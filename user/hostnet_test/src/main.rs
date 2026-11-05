@@ -1,10 +1,13 @@
-//! A page from the host: connects to 10.0.2.100 port 80 (QEMU's user
+//! A page from the host: resolves `gala-host.test` with getaddrinfo (the
+//! scenario's hosts file, %SystemRoot%\System32\drivers\etc\hosts, names
+//! 10.0.2.100, as Windows' resolver reads it before DNS), connects to it
+//! on port 80 (QEMU's user
 //! network forwards that address to a program on the host for each
 //! connection: xtask's `serve-page`), sends `GET /`, reads the response
 //! until the server closes and checks it is a 200 whose body is
 //! `HOST_PAGE`. Prints `hostnet_test: ok` or exits with the number of the
 //! failing step (1 WSAStartup, 2 socket, 3 connect, 4 send, 5 recv, 6 the
-//! status line, 7 the body).
+//! status line, 7 the body, 8 the name).
 
 #![no_std]
 #![no_main]
@@ -31,6 +34,26 @@ unsafe extern "system" {
     fn send(s: Socket, buf: *const u8, len: i32, flags: i32) -> i32;
     fn recv(s: Socket, buf: *mut u8, len: i32, flags: i32) -> i32;
     fn closesocket(s: Socket) -> i32;
+    fn getaddrinfo(
+        node: *const u8,
+        service: *const u8,
+        hints: *const i32,
+        out: *mut *mut AddrInfo,
+    ) -> i32;
+    fn freeaddrinfo(ai: *mut AddrInfo);
+}
+
+/// ADDRINFOA (x64).
+#[repr(C)]
+struct AddrInfo {
+    flags: i32,
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+    addrlen: usize,
+    canonname: *mut u8,
+    addr: *const SockaddrIn,
+    next: *mut AddrInfo,
 }
 
 #[allow(dead_code)]
@@ -135,16 +158,32 @@ pub extern "C" fn mainCRTStartup() -> ! {
         if WSAStartup(0x0202, wsa.as_mut_ptr()) != 0 {
             fail(1);
         }
+        // The name, from the hosts file.
+        let mut list: *mut AddrInfo = core::ptr::null_mut();
+        let hints = [0i32, 2, 1, 6, 0, 0, 0, 0, 0, 0, 0, 0];
+        if getaddrinfo(b"gala-host.test\0".as_ptr(), core::ptr::null(), hints.as_ptr(), &mut list)
+            != 0
+            || list.is_null()
+            || (*list).addr.is_null()
+        {
+            fail(8);
+        }
+        let address = (*(*list).addr).addr;
+        freeaddrinfo(list);
+        if address != [10, 0, 2, 100] {
+            fail(8);
+        }
+        out(b"hostnet_test: gala-host.test is 10.0.2.100\n");
         let s = socket(2, 1, 6);
         if s == !0 {
             fail(2);
         }
-        let to = SockaddrIn { family: 2, port: 80u16.to_be(), addr: [10, 0, 2, 100], zero: [0; 8] };
+        let to = SockaddrIn { family: 2, port: 80u16.to_be(), addr: address, zero: [0; 8] };
         if connect(s, &to, 16) != 0 {
             let _ = WSAGetLastError();
             fail(3);
         }
-        let request = b"GET / HTTP/1.0\r\nHost: 10.0.2.100\r\n\r\n";
+        let request = b"GET / HTTP/1.0\r\nHost: gala-host.test\r\n\r\n";
         if send(s, request.as_ptr(), request.len() as i32, 0) != request.len() as i32 {
             fail(4);
         }

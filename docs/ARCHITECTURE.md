@@ -3251,8 +3251,11 @@ SOCKET values are the endpoint handles.
   tested.
 - Name resolution: getaddrinfo resolves numeric IPv4 addresses,
   "localhost" and the machine's own host name (gethostname's "gala", to
-  loopback: what Windows answers without network adapters); other names
-  go to DNS (`dns`: one A query over UDP to 10.0.2.3, QEMU's user
+  loopback: what Windows answers without network adapters); then the
+  hosts file (`%SystemRoot%\System32\drivers\etc\hosts`, read at each
+  lookup, IPv4 lines, names without case: `hosts`; the hostnet and
+  chromium_host scenarios name the host page `gala-host.test` there);
+  other names go to DNS (`dns`: one A query over UDP to 10.0.2.3, QEMU's user
   network's resolver standing in for a DHCP-given server; two tries of
   2 s; NXDOMAIN is WSAHOST_NOT_FOUND, no A record WSANO_DATA, no answer
   WSATRY_AGAIN, no network card WSAHOST_NOT_FOUND at once;

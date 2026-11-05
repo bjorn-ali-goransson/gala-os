@@ -760,6 +760,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("hostnet", "ntdll.dll", "Windows/System32"),
     ("hostnet", "kernel32.dll", "Windows/System32"),
     ("hostnet", "ws2_32.dll", "Windows/System32"),
+    ("hostnet", "user/hostnet_test/hosts", "Windows/System32/drivers/etc"),
+    ("chromium_host", "user/hostnet_test/hosts", "Windows/System32/drivers/etc"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -5496,12 +5498,13 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["<h1>Welcome to nginx!</h1>", "chrome.exe finished with status 0x00000000"],
     },
     Scenario {
-        // BR stage 1: a page from the host network: http://10.0.2.100/,
-        // which QEMU's user network hands to xtask's `serve-page` on the
-        // host (HOST_PAGE_SCENARIOS); the network service's sockets leave
-        // the guest through virtio-net.
+        // BR stage 1: a page from the host network by name:
+        // http://gala-host.test/ (the scenario's hosts file names
+        // 10.0.2.100, which QEMU's user network hands to xtask's
+        // `serve-page` on the host: HOST_PAGE_SCENARIOS); the network
+        // service's sockets leave the guest through virtio-net.
         name: "chromium_host",
-        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20http://10.0.2.100/ \
+        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20http://gala-host.test/ \
                   dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
@@ -6289,6 +6292,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_dump", "chromium"),
     ("chromium_https", "chromium"),
     ("chromium_host", "chromium"),
+    ("chromium_host", "chromium_host"),
     ("chromium_https", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];

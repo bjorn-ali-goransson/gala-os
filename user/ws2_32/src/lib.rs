@@ -99,6 +99,17 @@ unsafe extern "system" {
     fn SetEvent(h: usize) -> i32;
     fn ResetEvent(h: usize) -> i32;
     fn CloseHandle(h: usize) -> i32;
+    fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        security: usize,
+        disposition: u32,
+        flags: u32,
+        template: usize,
+    ) -> usize;
+    fn ReadFile(h: usize, buffer: *mut u8, len: u32, read: *mut u32, overlapped: usize) -> i32;
 }
 
 /// WSACreateEvent: a manual-reset event, initially not signaled (NULL,
@@ -1766,6 +1777,8 @@ pub extern "system" fn getaddrinfo(
                 ip
             } else if flags & AI_NUMERICHOST != 0 {
                 return WSAHOST_NOT_FOUND;
+            } else if let Some(ip) = hosts::lookup(text) {
+                ip
             } else {
                 match dns::resolve(text) {
                     Ok(ip) => ip,
@@ -1856,6 +1869,69 @@ pub extern "system" fn freeaddrinfo(ai: *mut u8) {
 }
 
 const AI_NUMERICHOST: i32 = 4;
+
+/// The hosts file, `%SystemRoot%\System32\drivers\etc\hosts`, which
+/// Windows' resolver reads before asking DNS: lines of an address and its
+/// names, `#` starting a comment. IPv4 entries only; read at each lookup
+/// (no cache: an edit shows at once), the first 16 KiB.
+mod hosts {
+    use super::*;
+
+    const MAX: usize = 16 * 1024;
+
+    /// The address `name` has in the hosts file, if any.
+    pub fn lookup(name: &[u8]) -> Option<[u8; 4]> {
+        let mut path = [0u16; 300];
+        // SAFETY: a buffer of the length given.
+        let n = unsafe { GetSystemDirectoryW(path.as_mut_ptr(), 260) } as usize;
+        let tail: &[u8] = b"\\drivers\\etc\\hosts";
+        if n == 0 || n + tail.len() + 1 > path.len() {
+            return None;
+        }
+        for (i, &c) in tail.iter().enumerate() {
+            path[n + i] = u16::from(c);
+        }
+        path[n + tail.len()] = 0;
+        // SAFETY: a NUL-terminated path; GENERIC_READ, shared reading,
+        // OPEN_EXISTING.
+        let h = unsafe { CreateFileW(path.as_ptr(), 0x8000_0000, 7, 0, 3, 0, 0) };
+        if h == usize::MAX {
+            return None;
+        }
+        let buffer = buffer()?;
+        let mut got = 0u32;
+        // SAFETY: our handle and a buffer of MAX bytes.
+        let ok = unsafe { ReadFile(h, buffer, MAX as u32, &mut got, 0) };
+        // SAFETY: our handle.
+        unsafe { CloseHandle(h) };
+        // SAFETY: the buffer holds `got` bytes read.
+        let text = unsafe { core::slice::from_raw_parts(buffer, got as usize) };
+        let found = if ok != 0 { find(text, name) } else { None };
+        // SAFETY: the allocation made above.
+        unsafe { VirtualFree(buffer, 0, 0x8000) };
+        found
+    }
+
+    fn buffer() -> Option<*mut u8> {
+        // SAFETY: a fresh reservation and commit, read-write.
+        let p = unsafe { VirtualAlloc(core::ptr::null_mut(), MAX, 0x3000, 4) };
+        (!p.is_null()).then_some(p)
+    }
+
+    /// The address of `name` in hosts-file `text` (names compared without
+    /// case, as Windows does).
+    pub fn find(text: &[u8], name: &[u8]) -> Option<[u8; 4]> {
+        for line in text.split(|&c| c == b'\n') {
+            let line = line.split(|&c| c == b'#').next().unwrap_or(&[]);
+            let mut fields = line.split(|c| c.is_ascii_whitespace()).filter(|f| !f.is_empty());
+            let Some(address) = fields.next().and_then(parse_ipv4) else { continue };
+            if fields.any(|f| f.eq_ignore_ascii_case(name)) {
+                return Some(address);
+            }
+        }
+        None
+    }
+}
 
 /// Name resolution over UDP (RFC 1035): one A query to the DNS server of
 /// gala's static network configuration (QEMU's user network answers at
