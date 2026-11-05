@@ -3274,6 +3274,37 @@ SOCKET values are the endpoint handles.
   address (AF_UNSPEC too, the way libuv disconnects) sends AFD the zero
   IPv4 address: no peer.
 
+### Plan: IPv6 (ROADMAP N3)
+
+Windows programs expect AF_INET6 sockets to exist whatever the network:
+Chromium opens one to probe for IPv6 (refused today: the ledger's
+`socket(address family)` 23; it then stays on IPv4), Java and .NET
+listen dual-stack by default where they can. Steps, each test first
+against Windows' results (a Winsock IPv6 test program):
+
+1. **Loopback `::1`**: smoltcp's `proto-ipv6`; `lo` gets ::1/128 beside
+   127.0.0.1/8; `net::tcp`/`net::udp` endpoints become `IpEndpoint`s
+   (they are IPv4 throughout today). AFD's transport addresses take
+   TDI_ADDRESS_IP6 (family 23: port, flow info, the 16-byte address,
+   scope id) for bind, connect, accept and the address queries.
+   ws2_32: socket/WSASocketW with AF_INET6, SOCKADDR_IN6 (28 bytes) in
+   bind, connect, accept(Ex), getsockname/getpeername, sendto/recvfrom;
+   getaddrinfo with AF_INET6 or AF_UNSPEC hints answering `::1` for
+   localhost (Windows lists ::1 first); inet_pton/inet_ntop and
+   WSAStringToAddress/WSAAddressToString for v6.
+2. **IPV6_V6ONLY**: Windows' default is on (a v6 socket takes only v6);
+   off makes a dual-stack socket that accepts IPv4 peers as
+   ::ffff:a.b.c.d (IPv4-mapped). gala keeps the option per socket
+   and maps addresses at AFD's boundary (smoltcp has no dual-stack
+   socket: a dual-stack listener is two smoltcp listeners).
+3. **The card**: a link-local fe80:: address from the MAC (EUI-64) and
+   QEMU's user network's IPv6 (fec0::/64, router fec0::2) by router
+   advertisement; iphlpapi's tables get the IPv6 rows
+   (GetUnicastIpAddressTable, GetAdaptersAddresses' unicast list).
+
+Not planned: IPv6 extension headers beyond what smoltcp parses, DHCPv6,
+privacy addresses.
+
 ### Tests
 
 | Test | What it checks |
