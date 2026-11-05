@@ -3348,7 +3348,11 @@ against Windows' results (a Winsock IPv6 test program):
    way in is a launch-time value the kernel reads (QEMU's fw_cfg,
    `-fw_cfg name=opt/gala/...`); AAAA answers through fec0::3 depend on
    the host's resolver. Nothing needs IPv6 off the loopback yet
-   (Chromium's pages come over IPv4).
+   (Chromium's pages come over IPv4). passt (QEMU's `-netdev passt`)
+   forwards host ports over IPv6, but it copies the host's addresses:
+   in a container without an IPv6 route (this one, GitHub's runners)
+   it disables IPv6 ("No routable interface for IPv6", the 2024-02
+   build). Step 3 is out of scope for now (ROADMAP N3: parked).
 
 Not planned: IPv6 extension headers beyond what smoltcp parses, DHCPv6,
 privacy addresses.
