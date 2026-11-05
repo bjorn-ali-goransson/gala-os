@@ -522,7 +522,9 @@ fn put(s: &mut State, writer: usize, mut data: VecDeque<u8>) -> (VecDeque<u8>, u
     } else {
         space.min(data.len())
     };
-    if n == 0 {
+    // A zero-length message is a message too.
+    let empty_message = s.message_type && data.is_empty();
+    if n == 0 && !empty_message {
         return (data, 0);
     }
     if s.inbox[peer].try_reserve(n).is_err()
@@ -977,12 +979,7 @@ impl PipeEnd {
             let (left, _) = put(&mut s, self.end, out);
             out = left;
         }
-        if out.is_empty() && !(s.message_type && total == 0 && behind) {
-            if total == 0 && s.message_type {
-                // A zero-length message.
-                s.messages[peer].try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
-                s.messages[peer].push_back(0);
-            }
+        if out.is_empty() && !behind {
             let finished = try_complete(&mut s);
             drop(s);
             if finished > 0 {
