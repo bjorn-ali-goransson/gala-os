@@ -63,6 +63,24 @@ impl Ip {
         matches!(self, Ip::V6(_))
     }
 
+    /// An IPv4 address as IPv4-mapped IPv6 (::ffff:a.b.c.d), what an
+    /// IPv6 socket sees of an IPv4 peer; IPv6 addresses unchanged.
+    pub fn mapped(self) -> Ip {
+        match self {
+            Ip::V4([a, b, c, d]) => Ip::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d]),
+            v6 => v6,
+        }
+    }
+
+    /// An IPv4-mapped IPv6 address as the IPv4 address it stands for
+    /// (the stack routes and binds it as IPv4); others unchanged.
+    pub fn unmapped(self) -> Ip {
+        match self {
+            Ip::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d]) => Ip::V4([a, b, c, d]),
+            other => other,
+        }
+    }
+
     /// The unspecified address of this family.
     pub fn unspecified_like(self) -> Ip {
         match self {

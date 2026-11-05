@@ -4,7 +4,9 @@
 //! 23, an ephemeral port, ::1); listen, connect, accept (the peer ::1),
 //! getpeername; a send/recv round trip both ways; a datagram to itself
 //! with recvfrom's sender; getaddrinfo("localhost") with AF_INET6 hints
-//! (::1); inet_pton/inet_ntop of "::1" and "fe80::1:2". Prints
+//! (::1); a dual-stack socket (IPV6_V6ONLY 0) bound to ::ffff:127.0.0.1
+//! taking an IPv4 client (seen IPv4-mapped); inet_pton/inet_ntop of "::1"
+//! and "fe80::1:2". Prints
 //! `ipv6_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -53,6 +55,9 @@ unsafe extern "system" {
     fn getsockname(s: Socket, addr: *mut Sockaddr6, len: *mut i32) -> i32;
     fn getpeername(s: Socket, addr: *mut Sockaddr6, len: *mut i32) -> i32;
     fn getsockopt(s: Socket, level: i32, name: i32, value: *mut u8, len: *mut i32) -> i32;
+    fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
+    #[link_name = "connect"]
+    fn connect4(s: Socket, addr: *const Sockaddr4, len: i32) -> i32;
     fn closesocket(s: Socket) -> i32;
     fn getaddrinfo(
         node: *const u8,
@@ -103,6 +108,15 @@ impl Sockaddr6 {
     }
 }
 
+/// SOCKADDR_IN.
+#[repr(C)]
+struct Sockaddr4 {
+    family: u16,
+    port: u16,
+    addr: [u8; 4],
+    zero: [u8; 8],
+}
+
 /// ADDRINFOA (x64).
 #[repr(C)]
 struct AddrInfo {
@@ -123,6 +137,8 @@ const IPPROTO_IPV6: i32 = 41;
 const IPV6_V6ONLY: i32 = 27;
 const LEN: i32 = 28;
 const LOOPBACK: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+/// ::ffff:127.0.0.1 (IPv4-mapped).
+const MAPPED_LOOPBACK: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1];
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -194,6 +210,27 @@ pub extern "C" fn mainCRTStartup() -> ! {
         closesocket(client);
         closesocket(server);
         closesocket(l);
+        // Dual stack (IPV6_V6ONLY 0, as Java's sockets): a v6 socket bound to
+        // ::ffff:127.0.0.1 takes an IPv4 client, seen as ::ffff:127.0.0.1.
+        let d = socket(AF_INET6, SOCK_STREAM, 6);
+        c.ok(d != !0);
+        let zero = 0i32;
+        c.ok(setsockopt(d, IPPROTO_IPV6, IPV6_V6ONLY, (&raw const zero).cast(), 4) == 0);
+        c.ok(bind(d, &Sockaddr6::new(MAPPED_LOOPBACK, 0), LEN) == 0);
+        let mut dname = Sockaddr6::empty();
+        let mut dlen = LEN;
+        c.ok(getsockname(d, &mut dname, &mut dlen) == 0 && dname.addr == MAPPED_LOOPBACK);
+        c.ok(listen(d, 4) == 0);
+        let v4 = socket(2, SOCK_STREAM, 6);
+        let to = Sockaddr4 { family: 2, port: dname.port, addr: [127, 0, 0, 1], zero: [0; 8] };
+        c.ok(connect4(v4, &to, 16) == 0);
+        let mut dpeer = Sockaddr6::empty();
+        let mut dplen = LEN;
+        let ds = accept(d, &mut dpeer, &mut dplen);
+        c.ok(ds != !0 && dplen == LEN && dpeer.addr == MAPPED_LOOPBACK);
+        closesocket(ds);
+        closesocket(v4);
+        closesocket(d);
         // UDP over ::1: a datagram to itself.
         let u = socket(AF_INET6, SOCK_DGRAM, 17);
         c.ok(u != !0);

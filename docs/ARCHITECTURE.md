@@ -3307,9 +3307,17 @@ against Windows' results (a Winsock IPv6 test program):
    process holding an IPv6 socket (the record holds IPv4 addresses).
 2. **IPV6_V6ONLY**: Windows' default is on (a v6 socket takes only v6);
    off makes a dual-stack socket that accepts IPv4 peers as
-   ::ffff:a.b.c.d (IPv4-mapped). gala keeps the option per socket
-   and maps addresses at AFD's boundary (smoltcp has no dual-stack
-   socket: a dual-stack listener is two smoltcp listeners).
+   ::ffff:a.b.c.d (IPv4-mapped). Done: AFD maps at its boundary (an
+   IPv4-mapped address from a program is the IPv4 address to the
+   stack; an IPv6 endpoint's IPv4 addresses go back IPv4-mapped:
+   `Ip::mapped`/`unmapped`), and a listener on :: takes IPv4
+   connections too (smoltcp's listen on no address takes both), which
+   is what Java's dual-stack sockets need (its loopback pipe binds
+   ::ffff:127.0.0.1; `java_http`). Not yet: IPV6_V6ONLY 1 enforced (a
+   v6-only listener takes IPv4 peers too, mapped) and separate port
+   spaces per family (binding 0.0.0.0:p and [::]:p, both v6-only on
+   Windows, is refused here as the port in use); getaddrinfo with
+   AF_UNSPEC listing ::1 first.
 3. **The card**: a link-local fe80:: address from the MAC (EUI-64) and
    QEMU's user network's IPv6 (fec0::/64, router fec0::2) by router
    advertisement; iphlpapi's tables get the IPv6 rows

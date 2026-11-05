@@ -101,6 +101,12 @@ impl Transport {
         matches!(self, Transport::Udp | Transport::Udp6)
     }
 
+    /// Whether it is an IPv6 endpoint (its addresses go out as
+    /// SOCKADDR_IN6, IPv4 ones IPv4-mapped).
+    pub fn is_v6(self) -> bool {
+        matches!(self, Transport::Tcp6 | Transport::Udp6)
+    }
+
     /// The unspecified address of its family (an implicit bind's).
     pub fn any_address(self) -> Addr {
         match self {
@@ -389,7 +395,7 @@ fn user_write(process: &Process, addr: u64, data: &[u8]) -> Result<(), NtStatus>
 fn attempt(state: &EndpointState, op: &mut Op, process: &Process) -> Attempt {
     let socket = *state.socket.lock();
     let non_blocking = state.non_blocking.load(Ordering::Acquire);
-    match attempt_inner(socket, op, process, non_blocking) {
+    match attempt_inner(socket, op, process, non_blocking, state.transport.is_v6()) {
         Ok(Some(information)) => Attempt::Done(NtStatus::SUCCESS, information),
         Ok(None) | Err(Failure::Net(NetError::WouldBlock)) => Attempt::Wait,
         Err(Failure::Net(e)) => Attempt::Done(status_of(e), 0),
@@ -419,11 +425,13 @@ impl From<NtStatus> for Failure {
 }
 
 /// `Ok(Some(information))` when done, `Ok(None)` to keep waiting.
+/// `v6`: the endpoint is IPv6 (addresses go out as SOCKADDR_IN6).
 fn attempt_inner(
     socket: Option<SocketId>,
     op: &mut Op,
     process: &Process,
     non_blocking: bool,
+    v6: bool,
 ) -> Result<Option<u64>, Failure> {
     if let Op::Poll { sockets, output, output_len, wait } = op {
         return poll_once(sockets, *output, *output_len, *wait, process);
@@ -486,11 +494,11 @@ fn attempt_inner(
                 copied += n;
             }
             if *address != 0 {
-                let (b, n) = to_sockaddr(got.from);
+                let (b, n) = to_sockaddr(got.from, v6);
                 user_write(process, *address, &b[..n])?;
             }
             if *address_len != 0 {
-                let n = to_sockaddr(got.from).1;
+                let n = to_sockaddr(got.from, v6).1;
                 user_write(process, *address_len, &(n as i32).to_le_bytes())?;
             }
             if got.length > got.copied {
@@ -514,7 +522,7 @@ fn attempt_inner(
         }
         Op::WaitForListen { output, output_len } => {
             let (sequence, remote) = tcp::pending(id)?;
-            let (ta, n) = to_transport_address(remote);
+            let (ta, n) = to_transport_address(remote, v6);
             let mut out = [0u8; 4 + TRANSPORT_ADDRESS6_LEN];
             out[..4].copy_from_slice(&sequence.to_le_bytes());
             out[4..4 + n].copy_from_slice(&ta[..n]);
@@ -539,7 +547,8 @@ fn attempt_inner(
             drop(slot);
             let local_addr = tcp::local(new)?;
             let at = *output + u64::from(*receive);
-            let ((lb, ln), (rb, rn)) = (to_sockaddr(local_addr), to_sockaddr(remote));
+            let v6 = accept.transport.is_v6();
+            let ((lb, ln), (rb, rn)) = (to_sockaddr(local_addr, v6), to_sockaddr(remote, v6));
             if ln > *local as usize {
                 return Err(NtStatus::BUFFER_TOO_SMALL.into());
             }
@@ -904,14 +913,16 @@ fn sockaddr(b: &[u8]) -> Result<Addr, NtStatus> {
         AF_INET6 if b.len() >= SOCKADDR6_LEN => {
             let mut ip = [0u8; 16];
             ip.copy_from_slice(&b[8..24]);
-            Ok(Addr { port: u16::from_be_bytes([b[2], b[3]]), ip: Ip::V6(ip) })
+            // IPv4-mapped: the IPv4 address (a dual-stack socket's).
+            Ok(Addr { port: u16::from_be_bytes([b[2], b[3]]), ip: Ip::V6(ip).unmapped() })
         }
         _ => Err(bad),
     }
 }
 
 /// Address -> SOCKADDR_IN or SOCKADDR_IN6: the bytes and their length.
-fn to_sockaddr(a: Addr) -> ([u8; SOCKADDR6_LEN], usize) {
+fn to_sockaddr(a: Addr, v6: bool) -> ([u8; SOCKADDR6_LEN], usize) {
+    let a = if v6 { Addr { ip: a.ip.mapped(), ..a } } else { a };
     let mut b = [0u8; SOCKADDR6_LEN];
     b[2..4].copy_from_slice(&a.port.to_be_bytes());
     match a.ip {
@@ -941,14 +952,15 @@ fn transport_address(b: &[u8]) -> Result<Addr, NtStatus> {
         AF_INET6 if b.len() >= TRANSPORT_ADDRESS6_LEN => {
             let mut ip = [0u8; 16];
             ip.copy_from_slice(&b[14..30]);
-            Ok(Addr { port, ip: Ip::V6(ip) })
+            Ok(Addr { port, ip: Ip::V6(ip).unmapped() })
         }
         _ => Err(bad),
     }
 }
 
 /// Address -> TRANSPORT_ADDRESS: the bytes and their length.
-fn to_transport_address(a: Addr) -> ([u8; TRANSPORT_ADDRESS6_LEN], usize) {
+fn to_transport_address(a: Addr, v6: bool) -> ([u8; TRANSPORT_ADDRESS6_LEN], usize) {
+    let a = if v6 { Addr { ip: a.ip.mapped(), ..a } } else { a };
     let mut b = [0u8; TRANSPORT_ADDRESS6_LEN];
     b[..4].copy_from_slice(&1u32.to_le_bytes());
     b[8..10].copy_from_slice(&a.port.to_be_bytes());
@@ -1056,7 +1068,10 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
             Immediate::Done(if r.output_len as usize >= SOCKADDR_LEN {
-                r.output(&to_sockaddr(bound).0[..to_sockaddr(bound).1])?
+                r.output(
+                    &to_sockaddr(bound, ep.transport.is_v6()).0
+                        [..to_sockaddr(bound, ep.transport.is_v6()).1],
+                )?
             } else {
                 0
             })
@@ -1202,11 +1217,13 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         IOCTL_AFD_GETSOCKNAME => {
             let local = tcp::local(socket().map_err(|_| NtStatus::INVALID_PARAMETER)?)
                 .map_err(status_of)?;
-            Immediate::Done(r.output(&to_sockaddr(local).0[..to_sockaddr(local).1])?)
+            let (b, n) = to_sockaddr(local, ep.transport.is_v6());
+            Immediate::Done(r.output(&b[..n])?)
         }
         IOCTL_AFD_GET_PEER_NAME => {
             let remote = tcp::remote(socket()?).map_err(status_of)?;
-            Immediate::Done(r.output(&to_sockaddr(remote).0[..to_sockaddr(remote).1])?)
+            let (b, n) = to_sockaddr(remote, ep.transport.is_v6());
+            Immediate::Done(r.output(&b[..n])?)
         }
         code => {
             super::ledger::record("NtDeviceIoControlFile", "afd ioctl", u64::from(code));
@@ -1252,7 +1269,10 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
             Immediate::Done(if r.output_len as usize >= SOCKADDR_LEN {
-                r.output(&to_sockaddr(bound).0[..to_sockaddr(bound).1])?
+                r.output(
+                    &to_sockaddr(bound, ep.transport.is_v6()).0
+                        [..to_sockaddr(bound, ep.transport.is_v6()).1],
+                )?
             } else {
                 0
             })
@@ -1617,24 +1637,32 @@ mod tests {
     #[test]
     fn address_layouts() {
         let a = Addr::v4([127, 0, 0, 1], 0x1234);
-        let (b, n) = to_sockaddr(a);
+        let (b, n) = to_sockaddr(a, false);
         assert_eq!(n, SOCKADDR_LEN);
         assert_eq!(sockaddr(&b[..n]), Ok(a));
-        let (t, m) = to_transport_address(a);
+        let (t, m) = to_transport_address(a, false);
         assert_eq!(m, TRANSPORT_ADDRESS_LEN);
         assert_eq!(transport_address(&t[..m]), Ok(a));
         assert_eq!(&b[..4], &[2, 0, 0x12, 0x34]);
         // IPv6: SOCKADDR_IN6 and TDI_ADDRESS_IP6.
         let a6 = Addr { ip: Ip::V6(Ip::LOOPBACK6), port: 0x1234 };
-        let (b, n) = to_sockaddr(a6);
+        let (b, n) = to_sockaddr(a6, true);
         assert_eq!(n, SOCKADDR6_LEN);
         assert_eq!(&b[..4], &[23, 0, 0x12, 0x34]);
         assert_eq!(b[23], 1);
         assert_eq!(sockaddr(&b[..n]), Ok(a6));
-        let (t, m) = to_transport_address(a6);
+        let (t, m) = to_transport_address(a6, true);
         assert_eq!(m, TRANSPORT_ADDRESS6_LEN);
         assert_eq!(transport_address(&t[..m]), Ok(a6));
         // A SOCKADDR_IN6 cut short is refused.
         assert!(sockaddr(&b[..SOCKADDR_LEN]).is_err());
+        // Dual stack: an IPv4 address goes out of an IPv6 endpoint
+        // IPv4-mapped and comes back in as IPv4.
+        let (b, n) = to_sockaddr(a, true);
+        assert_eq!(n, SOCKADDR6_LEN);
+        assert_eq!(&b[18..24], &[0xff, 0xff, 127, 0, 0, 1]);
+        assert_eq!(sockaddr(&b[..n]), Ok(a));
+        let (t, m) = to_transport_address(a, true);
+        assert_eq!(transport_address(&t[..m]), Ok(a));
     }
 }
