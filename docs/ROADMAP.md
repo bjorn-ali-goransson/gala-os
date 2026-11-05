@@ -1077,6 +1077,12 @@ its thread's span.
    for LX.
 4. OT5: the in-guest OTLP exporter for servers, controlled from the
    `gala` CLI (on/off, sampling, endpoint).
+5. OT6: visualization (OBSERVABILITY "Visualization"): a Perfetto
+   export (tracks per thread, IPC flows), then a live view (`cargo xtask
+   observe`: streaming OTLP into a collector and Grafana's stack with
+   provisioned dashboards: overview, hot paths, impact table, service
+   map), then transactions (causal chains with owners, callers and a
+   critical-path breakdown) as their own view.
 
 **Design**: OBSERVABILITY "OpenTelemetry export"; WORKFLOW
 "OpenTelemetry".

@@ -434,6 +434,67 @@ What failures still leave unexplained, ranked by the time they cost.
 
 ## Planned facilities
 
+### Visualization: a live view of hot paths and transactions
+
+The goal: watch a running gala (a QEMU boot, later real hardware) the
+way state-of-the-art observability dashboards show a distributed
+system: where the time goes (hot paths, impact = time x occurrences),
+over time, and which "transactions" (causal chains across threads and
+processes) are slow, with each step's owner and caller. Three layers,
+standard tools first, gala's own views only where gala knows more:
+
+1. **Live, on the standard stack** (ROADMAP OT6): a streaming export
+   (xtask follows the debug console, or the kernel's per-CPU rings,
+   and posts OTLP batches every second) into an OpenTelemetry
+   Collector feeding Grafana's stack: Tempo (traces), Pyroscope
+   (profiles), Loki (logs), Prometheus (metrics). `cargo xtask observe
+   <scenario>` starts the stack (a compose file in `tools/observe/`,
+   pinned images) and the boot, with provisioned dashboards:
+   - **Overview**: processes and threads alive, CPU by process (the
+     samples), system calls and waits per second, the ledger's new
+     entries, crash reports, IPC throughput.
+   - **Hot paths**: flame graphs of the samples (Pyroscope; leaf
+     frames now, whole stacks once samples carry them), filterable by
+     process, thread and mode, and a "from the trace" jump (each sample
+     links its thread's span).
+   - **Impact table**: per system call, wait object, function and IPC
+     channel: count, total time (impact), p50/p95/max, and a sparkline
+     of when it happened, sorted by impact (derived metrics).
+   - **Service map**: processes as nodes, IPC as edges (pipes, sockets,
+     completion ports) weighted by messages, bytes and hand-off
+     latency (Tempo's service graph from the link spans).
+2. **Deep timeline, Perfetto** (ROADMAP OT6): `cargo xtask perfetto`
+   writes a boot as a Perfetto trace: a track per process and thread
+   with system calls and waits as slices (the wait's object named),
+   CPU samples as on-CPU marks, and **flows** (arrows) for causality:
+   process creation, pipe data (write to the read that took it),
+   completion packets (post to dequeue). ui.perfetto.dev opens it
+   offline; it answers "what exactly happened in these three seconds"
+   with every thread side by side.
+3. **gala's own analyses** (in xtask, shown in both): what only the
+   kernel's view gives:
+   - **Transactions**: a chain of work linked across threads and
+     processes ("data from", "completion of", "created by", later trace
+     context carried in the TEB): a child's Mojo ping, the browser IO
+     thread's read, the UI thread's answer. Each step has its **owner**
+     (process, thread, module/function from the samples) and its
+     **caller** (the step before it). Each chain gets a
+     **critical-path** breakdown: on CPU in X, queued in port Y, blocked
+     in write Z, waiting for object W (OT1's "slow pipe data" and "slow
+     completion" lines are its first form).
+   - **Impact ranking** with a time axis: "time x occurrences" per key,
+     and its histogram over the boot, so a burst and a steady cost are
+     told apart.
+   - **Gaps and failures in context**: the ledger's entries, crash
+     reports and state dumps placed on the timeline and on the spans
+     they happened in.
+
+Order: the Perfetto export first (no infrastructure, a file one opens;
+the IPC flows are already in the stream), then the live stack, then
+transactions as their own view. The kernel side the live view needs
+(per-CPU rings instead of the debug console, which costs a port write
+per byte under TCG; stacks on samples) is OT2's.
+
 - **Trace context in the kernel** (ROADMAP OT2..OT5): system calls,
   waits, faults, I/O and network as spans in per-CPU rings; propagation
   through ntdll/kernel32, process creation, pipes, ALPC/RPC, IOCP; an
