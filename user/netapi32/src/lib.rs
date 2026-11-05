@@ -1,6 +1,6 @@
 //! gala's netapi32.dll (network management): NetWkstaGetInfo for this
 //! machine (a workstation in a workgroup, not a domain) and the buffers it
-//! returns; the other functions SQL Server LocalDB imports are not
+//! returns, NetUserGetInfo for local accounts (`user`); the other functions SQL Server LocalDB imports are not
 //! implemented yet (`gala_stubs`: each reports itself to the
 //! missing-features ledger and ends the process when called).
 
@@ -8,7 +8,19 @@
 
 mod join;
 mod unimplemented;
+mod user;
 mod wksta;
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+}
+
+/// Records an unsupported case in the missing-features ledger.
+fn unsupported(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
+}
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]

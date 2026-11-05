@@ -5,6 +5,13 @@
 //! users; the buffer is freed with NetApiBufferFree; an unknown level is
 //! ERROR_INVALID_LEVEL.
 //!
+//! NetUserGetInfo (Chromium's password manager reads the logged-on user's
+//! password age with it): for the user GetUserNameW names, level 0
+//! (USER_INFO_0) is the name; level 1 (USER_INFO_1) adds a null password,
+//! the privilege level (USER_PRIV_USER or USER_PRIV_ADMIN) and flags with
+//! UF_SCRIPT and UF_NORMAL_ACCOUNT; a user that does not exist is
+//! NERR_UserNotFound (2221), an unknown level ERROR_INVALID_LEVEL.
+//!
 //! Prints `netapi32_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -34,10 +41,29 @@ unsafe extern "system" {
     fn GetComputerNameW(buf: *mut u16, size: *mut u32) -> i32;
 }
 
+#[link(name = "advapi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetUserNameW(buf: *mut u16, size: *mut u32) -> i32;
+}
+
+/// USER_INFO_1 (lmaccess.h).
+#[repr(C)]
+struct UserInfo1 {
+    name: *const u16,
+    password: *const u16,
+    password_age: u32,
+    privilege: u32,
+    home_dir: *const u16,
+    comment: *const u16,
+    flags: u32,
+    script_path: *const u16,
+}
+
 #[link(name = "netapi32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn NetWkstaGetInfo(server: *const u16, level: u32, out: *mut *mut u8) -> u32;
     fn NetApiBufferFree(buffer: *mut u8) -> u32;
+    fn NetUserGetInfo(server: *const u16, user: *const u16, level: u32, out: *mut *mut u8) -> u32;
 }
 
 #[allow(dead_code)]
@@ -104,6 +130,17 @@ impl Checks {
     }
 }
 
+trait EqWide {
+    fn eq_ignore_ascii_case_wide(&self, other: &[u16]) -> bool;
+}
+
+impl EqWide for [u16] {
+    fn eq_ignore_ascii_case_wide(&self, other: &[u16]) -> bool {
+        let fold = |c: u16| if (65..=90).contains(&c) { c + 32 } else { c };
+        self.len() == other.len() && self.iter().zip(other).all(|(&a, &b)| fold(a) == fold(b))
+    }
+}
+
 /// The NUL-terminated string at `p`.
 fn wide(p: *const u16) -> &'static [u16] {
     let mut n = 0;
@@ -141,6 +178,28 @@ fn run() -> Result<(), u32> {
         c.eq(NetApiBufferFree(buf).into(), NERR_SUCCESS)?;
 
         c.eq(NetWkstaGetInfo(core::ptr::null(), 999, &mut buf).into(), ERROR_INVALID_LEVEL)?;
+
+        // NetUserGetInfo for the logged-on user.
+        let mut user = [0u16; 64];
+        let mut size = 64;
+        c.ok(GetUserNameW(user.as_mut_ptr(), &mut size) != 0, 0)?;
+        let user_name = &user[..size as usize - 1];
+        c.eq(NetUserGetInfo(core::ptr::null(), user.as_ptr(), 0, &mut buf).into(), NERR_SUCCESS)?;
+        c.ok(wide(*(buf as *const *const u16)).eq_ignore_ascii_case_wide(user_name), 0)?;
+        c.eq(NetApiBufferFree(buf).into(), NERR_SUCCESS)?;
+        c.eq(NetUserGetInfo(core::ptr::null(), user.as_ptr(), 1, &mut buf).into(), NERR_SUCCESS)?;
+        let info = &*(buf as *const UserInfo1);
+        c.ok(wide(info.name).eq_ignore_ascii_case_wide(user_name), 0)?;
+        c.ok(info.password.is_null(), info.password as u64)?;
+        c.ok(matches!(info.privilege, 1 | 2), info.privilege.into())?; // USER_PRIV_USER/ADMIN
+        c.eq((info.flags & 0x201).into(), 0x201)?; // UF_SCRIPT | UF_NORMAL_ACCOUNT
+        c.eq(NetApiBufferFree(buf).into(), NERR_SUCCESS)?;
+        let nobody = b"no-such-user-gala\0".map(u16::from);
+        c.eq(NetUserGetInfo(core::ptr::null(), nobody.as_ptr(), 1, &mut buf).into(), 2221)?;
+        c.eq(
+            NetUserGetInfo(core::ptr::null(), user.as_ptr(), 7777, &mut buf).into(),
+            ERROR_INVALID_LEVEL,
+        )?;
     }
     Ok(())
 }

@@ -2513,7 +2513,10 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   SHCreateMemStream (#12, ole32's memory stream, loaded when first
   needed).
 - **rpcrt4**: UUID functions (`rpcrt4_test`). **netapi32**:
-  NetWkstaGetInfo (`netapi32_test`). **wldap32** (PostgreSQL's LDAP
+  NetWkstaGetInfo; NetUserGetInfo levels 0 and 1 for the accounts
+  LookupAccountNameW finds as users (all USER_PRIV_USER, password age 0:
+  no alias memberships or change times are kept; Chromium's password
+  manager reads it) (`netapi32_test`). **wldap32** (PostgreSQL's LDAP
   functions): stubs, exported by Windows' ordinals.
 - **Failover clustering is not installed**: clusapi.dll and resutils.dll
   are real, not stubs (SQL Server resolves the whole API with

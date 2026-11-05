@@ -593,14 +593,20 @@ handle list); chrome.dll loads; the profile's process singleton is
 taken; DirectWrite and Skia's font manager come up on Selawik; the
 browser's main start-up runs to its end, every delay import it reaches
 on the way a real export; Crashpad's client registers with its handler
-(TransactNamedPipe as one operation), and the browser gets as far as
-creating its first renderer host. A run takes about a minute.
+(TransactNamedPipe as one operation) and its handler snapshots crashes
+(PEB.Ldr, the unload trace, NtOpenThread); the browser launches GPU,
+utility (network, storage, audio) and renderer processes, all sharing
+one chrome.dll layout; renderers start V8 (growable function tables)
+and create script contexts; crashes print symbolizable stacks
+(dbghelp's StackWalk64) and leave a crash report even when Crashpad's
+filter ends the process.
 
 **Next** (each stage test first, the ledger leading):
-1. Headless Chromium. First the crash Crashpad's snapshot reported
-   nothing of until ntdll kept PEB.Ldr (the browser ended with 0xffff7002,
-   snapshot failed). After it: what
-   `tools/import_survey.py` still lists (the rest of the delay imports:
+1. Headless Chromium. First why children end "after 15 seconds with no
+   connection" (the browser's answer to a child's Mojo ping comes late
+   or never) and why the network service keeps restarting; the
+   on_device_model utility's delay import of `dxgi.dll` (G0). After it:
+   what `tools/import_survey.py` still lists (the rest of the delay imports:
    advapi32's services and ImpersonateAnonymousToken, iphlpapi,
    wintrust's catalogs, dbghelp's stack walking, pdh, winhttp's proxy
    resolver, oleacc; the static imports that are still `gala_stubs`:
