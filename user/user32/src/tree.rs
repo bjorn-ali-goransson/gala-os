@@ -1072,10 +1072,15 @@ const SWP_NOZORDER: u32 = 0x4;
 const SWP_SHOWWINDOW: u32 = 0x40;
 const SWP_HIDEWINDOW: u32 = 0x80;
 const SWP_NOSENDCHANGING: u32 = 0x400;
+const SWP_FRAMECHANGED: u32 = 0x20;
 
 /// A top-level window's new client size (and menu bar height): a buffer
 /// of that size with what fits of the old client pixels (white
 /// elsewhere); the old one is freed.
+pub(crate) fn resize_client(i: usize, cw: i32, ch: i32) {
+    resize_buffer(i, cw, ch);
+}
+
 fn resize_buffer(i: usize, cw: i32, ch: i32) {
     let bar = with(|s| s.windows[i].bar);
     relayout(i, cw, ch, bar);
@@ -1212,8 +1217,9 @@ pub extern "system" fn SetWindowPos(
             // could see the move and then the old rectangle (gala_cli's
             // check 0x1f under load, 2026-11-04).
             crate::foreign::sync_tree(hwnd);
+            let (dx, dy, dw, dh) = crate::window::desktop_rect(&w, nx, ny, nw, nh);
             // SAFETY: our desktop window.
-            unsafe { GalaWindowPlace(w.desktop, nx, ny, nw as u32, nh as u32) };
+            unsafe { GalaWindowPlace(w.desktop, dx, dy, dw as u32, dh as u32) };
             // The desktop's new buffer needs the bar again.
             crate::track::draw_bar(hwnd);
         }
@@ -1231,6 +1237,11 @@ pub extern "system" fn SetWindowPos(
         if (nx, ny, nw, nh) != (w.x, w.y, w.w, w.h) {
             crate::window::InvalidateRect(w.parent, core::ptr::null(), 1);
         }
+    }
+    // The frame changed (SetWindowLong of the style, or a program's own
+    // frame): WM_NCCALCSIZE again.
+    if top_level && flags & SWP_FRAMECHANGED != 0 {
+        crate::window::calc_frame(hwnd, true);
     }
     if flags & SWP_NOZORDER == 0 {
         let z = match after {

@@ -671,9 +671,12 @@ samples).
    another process's window; CreateDIBSection over a file mapping).
    Glyph run analysis and outlines (DirectWrite: Skia's text). With
    `--disable-direct-composition` (a stopgap: "Known issues and
-   stopgaps"). Next, as the scenario finds them: Chromium's own frame (WM_NCCALCSIZE: shasha draws its caption over Chromium's),
-   input, IME off; then a click on a link and FlaUI reading the page's
-   accessibility tree.
+   stopgaps"). Chromium's own frame (WM_NCCALCSIZE, custom frames);
+   foreign DCs present only what they drew (GetBoundsRect) and keep
+   their mapping: whole-window presents per spinner frame starved the
+   renderer. Next, as the scenario finds them: WM_NCHITTEST (dragging
+   and Chromium's caption buttons), input, IME off; then a click on a
+   link and FlaUI reading the page's accessibility tree.
 3. The sandbox: renderers in restricted, low-integrity and
    AppContainer/LowBox tokens, job objects, process mitigation policies,
    handle inheritance lists, desktop and window station checks (RS);

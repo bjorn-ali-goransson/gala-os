@@ -179,6 +179,7 @@ pub(crate) fn new_ddb(w: i32, h: i32, bpp: u16) -> Handle {
         palette: [0, 0x00ff_ffff],
         bottom_up: false,
         mono: bpp == 1,
+        bounds: core::ptr::null(),
     };
     new_object(Object::Bitmap(Bitmap {
         surface,
@@ -351,6 +352,7 @@ pub extern "system" fn CreateDIBSection(
         palette,
         bottom_up: h.height > 0,
         mono: false,
+        bounds: core::ptr::null(),
     };
     let hb = new_object(Object::Bitmap(Bitmap {
         surface,

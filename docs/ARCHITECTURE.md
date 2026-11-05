@@ -3943,15 +3943,31 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   kernel's window registry (GalaWindowSurface, again after each resize);
   the registry drops it with the window. GetDC of another process's
   top-level window maps that section (GalaWindowSurfaceOpen) and gives a
-  DC over it, so both processes draw into one surface, as on Windows;
-  its ReleaseDC presents the whole client area (any process of the
-  desktop may present to any window: GalaWindowPresent no longer checks
-  the owner) and unmaps it. Chromium's GPU process paints its browser's
+  DC over it, so both processes draw into one surface, as on Windows.
+  The DC accumulates what it draws (gdi32's SetBoundsRect) and its
+  ReleaseDC presents that rectangle only (any process of the desktop may
+  present to any window: GalaWindowPresent does not check the owner);
+  the mapping is kept between GetDC calls while the surface's generation
+  (in GalaWindowSurfaceOpen's info) stays. Presenting the whole client
+  area and mapping it anew on every frame kept one of two CPUs busy
+  with Chromium's loading spinner and starved its renderer. Chromium's GPU process paints its browser's
   window so (`SoftwareOutputDeviceWinDirect`: GetDC, BitBlt from a DIB
   section over shared memory, ReleaseDC). Test: `windows_across_test`
   (a red square drawn into the child's window is what the child's own
   GetPixel reads). Limits: another process's child windows have no DC
-  (ledger); at most 16 such DCs at once. gdi32 is loaded lazily with LoadLibrary,
+  (ledger); at most 16 such DCs at once and 8 mapped surfaces.
+- **Frames** (`calc_frame`): CreateWindowEx sends WM_NCCALCSIZE between
+  WM_NCCREATE and WM_CREATE, and SetWindowPos(SWP_FRAMECHANGED) again;
+  DefWindowProc takes gala's frame off (border, caption, menu bar). A
+  procedure that answers otherwise draws its own frame (Chromium's
+  browser window: the whole window, or 8-pixel sides and bottom with no
+  top): user32 keeps its borders (`custom`; sides and bottom equal), and
+  the desktop shows a frameless window over the client area (the
+  borders outside it are like Windows 11's invisible resize borders);
+  the desktop window is made again when the frame changes. Test:
+  `user32_test` (custom_frame). Limits: uneven borders take the left one
+  (ledger); no WM_NCHITTEST yet, so such a window is not dragged or
+  resized by its own frame. gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it. GetDC(NULL) is
   the display DC.
 - **Deferred presenting**: EndPaint and ReleaseDC add the area to the
@@ -4399,6 +4415,12 @@ then riched20.dll).
   bitmap, and the display DC (CreateDCW("DISPLAY")), which draws nothing
   but answers GetDeviceCaps (the screen from GalaScreenInfo, 96 dpi, 32
   bpp).
+- **Bounds** (SetBoundsRect, GetBoundsRect): every pixel write goes
+  through `Surface::put`/`put_raw`, which add it to the DC's bounds
+  while accumulation is on (DCB_ENABLE; a pointer into a per-slot table
+  the DC's surface copies carry, kept across SelectObject); GetBoundsRect
+  gives them in logical coordinates (the origins only: window DCs have
+  no other mapping). user32 presents a foreign DC's bounds (above).
 - **Bitmaps** (`surface.rs`): 32-bit device-dependent ones (stored
   top-down; a monochrome one turns what is written into black or white;
   CreateCompatibleBitmap on a memory DC with the default bitmap is

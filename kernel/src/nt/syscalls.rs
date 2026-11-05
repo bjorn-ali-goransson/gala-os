@@ -2098,6 +2098,7 @@ fn gala_window_surface(call: &mut Call<'_>) -> NtStatus {
         offset,
         width,
         height,
+        generation: 0,
     };
     tri!(call.process.desk.windows.set_surface(surface));
     NtStatus::SUCCESS
@@ -2106,12 +2107,14 @@ fn gala_window_surface(call: &mut Call<'_>) -> NtStatus {
 /// GalaWindowSurfaceOpen(Hwnd, *SectionHandle, *Info): a handle (map
 /// read and write) to the section any process's top-level window Hwnd of
 /// the caller's desktop keeps its pixels in; Info (24 bytes) gets the
-/// client area's byte offset (u64), width, height and the window's id on
-/// shasha's screen (u32 each, then 4 reserved). STATUS_INVALID_HANDLE
+/// client area's byte offset (u64), width, height, the window's id on
+/// shasha's screen and the surface's generation (u32 each: a new section
+/// after a resize has a new one). STATUS_INVALID_HANDLE
 /// for a window without one (a child, another session's).
 fn gala_window_surface_open(call: &mut Call<'_>) -> NtStatus {
     let hwnd = arg!(call, 0);
-    let Some((section, offset, width, height, desktop)) = call.process.desk.windows.surface(hwnd)
+    let Some((section, offset, width, height, desktop, generation)) =
+        call.process.desk.windows.surface(hwnd)
     else {
         return no_window(call, hwnd, "asked for the surface of");
     };
@@ -2120,6 +2123,7 @@ fn gala_window_surface_open(call: &mut Call<'_>) -> NtStatus {
     info[8..12].copy_from_slice(&width.to_le_bytes());
     info[12..16].copy_from_slice(&height.to_le_bytes());
     info[16..20].copy_from_slice(&desktop.to_le_bytes());
+    info[20..24].copy_from_slice(&generation.to_le_bytes());
     if call.process.write(arg!(call, 2), &info).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }

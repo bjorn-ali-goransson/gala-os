@@ -172,6 +172,99 @@ pub(crate) struct Window {
     /// CreateWindowEx's hWndParent for a window without WS_CHILD
     /// (GetWindow GW_OWNER).
     pub(crate) owner: Hwnd,
+    /// A frame the window's procedure chose (WM_NCCALCSIZE): the left,
+    /// right and bottom border and the height above the client area.
+    /// The desktop then shows a frameless window over the client area
+    /// and the program draws its own frame (Chromium); None: gala's frame.
+    pub(crate) custom: Option<(i32, i32)>,
+}
+
+/// WM_NCCALCSIZE.
+pub(crate) const WM_NCCALCSIZE: u32 = 0x0083;
+
+/// NCCALCSIZE_PARAMS: three rectangles, then the WINDOWPOS.
+#[repr(C)]
+struct NcCalcSizeParams {
+    rects: [[i32; 4]; 3],
+    pos: *mut c_void,
+}
+
+/// Asks top-level window `hwnd`'s procedure for its client area within
+/// its rectangle (WM_NCCALCSIZE; wParam TRUE when the frame changed:
+/// SetWindowPos's SWP_FRAMECHANGED) and takes its frame: gala's
+/// (DefWindowProc's answer) or the program's own (`custom`).
+pub(crate) fn calc_frame(hwnd: Hwnd, changed: bool) {
+    let Some(i) = index_of(hwnd) else { return };
+    let w = with(|s| s.windows[i]);
+    if !w.used || w.parent != 0 || (w.popup && w.custom.is_none()) {
+        return;
+    }
+    let rect = [w.x, w.y, w.x + w.w, w.y + w.h];
+    let mut params = NcCalcSizeParams { rects: [rect; 3], pos: core::ptr::null_mut() };
+    SendMessageW(hwnd, WM_NCCALCSIZE, usize::from(changed), (&raw mut params) as isize);
+    let [l, t, r, b] = params.rects[0];
+    let insets = (l - w.x, t - w.y, w.x + w.w - r, w.y + w.h - b);
+    let custom = if insets == (BORDER, BORDER + CAPTION + w.bar, BORDER, BORDER) {
+        None
+    } else {
+        if insets.0 != insets.2 || insets.0 != insets.3 || w.bar != 0 {
+            // gala's frames have equal sides and bottom; a menu bar is
+            // gala's to draw.
+            unsupported(b"user32.dll!WM_NCCALCSIZE(uneven frame or menu bar)", 0);
+        }
+        Some((insets.0.clamp(0, w.w / 2), insets.1.clamp(0, w.h)))
+    };
+    if custom != w.custom {
+        set_frame(i, custom);
+    }
+}
+
+/// Where top-level window `w` at (x, y), w x h is on the desktop: its
+/// rectangle, or its client area's for a frame of its own.
+pub(crate) fn desktop_rect(w: &Window, x: i32, y: i32, wd: i32, ht: i32) -> (i32, i32, i32, i32) {
+    match w.custom {
+        Some((b, t)) => (x + b, y + t, (wd - 2 * b).max(1), (ht - t - b).max(1)),
+        None => (x, y, wd, ht),
+    }
+}
+
+/// Gives window `i` a frame (`calc_frame`): a new client buffer and a
+/// desktop window of the right kind (frameless for the program's own
+/// frame), shown again if it was.
+fn set_frame(i: usize, custom: Option<(i32, i32)>) {
+    with(|s| s.windows[i].custom = custom);
+    let w = with(|s| s.windows[i]);
+    let (b, top) = frame(&w);
+    crate::tree::resize_client(i, (w.w - 2 * b).max(1), (w.h - top - b).max(1));
+    let w = with(|s| s.windows[i]);
+    let len = w.title.iter().position(|&c| c == 0).unwrap_or(0);
+    let (x, y, wd, ht) = desktop_rect(&w, w.x, w.y, w.w, w.h);
+    let mut id = 0;
+    // SAFETY: plain calls on our desktop window and title.
+    unsafe {
+        if w.desktop != 0 {
+            GalaWindowDestroy(w.desktop);
+        }
+        let popup = w.custom.is_some() || w.popup;
+        let _ = GalaWindowCreate(
+            x,
+            y,
+            wd as u32,
+            ht as u32,
+            w.title.as_ptr(),
+            len,
+            &mut id,
+            u32::from(popup),
+        );
+        if id != 0 && w.visible {
+            GalaWindowShow(id, 1);
+        }
+    }
+    with(|s| s.windows[i].desktop = id);
+    let hwnd = hwnd_of(i);
+    crate::foreign::sync(hwnd);
+    show_icon(hwnd);
+    InvalidateRect(hwnd, core::ptr::null(), 1);
 }
 
 /// A top-level window's frame: the left, right and bottom border, and the
@@ -184,7 +277,11 @@ pub(crate) fn frame(w: &Window) -> (i32, i32) {
 /// The frame the desktop draws (the menu bar is in the desktop's client
 /// area, drawn by user32).
 pub(crate) fn desktop_frame(w: &Window) -> (i32, i32) {
-    if w.popup { (0, 0) } else { (BORDER, BORDER + CAPTION) }
+    match w.custom {
+        Some(f) => f,
+        None if w.popup => (0, 0),
+        None => (BORDER, BORDER + CAPTION),
+    }
 }
 
 /// The start of a top-level window's buffer (the menu bar's first row).
@@ -269,6 +366,7 @@ pub(crate) const NO_WINDOW: Window = Window {
     dirty: [0; 4],
     dirty_at: 0,
     owner: 0,
+    custom: None,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -374,13 +472,16 @@ pub(crate) fn unsupported(what: &[u8], detail: u64) {
 
 // ---- gdi32, loaded when first needed ----
 
-struct Gdi {
+pub(crate) struct Gdi {
     create_dc: extern "system" fn(*mut u32, i32, i32, i32) -> Handle,
     delete_dc: extern "system" fn(Handle) -> i32,
     solid_brush: extern "system" fn(u32) -> Handle,
     select: extern "system" fn(Handle, Handle) -> Handle,
     pat_blt: extern "system" fn(Handle, i32, i32, i32, i32, u32) -> i32,
     create_child_dc: ChildDc,
+    /// SetBoundsRect and GetBoundsRect (what a DC drew: `surface`).
+    pub(crate) set_bounds: extern "system" fn(Handle, *const [i32; 4], u32) -> u32,
+    pub(crate) get_bounds: extern "system" fn(Handle, *mut [i32; 4], u32) -> u32,
 }
 
 type ChildDc = extern "system" fn(*mut u32, i32, i32, i32, i32, i32, *const [i32; 4]) -> Handle;
@@ -392,7 +493,7 @@ struct Shared2(UnsafeCell<Option<Gdi>>);
 // SAFETY: written once before GDI is set (Release), read after (Acquire).
 unsafe impl Sync for Shared2 {}
 
-fn gdi() -> Option<&'static Gdi> {
+pub(crate) fn gdi() -> Option<&'static Gdi> {
     if GDI.load(Ordering::Acquire) == 2 {
         // SAFETY: set before GDI became 2.
         return unsafe { (*GDI_FNS.0.get()).as_ref() };
@@ -419,7 +520,8 @@ fn gdi() -> Option<&'static Gdi> {
             f(b"PatBlt\0"),
         );
         let child = f(b"GalaCreateChildDC\0");
-        if [a, b, c, d, e, child].iter().any(|p| p.is_null()) {
+        let (set_bounds, get_bounds) = (f(b"SetBoundsRect\0"), f(b"GetBoundsRect\0"));
+        if [a, b, c, d, e, child, set_bounds, get_bounds].iter().any(|p| p.is_null()) {
             return None;
         }
         if GDI.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
@@ -443,6 +545,14 @@ fn gdi() -> Option<&'static Gdi> {
                     extern "system" fn(Handle, i32, i32, i32, i32, u32) -> i32,
                 >(e),
                 create_child_dc: core::mem::transmute::<*const c_void, ChildDc>(child),
+                set_bounds: core::mem::transmute::<
+                    *const c_void,
+                    extern "system" fn(Handle, *const [i32; 4], u32) -> u32,
+                >(set_bounds),
+                get_bounds: core::mem::transmute::<
+                    *const c_void,
+                    extern "system" fn(Handle, *mut [i32; 4], u32) -> u32,
+                >(get_bounds),
             });
             GDI.store(2, Ordering::Release);
         }
@@ -862,6 +972,7 @@ pub extern "system" fn CreateWindowExW(
             dirty: [0; 4],
             dirty_at: 0,
             owner,
+            custom: None,
         };
         Some(i)
     });
@@ -944,7 +1055,13 @@ pub(crate) fn finish_create(
             return 0;
         }
     }
-    if SendMessageW(hwnd, WM_NCCREATE, 0, lp) == 0 || SendMessageW(hwnd, WM_CREATE, 0, lp) == -1 {
+    if SendMessageW(hwnd, WM_NCCREATE, 0, lp) == 0 {
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    // The frame, as on Windows between WM_NCCREATE and WM_CREATE.
+    calc_frame(hwnd, false);
+    if SendMessageW(hwnd, WM_CREATE, 0, lp) == -1 {
         DestroyWindow(hwnd);
         return 0;
     }
@@ -1521,6 +1638,24 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
     }
     match msg {
         WM_NCCREATE => 1,
+        // gala's frame around a top-level window's client area: the
+        // border, the caption and a menu bar.
+        WM_NCCALCSIZE => {
+            if let Some(w) = window(hwnd)
+                && w.parent == 0
+                && !w.popup
+                && lparam != 0
+            {
+                // SAFETY: the RECT (or NCCALCSIZE_PARAMS, which starts
+                // with it) the message carries.
+                let r = unsafe { &mut *(lparam as *mut [i32; 4]) };
+                r[0] += BORDER;
+                r[1] += BORDER + CAPTION + w.bar;
+                r[2] -= BORDER;
+                r[3] -= BORDER;
+            }
+            0
+        }
         // WM_SETICON: ICON_BIG (1) or ICON_SMALL (0); the previous one.
         WM_SETICON => {
             let Some(i) = index_of(hwnd) else { return 0 };

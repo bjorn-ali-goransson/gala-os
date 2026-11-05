@@ -19,6 +19,14 @@
  *   GetWindowRect/GetClientRect are the new ones
  *   in WM_WINDOWPOSCHANGED and WM_SIZE; WM_SIZE's wParam is
  *   SIZE_MAXIMIZED after SC_MAXIMIZE and SIZE_RESTORED otherwise.
+ * - WM_NCCALCSIZE (a custom frame, as Chromium's browser window draws
+ *   its own): CreateWindowEx sends it (wParam FALSE, the window's
+ *   rectangle); returning it unchanged makes the whole window the client
+ *   area (GetClientRect the window's size, ClientToScreen(0, 0) its
+ *   corner). SetWindowPos(SWP_FRAMECHANGED) sends it again (wParam TRUE,
+ *   NCCALCSIZE_PARAMS): 8-pixel left, right and bottom borders and no top
+ *   one give a client area that much smaller, at (8, 0); GetWindowRect
+ *   stays. A window that leaves it to DefWindowProc has a caption.
  * - BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos: nothing moves
  *   until EndDeferWindowPos, which applies every position and size;
  *   SetWindowPos to the same size sends no WM_SIZE; WindowFromPoint finds
@@ -869,6 +877,58 @@ static void positions(void) {
     DestroyWindow(w);
 }
 
+static int ncc_seen, ncc_mode;
+static WPARAM ncc_wparam;
+
+static LRESULT CALLBACK ncc_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_NCCALCSIZE) {
+        /* Both forms start with the window's new rectangle. */
+        RECT *r = (RECT *)lparam;
+        ncc_seen++;
+        ncc_wparam = wparam;
+        if (ncc_mode == 1) {
+            r->left += 8;
+            r->right -= 8;
+            r->bottom -= 8;
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static void custom_frame(void) {
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = ncc_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"User32TestFrame";
+    CHECK(RegisterClassW(&wc));
+    ncc_seen = 0;
+    ncc_mode = 0;
+    HWND w = CreateWindowExW(0, L"User32TestFrame", L"custom", WS_OVERLAPPEDWINDOW, 50, 60, 300, 200, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    CHECK(w != NULL && ncc_seen >= 1);
+    RECT c, r;
+    POINT p = {0, 0};
+    CHECK(GetClientRect(w, &c) && c.right == 300 && c.bottom == 200);
+    CHECK(ClientToScreen(w, &p) && p.x == 50 && p.y == 60);
+    ncc_mode = 1;
+    ncc_seen = 0;
+    CHECK(SetWindowPos(w, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED));
+    CHECK(ncc_seen >= 1 && ncc_wparam == TRUE);
+    CHECK(GetClientRect(w, &c) && c.right == 284 && c.bottom == 192);
+    p.x = p.y = 0;
+    CHECK(ClientToScreen(w, &p) && p.x == 58 && p.y == 60);
+    CHECK(GetWindowRect(w, &r) && r.left == 50 && r.top == 60 && r.right == 350 && r.bottom == 260);
+    DestroyWindow(w);
+    /* DefWindowProc's frame: a caption above the client area. */
+    HWND plain = CreateWindowExW(0, L"User32TestPos", L"plain", WS_OVERLAPPEDWINDOW, 50, 60, 300, 200, NULL,
+                                 NULL, GetModuleHandleW(NULL), NULL);
+    p.x = p.y = 0;
+    CHECK(plain != NULL && GetClientRect(plain, &c) && c.bottom < 200);
+    CHECK(ClientToScreen(plain, &p) && p.y > 60);
+    DestroyWindow(plain);
+}
+
 // Deferred positioning: DeferWindowPos records, EndDeferWindowPos moves
 // every window at once.
 static void deferred(void) {
@@ -981,6 +1041,7 @@ int main(void) {
     dialog_units();
     deferred();
     positions();
+    custom_frame();
     timers();
     menu_bar();
     monitors();

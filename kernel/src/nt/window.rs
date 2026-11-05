@@ -218,7 +218,13 @@ pub struct Surface {
     /// The client area's size in pixels (rows `width` pixels apart).
     pub width: u32,
     pub height: u32,
+    /// Which section this is (set by `set_surface`): a mapper keeps its
+    /// view while the generation stays.
+    pub generation: u32,
 }
+
+/// The next surface generation.
+static SURFACE_GENERATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 /// A message process `pid` lets through UIPI's filter: for its window
 /// `hwnd`, or process-wide (hwnd 0: ChangeWindowMessageFilter).
@@ -410,7 +416,8 @@ impl Windows {
 
     /// Process `pid`'s top-level window `hwnd` keeps its pixels in
     /// `section` (replacing a former one, after a resize).
-    pub fn set_surface(&self, surface: Surface) -> Result<(), NtStatus> {
+    pub fn set_surface(&self, mut surface: Surface) -> Result<(), NtStatus> {
+        surface.generation = SURFACE_GENERATION.fetch_add(1, Ordering::Relaxed);
         let old = {
             let mut r = self.0.lock();
             if !r
@@ -435,12 +442,13 @@ impl Windows {
     }
 
     /// Window `hwnd`'s surface (any process's): the section, the client
-    /// area's offset and size, the window's id on shasha's screen.
-    pub fn surface(&self, hwnd: u64) -> Option<(ObjectRef, u64, u32, u32, u32)> {
+    /// area's offset and size, the window's id on shasha's screen, the
+    /// surface's generation.
+    pub fn surface(&self, hwnd: u64) -> Option<(ObjectRef, u64, u32, u32, u32, u32)> {
         let r = self.0.lock();
         let desktop = r.windows.iter().find(|w| w.hwnd == hwnd)?.desktop;
         let s = r.surfaces.iter().find(|s| s.hwnd == hwnd)?;
-        Some((s.section.clone(), s.offset, s.width, s.height, desktop))
+        Some((s.section.clone(), s.offset, s.width, s.height, desktop, s.generation))
     }
 
     /// Drops the surfaces of windows no longer registered, one at a time

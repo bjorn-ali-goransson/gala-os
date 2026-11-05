@@ -317,6 +317,7 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut [Object; SLOTS], &[usize; STOCK]) -> R
                 palette: [0, 0x00ff_ffff],
                 bottom_up: false,
                 mono: true,
+                bounds: core::ptr::null(),
             };
             // WHITE, LTGRAY, GRAY, DKGRAY, BLACK, NULL brushes; WHITE,
             // BLACK, NULL pens; the fonts (one face for all); the default
@@ -427,7 +428,7 @@ pub(crate) fn alloc(bytes: usize) -> *mut u8 {
 
 fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
     let (brush, pen, font) = with(|_, stock| (stock[0], stock[7], stock[13]));
-    new_object(Object::Dc(Dc {
+    let hdc = new_object(Object::Dc(Dc {
         kind,
         surface,
         bitmap,
@@ -457,7 +458,13 @@ fn new_dc(kind: DcKind, surface: Surface, bitmap: usize) -> Handle {
         viewport_ext: (1, 1),
         dc_brush: 0xffffff,
         dc_pen: 0,
-    }))
+    }));
+    // A new DC accumulates nothing yet (the slot may have been another
+    // DC's).
+    if let Some(i) = slot_of(hdc) {
+        BOUNDS[i].reset();
+    }
+    hdc
 }
 
 // ---- gala's own exports for user32 ----
@@ -480,6 +487,7 @@ pub extern "system" fn GalaCreateSurfaceDC(
         palette: [0, 0x00ff_ffff],
         bottom_up: false,
         mono: false,
+        bounds: core::ptr::null(),
     };
     new_dc(DcKind::Window, surface, 0)
 }
@@ -809,7 +817,8 @@ pub extern "system" fn SelectObject(hdc: Handle, object: Handle) -> Handle {
                 if elsewhere && new != dc.bitmap {
                     return core::ptr::null_mut();
                 }
-                dc.surface = b.surface;
+                // The DC's bounds accumulation stays on.
+                dc.surface = surface::Surface { bounds: dc.surface.bounds, ..b.surface };
                 dc.clip = None;
                 &mut dc.bitmap
             }
@@ -1187,4 +1196,79 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// Each DC slot's accumulated bounds (SetBoundsRect, GetBoundsRect).
+static BOUNDS: [surface::Bounds; SLOTS] = [const { surface::Bounds::EMPTY }; SLOTS];
+
+const DCB_RESET: u32 = 0x1;
+const DCB_ACCUMULATE: u32 = 0x2;
+const DCB_SET: u32 = DCB_RESET | DCB_ACCUMULATE;
+const DCB_ENABLE: u32 = 0x4;
+const DCB_DISABLE: u32 = 0x8;
+
+/// The DC's accumulation state (DCB_ENABLE or DCB_DISABLE) and its bounds
+/// table entry.
+fn bounds_of(hdc: Handle) -> Option<(u32, &'static surface::Bounds)> {
+    let i = slot_of(hdc)?;
+    let on = with_dc(hdc, |dc, _| !dc.surface.bounds.is_null())?;
+    Some((if on { DCB_ENABLE } else { DCB_DISABLE }, &BOUNDS[i]))
+}
+
+/// SetBoundsRect(hdc, lprcBounds, flags): DCB_RESET clears the bounds,
+/// DCB_ACCUMULATE adds the rectangle (logical), DCB_ENABLE and
+/// DCB_DISABLE turn accumulation of what the DC draws on and off. The
+/// previous state (DCB_SET or DCB_RESET, with DCB_ENABLE or DCB_DISABLE);
+/// 0 for a handle that is not a DC.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetBoundsRect(hdc: Handle, rect: *const [i32; 4], flags: u32) -> u32 {
+    let Some((state, bounds)) = bounds_of(hdc) else { return 0 };
+    let before = state | if bounds.get().is_some() { DCB_SET } else { DCB_RESET };
+    if flags & DCB_RESET != 0 {
+        bounds.reset();
+    }
+    if flags & DCB_ACCUMULATE != 0 && !rect.is_null() {
+        // SAFETY: the caller's RECT.
+        let [l, t, r, b] = unsafe { *rect };
+        let (dx, dy) = with_dc(hdc, |dc, _| {
+            (dc.viewport_org.0 - dc.window_org.0, dc.viewport_org.1 - dc.window_org.1)
+        })
+        .unwrap_or((0, 0));
+        bounds.add(l + dx, t + dy, r + dx, b + dy);
+    }
+    if flags & (DCB_ENABLE | DCB_DISABLE) != 0 {
+        let on = flags & DCB_ENABLE != 0;
+        with_dc(hdc, |dc, _| {
+            dc.surface.bounds = if on { bounds } else { core::ptr::null() };
+        });
+    }
+    before
+}
+
+/// GetBoundsRect(hdc, lprcBounds, flags): the accumulated bounds in
+/// logical coordinates (DCB_SET) or none (DCB_RESET, the rectangle
+/// zeroed), with the accumulation state; DCB_RESET in flags clears them
+/// afterwards. Device coordinates are the DC's surface's (gala's window
+/// DCs have no other mapping than the origins).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetBoundsRect(hdc: Handle, rect: *mut [i32; 4], flags: u32) -> u32 {
+    let Some((state, bounds)) = bounds_of(hdc) else { return 0 };
+    let got = bounds.get();
+    if !rect.is_null() {
+        let (dx, dy) = with_dc(hdc, |dc, _| {
+            (dc.viewport_org.0 - dc.window_org.0, dc.viewport_org.1 - dc.window_org.1)
+        })
+        .unwrap_or((0, 0));
+        // SAFETY: the caller's RECT.
+        unsafe {
+            *rect = match got {
+                Some([l, t, r, b]) => [l - dx, t - dy, r - dx, b - dy],
+                None => [0; 4],
+            };
+        }
+    }
+    if flags & DCB_RESET != 0 {
+        bounds.reset();
+    }
+    state | if got.is_some() { DCB_SET } else { DCB_RESET }
 }

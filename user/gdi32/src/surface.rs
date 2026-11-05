@@ -20,6 +20,50 @@ pub struct Surface {
     pub bottom_up: bool,
     /// A monochrome bitmap: what is written becomes black or white.
     pub mono: bool,
+    /// Where writes are accumulated (SetBoundsRect's DCB_ENABLE on the DC
+    /// drawing through this copy); null: not accumulated.
+    pub bounds: *const Bounds,
+}
+
+/// A DC's accumulated bounds in device pixels: left, top, right, bottom
+/// (exclusive), empty while left >= right.
+pub struct Bounds {
+    pub rect: [core::sync::atomic::AtomicI32; 4],
+}
+
+impl Bounds {
+    pub const EMPTY: Bounds = Bounds {
+        rect: [
+            core::sync::atomic::AtomicI32::new(i32::MAX),
+            core::sync::atomic::AtomicI32::new(i32::MAX),
+            core::sync::atomic::AtomicI32::new(i32::MIN),
+            core::sync::atomic::AtomicI32::new(i32::MIN),
+        ],
+    };
+
+    pub fn reset(&self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.rect[0].store(i32::MAX, Relaxed);
+        self.rect[1].store(i32::MAX, Relaxed);
+        self.rect[2].store(i32::MIN, Relaxed);
+        self.rect[3].store(i32::MIN, Relaxed);
+    }
+
+    /// Adds the rectangle [l, r) x [t, b).
+    pub fn add(&self, l: i32, t: i32, r: i32, b: i32) {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.rect[0].fetch_min(l, Relaxed);
+        self.rect[1].fetch_min(t, Relaxed);
+        self.rect[2].fetch_max(r, Relaxed);
+        self.rect[3].fetch_max(b, Relaxed);
+    }
+
+    /// The rectangle, if anything was added.
+    pub fn get(&self) -> Option<[i32; 4]> {
+        use core::sync::atomic::Ordering::Relaxed;
+        let r = [0, 1, 2, 3].map(|i| self.rect[i].load(Relaxed));
+        (r[0] < r[2] && r[1] < r[3]).then_some(r)
+    }
 }
 
 impl Surface {
@@ -32,7 +76,16 @@ impl Surface {
         palette: [0, 0x00ff_ffff],
         bottom_up: false,
         mono: false,
+        bounds: core::ptr::null(),
     };
+
+    /// Records a write at (x, y) in the accumulated bounds, if on.
+    fn touch(&self, x: i32, y: i32) {
+        if !self.bounds.is_null() {
+            // SAFETY: a pointer into gdi32's static bounds table.
+            unsafe { (*self.bounds).add(x, y, x + 1, y + 1) };
+        }
+    }
 
     pub fn contains(&self, x: i32, y: i32) -> bool {
         !self.bits.is_null() && x >= 0 && y >= 0 && x < self.width && y < self.height
@@ -95,6 +148,7 @@ impl Surface {
     /// Writes (x, y) with its fourth byte (32-bit surfaces).
     pub fn put_raw(&self, x: i32, y: i32, c: u32) {
         if self.contains(x, y) && self.bpp == 32 && !self.mono {
+            self.touch(x, y);
             // SAFETY: inside the surface.
             unsafe { self.at(x, y).cast::<u32>().write_unaligned(c) };
         } else {
@@ -107,6 +161,7 @@ impl Surface {
         if !self.contains(x, y) {
             return;
         }
+        self.touch(x, y);
         let c = if self.mono { mono(c) } else { c & 0x00ff_ffff };
         if self.bpp == 1 {
             // The nearer palette entry.

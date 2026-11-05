@@ -5556,7 +5556,7 @@ const SCENARIOS: &[Scenario] = &[
         // Alt+F4. --disable-direct-composition: a stopgap until GPU
         // G2/G4 (ROADMAP "Known issues and stopgaps").
         name: "chromium_window",
-        cmdline: "qemu_exit run=chrome.exe args=--no-sandbox%20--disable-gpu%20--disable-direct-composition%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--window-position=0,0%20--window-size=800,600%20file:///C:/gala/window.html \
+        cmdline: "qemu_exit run=chrome.exe args=--no-sandbox%20--disable-gpu%20--disable-direct-composition%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--window-position=0%2C0%20--window-size=800%2C600%20file:///C:/gala/window.html \
                   dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[

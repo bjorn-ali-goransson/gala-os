@@ -18,6 +18,10 @@
  *   A DIB section over a file mapping (Chromium's shared canvas), from
  *   an offset: drawing appears in another view of the mapping, at the
  *   offset; DeleteObject unmaps the bitmap's view only.
+ *   Bounds accumulation: SetBoundsRect(DCB_ENABLE | DCB_RESET), then a
+ *   PatBlt and a SetPixel: GetBoundsRect gives DCB_SET | DCB_ENABLE and
+ *   the rectangle around both; with DCB_RESET it is empty afterwards
+ *   (DCB_RESET | DCB_ENABLE); DCB_DISABLE stops it.
  *   BitBlt SRCCOPY copies between memory DCs; SRCINVERT xors;
  *   StretchBlt doubles.
  * - Fonts: CreateFontIndirectW keeps the LOGFONTW (GetObjectW returns it,
@@ -170,6 +174,21 @@ static void bitmaps(void) {
     CHECK(DeleteDC(dmem3) && DeleteObject(dib3));
     CHECK(view[16 + 8 + 2] == 0x00070809); /* the mapping stays */
     CHECK(UnmapViewOfFile(view) && CloseHandle(mapping));
+
+    /* Bounds accumulation on a DC. */
+    {
+        RECT b;
+        CHECK(SetBoundsRect(dmem, NULL, DCB_ENABLE | DCB_RESET) != 0);
+        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_ENABLE));
+        CHECK(PatBlt(dmem, 2, 1, 3, 2, BLACKNESS));
+        CHECK(SetPixel(dmem, 6, 3, RGB(1, 1, 1)) == RGB(1, 1, 1));
+        CHECK(GetBoundsRect(dmem, &b, DCB_RESET) == (DCB_SET | DCB_ENABLE));
+        CHECK(b.left == 2 && b.top == 1 && b.right == 7 && b.bottom == 4);
+        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_ENABLE));
+        CHECK(SetBoundsRect(dmem, NULL, DCB_DISABLE) != 0);
+        CHECK(SetPixel(dmem, 0, 0, RGB(2, 2, 2)) == RGB(2, 2, 2));
+        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_DISABLE));
+    }
 
     /* BitBlt between memory DCs; SRCINVERT; StretchBlt. */
     CHECK(BitBlt(dmem2, 0, 0, 8, 4, dmem, 0, 0, SRCCOPY));
