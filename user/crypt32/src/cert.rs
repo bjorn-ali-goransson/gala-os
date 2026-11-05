@@ -1311,3 +1311,338 @@ pub extern "system" fn CertNameToStrW(
     }
     give_wide(&s, out, len)
 }
+
+// ---- Usage, names, time and signatures ----
+
+/// An extension's value (the bytes inside its OCTET STRING) by OID text.
+fn extension_value(info: &CertInfo, oid: &core::ffi::CStr) -> Option<&'static [u8]> {
+    let ext = CertFindExtension(oid.as_ptr().cast(), info.extension_count, info.extensions);
+    if ext.is_null() {
+        return None;
+    }
+    // SAFETY: an extension of the context; its blob points into the
+    // context's encoding.
+    unsafe {
+        let value = (*ext).value;
+        Some(core::slice::from_raw_parts(value.data, value.size as usize))
+    }
+}
+
+/// CertGetIntendedKeyUsage(encoding, info, usage, n): the key usage
+/// extension's bits, the first `n` bytes (zero-filled); FALSE with last
+/// error 0 when the certificate has none.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertGetIntendedKeyUsage(
+    _encoding: u32,
+    info: *const CertInfo,
+    usage: *mut u8,
+    n: u32,
+) -> i32 {
+    if info.is_null() {
+        return error(E_INVALIDARG, 0);
+    }
+    // SAFETY: the caller's CERT_INFO.
+    let Some(value) = extension_value(unsafe { &*info }, c"2.5.29.15") else {
+        return error(0, 0);
+    };
+    let Ok(bits) = Der::new(value).expect(BIT_STRING) else {
+        return error(CRYPT_E_ASN1_CORRUPT, 0);
+    };
+    let bytes = bits.content.get(1..).unwrap_or(&[]);
+    if !usage.is_null() {
+        for i in 0..n as usize {
+            // SAFETY: the caller's buffer of `n` bytes.
+            unsafe { *usage.add(i) = bytes.get(i).copied().unwrap_or(0) };
+        }
+    }
+    1
+}
+
+const CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG: u32 = 4;
+
+/// CertGetEnhancedKeyUsage(cert, flags, usage, size): the extended key
+/// usage extension's OIDs as CERT_ENHKEY_USAGE (count, pointer array,
+/// then the strings; the size with a NULL buffer, ERROR_MORE_DATA when
+/// short). No extension: an empty list and CRYPT_E_NOT_FOUND (good for
+/// every usage). The CERT_ENHKEY_USAGE_PROP_ID property is not kept, so
+/// CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG finds nothing.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertGetEnhancedKeyUsage(
+    cert: *const CertContext,
+    flags: u32,
+    usage: *mut u8,
+    size: *mut u32,
+) -> i32 {
+    if cert.is_null() || size.is_null() {
+        return error(E_INVALIDARG, 0);
+    }
+    // SAFETY: the caller's context and its CERT_INFO.
+    let info = unsafe { &*(*cert).info };
+    let value = if flags & CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG != 0 {
+        None
+    } else {
+        extension_value(info, c"2.5.29.37")
+    };
+    // The OIDs as text, NUL-terminated, one after another.
+    let mut text = [0u8; 1024];
+    let (mut used, mut count) = (0usize, 0usize);
+    if let Some(value) = value {
+        let Ok(list) = Der::new(value).expect(SEQUENCE) else {
+            return error(CRYPT_E_ASN1_CORRUPT, 0);
+        };
+        let mut items = Der::new(list.content);
+        while !items.data.is_empty() {
+            let Ok(oid) = items.expect(OID) else { return error(CRYPT_E_ASN1_CORRUPT, 0) };
+            let Ok(n) = oid_text(oid.content, &mut text[used..]) else {
+                return error(ERROR_NOT_ENOUGH_MEMORY, 0);
+            };
+            if used + n + 1 > text.len() {
+                return error(ERROR_NOT_ENOUGH_MEMORY, 0);
+            }
+            text[used + n] = 0;
+            used += n + 1;
+            count += 1;
+        }
+    }
+    let needed = 16 + 8 * count + used;
+    // SAFETY: the caller's size and buffer.
+    unsafe {
+        let room = *size as usize;
+        *size = needed as u32;
+        if !usage.is_null() {
+            if room < needed {
+                return error(ERROR_MORE_DATA, 0);
+            }
+            let ptrs = usage.add(16).cast::<*const u8>();
+            let strings = usage.add(16 + 8 * count);
+            core::ptr::copy_nonoverlapping(text.as_ptr(), strings, used);
+            let mut at = 0;
+            for i in 0..count {
+                ptrs.add(i).write_unaligned(strings.add(at));
+                while text[at] != 0 {
+                    at += 1;
+                }
+                at += 1;
+            }
+            usage.cast::<u32>().write_unaligned(count as u32);
+            usage.add(8).cast::<*const *const u8>().write_unaligned(if count == 0 {
+                core::ptr::null()
+            } else {
+                ptrs
+            });
+        }
+    }
+    if value.is_none() {
+        return error(CRYPT_E_NOT_FOUND, 1);
+    }
+    1
+}
+
+/// CertCompareCertificateName(encoding, a, b): whether two encoded names
+/// are the same bytes.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertCompareCertificateName(
+    _encoding: u32,
+    a: *const Blob,
+    b: *const Blob,
+) -> i32 {
+    if a.is_null() || b.is_null() {
+        return error(E_INVALIDARG, 0);
+    }
+    // SAFETY: the caller's blobs.
+    unsafe {
+        let (a, b) = (&*a, &*b);
+        let bytes = |x: &Blob| {
+            if x.data.is_null() {
+                &[][..]
+            } else {
+                core::slice::from_raw_parts(x.data, x.size as usize)
+            }
+        };
+        i32::from(bytes(a) == bytes(b))
+    }
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetSystemTimeAsFileTime(time: *mut u64);
+}
+
+/// CertVerifyTimeValidity(time, info): -1 before NotBefore, 1 after
+/// NotAfter, 0 within (the current time for NULL).
+#[unsafe(no_mangle)]
+pub extern "system" fn CertVerifyTimeValidity(time: *const u64, info: *const CertInfo) -> i32 {
+    if info.is_null() {
+        return 0;
+    }
+    let mut now = 0u64;
+    // SAFETY: the caller's FILETIME, or ours.
+    let t = unsafe {
+        if time.is_null() {
+            GetSystemTimeAsFileTime(&mut now);
+            now
+        } else {
+            time.read_unaligned()
+        }
+    };
+    // SAFETY: the caller's CERT_INFO.
+    let info = unsafe { &*info };
+    if t < info.not_before {
+        -1
+    } else if t > info.not_after {
+        1
+    } else {
+        0
+    }
+}
+
+const NTE_BAD_SIGNATURE: u32 = 0x8009_0006;
+
+/// The bcrypt hash pseudo-handle and name of an RSA signature algorithm
+/// (sha1/256/384/512WithRSAEncryption).
+fn rsa_hash(oid: &[u8]) -> Option<(usize, usize, &'static [u16])> {
+    const PKCS1: [u8; 8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+    const SHA1: [u16; 5] = [0x53, 0x48, 0x41, 0x31, 0];
+    const SHA256: [u16; 7] = [0x53, 0x48, 0x41, 0x32, 0x35, 0x36, 0];
+    const SHA384: [u16; 7] = [0x53, 0x48, 0x41, 0x33, 0x38, 0x34, 0];
+    const SHA512: [u16; 7] = [0x53, 0x48, 0x41, 0x35, 0x31, 0x32, 0];
+    if oid.len() != 9 || oid[..8] != PKCS1 {
+        return None;
+    }
+    match oid[8] {
+        5 => Some((0x31, 20, &SHA1)),
+        11 => Some((0x41, 32, &SHA256)),
+        12 => Some((0x51, 48, &SHA384)),
+        13 => Some((0x61, 64, &SHA512)),
+        _ => None,
+    }
+}
+
+/// CryptVerifyCertificateSignatureEx(prov, encoding, subjectType, subject,
+/// issuerType, issuer, flags, extra): whether the subject certificate
+/// (CRYPT_VERIFY_CERT_SIGN_SUBJECT_BLOB 1 or _CERT 2) is signed by the
+/// issuer's key (CRYPT_VERIFY_CERT_SIGN_ISSUER_PUBKEY 1 or _CERT 2): RSA
+/// PKCS #1 v1.5 with SHA-1/256/384/512, through bcrypt. A wrong signature
+/// is NTE_BAD_SIGNATURE; other algorithms NTE_BAD_ALGID (recorded).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn CryptVerifyCertificateSignatureEx(
+    _prov: usize,
+    _encoding: u32,
+    subject_type: u32,
+    subject: *const c_void,
+    issuer_type: u32,
+    issuer: *const c_void,
+    _flags: u32,
+    _extra: *const c_void,
+) -> i32 {
+    if subject.is_null() || issuer.is_null() {
+        return error(E_INVALIDARG, 0);
+    }
+    // SAFETY: the caller's blob or context.
+    let encoded: &[u8] = unsafe {
+        match subject_type {
+            1 => {
+                let b = &*subject.cast::<Blob>();
+                core::slice::from_raw_parts(b.data, b.size as usize)
+            }
+            2 => {
+                let c = &*subject.cast::<CertContext>();
+                core::slice::from_raw_parts(c.encoded, c.encoded_len as usize)
+            }
+            _ => return error(E_INVALIDARG, 0),
+        }
+    };
+    // SAFETY: the caller's CERT_PUBLIC_KEY_INFO or context.
+    let key_info: *const PublicKeyInfo = unsafe {
+        match issuer_type {
+            1 => issuer.cast(),
+            2 => &(*(*issuer.cast::<CertContext>()).info).public_key,
+            _ => return error(E_INVALIDARG, 0),
+        }
+    };
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm,
+    // signatureValue BIT STRING }.
+    let parts = (|| {
+        let outer = Der::new(encoded).expect(SEQUENCE)?;
+        let mut d = Der::new(outer.content);
+        let tbs = d.expect(SEQUENCE)?;
+        let (alg, _) = algorithm_id(d.expect(SEQUENCE)?)?;
+        let sig = d.expect(BIT_STRING)?;
+        Ok::<_, u32>((tbs.whole, alg, sig.content.get(1..).unwrap_or(&[])))
+    })();
+    let Ok((tbs, alg, signature)) = parts else { return error(CRYPT_E_ASN1_CORRUPT, 0) };
+    let Some((hash_alg, hash_len, hash_name)) = rsa_hash(alg) else {
+        crate::store::unsupported(b"crypt32.dll!CryptVerifyCertificateSignatureEx(algorithm)", 0);
+        return error(NTE_BAD_ALGID, 0);
+    };
+    let mut hash = [0u8; 64];
+    if !digest(hash_alg, tbs, &mut hash[..hash_len]) {
+        return error(NTE_BAD_ALGID, 0);
+    }
+    let mut key = 0usize;
+    if CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING, key_info, 0, core::ptr::null(), &mut key) == 0
+    {
+        return 0;
+    }
+    type Verify =
+        unsafe extern "system" fn(usize, *const c_void, *const u8, u32, *const u8, u32, u32) -> u32;
+    type Destroy = unsafe extern "system" fn(usize) -> u32;
+    let (Some(verify), Some(destroy)) =
+        (bcrypt(c"BCryptVerifySignature"), bcrypt(c"BCryptDestroyKey"))
+    else {
+        return error(NTE_BAD_ALGID, 0);
+    };
+    let padding = hash_name.as_ptr();
+    // SAFETY: bcrypt's documented signatures; BCRYPT_PKCS1_PADDING_INFO
+    // is the algorithm name's pointer; our buffers.
+    let status = unsafe {
+        let verify = core::mem::transmute::<usize, Verify>(verify);
+        let status = verify(
+            key,
+            (&raw const padding).cast(),
+            hash.as_ptr(),
+            hash_len as u32,
+            signature.as_ptr(),
+            signature.len() as u32,
+            2, // BCRYPT_PAD_PKCS1
+        );
+        core::mem::transmute::<usize, Destroy>(destroy)(key);
+        status
+    };
+    if status == 0 { 1 } else { error(NTE_BAD_SIGNATURE, 0) }
+}
+
+const CRYPT_E_NO_KEY_PROPERTY: u32 = 0x8009_200b;
+
+/// CryptAcquireCertificatePrivateKey: the private key of a certificate
+/// whose context names one (CERT_KEY_PROV_INFO_PROP_ID). gala opens no
+/// keys through it yet: with that property it is recorded and fails;
+/// without it, CRYPT_E_NO_KEY_PROPERTY, as documented.
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptAcquireCertificatePrivateKey(
+    cert: *const CertContext,
+    _flags: u32,
+    _reserved: *const c_void,
+    key: *mut usize,
+    _spec: *mut u32,
+    free: *mut i32,
+) -> i32 {
+    if !key.is_null() {
+        // SAFETY: the caller's outputs.
+        unsafe { *key = 0 };
+    }
+    if !free.is_null() {
+        // SAFETY: as above.
+        unsafe { *free = 0 };
+    }
+    let Some(b) = block(cert) else { return error(E_INVALIDARG, 0) };
+    if find_prop(b, CERT_KEY_PROV_INFO_PROP_ID).is_some() {
+        crate::store::unsupported(
+            b"crypt32.dll!CryptAcquireCertificatePrivateKey(a key provider)",
+            0,
+        );
+        return error(0x8009_0029, 0); // NTE_NOT_SUPPORTED
+    }
+    error(CRYPT_E_NO_KEY_PROPERTY, 0)
+}

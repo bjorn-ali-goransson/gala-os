@@ -46,6 +46,26 @@
 //!   ignored), CERT_FIND_EXISTING and CERT_FIND_ANY;
 //!   CertDeleteCertificateFromStore; CertDuplicateStore and
 //!   CertCloseStore; CertEnumCRLsInStore of a store without CRLs.
+//! - Collection stores (CERT_STORE_PROV_COLLECTION, as Chromium builds its
+//!   roots): CertAddStoreToCollection adds a store whose certificates the
+//!   collection then enumerates and finds (the contexts are the member's:
+//!   hCertStore), in priority order; a certificate added to the collection
+//!   goes to the member added with CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG;
+//!   CertRemoveStoreFromCollection takes a member out.
+//! - Usage, names, time, signatures (what Chromium imports): with
+//!   EKU_CERT (key usage digitalSignature | keyEncipherment, EKU
+//!   serverAuth and clientAuth) CertGetIntendedKeyUsage gives the bits
+//!   0xa0 and CertGetEnhancedKeyUsage the two OIDs (size first); with CERT
+//!   (neither extension) the first is FALSE with last error 0 and the
+//!   second an empty list with CRYPT_E_NOT_FOUND (every usage);
+//!   CertCompareCertificateName of a name with itself and with another;
+//!   CertVerifyTimeValidity before, inside and after the validity;
+//!   CryptVerifyCertificateSignatureEx of each self-signed certificate by
+//!   itself (TRUE) and of CERT by EKU_CERT's key (NTE_BAD_SIGNATURE);
+//!   CertControlStore(CERT_STORE_CTRL_RESYNC) on a memory store;
+//!   CertFindChainInStore finds no chain in a store without private keys;
+//!   CryptAcquireCertificatePrivateKey of a certificate without a key is
+//!   CRYPT_E_NO_KEY_PROPERTY.
 //! - CryptQueryObject on a blob: the DER certificate (content
 //!   CERT_QUERY_CONTENT_CERT, format BINARY) and its PEM text (format
 //!   BASE64_ENCODED), with its context and a store holding it; bytes that
@@ -137,6 +157,7 @@ unsafe extern "system" {
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> i32;
     fn ExitProcess(code: u32) -> !;
     fn GetLastError() -> u32;
+    fn SetLastError(code: u32);
     fn LocalFree(p: *mut c_void) -> *mut c_void;
 }
 
@@ -206,6 +227,54 @@ unsafe extern "system" {
     fn CertOpenSystemStoreW(prov: usize, name: *const u16) -> Handle;
     fn CertCloseStore(store: Handle, flags: u32) -> Bool;
     fn CertDuplicateStore(store: Handle) -> Handle;
+    fn CertGetIntendedKeyUsage(
+        encoding: u32,
+        info: *const CertInfo,
+        usage: *mut u8,
+        n: u32,
+    ) -> Bool;
+    fn CertGetEnhancedKeyUsage(
+        cert: *const CertContext,
+        flags: u32,
+        usage: *mut u8,
+        size: *mut u32,
+    ) -> Bool;
+    fn CertCompareCertificateName(encoding: u32, a: *const Blob, b: *const Blob) -> Bool;
+    fn CertVerifyTimeValidity(time: *const u64, info: *const CertInfo) -> i32;
+    fn CryptVerifyCertificateSignatureEx(
+        prov: usize,
+        encoding: u32,
+        subject_type: u32,
+        subject: *const c_void,
+        issuer_type: u32,
+        issuer: *const c_void,
+        flags: u32,
+        extra: *const c_void,
+    ) -> Bool;
+    fn CertControlStore(store: Handle, flags: u32, ctrl: u32, para: *const c_void) -> Bool;
+    fn CertFindChainInStore(
+        store: Handle,
+        encoding: u32,
+        flags: u32,
+        kind: u32,
+        para: *const c_void,
+        prev: *const c_void,
+    ) -> *const c_void;
+    fn CryptAcquireCertificatePrivateKey(
+        cert: *const CertContext,
+        flags: u32,
+        reserved: *const c_void,
+        key: *mut usize,
+        spec: *mut u32,
+        free: *mut Bool,
+    ) -> Bool;
+    fn CertAddStoreToCollection(
+        collection: Handle,
+        sibling: Handle,
+        flags: u32,
+        priority: u32,
+    ) -> Bool;
+    fn CertRemoveStoreFromCollection(collection: Handle, sibling: Handle);
     fn CertAddEncodedCertificateToStore(
         store: Handle,
         encoding: u32,
@@ -718,6 +787,8 @@ fn run() -> Result<(), u32> {
         c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
 
         stores(&mut c)?;
+        collections(&mut c)?;
+        usage(&mut c)?;
         query(&mut c)?;
         alt_names(&mut c)?;
     }
@@ -777,6 +848,181 @@ fn wide_text(s: &str, out: &mut [u16; 32]) -> *const u16 {
         *slot = c;
     }
     out.as_ptr()
+}
+
+/// Usage, names, time and signatures (see the module comment).
+fn usage(c: &mut Checks) -> Result<(), u32> {
+    use vectors::*;
+    const CRYPT_E_NO_KEY_PROPERTY: u32 = 0x8009_200b;
+    const NTE_BAD_SIGNATURE: u32 = 0x8009_0006;
+    const SUBJECT_CERT: u32 = 2;
+    const ISSUER_CERT: u32 = 2;
+    let null: *mut c_void = core::ptr::null_mut();
+    // SAFETY: crypt32 calls with our buffers and the contexts it returns.
+    unsafe {
+        let plain =
+            CertCreateCertificateContext(X509_ASN_ENCODING, CERT.as_ptr(), CERT.len() as u32);
+        let eku = CertCreateCertificateContext(
+            X509_ASN_ENCODING,
+            EKU_CERT.as_ptr(),
+            EKU_CERT.len() as u32,
+        );
+        c.ok(!plain.is_null() && !eku.is_null(), GetLastError().into())?;
+        let mut bits = [0xffu8; 2];
+        c.ok(
+            CertGetIntendedKeyUsage(X509_ASN_ENCODING, (*eku).info, bits.as_mut_ptr(), 2) != 0,
+            0,
+        )?;
+        c.ok(bits == [0xa0, 0], u32::from(bits[0]).into())?;
+        SetLastError(5);
+        c.eq(
+            CertGetIntendedKeyUsage(X509_ASN_ENCODING, (*plain).info, bits.as_mut_ptr(), 2) as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), 0)?;
+        let mut size = 0u32;
+        c.ok(CertGetEnhancedKeyUsage(eku, 0, core::ptr::null_mut(), &mut size) != 0, 0)?;
+        c.ok(size >= 16, size.into())?;
+        let mut buf = [0u64; 32];
+        c.ok((size as usize) <= core::mem::size_of_val(&buf), size.into())?;
+        c.ok(CertGetEnhancedKeyUsage(eku, 0, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
+        // CERT_ENHKEY_USAGE { cUsageIdentifier, rgpszUsageIdentifier }.
+        c.eq(buf[0] as u32 as u64, 2)?;
+        let ids = buf[1] as *const *const u8;
+        c.ok(c_str(*ids) == b"1.3.6.1.5.5.7.3.1" && c_str(*ids.add(1)) == b"1.3.6.1.5.5.7.3.2", 0)?;
+        size = core::mem::size_of_val(&buf) as u32;
+        c.ok(CertGetEnhancedKeyUsage(plain, 0, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
+        c.eq(buf[0] as u32 as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+
+        let info = &*(*plain).info;
+        let other = &*(*eku).info;
+        c.ok(CertCompareCertificateName(X509_ASN_ENCODING, &info.subject, &info.issuer) != 0, 0)?;
+        c.eq(
+            CertCompareCertificateName(X509_ASN_ENCODING, &info.subject, &other.subject) as u64,
+            0,
+        )?;
+        let (before, inside, after) = (NOT_BEFORE - 1, NOT_BEFORE + 1, NOT_AFTER + 1);
+        c.eq(CertVerifyTimeValidity(&before, info) as u32 as u64, u64::from(u32::MAX))?; // -1
+        c.eq(CertVerifyTimeValidity(&inside, info) as u64, 0)?;
+        c.eq(CertVerifyTimeValidity(&after, info) as u64, 1)?;
+
+        for cert in [plain, eku] {
+            let ok = CryptVerifyCertificateSignatureEx(
+                0,
+                X509_ASN_ENCODING,
+                SUBJECT_CERT,
+                cert.cast(),
+                ISSUER_CERT,
+                cert.cast(),
+                0,
+                null,
+            );
+            c.ok(ok != 0, GetLastError().into())?;
+        }
+        let ok = CryptVerifyCertificateSignatureEx(
+            0,
+            X509_ASN_ENCODING,
+            SUBJECT_CERT,
+            plain.cast(),
+            ISSUER_CERT,
+            eku.cast(),
+            0,
+            null,
+        );
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), NTE_BAD_SIGNATURE.into())?;
+
+        let store = CertOpenStore(CERT_STORE_PROV_MEMORY as *const u8, 0, 0, 0, null);
+        c.ok(CertControlStore(store, 0, 1, null) != 0, GetLastError().into())?; // RESYNC
+        c.ok(
+            CertAddCertificateContextToStore(
+                store,
+                plain,
+                CERT_STORE_ADD_NEW,
+                core::ptr::null_mut(),
+            ) != 0,
+            0,
+        )?;
+        let chain = CertFindChainInStore(store, X509_ASN_ENCODING, 0, 1, null, null);
+        c.ok(chain.is_null(), 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        CertCloseStore(store, 0);
+        let (mut key, mut spec, mut free) = (0usize, 0u32, 0);
+        let got = CryptAcquireCertificatePrivateKey(plain, 0, null, &mut key, &mut spec, &mut free);
+        c.eq(got as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NO_KEY_PROPERTY.into())?;
+        CertFreeCertificateContext(plain);
+        CertFreeCertificateContext(eku);
+    }
+    Ok(())
+}
+
+/// Collection stores (see the module comment).
+fn collections(c: &mut Checks) -> Result<(), u32> {
+    use vectors::*;
+    const CERT_STORE_PROV_COLLECTION: usize = 11;
+    const CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG: u32 = 1;
+    let null: *mut c_void = core::ptr::null_mut();
+    // SAFETY: crypt32 calls with our buffers and the handles it returns.
+    unsafe {
+        let memory = CERT_STORE_PROV_MEMORY as *const u8;
+        let (a, b) = (CertOpenStore(memory, 0, 0, 0, null), CertOpenStore(memory, 0, 0, 0, null));
+        let all = CertOpenStore(CERT_STORE_PROV_COLLECTION as *const u8, 0, 0, 0, null);
+        c.ok(!a.is_null() && !b.is_null() && !all.is_null(), 0)?;
+        let mut in_a: *const CertContext = core::ptr::null();
+        let ok = CertAddEncodedCertificateToStore(
+            a,
+            X509_ASN_ENCODING,
+            CERT.as_ptr(),
+            CERT.len() as u32,
+            CERT_STORE_ADD_NEW,
+            &mut in_a,
+        );
+        c.ok(ok != 0, GetLastError().into())?;
+        c.eq(count(all).into(), 0)?;
+        c.ok(CertAddStoreToCollection(all, a, 0, 1) != 0, GetLastError().into())?;
+        c.ok(CertAddStoreToCollection(all, b, CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG, 0) != 0, 0)?;
+        c.eq(count(all).into(), 1)?;
+        let first = CertEnumCertificatesInStore(all, core::ptr::null());
+        c.ok(!first.is_null() && (*first).store == a, 0)?;
+        CertFreeCertificateContext(first);
+        // Added to the collection: into b (the member that takes adds).
+        let mut added: *const CertContext = core::ptr::null();
+        let ok = CertAddEncodedCertificateToStore(
+            all,
+            X509_ASN_ENCODING,
+            CERT.as_ptr(),
+            CERT.len() as u32,
+            CERT_STORE_ADD_ALWAYS,
+            &mut added,
+        );
+        c.ok(ok != 0 && !added.is_null() && (*added).store == b, GetLastError().into())?;
+        CertFreeCertificateContext(added);
+        c.eq(count(b).into(), 1)?;
+        c.eq(count(all).into(), 2)?;
+        // Found through the collection.
+        let hash = Blob { size: 20, data: CERT_SHA1.as_ptr().cast_mut() };
+        let found = CertFindCertificateInStore(
+            all,
+            X509_ASN_ENCODING,
+            0,
+            CERT_FIND_SHA1_HASH,
+            (&raw const hash).cast(),
+            core::ptr::null(),
+        );
+        c.ok(!found.is_null() && (*found).store == a, 0)?;
+        CertFreeCertificateContext(found);
+        CertRemoveStoreFromCollection(all, a);
+        c.eq(count(all).into(), 1)?;
+        CertFreeCertificateContext(in_a);
+        c.ok(CertCloseStore(all, 0) != 0, 0)?;
+        // The members outlive the collection.
+        c.eq(count(a).into(), 1)?;
+        CertCloseStore(a, 0);
+        CertCloseStore(b, 0);
+    }
+    Ok(())
 }
 
 fn stores(c: &mut Checks) -> Result<(), u32> {

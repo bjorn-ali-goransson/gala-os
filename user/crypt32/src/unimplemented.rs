@@ -16,14 +16,11 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertAddRefServerOcspResponse
     CertAddRefServerOcspResponseContext
     CertAddSerializedElementToStore
-    CertAddStoreToCollection
     CertAlgIdToOID
     CertCloseServerOcspResponse
     CertCompareCertificate
-    CertCompareCertificateName
     CertCompareIntegerBlob
     CertComparePublicKeyInfo
-    CertControlStore
     CertCreateCRLContext
     CertCreateCTLContext
     CertCreateCTLEntryFromCertificateContextProperties
@@ -46,7 +43,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertFindCRLInStore
     CertFindCTLInStore
     CertFindCertificateInCRL
-    CertFindChainInStore
     CertFindRDNAttr
     CertFindSubjectInCTL
     CertFindSubjectInSortedCTL
@@ -58,8 +54,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertGetCRLContextProperty
     CertGetCRLFromStore
     CertGetCTLContextProperty
-    CertGetEnhancedKeyUsage
-    CertGetIntendedKeyUsage
     CertGetIssuerCertificateFromStore
     CertGetServerOcspResponseContext
     CertGetStoreProperty
@@ -76,7 +70,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertRegisterPhysicalStore
     CertRegisterSystemStore
     CertRemoveEnhancedKeyUsageIdentifier
-    CertRemoveStoreFromCollection
     CertResyncCertificateChainEngine
     CertRetrieveLogoOrBiometricInfo
     CertSaveStore
@@ -98,9 +91,7 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertVerifyCTLUsage
     CertVerifyRevocation
     CertVerifySubjectCertificateContext
-    CertVerifyTimeValidity
     CertVerifyValidityNesting
-    CryptAcquireCertificatePrivateKey
     CryptCreateKeyIdentifierFromCSP
     CryptDecodeMessage
     CryptDecodeObject
@@ -140,14 +131,12 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptInstallDefaultContext
     CryptInstallOIDFunctionAddress
     CryptMsgCalculateEncodedLength
-    CryptMsgClose
     CryptMsgControl
     CryptMsgCountersign
     CryptMsgCountersignEncoded
     CryptMsgDuplicate
     CryptMsgEncodeAndSignCTL
     CryptMsgGetAndVerifySigner
-    CryptMsgGetParam
     CryptMsgOpenToDecode
     CryptMsgOpenToEncode
     CryptMsgSignCTL
@@ -182,7 +171,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptUnregisterOIDInfo
     CryptUpdateProtectedState
     CryptVerifyCertificateSignature
-    CryptVerifyCertificateSignatureEx
     CryptVerifyDetachedMessageHash
     CryptVerifyDetachedMessageSignature
     CryptVerifyMessageHash

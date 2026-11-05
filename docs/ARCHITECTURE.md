@@ -5186,6 +5186,22 @@ stations and desktops a program creates are refused until stage 3).
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.
 - ntdll: RtlGetDeviceFamilyInfoEnum (10.0.26100.<UBR>, the desktop
   family, an unknown form).
+- crypt32 (`store.rs`, `cert.rs`; `cert_test`): collection stores
+  (CertAddStoreToCollection/RemoveStoreFromCollection: members by
+  priority, enumerated and found through the collection, adds to the
+  member flagged CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG, else to the
+  collection's own list); CertGetIntendedKeyUsage and
+  CertGetEnhancedKeyUsage from the extensions (no EKU: every usage,
+  CRYPT_E_NOT_FOUND); CertCompareCertificateName; CertVerifyTimeValidity;
+  CryptVerifyCertificateSignatureEx (RSA PKCS #1 with SHA-1/2 through
+  bcrypt); CertControlStore (nothing outside changes a store: resyncs do
+  nothing, change notifications never fire, recorded); CertFindChainInStore
+  and CryptAcquireCertificatePrivateKey (no private keys in gala's
+  stores); CryptMsgClose/GetParam (no message handles yet).
+- kernel32: PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY is accepted (8 or
+  16 bytes; Chromium sets it for every child) but not given to the child
+  (recorded): mitigation policies are kept per process in kernel32, not
+  enforced.
 - oleacc: no default IAccessible yet. CreateStdAccessibleObject,
   LresultFromObject, AccessibleObjectFromWindow, AccessibleChildren and
   WindowFromAccessibleObject are real exports that fail as documented

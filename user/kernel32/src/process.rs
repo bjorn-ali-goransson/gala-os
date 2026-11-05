@@ -29,6 +29,7 @@ const IGNORED_FLAGS: u32 = DETACHED_PROCESS
 const STARTF_USESTDHANDLES: u32 = 0x100;
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;
+const PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY: usize = 0x2_0007;
 /// An HPCON (CreatePseudoConsole): the child is attached to it.
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x2_0016;
 /// GROUP_AFFINITY (16 bytes), for threads.
@@ -805,6 +806,14 @@ pub extern "system" fn UpdateProcThreadAttribute(
         if size != 8 || value == 0 {
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);
         }
+    } else if attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY {
+        // A DWORD64, or two (the second word: the newer policies). Kept
+        // in the list; the child is not given them (mitigation policies
+        // are kept, not enforced, on gala: ROADMAP BR stage 3), recorded.
+        if size != 8 && size != 16 {
+            return fail_with(24, FALSE); // ERROR_BAD_LENGTH
+        }
+        unsupported(b"kernel32.dll!UpdateProcThreadAttribute(mitigation policy, not applied)", 0);
     } else if attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR
         || attribute == PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY
     {

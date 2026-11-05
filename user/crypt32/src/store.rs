@@ -61,7 +61,16 @@ pub struct Store {
     certs: *mut *const CertContext,
     len: usize,
     cap: usize,
+    /// A collection's member stores (each a reference) with their
+    /// CertAddStoreToCollection flags and priority, highest priority
+    /// first.
+    members: [(*mut c_void, u32, u32); MAX_MEMBERS],
+    member_count: usize,
 }
+
+/// The most stores a collection holds.
+const MAX_MEMBERS: usize = 16;
+const CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG: u32 = 1;
 
 fn store<'a>(h: *mut c_void) -> Option<&'a mut Store> {
     if h.is_null() {
@@ -138,6 +147,8 @@ fn new_store() -> *mut c_void {
             certs: core::ptr::null_mut(),
             len: 0,
             cap: 0,
+            members: [(core::ptr::null_mut(), 0, 0); MAX_MEMBERS],
+            member_count: 0,
         })
     };
     p.cast()
@@ -182,8 +193,9 @@ fn wide_len(p: *const u16) -> usize {
     n
 }
 
-/// CertOpenStore: a memory store (CERT_STORE_PROV_MEMORY, "Memory", and a
-/// collection: an empty memory store), or a system store (empty).
+/// CertOpenStore: a memory store (CERT_STORE_PROV_MEMORY, "Memory"), a
+/// collection (CERT_STORE_PROV_COLLECTION, "Collection": a store whose
+/// members CertAddStoreToCollection adds), or a system store (empty).
 /// Other providers fail with ERROR_NOT_SUPPORTED (recorded).
 #[unsafe(no_mangle)]
 pub extern "system" fn CertOpenStore(
@@ -247,6 +259,10 @@ pub extern "system" fn CertCloseStore(h: *mut c_void, _flags: u32) -> i32 {
         for &c in s.items() {
             CertFreeCertificateContext(c);
         }
+        let members = s.members;
+        for m in &members[..s.member_count] {
+            CertCloseStore(m.0, 0);
+        }
         s.magic = 0;
         // SAFETY: our blocks.
         unsafe {
@@ -298,6 +314,15 @@ fn add(
     if copy.is_null() {
         return 0;
     }
+    // A collection's adds go to its member that takes them.
+    let h = store(h).map_or(h, |s| {
+        s.with(|s| {
+            s.members[..s.member_count]
+                .iter()
+                .find(|m| m.1 & CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG != 0)
+                .map_or(h, |m| m.0)
+        })
+    });
     let Some(s) = store(h) else {
         // No store: just the copy.
         if out.is_null() {
@@ -398,25 +423,98 @@ fn next_after(
         }
         return error(E_INVALIDARG, core::ptr::null());
     };
-    let found = s.with(|s| {
-        let start = if prev.is_null() {
-            0
-        } else {
-            match s.items().iter().position(|&c| c == prev) {
-                Some(i) => i + 1,
-                None => s.len,
-            }
-        };
-        s.items()[start.min(s.len)..]
-            .iter()
-            .copied()
-            .find(|&c| keep(c))
-            .map(|c| CertDuplicateCertificateContext(c))
+    // The store's own certificates, then (a collection) its members', in
+    // order: the next one after `prev` that `keep` keeps.
+    let mut members = [core::ptr::null_mut(); MAX_MEMBERS];
+    let count = s.with(|s| {
+        for (slot, m) in members.iter_mut().zip(&s.members[..s.member_count]) {
+            *slot = CertDuplicateStore(m.0);
+        }
+        s.member_count
     });
+    let mut passed = prev.is_null();
+    let mut found = None;
+    for target in core::iter::once(h).chain(members[..count].iter().copied()) {
+        if found.is_some() {
+            break;
+        }
+        let Some(t) = store(target) else { continue };
+        found = t.with(|t| {
+            for &c in t.items() {
+                if !passed {
+                    passed = c == prev;
+                    continue;
+                }
+                if keep(c) {
+                    return Some(CertDuplicateCertificateContext(c));
+                }
+            }
+            None
+        });
+    }
+    for &m in &members[..count] {
+        CertCloseStore(m, 0);
+    }
     if !prev.is_null() {
         CertFreeCertificateContext(prev);
     }
     found.unwrap_or_else(|| error(CRYPT_E_NOT_FOUND, core::ptr::null()))
+}
+
+/// CertAddStoreToCollection(collection, sibling, flags, priority): the
+/// collection also enumerates and finds `sibling`'s certificates, members
+/// of higher priority first; with CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG the
+/// collection's adds go to it. The collection holds a reference.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertAddStoreToCollection(
+    collection: *mut c_void,
+    sibling: *mut c_void,
+    flags: u32,
+    priority: u32,
+) -> i32 {
+    let (Some(s), Some(_)) = (store(collection), store(sibling)) else {
+        return error(E_INVALIDARG, 0);
+    };
+    if collection == sibling {
+        return error(E_INVALIDARG, 0);
+    }
+    let added = s.with(|s| {
+        if s.member_count == MAX_MEMBERS {
+            return false;
+        }
+        let at = s.members[..s.member_count]
+            .iter()
+            .position(|m| m.2 < priority)
+            .unwrap_or(s.member_count);
+        s.members.copy_within(at..s.member_count, at + 1);
+        s.members[at] = (CertDuplicateStore(sibling), flags, priority);
+        s.member_count += 1;
+        true
+    });
+    if !added {
+        unsupported(b"crypt32.dll!CertAddStoreToCollection(too many stores)", MAX_MEMBERS as u64);
+        return error(ERROR_NOT_ENOUGH_MEMORY, 0);
+    }
+    1
+}
+
+/// CertRemoveStoreFromCollection: `sibling` is no longer a member.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertRemoveStoreFromCollection(
+    collection: *mut c_void,
+    sibling: *mut c_void,
+) {
+    let Some(s) = store(collection) else { return };
+    let removed = s.with(|s| {
+        let i = s.members[..s.member_count].iter().position(|m| m.0 == sibling)?;
+        let m = s.members[i].0;
+        s.members.copy_within(i + 1..s.member_count, i);
+        s.member_count -= 1;
+        Some(m)
+    });
+    if let Some(m) = removed {
+        CertCloseStore(m, 0);
+    }
 }
 
 /// CertEnumCertificatesInStore: the next certificate.
@@ -570,4 +668,82 @@ pub extern "system" fn CertDeleteCertificateFromStore(cert: *const CertContext) 
 #[unsafe(no_mangle)]
 pub extern "system" fn CertEnumCRLsInStore(_h: *mut c_void, _prev: *const c_void) -> *const c_void {
     error(CRYPT_E_NOT_FOUND, core::ptr::null())
+}
+
+const CERT_STORE_CTRL_RESYNC: u32 = 1;
+const CERT_STORE_CTRL_NOTIFY_CHANGE: u32 = 2;
+const CERT_STORE_CTRL_COMMIT: u32 = 3;
+const CERT_STORE_CTRL_AUTO_RESYNC: u32 = 4;
+const CERT_STORE_CTRL_CANCEL_NOTIFY: u32 = 5;
+
+/// CertControlStore(store, flags, ctrl, para): gala's stores are in memory
+/// and nothing outside the process changes them, so a resync, commit or
+/// automatic resync has nothing to do (TRUE), and a change notification
+/// is registered but never signaled (TRUE). Other controls: E_INVALIDARG.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertControlStore(
+    h: *mut c_void,
+    _flags: u32,
+    ctrl: u32,
+    _para: *const c_void,
+) -> i32 {
+    if store(h).is_none() {
+        return error(E_INVALIDARG, 0);
+    }
+    match ctrl {
+        CERT_STORE_CTRL_RESYNC
+        | CERT_STORE_CTRL_COMMIT
+        | CERT_STORE_CTRL_AUTO_RESYNC
+        | CERT_STORE_CTRL_CANCEL_NOTIFY => 1,
+        CERT_STORE_CTRL_NOTIFY_CHANGE => {
+            unsupported(b"crypt32.dll!CertControlStore(NOTIFY_CHANGE: never signaled)", 0);
+            1
+        }
+        _ => error(E_INVALIDARG, 0),
+    }
+}
+
+/// CertFindChainInStore: the chains, in the store, of certificates that
+/// have a private key matching the criteria. gala's stores keep no
+/// private keys, so there are none: NULL and CRYPT_E_NOT_FOUND (a
+/// previous chain passed in is freed, as documented).
+#[unsafe(no_mangle)]
+pub extern "system" fn CertFindChainInStore(
+    h: *mut c_void,
+    _encoding: u32,
+    _flags: u32,
+    _kind: u32,
+    _para: *const c_void,
+    prev: *const u8,
+) -> *const u8 {
+    if !prev.is_null() {
+        crate::chain::CertFreeCertificateChain(prev);
+    }
+    if store(h).is_none() {
+        return error(E_INVALIDARG, core::ptr::null());
+    }
+    error(CRYPT_E_NOT_FOUND, core::ptr::null())
+}
+
+/// CryptMsgClose: gala hands out no message handles (CryptMsgOpenToDecode
+/// is not there yet), so only NULL can come back: TRUE.
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptMsgClose(msg: *mut c_void) -> i32 {
+    if !msg.is_null() {
+        unsupported(b"crypt32.dll!CryptMsgClose(a message gala did not make)", 0);
+    }
+    1
+}
+
+/// CryptMsgGetParam: no message handles exist yet: E_INVALIDARG.
+#[unsafe(no_mangle)]
+pub extern "system" fn CryptMsgGetParam(
+    _msg: *mut c_void,
+    kind: u32,
+    _index: u32,
+    _data: *mut c_void,
+    _size: *mut u32,
+) -> i32 {
+    unsupported(b"crypt32.dll!CryptMsgGetParam", kind.into());
+    error(E_INVALIDARG, 0)
 }

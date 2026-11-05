@@ -8,7 +8,8 @@
 //! saturated values, an invalid one), GetCurrentThreadStackLimits (the
 //! reserved stack: TEB DeallocationStack to StackBase), Get/
 //! SetPriorityClass, CreateRemoteThreadEx in this process with an ideal
-//! processor and a group affinity in its attribute list; OpenThread of
+//! processor and a group affinity in its attribute list (and the
+//! mitigation policy attribute, 8 or 16 bytes, accepted); OpenThread of
 //! another thread by its id (waited on through that handle; an unknown id
 //! is ERROR_INVALID_PARAMETER). Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
@@ -383,6 +384,26 @@ fn run() -> Result<(), u32> {
         );
         c.eq(r as u64, 0)?;
         c.eq(GetLastError().into(), 24)?;
+        // PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY (Chromium sets it for its
+        // child processes): a DWORD64 or two; another size fails.
+        let mut size = 0;
+        InitializeProcThreadAttributeList(core::ptr::null_mut(), 1, 0, &mut size);
+        let mut list2 = [0u8; 512];
+        c.ok(size <= list2.len(), size as u64)?;
+        c.ok(InitializeProcThreadAttributeList(list2.as_mut_ptr(), 1, 0, &mut size) != 0, 0)?;
+        let policy: [u64; 2] = [0, 1 << 28]; // CET user shadow stacks always off
+        for (len, ok) in [(16usize, true), (4, false)] {
+            let r = UpdateProcThreadAttribute(
+                list2.as_mut_ptr(),
+                0,
+                0x20007,
+                policy.as_ptr().cast(),
+                len,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            );
+            c.ok((r != 0) == ok, GetLastError().into())?;
+        }
         RESULT.store(0, Ordering::SeqCst);
         let mut tid = 0;
         let h = CreateRemoteThreadEx(

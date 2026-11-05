@@ -42,7 +42,11 @@ pub extern "system" fn CreateStdAccessibleObject(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn LresultFromObject(_iid: *const [u8; 16], _wparam: usize, _object: *mut c_void) -> isize {
+pub extern "system" fn LresultFromObject(
+    _iid: *const [u8; 16],
+    _wparam: usize,
+    _object: *mut c_void,
+) -> isize {
     absent("oleacc.dll!LresultFromObject");
     E_NOTIMPL as isize
 }
