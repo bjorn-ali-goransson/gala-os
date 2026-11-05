@@ -3962,7 +3962,10 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   procedure that answers otherwise draws its own frame (Chromium's
   browser window: the whole window, or 8-pixel sides and bottom with no
   top): user32 keeps its borders (`custom`; sides and bottom equal), and
-  the desktop shows a frameless window over the client area (the
+  the desktop shows a frameless window over the client area
+  (GalaWindowCreate's STYLE_FRAMELESS, 2: all client area, otherwise an
+  application window: active, on the taskbar, in the usual order; the
+  popup style 1 is for menus and lists) (the
   borders outside it are like Windows 11's invisible resize borders);
   the desktop window is made again when the frame changes. Test:
   `user32_test` (custom_frame). Limits: uneven borders take the left one

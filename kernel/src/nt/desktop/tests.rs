@@ -236,6 +236,35 @@ fn qoi_pictures_decode_and_cover_the_screen() {
 }
 
 #[test]
+fn a_frameless_window_is_all_client_area_yet_an_application_window() {
+    // A program that draws its own frame (Chromium's WM_NCCALCSIZE).
+    let (mut d, a) = desktop_with_window();
+    let f = d.create(7, 300, 120, 200, 100, &title("own frame"), STYLE_FRAMELESS).unwrap();
+    let w = d.window(f).unwrap();
+    assert_eq!((w.client_size(), w.client_origin()), ((200, 100), (300, 120)));
+    let blue = [0x0000_00ffu32; 4];
+    d.present(f, Rect { x: 100, y: 0, w: 2, h: 2 }, &blue, 2).unwrap();
+    d.show(f, 7, true).unwrap();
+    // Its top rows are its own (no caption), it is active and on the
+    // taskbar.
+    assert_eq!(d.pixel(400, 120), 0x0000_00ff);
+    assert_eq!(d.active, Some(f));
+    assert_eq!(d.tasks().len(), 2);
+    // A click on its top row is the program's, in its coordinates.
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    click(&mut d, 460, 121);
+    let n = d.take_input(7, &mut out);
+    let down = out[..n].iter().find(|e| e.message == WM_LBUTTONDOWN).unwrap();
+    assert_eq!((down.window, down.lparam), (f, 1 << 16 | 160));
+    // Another window raised above it stays above it.
+    d.raise(a);
+    assert_ne!(d.pixel(400, 120), 0x0000_00ff);
+    // Popup and frameless together are refused.
+    assert!(d.create(7, 0, 0, 10, 10, &[], STYLE_POPUP | STYLE_FRAMELESS).is_err());
+}
+
+#[test]
 fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     let (mut d, a) = desktop_with_window();
     let p = d.create(7, 320, 150, 100, 60, &title("menu"), STYLE_POPUP).unwrap();

@@ -245,17 +245,16 @@ fn set_frame(i: usize, custom: Option<(i32, i32)>) {
         if w.desktop != 0 {
             GalaWindowDestroy(w.desktop);
         }
-        let popup = w.custom.is_some() || w.popup;
-        let _ = GalaWindowCreate(
-            x,
-            y,
-            wd as u32,
-            ht as u32,
-            w.title.as_ptr(),
-            len,
-            &mut id,
-            u32::from(popup),
-        );
+        // The desktop's styles: 1 a popup, 2 an application window that
+        // draws its own frame.
+        let style = if w.popup {
+            1
+        } else if w.custom.is_some() {
+            2
+        } else {
+            0
+        };
+        let _ = GalaWindowCreate(x, y, wd as u32, ht as u32, w.title.as_ptr(), len, &mut id, style);
         if id != 0 && w.visible {
             GalaWindowShow(id, 1);
         }

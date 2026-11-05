@@ -180,6 +180,10 @@ const VK_MENU: u8 = 0x12;
 
 /// GalaWindowCreate's style: a frameless popup.
 pub const STYLE_POPUP: u32 = 0x1;
+/// GalaWindowCreate's style: an application window that draws its own
+/// frame (WM_NCCALCSIZE took gala's away): all client area, otherwise as
+/// a framed window (active, on the taskbar, in the usual order).
+pub const STYLE_FRAMELESS: u32 = 0x2;
 
 /// Whether an outer size suits a window (a framed one needs room for its
 /// caption and buttons).
@@ -312,6 +316,8 @@ pub struct Window {
     /// tooltip): all client area, above the framed windows, not on the
     /// taskbar, never active.
     popup: bool,
+    /// An application window without gala's frame (STYLE_FRAMELESS).
+    frameless: bool,
     /// Its icon (GalaWindowSetIcon), ICON x ICON 0xAARRGGBB pixels
     /// (straight alpha); empty: none (the taskbar shows a lettered tile).
     icon: Vec<u32>,
@@ -378,7 +384,7 @@ pub fn scale_icon_to(src: &[u32], size: usize, to: usize) -> Option<Vec<u32>> {
 impl Window {
     /// The frame's left/right/bottom width and its top (caption) height.
     fn frame(&self) -> (u32, u32) {
-        if self.popup { (0, 0) } else { (BORDER, BORDER + CAPTION) }
+        if self.popup || self.frameless { (0, 0) } else { (BORDER, BORDER + CAPTION) }
     }
 
     fn client_size(&self) -> (u32, u32) {
@@ -437,7 +443,7 @@ impl Window {
 
     /// The colour of window point (lx, ly) inside its shape.
     fn body(&self, lx: i64, ly: i64, active: bool) -> u32 {
-        if self.popup {
+        if self.popup || self.frameless {
             let (cw, _) = self.client_size();
             return self
                 .client
@@ -716,10 +722,14 @@ impl Desktop {
         style: u32,
     ) -> Result<u32, NtStatus> {
         let popup = style & STYLE_POPUP != 0;
-        if style & !STYLE_POPUP != 0 || !size_fits(w, h, popup) {
+        let frameless = style & STYLE_FRAMELESS != 0;
+        if style & !(STYLE_POPUP | STYLE_FRAMELESS) != 0
+            || (popup && frameless)
+            || !size_fits(w, h, popup || frameless)
+        {
             return Err(NtStatus::INVALID_PARAMETER);
         }
-        let (b, top) = if popup { (0, 0) } else { (BORDER, BORDER + CAPTION) };
+        let (b, top) = if popup || frameless { (0, 0) } else { (BORDER, BORDER + CAPTION) };
         let mut client = Vec::new();
         let n = ((w - 2 * b) * (h - top - b)) as usize;
         client.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -746,6 +756,7 @@ impl Desktop {
             small_icon: Vec::new(),
             unsnapped: None,
             popup,
+            frameless,
         };
         self.windows.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
         self.windows.try_push(window).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -851,7 +862,8 @@ impl Desktop {
         w: u32,
         h: u32,
     ) -> Result<Rect, NtStatus> {
-        let popup = self.find(id, owner)?.popup;
+        let win = self.find(id, owner)?;
+        let popup = win.popup || win.frameless;
         if !size_fits(w, h, popup) {
             return Err(NtStatus::INVALID_PARAMETER);
         }
@@ -1516,7 +1528,7 @@ impl Desktop {
             if !w.rect().contains(x, y) || w.coverage(lx, ly) < 128 {
                 continue;
             }
-            if w.popup {
+            if w.popup || w.frameless {
                 return Hit::Client(w.id);
             }
             let ww = i64::from(w.w);
