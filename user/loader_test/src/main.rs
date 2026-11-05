@@ -13,8 +13,15 @@
 //! SizeOfImage the image's, its BaseDllName the end of its FullDllName; a
 //! loaded DLL in all three lists (load, memory and initialization order),
 //! the executable never in the initialization order; an unloaded DLL in
-//! none. Prints `loader_test: ok` or exits with the number of the failing
-//! check.
+//! none.
+//!
+//! RtlGetUnloadEventTraceEx (documented on learn.microsoft.com; Crashpad
+//! reads it for its reports): the element size (at least an
+//! RTL_UNLOAD_EVENT_TRACE's 100 bytes), the count, and the address of the
+//! pointer to the array; after testdll2 and testdll are unloaded the
+//! array holds both (base, image size, name), testdll's sequence after
+//! testdll2's. Prints `loader_test: ok` or exits with the number of the
+//! failing check.
 
 #![no_std]
 #![no_main]
@@ -333,6 +340,10 @@ fn run() -> Result<(), u32> {
     c.eq(value(), INITIAL_VALUE)?;
     c.eq(attaches(), 1)?;
 
+    // Their image sizes, for the unload trace.
+    let size_of = |base: usize| u32_at(base + u32_at(base + 0x3c) as usize + 24 + 56);
+    let (size, size2) = (size_of(dll), size_of(dll2));
+
     // Unloading: testdll2 goes at once; testdll after its second unload.
     c.eq((api.unload)(dll2).into(), STATUS_SUCCESS.into())?;
     let (s, _) = api.handle(&wide!("testdll2.dll"));
@@ -348,6 +359,45 @@ fn run() -> Result<(), u32> {
     c.ok(s != STATUS_SUCCESS || query(dll).1.kind != MEM_IMAGE, 0)?;
     // Unloaded: in none of PEB.Ldr's lists.
     check_ldr(&mut c, 0, dll)?;
+
+    // Both are in the unload event trace.
+    let ntdll = find_ntdll().unwrap_or(0);
+    let trace = find_export(ntdll, b"RtlGetUnloadEventTraceEx");
+    c.ok(trace.is_some(), 0)?;
+    // SAFETY: RtlGetUnloadEventTraceEx(PULONG*, PULONG*, PVOID*).
+    let trace = unsafe {
+        core::mem::transmute::<usize, extern "system" fn(*mut usize, *mut usize, *mut usize)>(
+            trace.unwrap_or(0),
+        )
+    };
+    let (mut size_ptr, mut count_ptr, mut array_ptr) = (0usize, 0usize, 0usize);
+    trace(&mut size_ptr, &mut count_ptr, &mut array_ptr);
+    c.ok(size_ptr != 0 && count_ptr != 0 && array_ptr != 0, 0)?;
+    let (element, count) = (u32_at(size_ptr) as usize, u32_at(count_ptr) as usize);
+    c.ok(element >= 100, element as u64)?;
+    c.ok((2..=1024).contains(&count), count as u64)?;
+    let array = usize_at(array_ptr);
+    c.ok(array != 0, 0)?;
+    let find = |base: usize, image: usize, name: &[u8]| {
+        (0..count).find_map(|i| {
+            let e = array + i * element;
+            // ImageName: WCHAR[32] at +0x1c.
+            // SAFETY: an entry of the array, 32 units of name.
+            let units = unsafe { core::slice::from_raw_parts((e + 0x1c) as *const u16, 32) };
+            let n = units.iter().position(|&u| u == 0).unwrap_or(32);
+            let same = n == name.len()
+                && units[..n]
+                    .iter()
+                    .zip(name)
+                    .all(|(&a, &b)| u8::try_from(a).is_ok_and(|a| a.to_ascii_lowercase() == b));
+            (usize_at(e) == base && usize_at(e + 8) == image && same).then(|| u32_at(e + 0x10))
+        })
+    };
+    let seq2 = find(dll2, size2 as usize, b"testdll2.dll");
+    let seq = find(dll, size as usize, b"testdll.dll");
+    c.ok(seq2.is_some(), 0)?;
+    c.ok(seq.is_some(), 0)?;
+    c.ok(seq > seq2, u64::from(seq.unwrap_or(0)))?;
     Ok(())
 }
 

@@ -1993,6 +1993,12 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   path), LoadCount (0xffff when pinned) and TimeDateStamp; an unloaded
   module leaves all three lists. Changed under the loader lock only
   (`loader_test`).
+- **The unload event trace** (RtlGetUnloadEventTraceEx,
+  RtlGetUnloadEventTrace): the last 64 unloaded modules as
+  RTL_UNLOAD_EVENT_TRACE entries (base, image size, sequence, time stamp,
+  checksum, base name), recorded while the image is still mapped; the
+  pointer to the array is NULL until the first unload. Crashpad's
+  handler reads it from a crashed process (`loader_test`).
 - **The loader lock** is laid out as an RTL_CRITICAL_SECTION
   (`LOADER_LOCK`, owner at +0x10) and PEB.LoaderLock (+0x110) points at
   it (Crashpad's IsThreadInLoaderLock reads it).

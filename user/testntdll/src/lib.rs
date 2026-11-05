@@ -1037,6 +1037,114 @@ fn ldr_unlink(slot: usize) {
     *e = NO_ENTRY;
 }
 
+/// RTL_UNLOAD_EVENT_TRACE (x64, 104 bytes): one unloaded module.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UnloadEvent {
+    base: usize,
+    size_of_image: usize,
+    sequence: u32,
+    time_date_stamp: u32,
+    checksum: u32,
+    image_name: [u16; 32],
+    version: [u32; 2],
+}
+
+const _: () = assert!(core::mem::size_of::<UnloadEvent>() == 104);
+
+/// How many unloads the trace keeps (the newest replace the oldest).
+const UNLOAD_EVENTS: usize = 64;
+
+const NO_UNLOAD: UnloadEvent = UnloadEvent {
+    base: 0,
+    size_of_image: 0,
+    sequence: 0,
+    time_date_stamp: 0,
+    checksum: 0,
+    image_name: [0; 32],
+    version: [0; 2],
+};
+
+/// The unload event trace (RtlGetUnloadEventTrace/Ex): the element size
+/// and count, the pointer to the array (NULL until the first unload, as
+/// on Windows), the array, the next sequence number. Changed under the
+/// loader lock; another process reads it (Crashpad's reports list the
+/// unloaded modules).
+struct UnloadTrace(core::cell::UnsafeCell<(u32, u32, usize, [UnloadEvent; UNLOAD_EVENTS], u32)>);
+
+// SAFETY: as `Modules`.
+unsafe impl Sync for UnloadTrace {}
+
+static UNLOADS: UnloadTrace = UnloadTrace(core::cell::UnsafeCell::new((
+    core::mem::size_of::<UnloadEvent>() as u32,
+    UNLOAD_EVENTS as u32,
+    0,
+    [NO_UNLOAD; UNLOAD_EVENTS],
+    0,
+)));
+
+/// Records the unload of the module in `slot` (its image still mapped).
+fn record_unload(slot: usize) {
+    let (base, path, len) =
+        with_modules(|m| (m[slot].base, m[slot].path.as_ptr() as usize, m[slot].path_len));
+    // SAFETY: under the loader lock (see `UnloadTrace`).
+    let trace = unsafe { &mut *UNLOADS.0.get() };
+    let pe = base + rd32(base + 0x3c) as usize;
+    // SAFETY: the module's path, `len` units in its slot.
+    let units = unsafe { core::slice::from_raw_parts(path as *const u16, len) };
+    let file = units.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
+    let mut event = UnloadEvent {
+        base,
+        size_of_image: rd32(pe + 24 + 56) as usize,
+        sequence: trace.4,
+        time_date_stamp: rd32(pe + 8),
+        checksum: rd32(pe + 24 + 64),
+        ..NO_UNLOAD
+    };
+    for (d, &c) in event.image_name[..31].iter_mut().zip(&units[file..]) {
+        *d = c;
+    }
+    let i = trace.4 as usize % UNLOAD_EVENTS;
+    trace.3[i] = event;
+    trace.4 = trace.4.wrapping_add(1);
+    trace.2 = trace.3.as_ptr() as usize;
+}
+
+/// RtlGetUnloadEventTraceEx(*ElementSize, *ElementCount, *EventTrace):
+/// where the element size, the count and the pointer to the array of the
+/// last unloaded modules are (as documented; the pointer is NULL until a
+/// module is unloaded).
+///
+/// # Safety
+/// The outputs must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlGetUnloadEventTraceEx(
+    size: *mut *mut u32,
+    count: *mut *mut u32,
+    trace: *mut *mut usize,
+) {
+    let t = UNLOADS.0.get();
+    // SAFETY: the caller's outputs; addresses of the static's fields.
+    unsafe {
+        if !size.is_null() {
+            *size = &raw mut (*t).0;
+        }
+        if !count.is_null() {
+            *count = &raw mut (*t).1;
+        }
+        if !trace.is_null() {
+            *trace = &raw mut (*t).2;
+        }
+    }
+}
+
+/// RtlGetUnloadEventTrace: the array of the last unloaded modules.
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlGetUnloadEventTrace() -> *mut u8 {
+    // SAFETY: the static's array.
+    unsafe { (*UNLOADS.0.get()).3.as_mut_ptr().cast() }
+}
+
 struct Modules(core::cell::UnsafeCell<[Module; MAX_MODULES]>);
 
 // SAFETY: used under the loader lock (`with_loader_lock`), or before a
@@ -1268,9 +1376,15 @@ fn unload_module(slot: usize) {
             return None;
         }
         m[slot].refs -= 1;
-        (m[slot].refs == 0).then(|| core::mem::replace(&mut m[slot], FREE))
+        if m[slot].refs != 0 {
+            return None;
+        }
+        Some(m[slot])
     });
     let Some(module) = module else { return };
+    // Recorded while its slot still has its path and its image is mapped.
+    record_unload(slot);
+    with_modules(|m| m[slot] = FREE);
     ldr_unlink(slot);
     if module.attached
         && let Some(entry) = entry_point(module.base)
