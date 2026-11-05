@@ -298,6 +298,7 @@ pub fn create(
         process.space.clone(),
         teb_addr,
         process.personality,
+        id,
     ) {
         Ok(tid) => {
             *as_thread(&object).sched_id.lock() = Some(tid);
@@ -850,6 +851,7 @@ pub fn start_adopted(object: &ObjectRef) -> Result<(), NtStatus> {
         p.space.clone(),
         t.teb,
         p.personality,
+        t.id,
     )
     .map_err(|_| NtStatus::NO_MEMORY)?;
     *t.sched_id.lock() = Some(tid);

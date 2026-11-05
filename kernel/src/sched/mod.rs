@@ -118,6 +118,8 @@ struct UserThread {
     /// Its process's personality: which dispatcher its system calls go to
     /// (`crate::personality`; fixed for the thread's life).
     personality: Personality,
+    /// Its client id (an NT thread id, a Linux tid), for the event stream.
+    client: u64,
 }
 
 /// One CPU's scheduling state.
@@ -335,13 +337,14 @@ pub fn spawn_user(
     space: SharedUserSpace,
     gs_base: u64,
     personality: Personality,
+    client: u64,
 ) -> Result<ThreadId, SpawnError> {
     let root = space.lock().root();
     spawn_inner(
         name,
         entry,
         arg,
-        Some(UserThread { space, root, gs_base, fs_base: 0, personality }),
+        Some(UserThread { space, root, gs_base, fs_base: 0, personality, client }),
     )
 }
 
@@ -613,6 +616,7 @@ fn schedule() {
                 user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
                 user_fs_base: n.user.as_ref().map_or(0, |u| u.fs_base),
                 personality: n.user.as_ref().map_or(Personality::Nt, |u| u.personality),
+                client: n.user.as_ref().map_or(0, |u| u.client),
             };
             (from, target)
         })

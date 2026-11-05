@@ -255,6 +255,8 @@ impl Threads for Um {
         space: SharedUserSpace,
         gs_base: u64,
         personality: Personality,
+        // gala-um writes no event stream.
+        _client: u64,
     ) -> Result<ThreadId, SpawnError> {
         threads::spawn(name, entry, arg, true, move || {
             // The thread keeps its address space alive, as in the kernel.

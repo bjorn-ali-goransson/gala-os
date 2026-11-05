@@ -51,8 +51,9 @@ impl Threads for Kernel {
         space: SharedUserSpace,
         gs_base: u64,
         personality: Personality,
+        client: u64,
     ) -> Result<ThreadId, SpawnError> {
-        sched::spawn_user(name, entry, arg, space, gs_base, personality)
+        sched::spawn_user(name, entry, arg, space, gs_base, personality, client)
     }
     fn current() -> ThreadId {
         sched::current()

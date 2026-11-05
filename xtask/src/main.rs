@@ -2897,6 +2897,19 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // OT2: a child's process start names its creator (process and
+        // thread); every event names the thread whose work emitted it
+        // ("by"; 0 for kernel threads).
+        "events_process",
+        &[
+            r#""by":0,"ev":"process start","pid":4,"#,
+            r#""ppid":0,"ptid":0"#,
+            r#""by":8,"ev":"process start","#,
+            r#""ppid":4,"ptid":8"#,
+            r#""by":8,"ev":"image","pid":4,"#,
+        ],
+    ),
+    (
         "events",
         &[
             r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe","personality":"nt""#,
@@ -3549,6 +3562,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=all run=import_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["import_test: ok", "events: "],
+    },
+    Scenario {
+        // The event stream's process tree and threads (see EVENT_EXPECT)
+        // while process_test starts its children.
+        name: "events_process",
+        cmdline: "qemu_exit events=process,thread,image run=process_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["process_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Smoke test only; `cargo xtask bench` collects the numbers.
@@ -6071,6 +6092,7 @@ fn events_flag() -> String {
 /// (the same set: they share a VM); a scenario listed more than once
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
+    ("events_process", "process_test"),
     ("pk_install_zip", "pk_install_test"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),

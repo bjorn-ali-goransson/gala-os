@@ -32,6 +32,10 @@ pub struct PerCpu {
     /// switch between threads with the same one (every NT thread: 0)
     /// costs no MSR write.
     user_fs_base: u64,
+    /// The client id of the thread running here (an NT thread id, a Linux
+    /// tid; 0 for kernel threads): what the event stream names as the
+    /// thread doing the work (`"by"`).
+    client: u64,
 }
 
 impl PerCpu {
@@ -44,6 +48,7 @@ impl PerCpu {
             tss: core::ptr::null_mut(),
             personality: 0,
             user_fs_base: 0,
+            client: 0,
         }
     }
 }
@@ -58,6 +63,7 @@ pub const KERNEL_RSP_OFFSET: usize = offset_of!(PerCpu, kernel_rsp);
 pub const USER_RSP_OFFSET: usize = offset_of!(PerCpu, user_rsp);
 const INDEX_OFFSET: usize = offset_of!(PerCpu, index);
 const PERSONALITY_OFFSET: usize = offset_of!(PerCpu, personality);
+const CLIENT_OFFSET: usize = offset_of!(PerCpu, client);
 
 /// The boot CPU's block; other CPUs' are allocated by `smp`. Each block is
 /// written only by its own CPU, with interrupts disabled.
@@ -125,6 +131,31 @@ pub fn set_kernel_stack(top: u64) {
         (*block).kernel_rsp = top;
         gdt::set_rsp0((*block).tss, top);
     }
+}
+
+/// Sets the client id of the thread this CPU runs (0: a kernel thread).
+pub fn set_client(client: u64) {
+    let block = current();
+    // SAFETY: only called with interrupts disabled during a context switch;
+    // the block is this CPU's.
+    unsafe { (*block).client = client };
+}
+
+/// The client id of the thread running here (0: a kernel thread).
+pub fn client() -> u64 {
+    let raw: u64;
+    // SAFETY: as in `cpu_index`: a single GS-relative load, so a migration
+    // cannot tear it: whichever CPU the load runs on is running the
+    // calling thread, whose id the switch to it stored there.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, gs:[{off}]",
+            out(reg) raw,
+            off = const CLIENT_OFFSET,
+            options(nostack, readonly, preserves_flags)
+        )
+    };
+    raw
 }
 
 /// Sets the personality of the thread this CPU runs (its system calls'

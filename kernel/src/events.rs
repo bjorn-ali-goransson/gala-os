@@ -5,8 +5,10 @@
 //! line turns categories on (`mock`: live mocking's changes, such as clock
 //! control). A `record`
 //! boot's recording also goes here (`"ev":"rec"`, whatever the mask). Each
-//! line starts with `"t"` (ns since boot), `"cpu"` and `"ev"`; the rest
-//! depends on the event.
+//! line starts with `"t"` (ns since boot), `"cpu"`, `"by"` (the client id
+//! of the thread whose work emitted it: an NT thread id, a Linux tid, 0
+//! for a kernel thread) and `"ev"`; the rest depends on the event (`pid`
+//! and `tid` in it name its subject, which may be another thread).
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -83,7 +85,19 @@ pub fn written() -> u64 {
     WRITTEN.load(Ordering::Relaxed)
 }
 
-/// Writes one event: `{"t":..,"cpu":..,"ev":"<name>",<fields>}`. `fields`
+/// The client id of the running thread (0: a kernel thread; and in host
+/// tests and gala-um, which write no stream).
+#[cfg(not(any(test, feature = "hosted")))]
+pub fn current_client() -> u64 {
+    crate::arch::percpu::client()
+}
+
+#[cfg(any(test, feature = "hosted"))]
+pub fn current_client() -> u64 {
+    0
+}
+
+/// Writes one event: `{"t":..,"cpu":..,"by":..,"ev":"<name>",<fields>}`. `fields`
 /// are the remaining JSON members (without braces); strings in them must
 /// be wrapped in [`Str`].
 #[cfg(not(any(test, feature = "hosted")))]
@@ -92,9 +106,9 @@ pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
         return;
     }
     let t = crate::time::raw_monotonic_ns();
-    let cpu = crate::arch::percpu::cpu_index();
+    let (cpu, by) = (crate::arch::percpu::cpu_index(), crate::arch::percpu::client());
     let mut port = crate::arch::debugcon::DEBUGCON.lock();
-    let _ = writeln!(port, r#"{{"t":{t},"cpu":{cpu},"ev":"{name}",{fields}}}"#);
+    let _ = writeln!(port, r#"{{"t":{t},"cpu":{cpu},"by":{by},"ev":"{name}",{fields}}}"#);
     WRITTEN.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -103,14 +117,14 @@ pub fn emit(category: Category, name: &str, fields: fmt::Arguments) {
 pub fn emit(_category: Category, _name: &str, _fields: fmt::Arguments) {}
 
 /// Writes one event whatever the mask (something going wrong that the
-/// stream must show: a wrong clock): `{"t":..,"cpu":..,<fields>}`,
+/// stream must show: a wrong clock): `{"t":..,"cpu":..,"by":..,<fields>}`,
 /// `fields` naming the event (`"ev":"..."`) themselves.
 #[cfg(not(any(test, feature = "hosted")))]
 pub fn emit_always(fields: fmt::Arguments) {
     let t = crate::time::raw_monotonic_ns();
-    let cpu = crate::arch::percpu::cpu_index();
+    let (cpu, by) = (crate::arch::percpu::cpu_index(), crate::arch::percpu::client());
     let mut port = crate::arch::debugcon::DEBUGCON.lock();
-    let _ = writeln!(port, r#"{{"t":{t},"cpu":{cpu},{fields}}}"#);
+    let _ = writeln!(port, r#"{{"t":{t},"cpu":{cpu},"by":{by},{fields}}}"#);
     WRITTEN.fetch_add(1, Ordering::Relaxed);
 }
 

@@ -72,7 +72,8 @@ pub trait Threads {
     /// A thread of a process: runs `entry(arg)` in the address space
     /// `space` with the user GS base `gs_base`; `entry` ends by entering
     /// user mode. Its system calls go to the dispatcher of `personality`
-    /// (its process's).
+    /// (its process's). `client` is its client id (the thread id the
+    /// event stream names it by).
     fn spawn_user(
         name: &'static str,
         entry: fn(usize),
@@ -80,6 +81,7 @@ pub trait Threads {
         space: SharedUserSpace,
         gs_base: u64,
         personality: Personality,
+        client: u64,
     ) -> Result<ThreadId, SpawnError>;
     fn current() -> ThreadId;
     fn exit() -> !;
@@ -254,8 +256,9 @@ pub fn spawn_user(
     space: SharedUserSpace,
     gs_base: u64,
     personality: Personality,
+    client: u64,
 ) -> Result<ThreadId, SpawnError> {
-    <P as Threads>::spawn_user(name, entry, arg, space, gs_base, personality)
+    <P as Threads>::spawn_user(name, entry, arg, space, gs_base, personality, client)
 }
 #[inline]
 pub fn current() -> ThreadId {

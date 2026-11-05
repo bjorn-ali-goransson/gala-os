@@ -89,10 +89,13 @@ real path has.
 A second output channel for tools: QEMU's `isa-debugcon` on port 0xe9
 (`arch::debugcon`; one `out` per byte, no UART handshake), which xtask
 always writes to `<iso>.events.jsonl` next to the serial log. One JSON
-object per line, starting with `"t"` (ns since boot), `"cpu"` and
-`"ev"`:
+object per line, starting with `"t"` (ns since boot), `"cpu"`, `"by"`
+(the client id of the thread whose work emitted it: an NT thread id, a
+Linux tid, 0 for a kernel thread; the scheduler keeps it per CPU, so
+`emit` reads it with one load) and `"ev"`; `pid`/`tid` in the rest name
+the event's subject, which may be another thread:
 
-    {"t":ns,"cpu":0,"pid":4,"tid":8,"ev":"syscall","name":"NtCreateFile",
+    {"t":ns,"cpu":0,"by":8,"ev":"syscall","pid":4,"tid":8,"name":"NtCreateFile",
      "args":[...],"status":"0xc0000034","ns":1200}
 
 Off by default and cheap when off (one relaxed atomic load of the
@@ -106,7 +109,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `syscall` | each call (pid, tid, nr, name, args, status, ns); `wait` on entry to a wait, so a thread blocked for good shows |
 | `image` | the exe and every image view (pid, NT path, base, size) |
 | `thread` | create (start address, TEB), exit (status) |
-| `process` | start (command line, `"session"`, `"personality":"nt"`), exit; `session` (a session made after boot: id, its BaseNamedObjects) |
+| `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit; `session` (a session made after boot: id, its BaseNamedObjects) |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
 | `mock` | live mocking's changes (clock control, record/replay) |
 | `net` | TCP accept, connect, close, reset, with local and remote addresses |
@@ -140,13 +143,13 @@ strings, enums as numbers.
 | Source | OTel | Names (semantic conventions first, else `gala.`) |
 |---|---|---|
 | the boot | one resource; one trace whose root span is `boot <scenario>` (0 to the last event) | `service.name` gala-os, `service.version` (the banner), `service.instance.id` (= the trace id), `gala.scenario`, `gala.kernel.build` (profile and commit), `gala.cmdline`, `gala.cpus` |
-| `process start` / `process exit` | span `process <name>`, child of the boot | `process.pid`, `process.executable.name`, `process.command_line`, `process.exit.code`, `gala.exit_status`, `gala.session`, `gala.image_base`, `gala.entry`; status ERROR for an NTSTATUS error |
+| `process start` / `process exit` | span `process <name>`, child of its parent process (`ppid`; the boot for processes the kernel starts), with a link `created by` to the creating thread's span (`ptid`) | `process.pid`, `process.parent_pid`, `gala.creator.tid`, `process.executable.name`, `process.command_line`, `process.exit.code`, `gala.exit_status`, `gala.session`, `gala.image_base`, `gala.entry`; status ERROR for an NTSTATUS error |
 | `thread create` / `thread exit` | span `thread <tid>`, child of its process | `thread.id`, `process.pid`, `gala.start_address`, `gala.teb`, `gala.exit_status` |
 | `syscall` (end time `t`, duration `ns`) | span named by the service, child of its thread | `code.function.name`, `gala.syscall.nr`, `gala.syscall.status`, `gala.syscall.args` (hex), `gala.cpu`, `thread.id`, `process.pid`; status ERROR for 0xC... |
 | `wait` (a wait's entry) | merged into its `syscall` span; one that never returns: span event `<service> (entered, no return)` on its thread | as the stream has them |
 | `fault` | span event `fault #PF page fault` (by vector) on the thread, else the process | `gala.fault.vector`, `.rip`, `.address` (cr2), `.error` |
 | `image` | span event `image load <file>` on the process | `gala.image.name`, `.base`, `.size` |
-| every other kind (`console *`, `clock_*`, `tcp *`, `logon`, `session`, `display *`, ...) | span event of that name on its thread, process, or the boot | `gala.<field>`; `pid`/`tid` as `process.pid`/`thread.id` |
+| every other kind (`console *`, `clock_*`, `tcp *`, `logon`, `session`, `display *`, ...) | span event of that name on its thread (`tid`, else the emitting thread `by`), process, or the boot | `gala.<field>`; `pid`/`tid` as `process.pid`/`thread.id` |
 | `rec` (record/replay bytes) | not mapped (counted) | |
 | serial log lines | one log record each, severity from `[info ]`/`[warn ]`/`[error]` (none: program output, severity 0), linked to the process span when the line names a pid, else to the boot | `gala.log.line`, `gala.time.estimated`, `process.pid`, `gala.log.source` |
 | `crash report:` block | one log record (ERROR) and an `exception` span event on the crashing thread (status ERROR) | `exception.type` (code and name), `exception.message`, `exception.stacktrace` (registers, stack words), `gala.crash.address`, `gala.crash.location` (module+offset) |
@@ -416,7 +419,7 @@ What failures still leave unexplained, ranked by the time they cost.
 | History covers only test/boot-test | `XTASK_REPEAT` boots and um-test in `history.jsonl` | flakiness found by repeats and in gala-um |
 | Flight recorder kinds | context switches, page faults, interrupts | what a CPU did just before a hang |
 | Crash record | symbols (addresses only now), the screen (a blue screen with the record) | a panic on a machine without serial |
-| Event stream (OT2's list) | thread id on `fault`, `image`, `console`, `net` (sshd_shell: 1885 faults without a thread); an entry event for every system call (only waits have one); parent pid and trace context on `process start` (every process hangs off the boot: sshd -> sshd-session -> conhost -> busybox are siblings); a time on serial lines; the boot's wall-clock start (guessed from the log's modification time) | cross-process traces, calls that never return |
+| Event stream (OT2's list) | an entry event for every system call (only waits have one); trace context propagated across processes and IPC (OT3); a time on serial lines; the boot's wall-clock start (guessed from the log's modification time) | cross-process traces, calls that never return |
 | Event stream, tools | process-relative times; user-address symbolization from the image events | user addresses without manual lookup |
 
 ## Planned facilities

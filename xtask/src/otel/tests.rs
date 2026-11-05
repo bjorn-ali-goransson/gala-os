@@ -131,6 +131,8 @@ struct S {
     end: u64,
     attrs: BTreeMap<String, Json>,
     events: Vec<(u64, String, BTreeMap<String, Json>)>,
+    /// (span id, attributes) of each link.
+    links: Vec<(String, BTreeMap<String, Json>)>,
     status: u64,
 }
 
@@ -153,7 +155,17 @@ fn spans(e: &Export) -> Vec<S> {
                 .iter()
                 .map(|e| (ns(e, "timeUnixNano"), text(e, "name").to_string(), check_attrs(e)))
                 .collect();
+            let links = sp
+                .get("links")
+                .map_or(&[][..], |_| arr(sp, "links"))
+                .iter()
+                .map(|l| {
+                    assert_eq!(text(l, "traceId"), text(sp, "traceId"), "links stay in the trace");
+                    (text(l, "spanId").to_string(), check_attrs(l))
+                })
+                .collect();
             out.push(S {
+                links,
                 trace: text(sp, "traceId").to_string(),
                 id: text(sp, "spanId").to_string(),
                 parent: sp.get("parentSpanId").map(|_| text(sp, "parentSpanId").to_string()),
@@ -470,8 +482,10 @@ fn schema(message: &str) -> &'static [(&'static str, Kind)] {
             ("endTimeUnixNano", U64),
             ("attributes", Msgs("KeyValue")),
             ("events", Msgs("Event")),
+            ("links", Msgs("Link")),
             ("status", Msg("Status")),
         ],
+        "Link" => &[("traceId", TraceId), ("spanId", SpanId), ("attributes", Msgs("KeyValue"))],
         "Event" => &[("timeUnixNano", U64), ("name", Str), ("attributes", Msgs("KeyValue"))],
         "Status" => &[("message", Str), ("code", Enum(2))],
         "LogRecord" => &[
@@ -592,4 +606,48 @@ fn the_export_is_posted_over_otlp_http() {
         ["POST /v1/traces HTTP/1.1", "POST /v1/logs HTTP/1.1", "POST /v1/metrics HTTP/1.1"]
     );
     assert!(post("https://example.com", &export()).is_err(), "plain http only");
+}
+
+const TREE: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"process start","pid":4,"session":1,"name":"parent.exe","personality":"nt","ppid":0,"ptid":0,"image_base":5368709120,"entry":1,"cmdline":"parent.exe"}
+{"t":200,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":8,"start":1,"teb":2}
+{"t":1000,"cpu":1,"by":8,"ev":"process start","pid":20,"session":1,"name":"child.exe","personality":"nt","ppid":4,"ptid":8,"image_base":5368709120,"entry":1,"cmdline":"child.exe x"}
+{"t":1100,"cpu":1,"by":8,"ev":"thread create","pid":20,"tid":24,"start":1,"teb":2}
+{"t":1500,"cpu":0,"by":24,"ev":"image","pid":20,"name":"\\Device\\HarddiskVolume1\\gala\\testdll.dll","base":6442450944,"size":8192}
+{"t":1600,"cpu":0,"by":24,"ev":"fault","pid":20,"vector":14,"rip":5368713216,"cr2":0,"error":6}
+{"t":2000,"cpu":1,"by":8,"ev":"syscall","pid":4,"tid":8,"nr":200,"name":"NtCreateUserProcess","args":[],"status":0,"ns":1500}
+{"t":3000,"cpu":0,"by":24,"ev":"thread exit","pid":20,"tid":24,"status":0}
+{"t":3100,"cpu":0,"by":24,"ev":"process exit","pid":20,"session":1,"status":0}
+{"t":4000,"cpu":1,"by":8,"ev":"thread exit","pid":4,"tid":8,"status":0}
+{"t":4100,"cpu":1,"by":8,"ev":"process exit","pid":4,"session":1,"status":0}
+"#;
+
+fn tree() -> Export {
+    convert(&Boot {
+        serial: "",
+        events: TREE,
+        scenario: "tree",
+        build: "debug 1",
+        start_unix_ns: BASE,
+    })
+}
+
+#[test]
+fn a_child_process_hangs_off_its_parent_and_links_its_creator() {
+    let e = tree();
+    let all = spans(&e);
+    let find = |name: &str| all.iter().find(|s| s.name == name).unwrap_or_else(|| panic!("{name}"));
+    let (parent, child, t8) =
+        (find("process parent.exe"), find("process child.exe"), find("thread 8"));
+    assert_eq!(child.parent.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(attr_str(&child.attrs, "process.parent_pid").as_deref(), Some("4"));
+    assert_eq!(attr_str(&child.attrs, "gala.creator.tid").as_deref(), Some("8"));
+    let links = &child.links;
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert_eq!(links[0].0, t8.id);
+    assert_eq!(attr_str(&links[0].1, "gala.link").as_deref(), Some("created by"));
+    // Events without a tid go on the thread that emitted them ("by").
+    let t24 = find("thread 24");
+    assert!(t24.events.iter().any(|e| e.1 == "fault #PF page fault"));
+    assert!(t24.events.iter().any(|e| e.1 == "image load testdll.dll"));
+    assert_eq!(e.report.gaps.get("fault without thread"), None);
 }

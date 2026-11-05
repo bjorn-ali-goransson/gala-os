@@ -14,6 +14,8 @@ pub(super) struct Target {
     pub user_fs_base: u64,
     /// Its personality (where its system calls are dispatched).
     pub personality: crate::personality::Personality,
+    /// Its client id (0: a kernel thread).
+    pub client: u64,
 }
 
 /// Switches from the context at `from` to `to`.
@@ -33,6 +35,7 @@ pub(super) fn switch(from: *const Context, to: Target) {
     percpu::set_user_gs_base(to.user_gs_base);
     percpu::set_user_fs_base(to.user_fs_base);
     percpu::set_personality(to.personality);
+    percpu::set_client(to.client);
     // SAFETY: see above.
     unsafe {
         paging::activate(to.root);

@@ -845,9 +845,15 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
 }
 
 /// The `process ... starting at` line and the `process start` event, with
-/// the process's personality.
+/// the process's personality and its creator: the parent process and the
+/// thread that created it (the caller's, when it has a parent; 0 for
+/// processes the kernel starts).
 pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
     let (id, session, personality) = (process.id, process.session, process.personality);
+    let (ppid, ptid) = match process.parent_id {
+        0 => (0, 0),
+        p => (p, crate::events::current_client()),
+    };
     info!(
         "process {} (pid {id}, session {session}): starting at {rip:#x}, personality {personality}",
         process.name
@@ -856,7 +862,7 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","image_base":{},"entry":{rip},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
             crate::events::Str(process.name),
             process.image.0,
             crate::events::Str(command_line)

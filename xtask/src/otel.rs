@@ -137,6 +137,9 @@ struct Span {
     end: Option<u64>,
     attrs: Attrs,
     events: Vec<SpanEvent>,
+    /// Links to other spans of the trace (the span they point to, the
+    /// link's attributes): a process to the thread that created it.
+    links: Vec<(usize, Attrs)>,
     /// (code, message): 0 unset, 1 ok, 2 error.
     status: (u8, String),
 }
@@ -529,6 +532,7 @@ impl State {
             end: None,
             attrs,
             events: Vec::new(),
+            links: Vec::new(),
             status: (0, String::new()),
         });
         self.spans.len() - 1
@@ -690,6 +694,8 @@ pub fn convert(boot: &Boot) -> Export {
         let kind = ev.str("ev").unwrap_or("?").to_string();
         let pid = ev.u64("pid");
         let tid = ev.u64("tid").filter(|&t| t != 0);
+        // The thread whose work emitted the event (0: a kernel thread).
+        let by = ev.u64("by").filter(|&b| b != 0);
         match kind.as_str() {
             "process start" => {
                 let pid = pid.unwrap_or(0);
@@ -717,6 +723,23 @@ pub fn convert(boot: &Boot) -> Export {
                 }
                 if let Some(v) = ev.u64("entry") {
                     a.push(("gala.entry".into(), hex(v)));
+                }
+                // The process tree: a child hangs off its parent process
+                // and links the thread that created it (both may end
+                // before it).
+                if let Some(ppid) = ev.u64("ppid").filter(|&p| p != 0 && p != pid) {
+                    let parent = st.process(ppid, t);
+                    st.spans[p].parent = Some(parent);
+                    st.spans[p].attrs.push(("process.parent_pid".into(), Val::Int(ppid as i64)));
+                    if let Some(ptid) = ev.u64("ptid").filter(|&t| t != 0) {
+                        st.spans[p].attrs.push(("gala.creator.tid".into(), Val::Int(ptid as i64)));
+                        match st.threads.get(&ptid) {
+                            Some(&creator) => st.spans[p]
+                                .links
+                                .push((creator, vec![("gala.link".into(), s("created by"))])),
+                            None => st.report.gap("process creator thread not seen"),
+                        }
+                    }
                 }
                 st.report.mapped(&kind, "span start");
             }
@@ -851,14 +874,16 @@ pub fn convert(boot: &Boot) -> Export {
                 *st.report.not_mapped.entry("rec (record/replay data)".into()).or_default() += 1;
             }
             _ => {
-                let at = match (tid, pid) {
-                    (Some(tid), _) if st.threads.contains_key(&tid) => st.threads[&tid],
-                    (_, Some(pid)) => st.process(pid, t),
+                let at = match (tid, by, pid) {
+                    (Some(tid), _, _) if st.threads.contains_key(&tid) => st.threads[&tid],
+                    // No subject thread: the thread that did the work.
+                    (None, Some(by), _) if st.threads.contains_key(&by) => st.threads[&by],
+                    (_, _, Some(pid)) => st.process(pid, t),
                     _ => root,
                 };
                 let (name, attrs) = match kind.as_str() {
                     "fault" => {
-                        if tid.is_none() {
+                        if tid.is_none() && by.is_none() {
                             st.report.gap("fault without thread");
                         }
                         let v = ev.u64("vector").unwrap_or(255);
@@ -1263,6 +1288,19 @@ pub fn convert(boot: &Boot) -> Export {
             esc(o, &e.name);
             o.push_str(",\"attributes\":");
             attrs_json(o, &e.attrs);
+            o.push('}');
+        }
+        o.push_str("],\"links\":[");
+        for (i, (to, attrs)) in sp.links.iter().enumerate() {
+            if i > 0 {
+                o.push(',');
+            }
+            let _ = write!(
+                o,
+                "{{\"traceId\":\"{trace_id}\",\"spanId\":\"{:016x}\",\"attributes\":",
+                st.spans[*to].id
+            );
+            attrs_json(o, attrs);
             o.push('}');
         }
         let _ = write!(o, "],\"status\":{{\"code\":{}", sp.status.0);
