@@ -28,12 +28,6 @@ unsafe extern "system" {
     fn GalaWindowShow(id: u32, show: u8) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
-    fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;
-}
-
 const WM_MOVE: u32 = 0x0003;
 const WM_SIZE: u32 = 0x0005;
 const WM_SETFOCUS: u32 = 0x0007;
@@ -1092,13 +1086,9 @@ fn relayout(i: usize, cw: i32, ch: i32, bar: i32) {
     let (old, ow, oh) = (w.pixels, w.cw, w.ch);
     let old_base = crate::window::buffer_base(&w);
     let (cw, ch) = (cw.max(1), ch.max(1));
-    // SAFETY: a plain call.
-    let base =
-        unsafe { VirtualAlloc(core::ptr::null_mut(), (cw * (ch + bar) * 4) as usize, 0x3000, 4) }
-            .cast::<u32>();
-    if base.is_null() {
+    let Some((base, section)) = crate::surface::alloc(cw, ch, bar) else {
         return;
-    }
+    };
     // SAFETY: the bar's rows come first.
     let new = unsafe { base.add((bar * cw) as usize) };
     for y in 0..ch {
@@ -1115,14 +1105,14 @@ fn relayout(i: usize, cw: i32, ch: i32, bar: i32) {
     }
     with(|s| {
         s.windows[i].pixels = new;
+        s.windows[i].section = section;
         s.windows[i].cw = cw;
         s.windows[i].ch = ch;
         s.windows[i].bar = bar;
     });
-    if !old_base.is_null() {
-        // SAFETY: the window's former buffer, no longer used.
-        unsafe { VirtualFree(old_base.cast(), 0, 0x8000) };
-    }
+    crate::surface::register(hwnd_of(i), section, cw, ch, bar);
+    // The window's former buffer, no longer used.
+    crate::surface::free(old_base, w.section);
     if bar != 0 {
         crate::track::draw_bar(hwnd_of(i));
     }

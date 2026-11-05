@@ -54,8 +54,6 @@ unsafe extern "system" {
     fn SetEvent(h: Handle) -> i32;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn WaitForMultipleObjects(count: u32, handles: *const Handle, all: i32, ms: u32) -> u32;
-    fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
-    fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;
     fn LoadLibraryW(name: *const u16) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
     fn GetTickCount() -> u32;
@@ -128,6 +126,8 @@ pub(crate) struct Window {
     pub(crate) erase: bool,
     pub(crate) thread: u32,
     pub(crate) pixels: *mut u32,
+    /// The section the buffer is in (`surface`; top-level windows).
+    pub(crate) section: Handle,
     pub(crate) cw: i32,
     pub(crate) ch: i32,
     pub(crate) user_data: isize,
@@ -248,6 +248,7 @@ pub(crate) const NO_WINDOW: Window = Window {
     erase: false,
     thread: 0,
     pixels: core::ptr::null_mut(),
+    section: core::ptr::null_mut(),
     cw: 0,
     ch: 0,
     user_data: 0,
@@ -795,12 +796,10 @@ pub extern "system" fn CreateWindowExW(
         if w == CW_USEDEFAULT { (640, 480) } else { (w.max(2 * b + 1), h.max(top + bar + b + 1)) };
     let (cw, ch) = (w - 2 * b, h - top - bar - b);
     // SAFETY: plain calls; the title is the caller's NUL-terminated string.
-    let (pixels, desktop) = unsafe {
-        let base = VirtualAlloc(core::ptr::null_mut(), (cw * (ch + bar) * 4) as usize, 0x3000, 4)
-            .cast::<u32>();
-        if base.is_null() {
+    let (pixels, section, desktop) = unsafe {
+        let Some((base, section)) = crate::surface::alloc(cw, ch, bar) else {
             return 0;
-        }
+        };
         let pixels = base.add((bar * cw) as usize);
         let mut len = 0;
         if !name.is_null() {
@@ -811,7 +810,7 @@ pub extern "system" fn CreateWindowExW(
         let mut id = 0;
         // Without a screen the window exists but is never shown.
         let _ = GalaWindowCreate(x, y, w as u32, h as u32, name, len, &mut id, u32::from(popup));
-        (pixels, id)
+        (pixels, section, id)
     };
     let mut title = [0u16; 128];
     if !name.is_null() {
@@ -842,6 +841,7 @@ pub extern "system" fn CreateWindowExW(
             erase: true,
             thread: me(),
             pixels,
+            section,
             cw,
             ch,
             user_data: 0,
@@ -868,7 +868,7 @@ pub extern "system" fn CreateWindowExW(
     let Some(i) = created else {
         // SAFETY: our buffer and window.
         unsafe {
-            VirtualFree(pixels.sub((bar * cw) as usize).cast(), 0, 0x8000);
+            crate::surface::free(pixels.sub((bar * cw) as usize), section);
             if desktop != 0 {
                 GalaWindowDestroy(desktop);
             }
@@ -877,6 +877,7 @@ pub extern "system" fn CreateWindowExW(
         return 0;
     };
     crate::foreign::assign(i);
+    crate::surface::register(hwnd_of(i), section, cw, ch, bar);
     if bar != 0 {
         crate::menu::attach(hwnd_of(i), menu as usize);
     }
@@ -937,7 +938,7 @@ pub(crate) fn finish_create(
                     GalaWindowDestroy(gone.desktop);
                 }
                 if !gone.pixels.is_null() {
-                    VirtualFree(buffer_base(&gone).cast(), 0, 0x8000);
+                    crate::surface::free(buffer_base(&gone), gone.section);
                 }
             }
             return 0;
@@ -1013,7 +1014,7 @@ fn free_slot(i: usize) {
             GalaWindowDestroy(gone.desktop);
         }
         if !gone.pixels.is_null() {
-            VirtualFree(buffer_base(&gone).cast(), 0, 0x8000);
+            crate::surface::free(buffer_base(&gone), gone.section);
         }
     }
 }
@@ -1418,7 +1419,8 @@ pub extern "system" fn GetDC(hwnd: Hwnd) -> Handle {
     }
     match window(hwnd) {
         Some(_) => client_dc(hwnd),
-        None => core::ptr::null_mut(),
+        // Another process's window: its surface.
+        None => crate::surface::foreign_dc(hwnd),
     }
 }
 
@@ -1429,7 +1431,7 @@ pub extern "system" fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32 {
         return gdi().map_or(0, |g| (g.delete_dc)(hdc));
     }
     if window(hwnd).is_none() {
-        return 0;
+        return crate::surface::release_foreign(hwnd, hdc).unwrap_or(0);
     }
     present(hwnd);
     gdi().map_or(0, |g| (g.delete_dc)(hdc))

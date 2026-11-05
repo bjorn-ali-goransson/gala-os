@@ -390,6 +390,11 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi.dll" },
     Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
     Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
+    // The GPU stubs (ROADMAP GPU G0): no Direct3D adapter yet.
+    Dll { package: "dxgi", file: "dxgi.dll", exported_as: "testdxgi.dll" },
+    Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
+    Dll { package: "d3d12", file: "d3d12.dll", exported_as: "testd3d12.dll" },
+    Dll { package: "dcomp", file: "dcomp.dll", exported_as: "testdcomp.dll" },
     // Rich edit controls: one crate (`richedit`) behind both DLLs.
     Dll { package: "riched20", file: "riched20.dll", exported_as: "testriched20.dll" },
     Dll { package: "msftedit", file: "msftedit.dll", exported_as: "testmsftedit.dll" },
@@ -731,6 +736,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("process_test", "kernel32.dll", "Windows/System32"),
     ("commit_test", "ntdll.dll", "Windows/System32"),
     ("commit_test", "kernel32.dll", "Windows/System32"),
+    ("gpu_stub_test", "ntdll.dll", "Windows/System32"),
+    ("gpu_stub_test", "kernel32.dll", "Windows/System32"),
+    ("gpu_stub_test", "dxgi.dll", "Windows/System32"),
+    ("gpu_stub_test", "d3d11.dll", "Windows/System32"),
+    ("gpu_stub_test", "d3d12.dll", "Windows/System32"),
+    ("gpu_stub_test", "dcomp.dll", "Windows/System32"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -1474,6 +1485,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // imports and delay imports name (delay-loaded ones load on first call).
     ("chromium", "target/prebuilt/chromium/chrome-win/", "chromium"),
     ("chromium", "user/chromium/page.html", "gala"),
+    ("chromium", "user/chromium/window.html", "gala"),
     ("chromium", "ntdll.dll", "Windows/System32"),
     ("chromium", "kernel32.dll", "Windows/System32"),
     ("chromium", "kernelbase.dll", "Windows/System32"),
@@ -1515,6 +1527,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "dwrite.dll", "Windows/System32"),
     ("chromium", "shcore.dll", "Windows/System32"),
     ("chromium", "dwmapi.dll", "Windows/System32"),
+    ("chromium", "dxgi.dll", "Windows/System32"),
+    ("chromium", "d3d11.dll", "Windows/System32"),
+    ("chromium", "d3d12.dll", "Windows/System32"),
+    ("chromium", "dcomp.dll", "Windows/System32"),
     ("chromium", "wtsapi32.dll", "Windows/System32"),
     ("chromium", "imm32.dll", "Windows/System32"),
     ("dotnet", "target/prebuilt/dotnet/", "dotnet"),
@@ -1914,6 +1930,7 @@ const USER_PROGRAMS: &[&str] = &[
     "conpty_test",
     "browser_api_test",
     "dwrite_test",
+    "gpu_stub_test",
     "persist_test",
     "kernel32_system_test",
     "kernel32_clr_test",
@@ -3014,6 +3031,7 @@ const PENDING: &[&str] = &[
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
+    "chromium_window",
     "boot_config_edited",
     "handover_uefi",
     "handover_upgrade_uefi",
@@ -4001,6 +4019,13 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=browser_api_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["browser_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // GPU G0: the Direct3D stubs fail cleanly (no adapter).
+        name: "gpu_stub_test",
+        cmdline: "qemu_exit run=gpu_stub_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["gpu_stub_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // BR stage 1: DirectWrite's system font collection (gala's
@@ -5525,6 +5550,22 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // BR stage 2: Chromium with a window (software rendering) on the
+        // desktop: a page with a green background and a magenta box,
+        // checked on the screen (SCREEN_SCENARIOS), then closed with
+        // Alt+F4. --disable-direct-composition: a stopgap until GPU
+        // G2/G4 (ROADMAP "Known issues and stopgaps").
+        name: "chromium_window",
+        cmdline: "qemu_exit run=chrome.exe args=--no-sandbox%20--disable-gpu%20--disable-direct-composition%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--window-position=0,0%20--window-size=800,600%20file:///C:/gala/window.html \
+                  dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "gala window painted",
+            "xtask: screen ok",
+            "chrome.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -6303,6 +6344,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_dump", "chromium"),
     ("chromium_https", "chromium"),
     ("chromium_host", "chromium"),
+    ("chromium_window", "chromium"),
     ("chromium_host", "chromium_host"),
     ("chromium_https", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
@@ -8285,6 +8327,26 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
 
 /// Scenarios with screen checks.
 const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
+    (
+        // Chromium's window at (0, 0), 800 x 600, its page (window.html)
+        // below Chromium's own tab strip and toolbar: the green body and
+        // the magenta box at page (100, 100) - (300, 200). Then Alt+F4.
+        "chromium_window",
+        ScreenCheck {
+            marker: "gala window painted",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::AnyIn(20, 400, 60, 60, 0x2e8b57), // the body
+                        PixelCheck::AnyIn(120, 200, 160, 160, 0xff00ff), // the box
+                    ],
+                },
+                ScreenStep { after: "", input: &["sendkey alt-f4"], pixels: &[] },
+            ],
+        },
+    ),
     ("gui_test", GUI_TEST_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows

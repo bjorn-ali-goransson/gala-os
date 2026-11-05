@@ -20,16 +20,18 @@ fn windows_composite_in_z_order_with_their_frames() {
     assert_eq!(d.pixel(client.0, client.1 + 10), 0x00ff_ffff);
     // Present a 2 x 2 red square at client (3, 4).
     let red = [0x00ff_0000u32; 4];
-    let area = d.present(a, 1, Rect { x: 3, y: 4, w: 2, h: 2 }, &red, 2).unwrap();
+    let area = d.present(a, Rect { x: 3, y: 4, w: 2, h: 2 }, &red, 2).unwrap();
     assert_eq!(area, Rect { x: client.0 + 3, y: client.1 + 4, w: 2, h: 2 });
     assert_eq!(d.pixel(client.0 + 4, client.1 + 5), 0x00ff_0000);
-    // Another owner's window on top covers it; only its owner may present
-    // to the first.
+    // Another owner's window on top covers it; any process of the
+    // desktop may present to the first (GetDC of another process's
+    // window), not to a window that is gone.
     let b = d.create(2, 0, 0, 160, 80, &t, 0).unwrap();
     d.show(b, 2, true).unwrap();
     assert_eq!(d.pixel(30, 50), 0x00ff_ffff);
+    assert!(d.present(a, Rect { x: 0, y: 0, w: 1, h: 1 }, &red, 1).is_ok());
     assert_eq!(
-        d.present(a, 2, Rect { x: 0, y: 0, w: 1, h: 1 }, &red, 1).err(),
+        d.present(a + b + 1, Rect { x: 0, y: 0, w: 1, h: 1 }, &red, 1).err(),
         Some(NtStatus::INVALID_HANDLE)
     );
     d.destroy_owned(2);
@@ -193,7 +195,7 @@ fn the_clock_shows_utc_time_and_date() {
 fn place_resizes_keeping_the_client_pixels_and_set_title_renames() {
     let (mut d, a) = desktop_with_window();
     let red = [0x00ff_0000u32; 4];
-    d.present(a, 7, Rect { x: 0, y: 0, w: 2, h: 2 }, &red, 2).unwrap();
+    d.present(a, Rect { x: 0, y: 0, w: 2, h: 2 }, &red, 2).unwrap();
     d.place(a, 7, 100, 50, 500, 400).unwrap();
     let w = d.window(a).unwrap();
     assert_eq!((w.x, w.y, w.w, w.h), (100, 50, 500, 400));
@@ -241,7 +243,7 @@ fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     let w = d.window(p).unwrap();
     assert_eq!((w.client_size(), w.client_origin()), ((100, 60), (320, 150)));
     let green = [0x0000_ff00u32; 1];
-    d.present(p, 7, Rect { x: 0, y: 0, w: 1, h: 1 }, &green, 1).unwrap();
+    d.present(p, Rect { x: 0, y: 0, w: 1, h: 1 }, &green, 1).unwrap();
     d.show(p, 7, true).unwrap();
     assert_eq!(d.pixel(320, 150), 0x0000_ff00);
     // Not active, not on the taskbar.

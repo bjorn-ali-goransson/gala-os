@@ -6,5 +6,5 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 DIR="$ROOT/user/windows_across_test"
 x86_64-w64-mingw32-gcc -O1 -g0 -s -Wl,--no-insert-timestamp \
-    -o "$ROOT/user/bin/windows_across_test.exe" "$DIR/main.c" -luser32 -lkernel32
+    -o "$ROOT/user/bin/windows_across_test.exe" "$DIR/main.c" -luser32 -lgdi32 -lkernel32
 sha256sum "$ROOT/user/bin/windows_across_test.exe"

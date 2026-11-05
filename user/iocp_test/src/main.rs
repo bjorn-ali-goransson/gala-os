@@ -223,7 +223,7 @@ fn run() -> Result<(), u32> {
     c.st((api.set)(port, 0x77, 0, ok, 0), ok)?;
     let mut ctx = 0usize;
     let mut iosb2 = IoStatusBlock { status: 0, information: 0 };
-    let bad = 8 as *mut usize; // the first page: never mapped
+    let bad = core::ptr::without_provenance_mut::<usize>(8); // the first page: never mapped
     c.st(
         (api.remove)(port, bad, &mut ctx, &mut iosb2, core::ptr::null()),
         STATUS_ACCESS_VIOLATION,
@@ -243,7 +243,7 @@ fn run() -> Result<(), u32> {
     delay(SECOND / 50);
     close(port2);
     c.st(wait(t2, Some(5 * SECOND)), ok)?;
-    c.eq(WORKER_STATUS.load(Ordering::SeqCst), u64::from(STATUS_ABANDONED_WAIT_0 as u32))?;
+    c.eq(WORKER_STATUS.load(Ordering::SeqCst), u64::from(STATUS_ABANDONED_WAIT_0))?;
     close(t2);
 
     c.st(set_file(file, FILE_DISPOSITION_INFORMATION, &[1]), ok)?;

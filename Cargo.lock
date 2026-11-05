@@ -449,6 +449,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "d3d11"
+version = "0.1.0"
+
+[[package]]
+name = "d3d12"
+version = "0.1.0"
+
+[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -460,6 +468,10 @@ version = "0.1.0"
 dependencies = [
  "gala_stubs",
 ]
+
+[[package]]
+name = "dcomp"
+version = "0.1.0"
 
 [[package]]
 name = "defmt"
@@ -567,11 +579,17 @@ version = "0.1.0"
 name = "dwrite"
 version = "0.1.0"
 dependencies = [
+ "fontdue",
+ "gala_heap",
  "ttf-parser",
 ]
 
 [[package]]
 name = "dwrite_test"
+version = "0.1.0"
+
+[[package]]
+name = "dxgi"
 version = "0.1.0"
 
 [[package]]
@@ -814,6 +832,10 @@ dependencies = [
  "opaque-debug",
  "polyval",
 ]
+
+[[package]]
+name = "gpu_stub_test"
+version = "0.1.0"
 
 [[package]]
 name = "group"

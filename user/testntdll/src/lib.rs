@@ -300,6 +300,8 @@ syscall_stubs! {
     GalaWindowReply = 0x7f4b, fn(id: u64, result: i64, out: *const u8, len: u32);
     GalaWindowPostThread = 0x7f50, fn(tid: u32, message: u32, wparam: u64, lparam: u64);
     GalaWindowSendAbandon = 0x7f51, fn(id: u64);
+    GalaWindowSurface = 0x7f52, fn(hwnd: u64, section: u64, offset: u64, width: u32, height: u32);
+    GalaWindowSurfaceOpen = 0x7f53, fn(hwnd: u64, section: *mut u64, info: *mut u8);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).
     GalaWindowFilter = 0x7f6a, fn(hwnd: u64, message: u32, action: u32, ext_status: *mut u32);
     // WinEvents across processes (SetWinEventHook, NotifyWinEvent).

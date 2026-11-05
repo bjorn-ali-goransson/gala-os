@@ -3937,7 +3937,21 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   there).
 - **Painting**: each top-level window owns a client pixel buffer;
   BeginPaint and GetDC return a gdi32 surface DC over it and EndPaint /
-  ReleaseDC present the buffer. gdi32 is loaded lazily with LoadLibrary,
+  ReleaseDC present the buffer.
+- **Window surfaces** (`surface.rs`): the buffer (menu bar rows, then
+  the client area) is a pagefile-backed section, registered with the
+  kernel's window registry (GalaWindowSurface, again after each resize);
+  the registry drops it with the window. GetDC of another process's
+  top-level window maps that section (GalaWindowSurfaceOpen) and gives a
+  DC over it, so both processes draw into one surface, as on Windows;
+  its ReleaseDC presents the whole client area (any process of the
+  desktop may present to any window: GalaWindowPresent no longer checks
+  the owner) and unmaps it. Chromium's GPU process paints its browser's
+  window so (`SoftwareOutputDeviceWinDirect`: GetDC, BitBlt from a DIB
+  section over shared memory, ReleaseDC). Test: `windows_across_test`
+  (a red square drawn into the child's window is what the child's own
+  GetPixel reads). Limits: another process's child windows have no DC
+  (ledger); at most 16 such DCs at once. gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it. GetDC(NULL) is
   the display DC.
 - **Deferred presenting**: EndPaint and ReleaseDC add the area to the
@@ -4389,7 +4403,10 @@ then riched20.dll).
   top-down; a monochrome one turns what is written into black or white;
   CreateCompatibleBitmap on a memory DC with the default bitmap is
   monochrome, as documented) and 24/32-bit DIB sections in the
-  program's own memory and orientation; 1-bit DIB sections keep their
+  program's own memory and orientation, or in a view of a file mapping
+  the caller gives (CreateDIBSection's hSection and offset, which must be
+  a multiple of 4; the view is unmapped with the bitmap; Skia's shared
+  canvas in Chromium's compositor); 1-bit DIB sections keep their
   two-colour palette in the surface (reads give the entry's colour,
   writes pick the nearer entry). 32-bit surfaces keep the fourth byte
   where Windows does: SRCCOPY between 32-bit surfaces and 32-bit
@@ -5425,6 +5442,27 @@ metrics, font tables in place), files with the local file loader (paths)
 and streams, localized strings (en-us). Each factory method not built
 yet records its own name (`dwrite.dll!IDWriteFactory::<method>`).
 
+Custom font files and collections (the renderer's font proxy: its
+collection loader enumerates the browser's handles to the system's font
+files, its file loader serves them as streams) are read through the
+caller's loaders: CreateCustomFontFileReference reads the stream whole
+and finds the system font with those exact bytes (its file object);
+CreateCustomFontCollection enumerates the loader's files and, when they
+are system fonts, gives the system collection. A font gala does not ship
+is left out (ledger: `(not a gala font)`); with none, the call fails
+with DWRITE_E_FILENOTFOUND. Test: `dwrite_test` step 7.
+
+Glyphs (`glyphs.rs`), as Skia's scaler draws text: CreateGlyphRunAnalysis
+rasterizes the run with fontdue (as gdi32 draws Selawik) into an
+analysis object whose aliased (1 byte, 0 or 255; ALIASED mode) or
+ClearType 3x1 texture (the same coverage in each of 3 bytes; the other
+modes) CreateAlphaTexture copies out, the other kind's bounds empty;
+OUTLINE mode is E_INVALIDARG; transforms may scale and translate (else
+ledger, E_NOTIMPL). GetGlyphRunOutline gives the TrueType contours to an
+ID2D1SimplifiedGeometrySink in DIPs, y downward (winding, quadratics as
+cubic Béziers); the sink's owner closes it. Test: `dwrite_test` steps 8
+and 9.
+
 ### Diagnosis
 
 Without disassembly (CLEAN_ROOM): Chromium's logs go to the serial log
@@ -5435,9 +5473,9 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
 
 ### Known limits
 
-- DirectWrite: no custom collections or file loaders (the renderer's
-  font proxy), text layout, glyph run analysis or outlines
-  (rasterizing), IDWriteFactory1+.
+- DirectWrite: custom collections and files hold only the system's
+  fonts (gala's font objects are static); glyph run analysis without
+  rotation, skew or sideways runs; no text layout, IDWriteFactory1+.
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
 - No Windows Runtime classes, no shell namespace objects, no COM
   proxies (see their sections).
@@ -6164,7 +6202,7 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 
 | Stage | Content | Tests |
 |---|---|---|
-| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs failing as Windows does without a usable adapter (codes checked against Chromium's fallback paths), so Chromium runs `--disable-gpu`, then `--use-angle=swiftshader`; DirectWrite is BR's own work | planned |
+| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
 | G1 | virtio-gpu 2D | built: `virtio_gpu`, `virtio_gpu_reset` |
 | G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs |
 | G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) |
@@ -6788,6 +6826,8 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 | GalaWindowReply(id, result, out, len) | 0x7f4b | answers it |
 | GalaWindowPostThread(tid, msg, wParam, lParam) | 0x7f50 | PostThreadMessage to any thread |
 | GalaWindowSendAbandon(id) | 0x7f51 | the sender gives up waiting |
+| GalaWindowSurface(hwnd, section, offset, width, height) | 0x7f52 | the caller's top-level window keeps its pixels in that section |
+| GalaWindowSurfaceOpen(hwnd, \*section, \*info) | 0x7f53 | a handle to any window's surface section on the caller's desktop |
 
 **The registry and its record** (step 1):
 

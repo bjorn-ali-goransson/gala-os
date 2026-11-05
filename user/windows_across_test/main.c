@@ -33,6 +33,12 @@
  * gives it ours, WM_GETTEXTLENGTH counts it, and WM_APP + 2's result is
  * what the child's procedure returned (wParam * lParam).
  *
+ * Drawing into another process's window (Chromium's GPU process paints
+ * its browser's window): GetDC of the child's window, FillRect of a red
+ * square at client (10, 10) - (20, 20), ReleaseDC; the child then reads
+ * the pixel through its own window DC (WM_APP + 16 returns GetPixel at
+ * (15, 15)): red, one surface for both; outside the square it is not.
+ *
  * The child's memory (what UI Automation's list proxies use to read
  * list-view items across processes): VirtualAllocEx in it,
  * WriteProcessMemory and ReadProcessMemory with the bytes copied; a
@@ -121,6 +127,12 @@ static LRESULT CALLBACK child_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     if (m == WM_APP + 13)
         return (LRESULT)InSendMessageEx(NULL);
+    if (m == WM_APP + 16) {
+        HDC dc = GetDC(h);
+        COLORREF c = GetPixel(dc, (int)w, (int)l);
+        ReleaseDC(h, dc);
+        return (LRESULT)c;
+    }
     if (m == WM_APP + 14) {
         WCHAR t[64];
         swprintf(t, 64, L"notify %d", (int)InSendMessageEx(NULL));
@@ -433,6 +445,18 @@ int main(int argc, char **argv) {
 
     /* SendMessageTimeout: the result through lpdwResult. */
     DWORD_PTR res = 0;
+    /* Drawing into the child's window. */
+    {
+        HDC dc = GetDC(top);
+        CHECK(dc != NULL);
+        RECT square = {10, 10, 20, 20};
+        HBRUSH red = CreateSolidBrush(RGB(255, 0, 0));
+        CHECK(FillRect(dc, &square, red));
+        CHECK(ReleaseDC(top, dc) == 1);
+        CHECK(DeleteObject(red));
+        CHECK(SendMessageW(top, WM_APP + 16, 15, 15) == RGB(255, 0, 0));
+        CHECK(SendMessageW(top, WM_APP + 16, 25, 15) != RGB(255, 0, 0));
+    }
     CHECK(SendMessageTimeoutW(top, WM_APP + 2, 6, 7, SMTO_NORMAL, 5000, &res) != 0);
     CHECK(res == 42);
     res = 0;

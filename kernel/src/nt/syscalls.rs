@@ -144,6 +144,10 @@ pub const GALA_WINDOW_RECEIVE: u32 = 0x7f4a;
 pub const GALA_WINDOW_REPLY: u32 = 0x7f4b;
 pub const GALA_WINDOW_POST_THREAD: u32 = 0x7f50;
 pub const GALA_WINDOW_SEND_ABANDON: u32 = 0x7f51;
+/// Window surfaces: a top-level window's pixels in a section another
+/// process of the desktop can map (GetDC of another process's window).
+pub const GALA_WINDOW_SURFACE: u32 = 0x7f52;
+pub const GALA_WINDOW_SURFACE_OPEN: u32 = 0x7f53;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
 /// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
@@ -373,6 +377,8 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_REPLY, "GalaWindowReply", 4, gala_window_reply),
     (GALA_WINDOW_POST_THREAD, "GalaWindowPostThread", 4, gala_window_post_thread),
     (GALA_WINDOW_SEND_ABANDON, "GalaWindowSendAbandon", 1, gala_window_send_abandon),
+    (GALA_WINDOW_SURFACE, "GalaWindowSurface", 5, gala_window_surface),
+    (GALA_WINDOW_SURFACE_OPEN, "GalaWindowSurfaceOpen", 3, gala_window_surface_open),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
     (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
@@ -1552,7 +1558,9 @@ fn gala_window_show(call: &mut Call<'_>) -> NtStatus {
 
 /// GalaWindowPresent(id, x, y, width, height, *pixels, stride): copies that
 /// rectangle of the client area from the caller's 0x00RRGGBB pixels (rows
-/// `stride` bytes apart) and shows it.
+/// `stride` bytes apart) and shows it. Any process of the desktop may
+/// present into any window, as any may draw into any window's DC on
+/// Windows (it maps the window's surface first: GalaWindowSurfaceOpen).
 fn gala_window_present(call: &mut Call<'_>) -> NtStatus {
     use super::desktop::Rect;
     let id = arg!(call, 0) as u32;
@@ -1588,10 +1596,9 @@ fn gala_window_present(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::NO_MEMORY;
     }
     pixels.extend(bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
-    let owner = call.process.id;
     tri!(super::desktop::with(&call.process.desk.shell, |d| Ok((
         (),
-        Some(d.present(id, owner, r, &pixels, stride / 4)?)
+        Some(d.present(id, r, &pixels, stride / 4)?)
     ))));
     NtStatus::SUCCESS
 }
@@ -2067,6 +2074,66 @@ fn gala_window_query(call: &mut Call<'_>) -> NtStatus {
     let mut bytes = [0u8; super::window::INFO_SIZE];
     let n = info.to_bytes_as(u32::from_le_bytes(asked), &mut bytes);
     if call.process.write(arg!(call, 1), &bytes[..n]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowSurface(Hwnd, SectionHandle, Offset, Width, Height): the
+/// caller's top-level window Hwnd keeps its client pixels (0x00RRGGBB,
+/// rows Width pixels apart) in the section from byte Offset (a resize
+/// names a new one). The handle needs SECTION_MAP_READ and _WRITE.
+fn gala_window_surface(call: &mut Call<'_>) -> NtStatus {
+    let (hwnd, offset) = (arg!(call, 0), arg!(call, 2));
+    let (width, height) = (arg!(call, 3) as u32, arg!(call, 4) as u32);
+    let entry = tri!(call.handle(Handle(arg!(call, 1))));
+    let section = tri!(entry.require(SECTION_MAP_READ | SECTION_MAP_WRITE)).clone();
+    if !is_section(&section) || width == 0 || height == 0 || width > 16384 || height > 16384 {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let surface = super::window::Surface {
+        pid: call.process.id as u32,
+        hwnd,
+        section,
+        offset,
+        width,
+        height,
+    };
+    tri!(call.process.desk.windows.set_surface(surface));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowSurfaceOpen(Hwnd, *SectionHandle, *Info): a handle (map
+/// read and write) to the section any process's top-level window Hwnd of
+/// the caller's desktop keeps its pixels in; Info (24 bytes) gets the
+/// client area's byte offset (u64), width, height and the window's id on
+/// shasha's screen (u32 each, then 4 reserved). STATUS_INVALID_HANDLE
+/// for a window without one (a child, another session's).
+fn gala_window_surface_open(call: &mut Call<'_>) -> NtStatus {
+    let hwnd = arg!(call, 0);
+    let Some((section, offset, width, height, desktop)) = call.process.desk.windows.surface(hwnd)
+    else {
+        return no_window(call, hwnd, "asked for the surface of");
+    };
+    let mut info = [0u8; 24];
+    info[..8].copy_from_slice(&offset.to_le_bytes());
+    info[8..12].copy_from_slice(&width.to_le_bytes());
+    info[12..16].copy_from_slice(&height.to_le_bytes());
+    info[16..20].copy_from_slice(&desktop.to_le_bytes());
+    if call.process.write(arg!(call, 2), &info).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let entry = HandleEntry {
+        object: section,
+        access: SECTION_QUERY | SECTION_MAP_READ | SECTION_MAP_WRITE,
+        attributes: 0,
+    };
+    let Ok(handle) = call.process.handles.lock().insert(entry) else {
+        return NtStatus::INSUFFICIENT_RESOURCES;
+    };
+    if call.write_u64(arg!(call, 1), handle.0).is_err() {
+        let closed = call.process.handles.lock().close(handle);
+        drop(closed);
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS

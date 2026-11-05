@@ -180,7 +180,13 @@ pub(crate) fn new_ddb(w: i32, h: i32, bpp: u16) -> Handle {
         bottom_up: false,
         mono: bpp == 1,
     };
-    new_object(Object::Bitmap(Bitmap { surface, bpp, dib: false, owned: true }))
+    new_object(Object::Bitmap(Bitmap {
+        surface,
+        bpp,
+        dib: false,
+        owned: true,
+        view: core::ptr::null_mut(),
+    }))
 }
 
 /// CreateCompatibleBitmap: like the DC's surface (a memory DC with the
@@ -277,8 +283,11 @@ pub struct BitmapInfoHeader {
 }
 
 /// CreateDIBSection(hdc, info, usage, &bits, section, offset): a 1-, 24-
-/// or 32-bit DIB (1-bit: with its two-colour palette) (BI_RGB, or BI_BITFIELDS with the usual masks) in memory of
-/// its own (file mappings are not supported); `bits` receives it.
+/// or 32-bit DIB (1-bit: with its two-colour palette) (BI_RGB, or
+/// BI_BITFIELDS with the usual masks) in memory of its own, or with a
+/// file mapping `section`, in a view of it from `offset` (a multiple of
+/// 4, as on Windows; the view is unmapped with the bitmap: another
+/// process sharing the section sees the pixels); `bits` receives it.
 #[unsafe(no_mangle)]
 pub extern "system" fn CreateDIBSection(
     _hdc: Handle,
@@ -286,15 +295,14 @@ pub extern "system" fn CreateDIBSection(
     _usage: u32,
     bits: *mut *mut u8,
     section: Handle,
-    _offset: u32,
+    offset: u32,
 ) -> Handle {
     if info.is_null() {
         return core::ptr::null_mut();
     }
     // SAFETY: the caller's BITMAPINFO.
     let h = unsafe { &*info };
-    if !section.is_null() {
-        unsupported(b"gdi32.dll!CreateDIBSection(section)", 0);
+    if !section.is_null() && !offset.is_multiple_of(4) {
         return core::ptr::null_mut();
     }
     if ![1, 24, 32].contains(&h.bit_count) || (h.compression != 0 && h.compression != 3) {
@@ -318,7 +326,19 @@ pub extern "system" fn CreateDIBSection(
             } & 0x00ff_ffff;
         }
     }
-    let memory = alloc(stride as usize * height as usize);
+    let size = stride as usize * height as usize;
+    let (memory, view) = if section.is_null() {
+        (alloc(size), core::ptr::null_mut())
+    } else {
+        // Views start on the 64 KiB allocation granularity.
+        let base = offset & !0xffff;
+        let skip = (offset - base) as usize;
+        // SAFETY: a plain call; FILE_MAP_READ | FILE_MAP_WRITE.
+        let view: *mut u8 =
+            unsafe { crate::MapViewOfFile(section, 6, 0, base, skip + size).cast() };
+        // SAFETY: inside the view just mapped.
+        (if view.is_null() { view } else { unsafe { view.add(skip) } }, view)
+    };
     if memory.is_null() {
         return core::ptr::null_mut();
     }
@@ -332,8 +352,13 @@ pub extern "system" fn CreateDIBSection(
         bottom_up: h.height > 0,
         mono: false,
     };
-    let hb =
-        new_object(Object::Bitmap(Bitmap { surface, bpp: h.bit_count, dib: true, owned: true }));
+    let hb = new_object(Object::Bitmap(Bitmap {
+        surface,
+        bpp: h.bit_count,
+        dib: true,
+        owned: view.is_null(),
+        view,
+    }));
     if !bits.is_null() {
         // SAFETY: the caller's pointer.
         unsafe { *bits = if hb.is_null() { core::ptr::null_mut() } else { memory } };

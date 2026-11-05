@@ -11,4 +11,6 @@ test = false
 bench = false
 
 [dependencies]
+gala_heap = { path = "../gala_heap" }
+fontdue = { version = "0.9.5", default-features = false, features = ["hashbrown"] }
 ttf-parser = { version = "0.25.1", default-features = false, features = ["no-std-float"] }

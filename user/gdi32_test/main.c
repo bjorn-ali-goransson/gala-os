@@ -15,6 +15,9 @@
  *   CreateDIBSection (32-bit, top-down and bottom-up) returns its bits:
  *   drawing appears in them at the documented place (row 0 of a
  *   bottom-up DIB is the bottom line), and they appear in GetPixel.
+ *   A DIB section over a file mapping (Chromium's shared canvas), from
+ *   an offset: drawing appears in another view of the mapping, at the
+ *   offset; DeleteObject unmaps the bitmap's view only.
  *   BitBlt SRCCOPY copies between memory DCs; SRCINVERT xors;
  *   StretchBlt doubles.
  * - Fonts: CreateFontIndirectW keeps the LOGFONTW (GetObjectW returns it,
@@ -148,6 +151,25 @@ static void bitmaps(void) {
     SelectObject(dmem2, dib2);
     CHECK(SetPixel(dmem2, 0, 0, RGB(9, 9, 9)) == RGB(9, 9, 9));
     CHECK(bottom[8 * 3] == 0x00090909); /* the top line is the last row */
+
+    /* A DIB section in a file mapping, 64 bytes in. */
+    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 65536, NULL);
+    CHECK(mapping != NULL);
+    DWORD *view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    CHECK(view != NULL);
+    bi.bmiHeader.biHeight = -4;
+    DWORD *shared = NULL;
+    HBITMAP dib3 = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, (void **)&shared, mapping, 64);
+    CHECK(dib3 != NULL && shared != NULL && shared != view + 16);
+    HDC dmem3 = CreateCompatibleDC(screen);
+    SelectObject(dmem3, dib3);
+    CHECK(SetPixel(dmem3, 2, 1, RGB(7, 8, 9)) == RGB(7, 8, 9));
+    CHECK(view[16 + 8 + 2] == 0x00070809); /* seen through the other view */
+    view[16] = 0x00445566;
+    CHECK(GetPixel(dmem3, 0, 0) == RGB(0x44, 0x55, 0x66));
+    CHECK(DeleteDC(dmem3) && DeleteObject(dib3));
+    CHECK(view[16 + 8 + 2] == 0x00070809); /* the mapping stays */
+    CHECK(UnmapViewOfFile(view) && CloseHandle(mapping));
 
     /* BitBlt between memory DCs; SRCINVERT; StretchBlt. */
     CHECK(BitBlt(dmem2, 0, 0, 8, 4, dmem, 0, 0, SRCCOPY));

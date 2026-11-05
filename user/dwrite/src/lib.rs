@@ -17,9 +17,14 @@
 //! read whole into the process heap on first use; TrueType tables are
 //! read with `ttf-parser`.
 //!
-//! Not there yet (each reported to the ledger, E_NOTIMPL): custom font
-//! collections and file loaders (Chromium's renderer proxies its fonts
-//! through them: BR stage 1's next step), text formats and layouts,
+//! Custom font files and collections (Chromium's renderer proxies its
+//! fonts through them: its loaders serve the browser's handles to the
+//! system's font files) are read through the caller's loaders and found
+//! by content among the system's fonts: CreateCustomFontFileReference
+//! gives that font's file, CreateCustomFontCollection the system
+//! collection. Other fonts are not supported (ledger).
+//!
+//! Not there yet (each reported to the ledger, E_NOTIMPL): text formats and layouts,
 //! glyph run analysis (rasterization) and outlines, rendering params,
 //! GDI interop, and the IDWriteFactory1+ interfaces (QueryInterface says
 //! E_NOINTERFACE, which Skia accepts).
@@ -29,6 +34,10 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 mod font;
+mod glyphs;
+
+extern crate alloc;
+use gala_heap as _;
 
 use core::ffi::c_void;
 
@@ -44,6 +53,8 @@ unsafe extern "C" {
     fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    // fontdue's hashing references it.
+    fn strlen(s: *const u8) -> usize;
     // MSVC-target unwind tables reference it (gala's ntdll provides it).
     fn __CxxFrameHandler3();
     // The stack probe for frames over a page (ntdll exports it).
@@ -134,7 +145,7 @@ static FACTORY_VTBL: VTable<24> = VTable([
     factory_CreateEllipsisTrimmingSign as *const (),
     factory_CreateTextAnalyzer as *const (),
     factory_CreateNumberSubstitution as *const (),
-    factory_CreateGlyphRunAnalysis as *const (),
+    glyphs::create_glyph_run_analysis as *const (),
 ]);
 
 /// Writes `object` to `out` if `riid` is one of `iids`.
@@ -197,19 +208,44 @@ extern "system" fn factory_get_system_font_collection(
     }
 }
 
+/// CreateCustomFontCollection(loader, key, size, &collection): the
+/// loader's files; gala's fonts are static, so a collection of the
+/// system's font files is the system collection (Chromium's renderer
+/// builds one per family it asks its browser for, which hands it the
+/// system's files). Files of other fonts are left out (ledger); with none
+/// of gala's: DWRITE_E_FILENOTFOUND.
 extern "system" fn factory_create_custom_font_collection(
-    _this: *const c_void,
-    _loader: *const c_void,
-    _key: *const c_void,
-    _key_size: u32,
+    this: *const c_void,
+    loader: *const c_void,
+    key: *const c_void,
+    key_size: u32,
     out: *mut *const c_void,
 ) -> HResult {
-    missing(b"dwrite.dll!IDWriteFactory::CreateCustomFontCollection", 0);
-    if !out.is_null() {
-        // SAFETY: the caller's output.
-        unsafe { *out = core::ptr::null() };
+    if out.is_null() || loader.is_null() {
+        return E_INVALIDARG;
     }
-    E_NOTIMPL
+    // SAFETY: the caller's output.
+    unsafe { *out = core::ptr::null() };
+    match font::custom_collection(this, loader, key, key_size) {
+        None => {
+            missing(b"dwrite.dll!CreateCustomFontCollection(loader failed)", 0);
+            E_FAIL
+        }
+        Some((collection, ours, others)) => {
+            if others > 0 {
+                missing(
+                    b"dwrite.dll!CreateCustomFontCollection(not a gala font)",
+                    u64::from(others),
+                );
+            }
+            if ours == 0 {
+                return DWRITE_E_FILENOTFOUND;
+            }
+            // SAFETY: as above.
+            unsafe { *out = collection };
+            S_OK
+        }
+    }
 }
 
 /// Register/UnregisterFontCollectionLoader and FontFileLoader: accepted
@@ -243,19 +279,32 @@ extern "system" fn factory_create_font_file_reference(
     }
 }
 
+/// CreateCustomFontFileReference(key, size, loader, &file): the file of
+/// the system font whose contents the loader's stream serves (read now;
+/// gala's font objects are static), else DWRITE_E_FILENOTFOUND (ledger).
 extern "system" fn factory_create_custom_font_file_reference(
     _this: *const c_void,
-    _key: *const c_void,
-    _key_size: u32,
-    _loader: *const c_void,
+    key: *const c_void,
+    key_size: u32,
+    loader: *const c_void,
     out: *mut *const c_void,
 ) -> HResult {
-    missing(b"dwrite.dll!IDWriteFactory::CreateCustomFontFileReference", 0);
-    if !out.is_null() {
-        // SAFETY: the caller's output.
-        unsafe { *out = core::ptr::null() };
+    if out.is_null() || loader.is_null() {
+        return E_INVALIDARG;
     }
-    E_NOTIMPL
+    match font::file_from_loader(key, key_size, loader) {
+        Some(file) => {
+            // SAFETY: the caller's output.
+            unsafe { *out = file };
+            S_OK
+        }
+        None => {
+            missing(b"dwrite.dll!CreateCustomFontFileReference(not a gala font)", 0);
+            // SAFETY: as above.
+            unsafe { *out = core::ptr::null() };
+            DWRITE_E_FILENOTFOUND
+        }
+    }
 }
 
 extern "system" fn factory_create_font_face(
@@ -314,7 +363,6 @@ factory_not_impl! {
     factory_CreateEllipsisTrimmingSign
     factory_CreateTextAnalyzer
     factory_CreateNumberSubstitution
-    factory_CreateGlyphRunAnalysis
 }
 
 /// DWriteCreateFactory(factoryType, iid, **factory): the process's

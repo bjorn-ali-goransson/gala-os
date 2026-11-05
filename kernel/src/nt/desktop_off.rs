@@ -110,14 +110,7 @@ impl Desktop {
     pub fn show_minimized(&mut self, _: u32, _: u64) -> Result<Rect, NtStatus> {
         match *self {}
     }
-    pub fn present(
-        &mut self,
-        _: u32,
-        _: u64,
-        _: Rect,
-        _: &[u32],
-        _: usize,
-    ) -> Result<Rect, NtStatus> {
+    pub fn present(&mut self, _: u32, _: Rect, _: &[u32], _: usize) -> Result<Rect, NtStatus> {
         match *self {}
     }
     pub fn place(

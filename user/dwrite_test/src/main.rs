@@ -12,7 +12,23 @@
 //! 5. the face's file: its loader is a local file loader whose path for
 //!    the file's key ends in ".ttf" (the file the font came from), and a
 //!    stream over it as long as the file;
-//! 6. GetFontFromFontFace gives a font of the same weight.
+//! 6. GetFontFromFontFace gives a font of the same weight;
+//! 7. a custom font collection, as Chromium's renderer builds one (its
+//!    font proxy): the test's own collection loader enumerates one file,
+//!    a custom file reference (CreateCustomFontFileReference) over the
+//!    test's own file loader, whose stream serves step 5's file from
+//!    memory. CreateCustomFontCollection gives one family; its first
+//!    font's face has as many glyphs as the system's face of that file;
+//! 8. glyph run analysis (CreateGlyphRunAnalysis) of 'A' at 32 px: in
+//!    NATURAL rendering mode the ClearType 3x1 texture has bounds (the
+//!    aliased texture's are empty), at most 32 px tall, above the
+//!    baseline; CreateAlphaTexture fills some coverage; ALIASED mode gives
+//!    an aliased texture (0 or 255) and an empty ClearType one; OUTLINE
+//!    mode is E_INVALIDARG;
+//! 9. the face's GetGlyphRunOutline for 'A' (em 32) drives a geometry
+//!    sink: closed figures with lines or Béziers, above the baseline
+//!    (y < 0); the sink is not closed (its owner closes it, as Direct2D's
+//!    samples do after GetGlyphRunOutline).
 
 #![no_std]
 #![no_main]
@@ -116,6 +132,261 @@ unsafe fn method<F: Copy>(this: *mut c_void, slot: usize) -> F {
 type GetPtr = extern "system" fn(*mut c_void, *mut *mut c_void) -> HResult;
 type GetIndexed = extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> HResult;
 type GetU32 = extern "system" fn(*mut c_void) -> u32;
+type GetPtr1 = extern "system" fn(*mut c_void, *mut c_void) -> HResult;
+
+/// Step 8's texture buffer (static: a frame over a page would need a
+/// stack probe).
+static mut ALPHA: [u8; 3 * 48 * 48] = [0; 3 * 48 * 48];
+
+/// Step 9's ID2D1SimplifiedGeometrySink: counts what it is told.
+mod sink {
+    use super::{HResult, Iid};
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    pub static FIGURES: AtomicU32 = AtomicU32::new(0);
+    pub static ENDED: AtomicU32 = AtomicU32::new(0);
+    pub static SEGMENTS: AtomicU32 = AtomicU32::new(0);
+    pub static CLOSED: AtomicU32 = AtomicU32::new(0);
+    /// Some point is above the baseline (y < 0: y grows downward).
+    pub static ABOVE: AtomicBool = AtomicBool::new(false);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct Point {
+        x: f32,
+        y: f32,
+    }
+
+    #[repr(C)]
+    struct Obj(*const ());
+    struct VTable([*const (); 10]);
+    // SAFETY (both): pointers to a static vtable and functions.
+    unsafe impl Sync for Obj {}
+    unsafe impl Sync for VTable {}
+
+    static VTBL: VTable = VTable([
+        qi as *const (),
+        add_ref as *const (),
+        release as *const (),
+        set_fill_mode as *const (),
+        set_segment_flags as *const (),
+        begin_figure as *const (),
+        add_lines as *const (),
+        add_beziers as *const (),
+        end_figure as *const (),
+        close as *const (),
+    ]);
+    static SINK: Obj = Obj(VTBL.0.as_ptr().cast());
+
+    pub fn sink() -> *mut c_void {
+        (&raw const SINK).cast_mut().cast()
+    }
+
+    fn see(p: Point) {
+        if p.y < -1.0 {
+            ABOVE.store(true, Ordering::Relaxed);
+        }
+    }
+
+    extern "system" fn qi(this: *mut c_void, _iid: *const Iid, out: *mut *mut c_void) -> HResult {
+        // SAFETY: the caller's output.
+        unsafe { *out = this };
+        0
+    }
+    extern "system" fn add_ref(_: *mut c_void) -> u32 {
+        1
+    }
+    extern "system" fn release(_: *mut c_void) -> u32 {
+        1
+    }
+    extern "system" fn set_fill_mode(_: *mut c_void, _: u32) {}
+    extern "system" fn set_segment_flags(_: *mut c_void, _: u32) {}
+    extern "system" fn begin_figure(_: *mut c_void, start: Point, _: u32) {
+        FIGURES.fetch_add(1, Ordering::Relaxed);
+        see(start);
+    }
+    extern "system" fn add_lines(_: *mut c_void, points: *const Point, count: u32) {
+        SEGMENTS.fetch_add(count, Ordering::Relaxed);
+        for i in 0..count as usize {
+            // SAFETY: the caller's `count` points.
+            see(unsafe { *points.add(i) });
+        }
+    }
+    extern "system" fn add_beziers(_: *mut c_void, beziers: *const [Point; 3], count: u32) {
+        SEGMENTS.fetch_add(count, Ordering::Relaxed);
+        for i in 0..count as usize {
+            // SAFETY: the caller's `count` segments.
+            see(unsafe { (*beziers.add(i))[2] });
+        }
+    }
+    extern "system" fn end_figure(_: *mut c_void, _: u32) {
+        ENDED.fetch_add(1, Ordering::Relaxed);
+    }
+    extern "system" fn close(_: *mut c_void) -> HResult {
+        CLOSED.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+}
+
+/// Step 7's objects: a collection loader whose enumerator gives one custom
+/// file reference (key: the number 1) over a file loader whose stream
+/// serves `DATA` (the font file's bytes). Static objects: AddRef and
+/// Release count nothing.
+mod custom {
+    use super::{HResult, Iid};
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+
+    pub static DATA: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+    pub static LEN: AtomicUsize = AtomicUsize::new(0);
+    pub static FACTORY: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
+    /// The enumerator's position: 0 before the file, 1 on it, 2 past it.
+    static POSITION: AtomicU32 = AtomicU32::new(0);
+    static FILE_KEY: u32 = 1;
+
+    #[repr(C)]
+    struct Obj(*const ());
+    struct VTable<const N: usize>([*const (); N]);
+    // SAFETY (both): pointers to static vtables and functions.
+    unsafe impl Sync for Obj {}
+    unsafe impl<const N: usize> Sync for VTable<N> {}
+
+    static FILE_LOADER_VTBL: VTable<4> = VTable([
+        qi as *const (),
+        add_ref as *const (),
+        release as *const (),
+        create_stream as *const (),
+    ]);
+    static STREAM_VTBL: VTable<7> = VTable([
+        qi as *const (),
+        add_ref as *const (),
+        release as *const (),
+        read_fragment as *const (),
+        release_fragment as *const (),
+        file_size as *const (),
+        write_time as *const (),
+    ]);
+    static COLLECTION_LOADER_VTBL: VTable<4> = VTable([
+        qi as *const (),
+        add_ref as *const (),
+        release as *const (),
+        create_enumerator as *const (),
+    ]);
+    static ENUMERATOR_VTBL: VTable<5> = VTable([
+        qi as *const (),
+        add_ref as *const (),
+        release as *const (),
+        move_next as *const (),
+        current as *const (),
+    ]);
+
+    static FILE_LOADER: Obj = Obj(FILE_LOADER_VTBL.0.as_ptr().cast());
+    static STREAM: Obj = Obj(STREAM_VTBL.0.as_ptr().cast());
+    static COLLECTION_LOADER: Obj = Obj(COLLECTION_LOADER_VTBL.0.as_ptr().cast());
+    static ENUMERATOR: Obj = Obj(ENUMERATOR_VTBL.0.as_ptr().cast());
+
+    pub fn file_loader() -> *mut c_void {
+        (&raw const FILE_LOADER).cast_mut().cast()
+    }
+    pub fn collection_loader() -> *mut c_void {
+        (&raw const COLLECTION_LOADER).cast_mut().cast()
+    }
+
+    extern "system" fn qi(this: *mut c_void, _iid: *const Iid, out: *mut *mut c_void) -> HResult {
+        // SAFETY: the caller's output.
+        unsafe { *out = this };
+        0
+    }
+    extern "system" fn add_ref(_: *mut c_void) -> u32 {
+        1
+    }
+    extern "system" fn release(_: *mut c_void) -> u32 {
+        1
+    }
+    extern "system" fn create_stream(
+        _: *mut c_void,
+        key: *const u32,
+        size: u32,
+        out: *mut *mut c_void,
+    ) -> HResult {
+        // SAFETY: the reference key handed out below.
+        if size != 4 || unsafe { *key } != FILE_KEY {
+            return 0x8000_4005_u32 as i32; // E_FAIL
+        }
+        // SAFETY: the caller's output.
+        unsafe { *out = (&raw const STREAM).cast_mut().cast() };
+        0
+    }
+    extern "system" fn read_fragment(
+        _: *mut c_void,
+        start: *mut *const u8,
+        offset: u64,
+        size: u64,
+        context: *mut *mut c_void,
+    ) -> HResult {
+        let len = LEN.load(Ordering::Relaxed) as u64;
+        if offset.checked_add(size).is_none_or(|end| end > len) {
+            return 0x8000_4005_u32 as i32;
+        }
+        // SAFETY: inside the file's bytes; the caller's outputs.
+        unsafe {
+            *start = DATA.load(Ordering::Relaxed).add(offset as usize);
+            *context = core::ptr::null_mut();
+        }
+        0
+    }
+    extern "system" fn release_fragment(_: *mut c_void, _: *mut c_void) {}
+    extern "system" fn file_size(_: *mut c_void, size: *mut u64) -> HResult {
+        // SAFETY: the caller's output.
+        unsafe { *size = LEN.load(Ordering::Relaxed) as u64 };
+        0
+    }
+    extern "system" fn write_time(_: *mut c_void, time: *mut u64) -> HResult {
+        // SAFETY: the caller's output.
+        unsafe { *time = 0 };
+        0
+    }
+    extern "system" fn create_enumerator(
+        _: *mut c_void,
+        _factory: *mut c_void,
+        key: *const u32,
+        size: u32,
+        out: *mut *mut c_void,
+    ) -> HResult {
+        // SAFETY: the test's collection key.
+        if size != 4 || unsafe { *key } != 7 {
+            return 0x8007_0057_u32 as i32; // E_INVALIDARG
+        }
+        POSITION.store(0, Ordering::Relaxed);
+        // SAFETY: the caller's output.
+        unsafe { *out = (&raw const ENUMERATOR).cast_mut().cast() };
+        0
+    }
+    extern "system" fn move_next(_: *mut c_void, has: *mut i32) -> HResult {
+        let p = POSITION.fetch_add(1, Ordering::Relaxed) + 1;
+        // SAFETY: the caller's output.
+        unsafe { *has = i32::from(p == 1) };
+        0
+    }
+    extern "system" fn current(_: *mut c_void, file: *mut *mut c_void) -> HResult {
+        if POSITION.load(Ordering::Relaxed) != 1 {
+            return 0x8000_4005_u32 as i32;
+        }
+        let factory = FACTORY.load(Ordering::Relaxed);
+        // SAFETY: IDWriteFactory::CreateCustomFontFileReference (slot 8).
+        unsafe {
+            let create: extern "system" fn(
+                *mut c_void,
+                *const c_void,
+                u32,
+                *mut c_void,
+                *mut *mut c_void,
+            ) -> HResult = super::method(factory, 8);
+            create(factory, (&raw const FILE_KEY).cast(), 4, file_loader(), file)
+        }
+    }
+}
 
 fn w(s: &str, buf: &mut [u16; 64]) -> *const u16 {
     for (i, c) in s.bytes().enumerate() {
@@ -264,6 +535,196 @@ fn tests() {
         let mut again: *mut c_void = core::ptr::null_mut();
         check(from_face(collection, face, &mut again) == 0 && !again.is_null(), 6);
         check(weight(again) == 400, 6);
+
+        // 7. The file's bytes (the local stream's fragment, slot 3) back
+        // the test's own stream.
+        let fragment: extern "system" fn(
+            *mut c_void,
+            *mut *const u8,
+            u64,
+            u64,
+            *mut *mut c_void,
+        ) -> HResult = method(stream, 3);
+        let (mut bytes, mut fragment_context) = (core::ptr::null(), core::ptr::null_mut());
+        check(fragment(stream, &mut bytes, 0, file_size, &mut fragment_context) == 0, 7);
+        custom::DATA.store(bytes.cast_mut(), core::sync::atomic::Ordering::Relaxed);
+        custom::LEN.store(file_size as usize, core::sync::atomic::Ordering::Relaxed);
+        custom::FACTORY.store(factory, core::sync::atomic::Ordering::Relaxed);
+        // RegisterFontFileLoader (13), RegisterFontCollectionLoader (5).
+        let register: GetPtr1 = method(factory, 13);
+        check(register(factory, custom::file_loader()) == 0, 7);
+        let register: GetPtr1 = method(factory, 5);
+        check(register(factory, custom::collection_loader()) == 0, 7);
+        // CreateCustomFontCollection (4).
+        let create: extern "system" fn(
+            *mut c_void,
+            *mut c_void,
+            *const c_void,
+            u32,
+            *mut *mut c_void,
+        ) -> HResult = method(factory, 4);
+        let key = 7u32;
+        let mut custom_collection: *mut c_void = core::ptr::null_mut();
+        let hr = create(
+            factory,
+            custom::collection_loader(),
+            (&raw const key).cast(),
+            4,
+            &mut custom_collection,
+        );
+        check(hr == 0 && !custom_collection.is_null(), 7);
+        check(count(custom_collection) == 1, 7);
+        let mut custom_family: *mut c_void = core::ptr::null_mut();
+        let get_family: GetIndexed = method(custom_collection, 4);
+        check(get_family(custom_collection, 0, &mut custom_family) == 0, 7);
+        let font_count: GetU32 = method(custom_family, 4);
+        check(font_count(custom_family) >= 1, 7);
+        let get_font: GetIndexed = method(custom_family, 5);
+        let mut custom_font: *mut c_void = core::ptr::null_mut();
+        check(get_font(custom_family, 0, &mut custom_font) == 0 && !custom_font.is_null(), 7);
+        let mut custom_face: *mut c_void = core::ptr::null_mut();
+        let create_face: GetPtr = method(custom_font, 13);
+        check(create_face(custom_font, &mut custom_face) == 0 && !custom_face.is_null(), 7);
+        let glyphs: extern "system" fn(*mut c_void) -> u16 = method(face, 9);
+        let custom_glyphs: extern "system" fn(*mut c_void) -> u16 = method(custom_face, 9);
+        check(glyphs(face) > 0 && custom_glyphs(custom_face) == glyphs(face), 7);
+        let release_fragment: extern "system" fn(*mut c_void, *mut c_void) = method(stream, 4);
+        for o in [custom_face, custom_font, custom_family, custom_collection] {
+            let release: GetU32 = method(o, 2);
+            release(o);
+        }
+        // UnregisterFontCollectionLoader (6), UnregisterFontFileLoader (14).
+        let unregister: GetPtr1 = method(factory, 6);
+        check(unregister(factory, custom::collection_loader()) == 0, 7);
+        let unregister: GetPtr1 = method(factory, 14);
+        check(unregister(factory, custom::file_loader()) == 0, 7);
+        release_fragment(stream, fragment_context);
+
+        // 8. CreateGlyphRunAnalysis (23): DWRITE_GLYPH_RUN (face, em
+        // size, count, indices, advances, offsets, sideways, bidi level).
+        #[repr(C)]
+        struct GlyphRun {
+            face: *mut c_void,
+            em: f32,
+            count: u32,
+            indices: *const u16,
+            advances: *const f32,
+            offsets: *const c_void,
+            sideways: i32,
+            bidi: u32,
+        }
+        let run = GlyphRun {
+            face,
+            em: 32.0,
+            count: 1,
+            indices: &glyph,
+            advances: core::ptr::null(),
+            offsets: core::ptr::null(),
+            sideways: 0,
+            bidi: 0,
+        };
+        let analyze: extern "system" fn(
+            *mut c_void,
+            *const GlyphRun,
+            f32,
+            *const c_void,
+            u32,
+            u32,
+            f32,
+            f32,
+            *mut *mut c_void,
+        ) -> HResult = method(factory, 23);
+        let mut analysis: *mut c_void = core::ptr::null_mut();
+        // NATURAL (4), measuring NATURAL (0), baseline at (10, 40).
+        let hr = analyze(factory, &run, 1.0, core::ptr::null(), 4, 0, 10.0, 40.0, &mut analysis);
+        check(hr == 0 && !analysis.is_null(), 8);
+        let bounds: extern "system" fn(*mut c_void, u32, *mut [i32; 4]) -> HResult =
+            method(analysis, 3);
+        let mut aliased = [1i32; 4];
+        check(bounds(analysis, 0, &mut aliased) == 0, 8);
+        check(aliased[0] >= aliased[2] || aliased[1] >= aliased[3], 8);
+        let mut rect = [0i32; 4];
+        check(bounds(analysis, 1, &mut rect) == 0, 8);
+        let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
+        check(width > 0 && height > 0 && height <= 33 && rect[3] <= 41 && rect[0] >= 9, 8);
+        let texture: extern "system" fn(
+            *mut c_void,
+            u32,
+            *const [i32; 4],
+            *mut u8,
+            u32,
+        ) -> HResult = method(analysis, 4);
+        // One thread; the only reference to ALPHA (inside the function's
+        // unsafe block).
+        let alpha = core::slice::from_raw_parts_mut((&raw mut ALPHA).cast::<u8>(), 3 * 48 * 48);
+        let size = (3 * width * height) as u32;
+        check(size as usize <= alpha.len(), 8);
+        check(texture(analysis, 1, &rect, alpha.as_mut_ptr(), size) == 0, 8);
+        check(alpha[..size as usize].iter().any(|&a| a > 0), 8);
+        // A buffer too small is E_NOT_SUFFICIENT_BUFFER.
+        check(texture(analysis, 1, &rect, alpha.as_mut_ptr(), size - 1) != 0, 8);
+        let release: GetU32 = method(analysis, 2);
+        release(analysis);
+        // ALIASED (1): an aliased texture of 0 and 255.
+        let mut analysis: *mut c_void = core::ptr::null_mut();
+        let hr = analyze(factory, &run, 1.0, core::ptr::null(), 1, 0, 10.0, 40.0, &mut analysis);
+        check(hr == 0 && !analysis.is_null(), 8);
+        let bounds: extern "system" fn(*mut c_void, u32, *mut [i32; 4]) -> HResult =
+            method(analysis, 3);
+        let mut clear_type = [1i32; 4];
+        check(bounds(analysis, 1, &mut clear_type) == 0, 8);
+        check(clear_type[0] >= clear_type[2] || clear_type[1] >= clear_type[3], 8);
+        check(bounds(analysis, 0, &mut rect) == 0, 8);
+        let (width, height) = (rect[2] - rect[0], rect[3] - rect[1]);
+        check(width > 0 && height > 0, 8);
+        let texture: extern "system" fn(
+            *mut c_void,
+            u32,
+            *const [i32; 4],
+            *mut u8,
+            u32,
+        ) -> HResult = method(analysis, 4);
+        let size = (width * height) as u32;
+        check(texture(analysis, 0, &rect, alpha.as_mut_ptr(), size) == 0, 8);
+        let used = &alpha[..size as usize];
+        check(used.contains(&255) && used.iter().all(|&a| a == 0 || a == 255), 8);
+        let release: GetU32 = method(analysis, 2);
+        release(analysis);
+        // OUTLINE (6) cannot be analyzed.
+        let mut none: *mut c_void = core::ptr::null_mut();
+        let hr = analyze(factory, &run, 1.0, core::ptr::null(), 6, 0, 0.0, 0.0, &mut none);
+        check(hr == 0x8007_0057_u32 as i32 && none.is_null(), 8);
+
+        // 9. GetGlyphRunOutline (14) into the test's sink.
+        let outline: extern "system" fn(
+            *mut c_void,
+            f32,
+            *const u16,
+            *const f32,
+            *const c_void,
+            u32,
+            i32,
+            i32,
+            *mut c_void,
+        ) -> HResult = method(face, 14);
+        let hr = outline(
+            face,
+            32.0,
+            &glyph,
+            core::ptr::null(),
+            core::ptr::null(),
+            1,
+            0,
+            0,
+            sink::sink(),
+        );
+        check(hr == 0, 9);
+        let figures = sink::FIGURES.load(core::sync::atomic::Ordering::Relaxed);
+        let ended = sink::ENDED.load(core::sync::atomic::Ordering::Relaxed);
+        let segments = sink::SEGMENTS.load(core::sync::atomic::Ordering::Relaxed);
+        check(figures >= 1 && ended == figures && segments >= 3, 9);
+        check(sink::ABOVE.load(core::sync::atomic::Ordering::Relaxed), 9);
+        check(sink::CLOSED.load(core::sync::atomic::Ordering::Relaxed) == 0, 9);
 
         // Release what we were given (each Release is slot 2).
         for o in

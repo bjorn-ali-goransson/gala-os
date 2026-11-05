@@ -65,6 +65,9 @@ The ordering rules in force (set by the owner):
 
 In order:
 
+0. **BR stage 2** first (the owner: Chromium working, then the rest of
+   this list): `chromium_window`, headful Chromium with software
+   rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
 2. **TLS**: winhttp over Schannel (TLS step 1).
@@ -75,7 +78,7 @@ In order:
    record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
 6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver; HTTPS
    downloads (after TLS step 1); a real Inno Setup installer.
-7. **BR** stage 1's rest (the profile's hotspots) with **GPU** G0.
+7. **BR** stage 1's rest (the profile's hotspots).
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
     and wget over loopback.
@@ -156,8 +159,8 @@ has a section under "Open items".
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
 | RS | Remote access and sessions | in progress | A, B1, B2 done; B3a next |
-| GPU | Graphics and GPU | in progress | G1 done; G0 next; G3 parked |
-| BR | A web browser: stock Edge | in progress | stage 1: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate |
+| GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
+| BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
 
 ### Robustness, live update, tooling
@@ -544,32 +547,30 @@ server; paravirtual hardware next; vendor GPU drivers (WDDM) never in
 the kernel.
 
 **Done so far**:
+- G0: `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as stubs failing
+  with DXGI_ERROR_UNSUPPORTED (outputs NULL, each call in the ledger);
+  `gpu_stub_test`; Chromium's GPU process takes it as "no GPU".
 - G1, virtio-gpu 2D: the modern virtio-pci transport, the driver over a
   `Transport` trait host-tested against a fake device, `display=virtio`
   (default `fb`), `events=display`, `gputrace`, `gpureset=`; scenarios
   `virtio_gpu`, `virtio_gpu_reset`.
 
 **Next**:
-1. G0, for BR stage 2: `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll`
-   as stubs that fail as Windows does without a usable adapter
-   (`gpu_stub_test`: D3D11CreateDevice, CreateDXGIFactory1,
-   D3D12CreateDevice and DCompositionCreateDevice with the codes
-   Chromium's fallbacks expect).
-2. G1's rest: shasha's pointer on the hardware cursor,
+1. G1's rest: shasha's pointer on the hardware cursor,
    WM_DISPLAYCHANGE and refitting maximized windows on a resize (a test
    resizing the display through QEMU's monitor), several scanouts as
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-3. G2, software 3D for every program: `vulkan-1.dll` (Khronos loader),
+2. G2, software 3D for every program: `vulkan-1.dll` (Khronos loader),
    Mesa lavapipe (fallback SwiftShader), DXVK (d3d9/10/11, dxgi),
    vkd3d-proton (d3d12), Mesa llvmpipe `opengl32.dll`; PREBUILT,
    registered as on Windows; `vk_test`, `d3d11_test`, `gl_test` with
    screen checks, then DXVK's and vkd3d-proton's own tests. WARP is
    ruled out (not redistributable).
-4. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
+3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
-5. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
+4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
    until there is spare capacity; hardware partitioning and passthrough
    are out of scope).
 
@@ -660,10 +661,19 @@ samples).
    virtual memory (V8's reservations, the commit charge), DirectWrite or
    Chromium's font fallback, CNG, Winsock, the JIT (add to
    `SINGLE_THREAD_TCG`).
-2. Headful with software rendering (`--disable-gpu`,
-   `--use-angle=swiftshader`; GPU G0): a window on shasha, DirectWrite,
-   DirectComposition fallbacks, input, IME off; a screen check of a page
-   and a click on a link; FlaUI reading the page's accessibility tree.
+2. Headful with software rendering (`--disable-gpu`; scenario
+   `chromium_window`: a page's colours checked on the screen, then
+   Alt+F4). Done: the GPU stubs (GPU G0; the GPU process crashed on
+   dxgi.dll's delay import), the renderer's font proxy (DirectWrite
+   custom collections over the system's fonts: the renderer found no
+   font and ended in `FontCache::CrashWithFontInfo`), the GPU process
+   drawing into the browser's window (shared window surfaces, GetDC of
+   another process's window; CreateDIBSection over a file mapping).
+   Glyph run analysis and outlines (DirectWrite: Skia's text). With
+   `--disable-direct-composition` (a stopgap: "Known issues and
+   stopgaps"). Next, as the scenario finds them: Chromium's own frame (WM_NCCALCSIZE: shasha draws its caption over Chromium's),
+   input, IME off; then a click on a link and FlaUI reading the page's
+   accessibility tree.
 3. The sandbox: renderers in restricted, low-integrity and
    AppContainer/LowBox tokens, job objects, process mitigation policies,
    handle inheritance lists, desktop and window station checks (RS);
@@ -1131,7 +1141,15 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
 
-None open.
+- **`--disable-direct-composition` in `chromium_window`**: on Windows 11
+  22H2 and later Chromium draws even software frames through a D3D11
+  DXGI swap chain under DirectComposition (`kRemoveRedirectionBitmap`),
+  which gala's GPU stubs refuse (its GPU process then CHECKs for
+  E_ACCESSDENIED, session 0's answer). The switch, Chromium's own, keeps
+  its GDI path (GetDC and BitBlt into the window), which every Windows
+  also has. Structural fix: DXGI swap chains and DirectComposition
+  surfaces that shasha composes (GPU G2 for the device, G4 for
+  presentation); then the switch goes. Item BR stage 2.
 
 ### Defects known, not yet fixed
 

@@ -160,7 +160,7 @@ pub fn data(i: usize) -> Option<&'static [u8]> {
     }
 }
 
-fn face(i: usize) -> Option<ttf_parser::Face<'static>> {
+pub(crate) fn face(i: usize) -> Option<ttf_parser::Face<'static>> {
     ttf_parser::Face::parse(data(i)?, 0).ok()
 }
 
@@ -287,6 +287,138 @@ pub fn file_by_path(path: *const u16) -> Option<*const c_void> {
 
 fn lower(c: u16) -> u16 {
     if (u16::from(b'A')..=u16::from(b'Z')).contains(&c) { c + 32 } else { c }
+}
+
+/// Method `slot` of a caller's COM object, as a function of type `F`.
+///
+/// # Safety
+/// `this` is a COM object whose vtable has that slot with that type.
+unsafe fn method<F: Copy>(this: *const c_void, slot: usize) -> F {
+    // SAFETY: as the caller promises.
+    unsafe {
+        let vtbl = *this.cast::<*const usize>();
+        core::mem::transmute_copy(&*vtbl.add(slot))
+    }
+}
+
+type Release = extern "system" fn(*const c_void) -> u32;
+
+/// The system font whose file holds exactly `bytes`.
+fn font_with_bytes(bytes: &[u8]) -> Option<usize> {
+    (0..FONTS).find(|&i| data(i).is_some_and(|d| d == bytes))
+}
+
+/// CreateCustomFontFileReference's file: the caller's loader's stream
+/// for `key` read whole (IDWriteFontFileLoader::CreateStreamFromKey,
+/// then the stream's GetFileSize and ReadFileFragment), which must be the
+/// contents of one of the system's fonts (gala's fonts are static
+/// objects: another font has none); that font's file.
+pub fn file_from_loader(
+    key: *const c_void,
+    size: u32,
+    loader: *const c_void,
+) -> Option<*const c_void> {
+    if loader.is_null() {
+        return None;
+    }
+    // SAFETY (whole block): the caller's IDWriteFontFileLoader and the
+    // stream it gives, through their documented slots.
+    unsafe {
+        let create: extern "system" fn(
+            *const c_void,
+            *const c_void,
+            u32,
+            *mut *const c_void,
+        ) -> HResult = method(loader, 3);
+        let mut stream = core::ptr::null();
+        if create(loader, key, size, &mut stream) != S_OK || stream.is_null() {
+            return None;
+        }
+        let file_size: extern "system" fn(*const c_void, *mut u64) -> HResult = method(stream, 5);
+        let read: extern "system" fn(
+            *const c_void,
+            *mut *const u8,
+            u64,
+            u64,
+            *mut *mut c_void,
+        ) -> HResult = method(stream, 3);
+        let release_fragment: extern "system" fn(*const c_void, *mut c_void) = method(stream, 4);
+        let mut n = 0u64;
+        let mut found = None;
+        if file_size(stream, &mut n) == S_OK && n > 0 && n < 64 << 20 {
+            let (mut start, mut context) = (core::ptr::null(), core::ptr::null_mut());
+            if read(stream, &mut start, 0, n, &mut context) == S_OK && !start.is_null() {
+                found = font_with_bytes(core::slice::from_raw_parts(start, n as usize));
+                release_fragment(stream, context);
+            }
+        }
+        let release: Release = method(stream, 2);
+        release(stream);
+        let i = found?;
+        Some((&raw const FILE_OBJS[i]).cast())
+    }
+}
+
+/// CreateCustomFontCollection: the caller's collection loader's files for
+/// `key` (CreateEnumeratorFromKey, then the enumerator's MoveNext and
+/// GetCurrentFontFile). Files of the system's fonts make the system
+/// collection (its one family holds them all); the count of other files
+/// (not gala fonts: left out) comes back too. None: the loader failed.
+pub fn custom_collection(
+    factory: *const c_void,
+    loader: *const c_void,
+    key: *const c_void,
+    size: u32,
+) -> Option<(*const c_void, u32, u32)> {
+    if loader.is_null() {
+        return None;
+    }
+    let (mut ours, mut others) = (0u32, 0u32);
+    // SAFETY (whole block): the caller's IDWriteFontCollectionLoader and
+    // the enumerator and files it gives, through their documented slots.
+    unsafe {
+        let create: extern "system" fn(
+            *const c_void,
+            *const c_void,
+            *const c_void,
+            u32,
+            *mut *const c_void,
+        ) -> HResult = method(loader, 3);
+        let mut files = core::ptr::null();
+        if create(loader, factory, key, size, &mut files) != S_OK || files.is_null() {
+            return None;
+        }
+        let move_next: extern "system" fn(*const c_void, *mut i32) -> HResult = method(files, 3);
+        let current: extern "system" fn(*const c_void, *mut *const c_void) -> HResult =
+            method(files, 4);
+        // Bounded: a family has a handful of files.
+        for _ in 0..256 {
+            let mut has = 0;
+            if move_next(files, &mut has) != S_OK || has == 0 {
+                break;
+            }
+            let mut file = core::ptr::null();
+            if current(files, &mut file) != S_OK || file.is_null() {
+                others += 1;
+                continue;
+            }
+            if face_for_file(file).is_some() {
+                ours += 1;
+            } else {
+                others += 1;
+                let release: Release = method(file, 2);
+                release(file);
+            }
+        }
+        let release: Release = method(files, 2);
+        release(files);
+    }
+    Some((collection()?, ours, others))
+}
+
+/// The font index of a face object of ours.
+pub fn font_of_face(face: *const c_void) -> Option<usize> {
+    FACE_OBJS.iter().position(|f| core::ptr::eq((f as *const Indexed).cast(), face))
 }
 
 /// The face of a font file object of ours.
@@ -888,9 +1020,29 @@ extern "system" fn face_try_get_table(
 
 extern "system" fn face_release_table(_this: *const c_void, _context: *mut c_void) {}
 
-extern "system" fn face_glyph_run_outline(_this: *const c_void) -> HResult {
-    missing(b"dwrite.dll!IDWriteFontFace::GetGlyphRunOutline", 0);
-    E_NOTIMPL
+#[allow(clippy::too_many_arguments)]
+extern "system" fn face_glyph_run_outline(
+    this: *const c_void,
+    em: f32,
+    glyphs: *const u16,
+    advances: *const f32,
+    offsets: *const [f32; 2],
+    count: u32,
+    sideways: i32,
+    rtl: i32,
+    sink: *const c_void,
+) -> HResult {
+    crate::glyphs::outline(
+        index_of(this),
+        em,
+        glyphs,
+        advances,
+        offsets,
+        count,
+        sideways != 0,
+        rtl != 0,
+        sink,
+    )
 }
 
 /// DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC (anti-aliased, as gala draws).

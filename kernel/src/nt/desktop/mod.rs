@@ -813,12 +813,11 @@ impl Desktop {
     pub fn present(
         &mut self,
         id: u32,
-        owner: u64,
         r: Rect,
         pixels: &[u32],
         stride: usize,
     ) -> Result<Rect, NtStatus> {
-        let win = self.find(id, owner)?;
+        let win = self.windows.iter_mut().find(|w| w.id == id).ok_or(NtStatus::INVALID_HANDLE)?;
         let (cw, ch) = win.client_size();
         let clipped = r.clip(cw.into(), ch.into()).ok_or(NtStatus::INVALID_PARAMETER)?;
         let (dx, dy) = (clipped.x - r.x, clipped.y - r.y);

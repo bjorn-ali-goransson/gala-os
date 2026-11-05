@@ -73,6 +73,14 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;
+    pub(crate) fn MapViewOfFile(
+        mapping: *mut c_void,
+        access: u32,
+        offset_high: u32,
+        offset_low: u32,
+        size: usize,
+    ) -> *mut c_void;
+    fn UnmapViewOfFile(at: *const c_void) -> i32;
 }
 
 type Handle = *mut c_void;
@@ -93,6 +101,9 @@ pub(crate) struct Bitmap {
     pub dib: bool,
     /// Memory to free with the bitmap (VirtualAlloc'd).
     pub owned: bool,
+    /// The view of a file mapping the bits are in (a DIB section over a
+    /// caller's section), unmapped with the bitmap; null for none.
+    pub view: *mut u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -329,7 +340,13 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut [Object; SLOTS], &[usize; STOCK]) -> R
                 (17, gui),
                 (
                     DEFAULT_BITMAP,
-                    Object::Bitmap(Bitmap { surface: one, bpp: 1, dib: false, owned: false }),
+                    Object::Bitmap(Bitmap {
+                        surface: one,
+                        bpp: 1,
+                        dib: false,
+                        owned: false,
+                        view: core::ptr::null_mut(),
+                    }),
                 ),
             ];
             for (slot, (index, object)) in objects.into_iter().enumerate() {
@@ -748,7 +765,11 @@ pub extern "system" fn DeleteObject(h: Handle) -> i32 {
                 return None;
             }
             slots[i] = Object::Free;
-            return Some(b.owned.then_some(b.surface.bits));
+            return Some(if !b.view.is_null() {
+                Some((b.view, true))
+            } else {
+                b.owned.then_some((b.surface.bits, false))
+            });
         }
         slots[i] = Object::Free;
         Some(None)
@@ -756,9 +777,16 @@ pub extern "system" fn DeleteObject(h: Handle) -> i32 {
     match freed {
         None => 0,
         Some(memory) => {
-            if let Some(bits) = memory {
+            match memory {
+                // SAFETY: the bitmap's own view, no longer referenced.
+                Some((view, true)) => unsafe {
+                    UnmapViewOfFile(view.cast());
+                },
                 // SAFETY: the bitmap's own memory, no longer referenced.
-                unsafe { VirtualFree(bits.cast(), 0, 0x8000) };
+                Some((bits, false)) => unsafe {
+                    VirtualFree(bits.cast(), 0, 0x8000);
+                },
+                None => {}
             }
             1
         }

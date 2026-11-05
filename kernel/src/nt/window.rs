@@ -200,6 +200,24 @@ struct Registry {
     /// process lets through from lower integrity levels, process-wide or
     /// for one of its windows.
     filters: Vec<Filter>,
+    /// Top-level windows' surfaces (GalaWindowSurface): the section
+    /// holding the window's pixels, which another process of the desktop
+    /// maps to draw into the window (GetDC of another process's window:
+    /// Chromium's GPU process paints the browser's window).
+    surfaces: Vec<Surface>,
+}
+
+/// The section a top-level window's pixels are in.
+pub struct Surface {
+    pub pid: u32,
+    pub hwnd: u64,
+    pub section: ObjectRef,
+    /// The client area's first pixel, in bytes into the section (a menu
+    /// bar's rows come first).
+    pub offset: u64,
+    /// The client area's size in pixels (rows `width` pixels apart).
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A message process `pid` lets through UIPI's filter: for its window
@@ -386,7 +404,59 @@ impl Windows {
             next_sent: 1,
             queues: Vec::new(),
             filters: Vec::new(),
+            surfaces: Vec::new(),
         }))
+    }
+
+    /// Process `pid`'s top-level window `hwnd` keeps its pixels in
+    /// `section` (replacing a former one, after a resize).
+    pub fn set_surface(&self, surface: Surface) -> Result<(), NtStatus> {
+        let old = {
+            let mut r = self.0.lock();
+            if !r
+                .windows
+                .iter()
+                .any(|w| w.hwnd == surface.hwnd && w.pid == surface.pid && w.parent == 0)
+            {
+                return Err(NtStatus::INVALID_HANDLE);
+            }
+            match r.surfaces.iter_mut().find(|s| s.hwnd == surface.hwnd) {
+                Some(s) => Some(core::mem::replace(s, surface)),
+                None => {
+                    r.surfaces.try_push(surface).map_err(|_| NtStatus::NO_MEMORY)?;
+                    None
+                }
+            }
+        };
+        // The former section's last reference may go here, not under the
+        // registry's lock.
+        drop(old);
+        Ok(())
+    }
+
+    /// Window `hwnd`'s surface (any process's): the section, the client
+    /// area's offset and size, the window's id on shasha's screen.
+    pub fn surface(&self, hwnd: u64) -> Option<(ObjectRef, u64, u32, u32, u32)> {
+        let r = self.0.lock();
+        let desktop = r.windows.iter().find(|w| w.hwnd == hwnd)?.desktop;
+        let s = r.surfaces.iter().find(|s| s.hwnd == hwnd)?;
+        Some((s.section.clone(), s.offset, s.width, s.height, desktop))
+    }
+
+    /// Drops the surfaces of windows no longer registered, one at a time
+    /// outside the lock (a section's last reference may go).
+    fn prune_surfaces(&self) {
+        loop {
+            let gone = {
+                let mut r = self.0.lock();
+                let Registry { windows, surfaces, .. } = &mut *r;
+                match surfaces.iter().position(|s| !windows.iter().any(|w| w.hwnd == s.hwnd)) {
+                    Some(i) => surfaces.swap_remove(i),
+                    None => return,
+                }
+            };
+            drop(gone);
+        }
     }
 
     /// How much the registry holds (the state dump's line).
@@ -796,6 +866,8 @@ impl Windows {
             return Err(NtStatus::INVALID_HANDLE);
         }
         r.filters.retain(|f| !(f.pid == pid && f.hwnd == hwnd));
+        drop(r);
+        self.prune_surfaces();
         Ok(())
     }
 
@@ -882,6 +954,7 @@ impl Windows {
             // Its own sends go; sends to it fail (their senders wake).
             abandon_sends(&mut r, |m| m.from_pid == pid);
         }
+        self.prune_surfaces();
         self.fail_sends(|m| m.to_pid == pid);
     }
 
@@ -901,6 +974,7 @@ impl Windows {
             r.queues.retain(|&(p, t)| !(p == pid && t == tid));
             abandon_sends(&mut r, |m| m.from_pid == pid && m.from_tid == tid);
         }
+        self.prune_surfaces();
         self.fail_sends(|m| m.to_pid == pid && m.to_tid == tid);
     }
 }

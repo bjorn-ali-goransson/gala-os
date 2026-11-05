@@ -28,6 +28,7 @@ mod rect;
 mod scroll;
 mod session;
 mod spi;
+mod surface;
 mod text;
 mod timer;
 mod track;
