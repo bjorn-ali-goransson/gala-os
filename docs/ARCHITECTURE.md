@@ -1982,6 +1982,17 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   to kernel32 (no kernelbase), `downlevel-<dll>-*` to that DLL,
   `shcore-*` to shcore, `power-*` to powrprof; unknown contracts are
   looked up as files (and so not found).
+- **PEB.Ldr** (+0x18): a PEB_LDR_DATA and one LDR_DATA_TABLE_ENTRY per
+  module slot, in ntdll's own data (so in the process's memory, where
+  another process reads them: Crashpad's handler walks a crashed
+  process's InLoadOrderModuleList for its snapshot). The executable is
+  first in load order, then ntdll, then each DLL as it is mapped; memory
+  order is the same; initialization order has ntdll, then each DLL as
+  its DllMain first runs, never the executable. Entries carry DllBase,
+  EntryPoint, SizeOfImage, FullDllName and BaseDllName (in the slot's
+  path), LoadCount (0xffff when pinned) and TimeDateStamp; an unloaded
+  module leaves all three lists. Changed under the loader lock only
+  (`loader_test`).
 - **The loader lock** is laid out as an RTL_CRITICAL_SECTION
   (`LOADER_LOCK`, owner at +0x10) and PEB.LoaderLock (+0x110) points at
   it (Crashpad's IsThreadInLoaderLock reads it).

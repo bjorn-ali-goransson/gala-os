@@ -619,6 +619,8 @@ fn set_module_path(slot: usize, path: &[u16]) {
         m[slot].path[..n].copy_from_slice(&path[..n]);
         m[slot].path_len = n;
     });
+    // The module is complete: into PEB.Ldr's lists.
+    ldr_link(slot);
 }
 
 fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
@@ -823,7 +825,218 @@ pub(crate) fn with_loader_lock<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
-// TODO: PEB->Ldr lists.
+/// LIST_ENTRY.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ListEntry {
+    flink: usize,
+    blink: usize,
+}
+
+/// UNICODE_STRING (x64: lengths in bytes, padding, the buffer).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UnicodeStr {
+    length: u16,
+    maximum: u16,
+    pad: u32,
+    buffer: usize,
+}
+
+/// PEB_LDR_DATA (x64, 0x58 bytes), what PEB.Ldr (+0x18) points at.
+#[repr(C)]
+struct LdrData {
+    length: u32,
+    initialized: u32,
+    ss_handle: usize,
+    load_order: ListEntry,
+    memory_order: ListEntry,
+    init_order: ListEntry,
+    entry_in_progress: usize,
+    shutdown_in_progress: u32,
+    shutdown_thread: usize,
+}
+
+/// LDR_DATA_TABLE_ENTRY (x64), the fields up to TimeDateStamp (+0x80).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LdrEntry {
+    load_order: ListEntry,
+    memory_order: ListEntry,
+    init_order: ListEntry,
+    dll_base: usize,
+    entry_point: usize,
+    size_of_image: u32,
+    pad: u32,
+    full_name: UnicodeStr,
+    base_name: UnicodeStr,
+    flags: u32,
+    load_count: u16,
+    tls_index: u16,
+    hash_links: ListEntry,
+    time_date_stamp: u32,
+    pad2: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<LdrData>() == 0x58);
+const _: () = assert!(core::mem::offset_of!(LdrEntry, full_name) == 0x48);
+const _: () = assert!(core::mem::offset_of!(LdrEntry, time_date_stamp) == 0x80);
+
+const NO_LIST: ListEntry = ListEntry { flink: 0, blink: 0 };
+const NO_STRING: UnicodeStr = UnicodeStr { length: 0, maximum: 0, pad: 0, buffer: 0 };
+const NO_ENTRY: LdrEntry = LdrEntry {
+    load_order: NO_LIST,
+    memory_order: NO_LIST,
+    init_order: NO_LIST,
+    dll_base: 0,
+    entry_point: 0,
+    size_of_image: 0,
+    pad: 0,
+    full_name: NO_STRING,
+    base_name: NO_STRING,
+    flags: 0,
+    load_count: 0,
+    tls_index: 0,
+    hash_links: NO_LIST,
+    time_date_stamp: 0,
+    pad2: 0,
+};
+
+/// The loader's lists as Windows keeps them (PEB.Ldr), for code that walks
+/// them: debuggers, crash reporters (Crashpad's handler reads a crashed
+/// process's InLoadOrderModuleList to list its modules), module
+/// enumeration. One entry per module slot, in ntdll's own data (so in the
+/// process's memory, where another process can read it): the executable
+/// first in load order, then ntdll, then each DLL as it is mapped; in
+/// initialization order each DLL as its DllMain is first called (ntdll
+/// first, the executable never). Changed under the loader lock only.
+struct Ldr(core::cell::UnsafeCell<(LdrData, [LdrEntry; MAX_MODULES])>);
+
+// SAFETY: as `Modules`.
+unsafe impl Sync for Ldr {}
+
+static LDR: Ldr = Ldr(core::cell::UnsafeCell::new((
+    LdrData {
+        length: 0x58,
+        initialized: 0,
+        ss_handle: 0,
+        load_order: NO_LIST,
+        memory_order: NO_LIST,
+        init_order: NO_LIST,
+        entry_in_progress: 0,
+        shutdown_in_progress: 0,
+        shutdown_thread: 0,
+    },
+    [NO_ENTRY; MAX_MODULES],
+)));
+
+/// The list heads and entries (under the loader lock).
+fn ldr() -> &'static mut (LdrData, [LdrEntry; MAX_MODULES]) {
+    // SAFETY: changed under the loader lock or before a second thread.
+    unsafe { &mut *LDR.0.get() }
+}
+
+/// Makes the list heads empty (pointing at themselves) and PEB.Ldr point
+/// at them.
+fn ldr_init() {
+    let (data, _) = ldr();
+    for head in [&mut data.load_order, &mut data.memory_order, &mut data.init_order] {
+        let me = head as *mut ListEntry as usize;
+        *head = ListEntry { flink: me, blink: me };
+    }
+    // SAFETY: gs:[0x60] is the PEB; Ldr is at +0x18.
+    unsafe {
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        ((peb + 0x18) as *mut usize).write(data as *mut LdrData as usize);
+    }
+}
+
+/// Puts `entry` last in the list at `head`.
+fn list_append(head: *mut ListEntry, entry: *mut ListEntry) {
+    // SAFETY: a list head and an entry of `LDR`, under the loader lock.
+    unsafe {
+        let last = (*head).blink as *mut ListEntry;
+        (*entry).flink = head as usize;
+        (*entry).blink = last as usize;
+        (*last).flink = entry as usize;
+        (*head).blink = entry as usize;
+    }
+}
+
+/// Takes `entry` out of its list (if it is in one).
+fn list_remove(entry: *mut ListEntry) {
+    // SAFETY: an entry of `LDR`, under the loader lock.
+    unsafe {
+        if (*entry).flink == 0 {
+            return;
+        }
+        let (prev, next) = ((*entry).blink as *mut ListEntry, (*entry).flink as *mut ListEntry);
+        (*prev).flink = next as usize;
+        (*next).blink = prev as usize;
+        *entry = NO_LIST;
+    }
+}
+
+/// Fills slot `slot`'s entry from its module (base, image size, entry
+/// point, time stamp, the file's full and base names) and appends it to
+/// the load and memory order lists.
+fn ldr_link(slot: usize) {
+    let (base, refs) = with_modules(|m| (m[slot].base, m[slot].refs));
+    let (path, len) = with_modules(|m| (m[slot].path.as_ptr() as usize, m[slot].path_len));
+    let (data, entries) = ldr();
+    let e = &mut entries[slot];
+    list_remove(&mut e.load_order);
+    list_remove(&mut e.memory_order);
+    list_remove(&mut e.init_order);
+    let pe = base + rd32(base + 0x3c) as usize;
+    let entry = rd32(pe + 24 + 16) as usize;
+    // SAFETY: the module's path, `len` units in its slot.
+    let units = unsafe { core::slice::from_raw_parts(path as *const u16, len) };
+    let file = units.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
+    *e = LdrEntry {
+        dll_base: base,
+        entry_point: if entry == 0 { 0 } else { base + entry },
+        size_of_image: rd32(pe + 24 + 56),
+        full_name: UnicodeStr {
+            length: (2 * len) as u16,
+            maximum: (2 * len) as u16,
+            pad: 0,
+            buffer: path,
+        },
+        base_name: UnicodeStr {
+            length: (2 * (len - file)) as u16,
+            maximum: (2 * (len - file)) as u16,
+            pad: 0,
+            buffer: path + 2 * file,
+        },
+        load_count: if refs == PINNED { u16::MAX } else { refs.min(0xfffe) as u16 },
+        time_date_stamp: rd32(pe + 8),
+        ..NO_ENTRY
+    };
+    list_append(&mut data.load_order, &mut e.load_order);
+    list_append(&mut data.memory_order, &mut e.memory_order);
+}
+
+/// Appends slot `slot`'s entry to the initialization order list (its
+/// DllMain is about to run for the first time).
+fn ldr_initialized(slot: usize) {
+    let (data, entries) = ldr();
+    if entries[slot].init_order.flink == 0 && entries[slot].dll_base != 0 {
+        list_append(&mut data.init_order, &mut entries[slot].init_order);
+    }
+}
+
+/// Takes slot `slot`'s entry out of the lists (its module is unloaded).
+fn ldr_unlink(slot: usize) {
+    let (_, entries) = ldr();
+    let e = &mut entries[slot];
+    list_remove(&mut e.load_order);
+    list_remove(&mut e.memory_order);
+    list_remove(&mut e.init_order);
+    *e = NO_ENTRY;
+}
+
 struct Modules(core::cell::UnsafeCell<[Module; MAX_MODULES]>);
 
 // SAFETY: used under the loader lock (`with_loader_lock`), or before a
@@ -1027,6 +1240,7 @@ fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
             tls::callbacks(base, tls::DLL_PROCESS_ATTACH);
         }
         with_modules(|m| m[slot].attached = true);
+        ldr_initialized(slot);
         // lpvReserved: non-NULL for a DLL loaded with the program (the
         // initial context, as Windows passes), NULL for LoadLibrary.
         let reserved = if STARTUP.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1057,6 +1271,7 @@ fn unload_module(slot: usize) {
         (m[slot].refs == 0).then(|| core::mem::replace(&mut m[slot], FREE))
     });
     let Some(module) = module else { return };
+    ldr_unlink(slot);
     if module.attached
         && let Some(entry) = entry_point(module.base)
     {
@@ -1354,8 +1569,25 @@ extern "system" fn ldr_unload_dll(module: usize) -> u32 {
     }
 }
 
-/// Records ntdll and the executable as pinned modules.
+/// Records the executable and ntdll as pinned modules (in that order, the
+/// order of PEB.Ldr's load order list on Windows).
 fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
+    ldr_init();
+    // SAFETY: gs:[0x60] is the PEB; ProcessParameters->ImagePathName is
+    // filled in by the kernel.
+    let image_path = unsafe {
+        let peb: usize;
+        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+        let params = rd64(peb + 0x20) as usize;
+        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
+        core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
+    };
+    let mut name = [0u8; MAX_NAME];
+    // An executable whose name is not a plain ASCII one is just not listed.
+    if let Ok(n) = normalize(image_path.iter().copied(), &mut name) {
+        let slot = add_module(&name[..n], image, PINNED)?;
+        set_module_path(slot, image_path);
+    }
     let ntdll_slot = add_module(b"ntdll.dll", ntdll, PINNED)?;
     // ntdll's file: <NtSystemRoot>\System32\ntdll.dll.
     let mut path = [0u16; MAX_PATH];
@@ -1372,21 +1604,9 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
         n += 1;
     }
     set_module_path(ntdll_slot, &path[..n]);
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters->ImagePathName is
-    // filled in by the kernel.
-    let image_path = unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        let params = rd64(peb + 0x20) as usize;
-        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-        core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
-    };
-    let mut name = [0u8; MAX_NAME];
-    // An executable whose name is not a plain ASCII one is just not listed.
-    if let Ok(n) = normalize(image_path.iter().copied(), &mut name) {
-        let slot = add_module(&name[..n], image, PINNED)?;
-        set_module_path(slot, image_path);
-    }
+    // ntdll is initialized first; the executable is never in that list.
+    ldr_initialized(ntdll_slot);
+    ldr().0.initialized = 1;
     Ok(())
 }
 
