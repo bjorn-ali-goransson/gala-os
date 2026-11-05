@@ -185,9 +185,58 @@ fn as_thread(object: &ObjectRef) -> &NtThread {
     }
 }
 
+/// Each NT thread's object by its scheduler id (the index): `current`
+/// finds the caller's at once. Scanning every thread of every process on
+/// each system call took 36% of a Chromium run (its hundreds of threads;
+/// `bench`'s null_syscall_200_threads).
+static BY_SCHED: IrqMutex<Vec<Option<ObjectRef>>> = IrqMutex::new(Vec::new());
+
+/// Scheduler ids beyond this are not indexed (`current` scans for them).
+const BY_SCHED_MAX: usize = 1 << 16;
+
+/// Records `object` as the NT thread of scheduler thread `id`. Only the
+/// thread itself does (in `thread_entry`): its creator binding it after
+/// the spawn raced the thread's own exit, leaving a stale reference that
+/// kept its process alive. Out of memory it is not indexed and `current`
+/// finds it by a scan.
+fn bind_sched(id: ThreadId, object: &ObjectRef) {
+    let i = id.as_usize();
+    if i >= BY_SCHED_MAX {
+        return;
+    }
+    let mut table = BY_SCHED.lock();
+    if table.len() <= i {
+        let more = i + 1 - table.len();
+        if table.try_reserve(more).is_err() {
+            return;
+        }
+        table.resize(i + 1, None);
+    }
+    table[i] = Some(object.clone());
+}
+
+/// Forgets `object` as the NT thread of scheduler thread `id`.
+fn unbind_sched(id: ThreadId, object: &ObjectRef) {
+    let mut table = BY_SCHED.lock();
+    if let Some(slot) = table.get_mut(id.as_usize())
+        && slot.as_ref().is_some_and(|o| KArc::ptr_eq(o, object))
+    {
+        *slot = None;
+    }
+}
+
 /// The NT thread object of the running thread (None for kernel threads).
 pub fn current() -> Option<ObjectRef> {
     let me = platform::current();
+    // An entry is checked: a scheduler id is reused once its thread is
+    // gone, and an exit that missed `unbind_sched` must not name another
+    // thread.
+    let indexed = BY_SCHED.lock().get(me.as_usize()).cloned().flatten();
+    if let Some(o) = indexed
+        && *as_thread(&o).sched_id.lock() == Some(me)
+    {
+        return Some(o);
+    }
     THREADS.lock().iter().find(|o| *as_thread(o).sched_id.lock() == Some(me)).cloned()
 }
 
@@ -359,6 +408,7 @@ fn thread_entry(id: usize) {
     let Some(object) = by_id(id as u64) else { platform::exit() };
     let t = as_thread(&object);
     *t.sched_id.lock() = Some(platform::current());
+    bind_sched(platform::current(), &object);
     t.apply_affinity();
     let resume = t.resume.lock().take();
     let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
@@ -1026,6 +1076,9 @@ pub fn exit_current(status: NtStatus) -> ! {
         t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
         t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
+        if let Some(id) = *t.sched_id.lock() {
+            unbind_sched(id, &object);
+        }
         let process = t.process.clone();
         let last = process.remove_thread(&object);
         wait::set_signal(&object, 1);

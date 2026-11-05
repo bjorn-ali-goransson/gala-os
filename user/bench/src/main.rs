@@ -100,6 +100,16 @@ extern "C" fn exit_now(_: usize) -> ! {
     exit_thread(STATUS_SUCCESS)
 }
 
+/// Waits on the event `handle` names, then exits.
+extern "C" fn wait_then_exit(handle: usize) -> ! {
+    wait(Handle(handle), None);
+    exit_thread(STATUS_SUCCESS)
+}
+
+/// How many other threads `null_syscall_200_threads` keeps alive (a
+/// browser has hundreds).
+const MANY: usize = 200;
+
 fn main() -> u32 {
     let mut b = [0u8; 64];
     query_system(0, &mut b);
@@ -158,6 +168,24 @@ fn main() -> u32 {
         wait(h, None);
         close(h);
     });
+    // The same call with many other threads alive: what a system call
+    // costs in a process like a browser (its cost must not grow with the
+    // number of threads).
+    let (_, gate) = create_event(EVENT_ALL_ACCESS, NOTIFICATION_EVENT, false);
+    let mut waiters = [Handle(0); MANY];
+    for w in waiters.iter_mut() {
+        let (_, h, _) = create_thread(wait_then_exit, gate.0, false);
+        *w = h;
+    }
+    bench("null_syscall_200_threads", 5000, || {
+        performance_counter();
+    });
+    set_event(gate);
+    for w in waiters {
+        wait(w, None);
+        close(w);
+    }
+    close(gate);
     ping_pong("event_pingpong_same_cpu", 0);
     if cpus >= 2 {
         ping_pong("event_pingpong_cross_cpu", 1);

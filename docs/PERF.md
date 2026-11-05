@@ -23,7 +23,11 @@ machine. Each measurement below keeps its date and how it was taken.
   dominating), so use it for shares and arguments, not totals.
 - **Micro-benchmarks**: `user/bench` runs unchanged on Windows and gala
   and prints `bench: <name> ns_per_op <n>` (wall time from the
-  performance counter): `null_syscall`, `handle_create_close`,
+  performance counter): `null_syscall`, `null_syscall_200_threads`
+  (the same with 200 other threads alive: a system call's cost must not
+  grow with the threads, as a browser has hundreds; compare the two in
+  one run, absolute numbers move ±30% between runs under TCG),
+  `handle_create_close`,
   `virtual_alloc_free_64k`, `demand_zero_fault`, `section_map_unmap_64k`,
   `image_load`, `thread_create_exit`, `event_pingpong_same_cpu`,
   `event_pingpong_cross_cpu` (with two CPUs). `cargo xtask bench
@@ -34,8 +38,12 @@ machine. Each measurement below keeps its date and how it was taken.
   build only with `--release`.
 - **Without kernel changes**: QEMU TCG plugins (`-plugin`) count
   instructions per address range (needs a QEMU built with plugins;
-  Ubuntu's has none); under KVM, `perf kvm` on the host. A sampling
-  profiler is planned (docs/OBSERVABILITY.md "Planned facilities").
+  Ubuntu's has none); under KVM, `perf kvm` on the host.
+- **The sampling profiler**: `events=sample,image,thread,process` (or
+  `XTASK_EVENTS=...`) and `cargo xtask profile` (docs/OBSERVABILITY.md
+  "Event stream"): where the CPU time goes, per process, thread, module
+  and function. A Chromium run found 36% of all samples in
+  `nt::thread::current`, a scan of every thread on each system call.
 
 Rules of thumb:
 

@@ -632,7 +632,13 @@ one flat structure, 120 bytes plus the extensions its flags name:
 
 An `NtThread` (`nt::thread`) is a waitable object (signaled on exit) with
 its ClientId, TEB, initial `UserRegs` (from the CONTEXT), suspend count
-and exit status; `THREADS` maps scheduler threads to them. A process
+and exit status; `THREADS` lists them, and `BY_SCHED` indexes each by its
+scheduler id so `thread::current` (every system call) is one lookup, not
+a scan of every thread of every process (a Chromium run spent 36% of its
+time there). A thread binds itself in `thread_entry` and unbinds at its
+exit (a creator binding it after the spawn raced a short thread's exit
+and kept its process alive); a hit is checked against the thread's
+scheduler id. A process
 (`nt::process`) owns its thread objects, a dispatcher (signaled when the
 last thread exits), handle table, VAD and address space, and records its
 creator's id (`parent_id`, 0 for boot programs). Pseudo handles: -1 =
