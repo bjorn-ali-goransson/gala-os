@@ -154,6 +154,8 @@ has a section under "Open items".
 | W2 | Styled desktop and input | done | `gui_test` |
 | W3 | FileZilla | in progress | connects to FileZilla Server, driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
+| SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
+| AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
@@ -371,10 +373,119 @@ Windows' metrics (`gdi32_test`).
 
 **Next**:
 1. Step 3: uxtheme with themes on and Windows 11-style control drawing.
-2. Later: a user-mode shell (taskbar and start menu out of the kernel),
-   resizing windows by the frame, keyboard focus per window.
+2. Later: resizing windows by the frame, keyboard focus per window
+   (SH's step 1 needs it); the shell itself leaves the kernel in item SH.
 
 **Design**: ARCHITECTURE "Windows on the screen".
+
+### SH. The shell in user mode
+
+**Goal**: the kernel keeps what win32k keeps on Windows (window state,
+Z order, focus, message routing, input queues, UIPI: what enforces
+isolation between processes) and nothing of the shell. The taskbar,
+start menu and wallpaper run as a user-mode program, as explorer.exe
+does; the compositor follows later, as DWM is a user-mode process.
+
+**Why**: a fault in the shell restarts a process instead of panicking
+the kernel (it matters more once the start menu holds an LLM client,
+item AI); the shell launches programs under the logged-on user's token
+(the start menu passes no token to `process::launch` today); less
+kernel state to carry across a handover (item R); the shell exercises
+gala's user32, gdi32 and GalaDesktopAction as any program does and can
+be replaced like one; 2.5 MB of the kernel (the `shasha` feature's
+shell part) leaves it.
+
+**Next** (each step test first, screen and UIA checks):
+1. `shasha.exe` (`user/shasha`): the taskbar, the start menu and the
+   wallpaper as ordinary topmost windows of a user-mode process, on
+   the existing calls (GalaDesktopAction's Start, Windows, Programs,
+   Activate, Minimize/Maximize/Restore, Close, Snap, Wallpaper; the
+   window and WinEvent calls for the taskbar's list). Started per
+   session under its user's token; the kernel's shell code removed in
+   the same change. Needs keyboard focus per window (W4): the start
+   menu gets keys as a focused window, not through the input thread.
+2. Supervision: the session (RS B4's session manager, the kernel until
+   then) restarts a shell that ends, with its exit status and crash
+   record in the event stream; windows stay usable meanwhile (Win+arrows
+   and the `gala` command do not depend on the shell). A scenario kills
+   the shell and checks it comes back with the same windows listed.
+3. What must not depend on the shell stays out of it: Ctrl+Alt+Del, a
+   later lock screen and consent prompts belong to the kernel or a
+   separate trusted process (RS's secure desktop).
+4. Later: the compositor in user mode along RS B3a's presenter seam
+   (shared-memory surfaces between programs and the compositor, one
+   copy to the Display seam per frame, damage tracking kept), after
+   B3a and GPU G0. Until then composition stays in the kernel.
+
+**Done when**: a scenario boots to a desktop drawn by `shasha.exe`
+under the boot user's token, starts a program from the start menu and
+switches to it from the taskbar (UIA), kills the shell and sees it
+restarted; the server kernel and `profile=server` start no shell.
+
+**Design**: ARCHITECTURE "Windows on the screen" (shasha), "Server and
+desktop workloads", "Plan: sessions and remote shasha" (presenters).
+
+### AI. An AI-enabled start menu
+
+**Goal**: the start menu talks to any standard LLM API (OpenAI-style,
+Anthropic, Gemini, Ollama or any OpenAI-compatible endpoint, local
+models included) with streamed replies and tool calls that act on the
+desktop; the same assistant is a console command first (CLI parity,
+the server edition too).
+
+**Approach**: no web view and no browser engine in the image (gala is
+under 10 MB, Chromium over 300 MB; BR brings Edge and WebView2 as an
+installed package, never part of the image). The LLM client is an
+existing CLI, **aichat** (sigoden/aichat, MIT or Apache-2.0, Rust, one
+exe): streaming over server-sent events, many providers, function
+calling (its llm-functions tools are scripts), a REPL, one-shot use and
+`aichat --serve`, a local OpenAI-compatible server. It is installed
+with `gala install sigoden.AIChat` (winget-pkgs: a zip with a portable
+`aichat.exe`, which PK's stages 1-2 handle), not shipped. The tools are
+the `gala` commands (start, windows, activate, snap, close, ...) and
+UIA for driving programs, so the model acts only through what CLI
+parity already exposes.
+
+**Next** (each step test first, the ledger leading):
+1. Install and run: a scenario installs `sigoden.AIChat` from a
+   mirrored manifest and zip (`--source` with an `installers\` mirror,
+   as `pk_install_zip`; xtask fetches the real zip, never committed)
+   and runs `aichat` one-shot and streaming against an in-guest mock
+   endpoint over plain HTTP (a test program serving a scripted SSE
+   stream, a tool call included), so streaming is tested without TLS.
+   Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
+   Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
+   not with gala; scenarios copy the JDK's app-local copy today) need a
+   decided home in the image or the installer.
+2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
+   system store (rustls-native-certs through crypt32), which gala opens
+   empty today; TLS step 6's ROOT store makes it work (aichat's TLS is
+   its own, so it does not wait for winhttp). A scenario against the
+   in-guest Nginx with the test CA in gala's roots.
+3. `gala ask`: the console entry point (provider and model from
+   configuration, the key stored with DPAPI, never in a plain file),
+   streaming to the console, the `gala` commands as tools; every
+   request, tool call (arguments and result) and confirmation in the
+   event stream; actions that close, kill or delete ask first; text a
+   tool returns is treated as untrusted (prompt injection).
+4. The start menu's chat panel in `shasha.exe` (after SH step 1): a
+   native panel (input, streamed text, a Markdown subset: paragraphs,
+   lists, code blocks) over `aichat --serve` on localhost; the panel
+   holds no TLS or provider code. If native drawing is not enough, a
+   small HTML/CSS renderer without JavaScript (litehtml, BSD) before
+   any browser engine.
+5. Later: WebView2 rendering when Edge is installed (BR stage 4), as an
+   option the start menu never depends on.
+
+**Done when**: from a fresh image, `gala install sigoden.AIChat` then
+`gala ask` streams an answer from the mock endpoint and performs a
+`gala` tool call with its confirmation; the start menu does the same
+through UIA; both leave the request and tool events in the event
+stream.
+
+**Design**: to be written in ARCHITECTURE with step 3 (the assistant's
+process, tools, confirmation and key storage); "Installing software"
+(PK); "Schannel (TLS)" for the root store.
 
 ### UIA. UI Automation and windows across processes
 
@@ -511,7 +622,8 @@ own session and shell.
    checks without QEMU screendumps); a session with no presenter keeps
    its windows. The Display seam's `screen_flush` and `screen_changed`
    (from GPU G1) are what a presenter needs. Window station and desktop
-   objects (GetProcessWindowStation is NULL today).
+   objects (GetProcessWindowStation is NULL today). The presenter seam
+   is also where the compositor later leaves the kernel (SH step 4).
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
@@ -661,9 +773,12 @@ started and, as administrator, imports the test CA first).
    Schannel).
 5. `gala install`'s HTTPS downloads (PK) on winhttp, with gala's root
    store holding a pinned, documented public CA bundle.
-6. For BR: crypt32's stores and chain engine
-   (CertVerifyCertificateChainPolicy; the ROOT store from the same
-   directory), Schannel then validating through them.
+6. crypt32's system stores and chain engine: the ROOT system store
+   from the same directory (CertOpenStore and CertOpenSystemStore open
+   system stores empty today; rustls-native-certs reads it, so aichat,
+   item AI step 2, needs it first), then the chain engine
+   (CertGetCertificateChain, CertVerifyCertificateChainPolicy; Go's TLS
+   and BR verify through them), Schannel then validating through them.
 7. Also open: session resumption, client certificates, ECDSA server
    keys, revocation, keys persisted across processes.
 
@@ -823,7 +938,8 @@ from the command line first (CLI parity; the server profile too).
    delete `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and
    an upgrade that keeps scope.
 2. The HTTPS fetcher (on winhttp and Schannel, TLS step 5): the GitHub
-   raw and contents URLs, winget's source index for search; real
+   raw and contents URLs, winget's source index for search (first
+   real-world target: `sigoden.AIChat`, item AI); real
    symbolic links for commands; the logon environment from
    `HKCU\Environment`.
 3. Stage 3, Inno Setup and NSIS (`inno`, `nullsoft`, `exe` with known
