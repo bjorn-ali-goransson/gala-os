@@ -3278,6 +3278,16 @@ SOCKET values are the endpoint handles.
 | `udp_echo` | `udp_test serve`: `udp_client` sends datagrams of 1-1400 bytes through the UDP forward, resending until each is echoed, then `dns example.com` resolves through QEMU's DNS (an address is required when the host resolves the name; skipped and logged when the host has no DNS) |
 | `afd_poll_test`, `winsock_async_test`, `iphlpapi_test` | independent polls on one helper handle; overlapped Winsock with a completion port as Go uses it (AcceptEx, ConnectEx, packets); the interface tables |
 
+Scenarios in xtask's `HOST_PAGE_SCENARIOS` (`hostnet`: user/hostnet_test
+with Winsock; `chromium_host`: Chromium's network service) fetch a page
+from the host: their card's user network gets
+`guestfwd=tcp:10.0.2.100:80-cmd:<xtask> serve-page`, so QEMU runs
+`xtask serve-page` for each connection to 10.0.2.100 port 80, its
+standard input and output the connection (its standard error too: it
+logs each request line to `<iso>.serve.log`, which the run adds to the
+serial log as `xtask: serve-page: "GET / ..."`). No host port is leased
+or told to the guest.
+
 Scenarios in xtask's `NET_SCENARIOS` get a virtio-net card and
 `-netdev user,hostfwd=tcp:127.0.0.1:<leased port>-:7,hostfwd=udp:
 127.0.0.1:<the same port>-:7` (every other VM gets `-nic none`). The

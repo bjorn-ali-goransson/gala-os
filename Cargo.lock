@@ -908,6 +908,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostnet_test"
+version = "0.1.0"
+
+[[package]]
 name = "image_test"
 version = "0.1.0"
 dependencies = [

@@ -205,6 +205,7 @@ xtask that change how a scenario boots:
 | `SLOW_SCENARIOS` | 300 s instead of `BOOT_TEST_TIMEOUT` (120 s) |
 | `UEFI_SCENARIOS` | boot by UEFI (the rest by BIOS) |
 | `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
+| `HOST_PAGE_SCENARIOS` | a network card whose 10.0.2.100:80 is a page served from the host (`xtask serve-page`; "Network tests") |
 | `DISK_SCENARIOS` | a virtio-blk disk ("Disk tests") |
 | `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
 | `SCREEN_SCENARIOS` | pixel checks through the QEMU monitor ("Screenshots") |
@@ -258,7 +259,13 @@ a summary go to `target/report/timing.txt`; outcomes to
 ### Network tests
 
 VMs have no network card unless the scenario is in `NET_SCENARIOS`
-(`-nic none` otherwise).
+or `HOST_PAGE_SCENARIOS` (`-nic none` otherwise).
+
+- A host-page scenario's guest fetches `http://10.0.2.100/`: QEMU runs
+  `xtask serve-page` (the running xtask's own binary) per connection,
+  which answers with `HOST_PAGE`. Nothing is leased; its requests show
+  as `xtask: serve-page: "GET / ..."` in the log. To serve something
+  else, change `HOST_PAGE` (user/hostnet_test checks it byte for byte).
 
 - A net scenario gets a virtio-net card on QEMU's user network with a
   host port forwarded to guest port 7 (TCP and UDP, the same port number

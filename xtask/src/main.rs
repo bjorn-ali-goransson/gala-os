@@ -757,6 +757,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("browser_api_test", "wtsapi32.dll", "Windows/System32"),
     ("browser_api_test", "dwmapi.dll", "Windows/System32"),
     ("browser_api_test", "imm32.dll", "Windows/System32"),
+    ("hostnet", "ntdll.dll", "Windows/System32"),
+    ("hostnet", "kernel32.dll", "Windows/System32"),
+    ("hostnet", "ws2_32.dll", "Windows/System32"),
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
@@ -1941,6 +1944,7 @@ const USER_PROGRAMS: &[&str] = &[
     "replay_test",
     "kernel32_env_test",
     "winsock_test",
+    "hostnet_test",
     "winsock_async_test",
     "udp_test",
     "process_test",
@@ -2069,6 +2073,8 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  serve-page   answer one HTTP request on standard input/output with the
+               host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
   perfetto     a boot's event stream as a Perfetto trace (tracks per thread,
                system calls, IPC flows, samples): <events.jsonl | scenario>
                [--out FILE]; open it in ui.perfetto.dev
@@ -2172,6 +2178,7 @@ fn main() -> ExitCode {
             Some("otel") => otel_cli(&args[1..]),
             Some("profile") => profile_cli(&args[1..]),
             Some("perfetto") => perfetto_cli(&args[1..]),
+            Some("serve-page") => serve_page(),
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -2989,6 +2996,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
     "java_stress",
+    "chromium_host",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -3615,6 +3623,19 @@ const SCENARIOS: &[Scenario] = &[
             "xtask: net client: echo ok",
             "winsock_test: ok",
             "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // A page from the host network: hostnet_test fetches
+        // http://10.0.2.100/, which QEMU's user network hands to xtask's
+        // `serve-page` on the host (HOST_PAGE_SCENARIOS).
+        name: "hostnet",
+        cmdline: "qemu_exit run=hostnet_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "hostnet_test: ok",
+            "exited with status 0x00000000",
+            "xtask: serve-page: \"GET / HTTP/1.0\"",
         ],
     },
     Scenario {
@@ -5476,6 +5497,21 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["<h1>Welcome to nginx!</h1>", "chrome.exe finished with status 0x00000000"],
     },
     Scenario {
+        // BR stage 1: a page from the host network: http://10.0.2.100/,
+        // which QEMU's user network hands to xtask's `serve-page` on the
+        // host (HOST_PAGE_SCENARIOS); the network service's sockets leave
+        // the guest through virtio-net.
+        name: "chromium_host",
+        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20http://10.0.2.100/ \
+                  dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "<h1>hello from the host</h1>",
+            "chrome.exe finished with status 0x00000000",
+            "xtask: serve-page: \"GET / HTTP/1.1\"",
+        ],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -6253,6 +6289,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_version", "chromium"),
     ("chromium_dump", "chromium"),
     ("chromium_https", "chromium"),
+    ("chromium_host", "chromium"),
     ("chromium_https", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];
@@ -6279,6 +6316,7 @@ fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
         || scenario_boot(s.name) != Boot::Bios
         || s.expect.iter().any(|e| e.contains("pid "))
         || net_marker(s.name).is_some()
+        || HOST_PAGE_SCENARIOS.contains(&s.name)
         || disk_scenario(s.name).is_some()
         || s.name.starts_with("onecpu_")
     {
@@ -6792,7 +6830,7 @@ fn um_gap(s: &Scenario) -> Option<String> {
     if scenario_program(s).is_none() {
         return Some("not a program's own scenario".into());
     }
-    if net_marker(s.name).is_some() {
+    if net_marker(s.name).is_some() || HOST_PAGE_SCENARIOS.contains(&s.name) {
         return Some("network scenario (needs a network card and xtask's client)".into());
     }
     if disk_scenario(s.name).is_some() {
@@ -7685,6 +7723,9 @@ fn run_vm_once(
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
         add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
+    } else if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
+        let _ = fs::remove_file(iso.with_extension("serve.log"));
+        add_host_page_net(&mut cmd, &iso.with_extension("serve.log"))?;
     }
     if let Some(disk) = disk {
         add_disk(&mut cmd, disk);
@@ -7827,6 +7868,10 @@ fn run_vm_once(
     }
     if let Some(verdict) = screen_verdict {
         serial += &verdict;
+    }
+    // The host page's requests (`serve-page`), as they came.
+    if let Ok(served) = fs::read_to_string(iso.with_extension("serve.log")) {
+        serial += &served;
     }
     let vcpus = qmp_thread.join().ok().flatten();
     let _ = fs::remove_file(&qmp);
@@ -8696,6 +8741,66 @@ fn add_net_to(cmd: &mut Command, port: u16, guest: u16) {
         ))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+}
+
+/// Scenarios whose guest fetches `http://10.0.2.100/` from the host
+/// (`add_host_page_net`).
+const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host"];
+
+/// The page `serve-page` serves (user/hostnet_test checks it byte for
+/// byte).
+const HOST_PAGE: &str = "<html><body><h1>hello from the host</h1></body></html>\n";
+
+/// A virtio-net card on QEMU's user network whose address 10.0.2.100
+/// port 80 is forwarded, a connection at a time, to `xtask serve-page` on
+/// the host (QEMU runs the program for each connection, its standard
+/// input and output the connection): a page from the host network with
+/// no host port to lease or to tell the guest.
+fn add_host_page_net(cmd: &mut Command, log: &Path) -> Result {
+    let exe = env::current_exe().map_err(|e| format!("xtask's own path: {e}"))?;
+    let exe = exe.display().to_string();
+    if exe.contains(',') || exe.contains(' ') {
+        return Err(format!("xtask's path {exe:?} cannot go in a -netdev option"));
+    }
+    // serve-page's standard error is the connection too: it logs each
+    // request to `log`, which the run adds to the serial log.
+    cmd.env("XTASK_SERVE_PAGE_LOG", log)
+        .arg("-netdev")
+        .arg(format!("user,id=n0,guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
+        .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+    Ok(())
+}
+
+/// `cargo xtask serve-page` (QEMU runs it for each connection to
+/// 10.0.2.100:80): reads the request's head from standard input, answers
+/// with HOST_PAGE and exits (closing the connection). Each request is
+/// appended to `XTASK_SERVE_PAGE_LOG` (the run adds it to the serial
+/// log), as `xtask: serve-page: "<request line>"`: standard output and
+/// error are both the connection.
+fn serve_page() -> Result {
+    use std::io::{Read, Write};
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    let mut stdin = std::io::stdin().lock();
+    while !head.ends_with(b"\r\n\r\n") && head.len() < 64 * 1024 {
+        match stdin.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => break,
+        }
+    }
+    let first =
+        String::from_utf8_lossy(head.split(|&b| b == b'\r').next().unwrap_or(&[])).into_owned();
+    if let Ok(path) = env::var("XTASK_SERVE_PAGE_LOG")
+        && let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(path)
+    {
+        let _ = writeln!(log, "xtask: serve-page: {first:?}");
+    }
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{HOST_PAGE}",
+        HOST_PAGE.len()
+    );
+    let mut out = std::io::stdout().lock();
+    out.write_all(response.as_bytes()).and_then(|()| out.flush()).map_err(|e| e.to_string())
 }
 
 /// A virtio-gpu (modern virtio-pci) as the only display, at 1280 x 800
