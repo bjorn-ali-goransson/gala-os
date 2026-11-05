@@ -2377,7 +2377,10 @@ ntdll imports.
   the system providers or "System", CertOpenSystemStoreW/A) is a memory
   store filled with **gala's machine root store**, the certificates (DER,
   or PEM with any number) in `%SystemRoot%\System32\gala\roots`
-  (`roots.rs`), the anchors Schannel trusts too, so programs that build
+  (`roots.rs`), the anchors Schannel trusts too. Collections nest
+  (enumeration and finds walk members depth first, at most 64 stores 4
+  deep, a store met twice skipped): Chromium's issuer lookup searches a
+  collection of its roots and intermediates collections. Programs that build
   trust from crypt32's stores (Chromium's TrustStoreWin) trust the same
   roots. The other system stores are empty memory stores (no persistent
   certificate store; each open recorded with the store's name). CryptQueryObject

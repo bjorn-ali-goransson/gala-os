@@ -70,6 +70,36 @@ pub struct Store {
 
 /// The most stores a collection holds.
 const MAX_MEMBERS: usize = 16;
+/// The most stores one enumeration walks (a collection and its members,
+/// nested), and how deep.
+const MAX_WALKED: usize = 64;
+const MAX_DEPTH: usize = 4;
+
+/// Appends references to `s`'s members to `out` (depth first: each
+/// member, then its own members), skipping stores already there (a
+/// collection that contains itself) and past `MAX_WALKED`/`MAX_DEPTH`.
+/// The caller closes them.
+fn walk_members(s: &mut Store, out: &mut [*mut c_void; MAX_WALKED], n: &mut usize, depth: usize) {
+    let mut direct = [core::ptr::null_mut(); MAX_MEMBERS];
+    let count = s.with(|s| {
+        for (slot, m) in direct.iter_mut().zip(&s.members[..s.member_count]) {
+            *slot = m.0;
+        }
+        s.member_count
+    });
+    for &m in &direct[..count] {
+        if *n == MAX_WALKED || out[..*n].contains(&m) {
+            continue;
+        }
+        out[*n] = CertDuplicateStore(m);
+        *n += 1;
+        if depth + 1 < MAX_DEPTH
+            && let Some(inner) = store(m)
+        {
+            walk_members(inner, out, n, depth + 1);
+        }
+    }
+}
 const CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG: u32 = 1;
 
 fn store<'a>(h: *mut c_void) -> Option<&'a mut Store> {
@@ -476,14 +506,12 @@ fn next_after(
         return error(E_INVALIDARG, core::ptr::null());
     };
     // The store's own certificates, then (a collection) its members', in
-    // order: the next one after `prev` that `keep` keeps.
-    let mut members = [core::ptr::null_mut(); MAX_MEMBERS];
-    let count = s.with(|s| {
-        for (slot, m) in members.iter_mut().zip(&s.members[..s.member_count]) {
-            *slot = CertDuplicateStore(m.0);
-        }
-        s.member_count
-    });
+    // order and depth first (a member may be a collection itself:
+    // Chromium's issuer lookup nests them): the next one after `prev`
+    // that `keep` keeps.
+    let mut members = [core::ptr::null_mut(); MAX_WALKED];
+    let mut count = 0;
+    walk_members(s, &mut members, &mut count, 0);
     let mut passed = prev.is_null();
     let mut found = None;
     for target in core::iter::once(h).chain(members[..count].iter().copied()) {

@@ -50,7 +50,9 @@
 //!   CertDeleteCertificateFromStore; CertDuplicateStore and
 //!   CertCloseStore; CertEnumCRLsInStore of a store without CRLs.
 //! - Collection stores (CERT_STORE_PROV_COLLECTION, as Chromium builds its
-//!   roots): CertAddStoreToCollection adds a store whose certificates the
+//!   roots; nested, as its issuer lookup is: a collection's members'
+//!   members' certificates are its too): CertAddStoreToCollection adds a
+//!   store whose certificates the
 //!   collection then enumerates and finds (the contexts are the member's:
 //!   hCertStore), in priority order; a certificate added to the collection
 //!   goes to the member added with CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG;
@@ -1016,6 +1018,23 @@ fn collections(c: &mut Checks) -> Result<(), u32> {
         );
         c.ok(!found.is_null() && (*found).store == a, 0)?;
         CertFreeCertificateContext(found);
+        // A collection of collections (Chromium's issuer lookup: all
+        // certificates = {roots, intermediates}, each a collection of
+        // system stores): the members' members' certificates count too.
+        let outer = CertOpenStore(CERT_STORE_PROV_COLLECTION as *const u8, 0, 0, 0, null);
+        c.ok(CertAddStoreToCollection(outer, all, 0, 0) != 0, GetLastError().into())?;
+        c.eq(count(outer).into(), 2)?;
+        let found = CertFindCertificateInStore(
+            outer,
+            X509_ASN_ENCODING,
+            0,
+            CERT_FIND_SHA1_HASH,
+            (&raw const hash).cast(),
+            core::ptr::null(),
+        );
+        c.ok(!found.is_null() && (*found).store == a, 0)?;
+        CertFreeCertificateContext(found);
+        c.ok(CertCloseStore(outer, 0) != 0, 0)?;
         CertRemoveStoreFromCollection(all, a);
         c.eq(count(all).into(), 1)?;
         CertFreeCertificateContext(in_a);
