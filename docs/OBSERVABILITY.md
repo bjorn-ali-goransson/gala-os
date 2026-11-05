@@ -463,8 +463,10 @@ standard tools first, gala's own views only where gala knows more:
    - **Service map**: processes as nodes, IPC as edges (pipes, sockets,
      completion ports) weighted by messages, bytes and hand-off
      latency (Tempo's service graph from the link spans).
-2. **Deep timeline, Perfetto** (ROADMAP OT6): `cargo xtask perfetto`
-   writes a boot as a Perfetto trace: a track per process and thread
+2. **Deep timeline, Perfetto** (ROADMAP OT6): `cargo xtask perfetto
+   <events.jsonl | scenario> [--out FILE]` writes a boot as a Perfetto
+   trace (Chrome's JSON trace-event format; default
+   `target/events/<scenario>.perfetto.json`): a track per process and thread
    with system calls and waits as slices (the wait's object named),
    CPU samples as on-CPU marks, and **flows** (arrows) for causality:
    process creation, pipe data (write to the read that took it),
@@ -489,8 +491,7 @@ standard tools first, gala's own views only where gala knows more:
      reports and state dumps placed on the timeline and on the spans
      they happened in.
 
-Order: the Perfetto export first (no infrastructure, a file one opens;
-the IPC flows are already in the stream), then the live stack, then
+Order: the Perfetto export first (done), then the live stack, then
 transactions as their own view. The kernel side the live view needs
 (per-CPU rings instead of the debug console, which costs a port write
 per byte under TCG; stacks on samples) is OT2's.

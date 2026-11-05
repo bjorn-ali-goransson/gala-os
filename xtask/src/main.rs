@@ -22,6 +22,7 @@ mod vmtime;
 #[allow(dead_code)]
 mod manifest;
 mod otel;
+mod perfetto;
 mod profile;
 mod report;
 #[path = "../../kernel/src/trust/sha256.rs"]
@@ -2068,6 +2069,9 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  perfetto     a boot's event stream as a Perfetto trace (tracks per thread,
+               system calls, IPC flows, samples): <events.jsonl | scenario>
+               [--out FILE]; open it in ui.perfetto.dev
   profile      the sampling profiler's report: <events.jsonl | scenario> [--pid N]
                [--tid N] [--from S --to S] [--top N] [--symbols DIR] (boot
                with events=sample,image,thread,process; sample_hz=, default 100)
@@ -2167,6 +2171,7 @@ fn main() -> ExitCode {
             },
             Some("otel") => otel_cli(&args[1..]),
             Some("profile") => profile_cli(&args[1..]),
+            Some("perfetto") => perfetto_cli(&args[1..]),
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -2976,7 +2981,6 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
     "java_stress",
-    "chromium_https",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -9901,6 +9905,34 @@ fn otel_export_at(
         }
     }
     Ok(said)
+}
+
+/// `cargo xtask perfetto <events.jsonl | scenario> [--out FILE]`: the
+/// boot as a Perfetto trace (xtask/src/perfetto.rs).
+fn perfetto_cli(args: &[String]) -> Result {
+    let Some(what) = args.first().filter(|a| !a.starts_with("--")) else {
+        return Err("usage: cargo xtask perfetto <events.jsonl | scenario> [--out FILE]".into());
+    };
+    let path = if Path::new(what).exists() {
+        PathBuf::from(what)
+    } else {
+        target_dir().join("debug").join(format!("test-{what}.events.jsonl"))
+    };
+    let text = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let out = args
+        .iter()
+        .position(|a| a == "--out")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path.with_extension("perfetto.json"));
+    let trace = perfetto::convert(&text);
+    fs::write(&out, &trace).map_err(|e| format!("writing {}: {e}", out.display()))?;
+    eprintln!(
+        "perfetto: wrote {} ({}); open it in https://ui.perfetto.dev (Open trace file; it stays local)",
+        out.display(),
+        perfetto::summary(&trace)
+    );
+    Ok(())
 }
 
 /// `cargo xtask profile <events.jsonl | scenario> [--pid N] [--tid N]

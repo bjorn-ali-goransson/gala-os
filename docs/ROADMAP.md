@@ -76,8 +76,8 @@ In order:
    record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
 6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver; HTTPS
    downloads (after TLS step 1); a real Inno Setup installer.
-7. **BR** stage 1 (headless Chromium: an https page from the guest's
-   nginx, the profile's hotspots) with **GPU** G0.
+7. **BR** stage 1 (headless Chromium: a page from the host network,
+   the profile's hotspots) with **GPU** G0.
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
     and wget over loopback.
@@ -158,7 +158,7 @@ has a section under "Open items".
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
 | RS | Remote access and sessions | in progress | A, B1, B2 done; B3a next |
 | GPU | Graphics and GPU | in progress | G1 done; G0 next; G3 parked |
-| BR | A web browser: stock Edge | in progress | stage 1: chromium_version and chromium_dump (a page's script runs) pass in the gate; https pages next |
+| BR | A web browser: stock Edge | in progress | stage 1: chromium_version, chromium_dump (a page's script runs) and chromium_https (a page from the guest's nginx over TLS) pass in the gate; a page from the host network next |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
 
 ### Robustness, live update, tooling
@@ -610,8 +610,9 @@ samples).
 
 **Next** (each stage test first, the ledger leading):
 1. Headless Chromium. Its local goal is met (`chromium_dump`: the DOM
-   of a page its script changed, about 410 s); next an `https://` page
-   from nginx_tls in the guest and a page from the host network, and
+   of a page its script changed, about 410 s; `chromium_https`: an
+   `https://` page from the guest's nginx, its CA in crypt32's ROOT
+   store, about 320 s); next a page from the host network, and
    the profile's top items (PartitionAlloc's SpinningMutex spinning,
    5.5%; the kernel's `vm::allocate`, 4.7%, and address-space guard
    drops, 3.8%); the 2 utilities a run that still end "after 15
@@ -633,8 +634,8 @@ samples).
    `NtQueryInformationToken` class 39, `CoGetClassObject` of an
    unregistered class. The goal of the stage: `chrome.exe --headless
    --no-sandbox --disable-gpu
-   --dump-dom file:///C:/gala/page.html` prints the DOM; then an
-   `https://` page from nginx_tls in the guest and a page from the host
+   --dump-dom file:///C:/gala/page.html` prints the DOM (done; and an
+   `https://` page from the guest's nginx); then a page from the host
    network. Needs: Mojo IPC over named pipes, many threads, large
    virtual memory (V8's reservations, the commit charge), DirectWrite or
    Chromium's font fallback, CNG, Winsock, the JIT (add to
@@ -1077,8 +1078,9 @@ its thread's span.
    for LX.
 4. OT5: the in-guest OTLP exporter for servers, controlled from the
    `gala` CLI (on/off, sampling, endpoint).
-5. OT6: visualization (OBSERVABILITY "Visualization"): a Perfetto
-   export (tracks per thread, IPC flows), then a live view (`cargo xtask
+5. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
+   export is done (`cargo xtask perfetto`: tracks per thread, IPC
+   flows, samples); next a live view (`cargo xtask
    observe`: streaming OTLP into a collector and Grafana's stack with
    provisioned dashboards: overview, hot paths, impact table, service
    map), then transactions (causal chains with owners, callers and a
