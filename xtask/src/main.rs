@@ -474,6 +474,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("cert_test", "kernel32.dll", "Windows/System32"),
     ("cert_test", "advapi32.dll", "Windows/System32"),
     ("cert_test", "crypt32.dll", "Windows/System32"),
+    ("cert_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
     ("cert_test", "bcrypt.dll", "Windows/System32"),
     ("cert_test", "bcryptprimitives.dll", "Windows/System32"),
     ("sspi_test", "ntdll.dll", "Windows/System32"),

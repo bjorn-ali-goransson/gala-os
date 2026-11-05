@@ -2373,8 +2373,14 @@ ntdll imports.
   one more reference and free the previous one; closing the last
   reference releases the contexts (a caller's context then keeps a
   dangling hCertStore, where Windows would keep the store alive). No CRLs
-  or CTLs. The system stores are empty memory stores (no persistent
-  certificate store; recorded once per open). CryptQueryObject
+  or CTLs. The "ROOT" system store (any location; CertOpenStore with
+  the system providers or "System", CertOpenSystemStoreW/A) is a memory
+  store filled with **gala's machine root store**, the certificates (DER,
+  or PEM with any number) in `%SystemRoot%\System32\gala\roots`
+  (`roots.rs`), the anchors Schannel trusts too, so programs that build
+  trust from crypt32's stores (Chromium's TrustStoreWin) trust the same
+  roots. The other system stores are empty memory stores (no persistent
+  certificate store; each open recorded with the store's name). CryptQueryObject
   recognises one certificate (DER, or base64 with or without PEM lines);
   CryptDecodeObjectEx decodes GeneralNames into CERT_ALT_NAME_INFO
   (e-mail, DNS, URL as UTF-16 strings, IPs as blobs, all in one block;
@@ -2669,8 +2675,9 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   `getrandom` is patched (`vendor/getrandom`: ProcessPrng by
   `raw-dylib`, since the DLLs link without import libraries).
 - Around it: crypt32 (`user/crypt32`) decodes certificates into
-  CERT_CONTEXTs and has memory stores (`store.rs`; the system stores
-  open empty: no persistent store yet) but no chain engine
+  CERT_CONTEXTs and has memory stores (`store.rs`; "ROOT" holds the
+  machine root store, the other system stores open empty) but no chain
+  engine
   (`chain.rs`, below); ncrypt imports RSA keys into the Microsoft
   Software Key Storage Provider and signs with them (no key generation
   yet); bcrypt has hashes, AES/DES/RC2 and RSA (PKCS#1 v1.5, PSS,

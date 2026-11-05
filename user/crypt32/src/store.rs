@@ -174,11 +174,51 @@ fn provider_is(p: *const u8, name: &[u8]) -> bool {
     unsafe { *p.add(name.len()) == 0 }
 }
 
-/// A system store by name: empty in gala (nothing installs certificates
-/// yet), reported so a program that expects roots there shows up.
-fn system_store(name_len: usize) -> *mut c_void {
-    unsupported(b"crypt32.dll!CertOpenStore(system store, empty)", name_len as u64);
-    new_store()
+/// A system store by name: "ROOT" (any location) holds gala's machine
+/// root store (`roots`: the certificates in System32\gala\roots, the
+/// anchors Schannel trusts too); the others are empty in gala, reported
+/// with the name's first characters so a program that expects
+/// certificates there shows up.
+fn system_store(name: &[u8]) -> *mut c_void {
+    let store = new_store();
+    if name.eq_ignore_ascii_case(b"ROOT") {
+        if !store.is_null() {
+            super::roots::load(store);
+        }
+        return store;
+    }
+    let mut what = *b"crypt32.dll!CertOpenStore(system store, empty: ????????)";
+    let at = what.len() - 9;
+    for (slot, &c) in what[at..at + 8].iter_mut().zip(name) {
+        *slot = if c.is_ascii_alphanumeric() { c } else { b'?' };
+    }
+    unsupported(&what, name.len() as u64);
+    store
+}
+
+/// A wide system-store name as ASCII (at most 32 characters; others '?').
+fn wide_name(p: *const u16, out: &mut [u8; 32]) -> usize {
+    let n = wide_len(p).min(out.len());
+    for (i, slot) in out[..n].iter_mut().enumerate() {
+        // SAFETY: within the caller's string.
+        let c = unsafe { *p.add(i) };
+        *slot = u8::try_from(c).ok().filter(u8::is_ascii).unwrap_or(b'?');
+    }
+    n
+}
+
+/// An ASCII system-store name (at most 32 characters).
+fn ascii_name(p: *const u8, out: &mut [u8; 32]) -> usize {
+    if p.is_null() {
+        return 0;
+    }
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string, read up to its end.
+    while n < out.len() && unsafe { *p.add(n) } != 0 {
+        out[n] = unsafe { *p.add(n) };
+        n += 1;
+    }
+    n
 }
 
 fn wide_len(p: *const u16) -> usize {
@@ -210,9 +250,15 @@ pub extern "system" fn CertOpenStore(
         return match id {
             CERT_STORE_PROV_MEMORY | CERT_STORE_PROV_COLLECTION => new_store(),
             CERT_STORE_PROV_SYSTEM_W | CERT_STORE_PROV_SYSTEM_REGISTRY_W => {
-                system_store(wide_len(para.cast()))
+                let mut name = [0u8; 32];
+                let n = wide_name(para.cast(), &mut name);
+                system_store(&name[..n])
             }
-            CERT_STORE_PROV_SYSTEM_A => system_store(1),
+            CERT_STORE_PROV_SYSTEM_A => {
+                let mut name = [0u8; 32];
+                let n = ascii_name(para.cast(), &mut name);
+                system_store(&name[..n])
+            }
             _ => {
                 unsupported(b"crypt32.dll!CertOpenStore(provider)", id as u64);
                 error(ERROR_NOT_SUPPORTED, core::ptr::null_mut())
@@ -223,22 +269,28 @@ pub extern "system" fn CertOpenStore(
         return new_store();
     }
     if provider_is(provider, b"System") {
-        return system_store(wide_len(para.cast()));
+        let mut name = [0u8; 32];
+        let n = wide_name(para.cast(), &mut name);
+        return system_store(&name[..n]);
     }
     unsupported(b"crypt32.dll!CertOpenStore(provider)", 0);
     error(ERROR_NOT_SUPPORTED, core::ptr::null_mut())
 }
 
-/// CertOpenSystemStoreW: the system store `name` (empty in gala).
+/// CertOpenSystemStoreW: the system store `name` (see `system_store`).
 #[unsafe(no_mangle)]
 pub extern "system" fn CertOpenSystemStoreW(_prov: usize, name: *const u16) -> *mut c_void {
-    system_store(wide_len(name))
+    let mut ascii = [0u8; 32];
+    let n = wide_name(name, &mut ascii);
+    system_store(&ascii[..n])
 }
 
 /// CertOpenSystemStoreA: as the W form.
 #[unsafe(no_mangle)]
-pub extern "system" fn CertOpenSystemStoreA(_prov: usize, _name: *const u8) -> *mut c_void {
-    system_store(1)
+pub extern "system" fn CertOpenSystemStoreA(_prov: usize, name: *const u8) -> *mut c_void {
+    let mut ascii = [0u8; 32];
+    let n = ascii_name(name, &mut ascii);
+    system_store(&ascii[..n])
 }
 
 /// CertDuplicateStore: another reference to the store.

@@ -15,6 +15,7 @@ mod chain;
 mod dpapi;
 mod misc;
 mod query;
+mod roots;
 mod store;
 mod unimplemented;
 

@@ -99,8 +99,8 @@ impl TimeProvider for Clock {
 }
 
 /// gala's machine root store: the certificates (DER or PEM) in
-/// %SystemRoot%\System32\gala\roots. (crypt32 has no certificate stores
-/// yet; when it gets the ROOT store, this is where it reads it.)
+/// %SystemRoot%\System32\gala\roots, which crypt32's "ROOT" system
+/// store holds too (user/crypt32/src/roots.rs).
 pub fn machine_roots() -> Vec<CertificateDer<'static>> {
     let mut roots = Vec::new();
     let mut dir = [0u16; 300];

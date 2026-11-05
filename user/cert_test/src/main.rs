@@ -36,7 +36,10 @@
 //!   certificate).
 //! - Certificate stores (documented behaviour, no Windows run yet):
 //!   CertOpenStore(CERT_STORE_PROV_MEMORY) and the "ROOT" system store
-//!   (empty on gala); CertAddEncodedCertificateToStore and
+//!   (the machine's trusted roots: the schannel test CA found in it by
+//!   subject, opened with CertOpenSystemStoreW and with
+//!   CertOpenStore(CERT_STORE_PROV_SYSTEM_W, LOCAL_MACHINE));
+//!   CertAddEncodedCertificateToStore and
 //!   CertAddCertificateContextToStore with CERT_STORE_ADD_NEW (a second
 //!   copy is CRYPT_E_EXISTS), _USE_EXISTING (the copy in the store) and
 //!   _ALWAYS (a duplicate); the added contexts belong to the store
@@ -1169,10 +1172,50 @@ fn stores(c: &mut Checks) -> Result<(), u32> {
         let dup = CertDuplicateStore(store);
         c.ok(dup == store, 0)?;
         c.ok(CertCloseStore(dup, 0) != 0 && CertCloseStore(store, 0) != 0, 0)?;
-        // A system store.
-        let root = CertOpenSystemStoreW(0, wide_text("ROOT", &mut text));
+        // A system store: ROOT holds the machine's trusted roots, the
+        // schannel test CA among them (installed by run-all.ps1 on
+        // Windows, in gala's machine root store on gala), found by
+        // subject; also through CertOpenStore(CERT_STORE_PROV_SYSTEM_W,
+        // CERT_SYSTEM_STORE_LOCAL_MACHINE), as Chromium opens it.
+        let mut root_text = [0u16; 32];
+        let root = CertOpenSystemStoreW(0, wide_text("ROOT", &mut root_text));
         c.ok(!root.is_null(), 0)?;
+        let mut name = [0u16; 32];
+        let subject = wide_text("gala schannel test CA", &mut name);
+        let found = CertFindCertificateInStore(
+            root,
+            X509_ASN_ENCODING,
+            0,
+            CERT_FIND_SUBJECT_STR_W,
+            subject.cast(),
+            core::ptr::null(),
+        );
+        c.ok(!found.is_null(), GetLastError().into())?;
+        CertFreeCertificateContext(found);
         c.ok(CertCloseStore(root, 0) != 0, 0)?;
+        const CERT_STORE_PROV_SYSTEM_W: usize = 10;
+        const CERT_SYSTEM_STORE_LOCAL_MACHINE: u32 = 2 << 16;
+        const CERT_STORE_READONLY_FLAG: u32 = 0x8000;
+        let mut root_name = [0u16; 32];
+        let machine = CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_W as *const u8,
+            0,
+            0,
+            CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_READONLY_FLAG,
+            wide_text("ROOT", &mut root_name).cast(),
+        );
+        c.ok(!machine.is_null(), GetLastError().into())?;
+        let found = CertFindCertificateInStore(
+            machine,
+            X509_ASN_ENCODING,
+            0,
+            CERT_FIND_SUBJECT_STR_W,
+            subject.cast(),
+            core::ptr::null(),
+        );
+        c.ok(!found.is_null(), GetLastError().into())?;
+        CertFreeCertificateContext(found);
+        c.ok(CertCloseStore(machine, 0) != 0, 0)?;
     }
     Ok(())
 }
