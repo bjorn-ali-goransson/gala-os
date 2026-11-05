@@ -337,6 +337,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
             start_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), console);
         }
     }
+    // `sampleprobe`: before the programs, while nothing waits on this CPU.
+    time::sample_probe();
     if let Some(names) = cmdline.value("run") {
         let mut args = cmdline.value("args").unwrap_or("").split(',');
         for name in names.split(',').filter(|n| !n.is_empty()) {
@@ -452,6 +454,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     }
     net::log_stats();
     display::log_stats();
+    #[cfg(not(feature = "hosted"))]
+    input::log_stats();
     info!("nt: {}", nt::stats::Summary);
     let (shootdowns, ipis) = arch::smp::flush_stats();
     let heap = mm::heap::stats();

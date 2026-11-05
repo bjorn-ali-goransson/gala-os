@@ -20,6 +20,30 @@ pub fn start() {
     }
 }
 
+/// Mouse packets and wheel notches (signed sum) the kernel received, keys
+/// pressed: the `input:` line at exit says whether input a test sent
+/// (QEMU's monitor) reached the kernel, when a screen check finds the
+/// screen behind (a wheel notch missing: console_window's step 5).
+static PACKETS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WHEEL_EVENTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WHEEL_NOTCHES: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+static KEYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The `input:` line (at the end of a run).
+pub fn log_stats() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let packets = PACKETS.load(Relaxed);
+    let keys = KEYS.load(Relaxed);
+    if packets == 0 && keys == 0 {
+        return;
+    }
+    crate::info!(
+        "input: {packets} mouse packets, {} with the wheel ({} notches away from the user), {keys} key presses",
+        WHEEL_EVENTS.load(Relaxed),
+        WHEEL_NOTCHES.load(Relaxed)
+    );
+}
+
 fn input_thread(_: usize) {
     let Some(mut controller) = ps2::claim() else { return };
     if !controller.enable_mouse() {
@@ -37,6 +61,9 @@ fn input_thread(_: usize) {
         while let Some((byte, aux)) = controller.poll() {
             if !aux {
                 if let Some((vk, scan, extended, down)) = keys.push(byte) {
+                    if down {
+                        KEYS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
                     if let Some((dx, dy, b)) = pending.take() {
                         deliver(dx, dy, b);
                     }
@@ -45,7 +72,10 @@ fn input_thread(_: usize) {
                 continue;
             }
             let Some((dx, dy, buttons, dz)) = packet.push(byte) else { continue };
+            PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if dz != 0 {
+                WHEEL_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                WHEEL_NOTCHES.fetch_add(dz, core::sync::atomic::Ordering::Relaxed);
                 if let Some((px, py, b)) = pending.take() {
                     deliver(px, py, b);
                 }

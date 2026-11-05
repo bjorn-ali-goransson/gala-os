@@ -1112,6 +1112,13 @@ None open.
 
 ### Defects known, not yet fixed
 
+- **console_window step 5 under load**: about 1 run in 20 of the full
+  suite, the wheel scrolls conhost back 15 lines instead of 18 (the
+  screenshot shows `history[1]` on top): one of six notches is missing.
+  Which layer drops it (QEMU's PS/2 queue while the guest is slow, the
+  kernel's input path, the window's message delivery) is open; the
+  `input:` line at exit now counts the notches the kernel received, so
+  the next failure says. Item W3.
 - **Hygiene sweep leftovers**: four lifecycle defects in IOCP, APCs and
   suspension. Item HS.
 - **Fault-injection leftovers**: a failed push in `notify::complete`

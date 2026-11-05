@@ -182,9 +182,9 @@ static SAMPLE_ASKED: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS
 /// for longer than `RING` samples); in the `events:` line.
 pub static SAMPLES_LOST: AtomicU64 = AtomicU64::new(0);
 
-/// `sampleprobe`: CPU 1 spins with interrupts off for half a second, 1 s
-/// after its timer starts, and reports whether samples landed inside
-/// (the NMI sampler's scenario test).
+/// `sampleprobe`: the boot thread spins with interrupts off for half a
+/// second and reports whether samples landed inside (the NMI sampler's
+/// scenario test; `sample_probe`).
 static SAMPLE_PROBE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// Per CPU: inside the probe's interrupts-off spin.
 static PROBING: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS] =
@@ -351,24 +351,37 @@ impl fmt::Display for Lost {
     }
 }
 
-/// `sampleprobe` on CPU 1's tick: the spin and its verdict.
-fn sample_probe() {
-    static BEATS: AtomicU64 = AtomicU64::new(0);
-    if BEATS.fetch_add(1, Ordering::Relaxed) != TICK_HZ {
+/// `sampleprobe`, from the boot thread before the `run=` programs (no
+/// other work then depends on this CPU: a probe in a tick during a
+/// program once found the other CPU waiting with interrupts off for this
+/// one's TLB-shootdown answer, so it sent no samples): this CPU spins
+/// with interrupts off for half a second, and the verdict says whether
+/// samples landed inside.
+pub fn sample_probe() {
+    if !SAMPLE_PROBE.swap(false, Ordering::Relaxed) {
         return;
     }
-    SAMPLE_PROBE.store(false, Ordering::Relaxed);
-    PROBING[1].store(true, Ordering::Relaxed);
+    let cpu = crate::arch::percpu::cpu_index() as usize;
+    let Some(probing) = PROBING.get(cpu) else { return };
+    let were_on = crate::arch::cpu::disable_interrupts();
+    probing.store(true, Ordering::Relaxed);
     let until = raw_monotonic_ns() + 500_000_000;
     while raw_monotonic_ns() < until {
         core::hint::spin_loop();
     }
-    PROBING[1].store(false, Ordering::Relaxed);
+    probing.store(false, Ordering::Relaxed);
+    if were_on {
+        crate::arch::cpu::enable_interrupts();
+    }
     let hits = PROBE_HITS.load(Ordering::Relaxed);
     if hits > 0 {
-        crate::info!("sampleprobe: ok ({hits} samples inside 0.5 s with interrupts off)");
+        crate::info!(
+            "sampleprobe: ok ({hits} samples inside 0.5 s with interrupts off on CPU {cpu})"
+        );
     } else {
-        crate::warn!("sampleprobe: FAILED (no sample inside 0.5 s with interrupts off)");
+        crate::warn!(
+            "sampleprobe: FAILED (no sample inside 0.5 s with interrupts off on CPU {cpu})"
+        );
     }
 }
 
@@ -409,9 +422,6 @@ fn on_tick(frame: &mut TrapFrame) {
         if crate::events::enabled(crate::events::Category::Sample) {
             sample_tick(frame, idle);
         }
-    }
-    if crate::arch::percpu::cpu_index() == 1 && SAMPLE_PROBE.load(Ordering::Relaxed) {
-        sample_probe();
     }
     if crate::arch::percpu::cpu_index() == 1 && HANG_TEST.load(Ordering::Relaxed) {
         static BEATS: AtomicU64 = AtomicU64::new(0);
