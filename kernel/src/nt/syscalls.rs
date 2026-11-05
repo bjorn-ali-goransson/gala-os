@@ -900,9 +900,20 @@ fn pipe_io(
         if call.process.read(buffer, &mut data).is_err() {
             return NtStatus::ACCESS_VIOLATION;
         }
-        match end.write(&data) {
-            Ok(()) => (NtStatus::SUCCESS, data.len() as u64, Vec::new()),
-            Err(e) => (e, 0, Vec::new()),
+        // An asynchronous end's write that does not fit pends instead of
+        // blocking its thread (Chromium writes to its children on its IO
+        // thread); a synchronous end's waits for room.
+        if end.synchronous {
+            match end.write(&data) {
+                Ok(()) => (NtStatus::SUCCESS, data.len() as u64, Vec::new()),
+                Err(e) => (e, 0, Vec::new()),
+            }
+        } else {
+            match end.write_async(&data, request.clone()) {
+                Ok(None) => return NtStatus::PENDING,
+                Ok(Some(n)) => (NtStatus::SUCCESS, n as u64, Vec::new()),
+                Err(e) => (e, 0, Vec::new()),
+            }
         }
     } else {
         match end.read(length as usize, Some(request.clone())) {

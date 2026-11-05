@@ -53,6 +53,13 @@
 //! - FormatMessageW has the pipe errors' texts (ERROR_PIPE_NOT_CONNECTED:
 //!   "No process is on the other end of the pipe.").
 //!
+//! - An overlapped write bigger than the pipe's buffer pends
+//!   (ERROR_IO_PENDING) instead of blocking the writing thread, and so
+//!   does a second one behind it; the reader gets all the bytes in
+//!   order, and each write completes (GetOverlappedResult) with its
+//!   length once its bytes are in the pipe. (Chromium's browser writes to
+//!   its children on its IO thread and must not block there.)
+//!
 //! Prints `pipe_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -567,6 +574,7 @@ fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     named(&mut c)?;
     reply_then_disconnect(&mut c)?;
+    overlapped_write_waits(&mut c)?;
     // SAFETY: documented kernel32 calls with valid arguments.
     unsafe {
         let (mut r, mut w) = (core::ptr::null_mut(), core::ptr::null_mut());
@@ -818,6 +826,86 @@ extern "system" fn reply_and_go(server: *mut c_void) -> u32 {
         }
     }
     0
+}
+
+/// Overlapped writes that do not fit pend; the reader takes them in order.
+fn overlapped_write_waits(c: &mut Checks) -> Result<(), u32> {
+    let name = wide("\\\\.\\pipe\\gala_test\\bigwrite");
+    // Far more than any pipe buffer (sizes are advisory on Windows; gala
+    // keeps at least 4096 bytes).
+    const N: usize = 100_000;
+    // SAFETY: documented kernel32 calls with valid arguments.
+    unsafe {
+        let server = CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            0, // PIPE_TYPE_BYTE
+            1,
+            64,
+            64,
+            0,
+            core::ptr::null(),
+        );
+        c.ok(server != INVALID_HANDLE, GetLastError().into())?;
+        let cl = client(&name, FILE_FLAG_OVERLAPPED);
+        c.ok(cl != INVALID_HANDLE, GetLastError().into())?;
+        static A: [u8; N] = [b'a'; N];
+        static B: [u8; N] = [b'b'; N];
+        let blank =
+            |event| Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        let (ea, eb) = (
+            CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()),
+            CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()),
+        );
+        let (mut oa, mut ob) = (blank(ea), blank(eb));
+        // Nobody reads yet: both writes pend, the thread goes on.
+        let wa = WriteFile(
+            cl,
+            A.as_ptr(),
+            N as u32,
+            core::ptr::null_mut(),
+            (&mut oa as *mut Overlapped).cast(),
+        );
+        c.ok(wa == 0 && GetLastError() == ERROR_IO_PENDING, GetLastError().into())?;
+        let wb = WriteFile(
+            cl,
+            B.as_ptr(),
+            N as u32,
+            core::ptr::null_mut(),
+            (&mut ob as *mut Overlapped).cast(),
+        );
+        c.ok(wb == 0 && GetLastError() == ERROR_IO_PENDING, GetLastError().into())?;
+        c.eq(WaitForSingleObject(ea, 0).into(), 0x102)?; // WAIT_TIMEOUT
+        // The reader takes everything, in order.
+        static mut GOT: [u8; 2 * N] = [0; 2 * N];
+        let got = &raw mut GOT;
+        let mut have = 0usize;
+        while have < 2 * N {
+            let mut n = 0;
+            let ok = ReadFile(
+                server,
+                (*got).as_mut_ptr().add(have),
+                (2 * N - have) as u32,
+                &mut n,
+                core::ptr::null_mut(),
+            );
+            c.ok(ok != 0 && n > 0, GetLastError().into())?;
+            have += n as usize;
+        }
+        let got = &*got;
+        c.ok(got[..N].iter().all(|&b| b == b'a'), 0)?;
+        c.ok(got[N..].iter().all(|&b| b == b'b'), 0)?;
+        let mut n = 0;
+        c.ok(GetOverlappedResult(cl, &mut oa, &mut n, 1) != 0, GetLastError().into())?;
+        c.eq(n.into(), N as u64)?;
+        c.ok(GetOverlappedResult(cl, &mut ob, &mut n, 1) != 0, GetLastError().into())?;
+        c.eq(n.into(), N as u64)?;
+        CloseHandle(ea);
+        CloseHandle(eb);
+        CloseHandle(cl);
+        CloseHandle(server);
+    }
+    Ok(())
 }
 
 /// A server that writes and disconnects at once: a client waiting in

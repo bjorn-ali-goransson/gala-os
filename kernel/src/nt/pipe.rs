@@ -40,7 +40,9 @@
 //! bytes nobody was reading (Crashpad's server writes its reply and
 //! disconnects at once). FSCTL_PIPE_TRANSCEIVE (TransactNamedPipe) puts
 //! its read in place before its write, so the answer cannot be lost
-//! either. A waiting thread looks for its result before each wait, never
+//! either. An asynchronous end's write that does not fit pends with the
+//! rest of its bytes (`Op::Write`), moved on as readers make room, instead
+//! of blocking its thread. A waiting thread looks for its result before each wait, never
 //! after only: the result can come while the lock is not held (the reply
 //! to a transceive's write), and its wake-up is then already spent.
 
@@ -133,7 +135,17 @@ struct State {
 #[derive(Clone, Copy)]
 enum Op {
     Listen,
-    Read { max: usize, message: bool },
+    Read {
+        max: usize,
+        message: bool,
+    },
+    /// An asynchronous write of `total` bytes that did not fit: its
+    /// remaining bytes wait in `Pending::out` and go into the pipe as
+    /// readers make room (oldest first), as Windows pends an overlapped
+    /// write to a full pipe instead of blocking its thread.
+    Write {
+        total: usize,
+    },
 }
 
 struct Pending {
@@ -144,6 +156,8 @@ struct Pending {
     /// (found by `token`), not reported by `report`.
     request: Option<Request>,
     token: u64,
+    /// A pending write's bytes not yet in the pipe.
+    out: VecDeque<u8>,
     /// Set when it has finished: reported (and removed) by `report`
     /// after the pipe's lock is released. Finishing a request needs no
     /// allocation, so none is ever lost (a list of finished requests that
@@ -182,8 +196,13 @@ fn report(pipe: &Pipe) {
                 None => return,
             }
         };
-        if let (Some((status, data)), Some(request)) = (finished.result, finished.request) {
-            notify::complete(request, status, &data);
+        match (finished.result, finished.request, finished.op) {
+            // A write reports its bytes (none copied back to the caller).
+            (Some((status, _)), Some(request), Op::Write { total }) => {
+                notify::complete_count(request, status, total as u64)
+            }
+            (Some((status, data)), Some(request), _) => notify::complete(request, status, &data),
+            _ => {}
         }
     }
 }
@@ -415,6 +434,8 @@ fn attempt(
             }
             Some(s.take(end, max, message))
         }
+        // Writes move in `complete_pass`, never here.
+        Op::Write { .. } => None,
     }
 }
 
@@ -422,11 +443,58 @@ fn attempt(
 /// returns how many (`report` reports them).
 fn try_complete(s: &mut State) -> usize {
     let mut finished = 0;
+    // Writes free reads and reads make room for writes: again until a
+    // pass changes nothing.
+    loop {
+        let (done, moved) = complete_pass(s);
+        finished += done;
+        if done == 0 && !moved {
+            return finished;
+        }
+    }
+}
+
+/// One pass of `try_complete`: (requests finished, whether any pending
+/// write's bytes went into the pipe).
+fn complete_pass(s: &mut State) -> (usize, bool) {
+    let mut finished = 0;
+    let mut moved = false;
     for i in 0..s.pending.len() {
         if s.pending[i].result.is_some() {
             continue;
         }
         let (end, generation) = (s.pending[i].end, s.pending[i].generation);
+        if let Op::Write { .. } = s.pending[i].op {
+            // Only the oldest unfinished write of an end moves: bytes keep
+            // their order.
+            if s.pending[..i]
+                .iter()
+                .any(|p| p.end == end && p.result.is_none() && matches!(p.op, Op::Write { .. }))
+            {
+                continue;
+            }
+            let peer = 1 - end;
+            let peer_open = if peer == 0 { s.server_open } else { s.conn == Conn::Connected };
+            if let Err(e) = s.check_connected(end, generation) {
+                s.pending[i].result = Some((e, Vec::new()));
+                finished += 1;
+                continue;
+            }
+            if !peer_open {
+                s.pending[i].result = Some((NtStatus::PIPE_CLOSING, Vec::new()));
+                finished += 1;
+                continue;
+            }
+            let out = core::mem::take(&mut s.pending[i].out);
+            let (left, n) = put(s, end, out);
+            moved |= n > 0;
+            s.pending[i].out = left;
+            if s.pending[i].out.is_empty() {
+                s.pending[i].result = Some((NtStatus::SUCCESS, Vec::new()));
+                finished += 1;
+            }
+            continue;
+        }
         // Take the op out to borrow the state mutably.
         let op = core::mem::replace(&mut s.pending[i].op, Op::Listen);
         match attempt(s, end, generation, &op) {
@@ -440,7 +508,45 @@ fn try_complete(s: &mut State) -> usize {
             }
         }
     }
-    finished
+    (finished, moved)
+}
+
+/// Puts what fits of `data` (written by end `writer`) into the other end's
+/// inbox: a message whole (when it fits, or alone), bytes as far as the
+/// quota allows. Returns what is left and how many bytes went in.
+fn put(s: &mut State, writer: usize, mut data: VecDeque<u8>) -> (VecDeque<u8>, usize) {
+    let peer = 1 - writer;
+    let space = s.quota[peer].saturating_sub(s.inbox[peer].len());
+    let n = if s.message_type {
+        if space >= data.len() || s.inbox[peer].is_empty() { data.len() } else { 0 }
+    } else {
+        space.min(data.len())
+    };
+    if n == 0 {
+        return (data, 0);
+    }
+    if s.inbox[peer].try_reserve(n).is_err()
+        || (s.message_type && s.messages[peer].try_reserve(1).is_err())
+    {
+        // Out of memory: the bytes wait for the next pass.
+        return (data, 0);
+    }
+    if s.message_type {
+        s.messages[peer].push_back(n);
+    }
+    s.inbox[peer].extend(data.drain(..n));
+    event(
+        "pipe write",
+        s.id,
+        format_args!(
+            r#""end":{writer},"to":{peer},"off":{},"bytes":{n},"queued":{},"pended":true"#,
+            s.put[peer],
+            s.inbox[peer].len()
+        ),
+    );
+    s.put[peer] += n as u64;
+    wake_all(s); // readers waiting for data
+    (data, n)
 }
 
 impl State {
@@ -592,6 +698,12 @@ impl PipeEnd {
     fn run(&self, op: Op, request: Option<Request>) -> Result<Outcome, NtStatus> {
         let mut s = self.pipe.state.lock();
         if let Some(result) = attempt(&mut s, self.end, self.generation, &op) {
+            // The room a read made lets pending writes go on.
+            let moved = try_complete(&mut s);
+            drop(s);
+            if moved > 0 {
+                report(&self.pipe);
+            }
             return Ok(done(result));
         }
         let token = self.queue(&mut s, op, request)?;
@@ -612,6 +724,7 @@ impl PipeEnd {
             op,
             request: if asynchronous { request } else { None },
             token,
+            out: VecDeque::new(),
             result: None,
         };
         s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
@@ -641,6 +754,11 @@ impl PipeEnd {
                 // Not there (a kernel handover does not carry it): ask again.
                 None => {
                     if let Some(result) = attempt(&mut s, self.end, self.generation, &op) {
+                        let moved = try_complete(&mut s);
+                        drop(s);
+                        if moved > 0 {
+                            report(&self.pipe);
+                        }
                         return Ok(done(result));
                     }
                     let p = Pending {
@@ -649,6 +767,7 @@ impl PipeEnd {
                         op,
                         request: None,
                         token,
+                        out: VecDeque::new(),
                         result: None,
                     };
                     s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
@@ -765,7 +884,10 @@ impl PipeEnd {
         loop {
             let s = self.pipe.state.lock();
             s.check_connected(self.end, self.generation)?;
-            if s.inbox[peer].is_empty() {
+            let writing = s.pending.iter().any(|p| {
+                p.end == self.end && p.result.is_none() && matches!(p.op, Op::Write { .. })
+            });
+            if s.inbox[peer].is_empty() && !writing {
                 return Ok(());
             }
             let peer_open = if peer == 0 { s.server_open } else { s.conn == Conn::Connected };
@@ -830,6 +952,60 @@ impl PipeEnd {
             }
             self.wait(s)?;
         }
+    }
+
+    /// An asynchronous end's write: done now (the bytes are in the pipe),
+    /// or pending with `request` (Ok(None), STATUS_PENDING) until readers
+    /// make room for the rest, behind this end's earlier pending writes.
+    pub fn write_async(&self, data: &[u8], request: Request) -> Result<Option<usize>, NtStatus> {
+        let total = data.len();
+        let mut out = VecDeque::new();
+        out.try_reserve_exact(total).map_err(|_| NtStatus::NO_MEMORY)?;
+        out.extend(data);
+        let mut s = self.pipe.state.lock();
+        s.check_connected(self.end, self.generation)?;
+        let peer = self.peer();
+        let peer_open = if peer == 0 { s.server_open } else { s.conn == Conn::Connected };
+        if !peer_open {
+            return Err(NtStatus::PIPE_CLOSING);
+        }
+        let behind = s
+            .pending
+            .iter()
+            .any(|p| p.end == self.end && p.result.is_none() && matches!(p.op, Op::Write { .. }));
+        if !behind {
+            let (left, _) = put(&mut s, self.end, out);
+            out = left;
+        }
+        if out.is_empty() && !(s.message_type && total == 0 && behind) {
+            if total == 0 && s.message_type {
+                // A zero-length message.
+                s.messages[peer].try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
+                s.messages[peer].push_back(0);
+            }
+            let finished = try_complete(&mut s);
+            drop(s);
+            if finished > 0 {
+                report(&self.pipe);
+            }
+            return Ok(Some(total));
+        }
+        let p = Pending {
+            end: self.end,
+            generation: self.generation,
+            op: Op::Write { total },
+            request: Some(request),
+            token: 0,
+            out,
+            result: None,
+        };
+        s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
+        let finished = try_complete(&mut s);
+        drop(s);
+        if finished > 0 {
+            report(&self.pipe);
+        }
+        Ok(None)
     }
 
     /// FSCTL_PIPE_PEEK: (NamedPipeState, bytes available, messages, the

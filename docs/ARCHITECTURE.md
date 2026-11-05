@@ -1421,6 +1421,16 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
   to a transceive's write can complete its read while the lock is not
   held, and that wake-up is spent). A kernel handover does
   not carry a synchronous request; its thread asks again.
+- **Writes of an asynchronous end never block its thread**: what does
+  not fit in the reader's quota becomes a pending write holding the rest
+  (STATUS_PENDING); readers' takes, connects and disconnects move it on
+  (`try_complete` runs passes until nothing moves: writes free reads,
+  reads make room), an end's pending writes go in order, and each
+  completes with its byte count (event, completion port, APC) once all
+  its bytes are in the pipe; FlushFileBuffers waits for them too. A
+  synchronous end's write waits for room. (Chromium's IO thread writes
+  to its children: blocked writes there delayed every child's answers
+  for seconds.)
 - **FSCTL_PIPE_TRANSCEIVE** (TransactNamedPipe, also under CallNamedPipe):
   the read is queued before the message is written, so the answer cannot
   be missed; message read mode only (STATUS_INVALID_PIPE_STATE), unread
