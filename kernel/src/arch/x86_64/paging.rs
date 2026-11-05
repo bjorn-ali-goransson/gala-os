@@ -439,6 +439,12 @@ impl UserSpace {
         self.mapper.translate(virt).is_some()
     }
 
+    /// The first mapped page at or after `virt` and below `end` (absent
+    /// page tables skipped whole).
+    pub fn next_mapped(&mut self, virt: u64, end: u64) -> Option<u64> {
+        self.mapper.next_mapped(virt / PAGE_SIZE * PAGE_SIZE, end)
+    }
+
     /// Changes the flags of a mapped page; `user` is not forced, so a
     /// kernel-only flags value makes the page inaccessible to user mode.
     pub fn set_flags(&mut self, virt: u64, mut flags: PageFlags) -> Result<(), PagingError> {

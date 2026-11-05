@@ -1045,6 +1045,15 @@ address-space teardown never free.
   gives each image one bias; below gala-um's HOST_START, where guest code
   must stay). Views there share frames relocated a page at a time
   (`pe::relocate_page`; an entry crossing pages is written in both).
+- **Image views are demand-paged** at the preferred and the alternative
+  base: mapping one only reserves and commits its ranges (one commit per
+  run of equal protection); a page is mapped at its first touch
+  (`vm::resolve_fault` asks `section::frame_for`, which gives the
+  layout's shared, or shared relocated, frame, made then with no lock
+  held). A view costs its committed ranges, not its pages; unmapping and
+  `vm::sync_range` visit only the mapped pages (`next_mapped` skips absent
+  page tables), so a 32 MiB view no page of which was touched costs what
+  an 87 KiB one does (bench `image_load_32m_untouched`).
   Only when that range is taken in a process is the view placed
   anywhere, with private pages relocated a page at a time (never a
   whole-image copy). A view not at the preferred base returns
@@ -1052,12 +1061,10 @@ address-space teardown never free.
 - **Large images** (chrome.dll is 340 MB): a layout keeps, per page, the
   offset of its relocation block (`ImageLayout::reloc_index`, built once
   with `pe::relocation_blocks`), so relocating a page reads two blocks,
-  not the whole table. A relocatable image of 16 MB or more whose
-  preferred base is taken gets its shared relocated frames made before
-  the view is mapped, with no process lock held (`prepare_relocated`),
-  each frame made outside the layout's lock too. The first map of
-  chrome.dll still takes ~30 s under TCG; later processes share the
-  frames.
+  not the whole table. A relocated frame is made at the page's first
+  touch, outside the layout's lock. Laying the file out is still one
+  copy of the whole image in the kernel heap (chrome.dll: 340 MB, about
+  0.3 s per 33 MB under TCG), done once per file version.
 - **Copy-on-write**: PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY pages are
   mapped read-only (`vm::flags_for`). A write fault gives the page a
   private frame (a copy of the borrowed shared frame, or the frame it

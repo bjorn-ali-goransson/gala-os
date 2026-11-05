@@ -410,6 +410,33 @@ impl<M: TableMemory> Mapper<M> {
         Some((frame, owned))
     }
 
+    /// The first mapped page (or large page) at or after `virt` and below
+    /// `end`: absent tables are skipped whole, so a range is walked in
+    /// time of its mappings, not of its size (unmapping a 340 MB view of
+    /// which a few pages were touched).
+    pub fn next_mapped(&mut self, mut virt: u64, end: u64) -> Option<u64> {
+        'next: while virt < end {
+            if !is_canonical(virt) {
+                return None;
+            }
+            let mut table = self.root;
+            for level in (1..=4).rev() {
+                let entry = self.mem.table(table).0[index(virt, level)];
+                if !entry.is_present() {
+                    // Past what this entry would map.
+                    let span = 1u64 << (12 + 9 * (level - 1));
+                    virt = (virt & !(span - 1)).checked_add(span)?;
+                    continue 'next;
+                }
+                if level == 1 || entry.is_huge() {
+                    return Some(virt);
+                }
+                table = Frame::containing(entry.addr());
+            }
+        }
+        None
+    }
+
     pub fn translate(&mut self, virt: u64) -> Option<Translation> {
         if !is_canonical(virt) {
             return None;
@@ -583,6 +610,24 @@ mod tests {
     }
 
     const KVIRT: u64 = 0xffff_ffff_8000_0000;
+
+    #[test]
+    fn next_mapped_skips_absent_tables() {
+        let (mut m, mut alloc) = setup();
+        let user = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+        // Two pages in one table, one in another PML4 slot.
+        for va in [0x40_0000, 0x40_3000, 0x80_0000_0000] {
+            m.map(va, 0x5000, PageSize::Size4K, user, &mut alloc).unwrap();
+        }
+        assert_eq!(m.next_mapped(0, USER_END), Some(0x40_0000));
+        assert_eq!(m.next_mapped(0x40_1000, USER_END), Some(0x40_3000));
+        assert_eq!(m.next_mapped(0x40_4000, USER_END), Some(0x80_0000_0000));
+        assert_eq!(m.next_mapped(0x40_4000, 0x80_0000_0000), None);
+        assert_eq!(m.next_mapped(0x80_0000_1000, USER_END), None);
+        // After an unmap the page is skipped.
+        m.unmap_4k(0x40_3000);
+        assert_eq!(m.next_mapped(0x40_1000, USER_END), Some(0x80_0000_0000));
+    }
 
     #[test]
     fn user_leaves_are_listed_in_order() {

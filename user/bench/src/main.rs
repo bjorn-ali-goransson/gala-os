@@ -23,6 +23,21 @@ static IMAGE: &[u8] = include_bytes!(concat!(
     "/../../target/x86_64-pc-windows-msvc/release/kernel32.dll"
 ));
 
+/// Grows a PE image's last section by `extra` bytes of virtual size (and
+/// SizeOfImage with it): pages past the file's data, zero when mapped.
+fn grow_last_section(pe: &mut [u8], extra: u32) {
+    let u16_at = |pe: &[u8], o: usize| u16::from_le_bytes([pe[o], pe[o + 1]]) as usize;
+    let u32_at = |pe: &[u8], o: usize| u32::from_le_bytes([pe[o], pe[o + 1], pe[o + 2], pe[o + 3]]);
+    let file = u32_at(pe, 0x3c) as usize + 4;
+    let sections = u16_at(pe, file + 2);
+    let opt = file + 20;
+    let last = opt + u16_at(pe, file + 16) + (sections - 1) * 40;
+    let size_of_image = u32_at(pe, opt + 56) + extra;
+    pe[opt + 56..opt + 60].copy_from_slice(&size_of_image.to_le_bytes());
+    let virtual_size = u32_at(pe, last + 8) + extra;
+    pe[last + 8..last + 12].copy_from_slice(&virtual_size.to_le_bytes());
+}
+
 /// Runs `op` `n` times and prints ns per operation.
 fn bench(name: &str, n: u64, mut op: impl FnMut()) {
     let (start, freq) = performance_counter();
@@ -171,7 +186,7 @@ fn main() -> u32 {
     let (_, f, _) = create_file(&attrs, GENERIC_WRITE | DELETE, 0, FILE_OVERWRITE_IF, opts);
     write_file_info(f, IMAGE);
     close(f);
-    bench("image_load", 50, || {
+    let load = || {
         let share = FILE_SHARE_READ | FILE_SHARE_DELETE;
         let (_, f, _) = open_file(&attrs, GENERIC_READ | GENERIC_EXECUTE, share, opts);
         let (_, section) = create_image_section(f);
@@ -179,10 +194,33 @@ fn main() -> u32 {
         unmap_view(view);
         close(section);
         close(f);
-    });
+    };
+    // Once untimed: the first load lays the file out (an OS caches that,
+    // as Windows does its image sections); the bench measures the loads
+    // after it.
+    load();
+    bench("image_load", 50, &load);
     let (_, f, _) = open_file(&attrs, DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, opts);
     set_file(f, 13, &[1]); // FileDispositionInformation: delete
     close(f);
+    // The same with the image 32 MiB larger (its last section's virtual
+    // size grown: zero pages), not touched after mapping: a view's cost
+    // must not grow with the image (chrome.dll is 340 MB; its processes
+    // touch a fraction of it).
+    let (_, buf, _) = allocate(0, IMAGE.len(), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    // SAFETY: a fresh read-write allocation of IMAGE.len() bytes.
+    let big = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, IMAGE.len()) };
+    big.copy_from_slice(IMAGE);
+    grow_last_section(big, 32 << 20);
+    let (_, f, _) = create_file(&attrs, GENERIC_WRITE | DELETE, 0, FILE_OVERWRITE_IF, opts);
+    write_file_info(f, big);
+    close(f);
+    load();
+    bench("image_load_32m_untouched", 20, &load);
+    let (_, f, _) = open_file(&attrs, DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, opts);
+    set_file(f, 13, &[1]); // FileDispositionInformation: delete
+    close(f);
+    free(buf, 0, MEM_RELEASE);
     bench("thread_create_exit", 100, || {
         let (_, h, _) = create_thread(exit_now, 0, false);
         wait(h, None);

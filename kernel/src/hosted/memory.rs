@@ -245,6 +245,11 @@ impl UserSpace {
         self.pages.contains_key(&(virt / PAGE_SIZE * PAGE_SIZE))
     }
 
+    /// The first mapped page at or after `virt` and below `end`.
+    pub fn next_mapped(&mut self, virt: u64, end: u64) -> Option<u64> {
+        self.pages.range(virt / PAGE_SIZE * PAGE_SIZE..end).next().map(|(&p, _)| p)
+    }
+
     pub fn set_flags(&mut self, virt: u64, flags: PageFlags) -> Result<(), PagingError> {
         let page = virt / PAGE_SIZE * PAGE_SIZE;
         let entry = self.pages.get_mut(&page).ok_or(PagingError::Map(MapError::BadAddress))?;

@@ -91,10 +91,6 @@ const DYNAMIC_BOTTOM: u64 = 0x3ff0_0000_0000;
 static NEXT_DYNAMIC: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(DYNAMIC_TOP);
 
-/// Images this large are relocated before their view is mapped
-/// (`ImageLayout::prepare_relocated`).
-const LARGE_IMAGE: u64 = 16 << 20;
-
 /// Header fields of an image, kept with its layout.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageInfo {
@@ -261,19 +257,6 @@ impl ImageLayout {
             None => {
                 *slot = Some(frame);
                 Some(frame)
-            }
-        }
-    }
-
-    /// Makes the relocated frames of every page for the image's
-    /// alternative base ahead of a view there, without any process lock
-    /// held: a large image (chrome.dll, 340 MB) takes seconds, which the
-    /// mapping loop must not spend with interrupts off.
-    fn prepare_relocated(&self) {
-        let Some(base) = self.dynamic_base() else { return };
-        for i in 0..self.page_protect.len() {
-            if self.relocated_frame(i, base).is_none() {
-                return;
             }
         }
     }
@@ -671,15 +654,7 @@ fn map_image_view(
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let size = image.size();
-    // A large relocatable image whose preferred base is taken here goes to
-    // its alternative base: relocate it first, with no lock held.
     let wanted = if base != 0 { base } else { image.base };
-    if base == 0 && image.relocatable && size >= LARGE_IMAGE {
-        let taken = process.vad.lock().query(wanted).is_ok_and(|r| r.state != vad::MEM_FREE);
-        if taken {
-            image.prepare_relocated();
-        }
-    }
     let mut views = process.views.lock();
     views.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
     let mut vad = process.vad.lock();
@@ -707,9 +682,29 @@ fn map_image_view(
         let _ = vad.release(view_base, 0);
         return Err(NtStatus::CONFLICTING_ADDRESSES);
     }
-    // The view's contents: at the preferred base the layout's shared
-    // frames; elsewhere private pages, relocated a page at a time (a large
-    // image is never copied whole).
+    // At the preferred base (the layout's shared frames) and at the
+    // alternative base (its shared relocated frames) the pages are mapped
+    // at their first touch (`frame_for`, `vm::resolve_fault`): a view
+    // costs its committed ranges, not its pages (chrome.dll has 83 000,
+    // of which a process touches a fraction; their frames are made then,
+    // with no lock held).
+    if delta == 0 || at_dynamic {
+        let protect = image.page_protect();
+        let mut i = 0;
+        while i < protect.len() {
+            let run = protect[i..].iter().take_while(|&&p| p == protect[i]).count();
+            let va = view_base + i as u64 * PAGE_SIZE;
+            if vad.commit(va, run as u64 * PAGE_SIZE, protect[i]).is_err() {
+                let _ = vad.release(view_base, 0);
+                return Err(NtStatus::NO_MEMORY);
+            }
+            i += run;
+        }
+        let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
+        return Ok(Mapped { base: view_base, size, relocated: delta != 0 });
+    }
+    // Elsewhere private pages, relocated a page at a time (a large image
+    // is never copied whole).
     let mut space = process.space.lock();
     let mut page_buf = [0u8; PAGE_SIZE as usize];
     for (i, &protect) in image.page_protect.iter().enumerate() {
@@ -777,11 +772,14 @@ pub fn unmap_view(process: &Process, addr: u64) -> Result<(), NtStatus> {
     let mut vad = process.vad.lock();
     vad.release(views[i].base, 0)?;
     let view = views.swap_remove(i);
+    // The pages mapped (most of a large image's never are): in time of
+    // those, not of the view's size.
     let mut space = process.space.lock();
-    let mut page = view.base;
-    while page < view.base + view.size {
+    let end = view.base + view.size;
+    let mut next = space.next_mapped(view.base, end);
+    while let Some(page) = next {
         space.unmap_page(page); // borrowed: frames stay with the section
-        page += PAGE_SIZE;
+        next = space.next_mapped(page + PAGE_SIZE, end);
     }
     drop(space);
     drop(vad);
@@ -817,16 +815,19 @@ pub fn mapped_file_name(process: &Process, addr: u64) -> Option<Result<Vec<u16>,
 /// the file system then delivers change notifications, which write user
 /// memory (and may fault).
 pub fn frame_for(process: &Process, addr: u64) -> Option<(ObjectRef, Frame)> {
-    let (section, index) = {
+    let (section, index, view_base) = {
         let views = process.views.lock();
         let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
         let index = usize::try_from((addr - v.base + v.offset) / PAGE_SIZE).ok()?;
-        (v.section.clone(), index)
+        (v.section.clone(), index, v.base)
     };
-    if section_of(&section).image.is_some() {
-        return None;
-    }
-    let frame = section_of(&section).frame(index)?;
+    // An image view's page: its shared (or shared relocated) frame, made
+    // now; None for a view with private pages (mapped with the view) or
+    // no memory.
+    let frame = match &section_of(&section).image {
+        Some(image) => image.view_frame(index, view_base, true)?,
+        None => section_of(&section).frame(index)?,
+    };
     Some((section, frame))
 }
 

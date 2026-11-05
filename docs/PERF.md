@@ -33,7 +33,9 @@ machine. Each measurement below keeps its date and how it was taken.
   of one split into 4096 runs: the cost must not grow with the runs;
   about 23 and 76 us under TCG, the latter 2.6 ms when each change
   rebuilt the run list), `demand_zero_fault`, `section_map_unmap_64k`,
-  `image_load`, `thread_create_exit`, `event_pingpong_same_cpu`,
+  `image_load`, `image_load_32m_untouched` (both after one untimed load
+  that lays the file out; the second must cost what the first does),
+  `thread_create_exit`, `event_pingpong_same_cpu`,
   `event_pingpong_cross_cpu` (with two CPUs). `cargo xtask bench
   --release [bench-windows.txt]` boots it (`run=bench.exe`, BIOS, no
   screen), writes `target/report/bench.json` (platform `gala qemu-tcg`
@@ -143,6 +145,15 @@ per view, and copied the whole executable into fresh frames
 | | Before | After |
 |---|---|---|
 | bench `image_load` (open, SEC_IMAGE section, map, unmap, close of an 87 KiB DLL) | 2.09 ms | 0.32 ms |
+
+Later: image views are demand-paged (a page is mapped at its first
+touch, not with the view). Warmed up (the layout made once, untimed),
+release kernel, TCG:
+
+| | Eager | Demand-paged |
+|---|---|---|
+| bench `image_load` (87 KiB DLL) | 0.50 ms | 0.30 ms |
+| bench `image_load_32m_untouched` (the same, 32 MiB larger, not touched) | 22.4 ms | 0.29 ms |
 | process creation (119) | 641 ms | 266 ms |
 | lua scenario, kernel time | 12.7 s | 7.9 s |
 | tcc / tcc_make / tcc_self (full suite run) | 6.3 / 9.0 / 8.5 s | 4.3 / 6.7 / 6.8 s |

@@ -130,7 +130,10 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     let Some(PageState { committed: true, protect }) = vad.page(addr) else {
         return Fault::Denied;
     };
-    let mapped = vad.query(addr).is_ok_and(|q| q.kind == vad::MEM_MAPPED);
+    // Section views (data and image) map their pages at the first touch.
+    let kind_of = vad.query(addr).map(|q| q.kind);
+    let image = kind_of == Ok(vad::MEM_IMAGE);
+    let mapped = image || kind_of == Ok(vad::MEM_MAPPED);
     let Ok(access) = vad::access_of(protect) else { return Fault::Denied };
     let allowed = match kind {
         AccessKind::Read => access.read,
@@ -148,6 +151,9 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
             Some((section, frame)) if super::section::in_view_of(&views, addr, section) => {
                 Some(*frame)
             }
+            // An image page always has a frame (its view maps the private
+            // ones at once): no memory to make it.
+            None if looked_up && image => return Fault::OutOfMemory,
             // No page there (past the section's end).
             None if looked_up => return Fault::Denied,
             // The page or view changed since the lookup: look again (the
@@ -279,20 +285,22 @@ fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> 
 /// committed pages get their flags, others lose their frame. The caller
 /// holds the VAD lock from its change to this (see `resolve_once`).
 pub fn sync_range(process: &Process, vad: &vad::Vad, start: u64, size: u64) {
+    // Only mapped pages have anything to sync: they are visited, absent
+    // page tables skipped (a free or protect of a large, mostly untouched
+    // range costs its mapped pages).
     let mut space = process.space.lock();
-    let mut addr = start;
-    while addr < start + size {
+    let end = start + size;
+    let mut next = space.next_mapped(start, end);
+    while let Some(addr) = next {
         match vad.page(addr) {
             Some(PageState { committed: true, protect }) => {
-                if space.is_mapped(addr) {
-                    let _ = space.set_flags(addr, flags_for(protect));
-                }
+                let _ = space.set_flags(addr, flags_for(protect));
             }
             _ => {
                 space.unmap_page(addr);
             }
         }
-        addr += PAGE_SIZE;
+        next = space.next_mapped(addr + PAGE_SIZE, end);
     }
 }
 
