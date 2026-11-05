@@ -23,7 +23,9 @@ machine. Each measurement below keeps its date and how it was taken.
   dominating), so use it for shares and arguments, not totals.
 - **Micro-benchmarks**: `user/bench` runs unchanged on Windows and gala
   and prints `bench: <name> ns_per_op <n>` (wall time from the
-  performance counter): `null_syscall`, `null_syscall_200_threads`
+  performance counter): `cpu_loop` (a xorshift step in user mode, no
+  system call: the CPU's own speed; also the user time `events_sample`'s
+  profiler check counts on), `null_syscall`, `null_syscall_200_threads`
   (the same with 200 other threads alive: a system call's cost must not
   grow with the threads, as a browser has hundreds; compare the two in
   one run, absolute numbers move ±30% between runs under TCG),

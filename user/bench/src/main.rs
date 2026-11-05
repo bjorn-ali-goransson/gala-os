@@ -130,6 +130,16 @@ fn main() -> u32 {
     query_system(0, &mut b);
     let cpus = u32::from(b[56]);
 
+    // Pure user-mode work (a xorshift step per operation, no system
+    // call): the CPU's own speed, and user time the sampling profiler's
+    // scenario can count on (events_sample).
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    bench("cpu_loop", 64_000_000, || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x = core::hint::black_box(x);
+    });
     bench("null_syscall", 5000, || {
         performance_counter();
     });
