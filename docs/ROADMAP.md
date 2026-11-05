@@ -1094,7 +1094,11 @@ need unwinding: next).
    what Windows programs emit into OTel logs and spans; later the same
    for LX.
 4. OT5: the in-guest OTLP exporter for servers, controlled from the
-   `gala` CLI (on/off, sampling, endpoint).
+   `gala` CLI (on/off, sampling rules, endpoint), and a Prometheus
+   `/metrics` endpoint (text format) any Prometheus scrapes directly;
+   defaults: metrics, failures, ledger, crash reports and the flight
+   recorder always on, traces and the profiler on demand
+   (OBSERVABILITY "Volume").
 5. OT6: visualization (OBSERVABILITY "Visualization"): the Perfetto
    export is done (`cargo xtask perfetto`: tracks per thread, IPC
    flows, samples); next a live view (`cargo xtask

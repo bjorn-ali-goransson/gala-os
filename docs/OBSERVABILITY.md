@@ -603,8 +603,25 @@ silent):
   budget, it lowers head ratios and the profile rate (never the
   metrics), and says so: dropped and sampled-out counts per signal are
   themselves metrics, and the export says what ratio was in force.
+- **Defaults: always on, cheap; deep on demand.** A running gala keeps,
+  always: the metrics (aggregated, fixed cost: they say something is
+  wrong and where), failures (above), the ledger, crash reports, the
+  flight recorder (an in-memory ring written out only when something
+  goes wrong), and the free watch of single calls (failed or slow).
+  Traces (head ratios), watched chains and the profiler are off by
+  default and raised at run time, narrowly (one process, one call type,
+  for a while), through the rules (the `gala` CLI), when a metric or a
+  failure points somewhere: no reboot, no permanent cost. Windows'
+  ETW works the same way (a few always-on loggers, providers enabled
+  for an investigation).
 - Debugging a test boot stays unsampled (`events=`, everything to the
   file); sampling is for long-running systems and the live view.
+- **Prometheus**: gala's metrics can be scraped directly, not only
+  through the OTel Collector: a running gala serves `/metrics` in
+  Prometheus' text format (in-guest, the OT5 exporter's service; any
+  Prometheus scrapes a gala server with nothing in between), and xtask
+  serves a test boot's the same way; OTLP metrics go out as well, for
+  the collector route.
 
 Order: the Perfetto export first (done), then the live stack, then
 transactions as their own view. The kernel side the live view needs
