@@ -1094,8 +1094,10 @@ need unwinding: next).
    what Windows programs emit into OTel logs and spans; later the same
    for LX.
 4. OT5: the in-guest OTLP exporter for servers, controlled from the
-   `gala` CLI (on/off, sampling rules, endpoint), and a Prometheus
-   `/metrics` endpoint (text format) any Prometheus scrapes directly;
+   `gala` CLI (on/off, sampling rules, endpoint), metrics pushed to
+   Prometheus' OTLP receiver (a heartbeat for "down"; `/metrics` for
+   scraping as an option); later, anomalies against a key's own baseline
+   suggesting (then, within a budget, starting) an investigation;
    defaults: metrics, failures, ledger, crash reports and the flight
    recorder always on, traces and the profiler on demand
    (OBSERVABILITY "Volume").

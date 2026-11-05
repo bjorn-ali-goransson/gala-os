@@ -616,12 +616,25 @@ silent):
   for an investigation).
 - Debugging a test boot stays unsampled (`events=`, everything to the
   file); sampling is for long-running systems and the live view.
-- **Prometheus**: gala's metrics can be scraped directly, not only
-  through the OTel Collector: a running gala serves `/metrics` in
-  Prometheus' text format (in-guest, the OT5 exporter's service; any
-  Prometheus scrapes a gala server with nothing in between), and xtask
-  serves a test boot's the same way; OTLP metrics go out as well, for
-  the collector route.
+- **Prometheus: pushed.** Prometheus' own model is pull (it scrapes,
+  and a target that stops answering shows as down), but a test boot
+  lives seconds (a scrape interval misses most of it) and a gala server
+  may sit behind NAT or a firewall. gala pushes: OTLP metrics straight
+  to Prometheus' OTLP receiver (Prometheus 3, `/api/v1/otlp/v1/metrics`;
+  remote-write as the alternative), no collector or Pushgateway (that
+  is for batch jobs) in between. Pull's "down" signal is kept with a
+  heartbeat metric whose staleness alerts. A `/metrics` endpoint in the
+  text format stays as an option for those who scrape.
+- **Anomalies suggest an investigation** (later): the always-on
+  histograms give each key (a call per process, a wait object, an IPC
+  channel) a baseline (its p50 and p99 over a recent window). A duration
+  far outside its own baseline (say 10 times its p99, or the whole
+  distribution shifting) flags the key, and the live view or the `gala`
+  CLI suggests tracing it ("NtReadFile in pid 1352 takes 40 times its
+  usual time: trace it for 5 minutes?"); accepting raises that key's
+  rule (keep, the profiler) for a limited time. Once trusted, it can
+  switch itself on within a budget (rate, time, bytes), saying so in the
+  stream: nothing changes silently.
 
 Order: the Perfetto export first (done), then the live stack, then
 transactions as their own view. The kernel side the live view needs
