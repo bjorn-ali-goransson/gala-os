@@ -111,6 +111,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `thread` | create (start address, TEB), exit (status) |
 | `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit; `session` (a session made after boot: id, its BaseNamedObjects) |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
+| `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
 | `net` | TCP accept, connect, close, reset, with local and remote addresses |
 | `logon` | LogonUser and LSA logons: pid, user, domain, type, how, status (never the password) |
@@ -147,7 +148,9 @@ strings, enums as numbers.
 | `thread create` / `thread exit` | span `thread <tid>`, child of its process | `thread.id`, `process.pid`, `gala.start_address`, `gala.teb`, `gala.exit_status` |
 | `syscall` (end time `t`, duration `ns`) | span named by the service, child of its thread | `code.function.name`, `gala.syscall.nr`, `gala.syscall.status`, `gala.syscall.args` (hex), `gala.cpu`, `thread.id`, `process.pid`; status ERROR for 0xC... |
 | `wait` (a wait's entry) | merged into its `syscall` span; one that never returns: span event `<service> (entered, no return)` on its thread | as the stream has them |
-| `fault` | span event `fault #PF page fault` (by vector) on the thread, else the process | `gala.fault.vector`, `.rip`, `.address` (cr2), `.error` |
+| `fault` | span event `fault #PF page fault` (by vector) on the thread, else the process |
+| `pipe write` / `pipe read` | a zero-length span on the thread that did it; a read links each write whose bytes it took (`data from`) | `gala.pipe.id`, `.name`, `.offset`, `.end`/`.to_end`, `.waited_ns` (from the first such write), `messaging.message.body.size` |
+| `iocp post` / `iocp dequeue` | a zero-length span on the thread that did it; a dequeue links its post (`completion of`, FIFO per port and context) | `gala.iocp.port`, `.key`, `.context`, `.bytes`, `.status`, `.queued_ns`, `.queued_by` | `gala.fault.vector`, `.rip`, `.address` (cr2), `.error` |
 | `image` | span event `image load <file>` on the process | `gala.image.name`, `.base`, `.size` |
 | every other kind (`console *`, `clock_*`, `tcp *`, `logon`, `session`, `display *`, ...) | span event of that name on its thread (`tid`, else the emitting thread `by`), process, or the boot | `gala.<field>`; `pid`/`tid` as `process.pid`/`thread.id` |
 | `rec` (record/replay bytes) | not mapped (counted) | |
@@ -167,6 +170,11 @@ strings, enums as numbers.
   boot`) and says so (`gala.time.estimated`).
 - **Ids** are derived from the boot's content, so converting the same
   boot twice gives the same ids.
+- **The slowest hand-offs**: `otel: slow pipe data:` (the five longest
+  times from a write to the read that took it: pipe, name, end, bytes,
+  writer and reader threads) and `otel: slow completion:` (the five
+  longest times a packet waited in its port: port, context, the thread
+  that queued it and the one that took it).
 - **Its own observability**: every conversion prints `otel:` lines: what
   each event kind became, what was **not mapped** (per kind, e.g. `rec`,
   unparsed lines) and the **gaps in the stream** (per kind: a fault

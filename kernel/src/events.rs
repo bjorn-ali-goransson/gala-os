@@ -1,7 +1,7 @@
 //! The event stream: one JSON object per line on the debug console
 //! (`arch::debugcon`), for tools rather than people (docs/OBSERVABILITY.md
 //! section 1). Off by default; `events=syscall,image,thread,process,fault,
-//! mock,net,logon,console,display` (or `events=all`) on the kernel command
+//! mock,net,logon,console,display,ipc` (or `events=all`) on the kernel command
 //! line turns categories on (`mock`: live mocking's changes, such as clock
 //! control). A `record`
 //! boot's recording also goes here (`"ev":"rec"`, whatever the mask). Each
@@ -39,9 +39,16 @@ pub enum Category {
     Window = 2048,
     /// File opens: the name, the handle or the failing status.
     File = 4096,
+    /// Interprocess I/O: pipes (create, connect, write and read with byte
+    /// offsets, disconnect, close) and I/O completion ports (post and
+    /// dequeue, with who queued the packet and when), so data can be
+    /// followed from a write to its read and to the thread that took the
+    /// completion.
+    Ipc = 8192,
 }
 
-const NAMES: [(&str, u32); 13] = [
+const NAMES: [(&str, u32); 14] = [
+    ("ipc", Category::Ipc as u32),
     ("file", Category::File as u32),
     ("window", Category::Window as u32),
     ("display", Category::Display as u32),

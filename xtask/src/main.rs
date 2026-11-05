@@ -2910,6 +2910,22 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // OT3: pipes and completion ports, so data can be followed from a
+        // write to the read that took it and to the thread that dequeued
+        // its completion.
+        "events_ipc",
+        &[
+            r#""ev":"pipe create","pipe":"#,
+            r#""ev":"pipe connect","pipe":"#,
+            r#""ev":"pipe write","pipe":"#,
+            r#""ev":"pipe read","pipe":"#,
+            r#""ev":"pipe disconnect","pipe":"#,
+            r#""ev":"iocp post","port":"#,
+            r#""ev":"iocp dequeue","port":"#,
+            r#","queued_by":"#,
+        ],
+    ),
+    (
         "events",
         &[
             r#""ev":"process start","pid":4,"session":1,"name":"import_test.exe","personality":"nt""#,
@@ -3570,6 +3586,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit events=process,thread,image run=process_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["process_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The event stream's pipe and completion-port events (see
+        // EVENT_EXPECT) while pipe_test runs.
+        name: "events_ipc",
+        cmdline: "qemu_exit events=ipc,thread run=pipe_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["pipe_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Smoke test only; `cargo xtask bench` collects the numbers.
@@ -6093,6 +6117,7 @@ fn events_flag() -> String {
 /// ships the union of its sets.
 const MODULE_SETS: &[(&str, &str)] = &[
     ("events_process", "process_test"),
+    ("events_ipc", "pipe_test"),
     ("pk_install_zip", "pk_install_test"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),

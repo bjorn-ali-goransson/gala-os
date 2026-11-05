@@ -1049,15 +1049,19 @@ emitted it (`"by"`, kept per CPU by the scheduler), so faults, image
 loads and console or network events land on a thread; `process start`
 names the parent process and creating thread, and the export nests a
 child under its parent with a span link to its creator (scenario
-`events_process`).
+`events_process`). From OT3: the `ipc` events (pipes with byte offsets,
+completion packets with who queued them and when; scenario
+`events_ipc`) become spans linked write to read and post to dequeue,
+and the converter names the slowest hand-offs.
 
 **Next**:
 1. OT2: trace context in the kernel; system calls, waits, faults, I/O
    and network as spans; per-CPU rings. Still open of OT1's gaps: an
    entry event for every system call; times on serial lines; the boot's
    wall-clock start.
-2. OT3: propagation through ntdll/kernel32, process creation, pipes,
-   ALPC/RPC, IOCP.
+2. OT3: trace context carried through ntdll/kernel32 (a TEB slot) and
+   ALPC/RPC; sockets and events signaled across processes as links like
+   pipes and completion ports.
 3. OT4: the ETW bridge (EventRegister/EventWrite, TraceLogging) turning
    what Windows programs emit into OTel logs and spans; later the same
    for LX.

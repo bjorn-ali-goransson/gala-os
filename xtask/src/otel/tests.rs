@@ -651,3 +651,67 @@ fn a_child_process_hangs_off_its_parent_and_links_its_creator() {
     assert!(t24.events.iter().any(|e| e.1 == "image load testdll.dll"));
     assert_eq!(e.report.gaps.get("fault without thread"), None);
 }
+
+const IPC: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":8,"start":1,"teb":2}
+{"t":110,"cpu":0,"by":0,"ev":"thread create","pid":20,"tid":24,"start":1,"teb":2}
+{"t":120,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":12,"start":1,"teb":2}
+{"t":200,"cpu":0,"by":8,"ev":"pipe create","pipe":3,"name":"\\mojo.1","message":false,"instance":1}
+{"t":300,"cpu":1,"by":24,"ev":"pipe connect","pipe":3,"generation":0}
+{"t":400,"cpu":1,"by":24,"ev":"pipe write","pipe":3,"end":1,"to":0,"off":0,"bytes":10,"queued":10}
+{"t":500,"cpu":1,"by":24,"ev":"pipe write","pipe":3,"end":1,"to":0,"off":10,"bytes":6,"queued":16}
+{"t":600,"cpu":1,"by":24,"ev":"pipe read","pipe":3,"end":0,"off":0,"bytes":16,"left":0}
+{"t":610,"cpu":1,"by":24,"ev":"iocp post","port":5,"key":7,"ctx":4096,"status":0,"bytes":16,"depth":1}
+{"t":9000,"cpu":0,"by":12,"ev":"iocp dequeue","port":5,"key":7,"ctx":4096,"status":0,"bytes":16,"queued_t":605,"queued_by":24,"depth":0}
+{"t":9100,"cpu":0,"by":12,"ev":"pipe read","pipe":3,"end":0,"off":16,"bytes":4,"left":0}
+{"t":9500,"cpu":0,"by":12,"ev":"thread exit","pid":4,"tid":12,"status":0}
+{"t":9600,"cpu":0,"by":24,"ev":"thread exit","pid":20,"tid":24,"status":0}
+{"t":9700,"cpu":0,"by":8,"ev":"thread exit","pid":4,"tid":8,"status":0}
+"#;
+
+#[test]
+fn reads_link_the_writes_they_took_and_dequeues_their_posts() {
+    let e = convert(&Boot {
+        serial: "",
+        events: IPC,
+        scenario: "ipc",
+        build: "debug 1",
+        start_unix_ns: BASE,
+    });
+    let all = spans(&e);
+    let by_id: HashMap<&str, &S> = all.iter().map(|s| (s.id.as_str(), s)).collect();
+    let named = |n: &str| all.iter().filter(|s| s.name == n).collect::<Vec<_>>();
+    let thread = |tid: &str| all.iter().find(|s| s.name == format!("thread {tid}")).unwrap();
+    let writes = named("pipe write");
+    assert_eq!(writes.len(), 2);
+    assert!(writes.iter().all(|w| w.parent.as_deref() == Some(thread("24").id.as_str())));
+    let reads = named("pipe read");
+    assert_eq!(reads.len(), 2);
+    // The first read took both writes' bytes: two links, "data from".
+    let first = reads.iter().find(|r| r.start == BASE + 600).unwrap();
+    let from: Vec<&str> = first.links.iter().map(|l| by_id[l.0.as_str()].name.as_str()).collect();
+    assert_eq!(from, ["pipe write", "pipe write"]);
+    assert!(
+        first.links.iter().all(|l| attr_str(&l.1, "gala.link").as_deref() == Some("data from"))
+    );
+    assert_eq!(attr_str(&first.attrs, "gala.pipe.id").as_deref(), Some("3"));
+    assert_eq!(attr_str(&first.attrs, "gala.pipe.name").as_deref(), Some("\\mojo.1"));
+    // The dequeue on thread 12 links the post on thread 24 and says how
+    // long the packet waited in the port.
+    let dq = named("iocp dequeue");
+    assert_eq!(dq.len(), 1);
+    assert_eq!(dq[0].parent.as_deref(), Some(thread("12").id.as_str()));
+    let post = named("iocp post")[0];
+    assert_eq!(dq[0].links.len(), 1);
+    assert_eq!(dq[0].links[0].0, post.id);
+    assert_eq!(attr_str(&dq[0].links[0].1, "gala.link").as_deref(), Some("completion of"));
+    assert_eq!(attr_str(&dq[0].attrs, "gala.iocp.queued_ns").as_deref(), Some("8395"));
+    // A read of bytes no write in the stream put there is a gap.
+    assert_eq!(e.report.gaps.get("pipe read without its write"), Some(&1));
+    // The report names the slowest hand-offs.
+    let lines = e.report.lines();
+    assert!(
+        lines.contains("otel: slow completion: 0.0 ms queued before dequeue: port 5 context 0x1000, queued by thread 24 at 605 ns, taken by thread 12 at 9000 ns"),
+        "{lines}"
+    );
+    assert!(lines.contains("otel: slow pipe data: 0.0 ms from write to read: pipe 3 \\mojo.1 end 0, 16 bytes at offset 0, written by thread 24"), "{lines}");
+}

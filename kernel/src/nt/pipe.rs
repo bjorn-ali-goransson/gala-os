@@ -60,6 +60,18 @@ use crate::sync::IrqMutex;
 /// Quota used when the creator asks for none (CreatePipe's nSize 0).
 const DEFAULT_QUOTA: usize = 4096;
 
+/// Numbers pipes for the event stream.
+static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// An `ipc` event about pipe `id` (`fields` after `"pipe":id`).
+fn event(name: &str, id: u64, fields: core::fmt::Arguments) {
+    crate::events::emit(
+        crate::events::Category::Ipc,
+        name,
+        format_args!(r#""pipe":{id},{fields}"#),
+    );
+}
+
 /// FILE_PIPE_PEEK_BUFFER.NamedPipeState values.
 pub const FILE_PIPE_DISCONNECTED_STATE: u32 = 1;
 pub const FILE_PIPE_LISTENING_STATE: u32 = 2;
@@ -93,6 +105,13 @@ enum Conn {
 }
 
 struct State {
+    /// The pipe's number in the event stream (`ipc` events).
+    id: u64,
+    /// Bytes ever put into each inbox and taken from it: the offsets of
+    /// `pipe write` and `pipe read` events, so a read is matched to the
+    /// writes it took (the data for end e are written by the other end).
+    put: [u64; 2],
+    taken: [u64; 2],
     /// Bytes waiting to be read by end 0 (server) and end 1 (client).
     inbox: [VecDeque<u8>; 2],
     /// The lengths of the messages in each inbox (message-type pipes).
@@ -182,6 +201,7 @@ impl Drop for PipeEnd {
         }
         {
             let mut s = self.pipe.state.lock();
+            event("pipe close", s.id, format_args!(r#""end":{}"#, self.end));
             if self.end == 0 {
                 s.server_open = false;
             } else if self.generation == s.generation && s.conn == Conn::Connected {
@@ -292,10 +312,24 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
     let mut given = Vec::new();
     given.try_reserve_exact(name.len()).map_err(|_| NtStatus::NO_MEMORY)?;
     given.try_extend_from_slice(name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let id = NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed);
+    event(
+        "pipe create",
+        id,
+        format_args!(
+            r#""name":{},"message":{},"instance":{}"#,
+            crate::events::Utf16(name),
+            o.message_type,
+            count + 1
+        ),
+    );
     let pipe = KArc::try_new(Pipe {
         client_token: IrqMutex::new(None),
         name: given,
         state: IrqMutex::new(State {
+            id,
+            put: [0; 2],
+            taken: [0; 2],
             inbox: [VecDeque::new(), VecDeque::new()],
             messages: [VecDeque::new(), VecDeque::new()],
             message_type: o.message_type,
@@ -340,6 +374,7 @@ pub fn open_client(
         }
         s.conn = Conn::Connected;
         let generation = s.generation;
+        event("pipe connect", s.id, format_args!(r#""generation":{generation}"#));
         try_complete(&mut s);
         wake_all(&mut s);
         drop(s);
@@ -447,6 +482,18 @@ impl State {
         let mut out = Vec::new();
         out.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;
         out.extend(self.inbox[end].drain(..n));
+        // The thread may be the writer completing a waiting read: `by`
+        // says who, `end` whose read it is.
+        event(
+            "pipe read",
+            self.id,
+            format_args!(
+                r#""end":{end},"off":{},"bytes":{n},"left":{}"#,
+                self.taken[end],
+                self.inbox[end].len()
+            ),
+        );
+        self.taken[end] += n as u64;
         // Consume the message lengths the bytes covered.
         let mut left = n;
         while left > 0 {
@@ -697,6 +744,8 @@ impl PipeEnd {
                 return Err(PIPE_DISCONNECTED);
             }
             s.conn = Conn::Disconnected;
+            let dropped = s.inbox[0].len() + s.inbox[1].len();
+            event("pipe disconnect", s.id, format_args!(r#""unread":{dropped}"#));
             s.generation += 1;
             for e in 0..2 {
                 s.inbox[e].clear();
@@ -753,6 +802,17 @@ impl PipeEnd {
                     s.messages[peer].push_back(n);
                 }
                 s.inbox[peer].extend(&data[..n]);
+                event(
+                    "pipe write",
+                    s.id,
+                    format_args!(
+                        r#""end":{},"to":{peer},"off":{},"bytes":{n},"queued":{}"#,
+                        self.end,
+                        s.put[peer],
+                        s.inbox[peer].len()
+                    ),
+                );
+                s.put[peer] += n as u64;
                 data = &data[n..];
                 first = false;
                 finished = try_complete(&mut s);
@@ -961,6 +1021,9 @@ pub fn adopt(c: Carried) -> Result<KArc<Pipe>, NtStatus> {
         client_token: IrqMutex::new(None),
         name: given,
         state: IrqMutex::new(State {
+            id: NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed),
+            put: [0; 2],
+            taken: [0; 2],
             inbox,
             messages,
             message_type: c.message_type,

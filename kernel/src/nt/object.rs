@@ -166,17 +166,79 @@ pub struct CompletionPacket {
     pub context: u64,
     pub status: u32,
     pub information: u64,
+    /// When it was queued (ns since boot) and by which thread (its client
+    /// id; 0 for a kernel thread): set by `CompletionQueue::push`, for the
+    /// event stream's `iocp dequeue`.
+    pub queued_t: u64,
+    pub queued_by: u64,
 }
 
+impl CompletionPacket {
+    pub fn new(key: u64, context: u64, status: u32, information: u64) -> Self {
+        CompletionPacket { key, context, status, information, queued_t: 0, queued_by: 0 }
+    }
+}
+
+/// Numbers completion ports for the event stream.
+static NEXT_PORT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
 /// The FIFO of an I/O completion port.
-#[derive(Default)]
 pub struct CompletionQueue {
+    /// The port's number in the event stream.
+    pub id: u64,
     packets: Vec<CompletionPacket>,
 }
 
+impl Default for CompletionQueue {
+    fn default() -> Self {
+        let id = NEXT_PORT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        CompletionQueue { id, packets: Vec::new() }
+    }
+}
+
 impl CompletionQueue {
-    pub fn push(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
-        self.packets.try_push(packet)
+    /// Queues `packet`, stamped with the time and the queuing thread
+    /// (`iocp post` in the event stream).
+    pub fn push(&mut self, mut packet: CompletionPacket) -> Result<(), AllocError> {
+        packet.queued_t = crate::nt::platform::monotonic_ns();
+        packet.queued_by = crate::events::current_client();
+        self.packets.try_push(packet)?;
+        crate::events::emit(
+            crate::events::Category::Ipc,
+            "iocp post",
+            format_args!(
+                r#""port":{},"key":{},"ctx":{},"status":{},"bytes":{},"depth":{}"#,
+                self.id,
+                packet.key,
+                packet.context,
+                packet.status,
+                packet.information,
+                self.packets.len()
+            ),
+        );
+        Ok(())
+    }
+
+    /// Takes the oldest packet for the calling thread (`iocp dequeue`, with
+    /// who queued it and when, in the event stream).
+    pub fn take(&mut self) -> Option<CompletionPacket> {
+        let p = self.pop()?;
+        crate::events::emit(
+            crate::events::Category::Ipc,
+            "iocp dequeue",
+            format_args!(
+                r#""port":{},"key":{},"ctx":{},"status":{},"bytes":{},"queued_t":{},"queued_by":{},"depth":{}"#,
+                self.id,
+                p.key,
+                p.context,
+                p.status,
+                p.information,
+                p.queued_t,
+                p.queued_by,
+                self.packets.len()
+            ),
+        );
+        Some(p)
     }
 
     pub fn pop(&mut self) -> Option<CompletionPacket> {
@@ -737,14 +799,17 @@ mod tests {
     #[test]
     fn completion_queue_is_fifo() {
         let mut q = CompletionQueue::default();
-        let p = |key| CompletionPacket { key, context: key * 2, status: 0, information: 1 };
+        let p = |key| CompletionPacket::new(key, key * 2, 0, 1);
         q.push(p(1)).unwrap();
         q.push(p(2)).unwrap();
         assert_eq!(q.len(), 2);
-        assert_eq!(q.pop(), Some(p(1)));
-        assert_eq!(q.pop(), Some(p(2)));
+        let key = |p: Option<CompletionPacket>| p.map(|p| (p.key, p.context));
+        assert_eq!(key(q.pop()), Some((1, 2)));
+        assert_eq!(key(q.take()), Some((2, 4)));
         assert_eq!(q.pop(), None);
         assert!(q.is_empty());
+        // Each port has its own number in the event stream.
+        assert_ne!(CompletionQueue::default().id, q.id);
     }
 
     #[test]

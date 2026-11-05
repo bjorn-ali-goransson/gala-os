@@ -342,7 +342,7 @@ fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, im
     }
     let port = state.completion.lock().clone();
     if let (Some((port, key)), true) = (port, io.context != 0 && io.apc.is_none()) {
-        let packet = CompletionPacket { key, context: io.context, status: status.0, information };
+        let packet = CompletionPacket::new(key, io.context, status.0, information);
         if let ObjectBody::IoCompletion(c) = &port.body
             && c.queue.lock().push(packet).is_ok()
         {

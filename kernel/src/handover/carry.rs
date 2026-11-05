@@ -1606,12 +1606,7 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
         for mut p in e.table().iter() {
             let p = PacketRec::read(&mut p);
             queue
-                .push(CompletionPacket {
-                    key: p.key,
-                    context: p.context,
-                    status: p.status,
-                    information: p.information,
-                })
+                .push(CompletionPacket::new(p.key, p.context, p.status, p.information))
                 .map_err(no_memory)?;
         }
         let o = new_object(ObjectBody::IoCompletion(IoCompletion {

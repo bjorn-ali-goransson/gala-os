@@ -235,8 +235,7 @@ pub fn complete_count(r: Request, status: NtStatus, count: u64) {
     }
     wait::signal_dispatcher(&r.file_signal, 1);
     if let (Some((port, key)), true) = (&r.port, r.apc_context != 0) {
-        let packet =
-            CompletionPacket { key: *key, context: r.apc_context, status: status.0, information };
+        let packet = CompletionPacket::new(*key, r.apc_context, status.0, information);
         if let ObjectBody::IoCompletion(c) = &port.body
             && c.queue.lock().push(packet).is_ok()
         {

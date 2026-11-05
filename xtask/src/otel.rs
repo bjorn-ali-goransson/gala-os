@@ -71,6 +71,22 @@ pub struct Report {
     pub not_mapped: BTreeMap<String, u64>,
     /// What the stream lacks (OT2's work) -> count.
     pub gaps: BTreeMap<&'static str, u64>,
+    /// The slowest IPC hand-offs (OT3): (ns, description), longest first,
+    /// at most `SLOWEST` of each kind.
+    pub slow_pipes: Vec<(u64, String)>,
+    pub slow_completions: Vec<(u64, String)>,
+}
+
+/// How many of the slowest IPC hand-offs the report keeps.
+const SLOWEST: usize = 5;
+
+/// Keeps `list` the `SLOWEST` longest, longest first.
+fn keep_slowest(list: &mut Vec<(u64, String)>, ns: u64, what: impl FnOnce() -> String) {
+    if list.len() < SLOWEST || list.last().is_some_and(|l| l.0 < ns) {
+        list.push((ns, what()));
+        list.sort_by_key(|l| core::cmp::Reverse(l.0));
+        list.truncate(SLOWEST);
+    }
 }
 
 impl Report {
@@ -101,6 +117,20 @@ impl Report {
             let mut it = self.gaps.iter().map(|(k, n)| format!("{k} {n}"));
             let _ = writeln!(o, "otel: gaps in the stream (OT2): {}", list(&mut it));
         }
+        for (ns, what) in &self.slow_pipes {
+            let _ = writeln!(
+                o,
+                "otel: slow pipe data: {:.1} ms from write to read: {what}",
+                *ns as f64 / 1e6
+            );
+        }
+        for (ns, what) in &self.slow_completions {
+            let _ = writeln!(
+                o,
+                "otel: slow completion: {:.1} ms queued before dequeue: {what}",
+                *ns as f64 / 1e6
+            );
+        }
         o
     }
 }
@@ -115,6 +145,13 @@ pub enum Val {
 }
 
 type Attrs = Vec<(String, Val)>;
+
+/// The writes into each (pipe, reading end): (first byte, end, span).
+type PipeWrites = HashMap<(u64, u64), Vec<(u64, u64, usize)>>;
+
+/// I/O completion posts not yet dequeued, per (port, context), oldest
+/// first (their spans).
+type Posts = HashMap<(u64, u64), std::collections::VecDeque<usize>>;
 
 fn s(v: impl Into<String>) -> Val {
     Val::Str(v.into())
@@ -609,6 +646,19 @@ impl State {
     }
 }
 
+/// The thread id of the thread span holding span `sp` (0: none).
+fn ev_thread_of(st: &State, sp: usize) -> u64 {
+    let parent = st.spans[sp].parent.unwrap_or(0);
+    st.spans[parent]
+        .attrs
+        .iter()
+        .find_map(|(k, v)| match (k.as_str(), v) {
+            ("thread.id", Val::Int(t)) => Some(*t as u64),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
 fn thread_attrs(pid: Option<u64>, tid: u64) -> Attrs {
     let mut a = vec![("thread.id".to_string(), Val::Int(tid as i64))];
     if let Some(pid) = pid {
@@ -688,6 +738,12 @@ pub fn convert(boot: &Boot) -> Export {
     let mut last = 0u64;
     // name -> (calls, ns)
     let mut services: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    // IPC (OT3): pipe names; the writes into each (pipe, reading end) as
+    // (first byte, end, span); the posts not yet dequeued per (port,
+    // context), oldest first.
+    let mut pipe_names: HashMap<u64, String> = HashMap::new();
+    let mut pipe_writes: PipeWrites = HashMap::new();
+    let mut posts: Posts = HashMap::new();
     for (t, ev) in &events {
         let t = *t;
         last = last.max(t);
@@ -696,7 +752,118 @@ pub fn convert(boot: &Boot) -> Export {
         let tid = ev.u64("tid").filter(|&t| t != 0);
         // The thread whose work emitted the event (0: a kernel thread).
         let by = ev.u64("by").filter(|&b| b != 0);
+        if kind == "pipe create"
+            && let (Some(p), Some(n)) = (ev.u64("pipe"), ev.str("name"))
+        {
+            pipe_names.insert(p, n.to_string());
+        }
+        // An IPC step: a zero-length span on the thread that did it.
+        let ipc_span = |st: &mut State, name: &str, attrs: Attrs| {
+            let at = by.and_then(|b| st.threads.get(&b).copied()).unwrap_or(root);
+            let sp = st.new_span(Some(at), name.to_string(), t, attrs);
+            st.spans[sp].end = Some(t);
+            sp
+        };
+        let pipe_attrs = |pipe: u64| {
+            let mut a: Attrs = vec![("gala.pipe.id".into(), Val::Int(pipe as i64))];
+            if let Some(n) = pipe_names.get(&pipe) {
+                a.push(("gala.pipe.name".into(), s(n)));
+            }
+            a
+        };
         match kind.as_str() {
+            "pipe write" | "pipe read" => {
+                let (pipe, off, bytes) = (
+                    ev.u64("pipe").unwrap_or(0),
+                    ev.u64("off").unwrap_or(0),
+                    ev.u64("bytes").unwrap_or(0),
+                );
+                let mut attrs = pipe_attrs(pipe);
+                attrs.push(("gala.pipe.offset".into(), Val::Int(off as i64)));
+                attrs.push(("messaging.message.body.size".into(), Val::Int(bytes as i64)));
+                if kind == "pipe write" {
+                    let to = ev.u64("to").unwrap_or(0);
+                    attrs.push(("gala.pipe.to_end".into(), Val::Int(to as i64)));
+                    let sp = ipc_span(&mut st, &kind, attrs);
+                    pipe_writes.entry((pipe, to)).or_default().push((off, off + bytes, sp));
+                } else {
+                    let end = ev.u64("end").unwrap_or(0);
+                    attrs.push(("gala.pipe.end".into(), Val::Int(end as i64)));
+                    let sp = ipc_span(&mut st, &kind, attrs);
+                    // The writes whose bytes this read took.
+                    let from: Vec<usize> = pipe_writes
+                        .get(&(pipe, end))
+                        .map(|w| {
+                            w.iter()
+                                .filter(|&&(a, b, _)| a < off + bytes.max(1) && off < b.max(a + 1))
+                                .map(|&(_, _, s)| s)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if from.is_empty() && bytes > 0 {
+                        st.report.gap("pipe read without its write");
+                    }
+                    if let Some(&first) = from.first() {
+                        let waited = t.saturating_sub(st.spans[first].start);
+                        st.spans[sp]
+                            .attrs
+                            .push(("gala.pipe.waited_ns".into(), Val::Int(waited as i64)));
+                        let name = pipe_names.get(&pipe).cloned().unwrap_or_default();
+                        let writer = ev_thread_of(&st, first);
+                        keep_slowest(&mut st.report.slow_pipes, waited, || {
+                            format!(
+                                "pipe {pipe} {name} end {end}, {bytes} bytes at offset {off}, written by thread {writer} at {} ns, read by thread {} at {t} ns",
+                                st.spans[first].start,
+                                by.unwrap_or(0)
+                            )
+                        });
+                    }
+                    for w in from {
+                        st.spans[sp].links.push((w, vec![("gala.link".into(), s("data from"))]));
+                    }
+                }
+                st.report.mapped(&kind, "span, linked write to read");
+            }
+            "iocp post" | "iocp dequeue" => {
+                let (port, ctx) = (ev.u64("port").unwrap_or(0), ev.u64("ctx").unwrap_or(0));
+                let mut attrs: Attrs = vec![
+                    ("gala.iocp.port".into(), Val::Int(port as i64)),
+                    ("gala.iocp.key".into(), hex(ev.u64("key").unwrap_or(0))),
+                    ("gala.iocp.context".into(), hex(ctx)),
+                    ("gala.iocp.bytes".into(), Val::Int(ev.u64("bytes").unwrap_or(0) as i64)),
+                    (
+                        "gala.iocp.status".into(),
+                        Val::Str(format!("{:#010x}", ev.u64("status").unwrap_or(0) as u32)),
+                    ),
+                ];
+                if kind == "iocp post" {
+                    let sp = ipc_span(&mut st, &kind, attrs);
+                    posts.entry((port, ctx)).or_default().push_back(sp);
+                } else {
+                    if let Some(q) = ev.u64("queued_t") {
+                        let waited = t.saturating_sub(q);
+                        attrs.push(("gala.iocp.queued_ns".into(), Val::Int(waited as i64)));
+                        keep_slowest(&mut st.report.slow_completions, waited, || {
+                            format!(
+                                "port {port} context {ctx:#x}, queued by thread {} at {q} ns, taken by thread {} at {t} ns",
+                                ev.u64("queued_by").unwrap_or(0),
+                                by.unwrap_or(0)
+                            )
+                        });
+                    }
+                    if let Some(b) = ev.u64("queued_by") {
+                        attrs.push(("gala.iocp.queued_by".into(), Val::Int(b as i64)));
+                    }
+                    let sp = ipc_span(&mut st, &kind, attrs);
+                    match posts.get_mut(&(port, ctx)).and_then(|q| q.pop_front()) {
+                        Some(post) => st.spans[sp]
+                            .links
+                            .push((post, vec![("gala.link".into(), s("completion of"))])),
+                        None => st.report.gap("iocp dequeue without its post"),
+                    }
+                }
+                st.report.mapped(&kind, "span, linked post to dequeue");
+            }
             "process start" => {
                 let pid = pid.unwrap_or(0);
                 if let Some(&p) = st.procs.get(&pid)

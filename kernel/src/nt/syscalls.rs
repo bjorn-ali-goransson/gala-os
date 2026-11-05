@@ -5652,12 +5652,8 @@ fn post_completion(call: &Call<'_>, file: &file::FileObject, iosb: u64, status: 
     }
     let Some((port, key)) = file.completion.lock().clone() else { return };
     let information = call.read_u64(iosb + 8).unwrap_or(0);
-    let packet = super::object::CompletionPacket {
-        key,
-        context: call.arg(3).unwrap_or(0),
-        status: status.0,
-        information,
-    };
+    let packet =
+        super::object::CompletionPacket::new(key, call.arg(3).unwrap_or(0), status.0, information);
     post_packet(&port, packet);
 }
 
@@ -5699,12 +5695,12 @@ fn nt_create_io_completion(call: &mut Call<'_>) -> NtStatus {
 fn nt_set_io_completion(call: &mut Call<'_>) -> NtStatus {
     let port =
         tri!(io_completion_object(call, arg!(call, 0), super::object::IO_COMPLETION_MODIFY_STATE));
-    let packet = super::object::CompletionPacket {
-        key: arg!(call, 1),
-        context: arg!(call, 2),
-        status: arg!(call, 3) as u32,
-        information: arg!(call, 4),
-    };
+    let packet = super::object::CompletionPacket::new(
+        arg!(call, 1),
+        arg!(call, 2),
+        arg!(call, 3) as u32,
+        arg!(call, 4),
+    );
     post_packet(&port, packet)
 }
 
@@ -5718,7 +5714,7 @@ fn nt_remove_io_completion(call: &mut Call<'_>) -> NtStatus {
     let timeout = tri!(call.timeout(arg!(call, 4)));
     let objects = [port.clone()];
     loop {
-        if let Some(p) = c.queue.lock().pop() {
+        if let Some(p) = c.queue.lock().take() {
             tri!(call.write_u64(key_ptr, p.key));
             tri!(call.write_u64(context_ptr, p.context));
             tri!(call.write_iosb(iosb, NtStatus(p.status), p.information));
