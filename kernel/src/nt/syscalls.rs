@@ -3134,12 +3134,30 @@ fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
     } else {
         tri!(source_process.handles.lock().get(source).ok_or(NtStatus::INVALID_HANDLE))
     };
-    let new = HandleEntry {
-        access: if options & DUPLICATE_SAME_ACCESS != 0 {
-            entry.access
+    // Access within the source handle's is granted as asked; more than it
+    // has goes through an access check against the object's security
+    // descriptor (an object with an empty DACL grants nothing more:
+    // Chromium tells its read-only shared memory handles so).
+    let access = if options & DUPLICATE_SAME_ACCESS != 0 {
+        entry.access
+    } else {
+        let wanted = entry.object.mapping().map(access);
+        if wanted & !entry.access == 0 {
+            wanted
         } else {
-            entry.object.mapping().map(access)
-        },
+            match security_calls::check_object(call, &entry.object, wanted) {
+                Ok(granted) => granted,
+                Err(e) => {
+                    if options & DUPLICATE_CLOSE_SOURCE != 0 {
+                        close_source(&source_process);
+                    }
+                    return e;
+                }
+            }
+        }
+    };
+    let new = HandleEntry {
+        access,
         attributes: if options & DUPLICATE_SAME_ATTRIBUTES != 0 {
             entry.attributes
         } else {
@@ -4330,8 +4348,9 @@ fn nt_query_section(call: &mut Call<'_>) -> NtStatus {
     let mut b = [0u8; 24];
     b[8..12].copy_from_slice(&s.attributes.to_le_bytes());
     b[16..24].copy_from_slice(&s.size.to_le_bytes());
-    if ret_ptr != 0 {
-        tri!(call.write_u64(ret_ptr, b.len() as u64));
+    // ResultLength is a ULONG.
+    if ret_ptr != 0 && call.process.write(ret_ptr, &(b.len() as u32).to_le_bytes()).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
     }
     if (length as usize) < b.len() {
         return NtStatus::INFO_LENGTH_MISMATCH;
@@ -4645,11 +4664,14 @@ const FSCTL_PIPE_DISCONNECT: u32 = 0x0011_0004;
 const FSCTL_PIPE_LISTEN: u32 = 0x0011_0008;
 /// FSCTL_PIPE_IMPERSONATE (ImpersonateNamedPipeClient).
 const FSCTL_PIPE_IMPERSONATE: u32 = 0x0011_001c;
+/// FSCTL_PIPE_TRANSCEIVE (TransactNamedPipe): the input buffer written as
+/// one message, one message read into the output buffer.
+const FSCTL_PIPE_TRANSCEIVE: u32 = 0x0011_c017;
 
 /// NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext,
 ///   *IoStatusBlock, FsControlCode, InputBuffer, InputBufferLength,
 ///   OutputBuffer, OutputBufferLength): FSCTL_PIPE_PEEK, _LISTEN,
-///   _DISCONNECT and _IMPERSONATE on pipes.
+///   _DISCONNECT, _IMPERSONATE and _TRANSCEIVE on pipes.
 fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, code, out, out_len) =
@@ -4665,6 +4687,30 @@ fn nt_fs_control_file(call: &mut Call<'_>) -> NtStatus {
             let outcome = match end.listen(Some(request.clone())) {
                 Ok(super::pipe::Outcome::Pending) => return NtStatus::PENDING,
                 Ok(super::pipe::Outcome::Done(status, _)) => (status, 0, Vec::new()),
+                Err(e) => (e, 0, Vec::new()),
+            };
+            return pipe_finish(call, &entry, end, request, event.as_ref(), outcome);
+        }
+        FSCTL_PIPE_TRANSCEIVE => {
+            let (input, in_len) = (arg!(call, 6), arg!(call, 7) as u32 as usize);
+            if entry.access & (file::FILE_READ_DATA | file::FILE_WRITE_DATA)
+                != file::FILE_READ_DATA | file::FILE_WRITE_DATA
+            {
+                return NtStatus::ACCESS_DENIED;
+            }
+            let mut data = Vec::new();
+            if data.try_reserve_exact(in_len).is_err() {
+                return NtStatus::NO_MEMORY;
+            }
+            data.resize(in_len, 0);
+            if call.process.read(input, &mut data).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
+            let request = tri!(pipe_request(call, end, event.clone(), iosb, out, out_len as u32));
+            let outcome = match end.transceive(&data, out_len, Some(request.clone())) {
+                Ok(super::pipe::Outcome::Pending) => return NtStatus::PENDING,
+                Ok(super::pipe::Outcome::Done(status, data)) => (status, data.len() as u64, data),
                 Err(e) => (e, 0, Vec::new()),
             };
             return pipe_finish(call, &entry, end, request, event.as_ref(), outcome);

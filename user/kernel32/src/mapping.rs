@@ -63,6 +63,9 @@ pub extern "system" fn CreateFileMappingW(
 ) -> Handle {
     // SECURITY_ATTRIBUTES: only bInheritHandle matters here (OBJ_INHERIT).
     let inherit = if super::sync::inheritable(attributes) { 0x02 } else { 0 };
+    // The SECURITY_ATTRIBUTES' descriptor (Chromium's sections have an
+    // empty DACL, which keeps their read-only handles read-only).
+    let descriptor = super::security_descriptor(attributes);
     let size = (i64::from(size_high) << 32) | i64::from(size_low);
     let size_ptr = if size == 0 { core::ptr::null() } else { &size as *const i64 };
     let file = if file == INVALID_HANDLE_VALUE { core::ptr::null_mut() } else { file };
@@ -80,19 +83,19 @@ pub extern "system" fn CreateFileMappingW(
         root_directory: 0,
         object_name: &us,
         attributes: 0x80 | inherit, // OBJ_OPENIF
-        security_descriptor: 0,
+        security_descriptor: descriptor,
         security_quality_of_service: 0,
     };
-    // Unnamed: attributes only to ask for an inheritable handle.
+    // Unnamed: attributes only for an inheritable handle or a descriptor.
     let unnamed = ObjectAttributes {
         length: size_of::<ObjectAttributes>() as u32,
         root_directory: 0,
         object_name: core::ptr::null(),
         attributes: inherit,
-        security_descriptor: 0,
+        security_descriptor: descriptor,
         security_quality_of_service: 0,
     };
-    let oa_ptr = match (name.is_null(), inherit != 0) {
+    let oa_ptr = match (name.is_null(), inherit != 0 || descriptor != 0) {
         (false, _) => &oa as *const ObjectAttributes,
         (true, true) => &unnamed as *const ObjectAttributes,
         (true, false) => core::ptr::null(),

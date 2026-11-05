@@ -62,6 +62,11 @@
 //!    (GetApplicationRestartSettings; the size with the NUL, a short
 //!    buffer's error), unknown flags refused; after
 //!    UnregisterApplicationRestart: ERROR_NOT_FOUND.
+//! 35. Chromium's shared memory sections (an empty DACL): NtQuerySection's
+//!    basic information (not an image, the size; ResultLength is a ULONG);
+//!    a duplicate within the handle's access is granted, one asking for
+//!    more goes through the access check (FILE_MAP_WRITE from a read-only
+//!    handle: ERROR_ACCESS_DENIED).
 
 #![no_std]
 #![no_main]
@@ -127,6 +132,14 @@ unsafe extern "system" {
     ) -> i32;
     fn GetFileSizeEx(h: Handle, size: *mut i64) -> i32;
     fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn CreateFileMappingW(
+        file: Handle,
+        sa: *const c_void,
+        protect: u32,
+        high: u32,
+        low: u32,
+        name: *const u16,
+    ) -> Handle;
     fn RegisterApplicationRestart(command: *const u16, flags: u32) -> i32;
     fn UnregisterApplicationRestart() -> i32;
     fn GetApplicationRestartSettings(
@@ -193,6 +206,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn RtlFormatCurrentUserKeyPath(out: *mut UnicodeString) -> u32;
     fn RtlFreeUnicodeString(s: *mut UnicodeString);
+    fn NtQuerySection(h: Handle, class: u32, info: *mut u8, len: u32, ret: *mut u32) -> u32;
 }
 
 #[link(name = "advapi32", kind = "raw-dylib")]
@@ -217,6 +231,8 @@ unsafe extern "system" {
     fn GetSecurityDescriptorSacl(sd: *const u8, p: *mut i32, acl: *mut *mut u8, d: *mut i32)
     -> i32;
     fn InitializeAcl(acl: *mut u8, size: u32, revision: u32) -> i32;
+    fn InitializeSecurityDescriptor(sd: *mut u8, revision: u32) -> i32;
+    fn SetSecurityDescriptorDacl(sd: *mut u8, present: i32, acl: *const u8, defaulted: i32) -> i32;
     fn AddMandatoryAce(acl: *mut u8, rev: u32, flags: u32, policy: u32, sid: *const u8) -> i32;
     fn GetAce(acl: *const u8, index: u32, ace: *mut *mut u8) -> i32;
 }
@@ -850,6 +866,53 @@ fn tests() {
                 == 0x8007_0490_u32 as i32,
             34,
         );
+
+        // 35. Chromium's shared memory: a section with an empty DACL, its
+        // handle reduced by DuplicateHandle; NtQuerySection; a duplicate
+        // asking for FILE_MAP_WRITE works from the writable handle (within
+        // its access) and fails from the read-only one (more than it has:
+        // the empty DACL grants nothing).
+        const FILE_MAP_WRITE: u32 = 2;
+        const FILE_MAP_READ: u32 = 4;
+        const SECTION_QUERY: u32 = 1;
+        const READ_CONTROL: u32 = 0x0002_0000;
+        let mut acl = [0u64; 1];
+        let mut sd = [0u64; 5];
+        check(InitializeAcl(acl.as_mut_ptr().cast(), 8, 2) != 0, 35);
+        check(InitializeSecurityDescriptor(sd.as_mut_ptr().cast(), 1) != 0, 35);
+        check(
+            SetSecurityDescriptorDacl(sd.as_mut_ptr().cast(), 1, acl.as_ptr().cast(), 0) != 0,
+            35,
+        );
+        let sa: [usize; 3] = [24, sd.as_ptr() as usize, 0];
+        let invalid = -1isize as Handle;
+        let h = CreateFileMappingW(invalid, sa.as_ptr().cast(), 4, 0, 65536, core::ptr::null());
+        check(!h.is_null(), 35);
+        let mut rw: Handle = core::ptr::null_mut();
+        let want = FILE_MAP_READ | FILE_MAP_WRITE | SECTION_QUERY | READ_CONTROL;
+        check(DuplicateHandle(me, h, me, &mut rw, want, 0, 0) != 0, 35);
+        CloseHandle(h);
+        let mut info = [0u8; 24];
+        // ResultLength is a ULONG: the word after it stays.
+        let mut lens = [0xdead_beef_u32; 2];
+        check(NtQuerySection(rw, 0, info.as_mut_ptr(), 24, lens.as_mut_ptr()) == 0, 35);
+        check(lens == [24, 0xdead_beef], 35);
+        let attributes = u32::from_le_bytes([info[8], info[9], info[10], info[11]]);
+        let size = u64::from_le_bytes([
+            info[16], info[17], info[18], info[19], info[20], info[21], info[22], info[23],
+        ]);
+        check(attributes & 0x0100_0000 == 0 && size == 65536, 35); // not SEC_IMAGE
+        let mut probe: Handle = core::ptr::null_mut();
+        check(DuplicateHandle(me, rw, me, &mut probe, FILE_MAP_WRITE, 0, 0) != 0, 35);
+        CloseHandle(probe);
+        let mut ro: Handle = core::ptr::null_mut();
+        check(DuplicateHandle(me, rw, me, &mut ro, FILE_MAP_READ | SECTION_QUERY, 0, 0) != 0, 35);
+        probe = core::ptr::null_mut();
+        check(DuplicateHandle(me, ro, me, &mut probe, FILE_MAP_WRITE, 0, 0) == 0, 35);
+        check(GetLastError() == 5 && probe.is_null(), 35); // ERROR_ACCESS_DENIED
+        check(NtQuerySection(ro, 0, info.as_mut_ptr(), 24, core::ptr::null_mut()) == 0, 35);
+        CloseHandle(ro);
+        CloseHandle(rw);
     }
 }
 

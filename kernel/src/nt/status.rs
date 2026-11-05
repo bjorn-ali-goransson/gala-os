@@ -81,6 +81,8 @@ impl NtStatus {
     // Named pipes.
     pub const INSTANCE_NOT_AVAILABLE: NtStatus = NtStatus(0xc000_00ab);
     pub const PIPE_NOT_AVAILABLE: NtStatus = NtStatus(0xc000_00ac);
+    pub const INVALID_PIPE_STATE: NtStatus = NtStatus(0xc000_00ad);
+    pub const PIPE_BUSY: NtStatus = NtStatus(0xc000_00ae);
     pub const PIPE_CLOSING: NtStatus = NtStatus(0xc000_00b1);
     pub const PIPE_DISCONNECTED: NtStatus = NtStatus(0xc000_00b0);
     pub const PIPE_CONNECTED: NtStatus = NtStatus(0xc000_00b2);

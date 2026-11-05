@@ -42,6 +42,15 @@
 //!   reads its answer (ERROR_FILE_NOT_FOUND without a server); the
 //!   server's FlushFileBuffers waits until the client has read it, so the
 //!   DisconnectNamedPipe after it does not take the answer away.
+//! - Crashpad's registration server: it reads a request, writes the reply
+//!   and calls DisconnectNamedPipe at once (no flush). A client already
+//!   waiting in ReadFile gets the reply, and so does one using
+//!   TransactNamedPipe (write and read as one operation: its read is in
+//!   place before its write), every time (50 rounds each); disconnecting
+//!   discards only data nobody was reading. TransactNamedPipe with unread
+//!   data in the pipe fails with ERROR_PIPE_BUSY.
+//! - FormatMessageW has the pipe errors' texts (ERROR_PIPE_NOT_CONNECTED:
+//!   "No process is on the other end of the pipe.").
 //!
 //! Prints `pipe_test: ok` or exits with the number of the failing check.
 
@@ -150,6 +159,24 @@ unsafe extern "system" {
     fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, n: *mut u32, wait: Bool) -> Bool;
     fn GetCurrentProcess() -> Handle;
     fn FlushFileBuffers(h: Handle) -> Bool;
+    fn FormatMessageW(
+        flags: u32,
+        source: *const c_void,
+        id: u32,
+        language: u32,
+        buffer: *mut u16,
+        size: u32,
+        args: *const c_void,
+    ) -> u32;
+    fn TransactNamedPipe(
+        h: Handle,
+        input: *const u8,
+        input_size: u32,
+        output: *mut u8,
+        output_size: u32,
+        read: *mut u32,
+        ov: *mut Overlapped,
+    ) -> Bool;
     fn CallNamedPipeA(
         name: *const u8,
         input: *const u8,
@@ -538,6 +565,7 @@ fn named(c: &mut Checks) -> Result<(), u32> {
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     named(&mut c)?;
+    reply_then_disconnect(&mut c)?;
     // SAFETY: documented kernel32 calls with valid arguments.
     unsafe {
         let (mut r, mut w) = (core::ptr::null_mut(), core::ptr::null_mut());
@@ -762,6 +790,163 @@ fn run() -> Result<(), u32> {
             0,
         )?;
         c.eq(GetLastError().into(), 2)?;
+    }
+    Ok(())
+}
+
+const ROUNDS: u32 = 50;
+
+/// Crashpad's registration server, ROUNDS times: connect, read the
+/// request, write the reply, disconnect at once.
+extern "system" fn reply_and_go(server: *mut c_void) -> u32 {
+    let mut b = [0u8; 16];
+    let mut n = 0;
+    for _ in 0..ROUNDS {
+        // SAFETY: plain calls with our buffer and the pipe.
+        unsafe {
+            let ok = ConnectNamedPipe(server, core::ptr::null_mut());
+            if ok == 0 && GetLastError() != ERROR_PIPE_CONNECTED {
+                return 1;
+            }
+            if ReadFile(server, b.as_mut_ptr(), 16, &mut n, core::ptr::null_mut()) == 0 {
+                DisconnectNamedPipe(server);
+                return 2;
+            }
+            WriteFile(server, b"reply".as_ptr(), 5, &mut n, core::ptr::null_mut());
+            DisconnectNamedPipe(server);
+        }
+    }
+    0
+}
+
+/// A server that writes and disconnects at once: a client waiting in
+/// ReadFile, and one using TransactNamedPipe, get the reply every round.
+fn reply_then_disconnect(c: &mut Checks) -> Result<(), u32> {
+    let name = wide("\\\\.\\pipe\\gala_test\\transact");
+    // SAFETY: documented kernel32 calls with valid arguments.
+    unsafe {
+        for transact in [false, true] {
+            let server = CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+                1,
+                64,
+                64,
+                0,
+                core::ptr::null(),
+            );
+            c.ok(server != INVALID_HANDLE, GetLastError().into())?;
+            let t = CreateThread(
+                core::ptr::null_mut(),
+                0,
+                reply_and_go,
+                server,
+                0,
+                core::ptr::null_mut(),
+            );
+            c.ok(!t.is_null(), 0)?;
+            let mut ok_rounds = 0u32;
+            for _ in 0..ROUNDS {
+                // The instance listens again after each disconnect.
+                let mut cl = client(&name, 0);
+                while cl == INVALID_HANDLE && GetLastError() == ERROR_PIPE_BUSY {
+                    SleepEx(1, 0);
+                    cl = client(&name, 0);
+                }
+                c.ok(cl != INVALID_HANDLE, GetLastError().into())?;
+                let mode = PIPE_READMODE_MESSAGE;
+                c.ok(
+                    SetNamedPipeHandleState(cl, &mode, core::ptr::null(), core::ptr::null()) != 0,
+                    GetLastError().into(),
+                )?;
+                let mut reply = [0u8; 16];
+                let mut got = 0;
+                let done = if transact {
+                    TransactNamedPipe(
+                        cl,
+                        b"request".as_ptr(),
+                        7,
+                        reply.as_mut_ptr(),
+                        16,
+                        &mut got,
+                        core::ptr::null_mut(),
+                    )
+                } else {
+                    let sent = write(cl, b"request");
+                    let read =
+                        ReadFile(cl, reply.as_mut_ptr(), 16, &mut got, core::ptr::null_mut());
+                    i32::from(sent && read != 0)
+                };
+                if done != 0 && got == 5 && &reply[..5] == b"reply" {
+                    ok_rounds += 1;
+                }
+                CloseHandle(cl);
+            }
+            c.eq(ok_rounds.into(), ROUNDS.into())?;
+            c.eq(WaitForSingleObject(t, 10_000).into(), 0)?;
+            let mut code = 9;
+            c.ok(GetExitCodeThread(t, &mut code) != 0 && code == 0, code.into())?;
+            CloseHandle(t);
+            CloseHandle(server);
+        }
+
+        // Unread data in the pipe: ERROR_PIPE_BUSY, nothing written.
+        let server = CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+            1,
+            64,
+            64,
+            0,
+            core::ptr::null(),
+        );
+        c.ok(server != INVALID_HANDLE, GetLastError().into())?;
+        let cl = client(&name, 0);
+        c.ok(cl != INVALID_HANDLE, GetLastError().into())?;
+        let mode = PIPE_READMODE_MESSAGE;
+        SetNamedPipeHandleState(cl, &mode, core::ptr::null(), core::ptr::null());
+        c.ok(write(server, b"unread"), GetLastError().into())?;
+        let (mut reply, mut got) = ([0u8; 16], 0);
+        let r = TransactNamedPipe(
+            cl,
+            b"x".as_ptr(),
+            1,
+            reply.as_mut_ptr(),
+            16,
+            &mut got,
+            core::ptr::null_mut(),
+        );
+        c.eq(r as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_PIPE_BUSY.into())?;
+        let (mut avail, mut left) = (0u32, 0u32);
+        PeekNamedPipe(
+            server,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            &mut avail,
+            &mut left,
+        );
+        c.eq(avail.into(), 0)?;
+        CloseHandle(cl);
+        CloseHandle(server);
+
+        // FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS.
+        let mut text = [0u16; 128];
+        let n = FormatMessageW(
+            0x1000 | 0x200,
+            core::ptr::null(),
+            233,
+            0,
+            text.as_mut_ptr(),
+            128,
+            core::ptr::null(),
+        );
+        let want = "No process is on the other end of the pipe.";
+        c.ok(n as usize >= want.len(), GetLastError().into())?;
+        c.ok(want.encode_utf16().zip(text.iter()).all(|(a, &b)| a == b), n.into())?;
     }
     Ok(())
 }

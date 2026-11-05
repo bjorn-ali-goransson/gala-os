@@ -59,6 +59,8 @@ const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
 const OBJ_INHERIT: u32 = 0x02;
 const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+/// FSCTL_PIPE_TRANSCEIVE (TransactNamedPipe).
+const FSCTL_PIPE_TRANSCEIVE: u32 = 0x0011_c017;
 const FSCTL_PIPE_PEEK: u32 = 0x0011_400c;
 const STATUS_BUFFER_OVERFLOW: u32 = 0x8000_0005;
 const OBJECT_HANDLE_FLAG_INFORMATION: u32 = 4;
@@ -453,11 +455,15 @@ pub extern "system" fn CallNamedPipeW(
     };
     let mode = 2u32; // PIPE_READMODE_MESSAGE
     let ok = SetNamedPipeHandleState(h, &mode, core::ptr::null(), core::ptr::null()) != 0
-        && {
-            let mut written = 0;
-            super::WriteFile(h, input, input_size, &mut written, core::ptr::null_mut()) != 0
-        }
-        && super::ReadFile(h, output, output_size, read, core::ptr::null_mut()) != 0;
+        && TransactNamedPipe(
+            h,
+            input,
+            input_size,
+            output,
+            output_size,
+            read,
+            core::ptr::null_mut(),
+        ) != 0;
     let error = GetLastError();
     super::CloseHandle(h);
     if ok { TRUE } else { fail_with(error, FALSE) }
@@ -484,9 +490,12 @@ pub extern "system" fn CallNamedPipeA(
 
 /// TransactNamedPipe(hNamedPipe, lpInBuffer, nInBufferSize, lpOutBuffer,
 /// nOutBufferSize, lpBytesRead, lpOverlapped): writes one message and reads
-/// one on a message-mode pipe (ERROR_MORE_DATA when the answer is longer
-/// than the buffer). Synchronous handles only: an OVERLAPPED is not
-/// supported yet (reported; ERROR_NOT_SUPPORTED).
+/// one on a message-mode pipe as one operation (FSCTL_PIPE_TRANSCEIVE: the
+/// read is in place before the write, so an answer the server writes just
+/// before disconnecting is not lost). ERROR_MORE_DATA when the answer is
+/// longer than the buffer, ERROR_PIPE_BUSY with unread data in the pipe,
+/// ERROR_BAD_PIPE outside message read mode; with an OVERLAPPED it may
+/// complete later, as ReadFile does.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn TransactNamedPipe(
@@ -498,13 +507,44 @@ pub extern "system" fn TransactNamedPipe(
     read: *mut u32,
     overlapped: *mut c_void,
 ) -> Bool {
+    let transceive = |event: usize, context: usize, iosb: *mut [usize; 2]| {
+        // SAFETY: the caller's buffers of the given sizes; `iosb` valid.
+        unsafe {
+            NtFsControlFile(
+                pipe,
+                event,
+                0,
+                context,
+                iosb,
+                FSCTL_PIPE_TRANSCEIVE,
+                input,
+                input_size,
+                output,
+                output_size,
+            )
+        }
+    };
     if !overlapped.is_null() {
-        unsupported(b"kernel32.dll!TransactNamedPipe(overlapped)", 0);
-        return fail_with(ERROR_NOT_SUPPORTED, FALSE);
+        return super::overlapped_request(read, overlapped, |event, context, iosb, _| {
+            transceive(event, context, iosb)
+        });
     }
-    let mut written = 0;
-    if super::WriteFile(pipe, input, input_size, &mut written, core::ptr::null_mut()) == FALSE {
-        return FALSE;
+    let mut iosb = [0usize; 2];
+    let mut status = transceive(0, 0, &mut iosb);
+    if status == super::STATUS_PENDING {
+        // An asynchronous handle used synchronously: wait for it.
+        // SAFETY: plain call.
+        status = unsafe { super::NtWaitForSingleObject(pipe, 0, core::ptr::null()) };
+        if status == STATUS_SUCCESS {
+            status = iosb[0] as u32;
+        }
     }
-    super::ReadFile(pipe, output, output_size, read, core::ptr::null_mut())
+    if !read.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *read = iosb[1] as u32 };
+    }
+    if status == STATUS_SUCCESS {
+        return TRUE;
+    }
+    fail(status, FALSE)
 }

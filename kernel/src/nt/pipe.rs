@@ -31,10 +31,20 @@
 //! port, APC) when a client connects or data arrives; CancelIoEx and
 //! closing the end cancel it. Writes on such an end still wait (a
 //! documented simplification: they complete once the bytes are queued).
+//!
+//! **Invariant: a write completes the reads already waiting for it**, on
+//! synchronous ends too: a synchronous read that has to wait is a pending
+//! request without a `Request` (its thread waits for its result), so the
+//! write that satisfies it hands it the bytes at once, as Windows
+//! completes a waiting read's IRP. DisconnectNamedPipe then discards only
+//! bytes nobody was reading (Crashpad's server writes its reply and
+//! disconnects at once). FSCTL_PIPE_TRANSCEIVE (TransactNamedPipe) puts
+//! its read in place before its write, so the answer cannot be lost
+//! either.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::notify::{self, Request};
 use super::object::ObjectRef;
@@ -99,6 +109,7 @@ struct State {
     pending: Vec<Pending>,
 }
 
+#[derive(Clone, Copy)]
 enum Op {
     Listen,
     Read { max: usize, message: bool },
@@ -108,7 +119,10 @@ struct Pending {
     end: usize,
     generation: u64,
     op: Op,
-    request: Request,
+    /// None: a synchronous call's, its thread waiting for `result`
+    /// (found by `token`), not reported by `report`.
+    request: Option<Request>,
+    token: u64,
     /// Set when it has finished: reported (and removed) by `report`
     /// after the pipe's lock is released. Finishing a request needs no
     /// allocation, so none is ever lost (a list of finished requests that
@@ -142,13 +156,13 @@ fn report(pipe: &Pipe) {
     loop {
         let finished = {
             let mut s = pipe.state.lock();
-            match s.pending.iter().position(|p| p.result.is_some()) {
+            match s.pending.iter().position(|p| p.result.is_some() && p.request.is_some()) {
                 Some(i) => s.pending.remove(i),
                 None => return,
             }
         };
-        if let Some((status, data)) = finished.result {
-            notify::complete(finished.request, status, &data);
+        if let (Some((status, data)), Some(request)) = (finished.result, finished.request) {
+            notify::complete(request, status, &data);
         }
     }
 }
@@ -454,6 +468,16 @@ impl State {
     }
 }
 
+/// Numbers synchronous requests (0: none).
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn done(result: Result<(Vec<u8>, NtStatus), NtStatus>) -> Outcome {
+    match result {
+        Ok((data, status)) => Outcome::Done(status, data),
+        Err(e) => Outcome::Done(e, Vec::new()),
+    }
+}
+
 /// How a read or listen of an asynchronous end ends: done now, or pending.
 pub enum Outcome {
     Done(NtStatus, Vec<u8>),
@@ -516,30 +540,120 @@ impl PipeEnd {
 
     /// Runs `op` now, waits for it (a synchronous end) or leaves `request`
     /// pending (an asynchronous one).
-    fn run(&self, op: Op, mut request: Option<Request>) -> Result<Outcome, NtStatus> {
-        loop {
-            let mut s = self.pipe.state.lock();
-            if let Some(result) = attempt(&mut s, self.end, self.generation, &op) {
-                return Ok(match result {
-                    Ok((data, status)) => Outcome::Done(status, data),
-                    Err(e) => Outcome::Done(e, Vec::new()),
-                });
-            }
-            if !self.synchronous
-                && let Some(request) = request.take()
-            {
-                let p = Pending {
-                    end: self.end,
-                    generation: self.generation,
-                    op,
-                    request,
-                    result: None,
-                };
-                s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
-                return Ok(Outcome::Pending);
-            }
-            self.wait(s)?;
+    fn run(&self, op: Op, request: Option<Request>) -> Result<Outcome, NtStatus> {
+        let mut s = self.pipe.state.lock();
+        if let Some(result) = attempt(&mut s, self.end, self.generation, &op) {
+            return Ok(done(result));
         }
+        let token = self.queue(&mut s, op, request)?;
+        if token == 0 {
+            return Ok(Outcome::Pending);
+        }
+        self.await_result(s, op, token)
+    }
+
+    /// Queues `op` as a pending request: `request`'s on an asynchronous
+    /// end (returns 0), else a synchronous one whose token it returns.
+    fn queue(&self, s: &mut State, op: Op, request: Option<Request>) -> Result<u64, NtStatus> {
+        let asynchronous = !self.synchronous && request.is_some();
+        let token = if asynchronous { 0 } else { NEXT_TOKEN.fetch_add(1, Ordering::Relaxed) };
+        let p = Pending {
+            end: self.end,
+            generation: self.generation,
+            op,
+            request: if asynchronous { request } else { None },
+            token,
+            result: None,
+        };
+        s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
+        Ok(token)
+    }
+
+    /// Waits for synchronous request `token` to be finished (by a write,
+    /// a connect, a disconnect or a close) and takes its result.
+    fn await_result<'a>(
+        &'a self,
+        mut s: crate::sync::IrqGuard<'a, State>,
+        op: Op,
+        token: u64,
+    ) -> Result<Outcome, NtStatus> {
+        loop {
+            if let Err(e) = self.wait(s) {
+                let mut s = self.pipe.state.lock();
+                s.pending.retain(|p| p.token != token || p.request.is_some());
+                return Err(e);
+            }
+            s = self.pipe.state.lock();
+            match s.pending.iter().position(|p| p.token == token && p.request.is_none()) {
+                Some(i) if s.pending[i].result.is_some() => {
+                    let p = s.pending.remove(i);
+                    let (status, data) = p.result.unwrap_or((NtStatus::UNSUCCESSFUL, Vec::new()));
+                    return Ok(Outcome::Done(status, data));
+                }
+                Some(_) => {}
+                // Not there (a kernel handover does not carry it): ask again.
+                None => {
+                    if let Some(result) = attempt(&mut s, self.end, self.generation, &op) {
+                        return Ok(done(result));
+                    }
+                    let p = Pending {
+                        end: self.end,
+                        generation: self.generation,
+                        op,
+                        request: None,
+                        token,
+                        result: None,
+                    };
+                    s.pending.try_push(p).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
+                }
+            }
+        }
+    }
+
+    /// FSCTL_PIPE_TRANSCEIVE (TransactNamedPipe): writes `data` as one
+    /// message and reads one, the read in place before the write so the
+    /// answer cannot be missed. A message-type pipe in message read mode
+    /// only (STATUS_INVALID_PIPE_STATE); unread data in the pipe:
+    /// STATUS_PIPE_BUSY.
+    pub fn transceive(
+        &self,
+        data: &[u8],
+        max: usize,
+        request: Option<Request>,
+    ) -> Result<Outcome, NtStatus> {
+        let op = Op::Read { max, message: true };
+        let token = {
+            let mut s = self.pipe.state.lock();
+            if !s.message_type || !self.message_reads.load(Ordering::Acquire) {
+                return Err(NtStatus::INVALID_PIPE_STATE);
+            }
+            s.check_connected(self.end, self.generation)?;
+            if !s.inbox[self.end].is_empty() {
+                return Err(NtStatus::PIPE_BUSY);
+            }
+            self.queue(&mut s, op, request)?
+        };
+        if let Err(e) = self.write(data) {
+            // The read goes with the write that failed.
+            let mut s = self.pipe.state.lock();
+            if token != 0 {
+                s.pending.retain(|p| p.token != token || p.request.is_some());
+            } else if let Some(i) = s
+                .pending
+                .iter()
+                .rposition(|p| p.request.is_some() && p.end == self.end && p.result.is_none())
+            {
+                cancel_pending(&mut s, i);
+                drop(s);
+                report(&self.pipe);
+            }
+            return Err(e);
+        }
+        if token == 0 {
+            return Ok(Outcome::Pending);
+        }
+        let s = self.pipe.state.lock();
+        self.await_result(s, op, token)
     }
 
     /// Reads up to `max` bytes (see the module comment).
@@ -707,11 +821,12 @@ impl PipeEnd {
             let mut s = self.pipe.state.lock();
             for i in 0..s.pending.len() {
                 let p = &s.pending[i];
+                let Some(request) = &p.request else { continue };
                 if p.result.is_none()
                     && p.end == self.end
                     && p.generation == self.generation
-                    && KArc::ptr_eq(&p.request.process, process)
-                    && iosb.is_none_or(|b| b == p.request.iosb)
+                    && KArc::ptr_eq(&request.process, process)
+                    && iosb.is_none_or(|b| b == request.iosb)
                 {
                     cancel_pending(&mut s, i);
                     n += 1;
@@ -777,8 +892,13 @@ pub fn carry(pipe: &KArc<Pipe>) -> Result<Carried, Option<&'static str>> {
         max_instances = i.max;
     }
     let s = pipe.state.lock();
-    if !s.pending.is_empty() {
+    if s.pending.iter().any(|p| p.request.is_some()) {
         return Err(Some("a pipe with asynchronous I/O in flight"));
+    }
+    // A synchronous read is carried by its thread making its call again,
+    // but one already finished holds bytes taken from the queue.
+    if s.pending.iter().any(|p| p.result.is_some()) {
+        return Err(Some("a pipe with a read finishing"));
     }
     let mut inbox = [Vec::new(), Vec::new()];
     let mut messages = [Vec::new(), Vec::new()];

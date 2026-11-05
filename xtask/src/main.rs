@@ -5303,7 +5303,7 @@ const SCENARIOS: &[Scenario] = &[
         // about:blank and prints its DOM: the browser process, its
         // children (renderer, network service) over Mojo, V8.
         name: "chromium_version",
-        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--dump-dom%20about:blank dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
+        cmdline: "qemu_exit run=chrome.exe args=--headless%20--no-sandbox%20--disable-gpu%20--no-first-run%20--user-data-dir=C:\\tmp\\chr%20--enable-logging=stderr%20--v=1%20--dump-dom%20about:blank dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "<html><head></head><body></body></html>",
@@ -7281,7 +7281,7 @@ fn gala_report(release: bool) -> Result {
     let mut results = Vec::new();
     let mut ledger = Vec::new();
     for ((_, program), iso) in selected.iter().zip(&isos) {
-        let serial = fs::read_to_string(iso.with_extension("serial.log")).unwrap_or_default();
+        let serial = read_log(&iso.with_extension("serial.log"));
         results.push(report::outcome_from_serial(program, &serial));
         report::merge_ledger(&mut ledger, program, &serial);
     }
@@ -7602,10 +7602,7 @@ fn run_vm_once(
     let _ = fs::remove_file(&socket);
     let total = start.elapsed();
     let vm_time = vm_clock.sample();
-    let mut serial = String::new();
-    if let Ok(mut f) = fs::File::open(&log) {
-        let _ = f.read_to_string(&mut serial);
-    }
+    let mut serial = read_log(&log);
     if let Some(note) = dump_note {
         serial += &note;
     }
@@ -9591,6 +9588,14 @@ fn judge(
     })
 }
 
+/// A serial log as text. Not `read_to_string`: a program's bytes need
+/// not be UTF-8, and one invalid byte would make the whole log read as
+/// empty (a failed boot's kept log then holds only xtask's lines); invalid
+/// bytes become U+FFFD instead.
+fn read_log(path: &Path) -> String {
+    fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+}
+
 /// The repeat number of a file of an `XTASK_REPEAT` boot
 /// (`test-<name>.r<i>.<ext>`).
 fn repeat_index(path: &Path) -> Option<usize> {
@@ -10886,6 +10891,19 @@ fn bake_icons() -> Result {
 #[cfg(test)]
 mod judging {
     use super::*;
+
+    /// A log with a byte that is not UTF-8 is still read whole (the
+    /// invalid byte as U+FFFD), not as empty.
+    #[test]
+    fn a_log_with_an_invalid_byte_is_read_whole() {
+        let path = std::env::temp_dir().join(format!("xtask-read-log-{}.log", std::process::id()));
+        fs::write(&path, b"first line\ncheck \xb0 failed\nlast line\n").unwrap();
+        let text = read_log(&path);
+        let _ = fs::remove_file(&path);
+        assert!(text.starts_with("first line\n"));
+        assert!(text.contains("check \u{fffd} failed"));
+        assert!(text.ends_with("last line\n"));
+    }
 
     #[test]
     fn a_server_that_ends_after_the_client_passes() {

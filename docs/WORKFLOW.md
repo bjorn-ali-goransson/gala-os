@@ -1180,23 +1180,30 @@ about a minute under TCG. Read, in order:
   build.rs (`/EXPORT:name,@N`, the number checked in Wine's .spec, not
   recalled): an unpinned DLL numbers its exports arbitrarily, so `#N`
   binds to an unrelated function and the survey cannot tell.
-- A `Check failed` with an unresolved backtrace (no chrome.dll symbols:
-  its PDB does not fit the disk): read the Chromium source around the
-  last log line before it, and the ledger's last lines (each
-  `unsupported` / `missing export` names the function that failed).
+- A `Check failed` with an unresolved backtrace (`Symbols not available.
+  Dumping unresolved backtrace`): symbolize it (below). chrome.dll is
+  mapped at its system-wide alternative base, the same every run
+  (`XTASK_EVENTS=image` gives it: 0x3ff7eb500000 so far); a frame's
+  address in it is `address - base + 0x180000000` for llvm-symbolizer.
 - `XTASK_EVENTS=syscall,image,fault,file,process,thread`: the `file`
   category (`"ev":"open"`, path, handle, status) shows each open, which
   `syscall` events cannot (their arguments are pointers).
 - A crash report's `module+offset`: symbolize it with the snapshot's own
   PDBs (symbols are not disassembly: CLEAN_ROOM allows reading
   Chromium's source, and the PDB names the source line). The revision is
-  pinned partly because its `chrome-win32-syms.zip` exists (922 MB): read
-  only the member you need with HTTP range requests (Python's `zipfile`
-  over a file object whose `readinto` sends `Range:` requests), e.g.
-  `chrome-win32-syms/chrome_elf.dll.pdb` (30 MB) or `chrome.exe.pdb`
-  (40 MB). Put the PDB next to (a link to) the module and run
-  `llvm-symbolizer --obj=chrome_elf.dll 0x<ImageBase + offset>`
-  (ImageBase 0x180000000 for the DLLs, 0x140000000 for chrome.exe).
+  pinned partly because its `chrome-win32-syms.zip` exists (922 MB): fetch
+  only the member you need, `python3 -I tools/zipmember.py <the zip's URL>
+  chrome-win32-syms/<module>.pdb target/prebuilt/chromium-syms/<module>.pdb`
+  (HTTP range requests): chrome_elf.dll.pdb is 30 MB, chrome.exe.pdb 40 MB,
+  chrome.dll.pdb 2.6 GB (about 900 MB downloaded; mind the 2 GB disk
+  floor, and delete it when done). Put the PDB next to a link to the
+  module and run `llvm-symbolizer --obj=chrome.dll 0x<ImageBase + offset>`
+  (ImageBase 0x180000000 for the DLLs, 0x140000000 for chrome.exe); the
+  first query loads the PDB (seconds).
+- Crashpad's termination codes: 0xffff7001 the client found no handler
+  and ended itself, 0xffff7002 the handler could not snapshot the
+  crashed process (its reads of the process failed), 0xffff7003 a dump
+  was asked of a client never registered.
 - Chromium's source (github.com/chromium/chromium; crashpad on
   chromium.googlesource.com) says what a function expects: read it as
   documentation, as for any program.

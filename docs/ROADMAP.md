@@ -592,13 +592,16 @@ and Crashpad come up (the handler runs as a child with an inherited
 handle list); chrome.dll loads; the profile's process singleton is
 taken; DirectWrite and Skia's font manager come up on Selawik; the
 browser's main start-up runs to its end, every delay import it reaches
-on the way a real export. A run takes about a minute.
+on the way a real export; Crashpad's client registers with its handler
+(TransactNamedPipe as one operation), and the browser gets as far as
+creating its first renderer host. A run takes about a minute.
 
 **Next** (each stage test first, the ledger leading):
-1. Headless Chromium. First the `base::expected` CHECK the browser
-   process hits after RegisterApplicationRestart (no chrome.dll
-   symbols: find what returned the error from the log and the ledger,
-   which names each missing IDWriteFactory method); then what
+1. Headless Chromium. First PEB.Ldr (ntdll keeps no loader lists yet):
+   Crashpad's handler walks the crashed browser's InLoadOrderModuleList
+   for its snapshot, reads address 0 and ends the browser with
+   0xffff7002 (snapshot failed), so the crash behind it is still
+   unreported; then that crash. After them: what
    `tools/import_survey.py` still lists (the rest of the delay imports:
    advapi32's services and ImpersonateAnonymousToken, iphlpapi,
    wintrust's catalogs, dbghelp's stack walking, pdh, winhttp's proxy

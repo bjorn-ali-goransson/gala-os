@@ -1066,7 +1066,13 @@ access, as Windows does. Handle values are `(slot + 1) * 4`.
   tables locked at once). DuplicateHandle with a NULL target and
   DUPLICATE_CLOSE_SOURCE only closes the source (documented: closed
   regardless of errors); a duplicate with nowhere to return it is not
-  created. WSADuplicateSocketW duplicates the socket's handle into the
+  created. **Access**: what the duplicate asks for is granted as it is
+  when it is within the source handle's access; more than that goes
+  through the access check against the object's descriptor
+  (STATUS_ACCESS_DENIED), as on Windows. Chromium's shared memory relies
+  on it: its sections have an empty DACL, so a read-only handle cannot be
+  duplicated into a writable one (`browser_api_test` 35).
+  WSADuplicateSocketW duplicates the socket's handle into the
   target process and leaves it in WSAPROTOCOL_INFOW.dwProviderReserved,
   which that process's WSASocketW(FROM_PROTOCOL_INFO) returns.
 
@@ -1391,11 +1397,23 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
   STATUS_CANNOT_IMPERSONATE otherwise.
 - **Names**: a pipe keeps the name it was created with;
   FileNameInformation of a pipe handle is `\<name>` (Crashpad's handler
-  rebuilds its pipe path from it). TransactNamedPipe on synchronous
-  handles writes one message and reads one.
-- Not done: WaitNamedPipe (FSCTL_PIPE_WAIT), TransactNamedPipe on
-  asynchronous handles, PIPE_NOWAIT (recorded), pipe security (pipes
-  are not access-checked).
+  rebuilds its pipe path from it).
+- **Invariant: a write completes the reads already waiting for it.** A
+  synchronous read (or listen) that has to wait is queued like an
+  asynchronous one, as a pending request without a completion `Request`
+  (its thread waits for its result, found by a token), so the write that
+  satisfies it hands it the bytes at once, as Windows completes a waiting
+  read's IRP. DisconnectNamedPipe then discards only bytes nobody was
+  reading: Crashpad's server writes its reply and disconnects at once.
+  A kernel handover does
+  not carry a synchronous request; its thread asks again.
+- **FSCTL_PIPE_TRANSCEIVE** (TransactNamedPipe, also under CallNamedPipe):
+  the read is queued before the message is written, so the answer cannot
+  be missed; message read mode only (STATUS_INVALID_PIPE_STATE), unread
+  data in the pipe is STATUS_PIPE_BUSY; asynchronous handles complete it
+  later like a read (`pipe_test`).
+- Not done: WaitNamedPipe (FSCTL_PIPE_WAIT), PIPE_NOWAIT (recorded), pipe
+  security (pipes are not access-checked).
 
 ### Time and KUSER_SHARED_DATA
 
@@ -2119,6 +2137,9 @@ ntdll imports.
   file alone and fails with ERROR_ACCESS_DENIED, as for a standard user
   (no boot-time renames; recorded). CreateFileW adds DELETE access for
   FILE_FLAG_DELETE_ON_CLOSE (NtCreateFile refuses the option without it).
+- **Security attributes**: CreateFileMappingW passes the
+  SECURITY_ATTRIBUTES' descriptor on to NtCreateSection, named or not
+  (the kernel keeps a given descriptor on unnamed objects too).
 - **Version resource**: kernel32.dll carries a VS_VERSION_INFO with the
   pinned build, 10.0.26100.<UBR of the registry seed> (`build.rs` writes
   the .res); programs read the system's version from it.
