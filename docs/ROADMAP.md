@@ -1095,8 +1095,8 @@ need unwinding: next).
    for LX.
 4. OT5: the in-guest OTLP exporter for servers, controlled from the
    `gala` CLI (on/off, sampling rules, endpoint), metrics pushed to
-   Prometheus' OTLP receiver (a heartbeat for "down"; `/metrics` for
-   scraping as an option); later, anomalies against a key's own baseline
+   Prometheus' OTLP receiver on the same host (diagnosis, not
+   availability; `/metrics` for scraping as an option); later, anomalies against a key's own baseline
    suggesting (then, within a budget, starting) an investigation;
    defaults: metrics, failures, ledger, crash reports and the flight
    recorder always on, traces and the profiler on demand

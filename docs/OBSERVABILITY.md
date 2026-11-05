@@ -622,9 +622,11 @@ silent):
   may sit behind NAT or a firewall. gala pushes: OTLP metrics straight
   to Prometheus' OTLP receiver (Prometheus 3, `/api/v1/otlp/v1/metrics`;
   remote-write as the alternative), no collector or Pushgateway (that
-  is for batch jobs) in between. Pull's "down" signal is kept with a
-  heartbeat metric whose staleness alerts. A `/metrics` endpoint in the
-  text format stays as an option for those who scrape.
+  is for batch jobs) in between. Prometheus runs on the same host as
+  the gala it watches, and this is for diagnosing symptoms, not for
+  checking availability (a fleet's uptime is another tool's job): no
+  heartbeat. A `/metrics` endpoint in the text format stays as an
+  option for those who scrape.
 - **Anomalies suggest an investigation** (later): the always-on
   histograms give each key (a call per process, a wait object, an IPC
   channel) a baseline (its p50 and p99 over a recent window). A duration
