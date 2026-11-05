@@ -757,6 +757,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("browser_api_test", "wtsapi32.dll", "Windows/System32"),
     ("browser_api_test", "dwmapi.dll", "Windows/System32"),
     ("browser_api_test", "imm32.dll", "Windows/System32"),
+    ("ipv6_test", "ntdll.dll", "Windows/System32"),
+    ("ipv6_test", "kernel32.dll", "Windows/System32"),
+    ("ipv6_test", "ws2_32.dll", "Windows/System32"),
     ("hostnet", "ntdll.dll", "Windows/System32"),
     ("hostnet", "kernel32.dll", "Windows/System32"),
     ("hostnet", "ws2_32.dll", "Windows/System32"),
@@ -1947,6 +1950,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_env_test",
     "winsock_test",
     "hostnet_test",
+    "ipv6_test",
     "winsock_async_test",
     "udp_test",
     "process_test",
@@ -2998,6 +3002,7 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
     "java_stress",
+    "ipv6_test",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -3625,6 +3630,13 @@ const SCENARIOS: &[Scenario] = &[
             "winsock_test: ok",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // N3 step 1: IPv6 sockets over ::1 (ARCHITECTURE "Plan: IPv6").
+        name: "ipv6_test",
+        cmdline: "qemu_exit run=ipv6_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["ipv6_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // A page from the host network: hostnet_test fetches
