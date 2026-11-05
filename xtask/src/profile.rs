@@ -185,9 +185,18 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
     }
     // Functions: symbolized per module where the symbolizer knows it,
     // else 256-byte buckets.
+    // Only the addresses in the heaviest 256-byte blocks are symbolized
+    // (a large module's symbols are slow to search: chrome.dll's PDB is
+    // 2.6 GB, and a run has hundreds of thousands of distinct addresses).
+    let mut blocks: HashMap<(String, u64), usize> = HashMap::new();
+    for ((m, off), n) in &at {
+        *blocks.entry((m.clone(), off & !0xff)).or_default() += n;
+    }
+    let heavy: std::collections::HashSet<(String, u64)> =
+        ranked(&blocks, top * 20).into_iter().map(|(k, _)| k).collect();
     let mut per_module: HashMap<String, Vec<u64>> = HashMap::new();
     for (m, off) in at.keys() {
-        if m != "(no module)" {
+        if m != "(no module)" && heavy.contains(&(m.clone(), off & !0xff)) {
             per_module.entry(m.clone()).or_default().push(*off);
         }
     }
