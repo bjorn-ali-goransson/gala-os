@@ -149,6 +149,9 @@ struct SampleEntry {
 struct SampleRing {
     head: AtomicU64,
     tail: AtomicU64,
+    /// Samples dropped since the tick last wrote (the ring was full: the
+    /// CPU kept interrupts off); written with the last sample before them.
+    lost: AtomicU64,
     entries: [SampleEntry; RING],
 }
 
@@ -156,6 +159,7 @@ static RINGS: [SampleRing; crate::arch::smp::MAX_CPUS] = [const {
     SampleRing {
         head: AtomicU64::new(0),
         tail: AtomicU64::new(0),
+        lost: AtomicU64::new(0),
         entries: [const {
             SampleEntry {
                 t: AtomicU64::new(0),
@@ -241,6 +245,7 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     let head = ring.head.load(Ordering::Relaxed);
     if head - ring.tail.load(Ordering::Acquire) >= RING as u64 {
         SAMPLES_LOST.fetch_add(1, Ordering::Relaxed);
+        ring.lost.fetch_add(1, Ordering::Relaxed);
         return true;
     }
     let e = &ring.entries[head as usize % RING];
@@ -266,9 +271,14 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
 /// Writes CPU `cpu`'s waiting NMI samples (from its tick).
 fn write_samples(cpu: usize) {
     let Some(ring) = RINGS.get(cpu) else { return };
+    // Drops happen only while the ring is full, so after its newest
+    // sample: they go with the last one written now (a drop needs a full
+    // ring, so there is one).
+    let mut lost = ring.lost.swap(0, Ordering::Relaxed);
     loop {
         let tail = ring.tail.load(Ordering::Relaxed);
-        if tail == ring.head.load(Ordering::Acquire) {
+        let head = ring.head.load(Ordering::Acquire);
+        if tail == head {
             return;
         }
         let e = &ring.entries[tail as usize % RING];
@@ -285,7 +295,8 @@ fn write_samples(cpu: usize) {
         }
         // The entry is copied: the NMI may reuse it.
         ring.tail.store(tail + 1, Ordering::Release);
-        emit_sample(t, by, user, rip, &stack);
+        let carried = if tail + 1 == head { core::mem::take(&mut lost) } else { 0 };
+        emit_sample(t, by, user, rip, &stack, carried);
     }
 }
 
@@ -301,22 +312,24 @@ fn sample_here(frame: &TrapFrame) {
             }
         });
     }
-    emit_sample(raw_monotonic_ns(), crate::arch::percpu::client(), user, frame.rip, &stack);
+    emit_sample(raw_monotonic_ns(), crate::arch::percpu::client(), user, frame.rip, &stack, 0);
 }
 
 /// The `sample` event: the thread (`by`), the mode, the address and in
 /// the kernel the return addresses of its frames (frame pointers; the
 /// chain ends at the first user-mode or out-of-stack frame pointer), so
 /// `cargo xtask profile` names callers.
-fn emit_sample(t: u64, by: u64, user: bool, rip: u64, stack: &SampleStack) {
+/// `lost`: samples dropped after this one (`"lost"`, when not 0).
+fn emit_sample(t: u64, by: u64, user: bool, rip: u64, stack: &SampleStack, lost: u64) {
     use crate::events::Category::Sample;
+    let lost = Lost(lost);
     if user {
         crate::events::emit_at(
             Sample,
             "sample",
             t,
             by,
-            format_args!(r#""mode":"user","rip":{rip}"#),
+            format_args!(r#""mode":"user","rip":{rip}{lost}"#),
         );
     } else {
         crate::events::emit_at(
@@ -324,8 +337,17 @@ fn emit_sample(t: u64, by: u64, user: bool, rip: u64, stack: &SampleStack) {
             "sample",
             t,
             by,
-            format_args!(r#""mode":"kernel","rip":{rip},"stack":{stack}"#),
+            format_args!(r#""mode":"kernel","rip":{rip},"stack":{stack}{lost}"#),
         );
+    }
+}
+
+/// `,"lost":N`, or nothing for 0.
+struct Lost(u64);
+
+impl fmt::Display for Lost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 > 0 { write!(f, r#","lost":{}"#, self.0) } else { Ok(()) }
     }
 }
 

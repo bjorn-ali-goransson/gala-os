@@ -74,6 +74,9 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
     let mut samples: Vec<(u64, u64, bool, u64)> = Vec::new();
     // A kernel sample's return addresses, by its index in `samples`.
     let mut stacks: HashMap<usize, Vec<u64>> = HashMap::new();
+    // Samples lost after a kernel sample (its CPU's ring overflowed: the
+    // interrupts-off stretch it was in went on), by its index.
+    let mut lost: HashMap<usize, u64> = HashMap::new();
     for line in events.lines() {
         let Ok(ev) = parse_json(line.trim()) else { continue };
         match ev.str("ev") {
@@ -105,6 +108,9 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
                 if !stack.is_empty() {
                     stacks.insert(samples.len(), stack);
                 }
+                if let Some(n) = ev.u64("lost") {
+                    lost.insert(samples.len(), n);
+                }
                 samples.push((t, by, ev.str("mode") == Some("user"), rip));
             }
             _ => {}
@@ -120,14 +126,15 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
         samples.iter().copied().filter(|s| wanted(s)).collect();
     // The selected kernel samples' frames, innermost first (the
     // interrupted address, then return addresses).
-    let kernel_stacks: Vec<Vec<u64>> = samples
+    // With the samples lost after each (0: none).
+    let kernel_stacks: Vec<(Vec<u64>, u64)> = samples
         .iter()
         .enumerate()
         .filter(|(i, s)| !s.2 && wanted(s) && stacks.contains_key(i))
         .map(|(i, s)| {
             let mut v = vec![s.3];
             v.extend(&stacks[&i]);
-            v
+            (v, lost.get(&i).copied().unwrap_or(0))
         })
         .collect();
     let mut out = String::new();
@@ -245,7 +252,7 @@ const PATH_FRAMES: usize = 6;
 
 /// The kernel samples' stacks: each function's share including what it
 /// calls (inclusive), and the heaviest call paths (leaf <- callers).
-fn kernel_callers(out: &mut String, stacks: &[Vec<u64>], top: usize, symbolize: Symbolizer) {
+fn kernel_callers(out: &mut String, stacks: &[(Vec<u64>, u64)], top: usize, symbolize: Symbolizer) {
     if stacks.is_empty() {
         return;
     }
@@ -253,7 +260,7 @@ fn kernel_callers(out: &mut String, stacks: &[Vec<u64>], top: usize, symbolize: 
     // instruction (its line and inlined frames, not the next statement's).
     let lookup = |i: usize, a: u64| if i == 0 { a } else { a - 1 };
     let mut addrs: Vec<u64> =
-        stacks.iter().flat_map(|s| s.iter().enumerate().map(|(i, &a)| lookup(i, a))).collect();
+        stacks.iter().flat_map(|(s, _)| s.iter().enumerate().map(|(i, &a)| lookup(i, a))).collect();
     addrs.sort_unstable();
     addrs.dedup();
     let names: HashMap<u64, String> = addrs
@@ -267,7 +274,8 @@ fn kernel_callers(out: &mut String, stacks: &[Vec<u64>], top: usize, symbolize: 
     let total = stacks.len();
     let mut inclusive: HashMap<String, usize> = HashMap::new();
     let mut paths: HashMap<String, usize> = HashMap::new();
-    for s in stacks {
+    let mut lost_after: HashMap<String, usize> = HashMap::new();
+    for (s, lost) in stacks {
         let mut frames = named(s);
         // Recursion counts once per sample.
         let mut seen = frames.clone();
@@ -278,7 +286,11 @@ fn kernel_callers(out: &mut String, stacks: &[Vec<u64>], top: usize, symbolize: 
         }
         frames.dedup();
         frames.truncate(PATH_FRAMES);
-        *paths.entry(frames.join(" <- ")).or_default() += 1;
+        let path = frames.join(" <- ");
+        if *lost > 0 {
+            *lost_after.entry(path.clone()).or_default() += *lost as usize;
+        }
+        *paths.entry(path).or_default() += 1;
     }
     let _ = writeln!(
         out,
@@ -290,6 +302,17 @@ fn kernel_callers(out: &mut String, stacks: &[Vec<u64>], top: usize, symbolize: 
     let _ = writeln!(out, "profile: kernel call paths (leaf <- callers):");
     for (p, n) in ranked(&paths, top) {
         let _ = writeln!(out, "  {n:7} {:5.1}%  {p}", pct(n, total));
+    }
+    // A CPU whose ring overflowed had interrupts off for longer than the
+    // ring holds: the samples lost belong to the stretch its last
+    // recorded sample was in.
+    let lost: usize = lost_after.values().sum();
+    if lost > 0 {
+        let _ =
+            writeln!(out, "profile: {lost} samples lost to interrupts off past the ring, after:");
+        for (p, n) in ranked(&lost_after, top) {
+            let _ = writeln!(out, "  {n:7}  {p}");
+        }
     }
 }
 
@@ -423,6 +446,30 @@ mod tests {
         assert!(r.contains("      1 100.0%  allocate\n"), "{r}");
         assert!(r.contains("profile: kernel call paths (leaf <- callers):"), "{r}");
         assert!(r.contains("      1 100.0%  leaf <- allocate <- syscall\n"), "{r}");
+    }
+
+    #[test]
+    fn lost_samples_name_long_interrupts_off_stretches() {
+        let events = EVENTS.replace(
+            r#""stack":[18446744071562072065,18446744071562076161]}"#,
+            r#""stack":[18446744071562072065,18446744071562076161],"lost":7}"#,
+        );
+        let fake: Symbolizer = &|m, offs| {
+            offs.iter()
+                .map(|&o| match (m, o & 0xffff) {
+                    ("kernel", 0) => Some("leaf".to_string()),
+                    ("kernel", 0x1000) => Some("allocate".to_string()),
+                    ("kernel", 0x2000) => Some("syscall".to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let r = report(&events, &Options::default(), fake);
+        assert!(
+            r.contains("profile: 7 samples lost to interrupts off past the ring, after:"),
+            "{r}"
+        );
+        assert!(r.contains("        7  leaf <- allocate <- syscall\n"), "{r}");
     }
 
     #[test]

@@ -2889,6 +2889,9 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
             r#""ev":"sample","mode":"user","rip":"#,
             r#""ev":"sample","mode":"kernel","rip":"#,
             r#","stack":[18446744"#,
+            // sampleprobe's half second with interrupts off overflows the
+            // CPU's ring: its last sample says how many were lost after it.
+            r#"],"lost":"#,
         ],
     ),
     (
