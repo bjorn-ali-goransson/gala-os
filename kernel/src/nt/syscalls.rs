@@ -5750,11 +5750,22 @@ fn nt_remove_io_completion(call: &mut Call<'_>) -> NtStatus {
     let timeout = tri!(call.timeout(arg!(call, 4)));
     let objects = [port.clone()];
     loop {
+        // The outputs are written (probed) before a packet is taken: a bad
+        // pointer fails the call and leaves the packet queued, as on
+        // Windows (taken first, the packet was lost).
+        tri!(call.write_u64(key_ptr, 0));
+        tri!(call.write_u64(context_ptr, 0));
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
         if let Some(p) = c.queue.lock().take() {
             tri!(call.write_u64(key_ptr, p.key));
             tri!(call.write_u64(context_ptr, p.context));
             tri!(call.write_iosb(iosb, NtStatus(p.status), p.information));
             return NtStatus::SUCCESS;
+        }
+        // The port's last handle closed: the wait is abandoned (no packet
+        // was taken; GetQueuedCompletionStatus: ERROR_ABANDONED_WAIT_0).
+        if port.handle_count() == 0 {
+            return NtStatus::ABANDONED_WAIT_0;
         }
         match wait::wait_for(&objects, false, timeout) {
             NtStatus::TIMEOUT => return NtStatus::TIMEOUT,

@@ -136,7 +136,9 @@ pub fn signal_dispatcher(d: &Dispatcher, signal: i32) {
 /// Whether `object` would satisfy a wait right now.
 fn is_signaled(object: &ObjectRef) -> bool {
     if let ObjectBody::IoCompletion(c) = &object.body {
-        return !c.queue.lock().is_empty();
+        // A packet, or no handle left: the waits are abandoned
+        // (NtRemoveIoCompletion: STATUS_ABANDONED_WAIT_0).
+        return !c.queue.lock().is_empty() || object.handle_count() == 0;
     }
     if let ObjectBody::Mutant(m) = &object.body {
         // Free, or already ours (mutants are recursive).

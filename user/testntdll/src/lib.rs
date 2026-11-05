@@ -1738,6 +1738,7 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
 /// reference, Wine's mapping table as a cross-check).
 const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0x0000_0000, 0),    // SUCCESS
+    (0x0000_0080, 735),  // ABANDONED_WAIT_0 -> ERROR_ABANDONED_WAIT_0
     (0x0000_0102, 1460), // TIMEOUT -> ERROR_TIMEOUT
     (0x0000_0103, 997),  // PENDING -> ERROR_IO_PENDING
     (0x4000_0000, 183),  // OBJECT_NAME_EXISTS -> ERROR_ALREADY_EXISTS

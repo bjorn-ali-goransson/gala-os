@@ -3096,7 +3096,13 @@ pub extern "system" fn GetQueuedCompletionStatus(
             unsafe { *overlapped = 0 };
             fail_with(258, FALSE)
         }
-        Err(status) => fail(status, FALSE),
+        // No packet (the port's last handle closed while waiting:
+        // ERROR_ABANDONED_WAIT_0): *lpOverlapped is NULL, as documented.
+        Err(status) => {
+            // SAFETY: the caller's output pointer.
+            unsafe { *overlapped = 0 };
+            fail(status, FALSE)
+        }
     }
 }
 

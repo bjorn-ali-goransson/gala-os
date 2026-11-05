@@ -475,8 +475,15 @@ impl KObject {
     /// looks at the count again under the namespace's lock, so an open by
     /// name that pinned the object meanwhile keeps the name.
     fn drop_handle(object: &ObjectRef) {
-        if object.handle_count.fetch_sub(1, Ordering::AcqRel) == 1 && !object.permanent {
+        let last = object.handle_count.fetch_sub(1, Ordering::AcqRel) == 1;
+        if last && !object.permanent {
             super::namespace::unlink(object);
+        }
+        // Threads waiting in NtRemoveIoCompletion on a port whose last
+        // handle closed end their wait (STATUS_ABANDONED_WAIT_0, as on
+        // Windows): woken here, they find no handle (`wait::is_signaled`).
+        if last && matches!(object.body, ObjectBody::IoCompletion(_)) {
+            super::wait::set_signal(object, 1);
         }
     }
 }

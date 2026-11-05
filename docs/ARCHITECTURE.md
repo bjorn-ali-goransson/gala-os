@@ -1234,7 +1234,14 @@ Invariants:
   non-empty. FileCompletionInformation binds a file to a port and key;
   every read or write on it that does not fail at once posts a packet
   (context = ApcContext). NtRemoveIoCompletion pops one, waiting with a
-  timeout.
+  timeout. It writes (probes) its outputs before taking a packet, so a
+  bad pointer fails with STATUS_ACCESS_VIOLATION and leaves the packet
+  queued. A port also counts as signaled when no handle to it is left:
+  closing its last handle wakes its waiters (`object::drop_handle`), and
+  a wait that finds no packet and no handle returns
+  STATUS_ABANDONED_WAIT_0 (GetQueuedCompletionStatus:
+  ERROR_ABANDONED_WAIT_0, lpOverlapped NULL), as on Windows; a named
+  port opened again has handles, so the condition ends with them.
 - **User APCs** (`apc_test`, `ioapc_test`): NtQueueApcThread (0x45)
   appends to the thread's FIFO and wakes it if it is in an alertable
   wait (under the dispatcher lock, which alertable waits hold between

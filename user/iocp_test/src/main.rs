@@ -3,7 +3,11 @@
 //! build): a port bound to an asynchronous file receives one packet per
 //! completed read or write (key, ApcContext, status, count) in FIFO order;
 //! NtSetIoCompletion posts directly; NtRemoveIoCompletion times out when
-//! empty and wakes a thread blocked in it; NtQueryIoCompletion reports the
+//! empty and wakes a thread blocked in it; closing the port's last handle
+//! ends such a wait with STATUS_ABANDONED_WAIT_0 (GetQueuedCompletionStatus'
+//! ERROR_ABANDONED_WAIT_0); a bad output pointer fails with
+//! STATUS_ACCESS_VIOLATION and leaves the packet queued;
+//! NtQueryIoCompletion reports the
 //! depth; an I/O that fails at once posts nothing. Prints `iocp_test: ok`
 //! or exits with the number of the failing check.
 
@@ -15,6 +19,8 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use ntrt::*;
 
 const STATUS_TIMEOUT: NtStatus = 0x0000_0102;
+const STATUS_ABANDONED_WAIT_0: NtStatus = 0x0000_0080;
+const STATUS_ACCESS_VIOLATION: NtStatus = 0xc000_0005u32 as NtStatus;
 const STATUS_END_OF_FILE: NtStatus = 0xc000_0011;
 const IO_COMPLETION_ALL_ACCESS: u32 = 0x1f_0003;
 const FILE_COMPLETION_INFORMATION: u32 = 30;
@@ -89,6 +95,8 @@ fn started(s: NtStatus) -> bool {
 static PORT: AtomicUsize = AtomicUsize::new(0);
 static REMOVE_FN: AtomicUsize = AtomicUsize::new(0);
 static WORKER_KEY: AtomicU64 = AtomicU64::new(0);
+/// NtRemoveIoCompletion's status in `waiter`.
+static WORKER_STATUS: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn waiter(_: usize) -> ! {
     // SAFETY: stored from the resolved NtRemoveIoCompletion export.
@@ -102,6 +110,7 @@ extern "C" fn waiter(_: usize) -> ! {
         &mut iosb,
         core::ptr::null(),
     );
+    WORKER_STATUS.store(u64::from(s as u32), Ordering::SeqCst);
     WORKER_KEY.store(if s == STATUS_SUCCESS { key as u64 } else { 0xbad }, Ordering::SeqCst);
     exit_thread(0)
 }
@@ -208,6 +217,34 @@ fn run() -> Result<(), u32> {
     c.st(wait(t, Some(5 * SECOND)), ok)?;
     c.eq(WORKER_KEY.load(Ordering::SeqCst), 0x99)?;
     close(t);
+
+    // A bad output pointer fails the call and leaves the packet queued
+    // (Windows probes the outputs before dequeuing).
+    c.st((api.set)(port, 0x77, 0, ok, 0), ok)?;
+    let mut ctx = 0usize;
+    let mut iosb2 = IoStatusBlock { status: 0, information: 0 };
+    let bad = 8 as *mut usize; // the first page: never mapped
+    c.st(
+        (api.remove)(port, bad, &mut ctx, &mut iosb2, core::ptr::null()),
+        STATUS_ACCESS_VIOLATION,
+    )?;
+    c.eq(depth(&api, port), 1)?;
+    let (s, key, _, _) = remove(&api, port, Some(0));
+    c.st(s, ok)?;
+    c.eq(key as u64, 0x77)?;
+
+    // Closing a port's last handle ends a wait in NtRemoveIoCompletion
+    // (GetQueuedCompletionStatus: ERROR_ABANDONED_WAIT_0).
+    let mut port2 = Handle(0);
+    c.st((api.create)(&mut port2, IO_COMPLETION_ALL_ACCESS, core::ptr::null(), 0), ok)?;
+    PORT.store(port2.0, Ordering::SeqCst);
+    let (s, t2, _) = create_thread(waiter, 0, false);
+    c.st(s, ok)?;
+    delay(SECOND / 50);
+    close(port2);
+    c.st(wait(t2, Some(5 * SECOND)), ok)?;
+    c.eq(WORKER_STATUS.load(Ordering::SeqCst), u64::from(STATUS_ABANDONED_WAIT_0 as u32))?;
+    close(t2);
 
     c.st(set_file(file, FILE_DISPOSITION_INFORMATION, &[1]), ok)?;
     close(file);
