@@ -869,6 +869,11 @@ Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
 ABI/ELF specs, observed behaviour, gVisor; never the Linux kernel
 source).
 
+- **A shell's report of a killed background job depends on timing**:
+  `kill $pid; wait $pid` prints "Terminated" through `wait` only when
+  the job had not been reaped before; otherwise nothing (on Linux too).
+  Discard `wait`'s stderr in transcripts (`wait $pid 2>/dev/null`),
+  as `user/lx/busybox/httpd.sh` does.
 - **The program**: `user/lx/<name>_test/main.c`, built with musl
   (`apt install musl-tools`), makes the system calls it checks itself
   (`user/lx/common/lx.h`: `sys6` and friends with the `syscall`
