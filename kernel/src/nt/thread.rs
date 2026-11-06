@@ -1001,8 +1001,25 @@ pub fn dump() {
         // The first argument (r10), as a handle: what a wait is on.
         let handle = super::object::Handle(regs.gpr[10]);
         if let Some(e) = t.process.handles.lock().get(handle) {
-            let signal = e.object.dispatcher().map_or(-1, |d| d.signal_state());
-            info!("thread:   on handle {:#x}: {} signal {signal}", handle.0, e.object.type_name());
+            if let ObjectBody::IoCompletion(c) = &e.object.body {
+                // A port is ready while it holds packets (its dispatcher
+                // flag is set by a post and never cleared: not a sign).
+                match c.queue.try_lock() {
+                    Some(q) => info!(
+                        "thread:   on handle {:#x}: IoCompletion with {} packets queued",
+                        handle.0,
+                        q.len()
+                    ),
+                    None => info!("thread:   on handle {:#x}: IoCompletion (queue busy)", handle.0),
+                }
+            } else {
+                let signal = e.object.dispatcher().map_or(-1, |d| d.signal_state());
+                info!(
+                    "thread:   on handle {:#x}: {} signal {signal}",
+                    handle.0,
+                    e.object.type_name()
+                );
+            }
             if let ObjectBody::Timer(timer) = &e.object.body {
                 info!(
                     "thread:   timer due tick {:?} (now {})",
