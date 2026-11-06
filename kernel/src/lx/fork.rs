@@ -164,15 +164,19 @@ pub fn wait4(call: &Call<'_>, pid: u64, status: u64, options: u64, rusage: u64) 
         {
             let mut c = call.lx.children.lock();
             c.waiters.retain(|&w| w != me);
-            if let Some(i) = c.ended.iter().position(|&(p, _)| wanted(p)) {
-                let (child, how) = c.ended.remove(i);
+            if let Some(&(child, how)) = c.ended.iter().find(|&&(p, _)| wanted(p)) {
                 drop(c);
                 let word = super::signal::wait_status(how);
                 if status != 0 && call.process.write(status, &word.to_le_bytes()).is_err() {
                     // Not reaped: it stays for the next wait.
-                    let _ = call.lx.children.lock().ended.try_insert(i, (child, how));
                     return Err(EFAULT);
                 }
+                // Reaped once its status is out; another thread's wait may
+                // have taken it meanwhile, then look again.
+                let mut c = call.lx.children.lock();
+                let Some(i) = c.ended.iter().position(|&(p, _)| p == child) else { continue };
+                c.ended.remove(i);
+                drop(c);
                 if rusage != 0 {
                     ledger::record("wait4", "linux syscall stub", rusage);
                     let zero = [0u8; core::mem::size_of::<lx_abi::layout::Rusage>()];

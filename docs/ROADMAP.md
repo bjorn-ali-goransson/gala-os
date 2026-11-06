@@ -1011,8 +1011,6 @@ line and in gala-um, `cargo xtask fault-test [filter] [--sweep[=point]]`,
 `cargo xtask alloc-audit`, scenarios `failpoint_heap`, `failpoint_frame`,
 `failpoint_random`, `failpoint_disk` (ARCHITECTURE "Fault injection",
 WORKFLOW "Fault injection"). Left:
-- The completion port and APC queues still grow when a completion is
-  reported (`notify::complete`: a failed push loses the packet).
 - Out of memory in gala's ntdll loader shows as STATUS_DLL_NOT_FOUND and
   in child process creation as STATUS_INVALID_IMAGE_FORMAT.
 - A QEMU sweep of the kernel-only paths (child processes, the
@@ -1224,8 +1222,7 @@ Each entry: what, why it matters, the structural fix, the owning item.
   kernel's input path, the window's message delivery) is open; the
   `input:` line at exit now counts the notches the kernel received, so
   the next failure says. Item W3.
-- **Fault-injection leftovers**: a failed push in `notify::complete`
-  loses a completion packet; out-of-memory reported as
+- **Fault-injection leftovers**: out-of-memory reported as
   STATUS_DLL_NOT_FOUND / STATUS_INVALID_IMAGE_FORMAT. Item R2.
 - **Seen once, unexplained**: sshd_password's sshd.exe ended with an
   unhandled access violation at 0xffffd0000013f948 (a kernel-half

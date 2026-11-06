@@ -49,7 +49,9 @@ pub struct NtThread {
     /// ThreadAffinityMask: the CPUs it may run on.
     affinity: core::sync::atomic::AtomicU64,
     /// Queued user APCs (FIFO), run at alertable waits.
-    apcs: IrqMutex<Vec<UserApc>>,
+    /// Queued user APCs; room is kept for the completion routines of I/O
+    /// requests in progress (`notify::Reserved`).
+    apcs: IrqMutex<crate::mm::heap::ReservedVec<UserApc>>,
     /// Set while the thread is in an alertable wait (an APC wakes it).
     alertable: core::sync::atomic::AtomicBool,
     /// Mutants it owns (abandoned if it exits).
@@ -350,7 +352,7 @@ fn create_inner(
         create_time: platform::system_time(),
         exit_time: IrqMutex::named("thread.exit_time", 0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
-        apcs: IrqMutex::new(Vec::new()),
+        apcs: IrqMutex::new(crate::mm::heap::ReservedVec::new()),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
@@ -549,13 +551,43 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
 /// Queues a user APC to thread `object`, waking it if it is in an
 /// alertable wait (NtQueueApcThread).
 pub fn queue_user_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> {
+    queue_apc(object, apc, false)
+}
+
+/// Keeps room in `object`'s APC queue for the completion routine of an
+/// I/O request in progress (`notify::Reserved`).
+pub fn reserve_apc(object: &ObjectRef) -> Result<(), NtStatus> {
+    let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    t.apcs.lock().reserve_slot().map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)
+}
+
+/// Gives back a slot `reserve_apc` kept.
+pub fn release_apc(object: &ObjectRef) {
+    if let ObjectBody::Thread(t) = &object.body {
+        t.apcs.lock().release_slot();
+    }
+}
+
+/// Queues an I/O request's completion routine into the slot reserved for
+/// it (no allocation); the slot is used up either way.
+pub fn queue_reserved_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> {
+    queue_apc(object, apc, true)
+}
+
+fn queue_apc(object: &ObjectRef, apc: UserApc, reserved: bool) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     wait::with_dispatcher_lock(|| {
         // Under the lock the thread's exit marks it under (`exit_current`).
         if t.has_exited() {
+            if reserved {
+                t.apcs.lock().release_slot();
+            }
             return Err(NtStatus::UNSUCCESSFUL);
         }
-        t.apcs.lock().try_push(apc).map_err(|_| NtStatus::NO_MEMORY)?;
+        let mut apcs = t.apcs.lock();
+        let pushed = if reserved { apcs.push_reserved(apc) } else { apcs.try_push(apc) };
+        drop(apcs);
+        pushed.map_err(|_| NtStatus::NO_MEMORY)?;
         if t.alertable.load(Ordering::SeqCst)
             && let Some(tid) = *t.sched_id.lock()
         {
@@ -901,7 +933,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         create_time: a.create_time,
         exit_time: IrqMutex::named("thread.exit_time", a.exited.map_or(0, |e| e.1)),
         priority: IrqMutex::new(a.priority),
-        apcs: IrqMutex::new(a.apcs),
+        apcs: IrqMutex::new(crate::mm::heap::ReservedVec::from_vec(a.apcs)),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),

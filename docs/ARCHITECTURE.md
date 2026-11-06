@@ -3314,6 +3314,19 @@ endpoint's I/O completion port.
   `POLLERS`). Events: READ (bytes or end of stream), WRITE, HUP,
   ACCEPT, CONNECT, CONNECT_ERR, from `net::tcp::readiness`. Only a zero
   timeout (just look) is honoured by the kernel; gala's ws2_32 `select`
+- **A completion never needs memory**: as Windows allocates the packet
+  and the APC with the request (the IRP), a request reserves them when
+  it starts (`notify::Reserved`: AFD's `submit`, pipe and directory
+  requests' `Request::reserve`): a slot in its port's queue (if the
+  file has a port and the request an ApcContext) and in its thread's APC
+  queue (if it has a routine), both `mm::heap::ReservedVec`, which keep
+  room for reserved slots (capacity >= len + reserved; ordinary posts
+  never use it). Without memory the request fails in its call with
+  STATUS_INSUFFICIENT_RESOURCES. Clones of a pipe request share one
+  reservation; slots not used are given back when the request is
+  dropped. A port associated after the request started gets an ordinary
+  post, which may fail: logged (`io: a completion packet (context ...)
+  was lost: no memory`), as is a lost completion routine.
   waits with its timeout and then cancels the poll (TODO: honour the
   timeout in AFD, for programs that poll AFD directly, like libuv).
 - **Non-blocking sockets** (FIONBIO through SET_INFO): a request without

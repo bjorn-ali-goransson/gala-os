@@ -989,7 +989,7 @@ fn pipe_request(
         let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] };
         thread::current().map(|t| (t, apc))
     };
-    Ok(super::notify::Request {
+    super::notify::Request {
         process: call.process.clone(),
         iosb,
         buffer,
@@ -1005,7 +1005,9 @@ fn pipe_request(
             end.dispatcher.clone()
         },
         done: None,
-    })
+        reserved: None,
+    }
+    .reserve()
 }
 
 /// NtClose(Handle)
@@ -5168,8 +5170,14 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         output,
         output_len,
     };
-    let io =
-        super::afd::Io { process: call.process.clone(), iosb, event, context: arg!(call, 3), apc };
+    let io = super::afd::Io {
+        process: call.process.clone(),
+        iosb,
+        event,
+        context: arg!(call, 3),
+        apc,
+        reserved: super::notify::Reserved::none(),
+    };
     super::afd::ioctl(&request, io)
 }
 
@@ -6547,7 +6555,9 @@ fn nt_query_directory_file(call: &mut Call<'_>) -> NtStatus {
 fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, buffer, length, class) =
+        reserved: None,
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4) as u32);
+    let request = tri!(request.reserve());
     // FILE_FS_DEVICE_INFORMATION { DeviceType, Characteristics: 0 } of
     // console handles (FILE_DEVICE_CONSOLE) and pipes (FILE_DEVICE_NAMED_PIPE).
     let device = match entry.object.body {

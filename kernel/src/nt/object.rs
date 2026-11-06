@@ -186,23 +186,53 @@ static NEXT_PORT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 pub struct CompletionQueue {
     /// The port's number in the event stream.
     pub id: u64,
-    packets: Vec<CompletionPacket>,
+    /// Room is kept for the packets of I/O requests in progress
+    /// (`notify::Reserved`), so their completion never fails to post.
+    packets: crate::mm::heap::ReservedVec<CompletionPacket>,
 }
 
 impl Default for CompletionQueue {
     fn default() -> Self {
         let id = NEXT_PORT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        CompletionQueue { id, packets: Vec::new() }
+        CompletionQueue { id, packets: crate::mm::heap::ReservedVec::new() }
     }
 }
 
 impl CompletionQueue {
     /// Queues `packet`, stamped with the time and the queuing thread
     /// (`iocp post` in the event stream).
-    pub fn push(&mut self, mut packet: CompletionPacket) -> Result<(), AllocError> {
+    pub fn push(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
+        self.push_inner(packet, false)
+    }
+
+    /// Keeps room for one packet a request in progress will post.
+    pub fn reserve_slot(&mut self) -> Result<(), AllocError> {
+        self.packets.reserve_slot()
+    }
+
+    /// Gives back a slot its request will not use.
+    pub fn release_slot(&mut self) {
+        self.packets.release_slot();
+    }
+
+    /// Posts a request's packet into the slot reserved for it (no
+    /// allocation).
+    pub fn push_reserved(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
+        self.push_inner(packet, true)
+    }
+
+    fn push_inner(
+        &mut self,
+        mut packet: CompletionPacket,
+        reserved: bool,
+    ) -> Result<(), AllocError> {
         packet.queued_t = crate::nt::platform::monotonic_ns();
         packet.queued_by = crate::events::current_client();
-        self.packets.try_push(packet)?;
+        if reserved {
+            self.packets.push_reserved(packet)?;
+        } else {
+            self.packets.try_push(packet)?;
+        }
         crate::events::emit(
             crate::events::Category::Ipc,
             "iocp post",
