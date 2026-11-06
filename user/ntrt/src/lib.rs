@@ -76,6 +76,7 @@ stubs! {
     ntrt_gala_clock_control = 0x7f4c;
     ntrt_gala_request_handover = 0x7f5a;
     ntrt_gala_handover_pause = 0x7f5b;
+    ntrt_gala_session = 0x7fb0;
     // Waitable timers: gala's numbers, UNVERIFIED for the pinned build
     // (programs on Windows reach them through ntdll's exports).
     ntrt_nt_create_timer = 0x00d9;
@@ -116,6 +117,7 @@ unsafe extern "system" {
     fn ntrt_gala_clock_control(operation: u32, a: i64, b: i64, state: *mut ClockState) -> NtStatus;
     fn ntrt_gala_request_handover() -> NtStatus;
     fn ntrt_gala_handover_pause(info: *mut [u64; 2]) -> NtStatus;
+    fn ntrt_gala_session(op: u64, session: u32, arg: u64, buffer: u64, length: u64) -> NtStatus;
     fn ntrt_nt_create_timer(
         handle: *mut Handle,
         access: u32,
@@ -420,6 +422,50 @@ pub fn handover_pause() -> (NtStatus, u64, u64) {
     // SAFETY: a valid output buffer of 16 bytes.
     let st = unsafe { ntrt_gala_handover_pause(&mut info) };
     (st, info[0], info[1])
+}
+
+/// GalaSession's operations (gala only; ARCHITECTURE "Presenters (B3a)").
+pub const SESSION_QUERY: u64 = 0;
+pub const SESSION_PRESENT: u64 = 1;
+pub const SESSION_FRAME: u64 = 2;
+/// Presenters.
+pub const PRESENTER_NONE: u64 = 0;
+pub const PRESENTER_CONSOLE: u64 = 1;
+pub const PRESENTER_TEST: u64 = 2;
+
+/// GalaSession(Operation, Session, Argument, Buffer, Length) (gala only,
+/// SeTcbPrivilege): a session's presenter and a Test frame's pixels;
+/// STATUS_INVALID_SYSTEM_SERVICE on Windows.
+pub fn gala_session(op: u64, session: u32, arg: u64, buffer: u64, length: u64) -> NtStatus {
+    // SAFETY: the caller's buffers, as the operation describes them.
+    unsafe { ntrt_gala_session(op, session, arg, buffer, length) }
+}
+
+/// SESSION_QUERY: (status, [presenter, live, width, height, windows]).
+pub fn session_query(session: u32) -> (NtStatus, [u32; 5]) {
+    let mut out = [0u32; 5];
+    let st = gala_session(SESSION_QUERY, session, 0, out.as_mut_ptr() as u64, 20);
+    (st, out)
+}
+
+/// SESSION_FRAME: area (x, y, w, h) of the Test frame showing `session`
+/// into `pixels` (0x00RRGGBB, row after row): (status, frame width,
+/// height, flushes).
+pub fn session_frame(
+    session: u32,
+    area: [u32; 4],
+    pixels: &mut [u32],
+) -> (NtStatus, u32, u32, u64) {
+    let mut record = [0u32; 8];
+    record[..4].copy_from_slice(&area);
+    let st = gala_session(
+        SESSION_FRAME,
+        session,
+        record.as_mut_ptr() as u64,
+        pixels.as_mut_ptr() as u64,
+        4 * pixels.len() as u64,
+    );
+    (st, record[4], record[5], u64::from(record[6]) | u64::from(record[7]) << 32)
 }
 
 pub const TIMER_ALL_ACCESS: u32 = 0x1f_0003;

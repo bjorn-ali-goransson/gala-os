@@ -9,7 +9,9 @@
 //! wallpaper, the windows bottom to top (each with a soft shadow), the
 //! taskbar (translucent), the start menu (with its shadow) and the pointer.
 //! Changes collect damage rectangles which `with`/`pointer_event`/`tick`
-//! redraw.
+//! compose and hand to the desktop's presenter (`present`: the screen, a
+//! frame in memory, or nothing; the windows and their pixels are kept
+//! either way).
 //!
 //! The mouse: a click raises and activates a window, its caption drags
 //! it, the caption buttons minimize it or ask it to close (WM_CLOSE to the
@@ -21,10 +23,11 @@
 //! taskbar, the caption buttons and the Snap keys call it, and so does
 //! GalaDesktopAction (`nt::action`, the `gala` command): everything shasha
 //! does with the mouse can be done from a terminal.
-//! Design: docs/ARCHITECTURE.md, "Windows on the screen" and "Server and
-//! desktop workloads".
+//! Design: docs/ARCHITECTURE.md, "Windows on the screen", "Server and
+//! desktop workloads" and "Presenters (B3a)".
 
 mod paint;
+mod present;
 
 use super::object::ObjectRef;
 use super::platform;
@@ -33,6 +36,7 @@ use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
 use paint::{Canvas, Font, Picture, Wallpaper, blend, over, round_coverage2, shadow_alpha};
+pub use present::{DEFAULT_SIZE, Frame, Kind, MAX_SIDE as MAX_FRAME_SIDE, Presenter};
 
 /// Frame metrics (what user32's GetSystemMetrics reports): Windows 11's
 /// (a 1-pixel border, a 32-pixel caption, 46 x 32 caption buttons, 8-pixel
@@ -595,9 +599,14 @@ pub struct Desktop {
     /// Bottom to top.
     windows: Vec<Window>,
     next_id: u32,
-    /// The whole screen has been painted once (the console drew it before).
-    painted: bool,
-    /// The screen's size (0 x 0 until known: no shell or pointer).
+    /// Laid out at its size (wallpaper, taskbar, pointer): the desktop
+    /// keeps its windows and their pixels from then on, whether or not a
+    /// presenter shows it.
+    live: bool,
+    /// What shows it (ROADMAP RS B3a): composed rows go there.
+    presenter: Presenter,
+    /// The desktop's size (0 x 0 until known: no shell or pointer): its
+    /// presenter's, or the one it was last shown at.
     screen: (i64, i64),
     wallpaper: Option<Wallpaper>,
     /// The taskbar's pixels (screen width x TASKBAR, ARGB).
@@ -659,7 +668,8 @@ impl Desktop {
         Desktop {
             windows: Vec::new(),
             next_id: 1,
-            painted: false,
+            live: false,
+            presenter: Presenter::None,
             screen: (0, 0),
             wallpaper: None,
             taskbar: None,
@@ -701,6 +711,22 @@ impl Desktop {
         self.taskbar_dirty = true;
         self.refresh();
         Ok(())
+    }
+
+    /// Shows the desktop by `presenter` from now on: the desktop takes
+    /// its size (keeping its windows' places) and is drawn whole there.
+    /// Returns the presenter it replaced.
+    pub fn set_presenter(&mut self, presenter: Presenter) -> Result<Presenter, NtStatus> {
+        if let Some((w, h)) = presenter.size()
+            && (i64::from(w), i64::from(h)) != self.screen
+        {
+            self.set_screen(w, h)?;
+        }
+        let old = core::mem::replace(&mut self.presenter, presenter);
+        self.damage.clear();
+        let (w, h) = self.screen;
+        redraw(self, Rect { x: 0, y: 0, w, h });
+        Ok(old)
     }
 
     fn add_damage(&mut self, r: Rect) {
@@ -2358,38 +2384,26 @@ fn clock(minute: u64) -> ([u8; 8], usize, [u8; 10], usize) {
     (time, tn, date, dn)
 }
 
-/// One session's desktop as shasha keeps it (ROADMAP RS step B2): its
-/// windows on the screen, Z order, focus, capture, pixels and input
-/// queue, behind its own lock (nt::session::Desk holds it). Only the
-/// desktop the console shows is drawn and gets the keyboard and mouse:
-/// the console session's (session::CONSOLE) until step B3a attaches
-/// presenters; another session's programs find no screen there (as on a
-/// machine without one: their windows live in the registry only).
+/// One session's desktop as shasha keeps it (ROADMAP RS steps B2, B3a):
+/// its windows, Z order, focus, capture, pixels and input queue, and the
+/// presenter that shows it, behind its own lock (nt::session::Desk holds
+/// it). Every session's desktop keeps its windows whether or not anything
+/// shows it; the console session's is shown by the screen (or by what
+/// `presenter=` names) and gets the keyboard and mouse.
 pub struct Shell {
     session: u32,
     d: IrqMutex<Desktop>,
-    /// "not shown" was logged for this session.
-    noted: core::sync::atomic::AtomicBool,
 }
 
 impl Shell {
     pub const fn new(session: u32) -> Shell {
-        Shell {
-            session,
-            d: IrqMutex::new(Desktop::new()),
-            noted: core::sync::atomic::AtomicBool::new(false),
-        }
+        Shell { session, d: IrqMutex::new(Desktop::new()) }
     }
 
-    /// Whether the console shows this desktop.
-    pub fn shown(&self) -> bool {
-        self.session == super::session::CONSOLE
-    }
-
-    /// (windows on the screen, drawn yet): the state dump's figures.
-    pub fn counts(&self) -> (usize, bool) {
+    /// (windows, live, what shows it): the state dump's figures.
+    pub fn counts(&self) -> (usize, bool, Kind) {
         let d = self.d.lock();
-        (d.windows.len(), d.painted)
+        (d.windows.len(), d.live, d.presenter.kind())
     }
 }
 
@@ -2443,21 +2457,27 @@ pub fn choose_wallpaper(choice: Option<&str>) {
     }
 }
 
-/// Redraws screen area `r` from the desktop.
-fn redraw(desktop: &Desktop, r: Rect) {
-    let Some((sw, sh)) = platform::screen_size() else { return };
-    let Some(r) = r.clip(sw.into(), sh.into()) else { return };
+/// Composes area `r` of the desktop and hands it to its presenter
+/// (nothing is composed when nothing shows it).
+fn redraw(d: &mut Desktop, r: Rect) {
+    if d.presenter.kind() == Kind::None {
+        return;
+    }
+    let Some(r) = r.clip(d.screen.0, d.screen.1) else { return };
     let mut row = Vec::new();
     if row.try_reserve_exact(r.w as usize).is_err() {
         return;
     }
+    // Out of the desktop while it composes from it (a move, no copy).
+    let mut presenter = core::mem::take(&mut d.presenter);
     for y in r.y..r.y + r.h {
         row.clear();
-        row.extend((r.x..r.x + r.w).map(|x| desktop.pixel(x, y)));
-        platform::screen_write_row(r.x as u32, y as u32, &row);
+        row.extend((r.x..r.x + r.w).map(|x| d.pixel(x, y)));
+        presenter.write_row(r.x as u32, y as u32, &row);
     }
     // A GPU shows the rows now (TRANSFER_TO_HOST_2D + RESOURCE_FLUSH).
-    platform::screen_flush(r.x as u32, r.y as u32, r.w as u32, r.h as u32);
+    presenter.flush(r.x as u32, r.y as u32, r.w as u32, r.h as u32);
+    d.presenter = presenter;
 }
 
 fn redraw_damage(d: &mut Desktop) {
@@ -2467,12 +2487,13 @@ fn redraw_damage(d: &mut Desktop) {
     }
 }
 
-/// The desktop on the screen, painted once.
 /// `profile=server` (ROADMAP SD, ARCHITECTURE "Server and desktop
-/// workloads"): the desktop is never drawn, even with a screen; windows
+/// workloads"): no desktop is ever live, even with a screen; windows
 /// still exist (the registry, messages), as without a screen.
 static SERVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static SERVER_NOTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// "no screen" was logged.
+static NO_SCREEN_NOTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Boots in the server profile (before any program runs).
 pub fn set_server_profile() {
@@ -2483,53 +2504,125 @@ pub fn server_profile() -> bool {
     SERVER.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// The screen `shell`'s desktop may draw on: none in the server profile
-/// (noted once in the log the first time a program asks for it), none
-/// for a desktop the console does not show (noted once per session).
-pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
-    if server_profile() {
-        if !SERVER_NOTED.swap(true, core::sync::atomic::Ordering::Relaxed) {
-            crate::info!("desktop: not drawn (server profile)");
-        }
-        return None;
-    }
-    if !shell.shown() {
-        if !shell.noted.swap(true, core::sync::atomic::Ordering::Relaxed) {
-            crate::info!(
-                "desktop: session {}'s windows are not shown (the console shows session {})",
-                shell.session,
-                super::session::CONSOLE
-            );
-        }
-        return None;
-    }
-    platform::screen_size()
+/// The boot option `presenter=<test|none>` (before any program runs):
+/// a headless desktop. False for another value.
+pub fn set_local_presenter(name: &str) -> bool {
+    present::set_local(name)
 }
 
-fn ensure_painted(d: &mut Desktop) -> Result<(), NtStatus> {
-    if !d.painted
-        && let Some((w, h)) = platform::screen_size()
-    {
-        d.set_screen(w, h)?;
-        d.set_minute(platform::system_time() / 600_000_000);
-        d.painted = true;
-        d.damage.clear();
-        redraw(d, Rect { x: 0, y: 0, w: w.into(), h: h.into() });
+/// Whether this machine has desktops at all: not in the server profile
+/// (noted once in the log), and a screen or `presenter=` (a headless
+/// desktop); without either, GUI calls behave as on a machine without a
+/// screen (noted once).
+fn available() -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if server_profile() {
+        if !SERVER_NOTED.swap(true, Relaxed) {
+            crate::info!("desktop: not drawn (server profile)");
+        }
+        return false;
     }
+    if present::local().is_some() || platform::screen_size().is_some() {
+        return true;
+    }
+    if !NO_SCREEN_NOTED.swap(true, Relaxed) {
+        crate::info!("desktop: no screen and no presenter= (windows live in the registry only)");
+    }
+    false
+}
+
+/// What shows the console session's desktop when it goes live: the
+/// screen, or what `presenter=` names.
+fn local_presenter() -> Result<Presenter, NtStatus> {
+    Ok(match present::local() {
+        None | Some(Kind::Console) => Presenter::Console,
+        Some(Kind::None) => Presenter::None,
+        Some(Kind::Test) => {
+            let (w, h) = DEFAULT_SIZE;
+            Presenter::Test(Frame::new(w, h).ok_or(NtStatus::NO_MEMORY)?)
+        }
+    })
+}
+
+/// Logs a Test frame's place (xtask's screen checks read it there with
+/// QEMU's `memsave`).
+fn note_frame(session: u32, presenter: &Presenter) {
+    if let Presenter::Test(f) = presenter {
+        let (w, h) = f.size();
+        crate::info!(
+            "presenter: test frame for session {session}: {w}x{h} at {:#x} ({} bytes, 0x00RRGGBB rows)",
+            f.address(),
+            4 * w as usize * h as usize
+        );
+    }
+}
+
+/// Makes `shell`'s desktop live if it is not: laid out at its presenter's
+/// size (DEFAULT_SIZE without one), drawn whole there. The console
+/// session's gets the local presenter and the keyboard and mouse;
+/// another session's none. STATUS_NOT_SUPPORTED where there are no
+/// desktops (`available`).
+fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
+    if d.live {
+        return Ok(());
+    }
+    if !available() {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let console = shell.session == super::session::CONSOLE;
+    let presenter = if console { local_presenter()? } else { Presenter::None };
+    let (w, h) = presenter.size().unwrap_or(DEFAULT_SIZE);
+    d.set_screen(w, h)?;
+    d.set_minute(platform::system_time() / 600_000_000);
+    d.live = true;
+    let kind = presenter.kind();
+    note_frame(shell.session, &presenter);
+    d.set_presenter(presenter)?;
+    if console {
+        crate::info!(
+            "desktop: session {} is live ({w}x{h}), shown by {}",
+            shell.session,
+            kind.name()
+        );
+        platform::local_input();
+    } else {
+        crate::info!(
+            "desktop: session {} is live ({w}x{h}), shown by {} (the console shows session {})",
+            shell.session,
+            kind.name(),
+            super::session::CONSOLE
+        );
+    }
+    crate::events::emit(
+        crate::events::Category::Window,
+        "presenter",
+        format_args!(
+            r#""op":"live","session":{},"presenter":"{}","w":{w},"h":{h}"#,
+            shell.session,
+            kind.name()
+        ),
+    );
     Ok(())
 }
 
+/// The size of `shell`'s desktop (made live if it was not); None where
+/// there are no desktops (no screen and no `presenter=`, the server
+/// profile).
+pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d).ok()?;
+    Some((d.screen.0 as u32, d.screen.1 as u32))
+}
+
 /// Runs `f` on the desktop and redraws what it changed; STATUS_NOT_SUPPORTED
-/// without a screen.
+/// where there are no desktops. Works the same whatever shows the
+/// desktop, or nothing.
 pub fn with<R>(
     shell: &Shell,
     f: impl FnOnce(&mut Desktop) -> Result<(R, Option<Rect>), NtStatus>,
 ) -> Result<R, NtStatus> {
-    if screen(shell).is_none() {
-        return Err(NtStatus::NOT_SUPPORTED);
-    }
     let mut d = shell.d.lock();
-    ensure_painted(&mut d)?;
+    ensure_live(shell, &mut d)?;
     let (r, area) = f(&mut d)?;
     if let Some(area) = area {
         d.add_damage(area);
@@ -2538,13 +2631,86 @@ pub fn with<R>(
     Ok(r)
 }
 
-/// A process ended: its windows go.
-pub fn process_ended(shell: &Shell, owner: u64) {
-    if server_profile() || !shell.shown() || platform::screen_size().is_none() {
-        return;
+/// Attaches a presenter of `kind` to `shell`'s desktop (GalaSession):
+/// it goes live if it was not, a Test frame is `size` (else the
+/// desktop's size; the desktop takes the presenter's size, keeping its
+/// windows' places) and the desktop is drawn whole there. The old
+/// presenter goes (a Test frame is freed). Returns the kind it replaced.
+/// STATUS_NOT_SUPPORTED where there are no desktops, and for Console on
+/// another session than the console's or without a screen (a console
+/// switch is not there yet); STATUS_NO_MEMORY for a frame.
+pub fn attach(shell: &Shell, kind: Kind, size: Option<(u32, u32)>) -> Result<Kind, NtStatus> {
+    if kind == Kind::Console
+        && (shell.session != super::session::CONSOLE || platform::screen_size().is_none())
+    {
+        return Err(NtStatus::NOT_SUPPORTED);
     }
+    let current = {
+        let mut d = shell.d.lock();
+        ensure_live(shell, &mut d)?;
+        (d.screen.0 as u32, d.screen.1 as u32)
+    };
+    // A frame (megabytes) is made outside the desktop's lock.
+    let presenter = match kind {
+        Kind::None => Presenter::None,
+        Kind::Console => Presenter::Console,
+        Kind::Test => {
+            let (w, h) = size.unwrap_or(current);
+            Presenter::Test(Frame::new(w, h).ok_or(NtStatus::NO_MEMORY)?)
+        }
+    };
+    note_frame(shell.session, &presenter);
     let mut d = shell.d.lock();
-    if !d.painted {
+    let old = d.set_presenter(presenter)?;
+    let (w, h) = d.screen;
+    drop(d);
+    let was = old.kind();
+    // The old frame is freed outside the lock.
+    drop(old);
+    crate::info!(
+        "desktop: session {} is now shown by {} ({w}x{h}; was {})",
+        shell.session,
+        kind.name(),
+        was.name()
+    );
+    crate::events::emit(
+        crate::events::Category::Window,
+        "presenter",
+        format_args!(
+            r#""op":"attach","session":{},"presenter":"{}","was":"{}","w":{w},"h":{h}"#,
+            shell.session,
+            kind.name(),
+            was.name()
+        ),
+    );
+    Ok(was)
+}
+
+/// What a session's desktop is (GalaSession's query): what shows it,
+/// whether it is live, its size (0 x 0 before) and its windows; nothing
+/// is made live.
+pub fn query(shell: &Shell) -> (Kind, bool, (u32, u32), usize) {
+    let d = shell.d.lock();
+    (d.presenter.kind(), d.live, (d.screen.0 as u32, d.screen.1 as u32), d.windows.len())
+}
+
+/// Copies area `r` of the Test frame that shows `shell`'s desktop into
+/// `out` (row after row; GalaSession): the frame's size and flush count.
+/// STATUS_INVALID_DEVICE_STATE when no Test presenter shows it,
+/// STATUS_INVALID_PARAMETER when `r` is not inside the frame.
+pub fn read_frame(shell: &Shell, r: Rect, out: &mut [u32]) -> Result<((u32, u32), u64), NtStatus> {
+    let d = shell.d.lock();
+    let Presenter::Test(f) = &d.presenter else { return Err(NtStatus::INVALID_DEVICE_STATE) };
+    if !f.read(r, out) {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    Ok((f.size(), f.flushes()))
+}
+
+/// A process ended: its windows go (shown or not).
+pub fn process_ended(shell: &Shell, owner: u64) {
+    let mut d = shell.d.lock();
+    if !d.live {
         return;
     }
     d.destroy_owned(owner);
@@ -2552,14 +2718,15 @@ pub fn process_ended(shell: &Shell, owner: u64) {
 }
 
 /// Mouse input: the pointer moved by (dx, dy) with `buttons` held (bit 0
-/// left, 1 right, 2 middle). Nothing before the desktop is on the screen.
+/// left, 1 right, 2 middle), to the console session's desktop. Nothing
+/// before that desktop is live.
 /// Returns the program the start menu asked to start, if any.
 pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<&'static Program> {
     // Which programs exist (outside the desktop's lock: the file system).
     let (available, n) = if buttons & 1 != 0 { available_programs() } else { ([0; 8], 0) };
     let desk = console()?;
     let mut d = desk.shell.d.lock();
-    if !d.painted {
+    if !d.live {
         return None;
     }
     if buttons & 1 != 0 && !d.menu_open() {
@@ -2567,7 +2734,7 @@ pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<&'static Program> 
     }
     let damage = d.pointer(dx, dy, buttons);
     for r in damage {
-        redraw(&d, r);
+        redraw(&mut d, r);
     }
     let launch = d.take_launch();
     let wakes = d.take_wakes();
@@ -2668,7 +2835,7 @@ pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     *PICTURE.lock() = picture;
     let mut d = shell.d.lock();
     if let Some(layout) = layout
-        && d.painted
+        && d.live
         && d.screen == screen
     {
         d.wallpaper = Some(layout);
@@ -2693,7 +2860,7 @@ fn signal(events: Vec<ObjectRef>) {
 pub fn wheel_event(notches: i64) {
     let Some(desk) = console() else { return };
     let mut d = desk.shell.d.lock();
-    if !d.painted {
+    if !d.live {
         return;
     }
     d.wheel(notches);
@@ -2705,7 +2872,7 @@ pub fn wheel_event(notches: i64) {
 pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
     let Some(desk) = console() else { return };
     let mut d = desk.shell.d.lock();
-    if !d.painted {
+    if !d.live {
         return;
     }
     d.key(vk, scan, extended, down);
@@ -2725,20 +2892,27 @@ pub fn listen(shell: &Shell, owner: u64, event: ObjectRef) -> Result<(), NtStatu
     Ok(())
 }
 
-/// The clock: called now and then (the input thread). Also notices a
-/// display change (virtio-gpu: the host's window resized).
+/// The clock: called now and then (the input thread), for every live
+/// desktop. Also notices a display change (virtio-gpu: the host's window
+/// resized), which the desktop the screen shows follows.
 pub fn tick() {
     let changed = platform::screen_changed();
-    let Some(desk) = console() else { return };
-    let mut d = desk.shell.d.lock();
-    if !d.painted {
-        return;
+    let minute = platform::system_time() / 600_000_000;
+    let Ok(ids) = super::session::ids() else { return };
+    for id in ids {
+        let Some(desk) = super::session::desk(id) else { continue };
+        let mut d = desk.shell.d.lock();
+        if !d.live {
+            continue;
+        }
+        if let Some((w, h)) = changed
+            && d.presenter.kind() == Kind::Console
+        {
+            resize(&mut d, w, h);
+        }
+        d.set_minute(minute);
+        redraw_damage(&mut d);
     }
-    if let Some((w, h)) = changed {
-        resize(&mut d, w, h);
-    }
-    d.set_minute(platform::system_time() / 600_000_000);
-    redraw_damage(&mut d);
 }
 
 /// The screen is now w x h: the shell is laid out again and everything

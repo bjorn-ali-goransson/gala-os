@@ -141,8 +141,9 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `logtee=C:/dir` | what programs write to files below that directory (percent-encoded) is also logged line by line, `logtee: <file>: <line>` |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display` or `all` (`display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window` or `all` (`window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
+| `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
 | `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
@@ -2771,6 +2772,23 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   SEC_E_UNTRUSTED_ROOT, SEC_E_CERT_EXPIRED and SEC_E_WRONG_PRINCIPAL, as
   documented for automatic validation. Revocation is not checked (the
   flags are recorded).
+- **The machine root store's contents**: every full image (`cargo
+  xtask iso`, the images `image_modules` makes) ships
+  `gala\roots\public-roots.pem`, the public CA bundle: Mozilla's root
+  program's TLS server roots as curl.se publishes them
+  (`user/roots/public-roots.pem`, a dated release pinned by SHA-256 in
+  THIRD_PARTY.md, replaced with `user/roots/update.sh`). It is one file
+  among the others there, so a scenario adds its own test CA beside it
+  (`ca.cer`), and Schannel and crypt32's ROOT store read the same set
+  (curl's LibreSSL build and Chromium through crypt32, Schannel's
+  callers through it). Boot scenarios ship the bundle only where they
+  need it (`pk_install_https`); the test CA alone otherwise. The host
+  test `public_roots_are_all_trust_anchors` (`cargo test -p
+  schannel_tls`) checks that rustls takes every certificate of it as a
+  trust anchor (one that did not parse would be dropped silently).
+  Windows also updates its roots from Windows Update and fetches missing
+  ones on demand; gala's change only with the image (TODO: an update
+  path that does not need a new image).
 - **Why in schannel.dll**: crypt32 has no chain engine. Its
   CertGetCertificateChain gives a chain of the certificate alone,
   untrusted (CERT_TRUST_IS_UNTRUSTED_ROOT | CERT_TRUST_IS_PARTIAL_CHAIN,
@@ -2889,11 +2907,14 @@ schannel_test's Nginx, which also serves plain HTTP on
   it): an unknown handle is ERROR_INVALID_HANDLE, the wrong kind
   ERROR_WINHTTP_INCORRECT_HANDLE_TYPE (= _INTERNET_). Each handle
   copies its parent's settings (user agent, time-outs, secure
-  protocols, redirect policy)
+  protocols, redirect policy and maximum)
   when made, so closing a parent leaves its children working.
   WinHttpSetTimeouts / SetOption / QueryOption: the time-outs,
-  CONTEXT_VALUE, USER_AGENT, SECURE_PROTOCOLS, REDIRECT_POLICY,
-  SECURITY_FLAGS, HANDLE_TYPE; other options are recorded (SetOption
+  CONTEXT_VALUE, USER_AGENT, SECURE_PROTOCOLS, REDIRECT_POLICY (exactly
+  a DWORD, else ERROR_INSUFFICIENT_BUFFER), MAX_HTTP_AUTOMATIC_REDIRECTS,
+  SECURITY_FLAGS, HANDLE_TYPE, URL (query only: the request's URL, the
+  port shown unless the scheme's; after redirects the last one's);
+  other options are recorded (SetOption
   accepts and ignores them, QueryOption fails with
   ERROR_WINHTTP_INVALID_OPTION).
 - **WinINet's functions** (`user/wininet`): InternetOpenW (DIRECT and
@@ -2958,12 +2979,36 @@ schannel_test's Nginx, which also serves plain HTTP on
   server's close; HEAD, 204 and 304 have none. QueryDataAvailable
   blocks until some body is decoded and gives 0 at the end; a body cut
   short is ERROR_WINHTTP_CONNECTION_ERROR.
+- **Redirects** (`request.rs`: `redirect`, `resolve`, `follow`):
+  followed inside ReceiveResponse (WinHttpReceiveResponse,
+  HttpSendRequestW), on a new connection each, as each API's policy and
+  rules say (`Settings::redirect_policy`, `redirect_rules`; from the
+  documentation and Wine's conformance tests, which run on Windows).
+  WinHTTP: 301, 302, 307 and 308 (a 303 is returned), by
+  WINHTTP_OPTION_REDIRECT_POLICY (default DISALLOW_HTTPS_TO_HTTP: https
+  to http is ERROR_WINHTTP_REDIRECT_FAILED; NEVER returns the 3xx;
+  ALWAYS), at most WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS (default
+  10; one more is ERROR_WINHTTP_REDIRECT_FAILED, the URL staying the
+  last one followed); a 301 or 302 turns a POST into a GET without its
+  body, a 307 or 308 sends the same verb and body again. WinINet: 301,
+  302, 303, 307 and 308, https to http included, unless
+  INTERNET_FLAG_NO_AUTO_REDIRECT; any verb but GET and HEAD becomes a
+  GET except for 307 and 308; the same maximum (WinINet documents none
+  but its "all attempts made to redirect failed"). The Location is
+  absolute (http or https; another scheme is REDIRECT_FAILED),
+  scheme-relative, an absolute path, a query or a relative path
+  (RFC 3986 5.2, dot segments removed); the fragment is dropped; Host
+  and the headers the API added are made again for the new URL, the
+  caller's kept. A 307/308 of a body sent with WinHttpWriteData is not
+  followed (the body is not kept; recorded, the 3xx returned).
 - **What a failure leaves**: every failed step records
   `winhttp.dll!<step>` or `wininet.dll!<step>` (kind "other", the
   request's DLL) with the Winsock or SSPI status
   as detail (`connect` 10061, `TLS handshake` 0x80090325 after
   schannel's own reason, `GetAddrInfoW`, `recv`, `DecryptMessage`,
-  `timed out`, `invalid status line`, ...); a panic records its
+  `timed out`, `invalid status line`, `redirect: https to http
+  (REDIRECT_POLICY)`, `redirect: more than the maximum`, `redirect:
+  Location is no http(s) URL`, ...); a panic records its
   location (`<dll>!panic <file>`) and ends the process with 0xC0000409.
 - **Limits** (recorded where met): asynchronous sessions
   (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and
@@ -2972,8 +3017,8 @@ schannel_test's Nginx, which also serves plain HTTP on
   proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
   WinINet's FTP and Gopher and its cache (InternetQueryOptionW and the
   A functions are not exported yet);
-  automatic redirects (the 3xx response is returned:
-  `<dll>!automatic redirect`);
+  WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
+  as an option, not applied; the redirect policy is);
   connection reuse (every request has its own connection, closed with
   its body); the resolve and connect time-outs (the stack's apply);
   authentication, cookies, decompression, HTTP/2, client certificates,
@@ -3737,26 +3782,33 @@ sessions and remote shasha" (one desktop per session).
 Code: `kernel/src/nt/desktop/` (`mod.rs`: windows, shell, input,
 actions; `paint.rs`: drawing; `tests.rs`), `kernel/src/console.rs`
 (boot splash), `kernel/src/input.rs` and `arch::ps2` (devices),
-`nt::platform::Display` (the screen). Each session's desktop is a
-`Shell` (its windows, Z order, focus, capture, pixels and input queue
-behind its own `IrqMutex<Desktop>`; `nt::session::Desk` holds it). Only
-the desktop the console shows (`session::CONSOLE`'s) is drawn and gets
-the keyboard and mouse; another session's programs find no screen
-(their windows live in the registry only).
+`nt::platform::Display` (the screen), `desktop/present.rs`
+(presenters). Each session's desktop is a `Shell` (its windows, Z order,
+focus, capture, pixels, input queue and presenter behind its own
+`IrqMutex<Desktop>`; `nt::session::Desk` holds it). Every session's
+desktop keeps its windows and their pixels whether or not anything shows
+it; the console session's (`session::CONSOLE`) is shown by the screen
+(or what `presenter=` names) and gets the keyboard and mouse; another
+session's is shown by nothing unless GalaSession attaches a presenter
+("Plan: sessions and remote shasha", "Presenters (B3a)").
 
 #### Screen, devices and boot splash
 
 - **Display seam** (`nt::platform::Display`): `screen_size`,
   `screen_write_row`, `screen_flush` (a damaged rectangle's rows are
-  written: a GPU shows them) and `screen_changed` (a new size). The
+  written: a GPU shows them), `screen_changed` (a new size) and
+  `local_input` (the console session's desktop went live: the kernel
+  starts the PS/2 thread, also without a screen). The Console presenter
+  is what uses it. The
   screen is the bootloader's framebuffer, or with `display=virtio` a
   virtio-gpu ("Plan: graphics and GPU", G1). The kernel takes the
   framebuffer from the screen console on first use
   (`console::take_framebuffer`; the console then writes to the serial
   port only) and starts the input thread. BIOS boots have no
   framebuffer, so screen tests are UEFI scenarios; `noscreen` keeps the
-  framebuffer off (boot tests use it); gala-um has no screen (the window
-  syscalls return STATUS_NOT_SUPPORTED).
+  framebuffer off (boot tests use it); gala-um has no screen (without
+  `presenter=`, which gala-um does not take yet, the window syscalls
+  return STATUS_NOT_SUPPORTED).
 - **Devices** (`arch::ps2`, `input.rs`): the i8042 polled every 5 ms
   from a kernel thread (IRQ 1 and 12 are not routed); the configuration
   turns both ports on and translation to scan code set 1; mouse
@@ -3789,9 +3841,12 @@ the keyboard and mouse; another session's programs find no screen
   maximized or docked window (filling the work area's height against
   its left or right edge) is square with no shadow (`Window::square`).
 - **Damage**: changes collect damage rectangles; `with`,
-  `pointer_event`, `key_event` and `tick` redraw them row by row through
-  `platform::screen_write_row`. The desktop is drawn lazily: the first
-  use paints the whole screen.
+  `pointer_event`, `key_event` and `tick` compose them row by row and
+  hand the rows to the desktop's presenter (`Presenter::write_row`,
+  then `flush`: the screen through `platform::screen_write_row`, a Test
+  frame, or nothing: with no presenter nothing is composed). A desktop
+  goes live lazily: its first use lays it out and draws it whole, as
+  does attaching a presenter.
 - **Drawing** (`paint.rs`): integer-only blending and gradients, an ARGB
   `Canvas` (rounded rectangles, outlines, tinted alpha masks, text in
   the baked Selawik sizes of `paint::Font`: proportional, advances in
@@ -3934,6 +3989,7 @@ registry ("Plan: windows across processes").
 | 0x7f58 | GalaDesktopAction | named desktop actions ("Server and desktop workloads") |
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
+| 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter and a Test frame's pixels ("Presenters (B3a)") |
 
 #### Invariants and limits
 
@@ -3942,9 +3998,10 @@ registry ("Plan: windows across processes").
   bounds).
 - The desktop's keyboard focus is the active top-level window; focus
   among child windows is user32's.
-- Without a screen (or in the server profile, or for a session the
-  console does not show), desktop calls are STATUS_NOT_SUPPORTED and
-  the window registry still works.
+- Without a screen and without `presenter=` (or in the server profile),
+  desktop calls are STATUS_NOT_SUPPORTED and the window registry still
+  works. A session the console does not show keeps a live desktop
+  (presenter None).
 - TODO: the shell belongs in a user-mode program (an explorer.exe of
   gala's); the clock is UTC; popups and hidden windows are not listed by
   GalaDesktopAction's Windows (the registry has them:
@@ -4904,7 +4961,7 @@ ROADMAP PK has the stages and their status; in short:
 | Piece | State |
 |---|---|
 | Client commands, winget-pkgs trees, zip and portable installs, shims, transactions (PK stages 1-2) | in use; scenario `pk_install_zip` |
-| Downloads over HTTP(S) (PK stage 1) | not built: `Host::fetch` refuses them |
+| Downloads over HTTP(S) (PK stage 1, TLS step 4) | in use: gala.exe over winhttp and Schannel; scenario `pk_install_https` |
 | The full winget resolver (`galapkg::winget`) | built, host-tested; the install command does not call it yet |
 | Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`); Inno host-tested |
 | MSIX/AppX reading (PK stage 4 groundwork) | built, host-tested; nothing installed |
@@ -4964,17 +5021,28 @@ type, HTTP(S)), 4 failed (rolled back), 5 SHA-256 mismatch.
 - **Offline mirror**: a local snapshot may carry installers under
   `installers\<the URL's file name>`, used before any download; the
   SHA-256 is checked all the same.
-- **Downloads** (TODO, ROADMAP PK stage 1 and TLS step 4): `Host::
-  fetch(url)` is the seam. gala.exe reads `file:///` URLs and paths and
-  answers ERROR_NOT_SUPPORTED for `http(s)://` (galapkg turns that into
-  exit 3 with what is missing). The plan: winhttp over Schannel ("Schannel
-  (TLS)"), with gala's root store holding the public roots; redirects
-  (GitHub release URLs redirect to objects.githubusercontent.com);
-  manifests from `raw.githubusercontent.com/microsoft/winget-pkgs/
-  master/manifests/...`, version lists from the GitHub contents API;
-  `search` against winget's source index
+- **Downloads**: `Host::fetch(url)`. gala.exe (`user/gala/src/fetch.rs`)
+  GETs `http://` and `https://` URLs through winhttp.dll, loaded when a
+  download starts (as advapi32 is: gala's other commands run on images
+  without it), exactly as a Windows program would: on gala that is
+  gala's winhttp over Schannel ("WinHTTP and WinINet", "Schannel (TLS)"),
+  validating against the machine root store (the public CA bundle);
+  redirects are winhttp's default policy (GitHub's release URLs answer
+  302 with their storage host's URL), User-Agent `gala-install/1.0`. A
+  status other than 200 is `install::HTTP_STATUS_ERROR | status`; any
+  failure is exit 4 with the WinHTTP error's meaning ("the server's
+  certificate is not valid or not trusted ... (error 12175)", "the
+  server's name was not resolved (error 12007)", ...). `file:///` URLs
+  and paths are read; another scheme is ERROR_NOT_SUPPORTED (exit 3).
+  The body is held in memory (fallibly reserved from Content-Length),
+  then checked against the manifest's SHA-256 before anything changes.
+  TODO (ROADMAP PK step 2): manifests from
+  `raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/...`
+  and version lists from the GitHub contents API (`--source https://...`
+  is refused, exit 3); `search` against winget's source index
   (`cdn.winget.microsoft.com/cache/source2.msix`, an MSIX with a SQLite
-  index: needs the MSIX reader and sqlite).
+  index: needs the MSIX reader and sqlite); streaming large installers
+  to disk instead of memory.
 
 ### Installing zip and portable packages
 
@@ -5050,7 +5118,10 @@ as it was.**
 ### Observability
 
 - The install log `%LOCALAPPDATA%\gala\logs\install.log`: one line per
-  step (`install`, `manifest`, `installer`, `download`, `sha256
+  step (`install`, `manifest`, `installer`, `download url=`, `fetch
+  connect host= port=`, `fetch status= url=<final> [redirected-from=]
+  bytes=` or `fetch error step=<WinHTTP call> code=` with `error download
+  code=`, `download bytes=`, `sha256
   expected= got=`, `plan`, `unpacked`, `link`, `path added`,
   `registered`, `installed`; `error ...` with the Win32 error; `rollback
   ...` per undo step), timestamped with the process id; `--verbose`
@@ -5132,7 +5203,16 @@ manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup, a stand-in
 that registers nothing; Msix; PkNsis 1.0.0 and 1.1.0, real x64 NSIS
 installers built with makensis from
 `user/pk_install_test/nsis/pknsis.nsi`) and real winget-pkgs manifests
-(ripgrep, jq) for search and the HTTPS refusal. `pk_install_test nsis`
+(ripgrep, jq) for search and a download that fails (no winhttp.dll in
+that image). `pk_install_test https` (scenario `pk_install_https`, with
+schannel_test's Nginx in the guest) installs GalaTest.PkHttps, whose
+zip is not mirrored: Nginx serves it (`user/pk_install_test/served`)
+behind a release URL that answers 302, so gala downloads it over
+winhttp and Schannel, follows the redirect and checks the SHA-256; it
+runs and is uninstalled; GalaTest.PkUntrusted (Nginx's untrusted
+certificate) fails with error 12175, jq's github.com URL with 12007 (no
+network card); crypt32's ROOT store has the public roots and the test
+CA. `pk_install_test nsis`
 (scenario `pk_install_nsis`) installs PkNsis (/S), checks its files, its
 ARP entry and gala's tags, runs the program, upgrades it to 1.1.0,
 uninstalls it (/S, waiting for the entry to go), and installs and
@@ -5697,9 +5777,11 @@ one machine: **sessions own desktops, and a desktop is shown by a
 presenter** (the local console, a remote shasha client, or none).
 ROADMAP RS tracks it: B1 (session ids, per-session named objects) and
 B2 (a desktop per session) are built, and B3a's window station and
-desktop objects; B3a's presenters, B3b (remote shasha), B4 (session
-manager) and B5 (sessions across a handover) are the planned design
-below. Test programs: `user/session_test`, `user/winsta_test`.
+desktop objects and its first presenters (None, Console, Test); the
+console switch, B3b (remote shasha), B4 (session manager) and B5
+(sessions across a handover) are the planned design below. Test
+programs: `user/session_test`, `user/winsta_test`,
+`user/presenter_test`.
 
 What this builds on:
 
@@ -5792,7 +5874,7 @@ while another session's is taken:
 |---|---|---|
 | `windows` | `window::Windows` | the window registry: windows, message queues, posted and sent messages, listeners, UIPI filters |
 | `hooks` | `winevent::Hooks` | SetWinEventHook's hooks and waiting events |
-| `shell` | `desktop::Shell` | shasha's `Desktop` (`desktop_off::Shell`, empty, in the server kernel) |
+| `shell` | `desktop::Shell` | shasha's `Desktop` and its presenter (`desktop_off::Shell`, empty, in the server kernel) |
 
 - HWNDs come from one global counter (`window::NEXT_HWND`), so a value
   is never reused across sessions.
@@ -5800,18 +5882,18 @@ while another session's is taken:
   (`call.process.desk.windows` / `.hooks` / `.shell`), and so does
   GalaDesktopAction (`action::Caller::desk`): `gala windows` lists the
   caller's session, a window action on another session's HWND is
-  STATUS_INVALID_HANDLE, `gala start` resolves start-menu names only when
-  the caller's desktop is shown. Process and thread ends clean their
+  STATUS_INVALID_HANDLE, `gala start` resolves start-menu names only where
+  there are desktops. Process and thread ends clean their
   session's registry, hooks and shell.
 - A WinEvent raised in a session reaches only that session's hooks and
   wakes listeners of that session's registry.
-- **Only a shown desktop is drawn and gets input**: `Shell::shown` is
-  true for the console session (`session::CONSOLE`) until presenters
-  exist (B3a). For any other session `desktop::screen(shell)` is None, so
-  its GUI calls behave as on a machine without a screen
-  (STATUS_NOT_SUPPORTED; user32 keeps its windows in the registry), and
-  the log says so once per session (`desktop: session 0's windows are not
-  shown (the console shows session 1)`).
+- **Every session's desktop keeps its windows; only the console
+  session's gets input**: a desktop is shown by its presenter
+  ("Presenters (B3a)"): the console session's by the screen, another
+  session's by nothing until GalaSession attaches one. Its GUI calls work
+  the same either way (`desktop: session 0 is live (1280x800), shown by
+  none (the console shows session 1)` when it goes live). The keyboard
+  and mouse go to the console session's.
 - Machine settings stay global: the wallpaper picture (`PICTURE`, the
   boot's choice) and the server-profile flags.
 
@@ -5837,8 +5919,9 @@ about window 0x20000 of pid 4 in session 0: not visible across
 sessions`), so an ERROR_INVALID_WINDOW_HANDLE across sessions explains
 itself. The state dump's sessions part (`session::dump`): per session
 its top-level windows, queues, posted and sent messages, filters, hooks
-and waiting events, whether shasha shows it and how many windows it has
-there, then each top-level window (hwnd, pid, tid, class, text,
+and waiting events, whether its shasha desktop is live, how many windows
+it has there and what shows it (`shasha: live (1 windows, presenter
+test)`), then each top-level window (hwnd, pid, tid, class, text,
 rectangle, flags; at most 16), and how many times a window was asked
 for across sessions.
 
@@ -5923,6 +6006,88 @@ same program as SYSTEM).
   station, desktop, `from`), `"connect failed"`, `"made"`. The state
   dump's sessions part lists each session's stations.
 
+### Presenters (B3a)
+
+`kernel/src/nt/desktop/present.rs` (the presenters, the Test frame),
+`kernel/src/nt/desktop/mod.rs` (a desktop going live, `attach`,
+`read_frame`; host tests in `desktop/tests.rs`),
+`kernel/src/nt/session_calls.rs` (GalaSession). Test programs:
+`user/presenter_test` (scenario `presenter_test`) and gui_test on a
+headless desktop (scenario `gui_test_headless`).
+
+- **Window state apart from composition**: a session's desktop (its
+  windows, Z order, focus and each window's client pixels) is kept
+  whether or not anything shows it. Composition is the presenter's
+  business: `redraw` composes a damaged area only while a presenter
+  shows the desktop, and hands it the rows (`write_row`) and the area
+  (`flush`). With none, damage is dropped; attaching one draws the
+  desktop whole.
+- **Presenters** (`Presenter`), one per desktop:
+  - **Console**: the screen through `platform::Display`; only for the
+    console session on a machine with a screen (a console switch to
+    another session is not there yet);
+  - **None**: shown by nothing (disconnected); what a session other than
+    the console's starts with;
+  - **Test** (gala's addition): a headless frame in memory (`Frame`:
+    0x00RRGGBB rows, made once at its size, never moved; a flush count).
+    A program reads it with GalaSession; xtask's screen checks read it
+    with QEMU's `memsave` at the address the kernel logs.
+- **A desktop goes live** on its first GUI call (or GalaSession): laid
+  out at its presenter's size, else DEFAULT_SIZE (1280 x 800: QEMU's
+  default UEFI mode, which user32 also assumes without screen
+  information; gala's choice for a desktop nothing shows), the clock
+  set, drawn whole. Desktops exist where the machine has a screen or the
+  boot option `presenter=` asks for a headless one, never in the server
+  profile; without either, GUI calls are STATUS_NOT_SUPPORTED as on a
+  machine without a screen.
+- **`presenter=test|none`**: the console session's desktop is shown by
+  a Test frame of DEFAULT_SIZE or by nothing, with or without a screen;
+  the PS/2 keyboard and mouse still go to it (`platform::local_input`).
+  So a BIOS boot (no framebuffer) gets screen checks: gui_test_headless
+  runs gui_test's twelve steps on the frame.
+- **Attaching** (`desktop::attach`): a frame is made outside the
+  desktop's lock; the desktop takes the presenter's size if it differs
+  (windows keep their places), the old presenter is replaced and freed
+  outside the lock, and the desktop is drawn whole on the new one.
+- **The clock** (`tick`, from the input thread every second) updates
+  every live desktop; a display change resizes the desktop the Console
+  presenter shows.
+- **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
+  another session's pixels are its users'; STATUS_NOT_FOUND for a
+  session that does not exist; STATUS_NOT_SUPPORTED where there are no
+  desktops):
+  - SESSION_QUERY (0): what shows the desktop (0 none, 1 console, 2
+    test), whether it is live, its size, its windows; nothing is made
+    live;
+  - SESSION_PRESENT (1): attaches presenter `arg`; a Test frame's size
+    in `buffer` (width | height << 32; 0: the desktop's);
+    STATUS_NOT_SUPPORTED for Console other than on the console session
+    with a screen;
+  - SESSION_FRAME (2): an area of the Test frame (a 32-byte record: x,
+    y, w, h in; the frame's width, height and flushes out) into the
+    caller's buffer; STATUS_INVALID_DEVICE_STATE when no Test frame
+    shows the desktop, STATUS_INVALID_PARAMETER outside it.
+
+  user/ntrt has `gala_session`, `session_query` and `session_frame`.
+- **Observability**: `desktop: session 2 is live (1280x800), shown by
+  none (the console shows session 1)`; `desktop: session 2 is now shown
+  by test (1280x800; was none)`; `presenter: test frame for session 1:
+  1280x800 at 0xffffe80000cb0000 (4096000 bytes, 0x00RRGGBB rows)` (what
+  xtask reads); a refused attach is a warning naming the caller;
+  `desktop: no screen and no presenter= (...)` once on a machine without
+  desktops. Events (category `window`): `"ev":"presenter"` with `"op":
+  "live"` and `"attach"` (session, presenter, was, size). The state
+  dump's sessions part says per session whether its desktop is live and
+  what shows it. A failed headless screen check leaves its frames as
+  `test-<scenario>.screen<n>.png` and quotes the monitor's reply to
+  `memsave`.
+- **Limits**: no console switch (Console on another session) and no
+  remote presenter (B3b); the window state is still part of the
+  compositor's `Desktop` in the `shasha` kernel, so the server kernel
+  keeps no window pixels yet; gala-um takes no `presenter=` (its
+  sessions have no desktops); frames are read, not recorded over time;
+  only the console session's desktop gets input.
+
 ### Target design (B3-B5)
 
 ```
@@ -5936,14 +6101,16 @@ Session (id, its object directory, its token defaults, presenter)
 Numbering: 0 for services and SYSTEM (sshd and its logons are session 0
 on Windows too), 1 for the local console, 2+ for remote logons.
 
-1. **Window state apart from composition** (gala's own addition; B3a):
-   the desktop's window state and each window's last pixels are kept in
-   every kernel; the compositor (frames, taskbar, start menu, wallpaper,
+1. **Window state apart from composition** (gala's own addition; B3a;
+   built in the desktop kernel, "Presenters (B3a)"; the server kernel's
+   is to come): the desktop's window state and each window's last pixels
+   are kept in every kernel; the compositor (frames, taskbar, start menu, wallpaper,
    fonts) is a presenter. So the server kernel (no `shasha` feature,
    ROADMAP SD) can serve GUI programs to a remote shasha client without a
    compositor of its own, and a desktop with no presenter keeps its
    windows alive (RDP-style disconnect and resume).
-2. **Presenters** (B3a), at most one per desktop at a time:
+2. **Presenters** (B3a; Console, None and Test are built, "Presenters
+   (B3a)"), at most one per desktop at a time:
    - **Console**: the framebuffer through `platform::Display`, PS/2
      input routed to the session the console shows;
    - **Remote**: a shasha client over the network;

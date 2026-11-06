@@ -142,6 +142,9 @@ pub const GALA_USER_OBJECT_SET: u32 = 0x7fa2;
 pub const GALA_USER_OBJECT_CLOSE: u32 = 0x7fa3;
 pub const GALA_USER_OBJECT_INFORMATION: u32 = 0x7fa4;
 pub const GALA_USER_OBJECT_ENUM: u32 = 0x7fa5;
+/// gala's session service (session_calls; ROADMAP RS): what shows a
+/// session's desktop (presenters) and a Test frame's pixels.
+pub const GALA_SESSION: u32 = 0x7fb0;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -423,6 +426,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
         winsta_calls::gala_user_object_information,
     ),
     (GALA_USER_OBJECT_ENUM, "GalaUserObjectEnum", 4, winsta_calls::gala_user_object_enum),
+    (GALA_SESSION, "GalaSession", 5, session_calls::gala_session),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -6861,3 +6865,6 @@ mod security_calls;
 
 #[path = "winsta_calls.rs"]
 mod winsta_calls;
+
+#[path = "session_calls.rs"]
+mod session_calls;

@@ -11,6 +11,8 @@ use super::status::NtStatus;
 use alloc::vec::Vec;
 
 pub const TASKBAR: u32 = 48;
+/// The largest Test frame side (nt::desktop's).
+pub const MAX_FRAME_SIDE: u32 = 4096;
 
 /// A start menu entry (there is no start menu).
 pub struct Program {
@@ -79,14 +81,36 @@ impl Shell {
         Shell
     }
 
-    /// Never shown: there is no compositor.
-    pub fn shown(&self) -> bool {
-        false
+    /// (windows, live, what shows it): none, never, nothing.
+    pub fn counts(&self) -> (usize, bool, Kind) {
+        (0, false, Kind::None)
+    }
+}
+
+/// The kinds of presenter (nt::desktop's; none can attach here).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    None = 0,
+    Console = 1,
+    Test = 2,
+}
+
+impl Kind {
+    pub fn from_number(n: u64) -> Option<Kind> {
+        match n {
+            0 => Some(Kind::None),
+            1 => Some(Kind::Console),
+            2 => Some(Kind::Test),
+            _ => None,
+        }
     }
 
-    /// (windows on the screen, drawn yet): none.
-    pub fn counts(&self) -> (usize, bool) {
-        (0, false)
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::None => "none",
+            Kind::Console => "console",
+            Kind::Test => "test",
+        }
     }
 }
 
@@ -147,6 +171,24 @@ impl Desktop {
 pub fn choose_wallpaper(_: Option<&str>) {}
 
 pub fn set_server_profile() {}
+
+/// `presenter=`: accepted (and without effect: there are no desktops).
+pub fn set_local_presenter(name: &str) -> bool {
+    matches!(name, "test" | "none")
+}
+
+/// GalaSession's presenters: no desktop to show.
+pub fn attach(_: &Shell, _: Kind, _: Option<(u32, u32)>) -> Result<Kind, NtStatus> {
+    Err(NtStatus::NOT_SUPPORTED)
+}
+
+pub fn query(_: &Shell) -> (Kind, bool, (u32, u32), usize) {
+    (Kind::None, false, (0, 0), 0)
+}
+
+pub fn read_frame(_: &Shell, _: Rect, _: &mut [u32]) -> Result<((u32, u32), u64), NtStatus> {
+    Err(NtStatus::NOT_SUPPORTED)
+}
 
 /// Always the server profile: there is no desktop to bring up.
 pub fn server_profile() -> bool {

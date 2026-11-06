@@ -9,6 +9,6 @@ Installers:
 - Architecture: x64
   InstallerType: inno
   InstallerUrl: https://packages.gala.invalid/innosetup-2.0.exe
-  InstallerSha256: 133083AF960AC1DF0CB5D7784A368F2AE46B39E43F7E1E8FF9635DDF5D83C354
+  InstallerSha256: 5EDD3D8DAB34BE7906F7397E1FE4E76E667DBFC58180A27E8816C4AFEC453E27
 ManifestType: singleton
 ManifestVersion: 1.6.0

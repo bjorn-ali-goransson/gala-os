@@ -241,6 +241,15 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 
     // The desktop's wallpaper (`wallpaper=<name>`, else one at random).
     nt::desktop::choose_wallpaper(cmdline.value("wallpaper"));
+    // `presenter=test|none` (ROADMAP RS B3a): a headless desktop, the
+    // console session's shown by a frame in memory or by nothing.
+    if let Some(name) = cmdline.value("presenter") {
+        if nt::desktop::set_local_presenter(name) {
+            info!("desktop: the console session's desktop is shown by {name} (presenter=)");
+        } else {
+            warn!("desktop: presenter={name} is not a presenter (test, none); ignored");
+        }
+    }
     #[cfg(not(feature = "shasha"))]
     info!("desktop: not in this kernel (server build)");
     // `profile=server` (ROADMAP SD): no graphical interface, ever.

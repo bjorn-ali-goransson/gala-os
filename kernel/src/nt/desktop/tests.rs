@@ -630,3 +630,107 @@ fn a_drag_takes_the_capture_from_its_window() {
     let n = d.take_input(7, &mut out);
     assert!(out[..n].iter().any(|e| e.message == GALA_WM_PLACE && e.window == f));
 }
+
+/// A live 640 x 480 desktop shown by nothing, with window "Kept" at (40,
+/// 30) whose client area (from (41, 63)) is red.
+fn unshown_desktop_with_red_window() -> (Desktop, u32) {
+    let mut d = Desktop::new();
+    d.set_screen(640, 480).unwrap();
+    d.live = true;
+    let a = d.create(9, 40, 30, 300, 200, &title("Kept"), 0).unwrap();
+    d.show(a, 9, true).unwrap();
+    let red = [0x00ff_0000u32; 100 * 50];
+    let area = d.present(a, Rect { x: 0, y: 0, w: 100, h: 50 }, &red, 100).unwrap();
+    d.add_damage(area);
+    redraw_damage(&mut d);
+    (d, a)
+}
+
+fn test_frame(d: &Desktop) -> &Frame {
+    match &d.presenter {
+        Presenter::Test(f) => f,
+        _ => panic!("not shown by a Test frame"),
+    }
+}
+
+/// Every pixel of the frame is the desktop's composition.
+fn frame_matches(d: &Desktop) {
+    let f = test_frame(d);
+    let (w, h) = f.size();
+    assert_eq!((i64::from(w), i64::from(h)), d.screen);
+    for y in 0..h {
+        for x in 0..w {
+            assert_eq!(f.pixel(x, y), Some(d.pixel(x.into(), y.into())), "at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn a_desktop_shown_by_nothing_keeps_its_windows_and_pixels() {
+    let (mut d, a) = unshown_desktop_with_red_window();
+    // Nothing shows it: no damage left over, the window and its pixels
+    // are the desktop's.
+    assert_eq!(d.presenter.kind(), Kind::None);
+    assert!(d.damage.is_empty());
+    assert_eq!(d.pixel(41 + 10, 63 + 10), 0x00ff_0000);
+    // A Test frame attached gets the whole desktop.
+    let old = d.set_presenter(Presenter::Test(Frame::new(640, 480).unwrap())).unwrap();
+    assert_eq!(old.kind(), Kind::None);
+    frame_matches(&d);
+    assert_eq!(test_frame(&d).pixel(41 + 10, 63 + 10), Some(0x00ff_0000));
+    assert_eq!(test_frame(&d).flushes(), 1);
+    // A change is damage, which reaches the frame.
+    let green = [0x0000_c000u32; 4];
+    let area = d.present(a, Rect { x: 10, y: 10, w: 2, h: 2 }, &green, 2).unwrap();
+    d.add_damage(area);
+    redraw_damage(&mut d);
+    assert_eq!(test_frame(&d).pixel(41 + 10, 63 + 10), Some(0x0000_c000));
+    assert_eq!(test_frame(&d).flushes(), 2);
+    frame_matches(&d);
+    // Detached: the old frame stays as it was, the desktop keeps the
+    // change made meanwhile; a new frame shows it.
+    let old = d.set_presenter(Presenter::None).unwrap();
+    let blue = [0x0000_00ffu32; 4];
+    let area = d.present(a, Rect { x: 10, y: 10, w: 2, h: 2 }, &blue, 2).unwrap();
+    d.add_damage(area);
+    redraw_damage(&mut d);
+    match &old {
+        Presenter::Test(f) => assert_eq!(f.pixel(41 + 10, 63 + 10), Some(0x0000_c000)),
+        _ => panic!("the old presenter was the frame"),
+    }
+    d.set_presenter(Presenter::Test(Frame::new(640, 480).unwrap())).unwrap();
+    assert_eq!(test_frame(&d).pixel(41 + 10, 63 + 10), Some(0x0000_00ff));
+    frame_matches(&d);
+    // The window's end shows on the frame.
+    d.destroy_owned(9);
+    redraw_damage(&mut d);
+    assert_ne!(test_frame(&d).pixel(41 + 10, 63 + 10), Some(0x0000_00ff));
+    frame_matches(&d);
+}
+
+#[test]
+fn a_frame_of_another_size_lays_the_desktop_out_again() {
+    let (mut d, _) = unshown_desktop_with_red_window();
+    d.set_presenter(Presenter::Test(Frame::new(800, 600).unwrap())).unwrap();
+    assert_eq!(d.screen, (800, 600));
+    // The window keeps its place; the taskbar is at the new bottom.
+    assert_eq!(test_frame(&d).pixel(41 + 10, 63 + 10), Some(0x00ff_0000));
+    frame_matches(&d);
+}
+
+#[test]
+fn a_frame_reads_areas_inside_it_only() {
+    assert!(Frame::new(0, 10).is_none());
+    assert!(Frame::new(10, MAX_FRAME_SIDE + 1).is_none());
+    let (mut d, _) = unshown_desktop_with_red_window();
+    d.set_presenter(Presenter::Test(Frame::new(640, 480).unwrap())).unwrap();
+    let f = test_frame(&d);
+    let mut out = [0u32; 6];
+    assert!(f.read(Rect { x: 41, y: 63, w: 3, h: 2 }, &mut out));
+    assert_eq!(out, [0x00ff_0000; 6]);
+    // Outside, empty, or more than `out` holds.
+    assert!(!f.read(Rect { x: 639, y: 0, w: 2, h: 1 }, &mut out));
+    assert!(!f.read(Rect { x: -1, y: 0, w: 1, h: 1 }, &mut out));
+    assert!(!f.read(Rect { x: 0, y: 0, w: 0, h: 1 }, &mut out));
+    assert!(!f.read(Rect { x: 0, y: 0, w: 7, h: 1 }, &mut out));
+}

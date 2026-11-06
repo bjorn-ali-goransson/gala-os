@@ -70,15 +70,16 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: `gala install`'s HTTPS downloads on winhttp (TLS step 4;
-   step 3, curl and Git's https remotes, is done).
+2. **TLS**: step 5, crypt32's system stores and chain engine (step 4,
+   `gala install`'s HTTPS downloads on winhttp, is done).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
-4. **RS**: step B3a (window state apart from composition, presenters).
+4. **RS**: step B3a's next part (the console switch, the window state
+   apart from the compositor in the server kernel).
 5. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
-6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver; HTTPS
-   downloads (after TLS step 1); a real Inno Setup installer.
+6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver;
+   manifests over HTTPS (step 2's rest); a real Inno Setup installer.
 7. **BR** stage 1's rest (the profile's hotspots).
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
@@ -144,7 +145,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine), curl and Git's https remotes done; `gala install`'s downloads next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes, `gala install`'s downloads with a public CA bundle done; crypt32's chain engine next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
@@ -162,7 +163,7 @@ has a section under "Open items".
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
-| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations done; B3a's presenters next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations and first presenters done; the console switch next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
@@ -631,14 +632,24 @@ own session and shell.
   GetThreadDesktop, SetThreadDesktop, OpenDesktop, OpenInputDesktop,
   CloseDesktop, EnumDesktopsW, GetUserObjectInformationW/A over gala
   calls (`winsta_test`, `winsta_service`).
+- B3a, presenters (`desktop/present.rs`, GalaSession): every session's
+  desktop keeps its windows and their pixels whether or not anything
+  shows it (a session-2 window kept while not shown, `presenter_test`);
+  presenters Console (the screen), None and Test (a frame in memory,
+  read back with GalaSession's SESSION_FRAME); `presenter=test|none` for
+  a headless desktop, whose frame xtask's screen checks read with QEMU's
+  `memsave` (gui_test's screen check on a BIOS boot,
+  `gui_test_headless`).
 
 **Next**:
-1. B3a: window state apart from composition, and presenters: console
-   attach and switch; a test presenter (headless rendering for screen
-   checks without QEMU screendumps); a session with no presenter keeps
-   its windows. The Display seam's `screen_flush` and `screen_changed`
-   (from GPU G1) are what a presenter needs. The presenter seam is
-   also where the compositor later leaves the kernel (SH step 4).
+1. B3a: the console switch (Console attached to another session, PS/2
+   input following it; `gala attach`); the window state apart from the
+   compositor's `Desktop`, so the server kernel keeps window pixels too;
+   `presenter=` in gala-um (screen checks there; its sessions have no
+   desktops yet); input to a desktop the console does not show (a Test
+   presenter that injects input, for screen checks without PS/2); Test
+   frames recorded over time. The presenter seam is also where the
+   compositor later leaves the kernel (SH step 4).
    Window stations' open ends: DACLs on stations and desktops;
    CreateWindowStationW and CreateDesktopW stay unsupported until BR
    stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
@@ -872,22 +883,26 @@ Not yet run on real Windows (run-all.ps1 runs it when Nginx can be
 started and, as administrator, imports the test CA first). winhttp's
 and wininet's synchronous clients over it, on one engine (steps 1 and
 2 below); unmodified curl and Git over it (`curl_schannel`,
-`git_https`; step 3).
+`git_https`; step 3); `gala install`'s downloads over winhttp, with the
+public CA bundle in gala's machine root store (`pk_install_https`; step
+4).
 
 **Next**:
 1. Done: winhttp over Schannel, synchronous (`winhttp_test` against the
    same Nginx: http and https GETs, status and headers, Content-Length
    and chunked bodies, an untrusted issuer, a closed port,
-   WinHttpCrackUrl; ARCHITECTURE "WinHTTP and WinINet"). Still open there:
-   automatic redirects (needed by step 4: GitHub's release URLs
-   redirect), connection reuse, asynchronous sessions and status
-   callbacks, proxies, authentication.
+   WinHttpCrackUrl; automatic redirects by WINHTTP_OPTION_REDIRECT_POLICY
+   and MAX_HTTP_AUTOMATIC_REDIRECTS, WINHTTP_OPTION_URL; ARCHITECTURE
+   "WinHTTP and WinINet"). Still open there: connection reuse,
+   asynchronous sessions and status callbacks, proxies, authentication,
+   WINHTTP_DISABLE_REDIRECTS.
 2. Done: wininet's HTTP functions on the same engine as winhttp
    (`user/http_client`; `wininet_test` against the same Nginx:
    InternetOpenW/ConnectW, HttpOpenRequestW/AddRequestHeadersW/
    SendRequestW, HttpQueryInfoW with CUSTOM, InternetQueryDataAvailable
    and InternetReadFile, InternetOpenUrlW, InternetCrackUrlW, an unknown
-   issuer as ERROR_INTERNET_INVALID_CA, a closed port; ARCHITECTURE
+   issuer as ERROR_INTERNET_INVALID_CA, a closed port, a redirect
+   followed and one not (INTERNET_FLAG_NO_AUTO_REDIRECT); ARCHITECTURE
    "WinHTTP and WinINet"). Still open there, besides winhttp's list:
    the A functions, InternetQueryOptionW, FTP, the cache,
    InternetTimeFrom/ToSystemTimeW.
@@ -920,8 +935,18 @@ and wininet's synchronous clients over it, on one engine (steps 1 and
    (msvcrt's _localtime64_s, userenv's GetUserProfileDirectoryA, bcrypt's
    DH/DSA and chaining-mode property for libssh2's WinCNG probe,
    WSAIoctl's SIO_IDEAL_SEND_BACKLOG_QUERY).
-4. `gala install`'s HTTPS downloads (PK) on winhttp, with gala's root
-   store holding a pinned, documented public CA bundle.
+4. Done: `gala install`'s HTTPS downloads (PK) on winhttp
+   (`pk_install_https`: a package downloaded from the in-guest Nginx
+   behind a release URL that redirects, as GitHub's do, its SHA-256
+   checked; an untrusted certificate and an unreachable host fail with
+   the reason), with gala's root store holding a pinned, documented
+   public CA bundle (Mozilla's, as curl.se publishes it:
+   `user/roots/public-roots.pem`, THIRD_PARTY.md; shipped in every full
+   image beside the test CAs; host test
+   `public_roots_are_all_trust_anchors`; ARCHITECTURE "Schannel (TLS)").
+   Still open there: a download from the real GitHub in a scenario (the
+   test VMs have no internet: a host-network scenario could relay one),
+   root updates without a new image (Windows Update's role).
 5. crypt32's system stores and chain engine: the ROOT system store
    from the same directory (CertOpenStore and CertOpenSystemStore open
    system stores empty today; rustls-native-certs reads it, so aichat,
@@ -1143,11 +1168,13 @@ silent switches, nested installer files) and installs as winget would,
 from the command line first (CLI parity; the server profile too).
 
 **Done so far**:
-- Stages 1-2 except downloads (`pk_install_test`, scenario
-  `pk_install_zip`; host tests `cargo test -p galapkg`, with a failure
+- Stages 1-2 (`pk_install_test`, scenarios `pk_install_zip` and
+  `pk_install_https`; host tests `cargo test -p galapkg`, with a failure
   injected at every step): `gala install|search|list|upgrade|uninstall`
   over a winget-pkgs tree (`--source <dir>` with an `installers\`
-  mirror), manifests 1.x singleton and multi-file, SHA-256 checked, zip
+  mirror; installers not mirrored downloaded over http(s) through
+  winhttp and Schannel, redirects followed: TLS step 4), manifests 1.x
+  singleton and multi-file, SHA-256 checked, zip
   (deflate) and portable installs to `WinGet\Packages`, commands as
   shims (gala.exe + `.shim`) in `WinGet\Links` on the user's PATH,
   winget's ARP entry, transactions with rollback (upgrade included), an
@@ -1178,8 +1205,9 @@ from the command line first (CLI parity; the server profile too).
 1. Switch `gala install`/`list`/`upgrade` to `galapkg::winget`, then
    delete `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and
    an upgrade that keeps scope.
-2. The HTTPS fetcher (on winhttp and Schannel, TLS step 4): the GitHub
-   raw and contents URLs, winget's source index for search (first
+2. Manifests over HTTPS (installers download already, TLS step 4): the
+   GitHub raw and contents URLs for `--source https://...` and the
+   default source, winget's source index for search (first
    real-world target: `sigoden.AIChat`, item AI); real
    symbolic links for commands; the logon environment from
    `HKCU\Environment`.

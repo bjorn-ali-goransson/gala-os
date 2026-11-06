@@ -627,9 +627,13 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   that hover put their window under GetCursorPos's point, so the same
   check holds on Windows (comctl32_test).
 - **Windows in another session**: a GUI test run with `as=system` is in
-  session 0: its windows exist (registry, messages) but are not drawn
-  and get no input (`desktop: session 0's windows are not shown`), so
-  screen checks need the boot user (session 1). On real Windows a child
+  session 0: on a machine with a screen its windows are kept with their
+  pixels but nothing shows them and they get no input (`desktop: session
+  0 is live (1280x800), shown by none (the console shows session 1)`), so
+  screen checks need the boot user (session 1), or the program attaches a
+  Test presenter to its session and reads the frame back (GalaSession,
+  `presenter_test`). On a BIOS boot without `presenter=` no session has
+  a desktop (`desktop: no screen and no presenter=`). On real Windows a child
   started in another session needs STARTUPINFO.lpDesktop
   `winsta0\default` and a token that may open it (SYSTEM's, moved with
   SetTokenInformation(TokenSessionId), as session_test does), or user32
@@ -901,7 +905,18 @@ on `user/http_client`: a change to the engine boots both scenarios.
   scenario that needs a trusted root ships the CA there (an
   EXTRA_MODULES line). Without one, automatic validation gives
   SEC_E_UNTRUSTED_ROOT and the ledger says `schannel.dll!machine root
-  store (no gala/roots ...)`.
+  store (no gala/roots ...)`. Full images (`cargo xtask iso`) also ship
+  the public CA bundle there (`user/roots/public-roots.pem`); a scenario
+  that wants it lists it (`pk_install_https`). To move to a newer
+  bundle: `sh user/roots/update.sh <date>` (a release from
+  curl.se/docs/caextract.html, its published SHA-256 checked), then the
+  date and checksum in THIRD_PARTY.md and `cargo test -p schannel_tls`.
+- The Nginx configuration also serves redirects for `winhttp_test` and
+  `wininet_test` (`/redirect-rel`, `/to-https`, `/to-http`, `/loop`,
+  `/post-307`) and `pk_install_https`'s release URL; Nginx's
+  `absolute_redirect off` keeps a relative Location relative. A failed
+  redirect names its reason in the ledger (`winhttp.dll!redirect:
+  ...`).
 - A failing handshake leaves `schannel.dll!ISC: <rustls error>` (ASC for
   a server) in the ledger with the SSPI status: read that first.
 - SEC_E_INCOMPLETE_MESSAGE means the caller passes the same bytes again
@@ -1294,6 +1309,15 @@ about a minute under TCG. Read, in order:
 - **The boot test** is `cargo xtask boot-test pk_install_zip`; a failed
   run shows the install log twice (`logtee: install.log:` lines, and
   pk_install_test prints it after the failing check).
+- **Downloads** are `pk_install_https` (`pk_install_test https`, with
+  schannel_test's Nginx): the served zip is
+  `user/pk_install_test/served` (make_source.py writes it with the
+  manifests). A failed download's install log has `fetch error
+  step=<WinHTTP call> code=<error>` (12029 cannot connect, 12007 name
+  not resolved, 12175 certificate, 12156 redirect refused) and the
+  ledger the engine's reason (`winhttp.dll!TLS handshake`,
+  `schannel.dll!ISC: ...`, `winhttp.dll!redirect: ...`). The test VMs
+  have no internet: a download test points at the in-guest Nginx.
 - **gala.exe is `no_std` with `alloc`** (gala_heap): code that brings in
   more of `alloc` may need another ntdll C function in main.rs's import
   list (`memmove`, `strlen`; the link error names it). advapi32 is
@@ -1398,7 +1422,8 @@ says which values are independently verified).
 boots an ISO (all test programs and DLLs as boot modules, ntdll in
 System32; BIOS unless `--uefi`) and writes
 `target/screenshots/<name>-<t>s.png` at each time (default 3 s) through
-QEMU's monitor (`screendump`). `--scenario S` adds S's files from the
+QEMU's monitor (`screendump`; a headless desktop, `presenter=test`, has
+nothing on the screen: its frame is what screen checks read). `--scenario S` adds S's files from the
 repository (scripts, archives). The kernel's screen console shows the
 same log as the serial port (green header bar; warnings yellow, errors
 and panics red). The boot splash replaces the text console: add
@@ -1413,7 +1438,8 @@ A scenario in `SCREEN_SCENARIOS` gets a QEMU monitor socket; when its
 serial log shows the trigger line (a program's can be the desktop's
 `desktop: shown window '<title>'`), xtask runs the check's steps and
 logs `xtask: screen ok` or the mismatch. Such scenarios must boot by
-UEFI (BIOS boots have no framebuffer).
+UEFI (BIOS boots have no framebuffer), unless their desktop is headless
+(`presenter=test`, below).
 
 - A step first sends QEMU monitor commands, 250 ms apart: `mouse_move dx
   dy`, `mouse_button 1` (bit 0 the left button, bit 1 the right:
@@ -1452,6 +1478,15 @@ UEFI (BIOS boots have no framebuffer).
   pixel the redraw reaches last (the window's bottom-right corner).
 - A screen check pins a wallpaper with `wallpaper=<name>` (the default
   is a random one).
+- **Headless screen checks**: a scenario whose command line has
+  `presenter=test` shows the console session's desktop in a frame in
+  the guest's memory (1280 x 800, no screen needed: it may boot by BIOS,
+  `gui_test_headless`); each step reads the frame with the monitor's
+  `memsave` at the address of the serial log's `presenter: test frame
+  for session 1:` line instead of a screendump (kept the same way as
+  `screen<n>.png`). Input is the same (PS/2 through the monitor). A
+  failed read quotes the monitor's reply (`memsave`'s file name must be
+  quoted: unquoted, its slashes are read as part of the size).
 
 #### Fonts, icons and wallpapers
 
@@ -2513,7 +2548,8 @@ ARCHITECTURE "Waits".
 | Test runtime for user programs | `user/ntrt/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Linux test programs, their binaries and transcripts | `user/lx/`, `user/lx/bin/` |
-| `gala install` (winget packages): library, commands, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/pk_install_test/` |
+| `gala install` (winget packages): library, commands, downloads, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/gala/src/fetch.rs`, `user/pk_install_test/` |
+| The public CA bundle of the machine root store | `user/roots/` (`public-roots.pem`, `update.sh`) |
 | winget manifest resolver and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Third-party program builds, scripts and configuration | `user/<program>/` (`build.sh`) |
 | Checked-in binaries, Windows runner (`run-all.ps1`) | `user/bin/` |

@@ -77,7 +77,8 @@ pub struct Desk {
     pub windows: super::window::Windows,
     /// SetWinEventHook's hooks and their waiting events.
     pub hooks: super::winevent::Hooks,
-    /// shasha's desktop (drawn only while the console shows the session).
+    /// shasha's desktop: its windows and their pixels, and what shows it
+    /// (ROADMAP RS B3a's presenters).
     pub shell: super::desktop::Shell,
 }
 
@@ -338,10 +339,10 @@ pub fn dump() {
     for d in desks.iter().flatten() {
         let c = d.windows.counts();
         let (hooks, events) = d.hooks.counts();
-        let (on_screen, painted) = d.shell.counts();
+        let (on_desktop, live, presenter) = d.shell.counts();
         log!(
             info,
-            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), shasha: {} ({} windows{})",
+            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), shasha: {} ({} windows, presenter {})",
             d.session,
             c.windows,
             c.top_level,
@@ -351,9 +352,9 @@ pub fn dump() {
             c.filters,
             hooks,
             events,
-            if d.shell.shown() { "shown" } else { "not shown" },
-            on_screen,
-            if painted { ", drawn" } else { "" },
+            if live { "live" } else { "not live" },
+            on_desktop,
+            presenter.name(),
         );
         dump_stations(d.session);
         let mut top = [super::window::Info::default(); 16];

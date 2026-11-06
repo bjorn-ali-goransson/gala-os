@@ -14,6 +14,6 @@ Installers:
   - RelativeFilePath: pkhello-1.1.0/pkhello.exe
     PortableCommandAlias: pkhello
   InstallerUrl: https://packages.gala.invalid/pkhello-1.1.0.zip
-  InstallerSha256: B21BFB505B6336201E7CE0386D1BAD52F5B5D35F3E29575A75AE01878C463BBD
+  InstallerSha256: B1CA112DA86438C715F930548B1739D99843C9263FDE0793AAA83A3CA72D6504
 ManifestType: installer
 ManifestVersion: 1.12.0

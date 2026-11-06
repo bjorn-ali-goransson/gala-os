@@ -208,6 +208,10 @@ pub trait Display {
     fn screen_changed() -> Option<(u32, u32)> {
         None
     }
+    /// The local keyboard and mouse start going to the console session's
+    /// desktop (it went live; with a screen they started when it was
+    /// taken, with `presenter=` this starts them). None by default.
+    fn local_input() {}
 }
 
 // The NT layer's calls. Thin and inlined: the kernel implementation costs
@@ -438,4 +442,8 @@ pub fn screen_flush(x: u32, y: u32, w: u32, h: u32) {
 #[inline]
 pub fn screen_changed() -> Option<(u32, u32)> {
     <P as Display>::screen_changed()
+}
+#[inline]
+pub fn local_input() {
+    <P as Display>::local_input()
 }

@@ -41,7 +41,7 @@ rather than free text.
 | Crash record across reboots | `kernel/src/crash.rs` | `crash:` lines on the next boot |
 | Clock checks | `kernel/src/time.rs`, `kernel/src/clockcal.rs`, `xtask/src/clockcheck.rs` | `tsc:`, `clock:`, `xtask: clock:` lines |
 | Early boot (QEMU side, phases) | `xtask/src/telemetry.rs`, `arch::bootphase` | `.qemu.log`, `.bios.log`, `.phases.log`, `xtask:` lines |
-| Screen | kernel screen console | `cargo xtask screenshot` |
+| Screen | kernel screen console; Test presenter frames (`presenter=test`, GalaSession) | `cargo xtask screenshot`; `test-<scenario>.screen<n>.png`; ARCHITECTURE "Presenters (B3a)" |
 | Benchmarks | `user/bench` | `cargo xtask bench` (docs/PERF.md) |
 
 Fault injection, deterministic simulation and record/replay are test
@@ -71,6 +71,11 @@ port. Lines that tools and agents rely on:
   station "x": 0xc0000034` for an open of an unknown name (the first
   32), `winsta: made window station Service-0x...$` (ARCHITECTURE
   "Window stations and desktops (B3a)").
+- `desktop: session S is live (WxH), shown by none|console|test`, `desktop:
+  session S is now shown by test (WxH; was none)`, `presenter: test frame
+  for session S: WxH at 0x... (...)` (where xtask's headless screen checks
+  read it), `desktop: no screen and no presenter= (...)` (ARCHITECTURE
+  "Presenters (B3a)").
 - `console N: Ctrl+C k` and `console N: pid P tid T (name) takes Ctrl+C
   k after m ms`, with a warning `took Ctrl+C k late` from 250 ms: when
   each process's control handler took the event.
@@ -126,7 +131,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
 | `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names) |
-| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test` |
+| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h), `attach` (GalaSession attached a presenter: session, presenter, was, w, h). Scenario `presenter_test` |
 
 A `record` boot's recording also goes to this port (`"ev":"rec"`,
 whatever the mask; extracted to `<iso>.rec`).

@@ -1,0 +1,18 @@
+PackageIdentifier: GalaTest.PkUntrusted
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkUntrusted
+License: Proprietary
+ShortDescription: Served with an untrusted certificate (gala's install test)
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: pkhttps-1.0.0\pkhttps.exe
+  PortableCommandAlias: pkuntrusted
+Installers:
+- Architecture: x64
+  InstallerUrl: https://localhost:8444/objects/pkhttps-1.0.0.zip
+  InstallerSha256: F68DF359EF25817FCDC2C61A69B3B96286A870032341F913F7013686D295C1E4
+ManifestType: singleton
+ManifestVersion: 1.6.0

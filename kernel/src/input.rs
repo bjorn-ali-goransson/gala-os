@@ -2,7 +2,9 @@
 //! (`arch::ps2`) every few milliseconds, assembles the mouse's 3-byte
 //! packets and hands the movement and buttons to `nt::desktop`, and turns
 //! the keyboard's scan codes (set 1: the controller translates) into
-//! Windows virtual keys for it. Started when the desktop takes the screen.
+//! Windows virtual keys for it. Started when the desktop takes the screen,
+//! or when the console session's desktop goes live without one
+//! (`presenter=`: a headless desktop still takes the local input).
 
 use crate::arch::ps2;
 use crate::sched;

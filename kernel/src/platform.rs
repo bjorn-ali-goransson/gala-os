@@ -238,4 +238,9 @@ impl Display for Kernel {
     fn screen_changed() -> Option<(u32, u32)> {
         crate::display::poll()
     }
+    /// The PS/2 input thread (also without a screen: a headless desktop,
+    /// `presenter=`).
+    fn local_input() {
+        crate::input::start();
+    }
 }

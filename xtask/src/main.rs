@@ -690,6 +690,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("session_test", "user32.dll", "Windows/System32"),
     ("session_test", "gdi32.dll", "Windows/System32"),
     ("session_test", "user/access_test/access_test.regseed", "registry"),
+    ("presenter_test", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
+    ("presenter_test", "ntdll.dll", "Windows/System32"),
+    ("presenter_test", "kernel32.dll", "Windows/System32"),
+    ("presenter_test", "advapi32.dll", "Windows/System32"),
+    ("presenter_test", "secur32.dll", "Windows/System32"),
+    ("presenter_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("presenter_test", "bcrypt.dll", "Windows/System32"),
+    ("presenter_test", "user32.dll", "Windows/System32"),
+    ("presenter_test", "gdi32.dll", "Windows/System32"),
     ("winsta_test", "ntdll.dll", "Windows/System32"),
     ("winsta_test", "kernel32.dll", "Windows/System32"),
     ("winsta_test", "user32.dll", "Windows/System32"),
@@ -987,6 +996,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_nsis", "ole32.dll", "Windows/System32"),
     ("pk_install_nsis", "shell32.dll", "Windows/System32"),
     ("pk_install_nsis", "shfolder.dll", "Windows/System32"),
+    // pk_install_https: `gala install` downloads over winhttp from
+    // schannel_test's Nginx (MODULE_SETS), which serves the package; the
+    // machine root store holds the public CA bundle beside the test CA.
+    ("pk_install_https", "winhttp.dll", "Windows/System32"),
+    (
+        "pk_install_https",
+        "user/pk_install_test/served/objects/pkhttps-1.0.0.zip",
+        "nginx/html/objects",
+    ),
+    ("pk_install_https", "user/roots/public-roots.pem", "Windows/System32/gala/roots"),
     ("uipi_test", "ntdll.dll", "Windows/System32"),
     ("uipi_test", "kernel32.dll", "Windows/System32"),
     ("uipi_test", "msvcrt.dll", "Windows/System32"),
@@ -2013,6 +2032,7 @@ const USER_PROGRAMS: &[&str] = &[
     "logon_test",
     "system_test",
     "session_test",
+    "presenter_test",
     "winsta_test",
     "lsa_test",
     "restricted_test",
@@ -3027,6 +3047,16 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // RS step B3a's presenters: session 2's desktop goes live shown
+        // by nothing, then a Test frame is attached and detached.
+        "presenter_test",
+        &[
+            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800"#,
+            r#""ev":"presenter","op":"attach","session":2,"presenter":"test","was":"none""#,
+            r#""ev":"presenter","op":"attach","session":2,"presenter":"none","was":"test""#,
+        ],
+    ),
+    (
         // RS step B3a: each process's window station and desktop, and
         // where the choice came from.
         "winsta_test",
@@ -3112,6 +3142,7 @@ const PENDING: &[&str] = &[
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
+    "presenter_test",
     "chromium_window",
     "boot_config_edited",
     "handover_uefi",
@@ -3978,10 +4009,34 @@ const SCENARIOS: &[Scenario] = &[
             "session: 1 made, named objects in \\Sessions\\1\\BaseNamedObjects",
             "session 0): starting at",
             "session 1): starting at",
-            "desktop: session 0's windows are not shown (the console shows session 1)",
+            "desktop: no screen and no presenter= (windows live in the registry only)",
             "in session 0: not visible across sessions",
             "in session 1: not visible across sessions",
             "session_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Presenters, ROADMAP RS step B3a (user/presenter_test): as SYSTEM
+        // (session 0) it starts a child in session 2, which nothing
+        // shows; the child's window is kept with its pixels, a Test
+        // presenter attached renders it to memory, which the parent reads
+        // back (GalaSession), detached and attached again it shows what
+        // the child painted meanwhile. UEFI: a machine with a screen,
+        // which shows session 1.
+        name: "presenter_test",
+        cmdline: "qemu_exit as=system wallpaper=night events=window run=presenter_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "session: 2 made, named objects in \\Sessions\\2\\BaseNamedObjects",
+            "desktop: session 2 is live (1280x800), shown by none (the console shows session 1)",
+            "presenter_test: child painted",
+            "presenter: test frame for session 2: 1280x800 at",
+            "desktop: session 2 is now shown by test (1280x800; was none)",
+            "presenter_test: frame shows the window",
+            "desktop: session 2 is now shown by none (1280x800; was test)",
+            "presenter_test: kept while not shown",
+            "presenter_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -4193,6 +4248,28 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // gui_test on a headless desktop (ROADMAP RS B3a): BIOS, no
+        // screen; `presenter=test` shows the console session's desktop in
+        // a frame in memory, which the same screen check reads (QEMU's
+        // memsave at the address the kernel logs) instead of screendumps;
+        // the keyboard and mouse still come through PS/2.
+        name: "gui_test_headless",
+        cmdline: "qemu_exit wallpaper=night presenter=test run=gui_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: session 1 is live (1280x800), shown by test",
+            "presenter: test frame for session 1: 1280x800 at",
+            "gui_test: painted",
+            "gui_test: click",
+            "gui_test: typed hi",
+            "gui_test: menu 202",
+            "gui_test: combo picked Blue",
+            "xtask: screen ok",
+            "gui_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // gui_test with the screen on virtio-gpu (`display=virtio`; QEMU
         // gets `-vga none -device virtio-gpu-pci`: GPU_SCENARIOS), the same
         // screen check (SCREEN_SCENARIOS). ARCHITECTURE "Plan: graphics and
@@ -4290,6 +4367,26 @@ const SCENARIOS: &[Scenario] = &[
             "found-by=the one new entry",
             "upgraded id=GalaTest.PkNsis from=1.0.0 to=1.1.0",
             "arp-entry-gone key=HKCU",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP PK and TLS step 4: `gala install` downloads an
+        // installer over HTTPS (winhttp on Schannel) from schannel_test's
+        // Nginx in the guest: the release URL redirects (302) to the
+        // file, as GitHub's do; SHA-256 checked, installed, run,
+        // uninstalled; an untrusted certificate and an unreachable
+        // github.com fail with the reason; the public CA bundle is in
+        // crypt32's ROOT store.
+        name: "pk_install_https",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=https",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "fetch status=200 url=https://localhost:8443/objects/pkhttps-1.0.0.zip redirected-from=https://localhost:8443/releases/download/v1.0.0/pkhttps-1.0.0.zip",
+            "installed id=GalaTest.PkHttps version=1.0.0",
+            "fetch error step=WinHttpSendRequest code=12175",
             "pk_install_test: ok",
             "exited with status 0x00000000",
         ],
@@ -6494,6 +6591,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("pk_install_zip", "pk_install_test"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),
+    ("pk_install_https", "pk_install_test"),
+    ("pk_install_https", "schannel_test"),
+    ("pk_install_https", "pk_install_https"),
     ("onecpu_programs", "smpsched_test"),
     ("kernel_watchdog", "hello"),
     ("service_restart", "hello"),
@@ -6501,6 +6601,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("server_kernel", "user32_test"),
     ("gala_cli", "gui_test"),
     ("virtio_gpu", "gui_test"),
+    ("gui_test_headless", "gui_test"),
     ("virtio_gpu_reset", "gui_test"),
     ("gala_cli", "gala_cli_test"),
     ("net_reset", "go_http"),
@@ -7061,6 +7162,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("session_test", "child processes; run as SYSTEM (a boot option)"),
+    ("presenter_test", "a child process; run as SYSTEM (a boot option)"),
     ("winsta_test", "child processes (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
@@ -8595,6 +8697,10 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     // RESOURCE_FLUSH; the second resets the device midway (gpureset=).
     ("virtio_gpu", GUI_TEST_SCREEN),
     ("virtio_gpu_reset", GUI_TEST_SCREEN),
+    // The same on a headless desktop (`presenter=test`, a BIOS boot with
+    // no screen): the pixels are the Test presenter's frame in the
+    // guest's memory (`dump_frame`), not a screendump.
+    ("gui_test_headless", GUI_TEST_SCREEN),
     (
         // `gala snap left` put gala_cli_test's window (client area
         // RGB 2e 8b 57) on the left half of the work area (640 x 752 on
@@ -8967,6 +9073,96 @@ fn check_screen_step(
     }
 }
 
+/// Whether scenario `name`'s screen is a Test presenter's frame in the
+/// guest's memory (`presenter=test` on its command line) rather than a
+/// screen QEMU shows.
+fn headless_screen(name: &str) -> bool {
+    SCENARIOS
+        .iter()
+        .find(|s| s.name == name)
+        .is_some_and(|s| s.cmdline.split_whitespace().any(|w| w == "presenter=test"))
+}
+
+/// Where the console session's Test frame is: (address, width, height)
+/// from the serial log's last `presenter: test frame for session 1:` line
+/// (the kernel logs it when it makes the frame; ARCHITECTURE
+/// "Presenters (B3a)").
+fn frame_place(log: &Path) -> Result<(u64, usize, usize)> {
+    const LINE: &str = "presenter: test frame for session 1: ";
+    let text = fs::read_to_string(log).map_err(|e| format!("reading {log:?}: {e}"))?;
+    let rest = text
+        .lines()
+        .rev()
+        .find_map(|l| l.split_once(LINE).map(|(_, r)| r))
+        .ok_or("no `presenter: test frame for session 1:` line in the serial log")?;
+    // "1280x800 at 0xffff... (4096000 bytes, ...)"
+    let parse = || -> Option<(u64, usize, usize)> {
+        let (size, rest) = rest.split_once(" at 0x")?;
+        let (w, h) = size.split_once('x')?;
+        let address = rest.split_whitespace().next()?;
+        Some((u64::from_str_radix(address, 16).ok()?, w.parse().ok()?, h.parse().ok()?))
+    };
+    parse().ok_or_else(|| format!("cannot read the frame's place from {rest:?}"))
+}
+
+/// The guest's Test frame as a PPM at `ppm`: its 0x00RRGGBB pixels read
+/// with the monitor's `memsave` (virtual addresses: the kernel's heap is
+/// mapped in every address space) and turned into RGB.
+fn dump_frame(monitor: &mut std::os::unix::net::UnixStream, iso: &Path, ppm: &Path) -> Result {
+    use std::io::Write;
+    let (address, w, h) = frame_place(&iso.with_extension("serial.log"))?;
+    let raw = ppm.with_extension("frame");
+    let _ = fs::remove_file(&raw);
+    let size = 4 * w * h;
+    // The file name quoted: unquoted, the monitor reads its slashes as
+    // part of the size's expression.
+    writeln!(monitor, "memsave {address:#x} {size} \"{}\"", raw.display())
+        .map_err(|e| e.to_string())?;
+    let mut data = Vec::new();
+    for _ in 0..100 {
+        thread::sleep(Duration::from_millis(50));
+        if fs::metadata(&raw).is_ok_and(|m| m.len() as usize == size) {
+            data = fs::read(&raw).map_err(|e| format!("reading {raw:?}: {e}"))?;
+            break;
+        }
+    }
+    let _ = fs::remove_file(&raw);
+    if data.len() != size {
+        // What the monitor said (an address it could not read: "Invalid
+        // addr ...").
+        let said = monitor_reply(monitor);
+        return Err(format!(
+            "memsave of the frame at {address:#x} gave no {size} bytes; the monitor: {said:?}"
+        ));
+    }
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    for p in data.chunks_exact(4) {
+        out.extend_from_slice(&[p[2], p[1], p[0]]);
+    }
+    fs::write(ppm, out).map_err(|e| format!("writing {ppm:?}: {e}"))
+}
+
+/// What the monitor has written and not been read (its replies: the last
+/// three lines), waiting at most 200 ms.
+fn monitor_reply(monitor: &mut std::os::unix::net::UnixStream) -> String {
+    use std::io::Read;
+    let _ = monitor.set_read_timeout(Some(Duration::from_millis(200)));
+    let mut said = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = monitor.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        said.extend_from_slice(&buf[..n]);
+    }
+    let _ = monitor.set_read_timeout(None);
+    // Its last lines, without the line editor's cursor moves.
+    let text = String::from_utf8_lossy(&said).replace("\u{1b}[D", "").replace("\u{1b}[K", "");
+    let lines: Vec<&str> =
+        text.lines().map(str::trim).filter(|l| !l.is_empty() && *l != "(qemu)").collect();
+    lines[lines.len().saturating_sub(3)..].join(" | ")
+}
+
 fn dump_and_check(
     monitor: &mut std::os::unix::net::UnixStream,
     iso: &Path,
@@ -8976,15 +9172,19 @@ fn dump_and_check(
     use std::io::Write;
     let ppm = iso.with_extension(format!("screen{n}.ppm"));
     let _ = fs::remove_file(&ppm);
-    writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
-    let mut previous = 0;
-    for _ in 0..100 {
-        thread::sleep(Duration::from_millis(50));
-        let len = fs::metadata(&ppm).map_or(0, |m| m.len());
-        if len > 0 && len == previous {
-            break;
+    if headless_screen(iso_scenario(iso)) {
+        dump_frame(monitor, iso, &ppm)?;
+    } else {
+        writeln!(monitor, "screendump {}", ppm.display()).map_err(|e| e.to_string())?;
+        let mut previous = 0;
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(50));
+            let len = fs::metadata(&ppm).map_or(0, |m| m.len());
+            if len > 0 && len == previous {
+                break;
+            }
+            previous = len;
         }
-        previous = len;
     }
     let (w, h, rgb) = read_ppm(&ppm)?;
     let _ = ppm_to_png(&ppm, &iso.with_extension(format!("screen{n}.png")));
@@ -10961,8 +11161,9 @@ fn boot_scenario_quiet(scenario: &Scenario, iso: &Path) -> Result {
 }
 
 /// Boot modules for an ISO with kernel command line `cmdline`: gala's
-/// system DLLs in System32 (programs may look only there), the test DLLs
-/// next to the programs, Nginx's files if it runs, and `scenario`'s files
+/// system DLLs in System32 (programs may look only there), the public CA
+/// bundle in the machine root store, the test DLLs next to the programs,
+/// Nginx's files if it runs, and `scenario`'s files
 /// from the repository (scripts, archives) if one is named.
 fn image_modules(
     cmdline: &[&str],
@@ -10981,6 +11182,10 @@ fn image_modules(
             )
         })
         .collect();
+    // The machine root store's public CAs (THIRD_PARTY.md: Mozilla's, as
+    // curl.se publishes them), which Schannel and crypt32's ROOT store
+    // read: a full image trusts the public web, as Windows does.
+    modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
     if cmdline.iter().any(|w| w.contains("nginx.exe")) {
         let nginx = if cmdline.iter().any(|w| w.contains("nginx-master")) {
             "nginx_master"
