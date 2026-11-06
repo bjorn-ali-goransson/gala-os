@@ -1637,6 +1637,13 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
     }
     match msg {
         WM_NCCREATE => 1,
+        // Alt+F4 (the Alt bit is lParam's bit 29): WM_SYSCOMMAND SC_CLOSE
+        // posted to the top-level window, as on Windows.
+        WM_SYSKEYDOWN if wparam == 0x73 && lparam & (1 << 29) != 0 => {
+            let top = crate::tree::GetAncestor(hwnd, 2);
+            PostMessageW(if top == 0 { hwnd } else { top }, 0x0112, 0xf060, 0);
+            0
+        }
         // gala's frame around a top-level window's client area: the
         // border, the caption and a menu bar.
         WM_NCCALCSIZE => {

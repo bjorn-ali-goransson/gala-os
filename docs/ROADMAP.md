@@ -1154,6 +1154,20 @@ Each entry: what, why it matters, the structural fix, the owning item.
   surfaces that shasha composes (GPU G2 for the device, G4 for
   presentation); then the switch goes. Item BR stage 2.
 
+- **`--ipc-connection-timeout=120` in `chromium_window`**: a Chromium
+  child process ends itself when its browser has not answered its first
+  ping within 15 s ("Terminating current process after 15 seconds with
+  no connection"); the browser answers on its UI thread, which under TCG
+  is busy with start-up for longer than that (the guest's clock follows
+  the host's, its CPU runs tens of times slower). The network service
+  died mid-navigation and the page never loaded (the switch makes it
+  load: measured). The headless scenarios recover by restarting the
+  service. Structural fix: guest time that follows the emulated CPU's
+  work, so that programs' own timeouts see what real hardware would
+  (QEMU `-icount`: `shift=0,sleep=off` stops at "Bad icount read" during
+  the UEFI firmware, to investigate), or KVM. Item BR stage 2 (owner),
+  T2 (test environment).
+
 ### Defects known, not yet fixed
 
 - **console_window step 5 under load**: about 1 run in 20 of the full

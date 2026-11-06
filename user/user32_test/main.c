@@ -27,6 +27,10 @@
  *   NCCALCSIZE_PARAMS): 8-pixel left, right and bottom borders and no top
  *   one give a client area that much smaller, at (8, 0); GetWindowRect
  *   stays. A window that leaves it to DefWindowProc has a caption.
+ * - Alt+F4: WM_SYSKEYDOWN with VK_F4 and the Alt bit (lParam bit 29)
+ *   to DefWindowProc posts WM_SYSCOMMAND SC_CLOSE to the top-level
+ *   window, which closes it once the message is dispatched; F4 alone
+ *   does not.
  * - BeginDeferWindowPos/DeferWindowPos/EndDeferWindowPos: nothing moves
  *   until EndDeferWindowPos, which applies every position and size;
  *   SetWindowPos to the same size sends no WM_SIZE; WindowFromPoint finds
@@ -920,6 +924,21 @@ static void custom_frame(void) {
     CHECK(ClientToScreen(w, &p) && p.x == 58 && p.y == 60);
     CHECK(GetWindowRect(w, &r) && r.left == 50 && r.top == 60 && r.right == 350 && r.bottom == 260);
     DestroyWindow(w);
+    /* Alt+F4 closes a window through DefWindowProc. */
+    HWND f4 = CreateWindowExW(0, L"User32TestPos", L"alt f4", WS_OVERLAPPEDWINDOW, 50, 60, 300, 200, NULL, NULL,
+                              GetModuleHandleW(NULL), NULL);
+    CHECK(f4 != NULL);
+    DefWindowProcW(f4, WM_SYSKEYDOWN, VK_F4, 0);
+    MSG m;
+    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
+        DispatchMessageW(&m);
+    CHECK(IsWindow(f4));
+    DefWindowProcW(f4, WM_SYSKEYDOWN, VK_F4, 1 << 29);
+    CHECK(IsWindow(f4));
+    while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
+        DispatchMessageW(&m);
+    CHECK(!IsWindow(f4));
+
     /* DefWindowProc's frame: a caption above the client area. */
     HWND plain = CreateWindowExW(0, L"User32TestPos", L"plain", WS_OVERLAPPEDWINDOW, 50, 60, 300, 200, NULL,
                                  NULL, GetModuleHandleW(NULL), NULL);
