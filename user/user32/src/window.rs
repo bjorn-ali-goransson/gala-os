@@ -624,6 +624,38 @@ pub struct WndClassExW {
 }
 
 impl WndClassExW {
+    /// A zeroed WNDCLASSEXW with its cbSize, for GetClassInfoExW to fill.
+    pub(crate) const EMPTY: WndClassExW = WndClassExW {
+        size: size_of::<WndClassExW>() as u32,
+        style: 0,
+        proc_: None,
+        class_extra: 0,
+        window_extra: 0,
+        instance: core::ptr::null_mut(),
+        icon: core::ptr::null_mut(),
+        cursor: core::ptr::null_mut(),
+        background: core::ptr::null_mut(),
+        menu_name: core::ptr::null(),
+        class_name: core::ptr::null(),
+        icon_small: core::ptr::null_mut(),
+    };
+
+    /// The WNDCLASSW of the same class (GetClassInfoW).
+    pub(crate) fn without_size(&self) -> WndClassW {
+        WndClassW {
+            style: self.style,
+            proc_: self.proc_,
+            class_extra: self.class_extra,
+            window_extra: self.window_extra,
+            instance: self.instance,
+            icon: self.icon,
+            cursor: self.cursor,
+            background: self.background,
+            menu_name: self.menu_name,
+            class_name: self.class_name,
+        }
+    }
+
     /// A system class (user32's controls): its name, its procedure, the
     /// arrow cursor's class style, no background (the control paints it).
     pub(crate) fn system(name: *const u16, proc_: WndProc) -> WndClassExW {
@@ -3221,13 +3253,13 @@ pub extern "system" fn GetActiveWindow() -> Hwnd {
 /// (FLASHWINFO: cbSize, hwnd, dwFlags, uCount, dwTimeout). The desktop
 /// does not flash captions or taskbar buttons yet.
 #[unsafe(no_mangle)]
-pub extern "system" fn FlashWindowEx(info: *const u8) -> i32 {
+pub extern "system" fn FlashWindowEx(info: *const [usize; 2]) -> i32 {
     if info.is_null() {
         set_last_error(87);
         return 0;
     }
-    // SAFETY: the caller's FLASHWINFO: hwnd at offset 8.
-    let hwnd = unsafe { info.add(8).cast::<Hwnd>().read_unaligned() };
+    // SAFETY: the caller's FLASHWINFO: cbSize (padded to a pointer), hwnd.
+    let hwnd = unsafe { info.read_unaligned()[1] };
     i32::from(hwnd != 0 && GetActiveWindow() == hwnd)
 }
 
@@ -3326,6 +3358,19 @@ pub extern "system" fn GetClassLongPtrW(hwnd: Hwnd, index: i32) -> usize {
         -26 => c.style as usize,
         _ => 0,
     }
+}
+
+/// GetClassLongW(hWnd, nIndex): GetClassLongPtrW's value as a DWORD
+/// (what 32-bit programs call: their GetClassLongPtrW is this).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetClassLongW(hwnd: Hwnd, index: i32) -> u32 {
+    GetClassLongPtrW(hwnd, index) as u32
+}
+
+/// SetClassLongW(hWnd, nIndex, value): SetClassLongPtrW with a DWORD.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetClassLongW(hwnd: Hwnd, index: i32, value: i32) -> u32 {
+    SetClassLongPtrW(hwnd, index, value as usize) as u32
 }
 
 /// SetClassLongPtrW(hWnd, nIndex, value): changes the window's class

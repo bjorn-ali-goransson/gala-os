@@ -10,6 +10,13 @@
 #![no_std]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -17,7 +24,11 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
 }
 
-#[link(name = "user32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "user32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "user32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetSysColor(index: i32) -> u32;
     fn SystemParametersInfoW(action: u32, param: u32, out: *mut u8, update: u32) -> i32;
@@ -122,7 +133,11 @@ pub extern "system" fn OpenThemeDataForDpi(_hwnd: usize, _classes: *const u16, _
 // one fails (NULL, as documented on failure; the program then paints
 // directly) and is recorded in the ledger; no animation ever runs.
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
@@ -238,6 +253,7 @@ pub extern "system" fn GetCurrentThemeName(
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
 /// come from an import.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 

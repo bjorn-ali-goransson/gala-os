@@ -224,19 +224,32 @@ pub extern "system" fn ClipCursor(_rect: *const i32) -> i32 {
 /// GetCursorInfo(pci): CURSORINFO { cbSize (24), flags, hCursor,
 /// ptScreenPos }: showing, the arrow (gala's cursor is not a handle: 0),
 /// at the cursor's position.
+/// CURSORINFO (24 bytes on x64, 20 on x86).
+#[repr(C)]
+pub struct CursorInfo {
+    size: u32,
+    flags: u32,
+    cursor: usize,
+    point: [i32; 2],
+}
+
 #[unsafe(no_mangle)]
-pub extern "system" fn GetCursorInfo(info: *mut u8) -> i32 {
+pub extern "system" fn GetCursorInfo(info: *mut CursorInfo) -> i32 {
     // SAFETY: the caller's CURSORINFO.
     unsafe {
-        if info.is_null() || info.cast::<u32>().read_unaligned() != 24 {
+        if info.is_null() || info.cast::<u32>().read_unaligned() != size_of::<CursorInfo>() as u32 {
             set_error(87);
             return 0;
         }
-        info.add(4).cast::<u32>().write_unaligned(1); // CURSOR_SHOWING
-        info.add(8).cast::<usize>().write_unaligned(0);
         let mut point = [0i32; 2];
         super::window::GetCursorPos(&mut point);
-        info.add(16).cast::<[i32; 2]>().write_unaligned(point);
+        // CURSOR_SHOWING.
+        info.write_unaligned(CursorInfo {
+            size: size_of::<CursorInfo>() as u32,
+            flags: 1,
+            cursor: 0,
+            point,
+        });
     }
     1
 }
@@ -1068,23 +1081,17 @@ pub extern "system" fn DrawFrameControl(
 pub extern "system" fn GetClassInfoW(
     instance: *mut core::ffi::c_void,
     name: *const u16,
-    out: *mut u8,
+    out: *mut super::window::WndClassW,
 ) -> i32 {
     if out.is_null() {
         set_error(87);
         return 0;
     }
-    let mut ex = [0u8; 80];
-    ex[..4].copy_from_slice(&80u32.to_le_bytes());
-    let atom = super::window::GetClassInfoExW(instance, name, ex.as_mut_ptr().cast());
+    let mut ex = super::window::WndClassExW::EMPTY;
+    let atom = super::window::GetClassInfoExW(instance, name, &mut ex);
     if atom != 0 {
-        // SAFETY: the caller's 72-byte WNDCLASSW: its style at 0 (then 4
-        // bytes of padding) and lpfnWndProc .. lpszClassName at 8..72, where
-        // WNDCLASSEXW has them after its cbSize (style at 4).
-        unsafe {
-            core::ptr::copy_nonoverlapping(ex.as_ptr().add(4), out, 4);
-            core::ptr::copy_nonoverlapping(ex.as_ptr().add(8), out.add(8), 64);
-        }
+        // SAFETY: the caller's WNDCLASSW.
+        unsafe { out.write_unaligned(ex.without_size()) };
     }
     atom
 }

@@ -226,17 +226,20 @@ pub extern "system" fn CreateBitmapIndirect(bm: *const u8) -> Handle {
     if bm.is_null() {
         return core::ptr::null_mut();
     }
-    // SAFETY: the caller's BITMAP: bmType, bmWidth, bmHeight (i32 at 0,
-    // 4, 8), bmWidthBytes (12), bmPlanes, bmBitsPixel (u16 at 16, 18),
-    // bmBits (a pointer at 24).
-    unsafe {
-        let w = bm.add(4).cast::<i32>().read_unaligned();
-        let h = bm.add(8).cast::<i32>().read_unaligned();
-        let planes = bm.add(16).cast::<u16>().read_unaligned();
-        let bpp = bm.add(18).cast::<u16>().read_unaligned();
-        let bits = bm.add(24).cast::<*const u8>().read_unaligned();
-        CreateBitmap(w, h, u32::from(planes), u32::from(bpp), bits)
+    /// BITMAP (bmBits at 24 on x64, 20 on x86).
+    #[repr(C)]
+    struct Bitmap {
+        kind: i32,
+        width: i32,
+        height: i32,
+        width_bytes: i32,
+        planes: u16,
+        bpp: u16,
+        bits: *const u8,
     }
+    // SAFETY: the caller's BITMAP.
+    let b = unsafe { bm.cast::<Bitmap>().read_unaligned() };
+    CreateBitmap(b.width, b.height, u32::from(b.planes), u32::from(b.bpp), b.bits)
 }
 
 /// CreateBitmap(w, h, planes, bpp, bits): 1-bit (rows padded to 16 bits,

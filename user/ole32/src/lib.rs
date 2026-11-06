@@ -36,6 +36,13 @@ mod stream;
 mod unimplemented;
 mod winrt;
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -51,15 +58,24 @@ unsafe extern "C" {
 }
 
 /// MSVC-target codegen references this marker symbol directly.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -79,7 +95,11 @@ unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
 
-#[link(name = "bcryptprimitives", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "bcryptprimitives", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "bcryptprimitives", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn ProcessPrng(data: *mut u8, length: usize) -> i32;
 }
@@ -442,12 +462,24 @@ pub(crate) struct ThreadState {
     number: u32,
 }
 
+/// TEB.ReservedForOle (x64 0x1758, x86 0xf80).
+#[cfg(target_arch = "x86_64")]
 const TEB_RESERVED_FOR_OLE: usize = 0x1758;
+#[cfg(target_arch = "x86")]
+const TEB_RESERVED_FOR_OLE: usize = 0xf80;
 
 fn teb() -> usize {
     let teb: usize;
     // SAFETY: gs:[0x30] is the TEB's self pointer.
-    unsafe { core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly)) };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly))
+    };
+    // SAFETY: fs:[0x18] is the (32-bit) TEB's self pointer.
+    #[cfg(target_arch = "x86")]
+    unsafe {
+        core::arch::asm!("mov {}, fs:[0x18]", out(reg) teb, options(nostack, readonly))
+    };
     teb
 }
 

@@ -6796,13 +6796,14 @@ Win32 Structured Exception Handling", MSJ 1997).
 | The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
 | The 32-bit advapi32 and bcryptprimitives (SysWOW64) | `user/advapi32` built for i686 (its typed structures in `layout.rs`), `user/bcryptprimitives` |
 | The 32-bit user32 and gdi32 (SysWOW64) | `user/user32`, `user/gdi32`, `user/gala_heap` built for i686; their services' rows in `user/wow64/src/generic.rs` |
+| The 32-bit comctl32, oleaut32, ole32, shell32, shlwapi, winhttp, ws2_32 and the rest of what an x86 Inno installer loads | those crates built for i686 (`USER_DLLS_X86`); typed structures in `user/comctl32/src/layout.rs`, `user/ws2_32/src/layout.rs` |
 | The stubs, callers and table agree | `xtask/src/stub_audit.rs` (`cargo xtask stub-audit`) |
 | The registry's 32-bit view | `kernel/src/nt/regview.rs`, applied in `nt/registry_calls.rs` (`key_view`) |
 | The environment by bitness | `nt/wow64.rs` (`environment`) |
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, painting) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer) |
 
 ### Decisions
 
@@ -7056,9 +7057,35 @@ pointer-sized fields; the records it hands the kernel (window
 information, send requests, input events) are fixed-width little-endian
 bytes alike for both, so wow64.dll passes them through, and an HWND,
 WPARAM or LPARAM it passes as a u64 takes two words (`Hi`); gala's own
-messages pack their values to fit a 32-bit WPARAM (GALA_WM_PLACE). To
-come, as programs need them: kernelbase, comctl32, shell32, ole32 and
-the rest (ROADMAP WOW).
+messages pack their values to fit a 32-bit WPARAM (GALA_WM_PLACE). Built
+for i686 too, for what an x86 Inno Setup installer (Delphi's VCL) loads:
+comctl32 (its message structures with pointers, HDITEMW, LVCOLUMNW,
+LVFINDINFOW, TBBUTTON, TBBUTTONINFOW, TOOLINFOW, MSG, WINDOWPOS,
+HDLAYOUT, typed in `layout.rs` and read field by field with `get!`/
+`set!`, as a caller's older, shorter version may be all there is;
+TVINSERTSTRUCTW and TVHITTESTINFO in `treeview.rs`), oleaut32 (a VARIANT
+of 16 bytes on x86, 24 on x64: its union is 8 bytes or two pointers),
+ole32 (TEB.ReservedForOle at fs:[0x18] + 0xf80; an HSTRING's header fits
+the caller's 20-byte HSTRING_HEADER), shlwapi (QITAB typed), shell32
+(its ShellLink class registered in `Classes\WOW6432Node` too), version,
+mpr, comdlg32, uxtheme, imm32, dwmapi, msimg32, msctf, winspool,
+wtsapi32, shfolder, bcrypt (its padding infos typed), winhttp, secur32
+(its handle tags the low half on x86) and ws2_32 (WSADATA, whose fields
+come in another order on x86, ADDRINFO and ADDRINFOEX typed in
+`layout.rs`; AFD's buffers to the kernel keep the kernel's 64-bit layout,
+and wow64.dll does not convert AFD's IOCTLs yet, so a 32-bit socket call
+fails into the ledger). user32 and gdi32's structures with pointers are
+typed for both too: WNDCLASSW (GetClassInfoW), CURSORINFO, FLASHWINFO,
+HIGHCONTRAST's size, BITMAP (CreateBitmapIndirect), and GetObjectW's
+LOGBRUSH, BITMAP and DIBSECTION sizes by pointer size; WM_COPYDATA's
+COPYDATASTRUCT crosses between processes in one wire form (the x64
+layout, written field by field), so 32-bit and 64-bit windows exchange
+it. The 32-bit ntdll exports the MSVC 64-bit arithmetic helpers that
+compiled programs import from it (`_allmul`, `_alldiv`, `_allrem`,
+`_aulldiv`, `_aullrem`, `_alldvrm`, `_aulldvrm`, `_allshl`, `_allshr`,
+`_aullshr`: `x86.rs`). Inno Setup 6.5.4's x86 installer installs on
+these (`wow64_inno`). To come, as programs need them: kernelbase,
+crypt32 and the rest (ROADMAP WOW).
 
 The 32-bit stubs pop the bytes their own declaration names (stdcall
 `ret N`), and wow64.dll's table converts one entry per 4-byte word:
@@ -7077,7 +7104,8 @@ as `x86/<file>` in EXTRA_MODULES (under `boot/x86` on the ISO, its name
 being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
 (`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`,
 `testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
-`testuser32_32.dll`, `testgdi32_32.dll`; test DLLs
+`testuser32_32.dll`, `testgdi32_32.dll`, `testcomctl3232.dll` and the
+rest of the Inno set as `test<name>32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers

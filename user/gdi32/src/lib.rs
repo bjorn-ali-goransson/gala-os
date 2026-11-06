@@ -895,6 +895,15 @@ fn give(out: *mut u8, size: i32, bytes: &[u8]) -> i32 {
 /// it) DIBSECTION.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
+    // The sizes with a pointer in them: LOGBRUSH (lbHatch), BITMAP (bmBits
+    // at 24 on x64, 20 on x86) and DIBSECTION (a BITMAP, the
+    // BITMAPINFOHEADER after it, dsBitfields, dshSection, dsOffset: 104
+    // bytes on x64, 84 on x86).
+    const P: usize = size_of::<usize>();
+    const LOGBRUSH: usize = 8 + P;
+    const BM_BITS: usize = if P == 8 { 24 } else { 20 };
+    const BITMAP: usize = BM_BITS + P;
+    const DIBSECTION: usize = if P == 8 { 104 } else { 84 };
     let Some(i) = slot_of(h) else { return 0 };
     let object = with(|slots, _| slots[i]);
     let mut buf = [0u8; 104];
@@ -903,7 +912,7 @@ pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
         Object::Brush { color, null } => {
             put(&mut buf, 0, &u32::from(null).to_le_bytes()); // BS_SOLID 0, BS_NULL 1
             put(&mut buf, 4, &pixel(color).to_le_bytes());
-            give(out, size, &buf[..16])
+            give(out, size, &buf[..LOGBRUSH])
         }
         Object::Pen { color, null, width, style } => {
             put(&mut buf, 0, &(if null { 5 } else { style as u32 }).to_le_bytes());
@@ -926,20 +935,21 @@ pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
             put(&mut buf, 12, &width_bytes.to_le_bytes());
             put(&mut buf, 16, &1u16.to_le_bytes());
             put(&mut buf, 18, &b.bpp.to_le_bytes());
-            let bits = if b.dib { s.bits as u64 } else { 0 };
-            put(&mut buf, 24, &bits.to_le_bytes());
-            if b.dib && (out.is_null() || size >= 104) {
+            let bits = if b.dib { s.bits as usize } else { 0 };
+            put(&mut buf, BM_BITS, &bits.to_le_bytes());
+            if b.dib && (out.is_null() || size as usize >= DIBSECTION) {
                 // The BITMAPINFOHEADER (bottom-up: positive height).
-                put(&mut buf, 32, &40u32.to_le_bytes());
-                put(&mut buf, 36, &s.width.to_le_bytes());
+                let at = BITMAP;
+                put(&mut buf, at, &40u32.to_le_bytes());
+                put(&mut buf, at + 4, &s.width.to_le_bytes());
                 let h = if s.bottom_up { s.height } else { -s.height };
-                put(&mut buf, 40, &h.to_le_bytes());
-                put(&mut buf, 44, &1u16.to_le_bytes());
-                put(&mut buf, 46, &b.bpp.to_le_bytes());
-                put(&mut buf, 52, &((s.stride * s.height) as u32).to_le_bytes());
-                return give(out, size, &buf[..104]);
+                put(&mut buf, at + 8, &h.to_le_bytes());
+                put(&mut buf, at + 12, &1u16.to_le_bytes());
+                put(&mut buf, at + 14, &b.bpp.to_le_bytes());
+                put(&mut buf, at + 20, &((s.stride * s.height) as u32).to_le_bytes());
+                return give(out, size, &buf[..DIBSECTION]);
             }
-            give(out, size, &buf[..32])
+            give(out, size, &buf[..BITMAP])
         }
         Object::Palette(p) => {
             let count = if p == usize::MAX { 20u16 } else { palette::count(p) };

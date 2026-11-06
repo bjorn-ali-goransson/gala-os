@@ -128,9 +128,15 @@
 "CommonW6432Dir"=sz:C:\Program Files\Common Files
 "ProgramFilesPath"=expand:%ProgramFiles%
 "MediaPathUnexpanded"=expand:%SystemRoot%\Media
-; The 32-bit COM registrations (Classes\WOW6432Node): none yet (gala's
-; COM servers are 64-bit DLLs).
+; The 32-bit COM registrations (Classes\WOW6432Node): the classes gala's
+; 32-bit DLLs serve (the System32 path reaches SysWOW64 through the file
+; system redirector, as Windows' own registrations do). CLSID_ShellLink.
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID]
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{00021401-0000-0000-C000-000000000046}]
+@=sz:Shortcut
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{00021401-0000-0000-C000-000000000046}\InprocServer32]
+@=expand:%SystemRoot%\System32\shell32.dll
+"ThreadingModel"=sz:Both
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\Interface]
 
 ; A workstation (WinNT; servers say ServerNT or LanmanNT).

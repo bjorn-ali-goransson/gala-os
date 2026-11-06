@@ -17,6 +17,7 @@ mod drag;
 mod flatsb;
 mod header;
 mod imagelist;
+mod layout;
 mod listview;
 mod statusbar;
 mod subclass;
@@ -42,7 +43,11 @@ fn register_classes() {
 // The global allocator (the image lists' vectors).
 use gala_heap as _;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
@@ -53,6 +58,13 @@ pub(crate) fn unsupported(what: &[u8], detail: u64) {
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
 }
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -69,6 +81,7 @@ unsafe extern "C" {
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
 /// come from an import. (It becomes a harmless extra data export.)
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 

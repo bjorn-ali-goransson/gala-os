@@ -369,6 +369,18 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["innosetup-7.1.1-x64.exe"],
         excludes: &[],
     },
+    // Inno Setup 6.5.4's own installer, an x86 Inno Setup installer
+    // (jrsoftware.org's GitHub release; the SHA-256 is winget-pkgs'
+    // JRSoftware.InnoSetup 6.5.4 manifest's, whose only installer is x86):
+    // a 32-bit Setup and uninstaller under WOW64 (ROADMAP WOW stage 4,
+    // scenario wow64_inno). Not unpacked; inside gala only.
+    Prebuilt {
+        name: "innosetup6",
+        url: "https://github.com/jrsoftware/issrc/releases/download/is-6_5_4/innosetup-6.5.4.exe",
+        checksum: "fa73bf47a4da250d185d07561c2bfda387e5e20db77e4570004cf6a133cc10b1",
+        members: &["innosetup-6.5.4.exe"],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -522,6 +534,28 @@ const USER_DLLS_X86: &[Dll] = &[
         file: "bcryptprimitives.dll",
         exported_as: "testbcryptprimitives32.dll",
     },
+    // What an x86 Inno Setup installer (Delphi's VCL) loads (WOW64 stage 4).
+    Dll { package: "comctl32", file: "comctl32.dll", exported_as: "testcomctl3232.dll" },
+    Dll { package: "oleaut32", file: "oleaut32.dll", exported_as: "testoleaut3232.dll" },
+    Dll { package: "ole32", file: "ole32.dll", exported_as: "testole3232.dll" },
+    Dll { package: "shell32", file: "shell32.dll", exported_as: "testshell3232.dll" },
+    Dll { package: "shlwapi", file: "shlwapi.dll", exported_as: "testshlwapi32.dll" },
+    Dll { package: "version", file: "version.dll", exported_as: "testversion32.dll" },
+    Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr32.dll" },
+    Dll { package: "comdlg32", file: "comdlg32.dll", exported_as: "testcomdlg3232.dll" },
+    Dll { package: "uxtheme", file: "uxtheme.dll", exported_as: "testuxtheme32.dll" },
+    Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm3232.dll" },
+    Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi32.dll" },
+    Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg3232.dll" },
+    Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf32.dll" },
+    Dll { package: "winspool", file: "winspool.drv", exported_as: "testwinspool32.drv" },
+    Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi3232.dll" },
+    // winhttp (Inno Setup's downloads) and what it loads.
+    Dll { package: "winhttp", file: "winhttp.dll", exported_as: "testwinhttp32.dll" },
+    Dll { package: "ws2_32", file: "ws2_32.dll", exported_as: "testws2_32_32.dll" },
+    Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur3232.dll" },
+    Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder32.dll" },
+    Dll { package: "bcrypt", file: "bcrypt.dll", exported_as: "testbcrypt32.dll" },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -533,7 +567,12 @@ fn x86_dll(file: &str) -> Option<&'static Dll> {
 
 /// Where the build puts the USER_DLLS_X86 file `file`.
 fn built_dll_x86(file: &str) -> PathBuf {
-    target_dir().join(USER_TARGET_X86).join("release").join(file)
+    let release = target_dir().join(USER_TARGET_X86).join("release");
+    match USER_DLLS_X86.iter().find(|d| d.file == file) {
+        // As built_dll: cargo names it `<package>.dll`.
+        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        _ => release.join(file),
+    }
 }
 
 /// Where the build puts the USER_DLLS file `file`: cargo names a cdylib
@@ -2163,6 +2202,37 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_gui_test", "x86/user32.dll", "Windows/SysWOW64"),
     ("wow64_gui_test", "x86/gdi32.dll", "Windows/SysWOW64"),
     ("wow64_gui_test", "user/bin/wow64_gui_test.exe", "gala"),
+    // wow64_inno: an x86 Inno Setup installer (PREBUILT innosetup6) and the
+    // 32-bit DLLs its Setup loads.
+    ("wow64_inno", "wow64.dll", "Windows/System32"),
+    ("wow64_inno", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/comctl32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/version.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/mpr.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/comdlg32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/uxtheme.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/dwmapi.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/msimg32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/msctf.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/winspool.drv", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/shfolder.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -6960,6 +7030,26 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_gui_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WOW64 stage 4: an x86 Inno Setup installer (Inno Setup 6.5.4's
+        // own, PREBUILT innosetup6) installs silently for the current user:
+        // its 32-bit setup loader, the Setup it extracts and runs on gala's
+        // 32-bit DLLs (the files, the Start menu's shortcuts through the
+        // 32-bit shell32's ShellLink, the uninstall entry), then the
+        // installed 32-bit Compil32.exe /ASSOC; Inno's own log is dumped.
+        name: "wow64_inno",
+        cmdline: "qemu_exit run=innosetup-6.5.4.exe args=/SP-%20/VERYSILENT%20/SUPPRESSMSGBOXES%20/NORESTART%20/CURRENTUSER%20/LOG=C:\\inno.log dump=C:/inno.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "64-bit install mode: No",
+            "Programs\\Inno Setup 6\\Compil32.exe",
+            "Successfully created the icon.",
+            "Creating new uninstall key: HKEY_CURRENT_USER",
+            "Installation process succeeded.",
+            "Process exit code: 0",
+            "innosetup-6.5.4.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
         // (user/wow64_crt_test: mingw's i686 startup code, checked-in
         // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
@@ -8038,6 +8128,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_inno", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),

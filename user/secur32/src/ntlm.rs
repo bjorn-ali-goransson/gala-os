@@ -346,7 +346,11 @@ pub enum Failure {
 
 /// Fills `random` from the system's generator.
 pub fn random(out: &mut [u8]) {
-    #[link(name = "bcryptprimitives", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "bcryptprimitives", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "bcryptprimitives", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn ProcessPrng(buffer: *mut u8, length: usize) -> i32;
     }
@@ -355,7 +359,11 @@ pub fn random(out: &mut [u8]) {
 }
 
 fn filetime() -> u64 {
-    #[link(name = "kernel32", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn GetSystemTimeAsFileTime(time: *mut u64);
     }

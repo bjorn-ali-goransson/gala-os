@@ -36,7 +36,11 @@ struct ObjectAttributes {
     qos: usize,
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenKey(out: *mut usize, access: u32, attributes: *const ObjectAttributes) -> u32;
     fn NtQueryValueKey(
@@ -50,7 +54,11 @@ unsafe extern "system" {
     fn NtClose(handle: usize) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32;
 }

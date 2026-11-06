@@ -217,7 +217,7 @@ fn source_units(src: &Source, out: &mut [u16; MAX_MESSAGE]) -> usize {
 }
 
 /// Argument `i` (from 1): from the array, or the va_list (an array of
-/// 8-byte slots behind a pointer).
+/// pointer-sized slots behind a pointer: 8 bytes on x64, 4 on x86).
 fn argument(flags: u32, args: *const c_void, i: usize) -> Result<usize, u32> {
     if args.is_null() {
         return Err(ERROR_INVALID_PARAMETER);

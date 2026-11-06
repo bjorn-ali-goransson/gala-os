@@ -24,7 +24,11 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::{E_INVALIDARG, E_OUTOFMEMORY, MAX_PATH, S_OK, unsupported};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -2045,7 +2049,11 @@ pub fn save_link(target: &[u16], file: &[u16]) -> HResult {
 
 use super::shellops::FindData;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn FindFirstFileW(pattern: *const u16, data: *mut FindData) -> usize;
     fn FindNextFileW(h: usize, data: *mut FindData) -> i32;

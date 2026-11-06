@@ -109,7 +109,11 @@ struct PollFd {
     revents: i16,
 }
 
-#[link(name = "ws2_32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ws2_32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ws2_32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn WSAStartup(version: u16, data: *mut WsaData) -> i32;
     fn WSACleanup() -> i32;
@@ -129,7 +133,11 @@ unsafe extern "system" {
     fn closesocket(s: usize) -> i32;
 }
 
-#[link(name = "secur32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "secur32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "secur32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn AcquireCredentialsHandleW(
         principal: *const u16,

@@ -143,7 +143,7 @@ fn store(out: *mut Variant, vt: u16, value: u64) {
     // SAFETY: the caller's result VARIANT.
     unsafe {
         (*out).vt = vt;
-        (*out).value = [value, 0];
+        (*out).value = crate::variant::word(value);
     }
 }
 

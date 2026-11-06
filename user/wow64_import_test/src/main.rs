@@ -22,6 +22,12 @@
 //! - PEB32.Ldr's load-order list: this executable first, then ntdll.dll
 //!   (from C:\Windows\SysWOW64), testdll32.dll in it with its base and
 //!   name.
+//! - ntdll.dll's exports of the MSVC 64-bit arithmetic helpers (which
+//!   compiled 32-bit programs import from it): `_allmul`, `_alldiv`,
+//!   `_allrem`, `_aulldiv`, `_aullrem` (operands on the stack, popped by the
+//!   callee, the result in edx:eax), `_alldvrm`/`_aulldvrm` (the remainder
+//!   in ebx:ecx too), `_allshl`, `_allshr`, `_aullshr` (the value in
+//!   edx:eax, the count in cl; 64 or more shifts everything out).
 //!
 //! Prints `wow64_import_test: ok` and exits with 0, or exits with the
 //! number of the failing check (`(line 0x...) wow64_import_test: check N
@@ -348,7 +354,102 @@ fn run() -> Result<(), u32> {
         }
     }
     c.ok(seen, 0)?;
+
+    // ntdll's 64-bit arithmetic helpers.
+    let ntdll = read_u32(second + 0x18) as usize;
+    let find = |name: &[u8]| -> usize {
+        let mut buf = [0u8; 16];
+        buf[..name.len()].copy_from_slice(name);
+        let ansi = AnsiString {
+            length: name.len() as u16,
+            maximum_length: name.len() as u16,
+            buffer: buf.as_mut_ptr(),
+        };
+        let mut at = 0usize;
+        // SAFETY: ntdll's base, our name.
+        let status = unsafe { LdrGetProcedureAddress(ntdll, &ansi, 0, &mut at) };
+        if status == 0 { at } else { 0 }
+    };
+    let two = |name: &[u8], a: u64, b: u64| -> u64 {
+        let f = find(name);
+        if f == 0 {
+            return 0xdead;
+        }
+        // SAFETY: the helper's convention is stdcall with two u64s.
+        let f: extern "system" fn(u64, u64) -> u64 = unsafe { core::mem::transmute(f) };
+        f(a, b)
+    };
+    c.ok(two(b"_allmul", 0x1_0000_0003, 5) == 0x5_0000_000f, 0)?;
+    c.ok(two(b"_allmul", -3i64 as u64, 7) as i64 == -21, 0)?;
+    c.ok(two(b"_alldiv", -100i64 as u64, 7) as i64 == -14, 0)?;
+    c.ok(two(b"_allrem", -100i64 as u64, 7) as i64 == -2, 0)?;
+    c.ok(two(b"_aulldiv", u64::MAX, 0x1_0000_0000) == 0xffff_ffff, 0)?;
+    c.ok(two(b"_aullrem", 1_000_000_000_007, 1000) == 7, 0)?;
+    c.ok(dvrm(find(b"_alldvrm"), -100i64 as u64, 7) == (-14i64 as u64, -2i64 as u64), 0)?;
+    c.ok(dvrm(find(b"_aulldvrm"), 0x1_2345_6789, 0x10) == (0x1234_5678, 9), 0)?;
+    let (shl, shr, ushr) = (find(b"_allshl"), find(b"_allshr"), find(b"_aullshr"));
+    c.ok(shift(shl, 1, 40) == 1 << 40, 0)?;
+    c.ok(shift(shl, 0x8000_0001, 4) == 0x8_0000_0010, 0)?;
+    c.ok(shift(shl, 1, 64) == 0, 0)?;
+    c.ok(shift(shr, -256i64 as u64, 4) as i64 == -16, 0)?;
+    c.ok(shift(shr, 1 << 63, 63) as i64 == -1, 0)?;
+    c.ok(shift(ushr, 1 << 63, 63) == 1, 0)?;
+    c.ok(shift(ushr, 0x1234_5678_9abc_def0, 36) == 0x123_4567, 0)?;
+    c.ok(shift(ushr, u64::MAX, 70) == 0, 0)?;
     Ok(())
+}
+
+/// Calls `_alldvrm`/`_aulldvrm` at `f`: (quotient, remainder); a missing
+/// one gives (0xdead, 0xdead).
+fn dvrm(f: usize, a: u64, b: u64) -> (u64, u64) {
+    if f == 0 {
+        return (0xdead, 0xdead);
+    }
+    let args = [a as u32, (a >> 32) as u32, b as u32, (b >> 32) as u32];
+    let mut rem = [0u32; 2];
+    let (lo, hi): (u32, u32);
+    // SAFETY: the helper takes the operands on the stack (and pops them),
+    // returns the quotient in edx:eax and the remainder in ebx:ecx; ebx is
+    // saved around it, the remainder stored through edi.
+    unsafe {
+        core::arch::asm!(
+            "push ebx",
+            "push dword ptr [ecx + 12]",
+            "push dword ptr [ecx + 8]",
+            "push dword ptr [ecx + 4]",
+            "push dword ptr [ecx]",
+            "call eax",
+            "mov [edi], ecx",
+            "mov [edi + 4], ebx",
+            "pop ebx",
+            inout("ecx") args.as_ptr() => _,
+            inout("eax") f => lo,
+            out("edx") hi,
+            in("edi") rem.as_mut_ptr(),
+        )
+    };
+    let (rlo, rhi) = (rem[0], rem[1]);
+    (u64::from(hi) << 32 | u64::from(lo), u64::from(rhi) << 32 | u64::from(rlo))
+}
+
+/// Calls a shift helper at `f` (`v` in edx:eax, `n` in cl); a missing one
+/// gives 0xdead.
+fn shift(f: usize, v: u64, n: u8) -> u64 {
+    if f == 0 {
+        return 0xdead;
+    }
+    let (lo, hi): (u32, u32);
+    // SAFETY: the helper's register convention; it may change ecx.
+    unsafe {
+        core::arch::asm!(
+            "call edi",
+            in("edi") f,
+            inout("eax") v as u32 => lo,
+            inout("edx") (v >> 32) as u32 => hi,
+            inout("ecx") u32::from(n) => _,
+        )
+    };
+    u64::from(hi) << 32 | u64::from(lo)
 }
 
 fn main() -> u32 {

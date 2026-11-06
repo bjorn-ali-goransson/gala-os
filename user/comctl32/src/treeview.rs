@@ -11,6 +11,7 @@
 //! editing, drag images, lines (TVS_HASLINES draws none), check boxes.
 
 use crate::common::*;
+use crate::layout::{get, set};
 use alloc::vec::Vec;
 
 const TVM_INSERTITEMW: u32 = 0x1132;
@@ -363,28 +364,33 @@ fn display(hwnd: Hwnd, id: usize) -> (Vec<u16>, i32, bool) {
 
 // ---- Operations ----
 
-/// TVINSERTSTRUCTW: hParent (0), hInsertAfter (8), the item from 16
-/// (mask 16, hItem 24, state 32, stateMask 36, pszText 40, cchTextMax
-/// 48, iImage 52, iSelectedImage 56, cChildren 60, lParam 64).
-fn insert(hwnd: Hwnd, p: *const u8) -> isize {
+/// TVINSERTSTRUCTW: hParent, hInsertAfter, the item (a TVITEMW; the
+/// TVITEMEXW it may be begins alike).
+#[repr(C)]
+struct TvInsert {
+    parent: usize,
+    after: usize,
+    item: TvItem,
+}
+
+/// TVHITTESTINFO.
+#[repr(C)]
+struct TvHitTest {
+    pt: [i32; 2],
+    flags: u32,
+    item: usize,
+}
+
+fn insert(hwnd: Hwnd, p: *const TvInsert) -> isize {
     if p.is_null() {
         return 0;
     }
     // SAFETY: the caller's TVINSERTSTRUCTW.
-    let (parent, after, mask, state, state_mask, text, image, selected_image, children, param) = unsafe {
-        (
-            p.cast::<usize>().read_unaligned(),
-            p.add(8).cast::<usize>().read_unaligned(),
-            p.add(16).cast::<u32>().read_unaligned(),
-            p.add(32).cast::<u32>().read_unaligned(),
-            p.add(36).cast::<u32>().read_unaligned(),
-            p.add(40).cast::<usize>().read_unaligned(),
-            p.add(52).cast::<i32>().read_unaligned(),
-            p.add(56).cast::<i32>().read_unaligned(),
-            p.add(60).cast::<i32>().read_unaligned(),
-            p.add(64).cast::<isize>().read_unaligned(),
-        )
+    let (parent, after, it) = unsafe {
+        (get!(p, parent), get!(p, after), core::ptr::addr_of!((*p).item).read_unaligned())
     };
+    let TvItem { mask, state, state_mask, image, selected_image, children, param, .. } = it;
+    let text = it.text as usize;
     let parent_id = if parent == TVI_ROOT || parent == 0 { 0 } else { id_of_handle(parent) };
     let text = if mask & TVIF_TEXT == 0 {
         Some(Vec::new())
@@ -974,7 +980,7 @@ fn paint_tree(hwnd: Hwnd) {
 
 pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
-        TVM_INSERTITEMW => insert(hwnd, lparam as *const u8),
+        TVM_INSERTITEMW => insert(hwnd, lparam as *const TvInsert),
         TVM_DELETEITEM => delete(hwnd, lparam as usize),
         TVM_EXPAND => expand(hwnd, wparam, lparam as usize, 0),
         TVM_GETCOUNT => with(hwnd, |t| t.nodes.len() as isize).unwrap_or(0),
@@ -1018,17 +1024,14 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             if lparam == 0 {
                 return 0;
             }
-            // TVHITTESTINFO: pt (0), flags (8), hItem (16).
+            let p = lparam as *mut TvHitTest;
             // SAFETY: the caller's TVHITTESTINFO.
-            let [x, y] = unsafe { *(lparam as *const [i32; 2]) };
+            let [x, y] = unsafe { get!(p, pt) };
             let found = hit(hwnd, x, y);
             // SAFETY: as above.
             unsafe {
-                let p = lparam as *mut u8;
-                p.add(8).cast::<u32>().write_unaligned(found.map_or(0x1, |f| f.1));
-                p.add(16)
-                    .cast::<usize>()
-                    .write_unaligned(found.map_or(0, |f| handle(f.0) as usize));
+                set!(p, flags, found.map_or(0x1, |f| f.1));
+                set!(p, item, found.map_or(0, |f| handle(f.0) as usize));
             }
             found.map_or(0, |f| handle(f.0))
         }

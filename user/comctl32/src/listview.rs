@@ -15,6 +15,7 @@
 
 use crate::common::*;
 use crate::header;
+use crate::layout::{HdItemW, LvColumnW, LvFindInfoW, get, set};
 use alloc::vec::Vec;
 
 const LVM_GETBKCOLOR: u32 = 0x1000;
@@ -532,79 +533,67 @@ fn scroll_to(hwnd: Hwnd, top: isize) {
 
 // ---- Columns (through the header) ----
 
-/// LVCOLUMNW (64-bit): mask (0), fmt (4), cx (8), pszText (16),
-/// cchTextMax (24), iSubItem (28), iImage (32), iOrder (36).
-fn hd_from_lv(p: *const u8) -> [u8; 72] {
-    let mut hd = [0u8; 72];
-    // SAFETY: the caller's LVCOLUMNW.
+fn hd_from_lv(p: *const LvColumnW) -> HdItemW {
+    let mut hd = HdItemW::ZERO;
+    // SAFETY: the caller's LVCOLUMNW (the fields its mask names).
     unsafe {
-        let mask = p.cast::<u32>().read_unaligned();
-        let mut hmask = 0u32;
+        let mask = get!(p, mask);
         if mask & LVCF_WIDTH != 0 {
-            hmask |= header::HDI_WIDTH;
-            hd[4..8].copy_from_slice(&p.add(8).cast::<i32>().read_unaligned().to_le_bytes());
+            hd.mask |= header::HDI_WIDTH;
+            hd.cxy = get!(p, cx);
         }
         if mask & LVCF_TEXT != 0 {
-            hmask |= header::HDI_TEXT;
-            hd[8..16].copy_from_slice(&p.add(16).cast::<usize>().read_unaligned().to_le_bytes());
+            hd.mask |= header::HDI_TEXT;
+            hd.text = get!(p, text);
         }
-        let mut fmt = 0i32;
         if mask & LVCF_FMT != 0 {
-            hmask |= header::HDI_FORMAT;
-            fmt = p.add(4).cast::<i32>().read_unaligned() & 0x3;
+            hd.mask |= header::HDI_FORMAT;
+            hd.fmt = get!(p, fmt) & 0x3;
         }
         if mask & LVCF_IMAGE != 0 {
-            hmask |= header::HDI_IMAGE | header::HDI_FORMAT;
-            fmt |= 0x800;
-            hd[40..44].copy_from_slice(&p.add(32).cast::<i32>().read_unaligned().to_le_bytes());
+            hd.mask |= header::HDI_IMAGE | header::HDI_FORMAT;
+            hd.fmt |= 0x800;
+            hd.image = get!(p, image);
         }
-        hd[28..32].copy_from_slice(&fmt.to_le_bytes());
-        hd[..4].copy_from_slice(&hmask.to_le_bytes());
     }
     hd
 }
 
-fn get_column(hwnd: Hwnd, i: usize, p: *mut u8) -> isize {
+fn get_column(hwnd: Hwnd, i: usize, p: *mut LvColumnW) -> isize {
     let h = header_of(hwnd);
     // SAFETY: the caller's LVCOLUMNW.
-    let (mask, out, room) = unsafe {
-        (
-            p.cast::<u32>().read_unaligned(),
-            p.add(16).cast::<usize>().read_unaligned(),
-            p.add(24).cast::<i32>().read_unaligned(),
-        )
+    let (mask, out, room) = unsafe { (get!(p, mask), get!(p, text), get!(p, text_max)) };
+    let mut hd = HdItemW {
+        mask: header::HDI_WIDTH
+            | header::HDI_FORMAT
+            | header::HDI_IMAGE
+            | header::HDI_ORDER
+            | if mask & LVCF_TEXT != 0 { header::HDI_TEXT } else { 0 },
+        text: out,
+        text_max: room,
+        ..HdItemW::ZERO
     };
-    let mut hd = [0u8; 72];
-    let hmask = header::HDI_WIDTH
-        | header::HDI_FORMAT
-        | header::HDI_IMAGE
-        | header::HDI_ORDER
-        | if mask & LVCF_TEXT != 0 { header::HDI_TEXT } else { 0 };
-    hd[..4].copy_from_slice(&hmask.to_le_bytes());
-    hd[8..16].copy_from_slice(&out.to_le_bytes());
-    hd[24..28].copy_from_slice(&room.to_le_bytes());
     // SAFETY: plain call; our HDITEMW.
-    if unsafe { SendMessageW(h, header::HDM_GETITEMW, i, hd.as_mut_ptr() as isize) } == 0 {
+    if unsafe { SendMessageW(h, header::HDM_GETITEMW, i, &mut hd as *mut HdItemW as isize) } == 0 {
         return 0;
     }
-    let field = |o: usize| i32::from_le_bytes([hd[o], hd[o + 1], hd[o + 2], hd[o + 3]]);
-    // SAFETY: as above.
+    // SAFETY: as above (the fields its mask names).
     unsafe {
         if mask & LVCF_WIDTH != 0 {
-            p.add(8).cast::<i32>().write_unaligned(field(4));
+            set!(p, cx, hd.cxy);
         }
         if mask & LVCF_FMT != 0 {
-            p.add(4).cast::<i32>().write_unaligned(field(28) & 0x3);
+            set!(p, fmt, hd.fmt & 0x3);
         }
         if mask & LVCF_IMAGE != 0 {
-            p.add(32).cast::<i32>().write_unaligned(field(40));
+            set!(p, image, hd.image);
         }
         if mask & LVCF_ORDER != 0 {
-            p.add(36).cast::<i32>().write_unaligned(field(44));
+            set!(p, order, hd.order);
         }
         if mask & 0x8 != 0 {
             // LVCF_SUBITEM
-            p.add(28).cast::<i32>().write_unaligned(i as i32);
+            set!(p, sub_item, i as i32);
         }
     }
     1
@@ -628,11 +617,13 @@ fn set_column_width(hwnd: Hwnd, i: usize, cx: i32) -> isize {
         }
         if cx == -2 {
             let mut title = [0u16; 260];
-            let mut col = [0u8; 56];
-            col[..4].copy_from_slice(&LVCF_TEXT.to_le_bytes());
-            col[16..24].copy_from_slice(&(title.as_mut_ptr() as usize).to_le_bytes());
-            col[24..28].copy_from_slice(&260i32.to_le_bytes());
-            get_column(hwnd, i, col.as_mut_ptr());
+            let mut col = LvColumnW {
+                mask: LVCF_TEXT,
+                text: title.as_mut_ptr(),
+                text_max: 260,
+                ..LvColumnW::ZERO
+            };
+            get_column(hwnd, i, &mut col);
             let n = title.iter().position(|&c| c == 0).unwrap_or(0);
             w = w.max(text_width(hdc, &title[..n]) + 8);
         }
@@ -643,12 +634,11 @@ fn set_column_width(hwnd: Hwnd, i: usize, cx: i32) -> isize {
     } else {
         cx
     };
-    let mut hd = [0u8; 72];
-    hd[..4].copy_from_slice(&header::HDI_WIDTH.to_le_bytes());
-    hd[4..8].copy_from_slice(&cx.to_le_bytes());
+    let mut hd = HdItemW { mask: header::HDI_WIDTH, cxy: cx, ..HdItemW::ZERO };
     // SAFETY: plain call; our HDITEMW.
-    let r =
-        unsafe { SendMessageW(header_of(hwnd), header::HDM_SETITEMW, i, hd.as_mut_ptr() as isize) };
+    let r = unsafe {
+        SendMessageW(header_of(hwnd), header::HDM_SETITEMW, i, &mut hd as *mut HdItemW as isize)
+    };
     redraw(hwnd);
     r
 }
@@ -902,20 +892,14 @@ fn sort(hwnd: Hwnd, data: isize, compare: usize, by_index: bool) -> isize {
     1
 }
 
-/// LVFINDINFOW: flags (0), psz (8), lParam (16).
+/// LVFINDINFOW: flags, psz, lParam.
 fn find_item(hwnd: Hwnd, start: isize, lparam: isize) -> isize {
     if lparam == 0 {
         return -1;
     }
-    let p = lparam as *const u8;
+    let p = lparam as *const LvFindInfoW;
     // SAFETY: the caller's LVFINDINFOW.
-    let (flags, text, param) = unsafe {
-        (
-            p.cast::<u32>().read_unaligned(),
-            p.add(8).cast::<*const u16>().read_unaligned(),
-            p.add(16).cast::<isize>().read_unaligned(),
-        )
-    };
+    let (flags, text, param) = unsafe { (get!(p, flags), get!(p, text), get!(p, param)) };
     let want = wide(text, 1024);
     let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 32 } else { c };
     let n = count(hwnd);
@@ -1048,10 +1032,9 @@ fn paint_list(hwnd: Hwnd) {
     let order: Vec<usize> = if order.is_empty() { (0..cols.len()).collect() } else { order };
     let formats: Vec<i32> = (0..cols.len())
         .map(|c| {
-            let mut col = [0u8; 56];
-            col[..4].copy_from_slice(&LVCF_FMT.to_le_bytes());
-            get_column(hwnd, c, col.as_mut_ptr());
-            i32::from_le_bytes([col[4], col[5], col[6], col[7]])
+            let mut col = LvColumnW { mask: LVCF_FMT, ..LvColumnW::ZERO };
+            get_column(hwnd, c, &mut col);
+            col.fmt
         })
         .collect();
     // SAFETY: plain call.
@@ -1188,8 +1171,8 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             // SAFETY: the NMHDR WM_NOTIFY carries.
             let code = unsafe { (*(lparam as *const NmHdr)).code } as i32;
             if code == HDN_ITEMCLICKW {
-                // SAFETY: NMHEADERW: iItem after the NMHDR.
-                let item = unsafe { *(lparam as *const u8).add(24).cast::<i32>() };
+                // SAFETY: the header's NMHEADERW.
+                let item = unsafe { (*(lparam as *const header::NmHeader)).item };
                 send_lv(hwnd, LVN_COLUMNCLICK, -1, item, 0, 0, 0, [0, 0]);
                 return 0;
             }
@@ -1265,14 +1248,14 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             if lparam == 0 {
                 return -1;
             }
-            let mut hd = hd_from_lv(lparam as *const u8);
+            let mut hd = hd_from_lv(lparam as *const LvColumnW);
             // SAFETY: plain call; our HDITEMW.
             let r = unsafe {
                 SendMessageW(
                     header_of(hwnd),
                     header::HDM_INSERTITEMW,
                     wparam,
-                    hd.as_mut_ptr() as isize,
+                    &mut hd as *mut HdItemW as isize,
                 )
             };
             redraw(hwnd);
@@ -1282,14 +1265,14 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             if lparam == 0 {
                 return 0;
             }
-            let mut hd = hd_from_lv(lparam as *const u8);
+            let mut hd = hd_from_lv(lparam as *const LvColumnW);
             // SAFETY: plain call; our HDITEMW.
             let r = unsafe {
                 SendMessageW(
                     header_of(hwnd),
                     header::HDM_SETITEMW,
                     wparam,
-                    hd.as_mut_ptr() as isize,
+                    &mut hd as *mut HdItemW as isize,
                 )
             };
             redraw(hwnd);
@@ -1299,7 +1282,7 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             if lparam == 0 {
                 return 0;
             }
-            get_column(hwnd, wparam, lparam as *mut u8)
+            get_column(hwnd, wparam, lparam as *mut LvColumnW)
         }
         LVM_DELETECOLUMN => {
             // SAFETY: plain call.

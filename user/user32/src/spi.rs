@@ -121,11 +121,13 @@ pub extern "system" fn SystemParametersInfoW(
             // SAFETY: as above.
             let size =
                 if out.is_null() { 0 } else { unsafe { out.cast::<u32>().read_unaligned() } };
-            if size < 16 {
+            // HIGHCONTRAST: cbSize, dwFlags, lpszDefaultScheme (16 bytes on
+            // x64, 12 on x86).
+            if (size as usize) < 8 + size_of::<usize>() {
                 return fail();
             }
             put_u32(out, 4, 0);
-            // SAFETY: lpszDefaultScheme (NULL).
+            // SAFETY: lpszDefaultScheme (NULL), after the two DWORDs.
             unsafe { out.add(8).cast::<usize>().write_unaligned(0) };
             1
         }

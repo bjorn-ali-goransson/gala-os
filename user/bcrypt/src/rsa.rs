@@ -435,15 +435,28 @@ fn pkcs1_sign(info: *const u8) -> Option<Pkcs1v15Sign> {
     Some(Pkcs1v15Sign { hash_len: Some(len), prefix: Box::from(prefix) })
 }
 
+/// BCRYPT_PSS_PADDING_INFO.
+#[repr(C)]
+struct PssInfo {
+    alg: *const u16,
+    salt: u32,
+}
+
+/// BCRYPT_OAEP_PADDING_INFO.
+#[repr(C)]
+struct OaepInfo {
+    alg: *const u16,
+    label: *const u8,
+    label_len: u32,
+}
+
 /// PSS padding: BCRYPT_PSS_PADDING_INFO { pszAlgId, cbSalt }.
 fn pss(info: *const u8) -> Option<Pss> {
     if info.is_null() {
         return None;
     }
     // SAFETY: the caller's padding information.
-    let (alg, salt) = unsafe {
-        (info.cast::<*const u16>().read_unaligned(), info.add(8).cast::<u32>().read_unaligned())
-    };
+    let PssInfo { alg, salt } = unsafe { info.cast::<PssInfo>().read_unaligned() };
     let salt = salt as usize;
     Some(match hash_id(alg)? {
         HashId::Md5 => Pss::new_with_salt::<md5::Md5>(salt),
@@ -462,13 +475,7 @@ fn oaep(info: *const u8) -> Option<Oaep> {
         return None;
     }
     // SAFETY: the caller's padding information.
-    let (alg, label, label_len) = unsafe {
-        (
-            info.cast::<*const u16>().read_unaligned(),
-            info.add(8).cast::<*const u8>().read_unaligned(),
-            info.add(16).cast::<u32>().read_unaligned(),
-        )
-    };
+    let OaepInfo { alg, label, label_len } = unsafe { info.cast::<OaepInfo>().read_unaligned() };
     let label = if label.is_null() || label_len == 0 {
         None
     } else {

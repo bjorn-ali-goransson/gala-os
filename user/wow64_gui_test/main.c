@@ -3,7 +3,7 @@
  * mingw-w64's i686 compiler against user32, gdi32 and kernel32 from
  * SysWOW64. Expected results are those of 32-bit Windows programs on
  * 64-bit Windows: a window class and window, WM_CREATE's CREATESTRUCTW,
- * window longs, SendMessageW/PostMessageW with 32-bit WPARAM/LPARAM
+ * GetClassInfoW, GetObjectW's DIBSECTION, window longs and class longs, SendMessageW/PostMessageW with 32-bit WPARAM/LPARAM
  * through a message loop, the client rectangle, WM_PAINT painting a
  * rectangle read back with GetPixel, DestroyWindow and WM_QUIT.
  * Prints "wow64_gui_test: ok" or exits with the failing check's line. */
@@ -53,6 +53,7 @@ static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 int wmain(void)
 {
     WNDCLASSEXW wc = { sizeof(wc) };
+    wc.style = CS_HREDRAW;
     wc.lpfnWndProc = proc;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.lpszClassName = L"Wow64Gui";
@@ -60,6 +61,12 @@ int wmain(void)
     wc.cbWndExtra = 2 * sizeof(LONG_PTR);
     ATOM atom = RegisterClassExW(&wc);
     CHECK(atom != 0);
+    /* GetClassInfoW fills the 40-byte x86 WNDCLASSW, nothing after it. */
+    struct { WNDCLASSW wc; DWORD canary; } ci;
+    memset(&ci, 0xcc, sizeof ci);
+    CHECK(GetClassInfoW(wc.hInstance, L"Wow64Gui", &ci.wc));
+    CHECK(ci.wc.lpfnWndProc == proc && ci.wc.style == CS_HREDRAW && ci.wc.cbWndExtra == 2 * sizeof(LONG_PTR));
+    CHECK(ci.canary == 0xcccccccc);
 
     HWND hwnd = CreateWindowExW(0, L"Wow64Gui", L"32-bit window", WS_OVERLAPPEDWINDOW,
                                 100, 100, 300, 200, NULL, NULL, wc.hInstance, (void *)0x51);
@@ -70,12 +77,31 @@ int wmain(void)
                created_ok ? "right" : "wrong");
     CHECK(IsWindow(hwnd));
 
+    /* GetObjectW of a DIB section: the x86 BITMAP (24 bytes) and
+     * DIBSECTION (84 bytes) with its bits pointer. */
+    {
+        BITMAPINFO bi = { { sizeof(BITMAPINFOHEADER), 4, 4, 1, 32, BI_RGB } };
+        void *bits = NULL;
+        HBITMAP dib = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+        DIBSECTION ds;
+        BITMAP bm;
+        CHECK(dib != NULL && bits != NULL);
+        CHECK(GetObjectW(dib, sizeof bm, &bm) == sizeof bm && bm.bmBits == bits && bm.bmWidth == 4);
+        CHECK(GetObjectW(dib, sizeof ds, &ds) == sizeof ds && ds.dsBm.bmBits == bits && ds.dsBmih.biWidth == 4);
+        DeleteObject(dib);
+    }
+
     /* Window longs: the extra bytes and the user data, 32-bit wide. */
     SetWindowLongPtrW(hwnd, 0, 0x1234567);
     CHECK(GetWindowLongPtrW(hwnd, 0) == 0x1234567);
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)-5);
     CHECK(GetWindowLongPtrW(hwnd, GWLP_USERDATA) == (LONG_PTR)-5);
     CHECK((WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == proc);
+    /* Class longs, as Delphi's VCL reads them on x86. */
+    CHECK(GetClassLongW(hwnd, GCL_STYLE) == CS_HREDRAW);
+    CHECK(SetClassLongW(hwnd, GCL_STYLE, CS_HREDRAW | CS_VREDRAW) == CS_HREDRAW);
+    CHECK(GetClassLongW(hwnd, GCL_STYLE) == (CS_HREDRAW | CS_VREDRAW));
+    CHECK((WNDPROC)GetClassLongW(hwnd, GCL_WNDPROC) == proc);
 
     /* SendMessageW calls the 32-bit procedure directly. */
     CHECK(SendMessageW(hwnd, WM_USER + 1, 0x1000, 0x234) == 0x1234);

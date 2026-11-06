@@ -4,14 +4,13 @@
 //! say so (no providers, service not found).
 
 use super::*;
+use crate::layout::{AddrInfo, AddrInfoExW};
 
 const NS_ALL: u32 = 0;
 const NS_DNS: u32 = 12;
 const WSASERVICE_NOT_FOUND: u32 = 10108;
 const WSANO_RECOVERY: i32 = 11003;
-/// ADDRINFOEXW (x64): flags, family, socktype, protocol, addrlen,
-/// canonname, addr, blob, bloblen, provider, next.
-const ADDRINFOEXW_SIZE: usize = 72;
+const ADDRINFOEXW_SIZE: usize = core::mem::size_of::<AddrInfoExW>();
 
 /// GetAddrInfoExW(pName, pServiceName, dwNameSpace, lpNspId, hints, ppResult,
 /// timeout, lpOverlapped, lpCompletionRoutine, lpHandle): resolved
@@ -56,9 +55,8 @@ pub extern "system" fn GetAddrInfoExW(
             freeaddrinfo(plain);
             return WSAENOBUFS as i32;
         }
-        core::ptr::copy_nonoverlapping(plain, page, 24); // the ints and addrlen
-        let len = *plain.add(16).cast::<usize>();
-        let src = *plain.add(32).cast::<*const u8>();
+        let ai = &*plain.cast::<AddrInfo>();
+        let (len, src) = (ai.addrlen, ai.addr.cast_const());
         if src.is_null() || len > 128 {
             freeaddrinfo(plain);
             VirtualFree(page, 0, 0x8000);
@@ -66,7 +64,19 @@ pub extern "system" fn GetAddrInfoExW(
         }
         let sa = page.add(ADDRINFOEXW_SIZE + 8);
         core::ptr::copy_nonoverlapping(src, sa, len);
-        *page.add(32).cast::<*mut u8>() = sa;
+        page.cast::<AddrInfoExW>().write(AddrInfoExW {
+            flags: ai.flags,
+            family: ai.family,
+            socktype: ai.socktype,
+            protocol: ai.protocol,
+            addrlen: len,
+            canonname: core::ptr::null_mut(),
+            addr: sa,
+            blob: core::ptr::null_mut(),
+            bloblen: 0,
+            provider: core::ptr::null_mut(),
+            next: core::ptr::null_mut(),
+        });
         freeaddrinfo(plain);
         *result = page;
     }

@@ -80,10 +80,9 @@ In order:
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW**: stage 4's rest (the 32-bit comctl32, shell32, ole32 and
-   the rest an x86 Inno Setup installer imports, then that installer;
-   Inno Setup's x64 Setup runs natively); stage 3's rest (kernelbase;
-   kernel32_test built for x86).
+5. **WOW**: stage 4's rest (the x86 Inno installer under `gala install`,
+   winget's x86 choices; 32-bit sockets through wow64.dll); stage 3's
+   rest (kernelbase; kernel32_test built for x86).
 6. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's rest (quota_test on Windows), R8's Secure
    Boot.
@@ -1652,7 +1651,19 @@ wow64.dll converts 32-bit system calls in user mode).
   Window extra bytes (cbWndExtra) for both architectures (`user32_test`
   too). `cargo xtask stub-audit` checks that every DLL declares a stub's
   function with the stub's argument sizes and that wow64.dll's rows
-  have the stub's word count.
+  have the stub's word count. **What an x86 Inno installer loads**, built
+  for i686 (`test<name>32.dll`): comctl32 (its message structures typed:
+  `layout.rs`), oleaut32 (the x86 VARIANT), ole32, shell32, shlwapi,
+  version, mpr, comdlg32, uxtheme, imm32, dwmapi, msimg32, msctf, winspool,
+  wtsapi32, shfolder, bcrypt, winhttp, secur32, ws2_32; the 32-bit ntdll's
+  MSVC 64-bit arithmetic helpers (`wow64_import_test`); user32 and gdi32's
+  pointer-bearing structures typed for x86 (GetClassInfoW, GetObjectW's
+  DIBSECTION, CURSORINFO, WM_COPYDATA's wire form), GetClassLongW and
+  SetClassLongW; the 32-bit ShellLink class in `Classes\WOW6432Node`.
+  **An x86 Inno Setup installer installs** (`wow64_inno`: Inno Setup
+  6.5.4's own, winget's x86 choice, PREBUILT innosetup6, silently for the
+  current user: its files, Start menu shortcuts, uninstall entry, then the
+  installed 32-bit Compil32.exe /ASSOC).
 
 **Next**:
 1. Stage 3's rest, the 32-bit system DLLs: kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
@@ -1682,12 +1693,15 @@ wow64.dll converts 32-bit system calls in user mode).
    resolve in a 32-bit process); its exports include ntrt's runtime
    symbols. The registry view's: WOW6432Node's `Classes` link and
    `HKEY_USERS\<SID>_Classes` are not modelled (ARCHITECTURE "Registry").
-2. Stage 4's rest: comctl32, uxtheme, shell32, ole32, oleaut32,
-   comdlg32, shlwapi, version and what Delphi's VCL imports, for i686
-   (as an x86 Inno Setup installer needs them); then that installer
-   under `gala install` (the x64 one runs natively: `pk_install_inno`);
-   `gala install` installing winget's x86 choices (the fallback
-   stopgap goes).
+2. Stage 4's rest: the x86 installer under `gala install` (the x64 one
+   runs natively: `pk_install_inno`), its uninstaller; `gala install`
+   installing winget's x86 choices (the fallback stopgap goes). Gaps the
+   x86 Inno run leaves in the ledger: AFD's IOCTLs through wow64.dll
+   (32-bit sockets), FormatMessage's HRESULT texts (REGDB_E_CLASSNOTREG:
+   on that error path, when a COM class is missing, Inno's Setup raised an
+   access violation, not yet understood), comctl32's TaskDialogIndirect,
+   shell32's SHPathPrepareForWriteW, rstrtmgr, riched20/msftedit and sfc
+   for i686.
 3. Later: the handover carrying WOW64 processes; gala-um running 32-bit
    code (a 32-bit code segment and a TEB32 through the host's
    modify_ldt); ARM64 guests are out of scope.

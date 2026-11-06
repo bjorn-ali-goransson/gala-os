@@ -27,3 +27,6 @@ num-bigint-dig = { version = "0.8", default-features = false }
 rand_core = { version = "0.6", default-features = false }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+
+[target.'cfg(target_arch = "x86")'.dependencies]
+ntrt = { path = "../ntrt" }

@@ -9,7 +9,11 @@
 
 use core::ffi::c_void;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaLogonUser(
         user: *const UnicodeString,
@@ -29,7 +33,11 @@ unsafe extern "system" {
     fn NtClose(h: usize) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;

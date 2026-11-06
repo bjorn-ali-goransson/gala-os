@@ -146,6 +146,7 @@ dependencies = [
  "md-5",
  "md2",
  "md4",
+ "ntrt",
  "num-bigint-dig",
  "p256",
  "p384",
@@ -306,6 +307,7 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -313,6 +315,7 @@ name = "comdlg32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -580,6 +583,9 @@ version = "0.1.0"
 [[package]]
 name = "dwmapi"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "dwrite"
@@ -960,6 +966,9 @@ checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 [[package]]
 name = "imm32"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "import_test"
@@ -1230,11 +1239,15 @@ name = "mpr"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
 name = "msctf"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "msftedit"
@@ -1246,6 +1259,9 @@ dependencies = [
 [[package]]
 name = "msimg32"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "msvcrt"
@@ -1356,6 +1372,7 @@ name = "ole32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -1370,6 +1387,7 @@ name = "oleaut32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -1912,6 +1930,7 @@ dependencies = [
  "hmac",
  "md-5",
  "md4",
+ "ntrt",
 ]
 
 [[package]]
@@ -2007,11 +2026,15 @@ name = "shell32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
 name = "shfolder"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "shlex"
@@ -2022,6 +2045,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "shlwapi"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "shootdown_test"
@@ -2450,10 +2476,16 @@ dependencies = [
 [[package]]
 name = "uxtheme"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "version"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "version_check"
@@ -2579,6 +2611,7 @@ dependencies = [
  "gala_heap",
  "gala_stubs",
  "http_client",
+ "ntrt",
 ]
 
 [[package]]
@@ -2608,6 +2641,9 @@ version = "0.1.0"
 [[package]]
 name = "winspool"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "winsta_test"
@@ -2685,6 +2721,7 @@ name = "ws2_32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -2694,6 +2731,9 @@ version = "0.1.0"
 [[package]]
 name = "wtsapi32"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "x25519-dalek"

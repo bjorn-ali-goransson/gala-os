@@ -14,7 +14,11 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub type Hwnd = usize;
 pub type WndProc = extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 
-#[link(name = "user32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "user32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "user32", kind = "raw-dylib"))]
 unsafe extern "system" {
     pub fn RegisterClassExW(wc: *const WndClassExW) -> u16;
     pub fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;

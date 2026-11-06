@@ -16,6 +16,7 @@
 // pointers its documentation describes; Rust callers do not exist.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod layout;
 mod nsp;
 mod unimplemented;
 
@@ -23,7 +24,11 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 type Socket = usize;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtCreateFile(
         handle: *mut usize,
@@ -78,6 +83,21 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
+// The runtime functions ws2_32 calls itself: ntrt's on x86 (no link: they
+// are in the same image).
+#[cfg(target_arch = "x86")]
+unsafe extern "C" {
+    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn strlen(s: *const u8) -> usize;
+}
+
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -91,7 +111,11 @@ unsafe extern "C" {
     fn __chkstk();
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn VirtualAlloc(address: *mut u8, size: usize, kind: u32, protect: u32) -> *mut u8;
     fn VirtualFree(address: *mut u8, size: usize, kind: u32) -> i32;
@@ -219,6 +243,7 @@ const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
 const IOCTL_AFD_SUPER_CONNECT: u32 = 0x120c7;
 
 /// Referenced by code that uses floating point (MSVC target convention).
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
@@ -608,18 +633,19 @@ pub extern "system" fn WSAStartup(version: u16, data: *mut u8) -> i32 {
         return WSAEFAULT as i32;
     }
     let granted: u16 = if major > 2 || (major == 2 && minor >= 2) { 0x0202 } else { version };
-    // WSADATA (x64): wVersion, wHighVersion, iMaxSockets, iMaxUdpDg,
-    // lpVendorInfo, szDescription[257], szSystemStatus[129].
-    // SAFETY: the caller passes a WSADATA (408 bytes on x64).
-    unsafe {
-        memset(data, 0, 408);
-        core::ptr::write_unaligned(data.cast::<u16>(), granted);
-        core::ptr::write_unaligned(data.add(2).cast::<u16>(), 0x0202);
-        let description = b"WinSock 2.0";
-        core::ptr::copy_nonoverlapping(description.as_ptr(), data.add(16), description.len());
-        let status = b"Running";
-        core::ptr::copy_nonoverlapping(status.as_ptr(), data.add(16 + 257), status.len());
-    }
+    let mut w = layout::WsaData {
+        version: granted,
+        high_version: 0x0202,
+        max_sockets: 0,
+        max_udp_dg: 0,
+        vendor_info: core::ptr::null_mut(),
+        description: [0; 257],
+        system_status: [0; 129],
+    };
+    w.description[..11].copy_from_slice(b"WinSock 2.0");
+    w.system_status[..7].copy_from_slice(b"Running");
+    // SAFETY: the caller passes a WSADATA (layout::WsaData's size).
+    unsafe { data.cast::<layout::WsaData>().write_unaligned(w) };
     STARTED.fetch_add(1, Ordering::AcqRel);
     0
 }
@@ -823,7 +849,7 @@ pub extern "system" fn recv(s: Socket, buf: *mut u8, len: i32, flags: i32) -> i3
 fn query_name(s: Socket, code: u32, name: *mut u8, len: *mut i32) -> i32 {
     let mut b = [0u8; 28];
     let n = match afd_call(s, code, &[], &mut b) {
-        Ok(n) => n as usize,
+        Ok(n) => n,
         Err(e) => return e,
     };
     let sa = Sa { b, len: if n >= 28 { 28 } else { 16 } };
@@ -1373,7 +1399,7 @@ mod options {
             core::hint::spin_loop();
         }
         // SAFETY: LOCK gives this thread the table to itself.
-        let r = f(unsafe { &mut *(&raw mut TABLE) });
+        let r = f(unsafe { &mut *core::ptr::addr_of_mut!(TABLE) });
         LOCK.store(false, Ordering::Release);
         r
     }
@@ -1660,7 +1686,7 @@ pub extern "system" fn WSAPoll(fds: *mut PollFd, count: u32, timeout: i32) -> i3
     let poll_timeout: i64 = if timeout == 0 { 0 } else { i64::MAX };
     input[..8].copy_from_slice(&poll_timeout.to_le_bytes());
     input[8..12].copy_from_slice(&(n as u32).to_le_bytes());
-    let first = usize::from_le_bytes(input[16..24].try_into().unwrap_or([0; 8]));
+    let first = u64::from_le_bytes(input[16..24].try_into().unwrap_or([0; 8])) as usize;
     let mut output = [0u8; 16 + 16 * MAX_SELECT];
     let ready = match poll(first, &input[..16 + 16 * n], &mut output, ms) {
         0 => u32::from_le_bytes([output[8], output[9], output[10], output[11]]) as usize,
@@ -1676,7 +1702,7 @@ pub extern "system" fn WSAPoll(fds: *mut PollFd, count: u32, timeout: i32) -> i3
     };
     for e in 0..ready.min(MAX_SELECT) {
         let at = 16 + 16 * e;
-        let sock = usize::from_le_bytes(output[at..at + 8].try_into().unwrap_or([0; 8]));
+        let sock = u64::from_le_bytes(output[at..at + 8].try_into().unwrap_or([0; 8])) as usize;
         let events =
             u32::from_le_bytes([output[at + 8], output[at + 9], output[at + 10], output[at + 11]]);
         for f in fds.iter_mut().filter(|f| f.fd == sock) {
@@ -1751,7 +1777,7 @@ pub extern "system" fn select(
     };
     input[..8].copy_from_slice(&poll_timeout.to_le_bytes());
     input[8..12].copy_from_slice(&(n as u32).to_le_bytes());
-    let first = usize::from_le_bytes(input[16..24].try_into().unwrap_or([0; 8]));
+    let first = u64::from_le_bytes(input[16..24].try_into().unwrap_or([0; 8])) as usize;
     let mut output = [0u8; 16 + 16 * MAX_SELECT];
     let status = poll(first, &input[..16 + 16 * n], &mut output, ms);
     let ready = match status {
@@ -1770,7 +1796,7 @@ pub extern "system" fn select(
         let mut keep = [0usize; MAX_SELECT];
         for e in 0..ready.min(MAX_SELECT) {
             let at = 16 + 16 * e;
-            let sock = usize::from_le_bytes(output[at..at + 8].try_into().unwrap_or([0; 8]));
+            let sock = u64::from_le_bytes(output[at..at + 8].try_into().unwrap_or([0; 8])) as usize;
             let events = u32::from_le_bytes([
                 output[at + 8],
                 output[at + 9],
@@ -1972,24 +1998,25 @@ pub extern "system" fn getaddrinfo(
         if page.is_null() {
             return WSAENOBUFS as i32;
         }
-        // ADDRINFOA (x64): flags, family, socktype, protocol, addrlen,
-        // canonname, addr, next; the SOCKADDR_IN(6) follows it. A second
-        // result (AF_UNSPEC localhost's 127.0.0.1) at 128.
+        // An ADDRINFOA, its SOCKADDR_IN(6) after it (48 bytes on); a
+        // second result (AF_UNSPEC localhost's 127.0.0.1) at 128.
         let fill = |at: *mut u8, v6: Option<[u8; 16]>, ip: [u8; 4]| {
-            let ai = at.cast::<i32>();
-            *ai = flags;
-            *ai.add(1) = if v6.is_some() { AF_INET6 } else { AF_INET };
-            *ai.add(2) = socktype;
-            *ai.add(3) = protocol;
             let sa = at.add(48);
-            *at.add(32).cast::<*mut u8>() = sa;
+            at.cast::<layout::AddrInfo>().write(layout::AddrInfo {
+                flags,
+                family: if v6.is_some() { AF_INET6 } else { AF_INET },
+                socktype,
+                protocol,
+                addrlen: if v6.is_some() { SOCKADDR6_LEN } else { SOCKADDR_LEN } as usize,
+                canonname: core::ptr::null_mut(),
+                addr: sa,
+                next: core::ptr::null_mut(),
+            });
             core::ptr::copy_nonoverlapping(port.to_be_bytes().as_ptr(), sa.add(2), 2);
             if let Some(a) = v6 {
-                *at.add(16).cast::<usize>() = SOCKADDR6_LEN as usize;
                 *sa = AF_INET6 as u8;
                 core::ptr::copy_nonoverlapping(a.as_ptr(), sa.add(8), 16);
             } else {
-                *at.add(16).cast::<usize>() = SOCKADDR_LEN as usize;
                 *sa = AF_INET as u8;
                 core::ptr::copy_nonoverlapping(ip.as_ptr(), sa.add(4), 4);
             }
@@ -1998,7 +2025,7 @@ pub extern "system" fn getaddrinfo(
         if both {
             let second = page.add(128);
             fill(second, None, [127, 0, 0, 1]);
-            *page.add(40).cast::<*mut u8>() = second;
+            (*page.cast::<layout::AddrInfo>()).next = second.cast();
         }
         *result = page;
     }
@@ -2598,7 +2625,7 @@ pub extern "system" fn inet_ntoa(address: u32) -> *const u8 {
     let mut n = 0;
     // SAFETY: our buffer: 4 * 3 digits + 3 dots + NUL fits in 16.
     unsafe {
-        let text = &mut *(&raw mut TEXT);
+        let text = &mut *core::ptr::addr_of_mut!(TEXT);
         for (i, b) in address.to_ne_bytes().iter().enumerate() {
             if i > 0 {
                 text[n] = b'.';
@@ -3080,7 +3107,11 @@ pub extern "system" fn WSAWaitForMultipleEvents(
     ms: u32,
     alertable: i32,
 ) -> u32 {
-    #[link(name = "kernel32", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn WaitForMultipleObjectsEx(
             count: u32,
@@ -3107,7 +3138,11 @@ pub extern "system" fn WSAWaitForMultipleEvents(
 /// the event is reset.
 #[unsafe(no_mangle)]
 pub extern "system" fn WSAEnumNetworkEvents(s: usize, event: usize, out: *mut u8) -> i32 {
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn NtClearEvent(h: usize) -> u32;
     }

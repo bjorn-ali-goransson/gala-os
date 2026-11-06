@@ -40,10 +40,14 @@ const SECBUFFER_ATTRMASK: u32 = 0xf000_0000;
 const ALLOCATE_MEMORY: u32 = 0x100;
 
 /// Tags in SecHandle.dwUpper.
-const CREDENTIAL_TAG: usize = 0x6761_6c61_4352_4544; // "galaCRED"
-const CONTEXT_TAG: usize = 0x6761_6c61_4354_5854; // "galaCTXT"
+const CREDENTIAL_TAG: usize = 0x6761_6c61_4352_4544_u64 as usize; // "galaCRED" (its low half on x86)
+const CONTEXT_TAG: usize = 0x6761_6c61_4354_5854_u64 as usize; // "galaCTXT" (its low half on x86)
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
