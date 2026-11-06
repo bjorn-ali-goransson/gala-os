@@ -413,6 +413,18 @@ pub fn image_layout(node: crate::fs::ramfs::NodeId) -> Result<KArc<ImageLayout>,
 }
 
 impl Section {
+    /// Its page table's size in bytes (charged to its creator's paged
+    /// pool quota, nt::quota): one slot per page of a pagefile-backed
+    /// section, none for a file or image section (their pages are the
+    /// file's or the image layout's).
+    pub fn table_bytes(&self) -> usize {
+        if self.file.is_some() || self.image.is_some() {
+            return 0;
+        }
+        usize::try_from(self.size.div_ceil(PAGE_SIZE)).unwrap_or(usize::MAX)
+            * core::mem::size_of::<Option<Frame>>()
+    }
+
     pub fn new(size: u64, protect: u32, attributes: u32) -> Result<Self, NtStatus> {
         vad::access_of(protect)?;
         let count =

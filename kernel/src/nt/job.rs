@@ -31,7 +31,7 @@ pub const JOB_MAPPING: GenericMapping = GenericMapping {
 };
 
 /// STATUS_QUOTA_EXCEEDED (ERROR_NOT_ENOUGH_QUOTA).
-pub const QUOTA_EXCEEDED: NtStatus = NtStatus(0xc000_0044);
+pub const QUOTA_EXCEEDED: NtStatus = NtStatus::QUOTA_EXCEEDED;
 /// NtIsProcessInJob's answers.
 pub const PROCESS_IN_JOB: NtStatus = NtStatus(0x0000_0123);
 pub const PROCESS_NOT_IN_JOB: NtStatus = NtStatus(0x0000_0124);

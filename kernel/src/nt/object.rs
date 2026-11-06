@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use super::quota::{self, Block, Pool};
 use super::status::NtStatus;
 use super::wait::Dispatcher;
 use crate::mm::heap::{AllocError, KArc, TryVec};
@@ -422,7 +423,9 @@ pub enum ObjectBody {
     IoCompletion(IoCompletion),
     Timer(Timer),
     Directory(Directory),
-    Thread(super::thread::NtThread),
+    /// Boxed: a thread is large (its saved register states), and every
+    /// object is the size of the largest variant (nt::quota charges it).
+    Thread(alloc::boxed::Box<super::thread::NtThread>),
     Section(super::section::Section),
     /// The file system volume (`\Device\HarddiskVolume1`, `\??\C:`).
     Volume,
@@ -480,6 +483,9 @@ pub struct KObject {
     /// Its security descriptor (self-relative; nt::security), if assigned
     /// (files and keys keep theirs on their nodes).
     pub security: IrqMutex<Option<Vec<u8>>>,
+    /// What it costs, charged to the process that first held a handle to
+    /// it (nt::quota); given back when the object goes.
+    pub quota: IrqMutex<Option<super::quota::Charge>>,
 }
 
 pub type ObjectRef = KArc<KObject>;
@@ -496,6 +502,7 @@ impl KObject {
             handle_count: AtomicUsize::new(0),
             permanent,
             security: IrqMutex::new(None),
+            quota: IrqMutex::new(None),
         })
     }
 
@@ -742,9 +749,14 @@ fn with_implied(access: u32, kind: Option<ImpliedKind>) -> u32 {
     }
 }
 
+/// A process's handles. With a quota block attached (`attach_quota`:
+/// every process's table) each handle counts against the process's handle
+/// limit and is charged to its paged pool quota, and the object of a new
+/// handle is charged to the process unless it already is (nt::quota).
 #[derive(Default)]
 pub struct HandleTable {
     entries: Vec<Option<HandleEntry>>,
+    quota: Option<KArc<Block>>,
 }
 
 fn slot(handle: Handle) -> Option<usize> {
@@ -753,7 +765,38 @@ fn slot(handle: Handle) -> Option<usize> {
 }
 
 impl HandleTable {
-    pub fn insert(&mut self, entry: HandleEntry) -> Result<Handle, AllocError> {
+    /// Charges the table's handles and their objects to `block` from now
+    /// on, those it holds already without a limit (inherited handles).
+    pub fn attach_quota(&mut self, block: KArc<Block>) {
+        for entry in self.entries.iter().flatten() {
+            charge_unchecked(&block, &entry.object);
+        }
+        self.quota = Some(block);
+    }
+
+    /// The quota block, if attached.
+    pub fn quota(&self) -> Option<&KArc<Block>> {
+        self.quota.as_ref()
+    }
+
+    /// Inserts a handle at the lowest free value. Fails with
+    /// STATUS_INSUFFICIENT_RESOURCES at the process's handle limit,
+    /// STATUS_QUOTA_EXCEEDED over its pool quota (the handle's entry, or
+    /// the object if no process was charged for it yet) and
+    /// STATUS_NO_MEMORY without memory; nothing is left charged then
+    /// except a charge the object already had.
+    pub fn insert(&mut self, entry: HandleEntry) -> Result<Handle, NtStatus> {
+        if let Some(q) = &self.quota {
+            q.add_handle(false)?;
+            if let Err(e) = q.try_charge(Pool::Paged, quota::HANDLE_ENTRY) {
+                q.remove_handle();
+                return Err(e);
+            }
+            if let Err(e) = quota::claim(&entry.object, q, true) {
+                uncharge_entry(q);
+                return Err(e);
+            }
+        }
         let object = entry.object.clone();
         let index = match self.entries.iter().position(Option::is_none) {
             Some(i) => {
@@ -761,7 +804,12 @@ impl HandleTable {
                 i
             }
             None => {
-                self.entries.try_push(Some(entry))?;
+                if self.entries.try_push(Some(entry)).is_err() {
+                    if let Some(q) = &self.quota {
+                        uncharge_entry(q);
+                    }
+                    return Err(NtStatus::NO_MEMORY);
+                }
                 self.entries.len() - 1
             }
         };
@@ -770,7 +818,7 @@ impl HandleTable {
     }
 
     /// Inserts `entry` at the handle value `handle` (inherited handles keep
-    /// their values); fails if the slot is taken.
+    /// their values); fails if the slot is taken. Charged without a limit.
     pub fn insert_at(&mut self, handle: Handle, entry: HandleEntry) -> Result<(), AllocError> {
         let index = slot(handle).ok_or(AllocError)?;
         while self.entries.len() <= index {
@@ -778,6 +826,9 @@ impl HandleTable {
         }
         if self.entries[index].is_some() {
             return Err(AllocError);
+        }
+        if let Some(q) = &self.quota {
+            charge_unchecked(q, &entry.object);
         }
         entry.object.add_handle();
         self.entries[index] = Some(entry);
@@ -793,7 +844,7 @@ impl HandleTable {
     }
 
     /// Inserts `object` with its full rights (used for kernel-created handles).
-    pub fn insert_object(&mut self, object: ObjectRef) -> Result<Handle, AllocError> {
+    pub fn insert_object(&mut self, object: ObjectRef) -> Result<Handle, NtStatus> {
         let access = object.mapping().all;
         self.insert(HandleEntry { object, access, attributes: 0 })
     }
@@ -829,9 +880,26 @@ impl HandleTable {
 
     pub fn close(&mut self, handle: Handle) -> Option<HandleEntry> {
         let entry = self.entries.get_mut(slot(handle)?)?.take()?;
+        if let Some(q) = &self.quota {
+            uncharge_entry(q);
+        }
         KObject::drop_handle(&entry.object);
         Some(entry)
     }
+}
+
+/// A handle `block`'s table holds already, and its object, charged
+/// without a limit.
+fn charge_unchecked(block: &KArc<Block>, object: &ObjectRef) {
+    let _ = block.add_handle(true);
+    block.charge(Pool::Paged, quota::HANDLE_ENTRY);
+    let _ = quota::claim(object, block, false);
+}
+
+/// Gives back what one handle entry was charged.
+fn uncharge_entry(block: &Block) {
+    block.release(Pool::Paged, quota::HANDLE_ENTRY);
+    block.remove_handle();
 }
 
 #[cfg(test)]
@@ -909,6 +977,63 @@ mod tests {
         assert_eq!(KArc::strong_count(&obj), 2);
         drop(t.close(h));
         assert_eq!(KArc::strong_count(&obj), 1);
+    }
+
+    #[test]
+    fn handles_and_objects_are_charged_to_the_process() {
+        use crate::nt::quota::{Block, HANDLE_ENTRY, Pool, QUOTA_EXCEEDED};
+        let event = || {
+            let d = Dispatcher::new(0);
+            KObject::new(ObjectBody::Event(Event { kind: EventType::Notification, dispatcher: d }))
+                .unwrap()
+        };
+        let one = quota::object_cost(&event());
+        assert!(one.1 > 0 && one.0 == 0, "an event is nonpaged: {one:?}");
+        // Room for three events and four handles' entries.
+        let block = Block::with_limits(4, "a.exe", 4 * HANDLE_ENTRY, 3 * one.1, 4).unwrap();
+        let mut t = HandleTable::default();
+        t.attach_quota(block.clone());
+        let a = t.insert_object(event()).unwrap();
+        let b = t.insert_object(event()).unwrap();
+        let c = t.insert_object(event()).unwrap();
+        assert_eq!(block.pool(Pool::NonPaged).0, 3 * one.1);
+        assert_eq!(block.pool(Pool::Paged).0, 3 * HANDLE_ENTRY);
+        // A fourth object is over the nonpaged quota: nothing stays charged.
+        assert_eq!(t.insert_object(event()), Err(QUOTA_EXCEEDED));
+        assert_eq!(block.pool(Pool::Paged).0, 3 * HANDLE_ENTRY);
+        assert_eq!(block.handles().0, 3);
+        // A second handle to an object costs only its entry; the fifth
+        // handle is over the handle limit.
+        let shared = t.get(a).unwrap().object;
+        let d = t.insert_object(shared.clone()).unwrap();
+        assert_eq!(block.pool(Pool::NonPaged).0, 3 * one.1);
+        assert_eq!(t.insert_object(shared.clone()), Err(NtStatus::INSUFFICIENT_RESOURCES));
+        assert_eq!(block.handles(), (4, 4, 4));
+        // Another process's handle to it charges that process the entry
+        // only: the object stays charged to its first holder.
+        let other = Block::with_limits(8, "b.exe", 1 << 20, 1 << 20, 100).unwrap();
+        let mut u = HandleTable::default();
+        u.attach_quota(other.clone());
+        let e = u.insert_object(shared.clone()).unwrap();
+        assert_eq!(other.pool(Pool::NonPaged).0, 0);
+        assert_eq!(other.pool(Pool::Paged).0, HANDLE_ENTRY);
+        // Closing gives back the entries; an object's charge goes with it.
+        drop(t.close(b));
+        drop(t.close(c));
+        assert_eq!(block.pool(Pool::NonPaged).0, one.1);
+        drop(t.close(a));
+        drop(t.close(d));
+        drop(shared);
+        assert_eq!(block.pool(Pool::Paged).0, 0);
+        assert_eq!(block.handles().0, 0);
+        assert_eq!(block.pool(Pool::NonPaged).0, one.1, "b.exe still holds it");
+        drop(u.close(e));
+        assert_eq!(block.pool(Pool::NonPaged), (0, 3 * one.1, 3 * one.1));
+        // Permanent objects are the system's.
+        let dir = KObject::with_permanence(ObjectBody::Directory(Directory::default()), true);
+        let h = u.insert_object(dir.unwrap()).unwrap();
+        assert_eq!(other.pool(Pool::Paged).0, HANDLE_ENTRY);
+        drop(u.close(h));
     }
 
     #[test]

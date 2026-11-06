@@ -323,6 +323,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // from the programs' start on.
     configure_clock(&cmdline);
     time::arm_clock_control();
+    // `quota=paged:<bytes>,nonpaged:<bytes>,handles:<n>`: every process's
+    // pool and handle limits (nt::quota; tests give small ones).
+    if let Some(spec) = cmdline.value("quota") {
+        match nt::quota::configure(spec) {
+            Ok(()) => info!("quota: {spec}"),
+            Err(item) => error!("quota: {spec:?}: cannot use {item:?}"),
+        }
+    }
     // `record`: what the programs read from outside goes to the debug
     // console; `replay=<boot module>`: they read it from that recording
     // (kernel/src/replay.rs).
@@ -466,6 +474,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     #[cfg(not(feature = "hosted"))]
     input::log_stats();
     info!("nt: {}", nt::stats::Summary);
+    info!("quota: {}", nt::quota::peaks());
     let (shootdowns, ipis) = arch::smp::flush_stats();
     let heap = mm::heap::stats();
     let window_flushes = mm::vmap::WINDOW.lock().flushes();

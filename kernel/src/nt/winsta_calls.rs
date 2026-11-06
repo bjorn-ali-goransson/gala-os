@@ -85,7 +85,7 @@ impl Call<'_> {
     fn connection_handle(&self, object: ObjectRef) -> Result<u64, NtStatus> {
         let access = object.mapping().map(MAXIMUM_ALLOWED);
         let entry = HandleEntry { object, access, attributes: 0 };
-        self.process.handles.lock().insert(entry).map(|h| h.0).map_err(|_| NtStatus::NO_MEMORY)
+        self.process.handles.lock().insert(entry).map(|h| h.0)
     }
 
     /// The process's window station handle, opened on first use.

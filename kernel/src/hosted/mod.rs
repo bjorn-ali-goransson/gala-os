@@ -129,6 +129,12 @@ pub fn configure_clock(spec: &str) -> Result<(), String> {
         .map_err(|item| alloc::format!("--clock={spec}: cannot use {item:?}"))
 }
 
+/// `quota=` values, as on the kernel command line (um's `--quota=`).
+pub fn configure_quota(spec: &str) -> Result<(), String> {
+    crate::nt::quota::configure(spec)
+        .map_err(|item| alloc::format!("--quota={spec}: cannot use {item:?}"))
+}
+
 /// The recording's file descriptor (`--record=`).
 static RECORD_FD: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
 
@@ -456,6 +462,7 @@ pub fn run(
         None => crate::warn!("run: {} ended without an exit status", process.name),
     }
     crate::nt::ledger::dump();
+    crate::info!("quota: {}", crate::nt::quota::peaks());
     sim::report();
     crate::replay::finish();
     Ok(process.exit_status().map_or(u32::MAX, |s| s.0))

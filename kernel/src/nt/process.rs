@@ -62,6 +62,8 @@ pub struct Core {
     /// Pages of committed private memory charged to the process
     /// (nt::charge); set to 0 for good when it ends.
     pub commit: core::sync::atomic::AtomicU64,
+    /// The most it was charged (PeakPagefileUsage).
+    pub commit_peak: core::sync::atomic::AtomicU64,
     pub commit_ended: core::sync::atomic::AtomicBool,
     /// The primary token (nt::token).
     pub token: IrqMutex<ObjectRef>,
@@ -80,6 +82,8 @@ pub struct Process {
     /// What every personality's process has.
     core: Core,
     pub handles: IrqMutex<HandleTable>,
+    /// Its pool and handle quotas (nt::quota), also attached to `handles`.
+    pub quota: KArc<super::quota::Block>,
     /// The executable's mapping: (base, size).
     pub image: (u64, u64),
     /// Its layout, whose shared frames back the executable's pages (held
@@ -322,6 +326,25 @@ pub fn running() -> Result<Vec<KArc<Process>>, AllocError> {
         out.try_push(p.clone())?;
     }
     Ok(out)
+}
+
+/// The state dump's process lines: each running process's commit charge
+/// and its pool and handle quotas (`process: pid P (x.exe) commit N KiB;
+/// paged U/L (peak P) ...`).
+pub fn dump() {
+    let Ok(list) = running() else {
+        info!("process: no memory to list the processes");
+        return;
+    };
+    for p in list.iter() {
+        info!(
+            "process: pid {} ({}) commit {} KiB; {}",
+            p.id,
+            p.name,
+            p.commit.load(core::sync::atomic::Ordering::Relaxed) * 4,
+            *p.quota
+        );
+    }
 }
 
 /// The process with id `id` (running, or exited and still referenced).
@@ -706,6 +729,10 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             (handles, [stdin.0, stdout.0, stderr.0])
         }
     };
+    // Its quotas: what it holds from here on is charged (the handles it
+    // starts with too, without a limit).
+    let quota = super::quota::Block::new(id, name)?;
+    handles.attach_quota(quota.clone());
 
     // The current directory, as a handle.
     let cwd_handle = match open_directory(current_directory) {
@@ -797,12 +824,14 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             exit_time: IrqMutex::named("process.exit_time", 0),
             oom_logged: core::sync::atomic::AtomicBool::new(false),
             commit: core::sync::atomic::AtomicU64::new(0),
+            commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
             token: IrqMutex::new(token),
             session,
             desk,
         },
         handles: IrqMutex::new(handles),
+        quota,
         image: (base, u64::from(info.size_of_image)),
         _layout: Some(image.clone()),
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
@@ -899,6 +928,9 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
     let session = super::token::session_of(&token);
     let desk = super::session::ensure(session)?;
     let space = KArc::try_new(platform::SpaceLock::new(bare.space))?;
+    let quota = super::quota::Block::new(id, bare.name)?;
+    let mut handles = HandleTable::default();
+    handles.attach_quota(quota.clone());
     let process = KArc::try_new(Process {
         core: Core {
             id,
@@ -916,12 +948,14 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
             exit_time: IrqMutex::named("process.exit_time", 0),
             oom_logged: core::sync::atomic::AtomicBool::new(false),
             commit: core::sync::atomic::AtomicU64::new(0),
+            commit_peak: core::sync::atomic::AtomicU64::new(0),
             commit_ended: core::sync::atomic::AtomicBool::new(false),
             token: IrqMutex::new(token),
             session,
             desk,
         },
-        handles: IrqMutex::new(HandleTable::default()),
+        handles: IrqMutex::new(handles),
+        quota,
         image: bare.image,
         _layout: None,
         exception_dispatcher: core::sync::atomic::AtomicU64::new(0),
@@ -1036,8 +1070,14 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
         crate::events::Category::Process,
         "process exit",
         format_args!(
-            r#""pid":{},"session":{},"status":{},"personality":"{}""#,
-            process.id, process.session, status.0, process.personality
+            r#""pid":{},"session":{},"status":{},"personality":"{}","paged_peak":{},"nonpaged_peak":{},"handles_peak":{}"#,
+            process.id,
+            process.session,
+            status.0,
+            process.personality,
+            process.quota.pool(super::quota::Pool::Paged).1,
+            process.quota.pool(super::quota::Pool::NonPaged).1,
+            process.quota.handles().1
         ),
     );
     super::desktop::process_ended(&process.desk.shell, process.id);
@@ -1339,6 +1379,9 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
     let space =
         KArc::try_new(platform::SpaceLock::new(a.space)).map_err(|_| NtStatus::NO_MEMORY)?;
     let commit = a.vad.private_commit();
+    let quota = super::quota::Block::new(a.id, a.name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut handles = HandleTable::default();
+    handles.attach_quota(quota.clone());
     let process = KArc::try_new(Process {
         core: Core {
             id: a.id,
@@ -1356,12 +1399,14 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
             exit_time: IrqMutex::named("process.exit_time", 0),
             oom_logged: AtomicBool::new(false),
             commit: AtomicU64::new(0),
+            commit_peak: AtomicU64::new(0),
             commit_ended: AtomicBool::new(false),
             token: IrqMutex::new(token),
             session,
             desk,
         },
-        handles: IrqMutex::new(HandleTable::default()),
+        handles: IrqMutex::new(handles),
+        quota,
         image: a.image,
         _layout: Some(a.layout),
         exception_dispatcher: AtomicU64::new(a.exception_dispatcher),

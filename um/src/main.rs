@@ -2,7 +2,7 @@
 //! gala's NT layer (the kernel library built with `--features hosted`) as
 //! its "kernel". The platform is `kernel::hosted` (docs/GALA_UM.md).
 //!
-//! usage: um [--trace] [--sim=<seed>] [--clock=<spec>] [--record=<file>] [--replay=<file>] [--dir=<directory on C:>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
+//! usage: um [--trace] [--sim=<seed>] [--clock=<spec>] [--record=<file>] [--replay=<file>] [--dir=<directory on C:>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--quota=<limits>] [--module=<directory on C:>/<name>=<host file>]... <program.exe> [arguments]
 //!
 //! `--failpoint`, `--failseed`: fault injection while the program runs,
 //! as the kernel's `failpoint=` and `failseed=` (kernel/src/failpoint.rs).
@@ -24,6 +24,9 @@
 //! runs with them (kernel/src/replay.rs). Options given with `--replay`
 //! override the recorded settings.
 //!
+//! `--quota=<limits>`: every process's pool and handle limits, as the
+//! kernel's `quota=` (kernel/src/nt/quota.rs).
+//!
 //! `--cpus`: show at most n of the host's processors (um-test: 2, as the
 //! QEMU boot tests).
 //!
@@ -37,7 +40,7 @@ use std::process::ExitCode;
 static ALLOCATOR: kernel::hosted::memory::Allocator = kernel::hosted::memory::Allocator;
 
 const USAGE: &str = "usage: um [--trace] [--sim=<seed>] [--clock=<spec>] [--record=<file>] \
-    [--replay=<file>] [--dir=<directory on C:>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] \
+    [--replay=<file>] [--dir=<directory on C:>] [--cpus=<n>] [--failpoint=<rules>] [--failseed=<n>] [--failtrace] [--quota=<limits>] \
     [--module=<dir>/<name>=<host file>]... <program.exe> [arguments]";
 
 /// The settings a recording keeps (`--record`) and a replay restores.
@@ -48,6 +51,7 @@ struct Settings {
     clock: Option<String>,
     failpoint: Option<String>,
     failseed: Option<String>,
+    quota: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -70,6 +74,9 @@ fn main() -> ExitCode {
             settings.failseed = Some(seed);
         } else if let Some(seed) = value("--sim=") {
             settings.sim = Some(seed);
+        } else if let Some(spec) = value("--quota=") {
+            // Pool and handle limits, as the kernel's `quota=`.
+            settings.quota = Some(spec);
         } else if let Some(spec) = value("--clock=") {
             // Clock control, as the kernel's `clock=`.
             settings.clock = Some(spec);
@@ -129,6 +136,7 @@ fn main() -> ExitCode {
             ("clock", &mut settings.clock),
             ("failpoint", &mut settings.failpoint),
             ("failseed", &mut settings.failseed),
+            ("quota", &mut settings.quota),
         ] {
             if slot.is_none() {
                 *slot = recorded(key);
@@ -168,6 +176,12 @@ fn main() -> ExitCode {
         eprintln!("um: {e}");
         return ExitCode::from(2);
     }
+    if let Some(spec) = &settings.quota
+        && let Err(e) = kernel::hosted::configure_quota(spec)
+    {
+        eprintln!("um: {e}");
+        return ExitCode::from(2);
+    }
     if let Some(spec) = &settings.failpoint
         && let Err(e) = kernel::hosted::configure_failpoints(spec, settings.failseed.as_deref())
     {
@@ -196,6 +210,7 @@ fn main() -> ExitCode {
             ("clock", &settings.clock),
             ("failpoint", &settings.failpoint),
             ("failseed", &settings.failseed),
+            ("quota", &settings.quota),
         ] {
             if let Some(value) = value {
                 kernel::replay::info(key, value);

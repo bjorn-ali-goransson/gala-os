@@ -404,7 +404,8 @@ pub extern "system" fn K32GetModuleFileNameExA(
 
 /// PROCESS_MEMORY_COUNTERS(_EX): the working set and page file use are
 /// the committed memory (gala does not page out), private usage the
-/// committed private memory.
+/// committed private memory, the pool quota figures the kernel's
+/// (ProcessVmCounters).
 #[unsafe(no_mangle)]
 pub extern "system" fn K32GetProcessMemoryInfo(
     process: Handle,
@@ -418,8 +419,24 @@ pub extern "system" fn K32GetProcessMemoryInfo(
         return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
     }
     let (all, private) = committed();
+    // VM_COUNTERS: QuotaPeakPagedPoolUsage at 40 ... QuotaNonPagedPoolUsage at 64.
+    let mut vm = [0u64; 11];
+    // SAFETY: an 88-byte buffer (VM_COUNTERS).
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            3,
+            vm.as_mut_ptr().cast(),
+            88,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
+    }
     let n = if size >= 80 { 10 } else { 9 };
-    let values = [u64::from(n as u32 * 8), all, all, 0, 0, 0, 0, private, private, private];
+    let values =
+        [u64::from(n as u32 * 8), all, all, vm[5], vm[6], vm[7], vm[8], private, private, private];
     for (i, &v) in values.iter().enumerate().take(n) {
         // SAFETY: the caller's structure of `size` >= 8 * n bytes.
         unsafe { *counters.add(i) = v };

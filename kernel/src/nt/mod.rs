@@ -32,6 +32,7 @@ pub mod persist;
 pub mod pipe;
 pub mod platform;
 pub mod process;
+pub mod quota;
 pub mod registry;
 pub mod reglog;
 pub mod section;

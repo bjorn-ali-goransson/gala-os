@@ -48,13 +48,14 @@ if the program did. Options:
 | `--failpoint=<rules>`, `--failseed=<n>`, `--failtrace` | fault injection |
 | `--sim=<seed>` | deterministic simulation |
 | `--clock=<items>` | clock control (the kernel's `clock=`) |
+| `--quota=<limits>` | every process's pool and handle limits (the kernel's `quota=`) |
 | `--record=<file>`, `--replay=<file>` | record/replay |
 
 `cargo xtask um-test` builds `um/` and runs every scenario that
 `runs_in_um` (below) under `timeout -s QUIT -k 5` (30 s, `UM_TIMEOUT_SECS`)
 with `--cpus=2` (as the QEMU tests' `-smp 2`), the scenario's
 `extra_modules` from `user/bin`, its `args=` (percent-decoded) and its
-`clock=` as `--clock=`, and checks the scenario's expected lines except
+`clock=` as `--clock=` (`quota=` as `--quota=`), and checks the scenario's expected lines except
 those only a QEMU boot has (`kernel_only`: the boot marker, the NMI part
 of a state dump, `flight:`, clock calibration lines). Debugging recipes
 (gdb, signals to ignore): WORKFLOW "gala-um".
@@ -286,7 +287,8 @@ virtual clock.
 `um --record=<file>` writes what the run reads from outside (the boot
 time, every reading of the host's clock with the reading thread, the
 random numbers GalaRandom hands out) and its settings (program,
-arguments, `--sim`, processors, `--clock`, `--failpoint`, `--failseed`)
+arguments, `--sim`, processors, `--clock`, `--failpoint`, `--failseed`,
+`--quota`)
 to `file`, record by record with write(2). `um --replay=<file>` runs with
 the recorded settings (options given override them) and inputs
 (ARCHITECTURE "Record/replay"; recordings move between gala-um and the

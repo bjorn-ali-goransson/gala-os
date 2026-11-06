@@ -425,6 +425,7 @@ Run a program directly:
   the program's directory on C:; `--trace` logs every system call;
   `--cpus` caps the processors (um-test uses 2, as QEMU);
   `--failpoint=`, `--failseed=` and `--failtrace` inject failures;
+  `--quota=` sets the pool and handle limits (the kernel's `quota=`);
   `--sim=<seed>` runs deterministically; `--record=<f>` and
   `--replay=<f>` record and replay outside inputs.
 - The kernel's log goes to stderr, the program's output to stdout.
@@ -904,8 +905,9 @@ on `user/http_client`: a change to the engine boots both scenarios.
 - gala's machine root store is `C:\Windows\System32\gala\roots`: a
   scenario that needs a trusted root ships the CA there (an
   EXTRA_MODULES line). Without one, automatic validation gives
-  SEC_E_UNTRUSTED_ROOT and the ledger says `schannel.dll!machine root
-  store (no gala/roots ...)`. Full images (`cargo xtask iso`) also ship
+  SEC_E_UNTRUSTED_ROOT and the ledger says `crypt32.dll!ROOT store (no
+  gala/roots directory)` (crypt32's ROOT store is what Schannel trusts).
+  Full images (`cargo xtask iso`) also ship
   the public CA bundle there (`user/roots/public-roots.pem`); a scenario
   that wants it lists it (`pk_install_https`). To move to a newer
   bundle: `sh user/roots/update.sh <date>` (a release from
@@ -918,7 +920,22 @@ on `user/http_client`: a change to the engine boots both scenarios.
   redirect names its reason in the ledger (`winhttp.dll!redirect:
   ...`).
 - A failing handshake leaves `schannel.dll!ISC: <rustls error>` (ASC for
-  a server) in the ledger with the SSPI status: read that first.
+  a server) in the ledger with the SSPI status: read that first. A
+  refused certificate also leaves crypt32's verdict,
+  `crypt32.dll!SSL: CERT_E_UNTRUSTEDROOT` (or BASE, BASIC_CONSTRAINTS;
+  CERT_E_EXPIRED, CERT_E_CN_NO_MATCH, ...) with the chain's
+  CERT_TRUST_* error bits as detail (0x20 an untrusted root, 0x10000 a
+  partial chain, 0x1 time, 0x8 a signature): Schannel and programs that
+  check chains themselves (curl's `--cacert`, Go) leave the same line.
+  A root of `gala\roots` crypt32 cannot decode is recorded as
+  `crypt32.dll!ROOT store (a certificate that does not decode)`.
+- The chain engine's own tests are `cert_test`'s chain part
+  (`user/cert_test/src/chain.rs`) with certificates made once by
+  `user/cert_test/chain/make.sh` (RSA root, ECDSA P-384 intermediate,
+  P-256 leaves; fixed validity 2025-2045, so the times in the test are
+  fixed); its trust comes from an engine with hExclusiveRoot, so the
+  test needs no change to Windows' root store. Each part prints
+  `cert_test: chain: <part>` before its checks.
 - SEC_E_INCOMPLETE_MESSAGE means the caller passes the same bytes again
   with more (schannel_tls keeps a count, `retained`); a rustls slice that
   still holds a partial handshake message must be the same buffer on the
@@ -937,7 +954,13 @@ on `user/http_client`: a change to the engine boots both scenarios.
   imports, from PortableGit). curl prints Schannel's failures as
   `schannel: SEC_E_... (0x8009....) - <FormatMessage text>`: the SSPI
   status is the place to start (then the `schannel.dll!ISC:` ledger
-  line). Git's dumb HTTP protocol needs only static files:
+  line). With `--cacert` Schannel's curl validates itself
+  (SCH_CRED_MANUAL_CRED_VALIDATION, then crypt32's chain engine with the
+  CA file as hExclusiveRoot and the remote certificate's hCertStore as
+  additional store) and prints `schannel: CertGetCertificateChain trust
+  error CERT_TRUST_...` (exit 60), then matches the host against
+  CertGetNameString(CERT_NAME_DNS_TYPE, all names); curl.sh's `cacert`
+  steps cover it (CA files in C:\gala). Git's dumb HTTP protocol needs only static files:
   `user/git_https/repo.git` is a bare repository after `git
   update-server-info`, cut to HEAD, info/refs, objects/info/packs and
   the loose objects (made with fixed author and committer dates, so the
@@ -2269,7 +2292,27 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   `crate::nt::platform` (the NT layer's seam) and not
   `crate::sched`/`crate::time` directly (those do nothing in gala-um). A
   new process constructor must set `personality` (ARCHITECTURE "The
-  seams").
+  seams") and attach a quota block to its handle table (`quota`,
+  `HandleTable::attach_quota`: a table without one charges and limits
+  nothing).
+- **Handles go in through `HandleTable::insert`, and its error is the
+  caller's status**: it fails with STATUS_QUOTA_EXCEEDED or
+  STATUS_INSUFFICIENT_RESOURCES at a process's quotas, not only
+  STATUS_NO_MEMORY; mapping every failure to NO_MEMORY hides which
+  limit a program hit (ARCHITECTURE "Pool and handle quotas").
+- **A new `ObjectBody` variant over a few hundred bytes is boxed**:
+  every object is the size of the largest variant (an unboxed 10 KiB
+  thread once made every event cost 10 KiB, all of it charged to pool
+  quotas); `quota::tests::objects_stay_small` checks it.
+- **No lock in a log line's formatting**: a `Display` that takes a lock
+  runs while `print` holds the serial port's, so the port is then
+  "taken before" that lock, and the first log line written under it
+  makes lockdep panic (debug kernels). The console's lock must stay the
+  last one taken: take what the line needs first (`quota::peaks()`),
+  and do not log while holding a lock that a line's formatting takes.
+- **Host unit tests have no console**: code that logs (`info!`, `warn!`)
+  writes to the serial port and crashes a host test (SIGSEGV); keep the
+  logging out of the tested path or under `cfg!(not(test))`.
 - **Arch code** (declared before `console` in lib.rs) writes
   `crate::info!`/`crate::warn!`, not the bare macros.
 - **Multiprocessor**: all CPUs schedule threads, and any thread, the

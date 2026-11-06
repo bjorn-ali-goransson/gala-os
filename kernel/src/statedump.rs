@@ -13,8 +13,9 @@
 //!    flight recorder. Only atomics and `try_lock` here.
 //! 2. From a normal context, which may take locks: the boot thread's wait
 //!    for its `run=` program wakes once a second and, when asked, logs every
-//!    NT thread (system call, wait object), every scheduler thread, the
-//!    ledger and the statistics, then `statedump: end`. A machine too stuck
+//!    NT thread (system call, wait object), every process (commit, pool
+//!    and handle quotas), every scheduler thread, the ledger and the
+//!    statistics, then `statedump: end`. A machine too stuck
 //!    for that still has part 1.
 //!
 //! Cheap when off: nothing runs until an NMI or SIGQUIT arrives.
@@ -38,6 +39,8 @@ pub fn take_request() -> bool {
 pub fn full_dump() {
     info!("statedump: threads (NT, then scheduler), the ledger, the statistics:");
     crate::nt::thread::dump();
+    // Each process's commit and its pool and handle quotas (nt::quota).
+    crate::nt::process::dump();
     #[cfg(not(feature = "hosted"))]
     crate::sched::dump();
     crate::nt::ledger::dump();

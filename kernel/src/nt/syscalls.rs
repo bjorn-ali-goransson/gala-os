@@ -1457,8 +1457,10 @@ impl Call<'_> {
     /// Inserts a handle for `object` and stores its value at `out`.
     fn return_handle(&self, out: u64, object: ObjectRef, access: u32, attributes: u32) -> NtStatus {
         let entry = HandleEntry { access: object.mapping().map(access), object, attributes };
-        let Ok(handle) = self.process.handles.lock().insert(entry) else {
-            return NtStatus::NO_MEMORY;
+        let inserted = self.process.handles.lock().insert(entry);
+        let handle = match inserted {
+            Ok(h) => h,
+            Err(e) => return e,
         };
         if self.write_u64(out, handle.0).is_err() {
             self.process.handles.lock().close(handle);
@@ -2176,8 +2178,10 @@ fn gala_window_surface_open(call: &mut Call<'_>) -> NtStatus {
         access: SECTION_QUERY | SECTION_MAP_READ | SECTION_MAP_WRITE,
         attributes: 0,
     };
-    let Ok(handle) = call.process.handles.lock().insert(entry) else {
-        return NtStatus::INSUFFICIENT_RESOURCES;
+    let inserted = call.process.handles.lock().insert(entry);
+    let handle = match inserted {
+        Ok(h) => h,
+        Err(e) => return e,
     };
     if call.write_u64(arg!(call, 1), handle.0).is_err() {
         let closed = call.process.handles.lock().close(handle);
@@ -3381,7 +3385,10 @@ fn nt_duplicate_object(call: &mut Call<'_>) -> NtStatus {
         object: entry.object.clone(),
     };
     let inserted = target.handles.lock().insert(new);
-    let Ok(handle) = inserted else { return NtStatus::NO_MEMORY };
+    let handle = match inserted {
+        Ok(h) => h,
+        Err(e) => return e,
+    };
     if options & DUPLICATE_CLOSE_SOURCE != 0 {
         close_source(&source_process);
     }
@@ -3952,6 +3959,45 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             let n = p.handles.lock().iter().count() as u32;
             return call.return_info(&n.to_le_bytes(), buffer, length, ret_ptr);
         }
+        PROCESS_QUOTA_LIMITS => {
+            // QUOTA_LIMITS { PagedPoolLimit, NonPagedPoolLimit,
+            // MinimumWorkingSetSize, MaximumWorkingSetSize, PagefileLimit,
+            // TimeLimit } (nt::quota; no working set or time limits: 0, and
+            // no page file: the commit limit).
+            use super::quota::Pool;
+            let mut q = [0u8; 48];
+            q[0..8].copy_from_slice(&p.quota.pool(Pool::Paged).2.to_le_bytes());
+            q[8..16].copy_from_slice(&p.quota.pool(Pool::NonPaged).2.to_le_bytes());
+            q[32..40].copy_from_slice(&(super::charge::limit() * 4096).to_le_bytes());
+            return call.return_info(&q, buffer, length, ret_ptr);
+        }
+        PROCESS_VM_COUNTERS => {
+            // VM_COUNTERS (88 bytes) or VM_COUNTERS_EX (96, with
+            // PrivateUsage): the pool quota usage and the commit charge
+            // (PagefileUsage, as Windows reports it); virtual size, working
+            // set and page faults are not kept (0; kernel32's
+            // K32GetProcessMemoryInfo reads the working set from the
+            // address space).
+            use super::quota::Pool;
+            let size = if length == 96 { 96 } else { 88 };
+            let mut v = [0u8; 96];
+            let (paged, paged_peak, _) = p.quota.pool(Pool::Paged);
+            let (nonpaged, nonpaged_peak, _) = p.quota.pool(Pool::NonPaged);
+            let commit = p.commit.load(core::sync::atomic::Ordering::Relaxed) * 4096;
+            let commit_peak = p.commit_peak.load(core::sync::atomic::Ordering::Relaxed) * 4096;
+            for (at, value) in [
+                (40, paged_peak),
+                (48, paged),
+                (56, nonpaged_peak),
+                (64, nonpaged),
+                (72, commit),
+                (80, commit_peak),
+                (88, commit),
+            ] {
+                v[at..at + 8].copy_from_slice(&value.to_le_bytes());
+            }
+            return call.return_info(&v[..size], buffer, length, ret_ptr);
+        }
         PROCESS_SESSION_INFORMATION => {
             // PROCESS_SESSION_INFORMATION { ULONG SessionId }.
             let session = p.session.to_le_bytes();
@@ -3986,6 +4032,8 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     call.return_info(&b, buffer, length, ret_ptr)
 }
 
+const PROCESS_QUOTA_LIMITS: u64 = 1;
+const PROCESS_VM_COUNTERS: u64 = 3;
 const PROCESS_TIMES: u64 = 4;
 const PROCESS_DEBUG_PORT: u64 = 7;
 const PROCESS_PRIORITY_CLASS: u64 = 18;
@@ -4827,8 +4875,10 @@ impl Call<'_> {
         };
         let attributes = tri!(self.handle_attributes(attrs_ptr));
         let entry = HandleEntry { object, access: granted, attributes };
-        let Ok(handle) = self.process.handles.lock().insert(entry) else {
-            return NtStatus::NO_MEMORY;
+        let inserted = self.process.handles.lock().insert(entry);
+        let handle = match inserted {
+            Ok(h) => h,
+            Err(e) => return e,
         };
         if self.write_u64(out, handle.0).is_err() {
             self.process.handles.lock().close(handle);
@@ -4892,8 +4942,10 @@ fn nt_create_named_pipe_file(call: &mut Call<'_>) -> NtStatus {
     let attributes = tri!(call.handle_attributes(attrs_ptr));
     let granted = super::object::FILE_MAPPING.map(access);
     let entry = HandleEntry { object, access: granted, attributes };
-    let Ok(handle) = call.process.handles.lock().insert(entry) else {
-        return NtStatus::NO_MEMORY;
+    let inserted = call.process.handles.lock().insert(entry);
+    let handle = match inserted {
+        Ok(h) => h,
+        Err(e) => return e,
     };
     if call.write_u64(out, handle.0).is_err() {
         call.process.handles.lock().close(handle);
@@ -5406,7 +5458,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         let output = KObject::new(ObjectBody::ConsoleOutput).map_err(|_| NtStatus::NO_MEMORY);
         let (input, output) = (tri!(input), tri!(output));
         for (i, object) in [input, output.clone(), output].into_iter().enumerate() {
-            std[i] = tri!(table.insert_object(object).map_err(|_| NtStatus::NO_MEMORY)).0;
+            std[i] = tri!(table.insert_object(object)).0;
         }
     }
 
@@ -5462,27 +5514,36 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         _ => 0,
     };
     let child_id = child.id;
-    // The handles to the child; without memory for them, the child (which
-    // has not run yet) ends and the call fails, as if never created.
-    let handles = KObject::new(ObjectBody::Process(child.clone())).ok().and_then(|object| {
-        let mut table = call.process.handles.lock();
-        let ph =
-            table.insert(HandleEntry { object, access: PROCESS_ALL_ACCESS, attributes: 0 }).ok()?;
-        let entry =
-            HandleEntry { object: thread_object.clone(), access: THREAD_ALL_ACCESS, attributes: 0 };
-        match table.insert(entry) {
-            Ok(th) => Some((ph, th)),
-            Err(_) => {
-                let entry = table.close(ph);
-                drop(table);
-                drop(entry);
-                None
+    // The handles to the child; without memory or quota for them, the
+    // child (which has not run yet) ends and the call fails with that
+    // status, as if never created.
+    let handles = KObject::new(ObjectBody::Process(child.clone()))
+        .map_err(|_| NtStatus::NO_MEMORY)
+        .and_then(|object| {
+            let mut table = call.process.handles.lock();
+            let ph =
+                table.insert(HandleEntry { object, access: PROCESS_ALL_ACCESS, attributes: 0 })?;
+            let entry = HandleEntry {
+                object: thread_object.clone(),
+                access: THREAD_ALL_ACCESS,
+                attributes: 0,
+            };
+            match table.insert(entry) {
+                Ok(th) => Ok((ph, th)),
+                Err(e) => {
+                    let entry = table.close(ph);
+                    drop(table);
+                    drop(entry);
+                    Err(e)
+                }
             }
+        });
+    let (ph, th) = match handles {
+        Ok(h) => h,
+        Err(e) => {
+            process::terminate(&child, e, false);
+            return e;
         }
-    });
-    let Some((ph, th)) = handles else {
-        process::terminate(&child, NtStatus::NO_MEMORY, false);
-        return NtStatus::NO_MEMORY;
     };
     if !suspended {
         thread::resume(&thread_object);

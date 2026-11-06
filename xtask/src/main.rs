@@ -785,6 +785,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("process_test", "kernel32.dll", "Windows/System32"),
     ("commit_test", "ntdll.dll", "Windows/System32"),
     ("commit_test", "kernel32.dll", "Windows/System32"),
+    ("quota_test", "ntdll.dll", "Windows/System32"),
+    ("quota_test", "kernel32.dll", "Windows/System32"),
     ("gpu_stub_test", "ntdll.dll", "Windows/System32"),
     ("gpu_stub_test", "kernel32.dll", "Windows/System32"),
     ("gpu_stub_test", "dxgi.dll", "Windows/System32"),
@@ -1921,6 +1923,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("curl_common", "wldap32.dll", "Windows/System32"),
     ("curl_common", "user/bin/busybox.exe", "gala"),
     ("curl_common", "user/curl/curl.sh", "gala"),
+    // The CA files of curl.sh's --cacert steps.
+    ("curl_common", "user/schannel_test/certs/ca.crt", "gala"),
+    ("curl_common", "user/schannel_test/certs/untrusted.crt", "gala"),
     // Git's https remotes (MinGit, MODULE_SETS) against the same Nginx,
     // which serves user/git_https/repo.git; busybox runs git.sh.
     ("git_https", "user/git_https/repo.git/", "nginx/html/repo.git"),
@@ -2062,6 +2067,7 @@ const USER_PROGRAMS: &[&str] = &[
     "udp_test",
     "process_test",
     "commit_test",
+    "quota_test",
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
@@ -4584,6 +4590,20 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["commit_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // R6: pool and handle quotas: a process leaking handles, then
+        // objects, fails at its limits (logged) while another runs on.
+        name: "quota_test",
+        cmdline: "qemu_exit quota=handles:3000,nonpaged:96K run=quota_test.exe args=3000%2098304",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "quota_test: handle limit at 3000 handles",
+            "over its handle limit: 3000 in use + 1 > limit 3000",
+            "over its nonpaged pool:",
+            "quota_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // N2b: CreateProcessW (the test starts itself as a child).
         name: "process_test",
         cmdline: "qemu_exit run=process_test.exe",
@@ -6068,6 +6088,10 @@ const SCENARIOS: &[Scenario] = &[
             "https ip: exit 0 200 896",
             "untrusted: exit 60",
             "expired: exit 60",
+            "cacert: exit 0 <title>Welcome to nginx!</title>",
+            "cacert untrusted: exit 60",
+            "cacert other: exit 60",
+            "cacert expired: exit 60",
             "curl.sh: done",
             "exited with status 0x00000000",
         ],
@@ -6076,7 +6100,8 @@ const SCENARIOS: &[Scenario] = &[
         // TLS step 3: curl on Schannel: Git for Windows' curl (PREBUILT
         // gitcurl, the libcurl MinGit's https remotes use), unmodified,
         // through secur32 and schannel.dll, validating against gala's
-        // machine root store; the same script.
+        // machine root store; the same script (its --cacert steps check
+        // the chain in curl, through crypt32's chain engine).
         name: "curl_schannel",
         cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
                   run=busybox.exe args=sh%20C:/gala/curl.sh",
@@ -6089,6 +6114,10 @@ const SCENARIOS: &[Scenario] = &[
             "curl: (60) schannel: ",
             "untrusted: exit 60",
             "expired: exit 35",
+            "cacert: exit 0 <title>Welcome to nginx!</title>",
+            "cacert untrusted: exit 60",
+            "cacert other: exit 60",
+            "cacert expired: exit 60",
             "curl.sh: done",
             "exited with status 0x00000000",
         ],
@@ -7153,6 +7182,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
+    ("quota_test", "child processes (one NT process per Linux process)"),
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
@@ -7182,6 +7212,7 @@ const UM_FLAGS: &[(&str, &str)] = &[
     ("run", "the program (um's program argument)"),
     ("args", "its command line"),
     ("clock", "um --clock="),
+    ("quota", "um --quota="),
     ("calstall", "stalls the kernel's clock calibration; gala-um has none"),
 ];
 
@@ -7343,6 +7374,10 @@ fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) ->
     // Clock control, as the kernel's `clock=`.
     if let Some(spec) = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("clock=")) {
         cmd.arg(format!("--clock={spec}"));
+    }
+    // Pool and handle limits, as the kernel's `quota=`.
+    if let Some(spec) = s.cmdline.split_whitespace().find_map(|w| w.strip_prefix("quota=")) {
+        cmd.arg(format!("--quota={spec}"));
     }
     // Its boot modules, from user/bin (checked in) as `--module=`.
     for (file, dir) in extra_modules(name) {

@@ -93,7 +93,17 @@ pub struct Pipe {
     /// The name it was created with (empty for an anonymous pipe), as
     /// FileNameInformation reports it.
     name: Vec<u16>,
+    /// What its byte queues may hold (both quotas, at most
+    /// MAX_CHARGED_BUFFERS): charged to the server end's creator
+    /// (nt::quota).
+    buffer_bytes: usize,
 }
+
+/// The most of an instance's buffers charged to its creator's quota: the
+/// queues hold at most their quotas, but only what is written is held,
+/// and a program asking for very large quotas (as it may on Windows)
+/// must not fail for memory it never fills.
+const MAX_CHARGED_BUFFERS: usize = 1 << 20;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Conn {
@@ -342,9 +352,11 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
             count + 1
         ),
     );
+    let quotas = [quota(o.inbound), quota(o.outbound)];
     let pipe = KArc::try_new(Pipe {
         client_token: IrqMutex::new(None),
         name: given,
+        buffer_bytes: (quotas[0] + quotas[1]).min(MAX_CHARGED_BUFFERS),
         state: IrqMutex::new(State {
             id,
             put: [0; 2],
@@ -352,7 +364,7 @@ pub fn create_server(name: &[u16], o: &ServerOptions) -> Result<PipeEnd, NtStatu
             inbox: [VecDeque::new(), VecDeque::new()],
             messages: [VecDeque::new(), VecDeque::new()],
             message_type: o.message_type,
-            quota: [quota(o.inbound), quota(o.outbound)],
+            quota: quotas,
             conn: Conn::Listening,
             server_open: true,
             generation: 0,
@@ -677,6 +689,12 @@ impl PipeEnd {
 
     pub fn is_server(&self) -> bool {
         self.end == 0
+    }
+
+    /// The pipe's buffers charged with this end (nt::quota): the server
+    /// end's (the instance's creator), none with a client end.
+    pub fn buffer_bytes(&self) -> usize {
+        if self.end == 0 { self.pipe.buffer_bytes } else { 0 }
     }
 
     /// Sleeps until the other side changes something (or termination).
@@ -1190,9 +1208,11 @@ pub fn adopt(c: Carried) -> Result<KArc<Pipe>, NtStatus> {
     let mut given = Vec::new();
     given.try_reserve_exact(c.name.len()).map_err(|_| NtStatus::NO_MEMORY)?;
     given.try_extend_from_slice(&c.name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let quotas = [quota(c.quota[0])?, quota(c.quota[1])?];
     let pipe = KArc::try_new(Pipe {
         client_token: IrqMutex::new(None),
         name: given,
+        buffer_bytes: quotas[0].saturating_add(quotas[1]).min(MAX_CHARGED_BUFFERS),
         state: IrqMutex::new(State {
             id: NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed),
             put: [0; 2],
@@ -1200,7 +1220,7 @@ pub fn adopt(c: Carried) -> Result<KArc<Pipe>, NtStatus> {
             inbox,
             messages,
             message_type: c.message_type,
-            quota: [quota(c.quota[0])?, quota(c.quota[1])?],
+            quota: quotas,
             conn,
             server_open: c.server_open,
             generation: c.generation,

@@ -166,6 +166,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `failseed=<n>` | seed of the `random` failpoints (default 0): the same seed fails the same occurrences |
 | `failtrace` | log each injected failure with a backtrace (`cargo xtask symbolize` resolves it) |
 | `clock=<items>` | clock control while the programs run (debug builds; "Clock control"): `control` (the test-only GalaClockControl call is allowed), `freeze`, `rate:<n>[/<d>]`, `advance:<seconds>`, `system:<UNIX seconds>` (the system time when the programs start). Example: `clock=control,freeze,system:2147483648` |
+| `quota=<items>` | every process's pool and handle limits ("Pool and handle quotas"): `paged:<bytes>`, `nonpaged:<bytes>` (sizes may end in K, M, G), `handles:<n>`; unnamed ones keep their defaults. Example: `quota=handles:3000,nonpaged:96K` (scenario `quota_test`); gala-um `--quota=` |
 | `record` | record what the programs read from outside (random numbers, the boot time) on the debug console; xtask writes it to `<iso>.rec` ("Record/replay") |
 | `replay=<file>` | the programs read those inputs from the recording in the boot module of that file name |
 | `handover=<n>` | at the end of the boot (after the `run=` programs), hand the machine over to a fresh copy of the kernel, until n handovers are done ("Kernel handover"; the command line is handed over, so each kernel sees it); while it allows one more, programs may ask for one (GalaRequestHandover, 0x7f5a): it happens once all their threads are blocked in waits, and they go on in the new kernel |
@@ -999,10 +1000,102 @@ fails, not whichever one faults next on an empty frame pool.
 - Lock order: a process's VAD, then its job pointer, then the job's
   state. The system count is one atomic step against the limit, so
   commits in different processes cannot both slip under it.
-- Not done: kernel pool and handle quotas (STATUS_QUOTA_EXCEEDED per
-  process), the job's completion-port message when a limit is hit,
+- `NtQueryInformationProcess(ProcessVmCounters)` reports the charge as
+  PagefileUsage and PrivateUsage, and its peak as PeakPagefileUsage
+  (`Process::commit_peak`).
+- Not done: the job's completion-port message when a limit is hit,
   charging copy-on-write views of sections, and limits on what the
   kernel commits itself (a thread's stack is charged but never refused).
+
+### Pool and handle quotas
+
+`nt::quota` (ROADMAP R6; `quota_test` checks the Windows behaviour):
+what a process makes the kernel hold for it (objects, handle table
+entries, an object's own big buffers) is charged to the process, and a
+process over its limit fails, not whichever process next finds the heap
+empty: STATUS_QUOTA_EXCEEDED (ERROR_NOT_ENOUGH_QUOTA) over a pool quota,
+STATUS_INSUFFICIENT_RESOURCES (ERROR_NO_SYSTEM_RESOURCES) at the handle
+limit. Only the failing call fails; the process and every other process
+go on (a handle leak in one process leaves the others their full
+limits).
+
+- **Quota block** (`quota::Block`, `Process::quota`, attached to the
+  handle table): usage, peak and limit per pool, the handle limit and
+  count, refusals. Shared (KArc) by the process, its table and every
+  object charged to it, so an object that outlives its creator gives its
+  charge back to the block when it goes.
+- **Two pools**, as Windows' QUOTA_LIMITS and VM_COUNTERS name them,
+  over gala's one heap: waitable objects (`KObject::dispatcher` is some:
+  events, mutants, semaphores, timers, completion ports, threads,
+  processes, files, pipes, sockets) and pipe buffers are "nonpaged",
+  the rest (handle entries, sections and their page tables, keys,
+  tokens, directories, names, security descriptors) "paged". The split
+  is gala's choice following Windows' (dispatcher objects live in
+  nonpaged pool there).
+- **What is charged** (`quota::object_cost`): every handle entry
+  (`quota::HANDLE_ENTRY`, the table slot) to the process whose table
+  holds it, released by its close; every object, its `KObject` and its
+  name and security descriptor, to the first process that gets a handle
+  to it (the creator, for every object a service creates; for a
+  kernel-made object, its first holder), released when the object is
+  deleted (`quota::Charge` in `KObject::quota`, dropped with it);
+  permanent objects (the namespace's directories, devices) are the
+  system's and never charged. On top: a thread's boxed `NtThread`, a pipe
+  instance's buffers (both quotas, at most 1 MiB: what its queues may
+  hold, charged with the server end), a pagefile-backed section's page
+  table. Windows charges an object's quota to its creator and gives it
+  back at deletion; a second opener pays only its handle entry, as here.
+- **Where**: `HandleTable::insert` checks the handle limit, then charges
+  the entry, then claims the object (`quota::claim`), each one atomic
+  step against its limit; a refusal undoes the earlier steps and the
+  caller gets the status (every service returns it: `return_handle`,
+  NtDuplicateObject, process creation's handles, which end the unrun
+  child). An object refused its first handle is dropped by its creator,
+  and a named one leaves the namespace with its pin, so nothing is left
+  behind. Handles a process starts with (inherited, carried by a
+  handover) are charged without a limit (`attach_quota`, `insert_at`).
+- **Limits**, fixed when a process is created: `quota=` on the command
+  line (tests), else `paged` a quarter of memory, `nonpaged` an eighth
+  (each at least 16 MiB), and Windows' documented 2^24 handles ("Kernel
+  Objects" on Microsoft Learn). Windows' own default pool quotas are not
+  documented and not reachable by a test; gala's are chosen from the
+  peaks measured below with ample headroom. The handle limit is reached
+  only with a configured one: at 16 bytes an entry, 2^24 handles are
+  256 MiB, more than the pool quota.
+- **Measured peaks** of the largest process (the `quota: most per
+  process` and `quota: new most` lines): chromium_window's chrome.exe
+  196 KiB paged, about 1.1 MiB nonpaged, 517 handles (its VM's limits
+  1280 MiB and 640 MiB); java_http's java.exe between 256 and 512 KiB
+  nonpaged; nginx, nginx_master, nginx_tls under 256 KiB (nginx.exe
+  about 128 KiB nonpaged, 16 handles); go_http 3 KiB paged, 51 KiB
+  nonpaged, 26 handles. In a 512 MiB VM the defaults are 128 MiB paged
+  and 64 MiB nonpaged: over 50 times the largest peak.
+- **Exposed**: NtQueryInformationProcess ProcessQuotaLimits (class 1,
+  QUOTA_LIMITS: the pool limits, the commit limit as PagefileLimit; no
+  working-set or time limits, 0), ProcessVmCounters (class 3,
+  VM_COUNTERS or VM_COUNTERS_EX: QuotaPeakPagedPoolUsage ...
+  QuotaNonPagedPoolUsage; virtual size, working set and page faults are
+  not kept, 0), ProcessHandleCount (GetProcessHandleCount);
+  K32GetProcessMemoryInfo takes its quota fields from ProcessVmCounters.
+- **Object size**: every `KObject` is as large as the largest
+  `ObjectBody` variant, so a large body is boxed (`Thread`, about
+  10 KiB of saved register states; unboxed, every event and file cost
+  that much: the quota's first measurement found it). A host test keeps
+  `KObject` under 1 KiB.
+- **Observability** (OBSERVABILITY "Serial log"): the `quota: pid P ...
+  over its ...` line (first four refusals per process), the `quota
+  exceeded` process event (every refusal), each process's usage in the
+  state dump (`process: pid P ...`), the end-of-run peaks.
+- Not charged yet: registry data (hive keys and values a program writes:
+  Windows does not charge them to a process either), file data in ramfs
+  (a disk's, not pool), window and message state (bounded on its own:
+  at most `window::MAX_POSTED` posted messages wait, as Windows bounds a
+  queue at 10000), a socket's
+  buffers, a completion port's queued packets, image layouts (shared by
+  every process that loads the image). Not done: NtSetInformationProcess
+  (ProcessQuotaLimits) to change a process's limits, job-wide pool
+  limits, and charging an object's memory that grows after its creation
+  (a key's subkeys, a token's groups).
 
 ### Sections
 
@@ -1095,6 +1188,10 @@ type's `GenericMapping`) and attributes; services check rights with
 `HandleEntry::require`, reporting a wrong object type before missing
 access, as Windows does. Handle values are `(slot + 1) * 4`.
 
+- **Quotas**: each handle counts against its process's handle limit and
+  paged pool quota, and a new object is charged to the first process
+  holding a handle to it ("Pool and handle quotas"); `insert` reports
+  the refusal's status.
 - **Handle flags**: NtQueryObject's ObjectHandleFlagInformation (class 4)
   and NtSetInformationObject (0x7f05) read and set OBJ_INHERIT and the
   protect-from-close bit; file opens keep OBJ_INHERIT from
@@ -2382,6 +2479,13 @@ ntdll imports.
     and BCRYPT_PAD_PSS (STATUS_INVALID_SIGNATURE when it does not
     verify), BCryptEncrypt/Decrypt with PKCS1, OAEP (a UTF-8 label only)
     and PAD_NONE; KeyLength/KeyStrength/BlockLength of a key.
+  - ECDSA (`ecdsa.rs`, RustCrypto's `p256`/`p384`): public keys on P-256
+    and P-384 (BCRYPT_ECDSA_P256/P384_ALGORITHM and their
+    pseudo-handles) imported from an ECCPUBLICBLOB, BCryptVerifySignature
+    of a hash with an r || s signature (STATUS_INVALID_SIGNATURE when it
+    does not verify): crypt32's certificate signatures. No private keys,
+    signing, generation, export or P-521 (recorded). The RSA pseudo-handle
+    (0xe1) imports RSA keys without opening a provider.
   - The `rsa` crate needs `alloc`: `user/gala_heap` makes the process
     heap the global allocator (in bcrypt, and in secur32 because Cargo
     then enables `digest`'s `alloc` for the whole build); its arithmetic
@@ -2411,16 +2515,24 @@ ntdll imports.
   friendly display, e-mail, attribute, RDN string), CertNameToStrW
   (X.500 keys, ", " separated, REVERSE), CertFindExtension,
   CertGetPublicKeyLength, CryptImportPublicKeyInfoEx2 (RSA: an
-  RSAPUBLICBLOB into bcrypt).
+  RSAPUBLICBLOB; ECDSA P-256/P-384: an ECCPUBLICBLOB; into bcrypt through
+  its pseudo-handles), CryptVerifyCertificateSignatureEx (RSA PKCS #1 and
+  ECDSA, SHA-1/2), CertGetNameStringW's CERT_NAME_DNS_TYPE (the
+  alternative name's DNS names, else the CN; all of them as a
+  multi-string with CERT_NAME_SEARCH_ALL_NAMES_FLAG).
 - **Certificate stores** (`store.rs`, `query.rs`): a store is a
   reference-counted array of contexts, each a copy of the added
   certificate whose hCertStore is the store and on which the store holds
   one reference (CERT_STORE_ADD_* dispositions, enumerate, find, delete,
   duplicate, close). Enumeration and Find return the next context with
-  one more reference and free the previous one; closing the last
-  reference releases the contexts (a caller's context then keeps a
-  dangling hCertStore, where Windows would keep the store alive). No CRLs
-  or CTLs. The "ROOT" system store (any location; CertOpenStore with
+  one more reference and free the previous one. A context a caller
+  holds holds its store: the context's count carries an "owned" flag,
+  and the store reference is taken when an owned context gets its first
+  caller reference and dropped with its last (or when it leaves the
+  store), so a store lives until its last handle is closed and its last
+  context held outside is freed, and a context's hCertStore stays
+  usable, as on Windows (Schannel's remote certificate relies on it).
+  A copy keeps the added context's encoding type. No CRLs or CTLs. The "ROOT" system store (any location; CertOpenStore with
   the system providers or "System", CertOpenSystemStoreW/A) is a memory
   store filled with **gala's machine root store**, the certificates (DER,
   or PEM with any number) in `%SystemRoot%\System32\gala\roots`
@@ -2435,6 +2547,49 @@ ntdll imports.
   CryptDecodeObjectEx decodes GeneralNames into CERT_ALT_NAME_INFO
   (e-mail, DNS, URL as UTF-16 strings, IPs as blobs, all in one block;
   other choices are recorded and skipped).
+- **Certificate chains** (`chain.rs`; `cert_test` chain.rs, with
+  `user/cert_test/chain/` made by its `make.sh`): engines (the default
+  one, made once per process for HCCE_CURRENT_USER/LOCAL_MACHINE,
+  trusts ROOT and finds issuers in ROOT, CA and MY;
+  CertCreateCertificateChainEngine's trust hExclusiveRoot, else
+  hRestrictedRoot, else ROOT, and search rghAdditionalStore too).
+  CertGetCertificateChain builds one simple chain, at most 8 elements,
+  in one heap block (reference-counted: CertDuplicateCertificateChain):
+  each issuer is found by its subject name in hAdditionalStore and the
+  engine's stores, the best candidate being the one the authority key
+  identifier names, whose signature verifies, that is a trusted root
+  and time valid; the chain ends at a self-signed certificate (subject =
+  issuer, its authority key identifier its own key), else it is
+  CERT_TRUST_IS_PARTIAL_CHAIN (chain level, as Windows reports it).
+  Element errors: NOT_TIME_VALID, NOT_SIGNATURE_VALID (on the signed
+  element), UNTRUSTED_ROOT (a root not in the engine's roots),
+  INVALID_BASIC_CONSTRAINTS (an issuer that is no CA, a path length
+  exceeded; v1/v2 issuers count as CAs only from the engine's own
+  stores), NOT_VALID_FOR_USAGE (keyCertSign against the CA flag;
+  RequestedUsage against the end certificate's EKU, AND/OR),
+  INVALID_EXTENSION | HAS_NOT_SUPPORTED_CRITICAL_EXT, name constraints
+  (not evaluated: INVALID_NAME_CONSTRAINTS |
+  HAS_NOT_SUPPORTED_NAME_CONSTRAINT, fails closed, ROADMAP "Known issues
+  and stopgaps"); with a CERT_CHAIN_REVOCATION_CHECK_* flag
+  REVOCATION_STATUS_UNKNOWN, with IS_OFFLINE_REVOCATION when the
+  certificate names a CRL or OCSP responder (revocation is not checked;
+  never on a self-signed root; the policies' CRYPT_E_REVOCATION_OFFLINE
+  or CRYPT_E_NO_REVOCATION_CHECK). Info: the issuer match
+  (KEY/NAME_MATCH_ISSUER), IS_SELF_SIGNED, HAS_PREFERRED_ISSUER and
+  IS_FROM_EXCLUSIVE_TRUST_STORE on a trusted root; the chain's status
+  is the elements' (info without the bottom nibble).
+  CertVerifyCertificateChainPolicy: BASE (signature, then untrusted
+  root, a partial chain as CERT_E_CHAINING, time, usage, revocation,
+  basic constraints, name constraints, critical extensions, each with
+  its ignore flag, at the first element with the error), SSL (the same
+  with SSL_EXTRA_CERT_CHAIN_POLICY_PARA's fdwChecks, a partial chain as
+  CERT_E_UNTRUSTEDROOT, then the end certificate's EKU for the side and
+  the server name: DNS and IP alternative names, else the subject's
+  CNs, one-label wildcards, CERT_E_CN_NO_MATCH at element 0),
+  BASIC_CONSTRAINTS; the others as BASE (recorded). The order and the
+  element indexes are those Wine's conformance tests record on Windows.
+  A failed policy is recorded as `crypt32.dll!<policy>: <error>` with
+  the chain's error bits, so a refused certificate says why.
 - **DPAPI** (`dpapi.rs`; `dpapi_test`): CryptProtectData/
   CryptUnprotectData with a per-machine master key (32 random bytes kept
   in `HKLM\SOFTWARE\gala\DPAPI` MasterKey, made on first use). gala's own
@@ -2706,7 +2861,7 @@ The kernel's side of OBSERVABILITY.md's dumps; crash reports are under
 SSPI's TLS package, client and server, TLS 1.2 and 1.3: schannel.dll,
 reached through secur32, with rustls as the engine. Status and the next
 steps (winhttp and wininet over it, curl, `gala install`'s downloads,
-crypt32's chain engine) are ROADMAP item TLS.
+crypt32's chain engine as its trust decision) are ROADMAP item TLS.
 
 Tests: `schannel_test` (scenario of the same name; the peers are Nginx
 with OpenSSL on the loopback address, started with `start=`, and the
@@ -2740,10 +2895,10 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   `getrandom` is patched (`vendor/getrandom`: ProcessPrng by
   `raw-dylib`, since the DLLs link without import libraries).
 - Around it: crypt32 (`user/crypt32`) decodes certificates into
-  CERT_CONTEXTs and has memory stores (`store.rs`; "ROOT" holds the
-  machine root store, the other system stores open empty) but no chain
-  engine
-  (`chain.rs`, below); ncrypt imports RSA keys into the Microsoft
+  CERT_CONTEXTs, has memory stores (`store.rs`; "ROOT" holds the
+  machine root store, the other system stores open empty) and the chain
+  engine that decides trust (`chain.rs`, "Certificate chains" under
+  "Cryptography"); ncrypt imports RSA keys into the Microsoft
   Software Key Storage Provider and signs with them (no key generation
   yet); bcrypt has hashes, AES/DES/RC2 and RSA (PKCS#1 v1.5, PSS,
   OAEP). winhttp and wininet are HTTP(S) clients over it, on one
@@ -2763,14 +2918,23 @@ test's own in-process server) and the host tests of `user/schannel_tls`
 - **Manual validation** (SCH_CRED_MANUAL_CRED_VALIDATION or
   ISC_REQ_MANUAL_CRED_VALIDATION): the server's certificate is not
   checked (its handshake signature is).
-- **Automatic validation** (otherwise): rustls' webpki verifier checks
-  a path to a trust anchor of **gala's machine root store**, the
-  certificates (DER or PEM) in `%SystemRoot%\System32\gala\roots`, read
-  when the credential is acquired (`creds::machine_roots`; a missing
-  directory is recorded); validity; and the target name (SNI and the
-  name check; SCH_CRED_NO_SERVERNAME_CHECK skips it). Failures are
-  SEC_E_UNTRUSTED_ROOT, SEC_E_CERT_EXPIRED and SEC_E_WRONG_PRINCIPAL, as
-  documented for automatic validation. Revocation is not checked (the
+- **Automatic validation** (otherwise): crypt32 decides (schannel.dll
+  `trust.rs`, the `schannel_tls::Trust` the engine asks): the server's
+  certificate, with the intermediates it sent in a memory store as
+  hAdditionalStore, chained by CertGetCertificateChain on the default
+  engine (**gala's machine root store**, the certificates in
+  `%SystemRoot%\System32\gala\roots`, crypt32's ROOT store), then
+  CertVerifyCertificateChainPolicy(SSL) with the target name
+  (SCH_CRED_NO_SERVERNAME_CHECK: SECURITY_FLAG_IGNORE_CERT_CN_INVALID).
+  The policy error becomes the SSPI status, as documented for automatic
+  validation: CERT_E_UNTRUSTEDROOT (and a chain that reaches no root)
+  SEC_E_UNTRUSTED_ROOT, CERT_E_EXPIRED SEC_E_CERT_EXPIRED,
+  CERT_E_CN_NO_MATCH SEC_E_WRONG_PRINCIPAL, CERT_E_WRONG_USAGE
+  SEC_E_CERT_WRONG_USAGE, others SEC_E_CERT_UNKNOWN. One trust decision:
+  a program that validates itself (curl's `--cacert` with manual
+  validation, Go, Chromium's issuer lookup) gets the same answer from
+  the same engine. The host tests (`cargo test -p schannel_tls`) plug
+  in webpki with the test CA instead. Revocation is not checked (the
   flags are recorded).
 - **The machine root store's contents**: every full image (`cargo
   xtask iso`, the images `image_modules` makes) ships
@@ -2780,8 +2944,7 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   THIRD_PARTY.md, replaced with `user/roots/update.sh`). It is one file
   among the others there, so a scenario adds its own test CA beside it
   (`ca.cer`), and Schannel and crypt32's ROOT store read the same set
-  (curl's LibreSSL build and Chromium through crypt32, Schannel's
-  callers through it). Boot scenarios ship the bundle only where they
+  (curl's LibreSSL build, Chromium and Schannel all through crypt32). Boot scenarios ship the bundle only where they
   need it (`pk_install_https`); the test CA alone otherwise. The host
   test `public_roots_are_all_trust_anchors` (`cargo test -p
   schannel_tls`) checks that rustls takes every certificate of it as a
@@ -2789,17 +2952,10 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   Windows also updates its roots from Windows Update and fetches missing
   ones on demand; gala's change only with the image (TODO: an update
   path that does not need a new image).
-- **Why in schannel.dll**: crypt32 has no chain engine. Its
-  CertGetCertificateChain gives a chain of the certificate alone,
-  untrusted (CERT_TRUST_IS_UNTRUSTED_ROOT | CERT_TRUST_IS_PARTIAL_CHAIN,
-  recorded), and CertVerifyCertificateChainPolicy reports
-  CERT_E_UNTRUSTEDROOT, so callers that validate themselves (curl with
-  `--cacert`) fail closed instead of ending the process. curl and Git
-  without `--cacert` leave validation to Schannel (`curl_schannel`,
-  `git_https`); curl.se's LibreSSL build reads the ROOT store itself
-  (CertOpenSystemStoreA, `curl`). When crypt32 gets its ROOT
-  store it reads the same directory, and Schannel moves onto its chain
-  engine.
+- **The remote certificate** (SECPKG_ATTR_REMOTE_CERT_CONTEXT): the
+  server's certificate in a memory store holding every certificate it
+  sent (its hCertStore, which curl passes to CertGetCertificateChain as
+  the additional store; the context keeps the store alive).
 - **Server credentials**: the certificate (paCred[0]) and the CNG key it
   names (CERT_NCRYPT_KEY_HANDLE_PROP_ID, or CERT_KEY_PROV_INFO_PROP_ID's
   provider and container, opened with NCryptOpenKey). rustls signs the
@@ -2869,8 +3025,8 @@ NEGOTIATION_INFO, SIZES; other attributes are recorded.
 - TODO (ROADMAP TLS): session resumption (rustls' is off: no cache
   without `std`), client certificates, ECDSA server keys, renegotiation
   requests (SCHANNEL_RENEGOTIATE), SCHANNEL_ALERT tokens (accepted, not
-  sent), revocation, crypt32's stores and chain engine underneath (and
-  a server chain with intermediates from them), DTLS. A client context
+  sent), revocation, a server chain with intermediates from crypt32's
+  stores, DTLS. A client context
   whose first call fails still has a handle (Windows gives none).
 
 ### WinHTTP and WinINet
@@ -5704,8 +5860,8 @@ stations and desktops a program creates are refused until stage 3).
   collection's own list); CertGetIntendedKeyUsage and
   CertGetEnhancedKeyUsage from the extensions (no EKU: every usage,
   CRYPT_E_NOT_FOUND); CertCompareCertificateName; CertVerifyTimeValidity;
-  CryptVerifyCertificateSignatureEx (RSA PKCS #1 with SHA-1/2 through
-  bcrypt); CertControlStore (nothing outside changes a store: resyncs do
+  CryptVerifyCertificateSignatureEx (RSA PKCS #1 and ECDSA P-256/P-384
+  with SHA-1/2 through bcrypt); CertControlStore (nothing outside changes a store: resyncs do
   nothing, change notifications never fire, recorded); CertFindChainInStore
   and CryptAcquireCertificatePrivateKey (no private keys in gala's
   stores); CryptMsgClose/GetParam (no message handles yet).

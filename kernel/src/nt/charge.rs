@@ -64,6 +64,7 @@ pub fn try_charge(process: &Process, pages: u64) -> Result<(), NtStatus> {
     }
     PEAK.fetch_max(COMMITTED.load(Ordering::Relaxed), Ordering::Relaxed);
     process.commit.store(own, Ordering::Relaxed);
+    process.commit_peak.fetch_max(own, Ordering::Relaxed);
     Ok(())
 }
 
@@ -113,6 +114,7 @@ pub fn sync(process: &Process, pages: u64) {
         uncharge_job(process, less);
     }
     process.commit.store(pages, Ordering::Relaxed);
+    process.commit_peak.fetch_max(pages, Ordering::Relaxed);
 }
 
 /// A process joins a job: its charge is now the job's too.

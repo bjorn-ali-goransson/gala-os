@@ -365,6 +365,7 @@ fn create_inner(
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
     };
+    let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
     if let Err(status) = process.add_thread(object.clone()) {
@@ -946,6 +947,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
     };
+    let thread = crate::mm::heap::try_box(thread).map_err(|_| NtStatus::NO_MEMORY)?;
     let object = KObject::new(ObjectBody::Thread(thread)).map_err(|_| NtStatus::NO_MEMORY)?;
     if live {
         THREADS.lock().try_push(object.clone()).map_err(|_| NtStatus::NO_MEMORY)?;

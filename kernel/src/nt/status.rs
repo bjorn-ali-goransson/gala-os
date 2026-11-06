@@ -128,6 +128,8 @@ impl NtStatus {
     /// A console program ended by its console closing (Ctrl+C, close).
     pub const CONTROL_C_EXIT: NtStatus = NtStatus(0xc000_013a);
     pub const INSUFFICIENT_RESOURCES: NtStatus = NtStatus(0xc000_009a);
+    /// Over a pool quota (nt::quota) or a job's process limit.
+    pub const QUOTA_EXCEEDED: NtStatus = NtStatus(0xc000_0044);
     pub const INVALID_CONNECTION: NtStatus = NtStatus(0xc000_0140);
     pub const INVALID_ADDRESS_COMPONENT: NtStatus = NtStatus(0xc000_0207);
     pub const ADDRESS_ALREADY_EXISTS: NtStatus = NtStatus(0xc000_020a);

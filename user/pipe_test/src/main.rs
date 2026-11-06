@@ -816,6 +816,10 @@ extern "system" fn reply_and_go(server: *mut c_void) -> u32 {
         unsafe {
             let ok = ConnectNamedPipe(server, core::ptr::null_mut());
             if ok == 0 && GetLastError() != ERROR_PIPE_CONNECTED {
+                // Giving up (the listen failed under fault injection): a
+                // client that connected anyway (it may, before the listen)
+                // is cut off, or its TransactNamedPipe waits for ever.
+                DisconnectNamedPipe(server);
                 return 1;
             }
             if ReadFile(server, b.as_mut_ptr(), 16, &mut n, core::ptr::null_mut()) == 0 {

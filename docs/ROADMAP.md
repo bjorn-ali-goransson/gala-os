@@ -70,14 +70,16 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: step 5, crypt32's system stores and chain engine (step 4,
-   `gala install`'s HTTPS downloads on winhttp, is done).
+2. **TLS**: step 6 (session resumption, client certificates, ECDSA
+   server keys, revocation; step 5, crypt32's chain engine as the one
+   trust decision, is done).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
 4. **RS**: step B3a's next part (the console switch, the window state
    apart from the compositor in the server kernel).
 5. **R**: R7's next part (network frames, disk reads and input in
-   record/replay), R6's kernel pool and handle quotas, R8's Secure Boot.
+   record/replay), R6's leftovers (what is not charged yet), R8's Secure
+   Boot.
 6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver;
    manifests over HTTPS (step 2's rest); a real Inno Setup installer.
 7. **BR** stage 1's rest (the profile's hotspots).
@@ -120,7 +122,7 @@ has a section under "Open items".
 | Area | Tests |
 |---|---|
 | Virtual memory: VAD, demand-zero paging, allocate/free/protect/query, guard pages and stack growth, copy-on-write | `vm_test`, `guard_test`, `cow_test`, `vmcycle_test`, `commit_test` |
-| Objects, handles, names, symbolic links | `object_test`, `symlink_test` |
+| Objects, handles, names, symbolic links; pool and handle quotas | `object_test`, `symlink_test`, `quota_test` |
 | Waits, events, mutants, semaphores, keyed events, timers | `wait_test`, `sync_test`, `keyed_event_test`, `timer_test`, `smpsem_test`, `smprace_test` |
 | Threads, suspension, context, TEB/PEB/KUSER_SHARED_DATA, process startup | `thread_test`, `threadinfo_test`, `context_test`, `kuser_test`, `peb_test`, `startup_test` |
 | Sections, image sections, memory-mapped files | `section_test`, `image_test`, `filemap_test` |
@@ -147,7 +149,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes, `gala install`'s downloads with a public CA bundle done; crypt32's chain engine next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision) done; revocation, session resumption next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
@@ -180,7 +182,7 @@ has a section under "Open items".
 | R3 | Lock-order checking | done | `sync::lockdep`; WORKFLOW "Lock-order checking (lockdep)" |
 | R4 | Flight recorder, watchdogs, crash record across reboots | done | `watchdog`, `kernel_watchdog`, `crash_record` |
 | R5 | Deterministic simulation in gala-um | done | `cargo xtask sim-test`; one refinement open |
-| R6 | Charging resources to an owner | in progress | commit charge done |
+| R6 | Charging resources to an owner | in progress | commit charge, pool and handle quotas done |
 | R7 | Live mocking: clock control, record/replay, device faults | in progress | clock control, record/replay of time and randomness, disk latency done |
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
@@ -1029,7 +1031,8 @@ schannel.dll on rustls with the RustCrypto provider (`schannel_test`
 against Nginx with OpenSSL and an in-process server; host tests `cargo
 test -p schannel_tls`): SSPI's token rules, EncryptMessage/
 DecryptMessage, QueryContextAttributes, SNI and the name check, ALPN,
-validation against gala's machine root store (`System32\gala\roots`).
+validation against gala's machine root store (`System32\gala\roots`),
+decided by crypt32's chain engine and SSL policy (step 5).
 Not yet run on real Windows (run-all.ps1 runs it when Nginx can be
 started and, as administrator, imports the test CA first). winhttp's
 and wininet's synchronous clients over it, on one engine (steps 1 and
@@ -1076,9 +1079,7 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    if_nametoindex/if_indextoname, kernel32's Module32First/Next (ANSI),
    SSPI texts in FormatMessage, wldap32 stubs. Still open there: the
    pinned curl.se version is fetched from curl.se, which keeps versions
-   from 8.17.0 on; curl's `--cacert` with Schannel (curl's own chain
-   check needs crypt32's chain engine, step 5; the curl.se build has no
-   Schannel to try it with); a smart-HTTP Git server (`git
+   from 8.17.0 on; a smart-HTTP Git server (`git
    http-backend`) and pushes; Schannel's revocation check (the
    scenarios pass `--ssl-no-revoke` / `http.schannelCheckRevoke=false`;
    what Windows does for a certificate with no CRL distribution point
@@ -1098,12 +1099,36 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    Still open there: a download from the real GitHub in a scenario (the
    test VMs have no internet: a host-network scenario could relay one),
    root updates without a new image (Windows Update's role).
-5. crypt32's system stores and chain engine: the ROOT system store
-   from the same directory (CertOpenStore and CertOpenSystemStore open
-   system stores empty today; rustls-native-certs reads it, so aichat,
-   item AI step 2, needs it first), then the chain engine
-   (CertGetCertificateChain, CertVerifyCertificateChainPolicy; Go's TLS
-   and BR verify through them), Schannel then validating through them.
+5. Done: crypt32's system stores and chain engine, and Schannel
+   deciding through them (`cert_test` chain.rs, `schannel_test`, the
+   `--cacert` steps of `curl` and `curl_schannel`; ARCHITECTURE
+   "Certificate chains"): ROOT (gala's machine root store), CA and MY
+   (empty) system stores; CertCreateCertificateChainEngine
+   (hExclusiveRoot, hRestrictedRoot, additional stores),
+   CertGetCertificateChain (issuers from hAdditionalStore and the
+   engine's stores; time, signatures with RSA and ECDSA P-256/P-384
+   through bcrypt, untrusted roots, partial chains, basic constraints,
+   key usage, critical extensions, RequestedUsage),
+   CertVerifyCertificateChainPolicy (BASE, SSL with the server name,
+   BASIC_CONSTRAINTS; the documented CERT_E_* errors and element
+   indexes), CertGetNameStringW's CERT_NAME_DNS_TYPE; a context's
+   hCertStore keeps its store alive, and Schannel's remote certificate
+   carries the server's chain in it (what curl's `--cacert` check
+   reads). Schannel's automatic validation is the same engine and SSL
+   policy (one trust decision; webpki only in the host tests). Still
+   open there: revocation (not checked: with a CERT_CHAIN_REVOCATION_*
+   flag the elements get CERT_TRUST_REVOCATION_STATUS_UNKNOWN, with
+   CERT_TRUST_IS_OFFLINE_REVOCATION when they name a CRL or OCSP
+   responder, and the policies CRYPT_E_REVOCATION_OFFLINE or
+   CRYPT_E_NO_REVOCATION_CHECK, as for a certificate Windows cannot
+   check; the scenarios pass `--ssl-no-revoke`); name constraints (a
+   stopgap: "Known issues and stopgaps"); P-521 keys (one root of the
+   public bundle cannot verify what it signs, recorded); RSA-PSS
+   signatures; issuance policies; AIA fetching of missing
+   intermediates (a chain the server sends incomplete stays partial);
+   CTLs, CRL stores, lower-quality chains; no Windows run of
+   `cert_test`'s chain part yet (its root is an exclusive one, so it
+   needs no administrator).
 6. Also open: session resumption, client certificates, ECDSA server
    keys, revocation, keys persisted across processes.
 
@@ -1151,7 +1176,8 @@ programs import.
    clipboard and DoDragDrop (need user32's clipboard).
 2. crypt32: PFXImportCertStore (PKCS #12), the other decode types,
    CRLs/CTLs, collections' member stores (CertAddStoreToCollection),
-   CryptAcquireCertificatePrivateKey; the chain engine is TLS step 5.
+   CryptAcquireCertificatePrivateKey (the chain engine is done: TLS
+   step 5).
 3. shell32: SHBrowseForFolderW (a dialog).
 4. comctl32: CreateUpDownControl (a new control class); drawing the drag
    image.
@@ -1429,9 +1455,18 @@ counters, as rr does) for long computations, on hosts that have them.
 #### R6. Charging resources to an owner
 
 Done: the commit charge (`nt::charge`, `commit_test`; ARCHITECTURE
-"Commit charge"). Next: kernel pool and handle quotas
-(STATUS_QUOTA_EXCEEDED), so the program using too much fails instead of
-everyone starving. GPU memory is charged here too (item GPU).
+"Commit charge"); kernel pool and handle quotas (`nt::quota`,
+`quota_test`, `quota=`; ARCHITECTURE "Pool and handle quotas"): objects,
+handle entries, pipe buffers and section page tables are charged to the
+process, STATUS_QUOTA_EXCEEDED and the handle limit's
+STATUS_INSUFFICIENT_RESOURCES fail the program using too much. Next:
+1. Charge what grows after an object's creation and what is not charged
+   yet (sockets' buffers, completion ports' queued packets, registry data
+   only if a reason appears: Windows does not charge it); job-wide pool
+   limits; NtSetInformationProcess(ProcessQuotaLimits).
+2. quota_test on real Windows (run-all.ps1): the handle limit's status
+   (ERROR_NO_SYSTEM_RESOURCES is assumed) and its exact count.
+GPU memory is charged here too (item GPU).
 
 #### R7. Live mocking
 
@@ -1624,6 +1659,14 @@ Each entry: what, why it matters, the structural fix, the owning item.
   the UEFI firmware, to investigate), or KVM. Item BR stage 2 (owner),
   T2 (test environment).
 
+- **Name constraints fail closed**: crypt32's chain engine does not
+  evaluate a CA's name constraints extension; a chain through such a CA
+  gets CERT_TRUST_INVALID_NAME_CONSTRAINTS and the policies refuse it
+  (CERT_E_INVALID_NAME), recorded as `crypt32.dll!CertGetCertificateChain(name
+  constraints)`. Accepting it unchecked would let a constrained CA
+  vouch for any name. Structural fix: evaluate permitted and excluded
+  subtrees (DNS, IP, directory names) as RFC 5280 6.1 does. Item TLS.
+
 ### Defects known, not yet fixed
 
 - **console_window step 5 under load**: about 1 run in 20 of the full
@@ -1747,7 +1790,7 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
     process groups, READCONSOLE_CONTROL wake-up keys, the scroll bar,
     rewrap on resize; ConPTY rendering of cell-based console APIs into
     VT, OSC 0 titles, mouse, bracketed paste, VT input.
-  - Resources: pool and handle quotas (R6), job limit messages,
+  - Resources: what pool quotas do not charge yet (R6), job limit messages,
     charging copy-on-write section views, limits on kernel commits;
     nested jobs, job time accounting and the other job limits.
   - Files: directory notification filters for attributes and times.

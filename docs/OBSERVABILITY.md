@@ -81,6 +81,18 @@ port. Lines that tools and agents rely on:
   each process's control handler took the event.
 - `display:` at the end of a boot (virtio-gpu commands, flushes, mode
   changes, errors, resets, the last error).
+- Pool and handle quotas (`nt::quota`; ARCHITECTURE "Pool and handle
+  quotas"): `quota: pid P (x.exe) over its nonpaged pool: U in use + N >
+  limit L` (or `paged pool`, `handle limit`) when a process is refused,
+  its first four times (the rest counted); `quota: <spec>` for a
+  `quota=` boot option; and at the end of a run (gala-um too) `quota:
+  most per process: paged pool K KiB (x.exe pid P), nonpaged pool ...,
+  handles N (...); limits ...`, the largest peaks any process reached
+  against the limits new processes get (how much headroom the defaults
+  leave); during the run `quota: new most per process: nonpaged pool N
+  KiB (x.exe pid P)` each time that largest peak reaches a new power of
+  two (from 256 KiB, or 1024 handles), so a server xtask stops before
+  the end still shows how far it went.
 - Kernel command-line options that add lines: `trace` (every system
   call; `um --trace` in gala-um), `gputrace` (every virtio-gpu command
   and its result), `logtee=C:/dir` (what programs write below a
@@ -120,7 +132,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `syscall` | each call (pid, tid, nr, name, args, status, ns); `wait` on entry to a wait, so a thread blocked for good shows, naming the object waited on (`obj`: its type, `oid`: its identity, the same in every process; the first of several). `events_pid=a,b,..` limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test), and `events_match=<text>` adds every process whose command line contains the text when it starts (a program's processes chosen by what they are: `events_match=network.mojom.NetworkService` for Chromium's network service; scenario `events_match`); 64 processes at most |
 | `image` | the exe and every image view (pid, NT path, base, size) |
 | `thread` | create (start address, TEB), exit (status) |
-| `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit; `session` (a session made after boot: id, its BaseNamedObjects) |
+| `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line) |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
 | `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too; the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts samples lost to a full ring, interrupts off for over 8 sample periods, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads, modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued). Scenario `events_ipc` |
@@ -309,6 +321,9 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    and frame figures, the flight recorder.
 2. From the boot thread (may take locks): every NT thread's system call
    and wait object (with `session N personality nt (name)`), every
+   running process's commit charge and pool and handle quotas
+   (`process: pid P (x.exe) commit N KiB; paged U/L (peak P) nonpaged
+   U/L (peak P) handles N/L (peak P) refused R`, bytes), every
    scheduler thread, the ledger, the statistics, each session's
    windows (`statedump: session N: ... windows ...`) and window stations
    (`statedump: session N window stations: WinSta0 ...`), then
