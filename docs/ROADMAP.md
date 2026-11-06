@@ -70,7 +70,8 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: wininet's HTTP functions (TLS step 2).
+2. **TLS**: curl for Windows on Schannel, then Git's https remotes
+   (TLS step 3).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
 4. **RS**: step B3a (window state apart from composition, presenters).
@@ -143,7 +144,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel and winhttp (synchronous) done; wininet, curl next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine) done; curl next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
 
@@ -742,18 +743,26 @@ DecryptMessage, QueryContextAttributes, SNI and the name check, ALPN,
 validation against gala's machine root store (`System32\gala\roots`).
 Not yet run on real Windows (run-all.ps1 runs it when Nginx can be
 started and, as administrator, imports the test CA first). winhttp's
-synchronous client over it (step 1 below).
+and wininet's synchronous clients over it, on one engine (steps 1 and
+2 below).
 
 **Next**:
 1. Done: winhttp over Schannel, synchronous (`winhttp_test` against the
    same Nginx: http and https GETs, status and headers, Content-Length
    and chunked bodies, an untrusted issuer, a closed port,
-   WinHttpCrackUrl; ARCHITECTURE "WinHTTP"). Still open there:
+   WinHttpCrackUrl; ARCHITECTURE "WinHTTP and WinINet"). Still open there:
    automatic redirects (needed by step 4: GitHub's release URLs
    redirect), connection reuse, asynchronous sessions and status
    callbacks, proxies, authentication.
-2. wininet's HTTP functions on the same code (InternetOpen/Connect,
-   HttpOpenRequest/SendRequest, InternetReadFile).
+2. Done: wininet's HTTP functions on the same engine as winhttp
+   (`user/http_client`; `wininet_test` against the same Nginx:
+   InternetOpenW/ConnectW, HttpOpenRequestW/AddRequestHeadersW/
+   SendRequestW, HttpQueryInfoW with CUSTOM, InternetQueryDataAvailable
+   and InternetReadFile, InternetOpenUrlW, InternetCrackUrlW, an unknown
+   issuer as ERROR_INTERNET_INVALID_CA, a closed port; ARCHITECTURE
+   "WinHTTP and WinINet"). Still open there, besides winhttp's list:
+   the A functions, InternetQueryOptionW, FTP, the cache,
+   InternetTimeFrom/ToSystemTimeW.
 3. curl for Windows (its Schannel backend), unmodified, fetching from
    the in-guest Nginx; then Git's https remotes (MinGit uses curl with
    Schannel).

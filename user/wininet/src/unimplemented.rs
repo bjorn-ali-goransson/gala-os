@@ -3,16 +3,6 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("wininet.dll":
-    HttpAddRequestHeadersW
-    HttpOpenRequestW
-    HttpQueryInfoW
-    HttpSendRequestW
-    InternetAttemptConnect
-    InternetCloseHandle
-    InternetConnectW
-    InternetOpenW
-    InternetReadFile
-    InternetSetOptionW
     InternetTimeFromSystemTimeW
     InternetTimeToSystemTimeW
 );

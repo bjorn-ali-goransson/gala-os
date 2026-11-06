@@ -2551,8 +2551,8 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   address tables are in "Network interfaces"; GetAdaptersAddresses, ICMP
   echo and address-change notification are not supported
   (ERROR_NOT_SUPPORTED or the documented failure, recorded);
-  ConvertLengthToIpv4Mask is computed. winhttp is "WinHTTP" (under
-  "Schannel (TLS)").
+  ConvertLengthToIpv4Mask is computed. winhttp and wininet are
+  "WinHTTP and WinINet" (under "Schannel (TLS)").
 - **uxtheme** (`user/uxtheme`) runs with themes off, the documented
   "classic" state: IsAppThemed and IsThemeActive are FALSE, OpenThemeData
   gives NULL (programs then draw controls themselves), functions taking a
@@ -2633,7 +2633,7 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   FileZilla (W3: FileZilla 3.69.3's imports across user32, gdi32, msvcrt,
   comctl32, shell32, ole32 and others); a function is implemented by
   removing its name from the list.
-- **Stub-only DLLs**: pdh, urlmon, wininet, xolehlp, odbc32, authz,
+- **Stub-only DLLs**: pdh, urlmon, xolehlp, odbc32, authz,
   wintrust, webservices, dhcpcsvc, comdlg32 and oleacc are nothing but
   such stubs. Mostly stubs: userenv (GetUserProfileDirectoryW,
   LoadUserProfileW, UnloadUserProfile: "Accounts and logon"), mpr
@@ -2732,8 +2732,8 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   (`chain.rs`, below); ncrypt imports RSA keys into the Microsoft
   Software Key Storage Provider and signs with them (no key generation
   yet); bcrypt has hashes, AES/DES/RC2 and RSA (PKCS#1 v1.5, PSS,
-  OAEP). winhttp is an HTTP(S) client over it ("WinHTTP" below);
-  wininet is all `gala_stubs` (ROADMAP TLS).
+  OAEP). winhttp and wininet are HTTP(S) clients over it, on one
+  engine ("WinHTTP and WinINet" below).
 
 ### Credentials and certificate validation
 
@@ -2832,33 +2832,75 @@ NEGOTIATION_INFO, SIZES; other attributes are recorded.
   a server chain with intermediates from them), DTLS. A client context
   whose first call fails still has a handle (Windows gives none).
 
-### WinHTTP
+### WinHTTP and WinINet
 
-`user/winhttp` (winhttp.dll): WinHTTP's synchronous client over ws2_32
-and Schannel, as Microsoft's WinHTTP reference documents it. Test:
-`winhttp_test` (C, mingw-w64; against schannel_test's Nginx, which also
-serves plain HTTP on 127.0.0.1:8080).
+`user/winhttp` (winhttp.dll) and `user/wininet` (wininet.dll): the two
+APIs' synchronous HTTP clients over ws2_32 and Schannel, as Microsoft's
+WinHTTP and WinINet references document them, on one engine,
+`user/http_client` (an `rlib`, `no_std` with `alloc`): the connection
+(`net.rs`), the request and response (`request.rs`), URL cracking
+(`url.rs`) and the live-handle list (`handles.rs`). Each DLL is its
+API's functions, flags, options and error codes over it. Tests:
+`winhttp_test` and `wininet_test` (C, mingw-w64; against
+schannel_test's Nginx, which also serves plain HTTP on
+127.0.0.1:8080).
 
-- **Handles** (`lib.rs`): sessions, connections and requests are heap
-  objects; the handle is the object's address, valid while it is in the
-  live list (an SRW lock guards it): an unknown handle is
-  ERROR_INVALID_HANDLE, the wrong kind
-  ERROR_WINHTTP_INCORRECT_HANDLE_TYPE. Each handle copies its parent's
-  settings (user agent, time-outs, secure protocols, redirect policy)
+- **What the APIs share, and so the engine**: WinHTTP kept WinINet's
+  numbers for the query levels and flags (WINHTTP_QUERY_* =
+  HTTP_QUERY_*), the ADDREQ modifiers, the SECURITY_FLAG_IGNORE_* bits
+  (INTERNET_FLAG_IGNORE_CERT_CN_INVALID / _DATE_INVALID too),
+  INTERNET_FLAG_SECURE = WINHTTP_FLAG_SECURE, URL_COMPONENTS' layout
+  and most error codes (ERROR_WINHTTP_* = ERROR_INTERNET_* /
+  ERROR_HTTP_*; the engine's `err`). What differs is the DLL's: the
+  scheme numbers (WinHTTP http 1 / https 2, WinINet 3 / 4); certificate
+  failures, which the engine returns as the SSPI or CERT_E_* status
+  itself (an HRESULT, `is_certificate`) for the DLL to translate
+  (WinHTTP: ERROR_WINHTTP_SECURE_FAILURE; WinINet by kind: an unknown
+  issuer ERROR_INTERNET_INVALID_CA, expired _SEC_CERT_DATE_INVALID,
+  wrong name _SEC_CERT_CN_INVALID, revoked _SEC_CERT_REVOKED, others
+  _SEC_INVALID_CERT); ERROR_WINHTTP_HEADER_SIZE_OVERFLOW, which WinINet
+  lacks (ERROR_HTTP_INVALID_SERVER_RESPONSE there).
+- **Handles** (`handles.rs`, each DLL's `lib.rs`): sessions,
+  connections and requests are heap objects; the handle is the object's
+  address, valid while it is in the DLL's live list (an SRW lock guards
+  it): an unknown handle is ERROR_INVALID_HANDLE, the wrong kind
+  ERROR_WINHTTP_INCORRECT_HANDLE_TYPE (= _INTERNET_). Each handle
+  copies its parent's settings (user agent, time-outs, secure
+  protocols, redirect policy)
   when made, so closing a parent leaves its children working.
   WinHttpSetTimeouts / SetOption / QueryOption: the time-outs,
   CONTEXT_VALUE, USER_AGENT, SECURE_PROTOCOLS, REDIRECT_POLICY,
   SECURITY_FLAGS, HANDLE_TYPE; other options are recorded (SetOption
   accepts and ignores them, QueryOption fails with
   ERROR_WINHTTP_INVALID_OPTION).
-- **WinHttpCrackUrl** (`url.rs`): http and https (other schemes:
-  ERROR_WINHTTP_UNRECOGNIZED_SCHEME), user and password, bracketed IPv6
+- **WinINet's functions** (`user/wininet`): InternetOpenW (DIRECT and
+  the PRECONFIG types: direct, no proxy is configured on gala),
+  InternetConnectW (INTERNET_SERVICE_HTTP; credentials recorded, not
+  sent), HttpOpenRequestW (INTERNET_FLAG_SECURE, the IGNORE_CERT flags,
+  NO_AUTO_REDIRECT; the cache flags have nothing to act on),
+  HttpAddRequestHeadersW, HttpSendRequestW (the request and the
+  response's headers: WinHttpSendRequest plus ReceiveResponse),
+  HttpQueryInfoW (WinHttpQueryHeaders' answers; HTTP_QUERY_CUSTOM's
+  name comes in the buffer), InternetQueryDataAvailable,
+  InternetReadFile (fills the buffer or reaches the end; 0 bytes read
+  is the end, and stays so), InternetOpenUrlW (http and https: a GET
+  of the path and extra info, the given headers added),
+  InternetCrackUrlW, InternetSetOptionW (the time-outs, CONNECT_RETRIES,
+  SECURITY_FLAGS, USER_AGENT, CONTEXT_VALUE; others and the process-wide
+  NULL handle are recorded and accepted), InternetCloseHandle and
+  InternetAttemptConnect (ERROR_SUCCESS: no dial-up). gala's default
+  time-outs: connect 60 s, send and receive 30 s (the response's headers
+  as a receive).
+- **WinHttpCrackUrl / InternetCrackUrlW** (`url.rs`): http and https
+  (other schemes: ERROR_WINHTTP_UNRECOGNIZED_SCHEME; recorded by
+  wininet, whose Windows counterpart also has ftp, file, ...), user and
+  password, bracketed IPv6
   hosts, the default ports, path and extra info (from `?` or `#`), with
   URL_COMPONENTS' conventions (length 0: left out; null pointer:
   pointer into the URL; buffer: a copy or ERROR_INSUFFICIENT_BUFFER
   with the length needed). ICU_DECODE / ICU_ESCAPE are recorded, not
   applied.
-- **The connection** (`net.rs`): WinHttpSendRequest resolves the host
+- **The connection** (`net.rs`): sending a request resolves the host
   (GetAddrInfoW) and connects to its addresses in order (localhost is
   ::1 then 127.0.0.1); failures are ERROR_WINHTTP_NAME_NOT_RESOLVED and
   ERROR_WINHTTP_CANNOT_CONNECT. For WINHTTP_FLAG_SECURE, a Schannel
@@ -2867,7 +2909,7 @@ serves plain HTTP on 127.0.0.1:8080).
   EncryptMessage / DecryptMessage in place (SEC_I_RENEGOTIATE's
   post-handshake messages go back to the token loop). Certificate
   failures (SEC_E_UNTRUSTED_ROOT, _CERT_EXPIRED, _WRONG_PRINCIPAL,
-  CERT_E_*) are ERROR_WINHTTP_SECURE_FAILURE, other SSPI failures
+  CERT_E_*) are the DLL's (above), other SSPI failures
   ERROR_WINHTTP_SECURE_CHANNEL_ERROR. SECURITY_FLAG_IGNORE_CERT_CN_INVALID
   is SCH_CRED_NO_SERVERNAME_CHECK; the other IGNORE flags are manual
   validation (which skips every check: recorded unless all are set).
@@ -2894,16 +2936,21 @@ serves plain HTTP on 127.0.0.1:8080).
   blocks until some body is decoded and gives 0 at the end; a body cut
   short is ERROR_WINHTTP_CONNECTION_ERROR.
 - **What a failure leaves**: every failed step records
-  `winhttp.dll!<step>` (kind "other") with the Winsock or SSPI status
+  `winhttp.dll!<step>` or `wininet.dll!<step>` (kind "other", the
+  request's DLL) with the Winsock or SSPI status
   as detail (`connect` 10061, `TLS handshake` 0x80090325 after
   schannel's own reason, `GetAddrInfoW`, `recv`, `DecryptMessage`,
   `timed out`, `invalid status line`, ...); a panic records its
-  location and ends the process with 0xC0000409.
+  location (`<dll>!panic <file>`) and ends the process with 0xC0000409.
 - **Limits** (recorded where met): asynchronous sessions
-  (WINHTTP_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and WinHttpSetStatusCallback
-  (a `gala_stubs` stub, as is WinHttpTimeFromSystemTime); named proxies
-  (WinHttpOpen fails) and WinHttpGetProxyForUrl; automatic redirects
-  (the 3xx response is returned: `winhttp.dll!automatic redirect`);
+  (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and
+  WinHttpSetStatusCallback (a `gala_stubs` stub, as are
+  WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW); named
+  proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
+  WinINet's FTP and Gopher and its cache (InternetQueryOptionW and the
+  A functions are not exported yet);
+  automatic redirects (the 3xx response is returned:
+  `<dll>!automatic redirect`);
   connection reuse (every request has its own connection, closed with
   its body); the resolve and connect time-outs (the stack's apply);
   authentication, cookies, decompression, HTTP/2, client certificates,

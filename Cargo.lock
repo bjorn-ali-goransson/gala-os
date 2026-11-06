@@ -934,6 +934,10 @@ name = "hostnet_test"
 version = "0.1.0"
 
 [[package]]
+name = "http_client"
+version = "0.1.0"
+
+[[package]]
 name = "image_test"
 version = "0.1.0"
 dependencies = [
@@ -2536,13 +2540,16 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "gala_stubs",
+ "http_client",
 ]
 
 [[package]]
 name = "wininet"
 version = "0.1.0"
 dependencies = [
+ "gala_heap",
  "gala_stubs",
+ "http_client",
 ]
 
 [[package]]

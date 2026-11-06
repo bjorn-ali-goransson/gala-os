@@ -13,3 +13,4 @@ bench = false
 [dependencies]
 gala_heap = { path = "../gala_heap" }
 gala_stubs = { path = "../gala_stubs" }
+http_client = { path = "../http_client" }

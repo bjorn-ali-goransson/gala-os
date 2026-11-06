@@ -867,10 +867,11 @@ xtask network client is involved), and the test retries its connect
 while Nginx starts. On Windows, run-all.ps1 starts the same Nginx from a
 prefix in TEMP and, as an administrator, imports the test CA into
 LocalMachine\Root for the run (skipped otherwise). `nginx_tls` instead
-uses the host's `curl -k` as the client. `winhttp_test` (C, built with
-`user/winhttp_test/build.sh`) uses the same Nginx, also on plain HTTP
-(8080); a failed request names its step in the ledger
-(`winhttp.dll!connect`, `winhttp.dll!TLS handshake`, ...).
+uses the host's `curl -k` as the client. `winhttp_test` and
+`wininet_test` (C, built with their `build.sh`) use the same Nginx, also
+on plain HTTP (8080); a failed request names its step in the ledger
+(`winhttp.dll!connect`, `wininet.dll!TLS handshake`, ...). Both DLLs run
+on `user/http_client`: a change to the engine boots both scenarios.
 
 - Host-test the engine first: `cargo test -p schannel_tls` runs both
   sides in memory (seconds, no QEMU); boot the scenario once those pass.
