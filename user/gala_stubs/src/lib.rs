@@ -20,7 +20,13 @@
 
 #![no_std]
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+// On x86 (the 32-bit DLLs, ARCHITECTURE "Plan: WOW64") ntdll's stdcall
+// exports have undecorated names.
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
     fn NtTerminateProcess(process: isize, status: u32) -> u32;
@@ -46,7 +52,8 @@ pub fn unimplemented(name: &str) -> ! {
 
 /// Defines an exported stub per name (see the crate documentation). The
 /// stubs take no parameters: under the x64 calling convention the caller
-/// owns its arguments, so any call is safe to receive. They live in the
+/// owns its arguments, so any call is safe to receive (on x86 a stdcall
+/// callee would pop them, but a stub never returns). They live in the
 /// `.gstub` section, which gala's ntdll knows: GetProcAddress does not
 /// return them (a program probing for an optional function takes its
 /// fallback), only static imports bind to them.

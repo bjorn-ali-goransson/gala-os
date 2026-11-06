@@ -39,8 +39,7 @@
 use core::arch::global_asm;
 
 use crate::{
-    ExceptionPointers, NtContinue, NtTerminateProcess, call_handlers, rd32, with_handlers,
-    with_modules,
+    ExceptionPointers, NtContinue, NtTerminateProcess, call_handlers, image_of, rd32, with_handlers,
 };
 
 const UNW_FLAG_EHANDLER: u32 = 1;
@@ -263,20 +262,6 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
 
 fn with_tables<R>(f: impl FnOnce(&mut [(usize, u32, u64); MAX_TABLES]) -> R) -> R {
     with_state(|s| f(&mut s.tables))
-}
-
-/// The base of the loaded image containing `pc`, if any.
-fn image_of(pc: usize) -> Option<usize> {
-    with_modules(|m| {
-        m.iter().find_map(|module| {
-            let base = module.base;
-            if base == 0 || pc < base {
-                return None;
-            }
-            let size = rd32(base + rd32(base + 0x3c) as usize + 24 + 56) as usize; // SizeOfImage
-            (pc < base + size).then_some(base)
-        })
-    })
 }
 
 /// Binary search of a sorted RUNTIME_FUNCTION table for `rva`.
@@ -514,21 +499,6 @@ pub extern "system" fn RtlDeleteFunctionTable(table: *const RuntimeFunction) -> 
             None => 0,
         }
     })
-}
-
-/// RtlPcToFileHeader(PcValue, *BaseOfImage): the base of the image
-/// containing `pc` (also stored), or null.
-///
-/// # Safety
-/// `base` must be writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn RtlPcToFileHeader(pc: usize, base: *mut usize) -> usize {
-    let found = image_of(pc).unwrap_or(0);
-    if !base.is_null() {
-        // SAFETY: the caller's output pointer.
-        unsafe { *base = found };
-    }
-    found
 }
 
 // --- Virtual unwinding -------------------------------------------------

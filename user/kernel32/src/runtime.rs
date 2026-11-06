@@ -8,12 +8,13 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use super::arch::*;
 use super::files::WaitForSingleObjectEx;
 use super::process::GetThreadTimes;
 use super::sync::{CreateEventW, ReleaseMutex, ReleaseSemaphore};
 use super::{
     Bool, FALSE, GetLastError, Handle, NtWaitForMultipleObjects, STATUS_SUCCESS, STATUS_TIMEOUT,
-    SetEvent, TRUE, fail, fail_with, teb_u64, timeout, unsupported,
+    SetEvent, TRUE, fail, fail_with, timeout, unsupported,
 };
 
 const WAIT_FAILED: u32 = u32::MAX;
@@ -78,25 +79,20 @@ pub extern "system" fn QueueUserAPC(routine: usize, thread: Handle, data: usize)
 
 /// The current thread's TEB.
 pub(crate) fn teb() -> usize {
-    teb_u64(0x30) as usize
+    teb_read(TEB_SELF)
 }
 
 /// GetCurrentThreadStackLimits: the stack the system reserved for the
-/// thread, from the TEB's DeallocationStack (+0x1478, the reservation's
-/// base) to its StackBase (+0x8).
+/// thread, from the TEB's DeallocationStack (the reservation's base) to
+/// its StackBase.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize) {
     // SAFETY: the caller passes writable pointers, as documented.
     unsafe {
-        low.write(teb_u64(0x1478) as usize);
-        high.write(teb_u64(0x8) as usize);
+        low.write(teb_read(TEB_DEALLOCATION_STACK));
+        high.write(teb_read(TEB_STACK_BASE));
     }
 }
-
-/// TEB.GuaranteedStackBytes (x64 offset 0x1748).
-const TEB_GUARANTEED_STACK_BYTES: usize = 0x1748;
-/// TEB.HardErrorMode (x64 offset 0x16b0).
-const TEB_HARD_ERROR_MODE: usize = 0x16b0;
 
 /// SetThreadStackGuarantee: raises the stack the thread keeps for its
 /// stack-overflow handler (never lowers it) and returns the previous
@@ -445,7 +441,11 @@ pub extern "system" fn VirtualQueryEx(
     if status != STATUS_SUCCESS { fail(status, 0) } else { ret }
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtCreateJobObject(out: *mut Handle, access: u32, attributes: *const c_void) -> u32;
     fn NtAssignProcessToJobObject(job: Handle, process: Handle) -> u32;
@@ -652,7 +652,11 @@ pub extern "system" fn GetThreadDescription(thread: Handle, out: *mut *mut u16) 
     0
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
 }
@@ -672,10 +676,7 @@ pub extern "system" fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *m
     if status != STATUS_SUCCESS {
         return fail(status, FALSE);
     }
-    let mut basic = [0u8; 64];
-    // SAFETY: a 64-byte SYSTEM_BASIC_INFORMATION buffer.
-    unsafe { NtQuerySystemInformation(0, basic.as_mut_ptr(), 64, core::ptr::null_mut()) };
-    let processors = u64::from(basic[56].max(1));
+    let processors = u64::from(super::basic_information().processors.max(1));
     let elapsed = tod[1].saturating_sub(tod[0]).max(1) * processors;
     // SAFETY: the caller's outputs (each may be null).
     unsafe {
@@ -692,7 +693,11 @@ pub extern "system" fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *m
     TRUE
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtSetInformationProcess(process: Handle, class: u32, buf: *const u8, len: u32) -> u32;
 }

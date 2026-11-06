@@ -491,29 +491,31 @@ pub extern "system" fn HeapUnlock(heap: Handle) -> Bool {
 /// is valid (Valid, ShareCount 1, Win32Protection, Shared for image and
 /// mapped pages); other pages get 0.
 #[unsafe(no_mangle)]
-pub extern "system" fn K32QueryWorkingSetEx(process: Handle, pv: *mut u64, cb: u32) -> Bool {
+pub extern "system" fn K32QueryWorkingSetEx(process: Handle, pv: *mut usize, cb: u32) -> Bool {
     const MEM_COMMIT: u32 = 0x1000;
     const MEM_PRIVATE: u32 = 0x2_0000;
-    if pv.is_null() || (cb as usize) < 16 {
+    // An entry: VirtualAddress, VirtualAttributes (a ULONG_PTR).
+    const ENTRY: usize = 2 * size_of::<usize>();
+    if pv.is_null() || (cb as usize) < ENTRY {
         return fail_with(ERROR_BAD_LENGTH, FALSE);
     }
-    for i in 0..cb as usize / 16 {
-        // SAFETY: the caller's array of cb / 16 entries.
+    for i in 0..cb as usize / ENTRY {
+        // SAFETY: the caller's array of cb / ENTRY entries.
         let address = unsafe { pv.add(2 * i).read_unaligned() };
-        let mut mbi = [0u64; 6];
+        let mut mbi = MemoryBasic::default();
         let n = super::runtime::VirtualQueryEx(
             process,
             address as *const c_void,
-            mbi.as_mut_ptr().cast(),
-            48,
+            (&raw mut mbi).cast(),
+            size_of::<MemoryBasic>(),
         );
         if n == 0 && i == 0 && GetLastError() == ERROR_INVALID_HANDLE {
             return FALSE;
         }
-        let (state, protect, kind) = (mbi[4] as u32, (mbi[4] >> 32) as u32, mbi[5] as u32);
-        let mut attributes = 0u64;
+        let (state, protect, kind) = (mbi.state, mbi.protect, mbi.kind);
+        let mut attributes = 0usize;
         if n != 0 && state == MEM_COMMIT && protect & 0x01 == 0 {
-            attributes = 1 | (1 << 1) | (u64::from(protect & 0x7ff) << 4);
+            attributes = 1 | (1 << 1) | ((protect & 0x7ff) as usize) << 4;
             if kind != MEM_PRIVATE {
                 attributes |= 1 << 15;
             }
@@ -610,7 +612,8 @@ pub extern "system" fn GetNamedPipeServerProcessId(_pipe: Handle, _id: *mut u32)
     fail_with(ERROR_NOT_SUPPORTED, FALSE)
 }
 
-/// Wow64GetThreadContext: no thread on gala runs under WOW64.
+/// Wow64GetThreadContext: not yet (a 64-bit debugger's view of a 32-bit
+/// thread: ThreadWow64Context, ROADMAP WOW); fails as for a native thread.
 #[unsafe(no_mangle)]
 pub extern "system" fn Wow64GetThreadContext(_thread: Handle, _context: *mut c_void) -> Bool {
     fail_with(ERROR_INVALID_PARAMETER, FALSE)
@@ -724,7 +727,11 @@ pub extern "system" fn QueryInterruptTime(out: *mut u64) {
     let _ = super::mapping::QueryUnbiasedInterruptTime(out);
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtCompareObjects(first: Handle, second: Handle) -> u32;
 }
@@ -807,8 +814,10 @@ pub extern "system" fn K32GetMappedFileNameW(
     if status != STATUS_SUCCESS {
         return fail(status, 0);
     }
-    let length = (buf[0] & 0xffff) as usize / 2;
-    let text = buf[1] as *const u16;
+    // SAFETY: the UNICODE_STRING the kernel wrote at the buffer's start.
+    let us = unsafe { &*buf.as_ptr().cast::<UnicodeString>() };
+    let length = usize::from(us.length) / 2;
+    let text = us.buffer;
     let n = length.min(size as usize - 1);
     // SAFETY: the string the kernel wrote into `buf`; the caller's buffer.
     unsafe {

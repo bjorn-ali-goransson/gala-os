@@ -272,7 +272,11 @@ pub extern "system" fn GetComputerNameA(buf: *mut u8, size: *mut u32) -> Bool {
     GetComputerNameExA(0, buf, size)
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenSymbolicLinkObject(
         handle: *mut Handle,

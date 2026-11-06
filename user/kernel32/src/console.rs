@@ -142,7 +142,11 @@ pub(crate) fn kind(h: Handle) -> Option<bool> {
 /// gala's standard handles are not consoles (redirected output, which the
 /// JDK and the Go runtime then treat as such).
 fn console_device(h: Handle) -> Option<bool> {
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn NtQueryVolumeInformationFile(
             h: Handle,
@@ -714,7 +718,11 @@ pub extern "system" fn GetLargestConsoleWindowSize(h: Handle) -> u32 {
     }
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaConsoleMode(mode: u32, set: u32) -> u32;
     fn GalaConsoleCtrl(seen: *mut u32) -> u32;

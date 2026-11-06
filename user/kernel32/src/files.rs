@@ -19,7 +19,11 @@ pub extern "system" fn GetFileSize(h: Handle, high: *mut u32) -> u32 {
     size as u32
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtDeviceIoControlFile(
         h: Handle,
@@ -80,13 +84,10 @@ unsafe extern "system" {
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 1;
 const LOCKFILE_EXCLUSIVE_LOCK: u32 = 2;
 
-/// The byte offset in an OVERLAPPED (Offset at 16, OffsetHigh at 20).
+/// The byte offset in an OVERLAPPED.
 fn overlapped_offset(overlapped: *const c_void) -> u64 {
     // SAFETY: the caller's OVERLAPPED.
-    unsafe {
-        let p = overlapped.cast::<u32>();
-        u64::from(*p.add(4)) | u64::from(*p.add(5)) << 32
-    }
+    unsafe { (*overlapped.cast::<Overlapped>()).position() }
 }
 
 /// LockFileEx: a byte-range lock at the OVERLAPPED's offset, shared or
@@ -105,10 +106,10 @@ pub extern "system" fn LockFileEx(
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
     let (offset, length) = (overlapped_offset(overlapped), u64::from(low) | u64::from(high) << 32);
-    // SAFETY: hEvent at 24 in the caller's OVERLAPPED, which is also the
+    // SAFETY: the caller's OVERLAPPED (its hEvent), which is also the
     // IO_STATUS_BLOCK.
     let status = unsafe {
-        let event = *overlapped.cast::<u8>().add(24).cast::<Handle>();
+        let event = (*overlapped.cast::<Overlapped>()).event as Handle;
         NtLockFile(
             h,
             event,
@@ -300,12 +301,12 @@ pub extern "system" fn ReadDirectoryChangesW(
         }
         return TRUE;
     }
-    let ov = overlapped.cast::<usize>();
+    let ov = overlapped.cast::<Overlapped>();
     // SAFETY: the caller's OVERLAPPED, valid until the request completes.
     let event = unsafe {
-        *ov = STATUS_PENDING as usize;
-        *ov.add(1) = 0;
-        *ov.add(3)
+        (*ov).internal = STATUS_PENDING as usize;
+        (*ov).internal_high = 0;
+        (*ov).event
     };
     let (apc, context) = if routine != 0 {
         (io_completion_trampoline as *const () as usize, routine)
@@ -688,14 +689,14 @@ pub extern "system" fn GetOverlappedResult(
 ) -> Bool {
     const ERROR_IO_INCOMPLETE: u32 = 996;
     // SAFETY: the caller's OVERLAPPED (Internal, InternalHigh, offsets,
-    // hEvent at index 3).
+    // hEvent).
     unsafe {
         let status = || core::ptr::read_volatile(overlapped) as u32;
         if status() == STATUS_PENDING {
             if wait == FALSE {
                 return fail_with(ERROR_IO_INCOMPLETE, FALSE);
             }
-            let event = *overlapped.add(3) as Handle;
+            let event = (*overlapped.cast::<Overlapped>()).event as Handle;
             let on = if event.is_null() { file } else { event };
             while status() == STATUS_PENDING {
                 if NtWaitForSingleObject(on, 0, core::ptr::null()) != 0 {
@@ -757,7 +758,6 @@ fn system_root(out: &mut [u8; 280], sub: &[u8]) -> usize {
 }
 
 /// The Windows directory's subdirectories these functions return.
-const SYSTEM32: &[u8] = b"\\system32";
 const SYSWOW64: &[u8] = b"\\SysWOW64";
 
 /// GetWindowsDirectoryW / A, GetSystemWindowsDirectoryW, GetSystemDirectoryW
@@ -796,7 +796,7 @@ pub extern "system" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(SYSTEM32, buf, size)
+    put_directory(super::arch::SYSTEM_DIRECTORY, buf, size)
 }
 
 /// GetSystemWow64DirectoryW / A: where the 32-bit system DLLs are
@@ -814,7 +814,58 @@ pub extern "system" fn GetSystemWow64DirectoryA(buf: *mut u8, size: u32) -> u32 
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryA(buf: *mut u8, size: u32) -> u32 {
-    put_directory(SYSTEM32, buf, size)
+    put_directory(super::arch::SYSTEM_DIRECTORY, buf, size)
+}
+
+// ---- WOW64 file system redirection (the 32-bit kernel32's) ----
+//
+// Per thread, in wow64.dll's file thunks (ARCHITECTURE "Plan: WOW64"): the
+// 32-bit ntdll's RtlWow64EnableFsRedirection(Ex) turn it off and on.
+
+#[cfg(target_arch = "x86")]
+#[link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")]
+unsafe extern "system" {
+    fn RtlWow64EnableFsRedirectionEx(disable: usize, old: *mut usize) -> u32;
+    fn RtlWow64EnableFsRedirection(enable: u8) -> u32;
+}
+
+/// Wow64DisableWow64FsRedirection(*OldValue): turns redirection off for
+/// this thread; *OldValue gets what Wow64RevertWow64FsRedirection restores.
+#[cfg(target_arch = "x86")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64DisableWow64FsRedirection(old: *mut usize) -> Bool {
+    let mut previous = 0;
+    // SAFETY: our output; ntdll sets this thread's state.
+    let status = unsafe { RtlWow64EnableFsRedirectionEx(1, &mut previous) };
+    if status != 0 {
+        return fail(status, FALSE);
+    }
+    if !old.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *old = previous };
+    }
+    TRUE
+}
+
+/// Wow64RevertWow64FsRedirection(OldValue): back to the state
+/// Wow64DisableWow64FsRedirection saved.
+#[cfg(target_arch = "x86")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64RevertWow64FsRedirection(old: usize) -> Bool {
+    let mut previous = 0;
+    // SAFETY: our output; ntdll sets this thread's state.
+    let status = unsafe { RtlWow64EnableFsRedirectionEx(old, &mut previous) };
+    if status != 0 { fail(status, FALSE) } else { TRUE }
+}
+
+/// Wow64EnableWow64FsRedirection(Enable): redirection on or off for this
+/// thread (a BOOLEAN result).
+#[cfg(target_arch = "x86")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64EnableWow64FsRedirection(enable: u8) -> u8 {
+    // SAFETY: ntdll sets this thread's state.
+    let status = unsafe { RtlWow64EnableFsRedirection(enable) };
+    if status != 0 { fail(status, 0) } else { 1 }
 }
 
 /// The AddDllDirectory directories (full paths, NUL-terminated), at most

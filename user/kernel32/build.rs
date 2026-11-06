@@ -1,6 +1,6 @@
 //! Export forwarders: these kernel32 exports name ntdll's functions, as on
 //! Windows (the loader follows them; defining them here would shadow the
-//! ntdll imports of the same name).
+//! ntdll imports of the same name). Those of the architecture built.
 //!
 //! The version resource: programs read the system's version from
 //! kernel32.dll's VS_VERSION_INFO (Chromium's base::win::OSInfo CHECKs it
@@ -101,20 +101,28 @@ fn entry(out: &mut Vec<u8>, kind: u16, name: u16, language: u16, data: &[u8]) {
 }
 
 fn main() {
-    for name in [
-        "RtlLookupFunctionEntry",
-        "RtlVirtualUnwind",
-        "RtlPcToFileHeader",
-        "RtlCaptureContext",
-        "RtlUnwind",
-        "RtlUnwindEx",
-        "RtlRestoreContext",
-        "RtlAddFunctionTable",
-        "RtlDeleteFunctionTable",
-        "RtlCaptureStackBackTrace",
-        "RtlInstallFunctionTableCallback",
-        "VerSetConditionMask",
-    ] {
+    // The x86 build (SysWOW64's kernel32) forwards what the 32-bit ntdll
+    // has: x86 has no function tables or virtual unwinding.
+    let forwarders: &[&str] = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86") => {
+            &["RtlPcToFileHeader", "RtlCaptureContext", "RtlUnwind", "VerSetConditionMask"]
+        }
+        _ => &[
+            "RtlLookupFunctionEntry",
+            "RtlVirtualUnwind",
+            "RtlPcToFileHeader",
+            "RtlCaptureContext",
+            "RtlUnwind",
+            "RtlUnwindEx",
+            "RtlRestoreContext",
+            "RtlAddFunctionTable",
+            "RtlDeleteFunctionTable",
+            "RtlCaptureStackBackTrace",
+            "RtlInstallFunctionTableCallback",
+            "VerSetConditionMask",
+        ],
+    };
+    for name in forwarders {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name}=ntdll.{name}");
     }
 

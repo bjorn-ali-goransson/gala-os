@@ -1210,6 +1210,35 @@ fn with_modules<R>(f: impl FnOnce(&mut [Module; MAX_MODULES]) -> R) -> R {
     f(unsafe { &mut *MODULES.0.get() })
 }
 
+/// The base of the loaded image containing `pc`, if any.
+pub(crate) fn image_of(pc: usize) -> Option<usize> {
+    with_modules(|m| {
+        m.iter().find_map(|module| {
+            let base = module.base;
+            if base == 0 || pc < base {
+                return None;
+            }
+            let size = rd32(base + rd32(base + 0x3c) as usize + 24 + 56) as usize; // SizeOfImage (PE32 and PE32+)
+            (pc < base + size).then_some(base)
+        })
+    })
+}
+
+/// RtlPcToFileHeader(PcValue, *BaseOfImage): the base of the image
+/// containing `pc` (also stored), or null.
+///
+/// # Safety
+/// `base` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlPcToFileHeader(pc: usize, base: *mut usize) -> usize {
+    let found = image_of(pc).unwrap_or(0);
+    if !base.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *base = found };
+    }
+    found
+}
+
 /// The slot of the module named `name` (already normalized).
 fn find_module(name: &[u8]) -> Option<usize> {
     with_modules(|m| m.iter().position(|m| m.base != 0 && &m.name[..m.name_len] == name))

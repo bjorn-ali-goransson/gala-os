@@ -5,7 +5,11 @@
 use super::sync::ansi_to_wide;
 use super::*;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtCreateSection(
         handle: *mut Handle,
@@ -122,7 +126,11 @@ fn named_path(name: *const u16, path: &mut [u16; 300]) -> Option<usize> {
     super::sync::session_path(name, path)
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenSection(handle: *mut Handle, access: u32, attributes: *const ObjectAttributes) -> u32;
 }
@@ -385,17 +393,12 @@ pub extern "system" fn TerminateProcess(process: Handle, code: u32) -> Bool {
 /// GetExitCodeProcess: the exit status, or STILL_ACTIVE (259).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetExitCodeProcess(process: Handle, code: *mut u32) -> Bool {
-    // PROCESS_BASIC_INFORMATION: ExitStatus first.
-    let mut info = [0u8; 48];
-    // SAFETY: a 48-byte buffer.
-    let status = unsafe {
-        NtQueryInformationProcess(process as isize, 0, info.as_mut_ptr(), 48, core::ptr::null_mut())
+    let info = match process_basic(process) {
+        Ok(b) => b,
+        Err(status) => return fail(status, FALSE),
     };
-    if status != STATUS_SUCCESS {
-        return fail(status, FALSE);
-    }
     // SAFETY: the caller's output pointer.
-    unsafe { *code = u32::from_le_bytes([info[0], info[1], info[2], info[3]]) };
+    unsafe { *code = info.exit_status };
     TRUE
 }
 
@@ -491,8 +494,8 @@ pub extern "system" fn SetEnvironmentVariableA(name: *const u8, value: *const u8
 
 /// The PEB's ImageBaseAddress.
 pub(crate) fn image_base() -> Handle {
-    // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
-    unsafe { *((teb_u64(0x60) as usize + 0x10) as *const Handle) }
+    // SAFETY: the PEB's ImageBaseAddress.
+    unsafe { *((peb() + PEB_IMAGE_BASE) as *const Handle) }
 }
 
 #[unsafe(no_mangle)]
@@ -626,21 +629,19 @@ pub extern "system" fn FreeConsole() -> Bool {
 /// SetStdHandle: replaces a standard handle in the process parameters.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetStdHandle(which: u32, h: Handle) -> Bool {
-    let offset = match which as i32 {
-        -10 => 0x20,
-        -11 => 0x28,
-        -12 => 0x30,
-        _ => return fail_with(6, FALSE),
+    let Some(offset) = std_handle_offset(which) else {
+        return fail_with(6, FALSE);
     };
-    // SAFETY: the PEB's process parameters are always set.
-    unsafe {
-        let params = *((teb_u64(0x60) as usize + 0x20) as *const usize);
-        *((params + offset) as *mut Handle) = h;
-    }
+    // SAFETY: the process parameters' standard handle.
+    unsafe { *((process_parameters() + offset) as *mut Handle) = h };
     TRUE
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn RtlRaiseException(record: *mut u8);
 }
@@ -663,17 +664,32 @@ pub unsafe extern "system" fn RaiseException(
     count: u32,
     args: *const usize,
 ) {
-    let mut record = [0u64; 19];
+    // EXCEPTION_RECORD.
+    #[repr(C)]
+    struct ExceptionRecord {
+        code: u32,
+        flags: u32,
+        record: usize,
+        address: usize,
+        count: u32,
+        information: [usize; 15],
+    }
     let count = if args.is_null() { 0 } else { count.min(EXCEPTION_MAXIMUM_PARAMETERS) };
-    record[0] = u64::from(code) | (u64::from(flags & EXCEPTION_NONCONTINUABLE) << 32);
-    record[3] = u64::from(count);
+    let mut record = ExceptionRecord {
+        code,
+        flags: flags & EXCEPTION_NONCONTINUABLE,
+        record: 0,
+        address: 0,
+        count,
+        information: [0; 15],
+    };
     for i in 0..count as usize {
         // SAFETY: the caller's array of `count` values.
-        record[4 + i] = unsafe { *args.add(i) } as u64;
+        record.information[i] = unsafe { *args.add(i) };
     }
     // SAFETY: a complete EXCEPTION_RECORD; RtlRaiseException fills in
     // ExceptionAddress.
-    unsafe { RtlRaiseException(record.as_mut_ptr().cast()) };
+    unsafe { RtlRaiseException((&raw mut record).cast()) };
 }
 
 /// SetUnhandledExceptionFilter: remembered and returned (UnhandledExceptionFilter
@@ -807,6 +823,10 @@ pub extern "system" fn MoveFileW(from: *const u16, to: *const u16) -> Bool {
     rename(from, to, false)
 }
 
+/// FILE_RENAME_INFORMATION's FileName: after ReplaceIfExists (padded),
+/// RootDirectory (a HANDLE) and FileNameLength (20 on x64, 12 on x86).
+pub(crate) const RENAME_HEADER: usize = 2 * size_of::<usize>() + 4;
+
 /// Renames `from` to `to` in one step (FileRenameInformation); `replace`:
 /// an existing `to` is replaced atomically (ReplaceIfExists).
 pub(crate) fn rename(from: *const u16, to: *const u16, replace: bool) -> Bool {
@@ -827,15 +847,17 @@ pub(crate) fn rename(from: *const u16, to: *const u16, replace: bool) -> Bool {
     };
     // FILE_RENAME_INFORMATION: ReplaceIfExists, RootDirectory,
     // FileNameLength, FileName.
-    let mut info = [0u8; 20 + 2 * MAX_PATH_CHARS];
+    let mut info = [0u8; RENAME_HEADER + 2 * MAX_PATH_CHARS];
     info[0] = u8::from(replace);
     let name = target.as_slice();
-    info[16..20].copy_from_slice(&((name.len() * 2) as u32).to_le_bytes());
+    let length_at = RENAME_HEADER - 4;
+    info[length_at..RENAME_HEADER].copy_from_slice(&((name.len() * 2) as u32).to_le_bytes());
     for (i, c) in name.iter().enumerate() {
-        info[20 + 2 * i..22 + 2 * i].copy_from_slice(&c.to_le_bytes());
+        let at = RENAME_HEADER + 2 * i;
+        info[at..at + 2].copy_from_slice(&c.to_le_bytes());
     }
     let mut iosb = [0usize; 2];
-    let len = 20 + 2 * name.len();
+    let len = RENAME_HEADER + 2 * name.len();
     // SAFETY: a buffer of `len` bytes.
     let status = unsafe { NtSetInformationFile(h, &mut iosb, info.as_ptr(), len as u32, 10) };
     CloseHandle(h);

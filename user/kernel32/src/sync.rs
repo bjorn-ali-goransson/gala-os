@@ -7,7 +7,11 @@
 use super::*;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenEvent(handle: *mut Handle, access: u32, attributes: *const ObjectAttributes) -> u32;
     fn NtClearEvent(h: Handle) -> u32;
@@ -42,8 +46,8 @@ pub(crate) fn ansi_to_wide(s: *const u8, out: &mut [u16]) -> Option<usize> {
 
 /// PEB.SessionId: the caller's session.
 pub(crate) fn session_id() -> u32 {
-    // SAFETY: gs:[0x60] is the PEB; SessionId is at +0x2c0.
-    unsafe { *((teb_u64(0x60) as usize + 0x2c0) as *const u32) }
+    // SAFETY: the TEB's PEB; its SessionId.
+    unsafe { *((teb_read(TEB_PEB) + PEB_SESSION_ID) as *const u32) }
 }
 
 /// Writes `<the session's BaseNamedObjects>\<name>` (UTF-16, `name`
@@ -87,7 +91,7 @@ pub(crate) fn session_path(name: *const u16, path: &mut [u16]) -> Option<usize> 
 /// bInheritHandle) ask for an inheritable handle.
 pub(crate) fn inheritable(attributes: *mut c_void) -> bool {
     // SAFETY: the caller's SECURITY_ATTRIBUTES (or NULL).
-    !attributes.is_null() && unsafe { *attributes.cast::<u8>().add(16).cast::<i32>() } != 0
+    !attributes.is_null() && unsafe { (*attributes.cast::<SecurityAttributes>()).inherit } != 0
 }
 
 const OBJ_INHERIT: u32 = 0x2;
@@ -297,14 +301,19 @@ pub extern "system" fn ReleaseMutex(h: Handle) -> Bool {
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
-/// RTL_CRITICAL_SECTION (x64, 40 bytes): ntdll's (RtlEnterCriticalSection
+/// RTL_CRITICAL_SECTION (40 bytes on x64; on x86 24, smaller than this:
+/// only a pointer to it is passed): ntdll's (RtlEnterCriticalSection
 /// and friends), so sections work whichever DLL a program calls.
 #[repr(C)]
 pub struct CriticalSection {
     words: [usize; 5],
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn RtlInitializeCriticalSection(cs: *mut CriticalSection) -> u32;
     fn RtlDeleteCriticalSection(cs: *mut CriticalSection) -> u32;
@@ -354,7 +363,11 @@ pub extern "system" fn LeaveCriticalSection(cs: *mut CriticalSection) {
 
 // --- Semaphores ----------------------------------------------------------
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtCreateSemaphore(
         handle: *mut Handle,
@@ -462,7 +475,7 @@ fn backoff(spins: &mut u32) {
 // SRWLOCK is one pointer: 0 when free, EXCLUSIVE when held exclusively,
 // otherwise the number of shared holders.
 
-const EXCLUSIVE: usize = 1 << 63;
+const EXCLUSIVE: usize = 1 << (usize::BITS - 1);
 
 fn srw(lock: *mut usize) -> &'static AtomicUsize {
     // SAFETY: the caller's pointer-sized, aligned SRWLOCK.
@@ -664,64 +677,24 @@ pub extern "system" fn InitOnceExecuteOnce(
 
 // --- Interlocked singly linked lists -------------------------------------
 //
-// SLIST_HEADER (x64, 16 bytes): the first entry in the high quadword (bits
-// 4..63, bit 0 = HeaderType 1), depth (16 bits) and a sequence number (48
-// bits) in the low one; both change together with cmpxchg16b, so a pop
-// cannot be fooled by an entry popped and pushed again meanwhile.
+// SLIST_HEADER is the architecture's (`x64.rs`, `x86.rs`): the first
+// entry, the depth and a sequence number, changed together by one
+// compare-exchange so a pop cannot be fooled by an entry popped and pushed
+// again meanwhile.
 
-#[repr(C, align(16))]
-pub struct SListHeader {
-    low: u64,
-    high: u64,
-}
-
-#[repr(C)]
-pub struct SListEntry {
-    next: *mut SListEntry,
-}
-
-/// Compares the header with `old` and, if equal, stores `new`; returns
-/// the value seen.
-fn cas16(head: *mut SListHeader, old: (u64, u64), new: (u64, u64)) -> (u64, u64) {
-    let (mut low, mut high) = old;
-    // SAFETY: a 16-byte aligned SLIST_HEADER; cmpxchg16b compares rdx:rax
-    // with it and stores rcx:rbx if equal, else loads it into rdx:rax.
-    // rbx is reserved by LLVM, so it is swapped in and out around the
-    // instruction.
-    unsafe {
-        core::arch::asm!(
-            "xchg rbx, {new_low}",
-            "lock cmpxchg16b [{head}]",
-            "mov rbx, {new_low}",
-            head = in(reg) head,
-            new_low = inout(reg) new.0 => _,
-            in("rcx") new.1,
-            inout("rax") low,
-            inout("rdx") high,
-        );
-    }
-    (low, high)
-}
-
-fn read_header(head: *mut SListHeader) -> (u64, u64) {
-    // A cmpxchg16b that fails (or rewrites the same value) reads the
-    // header atomically.
-    cas16(head, (0, 0), (0, 0))
-}
-
-fn first(high: u64) -> *mut SListEntry {
-    (high & !0xf) as *mut SListEntry
-}
+use super::arch::{
+    SListEntry, SListHeader, slist_cas, slist_depth, slist_first, slist_init, slist_read,
+    slist_value,
+};
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InitializeSListHead(head: *mut SListHeader) {
-    // SAFETY: the caller's aligned header.
-    unsafe { head.write(SListHeader { low: 0, high: 1 }) };
+    slist_init(head);
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn QueryDepthSList(head: *mut SListHeader) -> u16 {
-    read_header(head).0 as u16
+    slist_depth(slist_read(head))
 }
 
 #[unsafe(no_mangle)]
@@ -729,16 +702,14 @@ pub extern "system" fn InterlockedPushEntrySList(
     head: *mut SListHeader,
     entry: *mut SListEntry,
 ) -> *mut SListEntry {
-    let mut old = read_header(head);
+    let mut old = slist_read(head);
     loop {
         // SAFETY: the caller's aligned entry, not on any list.
-        unsafe { (*entry).next = first(old.1) };
-        let depth = (old.0 as u16).wrapping_add(1);
-        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
-        let new = (u64::from(depth) | sequence << 16, entry as u64 | 1);
-        let seen = cas16(head, old, new);
+        unsafe { (*entry).next = slist_first(old) };
+        let new = slist_value(old, entry, slist_depth(old).wrapping_add(1));
+        let seen = slist_cas(head, old, new);
         if seen == old {
-            return first(old.1);
+            return slist_first(old);
         }
         old = seen;
     }
@@ -746,19 +717,17 @@ pub extern "system" fn InterlockedPushEntrySList(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InterlockedPopEntrySList(head: *mut SListHeader) -> *mut SListEntry {
-    let mut old = read_header(head);
+    let mut old = slist_read(head);
     loop {
-        let top = first(old.1);
+        let top = slist_first(old);
         if top.is_null() {
             return top;
         }
         // SAFETY: entries stay valid while on the list (the caller's
         // contract); a stale read is caught by the sequence number.
         let next = unsafe { (*top).next };
-        let depth = (old.0 as u16).wrapping_sub(1);
-        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
-        let new = (u64::from(depth) | sequence << 16, next as u64 | 1);
-        let seen = cas16(head, old, new);
+        let new = slist_value(old, next, slist_depth(old).wrapping_sub(1));
+        let seen = slist_cas(head, old, new);
         if seen == old {
             return top;
         }
@@ -768,15 +737,14 @@ pub extern "system" fn InterlockedPopEntrySList(head: *mut SListHeader) -> *mut 
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InterlockedFlushSList(head: *mut SListHeader) -> *mut SListEntry {
-    let mut old = read_header(head);
+    let mut old = slist_read(head);
     loop {
-        if first(old.1).is_null() {
+        if slist_first(old).is_null() {
             return core::ptr::null_mut();
         }
-        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
-        let seen = cas16(head, old, (sequence << 16, 1));
+        let seen = slist_cas(head, old, slist_value(old, core::ptr::null_mut(), 0));
         if seen == old {
-            return first(old.1);
+            return slist_first(old);
         }
         old = seen;
     }

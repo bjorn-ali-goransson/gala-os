@@ -20,6 +20,17 @@
 
 use core::ffi::c_void;
 
+// The architecture's parts: x64 (System32's kernel32) or x86 (the 32-bit
+// kernel32 in SysWOW64, ARCHITECTURE "Plan: WOW64"): TEB access, the
+// offsets of the structures whose layout differs, SLIST_HEADER.
+#[cfg(target_arch = "x86_64")]
+#[path = "x64.rs"]
+mod arch;
+#[cfg(target_arch = "x86")]
+#[path = "x86.rs"]
+mod arch;
+use arch::*;
+
 mod actctx;
 mod address_wait;
 mod ansi;
@@ -75,6 +86,10 @@ struct UnicodeString {
     buffer: *const u16,
 }
 
+/// UNICODE_STRING.Buffer's offset (after Length and MaximumLength,
+/// pointer-aligned): for strings inside other structures.
+const US_BUFFER: usize = core::mem::offset_of!(UnicodeString, buffer);
+
 #[repr(C)]
 struct AnsiString {
     length: u16,
@@ -94,7 +109,10 @@ struct ObjectAttributes {
 }
 
 // The C runtime helpers the compiler may call, exported by ntdll (as the
-// real ntdll does). Only compiler-generated code calls them.
+// real ntdll does). Only compiler-generated code calls them. On x86 they
+// come from ntrt's x86 runtime (`x86.rs`): a raw-dylib import does not
+// give the symbols the compiler calls there.
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -110,11 +128,17 @@ unsafe extern "C" {
 }
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
-/// come from an import. (It becomes a harmless extra data export.)
+/// come from an import. (It becomes a harmless extra data export.) On x86,
+/// ntrt's.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtWaitForSingleObject(h: Handle, alertable: u8, timeout: *const i64) -> u32;
     fn NtWriteFile(
@@ -335,14 +359,15 @@ unsafe extern "system" {
     ) -> u32;
 }
 
-/// Reads a field of the current TEB.
-fn teb_u64(offset: usize) -> u64 {
-    let v: u64;
-    // SAFETY: gs:[offset] is inside the current thread's TEB.
-    unsafe {
-        core::arch::asm!("mov {}, gs:[{}]", out(reg) v, in(reg) offset, options(nostack, readonly))
-    };
-    v
+/// The PEB (TEB.ProcessEnvironmentBlock).
+fn peb() -> usize {
+    teb_read(TEB_PEB)
+}
+
+/// The process parameters (PEB.ProcessParameters, always set).
+fn process_parameters() -> usize {
+    // SAFETY: the PEB's ProcessParameters field.
+    unsafe { *((peb() + PEB_PROCESS_PARAMETERS) as *const usize) }
 }
 
 /// Reports an unsupported part of `function` to the missing-features ledger.
@@ -371,23 +396,22 @@ fn timeout(ms: u32) -> Option<i64> {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetLastError() -> u32 {
-    teb_u64(0x68) as u32
+    teb_read(TEB_LAST_ERROR) as u32
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn SetLastError(code: u32) {
-    // SAFETY: TEB.LastErrorValue (x64 offset 0x68) of the current thread.
-    unsafe { core::arch::asm!("mov gs:[0x68], {:e}", in(reg) code, options(nostack)) };
+    teb_write_u32(TEB_LAST_ERROR, code);
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCurrentProcessId() -> u32 {
-    teb_u64(0x40) as u32 // TEB.ClientId.UniqueProcess
+    teb_read(TEB_CLIENT_PROCESS) as u32
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCurrentThreadId() -> u32 {
-    teb_u64(0x48) as u32 // TEB.ClientId.UniqueThread
+    teb_read(TEB_CLIENT_THREAD) as u32
 }
 
 #[unsafe(no_mangle)]
@@ -404,18 +428,23 @@ pub extern "system" fn GetCurrentThread() -> Handle {
 /// the process parameters.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetStdHandle(which: u32) -> Handle {
-    let offset = match which as i32 {
-        -10 => 0x20,
-        -11 => 0x28,
-        -12 => 0x30,
-        _ => return fail_with(6, -1isize as Handle), // INVALID_HANDLE_VALUE
+    let Some(offset) = std_handle_offset(which) else {
+        return fail_with(6, -1isize as Handle); // INVALID_HANDLE_VALUE
     };
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters (+0x20) is always set.
-    unsafe {
-        let peb = teb_u64(0x60) as usize;
-        let params = *((peb + 0x20) as *const usize);
-        *((params + offset) as *const Handle)
-    }
+    // SAFETY: the process parameters' standard handle.
+    unsafe { *((process_parameters() + offset) as *const Handle) }
+}
+
+/// Where the process parameters keep standard handle `which`
+/// (STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE: -10, -11, -12).
+fn std_handle_offset(which: u32) -> Option<usize> {
+    let n = match which as i32 {
+        -10 => 0,
+        -11 => 1,
+        -12 => 2,
+        _ => return None,
+    };
+    Some(PARAMS_STANDARD_INPUT + n * size_of::<usize>())
 }
 
 #[unsafe(no_mangle)]
@@ -918,14 +947,21 @@ fn with_object_attributes<R>(
     with_object_attributes_sa(path, core::ptr::null_mut(), f)
 }
 
+/// SECURITY_ATTRIBUTES.
+#[repr(C)]
+pub(crate) struct SecurityAttributes {
+    pub length: u32,
+    pub descriptor: usize,
+    pub inherit: Bool,
+}
+
 /// The descriptor in SECURITY_ATTRIBUTES (or 0).
 pub(crate) fn security_descriptor(sa: *mut c_void) -> usize {
-    // SAFETY: the caller's SECURITY_ATTRIBUTES (or NULL):
-    // nLength, lpSecurityDescriptor at 8, bInheritHandle.
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (or NULL).
     if sa.is_null() {
         0
     } else {
-        unsafe { sa.cast::<u8>().add(8).cast::<usize>().read_unaligned() }
+        unsafe { (&raw const (*sa.cast::<SecurityAttributes>()).descriptor).read_unaligned() }
     }
 }
 
@@ -1173,13 +1209,12 @@ fn io_ex(
     let (Some(routine), false) = (routine, ov.is_null()) else {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     };
-    let ov = ov.cast::<usize>();
-    // SAFETY: the caller's OVERLAPPED {Internal, InternalHigh, Offset,
-    // OffsetHigh, hEvent}, valid until the routine has run.
+    let ov = ov.cast::<Overlapped>();
+    // SAFETY: the caller's OVERLAPPED, valid until the routine has run.
     let offset = unsafe {
-        *ov = STATUS_PENDING as usize;
-        *ov.add(1) = 0;
-        *ov.add(2) as i64
+        (*ov).internal = STATUS_PENDING as usize;
+        (*ov).internal_high = 0;
+        (*ov).position() as i64
     };
     let iosb = ov.cast::<[usize; 2]>();
     let (apc, context) = (io_completion as *const () as usize, routine as *const () as usize);
@@ -1245,7 +1280,11 @@ fn overlapped_io(
     })
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtReadFileScatter(
         h: Handle,
@@ -1341,13 +1380,12 @@ fn overlapped_request(
     ov: *mut c_void,
     issue: impl FnOnce(usize, usize, *mut [usize; 2], *const i64) -> u32,
 ) -> Bool {
-    let ov = ov.cast::<usize>();
-    // SAFETY: the caller's OVERLAPPED {Internal, InternalHigh, Offset,
-    // OffsetHigh, hEvent}, valid until the I/O completes.
+    let ov = ov.cast::<Overlapped>();
+    // SAFETY: the caller's OVERLAPPED, valid until the I/O completes.
     let (offset, event) = unsafe {
-        *ov = STATUS_PENDING as usize;
-        *ov.add(1) = 0;
-        (*ov.add(2) as i64, *ov.add(3))
+        (*ov).internal = STATUS_PENDING as usize;
+        (*ov).internal_high = 0;
+        ((*ov).position() as i64, (*ov).event)
     };
     let context = if event & 1 != 0 { 0 } else { ov as usize };
     let iosb = ov.cast::<[usize; 2]>();
@@ -1356,7 +1394,7 @@ fn overlapped_request(
         STATUS_SUCCESS => {
             if !count.is_null() {
                 // SAFETY: done: InternalHigh holds the count.
-                unsafe { *count = *ov.add(1) as u32 };
+                unsafe { *count = (*ov).internal_high as u32 };
             }
             TRUE
         }
@@ -1980,13 +2018,122 @@ pub struct SystemInfo {
     processor_revision: u16,
 }
 
-/// SystemBasicInformation (64 bytes on x64).
-fn basic_information() -> [u8; 64] {
-    let mut b = [0u8; 64];
+/// SYSTEM_BASIC_INFORMATION (pointer-sized fields: 64 bytes on x64, 44
+/// on x86).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SystemBasic {
+    reserved: u32,
+    timer_resolution: u32,
+    pub page_size: u32,
+    pub physical_pages: u32,
+    lowest_physical_page: u32,
+    highest_physical_page: u32,
+    pub allocation_granularity: u32,
+    pub minimum_address: usize,
+    pub maximum_address: usize,
+    pub processor_mask: usize,
+    pub processors: u8,
+}
+
+/// SystemBasicInformation (zeroes if the query fails).
+pub(crate) fn basic_information() -> SystemBasic {
+    let mut b = SystemBasic::default();
     let mut ret = 0;
-    // SAFETY: a 64-byte buffer.
-    unsafe { NtQuerySystemInformation(0, b.as_mut_ptr(), 64, &mut ret) };
+    // SAFETY: a buffer of the class's size.
+    unsafe {
+        NtQuerySystemInformation(0, (&raw mut b).cast(), size_of::<SystemBasic>() as u32, &mut ret)
+    };
     b
+}
+
+/// OVERLAPPED (32 bytes on x64, 20 on x86): Internal and InternalHigh
+/// are the IO_STATUS_BLOCK of the request.
+#[repr(C)]
+pub(crate) struct Overlapped {
+    pub internal: usize,
+    pub internal_high: usize,
+    pub offset: u32,
+    pub offset_high: u32,
+    pub event: usize,
+}
+
+impl Overlapped {
+    /// The byte offset (Offset, OffsetHigh).
+    pub fn position(&self) -> u64 {
+        u64::from(self.offset) | u64::from(self.offset_high) << 32
+    }
+}
+
+/// MEMORY_BASIC_INFORMATION (48 bytes on x64, where PartitionId sits in
+/// the padding after AllocationProtect; 28 on x86).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MemoryBasic {
+    pub base: usize,
+    pub allocation_base: usize,
+    pub allocation_protect: u32,
+    pub region_size: usize,
+    pub state: u32,
+    pub protect: u32,
+    pub kind: u32,
+}
+
+/// THREAD_BASIC_INFORMATION.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ThreadBasic {
+    pub exit_status: u32,
+    pub teb: usize,
+    pub client_id: [usize; 2],
+    pub affinity: usize,
+    pub priority: i32,
+    pub base_priority: i32,
+}
+
+/// ThreadBasicInformation of `thread`, or the status.
+pub(crate) fn thread_basic(thread: Handle) -> Result<ThreadBasic, u32> {
+    let mut b = ThreadBasic::default();
+    let mut ret = 0;
+    // SAFETY: a buffer of the class's size.
+    let status = unsafe {
+        NtQueryInformationThread(
+            thread,
+            0,
+            (&raw mut b).cast(),
+            size_of::<ThreadBasic>() as u32,
+            &mut ret,
+        )
+    };
+    if status != STATUS_SUCCESS { Err(status) } else { Ok(b) }
+}
+
+/// PROCESS_BASIC_INFORMATION.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ProcessBasic {
+    pub exit_status: u32,
+    pub peb: usize,
+    pub affinity: usize,
+    pub base_priority: i32,
+    pub pid: usize,
+    pub parent: usize,
+}
+
+/// ProcessBasicInformation of `process`, or the status.
+pub(crate) fn process_basic(process: Handle) -> Result<ProcessBasic, u32> {
+    let mut b = ProcessBasic::default();
+    // SAFETY: a buffer of the class's size.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            0,
+            (&raw mut b).cast(),
+            size_of::<ProcessBasic>() as u32,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS { Err(status) } else { Ok(b) }
 }
 
 fn u64_at(b: &[u8], i: usize) -> u64 {
@@ -1997,19 +2144,25 @@ fn u32_at(b: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
 
+/// GetSystemInfo: the processor (in a 32-bit process, what WOW64 tells
+/// it: PROCESSOR_ARCHITECTURE_INTEL) and the caller's application range.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemInfo(info: *mut SystemInfo) {
+    system_info(info, PROCESSOR_ARCHITECTURE, PROCESSOR_TYPE);
+}
+
+fn system_info(info: *mut SystemInfo, architecture: u16, processor_type: u32) {
     let b = basic_information();
     let i = SystemInfo {
-        processor_architecture: 9, // PROCESSOR_ARCHITECTURE_AMD64
+        processor_architecture: architecture,
         reserved: 0,
-        page_size: u32_at(&b, 8),
-        minimum_application_address: u64_at(&b, 32) as usize,
-        maximum_application_address: u64_at(&b, 40) as usize,
-        active_processor_mask: u64_at(&b, 48) as usize,
-        number_of_processors: u32::from(b[56]),
-        processor_type: 8664, // PROCESSOR_AMD_X8664
-        allocation_granularity: u32_at(&b, 24),
+        page_size: b.page_size,
+        minimum_application_address: b.minimum_address,
+        maximum_application_address: b.maximum_address,
+        active_processor_mask: b.processor_mask,
+        number_of_processors: u32::from(b.processors),
+        processor_type,
+        allocation_granularity: b.allocation_granularity,
         processor_level: 6,
         processor_revision: 0,
     };
@@ -2017,9 +2170,11 @@ pub extern "system" fn GetSystemInfo(info: *mut SystemInfo) {
     unsafe { info.write(i) };
 }
 
+/// GetNativeSystemInfo: the machine's processor (AMD64: the same as
+/// GetSystemInfo but in a 32-bit process, where it is not x86).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetNativeSystemInfo(info: *mut SystemInfo) {
-    GetSystemInfo(info);
+    system_info(info, 9, 8664); // PROCESSOR_ARCHITECTURE_AMD64, PROCESSOR_AMD_X8664
 }
 
 #[unsafe(no_mangle)]
@@ -2028,20 +2183,15 @@ pub extern "system" fn GetProcessAffinityMask(
     process_mask: *mut usize,
     system_mask: *mut usize,
 ) -> Bool {
-    // PROCESS_BASIC_INFORMATION.AffinityMask (offset 16).
-    let mut pbi = [0u8; 48];
-    let mut ret = 0;
-    // SAFETY: a 48-byte buffer.
-    let status =
-        unsafe { NtQueryInformationProcess(process as isize, 0, pbi.as_mut_ptr(), 48, &mut ret) };
-    if status != STATUS_SUCCESS {
-        return fail(status, FALSE);
-    }
-    let system = u64_at(&basic_information(), 48);
+    let pbi = match process_basic(process) {
+        Ok(b) => b,
+        Err(status) => return fail(status, FALSE),
+    };
+    let system = basic_information().processor_mask;
     // SAFETY: the caller's output pointers.
     unsafe {
-        *process_mask = u64_at(&pbi, 16) as usize;
-        *system_mask = system as usize;
+        *process_mask = pbi.affinity;
+        *system_mask = system;
     }
     TRUE
 }
@@ -2064,18 +2214,12 @@ fn with_env<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// The process parameters (PEB+0x20).
-fn process_parameters() -> usize {
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters is always set.
-    unsafe { *((teb_u64(0x60) as usize + 0x20) as *const usize) }
-}
-
 /// The environment block's strings (without the final empty one).
 fn env_entries() -> impl Iterator<Item = &'static [u16]> {
-    // SAFETY: ProcessParameters->Environment (+0x80): NUL-terminated
+    // SAFETY: ProcessParameters->Environment: NUL-terminated
     // strings ending with an empty one, alive until replaced (callers hold
     // ENV_LOCK).
-    let block = unsafe { *((process_parameters() + 0x80) as *const *const u16) };
+    let block = unsafe { *((process_parameters() + PARAMS_ENVIRONMENT) as *const *const u16) };
     let mut i = 0;
     core::iter::from_fn(move || {
         // SAFETY: as above.
@@ -2296,11 +2440,11 @@ pub extern "system" fn SetEnvironmentVariableW(name: *const u16, value: *const u
         }
         put(&[0]);
         let params = process_parameters();
-        // SAFETY: Environment (+0x80) and EnvironmentSize (+0x3f0) of this
+        // SAFETY: Environment and EnvironmentSize of this
         // process's parameters, writable; readers hold ENV_LOCK.
         unsafe {
-            *((params + 0x80) as *mut *mut u16) = block;
-            *((params + 0x3f0) as *mut usize) = chars * 2;
+            *((params + PARAMS_ENVIRONMENT) as *mut *mut u16) = block;
+            *((params + PARAMS_ENVIRONMENT_SIZE) as *mut usize) = chars * 2;
         }
         let old = ENV_OWNED.swap(block as usize, Ordering::Relaxed);
         if old != 0 {
@@ -2341,10 +2485,11 @@ pub extern "system" fn GetTimeZoneInformation(info: *mut u8) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCurrentDirectoryW(size: u32, buf: *mut u16) -> u32 {
     let params = process_parameters();
-    // SAFETY: CurrentDirectory.DosPath: UNICODE_STRING at +0x38.
+    // SAFETY: CurrentDirectory.DosPath, a UNICODE_STRING.
     let dos = unsafe {
-        let len = usize::from(*((params + 0x38) as *const u16)) / 2;
-        core::slice::from_raw_parts(*((params + 0x40) as *const *const u16), len)
+        let len = usize::from(*((params + PARAMS_CURRENT_DIRECTORY) as *const u16)) / 2;
+        let buf = *((params + PARAMS_CURRENT_DIRECTORY + US_BUFFER) as *const *const u16);
+        core::slice::from_raw_parts(buf, len)
     };
     let path = match dos {
         [.., b] if *b == u16::from(b'\\') && dos.len() > 3 => &dos[..dos.len() - 1],
@@ -2391,20 +2536,21 @@ pub extern "system" fn SetCurrentDirectoryW(path: *const u16) -> Bool {
         return FALSE;
     }
     let params = process_parameters();
-    // SAFETY: CurrentDirectory: DosPath UNICODE_STRING at +0x38 (Length,
-    // MaximumLength, Buffer at +0x40), Handle at +0x48.
+    // SAFETY: CurrentDirectory: DosPath (a UNICODE_STRING: Length,
+    // MaximumLength, Buffer), Handle.
     unsafe {
-        let max = usize::from(*((params + 0x3a) as *const u16)) / 2;
+        let max = usize::from(*((params + PARAMS_CURRENT_DIRECTORY + 2) as *const u16)) / 2;
         let chars = full.as_slice();
         if chars.len() + 1 > max {
             CloseHandle(h);
             return fail_with(ERROR_FILENAME_EXCED_RANGE, FALSE);
         }
-        let buf = *((params + 0x40) as *const *mut u16);
+        let buf = *((params + PARAMS_CURRENT_DIRECTORY + US_BUFFER) as *const *mut u16);
         core::ptr::copy_nonoverlapping(chars.as_ptr(), buf, chars.len());
         *buf.add(chars.len()) = 0;
-        *((params + 0x38) as *mut u16) = (chars.len() * 2) as u16;
-        let old = core::mem::replace(&mut *((params + 0x48) as *mut Handle), h);
+        *((params + PARAMS_CURRENT_DIRECTORY) as *mut u16) = (chars.len() * 2) as u16;
+        let handle = (params + PARAMS_CURRENT_DIRECTORY_HANDLE) as *mut Handle;
+        let old = core::mem::replace(&mut *handle, h);
         if !old.is_null() {
             CloseHandle(old);
         }
@@ -2557,25 +2703,19 @@ pub extern "system" fn GetTempPath2W(size: u32, buf: *mut u16) -> u32 {
 /// CommandLine, a NUL-terminated buffer).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCommandLineW() -> *const u16 {
-    // SAFETY: PEB (gs:[0x60]) -> ProcessParameters (+0x20) -> CommandLine
-    // (UNICODE_STRING at +0x70, Buffer at +0x78).
-    unsafe {
-        let peb = teb_u64(0x60) as usize;
-        let params = *((peb + 0x20) as *const usize);
-        *((params + 0x78) as *const *const u16)
-    }
+    // SAFETY: ProcessParameters->CommandLine (a UNICODE_STRING): its
+    // Buffer.
+    unsafe { *((process_parameters() + PARAMS_COMMAND_LINE + US_BUFFER) as *const *const u16) }
 }
 
 /// GetEnvironmentStringsW: a private copy of the environment block
 /// (`NAME=value\0...\0`), freed with FreeEnvironmentStringsW.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetEnvironmentStringsW() -> *mut u16 {
-    // SAFETY: PEB (gs:[0x60]) -> ProcessParameters (+0x20) -> Environment
-    // (+0x80), a block ending with an empty string.
+    // SAFETY: ProcessParameters->Environment, a block ending with an
+    // empty string.
     unsafe {
-        let peb = teb_u64(0x60) as usize;
-        let params = *((peb + 0x20) as *const usize);
-        let env = *((params + 0x80) as *const *const u16);
+        let env = *((process_parameters() + PARAMS_ENVIRONMENT) as *const *const u16);
         let mut n = 0;
         while !(core::ptr::read_volatile(env.add(n)) == 0
             && core::ptr::read_volatile(env.add(n + 1)) == 0)
@@ -2702,26 +2842,11 @@ pub extern "system" fn RaiseFailFastException(
 
 // ---- Threads ----
 
-/// CONTEXT (x64 layout, 0x4d0 bytes, 16-byte aligned).
-#[repr(C, align(16))]
-pub struct Context {
-    home: [u64; 6],
-    context_flags: u32,
-    mx_csr: u32,
-    /// SegCs, SegDs, SegEs, SegFs, SegGs, SegSs.
-    segs: [u16; 6],
-    eflags: u32,
-    dr: [u64; 6],
-    /// Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8..R15.
-    gpr: [u64; 16],
-    rip: u64,
-    rest: [u8; 0x4d0 - 0x100],
-}
-
 type StartRoutine = extern "system" fn(*mut c_void) -> u32;
 
-/// Every thread CreateThread makes starts here (rcx = start, rdx = param),
-/// like Windows' thread start thunk: run the routine, exit with its result.
+/// Every thread CreateThread makes starts here (with the start routine
+/// and its parameter as arguments: `thread_context`), like Windows' thread
+/// start thunk: run the routine, exit with its result.
 extern "system" fn thread_start(start: StartRoutine, param: *mut c_void) -> ! {
     // The thread's TLS blocks and DLL_THREAD_ATTACH (Windows does this in
     // ntdll before the thread's start routine).
@@ -2730,33 +2855,38 @@ extern "system" fn thread_start(start: StartRoutine, param: *mut c_void) -> ! {
     ExitThread(start(param))
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaInitializeThread();
     fn LdrShutdownThread();
     pub(crate) fn LdrDisableThreadCalloutsForDll(module: Handle) -> u32;
 }
 
-/// The executable's SizeOfStackReserve (PE32+ optional header +72): the
-/// default reservation for new threads, as on Windows (1 MiB if unset).
-fn default_stack() -> usize {
-    let base = mapping::image_base() as usize;
-    // SAFETY: the executable's mapped headers.
-    let reserve = unsafe {
-        let nt = base + (*((base + 0x3c) as *const u32)) as usize;
-        *((nt + 24 + 72) as *const u64) as usize
-    };
-    if reserve == 0 { 0x10_0000 } else { reserve }
-}
-
-/// The executable's SizeOfStackCommit (PE32+ optional header +80).
-fn default_stack_commit() -> usize {
+/// The executable's optional header's pointer-sized field at `offset`
+/// (an image of this DLL's architecture).
+fn image_optional_field(offset: usize) -> usize {
     let base = mapping::image_base() as usize;
     // SAFETY: the executable's mapped headers.
     unsafe {
         let nt = base + (*((base + 0x3c) as *const u32)) as usize;
-        *((nt + 24 + 80) as *const u64) as usize
+        ((nt + 24 + offset) as *const usize).read_unaligned()
     }
+}
+
+/// The executable's SizeOfStackReserve: the default reservation for new
+/// threads, as on Windows (1 MiB if unset).
+fn default_stack() -> usize {
+    let reserve = image_optional_field(OPTIONAL_STACK_RESERVE);
+    if reserve == 0 { 0x10_0000 } else { reserve }
+}
+
+/// The executable's SizeOfStackCommit.
+fn default_stack_commit() -> usize {
+    image_optional_field(OPTIONAL_STACK_COMMIT)
 }
 
 /// CreateThread: the stack is reserved and partly committed here, with a
@@ -2813,16 +2943,8 @@ pub extern "system" fn CreateThread(
         VirtualFree(stack as *mut c_void, 0, 0x8000);
         return core::ptr::null_mut();
     }
-    // SAFETY: an all-zero CONTEXT is a valid bit pattern.
-    let mut context: Context = unsafe { core::mem::zeroed() };
-    context.context_flags = 0x10_000b; // CONTEXT_FULL
-    context.mx_csr = 0x1f80;
-    context.segs = [0x33, 0x2b, 0x2b, 0x53, 0x2b, 0x2b];
-    context.eflags = 0x200;
-    context.rip = thread_start as *const () as u64;
-    context.gpr[1] = start as *const () as u64; // rcx
-    context.gpr[2] = param as u64; // rdx
-    context.gpr[4] = (top - 0x28) as u64; // rsp, as if called
+    let context =
+        thread_context(thread_start as *const () as usize, [start as usize, param as usize], top);
     // INITIAL_TEB: OldStackBase, OldStackLimit, StackBase, StackLimit,
     // StackAllocationBase.
     let initial_teb = [0, 0, top, limit, stack];
@@ -2881,15 +3003,12 @@ pub extern "system" fn ExitThread(code: u32) -> ! {
 /// GetExitCodeThread: STILL_ACTIVE (259) while it runs.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetExitCodeThread(h: Handle, code: *mut u32) -> Bool {
-    let mut basic = [0u8; 48];
-    let mut ret = 0;
-    // SAFETY: a 48-byte THREAD_BASIC_INFORMATION buffer.
-    let status = unsafe { NtQueryInformationThread(h, 0, basic.as_mut_ptr(), 48, &mut ret) };
-    if status != STATUS_SUCCESS {
-        return fail(status, FALSE);
-    }
+    let basic = match thread_basic(h) {
+        Ok(b) => b,
+        Err(status) => return fail(status, FALSE),
+    };
     // SAFETY: the caller's output pointer.
-    unsafe { *code = u32_at(&basic, 0) };
+    unsafe { *code = basic.exit_status };
     TRUE
 }
 
@@ -3152,14 +3271,11 @@ pub extern "system" fn SetThreadPriority(h: Handle, priority: i32) -> Bool {
 #[unsafe(no_mangle)]
 pub extern "system" fn GetThreadPriority(h: Handle) -> i32 {
     const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7fff_ffff;
-    let mut basic = [0u8; 48];
-    let mut ret = 0;
-    // SAFETY: a 48-byte buffer.
-    let status = unsafe { NtQueryInformationThread(h, 0, basic.as_mut_ptr(), 48, &mut ret) };
-    if status != STATUS_SUCCESS {
-        return fail(status, THREAD_PRIORITY_ERROR_RETURN);
-    }
-    match i32::from_le_bytes([basic[44], basic[45], basic[46], basic[47]]) {
+    let basic = match thread_basic(h) {
+        Ok(b) => b,
+        Err(status) => return fail(status, THREAD_PRIORITY_ERROR_RETURN),
+    };
+    match basic.base_priority {
         15.. => 15,
         ..=1 => -15,
         base => base - 8,
@@ -3248,15 +3364,13 @@ pub extern "system" fn RemoveVectoredContinueHandler(cookie: *mut c_void) -> u32
 // RtlLookupFunctionEntry and RtlVirtualUnwind are export forwarders to
 // ntdll, as on Windows (build.rs: /EXPORT:Name=ntdll.Name).
 
-// ---- Thread-local storage: TEB.TlsSlots (+0x1480, 64 slots) ----
+// ---- Thread-local storage: TEB.TlsSlots (64 slots) ----
 
 /// Allocated TLS indexes (bit set = in use). TODO: the expansion slots
 /// (indexes 64..1088, TEB.TlsExpansionSlots).
 static TLS_BITMAP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-const TLS_SLOTS: usize = 0x1480;
-
 fn tls_slot(index: u32) -> usize {
-    TLS_SLOTS + 8 * index as usize
+    TEB_TLS_SLOTS + size_of::<usize>() * index as usize
 }
 
 /// TlsAlloc: the lowest free index, its slot zeroed in this thread (TODO:
@@ -3303,7 +3417,7 @@ pub extern "system" fn TlsGetValue(index: u32) -> *mut c_void {
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
     }
     SetLastError(0);
-    teb_u64(tls_slot(index)) as *mut c_void
+    teb_read(tls_slot(index)) as *mut c_void
 }
 
 #[unsafe(no_mangle)]
@@ -3311,10 +3425,7 @@ pub extern "system" fn TlsSetValue(index: u32, value: *mut c_void) -> Bool {
     if index >= 64 {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    // SAFETY: the slot lies in the current thread's TEB.
-    unsafe {
-        core::arch::asm!("mov gs:[{}], {}", in(reg) tls_slot(index), in(reg) value as u64, options(nostack))
-    };
+    teb_write(tls_slot(index), value as usize);
     TRUE
 }
 
@@ -3352,7 +3463,7 @@ pub extern "system" fn FlsAlloc(callback: Option<FlsCallback>) -> u32 {
 fn fls_release(index: u32) {
     use core::sync::atomic::Ordering;
     let callback = FLS_CALLBACKS[index as usize].load(Ordering::Acquire);
-    let value = teb_u64(tls_slot(index)) as *mut c_void;
+    let value = teb_read(tls_slot(index)) as *mut c_void;
     if callback != 0 && !value.is_null() {
         TlsSetValue(index, core::ptr::null_mut());
         // SAFETY: registered as an FLS callback by FlsAlloc.
@@ -3391,7 +3502,7 @@ pub extern "system" fn TlsGetValue2(index: u32) -> *mut c_void {
     if index >= 64 {
         return core::ptr::null_mut();
     }
-    teb_u64(tls_slot(index)) as *mut c_void
+    teb_read(tls_slot(index)) as *mut c_void
 }
 
 #[unsafe(no_mangle)]
@@ -3424,7 +3535,9 @@ pub extern "system" fn ExitProcess(code: u32) -> ! {
 /// __C_specific_handler: the language handler of SEH __try blocks
 /// (kernel32 exports it on Windows; mingw's runtime imports it from
 /// here). gala does not run __except filters yet: the exception keeps
-/// searching (recorded), as msvcrt's.
+/// searching (recorded), as msvcrt's. x64 only: x86 SEH has no language
+/// handler.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __C_specific_handler(
     _record: *mut c_void,
@@ -3454,7 +3567,11 @@ pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: 
     1
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn RtlSetUnhandledExceptionFilter(filter: usize);
 }

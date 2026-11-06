@@ -12,3 +12,8 @@ bench = false
 
 [dependencies]
 gala_stubs = { path = "../gala_stubs" }
+
+# The 32-bit build (SysWOW64's kernel32): the memory routines, 64-bit
+# division helpers and unwind personality the compiler calls on x86.
+[target.'cfg(target_arch = "x86")'.dependencies]
+ntrt = { path = "../ntrt" }

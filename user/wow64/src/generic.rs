@@ -377,6 +377,9 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f21, &[U, U, U, U, Oh]), // GalaLogonUser
     (0x7f22, &[U]),              // NtAllocateLocallyUniqueId
     (0x7f24, &[Oh, U, Oa]),      // NtCreateDirectoryObject
+    // Console: a mode and what to do with it; *Seen (a ULONG).
+    (0x7f3f, &[U, U]),           // GalaConsoleMode
+    (0x7f40, &[U]),              // GalaConsoleCtrl
     (0x7f4d, &[U, U]),           // GalaRandom
     (0x7f90, &[H, H]),           // NtCompareObjects
     (0x7f91, &[H]),              // NtSuspendProcess

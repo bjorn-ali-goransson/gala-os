@@ -41,9 +41,43 @@ struct Header {
 }
 
 const HEADER: usize = size_of::<Header>();
-/// SYSTEM_PROCESS_INFORMATION's size; SYSTEM_THREAD_INFORMATION's.
-const PROCESS_ENTRY: usize = 0x100;
-const THREAD_ENTRY: usize = 0x50;
+
+/// SYSTEM_PROCESS_INFORMATION and SYSTEM_THREAD_INFORMATION (x64): their
+/// sizes; ImageName (Length, Buffer), BasePriority, UniqueProcessId,
+/// InheritedFromUniqueProcessId, HandleCount; a thread's ClientId
+/// (UniqueProcess, UniqueThread) and BasePriority.
+#[cfg(target_arch = "x86_64")]
+mod spi {
+    pub const PROCESS_ENTRY: usize = 0x100;
+    pub const THREAD_ENTRY: usize = 0x50;
+    pub const NAME_LENGTH: usize = 0x38;
+    pub const NAME_BUFFER: usize = 0x40;
+    pub const BASE_PRIORITY: usize = 0x48;
+    pub const PROCESS_ID: usize = 0x50;
+    pub const PARENT_ID: usize = 0x58;
+    pub const HANDLE_COUNT: usize = 0x68;
+    pub const THREAD_PROCESS: usize = 0x28;
+    pub const THREAD_ID: usize = 0x30;
+    pub const THREAD_BASE_PRIORITY: usize = 0x3c;
+}
+
+/// The same in the x86 layouts (4-byte pointers, handles and SIZE_Ts).
+#[cfg(target_arch = "x86")]
+mod spi {
+    pub const PROCESS_ENTRY: usize = 0xb8;
+    pub const THREAD_ENTRY: usize = 0x40;
+    pub const NAME_LENGTH: usize = 0x38;
+    pub const NAME_BUFFER: usize = 0x3c;
+    pub const BASE_PRIORITY: usize = 0x40;
+    pub const PROCESS_ID: usize = 0x44;
+    pub const PARENT_ID: usize = 0x48;
+    pub const HANDLE_COUNT: usize = 0x4c;
+    pub const THREAD_PROCESS: usize = 0x20;
+    pub const THREAD_ID: usize = 0x24;
+    pub const THREAD_BASE_PRIORITY: usize = 0x2c;
+}
+
+use spi::*;
 
 /// CreateToolhelp32Snapshot(flags, process): the processes and threads
 /// (TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD) and the modules of this
@@ -160,6 +194,11 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
     b.get(at..at + 8).map_or(0, |v| u64::from_le_bytes(v.try_into().unwrap_or([0; 8])))
 }
 
+/// A pointer-sized field (a pointer, handle or id) of the list.
+fn ptr_at(b: &[u8], at: usize) -> u64 {
+    if size_of::<usize>() == 8 { u64_at(b, at) } else { u32_at(b, at).into() }
+}
+
 /// What Process32 reports of the entry at `at`: (id, threads, parent,
 /// base priority) and the image name (UTF-16).
 struct ProcessInfo<'a> {
@@ -171,17 +210,17 @@ struct ProcessInfo<'a> {
 }
 
 fn process_at<'a>(header: &Header, list: &'a [u8], at: usize) -> ProcessInfo<'a> {
-    let name_len = usize::from(u32_at(list, at + 0x38) as u16);
-    let name_ptr = u64_at(list, at + 0x40);
+    let name_len = usize::from(u32_at(list, at + NAME_LENGTH) as u16);
+    let name_ptr = ptr_at(list, at + NAME_BUFFER);
     let name = name_ptr
         .checked_sub(header.query_base)
         .and_then(|off| list.get(off as usize..off as usize + name_len))
         .unwrap_or(&[]);
     ProcessInfo {
-        id: u64_at(list, at + 0x50) as u32,
+        id: ptr_at(list, at + PROCESS_ID) as u32,
         threads: u32_at(list, at + 4),
-        parent: u64_at(list, at + 0x58) as u32,
-        priority: u32_at(list, at + 0x48),
+        parent: ptr_at(list, at + PARENT_ID) as u32,
+        priority: u32_at(list, at + BASE_PRIORITY),
         name,
     }
 }
@@ -210,25 +249,41 @@ fn next_process<R>(
     .flatten()
 }
 
-/// Fills PROCESSENTRY32W/A (`wide`): dwSize, cntUsage, th32ProcessID (8),
-/// th32DefaultHeapID (16), th32ModuleID (24), cntThreads (28),
-/// th32ParentProcessID (32), pcPriClassBase (36), dwFlags (40),
-/// szExeFile (44, 260 characters).
+/// PROCESSENTRY32W (th32DefaultHeapID a ULONG_PTR: szExeFile at 44 on
+/// x64, 36 on x86); PROCESSENTRY32 has the same fields.
+#[repr(C)]
+struct ProcessEntry32W {
+    size: u32,
+    usage: u32,
+    process_id: u32,
+    heap_id: usize,
+    module_id: u32,
+    threads: u32,
+    parent: u32,
+    priority: i32,
+    flags: u32,
+    exe: [u16; 260],
+}
+
+/// Fills PROCESSENTRY32W/A (`wide`): th32ProcessID, cntThreads,
+/// th32ParentProcessID, pcPriClassBase, szExeFile (260 characters); the
+/// rest 0.
 fn fill_process(entry: *mut u8, wide: bool, p: &ProcessInfo<'_>) {
+    use core::mem::offset_of;
     // SAFETY: the caller's entry, at least as large as its dwSize says
     // (checked to cover szExeFile).
     unsafe {
         let size = *entry.cast::<u32>() as usize;
         core::ptr::write_bytes(entry.add(4), 0, size - 4);
         let put = |at: usize, v: u32| entry.add(at).cast::<u32>().write_unaligned(v);
-        put(8, p.id);
-        put(28, p.threads);
-        put(32, p.parent);
-        put(36, p.priority);
+        put(offset_of!(ProcessEntry32W, process_id), p.id);
+        put(offset_of!(ProcessEntry32W, threads), p.threads);
+        put(offset_of!(ProcessEntry32W, parent), p.parent);
+        put(offset_of!(ProcessEntry32W, priority), p.priority);
         // The idle process has no image: Windows calls it this.
         let idle: &[u8] = b"[System Process]";
         let units = p.name.len() / 2;
-        let name = entry.add(44);
+        let name = entry.add(offset_of!(ProcessEntry32W, exe));
         for i in 0..259 {
             let c = if p.name.is_empty() {
                 match idle.get(i) {
@@ -253,7 +308,8 @@ fn fill_process(entry: *mut u8, wide: bool, p: &ProcessInfo<'_>) {
 fn process32(snapshot: Handle, entry: *mut u8, first: bool, wide: bool) -> Bool {
     // SAFETY: the caller's entry starts with dwSize.
     let size = if entry.is_null() { 0 } else { unsafe { *entry.cast::<u32>() } };
-    let needed = if wide { 44 + 2 * 260 } else { 44 + 260 };
+    let exe = core::mem::offset_of!(ProcessEntry32W, exe);
+    let needed = if wide { exe + 2 * 260 } else { exe + 260 };
     if (size as usize) < needed {
         return fail_with(ERROR_BAD_LENGTH, FALSE);
     }
@@ -303,9 +359,9 @@ fn next_thread(snapshot: Handle, first: bool) -> Option<(u32, u32, u32)> {
                 header.next_thread += 1;
                 let t = at + PROCESS_ENTRY + THREAD_ENTRY * i;
                 return Some((
-                    u64_at(list, t + 0x30) as u32,
-                    u64_at(list, t + 0x28) as u32,
-                    u32_at(list, t + 0x3c),
+                    ptr_at(list, t + THREAD_ID) as u32,
+                    ptr_at(list, t + THREAD_PROCESS) as u32,
+                    u32_at(list, t + THREAD_BASE_PRIORITY),
                 ));
             }
             let next = u32_at(list, at) as usize;
@@ -362,12 +418,35 @@ fn next_module(snapshot: Handle, first: bool) -> Option<usize> {
     .flatten()
 }
 
-/// Fills MODULEENTRY32W: dwSize, th32ModuleID (4), th32ProcessID (8),
-/// GlblcntUsage (12), ProccntUsage (16), modBaseAddr (24), modBaseSize
-/// (32), hModule (40), szModule (48, 256 characters), szExePath (560,
-/// 260 characters): 1080 bytes.
+/// MODULEENTRY32W (1080 bytes on x64, 1064 on x86).
+#[repr(C)]
+struct ModuleEntry32W {
+    size: u32,
+    module_id: u32,
+    process_id: u32,
+    global_usage: u32,
+    process_usage: u32,
+    base: usize,
+    base_size: u32,
+    module: usize,
+    name: [u16; 256],
+    path: [u16; 260],
+}
+
+/// MODULEENTRY32 (the ANSI one): the same fixed fields, then the names
+/// as bytes.
+#[repr(C)]
+struct ModuleEntry32 {
+    /// Pointer alignment (sizeof: 568 on x64, 548 on x86).
+    align: [usize; 0],
+    fixed: [u8; core::mem::offset_of!(ModuleEntry32W, name)],
+    name: [u8; 256],
+    path: [u8; 260],
+}
+
+/// Fills MODULEENTRY32W.
 fn module32(snapshot: Handle, entry: *mut u8, first: bool) -> Bool {
-    const SIZE: usize = 1080;
+    const SIZE: usize = size_of::<ModuleEntry32W>();
     // SAFETY: the caller's entry starts with dwSize.
     if entry.is_null() || (unsafe { *entry.cast::<u32>() } as usize) < SIZE {
         return fail_with(ERROR_BAD_LENGTH, FALSE);
@@ -384,26 +463,26 @@ fn module32(snapshot: Handle, entry: *mut u8, first: bool) -> Bool {
         let nt = base + (base as *const u8).add(0x3c).cast::<u32>().read_unaligned() as usize;
         (nt as *const u8).add(24 + 56).cast::<u32>().read_unaligned()
     };
-    // SAFETY: the caller's MODULEENTRY32W (SIZE bytes, checked).
+    // SAFETY: an all-zero MODULEENTRY32W is a valid bit pattern (and its
+    // padding stays zero).
+    let mut e: ModuleEntry32W = unsafe { core::mem::zeroed() };
+    e.module_id = 1;
+    e.process_id = GetCurrentProcessId();
+    e.global_usage = 0xffff;
+    e.process_usage = 0xffff;
+    e.base = base;
+    e.base_size = size;
+    e.module = base;
+    let name = &path[name_at..n];
+    let name_len = name.len().min(255);
+    e.name[..name_len].copy_from_slice(&name[..name_len]);
+    let path_len = n.min(259);
+    e.path[..path_len].copy_from_slice(&path[..path_len]);
+    // SAFETY: the caller's MODULEENTRY32W (SIZE bytes, checked); its
+    // dwSize stays.
     unsafe {
-        core::ptr::write_bytes(entry.add(4), 0, SIZE - 4);
-        let put = |at: usize, v: u32| entry.add(at).cast::<u32>().write_unaligned(v);
-        put(4, 1);
-        put(8, GetCurrentProcessId());
-        put(12, 0xffff);
-        put(16, 0xffff);
-        entry.add(24).cast::<u64>().write_unaligned(base as u64);
-        put(32, size);
-        entry.add(40).cast::<u64>().write_unaligned(base as u64);
-        let name = &path[name_at..n];
-        let names = entry.add(48).cast::<u16>();
-        for (i, &c) in name.iter().take(255).enumerate() {
-            names.add(i).write_unaligned(c);
-        }
-        let paths = entry.add(560).cast::<u16>();
-        for (i, &c) in path[..n].iter().take(259).enumerate() {
-            paths.add(i).write_unaligned(c);
-        }
+        let from = (&raw const e).cast::<u8>();
+        core::ptr::copy_nonoverlapping(from.add(4), entry.add(4), SIZE - 4);
     }
     TRUE
 }
@@ -418,35 +497,31 @@ pub extern "system" fn Module32NextW(snapshot: Handle, entry: *mut u8) -> Bool {
     module32(snapshot, entry, false)
 }
 
-/// MODULEENTRY32 (the ANSI one): MODULEENTRY32W's fields up to hModule,
-/// then szModule (48, 256 bytes) and szExePath (304, 260 bytes): 568
-/// bytes. The names are converted from the W entry (gala's ANSI code page
-/// is UTF-8, so nothing is lost; a name that does not fit is cut).
+/// MODULEENTRY32 (the ANSI one), from the W entry. The names are
+/// converted (gala's ANSI code page is UTF-8, so nothing is lost; a name
+/// that does not fit is cut).
 fn module32_ansi(snapshot: Handle, entry: *mut u8, first: bool) -> Bool {
-    const SIZE: usize = 568;
+    const SIZE: usize = size_of::<ModuleEntry32>();
     // SAFETY: the caller's entry starts with dwSize.
     if entry.is_null() || (unsafe { *entry.cast::<u32>() } as usize) < SIZE {
         return fail_with(ERROR_BAD_LENGTH, FALSE);
     }
-    // The W entry, 8-byte aligned (module32 reads dwSize as a u32).
-    let mut block = [0u64; 135];
-    block[0] = 1080;
-    if module32(snapshot, block.as_mut_ptr().cast(), first) == FALSE {
+    // SAFETY: an all-zero MODULEENTRY32W is a valid bit pattern.
+    let mut w: ModuleEntry32W = unsafe { core::mem::zeroed() };
+    w.size = size_of::<ModuleEntry32W>() as u32;
+    if module32(snapshot, (&raw mut w).cast(), first) == FALSE {
         return FALSE;
     }
-    // SAFETY: the block's 1080 bytes as 540 UTF-16 units.
-    let w = unsafe { core::slice::from_raw_parts(block.as_ptr().cast::<u16>(), 540) };
-    let units = |from: usize, max: usize| {
-        let s = &w[from..from + max];
-        &s[..s.iter().position(|&c| c == 0).unwrap_or(max)]
-    };
-    // SAFETY: the caller's MODULEENTRY32 (SIZE bytes, checked): the 48
-    // bytes of fixed fields are laid out as in the W entry.
+    let units = |s: &[u16]| -> usize { s.iter().position(|&c| c == 0).unwrap_or(s.len()) };
+    let fixed = core::mem::offset_of!(ModuleEntry32, name);
+    // SAFETY: the caller's MODULEENTRY32 (SIZE bytes, checked): the fixed
+    // fields are laid out as in the W entry.
     unsafe {
         core::ptr::write_bytes(entry.add(4), 0, SIZE - 4);
-        core::ptr::copy_nonoverlapping(block.as_ptr().cast::<u8>().add(4), entry.add(4), 44);
-        let _ = super::ansi::to_utf8(units(24, 256), entry.add(48), 256);
-        let _ = super::ansi::to_utf8(units(280, 260), entry.add(304), 260);
+        core::ptr::copy_nonoverlapping((&raw const w).cast::<u8>().add(4), entry.add(4), fixed - 4);
+        let _ = super::ansi::to_utf8(&w.name[..units(&w.name)], entry.add(fixed), 256);
+        let path = core::mem::offset_of!(ModuleEntry32, path);
+        let _ = super::ansi::to_utf8(&w.path[..units(&w.path)], entry.add(path), 260);
     }
     TRUE
 }
@@ -482,14 +557,14 @@ pub(crate) fn system_counts() -> (u32, u32, u32) {
         let mut at = 0usize;
         loop {
             // SYSTEM_PROCESS_INFORMATION: NextEntryOffset, NumberOfThreads,
-            // UniqueProcessId at 0x50, HandleCount at 0x68.
-            if at + 0x6c > list.len() {
+            // ..., UniqueProcessId, ..., HandleCount.
+            if at + HANDLE_COUNT + 4 > list.len() {
                 break;
             }
-            if u64_at(list, at + 0x50) != 0 {
+            if ptr_at(list, at + PROCESS_ID) != 0 {
                 counts.0 += 1;
                 counts.1 += u32_at(list, at + 4);
-                counts.2 += u32_at(list, at + 0x68);
+                counts.2 += u32_at(list, at + HANDLE_COUNT);
             }
             let next = u32_at(list, at) as usize;
             if next == 0 {

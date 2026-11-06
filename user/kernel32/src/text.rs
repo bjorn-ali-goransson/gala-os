@@ -5,7 +5,11 @@
 
 use super::*;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtQuerySystemTime(time: *mut i64) -> u32;
 }
@@ -341,7 +345,11 @@ pub extern "system" fn GetModuleHandleExW(
 const PIN: u32 = 1;
 const UNCHANGED_REFCOUNT: u32 = 2;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LdrAddRefDll(flags: u32, module: Handle) -> u32;
     fn RtlPcToFileHeader(pc: usize, base: *mut Handle) -> Handle;

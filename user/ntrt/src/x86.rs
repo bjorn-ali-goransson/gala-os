@@ -639,10 +639,53 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
     exit(0xc000_0409)
 }
 
+// The stack probe the compiler calls in the prologue of a function whose
+// frame exceeds a page (MSVC's x86 convention: eax = the frame's size; it
+// touches each page from the caller's stack pointer down, so the stack's
+// guard page moves in order, then lowers esp by that size itself and
+// returns; ecx and edx, which may hold arguments, are kept).
+global_asm!(
+    ".globl __chkstk",
+    "__chkstk:",
+    "push ecx",
+    // The caller's esp: above the saved ecx and the return address.
+    "lea ecx, [esp + 8]",
+    "2:",
+    "cmp eax, 0x1000",
+    "jb 3f",
+    "sub ecx, 0x1000",
+    "test dword ptr [ecx], ecx",
+    "sub eax, 0x1000",
+    "jmp 2b",
+    "3:",
+    "sub ecx, eax",
+    "test dword ptr [ecx], ecx",
+    // eax: the saved ecx, then the return address above it.
+    "mov eax, esp",
+    "mov esp, ecx",
+    "push dword ptr [eax + 4]",
+    "mov ecx, dword ptr [eax]",
+    "ret",
+);
+
+/// strlen (the C library's; CStr::from_ptr calls it).
+///
+/// # Safety
+/// `s` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    let mut n = 0;
+    // SAFETY: up to the caller-guaranteed terminator.
+    while unsafe { core::ptr::read_volatile(s.add(n)) } != 0 {
+        n += 1;
+    }
+    n
+}
+
 // The MSVC run-time library's 64-bit division helpers, which the compiler
 // calls on x86 (their convention: both operands on the stack, low dword
 // first, the callee pops them, the result in edx:eax), on top of
-// compiler_builtins' __udivdi3/__umoddi3 (cdecl).
+// compiler_builtins' __udivdi3/__umoddi3/__divdi3/__moddi3 (cdecl).
 global_asm!(
     ".globl __aulldiv",
     "__aulldiv:",
@@ -660,6 +703,24 @@ global_asm!(
     "push dword ptr [esp + 16]",
     "push dword ptr [esp + 16]",
     "call ___umoddi3",
+    "add esp, 16",
+    "ret 16",
+    ".globl __alldiv",
+    "__alldiv:",
+    "push dword ptr [esp + 16]",
+    "push dword ptr [esp + 16]",
+    "push dword ptr [esp + 16]",
+    "push dword ptr [esp + 16]",
+    "call ___divdi3",
+    "add esp, 16",
+    "ret 16",
+    ".globl __allrem",
+    "__allrem:",
+    "push dword ptr [esp + 16]",
+    "push dword ptr [esp + 16]",
+    "push dword ptr [esp + 16]",
+    "push dword ptr [esp + 16]",
+    "call ___moddi3",
     "add esp, 16",
     "ret 16",
 );
