@@ -6237,6 +6237,57 @@ tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
 never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
 AT_MINSIGSTKSZ).
 
+## Plan: Linux containers through a WSL facade
+
+Docker Desktop and Podman for Windows run their Linux side (dockerd,
+containerd and runc; podman, conmon and crun) in a WSL2 distribution and
+drive it from Windows through `wsl.exe`, the WSL service, named pipes
+and hvsockets. gala runs both unmodified (ROADMAP CT) by answering
+WSL2's interface itself, with the distribution running on the Linux
+personality: a facade, not a VM. WSL2 itself, the Hyper-V backends and
+Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
+"Linux".
+
+```
+  Windows side (NT)                     Linux side (LX)
+  Docker Desktop / podman.exe           the distribution: init or systemd,
+     |  wsl.exe, WSL service API           dockerd / podman, runc / crun
+     |  \\.\pipe\..., AF_HYPERV            AF_VSOCK, /mnt/c, interop
+  gala's wsl.exe + WSL service  ---->   LX processes in a container object
+  ------------------------------------------------------------------------
+  core: one file system, one network stack, socket pairs, container objects
+```
+
+- **The facade** is user-mode programs and services of gala's (its
+  `wsl.exe` and WSL service, behaving as recorded on Windows) plus a
+  few kernel pieces; nothing in it depends on a hypervisor. A
+  distribution is a rootfs directory on gala's file system and a
+  container object; "starting the VM" starts its init as an LX process.
+- **Container objects in the core**: a container holds a namespace view
+  (mount, PID, UTS, IPC, network, user), resource limits (cgroup v2's
+  model over R6's charging) and a root directory. Linux namespaces and
+  cgroups are views of it, so a WSL distribution and the containers run
+  inside it nest the same way. They are core objects, carried by the
+  kernel handover (R9) like processes.
+- **Transports**: an hvsocket connect on the Windows side to a
+  distribution's `AF_VSOCK` listener (and back) becomes one core socket
+  pair with no virtual network between; the service id maps to the vsock
+  port as WSL defines it. Localhost forwarding is free: both sides use
+  one network stack (WSL's "mirrored" model).
+- **Files**: `/mnt/<drive>` is a mount of gala's own volume with POSIX
+  metadata (LX seam 4); `\\wsl.localhost\<distro>` is the distribution's
+  directory seen from NT, with no 9P protocol in between.
+- **Identity**: the distribution's root and its default user map to SIDs
+  (LX "Identity"); the Windows user launching `wsl.exe` owns the
+  distribution's processes.
+- **Observability**: `events=wsl` (facade calls: import, start,
+  terminate, interop launches, hvsocket connects with service ids), the
+  container id in process events and crash reports, each distribution's
+  console in the serial log.
+- **Limits** (planned work, ROADMAP CT): nothing is built yet; LX is at
+  milestone 1, and the distributions need glibc, systemd and the
+  container system calls beyond milestone 5.
+
 ## Plan: graphics and GPU
 
 GPU support serves the browser first (ROADMAP BR stages 2 and 5), then
