@@ -1730,6 +1730,26 @@ impl Desktop {
         }
     }
 
+    /// `owner`'s window `id` asks to be dragged by the pointer while the
+    /// left button stays down (a program that draws its own caption:
+    /// WM_NCHITTEST answered HTCAPTION). STATUS_INVALID_DEVICE_STATE when
+    /// the button is up already.
+    pub fn begin_drag(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        let (x, y) = self.pointer;
+        let w = self.find(id, owner)?;
+        let (wx, wy) = (i64::from(w.x), i64::from(w.y));
+        if self.buttons & 1 == 0 {
+            return Err(NtStatus::INVALID_DEVICE_STATE);
+        }
+        self.raise(id);
+        self.activate(Some(id));
+        self.drag = Some((id, x - wx, y - wy));
+        // (Host unit tests have no console to log to.)
+        #[cfg(not(test))]
+        crate::info!("desktop: dragging window {id} for its program (its own caption)");
+        Ok(())
+    }
+
     fn left_up(&mut self, hit: Hit, x: i64, y: i64, keys: u64) {
         let pressed = core::mem::replace(&mut self.pressed, Hit::Nothing);
         // A drag that ends tells the program where its client area went

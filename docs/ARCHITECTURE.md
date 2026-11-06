@@ -3969,8 +3969,11 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   borders outside it are like Windows 11's invisible resize borders);
   the desktop window is made again when the frame changes. Test:
   `user32_test` (custom_frame). Limits: uneven borders take the left one
-  (ledger); no WM_NCHITTEST yet, so such a window is not dragged or
-  resized by its own frame. gdi32 is loaded lazily with LoadLibrary,
+  (ledger). A left-button press in such a window goes first to its
+  WM_NCHITTEST (on its thread, posted GALA_WM_NCDOWN): HTCAPTION makes the
+  desktop drag it (GalaWindowDrag, 0x7f54: while the button stays down;
+  logged), anything else is the click it was; DefWindowProc answers
+  HTCLIENT. Not yet: resizing by its own borders. gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it. GetDC(NULL) is
   the display DC.
 - **Deferred presenting**: EndPaint and ReleaseDC add the area to the
@@ -6867,6 +6870,7 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 | GalaWindowSendAbandon(id) | 0x7f51 | the sender gives up waiting |
 | GalaWindowSurface(hwnd, section, offset, width, height) | 0x7f52 | the caller's top-level window keeps its pixels in that section |
 | GalaWindowSurfaceOpen(hwnd, \*section, \*info) | 0x7f53 | a handle to any window's surface section on the caller's desktop |
+| GalaWindowDrag(id) | 0x7f54 | the caller's window follows the pointer while the left button is down (its own caption) |
 
 **The registry and its record** (step 1):
 

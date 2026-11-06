@@ -302,6 +302,7 @@ syscall_stubs! {
     GalaWindowSendAbandon = 0x7f51, fn(id: u64);
     GalaWindowSurface = 0x7f52, fn(hwnd: u64, section: u64, offset: u64, width: u32, height: u32);
     GalaWindowSurfaceOpen = 0x7f53, fn(hwnd: u64, section: *mut u64, info: *mut u8);
+    GalaWindowDrag = 0x7f54, fn(id: u32);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).
     GalaWindowFilter = 0x7f6a, fn(hwnd: u64, message: u32, action: u32, ext_status: *mut u32);
     // WinEvents across processes (SetWinEventHook, NotifyWinEvent).

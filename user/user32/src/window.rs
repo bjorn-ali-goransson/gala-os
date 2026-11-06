@@ -30,6 +30,7 @@ unsafe extern "system" {
         style: u32,
     ) -> u32;
     fn GalaWindowShow(id: u32, show: u8) -> u32;
+    fn GalaWindowDrag(id: u32) -> u32;
     fn GalaWindowPresent(
         id: u32,
         x: i32,
@@ -88,6 +89,13 @@ const GALA_WM_MINIMIZED: u32 = 0x0001_0002;
 /// A click activates the top-level window (WA_CLICKACTIVE) on its own
 /// thread, before the click itself is dispatched.
 const GALA_WM_ACTIVATE: u32 = 0x0001_0003;
+/// A left-button press in a window that draws its own frame: its
+/// WM_NCHITTEST decides, on its thread, whether it is a caption drag
+/// (HTCAPTION) or the click it was (wParam, lParam: the click's).
+const GALA_WM_NCDOWN: u32 = 0x0001_0004;
+const WM_NCHITTEST: u32 = 0x0084;
+const HTCLIENT: isize = 1;
+const HTCAPTION: isize = 2;
 const WM_ACTIVATE: u32 = 0x0006;
 const WM_NCACTIVATE: u32 = 0x0086;
 const WA_INACTIVE: usize = 0;
@@ -1660,6 +1668,9 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
             }
             0
         }
+        // The desktop draws gala's frames and handles clicks on them, so
+        // what reaches a window is its client area.
+        WM_NCHITTEST => HTCLIENT,
         // The caption's state: nothing to draw (the desktop draws it);
         // TRUE lets the change proceed.
         WM_NCACTIVATE => 1,
@@ -1784,6 +1795,25 @@ static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
 /// another.
 fn set_foreground(hwnd: Hwnd) {
     activate(hwnd, WA_ACTIVE);
+}
+
+/// A left-button press at client point `lparam` of top-level window
+/// `top`, which draws its own frame: HTCAPTION from its WM_NCHITTEST (the
+/// screen point) makes the desktop drag it; otherwise the press goes to
+/// the window under it as usual.
+fn nc_down(top: Hwnd, wparam: usize, lparam: isize) {
+    let Some(w) = window(top) else { return };
+    let (cx, cy) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
+    let (b, t) = desktop_frame(&w);
+    let (sx, sy) = (w.x + b + cx, w.y + t + cy);
+    let screen = (sx as u16 as isize) | (sy as u16 as isize) << 16;
+    if SendMessageW(top, WM_NCHITTEST, 0, screen) == HTCAPTION && w.desktop != 0 {
+        // SAFETY: our desktop window.
+        unsafe { GalaWindowDrag(w.desktop) };
+        return;
+    }
+    let (to, lparam) = crate::tree::route(top, 0x0201, lparam);
+    SendMessageW(to, 0x0201, wparam, lparam);
 }
 
 /// Top-level window `hwnd` becomes the active (and foreground) window, as
@@ -2482,6 +2512,12 @@ fn pump() {
                 if (message == 0x0201 || message == 0x0204) && !with(|s| s.windows[i].popup) {
                     post(thread, message_at(top, GALA_WM_ACTIVATE, WA_CLICKACTIVE, 0));
                 }
+                // In a frame the program draws, its WM_NCHITTEST says
+                // whether a press is on its caption.
+                if message == 0x0201 && with(|s| s.windows[i].custom.is_some()) {
+                    post(thread, message_at(top, GALA_WM_NCDOWN, wparam, lparam));
+                    continue;
+                }
                 // The desktop moved the window (a drag): its position.
                 if message == 0x0003 {
                     crate::tree::moved_by_desktop(top, lparam);
@@ -2908,6 +2944,10 @@ pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
     }
     if m.message == GALA_WM_ACTIVATE {
         activate(m.hwnd, m.wparam);
+        return 0;
+    }
+    if m.message == GALA_WM_NCDOWN {
+        nc_down(m.hwnd, m.wparam, m.lparam);
         return 0;
     }
     if m.message == GALA_WM_PLACE {

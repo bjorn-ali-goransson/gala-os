@@ -148,6 +148,8 @@ pub const GALA_WINDOW_SEND_ABANDON: u32 = 0x7f51;
 /// process of the desktop can map (GetDC of another process's window).
 pub const GALA_WINDOW_SURFACE: u32 = 0x7f52;
 pub const GALA_WINDOW_SURFACE_OPEN: u32 = 0x7f53;
+/// A window that draws its own caption asks the desktop to drag it.
+pub const GALA_WINDOW_DRAG: u32 = 0x7f54;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
 /// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
@@ -379,6 +381,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SEND_ABANDON, "GalaWindowSendAbandon", 1, gala_window_send_abandon),
     (GALA_WINDOW_SURFACE, "GalaWindowSurface", 5, gala_window_surface),
     (GALA_WINDOW_SURFACE_OPEN, "GalaWindowSurfaceOpen", 3, gala_window_surface_open),
+    (GALA_WINDOW_DRAG, "GalaWindowDrag", 1, gala_window_drag),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
     (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
@@ -2140,6 +2143,20 @@ fn gala_window_surface_open(call: &mut Call<'_>) -> NtStatus {
         drop(closed);
         return NtStatus::ACCESS_VIOLATION;
     }
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowDrag(id): the caller's window `id` (on shasha's screen)
+/// follows the pointer while the left button stays down (user32: a click
+/// where the window's WM_NCHITTEST says HTCAPTION, in a frame the program
+/// draws itself). STATUS_INVALID_DEVICE_STATE when the button is up.
+fn gala_window_drag(call: &mut Call<'_>) -> NtStatus {
+    let id = arg!(call, 0) as u32;
+    let owner = call.process.id;
+    tri!(super::desktop::with(&call.process.desk.shell, |d| {
+        d.begin_drag(id, owner)?;
+        Ok(((), None))
+    }));
     NtStatus::SUCCESS
 }
 

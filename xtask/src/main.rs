@@ -8332,7 +8332,8 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     (
         // Chromium's window at (0, 0), 800 x 600, its page (window.html)
         // below Chromium's own tab strip and toolbar: the green body and
-        // the magenta box at page (100, 100) - (300, 200). Then Alt+F4.
+        // the magenta box at page (100, 100) - (300, 200). Then dragged by
+        // its own tab strip, and Alt+F4.
         "chromium_window",
         ScreenCheck {
             marker: "gala window painted",
@@ -8344,6 +8345,20 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                         PixelCheck::AnyIn(20, 400, 60, 60, 0x2e8b57), // the body
                         PixelCheck::AnyIn(120, 200, 160, 160, 0xff00ff), // the box
                     ],
+                },
+                ScreenStep {
+                    after: "",
+                    // A press on the tab strip's empty part (500, 20):
+                    // Chromium's WM_NCHITTEST says HTCAPTION, so user32
+                    // asks the desktop to drag the window.
+                    input: &["mouse_move -140 -200", "mouse_move 0 -180", "mouse_button 1"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "desktop: dragging window",
+                    // Dragged by (100, 100): the box moves with it.
+                    input: &["mouse_move 100 100", "mouse_button 0"],
+                    pixels: &[PixelCheck::AnyIn(220, 300, 160, 160, 0xff00ff)],
                 },
                 ScreenStep {
                     after: "",

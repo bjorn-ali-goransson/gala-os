@@ -265,6 +265,33 @@ fn a_frameless_window_is_all_client_area_yet_an_application_window() {
 }
 
 #[test]
+fn a_frameless_window_is_dragged_when_its_program_asks() {
+    // A program that draws its own caption asks for the drag on a button
+    // down in it (WM_NCHITTEST said HTCAPTION): the window follows the
+    // pointer until the button goes up, then gets WM_MOVE.
+    let (mut d, _) = desktop_with_window();
+    let f = d.create(7, 300, 120, 200, 100, &title("own frame"), STYLE_FRAMELESS).unwrap();
+    d.show(f, 7, true).unwrap();
+    go(&mut d, 350, 125, 0);
+    go(&mut d, 350, 125, 1);
+    // Not the owner's window: refused; no button down: refused.
+    assert_eq!(d.begin_drag(f, 8), Err(NtStatus::INVALID_HANDLE));
+    d.begin_drag(f, 7).unwrap();
+    go(&mut d, 400, 175, 1);
+    assert_eq!(d.window(f).map(|w| (w.x, w.y)), Some((350, 170)));
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    go(&mut d, 400, 175, 0);
+    let n = d.take_input(7, &mut out);
+    assert!(out[..n].iter().any(|e| e.message == WM_MOVE && e.window == f));
+    assert_eq!(d.begin_drag(f, 7), Err(NtStatus::INVALID_DEVICE_STATE));
+    // Its pixels go with it, to its new bottom-right corner.
+    let blue = alloc::vec![0x0000_00ffu32; 200 * 100];
+    d.present(f, Rect { x: 0, y: 0, w: 200, h: 100 }, &blue, 200).unwrap();
+    assert_eq!(d.pixel(350 + 195, 170 + 95), 0x0000_00ff);
+}
+
+#[test]
 fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     let (mut d, a) = desktop_with_window();
     let p = d.create(7, 320, 150, 100, 60, &title("menu"), STYLE_POPUP).unwrap();

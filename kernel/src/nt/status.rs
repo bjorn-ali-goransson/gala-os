@@ -121,6 +121,7 @@ impl NtStatus {
     pub const INVALID_BUFFER_SIZE: NtStatus = NtStatus(0xc000_0206);
     pub const CANCELLED: NtStatus = NtStatus(0xc000_0120);
     pub const DEVICE_NOT_READY: NtStatus = NtStatus(0xc000_00a3);
+    pub const INVALID_DEVICE_STATE: NtStatus = NtStatus(0xc000_0184);
     pub const NOT_FOUND: NtStatus = NtStatus(0xc000_0225);
     /// A console program ended by its console closing (Ctrl+C, close).
     pub const CONTROL_C_EXIT: NtStatus = NtStatus(0xc000_013a);

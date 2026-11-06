@@ -678,9 +678,11 @@ samples).
    views took no key before it; the desktop's `key` events showed the
    keys arriving). `chromium_window` passes in the gate: the page's
    colours on the screen, then Alt+F4 ends Chromium with 0 (about 2
-   minutes of kernel time). Next: WM_NCHITTEST (dragging and resizing a
-   window by its own frame), IME off, a click on a link, FlaUI reading
-   the page's accessibility tree.
+   minutes of kernel time). Dragging by its own caption (WM_NCHITTEST
+   HTCAPTION on a press: GalaWindowDrag; the scenario drags Chromium by
+   its tab strip). Next: resizing by its own frame (HTLEFT..HTBOTTOMRIGHT),
+   IME off, a click on a link, FlaUI reading the page's accessibility
+   tree.
 3. The sandbox: renderers in restricted, low-integrity and
    AppContainer/LowBox tokens, job objects, process mitigation policies,
    handle inheritance lists, desktop and window station checks (RS);
@@ -1173,6 +1175,15 @@ Each entry: what, why it matters, the structural fix, the owning item.
   T2 (test environment).
 
 ### Defects known, not yet fixed
+
+- **A strip left unredrawn after dragging Chromium**: the screenshot of
+  `chromium_window`'s drag step showed the part of the moved window's
+  new area right of x 826 and below the toolbar as wallpaper (no window,
+  no shadow) while the rest was drawn; a desktop unit test of a dragged
+  frameless window composes correctly. Either the screendump caught the
+  redraw midway (the check passes once the box is in place) or a damage
+  rectangle is dropped; to settle with a second screendump a few seconds
+  later in the step. Item W (desktop).
 
 - **console_window step 5 under load**: about 1 run in 20 of the full
   suite, the wheel scrolls conhost back 15 lines instead of 18 (the
