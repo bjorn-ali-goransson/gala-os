@@ -832,6 +832,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_arch_prctl_pie", "user/lx/bin/arch_prctl_test-pie", "lx"),
     ("lx_auxv", "user/lx/bin/auxv_test", "lx"),
     ("lx_auxv_pie", "user/lx/bin/auxv_test-pie", "lx"),
+    ("winhttp_test", "msvcrt.dll", "Windows/System32"),
+    ("winhttp_test", "winhttp.dll", "Windows/System32"),
+    ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
     ("gdi32_test", "ntdll.dll", "Windows/System32"),
     ("gdi32_test", "kernel32.dll", "Windows/System32"),
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
@@ -5828,6 +5831,15 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: tls ok"],
     },
     Scenario {
+        // TLS step 1: WinHTTP over Schannel against Nginx in the guest
+        // (schannel_test's configuration, with plain HTTP on 8080).
+        name: "winhttp_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=winhttp_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["winhttp_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Schannel (secur32 + schannel.dll): TLS 1.3 and 1.2 clients
         // against Nginx (OpenSSL) on the loopback address, certificate
         // validation, and a server (AcceptSecurityContext) in-process.
@@ -6349,6 +6361,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_window", "chromium"),
     ("chromium_host", "chromium_host"),
     ("chromium_https", "schannel_test"),
+    ("winhttp_test", "winhttp_test"),
+    ("winhttp_test", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];
 
