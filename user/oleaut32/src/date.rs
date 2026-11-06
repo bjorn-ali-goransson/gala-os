@@ -18,14 +18,15 @@ const LAST_DAY: i64 = 2_958_465;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 
 #[repr(C)]
+#[derive(Default)]
 pub struct SystemTime {
-    year: u16,
-    month: u16,
+    pub(crate) year: u16,
+    pub(crate) month: u16,
     day_of_week: u16,
-    day: u16,
-    hour: u16,
-    minute: u16,
-    second: u16,
+    pub(crate) day: u16,
+    pub(crate) hour: u16,
+    pub(crate) minute: u16,
+    pub(crate) second: u16,
     milliseconds: u16,
 }
 

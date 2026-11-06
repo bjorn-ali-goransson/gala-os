@@ -392,6 +392,48 @@ fn put_str(out: &mut [u16], parts: &[&str]) {
     }
 }
 
+/// EnumFontsW(hdc, face, callback, param): the fonts of the typeface
+/// `face` (each of its styles), or one font of every typeface for NULL;
+/// as EnumFontFamiliesExW with DEFAULT_CHARSET (whose callback receives
+/// an ENUMLOGFONTEXW and NEWTEXTMETRICEXW, which start with the LOGFONTW
+/// and TEXTMETRICW FONTENUMPROCW takes). The last callback's value, or 1
+/// when there was none.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumFontsW(
+    hdc: Handle,
+    face: *const u16,
+    callback: Option<FontEnumProcW>,
+    param: isize,
+) -> i32 {
+    let mut filter = LogFont {
+        height: 0,
+        width: 0,
+        escapement: 0,
+        orientation: 0,
+        weight: 0,
+        italic: 0,
+        underline: 0,
+        strike_out: 0,
+        char_set: 1, // DEFAULT_CHARSET
+        out_precision: 0,
+        clip_precision: 0,
+        quality: 0,
+        pitch_and_family: 0,
+        face: [0; 32],
+    };
+    if !face.is_null() {
+        for (i, slot) in filter.face.iter_mut().take(31).enumerate() {
+            // SAFETY: the caller's NUL-terminated face name.
+            let c = unsafe { *face.add(i) };
+            if c == 0 {
+                break;
+            }
+            *slot = c;
+        }
+    }
+    EnumFontFamiliesExW(hdc, &filter, callback, param, 0)
+}
+
 /// EnumFontFamiliesExW: the installed families matching the LOGFONTW's
 /// face name and character set. gala has one, Selawik (in four weights):
 /// an empty name enumerates it once (its Regular face), "Selawik" each of

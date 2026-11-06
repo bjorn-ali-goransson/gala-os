@@ -23,7 +23,7 @@
 //! RegOpenKeyExW/A of a key that does not exist, RegCloseKey of a
 //! predefined key; GetComputerNameW/ExW; ncrypt's NCryptFreeObject of a
 //! null handle, the software key storage provider (opened, no such key,
-//! freed). Prints
+//! freed); initialization files (`profile.rs`). Prints
 //! `kernel32_misc_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -33,6 +33,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 mod global;
+mod profile;
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -663,6 +664,7 @@ fn run() -> Result<(), u32> {
     }
     heaps(&mut c)?;
     global::global_memory(&mut c)?;
+    profile::profiles(&mut c)?;
     modules(&mut c)?;
     Ok(())
 }

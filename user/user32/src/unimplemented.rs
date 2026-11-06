@@ -3,7 +3,6 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("user32.dll":
-    AnimateWindow
     ChangeDisplaySettingsExW
     ChildWindowFromPoint
     ChildWindowFromPointEx
@@ -22,7 +21,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     LoadCursorFromFileW
     SetCaretBlinkTime
     SetCaretPos
-    SetLayeredWindowAttributes
     ShowCaret
     ToUnicode
     ValidateRgn
@@ -39,10 +37,8 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DefMDIChildProcW
     GetDCEx
     GetKeyNameTextW
-    GetLastActivePopup
     GetMenuItemRect
     GetScrollBarInfo
     LoadKeyboardLayoutW
-    ShowOwnedPopups
     TranslateMDISysAccel
 );

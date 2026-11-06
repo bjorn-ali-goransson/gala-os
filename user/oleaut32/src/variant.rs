@@ -49,6 +49,13 @@ pub struct Variant {
     pub value: [u64; 2],
 }
 
+impl Variant {
+    /// A VT_EMPTY variant.
+    pub(crate) const fn empty() -> Variant {
+        Variant { vt: VT_EMPTY, reserved: [0; 3], value: [0; 2] }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn VariantInit(v: *mut Variant) {
     if !v.is_null() {

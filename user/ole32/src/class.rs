@@ -7,6 +7,10 @@
 //! cross-apartment calls, so every object is used directly. Local and
 //! remote servers (CLSCTX_LOCAL_SERVER, ..._REMOTE_SERVER) are not
 //! supported (recorded); an unregistered class gives REGDB_E_CLASSNOTREG.
+//! A server process's reference count and suspension
+//! (CoAddRefServerProcess, CoReleaseServerProcess, CoSuspendClassObjects,
+//! CoResumeClassObjects) are kept as documented; with no local servers
+//! nothing is refused while suspended.
 
 use core::ffi::c_void;
 
@@ -212,4 +216,51 @@ pub extern "system" fn CoCreateInstance(
     );
     release(factory);
     hr
+}
+
+// ---- The server process's lifetime ----
+
+/// The process's server reference count (CoAddRefServerProcess).
+static SERVER_REFS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Whether the class objects are suspended (CoSuspendClassObjects, or
+/// CoReleaseServerProcess reaching 0) until CoResumeClassObjects.
+static SUSPENDED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// CoAddRefServerProcess: the process's server reference count, plus one
+/// (the new count).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoAddRefServerProcess() -> u32 {
+    SERVER_REFS.fetch_add(1, core::sync::atomic::Ordering::AcqRel).wrapping_add(1)
+}
+
+/// CoReleaseServerProcess: the count minus one (the new count, never
+/// below 0); at 0 the class objects are suspended, as documented, so no
+/// new activation reaches a server that is shutting down.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoReleaseServerProcess() -> u32 {
+    use core::sync::atomic::Ordering;
+    let old = SERVER_REFS
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| Some(n.saturating_sub(1)))
+        .unwrap_or(0);
+    let now = old.saturating_sub(1);
+    if now == 0 {
+        SUSPENDED.store(true, Ordering::Release);
+    }
+    now
+}
+
+/// CoSuspendClassObjects: the process's class objects take no new
+/// activations (gala's activations are in-process, through
+/// DllGetClassObject: nothing to refuse yet); S_OK.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoSuspendClassObjects() -> HResult {
+    SUSPENDED.store(true, core::sync::atomic::Ordering::Release);
+    super::S_OK
+}
+
+/// CoResumeClassObjects: activations are taken again; S_OK.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoResumeClassObjects() -> HResult {
+    SUSPENDED.store(false, core::sync::atomic::Ordering::Release);
+    super::S_OK
 }

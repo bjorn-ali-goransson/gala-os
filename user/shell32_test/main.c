@@ -43,12 +43,18 @@
  *   screen, not the whole screen) and edge when there is a taskbar; ShellExecuteA of a file that
  *   is not there returns at most 32; SHCreateMemStream holds a copy of
  *   the bytes, read back from its start.
+ * - Folders Inno Setup installs to: SHGetFolderPathW(CSIDL_PROGRAMS |
+ *   CSIDL_FLAG_CREATE) is %APPDATA%\Microsoft\Windows\Start Menu\Programs
+ *   and exists afterwards; SHGetKnownFolderPath(FOLDERID_UserProgramFiles,
+ *   KF_FLAG_CREATE) is %LOCALAPPDATA%\Programs and exists afterwards;
+ *   CSIDL_COMMON_PROGRAMS is under %ProgramData%.
  *
  * Prints "shell32_test: ok" or exits with the number of the failing
  * check. Run as "shell32_test child" it just exits with 7. */
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <knownfolders.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -107,6 +113,22 @@ static int fileop(UINT func, const wchar_t *from, const wchar_t *to, FILEOP_FLAG
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "child") == 0)
         return 7;
+
+    /* Start menu and per-user program folders. */
+    wchar_t folder[MAX_PATH], want[MAX_PATH];
+    CHECK(SHGetFolderPathW(NULL, CSIDL_PROGRAMS | CSIDL_FLAG_CREATE, NULL, 0, folder) == S_OK);
+    CHECK(GetEnvironmentVariableW(L"APPDATA", want, MAX_PATH) > 0);
+    wcscat(want, L"\\Microsoft\\Windows\\Start Menu\\Programs");
+    CHECK(_wcsicmp(folder, want) == 0 && exists(folder));
+    PWSTR known = NULL;
+    CHECK(SHGetKnownFolderPath(&FOLDERID_UserProgramFiles, KF_FLAG_CREATE, NULL, &known) == S_OK);
+    CHECK(GetEnvironmentVariableW(L"LOCALAPPDATA", want, MAX_PATH) > 0);
+    wcscat(want, L"\\Programs");
+    CHECK(_wcsicmp(known, want) == 0 && exists(known));
+    CoTaskMemFree(known);
+    CHECK(SHGetFolderPathW(NULL, CSIDL_COMMON_PROGRAMS, NULL, 0, folder) == S_OK);
+    CHECK(GetEnvironmentVariableW(L"ProgramData", want, MAX_PATH) > 0);
+    CHECK(_wcsnicmp(folder, want, wcslen(want)) == 0 && wcsstr(folder, L"\\Start Menu\\Programs") != NULL);
 
     /* ShellExecuteExW and ShellExecuteW running this program. */
     wchar_t self[MAX_PATH];

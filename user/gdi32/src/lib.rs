@@ -22,6 +22,7 @@ mod blend;
 mod dib;
 mod draw;
 mod font;
+mod older;
 mod palette;
 mod region;
 mod shapes;

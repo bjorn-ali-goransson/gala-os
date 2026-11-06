@@ -4,11 +4,6 @@
 
 gala_stubs::unimplemented_exports!("comctl32.dll":
     CreateUpDownControl
-    FlatSB_GetScrollInfo
-    FlatSB_GetScrollPos
-    FlatSB_SetScrollInfo
-    FlatSB_SetScrollPos
-    FlatSB_SetScrollProp
     ImageList_DragShowNolock
     ImageList_DrawEx
     ImageList_DrawIndirect
@@ -19,5 +14,4 @@ gala_stubs::unimplemented_exports!("comctl32.dll":
     ImageList_SetImageCount
     ImageList_SetOverlayImage
     ImageList_Write
-    InitializeFlatSB
 );

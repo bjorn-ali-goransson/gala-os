@@ -827,19 +827,6 @@ pub extern "system" fn UnregisterClassA(name: *const u8, instance: usize) -> i32
 
 // ---- Layered windows, regions, printing, input injection -------------------
 
-/// GetLayeredWindowAttributes: FALSE (gala keeps no layered attributes:
-/// as for a window SetLayeredWindowAttributes was never called on).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetLayeredWindowAttributes(
-    _hwnd: usize,
-    _key: *mut u32,
-    _alpha: *mut u8,
-    _flags: *mut u32,
-) -> i32 {
-    set_error(87);
-    0
-}
-
 /// UpdateLayeredWindow: not supported yet (reported; FALSE).
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
@@ -1083,8 +1070,13 @@ pub extern "system" fn GetClassInfoW(
     ex[..4].copy_from_slice(&80u32.to_le_bytes());
     let atom = super::window::GetClassInfoExW(instance, name, ex.as_mut_ptr().cast());
     if atom != 0 {
-        // SAFETY: the caller's 72-byte WNDCLASSW: style .. lpszClassName.
-        unsafe { core::ptr::copy_nonoverlapping(ex.as_ptr().add(4), out, 72) };
+        // SAFETY: the caller's 72-byte WNDCLASSW: its style at 0 (then 4
+        // bytes of padding) and lpfnWndProc .. lpszClassName at 8..72, where
+        // WNDCLASSEXW has them after its cbSize (style at 4).
+        unsafe {
+            core::ptr::copy_nonoverlapping(ex.as_ptr().add(4), out, 4);
+            core::ptr::copy_nonoverlapping(ex.as_ptr().add(8), out.add(8), 64);
+        }
     }
     atom
 }

@@ -13,5 +13,5 @@ printf '1 ICON "one.ico"\n2 ICON "two.ico"\n' > "$WORK/icons.rc"
 (cd "$WORK" && x86_64-w64-mingw32-windres --preprocessor=cat -i icons.rc -O coff -o icons.o)
 x86_64-w64-mingw32-gcc -O1 -g0 -s -Wl,--no-insert-timestamp \
     -o "$ROOT/user/bin/shell32_test.exe" "$ROOT/user/shell32_test/main.c" "$WORK/icons.o" \
-    -lshell32 -luser32 -lgdi32
+    -lshell32 -luser32 -lgdi32 -lole32 -luuid
 sha256sum "$ROOT/user/bin/shell32_test.exe"

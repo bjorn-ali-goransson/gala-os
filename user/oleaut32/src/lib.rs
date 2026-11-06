@@ -12,6 +12,7 @@
 
 use core::ffi::c_void;
 
+mod arith;
 mod conversions;
 mod date;
 mod safearray;

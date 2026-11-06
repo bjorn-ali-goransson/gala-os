@@ -74,6 +74,11 @@
  *   GetSystemTimeAsFileTime calls). CoGetCurrentProcess: non-zero, the
  *   same on each call in a thread, another number in another thread.
  *
+ * - A server process's lifetime (Delphi's ComServer looks these up; Inno
+ *   Setup): CoAddRefServerProcess returns the new count (1, 2),
+ *   CoReleaseServerProcess the count after it (1, 0);
+ *   CoSuspendClassObjects and CoResumeClassObjects return S_OK.
+ *
  * Prints "ole32_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
 #include <windows.h>
@@ -610,6 +615,9 @@ int main(void) {
     time_and_numbers();
 
     CoUninitialize();
+    CHECK(CoAddRefServerProcess() == 1 && CoAddRefServerProcess() == 2);
+    CHECK(CoReleaseServerProcess() == 1 && CoReleaseServerProcess() == 0);
+    CHECK(CoSuspendClassObjects() == S_OK && CoResumeClassObjects() == S_OK);
     printf("ole32_test: ok\n");
     return 0;
 }

@@ -39,6 +39,7 @@ mod pool;
 mod process;
 mod processor;
 mod procinfo;
+mod profile;
 mod pty;
 mod resource;
 mod runtime;

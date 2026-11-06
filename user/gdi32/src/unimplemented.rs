@@ -11,9 +11,7 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     Chord
     CopyEnhMetaFileW
     CreateHalftonePalette
-    CreatePenIndirect
     CreateRoundRectRgn
-    EnumFontsW
     FrameRgn
     GetBitmapBits
     GetCharABCWidthsW
@@ -22,14 +20,10 @@ gala_stubs::unimplemented_exports!("gdi32.dll":
     GetEnhMetaFileW
     GetMetaFileBitsEx
     GetSystemPaletteEntries
-    GetTextExtentPointW
     GetWinMetaFileBits
-    LineDDA
     PolyBezier
-    RectVisible
     RemoveFontResourceW
     ResizePalette
     SetMetaFileBitsEx
     SetWinMetaFileBits
-    UnrealizeObject
 );

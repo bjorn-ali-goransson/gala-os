@@ -22,7 +22,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNumaNodeProcessorMaskEx
     GetNumberFormatEx
     GetNumberFormatW
-    GetPrivateProfileStringW
     GetShortPathNameA
     GetSystemTimeAdjustment
     GetTapeParameters
@@ -91,10 +90,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleOutputW
     EnumResourceNamesW
     GetDiskFreeSpaceA
-    GetProfileStringW
     IsBadReadPtr
     ReadConsoleOutputCharacterA
-    WritePrivateProfileStringW
     // Inno Setup's Setup (Delphi's VCL) imports these.
-    WriteProfileStringW
 );

@@ -43,6 +43,7 @@ unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u16;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn GetModuleFileNameW(module: *mut core::ffi::c_void, buf: *mut u16, size: u32) -> u32;
+    fn CreateDirectoryW(path: *const u16, attrs: *const core::ffi::c_void) -> i32;
 }
 
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -58,6 +59,7 @@ pub(crate) fn unsupported(what: &[u8], detail: u64) {
 
 const S_OK: i32 = 0;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+const E_FAIL: i32 = 0x8000_4005u32 as i32;
 /// HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND): an unknown folder id.
 const E_FILE_NOT_FOUND: i32 = 0x8007_0002u32 as i32;
 const E_OUTOFMEMORY: i32 = 0x8007_000eu32 as i32;
@@ -72,17 +74,34 @@ enum Folder {
     System,
 }
 
-/// CSIDL values and their folders.
+const START_MENU: &str = "\\Microsoft\\Windows\\Start Menu";
+const PROGRAMS: &str = "\\Microsoft\\Windows\\Start Menu\\Programs";
+const STARTUP: &str = "\\Microsoft\\Windows\\Start Menu\\Programs\\Startup";
+
+/// CSIDL values and their folders (where Windows 11 has them).
 const CSIDLS: &[(i32, Folder)] = &[
+    (0x02, Folder::Env("APPDATA", PROGRAMS)), // CSIDL_PROGRAMS
     (0x05, Folder::Env("USERPROFILE", "\\Documents")), // CSIDL_PERSONAL
-    (0x10, Folder::Env("USERPROFILE", "\\Desktop")),   // CSIDL_DESKTOPDIRECTORY
-    (0x1a, Folder::Env("APPDATA", "")),                // CSIDL_APPDATA
-    (0x1c, Folder::Env("LOCALAPPDATA", "")),           // CSIDL_LOCAL_APPDATA
-    (0x23, Folder::Env("ProgramData", "")),            // CSIDL_COMMON_APPDATA
-    (0x24, Folder::Windows),                           // CSIDL_WINDOWS
-    (0x25, Folder::System),                            // CSIDL_SYSTEM
-    (0x26, Folder::Env("ProgramFiles", "")),           // CSIDL_PROGRAM_FILES
-    (0x28, Folder::Env("USERPROFILE", "")),            // CSIDL_PROFILE
+    (0x06, Folder::Env("USERPROFILE", "\\Favorites")), // CSIDL_FAVORITES
+    (0x07, Folder::Env("APPDATA", STARTUP)),  // CSIDL_STARTUP
+    (0x09, Folder::Env("APPDATA", "\\Microsoft\\Windows\\SendTo")), // CSIDL_SENDTO
+    (0x0b, Folder::Env("APPDATA", START_MENU)), // CSIDL_STARTMENU
+    (0x10, Folder::Env("USERPROFILE", "\\Desktop")), // CSIDL_DESKTOPDIRECTORY
+    (0x14, Folder::Env("windir", "\\Fonts")), // CSIDL_FONTS
+    (0x15, Folder::Env("APPDATA", "\\Microsoft\\Windows\\Templates")), // CSIDL_TEMPLATES
+    (0x16, Folder::Env("ProgramData", START_MENU)), // CSIDL_COMMON_STARTMENU
+    (0x17, Folder::Env("ProgramData", PROGRAMS)), // CSIDL_COMMON_PROGRAMS
+    (0x18, Folder::Env("ProgramData", STARTUP)), // CSIDL_COMMON_STARTUP
+    (0x19, Folder::Env("PUBLIC", "\\Desktop")), // CSIDL_COMMON_DESKTOPDIRECTORY
+    (0x1a, Folder::Env("APPDATA", "")),       // CSIDL_APPDATA
+    (0x1c, Folder::Env("LOCALAPPDATA", "")),  // CSIDL_LOCAL_APPDATA
+    (0x23, Folder::Env("ProgramData", "")),   // CSIDL_COMMON_APPDATA
+    (0x24, Folder::Windows),                  // CSIDL_WINDOWS
+    (0x25, Folder::System),                   // CSIDL_SYSTEM
+    (0x26, Folder::Env("ProgramFiles", "")),  // CSIDL_PROGRAM_FILES
+    (0x28, Folder::Env("USERPROFILE", "")),   // CSIDL_PROFILE
+    (0x2d, Folder::Env("ProgramData", "\\Microsoft\\Windows\\Templates")), // CSIDL_COMMON_TEMPLATES
+    (0x2e, Folder::Env("PUBLIC", "\\Documents")), // CSIDL_COMMON_DOCUMENTS
 ];
 
 /// KNOWNFOLDERIDs (GUIDs as in memory: Data1-3 little endian) and their
@@ -123,7 +142,60 @@ const KNOWN: &[([u8; 16], Folder)] = &[
         guid(0x1ac14e77, 0x02e7, 0x4e5d, [0xb7, 0x44, 0x2e, 0xb1, 0xae, 0x51, 0x98, 0xb7]),
         Folder::System,
     ),
+    // FOLDERID_UserProgramFiles {5CD7AEE2-2219-4A67-B85D-6C9CE15660CB}
+    (
+        guid(0x5cd7aee2, 0x2219, 0x4a67, [0xb8, 0x5d, 0x6c, 0x9c, 0xe1, 0x56, 0x60, 0xcb]),
+        Folder::Env("LOCALAPPDATA", "\\Programs"),
+    ),
+    // FOLDERID_UserProgramFilesCommon {BCBD3057-CA5C-4622-B42D-BC56DB0AE516}
+    (
+        guid(0xbcbd3057, 0xca5c, 0x4622, [0xb4, 0x2d, 0xbc, 0x56, 0xdb, 0x0a, 0xe5, 0x16]),
+        Folder::Env("LOCALAPPDATA", "\\Programs\\Common"),
+    ),
+    // FOLDERID_Programs {A77F5D77-2E2B-44C3-A6A2-ABA601054A51}
+    (
+        guid(0xa77f5d77, 0x2e2b, 0x44c3, [0xa6, 0xa2, 0xab, 0xa6, 0x01, 0x05, 0x4a, 0x51]),
+        Folder::Env("APPDATA", PROGRAMS),
+    ),
+    // FOLDERID_StartMenu {625B53C3-AB48-4EC1-BA1F-A1EF4146FC19}
+    (
+        guid(0x625b53c3, 0xab48, 0x4ec1, [0xba, 0x1f, 0xa1, 0xef, 0x41, 0x46, 0xfc, 0x19]),
+        Folder::Env("APPDATA", START_MENU),
+    ),
+    // FOLDERID_Desktop {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
+    (
+        guid(0xb4bfcc3a, 0xdb2c, 0x424c, [0xb0, 0x29, 0x7f, 0xe9, 0x9a, 0x87, 0xc6, 0x41]),
+        Folder::Env("USERPROFILE", "\\Desktop"),
+    ),
+    // FOLDERID_SavedGames {4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}
+    (
+        guid(0x4c5c32ff, 0xbb9d, 0x43b0, [0xb5, 0xb4, 0x2d, 0x72, 0xe5, 0x4e, 0xaa, 0xa4]),
+        Folder::Env("USERPROFILE", "\\Saved Games"),
+    ),
 ];
+
+/// Creates the directory `path` (its first `n` units) and the ones above
+/// it that are missing, as CSIDL_FLAG_CREATE and KF_FLAG_CREATE ask.
+/// Whether it exists now.
+fn create_folder(path: &mut [u16; MAX_PATH], n: usize) -> bool {
+    const INVALID: u32 = u32::MAX;
+    // SAFETY: NUL-terminated at n.
+    if unsafe { GetFileAttributesW(path.as_ptr()) } != INVALID {
+        return true;
+    }
+    // Each component after the drive ("C:\"), shortest first.
+    for i in 3..=n {
+        if i == n || path[i] == u16::from(b'\\') {
+            let saved = path[i];
+            path[i] = 0;
+            // SAFETY: NUL-terminated at i; an existing one fails harmlessly.
+            unsafe { CreateDirectoryW(path.as_ptr(), core::ptr::null()) };
+            path[i] = saved;
+        }
+    }
+    // SAFETY: NUL-terminated at n.
+    unsafe { GetFileAttributesW(path.as_ptr()) != INVALID }
+}
 
 const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> [u8; 16] {
     let a = d1.to_le_bytes();
@@ -164,8 +236,10 @@ fn resolve(folder: Folder, out: &mut [u16; MAX_PATH]) -> Option<usize> {
 }
 
 /// SHGetFolderPathW(hwnd, csidl, token, flags, path[MAX_PATH]): S_OK or
-/// E_INVALIDARG for a folder gala does not have (the CSIDL_FLAG_* bits
-/// are ignored: the folders exist).
+/// E_INVALIDARG for a folder gala does not have. With CSIDL_FLAG_CREATE
+/// the folder is created if it is missing (E_FAIL if that fails); without
+/// it the path is given even when the folder is missing (gala's profile
+/// does not hold every standard folder Windows makes with a profile).
 #[unsafe(no_mangle)]
 pub extern "system" fn SHGetFolderPathW(
     _window: usize,
@@ -181,6 +255,10 @@ pub extern "system" fn SHGetFolderPathW(
     let Some(n) = resolve(folder, &mut buf) else { return E_INVALIDARG };
     if path.is_null() {
         return E_INVALIDARG;
+    }
+    const CSIDL_FLAG_CREATE: i32 = 0x8000;
+    if csidl & CSIDL_FLAG_CREATE != 0 && !create_folder(&mut buf, n) {
+        return E_FAIL;
     }
     // SAFETY: the caller's MAX_PATH buffer.
     unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), path, n + 1) };
@@ -248,11 +326,12 @@ pub extern "system" fn SHGetSpecialFolderPathA(
 
 /// SHGetKnownFolderPath(id, flags, token, *path): the path in memory the
 /// caller frees (CoTaskMemFree; here from the process heap, which gala's
-/// CoTaskMemFree would free too).
+/// CoTaskMemFree would free too); KF_FLAG_CREATE creates a missing folder
+/// (E_FAIL if that fails).
 #[unsafe(no_mangle)]
 pub extern "system" fn SHGetKnownFolderPath(
     id: *const [u8; 16],
-    _flags: u32,
+    flags: u32,
     _token: usize,
     path: *mut *mut u16,
 ) -> i32 {
@@ -268,6 +347,12 @@ pub extern "system" fn SHGetKnownFolderPath(
     };
     let mut buf = [0u16; MAX_PATH];
     let Some(n) = resolve(folder, &mut buf) else { return E_FILE_NOT_FOUND };
+    const KF_FLAG_CREATE: u32 = 0x8000;
+    if flags & KF_FLAG_CREATE != 0 && !create_folder(&mut buf, n) {
+        // SAFETY: the caller's output.
+        unsafe { *path = core::ptr::null_mut() };
+        return E_FAIL;
+    }
     // SAFETY: plain call.
     let p = unsafe { LocalAlloc(0, 2 * (n + 1)) };
     if p.is_null() {

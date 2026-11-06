@@ -3,7 +3,8 @@
 //! (`statusbar.rs`), tooltips (`tooltips.rs`), the toolbar
 //! (`toolbar.rs`), the header (`header.rs`), the list view
 //! (`listview.rs`) and the tree view (`treeview.rs`), drawn in the Windows 11 style (`common.rs`); and image
-//! lists (`imagelist.rs`); window subclassing (`subclass.rs`).
+//! lists (`imagelist.rs`); window subclassing (`subclass.rs`); flat
+//! scroll bars (`flatsb.rs`).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -13,6 +14,7 @@ extern crate alloc;
 
 mod common;
 mod drag;
+mod flatsb;
 mod header;
 mod imagelist;
 mod listview;

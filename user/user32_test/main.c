@@ -142,6 +142,32 @@
  *   DRAGDROP_E_ALREADYREGISTERED, _NOTREGISTERED, _INVALIDHWND).
  * - ole32's OleInitialize (wx initializes OLE first): S_OK, then S_FALSE
  *   on the same thread; OleUninitialize once per call.
+ * - Classes (Delphi's VCL registers one per control type and looks it
+ *   up first): GetClassInfoW of a registered class gives its style,
+ *   window procedure and extra bytes where WNDCLASSW has them (the
+ *   procedure at offset 8, after the style's padding); GetClassInfoW of a
+ *   system class (LISTBOX) gives a procedure a superclass can call;
+ *   UnregisterClassW of a class with a window fails with
+ *   ERROR_CLASS_HAS_WINDOWS, after which RegisterClassW of the same name
+ *   fails with ERROR_CLASS_ALREADY_EXISTS; once the window is gone both
+ *   succeed.
+ * - Layered windows: GetLayeredWindowAttributes fails before
+ *   SetLayeredWindowAttributes, then gives its colour key, alpha and
+ *   flags; SetLayeredWindowAttributes fails on a window without
+ *   WS_EX_LAYERED.
+ * - AnimateWindow: shows a hidden window (visible after; activated with
+ *   AW_ACTIVATE) and hides a shown one (AW_HIDE); it fails for a window
+ *   already in that state and for a slide with no direction.
+ * - DisableProcessWindowsGhosting (no result);
+ *   ShutdownBlockReasonCreate/Query/Destroy: the reason given, its length
+ *   with the NUL when asked without a buffer; none after Destroy.
+ * - GetLastActivePopup: the window itself while none of its popups (a
+ *   captioned one, as a dialog) was
+ *   activated, then the popup activated last (a popup's own is itself);
+ *   the owner again once the popup is gone. ShowOwnedPopups(FALSE) hides
+ *   the owner's shown popups, TRUE shows them again.
+ * - msctf.dll (loaded as Delphi's VCL loads it): SetInputScope and
+ *   SetInputScopes on a window return S_OK.
  *
  * Prints "user32_test: ok" or exits with the number of the failing
  * check. */
@@ -759,6 +785,103 @@ static void dialog_units(void) {
     DestroyWindow(w);
 }
 
+static WNDPROC listbox_proc;
+static LRESULT CALLBACK sub_listbox(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    return CallWindowProcW(listbox_proc, hwnd, msg, wparam, lparam);
+}
+
+static void classes(void) {
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    WNDCLASSW wc = {0};
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = wndproc;
+    wc.cbWndExtra = 8;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"User32TestClassInfo";
+    CHECK(RegisterClassW(&wc) != 0);
+    WNDCLASSW got;
+    memset(&got, 0xcc, sizeof got);
+    CHECK(GetClassInfoW(inst, L"User32TestClassInfo", &got));
+    CHECK(got.lpfnWndProc == wndproc && got.style == (CS_HREDRAW | CS_VREDRAW));
+    /* A superclass of a system class, as Delphi's controls are. */
+    WNDCLASSW lb;
+    CHECK(GetClassInfoW(NULL, L"LISTBOX", &lb) && lb.lpfnWndProc != NULL);
+    listbox_proc = lb.lpfnWndProc;
+    lb.lpfnWndProc = sub_listbox;
+    lb.hInstance = inst;
+    lb.lpszClassName = L"User32TestListBox";
+    CHECK(RegisterClassW(&lb) != 0);
+    HWND parent = CreateWindowExW(0, L"User32TestClassInfo", L"classes", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL,
+                                  NULL, inst, NULL);
+    HWND list = CreateWindowExW(0, L"User32TestListBox", L"", WS_CHILD | LBS_NOTIFY, 0, 0, 100, 50, parent, NULL,
+                                inst, NULL);
+    CHECK(parent != NULL && list != NULL);
+    CHECK(SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)L"one") == 0 && SendMessageW(list, LB_GETCOUNT, 0, 0) == 1);
+    SetLastError(0);
+    CHECK(!UnregisterClassW(L"User32TestClassInfo", inst) && GetLastError() == ERROR_CLASS_HAS_WINDOWS);
+    SetLastError(0);
+    CHECK(RegisterClassW(&wc) == 0 && GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+    DestroyWindow(parent);
+    CHECK(UnregisterClassW(L"User32TestClassInfo", inst) && RegisterClassW(&wc) != 0);
+    CHECK(UnregisterClassW(L"User32TestListBox", inst));
+}
+
+static void effects(void) {
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    HWND w = CreateWindowExW(WS_EX_LAYERED, L"User32TestHooks", L"layered", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100,
+                             NULL, NULL, inst, NULL);
+    COLORREF key = 1;
+    BYTE alpha = 1;
+    DWORD flags = 1;
+    CHECK(w != NULL && !GetLayeredWindowAttributes(w, &key, &alpha, &flags));
+    CHECK(SetLayeredWindowAttributes(w, RGB(1, 2, 3), 200, LWA_ALPHA | LWA_COLORKEY));
+    CHECK(GetLayeredWindowAttributes(w, &key, &alpha, &flags));
+    CHECK(key == RGB(1, 2, 3) && alpha == 200 && flags == (LWA_ALPHA | LWA_COLORKEY));
+    CHECK(SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA) && GetLayeredWindowAttributes(w, NULL, &alpha, &flags));
+    CHECK(alpha == 255 && flags == LWA_ALPHA);
+    DestroyWindow(w);
+    w = CreateWindowExW(0, L"User32TestHooks", L"plain", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL, NULL, inst,
+                        NULL);
+    CHECK(!SetLayeredWindowAttributes(w, 0, 128, LWA_ALPHA));
+    /* AnimateWindow. */
+    CHECK(!IsWindowVisible(w) && !AnimateWindow(w, 10, AW_HIDE | AW_BLEND));
+    CHECK(!AnimateWindow(w, 10, AW_SLIDE) && !IsWindowVisible(w));
+    CHECK(AnimateWindow(w, 10, AW_BLEND | AW_ACTIVATE) && IsWindowVisible(w) && GetActiveWindow() == w);
+    CHECK(!AnimateWindow(w, 10, AW_BLEND));
+    CHECK(AnimateWindow(w, 10, AW_HIDE | AW_SLIDE | AW_VER_POSITIVE) && !IsWindowVisible(w));
+    CHECK(AnimateWindow(w, 10, AW_CENTER) && IsWindowVisible(w));
+    /* Ghosting and shutdown reasons. */
+    DisableProcessWindowsGhosting();
+    WCHAR reason[32];
+    DWORD n = 0;
+    CHECK(ShutdownBlockReasonCreate(w, L"Installing"));
+    CHECK(ShutdownBlockReasonQuery(w, NULL, &n) && n == 11);
+    n = 32;
+    CHECK(ShutdownBlockReasonQuery(w, reason, &n) && wcscmp(reason, L"Installing") == 0);
+    CHECK(ShutdownBlockReasonDestroy(w));
+    n = 32;
+    CHECK(!ShutdownBlockReasonQuery(w, reason, &n));
+    /* Owned popups. */
+    HWND p = CreateWindowExW(0, L"User32TestHooks", L"popup", WS_POPUP | WS_CAPTION, 0, 0, 50, 50, w, NULL, inst, NULL);
+    CHECK(p != NULL && GetLastActivePopup(w) == w);
+    ShowWindow(p, SW_SHOW);
+    CHECK(GetActiveWindow() == p && GetLastActivePopup(w) == p && GetLastActivePopup(p) == p);
+    CHECK(ShowOwnedPopups(w, FALSE) && !IsWindowVisible(p));
+    CHECK(ShowOwnedPopups(w, TRUE) && IsWindowVisible(p));
+    DestroyWindow(p);
+    CHECK(GetLastActivePopup(w) == w);
+    /* Input scopes (msctf.dll). */
+    HMODULE tsf = LoadLibraryW(L"msctf.dll");
+    CHECK(tsf != NULL);
+    HRESULT (WINAPI *set_scope)(HWND, int) = (void *)GetProcAddress(tsf, "SetInputScope");
+    HRESULT (WINAPI *set_scopes)(HWND, const int *, UINT, WCHAR **, UINT, WCHAR *, WCHAR *) =
+        (void *)GetProcAddress(tsf, "SetInputScopes");
+    int scopes[2] = {1 /* IS_URL */, 5 /* IS_EMAIL_SMTPEMAILADDRESS */};
+    CHECK(set_scope != NULL && set_scope(w, 1) == S_OK);
+    CHECK(set_scopes != NULL && set_scopes(w, scopes, 2, NULL, 0, NULL, NULL) == S_OK);
+    DestroyWindow(w);
+}
+
 static void unknown_class(void) {
     SetLastError(0);
     CHECK(CreateWindowExW(0, L"GalaNoSuchClass", L"x", WS_OVERLAPPEDWINDOW, 0, 0, 10, 10, NULL, NULL,
@@ -1125,6 +1248,8 @@ int main(void) {
     hooks();
     redraw();
     unknown_class();
+    classes();
+    effects();
     dialog_units();
     deferred();
     positions();

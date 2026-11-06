@@ -85,7 +85,15 @@
  *   starts with version 1.0), GDI_ERROR for a table the font lacks.
  *   EnumFontFamiliesExW with an empty name and DEFAULT_CHARSET calls back
  *   at least once and returns the callback's last value (0 stops it); an
- *   unknown family gets no callback.
+ *   unknown family gets no callback. EnumFontsW (Delphi asks it whether
+ *   a face is installed): with no face name each family once, with the
+ *   callback's last value returned; an unknown face gets no callback.
+ * - Older calls Delphi's VCL makes: GetTextExtentPointW measures as
+ *   GetTextExtentPoint32W; CreatePenIndirect makes a pen (OBJ_PEN);
+ *   UnrealizeObject is TRUE for a brush; RectVisible: TRUE for a
+ *   rectangle that meets the clipping region, FALSE for one outside it;
+ *   LineDDA reports each point of a line but the last, one per step of
+ *   the longer axis.
  *
  * Prints "gdi32_test: ok" or exits with the number of the failing check. */
 #include <windows.h>
@@ -787,6 +795,16 @@ static int CALLBACK enum_font(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD t
     return enum_stop ? 0 : 7;
 }
 
+static POINT dda[16];
+static int dda_n;
+static void CALLBACK dda_point(int x, int y, LPARAM data) {
+    if (data == 0x55 && dda_n < 16) {
+        dda[dda_n].x = x;
+        dda[dda_n].y = y;
+    }
+    dda_n++;
+}
+
 /* SaveDC/RestoreDC, the DC brush and pen colours, ANSI fonts, widths,
  * font data and enumeration (what Chromium delay-imports). */
 static void dc_state(void) {
@@ -839,6 +857,35 @@ static void dc_state(void) {
     enum_calls = 0;
     EnumFontFamiliesExW(dc, &any, enum_font, 0x1234, 0);
     CHECK(enum_calls == 0);
+    enum_calls = 0;
+    enum_stop = 0;
+    CHECK(EnumFontsW(dc, NULL, (FONTENUMPROCW)enum_font, 0x1234) == 7 && enum_calls >= 1);
+    enum_calls = 0;
+    EnumFontsW(dc, L"No Such Font Family", (FONTENUMPROCW)enum_font, 0x1234);
+    CHECK(enum_calls == 0);
+
+    SIZE old_size, new_size;
+    CHECK(GetTextExtentPointW(dc, L"Setup", 5, &old_size) && GetTextExtentPoint32W(dc, L"Setup", 5, &new_size));
+    CHECK(old_size.cx == new_size.cx && old_size.cy == new_size.cy && old_size.cx > 0);
+    LOGPEN lp = {PS_SOLID, {2, 0}, RGB(1, 2, 3)};
+    HPEN pen = CreatePenIndirect(&lp);
+    CHECK(pen != NULL && GetObjectType(pen) == OBJ_PEN && DeleteObject(pen));
+    HBRUSH brush = CreateSolidBrush(RGB(9, 9, 9));
+    CHECK(UnrealizeObject(brush) && DeleteObject(brush));
+    HBITMAP canvas = CreateCompatibleBitmap(screen, 64, 64);
+    HGDIOBJ old_bitmap = SelectObject(dc, canvas);
+    RECT inside = {10, 10, 20, 20}, outside = {100, 100, 120, 120};
+    CHECK(RectVisible(dc, &inside) && !RectVisible(dc, &outside));
+    SelectObject(dc, old_bitmap);
+    DeleteObject(canvas);
+    dda_n = 0;
+    CHECK(LineDDA(0, 0, 3, 0, dda_point, 0x55) && dda_n == 3);
+    CHECK(dda[0].x == 0 && dda[1].x == 1 && dda[2].x == 2 && dda[2].y == 0);
+    dda_n = 0;
+    CHECK(LineDDA(5, 5, 2, 2, dda_point, 0x55) && dda_n == 3);
+    CHECK(dda[0].x == 5 && dda[0].y == 5 && dda[2].x == 3 && dda[2].y == 3);
+    dda_n = 0;
+    CHECK(LineDDA(0, 0, 0, 4, dda_point, 0x55) && dda_n == 4 && dda[3].x == 0 && dda[3].y == 3);
 
     SelectObject(dc, old);
     DeleteObject(font);

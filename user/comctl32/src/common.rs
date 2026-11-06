@@ -259,6 +259,12 @@ impl<T> Store<T> {
         self.locked(|items| items.iter_mut().find(|e| e.0 == hwnd).map(|e| f(&mut e.1)))
     }
 
+    /// Keeps the states whose window `keep` accepts (the lock is held:
+    /// `keep` must not send messages).
+    pub fn retain(&self, mut keep: impl FnMut(Hwnd) -> bool) {
+        self.locked(|items| items.retain(|e| keep(e.0)));
+    }
+
     pub fn remove(&self, hwnd: Hwnd) -> Option<T> {
         self.locked(|items| items.iter().position(|e| e.0 == hwnd).map(|i| items.swap_remove(i).1))
     }

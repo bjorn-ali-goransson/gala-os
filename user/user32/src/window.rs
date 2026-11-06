@@ -193,6 +193,13 @@ pub(crate) struct Window {
     /// The desktop then shows a frameless window over the client area
     /// and the program draws its own frame (Chromium); None: gala's frame.
     pub(crate) custom: Option<(i32, i32)>,
+    /// SetLayeredWindowAttributes' colour key, alpha and LWA_* flags (a
+    /// WS_EX_LAYERED window that was given them).
+    pub(crate) layered: Option<(u32, u8, u32)>,
+    /// The owned popup activated last (GetLastActivePopup).
+    pub(crate) last_popup: Hwnd,
+    /// Hidden by ShowOwnedPopups(owner, FALSE), shown again by TRUE.
+    pub(crate) hidden_with_owner: bool,
 }
 
 /// WM_NCCALCSIZE.
@@ -382,6 +389,9 @@ pub(crate) const NO_WINDOW: Window = Window {
     dirty_at: 0,
     owner: 0,
     custom: None,
+    layered: None,
+    last_popup: 0,
+    hidden_with_owner: false,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -988,6 +998,9 @@ pub extern "system" fn CreateWindowExW(
             dirty_at: 0,
             owner,
             custom: None,
+            layered: None,
+            last_popup: 0,
+            hidden_with_owner: false,
         };
         Some(i)
     });
@@ -1860,6 +1873,10 @@ pub(crate) fn activate(hwnd: Hwnd, state: usize) {
         }
     }
     if let Some(w) = window(hwnd) {
+        // Its owner's last active popup (GetLastActivePopup).
+        if let Some(o) = (w.owner != 0).then(|| index_of(w.owner)).flatten() {
+            with(|s| s.windows[o].last_popup = hwnd);
+        }
         SendMessageW(hwnd, WM_NCACTIVATE, 1, 0);
         SendMessageW(hwnd, WM_ACTIVATE, state | usize::from(w.iconic) << 16, old as isize);
     }

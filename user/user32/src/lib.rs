@@ -15,6 +15,7 @@ mod combo;
 mod controls;
 mod dialog;
 mod dpi;
+mod effects;
 mod foreign;
 mod hook;
 mod icon;
