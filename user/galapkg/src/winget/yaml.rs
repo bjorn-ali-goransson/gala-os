@@ -24,11 +24,6 @@
 //! Scalars stay text, except a plain `~`, `null`, `Null`, `NULL` or
 //! nothing, which are [`Value::Null`]: the manifest reader reads numbers
 //! and booleans from the fields that want them.
-//!
-//! Separate from `crate::yaml` (which `crate::manifest` and the install
-//! path use) so that the install path is unchanged until it switches to
-//! `crate::winget` (ARCHITECTURE "Installing software", "The winget
-//! resolver").
 
 use alloc::string::String;
 use alloc::vec::Vec;

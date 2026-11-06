@@ -18,11 +18,11 @@
 //!   Add/Remove Programs records (what is installed, at what version);
 //! - [`version`]: winget's version ordering.
 //!
-//! Separate from `crate::manifest`/`crate::yaml`, which the install path
-//! uses today; the install command switches over as ARCHITECTURE
-//! describes. `no_std` with `alloc`, host-tested (`cargo test -p
-//! galapkg`), including a corpus of real winget-pkgs manifests
-//! (`testdata/winget-corpus`, `corpus_tests`).
+//! `crate::install` and `crate::source` (and so `gala install`, `list`,
+//! `upgrade`, `search`) read, select and match through these. `no_std`
+//! with `alloc`, host-tested (`cargo test -p galapkg`), including a
+//! corpus of real winget-pkgs manifests (`testdata/winget-corpus`,
+//! `corpus_tests`).
 
 pub mod arp;
 pub mod deps;

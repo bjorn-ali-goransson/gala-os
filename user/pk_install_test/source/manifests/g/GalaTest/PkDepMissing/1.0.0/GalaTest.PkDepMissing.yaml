@@ -1,0 +1,21 @@
+PackageIdentifier: GalaTest.PkDepMissing
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkDepMissing
+License: Proprietary
+ShortDescription: A test package with dependencies (gala's install test)
+Installers:
+- Architecture: x64
+  InstallerType: zip
+  NestedInstallerType: portable
+  NestedInstallerFiles:
+  - RelativeFilePath: pkdepmissing-1.0.0\pkdepmissing.exe
+    PortableCommandAlias: pkdepmissing
+  InstallerUrl: https://packages.gala.invalid/pkdepmissing-1.0.0.zip
+  InstallerSha256: 7EBD2C2A2ABFDE81216899EBB11FA0AE161E1D19D10DDC93301D7A8568C4FB7A
+  Dependencies:
+    PackageDependencies:
+    - PackageIdentifier: GalaTest.NoSuchLib
+ManifestType: singleton
+ManifestVersion: 1.6.0

@@ -17,6 +17,8 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use galapkg::install::{self, DirEntry, Host, HostError, Outcome, RegValue, Root};
 use galapkg::source::{ERROR_NOT_SUPPORTED, Source};
+use galapkg::winget::select::Mode;
+use galapkg::winget::{Architecture, InstallerType, Scope};
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -810,6 +812,8 @@ struct Options {
     location: Option<String>,
     all: bool,
     verbose: bool,
+    /// winget install's selection and command-line options.
+    install: install::Options,
 }
 
 fn options(a: &Args) -> Result<Options, u32> {
@@ -822,6 +826,7 @@ fn options(a: &Args) -> Result<Options, u32> {
         location: None,
         all: false,
         verbose: false,
+        install: install::Options::default(),
     };
     let mut i = 2;
     while i < a.count {
@@ -853,13 +858,55 @@ fn options(a: &Args) -> Result<Options, u32> {
                 o.location = Some(value(i)?);
                 i += 1;
             }
+            "--scope" => {
+                let v = value(i)?;
+                o.install.scope =
+                    Some(Scope::parse(&v).ok_or_else(|| {
+                        error(EXIT_USAGE, &format!("--scope {v}: user or machine"))
+                    })?);
+                i += 1;
+            }
+            "--architecture" | "-a" => {
+                let v = value(i)?;
+                o.install.architecture = Some(Architecture::parse(&v).ok_or_else(|| {
+                    error(
+                        EXIT_USAGE,
+                        &format!("--architecture {v}: x64, x86, arm64, arm or neutral"),
+                    )
+                })?);
+                i += 1;
+            }
+            "--locale" => {
+                o.install.locale = Some(value(i)?);
+                i += 1;
+            }
+            "--installer-type" => {
+                let v = value(i)?;
+                o.install.installer_type = Some(InstallerType::parse(&v).ok_or_else(|| {
+                    error(EXIT_USAGE, &format!("--installer-type {v}: not an installer type"))
+                })?);
+                i += 1;
+            }
+            "--custom" => {
+                o.install.custom = Some(value(i)?);
+                i += 1;
+            }
+            "--override" => {
+                o.install.override_args = Some(value(i)?);
+                i += 1;
+            }
+            "--log" | "-o" => {
+                o.install.log = Some(value(i)?);
+                i += 1;
+            }
+            "--silent" | "-h" => o.install.mode = Mode::Silent,
+            "--interactive" | "-i" => o.install.mode = Mode::Interactive,
+            "--skip-dependencies" => o.install.skip_dependencies = true,
             "--all" | "-r" | "--recurse" => o.all = true,
             "--verbose" | "--verbose-logs" => o.verbose = true,
             // winget's flags that change nothing here.
             "-e"
             | "--exact"
-            | "-h"
-            | "--silent"
             | "--disable-interactivity"
             | "--accept-package-agreements"
             | "--accept-source-agreements" => {}
@@ -873,14 +920,14 @@ fn options(a: &Args) -> Result<Options, u32> {
     Ok(o)
 }
 
-/// The source: `--source`, else %GALA_WINGET_SOURCE%, else the winget
-/// community repository (over HTTPS: not built yet).
+/// The source: `--source`, else %GALA_WINGET_SOURCE%, else winget's
+/// community repository on GitHub (read over HTTPS).
 fn source(o: &Options) -> Result<Source, install::Error> {
     let location = o
         .source
         .clone()
         .or_else(|| env_var("GALA_WINGET_SOURCE"))
-        .unwrap_or_else(|| "https://github.com/microsoft/winget-pkgs".to_string());
+        .unwrap_or_else(|| galapkg::source::DEFAULT_SOURCE.to_string());
     Source::open(&location)
 }
 
@@ -937,9 +984,16 @@ fn cmd_install(host: &mut Win32, o: &Options) -> Result<u32, install::Error> {
         version: o.version.as_deref(),
         source_location: &location,
         location: o.location.as_deref(),
+        options: o.install.clone(),
     };
     match install::install(host, &s, &req)? {
-        Outcome::Installed { id, version, commands, location } => {
+        Outcome::Installed { id, version, commands, location, dependencies } => {
+            if !dependencies.is_empty() {
+                print("Installed the dependencies first:\r\n");
+                for d in &dependencies {
+                    print(&format!("  - {d}\r\n"));
+                }
+            }
             print(&format!("Found {id} Version {version}\r\n"));
             print(&format!("Installed to {location}\r\n"));
             for c in &commands {
@@ -971,30 +1025,47 @@ fn cmd_search(host: &mut Win32, o: &Options) -> Result<u32, install::Error> {
     Ok(0)
 }
 
+/// The source `list` matches programs against: `--source`, else
+/// %GALA_WINGET_SOURCE%; none (the default source over HTTPS is not
+/// read yet) lists the entries as they are.
+fn list_source(host: &mut Win32, o: &Options) -> Option<Source> {
+    let location = o.source.clone().or_else(|| env_var("GALA_WINGET_SOURCE"))?;
+    match Source::open(&location) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            host.log(&format!("list: source {location} not used: {e}"));
+            None
+        }
+    }
+}
+
 fn cmd_list(host: &mut Win32, o: &Options) -> Result<u32, install::Error> {
     let filter = named(o);
-    let rows: Vec<Vec<String>> = install::installed(host)
+    let s = list_source(host, o);
+    let rows: Vec<Vec<String>> = install::list(host, s.as_ref())
         .into_iter()
-        .filter(|i| {
+        .filter(|l| {
             filter.as_deref().is_none_or(|f| {
-                galapkg::contains_ci(&i.name, f)
-                    || i.id.as_deref().is_some_and(|id| galapkg::contains_ci(id, f))
+                galapkg::contains_ci(&l.installed.name, f)
+                    || l.id.as_deref().is_some_and(|id| galapkg::contains_ci(id, f))
             })
         })
-        .map(|i| {
-            let id = i.id.clone().unwrap_or_else(|| {
+        .map(|l| {
+            let i = l.installed;
+            // winget's id for an entry no package matches.
+            let id = l.id.clone().unwrap_or_else(|| {
                 let scope = if i.root == Root::CurrentUser { "User" } else { "Machine" };
                 format!("ARP\\{scope}\\X64\\{}", i.key)
             });
-            let source = if i.id.is_some() { "winget" } else { "" };
-            vec![i.name, id, i.version, source.to_string()]
+            let source = if l.id.is_some() { "winget" } else { "" };
+            vec![i.name, id, i.version, l.available.unwrap_or_default(), source.to_string()]
         })
         .collect();
     if rows.is_empty() {
         print("No installed package found matching input criteria.\r\n");
         return Ok(if filter.is_some() { 2 } else { 0 });
     }
-    table(&["Name", "Id", "Version", "Source"], &rows);
+    table(&["Name", "Id", "Version", "Available", "Source"], &rows);
     Ok(0)
 }
 
@@ -1044,7 +1115,7 @@ fn cmd_upgrade(host: &mut Win32, o: &Options) -> Result<u32, install::Error> {
             .collect(),
     };
     for t in targets {
-        match install::upgrade(host, given.as_ref(), &t, o.version.as_deref())? {
+        match install::upgrade(host, given.as_ref(), &t, o.version.as_deref(), &o.install)? {
             Outcome::Upgraded { id, from, to } => {
                 print(&format!("Successfully upgraded {id} from {from} to {to}\r\n"));
             }

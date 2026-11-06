@@ -1008,6 +1008,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
         "nginx/html/objects",
     ),
     ("pk_install_https", "user/roots/public-roots.pem", "Windows/System32/gala/roots"),
+    // ... and a winget-pkgs tree (directory listings as JSON) for
+    // manifests over HTTPS.
+    ("pk_install_https", "user/pk_install_test/served/winget-pkgs/", "nginx/html/winget-pkgs"),
     ("uipi_test", "ntdll.dll", "Windows/System32"),
     ("uipi_test", "kernel32.dll", "Windows/System32"),
     ("uipi_test", "msvcrt.dll", "Windows/System32"),
@@ -3054,12 +3057,15 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
     ),
     (
         // RS step B3a's presenters: session 2's desktop goes live shown
-        // by nothing, then a Test frame is attached and detached.
+        // by nothing, then a Test frame is attached and detached; the
+        // console moves to session 2 and back.
         "presenter_test",
         &[
             r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800"#,
             r#""ev":"presenter","op":"attach","session":2,"presenter":"test","was":"none""#,
             r#""ev":"presenter","op":"attach","session":2,"presenter":"none","was":"test""#,
+            r#""ev":"presenter","op":"console","session":2,"from":1,"was":"test","kept":1"#,
+            r#""ev":"presenter","op":"console","session":1,"from":2,"was":"none","kept":1"#,
         ],
     ),
     (
@@ -4027,9 +4033,13 @@ const SCENARIOS: &[Scenario] = &[
         // (session 0) it starts a child in session 2, which nothing
         // shows; the child's window is kept with its pixels, a Test
         // presenter attached renders it to memory, which the parent reads
-        // back (GalaSession), detached and attached again it shows what
-        // the child painted meanwhile. UEFI: a machine with a screen,
-        // which shows session 1.
+        // back (GalaSession) and clicks (injected input), detached and
+        // attached again it shows what the child painted meanwhile. Then
+        // the console switch: a second child's window in session 1 on
+        // the screen, `gala attach 2` puts session 2 there, back with
+        // GalaSession; the screen check (SCREEN_SCENARIOS) sees each and
+        // clicks through PS/2. UEFI: a machine with a screen, which shows
+        // session 1.
         name: "presenter_test",
         cmdline: "qemu_exit as=system wallpaper=night events=window run=presenter_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -4040,8 +4050,18 @@ const SCENARIOS: &[Scenario] = &[
             "presenter: test frame for session 2: 1280x800 at",
             "desktop: session 2 is now shown by test (1280x800; was none)",
             "presenter_test: frame shows the window",
+            "presenter_test: injected click reached the window",
             "desktop: session 2 is now shown by none (1280x800; was test)",
             "presenter_test: kept while not shown",
+            "input for session 2 refused: 0xc0000184 (only a desktop a Test presenter shows",
+            "presenter_test: session 1 shows its window",
+            "presenter_test: a click on the console reached session 1",
+            "desktop: the console now shows session 2 (1280x800; was session 1, which keeps its 1 windows shown by none)",
+            "presenter_test: the console shows session 2",
+            "presenter_test: a click on the console reached session 2",
+            "desktop: the console now shows session 1 (1280x800; was session 2, which keeps its 1 windows shown by none)",
+            "presenter_test: the console shows session 1 again",
+            "presenter_test: a click reached session 1 again",
             "presenter_test: ok",
             "exited with status 0x00000000",
         ],
@@ -4345,8 +4365,11 @@ const SCENARIOS: &[Scenario] = &[
         // ROADMAP PK stages 1 and 2: `gala install` of a zip package from
         // a local winget-pkgs snapshot (C:\pk_source), its command run
         // from PATH through its shim, listed, upgraded, uninstalled; a
-        // conflicting install rolled back, a bad SHA-256 refused. The
-        // install log is copied to the serial log (`logtee:`).
+        // conflicting install rolled back, a bad SHA-256 refused. On the
+        // winget resolver: the installer selected as winget would, a
+        // dependency installed first, `--scope`, an upgrade keeping the
+        // installed scope. The install log is copied to the serial log
+        // (`logtee:`).
         name: "pk_install_zip",
         cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -4355,6 +4378,9 @@ const SCENARIOS: &[Scenario] = &[
             "rollback remove file",
             "upgraded id=GalaTest.PkHello from=1.0.0 to=1.1.0",
             "uninstalled key=GalaTest.PkHello_Microsoft.Winget.Source_8wekyb3d8bbwe",
+            "plan install GalaTest.PkLib 1.0.0 installer 1 (for GalaTest.PkDep)",
+            "installed id=GalaTest.PkLib version=1.0.0",
+            "upgraded id=GalaTest.PkScoped from=1.0.0 to=1.1.0",
             "pk_install_test: ok",
             "exited with status 0x00000000",
         ],
@@ -4364,7 +4390,9 @@ const SCENARIOS: &[Scenario] = &[
         // (user/pk_install_test/nsis, x64) from the snapshot: run with /S
         // (and /D=), found through its uninstall entry, upgraded by the
         // next version's installer, uninstalled through its
-        // UninstallString with /S (gala waits for the entry to go).
+        // UninstallString with /S (gala waits for the entry to go); then
+        // installed without gala, matched to its package by name and
+        // publisher (winget list) and upgraded.
         name: "pk_install_nsis",
         cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=nsis",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -4373,6 +4401,7 @@ const SCENARIOS: &[Scenario] = &[
             "found-by=the one new entry",
             "upgraded id=GalaTest.PkNsis from=1.0.0 to=1.1.0",
             "arp-entry-gone key=HKCU",
+            "matched key=GalaTest.PkNsis by=NameAndPublisher",
             "pk_install_test: ok",
             "exited with status 0x00000000",
         ],
@@ -4384,7 +4413,9 @@ const SCENARIOS: &[Scenario] = &[
         // file, as GitHub's do; SHA-256 checked, installed, run,
         // uninstalled; an untrusted certificate and an unreachable
         // github.com fail with the reason; the public CA bundle is in
-        // crypt32's ROOT store.
+        // crypt32's ROOT store. Manifests over HTTPS: a winget-pkgs tree
+        // Nginx serves (JSON listings); the default source, GitHub's API,
+        // is not reachable from the VM.
         name: "pk_install_https",
         cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
                   logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=https",
@@ -4393,6 +4424,7 @@ const SCENARIOS: &[Scenario] = &[
             "fetch status=200 url=https://localhost:8443/objects/pkhttps-1.0.0.zip redirected-from=https://localhost:8443/releases/download/v1.0.0/pkhttps-1.0.0.zip",
             "installed id=GalaTest.PkHttps version=1.0.0",
             "fetch error step=WinHttpSendRequest code=12175",
+            "source read url=https://localhost:8443/winget-pkgs/manifests/g/GalaTest/PkHttps/1.0.0/GalaTest.PkHttps.yaml",
             "pk_install_test: ok",
             "exited with status 0x00000000",
         ],
@@ -8736,6 +8768,92 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     // no screen): the pixels are the Test presenter's frame in the
     // guest's memory (`dump_frame`), not a screendump.
     ("gui_test_headless", GUI_TEST_SCREEN),
+    (
+        // RS B3a's console switch (user/presenter_test): session 1's
+        // yellow window (client from (601, 133)) on the screen, clicked;
+        // after `gala attach 2` session 2's (client from (101, 133), blue,
+        // with the magenta mark of the click injected earlier at (301,
+        // 233)) is there instead, clicked twice through PS/2 (input
+        // follows the console); back on session 1 its window and mark are
+        // shown again, and a click reaches it. Marks are 12 x 12 around
+        // the point, checked up and left of it (the pointer is drawn down
+        // and right). Each desktop keeps its own pointer: moves start
+        // from (0, 0) (four moves of -255 reach it from anywhere).
+        "presenter_test",
+        ScreenCheck {
+            marker: "presenter_test: session 1 shows its window",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(651, 183, 0xffff00), // session 1's client
+                        PixelCheck::At(800, 110, 0xeef2f7), // its active caption
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    // To client (200, 150) at (801, 283), a click.
+                    input: &[
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move 255 255",
+                        "mouse_move 255 28",
+                        "mouse_move 255 0",
+                        "mouse_move 36 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "presenter_test: the console shows session 2",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(151, 183, 0x0000ff), // session 2's client
+                        PixelCheck::At(297, 229, 0xff00ff), // the injected click's mark
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    // To client (250, 150) at (351, 283), a click: its mark.
+                    input: &[
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move -255 -255",
+                        "mouse_move 255 255",
+                        "mouse_move 96 28",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[PixelCheck::At(347, 279, 0xff00ff)],
+                },
+                ScreenStep {
+                    after: "presenter_test: a click on the console reached session 2",
+                    // A second click: the program goes on (switches back).
+                    input: &["mouse_button 1", "mouse_button 0"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "presenter_test: the console shows session 1 again",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(651, 183, 0xffff00), // session 1's client, kept
+                        PixelCheck::At(797, 279, 0xff00ff), // and the first click's mark
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    // Session 1's pointer is where it was: 40 down, a click.
+                    input: &["mouse_move 0 40", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
     (
         // `gala snap left` put gala_cli_test's window (client area
         // RGB 2e 8b 57) on the left half of the work area (640 x 752 on

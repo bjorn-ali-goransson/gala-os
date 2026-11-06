@@ -4145,7 +4145,7 @@ registry ("Plan: windows across processes").
 | 0x7f58 | GalaDesktopAction | named desktop actions ("Server and desktop workloads") |
 | 0x7f6a | GalaWindowFilter | UIPI message filters ("Windows across processes: UIPI") |
 | 0x7f70-0x7f73 | GalaWinEventHook/Unhook/Notify/Take | WinEvents ("Windows across processes: WinEvents") |
-| 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter and a Test frame's pixels ("Presenters (B3a)") |
+| 0x7fb0 | GalaSession(op, session, arg, buffer, length) | a session's presenter (the console switch), a Test frame's pixels and injected input ("Presenters (B3a)") |
 
 #### Invariants and limits
 
@@ -4266,6 +4266,7 @@ CLI-first.
 | `gala ps` | processes (SystemProcessInformation) |
 | `gala kill <pid\|name>` | OpenProcess/TerminateProcess; a name ends every process of that image but gala itself |
 | `gala install`, `search`, `list`, `upgrade`, `uninstall` | packages ("Installing software") |
+| `gala attach <session>` | the console switch (GalaSession, SeTcbPrivilege; "Presenters (B3a)"; tested by `presenter_test`) |
 | `gala help` | |
 
 A window is an HWND or a title (whole, or a part only one title has).
@@ -5117,8 +5118,8 @@ ROADMAP PK has the stages and their status; in short:
 | Piece | State |
 |---|---|
 | Client commands, winget-pkgs trees, zip and portable installs, shims, transactions (PK stages 1-2) | in use; scenario `pk_install_zip` |
-| Downloads over HTTP(S) (PK stage 1, TLS step 4) | in use: gala.exe over winhttp and Schannel; scenario `pk_install_https` |
-| The full winget resolver (`galapkg::winget`) | built, host-tested; the install command does not call it yet |
+| Downloads and manifests over HTTP(S) (PK stages 1-2, TLS step 4) | in use: gala.exe over winhttp and Schannel; GitHub sources host-tested; scenario `pk_install_https` |
+| The winget resolver (`galapkg::winget`) | in use by every package command: selection, dependencies, ARP matching; scenarios `pk_install_zip`, `pk_install_nsis` |
 | Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`); Inno host-tested |
 | MSIX/AppX reading (PK stage 4 groundwork) | built, host-tested; nothing installed |
 | MSI reading, LZX, install plans (PK stage 5 groundwork) | built, host-tested; nothing runs an installer |
@@ -5127,26 +5128,25 @@ ROADMAP PK has the stages and their status; in short:
 
 - **`user/galapkg`**: a library, `no_std` + `alloc`, host-tested with
   `cargo test -p galapkg` (run by `cargo xtask test`'s unit tests). The
-  install path's modules: `yaml` (the subset manifests use: block
-  mappings and sequences, plain, quoted and block scalars, flow
-  sequences of scalars; anchors, tags and complex keys are errors naming
-  the line), `manifest` (schema 1.x: singleton or version + installer +
-  defaultLocale/locale files merged, root installer fields as each
-  installer's defaults; installer selection: x64, else neutral, user
-  scope before machine, a type gala installs before one it does not),
+  install path's modules: `winget` (the resolver, below: manifests of
+  every schema, installer selection, dependencies, ARP matching),
   `version` (winget's ordering: parts by number then text, `1.0` after
   `1.0-beta`, missing parts are 0), `zip` (APPNOTE: EOCD, central
   directory, ZIP64, stored and deflate through `miniz_oxide`, CRC-32 and
   size checked; `safe_path` refuses `..`, roots, drives and `:`),
-  `source` (a winget-pkgs tree), `install` (the transaction over an
-  `install::Host`), `shim`. Then `winget` (the resolver), `cfb`, `msi`,
+  `source` (a winget-pkgs tree: a directory, a GitHub repository, a
+  tree over HTTP(S)), `json` (its listings), `install` (selection, dependencies and
+  the transaction over an `install::Host`), `shim`. Then `cfb`, `msi`,
   `cab`, `lzx` (Windows Installer) and `msix`, `appxmanifest`,
   `blockmap`, `xml` (MSIX), below.
 - **`user/gala`** module `pkg` (`user/gala/src/pkg.rs`): the commands
   and `Win32`, galapkg's `Host` over kernel32 (files) and advapi32 (the
   registry; loaded with LoadLibrary when a package command runs, so
   `gala`'s other commands still need only kernel32 and ntdll). gala.exe
-  links `gala_heap` (the process heap as the allocator); it is ~300 KB.
+  links `gala_heap` (the process heap as the allocator); it is ~520 KB,
+  most of it the winget resolver (schema tables, the YAML and manifest
+  readers). Each installed command is a copy of it (a shim, below): a
+  real symbolic link (ROADMAP PK step 2) ends that cost.
 
 ### Commands
 
@@ -5154,29 +5154,57 @@ winget's names and aliases:
 
 | Command | Does |
 |---|---|
-| `install\|add <id> [--version v] [--source s] [--verbose]` | installs |
+| `install\|add <id> [--version v] [--source s] [--verbose]` | installs, its dependencies first |
 | `search\|find <text>` | walks the source |
-| `list\|ls [<text>]` | every ARP entry, HKCU then HKLM; winget's `ARP\User\X64\<key>` ids for entries not from a package |
-| `upgrade\|update` | lists upgrades; with `<id>` or `--all` upgrades |
+| `list\|ls [<text>] [--source s]` | every ARP entry, HKCU then HKLM, with the version available; with a source (`--source`, `%GALA_WINGET_SOURCE%`) entries not tagged by gala or winget are matched to its packages; winget's `ARP\User\X64\<key>` ids for the rest |
+| `upgrade\|update [--source s]` | lists upgrades; with `<id>` or `--all` upgrades |
 | `uninstall\|remove\|rm <id>\|--product-code <key>` | uninstalls |
 
-winget's no-op flags (`-e`, `--silent`, the agreements) are accepted.
-Exit codes: 0, 1 usage, 2 not found, 3 not supported yet (installer
-type, HTTP(S)), 4 failed (rolled back), 5 SHA-256 mismatch.
+winget install's options: `--scope user|machine`, `-a|--architecture`,
+`--locale`, `--installer-type` (requirements: an installer that does not
+meet them is rejected, with its reason in the log), `-h|--silent`,
+`-i|--interactive` (else winget's silent with progress), `--custom`,
+`--override`, `-o|--log` (the installer's own log), `--skip-dependencies`,
+`-l|--location`. winget's no-op flags (`-e`, the agreements) are
+accepted. Exit codes: 0, 1 usage, 2 not found (package, version, an
+applicable installer, a dependency), 3 not supported yet (installer
+type, machine scope, HTTP(S) sources), 4 failed (rolled back), 5
+SHA-256 mismatch.
 
 ### Sources and downloads
 
 - **A source** is a winget-pkgs tree: `manifests\<first letter>\<id
   parts as directories>\<version>\*.yaml`; a version directory is one
   holding `<id>.*yaml` files, so `ripgrep\MSVC` (a package) and a
-  version are told apart. `--source <dir>`, else
-  `%GALA_WINGET_SOURCE%`, else `https://github.com/microsoft/winget-pkgs`,
-  which is refused for now (exit 3). The source used is kept in the ARP
-  entry (`GalaSource`) for `gala upgrade`. Search walks the whole tree
-  (fine for snapshots; the real repository needs an index).
+  version are told apart. `--source <dir|url>`, else
+  `%GALA_WINGET_SOURCE%`, else `https://github.com/microsoft/winget-pkgs`
+  (`source::DEFAULT_SOURCE`). Where the tree is (`source::Location`):
+  - a directory (a local snapshot);
+  - a GitHub repository, `https://github.com/<owner>/<repo>[/tree/<branch>]`
+    (branch `master` by default, winget-pkgs' own): directories listed
+    through GitHub's REST API ("Get repository content",
+    `https://api.github.com/repos/<owner>/<repo>/contents/<path>?ref=<branch>`,
+    a JSON array of entries with `name` and `type`), files from
+    `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`;
+    unauthenticated, so GitHub's rate limit (60 requests an hour per
+    address, its documentation) bounds how many installs an hour work;
+  - any other `http(s)://` URL: a tree served as files, each directory's
+    listing at `<url>/<path>/` as JSON (Nginx's `autoindex_format json`).
+  Listings are read by `galapkg::json` (RFC 8259 in full, nesting bounded,
+  errors with the byte offset; `json::listing` takes GitHub's `dir`/`file`
+  and Nginx's `directory`/`file`). Each listing and file read over
+  HTTP(S) is an install-log line (`source list url=`, `source read url=`,
+  `source <what> bytes=`, `error source <what> code= url=`) and goes
+  through `Host::fetch` (winhttp, below). A package missing from the
+  source is a 404 (exit 2); another failure is exit 4 naming the URL
+  and the WinHTTP error. The source used is kept in the ARP entry
+  (`GalaSource`) for `gala upgrade`. Search (and `list`'s matching)
+  walks the whole tree: fine for snapshots and small mirrors, refused
+  for a GitHub source (exit 3), which needs winget's source index.
 - **Offline mirror**: a local snapshot may carry installers under
   `installers\<the URL's file name>`, used before any download; the
-  SHA-256 is checked all the same.
+  SHA-256 is checked all the same. A source over HTTP(S) has none: its
+  installers are downloaded from the manifests' URLs.
 - **Downloads**: `Host::fetch(url)`. gala.exe (`user/gala/src/fetch.rs`)
   GETs `http://` and `https://` URLs through winhttp.dll, loaded when a
   download starts (as advapi32 is: gala's other commands run on images
@@ -5192,13 +5220,11 @@ type, HTTP(S)), 4 failed (rolled back), 5 SHA-256 mismatch.
   and paths are read; another scheme is ERROR_NOT_SUPPORTED (exit 3).
   The body is held in memory (fallibly reserved from Content-Length),
   then checked against the manifest's SHA-256 before anything changes.
-  TODO (ROADMAP PK step 2): manifests from
-  `raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/...`
-  and version lists from the GitHub contents API (`--source https://...`
-  is refused, exit 3); `search` against winget's source index
+  TODO (ROADMAP PK step 2): `search` against winget's source index
   (`cdn.winget.microsoft.com/cache/source2.msix`, an MSIX with a SQLite
-  index: needs the MSIX reader and sqlite); streaming large installers
-  to disk instead of memory.
+  index: needs the MSIX reader and sqlite), which also replaces the
+  GitHub API's listings (and its rate limit) for installs; streaming
+  large installers to disk instead of memory.
 
 ### Installing zip and portable packages
 
@@ -5274,7 +5300,14 @@ as it was.**
 ### Observability
 
 - The install log `%LOCALAPPDATA%\gala\logs\install.log`: one line per
-  step (`install`, `manifest`, `installer`, `download url=`, `fetch
+  step (`install`, `manifest id= version= manifest_version= form=`,
+  `warning <file>:<line>:<col>: ...` per manifest warning, `runner-up
+  installer=`, `rejected installer=N <reason>`, `fallback installer=N
+  instead of installer=M: <why>`, `selected installer=N type= nested=
+  arch= scope= locale= url=`, `plan install|installed <id> <version>
+  ... (for <dependant>)` per dependency step, `dependency id=`,
+  `installed scope= type= key=` and `matched key= by= package=` for an
+  upgrade, `download url=`, `fetch
   connect host= port=`, `fetch status= url=<final> [redirected-from=]
   bytes=` or `fetch error step=<WinHTTP call> code=` with `error download
   code=`, `download bytes=`, `sha256
@@ -5282,8 +5315,10 @@ as it was.**
   `registered`, `installed`; `error ...` with the Win32 error; `rollback
   ...` per undo step), timestamped with the process id; `--verbose`
   copies it to stderr.
-- An installer type gala cannot install is recorded in the ledger
-  (`gala.exe!install(InstallerType inno)`), so `cargo xtask report`
+- What gala cannot install is recorded in the ledger
+  (`gala.exe!install(InstallerType msix)`, `gala.exe!install(machine
+  scope portable)`, `gala.exe!install(x86 portable: WOW64)`,
+  `gala.exe!install(WindowsFeatures <name>)`), so `cargo xtask report`
   lists what real packages needed.
 - The scenario tees the log into the serial log (`logtee=`), and
   pk_install_test prints it when a check fails.
@@ -5297,13 +5332,19 @@ as winget runs them:
   `%TEMP%\gala\<install key>\<file>.exe` (a `Tx` step, cleaned up
   afterwards and logged as `cleanup ...`) and started through `Host::run`
   (CreateProcessW, no inherited handles, waited for up to 10 minutes)
-  with InstallerSwitches.Silent if the manifest has one, else winget's
-  default for the type (Inno `/SP- /VERYSILENT /SUPPRESSMSGBOXES
-  /NORESTART`, NSIS `/S`; a plain `exe` without Silent is refused, exit
-  3: gala does not run installers interactively), then Custom, then
-  Inno's `/LOG="%LOCALAPPDATA%\gala\logs\<id>-<version>.setup.log"`,
+  with the resolver's arguments (`select::command_line`, below): the
+  mode's switch, the manifest's or winget's default for the type
+  (winget's default mode shows progress: Inno `/SP- /SILENT
+  /SUPPRESSMSGBOXES /NORESTART`; `--silent`: `/VERYSILENT`; NSIS `/S`
+  either way; a plain `exe` with neither Silent nor SilentWithProgress is
+  refused, exit 3, unless `--interactive`), the Log switch with
+  `--log`, else `%LOCALAPPDATA%\gala\logs\<id>-<version>.setup.log`
+  (Inno's `/LOG="..."`), Upgrade on an upgrade, Custom and `--custom`,
   then with `--location <dir>` the InstallLocation switch last (Inno
-  `/DIR="<dir>"`, NSIS `/D=<dir>`, unquoted and last as NSIS requires).
+  `/DIR="<dir>"`, NSIS `/D=<dir>`, unquoted and last as NSIS requires);
+  `--override` replaces them all. The `run` log line names the mode and
+  where the switches came from (`manifest`, `winget-default`,
+  `override`).
 - **Exit codes**: 0 is success, 3010/1641 too (logged
   `restart-required`); anything else is exit 4 naming the code.
   ERROR_BAD_EXE_FORMAT (a 32-bit installer: gala has no WOW64) is exit
@@ -5355,12 +5396,20 @@ as winget runs them:
 (`user/pk_install_test/source`, shipped as a tree; `cargo xtask
 export-tests` remakes it, as it zips `user/bin/hello.exe`): test
 packages made by `make_source.py` (PkHello 1.0.0 as a singleton
-manifest, 1.1.0 multi-file; Conflict; BadHash; InnoSetup, a stand-in
-that registers nothing; Msix; PkNsis 1.0.0 and 1.1.0, real x64 NSIS
-installers built with makensis from
-`user/pk_install_test/nsis/pknsis.nsi`) and real winget-pkgs manifests
-(ripgrep, jq) for search and a download that fails (no winhttp.dll in
-that image). `pk_install_test https` (scenario `pk_install_https`, with
+manifest, 1.1.0 multi-file with an x86 installer listed first;
+Conflict; BadHash; InnoSetup, a stand-in that registers nothing; Msix;
+PkNsis 1.0.0 and 1.1.0, real x64 NSIS installers built with makensis
+from `user/pk_install_test/nsis/pknsis.nsi`; PkLib, PkDep (needs PkLib
+1.0.0) and PkDepMissing (needs a package the source lacks); PkScoped
+1.0.0 and 1.1.0, a machine and a user installer, the machine one first)
+and real winget-pkgs manifests (ripgrep, jq) for search and a download
+that fails (no winhttp.dll in that image). Its expected results are
+winget's documented behaviour: x64 chosen over x86, Inno's progress
+switches by default and `/VERYSILENT` with `--silent`, a dependency
+installed first and left by the dependant's uninstall, a missing
+dependency changing nothing (exit 2), `--scope machine` refused (exit
+3), `--scope user` taking the second installer and the upgrade keeping
+user scope. `pk_install_test https` (scenario `pk_install_https`, with
 schannel_test's Nginx in the guest) installs GalaTest.PkHttps, whose
 zip is not mirrored: Nginx serves it (`user/pk_install_test/served`)
 behind a release URL that answers 302, so gala downloads it over
@@ -5372,14 +5421,26 @@ CA. `pk_install_test nsis`
 (scenario `pk_install_nsis`) installs PkNsis (/S), checks its files, its
 ARP entry and gala's tags, runs the program, upgrades it to 1.1.0,
 uninstalls it (/S, waiting for the entry to go), and installs and
-removes it again with `--location` (/D=).
+removes it again with `--location` (/D=); then runs PkNsis 1.0.0's
+installer itself (no gala tags on its entry): `gala list` shows it as
+`ARP\User\X64\GalaTest.PkNsis`, `gala list --source` matches it to
+GalaTest.PkNsis by name and publisher with 1.1.0 available, and `gala
+upgrade --source` upgrades it. `pk_install_https` also installs, finds
+and upgrades GalaTest.PkHttps from `--source
+https://localhost:8443/winget-pkgs` (the tree Nginx serves from
+`user/pk_install_test/served/winget-pkgs`, made by make_source.py, with
+JSON listings), and checks that the default source fails as
+api.github.com not resolved (12007) and that searching it is exit 3.
+Host tests answer GitHub's API and raw URLs from the snapshot and
+Nginx's listings from `served/` (`install/tests.rs`, the Fake's
+`fetch`).
 
 ### The winget resolver
 
 `galapkg::winget` (`user/galapkg/src/winget/`): full winget manifest
-support as a library, beside `manifest`/`yaml` (which the install path
-still uses). Host-tested only; no scenario yet. Each file's head comment
-gives every rule and its source; the outline:
+support as a library, which every package command uses (below, "On the
+install path"; scenarios `pk_install_zip`, `pk_install_nsis`). Each
+file's head comment gives every rule and its source; the outline:
 
 | Module | What it does |
 |---|---|
@@ -5439,20 +5500,49 @@ indicators injected at line starts) must not panic. Singletons and
 schema 1.0.0 are in the unit tests only (winget-pkgs has neither any
 more).
 
-**Switching the install command over** (TODO, ROADMAP PK): read with
-`winget::Package::from_files` (with the file names); select with
-`winget::select::select` and a `Request` from
-`--architecture/--scope/--locale/--installer-type` (required) and the
-settings' preferences, `installed` from `arp::installed_type` and the
-ARP record's hive for `upgrade`; log `Package::warnings`, the selected
-installer and each `Rejected` line into install.log; build arguments
-with `select::command_line` for the types the install path supports;
-run `deps::plan` first (a `Catalog` over `source::Source`) and install
-the plan in order; match ARP entries for `gala list`/`upgrade` with
-`arp::find`. Then `manifest.rs` and `yaml.rs` can be deleted (their
-tests' manifests are covered by `winget::package`'s). Until then the
-install path uses `Manifest::select_installer` (user scope and
-x64-or-neutral only).
+**On the install path** (`galapkg::install`):
+
+- **Reading**: `Source::manifest` gives `Package::from_files` the version
+  directory's files with their paths, so errors and warnings name the
+  file, line and column; warnings go to the install log.
+- **Selection**: `Options::request` makes `--scope`, `--architecture`,
+  `--locale` and `--installer-type` requirements (as winget's options
+  are); no preferences yet (winget's settings file is not read: with no
+  scope asked, the manifest's order decides). The machine is
+  `install::machine()`: x64, build 26100, en-US. `select_installer` logs
+  the selected installer, the runners-up and every rejection's reason.
+  `install::gap` says what gala cannot install: a type of a later stage
+  (msi, wix, burn, msix, appx, a zip of those), an x86 portable program
+  (no WOW64), a portable package for machine scope (Program Files and
+  HKLM are not built; a portable installer without Scope takes the scope
+  asked for). For the first two `choose` takes the best-ranked runner-up
+  gala can install (a stopgap, ROADMAP "Known issues and stopgaps");
+  scope never falls back. Each gap is a ledger line.
+- **Dependencies**: `deps::plan_with` with gala's chooser and a
+  `Catalog` over the source and the ARP entries; the plan's lines go to
+  the log. Each dependency not installed at its MinimumVersion is
+  installed (or upgraded to the planned version) as an install of its
+  own before the package, as winget does: a later failure leaves the
+  dependencies installed and rolls back only the package's own
+  transaction. A missing dependency, a cycle or a too-old version fails
+  before anything changes. Windows features and libraries are ledger
+  lines (not enabled or checked). `--skip-dependencies` skips them.
+- **Upgrades**: the installed type (gala's WinGetInstallerType tag, else
+  `arp::installed_type`) and scope (HKCU user, HKLM machine) go into
+  `Request::installed`, so the new version's installer keeps them;
+  `CommandOptions::upgrade` adds the Upgrade switch.
+- **Matching** (`install::list`, `upgrade`): an entry with
+  WinGetPackageIdentifier is that package; with a source, the others
+  are matched to the source's packages (`Source::packages`, each at its
+  latest version) by `arp::Signature`, the strongest match first, and
+  their package version read by `arp::installed_version`. `gala list`
+  shows the package's id and what is available; `gala upgrade <id>
+  --source` upgrades a matched program (an installer that is a program
+  runs over it and gala then tags its entry; a portable upgrade of an
+  untagged entry is refused: gala has no record of its files).
+- TODO (ROADMAP PK step 1): machine-scope portable installs, an
+  upgrade's new dependencies, UpgradeBehavior and RequireExplicitUpgrade,
+  winget's settings (preferences, requirements), the user's locale.
 
 ### Reading MSI packages
 
@@ -5933,9 +6023,9 @@ one machine: **sessions own desktops, and a desktop is shown by a
 presenter** (the local console, a remote shasha client, or none).
 ROADMAP RS tracks it: B1 (session ids, per-session named objects) and
 B2 (a desktop per session) are built, and B3a's window station and
-desktop objects and its first presenters (None, Console, Test); the
-console switch, B3b (remote shasha), B4 (session manager) and B5
-(sessions across a handover) are the planned design below. Test
+desktop objects, its presenters (None, Console, Test) and the console
+switch; B3b (remote shasha), B4 (session manager) and B5 (sessions
+across a handover) are the planned design below. Test
 programs: `user/session_test`, `user/winsta_test`,
 `user/presenter_test`.
 
@@ -5995,7 +6085,8 @@ will make them and refuse unknown ids). Sessions are never removed yet.
     starts the process in that session (how a service starts a program
     in the console's session).
   - WTSGetActiveConsoleSessionId reads KUSER_SHARED_DATA's
-    ActiveConsoleId: 1.
+    ActiveConsoleId: the session the console shows (1 at boot; a
+    console switch moves it, "Presenters (B3a)").
 - **Handover** (R9): PROCESSES version 3 carries the session (a field at
   the entry's end). A version-2 entry reads as "none", which means the
   token's session; must_read stays 2, since the token gives the same
@@ -6043,13 +6134,15 @@ while another session's is taken:
   session's registry, hooks and shell.
 - A WinEvent raised in a session reaches only that session's hooks and
   wakes listeners of that session's registry.
-- **Every session's desktop keeps its windows; only the console
-  session's gets input**: a desktop is shown by its presenter
-  ("Presenters (B3a)"): the console session's by the screen, another
-  session's by nothing until GalaSession attaches one. Its GUI calls work
+- **Every session's desktop keeps its windows; the one the console
+  shows gets the keyboard and mouse**: a desktop is shown by its
+  presenter ("Presenters (B3a)"): the console's session's by the screen,
+  another session's by nothing until GalaSession attaches one (a Test
+  frame, or the console itself: the console switch). Its GUI calls work
   the same either way (`desktop: session 0 is live (1280x800), shown by
-  none (the console shows session 1)` when it goes live). The keyboard
-  and mouse go to the console session's.
+  none (the console shows session 1)` when it goes live). The PS/2
+  keyboard and mouse go to the desktop the console shows; a Test frame's
+  desktop takes injected input.
 - Machine settings stay global: the wallpaper picture (`PICTURE`, the
   boot's choice) and the server-profile flags.
 
@@ -6166,10 +6259,12 @@ same program as SYSTEM).
 
 `kernel/src/nt/desktop/present.rs` (the presenters, the Test frame),
 `kernel/src/nt/desktop/mod.rs` (a desktop going live, `attach`,
-`read_frame`; host tests in `desktop/tests.rs`),
-`kernel/src/nt/session_calls.rs` (GalaSession). Test programs:
-`user/presenter_test` (scenario `presenter_test`) and gui_test on a
-headless desktop (scenario `gui_test_headless`).
+`switch_console`, `inject`, `read_frame`; host tests in
+`desktop/tests.rs`), `kernel/src/nt/session_calls.rs` (GalaSession),
+`nt::session::active_console` (the session the console shows). Test
+programs: `user/presenter_test` (scenario `presenter_test`, with a
+screen check of the console switch) and gui_test on a headless desktop
+(scenario `gui_test_headless`).
 
 - **Window state apart from composition**: a session's desktop (its
   windows, Z order, focus and each window's client pixels) is kept
@@ -6179,9 +6274,10 @@ headless desktop (scenario `gui_test_headless`).
   (`flush`). With none, damage is dropped; attaching one draws the
   desktop whole.
 - **Presenters** (`Presenter`), one per desktop:
-  - **Console**: the screen through `platform::Display`; only for the
-    console session on a machine with a screen (a console switch to
-    another session is not there yet);
+  - **Console**: the screen through `platform::Display`, on a machine
+    with a screen; at most one desktop has it, the one the console
+    shows (`session::active_console`), which also gets the PS/2
+    keyboard and mouse;
   - **None**: shown by nothing (disconnected); what a session other than
     the console's starts with;
   - **Test** (gala's addition): a headless frame in memory (`Frame`:
@@ -6205,6 +6301,37 @@ headless desktop (scenario `gui_test_headless`).
   desktop's lock; the desktop takes the presenter's size if it differs
   (windows keep their places), the old presenter is replaced and freed
   outside the lock, and the desktop is drawn whole on the new one.
+- **The console switch** (`desktop::switch_console`; fast user
+  switching, `gala attach <session>`, GalaSession's SESSION_PRESENT
+  with Console on a session the console does not show), serialized by
+  one lock taken before any desktop's:
+  1. the target desktop goes live if it was not (shown by nothing): a
+     failure leaves the console where it was;
+  2. ActiveConsoleId becomes 0xFFFFFFFF (no session on the console, as
+     WTSGetActiveConsoleSessionId documents for a switch under way) and
+     PS/2 input is dropped;
+  3. the desktop the console showed lets go of what is held (buttons go
+     up where the pointer is, ending a drag or resize; Alt and the
+     Windows key count as released; the start menu closes) and is shown
+     by nothing, keeping its windows and pixels (a Test frame there is
+     left alone);
+  4. the target is shown by the console, laid out at the screen's size
+     if it differs, drawn whole (a Test frame it had is freed);
+  5. ActiveConsoleId (KUSER_SHARED_DATA) becomes the target's id and the
+     keyboard and mouse go there. If step 4 fails (no memory for the
+     layout) the console goes back to where it was.
+
+  Each desktop keeps its own pointer position, held buttons and active
+  window across switches. Session 0 is never on the console
+  (STATUS_NOT_SUPPORTED: session 0 isolation). A start menu other than
+  session 1's starts nothing yet (a session has no user of its own
+  until B4: logged, ledger `start menu`).
+- **Injected input** (`desktop::inject`, GalaSession's SESSION_INPUT):
+  the pointer to a point with buttons held, a key, the wheel, brought to
+  a desktop a Test frame shows exactly as the PS/2 devices bring theirs
+  (the same `Desktop::pointer`, `key`, `wheel`): screen checks inside
+  the guest, without the devices. A desktop shown by the console or by
+  nothing takes none (STATUS_INVALID_DEVICE_STATE).
 - **The clock** (`tick`, from the input thread every second) updates
   every live desktop; a display change resizes the desktop the Console
   presenter shows.
@@ -6216,33 +6343,50 @@ headless desktop (scenario `gui_test_headless`).
     test), whether it is live, its size, its windows; nothing is made
     live;
   - SESSION_PRESENT (1): attaches presenter `arg`; a Test frame's size
-    in `buffer` (width | height << 32; 0: the desktop's);
-    STATUS_NOT_SUPPORTED for Console other than on the console session
-    with a screen;
+    in `buffer` (width | height << 32; 0: the desktop's); Console on a
+    session the console does not show is the console switch;
+    STATUS_NOT_SUPPORTED for Console without a screen or on session 0;
   - SESSION_FRAME (2): an area of the Test frame (a 32-byte record: x,
     y, w, h in; the frame's width, height and flushes out) into the
     caller's buffer; STATUS_INVALID_DEVICE_STATE when no Test frame
-    shows the desktop, STATUS_INVALID_PARAMETER outside it.
+    shows the desktop, STATUS_INVALID_PARAMETER outside it;
+  - SESSION_INPUT (3): `arg` points to four u32: a kind and its values
+    (0: the pointer to x, y (i32) with buttons, bit 0 left, bit 1 right;
+    1: a key's virtual key, scan code and flags, bit 0 E0-prefixed, bit
+    1 up; 2: the wheel's notches, i32, positive away from the user);
+    STATUS_INVALID_DEVICE_STATE unless a Test frame shows the desktop,
+    STATUS_INVALID_PARAMETER for another kind.
 
-  user/ntrt has `gala_session`, `session_query` and `session_frame`.
+  user/ntrt has `gala_session`, `session_query`, `session_frame` and
+  `session_input`; ntdll (testntdll) exports GalaSession for gala.exe.
 - **Observability**: `desktop: session 2 is live (1280x800), shown by
   none (the console shows session 1)`; `desktop: session 2 is now shown
   by test (1280x800; was none)`; `presenter: test frame for session 1:
   1280x800 at 0xffffe80000cb0000 (4096000 bytes, 0x00RRGGBB rows)` (what
-  xtask reads); a refused attach is a warning naming the caller;
+  xtask reads); a refused attach is a warning naming the caller; a
+  console switch logs `desktop: the console now shows session 2
+  (1280x800; was session 1, which keeps its 1 windows shown by none)`
+  (a failed one a warning: `the console could not move ...; it stays`);
+  refused injected input is logged (the first 8, with the status);
   `desktop: no screen and no presenter= (...)` once on a machine without
   desktops. Events (category `window`): `"ev":"presenter"` with `"op":
-  "live"` and `"attach"` (session, presenter, was, size). The state
-  dump's sessions part says per session whether its desktop is live and
-  what shows it. A failed headless screen check leaves its frames as
+  "live"` and `"attach"` (session, presenter, was, size), `"console"`
+  (session, from: the session it left or -1, was: what showed the
+  target, kept: the windows the left desktop keeps, size). The state
+  dump's sessions part says which session the console shows and per
+  session whether its desktop is live and what shows it. A failed headless screen check leaves its frames as
   `test-<scenario>.screen<n>.png` and quotes the monitor's reply to
   `memsave`.
-- **Limits**: no console switch (Console on another session) and no
-  remote presenter (B3b); the window state is still part of the
-  compositor's `Desktop` in the `shasha` kernel, so the server kernel
-  keeps no window pixels yet; gala-um takes no `presenter=` (its
-  sessions have no desktops); frames are read, not recorded over time;
-  only the console session's desktop gets input.
+- **Limits**: no remote presenter (B3b); no console switch without a
+  screen (`presenter=test|none` keep session 1 on the console); no
+  WM_WTSSESSION_CHANGE notifications (WTSRegisterSessionNotification)
+  and no keys released by WM_KEYUP when the console leaves; `gala
+  attach` needs SeTcbPrivilege until B4 checks who may attach where; a
+  kernel handover puts the console back on session 1 (B5); the window
+  state is still part of the compositor's `Desktop` in the `shasha`
+  kernel, so the server kernel keeps no window pixels yet; gala-um takes
+  no `presenter=` (its sessions have no desktops); frames are read, not
+  recorded over time.
 
 ### Target design (B3-B5)
 
@@ -6265,15 +6409,15 @@ on Windows too), 1 for the local console, 2+ for remote logons.
    ROADMAP SD) can serve GUI programs to a remote shasha client without a
    compositor of its own, and a desktop with no presenter keeps its
    windows alive (RDP-style disconnect and resume).
-2. **Presenters** (B3a; Console, None and Test are built, "Presenters
-   (B3a)"), at most one per desktop at a time:
+2. **Presenters** (B3a; Console, None and Test and the console switch
+   are built, "Presenters (B3a)"), at most one per desktop at a time:
    - **Console**: the framebuffer through `platform::Display`, PS/2
      input routed to the session the console shows;
    - **Remote**: a shasha client over the network;
    - **None**: disconnected;
    - **Test** (gala's addition): a headless in-kernel presenter that
      renders to memory for screen checks and records frames, replacing
-     QEMU screendumps in tests.
+     QEMU screendumps in tests (frames recorded over time are to come).
    A console switch or a remote reconnect attaches a presenter. The
    Display seam's `screen_flush` (damaged area) and `screen_changed`
    (new size), added for virtio-gpu, are what a presenter needs too.
@@ -6313,7 +6457,8 @@ on Windows too), 1 for the local console, 2+ for remote logons.
    starts the user's shell); `wtsapi32` (WTSEnumerateSessions,
    WTSQuerySessionInformation, WTSDisconnectSession, WTSLogoffSession);
    CLI first: `gala sessions`, `gala logoff <id>`, `gala disconnect
-   <id>`, `gala attach <id>`.
+   <id>` (`gala attach <id>`, the console switch, is built: "Presenters
+   (B3a)"; B4 adds who may attach where).
 7. **Observability**: session events (create, logon, attach, detach,
    logoff); per-session counts on the `stats:` line; a protocol trace
    (`remote=trace`) and a recording of a client's input and the server's

@@ -22,13 +22,31 @@
 //! (the SHA-256, the archive's CRCs, NestedInstallerFiles), so a rollback
 //! is for what cannot be checked ahead: the disk, a command another
 //! package owns. Each step is a line of the install log ([`Host::log`]).
+//!
+//! Manifests are read, installers selected, dependencies planned and
+//! installed programs matched by the winget resolver ([`crate::winget`]):
+//! the package's installer is the one winget would take for gala's
+//! machine (x64, Windows 11 24H2, en-US) and the user's options
+//! ([`Options`]: `--scope`, `--architecture`, `--locale`,
+//! `--installer-type`, `--silent`/`--interactive`, `--custom`,
+//! `--override`, `--log`), an upgrade keeping the installed type and
+//! scope; its PackageDependencies are installed first ([`install`]);
+//! `list` and `upgrade` match programs installed without gala to the
+//! source's packages ([`list`]). Where winget's choice is an installer
+//! gala cannot install yet (a later stage's type, an x86 portable
+//! program: no WOW64) the best one it can install is used instead,
+//! logged and recorded in the ledger ([`select_installer`]).
 
-use crate::manifest::{Installer, Manifest};
 use crate::source::{Source, WINGET_SOURCE_ID};
+use crate::winget::arp::{self, ArpRecord, MatchKind, Signature};
+use crate::winget::deps;
+use crate::winget::select::{self as wsel, CommandOptions, Machine, Mode};
+use crate::winget::{Architecture, Installer, InstallerType, Package, Scope};
 use crate::{eq_ci, sha256_hex, shim, version, zip};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::fmt;
 
@@ -461,13 +479,74 @@ pub struct Plan {
     pub dir_on_path: bool,
 }
 
-/// Installer types gala installs (the rest: ROADMAP PK stages 4 and 5):
-/// portable, zip of portable, and installers that are programs (inno,
-/// nullsoft, exe: [`exe`]).
-pub fn supported(i: &Installer) -> bool {
-    i.installer_type == "portable"
-        || (i.installer_type == "zip" && i.nested_installer_type.as_deref() == Some("portable"))
-        || exe::is_program(&i.installer_type)
+/// Whether the installer is a portable program (a `portable` installer
+/// or a zip of them): what winget installs into its Packages directory.
+pub fn is_portable(i: &Installer) -> bool {
+    i.installer_type == Some(InstallerType::Portable)
+        || (i.installer_type == Some(InstallerType::Zip)
+            && i.nested_installer_type == Some(InstallerType::Portable))
+}
+
+/// Why gala cannot install an installer winget would choose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gap {
+    /// The ledger line (`gala.exe!install(...)`).
+    pub ledger: String,
+    pub why: String,
+    /// Whether another installer of the package may be used instead: a
+    /// type or an architecture gala lacks, yes; a scope (where the
+    /// program lands, which the user chose or winget's order did) no.
+    pub fallback: bool,
+}
+
+/// What gala cannot install (None: it can): portable programs and zips
+/// of them, per user, not x86 (no WOW64); installers that are programs
+/// (inno, nullsoft, exe: [`exe`]). The rest is ROADMAP PK stages 4 and 5.
+/// `scope`: the scope asked for, which a portable installer without
+/// Scope installs in (winget's `--scope`).
+pub fn gap(i: &Installer, scope: Option<Scope>) -> Option<Gap> {
+    let type_name = |i: &Installer| match (i.installer_type, i.nested_installer_type) {
+        (Some(InstallerType::Zip), Some(n)) => format!("zip of {}", n.as_str()),
+        (Some(t), _) => t.as_str().to_string(),
+        (None, _) => "unknown".to_string(),
+    };
+    if is_portable(i) {
+        if i.architecture == Architecture::X86 {
+            return Some(Gap {
+                ledger: "gala.exe!install(x86 portable: WOW64)".to_string(),
+                why: "an x86 program, which gala cannot run yet (no WOW64)".to_string(),
+                fallback: true,
+            });
+        }
+        if i.scope.or(scope) == Some(Scope::Machine) {
+            return Some(Gap {
+                ledger: "gala.exe!install(machine scope portable)".to_string(),
+                why: "a portable package for machine scope (winget's Program Files layout and \
+                      HKLM entry are not built yet; ROADMAP PK); --scope user installs it for \
+                      this user"
+                    .to_string(),
+                fallback: false,
+            });
+        }
+        return None;
+    }
+    match i.installer_type {
+        Some(t) if exe::is_program(t.as_str()) => None,
+        _ => Some(Gap {
+            ledger: format!("gala.exe!install(InstallerType {})", effective_name(i)),
+            why: format!(
+                "InstallerType {} is not supported yet (gala installs zip, portable, inno, \
+                 nullsoft and exe; ROADMAP PK stages 4-5)",
+                type_name(i)
+            ),
+            fallback: true,
+        }),
+    }
+}
+
+/// The type that is really installed, as text (`msix`, `portable`).
+fn effective_name(i: &Installer) -> &'static str {
+    i.effective_type().or(i.installer_type).map_or("unknown", InstallerType::as_str)
 }
 
 /// A command's name from a file name: without directory and `.exe`.
@@ -491,8 +570,8 @@ fn valid_alias(alias: &str) -> bool {
 /// against the SHA-256) puts in the package directory.
 pub fn plan(installer: &Installer, data: &[u8]) -> Result<Plan, Error> {
     let mut p = Plan::default();
-    match installer.installer_type.as_str() {
-        "portable" => {
+    match installer.installer_type {
+        Some(InstallerType::Portable) => {
             let alias = installer
                 .commands
                 .first()
@@ -505,12 +584,13 @@ pub fn plan(installer: &Installer, data: &[u8]) -> Result<Plan, Error> {
             p.files.push((file.clone(), data.to_vec()));
             p.commands.push(Command { alias: alias.to_string(), target: file });
         }
-        "zip" => {
-            match installer.nested_installer_type.as_deref() {
-                Some("portable") => {}
+        Some(InstallerType::Zip) => {
+            match installer.nested_installer_type {
+                Some(InstallerType::Portable) => {}
                 Some(other) => {
                     return Err(Error::unsupported(format!(
-                        "a zip whose NestedInstallerType is {other} (gala installs portable ones; ROADMAP PK)"
+                        "a zip whose NestedInstallerType is {} (gala installs portable ones; ROADMAP PK)",
+                        other.as_str()
                     )));
                 }
                 None => return Err(Error::failed("a zip installer without NestedInstallerType")),
@@ -533,10 +613,10 @@ pub fn plan(installer: &Installer, data: &[u8]) -> Result<Plan, Error> {
                     p.files.push((path, bytes));
                 }
             }
-            if installer.nested_files.is_empty() {
+            if installer.nested_installer_files.is_empty() {
                 return Err(Error::failed("a portable zip without NestedInstallerFiles"));
             }
-            for f in &installer.nested_files {
+            for f in &installer.nested_installer_files {
                 let path = zip::safe_path(&f.relative_path).ok_or_else(|| {
                     Error::failed(format!("unsafe RelativeFilePath {:?}", f.relative_path))
                 })?;
@@ -555,9 +635,10 @@ pub fn plan(installer: &Installer, data: &[u8]) -> Result<Plan, Error> {
             }
             p.dir_on_path = installer.archive_binaries_depend_on_path;
         }
-        other => {
+        _ => {
             return Err(Error::unsupported(format!(
-                "InstallerType {other} is not supported yet (gala installs zip, portable, inno, nullsoft and exe; ROADMAP PK stages 4-5)"
+                "InstallerType {} is not supported yet (gala installs zip, portable, inno, nullsoft and exe; ROADMAP PK stages 4-5)",
+                effective_name(installer)
             )));
         }
     }
@@ -652,6 +733,10 @@ pub struct Installed {
     pub id: Option<String>,
     pub source: Option<String>,
     pub install_location: Option<String>,
+    /// DisplayVersion as the program wrote it.
+    pub display_version: Option<String>,
+    /// `WindowsInstaller = 1`: an MSI registered it.
+    pub windows_installer: bool,
 }
 
 fn sz(host: &mut dyn Host, root: Root, key: &str, name: &str) -> Option<String> {
@@ -683,6 +768,9 @@ pub fn installed(host: &mut dyn Host) -> Vec<Installed> {
                 id: sz(host, root, &k, "WinGetPackageIdentifier"),
                 source: sz(host, root, &k, "GalaSource"),
                 install_location: sz(host, root, &k, "InstallLocation"),
+                display_version: sz(host, root, &k, "DisplayVersion"),
+                windows_installer: host.reg_get(root, &k, "WindowsInstaller")
+                    == Some(RegValue::Dword(1)),
                 key,
                 name,
             });
@@ -706,6 +794,55 @@ pub fn find_installed(host: &mut dyn Host, what: &str) -> Result<Installed, Erro
 
 // ---- Install, uninstall, upgrade ---------------------------------------
 
+/// The user's options that shape selection and the installer's command
+/// line (winget install's options of the same names).
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    /// `--scope`: required.
+    pub scope: Option<Scope>,
+    /// `--architecture`: required.
+    pub architecture: Option<Architecture>,
+    /// `--locale`: required.
+    pub locale: Option<String>,
+    /// `--installer-type`: required.
+    pub installer_type: Option<InstallerType>,
+    /// `--silent`, `--interactive`, else silent with progress (winget's
+    /// default).
+    pub mode: Mode,
+    /// `--custom`: added to the manifest's Custom switch.
+    pub custom: Option<String>,
+    /// `--override`: the installer's whole argument list.
+    pub override_args: Option<String>,
+    /// `--log`: the installer's own log (its Log switch); default: gala's
+    /// `<id>-<version>.setup.log` beside the install log.
+    pub log: Option<String>,
+    /// `--skip-dependencies`.
+    pub skip_dependencies: bool,
+}
+
+/// The machine gala installs for: x64, its pinned build (Windows 11
+/// 24H2, 26100), en-US (gala's only user locale so far).
+pub fn machine() -> Machine {
+    Machine::gala(Architecture::X64, "en-US")
+}
+
+impl Options {
+    /// The resolver's request: the options are requirements, as winget's
+    /// command-line options are; `installed` for an upgrade.
+    pub fn request(&self, installed: Option<wsel::Installed>) -> wsel::Request {
+        fn req<T>(v: Option<T>) -> wsel::Choice<T> {
+            v.map(|v| wsel::Choice::require(alloc::vec![v])).unwrap_or_default()
+        }
+        wsel::Request {
+            scope: req(self.scope),
+            locales: req(self.locale.clone()),
+            architectures: req(self.architecture),
+            installer_types: req(self.installer_type),
+            installed,
+        }
+    }
+}
+
 /// Options of an install.
 pub struct Request<'a> {
     pub id: &'a str,
@@ -716,71 +853,200 @@ pub struct Request<'a> {
     /// `--location`: where a program installer installs (its
     /// InstallLocation switch).
     pub location: Option<&'a str>,
+    pub options: Options,
 }
 
 /// What an install did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Installed { id: String, version: String, commands: Vec<String>, location: String },
-    AlreadyInstalled { id: String, version: String },
-    Upgraded { id: String, from: String, to: String },
-    Uninstalled { id: String, version: String },
-    UpToDate { id: String, version: String },
+    Installed {
+        id: String,
+        version: String,
+        commands: Vec<String>,
+        location: String,
+        /// The dependencies installed first (`<id> <version>`).
+        dependencies: Vec<String>,
+    },
+    AlreadyInstalled {
+        id: String,
+        version: String,
+    },
+    Upgraded {
+        id: String,
+        from: String,
+        to: String,
+    },
+    Uninstalled {
+        id: String,
+        version: String,
+    },
+    UpToDate {
+        id: String,
+        version: String,
+    },
 }
 
 /// The checked download and the plan: everything before the first change.
 struct Prepared {
-    manifest: Manifest,
+    package: Package,
     installer: Installer,
     plan: Plan,
     /// A program installer's bytes (to run); empty for the others.
     data: Vec<u8>,
+    /// How a program installer is run (mode, switches, location).
+    command: CommandOptions,
 }
 
-fn prepare(
+/// The installer [`choose`] picked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chosen {
+    pub index: usize,
+    /// winget's choice and its gap, when another is used.
+    pub instead_of: Option<(usize, Gap)>,
+}
+
+/// Why [`choose`] picked none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// No applicable installer, with each one's reason.
+    NoInstaller(wsel::NoInstaller),
+    /// What gala lacks for winget's choice (and every runner-up).
+    Gap(Gap),
+}
+
+/// winget's choice for `request`, unless gala cannot install it: then
+/// the best-ranked installer it can install, when the gap allows another
+/// ([`Gap::fallback`]).
+pub fn choose(package: &Package, request: &wsel::Request) -> Result<Chosen, Refused> {
+    let s = wsel::select(package, &machine(), request).map_err(Refused::NoInstaller)?;
+    let scope = request.scope.values.first().copied();
+    let Some(g) = gap(s.installer, scope) else {
+        return Ok(Chosen { index: s.installer.index, instead_of: None });
+    };
+    if !g.fallback {
+        return Err(Refused::Gap(g));
+    }
+    let usable =
+        s.runners_up.iter().copied().find(|&i| gap(&package.installers[i], scope).is_none());
+    match usable {
+        Some(index) => Ok(Chosen { index, instead_of: Some((s.installer.index, g)) }),
+        None => Err(Refused::Gap(g)),
+    }
+}
+
+/// [`choose`] with every step in the install log: the selected
+/// installer, the runners-up, each rejected installer's reason, a
+/// fallback; a gap recorded in the ledger.
+pub fn select_installer(
+    host: &mut dyn Host,
+    package: &Package,
+    request: &wsel::Request,
+) -> Result<usize, Error> {
+    let s = wsel::select(package, &machine(), request);
+    if let Ok(s) = &s {
+        for &i in &s.runners_up {
+            let r = &package.installers[i];
+            host.log(&format!(
+                "runner-up installer={} arch={} scope={} type={}",
+                i + 1,
+                r.architecture.as_str(),
+                r.scope.map_or("-", Scope::as_str),
+                effective_name(r)
+            ));
+        }
+    }
+    let rejected = match &s {
+        Ok(s) => &s.rejected,
+        Err(e) => &e.rejected,
+    };
+    for r in rejected {
+        host.log(&format!("rejected installer={} {}", r.index + 1, r.reason));
+    }
+    let what = format!("{} {}", package.id, package.version);
+    let index = match choose(package, request) {
+        Ok(Chosen { index, instead_of: None }) => index,
+        Ok(Chosen { index, instead_of: Some((wanted, g)) }) => {
+            host.record_missing(&g.ledger);
+            host.log(&format!(
+                "fallback installer={} instead of installer={}: {}",
+                index + 1,
+                wanted + 1,
+                g.why
+            ));
+            index
+        }
+        Err(Refused::NoInstaller(none)) => {
+            host.log(&format!("error {none}"));
+            return Err(Error::not_found(format!("{what}: {none}")));
+        }
+        Err(Refused::Gap(g)) => {
+            host.record_missing(&g.ledger);
+            host.log(&format!("error unsupported {}", g.why));
+            return Err(Error::unsupported(format!("{what}: {}", g.why)));
+        }
+    };
+    let i = &package.installers[index];
+    host.log(&format!(
+        "selected installer={} type={} nested={} arch={} scope={} locale={} url={}",
+        index + 1,
+        i.installer_type.map_or("-", InstallerType::as_str),
+        i.nested_installer_type.map_or("-", InstallerType::as_str),
+        i.architecture.as_str(),
+        i.scope.map_or("-", Scope::as_str),
+        i.locale.as_deref().unwrap_or("-"),
+        i.url
+    ));
+    Ok(index)
+}
+
+/// Reads a package version and logs it with its warnings.
+fn read_package(
     host: &mut dyn Host,
     source: &Source,
     id: &str,
     version: Option<&str>,
-) -> Result<Prepared, Error> {
-    let manifest = source.find(host, id, version)?;
+) -> Result<Package, Error> {
+    let package = source.find(host, id, version)?;
     host.log(&format!(
-        "manifest id={} version={} manifest_version={}",
-        manifest.id, manifest.version, manifest.manifest_version
+        "manifest id={} version={} manifest_version={} form={}",
+        package.id,
+        package.version,
+        package.manifest_version,
+        match package.form {
+            crate::winget::package::Form::Singleton => "singleton",
+            crate::winget::package::Form::MultiFile => "multi-file",
+        }
     ));
-    let Some(installer) = manifest.select_installer(supported).cloned() else {
-        let arches: Vec<&str> =
-            manifest.installers.iter().map(|i| i.architecture.as_str()).collect();
-        return Err(Error::unsupported(format!(
-            "{} {} has no x64 or neutral installer (it has {})",
-            manifest.id,
-            manifest.version,
-            arches.join(", ")
-        )));
-    };
-    host.log(&format!(
-        "installer type={} nested={} arch={} url={}",
-        installer.installer_type,
-        installer.nested_installer_type.as_deref().unwrap_or("-"),
-        installer.architecture,
-        installer.url
-    ));
-    if !supported(&installer) {
-        host.record_missing(&format!(
-            "gala.exe!install(InstallerType {})",
-            installer.effective_type()
-        ));
-        return Err(Error::unsupported(format!(
-            "{} {}: InstallerType {} is not supported yet (gala installs zip, portable, inno, nullsoft and exe; ROADMAP PK stages 4-5)",
-            manifest.id,
-            manifest.version,
-            installer.effective_type()
-        )));
+    for w in &package.warnings {
+        host.log(&format!("warning {w}"));
     }
+    Ok(package)
+}
+
+/// Downloads and checks the selected installer and plans what it puts
+/// where; nothing changes yet.
+fn prepare(
+    host: &mut dyn Host,
+    source: &Source,
+    package: Package,
+    index: usize,
+    options: &Options,
+    location: Option<&str>,
+    upgrade: bool,
+) -> Result<Prepared, Error> {
+    let installer = package.installers[index].clone();
+    let command = CommandOptions {
+        mode: options.mode,
+        log: options.log.clone(),
+        location: location.map(ToString::to_string),
+        custom: options.custom.clone(),
+        override_args: options.override_args.clone(),
+        upgrade,
+    };
     let data = source.installer_bytes(host, &installer)?;
     let got = sha256_hex(&data);
     host.log(&format!("sha256 expected={} got={} bytes={}", installer.sha256, got, data.len()));
-    if got != installer.sha256 {
+    if !eq_ci(&got, &installer.sha256) {
         return Err(Error {
             kind: Kind::HashMismatch,
             message: format!(
@@ -789,9 +1055,9 @@ fn prepare(
             ),
         });
     }
-    if exe::is_program(&installer.installer_type) {
-        host.log(&format!("plan run-installer type={}", installer.installer_type));
-        return Ok(Prepared { manifest, installer, plan: Plan::default(), data });
+    if !is_portable(&installer) {
+        host.log(&format!("plan run-installer type={}", effective_name(&installer)));
+        return Ok(Prepared { package, installer, plan: Plan::default(), data, command });
     }
     let plan = plan(&installer, &data)?;
     host.log(&format!(
@@ -800,7 +1066,7 @@ fn prepare(
         plan.dirs.len(),
         plan.commands.len()
     ));
-    Ok(Prepared { manifest, installer, plan, data: Vec::new() })
+    Ok(Prepared { package, installer, plan, data: Vec::new(), command })
 }
 
 /// Writes a prepared package (inside `tx`).
@@ -810,7 +1076,7 @@ fn apply(
     p: &Prepared,
     source_location: &str,
 ) -> Result<String, Error> {
-    let m = &p.manifest;
+    let m = &p.package;
     let key = install_key(&m.id);
     let dir = format!("{}\\{key}", layout.packages);
     if tx.host.exists(&dir).is_some() {
@@ -878,16 +1144,16 @@ fn apply(
         ("NoRepair", RegValue::Dword(1)),
         ("WinGetPackageIdentifier", RegValue::Sz(m.id.clone())),
         ("WinGetSourceIdentifier", RegValue::Sz(WINGET_SOURCE_ID.to_string())),
-        ("WinGetInstallerType", RegValue::Sz(p.installer.effective_type().to_string())),
+        ("WinGetInstallerType", RegValue::Sz(effective_name(&p.installer).to_string())),
         ("InstallDirectoryAddedToPath", RegValue::Dword(u32::from(added_dir_to_path))),
         ("GalaLinks", RegValue::MultiSz(links)),
         ("GalaSource", RegValue::Sz(source_location.to_string())),
         ("GalaInstallerSha256", RegValue::Sz(p.installer.sha256.clone())),
     ];
-    if let Some(publisher) = &m.publisher {
+    if let Some(publisher) = &m.default_locale.publisher {
         values.push(("Publisher", RegValue::Sz(publisher.clone())));
     }
-    if let Some(url) = &m.package_url {
+    if let Some(url) = &m.default_locale.package_url {
         values.push(("URLInfoAbout", RegValue::Sz(url.clone())));
     }
     for (name, v) in values {
@@ -938,8 +1204,95 @@ fn remove(tx: &mut Tx, layout: &Layout, i: &Installed) -> Result<(), Error> {
     Ok(())
 }
 
-/// `gala install`.
+/// The source's packages and installed versions, for [`deps::plan_with`].
+struct Catalog<'a> {
+    host: RefCell<&'a mut dyn Host>,
+    source: &'a Source,
+}
+
+impl deps::Catalog for Catalog<'_> {
+    fn versions(&self, id: &str) -> Vec<String> {
+        let mut h = self.host.borrow_mut();
+        self.source.versions(&mut **h, id).unwrap_or_default()
+    }
+    fn load(&self, id: &str, version: &str) -> Result<Package, String> {
+        let mut h = self.host.borrow_mut();
+        self.source.manifest(&mut **h, id, version).map_err(|e| e.message)
+    }
+    fn installed(&self, id: &str) -> Option<String> {
+        let mut h = self.host.borrow_mut();
+        find_installed(&mut **h, id)
+            .ok()
+            .filter(|i| i.id.as_deref().is_some_and(|x| eq_ci(x, id)))
+            .map(|i| i.version)
+    }
+}
+
+/// The package's dependencies, in install order (winget installs
+/// PackageDependencies first; [`deps`] has the rules), each line in the
+/// install log; Windows features and libraries are recorded in the
+/// ledger (gala neither enables nor checks them yet).
+fn plan_dependencies(
+    host: &mut dyn Host,
+    source: &Source,
+    package: &Package,
+    index: usize,
+    request: &wsel::Request,
+) -> Result<deps::Plan, Error> {
+    let chooser = |p: &Package, r: &wsel::Request| {
+        // The requested package's installer is the one already selected.
+        if core::ptr::eq(p, package) {
+            return Ok(index);
+        }
+        choose(p, r).map(|c| c.index).map_err(|e| match e {
+            Refused::NoInstaller(why) => {
+                deps::Error::NoInstaller { id: p.id.clone(), version: p.version.clone(), why }
+            }
+            Refused::Gap(g) => {
+                deps::Error::Unusable { id: p.id.clone(), version: p.version.clone(), why: g.why }
+            }
+        })
+    };
+    let plan = {
+        let catalog = Catalog { host: RefCell::new(&mut *host), source };
+        deps::plan_with(package, request, &catalog, &chooser)
+    };
+    let plan = plan.map_err(|e| {
+        let kind = match e {
+            deps::Error::NotFound { .. } | deps::Error::NoInstaller { .. } => Kind::NotFound,
+            deps::Error::Unusable { .. } => Kind::Unsupported,
+            _ => Kind::Failed,
+        };
+        host.log(&format!("error dependencies {e}"));
+        Error { kind, message: format!("{e}") }
+    })?;
+    for line in deps::describe(&plan) {
+        host.log(&format!("plan {line}"));
+    }
+    for n in &plan.windows_features {
+        host.record_missing(&format!("gala.exe!install(WindowsFeatures {})", n.name));
+    }
+    for n in &plan.windows_libraries {
+        host.record_missing(&format!("gala.exe!install(WindowsLibraries {})", n.name));
+    }
+    Ok(plan)
+}
+
+/// `gala install`: the package's dependencies first (each an install of
+/// its own, as winget does: a later failure leaves them installed), then
+/// the package.
 pub fn install(host: &mut dyn Host, source: &Source, req: &Request) -> Result<Outcome, Error> {
+    install_inner(host, source, req, false)
+}
+
+/// `planned`: a dependency of a package whose plan already covers its
+/// own dependencies.
+fn install_inner(
+    host: &mut dyn Host,
+    source: &Source,
+    req: &Request,
+    planned: bool,
+) -> Result<Outcome, Error> {
     host.log(&format!(
         "install id={} version={} source={}",
         req.id,
@@ -964,37 +1317,90 @@ pub fn install(host: &mut dyn Host, source: &Source, req: &Request) -> Result<Ou
             req.id, i.version, req.id
         )));
     }
-    let p = prepare(host, source, req.id, req.version)?;
-    if exe::is_program(&p.installer.installer_type) {
-        let location = exe::install_program(host, &p, req.source_location, req.location, None)?;
-        host.log(&format!("installed id={} version={}", p.manifest.id, p.manifest.version));
+    let package = read_package(host, source, req.id, req.version)?;
+    let request = req.options.request(None);
+    let index = select_installer(host, &package, &request)?;
+    let mut dependencies = Vec::new();
+    if req.options.skip_dependencies && !planned {
+        if !package.installers[index].dependencies.packages.is_empty() {
+            host.log("dependencies skipped (--skip-dependencies)");
+        }
+    } else if !planned {
+        let plan = plan_dependencies(host, source, &package, index, &request)?;
+        let n = plan.packages.len();
+        for step in plan.packages.iter().take(n.saturating_sub(1)).filter(|s| !s.satisfied) {
+            host.log(&format!(
+                "dependency id={} version={} for={}",
+                step.id,
+                step.version,
+                step.required_by.as_deref().unwrap_or("")
+            ));
+            install_dependency(host, source, req, &step.id, &step.version).map_err(|mut e| {
+                e.message = format!(
+                    "{} needs {} {}, whose install failed: {}",
+                    package.id, step.id, step.version, e.message
+                );
+                e
+            })?;
+            dependencies.push(format!("{} {}", step.id, step.version));
+        }
+    }
+    let p = prepare(host, source, package, index, &req.options, req.location, false)?;
+    if !is_portable(&p.installer) {
+        let location = exe::install_program(host, &p, req.source_location, None)?;
+        host.log(&format!("installed id={} version={}", p.package.id, p.package.version));
         return Ok(Outcome::Installed {
-            id: p.manifest.id.clone(),
-            version: p.manifest.version.clone(),
+            id: p.package.id.clone(),
+            version: p.package.version.clone(),
             commands: Vec::new(),
             location,
+            dependencies,
         });
     }
     if req.location.is_some() {
         return Err(Error::usage(format!(
             "--location: {} installs into its package directory (winget's portable layout)",
-            p.installer.effective_type()
+            effective_name(&p.installer)
         )));
     }
     let mut tx = Tx::new(host);
     match apply(&mut tx, &layout, &p, req.source_location) {
         Ok(location) => {
             tx.commit();
-            host.log(&format!("installed id={} version={}", p.manifest.id, p.manifest.version));
+            host.log(&format!("installed id={} version={}", p.package.id, p.package.version));
             Ok(Outcome::Installed {
-                id: p.manifest.id.clone(),
-                version: p.manifest.version.clone(),
+                id: p.package.id.clone(),
+                version: p.package.version.clone(),
                 commands: p.plan.commands.iter().map(|c| c.alias.clone()).collect(),
                 location,
+                dependencies,
             })
         }
         Err(e) => Err(fail(tx, e)),
     }
+}
+
+/// One planned dependency: installed, or (installed at a version below
+/// what is needed) upgraded to the planned version.
+fn install_dependency(
+    host: &mut dyn Host,
+    source: &Source,
+    req: &Request,
+    id: &str,
+    version: &str,
+) -> Result<Outcome, Error> {
+    let options = Options { mode: req.options.mode, ..Options::default() };
+    if find_installed(host, id).ok().is_some_and(|i| i.id.is_some()) {
+        return upgrade(host, Some(source), id, Some(version), &options);
+    }
+    let dep = Request {
+        id,
+        version: Some(version),
+        source_location: req.source_location,
+        location: None,
+        options,
+    };
+    install_inner(host, source, &dep, true)
 }
 
 /// Rolls a failed transaction back; the error says how it ended.
@@ -1038,6 +1444,8 @@ pub fn uninstall(host: &mut dyn Host, what: &str) -> Result<Outcome, Error> {
 /// An installed package with a later version in its source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Available {
+    /// Its `id` is the package's (matched, for a program installed
+    /// without gala).
     pub installed: Installed,
     pub available: String,
 }
@@ -1060,54 +1468,186 @@ fn source_for<'a>(
     Ok(owned.as_ref().unwrap_or_else(|| unreachable!()))
 }
 
-/// The upgrades available (all gala/winget installs, or `only`).
+/// An ARP entry as the resolver's matcher sees it.
+pub fn arp_record(i: &Installed) -> ArpRecord {
+    ArpRecord {
+        key: i.key.clone(),
+        display_name: Some(i.name.clone()),
+        publisher: i.publisher.clone(),
+        display_version: i.display_version.clone(),
+        upgrade_code: None,
+        winget_id: i.id.clone(),
+        scope: Some(match i.root {
+            Root::CurrentUser => Scope::User,
+            Root::LocalMachine => Scope::Machine,
+        }),
+        windows_installer: i.windows_installer,
+    }
+}
+
+/// One row of `gala list`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub installed: Installed,
+    /// The package: WinGetPackageIdentifier, else the source's package
+    /// the entry matches.
+    pub id: Option<String>,
+    /// A later version in the source.
+    pub available: Option<String>,
+    /// How an entry without WinGetPackageIdentifier was matched.
+    pub matched: Option<MatchKind>,
+}
+
+/// The source's package an untagged ARP entry is (winget list's
+/// correlation: [`arp`] has the rules), with the strongest match among
+/// the source's packages (the first package on a tie).
+fn correlate<'p>(
+    signatures: &[(Signature, &'p Package)],
+    record: &ArpRecord,
+) -> Option<(&'p Package, MatchKind)> {
+    let mut best: Option<(&Package, MatchKind)> = None;
+    for (sig, p) in signatures {
+        if let Some(k) = sig.matches(record)
+            && best.is_none_or(|(_, b)| k < b)
+        {
+            best = Some((p, k));
+        }
+    }
+    best
+}
+
+/// Every ARP entry with its package and the version available: entries
+/// gala or winget installed by their WinGetPackageIdentifier (the
+/// version from `source`, else the source they were installed from);
+/// with `source`, the others matched to its packages as winget list does
+/// (the installed version read through [`arp::installed_version`]).
+pub fn list(host: &mut dyn Host, source: Option<&Source>) -> Vec<Listed> {
+    let all = installed(host);
+    let packages = match source {
+        Some(s) if all.iter().any(|i| i.id.is_none()) => s.packages(host).unwrap_or_else(|e| {
+            host.log(&format!("list: the source's packages cannot be read: {e}"));
+            Vec::new()
+        }),
+        _ => Vec::new(),
+    };
+    let signatures: Vec<(Signature, &Package)> =
+        packages.iter().map(|p| (Signature::of(p), p)).collect();
+    let mut out = Vec::new();
+    for i in all {
+        let mut row = Listed { id: i.id.clone(), available: None, matched: None, installed: i };
+        if row.id.is_some() {
+            let mut owned = None;
+            if let Ok(s) = source_for(source, &row.installed, &mut owned)
+                && let Some(id) = row.id.clone()
+                && let Ok(versions) = s.versions(host, &id)
+                && arp::update_available(&row.installed.version, &versions[0])
+            {
+                row.available = Some(versions[0].clone());
+            }
+        } else if let Some((p, kind)) = correlate(&signatures, &arp_record(&row.installed)) {
+            row.installed.version = arp::installed_version(&arp_record(&row.installed), &[p]);
+            row.id = Some(p.id.clone());
+            row.matched = Some(kind);
+            if arp::update_available(&row.installed.version, &p.version) {
+                row.available = Some(p.version.clone());
+            }
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// The upgrades available (all packages [`list`] knows, or `only`).
 pub fn upgrades(
     host: &mut dyn Host,
     source: Option<&Source>,
     only: Option<&str>,
 ) -> Result<Vec<Available>, Error> {
     let mut out = Vec::new();
-    let candidates: Vec<Installed> = match only {
-        Some(what) => alloc::vec![find_installed(host, what)?],
-        None => installed(host)
-            .into_iter()
-            .filter(|i| i.id.is_some() && i.root == Root::CurrentUser)
-            .collect(),
-    };
-    for i in candidates {
-        let Some(id) = i.id.clone() else { continue };
-        let mut owned = None;
-        let s = match source_for(source, &i, &mut owned) {
-            Ok(s) => s,
-            Err(e) if only.is_some() => return Err(e),
-            Err(_) => continue,
-        };
-        let versions = match s.versions(host, &id) {
-            Ok(v) => v,
-            Err(e) if only.is_some() => return Err(e),
-            Err(_) => continue,
-        };
-        if version::compare(&versions[0], &i.version) == Ordering::Greater {
-            out.push(Available { installed: i, available: versions[0].clone() });
+    for l in list(host, source) {
+        let (Some(id), Some(available)) = (l.id, l.available) else { continue };
+        if only.is_some_and(|o| !eq_ci(o, &id)) {
+            continue;
         }
+        let mut installed = l.installed;
+        installed.id = Some(id);
+        out.push(Available { installed, available });
     }
     Ok(out)
 }
 
-/// `gala upgrade <id>`: the old version is removed and the new one
-/// installed in one transaction (a failure puts the old one back).
+/// The installed package `what` names for an upgrade: by
+/// [`find_installed`], else (with a source) the ARP entry the source's
+/// package `what` matches. Returns the entry and the package identifier.
+fn find_for_upgrade(
+    host: &mut dyn Host,
+    source: Option<&Source>,
+    what: &str,
+) -> Result<(Installed, String), Error> {
+    let found = find_installed(host, what);
+    if let Ok(i) = &found
+        && let Some(id) = i.id.clone()
+    {
+        return Ok((i.clone(), id));
+    }
+    let Some(s) = source else {
+        return Err(found.err().unwrap_or_else(|| {
+            Error::unsupported(format!("{what} was not installed by gala or winget (--source <dir> matches it to a package)"))
+        }));
+    };
+    let latest = s.find(host, what, None)?;
+    let mut versions = Vec::new();
+    for v in s.versions(host, &latest.id)? {
+        if let Ok(p) = s.manifest(host, &latest.id, &v) {
+            versions.push(p);
+        }
+    }
+    let records: Vec<(Installed, ArpRecord)> = installed(host)
+        .into_iter()
+        .map(|i| {
+            let r = arp_record(&i);
+            (i, r)
+        })
+        .collect();
+    let mut best: Option<(&Installed, &ArpRecord, MatchKind)> = None;
+    for p in &versions {
+        let sig = Signature::of(p);
+        for (i, r) in &records {
+            if let Some(k) = sig.matches(r)
+                && best.is_none_or(|(_, _, b)| k < b)
+            {
+                best = Some((i, r, k));
+            }
+        }
+    }
+    let Some((i, r, kind)) = best else {
+        return Err(Error::not_found(format!(
+            "no installed program matches {} (its name, publisher or product codes)",
+            latest.id
+        )));
+    };
+    host.log(&format!("matched key={} by={kind:?} package={}", i.key, latest.id));
+    let refs: Vec<&Package> = versions.iter().collect();
+    let mut i = i.clone();
+    i.version = arp::installed_version(r, &refs);
+    Ok((i, latest.id))
+}
+
+/// `gala upgrade <id>`: the selected installer of the new version keeps
+/// the installed type and scope (winget's rule, [`wsel::select`]). A
+/// zip or portable package's old version is removed and the new one
+/// installed in one transaction (a failure puts the old one back); a
+/// program installer runs over the installed version.
 pub fn upgrade(
     host: &mut dyn Host,
     source: Option<&Source>,
     what: &str,
     version: Option<&str>,
+    options: &Options,
 ) -> Result<Outcome, Error> {
     host.log(&format!("upgrade what={what}"));
     let layout = Layout::new(host)?;
-    let i = find_installed(host, what)?;
-    let Some(id) = i.id.clone() else {
-        return Err(Error::unsupported(format!("{} was not installed by gala or winget", i.name)));
-    };
+    let (i, id) = find_for_upgrade(host, source, what)?;
     let mut owned = None;
     let s = source_for(source, &i, &mut owned)?;
     let target = match version {
@@ -1118,31 +1658,53 @@ pub fn upgrade(
         host.log(&format!("up-to-date id={id} version={}", i.version));
         return Ok(Outcome::UpToDate { id, version: i.version });
     }
-    let p = prepare(host, s, &id, Some(&target))?;
+    let package = read_package(host, s, &id, Some(&target))?;
+    let tagged_type = exe::installed_type(host, &i);
+    let old_type = tagged_type
+        .as_deref()
+        .and_then(InstallerType::parse)
+        .or_else(|| arp::installed_type(&arp_record(&i), &package));
+    let scope = match i.root {
+        Root::CurrentUser => Scope::User,
+        Root::LocalMachine => Scope::Machine,
+    };
+    host.log(&format!(
+        "installed scope={} type={} key={}",
+        scope.as_str(),
+        old_type.map_or("-", InstallerType::as_str),
+        i.key
+    ));
+    let request =
+        options.request(Some(wsel::Installed { installer_type: old_type, scope: Some(scope) }));
+    let index = select_installer(host, &package, &request)?;
+    let p = prepare(host, s, package, index, options, None, true)?;
     let location = s.root.clone();
-    let old_type = exe::installed_type(host, &i).unwrap_or_default();
-    let (old_program, new_program) =
-        (exe::is_program(&old_type), exe::is_program(&p.installer.installer_type));
-    if old_program || new_program {
-        if !(old_program && new_program) {
-            return Err(Error::unsupported(format!(
-                "upgrading {id} from a {old_type} install to a {} one",
-                p.installer.installer_type
-            )));
-        }
+    // A portable install is gala's (its files recorded); anything else,
+    // known or not, is a program's.
+    let old_portable = i.id.is_some()
+        && old_type.is_some_and(|t| t == InstallerType::Portable || t == InstallerType::Zip);
+    let new_portable = is_portable(&p.installer);
+    if old_portable != new_portable {
+        let old = old_type.map_or("unknown", InstallerType::as_str);
+        return Err(Error::unsupported(format!(
+            "upgrading {id} from a {old} install to a {} one",
+            effective_name(&p.installer)
+        )));
+    }
+    if !new_portable {
         // winget's default for these: the new installer runs over the old
         // version (UpgradeBehavior install).
-        exe::install_program(host, &p, &location, None, Some(&i))?;
-        host.log(&format!("upgraded id={id} from={} to={}", i.version, p.manifest.version));
-        return Ok(Outcome::Upgraded { id, from: i.version, to: p.manifest.version.clone() });
+        exe::install_program(host, &p, &location, Some(&i))?;
+        host.log(&format!("upgraded id={id} from={} to={}", i.version, p.package.version));
+        return Ok(Outcome::Upgraded { id, from: i.version, to: p.package.version.clone() });
     }
     let mut tx = Tx::new(host);
     let r = remove(&mut tx, &layout, &i).and_then(|()| apply(&mut tx, &layout, &p, &location));
     match r {
         Ok(_) => {
             tx.commit();
-            host.log(&format!("upgraded id={id} from={} to={}", i.version, p.manifest.version));
-            Ok(Outcome::Upgraded { id, from: i.version, to: p.manifest.version.clone() })
+            host.log(&format!("upgraded id={id} from={} to={}", i.version, p.package.version));
+            Ok(Outcome::Upgraded { id, from: i.version, to: p.package.version.clone() })
         }
         Err(e) => Err(fail(tx, e)),
     }

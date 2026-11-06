@@ -632,8 +632,9 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   pixels but nothing shows them and they get no input (`desktop: session
   0 is live (1280x800), shown by none (the console shows session 1)`), so
   screen checks need the boot user (session 1), or the program attaches a
-  Test presenter to its session and reads the frame back (GalaSession,
-  `presenter_test`). On a BIOS boot without `presenter=` no session has
+  Test presenter to its session, reads the frame back and brings it input
+  (GalaSession's SESSION_FRAME and SESSION_INPUT, `presenter_test`), or
+  moves the console there (`gala attach <session>` as SYSTEM). On a BIOS boot without `presenter=` no session has
   a desktop (`desktop: no screen and no presenter=`). On real Windows a child
   started in another session needs STARTUPINFO.lpDesktop
   `winsta0\default` and a token that may open it (SYSTEM's, moved with
@@ -1331,7 +1332,16 @@ about a minute under TCG. Read, in order:
   is large (18 MB for pk_install_nsis): delete it afterwards.
 - **The boot test** is `cargo xtask boot-test pk_install_zip`; a failed
   run shows the install log twice (`logtee: install.log:` lines, and
-  pk_install_test prints it after the failing check).
+  pk_install_test prints it after the failing check). Its checks of the
+  log (`log_has`) scan the whole file, so a later check can find a line
+  of an earlier command: give each check text only its own step writes
+  (a URL, an id).
+- **Which installer, and why**: the install log's `selected`,
+  `runner-up`, `rejected` (with the resolver's reason) and `fallback`
+  lines; `plan ...` for dependencies; `installed scope= type=` and
+  `matched key= by=` for upgrades. A new test package's expected
+  selection is winget's documented rule (ARCHITECTURE "The winget
+  resolver"), not what gala happens to do.
 - **Downloads** are `pk_install_https` (`pk_install_test https`, with
   schannel_test's Nginx): the served zip is
   `user/pk_install_test/served` (make_source.py writes it with the
@@ -1341,6 +1351,12 @@ about a minute under TCG. Read, in order:
   ledger the engine's reason (`winhttp.dll!TLS handshake`,
   `schannel.dll!ISC: ...`, `winhttp.dll!redirect: ...`). The test VMs
   have no internet: a download test points at the in-guest Nginx.
+  Manifests over HTTPS come from the same Nginx
+  (`--source https://localhost:8443/winget-pkgs`, the tree
+  make_source.py writes to `user/pk_install_test/served/winget-pkgs`,
+  listed as JSON by `schannel_test/nginx.conf`); a source's reads are
+  the log's `source list|read url=` lines. GitHub's API (the default
+  source) is host-tested only, through the Fake's `fetch`.
 - **gala.exe is `no_std` with `alloc`** (gala_heap): code that brings in
   more of `alloc` may need another ntdll C function in main.rs's import
   list (`memmove`, `strlen`; the link error names it). advapi32 is
@@ -1349,9 +1365,10 @@ about a minute under TCG. Read, in order:
   command is a copy of gala.exe: a gala.exe change does not reach
   commands installed before it until they are reinstalled.
 
-**The winget resolver** (`galapkg::winget`) is tested on the host only:
+**The winget resolver** (`galapkg::winget`) is tested on the host with
 `cargo test -p galapkg winget` (`-- --nocapture` prints the corpus
-summary and every warning).
+summary and every warning) and on the install path by `cargo test -p
+galapkg install` and the pk_install scenarios.
 
 - The corpus is `user/galapkg/testdata/winget-corpus/manifests` (real
   manifests: never edit them; `.gitattributes` keeps their CRLFs).
@@ -1510,6 +1527,13 @@ UEFI (BIOS boots have no framebuffer), unless their desktop is headless
   `screen<n>.png`). Input is the same (PS/2 through the monitor). A
   failed read quotes the monitor's reply (`memsave`'s file name must be
   quoted: unquoted, its slashes are read as part of the size).
+- **Each desktop keeps its own pointer** (a session's, across console
+  switches and injected input): a step after a switch first puts the
+  pointer at (0, 0) with four `mouse_move -255 -255` (presenter_test).
+  A step whose input makes the program change the screen (a click that
+  starts a console switch) checks no pixels: its dump would race the
+  change; check them in a step before it, and let a later input (a
+  second click) tell the program a check is done.
 
 #### Fonts, icons and wallpapers
 

@@ -85,6 +85,8 @@ pub enum Error {
     Load { id: String, version: String, message: String },
     /// No installer of the package applies to this machine.
     NoInstaller { id: String, version: String, why: NoInstaller },
+    /// The caller's chooser ([`plan_with`]) refused every installer.
+    Unusable { id: String, version: String, why: String },
     /// Dependencies nested deeper than [`MAX_DEPTH`].
     TooDeep(Vec<String>),
 }
@@ -107,6 +109,7 @@ impl fmt::Display for Error {
             }
             Error::Load { id, version, message } => write!(f, "{id} {version}: {message}"),
             Error::NoInstaller { id, version, why } => write!(f, "{id} {version}: {why}"),
+            Error::Unusable { id, version, why } => write!(f, "{id} {version}: {why}"),
             Error::TooDeep(path) => {
                 write!(f, "dependencies nested too deep: {}", path.join(" -> "))
             }
@@ -118,9 +121,14 @@ impl fmt::Display for Error {
 /// long chain is more likely broken than real).
 pub const MAX_DEPTH: usize = 32;
 
+/// Picks a package's installer for a request: its index, or why none
+/// will do. [`plan`] uses winget's selection ([`select::select`]); a
+/// caller that cannot install every type passes its own ([`plan_with`]).
+pub type Chooser<'c> = &'c dyn Fn(&Package, &Request) -> Result<usize, Error>;
+
 struct Planner<'a, C: Catalog> {
     catalog: &'a C,
-    machine: &'a Machine,
+    choose: Chooser<'a>,
     request: Request,
     plan: Plan,
     stack: Vec<String>,
@@ -137,24 +145,33 @@ pub fn plan<C: Catalog>(
     request: &Request,
     catalog: &C,
 ) -> Result<Plan, Error> {
+    let choose =
+        |p: &Package, r: &Request| {
+            select::select(p, machine, r).map(|s| s.installer.index).map_err(|why| {
+                Error::NoInstaller { id: p.id.clone(), version: p.version.clone(), why }
+            })
+        };
+    plan_with(package, request, catalog, &choose)
+}
+
+/// [`plan`] with the installers chosen by `choose` (the requested
+/// package's with `request`, the dependencies' with the dependency
+/// request described at [`plan`]).
+pub fn plan_with<C: Catalog>(
+    package: &Package,
+    request: &Request,
+    catalog: &C,
+    choose: Chooser<'_>,
+) -> Result<Plan, Error> {
     let mut dep_request = request.clone();
     dep_request.installed = None;
     if dep_request.installer_types.required {
         dep_request.installer_types = Default::default();
     }
-    let mut p = Planner {
-        catalog,
-        machine,
-        request: dep_request,
-        plan: Plan::default(),
-        stack: Vec::new(),
-    };
-    let selected = select::select(package, machine, request).map_err(|why| Error::NoInstaller {
-        id: package.id.clone(),
-        version: package.version.clone(),
-        why,
-    })?;
-    p.visit(package, selected.installer.index, None)?;
+    let mut p =
+        Planner { catalog, choose, request: dep_request, plan: Plan::default(), stack: Vec::new() };
+    let index = choose(package, request)?;
+    p.visit(package, index, None)?;
     Ok(p.plan)
 }
 
@@ -251,10 +268,7 @@ impl<C: Catalog> Planner<'_, C> {
             version: latest.clone(),
             message,
         })?;
-        let selected = select::select(&package, self.machine, &self.request).map_err(|why| {
-            Error::NoInstaller { id: id.to_string(), version: latest.clone(), why }
-        })?;
-        let index = selected.installer.index;
+        let index = (self.choose)(&package, &self.request)?;
         self.visit(&package, index, Some(by))
     }
 }

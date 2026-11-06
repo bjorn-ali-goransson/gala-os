@@ -3,13 +3,19 @@
 //! run as winget runs them:
 //!
 //! - the installer is staged as `%TEMP%\gala\<install key>\<file>.exe`
-//!   (removed again afterwards) and started with its silent switches:
-//!   InstallerSwitches.Silent if the manifest has it, else winget's
-//!   defaults for the type (Inno: `/SP- /VERYSILENT /SUPPRESSMSGBOXES
-//!   /NORESTART`; NSIS: `/S`), then Custom, Inno's `/LOG="<file>"` (the
-//!   setup log, next to gala's install log), and with `--location` the
+//!   (removed again afterwards) and started with the arguments the
+//!   resolver builds ([`wsel::command_line`]): the mode's switch (winget's
+//!   default is silent with progress, `--silent` silent: the manifest's
+//!   InstallerSwitches, else the type's defaults, Inno `/SP- /SILENT|
+//!   /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, NSIS `/S`), the Log switch
+//!   with the setup log (`--log`, else
+//!   `%LOCALAPPDATA%\gala\logs\<id>-<version>.setup.log`), Upgrade on an
+//!   upgrade, Custom and `--custom`, and with `--location` the
 //!   InstallLocation switch last (Inno `/DIR="<dir>"`, NSIS `/D=<dir>`,
-//!   which NSIS wants last and unquoted);
+//!   which NSIS wants last and unquoted); `--override` replaces them all.
+//!   An `exe` with neither Silent nor SilentWithProgress is refused unless
+//!   `--interactive` (gala does not run installers interactively on its
+//!   own);
 //! - gala waits for it; exit code 0 is success (3010 and 1641: success,
 //!   a restart is wanted), anything else a failure;
 //! - the program is found through the uninstall (ARP) entry it registered:
@@ -34,6 +40,7 @@
 //! [`Tx`].
 
 use super::*;
+use crate::winget::select::{CommandOptions, Mode};
 
 /// Installer types that are programs gala runs.
 pub fn is_program(installer_type: &str) -> bool {
@@ -50,19 +57,6 @@ pub const ERROR_TIMEOUT: u32 = 1460;
 /// ERROR_BAD_EXE_FORMAT: not an x64 program (gala has no WOW64 yet).
 pub const ERROR_BAD_EXE_FORMAT: u32 = 193;
 
-/// winget's switches for a type: (silent, log, install location).
-fn defaults(installer_type: &str) -> (&'static str, Option<&'static str>, Option<&'static str>) {
-    match installer_type {
-        "inno" => (
-            "/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
-            Some("/LOG=\"<LOGPATH>\""),
-            Some("/DIR=\"<INSTALLPATH>\""),
-        ),
-        "nullsoft" => ("/S", None, Some("/D=<INSTALLPATH>")),
-        _ => ("", None, None),
-    }
-}
-
 /// The silent switch an uninstaller of this type takes.
 fn uninstall_switch(installer_type: &str) -> Option<&'static str> {
     match installer_type {
@@ -72,47 +66,22 @@ fn uninstall_switch(installer_type: &str) -> Option<&'static str> {
     }
 }
 
-fn switch<'a>(i: &'a Installer, name: &str) -> Option<&'a str> {
-    i.switches
-        .iter()
-        .find(|(k, _)| eq_ci(k, name))
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-}
-
-/// The command line that runs `exe` (the staged installer) silently.
-pub fn install_command(
-    i: &Installer,
-    exe: &str,
-    log_path: Option<&str>,
-    location: Option<&str>,
-) -> Result<String, Error> {
-    let (silent, log, install_location) = defaults(&i.installer_type);
-    let silent = switch(i, "Silent").unwrap_or(silent);
-    if silent.is_empty() {
-        return Err(Error::unsupported(format!(
-            "InstallerType {} without InstallerSwitches.Silent: gala does not run installers \
-             interactively",
-            i.installer_type
-        )));
+/// The command line that runs `exe` (the staged installer) as `opts`
+/// asks.
+pub fn install_command(i: &Installer, exe: &str, opts: &CommandOptions) -> Result<String, Error> {
+    let t = effective_name(i);
+    if opts.override_args.is_none() && opts.mode != Mode::Interactive {
+        let s = wsel::switches(i);
+        if s.silent.is_none() && s.silent_with_progress.is_none() {
+            return Err(Error::unsupported(format!(
+                "InstallerType {t} without InstallerSwitches.Silent: gala does not run installers \
+                 interactively unless asked to (--interactive)"
+            )));
+        }
     }
-    let mut parts = alloc::vec![format!("\"{exe}\""), silent.to_string()];
-    if let Some(custom) = switch(i, "Custom") {
-        parts.push(custom.to_string());
-    }
-    if let (Some(t), Some(p)) = (switch(i, "Log").or(log), log_path) {
-        parts.push(t.replace("<LOGPATH>", p));
-    }
-    if let Some(dir) = location {
-        let t = switch(i, "InstallLocation").or(install_location).ok_or_else(|| {
-            Error::unsupported(format!(
-                "--location: this {} installer has no InstallLocation switch",
-                i.installer_type
-            ))
-        })?;
-        parts.push(t.replace("<INSTALLPATH>", dir));
-    }
-    Ok(parts.join(" "))
+    let args = wsel::command_line(i, opts)
+        .map_err(|e| Error::unsupported(format!("this {t} installer: {e}")))?;
+    Ok(if args.is_empty() { format!("\"{exe}\"") } else { format!("\"{exe}\" {args}") })
 }
 
 /// The command line that removes an installed program silently, and
@@ -160,7 +129,7 @@ fn root_name(root: Root) -> &'static str {
 fn find_entry(
     host: &mut dyn Host,
     before: &[(Root, String)],
-    m: &Manifest,
+    m: &Package,
     i: &Installer,
     previous: Option<&Installed>,
 ) -> Option<(Root, String, &'static str)> {
@@ -214,9 +183,10 @@ fn temp_dir(host: &mut dyn Host) -> Result<String, Error> {
     Ok(format!("{}\\Temp", local.trim_end_matches('\\')))
 }
 
-/// Stages the installer, runs it silently and checks its exit code.
-fn run_installer(host: &mut dyn Host, p: &Prepared, location: Option<&str>) -> Result<(), Error> {
-    let m = &p.manifest;
+/// Stages the installer, runs it as [`install_command`] says and checks
+/// its exit code.
+fn run_installer(host: &mut dyn Host, p: &Prepared) -> Result<(), Error> {
+    let m = &p.package;
     let key = install_key(&m.id);
     let dir = format!("{}\\gala\\{key}", temp_dir(host)?);
     let mut file = p.installer.file_name().to_string();
@@ -224,19 +194,34 @@ fn run_installer(host: &mut dyn Host, p: &Prepared, location: Option<&str>) -> R
         file.push_str(".exe");
     }
     let exe = format!("{dir}\\{file}");
-    let log_path = host.env("LOCALAPPDATA").map(|l| {
-        format!("{}\\gala\\logs\\{}-{}.setup.log", l.trim_end_matches('\\'), m.id, m.version)
+    let log_path = p.command.log.clone().or_else(|| {
+        host.env("LOCALAPPDATA").map(|l| {
+            format!("{}\\gala\\logs\\{}-{}.setup.log", l.trim_end_matches('\\'), m.id, m.version)
+        })
     });
-    let cmd = install_command(&p.installer, &exe, log_path.as_deref(), location)?;
+    let command = CommandOptions { log: log_path.clone(), ..p.command.clone() };
+    let cmd = install_command(&p.installer, &exe, &command)?;
     let mut staging = Tx::new(host);
     let staged = staging.create_dir_all(&dir).and_then(|()| staging.create_file(&exe, &p.data));
     if let Err(e) = staged {
         return Err(fail(staging, e));
     }
+    let sw = &p.installer.switches;
+    let from = if command.override_args.is_some() {
+        "override"
+    } else if sw.silent.is_some() || sw.silent_with_progress.is_some() {
+        "manifest"
+    } else {
+        "winget-default"
+    };
+    let mode = match command.mode {
+        Mode::Silent => "silent",
+        Mode::SilentWithProgress => "silent-with-progress",
+        Mode::Interactive => "interactive",
+    };
     staging.host.log(&format!(
-        "run type={} switches={} cmd={cmd}",
-        p.installer.installer_type,
-        if switch(&p.installer, "Silent").is_some() { "manifest" } else { "winget-default" }
+        "run type={} mode={mode} switches={from} cmd={cmd}",
+        effective_name(&p.installer)
     ));
     let r = staging.host.run(&cmd, RUN_TIMEOUT_MS);
     let left = staging.cleanup();
@@ -284,12 +269,11 @@ pub(super) fn install_program(
     host: &mut dyn Host,
     p: &Prepared,
     source_location: &str,
-    location: Option<&str>,
     previous: Option<&Installed>,
 ) -> Result<String, Error> {
     let before = arp_keys(host);
-    run_installer(host, p, location)?;
-    let m = &p.manifest;
+    run_installer(host, p)?;
+    let m = &p.package;
     let Some((root, key, how)) = find_entry(host, &before, m, &p.installer, previous) else {
         host.log("error no-arp-entry (no new uninstall entry, none named like the package)");
         return Err(Error::failed(format!(
@@ -306,7 +290,7 @@ pub(super) fn install_program(
     let values = [
         ("WinGetPackageIdentifier", RegValue::Sz(m.id.clone())),
         ("WinGetSourceIdentifier", RegValue::Sz(WINGET_SOURCE_ID.to_string())),
-        ("WinGetInstallerType", RegValue::Sz(p.installer.installer_type.clone())),
+        ("WinGetInstallerType", RegValue::Sz(effective_name(&p.installer).to_string())),
         ("GalaPackageVersion", RegValue::Sz(m.version.clone())),
         ("GalaSource", RegValue::Sz(source_location.to_string())),
         ("GalaInstallerSha256", RegValue::Sz(p.installer.sha256.clone())),

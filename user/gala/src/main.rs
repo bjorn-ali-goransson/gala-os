@@ -14,6 +14,7 @@
 //! gala wallpaper <name>              dunes, ribbons, najdi, night or drawn
 //! gala ps                            list the processes
 //! gala kill <pid|name>               end a process (all of that name)
+//! gala attach <session>              the console (screen, keyboard, mouse) shows that session
 //! gala install <id> [--version v] [--source dir] [--location dir]
 //! gala search <text> [--source dir]
 //! gala list [<text>]
@@ -81,6 +82,7 @@ unsafe extern "system" {
         out_len: u32,
         returned: *mut u32,
     ) -> u32;
+    fn GalaSession(op: u64, session: u32, arg: u64, buffer: u64, length: u64) -> u32;
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
 }
 
@@ -119,6 +121,8 @@ const USAGE: &str = "usage: gala <command> [arguments]
   wallpaper <name>              dunes, ribbons, najdi, night or drawn
   ps                            list the processes
   kill <pid|name>               end a process (every one of that name)
+  attach <session>              the console shows that session (its desktop on the
+                                screen, the keyboard and mouse to it; SYSTEM only)
   install <id> [--version v] [--source dir] [--location dir]
                                 install a winget package (zip, portable;
                                 Inno Setup, NSIS, exe: run silently)
@@ -881,6 +885,45 @@ fn kill(a: &Args) -> u32 {
     code
 }
 
+/// GalaSession's SESSION_PRESENT and its Console presenter
+/// (kernel/src/nt/session_calls.rs).
+const SESSION_PRESENT: u64 = 1;
+const PRESENTER_CONSOLE: u64 = 1;
+const STATUS_NOT_FOUND: u32 = 0xc000_0225;
+const STATUS_PRIVILEGE_NOT_HELD: u32 = 0xc000_0061;
+
+/// `gala attach <session>`: the console switch (fast user switching;
+/// ARCHITECTURE "Presenters (B3a)"): the screen shows that session's
+/// desktop and the keyboard and mouse go to it; the session it showed
+/// keeps its windows, shown by nothing. Needs SeTcbPrivilege (SYSTEM)
+/// until RS B4's session manager checks who may attach where.
+fn attach(a: &Args) -> u32 {
+    let id = match (a.count, number(a.get(2)).and_then(|n| u32::try_from(n).ok())) {
+        (3, Some(id)) => id,
+        _ => return fail(EXIT_USAGE, &["which session? (gala attach <session number>)"]),
+    };
+    let mut name = Line::new();
+    name.s("session ").dec(i64::from(id));
+    let name = core::str::from_utf8(&name.b[..name.n]).unwrap_or("the session");
+    // SAFETY: no buffers (SESSION_PRESENT of the Console takes none).
+    let status = unsafe { GalaSession(SESSION_PRESENT, id, PRESENTER_CONSOLE, 0, 0) };
+    match status {
+        STATUS_SUCCESS => {
+            Line::new().s("the console shows ").s(name).print();
+            0
+        }
+        STATUS_NOT_FOUND => fail(EXIT_NOT_FOUND, &["there is no ", name]),
+        STATUS_PRIVILEGE_NOT_HELD => {
+            fail(EXIT_FAILED, &["attaching the console needs SeTcbPrivilege (run as SYSTEM)"])
+        }
+        STATUS_NOT_SUPPORTED => fail(
+            EXIT_NOT_SUPPORTED,
+            &["the console cannot show ", name, " (no screen here, or session 0)"],
+        ),
+        _ => status_error(status, "attached"),
+    }
+}
+
 /// The package commands and their winget aliases (module `pkg`).
 const PACKAGE_COMMANDS: [&str; 11] = [
     "install",
@@ -965,6 +1008,8 @@ fn run() -> u32 {
         ps()
     } else if a.is(1, "kill") {
         kill(&a)
+    } else if a.is(1, "attach") {
+        attach(&a)
     } else {
         let mut l = Line::new();
         l.s("unknown command \"").w(a.get(1)).s("\" (gala help)");

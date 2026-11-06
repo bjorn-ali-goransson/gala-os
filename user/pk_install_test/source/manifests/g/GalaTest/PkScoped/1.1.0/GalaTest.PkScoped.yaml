@@ -1,0 +1,23 @@
+PackageIdentifier: GalaTest.PkScoped
+PackageVersion: 1.1.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkScoped
+License: Proprietary
+ShortDescription: A user and a machine installer (gala's install test)
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: pkscoped-1.1.0\pkscoped.exe
+  PortableCommandAlias: pkscoped
+Installers:
+- Architecture: x64
+  Scope: machine
+  InstallerUrl: https://packages.gala.invalid/pkscoped-1.1.0-machine.zip
+  InstallerSha256: BAF0359B8E18801F5C6465FF1E8A19B866D9CF1EABF00103A69A89AD991C82C8
+- Architecture: x64
+  Scope: user
+  InstallerUrl: https://packages.gala.invalid/pkscoped-1.1.0-user.zip
+  InstallerSha256: BAF0359B8E18801F5C6465FF1E8A19B866D9CF1EABF00103A69A89AD991C82C8
+ManifestType: singleton
+ManifestVersion: 1.6.0

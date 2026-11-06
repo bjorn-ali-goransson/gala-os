@@ -41,6 +41,8 @@ struct Fake {
     /// this many sleeps.
     pending: Option<(String, u32)>,
     sleeps: u32,
+    /// URLs fetched, in order.
+    fetches: Vec<String>,
 }
 
 fn root_n(r: Root) -> u8 {
@@ -70,6 +72,7 @@ impl Fake {
             inno_registers: false,
             pending: None,
             sleeps: 0,
+            fetches: Vec::new(),
         };
         for d in
             ["C:", "C:\\gala", "C:\\Users", "C:\\Users\\gala", "C:\\Users\\gala\\AppData", LOCAL]
@@ -307,6 +310,49 @@ impl Host for Fake {
         Ok(())
     }
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, HostError> {
+        self.fetches.push(url.into());
+        // GitHub's REST API (directory listings, its JSON shape) and raw
+        // files, answered from pk_install_test's snapshot as if it were
+        // microsoft/winget-pkgs at master.
+        if let Some(rest) =
+            url.strip_prefix("https://api.github.com/repos/microsoft/winget-pkgs/contents/")
+        {
+            let path = rest.strip_suffix("?ref=master").ok_or(HostError { code: 12 })?;
+            let dir =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../pk_install_test/source").join(path);
+            return listing(&dir, |name, is_dir| {
+                format!(
+                    "{{\"name\": \"{name}\", \"path\": \"{path}/{name}\", \"sha\": \"0\", \"size\": 0, \"type\": \"{}\", \"_links\": {{\"self\": \"x\"}}}}",
+                    if is_dir { "dir" } else { "file" }
+                )
+            });
+        }
+        if let Some(path) =
+            url.strip_prefix("https://raw.githubusercontent.com/microsoft/winget-pkgs/master/")
+        {
+            let file =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../pk_install_test/source").join(path);
+            return std::fs::read(file).map_err(|_| HostError { code: HTTP_STATUS_ERROR | 404 });
+        }
+        // Nginx's winget-pkgs tree (autoindex_format json) and a listing
+        // that is not JSON.
+        if let Some(path) = url.strip_prefix("https://localhost:8443/winget-pkgs/") {
+            let local = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../pk_install_test/served/winget-pkgs")
+                .join(path.trim_end_matches('/'));
+            if path.ends_with('/') || path.is_empty() {
+                return listing(&local, |name, is_dir| {
+                    format!(
+                        "{{ \"name\":\"{name}\", \"type\":\"{}\", \"mtime\":\"Tue, 03 Nov 2026 00:00:00 GMT\" }}",
+                        if is_dir { "directory" } else { "file" }
+                    )
+                });
+            }
+            return std::fs::read(local).map_err(|_| HostError { code: HTTP_STATUS_ERROR | 404 });
+        }
+        if url.starts_with("https://localhost:8443/html-index/") {
+            return Ok(b"<html><body>Index of /</body></html>".to_vec());
+        }
         // What schannel_test's Nginx serves to pk_install_https (the
         // redirect is winhttp's, not seen here); 8444's certificate is
         // untrusted; another host is not reachable from the tests.
@@ -365,7 +411,11 @@ impl Host for Fake {
             return Ok(0);
         }
         if name == "innosetup-2.0.exe" {
-            assert!(args.contains("/VERYSILENT") && args.contains("/SUPPRESSMSGBOXES"), "{args}");
+            assert!(
+                (args.contains("/VERYSILENT") || args.contains("/SILENT"))
+                    && args.contains("/SUPPRESSMSGBOXES"),
+                "{args}"
+            );
             if !self.inno_registers {
                 return Ok(0);
             }
@@ -416,6 +466,22 @@ impl Host for Fake {
     }
 }
 
+/// A JSON directory listing of a host directory, each entry made by
+/// `entry(name, is_dir)`; 404 when there is no such directory.
+fn listing(dir: &Path, entry: impl Fn(&str, bool) -> String) -> Result<Vec<u8>, HostError> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Err(HostError { code: HTTP_STATUS_ERROR | 404 });
+    };
+    let mut items: Vec<String> = rd
+        .map(|e| {
+            let e = e.unwrap();
+            entry(&e.file_name().into_string().unwrap(), e.file_type().unwrap().is_dir())
+        })
+        .collect();
+    items.sort();
+    Ok(format!("[\n{}\n]", items.join(",\n")).into_bytes())
+}
+
 /// A command line's program (unquoted) and the rest.
 fn split_command(line: &str) -> (String, &str) {
     if let Some(rest) = line.strip_prefix('"') {
@@ -460,7 +526,20 @@ fn source() -> Source {
 }
 
 fn install_id(f: &mut Fake, id: &str, version: Option<&str>) -> Result<Outcome, Error> {
-    install(f, &source(), &Request { id, version, source_location: SRC, location: None })
+    install_with(f, id, version, Options::default())
+}
+
+fn install_with(
+    f: &mut Fake,
+    id: &str,
+    version: Option<&str>,
+    options: Options,
+) -> Result<Outcome, Error> {
+    install(f, &source(), &Request { id, version, source_location: SRC, location: None, options })
+}
+
+fn upgrade_id(f: &mut Fake, what: &str) -> Result<Outcome, Error> {
+    upgrade(f, None, what, None, &Options::default())
 }
 
 const KEY: &str = "GalaTest.PkHello_Microsoft.Winget.Source_8wekyb3d8bbwe";
@@ -499,7 +578,6 @@ fn source_versions_and_search() {
     assert_eq!(hits[0].version, "1.1.0");
     let hits = s.search(&mut f, "galatest.pkhello").unwrap();
     assert_eq!(hits[0].id, "GalaTest.PkHello");
-    assert!(Source::open("https://github.com/microsoft/winget-pkgs").is_err());
 }
 
 #[test]
@@ -515,9 +593,15 @@ fn every_test_package_manifest_parses() {
         ("GalaTest.Msix", "1.0.0"),
         ("GalaTest.PkNsis", "1.0.0"),
         ("GalaTest.PkNsis", "1.1.0"),
+        ("GalaTest.PkLib", "1.0.0"),
+        ("GalaTest.PkDep", "1.0.0"),
+        ("GalaTest.PkDepMissing", "1.0.0"),
+        ("GalaTest.PkScoped", "1.0.0"),
+        ("GalaTest.PkScoped", "1.1.0"),
         ("jqlang.jq", "1.8.2"),
     ] {
-        s.manifest(&mut f, id, v).unwrap_or_else(|e| panic!("{id} {v}: {e}"));
+        let m = s.manifest(&mut f, id, v).unwrap_or_else(|e| panic!("{id} {v}: {e}"));
+        assert!(m.warnings.is_empty(), "{id} {v}: {:?}", m.warnings);
     }
 }
 
@@ -533,6 +617,7 @@ fn install_list_run_uninstall() {
             version: "1.0.0".into(),
             commands: vec!["pkhello".into()],
             location: pkg_dir(),
+            dependencies: vec![],
         }
     );
     let hello =
@@ -616,7 +701,7 @@ fn upgrade_replaces_the_old_version() {
     let ups = upgrades(&mut f, None, None).unwrap();
     assert_eq!(ups.len(), 1);
     assert_eq!(ups[0].available, "1.1.0");
-    let out = upgrade(&mut f, None, "GalaTest.PkHello", None).unwrap();
+    let out = upgrade_id(&mut f, "GalaTest.PkHello").unwrap();
     assert_eq!(
         out,
         Outcome::Upgraded {
@@ -645,7 +730,7 @@ fn upgrade_replaces_the_old_version() {
         Some(RegValue::ExpandSz(links()))
     );
     assert_eq!(
-        upgrade(&mut f, None, "GalaTest.PkHello", None).unwrap(),
+        upgrade_id(&mut f, "GalaTest.PkHello").unwrap(),
         Outcome::UpToDate { id: "GalaTest.PkHello".into(), version: "1.1.0".into() }
     );
     assert!(upgrades(&mut f, None, None).unwrap().is_empty());
@@ -737,63 +822,58 @@ fn a_failure_at_any_step_rolls_back() {
     let setup = |f: &mut Fake| {
         install_id(f, "GalaTest.PkHello", Some("1.0.0")).unwrap();
     };
-    fail_each_step(setup, |f| upgrade(f, None, "GalaTest.PkHello", None));
+    fail_each_step(setup, |f| upgrade_id(f, "GalaTest.PkHello"));
     fail_each_step(setup, |f| uninstall(f, "GalaTest.PkHello"));
+}
+
+/// One installer (YAML of an `Installers` entry, indented by two) of a
+/// singleton manifest, read by the winget reader.
+fn installer_of(entry: &str) -> crate::winget::Installer {
+    let text = format!(
+        "PackageIdentifier: A.B\nPackageVersion: 1.0\nPackageLocale: en-US\nPublisher: P\nPackageName: N\nLicense: MIT\nShortDescription: d\nManifestType: singleton\nManifestVersion: 1.10.0\nInstallerSha256: {}\nInstallers:\n{entry}",
+        "0".repeat(64)
+    );
+    crate::winget::Package::from_texts(&[&text]).unwrap().installers.remove(0)
 }
 
 #[test]
 fn plans() {
-    let portable = Installer {
-        architecture: "x64".into(),
-        installer_type: "portable".into(),
-        nested_installer_type: None,
-        nested_files: vec![],
-        url: "https://h/jq-windows-amd64.exe".into(),
-        sha256: "0".repeat(64),
-        scope: None,
-        commands: vec![],
-        switches: vec![],
-        product_code: None,
-        archive_binaries_depend_on_path: false,
-    };
+    let portable = installer_of(
+        "- Architecture: x64\n  InstallerType: portable\n  InstallerUrl: https://h/jq-windows-amd64.exe\n",
+    );
     let p = plan(&portable, b"MZ").unwrap();
     assert_eq!(p.files[0].0, "jq-windows-amd64.exe");
     assert_eq!(
         p.commands,
         vec![Command { alias: "jq-windows-amd64".into(), target: "jq-windows-amd64.exe".into() }]
     );
-    let named = Installer { commands: vec!["jq".into()], ..portable.clone() };
+    let named = installer_of(
+        "- Architecture: x64\n  InstallerType: portable\n  InstallerUrl: https://h/jq-windows-amd64.exe\n  Commands: [jq]\n",
+    );
     let p = plan(&named, b"MZ").unwrap();
     assert_eq!(p.files[0].0, "jq.exe");
     assert_eq!(p.commands[0].alias, "jq");
-    let gala = Installer { commands: vec!["gala".into()], ..portable.clone() };
+    let gala = installer_of(
+        "- Architecture: x64\n  InstallerType: portable\n  InstallerUrl: https://h/g.exe\n  Commands: [gala]\n",
+    );
     assert!(plan(&gala, b"MZ").is_err());
     // A zip with a path out of the package directory.
     let evil = crate::zip::writer::build(&[("../evil.exe", b"MZ")], true);
-    let z = Installer {
-        installer_type: "zip".into(),
-        nested_installer_type: Some("portable".into()),
-        nested_files: vec![crate::manifest::NestedFile {
-            relative_path: "evil.exe".into(),
-            alias: None,
-        }],
-        ..portable.clone()
-    };
+    let z = installer_of(
+        "- Architecture: x64\n  InstallerType: zip\n  NestedInstallerType: portable\n  NestedInstallerFiles:\n  - RelativeFilePath: evil.exe\n  InstallerUrl: https://h/z.zip\n",
+    );
     assert!(plan(&z, &evil).unwrap_err().message.contains("unsafe path"));
     let ok = crate::zip::writer::build(&[("a/b/tool.exe", b"MZ"), ("c.txt", b"c")], true);
-    let z = Installer {
-        nested_files: vec![crate::manifest::NestedFile {
-            relative_path: "a\\b\\TOOL.exe".into(),
-            alias: None,
-        }],
-        archive_binaries_depend_on_path: true,
-        ..z
-    };
+    let z = installer_of(
+        "- Architecture: x64\n  InstallerType: zip\n  NestedInstallerType: portable\n  NestedInstallerFiles:\n  - RelativeFilePath: a\\b\\TOOL.exe\n  ArchiveBinariesDependOnPath: true\n  InstallerUrl: https://h/z.zip\n",
+    );
     let p = plan(&z, &ok).unwrap();
     assert_eq!(p.dirs, vec!["a".to_string(), "a\\b".to_string()]);
     assert_eq!(p.commands, vec![Command { alias: "TOOL".into(), target: "a\\b\\tool.exe".into() }]);
     assert!(p.dir_on_path);
-    let msi = Installer { installer_type: "msi".into(), ..portable };
+    let msi = installer_of(
+        "- Architecture: x64\n  InstallerType: msi\n  InstallerUrl: https://h/x.msi\n",
+    );
     assert_eq!(plan(&msi, b"").unwrap_err().kind, Kind::Unsupported);
 }
 
@@ -818,6 +898,7 @@ fn nsis_install_upgrade_uninstall() {
             version: "1.0.0".into(),
             commands: vec![],
             location: dir.clone(),
+            dependencies: vec![],
         }
     );
     // Run as winget runs NSIS: the staged installer with /S.
@@ -853,7 +934,7 @@ fn nsis_install_upgrade_uninstall() {
     ));
     assert_eq!(f.runs.len(), 1);
     // Upgrade: the new installer over the old one; the same entry.
-    let out = upgrade(&mut f, None, "GalaTest.PkNsis", None).unwrap();
+    let out = upgrade_id(&mut f, "GalaTest.PkNsis").unwrap();
     assert_eq!(
         out,
         Outcome::Upgraded {
@@ -889,6 +970,7 @@ fn nsis_install_location() {
         version: None,
         source_location: SRC,
         location: Some("C:\\Apps\\Pk Nsis"),
+        options: Options::default(),
     };
     let out = install(&mut f, &source(), &req).unwrap();
     assert!(matches!(&out, Outcome::Installed { location, .. } if location == "C:\\Apps\\Pk Nsis"));
@@ -896,7 +978,7 @@ fn nsis_install_location() {
     assert!(f.runs[0].ends_with("\" /S /D=C:\\Apps\\Pk Nsis"), "{}", f.runs[0]);
     assert!(f.file("C:\\Apps\\Pk Nsis\\pknsis.exe").is_some());
     // A zip package has no location to choose.
-    let req = Request { id: "GalaTest.PkHello", ..req };
+    let req = Request { id: "GalaTest.PkHello", options: Options::default(), ..req };
     assert_eq!(install(&mut f, &source(), &req).unwrap_err().kind, Kind::Usage);
 }
 
@@ -912,7 +994,7 @@ fn inno_install_and_uninstall() {
     assert_eq!(
         f.runs[0],
         format!(
-            "\"{staged}\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=\"{LOCAL}\\gala\\logs\\GalaTest.InnoSetup-2.0.setup.log\""
+            "\"{staged}\" /SP- /SILENT /SUPPRESSMSGBOXES /NORESTART /LOG=\"{LOCAL}\\gala\\logs\\GalaTest.InnoSetup-2.0.setup.log\""
         )
     );
     let k = format!("{UNINSTALL_KEY}\\{{8E2A0D4C-GALA}}_is1");
@@ -971,46 +1053,71 @@ fn program_install_failures() {
 
 #[test]
 fn switches() {
-    let nsis = Installer {
-        architecture: "x64".into(),
-        installer_type: "nullsoft".into(),
-        nested_installer_type: None,
-        nested_files: vec![],
-        url: "https://h/setup.exe".into(),
-        sha256: "0".repeat(64),
-        scope: None,
-        commands: vec![],
-        switches: vec![],
-        product_code: None,
-        archive_binaries_depend_on_path: false,
-    };
-    assert_eq!(
-        exe::install_command(&nsis, "C:\\t\\s.exe", Some("L"), None).unwrap(),
-        "\"C:\\t\\s.exe\" /S"
+    use crate::winget::select::{CommandOptions, Mode};
+    let silent = CommandOptions { mode: Mode::Silent, ..CommandOptions::default() };
+    let nsis = installer_of(
+        "- Architecture: x64\n  InstallerType: nullsoft\n  InstallerUrl: https://h/setup.exe\n",
     );
-    // The manifest's switches: Silent replaces, Custom is added.
-    let custom = Installer {
-        switches: vec![("Silent".into(), "/S /quiet".into()), ("Custom".into(), "/X=1".into())],
-        ..nsis.clone()
+    // winget's default mode is silent with progress (its documentation:
+    // "--silent ... The default experience shows installer progress");
+    // NSIS has one silent switch for both.
+    let opts = CommandOptions { log: Some("L".into()), ..CommandOptions::default() };
+    assert_eq!(exe::install_command(&nsis, "C:\\t\\s.exe", &opts).unwrap(), "\"C:\\t\\s.exe\" /S");
+    // The manifest's switches replace the type's one by one: Silent is
+    // the --silent mode's; Custom is added; /D= last.
+    let custom = installer_of(
+        "- Architecture: x64\n  InstallerType: nullsoft\n  InstallerUrl: https://h/setup.exe\n  InstallerSwitches:\n    Silent: /S /quiet\n    Custom: /X=1\n",
+    );
+    let at = |mode: Mode, dir: &str| CommandOptions {
+        mode,
+        location: Some(dir.into()),
+        ..CommandOptions::default()
     };
     assert_eq!(
-        exe::install_command(&custom, "s.exe", None, Some("D:\\p")).unwrap(),
+        exe::install_command(&custom, "s.exe", &at(Mode::SilentWithProgress, "D:\\p")).unwrap(),
+        "\"s.exe\" /S /X=1 /D=D:\\p"
+    );
+    assert_eq!(
+        exe::install_command(&custom, "s.exe", &at(Mode::Silent, "D:\\p")).unwrap(),
         "\"s.exe\" /S /quiet /X=1 /D=D:\\p"
     );
-    let inno = Installer { installer_type: "inno".into(), ..nsis.clone() };
+    // Inno Setup: /SILENT shows progress, /VERYSILENT nothing.
+    let inno = installer_of(
+        "- Architecture: x64\n  InstallerType: inno\n  InstallerUrl: https://h/setup.exe\n",
+    );
     assert_eq!(
-        exe::install_command(&inno, "s.exe", None, Some("D:\\p q")).unwrap(),
+        exe::install_command(&inno, "s.exe", &at(Mode::SilentWithProgress, "D:\\p q")).unwrap(),
+        "\"s.exe\" /SP- /SILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"D:\\p q\""
+    );
+    assert_eq!(
+        exe::install_command(&inno, "s.exe", &at(Mode::Silent, "D:\\p q")).unwrap(),
         "\"s.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"D:\\p q\""
     );
-    // A plain exe needs the manifest's Silent switch.
-    let exe_plain = Installer { installer_type: "exe".into(), ..nsis.clone() };
+    // A plain exe needs the manifest's Silent or SilentWithProgress,
+    // unless run interactively.
+    let exe_plain = installer_of(
+        "- Architecture: x64\n  InstallerType: exe\n  InstallerUrl: https://h/setup.exe\n",
+    );
     assert_eq!(
-        exe::install_command(&exe_plain, "s.exe", None, None).unwrap_err().kind,
+        exe::install_command(&exe_plain, "s.exe", &silent).unwrap_err().kind,
         Kind::Unsupported
     );
-    let exe_silent = Installer { switches: vec![("Silent".into(), "-q".into())], ..exe_plain };
-    assert_eq!(exe::install_command(&exe_silent, "s.exe", None, None).unwrap(), "\"s.exe\" -q");
-    assert!(exe::install_command(&exe_silent, "s.exe", None, Some("D:\\")).is_err());
+    let interactive = CommandOptions { mode: Mode::Interactive, ..CommandOptions::default() };
+    assert_eq!(exe::install_command(&exe_plain, "s.exe", &interactive).unwrap(), "\"s.exe\"");
+    let exe_silent = installer_of(
+        "- Architecture: x64\n  InstallerType: exe\n  InstallerUrl: https://h/setup.exe\n  InstallerSwitches:\n    Silent: -q\n",
+    );
+    assert_eq!(
+        exe::install_command(&exe_silent, "s.exe", &CommandOptions::default()).unwrap(),
+        "\"s.exe\" -q"
+    );
+    assert_eq!(
+        exe::install_command(&exe_silent, "s.exe", &at(Mode::Silent, "D:\\")).unwrap_err().kind,
+        Kind::Unsupported
+    );
+    // --override replaces everything.
+    let o = CommandOptions { override_args: Some("/x /y".into()), ..CommandOptions::default() };
+    assert_eq!(exe::install_command(&exe_plain, "s.exe", &o).unwrap(), "\"s.exe\" /x /y");
     // Uninstall commands.
     assert_eq!(
         exe::uninstall_command("inno", None, Some("\"C:\\a\\unins000.exe\"")).unwrap(),
@@ -1027,4 +1134,360 @@ fn switches() {
         exe::uninstall_command("exe", None, Some("u.exe")).unwrap_err().kind,
         Kind::Unsupported
     );
+}
+
+// ---- The winget resolver on the install path ---------------------------
+//
+// Expected results are winget's documented behaviour (learn.microsoft.com
+// "install command (winget)", "upgrade command", "list command", the
+// manifest schema's Dependencies and Scope), as galapkg::winget
+// implements it; see ARCHITECTURE "The winget resolver".
+
+fn log_has(f: &Fake, what: &str) -> bool {
+    f.log.iter().any(|l| l.contains(what))
+}
+
+fn log_pos(f: &Fake, what: &str) -> usize {
+    f.log.iter().position(|l| l.contains(what)).unwrap_or_else(|| panic!("{what}: {:#?}", f.log))
+}
+
+fn arp_of(id: &str) -> String {
+    format!("{UNINSTALL_KEY}\\{}", install_key(id))
+}
+
+#[test]
+fn the_selection_is_logged() {
+    let mut f = Fake::new();
+    install_id(&mut f, "GalaTest.PkHello", None).unwrap();
+    // 1.1.0 lists an x86 installer first: on x64 winget takes x64.
+    assert!(
+        log_has(
+            &f,
+            "selected installer=2 type=zip nested=portable arch=x64 scope=- locale=- url=https://packages.gala.invalid/pkhello-1.1.0.zip"
+        ),
+        "{:#?}",
+        f.log
+    );
+    assert!(log_has(&f, "runner-up installer=1 arch=x86"), "{:#?}", f.log);
+    assert!(log_has(
+        &f,
+        "manifest id=GalaTest.PkHello version=1.1.0 manifest_version=1.12.0 form=multi-file"
+    ));
+}
+
+#[test]
+fn dependencies_are_installed_first() {
+    let mut f = Fake::new();
+    let out = install_id(&mut f, "GalaTest.PkDep", None).unwrap();
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            id: "GalaTest.PkDep".into(),
+            version: "1.0.0".into(),
+            commands: vec!["pkdep".into()],
+            location: format!(
+                "{LOCAL}\\Microsoft\\WinGet\\Packages\\{}",
+                install_key("GalaTest.PkDep")
+            ),
+            dependencies: vec!["GalaTest.PkLib 1.0.0".into()],
+        }
+    );
+    assert!(log_has(&f, "plan install GalaTest.PkLib 1.0.0 installer 1 (for GalaTest.PkDep)"));
+    assert!(log_has(&f, "plan install GalaTest.PkDep 1.0.0 installer 1"));
+    assert!(
+        log_pos(&f, "installed id=GalaTest.PkLib") < log_pos(&f, "installed id=GalaTest.PkDep")
+    );
+    for id in ["GalaTest.PkLib", "GalaTest.PkDep"] {
+        assert_eq!(
+            f.value(Root::CurrentUser, &arp_of(id), "WinGetPackageIdentifier"),
+            Some(RegValue::Sz(id.into()))
+        );
+    }
+    assert!(f.file(&format!("{}\\pklib.shim", links())).is_some());
+    // Again: already installed; nothing planned.
+    assert!(matches!(
+        install_id(&mut f, "GalaTest.PkDep", None).unwrap(),
+        Outcome::AlreadyInstalled { .. }
+    ));
+    // Uninstalling the dependant leaves the dependency (winget does not
+    // remove dependencies).
+    uninstall(&mut f, "GalaTest.PkDep").unwrap();
+    assert!(f.reg_key_exists(Root::CurrentUser, &arp_of("GalaTest.PkLib")));
+    // Installed again: the dependency is there at its MinimumVersion, so
+    // it is satisfied and not installed again.
+    f.log.clear();
+    let out = install_id(&mut f, "GalaTest.PkDep", None).unwrap();
+    assert!(matches!(&out, Outcome::Installed { dependencies, .. } if dependencies.is_empty()));
+    assert!(
+        log_has(&f, "plan installed GalaTest.PkLib 1.0.0 (for GalaTest.PkDep)"),
+        "{:#?}",
+        f.log
+    );
+    assert!(!log_has(&f, "installed id=GalaTest.PkLib"));
+    // --skip-dependencies.
+    let mut f = Fake::new();
+    let skip = Options { skip_dependencies: true, ..Options::default() };
+    install_with(&mut f, "GalaTest.PkDep", None, skip).unwrap();
+    assert!(!f.reg_key_exists(Root::CurrentUser, &arp_of("GalaTest.PkLib")));
+    assert!(log_has(&f, "dependencies skipped (--skip-dependencies)"));
+}
+
+#[test]
+fn a_missing_dependency_changes_nothing() {
+    let mut f = Fake::new();
+    let before = f.m.clone();
+    let e = install_id(&mut f, "GalaTest.PkDepMissing", None).unwrap_err();
+    assert_eq!(e.kind, Kind::NotFound);
+    assert!(
+        e.message.contains(
+            "GalaTest.PkDepMissing needs GalaTest.NoSuchLib, which the source does not have"
+        ),
+        "{}",
+        e.message
+    );
+    assert!(f.m == before, "{}", diff(&f.m, &before));
+}
+
+#[test]
+fn a_failed_dependant_keeps_its_installed_dependencies() {
+    // winget installs each dependency as an install of its own: when the
+    // package itself then fails, the dependencies stay installed; the
+    // package's own transaction is rolled back.
+    let mut f = Fake::new();
+    // PkDep's command taken by something else.
+    install_id(&mut f, "GalaTest.PkHello", None).unwrap();
+    f.m.files.insert(
+        lc(&format!("{}\\pkdep.exe", links())),
+        (format!("{}\\pkdep.exe", links()), Some(b"MZ other".to_vec())),
+    );
+    let e = install_id(&mut f, "GalaTest.PkDep", None).unwrap_err();
+    assert_eq!(e.kind, Kind::Failed);
+    assert!(e.message.contains("pkdep exists already") && e.message.contains("rolled back"));
+    assert!(f.reg_key_exists(Root::CurrentUser, &arp_of("GalaTest.PkLib")));
+    assert!(!f.reg_key_exists(Root::CurrentUser, &arp_of("GalaTest.PkDep")));
+}
+
+#[test]
+fn scope_is_required_and_kept_on_upgrade() {
+    use crate::winget::Scope;
+    let user = Options { scope: Some(Scope::User), ..Options::default() };
+    let machine = Options { scope: Some(Scope::Machine), ..Options::default() };
+    // --scope user: the user installer, though the machine one is first.
+    let mut f = Fake::new();
+    install_with(&mut f, "GalaTest.PkScoped", Some("1.0.0"), user.clone()).unwrap();
+    assert!(log_has(
+        &f,
+        "scope=user locale=- url=https://packages.gala.invalid/pkscoped-1.0.0-user.zip"
+    ));
+    // --scope is a requirement: the machine installer is rejected.
+    assert!(log_has(&f, "rejected installer=1 scope machine (asked for user)"), "{:#?}", f.log);
+    // The upgrade keeps the installed (user) scope: winget would
+    // otherwise take the machine installer, listed first.
+    f.log.clear();
+    let out = upgrade_id(&mut f, "GalaTest.PkScoped").unwrap();
+    assert!(matches!(out, Outcome::Upgraded { .. }), "{out:?}");
+    assert!(log_has(&f, "installed scope=user type=portable"), "{:#?}", f.log);
+    assert!(
+        log_has(&f, "url=https://packages.gala.invalid/pkscoped-1.1.0-user.zip"),
+        "{:#?}",
+        f.log
+    );
+    // --scope machine: winget's machine-wide portable layout (Program
+    // Files, HKLM) is not built: refused before any change.
+    let mut f = Fake::new();
+    let before = f.m.clone();
+    let e = install_with(&mut f, "GalaTest.PkScoped", None, machine).unwrap_err();
+    assert_eq!(e.kind, Kind::Unsupported);
+    assert!(e.message.contains("machine scope"), "{}", e.message);
+    assert_eq!(f.missing, vec!["gala.exe!install(machine scope portable)".to_string()]);
+    assert!(f.m == before);
+    // No scope asked: winget's order (no preference: the manifest's), the
+    // machine installer, refused the same way.
+    let e = install_id(&mut f, "GalaTest.PkScoped", None).unwrap_err();
+    assert_eq!(e.kind, Kind::Unsupported);
+    // A scope no installer has.
+    let only_user = Options { scope: Some(Scope::Machine), ..Options::default() };
+    let e = install_with(&mut f, "GalaTest.PkHello", None, only_user).unwrap_err();
+    assert_eq!(e.kind, Kind::Unsupported);
+    let _ = user;
+}
+
+#[test]
+fn no_applicable_installer_says_why() {
+    use crate::winget::Architecture;
+    let mut f = Fake::new();
+    let arm = Options { architecture: Some(Architecture::Arm64), ..Options::default() };
+    let e = install_with(&mut f, "GalaTest.PkHello", None, arm).unwrap_err();
+    assert_eq!(e.kind, Kind::NotFound);
+    assert!(e.message.contains("no applicable installer"), "{}", e.message);
+    assert!(e.message.contains("architecture x64 was not asked for"), "{}", e.message);
+    assert!(log_has(&f, "rejected installer=2 architecture x64 was not asked for"), "{:#?}", f.log);
+}
+
+#[test]
+fn a_type_gala_cannot_install_falls_back_with_a_ledger_line() {
+    // MSIX and MSI are later stages: where a manifest also has an
+    // installer gala can use, that one is used (and the gap recorded).
+    let mut f = Fake::new();
+    let e = install_id(&mut f, "GalaTest.Msix", None).unwrap_err();
+    assert_eq!(e.kind, Kind::Unsupported);
+    assert!(e.message.contains("msix"), "{}", e.message);
+    assert_eq!(f.missing, vec!["gala.exe!install(InstallerType msix)".to_string()]);
+}
+
+#[test]
+fn list_and_upgrade_match_programs_installed_without_gala() {
+    // PkNsis 1.0.0 installed by running its installer directly (not
+    // through gala): its uninstall entry has no WinGet tags. winget list
+    // and upgrade match it to the source's package by its name and
+    // publisher (ARCHITECTURE "The winget resolver", arp).
+    let mut f = Fake::new();
+    f.run("\"C:\\pk_source\\installers\\pknsis-1.0.0.exe\" /S", 1000).unwrap();
+    let s = source();
+    let listed = list(&mut f, None);
+    let nsis = listed.iter().find(|l| l.installed.key == NSIS_KEY).unwrap();
+    assert_eq!(nsis.id, None);
+    let listed = list(&mut f, Some(&s));
+    let nsis = listed.iter().find(|l| l.installed.key == NSIS_KEY).unwrap();
+    assert_eq!(nsis.id.as_deref(), Some("GalaTest.PkNsis"));
+    assert_eq!(nsis.installed.version, "1.0.0");
+    assert_eq!(nsis.available.as_deref(), Some("1.1.0"));
+    // The MSI matches nothing.
+    let msi = listed.iter().find(|l| l.installed.name == "Some MSI").unwrap();
+    assert_eq!((msi.id.as_deref(), msi.available.as_deref()), (None, None));
+    let ups = upgrades(&mut f, Some(&s), None).unwrap();
+    assert_eq!(ups.len(), 1);
+    assert_eq!(ups[0].available, "1.1.0");
+    assert_eq!(ups[0].installed.id.as_deref(), Some("GalaTest.PkNsis"));
+    // Upgraded: 1.1.0's installer over it, the entry then tagged.
+    let out = upgrade(&mut f, Some(&s), "GalaTest.PkNsis", None, &Options::default()).unwrap();
+    assert_eq!(
+        out,
+        Outcome::Upgraded {
+            id: "GalaTest.PkNsis".into(),
+            from: "1.0.0".into(),
+            to: "1.1.0".into()
+        }
+    );
+    assert!(log_has(&f, "matched key=GalaTest.PkNsis by=NameAndPublisher"), "{:#?}", f.log);
+    assert_eq!(
+        f.value(Root::CurrentUser, &nsis_arp(), "WinGetPackageIdentifier"),
+        Some(RegValue::Sz("GalaTest.PkNsis".into()))
+    );
+    // Without a source, an untagged entry cannot be upgraded by name.
+    let mut f = Fake::new();
+    f.run("\"C:\\pk_source\\installers\\pknsis-1.0.0.exe\" /S", 1000).unwrap();
+    assert!(upgrade_id(&mut f, "GalaTest.PkNsis").is_err());
+}
+
+// ---- Sources over HTTP(S) ---------------------------------------------
+
+#[test]
+fn source_locations() {
+    use crate::source::Location;
+    let gh = |owner: &str, repo: &str, branch: &str| Location::GitHub {
+        owner: owner.into(),
+        repo: repo.into(),
+        branch: branch.into(),
+    };
+    for (given, want) in [
+        ("https://github.com/microsoft/winget-pkgs", gh("microsoft", "winget-pkgs", "master")),
+        ("https://GitHub.com/microsoft/winget-pkgs/", gh("microsoft", "winget-pkgs", "master")),
+        ("https://github.com/me/pkgs.git", gh("me", "pkgs", "master")),
+        ("https://github.com/me/pkgs/tree/main", gh("me", "pkgs", "main")),
+        (
+            "https://localhost:8443/winget-pkgs/",
+            Location::Http("https://localhost:8443/winget-pkgs".into()),
+        ),
+        ("http://mirror/x", Location::Http("http://mirror/x".into())),
+        ("C:\\pk_source\\", Location::Dir("C:\\pk_source".into())),
+        ("C:/pk_source", Location::Dir("C:\\pk_source".into())),
+    ] {
+        assert_eq!(Source::open(given).unwrap().location, want, "{given}");
+    }
+    for bad in ["https://github.com/microsoft", "https://github.com/a/b/blob/x", "https://h/x?y=1"]
+    {
+        assert_eq!(Source::open(bad).unwrap_err().kind, Kind::Usage, "{bad}");
+    }
+    assert_eq!(
+        Source::open(crate::source::DEFAULT_SOURCE).unwrap().location,
+        gh("microsoft", "winget-pkgs", "master")
+    );
+}
+
+#[test]
+fn a_github_source_reads_through_the_contents_api_and_raw_files() {
+    let mut f = Fake::new();
+    let s = Source::open("https://github.com/microsoft/winget-pkgs").unwrap();
+    assert_eq!(
+        s.versions(&mut f, "GalaTest.PkHello").unwrap(),
+        vec!["1.1.0".to_string(), "1.0.0".to_string()]
+    );
+    assert_eq!(
+        f.fetches[0],
+        "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/GalaTest/PkHello?ref=master"
+    );
+    // ripgrep's directory holds the MSVC package, not versions.
+    assert_eq!(s.versions(&mut f, "BurntSushi.ripgrep").unwrap_err().kind, Kind::NotFound);
+    assert_eq!(s.versions(&mut f, "No.Such").unwrap_err().kind, Kind::NotFound);
+    f.fetches.clear();
+    let p = s.find(&mut f, "GalaTest.PkHello", Some("1.1")).unwrap();
+    assert_eq!(p.version, "1.1.0");
+    assert!(f.fetches.iter().any(|u| u
+        == "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/g/GalaTest/PkHello/1.1.0/GalaTest.PkHello.installer.yaml"));
+    // Installed from it: the installer is downloaded (no mirror over
+    // HTTP), the source's URL kept for upgrade.
+    let req = Request {
+        id: "GalaTest.PkHttps",
+        version: None,
+        source_location: &s.root,
+        location: None,
+        options: Options::default(),
+    };
+    install(&mut f, &s, &req).unwrap();
+    assert!(log_has(
+        &f,
+        "source list url=https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/GalaTest/PkHttps?ref=master"
+    ));
+    assert!(log_has(&f, "source read url=https://raw.githubusercontent.com/"));
+    assert_eq!(
+        f.value(Root::CurrentUser, &arp_of("GalaTest.PkHttps"), "GalaSource"),
+        Some(RegValue::Sz("https://github.com/microsoft/winget-pkgs".into()))
+    );
+    // `gala upgrade` reads that source again: nothing newer.
+    assert_eq!(upgrades(&mut f, None, None).unwrap(), vec![]);
+    // Searching GitHub needs winget's index.
+    assert_eq!(s.search(&mut f, "hello").unwrap_err().kind, Kind::Unsupported);
+    // No installers\ mirror over HTTP: PkLib's URL (packages.gala.invalid)
+    // is fetched, which this host cannot.
+    let req = Request { id: "GalaTest.PkLib", ..req };
+    assert_eq!(install(&mut f, &s, &req).unwrap_err().kind, Kind::Unsupported);
+}
+
+#[test]
+fn a_tree_served_over_https() {
+    let mut f = Fake::new();
+    let s = Source::open("https://localhost:8443/winget-pkgs").unwrap();
+    assert_eq!(s.versions(&mut f, "GalaTest.PkHttps").unwrap(), vec!["1.0.0".to_string()]);
+    assert_eq!(f.fetches[0], "https://localhost:8443/winget-pkgs/manifests/g/GalaTest/PkHttps/");
+    let hits = s.search(&mut f, "pkhttps").unwrap();
+    assert_eq!(hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), vec!["GalaTest.PkHttps"]);
+    let req = Request {
+        id: "GalaTest.PkHttps",
+        version: None,
+        source_location: &s.root,
+        location: None,
+        options: Options::default(),
+    };
+    install(&mut f, &s, &req).unwrap();
+    // A listing that is not JSON fails with what was read.
+    let bad = Source::open("https://localhost:8443/html-index").unwrap();
+    let e = bad.versions(&mut f, "GalaTest.PkHttps").unwrap_err();
+    assert_eq!(e.kind, Kind::Failed);
+    assert!(
+        e.message.contains("https://localhost:8443/html-index/manifests/g/GalaTest/PkHttps/"),
+        "{}",
+        e.message
+    );
+    assert!(log_has(&f, "error source list JSON at byte 0: not a JSON value"), "{:#?}", f.log);
 }

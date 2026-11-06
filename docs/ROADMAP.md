@@ -75,13 +75,13 @@ In order:
    trust decision, is done).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
-4. **RS**: step B3a's next part (the console switch, the window state
-   apart from the compositor in the server kernel).
+4. **RS**: step B3a's next part (the window state apart from the
+   compositor in the server kernel).
 5. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's leftovers (what is not charged yet), R8's Secure
    Boot.
-6. **PK**: `gala install`/`list`/`upgrade` on the winget resolver;
-   manifests over HTTPS (step 2's rest); a real Inno Setup installer.
+6. **PK**: winget's source index (step 2's rest); machine-scope portable
+   installs; a real Inno Setup installer.
 7. **BR** stage 1's rest (the profile's hotspots).
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
@@ -168,7 +168,7 @@ has a section under "Open items".
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
-| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations and first presenters done; the console switch next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters and console switch done; the window state in the server kernel next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
@@ -187,7 +187,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
-| PK | `gala install` over winget manifests | in progress | zip/portable and NSIS installs; MSI, MSIX and winget readers |
+| PK | `gala install` over winget manifests | in progress | zip/portable and NSIS installs on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -793,16 +793,26 @@ own session and shell.
   a headless desktop, whose frame xtask's screen checks read with QEMU's
   `memsave` (gui_test's screen check on a BIOS boot,
   `gui_test_headless`).
+- B3a, the console switch (`desktop::switch_console`, `gala attach
+  <session>`, GalaSession): the screen and the PS/2 keyboard and mouse
+  move to another session's desktop, the one shown before goes to none
+  and keeps its windows, KUSER_SHARED_DATA's ActiveConsoleId
+  (WTSGetActiveConsoleSessionId) follows; a Test frame's desktop takes
+  injected input (GalaSession's SESSION_INPUT). `presenter_test`: a
+  click injected into session 2's frame, session 1's window on the
+  screen, `gala attach 2`, PS/2 clicks reaching session 2's window,
+  back to session 1 with its window kept (a screen check).
 
 **Next**:
-1. B3a: the console switch (Console attached to another session, PS/2
-   input following it; `gala attach`); the window state apart from the
-   compositor's `Desktop`, so the server kernel keeps window pixels too;
-   `presenter=` in gala-um (screen checks there; its sessions have no
-   desktops yet); input to a desktop the console does not show (a Test
-   presenter that injects input, for screen checks without PS/2); Test
-   frames recorded over time. The presenter seam is also where the
-   compositor later leaves the kernel (SH step 4).
+1. B3a: the window state apart from the compositor's `Desktop`, so the
+   server kernel keeps window pixels too; `presenter=` in gala-um
+   (screen checks there; its sessions have no desktops yet); xtask's
+   headless screen checks sending their input through SESSION_INPUT
+   instead of PS/2; Test frames recorded over time; the console switch's
+   open ends: WM_WTSSESSION_CHANGE (WTSRegisterSessionNotification),
+   a switch without a screen (`presenter=test`), held keys released with
+   WM_KEYUP. The presenter seam is also where the compositor later
+   leaves the kernel (SH step 4).
    Window stations' open ends: DACLs on stations and desktops;
    CreateWindowStationW and CreateDesktopW stay unsupported until BR
    stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
@@ -812,7 +822,10 @@ own session and shell.
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
 3. B4: a session manager, `wtsapi32` (only WTSGetActiveConsoleSessionId
-   exists), `gala sessions/logoff/disconnect/attach`; and B1's open ends:
+   exists), `gala sessions/logoff/disconnect` (`gala attach` exists, for
+   SeTcbPrivilege holders: B4 decides who may attach where), a user per
+   session (another session's start menu starts nothing yet); and B1's
+   open ends:
    DosDevices per session and logon, the SeCreateGlobalPrivilege check for
    `Global\` file mappings outside session 0, DACLs on session directories
    and on processes (a standard user's ProcessIdToSessionId of a SYSTEM
@@ -1350,7 +1363,10 @@ from the command line first (CLI parity; the server profile too).
   injected at every step): `gala install|search|list|upgrade|uninstall`
   over a winget-pkgs tree (`--source <dir>` with an `installers\`
   mirror; installers not mirrored downloaded over http(s) through
-  winhttp and Schannel, redirects followed: TLS step 4), manifests 1.x
+  winhttp and Schannel, redirects followed: TLS step 4; the tree itself
+  over HTTPS: GitHub's contents API and raw files for
+  `https://github.com/<owner>/<repo>`, the default source, or a tree
+  served with JSON listings, scenario `pk_install_https`), manifests 1.x
   singleton and multi-file, SHA-256 checked, zip
   (deflate) and portable installs to `WinGet\Packages`, commands as
   shims (gala.exe + `.shim`) in `WinGet\Links` on the user's PATH,
@@ -1360,6 +1376,16 @@ from the command line first (CLI parity; the server profile too).
   winget-pkgs version directories): schemas 1.0.0-1.28.0, installer
   selection as winget does it with every rejection's reason, switches,
   dependencies into an ordered plan, ARP matching, version ordering.
+  Every package command uses it (scenarios `pk_install_zip`,
+  `pk_install_nsis`): `--scope`, `--architecture`, `--locale`,
+  `--installer-type` as requirements; `--silent`/`--interactive` (else
+  winget's silent-with-progress), `--custom`, `--override`, `--log`;
+  PackageDependencies installed first (`--skip-dependencies`); upgrades
+  keep the installed type and scope; `list` and `upgrade` match programs
+  installed without gala to the source's packages (name and publisher,
+  product codes) and show what is available. Where winget's choice is a
+  type gala cannot install yet it falls back to one it can (a stopgap:
+  "Known issues and stopgaps").
 - Stage 3, installers that are programs (scenario `pk_install_nsis`,
   `pk_install_test nsis`; host tests): InstallerType inno, nullsoft and
   exe run as winget runs them (staged in %TEMP%, winget's silent
@@ -1379,15 +1405,18 @@ from the command line first (CLI parity; the server profile too).
   (`msi::plan`).
 
 **Next**:
-1. Switch `gala install`/`list`/`upgrade` to `galapkg::winget`, then
-   delete `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and
-   an upgrade that keeps scope.
-2. Manifests over HTTPS (installers download already, TLS step 4): the
-   GitHub raw and contents URLs for `--source https://...` and the
-   default source, winget's source index for search (first
-   real-world target: `sigoden.AIChat`, item AI); real
-   symbolic links for commands; the logon environment from
-   `HKCU\Environment`.
+1. The resolver's rest on the install path: machine-scope portable
+   installs (`%ProgramFiles%\WinGet\Packages` and `Links`, the HKLM
+   entry and machine PATH, elevation), dependencies of an upgrade's new
+   version, UpgradeBehavior (`uninstallPrevious`, `deny`),
+   RequireExplicitUpgrade, the user's winget settings
+   (`installBehavior.preferences`/`requirements`) and locale.
+2. winget's source index for search and listing
+   (`cdn.winget.microsoft.com/cache/source2.msix`: the MSIX reader and
+   sqlite), instead of GitHub's API and its rate limit; a first
+   real-world install against GitHub when a scenario can reach it
+   (`sigoden.AIChat`, item AI); real symbolic links for commands; the
+   logon environment from `HKCU\Environment`.
 3. Stage 3's rest: a real Inno Setup installer in a scenario (they are
    32-bit, so WOW64 first; the compiler runs only on Windows, so a
    stand-in checks the switches and the "no uninstall entry" failure
@@ -1666,6 +1695,19 @@ Each entry: what, why it matters, the structural fix, the owning item.
   constraints)`. Accepting it unchecked would let a constrained CA
   vouch for any name. Structural fix: evaluate permitted and excluded
   subtrees (DNS, IP, directory names) as RFC 5280 6.1 does. Item TLS.
+
+- **`gala install` falls back across installer types**: winget installs
+  the installer its selection ranks first; where that is one gala cannot
+  install yet (msi, wix, burn, msix, appx, a zip of those; an x86
+  portable program, gala having no WOW64), gala installs the
+  best-ranked one it can instead (`install::choose`), logged as
+  `fallback installer=N instead of installer=M` and recorded in the
+  ledger. Without it a package that offers both an MSI and a zip would
+  not install at all; with it the program lands where the zip's layout
+  puts it, not where winget would. Scope never falls back (`--scope
+  machine` for a portable package is refused). Structural fix: PK stages
+  4 and 5 (MSIX, MSI) and WOW64, then gala installs winget's choice and
+  the fallback goes. Item PK.
 
 ### Defects known, not yet fixed
 

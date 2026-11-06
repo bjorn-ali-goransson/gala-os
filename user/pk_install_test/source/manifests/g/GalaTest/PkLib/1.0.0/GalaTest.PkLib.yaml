@@ -1,0 +1,18 @@
+PackageIdentifier: GalaTest.PkLib
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkLib
+License: Proprietary
+ShortDescription: A test package with dependencies (gala's install test)
+Installers:
+- Architecture: x64
+  InstallerType: zip
+  NestedInstallerType: portable
+  NestedInstallerFiles:
+  - RelativeFilePath: pklib-1.0.0\pklib.exe
+    PortableCommandAlias: pklib
+  InstallerUrl: https://packages.gala.invalid/pklib-1.0.0.zip
+  InstallerSha256: 2346FFC40F3E4AC34D2817C889265C92AA5968A0A8E29300EE5C29D7B6B30B80
+ManifestType: singleton
+ManifestVersion: 1.6.0

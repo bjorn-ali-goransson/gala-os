@@ -1421,6 +1421,44 @@ mod tests {
     }
 
     #[test]
+    fn jq_portable_real() {
+        let p = Package::from_texts(&[
+            include_str!("../../../pk_install_test/source/manifests/j/jqlang/jq/1.8.2/jqlang.jq.yaml"),
+            include_str!(
+                "../../../pk_install_test/source/manifests/j/jqlang/jq/1.8.2/jqlang.jq.installer.yaml"
+            ),
+            include_str!(
+                "../../../pk_install_test/source/manifests/j/jqlang/jq/1.8.2/jqlang.jq.locale.en-US.yaml"
+            ),
+        ])
+        .unwrap();
+        let x64 = p.installers.iter().find(|i| i.architecture == Architecture::X64).unwrap();
+        assert_eq!(x64.installer_type, Some(InstallerType::Portable));
+        assert_eq!(x64.commands, ["jq"]);
+        assert_eq!(x64.file_name(), "jq-windows-amd64.exe");
+        assert_eq!(
+            p.default_locale.short_description.as_deref(),
+            Some("jq is a lightweight and flexible command-line JSON processor.")
+        );
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn pk_install_test_singleton_with_root_defaults() {
+        let p = Package::from_texts(&[include_str!(
+            "../../../pk_install_test/source/manifests/g/GalaTest/PkHello/1.0.0/GalaTest.PkHello.yaml"
+        )])
+        .unwrap();
+        assert_eq!(p.form, Form::Singleton);
+        assert_eq!(p.display_name(), "PkHello");
+        let i = &p.installers[0];
+        assert_eq!(i.installer_type, Some(InstallerType::Zip));
+        assert_eq!(i.nested_installer_type, Some(InstallerType::Portable));
+        assert_eq!(i.nested_installer_files[0].relative_path, "pkhello-1.0.0\\pkhello.exe");
+        assert_eq!(i.nested_installer_files[0].alias.as_deref(), Some("pkhello"));
+    }
+
+    #[test]
     fn root_defaults_and_switch_merge() {
         let body = format!(
             "InstallerType: inno\nScope: user\nInstallerSwitches:\n  Silent: /VERYSILENT\n  Custom: /ROOT\nUpgradeBehavior: install\nCommands: [a]\nInstallers:\n- Architecture: x64\n  InstallerUrl: https://h/a.exe\n  InstallerSha256: {SHA}\n  InstallerSwitches:\n    Custom: /MINE\n  Scope: machine\n- Architecture: x86\n  InstallerType: nullsoft\n  InstallerUrl: https://h/b.exe\n  InstallerSha256: {}\n  Commands: []\n",

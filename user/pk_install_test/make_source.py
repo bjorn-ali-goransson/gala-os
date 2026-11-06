@@ -79,8 +79,8 @@ def nsis_installer(version):
     return hashlib.sha256(open(path, "rb").read()).hexdigest().upper()
 
 
-def write(rel, text):
-    path = os.path.join(OUT, "manifests", rel)
+def write(rel, text, root=None):
+    path = os.path.join(root or OUT, "manifests", rel)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", newline="\r\n") as f:
         f.write(text)
@@ -309,6 +309,84 @@ ManifestType: singleton
 ManifestVersion: 1.6.0
 """,
         )
+    # Dependencies (winget installs a package's PackageDependencies
+    # first, each once; learn.microsoft.com "install command"): PkDep
+    # needs PkLib 1.0.0 or later; PkDepMissing needs a package the source
+    # does not have.
+    for ident, deps in [
+        ("PkLib", None),
+        ("PkDep", ("GalaTest.PkLib", "1.0.0")),
+        ("PkDepMissing", ("GalaTest.NoSuchLib", None)),
+    ]:
+        cmd = ident.lower()
+        hz = make_zip(
+            f"{cmd}-1.0.0.zip",
+            [(f"{cmd}-1.0.0/{cmd}.exe", HELLO), (f"{cmd}-1.0.0/README.txt", f"{ident} 1.0.0\r\n".encode())],
+        )
+        dep_yaml = ""
+        if deps:
+            dep_yaml = f"  Dependencies:\n    PackageDependencies:\n    - PackageIdentifier: {deps[0]}\n"
+            if deps[1]:
+                dep_yaml += f"      MinimumVersion: {deps[1]}\n"
+        write(
+            f"g/GalaTest/{ident}/1.0.0/GalaTest.{ident}.yaml",
+            f"""PackageIdentifier: GalaTest.{ident}
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: {ident}
+License: Proprietary
+ShortDescription: A test package with dependencies (gala's install test)
+Installers:
+- Architecture: x64
+  InstallerType: zip
+  NestedInstallerType: portable
+  NestedInstallerFiles:
+  - RelativeFilePath: {cmd}-1.0.0\\{cmd}.exe
+    PortableCommandAlias: {cmd}
+  InstallerUrl: {URL}{cmd}-1.0.0.zip
+  InstallerSha256: {hz}
+{dep_yaml}ManifestType: singleton
+ManifestVersion: 1.6.0
+""",
+        )
+    # Scope (`--scope`; an upgrade keeps the installed scope): a machine
+    # and a user installer, the machine one listed first. The files are
+    # the same; the URLs tell which installer was used.
+    for version in ["1.0.0", "1.1.0"]:
+        files = [
+            (f"pkscoped-{version}/pkscoped.exe", HELLO),
+            (f"pkscoped-{version}/README.txt", f"PkScoped {version}\r\n".encode()),
+        ]
+        hm = make_zip(f"pkscoped-{version}-machine.zip", files)
+        hu = make_zip(f"pkscoped-{version}-user.zip", files)
+        write(
+            f"g/GalaTest/PkScoped/{version}/GalaTest.PkScoped.yaml",
+            f"""PackageIdentifier: GalaTest.PkScoped
+PackageVersion: {version}
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkScoped
+License: Proprietary
+ShortDescription: A user and a machine installer (gala's install test)
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: pkscoped-{version}\\pkscoped.exe
+  PortableCommandAlias: pkscoped
+Installers:
+- Architecture: x64
+  Scope: machine
+  InstallerUrl: {URL}pkscoped-{version}-machine.zip
+  InstallerSha256: {hm}
+- Architecture: x64
+  Scope: user
+  InstallerUrl: {URL}pkscoped-{version}-user.zip
+  InstallerSha256: {hu}
+ManifestType: singleton
+ManifestVersion: 1.6.0
+""",
+        )
     # Downloaded over HTTPS (pk_install_https): the zip is served by
     # Nginx, not mirrored, so `gala install` fetches it through winhttp,
     # following the release URL's redirect, and checks its SHA-256.
@@ -317,13 +395,22 @@ ManifestVersion: 1.6.0
         [("pkhttps-1.0.0/pkhttps.exe", HELLO), ("pkhttps-1.0.0/README.txt", b"PkHttps 1.0.0\r\n")],
         os.path.join(SERVED, "objects"),
     )
-    for ident, url, what in [
-        ("PkHttps", f"{NGINX}releases/download/v1.0.0/pkhttps-1.0.0.zip", "Downloaded over HTTPS"),
-        ("PkUntrusted", f"{UNTRUSTED}objects/pkhttps-1.0.0.zip", "Served with an untrusted certificate"),
+    # PkHttps's manifest is also served by Nginx as a winget-pkgs tree
+    # (served/winget-pkgs, directory listings as JSON): `--source
+    # https://localhost:8443/winget-pkgs` reads it over HTTPS.
+    for ident, url, what, roots in [
+        (
+            "PkHttps",
+            f"{NGINX}releases/download/v1.0.0/pkhttps-1.0.0.zip",
+            "Downloaded over HTTPS",
+            [None, os.path.join(SERVED, "winget-pkgs")],
+        ),
+        ("PkUntrusted", f"{UNTRUSTED}objects/pkhttps-1.0.0.zip", "Served with an untrusted certificate", [None]),
     ]:
-        write(
-            f"g/GalaTest/{ident}/1.0.0/GalaTest.{ident}.yaml",
-            f"""PackageIdentifier: GalaTest.{ident}
+        for root in roots:
+            write(
+                f"g/GalaTest/{ident}/1.0.0/GalaTest.{ident}.yaml",
+                f"""PackageIdentifier: GalaTest.{ident}
 PackageVersion: 1.0.0
 PackageLocale: en-US
 Publisher: gala-os
@@ -342,7 +429,8 @@ Installers:
 ManifestType: singleton
 ManifestVersion: 1.6.0
 """,
-        )
+                root,
+            )
     print("made", OUT, "and", SERVED, file=sys.stderr)
 
 

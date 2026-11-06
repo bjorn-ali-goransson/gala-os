@@ -120,6 +120,7 @@ unsafe extern "system" {
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn __chkstk();
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
@@ -445,14 +446,22 @@ impl Checks {
 
     /// `pkhello <args>` found on PATH: hello.exe's line, exit 0.
     fn pkhello_runs(&mut self) -> Result<(), u32> {
-        let (got, o) = run(None, "pkhello --some \"args here\"");
+        self.command_runs("pkhello --some \"args here\"")
+    }
+
+    /// A command line whose program is an installed command found on
+    /// PATH (all are hello.exe): its line, exit 0.
+    fn command_runs(&mut self, line: &str) -> Result<(), u32> {
+        let (got, o) = run(None, line);
         if got != 0 || !o.has(HELLO) {
-            out(b"pk_install_test: pkhello -> ");
+            out(b"pk_install_test: ");
+            out(line.as_bytes());
+            out(b" -> ");
             out(&hex(got));
             out(b":\r\n");
             out(o.text());
         }
-        self.ok(got == 0 && o.has(HELLO), got, "pkhello runs from PATH")
+        self.ok(got == 0 && o.has(HELLO), got, line)
     }
 }
 
@@ -529,10 +538,14 @@ fn test() -> Result<(), u32> {
     c.gala(args, 5, &[b"SHA-256"])?;
     c.ok(!exists(local("\\Microsoft\\WinGet\\Links\\badhash.exe")), 0, "nothing of BadHash")?;
     // An Inno Setup stand-in that registers nothing: run (winget's Inno
-    // switches), then refused for want of an uninstall entry.
+    // switches: its default mode shows progress, /SILENT; --silent shows
+    // nothing, /VERYSILENT), then refused for want of an uninstall entry.
     let args = join(&mut a, &["install GalaTest.InnoSetup ", src]);
     c.gala(args, 4, &[b"registered no uninstall entry"])?;
-    c.ok(log_has(b"/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"), 0, "Inno's switches")?;
+    c.ok(log_has(b"/SP- /SILENT /SUPPRESSMSGBOXES /NORESTART"), 0, "Inno's default switches")?;
+    let args = join(&mut a, &["install GalaTest.InnoSetup --silent ", src]);
+    c.gala(args, 4, &[b"registered no uninstall entry"])?;
+    c.ok(log_has(b"/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"), 0, "Inno's --silent switches")?;
     let args = join(&mut a, &["install GalaTest.Msix ", src]);
     c.gala(args, 3, &[b"msix"])?;
     let args = join(&mut a, &["install jqlang.jq ", src]);
@@ -543,6 +556,13 @@ fn test() -> Result<(), u32> {
     let args = join(&mut a, &["upgrade ", src]);
     c.gala(args, 0, &[b"GalaTest.PkHello", b"1.0.0", b"1.1.0"])?;
     c.gala("upgrade GalaTest.PkHello", 0, &[b"Successfully upgraded", b"1.1.0"])?;
+    // winget's selection, logged: 1.1.0 lists x86 first; x64 is taken.
+    c.ok(
+        log_has(b"selected installer=2 type=zip nested=portable arch=x64"),
+        0,
+        "the selected installer logged",
+    )?;
+    c.ok(log_has(b"runner-up installer=1 arch=x86"), 0, "the runner-up logged")?;
     c.ok(exists(local(join(&mut p, &[dir, "\\pkhello-1.1.0\\README.txt"]))), 0, "1.1.0's files")?;
     c.ok(!exists(local(join(&mut p, &[dir, "\\pkhello-1.0.0"]))), 0, "1.0.0's files gone")?;
     let v = arp("DisplayVersion");
@@ -561,6 +581,62 @@ fn test() -> Result<(), u32> {
     let o = c.gala("list", 0, &[])?;
     c.ok(!o.has(b"GalaTest.PkHello"), 0, "not listed after the uninstall")?;
     c.gala("uninstall GalaTest.PkHello", 2, &[])?;
+    dependencies_and_scope(&mut c)
+}
+
+/// winget's documented behaviour for dependencies ("install command":
+/// PackageDependencies are installed first; uninstall leaves them) and
+/// scope (`--scope` is a requirement; an upgrade keeps the installed
+/// scope).
+fn dependencies_and_scope(c: &mut Checks) -> Result<(), u32> {
+    let src = "--source C:\\pk_source";
+    let mut a = [0u8; 200];
+    // PkDep needs PkLib 1.0.0: PkLib is installed first.
+    let args = join(&mut a, &["install GalaTest.PkDep ", src]);
+    c.gala(args, 0, &[b"GalaTest.PkLib 1.0.0", b"Successfully installed"])?;
+    c.ok(
+        log_has(b"plan install GalaTest.PkLib 1.0.0 installer 1 (for GalaTest.PkDep)"),
+        0,
+        "the dependency planned",
+    )?;
+    c.ok(log_has(b"installed id=GalaTest.PkLib version=1.0.0"), 0, "the dependency installed")?;
+    c.ok(exists(local("\\Microsoft\\WinGet\\Links\\pklib.exe")), 0, "the dependency's command")?;
+    refresh_path();
+    c.command_runs("pklib")?;
+    c.command_runs("pkdep")?;
+    c.gala("list", 0, &[b"GalaTest.PkLib", b"GalaTest.PkDep"])?;
+    // Uninstalling the package leaves its dependency.
+    c.gala("uninstall GalaTest.PkDep", 0, &[b"Successfully uninstalled"])?;
+    c.gala("list", 0, &[b"GalaTest.PkLib"])?;
+    c.gala("uninstall GalaTest.PkLib", 0, &[b"Successfully uninstalled"])?;
+    // A dependency the source does not have: nothing is installed.
+    let args = join(&mut a, &["install GalaTest.PkDepMissing ", src]);
+    c.gala(args, 2, &[b"needs GalaTest.NoSuchLib"])?;
+    c.ok(
+        !exists(local("\\Microsoft\\WinGet\\Links\\pkdepmissing.exe")),
+        0,
+        "nothing of PkDepMissing",
+    )?;
+
+    // Scope: --scope machine (Program Files and HKLM for a portable
+    // package) is not built: refused, nothing changed.
+    let args = join(&mut a, &["install GalaTest.PkScoped --scope machine ", src]);
+    c.gala(args, 3, &[b"machine scope"])?;
+    let args = join(&mut a, &["install GalaTest.PkScoped --scope user --version 1.0.0 ", src]);
+    c.gala(args, 0, &[b"Successfully installed"])?;
+    c.ok(
+        log_has(b"scope=user locale=- url=https://packages.gala.invalid/pkscoped-1.0.0-user.zip"),
+        0,
+        "the user installer",
+    )?;
+    // The upgrade keeps the user scope, though 1.1.0 lists the machine
+    // installer first.
+    c.gala("upgrade GalaTest.PkScoped", 0, &[b"Successfully upgraded", b"1.1.0"])?;
+    c.ok(log_has(b"installed scope=user type=portable"), 0, "the installed scope read")?;
+    c.ok(log_has(b"url=https://packages.gala.invalid/pkscoped-1.1.0-user.zip"), 0, "scope kept")?;
+    refresh_path();
+    c.command_runs("pkscoped")?;
+    c.gala("uninstall GalaTest.PkScoped", 0, &[b"Successfully uninstalled"])?;
     Ok(())
 }
 
@@ -628,9 +704,52 @@ fn show_file(name: &str, o: &Option<Output>) {
     }
 }
 
-/// The install log has `what`.
+/// The install log has `what` (anywhere: read in chunks that overlap
+/// by `what`'s length, the log being longer than one buffer).
 fn log_has(what: &[u8]) -> bool {
-    read_file(local("\\gala\\logs\\install.log")).is_some_and(|o| o.has(what))
+    let mut path = local("\\gala\\logs\\install.log");
+    let keep = what.len().saturating_sub(1).min(1024);
+    let mut b = [0u8; 8192];
+    let mut have = 0usize;
+    // SAFETY: plain calls with our buffers; the handle is closed.
+    unsafe {
+        let h = CreateFileW(
+            path.ptr(),
+            0x8000_0000,
+            7,
+            core::ptr::null_mut(),
+            3,
+            0,
+            core::ptr::null_mut(),
+        );
+        if h as isize == -1 {
+            return false;
+        }
+        let mut found = false;
+        loop {
+            let mut got = 0;
+            let ok = ReadFile(
+                h,
+                b.as_mut_ptr().add(have),
+                (b.len() - have) as u32,
+                &mut got,
+                core::ptr::null_mut(),
+            );
+            if ok == 0 || got == 0 {
+                break;
+            }
+            have += got as usize;
+            if contains(&b[..have], what) {
+                found = true;
+                break;
+            }
+            let tail = have.min(keep);
+            b.copy_within(have - tail..have, 0);
+            have = tail;
+        }
+        CloseHandle(h);
+        found
+    }
 }
 
 fn nsis_value(value: &str) -> Option<([u8; 2048], usize)> {
@@ -738,6 +857,37 @@ fn nsis_test() -> Result<(), u32> {
     c.gala("uninstall GalaTest.PkNsis", 0, &[b"Successfully uninstalled"])?;
     c.ok(!exists(W::new("C:\\PkNsisHere\\pknsis.exe")), 0, "removed from there")?;
     c.ok(nsis_value("DisplayName").is_none(), 0, "the ARP entry removed again")?;
+    // Installed without gala (its installer run directly): winget list
+    // and upgrade match the uninstall entry to the source's package by
+    // its name and publisher.
+    let (got, _) = run(Some("C:\\pk_source\\installers\\pknsis-1.0.0.exe"), "pknsis-1.0.0.exe /S");
+    c.ok(got == 0, got, "PkNsis 1.0.0's installer run directly")?;
+    c.ok(nsis_value("WinGetPackageIdentifier").is_none(), 0, "no gala tags")?;
+    c.gala("list", 0, &[b"ARP\\User\\X64\\GalaTest.PkNsis"])?;
+    c.gala(
+        "list PkNsis --source C:\\pk_source",
+        0,
+        &[b"GalaTest.PkNsis", b"1.0.0", b"1.1.0", b"winget"],
+    )?;
+    c.gala(
+        "upgrade --source C:\\pk_source",
+        0,
+        &[b"GalaTest.PkNsis", b"1.1.0", b"1 upgrades available"],
+    )?;
+    c.gala(
+        "upgrade GalaTest.PkNsis --source C:\\pk_source",
+        0,
+        &[b"Successfully upgraded", b"1.1.0"],
+    )?;
+    c.ok(log_has(b"matched key=GalaTest.PkNsis by=NameAndPublisher"), 0, "matched by name")?;
+    c.ok(nsis_value_is("DisplayVersion", b"1.1.0"), 0, "the matched program upgraded")?;
+    c.ok(
+        nsis_value_is("WinGetPackageIdentifier", b"GalaTest.PkNsis"),
+        0,
+        "tagged after the upgrade",
+    )?;
+    c.gala("uninstall GalaTest.PkNsis", 0, &[b"Successfully uninstalled"])?;
+    c.ok(nsis_value("DisplayName").is_none(), 0, "the ARP entry removed at the end")?;
     Ok(())
 }
 
@@ -861,6 +1011,38 @@ fn https_test() -> Result<(), u32> {
     // A real manifest's URL: github.com does not resolve in the VM.
     let args = join(&mut a, &["install jqlang.jq ", src]);
     c.gala(args, 4, &[b"downloading https://github.com/jqlang/jq/", b"12007"])?;
+
+    // Manifests over HTTPS: a winget-pkgs tree Nginx serves as files,
+    // each directory listed as JSON.
+    let web = "--source https://localhost:8443/winget-pkgs";
+    let args = join(&mut a, &["install GalaTest.PkHttps ", web]);
+    c.gala(args, 0, &[b"Successfully installed"])?;
+    c.ok(
+        log_has(
+            b"source list url=https://localhost:8443/winget-pkgs/manifests/g/GalaTest/PkHttps/",
+        ),
+        0,
+        "the package's directory listed over HTTPS",
+    )?;
+    c.ok(
+        log_has(b"source read url=https://localhost:8443/winget-pkgs/manifests/g/GalaTest/PkHttps/1.0.0/GalaTest.PkHttps.yaml"),
+        0,
+        "the manifest read over HTTPS",
+    )?;
+    let args = join(&mut a, &["search pkhttps ", web]);
+    c.gala(args, 0, &[b"GalaTest.PkHttps", b"1.0.0"])?;
+    // The ARP entry keeps the URL: upgrade reads it again.
+    c.gala("upgrade GalaTest.PkHttps", 0, &[b"No newer version"])?;
+    c.gala("uninstall GalaTest.PkHttps", 0, &[b"Successfully uninstalled"])?;
+    // The default source, winget's community repository on GitHub,
+    // listed through api.github.com: not reachable from the VM.
+    c.gala(
+        "install jqlang.jq",
+        4,
+        &[b"api.github.com/repos/microsoft/winget-pkgs/contents/manifests/j/jqlang/jq", b"12007"],
+    )?;
+    // Searching it needs winget's source index (not built: exit 3).
+    c.gala("search jq", 3, &[b"source index"])?;
     Ok(())
 }
 

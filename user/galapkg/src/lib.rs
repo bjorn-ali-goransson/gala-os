@@ -2,14 +2,18 @@
 //! ARCHITECTURE "Installing software"). The parts that need no system
 //! calls live here, so they run under `cargo test` on the host:
 //!
-//! - [`yaml`]: the YAML subset winget manifests use;
-//! - [`manifest`]: singleton and multi-file manifests (schema 1.x),
-//!   installer selection;
+//! - [`winget`]: winget's manifests in full (schemas 1.0.0-1.28.0, the
+//!   YAML they are written in), installer selection, dependencies, ARP
+//!   matching: the resolver every command uses;
 //! - [`version`]: winget's version ordering;
 //! - [`zip`]: zip archives (stored and deflate, CRC-32 checked, no path
 //!   leaving the target directory);
-//! - [`source`]: a winget-pkgs tree (a local snapshot) as packages;
-//! - [`install`]: install, uninstall, upgrade and list as transactions
+//! - [`source`]: a winget-pkgs tree as packages: a local snapshot, a
+//!   GitHub repository (the default: winget's community repository) or a
+//!   tree served over HTTP(S), read through the host's fetcher; [`json`]
+//!   reads the directory listings;
+//! - [`install`]: install (dependencies first), uninstall, upgrade and
+//!   list as transactions
 //!   over a [`install::Host`] (files, registry, downloads, the log), which
 //!   `gala.exe` implements with Win32 calls and the tests in memory;
 //! - [`shim`]: the command shims in the Links directory;
@@ -34,8 +38,8 @@ pub mod blockmap;
 pub mod cab;
 pub mod cfb;
 pub mod install;
+pub mod json;
 pub mod lzx;
-pub mod manifest;
 pub mod msi;
 pub mod msix;
 pub mod shim;
@@ -43,7 +47,6 @@ pub mod source;
 pub mod version;
 pub mod winget;
 pub mod xml;
-pub mod yaml;
 pub mod zip;
 
 use alloc::string::String;

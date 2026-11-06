@@ -1,0 +1,22 @@
+PackageIdentifier: GalaTest.PkDep
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: PkDep
+License: Proprietary
+ShortDescription: A test package with dependencies (gala's install test)
+Installers:
+- Architecture: x64
+  InstallerType: zip
+  NestedInstallerType: portable
+  NestedInstallerFiles:
+  - RelativeFilePath: pkdep-1.0.0\pkdep.exe
+    PortableCommandAlias: pkdep
+  InstallerUrl: https://packages.gala.invalid/pkdep-1.0.0.zip
+  InstallerSha256: 3B3BD8A96A607584BB535F13DDAF597CD6C58EB163716BB19B899556D8BD23AC
+  Dependencies:
+    PackageDependencies:
+    - PackageIdentifier: GalaTest.PkLib
+      MinimumVersion: 1.0.0
+ManifestType: singleton
+ManifestVersion: 1.6.0
