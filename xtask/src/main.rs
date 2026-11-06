@@ -534,6 +534,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("cert_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
     ("cert_test", "bcrypt.dll", "Windows/System32"),
     ("cert_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("cert_test", "ncrypt.dll", "Windows/System32"),
     ("sspi_test", "ntdll.dll", "Windows/System32"),
     ("sspi_test", "kernel32.dll", "Windows/System32"),
     ("sspi_test", "secur32.dll", "Windows/System32"),
@@ -913,6 +914,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_exec_pie", "user/lx/bin/exec_test-pie", "lx"),
     ("lx_socket", "user/lx/bin/socket_test", "lx"),
     ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
+    ("lx_thread", "user/lx/bin/thread_test", "lx"),
+    ("lx_thread_pie", "user/lx/bin/thread_test-pie", "lx"),
+    ("lx_poll", "user/lx/bin/poll_test", "lx"),
+    ("lx_poll_pie", "user/lx/bin/poll_test-pie", "lx"),
+    ("lx_epoll", "user/lx/bin/epoll_test", "lx"),
+    ("lx_epoll_pie", "user/lx/bin/epoll_test-pie", "lx"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -6733,6 +6740,54 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/socket_test-pie lxargs=./socket_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/socket_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/thread_test (LX): clone of threads, futex, signals per
+        // thread, musl's pthreads; its transcript must be its expected.txt
+        // (real Linux's; `lx_expect::check_boot`).
+        name: "lx_thread",
+        cmdline: "qemu_exit lxrun=/lx/thread_test lxargs=./thread_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/thread_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/thread_test as a static-pie.
+        name: "lx_thread_pie",
+        cmdline: "qemu_exit lxrun=/lx/thread_test-pie lxargs=./thread_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/thread_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/poll_test (LX): poll, select and epoll on pipes; its
+        // transcript must be its expected.txt (real Linux's;
+        // `lx_expect::check_boot`).
+        name: "lx_poll",
+        cmdline: "qemu_exit lxrun=/lx/poll_test lxargs=./poll_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/poll_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/poll_test as a static-pie.
+        name: "lx_poll_pie",
+        cmdline: "qemu_exit lxrun=/lx/poll_test-pie lxargs=./poll_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/poll_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/epoll_test (LX): epoll on sockets, epoll fds, blocking
+        // waits woken by a thread or a signal; its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_epoll",
+        cmdline: "qemu_exit lxrun=/lx/epoll_test lxargs=./epoll_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/epoll_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/epoll_test as a static-pie.
+        name: "lx_epoll_pie",
+        cmdline: "qemu_exit lxrun=/lx/epoll_test-pie lxargs=./epoll_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/epoll_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         // A static Linux busybox (ROADMAP LX milestone 2): its shell runs

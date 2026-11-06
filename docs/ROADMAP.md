@@ -152,7 +152,7 @@ has a section under "Open items".
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision) done; revocation, session resumption next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
-| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done; static busybox runs (milestone 2), TCP sockets |
+| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done; static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 
 ### Desktop, sessions and remote access
@@ -1181,47 +1181,66 @@ documentation and Wine's conformance tests).
 (`x86_64-w64-mingw32-objdump -p`) of the programs in `user/bin`, the
 JDK, PostgreSQL 17.2's `bin` (with StackBuilder's wxWidgets 3.2 VC
 DLLs), FileZilla Server 1.12.6 (with its GUI) and SQL Server LocalDB
-2022, against the exports of `user/bin/test*.dll` (oleaut32's ordinals
-from Wine's oleaut32.spec) and the `gala_stubs` stubs. Two kinds:
-missing exports stop a program from loading; stubs stop it when called.
+2022, against gala's built DLLs and their `gala_stubs` stubs
+(`python3 -I tools/import_survey.py target/x86_64-pc-windows-msvc/release
+<pe>...`, imports and delay imports, by name and ordinal; oleaut32's
+ordinals from Wine's oleaut32.spec). Two kinds: missing exports stop a
+program from loading (delay-loaded ones fail when called); stubs stop it
+when called.
 
-**Done so far** (groups 1-11; no Windows run yet, each test still needs
+**Done so far** (groups 1-12; no Windows run yet, each test still needs
 a run-all.ps1 check there): msvcrt's wide classes, `_wtol`, `difftime`
 (`msvcrt_test`); oleaut32's variant time and string conversions,
-`VarCmp`, `GetActiveObject` (`oleaut32_test`); all of shlwapi's surveyed
-path, string and URL functions, AssocQueryStringW,
-SHCreateStreamOnFileEx (`shlwapi_test`; no shlwapi stubs left);
-shell32's ShellExecuteExW, drag-and-drop, SHFileOperationW,
-SHChangeNotify, icon extraction (`shell32_test`); ole32's PROPVARIANT
-and STGMEDIUM clean-up, OleRun/OleLockRunning/OleSetContainedObject,
-proxy blankets, CoCreateInstanceEx, CreateBindCtx (`ole32_test`);
-dbghelp's ImageNtHeader, SymSrvGetFileIndexInfoW and symbols over
-exports, a new normaliz.dll (`dbghelp_test`); crypt32's memory
-functions, CertGetNameStringA, PFXIsPFXBlob, certificate stores,
-CryptQueryObject, CryptDecodeObjectEx for alternative names
-(`cert_test`); comctl32's image-list drag functions (`comctl32_test`).
-FileZilla Server's GUI and StackBuilder now find every msvcrt, oleaut32
-and ole32 import; version and msvcrt have nothing left the surveyed
-programs import.
+`VarCmp`, `GetActiveObject`, and the DATE/currency/double conversions
+msxmlsql imports by ordinal (#82, 83, 92, 93, 96, 103, 112, 123, 124)
+(`oleaut32_test`); all of shlwapi's surveyed path, string and URL
+functions, AssocQueryStringW, SHCreateStreamOnFileEx/W, StrToIntW,
+StrTrimW, PathIsFileSpecW (`shlwapi_test`; no shlwapi stubs or missing
+exports left); shell32's ShellExecuteExW, drag-and-drop,
+SHFileOperationW, SHChangeNotify, icon extraction (`shell32_test`);
+ole32's PROPVARIANT and STGMEDIUM clean-up,
+OleRun/OleLockRunning/OleSetContainedObject, proxy blankets,
+CoCreateInstanceEx, CreateBindCtx, CreateStreamOnHGlobal with an HGLOBAL
+and GetHGlobalFromStream (clones, CopyTo), CoFileTimeNow,
+CoGetCurrentProcess (`ole32_test`), on kernel32's movable global memory
+(GlobalAlloc/LocalAlloc GMEM_MOVEABLE handles, Lock/Unlock/Size/ReAlloc/
+Flags/Handle as Windows does them, `kernel32_misc_test`); dbghelp's
+ImageNtHeader, SymSrvGetFileIndexInfoW and symbols over exports, a new
+normaliz.dll (`dbghelp_test`); crypt32's memory functions,
+CertGetNameStringA, PFXIsPFXBlob, certificate stores, CryptQueryObject,
+CryptDecodeObjectEx for alternative names, PFXImportCertStore (PKCS #12
+with OpenSSL's modern and legacy algorithms, keys into ncrypt's KSP) and
+CryptAcquireCertificatePrivateKey for CNG keys (`cert_test`); comctl32's
+image-list drag functions (`comctl32_test`). FileZilla Server's GUI and
+StackBuilder find every msvcrt, oleaut32 and ole32 import; version and
+msvcrt have nothing left the surveyed programs import. The survey
+(`tools/import_survey.py` over user/bin, the JDK, PostgreSQL, FileZilla
+Server and LocalDB) finds no missing static import in these DLLs: what
+is left is delay-loaded or stubbed.
 
 **Next** (what is left, by DLL):
-1. ole32: GetHGlobalFromStream and CreateStreamOnHGlobal with an
-   HGLOBAL (they need movable global memory: GlobalSize is a stub and
-   GlobalAlloc hands out fixed blocks), CoRegisterMallocSpy, the OLE
-   clipboard and DoDragDrop (need user32's clipboard).
-2. crypt32: PFXImportCertStore (PKCS #12), the other decode types,
-   CRLs/CTLs, collections' member stores (CertAddStoreToCollection),
-   CryptAcquireCertificatePrivateKey (the chain engine is done: TLS
-   step 5).
-3. shell32: SHBrowseForFolderW (a dialog).
-4. comctl32: CreateUpDownControl (a new control class); drawing the drag
+1. ole32: CoRegisterMallocSpy (sqlmin; the task allocator would call the
+   spy around every operation and track spied blocks), the OLE clipboard
+   and DoDragDrop (need user32's clipboard).
+2. crypt32: the other decode types the programs use (which ones is only
+   seen at run time: the ledger's `CryptDecodeObjectEx` lines),
+   CRLs/CTLs, collections' member stores, PFX with ECDSA keys (ncrypt
+   imports RSA only) or public-key integrity, CryptoAPI (CSP) private
+   keys.
+3. Delay imports the survey finds missing (they fail only when called):
+   oleaut32's VarParseNumFromStr/VarNumFromParseNum (#46, 47),
+   VarFormat (#87), VarDateFromUdate/VarUdateFromDate (#330, 331)
+   (msxmlsql); comctl32's window subclassing (#410-413: awt.dll),
+   shell32's SHGetSettings (awt), version's VerInstallFileW (sqlmin).
+4. shell32: SHBrowseForFolderW (a dialog).
+5. comctl32: CreateUpDownControl (a new control class); drawing the drag
    image.
-5. dbghelp: MiniDumpWriteDump (a stub), PDB symbols, other processes'
+6. dbghelp: MiniDumpWriteDump (a stub), PDB symbols, other processes'
    modules.
-6. New DLLs: winspool.drv (StackBuilder's wxmsw326u_core), the JDK's
+7. New DLLs: winspool.drv (StackBuilder's wxmsw326u_core), the JDK's
    optional dsound, winscard, msi, dbgeng (loaded only by jsound,
    j2pcsc, jpackage, saproc).
-7. Elsewhere, for the agents working there: FileZilla Server's GUI also
+8. Elsewhere, for the agents working there: FileZilla Server's GUI also
    stops on user32 (54 stubs: carets, the clipboard, DDE,
    DrawEdge/DrawFrameControl, window placement), gdi32 (16: metafiles,
    font enumeration), kernel32 (13), comdlg32 (4), oleacc, winmm's
@@ -1294,23 +1313,36 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   sendfile, readv, close_range, the clocks and sleeps, ITIMER_REAL and
   alarm; blocking pipe writes larger than the room write piece by
   piece.
+- Threads and their primitives (`lx_thread`, thread_test, with musl's
+  pthreads on top): clone with CLONE_THREAD as pthread_create makes it
+  (`lx::threads`), signal masks and pending sets per thread, tgkill and
+  tkill, set_tid_address, CLONE_CHILD_SETTID/CLEARTID with the exit's
+  futex wake, exit against exit_group, Linux tids (the first thread's is
+  the pid); futex WAIT, WAKE, REQUEUE, CMP_REQUEUE, WAIT_BITSET,
+  WAKE_BITSET with timeouts on both clocks (`lx::futex`). epoll
+  (`lx::epoll`; `lx_poll` with poll_test, `lx_epoll` with epoll_test:
+  pipes, sockets, nested epolls, EPOLLET, EPOLLONESHOT, EPOLLRDHUP,
+  epoll_pwait/epoll_pwait2). Wait queues (`lx::wait`) replace the 1 ms
+  polling for pipes, poll/select/epoll over pipes, sleeps,
+  rt_sigsuspend, pause, rt_sigtimedwait and wait4, and a signal for a
+  blocked thread wakes it.
 
 **Next**:
-1. Milestone 2's rest: the rest of signal_test and fork_test (tgkill,
-   rt_sigqueueinfo, sigaltstack, faults as SIGSEGV/SIGBUS/SIGFPE
+1. Milestone 2's rest: the rest of signal_test and fork_test
+   (rt_sigqueueinfo, sigaltstack, faults as SIGSEGV/SIGBUS/SIGFPE
    through the exception path, delivery to a thread running user code,
    stop/continue, process groups and sessions, waitid, rusage), vfork
    sharing memory and copy-on-write for fork (shared frames,
    `vm::copy_on_write` for private pages; MAP_SHARED anonymous memory
-   shared with the child), clone of threads, futex; fs_test (symlinks,
-   hard links, unlink of an open file, statx: seam 4); per-thread CPU
-   time for clock_test's CPU clocks; wait queues instead of the 1 ms
-   polling (pipes, sockets, poll, sleeps, signals); `lx::state` onto
-   the core process; an `lx_pipe_pie` scenario.
+   shared with the child, then futexes keyed by the shared page);
+   execve ending the other threads first; fs_test (symlinks, hard
+   links, unlink of an open file, statx: seam 4); per-thread CPU time
+   for clock_test's CPU clocks; wait queues on sockets instead of their
+   1 ms look (seam 5: the stack's notify hook is AFD's alone);
+   `lx::state` onto the core process; an `lx_pipe_pie` scenario.
    Each corpus program becomes a boot scenario as its calls land; the
    busybox scripts grow with them (applets by name once symlinks exist).
-2. Milestone 3: threads and futex, clocks and polling, ptys over the
-   core terminal object, /proc.
+2. Milestone 3: clocks, ptys over the core terminal object, /proc.
 3. Seam 1: the pty as a core terminal object under ConPTY.
 4. Seam 4: file-system metadata: per-directory case sensitivity
    (FileCaseSensitiveInformation), POSIX metadata per file, a plan for

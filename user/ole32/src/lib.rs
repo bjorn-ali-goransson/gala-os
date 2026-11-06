@@ -11,7 +11,8 @@
 //!   (CoGetContextToken, CoGetObjectContext with IComThreadingInfo).
 //! - Task memory on the process heap; CoCreateGuid (RFC 4122 version 4
 //!   from ProcessPrng); StringFromGUID2.
-//! - CreateStreamOnHGlobal without an HGLOBAL: an IStream on heap memory.
+//! - CreateStreamOnHGlobal / GetHGlobalFromStream: an IStream on a global
+//!   memory block, the caller's or its own (stream.rs).
 //! - CoCreateFreeThreadedMarshaler: an aggregatable object with IMarshal,
 //!   whose marshaling methods are not there yet (E_NOTIMPL, recorded),
 //!   like CoMarshalInterface and friends (no cross-apartment calls yet).
@@ -75,6 +76,7 @@ unsafe extern "system" {
     fn GetLastError() -> u32;
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *const c_void;
+    fn GetSystemTimeAsFileTime(time: *mut u64);
 }
 
 #[link(name = "bcryptprimitives", kind = "raw-dylib")]
@@ -154,6 +156,32 @@ pub extern "system" fn CoTaskMemRealloc(p: *mut u8, size: usize) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "system" fn CoTaskMemFree(p: *mut u8) {
     free(p);
+}
+
+/// CoFileTimeNow: the current time as a FILETIME (UTC).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoFileTimeNow(time: *mut u64) -> HResult {
+    if time.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's FILETIME.
+    unsafe { GetSystemTimeAsFileTime(time) };
+    S_OK
+}
+
+/// The last number CoGetCurrentProcess gave a thread.
+static THREAD_NUMBERS: AtomicU32 = AtomicU32::new(0);
+
+/// CoGetCurrentProcess: a number unique to the calling thread (unlike
+/// thread ids, never reused in the process): the next of a count, given
+/// on the thread's first call and kept in its COM state.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoGetCurrentProcess() -> u32 {
+    let Some(state) = thread_state() else { return 0 };
+    if state.number == 0 {
+        state.number = THREAD_NUMBERS.fetch_add(1, Ordering::Relaxed).wrapping_add(1).max(1);
+    }
+    state.number
 }
 
 // ---- The task allocator (IMalloc over CoTaskMem*) ----
@@ -410,6 +438,8 @@ pub(crate) struct ThreadState {
     pub(crate) message_filter: usize,
     /// This STA thread's context object.
     sta_context: Context,
+    /// CoGetCurrentProcess's number for this thread (0 until asked).
+    number: u32,
 }
 
 const TEB_RESERVED_FOR_OLE: usize = 0x1758;
@@ -443,6 +473,7 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
                     vtable: CONTEXT_UNKNOWN.0.as_ptr().cast(),
                     threading: CONTEXT_THREADING.0.as_ptr().cast(),
                 },
+                number: 0,
             });
             *slot = p;
         }

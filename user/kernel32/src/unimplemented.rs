@@ -30,9 +30,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetTapeStatus
     GetThreadIOPendingFlag
     GetVolumePathNamesForVolumeNameW
-    GlobalFlags
     GlobalMemoryStatus
-    GlobalReAlloc
     MapUserPhysicalPagesScatter
     MapViewOfFileExNuma
     OpenJobObjectW
@@ -94,7 +92,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     EnumResourceNamesW
     GetDiskFreeSpaceA
     GetProfileStringW
-    GlobalHandle
     IsBadReadPtr
     ReadConsoleOutputCharacterA
     WritePrivateProfileStringW

@@ -15,7 +15,8 @@
 //! is the PEB's ProcessHeap; HeapAlloc with HEAP_ZERO_MEMORY, HeapSize as
 //! asked, HeapReAlloc keeping the contents and zeroing the growth,
 //! HEAP_REALLOC_IN_PLACE_ONLY failing, a private heap from HeapCreate,
-//! HeapValidate, HeapDestroy); GetDriveTypeW, GetLogicalDriveStringsW,
+//! HeapValidate, HeapDestroy); global and local memory, fixed and
+//! moveable (`global.rs`); GetDriveTypeW, GetLogicalDriveStringsW,
 //! AreFileApisANSI; winmm's
 //! timeBeginPeriod/timeEndPeriod/timeGetTime; ntdll's
 //! RtlGetNtVersionNumbers (10.0, build 26100 with the high bits); advapi32
@@ -30,6 +31,8 @@
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+mod global;
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -659,6 +662,7 @@ fn run() -> Result<(), u32> {
         c.ok(expect(b"%1 has %2!d! items (%3!x!)%%%n", &buf[..n as usize]), n.into())?;
     }
     heaps(&mut c)?;
+    global::global_memory(&mut c)?;
     modules(&mut c)?;
     Ok(())
 }

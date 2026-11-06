@@ -4,8 +4,7 @@
 //! ledger (`ole32.dll!<name>`, "unsupported") and fails as documented:
 //!
 //! - Structured storage on memory (CreateILockBytesOnHGlobal,
-//!   StgCreateDocfileOnILockBytes, GetHGlobalFromILockBytes) and
-//!   GetHGlobalFromStream (gala's memory streams are not HGLOBALs yet):
+//!   StgCreateDocfileOnILockBytes, GetHGlobalFromILockBytes):
 //!   E_NOTIMPL, the output NULL.
 //! - OleDuplicateData: NULL (the copy failed).
 //! - DoDragDrop: E_NOTIMPL (no drag and drop between windows yet).
@@ -48,14 +47,6 @@ pub extern "system" fn StgCreateDocfileOnILockBytes(
     out: *mut *mut c_void,
 ) -> HResult {
     absent(b"ole32.dll!StgCreateDocfileOnILockBytes", out)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn GetHGlobalFromStream(
-    _stream: *mut c_void,
-    out: *mut *mut c_void,
-) -> HResult {
-    absent(b"ole32.dll!GetHGlobalFromStream", out)
 }
 
 #[unsafe(no_mangle)]

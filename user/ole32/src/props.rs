@@ -11,6 +11,7 @@
 //! are found at run time, as Windows' ole32 does not make every program
 //! load them.
 
+use super::stream::{GlobalFree, GlobalLock, GlobalUnlock};
 use super::{
     E_INVALIDARG, Guid, HResult, LoadLibraryW, S_OK, com_call, free, missing, ole_iid, release,
 };
@@ -18,7 +19,6 @@ use core::ffi::c_void;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
-    fn GlobalFree(h: *mut c_void) -> *mut c_void;
     fn DeleteFileW(path: *const u16) -> i32;
 }
 
@@ -439,7 +439,7 @@ pub extern "system" fn ReleaseStgMedium(m: *mut StgMedium) {
         TYMED_ISTREAM | TYMED_ISTORAGE => release_ptr(m.handle),
         TYMED_HGLOBAL if owned && m.handle != 0 => {
             // SAFETY: a global memory handle the medium owns.
-            unsafe { GlobalFree(m.handle as *mut c_void) };
+            unsafe { GlobalFree(m.handle) };
         }
         TYMED_FILE if m.handle != 0 => {
             if owned {
@@ -452,12 +452,19 @@ pub extern "system" fn ReleaseStgMedium(m: *mut StgMedium) {
         TYMED_ENHMF if owned => call(&GDI32, b"DeleteEnhMetaFile\0", m.handle),
         TYMED_MFPICT if owned && m.handle != 0 => {
             // A METAFILEPICT (mm, x, y, then the HMETAFILE at offset 16)
-            // in global memory, as kernel32 hands it out (a pointer).
-            // SAFETY: the medium's METAFILEPICT.
-            let metafile = unsafe { *((m.handle + 16) as *const usize) };
-            call(&GDI32, b"DeleteMetaFile\0", metafile);
+            // in global memory.
+            // SAFETY: the medium's global block, locked while read.
+            let metafile = unsafe {
+                let p = GlobalLock(m.handle);
+                let metafile = if p.is_null() { 0 } else { *(p.add(16) as *const usize) };
+                GlobalUnlock(m.handle);
+                metafile
+            };
+            if metafile != 0 {
+                call(&GDI32, b"DeleteMetaFile\0", metafile);
+            }
             // SAFETY: as for TYMED_HGLOBAL.
-            unsafe { GlobalFree(m.handle as *mut c_void) };
+            unsafe { GlobalFree(m.handle) };
         }
         _ => {}
     }

@@ -789,6 +789,20 @@ source).
   count. Accessibility without signals: write(2) from an address fails
   with EFAULT if it is unreadable, read(2) into it if it is unwritable
   (brk_test, mmap_test).
+- **Threads**: a raw clone'd thread (thread_test's and epoll_test's
+  `clone_thread`) has its own stack and TLS block and runs only raw
+  system calls (no musl: its TLS is not musl's), leaving results in
+  globals for the main thread to print after joining it (CLEARTID's
+  futex wake); only the main thread prints. musl's pthreads may be used
+  as such (thread_test's last part). A signal for a thread that must
+  arrive while it waits is sent until its wait returns, or blocked and
+  taken with rt_sigtimedwait.
+- **Waiting in the kernel** (`lx::wait`): prepare before the last look
+  at what is waited for (under its lock, or after joining its queue),
+  then `block`; a wake can be spurious, so loop on the condition. A
+  check made before `prepare` and not repeated after loses the wake
+  that comes between (the thread then sleeps until its deadline or for
+  ever).
 - **Build**: `user/lx/build.sh` builds each as `user/lx/bin/<name>_test`
   (static, ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN),
   reproducibly (stripped, no build id, `-fno-stack-protector`: the
@@ -2468,6 +2482,10 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   search lost its loop exit and spun on a miss). Use
   `cond.then(|| f(x))`.
 
+- **An HGLOBAL is not a pointer**: GMEM_MOVEABLE memory (what
+  CreateStreamOnHGlobal, the clipboard, STGMEDIUM and DDE hand around)
+  is a handle to a table entry (kernel32's `global.rs`); read and write
+  it between GlobalLock and GlobalUnlock, never through the handle.
 - **The standard handles are not consoles without a console session**:
   making GetConsoleMode succeed on the serial-line handles changes
   programs' output (Caddy's logging; `kernel32_sys_test` and

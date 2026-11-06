@@ -32,6 +32,14 @@
  *   documented order 2string < 3string < 20string < st2ring < st20ring
  *   < string2 < string20).
  * - SHDeleteKeyW: a key and everything under it.
+ * - StrToIntW (Wine's string.c StrToInt_results): an optional '-' and
+ *   decimal digits only (no '+', no leading space, no hex), wrapping at
+ *   32 bits. StrTrimW: the given characters off both ends, TRUE when any
+ *   went. PathIsFileSpecW: TRUE without ':' or '\'.
+ * - SHCreateStreamOnFileW (Wine's istream.c): STGM_CONVERT,
+ *   STGM_DELETEONRELEASE and STGM_TRANSACTED are E_INVALIDARG; without
+ *   STGM_CREATE a missing file is ERROR_FILE_NOT_FOUND; STGM_CREATE makes
+ *   it, and it then opens without.
  * - The URL functions, AssocQueryStringW and SHCreateStreamOnFileEx:
  *   url.c (Wine's url.c vectors).
  *
@@ -193,6 +201,46 @@ int main(void) {
     CHECK(RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\GalaShlwapiTest", 0, KEY_READ, &key)
           == ERROR_FILE_NOT_FOUND);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\GalaShlwapiTest") == ERROR_FILE_NOT_FOUND);
+
+    /* StrToIntW. */
+    CHECK(StrToIntW(L"1099") == 1099 && StrToIntW(L"4294967319") == 23);
+    CHECK(StrToIntW(L"+88987") == 0 && StrToIntW(L"012") == 12 && StrToIntW(L"-55") == -55);
+    CHECK(StrToIntW(L"0x44ff") == 0 && StrToIntW(L" 1999") == 0 && StrToIntW(L"- 55") == 0);
+    CHECK(StrToIntW(L"12ab") == 12 && StrToIntW(L"") == 0);
+    /* StrTrimW. */
+    {
+        wchar_t s[32] = L"  \tgala os \t ";
+        CHECK(StrTrimW(s, L" \t") && wcscmp(s, L"gala os") == 0);
+        CHECK(!StrTrimW(s, L" \t") && wcscmp(s, L"gala os") == 0);
+        wcscpy(s, L"xxxx");
+        CHECK(StrTrimW(s, L"x") && s[0] == 0);
+    }
+    /* PathIsFileSpecW. */
+    CHECK(PathIsFileSpecW(L"file.txt") && PathIsFileSpecW(L"a/b") && PathIsFileSpecW(L""));
+    CHECK(!PathIsFileSpecW(L"c:file") && !PathIsFileSpecW(L"dir\\file"));
+    /* SHCreateStreamOnFileW. */
+    {
+        wchar_t path[MAX_PATH];
+        IStream *st = (IStream *)1;
+        GetTempPathW(MAX_PATH, path);
+        wcscat(path, L"gala_shlwapi_w.txt");
+        DeleteFileW(path);
+        CHECK(SHCreateStreamOnFileW(path, STGM_READ | STGM_CONVERT, &st) == E_INVALIDARG && st == NULL);
+        st = (IStream *)1;
+        CHECK(SHCreateStreamOnFileW(path, STGM_READ | STGM_DELETEONRELEASE, &st) == E_INVALIDARG && st == NULL);
+        st = (IStream *)1;
+        CHECK(SHCreateStreamOnFileW(path, STGM_READ | STGM_TRANSACTED, &st) == E_INVALIDARG && st == NULL);
+        CHECK(SHCreateStreamOnFileW(path, STGM_READ, &st) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) && st == NULL);
+        CHECK(SHCreateStreamOnFileW(path, STGM_READWRITE | STGM_CREATE, &st) == S_OK && st != NULL);
+        ULONG n = 0;
+        CHECK(IStream_Write(st, "gala", 4, &n) == S_OK && n == 4);
+        CHECK(IStream_Release(st) == 0);
+        CHECK(SHCreateStreamOnFileW(path, STGM_READ, &st) == S_OK && st != NULL);
+        char buf[8] = {0};
+        CHECK(IStream_Read(st, buf, 4, &n) == S_OK && n == 4 && memcmp(buf, "gala", 4) == 0);
+        CHECK(IStream_Release(st) == 0);
+        CHECK(DeleteFileW(path));
+    }
 
     url_checks();
     assoc_checks();

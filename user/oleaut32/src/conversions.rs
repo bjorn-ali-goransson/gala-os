@@ -6,7 +6,7 @@
 //! English ones (and the neutral/default LCIDs) are read as en-US and
 //! reported to the ledger.
 
-use super::{E_INVALIDARG, HResult, S_OK, missing, put, wide_len};
+use super::{DISP_E_OVERFLOW, E_INVALIDARG, HResult, S_OK, missing, put, wide_len};
 use crate::variant::{
     DISP_E_BADVARTYPE, DISP_E_TYPEMISMATCH, VARIANT_ALPHABOOL, VT_BOOL, VT_BSTR, VT_CY, VT_I4,
     VT_R8, VT_UI4, Value, Variant, bstr, chars, convert, decimal,
@@ -176,6 +176,109 @@ pub extern "system" fn VarBstrFromBool(
     match convert(Value::Bool(b != 0), VT_BSTR, VARIANT_ALPHABOOL) {
         Ok(v) => {
             put(out, v[0] as *mut u16);
+            S_OK
+        }
+        Err(hr) => hr,
+    }
+}
+
+/// DATE's range: 1 January 100 to 31 December 9999 (as days from 30
+/// December 1899); a value whose day is outside it is DISP_E_OVERFLOW.
+const DATE_MIN: f64 = -657_434.0;
+const DATE_MAX: f64 = 2_958_465.0;
+
+/// A DATE from a number of days: DISP_E_OVERFLOW past the range.
+fn date(v: f64, out: *mut f64) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    if v.is_nan() || v <= DATE_MIN - 1.0 || v >= DATE_MAX + 1.0 {
+        return DISP_E_OVERFLOW;
+    }
+    put(out, v);
+    S_OK
+}
+
+/// VarDateFromR8: the same number, within DATE's range.
+#[unsafe(no_mangle)]
+pub extern "system" fn VarDateFromR8(v: f64, out: *mut f64) -> HResult {
+    date(v, out)
+}
+
+/// VarDateFromCy: the currency's value (units of 1/10000) as days.
+#[unsafe(no_mangle)]
+pub extern "system" fn VarDateFromCy(cy: i64, out: *mut f64) -> HResult {
+    date(cy as f64 / 10000.0, out)
+}
+
+/// VarDateFromBool: VARIANT_TRUE is -1.0, VARIANT_FALSE 0.0.
+#[unsafe(no_mangle)]
+pub extern "system" fn VarDateFromBool(b: i16, out: *mut f64) -> HResult {
+    date(f64::from(b), out)
+}
+
+/// VarR8FromDate: the DATE's number.
+#[unsafe(no_mangle)]
+pub extern "system" fn VarR8FromDate(d: f64, out: *mut f64) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, d);
+    S_OK
+}
+
+/// VarR8FromCy: the currency's value (units of 1/10000).
+#[unsafe(no_mangle)]
+pub extern "system" fn VarR8FromCy(cy: i64, out: *mut f64) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, cy as f64 / 10000.0);
+    S_OK
+}
+
+/// VarCyFromDate: as VarCyFromR8 of the DATE's number.
+#[unsafe(no_mangle)]
+pub extern "system" fn VarCyFromDate(d: f64, out: *mut i64) -> HResult {
+    VarCyFromR8(d, out)
+}
+
+/// VarBoolFromDate: VARIANT_TRUE for any day but 0.
+#[unsafe(no_mangle)]
+pub extern "system" fn VarBoolFromDate(d: f64, out: *mut i16) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, if d != 0.0 { -1 } else { 0 });
+    S_OK
+}
+
+/// VarBoolFromCy: VARIANT_TRUE for any value but 0.
+#[unsafe(no_mangle)]
+pub extern "system" fn VarBoolFromCy(cy: i64, out: *mut i16) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, if cy != 0 { -1 } else { 0 });
+    S_OK
+}
+
+/// VarBstrFromR8: the number with up to 15 significant digits, fixed
+/// from 1E-11 to below 1E+15, else as "5.6789E-12" (en-US).
+#[unsafe(no_mangle)]
+pub extern "system" fn VarBstrFromR8(
+    v: f64,
+    lcid: u32,
+    _flags: u32,
+    out: *mut *mut u16,
+) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    check_locale(b"oleaut32.dll!VarBstrFromR8(locale)", lcid);
+    match convert(Value::Real(v), VT_BSTR, 0) {
+        Ok(b) => {
+            put(out, b[0] as *mut u16);
             S_OK
         }
         Err(hr) => hr,

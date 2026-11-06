@@ -263,6 +263,16 @@ pub extern "system" fn PathRemoveBackslashW(path: *mut u16) -> *mut u16 {
     path.wrapping_add(last)
 }
 
+/// PathIsFileSpecW: TRUE when the path has no ':' or '\\' (a file
+/// name alone, as documented).
+#[unsafe(no_mangle)]
+pub extern "system" fn PathIsFileSpecW(path: *const u16) -> i32 {
+    if path.is_null() {
+        return 0;
+    }
+    i32::from(!chars(path).iter().any(|&c| c == u16::from(b':') || c == u16::from(b'\\')))
+}
+
 /// PathIsRelativeW: TRUE unless the path starts with a backslash or a
 /// drive (`X:`); NULL and "" are relative.
 #[unsafe(no_mangle)]

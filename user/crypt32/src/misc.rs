@@ -164,8 +164,8 @@ pub extern "system" fn CertGetNameStringA(
 /// CRYPT_DATA_BLOB.
 #[repr(C)]
 pub struct DataBlob {
-    size: u32,
-    data: *const u8,
+    pub(crate) size: u32,
+    pub(crate) data: *const u8,
 }
 
 /// The DER element at `at` in `b`: (tag, content start, content end).

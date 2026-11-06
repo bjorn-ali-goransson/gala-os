@@ -406,7 +406,7 @@ pub(crate) fn decimal(mut v: u128, out: &mut [u8], mut at: usize) -> usize {
 }
 
 /// `v` as Automation prints a double: up to 15 significant digits, no
-/// trailing zeros, an exponent ("E+n"/"E-n") outside 1e-5 .. 1e15.
+/// trailing zeros, an exponent ("E+n"/"E-n") outside 1e-11 .. 1e15.
 fn format_real(v: f64, out: &mut [u8; 48]) -> usize {
     let mut n = 0;
     if v == 0.0 || v.is_nan() {
@@ -449,7 +449,9 @@ fn format_real(v: f64, out: &mut [u8; 48]) -> usize {
         out[n] = b;
         n += 1;
     };
-    if (-5..15).contains(&e) {
+    // Fixed notation from 1E-11 to below 1E+15 (Wine's vartype.c
+    // test_VarBstrFromR8 vectors, checked on Windows), else exponential.
+    if (-11..15).contains(&e) {
         if e < 0 {
             push(b'0');
             push(b'.');

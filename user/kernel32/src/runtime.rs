@@ -618,7 +618,7 @@ pub extern "system" fn GetThreadDescription(thread: Handle, out: *mut *mut u16) 
         return 0x8007_0057u32 as i32;
     }
     let name = with_names(|n| n.iter().find(|e| e.0 == id).map_or([0; 64], |e| e.1));
-    let p = super::heap::LocalAlloc(0, 128).cast::<u16>();
+    let p = super::global::LocalAlloc(0, 128).cast::<u16>();
     if p.is_null() {
         return 0x8007_000eu32 as i32; // E_OUTOFMEMORY
     }

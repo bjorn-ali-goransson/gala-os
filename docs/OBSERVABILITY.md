@@ -339,7 +339,11 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB; paged U/L (peak P) nonpaged
    U/L (peak P) handles N/L (peak P) refused R`, bytes), every
-   scheduler thread, the ledger, the statistics, each session's
+   scheduler thread, the ledger, each Linux thread (`lx: pid P thread
+   T (core C): mask .. pending .. process pending .. blocked|running`),
+   each epoll set's entries (`lx: pid P epoll fd N: fd ..`) and every
+   futex waiter (`lx: futex waiter: pid P address A bitset B thread
+   T`), the statistics, each session's
    windows (`statedump: session N: ... windows ...`) and window stations
    (`statedump: session N window stations: WinSta0 ...`), then
    `statedump: end`. A machine too stuck for this still has part 1.

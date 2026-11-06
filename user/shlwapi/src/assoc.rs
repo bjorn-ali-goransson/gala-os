@@ -599,3 +599,27 @@ pub extern "system" fn SHCreateStreamOnFileEx(
     }
     S_OK
 }
+
+const STGM_CONVERT: u32 = 0x0002_0000;
+const STGM_DELETEONRELEASE: u32 = 0x0400_0000;
+
+/// SHCreateStreamOnFileW: SHCreateStreamOnFileEx with no attributes and
+/// no `create` (STGM_CREATE replaces the file; without it the file must
+/// exist). STGM_CONVERT, STGM_DELETEONRELEASE and STGM_TRANSACTED are
+/// E_INVALIDARG (Wine's istream.c tests, checked on Windows).
+#[unsafe(no_mangle)]
+pub extern "system" fn SHCreateStreamOnFileW(
+    path: *const u16,
+    mode: u32,
+    out: *mut *mut c_void,
+) -> i32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    if mode & (STGM_CONVERT | STGM_DELETEONRELEASE | STGM_TRANSACTED) != 0 {
+        // SAFETY: the caller's output pointer.
+        unsafe { *out = core::ptr::null_mut() };
+        return E_INVALIDARG;
+    }
+    SHCreateStreamOnFileEx(path, mode, 0, 0, core::ptr::null_mut(), out)
+}

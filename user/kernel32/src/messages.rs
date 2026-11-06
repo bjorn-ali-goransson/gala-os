@@ -404,7 +404,7 @@ fn deliver(flags: u32, text: &[u16], buffer: *mut c_void, size: u32, wide: bool)
     };
     if flags & FORMAT_MESSAGE_ALLOCATE_BUFFER != 0 {
         let units = (text.len() + 1).max(size as usize);
-        let p = super::heap::LocalAlloc(0, units * unit);
+        let p = super::global::LocalAlloc(0, units * unit);
         if p.is_null() {
             return fail_with(8, 0); // ERROR_NOT_ENOUGH_MEMORY
         }

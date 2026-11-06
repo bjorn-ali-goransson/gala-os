@@ -56,6 +56,23 @@
  * - PropVariantCopy: a VT_LPWSTR is copied (a new string), a VT_UNKNOWN
  *   AddRef'd, a vector of strings copied element by element; an invalid
  *   type is STG_E_INVALIDPARAMETER.
+ * - CreateStreamOnHGlobal with an HGLOBAL (Wine's
+ *   dlls/ole32/tests/hglobalstream.c): the stream starts with the
+ *   block's contents and GlobalSize; writes past the end grow the block
+ *   (GlobalReAlloc, so a GMEM_FIXED block moves and the stream's handle
+ *   changes); GetHGlobalFromStream gives the handle (E_INVALIDARG for a
+ *   NULL argument or another stream); clones share the block and size
+ *   but have their own position, starting at the original's; the block
+ *   is freed with the last stream when fDeleteOnRelease. A freed block
+ *   reads as empty and fails SetSize and Write with E_OUTOFMEMORY.
+ *   Seek takes the low 32 bits of the move as signed and keeps the
+ *   position in 32 bits: a result below 0 or past 4 GiB is
+ *   STG_E_SEEKERROR (so is an unknown origin), which still reports the
+ *   position; SetSize ignores the high 32 bits. CopyTo reads from this
+ *   stream and writes what it read to the other.
+ * - CoFileTimeNow: the system time as a FILETIME (between two
+ *   GetSystemTimeAsFileTime calls). CoGetCurrentProcess: non-zero, the
+ *   same on each call in a thread, another number in another thread.
  *
  * Prints "ole32_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
@@ -124,6 +141,172 @@ static WCHAR *task_string(const WCHAR *s) {
     WCHAR *p = CoTaskMemAlloc((wcslen(s) + 1) * sizeof(WCHAR));
     wcscpy(p, s);
     return p;
+}
+
+/* The stream's handle, size (Stat) and position. */
+static void stream_info(IStream *s, HGLOBAL *h, ULONG *size, ULONG *pos) {
+    STATSTG st;
+    LARGE_INTEGER zero = {{0, 0}};
+    ULARGE_INTEGER at;
+    *h = NULL;
+    CHECK(GetHGlobalFromStream(s, h) == S_OK);
+    memset(&st, 0x55, sizeof st);
+    CHECK(IStream_Stat(s, &st, STATFLAG_DEFAULT) == S_OK && st.type == STGTY_STREAM);
+    CHECK(st.pwcsName == NULL && st.cbSize.HighPart == 0);
+    *size = st.cbSize.LowPart;
+    CHECK(IStream_Seek(s, zero, STREAM_SEEK_CUR, &at) == S_OK && at.HighPart == 0);
+    *pos = at.LowPart;
+}
+
+static DWORD WINAPI other_thread(void *out) {
+    *(DWORD *)out = CoGetCurrentProcess();
+    return 0;
+}
+
+static void time_and_numbers(void) {
+    FILETIME before, now, after;
+    GetSystemTimeAsFileTime(&before);
+    CHECK(CoFileTimeNow(&now) == S_OK);
+    GetSystemTimeAsFileTime(&after);
+    ULONGLONG b = ((ULONGLONG)before.dwHighDateTime << 32) | before.dwLowDateTime;
+    ULONGLONG n = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    ULONGLONG a = ((ULONGLONG)after.dwHighDateTime << 32) | after.dwLowDateTime;
+    CHECK(b <= n && n <= a);
+    DWORD mine = CoGetCurrentProcess(), theirs = 0;
+    CHECK(mine != 0 && CoGetCurrentProcess() == mine);
+    HANDLE t = CreateThread(NULL, 0, other_thread, &theirs, 0, NULL);
+    CHECK(t != NULL && WaitForSingleObject(t, 10000) == WAIT_OBJECT_0);
+    CloseHandle(t);
+    CHECK(theirs != 0 && theirs != mine);
+}
+
+static void hglobal_streams(void) {
+    static const char text[] = "this is a test string";
+    static const char hello[] = "Hello World!";
+    char buf[64];
+    ULONG n, size, pos;
+    HGLOBAL h, got, got2;
+    IStream *s, *clone, *other;
+    LARGE_INTEGER move;
+    ULARGE_INTEGER to, read, written;
+
+    /* A caller's block: its contents and size. */
+    h = GlobalAlloc(GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_DDESHARE, sizeof text);
+    CHECK(h != NULL);
+    memcpy(GlobalLock(h), text, sizeof text);
+    GlobalUnlock(h);
+    CHECK(CreateStreamOnHGlobal(h, FALSE, &s) == S_OK);
+    stream_info(s, &got, &size, &pos);
+    CHECK(got == h && size == sizeof text && pos == 0);
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == sizeof text);
+    CHECK(memcmp(buf, text, sizeof text) == 0);
+    /* Writing at the end grows the block, same handle. */
+    CHECK(IStream_Write(s, "!!", 2, &n) == S_OK && n == 2);
+    stream_info(s, &got, &size, &pos);
+    CHECK(got == h && size == sizeof text + 2 && pos == sizeof text + 2);
+    CHECK(GlobalSize(h) >= sizeof text + 2);
+    char *p = GlobalLock(h);
+    CHECK(p != NULL && memcmp(p, text, sizeof text) == 0 && p[sizeof text] == '!');
+    GlobalUnlock(h);
+    /* GetHGlobalFromStream's arguments. */
+    CHECK(GetHGlobalFromStream(s, NULL) == E_INVALIDARG);
+    CHECK(GetHGlobalFromStream(NULL, &got) == E_INVALIDARG);
+    Obj o;
+    make(&o, FALSE);
+    got = (HGLOBAL)1;
+    CHECK(GetHGlobalFromStream((IStream *)&o, &got) == E_INVALIDARG);
+    /* Seek: an unknown origin, before the start, the 32-bit position. */
+    to.QuadPart = 0xcafecafecafecafeull;
+    move.QuadPart = 123;
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_END + 1, &to) == STG_E_SEEKERROR);
+    CHECK(to.QuadPart == sizeof text + 2);
+    move.QuadPart = 0x80000000;
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_SET, &to) == STG_E_SEEKERROR);
+    CHECK(to.QuadPart == sizeof text + 2);
+    move.QuadPart = -(LONGLONG)(sizeof text + 3);
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_CUR, &to) == STG_E_SEEKERROR);
+    move.QuadPart = 0xffffffff00000005ll; /* the high part is ignored */
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_SET, &to) == S_OK && to.QuadPart == 5);
+    move.QuadPart = 0x7fffffff;
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_SET, &to) == S_OK && to.QuadPart == 0x7fffffff);
+    move.QuadPart = 9;
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_CUR, &to) == S_OK && to.QuadPart == 0x80000008);
+    move.QuadPart = 0x7fffffff;
+    CHECK(IStream_Seek(s, move, STREAM_SEEK_CUR, &to) == STG_E_SEEKERROR && to.QuadPart == 0x80000008);
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 0);
+    /* Not deleted on release. */
+    CHECK(IStream_Release(s) == 0);
+    CHECK(GlobalSize(h) >= sizeof text + 2 && GlobalFree(h) == NULL);
+
+    /* A block of its own; a clone shares it. */
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &s) == S_OK);
+    stream_info(s, &h, &size, &pos);
+    CHECK(h != NULL && size == 0 && pos == 0);
+    CHECK(IStream_Write(s, hello, sizeof hello, NULL) == S_OK);
+    CHECK(IStream_Clone(s, &clone) == S_OK);
+    stream_info(clone, &got, &size, &pos);
+    CHECK(got == h && size == sizeof hello && pos == sizeof hello);
+    move.QuadPart = 0;
+    CHECK(IStream_Seek(clone, move, STREAM_SEEK_SET, NULL) == S_OK);
+    stream_info(s, &got, &size, &pos);
+    CHECK(pos == sizeof hello);
+    to.QuadPart = 0x8000;
+    CHECK(IStream_SetSize(s, to) == S_OK);
+    stream_info(clone, &got, &size, &pos);
+    CHECK(got == h && size == 0x8000 && pos == 0);
+    to.QuadPart = 0xffffffff00000010ull; /* the high part is ignored */
+    CHECK(IStream_SetSize(clone, to) == S_OK);
+    stream_info(s, &got, &size, &pos);
+    CHECK(size == 0x10);
+    /* The clone outlives the original. */
+    CHECK(IStream_Release(s) == 0);
+    memset(buf, 0, sizeof buf);
+    CHECK(IStream_Read(clone, buf, sizeof buf, &n) == S_OK && n == 0x10);
+    CHECK(memcmp(buf, hello, sizeof hello) == 0);
+    /* CopyTo: what it read, what the other stream took. */
+    CHECK(CreateStreamOnHGlobal(NULL, TRUE, &other) == S_OK);
+    move.QuadPart = 6;
+    CHECK(IStream_Seek(clone, move, STREAM_SEEK_SET, NULL) == S_OK);
+    to.QuadPart = 100;
+    CHECK(IStream_CopyTo(clone, other, to, &read, &written) == S_OK);
+    CHECK(read.QuadPart == 10 && written.QuadPart == 10);
+    stream_info(other, &got2, &size, &pos);
+    CHECK(got2 != h && size == 10 && pos == 10);
+    p = GlobalLock(got2);
+    CHECK(p != NULL && memcmp(p, "World!", 7) == 0);
+    GlobalUnlock(got2);
+    CHECK(IStream_Release(other) == 0);
+    CHECK(IStream_Release(clone) == 0);
+
+    /* A GMEM_FIXED block moves when it grows: the stream's handle changes,
+     * for its clone too. */
+    h = GlobalAlloc(GMEM_FIXED, 1);
+    CHECK(CreateStreamOnHGlobal(h, TRUE, &s) == S_OK);
+    CHECK(IStream_Clone(s, &clone) == S_OK);
+    stream_info(s, &got, &size, &pos);
+    CHECK(got == h && size == 1);
+    to.QuadPart = 0x8000;
+    CHECK(IStream_SetSize(s, to) == S_OK);
+    stream_info(s, &got, &size, &pos);
+    CHECK(got != NULL && got != h && size == 0x8000);
+    stream_info(clone, &got2, &size, &pos);
+    CHECK(got2 == got && size == 0x8000);
+    CHECK(IStream_Release(s) == 0 && IStream_Release(clone) == 0);
+
+    /* A block freed under the stream. */
+    h = GlobalAlloc(GMEM_MOVEABLE, sizeof text);
+    memcpy(GlobalLock(h), text, sizeof text);
+    GlobalUnlock(h);
+    CHECK(CreateStreamOnHGlobal(h, FALSE, &s) == S_OK);
+    CHECK(GlobalFree(h) == NULL);
+    memset(buf, 0, sizeof buf);
+    n = 7;
+    CHECK(IStream_Read(s, buf, sizeof buf, &n) == S_OK && n == 0 && buf[0] == 0);
+    to.QuadPart = 64;
+    CHECK(IStream_SetSize(s, to) == E_OUTOFMEMORY);
+    n = 7;
+    CHECK(IStream_Write(s, buf, 8, &n) == E_OUTOFMEMORY && n == 0);
+    CHECK(IStream_Release(s) == 0);
 }
 
 int main(void) {
@@ -422,6 +605,9 @@ int main(void) {
         a.vt = 0x5555;
         CHECK(PropVariantCopy(&b, &a) == STG_E_INVALIDPARAMETER);
     }
+
+    hglobal_streams();
+    time_and_numbers();
 
     CoUninitialize();
     printf("ole32_test: ok\n");

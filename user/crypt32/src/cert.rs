@@ -300,6 +300,9 @@ struct Block {
     magic: u32,
     refs: AtomicU32,
     props: *mut Prop,
+    /// A CNG key the context owns (PFXImportCertStore's
+    /// PKCS12_NO_PERSIST_KEY, CRYPT_ACQUIRE_CACHE_FLAG): freed with it.
+    owned_key: usize,
     context: CertContext,
     info: CertInfo,
 }
@@ -536,6 +539,7 @@ pub extern "system" fn CertCreateCertificateContext(
             magic: CERT_MAGIC,
             refs: AtomicU32::new(1),
             props: core::ptr::null_mut(),
+            owned_key: 0,
             context: CertContext {
                 encoding,
                 encoded,
@@ -599,6 +603,9 @@ pub extern "system" fn CertFreeCertificateContext(p: *const CertContext) -> i32 
         return 1;
     }
     if old & !OWNED == 1 {
+        if b.owned_key != 0 {
+            free_ncrypt_key(b.owned_key);
+        }
         let mut prop = b.props;
         while !prop.is_null() {
             // SAFETY: our property list.
@@ -676,7 +683,7 @@ fn add_prop(b: &mut Block, id: u32, data: &[u8]) -> bool {
 }
 
 /// A bcrypt function, resolved by name.
-fn bcrypt(name: &core::ffi::CStr) -> Option<usize> {
+pub(crate) fn bcrypt(name: &core::ffi::CStr) -> Option<usize> {
     // SAFETY: loading a system DLL and looking up a name.
     unsafe {
         let m = LoadLibraryA(c"bcrypt.dll".as_ptr().cast());
@@ -1796,35 +1803,182 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
 }
 
 const CRYPT_E_NO_KEY_PROPERTY: u32 = 0x8009_200b;
+const NTE_NOT_SUPPORTED: u32 = 0x8009_0029;
+pub(crate) const CERT_NCRYPT_KEY_SPEC: u32 = 0xffff_ffff;
+const CRYPT_ACQUIRE_CACHE_FLAG: u32 = 0x1;
+const CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG: u32 = 0x1_0000;
+const CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG: u32 = 0x2_0000;
+const CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG: u32 = 0x4_0000;
+/// CRYPT_KEY_PROV_INFO.dwFlags: CRYPT_MACHINE_KEYSET, which CNG spells
+/// NCRYPT_MACHINE_KEY_FLAG.
+const CRYPT_MACHINE_KEYSET: u32 = 0x20;
 
-/// CryptAcquireCertificatePrivateKey: the private key of a certificate
-/// whose context names one (CERT_KEY_PROV_INFO_PROP_ID). gala opens no
-/// keys through it yet: with that property it is recorded and fails;
-/// without it, CRYPT_E_NO_KEY_PROPERTY, as documented.
+/// An ncrypt function, resolved by name.
+pub(crate) fn ncrypt(name: &core::ffi::CStr) -> Option<usize> {
+    // SAFETY: loading a system DLL and looking up a name.
+    unsafe {
+        let m = LoadLibraryA(c"ncrypt.dll".as_ptr().cast());
+        if m == 0 {
+            return None;
+        }
+        let f = GetProcAddress(m, name.as_ptr().cast());
+        (f != 0).then_some(f)
+    }
+}
+
+/// NCryptFreeObject.
+pub(crate) fn free_ncrypt_key(key: usize) {
+    if let Some(f) = ncrypt(c"NCryptFreeObject") {
+        // SAFETY: NCryptFreeObject's documented signature; a key we own.
+        unsafe { core::mem::transmute::<usize, unsafe extern "system" fn(usize) -> i32>(f)(key) };
+    }
+}
+
+/// Gives context `p` the CNG key `key`, which it then owns (freed with
+/// it): CERT_KEY_CONTEXT_PROP_ID (cbSize 24, the handle, CERT_NCRYPT_KEY_
+/// SPEC) and CERT_NCRYPT_KEY_HANDLE_PROP_ID, as Windows keeps a key that
+/// is not persisted.
+pub(crate) fn give_key(p: *const CertContext, key: usize) -> bool {
+    let Some(b) = block(p) else { return false };
+    let mut context = [0u8; 24];
+    context[..4].copy_from_slice(&24u32.to_le_bytes());
+    context[8..16].copy_from_slice(&(key as u64).to_le_bytes());
+    context[16..20].copy_from_slice(&CERT_NCRYPT_KEY_SPEC.to_le_bytes());
+    if !add_prop(b, CERT_KEY_CONTEXT_PROP_ID, &context)
+        || !add_prop(b, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &(key as u64).to_le_bytes())
+    {
+        return false;
+    }
+    if b.owned_key != 0 && b.owned_key != key {
+        free_ncrypt_key(b.owned_key);
+    }
+    b.owned_key = key;
+    true
+}
+
+/// The CNG key a CRYPT_KEY_PROV_INFO with dwProvType 0 names: opened
+/// from its key storage provider.
+fn open_ncrypt_key(info: &[u8]) -> Result<usize, u32> {
+    type Open = unsafe extern "system" fn(*mut usize, *const u16, u32) -> i32;
+    type OpenKey = unsafe extern "system" fn(usize, *mut usize, *const u16, u32, u32) -> i32;
+    let field =
+        |at: usize| u32::from_le_bytes([info[at], info[at + 1], info[at + 2], info[at + 3]]);
+    // The stored strings follow the 48 bytes (set_prov_info); the
+    // container's length is at 28.
+    let container_len = field(28) as usize;
+    let mut container = [0u16; 260];
+    let mut provider = [0u16; 260];
+    for (i, w) in info[48..].chunks_exact(2).enumerate() {
+        let c = u16::from_le_bytes([w[0], w[1]]);
+        if i < container_len {
+            container[i] = c;
+        } else if i > container_len && i - container_len - 1 < 259 {
+            provider[i - container_len - 1] = c;
+        }
+    }
+    let (spec, flags) = (field(40), field(20) & CRYPT_MACHINE_KEYSET);
+    let (Some(open), Some(open_key)) =
+        (ncrypt(c"NCryptOpenStorageProvider"), ncrypt(c"NCryptOpenKey"))
+    else {
+        return Err(NTE_NOT_SUPPORTED);
+    };
+    let (mut prov, mut key) = (0usize, 0usize);
+    // SAFETY: ncrypt's documented signatures; NUL-terminated names.
+    unsafe {
+        let r = core::mem::transmute::<usize, Open>(open)(&mut prov, provider.as_ptr(), 0);
+        if r != 0 {
+            return Err(r as u32);
+        }
+        let r = core::mem::transmute::<usize, OpenKey>(open_key)(
+            prov,
+            &mut key,
+            container.as_ptr(),
+            spec,
+            flags,
+        );
+        free_ncrypt_key(prov);
+        if r != 0 {
+            return Err(r as u32);
+        }
+    }
+    Ok(key)
+}
+
+/// CryptAcquireCertificatePrivateKey: the private key of a certificate,
+/// as documented: the key the context holds (CERT_KEY_CONTEXT_PROP_ID,
+/// not the caller's to free), or the key CERT_KEY_PROV_INFO_PROP_ID
+/// names, opened (the caller's, unless CRYPT_ACQUIRE_CACHE_FLAG keeps it
+/// in the context); CRYPT_E_NO_KEY_PROPERTY without either. gala's keys
+/// are CNG keys (CERT_NCRYPT_KEY_SPEC), given when the caller allows
+/// them (CRYPT_ACQUIRE_ALLOW/PREFER/ONLY_NCRYPT_KEY_FLAG); CryptoAPI
+/// (CSP) keys do not exist in gala (recorded).
 #[unsafe(no_mangle)]
 pub extern "system" fn CryptAcquireCertificatePrivateKey(
     cert: *const CertContext,
-    _flags: u32,
+    flags: u32,
     _reserved: *const c_void,
     key: *mut usize,
-    _spec: *mut u32,
+    spec: *mut u32,
     free: *mut i32,
 ) -> i32 {
-    if !key.is_null() {
-        // SAFETY: the caller's outputs.
-        unsafe { *key = 0 };
-    }
-    if !free.is_null() {
-        // SAFETY: as above.
-        unsafe { *free = 0 };
-    }
+    let put = |k: usize, owned: bool| {
+        // SAFETY: the caller's outputs (each may be null).
+        unsafe {
+            if !key.is_null() {
+                *key = k;
+            }
+            if !spec.is_null() && k != 0 {
+                *spec = CERT_NCRYPT_KEY_SPEC;
+            }
+            if !free.is_null() {
+                *free = i32::from(owned);
+            }
+        }
+    };
+    put(0, false);
     let Some(b) = block(cert) else { return error(E_INVALIDARG, 0) };
-    if find_prop(b, CERT_KEY_PROV_INFO_PROP_ID).is_some() {
-        crate::store::unsupported(
-            b"crypt32.dll!CryptAcquireCertificatePrivateKey(a key provider)",
-            0,
-        );
-        return error(0x8009_0029, 0); // NTE_NOT_SUPPORTED
+    let ncrypt_ok = flags
+        & (CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG
+            | CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG
+            | CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG)
+        != 0;
+    let held = find_prop(b, CERT_KEY_CONTEXT_PROP_ID).filter(|c| c.len() >= 20).map(|c| {
+        let handle = u64::from_le_bytes(c[8..16].try_into().unwrap_or([0; 8])) as usize;
+        (handle, u32::from_le_bytes([c[16], c[17], c[18], c[19]]))
+    });
+    let info = find_prop(b, CERT_KEY_PROV_INFO_PROP_ID);
+    if held.is_none() && info.is_none() {
+        return error(CRYPT_E_NO_KEY_PROPERTY, 0);
     }
-    error(CRYPT_E_NO_KEY_PROPERTY, 0)
+    if let Some((handle, key_spec)) = held {
+        if key_spec != CERT_NCRYPT_KEY_SPEC || !ncrypt_ok {
+            crate::store::unsupported(
+                b"crypt32.dll!CryptAcquireCertificatePrivateKey(a CryptoAPI key)",
+                flags.into(),
+            );
+            return error(NTE_NOT_SUPPORTED, 0);
+        }
+        put(handle, false);
+        return 1;
+    }
+    let info = info.unwrap_or(&[]);
+    let provider_type = u32::from_le_bytes([info[16], info[17], info[18], info[19]]);
+    if provider_type != 0 || !ncrypt_ok {
+        crate::store::unsupported(
+            b"crypt32.dll!CryptAcquireCertificatePrivateKey(a CryptoAPI key)",
+            provider_type.into(),
+        );
+        return error(NTE_NOT_SUPPORTED, 0);
+    }
+    match open_ncrypt_key(info) {
+        Ok(k) => {
+            if flags & CRYPT_ACQUIRE_CACHE_FLAG != 0 && give_key(cert, k) {
+                put(k, false);
+            } else {
+                put(k, true);
+            }
+            1
+        }
+        Err(e) => error(e, 0),
+    }
 }

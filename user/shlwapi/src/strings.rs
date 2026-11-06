@@ -188,3 +188,43 @@ pub extern "system" fn SHAutoComplete(_edit: usize, flags: u32) -> i32 {
     unsupported(b"shlwapi.dll!SHAutoComplete", flags.into());
     0x8000_4001u32 as i32
 }
+
+/// StrToIntW: a decimal number with an optional '-' (no '+', no leading
+/// spaces), as far as the digits go; 0 when there are none. Overflow
+/// wraps (Wine's string.c tests, checked on Windows: "4294967319" is 23).
+#[unsafe(no_mangle)]
+pub extern "system" fn StrToIntW(s: *const u16) -> i32 {
+    let s = chars(s);
+    let (negative, digits) = match s.first() {
+        Some(&c) if c == u16::from(b'-') => (true, &s[1..]),
+        _ => (false, s),
+    };
+    let mut v = 0i32;
+    for &c in digits.iter().take_while(|&&c| (u16::from(b'0')..=u16::from(b'9')).contains(&c)) {
+        v = v.wrapping_mul(10).wrapping_add(i32::from(c - u16::from(b'0')));
+    }
+    if negative { v.wrapping_neg() } else { v }
+}
+
+/// StrTrimW: removes the characters of `trim` from both ends of `s` in
+/// place; TRUE when any were removed.
+#[unsafe(no_mangle)]
+pub extern "system" fn StrTrimW(s: *mut u16, trim: *const u16) -> i32 {
+    if s.is_null() || trim.is_null() {
+        return 0;
+    }
+    let set = chars(trim);
+    let text = chars(s);
+    let start = text.iter().position(|c| !set.contains(c)).unwrap_or(text.len());
+    let end = text.iter().rposition(|c| !set.contains(c)).map_or(start, |i| i + 1);
+    if start == 0 && end == text.len() {
+        return 0;
+    }
+    // SAFETY: the caller's string: the kept part moves to its start and
+    // a NUL follows it.
+    unsafe {
+        core::ptr::copy(s.add(start), s, end - start);
+        *s.add(end - start) = 0;
+    }
+    1
+}

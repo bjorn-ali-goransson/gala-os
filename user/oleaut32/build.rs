@@ -65,6 +65,15 @@ fn main() {
         ("GetRecordInfoFromGuids", 322),
         ("GetRecordInfoFromTypeInfo", 323),
         ("SafeArrayCreateVector", 411),
+        ("VarR8FromCy", 82),
+        ("VarR8FromDate", 83),
+        ("VarDateFromR8", 92),
+        ("VarDateFromCy", 93),
+        ("VarDateFromBool", 96),
+        ("VarCyFromDate", 103),
+        ("VarBstrFromR8", 112),
+        ("VarBoolFromDate", 123),
+        ("VarBoolFromCy", 124),
     ];
     for (name, ordinal) in ordinals {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name},@{ordinal}");

@@ -39,6 +39,14 @@
  * - VarBstrCmp (#314, imported by ordinal by Chromium): VARCMP_LT, _EQ,
  *   _GT by the locale's order; NORM_IGNORECASE makes case equal; a NULL
  *   BSTR is the empty string.
+ * - What SQL Server LocalDB's msxmlsql.dll imports by ordinal (Wine's
+ *   vartype.c vectors; each export at its ordinal): VarR8FromCy (#82)
+ *   and VarDateFromCy (#93) divide by 10000; VarR8FromDate (#83) and
+ *   VarDateFromR8 (#92, DISP_E_OVERFLOW a day outside 100-9999) keep the
+ *   number; VarDateFromBool (#96): -1.0 or 0.0; VarCyFromDate (#103) as
+ *   VarCyFromR8; VarBoolFromDate (#123) and VarBoolFromCy (#124):
+ *   VARIANT_TRUE unless 0; VarBstrFromR8 (#112): 15 significant digits,
+ *   fixed from 1E-11 to below 1E+15, else "5.6789E-12".
  *
  * Prints "oleaut32_test: ok" or exits with the number of the failing
  * check. */
@@ -293,6 +301,59 @@ int main(void) {
     SysFreeString(apple2);
     SysFreeString(pear);
     SysFreeString(blank);
+
+    /* msxmlsql's ordinal imports. */
+    {
+        HMODULE m = GetModuleHandleW(L"oleaut32.dll");
+        CHECK(GetProcAddress(m, (LPCSTR)82) == (FARPROC)VarR8FromCy);
+        CHECK(GetProcAddress(m, (LPCSTR)83) == (FARPROC)VarR8FromDate);
+        CHECK(GetProcAddress(m, (LPCSTR)92) == (FARPROC)VarDateFromR8);
+        CHECK(GetProcAddress(m, (LPCSTR)93) == (FARPROC)VarDateFromCy);
+        CHECK(GetProcAddress(m, (LPCSTR)96) == (FARPROC)VarDateFromBool);
+        CHECK(GetProcAddress(m, (LPCSTR)103) == (FARPROC)VarCyFromDate);
+        CHECK(GetProcAddress(m, (LPCSTR)112) == (FARPROC)VarBstrFromR8);
+        CHECK(GetProcAddress(m, (LPCSTR)123) == (FARPROC)VarBoolFromDate);
+        CHECK(GetProcAddress(m, (LPCSTR)124) == (FARPROC)VarBoolFromCy);
+        double d = 7;
+        CY cy;
+        cy.int64 = -15000;
+        CHECK(VarR8FromCy(cy, &d) == S_OK && d == -1.5);
+        cy.int64 = 4000;
+        CHECK(VarDateFromCy(cy, &d) == S_OK && d == 0.4);
+        CHECK(VarR8FromDate(-1.0, &d) == S_OK && d == -1.0);
+        CHECK(VarDateFromR8(1.5, &d) == S_OK && d == 1.5);
+        CHECK(VarDateFromR8(-657434.0, &d) == S_OK && d == -657434.0);
+        CHECK(VarDateFromR8(2958465.5, &d) == S_OK);
+        CHECK(VarDateFromR8(-657435.0, &d) == DISP_E_OVERFLOW);
+        CHECK(VarDateFromR8(2958466.0, &d) == DISP_E_OVERFLOW);
+        CHECK(VarDateFromBool(VARIANT_TRUE, &d) == S_OK && d == -1.0);
+        CHECK(VarDateFromBool(VARIANT_FALSE, &d) == S_OK && d == 0.0);
+        CHECK(VarCyFromDate(1.00009f, &cy) == S_OK && cy.int64 == 10001);
+        CHECK(VarCyFromDate(-0.00005f, &cy) == S_OK && cy.int64 == 0);
+        VARIANT_BOOL vb = 7;
+        CHECK(VarBoolFromDate(-0.0, &vb) == S_OK && vb == VARIANT_FALSE);
+        CHECK(VarBoolFromDate(1.0, &vb) == S_OK && vb == VARIANT_TRUE);
+        cy.int64 = 0;
+        CHECK(VarBoolFromCy(cy, &vb) == S_OK && vb == VARIANT_FALSE);
+        cy.int64 = -32769;
+        CHECK(VarBoolFromCy(cy, &vb) == S_OK && vb == VARIANT_TRUE);
+        static const struct { double v; const wchar_t *text; } r8[] = {
+            { 0.56789, L"0.56789" }, { 5.6789e-6, L"0.0000056789" },
+            { 5.6789e-11, L"0.000000000056789" }, { 5.6789e-12, L"5.6789E-12" },
+            { 1.0e14, L"100000000000000" }, { 999999999999999.0, L"999999999999999" },
+            { 1.0e15, L"1E+15" }, { 1.234e16, L"1.234E+16" },
+            { 3.141592653589793, L"3.14159265358979" }, { 1234.567890123456789, L"1234.56789012346" },
+            { -2.5, L"-2.5" }, { 0.0, L"0" },
+        };
+        for (unsigned i = 0; i < sizeof r8 / sizeof r8[0]; i++) {
+            BSTR t = NULL;
+            HRESULT hr = VarBstrFromR8(r8[i].v, EN_US, 0, &t);
+            if (hr != S_OK || !bstr_is(t, r8[i].text))
+                printf("oleaut32_test: VarBstrFromR8 %u gave %08lx \"%ls\"\n", i, hr, t ? t : L"(null)");
+            CHECK(hr == S_OK && bstr_is(t, r8[i].text));
+            SysFreeString(t);
+        }
+    }
 
     printf("oleaut32_test: ok\n");
     return 0;

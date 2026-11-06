@@ -2245,6 +2245,27 @@ ntdll imports.
   sleeping 1 ms at a time (TODO: a kernel address wait, as
   WaitOnAddress, so that long waits sleep); every wake ends every wait,
   which the API allows.
+- **Global and local memory** (`global.rs`; `kernel32_misc_test`):
+  GMEM_FIXED/LMEM_FIXED memory is a process-heap block (at least one
+  byte) and its pointer is the handle. Moveable memory is a handle to a
+  16-byte entry `{flags, pointer}` of a handle table: the handle is the
+  address of the pointer (`handle % 16 == 8`, which heap pointers never
+  are, and `*(void **)handle` is the data, as old programs assume), the
+  flags Windows' (1 in use, 2 moveable, 4 discardable, 8 discarded, 0x8000
+  GMEM_DDESHARE, the lock count in bits 16-23, saturating at 255); a freed
+  entry holds the next free one instead (bit 0 clear), so stale handles
+  are ERROR_INVALID_HANDLE. The table is one 1 MiB reservation (65536
+  entries, Windows' limit) committed a page at a time under a spinlock.
+  Size 0 makes a discarded block (GlobalLock: ERROR_DISCARDED);
+  GlobalReAlloc keeps Windows' rules (GMEM_MODIFY changes flags only and
+  turns fixed memory moveable; a locked block moves only with
+  GMEM_MOVEABLE; size 0 discards an unlocked block; GMEM_DISCARDABLE
+  without GMEM_MODIFY fails); GlobalHandle of a data pointer finds its
+  entry. A value that is neither an entry nor mapped memory
+  (NtQueryVirtualMemory: gala's DLLs have no SEH to catch the fault)
+  fails as Windows' does after catching it. Global and Local handles are
+  one kind; GlobalUnlock and LocalUnlock differ for fixed memory and bad
+  handles.
 - **Language runtimes' needs** (`runtime.rs`): alertable multi-object
   waits, SignalObjectAndWait (not atomic here; TODO a kernel service),
   user APCs, the stack guarantee and error mode in the TEB, cycle times
@@ -2608,6 +2629,29 @@ ntdll imports.
   made once per process.
 - **crypt32 misc** (`misc.rs`): CryptMemAlloc/Realloc/Free (the process
   heap), PFXIsPFXBlob (the outer SEQUENCE { INTEGER 3, ContentInfo }).
+- **PKCS #12** (`pfx.rs`; `cert_test` pfx.rs): PFXImportCertStore reads a
+  PFX whose authSafe is `data` (public-key integrity is recorded and
+  fails), checks its MAC (HMAC-SHA1/SHA-2, key from the PKCS #12 KDF;
+  ERROR_INVALID_PASSWORD), and decrypts `encryptedData` and shrouded key
+  bags under the PKCS #12 PBE schemes (3DES, 2-key 3DES, RC2-128, RC2-40)
+  or PBES2 (PBKDF2 with HMAC-SHA1/256/384/512; AES-128/192/256-CBC or
+  DES-EDE3-CBC), all through bcrypt (hashes, HMACs, CBC with PKCS #7
+  padding; the KDFs are its own). The empty password is tried as an empty
+  BMPString with its NUL and as no bytes (the MAC tells which). Up to 32
+  certificates (friendly names kept) and 8 keys per PFX, each key going
+  to the certificate with its localKeyId (or the only one). Keys are
+  RSA keys of ncrypt's software KSP: persisted under a new GUID container
+  named by CRYPT_KEY_PROV_INFO (dwProvType 0, AT_KEYEXCHANGE), or with
+  PKCS12_NO_PERSIST_KEY owned by the context (CERT_KEY_CONTEXT with
+  CERT_NCRYPT_KEY_SPEC and CERT_NCRYPT_KEY_HANDLE, freed with the
+  context). Windows uses a CryptoAPI CSP unless PKCS12_PREFER/ALWAYS_
+  CNG_KSP; gala has no CSP keys, so a request without them is recorded
+  (`PFXImportCertStore(CSP key in the KSP)`) and served by the KSP.
+  CryptAcquireCertificatePrivateKey hands out these CNG keys when the
+  caller allows them (CRYPT_ACQUIRE_ALLOW/PREFER/ONLY_NCRYPT_KEY_FLAG):
+  the context's own (not the caller's to free) or the one the provider
+  info names, opened (the caller's, or kept in the context with
+  CRYPT_ACQUIRE_CACHE_FLAG); CSP keys are recorded and NTE_NOT_SUPPORTED.
   crypt32 loads bcrypt and advapi32 on first use (LoadLibrary), so it
   keeps no static imports of them (Caddy ships crypt32 alone).
 
@@ -2651,8 +2695,14 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   CoGetObjectContext with IComThreadingInfo), task memory on the process
   heap, version-4 GUIDs and their braced string forms
   (StringFromCLSID/IID, CLSIDFromString with CO_E_CLASSSTRING,
-  IIDFromString with E_INVALIDARG), an IStream on heap memory
-  (CreateStreamOnHGlobal without an HGLOBAL), an aggregatable
+  IIDFromString with E_INVALIDARG), CreateStreamOnHGlobal and
+  GetHGlobalFromStream (`stream.rs`: an IStream on a global memory
+  block, the caller's or a new moveable one; it grows with
+  GlobalReAlloc, so a fixed block moves and the stream's handle changes;
+  clones share the block and its size with positions of their own; the
+  block is freed with the last stream when asked; positions are 32-bit,
+  Seek past them STG_E_SEEKERROR), CoFileTimeNow, CoGetCurrentProcess (a
+  per-thread number from a count, never reused), an aggregatable
   free-threaded marshaler whose IMarshal methods are E_NOTIMPL, and
   CoWaitForMultipleHandles (no message pumping). In-process classes
   registered under HKCR\CLSID are created from their DLLs ("UI
@@ -2688,7 +2738,11 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   numbers, booleans, currency and strings in the en-US format; dates and
   decimals in VARIANTs recorded as missing); the direct conversions
   programs import (VarI4/UI4/R8/Cy/BoolFromStr, VarCyFromR8,
-  VarBstrFromCy/Bool, VarCyFromDec; strings to currency in exact decimal
+  VarBstrFromCy/Bool/R8, VarCyFromDec; the DATE/currency/boolean/double
+  ones msxmlsql imports by ordinal: VarR8FromCy/Date,
+  VarDateFromR8/Cy/Bool with DATE's range, VarCyFromDate,
+  VarBoolFromDate/Cy; doubles print with 15 significant digits, fixed
+  from 1E-11 to below 1E+15; strings to currency in exact decimal
   arithmetic, half to even); dates (`date.rs`: SystemTimeToVariantTime,
   VariantTimeToSystemTime to the second, VarDateFromStr for en-US
   month/day/year, year-month-day and English month names; the forms
@@ -2740,7 +2794,10 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   fragment in a file URL only after a .htm/.html name), AssocQueryStringW
   (the user's classes, then HKCR; shell\<verb>\command) and
   SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
-  transactions, CopyTo, Clone or region locks: recorded), and
+  transactions, CopyTo, Clone or region locks: recorded) with
+  SHCreateStreamOnFileW over it (STGM_CONVERT, _DELETEONRELEASE and
+  _TRANSACTED are E_INVALIDARG), StrToIntW (decimal with an optional
+  '-', wrapping), StrTrimW, PathIsFileSpecW, and
   SHCreateMemStream (#12, ole32's memory stream, loaded when first
   needed).
 - **rpcrt4**: UUID functions (`rpcrt4_test`). **netapi32**:
@@ -5958,8 +6015,9 @@ stations and desktops a program creates are refused until stage 3).
   CryptVerifyCertificateSignatureEx (RSA PKCS #1 and ECDSA P-256/P-384
   with SHA-1/2 through bcrypt); CertControlStore (nothing outside changes a store: resyncs do
   nothing, change notifications never fire, recorded); CertFindChainInStore
-  and CryptAcquireCertificatePrivateKey (no private keys in gala's
-  stores); CryptMsgClose/GetParam (no message handles yet).
+  (no chains by issuer yet); CryptAcquireCertificatePrivateKey (CNG keys
+  only, "PKCS #12" above); CryptMsgClose/GetParam (no message handles
+  yet).
 - kernel32: PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY is accepted (8 or
   16 bytes; Chromium sets it for every child) but not given to the child
   (recorded): mitigation policies are kept per process in kernel32, not
@@ -6631,18 +6689,19 @@ calls; priorities come from `strace` of target programs on real Linux.
 | Milestone | Scope | State |
 |---|---|---|
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
-| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run (`lx_busybox`); clone of threads and futex not yet |
+| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run (`lx_busybox`); threads, futex and musl's pthreads run (`lx_thread`) |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
-| 4 | dynamic linking (ld.so, glibc), epoll, sockets | TCP sockets, poll and select run (`lx_socket`, busybox httpd and wget: `lx_httpd`); the rest planned |
+| 4 | dynamic linking (ld.so, glibc), epoll, sockets | TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
 
 Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
 mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_hello`, `lx_write_exit`, `lx_brk`, `lx_mmap`, `lx_arch_prctl`,
 `lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
-exec_test and socket_test (`lx_fileio`, `lx_exec`, `lx_socket`, each
-also `_pie`), and clock_test, fork_test, fs_test, poll_test, proc_test,
-pty_test, signal_test, thread_test, whose transcripts recorded on Linux
+exec_test, socket_test, thread_test, poll_test and epoll_test
+(`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
+`lx_epoll`, each also `_pie`), and clock_test, fork_test, fs_test,
+proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
 static busybox from busybox.net (a `PREBUILT`) runs our scripts in
 `user/lx/busybox/` (`lx_busybox`: the shell and coreutils-style applets;
@@ -6745,7 +6804,7 @@ The running parts (milestone 1; `lxrun=`):
   the entry with every register as a fresh start (`Call::resume`). Not
   yet: x87's control word and the rest of the XSAVE state are not reset,
   the core process keeps its first name and image span (logs, crash
-  reports), other threads (none exist yet) are not ended.
+  reports), other threads are not ended first (ledgered).
 - **FS/GS bases**: the scheduler keeps a user FS base per thread beside
   the GS base; the switch writes IA32_FS_BASE only when it differs from
   the per-CPU cached value (NT threads all have 0: no cost between
@@ -6777,10 +6836,12 @@ The running parts (milestone 1; `lxrun=`):
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
   munmap, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
-  rt_sigpending, rt_sigtimedwait (below), fork, clone (only an exit
-  signal of SIGCHLD: a fork; other flags ENOSYS), wait4, ioctl (ENOTTY),
+  rt_sigpending, rt_sigtimedwait (below), fork, clone (CLONE_THREAD: a
+  thread; only an exit signal of SIGCHLD: a fork; CLONE_VM|CLONE_VFORK:
+  a vfork; other flags ENOSYS), wait4, ioctl (ENOTTY),
   writev, getpid, gettid, exit (the thread), exit_group (the process,
-  status & 0xff), fcntl (F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD/F_SETFD
+  status & 0xff), clone of threads, set_tid_address, futex, tgkill and
+  tkill (below), sched_yield, pause, fcntl (F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD/F_SETFD
   (FD_CLOEXEC only), F_GETFL/F_SETFL (O_NONBLOCK; the access mode
   ignored; a file's O_APPEND), F_GETPIPE_SZ/F_SETPIPE_SZ), dup, dup2,
   dup3 (O_CLOEXEC; the lowest free fd, a negative target EBADF),
@@ -6791,9 +6852,8 @@ The running parts (milestone 1; `lxrun=`):
   vfork, kill, rt_sigsuspend, the clocks and timers, sockets and poll
   (below),
   arch_prctl (SET/GET FS/GS; a base at or above TASK_SIZE is EPERM),
-  set_tid_address (returns the tid), pipe and pipe2 (O_NONBLOCK,
-  O_CLOEXEC; blocking reads and writes poll every ms until the process
-  ends: no wait queue yet). A pipe keeps its bytes as Linux does, in
+  pipe and pipe2 (O_NONBLOCK, O_CLOEXEC; blocking reads and writes wait
+  on the pipe's wait queue: `lx::wait`). A pipe keeps its bytes as Linux does, in
   whole pages: 64 KiB by default, F_SETPIPE_SZ rounds up to a power of
   two pages (at most 1 MiB unprivileged, EPERM; EBUSY under what it
   holds); its first page is free only once read through, so a full pipe
@@ -6876,35 +6936,106 @@ The running parts (milestone 1; `lxrun=`):
   IN with bytes, HUP without writers, OUT with a whole page free, ERR
   without readers; files and devices always ready; sockets: a listener
   IN with a connection waiting, a connection IN with bytes or at the end
-  of the stream, OUT with room, ERR|HUP once refused); select's EBADF
+  of the stream (RDHUP then), OUT with room or once shut down for
+  writing, HUP once both directions are done, ERR|HUP once refused:
+  epoll_test); select's EBADF
   counts only fds within the table (at least 64, a power of two). Time
   left is written back (ppoll, select, pselect6); their masks are
-  rt_sigsuspend's kind (`Signals::suspend`). epoll is not there yet.
-- **Waiting**: every blocking call (pipes, sockets, poll, sleeps,
-  rt_sigsuspend, rt_sigtimedwait) polls every millisecond through
-  `dispatch::pause` (an expired timer fires, then EINTR if a signal is
-  deliverable or the process is ending); wait4 and vfork's parent sleep
-  until woken. Wait queues on the core objects replace the polling with
-  seam 5.
+  rt_sigsuspend's kind (`Signals::suspend`); an epoll fd is IN while its
+  set has something to report.
+- **epoll** (`lx::epoll`; poll_test's epoll part, epoll_test):
+  epoll_create/epoll_create1 (EPOLL_CLOEXEC), epoll_ctl (ADD, MOD, DEL;
+  EBADF, EINVAL for a non-epoll or the epoll itself, EPERM for files and
+  devices, EEXIST, ENOENT, ELOOP for a cycle or nesting deeper than 4),
+  epoll_wait, epoll_pwait (its mask while it waits), epoll_pwait2 (a
+  timespec). The set holds entries keyed by (fd number, open file
+  description), each with a clone of the description's object (which
+  does not keep the description open) and its `Interest`: readiness is
+  poll's (`poll::readiness`), masked by the events plus ERR and HUP;
+  level-triggered entries report while ready, EPOLLET ones once after
+  ADD/MOD and then only after their object moved (`poll::events_count`:
+  a pipe end's change counts, a socket's arrivals, `socket::arrivals`:
+  bytes or connections taken plus queued), EPOLLONESHOT ones once until
+  MOD. A closed fd whose description lives on (a dup) stays in the set;
+  the description's last close removes it from every set
+  (`Fd::watchers`, `Epoll::forget`); closing the epoll fd empties its
+  set. Ready entries come out in the order they were added; struct
+  epoll_event is the packed 12 bytes.
+- **Waiting** (`lx::wait`): a thread blocks by `prepare` (the
+  scheduler's prepare_wait, its deadline the earlier of the call's and
+  ITIMER_REAL's), then `block`, which records it as its signal state's
+  sleeper (a signal raised for it, or for its process, wakes it:
+  `sigcalls::raise_for`), and ends with EINTR when a signal is
+  deliverable or the process is ending. Pipes keep a `WaitQueue` woken
+  by every change (bytes in or out, an end's last close, a new size);
+  a waiter adds itself and prepares under the pipe's lock, so a change
+  after its check finds it waiting. poll, select and epoll add the
+  thread to every pipe they look at (`poll::Watch`) and look once more
+  after preparing. Sleeps, rt_sigsuspend, pause, rt_sigtimedwait,
+  futex waits and wait4 block the same way. Sockets have no wait queue
+  (the stack's notify hook is AFD's): their waits, and poll/epoll over a
+  socket or a nested epoll, look again every millisecond (`dispatch::
+  pause`, `wait::POLL_NS`) until seam 5 gives the core objects queues.
+- **Threads** (`lx::threads`; thread_test): clone with
+  CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD (required)
+  and CLONE_SYSVSEM, CLONE_SETTLS, CLONE_PARENT_SETTID,
+  CLONE_CHILD_SETTID, CLONE_CHILD_CLEARTID, CLONE_DETACHED (optional),
+  as pthread_create makes it, is a core thread of the same core process
+  (`thread::create_forked`, suspended until its Linux state is in
+  place): it goes on from the `syscall` with rax 0, on the stack given,
+  with FS base the TLS given, the caller's other registers, x87/SSE
+  state and signal mask. clone(2)'s invalid combinations are EINVAL
+  (SIGHAND without VM, THREAD without SIGHAND, FS with NEWNS or
+  NEWUSER); other thread flag sets ENOSYS, ledgered. The fds, directory,
+  umask and signal actions are the process's (`LxProcess`), so shared;
+  each thread has its own `LxThread` (core tid, clear-tid address) and
+  `ThreadSignals`. Linux tids: the process's first thread's is the pid,
+  the others' their core thread ids (the same sequence as pids, so
+  never a pid; `LxProcess::linux_tid`, `core_tid`). set_tid_address
+  sets the clear-tid address and returns the tid; exit(2) ends the
+  thread: its clear-tid address gets 0 and one futex waiter there wakes
+  (pthread_join), what was pending for it alone goes, and the process
+  ends with its last thread (that thread's status); exit_group ends
+  every thread. musl's pthreads (create, join, mutexes, condition
+  variables with FUTEX_REQUEUE, pthread_kill) run on these.
+- **futex** (`lx::futex`; thread_test): WAIT (relative timeout), WAKE,
+  REQUEUE and CMP_REQUEUE (both return woken plus moved), WAIT_BITSET
+  (absolute timeout, FUTEX_CLOCK_REALTIME allowed: a real-time deadline
+  is converted again on every wake) and WAKE_BITSET (bitset 0 EINVAL),
+  with FUTEX_PRIVATE_FLAG; CLOCK_REALTIME with any other op is ENOSYS,
+  as are the PI ops and WAKE_OP (ledgered). One table of waiters (key:
+  pid and address, so private and shared futexes are alike: no memory
+  is shared between processes yet), oldest first. A WAIT queues itself
+  before it reads the word (a waker that changes the word then wakes
+  either finds it queued or the read sees the change: EAGAIN), learns
+  it was woken from its ticket having left the table, and takes itself
+  out on a timeout (ETIMEDOUT) or a signal (EINTR: futex(2), and
+  thread_test on Linux). Errors: EINVAL for an unaligned word or a bad
+  timespec, EFAULT for an unreadable word, EAGAIN for a changed one.
 - **Signals** (`lx::signal`: plain data, host-tested; `lx::sigcalls`:
   the calls and delivery; layouts and numbers from `lx_abi::signal`):
   - the actions are the process's; the blocked mask and the
-    thread-directed pending set (SIGPIPE, later faults and tgkill) are a
-    thread's (`ThreadSignals`), the process-directed one (SIGCHLD,
-    later kill) the process's. One thread per process today, so
-    `Signals` holds one `ThreadSignals`; it becomes one per thread with
-    clone of threads;
+    thread-directed pending set (SIGPIPE, tgkill, later faults) are
+    each thread's (`ThreadSignals`, by core thread id), the
+    process-directed one (SIGCHLD, kill, SIGALRM) the process's: any
+    thread not blocking such a signal takes it (`signal::Target`). A
+    new thread starts with its creator's mask and nothing pending;
+    rt_sigprocmask, rt_sigpending, rt_sigsuspend and rt_sigtimedwait act
+    on the calling thread;
   - a standard signal is pending once (merged), a real-time one queues
     each siginfo; generation discards an ignored signal (SIG_IGN, or
-    SIG_DFL with an Ign default) unless blocked: a blocked one stays
+    SIG_DFL with an Ign default) unless blocked (by the thread it is
+    for; process-directed, by some thread): a blocked one stays
     pending; an action set to ignore discards what is pending;
+  - tgkill and tkill (SI_TKILL with the sender's pid and uid; EINVAL
+    for a tid or tgid not above 0 or a bad signal, ESRCH for no such
+    thread in the group; SIGKILL ends the process);
   - rt_sigaction (EINVAL: sigsetsize != 8, a bad number, changing
     SIGKILL/SIGSTOP; the new action read before the change, the old
     written after; sa_mask without SIGKILL/SIGSTOP), rt_sigprocmask
     (`how` checked only with a set), rt_sigpending (pending and
     blocked), rt_sigtimedwait (the lowest pending in the set; EAGAIN at
-    the timeout, EINTR if another signal is deliverable; polls every
-    ms);
+    the timeout, EINTR if another signal is deliverable);
   - SIGPIPE: a write (or writev) to a pipe with no reader raises it for
     the writer (si_code SI_USER, its pid and uid, as Linux shows) and
     fails with EPIPE;
@@ -6941,7 +7072,7 @@ The running parts (milestone 1; `lxrun=`):
     comes back at once if no handler runs: `Signals::suspend`,
     `frame_mask`, `restore_saved_mask`); SA_RESTART also restarts readv,
     pread64/pwrite64, accept/accept4, recvfrom and sendto.
-  - Not yet: tgkill, rt_sigqueueinfo,
+  - Not yet: rt_sigqueueinfo,
     sigaltstack (SA_ONSTACK is ledgered and the current stack used),
     CPU faults as signals (an exception still ends the process with its
     NT status, read as SIGSEGV etc.), delivery to a thread running user
@@ -6999,13 +7130,20 @@ The running parts (milestone 1; `lxrun=`):
   image's `lx: exec` line; a refused image logs `lx: pid <p> execve
   <path> failed: <why>`, one that cannot be mapped after the old is gone
   `... killed by SIGSEGV`. Sockets: the stack's `tcp accept`, `tcp
-  connect`, `tcp close` events (`events=net`). Ledger: `linux clone
-  flags missing` (and vfork's CLONE_VM), `linux signal action missing`
+  connect`, `tcp close` events (`events=net`). Threads: an `lx thread`
+  event per clone (pid, tid, flags) after the core's `thread create`; a
+  failed clone logs why. The state dump (OBSERVABILITY "State dump")
+  lists every Linux thread (Linux and core tid, mask, pending, blocked
+  or running), every epoll set's entries and every futex waiter (pid,
+  address, bitset, thread), so a hang shows who waits where. Ledger:
+  `linux clone flags missing` (and vfork's CLONE_VM, unsupported thread
+  flag sets), `linux signal action missing`
   (Stop), `linux signal option missing` (SA_ONSTACK), `linux option
   missing` (wait4's and kill's process groups, open flags, unlink of an
   open file, a rename onto an open file, names the file system cannot
   hold, socket families and types, socket options, CPU-time clocks and
-  timers, a script as interpreter), `linux syscall stub` (ioctl,
+  timers, a script as interpreter, futex ops not supported, an execve
+  with other threads running), `linux syscall stub` (ioctl,
   wait4's rusage).
 - **Invariants**: a Linux process is never handed over (carry refuses "a
   personality other than NT"); its threads have no TEB; NT threads' FS
@@ -7013,19 +7151,29 @@ The running parts (milestone 1; `lxrun=`):
   system call, never while the process is ending; a signal's state is
   changed only under `LxProcess::signals`, which is never held across a
   user-memory access or a wait. A child is listed and counted as
-  running in its parent before its thread starts; a process's fds are
-  closed before its parent learns it ended. Lock order: `children`
-  before `signals` (wait4), each taken alone elsewhere.
+  running in its parent before its thread starts, and a thread's Linux
+  state (`add_thread`) is in place before it runs (it is created
+  suspended); a process's fds are closed before its parent learns it
+  ended. A waiter prepares (`wait::prepare`) before its last look at
+  what it waits for, under that object's lock or after joining its
+  queue, so no wake is lost; every waiter loops on its condition, as
+  wakes can be spurious. Lock order: `children` before `signals`
+  (wait4), each taken alone elsewhere; an object's lock (a pipe's, the
+  futex table, `children`) before the scheduler's (prepare, wake);
+  `signals` before the scheduler's (a raise wakes sleepers under it);
+  an epoll's entries are never held while an object's readiness is
+  asked.
 - **TODO** (ROADMAP LX): randomization (the stack gap, AT_RANDOM's
   source, the bases); PT_INTERP and dynamic linking; the signal calls
   and deliveries listed as not yet above; copy-on-write fork and shared
-  MAP_SHARED memory, vfork sharing its parent's memory; clone of
-  threads, futex; wait queues instead of the 1 ms polling (pipes,
-  sockets, poll, sleeps, signals); per-thread CPU time (the CPU clocks,
+  MAP_SHARED memory (then shared futexes keyed by the page), vfork
+  sharing its parent's memory; execve ending the other threads first;
+  wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
+  CPU time (the CPU clocks,
   ITIMER_VIRTUAL/PROF, rusage); symlinks, hard links, POSIX unlink of an
   open file, case-sensitive names and POSIX metadata in the change log
   (seam 4: fs_test is the spec); a /dev
-  directory and /proc; epoll; datagram and Unix sockets; process groups
+  directory and /proc; datagram and Unix sockets; process groups
   and sessions; a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
   name them yet).

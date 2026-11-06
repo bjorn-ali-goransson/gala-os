@@ -14,6 +14,7 @@ mod cert;
 mod chain;
 mod dpapi;
 mod misc;
+mod pfx;
 mod query;
 mod roots;
 mod store;

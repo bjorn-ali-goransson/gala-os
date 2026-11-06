@@ -27,6 +27,7 @@ mod calendar;
 mod console;
 mod context;
 mod files;
+mod global;
 mod heap;
 mod idn;
 mod locale;

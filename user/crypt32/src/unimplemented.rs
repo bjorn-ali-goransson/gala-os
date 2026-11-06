@@ -175,6 +175,5 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CryptVerifyTimeStampSignature
     PFXExportCertStore
     PFXExportCertStoreEx
-    PFXImportCertStore
     PFXVerifyPassword
 );

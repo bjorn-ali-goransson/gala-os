@@ -82,6 +82,8 @@
 //!   the buffer is short.
 //! - The chain engine and its policies (chain.rs: CertGetCertificateChain,
 //!   CertVerifyCertificateChainPolicy, engines with an exclusive root).
+//! - PFXImportCertStore (pfx.rs: PKCS #12 files from OpenSSL, modern and
+//!   legacy algorithms, the key kept or not).
 //!
 //! Prints `cert_test: ok` or exits with the number of the failing check.
 
@@ -369,6 +371,7 @@ unsafe extern "system" {
 }
 
 mod chain;
+mod pfx;
 mod vectors;
 
 #[allow(dead_code)]
@@ -800,6 +803,7 @@ fn run() -> Result<(), u32> {
         query(&mut c)?;
         alt_names(&mut c)?;
         chain::chains(&mut c)?;
+        pfx::pfx(&mut c)?;
     }
     Ok(())
 }
