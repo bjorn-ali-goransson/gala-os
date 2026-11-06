@@ -1,0 +1,64 @@
+-- sockets
+ADD listener (IN), data 1 = 0
+epoll_wait(nothing pending, 0) = 0
+connect = 0
+epoll_wait(a connection pending, 5 s) = 1: data 1 events IN
+accept4 = ok
+epoll_wait(accepted, 0) = 0
+ADD server end (IN|RDHUP), data 2 = 0
+ADD client end (OUT), data 3 = 0
+epoll_wait(nothing sent yet) = 1: data 3 events OUT
+DEL client end = 0
+DEL listener = 0
+epoll_wait(5 bytes sent, 5 s) = 1: data 2 events IN
+  again (level-triggered) = 1: data 2 events IN
+read = 5 "hello"
+epoll_wait(all read, 0) = 0
+MOD server end to IN|ONESHOT, data 4 = 0
+EPOLLONESHOT: epoll_wait(5 s) = 1: data 4 events IN
+EPOLLONESHOT: again (disabled) = 0
+MOD re-arms it (IN|ET), data 5 = 0
+EPOLLET: epoll_wait (data was there before) = 1: data 5 events IN
+EPOLLET: again (no new data) = 0
+EPOLLET: after more data (5 s) = 1: data 5 events IN
+EPOLLET: again = 0
+read = 3 "abc"
+MOD server end to IN|RDHUP, data 6 = 0
+shutdown(client end, SHUT_WR) = 0
+epoll_wait(peer shut down writing, 5 s) = 1: data 6 events IN|RDHUP
+read = 0
+ADD client end (IN|OUT|RDHUP), data 7 = 0
+epoll_wait(both ends; the client's shut down writing) = 2: data 6 events IN|RDHUP; data 7 events OUT
+DEL server end = 0
+MOD client end to IN|RDHUP, data 8 = 0
+server end closed: epoll_wait(5 s) = 1: data 8 events IN|HUP|RDHUP
+MOD client end to IN|OUT|RDHUP, data 7 = 0
+epoll_wait(0) = 1: data 7 events IN|OUT|HUP|RDHUP
+all closed = 0
+-- epoll fds and descriptions
+ADD an epoll fd to another, data 9 = 0
+ADD the outer one to the inner one (a loop) = -40 (ELOOP)
+poll(an epoll fd, nothing ready) = 0
+outer epoll_wait(nothing ready) = 0
+poll(an epoll fd, one ready) = 1
+  revents = 1
+outer epoll_wait(one ready inside) = 1: data 9 events IN
+  inner epoll_wait = 1: data 1 events IN
+read end closed but dup'ed: still in the set = 1: data 1 events IN
+DEL by the closed fd number = -9 (EBADF)
+DEL by the dup = -2 (ENOENT)
+ADD the dup, empty pipe = 0
+-- blocking
+epoll_wait(-1) woken by another thread's write = 2: data 1 events IN; data 10 events IN
+epoll_wait(-1), SIGALRM handled meanwhile = -4 (EINTR)
+  handler runs = 1
+epoll_pwait(60 ms, SIGALRM blocked meanwhile, due in 20 ms) = 0
+  waited >= 60 ms = yes
+  handler runs after it returned = 2
+epoll_pwait(sigsetsize 4) = -22 (EINVAL)
+epoll_pwait2(30 ms) = 0
+  waited >= 30 ms = yes
+epoll_pwait2(tv_nsec = 1e9) = -22 (EINVAL)
+epoll_pwait2(NULL timeout, data there) = 2: data 1 events IN; data 10 events IN
+epoll_test: ok
+-- exit status 0

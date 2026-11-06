@@ -303,17 +303,26 @@ pub fn create(
     create_inner(process, regs, win32_start, mxcsr, stack, suspended, None)
 }
 
-/// Creates the thread of a Linux fork's child (`lx::fork`): it goes
-/// on in user mode with exactly `regs`, the x87/SSE state `fx` and the
-/// FS and GS bases `bases` (its parent's, at the fork).
+/// Creates a thread of the Linux personality that goes on in user mode
+/// with exactly `regs`, the x87/SSE state `fx` and the FS and GS bases
+/// `bases`: a fork's child's (its parent's state at the fork,
+/// `lx::fork`) or a clone'd thread (`lx::threads`). `suspended`: it
+/// waits for `resume` (its Linux state is set up first).
 pub fn create_forked(
     process: &KArc<Process>,
     regs: UserRegs,
     fx: platform::XState,
     bases: (u64, u64),
+    suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
     let resume = Some((Resume::User { regs, fx }, bases));
-    create_inner(process, regs, regs.rip, None, (0, 0, 0), false, resume)
+    create_inner(process, regs, regs.rip, None, (0, 0, 0), suspended, resume)
+}
+
+/// A thread object's id (its NT ClientId thread; a Linux thread's core
+/// id).
+pub fn id_of(object: &ObjectRef) -> u64 {
+    as_thread(object).id
 }
 
 fn create_inner(

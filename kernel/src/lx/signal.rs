@@ -12,11 +12,10 @@
 //!
 //! Model:
 //! - The actions (rt_sigaction) are the process's; the blocked mask and
-//!   the thread-directed pending set (SIGPIPE, faults, tgkill) are a
-//!   thread's (`ThreadSignals`), the process-directed pending set
-//!   (kill, SIGCHLD) the process's. A process has one thread today
-//!   (clone of threads is not implemented), so `Signals` holds one
-//!   `ThreadSignals`; with threads it becomes one per thread.
+//!   the thread-directed pending set (SIGPIPE, faults, tgkill) are each
+//!   thread's (`ThreadSignals`, by core thread id), the process-directed
+//!   pending set (kill, SIGCHLD, SIGALRM) the process's: any thread not
+//!   blocking such a signal takes it (`Target`).
 //! - A standard signal (1..=31) is pending at most once (a second one is
 //!   merged); a real-time one queues each siginfo.
 //! - Generation discards a signal whose action ignores it (SIG_IGN, or
@@ -26,7 +25,8 @@
 //! - Delivery happens on the way back to user mode from a system call
 //!   (`lx::dispatch`), the lowest-numbered deliverable signal first, one
 //!   handler frame per return: the next one is delivered when its
-//!   rt_sigreturn returns.
+//!   rt_sigreturn returns. A thread blocked in a wait records itself as
+//!   its `sleeper`; raising a signal for it wakes it (`sleepers`).
 
 use alloc::vec::Vec;
 
@@ -35,8 +35,8 @@ use lx_abi::signal::{
     SigSet, Sigcontext, Siginfo, Stack, Ucontext,
 };
 
-use crate::mm::heap::TryVec;
-use crate::nt::platform::UserRegs;
+use crate::mm::heap::{AllocError, TryVec};
+use crate::nt::platform::{ThreadId, UserRegs};
 use crate::nt::status::NtStatus;
 
 /// A signal's name for logs (signal(7)); real-time ones are "SIGRT".
@@ -145,6 +145,9 @@ pub struct ThreadSignals {
     /// that ends the wait saves it (uc_sigmask, put back by
     /// rt_sigreturn), or it is put back at once if no handler runs.
     pub saved_mask: Option<SigSet>,
+    /// The thread, while it blocks in a wait a signal ends (`lx::wait`):
+    /// a signal raised for it wakes it.
+    pub sleeper: Option<ThreadId>,
 }
 
 /// What delivering a signal does.
@@ -161,14 +164,24 @@ pub enum Disposition {
     Handler(KSigaction),
 }
 
+/// Who a signal is generated for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// One thread (by its core thread id): SIGPIPE, faults, tgkill.
+    Thread(u64),
+    /// The process: kill, SIGCHLD, SIGALRM; any thread not blocking it
+    /// takes it.
+    Process,
+}
+
 /// A process's signal state.
 pub struct Signals {
     /// Signal n's action at n - 1.
     actions: [KSigaction; abi::NSIG as usize],
     /// Process-directed pending signals (kill, SIGCHLD).
     pub process: Pending,
-    /// The one thread's mask and pending signals (see the module doc).
-    pub thread: ThreadSignals,
+    /// Each thread's mask and pending signals, by core thread id.
+    threads: Vec<(u64, ThreadSignals)>,
 }
 
 impl Default for Signals {
@@ -176,43 +189,89 @@ impl Default for Signals {
         Signals {
             actions: [KSigaction::default(); abi::NSIG as usize],
             process: Pending::default(),
-            thread: ThreadSignals::default(),
+            threads: Vec::new(),
         }
     }
 }
 
 impl Signals {
-    /// A forked child's state: the same actions and mask, nothing pending
-    /// (fork(2)).
+    /// A forked child's state: the same actions, nothing pending, no
+    /// thread yet (fork(2); its thread is added with the forking thread's
+    /// mask: `add_thread`).
     pub fn forked(&self) -> Signals {
-        Signals {
-            actions: self.actions,
-            process: Pending::default(),
-            thread: ThreadSignals {
-                mask: self.thread.mask,
-                pending: Pending::default(),
-                saved_mask: None,
-            },
+        Signals { actions: self.actions, process: Pending::default(), threads: Vec::new() }
+    }
+
+    /// A new thread `tid` with `mask` (clone(2): the creating thread's).
+    pub fn add_thread(&mut self, tid: u64, mask: SigSet) -> Result<(), AllocError> {
+        self.threads.try_push((tid, ThreadSignals { mask, ..ThreadSignals::default() }))
+    }
+
+    /// Thread `tid` ended: what was pending for it alone goes with it.
+    pub fn remove_thread(&mut self, tid: u64) {
+        self.threads.retain(|(t, _)| *t != tid);
+    }
+
+    /// The threads' ids.
+    pub fn thread_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.threads.iter().map(|(t, _)| *t)
+    }
+
+    /// Thread `tid`'s part.
+    pub fn thread(&self, tid: u64) -> Option<&ThreadSignals> {
+        self.threads.iter().find(|(t, _)| *t == tid).map(|(_, s)| s)
+    }
+
+    fn thread_mut(&mut self, tid: u64) -> Option<&mut ThreadSignals> {
+        self.threads.iter_mut().find(|(t, _)| *t == tid).map(|(_, s)| s)
+    }
+
+    /// Thread `tid`'s blocked mask (empty for a thread not known).
+    pub fn mask(&self, tid: u64) -> SigSet {
+        self.thread(tid).map_or(SigSet::EMPTY, |t| t.mask)
+    }
+
+    /// Records (or clears) the scheduler thread blocked for `tid`.
+    pub fn set_sleeper(&mut self, tid: u64, sleeper: Option<ThreadId>) {
+        if let Some(t) = self.thread_mut(tid) {
+            t.sleeper = sleeper;
         }
+    }
+
+    /// The blocked threads a signal for `target` must wake: the thread,
+    /// or every thread of the process (one not blocking it takes it; one
+    /// in rt_sigtimedwait may wait for it blocked).
+    pub fn sleepers(&self, target: Target) -> impl Iterator<Item = ThreadId> + '_ {
+        self.threads
+            .iter()
+            .filter(move |(t, _)| match target {
+                Target::Thread(tid) => *t == tid,
+                Target::Process => true,
+            })
+            .filter_map(|(_, s)| s.sleeper)
     }
 
     /// rt_sigsuspend: `mask` (without SIGKILL/SIGSTOP) until a signal is
     /// delivered; the mask it replaces is kept to put back.
-    pub fn suspend(&mut self, mask: SigSet) {
-        let old = core::mem::replace(&mut self.thread.mask, mask.blockable());
-        self.thread.saved_mask.get_or_insert(old);
+    pub fn suspend(&mut self, tid: u64, mask: SigSet) {
+        if let Some(t) = self.thread_mut(tid) {
+            let old = core::mem::replace(&mut t.mask, mask.blockable());
+            t.saved_mask.get_or_insert(old);
+        }
     }
 
     /// The mask a handler frame saves (rt_sigsuspend's, if it replaced
     /// one: taken), given the one in effect before the handler (`old`).
-    pub fn frame_mask(&mut self, old: SigSet) -> SigSet {
-        self.thread.saved_mask.take().unwrap_or(old)
+    pub fn frame_mask(&mut self, tid: u64, old: SigSet) -> SigSet {
+        self.thread_mut(tid).and_then(|t| t.saved_mask.take()).unwrap_or(old)
     }
 
     /// No handler ran after rt_sigsuspend: its mask goes back.
-    pub fn restore_saved_mask(&mut self) {
-        if let Some(m) = self.thread.saved_mask.take() {
-            self.thread.mask = m;
+    pub fn restore_saved_mask(&mut self, tid: u64) {
+        if let Some(t) = self.thread_mut(tid)
+            && let Some(m) = t.saved_mask.take()
+        {
+            t.mask = m;
         }
     }
 
@@ -234,13 +293,16 @@ impl Signals {
 
     /// rt_sigaction's change (the caller checked `sig` may change):
     /// returns the old action. sa_mask never holds SIGKILL or SIGSTOP; an
-    /// action that ignores the signal discards what is pending of it.
+    /// action that ignores the signal discards what is pending of it, for
+    /// the process and every thread.
     pub fn set_action(&mut self, sig: u32, mut new: KSigaction) -> KSigaction {
         new.mask = SigSet(new.mask).blockable().0;
         let old = core::mem::replace(&mut self.actions[sig as usize - 1], new);
         if self.ignored(sig) {
             self.process.discard(sig);
-            self.thread.pending.discard(sig);
+            for (_, t) in self.threads.iter_mut() {
+                t.pending.discard(sig);
+            }
         }
         old
     }
@@ -266,58 +328,77 @@ impl Signals {
         }
     }
 
-    /// rt_sigprocmask: the old mask, or None for an unknown `how`.
-    pub fn procmask(&mut self, how: u32, set: SigSet) -> Option<SigSet> {
-        let new = self.thread.mask.apply(how, set)?;
-        Some(core::mem::replace(&mut self.thread.mask, new))
+    /// rt_sigprocmask for thread `tid`: the old mask, or None for an
+    /// unknown `how`.
+    pub fn procmask(&mut self, tid: u64, how: u32, set: SigSet) -> Option<SigSet> {
+        let t = self.thread_mut(tid)?;
+        let new = t.mask.apply(how, set)?;
+        Some(core::mem::replace(&mut t.mask, new))
     }
 
-    /// A signal is generated: for the thread (`to_thread`: SIGPIPE,
-    /// faults, tgkill) or the process (kill, SIGCHLD).
-    pub fn raise(&mut self, info: Siginfo, to_thread: bool) -> Raised {
+    /// A signal is generated for `target`. An ignored one is discarded
+    /// unless blocked: by the thread it is for, or (process-directed) by
+    /// some thread of the process.
+    pub fn raise(&mut self, info: Siginfo, target: Target) -> Raised {
         let sig = info.signo as u32;
         if !abi::valid(sig) {
             return Raised::Discarded;
         }
-        if !self.thread.mask.contains(sig) && self.ignored(sig) {
+        let blocked = match target {
+            Target::Thread(tid) => self.mask(tid).contains(sig),
+            Target::Process => self.threads.iter().any(|(_, t)| t.mask.contains(sig)),
+        };
+        if !blocked && self.ignored(sig) {
             return Raised::Discarded;
         }
-        if to_thread { self.thread.pending.add(info) } else { self.process.add(info) }
+        match target {
+            Target::Thread(tid) => match self.thread_mut(tid) {
+                Some(t) => t.pending.add(info),
+                None => Raised::Discarded,
+            },
+            Target::Process => self.process.add(info),
+        }
     }
 
-    /// Everything pending for the thread (its own and the process's).
-    pub fn pending(&self) -> SigSet {
-        self.thread.pending.set.union(self.process.set)
+    /// Everything pending for thread `tid` (its own and the process's).
+    pub fn pending(&self, tid: u64) -> SigSet {
+        let own = self.thread(tid).map_or(SigSet::EMPTY, |t| t.pending.set);
+        own.union(self.process.set)
     }
 
-    /// rt_sigpending: what is pending and blocked.
-    pub fn pending_blocked(&self) -> SigSet {
-        SigSet(self.pending().0 & self.thread.mask.0)
+    /// rt_sigpending: what is pending for `tid` and blocked.
+    pub fn pending_blocked(&self, tid: u64) -> SigSet {
+        SigSet(self.pending(tid).0 & self.mask(tid).0)
     }
 
-    /// The signal to deliver next: the lowest pending one not blocked.
-    pub fn deliverable(&self) -> Option<u32> {
-        self.pending().minus(self.thread.mask).lowest()
+    /// The signal to deliver to `tid` next: the lowest pending one it does
+    /// not block.
+    pub fn deliverable(&self, tid: u64) -> Option<u32> {
+        self.pending(tid).minus(self.mask(tid)).lowest()
     }
 
-    /// Takes the lowest pending signal in `set` (rt_sigtimedwait), the
-    /// thread's own first.
-    pub fn take_from(&mut self, set: SigSet) -> Option<Siginfo> {
-        let sig = SigSet(self.pending().0 & set.0).lowest()?;
-        self.thread.pending.take(sig).or_else(|| self.process.take(sig))
+    /// Takes the lowest pending signal of `tid` in `set` (rt_sigtimedwait,
+    /// delivery), the thread's own first.
+    pub fn take_from(&mut self, tid: u64, set: SigSet) -> Option<Siginfo> {
+        let sig = SigSet(self.pending(tid).0 & set.0).lowest()?;
+        let own = self.thread_mut(tid).and_then(|t| t.pending.take(sig));
+        own.or_else(|| self.process.take(sig))
     }
 
-    /// A handler of `sig` is entered: the mask it runs with (the current
-    /// one, its sa_mask, and `sig` itself unless SA_NODEFER); SA_RESETHAND
-    /// puts the handler back to SIG_DFL (the flags, mask and restorer
-    /// stay: signal_test). Returns the mask to restore on rt_sigreturn.
-    pub fn enter_handler(&mut self, sig: u32, action: &KSigaction) -> SigSet {
-        let old = self.thread.mask;
+    /// A handler of `sig` is entered on thread `tid`: the mask it runs
+    /// with (the current one, its sa_mask, and `sig` itself unless
+    /// SA_NODEFER); SA_RESETHAND puts the handler back to SIG_DFL (the
+    /// flags, mask and restorer stay: signal_test). Returns the mask to
+    /// restore on rt_sigreturn.
+    pub fn enter_handler(&mut self, tid: u64, sig: u32, action: &KSigaction) -> SigSet {
+        let old = self.mask(tid);
         let mut mask = old.union(SigSet(action.mask));
         if action.flags & SA_NODEFER == 0 {
             mask = mask.with(sig);
         }
-        self.thread.mask = mask.blockable();
+        if let Some(t) = self.thread_mut(tid) {
+            t.mask = mask.blockable();
+        }
         if action.flags & SA_RESETHAND != 0 {
             self.actions[sig as usize - 1].handler = SIG_DFL;
         }
@@ -325,8 +406,10 @@ impl Signals {
     }
 
     /// rt_sigreturn puts back the interrupted mask.
-    pub fn restore_mask(&mut self, mask: SigSet) {
-        self.thread.mask = mask.blockable();
+    pub fn restore_mask(&mut self, tid: u64, mask: SigSet) {
+        if let Some(t) = self.thread_mut(tid) {
+            t.mask = mask.blockable();
+        }
     }
 }
 
@@ -506,6 +589,15 @@ mod tests {
         KSigaction { handler: h, flags: flags | SA_RESTORER, restorer: 0x40_1000, mask }
     }
 
+    const T: Target = Target::Thread(1);
+
+    /// A process with one thread, id 1.
+    fn one() -> Signals {
+        let mut s = Signals::default();
+        s.add_thread(1, SigSet::EMPTY).unwrap();
+        s
+    }
+
     fn pipe_info() -> Siginfo {
         Siginfo::from_process(SIGPIPE as i32, abi::SI_USER, 4, 1000)
     }
@@ -514,23 +606,23 @@ mod tests {
     /// rt_sigtimedwait takes it (si_code 0); ignored, it is discarded.
     #[test]
     fn sigpipe_blocked_ignored_and_taken() {
-        let mut s = Signals::default();
+        let mut s = one();
         let pipe = SigSet::of(SIGPIPE);
-        s.procmask(abi::SIG_BLOCK, pipe).unwrap();
-        assert_eq!(s.raise(pipe_info(), true), Raised::Pending);
-        assert_eq!(s.raise(pipe_info(), true), Raised::Merged);
-        assert_eq!(s.pending_blocked(), pipe);
-        assert_eq!(s.deliverable(), None);
-        let info = s.take_from(pipe).unwrap();
+        s.procmask(1, abi::SIG_BLOCK, pipe).unwrap();
+        assert_eq!(s.raise(pipe_info(), T), Raised::Pending);
+        assert_eq!(s.raise(pipe_info(), T), Raised::Merged);
+        assert_eq!(s.pending_blocked(1), pipe);
+        assert_eq!(s.deliverable(1), None);
+        let info = s.take_from(1, pipe).unwrap();
         assert_eq!((info.signo, info.code), (SIGPIPE as i32, 0));
-        assert!(s.pending().is_empty());
-        s.procmask(abi::SIG_SETMASK, SigSet::EMPTY).unwrap();
+        assert!(s.pending(1).is_empty());
+        s.procmask(1, abi::SIG_SETMASK, SigSet::EMPTY).unwrap();
         s.set_action(SIGPIPE, KSigaction { handler: SIG_IGN, ..Default::default() });
-        assert_eq!(s.raise(pipe_info(), true), Raised::Discarded);
+        assert_eq!(s.raise(pipe_info(), T), Raised::Discarded);
         // At SIG_DFL it is delivered and terminates.
         s.set_action(SIGPIPE, KSigaction::default());
-        assert_eq!(s.raise(pipe_info(), true), Raised::Pending);
-        assert_eq!(s.deliverable(), Some(SIGPIPE));
+        assert_eq!(s.raise(pipe_info(), T), Raised::Pending);
+        assert_eq!(s.deliverable(1), Some(SIGPIPE));
         assert_eq!(s.disposition(SIGPIPE), Disposition::Terminate { core: false });
     }
 
@@ -538,31 +630,34 @@ mod tests {
     /// setting SIG_IGN discards a pending one; SIGCHLD's default ignores.
     #[test]
     fn ignoring() {
-        let mut s = Signals::default();
-        assert_eq!(s.raise(Siginfo::child(abi::CLD_EXITED, 5, 0, 0), false), Raised::Discarded);
+        let mut s = one();
+        assert_eq!(
+            s.raise(Siginfo::child(abi::CLD_EXITED, 5, 0, 0), Target::Process),
+            Raised::Discarded
+        );
         s.set_action(SIGUSR2, KSigaction { handler: SIG_IGN, ..Default::default() });
-        s.procmask(abi::SIG_BLOCK, SigSet::of(SIGUSR2)).unwrap();
+        s.procmask(1, abi::SIG_BLOCK, SigSet::of(SIGUSR2)).unwrap();
         let usr2 = Siginfo::from_process(SIGUSR2 as i32, abi::SI_USER, 4, 1000);
-        assert_eq!(s.raise(usr2, false), Raised::Pending);
-        assert_eq!(s.pending_blocked(), SigSet::of(SIGUSR2));
+        assert_eq!(s.raise(usr2, Target::Process), Raised::Pending);
+        assert_eq!(s.pending_blocked(1), SigSet::of(SIGUSR2));
         s.set_action(SIGUSR1, handler(0x1234, 0, 0));
-        s.raise(Siginfo::from_process(SIGUSR1 as i32, 0, 4, 1000), false);
+        s.raise(Siginfo::from_process(SIGUSR1 as i32, 0, 4, 1000), Target::Process);
         s.set_action(SIGUSR2, KSigaction { handler: SIG_IGN, ..Default::default() });
-        assert_eq!(s.pending(), SigSet::of(SIGUSR1));
+        assert_eq!(s.pending(1), SigSet::of(SIGUSR1));
     }
 
     #[test]
     fn real_time_signals_queue() {
-        let mut s = Signals::default();
-        s.procmask(abi::SIG_SETMASK, SigSet::FULL).unwrap();
+        let mut s = one();
+        s.procmask(1, abi::SIG_SETMASK, SigSet::FULL).unwrap();
         for v in [1, 2] {
-            s.raise(Siginfo::queued(35, 4, 1000, v), false);
+            s.raise(Siginfo::queued(35, 4, 1000, v), Target::Process);
         }
-        assert_eq!(s.take_from(SigSet::of(35)).unwrap().get_u64(abi::SI_VALUE_OFFSET), 1);
-        assert!(s.pending().contains(35));
-        assert_eq!(s.take_from(SigSet::of(35)).unwrap().get_u64(abi::SI_VALUE_OFFSET), 2);
-        assert!(s.pending().is_empty());
-        assert!(s.take_from(SigSet::FULL).is_none());
+        assert_eq!(s.take_from(1, SigSet::of(35)).unwrap().get_u64(abi::SI_VALUE_OFFSET), 1);
+        assert!(s.pending(1).contains(35));
+        assert_eq!(s.take_from(1, SigSet::of(35)).unwrap().get_u64(abi::SI_VALUE_OFFSET), 2);
+        assert!(s.pending(1).is_empty());
+        assert!(s.take_from(1, SigSet::FULL).is_none());
     }
 
     /// signal_test on Linux: the handler runs with its signal and sa_mask
@@ -570,30 +665,31 @@ mod tests {
     /// the flags; SIGKILL never enters a mask.
     #[test]
     fn entering_a_handler() {
-        let mut s = Signals::default();
+        let mut s = one();
         let a = handler(0x1234, SA_SIGINFO, SigSet::of(abi::SIGTERM).with(SIGKILL).0);
         s.set_action(SIGUSR2, a);
         assert_eq!(s.action(SIGUSR2).mask, SigSet::of(abi::SIGTERM).0);
         let a = s.action(SIGUSR2);
-        let old = s.enter_handler(SIGUSR2, &a);
+        let old = s.enter_handler(1, SIGUSR2, &a);
         assert_eq!(old, SigSet::EMPTY);
-        assert_eq!(s.thread.mask, SigSet::of(SIGUSR2).with(abi::SIGTERM));
-        s.restore_mask(old);
+        assert_eq!(s.mask(1), SigSet::of(SIGUSR2).with(abi::SIGTERM));
+        s.restore_mask(1, old);
         let a = handler(0x1234, SA_SIGINFO | SA_NODEFER, 0);
-        s.enter_handler(SIGUSR2, &a);
-        assert!(!s.thread.mask.contains(SIGUSR2));
-        s.restore_mask(SigSet::EMPTY);
+        s.enter_handler(1, SIGUSR2, &a);
+        assert!(!s.mask(1).contains(SIGUSR2));
+        s.restore_mask(1, SigSet::EMPTY);
         let a = handler(0x1234, SA_SIGINFO | SA_RESETHAND, 0);
         s.set_action(SIGUSR2, a);
-        s.enter_handler(SIGUSR2, &a);
-        assert!(s.thread.mask.contains(SIGUSR2));
+        s.enter_handler(1, SIGUSR2, &a);
+        assert!(s.mask(1).contains(SIGUSR2));
         let after = s.action(SIGUSR2);
         assert_eq!((after.handler, after.flags), (SIG_DFL, 0x8400_0004));
         // A fork keeps actions and mask, not what is pending.
-        s.raise(Siginfo::from_process(SIGUSR1 as i32, 0, 4, 1000), false);
-        let child = s.forked();
-        assert!(child.pending().is_empty());
-        assert_eq!(child.thread.mask, s.thread.mask);
+        s.raise(Siginfo::from_process(SIGUSR1 as i32, 0, 4, 1000), Target::Process);
+        let mut child = s.forked();
+        child.add_thread(1, s.mask(1)).unwrap();
+        assert!(child.pending(1).is_empty());
+        assert_eq!(child.mask(1), s.mask(1));
         assert_eq!(child.action(SIGUSR2), s.action(SIGUSR2));
     }
 
@@ -601,36 +697,75 @@ mod tests {
     /// ignored one still ignored, a blocked one still blocked.
     #[test]
     fn execve_resets_handlers() {
-        let mut s = Signals::default();
+        let mut s = one();
         s.set_action(SIGUSR1, handler(0x1234, SA_SIGINFO, 0));
         s.set_action(SIGUSR2, KSigaction { handler: SIG_IGN, ..Default::default() });
-        s.procmask(abi::SIG_BLOCK, SigSet::of(abi::SIGTERM)).unwrap();
+        s.procmask(1, abi::SIG_BLOCK, SigSet::of(abi::SIGTERM)).unwrap();
         s.exec();
         assert_eq!(s.action(SIGUSR1), KSigaction::default());
         assert_eq!(s.action(SIGUSR2).handler, SIG_IGN);
-        assert!(s.thread.mask.contains(abi::SIGTERM));
+        assert!(s.mask(1).contains(abi::SIGTERM));
     }
 
     /// signal_test on Linux: rt_sigsuspend's mask is in effect until a
     /// handler runs; the handler's frame saves the mask from before it.
     #[test]
     fn suspend_saves_the_mask_for_the_frame() {
-        let mut s = Signals::default();
+        let mut s = one();
         s.set_action(SIGUSR1, handler(0x1234, 0, 0));
-        s.procmask(abi::SIG_SETMASK, SigSet::of(SIGUSR1)).unwrap();
-        s.suspend(SigSet::of(SIGKILL).with(abi::SIGTERM));
-        assert_eq!(s.thread.mask, SigSet::of(abi::SIGTERM));
-        s.raise(Siginfo::from_process(SIGUSR1 as i32, 0, 4, 1000), false);
-        assert_eq!(s.deliverable(), Some(SIGUSR1));
+        s.procmask(1, abi::SIG_SETMASK, SigSet::of(SIGUSR1)).unwrap();
+        s.suspend(1, SigSet::of(SIGKILL).with(abi::SIGTERM));
+        assert_eq!(s.mask(1), SigSet::of(abi::SIGTERM));
+        s.raise(Siginfo::from_process(SIGUSR1 as i32, 0, 4, 1000), Target::Process);
+        assert_eq!(s.deliverable(1), Some(SIGUSR1));
         let a = s.action(SIGUSR1);
-        let before = s.enter_handler(SIGUSR1, &a);
-        assert_eq!(s.frame_mask(before), SigSet::of(SIGUSR1));
-        assert_eq!(s.thread.saved_mask, None);
+        let before = s.enter_handler(1, SIGUSR1, &a);
+        assert_eq!(s.frame_mask(1, before), SigSet::of(SIGUSR1));
+        assert_eq!(s.thread(1).unwrap().saved_mask, None);
         // Without a handler the old mask goes back at once.
-        s.restore_mask(SigSet::of(SIGUSR1));
-        s.suspend(SigSet::EMPTY);
-        s.restore_saved_mask();
-        assert_eq!(s.thread.mask, SigSet::of(SIGUSR1));
+        s.restore_mask(1, SigSet::of(SIGUSR1));
+        s.suspend(1, SigSet::EMPTY);
+        s.restore_saved_mask(1);
+        assert_eq!(s.mask(1), SigSet::of(SIGUSR1));
+    }
+
+    /// thread_test on Linux: a tgkill'd signal is pending for its thread
+    /// only; a kill'd one for the process, taken by whichever thread
+    /// waits for it; a thread blocked in a wait is woken for either.
+    #[test]
+    fn signals_per_thread() {
+        let mut s = one();
+        s.add_thread(2, SigSet::EMPTY).unwrap();
+        let both = SigSet::of(SIGUSR1).with(SIGUSR2);
+        s.procmask(1, abi::SIG_BLOCK, both).unwrap();
+        s.procmask(2, abi::SIG_BLOCK, both).unwrap();
+        let tkill = Siginfo::from_process(SIGUSR1 as i32, abi::SI_TKILL, 4, 1000);
+        assert_eq!(s.raise(tkill, Target::Thread(2)), Raised::Pending);
+        assert_eq!(s.pending_blocked(1), SigSet::EMPTY);
+        let kill = Siginfo::from_process(SIGUSR2 as i32, abi::SI_USER, 4, 1000);
+        assert_eq!(s.raise(kill, Target::Process), Raised::Pending);
+        assert_eq!(s.pending_blocked(1), SigSet::of(SIGUSR2));
+        assert_eq!(s.pending_blocked(2), both);
+        assert_eq!(s.take_from(2, SigSet::of(SIGUSR2)).unwrap().code, abi::SI_USER);
+        assert!(s.pending(1).is_empty());
+        s.procmask(2, abi::SIG_UNBLOCK, SigSet::of(SIGUSR1)).unwrap();
+        assert_eq!((s.deliverable(1), s.deliverable(2)), (None, Some(SIGUSR1)));
+        // Sleepers: the thread a signal is for, or all for the process.
+        let (a, b) = (ThreadId::from_raw(7), ThreadId::from_raw(8));
+        s.set_sleeper(1, Some(a));
+        s.set_sleeper(2, Some(b));
+        assert!(s.sleepers(Target::Thread(2)).eq([b]));
+        assert!(s.sleepers(Target::Process).eq([a, b]));
+        s.set_sleeper(1, None);
+        assert!(s.sleepers(Target::Process).eq([b]));
+        // A thread's end takes what was pending for it alone.
+        s.remove_thread(2);
+        assert!(s.thread(2).is_none());
+        assert_eq!(s.raise(tkill, Target::Thread(2)), Raised::Discarded);
+        // A blocked ignored signal stays pending when some thread blocks
+        // it (the process-directed rule).
+        s.set_action(SIGUSR2, KSigaction { handler: SIG_IGN, ..Default::default() });
+        assert_eq!(s.raise(kill, Target::Process), Raised::Pending);
     }
 
     #[test]

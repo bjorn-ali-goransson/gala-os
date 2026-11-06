@@ -926,6 +926,10 @@ pub struct Readiness {
     pub connected: bool,
     /// A connection attempt failed.
     pub refused: bool,
+    /// Bytes buffered to receive (a connection), connections waiting to
+    /// be accepted (a listener): Linux's epoll tells new arrivals by them
+    /// (EPOLLET, `lx::socket::arrivals`).
+    pub queued: usize,
 }
 
 pub fn readiness(id: SocketId) -> Result<Readiness, NetError> {
@@ -933,9 +937,11 @@ pub fn readiness(id: SocketId) -> Result<Readiness, NetError> {
         let entry = s.entry(id)?;
         Ok(match entry.kind {
             Kind::Bound => Readiness::default(),
-            Kind::Listener { ref ready, .. } => {
-                Readiness { acceptable: !ready.is_empty(), ..Readiness::default() }
-            }
+            Kind::Listener { ref ready, .. } => Readiness {
+                acceptable: !ready.is_empty(),
+                queued: ready.len(),
+                ..Readiness::default()
+            },
             Kind::Conn { sock, connected } => {
                 let t = s.tcp(sock).ok_or(NetError::NoSocket)?;
                 let state = t.state();
@@ -948,6 +954,7 @@ pub fn readiness(id: SocketId) -> Result<Readiness, NetError> {
                     acceptable: false,
                     connected: !opening && !refused,
                     refused,
+                    queued: t.recv_queue(),
                 }
             }
             // Datagrams: readable while one is queued; always writable (a

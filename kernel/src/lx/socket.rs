@@ -31,7 +31,7 @@
 //! more than its errno in the flight recorder.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::dispatch::{Call, Result};
 use super::errno::{
@@ -131,6 +131,10 @@ pub struct Socket {
     error: IrqMutex<u16>,
     shut_read: AtomicBool,
     shut_write: AtomicBool,
+    /// Bytes received and taken (not peeked) from a connection,
+    /// connections accepted from a listener: with what is queued, the
+    /// count of arrivals (`arrivals`).
+    taken: AtomicU64,
 }
 
 impl Drop for Socket {
@@ -201,6 +205,7 @@ pub fn socket(call: &Call<'_>, domain: u64, kind: u64, protocol: u64) -> Result 
         error: IrqMutex::new(0),
         shut_read: AtomicBool::new(false),
         shut_write: AtomicBool::new(false),
+        taken: AtomicU64::new(0),
     })
     .map_err(|_| ENOMEM)?;
     let fd = KArc::try_new(Fd::new(Object::Socket(sock), flags & SOCK_NONBLOCK != 0))
@@ -340,6 +345,7 @@ pub fn accept4(call: &Call<'_>, fd: u64, addr: u64, len: u64, flags: u64) -> Res
         }
     };
     let new = tcp::accept(id, sequence, TOKEN).map_err(errno_of)?;
+    sock.taken.fetch_add(1, Ordering::Relaxed);
     let options = *sock.options.lock();
     let accepted = KArc::try_new(Socket {
         family: sock.family,
@@ -348,6 +354,7 @@ pub fn accept4(call: &Call<'_>, fd: u64, addr: u64, len: u64, flags: u64) -> Res
         error: IrqMutex::new(0),
         shut_read: AtomicBool::new(false),
         shut_write: AtomicBool::new(false),
+        taken: AtomicU64::new(0),
     });
     let Ok(accepted) = accepted else {
         tcp::close(new, true);
@@ -487,6 +494,9 @@ pub fn recv(call: &Call<'_>, f: &Fd, sock: &Socket, buf: u64, count: u64, flags:
             Ok(n) => {
                 if n > 0 {
                     tcp::kick();
+                    if flags & MSG_PEEK == 0 {
+                        sock.taken.fetch_add(n as u64, Ordering::Relaxed);
+                    }
                 }
                 let more = n > 0 && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
                 done += n;
@@ -727,6 +737,25 @@ pub fn getsockopt(call: &Call<'_>, fd: u64, level: u64, name: u64, val: u64, len
     Ok(0)
 }
 
+/// How many things have arrived: bytes on a connection, connections on a
+/// listener, the end of the stream, a refusal. It grows with each
+/// arrival and stays while nothing new comes (reading moves bytes from
+/// queued to taken), so epoll's EPOLLET reports a ready socket again
+/// only after something new came (epoll_test on Linux).
+pub fn arrivals(sock: &Socket) -> u64 {
+    let taken = sock.taken.load(Ordering::Relaxed);
+    let id = match *sock.state.lock() {
+        SockState::Listening(id) | SockState::Connected(id) | SockState::Connecting(id) => id,
+        SockState::Fresh | SockState::Bound(_) => return taken,
+    };
+    match tcp::readiness(id) {
+        Ok(r) => {
+            taken + r.queued as u64 + (u64::from(r.hangup) << 40) + (u64::from(r.refused) << 41)
+        }
+        Err(_) => taken | 1 << 42,
+    }
+}
+
 // poll(2)'s event bits.
 pub const POLLIN: u16 = 0x1;
 pub const POLLOUT: u16 = 0x4;
@@ -736,9 +765,10 @@ pub const POLLRDNORM: u16 = 0x40;
 pub const POLLWRNORM: u16 = 0x100;
 pub const POLLRDHUP: u16 = 0x2000;
 
-/// What poll would report for the socket now (socket_test on Linux: a
-/// listener is readable with a connection to accept; a connection
-/// readable with bytes or at the end of the stream, writable with room,
+/// What poll would report for the socket now (socket_test and
+/// epoll_test on Linux: a listener is readable with a connection to
+/// accept; a connection readable with bytes or at the end of the stream
+/// (RDHUP too then), writable with room or once shut down for writing,
 /// HUP once both directions are done; a refused connect ERR|HUP).
 pub fn readiness(sock: &Socket) -> u16 {
     let mut state = sock.state.lock();
@@ -773,7 +803,9 @@ pub fn readiness(sock: &Socket) -> u16 {
             if r.hangup {
                 ev |= POLLRDHUP;
             }
-            if r.writable && !shut_write {
+            // Shut down for writing, it reports writable (a write fails
+            // at once: epoll_test on Linux).
+            if r.writable || shut_write {
                 ev |= POLLOUT | POLLWRNORM;
             }
             if r.hangup && shut_write {

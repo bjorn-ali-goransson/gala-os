@@ -265,23 +265,33 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
         parent_id: 0,
     })
     .map_err(|_| ExecError::OutOfMemory)?;
-    if state::create(process.id, plan.brk, super::file::directory_of(path)).is_err() {
+    let Ok(lx) = state::create(process.id, plan.brk, super::file::directory_of(path)) else {
         process::forget_bare(&process);
         return Err(ExecError::OutOfMemory);
-    }
+    };
     let regs = start_regs(&p);
-    if let Err(status) = thread::create(
+    // Suspended until its Linux thread state is there.
+    let object = match thread::create(
         &process,
         regs,
         plan.entry,
         None,
         (STACK_END, stack_bottom, stack_bottom),
-        false,
+        true,
     ) {
-        state::ended(process.id, status);
-        process::forget_bare(&process);
-        return Err(ExecError::Map("first thread", status));
+        Ok(o) => o,
+        Err(status) => {
+            state::ended(process.id, status);
+            process::forget_bare(&process);
+            return Err(ExecError::Map("first thread", status));
+        }
+    };
+    if lx.add_thread(thread::id_of(&object), lx_abi::signal::SigSet::EMPTY).is_err() {
+        thread::request_termination(&object, NtStatus::NO_MEMORY);
+        thread::resume(&object);
+        return Err(ExecError::OutOfMemory);
     }
+    thread::resume(&object);
     let mut cmdline: Vec<u8> = Vec::new();
     for (i, a) in argv.iter().enumerate() {
         if i > 0 {
@@ -488,6 +498,12 @@ pub fn execve(
             });
         }
     };
+    let others = call.lx.threads.lock().len().saturating_sub(1);
+    if others > 0 {
+        // Linux ends the other threads first (execve(2)); they go on in
+        // the new image here: not done yet.
+        ledger::record("execve", "linux option missing", others as u64);
+    }
     // The point of no return.
     if let Err(e) = replace_image(&call.process, &p) {
         crate::warn!(

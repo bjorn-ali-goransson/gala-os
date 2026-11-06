@@ -28,11 +28,74 @@ FUTEX_WAIT on a bad address = -14 (EFAULT)
 futex(unknown op) = -38 (ENOSYS)
 -- four threads, a futex lock
 counter after 4 x 10000 = 40000
+-- futex: bitsets, absolute deadlines, requeue
+WAIT_BITSET with bitset 0 = -22 (EINVAL)
+WAKE_BITSET with bitset 0 = -22 (EINVAL)
+WAIT_BITSET, MONOTONIC deadline passed = -110 (ETIMEDOUT)
+WAIT_BITSET, MONOTONIC deadline in 50 ms = -110 (ETIMEDOUT)
+  woke at or after the deadline = yes
+WAIT_BITSET|CLOCK_REALTIME, deadline in 30 ms = -110 (ETIMEDOUT)
+  woke at or after the deadline = yes
+WAIT|CLOCK_REALTIME, 1 ms = -38 (ENOSYS)
+WAKE|CLOCK_REALTIME = -38 (ENOSYS)
+WAIT_BITSET on a changed value = -11 (EAGAIN)
+REQUEUE with no waiter = 0
+CMP_REQUEUE with no waiter = 0
+CMP_REQUEUE, *uaddr != val3 = -11 (EAGAIN)
+CMP_REQUEUE, nr_requeue -1 = -22 (EINVAL)
+WAKE_BITSET(0x2) woke = 1
+  the 0x2 waiter's WAIT_BITSET = 0
+  the 0x1 waiter still waits = yes
+WAKE_BITSET(all bits) woke = 1
+  the 0x1 waiter's WAIT_BITSET = 0
+CMP_REQUEUE(wake 0, requeue 1) moved = 1
+  FUTEX_WAKE on the first word = 0
+  FUTEX_WAKE on the second word = 1
+  the requeued waiter's FUTEX_WAIT = 0
+FUTEX_WAIT interrupted by a handled signal = -4 (EINTR)
+  the handler ran = yes
+-- signals and threads
+tgkill(the thread, SIGUSR1) = 0
+  pending in the main thread = 0x0
+kill(the process, SIGUSR2) = 0
+  pending in the main thread = 0x800
+the thread saw pending = 0xa00
+  its rt_sigtimedwait(SIGUSR2) = 12
+  si_code = 0
+  si_pid is the sender = yes
+its SIGUSR1 handler ran in it = yes
+  si_code = -6
+  si_pid is the sender = yes
+  its mask after unblocking SIGUSR1 = 0x800
+pending in the main thread now = 0x0
+unblocked in the main thread: no handler ran here = yes
+tgkill(pid, no such tid) = -3 (ESRCH)
+tgkill(pid, tid, signal 65) = -22 (EINVAL)
+tgkill(0, tid) = -22 (EINVAL)
+tgkill(pid, tid, 0) = 0
+tkill(tid, 0) = 0
+tkill(-1, 0) = -22 (EINVAL)
+a thread's tgkill(SIGTERM) to itself ends its process: killed by 15
+-- set_tid_address and CLONE_CHILD_SETTID in a thread
+set_tid_address in the thread returned its tid = yes
+  the new address cleared at exit to = 0
+  the clone's ctid (no longer the clear address) = -1
+CLONE_CHILD_SETTID: the thread found its tid there = yes
+  cleared at exit to = 0
 -- clone's errors and exits
 CLONE_THREAD without CLONE_SIGHAND = -22 (EINVAL)
 CLONE_SIGHAND without CLONE_VM = -22 (EINVAL)
 CLONE_NEWNS|CLONE_FS = -22 (EINVAL)
 a thread's exit_group ends its process: exited 42
 main thread exit(0), then the last thread exit(5): exited 5
+-- pthreads
+pthread_create = 0
+pthread_join = 0
+  its pthread_exit value = 42
+mutex: counter after 4 x 10000 = 40000
+condition variable: the sum of 1..1000 handed over = 500500
+pthread_cond_broadcast released waiters = 3
+pthread_kill(SIGUSR2) = 0
+  its handler ran in that thread = yes
 thread_test: ok
 -- exit status 0

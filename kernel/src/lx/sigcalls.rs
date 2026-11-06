@@ -23,9 +23,10 @@ use lx_abi::signal::{
 
 use super::dispatch::{Call, Result};
 use super::errno::{self, EAGAIN, EFAULT, EINTR, EINVAL};
-use super::signal::{self, Disposition, Raised};
+use super::signal::{self, Disposition, Raised, Target};
 use super::state::LxProcess;
 use super::syscalls::nr;
+use super::wait;
 use crate::mm::heap::KArc;
 use crate::nt::ledger;
 use crate::nt::platform::{self, UserRegs, XState, xstate};
@@ -43,15 +44,34 @@ fn event(pid: u64, tid: u64, info: &Siginfo, what: &str) {
     );
 }
 
-/// Generates `info` for the calling thread (`to_thread`) or its process.
-pub fn raise(call: &Call<'_>, info: Siginfo, to_thread: bool) {
-    let raised = call.lx.signals.lock().raise(info, to_thread);
+/// Generates `info` for `target` in process `lx` (pid `pid`): pending
+/// (or merged, or discarded as ignored), and the threads it may concern
+/// woken from their waits. `tid` names the thread in the event (0: the
+/// process).
+pub fn raise_for(lx: &LxProcess, pid: u64, tid: u64, info: Siginfo, target: Target) -> Raised {
+    let raised = {
+        let mut s = lx.signals.lock();
+        let raised = s.raise(info, target);
+        if raised != Raised::Discarded {
+            for t in s.sleepers(target) {
+                platform::wake(t);
+            }
+        }
+        raised
+    };
     let what = match raised {
         Raised::Pending => "pending",
         Raised::Merged => "merged",
         Raised::Discarded => "discarded",
     };
-    event(call.process.id, call.tid, &info, what);
+    event(pid, tid, &info, what);
+    raised
+}
+
+/// Generates `info` for the calling thread (`to_thread`) or its process.
+pub fn raise(call: &Call<'_>, info: Siginfo, to_thread: bool) {
+    let target = if to_thread { Target::Thread(call.tid) } else { Target::Process };
+    raise_for(&call.lx, call.process.id, call.tid, info, target);
 }
 
 /// A write to a pipe with no reader: SIGPIPE for the writing thread
@@ -118,9 +138,9 @@ pub fn rt_sigprocmask(call: &Call<'_>, how: u64, set: u64, oset: u64, size: u64)
         match set {
             Some(set) => {
                 let how = u32::try_from(how).map_err(|_| EINVAL)?;
-                s.procmask(how, set).ok_or(EINVAL)?
+                s.procmask(call.tid, how, set).ok_or(EINVAL)?
             }
-            None => s.thread.mask,
+            None => s.mask(call.tid),
         }
     };
     if oset != 0 {
@@ -134,7 +154,7 @@ pub fn rt_sigpending(call: &Call<'_>, set: u64, size: u64) -> Result {
     if size != SIGSET_SIZE as u64 {
         return Err(EINVAL);
     }
-    let pending = call.lx.signals.lock().pending_blocked();
+    let pending = call.lx.signals.lock().pending_blocked(call.tid);
     call.process.write(set, &pending.0.to_le_bytes()).map_err(|_| EFAULT)?;
     Ok(0)
 }
@@ -142,8 +162,8 @@ pub fn rt_sigpending(call: &Call<'_>, set: u64, size: u64) -> Result {
 /// rt_sigtimedwait(set, info, timeout, sigsetsize): takes a pending
 /// signal of `set` (the lowest), writes its siginfo and returns its
 /// number; EAGAIN once the timeout passes (at once for a zero timeout),
-/// EINTR if a signal outside the set is to be delivered first. Waits by
-/// polling every millisecond (as blocking pipes do: no wait queue yet).
+/// EINTR if a signal outside the set is to be delivered first. Blocks
+/// until a signal for the thread or its process wakes it (`lx::wait`).
 pub fn rt_sigtimedwait(call: &Call<'_>, set: u64, info: u64, timeout: u64, size: u64) -> Result {
     if size != SIGSET_SIZE as u64 {
         return Err(EINVAL);
@@ -164,9 +184,9 @@ pub fn rt_sigtimedwait(call: &Call<'_>, set: u64, info: u64, timeout: u64, size:
         super::timer::fire(call);
         let taken = {
             let mut s = call.lx.signals.lock();
-            match s.take_from(set) {
+            match s.take_from(call.tid, set) {
                 Some(i) => Ok(i),
-                None => Err(s.deliverable().is_some()),
+                None => Err(s.deliverable(call.tid).is_some()),
             }
         };
         match taken {
@@ -180,13 +200,27 @@ pub fn rt_sigtimedwait(call: &Call<'_>, set: u64, info: u64, timeout: u64, size:
             Err(true) => return Err(EINTR),
             Err(false) => {}
         }
-        if call.process.exit_status().is_some() {
+        if wait::ending(call) {
             return Err(EINTR);
         }
         if deadline.is_some_and(|d| platform::monotonic_ns() >= d) {
             return Err(EAGAIN);
         }
-        platform::sleep_ms(1);
+        // A signal raised from here on wakes the thread (`block` records
+        // it as the sleeper before it looks again). One taken in `set`
+        // is blocked, so `block` does not report it as EINTR.
+        wait::prepare(call, deadline);
+        if call.lx.signals.lock().pending(call.tid).0 & set.0 != 0 {
+            wait::abandon();
+            continue;
+        }
+        if let Err(e) = wait::block(call) {
+            // A signal in `set` that is not blocked is taken here rather
+            // than delivered (the next loop takes it).
+            if call.lx.signals.lock().pending(call.tid).0 & set.0 == 0 {
+                return Err(e);
+            }
+        }
     }
 }
 
@@ -222,28 +256,68 @@ pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
         }
         return Ok(0);
     }
-    let raised = target.signals.lock().raise(info, false);
-    let what = match raised {
-        Raised::Pending => "pending",
-        Raised::Merged => "merged",
-        Raised::Discarded => "discarded",
+    raise_for(&target, pid as u64, 0, info, Target::Process);
+    Ok(0)
+}
+
+/// tgkill(tgid, tid, sig) and tkill(tid, sig) (`tgid` None): a signal for
+/// one thread (si_code SI_TKILL, the sender's pid and uid). EINVAL for a
+/// tid or tgid not above 0 or a bad signal; ESRCH when no thread `tid`
+/// is in thread group `tgid` (or anywhere, for tkill). SIGKILL ends the
+/// whole process (its default action, which cannot change).
+pub fn tgkill(call: &Call<'_>, tgid: Option<u64>, tid: u64, sig: u64) -> Result {
+    let tid = tid as i32;
+    if tid <= 0 || tgid.is_some_and(|g| g as i32 <= 0) || sig > u64::from(abi::NSIG) {
+        return Err(EINVAL);
+    }
+    let (target, core_tid) = match tgid {
+        Some(g) => {
+            let p = super::state::get(u64::from(g as u32)).ok_or(errno::ESRCH)?;
+            let t = p.core_tid(tid as u64).ok_or(errno::ESRCH)?;
+            (p, t)
+        }
+        None => super::state::find_thread(tid as u64).ok_or(errno::ESRCH)?,
     };
-    event(pid as u64, 0, &info, what);
+    if sig == 0 {
+        return Ok(0);
+    }
+    let sig = sig as u32;
+    let info = Siginfo::from_process(
+        sig as i32,
+        abi::SI_TKILL,
+        call.process.id as i32,
+        super::exec::UID as u32,
+    );
+    if sig == abi::SIGKILL {
+        if let Some(p) = process::by_id(target.pid) {
+            kill(&p, core_tid, sig, &info);
+        }
+        return Ok(0);
+    }
+    raise_for(&target, target.pid, core_tid, info, Target::Thread(core_tid));
     Ok(0)
 }
 
 /// rt_sigsuspend: waits with `set` as the mask until a signal is to be
 /// delivered (a handler, or a default action that ends the process),
 /// then EINTR; the old mask comes back after the handler (its frame
-/// saves it) or at once (`deliver`). Polls every ms, as rt_sigtimedwait.
+/// saves it) or at once (`deliver`).
 pub fn rt_sigsuspend(call: &Call<'_>, set: u64, size: u64) -> Result {
     if size != SIGSET_SIZE as u64 {
         return Err(EINVAL);
     }
     let set = read_set(call, set)?;
-    call.lx.signals.lock().suspend(set);
+    call.lx.signals.lock().suspend(call.tid, set);
     loop {
-        super::dispatch::pause(call)?;
+        wait::sleep_until(call, None)?;
+    }
+}
+
+/// pause: waits until a signal is delivered (a handler, or a default
+/// action that ends the process), then EINTR.
+pub fn pause(call: &Call<'_>) -> Result {
+    loop {
+        wait::sleep_until(call, None)?;
     }
 }
 
@@ -271,7 +345,7 @@ pub fn rt_sigreturn(call: &Call<'_>) -> Result {
         }
     }
     platform::xrstor(&fx);
-    call.lx.signals.lock().restore_mask(SigSet(uc.uc_sigmask));
+    call.lx.signals.lock().restore_mask(call.tid, SigSet(uc.uc_sigmask));
     call.resume.set(Some(regs));
     Ok(regs.gpr[0])
 }
@@ -356,14 +430,15 @@ pub fn deliver(
             return changed;
         }
         let mut sigs = lx.signals.lock();
-        let Some(sig) = sigs.deliverable() else {
+        let Some(sig) = sigs.deliverable(tid) else {
             // Nothing (more) to deliver: an rt_sigsuspend mask no handler
             // took goes back.
-            sigs.restore_saved_mask();
+            sigs.restore_saved_mask(tid);
             return changed;
         };
-        let info =
-            sigs.take_from(SigSet::of(sig)).unwrap_or(Siginfo::zeroed(sig as i32, abi::SI_KERNEL));
+        let info = sigs
+            .take_from(tid, SigSet::of(sig))
+            .unwrap_or(Siginfo::zeroed(sig as i32, abi::SI_KERNEL));
         match sigs.disposition(sig) {
             Disposition::Ignore | Disposition::Continue | Disposition::Stop => {
                 let stop = sigs.disposition(sig) == Disposition::Stop;
@@ -384,8 +459,8 @@ pub fn deliver(
                 return changed;
             }
             Disposition::Handler(action) => {
-                let before = sigs.enter_handler(sig, &action);
-                let old = sigs.frame_mask(before);
+                let before = sigs.enter_handler(tid, sig, &action);
+                let old = sigs.frame_mask(tid, before);
                 drop(sigs);
                 if interrupted && !changed && action.flags & SA_RESTART != 0 && restartable(number)
                 {

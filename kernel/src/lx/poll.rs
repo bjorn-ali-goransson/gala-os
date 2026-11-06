@@ -11,12 +11,13 @@
 //! within the descriptor table: Linux's is at least 64 entries, a power
 //! of two; beyond it a bit is ignored).
 //!
-//! Waiting polls every millisecond (no wait queues yet, as pipes),
-//! ending at the timeout (the time left written back for ppoll, select
-//! and pselect6, as Linux does) or with EINTR when a signal is to be
-//! delivered. ppoll's and pselect6's mask is in effect while they wait
-//! and put back after (after the handler, if one runs: as
-//! rt_sigsuspend's).
+//! Waiting blocks on the pipes' wait queues (`Watch`; sockets and epoll
+//! fds have none: looked at every millisecond), ending at the timeout
+//! (the time left written back for ppoll, select and pselect6, as Linux
+//! does) or with EINTR when a signal is to be delivered. ppoll's and
+//! pselect6's mask is in effect while they wait and put back after
+//! (after the handler, if one runs: as rt_sigsuspend's). An epoll fd is
+//! readable while its set has something to report (`lx::epoll`).
 
 use alloc::vec::Vec;
 
@@ -26,7 +27,9 @@ use super::dispatch::{Call, Result};
 use super::errno::{EBADF, EFAULT, EINVAL, ENOMEM};
 use super::socket::{self, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
 use super::state::{self, Object, Stream};
-use crate::nt::platform;
+use super::wait;
+use crate::mm::heap::{KArc, TryVec};
+use crate::nt::platform::{self, ThreadId};
 
 const POLLPRI: u16 = 0x2;
 const POLLNVAL: u16 = 0x20;
@@ -60,10 +63,92 @@ pub fn readiness(object: &Object) -> u16 {
         }
         Object::File(_) | Object::Device(_) => POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM,
         Object::Socket(s) => socket::readiness(s),
+        Object::Epoll(e) => {
+            if e.has_ready() {
+                POLLIN | POLLRDNORM
+            } else {
+                0
+            }
+        }
     }
 }
 
-use super::dispatch::pause;
+/// A count that grows with each change of `object` a waiter for `events`
+/// would be woken by (epoll's EPOLLET: a ready object is reported again
+/// once it moved). A pipe's read end counts writes (and the last writer
+/// going), its write end reads (and the last reader going); a socket its
+/// arrivals; what is always ready never changes.
+pub fn events_count(object: &Object) -> u64 {
+    match object {
+        Object::PipeRead(p) => p.state.lock().read_events,
+        Object::PipeWrite(p) => p.state.lock().write_events,
+        Object::Socket(s) => socket::arrivals(s),
+        Object::Epoll(e) => u64::from(e.has_ready()),
+        Object::Console(_) | Object::File(_) | Object::Device(_) => 0,
+    }
+}
+
+/// The objects a poll-like wait blocks on: the calling thread is on each
+/// pipe's wait queue while it waits (taken off on drop); an object
+/// without a queue (a socket, an epoll) makes the wait look again every
+/// `wait::POLL_NS`.
+pub struct Watch {
+    me: ThreadId,
+    pipes: Vec<KArc<state::Pipe>>,
+    pub polled: bool,
+}
+
+impl Default for Watch {
+    fn default() -> Watch {
+        Watch::new()
+    }
+}
+
+impl Watch {
+    pub fn new() -> Watch {
+        Watch { me: platform::current(), pipes: Vec::new(), polled: false }
+    }
+
+    /// Waits for `object` too (out of memory it is polled instead).
+    pub fn add(&mut self, object: &Object) {
+        match object {
+            Object::PipeRead(p) | Object::PipeWrite(p) => {
+                if self.pipes.iter().any(|q| KArc::ptr_eq(q, p)) {
+                    return;
+                }
+                if self.pipes.try_push(p.clone()).is_err() {
+                    self.polled = true;
+                    return;
+                }
+                if p.state.lock().waiters.add(self.me).is_err() {
+                    self.pipes.pop();
+                    self.polled = true;
+                }
+            }
+            Object::Socket(_) | Object::Epoll(_) => self.polled = true,
+            // Always ready: nothing to wait for.
+            Object::Console(_) | Object::File(_) | Object::Device(_) => {}
+        }
+    }
+
+    /// The deadline to wait to: `deadline`, or sooner to look at the
+    /// polled objects again.
+    pub fn deadline(&self, deadline: Option<u64>) -> Option<u64> {
+        if !self.polled {
+            return deadline;
+        }
+        let next = platform::monotonic_ns().saturating_add(wait::POLL_NS);
+        Some(deadline.map_or(next, |d| d.min(next)))
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        for p in &self.pipes {
+            p.state.lock().waiters.remove(self.me);
+        }
+    }
+}
 
 /// A deadline on the monotonic clock: None waits for ever.
 fn deadline_after(ns: Option<u64>) -> Option<u64> {
@@ -107,28 +192,48 @@ fn read_mask(call: &Call<'_>, addr: u64, size: u64) -> core::result::Result<Opti
 
 /// Runs `check` (Some(result) when done) until it is done, the deadline
 /// passes (`check` once more, then its timeout result), or a signal
-/// interrupts; with `mask` in effect meanwhile.
-fn wait<T>(
+/// interrupts; with `mask` in effect meanwhile. `check` adds the objects
+/// it looks at to the `Watch` it is given (when one is), so the thread
+/// blocks until one of them changes; it looks once more after `prepare`
+/// (without a `Watch`) to see a change made between the two.
+pub fn wait<T>(
     call: &Call<'_>,
     deadline: Option<u64>,
     mask: Option<SigSet>,
-    mut check: impl FnMut(bool) -> core::result::Result<Option<T>, u16>,
+    mut check: impl FnMut(bool, Option<&mut Watch>) -> core::result::Result<Option<T>, u16>,
 ) -> core::result::Result<T, u16> {
     if let Some(m) = mask {
-        call.lx.signals.lock().suspend(m);
+        call.lx.signals.lock().suspend(call.tid, m);
     }
     let result = loop {
         let timed_out = deadline.is_some_and(|d| platform::monotonic_ns() >= d);
-        match check(timed_out) {
+        let mut watch = Watch::new();
+        match check(timed_out, Some(&mut watch)) {
             Ok(Some(v)) => break Ok(v),
             Ok(None) => {}
             Err(e) => break Err(e),
         }
+        // Waiting from here: a change after the next look wakes the
+        // thread (it is on the objects' queues already).
+        wait::prepare(call, watch.deadline(deadline));
+        match check(false, None) {
+            Ok(Some(v)) => {
+                wait::abandon();
+                break Ok(v);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                wait::abandon();
+                break Err(e);
+            }
+        }
         // Interrupted, the mask stays until the signal's handler has run.
-        pause(call)?;
+        let r = wait::block(call);
+        drop(watch);
+        r?;
     };
     if mask.is_some() {
-        call.lx.signals.lock().restore_saved_mask();
+        call.lx.signals.lock().restore_saved_mask(call.tid);
     }
     result
 }
@@ -150,7 +255,7 @@ fn poll_inner(
     raw.resize(n * 8, 0);
     call.process.read(fds, &mut raw).map_err(|_| EFAULT)?;
     let deadline = deadline_after(timeout);
-    let count = wait(call, deadline, mask, |timed_out| {
+    let count = wait(call, deadline, mask, |timed_out, mut watch| {
         let mut ready = 0u64;
         for e in raw.chunks_exact_mut(8) {
             let fd = i32::from_le_bytes([e[0], e[1], e[2], e[3]]);
@@ -160,7 +265,12 @@ fn poll_inner(
             } else {
                 match call.lx.fd(fd as u64) {
                     None => POLLNVAL,
-                    Some(f) => readiness(&f.object) & (events | POLLERR | POLLHUP),
+                    Some(f) => {
+                        if let Some(w) = watch.as_deref_mut() {
+                            w.add(&f.object);
+                        }
+                        readiness(&f.object) & (events | POLLERR | POLLHUP)
+                    }
                 }
             };
             e[6..8].copy_from_slice(&revents.to_le_bytes());
@@ -231,7 +341,7 @@ fn select_inner(
     }
     let deadline = deadline_after(timeout);
     let mut got = [[0u64; state::MAX_FDS / 64]; 3];
-    let count = wait(call, deadline, mask, |timed_out| {
+    let count = wait(call, deadline, mask, |timed_out, mut watch| {
         let mut ready = 0u64;
         got = [[0u64; state::MAX_FDS / 64]; 3];
         for fd in 0..limit {
@@ -240,6 +350,9 @@ fn select_inner(
                 continue;
             }
             let Some(f) = call.lx.fd(fd as u64) else { return Err(EBADF) };
+            if let Some(w) = watch.as_deref_mut() {
+                w.add(&f.object);
+            }
             let r = readiness(&f.object);
             let hits = [
                 r & (POLLIN | POLLHUP | POLLERR) != 0,

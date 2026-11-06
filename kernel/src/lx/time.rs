@@ -11,15 +11,15 @@
 //!   or thread's clock id) need CPU time accounted per thread, which the
 //!   scheduler does not do yet (NT's ThreadTimes has the same TODO): they
 //!   are EINVAL, ledgered as `linux option missing` with the clock id.
-//! - A sleep waits a millisecond at a time until its deadline (no timer
-//!   wait queue yet, as pipes), ending with EINTR (and the time left in
-//!   `rem` for a relative one) when a signal is to be delivered; it is
-//!   never restarted (signal(7): nanosleep is not restarted).
+//! - A sleep blocks until its deadline (`lx::wait`), ending with EINTR
+//!   (and the time left in `rem` for a relative one) when a signal is to
+//!   be delivered; it is never restarted (signal(7): nanosleep is not
+//!   restarted).
 
 use lx_abi::layout::Timespec;
 
 use super::dispatch::{Call, Result};
-use super::errno::{EFAULT, EINTR, EINVAL, EOPNOTSUPP};
+use super::errno::{EFAULT, EINVAL, EOPNOTSUPP};
 use crate::nt::{ledger, platform};
 
 const CLOCK_REALTIME: u64 = 0;
@@ -61,6 +61,11 @@ fn now_ns(clock: u64) -> core::result::Result<u64, u16> {
             Err(EINVAL)
         }
     }
+}
+
+/// CLOCK_REALTIME now, in nanoseconds since 1970.
+pub fn realtime_ns() -> u64 {
+    unix_ns(platform::system_time())
 }
 
 /// NT time (100 ns since 1601) as nanoseconds since 1970.
@@ -140,22 +145,26 @@ pub fn clock_nanosleep(call: &Call<'_>, clock: u64, flags: u64, req: u64, rem: u
     sleep(call, clock, t, flags & TIMER_ABSTIME != 0, rem)
 }
 
-/// Sleeps until `clock` reads `t` (absolute) or for `t` (relative).
+/// Sleeps until `clock` reads `t` (absolute) or for `t` (relative):
+/// blocked until then (`lx::wait`; a real-time deadline is looked at
+/// again on every wake, as the clock may be set meanwhile), ended early
+/// by a signal to deliver (EINTR, and the time left in `rem` for a
+/// relative sleep).
 fn sleep(call: &Call<'_>, clock: u64, t: Timespec, absolute: bool, rem: u64) -> Result {
     let length = t.sec as u64 * NS + t.nsec as u64;
     let deadline = if absolute { length } else { now_ns(clock)?.saturating_add(length) };
     loop {
-        super::timer::fire(call);
         let now = now_ns(clock)?;
         if now >= deadline {
             return Ok(0);
         }
-        if call.process.exit_status().is_some() || call.lx.signals.lock().deliverable().is_some() {
+        let at = platform::monotonic_ns().saturating_add(deadline - now);
+        if let Err(e) = super::wait::sleep_until(call, Some(at)) {
             if !absolute && rem != 0 {
-                call.process.write(rem, &timespec(deadline - now)).map_err(|_| EFAULT)?;
+                let left = deadline.saturating_sub(now_ns(clock)?);
+                call.process.write(rem, &timespec(left)).map_err(|_| EFAULT)?;
             }
-            return Err(EINTR);
+            return Err(e);
         }
-        platform::sleep_ms(1);
     }
 }

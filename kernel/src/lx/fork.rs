@@ -20,7 +20,7 @@
 //! process-group pid `"linux option missing"`.
 
 use super::dispatch::{Call, Result, return_regs};
-use super::errno::{EAGAIN, ECHILD, EFAULT, EINTR, EINVAL, ENOMEM, ENOSYS};
+use super::errno::{EAGAIN, ECHILD, EFAULT, EINVAL, ENOMEM, ENOSYS};
 use super::state;
 use crate::mm::heap::TryVec;
 use crate::nt::platform::{self, Personality, UserSpace};
@@ -36,10 +36,7 @@ const WNOTHREAD: u64 = 0x2000_0000;
 const WALL: u64 = 0x4000_0000;
 const WCLONE: u64 = 0x8000_0000;
 
-/// clone's CSIGNAL: the low byte is the exit signal.
-const CSIGNAL: u64 = 0xff;
-const CLONE_VM: u64 = 0x100;
-const CLONE_VFORK: u64 = 0x4000;
+use super::threads::CLONE_VM;
 
 /// The parent's address space for a child: its VAD and every mapped page
 /// copied (the parent is in this system call; with one thread nothing
@@ -118,16 +115,27 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
             return failed("no memory for the Linux state", ENOMEM);
         }
     };
-    if let Err(status) = thread::create_forked(&child, regs, fx, bases) {
-        state::discard(&lx);
-        undo();
-        crate::warn!(
-            "lx: pid {} fork failed: the child's thread (status {:#010x})",
-            parent.id,
-            status.0
-        );
-        return Err(EAGAIN);
+    let object = match thread::create_forked(&child, regs, fx, bases, true) {
+        Ok(o) => o,
+        Err(status) => {
+            state::discard(&lx);
+            undo();
+            crate::warn!(
+                "lx: pid {} fork failed: the child's thread (status {:#010x})",
+                parent.id,
+                status.0
+            );
+            return Err(EAGAIN);
+        }
+    };
+    // Its one thread, with the forking thread's mask, before it runs.
+    if lx.add_thread(thread::id_of(&object), super::threads::mask_of(call)).is_err() {
+        crate::warn!("lx: pid {} fork failed: no memory for the child's thread state", parent.id);
+        process::terminate(&child, super::signal::killed_status(lx_abi::signal::SIGKILL), false);
+        thread::resume(&object);
+        return Err(ENOMEM);
     }
+    thread::resume(&object);
     crate::info!(
         "lx: pid {} {}: child pid {} ({pages} pages copied)",
         parent.id,
@@ -160,10 +168,17 @@ fn wait_for_exec(call: &Call<'_>, child: &state::LxProcess) {
     }
 }
 
-/// clone(flags, stack, parent_tid, child_tid, tls): a fork when the flags
-/// are only an exit signal (SIGCHLD or none: the C library's fork).
-pub fn clone(call: &Call<'_>, flags: u64, stack: u64) -> Result {
-    // CLONE_VM|CLONE_VFORK: a vfork (posix_spawn's), on the stack given.
+/// clone(flags, stack, parent_tid, child_tid, tls): a thread with
+/// CLONE_THREAD (`lx::threads`); a fork when the flags are only an exit
+/// signal (SIGCHLD: the C library's fork); a vfork with
+/// CLONE_VM|CLONE_VFORK (posix_spawn's). The combinations clone(2) calls
+/// invalid are EINVAL first.
+pub fn clone(call: &Call<'_>, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> Result {
+    use super::threads::{CLONE_THREAD, CLONE_VFORK, CSIGNAL, check_flags, clone_thread};
+    check_flags(flags)?;
+    if flags & CLONE_THREAD != 0 {
+        return clone_thread(call, flags, stack, ptid, ctid, tls);
+    }
     let vfork = flags & !CSIGNAL == CLONE_VM | CLONE_VFORK;
     if flags & !CSIGNAL != 0 && !vfork {
         ledger::record("clone", "linux clone flags missing", flags);
@@ -226,19 +241,12 @@ pub fn wait4(call: &Call<'_>, pid: u64, status: u64, options: u64, rusage: u64) 
             if options & WNOHANG != 0 {
                 return Ok(0);
             }
-            if call.process.exit_status().is_some()
-                || call.lx.signals.lock().deliverable().is_some()
-            {
-                return Err(EINTR);
-            }
             c.waiters.try_push(me).map_err(|_| ENOMEM)?;
-            // Woken by a child's end, or at the timer's expiry.
-            let deadline = super::timer::next_deadline(call).map(|at| {
-                let ns = at.saturating_sub(platform::monotonic_ns());
-                platform::ticks() + ns.div_ceil(1_000_000_000 / platform::TICK_HZ).max(1)
-            });
-            platform::prepare_wait(deadline);
+            // Woken by a child's end, a signal, or the timer's expiry.
+            super::wait::prepare(call, None);
         }
-        platform::wait();
+        let r = super::wait::block(call);
+        call.lx.children.lock().waiters.retain(|&w| w != me);
+        r?;
     }
 }

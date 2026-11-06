@@ -44,6 +44,9 @@ pub fn full_dump() {
     #[cfg(not(feature = "hosted"))]
     crate::sched::dump();
     crate::nt::ledger::dump();
+    // Linux threads (masks, pending signals, blocked or not), epoll sets
+    // and futex waiters (ROADMAP LX).
+    crate::lx::dump();
     // Each session's windows (RS step B2).
     crate::nt::session::dump();
     // gala-um: the host's allocator, no frame figures worth printing.

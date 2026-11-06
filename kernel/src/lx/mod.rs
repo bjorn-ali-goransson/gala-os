@@ -37,14 +37,20 @@
 //!   scripts) replaces a process's image.
 //! - [`time`]: the clocks and sleeps; [`timer`]: ITIMER_REAL and alarm.
 //! - [`socket`]: TCP sockets on the kernel's stack (`net::tcp`);
-//!   [`poll`]: poll, ppoll, select, pselect6.
+//!   [`poll`]: poll, ppoll, select, pselect6; [`epoll`]: epoll.
+//! - [`threads`]: clone of threads, set_tid_address, a thread's exit;
+//!   [`futex`]: futex(2); [`wait`]: wait queues and the one way a Linux
+//!   thread blocks (a signal for it, the process's end or a timer
+//!   interrupts it).
 
 pub mod dispatch;
 pub mod elf;
+pub mod epoll;
 pub mod errno;
 pub mod exec;
 pub mod file;
 pub mod fork;
+pub mod futex;
 pub mod mm;
 pub mod poll;
 pub mod sigcalls;
@@ -53,8 +59,10 @@ pub mod socket;
 pub mod stack;
 pub mod state;
 pub mod syscalls;
+pub mod threads;
 pub mod time;
 pub mod timer;
+pub mod wait;
 
 /// Registers the Linux personality's dispatcher (at start, after NT's).
 pub fn init() {
@@ -64,4 +72,12 @@ pub fn init() {
 /// A process of the Linux personality has ended (`nt::process::finish`).
 pub fn process_ended(pid: u64, status: crate::nt::status::NtStatus) {
     state::ended(pid, status);
+}
+
+/// The state dump's Linux part: each process's threads (Linux and core
+/// tids, mask, pending, whether blocked), its epoll sets, and the futex
+/// waiters.
+pub fn dump() {
+    state::dump();
+    futex::dump();
 }

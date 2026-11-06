@@ -501,12 +501,14 @@ fn stat_of(fs: &ramfs::RamFs, id: NodeId) -> core::result::Result<Stat, u16> {
 }
 
 /// `struct stat` of what an fd that is not a file refers to: a pipe is a
-/// FIFO (mode 0600), the console a terminal (character device 136:0,
+/// FIFO (mode 0600), an epoll an anonymous inode, the console a terminal (character device 136:0,
 /// mode 0620, as a pseudo-terminal's slave shows).
 fn stat_other(object: &Object) -> Stat {
     let (mode, rdev) = match object {
         Object::PipeRead(_) | Object::PipeWrite(_) => (abi::S_IFIFO | 0o600, 0),
         Object::Socket(_) => (abi::S_IFSOCK | 0o777, 0),
+        // An anonymous inode: no file type, 0600.
+        Object::Epoll(_) => (0o600, 0),
         _ => (abi::S_IFCHR | 0o620, 136 << 8),
     };
     Stat {

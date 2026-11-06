@@ -1,8 +1,9 @@
 //! A Linux process's own state beside its core process (`nt::Process`
 //! until ROADMAP LX seam 3 splits the core from NT): the program break,
-//! the file-descriptor table, pipes, signals (`lx::signal`), its parent
-//! and children (fork, wait4), and the line buffers that carry stdout
-//! and stderr to the log.
+//! the file-descriptor table, pipes (with their wait queues), signals
+//! (`lx::signal`), its threads (`LxThread`: clear-tid addresses; the
+//! first thread's Linux tid is the pid), its parent and children (fork,
+//! wait4), and the line buffers that carry stdout and stderr to the log.
 //!
 //! Kept in a table keyed by pid (`get`), added by `exec` or `fork` and
 //! dropped when the process ends (`ended`, from `nt::process::finish`):
@@ -20,12 +21,13 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use lx_abi::signal::{SA_NOCLDWAIT, SIG_IGN, SIGCHLD, Siginfo};
 
 use super::file::OpenFile;
-use super::signal::{self, Signals};
+use super::signal::{self, Signals, Target};
+use super::wait::WaitQueue;
 use crate::fs::ramfs::NodeId;
 use crate::mm::heap::{AllocError, KArc, TryVec};
 use crate::nt::platform::{self, ThreadId};
@@ -74,6 +76,15 @@ pub struct PipeState {
     /// How far into its first page the bytes start (read from it already):
     /// that page is not free again until it is read through.
     pub head: usize,
+    /// Threads blocked on either end (reads, writes, poll, epoll): woken
+    /// by every change (`changed_for_readers`, `changed_for_writers`).
+    pub waiters: WaitQueue,
+    /// Counts the changes a reader waits for (bytes written, the last
+    /// writer gone) and those a writer waits for (bytes read, the last
+    /// reader gone): epoll's EPOLLET reports a ready end when its count
+    /// moved since the last report.
+    pub read_events: u64,
+    pub write_events: u64,
 }
 
 impl PipeState {
@@ -93,6 +104,21 @@ impl PipeState {
     pub fn consumed(&mut self, n: usize) {
         self.data.drain(..n);
         self.head = if self.data.is_empty() { 0 } else { (self.head + n) % PIPE_PAGE };
+        self.changed_for_writers();
+    }
+
+    /// Something a reader waits for happened (bytes, the last writer
+    /// gone): the waiters wake.
+    pub fn changed_for_readers(&mut self) {
+        self.read_events += 1;
+        self.waiters.wake_all();
+    }
+
+    /// Something a writer waits for happened (room, the last reader
+    /// gone, a new size).
+    pub fn changed_for_writers(&mut self) {
+        self.write_events += 1;
+        self.waiters.wake_all();
     }
 }
 
@@ -112,13 +138,35 @@ pub enum Object {
     Device(super::file::Device),
     /// A TCP socket (`lx::socket`).
     Socket(KArc<super::socket::Socket>),
+    /// An epoll instance (`lx::epoll`).
+    Epoll(KArc<super::epoll::Epoll>),
 }
 
 impl Drop for Fd {
     fn drop(&mut self) {
+        // The description's last reference: the epoll sets watching it
+        // forget it (epoll(7): a closed file leaves every set).
+        let watchers = core::mem::take(&mut *self.watchers.lock());
+        for e in watchers {
+            e.forget(self.id());
+        }
         match &self.object {
-            Object::PipeRead(p) => p.state.lock().readers -= 1,
-            Object::PipeWrite(p) => p.state.lock().writers -= 1,
+            Object::PipeRead(p) => {
+                let mut st = p.state.lock();
+                st.readers -= 1;
+                if st.readers == 0 {
+                    st.changed_for_writers();
+                }
+            }
+            Object::PipeWrite(p) => {
+                let mut st = p.state.lock();
+                st.writers -= 1;
+                if st.writers == 0 {
+                    st.changed_for_readers();
+                }
+            }
+            // An epoll closed: its set goes (what it watched is released).
+            Object::Epoll(e) => e.close(),
             Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => {}
         }
     }
@@ -130,6 +178,9 @@ pub struct Fd {
     pub object: Object,
     /// O_NONBLOCK (F_SETFL changes it for every dup).
     pub nonblock: AtomicBool,
+    /// The epoll instances whose sets hold this description: told when it
+    /// goes (`Drop`).
+    pub watchers: IrqMutex<Vec<KArc<super::epoll::Epoll>>>,
 }
 
 impl Fd {
@@ -137,9 +188,19 @@ impl Fd {
         match &object {
             Object::PipeRead(p) => p.state.lock().readers += 1,
             Object::PipeWrite(p) => p.state.lock().writers += 1,
-            Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => {}
+            Object::Console(_)
+            | Object::File(_)
+            | Object::Device(_)
+            | Object::Socket(_)
+            | Object::Epoll(_) => {}
         }
-        Fd { object, nonblock: AtomicBool::new(nonblock) }
+        Fd { object, nonblock: AtomicBool::new(nonblock), watchers: IrqMutex::new(Vec::new()) }
+    }
+
+    /// The description's identity while it lives (epoll's key with the fd
+    /// number).
+    pub fn id(&self) -> usize {
+        self as *const Fd as usize
     }
 
     pub fn nonblock(&self) -> bool {
@@ -178,8 +239,23 @@ pub struct Children {
     pub waiters: Vec<ThreadId>,
 }
 
+/// A thread's own Linux state beside its signals (`signal::Signals`).
+pub struct LxThread {
+    /// Its core thread id (`Call::tid`).
+    pub tid: u64,
+    /// set_tid_address / CLONE_CHILD_CLEARTID: at the thread's exit a 0
+    /// is stored there and one futex waiter woken (pthread_join).
+    pub clear_tid: u64,
+}
+
 pub struct LxProcess {
     pub pid: u64,
+    /// The core thread id of the thread Linux calls by the pid (the
+    /// process's first: its tid is the pid; other threads' tids are their
+    /// core ids, from the same sequence as pids, so never a pid).
+    pub main_tid: AtomicU64,
+    /// Its threads (clone with CLONE_THREAD adds them, exit removes them).
+    pub threads: IrqMutex<Vec<LxThread>>,
     /// The parent's pid; 0 for a process the kernel started (`lxrun=`).
     pub parent: u64,
     /// The signal the parent gets when this process ends (SIGCHLD for a
@@ -218,6 +294,8 @@ pub fn create(pid: u64, brk: u64, cwd: NodeId) -> Result<KArc<LxProcess>, AllocE
     }
     let state = KArc::try_new(LxProcess {
         pid,
+        main_tid: AtomicU64::new(0),
+        threads: IrqMutex::new(Vec::new()),
         parent: 0,
         exit_signal: SIGCHLD,
         brk: IrqMutex::new(Brk { start: brk, current: brk }),
@@ -237,9 +315,10 @@ pub fn create(pid: u64, brk: u64, cwd: NodeId) -> Result<KArc<LxProcess>, AllocE
 
 /// The state of a forked child `pid` of `parent`: the same break, the
 /// same open file descriptions in the same slots (shared: a pipe end
-/// stays open while either holds it), the same signal actions and mask,
-/// nothing pending, no children. It is listed, and counted as a running
-/// child of `parent`, before its thread starts.
+/// stays open while either holds it), the same signal actions, nothing
+/// pending, no children, no thread yet (`add_thread` with the forking
+/// thread's mask before it starts). It is listed, and counted as a
+/// running child of `parent`, before its thread starts.
 pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>, AllocError> {
     let mut fds = Vec::new();
     {
@@ -255,6 +334,8 @@ pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>
     let umask = *parent.umask.lock();
     let state = KArc::try_new(LxProcess {
         pid,
+        main_tid: AtomicU64::new(0),
+        threads: IrqMutex::new(Vec::new()),
         parent: parent.pid,
         exit_signal: SIGCHLD,
         brk: IrqMutex::new(brk),
@@ -291,6 +372,13 @@ pub fn discard(child: &LxProcess) {
 /// The state of Linux process `pid`.
 pub fn get(pid: u64) -> Option<KArc<LxProcess>> {
     TABLE.lock().iter().find(|p| p.pid == pid).cloned()
+}
+
+/// The process holding the thread whose Linux tid is `tid`, and its core
+/// thread id (tkill).
+pub fn find_thread(tid: u64) -> Option<(KArc<LxProcess>, u64)> {
+    let table = TABLE.lock();
+    table.iter().find_map(|p| p.core_tid(tid).map(|t| (p.clone(), t)))
 }
 
 /// How a Linux process ended, as a shell (and `cargo xtask lx-expect`)
@@ -373,7 +461,7 @@ fn child_ended(parent: &LxProcess, child: &LxProcess, status: NtStatus) {
     } else {
         Siginfo::from_process(child.exit_signal as i32, 0, child.pid as i32, 0)
     };
-    let raised = parent.signals.lock().raise(info, false);
+    let raised = super::sigcalls::raise_for(parent, parent.pid, 0, info, Target::Process);
     crate::events::emit(
         crate::events::Category::Process,
         "lx child ended",
@@ -395,6 +483,55 @@ fn log_line(pid: u64, stream: Stream, line: &[u8]) {
 }
 
 impl LxProcess {
+    /// A new thread `tid` of this process (exec's, fork's or clone's)
+    /// with signal mask `mask`; the first is the main thread (tid = pid).
+    pub fn add_thread(&self, tid: u64, mask: lx_abi::signal::SigSet) -> Result<(), AllocError> {
+        self.threads.lock().try_push(LxThread { tid, clear_tid: 0 })?;
+        if let Err(e) = self.signals.lock().add_thread(tid, mask) {
+            self.threads.lock().retain(|t| t.tid != tid);
+            return Err(e);
+        }
+        let _ = self.main_tid.compare_exchange(0, tid, Ordering::AcqRel, Ordering::Acquire);
+        Ok(())
+    }
+
+    /// Thread `tid` leaves (exit): its record and what was pending for it
+    /// alone go; returns its clear-tid address.
+    pub fn remove_thread(&self, tid: u64) -> u64 {
+        self.signals.lock().remove_thread(tid);
+        let mut threads = self.threads.lock();
+        let clear = threads.iter().find(|t| t.tid == tid).map_or(0, |t| t.clear_tid);
+        threads.retain(|t| t.tid != tid);
+        clear
+    }
+
+    /// Sets thread `tid`'s clear-tid address (set_tid_address).
+    pub fn set_clear_tid(&self, tid: u64, addr: u64) {
+        if let Some(t) = self.threads.lock().iter_mut().find(|t| t.tid == tid) {
+            t.clear_tid = addr;
+        }
+    }
+
+    /// The Linux tid of core thread `tid` (gettid).
+    pub fn linux_tid(&self, tid: u64) -> u64 {
+        if tid == self.main_tid.load(Ordering::Acquire) { self.pid } else { tid }
+    }
+
+    /// The core thread id of this process's thread whose Linux tid is
+    /// `tid`, if it has one.
+    pub fn core_tid(&self, tid: u64) -> Option<u64> {
+        let main = self.main_tid.load(Ordering::Acquire);
+        let core = if tid == self.pid {
+            main
+        } else if tid == main {
+            // The main thread's core id is not a Linux tid.
+            return None;
+        } else {
+            tid
+        };
+        self.threads.lock().iter().any(|t| t.tid == core).then_some(core)
+    }
+
     /// Bytes written to the console stream `stream` (stdout or stderr):
     /// logged a line at a time.
     pub fn console_write(&self, stream: Stream, data: &[u8]) -> Result<(), AllocError> {
@@ -540,6 +677,46 @@ impl LxProcess {
     }
 }
 
+/// The state dump's lines for every Linux process: its threads, each
+/// with its Linux tid, mask, pending set and whether it is blocked in a
+/// wait, and its epoll sets.
+pub fn dump() {
+    let mut all: Vec<KArc<LxProcess>> = Vec::new();
+    {
+        let table = TABLE.lock();
+        if all.try_reserve_exact(table.len()).is_err() {
+            return;
+        }
+        all.extend(table.iter().cloned());
+    }
+    for p in all {
+        {
+            let sigs = p.signals.lock();
+            for tid in sigs.thread_ids() {
+                if let Some(t) = sigs.thread(tid) {
+                    crate::info!(
+                        "lx: pid {} thread {} (core {tid}): mask {:#x} pending {:#x}                          process pending {:#x} {}",
+                        p.pid,
+                        p.linux_tid(tid),
+                        t.mask.0,
+                        t.pending.set.0,
+                        sigs.process.set.0,
+                        if t.sleeper.is_some() { "blocked" } else { "running" }
+                    );
+                }
+            }
+        }
+        let fds = p.fds.lock();
+        for (i, slot) in fds.iter().enumerate() {
+            if let Some(Slot { fd, .. }) = slot
+                && let Object::Epoll(e) = &fd.object
+            {
+                super::epoll::dump(p.pid, i, e);
+            }
+        }
+    }
+}
+
 /// Text that may not be UTF-8, shown with U+FFFD for bad bytes.
 struct Lossy<'a>(&'a [u8]);
 
@@ -564,6 +741,9 @@ pub fn new_pipe() -> Result<KArc<Pipe>, AllocError> {
             writers: 0,
             capacity: PIPE_CAPACITY,
             head: 0,
+            waiters: WaitQueue::new(),
+            read_events: 0,
+            write_events: 0,
         }),
     })
 }

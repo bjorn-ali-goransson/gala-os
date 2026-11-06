@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use super::errno::{
-    self, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, ENOMEM, ENOSYS, ENOTTY, EPERM, EPIPE, ESPIPE,
+    self, EAGAIN, EBADF, EBUSY, EFAULT, EINVAL, ENOMEM, ENOSYS, ENOTTY, EPERM, EPIPE, ESPIPE,
 };
 use super::file;
 use super::sigcalls;
@@ -171,7 +171,7 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::ALARM => super::timer::alarm(call, a(0)),
         nr::FORK => super::fork::fork(call, None, false),
         nr::VFORK => super::fork::fork(call, None, true),
-        nr::CLONE => super::fork::clone(call, a(0), a(1)),
+        nr::CLONE => super::fork::clone(call, a(0), a(1), a(2), a(3), a(4)),
         nr::WAIT4 => super::fork::wait4(call, a(0), a(1), a(2), a(3)),
         nr::IOCTL => match call.lx.fd(a(0)) {
             None => Err(EBADF),
@@ -182,12 +182,9 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         },
         nr::WRITEV => writev(call, a(0), a(1), a(2)),
         nr::GETPID => Ok(call.process.id),
-        nr::GETTID => Ok(call.tid),
-        nr::EXIT => {
-            // This thread ends; the process with its last thread.
-            thread::exit_current_on_return(NtStatus((a(0) & 0xff) as u32));
-            Ok(0)
-        }
+        nr::GETTID => Ok(super::threads::gettid(call)),
+        // This thread ends; the process with its last thread.
+        nr::EXIT => super::threads::exit(call, a(0)),
         nr::EXIT_GROUP => {
             process::terminate(&call.process, NtStatus((a(0) & 0xff) as u32), true);
             Ok(0)
@@ -196,11 +193,21 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::GETUID | nr::GETEUID => Ok(super::exec::UID),
         nr::GETGID | nr::GETEGID => Ok(super::exec::GID),
         nr::ARCH_PRCTL => arch_prctl(call, a(0), a(1)),
-        nr::SET_TID_ADDRESS => {
-            // Kept for the thread's exit (CLONE_CHILD_CLEARTID) once
-            // threads are created: one thread so far.
-            Ok(call.tid)
+        nr::SET_TID_ADDRESS => super::threads::set_tid_address(call, a(0)),
+        nr::FUTEX => super::futex::futex(call, a(0), a(1), a(2), a(3), a(4), a(5)),
+        nr::TGKILL => sigcalls::tgkill(call, Some(a(0)), a(1), a(2)),
+        nr::TKILL => sigcalls::tgkill(call, None, a(0), a(1)),
+        nr::PAUSE => sigcalls::pause(call),
+        nr::SCHED_YIELD => {
+            platform::yield_now();
+            Ok(0)
         }
+        nr::EPOLL_CREATE => super::epoll::epoll_create(call, a(0)),
+        nr::EPOLL_CREATE1 => super::epoll::epoll_create1(call, a(0)),
+        nr::EPOLL_CTL => super::epoll::epoll_ctl(call, a(0), a(1), a(2), a(3)),
+        nr::EPOLL_WAIT => super::epoll::epoll_wait(call, a(0), a(1), a(2), a(3)),
+        nr::EPOLL_PWAIT => super::epoll::epoll_pwait(call, a(0), a(1), a(2), a(3), a(4), a(5)),
+        nr::EPOLL_PWAIT2 => super::epoll::epoll_pwait2(call, a(0), a(1), a(2), a(3), a(4), a(5)),
         nr::PIPE2 => pipe2(call, a(0), a(1)),
         nr::PIPE => pipe2(call, a(0), 0),
         nr::DUP => {
@@ -357,7 +364,11 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     let pipe = match &f.object {
         Object::PipeRead(p) | Object::PipeWrite(p) => Some(p),
-        Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => None,
+        Object::Console(_)
+        | Object::File(_)
+        | Object::Device(_)
+        | Object::Socket(_)
+        | Object::Epoll(_) => None,
     };
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
@@ -378,7 +389,7 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
                 Object::PipeWrite(_) => 1,
                 Object::Console(_) => 2,
                 Object::File(file) => file::status_flags(file),
-                Object::Socket(_) => file::O_RDWR,
+                Object::Socket(_) | Object::Epoll(_) => file::O_RDWR,
                 Object::Device(d) => match (d.readable, d.writable) {
                     (true, true) => file::O_RDWR,
                     (false, true) => file::O_WRONLY,
@@ -411,6 +422,7 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
                 return Err(EBUSY);
             }
             st.capacity = size;
+            st.changed_for_writers();
             Ok(size as u64)
         }
         _ => {
@@ -482,9 +494,11 @@ fn dup_to(call: &Call<'_>, old: u64, new: u64, flags: Option<u64>) -> Result {
 /// lseek: a pipe or the console cannot seek.
 fn lseek(call: &Call<'_>, fd: u64, offset: u64, whence: u64) -> Result {
     match &call.lx.fd(fd).ok_or(EBADF)?.object {
-        Object::PipeRead(_) | Object::PipeWrite(_) | Object::Console(_) | Object::Socket(_) => {
-            Err(ESPIPE)
-        }
+        Object::PipeRead(_)
+        | Object::PipeWrite(_)
+        | Object::Console(_)
+        | Object::Socket(_)
+        | Object::Epoll(_) => Err(ESPIPE),
         Object::File(file) => file::lseek(file, offset, whence),
         // A device's position means nothing: always 0.
         Object::Device(_) => Ok(0),
@@ -519,18 +533,15 @@ fn pipe2(call: &Call<'_>, fds: u64, flags: u64) -> Result {
     Ok(0)
 }
 
-/// One step of every blocking wait of the personality (pipes, sockets,
-/// poll, sleeps: no wait queues yet, they poll): an expired timer raises
-/// its SIGALRM; EINTR once the process is ending or a signal is to be
-/// delivered (restarted after it if its handler has SA_RESTART and the
-/// call may be: `sigcalls::deliver`); else a millisecond's sleep.
+/// A wait on something with no wait queue (sockets: the stack's notify
+/// hook is AFD's; a connect under way): a millisecond's sleep, cut short
+/// by a signal (EINTR once one is to be delivered or the process is
+/// ending; restarted after it if its handler has SA_RESTART and the call
+/// may be: `sigcalls::deliver`) or an expired timer (its SIGALRM).
 pub fn pause(call: &Call<'_>) -> core::result::Result<(), u16> {
     super::timer::fire(call);
-    if call.process.exit_status().is_some() || call.lx.signals.lock().deliverable().is_some() {
-        return Err(EINTR);
-    }
-    platform::sleep_ms(1);
-    Ok(())
+    let at = platform::monotonic_ns().saturating_add(super::wait::POLL_NS);
+    super::wait::sleep_until(call, Some(at))
 }
 
 fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
@@ -539,7 +550,7 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
     match &f.object {
         // No console input yet: end of file.
         Object::Console(Stream::Stdin) => Ok(0),
-        Object::Console(_) | Object::PipeWrite(_) => Err(EBADF),
+        Object::Console(_) | Object::PipeWrite(_) | Object::Epoll(_) => Err(EBADF),
         Object::File(file) => file::read(call, file, buf, count),
         Object::Device(dev) => file::device_read(call, dev, buf, count),
         Object::Socket(sock) => socket::recv(call, &f, sock, buf, count, 0),
@@ -550,23 +561,30 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
             // Copied out before it is taken: a read into a bad buffer
             // leaves the bytes in the pipe (EFAULT; brk_test's probes).
             let mut data = Vec::new();
-            let writers = {
-                let st = pipe.state.lock();
+            let me = platform::current();
+            {
+                let mut st = pipe.state.lock();
                 let n = (st.data.len() as u64).min(count) as usize;
                 if data.try_reserve_exact(n).is_err() {
                     return Err(ENOMEM);
                 }
                 data.extend(st.data.iter().take(n));
-                st.writers
-            };
+                if data.is_empty() {
+                    if st.writers == 0 {
+                        return Ok(0);
+                    }
+                    if f.nonblock() {
+                        return Err(EAGAIN);
+                    }
+                    // Woken by a write or the last writer's close.
+                    st.waiters.add(me)?;
+                    super::wait::prepare(call, None);
+                }
+            }
             if data.is_empty() {
-                if writers == 0 {
-                    return Ok(0);
-                }
-                if f.nonblock() {
-                    return Err(EAGAIN);
-                }
-                pause(call)?;
+                let r = super::wait::block(call);
+                pipe.state.lock().waiters.remove(me);
+                r?;
                 continue;
             }
             call.process.write(buf, &data).map_err(|_| EFAULT)?;
@@ -580,7 +598,7 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     let count = count.min(MAX_RW);
     match &f.object {
-        Object::Console(Stream::Stdin) | Object::PipeRead(_) => Err(EBADF),
+        Object::Console(Stream::Stdin) | Object::PipeRead(_) | Object::Epoll(_) => Err(EBADF),
         Object::File(file) => file::write(call, file, buf, count),
         Object::Device(dev) => file::device_write(dev, count),
         Object::Socket(sock) => socket::send(call, &f, sock, count as usize, 0, |at, out| {
@@ -630,22 +648,33 @@ fn pipe_write(
 ) -> Result {
     let mut done = 0usize;
     let partial = |done: usize, e: u16| if done > 0 { Ok(done as u64) } else { Err(e) };
+    let me = platform::current();
     while done < count {
-        let (room, readers) = {
-            let st = pipe.state.lock();
-            (st.free(), st.readers)
+        let left = count - done;
+        let (room, readers, fits) = {
+            let mut st = pipe.state.lock();
+            let room = st.free();
+            let fits = if count <= PIPE_BUF { room >= left } else { room > 0 };
+            if !fits && st.readers > 0 && !f.nonblock() {
+                // Woken by a read or the last reader's close.
+                if let Err(e) = st.waiters.add(me) {
+                    return partial(done, e);
+                }
+                super::wait::prepare(call, None);
+            }
+            (room, st.readers, fits)
         };
         if readers == 0 {
             sigcalls::sigpipe(call);
             return partial(done, EPIPE);
         }
-        let left = count - done;
-        let fits = if count <= PIPE_BUF { room >= left } else { room > 0 };
         if !fits {
             if f.nonblock() {
                 return partial(done, EAGAIN);
             }
-            if let Err(e) = pause(call) {
+            let r = super::wait::block(call);
+            pipe.state.lock().waiters.remove(me);
+            if let Err(e) = r {
                 return partial(done, e);
             }
             continue;
@@ -664,6 +693,7 @@ fn pipe_write(
             return partial(done, ENOMEM);
         }
         st.data.extend(data.iter());
+        st.changed_for_readers();
         done += n;
     }
     Ok(done as u64)
@@ -796,7 +826,7 @@ fn sendfile(call: &Call<'_>, out_fd: u64, in_fd: u64, offset: u64, count: u64) -
 fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     match &f.object {
-        Object::Console(Stream::Stdin) | Object::PipeRead(_) => Err(EBADF),
+        Object::Console(Stream::Stdin) | Object::PipeRead(_) | Object::Epoll(_) => Err(EBADF),
         Object::File(file) => file::write_bytes(file, data),
         Object::Device(dev) => file::device_write(dev, data.len() as u64),
         Object::Socket(sock) => socket::send(call, &f, sock, data.len(), 0, |at, out| {
