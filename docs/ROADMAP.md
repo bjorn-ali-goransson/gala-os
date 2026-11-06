@@ -111,6 +111,8 @@ has a section under "Open items".
 | O1 | Ledger, event stream, backtraces, benchmarks | done | OBSERVABILITY "Event stream", "Missing-features ledger", "Backtraces and panic output", "Benchmarks" |
 | U1-U3 | gala-um | done | 109 programs in seconds; GALA_UM.md |
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
+| U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
+| U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
 | HS | Hygiene sweeps | in progress | recurring; first sweep and its four leftovers done; the next sweep after the next change of assumptions |
 
 ### NT core services (done, by test)
@@ -163,6 +165,7 @@ has a section under "Open items".
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
+| CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations and first presenters done; the console switch next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
@@ -206,7 +209,99 @@ the in-process TLS 1.3 and 1.2 server included.
 2. `start=` and child process creation on it; then the scenarios above
    out of `NOT_IN_UM`.
 
+Also needed by CP step 3: programs started from gala-um's interactive
+prompt are child processes.
+
 **Done when**: schannel_test and process_test pass in um-test.
+
+### U5. gala-um: a window on the host
+
+**Goal**: `um --window <program.exe>` shows the desktop and the
+program's windows in a window on the Linux host, with the host
+window's keyboard and mouse as the input, so GUI programs (gui_test,
+console_window) run and can be debugged in gala-um.
+
+**Approach**: the NT layer already draws through `nt::platform::Display`
+(`screen_size`, `screen_write_row`, `screen_flush`, `screen_changed`);
+gala-um's implementation (`kernel/src/hosted`) reports no screen. With
+`--window` it backs those calls with a host pixel buffer shown in an
+X11 or Wayland window (a small windowing crate, recorded in
+`THIRD_PARTY.md`; host code, so `hosted::HostCode` around its
+allocations), the window's size as the screen's and its resizes
+through `screen_changed`. A host thread turns the window's events into
+the desktop's input entry points (`nt::desktop::key_event`,
+`wheel_event`, and an absolute pointer call beside the PS/2 driver's
+relative `pointer_event`). The window is a presenter in RS B3a's sense
+(the desktop's state apart from where it is shown). Without
+`--window`, nothing changes: um-test runs in containers with no
+display.
+
+**Next** (test first):
+1. The `Display` implementation and the window; a host test that a
+   frame written through `Display` reaches the buffer, and
+   `um --window --screenshot=<png>` (a headless buffer, no host window)
+   so the screen scenarios' pixel checks run in gala-um.
+2. Input: keys, wheel and an absolute pointer; gui_test and
+   console_window out of `NOT_IN_UM` for the headless mode, with input
+   scripted as xtask scripts it for QEMU.
+3. With U4: programs started from the start menu and windows across
+   processes (windows_across_test, uia_test).
+
+**Done when**: gui_test and console_window pass in um-test headless,
+and `um --window` shows gui_test's window on a Linux desktop, driven
+by the host's mouse and keyboard. Observability: the window's size,
+resizes and input events under `--trace`, and a failure to open the
+host window reported with the display it tried.
+
+### U6. Windows applications in CI through gala-um
+
+**Goal**: an unmodified Windows application and its UI Automation tests
+(FlaUI under `dotnet test`) run headless on a stock GitHub Actions
+Ubuntu runner through gala-um, with no KVM, QEMU or root, and leave
+screenshots, test results and gala's own diagnostics as artifacts. A
+fast first pass on every commit, not a substitute for testing on
+Windows: a pass in gala-um is not a pass on Windows, and the ledger
+says what the application used that gala lacks.
+
+**Needs**: U4 (a test runner driving the application is two processes;
+`dotnet test` starts its test host as a child), U5 (headless drawing,
+screenshots, scripted input).
+
+**Next** (each step test first):
+1. Host directories as drives: `um --mount=<drive or directory on
+   C:>=<host directory>` backing part of the namespace with a host
+   directory, read and write, so the application, the test assemblies
+   and the outputs pass between the runner and gala (today C: is ramfs
+   filled file by file with `--module=`). Scenario: a program reads a
+   mounted file and writes one the host checks.
+2. Networking to the host: host sockets behind AFD (gala-um's TCP stack
+   reaches only its own loopback today), for applications that talk to
+   a test server or the network.
+3. Memory: the memfd's size (`MEMORY_SIZE`, 1 GiB) as an option, enough
+   for .NET plus a test runner and for Electron/Chromium applications.
+4. Acceptance in um-test: `flaui_test`, then `filezilla_flaui`,
+   headless.
+5. Packaging: a release bundle (the `um` binary, gala's DLLs and
+   programs, the default registry seed) and a GitHub Action that runs a
+   command against a mounted directory and uploads the artifacts: the
+   screenshots, the test results, and on failure the ledger, the event
+   stream, crash reports and the last screen. A sample repository whose
+   workflow runs a small application's FlaUI tests is the done check.
+6. Flaky UI tests: a failing run's `--record` file kept as an artifact,
+   so it replays deterministically on a developer's machine (R5, R7).
+
+**Done when**: the sample repository's workflow passes on a stock
+`ubuntu-latest` runner, and a deliberately broken test leaves a
+screenshot, the ledger and the event stream as artifacts that explain
+it.
+
+**Licensing**: distributing gala-um for use in other people's pipelines
+needs a licence for gala (README "License") and honours the obligations
+of what the bundle carries (`THIRD_PARTY.md`). That is the owner's
+decision, not yet taken; step 5 waits on it.
+
+**Design**: GALA_UM.md ("How a Windows program runs inside a Linux
+process", "Limits and open questions"); ARCHITECTURE "UI Automation".
 
 ### HS. Hygiene sweeps
 
@@ -604,6 +699,62 @@ carries sockets and pipes; consoles not yet).
 
 **Design**: ARCHITECTURE "Pseudo consoles"; SECURITY "Accounts and
 logon".
+
+### CP. An interactive console prompt
+
+**Goal**: a shell prompt typed at gala's own console, with no SSH: on
+the serial line (QEMU with `-nographic`, QEMU in a container, a VM's or
+a PC's serial port), on the screen with a PS/2 keyboard when there is
+no desktop (the server edition, `profile=server`), and in gala-um on
+the Linux terminal it was started from. Today the serial line is
+output only (`arch/x86_64/serial.rs` has no receive path), the
+sessionless console's reads return nothing (ARCHITECTURE "Consoles"),
+and the only interactive shell is busybox sh over sshd (SSH step 2).
+
+**Approach**: one path for every source. Each source is a terminal (a
+byte stream with VT sequences and a size) attached to a pseudo console,
+so programs get a real console session exactly as under sshd:
+conhost.exe `--headless` between the terminal and the processes
+(ARCHITECTURE "Pseudo consoles (ConPTY)"). The terminal is the core
+terminal object of LX seam 1, so a Linux shell can use the same
+console later.
+
+**Next** (each step test first):
+1. Serial input: the UART's receive path (polled, like the other
+   devices), its bytes into a terminal; the console prompt as a boot
+   option (a kernel flag naming the source and the shell, for example
+   `prompt=serial`), busybox sh first. Scenario: xtask writes
+   `echo hi` and `exit` to QEMU's serial chardev and reads the echo and
+   the output. Decide where kernel log lines go while a prompt owns the
+   line (held as the serial discipline holds them today, or a second
+   port), so the log never lands inside a typed line.
+2. The screen without a desktop: a text terminal drawn on the
+   framebuffer (the boot log's screen console) and the PS/2 keyboard
+   feeding it, when shasha is off or `profile=server`. Scenario: keys
+   sent through the QEMU monitor (`sendkey`), a screen check of the
+   result.
+3. gala-um: `um --prompt` attaches the host terminal (raw mode, the
+   window size from `TIOCGWINSZ` and SIGWINCH) as the terminal.
+   Builtins work at once; running programs from the prompt needs child
+   processes in gala-um (U4). Scenario: um-test drives it through a
+   host pty.
+4. Logon: the prompt asks for a user and password (LogonUserW, as
+   sshd's password logon) and runs the shell in that user's token and
+   profile; a test-only flag skips it for scenarios.
+5. gala's cmd.exe as the shell: its interactive prompt (`PROMPT`, line
+   editing through the console's cooked mode, `cd`, `dir`, `set`,
+   batch files), shared with SSH step 2; busybox sh until then.
+
+**Done when**: a scenario per source (serial, screen, gala-um) logs in,
+runs a program from cmd.exe's prompt and exits cleanly.
+Observability: the prompt's logons and the shell's start and exit in
+the event stream (`events=logon`), the terminal's bytes with
+`conpty=trace`, and a stuck prompt visible in the state dump (the
+reading thread and its wait).
+
+**Design**: ARCHITECTURE "Consoles" (with the serial line's
+discipline), "Pseudo consoles (ConPTY)"; SECURITY "Accounts and logon";
+LX seam 1.
 
 ### RS. Remote access and sessions
 
