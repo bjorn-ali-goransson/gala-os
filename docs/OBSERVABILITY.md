@@ -59,7 +59,11 @@ port. Lines that tools and agents rely on:
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`
-  and the exit line; the unknown-service line names its dispatcher
+  (with `, 32-bit x86 (WOW64)` for a 32-bit program; `wow64:` lines say
+  which wow64.dll is used, or why a 32-bit program cannot start) and
+  the exit line; a service or information class gala's wow64.dll cannot
+  convert yet is in the ledger as `wow64.dll!service 0x....` or
+  `wow64.dll!<service>(class)`; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
   personality nt)`); a thread whose personality has no dispatcher logs
   `syscall: no dispatcher for personality ..`.
@@ -74,7 +78,10 @@ port. Lines that tools and agents rely on:
 - `desktop: session S is live (WxH), shown by none|console|test`, `desktop:
   session S is now shown by test (WxH; was none)`, `presenter: test frame
   for session S: WxH at 0x... (...)` (where xtask's headless screen checks
-  read it), `desktop: no screen and no presenter= (...)`; the server
+  read it), a bare desktop (nothing can show it) going live: `desktop:
+  session S keeps its windows (WxH), shown by none (no screen and no
+  presenter=)` or `(server profile)`, a presenter refused there
+  `desktop: session S cannot be shown by test: server profile`; the server
   kernel's `desktop: no compositor in this kernel (server build: windows
   are kept, nothing draws them)` at boot, `desktop: session S keeps its
   windows (WxH), shown by none (no compositor in this kernel)` and the
@@ -86,7 +93,9 @@ port. Lines that tools and agents rely on:
   for session S refused: 0x... (...)` (GalaSession input to a desktop no
   Test frame shows; the first 8), `desktop: session S's start menu
   asked for ...: not started` (ARCHITECTURE "Presenters (B3a)"). The
-  state dump's sessions line says which session the console shows.
+  state dump's sessions line says which session the console shows, and
+  each session's line what shows its desktop (a bare one `presenter none;
+  never shown: <why>`).
 - `console N: Ctrl+C k` and `console N: pid P tid T (name) takes Ctrl+C
   k after m ms`, with a warning `took Ctrl+C k late` from 250 ms: when
   each process's control handler took the event.
@@ -142,19 +151,19 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 |---|---|
 | `syscall` | each call (pid, tid, nr, name, args, status, ns); `wait` on entry to a wait, so a thread blocked for good shows, naming the object waited on (`obj`: its type, `oid`: its identity, the same in every process; the first of several). `events_pid=a,b,..` limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test), and `events_match=<text>` adds every process whose command line contains the text when it starts (a program's processes chosen by what they are: `events_match=network.mojom.NetworkService` for Chromium's network service; scenario `events_match`); 64 processes at most |
 | `image` | the exe and every image view (pid, NT path, base, size) |
-| `thread` | create (start address, TEB), exit (status) |
-| `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line) |
+| `thread` | create (start address, TEB, `teb32`: a WOW64 thread's 32-bit TEB, else 0), exit (status) |
+| `process` | start (command line, `"session"`, `"personality":"nt"`, `"machine"`: `"x86"` for a 32-bit process running through WOW64, `"x64"` otherwise, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line) |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
 | `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too; the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts samples lost to a full ring, interrupts off for over 8 sample periods, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads, modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
-| `net` | TCP accept, connect, close, reset, with local and remote addresses |
+| `net` | TCP accept, connect, close, reset, with local and remote addresses; shutdown (`tcp shutdown`), close and reset with the connection's byte counts (`sent`, `received` by its owner, `unsent`, `unread` then); AFD's `afd shutdown after sends`, `afd send failed`, `afd shutdown failed` |
 | `logon` | LogonUser and LSA logons: pid, user, domain, type, how, status (never the password) |
 | `console` | console sessions and pseudo consoles created, resized, closed (with how many programs it ended); `console ctrl`, `console ctrl taken` |
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
 | `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names) |
-| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none) |
+| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h; a bare one, which nothing can show, `bare`: why), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none, `bare`), `noscreen_windows` and `server_profile_windows` (the desktop kernel's bare `live` without a screen and in the server profile) |
 
 A `record` boot's recording also goes to this port (`"ev":"rec"`,
 whatever the mask; extracted to `<iso>.rec`).
@@ -335,12 +344,15 @@ boot test times out, xtask injects an NMI (QEMU monitor `nmi`, every
 CPU) before killing the VM and waits up to 20 s for the dump:
 
 1. From the NMI (only atomics and `try_lock`): each CPU's rip and kernel
-   backtrace (`statedump: cpu N ...`, symbolized in the failed log), the
+   backtrace (`statedump: cpu N ...`, symbolized in the failed log;
+   `user 32-bit` for a CPU interrupted in a WOW64 thread's 32-bit code), the
    thread each CPU runs, whether the scheduler, heap, frame and console
    locks are free (a lock held for the whole dump is the deadlock), heap
    and frame figures, the flight recorder.
 2. From the boot thread (may take locks): every NT thread's system call
-   and wait object (with `session N personality nt (name)`), every
+   and wait object (with `session N personality nt (name)`; for a WOW64
+   thread also the 32-bit code that made the call, from its CPU area:
+   `called from 32-bit code: eip=... esp=...`), every
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB; paged U/L (peak P) nonpaged
    U/L (peak P) handles N/L (peak P) refused R`, bytes), every
@@ -373,7 +385,9 @@ filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
 "ended with status S after an unhandled exception C"; a filter that
 continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
-and `crash_filtered`.
+and `crash_filtered`. An exception in 32-bit code (a WOW64 process, CS
+0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
+eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`.
 
 ### Crash record across reboots
 

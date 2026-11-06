@@ -548,6 +548,7 @@ fn collect_sockets(p: &mut Programs, stopped_ns: u64) -> Result<(), Refusal> {
             signal: c.signal,
             entry,
             requests,
+            send_side: c.send_side,
         };
         p.sockets.try_push(rec)?;
     }
@@ -628,6 +629,11 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
     // personality yet; ROADMAP LX).
     if process.personality != crate::personality::Personality::Nt {
         return Err(refuse("a personality other than NT"));
+    }
+    // A WOW64 process's 32-bit side (its address limit, TEB32s, the
+    // segment its threads need) is not in the record yet (ROADMAP WOW).
+    if process.wow64.is_some() {
+        return Err(refuse("32-bit code (WOW64)"));
     }
     if process.console.is_some() {
         return Err(refuse("a console window"));
@@ -1049,8 +1055,7 @@ impl Programs {
         // Milestone (e): only when a program holds a socket.
         if let Some(net) = &self.net {
             sockets::write_net(w, net)?;
-            let any_udp = self.sockets.iter().any(|s| s.transport == sockets::transport::UDP);
-            sockets::sockets_section(w, any_udp)?;
+            sockets::sockets_section(w, &self.sockets)?;
             for s in &self.sockets {
                 s.write(w)?;
             }
@@ -1911,6 +1916,7 @@ fn restore_sockets(
             select: get(s.select_event)?.map(|o| (o, s.select_mask)),
             recorded: s.recorded,
             signal: s.signal,
+            send_side: s.send_side,
             requests: Vec::new(),
         };
         let object = afd::adopt(&c, s.entry.as_ref())?;

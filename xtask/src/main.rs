@@ -373,6 +373,9 @@ const PREBUILT: &[Prebuilt] = &[
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
+/// 32-bit (x86) test programs, run through WOW64 (ARCHITECTURE "Plan:
+/// WOW64"): USER_PROGRAMS_X86.
+const USER_TARGET_X86: &str = "i686-pc-windows-msvc";
 /// A test DLL: its package, the file it builds, and its name in user/bin.
 struct Dll {
     package: &'static str,
@@ -484,6 +487,9 @@ const USER_DLLS: &[Dll] = &[
     // security.dll: forwarders to secur32 (SSPI's older name).
     Dll { package: "security", file: "security.dll", exported_as: "testsecurity.dll" },
     Dll { package: "resutils", file: "resutils.dll", exported_as: "testresutils.dll" },
+    // gala's wow64.dll: the 64-bit side of every 32-bit process (WOW64's
+    // system call thunks, its thread start; ARCHITECTURE "Plan: WOW64").
+    Dll { package: "wow64", file: "wow64.dll", exported_as: "testwow64.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
@@ -682,6 +688,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("win32_misc_test", "version.dll", "Windows/System32"),
     ("win32_misc_test", "iphlpapi.dll", "Windows/System32"),
     ("win32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
+    // Its 32-bit child (IsWow64Process2), created suspended.
+    ("win32_misc_test", "wow64.dll", "Windows/System32"),
     ("kernel32_pool_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_pool_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_pool_test", "winmm.dll", "Windows/System32"),
@@ -2047,6 +2055,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
+    // WOW64: gala's 64-bit side of 32-bit processes.
+    ("wow64_test", "wow64.dll", "Windows/System32"),
+    ("wow64_crash", "wow64.dll", "Windows/System32"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2184,6 +2195,16 @@ const USER_PROGRAMS: &[&str] = &[
     "pipe_test",
     "lock_test",
 ];
+
+/// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
+/// x86 runtime), shipped and exported like USER_PROGRAMS.
+const USER_PROGRAMS_X86: &[&str] = &["wow64_test"];
+
+/// Where the build puts test program `program` (x64 or x86).
+fn built_program(program: &str) -> PathBuf {
+    let target = if USER_PROGRAMS_X86.contains(&program) { USER_TARGET_X86 } else { USER_TARGET };
+    target_dir().join(target).join("release").join(format!("{program}.exe"))
+}
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
 /// QEMU exit statuses for `QemuExitCode::{Success, Failure}` (`(code << 1) | 1`).
@@ -2448,8 +2469,13 @@ fn cargo() -> Command {
 /// remapped to `/cargo` so that the checked-in binaries are the same
 /// wherever they are built (CI compares them).
 fn user_build() -> Command {
+    user_build_for(USER_TARGET)
+}
+
+/// `user_build` for `target` (USER_TARGET or USER_TARGET_X86).
+fn user_build_for(target: &str) -> Command {
     let mut cmd = cargo();
-    cmd.args(["build", "--release", "--target", USER_TARGET]);
+    cmd.args(["build", "--release", "--target", target]);
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
@@ -2457,7 +2483,7 @@ fn user_build() -> Command {
         // Cargo merges this array with the target's rustflags in
         // .cargo/config.toml.
         let flag = format!("--remap-path-prefix={}=/cargo", home.display());
-        cmd.arg("--config").arg(format!("target.{USER_TARGET}.rustflags=[{flag:?}]"));
+        cmd.arg("--config").arg(format!("target.{target}.rustflags=[{flag:?}]"));
     }
     cmd
 }
@@ -2594,6 +2620,11 @@ fn build_kernel(release: bool) -> Result {
     run_cmd(&mut cmd)?;
     let mut cmd = user_build();
     for program in USER_PROGRAMS {
+        cmd.args(["--package", program]);
+    }
+    run_cmd(&mut cmd)?;
+    let mut cmd = user_build_for(USER_TARGET_X86);
+    for program in USER_PROGRAMS_X86 {
         cmd.args(["--package", program]);
     }
     run_cmd(&mut cmd)?;
@@ -2771,9 +2802,8 @@ fn make_iso_unchecked(
         copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
     }
-    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
-        let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
-        copy(&exe, &boot.join(format!("{program}.exe")))?;
+    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS).chain(USER_PROGRAMS_X86) {
+        copy(&built_program(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
     for (file, dir) in extra {
@@ -3173,7 +3203,24 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         // kept with nothing to compose it.
         "server_windows",
         &[
-            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800"#,
+            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800,"bare":"no compositor in this kernel""#,
+            r#""ev":"window","op":"create""#,
+        ],
+    ),
+    (
+        // SD: the desktop kernel without a screen or `presenter=` keeps
+        // session 2's windows as the server kernel does.
+        "noscreen_windows",
+        &[
+            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800,"bare":"no screen and no presenter=""#,
+            r#""ev":"window","op":"create""#,
+        ],
+    ),
+    (
+        // SD: so does the server profile, with a screen.
+        "server_profile_windows",
+        &[
+            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800,"bare":"server profile""#,
             r#""ev":"window","op":"create""#,
         ],
     ),
@@ -3302,6 +3349,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "handover_k32_uefi",
     "handover_net_uefi",
     "server_profile",
+    "server_profile_windows",
     "gala_cli",
     "hello",
     "selftest",
@@ -4182,7 +4230,8 @@ const SCENARIOS: &[Scenario] = &[
             "session: 1 made, named objects in \\Sessions\\1\\BaseNamedObjects",
             "session 0): starting at",
             "session 1): starting at",
-            "desktop: no screen and no presenter= (windows live in the registry only)",
+            "desktop: session 0 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
+            "desktop: session 1 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
             "in session 0: not visible across sessions",
             "in session 1: not visible across sessions",
             "session_test: ok",
@@ -5018,10 +5067,16 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // W3: gala's user32 against documented behaviour, for what
         // wxWidgets (FileZilla) uses (user/user32_test/main.c, mingw).
+        // Without a screen (BIOS, gala-um) its windows are kept on a
+        // desktop shown by none, as by the server kernel (ROADMAP SD).
         name: "user32_test",
         cmdline: "qemu_exit run=user32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["user32_test: ok", "exited with status 0x00000000"],
+        expect: &[
+            "desktop: session 1 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
+            "user32_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // ROADMAP SD: the server kernel, built without shasha (no
@@ -5064,10 +5119,49 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // ROADMAP SD: the desktop kernel on a machine with no screen and
+        // no `presenter=` (a BIOS boot) keeps windows exactly as the
+        // server kernel does (server_windows, the same program): the
+        // shasha feature only adds. Nothing can show the desktop here, so
+        // frames, injected input and the Test and Console presenters are
+        // refused as there.
+        name: "noscreen_windows",
+        cmdline: "qemu_exit as=system events=window run=presenter_test.exe args=server",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "session: 2 made, named objects in \\Sessions\\2\\BaseNamedObjects",
+            "desktop: session 2 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
+            "presenter_test: child painted",
+            "desktop: session 2 cannot be shown by test: no screen and no presenter=",
+            "presenter_test: the window is kept with nothing showing it",
+            "presenter_test: the window was closed",
+            "presenter_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP SD: the server profile with a screen (UEFI) keeps
+        // windows as the server kernel does and never draws them: the
+        // Test and Console presenters are refused.
+        name: "server_profile_windows",
+        cmdline: "qemu_exit profile=server as=system events=window run=presenter_test.exe args=server",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "profile: server",
+            "desktop: session 2 keeps its windows (1280x800), shown by none (server profile)",
+            "presenter_test: child painted",
+            "desktop: session 2 cannot be shown by test: server profile",
+            "presenter_test: the window is kept with nothing showing it",
+            "presenter_test: the window was closed",
+            "presenter_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // ROADMAP SD: the server profile never brings up the graphical
         // interface, even with a screen (UEFI: a framebuffer): windows
-        // still work (the registry, messages), nothing is drawn, and
-        // `console=` starts no console window.
+        // are kept as by the server kernel (shown by none), nothing is
+        // drawn, and `console=` starts no console window.
         name: "server_profile",
         cmdline: "qemu_exit profile=server console=user32_test.exe \
                   run=user32_test.exe,gala_cli_test.exe args=,server",
@@ -5075,7 +5169,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "profile: server",
             "console: no console window for user32_test.exe (server profile)",
-            "desktop: not drawn (server profile)",
+            "desktop: session 1 keeps its windows (1280x800), shown by none (server profile)",
             "user32_test: ok",
             "gala_cli_test: ok",
             "exited with status 0x00000000",
@@ -6619,6 +6713,39 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["peb_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WOW64 (ARCHITECTURE "Plan: WOW64"): a 32-bit program in
+        // compatibility mode, its TEB32, PEB32 and parameters, NT services
+        // through gala's wow64.dll.
+        name: "wow64_test",
+        cmdline: "qemu_exit run=wow64_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality nt, 32-bit x86 (WOW64)",
+            "wow64_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64: a 32-bit program's unhandled exception, its crash report
+        // with the 32-bit registers.
+        name: "wow64_crash",
+        cmdline: "qemu_exit run=wow64_test.exe args=crash",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_test: writing to address 0",
+            "crash report: wow64_test.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "(wow64_test.exe+0x",
+            "writing address 0x0",
+            "crash report:   personality nt, 32-bit x86 (WOW64), session ",
+            "crash report:   eax=",
+            "crash report:   eip=",
+            "crash report:   [esp+0x00]",
+            "process wow64_test.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         name: "dir_test",
         cmdline: "qemu_exit run=dir_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -7060,6 +7187,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("server_profile", "user32_test"),
     ("server_kernel", "user32_test"),
     ("server_windows", "presenter_test"),
+    ("noscreen_windows", "presenter_test"),
+    ("server_profile_windows", "presenter_test"),
     ("gala_cli", "gui_test"),
     ("virtio_gpu", "gui_test"),
     ("gui_test_headless", "gui_test"),
@@ -7150,11 +7279,12 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
 
 /// `(program file, args)` if the scenario can share a VM: it only runs one
 /// program (no other kernel flags), expects success, boots by BIOS, and
-/// expects nothing that depends on running first (process ids).
+/// expects nothing that depends on running first (process ids, a
+/// session's desktop going live: logged once per boot).
 fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
     if s.exit_status != QEMU_EXIT_SUCCESS
         || scenario_boot(s.name) != Boot::Bios
-        || s.expect.iter().any(|e| e.contains("pid "))
+        || s.expect.iter().any(|e| e.contains("pid ") || e.starts_with("desktop: session "))
         || net_marker(s.name).is_some()
         || HOST_PAGE_SCENARIOS.contains(&s.name)
         || disk_scenario(s.name).is_some()
@@ -7621,6 +7751,8 @@ fn run_parallel_on<J: Sync, T: Send>(
 
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
+    ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
     ("quota_test", "child processes (one NT process per Linux process)"),
@@ -10869,6 +11001,25 @@ const FORWARD_REMOTE_PORT: u16 = 7001;
 /// The bytes each direction of `ssh_forward_client` carries.
 const FORWARD_BYTES: usize = 200 * 1024;
 
+/// Which leg of `ssh -L` lost bytes, from what sshfwd_test said it
+/// served: on the way in (the host's ssh, sshd-session's channel or gala's
+/// loopback connection to sshfwd_test; the scenario's `events=net` has
+/// each connection's byte counts at its shutdown and close) or on the way
+/// back.
+fn forward_leg(said: &[String]) -> String {
+    let served = said.iter().find_map(|l| {
+        l.split("sshfwd_test: served ").nth(1)?.split(' ').next()?.parse::<usize>().ok()
+    });
+    match served {
+        Some(n) if n < FORWARD_BYTES => format!(
+            " (sshfwd_test received {n} of {FORWARD_BYTES}: lost on the way in, before \
+             sshfwd_test; the tcp shutdown/close events count each connection's bytes)"
+        ),
+        Some(n) => format!(" (sshfwd_test received and echoed {n}: lost on the way back)"),
+        None => String::new(),
+    }
+}
+
 /// The host side of `sshd_forward`. `ssh -L <socket>:127.0.0.1:7000`
 /// whose command starts `sshfwd_test serve 7000` in gala: once it says it
 /// listens, the host writes FORWARD_BYTES to the local socket, shuts its
@@ -10975,7 +11126,11 @@ fn ssh_forward_client(port: u16) -> Result {
     });
     local.map_err(|e| {
         let trace = fs::read(&trace).unwrap_or_default();
-        format!("ssh -L: {e}; sshfwd_test said {said:?}\nssh -v:\n{}", trace_tail(&trace, 20))
+        format!(
+            "ssh -L: {e}{}; sshfwd_test said {said:?}\nssh -v:\n{}",
+            forward_leg(&said),
+            trace_tail(&trace, 20)
+        )
     })?;
 
     // -R: an echo server on the host for sshd's forwarded-tcpip channel.
@@ -12386,9 +12541,8 @@ fn docker_test(args: &[String]) -> Result {
 fn export_tests() -> Result {
     let dir = root().join("user/bin");
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
-    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
-        let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
-        copy(&exe, &dir.join(format!("{program}.exe")))?;
+    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS).chain(USER_PROGRAMS_X86) {
+        copy(&built_program(program), &dir.join(format!("{program}.exe")))?;
     }
     for dll in USER_DLLS {
         let file = built_dll(dll.file);

@@ -77,19 +77,23 @@ In order:
 3. **LX**: seams 1 and 5 as their areas are touched, seam 4's NT surface;
    milestone 2's rest (busybox runs; threads, futex, fs_test's links
    done) as filler.
-4. **RS**: step B3a's next part (the desktop kernel's desktops without
-   a presenter keeping their windows as the server kernel's do; then
-   B3b's remote presenter).
-5. **R**: R7's next part (network frames, disk reads and input in
+4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
+   screen checks through SESSION_INPUT); then B3b's remote presenter.
+5. **WOW**: stage 2 (the thunks a 32-bit ntdll and kernel32 need,
+   32-bit threads, safe 32-bit pointers), then stage 3 (the 32-bit
+   system DLLs in SysWOW64): the process model under PK's x86
+   installers and programs (Inno Setup's Setup passes its x86 check
+   since stage 1).
+6. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's leftovers (what is not charged yet), R8's Secure
    Boot.
-6. **PK**: winget's source index (step 2's rest); step 1's rest (an
+7. **PK**: winget's source index (step 2's rest); step 1's rest (an
    upgrade's dependencies, UpgradeBehavior, winget's settings); a real
-   Inno Setup installer once WOW64 is there (its x64 Setup refuses a
+   Inno Setup installer as WOW stages 3-4 land (its x64 Setup refuses a
    Windows without x86 support).
-7. **BR** stage 1's rest (the profile's hotspots).
-8. **AG**: the remaining stubs (filler).
-9. **SSH**: the client against the host's sshd, agent forwarding;
+8. **BR** stage 1's rest (the profile's hotspots).
+9. **AG**: the remaining stubs (filler).
+10. **SSH**: the client against the host's sshd, agent forwarding;
     **H11**: busybox-w32's httpd and wget over loopback (the Linux
     busybox's run: `lx_httpd`).
 
@@ -152,6 +156,7 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
+| WOW | 32-bit x86 programs (WOW64) | in progress | stage 1 done: `wow64_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -171,10 +176,10 @@ has a section under "Open items".
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
-| SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
+| SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel, bare desktops (the shasha feature only adds) done |
 | SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
-| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (server kernel too) done; B3b next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (server kernel and bare desktops too) done; B3b next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
@@ -193,7 +198,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
-| PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs, on the winget resolver (selection, dependencies, ARP matching); a real Inno Setup installer runs up to its WOW64 check; MSI and MSIX readers |
+| PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs, on the winget resolver (selection, dependencies, ARP matching); a real Inno Setup installer passes its WOW64 check and stops in its second stage (comctl32 FlatSB_*); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -651,8 +656,9 @@ processes"; WORKFLOW "FlaUI".
 desktop can do is reachable from the command line.
 
 **Done so far**:
-- `profile=server` (scenario `server_profile`): the desktop is never
-  drawn even with a screen, windows exist as without one, `console=`
+- `profile=server` (scenarios `server_profile`,
+  `server_profile_windows`): nothing draws a desktop even with a screen,
+  each session's keeps its windows as the server kernel's do, `console=`
   starts no conhost.exe.
 - **CLI parity** (scenario `gala_cli`): one kernel entry point,
   GalaDesktopAction (0x7f58: Start, Windows, Programs, Activate,
@@ -672,12 +678,15 @@ desktop can do is reachable from the command line.
   nothing; only wallpapers, fonts and GUI-only programs (conhost.exe,
   FileZilla) stay out of a server image.
 
-**Next**: the desktop kernel without a screen or `presenter=`, and with
-`profile=server`, keeping GUI programs' windows as the server kernel
-does instead of refusing the calls (the shasha feature should only add;
-every BIOS GUI scenario and gala-um to check); the wallpaper kept
-across boots; a `gala` command for each new shasha feature (it comes
-first).
+- The shasha feature only adds: where nothing can show a desktop (no
+  screen and no `presenter=`: BIOS boots, gala-um; `profile=server`)
+  the desktop kernel's desktops are bare, the window state alone shown
+  by none, exactly as the server kernel's (scenarios `noscreen_windows`,
+  `server_profile_windows`, the same program as `server_windows`;
+  user32_test's line on BIOS and in gala-um).
+
+**Next**: the wallpaper kept across boots; a `gala` command for each new
+shasha feature (it comes first).
 
 **Design**: ARCHITECTURE "Server and desktop workloads".
 
@@ -705,7 +714,9 @@ server, an interactive shell, file transfer, forwarding, a client.
 - Step 4: `sshd_forward`: `ssh -L` (direct-tcpip: sshd-session connects
   over loopback to `sshfwd_test serve`) and `ssh -R` (tcpip-forward:
   sshd-session listens on gala's 127.0.0.1:7001, `sshfwd_test connect`
-  reaches an echo server on the host), 200 KiB each way with half-closes.
+  reaches an echo server on the host), 200 KiB each way with half-closes
+  (the FIN follows sshd's still-pending overlapped send: ARCHITECTURE
+  "AFD").
 - Step 5 begun: `sshd_client`: gala's own ssh.exe logs on to gala's
   sshd over loopback with the key in galatest's profile, accepting the
   host key into `~/.ssh/known_hosts` and then checking it strictly.
@@ -840,13 +851,14 @@ own session and shell.
   each session's windows, their last pixels, Z order, focus, capture and
   input as on a desktop nobody shows (GalaSession's query reports them,
   frames and Test/Console presenters refused; `server_windows`,
-  presenter_test's `server` mode; host tests in `winstate/tests.rs`).
+  presenter_test's `server` mode; host tests in `winstate/tests.rs`);
+  so does the desktop kernel wherever nothing can show a desktop (bare
+  desktops: no screen and no `presenter=`, `profile=server`, gala-um;
+  `noscreen_windows`, `server_profile_windows`).
 
 **Next**:
-1. B3a: the desktop kernel's desktops without a presenter (no screen,
-   `profile=server`) keeping their windows as the server kernel's do
-   (SD); `presenter=` in gala-um
-   (screen checks there; its sessions have no desktops yet); xtask's
+1. B3a: `presenter=` in gala-um
+   (screen checks there; its sessions' desktops are bare today); xtask's
    headless screen checks sending their input through SESSION_INPUT
    instead of PS/2; Test frames recorded over time; the console switch's
    open ends: WM_WTSSESSION_CHANGE (WTSRegisterSessionNotification),
@@ -1478,6 +1490,77 @@ WSL's source (MIT) is an allowed source (CLEAN_ROOM "WSL").
 
 **Design**: ARCHITECTURE "Plan: Linux containers through a WSL facade".
 
+### WOW. 32-bit x86 programs (WOW64)
+
+**Goal** (approved by the owner): unmodified 32-bit x86 Windows programs
+run on gala as on 64-bit Windows, with the answers 64-bit Windows gives
+about them (IsWow64Process2, GetNativeSystemInfo, SysWOW64, the
+Wow6432Node registry view). Every Inno Setup installer needs it (its
+Setup, x64 builds included, refuses a Windows without x86 support: PK
+stage 3), and so do the many installers and programs only shipped for
+x86. Design: ARCHITECTURE "Plan: WOW64" (the kernel stays 64-bit; gala's
+wow64.dll converts 32-bit system calls in user mode).
+
+**Done so far** (stage 1):
+- Compatibility mode: the TEB32 segment (0x53) and DS/ES/FS loaded at
+  every switch to a WOW64 thread; PE32 executables (without imports) as
+  WOW64 processes: the 2/4 GiB address limit (large-address-aware), the
+  PEB32 and 32-bit process parameters, a TEB32 and CPU area per thread,
+  gala's wow64.dll (thread start, the 32-to-64-bit transition, thunks
+  for NtClose, NtTerminateProcess, NtQueryPerformanceCounter,
+  NtRead/WriteFile, NtAllocate/Free/Protect/QueryVirtualMemory,
+  NtQueryInformationProcess; the rest in the ledger as
+  `wow64.dll!service 0x...`). `wow64_test` (32-bit, ntrt's x86 runtime,
+  built for i686-pc-windows-msvc): CS 0x23, TEB32, PEB32, the 32-bit
+  parameters, the services above in their x86 layouts.
+- Truthful answers: IsWow64GuestMachineSupported (x86 only),
+  GetSystemWow64DirectoryW/A (`C:\Windows\SysWOW64`, which exists),
+  IsWow64Process and IsWow64Process2 of a native process and of a
+  32-bit child (`win32_misc_test`), from ProcessWow64Information.
+- Observability: the process start line and event (`32-bit x86
+  (WOW64)`, `"machine":"x86"`), crash reports with the 32-bit registers
+  (`wow64_crash`), the thread dump's 32-bit caller, the state dump's
+  `user 32-bit`.
+
+**Next**:
+1. Stage 2, the thunks a 32-bit ntdll and kernel32 need, each against
+   Windows in `wow64_test`: files and directories (UNICODE_STRING and
+   OBJECT_ATTRIBUTES conversion), sections and views, events, mutants,
+   semaphores, waits, keyed events, timers, the registry calls, tokens,
+   system/thread/process information classes, NtCreateThreadEx from
+   32-bit code (its 64-bit stack and TEB32; `thread::create_wow64`),
+   GalaCreateProcess from a 32-bit parent; 32-bit pointers read and
+   written through a fault-safe path (STATUS_ACCESS_VIOLATION, not a
+   crash in wow64.dll); the kernel writing the 32-bit IO_STATUS_BLOCK
+   when I/O completes later.
+2. Stage 3, the 32-bit system DLLs in `C:\Windows\SysWOW64`: gala's
+   ntdll (loader for PE32 DLLs, x86 SEH, the dispatchers), kernel32,
+   kernelbase, msvcrt, advapi32 rebuilt for i686-pc-windows-msvc
+   (arch-specific code behind `cfg(target_arch)`, as ntrt), shipped by
+   xtask and exported to user/bin; exceptions and APCs of 32-bit code
+   through wow64.dll's dispatchers (the user-return path learning the
+   target CS); ThreadWow64Context; file system redirection
+   (System32 to SysWOW64, Sysnative, the exemptions,
+   Wow64DisableWow64FsRedirection); the 32-bit environment
+   (PROCESSOR_ARCHITECTURE=x86, PROCESSOR_ARCHITEW6432, Program Files
+   (x86)), GetSystemInfo/GetNativeSystemInfo in a 32-bit process. Test:
+   kernel32_test and a C program (clang, i686-pc-windows-msvc) built
+   for x86.
+3. Stage 4: the registry's 32-bit view in the kernel (Wow6432Node,
+   KEY_WOW64_32KEY/64KEY, the shared keys); user32, gdi32, comctl32,
+   uxtheme, shell32, ole32 and what Delphi's VCL imports, for i686;
+   then PK's `pk_install_inno` (Inno Setup's x64 Setup past its check)
+   and an x86 Inno installer; `gala install` installing winget's x86
+   choices (the fallback stopgap goes).
+4. Later: the handover carrying WOW64 processes; gala-um running 32-bit
+   code (a 32-bit code segment and a TEB32 through the host's
+   modify_ldt); ARM64 guests are out of scope.
+
+**Done when**: an x86 Inno Setup installer installs, its 32-bit program
+runs and uninstalls under `gala install` (pk_install_inno in the suite),
+the wow64 scenarios pass in the suite, and the ledger lists no
+`wow64.dll!` gaps for them.
+
 ### PK. Installing software: `gala install` over winget manifests
 
 **Goal**: `gala install` reads winget's community manifests
@@ -1540,10 +1623,14 @@ from the command line first (CLI parity; the server profile too).
   winget-pkgs' manifest, PREBUILT `innosetup`) is run by `gala install`
   with winget's switches: its loader unpacks Setup to %TEMP% and runs
   it, Setup (Delphi's VCL) starts, writes its /LOG (copied into the
-  install log on failure: `setup-log:` lines) and stops at its own
-  check that the machine runs x86 programs ("This program does not
-  support the version of Windows your computer is running": every Inno
-  Setup, x64 builds included, requires WOW64). What it needed of gala
+  install log on failure: `setup-log:` lines), passes its check that
+  the machine runs x86 programs (every Inno Setup, x64 builds included,
+  requires WOW64: its log says `Machine types supported by system: x86
+  x64` since WOW stage 1), creates its temporary directory and starts
+  its second stage (`innosetup-7.1.1-x64.tmp`), which ends at
+  comctl32's FlatSB_SetScrollProp, a stub (the flat scroll bar API;
+  the ledger also lists its other missing comctl32, oleaut32 Var*, ole32
+  and user32 exports and msctf.dll). What it needed of gala
   on the way is built and tested (win32_misc_test, kernel32_locale_test,
   gui_test): EnumCalendarInfoW, SetSearchPathMode, SetProcessDEPPolicy,
   GetThreadUILanguage, SetThreadPreferredUILanguages, global atoms,
@@ -1570,9 +1657,10 @@ from the command line first (CLI parity; the server profile too).
    real-world install against GitHub when a scenario can reach it
    (`sigoden.AIChat`, item AI); real symbolic links for commands; the
    logon environment from `HKCU\Environment`.
-3. Stage 3's rest: `pk_install_inno` passing (WOW64 first: Inno
-   Setup's Setup checks for x86 support and SysWOW64 even in its x64
-   build; then whatever its install and uninstaller need, as the ledger
+3. Stage 3's rest: `pk_install_inno` passing (Setup's WOW64 check
+   passes since WOW stage 1; next the flat scroll bar functions
+   FlatSB_* of comctl32 its second stage calls, then whatever its
+   install and uninstaller need, as the ledger
    names it: its Setup's static imports that are still stubs are listed
    by `tools/inno_setup_exe.py` and `tools/import_survey.py`); its
    machine install as an administrator (`/ALLUSERS`); Scope switches and
@@ -1866,13 +1954,14 @@ Each entry: what, why it matters, the structural fix, the owning item.
 - **`gala install` falls back across installer types**: winget installs
   the installer its selection ranks first; where that is one gala cannot
   install yet (msi, wix, burn, msix, appx, a zip of those; an x86
-  portable program, gala having no WOW64), gala installs the
+  portable program, until WOW stage 3 gives 32-bit programs their
+  DLLs), gala installs the
   best-ranked one it can instead (`install::choose`), logged as
   `fallback installer=N instead of installer=M` and recorded in the
   ledger. Without it a package that offers both an MSI and a zip would
   not install at all; with it the program lands where the zip's layout
   puts it, not where winget would. Scope never falls back. Structural
-  fix: PK stages 4 and 5 (MSIX, MSI) and WOW64, then gala installs
+  fix: PK stages 4 and 5 (MSIX, MSI) and WOW stage 3, then gala installs
   winget's choice and the fallback goes. Item PK.
 
 ### Defects known, not yet fixed
@@ -1966,10 +2055,6 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
 - **gala's own drivers** against published standards: after virtio,
   AHCI/NVMe, xHCI, e1000; device interrupts (all devices are polled
   today).
-- **WOW64**: 32-bit programs (a 32-bit ntdll and thunks); the official
-  Nginx build and many installers are PE32, and every Inno Setup
-  installer needs it (its x64 Setup checks for x86 support and
-  SysWOW64\kernel32.dll: `pk_install_inno`, PK step 3).
 - **ARM64**: a second arch port (boot, MMU, exceptions, timer, context
   switch), ARM64 PE images and ARM64 builds of gala's DLLs; the NT layer
   above is portable. x86_64 (Intel and AMD) is the only port today.

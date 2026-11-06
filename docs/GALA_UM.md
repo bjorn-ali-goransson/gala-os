@@ -319,7 +319,16 @@ dump"); um-test's `timeout -s QUIT` sends it when a program hangs.
   until then those scenarios run in QEMU only (ROADMAP U4).
 - **No network card, no disk, no screen**: see "What runs in gala-um";
   a window on the host is planned (ROADMAP U5), host directories as
-  drives and host networking with U6.
+  drives and host networking with U6. Without a screen or `presenter=`
+  (um takes none) its sessions' desktops are bare, as in a BIOS boot:
+  GUI programs' windows are kept, shown by none, exactly as the server
+  kernel keeps them (ARCHITECTURE "Server and desktop workloads";
+  user32_test's scenario checks the line here too).
+- **No 32-bit code (WOW64)**: a 32-bit program's threads need the TEB32
+  as FS and a 32-bit code segment, which are the host kernel's to give
+  (`UserEntry::set_teb32` answers false: the thread ends with
+  STATUS_NOT_SUPPORTED and a `wow64:` line); `wow64_test` is in
+  NOT_IN_UM. Possible later through the host's modify_ldt (ROADMAP WOW).
 - **Fidelity drift**: anything emulated differently (memory placement,
   timer resolution, tick updates, lock spinning) must be listed here, so
   that a gala-um pass is not mistaken for kernel correctness. Tests that

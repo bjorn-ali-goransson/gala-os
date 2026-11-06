@@ -334,8 +334,9 @@ the modes, resets and errors.
   `UEFI_SCENARIOS` (hello, selftest, fault-pagefault, the handover
   `_uefi` ones, the screen ones, ...) keep the UEFI path tested.
 - **Shared VMs.** Scenarios that just run one program with no other
-  flags, expect success, boot by BIOS and expect no process ids are
-  grouped by identical boot modules and run in shared VMs
+  flags, expect success, boot by BIOS and expect no process ids and no
+  `desktop: session ...` line (logged once per session and boot, so it
+  lands in whichever program's section came first) are grouped by identical boot modules and run in shared VMs
   (`run=a.exe,b.exe`). Each program is judged on its own section of the
   log (between `run: begin` and `run: end`, plus the boot preamble);
   scenarios running the same program (two `dotnet.exe` runs) are judged
@@ -634,8 +635,10 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   screen checks need the boot user (session 1), or the program attaches a
   Test presenter to its session, reads the frame back and brings it input
   (GalaSession's SESSION_FRAME and SESSION_INPUT, `presenter_test`), or
-  moves the console there (`gala attach <session>` as SYSTEM). On a BIOS boot without `presenter=` no session has
-  a desktop (`desktop: no screen and no presenter=`). On real Windows a child
+  moves the console there (`gala attach <session>` as SYSTEM). On a BIOS boot without `presenter=` every
+  session's desktop is bare (`desktop: session 0 keeps its windows
+  (1280x800), shown by none (no screen and no presenter=)`): windows
+  work, nothing can show them, no Test frame can be attached. On real Windows a child
   started in another session needs STARTUPINFO.lpDesktop
   `winsta0\default` and a token that may open it (SYSTEM's, moved with
   SetTokenInformation(TokenSessionId), as session_test does), or user32
@@ -735,6 +738,29 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   (reproducible: the script pins the MVID and timestamp). CI does not
   rebuild them, as for the other third-party-tool builds. FlaUI tests:
   "FlaUI".
+
+### 32-bit test programs (WOW64)
+
+32-bit (x86) programs test WOW64 (ARCHITECTURE "Plan: WOW64"): no_std
+Rust built for `i686-pc-windows-msvc` (in `rust-toolchain.toml`; linked
+as the x64 ones, `.cargo/config.toml`) on ntrt's x86 runtime
+(`user/ntrt/src/x86.rs`: the 32-bit stubs, TEB32/PEB32 access, print,
+exit, memory, a few NT services; add what a test needs there, with the
+x64 service number). On Windows they run from user/bin through
+Windows' own WOW64.
+
+- List the program in `USER_PROGRAMS_X86` (not USER_PROGRAMS: xtask
+  builds that list for the i686 target) and add `-p <name>` to CI's
+  i686 clippy line (`cargo clippy --release --target
+  i686-pc-windows-msvc -p ntrt -p ...`); it cannot build for x64.
+- Its scenario ships gala's wow64.dll: `("<scenario>", "wow64.dll",
+  "Windows/System32")` in EXTRA_MODULES (any scenario whose program
+  starts a 32-bit child too). Without it the process is refused (`wow64:
+  ... there is no ...wow64.dll`).
+- gala-um cannot run 32-bit code: such scenarios go in NOT_IN_UM.
+- Until stage 3 (the 32-bit ntdll) a 32-bit program must import nothing:
+  the kernel refuses one with imports (`wow64: <name> imports DLLs`).
+  Check with `llvm-readobj --coff-imports`.
 
 ### Derived test data
 
@@ -1197,6 +1223,16 @@ into a running gala" says how to log in.
 - Forwarding tests need no host port: `ssh -L` forwards from a Unix
   socket in the client's directory, `ssh -R` to an echo server xtask
   binds on port 0; the far end inside gala is `sshfwd_test`.
+- Its sockets (`contrib/win32/win32compat/socketio.c`) keep one
+  overlapped WSASend with a completion routine pending, of up to 70 KiB
+  (more than a gala socket's send buffer), report it as written, and a
+  channel calls shutdown(SD_SEND) as soon as its own buffer is empty:
+  the FIN must follow that send (ARCHITECTURE "AFD"). A short
+  `sshd_forward` stream: the verdict says which leg lost bytes
+  (sshfwd_test checks the pattern as it arrives and says how much it
+  served), and the `tcp shutdown`/`tcp close` events (`events=net`, on in
+  the scenario) count each loopback connection's bytes at both ends;
+  `afd send failed` names a send that never finished.
 - Each process's console-control handler thread logs how late it took a
   Ctrl+C (`took Ctrl+C N late`, from 250 ms on).
 
@@ -2480,6 +2516,14 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   `set_signal`, and never reset a signal after testing other state
   outside `wait::update_signal`: both lose wake-ups under SMP
   (`smpsem_test`, `smprace_test`; ARCHITECTURE "Waits").
+- **A request that ends a stream waits for the pending ones that write
+  it**: an asynchronous driver (AFD, pipes) may hold requests whose
+  bytes are not in the stream yet (an overlapped send waiting for room);
+  a shutdown, disconnect or end-of-file marker taken at once overtakes
+  them, and the peer sees a clean end of stream short of the data. Order
+  it behind them (AFD's `send_side`, ARCHITECTURE "AFD"); a call that
+  must not block, like shutdown, records it and the last pending
+  request's completion carries it out.
 - **Termination-aware waits** call `thread::wake_if_terminating()` right
   after `platform::prepare_wait`; checking `is_terminating()` before
   marking the thread waiting loses a termination request made in
@@ -2532,6 +2576,16 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   show. An HWND of another session is no window
   (ERROR_INVALID_WINDOW_HANDLE; `events=window` and the log say where it
   is).
+- **32-bit code (WOW64) and the segments**: DS, ES and FS are per CPU,
+  not per thread: a WOW64 thread gets them (and this CPU's TEB32 entry)
+  at every switch to it (`sched::set_teb32`, `percpu::load_teb32`);
+  32-bit code with DS 0 faults at its first memory access. Never load
+  GS for a WOW64 thread: its base is the 64-bit TEB, through which
+  wow64.dll finds the thread's CPU area. `syscall::enter_user_regs`
+  always returns with CS 0x33: anything that redirects a thread
+  interrupted in 32-bit code (an exception, an APC) must enter 64-bit
+  code (wow64.dll's dispatchers), never resume at a 64-bit address with
+  the frame's CS 0x23.
 
 ### gala's DLLs
 
@@ -2625,6 +2679,17 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   the listener's non-blocking mode (Nginx relies on it; without it recv
   blocked on the TLS handshake's second flight while plain HTTP, arriving
   in one piece, hid the bug).
+- **Rust for x86 (i686-pc-windows-msvc)**: `extern "C"` symbols are
+  decorated with a leading underscore, so `global_asm!` defines
+  `_name` for Rust's `name` (C runtime ones too: `_memcpy`); `extern
+  "system"` is stdcall (the callee pops) where x64 has one convention;
+  `core` calls MSVC's 64-bit division helpers (`__aulldiv`,
+  `__aullrem`), which ntrt's x86 runtime provides; Rust's target marks
+  images large-address-aware (a 4 GiB 32-bit address space under
+  WOW64). 32-bit code inside a 64-bit image (`.code32` in wow64.dll's
+  `global_asm!`) cannot use label differences in memory operands with
+  Intel syntax: keep such sequences fixed-length and check the bytes
+  with `llvm-objdump -d --triple=i386`.
 
 ### Windows behaviour gala must copy
 
@@ -2731,7 +2796,8 @@ ARCHITECTURE "Waits".
 | Kernel handover record | `kernel/src/handover/` |
 | gala-um's platform | `kernel/src/hosted/`, `um/` |
 | Baked fonts, icons, wallpapers | `kernel/assets/`, `fonts/selawik/` |
-| Test runtime for user programs | `user/ntrt/` |
+| Test runtime for user programs (x64, and x86 for 32-bit ones) | `user/ntrt/` (`x64.rs`, `x86.rs`) |
+| WOW64: the kernel's part, gala's wow64.dll, the 32-bit test | `kernel/src/nt/wow64.rs`, `user/wow64/`, `user/wow64_test/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Linux test programs, their binaries and transcripts | `user/lx/`, `user/lx/bin/` |
 | `gala install` (winget packages): library, commands, downloads, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/gala/src/fetch.rs`, `user/pk_install_test/` |

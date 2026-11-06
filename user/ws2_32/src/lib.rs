@@ -183,6 +183,7 @@ const WSAENETUNREACH: u32 = 10051;
 const WSAECONNRESET: u32 = 10054;
 const WSAENOBUFS: u32 = 10055;
 const WSAENOTCONN: u32 = 10057;
+const WSAESHUTDOWN: u32 = 10058;
 const WSAECONNREFUSED: u32 = 10061;
 const WSAVERNOTSUPPORTED: u32 = 10092;
 const WSAENOPROTOOPT: u32 = 10042;
@@ -246,6 +247,9 @@ fn wsa_error(status: u32) -> u32 {
         0xc000_020a => WSAEADDRINUSE,
         0xc000_0207 => WSAEADDRNOTAVAIL,
         0xc000_0140 => WSAENOTCONN,
+        // A send after shutdown(SD_SEND) (STATUS_PIPE_DISCONNECTED, as
+        // Wine maps it).
+        0xc000_00b0 => WSAESHUTDOWN,
         0xc000_023c => WSAENETUNREACH,
         // Not a handle, or a handle to something that is not a socket.
         0xc000_0008 | 0xc000_0024 | 0xc000_0010 => WSAENOTSOCK,

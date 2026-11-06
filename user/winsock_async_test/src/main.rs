@@ -10,7 +10,9 @@
 //! WSASend with lpCompletionRoutine: queued to the thread, run in SleepEx's
 //! alertable wait, also for a receive that completed at once);
 //! WSAEventSelect/WSAEnumNetworkEvents (FD_ACCEPT, FD_READ, FD_CLOSE; the
-//! event reset). Prints `winsock_async_test: ok`
+//! event reset); a shutdown(SD_SEND) while an overlapped send is still
+//! pending (the FIN follows that send's bytes; a later send fails with
+//! WSAESHUTDOWN). Prints `winsock_async_test: ok`
 //! or exits with the number of the failing check.
 
 #![no_std]
@@ -172,6 +174,7 @@ unsafe extern "system" {
     fn accept(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> Socket;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
+    fn shutdown(s: Socket, how: i32) -> i32;
     fn closesocket(s: Socket) -> i32;
 }
 
@@ -195,6 +198,8 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    // Stack probe for the 4 KiB buffer (ntdll exports it, as on Windows).
+    fn __chkstk();
 }
 
 #[unsafe(no_mangle)]
@@ -318,6 +323,16 @@ static mut DONE_ERROR: u32 = 0;
 static mut DONE_BYTES: u32 = 0;
 static mut DONE_OV: *mut Overlapped = core::ptr::null_mut();
 const WAIT_IO_COMPLETION: u32 = 0xc0;
+const SD_SEND: i32 = 1;
+const WSAESHUTDOWN: i32 = 10058;
+/// More than a loopback connection's send and receive buffers together,
+/// so an overlapped send of it pends.
+const BIG_LEN: usize = 256 * 1024;
+static mut BIG: [u8; BIG_LEN] = [0; BIG_LEN];
+
+fn pattern(i: usize) -> u8 {
+    (i * 31 + i / 7) as u8
+}
 
 /// The completion routine: (dwError, cbTransferred, lpOverlapped, dwFlags).
 extern "system" fn done(error: u32, bytes: u32, ov: *mut Overlapped, _flags: u32) {
@@ -637,6 +652,61 @@ fn run() -> Result<(), u32> {
             c.eq(closesocket(s) as u64, 0)?;
         }
         CloseHandle(ev);
+
+        // A graceful shutdown comes after the sends issued before it
+        // (Win32-OpenSSH's channels, `sshd_forward`: one overlapped WSASend
+        // with a routine, larger than the socket's buffers, still pending
+        // when its channel calls shutdown(SD_SEND)). shutdown does not
+        // wait; the peer reads every byte, then end of stream; the send
+        // completes in full; a send after the shutdown fails with
+        // WSAESHUTDOWN.
+        let l4 = overlapped_socket();
+        c.eq(bind(l4, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.eq(listen(l4, 1) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(l4, &mut name, &mut len) as u64, 0)?;
+        let c4 = overlapped_socket();
+        c.eq(connect(c4, &name, ADDR_LEN) as u64, 0)?;
+        let a4 = accept(l4, core::ptr::null_mut(), core::ptr::null_mut());
+        c.ok(a4 != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        let big = core::slice::from_raw_parts_mut((&raw mut BIG).cast::<u8>(), BIG_LEN);
+        for (i, b) in big.iter_mut().enumerate() {
+            *b = pattern(i);
+        }
+        let mut sb = WsaBuf { len: BIG_LEN as u32, buf: big.as_mut_ptr() };
+        let mut ov_d = Overlapped::new();
+        let r = WSASend(c4, &mut sb, 1, &mut bytes, 0, &mut ov_d, done as *const () as usize);
+        c.ok(r == 0 || WSAGetLastError() as u32 == ERROR_IO_PENDING, WSAGetLastError() as u64)?;
+        c.eq(shutdown(c4, SD_SEND) as u64, 0)?;
+        let mut late = WsaBuf { len: 1, buf: one.as_mut_ptr() };
+        let r = WSASend(c4, &mut late, 1, &mut bytes, 0, core::ptr::null_mut(), 0);
+        c.ok(r != 0 && WSAGetLastError() == WSAESHUTDOWN, WSAGetLastError() as u64)?;
+        let mut chunk = [0u8; 4096];
+        let mut rc = WsaBuf { len: chunk.len() as u32, buf: chunk.as_mut_ptr() };
+        let mut got = 0usize;
+        loop {
+            flags = 0;
+            let r = WSARecv(a4, &mut rc, 1, &mut received, &mut flags, core::ptr::null_mut(), 0);
+            c.ok(r == 0, WSAGetLastError() as u64)?;
+            if received == 0 {
+                break;
+            }
+            let n = received as usize;
+            let bad = chunk[..n].iter().enumerate().position(|(i, &b)| b != pattern(got + i));
+            c.ok(bad.is_none(), (got + bad.unwrap_or(0)) as u64)?;
+            got += n;
+        }
+        // All of it, then end of stream (gala sent the FIN at the
+        // shutdown and the send's rest was lost: 131072 bytes came).
+        c.eq(got as u64, BIG_LEN as u64)?;
+        // The routine ran (in one of the waits above, or now).
+        SleepEx(0, 1);
+        c.ok(DONE_COUNT == 4 && DONE_ERROR == 0, DONE_ERROR.into())?;
+        c.eq(DONE_BYTES.into(), BIG_LEN as u64)?;
+        c.ok(core::ptr::eq(DONE_OV, &raw mut ov_d), 0)?;
+        for s in [a4, c4, l4] {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
         c.eq(WSACleanup() as u64, 0)?;
     }
     Ok(())

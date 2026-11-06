@@ -248,6 +248,19 @@ pub struct EndpointState {
     /// The selected events that happened since WSAEnumNetworkEvents last
     /// read them.
     recorded: AtomicU32,
+    /// The sending side (`send_side`): open, shut down with the FIN
+    /// waiting for the sends issued before it, or shut down. Changed under
+    /// `pending`'s lock.
+    send_side: AtomicU32,
+}
+
+/// `EndpointState::send_side` (also carried across a handover).
+pub mod send_side {
+    pub const OPEN: u32 = 0;
+    /// shutdown(SD_SEND) came while sends were pending: the FIN follows
+    /// once none is (`fin_after_sends`).
+    pub const AFTER_SENDS: u32 = 1;
+    pub const SHUT: u32 = 2;
 }
 
 /// A socket endpoint (`ObjectBody::Socket`).
@@ -642,6 +655,17 @@ fn try_complete(state: &EndpointState) {
                 if usize::from(p.op.kind()) == POLL_KIND {
                     state.polls.fetch_sub(1, Ordering::AcqRel);
                 }
+                if let Op::Send { buffers, done } = &p.op
+                    && status.0 >= 0xc000_0000
+                {
+                    // Its first `done` bytes are in the stream, the rest
+                    // never will be: a peer that comes up short says how
+                    // much from here.
+                    let total: usize = buffers.iter().map(|&(_, l)| l).sum();
+                    afd_event(state, "afd send failed", |f| {
+                        write!(f, r#","status":{},"queued":{done},"of":{total}"#, status.0)
+                    });
+                }
                 finish(state, &p.io, status, information, false);
             }
             Attempt::Wait => {
@@ -650,6 +674,49 @@ fn try_complete(state: &EndpointState) {
             }
         }
     }
+    fin_after_sends(state, &pending);
+}
+
+/// `Op::kind` of a send.
+const SEND_KIND: u8 = 1;
+
+/// The FIN of a shutdown(SD_SEND) that came while sends were pending,
+/// once none is (they completed, failed or were cancelled). Called with
+/// `pending` locked.
+fn fin_after_sends(state: &EndpointState, pending: &[Pending]) {
+    if state.send_side.load(Ordering::Acquire) != send_side::AFTER_SENDS
+        || pending.iter().any(|p| p.op.kind() == SEND_KIND)
+    {
+        return;
+    }
+    state.send_side.store(send_side::SHUT, Ordering::Release);
+    let socket = *state.socket.lock();
+    let result = socket.ok_or(NetError::NotConnected).and_then(tcp::shutdown_send);
+    if let Err(e) = result {
+        afd_event(state, "afd shutdown failed", |f| write!(f, r#","error":"{e:?}""#));
+    }
+}
+
+/// An endpoint event (`events=net`): its kernel socket's number (as the
+/// "tcp ..." events name it, -1 without one), then `fields` (each
+/// starting with a comma).
+fn afd_event(
+    state: &EndpointState,
+    what: &str,
+    fields: impl Fn(&mut core::fmt::Formatter<'_>) -> core::fmt::Result,
+) {
+    struct Fields<F>(F);
+    impl<F: Fn(&mut core::fmt::Formatter<'_>) -> core::fmt::Result> core::fmt::Display for Fields<F> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            (self.0)(f)
+        }
+    }
+    let socket = state.socket.lock().map_or(-1, |id| i64::from(id.number()));
+    crate::events::emit(
+        crate::events::Category::Net,
+        what,
+        format_args!(r#""socket":{socket}{}"#, Fields(fields)),
+    );
 }
 
 /// `Op::kind` of a poll.
@@ -750,6 +817,7 @@ pub fn cancel(state: &EndpointState, process: Option<&KArc<Process>>, iosb: Opti
             i += 1;
         }
     }
+    fin_after_sends(state, &pending);
     n
 }
 
@@ -856,6 +924,7 @@ pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
         select: IrqMutex::new(None),
         recorded: AtomicU32::new(0),
         polls: AtomicUsize::new(0),
+        send_side: AtomicU32::new(send_side::OPEN),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -1225,6 +1294,10 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         }
         IOCTL_AFD_SEND => {
             socket()?;
+            if ep.send_side.load(Ordering::Acquire) != send_side::OPEN {
+                // After shutdown(SD_SEND): WSAESHUTDOWN (Wine's mapping).
+                return Err(NtStatus::PIPE_DISCONNECTED);
+            }
             Immediate::Async(Op::Send { buffers: buffers(r)?, done: 0 })
         }
         IOCTL_AFD_RECV => {
@@ -1247,11 +1320,39 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             let b: [u8; 16] = r.input()?;
             let kind = u32_at(&b, 0);
             if kind & AFD_DISCONNECT_ABORT != 0 {
+                // Reset: no FIN is owed any more.
+                let _pending = ep.pending.lock();
+                ep.send_side.store(send_side::SHUT, Ordering::Release);
                 if let Some(id) = ep.socket.lock().take() {
                     tcp::close(id, true);
                 }
             } else if kind & AFD_DISCONNECT_SEND != 0 {
-                tcp::shutdown_send(socket()?).map_err(status_of)?;
+                let id = socket()?;
+                // The FIN follows the bytes of every send issued before the
+                // shutdown, also of overlapped ones still pending
+                // (Win32-OpenSSH shuts a channel's socket down while its
+                // last WSASend waits for room); shutdown itself does not
+                // wait. Sending the FIN now would lose the rest of those
+                // sends (`sshd_forward`, winsock_async_test).
+                let pending = ep.pending.lock();
+                if ep.send_side.load(Ordering::Acquire) == send_side::OPEN {
+                    let sends = pending.iter().filter(|p| p.op.kind() == SEND_KIND);
+                    let (count, left) = sends.fold((0usize, 0usize), |(n, left), p| match &p.op {
+                        Op::Send { buffers, done } => {
+                            (n + 1, left + buffers.iter().map(|&(_, l)| l).sum::<usize>() - done)
+                        }
+                        _ => (n, left),
+                    });
+                    if count == 0 {
+                        tcp::shutdown_send(id).map_err(status_of)?;
+                        ep.send_side.store(send_side::SHUT, Ordering::Release);
+                    } else {
+                        ep.send_side.store(send_side::AFTER_SENDS, Ordering::Release);
+                        afd_event(ep, "afd shutdown after sends", |f| {
+                            write!(f, r#","sends":{count},"bytes":{left}"#)
+                        });
+                    }
+                }
             }
             Immediate::Done(0)
         }
@@ -1434,6 +1535,8 @@ pub struct CarriedEndpoint {
     pub select: Option<(ObjectRef, u32)>,
     pub recorded: u32,
     pub signal: i32,
+    /// `send_side` (`send_side::*`).
+    pub send_side: u32,
     pub requests: Vec<CarriedRequest>,
 }
 
@@ -1546,6 +1649,7 @@ pub fn carry(state: &EndpointState) -> Result<CarriedEndpoint, NtStatus> {
         select: state.select.lock().clone(),
         recorded: state.recorded.load(Ordering::Acquire),
         signal: state.dispatcher.signal_state(),
+        send_side: state.send_side.load(Ordering::Acquire),
         requests,
     })
 }
@@ -1572,6 +1676,7 @@ pub fn adopt(
         select: IrqMutex::new(c.select.clone()),
         recorded: AtomicU32::new(c.recorded),
         polls: AtomicUsize::new(0),
+        send_side: AtomicU32::new(c.send_side),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;

@@ -35,7 +35,11 @@
 //! version-2 writer marks the section must_read 2 only when it holds a
 //! UDP socket (`sockets_must_read`): TCP-only records still go to a
 //! version-1 reader, which skips the appended fields; this reader takes
-//! version 1 with the new fields absent.
+//! version 1 with the new fields absent. 3 appends the endpoint's sending
+//! side (`afd::send_side`: open, shut down with the FIN waiting for the
+//! pending sends, shut down), marked must_read 3 only when an endpoint's
+//! FIN waits (a version-2 reader would never send it); read as open when
+//! absent.
 
 use alloc::vec::Vec;
 
@@ -404,6 +408,8 @@ pub struct SocketRec {
     /// The kernel socket behind it, if any.
     pub entry: Option<CarriedEntry>,
     pub requests: Vec<RequestRec>,
+    /// Version 3: `afd::send_side` (0, open, when absent).
+    pub send_side: u32,
 }
 
 impl SocketRec {
@@ -473,6 +479,8 @@ impl SocketRec {
             w.blob(data)?;
             w.end_entry(d)?;
         }
+        // Version 3.
+        w.u32(self.send_side)?;
         w.end_entry(e)
     }
 
@@ -549,22 +557,29 @@ impl SocketRec {
             _ if has_peer || count != 0 => return Err(None),
             _ => {}
         }
+        // Version 3 (absent before: open).
+        s.send_side = r.u32();
         Ok(s)
     }
 }
 
 /// SOCKETS' `must_read`: a record holding a UDP socket (or a request on
-/// one) is misread by a version-1 reader, which knows neither.
-pub fn sockets_must_read(any_udp: bool) -> u16 {
+/// one) is misread by a version-1 reader, which knows neither; one with an
+/// endpoint whose FIN waits for its sends (`after_sends`) by a version-2
+/// reader, which would never send that FIN.
+pub fn sockets_must_read(any_udp: bool, after_sends: bool) -> u16 {
     let k = version::kind_of(tag::SOCKETS).map_or(0, |k| k.must_read);
-    if any_udp { k.max(2) } else { k }
+    let k = if any_udp { k.max(2) } else { k };
+    if after_sends { k.max(3) } else { k }
 }
 
-/// Starts the SOCKETS section (its entries: `SocketRec::write`); `any_udp`:
-/// a UDP socket is among them.
-pub fn sockets_section(w: &mut Writer, any_udp: bool) -> Result<(), AllocError> {
+/// Starts the SOCKETS section for `sockets` (written next, each with
+/// `SocketRec::write`).
+pub fn sockets_section(w: &mut Writer, sockets: &[SocketRec]) -> Result<(), AllocError> {
     let writes = version::writes(tag::SOCKETS);
-    w.section_needing(tag::SOCKETS, writes, REQUIRED, sockets_must_read(any_udp))
+    let any_udp = sockets.iter().any(|s| s.transport == transport::UDP);
+    let after_sends = sockets.iter().any(|s| s.send_side == crate::nt::afd::send_side::AFTER_SENDS);
+    w.section_needing(tag::SOCKETS, writes, REQUIRED, sockets_must_read(any_udp, after_sends))
 }
 
 #[cfg(test)]
@@ -706,6 +721,7 @@ mod tests {
                     },
                 }),
                 requests: Vec::new(),
+                send_side: 0,
             },
             SocketRec {
                 id: 2,
@@ -723,6 +739,7 @@ mod tests {
                     kind: CarriedKind::Conn { conn: conn(1), connected: true },
                 }),
                 requests: [request].into_iter().collect(),
+                send_side: 0,
             },
             SocketRec {
                 id: 5,
@@ -751,7 +768,7 @@ mod tests {
     fn record() -> Vec<u8> {
         let mut w = Writer::new(1).unwrap();
         write_net(&mut w, &net()).unwrap();
-        sockets_section(&mut w, false).unwrap();
+        sockets_section(&mut w, &sockets()).unwrap();
         for s in sockets() {
             s.write(&mut w).unwrap();
         }
@@ -786,8 +803,9 @@ mod tests {
     fn udp_sockets_round_trip_and_need_version_2() {
         let mut w = Writer::new(1).unwrap();
         write_net(&mut w, &net()).unwrap();
-        sockets_section(&mut w, true).unwrap();
-        for s in sockets().into_iter().chain([udp_socket()]) {
+        let all: Vec<SocketRec> = sockets().into_iter().chain([udp_socket()]).collect();
+        sockets_section(&mut w, &all).unwrap();
+        for s in all {
             s.write(&mut w).unwrap();
         }
         let bytes = w.finish().unwrap();
@@ -796,13 +814,44 @@ mod tests {
         assert_eq!(got[3], udp_socket());
         assert_eq!(&got[..3], &sockets());
         let s = rec.sections().flatten().find(|s| s.tag == tag::SOCKETS).unwrap();
-        assert_eq!((s.version, s.must_read), (2, 2));
+        assert_eq!((s.version, s.must_read), (version::writes(tag::SOCKETS), 2));
         // Without a UDP socket a version-1 reader may take it.
         let rec_bytes = record();
         let rec = record::parse(&rec_bytes).unwrap();
         let s = rec.sections().flatten().find(|s| s.tag == tag::SOCKETS).unwrap();
-        assert_eq!((s.version, s.must_read), (2, 0));
-        assert_eq!(sockets_must_read(true), 2);
+        assert_eq!((s.version, s.must_read), (version::writes(tag::SOCKETS), 0));
+        assert_eq!(sockets_must_read(true, false), 2);
+    }
+
+    /// SOCKETS 3: an endpoint's sending side round trips, and only a
+    /// record with a FIN waiting for its sends needs a version-3 reader.
+    #[test]
+    fn a_fin_after_sends_round_trips_and_needs_version_3() {
+        use crate::nt::afd::send_side;
+        let mut all = sockets();
+        all[1].send_side = send_side::AFTER_SENDS;
+        all[2].send_side = send_side::SHUT;
+        let mut w = Writer::new(1).unwrap();
+        write_net(&mut w, &net()).unwrap();
+        sockets_section(&mut w, &all).unwrap();
+        for s in &all {
+            s.write(&mut w).unwrap();
+        }
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        assert_eq!(read_sockets(&rec), all);
+        let s = rec.sections().flatten().find(|s| s.tag == tag::SOCKETS).unwrap();
+        assert_eq!((s.version, s.must_read), (3, 3));
+        // Only shut down (the FIN is in the stream): a version-2 reader
+        // may take it (its sends then fail as WSAEINVAL, not WSAESHUTDOWN).
+        all[1].send_side = send_side::SHUT;
+        assert_eq!(sockets_must_read(false, false), 0);
+        let mut w = Writer::new(1).unwrap();
+        sockets_section(&mut w, &all).unwrap();
+        let bytes = w.finish().unwrap();
+        let rec = record::parse(&bytes).unwrap();
+        let s = rec.sections().flatten().find(|s| s.tag == tag::SOCKETS).unwrap();
+        assert_eq!(s.must_read, 0);
     }
 
     /// A version-1 writer's SOCKETS (no datagram fields) reads with them
@@ -874,7 +923,7 @@ mod tests {
         // An entry cut short (as a damaged length would leave it): the
         // reader gives defaults or refuses, it never reads past the end.
         let mut w = Writer::new(1).unwrap();
-        sockets_section(&mut w, false).unwrap();
+        sockets_section(&mut w, &[]).unwrap();
         let e = w.begin_entry().unwrap();
         w.u32(3).unwrap(); // id
         w.u32(1).unwrap(); // TCP
@@ -891,7 +940,7 @@ mod tests {
         assert_eq!(SocketRec::read(&mut e), Err(None));
         // An unknown role.
         let mut w = Writer::new(1).unwrap();
-        sockets_section(&mut w, false).unwrap();
+        sockets_section(&mut w, &[]).unwrap();
         let e = w.begin_entry().unwrap();
         for _ in 0..12 {
             w.u32(0).unwrap();

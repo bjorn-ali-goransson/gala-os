@@ -101,10 +101,50 @@ fn net_event(what: &str, id: SocketId, local: Addr, remote: Option<Addr>) {
     );
 }
 
+/// The end of a connection's sending side or of the connection
+/// (`events=net`: "tcp shutdown", "tcp close"), with its byte counts: what
+/// its owner queued and took, what was still unsent (queued, not yet
+/// acknowledged) and unread (received, never taken). A stream that came
+/// up short is found by comparing one end's `sent` with the other's
+/// `received`.
+fn bytes_event(what: &str, id: SocketId, local: Addr, remote: Option<Addr>, b: Bytes) {
+    crate::events::emit(
+        crate::events::Category::Net,
+        what,
+        format_args!(
+            r#""socket":{},"local":{local},"remote":{},"sent":{},"received":{},"unsent":{},"unread":{}"#,
+            id.index,
+            remote.map_or(Addr::default(), |r| r),
+            b.sent,
+            b.received,
+            b.unsent,
+            b.unread
+        ),
+    );
+}
+
+/// A connection's byte counts (`bytes_event`): `sent` and `received` by
+/// its owner since the socket was made (or adopted after a handover);
+/// `unsent` and `unread` are the queues' lengths when reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Bytes {
+    sent: u64,
+    received: u64,
+    unsent: usize,
+    unread: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SocketId {
     pub(super) index: u32,
     generation: u32,
+}
+
+impl SocketId {
+    /// The number events name it by (`"socket"`).
+    pub fn number(self) -> u32 {
+        self.index
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -148,6 +188,8 @@ pub(super) struct Entry {
     /// owner sent, received or accepted (the next poll reports it: a queue
     /// emptied and refilled to the same length looks unchanged).
     pub(super) last: u64,
+    /// What its owner sent and received (a connection; `bytes_event`).
+    pub(super) bytes: Bytes,
 }
 
 /// No signature: the next poll reports the entry.
@@ -302,7 +344,8 @@ impl Stack {
     ) -> Result<SocketId, NetError> {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
-        let entry = Entry { generation, token, local, scope, kind, last: 0 };
+        let entry =
+            Entry { generation, token, local, scope, kind, last: 0, bytes: Bytes::default() };
         let index = match self.entries.iter().position(Option::is_none) {
             Some(i) => {
                 self.entries[i] = Some(entry);
@@ -783,28 +826,33 @@ pub fn connected(id: SocketId) -> Result<(), NetError> {
     })
 }
 
+/// Runs `f` on a connection's socket and its byte counts.
 fn conn<R>(
     id: SocketId,
-    f: impl FnOnce(&mut tcp::Socket<'static>) -> Result<R, NetError>,
+    f: impl FnOnce(&mut tcp::Socket<'static>, &mut Bytes) -> Result<R, NetError>,
 ) -> Result<R, NetError> {
     with_stack(|s| {
-        let Kind::Conn { sock, connected } = s.entry(id)?.kind else {
+        let entry = s.entry(id)?;
+        let Kind::Conn { sock, connected } = entry.kind else {
             return Err(NetError::NotConnected);
         };
         // What the owner does to the socket is not seen by the net thread:
         // the next poll must report the socket whatever it finds.
-        s.entry(id)?.last = STALE;
+        entry.last = STALE;
+        let mut bytes = entry.bytes;
         let socket = s.tcp(sock).ok_or(NetError::NoSocket)?;
         if !connected && matches!(socket.state(), State::SynSent | State::SynReceived) {
             return Err(NetError::NotConnected);
         }
-        f(socket)
+        let r = f(socket, &mut bytes);
+        s.entry(id)?.bytes = bytes;
+        r
     })
 }
 
 /// Queues bytes for sending; returns how many fit (WouldBlock if none).
 pub fn send(id: SocketId, data: &[u8]) -> Result<usize, NetError> {
-    conn(id, |t| {
+    conn(id, |t, bytes| {
         if !t.may_send() {
             return Err(if t.state() == State::Closed {
                 NetError::Reset
@@ -814,7 +862,10 @@ pub fn send(id: SocketId, data: &[u8]) -> Result<usize, NetError> {
         }
         match t.send_slice(data) {
             Ok(0) if !data.is_empty() => Err(NetError::WouldBlock),
-            Ok(n) => Ok(n),
+            Ok(n) => {
+                bytes.sent += n as u64;
+                Ok(n)
+            }
             Err(_) => Err(NetError::InvalidState),
         }
     })
@@ -822,9 +873,11 @@ pub fn send(id: SocketId, data: &[u8]) -> Result<usize, NetError> {
 
 /// Takes received bytes; Ok(0) at end of stream, WouldBlock if none yet.
 pub fn recv(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
-    conn(id, |t| {
+    conn(id, |t, bytes| {
         if t.can_recv() {
-            return t.recv_slice(out).map_err(|_| NetError::Reset);
+            let n = t.recv_slice(out).map_err(|_| NetError::Reset)?;
+            bytes.received += n as u64;
+            return Ok(n);
         }
         if t.may_recv() {
             return Err(NetError::WouldBlock);
@@ -838,7 +891,7 @@ pub fn recv(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
 
 /// `recv` that leaves the bytes in the socket (MSG_PEEK).
 pub fn peek(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
-    conn(id, |t| {
+    conn(id, |t, _| {
         if t.can_recv() {
             return t.peek_slice(out).map_err(|_| NetError::Reset);
         }
@@ -846,12 +899,18 @@ pub fn peek(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
     })
 }
 
-/// Stops sending (FIN after the queued bytes).
+/// Stops sending (FIN after the queued bytes); `events=net` "tcp
+/// shutdown" with the byte counts (`bytes_event`).
 pub fn shutdown_send(id: SocketId) -> Result<(), NetError> {
-    conn(id, |t| {
+    let (local, remote, bytes) = conn(id, |t, bytes| {
         t.close();
-        Ok(())
-    })
+        let local = t.local_endpoint().map(Addr::from_endpoint).unwrap_or_default();
+        let remote = t.remote_endpoint().map(Addr::from_endpoint);
+        let b = Bytes { unsent: t.send_queue(), unread: t.recv_queue(), ..*bytes };
+        Ok((local, remote, b))
+    })?;
+    bytes_event("tcp shutdown", id, local, remote, bytes);
+    Ok(())
 }
 
 pub fn local(id: SocketId) -> Result<Addr, NetError> {
@@ -879,8 +938,15 @@ pub fn close(id: SocketId, abort: bool) {
             return Ok(());
         };
         if let Kind::Conn { sock, .. } = entry.kind {
-            let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
-            net_event(if abort { "tcp reset" } else { "tcp close" }, id, entry.local, remote);
+            let t = s.tcp(sock);
+            let remote = t.as_ref().and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
+            let bytes = Bytes {
+                unsent: t.as_ref().map_or(0, |t| t.send_queue()),
+                unread: t.as_ref().map_or(0, |t| t.recv_queue()),
+                ..entry.bytes
+            };
+            let what = if abort { "tcp reset" } else { "tcp close" };
+            bytes_event(what, id, entry.local, remote, bytes);
         }
         let finish = |s: &mut Stack, sock: Sock, abort: bool| {
             if let Some(t) = s.tcp(sock) {

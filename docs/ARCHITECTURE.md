@@ -50,6 +50,8 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/hosted/           gala-um's platform (feature `hosted`; memfd, host threads, signals) [unsafe allowed]
 user/                   freestanding Windows programs and DLLs (x86_64-pc-windows-msvc)
   ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
+                        (x64.rs; x86.rs for 32-bit programs, "Plan: WOW64")
+  wow64/                wow64.dll, the 64-bit side of 32-bit processes
   <name>_test/          test programs (one per feature)
   <dll>/                gala's system DLLs ("gala's system DLLs" below)
   bin/                  the built test binaries, checked in (`cargo xtask export-tests`)
@@ -97,7 +99,9 @@ line, calibration arithmetic, ...) is unit-tested on the host with
 
 The GDT uses the x64 Windows selector values because user mode can
 observe them: kernel CS/SS `0x10`/`0x18`, user CS `0x33`, user SS `0x2b`,
-32-bit compat CS `0x23`, TSS `0x40`. This ordering is also exactly what
+32-bit compat CS `0x23`, TSS `0x40`, and `0x53`, the running WOW64
+thread's TEB32 as FS for 32-bit code (written per CPU at each switch to
+such a thread: "Plan: WOW64"). This ordering is also exactly what
 SYSCALL/SYSRET require. The TSS provides IST stacks for #DF (IST1), NMI
 (IST2) and #MC.
 
@@ -146,7 +150,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
-| `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
+| `profile=server` | never bring up the graphical interface: nothing draws a desktop even with a screen (each session's keeps its windows, shown by none, as in the server kernel), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (scenario `net_echo`) |
 | `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (driver recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (driver recovery test) |
@@ -535,7 +539,10 @@ numbers and the version reported to programs depend on it.
   executable itself is not relocated (TODO in `map_image`: relocate when
   the preferred base is taken). Executables with imports are accepted
   only when an ntdll is present: binding them is the user-mode loader's
-  job, as on Windows.
+  job, as on Windows. A PE32 (x86) executable makes a WOW64 process
+  ("Plan: WOW64"): its 32-bit address limit, a PEB32, 32-bit parameters
+  and TEB32s beside the 64-bit ones, gala's wow64.dll, and a main thread
+  that starts there.
 - **Main thread's stack**: a reservation of the header's
   SizeOfStackReserve (64 KiB units, at most 256 MiB) ending at
   `layout::STACK_TOP` (0x200000) when it fits below it, else anywhere;
@@ -2137,7 +2144,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 
 | Role | DLLs |
 |---|---|
-| core | ntdll, kernel32, kernelbase (what programs look up only there: QueryInterruptTime and friends, SetThreadDescription), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions) |
+| core | ntdll, kernel32, kernelbase (what programs look up only there: QueryInterruptTime and friends, SetThreadDescription), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
 | C runtime | msvcrt (mingw-w64 programs' C runtime) |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
@@ -3554,6 +3561,13 @@ The kernel's socket API, independent of NT: `listen(local, backlog)`,
   (128 KiB), so a listener on 0.0.0.0 with backlog 5 holds 1.25 MiB
   (TODO: fewer listening sockets or smaller buffers for servers with
   many listeners).
+- Byte counts: an entry counts what its owner sent (queued) and
+  received (took); `tcp shutdown` and `tcp close`/`tcp reset`
+  (`events=net`) carry them with the queues' lengths then (`unsent`:
+  queued, not yet acknowledged; `unread`: received, never taken).
+  Comparing one end's `sent` with the other end's `received` says where
+  a short stream lost its bytes. They start at 0 for a connection
+  adopted after a handover.
 - Errors: a connection attempt answered by RST is refused
   (STATUS_CONNECTION_REFUSED), an established one reset by the peer is
   STATUS_CONNECTION_RESET. TODO: smoltcp ends a reset and a FIN both in
@@ -3726,6 +3740,22 @@ endpoint's I/O completion port.
   queued part of its bytes succeeds with that count (the bytes are in
   the socket). An accepted socket inherits the listener's mode (Nginx
   never sets it on accepted sockets).
+- **Invariant: a graceful shutdown follows the sends issued before
+  it.** DISCONNECT with the send flag (shutdown SD_SEND/SD_BOTH) gives
+  the FIN to `net::tcp` at once only when no send is pending; otherwise
+  the endpoint's `send_side` is AFTER_SENDS and the FIN goes once the
+  last pending send has completed, failed or been cancelled
+  (`fin_after_sends`, from `try_complete` and `cancel`). The call itself
+  does not wait. Sends issued after the shutdown fail in their call with
+  STATUS_PIPE_DISCONNECTED (WSAESHUTDOWN). Win32-OpenSSH depends on it:
+  its sockets keep one overlapped WSASend of up to 70 KiB pending (more
+  than a socket's 64 KiB send buffer) and a channel calls shutdown as
+  soon as its own buffer is empty; a FIN sent then ended the stream and
+  failed the send's rest (`sshd_forward` lost tens of KiB now and then;
+  winsock_async_test sends 256 KiB, shuts down, and reads it all back).
+  Events (`events=net`): `afd shutdown after sends` (the sends and bytes
+  still pending), `afd send failed` (a pending send that failed: its
+  status, bytes already queued and its length), `afd shutdown failed`.
 - **Receive flags** (afd_recv_params.msg_flags, Wine's layout):
   AFD_MSG_PEEK (0x80) leaves the bytes in the socket (Nginx peeks to
   tell TLS from plain HTTP); OOB and WAITALL are not supported (ledger).
@@ -4336,12 +4366,12 @@ registry ("Plan: windows across processes").
   bounds).
 - The desktop's keyboard focus is the active top-level window; focus
   among child windows is user32's.
-- In the desktop kernel without a screen and without `presenter=` (or
-  in the server profile), desktop calls are STATUS_NOT_SUPPORTED and the
-  window registry still works; the server kernel keeps every session's
-  window state with nothing to compose it ("Server and desktop
-  workloads"). A session the console does not show keeps a live desktop
-  (presenter None).
+- Where nothing can show a desktop (the desktop kernel without a screen
+  and without `presenter=`, or in the server profile) every session's
+  desktop is bare: the window state alone, shown by none, exactly as the
+  server kernel keeps it ("Server and desktop workloads"). A session the
+  console does not show on a machine that draws keeps a live desktop
+  (presenter None) with the compositor's layout, ready to be shown.
 - `nt::winstate` holds what a window is and what the named actions do;
   `nt::desktop` only draws it. Damage rectangles come from the window
   state (with the compositor's shadow margin, `winstate::Shadow`; none in
@@ -4367,17 +4397,39 @@ load a GUI DLL unless a program asked for a window. user32 and gdi32
 themselves stay (many server programs import them, and loading them
 draws nothing; user32 loads gdi32 lazily).
 
-- **Lazy desktop**: `desktop::with` paints the desktop the first time a
-  program creates a window, and only when there is a screen
-  (`desktop::screen`); without one the window registry still works (UI
-  Automation and cross-process windows need no screen).
+- **Lazy desktop**: a session's desktop goes live at its first GUI call
+  (`desktop::with`, `desktop::screen`) and is drawn only when something
+  shows it (the screen, `presenter=`); on a machine nothing shows it is
+  bare (below) and nothing is laid out or drawn.
+- **Bare desktops: the shasha feature only adds.** In the desktop
+  kernel, a machine with no screen and no `presenter=` (BIOS boots,
+  gala-um) or in the server profile has nothing that can show a desktop
+  (`desktop::bare`, fixed before any program runs). There each session's
+  desktop is the window state alone, exactly as the server kernel's:
+  live at DEFAULT_SIZE (1280 x 800) on the first GUI call, shown by
+  none; windows are made, shown, placed, painted and queried
+  (GalaSession's query reports them); GalaScreenInfo reports DEFAULT_SIZE
+  with the taskbar's rows out of the work area; GalaWindowListen takes
+  the event; a frame, injected input and GalaWindowDrag/Resize are
+  STATUS_INVALID_DEVICE_STATE; presenter none is accepted, Test and
+  Console are STATUS_NOT_SUPPORTED; the shell's actions, lists and
+  wallpaper are STATUS_NOT_SUPPORTED (`has_shell` false). The compositor
+  does no work for it (`Desktop::bare`: no wallpaper or taskbar laid
+  out, no captions rendered, no PS/2 input or clock), so GUI programs
+  without a screen cost what they cost in the server kernel. GUI
+  programs behave the same in both kernels whenever nothing shows the
+  desktop: `noscreen_windows` (BIOS) and `server_profile_windows` (UEFI,
+  `profile=server`) run presenter_test's `server` mode, which
+  `server_windows` runs on the server kernel; user32_test's scenario
+  checks the line on BIOS and in gala-um.
 - **Console windows**: a console window (conhost.exe) is started only
   for the program named by `console=`; otherwise console output goes to
   the boot console.
-- **`profile=server`** (scenario `server_profile`, by UEFI so there is
-  a screen): the desktop is never drawn (`desktop::screen()` is None;
-  logged once as "desktop: not drawn (server profile)"),
-  GalaWindowListen and GalaScreenInfo answer as without a screen, and
+- **`profile=server`** (scenarios `server_profile` and
+  `server_profile_windows`, by UEFI so there is a screen): nothing ever
+  draws a desktop; each session's is bare, as the server kernel's
+  (`desktop: session 1 keeps its windows (1280x800), shown by none
+  (server profile)`), the PS/2 keyboard and mouse reach none, and
   `console=` starts no conhost.exe. The screen keeps the text console.
 - **The server kernel** (scenarios `server_kernel`, `server_windows`):
   the kernel's `shasha` feature is on by default; without it
@@ -4399,10 +4451,9 @@ draws nothing; user32 loads gdi32 lazily).
   this kernel (server build: windows are kept, nothing draws them)` at
   boot, `desktop: session 2 keeps its windows (1280x800), shown by none
   (no compositor in this kernel)` (event `presenter`, op `live`) per
-  session, a refused presenter as a warning. Limit: the desktop kernel
-  without a screen or `presenter=`, and with `profile=server`, still
-  refuses GUI calls, where the server kernel keeps the windows (ROADMAP
-  SD: the shasha feature should only add). xtask
+  session (with `"bare":"no compositor in this kernel"`), a refused
+  presenter as a warning; the state dump says `never shown: no
+  compositor in this kernel`. xtask
   builds it into `target/server` beside the normal one; scenarios in
   `SERVER_KERNEL_SCENARIOS` boot it; CI runs clippy on it.
   **Invariant: a change to `nt::desktop`'s public interface needs the
@@ -4587,8 +4638,8 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   say so yet); no WM_ACTIVATEAPP.
 - **The display** (`monitor.rs`): one monitor (a constant HMONITOR), the
   desktop's screen; GalaScreenInfo gives the screen and the work area
-  (STATUS_NOT_SUPPORTED without a screen: user32 then assumes 1280 x
-  800). EnumDisplayMonitors, MonitorFromWindow/Point/Rect (off-screen:
+  (DEFAULT_SIZE, 1280 x 800, for a desktop nothing shows, in both
+  kernels; user32 assumes the same if the call fails). EnumDisplayMonitors, MonitorFromWindow/Point/Rect (off-screen:
   by the default flags), GetMonitorInfoW/A (`\\.\DISPLAY1`) and
   GetSystemMetrics' screen metrics come from it.
 - **TrackMouseEvent**: TME_LEAVE watches one window (process-wide),
@@ -6302,6 +6353,234 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
 - No Windows Runtime classes, no shell namespace objects, no COM
   proxies (see their sections).
 
+## Plan: WOW64 (32-bit x86 programs)
+
+32-bit x86 Windows programs run on gala as on 64-bit Windows (ROADMAP
+WOW; the owner's approval): unmodified PE32 executables and DLLs, with
+the answers 64-bit Windows gives about them. Sources: Microsoft Learn
+("WOW64 Implementation Details", "File System Redirector", "Registry
+Keys Affected by WOW64", the x86 calling conventions, the PE format),
+the public x86 TEB/PEB/CONTEXT layouts (winnt.h, winternl.h), Intel's
+and AMD's manuals for compatibility mode, Wine's WOW64 headers
+(WOW64_CPURESERVED, the TLS slot numbers) as documentation.
+
+### Where the code is
+
+| Part | Where |
+|---|---|
+| PE32 executables, the 32-bit address limit, the PEB32 and 32-bit parameters, TEB32s, the CPU area | `kernel/src/nt/wow64.rs`, `nt/process.rs` (`spawn_inner`), `nt/thread.rs` (`create_wow64`), `nt/params.rs` (`build32`), `nt/layout.rs` (`wow64`) |
+| The TEB32 segment, DS/ES/FS at every switch | `arch/x86_64/gdt.rs` (`TEB32_SELECTOR`, `set_teb32`), `percpu::load_teb32`, `sched::set_teb32`, `sched/switch.rs` |
+| gala's wow64.dll: thread start, the transition, the system call thunks | `user/wow64` (x64 DLL, no imports) |
+| The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `win32_misc_test`'s `wow64` |
+
+### Decisions
+
+- **The kernel stays 64-bit; WOW64 is a user-mode layer**, as on
+  Windows: every system call the kernel serves is an x64 one. A 32-bit
+  program's call goes to gala's wow64.dll, 64-bit code inside the
+  32-bit process, which converts its arguments and structures, makes
+  the 64-bit call and converts the results back. Reasons: no second
+  system call ABI and no 32-bit structure parsing in the trusted core
+  (smaller attack surface, one dispatcher, the handover's formats
+  unchanged); conversion is data work, written once in Rust beside the
+  services' user-mode contracts; programs and tools see what Windows
+  has (64-bit code and a 64-bit TEB in every 32-bit process); and
+  SYSCALL raises #UD in compatibility mode on Intel CPUs, so a direct
+  32-bit entry would need another entry path (SYSENTER or an interrupt
+  gate). The kernel does what only it can: the 32-bit address space,
+  the PEB32/TEB32 beside the 64-bit ones, the compatibility-mode
+  segments, mapping wow64.dll, the answers about a process's machine
+  (ProcessWow64Information), and later the 32-bit view of the
+  registry (below) and the 32-bit IO_STATUS_BLOCK at completion.
+- **One DLL, gala's own ABI**: Windows splits the layer into wow64.dll,
+  wow64cpu.dll and wow64win.dll on top of the 64-bit ntdll; gala has one
+  `wow64.dll` (in System32, 64-bit, no imports: it makes system calls
+  directly) whose entry points are gala's (`GalaWow64Start`,
+  `GalaWow64Transition`), found by the kernel by export name. There is
+  no 64-bit ntdll in a 32-bit process: the kernel will deliver a WOW64
+  thread's exceptions and APCs to wow64.dll's own 64-bit dispatchers
+  (stage 3). Programs that look for the 64-bit ntdll in a 32-bit
+  process (debuggers, code switching to 64-bit itself) are out of scope.
+- **What the 32-bit side sees is Windows'**: CS 0x23, DS/ES/SS 0x2b,
+  FS 0x53 whose base is the TEB32; the 32-bit ntdll's system call stub
+  `mov eax, N; call fs:[0xc0]` (TEB32.WOW32Reserved; Windows 10's
+  ntdll calls its Wow64Transition pointer, same shape), with the x64
+  service numbers and the arguments on the 32-bit stack;
+  TEB64.TlsSlots[1] (WOW64_TLS_CPURESERVED) pointing at the thread's CPU
+  area (WOW64_CPURESERVED: Flags, Machine 0x14c, then the x86 CONTEXT);
+  TEB64.NtTib.ExceptionList pointing at the TEB32.
+
+### The CPU and the segments
+
+The GDT has Windows' selectors ("CPU tables"): 0x23 is the 32-bit user
+code segment, 0x2b the user data segment, 0x53 (entry 0x50) a 4 KiB
+ring-3 data segment whose base is the running thread's TEB32. A WOW64
+thread's scheduler record says so (`sched::set_teb32`, called before
+its first entry to user mode): every switch to it writes this CPU's
+0x50 entry and loads DS, ES (0x2b) and FS (0x53), which also sets the
+FS base to the TEB32 (`percpu::load_teb32`). They are reloaded at every
+switch because segment registers belong to the CPU, not the thread, and
+an IRET to ring 3 nulls data selectors with DPL 0 (the kernel's), with
+which 32-bit code faults at its first memory access. GS is never
+loaded: its base (the 64-bit TEB, the per-thread `user_gs_base`) is how
+the transition finds the CPU area. An interrupt in 32-bit code saves and
+restores the full 64-bit registers and returns with IRETQ to CS 0x23;
+SYSCALL only ever comes from wow64.dll's 64-bit code.
+
+### A 32-bit process
+
+- **Image**: `PeImage::parse` takes PE32 (machine i386) executables;
+  `ImageInfo.x86` makes the process a WOW64 one (`Process.wow64`). An
+  executable with imports needs a 32-bit ntdll (stage 3): refused for
+  now with `wow64: <name> imports DLLs` (STATUS_INVALID_IMAGE_FORMAT to
+  CreateProcess).
+- **Address space**: the VAD's limit (`Vad::set_limit`) keeps every
+  allocation made without an address below 2 GiB, or 4 GiB less 64 KiB
+  for an IMAGE_FILE_LARGE_ADDRESS_AWARE image (Rust's i686 target sets
+  it), as 64-bit Windows does; image views without a given address go
+  below it too (a preferred or alternative base above counts as taken).
+  Placements at given addresses are not limited: the 64-bit PEB,
+  parameters and TEBs stay where every process has them (Windows keeps
+  them below 4 GiB; only 64-bit code reads them, through GS).
+- **PEB32** at 0x7ffd0000 (the PEB's values at the x86 offsets:
+  ImageBaseAddress, ProcessParameters, NumberOfProcessors, the OS
+  version, subsystem, SessionId); the **32-bit parameters** below it
+  (`params::build32`: the same block with 4-byte pointers and handles,
+  normalized); ProcessWow64Information answers the PEB32 (0 for a
+  64-bit process), which kernel32's IsWow64Process(2) read.
+- **wow64.dll** is mapped when the process is made (`wow64::map_dll`);
+  without it the process is not created (`wow64: <name> is a 32-bit
+  program, and there is no ...wow64.dll`; ERROR_BAD_EXE_FORMAT, as a
+  Windows without WOW64).
+- **Threads**: each has a TEB32 (one page, placed top-down below the
+  limit: Self, StackBase/Limit, DeallocationStack, ClientId, the PEB32,
+  WOW32Reserved = the transition, ExceptionList = 0xffffffff) and a CPU
+  area in its 64-bit TEB's second page (TEB64 + 0x1a00): the x86
+  context, the 64-bit stack pointer the transition switches to, and a
+  64-bit IO_STATUS_BLOCK. The main thread starts in wow64.dll's
+  `GalaWow64Start` (rcx = the CPU area) on a 256 KiB 64-bit stack, with
+  the area's context set to the 32-bit start: eip the entry point (also
+  in eax), esp the image's stack (its reservation, below 2 MiB as for
+  x64) with a null return address and the PEB32 above it (also in ebx).
+  `GalaWow64Start` enters 32-bit code with IRETQ.
+
+### The transition and the thunks
+
+`GalaWow64Transition` is 32-bit code: it far-returns to CS 0x33 at the
+next instruction (position independent: the address of a call's return
+plus a fixed 6), where 64-bit code zero-extends esp, finds the CPU area
+through GS, saves the caller's registers there (eip = the return into
+the stub, esp after it), moves to the 64-bit stack and calls
+`gala_wow64_service(number, args, area)`. The status goes into the
+area's eax and `gala_wow64_enter32` re-enters 32-bit code with IRETQ
+from the area (so a changed context, later Wow64SetThreadContext, takes
+effect the same way). Conversions, per argument: handles are
+sign-extended (pseudo-handles are negative), pointers zero-extended;
+pointer-sized outputs (PVOID*, SIZE_T*, HANDLE*) go through 64-bit
+temporaries; structures with pointer-sized fields are converted per
+service and information class (IO_STATUS_BLOCK, MEMORY_BASIC_INFORMATION,
+PROCESS_BASIC_INFORMATION, ProcessWow64Information so far; next
+UNICODE_STRING, OBJECT_ATTRIBUTES, CONTEXT, the system and thread
+information classes). A service or class without a conversion fails
+with STATUS_NOT_IMPLEMENTED (STATUS_INVALID_INFO_CLASS for a class) and
+is recorded in the ledger (`wow64.dll!service 0x00c1`,
+`wow64.dll!NtQueryVirtualMemory(class)`), so a program's first missing
+thunk names itself.
+
+Converted so far: NtClose, NtTerminateProcess,
+NtQueryPerformanceCounter, NtReadFile/NtWriteFile (synchronous; the
+APC form is refused), NtAllocate/Free/ProtectVirtualMemory,
+NtQueryVirtualMemory (MemoryBasicInformation), NtQueryInformationProcess
+(basic information with the PEB32, ProcessWow64Information, handle
+count, session).
+
+### The 32-bit system DLLs (stage 3)
+
+gala's DLLs are rebuilt for `i686-pc-windows-msvc` and shipped in
+`C:\Windows\SysWOW64` (the directory exists from boot;
+GetSystemWow64DirectoryW names it): the 32-bit ntdll (testntdll's
+loader for PE32 images, x86 SEH: the `fs:[0]` chain rather than unwind
+tables, the 32-bit KiUser* dispatchers, the stubs above), kernel32,
+kernelbase, msvcrt, advapi32, user32, gdi32 and the rest as programs
+need them. Arch-specific code moves behind `cfg(target_arch)` as in
+ntrt (`x64.rs`, `x86.rs`): the TEB through FS, inline assembly, x86's
+64-bit division helpers (`__aulldiv`, `__aullrem`, which ntrt's x86
+runtime provides on compiler_builtins' `__udivdi3`); `extern "system"`
+is stdcall there, which Windows' exports are, and exports keep their
+undecorated names (a .def or `/EXPORT:` per function). xtask builds
+`USER_PROGRAMS_X86` (and later the 32-bit DLL list) with the i686
+target; user/bin gets the 32-bit DLLs as `test<name>32.dll`.
+
+### Redirection, the 32-bit environment and the answers
+
+- **File system** (stage 3): in wow64.dll's file thunks (NtCreateFile,
+  NtOpenFile, NtQueryAttributesFile, NtQueryFullAttributesFile,
+  NtDeleteFile, ...), as on Windows: `%windir%\System32` becomes
+  `SysWOW64` for 32-bit callers except the documented exemptions
+  (catroot, catroot2, drivers\etc, driverstore, logfiles, spool), and
+  `Sysnative` names the real System32; Wow64DisableWow64FsRedirection
+  sets the per-thread flag in TEB64.TlsSlots[8]. In user mode because
+  the switch is per thread and the rewrite is string work on the name
+  the caller passed; the kernel's namespace stays unaware.
+- **Registry** (stage 4): the 32-bit view (`HKLM\Software\Wow6432Node`
+  and the other redirected keys of "Registry Keys Affected by WOW64",
+  shared keys left alone) in the kernel's registry, chosen per open by
+  the caller (a WOW64 process) and the access mask (KEY_WOW64_32KEY,
+  KEY_WOW64_64KEY, which 64-bit programs pass too): the kernel resolves
+  key paths, including opens relative to a handle, where a user-mode
+  rewrite of names would not see the full path.
+- **Answers**: IsWow64GuestMachineSupported: x86 only; IsWow64Process
+  and IsWow64Process2 (I386 for a WOW64 process, UNKNOWN for a native
+  one, AMD64 native) from ProcessWow64Information;
+  GetSystemWow64Directory(W/A): `<Windows>\SysWOW64` (done). In a
+  32-bit process (stage 3): GetSystemInfo reports
+  PROCESSOR_ARCHITECTURE_INTEL and the 2/4 GiB application range,
+  GetNativeSystemInfo AMD64; the environment has
+  PROCESSOR_ARCHITECTURE=x86 and PROCESSOR_ARCHITEW6432=AMD64,
+  ProgramFiles is `C:\Program Files (x86)` (ProgramW6432 the 64-bit
+  one), and that directory exists.
+- **Exceptions, APCs, contexts** (stage 3): the kernel delivers a
+  WOW64 thread's exception or APC to wow64.dll's 64-bit dispatchers,
+  with CS 0x33 even when it interrupted 32-bit code (the user-return
+  path then needs the target CS, which `UserRegs` lacks today);
+  wow64.dll converts the CONTEXT to the x86 one and calls the 32-bit
+  ntdll's dispatcher on the 32-bit stack. ThreadWow64Context
+  (Wow64Get/SetThreadContext) reads and writes the CPU area, or the
+  interrupted 32-bit registers.
+
+### Observability
+
+- The process start line and event say a process is 32-bit:
+  `process x.exe (pid N, session S): starting at 0x..., personality nt,
+  32-bit x86 (WOW64)`, `"machine":"x86"` (`"x64"` otherwise) in
+  `process start`; `thread create` carries `"teb32"`.
+- `wow64: using ...wow64.dll, GalaWow64Start at rva ..., GalaWow64Transition
+  at rva ...` once; a missing or unusable wow64.dll, a 32-bit program
+  with imports and a platform that cannot run 32-bit code (gala-um)
+  each have their line.
+- Crash reports of an exception in 32-bit code (CS 0x23) say `32-bit
+  x86 (WOW64)` and show eax..esp, eip and the 4-byte stack words
+  (`[esp+0x..]`); the thread dump shows, for a WOW64 thread in a system
+  call, the 32-bit caller's registers from its CPU area (`called from
+  32-bit code: eip=...`); the NMI state dump marks a CPU in 32-bit code
+  `user 32-bit`.
+- Every service or class wow64.dll cannot convert is in the ledger.
+
+### Limits (now)
+
+- 32-bit executables without imports only (no 32-bit ntdll yet); the
+  main thread only (NtCreateThreadEx from 32-bit code is not thunked).
+- An invalid 32-bit pointer passed to a converted service faults in
+  wow64.dll (a crash report) instead of failing with
+  STATUS_ACCESS_VIOLATION.
+- I/O that completes later writes the 64-bit IO_STATUS_BLOCK in the CPU
+  area, not the caller's (recorded in the ledger).
+- No exceptions or APCs delivered to 32-bit code: an exception ends the
+  process (with its crash report).
+- A kernel handover refuses a WOW64 process ("32-bit code (WOW64)").
+- gala-um cannot run 32-bit code (the segments are the host kernel's).
+
 ## Plan: sessions and remote shasha
 
 One design covers remote shell access, a remote graphical desktop
@@ -6583,10 +6862,10 @@ alone in `winstate/tests.rs`.
   out at its presenter's size, else DEFAULT_SIZE (1280 x 800: QEMU's
   default UEFI mode, which user32 also assumes without screen
   information; gala's choice for a desktop nothing shows), the clock
-  set, drawn whole. Desktops exist where the machine has a screen or the
-  boot option `presenter=` asks for a headless one, never in the server
-  profile; without either, GUI calls are STATUS_NOT_SUPPORTED as on a
-  machine without a screen.
+  set, drawn whole. Where nothing can show desktops (the server profile;
+  no screen and no `presenter=`) it is bare instead: the window state
+  alone at DEFAULT_SIZE, shown by none for good, as the server kernel's
+  ("Server and desktop workloads").
 - **`presenter=test|none`**: the console session's desktop is shown by
   a Test frame of DEFAULT_SIZE or by nothing, with or without a screen;
   the PS/2 keyboard and mouse still go to it (`platform::local_input`).
@@ -6632,8 +6911,8 @@ alone in `winstate/tests.rs`.
   presenter shows.
 - **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
   another session's pixels are its users'; STATUS_NOT_FOUND for a
-  session that does not exist; STATUS_NOT_SUPPORTED where there are no
-  desktops; the server kernel's answers are in "Server and desktop
+  session that does not exist; a bare desktop's and the server kernel's
+  answers are in "Server and desktop
   workloads", tested by presenter_test's `server` mode):
   - SESSION_QUERY (0): what shows the desktop (0 none, 1 console, 2
     test), whether it is live, its size, its windows; nothing is made
@@ -6664,13 +6943,17 @@ alone in `winstate/tests.rs`.
   (1280x800; was session 1, which keeps its 1 windows shown by none)`
   (a failed one a warning: `the console could not move ...; it stays`);
   refused injected input is logged (the first 8, with the status);
-  `desktop: no screen and no presenter= (...)` once on a machine without
-  desktops. Events (category `window`): `"ev":"presenter"` with `"op":
-  "live"` and `"attach"` (session, presenter, was, size), `"console"`
+  a bare desktop going live: `desktop: session 1 keeps its windows
+  (1280x800), shown by none (no screen and no presenter=)` (or `(server
+  profile)`), a refused presenter there `desktop: session 2 cannot be
+  shown by test: server profile`. Events (category `window`): `"ev":"presenter"` with `"op":
+  "live"` (a bare desktop's with `"bare"`: why nothing shows it) and
+  `"attach"` (session, presenter, was, size), `"console"`
   (session, from: the session it left or -1, was: what showed the
   target, kept: the windows the left desktop keeps, size). The state
   dump's sessions part says which session the console shows and per
-  session whether its desktop is live and what shows it. A failed headless screen check leaves its frames as
+  session whether its desktop is live and what shows it (a bare one:
+  `never shown: <why>`). A failed headless screen check leaves its frames as
   `test-<scenario>.screen<n>.png` and quotes the monitor's reply to
   `memsave`.
 - **Limits**: no remote presenter (B3b); no console switch without a
@@ -6679,8 +6962,8 @@ alone in `winstate/tests.rs`.
   and no keys released by WM_KEYUP when the console leaves; `gala
   attach` needs SeTcbPrivilege until B4 checks who may attach where; a
   kernel handover puts the console back on session 1 (B5); gala-um takes
-  no `presenter=` (its sessions have no desktops); frames are read, not
-  recorded over time.
+  no `presenter=` (its sessions' desktops are bare, shown by none);
+  frames are read, not recorded over time.
 
 ### Target design (B3-B5)
 
@@ -9376,13 +9659,15 @@ under TCG), never a reset. Host tests in `net::tcp`,
   bytes come. Socket options gala's ws2_32 keeps are in the program's
   memory (carried as it is).
 - **Record**: NET (tag 34, version 1: a header entry, then the closing
-  connections) and SOCKETS (tag 35, version 2: per endpoint object a
+  connections) and SOCKETS (tag 35, version 3: per endpoint object a
   `SocketRec`, with the connections as CONNECTION entries carrying a
   role (the socket's own, READY with its sequence number, OPENING,
   LINGERING) and the pending requests as `RequestRec`s; version 2 adds
   UDP sockets and the datagram requests at the ends of their entries,
   must_read 2 only when the record holds a UDP socket,
-  `sockets::sockets_must_read`; version 1 reads with them absent). Both
+  `sockets::sockets_must_read`; version 1 reads with them absent;
+  version 3 appends the endpoint's `send_side`, must_read 3 only while a
+  shutdown's FIN waits for pending sends, read as open when absent). Both
   REQUIRED and written only when a program holds a socket
   (`version::Kind::when_present`): `agree` does not ask for them up
   front, the record as written is checked (`check_record`), so programs
@@ -9425,7 +9710,8 @@ format differs; every format change follows these rules. Code
   TIMERS 2) raises it to the new version. It may depend on the data:
   THREADS 3 needs a version-3 reader only when a thread's
   extended-state blob is not empty (`programs::threads_must_read`);
-  SOCKETS 2 only when a UDP socket is carried.
+  SOCKETS 2 only when a UDP socket is carried, SOCKETS 3 only when a
+  shutdown's FIN waits for pending sends.
 - **The note**: each kernel image carries its read facts in an ELF note
   (name "GALA", type 0x47410001, section `.gala_note` in a PT_NOTE
   segment, `boot::HANDOVER_NOTE`, built at compile time from `KINDS`):

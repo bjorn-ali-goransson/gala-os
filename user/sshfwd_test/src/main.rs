@@ -7,7 +7,9 @@
 //!   connection (`ssh -L`: sshd's direct-tcpip channel connecting out over
 //!   loopback), echoes it until the peer shuts down its sending side,
 //!   closes it and prints `sshfwd_test: served <n> bytes to 127.0.0.1`
-//!   (the peer's address: sshd connected from the loopback address).
+//!   (the peer's address: sshd connected from the loopback address). The
+//!   bytes must be the pattern `connect` and xtask send: the first that is
+//!   not fails a check with its stream offset (where the stream diverged).
 //! - `sshfwd_test connect <port> <bytes>`: connects to 127.0.0.1:<port>
 //!   (`ssh -R`: sshd's tcpip-forward listener), sends <bytes> bytes of a
 //!   pattern, shuts down its sending side, reads until end of stream (the
@@ -205,6 +207,7 @@ fn serve(c: &mut Checks, port: u16) -> Result<(), u32> {
             if n == 0 {
                 break;
             }
+            c.eq(mismatch(&buf[..n as usize], total as usize), u64::MAX)?;
             let mut sent = 0;
             while sent < n {
                 let m = send(conn, buf[sent as usize..].as_ptr(), n - sent, 0);

@@ -123,7 +123,8 @@ const fn present(tag: u32, name: &'static str, writes: u16, must_read: u16) -> K
 ///   sockets, written only when a program holds a socket. SOCKETS 2: UDP
 ///   sockets and datagram requests (must_read 2 only when the record holds
 ///   a UDP socket, `sockets::sockets_must_read`; version 1 is read with
-///   the new fields absent).
+///   the new fields absent). SOCKETS 3: an endpoint's sending side
+///   (must_read 3 only while a shutdown's FIN waits for pending sends).
 /// - STOPPED 1 (2026-11-03): when the programs stopped (optional; GalaHandoverPause).
 pub const KINDS: [Kind; 36] = [
     kind(tag::MEMORY_MAP, "MEMORY_MAP", 1, 0, false),
@@ -161,7 +162,7 @@ pub const KINDS: [Kind; 36] = [
     // The writer's name (optional; `handover_next` only, for now).
     kind(tag::WRITER, "WRITER", if NEXT { 1 } else { 0 }, 0, false),
     present(tag::NET, "NET", 1, 0),
-    present(tag::SOCKETS, "SOCKETS", 2, 0),
+    present(tag::SOCKETS, "SOCKETS", 3, 0),
     // When the programs stopped (optional: a reader that skips it reports
     // the pause from the record on).
     kind(tag::STOPPED, "STOPPED", 1, 0, false),
@@ -701,7 +702,7 @@ mod tests {
         let mut w = Writer::new(1).unwrap();
         w.section_needing(tag::THREADS, 3, REQUIRED, 2).unwrap();
         crate::handover::sockets::write_net(&mut w, &Default::default()).unwrap();
-        crate::handover::sockets::sockets_section(&mut w, false).unwrap();
+        crate::handover::sockets::sockets_section(&mut w, &[]).unwrap();
         let bytes = w.finish().unwrap();
         let e = check_record(&bytes, &old).unwrap_err();
         assert!(matches!(e, Mismatch::Unknown { tag: tag::NET, .. }), "{e:?}");
