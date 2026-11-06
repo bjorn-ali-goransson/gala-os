@@ -269,8 +269,11 @@ int main(void)
 	clone_thread(THREAD_FLAGS, stack + sizeof stack, &ptid, (int *)&ctid, tls_block, writer, 0);
 	writer_go = 1;
 	say_epoll("epoll_wait(-1) woken by another thread's write", ewait(inner, ev, 8, -1), ev);
-	while (ctid != 0)
-		sys4(SYS_futex, &ctid, 0, ctid, 0);
+	/* Join: the word read once per wait (the value the wait compares
+	 * with), so an exit between two reads cannot leave the wait asking
+	 * for 0 (it would sleep with no wake to come). */
+	for (int v; (v = ctid) != 0;)
+		sys4(SYS_futex, &ctid, 0, v, 0);
 	sys3(SYS_read, d, buf, sizeof buf);
 	set_action(SIGALRM, on_alarm, 0, 0);
 	arm_ms(20);

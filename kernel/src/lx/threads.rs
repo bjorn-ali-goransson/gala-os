@@ -156,9 +156,16 @@ pub fn gettid(call: &Call<'_>) -> u64 {
 pub fn exit(call: &Call<'_>, status: u64) -> Result {
     let clear = call.lx.remove_thread(call.tid);
     if clear != 0 {
-        // A bad address is ignored (as Linux does).
+        // A bad address is ignored (as Linux does), and logged: a joiner
+        // would wait for a wake that does not come.
         if call.process.write(clear, &0u32.to_le_bytes()).is_ok() {
             super::futex::wake_one(call.process.id, clear);
+        } else {
+            crate::warn!(
+                "lx: pid {} thread {} exits: its clear-tid address {clear:#x} is not writable",
+                call.process.id,
+                call.tid
+            );
         }
     }
     thread::exit_current_on_return(NtStatus((status & 0xff) as u32));

@@ -869,6 +869,10 @@ numbers, 0x7f.., fail there).
 - wow64.dll touches a caller's memory only through `mem` (fault-safe):
   a plain dereference of a 32-bit pointer would crash the process
   instead of failing the call with STATUS_ACCESS_VIOLATION.
+- A FUTEX_WAIT loop in a test reads the word once and passes that value
+  (`for (int v; (v = word) != 0;) futex(&word, FUTEX_WAIT, v)`): reading
+  it again for the argument can pass the value a wake already set, and
+  the wait then sleeps with no wake to come (lx_epoll's join hung so).
 - A recursive test function meant to use stack must keep its frame live
   across the call (`core::hint::black_box(&mut frame)` after it), or
   LLVM turns the recursion into a loop.
