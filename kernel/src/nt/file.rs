@@ -75,7 +75,9 @@ const DIRECTORIES: &[&[&str]] = &[
     &["Users", "gala", "AppData", "Roaming"],
     &["Users", "gala", "AppData", "Local", "Temp"],
     &["ProgramData"],
-    &["Program Files"],
+    &["Program Files", "Common Files"],
+    // The 32-bit programs' (WOW64; ProgramFiles in a 32-bit process).
+    &["Program Files (x86)", "Common Files"],
     &["gala"],
 ];
 

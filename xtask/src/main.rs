@@ -497,6 +497,30 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
 ];
 
+/// gala's 32-bit (x86) DLLs, built for USER_TARGET_X86 and shipped with
+/// an `x86/` prefix in EXTRA_MODULES (`("<scenario>", "x86/ntdll.dll",
+/// "Windows/SysWOW64")`): the 32-bit ntdll goes in SysWOW64, as on 64-bit
+/// Windows (ARCHITECTURE "Plan: WOW64"). Exported to user/bin under their
+/// own names (`testntdll32.dll`).
+const USER_DLLS_X86: &[Dll] = &[
+    // The 32-bit ntdll: testntdll built for i686.
+    Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll32.dll" },
+    // A 32-bit test DLL (wow64_import_test).
+    Dll { package: "testdll32", file: "testdll32.dll", exported_as: "testdll32.dll" },
+];
+
+/// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
+/// (its file name), else None.
+fn x86_dll(file: &str) -> Option<&'static Dll> {
+    let name = file.strip_prefix("x86/")?;
+    USER_DLLS_X86.iter().find(|d| d.file == name)
+}
+
+/// Where the build puts the USER_DLLS_X86 file `file`.
+fn built_dll_x86(file: &str) -> PathBuf {
+    target_dir().join(USER_TARGET_X86).join("release").join(file)
+}
+
 /// Where the build puts the USER_DLLS file `file`: cargo names a cdylib
 /// `<package>.dll`, so a DLL Windows calls otherwise (winspool.drv) is
 /// built under its package's name and shipped under its own.
@@ -1029,6 +1053,19 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shell32_test", "advapi32.dll", "Windows/System32"),
     ("shell32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("shell32_test", "user/bin/shell32_test.exe", "gala"),
+    // comdlg32_test: what Inno Setup's IDE imports from comdlg32
+    // (user/comdlg32_test/main.c, mingw); PrintDlgW asks winspool for the
+    // default printer.
+    ("comdlg32_test", "ntdll.dll", "Windows/System32"),
+    ("comdlg32_test", "kernel32.dll", "Windows/System32"),
+    ("comdlg32_test", "msvcrt.dll", "Windows/System32"),
+    ("comdlg32_test", "comdlg32.dll", "Windows/System32"),
+    ("comdlg32_test", "user32.dll", "Windows/System32"),
+    ("comdlg32_test", "gdi32.dll", "Windows/System32"),
+    ("comdlg32_test", "winspool.drv", "Windows/System32"),
+    ("comdlg32_test", "advapi32.dll", "Windows/System32"),
+    ("comdlg32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("comdlg32_test", "user/bin/comdlg32_test.exe", "gala"),
     ("dbghelp_test", "ntdll.dll", "Windows/System32"),
     ("dbghelp_test", "kernel32.dll", "Windows/System32"),
     ("dbghelp_test", "msvcrt.dll", "Windows/System32"),
@@ -1057,6 +1094,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "oleaut32.dll", "Windows/System32"),
     ("user32_test", "advapi32.dll", "Windows/System32"),
     ("user32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("user32_test", "imm32.dll", "Windows/System32"),
     ("user32_test", "user/bin/user32_test.exe", "gala"),
     ("windows_across_test", "ntdll.dll", "Windows/System32"),
     ("windows_across_test", "kernel32.dll", "Windows/System32"),
@@ -2063,6 +2101,25 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_test", "wow64.dll", "Windows/System32"),
     ("wow64_crash", "wow64.dll", "Windows/System32"),
     ("wow64_thread_test", "wow64.dll", "Windows/System32"),
+    // A 32-bit program with imports: the 32-bit ntdll's loader.
+    ("wow64_import_test", "wow64.dll", "Windows/System32"),
+    ("wow64_import_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_import_test", "x86/testdll32.dll", "gala"),
+    // Exceptions and APCs in 32-bit code: the 32-bit ntdll's dispatchers.
+    ("wow64_seh_test", "wow64.dll", "Windows/System32"),
+    ("wow64_seh_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_seh_crash", "wow64.dll", "Windows/System32"),
+    ("wow64_seh_crash", "x86/ntdll.dll", "Windows/SysWOW64"),
+    // The file system redirector: both ntdlls (told apart by their
+    // machine), a hosts file in an exempt directory.
+    ("wow64_fs_test", "wow64.dll", "Windows/System32"),
+    ("wow64_fs_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_fs_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_fs_test", "user/wow64_fs_test/hosts", "Windows/System32/drivers/etc"),
+    // A plain 32-bit program on kernel32 (PENDING: gala's kernel32 is not
+    // built for x86 yet, ROADMAP WOW stage 3).
+    ("wow64_k32_test", "wow64.dll", "Windows/System32"),
+    ("wow64_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2203,7 +2260,14 @@ const USER_PROGRAMS: &[&str] = &[
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
 /// x86 runtime), shipped and exported like USER_PROGRAMS.
-const USER_PROGRAMS_X86: &[&str] = &["wow64_test", "wow64_thread_test"];
+const USER_PROGRAMS_X86: &[&str] = &[
+    "wow64_test",
+    "wow64_thread_test",
+    "wow64_import_test",
+    "wow64_seh_test",
+    "wow64_fs_test",
+    "wow64_k32_test",
+];
 
 /// Where the build puts test program `program` (x64 or x86).
 fn built_program(program: &str) -> PathBuf {
@@ -2629,6 +2693,11 @@ fn build_kernel(release: bool) -> Result {
     }
     run_cmd(&mut cmd)?;
     let mut cmd = user_build_for(USER_TARGET_X86);
+    for dll in USER_DLLS_X86 {
+        cmd.args(["--package", dll.package]);
+    }
+    run_cmd(&mut cmd)?;
+    let mut cmd = user_build_for(USER_TARGET_X86);
     for program in USER_PROGRAMS_X86 {
         cmd.args(["--package", program]);
     }
@@ -2830,6 +2899,18 @@ fn make_iso_unchecked(
             let kind = if WRITABLE_TREES.contains(dir) { "tarw" } else { "tar" };
             modules += &format!(
                 "    module_path: boot():/boot/{archive}\n    module_string: {kind}:{dir}\n"
+            );
+            continue;
+        }
+        // A 32-bit DLL: under boot/x86 (its name is often a 64-bit one's;
+        // the kernel names the file after the path's last part).
+        if let Some(dll) = x86_dll(file) {
+            let x86 = boot.join("x86");
+            fs::create_dir_all(&x86).map_err(|e| format!("creating {x86:?}: {e}"))?;
+            copy(&built_dll_x86(dll.file), &x86.join(dll.file))?;
+            modules += &format!(
+                "    module_path: boot():/boot/x86/{}\n    module_string: {dir}\n",
+                dll.file
             );
             continue;
         }
@@ -3327,6 +3408,8 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
     "java_stress",
+    // gala's kernel32 is not built for x86 yet (ROADMAP WOW stage 3).
+    "wow64_k32_test",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -5037,11 +5120,21 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // AG: shell32's ShellExecuteExW, dropped files, DragAcceptFiles
         // and SHFileOperationW against documented behaviour, for what
-        // wxWidgets imports (user/shell32_test/main.c, mingw).
+        // wxWidgets imports, and shell links ([MS-SHLLINK] files) for
+        // Inno Setup's shortcuts (user/shell32_test/main.c, mingw).
         name: "shell32_test",
         cmdline: "qemu_exit run=shell32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["shell32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // PK stage 3: what Inno Setup's IDE (ISIDE.exe /assoc) imports from
+        // comdlg32: GetFileTitleW and the dialogs' parameter checks against
+        // documented behaviour (user/comdlg32_test/main.c, mingw).
+        name: "comdlg32_test",
+        cmdline: "qemu_exit run=comdlg32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["comdlg32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: dbghelp's ImageNtHeader and SymSrvGetFileIndexInfoW (what
@@ -6734,6 +6827,61 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_thread_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WOW64 stage 3: a 32-bit program with imports, bound by the
+        // 32-bit ntdll (SysWOW64) before its entry point: a relocated DLL,
+        // TLS and its callbacks, DllMain, the loader's services.
+        name: "wow64_import_test",
+        cmdline: "qemu_exit run=wow64_import_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality nt, 32-bit x86 (WOW64)",
+            "wow64_import_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64 stage 3: exceptions in 32-bit code through the 32-bit
+        // ntdll's dispatcher (x86 SEH frames, RtlUnwind, RtlRaiseException,
+        // vectored handlers) and user APCs with 32-bit routines.
+        name: "wow64_seh_test",
+        cmdline: "qemu_exit run=wow64_seh_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_seh_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: the file system redirector (System32, Sysnative,
+        // an exemption, turned off per thread) and the 32-bit environment.
+        name: "wow64_fs_test",
+        cmdline: "qemu_exit run=wow64_fs_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_fs_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: a plain 32-bit program on kernel32 (PENDING until
+        // gala's kernel32 is built for x86).
+        name: "wow64_k32_test",
+        cmdline: "qemu_exit run=wow64_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_k32_test: hello", "wow64_k32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: an exception no 32-bit handler takes, through the
+        // 32-bit ntdll: the crash report's 32-bit registers.
+        name: "wow64_seh_crash",
+        cmdline: "qemu_exit run=wow64_seh_test.exe args=crash",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_seh_test: writing to address 0",
+            "crash report: wow64_seh_test.exe (pid 4) ended by an unhandled exception \
+             0xc0000005 (access violation) in thread",
+            "writing address 0x0",
+            "crash report:   personality nt, 32-bit x86 (WOW64), session ",
+            "ebx=0x12345678",
+            "process wow64_seh_test.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // WOW64: a 32-bit program's unhandled exception, its crash report
         // with the 32-bit registers.
         name: "wow64_crash",
@@ -7761,6 +7909,10 @@ fn run_parallel_on<J: Sync, T: Send>(
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_thread_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_import_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_seh_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
@@ -7972,6 +8124,9 @@ fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) ->
             fetch_prebuilt(file.trim_end_matches('/'))?;
         }
         let (host, file_name) = match file.rsplit_once('/') {
+            Some(_) if let Some(dll) = x86_dll(file) => {
+                (root().join("user/bin").join(dll.exported_as), dll.file)
+            }
             Some((_, n)) => (root().join(file), n),
             None => {
                 let dll = USER_DLLS
@@ -12556,6 +12711,9 @@ fn export_tests() -> Result {
     for dll in USER_DLLS {
         let file = built_dll(dll.file);
         copy(&file, &dir.join(dll.exported_as))?;
+    }
+    for dll in USER_DLLS_X86 {
+        copy(&built_dll_x86(dll.file), &dir.join(dll.exported_as))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
     // pk_install_test's package source zips user/bin/hello.exe, so it is

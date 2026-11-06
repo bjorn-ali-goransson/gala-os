@@ -34,10 +34,14 @@ pub enum K {
     Ocid,
     /// PSECURITY_DESCRIPTOR in (optional; absolute or self-relative).
     Sd,
-    /// A PIO_APC_ROUTINE (or a timer's): a 32-bit routine cannot run as
-    /// the kernel's APC until APCs reach 32-bit code (ROADMAP WOW stage
-    /// 3); a call that names one is refused.
+    /// A PIO_APC_ROUTINE (or a timer's), its context the next argument:
+    /// a 32-bit routine is queued as wow64.dll's marker with the two packed
+    /// in the context (`dispatch::apc32`), and runs in 32-bit code.
     Apc,
+    /// The high half of the 64-bit value before it (a ULONG64 passed by
+    /// value takes two words on the 32-bit stack, one argument of the
+    /// 64-bit call).
+    Hi,
 }
 
 /// UNICODE_STRING (x64).
@@ -157,9 +161,9 @@ pub fn convert_in(kinds: &[K], args: &[u32], out: &mut [u64], slots: &mut [Slot]
         let p = u64::from(a);
         let slot = &mut slots[i];
         out[i] = match k {
-            K::U => p,
+            K::U | K::Hi => p,
             K::H => a as i32 as i64 as u64,
-            K::Apc if a != 0 => return Err(crate::STATUS_NOT_SUPPORTED),
+            K::Apc if a != 0 => crate::dispatch::apc32(a, 0).0,
             K::Apc => 0,
             K::Oh | K::Osz | K::Ocid if p == 0 => 0,
             K::Oh => {
@@ -191,6 +195,12 @@ pub fn convert_in(kinds: &[K], args: &[u32], out: &mut [u64], slots: &mut [Slot]
             }
             K::Sd => sd_in(p, &mut slot.sd)?,
         };
+    }
+    // A 32-bit APC routine's context carries the routine too.
+    for (i, (&k, &a)) in kinds.iter().zip(args).enumerate() {
+        if k == K::Apc && a != 0 && i + 1 < args.len() {
+            out[i + 1] = crate::dispatch::apc32(a, args[i + 1]).1;
+        }
     }
     Ok(())
 }
@@ -231,12 +241,29 @@ pub fn call(number: u32, kinds: &[K], args: &[u32]) -> NtStatus {
     let mut slots: [Slot; 16] = Default::default();
     let mut out = [0u64; 16];
     if let Err(e) = convert_in(kinds, args, &mut out, &mut slots) {
-        if e == crate::STATUS_NOT_SUPPORTED {
-            crate::unsupported_service(number, b"APC routine");
-        }
         return e;
     }
-    let status = syscall(number, &out[..kinds.len()]);
+    // The file system redirector: a file's name, rewritten here.
+    let mut redirected = [0u16; crate::redirect::MAX_NAME];
+    if let Some(&(_, i)) = crate::redirect::FILE_SERVICES.iter().find(|(n, _)| *n == number) {
+        let slot = &mut slots[i];
+        if slot.oa.name != 0
+            && let Err(e) = crate::redirect::apply(&mut slot.us, slot.oa.root, &mut redirected)
+        {
+            return e;
+        }
+    }
+    // A 64-bit value's two words become one argument.
+    let mut n = 0;
+    for (i, &k) in kinds.iter().enumerate() {
+        if k == K::Hi && n > 0 {
+            out[n - 1] |= out[i] << 32;
+        } else {
+            out[n] = out[i];
+            n += 1;
+        }
+    }
+    let status = syscall(number, &out[..n]);
     match convert_out(kinds, args, &slots, status) {
         Ok(()) => status,
         Err(_) => STATUS_ACCESS_VIOLATION,
@@ -314,7 +341,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x01b0, &[H, U, U, U, U]),                      // NtSetIoCompletion
     (0x01bc, &[H, U]),                               // NtSuspendThread
     (0x01c5, &[H, U, U, U, U]),                      // NtUnlockFile
-    (0x7f00, &[U, U, U, U]),                         // GalaRecordMissing
+    (0x7f00, &[U, U, U, U, Hi]),                     // GalaRecordMissing
     (0x7f01, &[H, U, U]),                            // NtCancelIoFileEx
     // GalaCreateProcess: its block has fixed 8-byte fields whatever the
     // caller's bitness (ARCHITECTURE "Processes started by programs").

@@ -298,7 +298,10 @@ pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
         Some(u32::from_le_bytes(image.get(off..off.checked_add(4)?)?.try_into().ok()?))
     };
     let pe = u32_at(0x3c)? as usize;
-    let dir = u32_at(pe + 24 + 112)? as usize; // DataDirectory[0]
+    // DataDirectory[0]: after a PE32+ optional header's 112 bytes, a PE32
+    // one's 96 (32-bit images: the WOW64 ntdll and wow64.dll's peers).
+    let directories = if u32_at(pe + 24)? & 0xffff == u32::from(PE32_MAGIC) { 96 } else { 112 };
+    let dir = u32_at(pe + 24 + directories)? as usize;
     if dir == 0 {
         return None;
     }
@@ -677,6 +680,14 @@ mod tests {
         assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
         assert_eq!(find_export(&image, b"Gamma"), None);
         assert_eq!(find_export(&image, b"Alf"), None);
+        // The same in a PE32 image: its data directories start 16 bytes
+        // earlier (no 64-bit ImageBase and stack/heap sizes).
+        let opt = 0x44 + 24;
+        image[opt..opt + 2].copy_from_slice(&PE32_MAGIC.to_le_bytes());
+        image.copy_within(opt + 112..opt + 120, opt + 96);
+        image[opt + 112..opt + 120].fill(0);
+        assert_eq!(find_export(&image, b"Alfa"), Some(0x2010));
+        assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
     }
 
     #[test]

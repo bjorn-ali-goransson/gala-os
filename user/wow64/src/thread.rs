@@ -35,11 +35,10 @@ pub fn call(number: u32, a: &Args, cpu: u64) -> NtStatus {
         NT_CREATE_THREAD => create(a),
         NT_GET_CONTEXT_THREAD => get_context(a, cpu),
         NT_SET_CONTEXT_THREAD => set_context(a.h(0), a.p(1), cpu),
-        NT_CONTINUE => continue_with(a.p(0), cpu),
+        NT_CONTINUE => continue_with(a.p(0), a.u(1) as u8 != 0, cpu),
+        NT_QUEUE_APC_THREAD => crate::dispatch::queue_apc(a),
         _ => {
-            // A 32-bit APC routine cannot run until APCs reach 32-bit code
-            // (ROADMAP WOW stage 3).
-            unsupported_service(number, b"32-bit APC");
+            unsupported_service(number, b"thread");
             Ok(STATUS_NOT_SUPPORTED)
         }
     };
@@ -47,7 +46,7 @@ pub fn call(number: u32, a: &Args, cpu: u64) -> NtStatus {
 }
 
 /// x86 CONTEXT (winnt.h).
-mod x86 {
+pub(crate) mod x86 {
     pub const SIZE: usize = 0x2cc;
     pub const FLAGS: usize = 0x00;
     pub const FLOAT_SAVE: usize = 0x1c;
@@ -94,7 +93,7 @@ mod x64 {
     pub const FLOATING_POINT: u32 = 0x10_0008;
 }
 
-const CS32: u32 = 0x23;
+pub(crate) const CS32: u32 = 0x23;
 const DS32: u32 = 0x2b;
 const FS32: u32 = 0x53;
 const CURRENT_THREAD: u64 = u64::MAX - 1;
@@ -174,9 +173,24 @@ fn area_of(thread: u64) -> Res<u64> {
     Ok(u64::from_le_bytes(slot))
 }
 
+/// Windows' selectors in an x86 CONTEXT (CS 0x23, SS/DS/ES/GS 0x2b, FS
+/// 0x53: the TEB32).
+pub(crate) fn set_segments(c: &mut [u8; x86::SIZE]) {
+    for (at, v) in [
+        (x86::SEG_CS, CS32),
+        (x86::SEG_SS, DS32),
+        (x86::SEG_GS, DS32),
+        (x86::SEG_FS, FS32),
+        (x86::SEG_ES, DS32),
+        (x86::SEG_DS, DS32),
+    ] {
+        set32(c, at, v);
+    }
+}
+
 /// The x87 state in FLOATING_SAVE_AREA form (FSAVE's, 112 bytes) from an
 /// FXSAVE image.
-fn float_save(fx: &[u8]) -> [u8; 112] {
+pub(crate) fn float_save(fx: &[u8]) -> [u8; 112] {
     let mut f = [0u8; 112];
     // ControlWord, StatusWord (as 32-bit words), TagWord (full: valid or
     // empty from the abridged bits).
@@ -215,7 +229,7 @@ fn fxsave() -> [u8; 512] {
 
 /// Loads x87/SSE state from an FXSAVE image (MXCSR's reserved bits
 /// cleared: setting them faults).
-fn fxrstor(image: &[u8]) {
+pub(crate) fn fxrstor(image: &[u8]) {
     #[repr(align(16))]
     struct Area([u8; 512]);
     let mut area = Area([0; 512]);
@@ -400,9 +414,21 @@ fn set_context(thread: u64, at: u64, cpu: u64) -> Res<NtStatus> {
 }
 
 /// NtContinue(*Context (x86), TestAlert): the caller goes on with the
-/// context (no 32-bit APCs to test for yet).
-fn continue_with(at: u64, cpu: u64) -> Res<NtStatus> {
+/// context; with TestAlert, the next queued user APC runs first (an
+/// alertable zero wait: the kernel delivers it to `dispatch::apc`, which
+/// resumes this context after it).
+fn continue_with(at: u64, test_alert: bool, cpu: u64) -> Res<NtStatus> {
     let mut new = [0u8; x86::SIZE];
     mem::read(at, &mut new)?;
-    set_own(&new, cpu)
+    let eax = set_own(&new, cpu)?;
+    if test_alert {
+        // SAFETY: a system call with arguments on this stack.
+        unsafe { gala_wow64_test_alert() };
+    }
+    Ok(eax)
+}
+
+unsafe extern "C" {
+    /// NtDelayExecution(TRUE, 0): delivers the next user APC, if any.
+    fn gala_wow64_test_alert();
 }

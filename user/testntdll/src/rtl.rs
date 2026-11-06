@@ -7,6 +7,7 @@
 //! (TODO: the Unicode upcase table).
 
 use crate::heap::{RtlAllocateHeap, RtlFreeHeap, process_heap};
+use crate::{PARAMS_CURRENT_DIRECTORY, PTR};
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 const STATUS_SUCCESS: u32 = 0;
@@ -912,10 +913,7 @@ pub struct CriticalSection {
 }
 
 fn thread_id() -> usize {
-    let me: usize;
-    // SAFETY: gs:[0x48] is TEB.ClientId.UniqueThread.
-    unsafe { core::arch::asm!("mov {}, gs:[0x48]", out(reg) me, options(nostack, readonly)) };
-    me
+    crate::thread_id()
 }
 
 #[unsafe(no_mangle)]
@@ -1020,12 +1018,7 @@ pub extern "system" fn NtQueryTimerResolution(
 
 /// The process parameters (PEB.ProcessParameters).
 fn process_parameters() -> usize {
-    let peb: usize;
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters at +0x20.
-    unsafe {
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        *((peb + 0x20) as *const usize)
-    }
+    crate::rdp(crate::peb() + crate::PEB_PROCESS_PARAMETERS)
 }
 
 /// RtlSetCurrentDirectory_U(path): a full DOS path (`C:\dir`, also as
@@ -1039,8 +1032,13 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
     let params = process_parameters();
     let mut dos = [0u16; 520];
     let mut n = 0;
-    // SAFETY: the caller's string; CurrentDirectory: DosPath at +0x38
-    // (Length, MaximumLength, Buffer at +0x40), Handle at +0x48.
+    // CurrentDirectory: DosPath (Length, MaximumLength, Buffer), then
+    // Handle.
+    let (length, maximum) =
+        (params + PARAMS_CURRENT_DIRECTORY, params + PARAMS_CURRENT_DIRECTORY + 2);
+    let (buffer, handle) =
+        (params + PARAMS_CURRENT_DIRECTORY + PTR, params + PARAMS_CURRENT_DIRECTORY + 2 * PTR);
+    // SAFETY: the caller's string; the parameters' CurrentDirectory.
     unsafe {
         let mut p = chars(path);
         let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
@@ -1049,8 +1047,8 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
         }
         let absolute = p.get(1) == Some(&u16::from(b':')) || p.first() == Some(&BACKSLASH);
         if !absolute {
-            let len = usize::from(*((params + 0x38) as *const u16)) / 2;
-            let cur = core::slice::from_raw_parts(*((params + 0x40) as *const *const u16), len);
+            let len = usize::from(*(length as *const u16)) / 2;
+            let cur = core::slice::from_raw_parts(*(buffer as *const *const u16), len);
             if cur.len() >= dos.len() {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -1078,7 +1076,7 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
             buffer: nt.as_ptr(),
         };
         let attributes = crate::ObjectAttributes {
-            length: 48,
+            length: core::mem::size_of::<crate::ObjectAttributes>() as u32,
             root_directory: 0,
             object_name: &name,
             attributes: 0x40, // OBJ_CASE_INSENSITIVE
@@ -1092,16 +1090,16 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
         if status != STATUS_SUCCESS {
             return status;
         }
-        let max = usize::from(*((params + 0x3a) as *const u16)) / 2;
+        let max = usize::from(*(maximum as *const u16)) / 2;
         if n + 1 > max {
             crate::NtClose(h);
             return STATUS_INVALID_PARAMETER;
         }
-        let buf = *((params + 0x40) as *const *mut u16);
+        let buf = *(buffer as *const *mut u16);
         core::ptr::copy_nonoverlapping(dos.as_ptr(), buf, n);
         *buf.add(n) = 0;
-        *((params + 0x38) as *mut u16) = (2 * n) as u16;
-        let old = core::mem::replace(&mut *((params + 0x48) as *mut usize), h);
+        *(length as *mut u16) = (2 * n) as u16;
+        let old = core::mem::replace(&mut *(handle as *mut usize), h);
         if old != 0 {
             crate::NtClose(old);
         }

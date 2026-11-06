@@ -2256,6 +2256,10 @@ name = "testdll2"
 version = "0.1.0"
 
 [[package]]
+name = "testdll32"
+version = "0.1.0"
+
+[[package]]
 name = "testntdll"
 version = "0.1.0"
 
@@ -2618,6 +2622,34 @@ dependencies = [
 [[package]]
 name = "wow64"
 version = "0.1.0"
+
+[[package]]
+name = "wow64_fs_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_import_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_k32_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_seh_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "wow64_test"

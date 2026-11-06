@@ -21,7 +21,9 @@ use super::process::Process;
 use super::section::Section;
 use super::status::NtStatus;
 use super::vad::{self, Vad};
+use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
+use alloc::vec::Vec;
 
 const PATH: &str = "\\Windows\\System32\\wow64.dll";
 /// IMAGE_FILE_MACHINE_I386: WOW64_CPURESERVED.Machine.
@@ -38,8 +40,12 @@ pub struct Dll {
     pub transition_rva: u32,
     /// GalaWow64Exception: the dispatcher of exceptions in wow64.dll's own
     /// 64-bit code (as ntdll's KiUserExceptionDispatcher; it recovers from
-    /// faults on a caller's invalid 32-bit pointers).
+    /// faults on a caller's invalid 32-bit pointers) and, through it, in
+    /// 32-bit code (`deliver_to_user`).
     pub exception_rva: u32,
+    /// GalaWow64Apc: where user APCs run (as ntdll's KiUserApcDispatcher),
+    /// handed on to the 32-bit ntdll's.
+    pub apc_rva: u32,
 }
 
 /// Loaded on first use; `Some(None)` once we know there is none.
@@ -69,20 +75,25 @@ fn load() -> Option<Dll> {
     };
     section.file_name = super::file::nt_path(node).ok();
     let image = section.image.as_ref()?;
-    let (Some(start_rva), Some(transition_rva), Some(exception_rva)) = (
+    let (Some(start_rva), Some(transition_rva), Some(exception_rva), Some(apc_rva)) = (
         image.export(b"GalaWow64Start"),
         image.export(b"GalaWow64Transition"),
         image.export(b"GalaWow64Exception"),
+        image.export(b"GalaWow64Apc"),
     ) else {
-        warn!("wow64: {PATH} lacks GalaWow64Start, GalaWow64Transition or GalaWow64Exception");
+        warn!(
+            "wow64: {PATH} lacks GalaWow64Start, GalaWow64Transition, GalaWow64Exception or \
+             GalaWow64Apc"
+        );
         return None;
     };
     let section = KObject::new(ObjectBody::Section(section)).ok()?;
     info!(
         "wow64: using {PATH}, GalaWow64Start at rva {start_rva:#x}, GalaWow64Transition at rva \
-         {transition_rva:#x}, GalaWow64Exception at rva {exception_rva:#x}"
+         {transition_rva:#x}, GalaWow64Exception at rva {exception_rva:#x}, GalaWow64Apc at rva \
+         {apc_rva:#x}"
     );
-    Some(Dll { section, start_rva, transition_rva, exception_rva })
+    Some(Dll { section, start_rva, transition_rva, exception_rva, apc_rva })
 }
 
 /// A WOW64 process's 32-bit side.
@@ -93,11 +104,22 @@ pub struct Wow64Process {
     /// until it is mapped).
     pub start: AtomicU64,
     pub transition: AtomicU64,
+    /// The 32-bit ntdll's KiUserExceptionDispatcher and
+    /// KiUserApcDispatcher (0 until it is mapped, or without one): every
+    /// thread's CPU area names them for wow64.dll.
+    pub dispatcher32: AtomicU64,
+    pub apc_dispatcher32: AtomicU64,
 }
 
 impl Wow64Process {
     pub fn new(peb32: u64) -> Self {
-        Wow64Process { peb32, start: AtomicU64::new(0), transition: AtomicU64::new(0) }
+        Wow64Process {
+            peb32,
+            start: AtomicU64::new(0),
+            transition: AtomicU64::new(0),
+            dispatcher32: AtomicU64::new(0),
+            apc_dispatcher32: AtomicU64::new(0),
+        }
     }
 }
 
@@ -159,9 +181,11 @@ pub fn map_dll(process: &Process) -> Result<(), NtStatus> {
     }
     state.start.store(view.base + u64::from(dll.start_rva), Ordering::Relaxed);
     state.transition.store(transition, Ordering::Relaxed);
-    // Exceptions in 64-bit code (wow64.dll's) go to its dispatcher; those
-    // in 32-bit code are not delivered yet (`process::deliver_to_user`).
+    // Exceptions go to its dispatcher: those in its own 64-bit code, and
+    // those in 32-bit code, which it hands to the 32-bit ntdll's
+    // (`process::deliver_to_user`); user APCs to its APC dispatcher.
     process.exception_dispatcher.store(view.base + u64::from(dll.exception_rva), Ordering::Relaxed);
+    process.apc_dispatcher.store(view.base + u64::from(dll.apc_rva), Ordering::Relaxed);
     Ok(())
 }
 
@@ -181,10 +205,21 @@ pub struct Start32 {
 /// The CPU area's initial bytes: the 32-bit context `start` describes.
 pub fn cpu_area(start: &Start32) -> [u8; cpu::SIZE as usize] {
     let mut a = [0u8; cpu::SIZE as usize];
+    a[cpu::MACHINE as usize..cpu::MACHINE as usize + 2]
+        .copy_from_slice(&MACHINE_I386.to_le_bytes());
+    let c = cpu::CONTEXT as usize;
+    a[c..c + ctx::SIZE as usize].copy_from_slice(&context32(start));
+    let s = cpu::STACK64 as usize;
+    a[s..s + 8].copy_from_slice(&start.stack64.to_le_bytes());
+    a
+}
+
+/// The x86 CONTEXT (CONTEXT_FULL: Windows' selectors) of the registers
+/// `start` describes.
+pub fn context32(start: &Start32) -> [u8; ctx::SIZE as usize] {
+    let mut a = [0u8; ctx::SIZE as usize];
     let mut put = |off: u64, v: &[u8]| a[off as usize..off as usize + v.len()].copy_from_slice(v);
-    put(cpu::MACHINE, &MACHINE_I386.to_le_bytes());
-    let c = cpu::CONTEXT;
-    put(c + ctx::CONTEXT_FLAGS, &ctx::FLAGS_FULL.to_le_bytes());
+    put(ctx::CONTEXT_FLAGS, &ctx::FLAGS_FULL.to_le_bytes());
     for (off, v) in [
         (ctx::SEG_GS, w::DS32),
         (ctx::SEG_FS, w::FS32),
@@ -203,10 +238,53 @@ pub fn cpu_area(start: &Start32) -> [u8; cpu::SIZE as usize] {
         (ctx::ESP, start.esp),
         (ctx::EFLAGS, 0x202),
     ] {
-        put(c + off, &v.to_le_bytes());
+        put(off, &v.to_le_bytes());
     }
-    put(cpu::STACK64, &start.stack64.to_le_bytes());
     a
+}
+
+/// With a 32-bit ntdll (`ntdll::get32`), the main thread of a WOW64
+/// process starts in it, as the 64-bit ntdll's does: at its
+/// LdrInitializeThunk(Context, NtdllBase) (stdcall, 32-bit code), the x86
+/// CONTEXT of `start` (its real start, which the loader resumes with
+/// NtContinue once the imports are bound) on the 32-bit stack below
+/// `start`'s esp, then the thunk's arguments above a null return address.
+/// Maps the 32-bit ntdll's view. None without a 32-bit ntdll.
+pub fn through_ntdll32(process: &Process, start: &Start32) -> Result<Option<Start32>, NtStatus> {
+    let Some(ntdll) = super::ntdll::get32() else { return Ok(None) };
+    let view = super::section::map_view(
+        process,
+        &ntdll.section,
+        0,
+        0,
+        0,
+        vad::PAGE_EXECUTE_WRITECOPY,
+        false,
+    )?;
+    if view.base + u64::from(ntdll.thunk_rva) > u64::from(u32::MAX) {
+        return Err(NtStatus::CONFLICTING_ADDRESSES);
+    }
+    // Its dispatchers, which wow64.dll hands 32-bit code's exceptions and
+    // APCs to (every thread's CPU area names them: `allocate_teb32`).
+    if let Some(state) = process.wow64.as_ref() {
+        let at = |rva: Option<u32>| rva.map_or(0, |r| view.base + u64::from(r));
+        state.dispatcher32.store(at(ntdll.dispatcher_rva), Ordering::Relaxed);
+        state.apc_dispatcher32.store(at(ntdll.apc_dispatcher_rva), Ordering::Relaxed);
+    }
+    let context_at = (u64::from(start.esp) - ctx::SIZE) & !0xf;
+    let fault = |_| NtStatus::NO_MEMORY;
+    process.write(context_at, &context32(start)).map_err(fault)?;
+    let esp = context_at - 12;
+    let mut frame = [0u8; 12];
+    frame[4..8].copy_from_slice(&(context_at as u32).to_le_bytes());
+    frame[8..12].copy_from_slice(&(view.base as u32).to_le_bytes());
+    process.write(esp, &frame).map_err(fault)?;
+    Ok(Some(Start32 {
+        eip: (view.base + u64::from(ntdll.thunk_rva)) as u32,
+        esp: esp as u32,
+        gpr: [0; 7],
+        ..*start
+    }))
 }
 
 /// Gives the new thread whose 64-bit TEB is at `teb` its TEB32 (below the
@@ -250,7 +328,27 @@ pub fn allocate_teb32(
     process.write_u64(teb + w::TEB64_EXCEPTION_LIST, addr).map_err(fault)?;
     process.write_u64(teb + w::TEB64_CPU_SLOT, area).map_err(fault)?;
     process.write(area, &cpu_area(start)).map_err(fault)?;
+    let dispatchers = [&state.dispatcher32, &state.apc_dispatcher32];
+    for (off, d) in [cpu::DISPATCHER32, cpu::APC_DISPATCHER32].into_iter().zip(dispatchers) {
+        let d = d.load(Ordering::Relaxed) as u32;
+        process.write(area + off, &d.to_le_bytes()).map_err(fault)?;
+    }
     Ok(addr)
+}
+
+/// Where the kernel hands an exception in 32-bit code of the WOW64 thread
+/// whose 64-bit TEB is at `teb`: the top of its 64-bit stack (wow64.dll's
+/// dispatcher runs there and passes it on to the 32-bit ntdll's), if the
+/// process has a 32-bit ntdll to dispatch it; None otherwise (the
+/// exception then ends the process).
+pub fn exception_stack(process: &Process, teb: u64) -> Option<u64> {
+    let area = process.read_u64(teb + w::TEB64_CPU_SLOT).ok()?;
+    let mut d = [0u8; 4];
+    process.read(area + cpu::DISPATCHER32, &mut d).ok()?;
+    if u32::from_le_bytes(d) == 0 {
+        return None;
+    }
+    process.read_u64(area + cpu::STACK64).ok().filter(|&s| s != 0)
 }
 
 /// The 32-bit registers a WOW64 thread's CPU area holds (the caller of
@@ -346,9 +444,191 @@ pub fn release_thread(process: &Process, teb: u64, teb32: u64) {
     }
 }
 
+/// A process's environment, adjusted to its bitness: the variables,
+/// each NUL-terminated.
+pub struct Environment {
+    text: Vec<u8>,
+}
+
+impl Environment {
+    /// The variables (`name=value`).
+    pub fn vars(&self) -> Result<Vec<&str>, NtStatus> {
+        let mut out = Vec::new();
+        for var in self.text.split(|&b| b == 0).filter(|v| !v.is_empty()) {
+            let var = core::str::from_utf8(var).map_err(|_| NtStatus::INVALID_PARAMETER)?;
+            out.try_push(var).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        Ok(out)
+    }
+}
+
+/// The environment a new process starts with, from `vars` (the system's
+/// or its creator's), as WOW64 sets it for the process's bitness
+/// (Microsoft Learn, "WOW64 Implementation Details", environment
+/// variables). A 32-bit process: PROCESSOR_ARCHITECTURE=x86,
+/// PROCESSOR_ARCHITEW6432 the native one, ProgramFiles and
+/// CommonProgramFiles the (x86) directories, ProgramW6432 and
+/// CommonProgramW6432 the native ones. A 64-bit process (a 32-bit parent's
+/// variables back): PROCESSOR_ARCHITECTURE from PROCESSOR_ARCHITEW6432
+/// (which goes), ProgramFiles and CommonProgramFiles from the W6432 ones.
+/// Variables keep their place; new ones go where they sort.
+pub fn environment<'a>(vars: &[&'a str], x86: bool) -> Result<Environment, NtStatus> {
+    const ARCH: &str = "PROCESSOR_ARCHITECTURE";
+    const ARCH_W6432: &str = "PROCESSOR_ARCHITEW6432";
+    const PF: &str = "ProgramFiles";
+    const PF_X86: &str = "ProgramFiles(x86)";
+    const PF_W6432: &str = "ProgramW6432";
+    const CPF: &str = "CommonProgramFiles";
+    const CPF_X86: &str = "CommonProgramFiles(x86)";
+    const CPF_W6432: &str = "CommonProgramW6432";
+    let get = |name: &str| -> Option<&'a str> {
+        vars.iter().find_map(|v| {
+            v.split_once('=').filter(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, value)| value)
+        })
+    };
+    // (name, new value: None removes it).
+    let mut changes: [(&str, Option<&'a str>); 6] = [("", None); 6];
+    let mut n = 0;
+    let mut change = |name: &'static str, value: Option<&'a str>| {
+        changes[n] = (name, value);
+        n += 1;
+    };
+    if x86 {
+        change(ARCH, Some("x86"));
+        if let Some(native) = get(ARCH_W6432).or(get(ARCH)) {
+            change(ARCH_W6432, Some(native));
+        }
+        if let Some(native) = get(PF_W6432).or(get(PF)) {
+            change(PF_W6432, Some(native));
+        }
+        if let Some(x86) = get(PF_X86) {
+            change(PF, Some(x86));
+        }
+        if let Some(native) = get(CPF_W6432).or(get(CPF)) {
+            change(CPF_W6432, Some(native));
+        }
+        if let Some(x86) = get(CPF_X86) {
+            change(CPF, Some(x86));
+        }
+    } else {
+        if let Some(native) = get(ARCH_W6432) {
+            change(ARCH, Some(native));
+            change(ARCH_W6432, None);
+        }
+        if let Some(native) = get(PF_W6432) {
+            change(PF, Some(native));
+        }
+        if let Some(native) = get(CPF_W6432) {
+            change(CPF, Some(native));
+        }
+    }
+    let changes = &changes[..n];
+    let changed = |var: &str| {
+        let name = var.split_once('=').map_or(var, |(n, _)| n);
+        changes.iter().find(|(c, _)| c.eq_ignore_ascii_case(name))
+    };
+    fn upper(s: &str) -> impl Iterator<Item = u8> + '_ {
+        s.bytes().map(|b| b.to_ascii_uppercase())
+    }
+    let mut text = Vec::new();
+    let push = |text: &mut Vec<u8>, parts: &[&str]| -> Result<(), NtStatus> {
+        for p in parts {
+            text.try_extend_from_slice(p.as_bytes()).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        text.try_push(0).map_err(|_| NtStatus::NO_MEMORY)
+    };
+    // New variables, in sorted order, before the first that sorts after.
+    let mut new: [(&str, &str); 6] = [("", ""); 6];
+    let mut new_count = 0;
+    for &(name, value) in changes {
+        if let Some(value) = value
+            && get(name).is_none()
+        {
+            new[new_count] = (name, value);
+            new_count += 1;
+        }
+    }
+    let new = &mut new[..new_count];
+    new.sort_by(|a, b| upper(a.0).cmp(upper(b.0)));
+    let mut next = 0;
+    for var in vars {
+        let name = var.split_once('=').map_or(*var, |(n, _)| n);
+        while next < new.len() && !name.starts_with('=') && upper(new[next].0).lt(upper(name)) {
+            push(&mut text, &[new[next].0, "=", new[next].1])?;
+            next += 1;
+        }
+        match changed(var) {
+            Some(&(name, Some(value))) => push(&mut text, &[name, "=", value])?,
+            Some((_, None)) => {}
+            None => push(&mut text, &[var])?,
+        }
+    }
+    for &(name, value) in &new[next..] {
+        push(&mut text, &[name, "=", value])?;
+    }
+    Ok(Environment { text })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SYSTEM: &[&str] = &[
+        "CommonProgramFiles=C:\\Program Files\\Common Files",
+        "CommonProgramFiles(x86)=C:\\Program Files (x86)\\Common Files",
+        "CommonProgramW6432=C:\\Program Files\\Common Files",
+        "OS=Windows_NT",
+        "PROCESSOR_ARCHITECTURE=AMD64",
+        "ProgramFiles=C:\\Program Files",
+        "ProgramFiles(x86)=C:\\Program Files (x86)",
+        "ProgramW6432=C:\\Program Files",
+        "windir=C:\\Windows",
+    ];
+
+    #[test]
+    fn a_32_bit_process_sees_the_x86_directories() {
+        let env = environment(SYSTEM, true).unwrap();
+        assert_eq!(
+            env.vars().unwrap(),
+            [
+                "CommonProgramFiles=C:\\Program Files (x86)\\Common Files",
+                "CommonProgramFiles(x86)=C:\\Program Files (x86)\\Common Files",
+                "CommonProgramW6432=C:\\Program Files\\Common Files",
+                "OS=Windows_NT",
+                "PROCESSOR_ARCHITECTURE=x86",
+                "PROCESSOR_ARCHITEW6432=AMD64",
+                "ProgramFiles=C:\\Program Files (x86)",
+                "ProgramFiles(x86)=C:\\Program Files (x86)",
+                "ProgramW6432=C:\\Program Files",
+                "windir=C:\\Windows",
+            ]
+        );
+        // A 32-bit child of a 32-bit process: the same.
+        let again = environment(&env.vars().unwrap(), true).unwrap();
+        assert_eq!(again.vars().unwrap(), env.vars().unwrap());
+        // A 64-bit child of a 32-bit process: the native values back.
+        let back = environment(&env.vars().unwrap(), false).unwrap();
+        assert_eq!(back.vars().unwrap(), SYSTEM);
+    }
+
+    #[test]
+    fn a_64_bit_process_keeps_the_system_environment() {
+        assert_eq!(environment(SYSTEM, false).unwrap().vars().unwrap(), SYSTEM);
+        // Without the W6432 variables (an environment given by a program):
+        // a 32-bit process gets them, in sorted places.
+        let env =
+            environment(&["=C:=C:\\", "A=1", "PROCESSOR_ARCHITECTURE=AMD64", "Z=2"], true).unwrap();
+        assert_eq!(
+            env.vars().unwrap(),
+            [
+                "=C:=C:\\",
+                "A=1",
+                "PROCESSOR_ARCHITECTURE=x86",
+                "PROCESSOR_ARCHITEW6432=AMD64",
+                "Z=2"
+            ]
+        );
+    }
 
     #[test]
     fn cpu_area_holds_the_32_bit_start() {

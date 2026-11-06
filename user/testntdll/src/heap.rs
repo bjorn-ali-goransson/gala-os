@@ -344,21 +344,13 @@ pub extern "system" fn RtlCompactHeap(h: *mut u8, _flags: u32) -> usize {
 
 /// PEB.ProcessHeap.
 pub(crate) fn process_heap() -> *mut u8 {
-    // SAFETY: gs:[0x60] is the PEB; ProcessHeap is at +0x30.
-    unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        *((peb + 0x30) as *const *mut u8)
-    }
+    // SAFETY: PEB.ProcessHeap.
+    unsafe { *((crate::peb() + crate::PEB_PROCESS_HEAP) as *const *mut u8) }
 }
 
 /// Creates the process heap (LdrInitializeThunk, before any DLL runs).
 pub fn create_process_heap() {
     let h = RtlCreateHeap(0, null_mut(), 0, 0, null_mut(), null_mut());
     // SAFETY: the PEB is writable by its process.
-    unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        *((peb + 0x30) as *mut *mut u8) = h;
-    }
+    unsafe { *((crate::peb() + crate::PEB_PROCESS_HEAP) as *mut *mut u8) = h };
 }

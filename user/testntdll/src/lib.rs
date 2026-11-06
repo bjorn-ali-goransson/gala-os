@@ -15,42 +15,36 @@
 #![no_std]
 #![allow(non_snake_case, non_upper_case_globals)]
 
+// The architecture's parts: x64 (System32's ntdll) or x86 (the 32-bit
+// ntdll in SysWOW64, ARCHITECTURE "Plan: WOW64"). First: they define the
+// system call stub macro.
+#[cfg(target_arch = "x86_64")]
+#[macro_use]
+#[path = "x64.rs"]
+mod arch;
+#[cfg(target_arch = "x86")]
+#[macro_use]
+#[path = "x86.rs"]
+mod arch;
+
 mod heap;
 mod rtl;
+#[cfg(target_arch = "x86_64")]
+mod seh;
+#[cfg(target_arch = "x86")]
+#[path = "seh_x86.rs"]
 mod seh;
 mod tls;
 mod unimplemented;
 
+pub use arch::*;
+
 /// "galantdl": marks the state as written by this DLL.
 const MAGIC: u64 = 0x6761_6c61_6e74_646c;
-/// CONTEXT.Rip (public x64 layout).
-const CONTEXT_RIP: usize = 0xf8;
-/// NtContinue on the pinned build (to be verified, like all numbers).
-const NT_CONTINUE: u32 = 0x43;
 
 /// [magic, NtdllBase argument, Context->Rip, number of thunk calls]
 #[unsafe(no_mangle)]
 pub static mut GalaTestNtdllState: [u64; 4] = [0; 4];
-
-/// NtContinue(Context, TestAlert): resumes `Context`; does not return on
-/// success.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn NtContinue(_context: *const u8, _test_alert: u8) -> i32 {
-    core::arch::naked_asm!("mov r10, rcx", "mov eax, {n}", "syscall", "ret", n = const NT_CONTINUE)
-}
-
-/// System call stubs shaped like ntdll's: `mov r10, rcx; mov eax, n;
-/// syscall; ret` (stack arguments stay where the kernel expects them).
-macro_rules! syscall_stubs {
-    ($($name:ident = $n:expr, fn($($arg:ident: $ty:ty),*);)*) => {$(
-        #[unsafe(naked)]
-        #[unsafe(no_mangle)]
-        pub extern "system" fn $name($(_: $ty),*) -> u32 {
-            core::arch::naked_asm!("mov r10, rcx", "mov eax, {n}", "syscall", "ret", n = const $n)
-        }
-    )*};
-}
 
 // Numbers of the pinned build (to be verified), as in ntrt.
 syscall_stubs! {
@@ -454,6 +448,34 @@ fn rd64(addr: usize) -> u64 {
     unsafe { (addr as *const u64).read_unaligned() }
 }
 
+/// The size of a pointer (and of an IAT slot, a TLS array slot).
+const PTR: usize = core::mem::size_of::<usize>();
+
+/// A pointer-sized value (an address in this build's images and system
+/// structures).
+fn rdp(addr: usize) -> usize {
+    // SAFETY: as above.
+    unsafe { (addr as *const usize).read_unaligned() }
+}
+
+/// The UNICODE_STRING at `addr` (Length, then the buffer a pointer
+/// further).
+fn unicode_at(addr: usize) -> &'static [u16] {
+    let len = usize::from(rd32(addr) as u16) / 2;
+    // SAFETY: a UNICODE_STRING the kernel or the loader filled in.
+    unsafe { core::slice::from_raw_parts(rdp(addr + PTR) as *const u16, len) }
+}
+
+/// ProcessParameters->ImagePathName.
+fn image_path() -> &'static [u16] {
+    unicode_at(rdp(peb() + PEB_PROCESS_PARAMETERS) + PARAMS_IMAGE_PATH)
+}
+
+/// PEB.ImageBaseAddress: the executable.
+fn image_base() -> usize {
+    rdp(peb() + PEB_IMAGE_BASE)
+}
+
 /// A NUL-terminated string inside a mapped image.
 fn c_str(addr: usize) -> &'static [u8] {
     let mut n = 0;
@@ -468,8 +490,8 @@ fn c_str(addr: usize) -> &'static [u8] {
 
 /// The IMAGE_DATA_DIRECTORY `index` of the image at `base`: (rva, size).
 fn directory(base: usize, index: usize) -> (usize, usize) {
-    let opt = base + rd32(base + 0x3c) as usize + 24;
-    (rd32(opt + 112 + 8 * index) as usize, rd32(opt + 116 + 8 * index) as usize)
+    let opt = base + rd32(base + 0x3c) as usize + 24 + DATA_DIRECTORIES;
+    (rd32(opt + 8 * index) as usize, rd32(opt + 4 + 8 * index) as usize)
 }
 
 /// Whether `address` is code in a loaded DLL's `.gstub` section: the
@@ -573,15 +595,7 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
         return open_dll(dir, dll);
     }
     let system32_only = matches!(search, Search::System32);
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters and ImagePathName are
-    // filled in by the kernel.
-    let image_path = unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        let params = rd64(peb + 0x20) as usize;
-        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-        core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
-    };
+    let image_path = image_path();
     let dir_len = image_path.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
     let mut system32 = [0u16; 280];
     let mut n = 0;
@@ -593,7 +607,7 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
             n += 1;
         }
     }
-    for &b in b"\\System32\\" {
+    for &b in SYSTEM_DIR {
         system32[n] = u16::from(b);
         n += 1;
     }
@@ -716,28 +730,30 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
         STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => {}
         _ => return Err(st),
     }
-    // Image sections take 32-bit images too; a 64-bit process loads one
-    // as a module only if it is an IL-only .NET assembly (no code runs).
-    if is_pe32(base) && !is_il_only(base) {
+    // Image sections take both kinds; an image of the other kind loads as
+    // a module only if it is an IL-only .NET assembly (no code runs).
+    if is_foreign(base) && !is_il_only(base) {
         NtUnmapViewOfSection(-1, base);
         return Err(STATUS_INVALID_IMAGE_FORMAT);
     }
     Ok(base)
 }
 
-/// Whether the image at `base` is 32-bit (PE32).
-fn is_pe32(base: usize) -> bool {
-    rd32(base + rd32(base + 0x3c) as usize + 24) & 0xffff == 0x10b
+/// Whether the image at `base` is not of this build's kind (PE32 for the
+/// 64-bit ntdll, PE32+ for the 32-bit one).
+fn is_foreign(base: usize) -> bool {
+    rd32(base + rd32(base + 0x3c) as usize + 24) & 0xffff != NATIVE_MAGIC
 }
 
-/// Whether the PE32 image at `base` is an IL-only .NET assembly: its CLI
-/// header (data directory 14, at +96 + 14 * 8 in a PE32 optional header)
-/// has COMIMAGE_FLAGS_ILONLY (bit 0 of Flags, at +16). Windows loads
-/// these into 64-bit processes; nothing in them runs (no imports are
-/// bound, no entry point is called).
+/// Whether the image at `base` (of the other kind) is an IL-only .NET
+/// assembly: its CLI header (data directory 14, at +96 + 14 * 8 in a PE32
+/// optional header, +112 in a PE32+ one) has COMIMAGE_FLAGS_ILONLY (bit 0
+/// of Flags, at +16). Windows loads these into processes of either kind;
+/// nothing in them runs (no imports are bound, no entry point is called).
 fn is_il_only(base: usize) -> bool {
     let optional = base + rd32(base + 0x3c) as usize + 24;
-    let cli = rd32(optional + 96 + 14 * 8) as usize;
+    let directories = if rd32(optional) & 0xffff == 0x10b { 96 } else { 112 };
+    let cli = rd32(optional + directories + 14 * 8) as usize;
     cli != 0 && rd32(base + cli + 16) & 1 != 0
 }
 
@@ -804,7 +820,7 @@ struct LoaderLock {
     debug_info: usize,
     lock_count: i32,
     depth: core::sync::atomic::AtomicU32,
-    owner: core::sync::atomic::AtomicU64,
+    owner: core::sync::atomic::AtomicUsize,
     semaphore: usize,
     spin_count: usize,
 }
@@ -813,11 +829,11 @@ static LOADER_LOCK: LoaderLock = LoaderLock {
     debug_info: 0,
     lock_count: -1,
     depth: core::sync::atomic::AtomicU32::new(0),
-    owner: core::sync::atomic::AtomicU64::new(0),
+    owner: core::sync::atomic::AtomicUsize::new(0),
     semaphore: 0,
     spin_count: 0,
 };
-static LOADER_OWNER: &core::sync::atomic::AtomicU64 = &LOADER_LOCK.owner;
+static LOADER_OWNER: &core::sync::atomic::AtomicUsize = &LOADER_LOCK.owner;
 static LOADER_DEPTH: &core::sync::atomic::AtomicU32 = &LOADER_LOCK.depth;
 
 /// Set while the executable's imports are bound at startup.
@@ -826,9 +842,7 @@ static STARTUP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 /// Runs `f` holding the loader lock.
 pub(crate) fn with_loader_lock<R>(f: impl FnOnce() -> R) -> R {
     use core::sync::atomic::Ordering;
-    let me: u64;
-    // SAFETY: gs:[0x48] is TEB.ClientId.UniqueThread.
-    unsafe { core::arch::asm!("mov {}, gs:[0x48]", out(reg) me, options(nostack, readonly)) };
+    let me = thread_id();
     if LOADER_OWNER.load(Ordering::Acquire) == me {
         LOADER_DEPTH.fetch_add(1, Ordering::Relaxed);
         let r = f();
@@ -859,17 +873,21 @@ struct ListEntry {
     blink: usize,
 }
 
-/// UNICODE_STRING (x64: lengths in bytes, padding, the buffer).
+/// Padding words of the x64 layouts (UNICODE_STRING's after the lengths,
+/// LDR_DATA_TABLE_ENTRY's after SizeOfImage); none in the x86 ones.
+const PAD: usize = if PTR == 8 { 1 } else { 0 };
+
+/// UNICODE_STRING (lengths in bytes, padding on x64, the buffer).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UnicodeStr {
     length: u16,
     maximum: u16,
-    pad: u32,
+    pad: [u32; PAD],
     buffer: usize,
 }
 
-/// PEB_LDR_DATA (x64, 0x58 bytes), what PEB.Ldr (+0x18) points at.
+/// PEB_LDR_DATA (x64: 0x58 bytes; x86: 0x30), what PEB.Ldr points at.
 #[repr(C)]
 struct LdrData {
     length: u32,
@@ -883,7 +901,8 @@ struct LdrData {
     shutdown_thread: usize,
 }
 
-/// LDR_DATA_TABLE_ENTRY (x64), the fields up to TimeDateStamp (+0x80).
+/// LDR_DATA_TABLE_ENTRY, the fields up to TimeDateStamp (x64: +0x80;
+/// x86: +0x44).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LdrEntry {
@@ -893,7 +912,7 @@ struct LdrEntry {
     dll_base: usize,
     entry_point: usize,
     size_of_image: u32,
-    pad: u32,
+    pad: [u32; PAD],
     full_name: UnicodeStr,
     base_name: UnicodeStr,
     flags: u32,
@@ -904,12 +923,21 @@ struct LdrEntry {
     pad2: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<LdrData>() == 0x58);
-const _: () = assert!(core::mem::offset_of!(LdrEntry, full_name) == 0x48);
-const _: () = assert!(core::mem::offset_of!(LdrEntry, time_date_stamp) == 0x80);
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    assert!(core::mem::size_of::<LdrData>() == 0x58);
+    assert!(core::mem::offset_of!(LdrEntry, full_name) == 0x48);
+    assert!(core::mem::offset_of!(LdrEntry, time_date_stamp) == 0x80);
+};
+#[cfg(target_arch = "x86")]
+const _: () = {
+    assert!(core::mem::size_of::<LdrData>() == 0x30);
+    assert!(core::mem::offset_of!(LdrEntry, full_name) == 0x24);
+    assert!(core::mem::offset_of!(LdrEntry, time_date_stamp) == 0x44);
+};
 
 const NO_LIST: ListEntry = ListEntry { flink: 0, blink: 0 };
-const NO_STRING: UnicodeStr = UnicodeStr { length: 0, maximum: 0, pad: 0, buffer: 0 };
+const NO_STRING: UnicodeStr = UnicodeStr { length: 0, maximum: 0, pad: [0; PAD], buffer: 0 };
 const NO_ENTRY: LdrEntry = LdrEntry {
     load_order: NO_LIST,
     memory_order: NO_LIST,
@@ -917,7 +945,7 @@ const NO_ENTRY: LdrEntry = LdrEntry {
     dll_base: 0,
     entry_point: 0,
     size_of_image: 0,
-    pad: 0,
+    pad: [0; PAD],
     full_name: NO_STRING,
     base_name: NO_STRING,
     flags: 0,
@@ -943,7 +971,7 @@ unsafe impl Sync for Ldr {}
 
 static LDR: Ldr = Ldr(core::cell::UnsafeCell::new((
     LdrData {
-        length: 0x58,
+        length: core::mem::size_of::<LdrData>() as u32,
         initialized: 0,
         ss_handle: 0,
         load_order: NO_LIST,
@@ -970,12 +998,8 @@ fn ldr_init() {
         let me = head as *mut ListEntry as usize;
         *head = ListEntry { flink: me, blink: me };
     }
-    // SAFETY: gs:[0x60] is the PEB; Ldr is at +0x18.
-    unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        ((peb + 0x18) as *mut usize).write(data as *mut LdrData as usize);
-    }
+    // SAFETY: PEB.Ldr, written by this loader only.
+    unsafe { ((peb() + PEB_LDR) as *mut usize).write(data as *mut LdrData as usize) };
 }
 
 /// Puts `entry` last in the list at `head`.
@@ -1027,13 +1051,13 @@ fn ldr_link(slot: usize) {
         full_name: UnicodeStr {
             length: (2 * len) as u16,
             maximum: (2 * len) as u16,
-            pad: 0,
+            pad: [0; PAD],
             buffer: path,
         },
         base_name: UnicodeStr {
             length: (2 * (len - file)) as u16,
             maximum: (2 * (len - file)) as u16,
-            pad: 0,
+            pad: [0; PAD],
             buffer: path + 2 * file,
         },
         load_count: if refs == PINNED { u16::MAX } else { refs.min(0xfffe) as u16 },
@@ -1063,7 +1087,7 @@ fn ldr_unlink(slot: usize) {
     *e = NO_ENTRY;
 }
 
-/// RTL_UNLOAD_EVENT_TRACE (x64, 104 bytes): one unloaded module.
+/// RTL_UNLOAD_EVENT_TRACE (x64: 104 bytes; x86: 92): one unloaded module.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UnloadEvent {
@@ -1076,7 +1100,7 @@ struct UnloadEvent {
     version: [u32; 2],
 }
 
-const _: () = assert!(core::mem::size_of::<UnloadEvent>() == 104);
+const _: () = assert!(core::mem::size_of::<UnloadEvent>() == if PTR == 8 { 104 } else { 92 });
 
 /// How many unloads the trace keeps (the newest replace the oldest).
 const UNLOAD_EVENTS: usize = 64;
@@ -1365,7 +1389,7 @@ fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
     let (path, n) = unsafe { *LAST_PATH.0.get() };
     set_module_path(slot, &path[..n]);
     let attach = || {
-        if is_pe32(base) {
+        if is_foreign(base) {
             return Ok(()); // an IL-only assembly: mapped, nothing to run
         }
         bind_imports(base, Some(slot))?;
@@ -1460,25 +1484,24 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         let lookup = base + rd32(if rd32(desc) != 0 { desc } else { desc + 16 }) as usize;
         let iat = base + rd32(desc + 16) as usize;
         let mut count = 0;
-        while rd64(lookup + 8 * count) != 0 {
+        while rdp(lookup + PTR * count) != 0 {
             count += 1;
         }
-        let (mut at, mut size, mut old) = (iat, count * 8, 0u32);
+        let (mut at, mut size, mut old) = (iat, count * PTR, 0u32);
         if NtProtectVirtualMemory(-1, &mut at, &mut size, 0x04, &mut old) != STATUS_SUCCESS {
             return Err(STATUS_ENTRYPOINT_NOT_FOUND);
         }
         for i in 0..count {
-            let entry = rd64(lookup + 8 * i);
-            let (name, ordinal) = if entry >> 63 != 0 {
+            let entry = rdp(lookup + PTR * i);
+            // IMAGE_ORDINAL_FLAG: the top bit.
+            let (name, ordinal) = if entry >> (8 * PTR - 1) != 0 {
                 (&[][..], (entry & 0xffff) as u32)
             } else {
-                (c_str(base + (entry as usize & 0x7fff_ffff) + 2), 0)
+                (c_str(base + (entry & 0x7fff_ffff) + 2), 0)
             };
             match export(dll, name, ordinal) {
                 // SAFETY: the IAT slot, made writable above.
-                Some(target) => unsafe {
-                    ((iat + 8 * i) as *mut u64).write_unaligned(target as u64)
-                },
+                Some(target) => unsafe { ((iat + PTR * i) as *mut usize).write_unaligned(target) },
                 None => {
                     // As on Windows the image will not load, but every
                     // missing import is reported first (not just the first).
@@ -1487,7 +1510,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                 }
             }
         }
-        let (mut at, mut size, mut ignored) = (iat, count * 8, 0u32);
+        let (mut at, mut size, mut ignored) = (iat, count * PTR, 0u32);
         NtProtectVirtualMemory(-1, &mut at, &mut size, old, &mut ignored);
         desc += 20;
     }
@@ -1642,16 +1665,7 @@ unsafe extern "system" fn ldr_get_procedure_address(
 ) -> u32 {
     // A null module means the executable (as on Windows, where
     // GetProcAddress(NULL, ...) searches it).
-    let module = if module == 0 {
-        // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
-        unsafe {
-            let peb: usize;
-            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-            rd64(peb + 0x10) as usize
-        }
-    } else {
-        module
-    };
+    let module = if module == 0 { image_base() } else { module };
     let found = if name.is_null() {
         export(module, &[], ordinal).ok_or(STATUS_ORDINAL_NOT_FOUND)
     } else {
@@ -1713,15 +1727,7 @@ extern "system" fn ldr_unload_dll(module: usize) -> u32 {
 /// order of PEB.Ldr's load order list on Windows).
 fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
     ldr_init();
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters->ImagePathName is
-    // filled in by the kernel.
-    let image_path = unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        let params = rd64(peb + 0x20) as usize;
-        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-        core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
-    };
+    let image_path = image_path();
     let mut name = [0u8; MAX_NAME];
     // An executable whose name is not a plain ASCII one is just not listed.
     if let Ok(n) = normalize(image_path.iter().copied(), &mut name) {
@@ -1729,7 +1735,8 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
         set_module_path(slot, image_path);
     }
     let ntdll_slot = add_module(b"ntdll.dll", ntdll, PINNED)?;
-    // ntdll's file: <NtSystemRoot>\System32\ntdll.dll.
+    // ntdll's file: <NtSystemRoot>\System32\ntdll.dll (SysWOW64 for the
+    // 32-bit one).
     let mut path = [0u16; MAX_PATH];
     let mut n = 0;
     // SAFETY: KUSER_SHARED_DATA.NtSystemRoot (+0x30), NUL-terminated.
@@ -1739,7 +1746,7 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
             n += 1;
         }
     }
-    for &b in b"\\System32\\ntdll.dll" {
+    for &b in SYSTEM_DIR.iter().chain(b"ntdll.dll") {
         path[n] = u16::from(b);
         n += 1;
     }
@@ -1846,10 +1853,6 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0225, 1168), // NOT_FOUND -> ERROR_NOT_FOUND
 ];
 
-/// TEB.LastStatusValue (x64 offset 0x1250): the NTSTATUS behind the
-/// thread's last error.
-const TEB_LAST_STATUS: usize = 0x1250;
-
 /// NtFlushBuffersFileEx(FileHandle, Flags, Parameters, ParametersSize,
 /// *IoStatusBlock): NtFlushBuffersFile (gala's volume is in memory, so the
 /// FLUSH_FLAGS_FILE_DATA_ONLY / NO_SYNC / FILE_DATA_SYNC_ONLY variants are
@@ -1871,12 +1874,7 @@ pub extern "system" fn NtFlushBuffersFileEx(
 /// RtlGetLastNtStatus(): TEB.LastStatusValue.
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlGetLastNtStatus() -> u32 {
-    let v: u32;
-    // SAFETY: the current thread's TEB (gs), a 4-byte field.
-    unsafe {
-        core::arch::asm!("mov {:e}, gs:[{}]", out(reg) v, const TEB_LAST_STATUS, options(nostack, readonly))
-    };
-    v
+    last_status()
 }
 
 /// RtlNtStatusToDosError(Status): the Win32 error for an NTSTATUS
@@ -1884,10 +1882,7 @@ pub extern "system" fn RtlGetLastNtStatus() -> u32 {
 /// does, it keeps `status` in TEB.LastStatusValue (RtlGetLastNtStatus).
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlNtStatusToDosError(status: u32) -> u32 {
-    // SAFETY: the current thread's TEB (gs), a 4-byte field.
-    unsafe {
-        core::arch::asm!("mov gs:[{}], {:e}", const TEB_LAST_STATUS, in(reg) status, options(nostack))
-    };
+    set_last_status(status);
     if (0xc000_00ef..=0xc000_00fa).contains(&status) {
         return 87; // STATUS_INVALID_PARAMETER_1..12
     }
@@ -1908,10 +1903,7 @@ pub extern "system" fn RtlNtStatusToDosError(status: u32) -> u32 {
 /// RtlGetCurrentPeb(): this process's PEB.
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlGetCurrentPeb() -> usize {
-    let peb: usize;
-    // SAFETY: gs:[0x60] is TEB.ProcessEnvironmentBlock.
-    unsafe { core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly)) };
-    peb
+    peb()
 }
 
 /// RtlGetVersion(*OSVERSIONINFO[EX]W): the version KUSER_SHARED_DATA
@@ -2015,33 +2007,24 @@ static INITIAL_CONTEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::At
 /// # Safety
 /// Called by the kernel with a valid CONTEXT.
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base: u64) -> ! {
+pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base: usize) -> ! {
     // SAFETY: the kernel passes a readable CONTEXT; the state is only
     // written here, before any other thread exists.
     unsafe {
-        let rip = (context.add(CONTEXT_RIP) as *const u64).read_unaligned();
+        let pc = (context.add(CONTEXT_PC) as *const usize).read_unaligned();
         let state = &raw mut GalaTestNtdllState;
         let calls = (*state)[3];
-        state.write_volatile([MAGIC, ntdll_base, rip, calls + 1]);
+        state.write_volatile([MAGIC, ntdll_base as u64, pc as u64, calls + 1]);
     }
-    // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
-    let image = unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        rd64(peb + 0x10) as usize
-    };
+    let image = image_base();
     // PEB.LoaderLock: where programs find the loader lock's owner.
-    // SAFETY: gs:[0x60] is the PEB, writable by the process.
-    unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        ((peb + 0x110) as *mut usize).write(&raw const LOADER_LOCK as usize);
-    }
+    // SAFETY: the PEB, writable by the process.
+    unsafe { ((peb() + PEB_LOADER_LOCK) as *mut usize).write(&raw const LOADER_LOCK as usize) };
     // The process heap, before any DLL's code runs.
     heap::create_process_heap();
     INITIAL_CONTEXT.store(context as usize, core::sync::atomic::Ordering::Relaxed);
     let started = with_loader_lock(|| {
-        register_startup_modules(ntdll_base as usize, image)?;
+        register_startup_modules(ntdll_base, image)?;
         // The executable's TLS (and this thread's blocks) before its
         // imports load; its TLS callbacks after their DllMains.
         tls::process_init(image);
@@ -2152,22 +2135,6 @@ pub unsafe extern "system" fn RtlVerifyVersionInfo(info: *const u32, kind: u32, 
         }
     }
     STATUS_SUCCESS
-}
-
-/// NtTerminateProcess on the pinned build (to be verified).
-const NT_TERMINATE_PROCESS: u32 = 0x2c;
-
-/// NtTerminateProcess(ProcessHandle, ExitStatus).
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn NtTerminateProcess(_process: isize, _status: u32) -> i32 {
-    core::arch::naked_asm!(
-        "mov r10, rcx",
-        "mov eax, {n}",
-        "syscall",
-        "ret",
-        n = const NT_TERMINATE_PROCESS
-    )
 }
 
 /// PVECTORED_EXCEPTION_HANDLER: LONG (PEXCEPTION_POINTERS).
@@ -2286,28 +2253,6 @@ pub extern "system" fn RtlRemoveVectoredContinueHandler(cookie: *mut core::ffi::
     remove_handler(true, cookie)
 }
 
-/// The kernel resumes a thread here to run a user APC: rsp points at the
-/// CONTEXT to return to, whose P1Home..P4Home hold NormalContext,
-/// SystemArgument1, SystemArgument2 and NormalRoutine. The routine runs
-/// with the CONTEXT's home area as its shadow space; NtContinue with
-/// TestAlert then delivers the next APC or resumes the CONTEXT.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn KiUserApcDispatcher() -> ! {
-    core::arch::naked_asm!(
-        "mov rcx, [rsp]",
-        "mov rdx, [rsp + 8]",
-        "mov r8, [rsp + 0x10]",
-        "mov rax, [rsp + 0x18]",
-        "call rax",
-        "mov rcx, rsp",
-        "mov edx, 1",
-        "call {continue}",
-        "int3",
-        continue = sym NtContinue,
-    )
-}
-
 /// Calls the handlers of one table in order; whether one of them returned
 /// EXCEPTION_CONTINUE_EXECUTION.
 fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> bool {
@@ -2322,102 +2267,6 @@ fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> 
         }
     }
     false
-}
-
-// Memory routines (ntdll exports them; the compiler also calls them).
-// `rep` string instructions, so they cannot compile back into calls.
-
-/// memcpy(dst, src, n) -> dst
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn memcpy(_dst: *mut u8, _src: *const u8, _n: usize) -> *mut u8 {
-    core::arch::naked_asm!(
-        "mov rax, rcx",
-        "mov r9, rdi",
-        "mov r10, rsi",
-        "mov rdi, rcx",
-        "mov rsi, rdx",
-        "mov rcx, r8",
-        "rep movsb",
-        "mov rdi, r9",
-        "mov rsi, r10",
-        "ret",
-    )
-}
-
-/// memmove(dst, src, n) -> dst (overlap-safe)
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn memmove(_dst: *mut u8, _src: *const u8, _n: usize) -> *mut u8 {
-    core::arch::naked_asm!(
-        "mov rax, rcx",
-        "mov r9, rdi",
-        "mov r10, rsi",
-        "mov rdi, rcx",
-        "mov rsi, rdx",
-        "mov rcx, r8",
-        "cmp rdi, rsi",
-        "jbe 2f",
-        // Destination above source: copy backwards.
-        "lea rsi, [rsi + rcx - 1]",
-        "lea rdi, [rdi + rcx - 1]",
-        "std",
-        "rep movsb",
-        "cld",
-        "jmp 3f",
-        "2:",
-        "rep movsb",
-        "3:",
-        "mov rdi, r9",
-        "mov rsi, r10",
-        "ret",
-    )
-}
-
-/// memset(dst, value, n) -> dst
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn memset(_dst: *mut u8, _value: i32, _n: usize) -> *mut u8 {
-    core::arch::naked_asm!(
-        "mov r9, rdi",
-        "mov r10, rcx",
-        "mov rdi, rcx",
-        "mov eax, edx",
-        "mov rcx, r8",
-        "rep stosb",
-        "mov rdi, r9",
-        "mov rax, r10",
-        "ret",
-    )
-}
-
-/// __chkstk: the stack probe compilers call before allocating more than a
-/// page of stack (rax = bytes). Touches each page from the caller's stack
-/// pointer down, so guard pages grow the stack in order; changes no
-/// register (the caller then subtracts rax from rsp). Exported by ntdll,
-/// as on Windows.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn __chkstk() {
-    core::arch::naked_asm!(
-        "push rcx",
-        "push rax",
-        "lea rcx, [rsp + 24]", // the caller's rsp (after our return)
-        "cmp rax, 0x1000",
-        "jb 2f",
-        "1:",
-        "sub rcx, 0x1000",
-        "test byte ptr [rcx], 0",
-        "sub rax, 0x1000",
-        "cmp rax, 0x1000",
-        "ja 1b",
-        "2:",
-        "sub rcx, rax",
-        "test byte ptr [rcx], 0",
-        "pop rax",
-        "pop rcx",
-        "ret",
-    )
 }
 
 /// strlen (exported by ntdll, as on Windows; gala's DLLs import it).
@@ -2620,16 +2469,7 @@ pub unsafe extern "system" fn LdrGetDllDirectory(dir: *mut UnicodeString) -> u32
 /// MaximumLength bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn LdrGetDllFullName(module: usize, name: *mut UnicodeString) -> u32 {
-    let base = if module == 0 {
-        // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
-        unsafe {
-            let peb: usize;
-            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-            rd64(peb + 0x10) as usize
-        }
-    } else {
-        module
-    };
+    let base = if module == 0 { image_base() } else { module };
     with_loader_lock(|| {
         let found = with_modules(|m| {
             m.iter().find(|m| m.base == base && base != 0).map(|m| (m.path, m.path_len))

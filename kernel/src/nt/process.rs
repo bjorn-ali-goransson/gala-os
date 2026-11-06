@@ -518,10 +518,14 @@ fn number_variable<'a>(buf: &'a mut [u8; 24], name: &'a str, value: u32) -> &'a 
 
 /// The initial environment: the system's variables and the profile of
 /// the user `gala` (directories made by `file::init`), as a Windows logon
-/// sets them.
+/// sets them (a 64-bit process's; a 32-bit one's is adjusted:
+/// `wow64::environment`).
 const ENVIRONMENT: &[&str] = &[
     "ALLUSERSPROFILE=C:\\ProgramData",
     "APPDATA=C:\\Users\\gala\\AppData\\Roaming",
+    "CommonProgramFiles=C:\\Program Files\\Common Files",
+    "CommonProgramFiles(x86)=C:\\Program Files (x86)\\Common Files",
+    "CommonProgramW6432=C:\\Program Files\\Common Files",
     "ComSpec=C:\\Windows\\System32\\cmd.exe",
     "COMPUTERNAME=GALA",
     "HOMEDRIVE=C:",
@@ -533,6 +537,8 @@ const ENVIRONMENT: &[&str] = &[
     "PROCESSOR_ARCHITECTURE=AMD64",
     "ProgramData=C:\\ProgramData",
     "ProgramFiles=C:\\Program Files",
+    "ProgramFiles(x86)=C:\\Program Files (x86)",
+    "ProgramW6432=C:\\Program Files",
     "PUBLIC=C:\\Users\\Public",
     "SystemDrive=C:",
     "SystemRoot=C:\\Windows",
@@ -714,10 +720,10 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     if info.has_imports && !info.x86 && super::ntdll::get().is_none() {
         return Err(LoadError::ImportsNotSupported);
     }
-    // A 32-bit program runs through WOW64 (nt::wow64); its imports need a
-    // 32-bit ntdll, which gala does not have yet (ROADMAP WOW stage 2).
-    if info.x86 && info.has_imports {
-        warn!("wow64: {name} imports DLLs: 32-bit programs with imports need a 32-bit ntdll");
+    // A 32-bit program runs through WOW64 (nt::wow64); its imports are
+    // bound by the 32-bit ntdll.
+    if info.x86 && info.has_imports && super::ntdll::get32().is_none() {
+        warn!("wow64: {name} imports DLLs, and there is no {} to bind them", super::ntdll::PATH32);
         return Err(LoadError::ImportsNotSupported);
     }
     let mut space = UserSpace::new()?;
@@ -800,6 +806,10 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     for (slot, var) in environment_default.iter_mut().zip(ENVIRONMENT) {
         *slot = if *var == "NUMBER_OF_PROCESSORS=" { cpus_var } else { var };
     }
+    // As WOW64 sets it for the process's bitness (nt::wow64).
+    let adjusted = super::wow64::environment(environment.unwrap_or(&environment_default), info.x86)
+        .map_err(|_| LoadError::OutOfMemory)?;
+    let environment = adjusted.vars().map_err(|_| LoadError::OutOfMemory)?;
     let p = layout::PARAMS_ADDRESS;
     let block = super::params::build(
         &super::params::ProcessParameters {
@@ -809,7 +819,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             current_directory_handle: cwd_handle,
             dll_path: "",
             std_handles,
-            environment: environment.unwrap_or(&environment_default),
+            environment: &environment,
             runtime_data,
         },
         p,
@@ -863,7 +873,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             current_directory_handle: cwd_handle,
             dll_path: "",
             std_handles,
-            environment: environment.unwrap_or(&environment_default),
+            environment: &environment,
             runtime_data,
         };
         // The block's size first (it does not depend on where it goes).
@@ -928,7 +938,8 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
 
     // A WOW64 process: gala's wow64.dll, then the main thread, which starts
     // there and enters 32-bit code at the entry point (stdcall, the PEB32
-    // as its argument above a null return address).
+    // as its argument above a null return address), through the 32-bit
+    // ntdll's LdrInitializeThunk when there is one.
     if let (Some(state), Some(stack64)) = (process.wow64.as_ref(), stack64) {
         let entry = (base + u64::from(info.entry_rva)) as u32;
         let peb32 = state.peb32 as u32;
@@ -945,9 +956,10 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
                     stack: (stack_top as u32, stack_limit as u32, stack_bottom as u32),
                     stack64: stack64.0,
                 };
-                thread::create_wow64(&process, start, stack64, suspended)
+                let start = super::wow64::through_ntdll32(&process, &start)?.unwrap_or(start);
+                thread::create_wow64(&process, start, stack64, suspended).map(|t| (t, start.eip))
             });
-        let main = match started {
+        let (main, eip) = match started {
             Ok(t) => t,
             Err(status) => {
                 PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, &process));
@@ -958,7 +970,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
                 });
             }
         };
-        announce_start(&process, u64::from(entry), command_line);
+        announce_start(&process, u64::from(eip), command_line);
         return Ok((process, main));
     }
 
@@ -1351,7 +1363,11 @@ fn exception_record(status: NtStatus, address: u64, info: &[u64]) -> [u8; RECORD
 /// MACHINE_FRAME: rip, cs, rflags, rsp, ss of the interrupted code.
 fn machine_frame(rip: u64, frame: &TrapFrame) -> [u8; 40] {
     let mut m = [0u8; 40];
-    let (cs, ss) = (super::context::USER_CS.into(), super::context::USER_DS.into());
+    let (cs, ss) = if frame.cs == u64::from(super::layout::wow64::CS32) {
+        (frame.cs, u64::from(super::layout::wow64::DS32))
+    } else {
+        (super::context::USER_CS.into(), super::context::USER_DS.into())
+    };
     let values = [rip, cs, frame.rflags, frame.rsp, ss];
     for (chunk, v) in m.chunks_exact_mut(8).zip(values) {
         chunk.copy_from_slice(&v.to_le_bytes());
@@ -1362,6 +1378,12 @@ fn machine_frame(rip: u64, frame: &TrapFrame) -> [u8; 40] {
 /// Hands a user-mode exception to ntdll!KiUserExceptionDispatcher, if the
 /// process has one: CONTEXT and EXCEPTION_RECORD go on the user stack and
 /// the thread resumes in the dispatcher. False if it cannot be delivered.
+///
+/// A WOW64 thread's exception in 32-bit code (CS 0x23) goes to wow64.dll's
+/// dispatcher (the process's) in 64-bit code, on the thread's 64-bit
+/// stack, with the CONTEXT saying CS 0x23; wow64.dll converts it and hands
+/// it to the 32-bit ntdll's dispatcher on the 32-bit stack. Without a
+/// 32-bit ntdll it is not delivered.
 fn deliver_to_user(
     process: &Process,
     frame: &mut TrapFrame,
@@ -1372,12 +1394,19 @@ fn deliver_to_user(
     if dispatcher == 0 {
         return false;
     }
-    // A WOW64 thread's exception in 32-bit code: no 32-bit dispatcher yet
-    // (ROADMAP WOW stage 3); it ends the process with its crash report.
-    // (The process's dispatcher is wow64.dll's, for its 64-bit code.)
-    if frame.cs == u64::from(super::layout::wow64::CS32) {
-        return false;
-    }
+    let x86 = frame.cs == u64::from(super::layout::wow64::CS32);
+    let stack = if x86 {
+        let teb = thread::current().and_then(|t| match &t.body {
+            ObjectBody::Thread(t) => Some(t.teb),
+            _ => None,
+        });
+        match teb.and_then(|teb| super::wow64::exception_stack(process, teb)) {
+            Some(top) => top,
+            None => return false,
+        }
+    } else {
+        frame.rsp
+    };
     // Breakpoints report the int3 itself (the trap left rip after it).
     let rip = if status == NtStatus::BREAKPOINT { frame.rip.wrapping_sub(1) } else { frame.rip };
     let info: &[u64] = match status {
@@ -1405,7 +1434,11 @@ fn deliver_to_user(
     };
     use super::context as c;
     let state = platform::xsave();
-    let context = c::to_bytes(&regs, Some(&state));
+    let mut context = c::to_bytes(&regs, Some(&state));
+    if x86 {
+        let flags = c::flags(&context);
+        c::mark_compat(&mut context, flags);
+    }
     let machine = machine_frame(rip, frame);
     // The frame without the XSTATE area if there is no room for it (a
     // stack overflow's last page: an AVX-512 area makes the frame 3.6 KiB).
@@ -1416,8 +1449,8 @@ fn deliver_to_user(
             let flags = c::flags(&context) | c::CONTEXT_XSTATE;
             c::set_flags(&mut context, flags);
         }
-        let at = (frame.rsp.wrapping_sub(size)) & !0x3f;
-        if at >= frame.rsp {
+        let at = (stack.wrapping_sub(size)) & !0x3f;
+        if at >= stack {
             return None;
         }
         if xlen != 0 {
@@ -1435,11 +1468,16 @@ fn deliver_to_user(
     let xlen = c::xstate_len();
     let pushed = push(xlen).or_else(|| if xlen == 0 { None } else { push(0) });
     let Some(new_rsp) = pushed else {
-        warn!("user exception: cannot push the dispatcher frame (rsp {:#x})", frame.rsp);
+        warn!("user exception: cannot push the dispatcher frame (rsp {stack:#x})");
         return false;
     };
     frame.rip = dispatcher;
     frame.rsp = new_rsp;
+    if x86 {
+        // wow64.dll's dispatcher is 64-bit code.
+        frame.cs = super::context::USER_CS.into();
+        frame.ss = super::context::USER_DS.into();
+    }
     true
 }
 

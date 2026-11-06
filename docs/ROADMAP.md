@@ -79,17 +79,17 @@ In order:
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW**: stage 3 (the 32-bit system DLLs in SysWOW64, starting with
-   the 32-bit ntdll's loader so PE32 programs with imports run): the
-   process model under PK's x86 installers and programs (Inno Setup's
-   x64 Setup runs natively; an x86 Inno installer needs stage 3-4).
+5. **WOW**: stage 3's rest (gala's kernel32 built for x86, so the
+   PENDING `wow64_k32_test` passes; then kernelbase, msvcrt, advapi32):
+   the process model under PK's x86 installers and programs (Inno
+   Setup's x64 Setup runs natively; an x86 Inno installer needs stage
+   3-4).
 6. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's leftovers (what is not charged yet), R8's Secure
    Boot.
 7. **PK**: winget's source index (step 2's rest); step 1's rest (an
-   upgrade's dependencies, UpgradeBehavior, winget's settings); Inno
-   Setup's shortcuts (IShellLinkW) and an x86 Inno installer as WOW
-   stages 3-4 land.
+   upgrade's dependencies, UpgradeBehavior, winget's settings); an x86
+   Inno installer as WOW stages 3-4 land.
 8. **BR** stage 1's rest (the profile's hotspots).
 9. **AG**: the remaining stubs (filler).
 10. **SSH**: the client against the host's sshd, agent forwarding;
@@ -155,7 +155,7 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; kernel32 next (`wow64_k32_test`, PENDING); ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -197,7 +197,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
-| PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed, run, uninstalled; no shortcuts yet), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
+| PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -1274,7 +1274,15 @@ shutdown-block reasons, GetLastActivePopup, ShowOwnedPopups and a
 fixed GetClassInfoW, msctf.dll's input scopes (`user32_test`), gdi32's
 EnumFontsW and older calls (`gdi32_test`), shell32's Start menu
 folders (`shell32_test`), kernel32's INI functions
-(`kernel32_misc_test`). FileZilla Server's GUI and
+(`kernel32_misc_test`); what Inno Setup's shortcuts and IDE need:
+shell32's shell links and SHAddToRecentDocs (`shell32_test`),
+comdlg32's GetFileTitleW and dialog parameter checks
+(`comdlg32_test`), user32's GetMenuBarInfo, GetMenuItemRect,
+SendDlgItemMessageW, RegisterClassExA and imm32's input contexts
+(`user32_test`), gdi32's ANSI text functions (`gdi32_test`),
+kernel32's FileTimeToDosDateTime, FindStringOrdinal (`kernel32_misc_test`)
+and EnumResourceLanguagesW (`shell32_test`), bcrypt's ECDSA key export
+(`bcrypt_test`). FileZilla Server's GUI and
 StackBuilder find every msvcrt, oleaut32 and ole32 import; version and
 msvcrt have nothing left the surveyed programs import. The survey
 (`tools/import_survey.py` over user/bin, the JDK, PostgreSQL, FileZilla
@@ -1550,26 +1558,54 @@ wow64.dll converts 32-bit system calls in user mode).
   kernel stopped in 32-bit code: `Parked::compat`; the CPU area for one
   in wow64.dll; a thread created suspended reports its start),
   NtContinue; the 32-bit stack grows through its guard page.
+- Stage 3 so far: **the 32-bit ntdll** (`wow64_import_test`): gala's
+  ntdll built for i686 (`user/testntdll`, its x64 and x86 parts in
+  `x64.rs`/`x86.rs`), shipped as `C:\Windows\SysWOW64\ntdll.dll` and
+  exported as `testntdll32.dll`; the kernel starts a 32-bit process at
+  its LdrInitializeThunk, whose loader binds PE32 imports (from the
+  executable's directory, then SysWOW64), with relocation (by the
+  kernel's image sections), TLS and TLS callbacks, DllMain, PEB32.Ldr's
+  lists, the process heap, and the 32-bit system call stubs through
+  wow64.dll's transition. **Exceptions and APCs in 32-bit code**
+  (`wow64_seh_test`, `wow64_seh_crash`): the kernel hands an exception
+  in 32-bit code to wow64.dll's dispatcher on the 64-bit stack, which
+  passes it to the 32-bit ntdll's KiUserExceptionDispatcher (the x86
+  SEH chain at fs:[0], RtlUnwind, RtlRaiseException, vectored
+  handlers); user APCs with 32-bit routines (NtQueueApcThread, the APC
+  routines of I/O and timers, NtContinue's TestAlert) run through its
+  KiUserApcDispatcher. **File system redirection and the 32-bit
+  environment** (`wow64_fs_test`): System32 to SysWOW64 in wow64.dll's
+  file thunks, Sysnative, the documented exemptions, per-thread
+  RtlWow64EnableFsRedirection(Ex); PROCESSOR_ARCHITECTURE=x86,
+  PROCESSOR_ARCHITEW6432, ProgramFiles and CommonProgramFiles the (x86)
+  directories, ProgramW6432, `C:\Program Files (x86)`.
 
 **Next**:
-1. Stage 3, the 32-bit system DLLs in `C:\Windows\SysWOW64`: gala's
-   ntdll (loader for PE32 DLLs, x86 SEH, the dispatchers), kernel32,
-   kernelbase, msvcrt, advapi32 rebuilt for i686-pc-windows-msvc
-   (arch-specific code behind `cfg(target_arch)`, as ntrt), shipped by
-   xtask and exported to user/bin; exceptions and APCs of 32-bit code
-   through wow64.dll's dispatchers (the user-return path learning the
-   target CS; then NtQueueApcThread and APC routines of I/O and timers,
-   refused now, and NtContinue's TestAlert); ThreadWow64Context for
-   64-bit debuggers; file system redirection
-   (System32 to SysWOW64, Sysnative, the exemptions,
-   Wow64DisableWow64FsRedirection); the 32-bit environment
-   (PROCESSOR_ARCHITECTURE=x86, PROCESSOR_ARCHITEW6432, Program Files
-   (x86)), GetSystemInfo/GetNativeSystemInfo in a 32-bit process. Test:
-   kernel32_test and a C program (clang, i686-pc-windows-msvc) built
-   for x86. Stage 2's leftovers, each in the ledger: the job
-   information classes, AFD's IOCTLs (sockets), gala's window and
-   console services (with user32, stage 4), CONTEXT_FLOATING_POINT on
-   NtSetContextThread.
+1. Stage 3's rest, the 32-bit system DLLs: **kernel32 for x86**, so the
+   PENDING `wow64_k32_test` (a plain 32-bit program: GetStdHandle,
+   WriteFile, CreateFileW, CreateThread, GetSystemInfo,
+   GetNativeSystemInfo, GetSystemDirectoryW, IsWow64Process,
+   Wow64DisableWow64FsRedirection, ExitProcess) passes once
+   `x86/kernel32.dll` joins its modules and USER_DLLS_X86: the
+   `raw-dylib` blocks with `import_name_type = "undecorated"` on x86;
+   the TEB, PEB, process parameters, CONTEXT (CreateThread, the context
+   functions) and PE header offsets behind named constants per
+   architecture (as testntdll's `x64.rs`/`x86.rs`; about 90 places in
+   lib.rs, process.rs, mapping.rs, runtime.rs, sync.rs, heap.rs,
+   resource.rs, context.rs, procinfo.rs, sysmem.rs, toolhelp.rs,
+   actctx.rs); `core::arch::x86` for cpuid; GetSystemInfo's 32-bit
+   answers (PROCESSOR_ARCHITECTURE_INTEL, the 2/4 GiB range),
+   GetSystemDirectory's SysWOW64, Wow64Disable/Revert/
+   EnableWow64FsRedirection on the 32-bit ntdll's
+   RtlWow64EnableFsRedirection(Ex); then kernel32_test built for x86
+   and a C program (clang, i686-pc-windows-msvc). Then kernelbase,
+   msvcrt, advapi32. Also: the redirector for GalaCreateProcess's image
+   path and names relative to a RootDirectory handle (it rewrites full
+   NT paths only); nested exceptions and collided unwinds in the x86
+   dispatcher; ThreadWow64Context for 64-bit debuggers. Stage 2's
+   leftovers, each in the ledger: the job information classes, AFD's
+   IOCTLs (sockets), gala's window and console services (with user32,
+   stage 4), CONTEXT_FLOATING_POINT on NtSetContextThread.
 2. Stage 4: the registry's 32-bit view in the kernel (Wow6432Node,
    KEY_WOW64_32KEY/64KEY, the shared keys); user32, gdi32, comctl32,
    uxtheme, shell32, ole32 and what Delphi's VCL imports, for i686;
@@ -1649,8 +1685,13 @@ from the command line first (CLI parity; the server profile too).
   `gala install` with winget's switches (its loader unpacks Setup to
   %TEMP%, Setup passes its x86 check since WOW stage 1 and runs its
   second stage, which installs the files, the uninstaller, the `.url`
-  shortcut file and the `Inno Setup 7_is1` entry), its ISCC.exe runs,
-  it is listed and uninstalled through its QuietUninstallString. What
+  shortcut file, the six `[Icons]` shell links in the Start menu group
+  (CLSID_ShellLink, `.lnk` files as [MS-SHLLINK] lays them out:
+  shell32_test) and the `Inno Setup 7_is1` entry, and runs its `[Run]`
+  entry `ISIDE.exe /assoc`, the IDE writing the `.iss` association under
+  `HKCU\Software\Classes`), its ISCC.exe runs, it is listed and
+  uninstalled through its QuietUninstallString (the shortcuts and, by
+  `ISIDE.exe /unassoc`, the association removed). What
   it needed of gala is built and tested (win32_misc_test,
   kernel32_locale_test, gui_test, comctl32_test, user32_test,
   gdi32_test, shell32_test, kernel32_misc_test, oleaut32_test,
@@ -1670,7 +1711,16 @@ from the command line first (CLI parity; the server profile too).
   FOLDERID_UserProgramFiles (created on request); kernel32's private
   profile (INI) functions; oleaut32's variant arithmetic and logic,
   VarR4FromStr, VarBstrFromDate; ole32's server-process count; a new
-  msctf.dll (input scopes).
+  msctf.dll (input scopes); for the shortcuts, shell32's shell links
+  (IShellLinkW, IPersistFile, IShellLinkDataList, IPropertyStore) and
+  SHAddToRecentDocs; for the IDE to load (comdlg32_test, user32_test,
+  gdi32_test, kernel32_misc_test, bcrypt_test): comdlg32's
+  GetFileTitleW and the dialogs' parameter checks, user32's
+  SendDlgItemMessageW, GetMenuBarInfo, GetMenuItemRect,
+  RegisterClassExA, kernel32's FileTimeToDosDateTime, FindStringOrdinal,
+  EnumResourceLanguagesW, gdi32's ANSI text functions, imm32's
+  input-context calls, bcrypt's ECDSA key export (the IDE's signature
+  check of ISCmplr.dll).
 - Stage 4 groundwork: the MSIX/AppX reader (packages and bundles,
   AppxManifest.xml, block-map hashes per 64 KiB block, package full and
   family names); AppxSignature.p7x presence only.
@@ -1689,21 +1739,20 @@ from the command line first (CLI parity; the server profile too).
    real-world install against GitHub when a scenario can reach it
    (`sigoden.AIChat`, item AI); real symbolic links for commands; the
    logon environment from `HKCU\Environment`.
-3. Stage 3's rest: what Inno Setup's own install still lacks, which
-   Setup reports and skips (the ledger of `pk_install_inno`): its six
-   `[Icons]` shortcuts (CLSID_ShellLink's IShellLinkW and IPersistFile
-   writing `.lnk` files, [MS-SHLLINK]; REGDB_E_CLASSNOTREG today) and
-   its `[Run]` entry `ISIDE.exe /assoc` (the IDE, which does not load:
-   comdlg32's GetFileTitleW, ReplaceTextW, ChooseColorW, PrintDlgW,
-   shell32's SHAddToRecentDocs, user32's SendDlgItemMessageW,
-   GetMenuBarInfo, kernel32's FileTimeToDosDateTime, FindStringOrdinal
-   are missing exports); an x86 Inno installer (WOW stage 3); its
+3. Stage 3's rest: what Inno Setup's own install still reports and
+   skips (the ledger of `pk_install_inno`): unpinning its shortcuts at
+   uninstall (SHCreateItemFromParsingName), SHPathPrepareForWriteW, the
+   taskbar list (CLSID_TaskbarList), the Restart Manager (rstrtmgr.dll),
+   HTML Help (hhctrl.ocx); its compiler compiling a script (ISCC.exe and
+   the IDE's ISCmplr.dll write the Setup's icons and version with
+   BeginUpdateResourceW/UpdateResourceW/EndUpdateResourceW, stubs today:
+   rewriting a PE's resource section); an x86 Inno installer (WOW stage 3); its
    machine install as an administrator (`/ALLUSERS`); Scope switches and
    elevation for machine-wide installers (a non-portable machine
    installer run by a standard user: winget leaves elevation to the
    installer, gala's UAC has no prompt yet); the manifest's success codes; a tracking catalog of
    gala's own instead of tagging vendors' ARP keys; the needs of other
-   vendors' installers (IShellLink shortcuts, file associations, UAC
+   vendors' installers (IShellLinkA shortcuts, file associations, UAC
    manifests as the admin token) as the ledger names them.
 4. Stage 4, MSIX sideloading for packaged Win32 programs: signature
    validation (PKCS#7 over the block map against trusted certificates),

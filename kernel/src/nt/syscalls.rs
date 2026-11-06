@@ -3906,10 +3906,12 @@ fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     for (i, r) in regs.iter_mut().enumerate() {
         *r = tri!(call.read_u64(context + 0x78 + 8 * i as u64));
     }
-    // A 64-bit ntdll's report (32-bit code's exceptions come with WOW64's
-    // 32-bit ntdll: ROADMAP WOW stage 3).
-    let note =
-        super::crashreport::Note::new(&call.process, NtStatus(code), rip, access, regs, false);
+    // From a 32-bit ntdll, wow64.dll passes the x86 registers in a 64-bit
+    // CONTEXT that says CS 0x23 (the report shows them as 32-bit).
+    let mut cs = [0u8; 2];
+    tri!(call.process.read(context + 0x38, &mut cs).map_err(|_| NtStatus::ACCESS_VIOLATION));
+    let x86 = u32::from(u16::from_le_bytes(cs)) == super::layout::wow64::CS32;
+    let note = super::crashreport::Note::new(&call.process, NtStatus(code), rip, access, regs, x86);
     *call.process.unhandled_exception.lock() = Some(note);
     NtStatus::SUCCESS
 }

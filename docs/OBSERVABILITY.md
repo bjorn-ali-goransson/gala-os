@@ -60,11 +60,16 @@ port. Lines that tools and agents rely on:
   docs/PERF.md) at the end of a run.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`
   (with `, 32-bit x86 (WOW64)` for a 32-bit program; `wow64:` lines say
-  which wow64.dll is used, or why a 32-bit program cannot start) and
-  the exit line; a service or information class gala's wow64.dll cannot
-  convert yet is in the ledger as `wow64.dll!service 0x....` (with the
-  case: `wow64.dll!service 0x0045 (32-bit APC)`) or
-  `wow64.dll!<service>(class)`; `wow64: ... cannot free an exited
+  which wow64.dll is used, or why a 32-bit program cannot start, e.g.
+  `wow64: x.exe imports DLLs, and there is no \Windows\SysWOW64\ntdll.dll
+  to bind them`; `ntdll: using \Windows\SysWOW64\ntdll.dll` names the
+  32-bit ntdll) and the exit line; a service or information class gala's
+  wow64.dll cannot convert yet is in the ledger as `wow64.dll!service
+  0x....` (with the case: `wow64.dll!service 0x0007 (AFD IOCTL)`) or
+  `wow64.dll!<service>(class)`, an exception or APC it cannot hand to
+  32-bit code as `wow64.dll!exception (32-bit stack full)` or
+  `wow64.dll!APC (no 32-bit ntdll|32-bit stack full|64-bit routine)`;
+  `wow64: ... cannot free an exited
   thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
   personality nt)`); a thread whose personality has no dispatcher logs
@@ -389,7 +394,11 @@ filter that ends the process with its own status (Chromium's Crashpad:
 continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
 and `crash_filtered`. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
-eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`.
+eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
+(no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`
+(the 32-bit ntdll's dispatcher found no handler: wow64.dll passes its
+record and the 32-bit registers on through GalaUnhandledException, and
+the ledger has `ntdll.dll!unhandled exception` as for 64-bit code).
 An exception in wow64.dll's own 64-bit code other than a fault on a
 caller's invalid 32-bit pointer (which fails that call with
 STATUS_ACCESS_VIOLATION) is a bug there: its dispatcher reports it

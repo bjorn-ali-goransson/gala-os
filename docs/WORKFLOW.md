@@ -723,7 +723,8 @@ kernel32 through `raw-dylib`), run under gala and under Windows
 ### Tests in C, C++ and C#
 
 - **DLL tests in C** (`user/<dll>_test/main.c`, mingw; oleaut32_test,
-  shlwapi_test, ole32_test, shell32_test, dbghelp_test, msvcrt_test):
+  shlwapi_test, ole32_test, shell32_test, comdlg32_test, dbghelp_test,
+  msvcrt_test):
   `build.sh` rebuilds the checked-in `user/bin/<name>.exe` (xtask does
   not; run it after editing main.c and commit the binary).
   `user/msvcrt_test` builds against msvcrt's own stdio, and its main.c
@@ -759,9 +760,30 @@ numbers, 0x7f.., fail there).
   starts a 32-bit child too). Without it the process is refused (`wow64:
   ... there is no ...wow64.dll`).
 - gala-um cannot run 32-bit code: such scenarios go in NOT_IN_UM.
-- Until stage 3 (the 32-bit ntdll) a 32-bit program must import nothing:
-  the kernel refuses one with imports (`wow64: <name> imports DLLs`).
-  Check with `llvm-readobj --coff-imports`.
+- A 32-bit program may import from gala's 32-bit ntdll and from 32-bit
+  DLLs of its own (`wow64_import_test`): its scenario then ships
+  `("<scenario>", "x86/ntdll.dll", "Windows/SysWOW64")` too (the `x86/`
+  prefix names a USER_DLLS_X86 DLL: built for i686, under `boot/x86`
+  on the ISO). Without it the kernel refuses a program with imports
+  (`wow64: <name> imports DLLs, and there is no ...`); with it, every
+  32-bit program starts through it (its exceptions and APCs need it).
+  No 32-bit kernel32 yet. Check imports with `llvm-readobj
+  --coff-imports`.
+- Imports on x86 are `#[link(name = "...", kind = "raw-dylib",
+  import_name_type = "undecorated")]` (without it a stdcall import is
+  named `_Name@N`, which no DLL exports). Keep data imports (`static`)
+  in an `extern "C"` block: one in an `extern "system"` raw-dylib block
+  crashes rustc 1.97 ("Ty::fn_sig() called on non-fn type"). The
+  memory routines the compiler calls (`memcpy`) do not come from a
+  raw-dylib import: take ntrt's x86 runtime as a dependency (`use ntrt as
+  _;`) even when the program calls only kernel32.
+- A 32-bit DLL (USER_DLLS_X86, exported as `test<name>32.dll` or its
+  own `<name>32.dll`): its exports keep their undecorated names
+  (`#[unsafe(no_mangle)] extern "system"`, naked functions too); symbols
+  of `global_asm!` need `/EXPORT:` in its build.rs. testntdll is one
+  crate for both ntdlls: what differs by architecture goes in its
+  `x64.rs` and `x86.rs` (offsets, stubs, assembly), x86 SEH in
+  `seh_x86.rs`; add `-p <name>` to CI's i686 clippy line.
 - A service a 32-bit program calls needs its conversion in wow64.dll
   (`user/wow64`: a row of argument kinds in `generic::TABLE`, or an
   information-class case in `info.rs`); one without fails with
@@ -1484,7 +1506,12 @@ about a minute under TCG. Read, in order:
   a Delphi exception naming a Windows error code (Setup's "System
   Error. Code: 1410") is the last error of the call that failed, and
   `XTASK_EVENTS=window` shows the windows the VCL made up to it (the
-  next one is the control whose creation failed).
+  next one is the control whose creation failed). A program Setup runs
+  (`[Run]`: `ISIDE.exe /assoc`) that fails says why in a message box,
+  which gala's user32 writes to the program's standard error: nowhere,
+  for Setup's child. Setup logs only the exit code; run the program
+  again from the test, with its output captured, as `inno_test` does
+  when the `.iss` association is missing.
 - **A vendor installer exits with an odd code and no ledger line**:
   boot with `XTASK_EVENTS=syscall,image` and list the installer's system
   calls (its pid from the `image` event; skip the memory calls and the
@@ -2607,10 +2634,18 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   always returns with CS 0x33: anything that redirects a thread
   interrupted in 32-bit code (an exception, an APC) must enter 64-bit
   code (wow64.dll's dispatchers), never resume at a 64-bit address with
-  the frame's CS 0x23.
+  the frame's CS 0x23: a trap frame redirected there gets CS 0x33 and
+  SS 0x2b too (`process::deliver_to_user`), on the thread's 64-bit stack,
+  not the 32-bit one.
 
 ### gala's DLLs
 
+- **Objects told apart by a leading magic must be `#[repr(C)]`**:
+  Rust reorders a plain struct's fields, so "every key object starts
+  with its magic" is false without it. bcrypt's RSA and ECDSA key
+  structs lacked it: an ECDSA handle read as an RSA key matched, and
+  BCryptExportKey of it answered for RSA (seen once ECDSA export was
+  added).
 - **`cond.then_some(f(x))` evaluates `f(x)` even when `cond` is
   false**: with `f` dereferencing a pointer `cond` checks for null,
   the compiler takes the dereference as proof the pointer is never
@@ -2825,7 +2860,7 @@ ARCHITECTURE "Waits".
 | gala-um's platform | `kernel/src/hosted/`, `um/` |
 | Baked fonts, icons, wallpapers | `kernel/assets/`, `fonts/selawik/` |
 | Test runtime for user programs (x64, and x86 for 32-bit ones) | `user/ntrt/` (`x64.rs`, `x86.rs`) |
-| WOW64: the kernel's part, gala's wow64.dll, the 32-bit tests | `kernel/src/nt/wow64.rs`, `user/wow64/`, `user/wow64_test/`, `user/wow64_thread_test/` |
+| WOW64: the kernel's part, gala's wow64.dll, the 32-bit ntdll, the 32-bit tests | `kernel/src/nt/wow64.rs`, `user/wow64/`, `user/testntdll/` (`x86.rs`, `seh_x86.rs`), `user/wow64_*_test/`, `user/testdll32/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Linux test programs, their binaries and transcripts | `user/lx/`, `user/lx/bin/` |
 | `gala install` (winget packages): library, commands, downloads, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/gala/src/fetch.rs`, `user/pk_install_test/` |

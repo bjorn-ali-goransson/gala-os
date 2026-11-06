@@ -1,0 +1,3 @@
+# The hosts file of wow64_fs_test's scenario (only in System32\drivers\etc:
+# a 32-bit program reaches it there, an exemption of the redirector).
+127.0.0.1 localhost

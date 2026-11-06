@@ -131,7 +131,12 @@ pub mod wow64 {
         /// The 64-bit stack pointer wow64.dll's transition from 32-bit
         /// code switches to (u64).
         pub const STACK64: u64 = 0x2d0;
-        pub const SIZE: u64 = 0x2d8;
+        /// The 32-bit ntdll's KiUserExceptionDispatcher and
+        /// KiUserApcDispatcher (u32 each; 0 without a 32-bit ntdll), where
+        /// wow64.dll hands 32-bit code's exceptions and APCs.
+        pub const DISPATCHER32: u64 = 0x2d8;
+        pub const APC_DISPATCHER32: u64 = 0x2dc;
+        pub const SIZE: u64 = 0x2e0;
     }
 
     /// WOW64_CONTEXT offsets (winnt.h's x86 CONTEXT).

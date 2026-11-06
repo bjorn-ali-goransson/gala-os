@@ -25,15 +25,21 @@
 //! pointer fails the call with STATUS_ACCESS_VIOLATION (the kernel hands
 //! faults in wow64.dll's 64-bit code to `GalaWow64Exception`).
 //!
+//! Exceptions in 32-bit code and user APCs come here too (the kernel
+//! delivers them in 64-bit code, `GalaWow64Exception`, `GalaWow64Apc`) and
+//! go on to the 32-bit ntdll's dispatchers (`dispatch`).
+//!
 //! No imports: system calls are made directly (`gala_wow64_syscall`).
 
 #![no_std]
 
 use core::arch::global_asm;
 
+mod dispatch;
 mod generic;
 mod info;
 mod mem;
+mod redirect;
 mod thread;
 
 // The CPU area (the kernel's `layout::wow64::cpu` and `context32`).
@@ -67,6 +73,7 @@ global_asm!(
     // Enters 32-bit code with the context in the CPU area at rcx. DS, ES
     // and FS (the TEB32) are the kernel's to set (sched::set_teb32); GS
     // stays: its base is the 64-bit TEB, which the transition reads.
+    ".globl gala_wow64_enter32",
     "gala_wow64_enter32:",
     "mov eax, [rcx + {ss}]",
     "push rax",
@@ -198,6 +205,33 @@ global_asm!(
     "sub rsp, 0x20",
     "call gala_wow64_exception",
     "ud2",
+    // GalaWow64Apc: the kernel runs a user APC here, as for ntdll's
+    // KiUserApcDispatcher: rsp -> the CONTEXT to return to, its P1Home..
+    // P4Home NormalContext, SystemArgument1, SystemArgument2 and
+    // NormalRoutine (`dispatch::apc`).
+    ".globl GalaWow64Apc",
+    "GalaWow64Apc:",
+    "mov rcx, rsp",
+    "and rsp, -16",
+    "sub rsp, 0x20",
+    "call gala_wow64_apc",
+    "ud2",
+    // gala_wow64_test_alert: NtDelayExecution(TRUE, &0), so that the
+    // kernel delivers the next user APC (`dispatch::apc` tells this call
+    // by its return address).
+    ".globl gala_wow64_test_alert",
+    "gala_wow64_test_alert:",
+    "sub rsp, 0x38",
+    "mov qword ptr [rsp + 0x30], 0",
+    "mov r10d, 1",
+    "lea rdx, [rsp + 0x30]",
+    "mov eax, {delay}",
+    "syscall",
+    ".globl gala_wow64_test_alert_return",
+    "gala_wow64_test_alert_return:",
+    "add rsp, 0x38",
+    "ret",
+    delay = const NT_DELAY_EXECUTION,
     slot = const TEB64_CPU_SLOT,
     stack64 = const CPU_STACK64,
     edi = const CTX_EDI,
@@ -234,6 +268,7 @@ const STATUS_NOT_SUPPORTED: NtStatus = 0xc000_00bb;
 
 const NT_TERMINATE_PROCESS: u32 = 0x2c;
 const NT_CONTINUE: u32 = 0x43;
+const NT_DELAY_EXECUTION: u32 = 0x34;
 const GALA_RECORD_MISSING: u32 = 0x7f00;
 const GALA_UNHANDLED_EXCEPTION: u32 = 0x7f5c;
 
@@ -305,7 +340,13 @@ fn argument_count(number: u32) -> Option<usize> {
     if let Some(kinds) = generic::kinds(number) {
         return Some(kinds.len());
     }
-    info::SERVICES.iter().chain(thread::SERVICES).find(|(n, _)| *n == number).map(|&(_, c)| c)
+    info::SERVICES
+        .iter()
+        .chain(thread::SERVICES)
+        .chain(dispatch::SERVICES)
+        .chain(redirect::SERVICES)
+        .find(|(n, _)| *n == number)
+        .map(|&(_, c)| c)
 }
 
 /// The 32-bit system call `number` with its arguments at `args`, from the
@@ -329,6 +370,12 @@ extern "C" fn gala_wow64_service(number: u32, args: u32, cpu: u64) -> u32 {
     if info::SERVICES.iter().any(|(n, _)| *n == number) {
         return info::call(number, &a);
     }
+    if dispatch::SERVICES.iter().any(|(n, _)| *n == number) {
+        return dispatch::call(number, &a);
+    }
+    if redirect::SERVICES.iter().any(|(n, _)| *n == number) {
+        return redirect::call(number, &a);
+    }
     thread::call(number, &a, cpu)
 }
 
@@ -338,18 +385,28 @@ fn hex4(out: &mut [u8], value: u32) {
     }
 }
 
-/// An exception in wow64.dll's own 64-bit code (`context`: the x64
-/// CONTEXT, `record`: the EXCEPTION_RECORD). A fault on a caller's memory
-/// in `gala_wow64_copy` resumes at its failure exit; anything else is a
-/// bug here: reported (GalaUnhandledException: the crash report shows
-/// wow64.dll's registers) and the process ends.
+/// An exception (`context`: the x64 CONTEXT, `record`: the
+/// EXCEPTION_RECORD). In 32-bit code (the CONTEXT says CS 0x23): to the
+/// 32-bit ntdll (`dispatch::exception32`). In wow64.dll's own 64-bit code:
+/// a fault on a caller's memory in `gala_wow64_copy` resumes at its
+/// failure exit; anything else is a bug here: reported
+/// (GalaUnhandledException: the crash report shows wow64.dll's registers)
+/// and the process ends.
 #[unsafe(no_mangle)]
 extern "C" fn gala_wow64_exception(context: u64, record: u64) -> ! {
     const RIP: u64 = 0xf8;
+    const SEG_CS: u64 = 0x38;
     // SAFETY: the kernel put both on this stack for this call.
-    let (rip, code) = unsafe {
-        (core::ptr::read((context + RIP) as *const u64), core::ptr::read(record as *const u32))
+    let (rip, code, cs) = unsafe {
+        (
+            core::ptr::read((context + RIP) as *const u64),
+            core::ptr::read(record as *const u32),
+            core::ptr::read((context + SEG_CS) as *const u16),
+        )
     };
+    if u32::from(cs) == thread::CS32 {
+        dispatch::exception32(context, record);
+    }
     if rip == gala_wow64_copy_access as *const () as u64 {
         // SAFETY: as above; the CONTEXT is this thread's to change.
         unsafe {
@@ -476,6 +533,12 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
 pub unsafe extern "C" fn bcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     // SAFETY: forwarded.
     unsafe { memcmp(a, b, n) }
+}
+
+/// A user APC (`context`: the x64 CONTEXT on this stack; `dispatch::apc`).
+#[unsafe(no_mangle)]
+extern "C" fn gala_wow64_apc(context: u64) -> ! {
+    dispatch::apc(context)
 }
 
 /// The DLL's entry point (never called: the kernel maps the DLL).
