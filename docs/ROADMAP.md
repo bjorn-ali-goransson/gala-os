@@ -70,7 +70,7 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: winhttp over Schannel (TLS step 1).
+2. **TLS**: wininet's HTTP functions (TLS step 2).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
 4. **RS**: step B3a (window state apart from composition, presenters).
@@ -143,7 +143,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel done; winhttp, wininet, curl next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel and winhttp (synchronous) done; wininet, curl next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
 
@@ -731,12 +731,17 @@ test -p schannel_tls`): SSPI's token rules, EncryptMessage/
 DecryptMessage, QueryContextAttributes, SNI and the name check, ALPN,
 validation against gala's machine root store (`System32\gala\roots`).
 Not yet run on real Windows (run-all.ps1 runs it when Nginx can be
-started and, as administrator, imports the test CA first).
+started and, as administrator, imports the test CA first). winhttp's
+synchronous client over it (step 1 below).
 
 **Next**:
-1. winhttp over Schannel: WinHttpOpen/Connect/OpenRequest/SendRequest/
-   ReceiveResponse/ReadData for http and https (the JDK's and .NET's
-   HttpClient use it), tested against the same Nginx.
+1. Done: winhttp over Schannel, synchronous (`winhttp_test` against the
+   same Nginx: http and https GETs, status and headers, Content-Length
+   and chunked bodies, an untrusted issuer, a closed port,
+   WinHttpCrackUrl; ARCHITECTURE "WinHTTP"). Still open there:
+   automatic redirects (needed by step 4: GitHub's release URLs
+   redirect), connection reuse, asynchronous sessions and status
+   callbacks, proxies, authentication.
 2. wininet's HTTP functions on the same code (InternetOpen/Connect,
    HttpOpenRequest/SendRequest, InternetReadFile).
 3. curl for Windows (its Schannel backend), unmodified, fetching from

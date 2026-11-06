@@ -1,0 +1,732 @@
+//! A request's connection: TCP through ws2_32 (GetAddrInfoW, each
+//! address in turn), and for https a TLS client through SSPI's Schannel
+//! (secur32), as "Using SSPI with a Windows Sockets Client" and "Creating
+//! a Secure Connection Using Schannel" describe it: the
+//! InitializeSecurityContextW loop with the host as target name (SNI and
+//! the name check) and Schannel's automatic validation against the
+//! machine root store, then EncryptMessage (STREAM_HEADER, DATA,
+//! STREAM_TRAILER) and DecryptMessage in place (DATA, EXTRA;
+//! SEC_I_RENEGOTIATE's post-handshake messages back to the token loop;
+//! close_notify as SEC_I_CONTEXT_EXPIRED). Time-outs: WSAPoll before each
+//! send and receive.
+
+use alloc::vec::Vec;
+use core::ffi::c_void;
+use core::ptr::{null, null_mut};
+
+use crate::{
+    ERROR_NOT_ENOUGH_MEMORY, ERROR_WINHTTP_CANNOT_CONNECT, ERROR_WINHTTP_CONNECTION_ERROR,
+    ERROR_WINHTTP_NAME_NOT_RESOLVED, ERROR_WINHTTP_SECURE_CHANNEL_ERROR,
+    ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_TIMEOUT, failed, put,
+};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SecHandle {
+    lower: usize,
+    upper: usize,
+}
+
+const NO_HANDLE: SecHandle = SecHandle { lower: 0, upper: 0 };
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SecBuffer {
+    size: u32,
+    kind: u32,
+    data: *mut u8,
+}
+
+const EMPTY_BUFFER: SecBuffer = SecBuffer { size: 0, kind: SECBUFFER_EMPTY, data: null_mut() };
+
+#[repr(C)]
+struct SecBufferDesc {
+    version: u32,
+    count: u32,
+    buffers: *mut SecBuffer,
+}
+
+fn desc(buffers: &mut [SecBuffer]) -> SecBufferDesc {
+    SecBufferDesc { version: 0, count: buffers.len() as u32, buffers: buffers.as_mut_ptr() }
+}
+
+/// SCHANNEL_CRED (version 4).
+#[repr(C)]
+struct SchannelCred {
+    version: u32,
+    creds: u32,
+    cred: *const *const c_void,
+    root_store: *mut c_void,
+    mappers: u32,
+    mapper: *const c_void,
+    algs: u32,
+    alg: *const u32,
+    enabled_protocols: u32,
+    min_strength: u32,
+    max_strength: u32,
+    lifespan: u32,
+    flags: u32,
+    format: u32,
+}
+
+#[repr(C)]
+struct WsaData {
+    version: u16,
+    high_version: u16,
+    max_sockets: u16,
+    max_udp_dg: u16,
+    vendor_info: *mut u8,
+    description: [u8; 257],
+    system_status: [u8; 129],
+}
+
+/// ADDRINFOW (x64).
+#[repr(C)]
+struct AddrInfo {
+    flags: i32,
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+    addrlen: usize,
+    canonname: *const u16,
+    addr: *const c_void,
+    next: *const AddrInfo,
+}
+
+/// WSAPOLLFD.
+#[repr(C)]
+struct PollFd {
+    fd: usize,
+    events: i16,
+    revents: i16,
+}
+
+#[link(name = "ws2_32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn WSAStartup(version: u16, data: *mut WsaData) -> i32;
+    fn WSACleanup() -> i32;
+    fn WSAGetLastError() -> i32;
+    fn WSAPoll(fds: *mut PollFd, count: u32, timeout: i32) -> i32;
+    fn GetAddrInfoW(
+        node: *const u16,
+        service: *const u16,
+        hints: *const AddrInfo,
+        result: *mut *const AddrInfo,
+    ) -> i32;
+    fn FreeAddrInfoW(ai: *const AddrInfo);
+    fn socket(af: i32, kind: i32, protocol: i32) -> usize;
+    fn connect(s: usize, addr: *const c_void, len: i32) -> i32;
+    fn send(s: usize, buf: *const u8, len: i32, flags: i32) -> i32;
+    fn recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32;
+    fn closesocket(s: usize) -> i32;
+}
+
+#[link(name = "secur32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn AcquireCredentialsHandleW(
+        principal: *const u16,
+        package: *const u16,
+        usage: u32,
+        logon_id: *mut c_void,
+        auth: *const c_void,
+        get_key: usize,
+        arg: usize,
+        credential: *mut SecHandle,
+        expiry: *mut i64,
+    ) -> i32;
+    fn FreeCredentialsHandle(credential: *mut SecHandle) -> i32;
+    fn InitializeSecurityContextW(
+        credential: *mut SecHandle,
+        context: *mut SecHandle,
+        target: *const u16,
+        flags: u32,
+        reserved: u32,
+        representation: u32,
+        input: *mut SecBufferDesc,
+        reserved2: u32,
+        new_context: *mut SecHandle,
+        output: *mut SecBufferDesc,
+        attributes: *mut u32,
+        expiry: *mut i64,
+    ) -> i32;
+    fn DeleteSecurityContext(context: *mut SecHandle) -> i32;
+    fn FreeContextBuffer(buffer: *mut c_void) -> i32;
+    fn QueryContextAttributesW(context: *mut SecHandle, attribute: u32, buffer: *mut c_void)
+    -> i32;
+    fn EncryptMessage(
+        context: *mut SecHandle,
+        qop: u32,
+        message: *mut SecBufferDesc,
+        seq: u32,
+    ) -> i32;
+    fn DecryptMessage(
+        context: *mut SecHandle,
+        message: *mut SecBufferDesc,
+        seq: u32,
+        qop: *mut u32,
+    ) -> i32;
+}
+
+const SEC_E_OK: u32 = 0;
+const SEC_I_CONTINUE_NEEDED: u32 = 0x0009_0312;
+const SEC_I_CONTEXT_EXPIRED: u32 = 0x0009_0317;
+const SEC_I_RENEGOTIATE: u32 = 0x0009_0321;
+const SEC_E_INCOMPLETE_MESSAGE: u32 = 0x8009_0318;
+const SEC_E_WRONG_PRINCIPAL: u32 = 0x8009_0322;
+const SEC_E_UNTRUSTED_ROOT: u32 = 0x8009_0325;
+const SEC_E_CERT_UNKNOWN: u32 = 0x8009_0327;
+const SEC_E_CERT_EXPIRED: u32 = 0x8009_0328;
+const SEC_E_CERT_WRONG_USAGE: u32 = 0x8009_0349;
+
+const SECPKG_CRED_OUTBOUND: u32 = 2;
+const SECBUFFER_EMPTY: u32 = 0;
+const SECBUFFER_DATA: u32 = 1;
+const SECBUFFER_TOKEN: u32 = 2;
+const SECBUFFER_EXTRA: u32 = 5;
+const SECBUFFER_STREAM_TRAILER: u32 = 6;
+const SECBUFFER_STREAM_HEADER: u32 = 7;
+const SECPKG_ATTR_STREAM_SIZES: u32 = 4;
+
+/// ISC_REQ_REPLAY_DETECT, SEQUENCE_DETECT, CONFIDENTIALITY,
+/// ALLOCATE_MEMORY, STREAM: the documented client's request.
+const ISC_FLAGS: u32 = 0x4 | 0x8 | 0x10 | 0x100 | 0x8000;
+
+const SCHANNEL_CRED_VERSION: u32 = 4;
+const SCH_CRED_NO_SERVERNAME_CHECK: u32 = 0x4;
+const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x8;
+const SCH_CRED_NO_DEFAULT_CREDS: u32 = 0x10;
+const SCH_CRED_AUTO_CRED_VALIDATION: u32 = 0x20;
+
+/// SECURITY_FLAG_IGNORE_UNKNOWN_CA, _CERT_WRONG_USAGE, _CERT_CN_INVALID,
+/// _CERT_DATE_INVALID.
+const IGNORE_UNKNOWN_CA: u32 = 0x100;
+const IGNORE_WRONG_USAGE: u32 = 0x200;
+const IGNORE_CN_INVALID: u32 = 0x1000;
+const IGNORE_DATE_INVALID: u32 = 0x2000;
+
+const POLLRDNORM: i16 = 0x100;
+const POLLWRNORM: i16 = 0x10;
+const WSAETIMEDOUT: i32 = 10060;
+
+/// "Microsoft Unified Security Protocol Provider" (UNISP_NAME_W).
+const UNISP: &[u8] = b"Microsoft Unified Security Protocol Provider\0";
+
+struct Tls {
+    cred: SecHandle,
+    ctx: SecHandle,
+    header: usize,
+    trailer: usize,
+    max: usize,
+    /// close_notify came (SEC_I_CONTEXT_EXPIRED).
+    closed: bool,
+}
+
+pub struct Conn {
+    socket: usize,
+    tls: Option<Tls>,
+    /// Received bytes not yet decrypted (TLS).
+    raw: Vec<u8>,
+    /// The TLS target name (the host), NUL-terminated.
+    target: Vec<u16>,
+    send_timeout: i32,
+    pub receive_timeout: i32,
+}
+
+/// Where a connection goes and how.
+pub struct Target<'a> {
+    /// The host, without IPv6 brackets.
+    pub host: &'a [u16],
+    pub port: u16,
+    pub secure: bool,
+    /// WINHTTP_OPTION_SECURITY_FLAGS.
+    pub security_flags: u32,
+    /// SP_PROT_* (0: Schannel's defaults).
+    pub protocols: u32,
+    pub send_timeout: i32,
+    pub receive_timeout: i32,
+}
+
+impl Conn {
+    /// Resolves the host, connects to its addresses in turn and, for
+    /// https, makes the TLS handshake.
+    pub fn open(t: &Target) -> Result<Conn, u32> {
+        // SAFETY: Winsock's start, balanced by Drop's WSACleanup.
+        let started = unsafe {
+            let mut data: WsaData = core::mem::zeroed();
+            WSAStartup(0x202, &mut data)
+        };
+        if started != 0 {
+            failed(b"winhttp.dll!WSAStartup", started as u64);
+            return Err(ERROR_WINHTTP_CANNOT_CONNECT);
+        }
+        let mut conn = Conn {
+            socket: usize::MAX,
+            tls: None,
+            raw: Vec::new(),
+            target: Vec::new(),
+            send_timeout: t.send_timeout,
+            receive_timeout: t.receive_timeout,
+        };
+        conn.socket = connect_to(t.host, t.port)?;
+        if t.secure {
+            conn.handshake(t)?;
+        }
+        Ok(conn)
+    }
+
+    fn send_all(&self, data: &[u8]) -> Result<(), u32> {
+        send_all(self.socket, self.send_timeout, data)
+    }
+
+    /// Appends what the server sends next to `out`; Ok(0) when it closed.
+    fn recv_into(&self, out: &mut Vec<u8>) -> Result<usize, u32> {
+        wait(self.socket, POLLRDNORM, self.receive_timeout)?;
+        const CHUNK: usize = 16 * 1024;
+        out.try_reserve(CHUNK).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
+        let at = out.len();
+        // SAFETY: `CHUNK` reserved bytes after `at`; `recv` writes at most
+        // that many, and only those it wrote are made part of `out`.
+        unsafe {
+            let n = recv(self.socket, out.as_mut_ptr().add(at), CHUNK as i32, 0);
+            if n < 0 {
+                return Err(socket_error(b"winhttp.dll!recv"));
+            }
+            out.set_len(at + n as usize);
+            Ok(n as usize)
+        }
+    }
+
+    /// InitializeSecurityContextW with `input` (None: the first call).
+    fn isc(&mut self, input: *mut SecBufferDesc, out: &mut SecBuffer) -> u32 {
+        let tls = self.tls.as_mut().expect("a TLS connection");
+        let first = tls.ctx.lower == 0 && tls.ctx.upper == 0;
+        let ctx: *mut SecHandle = if first { null_mut() } else { &mut tls.ctx };
+        let mut ob = [SecBuffer { size: 0, kind: SECBUFFER_TOKEN, data: null_mut() }];
+        let mut output = desc(&mut ob);
+        let mut attributes = 0;
+        // SAFETY: handles and descriptors of ours; a NUL-terminated target.
+        let r = unsafe {
+            InitializeSecurityContextW(
+                &mut tls.cred,
+                ctx,
+                self.target.as_ptr(),
+                ISC_FLAGS,
+                0,
+                0,
+                input,
+                0,
+                &mut tls.ctx,
+                &mut output,
+                &mut attributes,
+                null_mut(),
+            )
+        } as u32;
+        *out = ob[0];
+        r
+    }
+
+    /// Sends a token the package allocated, and frees it.
+    fn send_token(&self, b: &SecBuffer) -> Result<(), u32> {
+        if b.data.is_null() {
+            return Ok(());
+        }
+        // SAFETY: the package's buffer of `size` bytes.
+        let r = self.send_all(unsafe { core::slice::from_raw_parts(b.data, b.size as usize) });
+        // SAFETY: allocated by the package (ISC_REQ_ALLOCATE_MEMORY).
+        unsafe { FreeContextBuffer(b.data.cast()) };
+        r
+    }
+
+    /// Feeds the received handshake bytes in `raw` to the token loop;
+    /// keeps SECBUFFER_EXTRA. Ok(status) for OK / CONTINUE_NEEDED /
+    /// INCOMPLETE_MESSAGE.
+    fn feed(&mut self) -> Result<u32, u32> {
+        let mut ib = [
+            SecBuffer {
+                size: self.raw.len() as u32,
+                kind: SECBUFFER_TOKEN,
+                data: self.raw.as_mut_ptr(),
+            },
+            EMPTY_BUFFER,
+        ];
+        let mut input = desc(&mut ib);
+        let mut token = EMPTY_BUFFER;
+        let r = self.isc(&mut input, &mut token);
+        if r == SEC_E_INCOMPLETE_MESSAGE {
+            return Ok(r);
+        }
+        if r != SEC_E_OK && r != SEC_I_CONTINUE_NEEDED {
+            if !token.data.is_null() {
+                // An alert for the server, if any: the connection ends anyway.
+                // SAFETY: allocated by the package.
+                unsafe { FreeContextBuffer(token.data.cast()) };
+            }
+            failed(b"winhttp.dll!TLS handshake", r.into());
+            return Err(secure_error(r));
+        }
+        self.send_token(&token)?;
+        let extra = if ib[1].kind == SECBUFFER_EXTRA { ib[1].size as usize } else { 0 };
+        let extra = extra.min(self.raw.len());
+        self.raw.drain(..self.raw.len() - extra);
+        Ok(r)
+    }
+
+    fn handshake(&mut self, t: &Target) -> Result<(), u32> {
+        let ignore = t.security_flags;
+        let mut flags = SCH_CRED_NO_DEFAULT_CREDS;
+        if ignore & (IGNORE_UNKNOWN_CA | IGNORE_DATE_INVALID | IGNORE_WRONG_USAGE) != 0 {
+            // Schannel's manual validation skips every certificate check,
+            // more than the flags ask for: recorded.
+            if ignore
+                & (IGNORE_UNKNOWN_CA | IGNORE_DATE_INVALID | IGNORE_WRONG_USAGE | IGNORE_CN_INVALID)
+                != IGNORE_UNKNOWN_CA | IGNORE_DATE_INVALID | IGNORE_WRONG_USAGE | IGNORE_CN_INVALID
+            {
+                crate::missing(b"winhttp.dll!SECURITY_FLAG_IGNORE_* (some)", ignore.into());
+            }
+            flags |= SCH_CRED_MANUAL_CRED_VALIDATION;
+        } else {
+            flags |= SCH_CRED_AUTO_CRED_VALIDATION;
+            if ignore & IGNORE_CN_INVALID != 0 {
+                flags |= SCH_CRED_NO_SERVERNAME_CHECK;
+            }
+        }
+        let auth = SchannelCred {
+            version: SCHANNEL_CRED_VERSION,
+            creds: 0,
+            cred: null(),
+            root_store: null_mut(),
+            mappers: 0,
+            mapper: null(),
+            algs: 0,
+            alg: null(),
+            enabled_protocols: t.protocols,
+            min_strength: 0,
+            max_strength: 0,
+            lifespan: 0,
+            flags,
+            format: 0,
+        };
+        let mut package = [0u16; UNISP.len()];
+        for (d, &b) in package.iter_mut().zip(UNISP) {
+            *d = b.into();
+        }
+        let mut cred = NO_HANDLE;
+        // SAFETY: a credentials structure of ours.
+        let r = unsafe {
+            AcquireCredentialsHandleW(
+                null(),
+                package.as_ptr(),
+                SECPKG_CRED_OUTBOUND,
+                null_mut(),
+                (&auth as *const SchannelCred).cast(),
+                0,
+                0,
+                &mut cred,
+                null_mut(),
+            )
+        } as u32;
+        if r != SEC_E_OK {
+            failed(b"winhttp.dll!AcquireCredentialsHandleW", r.into());
+            return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+        }
+        self.tls = Some(Tls { cred, ctx: NO_HANDLE, header: 0, trailer: 0, max: 0, closed: false });
+        put(&mut self.target, t.host)?;
+        put(&mut self.target, &[0])?;
+        let mut token = EMPTY_BUFFER;
+        let r = self.isc(null_mut(), &mut token);
+        if r != SEC_I_CONTINUE_NEEDED {
+            failed(b"winhttp.dll!TLS handshake", r.into());
+            return Err(secure_error(r));
+        }
+        self.send_token(&token)?;
+        let mut need = true;
+        loop {
+            if need || self.raw.is_empty() {
+                let mut raw = core::mem::take(&mut self.raw);
+                let n = self.recv_into(&mut raw);
+                self.raw = raw;
+                if n? == 0 {
+                    failed(b"winhttp.dll!TLS handshake: closed", 0);
+                    return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+                }
+            }
+            match self.feed()? {
+                SEC_E_INCOMPLETE_MESSAGE => need = true,
+                SEC_E_OK => break,
+                _ => need = self.raw.is_empty(),
+            }
+        }
+        let mut sizes = [0u32; 5];
+        let tls = self.tls.as_mut().expect("a TLS connection");
+        // SAFETY: SecPkgContext_StreamSizes (five DWORDs).
+        let r = unsafe {
+            QueryContextAttributesW(
+                &mut tls.ctx,
+                SECPKG_ATTR_STREAM_SIZES,
+                sizes.as_mut_ptr().cast(),
+            )
+        } as u32;
+        if r != SEC_E_OK {
+            failed(b"winhttp.dll!QueryContextAttributesW(STREAM_SIZES)", r.into());
+            return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+        }
+        (tls.header, tls.trailer, tls.max) =
+            (sizes[0] as usize, sizes[1] as usize, sizes[2] as usize);
+        Ok(())
+    }
+
+    /// Sends `data` (as TLS records on https).
+    pub fn write(&mut self, data: &[u8]) -> Result<(), u32> {
+        let Some(tls) = self.tls.as_mut() else {
+            return self.send_all(data);
+        };
+        let (header, trailer) = (tls.header, tls.trailer);
+        let mut record = Vec::new();
+        for chunk in data.chunks(tls.max.max(1)) {
+            record.clear();
+            record
+                .try_reserve(header + chunk.len() + trailer)
+                .map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
+            record.resize(header + chunk.len() + trailer, 0);
+            record[header..header + chunk.len()].copy_from_slice(chunk);
+            let base = record.as_mut_ptr();
+            // SAFETY: inside `record`.
+            let mut b = unsafe {
+                [
+                    SecBuffer { size: header as u32, kind: SECBUFFER_STREAM_HEADER, data: base },
+                    SecBuffer {
+                        size: chunk.len() as u32,
+                        kind: SECBUFFER_DATA,
+                        data: base.add(header),
+                    },
+                    SecBuffer {
+                        size: trailer as u32,
+                        kind: SECBUFFER_STREAM_TRAILER,
+                        data: base.add(header + chunk.len()),
+                    },
+                    EMPTY_BUFFER,
+                ]
+            };
+            let mut d = desc(&mut b);
+            // SAFETY: our context and buffers.
+            let r = unsafe { EncryptMessage(&mut tls.ctx, 0, &mut d, 0) } as u32;
+            if r != SEC_E_OK {
+                failed(b"winhttp.dll!EncryptMessage", r.into());
+                return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+            }
+            let total = (b[0].size + b[1].size + b[2].size) as usize;
+            send_all(self.socket, self.send_timeout, &record[..total])?;
+        }
+        Ok(())
+    }
+
+    /// Appends the next plaintext the server sends to `out`; Ok(true)
+    /// when it closed (or sent close_notify) instead.
+    pub fn read(&mut self, out: &mut Vec<u8>) -> Result<bool, u32> {
+        if self.tls.is_none() {
+            return Ok(self.recv_into(out)? == 0);
+        }
+        let mut need = self.raw.is_empty();
+        loop {
+            if self.tls.as_ref().is_some_and(|t| t.closed) {
+                return Ok(true);
+            }
+            if need {
+                let mut raw = core::mem::take(&mut self.raw);
+                let n = self.recv_into(&mut raw);
+                self.raw = raw;
+                if n? == 0 {
+                    // Closed without close_notify: the end of the stream as
+                    // far as HTTP framing is concerned.
+                    return Ok(true);
+                }
+            }
+            let tls = self.tls.as_mut().expect("a TLS connection");
+            let mut b = [
+                SecBuffer {
+                    size: self.raw.len() as u32,
+                    kind: SECBUFFER_DATA,
+                    data: self.raw.as_mut_ptr(),
+                },
+                EMPTY_BUFFER,
+                EMPTY_BUFFER,
+                EMPTY_BUFFER,
+            ];
+            let mut d = desc(&mut b);
+            // SAFETY: our context and buffers.
+            let r = unsafe { DecryptMessage(&mut tls.ctx, &mut d, 0, null_mut()) } as u32;
+            if r == SEC_E_INCOMPLETE_MESSAGE {
+                need = true;
+                continue;
+            }
+            if r != SEC_E_OK && r != SEC_I_RENEGOTIATE && r != SEC_I_CONTEXT_EXPIRED {
+                failed(b"winhttp.dll!DecryptMessage", r.into());
+                return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+            }
+            let before = out.len();
+            let mut extra = 0;
+            for buffer in &b {
+                if buffer.kind == SECBUFFER_DATA && buffer.size > 0 {
+                    // SAFETY: decrypted in place, inside `raw`.
+                    let text =
+                        unsafe { core::slice::from_raw_parts(buffer.data, buffer.size as usize) };
+                    put(out, text)?;
+                }
+                if buffer.kind == SECBUFFER_EXTRA {
+                    extra = buffer.size as usize;
+                }
+            }
+            let extra = extra.min(self.raw.len());
+            self.raw.drain(..self.raw.len() - extra);
+            if r == SEC_I_CONTEXT_EXPIRED {
+                tls.closed = true;
+            }
+            if r == SEC_I_RENEGOTIATE {
+                // A post-handshake message (TLS 1.3 NewSessionTicket,
+                // KeyUpdate) in the extra bytes: back to the token loop.
+                match self.feed()? {
+                    SEC_E_OK => {}
+                    s => {
+                        failed(b"winhttp.dll!TLS post-handshake", s.into());
+                        return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+                    }
+                }
+            }
+            if out.len() > before {
+                return Ok(false);
+            }
+            need = self.raw.is_empty();
+        }
+    }
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        // SAFETY: our handles.
+        unsafe {
+            if let Some(tls) = self.tls.as_mut() {
+                if tls.ctx.lower != 0 || tls.ctx.upper != 0 {
+                    DeleteSecurityContext(&mut tls.ctx);
+                }
+                FreeCredentialsHandle(&mut tls.cred);
+            }
+            if self.socket != usize::MAX {
+                closesocket(self.socket);
+            }
+            WSACleanup();
+        }
+    }
+}
+
+/// Waits until the socket can take `events`, for at most `timeout` ms
+/// (-1: no limit); ERROR_WINHTTP_TIMEOUT when it cannot.
+fn wait(socket: usize, events: i16, timeout: i32) -> Result<(), u32> {
+    if timeout < 0 {
+        return Ok(());
+    }
+    let mut fd = PollFd { fd: socket, events, revents: 0 };
+    // SAFETY: one WSAPOLLFD of ours.
+    let n = unsafe { WSAPoll(&mut fd, 1, timeout) };
+    if n == 0 {
+        failed(b"winhttp.dll!timed out", timeout as u64);
+        return Err(ERROR_WINHTTP_TIMEOUT);
+    }
+    // An error shows in the send or recv that follows.
+    Ok(())
+}
+
+fn send_all(socket: usize, timeout: i32, data: &[u8]) -> Result<(), u32> {
+    let mut done = 0;
+    while done < data.len() {
+        wait(socket, POLLWRNORM, timeout)?;
+        let chunk = (data.len() - done).min(1 << 30) as i32;
+        // SAFETY: our buffer of `chunk` bytes at `done`.
+        let n = unsafe { send(socket, data[done..].as_ptr(), chunk, 0) };
+        if n <= 0 {
+            return Err(socket_error(b"winhttp.dll!send"));
+        }
+        done += n as usize;
+    }
+    Ok(())
+}
+
+/// The WinHTTP error for a failed handshake: certificate problems are
+/// ERROR_WINHTTP_SECURE_FAILURE, other SSPI failures
+/// ERROR_WINHTTP_SECURE_CHANNEL_ERROR (as the error list documents them).
+fn secure_error(status: u32) -> u32 {
+    let certificate = matches!(
+        status,
+        SEC_E_WRONG_PRINCIPAL
+            | SEC_E_UNTRUSTED_ROOT
+            | SEC_E_CERT_UNKNOWN
+            | SEC_E_CERT_EXPIRED
+            | SEC_E_CERT_WRONG_USAGE
+    ) || status & 0xffff_0000 == 0x800b_0000; // CERT_E_*, TRUST_E_*
+    if certificate { ERROR_WINHTTP_SECURE_FAILURE } else { ERROR_WINHTTP_SECURE_CHANNEL_ERROR }
+}
+
+/// Records a failed send or recv; the WinHTTP error for it.
+fn socket_error(what: &[u8]) -> u32 {
+    // SAFETY: a plain call.
+    let e = unsafe { WSAGetLastError() };
+    failed(what, e as u64);
+    if e == WSAETIMEDOUT { ERROR_WINHTTP_TIMEOUT } else { ERROR_WINHTTP_CONNECTION_ERROR }
+}
+
+/// Resolves `host` and connects to its addresses in the order given.
+fn connect_to(host: &[u16], port: u16) -> Result<usize, u32> {
+    let mut name = Vec::new();
+    put(&mut name, host)?;
+    put(&mut name, &[0])?;
+    let mut service = [0u16; 6];
+    let mut digits = [0u8; 5];
+    let mut n = 0;
+    let mut p = port;
+    loop {
+        digits[n] = b'0' + (p % 10) as u8;
+        n += 1;
+        p /= 10;
+        if p == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        service[i] = digits[n - 1 - i].into();
+    }
+    // SAFETY: plain data.
+    let mut hints: AddrInfo = unsafe { core::mem::zeroed() };
+    hints.socktype = 1; // SOCK_STREAM
+    hints.protocol = 6; // IPPROTO_TCP
+    let mut list: *const AddrInfo = null();
+    // SAFETY: NUL-terminated strings and hints of ours.
+    let r = unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut list) };
+    if r != 0 {
+        failed(b"winhttp.dll!GetAddrInfoW", r as u64);
+        return Err(ERROR_WINHTTP_NAME_NOT_RESOLVED);
+    }
+    let mut last = 0;
+    let mut ai = list;
+    let mut found = None;
+    // SAFETY: the list GetAddrInfoW made, freed below.
+    unsafe {
+        while !ai.is_null() {
+            let a = &*ai;
+            let s = socket(a.family, 1, 6);
+            if s == usize::MAX {
+                last = WSAGetLastError();
+            } else if connect(s, a.addr, a.addrlen as i32) == 0 {
+                found = Some(s);
+                break;
+            } else {
+                last = WSAGetLastError();
+                closesocket(s);
+            }
+            ai = a.next;
+        }
+        FreeAddrInfoW(list);
+    }
+    found.ok_or_else(|| {
+        failed(b"winhttp.dll!connect", last as u64);
+        ERROR_WINHTTP_CANNOT_CONNECT
+    })
+}
