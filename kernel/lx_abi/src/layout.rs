@@ -47,6 +47,34 @@ pub struct Stat {
     pub _unused: [i64; 3],
 }
 
+impl Stat {
+    /// The struct as user memory holds it (little-endian fields at their
+    /// offsets, padding zero): what stat(2) copies out.
+    pub fn to_bytes(&self) -> [u8; 144] {
+        let mut b = [0u8; 144];
+        let mut put = |at: usize, v: &[u8]| b[at..at + v.len()].copy_from_slice(v);
+        put(offset_of!(Stat, dev), &self.dev.to_le_bytes());
+        put(offset_of!(Stat, ino), &self.ino.to_le_bytes());
+        put(offset_of!(Stat, nlink), &self.nlink.to_le_bytes());
+        put(offset_of!(Stat, mode), &self.mode.to_le_bytes());
+        put(offset_of!(Stat, uid), &self.uid.to_le_bytes());
+        put(offset_of!(Stat, gid), &self.gid.to_le_bytes());
+        put(offset_of!(Stat, rdev), &self.rdev.to_le_bytes());
+        put(offset_of!(Stat, size), &self.size.to_le_bytes());
+        put(offset_of!(Stat, blksize), &self.blksize.to_le_bytes());
+        put(offset_of!(Stat, blocks), &self.blocks.to_le_bytes());
+        for (at, t) in [
+            (offset_of!(Stat, atime), self.atime),
+            (offset_of!(Stat, mtime), self.mtime),
+            (offset_of!(Stat, ctime), self.ctime),
+        ] {
+            put(at, &t.sec.to_le_bytes());
+            put(at + 8, &t.nsec.to_le_bytes());
+        }
+        b
+    }
+}
+
 // st_mode's file types (inode(7)).
 pub const S_IFMT: u32 = 0o170000;
 pub const S_IFSOCK: u32 = 0o140000;
@@ -135,6 +163,21 @@ pub const DT_SOCK: u8 = 12;
 /// its NUL, rounded up to 8 (fs_test checks every record it reads).
 pub const fn dirent64_reclen(name_len: usize) -> usize {
     (DIRENT64_NAME_OFFSET + name_len + 1).div_ceil(8) * 8
+}
+
+/// Writes one `linux_dirent64` record for `name` into the front of `out`
+/// (the head, the name, its NUL, zero padding to 8); returns its length,
+/// or None if `out` is too short for it.
+pub fn put_dirent64(out: &mut [u8], ino: u64, off: i64, d_type: u8, name: &[u8]) -> Option<usize> {
+    let len = dirent64_reclen(name.len());
+    let rec = out.get_mut(..len)?;
+    rec.fill(0);
+    rec[..8].copy_from_slice(&ino.to_le_bytes());
+    rec[8..16].copy_from_slice(&off.to_le_bytes());
+    rec[16..18].copy_from_slice(&u16::try_from(len).ok()?.to_le_bytes());
+    rec[18] = d_type;
+    rec[DIRENT64_NAME_OFFSET..DIRENT64_NAME_OFFSET + name.len()].copy_from_slice(name);
+    Some(len)
 }
 
 /// `struct epoll_event`: packed on x86_64 (12 bytes; data at 4).
@@ -260,6 +303,40 @@ mod tests {
     }
 
     #[test]
+    fn stat_bytes_put_fields_where_linux_has_them() {
+        let st = Stat {
+            dev: 1,
+            ino: 2,
+            nlink: 3,
+            mode: 0o100644,
+            uid: 1000,
+            gid: 1001,
+            size: 10,
+            blksize: 4096,
+            blocks: 8,
+            mtime: Timespec { sec: 5, nsec: 6 },
+            ..Stat::default()
+        };
+        let b = st.to_bytes();
+        let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        // fs_test's offsets (recorded on Linux).
+        let off = |name: &str| v(FS, &format!("offsetof(stat, {name})"));
+        assert_eq!(u64_at(off("st_size")), 10);
+        assert_eq!(u32_at(off("st_mode")), 0o100644);
+        assert_eq!(u64_at(off("st_nlink")), 3);
+        assert_eq!(u64_at(off("st_ino")), 2);
+        assert_eq!(u32_at(off("st_uid")), 1000);
+        assert_eq!(u32_at(off("st_gid")), 1001);
+        assert_eq!(u64_at(off("st_blocks")), 8);
+        assert_eq!(u64_at(off("st_mtim")), 5);
+        assert_eq!(u64_at(off("st_mtim") + 8), 6);
+        // Padding and unused words stay zero.
+        assert_eq!(u32_at(36), 0);
+        assert!(b[120..].iter().all(|&x| x == 0));
+    }
+
+    #[test]
     fn statx_matches_linux() {
         assert_eq!(v(FS, "sizeof(struct statx)"), size_of::<Statx>());
         assert_eq!(v(FS, "statx writes bytes"), size_of::<Statx>());
@@ -289,6 +366,16 @@ mod tests {
         assert_eq!(dirent64_reclen(1), 24); // "."
         assert_eq!(dirent64_reclen(4), 24);
         assert_eq!(dirent64_reclen(5), 32); // "inner"
+        let mut out = [0xaa_u8; 40];
+        assert_eq!(put_dirent64(&mut out, 7, 3, DT_REG, b"inner"), Some(32));
+        assert_eq!(u64::from_le_bytes(out[..8].try_into().unwrap()), 7);
+        assert_eq!(i64::from_le_bytes(out[8..16].try_into().unwrap()), 3);
+        assert_eq!(u16::from_le_bytes(out[16..18].try_into().unwrap()), 32);
+        assert_eq!(out[18], DT_REG);
+        assert_eq!(&out[19..25], b"inner\0");
+        assert!(out[25..32].iter().all(|&x| x == 0));
+        assert_eq!(out[32], 0xaa);
+        assert_eq!(put_dirent64(&mut out[..31], 7, 3, DT_REG, b"inner"), None);
     }
 
     #[test]

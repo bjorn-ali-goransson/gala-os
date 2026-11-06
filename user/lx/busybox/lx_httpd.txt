@@ -1,0 +1,12 @@
+server answers: yes
+wget index.html: status 0
+index.html the same: yes
+wget big.txt: status 0
+big.txt the same: yes (108894 bytes)
+wget -O - to a pipe: HELLO FROM HTTPD
+wget missing.html: status 1
+server ended by SIGTERM: status 143
+httpd.sh: ok
+-- stderr:
+Terminated
+-- exit status 0

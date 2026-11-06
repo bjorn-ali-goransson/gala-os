@@ -24,7 +24,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use lx_abi::signal::{SA_NOCLDWAIT, SIG_IGN, SIGCHLD, Siginfo};
 
+use super::file::OpenFile;
 use super::signal::{self, Signals};
+use crate::fs::ramfs::NodeId;
 use crate::mm::heap::{AllocError, KArc, TryVec};
 use crate::nt::platform::{self, ThreadId};
 use crate::nt::status::NtStatus;
@@ -81,6 +83,12 @@ impl PipeState {
         self.capacity.saturating_sub(self.head + self.data.len())
     }
 
+    /// Whether a whole page is free (poll's POLLOUT: poll_test on Linux,
+    /// a full pipe is writable again once a page of it was read).
+    pub fn page_free(&self) -> bool {
+        (self.head + self.data.len()).div_ceil(PIPE_PAGE) * PIPE_PAGE < self.capacity
+    }
+
     /// `n` bytes were read from the front.
     pub fn consumed(&mut self, n: usize) {
         self.data.drain(..n);
@@ -98,6 +106,12 @@ pub enum Object {
     Console(Stream),
     PipeRead(KArc<Pipe>),
     PipeWrite(KArc<Pipe>),
+    /// A regular file or directory (`lx::file`).
+    File(KArc<OpenFile>),
+    /// A character device (`/dev/null` and friends: `lx::file`).
+    Device(super::file::Device),
+    /// A TCP socket (`lx::socket`).
+    Socket(KArc<super::socket::Socket>),
 }
 
 impl Drop for Fd {
@@ -105,7 +119,7 @@ impl Drop for Fd {
         match &self.object {
             Object::PipeRead(p) => p.state.lock().readers -= 1,
             Object::PipeWrite(p) => p.state.lock().writers -= 1,
-            Object::Console(_) => {}
+            Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => {}
         }
     }
 }
@@ -123,7 +137,7 @@ impl Fd {
         match &object {
             Object::PipeRead(p) => p.state.lock().readers += 1,
             Object::PipeWrite(p) => p.state.lock().writers += 1,
-            Object::Console(_) => {}
+            Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => {}
         }
         Fd { object, nonblock: AtomicBool::new(nonblock) }
     }
@@ -137,6 +151,13 @@ impl Fd {
 pub struct Slot {
     pub fd: KArc<Fd>,
     pub cloexec: bool,
+}
+
+/// Whether a vfork's parent may go on, and the parent thread waiting.
+#[derive(Default)]
+pub struct Vfork {
+    pub released: bool,
+    pub waiter: Option<ThreadId>,
 }
 
 /// The program break (brk(2)): `start` is fixed at exec, `current` is
@@ -169,6 +190,16 @@ pub struct LxProcess {
     pub children: IrqMutex<Children>,
     /// Indexed by fd; None: closed.
     pub fds: IrqMutex<Vec<Option<Slot>>>,
+    /// The current directory (chdir; a forked child's starts as its
+    /// parent's).
+    pub cwd: IrqMutex<NodeId>,
+    /// The file-mode creation mask (umask(2); 022 at the start).
+    pub umask: IrqMutex<u32>,
+    /// ITIMER_REAL (`lx::timer`; alarm, setitimer).
+    pub alarm: IrqMutex<Option<super::timer::Alarm>>,
+    /// A vfork child's hold on its parent (`lx::fork`): released when it
+    /// execs or ends.
+    pub vfork: IrqMutex<Vfork>,
     /// stdout's and stderr's bytes since their last newline.
     lines: IrqMutex<[Vec<u8>; 2]>,
     /// The unimplemented system calls already logged (once each).
@@ -178,8 +209,8 @@ pub struct LxProcess {
 static TABLE: IrqMutex<Vec<KArc<LxProcess>>> = IrqMutex::new(Vec::new());
 
 /// Creates the state of a new Linux process `pid` with fds 0, 1 and 2 on
-/// the console.
-pub fn create(pid: u64, brk: u64) -> Result<KArc<LxProcess>, AllocError> {
+/// the console, in directory `cwd`.
+pub fn create(pid: u64, brk: u64, cwd: NodeId) -> Result<KArc<LxProcess>, AllocError> {
     let mut fds = Vec::new();
     for stream in [Stream::Stdin, Stream::Stdout, Stream::Stderr] {
         let fd = KArc::try_new(Fd::new(Object::Console(stream), false))?;
@@ -193,6 +224,10 @@ pub fn create(pid: u64, brk: u64) -> Result<KArc<LxProcess>, AllocError> {
         signals: IrqMutex::new(Signals::default()),
         children: IrqMutex::new(Children::default()),
         fds: IrqMutex::new(fds),
+        cwd: IrqMutex::new(cwd),
+        umask: IrqMutex::new(0o022),
+        vfork: IrqMutex::new(Vfork { released: true, waiter: None }),
+        alarm: IrqMutex::new(None),
         lines: IrqMutex::new([Vec::new(), Vec::new()]),
         missing: IrqMutex::new(Vec::new()),
     })?;
@@ -205,7 +240,7 @@ pub fn create(pid: u64, brk: u64) -> Result<KArc<LxProcess>, AllocError> {
 /// stays open while either holds it), the same signal actions and mask,
 /// nothing pending, no children. It is listed, and counted as a running
 /// child of `parent`, before its thread starts.
-pub fn fork(parent: &LxProcess, pid: u64) -> Result<KArc<LxProcess>, AllocError> {
+pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>, AllocError> {
     let mut fds = Vec::new();
     {
         let from = parent.fds.lock();
@@ -216,6 +251,8 @@ pub fn fork(parent: &LxProcess, pid: u64) -> Result<KArc<LxProcess>, AllocError>
     }
     let brk = *parent.brk.lock();
     let signals = parent.signals.lock().forked();
+    let cwd = *parent.cwd.lock();
+    let umask = *parent.umask.lock();
     let state = KArc::try_new(LxProcess {
         pid,
         parent: parent.pid,
@@ -224,6 +261,11 @@ pub fn fork(parent: &LxProcess, pid: u64) -> Result<KArc<LxProcess>, AllocError>
         signals: IrqMutex::new(signals),
         children: IrqMutex::new(Children::default()),
         fds: IrqMutex::new(fds),
+        cwd: IrqMutex::new(cwd),
+        umask: IrqMutex::new(umask),
+        vfork: IrqMutex::new(Vfork { released: !vfork, waiter: None }),
+        // A child starts with no timer (setitimer(2)).
+        alarm: IrqMutex::new(None),
         lines: IrqMutex::new([Vec::new(), Vec::new()]),
         missing: IrqMutex::new(Vec::new()),
     })?;
@@ -287,6 +329,7 @@ pub fn ended(pid: u64, status: NtStatus) {
         }
     }
     crate::info!("lx: pid {pid} {}", Ending(status));
+    state.release_vfork();
     // The fds close with the state (pipe ends counted down), before the
     // parent hears of it.
     let fds = core::mem::take(&mut *state.fds.lock());
@@ -453,6 +496,37 @@ impl LxProcess {
         // Dropped outside the table's lock (a pipe end counts down).
         drop(old);
         Ok(())
+    }
+
+    /// A vfork child execs or ends: its parent goes on.
+    pub fn release_vfork(&self) {
+        let waiter = {
+            let mut v = self.vfork.lock();
+            v.released = true;
+            v.waiter.take()
+        };
+        if let Some(w) = waiter {
+            platform::wake(w);
+        }
+    }
+
+    /// execve: the fds marked close-on-exec close.
+    pub fn close_on_exec(&self) {
+        let mut closed: Vec<Slot> = Vec::new();
+        {
+            let mut fds = self.fds.lock();
+            for slot in fds.iter_mut() {
+                if slot.as_ref().is_some_and(|s| s.cloexec)
+                    && let Some(s) = slot.take()
+                {
+                    // Kept to drop outside the lock; with no room it drops
+                    // here (closing takes a pipe's or the file system's
+                    // lock, never the table's).
+                    let _ = closed.try_push(s);
+                }
+            }
+        }
+        drop(closed);
     }
 
     /// Closes `fd`; false if it was not open.

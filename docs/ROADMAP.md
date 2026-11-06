@@ -73,8 +73,8 @@ In order:
 2. **TLS**: step 6 (session resumption, client certificates, ECDSA
    server keys, revocation; step 5, crypt32's chain engine as the one
    trust decision, is done).
-3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
-   (static busybox) as filler.
+3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2's
+   rest (busybox runs; threads, futex, fs_test's links) as filler.
 4. **RS**: step B3a's next part (the window state apart from the
    compositor in the server kernel).
 5. **R**: R7's next part (network frames, disk reads and input in
@@ -84,8 +84,9 @@ In order:
    installs; a real Inno Setup installer.
 7. **BR** stage 1's rest (the profile's hotspots).
 8. **AG**: the remaining stubs (filler).
-9. **SSH**: scp, port forwarding, the client; **H11**: busybox httpd
-    and wget over loopback.
+9. **SSH**: the client against the host's sshd, agent forwarding;
+    **H11**: busybox-w32's httpd and wget over loopback (the Linux
+    busybox's run: `lx_httpd`).
 
 ## Status at a glance
 
@@ -145,13 +146,13 @@ has a section under "Open items".
 | N2 | Nginx (x64 build, master/worker, zlib, PCRE2, OpenSSL) | done | `nginx`, `nginx_master`, `nginx_tls`; WORKFLOW "Nginx" |
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
-| H11 | busybox httpd and wget over loopback | planned | |
+| H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision) done; revocation, session resumption next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
-| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
+| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done; static busybox runs (milestone 2), TCP sockets |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 
 ### Desktop, sessions and remote access
@@ -166,7 +167,7 @@ has a section under "Open items".
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
-| SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
+| SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters and console switch done; the window state in the server kernel next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
@@ -375,6 +376,15 @@ Windows.
 
 **Done when**: a scenario runs httpd, fetches files with wget and the
 tcc-built client, and compares them byte for byte.
+
+**Done so far**: the same with Linux's static busybox on the Linux
+personality (LX): `lx_httpd` runs `busybox httpd -f -p 127.0.0.1:8080`,
+fetches a small and a 106 KiB file with `busybox wget` (byte for byte,
+and through a pipe), sees a 404 fail, and stops the server with kill;
+Linux sockets on the kernel's TCP stack (`lx::socket`, `lx_socket`).
+
+**Next**: busybox-w32's httpd and wget on the NT side, and the tcc-built
+Winsock client.
 
 ### P1. Unmodified prebuilt programs
 
@@ -676,8 +686,18 @@ server, an interactive shell, file transfer, forwarding, a client.
   ClosePseudoConsole; conhost.exe `--headless`; `conpty_test`) and
   `sshd_shell` (busybox sh under ConPTY: typing, line editing, Ctrl+C
   interrupting `sleep 60`, exit; `conpty=trace`).
-- Step 3 begun: `sshd_sftp` (put a 200 KiB file, ls, get it back byte
-  for byte, rm).
+- Step 3: `sshd_sftp` (put a 200 KiB file, ls, get it back byte for
+  byte, rm); `sshd_scp` (the host's `scp -p` both ways over SFTP and the
+  legacy protocol, `-O`, which runs gala's System32\scp.exe: bytes,
+  modification and access times; gala's files keep an access time of
+  their own for it, ARCHITECTURE "File times").
+- Step 4: `sshd_forward`: `ssh -L` (direct-tcpip: sshd-session connects
+  over loopback to `sshfwd_test serve`) and `ssh -R` (tcpip-forward:
+  sshd-session listens on gala's 127.0.0.1:7001, `sshfwd_test connect`
+  reaches an echo server on the host), 200 KiB each way with half-closes.
+- Step 5 begun: `sshd_client`: gala's own ssh.exe logs on to gala's
+  sshd over loopback with the key in galatest's profile, accepting the
+  host key into `~/.ssh/known_hosts` and then checking it strictly.
 
 **Next**:
 1. sshd in the Docker/server image.
@@ -687,10 +707,12 @@ server, an interactive shell, file transfer, forwarding, a client.
    draw with the cell APIs (SetConsoleCursorPosition,
    WriteConsoleOutput) reaching the terminal (only VT text does now);
    `gala` commands in the shell.
-3. File transfer: scp, permissions, large files.
-4. Port forwarding: `ssh -L` and `-R`; agent forwarding if cheap.
-5. The client: gala's ssh.exe connecting to the host's sshd, keys in the
-   user's profile, known_hosts.
+3. File transfer: permissions (scp -p's mode, ACLs), large files (more
+   than the 300 KiB the scenarios move).
+4. Port forwarding: dynamic (`ssh -D`), agent forwarding if cheap.
+5. The client: gala's ssh.exe connecting to the host's sshd (a host
+   server for xtask to run, like the echo server `sshd_forward` uses),
+   ssh-agent, an interactive client session under a pty.
 6. Observability: sshd's and sshd-session's logs in failed logs,
    connection and auth events in the event stream, the ledger's
    ssh-related gaps in the report.
@@ -1256,19 +1278,37 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   read/write/wait4). fork (and clone with only SIGCHLD) with an eagerly
   copied address space, wait4, SIGCHLD at the child's end. Scenario
   `lx_pipe` matches pipe_test's transcript exactly.
+- Milestone 2's static busybox runs: busybox.net's static musl build
+  (a `PREBUILT`, run only in gala) runs a shell script of pipelines,
+  redirections, here-documents, functions, background jobs and the
+  coreutils-style applets through fork and execve (`lx_busybox`).
+  Built for it, each with a corpus program recorded on Linux and a
+  scenario matching it exactly: files and directories on the shared
+  ramfs (`lx::file`: open/openat flags, read/write/pread/pwrite, lseek,
+  the stat family, getdents64, mkdir/unlink/rmdir/rename, chdir/getcwd,
+  access, umask, chmod, utimensat; POSIX modes on ramfs nodes; /dev/null and
+  friends: fileio_test, `lx_fileio`); execve with `#!` scripts, getppid,
+  uname, setuid/setgid (exec_test, `lx_exec`); TCP sockets and poll/
+  select (socket_test, `lx_socket`; busybox httpd and wget: `lx_httpd`,
+  H11). Also vfork (a copy, the parent waits), kill, rt_sigsuspend,
+  sendfile, readv, close_range, the clocks and sleeps, ITIMER_REAL and
+  alarm; blocking pipe writes larger than the room write piece by
+  piece.
 
 **Next**:
-1. Milestone 2, static busybox: the rest of signal_test and fork_test
-   (kill, tgkill, rt_sigqueueinfo, rt_sigsuspend, sigaltstack, faults
-   as SIGSEGV/SIGBUS/SIGFPE through the exception path, delivery to a
-   thread running user code, stop/continue), copy-on-write for fork
-   (shared frames, `vm::copy_on_write` for private pages; MAP_SHARED
-   anonymous memory shared with the child), then files and directories,
-   execve, clone of threads, futex (priorities from `strace` on real
-   Linux and the ledger); wait queues for pipes, rt_sigtimedwait and
-   wait4's signal check (they poll or rely on one waker today);
-   `lx::state` onto the core process; an `lx_pipe_pie` scenario. Each
-   corpus program becomes a boot scenario as its calls land.
+1. Milestone 2's rest: the rest of signal_test and fork_test (tgkill,
+   rt_sigqueueinfo, sigaltstack, faults as SIGSEGV/SIGBUS/SIGFPE
+   through the exception path, delivery to a thread running user code,
+   stop/continue, process groups and sessions, waitid, rusage), vfork
+   sharing memory and copy-on-write for fork (shared frames,
+   `vm::copy_on_write` for private pages; MAP_SHARED anonymous memory
+   shared with the child), clone of threads, futex; fs_test (symlinks,
+   hard links, unlink of an open file, statx: seam 4); per-thread CPU
+   time for clock_test's CPU clocks; wait queues instead of the 1 ms
+   polling (pipes, sockets, poll, sleeps, signals); `lx::state` onto
+   the core process; an `lx_pipe_pie` scenario.
+   Each corpus program becomes a boot scenario as its calls land; the
+   busybox scripts grow with them (applets by name once symlinks exist).
 2. Milestone 3: threads and futex, clocks and polling, ptys over the
    core terminal object, /proc.
 3. Seam 1: the pty as a core terminal object under ConPTY.
@@ -1652,6 +1692,16 @@ need unwinding: next).
 Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
+
+- **Hand-written busybox transcripts** (`user/lx/busybox/lx_busybox.txt`,
+  `lx_httpd.txt`): every other Linux transcript is recorded on real
+  Linux (`cargo xtask lx-expect`); these were written from POSIX and
+  busybox's documented output and cross-checked against the host's dash
+  and coreutils, because the pinned busybox (busybox.net's static 1.35.0)
+  is not run on the host. Only the busybox-specific lines (xargs, wget's
+  status codes) are unchecked. Structural fix: record both transcripts
+  by running the same pinned binary on a Linux machine (or a Linux VM
+  xtask boots), and let `lx-expect` regenerate them. Item LX.
 
 - **`--no-sandbox` in the Chromium scenarios**: Chromium's renderers
   normally run in a sandbox (restricted, low-integrity and

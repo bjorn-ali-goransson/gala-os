@@ -1,0 +1,60 @@
+-- process calls
+child: getppid() is the parent (1 = yes): exited 1
+uname = 0
+  sysname = Linux
+  machine = x86_64
+uname(bad pointer) = -14 (EFAULT)
+setuid(getuid()) = 0
+setgid(getgid()) = 0
+-- execve
+mkdir(exec.dir) = 0
+chdir(exec.dir) = 0
+execve(missing) = -2 (ENOENT)
+execve(.) = -13 (EACCES)
+execve(not executable) = -13 (EACCES)
+chmod(data, 0755) = 0
+execve(executable, not a program) = -8 (ENOEXEC)
+execve(data/x) = -20 (ENOTDIR)
+execve(bad pointer) = -14 (EFAULT)
+execve(argv with a bad pointer) = -14 (EFAULT)
+execve(bad argv) = -14 (EFAULT)
+exec child: argc = 4
+exec child: argv[1] = "exec-child"
+exec child: argv[2] = ""
+exec child: argv[3] = "with space"
+exec child: envp[0] = "ONE=1"
+exec child: envp[1] = "EMPTY="
+exec child: envp[2] = "LAST=the end"
+exec child: envc = 3
+exec child: F_GETFD(3) (opened without O_CLOEXEC) = 0
+exec child: F_GETFD(4) (opened with O_CLOEXEC) = -9 (EBADF)
+exec child: read(3) = 10 "just data\n"
+exec child: SIGUSR1 handler (was caught) = 0
+exec child: SIGUSR2 handler (was ignored) = 1
+exec child: SIGTERM still blocked = yes
+exec child: still in the directory exec.dir = yes
+execve'd child: exited 3
+exec child: argc = 2
+exec child: argv[0] = "renamed"
+exec child: argv[1] = "exec-child"
+exec child: envc = 0
+exec child: F_GETFD(3) (opened without O_CLOEXEC) = 0
+exec child: F_GETFD(4) (opened with O_CLOEXEC) = -9 (EBADF)
+exec child: read(3) = 10 "just data\n"
+exec child: SIGUSR1 handler (was caught) = 0
+exec child: SIGUSR2 handler (was ignored) = 1
+exec child: SIGTERM still blocked = yes
+exec child: still in the directory exec.dir = yes
+execve'd child with argv[0] renamed and no environment: exited 3
+-- scripts
+script child: argc = 5
+script child: argv[0] is the #! line's interpreter (../ and the program) = yes
+exec child: argv[1] = "interp-arg"
+exec child: argv[2] = "./script"
+exec child: argv[3] = "a1"
+exec child: argv[4] = ""
+execve'd script: exited 4
+execve(script without x) = -13 (EACCES)
+execve(script, missing interpreter) = -2 (ENOENT)
+exec_test: ok
+-- exit status 0

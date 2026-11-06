@@ -1,0 +1,38 @@
+pwd: /lx/bb.dir
+pipe: HELLO
+sort: a b c 
+sort -r: c b a 
+wc -l: 3
+head -n 2: b a 
+tail -n 1: c
+grep -c: 1
+sed: one three
+cmp: same
+ls: list moved 
+find: a/b/c/f
+rm -r: list moved 
+append: one two 
+test -d: yes
+status of false: 1
+arithmetic: 6
+pipeline of three: 271
+more than a pipe holds: 20000
+function arg
+here-document: line
+case: a*
+basename: c
+dirname: /a/b
+expr: 42
+md5sum: 0bee89b07a248e27c83fc3d5951213c1  -
+env: A=1
+/dev/null: 0
+stderr into the pipe: 1
+xargs: n 1 2 3
+sleep: slept
+touch: t
+stat -c %s: 6
+subshell exit: 7
+background and wait: 0
+cleaned up: yes
+shell.sh: ok
+-- exit status 0

@@ -31,18 +31,30 @@
 //!   SIGPIPE, and delivery on the way back from a system call.
 //! - [`fork`]: fork (clone as a fork) with a copied address space, and
 //!   wait4.
+//! - [`file`]: files and directories on the shared file system: Linux
+//!   paths, open file descriptions, the stat family, getdents64, mkdir,
+//!   unlink, rename, chdir/getcwd, umask; [`exec`]'s execve (with `#!`
+//!   scripts) replaces a process's image.
+//! - [`time`]: the clocks and sleeps; [`timer`]: ITIMER_REAL and alarm.
+//! - [`socket`]: TCP sockets on the kernel's stack (`net::tcp`);
+//!   [`poll`]: poll, ppoll, select, pselect6.
 
 pub mod dispatch;
 pub mod elf;
 pub mod errno;
 pub mod exec;
+pub mod file;
 pub mod fork;
 pub mod mm;
+pub mod poll;
 pub mod sigcalls;
 pub mod signal;
+pub mod socket;
 pub mod stack;
 pub mod state;
 pub mod syscalls;
+pub mod time;
+pub mod timer;
 
 /// Registers the Linux personality's dispatcher (at start, after NT's).
 pub fn init() {

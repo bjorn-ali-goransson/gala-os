@@ -26,9 +26,12 @@ use core::cell::Cell;
 use super::errno::{
     self, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, ENOMEM, ENOSYS, ENOTTY, EPERM, EPIPE, ESPIPE,
 };
+use super::file;
 use super::sigcalls;
+use super::socket;
 use super::state::{self, Fd, LxProcess, Object, PIPE_MAX, PIPE_PAGE, Stream};
 use super::syscalls::{self, nr};
+use super::time;
 use crate::mm::heap::{KArc, TryVec};
 use crate::nt::object::ObjectBody;
 use crate::nt::platform::{self, Personality, SyscallFrame, UserRegs};
@@ -53,6 +56,9 @@ const IOV_MAX: u64 = 1024;
 
 const O_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u64 = 0o2000000;
+/// creat(2) is open with these.
+const CREAT_FLAGS: u64 = 0o1 | 0o100 | 0o1000;
+const AT_REMOVEDIR: u64 = 0x200;
 const F_GETFD: u64 = 1;
 const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
@@ -123,6 +129,8 @@ fn dispatch(frame: &mut SyscallFrame) {
         Ok(v) => v,
         Err(e) => errno::to_return(e),
     };
+    // An expired timer's SIGALRM is delivered with the others below.
+    super::timer::fire(&call);
     crate::flight::record(crate::flight::Kind::SyscallDone, number, rax);
     let Call { process, lx, resume, .. } = call;
     frame.rax = rax;
@@ -156,7 +164,13 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::RT_SIGRETURN => sigcalls::rt_sigreturn(call),
         nr::RT_SIGPENDING => sigcalls::rt_sigpending(call, a(0), a(1)),
         nr::RT_SIGTIMEDWAIT => sigcalls::rt_sigtimedwait(call, a(0), a(1), a(2), a(3)),
-        nr::FORK => super::fork::fork(call, None),
+        nr::RT_SIGSUSPEND => sigcalls::rt_sigsuspend(call, a(0), a(1)),
+        nr::KILL => sigcalls::kill_call(call, a(0), a(1)),
+        nr::SETITIMER => super::timer::setitimer(call, a(0), a(1), a(2)),
+        nr::GETITIMER => super::timer::getitimer(call, a(0), a(1)),
+        nr::ALARM => super::timer::alarm(call, a(0)),
+        nr::FORK => super::fork::fork(call, None, false),
+        nr::VFORK => super::fork::fork(call, None, true),
         nr::CLONE => super::fork::clone(call, a(0), a(1)),
         nr::WAIT4 => super::fork::wait4(call, a(0), a(1), a(2), a(3)),
         nr::IOCTL => match call.lx.fd(a(0)) {
@@ -195,7 +209,77 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         }
         nr::DUP2 => dup_to(call, a(0), a(1), None),
         nr::DUP3 => dup_to(call, a(0), a(1), Some(a(2))),
-        nr::LSEEK => lseek(call, a(0)),
+        nr::LSEEK => lseek(call, a(0), a(1), a(2)),
+        nr::READV => readv(call, a(0), a(1), a(2)),
+        nr::PREAD64 => file::pread(call, a(0), a(1), a(2), a(3), false),
+        nr::PWRITE64 => file::pread(call, a(0), a(1), a(2), a(3), true),
+        nr::OPEN => file::openat(call, file::AT_FDCWD, a(0), a(1), a(2)),
+        nr::CREAT => file::openat(call, file::AT_FDCWD, a(0), CREAT_FLAGS, a(1)),
+        nr::OPENAT => file::openat(call, a(0), a(1), a(2), a(3)),
+        nr::STAT | nr::LSTAT => file::stat(call, a(0), a(1)),
+        nr::FSTAT => file::fstat(call, a(0), a(1)),
+        nr::NEWFSTATAT => file::newfstatat(call, a(0), a(1), a(2), a(3)),
+        nr::GETDENTS64 => file::getdents64(call, a(0), a(1), a(2)),
+        nr::MKDIR => file::mkdirat(call, file::AT_FDCWD, a(0), a(1)),
+        nr::MKDIRAT => file::mkdirat(call, a(0), a(1), a(2)),
+        nr::RMDIR => file::unlinkat(call, file::AT_FDCWD, a(0), AT_REMOVEDIR),
+        nr::UNLINK => file::unlinkat(call, file::AT_FDCWD, a(0), 0),
+        nr::UNLINKAT => file::unlinkat(call, a(0), a(1), a(2)),
+        nr::RENAME => file::renameat(call, file::AT_FDCWD, a(0), file::AT_FDCWD, a(1), 0),
+        nr::RENAMEAT => file::renameat(call, a(0), a(1), a(2), a(3), 0),
+        nr::RENAMEAT2 => file::renameat(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::ACCESS => file::faccessat(call, file::AT_FDCWD, a(0), a(1), 0),
+        nr::FACCESSAT => file::faccessat(call, a(0), a(1), a(2), 0),
+        nr::FACCESSAT2 => file::faccessat(call, a(0), a(1), a(2), a(3)),
+        nr::CHDIR => file::chdir(call, a(0)),
+        nr::FCHDIR => file::fchdir(call, a(0)),
+        nr::GETCWD => file::getcwd(call, a(0), a(1)),
+        nr::READLINK => file::readlinkat(call, file::AT_FDCWD, a(0), a(2)),
+        nr::READLINKAT => file::readlinkat(call, a(0), a(1), a(3)),
+        nr::FTRUNCATE => file::ftruncate(call, a(0), a(1)),
+        nr::TRUNCATE => file::truncate(call, a(0), a(1)),
+        nr::FSYNC | nr::FDATASYNC => file::fsync(call, a(0)),
+        nr::CHMOD => file::chmod(call, file::ChmodTarget::Path(file::AT_FDCWD, a(0)), a(1)),
+        nr::FCHMOD => file::chmod(call, file::ChmodTarget::Fd(a(0)), a(1)),
+        nr::FCHMODAT => file::chmod(call, file::ChmodTarget::Path(a(0), a(1)), a(2)),
+        nr::CHOWN | nr::LCHOWN | nr::FCHOWN => file::chown(a(1), a(2)),
+        nr::FCHOWNAT => file::chown(a(2), a(3)),
+        nr::UMASK => file::umask(call, a(0)),
+        nr::UTIMENSAT => file::utimensat(call, a(0), a(1), a(2), a(3), false),
+        nr::UTIMES => file::utimensat(call, file::AT_FDCWD, a(0), a(1), 0, true),
+        nr::FUTIMESAT => file::utimensat(call, a(0), a(1), a(2), 0, true),
+        nr::EXECVE => super::exec::execve(call, a(0), a(1), a(2)),
+        nr::GETPPID => Ok(call.lx.parent),
+        nr::UNAME => uname(call, a(0)),
+        // The one user: setting the ids it has is allowed, anything else
+        // is EPERM (an unprivileged process).
+        nr::SETUID => same_id(a(0), super::exec::UID),
+        nr::SETGID => same_id(a(0), super::exec::GID),
+        nr::CLOSE_RANGE => close_range(call, a(0), a(1), a(2)),
+        nr::SENDFILE => sendfile(call, a(0), a(1), a(2), a(3)),
+        nr::POLL => super::poll::poll(call, a(0), a(1), a(2)),
+        nr::PPOLL => super::poll::ppoll(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::SELECT => super::poll::select(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::PSELECT6 => super::poll::pselect6(call, a(0), a(1), a(2), a(3), a(4), a(5)),
+        nr::SOCKET => socket::socket(call, a(0), a(1), a(2)),
+        nr::BIND => socket::bind(call, a(0), a(1), a(2)),
+        nr::LISTEN => socket::listen(call, a(0), a(1)),
+        nr::ACCEPT => socket::accept4(call, a(0), a(1), a(2), 0),
+        nr::ACCEPT4 => socket::accept4(call, a(0), a(1), a(2), a(3)),
+        nr::CONNECT => socket::connect(call, a(0), a(1), a(2)),
+        nr::SENDTO => socket::sendto(call, a(0), a(1), a(2), a(3)),
+        nr::RECVFROM => socket::recvfrom(call, a(0), a(1), a(2), a(3), a(4), a(5)),
+        nr::SHUTDOWN => socket::shutdown(call, a(0), a(1)),
+        nr::GETSOCKNAME => socket::getsockname(call, a(0), a(1), a(2)),
+        nr::GETPEERNAME => socket::getpeername(call, a(0), a(1), a(2)),
+        nr::SETSOCKOPT => socket::setsockopt(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::GETSOCKOPT => socket::getsockopt(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::CLOCK_GETTIME => time::clock_gettime(call, a(0), a(1)),
+        nr::CLOCK_GETRES => time::clock_getres(call, a(0), a(1)),
+        nr::GETTIMEOFDAY => time::gettimeofday(call, a(0), a(1)),
+        nr::TIME => time::time(call, a(0)),
+        nr::NANOSLEEP => time::nanosleep(call, a(0), a(1)),
+        nr::CLOCK_NANOSLEEP => time::clock_nanosleep(call, a(0), a(1), a(2), a(3)),
         _ => missing(call, number),
     }
 }
@@ -273,7 +357,7 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     let pipe = match &f.object {
         Object::PipeRead(p) | Object::PipeWrite(p) => Some(p),
-        Object::Console(_) => None,
+        Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => None,
     };
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
@@ -289,17 +373,28 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
             Ok(0)
         }
         F_GETFL => {
-            let access = match f.object {
+            let access = match &f.object {
                 Object::PipeRead(_) | Object::Console(Stream::Stdin) => 0,
                 Object::PipeWrite(_) => 1,
                 Object::Console(_) => 2,
+                Object::File(file) => file::status_flags(file),
+                Object::Socket(_) => file::O_RDWR,
+                Object::Device(d) => match (d.readable, d.writable) {
+                    (true, true) => file::O_RDWR,
+                    (false, true) => file::O_WRONLY,
+                    _ => 0,
+                },
             };
             Ok(access | if f.nonblock() { O_NONBLOCK } else { 0 })
         }
         F_SETFL => {
-            // The access mode is ignored; O_NONBLOCK is the status flag
-            // kept (for every dup of the description).
+            // The access mode is ignored; O_NONBLOCK (and a file's
+            // O_APPEND) are the status flags kept (for every dup of the
+            // description).
             f.nonblock.store(arg & O_NONBLOCK != 0, core::sync::atomic::Ordering::Relaxed);
+            if let Object::File(file) = &f.object {
+                file.append.store(arg & file::O_APPEND != 0, core::sync::atomic::Ordering::Relaxed);
+            }
             Ok(0)
         }
         F_GETPIPE_SZ => Ok(pipe.ok_or(EBADF)?.state.lock().capacity as u64),
@@ -325,6 +420,46 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
     }
 }
 
+fn same_id(id: u64, own: u64) -> Result {
+    if u64::from(id as u32) == own { Ok(0) } else { Err(EPERM) }
+}
+
+/// The `struct utsname` fields (65 bytes each): the system as Linux
+/// programs see it. The release is the kernel the corpus was recorded on
+/// (user/lx), which is what gala's Linux layer follows.
+const UTSNAME: [&[u8]; 6] =
+    [b"Linux", b"gala", b"6.18.0-gala", b"#1 SMP gala", b"x86_64", b"(none)"];
+
+fn uname(call: &Call<'_>, buf: u64) -> Result {
+    let mut out = [0u8; 6 * 65];
+    for (i, field) in UTSNAME.iter().enumerate() {
+        out[i * 65..i * 65 + field.len()].copy_from_slice(field);
+    }
+    call.process.write(buf, &out).map_err(|_| EFAULT)?;
+    Ok(0)
+}
+
+/// close_range: fds `first..=last` close (or, with CLOSE_RANGE_CLOEXEC,
+/// get close-on-exec); CLOSE_RANGE_UNSHARE changes nothing (each process
+/// has its own table).
+fn close_range(call: &Call<'_>, first: u64, last: u64, flags: u64) -> Result {
+    const UNSHARE: u64 = 2;
+    const CLOEXEC: u64 = 4;
+    let (first, last) = (u64::from(first as u32), u64::from(last as u32));
+    if flags & !(UNSHARE | CLOEXEC) != 0 || first > last {
+        return Err(EINVAL);
+    }
+    let end = last.min(state::MAX_FDS as u64 - 1);
+    for fd in first..=end {
+        if flags & CLOEXEC != 0 {
+            call.lx.set_cloexec(fd, true);
+        } else {
+            call.lx.close(fd);
+        }
+    }
+    Ok(0)
+}
+
 /// dup2 (`flags` None) and dup3 (O_CLOEXEC or nothing).
 fn dup_to(call: &Call<'_>, old: u64, new: u64, flags: Option<u64>) -> Result {
     if let Some(flags) = flags
@@ -345,9 +480,14 @@ fn dup_to(call: &Call<'_>, old: u64, new: u64, flags: Option<u64>) -> Result {
 }
 
 /// lseek: a pipe or the console cannot seek.
-fn lseek(call: &Call<'_>, fd: u64) -> Result {
-    match call.lx.fd(fd).ok_or(EBADF)?.object {
-        Object::PipeRead(_) | Object::PipeWrite(_) | Object::Console(_) => Err(ESPIPE),
+fn lseek(call: &Call<'_>, fd: u64, offset: u64, whence: u64) -> Result {
+    match &call.lx.fd(fd).ok_or(EBADF)?.object {
+        Object::PipeRead(_) | Object::PipeWrite(_) | Object::Console(_) | Object::Socket(_) => {
+            Err(ESPIPE)
+        }
+        Object::File(file) => file::lseek(file, offset, whence),
+        // A device's position means nothing: always 0.
+        Object::Device(_) => Ok(0),
     }
 }
 
@@ -379,11 +519,13 @@ fn pipe2(call: &Call<'_>, fds: u64, flags: u64) -> Result {
     Ok(0)
 }
 
-/// Waits a little for a pipe to change (no wait queue yet: a blocking
-/// pipe operation polls); EINTR once the process is ending or a signal
-/// is to be delivered (restarted after it if its handler has
-/// SA_RESTART: `sigcalls::deliver`).
-fn pause(call: &Call<'_>) -> core::result::Result<(), u16> {
+/// One step of every blocking wait of the personality (pipes, sockets,
+/// poll, sleeps: no wait queues yet, they poll): an expired timer raises
+/// its SIGALRM; EINTR once the process is ending or a signal is to be
+/// delivered (restarted after it if its handler has SA_RESTART and the
+/// call may be: `sigcalls::deliver`); else a millisecond's sleep.
+pub fn pause(call: &Call<'_>) -> core::result::Result<(), u16> {
+    super::timer::fire(call);
     if call.process.exit_status().is_some() || call.lx.signals.lock().deliverable().is_some() {
         return Err(EINTR);
     }
@@ -398,6 +540,9 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         // No console input yet: end of file.
         Object::Console(Stream::Stdin) => Ok(0),
         Object::Console(_) | Object::PipeWrite(_) => Err(EBADF),
+        Object::File(file) => file::read(call, file, buf, count),
+        Object::Device(dev) => file::device_read(call, dev, buf, count),
+        Object::Socket(sock) => socket::recv(call, &f, sock, buf, count, 0),
         Object::PipeRead(pipe) => loop {
             if count == 0 {
                 return Ok(0);
@@ -436,6 +581,11 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
     let count = count.min(MAX_RW);
     match &f.object {
         Object::Console(Stream::Stdin) | Object::PipeRead(_) => Err(EBADF),
+        Object::File(file) => file::write(call, file, buf, count),
+        Object::Device(dev) => file::device_write(dev, count),
+        Object::Socket(sock) => socket::send(call, &f, sock, count as usize, 0, |at, out| {
+            call.process.read(buf + at as u64, out).map_err(|_| EFAULT)
+        }),
         Object::Console(stream) => {
             // A piece at a time; a fault after some pieces ends the write
             // with what was written, one at the start is EFAULT.
@@ -456,51 +606,67 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
             }
             Ok(done)
         }
-        Object::PipeWrite(pipe) => loop {
-            if count == 0 {
-                return Ok(0);
-            }
-            let (room, readers) = {
-                let st = pipe.state.lock();
-                (st.free(), st.readers)
-            };
-            if readers == 0 {
-                sigcalls::sigpipe(call);
-                return Err(EPIPE);
-            }
-            let count = count as usize;
-            // Up to PIPE_BUF bytes go in whole or not at all; more are
-            // written as room allows (all of it in blocking mode, which
-            // waits for the rest).
-            let fits = if count <= PIPE_BUF { room >= count } else { room > 0 };
-            if !fits {
-                if f.nonblock() {
-                    return Err(EAGAIN);
-                }
-                pause(call)?;
-                continue;
-            }
-            let n = count.min(room);
-            if !f.nonblock() && n < count {
-                pause(call)?;
-                continue;
-            }
-            // Copied in whole first: a fault anywhere is EFAULT with
-            // nothing written (write_exit_test: Linux does that too).
-            let mut data = Vec::new();
-            if data.try_reserve_exact(n).is_err() {
-                return Err(ENOMEM);
-            }
-            data.resize(n, 0);
-            call.process.read(buf, &mut data).map_err(|_| EFAULT)?;
-            let mut st = pipe.state.lock();
-            if st.data.try_reserve(n).is_err() {
-                return Err(ENOMEM);
-            }
-            st.data.extend(data.iter());
-            return Ok(n as u64);
-        },
+        Object::PipeWrite(pipe) => pipe_write(call, &f, pipe, count as usize, |at, out| {
+            call.process.read(buf + at as u64, out).map_err(|_| EFAULT)
+        }),
     }
+}
+
+/// A write of `count` bytes to `pipe` through fd `f`, its bytes fetched
+/// piece by piece (`fetch(offset, out)` fills `out` with the bytes from
+/// `offset` on). Up to PIPE_BUF bytes go in whole or not at all; a larger
+/// write takes what room there is and, blocking, waits for more until all
+/// of it is in (a signal ends it with what was written, or EINTR). A
+/// piece that cannot be fetched is not written: EFAULT if nothing was
+/// (write_exit_test: Linux keeps nothing of a buffer that runs into a
+/// hole within its first piece). No reader: SIGPIPE and EPIPE (or the
+/// count already written).
+fn pipe_write(
+    call: &Call<'_>,
+    f: &Fd,
+    pipe: &state::Pipe,
+    count: usize,
+    mut fetch: impl FnMut(usize, &mut [u8]) -> core::result::Result<(), u16>,
+) -> Result {
+    let mut done = 0usize;
+    let partial = |done: usize, e: u16| if done > 0 { Ok(done as u64) } else { Err(e) };
+    while done < count {
+        let (room, readers) = {
+            let st = pipe.state.lock();
+            (st.free(), st.readers)
+        };
+        if readers == 0 {
+            sigcalls::sigpipe(call);
+            return partial(done, EPIPE);
+        }
+        let left = count - done;
+        let fits = if count <= PIPE_BUF { room >= left } else { room > 0 };
+        if !fits {
+            if f.nonblock() {
+                return partial(done, EAGAIN);
+            }
+            if let Err(e) = pause(call) {
+                return partial(done, e);
+            }
+            continue;
+        }
+        let n = left.min(room);
+        let mut data = Vec::new();
+        if data.try_reserve_exact(n).is_err() {
+            return partial(done, ENOMEM);
+        }
+        data.resize(n, 0);
+        if let Err(e) = fetch(done, &mut data) {
+            return partial(done, e);
+        }
+        let mut st = pipe.state.lock();
+        if st.data.try_reserve(n).is_err() {
+            return partial(done, ENOMEM);
+        }
+        st.data.extend(data.iter());
+        done += n;
+    }
+    Ok(done as u64)
 }
 
 fn writev(call: &Call<'_>, fd: u64, iov: u64, count: u64) -> Result {
@@ -538,30 +704,113 @@ fn writev(call: &Call<'_>, fd: u64, iov: u64, count: u64) -> Result {
     write_bytes(call, fd, &data)
 }
 
+/// readv: one read as long as the vectors together, its bytes scattered
+/// over them (a pipe's are taken once they are all copied out).
+fn readv(call: &Call<'_>, fd: u64, iov: u64, count: u64) -> Result {
+    if count > IOV_MAX {
+        return Err(EINVAL);
+    }
+    call.lx.fd(fd).ok_or(EBADF)?;
+    let mut pieces: Vec<(u64, u64)> = Vec::new();
+    let mut total = 0u64;
+    for i in 0..count {
+        let base = call.process.read_u64(iov + i * 16).map_err(|_| EFAULT)?;
+        let len = call.process.read_u64(iov + i * 16 + 8).map_err(|_| EFAULT)?;
+        total = total.checked_add(len).filter(|&t| t <= i64::MAX as u64).ok_or(EINVAL)?;
+        if len > 0 {
+            pieces.try_push((base, len)).map_err(|_| ENOMEM)?;
+        }
+    }
+    // One vector: a plain read. Otherwise a read into the first, and on
+    // into the next only while each is filled (what a reader of the
+    // whole would see; a pipe gives what it holds, piece by piece).
+    let mut done = 0u64;
+    for (base, len) in pieces {
+        let n = match read(call, fd, base, len) {
+            Ok(n) => n,
+            Err(e) if done == 0 => return Err(e),
+            Err(_) => break,
+        };
+        done += n;
+        if n < len {
+            break;
+        }
+        if let Some(f) = call.lx.fd(fd)
+            && matches!(f.object, Object::PipeRead(_))
+            && pipe_empty(&f.object)
+        {
+            break;
+        }
+    }
+    Ok(done)
+}
+
+/// Whether a pipe holds no bytes now (readv stops instead of blocking).
+fn pipe_empty(object: &Object) -> bool {
+    match object {
+        Object::PipeRead(p) => p.state.lock().data.is_empty(),
+        _ => false,
+    }
+}
+
+/// sendfile: up to `count` bytes (64 KiB a call) from the file `in_fd`
+/// (at `*offset`, which moves on, or at its own offset) written to
+/// `out_fd` as one write.
+fn sendfile(call: &Call<'_>, out_fd: u64, in_fd: u64, offset: u64, count: u64) -> Result {
+    let f = call.lx.fd(in_fd).ok_or(EBADF)?;
+    call.lx.fd(out_fd).ok_or(EBADF)?;
+    let Object::File(file) = &f.object else { return Err(EINVAL) };
+    if !file.readable || file.path_only {
+        return Err(EBADF);
+    }
+    if file.dir {
+        return Err(EINVAL);
+    }
+    let at = if offset != 0 {
+        let at = call.process.read_u64(offset).map_err(|_| EFAULT)?;
+        if (at as i64) < 0 {
+            return Err(EINVAL);
+        }
+        at
+    } else {
+        *file.position.lock()
+    };
+    let n = count.min(MAX_RW).min(CHUNK as u64) as usize;
+    let mut data = Vec::new();
+    data.try_reserve_exact(n).map_err(|_| ENOMEM)?;
+    data.resize(n, 0);
+    let got = file::read_node(file, at, &mut data)?;
+    if got == 0 {
+        return Ok(0);
+    }
+    let written = write_bytes(call, out_fd, &data[..got])?;
+    if offset != 0 {
+        call.process.write(offset, &(at + written).to_le_bytes()).map_err(|_| EFAULT)?;
+    } else {
+        *file.position.lock() = at + written;
+    }
+    Ok(written)
+}
+
 /// Writes kernel bytes to `fd` (writev's gathered pieces).
 fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
     match &f.object {
         Object::Console(Stream::Stdin) | Object::PipeRead(_) => Err(EBADF),
+        Object::File(file) => file::write_bytes(file, data),
+        Object::Device(dev) => file::device_write(dev, data.len() as u64),
+        Object::Socket(sock) => socket::send(call, &f, sock, data.len(), 0, |at, out| {
+            out.copy_from_slice(&data[at..at + out.len()]);
+            Ok(())
+        }),
         Object::Console(stream) => {
             call.lx.console_write(*stream, data).map_err(|_| ENOMEM)?;
             Ok(data.len() as u64)
         }
-        Object::PipeWrite(pipe) => {
-            let mut st = pipe.state.lock();
-            if st.readers == 0 {
-                drop(st);
-                sigcalls::sigpipe(call);
-                return Err(EPIPE);
-            }
-            let n = data.len().min(st.free());
-            if n == 0 {
-                return Err(EAGAIN);
-            }
-            st.data.try_reserve(n).map_err(|_| ENOMEM)?;
-            st.data.extend(data[..n].iter());
-            Ok(n as u64)
-        }
+        Object::PipeWrite(pipe) => pipe_write(call, &f, pipe, data.len(), |at, out| {
+            out.copy_from_slice(&data[at..at + out.len()]);
+            Ok(())
+        }),
     }
 }
 

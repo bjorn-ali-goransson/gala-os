@@ -58,7 +58,17 @@ static const char *errno_name(i64 e)
 	case 38: return "ENOSYS";
 	case 39: return "ENOTEMPTY";
 	case 40: return "ELOOP";
+	case 88: return "ENOTSOCK";
 	case 95: return "EOPNOTSUPP";
+	case 97: return "EAFNOSUPPORT";
+	case 98: return "EADDRINUSE";
+	case 99: return "EADDRNOTAVAIL";
+	case 104: return "ECONNRESET";
+	case 106: return "EISCONN";
+	case 107: return "ENOTCONN";
+	case 111: return "ECONNREFUSED";
+	case 114: return "EALREADY";
+	case 115: return "EINPROGRESS";
 	case 110: return "ETIMEDOUT";
 	}
 	return 0;

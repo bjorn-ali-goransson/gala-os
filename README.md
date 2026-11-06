@@ -8,7 +8,8 @@ ships its own clean-room `ntdll.dll`, `kernel32.dll`, `msvcrt.dll`,
 `ws2_32.dll` and about fifty other system DLLs, so `.exe` files built for
 Windows (by MSVC, mingw-w64, Go or Rust, or downloaded as their makers
 ship them) run on it as they are. A Linux personality on the same core
-runs its first static Linux programs.
+runs static Linux programs: busybox's shell and tools, its httpd and
+wget.
 
 - **Clean room.** Written from public documentation, headers, open-source
   reimplementations and the black-box behaviour of Windows only; never
@@ -162,10 +163,14 @@ test programs in `user/*_test`:
 ### Linux programs
 
 Static and static-pie Linux ELF programs (musl) run as Linux-personality
-processes on the same kernel core (`lxrun=/lx/<binary>`): `write`,
-`exit`, `brk`, `mmap`/`munmap`/`mprotect`, `arch_prctl`, pipes and the
-auxiliary vector, each transcript equal to real Linux's (`lx_*`
-scenarios). The rest of the Linux system calls are ROADMAP item LX.
+processes on the same kernel core (`lxrun=/lx/<binary>`): memory, pipes,
+signals, fork, vfork and execve (with `#!` scripts), files and
+directories on the shared file system, clocks and timers, TCP sockets
+and poll/select, each test's transcript equal to real Linux's (`lx_*`
+scenarios). The static busybox from busybox.net runs a shell script of
+pipelines and applets (`lx_busybox`) and serves files with its httpd to
+its wget over loopback (`lx_httpd`). Threads, futex, symlinks, epoll and
+dynamic linking are not there yet (ROADMAP item LX).
 
 ### Not there yet
 

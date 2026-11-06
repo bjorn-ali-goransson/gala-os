@@ -38,6 +38,8 @@ const WCLONE: u64 = 0x8000_0000;
 
 /// clone's CSIGNAL: the low byte is the exit signal.
 const CSIGNAL: u64 = 0xff;
+const CLONE_VM: u64 = 0x100;
+const CLONE_VFORK: u64 = 0x4000;
 
 /// The parent's address space for a child: its VAD and every mapped page
 /// copied (the parent is in this system call; with one thread nothing
@@ -67,8 +69,11 @@ fn copy_space(parent: &Process) -> core::result::Result<(UserSpace, Vad, u64), &
     Ok((space, vad, pages))
 }
 
-/// fork (and clone without flags; `stack`: clone's new stack pointer).
-pub fn fork(call: &Call<'_>, stack: Option<u64>) -> Result {
+/// fork (and clone without flags; `stack`: clone's new stack pointer);
+/// with `vfork`, the parent then waits until the child execs or ends
+/// (vfork(2); the child's memory is a copy, not the parent's: ledgered
+/// as `linux clone flags missing` CLONE_VM).
+pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
     let parent = &call.process;
     let mut regs = return_regs(call.frame);
     regs.gpr[0] = 0;
@@ -106,7 +111,7 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>) -> Result {
         charge::ended(&child);
         process::forget_bare(&child);
     };
-    let lx = match state::fork(&call.lx, child.id) {
+    let lx = match state::fork(&call.lx, child.id, vfork) {
         Ok(s) => s,
         Err(_) => {
             undo();
@@ -123,15 +128,44 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>) -> Result {
         );
         return Err(EAGAIN);
     }
-    crate::info!("lx: pid {} fork: child pid {} ({pages} pages copied)", parent.id, child.id);
+    crate::info!(
+        "lx: pid {} {}: child pid {} ({pages} pages copied)",
+        parent.id,
+        if vfork { "vfork" } else { "fork" },
+        child.id
+    );
     process::announce_start(&child, regs.rip, child.path);
+    if vfork {
+        ledger::record("vfork", "linux clone flags missing", CLONE_VM);
+        wait_for_exec(call, &lx);
+    }
     Ok(child.id)
+}
+
+/// A vfork's parent waits until its child execs or ends (or itself is
+/// ending: Linux's wait is killable only).
+fn wait_for_exec(call: &Call<'_>, child: &state::LxProcess) {
+    let me = platform::current();
+    loop {
+        {
+            let mut v = child.vfork.lock();
+            v.waiter = None;
+            if v.released || call.process.exit_status().is_some() {
+                return;
+            }
+            v.waiter = Some(me);
+            platform::prepare_wait(None);
+        }
+        platform::wait();
+    }
 }
 
 /// clone(flags, stack, parent_tid, child_tid, tls): a fork when the flags
 /// are only an exit signal (SIGCHLD or none: the C library's fork).
 pub fn clone(call: &Call<'_>, flags: u64, stack: u64) -> Result {
-    if flags & !CSIGNAL != 0 {
+    // CLONE_VM|CLONE_VFORK: a vfork (posix_spawn's), on the stack given.
+    let vfork = flags & !CSIGNAL == CLONE_VM | CLONE_VFORK;
+    if flags & !CSIGNAL != 0 && !vfork {
         ledger::record("clone", "linux clone flags missing", flags);
         return Err(ENOSYS);
     }
@@ -141,7 +175,7 @@ pub fn clone(call: &Call<'_>, flags: u64, stack: u64) -> Result {
         ledger::record("clone", "linux clone flags missing", flags);
         return Err(ENOSYS);
     }
-    fork(call, (stack != 0).then_some(stack))
+    fork(call, (stack != 0).then_some(stack), vfork)
 }
 
 /// wait4(pid, status, options, rusage): reaps an ended child (pid > 0:
@@ -161,6 +195,8 @@ pub fn wait4(call: &Call<'_>, pid: u64, status: u64, options: u64, rusage: u64) 
     let wanted = |child: u64| pid <= 0 || child == pid as u64;
     let me = platform::current();
     loop {
+        // An expired timer interrupts the wait (its SIGALRM).
+        super::timer::fire(call);
         {
             let mut c = call.lx.children.lock();
             c.waiters.retain(|&w| w != me);
@@ -196,7 +232,12 @@ pub fn wait4(call: &Call<'_>, pid: u64, status: u64, options: u64, rusage: u64) 
                 return Err(EINTR);
             }
             c.waiters.try_push(me).map_err(|_| ENOMEM)?;
-            platform::prepare_wait(None);
+            // Woken by a child's end, or at the timer's expiry.
+            let deadline = super::timer::next_deadline(call).map(|at| {
+                let ns = at.saturating_sub(platform::monotonic_ns());
+                platform::ticks() + ns.div_ceil(1_000_000_000 / platform::TICK_HZ).max(1)
+            });
+            platform::prepare_wait(deadline);
         }
         platform::wait();
     }

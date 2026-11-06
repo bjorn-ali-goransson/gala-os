@@ -2129,6 +2129,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sshfwd_test"
+version = "0.1.0"
+
+[[package]]
 name = "sspi_test"
 version = "0.1.0"
 

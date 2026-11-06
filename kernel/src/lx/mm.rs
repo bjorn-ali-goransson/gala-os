@@ -62,7 +62,7 @@ fn round_up(len: u64) -> Option<u64> {
 
 /// After a change of `[start, end)` in the VAD: the charge follows and
 /// the page tables match.
-fn sync(process: &Process, vad: &Vad, start: u64, end: u64) {
+pub fn sync(process: &Process, vad: &Vad, start: u64, end: u64) {
     charge::sync(process, vad.private_commit());
     vm::sync_range(process, vad, start, end - start);
 }

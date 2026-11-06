@@ -1425,13 +1425,16 @@ the volume device `\Device\HarddiskVolume1`, linked as `\??\C:`; with
   its data files) take a FILE_SEGMENT_ELEMENT array of 4 KiB page
   pointers and a length, and complete as NtReadFile and NtWriteFile do,
   on the same `read_range`/`write_range` helpers.
-- **File times**: nodes keep a creation and a write time (NT times);
-  FileBasicInformation reports the write time as the access and change
-  times too. Setting FileBasicInformation (FILE_WRITE_ATTRIBUTES) changes
-  the creation and write times given (0 or -1 keep a value; the access
-  and change times are not stored) and the settable attribute bits;
-  kernel32's SetFileTime/GetFileTime are built on it (make compares
-  write times, tar restores them).
+- **File times**: nodes keep a creation, an access and a write time (NT
+  times; `ramfs::Times`); the change time reported is the write time.
+  A write (or size change) sets the access time with the write time; a
+  read does not (Windows with last-access updates off). Setting
+  FileBasicInformation (FILE_WRITE_ATTRIBUTES) changes the times given
+  (0 or -1 keep a value; the change time is not stored) and the settable
+  attribute bits; kernel32's SetFileTime/GetFileTime are built on it
+  (make compares write times, tar and scp -p restore the write and
+  access times: `kernel32_file_test`, `sshd_scp`). Directory
+  enumeration reports the same times.
 - **Byte-range locks** (`nt::locks`): every lock (file node, owning file
   object and key, range, shared or exclusive) is in one list. A request
   conflicts with an overlapping lock if either is exclusive, whoever owns
@@ -3840,7 +3843,9 @@ the disk is only written (never read) while running.
 - `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
   not survive a reboot): Create (directory or file, attributes, times; a
   file that exists is emptied), Write (offset, data of at most 64 KiB,
-  time), SetSize, SetBasic (times, attributes), SetSecurity (the
+  time), SetSize, SetBasic (creation, access and write times,
+  attributes; record version 2 added the access time after the
+  attributes, a version 1 record's is its write time), SetSecurity (the
   self-relative descriptor), Rename, Delete (with everything below).
   Each record carries the log's generation and a CRC-32; the first
   record that does not check out ends the log.
@@ -6626,17 +6631,22 @@ calls; priorities come from `strace` of target programs on real Linux.
 | Milestone | Scope | State |
 |---|---|---|
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
-| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | ABI data ready (`lx_abi`) |
+| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run (`lx_busybox`); clone of threads and futex not yet |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
-| 4 | dynamic linking (ld.so, glibc), epoll, sockets | planned |
+| 4 | dynamic linking (ld.so, glibc), epoll, sockets | TCP sockets, poll and select run (`lx_socket`, busybox httpd and wget: `lx_httpd`); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
 
 Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
 mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_hello`, `lx_write_exit`, `lx_brk`, `lx_mmap`, `lx_arch_prctl`,
-`lx_auxv` and their `_pie` variants), and clock_test, fork_test,
-fs_test, pipe_test, poll_test, proc_test, pty_test, signal_test,
-thread_test, whose transcripts recorded on Linux fix `lx_abi`'s layouts.
+`lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
+exec_test and socket_test (`lx_fileio`, `lx_exec`, `lx_socket`, each
+also `_pie`), and clock_test, fork_test, fs_test, poll_test, proc_test,
+pty_test, signal_test, thread_test, whose transcripts recorded on Linux
+fix `lx_abi`'s layouts and are the spec for what is still missing. The
+static busybox from busybox.net (a `PREBUILT`) runs our scripts in
+`user/lx/busybox/` (`lx_busybox`: the shell and coreutils-style applets;
+`lx_httpd`: httpd and wget over loopback).
 
 ### The lx module
 
@@ -6699,7 +6709,8 @@ The running parts (milestone 1; `lxrun=`):
   alone), `lxenv=` the environment of all of them (default none)):
   - the Linux path `/a/b` is `C:\a\b` (one file system); the file is read
     whole and parsed; an `ElfError` becomes ENOEXEC/EINVAL; a PT_INTERP
-    is refused (milestone 4);
+    is refused (milestone 4); the process starts in its program's
+    directory (as `cargo xtask lx-expect` runs the tests), umask 022;
   - ET_EXEC is mapped at its addresses, ET_DYN at `DEFAULT_DYN_BASE`
     (rounded to its alignment); each segment's page range goes in the
     VAD (`Vad::map_exact`, page-granular, MEM_PRIVATE, committed); a page
@@ -6715,6 +6726,26 @@ The running parts (milestone 1; `lxrun=`):
     layout: `Process::layout()` is None) and `thread::create`, which
     gives a non-NT thread no TEB: GS and FS base 0, rip = AT_ENTRY, rsp =
     argc's address, every other register 0 (rdx 0: no atexit function).
+- **execve** (`lx::exec::execve`; exec_test): the path resolved as any
+  (`lx::file`), a directory or a file without its owner's x bit EACCES;
+  argv/envp copied in (EFAULT for a bad pointer, E2BIG past a quarter of
+  the stack or a 128 KiB string); a `#!` line (its first 256 bytes) runs
+  its interpreter with `interp [arg] path argv[1..]`, the rest of the
+  line one argument, trimmed (one level of scripts: a script as
+  interpreter is ELOOP, ledgered); everything that can fail (ELF parse,
+  stack build) is done before the old image goes. Then the same process
+  gets the new image in place: the whole VAD unmapped and its frames
+  freed (`mm::sync`), the image's ranges and the stack mapped writable,
+  the bytes written through the process's own demand-zero pages, each
+  range given its protection; a failure from there kills it with
+  SIGSEGV (Linux's rule). Kept: the pid, the fds but the close-on-exec
+  ones, the mask, pending signals, ignored actions (caught ones go back
+  to SIG_DFL: `Signals::exec`), the directory, umask and ITIMER_REAL;
+  reset: the break, FS/GS bases 0, MXCSR 0x1f80; the thread goes on at
+  the entry with every register as a fresh start (`Call::resume`). Not
+  yet: x87's control word and the rest of the XSAVE state are not reset,
+  the core process keeps its first name and image span (logs, crash
+  reports), other threads (none exist yet) are not ended.
 - **FS/GS bases**: the scheduler keeps a user FS base per thread beside
   the GS base; the switch writes IA32_FS_BASE only when it differs from
   the per-CPU cached value (NT threads all have 0: no cost between
@@ -6722,9 +6753,12 @@ The running parts (milestone 1; `lxrun=`):
   (gala-um refuses: its host libc owns FS). FSGSBASE stays off, so user
   code cannot change them behind the kernel's back.
 - **State** (`lx::state`, a table keyed by pid): the break, the fd table
-  (fds 0-2 on the console; pipes: slots holding a shared open file
-  description, `Fd`, whose O_NONBLOCK every dup sees, and the fd's own
-  close-on-exec flag), the signal state (`lx::signal::Signals`), the
+  (fds 0-2 on the console; slots holding a shared open file description,
+  `Fd`, whose O_NONBLOCK every dup sees, and the fd's own close-on-exec
+  flag; a description is the console, a pipe end, a file or directory,
+  a character device or a socket), the current directory and umask,
+  ITIMER_REAL, a vfork child's hold on its parent, the signal state
+  (`lx::signal::Signals`), the
   parent's pid and the exit signal, the children (running, ended
   zombies with their status, threads waiting in wait4), the
   stdout/stderr line buffers; dropped in `nt::process::finish`
@@ -6748,9 +6782,14 @@ The running parts (milestone 1; `lxrun=`):
   writev, getpid, gettid, exit (the thread), exit_group (the process,
   status & 0xff), fcntl (F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD/F_SETFD
   (FD_CLOEXEC only), F_GETFL/F_SETFL (O_NONBLOCK; the access mode
-  ignored), F_GETPIPE_SZ/F_SETPIPE_SZ), dup, dup2, dup3 (O_CLOEXEC;
-  the lowest free fd, a negative target EBADF), lseek (ESPIPE: only
-  pipes and the console exist), getuid/geteuid/getgid/getegid,
+  ignored; a file's O_APPEND), F_GETPIPE_SZ/F_SETPIPE_SZ), dup, dup2,
+  dup3 (O_CLOEXEC; the lowest free fd, a negative target EBADF),
+  close_range (CLOSE_RANGE_CLOEXEC), lseek (ESPIPE on pipes, the console
+  and sockets), getuid/geteuid/getgid/getegid, setuid/setgid (to the ids
+  it has; else EPERM), getppid, uname (`Linux`, `gala`, release
+  `6.18.0-gala`: the corpus's kernel, `x86_64`), the file calls, execve,
+  vfork, kill, rt_sigsuspend, the clocks and timers, sockets and poll
+  (below),
   arch_prctl (SET/GET FS/GS; a base at or above TASK_SIZE is EPERM),
   set_tid_address (returns the tid), pipe and pipe2 (O_NONBLOCK,
   O_CLOEXEC; blocking reads and writes poll every ms until the process
@@ -6759,8 +6798,94 @@ The running parts (milestone 1; `lxrun=`):
   two pages (at most 1 MiB unprivileged, EPERM; EBUSY under what it
   holds); its first page is free only once read through, so a full pipe
   that gave up a few bytes still refuses a small write; writes up to
-  PIPE_BUF (4096) are whole or nothing. Anything else:
+  PIPE_BUF (4096) are whole or nothing, a larger one takes what room
+  there is and, blocking, waits for the rest (`pipe_write`, the one path
+  of write, writev and sendfile: a signal ends it with what was written,
+  a buffer fault before anything was written is EFAULT). readv reads
+  into one vector after another while each fills. Anything else:
   `errno::to_return(ENOSYS)`.
+- **Files** (`lx::file`; fileio_test, fs_test the fuller spec): Linux
+  paths walked on the shared ramfs (`/` separators, `.` and `..` by the
+  walk, ENOTDIR/ENOENT on the way, a trailing slash makes the last a
+  directory, UTF-8 names of up to 255 bytes: other bytes or a `\` are
+  EINVAL, ledgered; names compare case-insensitively as the file
+  system's: seam 4). An open registers with the file system sharing
+  everything and keeps the offset in the description (dup'ed and
+  inherited fds share it; its lock is never held across user memory).
+  The calls: open/openat/creat (O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
+  O_DIRECTORY, O_PATH, O_CLOEXEC, O_NONBLOCK; O_TMPFILE EOPNOTSUPP), read,
+  write, pread64/pwrite64, readv/writev, lseek (SEEK_DATA/HOLE: one hole
+  at the end; a directory only back to an offset getdents64 gave),
+  ftruncate/truncate, fsync/fdatasync, the stat family (stat, lstat,
+  fstat, newfstatat with AT_EMPTY_PATH), getdents64 (`.` and `..` first,
+  then the entries in the file system's order; it goes on after the last
+  name it returned, so `rm -r` deleting between calls skips nothing;
+  d_ino the node + 1, d_off the entry's index + 1), mkdir/mkdirat,
+  unlink/unlinkat/rmdir, rename/renameat/renameat2 (RENAME_NOREPLACE;
+  an empty directory replaced; into itself EINVAL), access/faccessat/
+  faccessat2 (the owner's bits: every file is uid 1000's),
+  chdir/fchdir/getcwd, readlink (EINVAL: no symlinks yet),
+  chmod/fchmod/fchmodat, chown and friends (to the ids it has, else
+  EPERM), umask, utimensat/utimes/futimesat (UTIME_NOW, UTIME_OMIT; to
+  the 100 ns the file system keeps), sendfile. Metadata: the type from the node, the
+  permission bits the node's POSIX mode (`ramfs::Node::mode`, set at
+  creation from the mode and umask, or by chmod; not in the change log
+  yet), else 0755 (0555 for a read-only file); nlink 1 for a file, 2 +
+  subdirectories for a directory; atime the access time, mtime and ctime
+  the write time. Unlink and
+  rmdir mark the node delete-pending and close a delete open: an open
+  node stays until its last close, its name taken meanwhile (Linux frees
+  it at once; ledgered). Character devices by exact path (no /dev
+  directory yet): /dev/null, zero, full, random, urandom; /dev/tty is
+  ENXIO (no controlling terminal).
+- **vfork** (and clone(CLONE_VM|CLONE_VFORK), posix_spawn's): a fork
+  whose parent then waits until the child execs or ends (`state::Vfork`,
+  woken by `release_vfork`); the child's memory is a copy, not shared
+  (ledgered `linux clone flags missing` CLONE_VM): fork_test's vfork
+  check does not pass yet.
+- **Clocks and timers** (`lx::time`, `lx::timer`; clock_test is the
+  spec): clock_gettime/clock_getres (REALTIME and its variants from the
+  system time, MONOTONIC, _RAW, _COARSE, BOOTTIME from the monotonic
+  clock; resolution 1 ns), gettimeofday, time, nanosleep and
+  clock_nanosleep (TIMER_ABSTIME; EINTR with `rem`, never restarted).
+  The CPU-time clocks need per-thread CPU accounting, which the
+  scheduler lacks: EINVAL, ledgered (clock_test cannot pass yet).
+  ITIMER_REAL (setitimer, getitimer, alarm): SIGALRM (SI_KERNEL) at
+  expiry, its interval re-arming; noticed on the way back from every
+  call and in every wait (`dispatch::pause`; wait4 sleeps until the
+  deadline at the latest); ITIMER_VIRTUAL/PROF EINVAL, ledgered.
+- **Sockets** (`lx::socket`; socket_test): AF_INET and AF_INET6 (dual
+  stack unless IPV6_V6ONLY) stream sockets on `net::tcp`, the stack NT's
+  AFD uses, with a token AFD does not know (Linux sockets poll, the
+  notify hook is AFD's): socket (SOCK_NONBLOCK, SOCK_CLOEXEC; datagram,
+  Unix and netlink sockets ledgered, refused), bind, listen (binds an
+  ephemeral port first if needed), accept/accept4, connect (blocking;
+  non-blocking always EINPROGRESS, the next connect after it finished
+  returns 0 once, then EISCONN; refused: ECONNREFUSED or SO_ERROR once,
+  and it may connect again), read/write/readv/writev, send/recv/
+  sendto/recvfrom (MSG_PEEK, MSG_DONTWAIT, MSG_WAITALL, MSG_NOSIGNAL;
+  EPIPE and SIGPIPE once the connection cannot send), shutdown,
+  getsockname/getpeername (IPv4 peers of an IPv6 socket as mapped
+  addresses), setsockopt/getsockopt (SO_TYPE, SO_ERROR, SO_ACCEPTCONN;
+  SO_REUSEADDR, SO_KEEPALIVE, SO_REUSEPORT, SO_BROADCAST, buffer sizes
+  (doubled, as Linux reports them), SO_LINGER, timeouts, TCP_NODELAY
+  kept and read back without effect on the stack; others ENOPROTOOPT,
+  ledgered). A socket closes with its last description.
+- **poll** (`lx::poll`; poll_test's poll and select parts, socket_test):
+  poll, ppoll, select, pselect6 over every kind of description (pipes:
+  IN with bytes, HUP without writers, OUT with a whole page free, ERR
+  without readers; files and devices always ready; sockets: a listener
+  IN with a connection waiting, a connection IN with bytes or at the end
+  of the stream, OUT with room, ERR|HUP once refused); select's EBADF
+  counts only fds within the table (at least 64, a power of two). Time
+  left is written back (ppoll, select, pselect6); their masks are
+  rt_sigsuspend's kind (`Signals::suspend`). epoll is not there yet.
+- **Waiting**: every blocking call (pipes, sockets, poll, sleeps,
+  rt_sigsuspend, rt_sigtimedwait) polls every millisecond through
+  `dispatch::pause` (an expired timer fires, then EINTR if a signal is
+  deliverable or the process is ending); wait4 and vfork's parent sleep
+  until woken. Wait queues on the core objects replace the polling with
+  seam 5.
 - **Signals** (`lx::signal`: plain data, host-tested; `lx::sigcalls`:
   the calls and delivery; layouts and numbers from `lx_abi::signal`):
   - the actions are the process's; the blocked mask and the
@@ -6809,7 +6934,14 @@ The running parts (milestone 1; `lxrun=`):
     end with EINTR when a signal is deliverable; read, write, writev and
     wait4 are restarted (rip back over `syscall`, rax the number) after
     a handler with SA_RESTART or a signal that turned out ignored.
-  - Not yet: kill, tgkill, rt_sigqueueinfo, rt_sigsuspend,
+  - kill (pid > 0; sig 0 checks; SIGKILL ends the target at once,
+    other signals reach it on the way back from its next system call;
+    process groups ledgered, ESRCH); rt_sigsuspend (the mask until a
+    signal is delivered; the handler's frame saves the old one, which
+    comes back at once if no handler runs: `Signals::suspend`,
+    `frame_mask`, `restore_saved_mask`); SA_RESTART also restarts readv,
+    pread64/pwrite64, accept/accept4, recvfrom and sendto.
+  - Not yet: tgkill, rt_sigqueueinfo,
     sigaltstack (SA_ONSTACK is ledgered and the current stack used),
     CPU faults as signals (an exception still ends the process with its
     NT status, read as SIGSEGV etc.), delivery to a thread running user
@@ -6862,10 +6994,19 @@ The running parts (milestone 1; `lxrun=`):
   child pid <c> (<n> pages copied)` then the core's process line and
   `process start` event (ppid); a failed fork logs why; an `lx child
   ended` event (pid, child, wait status, signal, whether the SIGCHLD was
-  discarded, whether reaped at once). Ledger: `linux clone flags
-  missing`, `linux signal action missing` (Stop), `linux signal option
-  missing` (SA_ONSTACK), `linux option missing` (wait4's process
-  groups).
+  discarded, whether reaped at once); a vfork logs `lx: pid <p> vfork:
+  child pid <c> ...`. execve: `lx: pid <p> execve <path>` then the
+  image's `lx: exec` line; a refused image logs `lx: pid <p> execve
+  <path> failed: <why>`, one that cannot be mapped after the old is gone
+  `... killed by SIGSEGV`. Sockets: the stack's `tcp accept`, `tcp
+  connect`, `tcp close` events (`events=net`). Ledger: `linux clone
+  flags missing` (and vfork's CLONE_VM), `linux signal action missing`
+  (Stop), `linux signal option missing` (SA_ONSTACK), `linux option
+  missing` (wait4's and kill's process groups, open flags, unlink of an
+  open file, a rename onto an open file, names the file system cannot
+  hold, socket families and types, socket options, CPU-time clocks and
+  timers, a script as interpreter), `linux syscall stub` (ioctl,
+  wait4's rusage).
 - **Invariants**: a Linux process is never handed over (carry refuses "a
   personality other than NT"); its threads have no TEB; NT threads' FS
   base is 0. Signals are delivered only on the way back from a Linux
@@ -6878,9 +7019,14 @@ The running parts (milestone 1; `lxrun=`):
 - **TODO** (ROADMAP LX): randomization (the stack gap, AT_RANDOM's
   source, the bases); PT_INTERP and dynamic linking; the signal calls
   and deliveries listed as not yet above; copy-on-write fork and shared
-  MAP_SHARED memory; clone of threads; wait queues for pipes and
-  rt_sigtimedwait; files and the
-  fd-based calls (milestone 2); a vDSO; Linux in gala-um; the
+  MAP_SHARED memory, vfork sharing its parent's memory; clone of
+  threads, futex; wait queues instead of the 1 ms polling (pipes,
+  sockets, poll, sleeps, signals); per-thread CPU time (the CPU clocks,
+  ITIMER_VIRTUAL/PROF, rusage); symlinks, hard links, POSIX unlink of an
+  open file, case-sensitive names and POSIX metadata in the change log
+  (seam 4: fs_test is the spec); a /dev
+  directory and /proc; epoll; datagram and Unix sockets; process groups
+  and sessions; a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
   name them yet).
 
@@ -6893,10 +7039,12 @@ host-tested on its own (`cargo test -p lx_abi`, part of `cargo xtask
 test`); CI runs clippy on it for the host with tests and for
 x86_64-unknown-none; kernel/clippy.toml applies. The kernel depends on
 it (`lx_abi = { path = "lx_abi" }`): `lx::signal` and `lx::sigcalls`
-use its signal data; the pty and file calls will use the rest. Besides
+use its signal data, `lx::file` its stat and dirent layouts; the pty
+calls will use the rest. Besides
 the layouts it encodes and decodes them as user memory holds them
 (`KSigaction::{from,to}_bytes`, `Siginfo::to_bytes`,
-`Ucontext::{from,to}_bytes`, `RtSigframe::to_bytes`: little-endian
+`Ucontext::{from,to}_bytes`, `RtSigframe::to_bytes`, `Stat::to_bytes`,
+`put_dirent64`: little-endian
 fields at the `repr(C)` offsets, host-tested), since `lx` has no
 `unsafe`.
 
@@ -7915,7 +8063,7 @@ New code follows them; old code is brought in line (ROADMAP R1).
    (what a kernel handover or a device reset needs).
 3. **Everything stored or shared has a version and an upgrade path**:
    the disk format (log records carry a format version at byte 17,
-   VERSION 1; the superblock's magic ends in its format version,
+   VERSION 2; the superblock's magic ends in its format version,
    `GALAFS\0\x01`), the registry journal, the private `Gala*` system
    calls' records (window records, console records...),
    KUSER_SHARED_DATA and other shared sections, the window-manager

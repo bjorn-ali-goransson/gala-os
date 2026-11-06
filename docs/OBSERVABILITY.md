@@ -232,6 +232,15 @@ hit (scenario `ledger_test`).
   dumped after each program, before `boot ok` and in a state dump.
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
+- The Linux personality records with the same call: `linux syscall
+  missing` (a call it lacks, by number), `linux syscall stub` (accepted
+  without its effect: ioctl, wait4's rusage), `linux
+  option missing` (a flag, family, option or case not supported: open
+  flags, socket families and options, CPU-time clocks, unlink of an open
+  file, process groups...), `linux clone flags missing` (clone flags;
+  vfork's CLONE_VM, its memory being a copy). ARCHITECTURE "The lx
+  module", "Observability", lists them with the `lx:` log lines (`lx:
+  pid <p> execve <path>`, `lx: pid <p> vfork: child pid <c> ...`).
 
 ### Failed logs: triage and history
 

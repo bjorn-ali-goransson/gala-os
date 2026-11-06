@@ -1,0 +1,83 @@
+-- socket
+socket(AF_INET, SOCK_STREAM) fd = 3
+  fstat: S_ISSOCK = yes
+  F_GETFL & O_ACCMODE = 2
+  F_GETFD = 0
+  getsockopt(SO_TYPE) = 0
+  type = 1
+  optlen = 4
+socket(SOCK_NONBLOCK|SOCK_CLOEXEC): F_GETFL has O_NONBLOCK = yes
+  F_GETFD = 1
+socket(999, SOCK_STREAM) = -97 (EAFNOSUPPORT)
+socket(AF_INET, type 99) = -22 (EINVAL)
+read(unconnected socket) = -107 (ENOTCONN)
+getpeername(unconnected) = -107 (ENOTCONN)
+listen(not a socket) = -88 (ENOTSOCK)
+listen(999) = -9 (EBADF)
+-- bind and listen
+setsockopt(SO_REUSEADDR, 1) = 0
+  getsockopt(SO_REUSEADDR) is set = yes
+bind(short address) = -22 (EINVAL)
+bind(AF_INET6 address to an AF_INET socket) = -22 (EINVAL)
+bind(127.0.0.1:0) = 0
+bind again = -22 (EINVAL)
+getsockname = 0
+  family = 2
+  port chosen (not 0) = yes
+  address 127.0.0.1 = yes
+  addrlen = 16
+bind(the same port, another socket) = -98 (EADDRINUSE)
+listen = 0
+accept(non-blocking listener, nothing pending) = -11 (EAGAIN)
+poll(listener, IN, 0) nothing pending = 0, revents 0
+-- connect and accept
+connect(127.0.0.1:port) = 0
+connect again = -106 (EISCONN)
+poll(listener, IN, 5 s) = 1, revents IN
+accept4(SOCK_CLOEXEC) = ok
+  F_GETFD = 1
+  peer family = 2
+  addrlen = 16
+  peer is the client's address (port and 127.0.0.1) = yes
+  the client's port is not the server's = yes
+getpeername(client) = 0
+  is the listener's port = yes
+getsockname(accepted) is the listener's port = yes
+setsockopt(TCP_NODELAY, 1) = 0
+setsockopt(SO_KEEPALIVE, 1) = 0
+getsockopt(SO_ERROR) after a connect = 0
+-- data
+poll(accepted, IN, 0) nothing sent = 0, revents 0
+poll(client, OUT, 0) = 1, revents OUT
+write(client, hello) = 5
+poll(accepted, IN, 5 s) = 1, revents IN
+recvfrom(accepted, MSG_PEEK) = 3 "hel"
+read(accepted, 64) = 5 "hello"
+recv(accepted, MSG_DONTWAIT) when empty = -11 (EAGAIN)
+sendto(accepted, reply, NULL address) = 5
+read(client) (blocks until it is there) = 5 "reply"
+shutdown(client, SHUT_WR) = 0
+read(accepted) after the client's shutdown (end of stream) = 0
+poll(accepted, IN) after it = 1, revents IN
+write(client) after SHUT_WR, MSG_NOSIGNAL = -32 (EPIPE)
+write(accepted, bye) still works = 3
+close(accepted) = 0
+read(client) the rest = 3 "bye"
+read(client) then (end of stream) = 0
+-- non-blocking connect
+connect(non-blocking) = 0 or EINPROGRESS = yes
+poll(OUT, 5 s) = 1, revents OUT
+  SO_ERROR = 0
+  connect again = 0
+accept(NULL address) = ok
+-- refused
+connect(a closed port) = -111 (ECONNREFUSED)
+connect(non-blocking, closed port) = EINPROGRESS or ECONNREFUSED = yes
+  poll then has ERR = yes
+  SO_ERROR = 111
+-- a child serves a connection
+child: exited 0
+read(client) the child's answer = 11 "served:ping"
+read(client) then (the child closed it) = 0
+socket_test: ok
+-- exit status 0

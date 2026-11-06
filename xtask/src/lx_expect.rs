@@ -283,14 +283,20 @@ pub fn transcript_from_log(serial: &str) -> Option<String> {
 
 /// For a boot scenario that runs a user/lx program (`lxrun=/lx/<binary>`):
 /// whether the transcript in its serial log is the program's expected.txt
-/// (what real Linux printed), exactly. Ok for other scenarios.
-pub fn check_boot(cmdline: &str, serial: &str) -> std::result::Result<(), String> {
+/// (what real Linux printed), exactly. A program that is not a user/lx
+/// test (busybox) has one transcript per scenario:
+/// `user/lx/<binary>/<scenario>.txt`. Ok for other scenarios.
+pub fn check_boot(scenario: &str, cmdline: &str, serial: &str) -> std::result::Result<(), String> {
     let Some(path) = cmdline.split_whitespace().find_map(|w| w.strip_prefix("lxrun=")) else {
         return Ok(());
     };
     let binary = path.rsplit('/').next().unwrap_or(path);
     let test = binary.strip_suffix("-pie").unwrap_or(binary);
-    let expected_path = root().join("user/lx").join(test).join("expected.txt");
+    let expected_path = if test.ends_with("_test") {
+        root().join("user/lx").join(test).join("expected.txt")
+    } else {
+        root().join("user/lx").join(test).join(format!("{scenario}.txt"))
+    };
     let want = fs::read_to_string(&expected_path)
         .map_err(|e| format!("reading {}: {e}", expected_path.display()))?;
     let Some(got) = transcript_from_log(serial) else {

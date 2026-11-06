@@ -834,7 +834,26 @@ source).
   the `unimplemented system call <name>` lines and the `ledger:` lines
   (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
   the next work list.
-- **Pitfalls met**: Rust's `Command` passes the environment sorted by
+- **Linux programs that are not tests** (busybox): fetched as a
+  `PREBUILT` (never run on the host), shipped to `C:\lx` by an
+  EXTRA_MODULES entry, driven by a script of ours in
+  `user/lx/<program>/` (`lx_busybox` runs `busybox sh /lx/shell.sh` with
+  `lxenv=PATH=/lx`). Their transcript is per scenario,
+  `user/lx/<program>/<scenario>.txt` (`lx_expect::check_boot`), written
+  from POSIX's and the program's documented output, one labelled line per
+  check; cross-check it with the host's dash and coreutils behind a
+  `busybox() { "$@"; }` shim (a program from the internet runs only
+  inside gala, never on the host). busybox.net's build has no standalone
+  shell and gala no symlinks yet, so scripts call applets as `busybox
+  <applet>`. To try a command line quickly, change `lx_busybox`'s
+  `lxargs=` (percent-encoded) and read the `lx: pid N stdout:` lines.
+- **Pitfalls met**: a C argument evaluated twice in one call
+  (`say(name, poll(&rev), rev)`) reads in an unspecified order: compute
+  first, print after (socket_test's `say_poll`); a test that must give one
+  transcript for both binaries cannot print argv[0] (the `_pie` scenarios
+  run `./<name>_test-pie`): print relations (exec_test); Linux answers a
+  non-blocking TCP connect with EINPROGRESS even on loopback (the next
+  connect returns 0 once). Rust's `Command` passes the environment sorted by
   name (auxv_test's envp order); a static-pie's initial break is not
   above its bss (brk_test prints only what holds for both); a pipe write
   whose buffer runs into an unmapped page fails with EFAULT, not a
@@ -1050,6 +1069,9 @@ each one (URL, SHA-256, the files used), and a scenario module path
 `target/prebuilt/<name>/<file>` makes xtask download, check and unpack
 it on first use.
 
+- A release that is a single file (busybox.net's static Linux
+  `busybox`) names only that file as its one member, the URL's last
+  component: the download is kept as it is.
 - Unpackers: unzip for zips, msitools' `msiextract` for an MSI (`apt
   install msitools`), 7-Zip (`7z` from p7zip-full) for an NSIS installer
   or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
@@ -1099,8 +1121,9 @@ it on first use.
 
 ### Win32-OpenSSH (sshd)
 
-The sshd scenarios (`sshd_server`, `sshd_shell`, `sshd_sftp`, ...) run
-Win32-OpenSSH; "SSH into a running gala" says how to log in.
+The sshd scenarios (`sshd_server`, `sshd_shell`, `sshd_sftp`,
+`sshd_scp`, `sshd_forward`, `sshd_client`, ...) run Win32-OpenSSH; "SSH
+into a running gala" says how to log in.
 
 - As SYSTEM (and with `-d`) sshd and ssh-keygen log to the system log
   (ETW), not the console: pass `-e` to sshd for stderr. The scenarios tee
@@ -1114,9 +1137,20 @@ Win32-OpenSSH; "SSH into a running gala" says how to log in.
 - Win32-OpenSSH does not create %ProgramData%\ssh\logs (an installer
   does: the scenarios ship a placeholder file there); it runs subsystems
   and commands through DefaultShell with the command quoted, so
-  sftp-server.exe must be on the shell's PATH (a copy in System32); an
-  ssh client without a tty asks for a 0 x 0 pty (conhost then uses
-  80 x 25).
+  sftp-server.exe must be on the shell's PATH (a copy in System32), and
+  so must scp.exe for legacy scp (`scp -O` runs `scp -t`/`scp -f` there;
+  it imports shlwapi); an ssh client without a tty asks for a 0 x 0 pty
+  (conhost then uses 80 x 25).
+- With DefaultShellEscapeArguments 0 sshd runs `busybox.exe sh -c
+  "<command>"`: a command xtask sends must not contain double quotes
+  (quote a path with spaces in single quotes, as `sshd_client` does).
+- Host-side checks of times: the host's own file moves under the test
+  (relatime updates the access time of a file read whose access time is
+  older than its modification time), so `scp_client` sets the times
+  again before each upload.
+- Forwarding tests need no host port: `ssh -L` forwards from a Unix
+  socket in the client's directory, `ssh -R` to an echo server xtask
+  binds on port 0; the far end inside gala is `sshfwd_test`.
 - Each process's console-control handler thread logs how late it took a
   Ctrl+C (`took Ctrl+C N late`, from 250 ms on).
 

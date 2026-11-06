@@ -161,6 +161,7 @@ pub fn rt_sigtimedwait(call: &Call<'_>, set: u64, info: u64, timeout: u64, size:
         None
     };
     loop {
+        super::timer::fire(call);
         let taken = {
             let mut s = call.lx.signals.lock();
             match s.take_from(set) {
@@ -186,6 +187,63 @@ pub fn rt_sigtimedwait(call: &Call<'_>, set: u64, info: u64, timeout: u64, size:
             return Err(EAGAIN);
         }
         platform::sleep_ms(1);
+    }
+}
+
+/// kill(pid, sig): a process-directed signal from the caller (si_code
+/// SI_USER, its pid and uid) to Linux process `pid`; sig 0 only checks
+/// that it exists. SIGKILL ends the target at once (it cannot be caught
+/// or blocked; other signals reach a thread running user code only at its
+/// next system call: delivery happens on the way back from one). Process
+/// groups (pid 0 or negative) are not kept yet: ledgered, ESRCH.
+pub fn kill_call(call: &Call<'_>, pid: u64, sig: u64) -> Result {
+    let pid = pid as i32;
+    if sig > u64::from(abi::NSIG) {
+        return Err(EINVAL);
+    }
+    if pid <= 0 {
+        ledger::record("kill", "linux option missing", pid as u64);
+        return Err(errno::ESRCH);
+    }
+    let target = super::state::get(pid as u64).ok_or(errno::ESRCH)?;
+    if sig == 0 {
+        return Ok(0);
+    }
+    let sig = sig as u32;
+    let info = Siginfo::from_process(
+        sig as i32,
+        abi::SI_USER,
+        call.process.id as i32,
+        super::exec::UID as u32,
+    );
+    if sig == abi::SIGKILL {
+        if let Some(p) = process::by_id(pid as u64) {
+            kill(&p, 0, sig, &info);
+        }
+        return Ok(0);
+    }
+    let raised = target.signals.lock().raise(info, false);
+    let what = match raised {
+        Raised::Pending => "pending",
+        Raised::Merged => "merged",
+        Raised::Discarded => "discarded",
+    };
+    event(pid as u64, 0, &info, what);
+    Ok(0)
+}
+
+/// rt_sigsuspend: waits with `set` as the mask until a signal is to be
+/// delivered (a handler, or a default action that ends the process),
+/// then EINTR; the old mask comes back after the handler (its frame
+/// saves it) or at once (`deliver`). Polls every ms, as rt_sigtimedwait.
+pub fn rt_sigsuspend(call: &Call<'_>, set: u64, size: u64) -> Result {
+    if size != SIGSET_SIZE as u64 {
+        return Err(EINVAL);
+    }
+    let set = read_set(call, set)?;
+    call.lx.signals.lock().suspend(set);
+    loop {
+        super::dispatch::pause(call)?;
     }
 }
 
@@ -248,10 +306,24 @@ fn kill(process: &KArc<Process>, tid: u64, sig: u32, info: &Siginfo) {
 
 /// Whether call `number`, interrupted by a signal (EINTR), is made again
 /// after a handler with SA_RESTART, or after a signal that was ignored
-/// (signal(7) "Interruption of system calls": read, write and wait4
-/// are; rt_sigtimedwait, nanosleep and the like never).
+/// (signal(7) "Interruption of system calls": read, write, wait4 and
+/// the socket calls without a timeout are; rt_sigtimedwait, nanosleep,
+/// poll and the like never).
 fn restartable(number: u64) -> bool {
-    matches!(u32::try_from(number), Ok(nr::READ | nr::WRITE | nr::WRITEV | nr::WAIT4))
+    matches!(
+        u32::try_from(number),
+        Ok(nr::READ
+            | nr::WRITE
+            | nr::READV
+            | nr::WRITEV
+            | nr::PREAD64
+            | nr::PWRITE64
+            | nr::WAIT4
+            | nr::ACCEPT
+            | nr::ACCEPT4
+            | nr::RECVFROM
+            | nr::SENDTO)
+    )
 }
 
 /// The `syscall` instruction's length: a restarted call goes back to it.
@@ -284,7 +356,12 @@ pub fn deliver(
             return changed;
         }
         let mut sigs = lx.signals.lock();
-        let Some(sig) = sigs.deliverable() else { return changed };
+        let Some(sig) = sigs.deliverable() else {
+            // Nothing (more) to deliver: an rt_sigsuspend mask no handler
+            // took goes back.
+            sigs.restore_saved_mask();
+            return changed;
+        };
         let info =
             sigs.take_from(SigSet::of(sig)).unwrap_or(Siginfo::zeroed(sig as i32, abi::SI_KERNEL));
         match sigs.disposition(sig) {
@@ -307,7 +384,8 @@ pub fn deliver(
                 return changed;
             }
             Disposition::Handler(action) => {
-                let old = sigs.enter_handler(sig, &action);
+                let before = sigs.enter_handler(sig, &action);
+                let old = sigs.frame_mask(before);
                 drop(sigs);
                 if interrupted && !changed && action.flags & SA_RESTART != 0 && restartable(number)
                 {

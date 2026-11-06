@@ -1,0 +1,176 @@
+umask(022) returns the old mask = 022
+mkdir(fileio.dir) = 0
+chdir(fileio.dir) = 0
+-- open, read, write
+open(f, O_CREAT|O_EXCL) fd = 3
+write(f, hello) = 6
+read(write-only fd) = -9 (EBADF)
+fcntl(F_GETFL) & O_ACCMODE = 1
+stat(f) after umask 022 = regular, mode 0644, nlink 1, size 6
+open(f, O_CREAT|O_EXCL) again = -17 (EEXIST)
+open(missing) = -2 (ENOENT)
+open(missing/x) = -2 (ENOENT)
+open(f/x) = -20 (ENOTDIR)
+open(f, O_DIRECTORY) = -20 (ENOTDIR)
+open("") = -2 (ENOENT)
+open(f/) (a file with a slash) = -20 (ENOTDIR)
+open(bad pointer) = -14 (EFAULT)
+read(f) = 6 "hello\n"
+read(f) at EOF = 0
+write(read-only fd) = -9 (EBADF)
+lseek(f, 1, SEEK_SET) = 1
+read(f, 3) = 3 "ell"
+lseek(f, 0, SEEK_CUR) = 4
+lseek(f, -2, SEEK_END) = 4
+lseek(f, -1, SEEK_SET) = -22 (EINVAL)
+lseek(f, 0, 7) = -22 (EINVAL)
+lseek(f, 100, SEEK_SET) (past the end) = 100
+read past the end = 0
+pread64(f, 2, at 1) = 2 "el"
+  the offset after pread64 is still = 100
+pread64(f, at -1) = -22 (EINVAL)
+fcntl(F_GETFD) without O_CLOEXEC = 0
+lseek(dup, 0, SEEK_CUR) (the offset is shared) = 2
+close(f) again = -9 (EBADF)
+fstat(O_TRUNC fd) = 0
+  size after O_TRUNC = 0
+lseek(O_APPEND fd, 0, SEEK_SET) = 0
+write(O_APPEND fd, cd) = 2
+lseek(O_APPEND fd, 0, SEEK_CUR) = 4
+fcntl(F_GETFL) has O_APPEND = yes
+content after O_APPEND = 4 "abcd"
+pwrite64(f, XY, at 6) (past the end) = 2
+  the offset after pwrite64 is still = 0
+  read(f) (a hole of zeros) = 8 "abcd\x00\x00XY"
+ftruncate(f, 3) = 0
+fstat(f) = 0
+  size = 3
+ftruncate(f, 5) = 0
+  pread64(f) (zero filled) = 5 "abc\x00\x00"
+ftruncate(f, -1) = -22 (EINVAL)
+fsync(f) = 0
+ftruncate(read-only fd) = -22 (EINVAL)
+fcntl(F_GETFD) with O_CLOEXEC = 1
+stat(created with 0600) = regular, mode 0600, nlink 1, size 0
+umask(022) after umask(077) returns = 077
+stat(created under umask 077) = regular, mode 0600, nlink 1, size 0
+-- stat
+stat(missing) = -2 (ENOENT)
+stat(f/x) = -20 (ENOTDIR)
+stat(bad pointer) = -14 (EFAULT)
+lstat(f) = 0
+  S_ISREG = yes
+fstat(999) = -9 (EBADF)
+newfstatat(AT_FDCWD, f, 0) = 0
+  size = 5
+newfstatat(bad flags) = -22 (EINVAL)
+stat(.) = directory, mode 0755
+stat(/) = directory, mode 0755
+readlink(f) (not a link) = -22 (EINVAL)
+readlink(missing) = -2 (ENOENT)
+access(f, F_OK) = 0
+access(f, R_OK|W_OK) = 0
+access(missing, F_OK) = -2 (ENOENT)
+access(f, bad mode) = -22 (EINVAL)
+faccessat(AT_FDCWD, f, F_OK, 0) = 0
+-- times
+utimensat(f, atime 2000, mtime 1e9 + 123456700 ns) = 0
+  st_atime = 2000
+  st_mtime = 1000000000
+  st_mtim.tv_nsec = 123456700
+utimensat(f, atime UTIME_OMIT, mtime 1.5e9) = 0
+  st_atime (kept) = 2000
+  st_mtime = 1500000000
+utimensat(f, NULL) (now) = 0
+  st_mtime after 2020-01-01 = yes
+futimens(fd, atime 3000, mtime UTIME_NOW) = 0
+  st_atime = 3000
+utimensat(tv_nsec = 1e9) = -22 (EINVAL)
+utimensat(missing) = -2 (ENOENT)
+-- directories
+mkdir(d) = 0
+mkdir(d) again = -17 (EEXIST)
+mkdir(missing/d) = -2 (ENOENT)
+mkdir(f/d) = -20 (ENOTDIR)
+stat(d) = directory, mode 0755
+mkdir(d700, 0700) = 0
+stat(d700) = directory, mode 0700
+open(d, O_WRONLY) = -21 (EISDIR)
+open(d, O_RDWR) = -21 (EISDIR)
+open(d, O_CREAT) = -21 (EISDIR)
+open(d, O_DIRECTORY) = ok
+read(directory fd) = -21 (EISDIR)
+openat(d, inner, O_CREAT) = ok
+read(d/inner) from AT_FDCWD = 6 "inside"
+read(./d/../d/inner) = 6 "inside"
+openat(file fd, x) = -20 (ENOTDIR)
+openat(999, x) = -9 (EBADF)
+openat(999, /) (absolute: dirfd unused) = ok
+mkdirat(d, sub) = 0
+newfstatat(d, inner, 0) = 0
+  mode = 0100600
+newfstatat(d, "", AT_EMPTY_PATH) = 0
+  S_ISDIR = yes
+getdents64(d): [. dir] [.. dir] [inner reg] [many-00 reg] [many-01 reg] [many-02 reg] [many-03 reg] [many-04 reg] [many-05 reg] [many-06 reg] [many-07 reg] [many-08 reg] [many-09 reg] [many-10 reg] [many-11 reg] [sub dir]
+  every d_reclen = align8(19 + name + NUL), d_ino != 0 = yes
+  took more than one call = yes
+getdents64(d/sub): [. dir] [.. dir]
+  every d_reclen = align8(19 + name + NUL), d_ino != 0 = yes
+getdents64(file) = -20 (ENOTDIR)
+getdents64(d, 8-byte buffer) = -22 (EINVAL)
+getdents64(999) = -9 (EBADF)
+mkdir(cd) = 0
+chdir(cd) = 0
+getcwd ends with /fileio.dir/cd (length with the NUL) = yes
+  starts with / = yes
+getcwd(2-byte buffer) = -34 (ERANGE)
+chdir(..) = 0
+chdir(f) = -20 (ENOTDIR)
+chdir(missing) = -2 (ENOENT)
+fchdir(d) = 0
+read(inner) after fchdir = 6 "inside"
+getcwd after chdir(..) ends with /fileio.dir = yes
+fchdir(file fd) = -20 (ENOTDIR)
+-- rename
+rename(a, c) = 0
+stat(a) = -2 (ENOENT)
+read(c) = 1 "A"
+rename(c, b) (replaces b) = 0
+read(b) = 1 "A"
+rename(nonexistent, x) = -2 (ENOENT)
+renameat(d, inner, AT_FDCWD, moved) = 0
+  read(moved) = 6 "inside"
+mkdir(e) = 0
+mkdir(e/x) = 0
+rename(d, e) (e not empty) = -39 (ENOTEMPTY)
+rename(d, b) (b a file) = -20 (ENOTDIR)
+rename(b, e) (e a directory) = -21 (EISDIR)
+rename(e, e/x/y) (into itself) = -22 (EINVAL)
+mkdir(empty) = 0
+rename(e, empty) (empty replaced) = 0
+stat(empty/x) = directory, mode 0755
+rename(b, b) (same file: no-op) = 0
+read(b) = 1 "A"
+-- unlink and rmdir
+unlink(b) = 0
+stat(b) = -2 (ENOENT)
+unlink(b) again = -2 (ENOENT)
+unlink(d) = -21 (EISDIR)
+unlink(f/x) = -20 (ENOTDIR)
+rmdir(empty) (not empty) = -39 (ENOTEMPTY)
+rmdir(f) = -20 (ENOTDIR)
+rmdir(missing) = -2 (ENOENT)
+rmdir(.) = -22 (EINVAL)
+rmdir(empty/x) = 0
+rmdir(empty) = 0
+unlinkat(d, sub, 0) = -21 (EISDIR)
+unlinkat(d, sub, AT_REMOVEDIR) = 0
+unlinkat(d, many-00, AT_REMOVEDIR) = -20 (ENOTDIR)
+unlinkat(d, many-00, 0) = 0
+unlinkat(bad flags) = -22 (EINVAL)
+getdents64(d) now: [. dir] [.. dir]
+  every d_reclen = align8(19 + name + NUL), d_ino != 0 = yes
+getdents64(.): [. dir] [.. dir] [cd dir] [d dir] [d700 dir] [f reg] [mode600 reg] [moved reg] [umask077 reg]
+  every d_reclen = align8(19 + name + NUL), d_ino != 0 = yes
+fileio_test: ok
+-- exit status 0

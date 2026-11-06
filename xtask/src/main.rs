@@ -44,7 +44,9 @@ struct Prebuilt {
     url: &'static str,
     /// The release's SHA-256, or its SHA-512 (128 hex digits).
     checksum: &'static str,
-    /// The files used, inside the zip. For an MSI (a `.msi` URL, unpacked
+    /// The files used, inside the zip. A release that is one file, not an
+    /// archive, names just that file (the URL's last component): the
+    /// download is moved there. For an MSI (a `.msi` URL, unpacked
     /// with msitools' msiextract: gala has no Windows Installer), the
     /// directories used, each moved to the release's directory under its
     /// last component (`Program Files/X/Binn` becomes `Binn`).
@@ -341,6 +343,18 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // busybox 1.35.0 for Linux, static (musl), as busybox.net publishes
+    // it (a single ELF file, not an archive: the file is the download;
+    // no published checksum, the SHA-256 pinned at the first fetch). The
+    // Linux personality's milestone 2 target (ROADMAP LX); it runs only
+    // inside gala.
+    Prebuilt {
+        name: "busybox-linux",
+        url: "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox",
+        checksum: "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348",
+        members: &["busybox"],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -570,6 +584,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("console_window", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("sshd_server", "user/sshd/logs-placeholder.txt", "ProgramData/ssh/logs"),
     ("sshd_sftp", "target/prebuilt/openssh/OpenSSH-Win64/sftp-server.exe", "Windows/System32"),
+    // Legacy scp (`scp -O`) runs `scp -t`/`scp -f` through the users'
+    // shell, so scp.exe must be on its PATH, like sftp-server.exe.
+    ("sshd_scp", "target/prebuilt/openssh/OpenSSH-Win64/scp.exe", "Windows/System32"),
+    ("sshd_scp", "shlwapi.dll", "Windows/System32"),
+    // galatest's private key in its profile, for gala's own ssh.exe.
+    ("sshd_client", "user/sshd/client_ed25519", "Users/galatest/.ssh"),
     ("sshd_shell", "user/bin/conhost.exe", "Windows/System32"),
     ("sshd_shell", "gdi32.dll", "Windows/System32"),
     ("conpty_test", "ntdll.dll", "Windows/System32"),
@@ -830,6 +850,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsock_test", "ntdll.dll", "Windows/System32"),
     ("winsock_test", "kernel32.dll", "Windows/System32"),
     ("winsock_test", "ws2_32.dll", "Windows/System32"),
+    ("sshfwd_test", "ntdll.dll", "Windows/System32"),
+    ("sshfwd_test", "kernel32.dll", "Windows/System32"),
+    ("sshfwd_test", "ws2_32.dll", "Windows/System32"),
     ("udp_test", "ntdll.dll", "Windows/System32"),
     ("udp_test", "kernel32.dll", "Windows/System32"),
     ("udp_test", "ws2_32.dll", "Windows/System32"),
@@ -884,6 +907,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_arch_prctl_pie", "user/lx/bin/arch_prctl_test-pie", "lx"),
     ("lx_auxv", "user/lx/bin/auxv_test", "lx"),
     ("lx_auxv_pie", "user/lx/bin/auxv_test-pie", "lx"),
+    ("lx_fileio", "user/lx/bin/fileio_test", "lx"),
+    ("lx_fileio_pie", "user/lx/bin/fileio_test-pie", "lx"),
+    ("lx_exec", "user/lx/bin/exec_test", "lx"),
+    ("lx_exec_pie", "user/lx/bin/exec_test-pie", "lx"),
+    ("lx_socket", "user/lx/bin/socket_test", "lx"),
+    ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
+    ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
+    ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
+    ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
+    ("lx_httpd", "user/lx/busybox/httpd.sh", "lx"),
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
@@ -2064,6 +2097,7 @@ const USER_PROGRAMS: &[&str] = &[
     "replay_test",
     "kernel32_env_test",
     "winsock_test",
+    "sshfwd_test",
     "hostnet_test",
     "ipv6_test",
     "winsock_async_test",
@@ -2868,7 +2902,11 @@ fn fetch_prebuilt(path: &str) -> Result {
     } else {
         zip
     };
-    if p.url.ends_with(".msi") {
+    if p.members.len() == 1 && p.url.rsplit('/').next() == Some(p.members[0]) {
+        // Not an archive: the download is the one file used.
+        let to = dir.join(p.members[0]);
+        fs::rename(&zip, &to).map_err(|e| format!("moving {zip:?} to {to:?}: {e}"))?;
+    } else if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
     } else if p.url.ends_with(".7z.exe") || p.url.ends_with("-setup.exe") || chocolatey {
         // A 7-Zip self-extracting archive (Git for Windows' PortableGit) or
@@ -3089,6 +3127,17 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // ssh -L: sshd-session connects to sshfwd_test over loopback;
+        // ssh -R: it accepts sshfwd_test's connection on its listener.
+        "sshd_forward",
+        &[
+            r#""ev":"tcp connect""#,
+            r#""remote":"127.0.0.1:7000""#,
+            r#""ev":"tcp accept""#,
+            r#""local":"127.0.0.1:7001""#,
+        ],
+    ),
+    (
         "sshd_shell",
         &[
             r#""ev":"console create","id":1,"#,
@@ -3206,6 +3255,15 @@ enum NetClient {
     SshShell,
     /// File transfer with the host's sftp (`sftp_client`): put, ls, get.
     Sftp,
+    /// The host's scp both ways with `-p`, over SFTP and the legacy
+    /// protocol (`scp_client`): bytes and times.
+    Scp,
+    /// `ssh -L` and `ssh -R` to and from user/sshfwd_test inside gala
+    /// (`ssh_forward_client`).
+    SshForward,
+    /// gala's own ssh.exe logs on to gala's sshd over loopback, from a
+    /// session the host's ssh opened (`ssh_inner_client`).
+    SshInner,
     /// The host's psql runs `select 40+2` (`psql_client`).
     Psql,
     /// Logs on to an FTP server as `gala` and asks for the directory
@@ -3241,6 +3299,9 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("sshd_server", "Server listening on", NetClient::SshServer),
     ("sshd_shell", "Server listening on", NetClient::SshShell),
     ("sshd_sftp", "Server listening on", NetClient::Sftp),
+    ("sshd_scp", "Server listening on", NetClient::Scp),
+    ("sshd_forward", "Server listening on", NetClient::SshForward),
+    ("sshd_client", "Server listening on", NetClient::SshInner),
     ("postgres", "database system is ready to accept connections", NetClient::Psql),
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     // Elasticsearch's root endpoint: the node's JSON description.
@@ -3311,7 +3372,8 @@ fn iso_scenario(iso: &Path) -> &str {
 }
 
 /// Scenarios whose sshd listens on its configured port 22.
-const SSH_PORT_22: &[&str] = &["sshd_server", "sshd_shell", "sshd_sftp"];
+const SSH_PORT_22: &[&str] =
+    &["sshd_server", "sshd_shell", "sshd_sftp", "sshd_scp", "sshd_forward", "sshd_client"];
 
 /// The listening marker and client of a NET_SCENARIOS entry.
 fn net_marker(name: &str) -> Option<(&'static str, NetClient)> {
@@ -3762,6 +3824,15 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // N1b: Winsock over gala's ws2_32 and AFD: loopback checks, then
         // (`serve`) an echo server on port 7 for xtask's client.
+        // The far ends of `sshd_forward` without ssh: both ends of a
+        // loopback connection in one process (sshfwd_test without
+        // arguments, as run-all.ps1 runs it on Windows).
+        name: "sshfwd_test",
+        cmdline: "qemu_exit run=sshfwd_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["sshfwd_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         name: "winsock_test",
         cmdline: "qemu_exit run=winsock_test.exe args=serve",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -5643,6 +5714,45 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: sftp ok"],
     },
     Scenario {
+        // File transfer with scp (ROADMAP SSH step 3): the host's scp -p
+        // copies a file to gala and back, once over SFTP (scp's default:
+        // sftp-server.exe) and once with the legacy protocol (`-O`: sshd
+        // runs `scp -t` / `scp -f`, gala's System32\scp.exe, through the
+        // shell). Both directions keep the bytes and the times scp -p
+        // carries (gala's own `stat` sees the uploaded times).
+        name: "sshd_scp",
+        cmdline: "qemu_exit as=system logtee=C:/ProgramData/ssh/logs events=net,logon,process cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: scp ok"],
+    },
+    Scenario {
+        // Port forwarding (ROADMAP SSH step 4). `ssh -L`: the host's
+        // connection to a local socket becomes a direct-tcpip channel;
+        // sshd-session connects out over loopback to sshfwd_test serving
+        // 127.0.0.1:7000 (started by the same ssh's command) and the bytes
+        // come back echoed. `ssh -R`: sshd-session listens on gala's
+        // 127.0.0.1:7001 (tcpip-forward); sshfwd_test connects to it and
+        // its bytes travel to an echo server on the host and back.
+        name: "sshd_forward",
+        cmdline: "qemu_exit as=system logtee=C:/ProgramData/ssh/logs events=net,logon,process cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: ssh forward ok"],
+    },
+    Scenario {
+        // The client (ROADMAP SSH step 5): from a session the host's ssh
+        // opened, gala's own ssh.exe (Win32-OpenSSH's, unmodified) logs on
+        // to gala's sshd over 127.0.0.1 with galatest's key from its
+        // profile, twice: first accepting the new host key (written to
+        // ~/.ssh/known_hosts), then checking it strictly against that file.
+        name: "sshd_client",
+        cmdline: "qemu_exit as=system logtee=C:/ProgramData/ssh/logs events=net,logon,process cwd=C:/Program%20Files/OpenSSH run=ssh-keygen.exe,sshd.exe args=-A,",
+        exit_status: XTASK_STOPS,
+        expect: &[
+            "xtask: net client: ssh client ok",
+            "Accepted publickey for galatest from 127.0.0.1 port",
+        ],
+    },
+    Scenario {
         // `restart=` (the services' supervisor, as sshd_server uses it): a
         // program that ends is started again, here at most twice.
         name: "service_restart",
@@ -6577,6 +6687,74 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/auxv_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/fileio_test (LX milestone 2): files and directories; its
+        // transcript must be its expected.txt (real Linux's;
+        // `lx_expect::check_boot`).
+        name: "lx_fileio",
+        cmdline: "qemu_exit lxrun=/lx/fileio_test lxargs=./fileio_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/fileio_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/fileio_test as a static-pie.
+        name: "lx_fileio_pie",
+        cmdline: "qemu_exit lxrun=/lx/fileio_test-pie lxargs=./fileio_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/fileio_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/exec_test (LX milestone 2): execve, #! scripts, getppid,
+        // uname; its transcript must be its expected.txt (real Linux's;
+        // `lx_expect::check_boot`).
+        name: "lx_exec",
+        cmdline: "qemu_exit lxrun=/lx/exec_test lxargs=./exec_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/exec_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/exec_test as a static-pie (it execs itself by argv[0]).
+        name: "lx_exec_pie",
+        cmdline: "qemu_exit lxrun=/lx/exec_test-pie lxargs=./exec_test-pie",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/exec_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/socket_test (LX, H11): TCP sockets over loopback on the
+        // kernel's stack, poll; its transcript must be its expected.txt
+        // (real Linux's; `lx_expect::check_boot`).
+        name: "lx_socket",
+        cmdline: "qemu_exit lxrun=/lx/socket_test lxargs=./socket_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/socket_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/socket_test as a static-pie.
+        name: "lx_socket_pie",
+        cmdline: "qemu_exit lxrun=/lx/socket_test-pie lxargs=./socket_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/socket_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // A static Linux busybox (ROADMAP LX milestone 2): its shell runs
+        // user/lx/busybox/shell.sh (pipes, redirections, the coreutils-style
+        // applets through execve); the transcript must be
+        // user/lx/busybox/lx_busybox.txt (`lx_expect::check_boot`).
+        name: "lx_busybox",
+        cmdline: "qemu_exit lxrun=/lx/busybox lxargs=busybox%20sh%20/lx/shell.sh lxenv=PATH=/lx",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/busybox", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // busybox httpd serves a directory on 127.0.0.1:8080 and busybox
+        // wget fetches files from it (ROADMAP H11 on the Linux side: Linux
+        // sockets on the kernel's TCP stack); user/lx/busybox/httpd.sh,
+        // the transcript must be user/lx/busybox/lx_httpd.txt.
+        name: "lx_httpd",
+        cmdline: "qemu_exit lxrun=/lx/busybox lxargs=busybox%20sh%20/lx/httpd.sh lxenv=PATH=/lx",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/busybox", BOOT_OK_MARKER],
+    },
+    Scenario {
         name: "hello",
         cmdline: "qemu_exit run=hello.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -6696,6 +6874,15 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("sshd_sftp", "sshd_login"),
     ("sshd_sftp", "sshd_server"),
     ("sshd_sftp", "sshd_sftp"),
+    ("sshd_scp", "sshd_login"),
+    ("sshd_scp", "sshd_server"),
+    ("sshd_scp", "sshd_sftp"),
+    ("sshd_scp", "sshd_scp"),
+    ("sshd_forward", "sshd_login"),
+    ("sshd_forward", "sshd_server"),
+    ("sshd_client", "sshd_login"),
+    ("sshd_client", "sshd_server"),
+    ("sshd_client", "sshd_client"),
     ("dotnet_hello", "dotnet"),
     ("flaui_test", "dotnet"),
     ("filezilla_flaui", "dotnet"),
@@ -8215,6 +8402,9 @@ fn run_vm_once(
                 NetClient::SshServer => ssh_server_client(port),
                 NetClient::SshShell => ssh_shell_client(port),
                 NetClient::Sftp => sftp_client(port),
+                NetClient::Scp => scp_client(port),
+                NetClient::SshForward => ssh_forward_client(port),
+                NetClient::SshInner => ssh_inner_client(port),
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
                 NetClient::HandoverNet => handover_net_client(port),
@@ -8342,6 +8532,9 @@ fn run_vm_once(
                     NetClient::SshServer => "ssh server",
                     NetClient::SshShell => "ssh shell",
                     NetClient::Sftp => "sftp",
+                    NetClient::Scp => "scp",
+                    NetClient::SshForward => "ssh forward",
+                    NetClient::SshInner => "ssh client",
                     NetClient::Psql => "psql",
                     NetClient::Ftp => "ftp",
                     NetClient::HandoverNet => "handover",
@@ -10329,6 +10522,321 @@ fn sftp_client(port: u16) -> Result {
     }
 }
 
+/// The host's ssh (or scp, `program`) with the test key and the options
+/// every ssh client here uses; the caller adds the destination.
+fn ssh_tool(program: &str, port: u16, key: &Path, secs: u32) -> Command {
+    let mut cmd = Command::new("timeout");
+    cmd.arg(secs.to_string())
+        .arg(program)
+        .arg("-v")
+        .arg("-i")
+        .arg(key)
+        .args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"])
+        .args([if program == "scp" { "-P" } else { "-p" }, &port.to_string()])
+        .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "ConnectTimeout=60"])
+        .stdin(Stdio::null());
+    cmd
+}
+
+/// The last `lines` lines of a client's `-v` trace.
+fn trace_tail(trace: &[u8], lines: usize) -> String {
+    let trace = String::from_utf8_lossy(trace);
+    let mut tail: Vec<&str> = trace.lines().rev().take(lines).collect();
+    tail.reverse();
+    tail.join("\n")
+}
+
+/// The times `scp_client` gives its file (2021-03-04 05:06:07 UTC and
+/// 2020-09-13 12:26:40 UTC): far from now, so a copy that drops them shows.
+const SCP_MTIME: u64 = 1_614_834_367;
+const SCP_ATIME: u64 = 1_600_000_000;
+
+/// The host side of `sshd_scp`: the host's scp -p copies a 300 KiB file
+/// with fixed times to gala and back, over SFTP (scp's default) and over
+/// the legacy protocol (`-O`). Checks: gala's `stat` sees the upload's size
+/// and both times (scp -p sets them with SFTP SETSTAT or the legacy `T`
+/// line, i.e. SetFileTime there), the download equals the upload byte for
+/// byte and has the modification time gala holds (the one sent).
+fn scp_client(port: u16) -> Result {
+    let key = ssh_key(port)?;
+    let dir = client_dir(port)?.join("scp");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let data: Vec<u8> = (0..300 * 1024u32).map(|i| (i * 7 + i / 251) as u8).collect();
+    let up = dir.join("up.bin");
+    fs::write(&up, &data).map_err(|e| e.to_string())?;
+    // Set before each upload: reading the file moves the host's access
+    // time (relatime: it is older than the modification time).
+    let set_times = || -> Result {
+        let at = |secs: u64| std::time::UNIX_EPOCH + Duration::from_secs(secs);
+        let times = fs::FileTimes::new().set_modified(at(SCP_MTIME)).set_accessed(at(SCP_ATIME));
+        fs::File::options()
+            .write(true)
+            .open(&up)
+            .and_then(|f| f.set_times(times))
+            .map_err(|e| format!("setting up.bin's times: {e}"))
+    };
+    let scp = |legacy: bool, from: &str, to: &str| -> Result {
+        let mut cmd = ssh_tool("scp", port, &key, 120);
+        if legacy {
+            cmd.arg("-O");
+        }
+        let out = cmd
+            .arg("-p")
+            .args([from, to])
+            .current_dir(&dir)
+            .output()
+            .map_err(|e| format!("scp: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(format!(
+            "scp {from} {to}: exit {:?}, stdout {:?}:\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            trace_tail(&out.stderr, 20)
+        ))
+    };
+    for (mode, legacy) in [("sftp", false), ("legacy", true)] {
+        let remote = format!("gala-scp-{mode}.bin");
+        let down = format!("down-{mode}.bin");
+        set_times()?;
+        scp(legacy, "up.bin", &format!("galatest@127.0.0.1:{remote}"))
+            .map_err(|e| format!("{mode} upload: {e}"))?;
+        let seen = ssh_key_run(port, &[&format!("stat -c '%s %Y %X' {remote}")])
+            .map_err(|e| format!("{mode} upload: stat: {e}"))?;
+        let want = format!("{} {SCP_MTIME} {SCP_ATIME}", data.len());
+        if seen.trim() != want {
+            return Err(format!(
+                "{mode} upload: gala's stat says {:?} (size, modified, accessed), not {want:?}",
+                seen.trim()
+            ));
+        }
+        scp(legacy, &format!("galatest@127.0.0.1:{remote}"), &down)
+            .map_err(|e| format!("{mode} download: {e}"))?;
+        let got = fs::read(dir.join(&down)).map_err(|e| format!("{mode} download: {e}"))?;
+        if got != data {
+            let first = got.iter().zip(&data).position(|(a, b)| a != b);
+            return Err(format!(
+                "{mode} download: {} bytes, not the {} uploaded (first difference at {first:?})",
+                got.len(),
+                data.len()
+            ));
+        }
+        let modified = fs::metadata(dir.join(&down))
+            .and_then(|m| m.modified())
+            .map_err(|e| e.to_string())?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if modified != SCP_MTIME {
+            return Err(format!(
+                "{mode} download: modified at {modified}, not {SCP_MTIME} (scp -p keeps gala's time)"
+            ));
+        }
+        ssh_key_run(port, &[&format!("rm {remote}")])
+            .map_err(|e| format!("{mode}: removing {remote}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// sshfwd_test's port for `ssh -L` (it serves there) and sshd's for
+/// `ssh -R` (sshfwd_test connects there), inside gala.
+const FORWARD_LOCAL_PORT: u16 = 7000;
+const FORWARD_REMOTE_PORT: u16 = 7001;
+/// The bytes each direction of `ssh_forward_client` carries.
+const FORWARD_BYTES: usize = 200 * 1024;
+
+/// The host side of `sshd_forward`. `ssh -L <socket>:127.0.0.1:7000`
+/// whose command starts `sshfwd_test serve 7000` in gala: once it says it
+/// listens, the host writes FORWARD_BYTES to the local socket, shuts its
+/// side down and must read them all back (sshd-session's direct-tcpip
+/// channel connects over gala's loopback). Then `ssh -R
+/// 7001:127.0.0.1:<echo>` whose command runs `sshfwd_test connect 7001`:
+/// sshd-session listens on gala's 127.0.0.1:7001 (tcpip-forward), and what
+/// sshfwd_test sends there reaches an echo server on the host and comes
+/// back (sshfwd_test compares it).
+fn ssh_forward_client(port: u16) -> Result {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let key = ssh_key(port)?;
+    let dir = client_dir(port)?;
+    let data: Vec<u8> = (0..FORWARD_BYTES).map(|i| (i * 31 + i / 7) as u8).collect();
+
+    // -L: the local end is a Unix socket (no host port to lease).
+    let sock = dir.join("forward.sock");
+    let _ = fs::remove_file(&sock);
+    let trace = dir.join("ssh-L.trace");
+    let mut ssh = ssh_tool("ssh", port, &key, 180)
+        .args(["-o", "ExitOnForwardFailure=yes", "-L"])
+        .arg(format!("{}:127.0.0.1:{FORWARD_LOCAL_PORT}", sock.display()))
+        .arg("galatest@127.0.0.1")
+        .arg(format!("C:/gala/sshfwd_test.exe serve {FORWARD_LOCAL_PORT}"))
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(&trace).map_err(|e| e.to_string())?)
+        .spawn()
+        .map_err(|e| format!("ssh -L: {e}"))?;
+    let stdout = ssh.stdout.take().ok_or("ssh -L: no stdout")?;
+    let (lines_tx, lines_rx) = std::sync::mpsc::channel::<String>();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(std::result::Result::ok) {
+            let _ = lines_tx.send(line);
+        }
+    });
+    let mut said = Vec::new();
+    let local = (|| -> Result {
+        // sshfwd_test listens once it says so.
+        let until = Instant::now() + Duration::from_secs(90);
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            match lines_rx.recv_timeout(left) {
+                Ok(line) => {
+                    let listening = line.contains("sshfwd_test: listening on 127.0.0.1:");
+                    said.push(line);
+                    if listening {
+                        break;
+                    }
+                }
+                Err(_) => return Err("sshfwd_test did not say it listens within 90 s".into()),
+            }
+        }
+        let stream = std::os::unix::net::UnixStream::connect(&sock)
+            .map_err(|e| format!("connecting to ssh's local socket: {e}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
+        let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+        let sent = data.clone();
+        let sender = thread::spawn(move || -> Result {
+            writer.write_all(&sent).map_err(|e| format!("send: {e}"))?;
+            writer.shutdown(std::net::Shutdown::Write).map_err(|e| format!("shutdown: {e}"))
+        });
+        let mut back = Vec::new();
+        let read = (&stream).read_to_end(&mut back);
+        sender.join().unwrap_or_else(|_| Err("sender panicked".into()))?;
+        read.map_err(|e| format!("receive after {} bytes: {e}", back.len()))?;
+        if back != data {
+            let first = back.iter().zip(&data).position(|(a, b)| a != b);
+            return Err(format!(
+                "{} bytes came back, not the {} sent (first difference at {first:?})",
+                back.len(),
+                data.len()
+            ));
+        }
+        // The command ends once its connection has; so does ssh.
+        let until = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = ssh.try_wait().map_err(|e| e.to_string())? {
+                if !status.success() {
+                    return Err(format!("ssh ended with {status}"));
+                }
+                break;
+            }
+            if Instant::now() > until {
+                return Err("ssh did not end within 60 s of the connection's end".into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    })();
+    let _ = ssh.kill();
+    let _ = ssh.wait();
+    let _ = reader.join();
+    said.extend(lines_rx.try_iter());
+    let _ = fs::remove_file(&sock);
+    let served = format!("sshfwd_test: served {FORWARD_BYTES} bytes to 127.0.0.1");
+    let local = local.and_then(|()| {
+        if said.iter().any(|l| l.contains(&served))
+            && said.iter().any(|l| l.contains("sshfwd_test: ok"))
+        {
+            Ok(())
+        } else {
+            Err(format!("sshfwd_test did not say {served:?}"))
+        }
+    });
+    local.map_err(|e| {
+        let trace = fs::read(&trace).unwrap_or_default();
+        format!("ssh -L: {e}; sshfwd_test said {said:?}\nssh -v:\n{}", trace_tail(&trace, 20))
+    })?;
+
+    // -R: an echo server on the host for sshd's forwarded-tcpip channel.
+    let echo = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("echo: {e}"))?;
+    let echo_port = echo.local_addr().map_err(|e| e.to_string())?.port();
+    let echoer = thread::spawn(move || -> Result<usize> {
+        let (mut conn, _) = echo.accept().map_err(|e| format!("echo accept: {e}"))?;
+        conn.set_read_timeout(Some(Duration::from_secs(60))).map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 16384];
+        let mut total = 0;
+        loop {
+            let n = conn.read(&mut buf).map_err(|e| format!("echo read after {total}: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            conn.write_all(&buf[..n]).map_err(|e| format!("echo write: {e}"))?;
+            total += n;
+        }
+        conn.shutdown(std::net::Shutdown::Write).map_err(|e| format!("echo shutdown: {e}"))?;
+        Ok(total)
+    });
+    let out = ssh_tool("ssh", port, &key, 180)
+        .args(["-o", "ExitOnForwardFailure=yes", "-R"])
+        .arg(format!("{FORWARD_REMOTE_PORT}:127.0.0.1:{echo_port}"))
+        .arg("galatest@127.0.0.1")
+        .arg(format!("C:/gala/sshfwd_test.exe connect {FORWARD_REMOTE_PORT} {FORWARD_BYTES}"))
+        .output()
+        .map_err(|e| format!("ssh -R: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !echoer.is_finished() {
+        // Nothing was forwarded: end the echo server's accept.
+        let _ = std::net::TcpStream::connect(("127.0.0.1", echo_port));
+    }
+    let echoed = echoer.join().unwrap_or_else(|_| Err("echo server panicked".into()));
+    let forwarded = format!(
+        "sshfwd_test: forwarded {FORWARD_BYTES} bytes through 127.0.0.1:{FORWARD_REMOTE_PORT}"
+    );
+    let remote = if !out.status.success() {
+        Err(format!("ssh exit {:?}", out.status.code()))
+    } else if !stdout.contains(&forwarded) {
+        Err(format!("sshfwd_test did not say {forwarded:?}"))
+    } else {
+        match echoed {
+            Ok(n) if n == FORWARD_BYTES => Ok(()),
+            Ok(n) => Err(format!("the host's echo server saw {n} bytes")),
+            Err(e) => Err(e),
+        }
+    };
+    remote.map_err(|e| {
+        format!("ssh -R: {e}; stdout {stdout:?}\nssh -v:\n{}", trace_tail(&out.stderr, 20))
+    })
+}
+
+/// The host side of `sshd_client`: the host's ssh runs gala's ssh.exe in
+/// gala, which logs on to gala's sshd at 127.0.0.1 as galatest with the key
+/// in galatest's profile and runs `echo`. The first login accepts the host
+/// key (StrictHostKeyChecking=accept-new writes ~/.ssh/known_hosts), the
+/// second must find it there (StrictHostKeyChecking=yes); known_hosts must
+/// then name 127.0.0.1's ed25519 key. A failing ssh.exe's `-v` log (`-E`)
+/// is printed in its place.
+fn ssh_inner_client(port: u16) -> Result {
+    for (i, check) in [(1, "accept-new"), (2, "yes")] {
+        let word = format!("gala-inner-{i}");
+        let line = format!(
+            // Single quotes: sshd hands the command to `sh -c` in double ones.
+            "'C:/Program Files/OpenSSH/ssh.exe' -v -E inner-{i}.log \
+             -i C:/Users/galatest/.ssh/client_ed25519 -o BatchMode=yes \
+             -o StrictHostKeyChecking={check} galatest@127.0.0.1 echo {word}; \
+             s=$?; [ $s = 0 ] || tail -n 30 inner-{i}.log; exit $s"
+        );
+        let out = ssh_key_run(port, &[&line]).map_err(|e| format!("gala's ssh, login {i}: {e}"))?;
+        if !out.contains(&word) {
+            return Err(format!("gala's ssh, login {i}: stdout {out:?}"));
+        }
+    }
+    let known = ssh_key_run(port, &["cat C:/Users/galatest/.ssh/known_hosts"])
+        .map_err(|e| format!("reading known_hosts: {e}"))?;
+    if !known.lines().any(|l| l.starts_with("127.0.0.1 ssh-ed25519 ")) {
+        return Err(format!("known_hosts has no 127.0.0.1 ssh-ed25519 line: {known:?}"));
+    }
+    Ok(())
+}
+
 /// The host side of `sshd_server`: three logins one after another, each
 /// running a command, then two at once (both connected before either
 /// ends: each sleeps a second), all through the one sshd.
@@ -10983,7 +11491,7 @@ fn judge_log_inner(
         }
         // A user/lx program: its output and exit status exactly as real
         // Linux's (its expected.txt).
-        _ => lx_expect::check_boot(scenario.cmdline, serial),
+        _ => lx_expect::check_boot(scenario.name, scenario.cmdline, serial),
     }
 }
 

@@ -141,6 +141,10 @@ impl Pending {
 pub struct ThreadSignals {
     pub mask: SigSet,
     pub pending: Pending,
+    /// The mask rt_sigsuspend replaced: the handler frame of the signal
+    /// that ends the wait saves it (uc_sigmask, put back by
+    /// rt_sigreturn), or it is put back at once if no handler runs.
+    pub saved_mask: Option<SigSet>,
 }
 
 /// What delivering a signal does.
@@ -184,7 +188,42 @@ impl Signals {
         Signals {
             actions: self.actions,
             process: Pending::default(),
-            thread: ThreadSignals { mask: self.thread.mask, pending: Pending::default() },
+            thread: ThreadSignals {
+                mask: self.thread.mask,
+                pending: Pending::default(),
+                saved_mask: None,
+            },
+        }
+    }
+
+    /// rt_sigsuspend: `mask` (without SIGKILL/SIGSTOP) until a signal is
+    /// delivered; the mask it replaces is kept to put back.
+    pub fn suspend(&mut self, mask: SigSet) {
+        let old = core::mem::replace(&mut self.thread.mask, mask.blockable());
+        self.thread.saved_mask.get_or_insert(old);
+    }
+
+    /// The mask a handler frame saves (rt_sigsuspend's, if it replaced
+    /// one: taken), given the one in effect before the handler (`old`).
+    pub fn frame_mask(&mut self, old: SigSet) -> SigSet {
+        self.thread.saved_mask.take().unwrap_or(old)
+    }
+
+    /// No handler ran after rt_sigsuspend: its mask goes back.
+    pub fn restore_saved_mask(&mut self) {
+        if let Some(m) = self.thread.saved_mask.take() {
+            self.thread.mask = m;
+        }
+    }
+
+    /// After execve: caught signals go back to their default action
+    /// (their handlers are gone with the old image), ignored ones stay
+    /// ignored; the mask and what is pending stay (execve(2)).
+    pub fn exec(&mut self) {
+        for a in self.actions.iter_mut() {
+            if a.handler != SIG_IGN && a.handler != SIG_DFL {
+                *a = KSigaction::default();
+            }
         }
     }
 
@@ -556,6 +595,42 @@ mod tests {
         assert!(child.pending().is_empty());
         assert_eq!(child.thread.mask, s.thread.mask);
         assert_eq!(child.action(SIGUSR2), s.action(SIGUSR2));
+    }
+
+    /// fork_test on Linux: after execve a caught signal is at SIG_DFL, an
+    /// ignored one still ignored, a blocked one still blocked.
+    #[test]
+    fn execve_resets_handlers() {
+        let mut s = Signals::default();
+        s.set_action(SIGUSR1, handler(0x1234, SA_SIGINFO, 0));
+        s.set_action(SIGUSR2, KSigaction { handler: SIG_IGN, ..Default::default() });
+        s.procmask(abi::SIG_BLOCK, SigSet::of(abi::SIGTERM)).unwrap();
+        s.exec();
+        assert_eq!(s.action(SIGUSR1), KSigaction::default());
+        assert_eq!(s.action(SIGUSR2).handler, SIG_IGN);
+        assert!(s.thread.mask.contains(abi::SIGTERM));
+    }
+
+    /// signal_test on Linux: rt_sigsuspend's mask is in effect until a
+    /// handler runs; the handler's frame saves the mask from before it.
+    #[test]
+    fn suspend_saves_the_mask_for_the_frame() {
+        let mut s = Signals::default();
+        s.set_action(SIGUSR1, handler(0x1234, 0, 0));
+        s.procmask(abi::SIG_SETMASK, SigSet::of(SIGUSR1)).unwrap();
+        s.suspend(SigSet::of(SIGKILL).with(abi::SIGTERM));
+        assert_eq!(s.thread.mask, SigSet::of(abi::SIGTERM));
+        s.raise(Siginfo::from_process(SIGUSR1 as i32, 0, 4, 1000), false);
+        assert_eq!(s.deliverable(), Some(SIGUSR1));
+        let a = s.action(SIGUSR1);
+        let before = s.enter_handler(SIGUSR1, &a);
+        assert_eq!(s.frame_mask(before), SigSet::of(SIGUSR1));
+        assert_eq!(s.thread.saved_mask, None);
+        // Without a handler the old mask goes back at once.
+        s.restore_mask(SigSet::of(SIGUSR1));
+        s.suspend(SigSet::EMPTY);
+        s.restore_saved_mask();
+        assert_eq!(s.thread.mask, SigSet::of(SIGUSR1));
     }
 
     #[test]

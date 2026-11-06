@@ -26,7 +26,7 @@ use crate::nt::platform::{self, Personality, UserRegs, UserSpace};
 use crate::nt::process::{self, Process};
 use crate::nt::status::NtStatus;
 use crate::nt::vad::{self, Vad};
-use crate::nt::{thread, vm};
+use crate::nt::{ledger, thread, vm};
 
 /// The uid and gid every Linux program runs as for now (the boot user;
 /// later mapped to and from the token's SIDs).
@@ -153,8 +153,24 @@ impl fmt::Display for Escaped<'_> {
     }
 }
 
-fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Process>, ExecError> {
-    let data = read_file(path)?;
+/// A program ready to map: its file's bytes, its load plan, its stack's
+/// protection and initial contents.
+struct Prepared {
+    data: Vec<u8>,
+    plan: LoadPlan,
+    stack_protect: u32,
+    initial: stack::InitialStack,
+}
+
+/// Parses `data` (the file at `path`) and builds its initial stack for
+/// `argv` and `envp`: everything execve can fail on before the old image
+/// is gone.
+fn prepare(
+    path: &str,
+    data: Vec<u8>,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<Prepared, ExecError> {
     let image = ElfImage::parse(&data).map_err(ExecError::Elf)?;
     if image.interp.is_some() {
         return Err(ExecError::Interpreter);
@@ -168,18 +184,10 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
     let bias = image.load_bias(base).map_err(ExecError::Elf)?;
     let plan = image.plan(bias).map_err(ExecError::Elf)?;
     crate::info!("lx: exec {path} ({} bytes): {plan}", data.len());
-
-    let mut space = UserSpace::new().map_err(|_| ExecError::OutOfMemory)?;
-    let mut vad = Vad::default();
-    map_image(&mut space, &mut vad, &plan, &data)?;
-
     // The stack: STACK_SIZE committed (frames on touch), executable only
     // if PT_GNU_STACK asks (or is missing, as Linux does for old images).
     let stack_exec = image.gnu_stack.is_none_or(|p| p.exec);
     let stack_protect = if stack_exec { vad::PAGE_EXECUTE_READWRITE } else { vad::PAGE_READWRITE };
-    let stack_bottom = STACK_END - STACK_SIZE;
-    vad.map_exact(stack_bottom, STACK_END, stack_protect, vad::MEM_PRIVATE)
-        .map_err(|s| ExecError::Map("stack", s))?;
     let execfn = argv.first().copied().unwrap_or(path.as_bytes());
     let (_, _, _, edx) = platform::cpuid(1, 0);
     let mut random = [0u8; 16];
@@ -215,11 +223,34 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
         gap: 0,
     };
     let initial = stack::build(STACK_END, STACK_MAX, &params).map_err(ExecError::Stack)?;
-    let first = initial.sp / PAGE * PAGE;
+    Ok(Prepared { data, plan, stack_protect, initial })
+}
+
+/// The registers a program starts with: the ELF entry with rsp at argc
+/// and every other register zero (rdx 0: no function for atexit; SysV
+/// ABI, "Process initialization").
+fn start_regs(p: &Prepared) -> UserRegs {
+    let mut gpr = [0u64; 16];
+    gpr[4] = p.initial.sp;
+    UserRegs { gpr, rip: p.plan.entry, rflags: 0 }
+}
+
+fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Process>, ExecError> {
+    let data = read_file(path)?;
+    let p = prepare(path, data, argv, envp)?;
+    let plan = &p.plan;
+
+    let mut space = UserSpace::new().map_err(|_| ExecError::OutOfMemory)?;
+    let mut vad = Vad::default();
+    map_image(&mut space, &mut vad, plan, &p.data)?;
+    let stack_bottom = STACK_END - STACK_SIZE;
+    vad.map_exact(stack_bottom, STACK_END, p.stack_protect, vad::MEM_PRIVATE)
+        .map_err(|s| ExecError::Map("stack", s))?;
+    let first = p.initial.sp / PAGE * PAGE;
     space
-        .map_zeroed(first, (STACK_END - first) / PAGE, vm::flags_for(stack_protect))
+        .map_zeroed(first, (STACK_END - first) / PAGE, vm::flags_for(p.stack_protect))
         .map_err(|_| ExecError::OutOfMemory)?;
-    space.write_initial(initial.sp, &initial.bytes).map_err(|_| ExecError::OutOfMemory)?;
+    space.write_initial(p.initial.sp, &p.initial.bytes).map_err(|_| ExecError::OutOfMemory)?;
 
     let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(path);
     let name = process::intern(name)?;
@@ -234,15 +265,11 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
         parent_id: 0,
     })
     .map_err(|_| ExecError::OutOfMemory)?;
-    if state::create(process.id, plan.brk).is_err() {
+    if state::create(process.id, plan.brk, super::file::directory_of(path)).is_err() {
         process::forget_bare(&process);
         return Err(ExecError::OutOfMemory);
     }
-    // The ELF entry with rsp at argc and every other register zero (rdx
-    // 0: no function for atexit; SysV ABI, "Process initialization").
-    let mut gpr = [0u64; 16];
-    gpr[4] = initial.sp;
-    let regs = UserRegs { gpr, rip: plan.entry, rflags: 0 };
+    let regs = start_regs(&p);
     if let Err(status) = thread::create(
         &process,
         regs,
@@ -276,7 +303,54 @@ fn map_image(
     plan: &LoadPlan,
     data: &[u8],
 ) -> Result<(), ExecError> {
-    // Page ranges with their PROT bits, in address order.
+    for &(start, end, prot) in &image_ranges(plan)? {
+        vad.map_exact(start, end, mm::protect_of(prot), vad::MEM_PRIVATE)
+            .map_err(|s| ExecError::Map("image", s))?;
+    }
+    // The file's bytes, into pages mapped now (bss pages beyond them stay
+    // demand-zero).
+    for (index, s) in plan.segments.iter().enumerate() {
+        if s.filesz == 0 {
+            continue;
+        }
+        let mut page = s.page_start();
+        let end = (s.vaddr + s.filesz).next_multiple_of(PAGE);
+        while page < end {
+            if !space.is_mapped(page) {
+                let protect = vad.page(page).map_or(vad::PAGE_READONLY, |p| p.protect);
+                space
+                    .map_zeroed(page, 1, vm::flags_for(protect))
+                    .map_err(|_| ExecError::OutOfMemory)?;
+            }
+            page += PAGE;
+        }
+        space
+            .write_initial(s.vaddr, segment_bytes(data, index, s)?)
+            .map_err(|_| ExecError::Map("image", NtStatus::ACCESS_VIOLATION))?;
+    }
+    Ok(())
+}
+
+/// Segment `index`'s bytes in the file.
+fn segment_bytes<'a>(
+    data: &'a [u8],
+    index: usize,
+    s: &elf::Segment,
+) -> Result<&'a [u8], ExecError> {
+    usize::try_from(s.offset)
+        .ok()
+        .zip(usize::try_from(s.offset + s.filesz).ok())
+        .and_then(|(a, b)| data.get(a..b))
+        .ok_or(ExecError::Elf(ElfError::SegmentOutsideFile {
+            index,
+            offset: s.offset,
+            filesz: s.filesz,
+        }))
+}
+
+/// The plan's page ranges with their PROT bits, in address order: a page
+/// two segments share gets both protections.
+fn image_ranges(plan: &LoadPlan) -> Result<Vec<(u64, u64, u64)>, ExecError> {
     let mut ranges: Vec<(u64, u64, u64)> = Vec::new();
     for s in &plan.segments {
         let bit = |on: bool, b: u64| if on { b } else { 0 };
@@ -299,39 +373,201 @@ fn map_image(
         }
     }
     ranges.retain(|r| r.0 < r.1);
+    Ok(ranges)
+}
+
+/// The longest argument or environment string (MAX_ARG_STRLEN).
+const MAX_ARG_STRLEN: usize = 32 * PAGE as usize;
+/// The longest `#!` line Linux reads (BINPRM_BUF_SIZE).
+const SHEBANG_MAX: usize = 256;
+
+/// argv or envp for execve: the strings of a NULL-terminated array of
+/// pointers (a NULL array is empty). EFAULT for an unreadable pointer or
+/// string, E2BIG when they would not fit the initial stack.
+fn read_strings(process: &Process, mut addr: u64) -> Result<Vec<Vec<u8>>, u16> {
+    let mut out = Vec::new();
+    if addr == 0 {
+        return Ok(out);
+    }
+    let mut total = 0u64;
+    loop {
+        let p = process.read_u64(addr).map_err(|_| super::errno::EFAULT)?;
+        if p == 0 {
+            return Ok(out);
+        }
+        let s = super::file::read_cstring(process, p, MAX_ARG_STRLEN, super::errno::E2BIG)?;
+        total += s.len() as u64 + 1 + 8;
+        if total > STACK_MAX {
+            return Err(super::errno::E2BIG);
+        }
+        out.try_push(s).map_err(|_| super::errno::ENOMEM)?;
+        addr += 8;
+    }
+}
+
+/// A `#!` line's interpreter and its one optional argument (the rest of
+/// the line, trimmed), or None if `data` is not a script.
+fn shebang(data: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
+    let line = data.strip_prefix(b"#!")?;
+    let line = &line[..line.len().min(SHEBANG_MAX - 2)];
+    let line = &line[..line.iter().position(|&b| b == b'\n').unwrap_or(line.len())];
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    let start = line.iter().position(|b| !blank(b))?;
+    let line = &line[start..];
+    let end = line.iter().position(blank).unwrap_or(line.len());
+    let (interp, rest) = line.split_at(end);
+    let rest = rest.trim_ascii();
+    Some((interp, (!rest.is_empty()).then_some(rest)))
+}
+
+/// execve(2): the calling process runs the program at `path` (an ELF
+/// image, or a `#!` script run by its interpreter) with `argv` and
+/// `envp`, keeping its pid, its fds but the close-on-exec ones, its mask,
+/// what is pending and its ignored signals (caught ones go back to
+/// SIG_DFL), its current directory and umask. Everything that can fail
+/// is checked before the old image goes (the errno returned); once it is
+/// gone, a failure kills the process with SIGSEGV, as Linux does.
+pub fn execve(
+    call: &super::dispatch::Call<'_>,
+    path: u64,
+    argv: u64,
+    envp: u64,
+) -> super::dispatch::Result {
+    use super::errno::{ENOEXEC, ENOMEM};
+    let path = super::file::read_path(&call.process, path)?;
+    let mut args = read_strings(&call.process, argv)?;
+    let env = read_strings(&call.process, envp)?;
+    let mut data = super::file::executable(call, &path)?;
+    let mut program = path;
+    if let Some((interp, arg)) = shebang(&data) {
+        // argv becomes: the interpreter, its argument, the script's path,
+        // then the script's arguments after argv[0].
+        let mut new = Vec::new();
+        let mut copy = |s: &[u8]| -> Result<(), u16> {
+            let mut v = Vec::new();
+            v.try_extend_from_slice(s).map_err(|_| ENOMEM)?;
+            new.try_push(v).map_err(|_| ENOMEM)
+        };
+        copy(interp)?;
+        if let Some(a) = arg {
+            copy(a)?;
+        }
+        copy(&program)?;
+        for a in args.iter().skip(1) {
+            copy(a)?;
+        }
+        let interp_path = new[0].as_slice();
+        let interp_data = super::file::executable(call, interp_path)?;
+        if shebang(&interp_data).is_some() {
+            // One level of scripts (Linux allows a few).
+            ledger::record("execve", "linux option missing", 1);
+            return Err(super::errno::ELOOP);
+        }
+        program = Vec::new();
+        program.try_extend_from_slice(interp_path).map_err(|_| ENOMEM)?;
+        args = new;
+        data = interp_data;
+    }
+    let shown = core::str::from_utf8(&program).unwrap_or("(not UTF-8)");
+    let mut argv_refs: Vec<&[u8]> = Vec::new();
+    for a in &args {
+        argv_refs.try_push(a).map_err(|_| ENOMEM)?;
+    }
+    let mut envp_refs: Vec<&[u8]> = Vec::new();
+    for e in &env {
+        envp_refs.try_push(e).map_err(|_| ENOMEM)?;
+    }
+    crate::info!("lx: pid {} execve {shown}", call.process.id);
+    let p = match prepare(shown, data, &argv_refs, &envp_refs) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::warn!("lx: pid {} execve {shown} failed: {e}", call.process.id);
+            return Err(match e {
+                ExecError::Elf(_) | ExecError::Interpreter => ENOEXEC,
+                e => e.errno(),
+            });
+        }
+    };
+    // The point of no return.
+    if let Err(e) = replace_image(&call.process, &p) {
+        crate::warn!(
+            "lx: pid {} execve {shown}: the new image could not be mapped ({e}): killed by SIGSEGV",
+            call.process.id
+        );
+        process::terminate(
+            &call.process,
+            super::signal::killed_status(lx_abi::signal::SIGSEGV),
+            true,
+        );
+        return Ok(0);
+    }
+    *call.lx.brk.lock() = state::Brk { start: p.plan.brk, current: p.plan.brk };
+    call.lx.release_vfork();
+    call.lx.close_on_exec();
+    call.lx.signals.lock().exec();
+    // A fresh thread's TLS bases and SSE control (the default MXCSR).
+    platform::set_user_bases(Some(0), Some(0));
+    platform::set_mxcsr(0x1f80);
+    call.resume.set(Some(start_regs(&p)));
+    Ok(0)
+}
+
+/// Replaces the calling process's address space with `p`'s image and
+/// stack: everything unmapped, the ranges mapped writable, the bytes
+/// written through the process's own (demand-zero) pages, then each
+/// range given its protection.
+fn replace_image(process: &KArc<Process>, p: &Prepared) -> Result<(), ExecError> {
+    let ranges = image_ranges(&p.plan)?;
+    let stack_bottom = STACK_END - STACK_SIZE;
+    {
+        let mut vad = process.vad.lock();
+        vad.unmap_range(vad::USER_MIN, vad::USER_MAX)
+            .map_err(|s| ExecError::Map("old image", s))?;
+        mm::sync(process, &vad, vad::USER_MIN, vad::USER_MAX);
+        for &(start, end, _) in &ranges {
+            vad.map_exact(start, end, vad::PAGE_READWRITE, vad::MEM_PRIVATE)
+                .map_err(|s| ExecError::Map("image", s))?;
+        }
+        vad.map_exact(stack_bottom, STACK_END, vad::PAGE_READWRITE, vad::MEM_PRIVATE)
+            .map_err(|s| ExecError::Map("stack", s))?;
+        mm::sync(process, &vad, vad::USER_MIN, vad::USER_MAX);
+    }
+    for (index, s) in p.plan.segments.iter().enumerate() {
+        if s.filesz > 0 {
+            process
+                .write(s.vaddr, segment_bytes(&p.data, index, s)?)
+                .map_err(|_| ExecError::Map("image", NtStatus::ACCESS_VIOLATION))?;
+        }
+    }
+    process
+        .write(p.initial.sp, &p.initial.bytes)
+        .map_err(|_| ExecError::Map("stack", NtStatus::ACCESS_VIOLATION))?;
+    let mut vad = process.vad.lock();
     for &(start, end, prot) in &ranges {
-        vad.map_exact(start, end, mm::protect_of(prot), vad::MEM_PRIVATE)
+        vad.protect(start, end - start, mm::protect_of(prot))
             .map_err(|s| ExecError::Map("image", s))?;
     }
-    // The file's bytes, into pages mapped now (bss pages beyond them stay
-    // demand-zero).
-    for (index, s) in plan.segments.iter().enumerate() {
-        if s.filesz == 0 {
-            continue;
-        }
-        let mut page = s.page_start();
-        let end = (s.vaddr + s.filesz).next_multiple_of(PAGE);
-        while page < end {
-            if !space.is_mapped(page) {
-                let protect = vad.page(page).map_or(vad::PAGE_READONLY, |p| p.protect);
-                space
-                    .map_zeroed(page, 1, vm::flags_for(protect))
-                    .map_err(|_| ExecError::OutOfMemory)?;
-            }
-            page += PAGE;
-        }
-        let bytes = usize::try_from(s.offset)
-            .ok()
-            .zip(usize::try_from(s.offset + s.filesz).ok())
-            .and_then(|(a, b)| data.get(a..b))
-            .ok_or(ExecError::Elf(ElfError::SegmentOutsideFile {
-                index,
-                offset: s.offset,
-                filesz: s.filesz,
-            }))?;
-        space
-            .write_initial(s.vaddr, bytes)
-            .map_err(|_| ExecError::Map("image", NtStatus::ACCESS_VIOLATION))?;
-    }
+    vad.protect(stack_bottom, STACK_SIZE, p.stack_protect)
+        .map_err(|s| ExecError::Map("stack", s))?;
+    mm::sync(process, &vad, vad::USER_MIN, vad::USER_MAX);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// exec_test on Linux: the interpreter, then the rest of the line as
+    /// one argument with the blanks around it trimmed.
+    #[test]
+    fn shebang_lines() {
+        assert_eq!(
+            shebang(b"#!  ../exec_test interp-arg  \nnot read\n"),
+            Some((&b"../exec_test"[..], Some(&b"interp-arg"[..])))
+        );
+        assert_eq!(shebang(b"#!/bin/sh\n"), Some((&b"/bin/sh"[..], None)));
+        assert_eq!(shebang(b"#!/bin/sh -e -x"), Some((&b"/bin/sh"[..], Some(&b"-e -x"[..]))));
+        assert_eq!(shebang(b"#!   \n"), None);
+        assert_eq!(shebang(b"\x7fELF"), None);
+    }
 }
