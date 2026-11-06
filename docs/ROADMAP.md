@@ -145,6 +145,7 @@ has a section under "Open items".
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel done; winhttp, wininet, curl next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
+| CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 
 ### Desktop, sessions and remote access
 
@@ -904,6 +905,69 @@ runs as a boot scenario whose transcript equals its `expected.txt`.
 **Design**: ARCHITECTURE "Plan: a second personality (Linux)", "The
 seams", "The Linux layer's milestones", "The lx module", "The lx_abi
 crate"; WORKFLOW "Linux test programs".
+
+### CT. Linux containers: Docker Desktop and Podman over a WSL facade
+
+**Goal**: stock Docker Desktop for Windows and stock Podman for Windows
+(`podman machine`, later Podman Desktop) install and run Linux
+containers on gala, unmodified. On Windows both run their Linux side in
+a WSL2 distribution; gala answers WSL2's interface itself and runs that
+distribution on the Linux personality (LX), with no virtual machine.
+
+**Out of scope**: running WSL2 itself (a VM with Microsoft's Linux
+kernel), the Hyper-V backends of both products, and Windows containers
+(Docker Desktop's "Windows containers" mode: HCS, server silos).
+
+**Next** (each step test first; the recordings of step 1 are the spec):
+1. Spec: on real Windows 11 24H2, record what each product does to set
+   up and to run `hello-world`: every `wsl.exe` command line and its
+   output, the WSL service calls, named pipes and sockets (hvsocket and
+   localhost TCP) between the Windows and Linux sides, registry keys,
+   WMI queries and optional-feature checks, files under `%LOCALAPPDATA%`
+   and `%ProgramData%`; inside the distribution, `strace -f` of its
+   init, dockerd/containerd/runc and podman/conmon/crun. The ranked
+   result (Windows side, facade, Linux system calls) goes in this
+   section, like AG's blocker list.
+2. The facade's core, test first against recorded `wsl.exe`
+   transcripts: gala's `wsl.exe` and WSL service with `--import` of a
+   rootfs tarball, `-d <distro> [--exec] <cmd>`, `-l -v`,
+   `--terminate`, `--shutdown`, `--unregister`, `--version`, the
+   per-user distribution registry, and a distribution's init as an LX
+   process. Scenario: `wsl --import` of a busybox rootfs, then
+   `wsl -d bb -- echo hi`.
+3. The facade's plumbing: `/mnt/<drive>` inside the distribution and
+   `\\wsl.localhost\<distro>` outside (one file system, no 9P), interop
+   (Windows programs started from Linux and back), `wsl.conf`, hvsocket
+   (`AF_HYPERV`) on the Windows side meeting `AF_VSOCK` on the Linux
+   side as one core socket pair, localhost forwarding over one shared
+   network stack.
+4. LX up to the distributions' needs (beyond milestone 5): glibc,
+   systemd as PID 1 (Podman's machine), namespaces (mount, PID, UTS,
+   IPC, network, user), cgroup v2, overlayfs, bind mounts and
+   `pivot_root`, netlink, veth and bridges, nftables/iptables, seccomp,
+   `/proc` and `/sys` as these programs read them. Namespaces and
+   cgroups are core objects (ARCHITECTURE "Plan: Linux containers
+   through a WSL facade"), not LX-only state.
+5. Podman: `podman machine init`, `start`, then `podman run` from the
+   Windows side; Podman Desktop after BR stage 2 (Electron).
+6. Docker Desktop: install, the backend service, its distribution, the
+   `docker` CLI over `\\.\pipe\docker_engine` running containers; then
+   the dashboard (Electron, after BR stage 2).
+
+**Done when**: from a gala command prompt, `podman run --rm hello-world`
+and `docker run --rm hello-world` print their greeting with both
+products installed by their own installers; then a container serving
+HTTP reached from the Windows side (`-p 8080:80`). Observability with
+each step: the facade's calls as events (`events=wsl`), each
+distribution's console and the products' logs copied into the serial
+log, missing Linux calls in the ledger by distribution.
+
+**Licensing**: Podman is Apache-2.0; Docker Desktop's licence terms
+(a paid subscription for larger organisations) govern running it.
+Neither is committed; xtask fetches them and runs them only in QEMU.
+WSL's source (MIT) is an allowed source (CLEAN_ROOM "WSL").
+
+**Design**: ARCHITECTURE "Plan: Linux containers through a WSL facade".
 
 ### PK. Installing software: `gala install` over winget manifests
 

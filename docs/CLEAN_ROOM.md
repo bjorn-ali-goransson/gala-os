@@ -25,6 +25,14 @@ code, recorded in `THIRD_PARTY.md` like any borrowed code. **Not** the
 Linux kernel source (GPL-2.0): copying from it would constrain how gala
 can be licensed, so it is not used as a source.
 
+## WSL (for the WSL facade, ROADMAP CT)
+Allowed: Microsoft's published WSL source (github.com/microsoft/WSL,
+MIT) as reference and borrowable code, recorded in `THIRD_PARTY.md` like
+any borrowed code; WSL's documentation on learn.microsoft.com; black-box
+behaviour of WSL on real Windows (`wsl.exe` transcripts, what Docker
+Desktop and Podman do through it). Parts of WSL that are not published
+stay black-box: the "Never" rules above apply to them.
+
 ## How work flows
 1. **Spec**: describe the behavior (a doc, or better a test). Wine's
    conformance tests, which are validated on real Windows, are the primary

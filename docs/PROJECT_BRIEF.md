@@ -52,9 +52,9 @@ rented from elsewhere. The values of that family apply here:
 Never use disassembly, decompiled code or leaked Windows source.
 Implementation is written only from specifications and tests, and those
 come from public documentation, the *Windows Internals* books, mingw-w64
-headers, Wine and ReactOS source, and black-box behaviour observed on real
-Windows. The full rules, including those for the Linux personality, are
-in `CLEAN_ROOM.md`.
+headers, Wine and ReactOS source, Microsoft's published WSL source (MIT),
+and black-box behaviour observed on real Windows. The full rules,
+including those for the Linux personality, are in `CLEAN_ROOM.md`.
 
 ## Architecture in brief
 
@@ -103,6 +103,9 @@ Windows, are a primary specification; real programs (Go, Nginx, the JDK,
   virtio first. Windows drivers are a later, staged goal (UMDF, then KMDF
   in a driver host, then the class frameworks), isolated and never in the
   kernel's address space unsupervised, and never WDDM (ROADMAP DR).
+- **Virtual machines, WSL2 itself and Windows containers.** Linux
+  containers (Docker Desktop, Podman) run through a WSL facade on the
+  Linux personality instead (ROADMAP CT).
 
 ## Licensing and reuse
 
