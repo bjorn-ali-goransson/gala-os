@@ -156,6 +156,7 @@ has a section under "Open items".
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done; static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
+| AN | Android apps on the Linux personality | planned | spec recordings first; needs LX through milestone 4, binder, GPU G2 |
 
 ### Desktop, sessions and remote access
 
@@ -1460,6 +1461,92 @@ Neither is committed; xtask fetches them and runs them only in QEMU.
 WSL's source (MIT) is an allowed source (CLEAN_ROOM "WSL").
 
 **Design**: ARCHITECTURE "Plan: Linux containers through a WSL facade".
+
+### AN. Android apps on the Linux personality
+
+**Goal**: unmodified Android apps (APKs) run on gala's desktop edition,
+each in its own shasha window. Android is a Linux kernel plus its own
+user mode, and that user mode (AOSP: ART, bionic, init, servicemanager,
+the framework, SurfaceFlinger) is open source, mostly Apache-2.0 and
+BSD. So gala does not reimplement Android's frameworks, unlike its
+Windows DLLs. It runs an unmodified x86_64 AOSP-based system image as a
+container on the Linux personality (LX) and supplies the kernel
+interfaces Android expects on top of Linux.
+
+**Out of scope**:
+- Google Play, Google Play Services and the other Google apps (GMS):
+  proprietary and licensed only to certified devices. Apps come from
+  APKs, F-Droid or another store; microG (Apache-2.0) is optional.
+- Apps that refuse uncertified devices (Play Integrity, SafetyNet), as
+  with anti-cheat (PROJECT_BRIEF "Out of scope").
+- Apps whose native code is ARM-only: they wait for the ARM64 port
+  ("Later"; an arm64 image there), as an ARM64-to-x86_64 translator is
+  not planned. Bytecode-only apps and apps that ship x86_64 libraries
+  are the target.
+- Android's own Linux kernel, Google's Android Emulator and other
+  virtual machines: the image runs on gala's core, as CT runs WSL
+  distributions.
+
+**Next** (each step test first; the recordings of step 2 are the spec):
+1. Sources: a CLEAN_ROOM "Android" section (the owner's decision).
+   AOSP's user-mode code and documentation (source.android.com) are
+   allowed; Android's kernel drivers (binder, GPL-2.0) are not, as for
+   LX. Settle how the binder UAPI layouts may be taken, and record
+   borrowed AOSP code in THIRD_PARTY.md.
+2. Spec: on a real x86_64 Android (an AVD of a pinned Android release,
+   or a device), record the boot of the system image and the launch of
+   a minimal app: `strace -f` of init, ueventd, servicemanager, zygote64
+   and system_server, every binder transaction (from AOSP's binder
+   tracing), the files under `/dev`, `/proc` and `/sys` that are read,
+   and the mounts. Record a corpus of NDK test programs (static and
+   bionic-linked, in `user/android/`, transcripts as LX's
+   `lx-expect` records them). The ranked result (missing system calls,
+   kernel interfaces, devices) goes in this section, like AG's blocker
+   list.
+3. LX up to bionic and ART: Android's dynamic linker (`linker64`) and
+   bionic (LX milestone 4), JIT memory (`mmap`/`mprotect` with
+   execute, `memfd` dual mappings), futex, epoll, Unix sockets with
+   `SCM_RIGHTS`, signals as ART uses them (faults turned into
+   exceptions, SIGQUIT dumps). Scenario: the NDK corpus, then
+   `dalvikvm` running a dex file's `main`.
+4. Binder: `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder` (or
+   binderfs) as a core IPC object (transactions, replies, object
+   references and their counts, death notifications, file descriptors
+   passed along, one-way calls, thread pools), with its state carried
+   across a kernel handover (R9) or refused with the reason. Host
+   tests of the protocol plus a binder test program against step 2's
+   recordings; then servicemanager and `service list`.
+5. The rest of the container: the mount, PID, UTS and network
+   namespaces and cgroups that Android's init uses (shared with CT step
+   4 as core objects), ueventd's netlink, `/dev/ashmem` or memfd,
+   dma-buf heaps, FUSE for `/sdcard`, SELinux as init needs it
+   (permissive), lmkd's memory pressure (`/proc/pressure`), properties.
+   Scenario: the image boots to `sys.boot_completed=1`.
+6. Display and input: gralloc on dma-buf, a hardware-composer service
+   that hands each app's surfaces to shasha as windows, GLES and Vulkan
+   through SwiftShader (Apache-2.0, which Google's emulator uses) and
+   later GPU G2/G4; touch, keyboard and mouse from shasha; audio and
+   network through gala's drivers. Scenario: a test app's activity on
+   the screen (screen check), driven by input.
+7. `gala android` (SD's CLI parity first): `install <apk>`, `list`,
+   `start`, `stop`, `uninstall`, `logcat`, over adb's protocol on a
+   local socket, so a stock `adb.exe` works too; then the same actions
+   in shasha (an app's icon in the start menu, SH).
+
+**Done when**: an F-Droid app installed with `gala android install`
+opens in its own shasha window and works with mouse and keyboard; then
+the F-Droid client installs and updates an app by itself.
+Observability with each step: binder transactions as events
+(`events=binder`: sender, target, code, size, reply status, dead
+objects), logcat and tombstones copied into the serial log and crash
+reports, missing system calls and kernel interfaces in the ledger by
+Android component, the container's processes in the state dump.
+
+**Licensing**: the system image (built from AOSP, or a prebuilt
+AOSP-based image) and test APKs are not committed; xtask fetches them
+and runs them only in QEMU, as with CT.
+
+**Design**: ARCHITECTURE "Plan: Android apps" (written with step 2).
 
 ### PK. Installing software: `gala install` over winget manifests
 
