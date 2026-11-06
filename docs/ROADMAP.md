@@ -674,14 +674,13 @@ samples).
    stopgaps"). Chromium's own frame (WM_NCCALCSIZE, custom frames);
    foreign DCs present only what they drew (GetBoundsRect) and keep
    their mapping: whole-window presents per spinner frame starved the
-   renderer. `chromium_window` passes: the page's colours on the
-   screen, then a click on Chromium's own close button ends it with 0
-   (about 5 minutes under TCG). Next: keyboard input (Alt+F4 reaches
-   DefWindowProc's SC_CLOSE in user32_test, yet does not close
-   Chromium: to trace with the window events), WM_NCHITTEST (dragging
-   and resizing a window by its own frame), IME off; then a click on a
-   link and FlaUI reading the page's accessibility tree; the scenario
-   into the gate once its time is known.
+   renderer. Window activation (WM_ACTIVATE gives the focus: Chromium's
+   views took no key before it; the desktop's `key` events showed the
+   keys arriving). `chromium_window` passes in the gate: the page's
+   colours on the screen, then Alt+F4 ends Chromium with 0 (about 2
+   minutes of kernel time). Next: WM_NCHITTEST (dragging and resizing a
+   window by its own frame), IME off, a click on a link, FlaUI reading
+   the page's accessibility tree.
 3. The sandbox: renderers in restricted, low-integrity and
    AppContainer/LowBox tokens, job objects, process mitigation policies,
    handle inheritance lists, desktop and window station checks (RS);

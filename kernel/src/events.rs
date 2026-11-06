@@ -35,7 +35,8 @@ pub enum Category {
     /// clock is written whatever the mask: `emit_always`).
     Clock = 1024,
     /// Windows (RS step B2): registered and gone (with their session),
-    /// and an HWND asked for from another session.
+    /// an HWND asked for from another session, and each key the desktop
+    /// delivers (`key`: its window and owner).
     Window = 2048,
     /// File opens: the name, the handle or the failing status.
     File = 4096,

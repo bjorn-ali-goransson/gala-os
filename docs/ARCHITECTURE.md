@@ -3981,6 +3981,20 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   child; wx calls GetDC/ReleaseDC to measure text) is then one copy, not
   hundreds. TODO: a thread that draws and then blocks outside user32
   shows its last 50 ms only when it next draws or pumps.
+- **Activation** (`activate`): one active (foreground) top-level window
+  per process. Activating one sends the one it replaces WM_NCACTIVATE
+  (FALSE) and WM_ACTIVATE (WA_INACTIVE, lParam the new one; the focus
+  leaves it when none of ours takes it), then the new one WM_NCACTIVATE
+  (TRUE) and WM_ACTIVATE (WA_ACTIVE or WA_CLICKACTIVE, lParam the old
+  one); DefWindowProc's WM_ACTIVATE gives a window that is not minimized
+  the focus. ShowWindow activates except with SW_SHOWNOACTIVATE,
+  SW_SHOWMINNOACTIVE and SW_SHOWNA; a click activates its window on the
+  window's thread before the click is dispatched (posted
+  GALA_WM_ACTIVATE); popups (menus, drop-down lists) are never
+  activated. Chromium's views take keys only once their window is
+  activated. Test: `user32_test` (activation). TODO: another process's
+  window becoming active does not deactivate ours (the desktop does not
+  say so yet); no WM_ACTIVATEAPP.
 - **The display** (`monitor.rs`): one monitor (a constant HMONITOR), the
   desktop's screen; GalaScreenInfo gives the screen and the work area
   (STATUS_NOT_SUPPORTED without a screen: user32 then assumes 1280 x

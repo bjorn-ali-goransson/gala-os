@@ -85,6 +85,14 @@ const GALA_WM_PLACE: u32 = 0x0001_0001;
 /// (its caption button, its taskbar button, Win+Down): user32 keeps
 /// IsIconic.
 const GALA_WM_MINIMIZED: u32 = 0x0001_0002;
+/// A click activates the top-level window (WA_CLICKACTIVE) on its own
+/// thread, before the click itself is dispatched.
+const GALA_WM_ACTIVATE: u32 = 0x0001_0003;
+const WM_ACTIVATE: u32 = 0x0006;
+const WM_NCACTIVATE: u32 = 0x0086;
+const WA_INACTIVE: usize = 0;
+const WA_ACTIVE: usize = 1;
+const WA_CLICKACTIVE: usize = 2;
 const WM_SETICON: u32 = 0x0080;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_CHILD: u32 = 0x4000_0000;
@@ -1232,7 +1240,11 @@ pub extern "system" fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32 {
         // A popup (a menu, a drop-down list) leaves the focus and the
         // foreground where they are.
         if !window(hwnd).is_some_and(|w| w.popup) {
-            set_foreground(hwnd);
+            // SW_SHOWNOACTIVATE (4), SW_SHOWMINNOACTIVE (7) and SW_SHOWNA
+            // (8) leave the active window as it is.
+            if !matches!(cmd, 4 | 7 | 8) {
+                set_foreground(hwnd);
+            }
             crate::tree::shown_top_level(hwnd);
         }
         InvalidateRect(hwnd, core::ptr::null(), 1);
@@ -1637,6 +1649,20 @@ pub extern "system" fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lpara
     }
     match msg {
         WM_NCCREATE => 1,
+        // Activated and not minimized: the window takes the focus (unless
+        // it is already in it).
+        WM_ACTIVATE => {
+            if wparam & 0xffff != WA_INACTIVE && wparam >> 16 == 0 {
+                let focus = crate::tree::GetFocus();
+                if focus == 0 || crate::tree::GetAncestor(focus, 2) != hwnd {
+                    crate::tree::SetFocus(hwnd);
+                }
+            }
+            0
+        }
+        // The caption's state: nothing to draw (the desktop draws it);
+        // TRUE lets the change proceed.
+        WM_NCACTIVATE => 1,
         // Alt+F4 (the Alt bit is lParam's bit 29): WM_SYSCOMMAND SC_CLOSE
         // posted to the top-level window, as on Windows.
         WM_SYSKEYDOWN if wparam == 0x73 && lparam & (1 << 29) != 0 => {
@@ -1757,9 +1783,35 @@ static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
 /// The foreground window changes: EVENT_SYSTEM_FOREGROUND when it is
 /// another.
 fn set_foreground(hwnd: Hwnd) {
-    if FOREGROUND.swap(hwnd, Ordering::Relaxed) != hwnd {
-        use crate::winevent::{CHILDID_SELF, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW, raise};
-        raise(EVENT_SYSTEM_FOREGROUND, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    activate(hwnd, WA_ACTIVE);
+}
+
+/// Top-level window `hwnd` becomes the active (and foreground) window, as
+/// on Windows: the one it replaces gets WM_NCACTIVATE (FALSE) and
+/// WM_ACTIVATE (WA_INACTIVE, lParam the new one) and loses the focus;
+/// `hwnd` gets WM_NCACTIVATE (TRUE) and WM_ACTIVATE (`state`, lParam the
+/// old one), whose DefWindowProc gives it the focus. Programs keep their
+/// keyboard focus by these (Chromium's views take keys only once their
+/// window is activated).
+pub(crate) fn activate(hwnd: Hwnd, state: usize) {
+    let old = FOREGROUND.swap(hwnd, Ordering::Relaxed);
+    if old == hwnd {
+        return;
+    }
+    use crate::winevent::{CHILDID_SELF, EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW, raise};
+    raise(EVENT_SYSTEM_FOREGROUND, hwnd, OBJID_WINDOW, CHILDID_SELF);
+    if let Some(w) = window(old) {
+        SendMessageW(old, WM_NCACTIVATE, 0, 0);
+        SendMessageW(old, WM_ACTIVATE, WA_INACTIVE | usize::from(w.iconic) << 16, hwnd as isize);
+        // The focus leaves the window when no window of ours takes it.
+        let focus = crate::tree::GetFocus();
+        if window(hwnd).is_none() && focus != 0 && crate::tree::GetAncestor(focus, 2) == old {
+            crate::tree::SetFocus(0);
+        }
+    }
+    if let Some(w) = window(hwnd) {
+        SendMessageW(hwnd, WM_NCACTIVATE, 1, 0);
+        SendMessageW(hwnd, WM_ACTIVATE, state | usize::from(w.iconic) << 16, old as isize);
     }
 }
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
@@ -2423,8 +2475,12 @@ fn pump() {
             });
             if let Some((i, thread)) = target {
                 let top = hwnd_of(i);
-                if message == 0x0201 || message == 0x0204 {
-                    set_foreground(top);
+                // A click activates the window, on its own thread, before
+                // the click is dispatched; a popup (a menu, a drop-down
+                // list) leaves the activation where it is, as ShowWindow
+                // does.
+                if (message == 0x0201 || message == 0x0204) && !with(|s| s.windows[i].popup) {
+                    post(thread, message_at(top, GALA_WM_ACTIVATE, WA_CLICKACTIVE, 0));
                 }
                 // The desktop moved the window (a drag): its position.
                 if message == 0x0003 {
@@ -2848,6 +2904,10 @@ pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
         return 0;
     }
     if m.hwnd == 0 {
+        return 0;
+    }
+    if m.message == GALA_WM_ACTIVATE {
+        activate(m.hwnd, m.wparam);
         return 0;
     }
     if m.message == GALA_WM_PLACE {

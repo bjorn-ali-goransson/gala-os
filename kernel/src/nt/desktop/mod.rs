@@ -1148,6 +1148,16 @@ impl Desktop {
             (true, true) => WM_SYSKEYDOWN,
             (true, false) => WM_SYSKEYUP,
         };
+        // Where a key went (`events=window`): a program that does not
+        // react to one shows whether it had it.
+        let owner = self.window(id).map_or(0, |w| w.owner);
+        crate::events::emit(
+            crate::events::Category::Window,
+            "key",
+            format_args!(
+                r#""vk":{vk},"down":{down},"message":{message},"window":{id},"owner":{owner}"#
+            ),
+        );
         self.send(id, message, u64::from(vk), lparam);
     }
 

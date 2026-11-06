@@ -5552,8 +5552,8 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // BR stage 2: Chromium with a window (software rendering) on the
         // desktop: a page with a green background and a magenta box,
-        // checked on the screen (SCREEN_SCENARIOS), then closed by its
-        // own close button. --disable-direct-composition: a stopgap until GPU
+        // checked on the screen (SCREEN_SCENARIOS), then closed with
+        // Alt+F4. --disable-direct-composition: a stopgap until GPU
         // G2/G4; --ipc-connection-timeout=120: a stopgap until guest time
         // follows the emulated CPU's work (ROADMAP "Known issues and
         // stopgaps").
@@ -8332,8 +8332,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     (
         // Chromium's window at (0, 0), 800 x 600, its page (window.html)
         // below Chromium's own tab strip and toolbar: the green body and
-        // the magenta box at page (100, 100) - (300, 200). Then a click on
-        // Chromium's close button.
+        // the magenta box at page (100, 100) - (300, 200). Then Alt+F4.
         "chromium_window",
         ScreenCheck {
             marker: "gala window painted",
@@ -8348,15 +8347,9 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 },
                 ScreenStep {
                     after: "",
-                    // Chromium's own close button, in the frame it draws
-                    // (x 754..800 of its top row): from the pointer's
-                    // start (640, 400) to (776, 10).
-                    input: &[
-                        "mouse_move 136 -200",
-                        "mouse_move 0 -190",
-                        "mouse_button 1",
-                        "mouse_button 0",
-                    ],
+                    // Alt+F4: keys reach Chromium once its window is
+                    // activated (user32's WM_ACTIVATE gives it the focus).
+                    input: &["sendkey alt-f4"],
                     pixels: &[],
                 },
             ],

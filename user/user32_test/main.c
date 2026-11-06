@@ -27,6 +27,13 @@
  *   NCCALCSIZE_PARAMS): 8-pixel left, right and bottom borders and no top
  *   one give a client area that much smaller, at (8, 0); GetWindowRect
  *   stays. A window that leaves it to DefWindowProc has a caption.
+ * - Activation: ShowWindow(SW_SHOW) of a top-level window activates it:
+ *   WM_NCACTIVATE (TRUE), WM_ACTIVATE (WA_ACTIVE, lParam the window
+ *   deactivated), then WM_SETFOCUS from DefWindowProc's WM_ACTIVATE;
+ *   GetActiveWindow and GetFocus are it. Showing a second one deactivates
+ *   the first (WM_NCACTIVATE FALSE, WM_ACTIVATE WA_INACTIVE with lParam
+ *   the new one, WM_KILLFOCUS); SW_SHOWNOACTIVATE leaves the active one;
+ *   SetActiveWindow activates again.
  * - Alt+F4: WM_SYSKEYDOWN with VK_F4 and the Alt bit (lParam bit 29)
  *   to DefWindowProc posts WM_SYSCOMMAND SC_CLOSE to the top-level
  *   window, which closes it once the message is dispatched; F4 alone
@@ -900,6 +907,67 @@ static LRESULT CALLBACK ncc_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
+/* Activation messages seen: message, LOWORD(wParam), lParam. */
+static UINT act_msg[16];
+static WPARAM act_w[16];
+static LPARAM act_l[16];
+static int act_n;
+
+static LRESULT CALLBACK act_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if ((msg == WM_NCACTIVATE || msg == WM_ACTIVATE || msg == WM_SETFOCUS || msg == WM_KILLFOCUS) && act_n < 16) {
+        act_msg[act_n] = msg;
+        act_w[act_n] = LOWORD(wparam);
+        act_l[act_n] = lparam;
+        act_n++;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+#define ANY ((WPARAM)-1)
+
+/* Message `m` with wParam's low word `w` (ANY: any), seen at or after
+   index `from`: its index, or -1. */
+static int act_find(int from, UINT m, WPARAM w) {
+    for (int i = from; i < act_n; i++)
+        if (act_msg[i] == m && (w == ANY || act_w[i] == w))
+            return i;
+    return -1;
+}
+
+static void activation(void) {
+    WNDCLASSW wc = {0};
+    wc.lpfnWndProc = act_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"User32TestAct";
+    CHECK(RegisterClassW(&wc));
+    HWND a = CreateWindowExW(0, L"User32TestAct", L"a", WS_OVERLAPPEDWINDOW, 10, 10, 200, 100, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    HWND b = CreateWindowExW(0, L"User32TestAct", L"b", WS_OVERLAPPEDWINDOW, 40, 40, 200, 100, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    HWND c = CreateWindowExW(0, L"User32TestAct", L"c", WS_OVERLAPPEDWINDOW, 70, 70, 200, 100, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    CHECK(a && b && c);
+    act_n = 0;
+    ShowWindow(a, SW_SHOW);
+    int nc = act_find(0, WM_NCACTIVATE, TRUE), ac = act_find(0, WM_ACTIVATE, WA_ACTIVE);
+    CHECK(nc >= 0 && ac > nc && act_find(ac, WM_SETFOCUS, ANY) > ac);
+    CHECK(GetActiveWindow() == a && GetFocus() == a);
+    act_n = 0;
+    ShowWindow(b, SW_SHOW);
+    int off = act_find(0, WM_ACTIVATE, WA_INACTIVE);
+    CHECK(off >= 0 && act_l[off] == (LPARAM)b && act_find(0, WM_NCACTIVATE, FALSE) >= 0);
+    CHECK(act_find(0, WM_KILLFOCUS, ANY) >= 0);
+    int on = act_find(off, WM_ACTIVATE, WA_ACTIVE);
+    CHECK(on > off && act_l[on] == (LPARAM)a);
+    CHECK(GetActiveWindow() == b && GetFocus() == b);
+    ShowWindow(c, SW_SHOWNOACTIVATE);
+    CHECK(GetActiveWindow() == b && IsWindowVisible(c));
+    CHECK(SetActiveWindow(a) == b && GetActiveWindow() == a && GetFocus() == a);
+    DestroyWindow(c);
+    DestroyWindow(b);
+    DestroyWindow(a);
+}
+
 static void custom_frame(void) {
     WNDCLASSW wc = {0};
     wc.lpfnWndProc = ncc_proc;
@@ -1061,6 +1129,7 @@ int main(void) {
     deferred();
     positions();
     custom_frame();
+    activation();
     timers();
     menu_bar();
     monitors();
