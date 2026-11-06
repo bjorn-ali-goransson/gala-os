@@ -156,7 +156,7 @@ has a section under "Open items".
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done; static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| AN | Android apps on the Linux personality | planned | spec recordings first; needs LX through milestone 4, binder, GPU G2 |
+| AN | Android apps on the Linux personality | planned | spec recordings first; needs LX milestone 4's dynamic linking, binder, GPU G2 |
 
 ### Desktop, sessions and remote access
 
@@ -1503,12 +1503,13 @@ interfaces Android expects on top of Linux.
    `lx-expect` records them). The ranked result (missing system calls,
    kernel interfaces, devices) goes in this section, like AG's blocker
    list.
-3. LX up to bionic and ART: Android's dynamic linker (`linker64`) and
-   bionic (LX milestone 4), JIT memory (`mmap`/`mprotect` with
-   execute, `memfd` dual mappings), futex, epoll, Unix sockets with
-   `SCM_RIGHTS`, signals as ART uses them (faults turned into
-   exceptions, SIGQUIT dumps). Scenario: the NDK corpus, then
-   `dalvikvm` running a dex file's `main`.
+3. LX up to bionic and ART, on LX's threads, futex and epoll (built):
+   Android's dynamic linker (`linker64`) and bionic (LX milestone 4's
+   dynamic linking), JIT memory (`mmap`/`mprotect` with execute,
+   `memfd` dual mappings), Unix sockets with `SCM_RIGHTS`, signals as
+   ART uses them (faults turned into exceptions, SIGQUIT dumps).
+   Scenario: the NDK corpus, then `dalvikvm` running a dex file's
+   `main`.
 4. Binder: `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder` (or
    binderfs) as a core IPC object (transactions, replies, object
    references and their counts, death notifications, file descriptors
