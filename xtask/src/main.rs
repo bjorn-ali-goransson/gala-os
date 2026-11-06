@@ -148,6 +148,43 @@ const PREBUILT: &[Prebuilt] = &[
             "pgsql/share/locale/*",
         ],
     },
+    // curl for Windows 8.23.0_8 (curl.se/windows, the official build:
+    // llvm-mingw against the UCRT, LibreSSL as its only TLS backend, the
+    // Windows ROOT store as its CA list); SHA-256 as curl.se/windows
+    // publishes it (which keeps each version at this URL). Only curl.exe
+    // (libcurl linked in).
+    Prebuilt {
+        name: "curl",
+        url: "https://curl.se/windows/dl-8.23.0_8/curl-8.23.0_8-win64-mingw.zip",
+        checksum: "ca5b0fd6e7a6dbde210281f545c73a89784f2e88104a2cdfe0b73ea3dfed5b3a",
+        members: &["curl-8.23.0_8-win64-mingw/bin/curl.exe"],
+        excludes: &[],
+    },
+    // Git for Windows' curl (PortableGit 2.47.1, the release below):
+    // curl.exe and its libcurl-4.dll, built with Schannel as its only TLS
+    // backend (the libcurl MinGit's git-remote-https loads too), and the
+    // DLLs that one imports. curl.se's own Windows build (above) has
+    // LibreSSL only.
+    Prebuilt {
+        name: "gitcurl",
+        url: "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe",
+        checksum: "4f3f21f4effcb659566883ee1ed3ae403e5b3d7a0699cee455f6cd765e1ac39c",
+        members: &[
+            "mingw64/bin/curl.exe",
+            "mingw64/bin/libcurl-4.dll",
+            "mingw64/bin/libbrotlicommon.dll",
+            "mingw64/bin/libbrotlidec.dll",
+            "mingw64/bin/libiconv-2.dll",
+            "mingw64/bin/libidn2-0.dll",
+            "mingw64/bin/libintl-8.dll",
+            "mingw64/bin/libpsl-5.dll",
+            "mingw64/bin/libssh2-1.dll",
+            "mingw64/bin/libunistring-5.dll",
+            "mingw64/bin/libzstd.dll",
+            "mingw64/bin/zlib1.dll",
+        ],
+        excludes: &[],
+    },
     // MinGit 2.47.1 (Git for Windows' minimal distribution: git and the
     // MSYS2 runtime its scripts need); SHA-256 from the release notes.
     Prebuilt {
@@ -653,6 +690,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("session_test", "user32.dll", "Windows/System32"),
     ("session_test", "gdi32.dll", "Windows/System32"),
     ("session_test", "user/access_test/access_test.regseed", "registry"),
+    ("winsta_test", "ntdll.dll", "Windows/System32"),
+    ("winsta_test", "kernel32.dll", "Windows/System32"),
+    ("winsta_test", "user32.dll", "Windows/System32"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
     ("lsa_test", "advapi32.dll", "Windows/System32"),
@@ -825,6 +865,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_write_exit", "user/lx/bin/write_exit_test", "lx"),
     ("lx_write_exit_pie", "user/lx/bin/write_exit_test-pie", "lx"),
     ("lx_brk", "user/lx/bin/brk_test", "lx"),
+    ("lx_pipe", "user/lx/bin/pipe_test", "lx"),
     ("lx_brk_pie", "user/lx/bin/brk_test-pie", "lx"),
     ("lx_mmap", "user/lx/bin/mmap_test", "lx"),
     ("lx_mmap_pie", "user/lx/bin/mmap_test-pie", "lx"),
@@ -835,6 +876,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
+    ("wininet_test", "msvcrt.dll", "Windows/System32"),
+    ("wininet_test", "wininet.dll", "Windows/System32"),
+    ("wininet_test", "user/bin/wininet_test.exe", "gala"),
     ("gdi32_test", "ntdll.dll", "Windows/System32"),
     ("gdi32_test", "kernel32.dll", "Windows/System32"),
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
@@ -972,6 +1016,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msvcrt_test", "ntdll.dll", "Windows/System32"),
     ("msvcrt_test", "kernel32.dll", "Windows/System32"),
     ("msvcrt_test", "msvcrt.dll", "Windows/System32"),
+    // rand_s loads it (ProcessPrng).
+    ("msvcrt_test", "bcryptprimitives.dll", "Windows/System32"),
     ("msvcrt_test", "shell32.dll", "Windows/System32"),
     ("msvcrt_test", "user/bin/msvcrt_test.exe", "gala"),
     ("busybox", "ntdll.dll", "Windows/System32"),
@@ -1843,6 +1889,26 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("schannel_test", "user/nginx/html/index.html", "nginx/html"),
     ("schannel_test", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
+    // curl for Windows, run by busybox sh (user/curl/curl.sh) against
+    // schannel_test's Nginx (MODULE_SETS): curl.se's build (PREBUILT
+    // curl; the UCRT is the JDK's redistributable ucrtbase.dll, in
+    // System32 as on Windows) and Git for Windows' Schannel curl (PREBUILT
+    // gitcurl), each as C:\curl.
+    ("curl", "target/prebuilt/curl/curl-8.23.0_8-win64-mingw/bin/curl.exe", "curl"),
+    ("curl", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    ("curl", "normaliz.dll", "Windows/System32"),
+    ("curl_common", "iphlpapi.dll", "Windows/System32"),
+    ("curl_schannel", "target/prebuilt/gitcurl/mingw64/bin/", "curl"),
+    ("curl_common", "wldap32.dll", "Windows/System32"),
+    ("curl_common", "user/bin/busybox.exe", "gala"),
+    ("curl_common", "user/curl/curl.sh", "gala"),
+    // Git's https remotes (MinGit, MODULE_SETS) against the same Nginx,
+    // which serves user/git_https/repo.git; busybox runs git.sh.
+    ("git_https", "user/git_https/repo.git/", "nginx/html/repo.git"),
+    ("git_https", "user/bin/busybox.exe", "gala"),
+    ("git_https", "wldap32.dll", "Windows/System32"),
+    ("git_https", "iphlpapi.dll", "Windows/System32"),
+    ("git_https", "user/git_https/git.sh", "gala"),
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
@@ -1947,6 +2013,7 @@ const USER_PROGRAMS: &[&str] = &[
     "logon_test",
     "system_test",
     "session_test",
+    "winsta_test",
     "lsa_test",
     "restricted_test",
     "cmd",
@@ -2960,6 +3027,17 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // RS step B3a: each process's window station and desktop, and
+        // where the choice came from.
+        "winsta_test",
+        &[
+            r#""ev":"winsta","op":"connect","pid":"#,
+            r#""station":"WinSta0","desktop":"Default","from":"logon""#,
+            r#""from":"startupinfo""#,
+            r#""from":"parent""#,
+        ],
+    ),
+    (
         "sshd_server",
         &[
             r#""ev":"tcp accept""#,
@@ -3904,6 +3982,34 @@ const SCENARIOS: &[Scenario] = &[
             "in session 0: not visible across sessions",
             "in session 1: not visible across sessions",
             "session_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // Window stations and desktops, ROADMAP RS step B3a
+        // (user/winsta_test): the boot user's program and its children
+        // are on WinSta0\Default of session 1.
+        name: "winsta_test",
+        cmdline: "qemu_exit events=window run=winsta_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "is on WinSta0\\Default (its logon session's)",
+            "is on WinSta0\\Default (STARTUPINFO.lpDesktop)",
+            "is on WinSta0\\Default (its parent's, pid",
+            "asked for window station \"dummy name\": 0xc0000034",
+            "winsta_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same program run as SYSTEM in session 0, as services are:
+        // the SYSTEM logon session's window station, not visible.
+        name: "winsta_service",
+        cmdline: "qemu_exit as=system run=winsta_test.exe args=service",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "is on Service-0x0-3e7$\\Default (its logon session's)",
+            "winsta_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -5840,6 +5946,77 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["winhttp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // TLS step 2: WinINet's HTTP functions (on winhttp's engine,
+        // user/http_client) against the same Nginx.
+        name: "wininet_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wininet_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wininet_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // TLS step 3: curl for Windows (curl.se's build, PREBUILT curl),
+        // unmodified, against the same Nginx (user/curl/curl.sh: plain
+        // HTTP, HTTPS, an untrusted and an expired certificate). That build
+        // has LibreSSL as its only TLS backend; it trusts the Windows ROOT
+        // store (crypt32's CertOpenSystemStoreA: gala's machine roots).
+        name: "curl",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=busybox.exe args=sh%20C:/gala/curl.sh",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "version: curl 8.23.0 (x86_64-w64-mingw32) libcurl/8.23.0 LibreSSL/4.4.0",
+            "http: exit 0 <title>Welcome to nginx!</title>",
+            "https: exit 0 <title>Welcome to nginx!</title>",
+            "https ip: exit 0 200 896",
+            "untrusted: exit 60",
+            "expired: exit 60",
+            "curl.sh: done",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // TLS step 3: curl on Schannel: Git for Windows' curl (PREBUILT
+        // gitcurl, the libcurl MinGit's https remotes use), unmodified,
+        // through secur32 and schannel.dll, validating against gala's
+        // machine root store; the same script.
+        name: "curl_schannel",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=busybox.exe args=sh%20C:/gala/curl.sh",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "version: curl 8.11.0 (x86_64-w64-mingw32) libcurl/8.11.0 Schannel",
+            "http: exit 0 <title>Welcome to nginx!</title>",
+            "https: exit 0 <title>Welcome to nginx!</title>",
+            "https ip: exit 0 200 896",
+            "curl: (60) schannel: ",
+            "untrusted: exit 60",
+            "expired: exit 35",
+            "curl.sh: done",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // TLS step 3: Git's https remotes: MinGit (PREBUILT), unmodified,
+        // with Schannel (http.sslBackend), cloning user/git_https/repo.git
+        // from the same Nginx over Git's dumb HTTP protocol
+        // (user/git_https/git.sh), and refusing an untrusted certificate.
+        name: "git_https",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  cwd=C:/Users/gala run=busybox.exe args=sh%20C:/gala/git.sh",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ls-remote: exit 0 58e30b428a549e95e6456011efecb254e82a9265\tHEAD",
+            "clone: exit 0",
+            "file: hello over https",
+            "log: served by nginx",
+            "SEC_E_UNTRUSTED_ROOT",
+            "untrusted: exit 128",
+            "git.sh: done",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // Schannel (secur32 + schannel.dll): TLS 1.3 and 1.2 clients
         // against Nginx (OpenSSL) on the loopback address, certificate
         // validation, and a server (AcceptSecurityContext) in-process.
@@ -6170,6 +6347,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/write_exit_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/pipe_test (LX milestone 2): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_pipe",
+        cmdline: "qemu_exit lxrun=/lx/pipe_test lxargs=./pipe_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/pipe_test", BOOT_OK_MARKER],
+    },
+    Scenario {
         // user/lx/brk_test, static (ET_EXEC): its transcript must be its
         // expected.txt (real Linux's; `lx_expect::check_boot`).
         name: "lx_brk",
@@ -6363,7 +6548,19 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
     ("winhttp_test", "schannel_test"),
+    ("wininet_test", "wininet_test"),
+    ("wininet_test", "schannel_test"),
+    ("curl", "curl"),
+    ("curl", "curl_common"),
+    ("curl", "schannel_test"),
+    ("curl_schannel", "curl_schannel"),
+    ("curl_schannel", "curl_common"),
+    ("curl_schannel", "schannel_test"),
+    ("git_https", "git_https"),
+    ("git_https", "mingit"),
+    ("git_https", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
+    ("winsta_service", "winsta_test"),
 ];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
@@ -6864,6 +7061,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
     ("session_test", "child processes; run as SYSTEM (a boot option)"),
+    ("winsta_test", "child processes (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
@@ -8370,9 +8568,15 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 },
                 ScreenStep {
                     after: "desktop: dragging window",
-                    // Dragged by (100, 100): the box moves with it.
+                    // Dragged by (100, 100): the box moves with it, and
+                    // the whole new area is redrawn: the page's green at
+                    // its bottom-right corner, drawn last (the window spans
+                    // 100..900 x 100..700 now).
                     input: &["mouse_move 100 100", "mouse_button 0"],
-                    pixels: &[PixelCheck::AnyIn(220, 300, 160, 160, 0xff00ff)],
+                    pixels: &[
+                        PixelCheck::AnyIn(220, 300, 160, 160, 0xff00ff),
+                        PixelCheck::At(880, 600, 0x2e8b57),
+                    ],
                 },
                 ScreenStep {
                     after: "",

@@ -131,6 +131,17 @@ pub const NT_RESUME_PROCESS: u32 = 0x7f92;
 /// NtOpenThread (gala's number, unverified; Crashpad's handler opens a
 /// crashed client's threads for their contexts).
 pub const NT_OPEN_THREAD: u32 = 0x7f93;
+/// Window stations and desktops (nt::winsta), for gala's user32:
+/// OpenWindowStation/OpenDesktop/OpenInputDesktop, the process's and
+/// threads' handles, SetProcessWindowStation/SetThreadDesktop,
+/// CloseWindowStation/CloseDesktop, GetUserObjectInformation, the name
+/// lists.
+pub const GALA_USER_OBJECT_OPEN: u32 = 0x7fa0;
+pub const GALA_USER_OBJECT_CONNECTION: u32 = 0x7fa1;
+pub const GALA_USER_OBJECT_SET: u32 = 0x7fa2;
+pub const GALA_USER_OBJECT_CLOSE: u32 = 0x7fa3;
+pub const GALA_USER_OBJECT_INFORMATION: u32 = 0x7fa4;
+pub const GALA_USER_OBJECT_ENUM: u32 = 0x7fa5;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -150,6 +161,8 @@ pub const GALA_WINDOW_SURFACE: u32 = 0x7f52;
 pub const GALA_WINDOW_SURFACE_OPEN: u32 = 0x7f53;
 /// A window that draws its own caption asks the desktop to drag it.
 pub const GALA_WINDOW_DRAG: u32 = 0x7f54;
+/// ... or resize it by its own border.
+pub const GALA_WINDOW_RESIZE: u32 = 0x7f55;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
 /// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
@@ -382,6 +395,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SURFACE, "GalaWindowSurface", 5, gala_window_surface),
     (GALA_WINDOW_SURFACE_OPEN, "GalaWindowSurfaceOpen", 3, gala_window_surface_open),
     (GALA_WINDOW_DRAG, "GalaWindowDrag", 1, gala_window_drag),
+    (GALA_WINDOW_RESIZE, "GalaWindowResize", 2, gala_window_resize),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
     (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
@@ -393,6 +407,22 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
     (GALA_HANDOVER_PAUSE, "GalaHandoverPause", 1, gala_handover_pause),
     (GALA_UNHANDLED_EXCEPTION, "GalaUnhandledException", 2, gala_unhandled_exception),
+    (GALA_USER_OBJECT_OPEN, "GalaUserObjectOpen", 6, winsta_calls::gala_user_object_open),
+    (
+        GALA_USER_OBJECT_CONNECTION,
+        "GalaUserObjectConnection",
+        3,
+        winsta_calls::gala_user_object_connection,
+    ),
+    (GALA_USER_OBJECT_SET, "GalaUserObjectSet", 2, winsta_calls::gala_user_object_set),
+    (GALA_USER_OBJECT_CLOSE, "GalaUserObjectClose", 2, winsta_calls::gala_user_object_close),
+    (
+        GALA_USER_OBJECT_INFORMATION,
+        "GalaUserObjectInformation",
+        5,
+        winsta_calls::gala_user_object_information,
+    ),
+    (GALA_USER_OBJECT_ENUM, "GalaUserObjectEnum", 4, winsta_calls::gala_user_object_enum),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -986,7 +1016,7 @@ fn pipe_request(
         let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] };
         thread::current().map(|t| (t, apc))
     };
-    Ok(super::notify::Request {
+    super::notify::Request {
         process: call.process.clone(),
         iosb,
         buffer,
@@ -1002,12 +1032,19 @@ fn pipe_request(
             end.dispatcher.clone()
         },
         done: None,
-    })
+        reserved: None,
+    }
+    .reserve()
 }
 
 /// NtClose(Handle)
 fn nt_close(call: &mut Call<'_>) -> NtStatus {
     let handle = Handle(arg!(call, 0));
+    // The process's window station and its threads' desktop handles
+    // (nt::winsta) stay open while in use, as on Windows.
+    if call.process.ui.holds(handle.0) {
+        return NtStatus::HANDLE_NOT_CLOSABLE;
+    }
     let closed = call.process.handles.lock().close(handle);
     let Some(entry) = closed else { return NtStatus::INVALID_HANDLE };
     let was_process = matches!(entry.object.body, ObjectBody::Process(_) | ObjectBody::Thread(_));
@@ -2160,6 +2197,20 @@ fn gala_window_drag(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// GalaWindowResize(id, edges): the caller's window `id` is resized from
+/// `edges` (1 left, 2 top, 4 right, 8 bottom) by the pointer while the
+/// left button stays down; the program gets the rectangle (GALA_WM_PLACE)
+/// when it goes up. STATUS_INVALID_DEVICE_STATE when the button is up.
+fn gala_window_resize(call: &mut Call<'_>) -> NtStatus {
+    let (id, edges) = (arg!(call, 0) as u32, arg!(call, 1) as u32);
+    let owner = call.process.id;
+    tri!(super::desktop::with(&call.process.desk.shell, |d| {
+        d.begin_resize(id, owner, edges)?;
+        Ok(((), None))
+    }));
+    NtStatus::SUCCESS
+}
+
 /// GalaWindowChildren(Parent, *Hwnds, Max, *Count): the windows whose
 /// parent is Parent (0: the top-level windows of every process), the
 /// highest first; Count says how many there are (more than Max when the
@@ -2931,9 +2982,15 @@ fn nt_set_timer(call: &mut Call<'_>) -> NtStatus {
     let apc = (routine != 0).then_some((routine, context));
     let now = platform::system_time();
     let due_time = timer::due_system_time(due, now);
-    let due = timer::due_tick(due, platform::ticks(), now);
-    let previous =
-        tri!(timer::arm(&object, due, due_time, timer::period_ticks(period as u32), apc));
+    let ticks = timer::due_tick(due, platform::ticks(), now);
+    let previous = tri!(timer::arm(
+        &object,
+        ticks,
+        due_time,
+        timer::period_ticks(period as u32),
+        due > 0,
+        apc
+    ));
     let ptr = arg!(call, 6);
     if ptr != 0 && call.process.write(ptr, &[u8::from(previous)]).is_err() {
         return NtStatus::ACCESS_VIOLATION;
@@ -3647,6 +3704,11 @@ fn gala_clock_control(call: &mut Call<'_>) -> NtStatus {
     let state = super::kuser::refresh_after(|| platform::clock_control(op));
     if op != clockctl::Op::Query {
         info!("clock: {} asked to {op}: now {state}", call.process.name);
+        // Absolute timeouts and timers follow the system time.
+        if matches!(op, clockctl::Op::ShiftSystem(_) | clockctl::Op::SetSystem(_)) {
+            let woken = super::wait::system_time_changed();
+            info!("clock: the system time moved: {woken} absolute waits and the timers look again");
+        }
         crate::events::emit(
             crate::events::Category::Mock,
             "clock",
@@ -5140,8 +5202,14 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
         output,
         output_len,
     };
-    let io =
-        super::afd::Io { process: call.process.clone(), iosb, event, context: arg!(call, 3), apc };
+    let io = super::afd::Io {
+        process: call.process.clone(),
+        iosb,
+        event,
+        context: arg!(call, 3),
+        apc,
+        reserved: super::notify::Reserved::none(),
+    };
     super::afd::ioctl(&request, io)
 }
 
@@ -5361,6 +5429,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         parent_token
     };
     let token = tri!(super::token::for_new_process(Some(&source)));
+    let (desktop_origin, desktop_spec, inherited_station) =
+        tri!(child_desktop(call, ptr, flags, &table));
     let spawned = process::spawn(process::Spawn {
         name,
         path: path_static,
@@ -5382,6 +5452,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         Err(_) => return NtStatus::NO_MEMORY,
     };
     job_calls::join(&child, job);
+    child.ui.request(desktop_origin, desktop_spec, inherited_station);
     let thread_id = match &thread_object.body {
         ObjectBody::Thread(t) => t.id,
         _ => 0,
@@ -5421,6 +5492,58 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
+}
+
+/// The window station and desktop a new process is to connect to
+/// (nt::winsta; "Process Connection to a Window Station"): a window
+/// station handle it inherits (in `table`), else STARTUPINFO.lpDesktop
+/// (flag 256: its UTF-16 at 168, length at 176), else its creator's
+/// station and desktop (the names it connected to, or what it was asked
+/// for), else nothing (its logon session's default).
+fn child_desktop(
+    call: &Call<'_>,
+    ptr: u64,
+    flags: u64,
+    table: &super::object::HandleTable,
+) -> Result<(super::winsta::Origin, Vec<u16>, Option<ObjectRef>), NtStatus> {
+    use super::winsta::{self, Origin};
+    let inherited = table
+        .iter()
+        .find(|(_, e)| {
+            e.attributes & HANDLE_ATTRIBUTES != 0 && winsta::station_of(&e.object).is_some()
+        })
+        .map(|(_, e)| e.object.clone());
+    let named = if flags & 256 != 0 {
+        let mut ext = [0u8; 12];
+        call.process.read(ptr + 168, &mut ext).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let at = u64::from_le_bytes(ext[0..8].try_into().unwrap_or([0; 8]));
+        let len = u32::from_le_bytes(ext[8..12].try_into().unwrap_or([0; 4]));
+        if len > 512 {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        Some(call.read_wide(at, u64::from(len))?)
+    } else {
+        None
+    };
+    if let Some(station) = inherited {
+        return Ok((Origin::Handle, named.unwrap_or_default(), Some(station)));
+    }
+    if let Some(spec) = named {
+        return Ok((Origin::StartupInfo, spec, None));
+    }
+    let parent = call.process.id;
+    match call.process.ui.resolved() {
+        Some(Ok((s, d))) => Ok((Origin::Parent(parent), winsta::spec_of(&s, &d)?, None)),
+        _ => {
+            let (_, spec, inherited) = call.process.ui.request_of()?;
+            let origin = if spec.is_empty() && inherited.is_none() {
+                Origin::Logon
+            } else {
+                Origin::Parent(parent)
+            };
+            Ok((origin, spec, inherited))
+        }
+    }
 }
 
 /// ByteOffset values meaning "end of file" and "current position".
@@ -6432,7 +6555,9 @@ fn nt_notify_change_directory_file(call: &mut Call<'_>) -> NtStatus {
         apc,
         file_signal: dir.dispatcher.clone(),
         done: done.clone(),
+        reserved: None,
     };
+    let request = tri!(request.reserve());
     let key = dir.lock_owner();
     let node = dir.node;
     drop(entry);
@@ -6733,3 +6858,6 @@ mod token_calls;
 
 #[path = "security_calls.rs"]
 mod security_calls;
+
+#[path = "winsta_calls.rs"]
+mod winsta_calls;

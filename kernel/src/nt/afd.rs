@@ -148,6 +148,8 @@ pub struct Io {
     /// ApcRoutine: queued to the calling thread when the request
     /// completes (a completion routine; such a request posts no packet).
     pub apc: Option<(ObjectRef, super::thread::UserApc)>,
+    /// Its completion's packet and APC, reserved when it is submitted.
+    pub reserved: super::notify::Reserved,
 }
 
 /// An operation waiting for the network (docs/ARCHITECTURE.md, "AFD").
@@ -381,7 +383,7 @@ fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, im
         wait::set_signal(e, 1);
     }
     if let Some((thread, apc)) = &io.apc {
-        let _ = super::thread::queue_user_apc(thread, *apc);
+        io.reserved.queue_apc(thread, *apc);
     }
     let modes = state.modes.load(Ordering::Acquire);
     if modes & FILE_SKIP_SET_EVENT_ON_HANDLE == 0 {
@@ -393,11 +395,7 @@ fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, im
     let port = state.completion.lock().clone();
     if let (Some((port, key)), true) = (port, io.context != 0 && io.apc.is_none()) {
         let packet = CompletionPacket::new(key, io.context, status.0, information);
-        if let ObjectBody::IoCompletion(c) = &port.body
-            && c.queue.lock().push(packet).is_ok()
-        {
-            wait::set_signal(&port, 1);
-        }
+        io.reserved.post(&port, packet);
     }
 }
 
@@ -657,9 +655,22 @@ fn try_complete(state: &EndpointState) {
 /// `Op::kind` of a poll.
 const POLL_KIND: usize = 4;
 
+/// What a request's completion will post, reserved when it starts
+/// (`notify::Reserved`): the packet to the endpoint's port, if the
+/// request has an ApcContext and no routine, and its routine's APC.
+fn reserve(state: &EndpointState, io: &Io) -> Result<super::notify::Reserved, NtStatus> {
+    let port = state.completion.lock().clone();
+    let port = port.as_ref().filter(|_| io.context != 0 && io.apc.is_none()).map(|(p, _)| p);
+    super::notify::Reserved::new(port, io.apc.as_ref().map(|(t, _)| t))
+}
+
 /// Starts a request: done at once if possible, else pending.
-fn submit(state: &EndpointState, mut op: Op, io: Io) -> NtStatus {
+fn submit(state: &EndpointState, mut op: Op, mut io: Io) -> NtStatus {
     let mut pending = state.pending.lock();
+    io.reserved = match reserve(state, &io) {
+        Ok(r) => r,
+        Err(status) => return status,
+    };
     let kind = op.kind();
     // A non-blocking socket's synchronous connect never completes in the
     // call, as on Windows (WSAEWOULDBLOCK, then writable): over loopback
@@ -1616,8 +1627,15 @@ pub fn adopt_requests(object: &ObjectRef, requests: Vec<CarriedRequest>) -> Resu
             }
             _ => return Err(NtStatus::INVALID_PARAMETER),
         };
-        let io =
-            Io { process: q.process, iosb: q.iosb, event: q.event, context: q.context, apc: q.apc };
+        let mut io = Io {
+            process: q.process,
+            iosb: q.iosb,
+            event: q.event,
+            context: q.context,
+            apc: q.apc,
+            reserved: super::notify::Reserved::none(),
+        };
+        io.reserved = reserve(state, &io)?;
         if usize::from(op.kind()) == POLL_KIND {
             state.polls.fetch_add(1, Ordering::AcqRel);
             let mut pollers = POLLERS.lock();

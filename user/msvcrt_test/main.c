@@ -26,9 +26,12 @@
  * on a narrow text stream (fputws, putwc, fgetwc, getwc, ungetwc),
  * _putws, _aligned_malloc/_aligned_free, _beginthread and
  * _getdrive/_chdrive; what FileZilla Server's GUI imports: iswlower,
- * iswupper (and iswcntrl, iswgraph, iswascii), _wtol and difftime. Built against msvcrt
+ * iswupper (and iswcntrl, iswgraph, iswascii), _wtol and difftime; what
+ * Git for Windows' curl imports: rand_s (two draws differ), _sys_nerr
+ * (43) and _sys_errlist (strerror's texts). Built against msvcrt
  * (not mingw's own stdio) by build.sh.
  * Prints "msvcrt_test: ok" or exits with the number of the failing check. */
+#define _CRT_RAND_S /* rand_s */
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -101,6 +104,25 @@ static void __cdecl begin_thread(void *arg) { InterlockedExchange(&begun, (LONG)
 
 /* What FileZilla's DLLs (wxWidgets, libfilezilla, GnuTLS) import, as
  * msvcrt.dll documents it. */
+#ifndef __TINYC__
+/* Git for Windows' curl: rand_s, and _sys_errlist/_sys_nerr for its
+ * error texts (the same texts as strerror's). */
+static void curl_checks(void) {
+    unsigned int a = 0, b = 0;
+    CHECK(rand_s(&a) == 0 && rand_s(&b) == 0);
+    unsigned int c2 = 0;
+    CHECK(rand_s(&c2) == 0);
+    CHECK(a != b || b != c2); /* three equal 32-bit draws: never */
+    CHECK(_sys_nerr == 43);
+    CHECK(strcmp(_sys_errlist[0], "No error") == 0);
+    CHECK(strcmp(_sys_errlist[2], "No such file or directory") == 0);
+    CHECK(strcmp(_sys_errlist[42], "Illegal byte sequence") == 0);
+    for (int e = 0; e < _sys_nerr; e++)
+        CHECK(strcmp(strerror(e), _sys_errlist[e]) == 0);
+    CHECK(strcmp(strerror(_sys_nerr), "Unknown error") == 0);
+}
+#endif
+
 static void filezilla_checks(void) {
     CHECK(iswspace(L' ') && iswspace(L'\t') && iswspace(L'\n') && !iswspace(L'a'));
     CHECK(iswalpha(L'a') && iswalpha(L'Z') && iswalpha(0xe9) && !iswalpha(L'1'));
@@ -539,6 +561,7 @@ int main(void) {
         free(begin);
         wide_checks();
         filezilla_checks();
+        curl_checks();
     }
 #endif
 

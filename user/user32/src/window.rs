@@ -31,6 +31,7 @@ unsafe extern "system" {
     ) -> u32;
     fn GalaWindowShow(id: u32, show: u8) -> u32;
     fn GalaWindowDrag(id: u32) -> u32;
+    fn GalaWindowResize(id: u32, edges: u32) -> u32;
     fn GalaWindowPresent(
         id: u32,
         x: i32,
@@ -1799,17 +1800,37 @@ fn set_foreground(hwnd: Hwnd) {
 
 /// A left-button press at client point `lparam` of top-level window
 /// `top`, which draws its own frame: HTCAPTION from its WM_NCHITTEST (the
-/// screen point) makes the desktop drag it; otherwise the press goes to
-/// the window under it as usual.
+/// screen point) makes the desktop drag it, a border (HTLEFT..
+/// HTBOTTOMRIGHT) resize it; otherwise the press goes to the window under
+/// it as usual.
 fn nc_down(top: Hwnd, wparam: usize, lparam: isize) {
     let Some(w) = window(top) else { return };
     let (cx, cy) = (lparam as i16 as i32, (lparam >> 16) as i16 as i32);
     let (b, t) = desktop_frame(&w);
     let (sx, sy) = (w.x + b + cx, w.y + t + cy);
     let screen = (sx as u16 as isize) | (sy as u16 as isize) << 16;
-    if SendMessageW(top, WM_NCHITTEST, 0, screen) == HTCAPTION && w.desktop != 0 {
+    let hit = SendMessageW(top, WM_NCHITTEST, 0, screen);
+    if hit == HTCAPTION && w.desktop != 0 {
         // SAFETY: our desktop window.
         unsafe { GalaWindowDrag(w.desktop) };
+        return;
+    }
+    // HTLEFT..HTBOTTOMRIGHT (10..17): the desktop's edges (1 left, 2 top,
+    // 4 right, 8 bottom).
+    let edges = match hit {
+        10 => 1,
+        11 => 4,
+        12 => 2,
+        13 => 2 | 1,
+        14 => 2 | 4,
+        15 => 8,
+        16 => 8 | 1,
+        17 => 8 | 4,
+        _ => 0,
+    };
+    if edges != 0 && w.desktop != 0 {
+        // SAFETY: our desktop window.
+        unsafe { GalaWindowResize(w.desktop, edges) };
         return;
     }
     let (to, lparam) = crate::tree::route(top, 0x0201, lparam);

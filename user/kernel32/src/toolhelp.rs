@@ -418,6 +418,49 @@ pub extern "system" fn Module32NextW(snapshot: Handle, entry: *mut u8) -> Bool {
     module32(snapshot, entry, false)
 }
 
+/// MODULEENTRY32 (the ANSI one): MODULEENTRY32W's fields up to hModule,
+/// then szModule (48, 256 bytes) and szExePath (304, 260 bytes): 568
+/// bytes. The names are converted from the W entry (gala's ANSI code page
+/// is UTF-8, so nothing is lost; a name that does not fit is cut).
+fn module32_ansi(snapshot: Handle, entry: *mut u8, first: bool) -> Bool {
+    const SIZE: usize = 568;
+    // SAFETY: the caller's entry starts with dwSize.
+    if entry.is_null() || (unsafe { *entry.cast::<u32>() } as usize) < SIZE {
+        return fail_with(ERROR_BAD_LENGTH, FALSE);
+    }
+    // The W entry, 8-byte aligned (module32 reads dwSize as a u32).
+    let mut block = [0u64; 135];
+    block[0] = 1080;
+    if module32(snapshot, block.as_mut_ptr().cast(), first) == FALSE {
+        return FALSE;
+    }
+    // SAFETY: the block's 1080 bytes as 540 UTF-16 units.
+    let w = unsafe { core::slice::from_raw_parts(block.as_ptr().cast::<u16>(), 540) };
+    let units = |from: usize, max: usize| {
+        let s = &w[from..from + max];
+        &s[..s.iter().position(|&c| c == 0).unwrap_or(max)]
+    };
+    // SAFETY: the caller's MODULEENTRY32 (SIZE bytes, checked): the 48
+    // bytes of fixed fields are laid out as in the W entry.
+    unsafe {
+        core::ptr::write_bytes(entry.add(4), 0, SIZE - 4);
+        core::ptr::copy_nonoverlapping(block.as_ptr().cast::<u8>().add(4), entry.add(4), 44);
+        let _ = super::ansi::to_utf8(units(24, 256), entry.add(48), 256);
+        let _ = super::ansi::to_utf8(units(280, 260), entry.add(304), 260);
+    }
+    TRUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Module32First(snapshot: Handle, entry: *mut u8) -> Bool {
+    module32_ansi(snapshot, entry, true)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Module32Next(snapshot: Handle, entry: *mut u8) -> Bool {
+    module32_ansi(snapshot, entry, false)
+}
+
 /// (processes, threads, handles) in the system now, from
 /// SystemProcessInformation (the idle process not counted); zeros if the
 /// list cannot be read.

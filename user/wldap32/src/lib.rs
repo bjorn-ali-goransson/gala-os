@@ -1,5 +1,5 @@
 //! gala's wldap32.dll (the LDAP client): for now the functions PostgreSQL
-//! imports, none implemented yet. Each reports itself to the
+//! and curl import, none implemented yet. Each reports itself to the
 //! missing-features ledger and ends the process when called
 //! (`gala_stubs`), so the ledger shows which ones a program uses.
 

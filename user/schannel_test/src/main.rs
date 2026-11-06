@@ -37,7 +37,10 @@
 //!    (SEC_E_INCOMPLETE_MESSAGE and SECBUFFER_MISSING in the handshake and
 //!    in DecryptMessage);
 //! 4. TLS 1.2 forced by SCH_CREDENTIALS' TLS_PARAMETERS
-//!    (grbitDisabledProtocols);
+//!    (grbitDisabledProtocols); TLS 1.3 when they disable every protocol
+//!    but the client's TLS 1.0 to 1.3 (as curl does: the bits of the
+//!    other side do not count), with SECBUFFER_EMPTY output buffers that
+//!    come back as SECBUFFER_TOKEN (curl's too);
 //! 5. a name the certificate does not have: SEC_E_WRONG_PRINCIPAL with
 //!    automatic validation, SEC_E_OK with SCH_CRED_MANUAL_CRED_VALIDATION;
 //!    an untrusted root: SEC_E_UNTRUSTED_ROOT (manual: SEC_E_OK); an
@@ -640,6 +643,10 @@ struct Client {
     saw_missing: bool,
     saw_renegotiate: bool,
     attributes: u32,
+    /// The handshake's output buffers are SECBUFFER_EMPTY (as curl passes
+    /// them with ISC_REQ_ALLOCATE_MEMORY); the token comes back in them
+    /// as SECBUFFER_TOKEN.
+    empty_output: bool,
 }
 
 impl Client {
@@ -680,6 +687,7 @@ impl Client {
             saw_missing: false,
             saw_renegotiate: false,
             attributes: 0,
+            empty_output: false,
         })
     }
 
@@ -784,12 +792,14 @@ impl Client {
             data: protocols.as_mut_ptr(),
         }];
         let mut input = desc(&mut ib);
-        let mut ob = [SecBuffer { size: 0, kind: SECBUFFER_TOKEN, data: null_mut() }];
+        let out_kind = if self.empty_output { SECBUFFER_EMPTY } else { SECBUFFER_TOKEN };
+        let mut ob = [SecBuffer { size: 0, kind: out_kind, data: null_mut() }];
         let mut output = desc(&mut ob);
         let first_input: *mut SecBufferDesc = if n > 0 { &mut input } else { null_mut() };
         let r = self.isc(first_input, &mut output) as u32;
         c.eq(r.into(), SEC_I_CONTINUE_NEEDED.into())?;
         c.ok(ob[0].size > 5 && !ob[0].data.is_null(), ob[0].size.into())?;
+        c.eq(ob[0].kind.into(), SECBUFFER_TOKEN.into())?;
         // SAFETY: the token.
         c.eq(unsafe { *ob[0].data }.into(), 0x16)?; // a handshake record
         c.ok(self.send_token(&ob[0]), 0)?;
@@ -807,7 +817,7 @@ impl Client {
                 EMPTY_BUFFER,
             ];
             let mut input = desc(&mut ib);
-            let mut ob = [SecBuffer { size: 0, kind: SECBUFFER_TOKEN, data: null_mut() }];
+            let mut ob = [SecBuffer { size: 0, kind: out_kind, data: null_mut() }];
             let mut output = desc(&mut ob);
             let r = self.isc(&mut input, &mut output) as u32;
             if r == SEC_E_INCOMPLETE_MESSAGE {
@@ -1220,6 +1230,23 @@ fn tls12_parameters(c: &mut Checks) -> Result<(), u32> {
     let mut info = [0u32; 7];
     query(c, &mut client.ctx, SECPKG_ATTR_CONNECTION_INFO, &mut info)?;
     c.eq(info[0].into(), SP_PROT_TLS1_2_CLIENT.into())?;
+    let mut cred = client.cred;
+    client.close();
+    // SAFETY: our handle.
+    unsafe { FreeCredentialsHandle(&mut cred) };
+
+    // Everything disabled but the client's TLS 1.0 to 1.3, as curl asks:
+    // the server halves (and the old versions gala lacks) do not matter,
+    // TLS 1.3 is negotiated.
+    c.step(b"tls1.3 client, TLS_PARAMETERS disabling the rest");
+    let client_side = SP_PROT_TLS1_3_CLIENT | SP_PROT_TLS1_2_CLIENT | 0x200 | 0x80;
+    let cred = acquire(c, Creds::New(SCH_CRED_NO_DEFAULT_CREDS, !client_side), Abi::Wide)?;
+    let mut client = Client::connect(c, 8443, cred, "localhost")?;
+    client.empty_output = true;
+    let r = client.handshake(c, ALPN)?;
+    c.status(r as i32, SEC_E_OK)?;
+    query(c, &mut client.ctx, SECPKG_ATTR_CONNECTION_INFO, &mut info)?;
+    c.eq(info[0].into(), SP_PROT_TLS1_3_CLIENT.into())?;
     let mut cred = client.cred;
     client.close();
     // SAFETY: our handle.

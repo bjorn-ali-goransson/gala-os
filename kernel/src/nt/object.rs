@@ -186,23 +186,53 @@ static NEXT_PORT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 pub struct CompletionQueue {
     /// The port's number in the event stream.
     pub id: u64,
-    packets: Vec<CompletionPacket>,
+    /// Room is kept for the packets of I/O requests in progress
+    /// (`notify::Reserved`), so their completion never fails to post.
+    packets: crate::mm::heap::ReservedVec<CompletionPacket>,
 }
 
 impl Default for CompletionQueue {
     fn default() -> Self {
         let id = NEXT_PORT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        CompletionQueue { id, packets: Vec::new() }
+        CompletionQueue { id, packets: crate::mm::heap::ReservedVec::new() }
     }
 }
 
 impl CompletionQueue {
     /// Queues `packet`, stamped with the time and the queuing thread
     /// (`iocp post` in the event stream).
-    pub fn push(&mut self, mut packet: CompletionPacket) -> Result<(), AllocError> {
+    pub fn push(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
+        self.push_inner(packet, false)
+    }
+
+    /// Keeps room for one packet a request in progress will post.
+    pub fn reserve_slot(&mut self) -> Result<(), AllocError> {
+        self.packets.reserve_slot()
+    }
+
+    /// Gives back a slot its request will not use.
+    pub fn release_slot(&mut self) {
+        self.packets.release_slot();
+    }
+
+    /// Posts a request's packet into the slot reserved for it (no
+    /// allocation).
+    pub fn push_reserved(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
+        self.push_inner(packet, true)
+    }
+
+    fn push_inner(
+        &mut self,
+        mut packet: CompletionPacket,
+        reserved: bool,
+    ) -> Result<(), AllocError> {
         packet.queued_t = crate::nt::platform::monotonic_ns();
         packet.queued_by = crate::events::current_client();
-        self.packets.try_push(packet)?;
+        if reserved {
+            self.packets.push_reserved(packet)?;
+        } else {
+            self.packets.try_push(packet)?;
+        }
         crate::events::emit(
             crate::events::Category::Ipc,
             "iocp post",
@@ -292,6 +322,10 @@ pub struct TimerState {
     pub due_time: u64,
     /// Ticks between expiries (0 = once).
     pub period: u64,
+    /// The next expiry was asked for as an absolute system time: it
+    /// follows changes of the system time (KeSetTimer's absolute due
+    /// times); a periodic timer's later expiries are relative.
+    pub absolute: bool,
     /// (thread, routine, context) of the APC to queue on expiry.
     pub apc: Option<(ObjectRef, u64, u64)>,
 }
@@ -422,6 +456,10 @@ pub enum ObjectBody {
     KeyedEvent(super::keyed_event::KeyedEvent),
     /// An access token (nt::token).
     Token(super::token::Token),
+    /// A window station (nt::winsta).
+    WindowStation(super::winsta::WindowStation),
+    /// A desktop of a window station (nt::winsta).
+    Desktop(super::winsta::Desktop),
 }
 
 /// Where a named object lives in the namespace.
@@ -549,6 +587,8 @@ impl KObject {
             ObjectBody::Job(_) => "Job",
             ObjectBody::KeyedEvent(_) => "KeyedEvent",
             ObjectBody::Token(_) => "Token",
+            ObjectBody::WindowStation(_) => "WindowStation",
+            ObjectBody::Desktop(_) => "Desktop",
         }
     }
 
@@ -595,7 +635,9 @@ impl KObject {
             | ObjectBody::Key(_)
             | ObjectBody::Job(_)
             | ObjectBody::KeyedEvent(_)
-            | ObjectBody::Token(_) => None,
+            | ObjectBody::Token(_)
+            | ObjectBody::WindowStation(_)
+            | ObjectBody::Desktop(_) => None,
         }
     }
 
@@ -626,6 +668,8 @@ impl KObject {
             ObjectBody::Job(_) => super::job::JOB_MAPPING,
             ObjectBody::KeyedEvent(_) => super::keyed_event::KEYED_EVENT_MAPPING,
             ObjectBody::Token(_) => super::token::TOKEN_MAPPING,
+            ObjectBody::WindowStation(_) => super::winsta::WINSTA_MAPPING,
+            ObjectBody::Desktop(_) => super::winsta::DESKTOP_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

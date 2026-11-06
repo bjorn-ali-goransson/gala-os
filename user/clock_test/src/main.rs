@@ -19,11 +19,13 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use ntrt::*;
 
 const KUSER: usize = 0x7ffe_0000;
+/// TIMER_TYPE NotificationTimer.
+const NOTIFICATION_TIMER: u32 = 0;
 const STATUS_NOT_SUPPORTED: NtStatus = 0xc000_00bb;
 const STATUS_INVALID_PARAMETER_1: NtStatus = 0xc000_00ef;
 const STATUS_INVALID_PARAMETER_2: NtStatus = 0xc000_00f0;
@@ -124,8 +126,10 @@ impl Checks {
 }
 
 /// Waiter threads: set to 1 just before each starts its wait.
-static READY: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
+static READY: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 static EVENT: AtomicU32 = AtomicU32::new(0);
+/// The absolute system time `wait_until` waits until.
+static UNTIL: AtomicU64 = AtomicU64::new(0);
 
 /// Waits for an event nobody sets, for 10 minutes; exits with the result.
 extern "C" fn wait_10_minutes(_: usize) -> ! {
@@ -145,6 +149,13 @@ extern "C" fn wait_2_hours(_: usize) -> ! {
     READY[2].store(1, Ordering::SeqCst);
     let event = Handle(EVENT.load(Ordering::SeqCst) as usize);
     exit_thread(wait(event, Some(-2 * HOUR)))
+}
+
+/// Waits for the event until the absolute system time UNTIL.
+extern "C" fn wait_until(_: usize) -> ! {
+    READY[3].store(1, Ordering::SeqCst);
+    let event = Handle(EVENT.load(Ordering::SeqCst) as usize);
+    exit_thread(wait(event, Some(UNTIL.load(Ordering::SeqCst) as i64)))
 }
 
 /// Whether thread `h` is still running (a zero-timeout wait).
@@ -184,7 +195,7 @@ fn control_mode(c: &mut Checks) -> Result<(), u32> {
         c.eq(st.into(), STATUS_SUCCESS.into())?;
         *h = handle;
     }
-    while READY.iter().any(|r| r.load(Ordering::SeqCst) == 0) {
+    while READY[..3].iter().any(|r| r.load(Ordering::SeqCst) == 0) {
         yield_execution();
     }
     // Long enough for them to be in their waits.
@@ -223,6 +234,47 @@ fn control_mode(c: &mut Checks) -> Result<(), u32> {
     c.eq(exit_status(w2h), STATUS_TIMEOUT.into())?;
     let after = views();
     c.moved(&later, &after, HOUR + SECOND, 0)?;
+
+    // Absolute due times follow the system time (as Windows' timers and
+    // absolute wait timeouts: KeSetTimer, KeWaitForSingleObject): a timer
+    // due at now + 1 h and a wait until then end when the system time
+    // alone moves 2 h on; a relative timer of 1 h does not.
+    let (st, absolute) = create_timer(NOTIFICATION_TIMER);
+    c.eq(st.into(), STATUS_SUCCESS.into())?;
+    let (st, relative) = create_timer(NOTIFICATION_TIMER);
+    c.eq(st.into(), STATUS_SUCCESS.into())?;
+    c.eq(set_timer(absolute, after.system + HOUR, 0).into(), STATUS_SUCCESS.into())?;
+    c.eq(set_timer(relative, -HOUR, 0).into(), STATUS_SUCCESS.into())?;
+    UNTIL.store((after.system + HOUR) as u64, Ordering::SeqCst);
+    let (st, until, _) = create_thread(wait_until, 0, false);
+    c.eq(st.into(), STATUS_SUCCESS.into())?;
+    while READY[3].load(Ordering::SeqCst) == 0 {
+        yield_execution();
+    }
+    // Time for it to be in its wait (no delay ends while frozen).
+    for _ in 0..200 {
+        yield_execution();
+    }
+    c.ok(running(until), 0)?;
+    c.eq(wait(absolute, Some(0)).into(), STATUS_TIMEOUT.into())?;
+    c.control(CLOCK_SHIFT_SYSTEM, 2 * HOUR, 0)?;
+    // (Frozen: no timeout would end; the timer thread runs meanwhile.)
+    let mut spins = 0;
+    while (wait(absolute, Some(0)) == STATUS_TIMEOUT || running(until)) && spins < 100_000 {
+        yield_execution();
+        spins += 1;
+    }
+    c.eq(wait(absolute, Some(0)).into(), STATUS_SUCCESS.into())?;
+    c.ok(!running(until), spins)?;
+    c.eq(exit_status(until), STATUS_TIMEOUT.into())?;
+    c.eq(wait(relative, Some(0)).into(), STATUS_TIMEOUT.into())?;
+    // Back where it was; a time moved back does not un-signal.
+    let state = c.control(CLOCK_SHIFT_SYSTEM, -2 * HOUR, 0)?;
+    c.eq(state.system_offset, 0)?;
+    c.eq(wait(absolute, Some(0)).into(), STATUS_SUCCESS.into())?;
+    close(absolute);
+    close(relative);
+    let after = views();
 
     // The system time alone: a day back, then 2038.
     let state = c.control(CLOCK_SHIFT_SYSTEM, -24 * HOUR, 0)?;

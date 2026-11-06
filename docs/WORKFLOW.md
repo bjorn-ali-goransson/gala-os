@@ -634,6 +634,17 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   `winsta0\default` and a token that may open it (SYSTEM's, moved with
   SetTokenInformation(TokenSessionId), as session_test does), or user32
   fails to initialize.
+- **Window stations depend on the account**: a program run with
+  `as=system` is on `Service-0x0-3e7$\Default` (not visible: OpenSSL
+  calls that a service), the boot user's on `WinSta0\Default`; a child
+  inherits its parent's unless STARTUPINFO.lpDesktop names one, and a
+  name its session lacks leaves it with none (`winsta:` warning; on
+  Windows user32 fails to start). On Windows such a test runs as SYSTEM
+  through `psexec -s` (winsta_test's `service` argument).
+- **Window station and desktop handles block a kernel handover**: once a
+  program asked user32 for its window station or thread desktop it
+  holds handles a handover refuses ("a window station or desktop
+  handle"); handover tests keep away from those calls.
 - **A resource** (a manifest: `manifest_test`): the test's build.rs
   writes a .res file (the documented compiled resource format) and
   passes it to the linker; lld-link converts it itself (its
@@ -807,7 +818,10 @@ source).
   `C:\lx\<binary>` by an EXTRA_MODULES entry with its repository path.
   xtask rebuilds the transcript from the kernel's `lx: pid N stdout: ..`
   / `-- exit status` lines and requires it to equal expected.txt (a diff
-  on mismatch; `lx_expect::check_boot`). A new user/lx test that should
+  on mismatch; `lx_expect::check_boot`). The transcript joins the
+  stdout lines of every pid (a forked child's too) and ends with the
+  last `--` line logged, so a test's children print nothing and end
+  before it (pipe_test waits for each). A new user/lx test that should
   boot needs its two entries in EXTRA_MODULES and SCENARIOS (copy an
   `lx_` pair).
 - **Bring-up of a new Linux program**: run it with `lxrun=`, then read
@@ -867,10 +881,11 @@ xtask network client is involved), and the test retries its connect
 while Nginx starts. On Windows, run-all.ps1 starts the same Nginx from a
 prefix in TEMP and, as an administrator, imports the test CA into
 LocalMachine\Root for the run (skipped otherwise). `nginx_tls` instead
-uses the host's `curl -k` as the client. `winhttp_test` (C, built with
-`user/winhttp_test/build.sh`) uses the same Nginx, also on plain HTTP
-(8080); a failed request names its step in the ledger
-(`winhttp.dll!connect`, `winhttp.dll!TLS handshake`, ...).
+uses the host's `curl -k` as the client. `winhttp_test` and
+`wininet_test` (C, built with their `build.sh`) use the same Nginx, also
+on plain HTTP (8080); a failed request names its step in the ledger
+(`winhttp.dll!connect`, `wininet.dll!TLS handshake`, ...). Both DLLs run
+on `user/http_client`: a change to the engine boots both scenarios.
 
 - Host-test the engine first: `cargo test -p schannel_tls` runs both
   sides in memory (seconds, no QEMU); boot the scenario once those pass.
@@ -897,6 +912,26 @@ uses the host's `curl -k` as the client. `winhttp_test` (C, built with
   the last one (it panics).
 - schannel.dll is 1.4 MB (rustls and RustCrypto): only processes that
   use Schannel load it, through secur32.
+- **curl and Git** (`curl`, `curl_schannel`, `git_https`): unmodified
+  PREBUILT programs run by busybox sh scripts (`user/curl/curl.sh`,
+  `user/git_https/git.sh`) against the same Nginx, one labelled line
+  with the exit code per step. curl.se's Windows build is LibreSSL
+  only (CURL_SSL_BACKEND does nothing there: `curl -V` lists one
+  backend), so the Schannel curl is Git for Windows' (PREBUILT
+  `gitcurl`: curl.exe, its Schannel-only libcurl-4.dll and that DLL's
+  imports, from PortableGit). curl prints Schannel's failures as
+  `schannel: SEC_E_... (0x8009....) - <FormatMessage text>`: the SSPI
+  status is the place to start (then the `schannel.dll!ISC:` ledger
+  line). Git's dumb HTTP protocol needs only static files:
+  `user/git_https/repo.git` is a bare repository after `git
+  update-server-info`, cut to HEAD, info/refs, objects/info/packs and
+  the loose objects (made with fixed author and committer dates, so the
+  commit id in the scenario stays). To serve more, make it the same way
+  on the host and check the files in.
+- Schannel's revocation check is not implemented (recorded when asked):
+  the scenarios pass curl's `--ssl-no-revoke` and Git's
+  `http.schannelCheckRevoke=false`, as on Windows a certificate without
+  a CRL distribution point may fail it.
 
 ### busybox
 
@@ -1411,7 +1446,10 @@ UEFI (BIOS boots have no framebuffer).
   only it has (text in the new place); to tell a wrong layout from a
   late repaint, probe SetWindowPos (the sizes the program set) and
   present a window's whole buffer again a few seconds later: if the dump
-  is right then, the layout was.
+  is right then, the layout was. The desktop redraws a damage
+  rectangle row by row from the top, slowly under TCG: a dump during a
+  window move shows the moved window cut off below some row. Check a
+  pixel the redraw reaches last (the window's bottom-right corner).
 - A screen check pins a wallpaper with `wallpaper=<name>` (the default
   is a random one).
 

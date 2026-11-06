@@ -14,10 +14,18 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr::{null, null_mut};
 
+use crate::cert::{
+    CERT_E_CHAINING, CERT_E_CN_NO_MATCH, CERT_E_EXPIRED, CERT_E_REVOKED, CERT_E_UNTRUSTEDCA,
+    CERT_E_UNTRUSTEDROOT, SEC_E_CERT_EXPIRED, SEC_E_CERT_UNKNOWN, SEC_E_CERT_WRONG_USAGE,
+    SEC_E_UNTRUSTED_ROOT, SEC_E_WRONG_PRINCIPAL,
+};
+use crate::err::{
+    CANNOT_CONNECT, CONNECTION_ERROR, NAME_NOT_RESOLVED, NOT_ENOUGH_MEMORY, SECURE_CHANNEL_ERROR,
+    TIMEOUT,
+};
 use crate::{
-    ERROR_NOT_ENOUGH_MEMORY, ERROR_WINHTTP_CANNOT_CONNECT, ERROR_WINHTTP_CONNECTION_ERROR,
-    ERROR_WINHTTP_NAME_NOT_RESOLVED, ERROR_WINHTTP_SECURE_CHANNEL_ERROR,
-    ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_TIMEOUT, failed, put,
+    Dll, IGNORE_CN_INVALID, IGNORE_DATE_INVALID, IGNORE_UNKNOWN_CA, IGNORE_WRONG_USAGE, failed,
+    missing, put,
 };
 
 #[repr(C)]
@@ -172,11 +180,6 @@ const SEC_I_CONTINUE_NEEDED: u32 = 0x0009_0312;
 const SEC_I_CONTEXT_EXPIRED: u32 = 0x0009_0317;
 const SEC_I_RENEGOTIATE: u32 = 0x0009_0321;
 const SEC_E_INCOMPLETE_MESSAGE: u32 = 0x8009_0318;
-const SEC_E_WRONG_PRINCIPAL: u32 = 0x8009_0322;
-const SEC_E_UNTRUSTED_ROOT: u32 = 0x8009_0325;
-const SEC_E_CERT_UNKNOWN: u32 = 0x8009_0327;
-const SEC_E_CERT_EXPIRED: u32 = 0x8009_0328;
-const SEC_E_CERT_WRONG_USAGE: u32 = 0x8009_0349;
 
 const SECPKG_CRED_OUTBOUND: u32 = 2;
 const SECBUFFER_EMPTY: u32 = 0;
@@ -197,13 +200,6 @@ const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x8;
 const SCH_CRED_NO_DEFAULT_CREDS: u32 = 0x10;
 const SCH_CRED_AUTO_CRED_VALIDATION: u32 = 0x20;
 
-/// SECURITY_FLAG_IGNORE_UNKNOWN_CA, _CERT_WRONG_USAGE, _CERT_CN_INVALID,
-/// _CERT_DATE_INVALID.
-const IGNORE_UNKNOWN_CA: u32 = 0x100;
-const IGNORE_WRONG_USAGE: u32 = 0x200;
-const IGNORE_CN_INVALID: u32 = 0x1000;
-const IGNORE_DATE_INVALID: u32 = 0x2000;
-
 const POLLRDNORM: i16 = 0x100;
 const POLLWRNORM: i16 = 0x10;
 const WSAETIMEDOUT: i32 = 10060;
@@ -222,6 +218,7 @@ struct Tls {
 }
 
 pub struct Conn {
+    dll: Dll,
     socket: usize,
     tls: Option<Tls>,
     /// Received bytes not yet decrypted (TLS).
@@ -234,11 +231,12 @@ pub struct Conn {
 
 /// Where a connection goes and how.
 pub struct Target<'a> {
+    pub dll: Dll,
     /// The host, without IPv6 brackets.
     pub host: &'a [u16],
     pub port: u16,
     pub secure: bool,
-    /// WINHTTP_OPTION_SECURITY_FLAGS.
+    /// SECURITY_FLAG_IGNORE_* (the request's security flags).
     pub security_flags: u32,
     /// SP_PROT_* (0: Schannel's defaults).
     pub protocols: u32,
@@ -256,10 +254,11 @@ impl Conn {
             WSAStartup(0x202, &mut data)
         };
         if started != 0 {
-            failed(b"winhttp.dll!WSAStartup", started as u64);
-            return Err(ERROR_WINHTTP_CANNOT_CONNECT);
+            failed(t.dll, b"WSAStartup", started as u64);
+            return Err(CANNOT_CONNECT);
         }
         let mut conn = Conn {
+            dll: t.dll,
             socket: usize::MAX,
             tls: None,
             raw: Vec::new(),
@@ -267,7 +266,7 @@ impl Conn {
             send_timeout: t.send_timeout,
             receive_timeout: t.receive_timeout,
         };
-        conn.socket = connect_to(t.host, t.port)?;
+        conn.socket = connect_to(t.dll, t.host, t.port)?;
         if t.secure {
             conn.handshake(t)?;
         }
@@ -275,21 +274,21 @@ impl Conn {
     }
 
     fn send_all(&self, data: &[u8]) -> Result<(), u32> {
-        send_all(self.socket, self.send_timeout, data)
+        send_all(self.dll, self.socket, self.send_timeout, data)
     }
 
     /// Appends what the server sends next to `out`; Ok(0) when it closed.
     fn recv_into(&self, out: &mut Vec<u8>) -> Result<usize, u32> {
-        wait(self.socket, POLLRDNORM, self.receive_timeout)?;
+        wait(self.dll, self.socket, POLLRDNORM, self.receive_timeout)?;
         const CHUNK: usize = 16 * 1024;
-        out.try_reserve(CHUNK).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
+        out.try_reserve(CHUNK).map_err(|_| NOT_ENOUGH_MEMORY)?;
         let at = out.len();
         // SAFETY: `CHUNK` reserved bytes after `at`; `recv` writes at most
         // that many, and only those it wrote are made part of `out`.
         unsafe {
             let n = recv(self.socket, out.as_mut_ptr().add(at), CHUNK as i32, 0);
             if n < 0 {
-                return Err(socket_error(b"winhttp.dll!recv"));
+                return Err(socket_error(self.dll, b"recv"));
             }
             out.set_len(at + n as usize);
             Ok(n as usize)
@@ -361,7 +360,7 @@ impl Conn {
                 // SAFETY: allocated by the package.
                 unsafe { FreeContextBuffer(token.data.cast()) };
             }
-            failed(b"winhttp.dll!TLS handshake", r.into());
+            failed(self.dll, b"TLS handshake", r.into());
             return Err(secure_error(r));
         }
         self.send_token(&token)?;
@@ -381,7 +380,7 @@ impl Conn {
                 & (IGNORE_UNKNOWN_CA | IGNORE_DATE_INVALID | IGNORE_WRONG_USAGE | IGNORE_CN_INVALID)
                 != IGNORE_UNKNOWN_CA | IGNORE_DATE_INVALID | IGNORE_WRONG_USAGE | IGNORE_CN_INVALID
             {
-                crate::missing(b"winhttp.dll!SECURITY_FLAG_IGNORE_* (some)", ignore.into());
+                missing(t.dll, b"SECURITY_FLAG_IGNORE_* (some)", ignore.into());
             }
             flags |= SCH_CRED_MANUAL_CRED_VALIDATION;
         } else {
@@ -426,8 +425,8 @@ impl Conn {
             )
         } as u32;
         if r != SEC_E_OK {
-            failed(b"winhttp.dll!AcquireCredentialsHandleW", r.into());
-            return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+            failed(self.dll, b"AcquireCredentialsHandleW", r.into());
+            return Err(SECURE_CHANNEL_ERROR);
         }
         self.tls = Some(Tls { cred, ctx: NO_HANDLE, header: 0, trailer: 0, max: 0, closed: false });
         put(&mut self.target, t.host)?;
@@ -435,7 +434,7 @@ impl Conn {
         let mut token = EMPTY_BUFFER;
         let r = self.isc(null_mut(), &mut token);
         if r != SEC_I_CONTINUE_NEEDED {
-            failed(b"winhttp.dll!TLS handshake", r.into());
+            failed(self.dll, b"TLS handshake", r.into());
             return Err(secure_error(r));
         }
         self.send_token(&token)?;
@@ -446,8 +445,8 @@ impl Conn {
                 let n = self.recv_into(&mut raw);
                 self.raw = raw;
                 if n? == 0 {
-                    failed(b"winhttp.dll!TLS handshake: closed", 0);
-                    return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+                    failed(self.dll, b"TLS handshake: closed", 0);
+                    return Err(SECURE_CHANNEL_ERROR);
                 }
             }
             match self.feed()? {
@@ -467,8 +466,8 @@ impl Conn {
             )
         } as u32;
         if r != SEC_E_OK {
-            failed(b"winhttp.dll!QueryContextAttributesW(STREAM_SIZES)", r.into());
-            return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+            failed(self.dll, b"QueryContextAttributesW(STREAM_SIZES)", r.into());
+            return Err(SECURE_CHANNEL_ERROR);
         }
         (tls.header, tls.trailer, tls.max) =
             (sizes[0] as usize, sizes[1] as usize, sizes[2] as usize);
@@ -481,12 +480,11 @@ impl Conn {
             return self.send_all(data);
         };
         let (header, trailer) = (tls.header, tls.trailer);
+        let dll = self.dll;
         let mut record = Vec::new();
         for chunk in data.chunks(tls.max.max(1)) {
             record.clear();
-            record
-                .try_reserve(header + chunk.len() + trailer)
-                .map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
+            record.try_reserve(header + chunk.len() + trailer).map_err(|_| NOT_ENOUGH_MEMORY)?;
             record.resize(header + chunk.len() + trailer, 0);
             record[header..header + chunk.len()].copy_from_slice(chunk);
             let base = record.as_mut_ptr();
@@ -511,11 +509,11 @@ impl Conn {
             // SAFETY: our context and buffers.
             let r = unsafe { EncryptMessage(&mut tls.ctx, 0, &mut d, 0) } as u32;
             if r != SEC_E_OK {
-                failed(b"winhttp.dll!EncryptMessage", r.into());
-                return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+                failed(dll, b"EncryptMessage", r.into());
+                return Err(SECURE_CHANNEL_ERROR);
             }
             let total = (b[0].size + b[1].size + b[2].size) as usize;
-            send_all(self.socket, self.send_timeout, &record[..total])?;
+            send_all(dll, self.socket, self.send_timeout, &record[..total])?;
         }
         Ok(())
     }
@@ -527,6 +525,7 @@ impl Conn {
             return Ok(self.recv_into(out)? == 0);
         }
         let mut need = self.raw.is_empty();
+        let dll = self.dll;
         loop {
             if self.tls.as_ref().is_some_and(|t| t.closed) {
                 return Ok(true);
@@ -560,8 +559,8 @@ impl Conn {
                 continue;
             }
             if r != SEC_E_OK && r != SEC_I_RENEGOTIATE && r != SEC_I_CONTEXT_EXPIRED {
-                failed(b"winhttp.dll!DecryptMessage", r.into());
-                return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+                failed(dll, b"DecryptMessage", r.into());
+                return Err(SECURE_CHANNEL_ERROR);
             }
             let before = out.len();
             let mut extra = 0;
@@ -587,8 +586,8 @@ impl Conn {
                 match self.feed()? {
                     SEC_E_OK => {}
                     s => {
-                        failed(b"winhttp.dll!TLS post-handshake", s.into());
-                        return Err(ERROR_WINHTTP_SECURE_CHANNEL_ERROR);
+                        failed(dll, b"TLS post-handshake", s.into());
+                        return Err(SECURE_CHANNEL_ERROR);
                     }
                 }
             }
@@ -619,8 +618,8 @@ impl Drop for Conn {
 }
 
 /// Waits until the socket can take `events`, for at most `timeout` ms
-/// (-1: no limit); ERROR_WINHTTP_TIMEOUT when it cannot.
-fn wait(socket: usize, events: i16, timeout: i32) -> Result<(), u32> {
+/// (-1: no limit); err::TIMEOUT when it cannot.
+fn wait(dll: Dll, socket: usize, events: i16, timeout: i32) -> Result<(), u32> {
     if timeout < 0 {
         return Ok(());
     }
@@ -628,31 +627,32 @@ fn wait(socket: usize, events: i16, timeout: i32) -> Result<(), u32> {
     // SAFETY: one WSAPOLLFD of ours.
     let n = unsafe { WSAPoll(&mut fd, 1, timeout) };
     if n == 0 {
-        failed(b"winhttp.dll!timed out", timeout as u64);
-        return Err(ERROR_WINHTTP_TIMEOUT);
+        failed(dll, b"timed out", timeout as u64);
+        return Err(TIMEOUT);
     }
     // An error shows in the send or recv that follows.
     Ok(())
 }
 
-fn send_all(socket: usize, timeout: i32, data: &[u8]) -> Result<(), u32> {
+fn send_all(dll: Dll, socket: usize, timeout: i32, data: &[u8]) -> Result<(), u32> {
     let mut done = 0;
     while done < data.len() {
-        wait(socket, POLLWRNORM, timeout)?;
+        wait(dll, socket, POLLWRNORM, timeout)?;
         let chunk = (data.len() - done).min(1 << 30) as i32;
         // SAFETY: our buffer of `chunk` bytes at `done`.
         let n = unsafe { send(socket, data[done..].as_ptr(), chunk, 0) };
         if n <= 0 {
-            return Err(socket_error(b"winhttp.dll!send"));
+            return Err(socket_error(dll, b"send"));
         }
         done += n as usize;
     }
     Ok(())
 }
 
-/// The WinHTTP error for a failed handshake: certificate problems are
-/// ERROR_WINHTTP_SECURE_FAILURE, other SSPI failures
-/// ERROR_WINHTTP_SECURE_CHANNEL_ERROR (as the error list documents them).
+/// The error for a failed handshake: a certificate problem is its status
+/// itself, for the DLL to translate into its API's code
+/// (`crate::is_certificate`); other SSPI failures are
+/// err::SECURE_CHANNEL_ERROR.
 fn secure_error(status: u32) -> u32 {
     let certificate = matches!(
         status,
@@ -661,20 +661,26 @@ fn secure_error(status: u32) -> u32 {
             | SEC_E_CERT_UNKNOWN
             | SEC_E_CERT_EXPIRED
             | SEC_E_CERT_WRONG_USAGE
-    ) || status & 0xffff_0000 == 0x800b_0000; // CERT_E_*, TRUST_E_*
-    if certificate { ERROR_WINHTTP_SECURE_FAILURE } else { ERROR_WINHTTP_SECURE_CHANNEL_ERROR }
+            | CERT_E_EXPIRED
+            | CERT_E_UNTRUSTEDROOT
+            | CERT_E_CHAINING
+            | CERT_E_REVOKED
+            | CERT_E_CN_NO_MATCH
+            | CERT_E_UNTRUSTEDCA
+    ) || status & 0xffff_0000 == 0x800b_0000; // other CERT_E_*, TRUST_E_*
+    if certificate { status } else { SECURE_CHANNEL_ERROR }
 }
 
-/// Records a failed send or recv; the WinHTTP error for it.
-fn socket_error(what: &[u8]) -> u32 {
+/// Records a failed send or recv; the error for it.
+fn socket_error(dll: Dll, what: &[u8]) -> u32 {
     // SAFETY: a plain call.
     let e = unsafe { WSAGetLastError() };
-    failed(what, e as u64);
-    if e == WSAETIMEDOUT { ERROR_WINHTTP_TIMEOUT } else { ERROR_WINHTTP_CONNECTION_ERROR }
+    failed(dll, what, e as u64);
+    if e == WSAETIMEDOUT { TIMEOUT } else { CONNECTION_ERROR }
 }
 
 /// Resolves `host` and connects to its addresses in the order given.
-fn connect_to(host: &[u16], port: u16) -> Result<usize, u32> {
+fn connect_to(dll: Dll, host: &[u16], port: u16) -> Result<usize, u32> {
     let mut name = Vec::new();
     put(&mut name, host)?;
     put(&mut name, &[0])?;
@@ -701,8 +707,8 @@ fn connect_to(host: &[u16], port: u16) -> Result<usize, u32> {
     // SAFETY: NUL-terminated strings and hints of ours.
     let r = unsafe { GetAddrInfoW(name.as_ptr(), service.as_ptr(), &hints, &mut list) };
     if r != 0 {
-        failed(b"winhttp.dll!GetAddrInfoW", r as u64);
-        return Err(ERROR_WINHTTP_NAME_NOT_RESOLVED);
+        failed(dll, b"GetAddrInfoW", r as u64);
+        return Err(NAME_NOT_RESOLVED);
     }
     let mut last = 0;
     let mut ai = list;
@@ -726,7 +732,7 @@ fn connect_to(host: &[u16], port: u16) -> Result<usize, u32> {
         FreeAddrInfoW(list);
     }
     found.ok_or_else(|| {
-        failed(b"winhttp.dll!connect", last as u64);
-        ERROR_WINHTTP_CANNOT_CONNECT
+        failed(dll, b"connect", last as u64);
+        CANNOT_CONNECT
     })
 }

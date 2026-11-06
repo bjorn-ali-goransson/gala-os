@@ -1,14 +1,13 @@
-//! WinHttpCrackUrl: a URL's components into URL_COMPONENTS, with the
-//! documented conventions per component: length 0 leaves it out; a null
+//! WinHttpCrackUrl and InternetCrackUrlW: a URL's components into
+//! URL_COMPONENTS (one layout in both APIs), with the documented
+//! conventions per component: length 0 leaves it out; a null
 //! pointer with a nonzero length (often -1) gets a pointer into the URL
 //! and the component's length; a buffer with its length in characters
 //! gets a NUL-terminated copy and the copied length, or
 //! ERROR_INSUFFICIENT_BUFFER with the length needed (with the NUL).
 
-use crate::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_WINHTTP_INVALID_URL,
-    ERROR_WINHTTP_UNRECOGNIZED_SCHEME, done, missing,
-};
+use crate::err::{INSUFFICIENT_BUFFER, INVALID_PARAMETER, INVALID_URL, UNRECOGNIZED_SCHEME};
+use crate::{Dll, missing};
 
 /// URL_COMPONENTS (x64 layout).
 #[repr(C)]
@@ -30,15 +29,14 @@ pub struct UrlComponents {
     extra_length: u32,
 }
 
-pub const INTERNET_SCHEME_HTTP: u32 = 1;
-pub const INTERNET_SCHEME_HTTPS: u32 = 2;
 const ICU_DECODE: u32 = 0x1000_0000;
 const ICU_ESCAPE: u32 = 0x8000_0000;
 
 /// A URL split into ranges of its characters.
 pub struct Parts {
     pub scheme: (usize, usize),
-    pub n_scheme: u32,
+    /// https (otherwise http).
+    pub secure: bool,
     pub user: (usize, usize),
     pub password: (usize, usize),
     pub host: (usize, usize),
@@ -53,8 +51,7 @@ fn find(u: &[u16], from: usize, any: &[u8]) -> usize {
 
 /// Splits `scheme://[user[:password]@]host[:port][/path][?extra|#extra]`.
 pub fn parse(u: &[u16]) -> Result<Parts, u32> {
-    let colon =
-        u.iter().position(|&c| c == b':'.into()).ok_or(ERROR_WINHTTP_UNRECOGNIZED_SCHEME)?;
+    let colon = u.iter().position(|&c| c == b':'.into()).ok_or(UNRECOGNIZED_SCHEME)?;
     let scheme = (0, colon);
     let is = |want: &[u8]| {
         colon == want.len()
@@ -63,16 +60,16 @@ pub fn parse(u: &[u16]) -> Result<Parts, u32> {
                 .zip(want)
                 .all(|(&c, &w)| c < 0x80 && (c as u8).eq_ignore_ascii_case(&w))
     };
-    let (n_scheme, default_port) = if is(b"http") {
-        (INTERNET_SCHEME_HTTP, 80)
+    let (secure, default_port) = if is(b"http") {
+        (false, 80)
     } else if is(b"https") {
-        (INTERNET_SCHEME_HTTPS, 443)
+        (true, 443)
     } else {
-        return Err(ERROR_WINHTTP_UNRECOGNIZED_SCHEME);
+        return Err(UNRECOGNIZED_SCHEME);
     };
     let slash = [b'/' as u16, b'/' as u16];
     if u.len() < colon + 3 || u[colon + 1..colon + 3] != slash {
-        return Err(ERROR_WINHTTP_INVALID_URL);
+        return Err(INVALID_URL);
     }
     let start = colon + 3;
     let end = find(u, start, b"/?#");
@@ -89,18 +86,18 @@ pub fn parse(u: &[u16]) -> Result<Parts, u32> {
     let host_end = if u.get(host_start) == Some(&(b'[' as u16)) {
         let close = find(&u[..end], host_start, b"]");
         if close == end {
-            return Err(ERROR_WINHTTP_INVALID_URL);
+            return Err(INVALID_URL);
         }
         close + 1
     } else {
         find(&u[..end], host_start, b":")
     };
     if host_end == host_start {
-        return Err(ERROR_WINHTTP_INVALID_URL);
+        return Err(INVALID_URL);
     }
     let port = if host_end < end {
         if u[host_end] != b':'.into() {
-            return Err(ERROR_WINHTTP_INVALID_URL);
+            return Err(INVALID_URL);
         }
         let digits = &u[host_end + 1..end];
         let mut p: u32 = 0;
@@ -109,11 +106,11 @@ pub fn parse(u: &[u16]) -> Result<Parts, u32> {
         }
         for &d in digits {
             if !(b'0'.into()..=b'9'.into()).contains(&d) {
-                return Err(ERROR_WINHTTP_INVALID_URL);
+                return Err(INVALID_URL);
             }
             p = p * 10 + u32::from(d - u16::from(b'0'));
             if p > 65535 {
-                return Err(ERROR_WINHTTP_INVALID_URL);
+                return Err(INVALID_URL);
             }
         }
         p as u16
@@ -123,7 +120,7 @@ pub fn parse(u: &[u16]) -> Result<Parts, u32> {
     let extra_start = find(u, end, b"?#");
     Ok(Parts {
         scheme,
-        n_scheme,
+        secure,
         user,
         password,
         host: (host_start, host_end),
@@ -157,7 +154,7 @@ unsafe fn component(
         }
         if (*len as usize) < n + 1 {
             *len = n as u32 + 1;
-            return Err(ERROR_INSUFFICIENT_BUFFER);
+            return Err(INSUFFICIENT_BUFFER);
         }
         core::ptr::copy_nonoverlapping(url.add(range.0), *ptr, n);
         *(*ptr).add(n) = 0;
@@ -166,49 +163,51 @@ unsafe fn component(
     Ok(())
 }
 
-#[unsafe(no_mangle)]
-pub extern "system" fn WinHttpCrackUrl(
+/// Cracks `url` (`length` characters, 0: NUL-terminated) into the
+/// caller's URL_COMPONENTS; `schemes` are the API's numbers for http and
+/// https (nScheme).
+pub fn crack(
+    dll: Dll,
     url: *const u16,
     length: u32,
     flags: u32,
     components: *mut UrlComponents,
-) -> i32 {
-    done((|| {
-        if url.is_null() || components.is_null() {
-            return Err(ERROR_INVALID_PARAMETER);
-        }
-        // SAFETY: the caller's structure.
-        let c = unsafe { &mut *components };
-        if c.size as usize != size_of::<UrlComponents>() {
-            return Err(ERROR_INVALID_PARAMETER);
-        }
-        if flags & (ICU_DECODE | ICU_ESCAPE) != 0 {
-            // The components are given as they are in the URL.
-            missing(b"winhttp.dll!WinHttpCrackUrl(ICU_DECODE/ICU_ESCAPE)", flags.into());
-        }
-        let n = if length == 0 { None } else { Some(length as usize) };
-        let text = crate::wide(url, n)?;
-        let p = parse(&text)?;
-        let mut short = false;
-        // SAFETY: the caller's fields; the ranges are inside `url`.
-        unsafe {
-            for (range, ptr, len) in [
-                (p.scheme, &raw mut c.scheme, &raw mut c.scheme_length),
-                (p.host, &raw mut c.host, &raw mut c.host_length),
-                (p.user, &raw mut c.user, &raw mut c.user_length),
-                (p.password, &raw mut c.password, &raw mut c.password_length),
-                (p.path, &raw mut c.path, &raw mut c.path_length),
-                (p.extra, &raw mut c.extra, &raw mut c.extra_length),
-            ] {
-                match component(url, range, ptr, len) {
-                    Ok(()) => {}
-                    Err(ERROR_INSUFFICIENT_BUFFER) => short = true,
-                    Err(e) => return Err(e),
-                }
+    schemes: [u32; 2],
+) -> Result<(), u32> {
+    if url.is_null() || components.is_null() {
+        return Err(INVALID_PARAMETER);
+    }
+    // SAFETY: the caller's structure.
+    let c = unsafe { &mut *components };
+    if c.size as usize != size_of::<UrlComponents>() {
+        return Err(INVALID_PARAMETER);
+    }
+    if flags & (ICU_DECODE | ICU_ESCAPE) != 0 {
+        // The components are given as they are in the URL.
+        missing(dll, b"CrackUrl(ICU_DECODE/ICU_ESCAPE)", flags.into());
+    }
+    let n = if length == 0 { None } else { Some(length as usize) };
+    let text = crate::wide(url, n)?;
+    let p = parse(&text)?;
+    let mut short = false;
+    // SAFETY: the caller's fields; the ranges are inside `url`.
+    unsafe {
+        for (range, ptr, len) in [
+            (p.scheme, &raw mut c.scheme, &raw mut c.scheme_length),
+            (p.host, &raw mut c.host, &raw mut c.host_length),
+            (p.user, &raw mut c.user, &raw mut c.user_length),
+            (p.password, &raw mut c.password, &raw mut c.password_length),
+            (p.path, &raw mut c.path, &raw mut c.path_length),
+            (p.extra, &raw mut c.extra, &raw mut c.extra_length),
+        ] {
+            match component(url, range, ptr, len) {
+                Ok(()) => {}
+                Err(INSUFFICIENT_BUFFER) => short = true,
+                Err(e) => return Err(e),
             }
         }
-        c.n_scheme = p.n_scheme;
-        c.port = p.port;
-        if short { Err(ERROR_INSUFFICIENT_BUFFER) } else { Ok(()) }
-    })())
+    }
+    c.n_scheme = schemes[usize::from(p.secure)];
+    c.port = p.port;
+    if short { Err(INSUFFICIENT_BUFFER) } else { Ok(()) }
 }

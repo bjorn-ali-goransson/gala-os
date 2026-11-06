@@ -35,7 +35,110 @@ const CHANGE_DIR_NAME: u32 = 0x2;
 const CHANGE_SIZE: u32 = 0x8;
 const CHANGE_LAST_WRITE: u32 = 0x10;
 
-/// Where and how a request completes.
+/// What a request's completion will post, reserved when it starts: room
+/// for the packet in its completion port's queue and for its completion
+/// routine in its thread's APC queue (Windows allocates both with the
+/// request, the IRP), so a completion never fails for lack of memory.
+/// Slots not used are given back when this is dropped.
+pub struct Reserved {
+    packet: IrqMutex<Option<Slot>>,
+    apc: IrqMutex<Option<Slot>>,
+}
+
+/// One reserved slot in a port's queue or a thread's APC queue.
+struct Slot {
+    target: ObjectRef,
+    apc: bool,
+    /// Filled: nothing to give back.
+    used: bool,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if self.used {
+            return;
+        }
+        if self.apc {
+            thread::release_apc(&self.target);
+        } else if let ObjectBody::IoCompletion(c) = &self.target.body {
+            c.queue.lock().release_slot();
+        }
+    }
+}
+
+impl Reserved {
+    /// Nothing reserved.
+    pub const fn none() -> Reserved {
+        Reserved { packet: IrqMutex::new(None), apc: IrqMutex::new(None) }
+    }
+
+    /// Reserves the packet a completion will post to `port` and the APC it
+    /// will queue to `apc_thread`. STATUS_INSUFFICIENT_RESOURCES without
+    /// memory, as an IRP that cannot be allocated.
+    pub fn new(port: Option<&ObjectRef>, apc_thread: Option<&ObjectRef>) -> Result<Self, NtStatus> {
+        let r = Reserved::none();
+        if let Some(port) = port
+            && let ObjectBody::IoCompletion(c) = &port.body
+        {
+            c.queue.lock().reserve_slot().map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
+            *r.packet.lock() = Some(Slot { target: port.clone(), apc: false, used: false });
+        }
+        if let Some(t) = apc_thread {
+            thread::reserve_apc(t)?;
+            *r.apc.lock() = Some(Slot { target: t.clone(), apc: true, used: false });
+        }
+        Ok(r)
+    }
+
+    /// Posts `packet` to `port` (and signals it): into the reserved slot
+    /// if there is one for that port, else an ordinary post (the port was
+    /// associated after the request started), which may fail; a lost
+    /// packet is logged.
+    pub fn post(&self, port: &ObjectRef, packet: CompletionPacket) {
+        let ObjectBody::IoCompletion(c) = &port.body else { return };
+        let slot = self.packet.lock().take();
+        let pushed = match slot {
+            Some(mut slot) if KArc::ptr_eq(&slot.target, port) => {
+                slot.used = true;
+                c.queue.lock().push_reserved(packet)
+            }
+            other => {
+                drop(other);
+                c.queue.lock().push(packet)
+            }
+        };
+        if pushed.is_ok() {
+            wait::set_signal(port, 1);
+        } else {
+            crate::warn!(
+                "io: a completion packet (context {:#x}) was lost: no memory",
+                packet.context
+            );
+        }
+    }
+
+    /// Queues `apc` to `thread`: into the reserved slot if there is one for
+    /// that thread, else an ordinary queueing; a lost one is logged.
+    pub fn queue_apc(&self, thread_object: &ObjectRef, apc: UserApc) {
+        let slot = self.apc.lock().take();
+        let queued = match slot {
+            Some(mut slot) if KArc::ptr_eq(&slot.target, thread_object) => {
+                slot.used = true;
+                thread::queue_reserved_apc(thread_object, apc)
+            }
+            other => {
+                drop(other);
+                thread::queue_user_apc(thread_object, apc)
+            }
+        };
+        if queued == Err(NtStatus::NO_MEMORY) {
+            crate::warn!("io: a completion routine ({:#x}) was lost: no memory", apc.routine);
+        }
+    }
+}
+
+/// Where and how a request completes. Clones (a copy that pends while
+/// the call tries to finish it at once) share one reservation.
 #[derive(Clone)]
 pub struct Request {
     pub process: KArc<Process>,
@@ -54,6 +157,22 @@ pub struct Request {
     pub file_signal: KArc<Dispatcher>,
     /// Signaled when it completes (a synchronous handle's caller waits).
     pub done: Option<ObjectRef>,
+    /// Its packet and APC (`Request::reserve`); None: not reserved (the
+    /// completion's posts may then fail).
+    pub reserved: Option<KArc<Reserved>>,
+}
+
+impl Request {
+    /// Reserves what its completion will post (`Reserved`): a packet when
+    /// the file has a port and the request an ApcContext, the completion
+    /// routine's APC.
+    pub fn reserve(mut self) -> Result<Self, NtStatus> {
+        let port = self.port.as_ref().filter(|_| self.apc_context != 0).map(|(p, _)| p);
+        let reserved = Reserved::new(port, self.apc.as_ref().map(|(t, _)| t))?;
+        self.reserved =
+            Some(KArc::try_new(reserved).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?);
+        Ok(self)
+    }
 }
 
 struct State {
@@ -234,19 +353,17 @@ pub fn complete_count(r: Request, status: NtStatus, count: u64) {
         wait::set_signal(e, 1);
     }
     wait::signal_dispatcher(&r.file_signal, 1);
+    let none = Reserved::none();
+    let reserved = r.reserved.as_deref().unwrap_or(&none);
     if let (Some((port, key)), true) = (&r.port, r.apc_context != 0) {
         let packet = CompletionPacket::new(*key, r.apc_context, status.0, information);
-        if let ObjectBody::IoCompletion(c) = &port.body
-            && c.queue.lock().push(packet).is_ok()
-        {
-            wait::set_signal(port, 1);
-        }
+        reserved.post(port, packet);
     }
     // The completion routine runs whatever the status (ReadFileEx's gets
     // ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED...): a request that
     // failed in its call never gets here (the caller reports it).
     if let Some((thread, apc)) = &r.apc {
-        let _ = thread::queue_user_apc(thread, UserApc { routine: apc.routine, args: apc.args });
+        reserved.queue_apc(thread, UserApc { routine: apc.routine, args: apc.args });
     }
     if let Some(done) = &r.done {
         wait::set_signal(done, 1);

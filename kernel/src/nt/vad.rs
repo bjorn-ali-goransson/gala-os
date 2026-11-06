@@ -243,6 +243,26 @@ impl Vad {
         self.allocs.get(i).is_none_or(|a| a.base >= end)
     }
 
+    /// A copy of the whole map (a Linux fork's child starts with its
+    /// parent's).
+    pub fn try_clone(&self) -> Result<Vad, AllocError> {
+        let mut allocs = Vec::new();
+        allocs.try_reserve_exact(self.allocs.len()).map_err(|_| AllocError)?;
+        for a in &self.allocs {
+            let mut runs = Vec::new();
+            runs.try_reserve_exact(a.runs.len()).map_err(|_| AllocError)?;
+            runs.try_extend_from_slice(&a.runs)?;
+            allocs.try_push(Allocation {
+                base: a.base,
+                pages: a.pages,
+                kind: a.kind,
+                alloc_protect: a.alloc_protect,
+                runs,
+            })?;
+        }
+        Ok(Vad { allocs, private_commit: self.private_commit })
+    }
+
     /// Lowest (or highest, if `top_down`) free 64K-aligned range of `size`.
     fn find_free(&self, size: u64, top_down: bool) -> Option<u64> {
         let mut gaps: Vec<(u64, u64)> = Vec::new();
@@ -699,6 +719,24 @@ mod tests {
         assert_eq!(v.private_commit(), 0);
         assert!(v.is_range_free(base, base + 3 * PAGE));
         assert!(v.unmap_range(base + 1, base + PAGE).is_err());
+    }
+
+    /// A Linux fork's child starts with the same map, then they differ.
+    #[test]
+    fn a_clone_is_the_same_map_and_independent() {
+        let mut v = Vad::default();
+        let base = 0x7000_0000_1000;
+        v.map_exact(base, base + 3 * PAGE, rw(), MEM_PRIVATE).unwrap();
+        v.protect(base + PAGE, PAGE, PAGE_READONLY).unwrap();
+        let mut c = v.try_clone().unwrap();
+        assert_eq!(c.private_commit(), 3);
+        for p in 0..3 {
+            assert_eq!(c.page(base + p * PAGE), v.page(base + p * PAGE));
+        }
+        c.unmap_range(base, base + PAGE).unwrap();
+        assert!(c.page(base).is_none());
+        assert_eq!(v.page(base).unwrap().protect, rw());
+        assert_eq!((v.private_commit(), c.private_commit()), (3, 2));
     }
 
     #[test]

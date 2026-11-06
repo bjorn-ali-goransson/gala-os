@@ -67,6 +67,7 @@ pub fn arm(
     due: u64,
     due_time: u64,
     period: u64,
+    absolute: bool,
     apc: Option<(u64, u64)>,
 ) -> Result<bool, NtStatus> {
     let timer = timer_of(object).ok_or(NtStatus::OBJECT_TYPE_MISMATCH)?;
@@ -86,7 +87,7 @@ pub fn arm(
     let previous = {
         let mut state = timer.state.lock();
         let previous = wait::set_signal(object, 0) > 0;
-        *state = super::object::TimerState { due: Some(due), due_time, period, apc };
+        *state = super::object::TimerState { due: Some(due), due_time, period, absolute, apc };
         previous
     };
     // Then list it. Armed first: the worker prunes listed timers that are
@@ -136,9 +137,16 @@ pub fn due_system_time(due: i64, now_system: u64) -> u64 {
     if due < 0 { now_system.saturating_add(due.unsigned_abs()) } else { due as u64 }
 }
 
+/// The system time moved on its own (`wait::system_time_changed`):
+/// absolute timers are looked at again.
+pub fn system_time_changed() {
+    wake_worker();
+}
+
 fn worker(_: usize) {
     loop {
         let now = platform::ticks();
+        let system_now = platform::system_time();
         let timers: Vec<ObjectRef> = {
             let mut list = TIMERS.lock();
             // A timer nobody has a handle to any more is dropped (Windows
@@ -167,8 +175,18 @@ fn worker(_: usize) {
             // order: the timer's state, then the dispatcher.
             let fired = {
                 let mut state = timer.state.lock();
+                // An absolute due time is due when the system time reaches
+                // it, wherever the system time was moved meanwhile.
+                if state.absolute && state.due.is_some() {
+                    state.due = Some(if state.due_time <= system_now {
+                        now
+                    } else {
+                        due_tick(state.due_time as i64, now, system_now)
+                    });
+                }
                 match state.due {
                     Some(due) if due <= now => {
+                        state.absolute = false;
                         wait::set_signal(object, 1);
                         let apc = state.apc.clone();
                         if state.period > 0 {

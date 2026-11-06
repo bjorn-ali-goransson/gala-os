@@ -475,6 +475,7 @@ numbers and the version reported to programs depend on it.
 | 0x7f4c, 0x7f4d | GalaClockControl, GalaRandom | "Clock control", "Record/replay" |
 | 0x7f5a, 0x7f5b | GalaRequestHandover, GalaHandoverPause | "Kernel handover" |
 | 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
+| 0x7fa0-0x7fa5 | GalaUserObjectOpen, GalaUserObjectConnection, GalaUserObjectSet, GalaUserObjectClose, GalaUserObjectInformation, GalaUserObjectEnum | "Window stations and desktops" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
   gala's numbers for Windows services (until verified): 0x7f01
@@ -594,6 +595,7 @@ one flat structure, 120 bytes plus the extensions its flags name:
 | 136, 144 | with flag 8: lpReserved2 (the C runtime's descriptors), length |
 | 152 | with flag 16: the primary token (CreateProcessAsUserW; "Access tokens") |
 | 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES); flag 128: DETACHED_PROCESS, no console session |
+| 168, 176 | with flag 256: STARTUPINFO.lpDesktop (UTF-16, `station\desktop` or `desktop`), length in characters ("Window stations and desktops") |
 
 - **Search** (kernel32): a program named without a directory is searched
   for as CreateProcess documents: the caller's executable's directory,
@@ -626,7 +628,9 @@ one flat structure, 120 bytes plus the extensions its flags name:
   terminated and the call fails with STATUS_NO_MEMORY.
 - The child inherits the caller's console session (unless flags 32/128
   say otherwise), job ("Job objects") and a copy of its primary token
-  (unless flag 16 gives one).
+  (unless flag 16 gives one). Its window station and desktop: an
+  inherited window station handle's, else lpDesktop's (flag 256), else
+  the caller's ("Window stations and desktops").
 
 ### Process lifetime, OpenProcess and process lists
 
@@ -2167,7 +2171,11 @@ ntdll imports.
 - **Version**: the version reported to the program is as on Windows: the
   real version only if the executable's RT_MANIFEST declares Windows
   10/11, 6.3.9600 for Windows 8.1, else 6.2.9200 (GetVersion(Ex)A/W,
-  VerifyVersionInfoW).
+  VerifyVersionInfoW). ntdll's RtlGetVersion and RtlVerifyVersionInfo
+  give the real one whatever the manifest (curl asks the latter whether
+  Schannel has TLS 1.3); the two Verify functions each have the
+  comparison (major, minor and service pack as one version; build and
+  platform each alone), kernel32's against the manifest's version.
 - **CONTEXT buffers** (`context.rs`): InitializeContext/
   InitializeContext2 (with CONTEXT_XSTATE: CONTEXT_EX and a 64-byte
   aligned XSTATE area for every enabled feature), CopyContext by flag
@@ -2551,8 +2559,8 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   address tables are in "Network interfaces"; GetAdaptersAddresses, ICMP
   echo and address-change notification are not supported
   (ERROR_NOT_SUPPORTED or the documented failure, recorded);
-  ConvertLengthToIpv4Mask is computed. winhttp is "WinHTTP" (under
-  "Schannel (TLS)").
+  ConvertLengthToIpv4Mask is computed. winhttp and wininet are
+  "WinHTTP and WinINet" (under "Schannel (TLS)").
 - **uxtheme** (`user/uxtheme`) runs with themes off, the documented
   "classic" state: IsAppThemed and IsThemeActive are FALSE, OpenThemeData
   gives NULL (programs then draw controls themselves), functions taking a
@@ -2633,7 +2641,7 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   FileZilla (W3: FileZilla 3.69.3's imports across user32, gdi32, msvcrt,
   comctl32, shell32, ole32 and others); a function is implemented by
   removing its name from the list.
-- **Stub-only DLLs**: pdh, urlmon, wininet, xolehlp, odbc32, authz,
+- **Stub-only DLLs**: pdh, urlmon, xolehlp, odbc32, authz,
   wintrust, webservices, dhcpcsvc, comdlg32 and oleacc are nothing but
   such stubs. Mostly stubs: userenv (GetUserProfileDirectoryW,
   LoadUserProfileW, UnloadUserProfile: "Accounts and logon"), mpr
@@ -2710,10 +2718,15 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   and forwards every call whose credential or context handle carries
   schannel.dll's tags (`galaSCHC`, `galaSCHX` in dwUpper), and
   AcquireCredentialsHandleW/A for UNISP_NAME / "Schannel". The package
-  is listed under both names (EnumerateSecurityPackagesW,
-  QuerySecurityPackageInfoW: RPC id 14, cbMaxToken 24576). secur32 also
-  has NTLM, Kerberos as on a workgroup machine and Negotiate over NTLM
-  (`sspi_test`).
+  is listed under both names (EnumerateSecurityPackagesW/A,
+  QuerySecurityPackageInfoW/A: RPC id 14, cbMaxToken 24576). Two
+  dispatch tables, InitSecurityInterfaceW and InitSecurityInterfaceA
+  (the ANSI functions where a slot takes or gives strings; programs
+  built without UNICODE, such as curl, call SSPI through it; the ANSI
+  functions besides AcquireCredentialsHandleA, InitializeSecurityContextA,
+  QueryContextAttributesA and the package queries are recorded and give
+  SEC_E_UNSUPPORTED_FUNCTION). secur32 also has NTLM, Kerberos as on a
+  workgroup machine and Negotiate over NTLM (`sspi_test`).
 - `user/schannel` (schannel.dll; it also exports the SSPI functions, as
   Windows' does): credentials (`creds.rs`), the SecBuffer rules
   (`lib.rs`), QueryContextAttributes (`attrs.rs`).
@@ -2732,15 +2745,19 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   (`chain.rs`, below); ncrypt imports RSA keys into the Microsoft
   Software Key Storage Provider and signs with them (no key generation
   yet); bcrypt has hashes, AES/DES/RC2 and RSA (PKCS#1 v1.5, PSS,
-  OAEP). winhttp is an HTTP(S) client over it ("WinHTTP" below);
-  wininet is all `gala_stubs` (ROADMAP TLS).
+  OAEP). winhttp and wininet are HTTP(S) clients over it, on one
+  engine ("WinHTTP and WinINet" below).
 
 ### Credentials and certificate validation
 
 - **Protocols**: SCHANNEL_CRED (version 4: grbitEnabledProtocols,
   dwFlags, paCred) and SCH_CREDENTIALS (version 5: TLS_PARAMETERS'
-  grbitDisabledProtocols for every ALPN id). Only TLS 1.2 and 1.3; any
-  other protocol is recorded and the context then fails with
+  grbitDisabledProtocols for every ALPN id). Each protocol has a client
+  and a server bit (SP_PROT_TLS1_2_CLIENT, _SERVER): only the
+  credential's own side's bits count (curl disables every protocol but
+  the client's TLS 1.0 to 1.3, the server halves included). Only TLS
+  1.2 and 1.3; the others enabled with them are left out; a credential
+  with neither is recorded and its context fails with
   SEC_E_ALGORITHM_MISMATCH.
 - **Manual validation** (SCH_CRED_MANUAL_CRED_VALIDATION or
   ISC_REQ_MANUAL_CRED_VALIDATION): the server's certificate is not
@@ -2758,8 +2775,11 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   CertGetCertificateChain gives a chain of the certificate alone,
   untrusted (CERT_TRUST_IS_UNTRUSTED_ROOT | CERT_TRUST_IS_PARTIAL_CHAIN,
   recorded), and CertVerifyCertificateChainPolicy reports
-  CERT_E_UNTRUSTEDROOT, so callers that validate themselves (curl) fail
-  closed instead of ending the process. When crypt32 gets its ROOT
+  CERT_E_UNTRUSTEDROOT, so callers that validate themselves (curl with
+  `--cacert`) fail closed instead of ending the process. curl and Git
+  without `--cacert` leave validation to Schannel (`curl_schannel`,
+  `git_https`); curl.se's LibreSSL build reads the ROOT store itself
+  (CertOpenSystemStoreA, `curl`). When crypt32 gets its ROOT
   store it reads the same directory, and Schannel moves onto its chain
   engine.
 - **Server credentials**: the certificate (paCred[0]) and the CNG key it
@@ -2776,7 +2796,10 @@ AcceptSecurityContext chain:
 
 - **handshaking**: each call takes the input SECBUFFER_TOKEN and gives
   the output token (ISC_REQ_ALLOCATE_MEMORY: a process-heap block for
-  FreeContextBuffer, else the caller's buffer) and SEC_I_CONTINUE_NEEDED
+  FreeContextBuffer, else the caller's buffer; in the output's
+  SECBUFFER_TOKEN, else its first SECBUFFER_EMPTY, which becomes the
+  token, as curl passes it; with neither, recorded and
+  SEC_E_INVALID_TOKEN) and SEC_I_CONTINUE_NEEDED
   until SEC_E_OK; SEC_E_INCOMPLETE_MESSAGE with SECBUFFER_MISSING (the
   bytes the current record still lacks) in the first empty input buffer
   after the token; SECBUFFER_EXTRA there for bytes after the handshake's
@@ -2832,33 +2855,75 @@ NEGOTIATION_INFO, SIZES; other attributes are recorded.
   a server chain with intermediates from them), DTLS. A client context
   whose first call fails still has a handle (Windows gives none).
 
-### WinHTTP
+### WinHTTP and WinINet
 
-`user/winhttp` (winhttp.dll): WinHTTP's synchronous client over ws2_32
-and Schannel, as Microsoft's WinHTTP reference documents it. Test:
-`winhttp_test` (C, mingw-w64; against schannel_test's Nginx, which also
-serves plain HTTP on 127.0.0.1:8080).
+`user/winhttp` (winhttp.dll) and `user/wininet` (wininet.dll): the two
+APIs' synchronous HTTP clients over ws2_32 and Schannel, as Microsoft's
+WinHTTP and WinINet references document them, on one engine,
+`user/http_client` (an `rlib`, `no_std` with `alloc`): the connection
+(`net.rs`), the request and response (`request.rs`), URL cracking
+(`url.rs`) and the live-handle list (`handles.rs`). Each DLL is its
+API's functions, flags, options and error codes over it. Tests:
+`winhttp_test` and `wininet_test` (C, mingw-w64; against
+schannel_test's Nginx, which also serves plain HTTP on
+127.0.0.1:8080).
 
-- **Handles** (`lib.rs`): sessions, connections and requests are heap
-  objects; the handle is the object's address, valid while it is in the
-  live list (an SRW lock guards it): an unknown handle is
-  ERROR_INVALID_HANDLE, the wrong kind
-  ERROR_WINHTTP_INCORRECT_HANDLE_TYPE. Each handle copies its parent's
-  settings (user agent, time-outs, secure protocols, redirect policy)
+- **What the APIs share, and so the engine**: WinHTTP kept WinINet's
+  numbers for the query levels and flags (WINHTTP_QUERY_* =
+  HTTP_QUERY_*), the ADDREQ modifiers, the SECURITY_FLAG_IGNORE_* bits
+  (INTERNET_FLAG_IGNORE_CERT_CN_INVALID / _DATE_INVALID too),
+  INTERNET_FLAG_SECURE = WINHTTP_FLAG_SECURE, URL_COMPONENTS' layout
+  and most error codes (ERROR_WINHTTP_* = ERROR_INTERNET_* /
+  ERROR_HTTP_*; the engine's `err`). What differs is the DLL's: the
+  scheme numbers (WinHTTP http 1 / https 2, WinINet 3 / 4); certificate
+  failures, which the engine returns as the SSPI or CERT_E_* status
+  itself (an HRESULT, `is_certificate`) for the DLL to translate
+  (WinHTTP: ERROR_WINHTTP_SECURE_FAILURE; WinINet by kind: an unknown
+  issuer ERROR_INTERNET_INVALID_CA, expired _SEC_CERT_DATE_INVALID,
+  wrong name _SEC_CERT_CN_INVALID, revoked _SEC_CERT_REVOKED, others
+  _SEC_INVALID_CERT); ERROR_WINHTTP_HEADER_SIZE_OVERFLOW, which WinINet
+  lacks (ERROR_HTTP_INVALID_SERVER_RESPONSE there).
+- **Handles** (`handles.rs`, each DLL's `lib.rs`): sessions,
+  connections and requests are heap objects; the handle is the object's
+  address, valid while it is in the DLL's live list (an SRW lock guards
+  it): an unknown handle is ERROR_INVALID_HANDLE, the wrong kind
+  ERROR_WINHTTP_INCORRECT_HANDLE_TYPE (= _INTERNET_). Each handle
+  copies its parent's settings (user agent, time-outs, secure
+  protocols, redirect policy)
   when made, so closing a parent leaves its children working.
   WinHttpSetTimeouts / SetOption / QueryOption: the time-outs,
   CONTEXT_VALUE, USER_AGENT, SECURE_PROTOCOLS, REDIRECT_POLICY,
   SECURITY_FLAGS, HANDLE_TYPE; other options are recorded (SetOption
   accepts and ignores them, QueryOption fails with
   ERROR_WINHTTP_INVALID_OPTION).
-- **WinHttpCrackUrl** (`url.rs`): http and https (other schemes:
-  ERROR_WINHTTP_UNRECOGNIZED_SCHEME), user and password, bracketed IPv6
+- **WinINet's functions** (`user/wininet`): InternetOpenW (DIRECT and
+  the PRECONFIG types: direct, no proxy is configured on gala),
+  InternetConnectW (INTERNET_SERVICE_HTTP; credentials recorded, not
+  sent), HttpOpenRequestW (INTERNET_FLAG_SECURE, the IGNORE_CERT flags,
+  NO_AUTO_REDIRECT; the cache flags have nothing to act on),
+  HttpAddRequestHeadersW, HttpSendRequestW (the request and the
+  response's headers: WinHttpSendRequest plus ReceiveResponse),
+  HttpQueryInfoW (WinHttpQueryHeaders' answers; HTTP_QUERY_CUSTOM's
+  name comes in the buffer), InternetQueryDataAvailable,
+  InternetReadFile (fills the buffer or reaches the end; 0 bytes read
+  is the end, and stays so), InternetOpenUrlW (http and https: a GET
+  of the path and extra info, the given headers added),
+  InternetCrackUrlW, InternetSetOptionW (the time-outs, CONNECT_RETRIES,
+  SECURITY_FLAGS, USER_AGENT, CONTEXT_VALUE; others and the process-wide
+  NULL handle are recorded and accepted), InternetCloseHandle and
+  InternetAttemptConnect (ERROR_SUCCESS: no dial-up). gala's default
+  time-outs: connect 60 s, send and receive 30 s (the response's headers
+  as a receive).
+- **WinHttpCrackUrl / InternetCrackUrlW** (`url.rs`): http and https
+  (other schemes: ERROR_WINHTTP_UNRECOGNIZED_SCHEME; recorded by
+  wininet, whose Windows counterpart also has ftp, file, ...), user and
+  password, bracketed IPv6
   hosts, the default ports, path and extra info (from `?` or `#`), with
   URL_COMPONENTS' conventions (length 0: left out; null pointer:
   pointer into the URL; buffer: a copy or ERROR_INSUFFICIENT_BUFFER
   with the length needed). ICU_DECODE / ICU_ESCAPE are recorded, not
   applied.
-- **The connection** (`net.rs`): WinHttpSendRequest resolves the host
+- **The connection** (`net.rs`): sending a request resolves the host
   (GetAddrInfoW) and connects to its addresses in order (localhost is
   ::1 then 127.0.0.1); failures are ERROR_WINHTTP_NAME_NOT_RESOLVED and
   ERROR_WINHTTP_CANNOT_CONNECT. For WINHTTP_FLAG_SECURE, a Schannel
@@ -2867,7 +2932,7 @@ serves plain HTTP on 127.0.0.1:8080).
   EncryptMessage / DecryptMessage in place (SEC_I_RENEGOTIATE's
   post-handshake messages go back to the token loop). Certificate
   failures (SEC_E_UNTRUSTED_ROOT, _CERT_EXPIRED, _WRONG_PRINCIPAL,
-  CERT_E_*) are ERROR_WINHTTP_SECURE_FAILURE, other SSPI failures
+  CERT_E_*) are the DLL's (above), other SSPI failures
   ERROR_WINHTTP_SECURE_CHANNEL_ERROR. SECURITY_FLAG_IGNORE_CERT_CN_INVALID
   is SCH_CRED_NO_SERVERNAME_CHECK; the other IGNORE flags are manual
   validation (which skips every check: recorded unless all are set).
@@ -2894,16 +2959,21 @@ serves plain HTTP on 127.0.0.1:8080).
   blocks until some body is decoded and gives 0 at the end; a body cut
   short is ERROR_WINHTTP_CONNECTION_ERROR.
 - **What a failure leaves**: every failed step records
-  `winhttp.dll!<step>` (kind "other") with the Winsock or SSPI status
+  `winhttp.dll!<step>` or `wininet.dll!<step>` (kind "other", the
+  request's DLL) with the Winsock or SSPI status
   as detail (`connect` 10061, `TLS handshake` 0x80090325 after
   schannel's own reason, `GetAddrInfoW`, `recv`, `DecryptMessage`,
   `timed out`, `invalid status line`, ...); a panic records its
-  location and ends the process with 0xC0000409.
+  location (`<dll>!panic <file>`) and ends the process with 0xC0000409.
 - **Limits** (recorded where met): asynchronous sessions
-  (WINHTTP_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and WinHttpSetStatusCallback
-  (a `gala_stubs` stub, as is WinHttpTimeFromSystemTime); named proxies
-  (WinHttpOpen fails) and WinHttpGetProxyForUrl; automatic redirects
-  (the 3xx response is returned: `winhttp.dll!automatic redirect`);
+  (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and
+  WinHttpSetStatusCallback (a `gala_stubs` stub, as are
+  WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW); named
+  proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
+  WinINet's FTP and Gopher and its cache (InternetQueryOptionW and the
+  A functions are not exported yet);
+  automatic redirects (the 3xx response is returned:
+  `<dll>!automatic redirect`);
   connection reuse (every request has its own connection, closed with
   its body); the resolve and connect time-outs (the stack's apply);
   authentication, cookies, decompression, HTTP/2, client certificates,
@@ -3244,6 +3314,19 @@ endpoint's I/O completion port.
 - Completion routines of requests that pended run whatever the status
   (`notify::complete_count`); only a request that fails in its call
   queues none.
+- **A completion never needs memory**: as Windows allocates the packet
+  and the APC with the request (the IRP), a request reserves them when
+  it starts (`notify::Reserved`: AFD's `submit`, pipe and directory
+  requests' `Request::reserve`): a slot in its port's queue (if the
+  file has a port and the request an ApcContext) and in its thread's APC
+  queue (if it has a routine), both `mm::heap::ReservedVec`, which keep
+  room for reserved slots (capacity >= len + reserved; ordinary posts
+  never use it). Without memory the request fails in its call with
+  STATUS_INSUFFICIENT_RESOURCES. Clones of a pipe request share one
+  reservation; slots not used are given back when the request is
+  dropped. A port associated after the request started gets an ordinary
+  post, which may fail: logged (`io: a completion packet (context ...)
+  was lost: no memory`), as is a lost completion routine.
 - **APCs**: an ApcRoutine (WSARecv/WSASend's lpCompletionRoutine) is
   queued as a user APC to the calling thread when the request
   completes, at once or later, with (ApcContext, IoStatusBlock); such a
@@ -4049,8 +4132,15 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (ledger). A left-button press in such a window goes first to its
   WM_NCHITTEST (on its thread, posted GALA_WM_NCDOWN): HTCAPTION makes the
   desktop drag it (GalaWindowDrag, 0x7f54: while the button stays down;
-  logged), anything else is the click it was; DefWindowProc answers
-  HTCLIENT. Not yet: resizing by its own borders. gdi32 is loaded lazily with LoadLibrary,
+  logged), a border (HTLEFT..HTBOTTOMRIGHT) a resize (GalaWindowResize,
+  0x7f55, edges 1 left, 2 top, 4 right, 8 bottom: the rectangle follows
+  the pointer, at least 120 x 60, and goes to the program as
+  GALA_WM_PLACE when the button is released; no outline is drawn
+  meanwhile; as Windows' move and size loops, both take the desktop's
+  mouse capture, logged), anything else is the click it was; DefWindowProc answers
+  HTCLIENT. GALA_WM_PLACE names the desktop's window, which for such a
+  frame is the client area: user32 adds the program's borders back
+  (Snap places these windows right too). gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it. GetDC(NULL) is
   the display DC.
 - **Deferred presenting**: EndPaint and ReleaseDC add the area to the
@@ -5606,9 +5696,10 @@ One design covers remote shell access, a remote graphical desktop
 one machine: **sessions own desktops, and a desktop is shown by a
 presenter** (the local console, a remote shasha client, or none).
 ROADMAP RS tracks it: B1 (session ids, per-session named objects) and
-B2 (a desktop per session) are built; B3a (presenters), B3b (remote
-shasha), B4 (session manager) and B5 (sessions across a handover) are
-the planned design below. Test program: `user/session_test`.
+B2 (a desktop per session) are built, and B3a's window station and
+desktop objects; B3a's presenters, B3b (remote shasha), B4 (session
+manager) and B5 (sessions across a handover) are the planned design
+below. Test programs: `user/session_test`, `user/winsta_test`.
 
 What this builds on:
 
@@ -5643,9 +5734,8 @@ will make them and refuse unknown ids). Sessions are never removed yet.
     with `Global` -> `\BaseNamedObjects`, `Local` -> itself, `Session` ->
     `\Sessions\BNOLINKS`; `\Sessions\BNOLINKS\<n>` links to it;
   - window station directories: `\Windows\WindowStations` (session 0)
-    and `\Sessions\<n>\Windows\WindowStations`, empty (no window station
-    objects: GetProcessWindowStation returns NULL, which OpenSSL reads as
-    "not interactive").
+    and `\Sessions\<n>\Windows\WindowStations`, holding the session's
+    window stations ("Window stations and desktops (B3a)").
 - **kernel32** names objects under the caller's session directory, from
   PEB.SessionId (`sync::session_path`, also used for file mappings):
   `Local\x` and a plain `x` resolve to the session's directory,
@@ -5689,8 +5779,9 @@ will make them and refuse unknown ids). Sessions are never removed yet.
 
 ### A desktop per session (B2)
 
-`nt::session::Desk` is a session's desktop (Windows' WinSta0\Default;
-one per session until several window stations and desktops are wanted).
+`nt::session::Desk` is a session's window state (what Windows keeps per
+desktop; one per session, shared by every desktop object of the session
+until desktops with windows of their own are wanted).
 It is made with the session (`session::ensure` returns it) and held by
 every process of the session (`Process::desk`, fixed at creation like
 `Process::session`; a handover-restored process gets its session's
@@ -5754,6 +5845,83 @@ for across sessions.
 Host tests: `session::tests::windows_stay_in_their_session` (two
 sessions' registries, posts and thread posts across them),
 `window::tests` and `winevent::tests` on their own `Windows` / `Hooks`.
+
+### Window stations and desktops (B3a)
+
+`kernel/src/nt/winsta.rs` (objects, the choice of a process's station;
+host tests there), `syscalls/winsta_calls.rs` (gala's services),
+`user/user32/src/winsta.rs`. Test programs: `user/winsta_test`
+(scenarios `winsta_test`, the boot user's, and `winsta_service`, the
+same program as SYSTEM).
+
+- **Objects**: types `WindowStation` and `Desktop` (object type names
+  as NtQueryObject reports them; access rights and generic mappings of
+  winuser.h and "Window Station/Desktop Security and Access Rights").
+  A station is a permanent named object in its session's window
+  stations directory and holds its desktops, which are not in the
+  namespace (opened by name relative to the caller's station, as
+  Windows' station parses them). Every station has the desktop
+  `Default`.
+- **Per session** (made with the session, `winsta::make_session`):
+  `WinSta0`, interactive; session 0 also SYSTEM's `Service-0x0-3e7$`.
+  A non-interactive logon session's station, `Service-0x<high>-<low>$`
+  after its LUID, is made with its Default desktop the first time a
+  process of that logon connects ("Process Connection to a Window
+  Station"). Stations are never removed.
+- **USEROBJECTFLAGS.dwFlags**: WSF_VISIBLE for every user session's
+  WinSta0; not for session 0's (never displayed, session 0 isolation;
+  gala's choice, unverified) nor a logon session's station. OpenSSL
+  takes a station named `Service-0x...` or without WSF_VISIBLE for a
+  service: sshd (SYSTEM, session 0) is one, as on Windows.
+- **A process's connection** (`Process::ui`, `winsta::Connection`):
+  its creator records what it asks for before the process runs
+  (GalaCreateProcess): an inherited window station handle's station,
+  else STARTUPINFO.lpDesktop (`station\desktop` or a desktop alone),
+  else the creator's own station and desktop names (resolved, or what
+  it was asked for), else nothing. The first window station or desktop
+  call resolves it (`winsta::choose`, in the process's session): the
+  inherited station, the named one, or WinSta0 for an interactive
+  logon (the token holds INTERACTIVE, S-1-5-4) and the logon session's
+  station otherwise; the desktop named, else Default. A name the
+  session lacks leaves the process without a station (the calls fail;
+  on Windows user32's start-up fails there) and says so in the log.
+- **Handles**: the process's station handle (GetProcessWindowStation)
+  and the startup desktop's (GetThreadDesktop, the same for every
+  thread) are opened on first use with all access, not inheritable.
+  SetProcessWindowStation and SetThreadDesktop replace them with the
+  caller's handle. Handles in use cannot be closed: NtClose returns
+  STATUS_HANDLE_NOT_CLOSABLE (ERROR_INVALID_HANDLE), CloseDesktop
+  STATUS_DEVICE_BUSY (ERROR_BUSY), CloseWindowStation of the process's
+  station too. A thread's own desktop handle is freed when it ends.
+- **Other calls**: OpenWindowStation (an unknown or empty name is
+  STATUS_OBJECT_NAME_NOT_FOUND, a backslash STATUS_OBJECT_PATH_NOT_FOUND),
+  OpenDesktop (empty: STATUS_OBJECT_TYPE_MISMATCH, a backslash
+  STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
+  OpenInputDesktop (the process's station's Default, a new handle each
+  time; STATUS_INVALID_DEVICE_REQUEST from a station that cannot receive
+  input), GetUserObjectInformationW/A (UOI_FLAGS, UOI_NAME, UOI_TYPE,
+  UOI_IO; the size with the NUL, also when short; the A form reports
+  the UTF-16 size when short and the ANSI bytes on success, as Windows
+  does), EnumWindowStationsW (the caller's session's), EnumDesktopsW.
+- **Limits**: no DACLs on stations and desktops (any process of the
+  session may open them); CreateWindowStation and CreateDesktop are
+  unsupported (ledger; BR stage 3, Chromium's sandbox); SwitchDesktop
+  does not exist; every desktop of a session shares its `Desk`, so
+  SetThreadDesktop does not refuse a thread with windows (Windows:
+  ERROR_BUSY when the desktop differs); UOI_USER_SID and UOI_HEAPSIZE
+  are unsupported (ledger); a process holding a station or desktop
+  handle is refused by a kernel handover (B5), and a carried process
+  connects again from its logon session; no clipboard or atom tables
+  per station yet.
+- **Observability**: the first call logs where the process is and why
+  (`winsta: pid 4 (x.exe, session 1) is on WinSta0\Default (its logon
+  session's)`, or `(STARTUPINFO.lpDesktop)`, `(its parent's, pid 4)`, `(an
+  inherited window station handle)`), or a warning when the name is not
+  found; an open of an unknown station or desktop name is logged (the
+  first 32); a logon session's station made says so. Events (category
+  `window`): `"ev":"winsta"` with `"op":"connect"` (pid, session,
+  station, desktop, `from`), `"connect failed"`, `"made"`. The state
+  dump's sessions part lists each session's stations.
 
 ### Target design (B3-B5)
 
@@ -6086,8 +6254,15 @@ The running parts (milestone 1; `lxrun=`):
   (gala-um refuses: its host libc owns FS). FSGSBASE stays off, so user
   code cannot change them behind the kernel's back.
 - **State** (`lx::state`, a table keyed by pid): the break, the fd table
-  (fds 0-2 on the console; pipes), the stdout/stderr line buffers;
-  dropped in `nt::process::finish` (`lx::process_ended`).
+  (fds 0-2 on the console; pipes: slots holding a shared open file
+  description, `Fd`, whose O_NONBLOCK every dup sees, and the fd's own
+  close-on-exec flag), the signal state (`lx::signal::Signals`), the
+  parent's pid and the exit signal, the children (running, ended
+  zombies with their status, threads waiting in wait4), the
+  stdout/stderr line buffers; dropped in `nt::process::finish`
+  (`lx::process_ended`): the fds close first, then the parent is told
+  (a zombie, SIGCHLD, its wait4 waiters woken), so a parent woken by a
+  child's end reads EOF from a pipe only the child held.
 - **Memory** (`lx::mm`): anonymous mmap (the hint if free, else
   top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
   gives EEXIST), munmap (cuts VAD allocations: `Vad::unmap_range`),
@@ -6096,25 +6271,109 @@ The running parts (milestone 1; `lxrun=`):
   the old break). Pages are demand-zero through the core fault path;
   `vm::sync_range` frees the frames of removed pages. Linux overcommits:
   the commit charge counts but never refuses. MAP_SHARED anonymous is
-  private until fork exists.
+  private: a fork copies it (not yet shared with the child).
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
-  munmap, brk, rt_sigprocmask (stub: no signals), ioctl (ENOTTY),
+  munmap, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
+  rt_sigpending, rt_sigtimedwait (below), fork, clone (only an exit
+  signal of SIGCHLD: a fork; other flags ENOSYS), wait4, ioctl (ENOTTY),
   writev, getpid, gettid, exit (the thread), exit_group (the process,
-  status & 0xff), fcntl (F_GETPIPE_SZ, F_GETFL; F_GETFD/SETFD/SETFL
-  accepted), getuid/geteuid/getgid/getegid, arch_prctl (SET/GET FS/GS; a
-  base at or above TASK_SIZE is EPERM), set_tid_address (returns the
-  tid), pipe2 (64 KiB, O_NONBLOCK; blocking reads and writes poll every
-  ms until the process ends: no wait queue yet). Anything else:
+  status & 0xff), fcntl (F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD/F_SETFD
+  (FD_CLOEXEC only), F_GETFL/F_SETFL (O_NONBLOCK; the access mode
+  ignored), F_GETPIPE_SZ/F_SETPIPE_SZ), dup, dup2, dup3 (O_CLOEXEC;
+  the lowest free fd, a negative target EBADF), lseek (ESPIPE: only
+  pipes and the console exist), getuid/geteuid/getgid/getegid,
+  arch_prctl (SET/GET FS/GS; a base at or above TASK_SIZE is EPERM),
+  set_tid_address (returns the tid), pipe and pipe2 (O_NONBLOCK,
+  O_CLOEXEC; blocking reads and writes poll every ms until the process
+  ends: no wait queue yet). A pipe keeps its bytes as Linux does, in
+  whole pages: 64 KiB by default, F_SETPIPE_SZ rounds up to a power of
+  two pages (at most 1 MiB unprivileged, EPERM; EBUSY under what it
+  holds); its first page is free only once read through, so a full pipe
+  that gave up a few bytes still refuses a small write; writes up to
+  PIPE_BUF (4096) are whole or nothing. Anything else:
   `errno::to_return(ENOSYS)`.
+- **Signals** (`lx::signal`: plain data, host-tested; `lx::sigcalls`:
+  the calls and delivery; layouts and numbers from `lx_abi::signal`):
+  - the actions are the process's; the blocked mask and the
+    thread-directed pending set (SIGPIPE, later faults and tgkill) are a
+    thread's (`ThreadSignals`), the process-directed one (SIGCHLD,
+    later kill) the process's. One thread per process today, so
+    `Signals` holds one `ThreadSignals`; it becomes one per thread with
+    clone of threads;
+  - a standard signal is pending once (merged), a real-time one queues
+    each siginfo; generation discards an ignored signal (SIG_IGN, or
+    SIG_DFL with an Ign default) unless blocked: a blocked one stays
+    pending; an action set to ignore discards what is pending;
+  - rt_sigaction (EINVAL: sigsetsize != 8, a bad number, changing
+    SIGKILL/SIGSTOP; the new action read before the change, the old
+    written after; sa_mask without SIGKILL/SIGSTOP), rt_sigprocmask
+    (`how` checked only with a set), rt_sigpending (pending and
+    blocked), rt_sigtimedwait (the lowest pending in the set; EAGAIN at
+    the timeout, EINTR if another signal is deliverable; polls every
+    ms);
+  - SIGPIPE: a write (or writev) to a pipe with no reader raises it for
+    the writer (si_code SI_USER, its pid and uid, as Linux shows) and
+    fails with EPIPE;
+  - delivery on the way back from every system call (`lx::dispatch`
+    after the call): the lowest deliverable signal; Ignore, Continue
+    (and Stop, ledgered: no job control) drop it; Term/Core ends the
+    process with `signal::killed_status(sig)` (an NTSTATUS
+    0xe4c580nn, read back by `signal::killed_by` for `-- killed by
+    signal n` and wait4); a handler gets an rt_sigframe: below the
+    128-byte red zone, the XSAVE state (`xstate::size()` bytes)
+    64-aligned, then the 440-byte frame with rsp + 8 16-aligned
+    (pretcode = sa_restorer at rsp, the ucontext at +8 with uc_flags
+    UC_SIGCONTEXT_SS|UC_STRICT_RESTORE_SS, no alternate stack, the
+    interrupted mask in uc_sigmask and oldmask, siginfo at +312); the
+    handler starts with rdi = sig, rsi = &siginfo, rdx = &ucontext, rax
+    0, DF and TF clear, the mask plus sa_mask plus the signal (unless
+    SA_NODEFER); SA_RESETHAND leaves SIG_DFL with the flags kept. One
+    handler frame per return: the next is delivered when rt_sigreturn
+    returns. The new registers go to user mode through
+    `platform::continue_with` (every register, IRETQ);
+  - rt_sigreturn reads the ucontext at rsp (the restorer popped the
+    return address), restores every register (flags filtered by the
+    return), the XSAVE state and the mask; a frame it cannot read, or
+    whose rip/rsp leave user space, kills with SIGSEGV, as does a frame
+    that cannot be written or an action without SA_RESTORER;
+  - EINTR: blocking pipe reads and writes, wait4 and rt_sigtimedwait
+    end with EINTR when a signal is deliverable; read, write, writev and
+    wait4 are restarted (rip back over `syscall`, rax the number) after
+    a handler with SA_RESTART or a signal that turned out ignored.
+  - Not yet: kill, tgkill, rt_sigqueueinfo, rt_sigsuspend,
+    sigaltstack (SA_ONSTACK is ledgered and the current stack used),
+    CPU faults as signals (an exception still ends the process with its
+    NT status, read as SIGSEGV etc.), delivery to a thread running user
+    code (only at a system call's return), stop/continue, UC_FP_XSTATE's
+    software-reserved bytes in the FPU state.
+- **Fork** (`lx::fork`): fork, and clone with only SIGCHLD (the C
+  library's fork), make a child core process (`create_bare`, parent_id
+  set) with the parent's VAD cloned (`Vad::try_clone`) and every mapped
+  page copied into its own frame at once (`map_private_copy`; no
+  copy-on-write yet, untouched pages stay demand-zero in both); the
+  charge follows (`charge::sync`, Linux overcommits); its Linux state is
+  `state::fork`'s (the same open file descriptions in the same slots,
+  so pipe ends stay open while either holds them; the same actions and
+  mask; nothing pending); its thread (`thread::create_forked`) goes on
+  from the parent's `syscall` with rax 0, the parent's registers
+  (rcx/r11 as SYSRET leaves them), XSAVE state and FS/GS bases. wait4
+  reaps a zombie (pid > 0, or -1/0: any; < -1 is ledgered and taken as
+  any: no process groups yet), writes the wait status (exit code << 8,
+  or the signal; no core flag: no core files) and returns its pid;
+  WNOHANG gives 0, no such child ECHILD, rusage is zeros (ledgered);
+  it blocks with `prepare_wait`/`wait` and is woken by the child's end
+  (or the process's termination). A parent whose SIGCHLD is SIG_IGN or
+  SA_NOCLDWAIT keeps no zombies (wait(2)).
 - **Errors**: a user buffer is copied whole before anything happens, so
   a fault is EFAULT with nothing done (as Linux's transcripts show for
   pipes); a pipe read copies out before it takes the bytes (an EFAULT
   read leaves them).
 - **Output**: fds 1 and 2 on the console are logged a line at a time
   (`lx: pid <p> stdout: <line>`, `stderr`), and the end as `lx: pid <p>
-  -- exit status <n>` or `-- killed by signal <n>` (an exception: SIGSEGV
-  for an access violation). xtask's `lx_expect::check_boot` rebuilds the
+  -- exit status <n>` or `-- killed by signal <n>` (a signal's default
+  action, or an exception: SIGSEGV for an access violation). xtask's
+  `lx_expect::check_boot` rebuilds the
   program's transcript from those lines and compares it with
   expected.txt exactly.
 - **Observability**: `lx: exec <path> (<n> bytes): <plan>` (bias, entry,
@@ -6127,13 +6386,32 @@ The running parts (milestone 1; `lxrun=`):
   personality linux): ENOSYS` once per process and number, and goes to
   the ledger every time as `{"service":"<name>","what":"linux syscall
   missing","detail":<nr>}` (printed at `run: end`); stubs as `"what":
-  "linux syscall stub"`.
+  "linux syscall stub"`. Signals: an `lx signal` event for each one
+  generated or acted on (pid, tid, signal, code, what: pending, merged,
+  discarded, ignored, handler, killed, taken); `lx: pid <p> (thread
+  <t>): killed by signal <n> (<name>), its default action`; a frame that
+  cannot be written or read back logs why. Fork: `lx: pid <p> fork:
+  child pid <c> (<n> pages copied)` then the core's process line and
+  `process start` event (ppid); a failed fork logs why; an `lx child
+  ended` event (pid, child, wait status, signal, whether the SIGCHLD was
+  discarded, whether reaped at once). Ledger: `linux clone flags
+  missing`, `linux signal action missing` (Stop), `linux signal option
+  missing` (SA_ONSTACK), `linux option missing` (wait4's process
+  groups).
 - **Invariants**: a Linux process is never handed over (carry refuses "a
   personality other than NT"); its threads have no TEB; NT threads' FS
-  base is 0.
+  base is 0. Signals are delivered only on the way back from a Linux
+  system call, never while the process is ending; a signal's state is
+  changed only under `LxProcess::signals`, which is never held across a
+  user-memory access or a wait. A child is listed and counted as
+  running in its parent before its thread starts; a process's fds are
+  closed before its parent learns it ended. Lock order: `children`
+  before `signals` (wait4), each taken alone elsewhere.
 - **TODO** (ROADMAP LX): randomization (the stack gap, AT_RANDOM's
-  source, the bases); PT_INTERP and dynamic linking; signals (SIGPIPE,
-  SIGSEGV delivery); fork/clone; wait queues for pipes; files and the
+  source, the bases); PT_INTERP and dynamic linking; the signal calls
+  and deliveries listed as not yet above; copy-on-write fork and shared
+  MAP_SHARED memory; clone of threads; wait queues for pipes and
+  rt_sigtimedwait; files and the
   fd-based calls (milestone 2); a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
   name them yet).
@@ -6145,9 +6423,14 @@ dependencies, no allocation, `#![forbid(unsafe_code)]`) holding the
 Linux ABI's plain data for milestones 2 and 3. It builds and is
 host-tested on its own (`cargo test -p lx_abi`, part of `cargo xtask
 test`); CI runs clippy on it for the host with tests and for
-x86_64-unknown-none; kernel/clippy.toml applies. The kernel does not
-depend on it yet: it adds `lx_abi = { path = "lx_abi" }` when the Linux
-signal, pty and file calls are built.
+x86_64-unknown-none; kernel/clippy.toml applies. The kernel depends on
+it (`lx_abi = { path = "lx_abi" }`): `lx::signal` and `lx::sigcalls`
+use its signal data; the pty and file calls will use the rest. Besides
+the layouts it encodes and decodes them as user memory holds them
+(`KSigaction::{from,to}_bytes`, `Siginfo::to_bytes`,
+`Ucontext::{from,to}_bytes`, `RtSigframe::to_bytes`: little-endian
+fields at the `repr(C)` offsets, host-tested), since `lx` has no
+`unsafe`.
 
 - **`lx_abi::signal`**: signal numbers 1..=64 (SIGRTMIN 32, the
   kernel's; musl's is 35); `SA_*`, `SI_*`/`SEGV_*`/`CLD_*` codes;
@@ -6999,6 +7282,7 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 | GalaWindowSurface(hwnd, section, offset, width, height) | 0x7f52 | the caller's top-level window keeps its pixels in that section |
 | GalaWindowSurfaceOpen(hwnd, \*section, \*info) | 0x7f53 | a handle to any window's surface section on the caller's desktop |
 | GalaWindowDrag(id) | 0x7f54 | the caller's window follows the pointer while the left button is down (its own caption) |
+| GalaWindowResize(id, edges) | 0x7f55 | the caller's window is resized from those edges by the pointer, placed when the button goes up (its own border) |
 
 **The registry and its record** (step 1):
 
@@ -7504,6 +7788,19 @@ every moment.
   before returning, so a timer tick cannot show the old clock after the
   new one. Every change is logged (`clock: <process> asked to ...`) and
   is an event (`events=mock`, `"ev":"clock"`).
+- **Absolute due times follow the system time**, as Windows' absolute
+  timers and timeouts do (KeSetTimer, KeWaitForSingleObject): a wait
+  with a positive NT timeout is `wait::Timeout::Until(system time)`,
+  whose tick is worked out again on every pass and which ends once the
+  system time reaches it; a timer set to an absolute time keeps
+  `TimerState::absolute` until its first expiry (a periodic timer's
+  later ones are relative), and the timer worker fires it when the
+  system time reaches it. GalaClockControl 3 and 4 call
+  `wait::system_time_changed`, which wakes every thread in an absolute
+  wait (listed while it sleeps; a change counter covers one that moved
+  between working out the deadline and sleeping) and the timer worker,
+  logged (`clock: the system time moved: N absolute waits and the timers
+  look again`). Moving the time back does not un-signal a fired timer.
 - **Waits**: the schedulers compare deadlines with the virtual clock.
   The kernel's tick interrupt passes both clocks to `sched::on_tick`:
   waiters (`State::Waiting`, the NT layer's and the kernel's own
@@ -7529,16 +7826,16 @@ every moment.
   across yields and a busy loop; an advance of an hour moves every view
   by exactly an hour, ends a 10-minute wait (STATUS_TIMEOUT) and a
   20-minute sleep but not a 2-hour wait, which a second advance ends;
-  the system time moves alone; rate 1000 runs 30 s of program time in
+  the system time moves alone, and a timer due at an absolute time
+  and a wait until it end when the system time alone passes it (a
+  relative timer does not); rate 1000 runs 30 s of program time in
   about 30 ms of the unscaled clock; booted with
   `clock=control,freeze,system:2147483648` the clock reads exactly
   2038-01-19 03:14:08 UTC. Host tests: the transform, request decoding,
   the flag, the record's layout, the simulation's scaled and frozen
   clock.
 - **Limits**: RDTSC in program code reads the real TSC in the kernel
-  (only the simulation virtualizes it); absolute timeouts are converted
-  to relative ones on entry, so a later system-time change does not move
-  them (Windows re-evaluates absolute timers); kernel threads'
+  (only the simulation virtualizes it); kernel threads'
   `sleep_ms` run on real time by design; clock control state is not
   carried across a handover (a handover with programs is refused while
   it is armed).

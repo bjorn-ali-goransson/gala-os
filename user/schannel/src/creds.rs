@@ -396,6 +396,10 @@ pub struct Credential {
 
 const SP_PROT_TLS1_2: u32 = 0xc00;
 const SP_PROT_TLS1_3: u32 = 0x3000;
+/// The server and client bits of every SP_PROT_* protocol (PCT 1.0 to
+/// TLS 1.3, DTLS 1.0 and 1.2: server even, client odd).
+const SP_PROT_SERVER: u32 = 0x5_5555;
+const SP_PROT_CLIENT: u32 = 0xa_aaaa;
 const SCH_CRED_NO_SERVERNAME_CHECK: u32 = 0x4;
 const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x8;
 const SCH_CRED_REVOCATION_CHECKS: u32 = 0x100 | 0x200 | 0x400;
@@ -459,12 +463,17 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
         // No CRLs or OCSP here: certificates are not checked for revocation.
         missing(b"schannel.dll!revocation checking", flags.into());
     }
+    // Each protocol has a client and a server bit (SP_PROT_TLS1_2_CLIENT,
+    // _SERVER): only this side's count (curl disables every protocol but
+    // the client's TLS 1.0 to 1.3, the server halves included).
+    let side = if inbound { SP_PROT_SERVER } else { SP_PROT_CLIENT };
+    let (tls12, tls13) = (SP_PROT_TLS1_2 & side, SP_PROT_TLS1_3 & side);
     let mut protocols = Protocols {
-        tls12: enabled == 0 || enabled & SP_PROT_TLS1_2 != 0,
-        tls13: enabled == 0 || enabled & SP_PROT_TLS1_3 != 0,
+        tls12: enabled == 0 || enabled & tls12 != 0,
+        tls13: enabled == 0 || enabled & tls13 != 0,
     };
-    protocols.tls12 &= disabled & SP_PROT_TLS1_2 == 0;
-    protocols.tls13 &= disabled & SP_PROT_TLS1_3 == 0;
+    protocols.tls12 &= disabled & tls12 == 0;
+    protocols.tls13 &= disabled & tls13 == 0;
     if !protocols.tls12 && !protocols.tls13 {
         // SSL 3.0, TLS 1.0 and 1.1 (or DTLS) only: not supported.
         missing(b"schannel.dll!protocols other than TLS 1.2 and 1.3", (enabled | disabled).into());

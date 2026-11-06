@@ -70,7 +70,8 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: wininet's HTTP functions (TLS step 2).
+2. **TLS**: `gala install`'s HTTPS downloads on winhttp (TLS step 4;
+   step 3, curl and Git's https remotes, is done).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
 4. **RS**: step B3a (window state apart from composition, presenters).
@@ -144,7 +145,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel and winhttp (synchronous) done; wininet, curl next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine), curl and Git's https remotes done; `gala install`'s downloads next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
@@ -163,7 +164,7 @@ has a section under "Open items".
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
-| RS | Remote access and sessions | in progress | A, B1, B2 done; B3a next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations done; B3a's presenters next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
@@ -348,7 +349,8 @@ boot-test <name>`, see "Pending scenarios" below):
 - Step 7, Win32-OpenSSH 9.8.3.0p2: key and password logins
   (`sshd_login`, `sshd_password`); the remote shell is item SSH.
 - PostgreSQL 17.2: initdb, the server, the host's psql (`postgres`).
-- MinGit 2.47.1: init, add, commit, log (`mingit`, pending).
+- MinGit 2.47.1: init, add, commit, log (`mingit`, pending); a clone
+  over https on Schannel (`git_https`, ROADMAP TLS).
 - Git Bash (PortableGit 2.47.1): **parked**; msys-2.0.dll loads and
   bash gets past its startup deadlock, then dies with an access
   violation at address 0 after looking up kernelbase's VirtualAlloc2
@@ -720,15 +722,28 @@ own session and shell.
   session's desktop is drawn and gets input; window calls never cross
   sessions (`session_test`); `events=window`; the core/NT process split
   (`nt::process::Core`, which Linux processes use too).
+- B3a, window station and desktop objects (`nt::winsta`): WinSta0 and
+  its Default desktop in every session, SYSTEM's `Service-0x0-3e7$` in
+  session 0, a non-interactive logon's station made on first use; a
+  process's station from an inherited handle, STARTUPINFO.lpDesktop,
+  its parent or its logon session; user32's GetProcessWindowStation,
+  Open/CloseWindowStation, SetProcessWindowStation, EnumWindowStationsW,
+  GetThreadDesktop, SetThreadDesktop, OpenDesktop, OpenInputDesktop,
+  CloseDesktop, EnumDesktopsW, GetUserObjectInformationW/A over gala
+  calls (`winsta_test`, `winsta_service`).
 
 **Next**:
 1. B3a: window state apart from composition, and presenters: console
    attach and switch; a test presenter (headless rendering for screen
    checks without QEMU screendumps); a session with no presenter keeps
    its windows. The Display seam's `screen_flush` and `screen_changed`
-   (from GPU G1) are what a presenter needs. Window station and desktop
-   objects (GetProcessWindowStation is NULL today). The presenter seam
-   is also where the compositor later leaves the kernel (SH step 4).
+   (from GPU G1) are what a presenter needs. The presenter seam is
+   also where the compositor later leaves the kernel (SH step 4).
+   Window stations' open ends: DACLs on stations and desktops;
+   CreateWindowStationW and CreateDesktopW stay unsupported until BR
+   stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
+   desktops with windows of their own; UOI_USER_SID; clipboard and atoms
+   per station.
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
@@ -893,9 +908,10 @@ samples).
    colours on the screen, then Alt+F4 ends Chromium with 0 (about 2
    minutes of kernel time). Dragging by its own caption (WM_NCHITTEST
    HTCAPTION on a press: GalaWindowDrag; the scenario drags Chromium by
-   its tab strip). Next: resizing by its own frame (HTLEFT..HTBOTTOMRIGHT),
-   IME off, a click on a link, FlaUI reading the page's accessibility
-   tree.
+   its tab strip) and resizing by its own border (HTLEFT..HTBOTTOMRIGHT:
+   GalaWindowResize; desktop unit test, no outline while resizing yet).
+   Next: IME off, a click on a link, FlaUI reading the page's
+   accessibility tree.
    Then a conformance report (the owner): a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
@@ -954,21 +970,56 @@ DecryptMessage, QueryContextAttributes, SNI and the name check, ALPN,
 validation against gala's machine root store (`System32\gala\roots`).
 Not yet run on real Windows (run-all.ps1 runs it when Nginx can be
 started and, as administrator, imports the test CA first). winhttp's
-synchronous client over it (step 1 below).
+and wininet's synchronous clients over it, on one engine (steps 1 and
+2 below); unmodified curl and Git over it (`curl_schannel`,
+`git_https`; step 3).
 
 **Next**:
 1. Done: winhttp over Schannel, synchronous (`winhttp_test` against the
    same Nginx: http and https GETs, status and headers, Content-Length
    and chunked bodies, an untrusted issuer, a closed port,
-   WinHttpCrackUrl; ARCHITECTURE "WinHTTP"). Still open there:
+   WinHttpCrackUrl; ARCHITECTURE "WinHTTP and WinINet"). Still open there:
    automatic redirects (needed by step 4: GitHub's release URLs
    redirect), connection reuse, asynchronous sessions and status
    callbacks, proxies, authentication.
-2. wininet's HTTP functions on the same code (InternetOpen/Connect,
-   HttpOpenRequest/SendRequest, InternetReadFile).
-3. curl for Windows (its Schannel backend), unmodified, fetching from
-   the in-guest Nginx; then Git's https remotes (MinGit uses curl with
-   Schannel).
+2. Done: wininet's HTTP functions on the same engine as winhttp
+   (`user/http_client`; `wininet_test` against the same Nginx:
+   InternetOpenW/ConnectW, HttpOpenRequestW/AddRequestHeadersW/
+   SendRequestW, HttpQueryInfoW with CUSTOM, InternetQueryDataAvailable
+   and InternetReadFile, InternetOpenUrlW, InternetCrackUrlW, an unknown
+   issuer as ERROR_INTERNET_INVALID_CA, a closed port; ARCHITECTURE
+   "WinHTTP and WinINet"). Still open there, besides winhttp's list:
+   the A functions, InternetQueryOptionW, FTP, the cache,
+   InternetTimeFrom/ToSystemTimeW.
+3. Done: curl and Git over Schannel. curl.se's own Windows build
+   (8.23.0_8, PREBUILT `curl`) has LibreSSL as its only TLS backend (no
+   Schannel, no MultiSSL), so it runs as that (`curl`: its CA list is
+   the Windows ROOT store, crypt32's CertOpenSystemStoreA); the Schannel
+   curl is Git for Windows' (PortableGit 2.47.1's curl 8.11.0, PREBUILT
+   `gitcurl`; `curl_schannel`), the libcurl MinGit's https remotes load
+   (`git_https`: ls-remote and a clone over Git's dumb HTTP protocol
+   from the in-guest Nginx, and an untrusted certificate refused). Both
+   curl scenarios run `user/curl/curl.sh` against the same Nginx: plain
+   HTTP, HTTPS by name and address, an untrusted root (exit 60), an
+   expired certificate (60 on LibreSSL, 35 on Schannel). What they
+   needed: secur32's ANSI table (InitSecurityInterfaceA,
+   QuerySecurityPackageInfoA, EnumerateSecurityPackagesA), Schannel
+   counting only its own side's SP_PROT_* bits and taking a
+   SECBUFFER_EMPTY output buffer, ntdll's RtlVerifyVersionInfo,
+   msvcrt's rand_s/_sys_errlist/_sys_nerr, iphlpapi's
+   if_nametoindex/if_indextoname, kernel32's Module32First/Next (ANSI),
+   SSPI texts in FormatMessage, wldap32 stubs. Still open there: the
+   pinned curl.se version is fetched from curl.se, which keeps versions
+   from 8.17.0 on; curl's `--cacert` with Schannel (curl's own chain
+   check needs crypt32's chain engine, step 5; the curl.se build has no
+   Schannel to try it with); a smart-HTTP Git server (`git
+   http-backend`) and pushes; Schannel's revocation check (the
+   scenarios pass `--ssl-no-revoke` / `http.schannelCheckRevoke=false`;
+   what Windows does for a certificate with no CRL distribution point
+   is to be checked there); what the ledger shows besides
+   (msvcrt's _localtime64_s, userenv's GetUserProfileDirectoryA, bcrypt's
+   DH/DSA and chaining-mode property for libssh2's WinCNG probe,
+   WSAIoctl's SIO_IDEAL_SEND_BACKLOG_QUERY).
 4. `gala install`'s HTTPS downloads (PK) on winhttp, with gala's root
    store holding a pinned, documented public CA bundle.
 5. crypt32's system stores and chain engine: the ROOT system store
@@ -1067,8 +1118,8 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   static or static-pie ELF as a `Personality::Linux` process
   (`lx::exec`); `lx::dispatch` serves read, write, writev, close, pipe2,
   fcntl, mmap, munmap, mprotect, brk, arch_prctl, exit, exit_group,
-  set_tid_address, the get*id calls, and rt_sigprocmask and ioctl as
-  stubs; ENOSYS for the rest, logged by name and in the ledger
+  set_tid_address, the get*id calls, and ioctl as a stub; ENOSYS for
+  the rest, logged by name and in the ledger
   (`linux syscall missing`). Scenarios `lx_hello`, `lx_write_exit`,
   `lx_brk`, `lx_mmap`, `lx_arch_prctl`, `lx_auxv`, each also `_pie`,
   match real Linux's transcripts exactly.
@@ -1078,12 +1129,31 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   `kernel/lx_abi` crate (signal, termios, stat/statx/dirent64/epoll/poll
   layouts) host-tested against them.
 
+- Milestone 2 under way: pipes as Linux keeps them (whole pages:
+  F_GETPIPE_SZ/F_SETPIPE_SZ, a full pipe takes a small write only when
+  a page is free), the old `pipe` call, lseek (ESPIPE), dup, dup2, dup3,
+  F_DUPFD(_CLOEXEC), close-on-exec per fd, O_NONBLOCK shared by dups
+  (F_SETFL). Signals (`lx::signal`, `lx::sigcalls`, on `lx_abi`, now a
+  kernel dependency): rt_sigaction, rt_sigprocmask, rt_sigpending,
+  rt_sigtimedwait, rt_sigreturn; SIGPIPE from a pipe with no reader;
+  delivery on the way back from a system call (default actions, SIG_IGN,
+  handlers on an rt_sigframe with SA_RESTORER, SA_RESTART for
+  read/write/wait4). fork (and clone with only SIGCHLD) with an eagerly
+  copied address space, wait4, SIGCHLD at the child's end. Scenario
+  `lx_pipe` matches pipe_test's transcript exactly.
+
 **Next**:
-1. Milestone 2, static busybox: files and directories, wait4, execve,
-   clone, futex (priorities from `strace` on real Linux and the
-   ledger); signals (SIGSEGV, SIGPIPE; frames from `lx_abi::signal`);
-   wait queues for pipes; `lx::state` onto the core process. Each corpus
-   program becomes a boot scenario as its calls land.
+1. Milestone 2, static busybox: the rest of signal_test and fork_test
+   (kill, tgkill, rt_sigqueueinfo, rt_sigsuspend, sigaltstack, faults
+   as SIGSEGV/SIGBUS/SIGFPE through the exception path, delivery to a
+   thread running user code, stop/continue), copy-on-write for fork
+   (shared frames, `vm::copy_on_write` for private pages; MAP_SHARED
+   anonymous memory shared with the child), then files and directories,
+   execve, clone of threads, futex (priorities from `strace` on real
+   Linux and the ledger); wait queues for pipes, rt_sigtimedwait and
+   wait4's signal check (they poll or rely on one waker today);
+   `lx::state` onto the core process; an `lx_pipe_pie` scenario. Each
+   corpus program becomes a boot scenario as its calls land.
 2. Milestone 3: threads and futex, clocks and polling, ptys over the
    core terminal object, /proc.
 3. Seam 1: the pty as a core terminal object under ConPTY.
@@ -1093,8 +1163,7 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
 5. Seam 5: shared core objects when pipes, sockets or files are
    reworked.
 6. Also open (ARCHITECTURE "The lx module"): address randomization, a
-   vDSO, Linux in gala-um, the system-call numbers 462..=469; `lx_abi`
-   becomes a kernel dependency with the signal, pty and file calls.
+   vDSO, Linux in gala-um, the system-call numbers 462..=469.
 
 **Done when** (each milestone): every corpus program of the milestone
 runs as a boot scenario whose transcript equals its `expected.txt`.
@@ -1263,8 +1332,6 @@ line and in gala-um, `cargo xtask fault-test [filter] [--sweep[=point]]`,
 `cargo xtask alloc-audit`, scenarios `failpoint_heap`, `failpoint_frame`,
 `failpoint_random`, `failpoint_disk` (ARCHITECTURE "Fault injection",
 WORKFLOW "Fault injection"). Left:
-- The completion port and APC queues still grow when a completion is
-  reported (`notify::complete`: a failed push loses the packet).
 - Out of memory in gala's ntdll loader shows as STATUS_DLL_NOT_FOUND and
   in child process creation as STATUS_INVALID_IMAGE_FORMAT.
 - A QEMU sweep of the kernel-only paths (child processes, the
@@ -1292,7 +1359,8 @@ everyone starving. GPU memory is charged here too (item GPU).
 Done: clock control (`clock=`, GalaClockControl), record/replay of the
 boot time, clock readings and random numbers (`record`, `replay=`,
 `um --record/--replay`, GalaRandom), disk latency
-(`failpoint=disk_io:delay:<ms>`) (ARCHITECTURE "Clock control",
+(`failpoint=disk_io:delay:<ms>`), absolute timers and timeouts that
+follow a moved system time (ARCHITECTURE "Clock control",
 "Record/replay"; WORKFLOW "Clock control, record/replay, slow devices").
 Next:
 1. Record/replay of network frames, disk reads and input events (needs
@@ -1302,8 +1370,6 @@ Next:
 3. API-level faults in gala's DLLs (Application Verifier style).
 4. The read-write control channel (OBSERVABILITY "Planned facilities",
    the live introspection channel).
-5. A frozen clock's effect on absolute timers (Windows re-evaluates them
-   on a system time change).
 
 #### R8. Chain of trust for updates
 
@@ -1444,6 +1510,17 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
 
+- **`--no-sandbox` in the Chromium scenarios**: Chromium's renderers
+  normally run in a sandbox (restricted, low-integrity and
+  AppContainer/LowBox tokens, job objects, process mitigation
+  policies, handle inheritance lists, an alternate desktop); gala lacks
+  parts of it (CreateDesktopW, LowBox tokens, mitigation policies), so
+  sandbox set-up would fail and no renderer would start. The switch,
+  Chromium's own, runs every Chromium process on the user's ordinary
+  token (the browser shows its "unsupported command-line flag" bar).
+  Structural fix: BR stage 3, the sandbox's pieces; then the switch
+  goes.
+
 - **`--disable-direct-composition` in `chromium_window`**: on Windows 11
   22H2 and later Chromium draws even software frames through a D3D11
   DXGI swap chain under DirectComposition (`kRemoveRedirectionBitmap`),
@@ -1470,15 +1547,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Defects known, not yet fixed
 
-- **A strip left unredrawn after dragging Chromium**: the screenshot of
-  `chromium_window`'s drag step showed the part of the moved window's
-  new area right of x 826 and below the toolbar as wallpaper (no window,
-  no shadow) while the rest was drawn; a desktop unit test of a dragged
-  frameless window composes correctly. Either the screendump caught the
-  redraw midway (the check passes once the box is in place) or a damage
-  rectangle is dropped; to settle with a second screendump a few seconds
-  later in the step. Item W (desktop).
-
 - **console_window step 5 under load**: about 1 run in 20 of the full
   suite, the wheel scrolls conhost back 15 lines instead of 18 (the
   screenshot shows `history[1]` on top): one of six notches is missing.
@@ -1486,8 +1554,7 @@ Each entry: what, why it matters, the structural fix, the owning item.
   kernel's input path, the window's message delivery) is open; the
   `input:` line at exit now counts the notches the kernel received, so
   the next failure says. Item W3.
-- **Fault-injection leftovers**: a failed push in `notify::complete`
-  loses a completion packet; out-of-memory reported as
+- **Fault-injection leftovers**: out-of-memory reported as
   STATUS_DLL_NOT_FOUND / STATUS_INVALID_IMAGE_FORMAT. Item R2.
 - **Seen once, unexplained**: sshd_password's sshd.exe ended with an
   unhandled access violation at 0xffffd0000013f948 (a kernel-half

@@ -287,6 +287,17 @@ syscall_stubs! {
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, client_id: *const [usize; 2]
     );
     NtResumeProcess = 0x7f92, fn(process: usize);
+    // Window stations and desktops (gala's own; nt::winsta), for user32.
+    GalaUserObjectOpen = 0x7fa0, fn(
+        kind: u32, name: *const u16, length: u32, access: u32, inherit: u32, handle: *mut usize
+    );
+    GalaUserObjectConnection = 0x7fa1, fn(what: u32, tid: u32, handle: *mut usize);
+    GalaUserObjectSet = 0x7fa2, fn(what: u32, handle: usize);
+    GalaUserObjectClose = 0x7fa3, fn(kind: u32, handle: usize);
+    GalaUserObjectInformation = 0x7fa4, fn(
+        handle: usize, index: u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
+    GalaUserObjectEnum = 0x7fa5, fn(handle: usize, buffer: *mut u8, length: u32, needed: *mut u32);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
@@ -303,6 +314,7 @@ syscall_stubs! {
     GalaWindowSurface = 0x7f52, fn(hwnd: u64, section: u64, offset: u64, width: u32, height: u32);
     GalaWindowSurfaceOpen = 0x7f53, fn(hwnd: u64, section: *mut u64, info: *mut u8);
     GalaWindowDrag = 0x7f54, fn(id: u32);
+    GalaWindowResize = 0x7f55, fn(id: u32, edges: u32);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).
     GalaWindowFilter = 0x7f6a, fn(hwnd: u64, message: u32, action: u32, ext_status: *mut u32);
     // WinEvents across processes (SetWinEventHook, NotifyWinEvent).
@@ -1802,6 +1814,9 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
     (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME
     (0xc000_003a, 3),    // OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND
+    (0xc000_003b, 161),  // OBJECT_PATH_SYNTAX_BAD -> ERROR_BAD_PATHNAME
+    (0x8000_0011, 170),  // DEVICE_BUSY -> ERROR_BUSY
+    (0xc000_0235, 6),    // HANDLE_NOT_CLOSABLE -> ERROR_INVALID_HANDLE
     (0xc000_0043, 32),   // SHARING_VIOLATION
     (0xc000_0045, 87),   // INVALID_PAGE_PROTECTION -> ERROR_INVALID_PARAMETER
     (0xc000_0046, 288),  // MUTANT_NOT_OWNED -> ERROR_NOT_OWNER
@@ -2058,6 +2073,82 @@ pub extern "system" fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) 
         }
     }
     mask
+}
+
+/// RtlVerifyVersionInfo(*VersionInfo, TypeMask, ConditionMask): compares
+/// the requested OSVERSIONINFOEXW fields with the version RtlGetVersion
+/// gives, the real one whatever the program's manifest (kernel32's
+/// VerifyVersionInfoW compares with the version its manifest gets
+/// instead; curl asks this one). Major, minor and service pack are
+/// compared as one version when several are given, as documented; build
+/// and platform each on their own. STATUS_REVISION_MISMATCH when they do
+/// not match; STATUS_INVALID_PARAMETER for an empty TypeMask. The suite
+/// and product type are not compared (recorded).
+///
+/// # Safety
+/// `info` must point to an OSVERSIONINFOEXW (284 bytes).
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlVerifyVersionInfo(info: *const u32, kind: u32, mask: u64) -> u32 {
+    const STATUS_REVISION_MISMATCH: u32 = 0xc000_0059;
+    if info.is_null() || kind == 0 || mask == 0 {
+        return 0xc000_000d; // STATUS_INVALID_PARAMETER
+    }
+    if kind & (0x40 | 0x80) != 0 {
+        let what = b"ntdll.dll!RtlVerifyVersionInfo(suite or product type)";
+        GalaRecordMissing(what.as_ptr(), what.len(), 2, kind.into());
+    }
+    let mut system = [0u32; 71];
+    system[0] = 284;
+    // SAFETY: an OSVERSIONINFOEXW of the size it says; the caller's
+    // OSVERSIONINFOEXW: major +4, minor +8, build +12, platform +16, service
+    // pack major and minor at +276/+278 (WORDs).
+    let (wanted, have) = unsafe {
+        RtlGetVersion(system.as_mut_ptr());
+        let fields = |v: *const u32| {
+            let b = v.cast::<u8>();
+            [
+                *v.add(2),                                            // VER_MINORVERSION 0x1
+                *v.add(1),                                            // VER_MAJORVERSION 0x2
+                *v.add(3),                                            // VER_BUILDNUMBER 0x4
+                *v.add(4),                                            // VER_PLATFORMID 0x8
+                u32::from(b.add(278).cast::<u16>().read_unaligned()), // VER_SERVICEPACKMINOR 0x10
+                u32::from(b.add(276).cast::<u16>().read_unaligned()), // VER_SERVICEPACKMAJOR 0x20
+            ]
+        };
+        (fields(info), fields(system.as_ptr()))
+    };
+    let condition = |bit: u32| (mask >> (3 * bit.trailing_zeros())) & 7;
+    let compare = |cond: u64, system: u64, wanted: u64| match cond {
+        1 => system == wanted, // VER_EQUAL
+        2 => system > wanted,  // VER_GREATER
+        3 => system >= wanted, // VER_GREATER_EQUAL
+        4 => system < wanted,  // VER_LESS
+        5 => system <= wanted, // VER_LESS_EQUAL
+        _ => false,
+    };
+    // Major/minor/service pack as one number, with the condition of the
+    // most significant one given.
+    let version_bits = kind & (0x1 | 0x2 | 0x10 | 0x20);
+    if version_bits != 0 {
+        let lead =
+            [0x2, 0x1, 0x20, 0x10].into_iter().find(|&b| version_bits & b != 0).unwrap_or(0x2);
+        let pack = |f: &[u32; 6]| {
+            let get = |bit: u32| {
+                if kind & bit != 0 { u64::from(f[bit.trailing_zeros() as usize]) } else { 0 }
+            };
+            (get(0x2) << 48) | (get(0x1) << 32) | (get(0x20) << 16) | get(0x10)
+        };
+        if !compare(condition(lead), pack(&have), pack(&wanted)) {
+            return STATUS_REVISION_MISMATCH;
+        }
+    }
+    for bit in [0x4u32, 0x8] {
+        let i = bit.trailing_zeros() as usize;
+        if kind & bit != 0 && !compare(condition(bit), have[i].into(), wanted[i].into()) {
+            return STATUS_REVISION_MISMATCH;
+        }
+    }
+    STATUS_SUCCESS
 }
 
 /// NtTerminateProcess on the pinned build (to be verified).

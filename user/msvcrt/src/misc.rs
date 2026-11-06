@@ -329,7 +329,6 @@ pub extern "C" fn ___mb_cur_max_func() -> i32 {
 #[unsafe(no_mangle)]
 pub static __mb_cur_max: i32 = 1;
 
-/// strerror: the CRT's texts for the common errno values.
 /// perror(s): "s: <strerror(errno)>" on stderr (just the message if `s`
 /// is NULL or empty).
 #[unsafe(no_mangle)]
@@ -345,24 +344,136 @@ pub extern "C" fn perror(s: *const u8) {
     crate::stdio::write_stderr(b"\n");
 }
 
+/// msvcrt's error texts, indexed by errno: the ones Windows' msvcrt.dll
+/// prints (black-box: "Not enough space", "Resource device", "Filename
+/// too long", ...; msvcrt_test checks them against strerror, and they
+/// are to be confirmed on Windows by its run there); numbers without an
+/// errno are "Unknown error". (Wine's msvcrt has the same table with
+/// glibc's texts.)
+const ERROR_TEXTS: [&[u8]; 44] = [
+    b"No error\0",
+    b"Operation not permitted\0",
+    b"No such file or directory\0",
+    b"No such process\0",
+    b"Interrupted function call\0",
+    b"Input/output error\0",
+    b"No such device or address\0",
+    b"Arg list too long\0",
+    b"Exec format error\0",
+    b"Bad file descriptor\0",
+    b"No child processes\0",
+    b"Resource temporarily unavailable\0",
+    b"Not enough space\0",
+    b"Permission denied\0",
+    b"Bad address\0",
+    b"Unknown error\0",
+    b"Resource device\0",
+    b"File exists\0",
+    b"Improper link\0",
+    b"No such device\0",
+    b"Not a directory\0",
+    b"Is a directory\0",
+    b"Invalid argument\0",
+    b"Too many open files in system\0",
+    b"Too many open files\0",
+    b"Inappropriate I/O control operation\0",
+    b"Unknown error\0",
+    b"File too large\0",
+    b"No space left on device\0",
+    b"Invalid seek\0",
+    b"Read-only file system\0",
+    b"Too many links\0",
+    b"Broken pipe\0",
+    b"Domain error\0",
+    b"Result too large\0",
+    b"Unknown error\0",
+    b"Resource deadlock avoided\0",
+    b"Unknown error\0",
+    b"Filename too long\0",
+    b"No locks available\0",
+    b"Function not implemented\0",
+    b"Directory not empty\0",
+    b"Illegal byte sequence\0",
+    b"Unknown error\0",
+];
+
+/// The table of `char *` msvcrt exports as data (pointers into
+/// ERROR_TEXTS, which never change).
+#[repr(transparent)]
+pub struct ErrorList([*const u8; 44]);
+
+// SAFETY: read-only pointers to static text.
+unsafe impl Sync for ErrorList {}
+
+/// _sys_errlist: the error texts (the last one for numbers past the
+/// list, which strerror uses too).
+#[unsafe(no_mangle)]
+pub static _sys_errlist: ErrorList = {
+    let mut list = [core::ptr::null(); 44];
+    let mut i = 0;
+    while i < 44 {
+        list[i] = ERROR_TEXTS[i].as_ptr();
+        i += 1;
+    }
+    ErrorList(list)
+};
+
+/// _sys_nerr: the number of errno texts (the "Unknown error" after them
+/// not counted).
+#[unsafe(no_mangle)]
+pub static _sys_nerr: i32 = 43;
+
+/// strerror: _sys_errlist's text, "Unknown error" past it.
 #[unsafe(no_mangle)]
 pub extern "C" fn strerror(e: i32) -> *const u8 {
-    let text: &[u8] = match e {
-        0 => b"No error\0",
-        1 => b"Operation not permitted\0",
-        2 => b"No such file or directory\0",
-        5 => b"Input/output error\0",
-        9 => b"Bad file descriptor\0",
-        12 => b"Not enough space\0",
-        13 => b"Permission denied\0",
-        17 => b"File exists\0",
-        22 => b"Invalid argument\0",
-        24 => b"Too many open files\0",
-        28 => b"No space left on device\0",
-        34 => b"Result too large\0",
-        _ => b"Unknown error\0",
-    };
-    text.as_ptr()
+    let i = usize::try_from(e).ok().filter(|&i| i < 43).unwrap_or(43);
+    ERROR_TEXTS[i].as_ptr()
+}
+
+/// rand_s(*randomValue): 32 random bits from the system's generator
+/// (bcryptprimitives' ProcessPrng, loaded on first use: msvcrt does not
+/// import it, so programs that never ask need not ship it); EINVAL for a
+/// null pointer. Without the generator the call is recorded and gives
+/// ENOMEM (no value).
+#[unsafe(no_mangle)]
+pub extern "C" fn rand_s(value: *mut u32) -> i32 {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static PRNG: AtomicUsize = AtomicUsize::new(0);
+    if value.is_null() {
+        return 22; // EINVAL
+    }
+    let mut f = PRNG.load(Ordering::Acquire);
+    if f == 0 {
+        let dll: [u16; 21] = {
+            let mut w = [0u16; 21];
+            for (d, &b) in w.iter_mut().zip(b"bcryptprimitives.dll") {
+                *d = b.into();
+            }
+            w
+        };
+        // SAFETY: a NUL-terminated name, then the module's export by a
+        // NUL-terminated name; the module stays loaded.
+        f = unsafe {
+            let module = LoadLibraryW(dll.as_ptr());
+            if module == 0 { 0 } else { GetProcAddress(module, c"ProcessPrng".as_ptr().cast()) }
+        };
+        if f == 0 {
+            crate::missing(b"msvcrt.dll!rand_s(no bcryptprimitives.dll!ProcessPrng)", 0);
+            return 12; // ENOMEM
+        }
+        PRNG.store(f, Ordering::Release);
+    }
+    // SAFETY: ProcessPrng(Data, Length), documented; it always succeeds.
+    let prng =
+        unsafe { core::mem::transmute::<usize, extern "system" fn(*mut u8, usize) -> i32>(f) };
+    prng(value.cast(), 4);
+    0
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn LoadLibraryW(name: *const u16) -> usize;
+    fn GetProcAddress(module: usize, name: *const u8) -> usize;
 }
 
 /// raise(sig): no signal handlers run on gala; SIGABRT (22) and the rest

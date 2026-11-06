@@ -231,6 +231,92 @@ impl<T> TryVec<T> for alloc::vec::Vec<T> {
     }
 }
 
+/// A list with room kept for pushes promised in advance: a slot reserved
+/// (`reserve_slot`, fallible) is later filled by `push_reserved`, which
+/// does not allocate, or given back (`release_slot`). Ordinary pushes
+/// never use the reserved room. For what must not fail when it happens:
+/// an I/O's completion packet and completion-routine APC, which Windows
+/// allocates with the request (the IRP), so reporting a completion never
+/// needs memory. Invariant: capacity >= len + reserved.
+pub struct ReservedVec<T> {
+    items: alloc::vec::Vec<T>,
+    reserved: usize,
+}
+
+impl<T> Default for ReservedVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> ReservedVec<T> {
+    pub const fn new() -> Self {
+        ReservedVec { items: alloc::vec::Vec::new(), reserved: 0 }
+    }
+
+    /// A list of `items` with nothing reserved.
+    pub fn from_vec(items: alloc::vec::Vec<T>) -> Self {
+        ReservedVec { items, reserved: 0 }
+    }
+
+    /// Promises one later `push_reserved`.
+    pub fn reserve_slot(&mut self) -> Result<(), AllocError> {
+        self.items.try_reserve(self.reserved + 1).map_err(|_| AllocError)?;
+        self.reserved += 1;
+        Ok(())
+    }
+
+    /// Gives back a slot that will not be used.
+    pub fn release_slot(&mut self) {
+        debug_assert!(self.reserved > 0, "no reserved slot to release");
+        self.reserved = self.reserved.saturating_sub(1);
+    }
+
+    /// Fills a reserved slot (no allocation). Without one (a bug, caught in
+    /// debug builds) it is an ordinary push, which may fail.
+    #[allow(clippy::disallowed_methods)] // the capacity was reserved
+    pub fn push_reserved(&mut self, value: T) -> Result<(), AllocError> {
+        debug_assert!(self.reserved > 0, "no reserved slot");
+        if self.reserved == 0 {
+            return self.try_push(value);
+        }
+        self.reserved -= 1;
+        self.items.push(value);
+        Ok(())
+    }
+
+    /// An ordinary push, which leaves the reserved room free.
+    #[allow(clippy::disallowed_methods)] // the capacity was reserved
+    pub fn try_push(&mut self, value: T) -> Result<(), AllocError> {
+        self.items.try_reserve(self.reserved + 1).map_err(|_| AllocError)?;
+        self.items.push(value);
+        Ok(())
+    }
+
+    pub fn reserved(&self) -> usize {
+        self.reserved
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.items.capacity()
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        self.items.remove(index)
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+}
+
+impl<T> core::ops::Deref for ReservedVec<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.items
+    }
+}
+
 /// The kernel's page source: frames from the frame allocator, accessed via
 /// the HHDM; several-page allocations from single frames mapped into the
 /// mapped-allocation window (`mm::vmap`).
@@ -607,5 +693,49 @@ mod karc_tests {
         }
         assert_eq!(a.load(Ordering::SeqCst), 4);
         assert_eq!(KArc::strong_count(&a), 1);
+    }
+}
+
+#[cfg(test)]
+mod reserved_vec_tests {
+    use super::ReservedVec;
+
+    /// The invariant that makes a reserved push infallible.
+    fn holds<T>(v: &ReservedVec<T>) -> bool {
+        v.capacity() >= v.len() + v.reserved()
+    }
+
+    #[test]
+    fn reserved_slots_stay_free_for_their_owners() {
+        let mut v = ReservedVec::new();
+        v.reserve_slot().unwrap();
+        v.reserve_slot().unwrap();
+        assert_eq!(v.reserved(), 2);
+        assert!(holds(&v));
+        // Ordinary pushes keep the reserved room free.
+        for i in 0..10 {
+            v.try_push(i).unwrap();
+            assert!(holds(&v));
+        }
+        // A reserved push takes its slot without allocating.
+        let capacity = v.capacity();
+        v.push_reserved(100).unwrap();
+        v.push_reserved(101).unwrap();
+        assert_eq!((v.capacity(), v.reserved(), v.len()), (capacity, 0, 12));
+        assert_eq!(v.remove(0), 0);
+        // A slot given back without being used.
+        v.reserve_slot().unwrap();
+        v.release_slot();
+        assert_eq!(v.reserved(), 0);
+        v.clear();
+        assert!(v.is_empty() && holds(&v));
+        assert_eq!(v.iter().count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "no reserved slot")]
+    fn a_reserved_push_without_a_slot_is_a_bug() {
+        let mut v = ReservedVec::new();
+        let _ = v.push_reserved(1);
     }
 }

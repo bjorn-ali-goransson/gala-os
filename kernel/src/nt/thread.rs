@@ -49,7 +49,9 @@ pub struct NtThread {
     /// ThreadAffinityMask: the CPUs it may run on.
     affinity: core::sync::atomic::AtomicU64,
     /// Queued user APCs (FIFO), run at alertable waits.
-    apcs: IrqMutex<Vec<UserApc>>,
+    /// Queued user APCs; room is kept for the completion routines of I/O
+    /// requests in progress (`notify::Reserved`).
+    apcs: IrqMutex<crate::mm::heap::ReservedVec<UserApc>>,
     /// Set while the thread is in an alertable wait (an APC wakes it).
     alertable: core::sync::atomic::AtomicBool,
     /// Mutants it owns (abandoned if it exits).
@@ -67,9 +69,12 @@ pub struct NtThread {
     /// same on every platform and every run of a program, unlike thread
     /// ids (record/replay's streams).
     pub ordinal: u32,
-    /// A thread a kernel handover carried over: how it goes on when it
-    /// starts (instead of `start`).
+    /// A thread a kernel handover carried over, or a Linux fork's child:
+    /// how it goes on when it starts (instead of `start`).
     resume: IrqMutex<Option<Resume>>,
+    /// The user FS and GS bases it starts with (a Linux fork's child
+    /// keeps its parent's); None: 0, or the TEB's for an NT thread.
+    start_bases: Option<(u64, u64)>,
     /// While a kernel handover holds it on its way back to user mode
     /// (`hold_for_handover`): its full user state.
     held: IrqMutex<Option<Parked>>,
@@ -295,6 +300,31 @@ pub fn create(
     stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
+    create_inner(process, regs, win32_start, mxcsr, stack, suspended, None)
+}
+
+/// Creates the thread of a Linux fork's child (`lx::fork`): it goes
+/// on in user mode with exactly `regs`, the x87/SSE state `fx` and the
+/// FS and GS bases `bases` (its parent's, at the fork).
+pub fn create_forked(
+    process: &KArc<Process>,
+    regs: UserRegs,
+    fx: platform::XState,
+    bases: (u64, u64),
+) -> Result<ObjectRef, NtStatus> {
+    let resume = Some((Resume::User { regs, fx }, bases));
+    create_inner(process, regs, regs.rip, None, (0, 0, 0), false, resume)
+}
+
+fn create_inner(
+    process: &KArc<Process>,
+    regs: UserRegs,
+    win32_start: u64,
+    mxcsr: Option<u32>,
+    stack: (u64, u64, u64),
+    suspended: bool,
+    resume: Option<(Resume, (u64, u64))>,
+) -> Result<ObjectRef, NtStatus> {
     if !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
@@ -322,14 +352,15 @@ pub fn create(
         create_time: platform::system_time(),
         exit_time: IrqMutex::named("thread.exit_time", 0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
-        apcs: IrqMutex::new(Vec::new()),
+        apcs: IrqMutex::new(crate::mm::heap::ReservedVec::new()),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
         in_syscall: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
         ordinal: process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
-        resume: IrqMutex::new(None),
+        start_bases: resume.as_ref().map(|r| r.1),
+        resume: IrqMutex::new(resume.map(|r| r.0)),
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
@@ -411,6 +442,9 @@ fn thread_entry(id: usize) {
     bind_sched(platform::current(), &object);
     t.apply_affinity();
     let resume = t.resume.lock().take();
+    if let Some((fs, gs)) = t.start_bases {
+        platform::set_user_bases(Some(fs), Some(gs));
+    }
     let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
     match resume {
         Some(Resume::Syscall { number, regs, fx, deadline }) => {
@@ -517,13 +551,43 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
 /// Queues a user APC to thread `object`, waking it if it is in an
 /// alertable wait (NtQueueApcThread).
 pub fn queue_user_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> {
+    queue_apc(object, apc, false)
+}
+
+/// Keeps room in `object`'s APC queue for the completion routine of an
+/// I/O request in progress (`notify::Reserved`).
+pub fn reserve_apc(object: &ObjectRef) -> Result<(), NtStatus> {
+    let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    t.apcs.lock().reserve_slot().map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)
+}
+
+/// Gives back a slot `reserve_apc` kept.
+pub fn release_apc(object: &ObjectRef) {
+    if let ObjectBody::Thread(t) = &object.body {
+        t.apcs.lock().release_slot();
+    }
+}
+
+/// Queues an I/O request's completion routine into the slot reserved for
+/// it (no allocation); the slot is used up either way.
+pub fn queue_reserved_apc(object: &ObjectRef, apc: UserApc) -> Result<(), NtStatus> {
+    queue_apc(object, apc, true)
+}
+
+fn queue_apc(object: &ObjectRef, apc: UserApc, reserved: bool) -> Result<(), NtStatus> {
     let ObjectBody::Thread(t) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     wait::with_dispatcher_lock(|| {
         // Under the lock the thread's exit marks it under (`exit_current`).
         if t.has_exited() {
+            if reserved {
+                t.apcs.lock().release_slot();
+            }
             return Err(NtStatus::UNSUCCESSFUL);
         }
-        t.apcs.lock().try_push(apc).map_err(|_| NtStatus::NO_MEMORY)?;
+        let mut apcs = t.apcs.lock();
+        let pushed = if reserved { apcs.push_reserved(apc) } else { apcs.try_push(apc) };
+        drop(apcs);
+        pushed.map_err(|_| NtStatus::NO_MEMORY)?;
         if t.alertable.load(Ordering::SeqCst)
             && let Some(tid) = *t.sched_id.lock()
         {
@@ -869,7 +933,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         create_time: a.create_time,
         exit_time: IrqMutex::named("thread.exit_time", a.exited.map_or(0, |e| e.1)),
         priority: IrqMutex::new(a.priority),
-        apcs: IrqMutex::new(a.apcs),
+        apcs: IrqMutex::new(crate::mm::heap::ReservedVec::from_vec(a.apcs)),
         alertable: core::sync::atomic::AtomicBool::new(false),
         owned_mutants: IrqMutex::new(Vec::new()),
         parked: IrqMutex::new(None),
@@ -877,6 +941,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         impersonation: IrqMutex::new(None),
         ordinal: a.ordinal,
         resume: IrqMutex::new(a.resume),
+        start_bases: None,
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
@@ -1105,6 +1170,8 @@ pub fn exit_current(status: NtStatus) -> ! {
         // never got there), and messages sent to it fail.
         t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
         t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
+        // A desktop handle it was set to (SetThreadDesktop) may be closed.
+        t.process.ui.thread_ended(t.id);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         if let Some(id) = *t.sched_id.lock() {
             unbind_sched(id, &object);

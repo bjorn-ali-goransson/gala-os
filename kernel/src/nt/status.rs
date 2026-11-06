@@ -63,6 +63,8 @@ impl NtStatus {
     pub const GUARD_PAGE_VIOLATION: NtStatus = NtStatus(0x8000_0001);
     pub const BUFFER_OVERFLOW: NtStatus = NtStatus(0x8000_0005);
     pub const NO_MORE_FILES: NtStatus = NtStatus(0x8000_0006);
+    pub const DEVICE_BUSY: NtStatus = NtStatus(0x8000_0011);
+    pub const HANDLE_NOT_CLOSABLE: NtStatus = NtStatus(0xc000_0235);
     pub const NO_SUCH_FILE: NtStatus = NtStatus(0xc000_000f);
     pub const FILE_DELETED: NtStatus = NtStatus(0xc000_0123);
     pub const INVALID_ADDRESS: NtStatus = NtStatus(0xc000_0141);

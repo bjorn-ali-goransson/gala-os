@@ -1,5 +1,6 @@
-//! The LDAP client functions PostgreSQL imports (its LDAP authentication
-//! and libpq's ldap:// service lookups), none implemented yet
+//! The LDAP client functions PostgreSQL (its LDAP authentication and
+//! libpq's ldap:// service lookups) and curl (ldap:// URLs) import, none
+//! implemented yet
 //! (`gala_stubs`): calling one reports `dll!function` to the ledger and
 //! ends the process.
 
@@ -23,4 +24,10 @@ gala_stubs::unimplemented_exports!("wldap32.dll":
     ldap_set_option
     ldap_sslinit
     ldap_start_tls_sA
+    ber_free
+    ldap_bind_s
+    ldap_first_attribute
+    ldap_next_attribute
+    ldap_next_entry
+    ldap_unbind_s
 );

@@ -5,7 +5,8 @@
 //! a row by index (ERROR_FILE_NOT_FOUND for an unknown one,
 //! ERROR_INVALID_PARAMETER with neither LUID nor index); interface names
 //! are `<type>_<NetLuidIndex>` (`loopback_0`) and convert back to the
-//! LUID; tables come from the heap and go back with FreeMibTable.
+//! LUID, also through if_nametoindex / if_indextoname (0 and NULL for
+//! unknown ones); tables come from the heap and go back with FreeMibTable.
 //!
 //! Prints `iphlpapi_test: ok` or exits with the number of the failing
 //! check.
@@ -36,6 +37,8 @@ unsafe extern "system" {
     fn FreeMibTable(table: *mut u8);
     fn ConvertInterfaceLuidToNameW(luid: *const u64, name: *mut u16, length: usize) -> u32;
     fn ConvertInterfaceNameToLuidW(name: *const u16, luid: *mut u64) -> u32;
+    fn if_nametoindex(name: *const u8) -> u32;
+    fn if_indextoname(index: u32, name: *mut u8) -> *mut u8;
 }
 
 #[allow(dead_code)]
@@ -171,6 +174,13 @@ fn run() -> Result<(), u32> {
         let mut back = 0u64;
         c.eq(ConvertInterfaceNameToLuidW(name.as_ptr(), &mut back).into(), 0)?;
         c.eq(back, luid)?;
+        // The same names through if_nametoindex / if_indextoname.
+        c.eq(if_nametoindex(c"loopback_0".as_ptr().cast()).into(), 1)?;
+        c.eq(if_nametoindex(c"nosuch_0".as_ptr().cast()).into(), 0)?;
+        let mut short = [0xffu8; 256]; // IF_NAMESIZE
+        c.ok(if_indextoname(1, short.as_mut_ptr()) == short.as_mut_ptr(), 0)?;
+        c.ok(&short[..11] == want, short[0].into())?;
+        c.ok(if_indextoname(9999, short.as_mut_ptr()).is_null(), 0)?;
 
         // 127.0.0.1/8 on the loopback interface (SOCKADDR_IN: family,
         // port, address).

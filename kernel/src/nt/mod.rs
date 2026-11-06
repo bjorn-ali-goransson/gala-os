@@ -49,6 +49,7 @@ pub mod vm;
 pub mod wait;
 pub mod window;
 pub mod winevent;
+pub mod winsta;
 
 /// Installs the syscall entry and user exception handling.
 pub fn init() {

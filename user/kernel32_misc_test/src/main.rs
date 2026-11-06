@@ -9,7 +9,8 @@
 //! RtlPcToFileHeader, and RtlLookupFunctionEntry
 //! (the unwind entry of a function in this image), FormatMessageW's
 //! allocated buffers, strings with inserts and IGNORE_INSERTS, and its
-//! system messages (English text with a CRLF; ERROR_MR_MID_NOT_FOUND for
+//! system messages (English text with a CRLF, an SSPI status's too;
+//! ERROR_MR_MID_NOT_FOUND for
 //! a number without one; ERROR_INSUFFICIENT_BUFFER); heaps (GetProcessHeap
 //! is the PEB's ProcessHeap; HeapAlloc with HEAP_ZERO_MEMORY, HeapSize as
 //! asked, HeapReAlloc keeping the contents and zeroing the growth,
@@ -134,6 +135,8 @@ unsafe extern "system" {
     fn CreateToolhelp32Snapshot(flags: u32, process: u32) -> Handle;
     fn Module32FirstW(snapshot: Handle, entry: *mut ModuleEntry) -> Bool;
     fn Module32NextW(snapshot: Handle, entry: *mut ModuleEntry) -> Bool;
+    fn Module32First(snapshot: Handle, entry: *mut ModuleEntryA) -> Bool;
+    fn Module32Next(snapshot: Handle, entry: *mut ModuleEntryA) -> Bool;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -573,6 +576,19 @@ fn run() -> Result<(), u32> {
         let refused =
             b"No connection could be made because the target machine actively refused it.\r\n";
         c.ok(expect(refused, &buf[..n as usize]), n.into())?;
+        // An SSPI status (SEC_E_UNTRUSTED_ROOT), as curl shows it.
+        let n = FormatMessageW(
+            FROM_SYSTEM_IGNORE_INSERTS,
+            core::ptr::null(),
+            0x8009_0325,
+            0,
+            buf.as_mut_ptr(),
+            256,
+            core::ptr::null_mut(),
+        );
+        let untrusted =
+            b"The certificate chain was issued by an authority that is not trusted.\r\n";
+        c.ok(expect(untrusted, &buf[..n as usize]), n.into())?;
         // A number with no message.
         let n = FormatMessageW(
             FROM_SYSTEM_IGNORE_INSERTS,
@@ -662,9 +678,25 @@ struct ModuleEntry {
     path: [u16; 260],
 }
 
+/// MODULEENTRY32 (568 bytes on x64).
+#[repr(C)]
+struct ModuleEntryA {
+    size: u32,
+    module_id: u32,
+    process_id: u32,
+    global_usage: u32,
+    process_usage: u32,
+    base: usize,
+    base_size: u32,
+    module: usize,
+    name: [u8; 256],
+    path: [u8; 260],
+}
+
 /// A Toolhelp module snapshot of this process: the executable first, with
 /// its base, size and names; kernel32.dll among the rest; then
-/// ERROR_NO_MORE_FILES. A too-small dwSize is ERROR_BAD_LENGTH.
+/// ERROR_NO_MORE_FILES. A too-small dwSize is ERROR_BAD_LENGTH. The ANSI
+/// Module32First/Next walk the same modules (curl imports them).
 fn modules(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: Toolhelp calls with an entry of ours.
     unsafe {
@@ -693,6 +725,24 @@ fn modules(c: &mut Checks) -> Result<(), u32> {
         }
         c.eq(GetLastError().into(), 18)?; // ERROR_NO_MORE_FILES
         c.ok(seen && n >= 3, n)?;
+        // The same snapshot through the ANSI functions.
+        c.eq(size_of::<ModuleEntryA>() as u64, 568)?;
+        let mut a: ModuleEntryA = core::mem::zeroed();
+        a.size = 8;
+        c.eq(Module32First(snapshot, &mut a) as u64, 0)?;
+        c.eq(GetLastError().into(), 24)?; // ERROR_BAD_LENGTH
+        a.size = 568;
+        c.ok(Module32First(snapshot, &mut a) != 0, GetLastError().into())?;
+        c.eq(a.module as u64, me)?;
+        c.eq(a.base as u64, me)?;
+        c.ok(&a.name[..23] == b"kernel32_misc_test.exe\0", a.name[0].into())?;
+        c.ok(a.path[0] == b'C' && a.path[2] == b'\\', a.path[0].into())?;
+        let mut m = 1;
+        while Module32Next(snapshot, &mut a) != 0 {
+            m += 1;
+        }
+        c.eq(GetLastError().into(), 18)?; // ERROR_NO_MORE_FILES
+        c.eq(m, n)?;
         c.ok(CloseHandle(snapshot) != 0, 0)?;
 
         // SetThreadExecutionState: the previous state (ES_CONTINUOUS keeps

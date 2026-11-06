@@ -3,10 +3,12 @@
 //! "Query Info Flags", "Option Flags", "Error Messages"): sessions,
 //! connections and requests (heap objects behind validated handles),
 //! WinHttpCrackUrl, and HTTP/1.1 over TCP (ws2_32) or TLS (SSPI's
-//! Schannel through secur32, `net.rs`): requests with added headers and a
-//! body, the response's status line and headers (WinHttpQueryHeaders),
-//! and the body by Content-Length, chunked transfer coding or until the
-//! server closes (`request.rs`).
+//! Schannel through secur32): requests with added headers and a body,
+//! the response's status line and headers (WinHttpQueryHeaders), and the
+//! body by Content-Length, chunked transfer coding or until the server
+//! closes. The engine is `user/http_client`, shared with wininet.dll;
+//! this crate is WinHTTP's functions, options and error codes over it
+//! (`request.rs`: the request's functions).
 //!
 //! Limits (each recorded in the ledger where a program meets it):
 //! asynchronous sessions (WINHTTP_FLAG_ASYNC: ERROR_NOT_SUPPORTED),
@@ -26,13 +28,14 @@
 extern crate alloc;
 use gala_heap as _;
 
-mod net;
 mod request;
 mod unimplemented;
-mod url;
 
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
+use http_client::handles::Handles;
+use http_client::request::{Open, Request};
+use http_client::url::UrlComponents;
+use http_client::{Settings, Timeouts, err, narrow, wide};
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -53,49 +56,28 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
-}
-
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn SetLastError(e: u32);
-    fn ExitProcess(code: u32) -> !;
-    fn AcquireSRWLockExclusive(lock: *mut usize);
-    fn ReleaseSRWLockExclusive(lock: *mut usize);
 }
 
-pub const ERROR_FILE_NOT_FOUND: u32 = 2;
-pub const ERROR_INVALID_HANDLE: u32 = 6;
-pub const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
-pub const ERROR_NOT_SUPPORTED: u32 = 50;
-pub const ERROR_INVALID_PARAMETER: u32 = 87;
-pub const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
-pub const ERROR_WINHTTP_TIMEOUT: u32 = 12002;
-pub const ERROR_WINHTTP_INVALID_URL: u32 = 12005;
-pub const ERROR_WINHTTP_UNRECOGNIZED_SCHEME: u32 = 12006;
-pub const ERROR_WINHTTP_NAME_NOT_RESOLVED: u32 = 12007;
-pub const ERROR_WINHTTP_INVALID_OPTION: u32 = 12009;
-pub const ERROR_WINHTTP_INCORRECT_HANDLE_TYPE: u32 = 12018;
-pub const ERROR_WINHTTP_INCORRECT_HANDLE_STATE: u32 = 12019;
-pub const ERROR_WINHTTP_CANNOT_CONNECT: u32 = 12029;
-pub const ERROR_WINHTTP_CONNECTION_ERROR: u32 = 12030;
-pub const ERROR_WINHTTP_HEADER_NOT_FOUND: u32 = 12150;
-pub const ERROR_WINHTTP_INVALID_SERVER_RESPONSE: u32 = 12152;
-pub const ERROR_WINHTTP_INVALID_HEADER: u32 = 12153;
-pub const ERROR_WINHTTP_INVALID_QUERY_REQUEST: u32 = 12154;
-pub const ERROR_WINHTTP_HEADER_ALREADY_EXISTS: u32 = 12155;
-pub const ERROR_WINHTTP_SECURE_CHANNEL_ERROR: u32 = 12157;
-pub const ERROR_WINHTTP_SECURE_FAILURE: u32 = 12175;
-pub const ERROR_WINHTTP_HEADER_SIZE_OVERFLOW: u32 = 12181;
+/// This DLL, in ledger records.
+const DLL: http_client::Dll = "winhttp.dll";
+
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_NOT_SUPPORTED: u32 = err::NOT_SUPPORTED;
+const ERROR_INVALID_PARAMETER: u32 = err::INVALID_PARAMETER;
+const ERROR_INSUFFICIENT_BUFFER: u32 = err::INSUFFICIENT_BUFFER;
+const ERROR_WINHTTP_INVALID_OPTION: u32 = err::INVALID_OPTION;
+const ERROR_WINHTTP_INCORRECT_HANDLE_TYPE: u32 = err::INCORRECT_HANDLE_TYPE;
+const ERROR_WINHTTP_SECURE_FAILURE: u32 = 12175;
 
 const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: u32 = 0;
 const WINHTTP_ACCESS_TYPE_NO_PROXY: u32 = 1;
 const WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: u32 = 4;
 const WINHTTP_FLAG_ASYNC: u32 = 0x1000_0000;
-pub const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
-pub const WINHTTP_FLAG_ESCAPE_DISABLE: u32 = 0x40;
+const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
+const WINHTTP_FLAG_ESCAPE_DISABLE: u32 = 0x40;
 
 const WINHTTP_OPTION_RESOLVE_TIMEOUT: u32 = 2;
 const WINHTTP_OPTION_CONNECT_TIMEOUT: u32 = 3;
@@ -117,28 +99,26 @@ const HANDLE_TYPE_REQUEST: u32 = 3;
 
 /// WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 and _TLS1_3 (the same bits as
 /// SP_PROT_TLS1_2_CLIENT and SP_PROT_TLS1_3_CLIENT).
-pub const PROTOCOLS_SUPPORTED: u32 = 0x800 | 0x2000;
+const PROTOCOLS_SUPPORTED: u32 = 0x800 | 0x2000;
 
 /// Records a gap (`winhttp.dll!...`, "unsupported") in the ledger.
-pub fn missing(name: &[u8], detail: u64) {
-    // SAFETY: a valid buffer.
-    unsafe { GalaRecordMissing(name.as_ptr(), name.len(), 2, detail) };
+fn missing(what: &[u8], detail: u64) {
+    http_client::missing(DLL, what, detail);
 }
 
-/// Records why a call failed (`winhttp.dll!<step>`, kind "other", the
-/// Winsock or SSPI status as detail): what a failed request leaves behind.
-pub fn failed(name: &[u8], detail: u64) {
-    // SAFETY: a valid buffer.
-    unsafe { GalaRecordMissing(name.as_ptr(), name.len(), 5, detail) };
+/// The engine's error as WinHTTP's code: every certificate failure is
+/// ERROR_WINHTTP_SECURE_FAILURE (as the error list documents it).
+fn code(e: u32) -> u32 {
+    if http_client::is_certificate(e) { ERROR_WINHTTP_SECURE_FAILURE } else { e }
 }
 
-pub fn set_error(e: u32) {
+fn set_error(e: u32) {
     // SAFETY: a plain call.
-    unsafe { SetLastError(e) };
+    unsafe { SetLastError(code(e)) };
 }
 
 /// Ends an entry point: TRUE, or FALSE with the error set.
-pub fn done(r: Result<(), u32>) -> i32 {
+fn done(r: Result<(), u32>) -> i32 {
     match r {
         Ok(()) => {
             set_error(0);
@@ -151,68 +131,9 @@ pub fn done(r: Result<(), u32>) -> i32 {
     }
 }
 
-/// Fallible Vec growth (the heap's failure must not end the process).
-pub fn put<T: Copy>(v: &mut Vec<T>, items: &[T]) -> Result<(), u32> {
-    v.try_reserve(items.len()).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
-    v.extend_from_slice(items);
-    Ok(())
-}
-
-/// The caller's UTF-16 string: NUL-terminated (`len` None) or `len` units.
-pub fn wide(p: *const u16, len: Option<usize>) -> Result<Vec<u16>, u32> {
-    let mut v = Vec::new();
-    if p.is_null() {
-        return Ok(v);
-    }
-    // SAFETY: the caller's string, as documented for the parameter.
-    let n = len.unwrap_or_else(|| unsafe {
-        let mut n = 0;
-        while *p.add(n) != 0 {
-            n += 1;
-        }
-        n
-    });
-    // SAFETY: `n` units of the caller's string.
-    put(&mut v, unsafe { core::slice::from_raw_parts(p, n) })?;
-    Ok(v)
-}
-
-/// UTF-16 to bytes for the wire: Latin-1 code points as themselves (what
-/// HTTP headers carry); others become '?' (recorded).
-pub fn narrow(w: &[u16]) -> Result<Vec<u8>, u32> {
-    let mut v = Vec::new();
-    v.try_reserve(w.len()).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
-    for &c in w {
-        if c > 0xff {
-            missing(b"winhttp.dll!non-Latin-1 header text", c.into());
-        }
-        v.push(if c > 0xff { b'?' } else { c as u8 });
-    }
-    Ok(v)
-}
-
-/// Time-outs in milliseconds; -1 waits forever.
-#[derive(Clone, Copy)]
-pub struct Timeouts {
-    pub resolve: i32,
-    pub connect: i32,
-    pub send: i32,
-    pub receive: i32,
-    pub response: i32,
-}
-
 /// The documented defaults (WinHttpSetTimeouts; RECEIVE_RESPONSE_TIMEOUT).
 const DEFAULT_TIMEOUTS: Timeouts =
     Timeouts { resolve: -1, connect: 60_000, send: 30_000, receive: 30_000, response: 90_000 };
-
-/// What a session passes on to the handles made from it.
-#[derive(Clone)]
-pub struct Settings {
-    pub agent: Vec<u8>,
-    pub timeouts: Timeouts,
-    pub protocols: u32,
-    pub redirect_policy: u32,
-}
 
 pub struct Connect {
     pub settings: Settings,
@@ -226,7 +147,7 @@ pub struct Connect {
 pub enum Kind {
     Session(Settings),
     Connect(Connect),
-    Request(request::Request),
+    Request(Request),
 }
 
 /// What an HINTERNET points to.
@@ -245,73 +166,29 @@ impl Object {
     }
 }
 
-/// The live handles (the objects' addresses), for validation.
-struct Table {
-    lock: UnsafeCell<usize>,
-    live: UnsafeCell<Vec<usize>>,
-}
-
-// SAFETY: `live` is only touched with `lock` (an SRW lock) held.
-unsafe impl Sync for Table {}
-
-static TABLE: Table = Table { lock: UnsafeCell::new(0), live: UnsafeCell::new(Vec::new()) };
-
-fn with_table<R>(f: impl FnOnce(&mut Vec<usize>) -> R) -> R {
-    // SAFETY: the SRW lock serialises access to the list.
-    unsafe {
-        AcquireSRWLockExclusive(TABLE.lock.get());
-        let r = f(&mut *TABLE.live.get());
-        ReleaseSRWLockExclusive(TABLE.lock.get());
-        r
-    }
-}
+/// The live handles.
+static HANDLES: Handles<Object> = Handles::new();
 
 /// A new handle for `kind` (0 with ERROR_NOT_ENOUGH_MEMORY).
 fn new_handle(kind: Kind) -> usize {
-    let layout = core::alloc::Layout::new::<Object>();
-    // SAFETY: a non-zero-sized layout.
-    let p = unsafe { alloc::alloc::alloc(layout) }.cast::<Object>();
-    if p.is_null() {
-        set_error(ERROR_NOT_ENOUGH_MEMORY);
-        return 0;
-    }
-    // SAFETY: a fresh block for one Object.
-    unsafe { p.write(Object { kind, context: 0 }) };
-    let added = with_table(|t| {
-        if t.try_reserve(1).is_err() {
-            return false;
+    match HANDLES.insert(Object { kind, context: 0 }) {
+        Ok(h) => {
+            set_error(0);
+            h
         }
-        t.push(p as usize);
-        true
-    });
-    if !added {
-        free_object(p);
-        set_error(ERROR_NOT_ENOUGH_MEMORY);
-        return 0;
-    }
-    set_error(0);
-    p as usize
-}
-
-fn free_object(p: *mut Object) {
-    // SAFETY: a block from `new_handle`, no longer listed.
-    unsafe {
-        p.drop_in_place();
-        alloc::alloc::dealloc(p.cast(), core::alloc::Layout::new::<Object>());
+        Err(e) => {
+            set_error(e);
+            0
+        }
     }
 }
 
 /// The object behind a live handle (ERROR_INVALID_HANDLE otherwise).
-pub fn object(h: usize) -> Result<&'static mut Object, u32> {
-    if h == 0 || !with_table(|t| t.contains(&h)) {
-        return Err(ERROR_INVALID_HANDLE);
-    }
-    // SAFETY: a live handle's object (closing it is the caller's business,
-    // as on Windows: not while it is in use).
-    Ok(unsafe { &mut *(h as *mut Object) })
+fn object(h: usize) -> Result<&'static mut Object, u32> {
+    HANDLES.get(h)
 }
 
-pub fn request_of(h: usize) -> Result<&'static mut request::Request, u32> {
+fn request_of(h: usize) -> Result<&'static mut Request, u32> {
     match &mut object(h)?.kind {
         Kind::Request(r) => Ok(r),
         _ => Err(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE),
@@ -327,7 +204,7 @@ pub extern "system" fn WinHttpOpen(
     flags: u32,
 ) -> usize {
     if flags & WINHTTP_FLAG_ASYNC != 0 {
-        missing(b"winhttp.dll!WinHttpOpen(WINHTTP_FLAG_ASYNC)", flags.into());
+        missing(b"WinHttpOpen(WINHTTP_FLAG_ASYNC)", flags.into());
         set_error(ERROR_NOT_SUPPORTED);
         return 0;
     }
@@ -338,12 +215,12 @@ pub extern "system" fn WinHttpOpen(
         | WINHTTP_ACCESS_TYPE_NO_PROXY
         | WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY => {}
         _ => {
-            missing(b"winhttp.dll!WinHttpOpen(proxy)", access.into());
+            missing(b"WinHttpOpen(proxy)", access.into());
             set_error(ERROR_NOT_SUPPORTED);
             return 0;
         }
     }
-    let agent = match wide(agent, None).and_then(|a| narrow(&a)) {
+    let agent = match wide(agent, None).and_then(|a| narrow(DLL, &a)) {
         Ok(a) => a,
         Err(e) => {
             set_error(e);
@@ -351,6 +228,7 @@ pub extern "system" fn WinHttpOpen(
         }
     };
     new_handle(Kind::Session(Settings {
+        dll: DLL,
         agent,
         timeouts: DEFAULT_TIMEOUTS,
         protocols: 0,
@@ -403,7 +281,20 @@ pub extern "system" fn WinHttpOpenRequest(
             Kind::Connect(c) => c,
             _ => return Err(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE),
         };
-        request::Request::new(c, verb, object_name, version, referrer, accept_types, flags)
+        Request::new(
+            c.settings.clone(),
+            &Open {
+                host: &c.host,
+                port: c.port,
+                verb,
+                object: object_name,
+                version,
+                referrer,
+                accept: accept_types,
+                secure: flags & WINHTTP_FLAG_SECURE != 0,
+                escape: flags & WINHTTP_FLAG_ESCAPE_DISABLE == 0,
+            },
+        )
     })();
     match r {
         Ok(r) => new_handle(Kind::Request(r)),
@@ -416,21 +307,8 @@ pub extern "system" fn WinHttpOpenRequest(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn WinHttpCloseHandle(h: usize) -> i32 {
-    let removed = with_table(|t| match t.iter().position(|&x| x == h) {
-        Some(i) => {
-            t.swap_remove(i);
-            true
-        }
-        None => false,
-    });
-    if !removed || h == 0 {
-        set_error(ERROR_INVALID_HANDLE);
-        return 0;
-    }
     // Dropping a request closes its connection.
-    free_object(h as *mut Object);
-    set_error(0);
-    1
+    done(HANDLES.close(h))
 }
 
 /// A documented time-out value: -1 or 0 wait forever; below -1 is invalid.
@@ -468,10 +346,10 @@ pub extern "system" fn WinHttpSetTimeouts(
 /// apply): recorded when a caller sets one other than the default.
 fn note_unapplied(resolve: i32, connect: i32) {
     if resolve != DEFAULT_TIMEOUTS.resolve {
-        missing(b"winhttp.dll!resolve timeout", resolve as u64);
+        missing(b"resolve timeout", resolve as u64);
     }
     if connect != DEFAULT_TIMEOUTS.connect {
-        missing(b"winhttp.dll!connect timeout", connect as u64);
+        missing(b"connect timeout", connect as u64);
     }
 }
 
@@ -523,14 +401,14 @@ pub extern "system" fn WinHttpSetOption(h: usize, option: u32, buffer: *const u8
             }
             WINHTTP_OPTION_USER_AGENT => {
                 // `len` is in characters for string options.
-                let agent = narrow(&wide(buffer.cast(), Some(len as usize))?)?;
+                let agent = narrow(DLL, &wide(buffer.cast(), Some(len as usize))?)?;
                 o.settings().agent = agent;
             }
             WINHTTP_OPTION_SECURE_PROTOCOLS => {
                 let v = dword(buffer, len)?;
                 if v & PROTOCOLS_SUPPORTED == 0 {
                     // SSL 2/3, TLS 1.0/1.1 only: Schannel has TLS 1.2 and 1.3.
-                    missing(b"winhttp.dll!WINHTTP_OPTION_SECURE_PROTOCOLS", v.into());
+                    missing(b"WINHTTP_OPTION_SECURE_PROTOCOLS", v.into());
                 }
                 o.settings().protocols = v & PROTOCOLS_SUPPORTED;
             }
@@ -551,7 +429,7 @@ pub extern "system" fn WinHttpSetOption(h: usize, option: u32, buffer: *const u8
             _ => {
                 // Not applied; recorded, and accepted as the many tuning
                 // options are (the request still works without it).
-                missing(b"winhttp.dll!WinHttpSetOption", option.into());
+                missing(b"WinHttpSetOption", option.into());
             }
         }
         Ok(())
@@ -601,7 +479,7 @@ pub extern "system" fn WinHttpQueryOption(
                 return Ok(());
             }
             _ => {
-                missing(b"winhttp.dll!WinHttpQueryOption", option.into());
+                missing(b"WinHttpQueryOption", option.into());
                 return Err(ERROR_WINHTTP_INVALID_OPTION);
             }
         };
@@ -648,9 +526,20 @@ pub extern "system" fn WinHttpGetProxyForUrl(
     _options: usize,
     _info: usize,
 ) -> i32 {
-    missing(b"winhttp.dll!WinHttpGetProxyForUrl", 0);
+    missing(b"WinHttpGetProxyForUrl", 0);
     set_error(ERROR_NOT_SUPPORTED);
     0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn WinHttpCrackUrl(
+    url: *const u16,
+    length: u32,
+    flags: u32,
+    components: *mut UrlComponents,
+) -> i32 {
+    // INTERNET_SCHEME_HTTP and _HTTPS in WinHTTP's numbering.
+    done(http_client::url::crack(DLL, url, length, flags, components, [1, 2]))
 }
 
 /// DllMain (the entry point our link flags name).
@@ -660,27 +549,8 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
 }
 
 /// A panic is a bug: its location goes to the ledger, and the process
-/// ends with STATUS_STACK_BUFFER_OVERRUN (fail-fast), as schannel.dll's do.
+/// ends with STATUS_STACK_BUFFER_OVERRUN (fail-fast).
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    let mut text = [0u8; 96];
-    let mut n = 0;
-    for &b in b"winhttp.dll!panic " {
-        text[n] = b;
-        n += 1;
-    }
-    if let Some(l) = info.location() {
-        let file = l.file().as_bytes();
-        for &b in &file[file.len().saturating_sub(60)..] {
-            if n < text.len() {
-                text[n] = if b == b'\\' { b'/' } else { b };
-                n += 1;
-            }
-        }
-        failed(&text[..n], l.line().into());
-    } else {
-        failed(&text[..n], 0);
-    }
-    // SAFETY: ends the process.
-    unsafe { ExitProcess(0xc000_0409) }
+    http_client::fail_fast(DLL, info)
 }

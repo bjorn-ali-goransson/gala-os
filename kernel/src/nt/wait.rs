@@ -198,8 +198,13 @@ pub enum Timeout {
     Infinite,
     /// Return immediately if not satisfiable.
     Poll,
-    /// Absolute timer tick.
+    /// Absolute timer tick (a relative NT timeout, converted on entry).
     Tick(u64),
+    /// An absolute NT timeout: the system time (100 ns units) it ends at.
+    /// It follows changes of the system time, as Windows' absolute
+    /// timeouts do (KeWaitForSingleObject): its tick is worked out again
+    /// on every pass, and a change wakes the waiter (`system_time_changed`).
+    Until(u64),
 }
 
 impl Timeout {
@@ -207,11 +212,14 @@ impl Timeout {
     /// absolute system time, 0 = poll).
     pub fn from_nt(value: Option<i64>) -> Timeout {
         let Some(v) = value else { return Timeout::Infinite };
-        let relative_100ns = if v < 0 {
-            v.unsigned_abs()
-        } else {
-            (v as u64).saturating_sub(platform::system_time())
-        };
+        if v > 0 {
+            return if v as u64 <= platform::system_time() {
+                Timeout::Poll
+            } else {
+                Timeout::Until(v as u64)
+            };
+        }
+        let relative_100ns = v.unsigned_abs();
         if relative_100ns == 0 {
             return Timeout::Poll;
         }
@@ -223,10 +231,73 @@ impl Timeout {
     fn deadline(self) -> Option<u64> {
         match self {
             Timeout::Tick(t) => Some(t),
+            Timeout::Until(t) => {
+                Some(super::timer::due_tick(t as i64, platform::ticks(), platform::system_time()))
+            }
             Timeout::Poll => Some(0),
             Timeout::Infinite => None,
         }
     }
+
+    /// Whether a sleep that ended for `reason` ends the wait: a relative
+    /// one when its tick came, an absolute one when the system time
+    /// reached it (moved by a change, or not yet after one moved it back).
+    fn over(self, reason: WakeReason) -> bool {
+        match self {
+            Timeout::Until(t) => platform::system_time() >= t,
+            _ => reason == WakeReason::TimedOut,
+        }
+    }
+}
+
+/// Threads sleeping in an absolute wait (`Timeout::Until`), woken when the
+/// system time changes; and the changes so far, so a change between
+/// working out the deadline and sleeping is not missed.
+static UNTIL_WAITERS: IrqMutex<Vec<ThreadId>> = IrqMutex::named("wait.until", Vec::new());
+static SYSTEM_TIME_CHANGES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The system time moved on its own (clock control): absolute waits and
+/// timers look at their due times again. Returns the waiters woken.
+pub fn system_time_changed() -> usize {
+    SYSTEM_TIME_CHANGES.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    let waiters = UNTIL_WAITERS.lock();
+    for &tid in waiters.iter() {
+        platform::wake(tid);
+    }
+    let n = waiters.len();
+    drop(waiters);
+    super::timer::system_time_changed();
+    n
+}
+
+/// Sleeps until `timeout`'s deadline or a wake-up; an absolute timeout is
+/// listed for the system time's changes meanwhile (NO_MEMORY if it cannot
+/// be). Called with the dispatcher lock held (`guard`), which it drops.
+fn sleep(timeout: Timeout, guard: crate::sync::IrqGuard<'_, ()>) -> Result<WakeReason, NtStatus> {
+    let until = matches!(timeout, Timeout::Until(_));
+    let me = platform::current();
+    if until && UNTIL_WAITERS.lock().try_push(me).is_err() {
+        return Err(NtStatus::NO_MEMORY);
+    }
+    let changes = SYSTEM_TIME_CHANGES.load(core::sync::atomic::Ordering::SeqCst);
+    platform::prepare_wait(timeout.deadline());
+    super::thread::wake_if_terminating();
+    drop(guard);
+    let reason =
+        if until && SYSTEM_TIME_CHANGES.load(core::sync::atomic::Ordering::SeqCst) != changes {
+            // Moved after the deadline was worked out: look again (the
+            // prepared wait is ended by the next one).
+            WakeReason::Woken
+        } else {
+            platform::wait()
+        };
+    if until {
+        let mut waiters = UNTIL_WAITERS.lock();
+        if let Some(i) = waiters.iter().position(|&t| t == me) {
+            waiters.swap_remove(i);
+        }
+    }
+    Ok(reason)
 }
 
 /// Whether `objects` names one object more than once (a WaitAll wait on
@@ -300,17 +371,18 @@ pub fn wait_for_alertable(
             }
         }
         super::thread::set_alertable(alertable);
-        platform::prepare_wait(timeout.deadline());
-        super::thread::wake_if_terminating();
-        drop(guard);
-        let reason = platform::wait();
+        let reason = sleep(timeout, guard);
         super::kuser::catch_up();
         super::thread::set_alertable(false);
         {
             let _guard = DISPATCHER.lock();
             released = unregister(objects, me);
         }
-        timed_out = reason == WakeReason::TimedOut;
+        let reason = match reason {
+            Ok(reason) => reason,
+            Err(status) => return status,
+        };
+        timed_out = timeout.over(reason);
         if super::thread::is_terminating() {
             return NtStatus::THREAD_IS_TERMINATING;
         }
@@ -363,13 +435,14 @@ pub fn delay(timeout: Timeout, alertable: bool) -> NtStatus {
             return NtStatus::SUCCESS;
         }
         super::thread::set_alertable(alertable);
-        platform::prepare_wait(timeout.deadline());
-        super::thread::wake_if_terminating();
-        drop(guard);
-        let reason = platform::wait();
+        let reason = sleep(timeout, guard);
         super::kuser::catch_up();
         super::thread::set_alertable(false);
-        if reason == WakeReason::TimedOut {
+        let reason = match reason {
+            Ok(reason) => reason,
+            Err(status) => return status,
+        };
+        if timeout.over(reason) {
             return if apc() { NtStatus::USER_APC } else { NtStatus::SUCCESS };
         }
     }
