@@ -6,15 +6,16 @@
 //! request and its response's headers), HttpQueryInfoW,
 //! InternetQueryDataAvailable, InternetReadFile, InternetOpenUrlW (http
 //! and https), InternetCrackUrlW, InternetSetOptionW and
-//! InternetCloseHandle. The engine is `user/http_client`, shared with
+//! InternetCloseHandle; redirects are followed (301, 302, 303, 307, 308)
+//! unless INTERNET_FLAG_NO_AUTO_REDIRECT. The engine is
+//! `user/http_client`, shared with
 //! winhttp.dll (the same connection, request, framing and header
 //! queries); this crate is WinINet's functions, flags and error codes
 //! over it.
 //!
 //! Limits (each recorded in the ledger where a program meets it):
 //! asynchronous operation (INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED),
-//! proxies (INTERNET_OPEN_TYPE_PROXY), FTP and Gopher, automatic
-//! redirects (the 3xx response is returned), authentication (user names
+//! proxies (INTERNET_OPEN_TYPE_PROXY), FTP and Gopher, authentication (user names
 //! and passwords are not sent), the cache (every request goes to the
 //! server, as with INTERNET_FLAG_RELOAD), cookies, decompression,
 //! connection reuse and the connect time-out (the stack's own applies).
@@ -39,7 +40,10 @@ use http_client::cert::{
 use http_client::handles::Handles;
 use http_client::request::{ADDREQ_FLAG_ADD, Open, QUERY_CUSTOM, Request};
 use http_client::url::UrlComponents;
-use http_client::{IGNORE_CN_INVALID, IGNORE_DATE_INVALID, Settings, Timeouts, err, narrow, wide};
+use http_client::{
+    IGNORE_CN_INVALID, IGNORE_DATE_INVALID, REDIRECT_ALWAYS, REDIRECT_NEVER, RedirectRules,
+    Settings, Timeouts, err, narrow, wide,
+};
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -248,7 +252,12 @@ pub extern "system" fn InternetOpenW(
             agent,
             timeouts: DEFAULT_TIMEOUTS,
             protocols: 0,
-            redirect_policy: 1,
+            // WinINet follows every redirect (https to http included)
+            // unless INTERNET_FLAG_NO_AUTO_REDIRECT; the engine's limit
+            // stands for its "all attempts made to redirect failed".
+            redirect_policy: REDIRECT_ALWAYS,
+            max_redirects: 10,
+            redirect_rules: RedirectRules::WinInet,
         }))
     })();
     handle(r, 0)
@@ -303,7 +312,7 @@ fn open_request(
 ) -> Result<Request, u32> {
     let mut settings = c.settings.clone();
     if flags & INTERNET_FLAG_NO_AUTO_REDIRECT != 0 {
-        settings.redirect_policy = 0;
+        settings.redirect_policy = REDIRECT_NEVER;
     }
     let mut r = Request::new(
         settings,

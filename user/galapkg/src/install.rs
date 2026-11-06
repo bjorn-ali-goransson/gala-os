@@ -68,6 +68,11 @@ pub struct HostError {
     pub code: u32,
 }
 
+/// A download whose server answered with an HTTP status other than 200:
+/// `HTTP_STATUS_ERROR | status` (bit 29, the customer bit of Win32
+/// error codes, so no system error is mistaken for it).
+pub const HTTP_STATUS_ERROR: u32 = 0x2000_0000;
+
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.code {
@@ -77,7 +82,24 @@ impl fmt::Display for HostError {
             32 => f.write_str("the file is in use (error 32)"),
             80 | 183 => write!(f, "it already exists (error {})", self.code),
             112 => f.write_str("the disk is full (error 112)"),
+            126 => f.write_str("a DLL it needs is not on this machine (error 126)"),
             145 => f.write_str("the directory is not empty (error 145)"),
+            // WinHTTP's (the downloads).
+            12002 => f.write_str("the server did not answer in time (error 12002)"),
+            12007 => f.write_str("the server's name was not resolved (error 12007)"),
+            12029 => f.write_str("could not connect to the server (error 12029)"),
+            12030 => f.write_str("the connection was cut (error 12030)"),
+            12156 => {
+                f.write_str("a redirect was refused: https to http, or too many (error 12156)")
+            }
+            12157 => f.write_str("the TLS handshake failed (error 12157)"),
+            12175 => f.write_str(
+                "the server's certificate is not valid or not trusted by the machine's root \
+                 store (error 12175)",
+            ),
+            c if c & HTTP_STATUS_ERROR != 0 && c & !HTTP_STATUS_ERROR < 1000 => {
+                write!(f, "the server answered HTTP {}", c & !HTTP_STATUS_ERROR)
+            }
             c => write!(f, "error {c}"),
         }
     }
@@ -113,7 +135,10 @@ pub trait Host {
     fn reg_delete_value(&mut self, root: Root, key: &str, name: &str) -> Result<(), HostError>;
     /// Deletes a key that has no subkeys.
     fn reg_delete_key(&mut self, root: Root, key: &str) -> Result<(), HostError>;
-    /// Downloads a URL (`gala.exe`: not over HTTPS yet).
+    /// Downloads a URL (`gala.exe`: http and https over winhttp.dll,
+    /// redirects followed, `file:///` and paths read). A URL scheme the
+    /// host cannot fetch is ERROR_NOT_SUPPORTED; an HTTP status other
+    /// than 200 is `HTTP_STATUS_ERROR | status`.
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, HostError>;
     fn env(&mut self, name: &str) -> Option<String>;
     /// The path of the running `gala.exe` (copied as command shims).

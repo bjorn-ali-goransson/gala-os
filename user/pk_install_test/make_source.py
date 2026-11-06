@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Makes pk_install_test's package source (user/pk_install_test/source):
 a winget-pkgs tree with gala's test packages and the zips they install
-(the `installers` mirror). The tree also holds copies of real winget-pkgs
+(the `installers` mirror), and user/pk_install_test/served, the files
+the in-guest Nginx serves for the download test (pk_install_https:
+GalaTest.PkHttps, whose installer is not in the mirror). The tree also holds copies of real winget-pkgs
 manifests (manifests/b and manifests/j, MIT, THIRD_PARTY.md), which this
 script leaves alone. Run from the repository root:
 
@@ -21,14 +23,19 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, "user", "pk_install_test", "source")
+SERVED = os.path.join(ROOT, "user", "pk_install_test", "served")
 HELLO = open(os.path.join(ROOT, "user", "bin", "hello.exe"), "rb").read()
 STAMP = (2026, 11, 3, 0, 0, 0)
 URL = "https://packages.gala.invalid/"
+# schannel_test's Nginx (user/schannel_test/nginx.conf): the release URL
+# redirects to the file, as GitHub's do; 8444's certificate is untrusted.
+NGINX = "https://localhost:8443/"
+UNTRUSTED = "https://localhost:8444/"
 KEPT = {}
 
 
-def make_zip(name, files):
-    path = os.path.join(OUT, "installers", name)
+def make_zip(name, files, directory=None):
+    path = os.path.join(directory or os.path.join(OUT, "installers"), name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with zipfile.ZipFile(path, "w") as z:
         for entry, data in files:
@@ -100,7 +107,7 @@ def main():
         path = os.path.join(OUT, "installers", name)
         if os.path.exists(path):
             KEPT[name] = open(path, "rb").read()
-    for d in [os.path.join(OUT, "installers"), os.path.join(OUT, "manifests", "g", "GalaTest")]:
+    for d in [os.path.join(OUT, "installers"), os.path.join(OUT, "manifests", "g", "GalaTest"), SERVED]:
         if os.path.isdir(d):
             shutil.rmtree(d)
     h10 = pkhello_zip("1.0.0")
@@ -302,7 +309,41 @@ ManifestType: singleton
 ManifestVersion: 1.6.0
 """,
         )
-    print("made", OUT, file=sys.stderr)
+    # Downloaded over HTTPS (pk_install_https): the zip is served by
+    # Nginx, not mirrored, so `gala install` fetches it through winhttp,
+    # following the release URL's redirect, and checks its SHA-256.
+    hh = make_zip(
+        "pkhttps-1.0.0.zip",
+        [("pkhttps-1.0.0/pkhttps.exe", HELLO), ("pkhttps-1.0.0/README.txt", b"PkHttps 1.0.0\r\n")],
+        os.path.join(SERVED, "objects"),
+    )
+    for ident, url, what in [
+        ("PkHttps", f"{NGINX}releases/download/v1.0.0/pkhttps-1.0.0.zip", "Downloaded over HTTPS"),
+        ("PkUntrusted", f"{UNTRUSTED}objects/pkhttps-1.0.0.zip", "Served with an untrusted certificate"),
+    ]:
+        write(
+            f"g/GalaTest/{ident}/1.0.0/GalaTest.{ident}.yaml",
+            f"""PackageIdentifier: GalaTest.{ident}
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: gala-os
+PackageName: {ident}
+License: Proprietary
+ShortDescription: {what} (gala's install test)
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: pkhttps-1.0.0\\pkhttps.exe
+  PortableCommandAlias: {ident.lower()}
+Installers:
+- Architecture: x64
+  InstallerUrl: {url}
+  InstallerSha256: {hh}
+ManifestType: singleton
+ManifestVersion: 1.6.0
+""",
+        )
+    print("made", OUT, "and", SERVED, file=sys.stderr)
 
 
 main()

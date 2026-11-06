@@ -306,7 +306,19 @@ impl Host for Fake {
         self.m.keys.remove(&(root_n(root), lc(key)));
         Ok(())
     }
-    fn fetch(&mut self, _url: &str) -> Result<Vec<u8>, HostError> {
+    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, HostError> {
+        // What schannel_test's Nginx serves to pk_install_https (the
+        // redirect is winhttp's, not seen here); 8444's certificate is
+        // untrusted; another host is not reachable from the tests.
+        if let Some(name) = url.strip_prefix("https://localhost:8443/releases/download/v1.0.0/") {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../pk_install_test/served/objects")
+                .join(name);
+            return std::fs::read(path).map_err(|_| HostError { code: HTTP_STATUS_ERROR | 404 });
+        }
+        if url.starts_with("https://localhost:8444/") {
+            return Err(HostError { code: 12175 });
+        }
         Err(HostError { code: 50 })
     }
     fn env(&mut self, name: &str) -> Option<String> {
@@ -653,6 +665,32 @@ fn checks_before_any_change() {
     assert_eq!(install_id(&mut f, "jqlang.jq", None).unwrap_err().kind, Kind::Unsupported);
     assert_eq!(f.m, before);
     assert!(f.log.iter().any(|l| l.starts_with("sha256 expected=")));
+}
+
+#[test]
+fn an_installer_not_mirrored_is_downloaded() {
+    let mut f = Fake::new();
+    let before = f.m.clone();
+    // Fetched through the host (gala.exe: winhttp), its SHA-256 checked.
+    install_id(&mut f, "GalaTest.PkHttps", None).unwrap();
+    assert!(
+        f.log.iter().any(|l| l
+            == "download url=https://localhost:8443/releases/download/v1.0.0/pkhttps-1.0.0.zip")
+    );
+    assert!(f.log.iter().any(|l| l.starts_with("download bytes=")));
+    assert!(f.exists(&format!("{LOCAL}\\Microsoft\\WinGet\\Links\\pkhttps.exe")) == Some(false));
+    // A download that fails is the install's failure, with the reason
+    // and the error in the log; nothing changes.
+    let mut f = Fake::new();
+    let e = install_id(&mut f, "GalaTest.PkUntrusted", None).unwrap_err();
+    assert_eq!(e.kind, Kind::Failed);
+    assert!(e.message.contains("not trusted") && e.message.contains("12175"), "{}", e.message);
+    assert!(f.log.iter().any(|l| l.starts_with("error download code=12175")));
+    assert_eq!(f.m, before);
+    assert_eq!(
+        HostError { code: HTTP_STATUS_ERROR | 404 }.to_string(),
+        "the server answered HTTP 404"
+    );
 }
 
 #[test]

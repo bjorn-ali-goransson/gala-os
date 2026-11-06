@@ -4,16 +4,17 @@
 //! connections and requests (heap objects behind validated handles),
 //! WinHttpCrackUrl, and HTTP/1.1 over TCP (ws2_32) or TLS (SSPI's
 //! Schannel through secur32): requests with added headers and a body,
-//! the response's status line and headers (WinHttpQueryHeaders), and the
+//! the response's status line and headers (WinHttpQueryHeaders), the
 //! body by Content-Length, chunked transfer coding or until the server
-//! closes. The engine is `user/http_client`, shared with wininet.dll;
+//! closes, and automatic redirects by WINHTTP_OPTION_REDIRECT_POLICY
+//! (default: all but https to http) up to
+//! WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS (default 10). The engine is `user/http_client`, shared with wininet.dll;
 //! this crate is WinHTTP's functions, options and error codes over it
 //! (`request.rs`: the request's functions).
 //!
 //! Limits (each recorded in the ledger where a program meets it):
 //! asynchronous sessions (WINHTTP_FLAG_ASYNC: ERROR_NOT_SUPPORTED),
-//! proxies (named proxies, WinHttpGetProxyForUrl), automatic redirects
-//! (the 3xx response is returned), authentication, cookies,
+//! proxies (named proxies, WinHttpGetProxyForUrl), authentication, cookies,
 //! decompression, HTTP/2, connection reuse (each request has its own
 //! connection) and the connect and resolve time-outs (the stack's own
 //! apply). There are no Internet Explorer proxy settings on gala
@@ -35,7 +36,10 @@ use alloc::vec::Vec;
 use http_client::handles::Handles;
 use http_client::request::{Open, Request};
 use http_client::url::UrlComponents;
-use http_client::{Settings, Timeouts, err, narrow, wide};
+use http_client::{
+    REDIRECT_ALWAYS, REDIRECT_DISALLOW_HTTPS_TO_HTTP, RedirectRules, Settings, Timeouts, err,
+    narrow, wide,
+};
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -87,10 +91,12 @@ const WINHTTP_OPTION_RECEIVE_TIMEOUT: u32 = 6;
 const WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT: u32 = 7;
 const WINHTTP_OPTION_HANDLE_TYPE: u32 = 9;
 const WINHTTP_OPTION_SECURITY_FLAGS: u32 = 31;
+const WINHTTP_OPTION_URL: u32 = 34;
 const WINHTTP_OPTION_USER_AGENT: u32 = 41;
 const WINHTTP_OPTION_CONTEXT_VALUE: u32 = 45;
 const WINHTTP_OPTION_SECURE_PROTOCOLS: u32 = 84;
 const WINHTTP_OPTION_REDIRECT_POLICY: u32 = 88;
+const WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS: u32 = 89;
 
 /// WINHTTP_HANDLE_TYPE_SESSION, _CONNECT, _REQUEST.
 const HANDLE_TYPE_SESSION: u32 = 1;
@@ -232,7 +238,9 @@ pub extern "system" fn WinHttpOpen(
         agent,
         timeouts: DEFAULT_TIMEOUTS,
         protocols: 0,
-        redirect_policy: 1,
+        redirect_policy: REDIRECT_DISALLOW_HTTPS_TO_HTTP,
+        max_redirects: 10,
+        redirect_rules: RedirectRules::WinHttp,
     }))
 }
 
@@ -413,11 +421,22 @@ pub extern "system" fn WinHttpSetOption(h: usize, option: u32, buffer: *const u8
                 o.settings().protocols = v & PROTOCOLS_SUPPORTED;
             }
             WINHTTP_OPTION_REDIRECT_POLICY => {
+                // Exactly a DWORD (Wine's tests on Windows: one byte more
+                // or less is ERROR_INSUFFICIENT_BUFFER).
+                if buffer.is_null() {
+                    return Err(ERROR_INVALID_PARAMETER);
+                }
+                if len != 4 {
+                    return Err(ERROR_INSUFFICIENT_BUFFER);
+                }
                 let v = dword(buffer, len)?;
-                if v > 2 {
+                if v > REDIRECT_ALWAYS {
                     return Err(ERROR_INVALID_PARAMETER);
                 }
                 o.settings().redirect_policy = v;
+            }
+            WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS => {
+                o.settings().max_redirects = dword(buffer, len)?;
             }
             WINHTTP_OPTION_SECURITY_FLAGS => {
                 let v = dword(buffer, len)?;
@@ -457,6 +476,30 @@ pub extern "system" fn WinHttpQueryOption(
             WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT => t.response as u32 as usize,
             WINHTTP_OPTION_SECURE_PROTOCOLS => o.settings().protocols as usize,
             WINHTTP_OPTION_REDIRECT_POLICY => o.settings().redirect_policy as usize,
+            WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS => o.settings().max_redirects as usize,
+            WINHTTP_OPTION_URL => {
+                let url = match &o.kind {
+                    Kind::Request(r) => r.url()?,
+                    _ => return Err(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE),
+                };
+                // A string option: the bytes without the NUL, or
+                // ERROR_INSUFFICIENT_BUFFER with the bytes needed with it.
+                let needed = (url.len() as u32 + 1) * 2;
+                // SAFETY: the caller's length and buffer of `*len` bytes.
+                unsafe {
+                    if buffer.is_null() || *len < needed {
+                        *len = needed;
+                        return Err(ERROR_INSUFFICIENT_BUFFER);
+                    }
+                    let out = buffer.cast::<u16>();
+                    for (i, &c) in url.iter().enumerate() {
+                        out.add(i).write_unaligned(c);
+                    }
+                    out.add(url.len()).write_unaligned(0);
+                    *len = needed - 2;
+                }
+                return Ok(());
+            }
             WINHTTP_OPTION_HANDLE_TYPE => match o.kind {
                 Kind::Session(_) => HANDLE_TYPE_SESSION as usize,
                 Kind::Connect(_) => HANDLE_TYPE_CONNECT as usize,

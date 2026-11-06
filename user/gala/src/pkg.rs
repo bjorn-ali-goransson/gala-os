@@ -664,8 +664,12 @@ impl Host for Win32 {
     }
 
     fn fetch(&mut self, url: &str) -> Result<Vec<u8>, HostError> {
-        // file:///C:/dir/x.zip and plain paths are read; http(s) is the
-        // TODO of ROADMAP PK stage 1 (a TLS client in gala.exe).
+        // http(s) over winhttp (crate::fetch); file:///C:/dir/x.zip and
+        // plain paths are read.
+        let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+        if lower.starts_with("https://") || lower.starts_with("http://") {
+            return crate::fetch::get(url, &mut |line| self.log(line));
+        }
         if let Some(rest) = url.strip_prefix("file:///") {
             return read_whole(&rest.replace('/', "\\"));
         }

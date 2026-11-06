@@ -79,6 +79,9 @@ pub mod err {
     pub const INVALID_QUERY_REQUEST: u32 = 12154;
     /// ERROR_HTTP_HEADER_ALREADY_EXISTS.
     pub const HEADER_ALREADY_EXISTS: u32 = 12155;
+    /// ERROR_HTTP_REDIRECT_FAILED: a redirect the policy refuses (https
+    /// to http, another scheme) or one more than the maximum.
+    pub const REDIRECT_FAILED: u32 = 12156;
     /// ERROR_INTERNET_SECURITY_CHANNEL_ERROR.
     pub const SECURE_CHANNEL_ERROR: u32 = 12157;
     /// ERROR_WINHTTP_HEADER_SIZE_OVERFLOW (WinHTTP only).
@@ -200,10 +203,37 @@ pub struct Settings {
     pub timeouts: Timeouts,
     /// SP_PROT_* (0: Schannel's defaults).
     pub protocols: u32,
-    /// Nonzero when the API would follow a redirect (recorded: gala
-    /// returns the 3xx response).
+    /// Which redirects are followed, in WinHTTP's numbers
+    /// (WINHTTP_OPTION_REDIRECT_POLICY): `REDIRECT_NEVER`,
+    /// `REDIRECT_DISALLOW_HTTPS_TO_HTTP` or `REDIRECT_ALWAYS`.
     pub redirect_policy: u32,
+    /// How many redirects one request follows at most
+    /// (WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS).
+    pub max_redirects: u32,
+    /// Which statuses redirect and what they do to the verb (the APIs
+    /// differ).
+    pub redirect_rules: RedirectRules,
 }
+
+/// The redirect rules of each API (as Wine's conformance tests, run on
+/// Windows, show them).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RedirectRules {
+    /// WinHTTP: 301, 302, 307 and 308 (not 303); a 301 or 302 turns a
+    /// POST into a GET without its body.
+    WinHttp,
+    /// WinINet: 301, 302, 303, 307 and 308; any verb but GET and HEAD
+    /// becomes a GET without its body, except for 307 and 308.
+    WinInet,
+}
+
+/// WINHTTP_OPTION_REDIRECT_POLICY_NEVER: a 3xx response is returned.
+pub const REDIRECT_NEVER: u32 = 0;
+/// WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP: every redirect
+/// is followed except one from https to http (`err::REDIRECT_FAILED`).
+pub const REDIRECT_DISALLOW_HTTPS_TO_HTTP: u32 = 1;
+/// WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS.
+pub const REDIRECT_ALWAYS: u32 = 2;
 
 /// A DLL's panic handler: a panic is a bug, so its location goes to the
 /// ledger (`<dll>!panic <file>`, the line as detail) and the process ends

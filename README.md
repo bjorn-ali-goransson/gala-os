@@ -143,8 +143,8 @@ test programs in `user/*_test`:
   command lines, current directory, system and process information
   classes, random numbers (RDRAND).
 - **Installing software**: `gala install|search|list|upgrade|uninstall`
-  over winget's manifests (zip and portable packages from a local
-  mirror; downloads not yet).
+  over winget's manifests (zip, portable and NSIS packages from a local
+  snapshot; installers downloaded over HTTPS, redirects followed).
 - **Robustness**: fault injection (`failpoint=`), lock-order checking, a
   hang watchdog, a flight recorder and a crash record kept across
   reboots, record/replay of a run's inputs, and **kernel handover**: the
@@ -178,8 +178,9 @@ scenarios). The rest of the Linux system calls are ROADMAP item LX.
 - No 32-bit programs (WOW64), no service control manager (services are
   started from the kernel command line; `restart=` keeps them running),
   no IPv6, no GPU acceleration (Direct3D, Vulkan and OpenGL are planned
-  in software first), no registry hives in Windows' file format, no
-  downloads in `gala install` yet.
+  in software first), no registry hives in Windows' file format;
+  `gala install` reads manifests from a local snapshot only (not yet
+  from GitHub).
 - Some system call numbers are gala's own guesses for the pinned Windows
   build (marked `UNVERIFIED` in `kernel/src/nt/syscalls.rs`); programs
   that go through ntdll are not affected.

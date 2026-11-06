@@ -165,6 +165,7 @@ unsafe extern "system" {
         name: *const u16,
     ) -> Handle;
     fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, n: *mut u32, wait: Bool) -> Bool;
+    fn CancelIoEx(h: Handle, ov: *mut Overlapped) -> Bool;
     fn GetCurrentProcess() -> Handle;
     fn FlushFileBuffers(h: Handle) -> Bool;
     fn FormatMessageW(
@@ -944,7 +945,11 @@ fn reply_then_disconnect(c: &mut Checks) -> Result<(), u32> {
                 // Windows.
                 let flags = if transact { 0 } else { FILE_FLAG_OVERLAPPED };
                 let mut cl = client(&name, flags);
-                while cl == INVALID_HANDLE && GetLastError() == ERROR_PIPE_BUSY {
+                // Bounded: a server thread that gave up (its listen failed
+                // under fault injection) never listens again.
+                let mut tries = 0;
+                while cl == INVALID_HANDLE && GetLastError() == ERROR_PIPE_BUSY && tries < 1000 {
+                    tries += 1;
                     SleepEx(1, 0);
                     cl = client(&name, flags);
                 }
@@ -997,6 +1002,14 @@ fn reply_then_disconnect(c: &mut Checks) -> Result<(), u32> {
                     ) != 0
                         || GetLastError() == ERROR_IO_PENDING;
                     let wrote = wrote && GetOverlappedResult(cl, &mut wov, &mut sent, 1) != 0;
+                    // A failed write gets no reply, nor does a request to a
+                    // server thread that gave up (its listen failed: a
+                    // client may connect before the server listens, as on
+                    // Windows), both under fault injection: the read
+                    // posted for it is cancelled, not waited for.
+                    if posted && (!wrote || WaitForSingleObject(read_event, 3000) != 0) {
+                        CancelIoEx(cl, &mut rov);
+                    }
                     let read = posted && GetOverlappedResult(cl, &mut rov, &mut got, 1) != 0;
                     CloseHandle(read_event);
                     CloseHandle(write_event);
@@ -1016,6 +1029,10 @@ fn reply_then_disconnect(c: &mut Checks) -> Result<(), u32> {
                     out(b" error ");
                     out(&hex(error));
                     out(b"\r\n");
+                    // The server thread gives up after a failed round:
+                    // later connects would find no listener.
+                    CloseHandle(cl);
+                    break;
                 }
                 CloseHandle(cl);
             }

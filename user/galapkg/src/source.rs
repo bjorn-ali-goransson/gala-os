@@ -25,12 +25,12 @@ use core::cmp::Ordering;
 pub const WINGET_SOURCE_ID: &str = "Microsoft.Winget.Source_8wekyb3d8bbwe";
 
 /// A host's fetcher answers this (ERROR_NOT_SUPPORTED) for a URL scheme
-/// it cannot download yet.
+/// it cannot download (gala.exe: anything but http, https and files).
 pub const ERROR_NOT_SUPPORTED: u32 = 50;
 
 pub struct Source {
-    /// The tree's root (holding `manifests\`), a Windows path; or an
-    /// `https://` URL (not supported yet: [`Source::open`]).
+    /// The tree's root (holding `manifests\`), a Windows path (an
+    /// `https://` source is not supported yet: [`Source::open`]).
     pub root: String,
 }
 
@@ -46,14 +46,14 @@ pub struct Found {
 
 impl Source {
     /// A source from `--source`: a directory. URLs are refused with what
-    /// is missing (ARCHITECTURE "Installing software": the HTTPS fetcher
-    /// is designed, not built).
+    /// is missing (ARCHITECTURE "Installing software": manifests over
+    /// HTTPS, ROADMAP PK step 2).
     pub fn open(location: &str) -> Result<Source, Error> {
         let lower = location.to_ascii_lowercase();
         if lower.starts_with("https://") || lower.starts_with("http://") {
             return Err(Error::unsupported(format!(
-                "source {location}: fetching manifests over HTTP(S) is not built yet (ROADMAP PK stage 1: \
-                 needs a TLS client in gala.exe); use a local snapshot: --source <dir>"
+                "source {location}: reading manifests over HTTP(S) is not built yet (ROADMAP PK step 2: \
+                 the GitHub raw and contents URLs); use a local snapshot: --source <dir>"
             )));
         }
         let root = location.trim_end_matches(['\\', '/']).replace('/', "\\");
@@ -234,12 +234,16 @@ impl Source {
                 .map_err(|e| Error::failed(format!("reading {mirrored}: {e}")));
         }
         host.log(&format!("download url={}", installer.url));
-        host.fetch(&installer.url).map_err(|e| {
+        let fetched = host.fetch(&installer.url);
+        match &fetched {
+            Ok(data) => host.log(&format!("download bytes={}", data.len())),
+            Err(e) => host.log(&format!("error download code={} ({e})", e.code)),
+        }
+        fetched.map_err(|e| {
             if e.code == ERROR_NOT_SUPPORTED {
                 Error::unsupported(format!(
-                    "downloading {}: downloads over HTTP and HTTPS are not built yet (ROADMAP PK \
-                     stage 1: a TLS client in gala.exe); put the file in the source's \
-                     installers\\ directory",
+                    "downloading {}: this URL's scheme cannot be downloaded (http, https and \
+                     file:/// can); put the file in the source's installers\\ directory",
                     installer.url
                 ))
             } else {

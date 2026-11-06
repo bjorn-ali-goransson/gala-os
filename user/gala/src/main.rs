@@ -24,9 +24,12 @@
 //!
 //! The package commands (ROADMAP PK, ARCHITECTURE "Installing software")
 //! install winget packages the way winget does: module `pkg` over the
-//! `galapkg` library. Exit codes there: 0 done, 1 usage, 2 not found, 3
-//! an installer type or source gala cannot handle yet, 4 failed (rolled
-//! back), 5 the download's SHA-256 is not the manifest's. gala.exe
+//! `galapkg` library; installers not in the source's mirror are
+//! downloaded over winhttp (module `fetch`: http and https, redirects
+//! followed). Exit codes there: 0 done, 1 usage, 2 not found, 3 an
+//! installer type or source gala cannot handle yet, 4 failed (rolled
+//! back; a download that failed too), 5 the download's SHA-256 is not
+//! the manifest's. gala.exe
 //! copied into WinGet\Links under a command's name is that command's
 //! shim (`pkg::shim_main`).
 //!
@@ -47,6 +50,7 @@ extern crate alloc;
 // The process heap as Rust's allocator (galapkg uses `alloc`).
 use gala_heap as _;
 
+mod fetch;
 mod pkg;
 
 use core::ffi::c_void;

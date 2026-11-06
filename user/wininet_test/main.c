@@ -24,6 +24,8 @@
  *    ERROR_INTERNET_CANNOT_CONNECT.
  * 7. InternetOpenUrlW: GET http://127.0.0.1:8080/ in one call; the
  *    handle's status and body as in 2.
+ * 8. A redirect (/redirect-rel: 302 to "/") is followed: 200 and the
+ *    start page; with INTERNET_FLAG_NO_AUTO_REDIRECT the 302 itself.
  * The test retries its first request while Nginx starts.
  */
 #include <windows.h>
@@ -164,6 +166,18 @@ int main(void) {
     CHECK(r != NULL);
     status = response(r, body, sizeof body, 0);
     CHECK(status == 200 && strstr(body, "Welcome to nginx!") != NULL);
+    CHECK(InternetCloseHandle(r));
+    /* 8. */
+    r = InternetOpenUrlW(s, L"http://127.0.0.1:8080/redirect-rel", NULL, 0, INTERNET_FLAG_RELOAD, 0);
+    CHECK(r != NULL);
+    status = response(r, body, sizeof body, 0);
+    CHECK(status == 200 && strstr(body, "Welcome to nginx!") != NULL);
+    CHECK(InternetCloseHandle(r));
+    r = InternetOpenUrlW(s, L"http://127.0.0.1:8080/redirect-rel", NULL, 0,
+                         INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_AUTO_REDIRECT, 0);
+    CHECK(r != NULL);
+    status = response(r, body, sizeof body, 0);
+    CHECK(status == 302);
     CHECK(InternetCloseHandle(r));
     CHECK(InternetCloseHandle(s));
     printf("wininet_test: ok\n");

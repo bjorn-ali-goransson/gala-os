@@ -25,14 +25,17 @@
 //! runs (hello.exe's line) with its arguments; `gala list`; installing
 //! again is "already installed"; a package wanting the same command fails
 //! after writing its files and is rolled back (exit 4, nothing left); a
-//! wrong SHA-256 (exit 5); an MSIX and an HTTPS download (exit 3, not
-//! built yet); `gala upgrade` lists and installs 1.1.0 (the
+//! wrong SHA-256 (exit 5); an MSIX (exit 3, a later stage); a download
+//! from GitHub fails (exit 4: this image has no winhttp.dll, nor network);
+//! `gala upgrade` lists and installs 1.1.0 (the
 //! old files gone); uninstall removes files, command and record; the
 //! command is gone from PATH.
 //!
 //! With the argument `nsis` (scenario pk_install_nsis) it checks an NSIS
 //! installer instead (`nsis_test`); the zip run also checks an Inno Setup
-//! stand-in that registers nothing (exit 4) and an MSIX (exit 3).
+//! stand-in that registers nothing (exit 4) and an MSIX (exit 3). With
+//! `https` (scenario pk_install_https) it checks downloads over winhttp
+//! and Schannel (`https_test`).
 //!
 //! Prints `pk_install_test: ok` or exits with the number of the failing
 //! check (the install log is printed on failure).
@@ -83,6 +86,9 @@ unsafe extern "system" {
         info: *mut [usize; 3],
     ) -> Bool;
     fn GetFileAttributesW(path: *const u16) -> u32;
+    fn Sleep(ms: u32);
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, size: u32) -> u32;
     fn GetCommandLineW() -> *const u16;
     fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> Bool;
@@ -530,7 +536,7 @@ fn test() -> Result<(), u32> {
     let args = join(&mut a, &["install GalaTest.Msix ", src]);
     c.gala(args, 3, &[b"msix"])?;
     let args = join(&mut a, &["install jqlang.jq ", src]);
-    c.gala(args, 3, &[b"HTTPS"])?;
+    c.gala(args, 4, &[b"downloading https://github.com/jqlang/jq/"])?;
     c.gala("install No.Such.Package --source C:\\pk_source", 2, &[b"No.Such.Package"])?;
 
     // Upgrade: listed, then 1.1.0 in place of 1.0.0.
@@ -735,8 +741,131 @@ fn nsis_test() -> Result<(), u32> {
     Ok(())
 }
 
-/// Whether the command line has the argument `nsis`.
-fn nsis_mode() -> bool {
+// ---- Downloads over HTTPS (scenario pk_install_https) -----------------
+
+/// Whether crypt32's "ROOT" system store has a certificate whose subject
+/// has `name` (crypt32 loaded here: the other modes' images lack it).
+fn root_has(name: &str) -> bool {
+    type OpenSystemStore = unsafe extern "system" fn(usize, *const u16) -> Handle;
+    type Find = unsafe extern "system" fn(Handle, u32, u32, u32, *const u16, Handle) -> Handle;
+    type FreeContext = unsafe extern "system" fn(Handle) -> Bool;
+    type CloseStore = unsafe extern "system" fn(Handle, u32) -> Bool;
+    const X509_ASN_ENCODING: u32 = 1;
+    const CERT_FIND_SUBJECT_STR_W: u32 = 0x0008_0007;
+    let mut dll = W::new("crypt32.dll");
+    let mut store_name = W::new("ROOT");
+    let mut subject = W::new(name);
+    // SAFETY: crypt32's exports with their documented signatures; our
+    // NUL-terminated strings; the context and store are released.
+    unsafe {
+        let m = LoadLibraryW(dll.ptr());
+        let f = |n: &[u8]| GetProcAddress(m, n.as_ptr());
+        let procs = [
+            f(b"CertOpenSystemStoreW\0"),
+            f(b"CertFindCertificateInStore\0"),
+            f(b"CertFreeCertificateContext\0"),
+            f(b"CertCloseStore\0"),
+        ];
+        if m.is_null() || procs.iter().any(|p| p.is_null()) {
+            return false;
+        }
+        let open = core::mem::transmute::<*mut c_void, OpenSystemStore>(procs[0]);
+        let find = core::mem::transmute::<*mut c_void, Find>(procs[1]);
+        let free = core::mem::transmute::<*mut c_void, FreeContext>(procs[2]);
+        let close = core::mem::transmute::<*mut c_void, CloseStore>(procs[3]);
+        let store = open(0, store_name.ptr());
+        if store.is_null() {
+            return false;
+        }
+        let cert = find(
+            store,
+            X509_ASN_ENCODING,
+            0,
+            CERT_FIND_SUBJECT_STR_W,
+            subject.ptr(),
+            core::ptr::null_mut(),
+        );
+        let found = !cert.is_null();
+        if found {
+            free(cert);
+        }
+        close(store, 0);
+        found
+    }
+}
+
+/// `gala install` of a package whose installer is not in the snapshot's
+/// mirror: downloaded over HTTPS from schannel_test's Nginx in the guest,
+/// whose release URL answers 302 with the file's URL (as GitHub's
+/// release downloads do), through gala's winhttp (redirect followed) and
+/// Schannel (the test CA trusted by the machine root store, beside the
+/// public CA bundle gala ships), the SHA-256 checked, installed, run and
+/// uninstalled; an untrusted certificate (Nginx's 8444) fails the install
+/// with the reason (exit 4); github.com is not reachable from the VM (no
+/// network card), which fails as a name not resolved.
+fn https_test() -> Result<(), u32> {
+    let mut c = Checks(0);
+    let src = "--source C:\\pk_source";
+    let mut a = [0u8; 300];
+    // The machine root store: the public CA bundle (GitHub's roots among
+    // them) and the test CA, as crypt32 reads it.
+    c.ok(root_has("ISRG Root X1"), 0, "a public root (ISRG Root X1) in ROOT")?;
+    c.ok(root_has("USERTrust ECC Certification Authority"), 0, "github.com's root in ROOT")?;
+    c.ok(root_has("gala schannel test CA"), 0, "the test CA in ROOT")?;
+    // Installed from the download; retried while Nginx starts (gala
+    // cannot connect yet: error 12029).
+    let args = join(&mut a, &["gala install GalaTest.PkHttps ", src]);
+    let mut tries = 0;
+    let (got, o) = loop {
+        let (got, o) = run(Some("C:\\gala\\gala.exe"), args);
+        if got == 4 && o.has(b"12029") && tries < 100 {
+            tries += 1;
+            // SAFETY: a plain call.
+            unsafe { Sleep(200) };
+            continue;
+        }
+        break (got, o);
+    };
+    let good = got == 0 && o.has(b"Successfully installed");
+    if !good {
+        out(b"pk_install_test: ");
+        out(args.as_bytes());
+        out(b" -> ");
+        out(&hex(got));
+        out(b":\r\n");
+        out(o.text());
+    }
+    c.ok(good, got, "install GalaTest.PkHttps (downloaded)")?;
+    c.ok(
+        log_has(b"download url=https://localhost:8443/releases/download/v1.0.0/pkhttps-1.0.0.zip"),
+        0,
+        "the release URL asked for",
+    )?;
+    c.ok(
+        log_has(b"fetch status=200 url=https://localhost:8443/objects/pkhttps-1.0.0.zip redirected-from="),
+        0,
+        "the redirect followed",
+    )?;
+    c.ok(log_has(b"sha256 expected="), 0, "the download's SHA-256 checked")?;
+    c.ok(exists(local("\\Microsoft\\WinGet\\Links\\pkhttps.exe")), 0, "the command's shim")?;
+    refresh_path();
+    let (got, o) = run(None, "pkhttps");
+    c.ok(got == 0 && o.has(HELLO), got, "pkhttps runs from PATH")?;
+    c.gala("uninstall GalaTest.PkHttps", 0, &[b"Successfully uninstalled"])?;
+    c.ok(!exists(local("\\Microsoft\\WinGet\\Links\\pkhttps.exe")), 0, "the command removed")?;
+    // An untrusted certificate: the download fails, nothing is installed.
+    let args = join(&mut a, &["install GalaTest.PkUntrusted ", src]);
+    c.gala(args, 4, &[b"not trusted", b"12175"])?;
+    c.ok(log_has(b"fetch error step=WinHttpSendRequest code=12175"), 0, "the failing call logged")?;
+    c.ok(!exists(local("\\Microsoft\\WinGet\\Links\\pkuntrusted.exe")), 0, "nothing installed")?;
+    // A real manifest's URL: github.com does not resolve in the VM.
+    let args = join(&mut a, &["install jqlang.jq ", src]);
+    c.gala(args, 4, &[b"downloading https://github.com/jqlang/jq/", b"12007"])?;
+    Ok(())
+}
+
+/// Whether the command line has the argument `word` (after a space).
+fn has_arg(word: &str) -> bool {
     // SAFETY: the process's NUL-terminated command line.
     unsafe {
         let p = GetCommandLineW();
@@ -745,13 +874,22 @@ fn nsis_mode() -> bool {
             n += 1;
         }
         let line = core::slice::from_raw_parts(p, n);
-        line.windows(5).any(|w| w == [32, 110, 115, 105, 115])
+        let w = word.as_bytes();
+        line.windows(w.len() + 1)
+            .any(|x| x[0] == 32 && x[1..].iter().zip(w).all(|(&c, &b)| c == u16::from(b)))
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
-    let code = match if nsis_mode() { nsis_test() } else { test() } {
+    let result = if has_arg("nsis") {
+        nsis_test()
+    } else if has_arg("https") {
+        https_test()
+    } else {
+        test()
+    };
+    let code = match result {
         Ok(()) => {
             out(b"pk_install_test: ok\r\n");
             0

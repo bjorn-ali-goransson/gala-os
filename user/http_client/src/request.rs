@@ -6,6 +6,15 @@
 //! WinHttpReceiveResponse, WinHttpQueryHeaders / HttpQueryInfo,
 //! WinHttpQueryDataAvailable / InternetQueryDataAvailable and
 //! WinHttpReadData / InternetReadFile are thin wrappers of these.
+//!
+//! Redirects are followed while the response is received, as the API's
+//! policy says (`Settings::redirect_policy`, `redirect_rules`): the
+//! Location (absolute, scheme-relative or relative to the request's
+//! path) becomes the request's URL and the request is sent again, on a
+//! new connection, up to `max_redirects` times. A redirect refused (https
+//! to http under the default policy, a scheme other than http(s), one
+//! too many) is `err::REDIRECT_FAILED` with the reason in the ledger
+//! (`<dll>!redirect: ...`).
 
 use alloc::vec::Vec;
 
@@ -13,9 +22,13 @@ use crate::err::{
     CONNECTION_ERROR, HEADER_ALREADY_EXISTS, HEADER_NOT_FOUND, HEADER_SIZE_OVERFLOW,
     INCORRECT_HANDLE_STATE, INSUFFICIENT_BUFFER, INVALID_HEADER, INVALID_PARAMETER,
     INVALID_QUERY_REQUEST, INVALID_SERVER_RESPONSE, NOT_ENOUGH_MEMORY, NOT_SUPPORTED,
+    REDIRECT_FAILED,
 };
 use crate::net::{Conn, Target};
-use crate::{Settings, failed, missing, narrow, put, wide};
+use crate::{
+    REDIRECT_DISALLOW_HTTPS_TO_HTTP, REDIRECT_NEVER, RedirectRules, Settings, failed, missing,
+    narrow, put, url, wide,
+};
 
 /// The modifiers of WinHttpAddRequestHeaders and HttpAddRequestHeaders
 /// (the same bits).
@@ -167,10 +180,20 @@ pub struct Request {
     version: Vec<u8>,
     /// Headers added by the caller, then (once sent) the ones the API adds.
     headers: Vec<Header>,
+    /// The names of the headers the API added (`build`), replaced on
+    /// every send and redirect.
+    api_added: Vec<Vec<u8>>,
     state: State,
     conn: Option<Conn>,
     /// Body bytes still to come through WinHttpWriteData.
     to_write: u64,
+    /// The body given to the send call, kept for a redirect that sends
+    /// it again (307, 308).
+    sent_body: Vec<u8>,
+    /// More of the body came through WinHttpWriteData (not kept).
+    streamed: bool,
+    /// Redirects followed since the send.
+    redirects: u32,
     status: u16,
     reason: Vec<u8>,
     response_version: Vec<u8>,
@@ -221,6 +244,63 @@ fn decimal(mut n: u64, out: &mut Vec<u8>) -> Result<(), u32> {
         }
     }
     put(out, &d[i..])
+}
+
+/// Where a redirect goes.
+struct Next {
+    secure: bool,
+    host: Vec<u16>,
+    port: u16,
+    path: Vec<u8>,
+}
+
+/// `s` with spaces and non-ASCII bytes %-escaped (a path on the wire).
+fn escaped(s: &[u8]) -> Result<Vec<u8>, u32> {
+    let mut v = Vec::new();
+    for &b in s {
+        if b == b' ' || b >= 0x80 {
+            put(&mut v, &[b'%', hex(b >> 4), hex(b)])?;
+        } else {
+            put(&mut v, &[b])?;
+        }
+    }
+    Ok(v)
+}
+
+/// RFC 3986's remove_dot_segments for an absolute path (and its query).
+fn without_dots(path: &[u8]) -> Result<Vec<u8>, u32> {
+    let (path, query) = match path.iter().position(|&b| b == b'?') {
+        Some(i) => path.split_at(i),
+        None => (path, &b""[..]),
+    };
+    let mut kept: Vec<&[u8]> = Vec::new();
+    let parts = path.strip_prefix(b"/").unwrap_or(path);
+    let n = parts.split(|&b| b == b'/').count();
+    for (i, seg) in parts.split(|&b| b == b'/').enumerate() {
+        let last = i + 1 == n;
+        kept.try_reserve(1).map_err(|_| NOT_ENOUGH_MEMORY)?;
+        match seg {
+            b"." if last => kept.push(b""),
+            b"." => {}
+            b".." => {
+                kept.pop();
+                if last {
+                    kept.push(b"");
+                }
+            }
+            s => kept.push(s),
+        }
+    }
+    let mut out = Vec::new();
+    for seg in kept {
+        put(&mut out, b"/")?;
+        put(&mut out, seg)?;
+    }
+    if out.is_empty() {
+        put(&mut out, b"/")?;
+    }
+    put(&mut out, query)?;
+    Ok(out)
 }
 
 /// Where a request goes and how (WinHttpOpenRequest's and
@@ -275,9 +355,13 @@ impl Request {
             path,
             version,
             headers: Vec::new(),
+            api_added: Vec::new(),
             state: State::Open,
             conn: None,
             to_write: 0,
+            sent_body: Vec::new(),
+            streamed: false,
+            redirects: 0,
             status: 0,
             reason: Vec::new(),
             response_version: Vec::new(),
@@ -324,6 +408,16 @@ impl Request {
         Ok(())
     }
 
+    /// A header the API adds (Host, User-Agent, ...): replaced by the
+    /// next send's or redirect's.
+    fn add_own(&mut self, name: &[u8], value: &[u8]) -> Result<(), u32> {
+        let n = copy(name)?;
+        self.api_added.try_reserve(1).map_err(|_| NOT_ENOUGH_MEMORY)?;
+        self.add(name, value)?;
+        self.api_added.push(n);
+        Ok(())
+    }
+
     fn has(&self, name: &[u8]) -> bool {
         self.headers.iter().any(|h| same(&h.0, name))
     }
@@ -363,17 +457,19 @@ impl Request {
     /// The request line and headers, with the ones the API adds (Host,
     /// User-Agent, Content-Length, Connection) unless the caller gave them.
     fn build(&mut self, total: u64) -> Result<Vec<u8>, u32> {
+        let added = core::mem::take(&mut self.api_added);
+        self.headers.retain(|h| !added.iter().any(|n| same(n, &h.0)));
         let mut host = narrow(self.settings.dll, &self.host)?;
         if self.port != if self.secure { 443 } else { 80 } {
             put(&mut host, b":")?;
             decimal(self.port.into(), &mut host)?;
         }
         if !self.has(b"Host") {
-            self.add(b"Host", &host)?;
+            self.add_own(b"Host", &host)?;
         }
         if !self.settings.agent.is_empty() && !self.has(b"User-Agent") {
             let agent = copy(&self.settings.agent)?;
-            self.add(b"User-Agent", &agent)?;
+            self.add_own(b"User-Agent", &agent)?;
         }
         let bodyless = same(&self.verb, b"GET") || same(&self.verb, b"HEAD");
         if (total > 0 || !bodyless)
@@ -382,11 +478,11 @@ impl Request {
         {
             let mut n = Vec::new();
             decimal(total, &mut n)?;
-            self.add(b"Content-Length", &n)?;
+            self.add_own(b"Content-Length", &n)?;
         }
         if !self.has(b"Connection") {
             // Every request has its own connection (no reuse yet).
-            self.add(b"Connection", b"Keep-Alive")?;
+            self.add_own(b"Connection", b"Keep-Alive")?;
         }
         let mut out = Vec::new();
         for part in [&self.verb[..], b" ", &self.path, b" ", &self.version, b"\r\n"] {
@@ -407,6 +503,17 @@ impl Request {
         if !headers.is_empty() {
             self.add_headers(headers, ADDREQ_FLAG_ADD)?;
         }
+        let total = total.max(optional.len() as u64);
+        self.sent_body.clear();
+        put(&mut self.sent_body, optional)?;
+        self.streamed = total > optional.len() as u64;
+        self.redirects = 0;
+        self.transmit(total)
+    }
+
+    /// Sends the request line, the headers and `sent_body` on a new
+    /// connection (`total` bytes of body in all).
+    fn transmit(&mut self, total: u64) -> Result<(), u32> {
         // A new send starts over (its own connection).
         self.conn = None;
         self.state = State::Open;
@@ -414,9 +521,8 @@ impl Request {
         self.rx.clear();
         self.body.clear();
         self.body_at = 0;
-        let total = total.max(optional.len() as u64);
         let mut message = self.build(total)?;
-        put(&mut message, optional)?;
+        put(&mut message, &self.sent_body)?;
         // IPv6 literals go to the resolver without their brackets.
         let host = match &self.host[..] {
             [b, inner @ .., e] if *b == u16::from(b'[') && *e == u16::from(b']') => inner,
@@ -435,9 +541,156 @@ impl Request {
         })?;
         conn.write(&message)?;
         self.conn = Some(conn);
-        self.to_write = total - optional.len() as u64;
+        self.to_write = total - self.sent_body.len() as u64;
         self.state = State::Sent;
         Ok(())
+    }
+
+    /// The request's URL (WINHTTP_OPTION_URL): the scheme, the host, the
+    /// port unless the scheme's, the path as sent.
+    pub fn url(&self) -> Result<Vec<u16>, u32> {
+        let mut v: Vec<u16> = Vec::new();
+        let scheme: &[u8] = if self.secure { b"https://" } else { b"http://" };
+        let mut port = Vec::new();
+        if self.port != if self.secure { 443 } else { 80 } {
+            put(&mut port, b":")?;
+            decimal(self.port.into(), &mut port)?;
+        }
+        v.try_reserve(scheme.len() + self.host.len() + port.len() + self.path.len())
+            .map_err(|_| NOT_ENOUGH_MEMORY)?;
+        v.extend(scheme.iter().map(|&b| u16::from(b)));
+        v.extend_from_slice(&self.host);
+        v.extend(port.iter().chain(&self.path).map(|&b| u16::from(b)));
+        Ok(v)
+    }
+
+    /// The URL a redirect's Location names: absolute (http or https),
+    /// scheme-relative, an absolute path, a query, or a path relative to
+    /// the request's (RFC 3986 section 5.2); the fragment dropped.
+    fn resolve(&self, location: &[u8]) -> Result<Next, u32> {
+        let dll = self.settings.dll;
+        let location = match location.iter().position(|&b| b == b'#') {
+            Some(i) => &location[..i],
+            None => location,
+        };
+        let scheme_end = location.iter().position(|&b| matches!(b, b':' | b'/' | b'?'));
+        let has_scheme = scheme_end.is_some_and(|i| {
+            i > 0
+                && location[i] == b':'
+                && location[..i].iter().all(|&b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
+        });
+        if has_scheme || location.starts_with(b"//") {
+            let mut wide_url: Vec<u16> = Vec::new();
+            let scheme: &[u8] = match (has_scheme, self.secure) {
+                (true, _) => b"",
+                (false, true) => b"https:",
+                (false, false) => b"http:",
+            };
+            wide_url.try_reserve(scheme.len() + location.len()).map_err(|_| NOT_ENOUGH_MEMORY)?;
+            wide_url.extend(scheme.iter().chain(location).map(|&b| u16::from(b)));
+            let p = url::parse(&wide_url).map_err(|e| {
+                // Another scheme (ftp:, ...) or no host.
+                failed(dll, b"redirect: Location is no http(s) URL", e.into());
+                REDIRECT_FAILED
+            })?;
+            let mut host = Vec::new();
+            put(&mut host, &wide_url[p.host.0..p.host.1])?;
+            let rest: Vec<u8> = narrow(dll, &wide_url[p.path.0..])?;
+            let mut path = Vec::new();
+            if !rest.starts_with(b"/") {
+                put(&mut path, b"/")?;
+            }
+            put(&mut path, &rest)?;
+            return Ok(Next { secure: p.secure, host, port: p.port, path: escaped(&path)? });
+        }
+        let current = match self.path.iter().position(|&b| b == b'?') {
+            Some(i) => &self.path[..i],
+            None => &self.path[..],
+        };
+        let mut path = Vec::new();
+        match location.first() {
+            Some(b'/') => {}
+            Some(b'?') | None => put(&mut path, current)?,
+            Some(_) => {
+                let dir = current.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
+                put(&mut path, &current[..dir])?;
+                if path.is_empty() {
+                    put(&mut path, b"/")?;
+                }
+            }
+        }
+        put(&mut path, location)?;
+        let mut host = Vec::new();
+        put(&mut host, &self.host)?;
+        Ok(Next {
+            secure: self.secure,
+            host,
+            port: self.port,
+            path: escaped(&without_dots(&path)?)?,
+        })
+    }
+
+    /// Where the response just received redirects to, if the policy
+    /// follows it; a redirect it refuses is REDIRECT_FAILED.
+    fn redirect(&self) -> Result<Option<Next>, u32> {
+        let dll = self.settings.dll;
+        let rules = self.settings.redirect_rules;
+        let redirects = match self.status {
+            301 | 302 | 307 | 308 => true,
+            303 => rules == RedirectRules::WinInet,
+            _ => false,
+        };
+        if !redirects || self.settings.redirect_policy == REDIRECT_NEVER {
+            return Ok(None);
+        }
+        let Some(location) = self.header(b"Location") else {
+            return Ok(None);
+        };
+        if self.redirects >= self.settings.max_redirects {
+            failed(dll, b"redirect: more than the maximum", self.redirects.into());
+            return Err(REDIRECT_FAILED);
+        }
+        let next = self.resolve(trim(location))?;
+        if self.secure
+            && !next.secure
+            && self.settings.redirect_policy == REDIRECT_DISALLOW_HTTPS_TO_HTTP
+        {
+            failed(dll, b"redirect: https to http (REDIRECT_POLICY)", self.status.into());
+            return Err(REDIRECT_FAILED);
+        }
+        if matches!(self.status, 307 | 308) && self.streamed {
+            // The body written with WriteData is not kept to send again:
+            // the 3xx response is returned.
+            missing(dll, b"redirect of a body written with WriteData", self.status.into());
+            return Ok(None);
+        }
+        Ok(Some(next))
+    }
+
+    /// Sends the request again to where `next` says.
+    fn follow(&mut self, next: Next) -> Result<(), u32> {
+        self.redirects += 1;
+        let to_get = match self.settings.redirect_rules {
+            RedirectRules::WinHttp => matches!(self.status, 301 | 302) && same(&self.verb, b"POST"),
+            RedirectRules::WinInet => {
+                !matches!(self.status, 307 | 308)
+                    && !same(&self.verb, b"GET")
+                    && !same(&self.verb, b"HEAD")
+            }
+        };
+        if to_get {
+            self.verb = copy(b"GET")?;
+            self.sent_body.clear();
+            self.streamed = false;
+        }
+        // The Host is the new one's, even one the caller gave.
+        self.headers.retain(|h| !same(&h.0, b"Host"));
+        self.secure = next.secure;
+        self.host = next.host;
+        self.port = next.port;
+        self.path = next.path;
+        let total = self.sent_body.len() as u64;
+        self.transmit(total)
     }
 
     pub fn write_data(&mut self, data: &[u8]) -> Result<(), u32> {
@@ -544,6 +797,23 @@ impl Request {
             // The body is not all written yet.
             return Err(INCORRECT_HANDLE_STATE);
         }
+        loop {
+            self.receive_head()?;
+            match self.redirect()? {
+                Some(next) => self.follow(next)?,
+                None => break,
+            }
+        }
+        self.state = State::Received;
+        if self.framing == Framing::Done {
+            self.conn = None;
+        }
+        Ok(())
+    }
+
+    /// Reads the final response's status line and headers on the
+    /// current connection and decides the body's framing.
+    fn receive_head(&mut self) -> Result<(), u32> {
         if let Some(c) = self.conn.as_mut() {
             c.receive_timeout = self.settings.timeouts.response;
         }
@@ -582,19 +852,6 @@ impl Request {
         } else {
             Framing::UntilClose
         };
-        if matches!(self.status, 301 | 302 | 303 | 307 | 308)
-            && self.settings.redirect_policy != 0
-            && self.header(b"Location").is_some()
-        {
-            // Windows follows it (WINHTTP_OPTION_REDIRECT_POLICY, WinINet
-            // without INTERNET_FLAG_NO_AUTO_REDIRECT); gala returns the
-            // redirect itself.
-            missing(self.settings.dll, b"automatic redirect", self.status.into());
-        }
-        self.state = State::Received;
-        if self.framing == Framing::Done {
-            self.conn = None;
-        }
         Ok(())
     }
 

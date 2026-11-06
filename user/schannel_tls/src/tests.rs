@@ -311,3 +311,38 @@ fn renegotiate_on_post_handshake_message() {
     assert_eq!(d.status, sec::E_OK);
     assert_eq!(d.data, 5);
 }
+
+/// The public CA bundle gala ships in the machine root store
+/// (user/roots/public-roots.pem, THIRD_PARTY.md): every certificate in it
+/// is a trust anchor the client's verifier takes (a root that does not
+/// parse would be dropped silently by `Session::client`).
+#[test]
+fn public_roots_are_all_trust_anchors() {
+    let text = include_str!("../../roots/public-roots.pem");
+    let mut store = RootCertStore::empty();
+    let mut count = 0;
+    for block in text.split("-----BEGIN CERTIFICATE-----").skip(1) {
+        let body = block.split("-----END CERTIFICATE-----").next().unwrap();
+        let (mut acc, mut bits, mut der) = (0u32, 0, Vec::new());
+        for c in body.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+            let v = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => panic!("not base64: {c}"),
+            };
+            acc = (acc << 6) | u32::from(v);
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                der.push((acc >> bits) as u8);
+            }
+        }
+        store.add(CertificateDer::from(der)).unwrap();
+        count += 1;
+    }
+    assert!(count > 100, "{count} certificates");
+    assert_eq!(store.len(), count);
+}
