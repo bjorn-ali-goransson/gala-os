@@ -843,3 +843,35 @@ fn injected_input_reaches_a_desktop_a_test_frame_shows() {
     move_console(&two, Some(Presenter::None)).unwrap();
     assert_eq!(inject(&two, at(0)).err(), Some(NtStatus::INVALID_DEVICE_STATE));
 }
+
+/// A bare desktop (nothing can show it: the server profile, no screen and
+/// no `presenter=`) is the window state alone, as the server kernel's:
+/// windows are made, shown, placed, retitled and painted, the clock runs,
+/// and nothing is laid out or drawn for them (no wallpaper, taskbar or
+/// caption), so a machine nothing shows pays for no composition.
+#[test]
+fn a_bare_desktop_keeps_windows_and_draws_nothing() {
+    let mut d = Desktop::new();
+    d.bare = Some("no screen and no presenter=");
+    d.s.screen = (1280, 800);
+    d.s.live = true;
+    let a = d.create(1, 10, 10, 200, 80, &title("Hi"), 0).unwrap();
+    d.show(a, 1, true).unwrap();
+    d.place(a, 1, 20, 30, 300, 100).unwrap();
+    d.set_title(a, 1, &title("There")).unwrap();
+    d.set_minute(12_345);
+    let red = [0x00ff_0000u32; 4];
+    d.present(a, Rect { x: 0, y: 0, w: 2, h: 2 }, &red, 2).unwrap();
+    let w = d.s.window(a).unwrap();
+    assert_eq!((w.x, w.y, w.w, w.h), (20, 30, 300, 100));
+    assert!(w.client.first().is_some_and(|p| p & 0x00ff_ffff == 0x00ff_0000));
+    assert!(w.chrome.caption.is_none());
+    assert!(d.wallpaper.is_none() && d.taskbar.is_none());
+    assert_eq!(d.list().len(), 1);
+    assert_eq!(d.presenter.kind(), Kind::None);
+    // Its program's own move loop finds no button down (no pointer moves
+    // here), as in the server kernel.
+    assert_eq!(d.begin_drag(a, 1).err(), Some(NtStatus::INVALID_DEVICE_STATE));
+    d.destroy_owned(1);
+    assert!(d.s.window(a).is_none() && d.list().is_empty());
+}

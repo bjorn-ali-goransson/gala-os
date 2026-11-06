@@ -75,15 +75,20 @@ pub struct Shell {
 /// nothing composes it).
 const NO_SHADOW: Shadow = Shadow { reach: 0, drop: 0 };
 
+/// Why nothing shows a desktop here (the log, the presenter event, the
+/// state dump; the desktop kernel's bare desktops give theirs).
+const BARE: &str = "no compositor in this kernel";
+
 impl Shell {
     pub const fn new(session: u32) -> Shell {
         Shell { session, d: IrqMutex::new(Desktop(State::new(NO_SHADOW))) }
     }
 
-    /// (windows, live, what shows it): the state dump's figures.
-    pub fn counts(&self) -> (usize, bool, Kind) {
+    /// (windows, live, what shows it, why nothing can): the state
+    /// dump's figures.
+    pub fn counts(&self) -> (usize, bool, Kind, Option<&'static str>) {
         let d = self.d.lock();
-        (d.windows.len(), d.live, Kind::None)
+        (d.windows.len(), d.live, Kind::None, Some(BARE))
     }
 }
 
@@ -138,14 +143,14 @@ fn ensure_live(shell: &Shell, d: &mut Desktop) {
     d.screen = (i64::from(w), i64::from(h));
     d.live = true;
     crate::info!(
-        "desktop: session {} keeps its windows ({w}x{h}), shown by none (no compositor in this kernel)",
+        "desktop: session {} keeps its windows ({w}x{h}), shown by none ({BARE})",
         shell.session
     );
     crate::events::emit(
         crate::events::Category::Window,
         "presenter",
         format_args!(
-            r#""op":"live","session":{},"presenter":"none","w":{w},"h":{h}"#,
+            r#""op":"live","session":{},"presenter":"none","w":{w},"h":{h},"bare":"{BARE}""#,
             shell.session
         ),
     );
@@ -182,7 +187,7 @@ pub fn with<R>(
 pub fn attach(shell: &Shell, kind: Kind, _: Option<(u32, u32)>) -> Result<Kind, NtStatus> {
     if kind != Kind::None {
         crate::warn!(
-            "desktop: session {} cannot be shown by {}: no compositor in this kernel",
+            "desktop: session {} cannot be shown by {}: {BARE}",
             shell.session,
             kind.name()
         );

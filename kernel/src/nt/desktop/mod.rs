@@ -341,6 +341,11 @@ pub struct Desktop {
     s: State<Chrome>,
     /// What shows it (ROADMAP RS B3a): composed rows go there.
     presenter: Presenter,
+    /// Why nothing can ever show it, on a machine where nothing shows
+    /// desktops (`bare`: the server profile, no screen and no
+    /// `presenter=`): then it is the window state alone, as the server
+    /// kernel's (no wallpaper, captions, taskbar or input), shown by none.
+    bare: Option<&'static str>,
     wallpaper: Option<Wallpaper>,
     /// The taskbar's pixels (screen width x TASKBAR, ARGB).
     taskbar: Option<Canvas>,
@@ -394,6 +399,7 @@ impl Desktop {
         Desktop {
             s: State::new(SHADOW),
             presenter: Presenter::None,
+            bare: None,
             wallpaper: None,
             taskbar: None,
             taskbar_dirty: true,
@@ -1199,6 +1205,10 @@ impl Desktop {
     /// Brings the captions, the taskbar and the menu up to date with the
     /// state, collecting damage.
     fn refresh(&mut self) {
+        if self.bare.is_some() {
+            // Nothing will ever draw it.
+            return;
+        }
         if self.s.screen.0 == 0 {
             // Windows alone (host tests): captions only.
             let active = self.s.active;
@@ -1622,10 +1632,11 @@ impl Shell {
         Shell { session, d: IrqMutex::new(Desktop::new()) }
     }
 
-    /// (windows, live, what shows it): the state dump's figures.
-    pub fn counts(&self) -> (usize, bool, Kind) {
+    /// (windows, live, what shows it, why nothing can): the state
+    /// dump's figures.
+    pub fn counts(&self) -> (usize, bool, Kind, Option<&'static str>) {
         let d = self.d.lock();
-        (d.s.windows.len(), d.s.live, d.presenter.kind())
+        (d.s.windows.len(), d.s.live, d.presenter.kind(), d.bare)
     }
 }
 
@@ -1711,12 +1722,10 @@ fn redraw_damage(d: &mut Desktop) {
 }
 
 /// `profile=server` (ROADMAP SD, ARCHITECTURE "Server and desktop
-/// workloads"): no desktop is ever live, even with a screen; windows
-/// still exist (the registry, messages), as without a screen.
+/// workloads"): nothing ever draws a desktop, even with a screen; each
+/// session's desktop keeps its windows as the server kernel's does
+/// (`bare`).
 static SERVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static SERVER_NOTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// "no screen" was logged.
-static NO_SCREEN_NOTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Boots in the server profile (before any program runs).
 pub fn set_server_profile() {
@@ -1733,25 +1742,21 @@ pub fn set_local_presenter(name: &str) -> bool {
     present::set_local(name)
 }
 
-/// Whether this machine has desktops at all: not in the server profile
-/// (noted once in the log), and a screen or `presenter=` (a headless
-/// desktop); without either, GUI calls behave as on a machine without a
-/// screen (noted once).
-fn available() -> bool {
-    use core::sync::atomic::Ordering::Relaxed;
+/// Why nothing can show this machine's desktops, if so: the server
+/// profile (it never draws), or no screen and no `presenter=` (BIOS boots,
+/// gala-um). Then every session's desktop is bare: the window state alone,
+/// shown by none, exactly as the server kernel keeps it (`desktop_off`):
+/// GUI programs work, GalaSession's query reports their windows, and
+/// frames, injected input, the Test and Console presenters and the
+/// shell's actions are refused. Fixed before any program runs.
+fn bare() -> Option<&'static str> {
     if server_profile() {
-        if !SERVER_NOTED.swap(true, Relaxed) {
-            crate::info!("desktop: not drawn (server profile)");
-        }
-        return false;
+        return Some("server profile");
     }
     if present::local().is_some() || platform::screen_size().is_some() {
-        return true;
+        return None;
     }
-    if !NO_SCREEN_NOTED.swap(true, Relaxed) {
-        crate::info!("desktop: no screen and no presenter= (windows live in the registry only)");
-    }
-    false
+    Some("no screen and no presenter=")
 }
 
 /// What shows the console session's desktop when it goes live: the
@@ -1783,14 +1788,31 @@ fn note_frame(session: u32, presenter: &Presenter) {
 /// Makes `shell`'s desktop live if it is not: laid out at its presenter's
 /// size (DEFAULT_SIZE without one), drawn whole there. The console
 /// session's gets the local presenter and the keyboard and mouse;
-/// another session's none. STATUS_NOT_SUPPORTED where there are no
-/// desktops (`available`).
+/// another session's none. Where nothing shows desktops (`bare`) it is
+/// the window state alone at DEFAULT_SIZE, shown by none, as the server
+/// kernel's: nothing is laid out or drawn, no input is started.
 fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
     if d.s.live {
         return Ok(());
     }
-    if !available() {
-        return Err(NtStatus::NOT_SUPPORTED);
+    if let Some(why) = bare() {
+        let (w, h) = DEFAULT_SIZE;
+        d.s.screen = (i64::from(w), i64::from(h));
+        d.s.live = true;
+        d.bare = Some(why);
+        crate::info!(
+            "desktop: session {} keeps its windows ({w}x{h}), shown by none ({why})",
+            shell.session
+        );
+        crate::events::emit(
+            crate::events::Category::Window,
+            "presenter",
+            format_args!(
+                r#""op":"live","session":{},"presenter":"none","w":{w},"h":{h},"bare":"{why}""#,
+                shell.session
+            ),
+        );
+        return Ok(());
     }
     let console = shell.session == super::session::active_console();
     let presenter = if console { local_presenter()? } else { Presenter::None };
@@ -1828,9 +1850,9 @@ fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
     Ok(())
 }
 
-/// The size of `shell`'s desktop (made live if it was not); None where
-/// there are no desktops (no screen and no `presenter=`, the server
-/// profile).
+/// The size of `shell`'s desktop (made live if it was not; DEFAULT_SIZE
+/// where nothing shows desktops); None only without the memory to lay it
+/// out.
 pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
     let mut d = shell.d.lock();
     ensure_live(shell, &mut d).ok()?;
@@ -1838,15 +1860,16 @@ pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
 }
 
 /// Whether shasha's shell (taskbar, start menu, the named window
-/// actions) runs on `shell`'s desktop: wherever the desktop exists (made
-/// live if it was not; the server kernel has none).
+/// actions) runs on `shell`'s desktop (made live if it was not): not on a
+/// bare one (the server profile, no screen and no `presenter=`), as the
+/// server kernel has none.
 pub fn has_shell(shell: &Shell) -> bool {
-    screen(shell).is_some()
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d).is_ok() && d.bare.is_none()
 }
 
-/// Runs `f` on the desktop and redraws what it changed; STATUS_NOT_SUPPORTED
-/// where there are no desktops. Works the same whatever shows the
-/// desktop, or nothing.
+/// Runs `f` on the desktop and redraws what it changed. Works the same
+/// whatever shows the desktop, or nothing, bare or not.
 pub fn with<R>(
     shell: &Shell,
     f: impl FnOnce(&mut Desktop) -> Result<(R, Option<Rect>), NtStatus>,
@@ -1867,10 +1890,25 @@ pub fn with<R>(
 /// windows' places) and the desktop is drawn whole there. The old
 /// presenter goes (a Test frame is freed). Returns the kind it replaced.
 /// Console on another session than the one the console shows is a
-/// console switch (`switch_console`). STATUS_NOT_SUPPORTED where there
-/// are no desktops, and for Console without a screen or on session 0;
+/// console switch (`switch_console`). Where nothing shows desktops
+/// (`bare`) only none is accepted (what shows it already; the desktop
+/// goes live), as in the server kernel; STATUS_NOT_SUPPORTED for the
+/// others there, for Console without a screen or on session 0;
 /// STATUS_NO_MEMORY for a frame.
 pub fn attach(shell: &Shell, kind: Kind, size: Option<(u32, u32)>) -> Result<Kind, NtStatus> {
+    if let Some(why) = bare() {
+        if kind != Kind::None {
+            crate::warn!(
+                "desktop: session {} cannot be shown by {}: {why}",
+                shell.session,
+                kind.name()
+            );
+            return Err(NtStatus::NOT_SUPPORTED);
+        }
+        let mut d = shell.d.lock();
+        ensure_live(shell, &mut d)?;
+        return Ok(Kind::None);
+    }
     if kind == Kind::Console {
         if platform::screen_size().is_none() {
             return Err(NtStatus::NOT_SUPPORTED);
@@ -1931,11 +1969,12 @@ static SWITCH: IrqMutex<()> = IrqMutex::new(());
 /// (WTSGetActiveConsoleSessionId) follows: 0xFFFFFFFF while the switch is
 /// under way, then `to`'s id. Returns what showed `to` before.
 /// STATUS_NOT_SUPPORTED for session 0 (never on the console: session 0
-/// isolation) and where there are no desktops; on a failure (no memory
-/// to lay `to` out at the screen's size) the console stays where it was.
+/// isolation) and where nothing shows desktops (`bare`); on a failure (no
+/// memory to lay `to` out at the screen's size) the console stays where
+/// it was.
 pub fn switch_console(to: &Shell) -> Result<Kind, NtStatus> {
     use super::session;
-    if to.session == session::SERVICES {
+    if to.session == session::SERVICES || bare().is_some() {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     let _switching = SWITCH.lock();
@@ -2070,7 +2109,8 @@ fn pointer_on(
     // Which programs exist (outside the desktop's lock: the file system).
     let (available, n) = if buttons & 1 != 0 { available_programs() } else { ([0; 8], 0) };
     let mut d = shell.d.lock();
-    if !d.s.live {
+    // No pointer moves on a bare desktop.
+    if !d.s.live || d.bare.is_some() {
         return None;
     }
     if buttons & 1 != 0 && !d.menu_open() {
@@ -2160,10 +2200,10 @@ pub fn start_menu() -> Vec<&'static Program> {
 
 /// GalaDesktopAction on window `id` of process `owner` (the desktop's
 /// ids; the caller found it from the window's HWND):
-/// STATUS_NOT_SUPPORTED without shasha on the screen (no screen, the
-/// server profile), STATUS_INVALID_HANDLE when there is no such window.
+/// STATUS_NOT_SUPPORTED without shasha's shell (`has_shell`: a bare
+/// desktop), STATUS_INVALID_HANDLE when there is no such window.
 pub fn window_action(shell: &Shell, owner: u64, id: u32, action: Action) -> Result<(), NtStatus> {
-    if screen(shell).is_none() {
+    if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     let mut d = shell.d.lock();
@@ -2179,9 +2219,9 @@ pub fn window_action(shell: &Shell, owner: u64, id: u32, action: Action) -> Resu
 }
 
 /// The windows the taskbar shows (GalaDesktopAction): none before the
-/// desktop is drawn; STATUS_NOT_SUPPORTED without shasha on the screen.
+/// desktop is drawn; STATUS_NOT_SUPPORTED without shasha's shell.
 pub fn list_windows(shell: &Shell) -> Result<Vec<Listed>, NtStatus> {
-    if screen(shell).is_none() {
+    if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     Ok(shell.d.lock().list())
@@ -2189,9 +2229,9 @@ pub fn list_windows(shell: &Shell) -> Result<Vec<Listed>, NtStatus> {
 
 /// Shows wallpaper `name` (one of WALLPAPERS, or "drawn") from now on
 /// (GalaDesktopAction): STATUS_OBJECT_NAME_NOT_FOUND for another name or
-/// a missing file, STATUS_NOT_SUPPORTED without shasha on the screen.
+/// a missing file, STATUS_NOT_SUPPORTED without shasha's shell.
 pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
-    if screen(shell).is_none() {
+    if !has_shell(shell) {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     let picture = if name.eq_ignore_ascii_case("drawn") {
@@ -2247,7 +2287,7 @@ pub fn wheel_event(notches: i64) {
 
 fn wheel_on(shell: &Shell, notches: i64) {
     let mut d = shell.d.lock();
-    if !d.s.live {
+    if !d.s.live || d.bare.is_some() {
         return;
     }
     d.wheel(notches);
@@ -2264,7 +2304,7 @@ pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
 
 fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) {
     let mut d = shell.d.lock();
-    if !d.s.live {
+    if !d.s.live || d.bare.is_some() {
         return;
     }
     d.key(vk, scan, extended, down);
@@ -2294,7 +2334,7 @@ pub fn tick() {
     for id in ids {
         let Some(desk) = super::session::desk(id) else { continue };
         let mut d = desk.shell.d.lock();
-        if !d.s.live {
+        if !d.s.live || d.bare.is_some() {
             continue;
         }
         if let Some((w, h)) = changed

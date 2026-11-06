@@ -376,10 +376,10 @@ pub fn dump() {
     for d in desks.iter().flatten() {
         let c = d.windows.counts();
         let (hooks, events) = d.hooks.counts();
-        let (on_desktop, live, presenter) = d.shell.counts();
+        let (on_desktop, live, presenter, bare) = d.shell.counts();
         log!(
             info,
-            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), desktop: {} ({} windows, presenter {})",
+            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), desktop: {} ({} windows, presenter {}{}{})",
             d.session,
             c.windows,
             c.top_level,
@@ -392,6 +392,10 @@ pub fn dump() {
             if live { "live" } else { "not live" },
             on_desktop,
             presenter.name(),
+            // Nothing can show it: why (the server kernel, the server
+            // profile, no screen and no `presenter=`).
+            if bare.is_some() { "; never shown: " } else { "" },
+            bare.unwrap_or(""),
         );
         dump_stations(d.session);
         let mut top = [super::window::Info::default(); 16];

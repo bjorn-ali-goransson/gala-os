@@ -56,12 +56,14 @@
 //!   Test frame.
 //!
 //! `server` (scenario `server_windows`, the server kernel: no compositor,
-//! ROADMAP SD): a desktop nobody shows, as on a machine whose desktop no
-//! presenter shows. Session 2's child makes, shows and paints its window
+//! ROADMAP SD; and the desktop kernel where nothing can show a desktop:
+//! `noscreen_windows`, a BIOS boot without `presenter=`, and
+//! `server_profile_windows`, `profile=server`): a desktop nobody shows, as
+//! on a machine whose desktop no presenter shows. Session 2's child makes, shows and paints its window
 //! as above (1280 x 800, visible); the query says live, shown by none,
 //! 1280 x 800, one window; a frame and injected input are
 //! STATUS_INVALID_DEVICE_STATE; presenter none is accepted, Test and
-//! Console are STATUS_NOT_SUPPORTED (nothing in this kernel composes);
+//! Console are STATUS_NOT_SUPPORTED (nothing there composes);
 //! the child repaints while nothing shows it, then destroys its window
 //! (IsWindow FALSE) and ends: the query counts no window.
 //!
@@ -915,8 +917,9 @@ fn server_mode() -> bool {
         .is_some_and(|w| w.iter().copied().eq("server".encode_utf16()))
 }
 
-/// `server`: session 2's desktop on the server kernel, which nothing in
-/// the kernel composes: its window is kept, queried and closed.
+/// `server`: session 2's desktop where nothing composes it (the server
+/// kernel, or the desktop kernel's bare desktops): its window is kept,
+/// queried and closed.
 fn run_server() -> Result<bool, u32> {
     let c = Checks::new(0, false);
     let (st, _) = session_query(SESSION);
