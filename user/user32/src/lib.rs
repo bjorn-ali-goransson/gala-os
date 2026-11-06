@@ -36,6 +36,7 @@ mod tree;
 mod unimplemented;
 mod window;
 mod winevent;
+mod winsta;
 mod wsprintf;
 
 #[allow(dead_code)]
@@ -131,43 +132,6 @@ unsafe extern "system" {
 pub(crate) fn set_last_error(code: u32) {
     // SAFETY: a plain call.
     unsafe { SetLastError(code) };
-}
-
-/// GetProcessWindowStation: gala has no window stations (NULL), which is
-/// how OpenSSL tells it is not on an interactive desktop.
-#[unsafe(no_mangle)]
-pub extern "system" fn GetProcessWindowStation() -> usize {
-    // SAFETY: plain call.
-    unsafe { SetLastError(50) }; // ERROR_NOT_SUPPORTED
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn GetUserObjectInformationW(
-    object: usize,
-    index: i32,
-    info: *mut u8,
-    length: u32,
-    needed: *mut u32,
-) -> i32 {
-    if object == session::DESKTOP {
-        return session::desktop_information(index, info, length, needed);
-    }
-    // SAFETY: plain call.
-    unsafe { SetLastError(6) }; // ERROR_INVALID_HANDLE
-    0
-}
-
-/// GetUserObjectInformationA: as the W form (gala has no window stations).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetUserObjectInformationA(
-    object: usize,
-    index: i32,
-    info: *mut u8,
-    length: u32,
-    needed: *mut u32,
-) -> i32 {
-    GetUserObjectInformationW(object, index, info, length, needed)
 }
 
 /// CharNextExA: the next character of an ANSI string (gala's ANSI code

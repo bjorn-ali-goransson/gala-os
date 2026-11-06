@@ -159,7 +159,7 @@ has a section under "Open items".
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
-| RS | Remote access and sessions | in progress | A, B1, B2 done; B3a next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations done; B3a's presenters next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
@@ -510,13 +510,25 @@ own session and shell.
   sessions (`session_test`); `events=window`; the core/NT process split
   (`nt::process::Core`, which Linux processes use too).
 
+- B3a, window station and desktop objects (`nt::winsta`): WinSta0 and
+  its Default desktop in every session, SYSTEM's `Service-0x0-3e7$` in
+  session 0, a non-interactive logon's station made on first use; a
+  process's station from an inherited handle, STARTUPINFO.lpDesktop,
+  its parent or its logon session; user32's GetProcessWindowStation,
+  Open/CloseWindowStation, SetProcessWindowStation, EnumWindowStationsW,
+  GetThreadDesktop, SetThreadDesktop, OpenDesktop, OpenInputDesktop,
+  CloseDesktop, EnumDesktopsW, GetUserObjectInformationW/A over gala
+  calls (`winsta_test`, `winsta_service`).
 **Next**:
 1. B3a: window state apart from composition, and presenters: console
    attach and switch; a test presenter (headless rendering for screen
    checks without QEMU screendumps); a session with no presenter keeps
    its windows. The Display seam's `screen_flush` and `screen_changed`
-   (from GPU G1) are what a presenter needs. Window station and desktop
-   objects (GetProcessWindowStation is NULL today).
+   (from GPU G1) are what a presenter needs. Window stations' open
+   ends: DACLs on stations and desktops; CreateWindowStationW and
+   CreateDesktopW stay unsupported until BR stage 3 (Chromium's
+   sandbox) needs them, with SwitchDesktop and desktops with windows of
+   their own; UOI_USER_SID; clipboard and atoms per station.
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).

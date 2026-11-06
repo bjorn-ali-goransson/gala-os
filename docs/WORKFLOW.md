@@ -634,6 +634,17 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   `winsta0\default` and a token that may open it (SYSTEM's, moved with
   SetTokenInformation(TokenSessionId), as session_test does), or user32
   fails to initialize.
+- **Window stations depend on the account**: a program run with
+  `as=system` is on `Service-0x0-3e7$\Default` (not visible: OpenSSL
+  calls that a service), the boot user's on `WinSta0\Default`; a child
+  inherits its parent's unless STARTUPINFO.lpDesktop names one, and a
+  name its session lacks leaves it with none (`winsta:` warning; on
+  Windows user32 fails to start). On Windows such a test runs as SYSTEM
+  through `psexec -s` (winsta_test's `service` argument).
+- **Window station and desktop handles block a kernel handover**: once a
+  program asked user32 for its window station or thread desktop it
+  holds handles a handover refuses ("a window station or desktop
+  handle"); handover tests keep away from those calls.
 - **A resource** (a manifest: `manifest_test`): the test's build.rs
   writes a .res file (the documented compiled resource format) and
   passes it to the linker; lld-link converts it itself (its

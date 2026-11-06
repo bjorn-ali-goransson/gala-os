@@ -30,14 +30,16 @@
 //! the session manager of step B4 creates sessions and refuses unknown
 //! ones). Sessions are never removed yet.
 //!
-//! Step B2: each session has its desktop ([`Desk`], Windows' window
-//! station WinSta0 and its desktop "Default"): the window registry, the
+//! Step B2: each session has its window state ([`Desk`], what its
+//! desktops share): the window registry, the
 //! WinEvent hooks and shasha's desktop, each behind its own lock, reached
 //! through the caller's process (`Process::desk`). Nothing about windows
 //! crosses sessions. The window stations' directories exist as on
 //! Windows (`\Windows\WindowStations` for session 0,
-//! `\Sessions\<n>\Windows\WindowStations` for the others); window
-//! station and desktop objects in them are later work.
+//! `\Sessions\<n>\Windows\WindowStations` for the others), each with
+//! the session's window station objects (nt::winsta: WinSta0, and in
+//! session 0 SYSTEM's `Service-0x0-3e7$`), whose desktops all share the
+//! session's `Desk`.
 
 use alloc::vec::Vec;
 
@@ -64,9 +66,10 @@ pub struct Session {
     pub desk: KArc<Desk>,
 }
 
-/// A session's desktop (WinSta0\Default; one per session until several
-/// window stations and desktops are wanted): what the session's GUI
-/// programs share, and nothing another session sees.
+/// A session's window state (what Windows keeps per desktop; shared by
+/// every desktop object of the session, nt::winsta, until desktops with
+/// windows of their own are wanted): what the session's GUI programs
+/// share, and nothing another session sees.
 pub struct Desk {
     pub session: u32,
     /// Every window of the session's processes (FindWindow, EnumWindows,
@@ -200,6 +203,7 @@ fn make(id: u32) -> Result<Session, NtStatus> {
     let parent = stations.len() - "\\WindowStations".len();
     directory(&stations[..parent])?;
     directory(&stations)?;
+    super::winsta::make_session(id)?;
     let bno = directory(&bno_path)?;
     let mut global = Vec::new();
     push_str(&mut global, "\\BaseNamedObjects")?;
@@ -351,6 +355,7 @@ pub fn dump() {
             on_screen,
             if painted { ", drawn" } else { "" },
         );
+        dump_stations(d.session);
         let mut top = [super::window::Info::default(); 16];
         let n = d.windows.top_level(&mut top);
         for w in &top[..n] {
@@ -368,6 +373,31 @@ pub fn dump() {
             );
         }
     }
+}
+
+/// The state dump's line about session `id`'s window stations.
+#[cfg_attr(test, allow(unused_variables))]
+fn dump_stations(id: u32) {
+    let Ok(names) = super::winsta::station_names(id) else { return };
+    let mut line = [0u8; 160];
+    let mut n = 0;
+    for name in &names {
+        for c in char::decode_utf16(name.iter().copied()).chain(core::iter::once(Ok(' '))) {
+            let b = match c {
+                Ok(c) if c.is_ascii() => c as u8,
+                _ => b'?',
+            };
+            if n < line.len() {
+                line[n] = b;
+                n += 1;
+            }
+        }
+    }
+    log!(
+        info,
+        "statedump: session {id} window stations: {}",
+        core::str::from_utf8(&line[..n]).unwrap_or("?").trim_end()
+    );
 }
 
 /// The ids of the sessions that exist, in the order they were made.

@@ -475,6 +475,7 @@ numbers and the version reported to programs depend on it.
 | 0x7f4c, 0x7f4d | GalaClockControl, GalaRandom | "Clock control", "Record/replay" |
 | 0x7f5a, 0x7f5b | GalaRequestHandover, GalaHandoverPause | "Kernel handover" |
 | 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
+| 0x7fa0-0x7fa5 | GalaUserObjectOpen, GalaUserObjectConnection, GalaUserObjectSet, GalaUserObjectClose, GalaUserObjectInformation, GalaUserObjectEnum | "Window stations and desktops" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
   gala's numbers for Windows services (until verified): 0x7f01
@@ -594,6 +595,7 @@ one flat structure, 120 bytes plus the extensions its flags name:
 | 136, 144 | with flag 8: lpReserved2 (the C runtime's descriptors), length |
 | 152 | with flag 16: the primary token (CreateProcessAsUserW; "Access tokens") |
 | 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES); flag 128: DETACHED_PROCESS, no console session |
+| 168, 176 | with flag 256: STARTUPINFO.lpDesktop (UTF-16, `station\desktop` or `desktop`), length in characters ("Window stations and desktops") |
 
 - **Search** (kernel32): a program named without a directory is searched
   for as CreateProcess documents: the caller's executable's directory,
@@ -626,7 +628,9 @@ one flat structure, 120 bytes plus the extensions its flags name:
   terminated and the call fails with STATUS_NO_MEMORY.
 - The child inherits the caller's console session (unless flags 32/128
   say otherwise), job ("Job objects") and a copy of its primary token
-  (unless flag 16 gives one).
+  (unless flag 16 gives one). Its window station and desktop: an
+  inherited window station handle's, else lpDesktop's (flag 256), else
+  the caller's ("Window stations and desktops").
 
 ### Process lifetime, OpenProcess and process lists
 
@@ -5672,9 +5676,10 @@ One design covers remote shell access, a remote graphical desktop
 one machine: **sessions own desktops, and a desktop is shown by a
 presenter** (the local console, a remote shasha client, or none).
 ROADMAP RS tracks it: B1 (session ids, per-session named objects) and
-B2 (a desktop per session) are built; B3a (presenters), B3b (remote
-shasha), B4 (session manager) and B5 (sessions across a handover) are
-the planned design below. Test program: `user/session_test`.
+B2 (a desktop per session) are built, and B3a's window station and
+desktop objects; B3a's presenters, B3b (remote shasha), B4 (session
+manager) and B5 (sessions across a handover) are the planned design
+below. Test programs: `user/session_test`, `user/winsta_test`.
 
 What this builds on:
 
@@ -5709,9 +5714,8 @@ will make them and refuse unknown ids). Sessions are never removed yet.
     with `Global` -> `\BaseNamedObjects`, `Local` -> itself, `Session` ->
     `\Sessions\BNOLINKS`; `\Sessions\BNOLINKS\<n>` links to it;
   - window station directories: `\Windows\WindowStations` (session 0)
-    and `\Sessions\<n>\Windows\WindowStations`, empty (no window station
-    objects: GetProcessWindowStation returns NULL, which OpenSSL reads as
-    "not interactive").
+    and `\Sessions\<n>\Windows\WindowStations`, holding the session's
+    window stations ("Window stations and desktops (B3a)").
 - **kernel32** names objects under the caller's session directory, from
   PEB.SessionId (`sync::session_path`, also used for file mappings):
   `Local\x` and a plain `x` resolve to the session's directory,
@@ -5755,8 +5759,9 @@ will make them and refuse unknown ids). Sessions are never removed yet.
 
 ### A desktop per session (B2)
 
-`nt::session::Desk` is a session's desktop (Windows' WinSta0\Default;
-one per session until several window stations and desktops are wanted).
+`nt::session::Desk` is a session's window state (what Windows keeps per
+desktop; one per session, shared by every desktop object of the session
+until desktops with windows of their own are wanted).
 It is made with the session (`session::ensure` returns it) and held by
 every process of the session (`Process::desk`, fixed at creation like
 `Process::session`; a handover-restored process gets its session's
@@ -5840,6 +5845,83 @@ on Windows too), 1 for the local console, 2+ for remote logons.
    fonts) is a presenter. So the server kernel (no `shasha` feature,
    ROADMAP SD) can serve GUI programs to a remote shasha client without a
    compositor of its own, and a desktop with no presenter keeps its
+### Window stations and desktops (B3a)
+
+`kernel/src/nt/winsta.rs` (objects, the choice of a process's station;
+host tests there), `syscalls/winsta_calls.rs` (gala's services),
+`user/user32/src/winsta.rs`. Test programs: `user/winsta_test`
+(scenarios `winsta_test`, the boot user's, and `winsta_service`, the
+same program as SYSTEM).
+
+- **Objects**: types `WindowStation` and `Desktop` (object type names
+  as NtQueryObject reports them; access rights and generic mappings of
+  winuser.h and "Window Station/Desktop Security and Access Rights").
+  A station is a permanent named object in its session's window
+  stations directory and holds its desktops, which are not in the
+  namespace (opened by name relative to the caller's station, as
+  Windows' station parses them). Every station has the desktop
+  `Default`.
+- **Per session** (made with the session, `winsta::make_session`):
+  `WinSta0`, interactive; session 0 also SYSTEM's `Service-0x0-3e7$`.
+  A non-interactive logon session's station, `Service-0x<high>-<low>$`
+  after its LUID, is made with its Default desktop the first time a
+  process of that logon connects ("Process Connection to a Window
+  Station"). Stations are never removed.
+- **USEROBJECTFLAGS.dwFlags**: WSF_VISIBLE for every user session's
+  WinSta0; not for session 0's (never displayed, session 0 isolation;
+  gala's choice, unverified) nor a logon session's station. OpenSSL
+  takes a station named `Service-0x...` or without WSF_VISIBLE for a
+  service: sshd (SYSTEM, session 0) is one, as on Windows.
+- **A process's connection** (`Process::ui`, `winsta::Connection`):
+  its creator records what it asks for before the process runs
+  (GalaCreateProcess): an inherited window station handle's station,
+  else STARTUPINFO.lpDesktop (`station\desktop` or a desktop alone),
+  else the creator's own station and desktop names (resolved, or what
+  it was asked for), else nothing. The first window station or desktop
+  call resolves it (`winsta::choose`, in the process's session): the
+  inherited station, the named one, or WinSta0 for an interactive
+  logon (the token holds INTERACTIVE, S-1-5-4) and the logon session's
+  station otherwise; the desktop named, else Default. A name the
+  session lacks leaves the process without a station (the calls fail;
+  on Windows user32's start-up fails there) and says so in the log.
+- **Handles**: the process's station handle (GetProcessWindowStation)
+  and the startup desktop's (GetThreadDesktop, the same for every
+  thread) are opened on first use with all access, not inheritable.
+  SetProcessWindowStation and SetThreadDesktop replace them with the
+  caller's handle. Handles in use cannot be closed: NtClose returns
+  STATUS_HANDLE_NOT_CLOSABLE (ERROR_INVALID_HANDLE), CloseDesktop
+  STATUS_DEVICE_BUSY (ERROR_BUSY), CloseWindowStation of the process's
+  station too. A thread's own desktop handle is freed when it ends.
+- **Other calls**: OpenWindowStation (an unknown or empty name is
+  STATUS_OBJECT_NAME_NOT_FOUND, a backslash STATUS_OBJECT_PATH_NOT_FOUND),
+  OpenDesktop (empty: STATUS_OBJECT_TYPE_MISMATCH, a backslash
+  STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
+  OpenInputDesktop (the process's station's Default, a new handle each
+  time; STATUS_INVALID_DEVICE_REQUEST from a station that cannot receive
+  input), GetUserObjectInformationW/A (UOI_FLAGS, UOI_NAME, UOI_TYPE,
+  UOI_IO; the size with the NUL, also when short; the A form reports
+  the UTF-16 size when short and the ANSI bytes on success, as Windows
+  does), EnumWindowStationsW (the caller's session's), EnumDesktopsW.
+- **Limits**: no DACLs on stations and desktops (any process of the
+  session may open them); CreateWindowStation and CreateDesktop are
+  unsupported (ledger; BR stage 3, Chromium's sandbox); SwitchDesktop
+  does not exist; every desktop of a session shares its `Desk`, so
+  SetThreadDesktop does not refuse a thread with windows (Windows:
+  ERROR_BUSY when the desktop differs); UOI_USER_SID and UOI_HEAPSIZE
+  are unsupported (ledger); a process holding a station or desktop
+  handle is refused by a kernel handover (B5), and a carried process
+  connects again from its logon session; no clipboard or atom tables
+  per station yet.
+- **Observability**: the first call logs where the process is and why
+  (`winsta: pid 4 (x.exe, session 1) is on WinSta0\Default (its logon
+  session's)`, or `(STARTUPINFO.lpDesktop)`, `(its parent's, pid 4)`, `(an
+  inherited window station handle)`), or a warning when the name is not
+  found; an open of an unknown station or desktop name is logged (the
+  first 32); a logon session's station made says so. Events (category
+  `window`): `"ev":"winsta"` with `"op":"connect"` (pid, session,
+  station, desktop, `from`), `"connect failed"`, `"made"`. The state
+  dump's sessions part lists each session's stations.
+
    windows alive (RDP-style disconnect and resume).
 2. **Presenters** (B3a), at most one per desktop at a time:
    - **Console**: the framebuffer through `platform::Display`, PS/2

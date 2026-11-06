@@ -456,6 +456,10 @@ pub enum ObjectBody {
     KeyedEvent(super::keyed_event::KeyedEvent),
     /// An access token (nt::token).
     Token(super::token::Token),
+    /// A window station (nt::winsta).
+    WindowStation(super::winsta::WindowStation),
+    /// A desktop of a window station (nt::winsta).
+    Desktop(super::winsta::Desktop),
 }
 
 /// Where a named object lives in the namespace.
@@ -583,6 +587,8 @@ impl KObject {
             ObjectBody::Job(_) => "Job",
             ObjectBody::KeyedEvent(_) => "KeyedEvent",
             ObjectBody::Token(_) => "Token",
+            ObjectBody::WindowStation(_) => "WindowStation",
+            ObjectBody::Desktop(_) => "Desktop",
         }
     }
 
@@ -629,7 +635,9 @@ impl KObject {
             | ObjectBody::Key(_)
             | ObjectBody::Job(_)
             | ObjectBody::KeyedEvent(_)
-            | ObjectBody::Token(_) => None,
+            | ObjectBody::Token(_)
+            | ObjectBody::WindowStation(_)
+            | ObjectBody::Desktop(_) => None,
         }
     }
 
@@ -660,6 +668,8 @@ impl KObject {
             ObjectBody::Job(_) => super::job::JOB_MAPPING,
             ObjectBody::KeyedEvent(_) => super::keyed_event::KEYED_EVENT_MAPPING,
             ObjectBody::Token(_) => super::token::TOKEN_MAPPING,
+            ObjectBody::WindowStation(_) => super::winsta::WINSTA_MAPPING,
+            ObjectBody::Desktop(_) => super::winsta::DESKTOP_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

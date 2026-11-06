@@ -824,6 +824,11 @@ fn check_object(
         ObjectBody::Key(_) => return Err(refuse("an open registry key")),
         ObjectBody::Job(_) => return Err(refuse("a job object")),
         ObjectBody::Token(_) => {}
+        // Window stations and desktops are carried by nobody yet (ROADMAP
+        // RS B5): a process that asked user32 for one holds a handle.
+        ObjectBody::WindowStation(_) | ObjectBody::Desktop(_) => {
+            return Err(refuse("a window station or desktop handle"));
+        }
         ObjectBody::Directory(_) | ObjectBody::SymbolicLink(_) => {
             return Err(refuse("an object directory or link handle"));
         }

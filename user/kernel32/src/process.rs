@@ -414,7 +414,7 @@ fn create_process(
     // SAFETY: the caller's STARTUPINFOW (dwFlags at 60).
     let own_std =
         !startup.is_null() && unsafe { *startup.add(60).cast::<u32>() } & STARTF_USESTDHANDLES != 0;
-    let mut p = [0u8; 168];
+    let mut p = [0u8; 184];
     let mut put = |at: usize, v: u64| p[at..at + 8].copy_from_slice(&v.to_le_bytes());
     put(0, image.chars.as_ptr() as u64);
     put(16, line.as_ptr() as u64);
@@ -468,8 +468,22 @@ fn create_process(
         // Flag 128: no console at all.
         bits |= 128;
     }
+    // Flag 256: STARTUPINFO.lpDesktop (at 16), the window station and
+    // desktop the child connects to (else it inherits the caller's).
+    // SAFETY: the caller's STARTUPINFOW.
+    let desktop = if startup.is_null() {
+        core::ptr::null()
+    } else {
+        unsafe { *startup.add(16).cast::<*const u16>() }
+    };
+    if !desktop.is_null() {
+        bits |= 256;
+        let name = wide_slice(desktop);
+        p[168..176].copy_from_slice(&(name.as_ptr() as u64).to_le_bytes());
+        p[176..180].copy_from_slice(&(name.len() as u32).to_le_bytes());
+    }
     p[12..16].copy_from_slice(&bits.to_le_bytes());
-    // SAFETY: the 168-byte parameter block; its pointers live through
+    // SAFETY: the 184-byte parameter block; its pointers live through
     // the call.
     let status = unsafe { GalaCreateProcess(p.as_mut_ptr()) };
     if own_env {
@@ -590,6 +604,25 @@ fn create_process_a(
     let dir_w = match convert(directory, &mut dir) {
         Ok(p) => p,
         Err(e) => return fail_with(e, FALSE),
+    };
+    // STARTUPINFOA's lpDesktop (at 16) as UTF-16, in a copy of the
+    // structure (STARTUPINFOEXA's 112 bytes with its attribute list).
+    let mut desktop = [0u16; 260];
+    let mut startup_w = [0u64; 14];
+    let startup = if startup.is_null() {
+        startup
+    } else {
+        let size = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 { 112 } else { 104 };
+        // SAFETY: the caller's STARTUPINFO(EX)A of `size` bytes; our copy.
+        unsafe {
+            core::ptr::copy_nonoverlapping(startup, startup_w.as_mut_ptr().cast::<u8>(), size);
+        }
+        let name = startup_w[2] as *const u8;
+        match convert(name, &mut desktop) {
+            Ok(p) => startup_w[2] = p as u64,
+            Err(e) => return fail_with(e, FALSE),
+        }
+        startup_w.as_ptr().cast::<u8>()
     };
     match token {
         Some(token) => CreateProcessAsUserW(

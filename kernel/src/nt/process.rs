@@ -108,6 +108,9 @@ pub struct Process {
     /// process ends, whatever its status (a filter such as Crashpad's
     /// ends the process with its own code).
     pub unhandled_exception: IrqMutex<Option<super::crashreport::Note>>,
+    /// Its window station and desktops (nt::winsta): what its creator
+    /// asked for, resolved at its first window station or desktop call.
+    pub ui: super::winsta::Connection,
     /// Its system-call ABI, fixed at creation from the image (a PE image
     /// is NT): its threads' system calls go to that personality's
     /// dispatcher (`crate::personality`, ROADMAP LX seam 2).
@@ -809,6 +812,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         console,
         last_exception: IrqMutex::new(None),
         unhandled_exception: IrqMutex::new(None),
+        ui: super::winsta::Connection::new(),
         // A PE image: the NT personality (an ELF loader would choose Linux).
         personality: Personality::Nt,
     })?;
@@ -927,6 +931,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
         console: None,
         last_exception: IrqMutex::new(None),
         unhandled_exception: IrqMutex::new(None),
+        ui: super::winsta::Connection::new(),
         personality: bare.personality,
     })?;
     prune();
@@ -1366,6 +1371,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         console: None,
         last_exception: IrqMutex::new(None),
         unhandled_exception: IrqMutex::new(None),
+        ui: super::winsta::Connection::new(),
         // The handover's PROCESSES record has no personality yet: NT is
         // the only one with processes (a second needs a record version).
         personality: Personality::Nt,

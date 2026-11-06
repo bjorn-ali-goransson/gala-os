@@ -690,6 +690,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("advapi32_test", "secur32.dll", "Windows/System32"),
     ("advapi32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("advapi32_test", "bcrypt.dll", "Windows/System32"),
+    ("winsta_test", "ntdll.dll", "Windows/System32"),
+    ("winsta_test", "kernel32.dll", "Windows/System32"),
+    ("winsta_test", "user32.dll", "Windows/System32"),
     ("kernel32_system_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_system_test", "psapi.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
@@ -2010,6 +2013,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "filezilla",
 ];
 /// Memory for the Elasticsearch scenario's VM.
+    "winsta_test",
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
 const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
@@ -3022,6 +3026,17 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
     ),
 ];
 
+    (
+        // RS step B3a: each process's window station and desktop, and
+        // where the choice came from.
+        "winsta_test",
+        &[
+            r#""ev":"winsta","op":"connect","pid":"#,
+            r#""station":"WinSta0","desktop":"Default","from":"logon""#,
+            r#""from":"startupinfo""#,
+            r#""from":"parent""#,
+        ],
+    ),
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
@@ -3970,6 +3985,34 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // P1 (Elasticsearch): keyed events (the JDK's wepoll selector).
         name: "keyed_event_test",
+    Scenario {
+        // Window stations and desktops, ROADMAP RS step B3a
+        // (user/winsta_test): the boot user's program and its children
+        // are on WinSta0\Default of session 1.
+        name: "winsta_test",
+        cmdline: "qemu_exit events=window run=winsta_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "is on WinSta0\\Default (its logon session's)",
+            "is on WinSta0\\Default (STARTUPINFO.lpDesktop)",
+            "is on WinSta0\\Default (its parent's, pid",
+            "asked for window station \"dummy name\": 0xc0000034",
+            "winsta_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same program run as SYSTEM in session 0, as services are:
+        // the SYSTEM logon session's window station, not visible.
+        name: "winsta_service",
+        cmdline: "qemu_exit as=system run=winsta_test.exe args=service",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "is on Service-0x0-3e7$\\Default (its logon session's)",
+            "winsta_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
         cmdline: "qemu_exit run=keyed_event_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["keyed_event_test: ok", "exited with status 0x00000000"],
@@ -6517,6 +6560,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
                 &format!("batch-{}", group[0].name),
                 &cmdline,
                 &extra_modules(group[0].name),
+    ("winsta_service", "winsta_test"),
             )
         }
     };
@@ -7017,6 +7061,7 @@ fn build_um(release: bool) -> Result<PathBuf> {
         build.arg("--release");
     }
     run_quiet(&mut build)?;
+    ("winsta_test", "child processes (one NT process per Linux process)"),
     Ok(target_dir().join(if release { "release" } else { "debug" }).join("um"))
 }
 

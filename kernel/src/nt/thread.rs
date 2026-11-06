@@ -1170,6 +1170,8 @@ pub fn exit_current(status: NtStatus) -> ! {
         // never got there), and messages sent to it fail.
         t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
         t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
+        // A desktop handle it was set to (SetThreadDesktop) may be closed.
+        t.process.ui.thread_ended(t.id);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));
         if let Some(id) = *t.sched_id.lock() {
             unbind_sched(id, &object);

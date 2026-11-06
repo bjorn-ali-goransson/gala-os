@@ -65,6 +65,12 @@ port. Lines that tools and agents rely on:
   `syscall: no dispatcher for personality ..`.
 - `session` lines for a session made after boot; `window: pid P
   (session S) ... not visible across sessions` (the first 32 times).
+- `winsta: pid P (x.exe, session S) is on WinSta0\Default (why)` at a
+  process's first window station or desktop call (a warning when the
+  name it asked for does not exist), `winsta: ... asked for window
+  station "x": 0xc0000034` for an open of an unknown name (the first
+  32), `winsta: made window station Service-0x...$` (ARCHITECTURE
+  "Window stations and desktops (B3a)").
 - `console N: Ctrl+C k` and `console N: pid P tid T (name) takes Ctrl+C
   k after m ms`, with a warning `took Ctrl+C k late` from 250 ms: when
   each process's control handler took the event.
@@ -120,7 +126,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
 | `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names) |
-| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND) |
+| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test` |
 
 A `record` boot's recording also goes to this port (`"ev":"rec"`,
 whatever the mask; extracted to `<iso>.rec`).
@@ -299,8 +305,9 @@ CPU) before killing the VM and waits up to 20 s for the dump:
 2. From the boot thread (may take locks): every NT thread's system call
    and wait object (with `session N personality nt (name)`), every
    scheduler thread, the ledger, the statistics, each session's
-   windows (`statedump: session N: ... windows ...`), then `statedump:
-   end`. A machine too stuck for this still has part 1.
+   windows (`statedump: session N: ... windows ...`) and window stations
+   (`statedump: session N window stations: WinSta0 ...`), then
+   `statedump: end`. A machine too stuck for this still has part 1.
 
 xtask's line says how far the dump got (`did not answer the NMI`: the
 machine is wedged or the handler is not installed yet).

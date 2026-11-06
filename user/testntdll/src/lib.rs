@@ -287,6 +287,17 @@ syscall_stubs! {
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes, client_id: *const [usize; 2]
     );
     NtResumeProcess = 0x7f92, fn(process: usize);
+    // Window stations and desktops (gala's own; nt::winsta), for user32.
+    GalaUserObjectOpen = 0x7fa0, fn(
+        kind: u32, name: *const u16, length: u32, access: u32, inherit: u32, handle: *mut usize
+    );
+    GalaUserObjectConnection = 0x7fa1, fn(what: u32, tid: u32, handle: *mut usize);
+    GalaUserObjectSet = 0x7fa2, fn(what: u32, handle: usize);
+    GalaUserObjectClose = 0x7fa3, fn(kind: u32, handle: usize);
+    GalaUserObjectInformation = 0x7fa4, fn(
+        handle: usize, index: u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
+    GalaUserObjectEnum = 0x7fa5, fn(handle: usize, buffer: *mut u8, length: u32, needed: *mut u32);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);
@@ -1803,6 +1814,9 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0035, 183),  // OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
     (0xc000_0039, 161),  // OBJECT_PATH_INVALID -> ERROR_BAD_PATHNAME
     (0xc000_003a, 3),    // OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND
+    (0xc000_003b, 161),  // OBJECT_PATH_SYNTAX_BAD -> ERROR_BAD_PATHNAME
+    (0x8000_0011, 170),  // DEVICE_BUSY -> ERROR_BUSY
+    (0xc000_0235, 6),    // HANDLE_NOT_CLOSABLE -> ERROR_INVALID_HANDLE
     (0xc000_0043, 32),   // SHARING_VIOLATION
     (0xc000_0045, 87),   // INVALID_PAGE_PROTECTION -> ERROR_INVALID_PARAMETER
     (0xc000_0046, 288),  // MUTANT_NOT_OWNED -> ERROR_NOT_OWNER

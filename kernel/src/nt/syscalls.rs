@@ -131,6 +131,17 @@ pub const NT_RESUME_PROCESS: u32 = 0x7f92;
 /// NtOpenThread (gala's number, unverified; Crashpad's handler opens a
 /// crashed client's threads for their contexts).
 pub const NT_OPEN_THREAD: u32 = 0x7f93;
+/// Window stations and desktops (nt::winsta), for gala's user32:
+/// OpenWindowStation/OpenDesktop/OpenInputDesktop, the process's and
+/// threads' handles, SetProcessWindowStation/SetThreadDesktop,
+/// CloseWindowStation/CloseDesktop, GetUserObjectInformation, the name
+/// lists.
+pub const GALA_USER_OBJECT_OPEN: u32 = 0x7fa0;
+pub const GALA_USER_OBJECT_CONNECTION: u32 = 0x7fa1;
+pub const GALA_USER_OBJECT_SET: u32 = 0x7fa2;
+pub const GALA_USER_OBJECT_CLOSE: u32 = 0x7fa3;
+pub const GALA_USER_OBJECT_INFORMATION: u32 = 0x7fa4;
+pub const GALA_USER_OBJECT_ENUM: u32 = 0x7fa5;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -396,6 +407,22 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_REQUEST_HANDOVER, "GalaRequestHandover", 0, gala_request_handover),
     (GALA_HANDOVER_PAUSE, "GalaHandoverPause", 1, gala_handover_pause),
     (GALA_UNHANDLED_EXCEPTION, "GalaUnhandledException", 2, gala_unhandled_exception),
+    (GALA_USER_OBJECT_OPEN, "GalaUserObjectOpen", 6, winsta_calls::gala_user_object_open),
+    (
+        GALA_USER_OBJECT_CONNECTION,
+        "GalaUserObjectConnection",
+        3,
+        winsta_calls::gala_user_object_connection,
+    ),
+    (GALA_USER_OBJECT_SET, "GalaUserObjectSet", 2, winsta_calls::gala_user_object_set),
+    (GALA_USER_OBJECT_CLOSE, "GalaUserObjectClose", 2, winsta_calls::gala_user_object_close),
+    (
+        GALA_USER_OBJECT_INFORMATION,
+        "GalaUserObjectInformation",
+        5,
+        winsta_calls::gala_user_object_information,
+    ),
+    (GALA_USER_OBJECT_ENUM, "GalaUserObjectEnum", 4, winsta_calls::gala_user_object_enum),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -1013,6 +1040,11 @@ fn pipe_request(
 /// NtClose(Handle)
 fn nt_close(call: &mut Call<'_>) -> NtStatus {
     let handle = Handle(arg!(call, 0));
+    // The process's window station and its threads' desktop handles
+    // (nt::winsta) stay open while in use, as on Windows.
+    if call.process.ui.holds(handle.0) {
+        return NtStatus::HANDLE_NOT_CLOSABLE;
+    }
     let closed = call.process.handles.lock().close(handle);
     let Some(entry) = closed else { return NtStatus::INVALID_HANDLE };
     let was_process = matches!(entry.object.body, ObjectBody::Process(_) | ObjectBody::Thread(_));
@@ -5397,6 +5429,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         parent_token
     };
     let token = tri!(super::token::for_new_process(Some(&source)));
+    let (desktop_origin, desktop_spec, inherited_station) =
+        tri!(child_desktop(call, ptr, flags, &table));
     let spawned = process::spawn(process::Spawn {
         name,
         path: path_static,
@@ -5418,6 +5452,7 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         Err(_) => return NtStatus::NO_MEMORY,
     };
     job_calls::join(&child, job);
+    child.ui.request(desktop_origin, desktop_spec, inherited_station);
     let thread_id = match &thread_object.body {
         ObjectBody::Thread(t) => t.id,
         _ => 0,
@@ -5457,6 +5492,58 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     NtStatus::SUCCESS
+}
+
+/// The window station and desktop a new process is to connect to
+/// (nt::winsta; "Process Connection to a Window Station"): a window
+/// station handle it inherits (in `table`), else STARTUPINFO.lpDesktop
+/// (flag 256: its UTF-16 at 168, length at 176), else its creator's
+/// station and desktop (the names it connected to, or what it was asked
+/// for), else nothing (its logon session's default).
+fn child_desktop(
+    call: &Call<'_>,
+    ptr: u64,
+    flags: u64,
+    table: &super::object::HandleTable,
+) -> Result<(super::winsta::Origin, Vec<u16>, Option<ObjectRef>), NtStatus> {
+    use super::winsta::{self, Origin};
+    let inherited = table
+        .iter()
+        .find(|(_, e)| {
+            e.attributes & HANDLE_ATTRIBUTES != 0 && winsta::station_of(&e.object).is_some()
+        })
+        .map(|(_, e)| e.object.clone());
+    let named = if flags & 256 != 0 {
+        let mut ext = [0u8; 12];
+        call.process.read(ptr + 168, &mut ext).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
+        let at = u64::from_le_bytes(ext[0..8].try_into().unwrap_or([0; 8]));
+        let len = u32::from_le_bytes(ext[8..12].try_into().unwrap_or([0; 4]));
+        if len > 512 {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        Some(call.read_wide(at, u64::from(len))?)
+    } else {
+        None
+    };
+    if let Some(station) = inherited {
+        return Ok((Origin::Handle, named.unwrap_or_default(), Some(station)));
+    }
+    if let Some(spec) = named {
+        return Ok((Origin::StartupInfo, spec, None));
+    }
+    let parent = call.process.id;
+    match call.process.ui.resolved() {
+        Some(Ok((s, d))) => Ok((Origin::Parent(parent), winsta::spec_of(&s, &d)?, None)),
+        _ => {
+            let (_, spec, inherited) = call.process.ui.request_of()?;
+            let origin = if spec.is_empty() && inherited.is_none() {
+                Origin::Logon
+            } else {
+                Origin::Parent(parent)
+            };
+            Ok((origin, spec, inherited))
+        }
+    }
 }
 
 /// ByteOffset values meaning "end of file" and "current position".
@@ -6771,3 +6858,6 @@ mod token_calls;
 
 #[path = "security_calls.rs"]
 mod security_calls;
+
+#[path = "winsta_calls.rs"]
+mod winsta_calls;
