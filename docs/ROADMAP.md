@@ -1040,7 +1040,8 @@ everyone starving. GPU memory is charged here too (item GPU).
 Done: clock control (`clock=`, GalaClockControl), record/replay of the
 boot time, clock readings and random numbers (`record`, `replay=`,
 `um --record/--replay`, GalaRandom), disk latency
-(`failpoint=disk_io:delay:<ms>`) (ARCHITECTURE "Clock control",
+(`failpoint=disk_io:delay:<ms>`), absolute timers and timeouts that
+follow a moved system time (ARCHITECTURE "Clock control",
 "Record/replay"; WORKFLOW "Clock control, record/replay, slow devices").
 Next:
 1. Record/replay of network frames, disk reads and input events (needs
@@ -1050,8 +1051,6 @@ Next:
 3. API-level faults in gala's DLLs (Application Verifier style).
 4. The read-write control channel (OBSERVABILITY "Planned facilities",
    the live introspection channel).
-5. A frozen clock's effect on absolute timers (Windows re-evaluates them
-   on a system time change).
 
 #### R8. Chain of trust for updates
 

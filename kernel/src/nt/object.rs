@@ -292,6 +292,10 @@ pub struct TimerState {
     pub due_time: u64,
     /// Ticks between expiries (0 = once).
     pub period: u64,
+    /// The next expiry was asked for as an absolute system time: it
+    /// follows changes of the system time (KeSetTimer's absolute due
+    /// times); a periodic timer's later expiries are relative.
+    pub absolute: bool,
     /// (thread, routine, context) of the APC to queue on expiry.
     pub apc: Option<(ObjectRef, u64, u64)>,
 }

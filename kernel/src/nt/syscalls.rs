@@ -2948,9 +2948,15 @@ fn nt_set_timer(call: &mut Call<'_>) -> NtStatus {
     let apc = (routine != 0).then_some((routine, context));
     let now = platform::system_time();
     let due_time = timer::due_system_time(due, now);
-    let due = timer::due_tick(due, platform::ticks(), now);
-    let previous =
-        tri!(timer::arm(&object, due, due_time, timer::period_ticks(period as u32), apc));
+    let ticks = timer::due_tick(due, platform::ticks(), now);
+    let previous = tri!(timer::arm(
+        &object,
+        ticks,
+        due_time,
+        timer::period_ticks(period as u32),
+        due > 0,
+        apc
+    ));
     let ptr = arg!(call, 6);
     if ptr != 0 && call.process.write(ptr, &[u8::from(previous)]).is_err() {
         return NtStatus::ACCESS_VIOLATION;
@@ -3696,6 +3702,11 @@ pub fn allow_handover_requests() -> Result<ObjectRef, NtStatus> {
         kind: EventType::Synchronization,
         dispatcher: Dispatcher::new(0),
     }))
+        // Absolute timeouts and timers follow the system time.
+        if matches!(op, clockctl::Op::ShiftSystem(_) | clockctl::Op::SetSystem(_)) {
+            let woken = super::wait::system_time_changed();
+            info!("clock: the system time moved: {woken} absolute waits and the timers look again");
+        }
     .map_err(|_| NtStatus::NO_MEMORY)?;
     *HANDOVER_REQUEST.lock() = Some(event.clone());
     Ok(event)

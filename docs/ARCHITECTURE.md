@@ -7622,6 +7622,19 @@ every moment.
   before returning, so a timer tick cannot show the old clock after the
   new one. Every change is logged (`clock: <process> asked to ...`) and
   is an event (`events=mock`, `"ev":"clock"`).
+- **Absolute due times follow the system time**, as Windows' absolute
+  timers and timeouts do (KeSetTimer, KeWaitForSingleObject): a wait
+  with a positive NT timeout is `wait::Timeout::Until(system time)`,
+  whose tick is worked out again on every pass and which ends once the
+  system time reaches it; a timer set to an absolute time keeps
+  `TimerState::absolute` until its first expiry (a periodic timer's
+  later ones are relative), and the timer worker fires it when the
+  system time reaches it. GalaClockControl 3 and 4 call
+  `wait::system_time_changed`, which wakes every thread in an absolute
+  wait (listed while it sleeps; a change counter covers one that moved
+  between working out the deadline and sleeping) and the timer worker,
+  logged (`clock: the system time moved: N absolute waits and the timers
+  look again`). Moving the time back does not un-signal a fired timer.
 - **Waits**: the schedulers compare deadlines with the virtual clock.
   The kernel's tick interrupt passes both clocks to `sched::on_tick`:
   waiters (`State::Waiting`, the NT layer's and the kernel's own
@@ -7647,16 +7660,16 @@ every moment.
   across yields and a busy loop; an advance of an hour moves every view
   by exactly an hour, ends a 10-minute wait (STATUS_TIMEOUT) and a
   20-minute sleep but not a 2-hour wait, which a second advance ends;
-  the system time moves alone; rate 1000 runs 30 s of program time in
+  the system time moves alone, and a timer due at an absolute time
+  and a wait until it end when the system time alone passes it (a
+  relative timer does not); rate 1000 runs 30 s of program time in
   about 30 ms of the unscaled clock; booted with
   `clock=control,freeze,system:2147483648` the clock reads exactly
   2038-01-19 03:14:08 UTC. Host tests: the transform, request decoding,
   the flag, the record's layout, the simulation's scaled and frozen
   clock.
 - **Limits**: RDTSC in program code reads the real TSC in the kernel
-  (only the simulation virtualizes it); absolute timeouts are converted
-  to relative ones on entry, so a later system-time change does not move
-  them (Windows re-evaluates absolute timers); kernel threads'
+  (only the simulation virtualizes it); kernel threads'
   `sleep_ms` run on real time by design; clock control state is not
   carried across a handover (a handover with programs is refused while
   it is armed).

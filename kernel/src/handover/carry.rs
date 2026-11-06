@@ -1487,7 +1487,15 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
     let mut timer_apcs = Vec::new();
     each(rec, tag::TIMERS, |mut e| {
         let t = TimerRec::read(&mut e);
-        let state = TimerState { due: t.due, due_time: t.due_time, period: t.period, apc: None };
+        let state = TimerState {
+            due: t.due,
+            due_time: t.due_time,
+            period: t.period,
+            // Only clock control moves the system time alone, and a
+            // handover is refused while it is armed.
+            absolute: false,
+            apc: None,
+        };
         let o = new_object(ObjectBody::Timer(Timer {
             dispatcher: Dispatcher::new(t.signal),
             synchronization: t.synchronization,
