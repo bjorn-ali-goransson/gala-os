@@ -109,6 +109,7 @@ has a section under "Open items".
 | O1 | Ledger, event stream, backtraces, benchmarks | done | OBSERVABILITY "Event stream", "Missing-features ledger", "Backtraces and panic output", "Benchmarks" |
 | U1-U3 | gala-um | done | 109 programs in seconds; GALA_UM.md |
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
+| U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | HS | Hygiene sweeps | in progress | recurring; first sweep and its four leftovers done; the next sweep after the next change of assumptions |
 
 ### NT core services (done, by test)
@@ -209,6 +210,45 @@ Also needed by CP step 3: programs started from gala-um's interactive
 prompt are child processes.
 
 **Done when**: schannel_test and process_test pass in um-test.
+
+### U5. gala-um: a window on the host
+
+**Goal**: `um --window <program.exe>` shows the desktop and the
+program's windows in a window on the Linux host, with the host
+window's keyboard and mouse as the input, so GUI programs (gui_test,
+console_window) run and can be debugged in gala-um.
+
+**Approach**: the NT layer already draws through `nt::platform::Display`
+(`screen_size`, `screen_write_row`, `screen_flush`, `screen_changed`);
+gala-um's implementation (`kernel/src/hosted`) reports no screen. With
+`--window` it backs those calls with a host pixel buffer shown in an
+X11 or Wayland window (a small windowing crate, recorded in
+`THIRD_PARTY.md`; host code, so `hosted::HostCode` around its
+allocations), the window's size as the screen's and its resizes
+through `screen_changed`. A host thread turns the window's events into
+the desktop's input entry points (`nt::desktop::key_event`,
+`wheel_event`, and an absolute pointer call beside the PS/2 driver's
+relative `pointer_event`). The window is a presenter in RS B3a's sense
+(the desktop's state apart from where it is shown). Without
+`--window`, nothing changes: um-test runs in containers with no
+display.
+
+**Next** (test first):
+1. The `Display` implementation and the window; a host test that a
+   frame written through `Display` reaches the buffer, and
+   `um --window --screenshot=<png>` (a headless buffer, no host window)
+   so the screen scenarios' pixel checks run in gala-um.
+2. Input: keys, wheel and an absolute pointer; gui_test and
+   console_window out of `NOT_IN_UM` for the headless mode, with input
+   scripted as xtask scripts it for QEMU.
+3. With U4: programs started from the start menu and windows across
+   processes (windows_across_test, uia_test).
+
+**Done when**: gui_test and console_window pass in um-test headless,
+and `um --window` shows gui_test's window on a Linux desktop, driven
+by the host's mouse and keyboard. Observability: the window's size,
+resizes and input events under `--trace`, and a failure to open the
+host window reported with the display it tried.
 
 ### HS. Hygiene sweeps
 

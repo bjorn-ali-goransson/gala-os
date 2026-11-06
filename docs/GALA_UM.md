@@ -201,7 +201,7 @@ Excluded:
 | `NOT_IN_UM`: process_test, smprace_test, conpty_test, busybox, cmd_test, go_exec, logon_test, windows_across_test, uipi_test, shell32_test, winevent_test, uia_test | child processes: one NT process per Linux process |
 | `NOT_IN_UM`: system_test, session_test | run as SYSTEM (a boot option), and child processes |
 | kernel flags um does not apply: `as=system` (lsa_test, restricted_test, profile_test), `start=` (schannel_test's Nginx), `events=`, `wallpaper=`, ... | the `UM_FLAGS` rule above |
-| `NOT_IN_UM`: gui_test, gala_cli, console_window | need a screen |
+| `NOT_IN_UM`: gui_test, gala_cli, console_window | need a screen (ROADMAP U5) |
 | `NOT_IN_UM`: bench | measures the platform: gala-um's numbers are the host's |
 | kernel scenarios (selftest, fault-*, trace, events) | not program scenarios: they test the kernel itself with kernel flags |
 
@@ -315,7 +315,8 @@ dump"); um-test's `timeout -s QUIT` sends it when a program hangs.
   Running them needs a host process per NT process sharing one NT layer
   (objects, the loopback TCP stack), or several address spaces in one;
   until then those scenarios run in QEMU only (ROADMAP U4).
-- **No network card, no disk, no screen**: see "What runs in gala-um".
+- **No network card, no disk, no screen**: see "What runs in gala-um";
+  a window on the host is planned (ROADMAP U5).
 - **Fidelity drift**: anything emulated differently (memory placement,
   timer resolution, tick updates, lock spinning) must be listed here, so
   that a gala-um pass is not mistaken for kernel correctness. Tests that
