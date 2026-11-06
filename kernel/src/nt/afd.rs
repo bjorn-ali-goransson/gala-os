@@ -5,6 +5,7 @@
 //! Windows) and ReactOS's `drivers/afd/shared.h` (marked "to be verified"
 //! there); see THIRD_PARTY.md.
 
+use afd_abi::Layout;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -624,17 +625,20 @@ fn poll_once(
     wait: bool,
     process: &Process,
 ) -> Result<Option<u64>, Failure> {
+    let l = layout_of(process);
     let mut out = Vec::new();
-    out.try_reserve(POLL_HEADER + POLL_ENTRY * sockets.len()).map_err(|_| NtStatus::NO_MEMORY)?;
-    out.resize(POLL_HEADER, 0);
+    out.try_reserve(Layout::POLL_HEADER + l.poll_entry() * sockets.len())
+        .map_err(|_| NtStatus::NO_MEMORY)?;
+    out.resize(Layout::POLL_HEADER, 0);
     let mut count = 0u32;
     for (handle, state, wanted) in sockets {
         let events = poll_events(state) & wanted;
         if events != 0 {
-            // Capacity is reserved above.
-            let _ = out.try_extend_from_slice(&handle.to_le_bytes());
-            let _ = out.try_extend_from_slice(&events.to_le_bytes());
-            let _ = out.try_extend_from_slice(&0u32.to_le_bytes());
+            // Capacity is reserved above: {HANDLE; events; status}.
+            let at = out.len();
+            out.resize(at + l.poll_entry(), 0);
+            l.put_ptr(&mut out, at, *handle);
+            out[at + l.poll_events()..][..4].copy_from_slice(&events.to_le_bytes());
             count += 1;
         }
     }
@@ -649,10 +653,11 @@ fn poll_once(
     Ok(Some(out.len() as u64))
 }
 
-/// afd_poll_params: timeout (i64), count (u32), exclusive (u8), padding;
-/// then 16-byte entries (packed to 4).
-const POLL_HEADER: usize = 16;
-const POLL_ENTRY: usize = 16;
+/// The layouts of `process`'s AFD requests: its pointers' width (a WOW64
+/// process's are 4 bytes; afd_abi).
+fn layout_of(process: &Process) -> Layout {
+    if process.wow64.is_some() { Layout::X86 } else { Layout::X64 }
+}
 
 /// Completes the pending requests that can finish now, oldest first
 /// (a receive, send, accept or connect waits while an older one of its
@@ -995,6 +1000,11 @@ impl Request<'_> {
         self.process.write(addr, data).map_err(|_| NtStatus::ACCESS_VIOLATION)
     }
 
+    /// The caller's request layouts (afd_abi).
+    fn layout(&self) -> Layout {
+        layout_of(self.process)
+    }
+
     fn input<const N: usize>(&self) -> Result<[u8; N], NtStatus> {
         if (self.input_len as usize) < N {
             return Err(NtStatus::INVALID_PARAMETER);
@@ -1138,18 +1148,20 @@ fn to_transport_address(a: Addr, v6: bool) -> ([u8; TRANSPORT_ADDRESS6_LEN], usi
 
 /// Reads the WSABUF array of a RECV/SEND request: (address, length) pairs.
 fn buffers(r: &Request<'_>) -> Result<Vec<(u64, usize)>, NtStatus> {
-    let info: [u8; 24] = r.input()?;
-    let (array, count) = (u64_at(&info, 0), u32_at(&info, 8) as usize);
+    let l = r.layout();
+    let (info, _): ([u8; 24], usize) = r.input_upto(l.info_size())?;
+    let (array, count) = (l.get_ptr(&info, 0), u32_at(&info, l.info_count()) as usize);
     if count > 1024 {
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let mut out = Vec::new();
     out.try_reserve(count).map_err(|_| NtStatus::NO_MEMORY)?;
     for i in 0..count {
-        // WSABUF: {u32 len; (pad); char *buf}.
+        // WSABUF: {u32 len; char *buf}.
         let mut wsabuf = [0u8; 16];
-        r.read(array + 16 * i as u64, &mut wsabuf)?;
-        out.try_push((u64_at(&wsabuf, 8), u32_at(&wsabuf, 0) as usize))
+        let size = l.wsabuf_size();
+        r.read(array + (size * i) as u64, &mut wsabuf[..size])?;
+        out.try_push((l.get_ptr(&wsabuf, l.wsabuf_buf()), u32_at(&wsabuf, 0) as usize))
             .map_err(|_| NtStatus::NO_MEMORY)?;
     }
     Ok(out)
@@ -1257,8 +1269,10 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             Immediate::Async(Op::WaitForListen { output: r.output, output_len: r.output_len })
         }
         IOCTL_AFD_ACCEPT => {
-            let b: [u8; 16] = r.input()?;
-            let (sequence, handle) = (u32_at(&b, 4), u64_at(&b, 8));
+            let l = r.layout();
+            let (b, _): ([u8; 16], usize) = r.input_upto(l.accept_size())?;
+            let sequence = u32_at(&b, Layout::ACCEPT_SEQUENCE);
+            let handle = l.get_handle(&b, Layout::ACCEPT_HANDLE);
             let accepting = endpoint_of(r.process, handle)?;
             let mut slot = accepting.socket.lock();
             if slot.is_some() {
@@ -1274,9 +1288,12 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         IOCTL_AFD_SUPER_ACCEPT => {
             // {u8 san; u8 fix_alignment; HANDLE accept; u32 receive_length;
             //  u32 local_length; u32 remote_length}
-            let b: [u8; 28] = r.input()?;
-            let (handle, receive) = (u64_at(&b, 8), u32_at(&b, 16));
-            let (local, remote) = (u32_at(&b, 20), u32_at(&b, 24));
+            let l = r.layout();
+            let (b, _): ([u8; 28], usize) = r.input_upto(l.super_accept_size())?;
+            let handle = l.get_handle(&b, l.super_accept_handle());
+            let receive = u32_at(&b, l.super_accept_receive());
+            let (local, remote) =
+                (u32_at(&b, l.super_accept_local()), u32_at(&b, l.super_accept_remote()));
             if receive != 0 {
                 // AcceptEx that also waits for the first data.
                 super::ledger::record(
@@ -1298,20 +1315,27 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             Immediate::Async(Op::SuperAccept { accept, output: r.output, receive, local })
         }
         IOCTL_AFD_POLL => {
-            let header: [u8; POLL_HEADER] = r.input()?;
+            // AFD_POLL_INFO: the header, then {HANDLE; events; status}
+            // entries of the caller's width (afd_abi).
+            let l = r.layout();
+            let header: [u8; Layout::POLL_HEADER] = r.input()?;
             let timeout = u64_at(&header, 0) as i64;
             let count = u32_at(&header, 8) as usize;
-            if count > 1024 || (r.input_len as usize) < POLL_HEADER + POLL_ENTRY * count {
+            let entry_size = l.poll_entry();
+            if count > 1024 || (r.input_len as usize) < Layout::POLL_HEADER + entry_size * count {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
             let mut sockets = Vec::new();
             sockets.try_reserve(count).map_err(|_| NtStatus::NO_MEMORY)?;
             for i in 0..count {
-                let mut entry = [0u8; POLL_ENTRY];
-                r.read(r.input + (POLL_HEADER + POLL_ENTRY * i) as u64, &mut entry)?;
-                let handle = u64_at(&entry, 0);
+                let mut entry = [0u8; 16];
+                r.read(
+                    r.input + (Layout::POLL_HEADER + entry_size * i) as u64,
+                    &mut entry[..entry_size],
+                )?;
+                let handle = l.get_handle(&entry, 0);
                 let state = endpoint_of(r.process, handle)?;
-                let _ = sockets.try_push((handle, state, u32_at(&entry, 8)));
+                let _ = sockets.try_push((handle, state, u32_at(&entry, l.poll_events())));
             }
             // The timeout is left to the caller (a wait with a timeout,
             // then NtCancelIoFileEx); only 0 (just look) is honoured here.
@@ -1369,8 +1393,9 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             socket()?;
             // afd_recv_params.msg_flags (Wine): AFD_MSG_PEEK 0x80; OOB
             // (0x40) and WAITALL (0x4000) are not supported yet.
-            let info: [u8; 24] = r.input()?;
-            let msg_flags = u32_at(&info, 16);
+            let l = r.layout();
+            let (info, _): ([u8; 24], usize) = r.input_upto(l.info_size())?;
+            let msg_flags = u32_at(&info, l.info_tdi_flags());
             if msg_flags & (AFD_MSG_OOB | AFD_MSG_WAITALL) != 0 {
                 super::ledger::record(
                     "NtDeviceIoControlFile",
@@ -1439,15 +1464,10 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
     })
 }
 
-/// AFD_RECV_INFO_UDP (ReactOS `drivers/afd/shared.h`, to be verified):
-/// `{WSABUF *buffers; u32 count; u32 afd_flags; u32 tdi_flags; (pad);
-/// void *address; int *address_length}`.
-const RECV_DATAGRAM_INFO: usize = 40;
-/// AFD_SEND_INFO_UDP (ReactOS, to be verified): `{WSABUF *buffers; u32
-/// count; u32 afd_flags; TDI_REQUEST_SEND_DATAGRAM (40 bytes);
-/// TDI_CONNECTION_INFORMATION at 56}`, whose RemoteAddressLength (at 88)
-/// and RemoteAddress (a TRANSPORT_ADDRESS, at 96) name the destination.
-const SEND_DATAGRAM_INFO: usize = 104;
+// AFD_RECV_INFO_UDP and AFD_SEND_INFO_UDP (ReactOS `drivers/afd/
+// shared.h`, to be verified): their layouts for the caller's width are
+// afd_abi's (the destination is TDI_CONNECTION_INFORMATION's
+// RemoteAddressLength and RemoteAddress).
 
 /// The requests a datagram endpoint answers differently from a stream
 /// one (None: the shared handling applies).
@@ -1502,14 +1522,15 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
             Immediate::Done(0)
         }
         IOCTL_AFD_SEND_DATAGRAM => {
-            let info: [u8; SEND_DATAGRAM_INFO] = r.input()?;
-            let len = u32_at(&info, 88) as usize;
+            let l = r.layout();
+            let (info, _): ([u8; 104], usize) = r.input_upto(l.send_dgram_size())?;
+            let len = u32_at(&info, l.send_dgram_address_len()) as usize;
             if len < TRANSPORT_ADDRESS_LEN {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
             let mut ta = [0u8; TRANSPORT_ADDRESS6_LEN];
             let n = len.min(TRANSPORT_ADDRESS6_LEN);
-            r.read(u64_at(&info, 96), &mut ta[..n])?;
+            r.read(l.get_ptr(&info, l.send_dgram_address()), &mut ta[..n])?;
             let to = transport_address(&ta[..n])?;
             let buffers = buffers(r)?;
             bound_or_bind()?;
@@ -1523,8 +1544,9 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         IOCTL_AFD_RECV | IOCTL_AFD_RECV_DATAGRAM => {
             // Receiving needs a bound socket (WSAEINVAL otherwise).
             (*ep.socket.lock()).ok_or(NtStatus::INVALID_PARAMETER)?;
-            let info: [u8; 24] = r.input()?;
-            let msg_flags = u32_at(&info, 16);
+            let l = r.layout();
+            let (info, _): ([u8; 24], usize) = r.input_upto(l.info_size())?;
+            let msg_flags = u32_at(&info, l.info_tdi_flags());
             if msg_flags & (AFD_MSG_OOB | AFD_MSG_WAITALL) != 0 {
                 super::ledger::record(
                     "NtDeviceIoControlFile",
@@ -1534,8 +1556,8 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
                 return Err(NtStatus::NOT_SUPPORTED);
             }
             let (address, address_len) = if r.code == IOCTL_AFD_RECV_DATAGRAM {
-                let b: [u8; RECV_DATAGRAM_INFO] = r.input()?;
-                (u64_at(&b, 24), u64_at(&b, 32))
+                let (b, _): ([u8; 40], usize) = r.input_upto(l.recv_dgram_size())?;
+                (l.get_ptr(&b, l.recv_dgram_address()), l.get_ptr(&b, l.recv_dgram_address_len()))
             } else {
                 (0, 0)
             };

@@ -80,9 +80,8 @@ In order:
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW** follow-ups (done otherwise): 32-bit sockets through
-   wow64.dll (AFD's IOCTLs), the x86 Inno runs' other ledger gaps;
-   kernelbase; kernel32_test built for x86.
+5. **WOW** follow-ups (done otherwise): the x86 Inno runs' other ledger
+   gaps; kernelbase; kernel32_test built for x86.
 6. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's rest (quota_test on Windows), R8's Secure
    Boot.
@@ -1668,8 +1667,13 @@ wow64.dll converts 32-bit system calls in user mode).
   its AppsAndFeaturesEntries, its 32-bit compiler run, the .iss
   association its IDE writes, listed, uninstalled through its 32-bit
   uninstaller); an x86 portable program is gala's to install too (no
-  fallback to another installer). The "Done when" below is met; what
-  follows are follow-ups.
+  fallback to another installer). **32-bit sockets**
+  (`wow64_sock_test`: the x86 WSADATA, ADDRINFOA, WSABUFs and fd_set; TCP
+  and UDP on the loopback address; select): the kernel's AFD reads a
+  WOW64 caller's requests in their x86 layout, from `kernel/afd_abi`,
+  which gala's ws2_32 builds them with too; wow64.dll passes AFD's
+  IOCTLs through. The "Done when" below is met; what follows are
+  follow-ups.
 
 **Next**:
 1. Stage 3's rest, the 32-bit system DLLs: kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
@@ -1692,15 +1696,14 @@ wow64.dll converts 32-bit system calls in user mode).
    path and names relative to a RootDirectory handle (it rewrites full
    NT paths only); nested exceptions and collided unwinds in the x86
    dispatcher; ThreadWow64Context for 64-bit debuggers. Stage 2's
-   leftovers, each in the ledger: the job information classes, AFD's
-   IOCTLs (sockets), CONTEXT_FLOATING_POINT on NtSetContextThread.
+   leftovers, each in the ledger: the job information classes,
+   CONTEXT_FLOATING_POINT on NtSetContextThread.
    The 32-bit advapi32's own gaps: its service SIDs load bcrypt, which
    has no 32-bit build yet (LoadLibrary fails: NT SERVICE names do not
    resolve in a 32-bit process); its exports include ntrt's runtime
    symbols. The registry view's: WOW6432Node's `Classes` link and
    `HKEY_USERS\<SID>_Classes` are not modelled (ARCHITECTURE "Registry").
-2. Gaps the x86 Inno runs leave in the ledger: AFD's IOCTLs through wow64.dll
-   (32-bit sockets), FormatMessage's HRESULT texts (REGDB_E_CLASSNOTREG:
+2. Gaps the x86 Inno runs leave in the ledger: FormatMessage's HRESULT texts (REGDB_E_CLASSNOTREG:
    on that error path, when a COM class is missing, Inno's Setup raised an
    access violation, not yet understood), comctl32's TaskDialogIndirect,
    shell32's SHPathPrepareForWriteW, rstrtmgr, riched20/msftedit and sfc

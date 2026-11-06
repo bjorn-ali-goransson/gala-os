@@ -39,6 +39,7 @@ jobs:
           cargo clippy -p um -- -D warnings
           cargo clippy -p galapkg --tests -- -D warnings
           cargo clippy -p lx_abi --tests -- -D warnings
+          cargo clippy -p afd_abi --tests -- -D warnings
           cargo clippy -p schannel_tls --tests -- -D warnings
           cargo clippy -p lx_abi --target x86_64-unknown-none -- -D warnings
           cargo build --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives

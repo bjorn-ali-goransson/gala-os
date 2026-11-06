@@ -848,14 +848,19 @@ numbers, 0x7f.., fail there).
   ntrt as _;` and ntrt as an x86-only dependency in its Cargo.toml (the
   runtime functions it calls itself declared in an x86 `extern "C"`
   block); a structure it reads at byte offsets becomes a `repr(C)` type
-  with pointer-sized fields (comctl32's `layout.rs`), TEB reads go
-  through `fs:[0x18]` and the x86 offsets; add it to `USER_DLLS_X86` and
+  with pointer-sized fields (comctl32's `layout.rs`), TEB reads and
+  writes go through `fs:` and the x86 offsets (grep the crate for `gs:[`:
+  ws2_32's `gs:[0x68]` LastErrorValue wrote outside the 32-bit TEB); add it to `USER_DLLS_X86` and
   to CI's i686 clippy line. Find byte-offset code with a grep for
   `.add(8).cast` / `.add(16).cast` / `[u8; N]` buffers: a structure with
   a pointer has other offsets and another size on x86 (WNDCLASSW 40 bytes,
   not 72; WSADATA's fields in another order). A COM class a 32-bit DLL
   serves needs its registration under `SOFTWARE\Classes\WOW6432Node` in
   `registry.seed`.
+- An AFD request structure (ws2_32 to the kernel) is laid out by
+  `kernel/afd_abi`'s `Layout` on both sides, never at byte offsets of
+  one width: a new field or IOCTL goes there, with its x64 and x86
+  offsets in its host tests (`cargo test -p afd_abi`).
 - A 32-bit C GUI program: `user/wow64_gui_test` (mingw's i686 GCC with
   `-municode`, `-luser32 -lgdi32`); its scenario ships `x86/user32.dll`,
   `x86/gdi32.dll` (and kernel32, msvcrt, ntdll) to SysWOW64. gala's own

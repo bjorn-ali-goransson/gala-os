@@ -2202,6 +2202,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_gui_test", "x86/user32.dll", "Windows/SysWOW64"),
     ("wow64_gui_test", "x86/gdi32.dll", "Windows/SysWOW64"),
     ("wow64_gui_test", "user/bin/wow64_gui_test.exe", "gala"),
+    // wow64_sock_test: a 32-bit Winsock program and the 32-bit ws2_32.
+    ("wow64_sock_test", "wow64.dll", "Windows/System32"),
+    ("wow64_sock_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "user/bin/wow64_sock_test.exe", "gala"),
     // pk_install_inno32: the x86 Inno Setup installer in the snapshot's
     // mirror (with pk_install_test's set and wow64_inno's 32-bit DLLs:
     // MODULE_SETS).
@@ -2711,6 +2718,8 @@ fn unit_tests() -> Result {
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
+    // AFD's request layouts for both pointer sizes (kernel/afd_abi).
+    run_cmd(cargo().args(["test", "--package", "afd_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
@@ -7053,6 +7062,17 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_gui_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WOW64: Winsock from a 32-bit program (user/wow64_sock_test,
+        // mingw's i686 compiler, checked-in binary): the x86 WSADATA,
+        // ADDRINFOA, WSABUF and fd_set, TCP and UDP on the loopback
+        // address through AFD (whose structures the kernel reads in the
+        // caller's layout).
+        name: "wow64_sock_test",
+        cmdline: "qemu_exit run=wow64_sock_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_sock_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 4: an x86 Inno Setup installer (Inno Setup 6.5.4's
         // own, PREBUILT innosetup6) installs silently for the current user:
         // its 32-bit setup loader, the Setup it extracts and runs on gala's
@@ -8155,6 +8175,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_inno", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_sock_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),

@@ -67,6 +67,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "afd_abi"
+version = "0.1.0"
+
+[[package]]
 name = "afd_poll_test"
 version = "0.1.0"
 
@@ -1019,6 +1023,7 @@ version = "0.1.0"
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "afd_abi",
  "ed25519-compact",
  "libc",
  "lx_abi",
@@ -2720,6 +2725,7 @@ dependencies = [
 name = "ws2_32"
 version = "0.1.0"
 dependencies = [
+ "afd_abi",
  "gala_stubs",
  "ntrt",
 ]

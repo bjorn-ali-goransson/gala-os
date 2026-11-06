@@ -12,6 +12,8 @@ bench = false
 
 [dependencies]
 gala_stubs = { path = "../gala_stubs" }
+# AFD's request layouts, shared with the kernel.
+afd_abi = { path = "../../kernel/afd_abi" }
 
 [target.'cfg(target_arch = "x86")'.dependencies]
 ntrt = { path = "../ntrt" }

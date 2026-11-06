@@ -226,18 +226,11 @@ pub fn convert_out(kinds: &[K], args: &[u32], slots: &[Slot], status: NtStatus) 
     Ok(())
 }
 
-/// FILE_DEVICE_NETWORK: AFD's (sockets') IOCTLs, whose structures hold
-/// pointers (buffer arrays, addresses).
-const FILE_DEVICE_NETWORK: u32 = 0x12;
-
-/// The service `number` with arguments of `kinds`.
+/// The service `number` with arguments of `kinds`. NtDeviceIoControlFile's
+/// control codes pass as they are: AFD's (sockets') structures are read
+/// by the kernel in the caller's layout (afd_abi), as Windows' AFD reads
+/// a 32-bit caller's.
 pub fn call(number: u32, kinds: &[K], args: &[u32]) -> NtStatus {
-    // NtDeviceIoControlFile: control codes pass as they are, except the
-    // network's, which are not converted yet.
-    if number == 0x0007 && args[5] >> 16 == FILE_DEVICE_NETWORK {
-        crate::unsupported_service(number, b"AFD IOCTL");
-        return crate::STATUS_NOT_SUPPORTED;
-    }
     let mut slots: [Slot; 16] = Default::default();
     let mut out = [0u64; 16];
     if let Err(e) = convert_in(kinds, args, &mut out, &mut slots) {

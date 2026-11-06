@@ -3911,6 +3911,16 @@ object in the namespace; opening anything below it creates an endpoint
   WSAIoctl SIO_BASE_HANDLE / SIO_BSP_HANDLE_POLL, which return the
   socket itself (no layered providers).
 
+- **The caller's layouts**: AFD's structures hold pointers and handles
+  of the caller's width. A WOW64 process's requests are read as x86
+  ones, as Windows' AFD reads a 32-bit caller's (IoIs32bitProcess), and
+  wow64.dll passes AFD's IOCTLs through unconverted. The layouts for both
+  widths come from one definition, `kernel/afd_abi` (`Layout`: each
+  structure's offsets from the pointer size by the C rules, host-tested
+  for both), which the kernel (`layout_of(process)`) and gala's ws2_32
+  (`Layout::NATIVE`, `user/ws2_32/src/afd.rs`) share. The offsets below
+  are x64's.
+
 #### IOCTLs
 
 Code = 0x12000 | function << 2 | method. Layouts marked "to be verified"
@@ -6798,12 +6808,13 @@ Win32 Structured Exception Handling", MSJ 1997).
 | The 32-bit user32 and gdi32 (SysWOW64) | `user/user32`, `user/gdi32`, `user/gala_heap` built for i686; their services' rows in `user/wow64/src/generic.rs` |
 | The 32-bit comctl32, oleaut32, ole32, shell32, shlwapi, winhttp, ws2_32 and the rest of what an x86 Inno installer loads | those crates built for i686 (`USER_DLLS_X86`); typed structures in `user/comctl32/src/layout.rs`, `user/ws2_32/src/layout.rs` |
 | The stubs, callers and table agree | `xtask/src/stub_audit.rs` (`cargo xtask stub-audit`) |
+| 32-bit sockets: AFD's requests in the caller's layout | `kernel/afd_abi` (shared), `kernel/src/nt/afd.rs` (`layout_of`), `user/ws2_32/src/afd.rs` |
 | The registry's 32-bit view | `kernel/src/nt/regview.rs`, applied in `nt/registry_calls.rs` (`key_view`) |
 | The environment by bitness | `nt/wow64.rs` (`environment`) |
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
 
 ### Decisions
 
@@ -6982,8 +6993,10 @@ Conversions:
 A service or class without a conversion fails with
 STATUS_NOT_IMPLEMENTED (STATUS_INVALID_INFO_CLASS for a class) and is
 recorded in the ledger (`wow64.dll!service 0x00c1`,
-`wow64.dll!NtQueryVirtualMemory(class)`, `wow64.dll!service 0x0007
-(AFD IOCTL)`), so a program's first missing thunk names itself.
+`wow64.dll!NtQueryVirtualMemory(class)`), so a program's first missing
+thunk names itself. NtDeviceIoControlFile's control codes pass through:
+AFD (sockets) reads a WOW64 caller's structures in their x86 layout
+(`kernel/afd_abi`, "AFD").
 
 **Fault-safe access**: wow64.dll reads and writes a caller's memory
 (its arguments on the 32-bit stack included) only through
@@ -7072,9 +7085,8 @@ mpr, comdlg32, uxtheme, imm32, dwmapi, msimg32, msctf, winspool,
 wtsapi32, shfolder, bcrypt (its padding infos typed), winhttp, secur32
 (its handle tags the low half on x86) and ws2_32 (WSADATA, whose fields
 come in another order on x86, ADDRINFO and ADDRINFOEX typed in
-`layout.rs`; AFD's buffers to the kernel keep the kernel's 64-bit layout,
-and wow64.dll does not convert AFD's IOCTLs yet, so a 32-bit socket call
-fails into the ledger). user32 and gdi32's structures with pointers are
+`layout.rs`; its AFD requests in the caller's layout, `afd_abi`'s, which
+the kernel reads as such: `wow64_sock_test`). user32 and gdi32's structures with pointers are
 typed for both too: WNDCLASSW (GetClassInfoW), CURSORINFO, FLASHWINFO,
 HIGHCONTRAST's size, BITMAP (CreateBitmapIndirect), and GetObjectW's
 LOGBRUSH, BITMAP and DIBSECTION sizes by pointer size; WM_COPYDATA's
@@ -7233,8 +7245,8 @@ under their own names: `testdll32.dll`).
 - Without a 32-bit ntdll an exception in 32-bit code ends the process
   (with its crash report) and 32-bit APCs are dropped (in the ledger).
 - Not converted yet (the ledger names them): the job information
-  classes, AFD's IOCTLs (sockets), gala's window and console services,
-  CONTEXT_FLOATING_POINT on NtSetContextThread. gala has no
+  classes, the pseudo console's services, CONTEXT_FLOATING_POINT on
+  NtSetContextThread. gala has no
   NtCreateThreadEx (kernel32 uses NtCreateThread).
 - A kernel handover refuses a WOW64 process ("32-bit code (WOW64)").
 - gala-um cannot run 32-bit code (the segments are the host kernel's).

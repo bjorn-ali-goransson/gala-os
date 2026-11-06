@@ -5317,11 +5317,22 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
     // afd_get_events_params {flags, status[13]}); done at once.
     if code == super::afd::IOCTL_AFD_EVENT_SELECT || code == super::afd::IOCTL_AFD_GET_EVENTS {
         let status = if code == super::afd::IOCTL_AFD_EVENT_SELECT {
-            if input_len < 12 {
+            // {HANDLE event; int mask} of the caller's width (afd_abi).
+            let l = if call.process.wow64.is_some() {
+                afd_abi::Layout::X86
+            } else {
+                afd_abi::Layout::X64
+            };
+            if (input_len as usize) < l.event_select_mask() + 4 {
                 return NtStatus::INVALID_PARAMETER;
             }
-            let h = tri!(call.read_u64(input));
-            let mask = tri!(call.read_u64(input + 8)) as u32;
+            let mut b = [0u8; 16];
+            let n = l.event_select_mask() + 4;
+            if call.process.read(input, &mut b[..n]).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let h = l.get_handle(&b, 0);
+            let mask = u32::from_le_bytes([b[n - 4], b[n - 3], b[n - 2], b[n - 1]]);
             let event = match h {
                 0 => None,
                 h => Some(tri!(event_object(call, Handle(h), EVENT_MODIFY_STATE))),
