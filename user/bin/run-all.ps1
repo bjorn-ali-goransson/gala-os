@@ -35,7 +35,7 @@ Add-Type -Namespace Gala -Name Native -MemberDefinition @'
 
 # Command lines that scenarios pass (gala: `args=` in xtask/src/main.rs).
 # nginx.exe would serve until stopped: -v prints its version and exits.
-$arguments = @{ "args_test" = 'alpha "beta gamma"'; "go_http" = 'self'; "handover_net_test" = 'self'; "nginx" = '-v'; "busybox" = 'sh -c "echo hello | cat; echo pipe=$?; echo abc | sed s/b/X/; echo count=$(printf ''x\ny\nx\n'' | grep -c x); exit 3"' }
+$arguments = @{ "args_test" = 'alpha "beta gamma"'; "wow64_crt_test" = 'one "two three"'; "go_http" = 'self'; "handover_net_test" = 'self'; "nginx" = '-v'; "busybox" = 'sh -c "echo hello | cat; echo pipe=$?; echo abc | sed s/b/X/; echo count=$(printf ''x\ny\nx\n'' | grep -c x); exit 3"' }
 # smp_test takes an expected processor count (cpus=N); none on Windows.
 
 $results = @()

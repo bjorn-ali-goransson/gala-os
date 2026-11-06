@@ -7,7 +7,11 @@ use crate::heap::malloc;
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32;
@@ -29,8 +33,8 @@ unsafe extern "system" {
         flags: u32,
         environment: *mut c_void,
         directory: *const u8,
-        startup: *mut u8,
-        info: *mut usize,
+        startup: *mut crate::StartupInfoA,
+        info: *mut ProcessInformation,
     ) -> i32;
     fn WaitForSingleObject(h: *mut c_void, ms: u32) -> u32;
     fn GetExitCodeProcess(h: *mut c_void, code: *mut u32) -> i32;
@@ -353,7 +357,7 @@ pub extern "C" fn _putenv(entry: *const u8) -> i32 {
             }
             (None, true) => {}
             (None, false) => {
-                let grown = malloc((count + 2) * 8).cast::<*mut u8>();
+                let grown = malloc((count + 2) * size_of::<usize>()).cast::<*mut u8>();
                 if grown.is_null() {
                     set_errno(ENOMEM);
                     return -1;
@@ -393,6 +397,15 @@ pub extern "C" fn clock() -> i32 {
         GetSystemTimeAsFileTime(&mut now);
     }
     (now.saturating_sub(created) / 10_000) as i32
+}
+
+/// PROCESS_INFORMATION (processthreadsapi.h).
+#[repr(C)]
+struct ProcessInformation {
+    process: usize,
+    thread: usize,
+    process_id: u32,
+    thread_id: u32,
 }
 
 const P_WAIT: i32 = 0;
@@ -472,21 +485,23 @@ pub extern "C" fn _spawnve(
     };
     // STARTUPINFOA with our standard handles (STARTF_USESTDHANDLES) and our
     // other descriptors (cbReserved2/lpReserved2, see stdio.rs).
-    let mut startup = [0u8; 104];
-    startup[0..4].copy_from_slice(&104u32.to_le_bytes());
-    let mut block = [0u8; 4 + 9 * crate::stdio::MAX_FDS];
+    // SAFETY: zeroed is a valid STARTUPINFOA (integers and pointers).
+    let mut startup: crate::StartupInfoA = unsafe { core::mem::zeroed() };
+    startup.cb = size_of::<crate::StartupInfoA>() as u32;
+    let mut block = [0u8; crate::stdio::INHERITANCE_BLOCK];
     let block_len = crate::stdio::inheritance_block(&mut block);
     if block_len != 0 {
-        startup[66..68].copy_from_slice(&(block_len as u16).to_le_bytes());
-        startup[72..80].copy_from_slice(&(block.as_ptr() as u64).to_le_bytes());
+        startup.cb_reserved2 = block_len as u16;
+        startup.reserved2 = block.as_mut_ptr();
     }
-    startup[60..64].copy_from_slice(&0x100u32.to_le_bytes());
-    for (i, at) in [80usize, 88, 96].into_iter().enumerate() {
-        // SAFETY: plain call.
-        let h = unsafe { GetStdHandle((-10 - i as i32) as u32) } as u64;
-        startup[at..at + 8].copy_from_slice(&h.to_le_bytes());
+    startup.flags = 0x100; // STARTF_USESTDHANDLES
+    // SAFETY: plain calls.
+    unsafe {
+        startup.std_input = GetStdHandle(-10i32 as u32) as usize;
+        startup.std_output = GetStdHandle(-11i32 as u32) as usize;
+        startup.std_error = GetStdHandle(-12i32 as u32) as usize;
     }
-    let mut info = [0usize; 3];
+    let mut info = ProcessInformation { process: 0, thread: 0, process_id: 0, thread_id: 0 };
     // SAFETY: valid strings, blocks and structures.
     let ok = unsafe {
         CreateProcessA(
@@ -498,8 +513,8 @@ pub extern "C" fn _spawnve(
             0,
             env.cast(),
             core::ptr::null(),
-            startup.as_mut_ptr(),
-            info.as_mut_ptr(),
+            &mut startup,
+            &mut info,
         )
     };
     crate::heap::free(line);
@@ -510,7 +525,7 @@ pub extern "C" fn _spawnve(
         set_errno(errno_now());
         return -1;
     }
-    let (process, thread) = (info[0] as *mut c_void, info[1] as *mut c_void);
+    let (process, thread) = (info.process as *mut c_void, info.thread as *mut c_void);
     // SAFETY: our process and thread handles.
     unsafe {
         CloseHandle(thread);

@@ -8,7 +8,11 @@ use crate::heap::malloc;
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetCurrentDirectoryW(size: u32, buf: *mut u16) -> u32;
     fn GetModuleFileNameW(module: *mut c_void, buf: *mut u16, size: u32) -> u32;
@@ -147,7 +151,7 @@ pub extern "C" fn _wcsdup(s: *const u16) -> *mut u16 {
 /// msvcrt.dll's swprintf(buf, fmt, ...) has no count (the C standard's
 /// is `_snwprintf`'s shape): the arguments as a va_list (below).
 #[unsafe(no_mangle)]
-pub extern "C" fn _gala_vswprintf(buf: *mut u16, fmt: *const u16, args: *const u64) -> i32 {
+pub extern "C" fn _gala_vswprintf(buf: *mut u16, fmt: *const u16, args: crate::va::VaList) -> i32 {
     crate::stdio::_vsnwprintf(buf, usize::MAX / 4, fmt, args)
 }
 
@@ -366,7 +370,11 @@ fn wcopy(s: &[u16]) -> *mut u16 {
     out
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetCommandLineW() -> *const u16;
     fn GetEnvironmentStringsW() -> *mut u16;
@@ -381,7 +389,7 @@ fn build_wide() {
         let line = core::slice::from_raw_parts(p, wlen(p));
         let mut count = 0usize;
         crate::split_args(line, |_| count += 1);
-        let argv = malloc((count + 1) * 8).cast::<*mut u16>();
+        let argv = malloc((count + 1) * size_of::<usize>()).cast::<*mut u16>();
         if argv.is_null() {
             return;
         }
@@ -402,7 +410,7 @@ fn build_wide() {
                 q = q.add(wlen(q) + 1);
                 entries += 1;
             }
-            let env = malloc((entries + 1) * 8).cast::<*mut u16>();
+            let env = malloc((entries + 1) * size_of::<usize>()).cast::<*mut u16>();
             if !env.is_null() {
                 let (mut q, mut n) = (block, 0);
                 while *q != 0 {
@@ -490,7 +498,7 @@ pub extern "C" fn getchar() -> i32 {
 /// newline) and scans it. Conversions that span lines are not supported;
 /// what a line's conversions leave unread is dropped.
 #[unsafe(no_mangle)]
-pub extern "C" fn _gala_vfscanf(file: *mut u8, format: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn _gala_vfscanf(file: *mut u8, format: *const u8, args: crate::va::VaList) -> i32 {
     let mut line = [0u8; 1024];
     loop {
         if crate::stdio::fgets(line.as_mut_ptr(), line.len() as i32, file).is_null() {
@@ -525,54 +533,3 @@ pub extern "C" fn _execvp(path: *const u8, argv: *const *const u8) -> isize {
     }
     crate::_exit(0)
 }
-
-// swprintf(buf, fmt, ...) and fscanf(file, fmt, ...): sprintf's shape (see
-// stdio.rs). _execl(path, arg0, ...) and _execlp: the arguments after the
-// path, spilled to the home area next to the stack ones, are the NULL-
-// terminated argv.
-core::arch::global_asm!(
-    ".globl swprintf",
-    "swprintf:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea r8, [rsp+24]",
-    "sub rsp, 40",
-    "call {vswprintf}",
-    "add rsp, 40",
-    "ret",
-    ".globl fscanf",
-    "fscanf:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea r8, [rsp+24]",
-    "sub rsp, 40",
-    "call {vfscanf}",
-    "add rsp, 40",
-    "ret",
-    ".globl _execl",
-    "_execl:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea rdx, [rsp+16]",
-    "sub rsp, 40",
-    "call {execv}",
-    "add rsp, 40",
-    "ret",
-    ".globl _execlp",
-    "_execlp:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea rdx, [rsp+16]",
-    "sub rsp, 40",
-    "call {execvp}",
-    "add rsp, 40",
-    "ret",
-    vswprintf = sym _gala_vswprintf,
-    vfscanf = sym _gala_vfscanf,
-    execv = sym _execv,
-    execvp = sym _execvp,
-);
