@@ -734,3 +734,112 @@ fn a_frame_reads_areas_inside_it_only() {
     assert!(!f.read(Rect { x: 0, y: 0, w: 0, h: 1 }, &mut out));
     assert!(!f.read(Rect { x: 0, y: 0, w: 7, h: 1 }, &mut out));
 }
+
+/// A live 640 x 480 session desktop (`Shell`) with owner `owner`'s window
+/// at (40, 30) whose client area (from (41, 63)) is `colour`, shown by
+/// nothing.
+fn shell_with_window(session: u32, owner: u64, colour: u32) -> (Shell, u32) {
+    let shell = Shell::new(session);
+    let id = {
+        let mut d = shell.d.lock();
+        d.set_screen(640, 480).unwrap();
+        d.live = true;
+        let a = d.create(owner, 40, 30, 300, 200, &title("Kept"), 0).unwrap();
+        d.show(a, owner, true).unwrap();
+        let pixels = [colour; 100 * 50];
+        let area = d.present(a, Rect { x: 0, y: 0, w: 100, h: 50 }, &pixels, 100).unwrap();
+        d.add_damage(area);
+        redraw_damage(&mut d);
+        a
+    };
+    (shell, id)
+}
+
+fn messages(d: &mut Desktop, owner: u64) -> Vec<(u32, u64)> {
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    let n = d.take_input(owner, &mut out);
+    out[..n].iter().map(|e| (e.message, e.lparam)).collect()
+}
+
+/// RS B3a's console switch, desktop by desktop (`move_console`, the two
+/// halves of `switch_console`): the desktop the console leaves is shown
+/// by nothing and keeps its windows and their pixels, a button held there
+/// goes up; the one it arrives at is shown by it; and back.
+#[test]
+fn the_console_moves_between_desktops_keeping_their_windows() {
+    let (one, a) = shell_with_window(1, 9, 0x00ff_ff00);
+    let (two, b) = shell_with_window(2, 10, 0x0000_00ff);
+    assert_eq!(move_console(&one, Some(Presenter::Console)), Ok(Kind::None));
+    // The left button goes down in session 1's window and stays down.
+    {
+        let mut d = one.d.lock();
+        let (ox, oy) = d.window(a).unwrap().client_origin();
+        go(&mut d, ox + 5, oy + 6, 0);
+        go(&mut d, ox + 5, oy + 6, 1);
+        messages(&mut d, 9);
+    }
+    // The console leaves session 1: the button goes up there.
+    assert_eq!(move_console(&one, None), Ok(Kind::Console));
+    {
+        let mut d = one.d.lock();
+        assert_eq!(d.presenter.kind(), Kind::None);
+        assert_eq!(d.buttons, 0);
+        assert_eq!(messages(&mut d, 9), [(WM_LBUTTONUP, 6 << 16 | 5)]);
+        assert_eq!(d.pixel(41 + 10, 63 + 10), 0x00ff_ff00);
+        assert_eq!(d.windows.len(), 1);
+    }
+    // It arrives at session 2.
+    assert_eq!(move_console(&two, Some(Presenter::Console)), Ok(Kind::None));
+    assert_eq!(query(&two).0, Kind::Console);
+    // Leaving a desktop the console does not show changes nothing there.
+    assert_eq!(move_console(&one, None), Ok(Kind::None));
+    assert_eq!(query(&two).0, Kind::Console);
+    // And back: session 1's window was kept.
+    assert_eq!(move_console(&two, None), Ok(Kind::Console));
+    assert_eq!(move_console(&one, Some(Presenter::Console)), Ok(Kind::None));
+    assert_eq!(query(&one), (Kind::Console, true, (640, 480), 1));
+    assert_eq!(query(&two), (Kind::None, true, (640, 480), 1));
+    assert_eq!(one.d.lock().pixel(41 + 10, 63 + 10), 0x00ff_ff00);
+    assert_eq!(two.d.lock().pixel(41 + 10, 63 + 10), 0x0000_00ff);
+    let _ = b;
+}
+
+/// A Test presenter's injected input (GalaSession's SESSION_INPUT): a
+/// click reaches the window under it as the mouse's would (the right
+/// button here: a left press also looks for the start menu's programs in
+/// the file system, which host tests lack; presenter_test clicks left), a
+/// key the active window, the wheel the window under the pointer; a
+/// desktop no Test frame shows takes none.
+#[test]
+fn injected_input_reaches_a_desktop_a_test_frame_shows() {
+    let (two, b) = shell_with_window(2, 10, 0x0000_00ff);
+    let at = |buttons| Injected::Pointer { x: 41 + 30, y: 63 + 20, buttons };
+    assert_eq!(inject(&two, at(2)).err(), Some(NtStatus::INVALID_DEVICE_STATE));
+    move_console(&two, Some(Presenter::Test(Frame::new(640, 480).unwrap()))).unwrap();
+    for buttons in [0, 2, 0] {
+        assert!(matches!(inject(&two, at(buttons)), Ok(None)));
+    }
+    let key = Injected::Key { vk: b'H', scan: 0x23, extended: false, down: true };
+    assert!(matches!(inject(&two, key), Ok(None)));
+    assert!(matches!(inject(&two, Injected::Wheel(1)), Ok(None)));
+    let mut d = two.d.lock();
+    assert_eq!(d.active, Some(b));
+    let lp = 20 << 16 | 30;
+    assert_eq!(
+        messages(&mut d, 10),
+        [
+            (WM_MOUSEMOVE, lp),
+            (WM_RBUTTONDOWN, lp),
+            (WM_RBUTTONUP, lp),
+            (WM_KEYDOWN, 1 | 0x23 << 16),
+            (WM_MOUSEWHEEL, lp)
+        ]
+    );
+    drop(d);
+    // Clamped to the desktop, as the mouse is.
+    assert!(matches!(inject(&two, Injected::Pointer { x: -50, y: 9000, buttons: 0 }), Ok(None)));
+    assert_eq!(two.d.lock().pointer, (0, 479));
+    // Shown by nothing again: no input.
+    move_console(&two, Some(Presenter::None)).unwrap();
+    assert_eq!(inject(&two, at(0)).err(), Some(NtStatus::INVALID_DEVICE_STATE));
+}

@@ -1,9 +1,11 @@
 //! GalaSession: gala's session service (ROADMAP RS; ARCHITECTURE
 //! "Presenters (B3a)"). So far what shows a session's desktop: a query, a
-//! presenter attached (None, Console, Test) and a Test frame's pixels read
-//! back (screen checks inside the guest, also in gala-um). B4's session
-//! manager adds create, logoff and list here. Every operation needs
-//! SeTcbPrivilege (another session's pixels are its users').
+//! presenter attached (None, Console, Test; Console on another session
+//! is the console switch, `gala attach`), a Test frame's pixels read back
+//! and input brought to the desktop a Test frame shows (screen checks
+//! inside the guest, without the PS/2 devices). B4's session manager adds
+//! create, logoff and list here. Every operation needs SeTcbPrivilege
+//! (another session's pixels and input are its users').
 
 use alloc::vec::Vec;
 
@@ -15,6 +17,12 @@ use super::Call;
 pub const SESSION_QUERY: u64 = 0;
 pub const SESSION_PRESENT: u64 = 1;
 pub const SESSION_FRAME: u64 = 2;
+pub const SESSION_INPUT: u64 = 3;
+
+/// SESSION_INPUT's record kinds.
+const INPUT_POINTER: u32 = 0;
+const INPUT_KEY: u32 = 1;
+const INPUT_WHEEL: u32 = 2;
 
 /// SeTcbPrivilege's LUID.
 const SE_TCB: u64 = 7;
@@ -28,14 +36,25 @@ const MAX_PIXELS: u64 = 4096 * 4096;
 ///   width and height (0 before it is live), its windows.
 /// - SESSION_PRESENT: attaches presenter Argument (0 none, 1 console, 2
 ///   test); Buffer is a Test frame's size, width | height << 32 (0: the
-///   desktop's). Console only for the console session on a machine with a
-///   screen (a console switch is not there yet: STATUS_NOT_SUPPORTED).
+///   desktop's). Console on a machine with a screen only; on another
+///   session than the one the console shows it is the console switch
+///   (`desktop::switch_console`: that desktop goes to none, keeping its
+///   windows; input and ActiveConsoleId follow); never session 0
+///   (STATUS_NOT_SUPPORTED).
 /// - SESSION_FRAME: Argument points to a 32-byte record, in: x, y, width,
 ///   height (u32) of an area of the Test frame showing the desktop; out:
 ///   the frame's width and height (u32) and its flushes (u64). Buffer gets
 ///   the area's 0x00RRGGBB pixels row after row (Length bytes, at least 4
 ///   x width x height). STATUS_INVALID_DEVICE_STATE when no Test presenter
 ///   shows the desktop; STATUS_INVALID_PARAMETER for an area outside it.
+/// - SESSION_INPUT: Argument points to a 16-byte record of four u32: a
+///   kind and its values. 0: the pointer to (x, y) (i32, desktop
+///   coordinates) with buttons held (bit 0 left, 1 right); 1: a key, its
+///   virtual key, scan code and flags (bit 0 E0-prefixed, bit 1 up); 2:
+///   the wheel, notches (i32, positive away from the user). The desktop
+///   gets it as from the keyboard and mouse. STATUS_INVALID_DEVICE_STATE
+///   unless a Test presenter shows the desktop; STATUS_INVALID_PARAMETER
+///   for another kind.
 ///
 /// STATUS_PRIVILEGE_NOT_HELD without SeTcbPrivilege, STATUS_NOT_FOUND for
 /// a session that does not exist, STATUS_NOT_SUPPORTED where there are no
@@ -140,6 +159,61 @@ pub(super) fn gala_session(call: &mut Call<'_>) -> NtStatus {
             }
             NtStatus::SUCCESS
         }
+        SESSION_INPUT => {
+            let mut record = [0u8; 16];
+            if call.process.read(arg, &mut record).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let field = |i: usize| {
+                u32::from_le_bytes([
+                    record[4 * i],
+                    record[4 * i + 1],
+                    record[4 * i + 2],
+                    record[4 * i + 3],
+                ])
+            };
+            let (a, b, c) = (field(1), field(2), field(3));
+            let input = match field(0) {
+                INPUT_POINTER => desktop::Injected::Pointer {
+                    x: i64::from(a as i32),
+                    y: i64::from(b as i32),
+                    buttons: (c & 3) as u8,
+                },
+                INPUT_KEY if a <= 0xff && b <= 0xff => desktop::Injected::Key {
+                    vk: a as u8,
+                    scan: b as u8,
+                    extended: c & 1 != 0,
+                    down: c & 2 == 0,
+                },
+                INPUT_WHEEL => desktop::Injected::Wheel(i64::from(a as i32)),
+                _ => return NtStatus::INVALID_PARAMETER,
+            };
+            match desktop::inject(shell, input) {
+                Ok(launch) => {
+                    if let Some(program) = launch {
+                        super::super::action::start_from_menu(id, program);
+                    }
+                    NtStatus::SUCCESS
+                }
+                Err(e) => {
+                    note_input_refused(call.process.id, id, e);
+                    e
+                }
+            }
+        }
         _ => NtStatus::INVALID_PARAMETER,
+    }
+}
+
+/// How many SESSION_INPUT requests were refused (the first few are
+/// logged: a screen check whose input goes nowhere says why).
+static INPUT_REFUSED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn note_input_refused(pid: u64, session: u32, e: NtStatus) {
+    if INPUT_REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+        crate::info!(
+            "desktop: pid {pid}'s input for session {session} refused: {:#010x} (only a desktop a Test presenter shows takes injected input)",
+            e.0
+        );
     }
 }

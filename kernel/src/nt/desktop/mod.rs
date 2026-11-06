@@ -729,6 +729,31 @@ impl Desktop {
         Ok(old)
     }
 
+    /// The console leaves this desktop (a console switch): buttons still
+    /// held go up where the pointer is (a drag or resize ends, the window
+    /// under it gets its WM_LBUTTONUP), the Alt and Windows keys count as
+    /// released, an open start menu closes. The areas to redraw.
+    pub fn leave_console(&mut self) -> Vec<Rect> {
+        let mut damage = if self.buttons != 0 { self.pointer(0, 0, 0) } else { Vec::new() };
+        (self.alt, self.win_key, self.win_used) = (false, false, false);
+        if self.menu.is_some() {
+            self.close_menu();
+            self.refresh();
+            for r in core::mem::take(&mut self.damage) {
+                let _ = damage.try_push(r);
+            }
+        }
+        damage
+    }
+
+    /// Moves the pointer to (x, y) (clamped to the desktop) with
+    /// `buttons` held: injected input (GalaSession's SESSION_INPUT), in
+    /// the same terms as the mouse's moves. The areas to redraw.
+    pub fn pointer_at(&mut self, x: i64, y: i64, buttons: u8) -> Vec<Rect> {
+        let (dx, dy) = (x - self.pointer.0, y - self.pointer.1);
+        self.pointer(dx, dy, buttons)
+    }
+
     fn add_damage(&mut self, r: Rect) {
         if self.damage.len() >= 64 {
             self.damage.clear();
@@ -2407,9 +2432,10 @@ impl Shell {
     }
 }
 
-/// The console's desktop (the input thread's), if its session exists.
+/// The desktop the console shows (the input thread's), if any: none
+/// while a console switch is under way.
 fn console() -> Option<crate::mm::heap::KArc<super::session::Desk>> {
-    super::session::desk(super::session::CONSOLE)
+    super::session::desk(super::session::active_console())
 }
 
 /// The wallpaper picture chosen at boot (`choose_wallpaper`).
@@ -2569,7 +2595,7 @@ fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
     if !available() {
         return Err(NtStatus::NOT_SUPPORTED);
     }
-    let console = shell.session == super::session::CONSOLE;
+    let console = shell.session == super::session::active_console();
     let presenter = if console { local_presenter()? } else { Presenter::None };
     let (w, h) = presenter.size().unwrap_or(DEFAULT_SIZE);
     d.set_screen(w, h)?;
@@ -2587,10 +2613,10 @@ fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
         platform::local_input();
     } else {
         crate::info!(
-            "desktop: session {} is live ({w}x{h}), shown by {} (the console shows session {})",
+            "desktop: session {} is live ({w}x{h}), shown by {} (the console shows {})",
             shell.session,
             kind.name(),
-            super::session::CONSOLE
+            super::session::ConsoleShows(super::session::active_console())
         );
     }
     crate::events::emit(
@@ -2636,14 +2662,18 @@ pub fn with<R>(
 /// desktop's size; the desktop takes the presenter's size, keeping its
 /// windows' places) and the desktop is drawn whole there. The old
 /// presenter goes (a Test frame is freed). Returns the kind it replaced.
-/// STATUS_NOT_SUPPORTED where there are no desktops, and for Console on
-/// another session than the console's or without a screen (a console
-/// switch is not there yet); STATUS_NO_MEMORY for a frame.
+/// Console on another session than the one the console shows is a
+/// console switch (`switch_console`). STATUS_NOT_SUPPORTED where there
+/// are no desktops, and for Console without a screen or on session 0;
+/// STATUS_NO_MEMORY for a frame.
 pub fn attach(shell: &Shell, kind: Kind, size: Option<(u32, u32)>) -> Result<Kind, NtStatus> {
-    if kind == Kind::Console
-        && (shell.session != super::session::CONSOLE || platform::screen_size().is_none())
-    {
-        return Err(NtStatus::NOT_SUPPORTED);
+    if kind == Kind::Console {
+        if platform::screen_size().is_none() {
+            return Err(NtStatus::NOT_SUPPORTED);
+        }
+        if shell.session != super::session::active_console() {
+            return switch_console(shell);
+        }
     }
     let current = {
         let mut d = shell.d.lock();
@@ -2686,6 +2716,103 @@ pub fn attach(shell: &Shell, kind: Kind, size: Option<(u32, u32)>) -> Result<Kin
     Ok(was)
 }
 
+/// Serializes console switches (lock order: before any desktop's lock).
+static SWITCH: IrqMutex<()> = IrqMutex::new(());
+
+/// The console switch (fast user switching; `gala attach`, GalaSession's
+/// SESSION_PRESENT with Console): the screen, the keyboard and the mouse
+/// go to `to`'s desktop, which goes live if it was not and is drawn whole
+/// on the screen; the desktop the console showed is shown by nothing
+/// from then on and keeps its windows. ActiveConsoleId
+/// (WTSGetActiveConsoleSessionId) follows: 0xFFFFFFFF while the switch is
+/// under way, then `to`'s id. Returns what showed `to` before.
+/// STATUS_NOT_SUPPORTED for session 0 (never on the console: session 0
+/// isolation) and where there are no desktops; on a failure (no memory
+/// to lay `to` out at the screen's size) the console stays where it was.
+pub fn switch_console(to: &Shell) -> Result<Kind, NtStatus> {
+    use super::session;
+    if to.session == session::SERVICES {
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let _switching = SWITCH.lock();
+    let from_id = session::active_console();
+    // `to` goes live first, shown by nothing (not the console's yet): a
+    // failure here leaves the console as it was.
+    {
+        let mut d = to.d.lock();
+        ensure_live(to, &mut d)?;
+    }
+    let from = session::desk(from_id);
+    // No session is on the console while it moves: input is dropped.
+    session::set_active_console(session::NO_CONSOLE);
+    let left = from.as_ref().map(|f| move_console(&f.shell, None));
+    let result = move_console(to, Some(Presenter::Console));
+    let was = match result {
+        Ok(was) => was,
+        Err(e) => {
+            // Back where it was.
+            if let (Some(f), Some(Ok(Kind::Console))) = (from.as_ref(), left) {
+                let _ = move_console(&f.shell, Some(Presenter::Console));
+            }
+            session::set_active_console(from_id);
+            crate::warn!(
+                "desktop: the console could not move from {} to session {}: {:#010x}; it stays",
+                session::ConsoleShows(from_id),
+                to.session,
+                e.0
+            );
+            return Err(e);
+        }
+    };
+    session::set_active_console(to.session);
+    let (w, h) = query(to).2;
+    let kept = from.as_ref().map_or(0, |f| f.shell.counts().0);
+    crate::info!(
+        "desktop: the console now shows session {} ({w}x{h}; was {}, which keeps its {kept} windows shown by none)",
+        to.session,
+        session::ConsoleShows(from_id),
+    );
+    crate::events::emit(
+        crate::events::Category::Window,
+        "presenter",
+        format_args!(
+            r#""op":"console","session":{},"from":{},"was":"{}","kept":{kept},"w":{w},"h":{h}"#,
+            to.session,
+            if from_id == session::NO_CONSOLE { -1 } else { i64::from(from_id) },
+            was.name()
+        ),
+    );
+    Ok(was)
+}
+
+/// One half of a console switch, under `shell`'s lock alone: `to` Some,
+/// the desktop is shown by it from now on (the console arrives); None,
+/// the console leaves (held buttons and keys are let go, then nothing
+/// shows it: a desktop shown by something else keeps that). Returns what
+/// showed it before.
+fn move_console(shell: &Shell, to: Option<Presenter>) -> Result<Kind, NtStatus> {
+    let mut d = shell.d.lock();
+    let was = d.presenter.kind();
+    let old = match to {
+        Some(p) => d.set_presenter(p)?,
+        None => {
+            if !d.live || was != Kind::Console {
+                return Ok(was);
+            }
+            for r in d.leave_console() {
+                redraw(&mut d, r);
+            }
+            d.set_presenter(Presenter::None)?
+        }
+    };
+    let wakes = d.take_wakes();
+    drop(d);
+    // A Test frame it replaced is freed outside the lock.
+    drop(old);
+    signal(wakes);
+    Ok(was)
+}
+
 /// What a session's desktop is (GalaSession's query): what shows it,
 /// whether it is live, its size (0 x 0 before) and its windows; nothing
 /// is made live.
@@ -2718,21 +2845,34 @@ pub fn process_ended(shell: &Shell, owner: u64) {
 }
 
 /// Mouse input: the pointer moved by (dx, dy) with `buttons` held (bit 0
-/// left, 1 right, 2 middle), to the console session's desktop. Nothing
-/// before that desktop is live.
-/// Returns the program the start menu asked to start, if any.
-pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<&'static Program> {
+/// left, 1 right, 2 middle), to the desktop the console shows. Nothing
+/// before that desktop is live, nor during a console switch.
+/// Returns the session and the program its start menu asked to start, if
+/// any.
+pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<(u32, &'static Program)> {
+    let desk = console()?;
+    pointer_on(&desk.shell, buttons, |d| d.pointer(dx, dy, buttons))
+        .map(|p| (desk.shell.session, p))
+}
+
+/// Mouse input to `shell`'s desktop: `go` moves the pointer (relative,
+/// the mouse's; absolute, injected) with `buttons` held. The program its
+/// start menu asked to start, if any.
+fn pointer_on(
+    shell: &Shell,
+    buttons: u8,
+    go: impl FnOnce(&mut Desktop) -> Vec<Rect>,
+) -> Option<&'static Program> {
     // Which programs exist (outside the desktop's lock: the file system).
     let (available, n) = if buttons & 1 != 0 { available_programs() } else { ([0; 8], 0) };
-    let desk = console()?;
-    let mut d = desk.shell.d.lock();
+    let mut d = shell.d.lock();
     if !d.live {
         return None;
     }
     if buttons & 1 != 0 && !d.menu_open() {
         d.set_programs(&available[..n]);
     }
-    let damage = d.pointer(dx, dy, buttons);
+    let damage = go(&mut d);
     for r in damage {
         redraw(&mut d, r);
     }
@@ -2741,6 +2881,44 @@ pub fn pointer_event(dx: i64, dy: i64, buttons: u8) -> Option<&'static Program> 
     drop(d);
     signal(wakes);
     launch
+}
+
+/// Input a Test presenter brings to its desktop (GalaSession's
+/// SESSION_INPUT: screen checks without the PS/2 devices).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Injected {
+    /// The pointer to (x, y) with these buttons held (bit 0 left, 1 right).
+    Pointer { x: i64, y: i64, buttons: u8 },
+    /// A key down or up (virtual key, scan code, E0-prefixed).
+    Key { vk: u8, scan: u8, extended: bool, down: bool },
+    /// The wheel turned (positive away from the user).
+    Wheel(i64),
+}
+
+/// Brings `input` to `shell`'s desktop as the keyboard and mouse would,
+/// when a Test presenter shows it: STATUS_INVALID_DEVICE_STATE otherwise
+/// (the console's desktop gets the PS/2 devices, one shown by nothing
+/// gets nothing). Returns the program its start menu asked to start.
+pub fn inject(shell: &Shell, input: Injected) -> Result<Option<&'static Program>, NtStatus> {
+    {
+        let d = shell.d.lock();
+        if !d.live || d.presenter.kind() != Kind::Test {
+            return Err(NtStatus::INVALID_DEVICE_STATE);
+        }
+    }
+    Ok(match input {
+        Injected::Pointer { x, y, buttons } => {
+            pointer_on(shell, buttons, |d| d.pointer_at(x, y, buttons))
+        }
+        Injected::Key { vk, scan, extended, down } => {
+            key_on(shell, vk, scan, extended, down);
+            None
+        }
+        Injected::Wheel(notches) => {
+            wheel_on(shell, notches);
+            None
+        }
+    })
 }
 
 /// The start menu's programs that exist (indices into PROGRAMS, one per
@@ -2858,8 +3036,13 @@ fn signal(events: Vec<ObjectRef>) {
 /// `extended`) went down or up.
 /// The mouse wheel (from the input thread).
 pub fn wheel_event(notches: i64) {
-    let Some(desk) = console() else { return };
-    let mut d = desk.shell.d.lock();
+    if let Some(desk) = console() {
+        wheel_on(&desk.shell, notches);
+    }
+}
+
+fn wheel_on(shell: &Shell, notches: i64) {
+    let mut d = shell.d.lock();
     if !d.live {
         return;
     }
@@ -2870,8 +3053,13 @@ pub fn wheel_event(notches: i64) {
 }
 
 pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
-    let Some(desk) = console() else { return };
-    let mut d = desk.shell.d.lock();
+    if let Some(desk) = console() {
+        key_on(&desk.shell, vk, scan, extended, down);
+    }
+}
+
+fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) {
+    let mut d = shell.d.lock();
     if !d.live {
         return;
     }

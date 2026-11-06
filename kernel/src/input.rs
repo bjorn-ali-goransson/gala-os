@@ -2,8 +2,9 @@
 //! (`arch::ps2`) every few milliseconds, assembles the mouse's 3-byte
 //! packets and hands the movement and buttons to `nt::desktop`, and turns
 //! the keyboard's scan codes (set 1: the controller translates) into
-//! Windows virtual keys for it. Started when the desktop takes the screen,
-//! or when the console session's desktop goes live without one
+//! Windows virtual keys for it, all to the desktop the console shows
+//! (a console switch moves them). Started when the desktop takes the
+//! screen, or when the console session's desktop goes live without one
 //! (`presenter=`: a headless desktop still takes the local input).
 
 use crate::arch::ps2;
@@ -105,9 +106,8 @@ fn input_thread(_: usize) {
 
 /// Hands mouse input to the desktop; starts what its start menu chose.
 fn deliver(dx: i64, dy: i64, buttons: u8) {
-    if let Some(program) = crate::nt::desktop::pointer_event(dx, dy, buttons) {
-        // The same path as GalaDesktopAction's Start (logged there).
-        let _ = crate::nt::action::start_path(program.path, "", None);
+    if let Some((session, program)) = crate::nt::desktop::pointer_event(dx, dy, buttons) {
+        crate::nt::action::start_from_menu(session, program);
     }
 }
 

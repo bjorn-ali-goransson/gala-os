@@ -50,9 +50,12 @@ use crate::sync::IrqMutex;
 
 /// Services and SYSTEM.
 pub const SERVICES: u32 = 0;
-/// The local console's session (WTSGetActiveConsoleSessionId,
-/// KUSER_SHARED_DATA.ActiveConsoleId).
+/// The local console's session at boot (the boot user's): what the
+/// console shows until a console switch (`active_console`).
 pub const CONSOLE: u32 = 1;
+/// No session is attached to the console (WTSGetActiveConsoleSessionId's
+/// 0xFFFFFFFF: while a console switch is under way).
+pub const NO_CONSOLE: u32 = u32::MAX;
 /// How many sessions may exist at once (each holds directories; a token's
 /// session id is any u32 that a SeTcbPrivilege holder sets).
 pub const MAX_SESSIONS: usize = 64;
@@ -95,6 +98,24 @@ impl Desk {
 
 /// The sessions that exist (lock order: before the namespace's lock).
 static SESSIONS: IrqMutex<Vec<Session>> = IrqMutex::new(Vec::new());
+
+/// The session the console (the screen, the PS/2 keyboard and mouse)
+/// shows: CONSOLE at boot, moved by a console switch
+/// (`desktop::switch_console`), NO_CONSOLE while one is under way.
+static ACTIVE_CONSOLE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(CONSOLE);
+
+/// The session the console shows (KUSER_SHARED_DATA.ActiveConsoleId,
+/// WTSGetActiveConsoleSessionId); NO_CONSOLE during a console switch.
+pub fn active_console() -> u32 {
+    ACTIVE_CONSOLE.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// The console shows session `id` from now on (NO_CONSOLE: none, during
+/// a switch): the local input goes there and KUSER_SHARED_DATA says so.
+pub fn set_active_console(id: u32) {
+    ACTIVE_CONSOLE.store(id, core::sync::atomic::Ordering::Release);
+    super::kuser::set_active_console(id);
+}
 
 /// Appends `id` in decimal to `out`.
 fn push_number(out: &mut Vec<u16>, id: u32) -> Result<(), NtStatus> {
@@ -258,6 +279,19 @@ pub fn ensure(id: u32) -> Result<KArc<Desk>, NtStatus> {
     Ok(desk)
 }
 
+/// The console's session for the log: `session 2`, or `no session`
+/// (during a switch).
+pub struct ConsoleShows(pub u32);
+
+impl core::fmt::Display for ConsoleShows {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            NO_CONSOLE => f.write_str("no session"),
+            id => write!(f, "session {id}"),
+        }
+    }
+}
+
 /// A UTF-16 path as text (for the log).
 #[cfg_attr(test, allow(dead_code))]
 struct Plain<'a>(&'a [u16]);
@@ -333,7 +367,8 @@ pub fn dump() {
     }
     log!(
         info,
-        "statedump: sessions (windows asked for across sessions: {}):",
+        "statedump: sessions (the console shows {}; windows asked for across sessions: {}):",
+        ConsoleShows(active_console()),
         CROSSED.load(core::sync::atomic::Ordering::Relaxed)
     );
     for d in desks.iter().flatten() {

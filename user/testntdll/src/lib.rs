@@ -298,6 +298,8 @@ syscall_stubs! {
         handle: usize, index: u32, buffer: *mut u8, length: u32, needed: *mut u32
     );
     GalaUserObjectEnum = 0x7fa5, fn(handle: usize, buffer: *mut u8, length: u32, needed: *mut u32);
+    // Sessions' presenters (gala's own; nt::session_calls), for `gala attach`.
+    GalaSession = 0x7fb0, fn(op: u64, session: u32, arg: u64, buffer: u64, length: u64);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);

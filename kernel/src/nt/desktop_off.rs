@@ -208,8 +208,21 @@ pub fn with<R>(
 
 pub fn process_ended(_: &Shell, _: u64) {}
 
-pub fn pointer_event(_: i64, _: i64, _: u8) -> Option<&'static Program> {
+pub fn pointer_event(_: i64, _: i64, _: u8) -> Option<(u32, &'static Program)> {
     None
+}
+
+/// Injected input (GalaSession's SESSION_INPUT), as the desktop kernel's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Injected {
+    Pointer { x: i64, y: i64, buttons: u8 },
+    Key { vk: u8, scan: u8, extended: bool, down: bool },
+    Wheel(i64),
+}
+
+/// No desktop to bring input to.
+pub fn inject(_: &Shell, _: Injected) -> Result<Option<&'static Program>, NtStatus> {
+    Err(NtStatus::NOT_SUPPORTED)
 }
 
 pub fn wheel_event(_: i64) {}

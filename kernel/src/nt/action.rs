@@ -306,6 +306,25 @@ pub fn start_path(
     }
 }
 
+/// A desktop's start menu asked for `program` (the mouse or keys on the
+/// console, or injected input): started as the boot user, whose session
+/// is the console's at boot. Another session's start menu starts nothing
+/// yet: a session has no user of its own until B4's session manager
+/// (ROADMAP RS), so a program started for it would land in session 1.
+pub fn start_from_menu(session: u32, program: &desktop::Program) {
+    if session != super::session::CONSOLE {
+        crate::warn!(
+            "desktop: session {session}'s start menu asked for {}: not started (a session other than {} has no user to start it as yet)",
+            program.path,
+            super::session::CONSOLE
+        );
+        super::ledger::record("start menu", "session without a user", session.into());
+        return;
+    }
+    // The same path as GalaDesktopAction's Start (logged there).
+    let _ = start_path(program.path, "", None);
+}
+
 /// The path of the program `name` names (see `start`; the start menu's
 /// names when `shell`'s desktop is on the screen).
 fn resolve(name: &str, shell: &desktop::Shell) -> Result<&'static str, NtStatus> {

@@ -219,6 +219,15 @@ pub fn refresh_after<R>(change: impl FnOnce() -> R) -> R {
     result
 }
 
+/// ActiveConsoleId: the session the console shows now (a console switch;
+/// 0xFFFFFFFF while one is under way, as WTSGetActiveConsoleSessionId
+/// documents).
+pub fn set_active_console(id: u32) {
+    if let Some(page) = PAGE.lock().as_ref() {
+        page.write_u32(ACTIVE_CONSOLE_ID, id);
+    }
+}
+
 /// Maps the page read-only into a new address space and records it in
 /// the VAD.
 /// Maps the page alone (its VAD entry exists: a process a kernel handover

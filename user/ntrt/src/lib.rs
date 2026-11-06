@@ -428,6 +428,7 @@ pub fn handover_pause() -> (NtStatus, u64, u64) {
 pub const SESSION_QUERY: u64 = 0;
 pub const SESSION_PRESENT: u64 = 1;
 pub const SESSION_FRAME: u64 = 2;
+pub const SESSION_INPUT: u64 = 3;
 /// Presenters.
 pub const PRESENTER_NONE: u64 = 0;
 pub const PRESENTER_CONSOLE: u64 = 1;
@@ -446,6 +447,14 @@ pub fn session_query(session: u32) -> (NtStatus, [u32; 5]) {
     let mut out = [0u32; 5];
     let st = gala_session(SESSION_QUERY, session, 0, out.as_mut_ptr() as u64, 20);
     (st, out)
+}
+
+/// SESSION_INPUT: input to the desktop a Test frame shows, as the
+/// keyboard and mouse would bring it: `record` is a kind (0 the pointer
+/// to (x, y) with buttons held, 1 a key: virtual key, scan code, flags
+/// bit 0 extended and bit 1 up, 2 the wheel: notches) and its values.
+pub fn session_input(session: u32, record: [u32; 4]) -> NtStatus {
+    gala_session(SESSION_INPUT, session, record.as_ptr() as u64, 0, 0)
 }
 
 /// SESSION_FRAME: area (x, y, w, h) of the Test frame showing `session`
