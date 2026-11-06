@@ -12,8 +12,13 @@
 use core::ffi::c_void;
 
 use super::fail;
+use super::layout::SecurityDescriptor;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     pub(crate) fn NtQuerySecurityObject(
         h: usize,
@@ -27,7 +32,11 @@ unsafe extern "system" {
     fn RtlNtStatusToDosError(status: u32) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CreateFileW(
         name: *const u16,
@@ -342,19 +351,6 @@ pub extern "system" fn GetNamedSecurityInfoW(
     r
 }
 
-/// An absolute descriptor (x64 layout) with the parts SetSecurityInfo was
-/// given.
-#[repr(C)]
-struct Absolute {
-    revision: u8,
-    sbz1: u8,
-    control: u16,
-    owner: *const u8,
-    group: *const u8,
-    sacl: *const u8,
-    dacl: *const u8,
-}
-
 fn set_parts(
     h: usize,
     info: u32,
@@ -376,7 +372,15 @@ fn set_parts(
             control |= SE_SACL_PROTECTED;
         }
     }
-    let sd = Absolute { revision: 1, sbz1: 0, control, owner, group, sacl, dacl };
+    // An absolute descriptor with the parts SetSecurityInfo was given.
+    let sd = SecurityDescriptor {
+        control,
+        owner: owner.cast_mut(),
+        group: group.cast_mut(),
+        sacl: sacl.cast_mut(),
+        dacl: dacl.cast_mut(),
+        ..SecurityDescriptor::new()
+    };
     // SAFETY: our descriptor pointing at the caller's parts.
     match unsafe { NtSetSecurityObject(h, info, (&raw const sd).cast()) } {
         0 => 0,

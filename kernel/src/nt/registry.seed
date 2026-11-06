@@ -94,7 +94,44 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{00021401-0000-0000-C000-000000000046}\InprocServer32]
 @=expand:%SystemRoot%\System32\shell32.dll
 "ThreadingModel"=sz:Both
-[\Registry\Machine\SOFTWARE\WOW6432Node]
+; The 32-bit view (WOW64, nt::regview): what 32-bit programs read under
+; HKLM\SOFTWARE. Windows keeps the version there too, and gives them the
+; (x86) directories as ProgramFilesDir and CommonFilesDir.
+[\Registry\Machine\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion]
+"ProductName"=sz:Windows 10 Pro
+"EditionID"=sz:Professional
+"InstallationType"=sz:Client
+"CurrentVersion"=sz:6.3
+"CurrentBuild"=sz:26100
+"CurrentBuildNumber"=sz:26100
+"CurrentMajorVersionNumber"=dword:10
+"CurrentMinorVersionNumber"=dword:0
+"CurrentType"=sz:Multiprocessor Free
+"DisplayVersion"=sz:24H2
+"ReleaseId"=sz:2009
+"UBR"=dword:1
+"BuildLab"=sz:26100.ge_release.240331-1435
+"BuildLabEx"=sz:26100.1.amd64fre.ge_release.240331-1435
+"BuildBranch"=sz:ge_release
+"SystemRoot"=sz:C:\Windows
+"PathName"=sz:C:\Windows
+"RegisteredOwner"=sz:gala
+"RegisteredOrganization"=sz:
+"InstallDate"=dword:0
+"SoftwareType"=sz:System
+[\Registry\Machine\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion]
+"ProgramFilesDir"=sz:C:\Program Files (x86)
+"ProgramFilesDir (x86)"=sz:C:\Program Files (x86)
+"ProgramW6432Dir"=sz:C:\Program Files
+"CommonFilesDir"=sz:C:\Program Files (x86)\Common Files
+"CommonFilesDir (x86)"=sz:C:\Program Files (x86)\Common Files
+"CommonW6432Dir"=sz:C:\Program Files\Common Files
+"ProgramFilesPath"=expand:%ProgramFiles%
+"MediaPathUnexpanded"=expand:%SystemRoot%\Media
+; The 32-bit COM registrations (Classes\WOW6432Node): none yet (gala's
+; COM servers are 64-bit DLLs).
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID]
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\Interface]
 
 ; A workstation (WinNT; servers say ServerNT or LanmanNT).
 [\Registry\Machine\SYSTEM\CurrentControlSet\Control\ProductOptions]

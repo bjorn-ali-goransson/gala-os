@@ -8,9 +8,14 @@
 
 use core::ffi::c_void;
 
+use super::layout::{ExplicitAccess, Part, SecurityDescriptor, SidAndAttributes, part, set_part};
 use super::{ERROR_INSUFFICIENT_BUFFER, fail, missing};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn LoadLibraryA(name: *const u8) -> usize;
@@ -498,7 +503,11 @@ pub(crate) fn current_user(
     name: &mut [u16; 256],
     domain: &mut [u16; 64],
 ) -> Option<(usize, usize)> {
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn NtOpenThreadToken(thread: usize, access: u32, as_self: u8, token: *mut usize) -> u32;
         fn NtOpenProcessToken(process: usize, access: u32, token: *mut usize) -> u32;
@@ -512,7 +521,7 @@ pub(crate) fn current_user(
         fn NtClose(h: usize) -> u32;
     }
     let mut token = 0;
-    let mut b = [0u64; 32];
+    let mut b = [0usize; 64];
     let mut n = 0;
     // SAFETY: plain calls with our buffers (TOKEN_QUERY; TokenUser).
     let sid = unsafe {
@@ -521,12 +530,19 @@ pub(crate) fn current_user(
         {
             return None;
         }
-        let status = NtQueryInformationToken(token, 1, b.as_mut_ptr().cast(), 256, &mut n);
+        let status = NtQueryInformationToken(
+            token,
+            1,
+            b.as_mut_ptr().cast(),
+            size_of_val(&b) as u32,
+            &mut n,
+        );
         NtClose(token);
         if status != 0 {
             return None;
         }
-        b[0] as *const u8
+        // TOKEN_USER: a SID_AND_ATTRIBUTES.
+        b.as_ptr().cast::<SidAndAttributes>().read().sid.cast_const()
     };
     let (mut name_len, mut domain_len, mut kind) = (256u32, 64u32, 0u32);
     let r = LookupAccountSidW(
@@ -577,15 +593,14 @@ fn sam_rid(name: &[u16]) -> Option<u32> {
     if name.is_empty() || name.len() > 200 || name.contains(&u16::from(b'\\')) {
         return None;
     }
+    // `SAM_USERS\name`, NUL-terminated (name is at most 200 characters).
     let mut path = [0u16; 256];
-    let mut n = 0;
-    for c in SAM_USERS
+    let chars = SAM_USERS
         .encode_utf16()
         .chain(core::iter::once(u16::from(b'\\')))
-        .chain(name.iter().copied())
-    {
-        path[n] = c;
-        n += 1;
+        .chain(name.iter().copied());
+    for (slot, c) in path.iter_mut().zip(chars) {
+        *slot = c;
     }
     let value = [b'R', b'i', b'd', 0].map(u16::from);
     let mut rid = 0u32;
@@ -846,10 +861,11 @@ pub extern "system" fn GetAclInformation(
     1
 }
 
-// ---- Security descriptors (absolute, x64) ----
+// ---- Security descriptors ----
 //
 // SECURITY_DESCRIPTOR: Revision, Sbz1, Control (WORD), Owner, Group,
-// Sacl, Dacl (pointers at 8, 16, 24, 32).
+// Sacl, Dacl: pointers in the absolute form (`layout::SecurityDescriptor`),
+// offsets at 4, 8, 12, 16 in the self-relative one (`layout::part`).
 
 const SE_DACL_PRESENT: u16 = 0x4;
 const SE_DACL_DEFAULTED: u16 = 0x8;
@@ -860,11 +876,8 @@ pub extern "system" fn InitializeSecurityDescriptor(sd: *mut u8, revision: u32) 
     if sd.is_null() || revision != 1 {
         return fail(1305, 0); // ERROR_UNKNOWN_REVISION
     }
-    // SAFETY: the caller's 40-byte descriptor.
-    unsafe {
-        core::ptr::write_bytes(sd, 0, 40);
-        *sd = 1;
-    }
+    // SAFETY: the caller's SECURITY_DESCRIPTOR.
+    unsafe { sd.cast::<SecurityDescriptor>().write_unaligned(SecurityDescriptor::new()) };
     1
 }
 
@@ -901,14 +914,13 @@ pub extern "system" fn SetSecurityDescriptorDacl(
     // SAFETY: the caller's absolute descriptor.
     unsafe {
         sd.add(2).cast::<u16>().write_unaligned(c);
-        sd.add(32).cast::<*mut u8>().write_unaligned(p);
+        set_part(sd, Part::Dacl, p);
     }
     1
 }
 
 /// SetSecurityDescriptorSacl: as SetSecurityDescriptorDacl, for the
-/// SACL (SE_SACL_PRESENT, SE_SACL_DEFAULTED; an absolute descriptor's
-/// pointer at +24).
+/// SACL (SE_SACL_PRESENT, SE_SACL_DEFAULTED).
 #[unsafe(no_mangle)]
 pub extern "system" fn SetSecurityDescriptorSacl(
     sd: *mut u8,
@@ -932,7 +944,7 @@ pub extern "system" fn SetSecurityDescriptorSacl(
     // SAFETY: the caller's absolute descriptor.
     unsafe {
         sd.add(2).cast::<u16>().write_unaligned(c);
-        sd.add(24).cast::<*mut u8>().write_unaligned(p);
+        set_part(sd, Part::Sacl, p);
     }
     1
 }
@@ -966,17 +978,11 @@ pub extern "system" fn GetSecurityDescriptorDacl(
         return fail(ERROR_INVALID_SECURITY_DESCR, 0);
     }
     let c = control(sd);
-    // SAFETY: the caller's descriptor (absolute: a pointer at 32;
-    // self-relative: an offset at 16) and outputs.
+    // SAFETY: the caller's descriptor (either form) and outputs.
     unsafe {
         *present = i32::from(c & SE_DACL_PRESENT != 0);
         if c & SE_DACL_PRESENT != 0 {
-            *dacl = if c & SE_SELF_RELATIVE != 0 {
-                let off = sd.add(16).cast::<u32>().read_unaligned() as usize;
-                if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
-            } else {
-                sd.add(32).cast::<*mut u8>().read_unaligned()
-            };
+            *dacl = part(sd, Part::Dacl);
             *defaulted = i32::from(c & SE_DACL_DEFAULTED != 0);
         }
     }
@@ -996,13 +1002,13 @@ pub extern "system" fn SetSecurityDescriptorOwner(
     unsafe {
         let c = (control(sd) & !1) | u16::from(defaulted != 0);
         sd.add(2).cast::<u16>().write_unaligned(c);
-        sd.add(8).cast::<*mut u8>().write_unaligned(owner);
+        set_part(sd, Part::Owner, owner);
     }
     1
 }
 
 /// SetSecurityDescriptorGroup: the primary group of an absolute
-/// descriptor (+16; SE_GROUP_DEFAULTED is 2).
+/// descriptor (SE_GROUP_DEFAULTED is 2).
 #[unsafe(no_mangle)]
 pub extern "system" fn SetSecurityDescriptorGroup(
     sd: *mut u8,
@@ -1016,7 +1022,7 @@ pub extern "system" fn SetSecurityDescriptorGroup(
     unsafe {
         let c = (control(sd) & !2) | if defaulted != 0 { 2 } else { 0 };
         sd.add(2).cast::<u16>().write_unaligned(c);
-        sd.add(16).cast::<*mut u8>().write_unaligned(group);
+        set_part(sd, Part::Group, group);
     }
     1
 }
@@ -1312,8 +1318,8 @@ pub extern "system" fn MapGenericMask(mask: *mut u32, mapping: *const u32) {
     }
 }
 
-/// GetSecurityDescriptorOwner: absolute (a pointer at 8) or self-relative
-/// (an offset at 4) descriptors; SE_OWNER_DEFAULTED is control bit 1.
+/// GetSecurityDescriptorOwner: absolute or self-relative descriptors;
+/// SE_OWNER_DEFAULTED is control bit 1.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSecurityDescriptorOwner(
     sd: *const u8,
@@ -1326,12 +1332,7 @@ pub extern "system" fn GetSecurityDescriptorOwner(
     let c = control(sd);
     // SAFETY: the caller's descriptor and outputs.
     unsafe {
-        *owner = if c & SE_SELF_RELATIVE != 0 {
-            let off = sd.add(4).cast::<u32>().read_unaligned() as usize;
-            if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
-        } else {
-            sd.add(8).cast::<*mut u8>().read_unaligned()
-        };
+        *owner = part(sd, Part::Owner);
         if !defaulted.is_null() {
             *defaulted = i32::from(c & 1 != 0);
         }
@@ -1350,11 +1351,10 @@ pub extern "system" fn GetSecurityDescriptorOwner(
 #[unsafe(no_mangle)]
 pub extern "system" fn SetEntriesInAclW(
     count: u32,
-    entries: *const u8,
+    entries: *const ExplicitAccess,
     old: *const u8,
     new: *mut *mut u8,
 ) -> u32 {
-    const ENTRY: usize = 48;
     if new.is_null() || (count > 0 && entries.is_null()) {
         return ERROR_INVALID_PARAMETER;
     }
@@ -1384,16 +1384,9 @@ pub extern "system" fn SetEntriesInAclW(
     }
     for e in 0..count as usize {
         // SAFETY: the caller's array of `count` EXPLICIT_ACCESS_W.
-        let (mask, mode, inherit, form, name) = unsafe {
-            let p = entries.add(e * ENTRY);
-            (
-                p.cast::<u32>().read_unaligned(),
-                p.add(4).cast::<u32>().read_unaligned(),
-                p.add(8).cast::<u32>().read_unaligned(),
-                p.add(16 + 12).cast::<u32>().read_unaligned(),
-                p.add(16 + 24).cast::<*const u8>().read_unaligned(),
-            )
-        };
+        let entry = unsafe { entries.add(e).read_unaligned() };
+        let (mask, mode, inherit) = (entry.permissions, entry.mode, entry.inheritance);
+        let (form, name) = (entry.trustee.form, entry.trustee.name.cast::<u8>().cast_const());
         let mut sid_buf = [0u8; 8 + 4 * SID_MAX_SUB_AUTHORITIES];
         let sid: *const u8 = match form {
             0 => name, // TRUSTEE_IS_SID
@@ -2127,8 +2120,8 @@ fn sddl_to_descriptor(mut t: &[u8], out: *mut *mut u8, size: *mut u32) -> i32 {
     1
 }
 
-/// GetSecurityDescriptorGroup: as GetSecurityDescriptorOwner (group
-/// pointer at 16 absolute, offset at 8 self-relative; SE_GROUP_DEFAULTED).
+/// GetSecurityDescriptorGroup: as GetSecurityDescriptorOwner
+/// (SE_GROUP_DEFAULTED).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSecurityDescriptorGroup(
     sd: *const u8,
@@ -2141,12 +2134,7 @@ pub extern "system" fn GetSecurityDescriptorGroup(
     let c = control(sd);
     // SAFETY: the caller's descriptor and outputs.
     unsafe {
-        *group = if c & SE_SELF_RELATIVE != 0 {
-            let off = sd.add(8).cast::<u32>().read_unaligned() as usize;
-            if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
-        } else {
-            sd.add(16).cast::<*mut u8>().read_unaligned()
-        };
+        *group = part(sd, Part::Group);
         if !defaulted.is_null() {
             *defaulted = i32::from(c & 2 != 0);
         }
@@ -2172,24 +2160,25 @@ pub extern "system" fn GetSecurityDescriptorControl(
 }
 
 /// GetSecurityDescriptorLength: a self-relative descriptor's bytes up to
-/// the end of its last part; an absolute one's header (40).
+/// the end of its last part; an absolute one's header (40 bytes on x64,
+/// 20 on x86).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSecurityDescriptorLength(sd: *const u8) -> u32 {
     if IsValidSecurityDescriptor(sd) == 0 {
         return 0;
     }
     if control(sd) & SE_SELF_RELATIVE == 0 {
-        return 40;
+        return size_of::<SecurityDescriptor>() as u32;
     }
     let mut end = 20usize;
     // SAFETY: the offsets inside the caller's self-relative descriptor.
     unsafe {
         for field in [4usize, 8] {
             let off = sd.add(field).cast::<u32>().read_unaligned() as usize;
-            if off != 0 {
-                if let Some((_, _, n)) = read_sid(sd.add(off)) {
-                    end = end.max(off + sid_len(n));
-                }
+            if off != 0
+                && let Some((_, _, n)) = read_sid(sd.add(off))
+            {
+                end = end.max(off + sid_len(n));
             }
         }
         for field in [12usize, 16] {

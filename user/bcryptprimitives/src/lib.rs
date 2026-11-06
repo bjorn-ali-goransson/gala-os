@@ -16,7 +16,11 @@
 // The export is a C-ABI function called by foreign code.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtTerminateProcess(process: isize, status: u32) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
@@ -55,6 +59,10 @@ fn from_kernel(data: *mut u8, length: usize) -> bool {
     true
 }
 
+// The memory routines the compiler may call: ntdll's on x64, ntrt's x86
+// runtime on x86 (a raw-dylib import does not give the symbols the
+// compiler calls there).
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -62,12 +70,27 @@ unsafe extern "C" {
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
 }
 
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86")]
+use core::arch::x86::{__cpuid, __cpuid_count};
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::{__cpuid, __cpuid_count};
+
+/// A random word: 64 bits on x64, 32 on x86 (RDRAND and RDSEED fill a
+/// general register).
+#[cfg(target_arch = "x86_64")]
+type Word = u64;
+#[cfg(target_arch = "x86")]
+type Word = u32;
+
 /// One random word from RDRAND (10 tries, as recommended), else RDSEED.
-fn random_word() -> Option<u64> {
-    let ecx = core::arch::x86_64::__cpuid(1).ecx;
+fn random_word() -> Option<Word> {
+    let ecx = __cpuid(1).ecx;
     if ecx & (1 << 30) != 0 {
         for _ in 0..10 {
-            let (value, ok): (u64, u8);
+            let (value, ok): (Word, u8);
             // SAFETY: RDRAND exists (CPUID.1:ECX[30]); it only writes the
             // register and the carry flag.
             unsafe {
@@ -78,10 +101,10 @@ fn random_word() -> Option<u64> {
             }
         }
     }
-    let ebx = core::arch::x86_64::__cpuid_count(7, 0).ebx;
+    let ebx = __cpuid_count(7, 0).ebx;
     if ebx & (1 << 18) != 0 {
         for _ in 0..1000 {
-            let (value, ok): (u64, u8);
+            let (value, ok): (Word, u8);
             // SAFETY: RDSEED exists (CPUID.7.0:EBX[18]).
             unsafe {
                 core::arch::asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))

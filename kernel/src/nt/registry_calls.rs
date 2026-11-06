@@ -16,8 +16,10 @@ use super::super::registry::{
     self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_RES, KeyId, KeyObject,
     REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY, Registry,
 };
+use super::super::regview;
 use super::super::status::NtStatus;
 use super::{Call, HANDLE_ATTRIBUTES};
+use crate::mm::heap::TryVec;
 
 /// The longest value data accepted (NtSetValueKey).
 const MAX_VALUE_DATA: usize = 16 << 20;
@@ -52,6 +54,38 @@ impl Call<'_> {
         }
         let (object, id) = self.key(root, 0)?;
         Ok((Some(object), id, name, attributes))
+    }
+
+    /// `name` below `start` in the caller's view of the registry
+    /// (nt::regview): a WOW64 process's names are in the 32-bit view
+    /// unless `access` has KEY_WOW64_64KEY, any process's with
+    /// KEY_WOW64_32KEY. The redirected name is relative to the root; the
+    /// third part is the length of its prefix through WOW6432Node (0 if
+    /// it has none).
+    fn key_view(
+        &self,
+        access: u32,
+        start: KeyId,
+        name: Vec<u16>,
+    ) -> Result<(KeyId, Vec<u16>, usize), NtStatus> {
+        const KEY_WOW64_64KEY: u32 = 0x0100;
+        const KEY_WOW64_32KEY: u32 = 0x0200;
+        let wow64 = self.process.wow64.is_some();
+        if access & KEY_WOW64_32KEY == 0 && (!wow64 || access & KEY_WOW64_64KEY != 0) {
+            return Ok((start, name, 0));
+        }
+        let full = registry::with(|r| {
+            let mut full = r.full_name(start)?;
+            if !name.is_empty() {
+                full.try_push(u16::from(b'\\')).map_err(|_| NtStatus::NO_MEMORY)?;
+                full.try_extend_from_slice(&name).map_err(|_| NtStatus::NO_MEMORY)?;
+            }
+            Ok(full)
+        })?;
+        match regview::redirect(&full).map_err(|_| NtStatus::NO_MEMORY)? {
+            Some(r) => Ok((registry::ROOT, r.path, r.node)),
+            None => Ok((start, name, 0)),
+        }
     }
 
     /// Makes a key object for `id` (already retained) and returns a handle.
@@ -117,6 +151,7 @@ pub(super) fn nt_open_key_ex(call: &mut Call<'_>) -> NtStatus {
 fn open_key(call: &mut Call<'_>) -> NtStatus {
     let (out, access) = (arg!(call, 0), arg!(call, 1) as u32);
     let (_root, start, name, attributes) = tri!(call.key_attributes(arg!(call, 2)));
+    let (start, name, _) = tri!(call.key_view(access, start, name));
     let found = registry::with(|r| {
         let id = r.lookup(start, &name)?;
         r.retain(id);
@@ -177,8 +212,14 @@ pub(super) fn nt_create_key(call: &mut Call<'_>) -> NtStatus {
     let (class_ptr, options, disposition_ptr) =
         (arg!(call, 4), arg!(call, 5) as u32, arg!(call, 6));
     let (_root, start, name, attributes) = tri!(call.key_attributes(arg!(call, 2)));
+    let (start, name, node) = tri!(call.key_view(access, start, name));
     let class = if class_ptr == 0 { Vec::new() } else { tri!(call.unicode_string(class_ptr)) };
     let now = platform::system_time();
+    // A name in the 32-bit view: its WOW6432Node exists (as on Windows,
+    // where the views' keys are always there).
+    if node > 0 {
+        tri!(registry::with(|r| r.create(start, &name[..node], 0, &[], now).map(|_| ())));
+    }
     // A new key needs KEY_CREATE_SUB_KEY on its parent (the access check,
     // docs/SECURITY.md S3); an existing one is opened as NtOpenKey would.
     let existing = registry::with(|r| Ok(r.lookup(start, &name).ok()));

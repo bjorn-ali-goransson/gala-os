@@ -667,8 +667,12 @@ pub extern "system" fn RtlFirstFreeAce(acl: *const u8, ace: *mut *mut u8) -> u8 
 }
 
 // ---- Security descriptors: Revision, Sbz1, Control, then Owner, Group,
-// Sacl, Dacl: pointers (absolute, 40 bytes) or offsets (self-relative,
-// 20 bytes) ----
+// Sacl, Dacl: pointers (absolute: 40 bytes on x64, 20 on x86) or offsets
+// (self-relative, 20 bytes) ----
+
+/// The absolute form's size: the header, padded to a pointer, and four
+/// pointers.
+const ABSOLUTE_SIZE: usize = 5 * size_of::<usize>();
 
 const SE_OWNER_DEFAULTED: u16 = 0x1;
 const SE_GROUP_DEFAULTED: u16 = 0x2;
@@ -704,7 +708,7 @@ unsafe fn field(sd: *const u8, index: usize) -> *mut u8 {
             let off = sd.add(4 + 4 * index).cast::<u32>().read_unaligned() as usize;
             if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
         } else {
-            sd.add(8 + 8 * index).cast::<*mut u8>().read_unaligned()
+            sd.add(size_of::<usize>() * (1 + index)).cast::<*mut u8>().read_unaligned()
         }
     }
 }
@@ -714,9 +718,9 @@ pub extern "system" fn RtlCreateSecurityDescriptor(sd: *mut u8, revision: u32) -
     if revision != 1 {
         return STATUS_UNKNOWN_REVISION;
     }
-    // SAFETY: the caller's 40-byte buffer.
+    // SAFETY: the caller's SECURITY_DESCRIPTOR.
     unsafe {
-        core::ptr::write_bytes(sd, 0, 40);
+        core::ptr::write_bytes(sd, 0, ABSOLUTE_SIZE);
         *sd = 1;
     }
     STATUS_SUCCESS
@@ -729,7 +733,7 @@ fn set_field(sd: *mut u8, index: usize, value: *mut u8, bits: u16, on: u16) -> u
         if control(sd) & SE_SELF_RELATIVE != 0 {
             return STATUS_BAD_DESCRIPTOR_FORMAT;
         }
-        sd.add(8 + 8 * index).cast::<*mut u8>().write_unaligned(value);
+        sd.add(size_of::<usize>() * (1 + index)).cast::<*mut u8>().write_unaligned(value);
         set_control(sd, control(sd) & !bits | on);
     }
     STATUS_SUCCESS

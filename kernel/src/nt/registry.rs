@@ -13,8 +13,9 @@
 //! across boots (D3, nt::reglog), volatile keys excepted, and a volatile
 //! key's children must be volatile. There are no security descriptors yet (every caller may do
 //! everything its handle's access allows), no symbolic link keys (the seed
-//! has `CurrentControlSet` itself), no change notifications and no
-//! WOW64 views. See docs/ARCHITECTURE.md, "Registry".
+//! has `CurrentControlSet` itself) and no change notifications. The
+//! 32-bit view (WOW64) is a choice of name, made per open or create
+//! (nt::regview). See docs/ARCHITECTURE.md, "Registry".
 
 use alloc::vec::Vec;
 
@@ -30,7 +31,7 @@ pub const KEY_CREATE_SUB_KEY: u32 = 0x0004;
 pub const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
 pub const KEY_NOTIFY: u32 = 0x0010;
 pub const KEY_CREATE_LINK: u32 = 0x0020;
-/// KEY_WOW64_64KEY | KEY_WOW64_32KEY: views, not rights (there is one view).
+/// KEY_WOW64_64KEY | KEY_WOW64_32KEY: views (nt::regview), not rights.
 pub const KEY_WOW64_RES: u32 = 0x0300;
 pub const KEY_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0x3f;
 
