@@ -683,6 +683,15 @@ samples).
    its tab strip). Next: resizing by its own frame (HTLEFT..HTBOTTOMRIGHT),
    IME off, a click on a link, FlaUI reading the page's accessibility
    tree.
+   Then a conformance report (the owner): a subset of web-platform-tests
+   (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
+   storage, encoding, timers) driven through ChromeDriver from the
+   snapshot's revision, the WPT server on the host reached as
+   `chromium_host` reaches it; results per directory against
+   Chrome-on-Windows on wpt.fyi, the tests that fail only on gala with
+   the ledger lines behind them. Run by a sub-agent, widened as the
+   speed allows; Acid3 and Speedometer/JetStream alongside (performance
+   only with KVM or a release kernel).
 3. The sandbox: renderers in restricted, low-integrity and
    AppContainer/LowBox tokens, job objects, process mitigation policies,
    handle inheritance lists, desktop and window station checks (RS);
