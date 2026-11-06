@@ -22,6 +22,11 @@
 //!   named mapping.
 //! - RtlCaptureStackBackTrace (this function's caller first),
 //!   VerSetConditionMask and VerifyVersionInfoW, Beep, GetProductInfo.
+//! - ntdll's RtlVerifyVersionInfo: the real version (10.0, build 26100),
+//!   though this program has no manifest (VerifyVersionInfoW: 6.2);
+//!   STATUS_REVISION_MISMATCH when it does not match, an empty TypeMask
+//!   STATUS_INVALID_PARAMETER (curl asks it whether Schannel has TLS
+//!   1.3: 10.0 build 20348 or later).
 //!
 //! Prints `kernel32_system_test: ok` or exits with the number of the
 //! failing check.
@@ -136,6 +141,11 @@ unsafe extern "system" {
     fn Beep(freq: u32, ms: u32) -> Bool;
 }
 
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn RtlVerifyVersionInfo(info: *const OsVersionInfoExW, kind: u32, mask: u64) -> u32;
+}
+
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -213,6 +223,10 @@ const MEM_COMMIT_RESERVE: u32 = 0x3000;
 const MEM_RELEASE: u32 = 0x8000;
 const PAGE_READWRITE: u32 = 4;
 const VER_MAJORVERSION: u32 = 2;
+const VER_MINORVERSION: u32 = 1;
+const VER_BUILDNUMBER: u32 = 4;
+const STATUS_REVISION_MISMATCH: u64 = 0xc000_0059;
+const STATUS_INVALID_PARAMETER: u64 = 0xc000_000d;
 const VER_GREATER_EQUAL: u8 = 3;
 
 fn out(text: &[u8]) {
@@ -614,6 +628,21 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         v.major = 11;
         c.eq(VerifyVersionInfoW(&mut v, VER_MAJORVERSION, mask) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_OLD_WIN_VERSION.into())?;
+        // RtlVerifyVersionInfo: 10.0 build 20348 or later, as curl asks.
+        let ge = |m: u64, kind: u32| VerSetConditionMask(m, kind, VER_GREATER_EQUAL);
+        let mask = ge(ge(ge(0, VER_MAJORVERSION), VER_MINORVERSION), VER_BUILDNUMBER);
+        let all = VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER;
+        v.major = 10;
+        v.minor = 0;
+        v.build = 20348;
+        c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), 0)?;
+        v.build = 26101;
+        c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), STATUS_REVISION_MISMATCH)?;
+        v.build = 0;
+        v.major = 11;
+        c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), STATUS_REVISION_MISMATCH)?;
+        v.major = 10;
+        c.eq(RtlVerifyVersionInfo(&v, 0, mask).into(), STATUS_INVALID_PARAMETER)?;
         c.ok(Beep(750, 1) != 0, GetLastError().into())?;
         // The edition, as the registry's EditionID (Professional) says:
         // PRODUCT_PROFESSIONAL (0x30).

@@ -1,6 +1,7 @@
 //! FormatMessageW/A: the system message texts (US English, as Microsoft
-//! documents them in "System Error Codes" and "Windows Sockets Error
-//! Codes", each ending in CRLF) of the errors programs have needed, or
+//! documents them in "System Error Codes", "Windows Sockets Error
+//! Codes" and "COM Error Codes (Security and Setup)", each ending in
+//! CRLF) of the errors programs have needed, or
 //! the caller's string, or a module's message table, with inserts. Other numbers fail with ERROR_MR_MID_NOT_FOUND
 //! and go to the ledger, so the table grows where it matters.
 
@@ -85,6 +86,16 @@ const MESSAGES: &[(u32, &str)] = &[
     (10061, "No connection could be made because the target machine actively refused it."),
     (10093, "Either the application has not called WSAStartup, or WSAStartup failed."),
     (11001, "No such host is known."),
+    // SSPI / Schannel ("COM Error Codes (Security and Setup)"): curl
+    // prints these after its own name of the status.
+    (0x8009_0322, "The target principal name is incorrect."),
+    (0x8009_0325, "The certificate chain was issued by an authority that is not trusted."),
+    (0x8009_0326, "The message received was unexpected or badly formatted."),
+    (0x8009_0328, "The received certificate has expired."),
+    (
+        0x8009_0331,
+        "The client and server cannot communicate, because they do not possess a common algorithm.",
+    ),
 ];
 
 const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x200;

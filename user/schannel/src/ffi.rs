@@ -162,15 +162,28 @@ pub fn find(list: &[SecBuffer], k: u32) -> Option<usize> {
 
 /// Puts `token` in the descriptor's token buffer: a new block with
 /// ALLOCATE_MEMORY, else the caller's buffer if it fits. Returns whether
-/// it allocated.
+/// it allocated. Without a SECBUFFER_TOKEN buffer the first
+/// SECBUFFER_EMPTY one takes the token and becomes SECBUFFER_TOKEN (curl
+/// passes its output buffer so, with ISC_REQ_ALLOCATE_MEMORY).
 pub fn output_token(
     desc: *mut SecBufferDesc,
     token: &[u8],
     allocate_memory: bool,
 ) -> Result<bool, u32> {
     let list = buffers(desc);
-    let Some(i) = find(list, SECBUFFER_TOKEN) else {
-        return if token.is_empty() { Ok(false) } else { Err(crate::SEC_E_INVALID_TOKEN) };
+    let i = match find(list, SECBUFFER_TOKEN) {
+        Some(i) => i,
+        None if token.is_empty() => return Ok(false),
+        None => match find(list, SECBUFFER_EMPTY) {
+            Some(i) => {
+                list[i].kind = SECBUFFER_TOKEN;
+                i
+            }
+            None => {
+                missing(b"schannel.dll!output token (no TOKEN or EMPTY buffer)", list.len() as u64);
+                return Err(crate::SEC_E_INVALID_TOKEN);
+            }
+        },
     };
     let b = &mut list[i];
     if token.is_empty() {

@@ -1,6 +1,6 @@
-//! SSPI's Unicode entry points and its dispatch table
-//! (InitSecurityInterfaceW, SecurityFunctionTableW as sspi.h lays it
-//! out), with one package: NTLM (`ntlm`). Credential and context handles
+//! SSPI's Unicode entry points and its dispatch tables
+//! (InitSecurityInterfaceW/A, SecurityFunctionTableW/A as sspi.h lays
+//! them out), with one package: NTLM (`ntlm`). Credential and context handles
 //! (SecHandle: dwLower, dwUpper) hold a pointer to their state on the
 //! process heap and a tag; buffers SSPI hands out (package information,
 //! names, tokens with ISC_REQ_ALLOCATE_MEMORY) are process-heap blocks
@@ -251,33 +251,38 @@ pub struct SecPkgInfo {
     comment: *const u16,
 }
 
-/// SecPkgInfoW of `packages`, with their strings, in one block.
-fn package_info(packages: &[Package]) -> *mut SecPkgInfo {
+/// SecPkgInfoW of `packages`, with their strings, in one block;
+/// SecPkgInfoA (the same layout, ANSI strings) unless `wide`.
+fn package_info(packages: &[Package], wide: bool) -> *mut SecPkgInfo {
+    let unit = if wide { 2 } else { 1 };
     let rows = || PACKAGES.iter().filter(|row| packages.contains(&row.0));
-    let strings: usize = rows().map(|row| 2 * (row.1.len() + 1 + row.2.len() + 1)).sum();
+    let strings: usize = rows().map(|row| unit * (row.1.len() + 1 + row.2.len() + 1)).sum();
     let count = packages.len();
     let block = allocate(count * size_of::<SecPkgInfo>() + strings);
     if block.is_null() {
         return block.cast();
     }
     // SAFETY: inside the block just allocated (zeroed: the strings' NULs
-    // are there).
+    // are there). The names are ASCII: one byte or one UTF-16 unit each.
     unsafe {
         let infos = block.cast::<SecPkgInfo>();
-        let mut text = block.add(count * size_of::<SecPkgInfo>()).cast::<u16>();
+        let mut text = block.add(count * size_of::<SecPkgInfo>());
+        let mut put = |s: &str| {
+            let at = text;
+            for b in s.bytes() {
+                if wide {
+                    text.cast::<u16>().write_unaligned(u16::from(b));
+                } else {
+                    text.write(b);
+                }
+                text = text.add(unit);
+            }
+            text = text.add(unit);
+            at
+        };
         for (i, &(_, name, comment, capabilities, rpc_id, max_token)) in rows().enumerate() {
-            let name_at = text;
-            for c in name.encode_utf16() {
-                text.write(c);
-                text = text.add(1);
-            }
-            text = text.add(1);
-            let comment_at = text;
-            for c in comment.encode_utf16() {
-                text.write(c);
-                text = text.add(1);
-            }
-            text = text.add(1);
+            let name_at = put(name).cast::<u16>();
+            let comment_at = put(comment).cast::<u16>();
             infos.add(i).write(SecPkgInfo {
                 capabilities,
                 version: 1,
@@ -291,23 +296,20 @@ fn package_info(packages: &[Package]) -> *mut SecPkgInfo {
     }
 }
 
-/// EnumerateSecurityPackagesW: NTLM, Kerberos, Negotiate and Schannel
+/// EnumerateSecurityPackagesW/A: NTLM, Kerberos, Negotiate and Schannel
 /// (under both its names).
-#[unsafe(no_mangle)]
-pub extern "system" fn EnumerateSecurityPackagesW(
-    count: *mut u32,
-    info: *mut *mut SecPkgInfo,
-) -> u32 {
+fn enumerate_packages(count: *mut u32, info: *mut *mut SecPkgInfo, wide: bool) -> u32 {
     if count.is_null() || info.is_null() {
         return SEC_E_INVALID_TOKEN;
     }
-    let p = package_info(&[
+    let all = [
         Package::Ntlm,
         Package::Kerberos,
         Package::Negotiate,
         Package::Schannel,
         Package::SchannelName,
-    ]);
+    ];
+    let p = package_info(&all, wide);
     if p.is_null() {
         return SEC_E_INSUFFICIENT_MEMORY;
     }
@@ -317,6 +319,23 @@ pub extern "system" fn EnumerateSecurityPackagesW(
         info.write(p);
     }
     SEC_E_OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumerateSecurityPackagesW(
+    count: *mut u32,
+    info: *mut *mut SecPkgInfo,
+) -> u32 {
+    enumerate_packages(count, info, true)
+}
+
+/// EnumerateSecurityPackagesA: SecPkgInfoA, ANSI strings.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumerateSecurityPackagesA(
+    count: *mut u32,
+    info: *mut *mut SecPkgInfo,
+) -> u32 {
+    enumerate_packages(count, info, false)
 }
 
 /// QuerySecurityPackageInfoW: a package's information; other names are
@@ -334,7 +353,40 @@ pub extern "system" fn QuerySecurityPackageInfoW(
         unsafe { info.write(core::ptr::null_mut()) };
         return no_package(name);
     };
-    let p = package_info(&[package]);
+    let p = package_info(&[package], true);
+    // SAFETY: as above.
+    unsafe { info.write(p) };
+    if p.is_null() { SEC_E_INSUFFICIENT_MEMORY } else { SEC_E_OK }
+}
+
+/// QuerySecurityPackageInfoA: the same with an ANSI name and SecPkgInfoA
+/// (the names are ASCII: the W lookup of the widened name).
+#[unsafe(no_mangle)]
+pub extern "system" fn QuerySecurityPackageInfoA(
+    name: *const u8,
+    info: *mut *mut SecPkgInfo,
+) -> u32 {
+    if info.is_null() {
+        return SEC_E_INVALID_TOKEN;
+    }
+    let mut widened = [0u16; 64];
+    if !name.is_null() {
+        // SAFETY: the caller's NUL-terminated name (cut at 63 bytes: no
+        // package name is that long, so a longer one is no package).
+        unsafe {
+            let mut n = 0;
+            while n < widened.len() - 1 && *name.add(n) != 0 {
+                widened[n] = u16::from(*name.add(n));
+                n += 1;
+            }
+        }
+    }
+    let Some(package) = package_of(widened.as_ptr()) else {
+        // SAFETY: the caller's output.
+        unsafe { info.write(core::ptr::null_mut()) };
+        return no_package(widened.as_ptr());
+    };
+    let p = package_info(&[package], false);
     // SAFETY: as above.
     unsafe { info.write(p) };
     if p.is_null() { SEC_E_INSUFFICIENT_MEMORY } else { SEC_E_OK }
@@ -773,7 +825,7 @@ pub extern "system" fn QueryContextAttributesW(
             // SECPKG_ATTR_PACKAGE_INFO: SecPkgContext_PackageInfoW { info };
             // SECPKG_ATTR_NEGOTIATION_INFO: { info, NegotiationState }.
             // The package that ran: NTLM (Negotiate's choice, too).
-            let p = package_info(&[Package::Ntlm]);
+            let p = package_info(&[Package::Ntlm], true);
             if p.is_null() {
                 return SEC_E_INSUFFICIENT_MEMORY;
             }
@@ -993,6 +1045,9 @@ unsupported_function! {
     RevertSecurityContext ExportSecurityContext ImportSecurityContextW AddCredentialsW
     QuerySecurityContextToken SetContextAttributesW SetCredentialsAttributesW
     ChangeAccountPasswordW QueryContextAttributesExW QueryCredentialsAttributesExW
+    QueryCredentialsAttributesA ImportSecurityContextA AddCredentialsA
+    SetContextAttributesA SetCredentialsAttributesA ChangeAccountPasswordA
+    QueryContextAttributesExA QueryCredentialsAttributesExA
 }
 
 /// SecurityFunctionTableW (dwVersion, then 31 function pointers): atomics
@@ -1052,4 +1107,55 @@ pub extern "system" fn InitSecurityInterfaceW() -> *const SecurityFunctionTable 
     }
     TABLE.version.store(4, Ordering::Release);
     &TABLE
+}
+
+static TABLE_A: SecurityFunctionTable = SecurityFunctionTable {
+    version: AtomicU32::new(0),
+    functions: [const { AtomicUsize::new(0) }; 31],
+};
+
+/// InitSecurityInterfaceA: SecurityFunctionTableA, the same slots with
+/// the ANSI functions where a function takes or gives strings (programs
+/// built without UNICODE, such as curl for Windows, call SSPI through
+/// it).
+#[unsafe(no_mangle)]
+pub extern "system" fn InitSecurityInterfaceA() -> *const SecurityFunctionTable {
+    let functions: [usize; 31] = [
+        EnumerateSecurityPackagesA as *const () as usize,
+        QueryCredentialsAttributesA as *const () as usize,
+        crate::AcquireCredentialsHandleA as *const () as usize,
+        FreeCredentialsHandle as *const () as usize,
+        0, // Reserved2
+        crate::InitializeSecurityContextA as *const () as usize,
+        AcceptSecurityContext as *const () as usize,
+        CompleteAuthToken as *const () as usize,
+        DeleteSecurityContext as *const () as usize,
+        ApplyControlToken as *const () as usize,
+        crate::QueryContextAttributesA as *const () as usize,
+        ImpersonateSecurityContext as *const () as usize,
+        RevertSecurityContext as *const () as usize,
+        MakeSignature as *const () as usize,
+        VerifySignature as *const () as usize,
+        FreeContextBuffer as *const () as usize,
+        QuerySecurityPackageInfoA as *const () as usize,
+        0, // Reserved3
+        0, // Reserved4
+        ExportSecurityContext as *const () as usize,
+        ImportSecurityContextA as *const () as usize,
+        AddCredentialsA as *const () as usize,
+        0, // Reserved8
+        QuerySecurityContextToken as *const () as usize,
+        EncryptMessage as *const () as usize,
+        DecryptMessage as *const () as usize,
+        SetContextAttributesA as *const () as usize,
+        SetCredentialsAttributesA as *const () as usize,
+        ChangeAccountPasswordA as *const () as usize,
+        QueryContextAttributesExA as *const () as usize,
+        QueryCredentialsAttributesExA as *const () as usize,
+    ];
+    for (slot, f) in TABLE_A.functions.iter().zip(functions) {
+        slot.store(f, Ordering::Relaxed);
+    }
+    TABLE_A.version.store(4, Ordering::Release);
+    &TABLE_A
 }

@@ -14,8 +14,12 @@
 //! (its context reports NTLM as the negotiated package: NEGOTIATION_INFO,
 //! PACKAGE_INFO)
 //! (RPC id 9) authenticates with NTLM. Schannel's package information
-//! (RPC id 14). security.dll (the older name) forwards to the same
-//! functions.
+//! (RPC id 14). The ANSI dispatch table (InitSecurityInterfaceA,
+//! version 4, as programs built without UNICODE use it: curl for
+//! Windows): its QuerySecurityPackageInfoA and EnumerateSecurityPackagesA
+//! give SecPkgInfoA with ANSI names; an unknown package is
+//! SEC_E_SECPKG_NOT_FOUND. security.dll (the older name) forwards to the
+//! same functions.
 //!
 //! Prints `sspi_test: ok` or exits with the number of the failing check.
 
@@ -43,6 +47,27 @@ struct SecPkgInfo {
     max_token: u32,
     name: *const u16,
     comment: *const u16,
+}
+
+/// SecurityFunctionTableA: dwVersion, then 31 function pointers.
+#[repr(C)]
+struct FunctionTable {
+    version: u32,
+    functions: [usize; 31],
+}
+
+/// SecurityFunctionTableA's QuerySecurityPackageInfoA (slot 16).
+type QueryPackageA = unsafe extern "system" fn(*const u8, *mut *mut SecPkgInfoA) -> i32;
+
+/// SecPkgInfoA.
+#[repr(C)]
+struct SecPkgInfoA {
+    capabilities: u32,
+    version: u16,
+    rpc_id: u16,
+    max_token: u32,
+    name: *const u8,
+    comment: *const u8,
 }
 
 #[repr(C)]
@@ -84,6 +109,8 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn QuerySecurityPackageInfoW(name: *const u16, info: *mut *mut SecPkgInfo) -> i32;
     fn EnumerateSecurityPackagesW(count: *mut u32, info: *mut *mut SecPkgInfo) -> i32;
+    fn EnumerateSecurityPackagesA(count: *mut u32, info: *mut *mut SecPkgInfoA) -> i32;
+    fn InitSecurityInterfaceA() -> *const FunctionTable;
     fn FreeContextBuffer(buffer: *mut c_void) -> i32;
     fn AcquireCredentialsHandleW(
         principal: *const u16,
@@ -218,6 +245,7 @@ const SEC_E_OK: u64 = 0;
 const SEC_I_CONTINUE_NEEDED: u64 = 0x0009_0312;
 const SEC_E_LOGON_DENIED: u64 = 0x8009_030c;
 const SEC_E_MESSAGE_ALTERED: u64 = 0x8009_030f;
+const SEC_E_SECPKG_NOT_FOUND: u64 = 0x8009_0305;
 const SECPKG_CRED_INBOUND: u32 = 1;
 const SECPKG_CRED_OUTBOUND: u32 = 2;
 const SECBUFFER_DATA: u32 = 1;
@@ -234,6 +262,15 @@ fn w(s: &str) -> [u16; 48] {
         *d = c.into();
     }
     b
+}
+
+/// The NUL-terminated ANSI string at `p` equals `want`.
+fn same_a(p: *const u8, want: &[u8]) -> bool {
+    // SAFETY: a NUL-terminated string from SSPI.
+    !p.is_null()
+        && unsafe {
+            want.iter().enumerate().all(|(i, &b)| *p.add(i) == b) && *p.add(want.len()) == 0
+        }
 }
 
 /// The NUL-terminated string at `p` equals `want`.
@@ -584,6 +621,26 @@ fn run() -> Result<(), u32> {
         c.ok(same((*info).name, "Microsoft Unified Security Protocol Provider"), 0)?;
         c.eq((*info).rpc_id.into(), 14)?; // RPC_C_AUTHN_GSS_SCHANNEL
         FreeContextBuffer(info.cast());
+
+        // The ANSI table and package information.
+        let table = InitSecurityInterfaceA();
+        c.ok(!table.is_null(), 0)?;
+        c.eq((*table).version.into(), 4)?;
+        c.ok((*table).functions[16] != 0, 0)?;
+        let query_a: QueryPackageA = core::mem::transmute((*table).functions[16]);
+        let mut info_a: *mut SecPkgInfoA = core::ptr::null_mut();
+        let unisp = c"Microsoft Unified Security Protocol Provider";
+        c.eq(query_a(unisp.as_ptr().cast(), &mut info_a) as u64, SEC_E_OK)?;
+        c.ok(same_a((*info_a).name, unisp.to_bytes()), 0)?;
+        c.eq((*info_a).rpc_id.into(), 14)?;
+        FreeContextBuffer(info_a.cast());
+        let r = query_a(c"NoSuchPackage".as_ptr().cast(), &mut info_a);
+        c.eq(r as u32 as u64, SEC_E_SECPKG_NOT_FOUND)?;
+        let mut count = 0u32;
+        c.eq(EnumerateSecurityPackagesA(&mut count, &mut info_a) as u64, SEC_E_OK)?;
+        let ntlm = (0..count as usize).any(|i| same_a((*info_a.add(i)).name, b"NTLM"));
+        c.ok(ntlm, count.into())?;
+        FreeContextBuffer(info_a.cast());
 
         let security = LoadLibraryA(c"security.dll".as_ptr().cast());
         let secur32 = LoadLibraryA(c"secur32.dll".as_ptr().cast());

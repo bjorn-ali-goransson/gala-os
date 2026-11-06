@@ -70,8 +70,8 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: curl for Windows on Schannel, then Git's https remotes
-   (TLS step 3).
+2. **TLS**: `gala install`'s HTTPS downloads on winhttp (TLS step 4;
+   step 3, curl and Git's https remotes, is done).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2
    (static busybox) as filler.
 4. **RS**: step B3a (window state apart from composition, presenters).
@@ -144,7 +144,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine) done; curl next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine), curl and Git's https remotes done; `gala install`'s downloads next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
 
@@ -302,7 +302,8 @@ boot-test <name>`, see "Pending scenarios" below):
 - Step 7, Win32-OpenSSH 9.8.3.0p2: key and password logins
   (`sshd_login`, `sshd_password`); the remote shell is item SSH.
 - PostgreSQL 17.2: initdb, the server, the host's psql (`postgres`).
-- MinGit 2.47.1: init, add, commit, log (`mingit`, pending).
+- MinGit 2.47.1: init, add, commit, log (`mingit`, pending); a clone
+  over https on Schannel (`git_https`, ROADMAP TLS).
 - Git Bash (PortableGit 2.47.1): **parked**; msys-2.0.dll loads and
   bash gets past its startup deadlock, then dies with an access
   violation at address 0 after looking up kernelbase's VirtualAlloc2
@@ -509,7 +510,6 @@ own session and shell.
   session's desktop is drawn and gets input; window calls never cross
   sessions (`session_test`); `events=window`; the core/NT process split
   (`nt::process::Core`, which Linux processes use too).
-
 - B3a, window station and desktop objects (`nt::winsta`): WinSta0 and
   its Default desktop in every session, SYSTEM's `Service-0x0-3e7$` in
   session 0, a non-interactive logon's station made on first use; a
@@ -519,6 +519,7 @@ own session and shell.
   GetThreadDesktop, SetThreadDesktop, OpenDesktop, OpenInputDesktop,
   CloseDesktop, EnumDesktopsW, GetUserObjectInformationW/A over gala
   calls (`winsta_test`, `winsta_service`).
+
 **Next**:
 1. B3a: window state apart from composition, and presenters: console
    attach and switch; a test presenter (headless rendering for screen
@@ -756,7 +757,8 @@ validation against gala's machine root store (`System32\gala\roots`).
 Not yet run on real Windows (run-all.ps1 runs it when Nginx can be
 started and, as administrator, imports the test CA first). winhttp's
 and wininet's synchronous clients over it, on one engine (steps 1 and
-2 below).
+2 below); unmodified curl and Git over it (`curl_schannel`,
+`git_https`; step 3).
 
 **Next**:
 1. Done: winhttp over Schannel, synchronous (`winhttp_test` against the
@@ -775,9 +777,35 @@ and wininet's synchronous clients over it, on one engine (steps 1 and
    "WinHTTP and WinINet"). Still open there, besides winhttp's list:
    the A functions, InternetQueryOptionW, FTP, the cache,
    InternetTimeFrom/ToSystemTimeW.
-3. curl for Windows (its Schannel backend), unmodified, fetching from
-   the in-guest Nginx; then Git's https remotes (MinGit uses curl with
-   Schannel).
+3. Done: curl and Git over Schannel. curl.se's own Windows build
+   (8.23.0_8, PREBUILT `curl`) has LibreSSL as its only TLS backend (no
+   Schannel, no MultiSSL), so it runs as that (`curl`: its CA list is
+   the Windows ROOT store, crypt32's CertOpenSystemStoreA); the Schannel
+   curl is Git for Windows' (PortableGit 2.47.1's curl 8.11.0, PREBUILT
+   `gitcurl`; `curl_schannel`), the libcurl MinGit's https remotes load
+   (`git_https`: ls-remote and a clone over Git's dumb HTTP protocol
+   from the in-guest Nginx, and an untrusted certificate refused). Both
+   curl scenarios run `user/curl/curl.sh` against the same Nginx: plain
+   HTTP, HTTPS by name and address, an untrusted root (exit 60), an
+   expired certificate (60 on LibreSSL, 35 on Schannel). What they
+   needed: secur32's ANSI table (InitSecurityInterfaceA,
+   QuerySecurityPackageInfoA, EnumerateSecurityPackagesA), Schannel
+   counting only its own side's SP_PROT_* bits and taking a
+   SECBUFFER_EMPTY output buffer, ntdll's RtlVerifyVersionInfo,
+   msvcrt's rand_s/_sys_errlist/_sys_nerr, iphlpapi's
+   if_nametoindex/if_indextoname, kernel32's Module32First/Next (ANSI),
+   SSPI texts in FormatMessage, wldap32 stubs. Still open there: the
+   pinned curl.se version is fetched from curl.se, which keeps versions
+   from 8.17.0 on; curl's `--cacert` with Schannel (curl's own chain
+   check needs crypt32's chain engine, step 5; the curl.se build has no
+   Schannel to try it with); a smart-HTTP Git server (`git
+   http-backend`) and pushes; Schannel's revocation check (the
+   scenarios pass `--ssl-no-revoke` / `http.schannelCheckRevoke=false`;
+   what Windows does for a certificate with no CRL distribution point
+   is to be checked there); what the ledger shows besides
+   (msvcrt's _localtime64_s, userenv's GetUserProfileDirectoryA, bcrypt's
+   DH/DSA and chaining-mode property for libssh2's WinCNG probe,
+   WSAIoctl's SIO_IDEAL_SEND_BACKLOG_QUERY).
 4. `gala install`'s HTTPS downloads (PK) on winhttp, with gala's root
    store holding a pinned, documented public CA bundle.
 5. For BR: crypt32's stores and chain engine

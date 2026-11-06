@@ -912,6 +912,26 @@ on `user/http_client`: a change to the engine boots both scenarios.
   the last one (it panics).
 - schannel.dll is 1.4 MB (rustls and RustCrypto): only processes that
   use Schannel load it, through secur32.
+- **curl and Git** (`curl`, `curl_schannel`, `git_https`): unmodified
+  PREBUILT programs run by busybox sh scripts (`user/curl/curl.sh`,
+  `user/git_https/git.sh`) against the same Nginx, one labelled line
+  with the exit code per step. curl.se's Windows build is LibreSSL
+  only (CURL_SSL_BACKEND does nothing there: `curl -V` lists one
+  backend), so the Schannel curl is Git for Windows' (PREBUILT
+  `gitcurl`: curl.exe, its Schannel-only libcurl-4.dll and that DLL's
+  imports, from PortableGit). curl prints Schannel's failures as
+  `schannel: SEC_E_... (0x8009....) - <FormatMessage text>`: the SSPI
+  status is the place to start (then the `schannel.dll!ISC:` ledger
+  line). Git's dumb HTTP protocol needs only static files:
+  `user/git_https/repo.git` is a bare repository after `git
+  update-server-info`, cut to HEAD, info/refs, objects/info/packs and
+  the loose objects (made with fixed author and committer dates, so the
+  commit id in the scenario stays). To serve more, make it the same way
+  on the host and check the files in.
+- Schannel's revocation check is not implemented (recorded when asked):
+  the scenarios pass curl's `--ssl-no-revoke` and Git's
+  `http.schannelCheckRevoke=false`, as on Windows a certificate without
+  a CRL distribution point may fail it.
 
 ### busybox
 

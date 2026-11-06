@@ -380,3 +380,55 @@ pub extern "system" fn ConvertInterfaceIndexToLuid(index: u32, luid: *mut u64) -
         }
     }
 }
+
+/// if_nametoindex(InterfaceName): the index of the interface whose
+/// ConvertInterfaceLuidToNameA name this is (`loopback_0`), or 0.
+#[unsafe(no_mangle)]
+pub extern "system" fn if_nametoindex(name: *const u8) -> u32 {
+    if name.is_null() {
+        return 0;
+    }
+    let mut wide = [0u16; 33];
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated name.
+    unsafe {
+        while *name.add(n) != 0 {
+            if n == wide.len() - 1 {
+                return 0;
+            }
+            wide[n] = u16::from(*name.add(n));
+            n += 1;
+        }
+    }
+    let (mut luid, mut index) = (0u64, 0u32);
+    if ConvertInterfaceNameToLuidW(wide.as_ptr(), &mut luid) != NO_ERROR
+        || ConvertInterfaceLuidToIndex(&luid, &mut index) != NO_ERROR
+    {
+        return 0;
+    }
+    index
+}
+
+/// if_indextoname(InterfaceIndex, InterfaceName): the interface's name
+/// (`loopback_0`) in the caller's IF_NAMESIZE (256) buffer, which is
+/// returned; NULL for an unknown index.
+#[unsafe(no_mangle)]
+pub extern "system" fn if_indextoname(index: u32, name: *mut u8) -> *mut u8 {
+    let mut luid = 0u64;
+    let mut wide = [0u16; 33];
+    if name.is_null()
+        || ConvertInterfaceIndexToLuid(index, &mut luid) != NO_ERROR
+        || ConvertInterfaceLuidToNameW(&luid, wide.as_mut_ptr(), wide.len()) != NO_ERROR
+    {
+        return core::ptr::null_mut();
+    }
+    // The names are ASCII (`<type>_<index>`), NUL included.
+    for (k, &c) in wide.iter().enumerate() {
+        // SAFETY: the caller's IF_NAMESIZE buffer; names are shorter.
+        unsafe { *name.add(k) = c as u8 };
+        if c == 0 {
+            break;
+        }
+    }
+    name
+}

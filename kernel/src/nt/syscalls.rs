@@ -3704,6 +3704,11 @@ fn gala_clock_control(call: &mut Call<'_>) -> NtStatus {
     let state = super::kuser::refresh_after(|| platform::clock_control(op));
     if op != clockctl::Op::Query {
         info!("clock: {} asked to {op}: now {state}", call.process.name);
+        // Absolute timeouts and timers follow the system time.
+        if matches!(op, clockctl::Op::ShiftSystem(_) | clockctl::Op::SetSystem(_)) {
+            let woken = super::wait::system_time_changed();
+            info!("clock: the system time moved: {woken} absolute waits and the timers look again");
+        }
         crate::events::emit(
             crate::events::Category::Mock,
             "clock",
@@ -3736,11 +3741,6 @@ pub fn allow_handover_requests() -> Result<ObjectRef, NtStatus> {
         kind: EventType::Synchronization,
         dispatcher: Dispatcher::new(0),
     }))
-        // Absolute timeouts and timers follow the system time.
-        if matches!(op, clockctl::Op::ShiftSystem(_) | clockctl::Op::SetSystem(_)) {
-            let woken = super::wait::system_time_changed();
-            info!("clock: the system time moved: {woken} absolute waits and the timers look again");
-        }
     .map_err(|_| NtStatus::NO_MEMORY)?;
     *HANDOVER_REQUEST.lock() = Some(event.clone());
     Ok(event)
@@ -6555,7 +6555,9 @@ fn nt_notify_change_directory_file(call: &mut Call<'_>) -> NtStatus {
         apc,
         file_signal: dir.dispatcher.clone(),
         done: done.clone(),
+        reserved: None,
     };
+    let request = tri!(request.reserve());
     let key = dir.lock_owner();
     let node = dir.node;
     drop(entry);
@@ -6642,9 +6644,7 @@ fn nt_query_directory_file(call: &mut Call<'_>) -> NtStatus {
 fn nt_query_volume_information_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (iosb, buffer, length, class) =
-        reserved: None,
         (arg!(call, 1), arg!(call, 2), arg!(call, 3) as u32 as usize, arg!(call, 4) as u32);
-    let request = tri!(request.reserve());
     // FILE_FS_DEVICE_INFORMATION { DeviceType, Characteristics: 0 } of
     // console handles (FILE_DEVICE_CONSOLE) and pipes (FILE_DEVICE_NAMED_PIPE).
     let device = match entry.object.body {

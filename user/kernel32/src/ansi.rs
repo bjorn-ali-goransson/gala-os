@@ -19,7 +19,7 @@ fn wide(s: *const u8, buf: &mut [u16; MAX]) -> Result<*const u16, u32> {
 
 /// UTF-16 `w` (no NUL) to UTF-8 at `out` (`size` bytes, NUL added); the
 /// length without the NUL, or None if it does not fit.
-fn to_utf8(w: &[u16], out: *mut u8, size: usize) -> Option<usize> {
+pub(crate) fn to_utf8(w: &[u16], out: *mut u8, size: usize) -> Option<usize> {
     if w.is_empty() {
         if size == 0 {
             return None;

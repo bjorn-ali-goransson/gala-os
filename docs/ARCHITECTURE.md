@@ -2171,7 +2171,11 @@ ntdll imports.
 - **Version**: the version reported to the program is as on Windows: the
   real version only if the executable's RT_MANIFEST declares Windows
   10/11, 6.3.9600 for Windows 8.1, else 6.2.9200 (GetVersion(Ex)A/W,
-  VerifyVersionInfoW).
+  VerifyVersionInfoW). ntdll's RtlGetVersion and RtlVerifyVersionInfo
+  give the real one whatever the manifest (curl asks the latter whether
+  Schannel has TLS 1.3); the two Verify functions each have the
+  comparison (major, minor and service pack as one version; build and
+  platform each alone), kernel32's against the manifest's version.
 - **CONTEXT buffers** (`context.rs`): InitializeContext/
   InitializeContext2 (with CONTEXT_XSTATE: CONTEXT_EX and a 64-byte
   aligned XSTATE area for every enabled feature), CopyContext by flag
@@ -2714,10 +2718,15 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   and forwards every call whose credential or context handle carries
   schannel.dll's tags (`galaSCHC`, `galaSCHX` in dwUpper), and
   AcquireCredentialsHandleW/A for UNISP_NAME / "Schannel". The package
-  is listed under both names (EnumerateSecurityPackagesW,
-  QuerySecurityPackageInfoW: RPC id 14, cbMaxToken 24576). secur32 also
-  has NTLM, Kerberos as on a workgroup machine and Negotiate over NTLM
-  (`sspi_test`).
+  is listed under both names (EnumerateSecurityPackagesW/A,
+  QuerySecurityPackageInfoW/A: RPC id 14, cbMaxToken 24576). Two
+  dispatch tables, InitSecurityInterfaceW and InitSecurityInterfaceA
+  (the ANSI functions where a slot takes or gives strings; programs
+  built without UNICODE, such as curl, call SSPI through it; the ANSI
+  functions besides AcquireCredentialsHandleA, InitializeSecurityContextA,
+  QueryContextAttributesA and the package queries are recorded and give
+  SEC_E_UNSUPPORTED_FUNCTION). secur32 also has NTLM, Kerberos as on a
+  workgroup machine and Negotiate over NTLM (`sspi_test`).
 - `user/schannel` (schannel.dll; it also exports the SSPI functions, as
   Windows' does): credentials (`creds.rs`), the SecBuffer rules
   (`lib.rs`), QueryContextAttributes (`attrs.rs`).
@@ -2743,8 +2752,12 @@ test's own in-process server) and the host tests of `user/schannel_tls`
 
 - **Protocols**: SCHANNEL_CRED (version 4: grbitEnabledProtocols,
   dwFlags, paCred) and SCH_CREDENTIALS (version 5: TLS_PARAMETERS'
-  grbitDisabledProtocols for every ALPN id). Only TLS 1.2 and 1.3; any
-  other protocol is recorded and the context then fails with
+  grbitDisabledProtocols for every ALPN id). Each protocol has a client
+  and a server bit (SP_PROT_TLS1_2_CLIENT, _SERVER): only the
+  credential's own side's bits count (curl disables every protocol but
+  the client's TLS 1.0 to 1.3, the server halves included). Only TLS
+  1.2 and 1.3; the others enabled with them are left out; a credential
+  with neither is recorded and its context fails with
   SEC_E_ALGORITHM_MISMATCH.
 - **Manual validation** (SCH_CRED_MANUAL_CRED_VALIDATION or
   ISC_REQ_MANUAL_CRED_VALIDATION): the server's certificate is not
@@ -2762,8 +2775,11 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   CertGetCertificateChain gives a chain of the certificate alone,
   untrusted (CERT_TRUST_IS_UNTRUSTED_ROOT | CERT_TRUST_IS_PARTIAL_CHAIN,
   recorded), and CertVerifyCertificateChainPolicy reports
-  CERT_E_UNTRUSTEDROOT, so callers that validate themselves (curl) fail
-  closed instead of ending the process. When crypt32 gets its ROOT
+  CERT_E_UNTRUSTEDROOT, so callers that validate themselves (curl with
+  `--cacert`) fail closed instead of ending the process. curl and Git
+  without `--cacert` leave validation to Schannel (`curl_schannel`,
+  `git_https`); curl.se's LibreSSL build reads the ROOT store itself
+  (CertOpenSystemStoreA, `curl`). When crypt32 gets its ROOT
   store it reads the same directory, and Schannel moves onto its chain
   engine.
 - **Server credentials**: the certificate (paCred[0]) and the CNG key it
@@ -2780,7 +2796,10 @@ AcceptSecurityContext chain:
 
 - **handshaking**: each call takes the input SECBUFFER_TOKEN and gives
   the output token (ISC_REQ_ALLOCATE_MEMORY: a process-heap block for
-  FreeContextBuffer, else the caller's buffer) and SEC_I_CONTINUE_NEEDED
+  FreeContextBuffer, else the caller's buffer; in the output's
+  SECBUFFER_TOKEN, else its first SECBUFFER_EMPTY, which becomes the
+  token, as curl passes it; with neither, recorded and
+  SEC_E_INVALID_TOKEN) and SEC_I_CONTINUE_NEEDED
   until SEC_E_OK; SEC_E_INCOMPLETE_MESSAGE with SECBUFFER_MISSING (the
   bytes the current record still lacks) in the first empty input buffer
   after the token; SECBUFFER_EXTRA there for bytes after the handshake's
@@ -3295,6 +3314,19 @@ endpoint's I/O completion port.
 - Completion routines of requests that pended run whatever the status
   (`notify::complete_count`); only a request that fails in its call
   queues none.
+- **A completion never needs memory**: as Windows allocates the packet
+  and the APC with the request (the IRP), a request reserves them when
+  it starts (`notify::Reserved`: AFD's `submit`, pipe and directory
+  requests' `Request::reserve`): a slot in its port's queue (if the
+  file has a port and the request an ApcContext) and in its thread's APC
+  queue (if it has a routine), both `mm::heap::ReservedVec`, which keep
+  room for reserved slots (capacity >= len + reserved; ordinary posts
+  never use it). Without memory the request fails in its call with
+  STATUS_INSUFFICIENT_RESOURCES. Clones of a pipe request share one
+  reservation; slots not used are given back when the request is
+  dropped. A port associated after the request started gets an ordinary
+  post, which may fail: logged (`io: a completion packet (context ...)
+  was lost: no memory`), as is a lost completion routine.
 - **APCs**: an ApcRoutine (WSARecv/WSASend's lpCompletionRoutine) is
   queued as a user APC to the calling thread when the request
   completes, at once or later, with (ApcContext, IoStatusBlock); such a
@@ -3318,19 +3350,6 @@ endpoint's I/O completion port.
   `POLLERS`). Events: READ (bytes or end of stream), WRITE, HUP,
   ACCEPT, CONNECT, CONNECT_ERR, from `net::tcp::readiness`. Only a zero
   timeout (just look) is honoured by the kernel; gala's ws2_32 `select`
-- **A completion never needs memory**: as Windows allocates the packet
-  and the APC with the request (the IRP), a request reserves them when
-  it starts (`notify::Reserved`: AFD's `submit`, pipe and directory
-  requests' `Request::reserve`): a slot in its port's queue (if the
-  file has a port and the request an ApcContext) and in its thread's APC
-  queue (if it has a routine), both `mm::heap::ReservedVec`, which keep
-  room for reserved slots (capacity >= len + reserved; ordinary posts
-  never use it). Without memory the request fails in its call with
-  STATUS_INSUFFICIENT_RESOURCES. Clones of a pipe request share one
-  reservation; slots not used are given back when the request is
-  dropped. A port associated after the request started gets an ordinary
-  post, which may fail: logged (`io: a completion packet (context ...)
-  was lost: no memory`), as is a lost completion routine.
   waits with its timeout and then cancels the poll (TODO: honour the
   timeout in AFD, for programs that poll AFD directly, like libuv).
 - **Non-blocking sockets** (FIONBIO through SET_INFO): a request without
@@ -5826,25 +5845,6 @@ Host tests: `session::tests::windows_stay_in_their_session` (two
 sessions' registries, posts and thread posts across them),
 `window::tests` and `winevent::tests` on their own `Windows` / `Hooks`.
 
-### Target design (B3-B5)
-
-```
-Session (id, its object directory, its token defaults, presenter)
- └─ window station WinSta0 (later: clipboard, atoms)
-     └─ desktop "Default" = window state (registry, Z order, focus,
-                            capture, pixel buffers) + input queue
-                            + presenter: Console | Remote | None
-```
-
-Numbering: 0 for services and SYSTEM (sshd and its logons are session 0
-on Windows too), 1 for the local console, 2+ for remote logons.
-
-1. **Window state apart from composition** (gala's own addition; B3a):
-   the desktop's window state and each window's last pixels are kept in
-   every kernel; the compositor (frames, taskbar, start menu, wallpaper,
-   fonts) is a presenter. So the server kernel (no `shasha` feature,
-   ROADMAP SD) can serve GUI programs to a remote shasha client without a
-   compositor of its own, and a desktop with no presenter keeps its
 ### Window stations and desktops (B3a)
 
 `kernel/src/nt/winsta.rs` (objects, the choice of a process's station;
@@ -5922,6 +5922,25 @@ same program as SYSTEM).
   station, desktop, `from`), `"connect failed"`, `"made"`. The state
   dump's sessions part lists each session's stations.
 
+### Target design (B3-B5)
+
+```
+Session (id, its object directory, its token defaults, presenter)
+ └─ window station WinSta0 (later: clipboard, atoms)
+     └─ desktop "Default" = window state (registry, Z order, focus,
+                            capture, pixel buffers) + input queue
+                            + presenter: Console | Remote | None
+```
+
+Numbering: 0 for services and SYSTEM (sshd and its logons are session 0
+on Windows too), 1 for the local console, 2+ for remote logons.
+
+1. **Window state apart from composition** (gala's own addition; B3a):
+   the desktop's window state and each window's last pixels are kept in
+   every kernel; the compositor (frames, taskbar, start menu, wallpaper,
+   fonts) is a presenter. So the server kernel (no `shasha` feature,
+   ROADMAP SD) can serve GUI programs to a remote shasha client without a
+   compositor of its own, and a desktop with no presenter keeps its
    windows alive (RDP-style disconnect and resume).
 2. **Presenters** (B3a), at most one per desktop at a time:
    - **Console**: the framebuffer through `platform::Display`, PS/2
