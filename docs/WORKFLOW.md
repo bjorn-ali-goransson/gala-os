@@ -1411,7 +1411,10 @@ UEFI (BIOS boots have no framebuffer).
   only it has (text in the new place); to tell a wrong layout from a
   late repaint, probe SetWindowPos (the sizes the program set) and
   present a window's whole buffer again a few seconds later: if the dump
-  is right then, the layout was.
+  is right then, the layout was. The desktop redraws a damage
+  rectangle row by row from the top, slowly under TCG: a dump during a
+  window move shows the moved window cut off below some row. Check a
+  pixel the redraw reaches last (the window's bottom-right corner).
 - A screen check pins a wallpaper with `wallpaper=<name>` (the default
   is a random one).
 

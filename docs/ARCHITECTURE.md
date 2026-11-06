@@ -4052,7 +4052,8 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   0x7f55, edges 1 left, 2 top, 4 right, 8 bottom: the rectangle follows
   the pointer, at least 120 x 60, and goes to the program as
   GALA_WM_PLACE when the button is released; no outline is drawn
-  meanwhile), anything else is the click it was; DefWindowProc answers
+  meanwhile; as Windows' move and size loops, both take the desktop's
+  mouse capture, logged), anything else is the click it was; DefWindowProc answers
   HTCLIENT. GALA_WM_PLACE names the desktop's window, which for such a
   frame is the client area: user32 adds the program's borders back
   (Snap places these windows right too). gdi32 is loaded lazily with LoadLibrary,

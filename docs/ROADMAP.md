@@ -1201,15 +1201,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Defects known, not yet fixed
 
-- **A strip left unredrawn after dragging Chromium**: the screenshot of
-  `chromium_window`'s drag step showed the part of the moved window's
-  new area right of x 826 and below the toolbar as wallpaper (no window,
-  no shadow) while the rest was drawn; a desktop unit test of a dragged
-  frameless window composes correctly. Either the screendump caught the
-  redraw midway (the check passes once the box is in place) or a damage
-  rectangle is dropped; to settle with a second screendump a few seconds
-  later in the step. Item W (desktop).
-
 - **console_window step 5 under load**: about 1 run in 20 of the full
   suite, the wheel scrolls conhost back 15 lines instead of 18 (the
   screenshot shows `history[1]` on top): one of six notches is missing.

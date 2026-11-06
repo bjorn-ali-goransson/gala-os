@@ -51,9 +51,9 @@ fn desktop_with_window() -> (Desktop, u32) {
 }
 
 /// Moves the pointer to (x, y).
-fn go(d: &mut Desktop, x: i64, y: i64, buttons: u8) {
+fn go(d: &mut Desktop, x: i64, y: i64, buttons: u8) -> Vec<Rect> {
     let (px, py) = d.pointer;
-    d.pointer(x - px, y - py, buttons);
+    d.pointer(x - px, y - py, buttons)
 }
 
 fn click(d: &mut Desktop, x: i64, y: i64) {
@@ -598,4 +598,35 @@ fn snapping_a_minimized_window_below_another_remembers_its_own_rectangle() {
     d.act(a, Action::Snap(SnapTo::Left)).unwrap();
     assert_eq!(d.window(a).unwrap().unsnapped, Some((300, 100, 400, 300)));
     assert_eq!(d.window(b).unwrap().unsnapped, None);
+}
+
+#[test]
+fn a_drag_takes_the_capture_from_its_window() {
+    // As Windows' move and size loops: a window that holds the mouse
+    // capture (a program that captures on every button down) and asks
+    // for a drag or a resize loses the capture to it; the window follows
+    // the pointer and its moves are redrawn.
+    let (mut d, _) = desktop_with_window();
+    let f = d.create(7, 300, 120, 200, 100, &title("own frame"), STYLE_FRAMELESS).unwrap();
+    d.show(f, 7, true).unwrap();
+    go(&mut d, 350, 125, 0);
+    go(&mut d, 350, 125, 1);
+    d.capture(f, 7).unwrap();
+    d.begin_drag(f, 7).unwrap();
+    let damage = go(&mut d, 400, 175, 1);
+    assert_eq!(d.window(f).map(|w| (w.x, w.y)), Some((350, 170)));
+    assert!(
+        damage.iter().any(|r| r.x <= 350 && r.y <= 170 && r.x + r.w >= 550 && r.y + r.h >= 270)
+    );
+    go(&mut d, 400, 175, 0);
+    // The same for a resize.
+    go(&mut d, 548, 268, 1);
+    d.capture(f, 7).unwrap();
+    d.begin_resize(f, 7, RESIZE_RIGHT | RESIZE_BOTTOM).unwrap();
+    go(&mut d, 578, 288, 1);
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    go(&mut d, 578, 288, 0);
+    let n = d.take_input(7, &mut out);
+    assert!(out[..n].iter().any(|e| e.message == GALA_WM_PLACE && e.window == f));
 }

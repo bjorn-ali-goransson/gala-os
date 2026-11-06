@@ -8395,9 +8395,15 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 },
                 ScreenStep {
                     after: "desktop: dragging window",
-                    // Dragged by (100, 100): the box moves with it.
+                    // Dragged by (100, 100): the box moves with it, and
+                    // the whole new area is redrawn: the page's green at
+                    // its bottom-right corner, drawn last (the window spans
+                    // 100..900 x 100..700 now).
                     input: &["mouse_move 100 100", "mouse_button 0"],
-                    pixels: &[PixelCheck::AnyIn(220, 300, 160, 160, 0xff00ff)],
+                    pixels: &[
+                        PixelCheck::AnyIn(220, 300, 160, 160, 0xff00ff),
+                        PixelCheck::At(880, 600, 0x2e8b57),
+                    ],
                 },
                 ScreenStep {
                     after: "",

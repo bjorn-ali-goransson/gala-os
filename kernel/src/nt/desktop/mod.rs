@@ -1770,6 +1770,8 @@ impl Desktop {
         }
         self.raise(id);
         self.activate(Some(id));
+        // As Windows' move loop: the drag takes the mouse capture.
+        self.release_capture_for_loop(id);
         self.drag = Some((id, x - wx, y - wy));
         // (Host unit tests have no console to log to.)
         #[cfg(not(test))]
@@ -1793,10 +1795,23 @@ impl Desktop {
         }
         self.raise(id);
         self.activate(Some(id));
+        self.release_capture_for_loop(id);
         self.resize = Some(Resize { id, edges, start, from: rect, to: rect });
         #[cfg(not(test))]
         crate::info!("desktop: resizing window {id} for its program (edges {edges:#x})");
         Ok(())
+    }
+
+    /// A drag or resize of `id` that starts takes the mouse capture from
+    /// whichever window held it (otherwise every move would go to the
+    /// capture and the window would not follow the pointer).
+    fn release_capture_for_loop(&mut self, id: u32) {
+        if let Some(c) = self.captured.take() {
+            #[cfg(not(test))]
+            crate::info!("desktop: window {c} loses the mouse capture to the move of {id}");
+            #[cfg(test)]
+            let _ = (c, id);
+        }
     }
 
     /// A resize follows the pointer at (x, y).
