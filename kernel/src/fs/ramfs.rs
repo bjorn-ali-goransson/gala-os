@@ -1,5 +1,24 @@
-//! An in-memory file system: a tree of directories and files, with
-//! case-insensitive (case-preserving) names and NT-style share access.
+//! An in-memory file system: a tree of directories, files and symbolic
+//! links, with case-preserving names compared case-insensitively unless a
+//! directory is case-sensitive, hard links, and NT-style share access.
+//! Shared by both personalities (ARCHITECTURE "Files", LX seam 4).
+//!
+//! - **Names**: a directory compares names case-insensitively (NT's rule)
+//!   unless its `case_sensitive` flag is set (Windows' per-directory
+//!   case sensitivity, FileCaseSensitiveInformation): then exactly, for
+//!   every caller, so two names differing only in case can live in it. A
+//!   new directory inherits its parent's flag (as Windows' does); the Linux
+//!   personality sets it on every directory it makes (`create_posix`).
+//! - **Hard links**: a node's own `parent` and `name` are its first link
+//!   (what `path_of` gives, what NT reports); further links are entries of
+//!   `RamFs::links`. Removing the first link while others remain moves the
+//!   node to one of them. Directories have exactly one link.
+//! - **Symbolic links**: `Kind::Symlink` keeps the target as the bytes
+//!   given (a Linux path); following them is the caller's (`lx::file`).
+//!   NT sees one as a file with FILE_ATTRIBUTE_REPARSE_POINT.
+//! - **Unlink of an open node** (`unlink`, Linux's rule): the name goes at
+//!   once and the node lives on, *detached*, until its last close; NT's
+//!   delete (`set_delete_pending`) keeps the name until the last close.
 //!
 //! Pure data structure (host-tested); the NT layer maps it to file objects.
 
@@ -18,6 +37,7 @@ pub const ROOT: NodeId = 0;
 pub const ATTRIBUTE_READONLY: u32 = 0x01;
 pub const ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub const ATTRIBUTE_ARCHIVE: u32 = 0x20;
+pub const ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FsError {
@@ -34,6 +54,8 @@ pub enum FsError {
     /// Truncating below the size a section maps.
     UserMapped,
     NoMemory,
+    /// A symbolic link where a file's or directory's contents were wanted.
+    Symlink,
 }
 
 /// Size of a file page.
@@ -192,8 +214,20 @@ impl Data {
 }
 
 enum Kind {
+    /// The nodes whose first link is in this directory (more names in it
+    /// may be hard links: `RamFs::links`).
     Directory(Vec<NodeId>),
     File(Data),
+    /// A symbolic link and its target, as given (bytes of a Linux path).
+    Symlink(Vec<u8>),
+}
+
+/// A hard link beyond a node's first: the entry `name` of directory
+/// `parent` names `node` too.
+struct Link {
+    parent: NodeId,
+    name: Vec<u16>,
+    node: NodeId,
 }
 
 /// Requested data access of an open, for share checks.
@@ -269,9 +303,15 @@ pub struct Node {
     /// Its POSIX permission bits (`0o7777`), set when the Linux personality
     /// creates it or changes them (lx::file); None for a node made without
     /// them (boot files, NT programs' files), which Linux sees with a
-    /// default (`lx::file`). Not in the change log yet: they last until
-    /// reboot (ROADMAP LX seam 4).
+    /// default (`lx::file`). Kept in the change log (Create, SetMode).
     pub mode: Option<u16>,
+    /// A directory whose names compare exactly (see the module's doc).
+    pub case_sensitive: bool,
+    /// Its names beyond the first (entries of `RamFs::links`).
+    extra_links: u32,
+    /// Unlinked while open (`unlink`): in no directory, freed at its last
+    /// close, never recorded again.
+    detached: bool,
     /// Made by the boot (modules), not by a program or the change log.
     boot: bool,
     /// Created or changed since boot (or by the change log): part of a
@@ -299,6 +339,28 @@ impl Node {
         matches!(self.kind, Kind::Directory(_))
     }
 
+    pub fn is_symlink(&self) -> bool {
+        matches!(self.kind, Kind::Symlink(_))
+    }
+
+    /// A symbolic link's target.
+    pub fn symlink_target(&self) -> Option<&[u8]> {
+        match &self.kind {
+            Kind::Symlink(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// How many names it has (0 once unlinked while open).
+    pub fn nlink(&self) -> u32 {
+        if self.detached { 0 } else { 1 + self.extra_links }
+    }
+
+    /// Unlinked while open (see `RamFs::unlink`).
+    pub fn detached(&self) -> bool {
+        self.detached
+    }
+
     pub fn name(&self) -> &[u16] {
         &self.name
     }
@@ -310,6 +372,7 @@ impl Node {
     pub fn size(&self) -> u64 {
         match &self.kind {
             Kind::File(d) => d.len() as u64,
+            Kind::Symlink(t) => t.len() as u64,
             Kind::Directory(_) => 0,
         }
     }
@@ -329,6 +392,17 @@ fn same_name(a: &[u16], b: &[u16]) -> bool {
 /// Paths compare like names.
 fn same_path(a: &[u16], b: &[u16]) -> bool {
     same_name(a, b)
+}
+
+/// Names compare in directory `dir`'s way: exactly in a case-sensitive one.
+fn name_matches(case_sensitive: bool, a: &[u16], b: &[u16]) -> bool {
+    if case_sensitive { a == b } else { same_name(a, b) }
+}
+
+/// The order entries are listed and resumed in: NTFS collation, then (for
+/// names only a case-sensitive directory can hold together) the units.
+pub fn order(a: &[u16], b: &[u16]) -> core::cmp::Ordering {
+    collate(a, b).then_with(|| a.cmp(b))
 }
 
 /// A fallible copy.
@@ -388,6 +462,8 @@ pub struct RamFs {
     /// Paths of boot nodes removed or renamed away: the boot recreates
     /// them, a snapshot deletes them again.
     tombstones: Vec<Vec<u16>>,
+    /// Hard links beyond nodes' first (see the module's doc).
+    links: Vec<Link>,
     /// Changes since the last `take_changes`, recorded while `journal` is
     /// on (directory change notification: nt::notify).
     changes: Vec<Change>,
@@ -431,6 +507,9 @@ impl RamFs {
             mapped_size: 0,
             security: None,
             mode: None,
+            case_sensitive: false,
+            extra_links: 0,
+            detached: false,
             boot: true,
             dirty: false,
         };
@@ -442,6 +521,7 @@ impl RamFs {
             ops: Vec::new(),
             ops_lost: false,
             tombstones: Vec::new(),
+            links: Vec::new(),
             changes: Vec::new(),
             journal: false,
             changes_lost: false,
@@ -523,17 +603,46 @@ impl RamFs {
     fn children(&self, dir: NodeId) -> Result<&[NodeId], FsError> {
         match &self.node(dir).ok_or(FsError::NotFound)?.kind {
             Kind::Directory(c) => Ok(c),
-            Kind::File(_) => Err(FsError::NotADirectory),
+            Kind::File(_) | Kind::Symlink(_) => Err(FsError::NotADirectory),
         }
     }
 
-    /// Finds `name` in directory `dir`.
+    /// Whether directory `dir` compares names exactly.
+    fn exact(&self, dir: NodeId) -> bool {
+        self.node(dir).is_some_and(|n| n.case_sensitive)
+    }
+
+    /// Finds `name` in directory `dir` (a first name or a hard link).
     pub fn find(&self, dir: NodeId, name: &[u16]) -> Result<Option<NodeId>, FsError> {
         let children = self.children(dir)?;
-        Ok(children
+        let exact = self.exact(dir);
+        let first = children
             .iter()
             .copied()
-            .find(|&c| self.node(c).is_some_and(|n| same_name(&n.name, name))))
+            .find(|&c| self.node(c).is_some_and(|n| name_matches(exact, &n.name, name)));
+        Ok(first.or_else(|| self.link_at(dir, name).map(|i| self.links[i].node)))
+    }
+
+    /// The index in `links` of hard link `name` in `dir`.
+    fn link_at(&self, dir: NodeId, name: &[u16]) -> Option<usize> {
+        let exact = self.exact(dir);
+        self.links.iter().position(|l| l.parent == dir && name_matches(exact, &l.name, name))
+    }
+
+    /// The entries of directory `dir` (first names and hard links) as
+    /// (node, name), in `order`.
+    pub fn entries(&self, dir: NodeId) -> Result<Vec<(NodeId, &[u16])>, FsError> {
+        let mut out = Vec::new();
+        for &c in self.children(dir)? {
+            if let Some(n) = self.node(c) {
+                out.try_push((c, n.name.as_slice())).map_err(|_| FsError::NoMemory)?;
+            }
+        }
+        for l in self.links.iter().filter(|l| l.parent == dir) {
+            out.try_push((l.node, l.name.as_slice())).map_err(|_| FsError::NoMemory)?;
+        }
+        out.sort_unstable_by(|a, b| order(a.1, b.1));
+        Ok(out)
     }
 
     /// Resolves all but the last of `components` (relative to directory
@@ -557,7 +666,8 @@ impl RamFs {
         self.find(parent, last)?.ok_or(FsError::NotFound)
     }
 
-    /// Creates `name` in `parent`.
+    /// Creates `name` in `parent` (NT's way: no POSIX mode; a directory
+    /// inherits its parent's case sensitivity).
     pub fn create(
         &mut self,
         parent: NodeId,
@@ -565,16 +675,57 @@ impl RamFs {
         directory: bool,
         now: u64,
     ) -> Result<NodeId, FsError> {
+        let case_sensitive = directory && self.exact(parent);
+        let kind = if directory { Kind::Directory(Vec::new()) } else { Kind::File(Data::EMPTY) };
+        self.make(parent, name, kind, None, case_sensitive, now)
+    }
+
+    /// Creates `name` in `parent` the Linux way: with POSIX permission
+    /// bits `mode`, a directory case-sensitive.
+    pub fn create_posix(
+        &mut self,
+        parent: NodeId,
+        name: &[u16],
+        directory: bool,
+        mode: u16,
+        now: u64,
+    ) -> Result<NodeId, FsError> {
+        let kind = if directory { Kind::Directory(Vec::new()) } else { Kind::File(Data::EMPTY) };
+        self.make(parent, name, kind, Some(mode & 0o7777), directory, now)
+    }
+
+    /// Creates symbolic link `name` in `parent` pointing at `target`.
+    pub fn symlink(
+        &mut self,
+        parent: NodeId,
+        name: &[u16],
+        target: &[u8],
+        now: u64,
+    ) -> Result<NodeId, FsError> {
+        let target = copy(target).ok_or(FsError::NoMemory)?;
+        self.make(parent, name, Kind::Symlink(target), None, false, now)
+    }
+
+    fn make(
+        &mut self,
+        parent: NodeId,
+        name: &[u16],
+        kind: Kind,
+        mode: Option<u16>,
+        case_sensitive: bool,
+        now: u64,
+    ) -> Result<NodeId, FsError> {
         if self.find(parent, name)?.is_some() {
             return Err(FsError::Exists);
         }
         let mut owned_name = Vec::new();
         owned_name.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
-        let (kind, attributes) = if directory {
-            (Kind::Directory(Vec::new()), ATTRIBUTE_DIRECTORY)
-        } else {
-            (Kind::File(Data::EMPTY), ATTRIBUTE_ARCHIVE)
+        let attributes = match kind {
+            Kind::Directory(_) => ATTRIBUTE_DIRECTORY,
+            Kind::File(_) => ATTRIBUTE_ARCHIVE,
+            Kind::Symlink(_) => ATTRIBUTE_ARCHIVE | ATTRIBUTE_REPARSE_POINT,
         };
+        let directory = matches!(kind, Kind::Directory(_));
         let node = Node {
             parent,
             name: owned_name,
@@ -590,7 +741,10 @@ impl RamFs {
             write_maps: 0,
             mapped_size: 0,
             security: None,
-            mode: None,
+            mode,
+            case_sensitive,
+            extra_links: 0,
+            detached: false,
             boot: !self.recording && !self.replaying,
             dirty: self.recording || self.replaying,
         };
@@ -611,14 +765,19 @@ impl RamFs {
             return Err(FsError::NoMemory);
         }
         self.note(parent, name, directory, ACTION_ADDED);
-        self.record_node(id, |path, n| {
-            Some(Op::Create {
+        self.record_node(id, |path, n| match &n.kind {
+            Kind::Symlink(target) => {
+                Some(Op::Symlink { path, target: copy(target)?, created: n.created })
+            }
+            _ => Some(Op::Create {
                 path,
                 directory,
                 attributes: n.attributes,
                 created: n.created,
                 written: n.written,
-            })
+                mode: n.mode,
+                case_sensitive: n.case_sensitive,
+            }),
         });
         Ok(id)
     }
@@ -676,7 +835,7 @@ impl RamFs {
     }
 
     /// Ends an open; removes the node if it was the last open and a delete
-    /// is pending.
+    /// is pending, frees it if it was unlinked (`unlink`).
     pub fn close(&mut self, id: NodeId, access: Access, share: Share) {
         let Ok(node) = self.node_mut(id) else { return };
         node.opens.handles -= 1;
@@ -690,13 +849,25 @@ impl RamFs {
             o.shared_write -= u32::from(share.write);
             o.shared_delete -= u32::from(share.delete);
         }
-        if node.opens.handles == 0 && node.delete_pending {
-            self.record_removal(id);
-            self.remove(id);
+        if node.opens.handles == 0 {
+            if node.detached {
+                // Its name went at the unlink (and was recorded then).
+                self.nodes[id] = None;
+            } else if node.delete_pending {
+                self.record_removal(id);
+                self.remove(id);
+            }
         }
     }
 
+    /// Removes `id`'s first name: the node moves to one of its hard links
+    /// if it has any, else it goes. (Out of memory for the move, nothing
+    /// changes: the name stays.)
     fn remove(&mut self, id: NodeId) {
+        if let Some(i) = self.links.iter().position(|l| l.node == id) {
+            let _ = self.promote(id, i);
+            return;
+        }
         let Some(node) = self.nodes.get_mut(id).and_then(Option::take) else { return };
         self.note(node.parent, &node.name, node.is_dir(), ACTION_REMOVED);
         if let Some(Some(Node { kind: Kind::Directory(children), .. })) =
@@ -704,6 +875,34 @@ impl RamFs {
         {
             children.retain(|&c| c != id);
         }
+    }
+
+    /// Moves node `id` from its first name to its hard link `links[i]`,
+    /// which becomes its first name.
+    fn promote(&mut self, id: NodeId, i: usize) -> Result<(), FsError> {
+        let to = self.links.get(i).map(|l| l.parent).ok_or(FsError::NotFound)?;
+        match &mut self.node_mut(to)?.kind {
+            Kind::Directory(c) => c.try_reserve(1).map_err(|_| FsError::NoMemory)?,
+            _ => return Err(FsError::NotADirectory),
+        }
+        let link = self.links.remove(i);
+        let node = self.node_mut(id)?;
+        let from = node.parent;
+        let old = core::mem::replace(&mut node.name, link.name);
+        node.parent = link.parent;
+        node.extra_links -= 1;
+        node.delete_pending = false;
+        let directory = node.is_dir();
+        if let Kind::Directory(c) = &mut self.node_mut(from)?.kind {
+            c.retain(|&x| x != id);
+        }
+        if let Kind::Directory(c) = &mut self.node_mut(to)?.kind {
+            let _ = c.try_push(id);
+        }
+        self.note(from, &old, directory, ACTION_REMOVED);
+        // A snapshot makes it at its new first name.
+        self.mark_dirty(id);
+        Ok(())
     }
 
     /// The full path of `id` (`\\a\\b`; `\\` for the root).
@@ -726,17 +925,35 @@ impl RamFs {
         Ok(out)
     }
 
-    /// The entries of directory `dir` in directory order.
+    /// The path of entry `name` of directory `dir` (`\\a\\name`).
+    pub fn entry_path(&self, dir: NodeId, name: &[u16]) -> Result<Vec<u16>, FsError> {
+        let mut out = self.path_of(dir)?;
+        if dir == ROOT {
+            out.clear();
+        }
+        out.try_push(u16::from(b'\\')).map_err(|_| FsError::NoMemory)?;
+        out.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+        Ok(out)
+    }
+
+    /// The nodes whose first name is in directory `dir`, in `order` (its
+    /// hard links are not: `entries` has every name).
     pub fn list(&self, dir: NodeId) -> Result<Vec<NodeId>, FsError> {
         let mut out = Vec::new();
         out.try_extend_from_slice(self.children(dir)?).map_err(|_| FsError::NoMemory)?;
         let name = |id: NodeId| self.node(id).map_or(&[][..], |n| n.name.as_slice());
-        out.sort_unstable_by(|&a, &b| collate(name(a), name(b)));
+        out.sort_unstable_by(|&a, &b| order(name(a), name(b)));
         Ok(out)
     }
 
-    /// Moves `id` to `name` in directory `parent`. An existing target is
-    /// replaced only if `replace` and it is a file nobody has open.
+    /// Whether directory `dir` has no entries (nor hard links).
+    pub fn is_empty_dir(&self, dir: NodeId) -> Result<bool, FsError> {
+        Ok(self.children(dir)?.is_empty() && !self.links.iter().any(|l| l.parent == dir))
+    }
+
+    /// Moves `id`'s first name to `name` in directory `parent`. An existing
+    /// target is replaced only if `replace` and it is a file nobody has
+    /// open.
     pub fn rename(
         &mut self,
         id: NodeId,
@@ -776,15 +993,14 @@ impl RamFs {
         if old_parent != parent {
             match &mut self.node_mut(parent)?.kind {
                 Kind::Directory(c) => c.try_reserve(1).map_err(|_| FsError::NoMemory)?,
-                Kind::File(_) => return Err(FsError::NotADirectory),
+                Kind::File(_) | Kind::Symlink(_) => return Err(FsError::NotADirectory),
             }
         }
         let from = if self.recording { self.path_of(id).ok() } else { None };
         if let Some(t) = target
             && t != id
         {
-            self.tombstone(t);
-            self.remove(t);
+            self.drop_name(parent, name);
         }
         self.tombstone(id);
         if old_parent != parent {
@@ -814,12 +1030,197 @@ impl RamFs {
         Ok(())
     }
 
+    /// Moves entry `from_name` of `from_dir` (a first name or a hard link)
+    /// to `name` in `parent`, as `rename` does.
+    pub fn rename_entry(
+        &mut self,
+        from_dir: NodeId,
+        from_name: &[u16],
+        parent: NodeId,
+        name: &[u16],
+        replace: bool,
+    ) -> Result<(), FsError> {
+        let id = self.find(from_dir, from_name)?.ok_or(FsError::NotFound)?;
+        let Some(i) = self.link_at(from_dir, from_name) else {
+            return self.rename(id, parent, name, replace);
+        };
+        self.children(parent)?;
+        if let Some(t) = self.find(parent, name)?
+            && t != id
+        {
+            if !replace {
+                return Err(FsError::Exists);
+            }
+            let n = self.node(t).ok_or(FsError::NotFound)?;
+            if n.is_dir() || n.opens.handles != 0 {
+                return Err(FsError::AccessDenied);
+            }
+        }
+        let owned = copy(name).ok_or(FsError::NoMemory)?;
+        let paths = if self.recording {
+            Some((self.entry_path(from_dir, from_name), self.entry_path(parent, name)))
+        } else {
+            None
+        };
+        if self.find(parent, name)?.is_some_and(|t| t != id) {
+            self.drop_name(parent, name);
+        }
+        // The target's removal may have moved the links.
+        let i = self.link_at(from_dir, from_name).unwrap_or(i);
+        let Some(link) = self.links.get_mut(i) else { return Err(FsError::NotFound) };
+        let old = core::mem::replace(&mut link.name, owned);
+        link.parent = parent;
+        let directory = self.node(id).is_some_and(Node::is_dir);
+        self.note(from_dir, &old, directory, ACTION_RENAMED_OLD_NAME);
+        self.note(parent, name, directory, ACTION_RENAMED_NEW_NAME);
+        match paths {
+            Some((Ok(from), Ok(to))) => self.push_op(Op::Rename { from, to }),
+            Some(_) => self.ops_lost = true,
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Swaps entries `a_name` of `a_dir` and `b_name` of `b_dir` (Linux's
+    /// RENAME_EXCHANGE): both must exist. Made of three renames through a
+    /// free temporary name in `a_dir` (each recorded; atomic for every
+    /// caller, as all run under the file system's lock).
+    pub fn exchange(
+        &mut self,
+        a_dir: NodeId,
+        a_name: &[u16],
+        b_dir: NodeId,
+        b_name: &[u16],
+    ) -> Result<(), FsError> {
+        let a = self.find(a_dir, a_name)?.ok_or(FsError::NotFound)?;
+        let b = self.find(b_dir, b_name)?.ok_or(FsError::NotFound)?;
+        if a == b {
+            return Ok(());
+        }
+        let mut temp = Vec::new();
+        temp.try_extend_from_slice(&[u16::from(b'.'), u16::from(b'~'), 0])
+            .map_err(|_| FsError::NoMemory)?;
+        let mut n = 0u16;
+        loop {
+            temp[2] = u16::from(b'0') + n;
+            if self.find(a_dir, &temp)?.is_none() {
+                break;
+            }
+            n += 1;
+            if n > 1000 {
+                return Err(FsError::Exists);
+            }
+        }
+        self.rename_entry(a_dir, a_name, a_dir, &temp, false)?;
+        if let Err(e) = self.rename_entry(b_dir, b_name, a_dir, a_name, false) {
+            let _ = self.rename_entry(a_dir, &temp, a_dir, a_name, false);
+            return Err(e);
+        }
+        self.rename_entry(a_dir, &temp, b_dir, b_name, false)
+    }
+
+    /// Removes the name `name` of directory `dir` without recording it:
+    /// a hard link goes alone; a first name moves its node to a hard link,
+    /// else the node goes with everything below it.
+    fn drop_name(&mut self, dir: NodeId, name: &[u16]) {
+        if let Some(i) = self.link_at(dir, name) {
+            let link = self.links.remove(i);
+            if let Ok(n) = self.node_mut(link.node) {
+                n.extra_links -= 1;
+            }
+            self.note(dir, &link.name, false, ACTION_REMOVED);
+            return;
+        }
+        if let Ok(Some(id)) = self.find(dir, name) {
+            self.tombstone(id);
+            self.remove_tree(id);
+        }
+    }
+
+    /// Adds `name` in directory `parent` as another name of file (or
+    /// symbolic link) `id`: a hard link.
+    pub fn link(&mut self, id: NodeId, parent: NodeId, name: &[u16]) -> Result<(), FsError> {
+        let node = self.node(id).ok_or(FsError::NotFound)?;
+        if node.is_dir() {
+            return Err(FsError::IsADirectory);
+        }
+        if node.detached {
+            return Err(FsError::NotFound);
+        }
+        if self.find(parent, name)?.is_some() {
+            return Err(FsError::Exists);
+        }
+        let owned = copy(name).ok_or(FsError::NoMemory)?;
+        let paths = if self.recording {
+            Some((self.path_of(id), self.entry_path(parent, name)))
+        } else {
+            None
+        };
+        self.links
+            .try_push(Link { parent, name: owned, node: id })
+            .map_err(|_| FsError::NoMemory)?;
+        self.node_mut(id)?.extra_links += 1;
+        self.note(parent, name, false, ACTION_ADDED);
+        match paths {
+            Some((Ok(from), Ok(to))) => self.push_op(Op::Link { from, to }),
+            Some(_) => self.ops_lost = true,
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Removes the name `name` of directory `dir` at once (Linux's unlink
+    /// and rmdir; POSIX delete): a hard link goes alone; a node's first
+    /// name moves it to a hard link; a node with no other name goes, or,
+    /// while open, lives on detached until its last close. A directory
+    /// must be empty.
+    pub fn unlink(&mut self, dir: NodeId, name: &[u16]) -> Result<(), FsError> {
+        let id = self.find(dir, name)?.ok_or(FsError::NotFound)?;
+        if id == ROOT {
+            return Err(FsError::AccessDenied);
+        }
+        if self.node(id).is_some_and(Node::is_dir) && !self.is_empty_dir(id)? {
+            return Err(FsError::DirectoryNotEmpty);
+        }
+        let path = if self.recording { Some(self.entry_path(dir, name)) } else { None };
+        if let Some(i) = self.link_at(dir, name) {
+            let link = self.links.remove(i);
+            self.node_mut(id)?.extra_links -= 1;
+            self.note(dir, &link.name, false, ACTION_REMOVED);
+        } else if let Some(i) = self.links.iter().position(|l| l.node == id) {
+            self.tombstone(id);
+            self.promote(id, i)?;
+        } else if self.node(id).is_some_and(|n| n.opens.handles > 0) {
+            self.tombstone(id);
+            let node = self.node_mut(id)?;
+            node.detached = true;
+            let (parent, directory) = (node.parent, node.is_dir());
+            let old = core::mem::take(&mut node.name);
+            if let Kind::Directory(c) = &mut self.node_mut(parent)?.kind {
+                c.retain(|&x| x != id);
+            }
+            self.note(parent, &old, directory, ACTION_REMOVED);
+            if let Ok(node) = self.node_mut(id) {
+                node.name = old;
+            }
+        } else {
+            self.tombstone(id);
+            self.remove(id);
+        }
+        match path {
+            Some(Ok(path)) => self.push_op(Op::Delete { path }),
+            Some(Err(_)) => self.ops_lost = true,
+            None => {}
+        }
+        Ok(())
+    }
+
     /// Marks a node for deletion when its last open closes.
     pub fn set_delete_pending(&mut self, id: NodeId, pending: bool) -> Result<(), FsError> {
         if pending && id == ROOT {
             return Err(FsError::DirectoryNotEmpty);
         }
-        if pending && !self.children(id).map_or(true, <[NodeId]>::is_empty) {
+        if pending && self.children(id).is_ok() && !self.is_empty_dir(id)? {
             return Err(FsError::DirectoryNotEmpty);
         }
         self.node_mut(id)?.delete_pending = pending;
@@ -829,6 +1230,7 @@ impl RamFs {
     /// Sets the POSIX permission bits of `id` (`Node::mode`).
     pub fn set_mode(&mut self, id: NodeId, mode: u16) -> Result<(), FsError> {
         self.node_mut(id)?.mode = Some(mode & 0o7777);
+        self.record_node(id, |path, n| Some(Op::SetMode { path, mode: n.mode.unwrap_or(0) }));
         Ok(())
     }
 
@@ -839,7 +1241,11 @@ impl RamFs {
     /// Reads at `offset`; returns the number of bytes read (0 at or past EOF).
     pub fn read(&self, id: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, FsError> {
         let node = self.node(id).ok_or(FsError::NotFound)?;
-        let Kind::File(data) = &node.kind else { return Err(FsError::IsADirectory) };
+        let data = match &node.kind {
+            Kind::File(data) => data,
+            Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Directory(_) => return Err(FsError::IsADirectory),
+        };
         let Ok(start) = usize::try_from(offset) else { return Ok(0) };
         Ok(data.read_at(start, buf))
     }
@@ -853,14 +1259,20 @@ impl RamFs {
         now: u64,
     ) -> Result<usize, FsError> {
         let node = self.node_mut(id)?;
-        let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
+        let contents = match &mut node.kind {
+            Kind::File(contents) => contents,
+            Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Directory(_) => return Err(FsError::IsADirectory),
+        };
         let start = usize::try_from(offset).map_err(|_| FsError::NoMemory)?;
         contents.write_at(start, data)?;
         node.written = now;
         node.accessed = now;
         node.version = next_version();
         let (parent, name) = (node.parent, core::mem::take(&mut node.name));
-        self.note(parent, &name, false, ACTION_MODIFIED);
+        if !self.node(id).is_some_and(|n| n.detached) {
+            self.note(parent, &name, false, ACTION_MODIFIED);
+        }
         if let Ok(node) = self.node_mut(id) {
             node.name = name;
         }
@@ -919,14 +1331,20 @@ impl RamFs {
         if node.map_count > 0 && size < node.mapped_size {
             return Err(FsError::UserMapped);
         }
-        let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
+        let contents = match &mut node.kind {
+            Kind::File(contents) => contents,
+            Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Directory(_) => return Err(FsError::IsADirectory),
+        };
         let size = usize::try_from(size).map_err(|_| FsError::NoMemory)?;
         contents.set_len(size)?;
         node.written = now;
         node.accessed = now;
         node.version = next_version();
         let (parent, name) = (node.parent, core::mem::take(&mut node.name));
-        self.note(parent, &name, false, ACTION_MODIFIED);
+        if !self.node(id).is_some_and(|n| n.detached) {
+            self.note(parent, &name, false, ACTION_MODIFIED);
+        }
         if let Ok(node) = self.node_mut(id) {
             node.name = name;
         }
@@ -941,7 +1359,11 @@ impl RamFs {
     /// version until it ends (`Node::version`).
     pub fn map(&mut self, id: NodeId, size: u64, writable: bool) -> Result<(), FsError> {
         let node = self.node_mut(id)?;
-        let Kind::File(contents) = &mut node.kind else { return Err(FsError::IsADirectory) };
+        let contents = match &mut node.kind {
+            Kind::File(contents) => contents,
+            Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Directory(_) => return Err(FsError::IsADirectory),
+        };
         if size > contents.len() as u64 {
             return Err(FsError::NoMemory);
         }
@@ -975,7 +1397,7 @@ impl RamFs {
     pub fn page_address(&mut self, id: NodeId, index: usize) -> Option<usize> {
         match &mut self.node_mut(id).ok()?.kind {
             Kind::File(data) => data.page_address(index),
-            Kind::Directory(_) => None,
+            Kind::Directory(_) | Kind::Symlink(_) => None,
         }
     }
 
@@ -1015,6 +1437,10 @@ impl RamFs {
     /// Records a change of node `id` (marking it dirty): `make` builds it
     /// from the node's path and the node (None: out of memory).
     fn record_node(&mut self, id: NodeId, make: impl FnOnce(Vec<u16>, &Node) -> Option<Op>) {
+        if self.node(id).is_some_and(|n| n.detached) {
+            // Unlinked: its path names something else now, or nothing.
+            return;
+        }
         self.mark_dirty(id);
         if !self.recording {
             return;
@@ -1076,14 +1502,31 @@ impl RamFs {
         !self.ops.is_empty() || self.ops_lost
     }
 
-    /// Removes `id` and everything below it.
+    /// Removes `id`'s first name and, for a directory, everything below
+    /// it (a file below with a hard link elsewhere moves there).
     fn remove_tree(&mut self, id: NodeId) {
         // Children first; the list is copied (fallibly) as removing edits it.
         let children = self.children(id).ok().and_then(copy);
         for c in children.unwrap_or_default() {
             self.remove_tree(c);
         }
+        while let Some(i) = self.links.iter().position(|l| l.parent == id) {
+            let link = self.links.remove(i);
+            if let Ok(n) = self.node_mut(link.node) {
+                n.extra_links -= 1;
+            }
+        }
         self.remove(id);
+    }
+
+    /// The directory holding `path` (`\a\b`) and the last name.
+    fn split<'p>(&self, path: &'p [u16]) -> Result<(NodeId, &'p [u16]), FsError> {
+        let at = path.iter().rposition(|&u| u == u16::from(b'\\')).ok_or(FsError::NotFound)?;
+        let (dir, name) = (&path[..at], &path[at + 1..]);
+        if name.is_empty() {
+            return Err(FsError::NotFound);
+        }
+        Ok((self.lookup(dir)?, name))
     }
 
     /// The node at `path` (`\a\b`).
@@ -1128,7 +1571,7 @@ impl RamFs {
 
     fn apply_inner(&mut self, op: &Op) -> Result<(), FsError> {
         match op {
-            Op::Create { path, directory, attributes, created, written } => {
+            Op::Create { path, directory, attributes, created, written, mode, case_sensitive } => {
                 let (parent, name) = self.make_parent(path, *created)?;
                 let id = match self.find(parent, name)? {
                     Some(id) if self.node(id).is_some_and(|n| n.is_dir()) == *directory => {
@@ -1138,16 +1581,40 @@ impl RamFs {
                         id
                     }
                     other => {
-                        if let Some(id) = other {
-                            self.tombstone(id);
-                            self.remove_tree(id);
+                        if other.is_some() {
+                            self.drop_name(parent, name);
                         }
                         self.create(parent, name, *directory, *created)?
                     }
                 };
+                let node = self.node_mut(id)?;
+                node.mode = *mode;
+                node.case_sensitive = *directory && *case_sensitive;
                 // A record's file was last accessed when it was written.
                 let times = Times::all(*created, *written, *written);
                 self.set_basic(id, times, Some(*attributes))
+            }
+            Op::SetMode { path, mode } => {
+                let id = self.lookup(path)?;
+                self.set_mode(id, *mode)
+            }
+            Op::Symlink { path, target, created } => {
+                let (parent, name) = self.make_parent(path, *created)?;
+                if self.find(parent, name)?.is_some() {
+                    self.drop_name(parent, name);
+                }
+                self.symlink(parent, name, target, *created).map(drop)
+            }
+            Op::Link { from, to } => {
+                let id = self.lookup(from)?;
+                let (parent, name) = self.make_parent(to, 0)?;
+                if self.find(parent, name)?.is_some_and(|t| t != id) {
+                    self.drop_name(parent, name);
+                }
+                if self.find(parent, name)?.is_some() {
+                    return Ok(());
+                }
+                self.link(id, parent, name)
             }
             Op::Write { path, offset, data, written } => {
                 let id = self.lookup(path)?;
@@ -1167,23 +1634,20 @@ impl RamFs {
                 self.set_security(id, sd)
             }
             Op::Rename { from, to } => {
-                let id = self.lookup(from)?;
+                let (from_dir, from_name) = self.split(from)?;
+                let id = self.find(from_dir, from_name)?.ok_or(FsError::NotFound)?;
                 let (parent, name) = self.make_parent(to, 0)?;
-                if let Some(t) = self.find(parent, name)?
-                    && t != id
-                {
-                    self.tombstone(t);
-                    self.remove_tree(t);
+                if self.find(parent, name)?.is_some_and(|t| t != id) {
+                    self.drop_name(parent, name);
                 }
-                self.rename(id, parent, name, true)
+                self.rename_entry(from_dir, from_name, parent, name, true)
             }
             Op::Delete { path } => {
-                let id = self.lookup(path)?;
-                if id == ROOT {
-                    return Err(FsError::AccessDenied);
+                let (dir, name) = self.split(path)?;
+                if self.find(dir, name)?.is_none() {
+                    return Err(FsError::NotFound);
                 }
-                self.tombstone(id);
-                self.remove_tree(id);
+                self.drop_name(dir, name);
                 Ok(())
             }
         }
@@ -1204,12 +1668,19 @@ impl RamFs {
             if n.dirty && id != ROOT {
                 let path = self.path_of(id)?;
                 let p = || copy(&path).ok_or(FsError::NoMemory);
+                if let Kind::Symlink(target) = &n.kind {
+                    let target = copy(target).ok_or(FsError::NoMemory)?;
+                    push(Op::Symlink { path: p()?, target, created: n.created })?;
+                    continue;
+                }
                 push(Op::Create {
                     path: p()?,
                     directory: n.is_dir(),
                     attributes: n.attributes,
                     created: n.created,
                     written: n.written,
+                    mode: n.mode,
+                    case_sensitive: n.case_sensitive,
                 })?;
                 if let Some(sd) = &n.security {
                     let descriptor = copy(sd).ok_or(FsError::NoMemory)?;
@@ -1251,6 +1722,13 @@ impl RamFs {
                     stack.try_push(c).map_err(|_| FsError::NoMemory)?;
                 }
             }
+        }
+        // Hard links last: every first name exists by then.
+        for l in &self.links {
+            push(Op::Link {
+                from: self.path_of(l.node)?,
+                to: self.entry_path(l.parent, &l.name)?,
+            })?;
         }
         Ok(ops)
     }
@@ -1743,5 +2221,187 @@ mod tests {
         }
         assert!(g.lookup(&w("\\boot")).is_err());
         assert_eq!(content(&g, "\\moved\\keep.txt").unwrap(), b"boot data");
+    }
+
+    /// A directory a Linux program makes is case-sensitive (for NT callers
+    /// too, as Windows' per-directory flag is); one NT makes inherits its
+    /// parent's flag; the boot's are not.
+    #[test]
+    fn case_sensitive_directories() {
+        let mut f = fs();
+        let plain = f.create(ROOT, &w("plain"), true, 1).unwrap();
+        assert!(!f.node(plain).unwrap().case_sensitive);
+        let d = f.create_posix(ROOT, &w("w"), true, 0o755, 1).unwrap();
+        assert!(f.node(d).unwrap().case_sensitive);
+        assert_eq!(f.node(d).unwrap().mode, Some(0o755));
+        let upper = f.create_posix(d, &w("Case"), false, 0o644, 1).unwrap();
+        let lower = f.create(d, &w("case"), false, 1).unwrap();
+        assert_ne!(upper, lower);
+        assert_eq!(f.find(d, &w("Case")), Ok(Some(upper)));
+        assert_eq!(f.find(d, &w("case")), Ok(Some(lower)));
+        assert_eq!(f.find(d, &w("CASE")), Ok(None));
+        // Listed apart, in a stable order (collation, then units).
+        let names: Vec<_> = f.entries(d).unwrap().iter().map(|e| e.1.to_vec()).collect();
+        assert_eq!(names, [w("Case"), w("case")]);
+        // NT's subdirectory inherits the flag; a boot directory's does not.
+        let sub = f.create(d, &w("Sub"), true, 1).unwrap();
+        assert!(f.node(sub).unwrap().case_sensitive);
+        let p2 = f.create(plain, &w("x"), true, 1).unwrap();
+        assert!(!f.node(p2).unwrap().case_sensitive);
+        f.create(plain, &w("Name"), false, 1).unwrap();
+        assert_eq!(f.create(plain, &w("NAME"), false, 1), Err(FsError::Exists));
+    }
+
+    /// Hard links: every name finds the node; nlink counts them; removing
+    /// the first name moves the node to another; a link goes alone.
+    #[test]
+    fn hard_links() {
+        let mut f = fs();
+        let a = f.create(ROOT, &w("a"), true, 1).unwrap();
+        let b = f.create(ROOT, &w("b"), true, 1).unwrap();
+        let x = f.create(a, &w("x"), false, 1).unwrap();
+        f.write(x, 0, b"data", 2).unwrap();
+        f.link(x, b, &w("y")).unwrap();
+        f.link(x, a, &w("z")).unwrap();
+        assert_eq!(f.link(x, a, &w("Z")), Err(FsError::Exists));
+        assert_eq!(f.link(a, b, &w("dir")), Err(FsError::IsADirectory));
+        assert_eq!(f.find(b, &w("y")), Ok(Some(x)));
+        assert_eq!(f.node(x).unwrap().nlink(), 3);
+        let names: Vec<_> = f.entries(a).unwrap().iter().map(|e| e.1.to_vec()).collect();
+        assert_eq!(names, [w("x"), w("z")]);
+        assert_eq!(f.is_empty_dir(b), Ok(false));
+        // The first name goes: the node lives on at a link.
+        f.unlink(a, &w("x")).unwrap();
+        assert_eq!(f.find(a, &w("x")), Ok(None));
+        assert_eq!(f.node(x).unwrap().nlink(), 2);
+        assert_eq!(f.path_of(x).unwrap(), w("\\b\\y"));
+        // A link renamed, then removed.
+        f.rename_entry(a, &w("z"), b, &w("z2"), false).unwrap();
+        assert_eq!(f.find(b, &w("z2")), Ok(Some(x)));
+        f.unlink(b, &w("z2")).unwrap();
+        assert_eq!(f.node(x).unwrap().nlink(), 1);
+        assert_eq!(f.is_empty_dir(a), Ok(true));
+        let mut buf = [0u8; 4];
+        f.read(x, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"data");
+    }
+
+    /// Linux's unlink of an open file: the name is free at once, the node
+    /// lives on (nlink 0) until its last close; NT's delete keeps the name.
+    #[test]
+    fn unlink_of_an_open_file_frees_the_name() {
+        let mut f = fs();
+        let id = f.create(ROOT, &w("u"), false, 1).unwrap();
+        f.open(id, RW, NONE).unwrap();
+        f.unlink(ROOT, &w("u")).unwrap();
+        assert_eq!(f.find(ROOT, &w("u")), Ok(None));
+        assert!(f.node(id).unwrap().detached());
+        assert_eq!(f.node(id).unwrap().nlink(), 0);
+        f.write(id, 0, b"still", 2).unwrap();
+        let again = f.create(ROOT, &w("u"), false, 3).unwrap();
+        assert_ne!(again, id);
+        f.close(id, RW, NONE);
+        assert!(f.node(id).is_none());
+        assert_eq!(f.find(ROOT, &w("u")), Ok(Some(again)));
+        // A non-empty directory is not unlinked.
+        let d = f.create(ROOT, &w("d"), true, 1).unwrap();
+        f.create(d, &w("in"), false, 1).unwrap();
+        assert_eq!(f.unlink(ROOT, &w("d")), Err(FsError::DirectoryNotEmpty));
+    }
+
+    /// A symbolic link keeps its target; it is no file to read.
+    #[test]
+    fn symlinks_keep_their_target() {
+        let mut f = fs();
+        let id = f.symlink(ROOT, &w("l"), b"../t", 1).unwrap();
+        let n = f.node(id).unwrap();
+        assert!(n.is_symlink() && !n.is_dir());
+        assert_eq!(n.symlink_target(), Some(&b"../t"[..]));
+        assert_eq!(n.size(), 4);
+        assert_eq!(n.attributes & ATTRIBUTE_REPARSE_POINT, ATTRIBUTE_REPARSE_POINT);
+        assert_eq!(f.read(id, 0, &mut [0; 4]), Err(FsError::Symlink));
+        assert_eq!(f.write(id, 0, b"x", 2), Err(FsError::Symlink));
+        assert_eq!(f.symlink(ROOT, &w("L"), b"x", 1), Err(FsError::Exists));
+    }
+
+    #[test]
+    fn exchange_swaps_two_names() {
+        let mut f = fs();
+        let a = f.create(ROOT, &w("a"), false, 1).unwrap();
+        let d = f.create(ROOT, &w("d"), true, 1).unwrap();
+        let b = f.create(d, &w("b"), false, 1).unwrap();
+        f.exchange(ROOT, &w("a"), d, &w("b")).unwrap();
+        assert_eq!(f.find(ROOT, &w("a")), Ok(Some(b)));
+        assert_eq!(f.find(d, &w("b")), Ok(Some(a)));
+        assert_eq!(f.entries(ROOT).unwrap().len(), 2, "no temporary name left");
+        assert_eq!(f.exchange(ROOT, &w("a"), d, &w("none")), Err(FsError::NotFound));
+    }
+
+    /// What the Linux personality makes, as the change log keeps it: modes,
+    /// case-sensitive directories with a case pair, symbolic links, hard
+    /// links (one to a boot file, whose first name then goes), an unlinked
+    /// open file (gone, and its later writes not recorded).
+    fn change_posix(f: &mut RamFs) {
+        let w_dir = f.create_posix(ROOT, &w("w"), true, 0o750, 5).unwrap();
+        let up = f.create_posix(w_dir, &w("Case"), false, 0o600, 5).unwrap();
+        f.write(up, 0, b"upper", 6).unwrap();
+        let low = f.create_posix(w_dir, &w("case"), false, 0o644, 5).unwrap();
+        f.write(low, 0, b"lower", 6).unwrap();
+        f.set_mode(low, 0o640).unwrap();
+        f.symlink(w_dir, &w("ln"), b"Case", 5).unwrap();
+        f.link(up, w_dir, &w("Hard")).unwrap();
+        let keep = f.lookup(&w("\\boot\\keep.txt")).unwrap();
+        f.link(keep, w_dir, &w("kept")).unwrap();
+        let b = f.lookup(&w("\\boot")).unwrap();
+        f.unlink(b, &w("keep.txt")).unwrap();
+        let t = f.create_posix(w_dir, &w("tmp"), false, 0o644, 5).unwrap();
+        f.open(t, RW, NONE).unwrap();
+        f.unlink(w_dir, &w("tmp")).unwrap();
+        f.write(t, 0, b"gone", 7).unwrap();
+        f.close(t, RW, NONE);
+    }
+
+    fn check_posix(f: &RamFs) {
+        let w_dir = f.lookup(&w("\\w")).unwrap();
+        let d = f.node(w_dir).unwrap();
+        assert_eq!((d.mode, d.case_sensitive), (Some(0o750), true));
+        let up = f.lookup(&w("\\w\\Case")).unwrap();
+        let low = f.lookup(&w("\\w\\case")).unwrap();
+        assert_ne!(up, low);
+        assert_eq!(content(f, "\\w\\Case").unwrap(), b"upper");
+        assert_eq!(content(f, "\\w\\case").unwrap(), b"lower");
+        assert_eq!(f.node(up).unwrap().mode, Some(0o600));
+        assert_eq!(f.node(low).unwrap().mode, Some(0o640));
+        let ln = f.node(f.lookup(&w("\\w\\ln")).unwrap()).unwrap();
+        assert_eq!(ln.symlink_target(), Some(&b"Case"[..]));
+        assert_eq!(f.lookup(&w("\\w\\Hard")), Ok(up));
+        assert_eq!(f.node(up).unwrap().nlink(), 2);
+        assert!(f.lookup(&w("\\boot\\keep.txt")).is_err());
+        assert_eq!(content(f, "\\w\\kept").unwrap(), b"boot data");
+        assert!(f.lookup(&w("\\w\\tmp")).is_err());
+    }
+
+    #[test]
+    fn posix_changes_replay_and_snapshot() {
+        let mut f = booted();
+        change_posix(&mut f);
+        check_posix(&f);
+        let (ops, lost) = f.take_ops();
+        assert!(!lost);
+        assert!(!ops.iter().any(|op| matches!(op, Op::Write { data, .. } if data == b"gone")));
+        let mut g = booted();
+        g.recording = false;
+        for op in &ops {
+            g.apply(op).unwrap();
+        }
+        check_posix(&g);
+        let snap = f.snapshot().unwrap();
+        let mut h = booted();
+        h.recording = false;
+        for op in &snap {
+            h.apply(op).unwrap();
+        }
+        check_posix(&h);
+        assert_eq!(h.snapshot().unwrap(), snap);
     }
 }

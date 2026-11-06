@@ -61,6 +61,7 @@ pub const FILE_SYNCHRONOUS_IO_ALERT: u32 = 0x0010;
 pub const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
 pub const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
 pub const FILE_DELETE_ON_CLOSE: u32 = 0x1000;
+pub const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 /// Directories created at boot.
 /// The directories every boot starts with: the system's, the user's
@@ -258,6 +259,7 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::AccessDenied => NtStatus::ACCESS_DENIED,
         FsError::UserMapped => NtStatus::USER_MAPPED_FILE,
         FsError::NoMemory => NtStatus::NO_MEMORY,
+        FsError::Symlink => NtStatus::IO_REPARSE_TAG_NOT_HANDLED,
     }
 }
 
@@ -434,6 +436,11 @@ pub fn create(
                 if disposition == FILE_CREATE {
                     return Err(NtStatus::OBJECT_NAME_COLLISION);
                 }
+                // A Linux symbolic link is a reparse point nothing here
+                // follows (ARCHITECTURE "Files"): opened only as itself.
+                if n.is_symlink() && options & FILE_OPEN_REPARSE_POINT == 0 {
+                    return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
+                }
                 if want_dir && !n.is_dir() {
                     return Err(NtStatus::NOT_A_DIRECTORY);
                 }
@@ -527,7 +534,7 @@ pub fn standard_information(node: NodeId) -> Result<[u8; 24], NtStatus> {
         let mut b = [0u8; 24];
         b[0..8].copy_from_slice(&size.next_multiple_of(4096).to_le_bytes()); // AllocationSize
         b[8..16].copy_from_slice(&size.to_le_bytes()); // EndOfFile
-        b[16..20].copy_from_slice(&1u32.to_le_bytes()); // NumberOfLinks
+        b[16..20].copy_from_slice(&n.nlink().to_le_bytes()); // NumberOfLinks (hard links)
         b[20] = u8::from(fs.delete_pending(node));
         b[21] = u8::from(n.is_dir());
         Ok(b)
@@ -639,7 +646,8 @@ pub fn list_directory(
     let first = scan.at_start();
     with_fs(|fs| {
         let this = fs.node(dir).ok_or(NtStatus::FILE_DELETED)?;
-        let ids = fs.list(dir).map_err(fs_status)?;
+        // Every name: first names and hard links.
+        let ids = fs.entries(dir).map_err(fs_status)?;
         let mut data: Vec<u8> = Vec::new();
         let mut last_start: Option<usize> = None;
         let mut status = NtStatus::SUCCESS;
@@ -651,9 +659,9 @@ pub fn list_directory(
             .enumerate()
             .skip(usize::from(scan.dots))
             .map(|(i, &(name, id))| (Some(i), name, id))
-            .chain(ids.iter().filter_map(|&id| fs.node(id).map(|n| (None, n.name(), id))).filter(
-                |(_, name, _)| scan.after.as_ref().is_none_or(|a| ramfs::collate(name, a).is_gt()),
-            ));
+            .chain(ids.iter().map(|&(id, name)| (None, name, id)).filter(|(_, name, _)| {
+                scan.after.as_ref().is_none_or(|a| ramfs::order(name, a).is_gt())
+            }));
         let mut consumed_dots = scan.dots;
         let mut consumed_after: Option<&[u16]> = None;
         for (dot, name, id) in candidates {

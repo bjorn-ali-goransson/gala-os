@@ -30,6 +30,9 @@ stderr into the pipe: 1
 xargs: n 1 2 3
 sleep: slept
 touch: t
+ln -s, readlink: list
+through the link: 3
+ln, stat -c %h: 2
 stat -c %s: 6
 subshell exit: 7
 background and wait: 0

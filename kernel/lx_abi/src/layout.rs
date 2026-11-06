@@ -120,6 +120,40 @@ pub struct Statx {
     pub _spare: [u64; 14],
 }
 
+impl Statx {
+    /// The struct as user memory holds it (little-endian fields at their
+    /// offsets, padding and spare words zero): what statx(2) copies out.
+    pub fn to_bytes(&self) -> [u8; 256] {
+        let mut b = [0u8; 256];
+        let mut put = |at: usize, v: &[u8]| b[at..at + v.len()].copy_from_slice(v);
+        put(offset_of!(Statx, mask), &self.mask.to_le_bytes());
+        put(offset_of!(Statx, blksize), &self.blksize.to_le_bytes());
+        put(offset_of!(Statx, attributes), &self.attributes.to_le_bytes());
+        put(offset_of!(Statx, nlink), &self.nlink.to_le_bytes());
+        put(offset_of!(Statx, uid), &self.uid.to_le_bytes());
+        put(offset_of!(Statx, gid), &self.gid.to_le_bytes());
+        put(offset_of!(Statx, mode), &self.mode.to_le_bytes());
+        put(offset_of!(Statx, ino), &self.ino.to_le_bytes());
+        put(offset_of!(Statx, size), &self.size.to_le_bytes());
+        put(offset_of!(Statx, blocks), &self.blocks.to_le_bytes());
+        put(offset_of!(Statx, attributes_mask), &self.attributes_mask.to_le_bytes());
+        for (at, t) in [
+            (offset_of!(Statx, atime), self.atime),
+            (offset_of!(Statx, btime), self.btime),
+            (offset_of!(Statx, ctime), self.ctime),
+            (offset_of!(Statx, mtime), self.mtime),
+        ] {
+            put(at, &t.sec.to_le_bytes());
+            put(at + 8, &t.nsec.to_le_bytes());
+        }
+        put(offset_of!(Statx, rdev_major), &self.rdev_major.to_le_bytes());
+        put(offset_of!(Statx, rdev_minor), &self.rdev_minor.to_le_bytes());
+        put(offset_of!(Statx, dev_major), &self.dev_major.to_le_bytes());
+        put(offset_of!(Statx, dev_minor), &self.dev_minor.to_le_bytes());
+        b
+    }
+}
+
 // statx masks (statx(2)).
 pub const STATX_TYPE: u32 = 0x1;
 pub const STATX_MODE: u32 = 0x2;
@@ -355,6 +389,37 @@ mod tests {
         }
         assert_eq!(value(FS, "statx(reserved mask bit)"), -22);
         assert_eq!(STATX_RESERVED, 0x8000_0000);
+    }
+
+    #[test]
+    fn statx_bytes_put_fields_where_linux_has_them() {
+        let sx = Statx {
+            mask: STATX_BASIC_STATS,
+            nlink: 2,
+            mode: 0o120777,
+            ino: 9,
+            size: 4,
+            mtime: StatxTimestamp { sec: 5, nsec: 6, _reserved: 0 },
+            rdev_major: 1,
+            ..Statx::default()
+        };
+        let b = sx.to_bytes();
+        let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        // fs_test's offsets (recorded on Linux).
+        let off = |name: &str| v(FS, &format!("offsetof(statx, {name})"));
+        assert_eq!(u32_at(off("stx_mask")), STATX_BASIC_STATS);
+        assert_eq!(u32_at(off("stx_nlink")), 2);
+        assert_eq!(u16::from_le_bytes([b[off("stx_mode")], b[off("stx_mode") + 1]]), 0o120777);
+        assert_eq!(u64_at(off("stx_ino")), 9);
+        assert_eq!(u64_at(off("stx_size")), 4);
+        assert_eq!(u64_at(off("stx_mtime")), 5);
+        assert_eq!(u32_at(off("stx_mtime") + 8), 6);
+        assert_eq!(u32_at(off("stx_rdev_major")), 1);
+        // The spare words stay zero.
+        assert!(b[144..].iter().all(|&x| x == 0));
+        // What fs_test read back on Linux through statx(2).
+        assert_eq!(value(FS, "statx(lnk, AT_SYMLINK_NOFOLLOW)"), 0);
     }
 
     #[test]
