@@ -13,7 +13,11 @@ use crate::window::Handle;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> Handle;
     fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
@@ -591,13 +595,8 @@ pub extern "system" fn LoadIconW(module: Handle, name: *const u16) -> usize {
     if module.is_null() {
         return system(true);
     }
-    match LoadImageW(module, name, 1, 32, 32, 0) {
-        0 => {
-            // An unknown name in the program's own module: as Windows, NULL.
-            0
-        }
-        h => h,
-    }
+    // An unknown name in the program's own module: as Windows, NULL.
+    LoadImageW(module, name, 1, 32, 32, 0)
 }
 
 #[unsafe(no_mangle)]

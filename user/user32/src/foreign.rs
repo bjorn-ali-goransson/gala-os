@@ -9,7 +9,11 @@
 use crate::window::{Hwnd, MAX_WINDOWS, window, with};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaWindowRegister(info: *const u8, hwnd: *mut u64) -> u32;
     fn GalaWindowUpdate(info: *const u8) -> u32;
@@ -32,7 +36,11 @@ unsafe extern "system" {
 const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
 const ERROR_ACCESS_DENIED: u32 = 5;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn VirtualAlloc(
         at: *mut core::ffi::c_void,

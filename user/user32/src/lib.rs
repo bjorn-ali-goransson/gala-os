@@ -16,6 +16,7 @@ mod controls;
 mod dialog;
 mod dpi;
 mod effects;
+mod extra;
 mod foreign;
 mod hook;
 mod icon;
@@ -40,6 +41,22 @@ mod winevent;
 mod winsta;
 mod wsprintf;
 
+// The 32-bit build (SysWOW64's user32) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime: a
+// raw-dylib import does not give the symbols the compiler calls there
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+// The two of them user32 calls itself: ntrt's on x86 (no link: they are in
+// the same image).
+#[cfg(target_arch = "x86")]
+unsafe extern "C" {
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn strlen(s: *const u8) -> usize;
+}
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -54,11 +71,17 @@ unsafe extern "C" {
 }
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
-/// come from an import. (It becomes a harmless extra data export.)
+/// come from an import. (It becomes a harmless extra data export.) On x86,
+/// ntrt's.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn FindResourceExW(module: usize, kind: usize, name: usize, lang: u16) -> usize;
     fn LoadResource(module: usize, res: usize) -> *const u16;
@@ -122,7 +145,11 @@ pub extern "system" fn OemToCharA(src: *const u8, dst: *mut u8) -> i32 {
     unsafe { CharToOemBuffA(src, dst, strlen(src) as u32 + 1) }
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(code: u32);
     fn GetStdHandle(which: u32) -> usize;
@@ -155,7 +182,11 @@ pub extern "system" fn CharNextExA(_code_page: u16, s: *const u8, _flags: u32) -
     }
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LCMapStringW(lcid: u32, flags: u32, src: *const u16, n: i32, dst: *mut u16, m: i32) -> i32;
 }

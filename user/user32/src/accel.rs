@@ -8,7 +8,11 @@
 use crate::window::{Hwnd, Msg, SendMessageW};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn FindResourceW(module: usize, name: usize, kind: usize) -> usize;
     fn LoadResource(module: usize, res: usize) -> *const u16;

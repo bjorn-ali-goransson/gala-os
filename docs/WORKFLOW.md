@@ -57,7 +57,7 @@ All must pass:
 cargo fmt --all
 # every clippy/build line CI runs (selected by content, not line number)
 grep -E '^ +cargo (clippy|build --release)' .github/workflows/ci.yml | sed 's/^ *//' | bash -e
-cargo xtask test            # host tests, alloc-audit, gala-um, replay, every boot scenario
+cargo xtask test            # stub-audit, host tests, alloc-audit, gala-um, replay, every boot scenario
 cargo xtask export-tests    # refresh user/bin (CI compares)
 ```
 
@@ -120,7 +120,7 @@ alone prints the usage.
 |---|---|
 | `build` | kernel (default and server builds), DLLs, programs, `target/<profile>/gala-os.iso` |
 | `run [--headless]` | build, then boot in QEMU (UEFI) with the serial log on stdio |
-| `test` | host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` |
+| `test` | `stub-audit`, host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` |
 | `boot-test [filter]` | boot scenarios only; a filter matches names containing it, `name$` exactly that one, `a,b,c` exactly those |
 | `export-tests` | copy the built test programs and DLLs to `user/bin/`, then remake derived test data |
 | `iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]` | a bootable image ("Bootable images and USB sticks") |
@@ -132,6 +132,7 @@ alone prints the usage.
 | `replay-test` | record programs' inputs in gala-um and replay them, live and simulated |
 | `lx-expect [--record] [--no-build] [--runs N]` | the Linux test programs on this host against their transcripts |
 | `alloc-audit [kernel ELF] [--all]` | infallible allocations in the kernel's machine code |
+| `stub-audit` | the 32-bit ntdll's stubs agree with every DLL's declaration of them and with wow64.dll's table (argument sizes, words) |
 | `symbolize <log> [--release]` | resolve kernel backtraces in a serial log |
 | `triage <serial log> [events.jsonl]` | the triage block of a log ("When a test fails") |
 | `events <events.jsonl>` | summarize an event stream |
@@ -834,6 +835,17 @@ numbers, 0x7f.., fail there).
   (`wow64.dll!service 0x...`). A class whose x86 layout differs must be
   converted, never passed through: check it against the x86 headers
   (pointer-sized fields, handles, SIZE_Ts, alignment).
+- A DLL's declaration of a system call has the argument types of the
+  stub in `user/testntdll/src/lib.rs` (a handle is `usize` there, a u64
+  only a u64): the 32-bit stub pops what its declaration names, so a
+  different size corrupts the caller's stack (locals read wrong values
+  after the call, nowhere near it), and wow64.dll's row has one entry per
+  4-byte word of it. `cargo xtask stub-audit` names any mismatch.
+- A 32-bit C GUI program: `user/wow64_gui_test` (mingw's i686 GCC with
+  `-municode`, `-luser32 -lgdi32`); its scenario ships `x86/user32.dll`,
+  `x86/gdi32.dll` (and kernel32, msvcrt, ntdll) to SysWOW64. gala's own
+  window messages carry 32-bit WPARAM/LPARAM values (pack with 16-bit
+  halves, never `<< 32`).
 - wow64.dll touches a caller's memory only through `mem` (fault-safe):
   a plain dereference of a 32-bit pointer would crash the process
   instead of failing the call with STATUS_ACCESS_VIOLATION.

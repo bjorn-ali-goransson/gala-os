@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 mod alloc_audit;
 mod clockcheck;
 mod lx_expect;
+mod stub_audit;
 mod telemetry;
 mod vmtime;
 // The manifest's format and SHA-256 are the kernel's own code (one
@@ -511,6 +512,9 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32_32.dll" },
     // The 32-bit msvcrt: gala's msvcrt built for i686.
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
+    // The 32-bit user32 and gdi32 (WOW64 stage 4; user32 loads gdi32).
+    Dll { package: "user32", file: "user32.dll", exported_as: "testuser32_32.dll" },
+    Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32_32.dll" },
     // The 32-bit advapi32 and the bcryptprimitives it imports.
     Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32_32.dll" },
     Dll {
@@ -2152,6 +2156,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_crt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_crt_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
     ("wow64_crt_test", "user/bin/wow64_crt_test.exe", "gala"),
+    ("wow64_gui_test", "wow64.dll", "Windows/System32"),
+    ("wow64_gui_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "user/bin/wow64_gui_test.exe", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -2463,7 +2474,8 @@ fn main() -> ExitCode {
             Some("build") => build(release, "gala-os", "").map(drop),
             Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
             // gala-um first: it fails in seconds, before minutes of boots.
-            Some("test") => unit_tests()
+            Some("test") => stub_audit::stub_audit(&root())
+                .and_then(|()| unit_tests())
                 .and_then(|()| alloc_audit(release, None, false))
                 .and_then(|()| um_test(release))
                 .and_then(|()| replay_test(release))
@@ -2514,6 +2526,7 @@ fn main() -> ExitCode {
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),
+            Some("stub-audit") => stub_audit::stub_audit(&root()),
             Some("alloc-audit") => alloc_audit(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
@@ -6937,6 +6950,16 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_c_test: hello", "wow64_c_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WOW64 stage 4: a 32-bit GUI program (user/wow64_gui_test, mingw's
+        // i686 compiler, checked-in binary) on the 32-bit user32 and gdi32:
+        // a window, its messages with 32-bit WPARAM/LPARAM, painting read
+        // back, destruction (ARCHITECTURE "Plan: WOW64").
+        name: "wow64_gui_test",
+        cmdline: "qemu_exit run=wow64_gui_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_gui_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
         // (user/wow64_crt_test: mingw's i686 startup code, checked-in
         // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
@@ -8014,6 +8037,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),

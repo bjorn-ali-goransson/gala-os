@@ -307,8 +307,8 @@ syscall_stubs! {
     GalaWindowReply = 0x7f4b, fn(id: u64, result: i64, out: *const u8, len: u32);
     GalaWindowPostThread = 0x7f50, fn(tid: u32, message: u32, wparam: u64, lparam: u64);
     GalaWindowSendAbandon = 0x7f51, fn(id: u64);
-    GalaWindowSurface = 0x7f52, fn(hwnd: u64, section: u64, offset: u64, width: u32, height: u32);
-    GalaWindowSurfaceOpen = 0x7f53, fn(hwnd: u64, section: *mut u64, info: *mut u8);
+    GalaWindowSurface = 0x7f52, fn(hwnd: u64, section: usize, offset: u64, width: u32, height: u32);
+    GalaWindowSurfaceOpen = 0x7f53, fn(hwnd: u64, section: *mut usize, info: *mut u8);
     GalaWindowDrag = 0x7f54, fn(id: u32);
     GalaWindowResize = 0x7f55, fn(id: u32, edges: u32);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).

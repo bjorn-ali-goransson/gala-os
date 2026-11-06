@@ -806,6 +806,7 @@ dependencies = [
  "gala_heap",
  "gala_stubs",
  "noto-sans-mono-bitmap",
+ "ntrt",
  "ttf-parser",
 ]
 
@@ -2417,6 +2418,7 @@ version = "0.1.0"
 dependencies = [
  "gala_heap",
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]

@@ -60,7 +60,11 @@ pub extern "system" fn GetKeyboardLayoutNameW(name: *mut u16) -> i32 {
     1
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetTickCount() -> u32;
 }
@@ -535,7 +539,11 @@ static CLIPBOARD: Clipboard = Clipboard {
 };
 static CLIP_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
 }

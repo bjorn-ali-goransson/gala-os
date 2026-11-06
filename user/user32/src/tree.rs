@@ -21,7 +21,11 @@ use crate::window::{
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaWindowPlace(id: u32, x: i32, y: i32, w: u32, h: u32) -> u32;
     fn GalaWindowSetTitle(id: u32, title: *const u16, len: usize) -> u32;
@@ -282,8 +286,12 @@ pub fn create_child(
             disabled: style & WS_DISABLED != 0,
             z: next_z(true),
             instance: instance as usize,
+            extra: crate::extra::alloc(s.classes[class].window_extra),
             ..NO_WINDOW
         };
+        if !s.windows[i].extra.is_null() {
+            s.windows[i].extra_len = s.classes[class].window_extra;
+        }
         Some(i)
     });
     let Some(i) = created else {
@@ -466,7 +474,11 @@ pub extern "system" fn GetDesktopWindow() -> Hwnd {
 /// window gala's user32 knows is the process's own).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32 {
-    #[link(name = "kernel32", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn GetCurrentProcessId() -> u32;
     }
@@ -893,16 +905,19 @@ pub extern "system" fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize {
         GWLP_USERDATA => w.user_data,
         _ => match crate::dialog::get_long(hwnd, index) {
             Some(v) => v,
+            None if index >= 0 => crate::extra::get(hwnd, index, PTR),
             None => {
-                crate::window::unsupported(
-                    b"user32.dll!GetWindowLongPtrW(extra bytes)",
-                    index as u64,
-                );
+                crate::window::unsupported(b"user32.dll!GetWindowLongPtrW(index)", index as u64);
+                set_last_error(ERROR_INVALID_INDEX);
                 0
             }
         },
     }
 }
+
+/// The size of a window long (GetWindowLongPtrW) in the extra bytes.
+const PTR: u32 = core::mem::size_of::<isize>() as u32;
+const ERROR_INVALID_INDEX: u32 = 1413;
 
 #[unsafe(no_mangle)]
 pub extern "system" fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize {
@@ -938,11 +953,10 @@ pub extern "system" fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -
         }
         Some(isize::MIN) => match crate::dialog::set_long(hwnd, index, value) {
             Some(old) => old,
+            None if index >= 0 => crate::extra::set(hwnd, index, PTR, value),
             None => {
-                crate::window::unsupported(
-                    b"user32.dll!SetWindowLongPtrW(extra bytes)",
-                    index as u64,
-                );
+                crate::window::unsupported(b"user32.dll!SetWindowLongPtrW(index)", index as u64);
+                set_last_error(ERROR_INVALID_INDEX);
                 0
             }
         },
@@ -962,11 +976,19 @@ pub extern "system" fn SetWindowLongPtrA(hwnd: Hwnd, index: i32, value: isize) -
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowLongW(hwnd: Hwnd, index: i32) -> i32 {
+    // The extra bytes hold 4-byte longs here (at any offset up to the
+    // count less 4); a dialog's DWLP_* values are its own.
+    if index >= 0 && !crate::dialog::is_dialog(hwnd) {
+        return crate::extra::get(hwnd, index, 4) as i32;
+    }
     GetWindowLongPtrW(hwnd, index) as i32
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn SetWindowLongW(hwnd: Hwnd, index: i32, value: i32) -> i32 {
+    if index >= 0 && !crate::dialog::is_dialog(hwnd) {
+        return crate::extra::set(hwnd, index, 4, value as isize) as i32;
+    }
     SetWindowLongPtrW(hwnd, index, value as isize) as i32
 }
 

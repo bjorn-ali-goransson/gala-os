@@ -4555,8 +4555,9 @@ WM_SYSCOMMAND or gala's own messages and user32 calls SetWindowPos, so
 the program always sees WM_SIZE/WM_MOVE.
 
 - gala's own window messages, above any Windows message number:
-  GALA_WM_PLACE (0x10001; wParam left | top << 32, lParam width |
-  height << 32: user32's input pump posts it to the window's thread and
+  GALA_WM_PLACE (0x10001; wParam left | top << 16 as 16-bit signed
+  values, lParam width | height << 16, so both fit a 32-bit WPARAM:
+  user32's input pump posts it to the window's thread and
   DispatchMessage calls SetWindowPos, no longer maximized) and
   GALA_WM_MINIMIZED (the desktop minimized the window, so IsIconic
   follows).
@@ -4983,7 +4984,13 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   GalaWindowSetTitle).
 - Window longs: GWLP_WNDPROC, HINSTANCE, HWNDPARENT, ID, GWL_STYLE (with
   WS_VISIBLE/WS_DISABLED as they are), EXSTYLE, USERDATA. Window extra
-  bytes are not supported (recorded).
+  bytes (`extra.rs`): the class's cbWndExtra (GetClassInfo gives it
+  back), zeroed bytes from the process heap made with the window and
+  freed with it; Get/SetWindowLongPtrW read and write a pointer-sized
+  value at an offset from 0, Get/SetWindowLongW 4 bytes (little-endian,
+  overlapping); an offset whose value does not fit fails with
+  ERROR_INVALID_INDEX. A heap failure leaves the window without them
+  (recorded).
 - Hit testing and update areas: WindowFromPoint (the topmost visible
   top-level window at the point, then its topmost visible child,
   recursively), GetUpdateRgn/GetUpdateRect (the client area while
@@ -5181,8 +5188,9 @@ allocator (`gala_heap`).
 - DefDlgProcW asks the dialog procedure first (DWLP_MSGRESULT, or the
   result itself for the messages that return one), then defaults:
   WM_CLOSE is IDCANCEL, DM_GETDEFID/SETDEFID, the face colour.
-  DWLP_MSGRESULT/DLGPROC/USER live in the dialog table (no window extra
-  bytes). EndDialog hides a modeless dialog.
+  DWLP_MSGRESULT/DLGPROC/USER (0 and one and two pointers on: 8 and 16
+  on x64, 4 and 8 on x86) live in the dialog table; a dialog class's
+  other extra bytes are the window's. EndDialog hides a modeless dialog.
 - IsDialogMessageW: Tab/Shift+Tab between WS_TABSTOP children via
   GetNextDlgTabItem, Enter: DM_GETDEFID's button or IDOK, Esc: IDCANCEL,
   unless WM_GETDLGCODE asks for the key; the dialog's other messages are
@@ -6787,12 +6795,14 @@ Win32 Structured Exception Handling", MSJ 1997).
 | The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
 | The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
 | The 32-bit advapi32 and bcryptprimitives (SysWOW64) | `user/advapi32` built for i686 (its typed structures in `layout.rs`), `user/bcryptprimitives` |
+| The 32-bit user32 and gdi32 (SysWOW64) | `user/user32`, `user/gdi32`, `user/gala_heap` built for i686; their services' rows in `user/wow64/src/generic.rs` |
+| The stubs, callers and table agree | `xtask/src/stub_audit.rs` (`cargo xtask stub-audit`) |
 | The registry's 32-bit view | `kernel/src/nt/regview.rs`, applied in `nt/registry_calls.rs` (`key_view`) |
 | The environment by bitness | `nt/wow64.rs` (`environment`) |
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, painting) |
 
 ### Decisions
 
@@ -7037,8 +7047,26 @@ TRUSTEE_W, EXPLICIT_ACCESS_W; the LSA mapping inputs in `policy.rs`); a
 self-relative descriptor's offsets, SIDs, ACLs and ACEs are alike in
 both; TEB.ActivityId at fs:0xf50; RDRAND/RDSEED fill 32-bit words. The
 32-bit ntdll's descriptor functions take the absolute form's pointers at
-its own width. To come, as programs need them: kernelbase, user32, gdi32
-and the rest (ROADMAP WOW).
+its own width. Done too: the 32-bit user32 and gdi32 (`user/user32`,
+`user/gdi32` built for i686, with gala_heap): user32 calls window
+procedures directly in user mode (no kernel callbacks), so a 32-bit
+window procedure is just stdcall; its structures with pointers
+(MSG, WNDCLASSEXW, CREATESTRUCTW, PAINTSTRUCT) are `repr(C)` with
+pointer-sized fields; the records it hands the kernel (window
+information, send requests, input events) are fixed-width little-endian
+bytes alike for both, so wow64.dll passes them through, and an HWND,
+WPARAM or LPARAM it passes as a u64 takes two words (`Hi`); gala's own
+messages pack their values to fit a 32-bit WPARAM (GALA_WM_PLACE). To
+come, as programs need them: kernelbase, comctl32, shell32, ole32 and
+the rest (ROADMAP WOW).
+
+The 32-bit stubs pop the bytes their own declaration names (stdcall
+`ret N`), and wow64.dll's table converts one entry per 4-byte word:
+a DLL declaring a stub's function with another argument size (a 4-byte
+handle where the stub says u64) moves its caller's stack pointer on
+every call and corrupts the caller's locals far from the cause, and a
+table row of another length reads the wrong words. `cargo xtask
+stub-audit` (run by `cargo xtask test`) checks both from the sources.
 Arch-specific code moves behind `cfg(target_arch)`;
 `extern "system"` is stdcall there, which Windows' exports are, and
 exports keep their undecorated names (naked functions too; `/EXPORT:`
@@ -7048,7 +7076,8 @@ for `global_asm!` symbols); imports from them are `raw-dylib` with
 as `x86/<file>` in EXTRA_MODULES (under `boot/x86` on the ISO, its name
 being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
 (`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`,
-`testadvapi32_32.dll`, `testbcryptprimitives32.dll`; test DLLs
+`testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
+`testuser32_32.dll`, `testgdi32_32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers

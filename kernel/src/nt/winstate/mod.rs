@@ -894,8 +894,10 @@ impl<X: Default> State<X> {
         self.send(
             id,
             GALA_WM_PLACE,
-            u64::from(x as u32) | u64::from(y as u32) << 32,
-            u64::from(w) | u64::from(h) << 32,
+            // MAKELONG pairs, as WM_MOVE and WM_SIZE: they fit a 32-bit
+            // program's WPARAM/LPARAM too (WOW64).
+            u64::from(x as i16 as u16) | u64::from(y as i16 as u16) << 16,
+            u64::from(w.min(0xffff) as u16) | u64::from(h.min(0xffff) as u16) << 16,
         );
     }
 

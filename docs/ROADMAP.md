@@ -80,10 +80,10 @@ In order:
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW**: stage 3's rest (kernelbase; kernel32_test built for x86):
-   the process model under PK's x86 installers and programs (Inno
-   Setup's x64 Setup runs natively; an x86 Inno installer needs stage
-   3-4).
+5. **WOW**: stage 4's rest (the 32-bit comctl32, shell32, ole32 and
+   the rest an x86 Inno Setup installer imports, then that installer;
+   Inno Setup's x64 Setup runs natively); stage 3's rest (kernelbase;
+   kernel32_test built for x86).
 6. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's rest (quota_test on Windows), R8's Secure
    Boot.
@@ -155,7 +155,7 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; kernelbase next; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno installer next; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -1640,6 +1640,19 @@ wow64.dll converts 32-bit system calls in user mode).
   a handle by their full name, RegDeleteKeyEx in the view it names;
   WOW6432Node seeded with the version keys and the 32-bit
   ProgramFilesDir/CommonFilesDir.
+  **The 32-bit user32 and gdi32** (`wow64_gui_test`, C built with
+  mingw's i686 GCC; stage 4's second part): gala's user32, gdi32 and
+  gala_heap built for i686 (`testuser32_32.dll`, `testgdi32_32.dll`), a
+  32-bit program's window class and window (CREATESTRUCTW, window
+  longs, extra bytes), SendMessageW/PostMessageW with 32-bit
+  WPARAM/LPARAM through GetMessage/DispatchMessage, GetClientRect,
+  WM_PAINT with FillRect read back by GetPixel, DestroyWindow and
+  WM_QUIT; wow64.dll's rows for gala's window, console, desktop and
+  window-station services; GALA_WM_PLACE packed for a 32-bit WPARAM.
+  Window extra bytes (cbWndExtra) for both architectures (`user32_test`
+  too). `cargo xtask stub-audit` checks that every DLL declares a stub's
+  function with the stub's argument sizes and that wow64.dll's rows
+  have the stub's word count.
 
 **Next**:
 1. Stage 3's rest, the 32-bit system DLLs: kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
@@ -1647,8 +1660,9 @@ wow64.dll converts 32-bit system calls in user mode).
    x86). The 32-bit kernel32's own gaps: GetProcessInformation's
    ProcessMachineTypeInfo answers AMD64; the Wow64*FsRedirection
    functions are x86-only (64-bit Windows' kernel32 exports them too:
-   what they answer in a 64-bit process is to be observed); the console services
-   besides GalaConsoleMode/Ctrl are not converted by wow64.dll (the
+   what they answer in a 64-bit process is to be observed); the pseudo
+   console's services (GalaConsoleCreate/Size/Close/Trace) and
+   GalaClockControl, GalaSession are not converted by wow64.dll (the
    ledger names them); its exports include ntrt's runtime symbols
    (memcmp, strlen, bcmp, __CxxFrameHandler3; the 32-bit msvcrt's too).
    The 32-bit msvcrt's own gaps: the 32-bit `_stat`/`_fstat`/`_findfirst`
@@ -1662,18 +1676,18 @@ wow64.dll converts 32-bit system calls in user mode).
    NT paths only); nested exceptions and collided unwinds in the x86
    dispatcher; ThreadWow64Context for 64-bit debuggers. Stage 2's
    leftovers, each in the ledger: the job information classes, AFD's
-   IOCTLs (sockets), gala's window and console services (with user32,
-   stage 4), CONTEXT_FLOATING_POINT on NtSetContextThread.
+   IOCTLs (sockets), CONTEXT_FLOATING_POINT on NtSetContextThread.
    The 32-bit advapi32's own gaps: its service SIDs load bcrypt, which
    has no 32-bit build yet (LoadLibrary fails: NT SERVICE names do not
    resolve in a 32-bit process); its exports include ntrt's runtime
    symbols. The registry view's: WOW6432Node's `Classes` link and
    `HKEY_USERS\<SID>_Classes` are not modelled (ARCHITECTURE "Registry").
-2. Stage 4: user32, gdi32, comctl32,
-   uxtheme, shell32, ole32 and what Delphi's VCL imports, for i686;
-   then an x86 Inno Setup installer under `gala install` (the x64 one
-   runs natively: `pk_install_inno`); `gala install` installing
-   winget's x86 choices (the fallback stopgap goes).
+2. Stage 4's rest: comctl32, uxtheme, shell32, ole32, oleaut32,
+   comdlg32, shlwapi, version and what Delphi's VCL imports, for i686
+   (as an x86 Inno Setup installer needs them); then that installer
+   under `gala install` (the x64 one runs natively: `pk_install_inno`);
+   `gala install` installing winget's x86 choices (the fallback
+   stopgap goes).
 3. Later: the handover carrying WOW64 processes; gala-um running 32-bit
    code (a 32-bit code segment and a TEB32 through the host's
    modify_ldt); ARM64 guests are out of scope.

@@ -124,7 +124,7 @@ fn named_actions_change_the_state_and_tell_the_program() {
             (a, GALA_WM_MINIMIZED, 0, 0),
             (a, WM_SYSCOMMAND, SC_CLOSE, 0),
             // The left half of the work area (above the taskbar's rows).
-            (a, GALA_WM_PLACE, 0, 640 | 752 << 32),
+            (a, GALA_WM_PLACE, 0, 640 | 752 << 16),
         ]
     );
     // The program places it there: docked, listed as snapped.
@@ -136,7 +136,7 @@ fn named_actions_change_the_state_and_tell_the_program() {
     assert_eq!(&listed[0].title[..listed[0].title_len], title("Notes").as_slice());
     // Restore gives back the rectangle from before the snap.
     s.act(a, Action::Restore).unwrap();
-    assert_eq!(messages(&mut s, 5), [(a, GALA_WM_PLACE, 100 | 100 << 32, 400 | 300 << 32)]);
+    assert_eq!(messages(&mut s, 5), [(a, GALA_WM_PLACE, 100 | 100 << 16, 400 | 300 << 16)]);
     // Hidden windows and popups take no action; a desktop of no size
     // cannot snap.
     s.show(a, 5, false).unwrap();

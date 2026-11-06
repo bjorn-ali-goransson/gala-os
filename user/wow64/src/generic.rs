@@ -378,13 +378,61 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f22, &[U]),                 // NtAllocateLocallyUniqueId
     (0x7f24, &[Oh, U, Oa]),         // NtCreateDirectoryObject
     // Console: a mode and what to do with it; *Seen (a ULONG).
-    (0x7f3f, &[U, U]),           // GalaConsoleMode
-    (0x7f40, &[U]),              // GalaConsoleCtrl
-    (0x7f4d, &[U, U]),           // GalaRandom
-    (0x7f90, &[H, H]),           // NtCompareObjects
-    (0x7f91, &[H]),              // NtSuspendProcess
-    (0x7f92, &[H]),              // NtResumeProcess
-    (0x7f93, &[Oh, U, Oa, Cid]), // NtOpenThread
+    (0x7f3f, &[U, U]), // GalaConsoleMode
+    (0x7f40, &[U]),    // GalaConsoleCtrl
+    // gala's window, console and desktop services (user32, gdi32): their
+    // records are fixed-width little-endian bytes, alike for both
+    // bitnesses; a u64 by value (an HWND, a WPARAM) takes two words.
+    (0x7f30, &[U, U, U, U, U, U, U, U]), // GalaWindowCreate
+    (0x7f31, &[U, U]),                   // GalaWindowShow
+    (0x7f32, &[U, U, U, U, U, U, U]),    // GalaWindowPresent
+    (0x7f33, &[U]),                      // GalaWindowDestroy
+    (0x7f34, &[H]),                      // GalaWindowListen
+    (0x7f35, &[U, U, U]),                // GalaWindowInput
+    (0x7f36, &[U]),                      // GalaScreenInfo
+    (0x7f37, &[U, U, U, U, U]),          // GalaWindowPlace
+    (0x7f38, &[U, U, U]),                // GalaWindowSetTitle
+    (0x7f39, &[U]),                      // GalaWindowCapture
+    (0x7f3a, &[U, H]),                   // GalaConsoleHost
+    (0x7f3b, &[U, U, U, U]),             // GalaConsoleRead
+    (0x7f3c, &[U, U, U]),                // GalaConsoleInput
+    (0x7f3d, &[U, U, U, U]),             // GalaConsoleInputEvents
+    (0x7f3e, &[U, U, U]),                // GalaWindowSetIcon
+    (0x7f41, &[U, U]),                   // GalaWindowRegister
+    (0x7f42, &[U]),                      // GalaWindowUpdate
+    (0x7f43, &[U, Hi]),                  // GalaWindowUnregister
+    (0x7f44, &[U, Hi, U]),               // GalaWindowQuery
+    (0x7f45, &[U, Hi, U, U, U]),         // GalaWindowChildren
+    (0x7f46, &[U, Hi, U, U, Hi, U, Hi]), // GalaWindowPost
+    (0x7f47, &[U, U, U]),                // GalaWindowPosted
+    (0x7f48, &[U, U]),                   // GalaWindowSend
+    (0x7f49, &[U, Hi, U, U, U, U]),      // GalaWindowSendWait
+    (0x7f4a, &[U, U, U, U]),             // GalaWindowReceive
+    (0x7f4b, &[U, Hi, U, Hi, U, U]),     // GalaWindowReply
+    (0x7f50, &[U, U, U, Hi, U, Hi]),     // GalaWindowPostThread
+    (0x7f51, &[U, Hi]),                  // GalaWindowSendAbandon
+    (0x7f52, &[U, Hi, H, U, Hi, U, U]),  // GalaWindowSurface
+    (0x7f53, &[U, Hi, Oh, U]),           // GalaWindowSurfaceOpen
+    (0x7f54, &[U]),                      // GalaWindowDrag
+    (0x7f55, &[U, U]),                   // GalaWindowResize
+    (0x7f58, &[U, U, U, U, U]),          // GalaDesktopAction
+    (0x7f6a, &[U, Hi, U, U, U]),         // GalaWindowFilter
+    (0x7f70, &[U, U, U, U, U, U]),       // GalaWinEventHook
+    (0x7f71, &[U]),                      // GalaWinEventUnhook
+    (0x7f72, &[U, U, Hi, U, U]),         // GalaWinEventNotify
+    (0x7f73, &[U, U, U]),                // GalaWinEventTake
+    // Window stations and desktops: their handles are kernel handles.
+    (0x7fa0, &[U, U, U, U, U, Oh]), // GalaUserObjectOpen
+    (0x7fa1, &[U, U, Oh]),          // GalaUserObjectConnection
+    (0x7fa2, &[U, H]),              // GalaUserObjectSet
+    (0x7fa3, &[U, H]),              // GalaUserObjectClose
+    (0x7fa4, &[H, U, U, U, U]),     // GalaUserObjectInformation
+    (0x7fa5, &[H, U, U, U]),        // GalaUserObjectEnum
+    (0x7f4d, &[U, U]),              // GalaRandom
+    (0x7f90, &[H, H]),              // NtCompareObjects
+    (0x7f91, &[H]),                 // NtSuspendProcess
+    (0x7f92, &[H]),                 // NtResumeProcess
+    (0x7f93, &[Oh, U, Oa, Cid]),    // NtOpenThread
 ];
 
 /// The kinds of service `number`'s arguments, if it converts generically.

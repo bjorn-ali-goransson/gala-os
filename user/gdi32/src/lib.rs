@@ -40,9 +40,17 @@ use surface::Surface;
 use gala_heap as _;
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
-/// come from an import.
+/// come from an import. On x86, ntrt's.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
+
+// The 32-bit build (SysWOW64's gdi32) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime: a
+// raw-dylib import does not give the symbols the compiler calls there
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
 
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
@@ -50,6 +58,7 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
     1
 }
 
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -64,13 +73,21 @@ unsafe extern "C" {
     fn __chkstk();
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaScreenInfo(info: *mut [i32; 8]) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;

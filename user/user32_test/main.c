@@ -165,7 +165,9 @@
  *   UnregisterClassW of a class with a window fails with
  *   ERROR_CLASS_HAS_WINDOWS, after which RegisterClassW of the same name
  *   fails with ERROR_CLASS_ALREADY_EXISTS; once the window is gone both
- *   succeed.
+ *   succeed. A window's extra bytes (cbWndExtra 8) start zeroed and hold
+ *   a LONG_PTR at 0 or LONGs at 0 and 4 (little-endian, overlapping);
+ *   an offset past them fails with ERROR_INVALID_INDEX.
  * - Layered windows: GetLayeredWindowAttributes fails before
  *   SetLayeredWindowAttributes, then gives its colour key, alpha and
  *   flags; SetLayeredWindowAttributes fails on a window without
@@ -908,6 +910,18 @@ static void classes(void) {
     HWND list = CreateWindowExW(0, L"User32TestListBox", L"", WS_CHILD | LBS_NOTIFY, 0, 0, 100, 50, parent, NULL,
                                 inst, NULL);
     CHECK(parent != NULL && list != NULL);
+    /* The class's 8 extra bytes: zeroed, a pointer-sized long at 0, 4-byte
+     * longs at 0 and 4; nothing past them (ERROR_INVALID_INDEX). */
+    CHECK(got.cbWndExtra == 8);
+    CHECK(GetWindowLongPtrW(parent, 0) == 0);
+    CHECK(SetWindowLongPtrW(parent, 0, (LONG_PTR)0x1122334455667788ll) == 0);
+    CHECK(GetWindowLongPtrW(parent, 0) == (LONG_PTR)0x1122334455667788ll);
+    CHECK(GetWindowLongW(parent, 4) == 0x11223344 && GetWindowLongW(parent, 0) == 0x55667788);
+    CHECK(SetWindowLongW(parent, 4, -2) == 0x11223344 && GetWindowLongPtrW(parent, 0) == (LONG_PTR)0xfffffffe55667788ll);
+    SetLastError(0);
+    CHECK(GetWindowLongPtrW(parent, 4) == 0 && GetLastError() == ERROR_INVALID_INDEX);
+    SetLastError(0);
+    CHECK(SetWindowLongW(parent, 8, 1) == 0 && GetLastError() == ERROR_INVALID_INDEX);
     CHECK(SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)L"one") == 0 && SendMessageW(list, LB_GETCOUNT, 0, 0) == 1);
     SetLastError(0);
     CHECK(!UnregisterClassW(L"User32TestClassInfo", inst) && GetLastError() == ERROR_CLASS_HAS_WINDOWS);

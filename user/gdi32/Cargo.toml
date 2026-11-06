@@ -17,3 +17,8 @@ gala_heap = { path = "../gala_heap" }
 fontdue = { version = "0.9.5", default-features = false, features = ["hashbrown"] }
 ttf-parser = { version = "0.25.1", default-features = false, features = ["no-std-float"] }
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["size_16", "size_20", "size_24", "size_32", "regular", "bold", "unicode-basic-latin", "unicode-latin-1-supplement", "unicode-specials"] }
+
+# The 32-bit build (SysWOW64's gdi32): the memory routines, 64-bit
+# division helpers and unwind personality the compiler calls on x86.
+[target.'cfg(target_arch = "x86")'.dependencies]
+ntrt = { path = "../ntrt" }

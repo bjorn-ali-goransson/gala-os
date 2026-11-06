@@ -17,7 +17,11 @@ pub(crate) type Handle = *mut c_void;
 pub(crate) type Hwnd = usize;
 pub type WndProc = extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaWindowCreate(
         x: i32,
@@ -49,7 +53,11 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
     fn CreateEventW(sa: *const c_void, manual: i32, initial: i32, name: *const u16) -> Handle;
@@ -69,7 +77,6 @@ pub const MENU_BAR: i32 = 20;
 const MAX_CLASSES: usize = 32;
 pub(crate) const MAX_WINDOWS: usize = 512;
 const QUEUE: usize = 256;
-const HWND_BASE: usize = 0x0001_0000;
 
 const WM_NCCREATE: u32 = 0x0081;
 const WM_NCDESTROY: u32 = 0x0082;
@@ -81,7 +88,9 @@ const WM_QUIT: u32 = 0x0012;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETICON: u32 = 0x007f;
 /// The desktop's request to move a window (Snap; kernel desktop
-/// GALA_WM_PLACE): wParam left | top << 32, lParam width | height << 32.
+/// GALA_WM_PLACE): wParam MAKELONG(left, top), lParam MAKELONG(width,
+/// height), as WM_MOVE and WM_SIZE (signed positions, so they fit a
+/// 32-bit program's WPARAM/LPARAM too).
 const GALA_WM_PLACE: u32 = 0x0001_0001;
 /// The desktop minimized (wParam 1) or restored (0) the window itself
 /// (its caption button, its taskbar button, Win+Down): user32 keeps
@@ -123,6 +132,8 @@ pub(crate) struct Class {
     /// The class's icons (WNDCLASSEX hIcon, hIconSm).
     pub(crate) icon: usize,
     pub(crate) icon_small: usize,
+    /// Its windows' extra bytes (cbWndExtra; extra.rs).
+    pub(crate) window_extra: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +211,9 @@ pub(crate) struct Window {
     pub(crate) last_popup: Hwnd,
     /// Hidden by ShowOwnedPopups(owner, FALSE), shown again by TRUE.
     pub(crate) hidden_with_owner: bool,
+    /// The class's extra bytes for this window (extra.rs; null for none).
+    pub(crate) extra: *mut u8,
+    pub(crate) extra_len: u32,
 }
 
 /// WM_NCCALCSIZE.
@@ -351,6 +365,7 @@ const NO_CLASS: Class = Class {
     style: 0,
     icon: 0,
     icon_small: 0,
+    window_extra: 0,
 };
 pub(crate) const NO_WINDOW: Window = Window {
     used: false,
@@ -392,6 +407,8 @@ pub(crate) const NO_WINDOW: Window = Window {
     layered: None,
     last_popup: 0,
     hidden_with_owner: false,
+    extra: core::ptr::null_mut(),
+    extra_len: 0,
 };
 const NO_MSG: Msg =
     Msg { hwnd: 0, message: 0, wparam: 0, lparam: 0, time: 0, pt: [0; 2], private: 0 };
@@ -788,6 +805,7 @@ pub extern "system" fn RegisterClassExW(wc: *const WndClassExW) -> u16 {
             style: wc.style,
             icon: wc.icon as usize,
             icon_small: wc.icon_small as usize,
+            window_extra: crate::extra::class_extra(wc.window_extra),
         };
         Ok(atom)
     });
@@ -1021,7 +1039,12 @@ pub extern "system" fn CreateWindowExW(
             layered: None,
             last_popup: 0,
             hidden_with_owner: false,
+            extra: crate::extra::alloc(s.classes[class].window_extra),
+            extra_len: s.classes[class].window_extra,
         };
+        if s.windows[i].extra.is_null() {
+            s.windows[i].extra_len = 0;
+        }
         Some(i)
     });
     let Some(i) = created else {
@@ -1091,6 +1114,7 @@ pub(crate) fn finish_create(
         );
         if refused != 0 {
             let gone = with(|s| core::mem::replace(&mut s.windows[i], NO_WINDOW));
+            crate::extra::free(gone.extra);
             // SAFETY: the window's buffer and desktop window.
             unsafe {
                 if gone.desktop != 0 {
@@ -1173,6 +1197,7 @@ fn free_slot(i: usize) {
         }
         w
     });
+    crate::extra::free(gone.extra);
     // SAFETY: the window's buffer and desktop window.
     unsafe {
         if gone.desktop != 0 {
@@ -2195,10 +2220,11 @@ pub(crate) fn send_with(
 ) -> Result<isize, u32> {
     // Another process's window: through the kernel, the pointers
     // marshaled.
-    if hwnd != 0 && index_of(hwnd).is_none() {
-        if let Some(r) = crate::foreign::send_remote(hwnd, msg, wparam, lparam, mode) {
-            return r;
-        }
+    if hwnd != 0
+        && index_of(hwnd).is_none()
+        && let Some(r) = crate::foreign::send_remote(hwnd, msg, wparam, lparam, mode)
+    {
+        return r;
     }
     // gala's menu message for UI Automation: user32's own.
     if msg == crate::track::GALA_MENU && window(hwnd).is_some() {
@@ -3008,8 +3034,8 @@ pub extern "system" fn DispatchMessageW(msg: *const Msg) -> isize {
         return 0;
     }
     if m.message == GALA_WM_PLACE {
-        let (x, y) = (m.wparam as u32 as i32, (m.wparam >> 32) as u32 as i32);
-        let (w, h) = (m.lparam as u32 as i32, (m.lparam as usize >> 32) as u32 as i32);
+        let (x, y) = (i32::from(m.wparam as u16 as i16), i32::from((m.wparam >> 16) as u16 as i16));
+        let (w, h) = (i32::from(m.lparam as u16), i32::from((m.lparam as usize >> 16) as u16));
         crate::tree::snap(m.hwnd, x, y, w, h);
         return 0;
     }
@@ -3068,10 +3094,10 @@ pub extern "system" fn GetSystemMetrics(index: i32) -> i32 {
         4 => CAPTION,
         15 => MENU_BAR, // SM_CYMENU
         5 | 6 => BORDER,
-        30 => 46,                // SM_CXSIZE: the desktop's caption buttons
-        31 => CAPTION,           // SM_CYSIZE
-        11 | 12 | 13 | 14 => 32, // SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR
-        49 | 50 => 16,           // SM_CXSMICON, SM_CYSMICON
+        30 => 46,      // SM_CXSIZE: the desktop's caption buttons
+        31 => CAPTION, // SM_CYSIZE
+        11..=14 => 32, // SM_CXICON, SM_CYICON, SM_CXCURSOR, SM_CYCURSOR
+        49 | 50 => 16, // SM_CXSMICON, SM_CYSMICON
         _ => 0,
     }
 }
@@ -3240,7 +3266,8 @@ pub extern "system" fn BringWindowToTop(hwnd: Hwnd) -> i32 {
 }
 
 /// GetClassInfoExW(hInstance, lpszClass, lpwcx): the class's WNDCLASSEXW
-/// (style, procedure, background, icons; the name as given); its atom, or
+/// (style, procedure, window extra bytes, background, icons; the name as
+/// given); its atom, or
 /// 0 with ERROR_CLASS_DOES_NOT_EXIST.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetClassInfoExW(
@@ -3266,7 +3293,7 @@ pub extern "system" fn GetClassInfoExW(
             style: c.style,
             proc_: c.proc_,
             class_extra: 0,
-            window_extra: 0,
+            window_extra: c.window_extra as i32,
             instance,
             icon: c.icon as Handle,
             cursor: core::ptr::null_mut(),

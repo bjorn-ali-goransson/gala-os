@@ -27,7 +27,11 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;
@@ -1475,7 +1479,7 @@ fn edit_lines(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
         }
         EM_LINELENGTH => {
             let at = if wparam as isize == -1 { c.caret } else { wparam.min(text.len()) };
-            let start = starts().filter(|&s| s <= at).last().unwrap_or(0);
+            let start = starts().rfind(|&s| s <= at).unwrap_or(0);
             (line_end(start) - start) as isize
         }
         EM_GETLINE => {
