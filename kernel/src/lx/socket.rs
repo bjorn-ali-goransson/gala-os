@@ -302,6 +302,10 @@ pub fn bind(call: &Call<'_>, fd: u64, addr: u64, len: u64) -> Result {
     Ok(0)
 }
 
+/// /proc/sys/net/core/somaxconn's default (listen(2)): the most a backlog
+/// asks for.
+const SOMAXCONN: i32 = 4096;
+
 pub fn listen(call: &Call<'_>, fd: u64, backlog: u64) -> Result {
     let (_, sock) = socket_of(call, fd)?;
     let mut state = sock.state.lock();
@@ -314,9 +318,15 @@ pub fn listen(call: &Call<'_>, fd: u64, backlog: u64) -> Result {
         SockState::Bound(id) | SockState::Listening(id) => id,
         SockState::Connecting(_) | SockState::Connected(_) => return Err(EINVAL),
     };
-    // An int; negative or huge is the most the stack takes.
-    let backlog = (backlog as i32).clamp(1, i32::MAX) as usize;
-    if let Err(e) = tcp::listen(id, backlog) {
+    // An int, as Linux takes it (observed): negative or above somaxconn
+    // (4096, listen(2)'s default since Linux 5.4) is somaxconn, and
+    // backlog + 1 connections are completed before the SYNs beyond are
+    // ignored (listen(0) completes one).
+    let backlog = match backlog as i32 {
+        b @ 0..=SOMAXCONN => b as usize,
+        _ => SOMAXCONN as usize,
+    };
+    if let Err(e) = tcp::listen(id, backlog + 1, tcp::WhenFull::Ignore) {
         if *state == SockState::Fresh {
             tcp::close(id, false);
         }

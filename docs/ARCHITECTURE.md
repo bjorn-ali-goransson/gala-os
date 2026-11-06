@@ -2433,14 +2433,47 @@ ntdll imports.
 
 ### msvcrt
 
-`user/msvcrt` (`msvcrt_test`): the C runtime of mingw-w64 programs.
+`user/msvcrt` (`msvcrt_test`; the 32-bit one `wow64_crt_test`): the C
+runtime of mingw-w64 programs.
 
-- **FILE**: streams from fopen are a 48-byte FILE (the real layout,
-  `_cnt` 0, because mingw's inline getc reads it and calls `_filbuf`)
+- **Two architectures**: built for x64 (System32) and for x86
+  (SysWOW64, "Plan: WOW64"); what differs is in `x64.rs` and `x86.rs`.
+  The `v` functions take a `va_list` (`va.rs`) walked by the
+  architecture's slots: 8 bytes per argument on x64 (the variadic entry
+  points spill the register arguments into the caller's home area,
+  `global_asm!` exported by name in build.rs), on x86 cdecl's stack
+  arguments rounded to 4 bytes (a double or an __int64 takes 8; the
+  entry points are naked functions pushing the `va_list`'s address).
+  printf's `%I`, `%z`, `%t` and `%p` (all the pointer's digits) and
+  scanf's `%z` and `%p` are pointer-sized. setjmp/longjmp: x64's
+  256-byte `_JUMP_BUFFER` (no unwinding); x86's 64-byte one (ebp, ebx,
+  edi, esi, esp, eip, the SEH registration, try level, the "VC20" cookie
+  and unwind function of `_setjmp3(buf, count, ...)`, mingw's and MSVC's
+  `setjmp`), whose longjmp first unwinds the SEH frames registered since
+  the setjmp (RtlUnwind to the saved registration: their handlers see
+  EXCEPTION_UNWINDING) and runs the buffer's unwind function. The
+  floating-point control: `_controlfp` is MXCSR on x64; on x86
+  `_control87` sets the x87 control word (masks, rounding, precision,
+  infinity control) and MXCSR (masks, rounding, flush-to-zero) together
+  and answers the x87 form with `_EM_AMBIGUOUS` when they disagree,
+  `_controlfp` leaves the denormal mask alone; `_fpreset` gives x87
+  0x27f and MXCSR 0x1f80 (`_CW_DEFAULT`, 0x9001f on x86). time_t of the
+  unsized names (`time`, `gmtime`, `localtime`, `mktime`, `ctime`,
+  `difftime`) is 64 bits on x64 and 32 on x86, as in msvcrt.dll
+  (mingw's i686 headers use 32 and call them). On x86 the memory
+  routines, 64-bit division helpers and stack probe come from ntrt's x86
+  runtime (memcmp and strlen are exported from there, as are its bcmp
+  and __CxxFrameHandler3); `_except_handler3/4` are not there yet.
+- **FILE**: `struct _iobuf` (48 bytes on x64, 32 on x86, typed with
+  pointer-sized fields); `_iob` is exported (20 FILEs, `__iob_func`
+  returns it; 32-bit programs import the data), its first three the
+  console streams with `_file` 0, 1, 2. Streams from fopen are a FILE
+  (`_cnt` 0, because mingw's inline getc reads it and calls `_filbuf`)
   followed by a CRITICAL_SECTION, as msvcrt.dll's `_FILEX`: mingw's
-  `_lock_file` enters that lock directly (for the console slots it calls
-  `_lock`). `fscanf` reads a line at a time and scans it with `vsscanf`
-  (a conversion cannot span lines; what a line leaves unread is dropped).
+  `_lock_file` enters that lock directly (for the console slots, inside
+  `_iob`'s 20, it calls `_lock`). `fscanf` reads a line at a time and
+  scans it with `vsscanf` (a conversion cannot span lines; what a line
+  leaves unread is dropped).
   _getmaxstdio starts at 512 and _setmaxstdio accepts 20-2048.
 - **Descriptors**: a new descriptor is the lowest free one; 0-2 are the
   standard handles and are free after `_close` (then the new handle
@@ -2449,7 +2482,8 @@ ntdll imports.
   process's standard handle, so redirections reach children.
 - **Descriptor inheritance** (busybox): msvcrt passes its open
   descriptors to children in STARTUPINFO cbReserved2/lpReserved2 (a
-  count, a flags byte and a HANDLE per descriptor). `_spawnve` writes the
+  count, a flags byte and a pointer-sized HANDLE per descriptor).
+  `_spawnve` writes the
   block (inheritable handles only, so a child never trusts a value it did
   not inherit) and DLL attach reads it; kernel32 passes it through
   GalaCreateProcess (flag 8).
@@ -3655,8 +3689,17 @@ only. ROADMAP N1 (TCP/IP and sockets) and N2 (Nginx) are the items.
   handover"); `net::tcp::stop`/`restart` park the net thread for a
   kernel handover. Its `alloc` feature is on only so that a socket can
   own its buffers (`ManagedSlice::Owned`): socket buffers are allocated
-  fallibly by gala, and the socket sets are pre-filled to a fixed
-  capacity, so smoltcp never grows them.
+  fallibly by gala, and a socket set grows only through gala (the
+  patch's `SocketSet::has_room`/`try_reserve`: `Stack::admit` reserves
+  room fallibly before smoltcp's `add` would push), so smoltcp never
+  allocates infallibly.
+- **The socket limit**: every interface's sockets together are bounded
+  by `socket_limit`, a quarter of the machine's memory at 128 KiB of
+  buffers each (at least 64; 1024 at 512 MiB). A socket refused for it,
+  or for want of memory, is logged once until a socket goes: `net: a
+  loopback socket is refused: all 1024 sockets are in use (... sockets
+  in use: loopback .., card ..; limit .., ...; frames free ..)`.
+  TODO (ROADMAP R6): charge the buffers to the owning process's quota.
 - `net: ...` at the end of every boot logs frames, loopback packets,
   polls and the sockets still open (0 after programs that closed
   theirs).
@@ -3669,23 +3712,42 @@ The kernel's socket API, independent of NT: `listen(local, backlog)`,
 `SocketId` (interface + smoltcp handle + generation).
 
 - A listener bound to 0.0.0.0 listens on both interfaces. smoltcp has no
-  accept queue (a listening socket *becomes* the connection), so a
-  listener keeps `backlog` (1-8) listening sockets per interface; when
-  one is established it moves to the listener's ready queue and a fresh
-  one replaces it.
+  accept queue (a listening socket *becomes* the connection when a SYN
+  comes), so a listener (`Listener`) holds **one listening socket per
+  interface** and the connections it took: `opening` (SYN received) and
+  `ready` (established, waiting to be accepted, with sequence numbers).
+  The net thread takes received packets one at a time
+  (`poll_ingress_single`) and after each one `tend`s every listener: a
+  listening socket that took a SYN joins `opening` and a fresh one takes
+  its place, so the next SYN, even in the same burst, meets one; an
+  opened connection moves to `ready`; one reset during the handshake
+  goes. Nothing is set aside for the backlog: each connection is a
+  socket of its own when it comes, under the socket limit.
+- **The backlog** counts `opening` and `ready` together; what happens to
+  a SYN beyond it is the personality's (`WhenFull`): **Refuse** (AFD,
+  Windows' documented listen: WSAECONNREFUSED): while the backlog is
+  full the listener has no listening socket, smoltcp answers the SYN
+  with RST, and the client's connect is refused; an accept brings a
+  listening socket back at once. **Ignore** (lx, Linux): the listening
+  socket stays; one that took a SYN over the backlog is dropped before
+  smoltcp sent its SYN-ACK, so the SYN goes unanswered and the client's
+  retransmission gets in after an accept. AFD's backlog: SOMAXCONN is
+  200, SOMAXCONN_HINT(N) is N within 200-65535, other values 1-200
+  (`afd::backlog_of`; gala's ws2_32 still turns a negative hint into 1).
+  lx's: negative or above 4096 (somaxconn) is 4096, and backlog + 1
+  connections complete, as observed on Linux (listen(0) completes one).
+  A second listen on a listening socket changes nothing (Windows keeps
+  the first backlog). `events=net`: `tcp backlog full` each time a
+  listener's backlog fills, `tcp syn ignored` (with the client's
+  address) for each SYN Ignore drops.
 - Port 0 gets an ephemeral port (49152-65535, as Windows).
 - Closing is graceful: the socket sends FIN and stays in the set until
   it is closed or in TIME-WAIT, then it is removed and its buffers freed
   (`reap` in the poll loop).
-- Buffers are 64 KiB each way. Every listening socket owns full buffers
-  (128 KiB), so a listener on 0.0.0.0 with backlog 5 holds 1.25 MiB, and
-  the listening sockets come out of the interface's fixed set of 64:
-  eight listeners at backlog 8 hold all of loopback's, and further
-  sockets are refused (logged once until one goes: `net: the loopback
-  interface's 64 sockets are all in use`; ROADMAP "Known issues and
-  stopgaps", schannel_test's Nginx). TODO: listeners that do not
-  pre-allocate their backlog (fewer listening sockets, buffers on
-  establishment, a set that grows fallibly).
+- Buffers are 64 KiB each way, owned by each socket (a listening
+  socket's too: smoltcp fixes a socket's buffers when it is made, and the
+  window it advertises in its SYN-ACK comes from them), so a listener on
+  0.0.0.0 holds 256 KiB besides its connections.
 - Byte counts: an entry counts what its owner sent (queued) and
   received (took); `tcp shutdown` and `tcp close`/`tcp reset`
   (`events=net`) carry them with the queues' lengths then (`unsent`:
@@ -6617,11 +6679,12 @@ Win32 Structured Exception Handling", MSJ 1997).
 | Exceptions and APCs handed to 32-bit code; the file system redirector | `user/wow64/src/dispatch.rs`, `redirect.rs` |
 | The 32-bit ntdll (SysWOW64): the loader, the stubs, x86 SEH, the APC dispatcher | `user/testntdll` built for i686 (`x86.rs`, `seh_x86.rs`; `x64.rs` the 64-bit one's parts); the kernel's `nt/ntdll.rs` (`get32`), `nt/wow64.rs` (`through_ntdll32`, `exception_stack`), `nt/process.rs` (`deliver_to_user`) |
 | The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
+| The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
 | The environment by bitness | `nt/wow64.rs` (`environment`) |
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built) |
 
 ### Decisions
 
@@ -6852,8 +6915,12 @@ sign-extended). The compiler's runtime symbols (`memcpy`, `__aulldiv`,
 raw-dylib import does not define the symbol the compiler calls on x86.
 Its x86 answers: GetSystemInfo PROCESSOR_ARCHITECTURE_INTEL with the
 process's range (wow64.dll's SystemBasicInformation), GetNativeSystemInfo
-AMD64, GetSystemDirectory SysWOW64. To come, as programs need them:
-msvcrt, kernelbase, advapi32, user32, gdi32 and the rest (ROADMAP WOW).
+AMD64, GetSystemDirectory SysWOW64. Done too: the 32-bit msvcrt
+(`user/msvcrt` built for i686, "msvcrt": the `va_list` slots, the cdecl
+variadic entry points, the x86 jump buffer and SEH unwinding of
+longjmp, the x87 control word, FILE/lconv/STARTUPINFO with 4-byte
+pointers, the 32-bit time_t). To come, as programs need them:
+advapi32, kernelbase, user32, gdi32 and the rest (ROADMAP WOW).
 Arch-specific code moves behind `cfg(target_arch)`;
 `extern "system"` is stdcall there, which Windows' exports are, and
 exports keep their undecorated names (naked functions too; `/EXPORT:`
@@ -6862,8 +6929,8 @@ for `global_asm!` symbols); imports from them are `raw-dylib` with
 `USER_PROGRAMS_X86` with the i686 target; a scenario ships a 32-bit DLL
 as `x86/<file>` in EXTRA_MODULES (under `boot/x86` on the ISO, its name
 being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
-(`testntdll32.dll`, `testkernel32_32.dll`; test DLLs under their own
-names: `testdll32.dll`).
+(`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`; test DLLs
+under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers
 
@@ -10030,8 +10097,9 @@ under TCG), never a reset. Host tests in `net::tcp`,
   delayed-ACK state.
 - **smoltcp** has no public way to set a socket's sequence numbers, so
   it is vendored (`vendor/smoltcp`, 0.12.0, `[patch.crates-io]`) with
-  one patch between `gala: begin` and `gala: end` markers
-  (THIRD_PARTY.md): `Socket::carried` (the state as plain values),
+  gala's additions between `gala: begin` and `gala: end` markers
+  (THIRD_PARTY.md; the other is `SocketSet`'s fallible growth, "The
+  stack"): `Socket::carried` (the state as plain values),
   `Socket::queued_bytes` (copies of the queues) and `Socket::restore` (a
   new, closed socket becomes the connection; refused if the buffers are
   smaller than the carried ones or the state is inconsistent).
@@ -10041,9 +10109,9 @@ under TCG), never a reset. Host tests in `net::tcp`,
 - **Kernel sockets** (`net::tcp::carry_entry`/`adopt_entry`): a bound
   socket (its address); a listener (its address, backlog, next sequence
   number, its accept queue with the sequence numbers already handed to
-  the program by WAIT_FOR_LISTEN, and its listening sockets that are not
-  plain LISTEN: half-open, or established while the backlog was full;
-  plain LISTEN sockets are made fresh); a connection (and whether its
+  the program by WAIT_FOR_LISTEN, and its connections being opened
+  (half-open); its listening sockets are made fresh, and an adopted
+  listener refuses when full, as AFD's do); a connection (and whether its
   connect completed). The stack's own state (`carry_stack`/
   `adopt_stack`): the card's address configuration (IP, prefix,
   gateway, MAC; gala's static configuration stands for a DHCP lease, and

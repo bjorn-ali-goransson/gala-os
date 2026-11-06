@@ -608,9 +608,13 @@ impl Vad {
         }
         self.allocs.try_reserve(kept.len()).map_err(|_| NtStatus::NO_MEMORY)?;
         self.allocs.drain(first..last);
-        for (n, a) in kept.into_iter().enumerate() {
-            let _ = self.allocs.try_insert(first + n, a); // room reserved above
+        // Appended (room reserved above) and rotated into place: no
+        // insert, which may allocate.
+        let n = kept.len();
+        for a in kept {
+            let _ = self.allocs.try_push(a);
         }
+        self.allocs[first..].rotate_right(n);
         self.private_commit -= released;
         Ok(())
     }

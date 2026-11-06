@@ -11,7 +11,11 @@
 //! protocol information (a second socket for the connection; also
 //! WSADuplicateSocketA with WSASocketA), WSAConnect
 //! and WSAAccept, and non-blocking sockets (WSAEWOULDBLOCK from
-//! accept and recv; an accepted socket inherits the listener's mode).
+//! accept and recv; an accepted socket inherits the listener's mode),
+//! many listeners at once (twelve at SOMAXCONN, each accepting a
+//! connection: a listener holds no fixed share of the stack's sockets)
+//! and a full backlog (listen's documented WSAECONNREFUSED once `backlog`
+//! connections wait unaccepted; room again after an accept).
 //! Prints `winsock_test: ok` or exits with the number of the failing check.
 //!
 //! With the argument `serve` it then listens on port 7 of every address,
@@ -190,6 +194,7 @@ const WSAEWOULDBLOCK: i32 = 10035;
 const FIONBIO: i32 = 0x8004_667eu32 as i32;
 const WSAECONNREFUSED: i32 = 10061;
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const SOMAXCONN: i32 = 0x7fff_ffff;
 const ADDR_LEN: i32 = size_of::<SockaddrIn>() as i32;
 
 fn out(text: &[u8]) {
@@ -538,6 +543,96 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// A listener on an ephemeral loopback port with `backlog`; its port.
+fn listener_on_loopback(c: &mut Checks, backlog: i32) -> Result<(Socket, u16), u32> {
+    // SAFETY: documented Winsock calls with valid arguments.
+    unsafe {
+        let s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.ok(s != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        c.eq(bind(s, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.ok(listen(s, backlog) == 0, WSAGetLastError() as u64)?;
+        let mut bound = SockaddrIn::new([0; 4], 0);
+        let mut len = ADDR_LEN;
+        c.eq(getsockname(s, &mut bound, &mut len) as u64, 0)?;
+        Ok((s, u16::from_be(bound.port)))
+    }
+}
+
+/// Many listeners at once, and a full backlog.
+fn listeners(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: documented Winsock calls with valid arguments.
+    unsafe {
+        // Twelve listeners at SOMAXCONN (Nginx listens at 511 on each of
+        // its ports), all open together; each takes a connection and the
+        // bytes go both ways.
+        const MANY: usize = 12;
+        let mut many = [(INVALID_SOCKET, 0u16); MANY];
+        for l in many.iter_mut() {
+            *l = listener_on_loopback(c, SOMAXCONN)?;
+        }
+        for (i, &(l, port)) in many.iter().enumerate() {
+            let client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            c.ok(client != INVALID_SOCKET, WSAGetLastError() as u64)?;
+            c.ok(
+                connect(client, &SockaddrIn::new(LOOPBACK, port), ADDR_LEN) == 0,
+                WSAGetLastError() as u64,
+            )?;
+            let server = accept(l, null_mut(), null_mut());
+            c.ok(server != INVALID_SOCKET, WSAGetLastError() as u64)?;
+            let byte = [i as u8];
+            let mut got = [0xffu8; 1];
+            c.eq(send(client, byte.as_ptr(), 1, 0) as u64, 1)?;
+            c.eq(recv(server, got.as_mut_ptr(), 1, 0) as u64, 1)?;
+            c.eq(got[0].into(), i as u64)?;
+            c.eq(send(server, byte.as_ptr(), 1, 0) as u64, 1)?;
+            c.eq(recv(client, got.as_mut_ptr(), 1, 0) as u64, 1)?;
+            c.eq(got[0].into(), i as u64)?;
+            c.eq(closesocket(server) as u64, 0)?;
+            c.eq(closesocket(client) as u64, 0)?;
+        }
+        for &(l, _) in &many {
+            c.eq(closesocket(l) as u64, 0)?;
+        }
+
+        // A full backlog (listen on Microsoft Learn: "If a connection
+        // request arrives and the queue is full, the client will receive
+        // an error with an indication of WSAECONNREFUSED"): two
+        // connections wait unaccepted at backlog 2, the third is refused;
+        // once one is accepted there is room for another.
+        let (l, port) = listener_on_loopback(c, 2)?;
+        let to = SockaddrIn::new(LOOPBACK, port);
+        let mut waiting = [INVALID_SOCKET; 2];
+        for w in waiting.iter_mut() {
+            *w = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            c.ok(connect(*w, &to, ADDR_LEN) == 0, WSAGetLastError() as u64)?;
+        }
+        let refused = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.eq(connect(refused, &to, ADDR_LEN) as u64, SOCKET_ERROR as u64)?;
+        c.eq(WSAGetLastError() as u64, WSAECONNREFUSED as u64)?;
+        c.eq(closesocket(refused) as u64, 0)?;
+        let first = accept(l, null_mut(), null_mut());
+        c.ok(first != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        let late = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.ok(connect(late, &to, ADDR_LEN) == 0, WSAGetLastError() as u64)?;
+        // The rest wait in order: the second client, then the late one.
+        let mut accepted = [first, INVALID_SOCKET, INVALID_SOCKET];
+        for a in accepted[1..].iter_mut() {
+            *a = accept(l, null_mut(), null_mut());
+            c.ok(*a != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        }
+        let mut got = [0u8; 1];
+        for (i, &client) in [waiting[0], waiting[1], late].iter().enumerate() {
+            c.eq(send(client, [b'a' + i as u8].as_ptr(), 1, 0) as u64, 1)?;
+            c.eq(recv(accepted[i], got.as_mut_ptr(), 1, 0) as u64, 1)?;
+            c.eq(got[0].into(), (b'a' + i as u8).into())?;
+        }
+        for s in accepted.into_iter().chain(waiting).chain([late, l]) {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
+    }
+    Ok(())
+}
+
 /// `serve`: echo one connection on port 7 for the host.
 fn serve(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: documented Winsock calls with valid arguments.
@@ -589,6 +684,7 @@ fn wants_serve() -> bool {
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     loopback(&mut c)?;
+    listeners(&mut c)?;
     if wants_serve() {
         serve(&mut c)?;
     }

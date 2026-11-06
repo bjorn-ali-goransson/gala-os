@@ -509,6 +509,8 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "testdll32", file: "testdll32.dll", exported_as: "testdll32.dll" },
     // The 32-bit kernel32: gala's kernel32 built for i686.
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32_32.dll" },
+    // The 32-bit msvcrt: gala's msvcrt built for i686.
+    Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -2136,6 +2138,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_c_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_c_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_c_test", "user/bin/wow64_c_test.exe", "gala"),
+    // A 32-bit C program on the 32-bit msvcrt (mingw-built, checked-in).
+    ("wow64_crt_test", "wow64.dll", "Windows/System32"),
+    ("wow64_crt_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_crt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_crt_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_crt_test", "user/bin/wow64_crt_test.exe", "gala"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -6898,6 +6906,22 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_c_test: hello", "wow64_c_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
+        // (user/wow64_crt_test: mingw's i686 startup code, checked-in
+        // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
+        // x86 jump buffer, FILE and lconv layouts, the x87 control word,
+        // the 32-bit time_t, atexit.
+        name: "wow64_crt_test",
+        cmdline: "qemu_exit run=wow64_crt_test.exe args=one%20%22two%20three%22",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_crt_test: hello 32 bit 1.50",
+            "wow64_crt_test: ok",
+            "wow64_crt_test: atexit ran",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // WOW64 stage 3: an exception no 32-bit handler takes, through the
         // 32-bit ntdll: the crash report's 32-bit registers.
         name: "wow64_seh_crash",
@@ -7947,6 +7971,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),

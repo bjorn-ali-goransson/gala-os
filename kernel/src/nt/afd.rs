@@ -997,6 +997,26 @@ impl Request<'_> {
     }
 }
 
+/// SOMAXCONN (winsock2.h): "a maximum reasonable value".
+const SOMAXCONN: i32 = 0x7fff_ffff;
+/// The backlog SOMAXCONN gives, and the most an ordinary value gets
+/// (gala's reasonable maximum; the bottom of SOMAXCONN_HINT's range).
+const REASONABLE_BACKLOG: usize = 200;
+
+/// The connections a listen backlog lets wait, as Microsoft Learn's listen
+/// describes it: SOMAXCONN is a reasonable maximum (200 here),
+/// SOMAXCONN_HINT(N) (that is -N) is N kept within 200 to 65535, other
+/// values are limited to a reasonable one (1 to 200). Nothing is set aside
+/// for them: each connection is a socket of its own when it comes
+/// (ARCHITECTURE "TCP: net::tcp").
+fn backlog_of(asked: i32) -> usize {
+    match asked {
+        SOMAXCONN => REASONABLE_BACKLOG,
+        n if n < 0 => (n.unsigned_abs() as usize).clamp(REASONABLE_BACKLOG, tcp::MAX_BACKLOG),
+        n => (n as usize).clamp(1, REASONABLE_BACKLOG),
+    }
+}
+
 fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
@@ -1184,8 +1204,8 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         }
         IOCTL_AFD_LISTEN => {
             let b: [u8; 12] = r.input()?;
-            let backlog = u32_at(&b, 4) as i32;
-            tcp::listen(socket()?, backlog.max(1) as usize).map_err(status_of)?;
+            tcp::listen(socket()?, backlog_of(u32_at(&b, 4) as i32), tcp::WhenFull::Refuse)
+                .map_err(status_of)?;
             Immediate::Done(0)
         }
         IOCTL_AFD_CONNECT | IOCTL_AFD_SUPER_CONNECT => {
@@ -1760,6 +1780,20 @@ pub fn adopt_requests(object: &ObjectRef, requests: Vec<CarriedRequest>) -> Resu
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    /// listen's backlog as Microsoft Learn describes it.
+    #[test]
+    fn backlogs() {
+        assert_eq!(backlog_of(SOMAXCONN), 200);
+        assert_eq!(backlog_of(0), 1);
+        assert_eq!(backlog_of(5), 5);
+        assert_eq!(backlog_of(511), 200);
+        // SOMAXCONN_HINT(N) is -N, kept within 200 to 65535.
+        assert_eq!(backlog_of(-10), 200);
+        assert_eq!(backlog_of(-1000), 1000);
+        assert_eq!(backlog_of(-100_000), 65535);
+        assert_eq!(backlog_of(i32::MIN), 65535);
+    }
 
     #[test]
     fn open_packet_transport() {

@@ -199,7 +199,7 @@ pub fn echo_test() {
     let start = time::monotonic_ns();
     let result = (|| {
         let listener = tcp::bind(Addr::v4([0; 4], ECHO_PORT), 0)?;
-        tcp::listen(listener, 1)?;
+        tcp::listen(listener, 1, tcp::WhenFull::Refuse)?;
         info!("net: echo listening on port {ECHO_PORT}");
         let (sequence, _) = blocking(start, || tcp::pending(listener))?;
         let conn = tcp::accept(listener, sequence, 0)?;

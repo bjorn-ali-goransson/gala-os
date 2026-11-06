@@ -724,7 +724,7 @@ kernel32 through `raw-dylib`), run under gala and under Windows
 
 - **DLL tests in C** (`user/<dll>_test/main.c`, mingw; oleaut32_test,
   shlwapi_test, ole32_test, shell32_test, comdlg32_test, dbghelp_test,
-  msvcrt_test):
+  msvcrt_test; the 32-bit wow64_crt_test, "32-bit test programs"):
   `build.sh` rebuilds the checked-in `user/bin/<name>.exe` (xtask does
   not; run it after editing main.c and commit the binary).
   `user/msvcrt_test` builds against msvcrt's own stdio, and its main.c
@@ -798,6 +798,17 @@ numbers, 0x7f.., fail there).
   without a CRT); the binary is checked in (`user/bin/wow64_c_test.exe`,
   shipped from there by its scenario); rerun `build.sh` after editing
   main.c.
+- A 32-bit C program on msvcrt: `user/wow64_crt_test` (main.c,
+  `build.sh`: mingw-w64's i686 GCC, apt package
+  `gcc-mingw-w64-i686-win32`, with mingw's own startup code and
+  `-D__USE_MINGW_ANSI_STDIO=0` for msvcrt's stdio); its scenario ships
+  `x86/msvcrt.dll` to SysWOW64 too. mingw's i686 headers define
+  `_USE_32BIT_TIME_T` (time_t is 32 bits and `time()` imports msvcrt's
+  `time`), make `setjmp` `_setjmp3(buf, NULL)`, reach stdin/stdout
+  through the `_iob` data import, and link mingw's own `_fpreset`
+  (fninit: the x87 at 64-bit precision, `_controlfp(0, 0)` 0x8001f, not
+  msvcrt's 0x9001f): a test of msvcrt's `_fpreset` calls it through
+  GetProcAddress.
 - A 32-bit DLL (USER_DLLS_X86, exported as `test<name>32.dll` or its
   own `<name>32.dll`): its exports keep their undecorated names
   (`#[unsafe(no_mangle)] extern "system"`, naked functions too); symbols

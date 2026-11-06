@@ -80,7 +80,7 @@ In order:
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW**: stage 3's rest (msvcrt for x86, then kernelbase, advapi32;
+5. **WOW**: stage 3's rest (advapi32 for x86, then kernelbase;
    kernel32_test built for x86):
    the process model under PK's x86 installers and programs (Inno
    Setup's x64 Setup runs natively; an x86 Inno installer needs stage
@@ -151,12 +151,12 @@ has a section under "Open items".
 | G1 | kernel32, first part | done | `kernel32_test` |
 | G2 | Go hello world | done | `go_hello` |
 | G3 | Workable Go programs | done | `go_goroutines`, `go_time`, `go_gc`, `go_os`, `go_exit` |
-| N1 | Networking: virtio-net, TCP/IP, AFD, ws2_32, UDP | done | `net_echo`, `winsock_test`, `winsock_async_test`, `go_http`, `udp_test`, `udp_echo`; UDP limits in ARCHITECTURE "Networking" |
+| N1 | Networking: virtio-net, TCP/IP, AFD, ws2_32, UDP | done | `net_echo`, `winsock_test` (also many listeners, a full backlog), `winsock_async_test`, `go_http`, `udp_test`, `udp_echo`; UDP limits, listeners and the socket limit in ARCHITECTURE "Networking" |
 | N2 | Nginx (x64 build, master/worker, zlib, PCRE2, OpenSSL) | done | `nginx`, `nginx_master`, `nginx_tls`; WORKFLOW "Nginx" |
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; msvcrt next; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; advapi32 next; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -1608,16 +1608,29 @@ wow64.dll converts 32-bit system calls in user mode).
   range), GetNativeSystemInfo's AMD64, GetSystemDirectory's SysWOW64,
   Wow64Disable/Revert/EnableWow64FsRedirection; wow64.dll converts
   GalaConsoleMode and GalaConsoleCtrl (the console control thread).
+  **The 32-bit msvcrt** (`wow64_crt_test`, a C program built by
+  mingw-w64's i686 GCC with its own startup code): gala's msvcrt built
+  for i686, shipped as `C:\Windows\SysWOW64\msvcrt.dll`
+  (`testmsvcrt32.dll`): the `va_list` walker by the architecture's slots
+  (`va.rs`: 4 bytes, doubles and __int64 8), its `x64.rs`/`x86.rs`
+  (the variadic entry points: cdecl naked functions on x86;
+  `_setjmp3`/`_setjmp`/`longjmp` with the x86 `_JUMP_BUFFER`, unwinding
+  the SEH frames registered since setjmp through RtlUnwind; `_control87`
+  and `_controlfp` on the x87 control word and MXCSR together), `%I`
+  and `%p` pointer-sized, FILE, `_iob` (a data export), lconv,
+  STARTUPINFO and the descriptor-inheritance block with 4-byte
+  pointers, the 32-bit time_t of `time`/`gmtime`/`localtime`/`mktime`/
+  `ctime`/`difftime`, and what mingw's startup imports (`__p__fmode`,
+  `__p__commode`).
 
 **Next**:
-1. Stage 3's rest, the 32-bit system DLLs: **msvcrt for x86**: its
-   va_list walkers take 8-byte slots (`*const u64`) where x86 passes
-   4-byte ones (doubles and 64-bit integers 8), its variadic entry points
-   (`global_asm!` in stdio.rs, scan.rs, wide.rs) spill x64 registers,
-   setjmp/longjmp have x64's jmp_buf, the stdio FILE, `_iob` and lconv
-   hold pointers, MXCSR is x64's floating-point control (x86 also has the
-   x87 control word). Then kernelbase, advapi32; kernel32_test built for
-   x86 as a second scenario (xtask builds a package for one target per
+1. Stage 3's rest, the 32-bit system DLLs: **advapi32 for x86** (it
+   compiles for i686 but for registry.rs's predefined-key test, `key >>
+   32` on a 32-bit HKEY; still to do: the `cfg_attr` link pairs of its
+   imports, bcryptprimitives for i686 (it imports it), its structures
+   with pointers typed (security.rs, trustee.rs, perf.rs, etw.rs and
+   policy.rs build them at byte offsets), a 32-bit test), then
+   kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
    name: an x86 twin needs its own export name, and testdll/testdll2 for
    x86). The 32-bit kernel32's own gaps: GetProcessInformation's
    ProcessMachineTypeInfo answers AMD64; the Wow64*FsRedirection
@@ -1625,7 +1638,14 @@ wow64.dll converts 32-bit system calls in user mode).
    what they answer in a 64-bit process is to be observed); the console services
    besides GalaConsoleMode/Ctrl are not converted by wow64.dll (the
    ledger names them); its exports include ntrt's runtime symbols
-   (memcmp, strlen, bcmp, __CxxFrameHandler3). Also: the redirector for GalaCreateProcess's image
+   (memcmp, strlen, bcmp, __CxxFrameHandler3; the 32-bit msvcrt's too).
+   The 32-bit msvcrt's own gaps: the 32-bit `_stat`/`_fstat`/`_findfirst`
+   forms and the other `_*32` time functions (mingw's i686 headers name
+   them under `_USE_32BIT_TIME_T`; missing exports until a program needs
+   them), `_except_handler3`/`_except_handler4` and `_local_unwind2`
+   (MSVC's `__try` in C; a longjmp over a try level is in the ledger as
+   `msvcrt.dll!longjmp(try level)`), msvcrt_test's C source built for
+   x86 too (it needs a 32-bit shell32 for CommandLineToArgvW). Also: the redirector for GalaCreateProcess's image
    path and names relative to a RootDirectory handle (it rewrites full
    NT paths only); nested exceptions and collided unwinds in the x86
    dispatcher; ThreadWow64Context for 64-bit debuggers. Stage 2's
@@ -2017,19 +2037,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
   status codes) are unchecked. Structural fix: record both transcripts
   by running the same pinned binary on a Linux machine (or a Linux VM
   xtask boots), and let `lx-expect` regenerate them. Item LX.
-
-- **`backlog=2` in schannel_test's Nginx** (`user/schannel_test/nginx.conf`,
-  ports 8444-8449): gala's TCP listener keeps its backlog (clamped to
-  `MAX_BACKLOG`, 8) of listening smoltcp sockets, each with full
-  buffers, out of the interface's fixed set of `MAX_SOCKETS` (64,
-  `kernel/src/net/tcp.rs`); Nginx listens with backlog 511, so eight
-  listeners on loopback held all 64 and every client connect failed
-  (now logged once: `net: the loopback interface's 64 sockets are all
-  in use`). Real servers with many listeners hit the same wall.
-  Structural fix: listeners that do not pre-allocate their backlog from
-  a fixed set (a socket set that grows fallibly, or listening sockets
-  made as SYNs arrive, with buffers allocated on establishment; ARCHITECTURE
-  "TCP: net::tcp" TODO); then the option goes. Item N1 (networking).
 
 - **`--no-sandbox` in the Chromium scenarios**: Chromium's renderers
   normally run in a sandbox (restricted, low-integrity and

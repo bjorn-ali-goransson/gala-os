@@ -3,9 +3,11 @@
 //! "Networking".
 //!
 //! Two interfaces, each with its own socket set: `lo` (127.0.0.1/8, always)
-//! and `eth` (the card, when there is one). Our own table of entries maps
-//! `SocketId`s to smoltcp sockets: a bound address, a listener (with its
-//! listening and established-but-not-accepted sockets) or a connection.
+//! and `eth` (the card, when there is one). The sets grow fallibly up to
+//! the stack's socket limit (a share of memory, `socket_limit`). Our own
+//! table of entries maps `SocketId`s to smoltcp sockets: a bound address, a
+//! listener (one listening socket per interface, its connections being
+//! opened and those waiting to be accepted) or a connection.
 //! The `net` thread polls; after each poll every entry whose readiness
 //! changed is reported to the notify hook with the entry's token.
 
@@ -20,18 +22,32 @@ use crate::runtime as sched;
 use crate::runtime as time;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
+use smoltcp::iface::{
+    Config, Interface, PollIngressSingleResult, PollResult, SocketHandle, SocketSet, SocketStorage,
+};
 use smoltcp::phy::Device;
 use smoltcp::socket::tcp::{self, State};
 use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address,
 };
 
-/// Sockets per interface (smoltcp sockets, including listening ones).
-const MAX_SOCKETS: usize = 64;
 /// Bytes buffered per direction per connection.
 const BUFFER: usize = 64 * 1024;
-const MAX_BACKLOG: usize = 8;
+/// What one socket's buffers take (both directions; a UDP socket's too).
+const SOCKET_COST: u64 = 2 * BUFFER as u64;
+/// The share of memory the stack's sockets may take: a quarter
+/// (`socket_limit`).
+const MEMORY_SHARE: u64 = 4;
+/// The fewest sockets the limit allows, however little memory (and in
+/// host tests, which have no frame allocator).
+const MIN_SOCKETS: usize = 64;
+/// Slots a socket set starts with; it doubles as it fills.
+const INITIAL_SLOTS: usize = 16;
+/// The most connections a listener lets wait (opened or established, not
+/// accepted): a bound on what callers ask, not storage (each connection
+/// is a socket of its own when it comes). 65535 is the top of Windows'
+/// SOMAXCONN_HINT range.
+pub const MAX_BACKLOG: usize = 65535;
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 
 use super::{Ip, Scope};
@@ -153,16 +169,70 @@ pub(super) enum Side {
     Eth,
 }
 
+impl Side {
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Side::Lo => "loopback",
+            Side::Eth => "card",
+        }
+    }
+}
+
 pub(super) type Sock = (Side, SocketHandle);
+
+/// What a listener does with a connection request (a SYN) that finds its
+/// backlog full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WhenFull {
+    /// Refuse it (the stack answers with RST: the client's connect fails
+    /// with connection refused), as Windows documents for listen.
+    #[default]
+    Refuse,
+    /// Ignore it (no answer: the client sends its SYN again later and gets
+    /// in once an accept made room), as Linux does (tcp(7)'s
+    /// tcp_abort_on_overflow off).
+    Ignore,
+}
+
+/// A listener: one socket in LISTEN per interface (the one smoltcp hands
+/// the next SYN to; smoltcp has no accept queue, a listening socket
+/// *becomes* the connection), and the connections it took. After every
+/// packet the stack moves a socket that took a SYN to `opening` and puts
+/// a fresh one in its place while the backlog has room (`Stack::tend`),
+/// so a listener holds two sockets at most besides its connections.
+#[derive(Default)]
+pub(super) struct Listener {
+    /// The most connections waiting (`opening` and `ready` together).
+    backlog: usize,
+    when_full: WhenFull,
+    /// The socket in LISTEN on each interface (`Side::index`): None while
+    /// the backlog is full (WhenFull::Refuse: the stack's own RST answers
+    /// the SYN) or when no socket could be had (the limit, memory).
+    catchers: [Option<Sock>; 2],
+    /// Connections being opened (SYN received, the handshake not done).
+    opening: Vec<Sock>,
+    /// Established connections waiting to be accepted, with their
+    /// sequence numbers (AFD's WAIT_FOR_LISTEN / ACCEPT name them).
+    ready: Vec<(u32, Sock)>,
+    next_sequence: u32,
+    /// The backlog was full at the last look (`events=net` "tcp backlog
+    /// full" once each time it fills).
+    full: bool,
+}
+
+impl Listener {
+    fn waiting(&self) -> usize {
+        self.opening.len() + self.ready.len()
+    }
+}
 
 pub(super) enum Kind {
     Bound,
-    Listener {
-        backlog: usize,
-        listening: Vec<Sock>,
-        ready: Vec<(u32, Sock)>,
-        next_sequence: u32,
-    },
+    Listener(Listener),
     Conn {
         sock: Sock,
         connected: bool,
@@ -199,9 +269,8 @@ pub(super) struct Iface<D: Device> {
     pub(super) dev: D,
     iface: Interface,
     pub(super) sockets: SocketSet<'static>,
+    /// Sockets in the set.
     count: usize,
-    /// The set was found full and said so (once until a socket goes).
-    full_logged: bool,
 }
 
 impl<D: Device> Iface<D> {
@@ -212,17 +281,35 @@ impl<D: Device> Iface<D> {
         iface.update_ip_addrs(|addrs| {
             let _ = addrs.push(cidr);
         });
-        let mut storage = Vec::new();
-        storage.try_reserve_exact(MAX_SOCKETS).ok()?;
-        for _ in 0..MAX_SOCKETS {
-            storage.try_push(SocketStorage::EMPTY).ok()?;
-        }
-        Some(Self { dev, iface, sockets: SocketSet::new(storage), count: 0, full_logged: false })
+        // Empty slots reserved, not made: `Stack::add` grows the set
+        // (fallibly) before smoltcp would push.
+        let mut storage: Vec<SocketStorage<'static>> = Vec::new();
+        storage.try_reserve_exact(INITIAL_SLOTS).ok()?;
+        Some(Self { dev, iface, sockets: SocketSet::new(storage), count: 0 })
     }
 
-    fn poll(&mut self) -> bool {
-        self.iface.poll(now(), &mut self.dev, &mut self.sockets) != smoltcp::iface::PollResult::None
+    /// Takes one received packet; false when there was none.
+    fn ingress_one(&mut self, now: smoltcp::time::Instant) -> bool {
+        self.iface.poll_ingress_single(now, &mut self.dev, &mut self.sockets)
+            != PollIngressSingleResult::None
     }
+
+    /// Sends what the sockets queued; whether a socket may have changed.
+    fn egress(&mut self, now: smoltcp::time::Instant) -> bool {
+        self.iface.poll_egress(now, &mut self.dev, &mut self.sockets) != PollResult::None
+    }
+}
+
+/// The most sockets the stack holds, every interface's together: their
+/// buffers (SOCKET_COST each) may take a quarter of the machine's memory,
+/// at least MIN_SOCKETS of them. Every listener holds one per interface
+/// and every connection one, so this is what bounds listeners and
+/// connections alike (`Stack::admit`). TODO (ROADMAP R6): charge the
+/// buffers to the owning process's quota as well.
+fn socket_limit() -> usize {
+    let (_, frames) = crate::mm::frame_stats();
+    let share = frames.saturating_mul(4096) / MEMORY_SHARE / SOCKET_COST;
+    usize::try_from(share).unwrap_or(usize::MAX).max(MIN_SOCKETS)
 }
 
 pub(super) struct Stack {
@@ -236,6 +323,10 @@ pub(super) struct Stack {
     lingering: Vec<Sock>,
     next_port: u16,
     next_generation: u32,
+    /// `socket_limit` when the stack started.
+    limit: usize,
+    /// A socket was refused and it was logged (once until a socket goes).
+    refused_logged: bool,
 }
 
 static STACK: IrqMutex<Option<Stack>> = IrqMutex::new(None);
@@ -279,34 +370,73 @@ impl Stack {
         Some(self.sockets(side)?.get_mut::<tcp::Socket>(handle))
     }
 
+    /// Sockets in every set.
+    fn in_use(&self) -> usize {
+        self.lo.count + self.eth.as_ref().map_or(0, |e| e.count)
+    }
+
+    /// Logs why a socket is refused, once until a socket goes.
+    fn refused(&mut self, side: Side, why: core::fmt::Arguments<'_>) {
+        if !self.refused_logged {
+            self.refused_logged = true;
+            let (free, total) = crate::mm::frame_stats();
+            crate::warn!(
+                "net: a {} socket is refused: {why} ({} sockets in use: loopback {}, card {}; \
+                 limit {}, a quarter of memory at {} KiB each; frames free {free} of {total})",
+                side.name(),
+                self.in_use(),
+                self.lo.count,
+                self.eth.as_ref().map_or(0, |e| e.count),
+                self.limit,
+                SOCKET_COST / 1024,
+            );
+        }
+    }
+
+    /// Whether one more socket may go into `side`'s set: under the limit,
+    /// and room in the set (grown fallibly here, so smoltcp's `add` never
+    /// allocates). Callers ask before allocating a socket's buffers.
+    fn admit(&mut self, side: Side) -> Result<(), NetError> {
+        if self.in_use() >= self.limit {
+            let limit = self.limit;
+            self.refused(side, format_args!("all {limit} sockets are in use"));
+            return Err(NetError::NoMemory);
+        }
+        let set = self.sockets(side).ok_or(NetError::Unreachable)?;
+        if !set.has_room() {
+            let grow = set.slots().max(INITIAL_SLOTS);
+            if set.try_reserve(grow).is_err() {
+                self.refused(side, format_args!("out of memory growing the socket set"));
+                return Err(NetError::NoMemory);
+            }
+        }
+        Ok(())
+    }
+
+    /// A TCP socket for `side` with its buffers (`admit` first).
+    fn new_tcp(&mut self, side: Side) -> Result<tcp::Socket<'static>, NetError> {
+        self.admit(side)?;
+        new_socket().ok_or_else(|| {
+            self.refused(side, format_args!("out of memory for its buffers"));
+            NetError::NoMemory
+        })
+    }
+
     pub(super) fn add<S: smoltcp::socket::AnySocket<'static>>(
         &mut self,
         side: Side,
         socket: S,
     ) -> Result<Sock, NetError> {
-        let (count, full_logged) = match side {
-            Side::Lo => (&mut self.lo.count, &mut self.lo.full_logged),
-            Side::Eth => {
-                let e = self.eth.as_mut().ok_or(NetError::Unreachable)?;
-                (&mut e.count, &mut e.full_logged)
-            }
-        };
-        if *count == MAX_SOCKETS {
-            // Every socket of the interface is in use: a listener holds
-            // its backlog's (up to MAX_BACKLOG), so a few listeners can
-            // take them all and a connect fails for want of one.
-            if !*full_logged {
-                *full_logged = true;
-                crate::warn!(
-                    "net: the {} interface's {MAX_SOCKETS} sockets are all in use \
-                     (each listener holds up to {MAX_BACKLOG}): a socket is refused",
-                    if side == Side::Lo { "loopback" } else { "card" }
-                );
-            }
-            return Err(NetError::NoMemory);
-        }
-        *count += 1;
+        self.admit(side)?;
         let handle = self.sockets(side).ok_or(NetError::Unreachable)?.add(socket);
+        match side {
+            Side::Lo => self.lo.count += 1,
+            Side::Eth => {
+                if let Some(e) = self.eth.as_mut() {
+                    e.count += 1;
+                }
+            }
+        }
         Ok((side, handle))
     }
 
@@ -314,17 +444,14 @@ impl Stack {
         if let Some(set) = self.sockets(side) {
             set.remove(handle);
             match side {
-                Side::Lo => {
-                    self.lo.count -= 1;
-                    self.lo.full_logged = false;
-                }
+                Side::Lo => self.lo.count -= 1,
                 Side::Eth => {
                     if let Some(e) = self.eth.as_mut() {
                         e.count -= 1;
-                        e.full_logged = false;
                     }
                 }
             }
+            self.refused_logged = false;
         }
     }
 
@@ -432,60 +559,105 @@ impl Stack {
         local: Addr,
         scope: Scope,
     ) -> Result<Sock, NetError> {
-        let mut socket = new_socket().ok_or(NetError::NoMemory)?;
         let addr = self.side_address(side, local.ip, scope).ok_or(NetError::AddressNotAvailable)?;
+        let mut socket = self.new_tcp(side)?;
         let endpoint = IpListenEndpoint { addr, port: local.port };
         socket.listen(endpoint).map_err(|_| NetError::InvalidState)?;
         self.add(side, socket)
     }
 
-    /// Moves established connections of every listener to its ready
-    /// queue, replacing them with fresh listening sockets.
-    fn promote(&mut self) {
+    /// Puts every listener's sockets in order (`tend`).
+    fn tend_all(&mut self) {
         for i in 0..self.entries.len() {
-            let mut n = 0;
-            // The n-th listening socket of entry i, if any.
-            let nth = |entries: &[Option<Entry>], n: usize| match &entries[i] {
-                Some(Entry { kind: Kind::Listener { listening, .. }, local, scope, .. }) => {
-                    listening.get(n).map(|&sock| (sock, *local, *scope))
-                }
-                _ => None,
-            };
-            while let Some((sock, local, scope)) = nth(&self.entries, n) {
-                let state = self.tcp(sock).map(|t| t.state());
-                if !matches!(state, Some(State::Established | State::CloseWait)) {
-                    n += 1;
-                    continue;
-                }
-                let fresh = self.listening_socket(sock.0, local, scope);
-                let Some(Some(Entry {
-                    kind: Kind::Listener { listening, ready, next_sequence, backlog },
-                    ..
-                })) = self.entries.get_mut(i)
-                else {
-                    break;
-                };
-                // A full backlog keeps the connection where it is until
-                // the owner accepts (it is established; data waits in it).
-                if ready.len() >= *backlog || ready.try_push((*next_sequence, sock)).is_err() {
-                    // No room to queue it: leave it listening-side for now.
-                    if let Ok(f) = fresh {
-                        self.remove(f);
-                    }
-                    n += 1;
-                    continue;
-                }
-                *next_sequence = next_sequence.wrapping_add(1);
-                match fresh {
-                    Ok(f) => {
-                        listening[n] = f;
+            if matches!(self.entries[i], Some(Entry { kind: Kind::Listener(_), .. })) {
+                self.tend(i);
+            }
+        }
+    }
+
+    /// Puts listener `i`'s sockets in order after smoltcp moved some: a
+    /// listening socket that took a SYN joins the connections being opened
+    /// (or, with the backlog full and WhenFull::Ignore, is dropped before
+    /// it answered: the SYN goes unanswered); an opened connection joins
+    /// the ready queue; one that went back to LISTEN (reset during the
+    /// handshake) or closed goes; then each interface gets a fresh
+    /// listening socket where it has none, while the backlog has room
+    /// (always with WhenFull::Ignore). With WhenFull::Refuse and the
+    /// backlog full, the listening sockets go: a SYN then finds none and
+    /// the stack answers it with RST. Runs after every received packet,
+    /// so the next SYN always meets a listener in order.
+    fn tend(&mut self, i: usize) {
+        let Some(Some(entry)) = self.entries.get_mut(i) else { return };
+        let Kind::Listener(listener) = &mut entry.kind else { return };
+        let mut l = core::mem::take(listener);
+        let (local, scope) = (entry.local, entry.scope);
+        let id = SocketId { index: i as u32, generation: entry.generation };
+        // Listening sockets that took a SYN.
+        for slot in 0..l.catchers.len() {
+            let Some(sock) = l.catchers[slot] else { continue };
+            let state = self.tcp(sock).map(|t| t.state());
+            if state == Some(State::Listen) {
+                continue;
+            }
+            l.catchers[slot] = None;
+            if state.is_some() && l.waiting() < l.backlog && l.opening.try_push(sock).is_ok() {
+                continue;
+            }
+            // Over the backlog (WhenFull::Ignore, or both interfaces'
+            // sockets took one at once): forgotten before smoltcp sent
+            // its SYN-ACK, as if the SYN never came.
+            let remote = self.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
+            self.remove(sock);
+            net_event("tcp syn ignored", id, local, remote);
+        }
+        // Connections being opened.
+        let mut n = 0;
+        while n < l.opening.len() {
+            let sock = l.opening[n];
+            match self.tcp(sock).map(|t| t.state()) {
+                Some(State::SynReceived) => n += 1,
+                Some(State::Established | State::CloseWait) => {
+                    if l.ready.try_push((l.next_sequence, sock)).is_err() {
+                        // No memory to queue it: it stays here, counted
+                        // in the backlog, until the next look.
                         n += 1;
+                        continue;
                     }
-                    Err(_) => {
-                        listening.swap_remove(n);
-                    }
+                    l.next_sequence = l.next_sequence.wrapping_add(1);
+                    l.opening.remove(n);
+                }
+                // Back to LISTEN (a reset during the handshake), closed,
+                // or gone: no connection came of it.
+                _ => {
+                    l.opening.remove(n);
+                    self.remove(sock);
                 }
             }
+        }
+        // Listening sockets where there is room.
+        let room = l.waiting() < l.backlog || l.when_full == WhenFull::Ignore;
+        for &side in self.sides_for(local.ip) {
+            let slot = side.index();
+            match l.catchers[slot] {
+                None if room && self.side_address(side, local.ip, scope).is_some() => {
+                    // On failure (the limit, memory: logged) the interface
+                    // refuses connections until a later look finds room.
+                    l.catchers[slot] = self.listening_socket(side, local, scope).ok();
+                }
+                Some(sock) if !room => {
+                    self.remove(sock);
+                    l.catchers[slot] = None;
+                }
+                _ => {}
+            }
+        }
+        let full = l.waiting() >= l.backlog;
+        if full && !l.full {
+            net_event("tcp backlog full", id, local, None);
+        }
+        l.full = full;
+        if let Some(Some(Entry { kind: Kind::Listener(listener), .. })) = self.entries.get_mut(i) {
+            *listener = l;
         }
     }
 
@@ -510,7 +682,7 @@ impl Stack {
         let Some(entry) = self.entries[index].as_ref() else { return 0 };
         match entry.kind {
             Kind::Bound => 1,
-            Kind::Listener { ref ready, .. } => 2 | (ready.len() as u64) << 8,
+            Kind::Listener(ref l) => 2 | (l.ready.len() as u64) << 8,
             Kind::Conn { sock, .. } => match self.tcp(sock) {
                 Some(s) => {
                     3 | (s.state() as u64) << 4
@@ -523,29 +695,60 @@ impl Stack {
         }
     }
 
+    /// One interface's turn: every received packet, each followed by the
+    /// listeners' `tend` (so a SYN that a listening socket took is
+    /// replaced before the next packet), then what the sockets send.
+    /// Whether anything happened.
+    fn poll_side(&mut self, side: Side) -> bool {
+        let now = now();
+        let mut busy = false;
+        loop {
+            let took = match side {
+                Side::Lo => self.lo.ingress_one(now),
+                Side::Eth => self.eth.as_mut().is_some_and(|e| e.ingress_one(now)),
+            };
+            if !took {
+                break;
+            }
+            busy = true;
+            self.tend_all();
+        }
+        busy |= match side {
+            Side::Lo => self.lo.egress(now),
+            Side::Eth => self.eth.as_mut().is_some_and(|e| e.egress(now)),
+        };
+        busy
+    }
+
     /// Polls both interfaces; returns the tokens of changed entries.
     fn poll(&mut self, changed: &mut Vec<u64>) {
         POLLS.fetch_add(1, Ordering::Relaxed);
         // Loopback traffic answers itself: poll until quiet (bounded).
         for _ in 0..64 {
-            let mut busy = self.lo.poll();
-            if let Some(eth) = self.eth.as_mut() {
-                busy |= eth.poll();
+            let mut busy = self.poll_side(Side::Lo);
+            if self.eth.is_some() {
+                busy |= self.poll_side(Side::Eth);
             }
             if !busy {
                 break;
             }
         }
-        self.promote();
+        // What timers did (a handshake given up, a socket closed).
+        self.tend_all();
         self.reap();
         super::udp::drain(self);
+        // Room for every entry's report (the table grows with the sockets).
+        let _ = changed.try_reserve(self.entries.len());
         for i in 0..self.entries.len() {
             let signature = self.signature(i);
             if let Some(entry) = self.entries[i].as_mut()
                 && entry.last != signature
             {
-                entry.last = signature;
-                let _ = changed.try_push(entry.token);
+                // Recorded only once reported: without memory for the
+                // report, the next poll reports it.
+                if changed.try_push(entry.token).is_ok() {
+                    entry.last = signature;
+                }
             }
         }
     }
@@ -635,6 +838,8 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
         lingering: Vec::new(),
         next_port: *EPHEMERAL.start(),
         next_generation: 1,
+        limit: socket_limit(),
+        refused_logged: false,
     });
     let id = sched::spawn("net", net_thread, 0).map_err(|_| NetError::NoMemory)?;
     NET_THREAD.store(id.as_usize() as u64, Ordering::Release);
@@ -643,7 +848,7 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
 
 fn net_thread(_: usize) {
     let mut changed: Vec<u64> = Vec::new();
-    if changed.try_reserve(MAX_SOCKETS * 2).is_err() {
+    if changed.try_reserve(MIN_SOCKETS * 2).is_err() {
         crate::warn!("net: out of memory; the network thread stops");
         return;
     }
@@ -702,46 +907,34 @@ pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, Ne
     })
 }
 
-/// Turns a bound socket into a listener.
-pub fn listen(id: SocketId, backlog: usize) -> Result<(), NetError> {
+/// Turns a bound socket into a listener that lets up to `backlog`
+/// connections wait (1 to MAX_BACKLOG; the personality maps what its
+/// programs ask: `nt::afd`, `lx::socket`), and does `when_full` with a
+/// request beyond them. A listener already listening is left as it is
+/// (Windows keeps the first backlog).
+pub fn listen(id: SocketId, backlog: usize, when_full: WhenFull) -> Result<(), NetError> {
     with_stack(|s| {
         let entry = s.entry(id)?;
         match entry.kind {
             Kind::Bound => {}
-            Kind::Listener { .. } => return Ok(()),
+            Kind::Listener(_) => return Ok(()),
             Kind::Conn { .. } | Kind::Udp(_) => return Err(NetError::InvalidState),
         }
-        let (local, scope) = (entry.local, entry.scope);
         let backlog = backlog.clamp(1, MAX_BACKLOG);
-        let mut listening = Vec::new();
-        listening.try_reserve(backlog * 2).map_err(|_| NetError::NoMemory)?;
-        let mut ready = Vec::new();
-        ready.try_reserve(backlog * 2).map_err(|_| NetError::NoMemory)?;
-        for &side in s.sides_for(local.ip) {
-            if s.side_address(side, local.ip, scope).is_none() {
-                continue;
-            }
-            for _ in 0..backlog {
-                match s.listening_socket(side, local, scope) {
-                    Ok(sock) => listening.try_push(sock).map_err(|_| NetError::NoMemory)?,
-                    Err(e) => {
-                        let (free, total) = crate::mm::frame_stats();
-                        warn!(
-                            "net: listen on port {}: {e:?} (sockets: loopback {}, card {}; \
-                             frames free {free} of {total})",
-                            local.port,
-                            s.lo.count,
-                            s.eth.as_ref().map_or(0, |e| e.count)
-                        );
-                        for &sock in &listening {
-                            s.remove(sock);
-                        }
-                        return Err(e);
-                    }
-                }
-            }
+        entry.kind = Kind::Listener(Listener {
+            backlog,
+            when_full,
+            next_sequence: 1,
+            ..Listener::default()
+        });
+        s.tend(id.index as usize);
+        let Kind::Listener(l) = &mut s.entry(id)?.kind else { return Err(NetError::NoSocket) };
+        if l.catchers.iter().all(Option::is_none) {
+            // Not one listening socket (the limit or memory, logged by
+            // `Stack::refused`): the listen fails, the socket stays bound.
+            s.entry(id)?.kind = Kind::Bound;
+            return Err(NetError::NoMemory);
         }
-        s.entry(id)?.kind = Kind::Listener { backlog, listening, ready, next_sequence: 1 };
         Ok(())
     })
 }
@@ -750,10 +943,10 @@ pub fn listen(id: SocketId, backlog: usize) -> Result<(), NetError> {
 /// number and remote address.
 pub fn pending(id: SocketId) -> Result<(u32, Addr), NetError> {
     with_stack(|s| {
-        let Kind::Listener { ready, .. } = &s.entry(id)?.kind else {
+        let Kind::Listener(l) = &s.entry(id)?.kind else {
             return Err(NetError::InvalidState);
         };
-        let &(sequence, sock) = ready.first().ok_or(NetError::WouldBlock)?;
+        let &(sequence, sock) = l.ready.first().ok_or(NetError::WouldBlock)?;
         let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).ok_or(NetError::Reset)?;
         Ok((sequence, Addr::from_endpoint(remote)))
     })
@@ -762,12 +955,15 @@ pub fn pending(id: SocketId) -> Result<(u32, Addr), NetError> {
 /// Takes the pending connection `sequence` off a listener as a new socket.
 pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetError> {
     with_stack(|s| {
-        let Kind::Listener { ready, .. } = &mut s.entry(id)?.kind else {
+        let Kind::Listener(l) = &mut s.entry(id)?.kind else {
             return Err(NetError::InvalidState);
         };
-        let pos = ready.iter().position(|&(q, _)| q == sequence).ok_or(NetError::InvalidState)?;
-        let (_, sock) = ready.remove(pos);
+        let pos = l.ready.iter().position(|&(q, _)| q == sequence).ok_or(NetError::InvalidState)?;
+        let (_, sock) = l.ready.remove(pos);
         s.entry(id)?.last = STALE;
+        // Room in the backlog: a listening socket again before the next
+        // SYN comes (WhenFull::Refuse took them away while it was full).
+        s.tend(id.index as usize);
         let local = s.tcp(sock).and_then(|t| t.local_endpoint()).map(Addr::from_endpoint);
         let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
         let local = local.unwrap_or_default();
@@ -805,7 +1001,7 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
                 Side::Eth => Ip::V4(s.eth_ip.ok_or(NetError::Unreachable)?),
             };
         }
-        let mut socket = new_socket().ok_or(NetError::NoMemory)?;
+        let mut socket = s.new_tcp(side)?;
         let context = match side {
             Side::Lo => s.lo.iface.context(),
             Side::Eth => s.eth.as_mut().ok_or(NetError::Unreachable)?.iface.context(),
@@ -978,11 +1174,12 @@ pub fn close(id: SocketId, abort: bool) {
         };
         match entry.kind {
             Kind::Bound => {}
-            Kind::Listener { listening, ready, .. } => {
-                for sock in listening {
+            Kind::Listener(l) => {
+                for sock in l.catchers.into_iter().flatten() {
                     s.remove(sock);
                 }
-                for (_, sock) in ready {
+                // Connections not accepted are reset (half-open ones too).
+                for sock in l.opening.into_iter().chain(l.ready.into_iter().map(|(_, sock)| sock)) {
                     finish(s, sock, true);
                 }
             }
@@ -1023,9 +1220,9 @@ pub fn readiness(id: SocketId) -> Result<Readiness, NetError> {
         let entry = s.entry(id)?;
         Ok(match entry.kind {
             Kind::Bound => Readiness::default(),
-            Kind::Listener { ref ready, .. } => Readiness {
-                acceptable: !ready.is_empty(),
-                queued: ready.len(),
+            Kind::Listener(ref l) => Readiness {
+                acceptable: !l.ready.is_empty(),
+                queued: l.ready.len(),
                 ..Readiness::default()
             },
             Kind::Conn { sock, connected } => {
@@ -1447,26 +1644,21 @@ pub fn carry_entry(id: SocketId) -> Result<CarriedEntry, NetError> {
                 CarriedKind::Conn { conn: s.carry_conn(sock)?, connected }
             }
             Kind::Udp(_) => super::udp::carry(s, id)?,
-            Kind::Listener { backlog, listening, ready, next_sequence } => {
-                let (backlog, next_sequence) = (*backlog as u32, *next_sequence);
-                let mut socks: Vec<(Option<u32>, Sock)> = Vec::new();
-                socks.try_reserve(listening.len() + ready.len()).map_err(|_| NetError::NoMemory)?;
-                for &(q, sock) in ready {
-                    socks.try_push((Some(q), sock)).map_err(|_| NetError::NoMemory)?;
-                }
-                for &sock in listening {
-                    socks.try_push((None, sock)).map_err(|_| NetError::NoMemory)?;
-                }
+            Kind::Listener(l) => {
+                let (backlog, next_sequence) = (l.backlog as u32, l.next_sequence);
+                // The listening sockets are not carried: the next kernel
+                // makes its own (`tend`).
+                let (mut ready_socks, mut opening_socks) = (Vec::new(), Vec::new());
+                ready_socks.try_reserve(l.ready.len()).map_err(|_| NetError::NoMemory)?;
+                opening_socks.try_reserve(l.opening.len()).map_err(|_| NetError::NoMemory)?;
+                ready_socks.extend(l.ready.iter().copied());
+                opening_socks.extend(l.opening.iter().copied());
                 let (mut ready, mut opening) = (Vec::new(), Vec::new());
-                for (q, sock) in socks {
-                    match q {
-                        Some(q) => ready.try_push((q, s.carry_conn(sock)?)),
-                        None if s.tcp(sock).is_some_and(|t| t.state() == State::Listen) => {
-                            continue;
-                        }
-                        None => opening.try_push(s.carry_conn(sock)?),
-                    }
-                    .map_err(|_| NetError::NoMemory)?;
+                for (q, sock) in ready_socks {
+                    ready.try_push((q, s.carry_conn(sock)?)).map_err(|_| NetError::NoMemory)?;
+                }
+                for sock in opening_socks {
+                    opening.try_push(s.carry_conn(sock)?).map_err(|_| NetError::NoMemory)?;
                 }
                 CarriedKind::Listener { backlog, next_sequence, ready, opening }
             }
@@ -1549,42 +1741,40 @@ pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
                 Kind::Conn { sock: s.adopt_conn(conn)?, connected: *connected }
             }
             CarriedKind::Listener { backlog, next_sequence, ready, opening } => {
-                let backlog = (*backlog as usize).clamp(1, MAX_BACKLOG);
-                let mut listening = Vec::new();
-                listening
-                    .try_reserve(backlog * 2 + opening.len())
-                    .map_err(|_| NetError::NoMemory)?;
-                let mut queue = Vec::new();
-                queue.try_reserve(backlog * 2 + ready.len()).map_err(|_| NetError::NoMemory)?;
+                let mut l = Listener {
+                    backlog: (*backlog as usize).clamp(1, MAX_BACKLOG),
+                    // Only AFD's endpoints are carried (Windows' rule).
+                    when_full: WhenFull::Refuse,
+                    next_sequence: *next_sequence,
+                    ..Listener::default()
+                };
                 let built = (|| {
+                    l.ready.try_reserve(ready.len()).map_err(|_| NetError::NoMemory)?;
+                    l.opening.try_reserve(opening.len()).map_err(|_| NetError::NoMemory)?;
                     for (q, conn) in ready {
-                        queue
+                        l.ready
                             .try_push((*q, s.adopt_conn(conn)?))
                             .map_err(|_| NetError::NoMemory)?;
                     }
                     for conn in opening {
-                        listening.try_push(s.adopt_conn(conn)?).map_err(|_| NetError::NoMemory)?;
-                    }
-                    for &side in s.sides_for(c.local.ip) {
-                        let busy = listening.iter().filter(|l| l.0 == side).count();
-                        for _ in busy..backlog {
-                            let sock = s.listening_socket(side, c.local, Scope::of(c.local.ip))?;
-                            listening.try_push(sock).map_err(|_| NetError::NoMemory)?;
-                        }
+                        l.opening.try_push(s.adopt_conn(conn)?).map_err(|_| NetError::NoMemory)?;
                     }
                     Ok(())
                 })();
                 if let Err(e) = built {
-                    for &sock in listening.iter().chain(queue.iter().map(|(_, sock)| sock)) {
+                    for &sock in l.opening.iter().chain(l.ready.iter().map(|(_, sock)| sock)) {
                         s.remove(sock);
                     }
                     return Err(e);
                 }
-                Kind::Listener { backlog, listening, ready: queue, next_sequence: *next_sequence }
+                Kind::Listener(l)
             }
         };
         // Room was reserved: this cannot fail.
-        s.insert(token, c.local, Scope::of(c.local.ip), kind)
+        let id = s.insert(token, c.local, Scope::of(c.local.ip), kind)?;
+        // A listener's listening sockets, where its backlog has room.
+        s.tend(id.index as usize);
+        Ok(id)
     })
 }
 
@@ -1617,6 +1807,8 @@ pub(super) mod testing {
             lingering: Vec::new(),
             next_port: *EPHEMERAL.start(),
             next_generation: 1,
+            limit: socket_limit(),
+            refused_logged: false,
         });
     }
 
@@ -1648,7 +1840,7 @@ mod tests {
         loopback_stack();
         let addr = Addr::v4([127, 0, 0, 1], 4000);
         let listener = bind(addr, 1).unwrap();
-        listen(listener, 4).unwrap();
+        listen(listener, 4, WhenFull::Refuse).unwrap();
         let client = connect(None, addr, 2).unwrap();
         for _ in 0..4 {
             poll();
@@ -1677,7 +1869,7 @@ mod tests {
         loopback_stack();
         let addr = Addr { ip: Ip::V6(Ip::LOOPBACK6), port: 4200 };
         let listener = bind(addr, 1).unwrap();
-        listen(listener, 4).unwrap();
+        listen(listener, 4, WhenFull::Refuse).unwrap();
         let client = connect(None, addr, 2).unwrap();
         polls(4);
         let (sequence, remote) = pending(listener).unwrap();
@@ -1693,6 +1885,103 @@ mod tests {
         let far =
             Addr { ip: Ip::V6([0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), port: 80 };
         assert_eq!(connect(None, far, 4), Err(NetError::Unreachable));
+        *STACK.lock() = None;
+    }
+
+    /// More listeners than a fixed share of the stack's sockets allowed
+    /// (Nginx's ports at backlog 511): each takes its connection.
+    #[test]
+    fn many_listeners_each_take_a_connection() {
+        let _turn = turn();
+        loopback_stack();
+        let mut listeners = Vec::new();
+        for i in 0..20u16 {
+            let addr = Addr::v4([127, 0, 0, 1], 4300 + i);
+            let l = bind(addr, 100 + u64::from(i)).unwrap();
+            listen(l, 511, WhenFull::Refuse).unwrap();
+            listeners.push((l, addr));
+        }
+        for (i, &(l, addr)) in listeners.iter().enumerate() {
+            let client = connect(None, addr, 200 + i as u64).unwrap();
+            polls(4);
+            assert_eq!(connected(client), Ok(()), "listener {i}");
+            let (sequence, _) = pending(l).unwrap();
+            let server = accept(l, sequence, 300 + i as u64).unwrap();
+            assert_eq!(send(client, b"hi").unwrap(), 2);
+            assert_eq!(recv_all(server, 2), b"hi");
+        }
+        *STACK.lock() = None;
+    }
+
+    /// Windows' listen: once `backlog` connections wait unaccepted, the
+    /// next is refused (WSAECONNREFUSED); an accept makes room again.
+    #[test]
+    fn a_full_backlog_refuses_until_an_accept() {
+        let _turn = turn();
+        loopback_stack();
+        let addr = Addr::v4([127, 0, 0, 1], 4400);
+        let listener = bind(addr, 1).unwrap();
+        listen(listener, 2, WhenFull::Refuse).unwrap();
+        let a = connect(None, addr, 2).unwrap();
+        let b = connect(None, addr, 3).unwrap();
+        polls(4);
+        assert_eq!((connected(a), connected(b)), (Ok(()), Ok(())));
+        let c = connect(None, addr, 4).unwrap();
+        polls(4);
+        assert_eq!(connected(c), Err(NetError::Refused));
+        let (first, _) = pending(listener).unwrap();
+        accept(listener, first, 5).unwrap();
+        let d = connect(None, addr, 6).unwrap();
+        polls(4);
+        assert_eq!(connected(d), Ok(()));
+        *STACK.lock() = None;
+    }
+
+    /// Linux's way (`lx::socket`): a SYN beyond the backlog goes
+    /// unanswered (no refusal); once an accept made room, a SYN gets in.
+    #[test]
+    fn a_full_backlog_ignores_until_an_accept() {
+        let _turn = turn();
+        loopback_stack();
+        let addr = Addr::v4([127, 0, 0, 1], 4500);
+        let listener = bind(addr, 1).unwrap();
+        listen(listener, 1, WhenFull::Ignore).unwrap();
+        let a = connect(None, addr, 2).unwrap();
+        polls(4);
+        assert_eq!(connected(a), Ok(()));
+        let b = connect(None, addr, 3).unwrap();
+        polls(4);
+        // Not refused, not connected: its SYN went unanswered.
+        assert_eq!(connected(b), Err(NetError::WouldBlock));
+        let (first, _) = pending(listener).unwrap();
+        accept(listener, first, 4).unwrap();
+        // Room again: the next SYN gets in (b's own retransmission needs
+        // the clock, which host tests lack; lx_socket boots it).
+        let c = connect(None, addr, 5).unwrap();
+        polls(4);
+        assert_eq!(connected(c), Ok(()));
+        assert!(pending(listener).is_ok());
+        *STACK.lock() = None;
+    }
+
+    /// The socket sets grow past their first slots, and a closed listener
+    /// leaves nothing behind.
+    #[test]
+    fn listeners_hold_one_socket_each_and_free_it() {
+        let _turn = turn();
+        loopback_stack();
+        let before = stats().3;
+        let mut ids = Vec::new();
+        for i in 0..(INITIAL_SLOTS as u16 + 8) {
+            let l = bind(Addr::v4([127, 0, 0, 1], 4600 + i), 1).unwrap();
+            listen(l, 511, WhenFull::Refuse).unwrap();
+            ids.push(l);
+        }
+        assert_eq!(stats().3 - before, INITIAL_SLOTS + 8);
+        for l in ids {
+            close(l, false);
+        }
+        assert_eq!(stats().3, before);
         *STACK.lock() = None;
     }
 
@@ -1728,7 +2017,7 @@ mod tests {
         loopback_stack();
         let addr = Addr::v4([127, 0, 0, 1], 4100);
         let listener = bind(addr, 1).unwrap();
-        listen(listener, 2).unwrap();
+        listen(listener, 2, WhenFull::Refuse).unwrap();
         let client = connect(None, addr, 2).unwrap();
         polls(4);
         let (sequence, _) = pending(listener).unwrap();
