@@ -316,7 +316,8 @@ dump"); um-test's `timeout -s QUIT` sends it when a program hangs.
   (objects, the loopback TCP stack), or several address spaces in one;
   until then those scenarios run in QEMU only (ROADMAP U4).
 - **No network card, no disk, no screen**: see "What runs in gala-um";
-  a window on the host is planned (ROADMAP U5).
+  a window on the host is planned (ROADMAP U5), host directories as
+  drives and host networking with U6.
 - **Fidelity drift**: anything emulated differently (memory placement,
   timer resolution, tick updates, lock spinning) must be listed here, so
   that a gala-um pass is not mistaken for kernel correctness. Tests that

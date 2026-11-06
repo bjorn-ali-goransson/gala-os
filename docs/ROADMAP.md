@@ -111,6 +111,7 @@ has a section under "Open items".
 | U1-U3 | gala-um | done | 109 programs in seconds; GALA_UM.md |
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
+| U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
 | HS | Hygiene sweeps | in progress | recurring; first sweep and its four leftovers done; the next sweep after the next change of assumptions |
 
 ### NT core services (done, by test)
@@ -250,6 +251,56 @@ and `um --window` shows gui_test's window on a Linux desktop, driven
 by the host's mouse and keyboard. Observability: the window's size,
 resizes and input events under `--trace`, and a failure to open the
 host window reported with the display it tried.
+
+### U6. Windows applications in CI through gala-um
+
+**Goal**: an unmodified Windows application and its UI Automation tests
+(FlaUI under `dotnet test`) run headless on a stock GitHub Actions
+Ubuntu runner through gala-um, with no KVM, QEMU or root, and leave
+screenshots, test results and gala's own diagnostics as artifacts. A
+fast first pass on every commit, not a substitute for testing on
+Windows: a pass in gala-um is not a pass on Windows, and the ledger
+says what the application used that gala lacks.
+
+**Needs**: U4 (a test runner driving the application is two processes;
+`dotnet test` starts its test host as a child), U5 (headless drawing,
+screenshots, scripted input).
+
+**Next** (each step test first):
+1. Host directories as drives: `um --mount=<drive or directory on
+   C:>=<host directory>` backing part of the namespace with a host
+   directory, read and write, so the application, the test assemblies
+   and the outputs pass between the runner and gala (today C: is ramfs
+   filled file by file with `--module=`). Scenario: a program reads a
+   mounted file and writes one the host checks.
+2. Networking to the host: host sockets behind AFD (gala-um's TCP stack
+   reaches only its own loopback today), for applications that talk to
+   a test server or the network.
+3. Memory: the memfd's size (`MEMORY_SIZE`, 1 GiB) as an option, enough
+   for .NET plus a test runner and for Electron/Chromium applications.
+4. Acceptance in um-test: `flaui_test`, then `filezilla_flaui`,
+   headless.
+5. Packaging: a release bundle (the `um` binary, gala's DLLs and
+   programs, the default registry seed) and a GitHub Action that runs a
+   command against a mounted directory and uploads the artifacts: the
+   screenshots, the test results, and on failure the ledger, the event
+   stream, crash reports and the last screen. A sample repository whose
+   workflow runs a small application's FlaUI tests is the done check.
+6. Flaky UI tests: a failing run's `--record` file kept as an artifact,
+   so it replays deterministically on a developer's machine (R5, R7).
+
+**Done when**: the sample repository's workflow passes on a stock
+`ubuntu-latest` runner, and a deliberately broken test leaves a
+screenshot, the ledger and the event stream as artifacts that explain
+it.
+
+**Licensing**: distributing gala-um for use in other people's pipelines
+needs a licence for gala (README "License") and honours the obligations
+of what the bundle carries (`THIRD_PARTY.md`). That is the owner's
+decision, not yet taken; step 5 waits on it.
+
+**Design**: GALA_UM.md ("How a Windows program runs inside a Linux
+process", "Limits and open questions"); ARCHITECTURE "UI Automation".
 
 ### HS. Hygiene sweeps
 
