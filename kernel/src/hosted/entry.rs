@@ -58,7 +58,7 @@ static SELECTOR: AtomicU8 = AtomicU8::new(SYSCALL_DISPATCH_FILTER_BLOCK);
 /// ROADMAP LX seam 2): a call goes to the one of the calling thread's
 /// personality (`PERSONALITY`).
 static SYSCALL_HANDLER: Dispatchers = Dispatchers::new();
-static RETURN_HOOK: OnceLock<fn(&mut UserRegs) -> bool> = OnceLock::new();
+static RETURN_HOOK: OnceLock<fn(&mut UserRegs, bool) -> bool> = OnceLock::new();
 static EXCEPTION_HANDLER: OnceLock<fn(&mut TrapFrame, Option<u64>)> = OnceLock::new();
 
 std::thread_local! {
@@ -219,7 +219,7 @@ pub fn set_syscall_handler(
     }
 }
 
-pub fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
+pub fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool) {
     let _ = RETURN_HOOK.set(hook);
 }
 
@@ -263,7 +263,8 @@ fn set_regs(gregs: &mut Gregs, r: &UserRegs) {
 
 fn return_to_user(gregs: &mut Gregs, mut regs: UserRegs) {
     if let Some(hook) = RETURN_HOOK.get() {
-        hook(&mut regs);
+        // gala-um runs no 32-bit code.
+        hook(&mut regs, false);
     }
     set_regs(gregs, &regs);
 }

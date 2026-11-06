@@ -105,7 +105,7 @@ impl UserEntry for Kernel {
     ) {
         syscall::set_handler(personality, name, handler)
     }
-    fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
+    fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool) {
         syscall::set_user_return_hook(hook)
     }
     fn set_user_exception_handler(handler: fn(&mut TrapFrame, Option<u64>)) {

@@ -153,7 +153,8 @@ extern "C" fn dispatch(frame: &mut SyscallFrame) {
     let pending = crate::sched::take_pending_continue();
     // The return hook sees (and may change) the registers user mode gets.
     let mut regs = pending.unwrap_or_else(|| syscall_regs(frame));
-    let changed = run_user_return_hook(&mut regs);
+    // A system call always returns to 64-bit code.
+    let changed = run_user_return_hook(&mut regs, false);
     if pending.is_some() || changed {
         // Nothing on this stack needs dropping: the handler has returned.
         enter_user_regs(&regs);
@@ -329,9 +330,10 @@ pub(super) fn set_trap_regs(f: &mut super::interrupts::TrapFrame, r: &UserRegs) 
 
 static USER_RETURN_HOOK: AtomicUsize = AtomicUsize::new(0);
 
-/// What the user-return hook gets: the registers user mode resumes with;
-/// it returns true if it changed them.
-pub type UserReturnHook = fn(&mut UserRegs) -> bool;
+/// What the user-return hook gets: the registers user mode resumes with
+/// and whether that is 32-bit code (an interrupt in compatibility mode,
+/// CS 0x23: a WOW64 thread); it returns true if it changed them.
+pub type UserReturnHook = fn(&mut UserRegs, bool) -> bool;
 
 /// Registers a function run on every return to user mode from a system
 /// call or interrupt, in kernel context (e.g. to act on a pending thread
@@ -340,7 +342,7 @@ pub fn set_user_return_hook(hook: UserReturnHook) {
     USER_RETURN_HOOK.store(hook as usize, Ordering::Release);
 }
 
-pub(super) fn run_user_return_hook(regs: &mut UserRegs) -> bool {
+pub(super) fn run_user_return_hook(regs: &mut UserRegs, compat: bool) -> bool {
     let raw = USER_RETURN_HOOK.load(Ordering::Acquire);
     if raw == 0 {
         return false;
@@ -348,7 +350,7 @@ pub(super) fn run_user_return_hook(regs: &mut UserRegs) -> bool {
     // SAFETY: only `set_user_return_hook` stores non-zero values, and it
     // stores `UserReturnHook`s.
     let hook = unsafe { core::mem::transmute::<usize, UserReturnHook>(raw) };
-    let changed = hook(regs);
+    let changed = hook(regs, compat);
     if crate::sched::CHECK_USER_RETURN.load(Ordering::Relaxed) {
         crate::sched::check_user_return();
     }

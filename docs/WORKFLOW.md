@@ -745,9 +745,10 @@ kernel32 through `raw-dylib`), run under gala and under Windows
 Rust built for `i686-pc-windows-msvc` (in `rust-toolchain.toml`; linked
 as the x64 ones, `.cargo/config.toml`) on ntrt's x86 runtime
 (`user/ntrt/src/x86.rs`: the 32-bit stubs, TEB32/PEB32 access, print,
-exit, memory, a few NT services; add what a test needs there, with the
-x64 service number). On Windows they run from user/bin through
-Windows' own WOW64.
+exit, memory, a few NT services; any service through its generic stub
+`ntrt::syscall(nr::NT_..., &[args])` with the x64 numbers in `nr`). On
+Windows they run from user/bin through Windows' own WOW64 (gala's own
+numbers, 0x7f.., fail there).
 
 - List the program in `USER_PROGRAMS_X86` (not USER_PROGRAMS: xtask
   builds that list for the i686 target) and add `-p <name>` to CI's
@@ -761,6 +762,19 @@ Windows' own WOW64.
 - Until stage 3 (the 32-bit ntdll) a 32-bit program must import nothing:
   the kernel refuses one with imports (`wow64: <name> imports DLLs`).
   Check with `llvm-readobj --coff-imports`.
+- A service a 32-bit program calls needs its conversion in wow64.dll
+  (`user/wow64`: a row of argument kinds in `generic::TABLE`, or an
+  information-class case in `info.rs`); one without fails with
+  STATUS_NOT_IMPLEMENTED and names itself in the ledger
+  (`wow64.dll!service 0x...`). A class whose x86 layout differs must be
+  converted, never passed through: check it against the x86 headers
+  (pointer-sized fields, handles, SIZE_Ts, alignment).
+- wow64.dll touches a caller's memory only through `mem` (fault-safe):
+  a plain dereference of a 32-bit pointer would crash the process
+  instead of failing the call with STATUS_ACCESS_VIOLATION.
+- A recursive test function meant to use stack must keep its frame live
+  across the call (`core::hint::black_box(&mut frame)` after it), or
+  LLVM turns the recursion into a loop.
 
 ### Derived test data
 
@@ -1448,8 +1462,7 @@ about a minute under TCG. Read, in order:
   caller was an administrator (`layout scope=`, `elevation`, `error
   requires-admin`).
 - **A real Inno Setup installer** is `cargo xtask boot-test
-  pk_install_inno` (PENDING: Inno's Setup stops at its own WOW64 check,
-  ROADMAP PK step 3): Inno Setup 7.1.1's x64 installer (PREBUILT
+  pk_install_inno` (about 30 s): Inno Setup 7.1.1's x64 installer (PREBUILT
   `innosetup`, put in the snapshot's `installers\` mirror by
   EXTRA_MODULES) with winget-pkgs' manifest
   (`manifests/j/JRSoftware/InnoSetup/7/7.1.1`, real: leave it). Inno's
@@ -1463,6 +1476,15 @@ about a minute under TCG. Read, in order:
   or only a stub ends Setup with 0xc06d007f (the ledger's `missing
   export` names it); Inno's source (github.com/jrsoftware/issrc) says
   what Setup expects of Windows, read as documentation (as CoreCLR's).
+  Setup reports most failures in its log and goes on ("Defaulting to OK
+  for suppressed message box" after an "Exception message:"), so a
+  passing run can still skip steps: read the serial log's teed setup
+  log for those, and the ledger. Setup's second stage
+  (`<installer>.tmp`, run again by the first) is the one that installs;
+  a Delphi exception naming a Windows error code (Setup's "System
+  Error. Code: 1410") is the last error of the call that failed, and
+  `XTASK_EVENTS=window` shows the windows the VCL made up to it (the
+  next one is the control whose creation failed).
 - **A vendor installer exits with an odd code and no ledger line**:
   boot with `XTASK_EVENTS=syscall,image` and list the installer's system
   calls (its pid from the `image` event; skip the memory calls and the
@@ -2644,6 +2666,12 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   0xFFFFFFFF80000002; C programs and .NET pass that form, Rust test
   programs usually the zero-extended one. Accept both (advapi32's
   `predefined`).
+- **x64 structures have padding**: WNDCLASSW is WNDCLASSEXW without
+  cbSize, but its lpfnWndProc is still at offset 8 (4 bytes of padding
+  after the style), so converting between them is not one copy from
+  offset 4 (GetClassInfoW once gave Delphi's VCL a wrong window
+  procedure and every second control of a class failed to register).
+  Lay a converted structure out field by field from the header.
 - **SDK structure packing**: richedit.h packs its structures to 4 bytes
   (`pshpack4.h`): a pointer or WPARAM after a 4-byte field is not
   8-aligned (ENLINK's wParam at 28, lParam at 36, chrg at 44;
@@ -2797,7 +2825,7 @@ ARCHITECTURE "Waits".
 | gala-um's platform | `kernel/src/hosted/`, `um/` |
 | Baked fonts, icons, wallpapers | `kernel/assets/`, `fonts/selawik/` |
 | Test runtime for user programs (x64, and x86 for 32-bit ones) | `user/ntrt/` (`x64.rs`, `x86.rs`) |
-| WOW64: the kernel's part, gala's wow64.dll, the 32-bit test | `kernel/src/nt/wow64.rs`, `user/wow64/`, `user/wow64_test/` |
+| WOW64: the kernel's part, gala's wow64.dll, the 32-bit tests | `kernel/src/nt/wow64.rs`, `user/wow64/`, `user/wow64_test/`, `user/wow64_thread_test/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Linux test programs, their binaries and transcripts | `user/lx/`, `user/lx/bin/` |
 | `gala install` (winget packages): library, commands, downloads, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/gala/src/fetch.rs`, `user/pk_install_test/` |

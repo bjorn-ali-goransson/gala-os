@@ -180,8 +180,9 @@ dynamic linking are not there yet (ROADMAP item LX).
   a real PC gala boots from a CD or USB stick and runs the programs on
   its command line, showing their output on the screen; without a virtio
   disk, files live in memory and are gone at reboot.
-- 32-bit programs (WOW64) only in their first form: x86 executables
-  without imports run (no 32-bit system DLLs yet: ROADMAP WOW); no
+- 32-bit programs (WOW64) only without imports: x86 executables that
+  make system calls themselves run, threads included (no 32-bit system
+  DLLs yet, nor exceptions delivered to 32-bit code: ROADMAP WOW); no
   service control manager (services are
   started from the kernel command line; `restart=` keeps them running),
   no IPv6, no GPU acceleration (Direct3D, Vulkan and OpenGL are planned

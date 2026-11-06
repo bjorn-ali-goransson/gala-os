@@ -23,6 +23,7 @@ const CONTEXT_FLAGS: usize = 0x30;
 const MX_CSR: usize = 0x34;
 const SEG_CS: usize = 0x38;
 const SEG_DS: usize = 0x3a;
+const SEG_FS: usize = 0x3e;
 const SEG_SS: usize = 0x42;
 const EFLAGS: usize = 0x44;
 const DR0: usize = 0x48;
@@ -68,6 +69,11 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(b[off..off + 8].try_into().unwrap_or([0; 8]))
 }
 
+/// A CONTEXT's SegCs.
+pub fn seg_cs(ctx: &[u8]) -> u16 {
+    u16::from_le_bytes([ctx[SEG_CS], ctx[SEG_CS + 1]])
+}
+
 /// A CONTEXT's ContextFlags.
 pub fn flags(ctx: &[u8]) -> u32 {
     u32_at(ctx, CONTEXT_FLAGS)
@@ -92,6 +98,19 @@ pub fn extended_features() -> u64 {
 pub fn xstate_len() -> usize {
     let ext = extended_features();
     if ext == 0 { 0 } else { xstate::size_of(ext | LEGACY) - LEGACY_SIZE }
+}
+
+/// The selectors of a WOW64 thread stopped in 32-bit code (`fill` wrote
+/// the 64-bit ones): CS 0x23 and FS 0x53 (the TEB32), as Windows reports
+/// them in such a thread's (64-bit) CONTEXT.
+pub fn mark_compat(b: &mut [u8], flags: u32) {
+    use super::layout::wow64::{CS32, FS32};
+    if has(flags, CONTEXT_CONTROL) {
+        put(b, SEG_CS, &(CS32 as u16).to_le_bytes());
+    }
+    if has(flags, CONTEXT_SEGMENTS) {
+        put(b, SEG_FS, &(FS32 as u16).to_le_bytes());
+    }
 }
 
 /// Writes the parts of a CONTEXT that `flags` names, from user registers

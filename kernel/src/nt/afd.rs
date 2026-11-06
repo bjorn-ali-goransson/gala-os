@@ -383,10 +383,7 @@ pub fn get_events(socket: &ObjectRef) -> Result<u32, NtStatus> {
 /// SUCCESS suppresses the packet of a success).
 fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, immediate: bool) {
     if io.iosb != 0 {
-        let mut b = [0u8; 16];
-        b[0..4].copy_from_slice(&status.0.to_le_bytes());
-        b[8..16].copy_from_slice(&information.to_le_bytes());
-        let _ = io.process.write(io.iosb, &b);
+        let _ = io.process.write_iosb(io.iosb, status, information);
     }
     let failed = status.0 >= 0xc000_0000;
     if immediate && failed {

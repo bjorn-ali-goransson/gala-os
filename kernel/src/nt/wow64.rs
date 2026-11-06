@@ -36,6 +36,10 @@ pub struct Dll {
     pub start_rva: u32,
     /// GalaWow64Transition: 32-bit code, where `call fs:[0xc0]` goes.
     pub transition_rva: u32,
+    /// GalaWow64Exception: the dispatcher of exceptions in wow64.dll's own
+    /// 64-bit code (as ntdll's KiUserExceptionDispatcher; it recovers from
+    /// faults on a caller's invalid 32-bit pointers).
+    pub exception_rva: u32,
 }
 
 /// Loaded on first use; `Some(None)` once we know there is none.
@@ -65,18 +69,20 @@ fn load() -> Option<Dll> {
     };
     section.file_name = super::file::nt_path(node).ok();
     let image = section.image.as_ref()?;
-    let (Some(start_rva), Some(transition_rva)) =
-        (image.export(b"GalaWow64Start"), image.export(b"GalaWow64Transition"))
-    else {
-        warn!("wow64: {PATH} lacks GalaWow64Start or GalaWow64Transition");
+    let (Some(start_rva), Some(transition_rva), Some(exception_rva)) = (
+        image.export(b"GalaWow64Start"),
+        image.export(b"GalaWow64Transition"),
+        image.export(b"GalaWow64Exception"),
+    ) else {
+        warn!("wow64: {PATH} lacks GalaWow64Start, GalaWow64Transition or GalaWow64Exception");
         return None;
     };
     let section = KObject::new(ObjectBody::Section(section)).ok()?;
     info!(
         "wow64: using {PATH}, GalaWow64Start at rva {start_rva:#x}, GalaWow64Transition at rva \
-         {transition_rva:#x}"
+         {transition_rva:#x}, GalaWow64Exception at rva {exception_rva:#x}"
     );
-    Some(Dll { section, start_rva, transition_rva })
+    Some(Dll { section, start_rva, transition_rva, exception_rva })
 }
 
 /// A WOW64 process's 32-bit side.
@@ -153,6 +159,9 @@ pub fn map_dll(process: &Process) -> Result<(), NtStatus> {
     }
     state.start.store(view.base + u64::from(dll.start_rva), Ordering::Relaxed);
     state.transition.store(transition, Ordering::Relaxed);
+    // Exceptions in 64-bit code (wow64.dll's) go to its dispatcher; those
+    // in 32-bit code are not delivered yet (`process::deliver_to_user`).
+    process.exception_dispatcher.store(view.base + u64::from(dll.exception_rva), Ordering::Relaxed);
     Ok(())
 }
 
@@ -161,8 +170,8 @@ pub fn map_dll(process: &Process) -> Result<(), NtStatus> {
 pub struct Start32 {
     pub eip: u32,
     pub esp: u32,
-    pub eax: u32,
-    pub ebx: u32,
+    /// eax, ecx, edx, ebx, esi, edi, ebp.
+    pub gpr: [u32; 7],
     /// Its 32-bit stack: (base = top, limit, reservation bottom).
     pub stack: (u32, u32, u32),
     /// Top of its 64-bit stack (wow64.dll's code).
@@ -183,8 +192,13 @@ pub fn cpu_area(start: &Start32) -> [u8; cpu::SIZE as usize] {
         (ctx::SEG_DS, w::DS32),
         (ctx::SEG_CS, w::CS32),
         (ctx::SEG_SS, w::DS32),
-        (ctx::EAX, start.eax),
-        (ctx::EBX, start.ebx),
+        (ctx::EAX, start.gpr[0]),
+        (ctx::ECX, start.gpr[1]),
+        (ctx::EDX, start.gpr[2]),
+        (ctx::EBX, start.gpr[3]),
+        (ctx::ESI, start.gpr[4]),
+        (ctx::EDI, start.gpr[5]),
+        (ctx::EBP, start.gpr[6]),
         (ctx::EIP, start.eip),
         (ctx::ESP, start.esp),
         (ctx::EFLAGS, 0x202),
@@ -291,4 +305,85 @@ pub fn set_up_space(
         .map_err(|_| NtStatus::NO_MEMORY)?;
     space.write_initial(w::PEB32_ADDRESS, &peb32_bytes(peb)).map_err(|_| NtStatus::NO_MEMORY)?;
     Ok(())
+}
+
+/// Reserves a WOW64 thread's 64-bit stack, where wow64.dll's code runs
+/// (below the process's 32-bit limit, as the VAD places it): (top, limit,
+/// bottom), its top `STACK64_COMMIT` committed above a guard page. Its
+/// 64-bit TEB describes it; `release_thread` frees it.
+pub fn reserve_stack64(vad: &mut Vad) -> Result<(u64, u64, u64), NtStatus> {
+    use super::layout::wow64::{STACK64_COMMIT, STACK64_RESERVE};
+    let (bottom, _) =
+        vad.reserve(None, STACK64_RESERVE, vad::PAGE_READWRITE, vad::MEM_PRIVATE, false)?;
+    let top = bottom + STACK64_RESERVE;
+    let limit = top - STACK64_COMMIT;
+    let committed = vad.commit(limit, STACK64_COMMIT, vad::PAGE_READWRITE).and_then(|_| {
+        let guard = vad::PAGE_READWRITE | vad::PAGE_GUARD;
+        vad.commit(limit - platform::PAGE_SIZE, platform::PAGE_SIZE, guard)
+    });
+    if let Err(e) = committed {
+        let _ = vad.release(bottom, 0);
+        return Err(e);
+    }
+    Ok((top, limit, bottom))
+}
+
+/// Frees what the kernel gave an exiting WOW64 thread beside its TEB: its
+/// 64-bit stack (from its TEB's DeallocationStack) and its TEB32. The
+/// thread runs no user code any more; its process goes on (a process's
+/// last thread leaves this to the address space's end).
+pub fn release_thread(process: &Process, teb: u64, teb32: u64) {
+    use super::layout::teb;
+    let stack = process.read_u64(teb + teb::DEALLOCATION_STACK);
+    for (what, base) in [("64-bit stack", stack.ok()), ("TEB32", Some(teb32))] {
+        let Some(base) = base.filter(|&b| b != 0) else { continue };
+        if let Err(e) = super::vm::free(process, base, 0, super::vm::MEM_RELEASE) {
+            warn!(
+                "wow64: {} (pid {}): cannot free an exited thread's {what} at {base:#x}: {e:?}",
+                process.name, process.id
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_area_holds_the_32_bit_start() {
+        let start = Start32 {
+            eip: 0x40_1000,
+            esp: 0x1f_f000,
+            gpr: [1, 2, 3, 4, 5, 6, 7],
+            stack: (0x20_0000, 0x1f_0000, 0x10_0000),
+            stack64: 0x7000_0000,
+        };
+        let a = cpu_area(&start);
+        let at = |off: u64| {
+            let o = (cpu::CONTEXT + off) as usize;
+            u32::from_le_bytes([a[o], a[o + 1], a[o + 2], a[o + 3]])
+        };
+        for (off, want) in [
+            (ctx::EAX, 1),
+            (ctx::ECX, 2),
+            (ctx::EDX, 3),
+            (ctx::EBX, 4),
+            (ctx::ESI, 5),
+            (ctx::EDI, 6),
+            (ctx::EBP, 7),
+            (ctx::EIP, 0x40_1000),
+            (ctx::ESP, 0x1f_f000),
+            (ctx::SEG_CS, w::CS32),
+            (ctx::SEG_SS, w::DS32),
+            (ctx::SEG_FS, w::FS32),
+            (ctx::EFLAGS, 0x202),
+        ] {
+            assert_eq!(at(off), want, "context offset {off:#x}");
+        }
+        assert_eq!(u16::from_le_bytes([a[2], a[3]]), MACHINE_I386);
+        let s = cpu::STACK64 as usize;
+        assert_eq!(u64::from_le_bytes(a[s..s + 8].try_into().unwrap()), 0x7000_0000);
+        assert_eq!(a.len() as u64, cpu::SIZE);
+    }
 }

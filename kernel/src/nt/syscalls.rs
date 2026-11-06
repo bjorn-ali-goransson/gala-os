@@ -906,12 +906,7 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
         }
         done += n as u64;
     }
-    // IO_STATUS_BLOCK { union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR Information; }
-    let mut iosb = [0u8; 16];
-    iosb[8..].copy_from_slice(&done.to_le_bytes());
-    if call.process.write(io_status, &iosb).is_err() {
-        return NtStatus::ACCESS_VIOLATION;
-    }
+    tri!(call.write_iosb(io_status, NtStatus::SUCCESS, done));
     NtStatus::SUCCESS
 }
 
@@ -3131,13 +3126,18 @@ fn nt_get_context_thread(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     let flags = c::flags(&ctx);
-    let (regs, fx) = if is_current_thread(&object) {
-        (caller_regs(call), platform::xsave())
+    let (regs, fx, compat) = if is_current_thread(&object) {
+        (caller_regs(call), platform::xsave(), false)
     } else {
         let p = tri!(thread::parked_state(&object));
-        (p.regs, p.fx)
+        (p.regs, p.fx, p.compat)
     };
     c::fill(&mut ctx, flags, &regs, Some(&fx));
+    // A WOW64 thread stopped in 32-bit code: its selectors (CS 0x23, FS
+    // the TEB32's), as Windows reports them.
+    if compat {
+        c::mark_compat(&mut ctx, flags);
+    }
     if call.process.write(ptr, &ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
@@ -3469,16 +3469,20 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     let stack_base = tri!(call.read_u64(teb_ptr + 16));
     let stack_limit = tri!(call.read_u64(teb_ptr + 24));
     let stack_bottom = tri!(call.read_u64(teb_ptr + 32));
-    let object = tri!(thread::create(
-        &call.process,
-        regs,
-        // As ReactOS does: the "return register" of the start context
-        // (kernel32's thunks pass the Win32 start routine there).
-        regs.gpr[0],
-        mxcsr,
-        (stack_base, stack_limit, stack_bottom),
-        suspended
-    ));
+    let object = if call.process.wow64.is_some() {
+        tri!(create_wow64_thread(call, &ctx, (stack_base, stack_limit, stack_bottom), suspended))
+    } else {
+        tri!(thread::create(
+            &call.process,
+            regs,
+            // As ReactOS does: the "return register" of the start context
+            // (kernel32's thunks pass the Win32 start routine there).
+            regs.gpr[0],
+            mxcsr,
+            (stack_base, stack_limit, stack_bottom),
+            suspended
+        ))
+    };
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     let tid = t.id;
     // OBJECT_ATTRIBUTES: the thread's descriptor and OBJ_INHERIT.
@@ -3495,6 +3499,43 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
         tri!(call.write_u64(cid_ptr + 8, tid));
     }
     NtStatus::SUCCESS
+}
+
+/// NtCreateThread in a WOW64 process, where every thread runs 32-bit
+/// code: wow64.dll converts its 32-bit caller's x86 CONTEXT and
+/// INITIAL_TEB into the 64-bit ones, with SegCs 0x23 and the 32-bit
+/// registers and stack zero-extended ("Plan: WOW64"). The thread gets a
+/// 64-bit stack for wow64.dll's code, a TEB32, and starts in wow64.dll,
+/// which enters 32-bit code with those registers.
+fn create_wow64_thread(
+    call: &Call<'_>,
+    ctx: &[u8],
+    (base, limit, bottom): (u64, u64, u64),
+    suspended: bool,
+) -> Result<ObjectRef, NtStatus> {
+    use super::context as c;
+    if u32::from(c::seg_cs(ctx)) != super::layout::wow64::CS32 {
+        // A 64-bit thread would have no 64-bit ntdll to run.
+        super::ledger::record("NtCreateThread", "64-bit thread in a WOW64 process", 0);
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
+    let regs = c::from_bytes(ctx);
+    let low = |i: usize| regs.gpr[i] as u32;
+    let stack64 = super::wow64::reserve_stack64(&mut call.process.vad.lock())?;
+    let start = super::wow64::Start32 {
+        eip: regs.rip as u32,
+        esp: low(4),
+        // eax, ecx, edx, ebx, esi, edi, ebp (UserRegs order: rax, rcx, rdx,
+        // rbx, rsp, rbp, rsi, rdi).
+        gpr: [low(0), low(1), low(2), low(3), low(6), low(7), low(5)],
+        stack: (base as u32, limit as u32, bottom as u32),
+        stack64: stack64.0,
+    };
+    let created = thread::create_wow64(&call.process, start, stack64, suspended);
+    if created.is_err() {
+        let _ = super::vm::free(&call.process, stack64.2, 0, super::vm::MEM_RELEASE);
+    }
+    created
 }
 
 /// NtResumeThread(ThreadHandle, *PreviousSuspendCount)
@@ -4669,11 +4710,9 @@ fn nt_query_section(call: &mut Call<'_>) -> NtStatus {
 
 impl Call<'_> {
     /// Writes an IO_STATUS_BLOCK { Status (pointer-sized), Information }.
+    /// (x86: 8 bytes in a WOW64 process, `Process::write_iosb`).
     fn write_iosb(&self, ptr: u64, status: NtStatus, information: u64) -> Result<(), NtStatus> {
-        let mut b = [0u8; 16];
-        b[0..4].copy_from_slice(&status.0.to_le_bytes());
-        b[8..16].copy_from_slice(&information.to_le_bytes());
-        self.process.write(ptr, &b).map_err(|_| NtStatus::ACCESS_VIOLATION)
+        self.process.write_iosb(ptr, status, information).map_err(|_| NtStatus::ACCESS_VIOLATION)
     }
 
     /// Resolves OBJECT_ATTRIBUTES naming a file to a path on the volume.

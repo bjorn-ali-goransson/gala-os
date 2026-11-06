@@ -114,6 +114,10 @@ pub struct Parked {
     pub fx: platform::XState,
     /// Set by NtSetContextThread: resume with `regs`/`fx`.
     pub changed: bool,
+    /// Stopped in 32-bit code (a WOW64 thread interrupted in compatibility
+    /// mode): `regs` are its 32-bit registers, zero-extended, and it goes on
+    /// at CS 0x23. Otherwise in 64-bit code (a WOW64 thread's is wow64.dll's).
+    pub compat: bool,
 }
 
 /// The most a thread can be suspended (MAXIMUM_SUSPEND_COUNT).
@@ -269,6 +273,27 @@ pub fn current_stack(process: &Process) -> Option<(u64, u64, u64)> {
     let base = word(teb::STACK_BASE)?;
     let bottom = word(teb::DEALLOCATION_STACK)?;
     (bottom != 0 && bottom < base).then_some((t.teb, bottom, base))
+}
+
+/// The current WOW64 thread's TEB32 and its 32-bit stack reservation
+/// `[bottom, base)` (the TEB32's DeallocationStack and StackBase), if it
+/// is a WOW64 thread of `process`: the stack its 32-bit code grows
+/// through its guard page.
+pub fn current_stack32(process: &Process) -> Option<(u64, u64, u64)> {
+    use layout::wow64::teb32;
+    let object = current()?;
+    let t = as_thread(&object);
+    if !core::ptr::eq(&*t.process, process) || t.teb32 == 0 {
+        return None;
+    }
+    let mut space = process.space.lock();
+    let mut word = |off: u64| {
+        let mut b = [0u8; 4];
+        space.read(t.teb32 + off, &mut b).ok().map(|()| u64::from(u32::from_le_bytes(b)))
+    };
+    let base = word(teb32::STACK_BASE)?;
+    let bottom = word(teb32::DEALLOCATION_STACK)?;
+    (bottom != 0 && bottom < base).then_some((t.teb32, bottom, base))
 }
 
 fn by_id(id: u64) -> Option<ObjectRef> {
@@ -520,6 +545,8 @@ fn thread_entry(id: usize) {
         exit_current(NtStatus::NOT_SUPPORTED);
     }
     let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
+    // Stopped in user mode by a handover: goes on with the parked state.
+    let resumed_user = matches!(resume, Some(Resume::User { .. }));
     match resume {
         Some(Resume::Syscall { number, regs, fx, deadline }) => {
             // Carried over by a kernel handover: the blocked call again,
@@ -555,7 +582,7 @@ fn thread_entry(id: usize) {
             // Stopped in user mode by a handover: parked as a suspended
             // thread is (NtGetContextThread sees it while it stays
             // suspended), then on with every register.
-            *t.parked.lock() = Some(Parked { regs, fx, changed: false });
+            *t.parked.lock() = Some(Parked { regs, fx, changed: false, compat: false });
         }
         Some(Resume::Start { regs: start, mxcsr: start_mxcsr }) => {
             (regs, mxcsr) = (start, start_mxcsr);
@@ -582,7 +609,10 @@ fn thread_entry(id: usize) {
     if let Some(status) = pending {
         exit_current(status);
     }
-    if let Some(p) = parked {
+    // The parked state of a handover's thread, or of one created
+    // suspended whose context was set before it first ran (its start
+    // otherwise, `parked_state`).
+    if let Some(p) = parked.filter(|p| resumed_user || p.changed) {
         platform::xrstor(&p.fx);
         platform::enter_user(&p.regs);
     }
@@ -745,7 +775,7 @@ pub fn wake_if_terminating() {
 }
 
 /// Runs on every return to user mode: acts on a pending termination.
-fn on_user_return(regs: &mut UserRegs) -> bool {
+fn on_user_return(regs: &mut UserRegs, compat: bool) -> bool {
     let Some(object) = current() else { return false };
     let t = as_thread(&object);
     let terminate = *t.terminate_request.lock();
@@ -754,7 +784,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
         exit_current(status);
     }
     if HOLD.load(Ordering::SeqCst) {
-        hold(t, regs);
+        hold(t, regs, compat);
         let terminate = *t.terminate_request.lock();
         if let Some(status) = terminate {
             drop(object);
@@ -766,7 +796,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
     }
     // Suspended: wait here, with the user state where other threads can
     // read and change it, until resumed (or terminated).
-    *t.parked.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false });
+    *t.parked.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false, compat });
     loop {
         let count = t.suspend_count.lock();
         if *count == 0 || t.terminate_request.lock().is_some() {
@@ -799,8 +829,8 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
 /// programs, with its user state where the handover reads it
 /// (`snapshot`). Nothing is held here: the system call or interrupt is
 /// over, so the thread is at a safe point.
-fn hold(t: &NtThread, regs: &UserRegs) {
-    *t.held.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false });
+fn hold(t: &NtThread, regs: &UserRegs, compat: bool) {
+    *t.held.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false, compat });
     loop {
         if !HOLD.load(Ordering::SeqCst) || t.terminate_request.lock().is_some() {
             break;
@@ -1074,6 +1104,7 @@ pub fn set_in_syscall(object: &ObjectRef, regs: Option<(u32, UserRegs)>) {
 }
 
 /// The user state of a suspended thread: parked on its way to user mode,
+/// its start registers if it was created suspended and has not run yet,
 /// or, while it is inside a system call (blocked in a wait, say), its
 /// registers at the `syscall` with the default floating-point state.
 /// Waits for one of the two, as Windows does (up to 30 s: a thread just
@@ -1087,11 +1118,25 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
         if let Some(p) = t.parked.lock().clone() {
             return Ok(p);
         }
+        // Created suspended and not run yet: its start (as Windows reports
+        // a new thread's context), parked where NtSetContextThread changes
+        // it and the thread's first entry finds it.
+        if !t.entered.load(Ordering::SeqCst) && *t.suspend_count.lock() > 0 {
+            let mut parked = t.parked.lock();
+            let p = parked.get_or_insert_with(|| Parked {
+                regs: t.start,
+                fx: default_fx(),
+                changed: false,
+                compat: false,
+            });
+            return Ok(p.clone());
+        }
         if *t.suspend_count.lock() == 0 || t.has_exited() {
             break;
         }
         if let Some((_, regs)) = *t.in_syscall.lock() {
-            return Ok(Parked { regs, fx: default_fx(), changed: false });
+            // In a system call: the 64-bit code that made it.
+            return Ok(Parked { regs, fx: default_fx(), changed: false, compat: false });
         }
         platform::sleep_ms(1);
     }
@@ -1266,7 +1311,13 @@ pub fn exit_current(status: NtStatus) -> ! {
             unbind_sched(id, &object);
         }
         let process = t.process.clone();
+        let (teb, teb32) = (t.teb, t.teb32);
         let last = process.remove_thread(&object);
+        // A WOW64 thread's 64-bit stack and TEB32 (the kernel's to free;
+        // a process's last thread leaves them to its address space's end).
+        if teb32 != 0 && !last && !process_is_exiting(t) {
+            super::wow64::release_thread(&process, teb, teb32);
+        }
         wait::set_signal(&object, 1);
         drop(object);
         // Exactly one of several threads exiting at once on different CPUs

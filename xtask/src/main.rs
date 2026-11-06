@@ -460,6 +460,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi.dll" },
     Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
     Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
+    // msctf.dll: the input scope functions (Delphi's VCL; Inno Setup).
+    Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf.dll" },
     // The GPU stubs (ROADMAP GPU G0): no Direct3D adapter yet.
     Dll { package: "dxgi", file: "dxgi.dll", exported_as: "testdxgi.dll" },
     Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
@@ -1044,6 +1046,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "ntdll.dll", "Windows/System32"),
     ("user32_test", "kernel32.dll", "Windows/System32"),
     ("user32_test", "msvcrt.dll", "Windows/System32"),
+    ("user32_test", "msctf.dll", "Windows/System32"),
     ("user32_test", "user32.dll", "Windows/System32"),
     ("user32_test", "gdi32.dll", "Windows/System32"),
     ("user32_test", "ole32.dll", "Windows/System32"),
@@ -1109,6 +1112,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_inno", "dwmapi.dll", "Windows/System32"),
     ("pk_install_inno", "crypt32.dll", "Windows/System32"),
     ("pk_install_inno", "msimg32.dll", "Windows/System32"),
+    ("pk_install_inno", "msctf.dll", "Windows/System32"),
     // The UCRT (ucrtbase.dll ships with Windows; gala has none of its own:
     // Microsoft's redistributable copy from the JDK, as other scenarios).
     ("pk_install_inno", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
@@ -2058,6 +2062,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // WOW64: gala's 64-bit side of 32-bit processes.
     ("wow64_test", "wow64.dll", "Windows/System32"),
     ("wow64_crash", "wow64.dll", "Windows/System32"),
+    ("wow64_thread_test", "wow64.dll", "Windows/System32"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2198,7 +2203,7 @@ const USER_PROGRAMS: &[&str] = &[
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
 /// x86 runtime), shipped and exported like USER_PROGRAMS.
-const USER_PROGRAMS_X86: &[&str] = &["wow64_test"];
+const USER_PROGRAMS_X86: &[&str] = &["wow64_test", "wow64_thread_test"];
 
 /// Where the build puts test program `program` (x64 or x86).
 fn built_program(program: &str) -> PathBuf {
@@ -3330,12 +3335,6 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
-    // Inno Setup's x64 Setup runs (its loader unpacks it, it starts, logs
-    // and reads the machine) but refuses a Windows without x86 support
-    // ("This program does not support the version of Windows your
-    // computer is running": no SysWOW64, IsWow64GuestMachineSupported
-    // says no): it needs WOW64 (ROADMAP PK step 3).
-    "pk_install_inno",
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
@@ -6726,6 +6725,15 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // WOW64: 32-bit threads (NtCreateThread with the x86 CONTEXT, their
+        // TEB32s, exit), their contexts (CS 0x23) when suspended in 32-bit
+        // code or in a system call, NtSetContextThread.
+        name: "wow64_thread_test",
+        cmdline: "qemu_exit run=wow64_thread_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_thread_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64: a 32-bit program's unhandled exception, its crash report
         // with the 32-bit registers.
         name: "wow64_crash",
@@ -7752,6 +7760,7 @@ fn run_parallel_on<J: Sync, T: Send>(
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_thread_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),

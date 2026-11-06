@@ -62,8 +62,10 @@ port. Lines that tools and agents rely on:
   (with `, 32-bit x86 (WOW64)` for a 32-bit program; `wow64:` lines say
   which wow64.dll is used, or why a 32-bit program cannot start) and
   the exit line; a service or information class gala's wow64.dll cannot
-  convert yet is in the ledger as `wow64.dll!service 0x....` or
-  `wow64.dll!<service>(class)`; the unknown-service line names its dispatcher
+  convert yet is in the ledger as `wow64.dll!service 0x....` (with the
+  case: `wow64.dll!service 0x0045 (32-bit APC)`) or
+  `wow64.dll!<service>(class)`; `wow64: ... cannot free an exited
+  thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
   personality nt)`); a thread whose personality has no dispatcher logs
   `syscall: no dispatcher for personality ..`.
@@ -388,6 +390,11 @@ continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
 and `crash_filtered`. An exception in 32-bit code (a WOW64 process, CS
 0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
 eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`.
+An exception in wow64.dll's own 64-bit code other than a fault on a
+caller's invalid 32-bit pointer (which fails that call with
+STATUS_ACCESS_VIOLATION) is a bug there: its dispatcher reports it
+through GalaUnhandledException, so the report shows the 64-bit registers
+at `wow64.dll+0x...`.
 
 ### Crash record across reboots
 

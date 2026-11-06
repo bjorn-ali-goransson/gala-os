@@ -116,9 +116,11 @@ pub trait UserEntry {
         name: &'static str,
         handler: fn(&mut SyscallFrame),
     );
-    /// `hook` runs before each return to user mode; it may change the
-    /// registers (APCs, suspension) and returns whether it did.
-    fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool);
+    /// `hook` runs before each return to user mode (told whether that is
+    /// to 32-bit code, a WOW64 thread interrupted in compatibility mode);
+    /// it may change the registers (APCs, suspension) and returns whether
+    /// it did.
+    fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool);
     /// CPU exceptions raised in user mode go to `handler` (with the
     /// faulting address of a page fault).
     fn set_user_exception_handler(handler: fn(&mut TrapFrame, Option<u64>));
@@ -339,7 +341,7 @@ pub fn set_syscall_handler(
     <P as UserEntry>::set_syscall_handler(personality, name, handler)
 }
 #[inline]
-pub fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
+pub fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool) {
     <P as UserEntry>::set_user_return_hook(hook)
 }
 #[inline]

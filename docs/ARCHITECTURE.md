@@ -2149,7 +2149,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
-| UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation") |
+| UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
 | COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite |
 | other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils |
 
@@ -2383,6 +2383,18 @@ ntdll imports.
   %n %r %t %b %0 %%), IGNORE_INSERTS, argument arrays or va_lists,
   ALLOCATE_BUFFER (LocalAlloc).
 - **Consoles** (`console.rs`, `pty.rs`): "Consoles".
+- **Initialization files** (`profile.rs`; `kernel32_misc_test`):
+  Get/WritePrivateProfileStringW and the win.ini forms read the whole
+  file on each call and write it back whole on each change (no cache;
+  Windows' caching is not observable but in timing). A bare file name
+  is in the Windows directory; sections and keys match without case,
+  blanks around names and values and one pair of quotes around a value
+  are not part of them, ';' lines are comments; lists (a NULL section
+  or key) are NUL-separated with a final NUL, cut at size - 2. Text is
+  UTF-16 after its byte-order mark, else the ANSI code page (UTF-8),
+  written back as read (new files ANSI). A new key goes after its
+  section's last entry, a new section at the end. win.ini is a file, not
+  mapped to the registry (IniFileMapping).
 - **Files replaced in one step**: MoveFileExW with
   MOVEFILE_REPLACE_EXISTING renames with FileRenameInformation's
   ReplaceIfExists (the target is never deleted first); ReplaceFileW
@@ -2751,7 +2763,11 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   clones share the block and its size with positions of their own; the
   block is freed with the last stream when asked; positions are 32-bit,
   Seek past them STG_E_SEEKERROR), CoFileTimeNow, CoGetCurrentProcess (a
-  per-thread number from a count, never reused), an aggregatable
+  per-thread number from a count, never reused), a server process's
+  reference count (CoAddRefServerProcess/CoReleaseServerProcess: the
+  new count; at 0 the class objects are suspended, as
+  CoSuspendClassObjects does until CoResumeClassObjects; with no local
+  servers nothing is refused while suspended), an aggregatable
   free-threaded marshaler whose IMarshal methods are E_NOTIMPL, and
   CoWaitForMultipleHandles (no message pumping). In-process classes
   registered under HKCR\CLSID are created from their DLLs ("UI
@@ -2797,7 +2813,14 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   month/day/year, year-month-day and English month names; the forms
   Windows reads relative to the current year are recorded); VarCmp
   (Windows' rules: a string is greater than any number, an empty one
-  equals VT_EMPTY, strings through kernel32's CompareStringW), VarBstrCmp
+  equals VT_EMPTY, strings through kernel32's CompareStringW), variant
+  arithmetic and logic (`arith.rs`: VarAdd/Sub/Mul/Div/Idiv/Mod,
+  VarAnd/Or/Xor, VarNeg/Not, with the result types Wine's vartest.c
+  records for Windows: the wider operand type, integers moving up a
+  type on overflow, NULL propagating, BSTRs concatenated or read as
+  doubles; VT_DECIMAL and object operands are DISP_E_BADVARTYPE,
+  recorded), VarR4FromStr, VarBstrFromDate (en-US "M/D/YYYY h:mm:ss
+  AM", the date alone at midnight, the time alone on day 0), VarBstrCmp
   (#314: CompareStringW in the locale given, a NULL BSTR empty);
   SAFEARRAYs (descriptors with the VARTYPE/IRecordInfo/IID prefix, bounds
   stored rightmost first, BSTR/interface/VARIANT elements owned);
@@ -2810,7 +2833,13 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
 ### Other DLLs and programs
 
 - **shell32, version, powrprof, comctl32, user32 strings**: profile
-  folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath),
+  folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath:
+  the profile's, the Start menu's and Programs under it, per user in
+  %APPDATA% and for all in %ProgramData%, FOLDERID_UserProgramFiles in
+  %LOCALAPPDATA%\Programs; CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
+  missing folder and its parents; without them the path is given even
+  when the folder is missing, as gala's profile does not hold every
+  folder Windows makes with one; `shell32_test`),
   version resources read from PE files and walked (GetFileVersionInfo*,
   VerQueryValue*; a bare file name is found as LoadLibrary searches,
   through SearchPathW; the Ex forms ignore the MUI flags: no MUI files),
@@ -4554,7 +4583,21 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (`window::is_popup`; `window::frame` gives each top-level window's
   frame: none for these). An unregistered class makes CreateWindowExW
   fail with ERROR_CANNOT_FIND_WND_CLASS and records
-  `user32.dll!CreateWindowExW(<class>)`.
+  `user32.dll!CreateWindowExW(<class>)`. GetClassInfoW copies
+  GetClassInfoExW's fields to WNDCLASSW's offsets (the style at 0, then
+  padding, the procedure at 8): frameworks that register a class per
+  control type (Delphi's VCL) compare the procedure with their own
+  before registering again. Classes are process-wide (32), keyed by name
+  without the instance.
+- **Effects and ownership** (`effects.rs`): SetLayeredWindowAttributes
+  keeps a WS_EX_LAYERED window's key, alpha and flags for
+  GetLayeredWindowAttributes (the desktop does not blend: recorded);
+  AnimateWindow shows or hides as documented, with its failure cases,
+  without playing the animation (recorded); ShutdownBlockReasonCreate/
+  Query/Destroy keep a window's reason; GetLastActivePopup is the owned
+  popup `window::activate` recorded with its owner, while it is there
+  and shown; ShowOwnedPopups hides the shown owned popups and shows the
+  ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
 - **The message queue**: one per process (256 entries, an auto-reset
   event), filtered by thread. WM_PAINT is synthesised by GetMessage /
   PeekMessage when a visible window is invalid and the queue is empty,
@@ -4933,6 +4976,15 @@ but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
   window, position); the calls answer as documented while it lasts, but
   nothing draws the drag image yet (recorded per drag; it needs saving
   and restoring the window's pixels under it).
+- **Flat scroll bars** (`flatsb.rs`): comctl32 6 draws no flat ones, so
+  a window's are its user32 scroll bars (every FlatSB_ scroll call is
+  user32's); InitializeFlatSB gives the window a record of the
+  properties (the system metrics' sizes, FSB_FLAT_MODE), which
+  FlatSB_Set/GetScrollProp change and read (WSB_PROP_HSTYLE: whether it
+  was initialized; WSB_PROP_WINSTYLE: the window's scroll styles);
+  UninitializeFlatSB drops it (S_FALSE when there was none). Records of
+  windows that are gone are dropped at the next InitializeFlatSB (no
+  subclass: the window procedure stays the program's).
 
 #### Tooltips
 
@@ -5165,7 +5217,15 @@ then riched20.dll).
   file's tables by tag (table 0: the whole file; GDI_ERROR for the
   bitmap fixed-pitch font, which has no file); EnumFontFamiliesExW knows
   one family, Selawik (an empty name enumerates its Regular face, its
-  name each of its four faces; other names nothing).
+  name each of its four faces; other names nothing); EnumFontsW is it
+  with DEFAULT_CHARSET (ENUMLOGFONTEXW and NEWTEXTMETRICEXW start with
+  what FONTENUMPROCW takes).
+- **Older calls** (`older.rs`, Delphi's VCL): GetTextExtentPointW is
+  GetTextExtentPoint32W, CreatePenIndirect CreatePen, UnrealizeObject
+  TRUE for brushes and palettes (nothing realized to reset),
+  RectVisible against the clip box, LineDDA (one point per step of the
+  longer axis, the other coordinate rounded half away from the start,
+  the last point not reported).
 - **Exports with no use on gala yet** (`absent.rs`): chrome.dll
   resolves all its gdi32 imports at once with GetProcAddress, which does
   not return `gala_stubs` stubs, so these are real exports that fail as
@@ -5377,7 +5437,7 @@ ROADMAP PK has the stages and their status; in short:
 | Client commands, winget-pkgs trees, zip and portable installs (per user and machine-wide), shims, transactions (PK stages 1-2) | in use; scenarios `pk_install_zip`, `pk_install_machine` |
 | Downloads and manifests over HTTP(S) (PK stages 1-2, TLS step 4) | in use: gala.exe over winhttp and Schannel; GitHub sources host-tested; scenario `pk_install_https` |
 | The winget resolver (`galapkg::winget`) | in use by every package command: selection, dependencies, ARP matching; scenarios `pk_install_zip`, `pk_install_nsis` |
-| Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`); a real Inno Setup installer runs up to its own WOW64 check (`pk_install_inno`, PENDING) |
+| Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`) and Inno Setup (Inno Setup 7.1.1's own installer, scenario `pk_install_inno`: installed, run, uninstalled; its shortcuts and its IDE's file associations not made yet) |
 | MSIX/AppX reading (PK stage 4 groundwork) | built, host-tested; nothing installed |
 | MSI reading, LZX, install plans (PK stage 5 groundwork) | built, host-tested; nothing runs an installer |
 
@@ -5638,12 +5698,11 @@ as winget runs them:
   `restart-required`); anything else is exit 4 naming the code.
   ERROR_BAD_EXE_FORMAT (a 32-bit installer: gala has no WOW64) is exit
   3 and the ledger line `gala.exe!install(32-bit installer: WOW64)`.
-  Inno Setup 7 builds x64 installers (SetupArchitecture=x64), which
-  gala starts, but every Inno Setup refuses a Windows without x86
-  support ("Machine types supported by system: x64" in its log, then
-  "This program does not support the version of Windows..."; it asks
-  IsWow64GuestMachineSupported and looks for SysWOW64\kernel32.dll),
-  so a real Inno install waits for WOW64 (`pk_install_inno`).
+  Inno Setup 7 builds x64 installers (SetupArchitecture=x64), but every
+  Inno Setup refuses a Windows without x86 support (it asks
+  IsWow64GuestMachineSupported and looks for SysWOW64\kernel32.dll; its
+  log says "Machine types supported by system: x86 x64" since WOW stage
+  1).
 - **Finding the install**: through its ARP entry, from a snapshot of the
   HKCU and HKLM Uninstall keys taken before the run: the manifest's
   ProductCode if that key exists; else the one new key, or the new key
@@ -5681,9 +5740,9 @@ as winget runs them:
   FILE_FLAG_DELETE_ON_CLOSE and MoveFileExW's DELAY_UNTIL_REBOOT
   ("kernel32"); CreateProcessW accepting CREATE_DEFAULT_ERROR_MODE (the
   error mode is never inherited on gala). All are checked by
-  win32_misc_test. DialogBoxParamW, MessageBoxIndirectW,
-  SetClassLongPtrW, WritePrivateProfileStringW and SHCLSIDFromString are
-  stubs (UI and INI paths a silent install does not take).
+  win32_misc_test. DialogBoxParamW, MessageBoxIndirectW and
+  SHCLSIDFromString are stubs (UI paths a silent install does not
+  take).
 - **What Inno Setup's loader and Setup (Delphi's VCL) need of gala**
   (win32_misc_test, kernel32_locale_test, gui_test): kernel32's
   EnumCalendarInfoW (the era, by LCID), SetSearchPathMode (the mode
@@ -5697,9 +5756,8 @@ as winget runs them:
   GlobalFindAtomW, GlobalDeleteAtom, GlobalGetAtomNameW: integer atoms
   and counted string atoms from 0xC000; **limit**: per process, where
   Windows keeps one per session, so other processes do not see them),
-  IsWow64GuestMachineSupported (S_OK, FALSE for every machine) and
-  GetSystemWow64DirectoryW (ERROR_CALL_NOT_IMPLEMENTED): no WOW64, which
-  is what stops Inno; the LCTYPEs Delphi reads (LOCALE_SSHORTTIME,
+  IsWow64GuestMachineSupported and GetSystemWow64DirectoryW (x86 and
+  SysWOW64, through WOW64: Inno's check); the LCTYPEs Delphi reads (LOCALE_SSHORTTIME,
   ITIMEMARKPOSN, ICALENDARTYPE, IOPTIONALCALENDAR, IFIRSTDAYOFWEEK,
   IFIRSTWEEKOFYEAR, IDIGITSUBSTITUTION; their numbers checked against
   winnls.h); user32's SetClassLongPtrW (procedure, background, icons,
@@ -5715,10 +5773,36 @@ as winget runs them:
   OpenThemeDataForDpi (no theme); winspool.drv (`user/winspool`, a
   machine without printers: EnumPrintersW lists none, GetDefaultPrinterW
   ERROR_FILE_NOT_FOUND, OpenPrinterW ERROR_INVALID_PRINTER_NAME); the
-  UCRT (Microsoft's ucrtbase.dll, as other scenarios ship it). The rest
-  of Setup's static imports (FlatSB_*, ImageList_*, MDI, metafile,
-  printing and profile functions) are stubs; `tools/inno_setup_exe.py`
-  writes Setup out of an installer for `tools/import_survey.py`.
+  UCRT (Microsoft's ucrtbase.dll, as other scenarios ship it). Its
+  second stage (Setup run again as `<installer>.tmp`, which installs)
+  needs: comctl32's flat scroll bars (the VCL initializes them on every
+  scrolling control), user32's GetClassInfoW (the procedure where
+  WNDCLASSW has it: the VCL compares it with its own before registering
+  a control's class, and a wrong one made it re-register, failing with
+  ERROR_CLASS_ALREADY_EXISTS), GetLastActivePopup and ShowOwnedPopups
+  (the VCL asks for the active popup when a run ends), gdi32's
+  EnumFontsW, GetTextExtentPointW, LineDDA and the other older calls
+  (`older.rs`), shell32's Start menu folders and
+  FOLDERID_UserProgramFiles (`{group}`, `{userpf}`; created with
+  CSIDL_FLAG_CREATE/KF_FLAG_CREATE), kernel32's private profile
+  functions (its `.url` Internet shortcut), and what Delphi's units look
+  up at start (oleaut32's Var* arithmetic, ole32's server-process
+  count, user32's AnimateWindow and SetLayeredWindowAttributes, msctf's
+  SetInputScope): comctl32_test, user32_test, gdi32_test, shell32_test,
+  kernel32_misc_test, oleaut32_test, ole32_test. Still missing, and
+  reported but not fatal to a silent install: shortcuts (Inno creates
+  its `[Icons]` through CLSID_ShellLink's IShellLinkW and IPersistFile:
+  REGDB_E_CLASSNOTREG, the ledger's `CoGetClassObject(class not
+  registered)` 0x21401, and Inno logs and skips each one), and the
+  `[Run]` entry `ISIDE.exe /assoc` (the IDE registering the .iss file
+  type), which does not load: comdlg32's GetFileTitleW, ReplaceTextW,
+  ChooseColorW, PrintDlgW, shell32's SHAddToRecentDocs, user32's
+  SendDlgItemMessageW and GetMenuBarInfo, kernel32's
+  FileTimeToDosDateTime and FindStringOrdinal are missing exports
+  (Inno logs its exit code and goes on). The rest of Setup's static
+  imports (ImageList_*, MDI, metafile and printing functions) are stubs
+  a silent install does not call; `tools/inno_setup_exe.py` writes
+  Setup out of an installer for `tools/import_survey.py`.
 
 ### Tests
 
@@ -5744,13 +5828,14 @@ user scope. `pk_install_test machine` (scenario `pk_install_machine`,
 `as=system`: an administrator) installs PkScoped machine-wide (Program
 Files, the HKLM entry, Links on the machine's PATH), runs its command
 from that PATH, lists, upgrades it keeping machine scope and
-uninstalls it. `pk_install_test inno` (scenario `pk_install_inno`,
-PENDING until WOW64) installs JRSoftware.InnoSetup.7 (winget-pkgs' real
+uninstalls it. `pk_install_test inno` (scenario `pk_install_inno`)
+installs JRSoftware.InnoSetup.7 (winget-pkgs' real
 manifest; the installer, PREBUILT `innosetup`, in the snapshot's
 mirror) with `--scope user --silent` and expects Inno's files, its
 `Inno Setup 7_is1` entry found by ProductCode, ISCC.exe running, `list`,
-and uninstall through its QuietUninstallString; today it ends at
-Setup's own WOW64 check (the install log's `setup-log:` lines). `pk_install_test https` (scenario `pk_install_https`, with
+and uninstall through its QuietUninstallString (Setup's own log is in
+the serial log, and on a failure its last lines are the install log's
+`setup-log:` lines). `pk_install_test https` (scenario `pk_install_https`, with
 schannel_test's Nginx in the guest) installs GalaTest.PkHttps, whose
 zip is not mirrored: Nginx serves it (`user/pk_install_test/served`)
 behind a release URL that answers 302, so gala downloads it over
@@ -6218,9 +6303,10 @@ packages (.eappx), flat bundles; AppxSignature.p7x is only noticed.
 
 ### Limits and next steps
 
-In ROADMAP PK's order: winget's source index; stage 3's rest (a real
-Inno Setup install: WOW64 first, which every Inno Setup checks for;
-the manifest's InstallerSuccessCodes/ExpectedReturnCodes; Scope
+In ROADMAP PK's order: winget's source index; stage 3's rest (what Inno
+Setup's own install still lacks: shortcuts through IShellLinkW, its
+IDE's `/assoc` run; an x86 Inno installer, after WOW stage 3; the
+manifest's InstallerSuccessCodes/ExpectedReturnCodes; Scope
 switches and elevation for machine-wide installers that are programs;
 a tracking catalog of gala's own instead of tagging vendors' ARP keys);
 stage 4 (MSIX on the reader above: signature validation against
@@ -6264,6 +6350,10 @@ stations and desktops a program creates are refused until stage 3).
 
 ### Other DLLs
 
+- msctf (`user/msctf`): SetInputScope and SetInputScopes, S_OK for a
+  window and without effect (no text services to read them; Delphi's
+  VCL calls them on its edit controls); the TSF COM objects are not
+  provided (`user32_test`).
 - advapi32: trustees and BuildSecurityDescriptorW, AddMandatoryAce,
   GetSecurityDescriptorSacl, RegNotifyChangeKeyValue (asynchronous:
   accepted, never signaled, recorded).
@@ -6370,9 +6460,12 @@ and AMD's manuals for compatibility mode, Wine's WOW64 headers
 |---|---|
 | PE32 executables, the 32-bit address limit, the PEB32 and 32-bit parameters, TEB32s, the CPU area | `kernel/src/nt/wow64.rs`, `nt/process.rs` (`spawn_inner`), `nt/thread.rs` (`create_wow64`), `nt/params.rs` (`build32`), `nt/layout.rs` (`wow64`) |
 | The TEB32 segment, DS/ES/FS at every switch | `arch/x86_64/gdt.rs` (`TEB32_SELECTOR`, `set_teb32`), `percpu::load_teb32`, `sched::set_teb32`, `sched/switch.rs` |
-| gala's wow64.dll: thread start, the transition, the system call thunks | `user/wow64` (x64 DLL, no imports) |
-| The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `win32_misc_test`'s `wow64` |
+| gala's wow64.dll: thread start, the transition, the exception dispatcher | `user/wow64/src/lib.rs` (x64 DLL, no imports) |
+| Its conversions: services by argument kind, information classes, threads and contexts, fault-safe access | `user/wow64/src/generic.rs`, `info.rs`, `thread.rs`, `mem.rs` |
+| 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
+| The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
+| The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64` |
 
 ### Decisions
 
@@ -6391,16 +6484,19 @@ and AMD's manuals for compatibility mode, Wine's WOW64 headers
   gate). The kernel does what only it can: the 32-bit address space,
   the PEB32/TEB32 beside the 64-bit ones, the compatibility-mode
   segments, mapping wow64.dll, the answers about a process's machine
-  (ProcessWow64Information), and later the 32-bit view of the
-  registry (below) and the 32-bit IO_STATUS_BLOCK at completion.
+  (ProcessWow64Information), the IO_STATUS_BLOCK in the x86 layout
+  (below), a WOW64 thread's 64-bit stack and its 32-bit stack's guard
+  page, and later the 32-bit view of the registry.
 - **One DLL, gala's own ABI**: Windows splits the layer into wow64.dll,
   wow64cpu.dll and wow64win.dll on top of the 64-bit ntdll; gala has one
   `wow64.dll` (in System32, 64-bit, no imports: it makes system calls
   directly) whose entry points are gala's (`GalaWow64Start`,
-  `GalaWow64Transition`), found by the kernel by export name. There is
-  no 64-bit ntdll in a 32-bit process: the kernel will deliver a WOW64
-  thread's exceptions and APCs to wow64.dll's own 64-bit dispatchers
-  (stage 3). Programs that look for the 64-bit ntdll in a 32-bit
+  `GalaWow64Transition`, `GalaWow64Exception`), found by the kernel by
+  export name. There is no 64-bit ntdll in a 32-bit process: the
+  kernel delivers exceptions in wow64.dll's 64-bit code to its own
+  dispatcher (the process's exception dispatcher is
+  `GalaWow64Exception`), and will deliver a WOW64 thread's 32-bit
+  exceptions and APCs there too (stage 3). Programs that look for the 64-bit ntdll in a 32-bit
   process (debuggers, code switching to 64-bit itself) are out of scope.
 - **What the 32-bit side sees is Windows'**: CS 0x23, DS/ES/SS 0x2b,
   FS 0x53 whose base is the TEB32; the 32-bit ntdll's system call stub
@@ -6455,10 +6551,21 @@ SYSCALL only ever comes from wow64.dll's 64-bit code.
   Windows without WOW64).
 - **Threads**: each has a TEB32 (one page, placed top-down below the
   limit: Self, StackBase/Limit, DeallocationStack, ClientId, the PEB32,
-  WOW32Reserved = the transition, ExceptionList = 0xffffffff) and a CPU
-  area in its 64-bit TEB's second page (TEB64 + 0x1a00): the x86
-  context, the 64-bit stack pointer the transition switches to, and a
-  64-bit IO_STATUS_BLOCK. The main thread starts in wow64.dll's
+  WOW32Reserved = the transition, ExceptionList = 0xffffffff), a 64-bit
+  stack for wow64.dll's code (256 KiB reserved, below the limit; the
+  64-bit TEB describes it: `wow64::reserve_stack64`) and a CPU area in
+  its 64-bit TEB's second page (TEB64 + 0x1a00): the x86 context and the
+  64-bit stack pointer the transition switches to. Every thread of a
+  WOW64 process is a WOW64 thread: NtCreateThread there takes the
+  32-bit start as wow64.dll converts it (a CONTEXT with SegCs 0x23 and
+  the 32-bit registers, an INITIAL_TEB with the 32-bit stack, both
+  zero-extended; `create_wow64_thread`); any other CONTEXT is refused
+  (STATUS_INVALID_PARAMETER, in the ledger). A WOW64 thread's 64-bit
+  stack and TEB32 are freed when it exits (unless it is the process's
+  last: `wow64::release_thread`). Its 32-bit stack grows like a 64-bit
+  one: a guard page in the TEB32's stack range moves down and the
+  TEB32's StackLimit follows (`vm::guard_hit`, `current_stack32`). The
+  main thread starts in wow64.dll's
   `GalaWow64Start` (rcx = the CPU area) on a 256 KiB 64-bit stack, with
   the area's context set to the 32-bit start: eip the entry point (also
   in eax), esp the image's stack (its reservation, below 2 MiB as for
@@ -6474,26 +6581,65 @@ through GS, saves the caller's registers there (eip = the return into
 the stub, esp after it), moves to the 64-bit stack and calls
 `gala_wow64_service(number, args, area)`. The status goes into the
 area's eax and `gala_wow64_enter32` re-enters 32-bit code with IRETQ
-from the area (so a changed context, later Wow64SetThreadContext, takes
-effect the same way). Conversions, per argument: handles are
-sign-extended (pseudo-handles are negative), pointers zero-extended;
-pointer-sized outputs (PVOID*, SIZE_T*, HANDLE*) go through 64-bit
-temporaries; structures with pointer-sized fields are converted per
-service and information class (IO_STATUS_BLOCK, MEMORY_BASIC_INFORMATION,
-PROCESS_BASIC_INFORMATION, ProcessWow64Information so far; next
-UNICODE_STRING, OBJECT_ATTRIBUTES, CONTEXT, the system and thread
-information classes). A service or class without a conversion fails
-with STATUS_NOT_IMPLEMENTED (STATUS_INVALID_INFO_CLASS for a class) and
-is recorded in the ledger (`wow64.dll!service 0x00c1`,
-`wow64.dll!NtQueryVirtualMemory(class)`), so a program's first missing
-thunk names itself.
+from the area (so a changed context, NtSetContextThread or NtContinue
+of the caller, takes effect the same way; those return the new eax).
+Conversions:
 
-Converted so far: NtClose, NtTerminateProcess,
-NtQueryPerformanceCounter, NtReadFile/NtWriteFile (synchronous; the
-APC form is refused), NtAllocate/Free/ProtectVirtualMemory,
-NtQueryVirtualMemory (MemoryBasicInformation), NtQueryInformationProcess
-(basic information with the PEB32, ProcessWow64Information, handle
-count, session).
+- **By argument kind** (`generic::TABLE`, most services): handles
+  sign-extended (pseudo-handles are negative); values and pointers to
+  data laid out alike zero-extended; HANDLE* (probed before the call, so
+  a handle is never created that cannot be handed back), PVOID* and
+  SIZE_T* through 64-bit temporaries; OBJECT_ATTRIBUTES (with its
+  UNICODE_STRING and an absolute security descriptor; a self-relative
+  one holds offsets and passes), UNICODE_STRING, CLIENT_ID in and out.
+  An APC routine (I/O, timers) is refused (STATUS_NOT_SUPPORTED, in the
+  ledger) until APCs reach 32-bit code. gala's own GalaCreateProcess
+  block has fixed 8-byte fields whatever the caller's bitness, so it
+  passes.
+- **By information class** (`info`): classes with pointer-sized fields
+  converted (process basic/quota/VM counters/debug port/WOW64/image
+  name, thread basic with the TEB32 (from TEB64.ExceptionList) and start
+  address, set-thread affinity/token/start/name, system basic with the
+  32-bit application range and the process list, token SIDs, groups and
+  DACL with their pointers rebased into the caller's buffer and the x86
+  length (STATUS_BUFFER_TOO_SMALL when short), object name and type,
+  section basic and image, memory basic and section name, file rename,
+  link and completion, directory-object entries, a symbolic link's
+  target, a wait's handle array); classes laid out alike pass; any other
+  fails with STATUS_INVALID_INFO_CLASS. Variable results go through
+  scratch memory (wow64.dll has no heap: `mem::Scratch`).
+- **Threads and contexts** (`thread`): NtCreateThread (above);
+  NtGetContextThread gives the x86 CONTEXT from the CPU area (the
+  caller's own, or a thread in wow64.dll's code: a system call) or from
+  the registers of a thread the kernel stopped in 32-bit code (its
+  64-bit CONTEXT says CS 0x23); NtSetContextThread writes the same
+  places; the x87/SSE state from FXSAVE (EXTENDED_REGISTERS, and
+  FLOATING_SAVE_AREA derived from it).
+
+A service or class without a conversion fails with
+STATUS_NOT_IMPLEMENTED (STATUS_INVALID_INFO_CLASS for a class) and is
+recorded in the ledger (`wow64.dll!service 0x00c1`,
+`wow64.dll!NtQueryVirtualMemory(class)`, `wow64.dll!service 0x0045
+(32-bit APC)`), so a program's first missing thunk names itself.
+
+**Fault-safe access**: wow64.dll reads and writes a caller's memory
+(its arguments on the 32-bit stack included) only through
+`gala_wow64_copy`, whose one memory-touching instruction
+`GalaWow64Exception` recognizes: a fault there resumes at the copy's
+failure exit (NtContinue), and the call fails with
+STATUS_ACCESS_VIOLATION, as Windows' thunks do with `__try`. Any other
+exception in wow64.dll is a bug: reported through
+GalaUnhandledException (the crash report shows wow64.dll's 64-bit
+registers) and the process ends. Exceptions in 32-bit code are not
+delivered there (`deliver_to_user` refuses a CS 0x23 frame: stage 3).
+
+**IO_STATUS_BLOCK**: the kernel writes it in the x86 layout (Status,
+Information: 8 bytes) for a WOW64 process (`Process::write_iosb`, at
+every place it is written, in the call or at a later completion), so
+wow64.dll passes the caller's block through and pending I/O completes
+into it. Invariant: in a WOW64 process every system call comes from
+wow64.dll on behalf of 32-bit code; wow64.dll never passes a 64-bit
+block of its own.
 
 ### The 32-bit system DLLs (stage 3)
 
@@ -6545,9 +6691,11 @@ target; user/bin gets the 32-bit DLLs as `test<name>32.dll`.
   with CS 0x33 even when it interrupted 32-bit code (the user-return
   path then needs the target CS, which `UserRegs` lacks today);
   wow64.dll converts the CONTEXT to the x86 one and calls the 32-bit
-  ntdll's dispatcher on the 32-bit stack. ThreadWow64Context
-  (Wow64Get/SetThreadContext) reads and writes the CPU area, or the
-  interrupted 32-bit registers.
+  ntdll's dispatcher on the 32-bit stack (the user-return hook already
+  learns whether it returns to 32-bit code: `Parked::compat`).
+  ThreadWow64Context (Wow64Get/SetThreadContext, for 64-bit debuggers)
+  would read and write what wow64.dll's NtGet/SetContextThread do: the
+  CPU area, or the 32-bit registers of a thread stopped in 32-bit code.
 
 ### Observability
 
@@ -6556,7 +6704,9 @@ target; user/bin gets the 32-bit DLLs as `test<name>32.dll`.
   32-bit x86 (WOW64)`, `"machine":"x86"` (`"x64"` otherwise) in
   `process start`; `thread create` carries `"teb32"`.
 - `wow64: using ...wow64.dll, GalaWow64Start at rva ..., GalaWow64Transition
-  at rva ...` once; a missing or unusable wow64.dll, a 32-bit program
+  at rva ..., GalaWow64Exception at rva ...` once; `wow64: <name> (pid
+  N): cannot free an exited thread's 64-bit stack|TEB32 at ...` if
+  freeing fails; a missing or unusable wow64.dll, a 32-bit program
   with imports and a platform that cannot run 32-bit code (gala-um)
   each have their line.
 - Crash reports of an exception in 32-bit code (CS 0x23) say `32-bit
@@ -6566,18 +6716,22 @@ target; user/bin gets the 32-bit DLLs as `test<name>32.dll`.
   32-bit code: eip=...`); the NMI state dump marks a CPU in 32-bit code
   `user 32-bit`.
 - Every service or class wow64.dll cannot convert is in the ledger.
+- A bug in wow64.dll (an exception outside the fault-safe copy) ends the
+  process with a crash report of wow64.dll's own registers
+  (`at 0x... (wow64.dll+0x...)`).
+- `wow64_test` and `wow64_thread_test` name a failing check's source
+  line (`(line 0x...) wow64_test: check N failed, got ...`).
 
 ### Limits (now)
 
-- 32-bit executables without imports only (no 32-bit ntdll yet); the
-  main thread only (NtCreateThreadEx from 32-bit code is not thunked).
-- An invalid 32-bit pointer passed to a converted service faults in
-  wow64.dll (a crash report) instead of failing with
-  STATUS_ACCESS_VIOLATION.
-- I/O that completes later writes the 64-bit IO_STATUS_BLOCK in the CPU
-  area, not the caller's (recorded in the ledger).
+- 32-bit executables without imports only (no 32-bit ntdll yet).
 - No exceptions or APCs delivered to 32-bit code: an exception ends the
-  process (with its crash report).
+  process (with its crash report); APC routines (NtQueueApcThread, I/O,
+  timers) are refused.
+- Not converted yet (the ledger names them): the job information
+  classes, AFD's IOCTLs (sockets), gala's window and console services,
+  CONTEXT_FLOATING_POINT on NtSetContextThread. gala has no
+  NtCreateThreadEx (kernel32 uses NtCreateThread).
 - A kernel handover refuses a WOW64 process ("32-bit code (WOW64)").
 - gala-um cannot run 32-bit code (the segments are the host kernel's).
 

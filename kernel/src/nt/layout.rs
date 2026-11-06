@@ -131,10 +131,7 @@ pub mod wow64 {
         /// The 64-bit stack pointer wow64.dll's transition from 32-bit
         /// code switches to (u64).
         pub const STACK64: u64 = 0x2d0;
-        /// An IO_STATUS_BLOCK (16 bytes) the 64-bit calls of a 32-bit
-        /// caller's I/O write, converted back when they complete at once.
-        pub const IOSB64: u64 = 0x2d8;
-        pub const SIZE: u64 = 0x2e8;
+        pub const SIZE: u64 = 0x2d8;
     }
 
     /// WOW64_CONTEXT offsets (winnt.h's x86 CONTEXT).

@@ -59,6 +59,7 @@ pub mod peb {
 /// RTL_USER_PROCESS_PARAMETERS (x86) offsets.
 pub mod params {
     pub const FLAGS: usize = 0x08;
+    pub const STANDARD_INPUT: usize = 0x18;
     pub const STANDARD_OUTPUT: usize = 0x1c;
     pub const CURRENT_DIRECTORY: usize = 0x24;
     pub const IMAGE_PATH_NAME: usize = 0x38;
@@ -92,7 +93,38 @@ stubs! {
     ntrt_nt_protect_virtual_memory = 0x0050;
 }
 
+// The generic stub (cdecl `ntrt_syscall(number, args, count)`): pushes
+// the arguments as a caller of an ntdll stub would, then calls a stub-shaped
+// `call fs:[0xc0]; ret`, so the transition sees the stub's return, the
+// caller's return and the arguments above them, as from ntdll.
+global_asm!(
+    ".globl _ntrt_syscall",
+    "_ntrt_syscall:",
+    "push ebp",
+    "mov ebp, esp",
+    "push esi",
+    "mov esi, [ebp + 12]",
+    "mov ecx, [ebp + 16]",
+    "2:",
+    "test ecx, ecx",
+    "jz 3f",
+    "push dword ptr [esi + 4 * ecx - 4]",
+    "dec ecx",
+    "jmp 2b",
+    "3:",
+    "mov eax, [ebp + 8]",
+    "call 4f",
+    "lea esp, [ebp - 4]",
+    "pop esi",
+    "pop ebp",
+    "ret",
+    "4:",
+    "call dword ptr fs:[0xc0]",
+    "ret",
+);
+
 unsafe extern "C" {
+    fn ntrt_syscall(number: u32, args: *const usize, count: usize) -> NtStatus;
     fn ntrt_nt_write_file(
         file: Handle,
         event: Handle,
@@ -143,6 +175,184 @@ unsafe extern "C" {
         new: u32,
         old: *mut u32,
     ) -> NtStatus;
+}
+
+/// The 32-bit system call `number` (an x64 service number, `nr`) with
+/// `args`, as ntdll's stub for it makes it.
+///
+/// # Safety
+/// The arguments must be what the service expects (pointers valid for
+/// what it reads and writes, or deliberately invalid in a test).
+pub unsafe fn syscall(number: u32, args: &[usize]) -> NtStatus {
+    // SAFETY: the stub pushes exactly `args.len()` values from `args`.
+    unsafe { ntrt_syscall(number, args.as_ptr(), args.len()) }
+}
+
+/// x64 service numbers (as `kernel/src/nt/syscalls.rs`; those above 0x7f00
+/// are gala's own until verified on the pinned build, so a program using
+/// them gets STATUS_INVALID_SYSTEM_SERVICE on Windows).
+pub mod nr {
+    pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x0004;
+    pub const NT_READ_FILE: u32 = 0x0006;
+    pub const NT_WRITE_FILE: u32 = 0x0008;
+    pub const NT_REMOVE_IO_COMPLETION: u32 = 0x0009;
+    pub const NT_RELEASE_SEMAPHORE: u32 = 0x000a;
+    pub const NT_SET_INFORMATION_THREAD: u32 = 0x000d;
+    pub const NT_SET_EVENT: u32 = 0x000e;
+    pub const NT_CLOSE: u32 = 0x000f;
+    pub const NT_QUERY_OBJECT: u32 = 0x0010;
+    pub const NT_QUERY_INFORMATION_FILE: u32 = 0x0011;
+    pub const NT_OPEN_KEY: u32 = 0x0012;
+    pub const NT_ENUMERATE_VALUE_KEY: u32 = 0x0013;
+    pub const NT_QUERY_KEY: u32 = 0x0016;
+    pub const NT_QUERY_VALUE_KEY: u32 = 0x0017;
+    pub const NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0x0018;
+    pub const NT_QUERY_INFORMATION_PROCESS: u32 = 0x0019;
+    pub const NT_CREATE_KEY: u32 = 0x001d;
+    pub const NT_FREE_VIRTUAL_MEMORY: u32 = 0x001e;
+    pub const NT_RELEASE_MUTANT: u32 = 0x0020;
+    pub const NT_QUERY_VIRTUAL_MEMORY: u32 = 0x0023;
+    pub const NT_QUERY_INFORMATION_THREAD: u32 = 0x0025;
+    pub const NT_SET_INFORMATION_FILE: u32 = 0x0027;
+    pub const NT_MAP_VIEW_OF_SECTION: u32 = 0x0028;
+    pub const NT_UNMAP_VIEW_OF_SECTION: u32 = 0x002a;
+    pub const NT_TERMINATE_PROCESS: u32 = 0x002c;
+    pub const NT_QUERY_PERFORMANCE_COUNTER: u32 = 0x0031;
+    pub const NT_ENUMERATE_KEY: u32 = 0x0032;
+    pub const NT_OPEN_FILE: u32 = 0x0033;
+    pub const NT_DELAY_EXECUTION: u32 = 0x0034;
+    pub const NT_QUERY_DIRECTORY_FILE: u32 = 0x0035;
+    pub const NT_QUERY_SYSTEM_INFORMATION: u32 = 0x0036;
+    pub const NT_DUPLICATE_OBJECT: u32 = 0x003c;
+    pub const NT_QUERY_ATTRIBUTES_FILE: u32 = 0x003d;
+    pub const NT_CLEAR_EVENT: u32 = 0x003e;
+    pub const NT_OPEN_EVENT: u32 = 0x0040;
+    pub const NT_YIELD_EXECUTION: u32 = 0x0046;
+    pub const NT_CREATE_EVENT: u32 = 0x0048;
+    pub const NT_CREATE_SECTION: u32 = 0x004a;
+    pub const NT_CREATE_THREAD: u32 = 0x004e;
+    pub const NT_PROTECT_VIRTUAL_MEMORY: u32 = 0x0050;
+    pub const NT_QUERY_SECTION: u32 = 0x0051;
+    pub const NT_RESUME_THREAD: u32 = 0x0052;
+    pub const NT_TERMINATE_THREAD: u32 = 0x0053;
+    pub const NT_CREATE_FILE: u32 = 0x0055;
+    pub const NT_QUERY_EVENT: u32 = 0x0056;
+    pub const NT_QUERY_SYSTEM_TIME: u32 = 0x005a;
+    pub const NT_WAIT_FOR_MULTIPLE_OBJECTS: u32 = 0x005b;
+    pub const NT_OPEN_DIRECTORY_OBJECT: u32 = 0x0058;
+    pub const NT_SET_VALUE_KEY: u32 = 0x0060;
+    pub const NT_CREATE_MUTANT: u32 = 0x00c3;
+    pub const NT_CREATE_SEMAPHORE: u32 = 0x00cf;
+    pub const NT_CREATE_TIMER: u32 = 0x00d9;
+    pub const NT_GET_CONTEXT_THREAD: u32 = 0x00f2;
+    pub const NT_QUERY_MUTANT: u32 = 0x0146;
+    pub const NT_QUERY_SEMAPHORE: u32 = 0x015a;
+    pub const NT_QUERY_TIMER: u32 = 0x015f;
+    pub const NT_OPEN_SYMBOLIC_LINK_OBJECT: u32 = 0x0137;
+    pub const NT_QUERY_DIRECTORY_OBJECT: u32 = 0x014a;
+    pub const NT_QUERY_SYMBOLIC_LINK_OBJECT: u32 = 0x016a;
+    pub const NT_SET_CONTEXT_THREAD: u32 = 0x018d;
+    pub const NT_SET_TIMER: u32 = 0x019e;
+    pub const NT_SUSPEND_THREAD: u32 = 0x01bc;
+    pub const GALA_CREATE_PROCESS: u32 = 0x7f02;
+    pub const NT_DELETE_KEY: u32 = 0x7f07;
+    pub const NT_DELETE_VALUE_KEY: u32 = 0x7f08;
+    pub const NT_CREATE_KEYED_EVENT: u32 = 0x7f0f;
+    pub const NT_RELEASE_KEYED_EVENT: u32 = 0x7f12;
+    pub const NT_NOTIFY_CHANGE_DIRECTORY_FILE: u32 = 0x7f13;
+    pub const NT_OPEN_PROCESS_TOKEN: u32 = 0x7f16;
+    pub const NT_QUERY_INFORMATION_TOKEN: u32 = 0x7f1a;
+}
+
+/// UNICODE_STRING (x86: 8 bytes).
+#[repr(C)]
+pub struct UnicodeString {
+    pub length: u16,
+    pub maximum_length: u16,
+    pub buffer: *const u16,
+}
+
+impl UnicodeString {
+    pub fn new(s: &[u16]) -> Self {
+        let bytes = (s.len() * 2) as u16;
+        UnicodeString { length: bytes, maximum_length: bytes, buffer: s.as_ptr() }
+    }
+}
+
+/// OBJECT_ATTRIBUTES (x86: 24 bytes).
+#[repr(C)]
+pub struct ObjectAttributes {
+    pub length: u32,
+    pub root_directory: Handle,
+    pub object_name: *const UnicodeString,
+    pub attributes: u32,
+    pub security_descriptor: *const c_void,
+    pub security_quality_of_service: *const c_void,
+}
+
+pub const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+
+impl ObjectAttributes {
+    /// Names `name` (case-insensitively), no root.
+    pub fn named(name: &UnicodeString) -> Self {
+        ObjectAttributes {
+            length: size_of::<ObjectAttributes>() as u32,
+            root_directory: Handle(0),
+            object_name: name,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: core::ptr::null(),
+            security_quality_of_service: core::ptr::null(),
+        }
+    }
+}
+
+/// A UTF-16 array of an ASCII literal (no terminator).
+#[macro_export]
+macro_rules! wide {
+    ($s:literal) => {{
+        const S: &str = $s;
+        const N: usize = S.len();
+        const W: [u16; N] = {
+            let b = S.as_bytes();
+            let mut w = [0u16; N];
+            let mut i = 0;
+            while i < N {
+                w[i] = b[i] as u16;
+                i += 1;
+            }
+            w
+        };
+        W
+    }};
+}
+
+/// GalaCreateProcess (gala's own service, `nr::GALA_CREATE_PROCESS`): its
+/// block has fixed 8-byte fields whatever the caller's bitness (ARCHITECTURE
+/// "Processes started by programs"), so a 32-bit caller fills the same
+/// layout. Starts `image` (an NT path) with `command_line`, the caller's
+/// standard handles and directory `C:\`: (status, process handle, thread
+/// handle).
+pub fn create_process(image: &[u16], command_line: &[u16]) -> (NtStatus, Handle, Handle) {
+    let directory = [b'C' as u16, b':' as u16, b'\\' as u16];
+    let environment = [0u16, 0];
+    let mut block = [0u64; 15];
+    block[0] = image.as_ptr() as u64;
+    block[1] = image.len() as u64; // length; flags (+12) 0
+    block[2] = command_line.as_ptr() as u64;
+    block[3] = command_line.len() as u64;
+    block[4] = directory.as_ptr() as u64;
+    block[5] = directory.len() as u64;
+    block[6] = environment.as_ptr() as u64;
+    block[7] = environment.len() as u64;
+    // SAFETY: the parameters are mapped for the life of the process.
+    let std = unsafe { process_parameters().add(params::STANDARD_INPUT) as *const [u32; 3] };
+    // SAFETY: as above; handles are sign-extended (pseudo-handles).
+    for (i, h) in unsafe { *std }.into_iter().enumerate() {
+        block[8 + i] = h as i32 as i64 as u64;
+    }
+    // SAFETY: the block is the service's (120 bytes, outputs at 88).
+    let status = unsafe { syscall(nr::GALA_CREATE_PROCESS, &[block.as_mut_ptr() as usize]) };
+    (status, Handle(block[11] as usize), Handle(block[12] as usize))
 }
 
 /// IO_STATUS_BLOCK (x86: 8 bytes).

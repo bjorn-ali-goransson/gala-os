@@ -90,9 +90,10 @@ pub struct Process {
     /// for as long as they are mapped). None for a process of another
     /// personality (a Linux program's ELF image is copied in, `lx::exec`).
     _layout: Option<KArc<super::section::ImageLayout>>,
-    /// ntdll!KiUserExceptionDispatcher in this process, or 0: then user
-    /// exceptions end the process.
-    exception_dispatcher: core::sync::atomic::AtomicU64,
+    /// ntdll!KiUserExceptionDispatcher in this process (in a WOW64
+    /// process wow64.dll's GalaWow64Exception, for its 64-bit code), or 0:
+    /// then user exceptions end the process.
+    pub(super) exception_dispatcher: core::sync::atomic::AtomicU64,
     /// ntdll!KiUserApcDispatcher in this process, or 0 (no user APCs run).
     pub apc_dispatcher: core::sync::atomic::AtomicU64,
     /// The job object the process is in (nt::job).
@@ -266,6 +267,29 @@ impl Process {
 
     pub fn write_u64(&self, addr: u64, value: u64) -> Result<(), UserFault> {
         self.write(addr, &value.to_le_bytes())
+    }
+
+    /// Writes an IO_STATUS_BLOCK at `addr`, in the layout this process's
+    /// code reads: x64's (Status in a pointer-sized union, then
+    /// Information: 16 bytes), or in a WOW64 process the x86 one (8
+    /// bytes). Every call a WOW64 process makes comes from wow64.dll on
+    /// behalf of 32-bit code, which passes its caller's block through, so
+    /// I/O that completes later reports where and as the caller looks
+    /// (ARCHITECTURE "Plan: WOW64").
+    pub fn write_iosb(
+        &self,
+        addr: u64,
+        status: NtStatus,
+        information: u64,
+    ) -> Result<(), UserFault> {
+        let mut b = [0u8; 16];
+        b[0..4].copy_from_slice(&status.0.to_le_bytes());
+        if self.wow64.is_some() {
+            b[4..8].copy_from_slice(&(information as u32).to_le_bytes());
+            return self.write(addr, &b[..8]);
+        }
+        b[8..16].copy_from_slice(&information.to_le_bytes());
+        self.write(addr, &b)
     }
 }
 
@@ -736,18 +760,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     vad.commit(stack_limit - PAGE_SIZE, PAGE_SIZE, vad::PAGE_READWRITE | vad::PAGE_GUARD)?;
     // A WOW64 process's main thread also has a 64-bit stack, for its
     // wow64.dll code (system call thunks), laid out the same way.
-    let stack64 = if info.x86 {
-        use super::layout::wow64::{STACK64_COMMIT, STACK64_RESERVE};
-        let (bottom, _) =
-            vad.reserve(None, STACK64_RESERVE, vad::PAGE_READWRITE, vad::MEM_PRIVATE, false)?;
-        let top = bottom + STACK64_RESERVE;
-        let limit = top - STACK64_COMMIT;
-        vad.commit(limit, STACK64_COMMIT, vad::PAGE_READWRITE)?;
-        vad.commit(limit - PAGE_SIZE, PAGE_SIZE, vad::PAGE_READWRITE | vad::PAGE_GUARD)?;
-        Some((top, limit, bottom))
-    } else {
-        None
-    };
+    let stack64 = if info.x86 { Some(super::wow64::reserve_stack64(&mut vad)?) } else { None };
 
     super::kuser::map_into(&mut space, &mut vad)?;
 
@@ -928,8 +941,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
                 let start = super::wow64::Start32 {
                     eip: entry,
                     esp,
-                    eax: entry,
-                    ebx: peb32,
+                    gpr: [entry, 0, 0, peb32, 0, 0, 0],
                     stack: (stack_top as u32, stack_limit as u32, stack_bottom as u32),
                     stack64: stack64.0,
                 };
@@ -1358,6 +1370,12 @@ fn deliver_to_user(
 ) -> bool {
     let dispatcher = process.exception_dispatcher.load(core::sync::atomic::Ordering::Relaxed);
     if dispatcher == 0 {
+        return false;
+    }
+    // A WOW64 thread's exception in 32-bit code: no 32-bit dispatcher yet
+    // (ROADMAP WOW stage 3); it ends the process with its crash report.
+    // (The process's dispatcher is wow64.dll's, for its 64-bit code.)
+    if frame.cs == u64::from(super::layout::wow64::CS32) {
         return false;
     }
     // Breakpoints report the int3 itself (the trap left rip after it).

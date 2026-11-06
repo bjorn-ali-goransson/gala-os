@@ -324,7 +324,8 @@ fn nmi(frame: &TrapFrame) {
 /// Runs the user-return hook on an interrupt frame from user mode.
 fn user_return(frame: &mut TrapFrame) {
     let mut regs = super::syscall::trap_regs(frame);
-    if super::syscall::run_user_return_hook(&mut regs) {
+    let compat = frame.cs == u64::from(super::gdt::USER32_CS);
+    if super::syscall::run_user_return_hook(&mut regs, compat) {
         super::syscall::set_trap_regs(frame, &regs);
     }
 }

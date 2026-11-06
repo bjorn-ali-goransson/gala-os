@@ -1227,6 +1227,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "msctf"
+version = "0.1.0"
+
+[[package]]
 name = "msftedit"
 version = "0.1.0"
 dependencies = [
@@ -2617,6 +2621,13 @@ version = "0.1.0"
 
 [[package]]
 name = "wow64_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_thread_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
