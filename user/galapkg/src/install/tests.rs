@@ -880,6 +880,16 @@ fn installer_of(entry: &str) -> crate::winget::Installer {
 }
 
 #[test]
+fn x86_portable_is_installable() {
+    // WOW64 runs 32-bit programs: an x86 portable one is gala's to install,
+    // as winget's choice (no fallback to another installer).
+    let x86 = installer_of(
+        "- Architecture: x86\n  InstallerType: portable\n  InstallerUrl: https://h/jq-windows-i386.exe\n",
+    );
+    assert!(gap(&x86).is_none());
+}
+
+#[test]
 fn plans() {
     let portable = installer_of(
         "- Architecture: x64\n  InstallerType: portable\n  InstallerUrl: https://h/jq-windows-amd64.exe\n",
@@ -1051,6 +1061,30 @@ fn inno_install_and_uninstall() {
     assert_eq!(f.runs[1], format!("\"{LOCAL}\\Programs\\InnoSetup\\unins000.exe\" /SILENT"));
     assert!(!f.reg_key_exists(Root::CurrentUser, &k));
     assert!(f.exists(&format!("{LOCAL}\\Programs\\InnoSetup")).is_none());
+}
+
+#[test]
+fn entry_found_by_apps_and_features_product_code() {
+    // A manifest whose ProductCode is only in its AppsAndFeaturesEntries
+    // (winget-pkgs' JRSoftware.InnoSetup): the entry is found by it, as
+    // winget correlates, even when the install made other entries too.
+    let p = crate::winget::Package::from_texts(&[&format!(
+        "PackageIdentifier: A.B\nPackageVersion: 1.0\nPackageLocale: en-US\nPublisher: P\nPackageName: N\nLicense: MIT\nShortDescription: d\nManifestType: singleton\nManifestVersion: 1.10.0\nInstallerType: inno\nAppsAndFeaturesEntries:\n- ProductCode: App 6_is1\nInstallers:\n- Architecture: x86\n  InstallerUrl: https://h/a.exe\n  InstallerSha256: {}\n",
+        "0".repeat(64)
+    )])
+    .unwrap();
+    let mut f = Fake::new();
+    for k in ["Helper_is1", "App 6_is1"] {
+        f.reg_set(
+            Root::CurrentUser,
+            &format!("{UNINSTALL_KEY}\\{k}"),
+            "DisplayName",
+            &RegValue::Sz(k.into()),
+        )
+        .unwrap();
+    }
+    let found = exe::find_entry(&mut f, &[], &p, &p.installers[0], None);
+    assert_eq!(found, Some((Root::CurrentUser, "App 6_is1".to_string(), "ProductCode")));
 }
 
 #[test]
@@ -1641,6 +1675,32 @@ fn a_tree_served_over_https() {
         e.message
     );
     assert!(log_has(&f, "error source list JSON at byte 0: not a JSON value"), "{:#?}", f.log);
+}
+
+#[test]
+fn inno_setup_6_x86_beside_the_7_subpackage() {
+    // winget-pkgs keeps JRSoftware.InnoSetup's versions beside the
+    // JRSoftware.InnoSetup.7 package's directory (InnoSetup/7): 6.5.4 is
+    // found, its x86 installers chosen on x64 (WOW64), no fallback.
+    use crate::winget::Architecture;
+    use crate::winget::Scope;
+    use crate::winget::select::{CommandOptions, Mode};
+    let mut f = Fake::new();
+    let p = source().find(&mut f, "JRSoftware.InnoSetup", None).unwrap();
+    assert_eq!(p.version, "6.5.4");
+    let o = Options { scope: Some(Scope::User), ..Options::default() };
+    let user = select_installer(&mut f, &p, &o.request(None)).unwrap();
+    let i = &p.installers[user];
+    assert_eq!(i.architecture, Architecture::X86);
+    // Its ProductCode comes from the root AppsAndFeaturesEntries (ARP).
+    assert_eq!(i.apps_and_features[0].product_code.as_deref(), Some("Inno Setup 6_is1"));
+    assert!(gap(i).is_none(), "an x86 inno installer is gala's to run");
+    let opts = CommandOptions { mode: Mode::Silent, log: Some("L".into()), ..Default::default() };
+    assert_eq!(
+        exe::install_command(i, "C:\\t\\innosetup-6.5.4.exe", &opts).unwrap(),
+        "\"C:\\t\\innosetup-6.5.4.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART \
+         /LOG=\"L\" /CURRENTUSER"
+    );
 }
 
 #[test]

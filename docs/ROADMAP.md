@@ -80,15 +80,14 @@ In order:
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW**: stage 4's rest (the x86 Inno installer under `gala install`,
-   winget's x86 choices; 32-bit sockets through wow64.dll); stage 3's
-   rest (kernelbase; kernel32_test built for x86).
+5. **WOW** follow-ups (done otherwise): 32-bit sockets through
+   wow64.dll (AFD's IOCTLs), the x86 Inno runs' other ledger gaps;
+   kernelbase; kernel32_test built for x86.
 6. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's rest (quota_test on Windows), R8's Secure
    Boot.
 7. **PK**: winget's source index (step 2's rest); step 1's rest (an
-   upgrade's dependencies, UpgradeBehavior, winget's settings); an x86
-   Inno installer as WOW stages 3-4 land.
+   upgrade's dependencies, UpgradeBehavior, winget's settings).
 8. **BR** stage 1's rest (the profile's hotspots).
 9. **AG**: the remaining stubs (filler).
 10. **SSH**: the client against the host's sshd, agent forwarding;
@@ -154,7 +153,7 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno installer next; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -1663,7 +1662,14 @@ wow64.dll converts 32-bit system calls in user mode).
   **An x86 Inno Setup installer installs** (`wow64_inno`: Inno Setup
   6.5.4's own, winget's x86 choice, PREBUILT innosetup6, silently for the
   current user: its files, Start menu shortcuts, uninstall entry, then the
-  installed 32-bit Compil32.exe /ASSOC).
+  installed 32-bit Compil32.exe /ASSOC). **`gala install` of winget's x86
+  choices** (`pk_install_inno32`: JRSoftware.InnoSetup 6.5.4, whose
+  installers are all x86, installed per user, found by the ProductCode of
+  its AppsAndFeaturesEntries, its 32-bit compiler run, the .iss
+  association its IDE writes, listed, uninstalled through its 32-bit
+  uninstaller); an x86 portable program is gala's to install too (no
+  fallback to another installer). The "Done when" below is met; what
+  follows are follow-ups.
 
 **Next**:
 1. Stage 3's rest, the 32-bit system DLLs: kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
@@ -1693,10 +1699,7 @@ wow64.dll converts 32-bit system calls in user mode).
    resolve in a 32-bit process); its exports include ntrt's runtime
    symbols. The registry view's: WOW6432Node's `Classes` link and
    `HKEY_USERS\<SID>_Classes` are not modelled (ARCHITECTURE "Registry").
-2. Stage 4's rest: the x86 installer under `gala install` (the x64 one
-   runs natively: `pk_install_inno`), its uninstaller; `gala install`
-   installing winget's x86 choices (the fallback stopgap goes). Gaps the
-   x86 Inno run leaves in the ledger: AFD's IOCTLs through wow64.dll
+2. Gaps the x86 Inno runs leave in the ledger: AFD's IOCTLs through wow64.dll
    (32-bit sockets), FormatMessage's HRESULT texts (REGDB_E_CLASSNOTREG:
    on that error path, when a COM class is missing, Inno's Setup raised an
    access violation, not yet understood), comctl32's TaskDialogIndirect,
@@ -1781,7 +1784,10 @@ from the command line first (CLI parity; the server profile too).
   entry `ISIDE.exe /assoc`, the IDE writing the `.iss` association under
   `HKCU\Software\Classes`), its ISCC.exe runs, it is listed and
   uninstalled through its QuietUninstallString (the shortcuts and, by
-  `ISIDE.exe /unassoc`, the association removed). What
+  `ISIDE.exe /unassoc`, the association removed). Its x86 twin
+  (`pk_install_inno32`: Inno Setup 6.5.4, winget's JRSoftware.InnoSetup,
+  whose ProductCode is only in AppsAndFeaturesEntries) does the same under
+  WOW64. What
   it needed of gala is built and tested (win32_misc_test,
   kernel32_locale_test, gui_test, comctl32_test, user32_test,
   gdi32_test, shell32_test, kernel32_misc_test, oleaut32_test,
@@ -2133,16 +2139,15 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 - **`gala install` falls back across installer types**: winget installs
   the installer its selection ranks first; where that is one gala cannot
-  install yet (msi, wix, burn, msix, appx, a zip of those; an x86
-  portable program, until WOW stage 3 gives 32-bit programs their
-  DLLs), gala installs the
+  install yet (msi, wix, burn, msix, appx, a zip of those), gala
+  installs the
   best-ranked one it can instead (`install::choose`), logged as
   `fallback installer=N instead of installer=M` and recorded in the
   ledger. Without it a package that offers both an MSI and a zip would
   not install at all; with it the program lands where the zip's layout
   puts it, not where winget would. Scope never falls back. Structural
-  fix: PK stages 4 and 5 (MSIX, MSI) and WOW stage 3, then gala installs
-  winget's choice and the fallback goes. Item PK.
+  fix: PK stages 4 and 5 (MSIX, MSI), then gala installs winget's
+  choice and the fallback goes. Item PK.
 
 ### Defects known, not yet fixed
 

@@ -36,8 +36,8 @@
 //! scope; its PackageDependencies are installed first ([`install`]);
 //! `list` and `upgrade` match programs installed without gala to the
 //! source's packages ([`list`]). Where winget's choice is an installer
-//! gala cannot install yet (a later stage's type, an x86 portable
-//! program: no WOW64) the best one it can install is used instead,
+//! gala cannot install yet (a later stage's type) the best one it can
+//! install is used instead,
 //! logged and recorded in the ledger ([`select_installer`]).
 
 use crate::source::{Source, WINGET_SOURCE_ID};
@@ -590,7 +590,7 @@ pub struct Gap {
 }
 
 /// What gala cannot install (None: it can): portable programs and zips
-/// of them, per user or machine-wide, not x86 (no WOW64); installers that
+/// of them, per user or machine-wide, x64 or x86 (WOW64); installers that
 /// are programs (inno, nullsoft, exe: [`exe`]). The rest is ROADMAP PK
 /// stages 4 and 5.
 pub fn gap(i: &Installer) -> Option<Gap> {
@@ -600,13 +600,6 @@ pub fn gap(i: &Installer) -> Option<Gap> {
         (None, _) => "unknown".to_string(),
     };
     if is_portable(i) {
-        if i.architecture == Architecture::X86 {
-            return Some(Gap {
-                ledger: "gala.exe!install(x86 portable: WOW64)".to_string(),
-                why: "an x86 program, which gala cannot run yet (no WOW64)".to_string(),
-                fallback: true,
-            });
-        }
         return None;
     }
     match i.installer_type {

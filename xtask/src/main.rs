@@ -2202,6 +2202,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_gui_test", "x86/user32.dll", "Windows/SysWOW64"),
     ("wow64_gui_test", "x86/gdi32.dll", "Windows/SysWOW64"),
     ("wow64_gui_test", "user/bin/wow64_gui_test.exe", "gala"),
+    // pk_install_inno32: the x86 Inno Setup installer in the snapshot's
+    // mirror (with pk_install_test's set and wow64_inno's 32-bit DLLs:
+    // MODULE_SETS).
+    ("pk_install_inno32", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "pk_source/installers"),
     // wow64_inno: an x86 Inno Setup installer (PREBUILT innosetup6) and the
     // 32-bit DLLs its Setup loads.
     ("wow64_inno", "wow64.dll", "Windows/System32"),
@@ -4830,6 +4834,25 @@ const SCENARIOS: &[Scenario] = &[
             "innosetup-7.1.1-x64.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
             "found-by=ProductCode",
             "installed id=JRSoftware.InnoSetup.7 version=7.1.1",
+            "arp-entry-gone key=HKCU",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64 stage 4 under ROADMAP PK: `gala install` of an x86 Inno
+        // Setup installer (Inno Setup 6.5.4's own; winget-pkgs' manifest
+        // JRSoftware.InnoSetup, whose installers are all x86, chosen on
+        // x64 as winget does) from the snapshot's mirror: its 32-bit Setup,
+        // compiler, IDE (/ASSOC) and uninstaller under WOW64, otherwise as
+        // pk_install_inno.
+        name: "pk_install_inno32",
+        cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=inno32",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "innosetup-6.5.4.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+            "found-by=ProductCode",
+            "installed id=JRSoftware.InnoSetup version=6.5.4",
             "arp-entry-gone key=HKCU",
             "pk_install_test: ok",
             "exited with status 0x00000000",
@@ -7544,6 +7567,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("pk_install_machine", "pk_install_test"),
     ("pk_install_inno", "pk_install_test"),
     ("pk_install_inno", "pk_install_inno"),
+    ("pk_install_inno32", "pk_install_test"),
+    ("pk_install_inno32", "wow64_inno"),
+    ("pk_install_inno32", "pk_install_inno32"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),
     ("pk_install_https", "pk_install_test"),
@@ -8129,6 +8155,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_inno", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),

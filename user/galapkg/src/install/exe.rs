@@ -19,7 +19,8 @@
 //! - gala waits for it; exit code 0 is success (3010 and 1641: success,
 //!   a restart is wanted), anything else a failure;
 //! - the program is found through the uninstall (ARP) entry it registered:
-//!   the manifest's ProductCode if that key exists, else the entries that
+//!   the manifest's ProductCode (the installer's, else its
+//!   AppsAndFeaturesEntries') if that key exists, else the entries that
 //!   are new since before the run (one, or the one whose DisplayName is
 //!   the package's name), else (an upgrade over the old version) the
 //!   entry the old version had;
@@ -119,7 +120,7 @@ pub(super) fn arp_keys(host: &mut dyn Host) -> Vec<(Root, String)> {
 
 /// The ARP entry the installer registered (see the module comment):
 /// (root, key name, how it was found).
-fn find_entry(
+pub(super) fn find_entry(
     host: &mut dyn Host,
     before: &[(Root, String)],
     m: &Package,
@@ -127,10 +128,16 @@ fn find_entry(
     previous: Option<&Installed>,
 ) -> Option<(Root, String, &'static str)> {
     let after = arp_keys(host);
-    if let Some(pc) = &i.product_code
-        && let Some((r, k)) = after.iter().find(|(_, k)| eq_ci(k, pc))
-    {
-        return Some((*r, k.clone(), "ProductCode"));
+    // The installer's ProductCode, then its AppsAndFeaturesEntries' (a
+    // manifest may give it only there), as winget correlates.
+    let codes = i
+        .product_code
+        .iter()
+        .chain(i.apps_and_features.iter().filter_map(|e| e.product_code.as_ref()));
+    for pc in codes {
+        if let Some((r, k)) = after.iter().find(|(_, k)| eq_ci(k, pc)) {
+            return Some((*r, k.clone(), "ProductCode"));
+        }
     }
     let new: Vec<&(Root, String)> = after
         .iter()

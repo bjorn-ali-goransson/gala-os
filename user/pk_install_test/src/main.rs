@@ -1002,13 +1002,54 @@ fn nsis_test() -> Result<(), u32> {
     Ok(())
 }
 
-// ---- A real Inno Setup installer (scenario pk_install_inno) -----------
+// ---- Real Inno Setup installers (scenarios pk_install_inno, pk_install_inno32)
 
-const INNO_ARP: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 7_is1";
-const INNO_DIR: &str = "\\Programs\\Inno Setup 7";
-/// The Start menu group Inno Setup's [Icons] go to (per user: {group} is
-/// %APPDATA%\Microsoft\Windows\Start Menu\Programs\Inno Setup 7).
-const INNO_GROUP: &str = "\\Microsoft\\Windows\\Start Menu\\Programs\\Inno Setup 7\\";
+/// What tells the two Inno Setup packages apart.
+struct Inno {
+    /// The winget package and version.
+    id: &'static str,
+    version: &'static str,
+    /// Its installer's file name.
+    installer: &'static str,
+    /// The uninstall entry under HKCU (`<AppId>_is1`).
+    arp: &'static str,
+    /// Where it installs under %LOCALAPPDATA%.
+    dir: &'static str,
+    /// The Start menu group Inno Setup's [Icons] go to (per user: {group}
+    /// is under %APPDATA%\Microsoft\Windows\Start Menu\Programs).
+    group: &'static str,
+    /// The IDE, which its [Run] entry runs to associate .iss files.
+    ide: &'static str,
+    /// The command-line compiler's banner.
+    banner: &'static [u8],
+}
+
+/// Inno Setup 7.1.1 (x64: Inno Setup 7 builds x64 Setups), winget-pkgs'
+/// JRSoftware.InnoSetup.7.
+const INNO7: Inno = Inno {
+    id: "JRSoftware.InnoSetup.7",
+    version: "7.1.1",
+    installer: "innosetup-7.1.1-x64.exe",
+    arp: "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 7_is1",
+    dir: "\\Programs\\Inno Setup 7",
+    group: "\\Microsoft\\Windows\\Start Menu\\Programs\\Inno Setup 7\\",
+    ide: "ISIDE.exe",
+    banner: b"Inno Setup 7 Command-Line Compiler",
+};
+
+/// Inno Setup 6.5.4 (x86: a 32-bit Setup, uninstaller, IDE and compiler
+/// under WOW64), winget-pkgs' JRSoftware.InnoSetup.
+const INNO6: Inno = Inno {
+    id: "JRSoftware.InnoSetup",
+    version: "6.5.4",
+    installer: "innosetup-6.5.4.exe",
+    arp: "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 6_is1",
+    dir: "\\Programs\\Inno Setup 6",
+    group: "\\Microsoft\\Windows\\Start Menu\\Programs\\Inno Setup 6\\",
+    ide: "Compil32.exe",
+    banner: b"Inno Setup 6 Command-Line Compiler",
+};
+
 /// Its six shortcuts (setup.iss [Icons]; the desktop one is a task the
 /// silent install leaves off).
 const INNO_ICONS: [&str; 6] = [
@@ -1036,58 +1077,61 @@ fn local_text<'a>(buf: &'a mut [u8], rest: &str) -> &'a str {
     core::str::from_utf8(&buf[..n]).unwrap_or("")
 }
 
-/// `gala install` of a real Inno Setup installer: Inno Setup 7.1.1's own
-/// (x64: Inno Setup 7 builds x64 Setups), with winget-pkgs' manifest
-/// JRSoftware.InnoSetup.7 (a machine installer with `/ALLUSERS`, a user
-/// one with `/CURRENTUSER`). Run as winget runs Inno installers
+/// `gala install` of a real Inno Setup installer, Inno Setup's own: 7.1.1
+/// (x64, winget-pkgs' JRSoftware.InnoSetup.7) or 6.5.4 (x86 under WOW64,
+/// JRSoftware.InnoSetup), each manifest with a machine installer
+/// (`/ALLUSERS`) and a user one (`/CURRENTUSER`). Run as winget runs Inno installers
 /// (`--silent`: `/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, `/LOG=`,
 /// the manifest's Custom switch), found through the manifest's
-/// ProductCode `Inno Setup 7_is1`, its command-line compiler run,
+/// ProductCode `Inno Setup <n>_is1`, its command-line compiler run,
 /// listed, uninstalled through the QuietUninstallString Inno writes.
 /// What Inno Setup leaves is what its documentation says for a per-user
-/// install: the files in `{autopf}\Inno Setup 7` (per user
+/// install: the files in `{autopf}\Inno Setup <n>` (per user
 /// `%LOCALAPPDATA%\Programs`), `unins000.exe` and `.dat` beside them, the
 /// entry `<AppId>_is1` under HKCU, the six `[Icons]` shortcuts in the
 /// per-user Start menu group, and the `.iss` association its `[Run]` entry
-/// `ISIDE.exe /assoc` registers under `HKCU\Software\Classes` (the IDE's
+/// (`ISIDE.exe /assoc`, Inno 6's `Compil32.exe /ASSOC`) registers under
+/// `HKCU\Software\Classes` (the IDE's
 /// IDE.FileAssocFunc, for a user who is not an administrator); the
 /// uninstaller removes the shortcuts and its `/unassoc` the ProgID.
-fn inno_test() -> Result<(), u32> {
+fn inno_test(i: &Inno) -> Result<(), u32> {
     let mut c = Checks(0);
     let src = "--source C:\\pk_source";
     let mut a = [0u8; 300];
     let mut p = [0u8; 300];
-    c.gala("search inno --source C:\\pk_source", 0, &[b"JRSoftware.InnoSetup.7", b"7.1.1"])?;
-    let args = join(&mut a, &["install JRSoftware.InnoSetup.7 --scope user --silent ", src]);
-    c.gala(args, 0, &[b"Successfully installed", b"Inno Setup 7"])?;
-    c.ok(
-        log_has(b"innosetup-7.1.1-x64.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="),
-        0,
-        "run with winget's Inno switches",
-    )?;
+    let (id, version) = (i.id.as_bytes(), i.version.as_bytes());
+    c.gala("search inno --source C:\\pk_source", 0, &[id, version])?;
+    let args = join(&mut a, &["install ", i.id, " --exact --scope user --silent ", src]);
+    c.gala(args, 0, &[b"Successfully installed", b"Inno Setup"])?;
+    let switches =
+        join(&mut a, &[i.installer, "\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="]);
+    c.ok(log_has(switches.as_bytes()), 0, "run with winget's Inno switches")?;
     c.ok(log_has(b".setup.log\" /CURRENTUSER"), 0, "the user installer's Custom switch")?;
     c.ok(log_has(b"exit code=0 (0x0)"), 0, "Setup's exit code logged")?;
-    c.ok(log_has(b"Uninstall\\Inno Setup 7_is1 found-by=ProductCode"), 0, "the entry")?;
-    c.ok(exists(local(join(&mut p, &[INNO_DIR, "\\ISCC.exe"]))), 0, "Setup wrote ISCC.exe")?;
-    c.ok(exists(local(join(&mut p, &[INNO_DIR, "\\unins000.exe"]))), 0, "its uninstaller")?;
-    c.ok(exists(local(join(&mut p, &[INNO_DIR, "\\unins000.dat"]))), 0, "its uninstall log")?;
-    let setup_log = read_file(local("\\gala\\logs\\JRSoftware.InnoSetup.7-7.1.1.setup.log"));
+    let entry = join(&mut a, &[i.arp.rsplit('\\').next().unwrap_or(""), " found-by=ProductCode"]);
+    c.ok(log_has(entry.as_bytes()), 0, "the entry")?;
+    c.ok(exists(local(join(&mut p, &[i.dir, "\\ISCC.exe"]))), 0, "Setup wrote ISCC.exe")?;
+    c.ok(exists(local(join(&mut p, &[i.dir, "\\unins000.exe"]))), 0, "its uninstaller")?;
+    c.ok(exists(local(join(&mut p, &[i.dir, "\\unins000.dat"]))), 0, "its uninstall log")?;
+    let log_name = join(&mut a, &["\\gala\\logs\\", i.id, "-", i.version, ".setup.log"]);
+    let setup_log = read_file(local(log_name));
     show_file("the setup log", &setup_log);
     c.ok(setup_log.is_some_and(|o| o.has(b"Setup version: Inno Setup")), 0, "Inno's /LOG")?;
-    let inno = |v: &str| hkcu(INNO_ARP, v, false);
-    c.ok(inno("DisplayVersion").is_some_and(|(s, n)| &s[..n] == b"7.1.1"), 0, "DisplayVersion")?;
+    let inno = |v: &str| hkcu(i.arp, v, false);
+    c.ok(inno("DisplayVersion").is_some_and(|(s, n)| &s[..n] == version), 0, "DisplayVersion")?;
+    let dir = i.dir.trim_start_matches('\\').as_bytes();
     c.ok(
-        inno("InstallLocation").is_some_and(|(s, n)| contains(&s[..n], b"Programs\\Inno Setup 7")),
+        inno("InstallLocation").is_some_and(|(s, n)| contains(&s[..n], dir)),
         0,
         "InstallLocation",
     )?;
     c.ok(inno("QuietUninstallString").is_some(), 0, "QuietUninstallString")?;
     // Its [Icons]: shell links in the Start menu group, as [MS-SHLLINK]
-    // lays them out, the IDE's pointing at ISIDE.exe.
+    // lays them out, the IDE's pointing at it.
     for icon in INNO_ICONS {
-        c.ok(exists(roaming(join(&mut p, &[INNO_GROUP, icon]))), 0, icon)?;
+        c.ok(exists(roaming(join(&mut p, &[i.group, icon]))), 0, icon)?;
     }
-    let ide = read_file(roaming(join(&mut p, &[INNO_GROUP, INNO_ICONS[0]])));
+    let ide = read_file(roaming(join(&mut p, &[i.group, INNO_ICONS[0]])));
     c.ok(
         ide.as_ref().is_some_and(|o| {
             o.text().starts_with(b"L\0\0\0\x01\x14\x02\0\0\0\0\0\xc0\0\0\0\0\0\0F")
@@ -1095,20 +1139,18 @@ fn inno_test() -> Result<(), u32> {
         0,
         "the IDE's shortcut's header",
     )?;
-    c.ok(
-        ide.as_ref().is_some_and(|o| o.has(b"Inno Setup 7\\ISIDE.exe")),
-        0,
-        "the IDE's shortcut's target",
-    )?;
-    // Its [Run] entry ISIDE.exe /assoc: the .iss association in HKCU.
+    c.ok(ide.as_ref().is_some_and(|o| o.has(i.ide.as_bytes())), 0, "the IDE's shortcut's target")?;
+    // Its [Run] entry (the IDE's /assoc): the .iss association in HKCU.
     let classes = |k: &str, v: &str| hkcu(k, v, false);
     if classes(ISS_PROGID, "").is_none() {
         // Setup logs only the exit code: run it again here, where what it
         // writes (a message box's text, on gala) is captured.
         let mut e = [0u8; 300];
-        let ide = local_text(&mut e, join(&mut p, &[INNO_DIR, "\\ISIDE.exe"]));
-        let (got, o) = run(Some(ide), "ISIDE.exe /assoc");
-        out(b"pk_install_test: ISIDE.exe /assoc -> ");
+        let ide = local_text(&mut e, join(&mut p, &[i.dir, "\\", i.ide]));
+        let (got, o) = run(Some(ide), join(&mut a, &[i.ide, " /assoc"]));
+        out(b"pk_install_test: ");
+        out(i.ide.as_bytes());
+        out(b" /assoc -> ");
         out(&hex(got));
         out(b":\r\n");
         out(o.text());
@@ -1125,46 +1167,45 @@ fn inno_test() -> Result<(), u32> {
         ".iss's OpenWithProgids",
     )?;
     c.ok(
-        classes(join(&mut a, &[ISS_PROGID, "\\shell\\open\\command"]), "")
-            .is_some_and(|(s, n)| contains(&s[..n], b"ISIDE.exe\" \"%1\"")),
+        classes(join(&mut a, &[ISS_PROGID, "\\shell\\open\\command"]), "").is_some_and(|(s, n)| {
+            contains(&s[..n], join(&mut p, &[i.ide, "\" \"%1\""]).as_bytes())
+        }),
         0,
         "the open command",
     )?;
     c.ok(
-        classes(join(&mut a, &[ISS_PROGID, "\\shell\\Compile\\command"]), "")
-            .is_some_and(|(s, n)| contains(&s[..n], b"ISIDE.exe\" /cc \"%1\"")),
+        classes(join(&mut a, &[ISS_PROGID, "\\shell\\Compile\\command"]), "").is_some_and(
+            |(s, n)| contains(&s[..n], join(&mut p, &[i.ide, "\" /cc \"%1\""]).as_bytes()),
+        ),
         0,
         "the Compile command",
     )?;
-    c.ok(
-        inno("WinGetPackageIdentifier").is_some_and(|(s, n)| &s[..n] == b"JRSoftware.InnoSetup.7"),
-        0,
-        "gala's tag",
-    )?;
+    c.ok(inno("WinGetPackageIdentifier").is_some_and(|(s, n)| &s[..n] == id), 0, "gala's tag")?;
     // The installed compiler runs (its usage text).
     let mut e = [0u8; 300];
-    let iscc = local_text(&mut e, join(&mut p, &[INNO_DIR, "\\ISCC.exe"]));
+    let iscc = local_text(&mut e, join(&mut p, &[i.dir, "\\ISCC.exe"]));
     let (got, o) = run(Some(iscc), "ISCC.exe /?");
-    if !o.has(b"Inno Setup 7 Command-Line Compiler") {
+    if !o.has(i.banner) {
         out(b"pk_install_test: ISCC.exe /? -> ");
         out(&hex(got));
         out(b":\r\n");
         out(o.text());
     }
-    c.ok(o.has(b"Inno Setup 7 Command-Line Compiler"), got, "ISCC.exe runs")?;
-    c.gala("list", 0, &[b"JRSoftware.InnoSetup.7", b"7.1.1"])?;
-    let args = join(&mut a, &["install JRSoftware.InnoSetup.7 --scope user ", src]);
+    c.ok(o.has(i.banner), got, "ISCC.exe runs")?;
+    c.gala("list", 0, &[id, version])?;
+    let args = join(&mut a, &["install ", i.id, " --exact --scope user ", src]);
     c.gala(args, 0, &[b"already installed"])?;
     // Uninstall: Inno's QuietUninstallString (unins000.exe /SILENT), which
     // runs a copy of itself from %TEMP%; gala waits for the entry to go.
-    c.gala("uninstall JRSoftware.InnoSetup.7", 0, &[b"Successfully uninstalled"])?;
+    let args = join(&mut a, &["uninstall ", i.id, " --exact"]);
+    c.gala(args, 0, &[b"Successfully uninstalled"])?;
     c.ok(log_has(b"from=QuietUninstallString"), 0, "the quiet uninstall string used")?;
     c.ok(inno("DisplayName").is_none(), 0, "the entry removed")?;
-    c.ok(!exists(local(join(&mut p, &[INNO_DIR, "\\ISCC.exe"]))), 0, "ISCC.exe removed")?;
+    c.ok(!exists(local(join(&mut p, &[i.dir, "\\ISCC.exe"]))), 0, "ISCC.exe removed")?;
     for icon in INNO_ICONS {
-        c.ok(!exists(roaming(join(&mut p, &[INNO_GROUP, icon]))), 0, "a shortcut removed")?;
+        c.ok(!exists(roaming(join(&mut p, &[i.group, icon]))), 0, "a shortcut removed")?;
     }
-    // [UninstallRun] ISIDE.exe /unassoc: the ProgID and its .iss value go.
+    // [UninstallRun] (the IDE's /unassoc): the ProgID and its .iss value go.
     c.ok(hkcu(ISS_PROGID, "", false).is_none(), 0, "the ProgID removed")?;
     c.ok(
         hkcu("Software\\Classes\\.iss\\OpenWithProgids", "InnoSetupScriptFile", false).is_none(),
@@ -1172,7 +1213,8 @@ fn inno_test() -> Result<(), u32> {
         "the OpenWithProgids value removed",
     )?;
     let o = c.gala("list", 0, &[])?;
-    c.ok(!o.has(b"JRSoftware.InnoSetup.7"), 0, "not listed after the uninstall")?;
+    let listed = join(&mut a, &[i.id, " "]);
+    c.ok(!o.has(listed.as_bytes()), 0, "not listed after the uninstall")?;
     Ok(())
 }
 
@@ -1355,8 +1397,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
         https_test()
     } else if has_arg("machine") {
         machine_test()
+    } else if has_arg("inno32") {
+        inno_test(&INNO6)
     } else if has_arg("inno") {
-        inno_test()
+        inno_test(&INNO7)
     } else {
         test()
     };
