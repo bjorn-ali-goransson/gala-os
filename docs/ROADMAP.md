@@ -147,6 +147,7 @@ has a section under "Open items".
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine), curl and Git's https remotes done; `gala install`'s downloads next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done |
+| CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 
 ### Desktop, sessions and remote access
 
@@ -156,6 +157,8 @@ has a section under "Open items".
 | W2 | Styled desktop and input | done | `gui_test` |
 | W3 | FileZilla | in progress | connects to FileZilla Server, driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
+| SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
+| AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
@@ -377,10 +380,119 @@ Windows' metrics (`gdi32_test`).
 
 **Next**:
 1. Step 3: uxtheme with themes on and Windows 11-style control drawing.
-2. Later: a user-mode shell (taskbar and start menu out of the kernel),
-   resizing windows by the frame, keyboard focus per window.
+2. Later: resizing windows by the frame, keyboard focus per window
+   (SH's step 1 needs it); the shell itself leaves the kernel in item SH.
 
 **Design**: ARCHITECTURE "Windows on the screen".
+
+### SH. The shell in user mode
+
+**Goal**: the kernel keeps what win32k keeps on Windows (window state,
+Z order, focus, message routing, input queues, UIPI: what enforces
+isolation between processes) and nothing of the shell. The taskbar,
+start menu and wallpaper run as a user-mode program, as explorer.exe
+does; the compositor follows later, as DWM is a user-mode process.
+
+**Why**: a fault in the shell restarts a process instead of panicking
+the kernel (it matters more once the start menu holds an LLM client,
+item AI); the shell launches programs under the logged-on user's token
+(the start menu passes no token to `process::launch` today); less
+kernel state to carry across a handover (item R); the shell exercises
+gala's user32, gdi32 and GalaDesktopAction as any program does and can
+be replaced like one; 2.5 MB of the kernel (the `shasha` feature's
+shell part) leaves it.
+
+**Next** (each step test first, screen and UIA checks):
+1. `shasha.exe` (`user/shasha`): the taskbar, the start menu and the
+   wallpaper as ordinary topmost windows of a user-mode process, on
+   the existing calls (GalaDesktopAction's Start, Windows, Programs,
+   Activate, Minimize/Maximize/Restore, Close, Snap, Wallpaper; the
+   window and WinEvent calls for the taskbar's list). Started per
+   session under its user's token; the kernel's shell code removed in
+   the same change. Needs keyboard focus per window (W4): the start
+   menu gets keys as a focused window, not through the input thread.
+2. Supervision: the session (RS B4's session manager, the kernel until
+   then) restarts a shell that ends, with its exit status and crash
+   record in the event stream; windows stay usable meanwhile (Win+arrows
+   and the `gala` command do not depend on the shell). A scenario kills
+   the shell and checks it comes back with the same windows listed.
+3. What must not depend on the shell stays out of it: Ctrl+Alt+Del, a
+   later lock screen and consent prompts belong to the kernel or a
+   separate trusted process (RS's secure desktop).
+4. Later: the compositor in user mode along RS B3a's presenter seam
+   (shared-memory surfaces between programs and the compositor, one
+   copy to the Display seam per frame, damage tracking kept), after
+   B3a and GPU G0. Until then composition stays in the kernel.
+
+**Done when**: a scenario boots to a desktop drawn by `shasha.exe`
+under the boot user's token, starts a program from the start menu and
+switches to it from the taskbar (UIA), kills the shell and sees it
+restarted; the server kernel and `profile=server` start no shell.
+
+**Design**: ARCHITECTURE "Windows on the screen" (shasha), "Server and
+desktop workloads", "Plan: sessions and remote shasha" (presenters).
+
+### AI. An AI-enabled start menu
+
+**Goal**: the start menu talks to any standard LLM API (OpenAI-style,
+Anthropic, Gemini, Ollama or any OpenAI-compatible endpoint, local
+models included) with streamed replies and tool calls that act on the
+desktop; the same assistant is a console command first (CLI parity,
+the server edition too).
+
+**Approach**: no web view and no browser engine in the image (gala is
+under 10 MB, Chromium over 300 MB; BR brings Edge and WebView2 as an
+installed package, never part of the image). The LLM client is an
+existing CLI, **aichat** (sigoden/aichat, MIT or Apache-2.0, Rust, one
+exe): streaming over server-sent events, many providers, function
+calling (its llm-functions tools are scripts), a REPL, one-shot use and
+`aichat --serve`, a local OpenAI-compatible server. It is installed
+with `gala install sigoden.AIChat` (winget-pkgs: a zip with a portable
+`aichat.exe`, which PK's stages 1-2 handle), not shipped. The tools are
+the `gala` commands (start, windows, activate, snap, close, ...) and
+UIA for driving programs, so the model acts only through what CLI
+parity already exposes.
+
+**Next** (each step test first, the ledger leading):
+1. Install and run: a scenario installs `sigoden.AIChat` from a
+   mirrored manifest and zip (`--source` with an `installers\` mirror,
+   as `pk_install_zip`; xtask fetches the real zip, never committed)
+   and runs `aichat` one-shot and streaming against an in-guest mock
+   endpoint over plain HTTP (a test program serving a scripted SSE
+   stream, a tool call included), so streaming is tested without TLS.
+   Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
+   Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
+   not with gala; scenarios copy the JDK's app-local copy today) need a
+   decided home in the image or the installer.
+2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
+   system store (rustls-native-certs through crypt32), which gala opens
+   empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
+   its own, so it does not wait for winhttp). A scenario against the
+   in-guest Nginx with the test CA in gala's roots.
+3. `gala ask`: the console entry point (provider and model from
+   configuration, the key stored with DPAPI, never in a plain file),
+   streaming to the console, the `gala` commands as tools; every
+   request, tool call (arguments and result) and confirmation in the
+   event stream; actions that close, kill or delete ask first; text a
+   tool returns is treated as untrusted (prompt injection).
+4. The start menu's chat panel in `shasha.exe` (after SH step 1): a
+   native panel (input, streamed text, a Markdown subset: paragraphs,
+   lists, code blocks) over `aichat --serve` on localhost; the panel
+   holds no TLS or provider code. If native drawing is not enough, a
+   small HTML/CSS renderer without JavaScript (litehtml, BSD) before
+   any browser engine.
+5. Later: WebView2 rendering when Edge is installed (BR stage 4), as an
+   option the start menu never depends on.
+
+**Done when**: from a fresh image, `gala install sigoden.AIChat` then
+`gala ask` streams an answer from the mock endpoint and performs a
+`gala` tool call with its confirmation; the start menu does the same
+through UIA; both leave the request and tool events in the event
+stream.
+
+**Design**: to be written in ARCHITECTURE with step 3 (the assistant's
+process, tools, confirmation and key storage); "Installing software"
+(PK); "Schannel (TLS)" for the root store.
 
 ### UIA. UI Automation and windows across processes
 
@@ -525,11 +637,13 @@ own session and shell.
    attach and switch; a test presenter (headless rendering for screen
    checks without QEMU screendumps); a session with no presenter keeps
    its windows. The Display seam's `screen_flush` and `screen_changed`
-   (from GPU G1) are what a presenter needs. Window stations' open
-   ends: DACLs on stations and desktops; CreateWindowStationW and
-   CreateDesktopW stay unsupported until BR stage 3 (Chromium's
-   sandbox) needs them, with SwitchDesktop and desktops with windows of
-   their own; UOI_USER_SID; clipboard and atoms per station.
+   (from GPU G1) are what a presenter needs. The presenter seam is
+   also where the compositor later leaves the kernel (SH step 4).
+   Window stations' open ends: DACLs on stations and desktops;
+   CreateWindowStationW and CreateDesktopW stay unsupported until BR
+   stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
+   desktops with windows of their own; UOI_USER_SID; clipboard and atoms
+   per station.
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
@@ -808,9 +922,12 @@ and wininet's synchronous clients over it, on one engine (steps 1 and
    WSAIoctl's SIO_IDEAL_SEND_BACKLOG_QUERY).
 4. `gala install`'s HTTPS downloads (PK) on winhttp, with gala's root
    store holding a pinned, documented public CA bundle.
-5. For BR: crypt32's stores and chain engine
-   (CertVerifyCertificateChainPolicy; the ROOT store from the same
-   directory), Schannel then validating through them.
+5. crypt32's system stores and chain engine: the ROOT system store
+   from the same directory (CertOpenStore and CertOpenSystemStore open
+   system stores empty today; rustls-native-certs reads it, so aichat,
+   item AI step 2, needs it first), then the chain engine
+   (CertGetCertificateChain, CertVerifyCertificateChainPolicy; Go's TLS
+   and BR verify through them), Schannel then validating through them.
 6. Also open: session resumption, client certificates, ECDSA server
    keys, revocation, keys persisted across processes.
 
@@ -955,6 +1072,69 @@ runs as a boot scenario whose transcript equals its `expected.txt`.
 seams", "The Linux layer's milestones", "The lx module", "The lx_abi
 crate"; WORKFLOW "Linux test programs".
 
+### CT. Linux containers: Docker Desktop and Podman over a WSL facade
+
+**Goal**: stock Docker Desktop for Windows and stock Podman for Windows
+(`podman machine`, later Podman Desktop) install and run Linux
+containers on gala, unmodified. On Windows both run their Linux side in
+a WSL2 distribution; gala answers WSL2's interface itself and runs that
+distribution on the Linux personality (LX), with no virtual machine.
+
+**Out of scope**: running WSL2 itself (a VM with Microsoft's Linux
+kernel), the Hyper-V backends of both products, and Windows containers
+(Docker Desktop's "Windows containers" mode: HCS, server silos).
+
+**Next** (each step test first; the recordings of step 1 are the spec):
+1. Spec: on real Windows 11 24H2, record what each product does to set
+   up and to run `hello-world`: every `wsl.exe` command line and its
+   output, the WSL service calls, named pipes and sockets (hvsocket and
+   localhost TCP) between the Windows and Linux sides, registry keys,
+   WMI queries and optional-feature checks, files under `%LOCALAPPDATA%`
+   and `%ProgramData%`; inside the distribution, `strace -f` of its
+   init, dockerd/containerd/runc and podman/conmon/crun. The ranked
+   result (Windows side, facade, Linux system calls) goes in this
+   section, like AG's blocker list.
+2. The facade's core, test first against recorded `wsl.exe`
+   transcripts: gala's `wsl.exe` and WSL service with `--import` of a
+   rootfs tarball, `-d <distro> [--exec] <cmd>`, `-l -v`,
+   `--terminate`, `--shutdown`, `--unregister`, `--version`, the
+   per-user distribution registry, and a distribution's init as an LX
+   process. Scenario: `wsl --import` of a busybox rootfs, then
+   `wsl -d bb -- echo hi`.
+3. The facade's plumbing: `/mnt/<drive>` inside the distribution and
+   `\\wsl.localhost\<distro>` outside (one file system, no 9P), interop
+   (Windows programs started from Linux and back), `wsl.conf`, hvsocket
+   (`AF_HYPERV`) on the Windows side meeting `AF_VSOCK` on the Linux
+   side as one core socket pair, localhost forwarding over one shared
+   network stack.
+4. LX up to the distributions' needs (beyond milestone 5): glibc,
+   systemd as PID 1 (Podman's machine), namespaces (mount, PID, UTS,
+   IPC, network, user), cgroup v2, overlayfs, bind mounts and
+   `pivot_root`, netlink, veth and bridges, nftables/iptables, seccomp,
+   `/proc` and `/sys` as these programs read them. Namespaces and
+   cgroups are core objects (ARCHITECTURE "Plan: Linux containers
+   through a WSL facade"), not LX-only state.
+5. Podman: `podman machine init`, `start`, then `podman run` from the
+   Windows side; Podman Desktop after BR stage 2 (Electron).
+6. Docker Desktop: install, the backend service, its distribution, the
+   `docker` CLI over `\\.\pipe\docker_engine` running containers; then
+   the dashboard (Electron, after BR stage 2).
+
+**Done when**: from a gala command prompt, `podman run --rm hello-world`
+and `docker run --rm hello-world` print their greeting with both
+products installed by their own installers; then a container serving
+HTTP reached from the Windows side (`-p 8080:80`). Observability with
+each step: the facade's calls as events (`events=wsl`), each
+distribution's console and the products' logs copied into the serial
+log, missing Linux calls in the ledger by distribution.
+
+**Licensing**: Podman is Apache-2.0; Docker Desktop's licence terms
+(a paid subscription for larger organisations) govern running it.
+Neither is committed; xtask fetches them and runs them only in QEMU.
+WSL's source (MIT) is an allowed source (CLEAN_ROOM "WSL").
+
+**Design**: ARCHITECTURE "Plan: Linux containers through a WSL facade".
+
 ### PK. Installing software: `gala install` over winget manifests
 
 **Goal**: `gala install` reads winget's community manifests
@@ -999,7 +1179,8 @@ from the command line first (CLI parity; the server profile too).
    delete `manifest.rs`/`yaml.rs`; a boot scenario with a dependency and
    an upgrade that keeps scope.
 2. The HTTPS fetcher (on winhttp and Schannel, TLS step 4): the GitHub
-   raw and contents URLs, winget's source index for search; real
+   raw and contents URLs, winget's source index for search (first
+   real-world target: `sigoden.AIChat`, item AI); real
    symbolic links for commands; the logon environment from
    `HKCU\Environment`.
 3. Stage 3's rest: a real Inno Setup installer in a scenario (they are
@@ -1228,6 +1409,17 @@ need unwinding: next).
 Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Stopgaps (to replace)
+
+- **`--no-sandbox` in the Chromium scenarios**: Chromium's renderers
+  normally run in a sandbox (restricted, low-integrity and
+  AppContainer/LowBox tokens, job objects, process mitigation
+  policies, handle inheritance lists, an alternate desktop); gala lacks
+  parts of it (CreateDesktopW, LowBox tokens, mitigation policies), so
+  sandbox set-up would fail and no renderer would start. The switch,
+  Chromium's own, runs every Chromium process on the user's ordinary
+  token (the browser shows its "unsupported command-line flag" bar).
+  Structural fix: BR stage 3, the sandbox's pieces; then the switch
+  goes.
 
 - **`--disable-direct-composition` in `chromium_window`**: on Windows 11
   22H2 and later Chromium draws even software frames through a D3D11
