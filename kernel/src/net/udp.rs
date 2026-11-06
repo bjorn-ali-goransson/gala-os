@@ -13,7 +13,8 @@
 //! of the interface that reaches the destination.
 
 use super::tcp::{
-    Addr, Entry, Kind, NetError, STALE, Side, Sock, SocketId, Stack, with_stack, with_stack_quiet,
+    Addr, Entry, Kind, NetError, Owner, STALE, Side, Sock, SocketId, Stack, with_stack,
+    with_stack_quiet,
 };
 use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
@@ -23,8 +24,9 @@ use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
 use super::Scope;
 
-/// Bytes of received datagrams a socket keeps until they are read
-/// (Windows' default SO_RCVBUF is 64 KiB); more are dropped.
+/// Bytes of received datagrams a socket keeps until they are read unless
+/// its owner asks for more (SO_RCVBUF: Windows' default is 64 KiB, up to
+/// `tcp::MAX_BUFFER`); more are dropped.
 const RECV_LIMIT: usize = 64 * 1024;
 /// Datagrams a socket keeps until they are read.
 const RECV_DATAGRAMS: usize = 256;
@@ -52,6 +54,9 @@ pub struct Udp {
     /// Received, oldest first.
     pub(super) queue: Vec<Datagram>,
     queued_bytes: usize,
+    /// The most `queued_bytes` may be (`RECV_LIMIT` or the owner's
+    /// SO_RCVBUF).
+    recv_limit: usize,
     /// Datagrams that arrived since the socket was made (the readiness
     /// signature changes with each one).
     arrived: u64,
@@ -94,6 +99,20 @@ fn new_socket() -> Option<udp::Socket<'static>> {
     Some(udp::Socket::new(buffer()?, buffer()?))
 }
 
+/// What one smoltcp UDP socket's buffers take (both directions).
+const SMOLTCP_COST: u64 =
+    2 * (SMOLTCP_PAYLOAD + SMOLTCP_DATAGRAMS * core::mem::size_of::<udp::PacketMetadata>()) as u64;
+
+/// The queue's limit for `owner`.
+fn recv_limit(owner: &Owner) -> usize {
+    owner.rx.clamp(RECV_LIMIT, super::tcp::MAX_BUFFER)
+}
+
+/// The most a queue of `limit` bytes takes (the datagrams' records too).
+fn queue_cost(limit: usize) -> u64 {
+    (limit + RECV_DATAGRAMS * core::mem::size_of::<Datagram>()) as u64
+}
+
 fn side_index(side: Side) -> usize {
     match side {
         Side::Lo => 0,
@@ -109,17 +128,27 @@ fn addr_of(e: IpEndpoint) -> Addr {
     Addr { ip: super::Ip::from_smoltcp(e.addr), port: e.port }
 }
 
-/// The smoltcp sockets for `local` (already checked and with its port).
-fn open(s: &mut Stack, local: Addr, scope: Scope) -> Result<[Option<Sock>; 2], NetError> {
+/// The smoltcp sockets for `local` (already checked and with its port),
+/// charged to `owner`: each its buffers, the first one the queue's most
+/// as well (the entry's queue holds what every interface received).
+fn open(
+    s: &mut Stack,
+    local: Addr,
+    scope: Scope,
+    owner: &Owner,
+) -> Result<[Option<Sock>; 2], NetError> {
     let mut socks = [None; 2];
+    let mut queue = queue_cost(recv_limit(owner));
     for &side in s.sides_for(local.ip) {
         // The side's address of the socket's family (none: not on it).
         let Some(addr) = s.side_address(side, local.ip, scope) else { continue };
         let listen = IpListenEndpoint { addr, port: local.port };
-        let made = new_socket().ok_or(NetError::NoMemory).and_then(|mut socket| {
+        let made = s.admit(side, owner, SMOLTCP_COST + queue).and_then(|bill| {
+            let mut socket = new_socket().ok_or(NetError::NoMemory)?;
             socket.bind(listen).map_err(|_| NetError::InvalidState)?;
-            s.add(side, socket)
+            s.add(side, socket, bill)
         });
+        queue = 0;
         match made {
             Ok(sock) => socks[side_index(side)] = Some(sock),
             Err(e) => {
@@ -133,14 +162,19 @@ fn open(s: &mut Stack, local: Addr, scope: Scope) -> Result<[Option<Sock>; 2], N
     Ok(socks)
 }
 
-/// Binds a UDP socket to `local` (port 0: an ephemeral port). `token` is
-/// passed to the notify hook.
-pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
-    bind_scoped(local, Scope::of(local.ip), token)
+/// Binds a UDP socket to `local` (port 0: an ephemeral port) for `owner`
+/// (its token is passed to the notify hook).
+pub fn bind(local: Addr, owner: impl Into<Owner>) -> Result<SocketId, NetError> {
+    bind_scoped(local, Scope::of(local.ip), owner)
 }
 
 /// The same for a socket of `scope` (`nt::afd`).
-pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, NetError> {
+pub fn bind_scoped(
+    local: Addr,
+    scope: Scope,
+    owner: impl Into<Owner>,
+) -> Result<SocketId, NetError> {
+    let owner = owner.into();
     with_stack(|s| {
         if !s.may_bind(local.ip) {
             return Err(NetError::AddressNotAvailable);
@@ -151,9 +185,11 @@ pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, Ne
             p => p,
         };
         let local = Addr { ip: local.ip, port };
-        let socks = open(s, local, scope)?;
-        let udp = Udp { socks, peer: None, queue: Vec::new(), queued_bytes: 0, arrived: 0 };
-        s.insert(token, local, scope, Kind::Udp(udp)).inspect_err(|_| {
+        let socks = open(s, local, scope, &owner)?;
+        let recv_limit = recv_limit(&owner);
+        let udp =
+            Udp { socks, peer: None, queue: Vec::new(), queued_bytes: 0, recv_limit, arrived: 0 };
+        s.insert(owner, local, scope, Kind::Udp(udp)).inspect_err(|_| {
             for sock in socks.into_iter().flatten() {
                 s.remove(sock);
             }
@@ -290,7 +326,7 @@ fn drain_one(s: &mut Stack, index: usize) {
             u.arrived = u.arrived.wrapping_add(1);
             if !u.accepts(from)
                 || u.queue.len() >= RECV_DATAGRAMS
-                || u.queued_bytes + data.len() > RECV_LIMIT
+                || u.queued_bytes + data.len() > u.recv_limit
             {
                 continue;
             }
@@ -325,12 +361,13 @@ pub(super) fn carry(s: &mut Stack, id: SocketId) -> Result<super::tcp::CarriedKi
 }
 
 /// In the next kernel: a carried UDP socket's kernel half again (its
-/// smoltcp sockets bound anew, its queue as it was).
+/// smoltcp sockets bound anew, its queue as it was), for `owner`.
 pub(super) fn adopt(
     s: &mut Stack,
     local: Addr,
     peer: Option<Addr>,
     datagrams: &[(Addr, Vec<u8>)],
+    owner: &Owner,
 ) -> Result<Udp, NetError> {
     let mut queue = Vec::new();
     queue.try_reserve(datagrams.len()).map_err(|_| NetError::NoMemory)?;
@@ -346,8 +383,9 @@ pub(super) fn adopt(
     if local.port == 0 || s.port_in_use(local.port, true, scope) {
         return Err(NetError::AddressInUse);
     }
-    let socks = open(s, local, scope)?;
-    Ok(Udp { socks, peer, queue, queued_bytes, arrived: 0 })
+    let socks = open(s, local, scope, owner)?;
+    // A queue carried fuller than its limit drains below it first.
+    Ok(Udp { socks, peer, queue, queued_bytes, recv_limit: recv_limit(owner), arrived: 0 })
 }
 
 #[cfg(test)]

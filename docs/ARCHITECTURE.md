@@ -1016,13 +1016,16 @@ fails, not whichever one faults next on an empty frame pool.
 
 ### Pool and handle quotas
 
-`nt::quota` (ROADMAP R6; `quota_test` checks the Windows behaviour):
-what a process makes the kernel hold for it (objects, handle table
-entries, an object's own big buffers) is charged to the process, and a
-process over its limit fails, not whichever process next finds the heap
-empty: STATUS_QUOTA_EXCEEDED (ERROR_NOT_ENOUGH_QUOTA) over a pool quota,
-STATUS_INSUFFICIENT_RESOURCES (ERROR_NO_SYSTEM_RESOURCES) at the handle
-limit. Only the failing call fails; the process and every other process
+`crate::quota` (the block, below every personality: the network stack
+charges it too) and `nt::quota` (objects, handle entries) (ROADMAP R6;
+`quota_test` and `quota_sockets` check the Windows behaviour): what a
+process makes the kernel hold for it (objects, handle table entries, an
+object's own big buffers, sockets' buffers, queued completion packets)
+is charged to the process, and a process over its limit fails, not
+whichever process next finds the heap empty: STATUS_QUOTA_EXCEEDED
+(ERROR_NOT_ENOUGH_QUOTA; WSAENOBUFS for a socket, ENOBUFS for a Linux
+one) over a pool quota, STATUS_INSUFFICIENT_RESOURCES
+(ERROR_NO_SYSTEM_RESOURCES) at the handle limit. Only the failing call fails; the process and every other process
 go on (a handle leak in one process leaves the others their full
 limits).
 
@@ -1034,9 +1037,10 @@ limits).
 - **Two pools**, as Windows' QUOTA_LIMITS and VM_COUNTERS name them,
   over gala's one heap: waitable objects (`KObject::dispatcher` is some:
   events, mutants, semaphores, timers, completion ports, threads,
-  processes, files, pipes, sockets) and pipe buffers are "nonpaged",
-  the rest (handle entries, sections and their page tables, keys,
-  tokens, directories, names, security descriptors) "paged". The split
+  processes, files, pipes, sockets), pipe buffers, sockets' buffers and
+  completion packets are "nonpaged", the rest (handle entries, sections
+  and their page tables, keys, tokens, directories, names, security
+  descriptors) "paged". The split
   is gala's choice following Windows' (dispatcher objects live in
   nonpaged pool there).
 - **What is charged** (`quota::object_cost`): every handle entry
@@ -1050,8 +1054,31 @@ limits).
   system's and never charged. On top: a thread's boxed `NtThread`, a pipe
   instance's buffers (both quotas, at most 1 MiB: what its queues may
   hold, charged with the server end), a pagefile-backed section's page
-  table. Windows charges an object's quota to its creator and gives it
-  back at deletion; a second opener pays only its handle entry, as here.
+  table, a token's groups, privileges and restricting SIDs and its
+  dynamic part (`Token::fixed`, `Token::dynamic`). Windows charges an
+  object's quota to its creator and gives it back at deletion; a second
+  opener pays only its handle entry, as here.
+- **What grows after creation** is charged as it grows, to whoever the
+  object is charged to (`quota::grow`, `shrink`), or to its owner:
+  - a token's dynamic part (TOKEN_STATISTICS.DynamicCharged: at least
+    4096 bytes, else the default DACL's size): a larger default DACL
+    charges the difference (STATUS_QUOTA_EXCEEDED over the quota, the
+    DACL unchanged), a smaller one gives it back. Groups and privileges
+    never grow (NtAdjustGroupsToken and NtAdjustPrivilegesToken change
+    attributes only).
+  - a completion port's packets (`CompletionQueue`, `PACKET_COST` each):
+    queued packets and the slots kept for requests in progress, to the
+    port's creator, given back as they are taken or the port goes.
+    NtSetIoCompletion (PostQueuedCompletionStatus) is refused over the
+    quota (STATUS_QUOTA_EXCEEDED): a program posting without taking runs
+    out of its own quota; a completed I/O's packet and a request's slot
+    are charged whatever the limit (an I/O done cannot be refused; they
+    are bounded by the I/O in progress).
+  - a socket's buffers (`net::tcp::Owner`, "Networking"): each socket in
+    the stack's sets, while its owner holds it, to the AFD endpoint's
+    creator or the Linux socket's process; SO_RCVBUF/SO_SNDBUF size
+    them (up to 4 MiB each way), so a program asking for big buffers
+    pays for them.
 - **Where**: `HandleTable::insert` checks the handle limit, then charges
   the entry, then claims the object (`quota::claim`), each one atomic
   step against its limit; a refusal undoes the earlier steps and the
@@ -1070,16 +1097,30 @@ limits).
   only with a configured one: at 16 bytes an entry, 2^24 handles are
   256 MiB, more than the pool quota.
 - **Measured peaks** of the largest process (the `quota: most per
-  process` and `quota: new most` lines): chromium_window's chrome.exe
-  196 KiB paged, about 1.1 MiB nonpaged, 517 handles (its VM's limits
-  1280 MiB and 640 MiB); java_http's java.exe between 256 and 512 KiB
-  nonpaged; nginx, nginx_master, nginx_tls under 256 KiB (nginx.exe
-  about 128 KiB nonpaged, 16 handles); go_http 3 KiB paged, 51 KiB
-  nonpaged, 26 handles. In a 512 MiB VM the defaults are 128 MiB paged
-  and 64 MiB nonpaged: over 50 times the largest peak.
+  process` and `quota: new most` lines), sockets' buffers included (a
+  default socket holds 128 KiB): chromium_https's chrome.exe 175 KiB
+  paged, about 1.5 MiB nonpaged, 522 handles (chromium_window and
+  chromium_host about 1.1 and 1.4 MiB; their VMs' limits 1280 MiB and
+  640 MiB); curl's nginx.exe about 1.2 MiB nonpaged; go_http 692 KiB;
+  java_http's java.exe between 512 KiB and 1 MiB; sshd's sshd.exe between
+  512 KiB and 1 MiB; nginx, nginx_master, nginx_tls between 256 and
+  512 KiB. In a 512 MiB VM the defaults are 128 MiB paged and 64 MiB
+  nonpaged: over 50 times the largest peak.
+- **Changed** by NtSetInformationProcess(ProcessQuotaLimits) (class 1,
+  QUOTA_LIMITS or QUOTA_LIMITS_EX, PROCESS_SET_QUOTA): a nonzero pool
+  limit becomes the process's, which needs SeIncreaseQuotaPrivilege
+  (Microsoft Learn's Privilege Constants: "Required to adjust the memory
+  quota for a process"; STATUS_PRIVILEGE_NOT_HELD without it: a
+  standard user lacks it); what is charged stays charged, later charges
+  meet the new limit; logged `quota: pid P (x.exe) .. pool limit set to
+  N`. The working set's sizes are kept and reported (gala keeps no
+  working sets; both (SIZE_T)-1 trims, changing nothing; a minimum over
+  the maximum is STATUS_INVALID_PARAMETER); PagefileLimit and TimeLimit
+  are ledgered. kernel32's SetProcessWorkingSetSize does not call it yet
+  (it keeps the sizes in the process).
 - **Exposed**: NtQueryInformationProcess ProcessQuotaLimits (class 1,
-  QUOTA_LIMITS: the pool limits, the commit limit as PagefileLimit; no
-  working-set or time limits, 0), ProcessVmCounters (class 3,
+  QUOTA_LIMITS: the pool limits, the working set's sizes as set, the
+  commit limit as PagefileLimit; no time limit, 0), ProcessVmCounters (class 3,
   VM_COUNTERS or VM_COUNTERS_EX: QuotaPeakPagedPoolUsage ...
   QuotaNonPagedPoolUsage; virtual size, working set and page faults are
   not kept, 0), ProcessHandleCount (GetProcessHandleCount);
@@ -1093,16 +1134,18 @@ limits).
   over its ...` line (first four refusals per process), the `quota
   exceeded` process event (every refusal), each process's usage in the
   state dump (`process: pid P ...`), the end-of-run peaks.
-- Not charged yet: registry data (hive keys and values a program writes:
-  Windows does not charge them to a process either), file data in ramfs
-  (a disk's, not pool), window and message state (bounded on its own:
-  at most `window::MAX_POSTED` posted messages wait, as Windows bounds a
-  queue at 10000), a socket's
-  buffers, a completion port's queued packets, image layouts (shared by
-  every process that loads the image). Not done: NtSetInformationProcess
-  (ProcessQuotaLimits) to change a process's limits, job-wide pool
-  limits, and charging an object's memory that grows after its creation
-  (a key's subkeys, a token's groups).
+- Not charged, by design: registry data (hive keys, subkeys and values
+  a program writes: Windows does not charge them to a process either;
+  the registry has its own bounds), file data in ramfs (a disk's, not
+  pool), image layouts (`section::image_layout`: a file's laid-out
+  pages, shared by every process that loads it and kept by the system's
+  image cache, as Windows' image sections are the file cache's, not a
+  process's pool), window and message state (bounded on its own: at
+  most `window::MAX_POSTED` posted messages wait, as Windows bounds a
+  queue at 10000), lingering sockets (closed, still finishing: the
+  stack's, bounded by its budget). Job-wide pool limits: Windows has
+  none to copy (JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits only
+  commit: "Commit charge").
 
 ### Sections
 
@@ -2089,7 +2132,33 @@ shutdown.
 - **Access**: checked against the handle (KEY_QUERY_VALUE, KEY_SET_VALUE,
   KEY_ENUMERATE_SUB_KEYS, DELETE; KeyNameInformation needs none), and at
   open against the key's descriptor ("Access checks"). The WOW64 view
-  bits are dropped (one view).
+  bits (KEY_WOW64_32KEY, KEY_WOW64_64KEY) choose a view, not rights:
+  dropped from the handle's access.
+- **The 32-bit view** (`nt/regview.rs`; tested by
+  `wow64_adv_test`): NtOpenKey(Ex) and NtCreateKey resolve a name in the
+  32-bit view for a WOW64 process unless its access has KEY_WOW64_64KEY,
+  and for any process with KEY_WOW64_32KEY, as Microsoft Learn's
+  "Registry Redirector" and "Registry Keys Affected by WOW64" (Windows 7
+  and later) have it: on the full name (the RootDirectory key's name and
+  the relative one, so opens relative to a handle redirect as absolute
+  ones), `MACHINE\SOFTWARE\<x>` becomes `SOFTWARE\WOW6432Node\<x>`
+  except the documented shared keys and their subkeys (a table:
+  `Classes`, `Clients`, `Policies`, `RegisteredApplications` and the
+  listed `Microsoft\...` keys); in `SOFTWARE\Classes` and each user's
+  `Software\Classes` only CLSID, DirectShow, Interface, Media Type and
+  MediaFoundation are redirected, to `Classes\WOW6432Node\<key>`. A name
+  already through `WOW6432Node` is the 32-bit name it spells: a shared
+  key below it is the shared key itself (a 32-bit program's handle to
+  SOFTWARE is WOW6432Node's, and ProfileList below it is the machine's),
+  the rest stays. A create in the 32-bit view makes the WOW6432Node key
+  first when it is missing. The seed gives WOW6432Node the version keys
+  and the 32-bit ProgramFilesDir/CommonFilesDir (the `(x86)`
+  directories) and `Classes\WOW6432Node\CLSID` and `Interface` (empty:
+  no 32-bit COM servers). Not modelled: Vista's reflection,
+  WOW6432Node's own `Classes` link (a 32-bit name through it is taken as
+  `SOFTWARE\Classes`'s), `HKEY_USERS\<SID>_Classes`. advapi32 passes
+  the view flags on to every key it opens on the way (RegCreateKeyEx's
+  intermediate keys, RegDeleteKeyEx's).
 - **Services**: NtOpenKey 0x12, NtEnumerateValueKey 0x13, NtQueryKey
   0x16, NtQueryValueKey 0x17, NtCreateKey 0x1d, NtEnumerateKey 0x32
   (long-stable on x64), NtSetValueKey 0x60 (to be verified), and gala's
@@ -2103,7 +2172,10 @@ shutdown.
   scenario's keys, such as what an installer would write;
   `user/sqllocaldb/sqllocaldb.regseed` is SqlLocalDB.msi's Registry
   table). NtOpenKey of a missing key records it in the ledger
-  (`registry:MACHINE/...`, "absent key"), which is how the seed grows.
+  (`registry:MACHINE/...`, "absent key"), which is how the seed grows;
+  a name in the 32-bit view is recorded as it was resolved
+  (`registry:MACHINE/SOFTWARE/WOW6432Node/...`), so a 32-bit program's
+  missing key shows which view it looked in.
 - **advapi32** (`user/advapi32/src/registry.rs`): the Reg* functions over
   ntdll's Nt*Key services. The predefined HKEYs (zero- or sign-extended,
   as winreg.h's x64 values are) open their key on first use and keep the
@@ -2529,7 +2601,9 @@ runtime of mingw-w64 programs.
 
 ### advapi32
 
-`user/advapi32` (`advapi32_test`).
+`user/advapi32` (`advapi32_test`; built for i686 too, `wow64_adv_test`:
+its structures with pointer-sized fields are typed in `layout.rs`, one
+definition for both layouts, "Plan: WOW64").
 
 - **Security** (`security.rs`): SIDs, ACLs and absolute security
   descriptors built and read as documented; the user "gala"
@@ -3693,13 +3767,32 @@ only. ROADMAP N1 (TCP/IP and sockets) and N2 (Nginx) are the items.
   patch's `SocketSet::has_room`/`try_reserve`: `Stack::admit` reserves
   room fallibly before smoltcp's `add` would push), so smoltcp never
   allocates infallibly.
-- **The socket limit**: every interface's sockets together are bounded
-  by `socket_limit`, a quarter of the machine's memory at 128 KiB of
-  buffers each (at least 64; 1024 at 512 MiB). A socket refused for it,
-  or for want of memory, is logged once until a socket goes: `net: a
-  loopback socket is refused: all 1024 sockets are in use (... sockets
-  in use: loopback .., card ..; limit .., ...; frames free ..)`.
-  TODO (ROADMAP R6): charge the buffers to the owning process's quota.
+- **The buffer budget**: every interface's sockets' buffers together are
+  bounded by `buffer_budget`, a quarter of the machine's memory (at
+  least 64 default sockets' worth; 128 MiB at 512 MiB, 1024 default
+  sockets). A socket refused for it, or for want of memory, is logged
+  once until a socket goes: `net: a loopback socket is refused: its N
+  KiB of buffers are over the budget (.. sockets in use: loopback ..,
+  card ..; their buffers .. KiB of the stack's .. KiB, a quarter of
+  memory; frames free ..)`.
+- **Charged to the owner** (`tcp::Owner`, `Bill`; ARCHITECTURE "Pool and
+  handle quotas"): every socket in a set has a bill, its bytes against
+  the budget and their charge to its owner's nonpaged pool quota while
+  the owner holds it: a bound socket's connection to its owner, a
+  listener's listening sockets and the connections waiting on it to the
+  listener's owner, an accepted connection from then on to the
+  acceptor's (`rebill`: over the acceptor's quota the accept fails and
+  the connection stays pending); a socket its owner closed that still
+  finishes (FIN, TIME-WAIT) is the stack's alone (`unbill`), counted
+  only against the budget. Over the owner's quota a socket is refused
+  with `NetError::OverQuota` (AFD: STATUS_QUOTA_EXCEEDED, which ws2_32
+  reports as WSAENOBUFS; lx: ENOBUFS), logged by the quota (`quota: pid
+  P (x.exe) over its nonpaged pool`); a listener refused a listening
+  socket asks again quietly (`Listener::over_quota`, `Block::fits`) so
+  a starved listener logs once per stretch, not once per poll. A socket
+  a kernel handover carried is charged whatever its limit (the process
+  held it already), but an AFD endpoint carried has no quota (its
+  process's is restored after it), so its sockets are not charged.
 - `net: ...` at the end of every boot logs frames, loopback packets,
   polls and the sockets still open (0 after programs that closed
   theirs).
@@ -3744,10 +3837,17 @@ The kernel's socket API, independent of NT: `listen(local, backlog)`,
 - Closing is graceful: the socket sends FIN and stays in the set until
   it is closed or in TIME-WAIT, then it is removed and its buffers freed
   (`reap` in the poll loop).
-- Buffers are 64 KiB each way, owned by each socket (a listening
-  socket's too: smoltcp fixes a socket's buffers when it is made, and the
-  window it advertises in its SYN-ACK comes from them), so a listener on
-  0.0.0.0 holds 256 KiB besides its connections.
+- Buffers are 64 KiB each way unless the owner asks for more
+  (`Owner::rx`/`tx`: SO_RCVBUF/SO_SNDBUF, at least 64 KiB, at most
+  `MAX_BUFFER`, 4 MiB), owned by each socket (a listening socket's too:
+  smoltcp fixes a socket's buffers when it is made, and the window it
+  advertises in its SYN-ACK comes from them), so a listener on 0.0.0.0
+  holds 256 KiB besides its connections. The sizes apply to the sockets
+  made after they are set (`set_owner`: a bound socket's connection, a
+  listener's next listening sockets, which become its connections); a
+  connection's buffers stay as they were made. gala allocates a socket's
+  buffers whole when it is made (Windows grows AFD's as data comes), so
+  large ones are charged at once.
 - Byte counts: an entry counts what its owner sent (queued) and
   received (took); `tcp shutdown` and `tcp close`/`tcp reset`
   (`events=net`) carry them with the queues' lengths then (`unsent`:
@@ -3774,8 +3874,11 @@ peer), `recv_from` (a datagram, its whole length and its sender;
   received into the socket's own queue (`drain`): datagrams from other
   addresses than a connected socket's peer are discarded there
   (Windows' connect on a datagram socket); the queue holds 256 datagrams
-  / 64 KiB and drops what comes beyond (and on allocation failure). That
-  queue is what a handover carries.
+  / 64 KiB (more with SO_RCVBUF set before bind, up to 4 MiB) and drops
+  what comes beyond (and on allocation failure). That queue is what a
+  handover carries.
+- Charged like TCP's: each smoltcp socket's buffers, and with the first
+  the most its queue may hold.
 - Sends go into the smoltcp socket of the interface that reaches the
   destination (WouldBlock while its queue is full).
 - No IP fragmentation: a datagram larger than the interface's IP MTU
@@ -3828,7 +3931,7 @@ come from ReactOS and have not been checked against Windows.
 | 0x1202b | DISCONNECT: `{u32 type (1 send, 2 receive, 4 abort); i64 timeout}` | ReactOS, to be verified |
 | 0x1202f | GETSOCKNAME: returns the local sockaddr | Wine |
 | 0x12033 | GET_PEER_NAME: returns the remote sockaddr | ReactOS, to be verified |
-| 0x1203b | SET_INFO: `{u32 class; union at 8; u32 pad}`; class 2 (blocking mode, the union's BOOLEAN = non-blocking) | ReactOS, to be verified |
+| 0x1203b | SET_INFO: `{u32 class; union at 8; u32 pad}`; class 2 (blocking mode, the union's BOOLEAN = non-blocking); 6 and 7 (AFD_INFO_RECEIVE_WINDOW_SIZE, AFD_INFO_SEND_WINDOW_SIZE: SO_RCVBUF, SO_SNDBUF, the union's ULONG) | ReactOS, to be verified |
 | 0x12083 | SUPER_ACCEPT (AcceptEx): `{u8 san; u8 fix; HANDLE accept; u32 receive_length; u32 local_length; u32 remote_length}`; the output buffer receives [data][local address][remote address] | ReactOS, to be verified |
 | 0x120c7 | SUPER_CONNECT (ConnectEx): `{u8 san; TRANSPORT_ADDRESS at 4}` | ReactOS, to be verified |
 | 0x12087 | EVENT_SELECT (WSAEventSelect), below | Wine |
@@ -4008,8 +4111,11 @@ SOCKET values are the endpoint handles.
   mswsock.dll forwards its AcceptEx and GetAcceptExSockaddrs exports
   there (Go imports them from mswsock).
 - Socket options: those that only tune the stack (TCP_NODELAY,
-  keepalive, SO_UPDATE_*_CONTEXT, buffer sizes) are accepted and have no
-  effect yet. The integer ones (SO_REUSEADDR, SO_KEEPALIVE,
+  keepalive, SO_UPDATE_*_CONTEXT) are accepted and have no effect yet;
+  SO_RCVBUF and SO_SNDBUF go to AFD as well (SET_INFO classes 6 and 7)
+  and size the buffers of the sockets made from then on ("TCP"; set on
+  a connected socket they change nothing, ledgered `afd buffer size of
+  a connected socket`). The integer ones (SO_REUSEADDR, SO_KEEPALIVE,
   SO_SNDBUF/RCVBUF, SO_EXCLUSIVEADDRUSE, TCP_NODELAY, the TCP
   keep-alive idle/count/interval, SO_BROADCAST, SO_TYPE,
   SO_RANDOMIZE_PORT, IP_DONTFRAGMENT and IP_RECVECN, the last three set
@@ -6680,11 +6786,13 @@ Win32 Structured Exception Handling", MSJ 1997).
 | The 32-bit ntdll (SysWOW64): the loader, the stubs, x86 SEH, the APC dispatcher | `user/testntdll` built for i686 (`x86.rs`, `seh_x86.rs`; `x64.rs` the 64-bit one's parts); the kernel's `nt/ntdll.rs` (`get32`), `nt/wow64.rs` (`through_ntdll32`, `exception_stack`), `nt/process.rs` (`deliver_to_user`) |
 | The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
 | The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
+| The 32-bit advapi32 and bcryptprimitives (SysWOW64) | `user/advapi32` built for i686 (its typed structures in `layout.rs`), `user/bcryptprimitives` |
+| The registry's 32-bit view | `kernel/src/nt/regview.rs`, applied in `nt/registry_calls.rs` (`key_view`) |
 | The environment by bitness | `nt/wow64.rs` (`environment`) |
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view) |
 
 ### Decisions
 
@@ -6705,7 +6813,7 @@ Win32 Structured Exception Handling", MSJ 1997).
   segments, mapping wow64.dll, the answers about a process's machine
   (ProcessWow64Information), the IO_STATUS_BLOCK in the x86 layout
   (below), a WOW64 thread's 64-bit stack and its 32-bit stack's guard
-  page, and later the 32-bit view of the registry.
+  page, and the 32-bit view of the registry.
 - **One DLL, gala's own ABI**: Windows splits the layer into wow64.dll,
   wow64cpu.dll and wow64win.dll on top of the 64-bit ntdll; gala has one
   `wow64.dll` (in System32, 64-bit, no imports: it makes system calls
@@ -6919,8 +7027,18 @@ AMD64, GetSystemDirectory SysWOW64. Done too: the 32-bit msvcrt
 (`user/msvcrt` built for i686, "msvcrt": the `va_list` slots, the cdecl
 variadic entry points, the x86 jump buffer and SEH unwinding of
 longjmp, the x87 control word, FILE/lconv/STARTUPINFO with 4-byte
-pointers, the 32-bit time_t). To come, as programs need them:
-advapi32, kernelbase, user32, gdi32 and the rest (ROADMAP WOW).
+pointers, the 32-bit time_t). Done too: the 32-bit advapi32 and the
+bcryptprimitives it imports (`user/advapi32` and `user/bcryptprimitives`
+built for i686): the predefined HKEYs are 32-bit values there (no
+sign-extended form to fold), its structures with pointers are typed in
+`layout.rs` (SID_AND_ATTRIBUTES, TOKEN_GROUPS whose array starts at 4,
+the absolute SECURITY_DESCRIPTOR of 20 bytes, SECURITY_ATTRIBUTES,
+TRUSTEE_W, EXPLICIT_ACCESS_W; the LSA mapping inputs in `policy.rs`); a
+self-relative descriptor's offsets, SIDs, ACLs and ACEs are alike in
+both; TEB.ActivityId at fs:0xf50; RDRAND/RDSEED fill 32-bit words. The
+32-bit ntdll's descriptor functions take the absolute form's pointers at
+its own width. To come, as programs need them: kernelbase, user32, gdi32
+and the rest (ROADMAP WOW).
 Arch-specific code moves behind `cfg(target_arch)`;
 `extern "system"` is stdcall there, which Windows' exports are, and
 exports keep their undecorated names (naked functions too; `/EXPORT:`
@@ -6929,7 +7047,8 @@ for `global_asm!` symbols); imports from them are `raw-dylib` with
 `USER_PROGRAMS_X86` with the i686 target; a scenario ships a 32-bit DLL
 as `x86/<file>` in EXTRA_MODULES (under `boot/x86` on the ISO, its name
 being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
-(`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`; test DLLs
+(`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`,
+`testadvapi32_32.dll`, `testbcryptprimitives32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers
@@ -6951,13 +7070,13 @@ under their own names: `testdll32.dll`).
   name the caller passed; the kernel's namespace stays unaware. Not
   redirected yet: GalaCreateProcess's image path, names relative to a
   RootDirectory handle.
-- **Registry** (stage 4): the 32-bit view (`HKLM\Software\Wow6432Node`
-  and the other redirected keys of "Registry Keys Affected by WOW64",
-  shared keys left alone) in the kernel's registry, chosen per open by
-  the caller (a WOW64 process) and the access mask (KEY_WOW64_32KEY,
-  KEY_WOW64_64KEY, which 64-bit programs pass too): the kernel resolves
-  key paths, including opens relative to a handle, where a user-mode
-  rewrite of names would not see the full path.
+- **Registry**: the 32-bit view (`HKLM\Software\Wow6432Node` and the
+  other redirected keys of "Registry Keys Affected by WOW64", shared keys
+  left alone) in the kernel's registry, chosen per open by the caller (a
+  WOW64 process) and the access mask (KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+  which 64-bit programs pass too): the kernel resolves key paths,
+  including opens relative to a handle, where a user-mode rewrite of
+  names would not see the full path ("Registry", "The 32-bit view").
 - **Answers**: IsWow64GuestMachineSupported: x86 only; IsWow64Process
   and IsWow64Process2 (I386 for a WOW64 process, UNKNOWN for a native
   one, AMD64 native) from ProcessWow64Information;

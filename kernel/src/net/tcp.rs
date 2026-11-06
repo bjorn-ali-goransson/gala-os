@@ -3,17 +3,28 @@
 //! "Networking".
 //!
 //! Two interfaces, each with its own socket set: `lo` (127.0.0.1/8, always)
-//! and `eth` (the card, when there is one). The sets grow fallibly up to
-//! the stack's socket limit (a share of memory, `socket_limit`). Our own
-//! table of entries maps `SocketId`s to smoltcp sockets: a bound address, a
-//! listener (one listening socket per interface, its connections being
-//! opened and those waiting to be accepted) or a connection.
+//! and `eth` (the card, when there is one). The sets grow fallibly while
+//! the sockets' buffers stay within the stack's budget (a share of
+//! memory, `buffer_budget`). Our own table of entries maps `SocketId`s to
+//! smoltcp sockets: a bound address, a listener (one listening socket per
+//! interface, its connections being opened and those waiting to be
+//! accepted) or a connection.
+//!
+//! Every socket's buffers are charged to its owner's quota (`Owner`: the
+//! process that made the endpoint, ARCHITECTURE "Pool and handle quotas")
+//! while the owner holds it (`Bill`): a listener's sockets to the
+//! listener's owner, an accepted connection then to the acceptor's; a
+//! socket its owner closed and that still finishes (FIN, TIME-WAIT) is the
+//! stack's alone. A socket over its owner's quota is refused
+//! (`NetError::OverQuota`). An owner may ask for larger buffers than the
+//! default (SO_RCVBUF, SO_SNDBUF), up to MAX_BUFFER each way.
 //! The `net` thread polls; after each poll every entry whose readiness
 //! changed is reported to the notify hook with the entry's token.
 
 use super::loopback::Loopback;
 use super::virtio_net::VirtioNet;
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
+use crate::quota::{Block, Held, Pool};
 use crate::sync::IrqMutex;
 // Threads and time through the core's runtime (not `nt::platform`: `net`
 // is core, below every personality), so the stack also runs in gala-um
@@ -31,15 +42,20 @@ use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address,
 };
 
-/// Bytes buffered per direction per connection.
-const BUFFER: usize = 64 * 1024;
-/// What one socket's buffers take (both directions; a UDP socket's too).
+/// Bytes buffered per direction per connection unless its owner asks for
+/// more (Windows' default SO_RCVBUF and SO_SNDBUF are 64 KiB too).
+pub const BUFFER: usize = 64 * 1024;
+/// The most a socket buffers each way: larger SO_RCVBUF/SO_SNDBUF values
+/// give this much (gala's buffers are allocated whole when the socket is
+/// made, not as data comes).
+pub const MAX_BUFFER: usize = 4 << 20;
+/// What a default socket's buffers take (both directions).
 const SOCKET_COST: u64 = 2 * BUFFER as u64;
-/// The share of memory the stack's sockets may take: a quarter
-/// (`socket_limit`).
+/// The share of memory the stack's sockets' buffers may take: a quarter
+/// (`buffer_budget`).
 const MEMORY_SHARE: u64 = 4;
-/// The fewest sockets the limit allows, however little memory (and in
-/// host tests, which have no frame allocator).
+/// The fewest default sockets the budget allows, however little memory
+/// (and in host tests, which have no frame allocator).
 const MIN_SOCKETS: usize = 64;
 /// Slots a socket set starts with; it doubles as it fills.
 const INITIAL_SLOTS: usize = 16;
@@ -66,6 +82,9 @@ pub enum NetError {
     NotConnected,
     Unreachable,
     NoMemory,
+    /// Over its owner's pool quota (the owner's `quota: ... over its
+    /// nonpaged pool` line and event say by how much).
+    OverQuota,
     /// The id names no live socket.
     NoSocket,
     /// A datagram larger than the interface carries.
@@ -163,7 +182,7 @@ impl SocketId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(super) enum Side {
     Lo,
     Eth,
@@ -183,6 +202,48 @@ impl Side {
 }
 
 pub(super) type Sock = (Side, SocketHandle);
+
+/// Who a socket is for: the token the notify hook gets, the quota its
+/// buffers are charged to (none: the system's, uncharged) and the sizes
+/// its owner asked for (0: the default; clamped to BUFFER..=MAX_BUFFER).
+#[derive(Clone, Default)]
+pub struct Owner {
+    pub token: u64,
+    pub purse: Option<KArc<Block>>,
+    pub rx: usize,
+    pub tx: usize,
+    /// Charged whatever the limit (a socket a kernel handover carried:
+    /// its process held it already).
+    pub unchecked: bool,
+}
+
+impl From<u64> for Owner {
+    /// An owner with no quota and the default buffers (the kernel's own
+    /// sockets, host tests).
+    fn from(token: u64) -> Owner {
+        Owner { token, ..Owner::default() }
+    }
+}
+
+impl Owner {
+    /// The receive and send buffers' sizes its sockets get.
+    pub fn buffers(&self) -> (usize, usize) {
+        (self.rx.clamp(BUFFER, MAX_BUFFER), self.tx.clamp(BUFFER, MAX_BUFFER))
+    }
+
+    /// Its TCP socket's cost: both buffers.
+    fn tcp_cost(&self) -> u64 {
+        let (rx, tx) = self.buffers();
+        (rx + tx) as u64
+    }
+}
+
+/// What one socket in a set costs: its bytes against the stack's budget,
+/// and their charge to its owner's quota while the owner holds it.
+pub(super) struct Bill {
+    bytes: u64,
+    charge: Option<Held>,
+}
 
 /// What a listener does with a connection request (a SYN) that finds its
 /// backlog full.
@@ -211,7 +272,7 @@ pub(super) struct Listener {
     when_full: WhenFull,
     /// The socket in LISTEN on each interface (`Side::index`): None while
     /// the backlog is full (WhenFull::Refuse: the stack's own RST answers
-    /// the SYN) or when no socket could be had (the limit, memory).
+    /// the SYN) or when no socket could be had (the budget, memory, the owner's quota).
     catchers: [Option<Sock>; 2],
     /// Connections being opened (SYN received, the handshake not done).
     opening: Vec<Sock>,
@@ -222,6 +283,10 @@ pub(super) struct Listener {
     /// The backlog was full at the last look (`events=net` "tcp backlog
     /// full" once each time it fills).
     full: bool,
+    /// A listening socket was refused by the owner's quota: until one
+    /// fits again, `tend` asks quietly (the quota logs and reports one
+    /// refusal per stretch, not one per poll).
+    over_quota: bool,
 }
 
 impl Listener {
@@ -249,7 +314,9 @@ impl Kind {
 
 pub(super) struct Entry {
     generation: u32,
-    token: u64,
+    /// Its token, quota and buffer sizes (a listener's connections get
+    /// the sizes too).
+    pub(super) owner: Owner,
     pub(super) local: Addr,
     /// The families it takes (ports and listening addresses follow it).
     pub(super) scope: Scope,
@@ -300,16 +367,15 @@ impl<D: Device> Iface<D> {
     }
 }
 
-/// The most sockets the stack holds, every interface's together: their
-/// buffers (SOCKET_COST each) may take a quarter of the machine's memory,
-/// at least MIN_SOCKETS of them. Every listener holds one per interface
-/// and every connection one, so this is what bounds listeners and
-/// connections alike (`Stack::admit`). TODO (ROADMAP R6): charge the
-/// buffers to the owning process's quota as well.
-fn socket_limit() -> usize {
+/// The most bytes the stack's sockets' buffers take, every interface's
+/// together: a quarter of the machine's memory, at least MIN_SOCKETS
+/// default sockets' worth. Every listener holds a socket per interface
+/// and every connection one, so this bounds listeners and connections
+/// alike, whoever owns them; each owner's own share is its pool quota
+/// (`Stack::admit`).
+fn buffer_budget() -> u64 {
     let (_, frames) = crate::mm::frame_stats();
-    let share = frames.saturating_mul(4096) / MEMORY_SHARE / SOCKET_COST;
-    usize::try_from(share).unwrap_or(usize::MAX).max(MIN_SOCKETS)
+    (frames.saturating_mul(4096) / MEMORY_SHARE).max(MIN_SOCKETS as u64 * SOCKET_COST)
 }
 
 pub(super) struct Stack {
@@ -323,8 +389,12 @@ pub(super) struct Stack {
     lingering: Vec<Sock>,
     next_port: u16,
     next_generation: u32,
-    /// `socket_limit` when the stack started.
-    limit: usize,
+    /// `buffer_budget` when the stack started, and the bytes the sockets
+    /// in the sets take now.
+    budget: u64,
+    bytes: u64,
+    /// Each socket in a set and its `Bill`, by socket (binary search).
+    bills: Vec<(Sock, Bill)>,
     /// A socket was refused and it was logged (once until a socket goes).
     refused_logged: bool,
 }
@@ -344,12 +414,13 @@ fn now() -> smoltcp::time::Instant {
     smoltcp::time::Instant::from_micros((time::monotonic_ns() / 1000) as i64)
 }
 
-fn new_socket() -> Option<tcp::Socket<'static>> {
+/// A TCP socket with buffers of `rx` and `tx` bytes.
+fn new_socket((rx_len, tx_len): (usize, usize)) -> Option<tcp::Socket<'static>> {
     let (mut rx, mut tx) = (Vec::new(), Vec::new());
-    rx.try_reserve_exact(BUFFER).ok()?;
-    tx.try_reserve_exact(BUFFER).ok()?;
-    rx.resize(BUFFER, 0);
-    tx.resize(BUFFER, 0);
+    rx.try_reserve_exact(rx_len).ok()?;
+    tx.try_reserve_exact(tx_len).ok()?;
+    rx.resize(rx_len, 0);
+    tx.resize(tx_len, 0);
     let mut socket = tcp::Socket::new(tcp::SocketBuffer::new(rx), tcp::SocketBuffer::new(tx));
     // Small writes go out at once, as with TCP_NODELAY (request/response
     // round trips over loopback would otherwise wait for delayed ACKs).
@@ -375,31 +446,43 @@ impl Stack {
         self.lo.count + self.eth.as_ref().map_or(0, |e| e.count)
     }
 
-    /// Logs why a socket is refused, once until a socket goes.
+    /// Logs why a socket is refused, once until a socket goes. (A refusal
+    /// by its owner's quota is logged by the quota, per process.)
     fn refused(&mut self, side: Side, why: core::fmt::Arguments<'_>) {
         if !self.refused_logged {
             self.refused_logged = true;
             let (free, total) = crate::mm::frame_stats();
             crate::warn!(
                 "net: a {} socket is refused: {why} ({} sockets in use: loopback {}, card {}; \
-                 limit {}, a quarter of memory at {} KiB each; frames free {free} of {total})",
+                 their buffers {} KiB of the stack's {} KiB, a quarter of memory; \
+                 frames free {free} of {total})",
                 side.name(),
                 self.in_use(),
                 self.lo.count,
                 self.eth.as_ref().map_or(0, |e| e.count),
-                self.limit,
-                SOCKET_COST / 1024,
+                self.bytes / 1024,
+                self.budget / 1024,
             );
         }
     }
 
-    /// Whether one more socket may go into `side`'s set: under the limit,
-    /// and room in the set (grown fallibly here, so smoltcp's `add` never
-    /// allocates). Callers ask before allocating a socket's buffers.
-    fn admit(&mut self, side: Side) -> Result<(), NetError> {
-        if self.in_use() >= self.limit {
-            let limit = self.limit;
-            self.refused(side, format_args!("all {limit} sockets are in use"));
+    /// Whether one more socket of `bytes` may go into `side`'s set for
+    /// `owner`: within the stack's budget, room in the set and in the
+    /// bills (grown fallibly here, so smoltcp's `add` never allocates),
+    /// and within the owner's quota. Callers ask before allocating a
+    /// socket's buffers; the bill goes to `add` with the socket (dropped
+    /// instead, it gives the charge back).
+    pub(super) fn admit(
+        &mut self,
+        side: Side,
+        owner: &Owner,
+        bytes: u64,
+    ) -> Result<Bill, NetError> {
+        if self.bytes.saturating_add(bytes) > self.budget {
+            self.refused(
+                side,
+                format_args!("its {} KiB of buffers are over the budget", bytes / 1024),
+            );
             return Err(NetError::NoMemory);
         }
         let set = self.sockets(side).ok_or(NetError::Unreachable)?;
@@ -410,25 +493,97 @@ impl Stack {
                 return Err(NetError::NoMemory);
             }
         }
+        if self.bills.try_reserve(1).is_err() {
+            self.refused(side, format_args!("out of memory for its bill"));
+            return Err(NetError::NoMemory);
+        }
+        let charge = match &owner.purse {
+            None => None,
+            Some(purse) if owner.unchecked => Some(Held::new(purse, Pool::NonPaged, bytes)),
+            Some(purse) => {
+                Some(Held::try_new(purse, Pool::NonPaged, bytes).map_err(|_| NetError::OverQuota)?)
+            }
+        };
+        Ok(Bill { bytes, charge })
+    }
+
+    /// A TCP socket for `side` with `owner`'s buffers, and its bill
+    /// (`admit`).
+    fn new_tcp(
+        &mut self,
+        side: Side,
+        owner: &Owner,
+    ) -> Result<(tcp::Socket<'static>, Bill), NetError> {
+        let bill = self.admit(side, owner, owner.tcp_cost())?;
+        let socket = new_socket(owner.buffers()).ok_or_else(|| {
+            self.refused(side, format_args!("out of memory for its buffers"));
+            NetError::NoMemory
+        })?;
+        Ok((socket, bill))
+    }
+
+    /// The bill of a socket in a set.
+    fn bill(&mut self, sock: Sock) -> Option<&mut Bill> {
+        let i = self.bills.binary_search_by(|(s, _)| s.cmp(&sock)).ok()?;
+        Some(&mut self.bills[i].1)
+    }
+
+    /// The socket's owner gave it up (closed, still finishing): its
+    /// buffers are the stack's alone from now on.
+    fn unbill(&mut self, sock: Sock) {
+        if let Some(bill) = self.bill(sock) {
+            bill.charge = None;
+        }
+    }
+
+    /// Charges the socket's buffers to `owner` instead (an accepted
+    /// connection: from the listener's owner to the acceptor's). Fails
+    /// with OverQuota, the charge left where it was, over the new
+    /// owner's quota.
+    fn rebill(&mut self, sock: Sock, owner: &Owner) -> Result<(), NetError> {
+        let Some(bill) = self.bill(sock) else { return Ok(()) };
+        let same = match (&bill.charge, &owner.purse) {
+            (Some(c), Some(p)) => KArc::ptr_eq(c.block(), p),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return Ok(());
+        }
+        let charge = match &owner.purse {
+            None => None,
+            Some(purse) => Some(
+                Held::try_new(purse, Pool::NonPaged, bill.bytes)
+                    .map_err(|_| NetError::OverQuota)?,
+            ),
+        };
+        bill.charge = charge;
         Ok(())
     }
 
-    /// A TCP socket for `side` with its buffers (`admit` first).
-    fn new_tcp(&mut self, side: Side) -> Result<tcp::Socket<'static>, NetError> {
-        self.admit(side)?;
-        new_socket().ok_or_else(|| {
-            self.refused(side, format_args!("out of memory for its buffers"));
-            NetError::NoMemory
-        })
-    }
-
+    /// Puts `socket` in `side`'s set with its bill (`admit` made room).
     pub(super) fn add<S: smoltcp::socket::AnySocket<'static>>(
         &mut self,
         side: Side,
         socket: S,
+        bill: Bill,
     ) -> Result<Sock, NetError> {
-        self.admit(side)?;
-        let handle = self.sockets(side).ok_or(NetError::Unreachable)?.add(socket);
+        if self.bills.try_reserve(1).is_err() {
+            return Err(NetError::NoMemory);
+        }
+        let set = self.sockets(side).ok_or(NetError::Unreachable)?;
+        if !set.has_room() {
+            return Err(NetError::NoMemory);
+        }
+        let handle = set.add(socket);
+        let sock = (side, handle);
+        let at = self.bills.binary_search_by(|(s, _)| s.cmp(&sock)).unwrap_or_else(|i| i);
+        self.bytes += bill.bytes;
+        // Room was reserved: this cannot fail. (Pushed, then moved to its
+        // place: no insert, which may allocate.)
+        if self.bills.try_push((sock, bill)).is_ok() {
+            self.bills[at..].rotate_right(1);
+        }
         match side {
             Side::Lo => self.lo.count += 1,
             Side::Eth => {
@@ -441,6 +596,11 @@ impl Stack {
     }
 
     pub(super) fn remove(&mut self, (side, handle): Sock) {
+        if let Ok(i) = self.bills.binary_search_by(|(s, _)| s.cmp(&(side, handle))) {
+            // Its charge goes back with the bill.
+            let (_, bill) = self.bills.remove(i);
+            self.bytes = self.bytes.saturating_sub(bill.bytes);
+        }
         if let Some(set) = self.sockets(side) {
             set.remove(handle);
             match side {
@@ -484,7 +644,7 @@ impl Stack {
 
     pub(super) fn insert(
         &mut self,
-        token: u64,
+        owner: Owner,
         local: Addr,
         scope: Scope,
         kind: Kind,
@@ -492,7 +652,7 @@ impl Stack {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
         let entry =
-            Entry { generation, token, local, scope, kind, last: 0, bytes: Bytes::default() };
+            Entry { generation, owner, local, scope, kind, last: 0, bytes: Bytes::default() };
         let index = match self.entries.iter().position(Option::is_none) {
             Some(i) => {
                 self.entries[i] = Some(entry);
@@ -558,12 +718,13 @@ impl Stack {
         side: Side,
         local: Addr,
         scope: Scope,
+        owner: &Owner,
     ) -> Result<Sock, NetError> {
         let addr = self.side_address(side, local.ip, scope).ok_or(NetError::AddressNotAvailable)?;
-        let mut socket = self.new_tcp(side)?;
+        let (mut socket, bill) = self.new_tcp(side, owner)?;
         let endpoint = IpListenEndpoint { addr, port: local.port };
         socket.listen(endpoint).map_err(|_| NetError::InvalidState)?;
-        self.add(side, socket)
+        self.add(side, socket, bill)
     }
 
     /// Puts every listener's sockets in order (`tend`).
@@ -591,6 +752,8 @@ impl Stack {
         let Kind::Listener(listener) = &mut entry.kind else { return };
         let mut l = core::mem::take(listener);
         let (local, scope) = (entry.local, entry.scope);
+        // (A reference count, not an allocation.)
+        let owner = entry.owner.clone();
         let id = SocketId { index: i as u32, generation: entry.generation };
         // Listening sockets that took a SYN.
         for slot in 0..l.catchers.len() {
@@ -640,9 +803,20 @@ impl Stack {
             let slot = side.index();
             match l.catchers[slot] {
                 None if room && self.side_address(side, local.ip, scope).is_some() => {
-                    // On failure (the limit, memory: logged) the interface
-                    // refuses connections until a later look finds room.
-                    l.catchers[slot] = self.listening_socket(side, local, scope).ok();
+                    let fits = |p: &KArc<Block>| p.fits(Pool::NonPaged, owner.tcp_cost());
+                    if l.over_quota && !owner.purse.as_ref().is_none_or(fits) {
+                        continue;
+                    }
+                    // On failure (the budget, memory: logged; the owner's
+                    // quota: logged by it) the interface refuses
+                    // connections until a later look finds room.
+                    match self.listening_socket(side, local, scope, &owner) {
+                        Ok(sock) => {
+                            l.catchers[slot] = Some(sock);
+                            l.over_quota = false;
+                        }
+                        Err(e) => l.over_quota |= e == NetError::OverQuota,
+                    }
                 }
                 Some(sock) if !room => {
                     self.remove(sock);
@@ -746,7 +920,7 @@ impl Stack {
             {
                 // Recorded only once reported: without memory for the
                 // report, the next poll reports it.
-                if changed.try_push(entry.token).is_ok() {
+                if changed.try_push(entry.owner.token).is_ok() {
                     entry.last = signature;
                 }
             }
@@ -838,7 +1012,9 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
         lingering: Vec::new(),
         next_port: *EPHEMERAL.start(),
         next_generation: 1,
-        limit: socket_limit(),
+        budget: buffer_budget(),
+        bytes: 0,
+        bills: Vec::new(),
         refused_logged: false,
     });
     let id = sched::spawn("net", net_thread, 0).map_err(|_| NetError::NoMemory)?;
@@ -885,15 +1061,20 @@ fn net_thread(_: usize) {
     }
 }
 
-/// Binds a socket to `local` (port 0: an ephemeral port). `token` is
-/// passed to the notify hook.
-pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
-    bind_scoped(local, Scope::of(local.ip), token)
+/// Binds a socket to `local` (port 0: an ephemeral port) for `owner`
+/// (its token is passed to the notify hook).
+pub fn bind(local: Addr, owner: impl Into<Owner>) -> Result<SocketId, NetError> {
+    bind_scoped(local, Scope::of(local.ip), owner)
 }
 
 /// The same for a socket of `scope` (an IPv6 one with or without
 /// IPV6_V6ONLY: `nt::afd`).
-pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, NetError> {
+pub fn bind_scoped(
+    local: Addr,
+    scope: Scope,
+    owner: impl Into<Owner>,
+) -> Result<SocketId, NetError> {
+    let owner = owner.into();
     with_stack(|s| {
         if !s.may_bind(local.ip) {
             return Err(NetError::AddressNotAvailable);
@@ -903,7 +1084,27 @@ pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, Ne
             p if s.port_in_use(p, false, scope) => return Err(NetError::AddressInUse),
             p => p,
         };
-        s.insert(token, Addr { ip: local.ip, port }, scope, Kind::Bound)
+        s.insert(owner, Addr { ip: local.ip, port }, scope, Kind::Bound)
+    })
+}
+
+/// Changes the owner of bound or listening socket `id` (its buffers'
+/// sizes: SO_RCVBUF and SO_SNDBUF set after bind) for the sockets it
+/// makes from now on: a listener's next listening sockets and
+/// connections, a bound socket's connection; sockets it holds already
+/// keep their buffers and charge. InvalidState for a connection or a
+/// datagram socket: their buffers were made whole at the start.
+pub fn set_owner(id: SocketId, owner: impl Into<Owner>) -> Result<(), NetError> {
+    let owner = owner.into();
+    with_stack_quiet(|s| {
+        let entry = s.entry(id)?;
+        match entry.kind {
+            Kind::Bound | Kind::Listener(_) => {
+                entry.owner = owner;
+                Ok(())
+            }
+            Kind::Conn { .. } | Kind::Udp(_) => Err(NetError::InvalidState),
+        }
     })
 }
 
@@ -927,13 +1128,17 @@ pub fn listen(id: SocketId, backlog: usize, when_full: WhenFull) -> Result<(), N
             next_sequence: 1,
             ..Listener::default()
         });
+        let quota_refusals = s.entry(id)?.owner.purse.as_ref().map_or(0, |p| p.refused());
         s.tend(id.index as usize);
-        let Kind::Listener(l) = &mut s.entry(id)?.kind else { return Err(NetError::NoSocket) };
+        let entry = s.entry(id)?;
+        let over_quota = entry.owner.purse.as_ref().is_some_and(|p| p.refused() > quota_refusals);
+        let Kind::Listener(l) = &mut entry.kind else { return Err(NetError::NoSocket) };
         if l.catchers.iter().all(Option::is_none) {
-            // Not one listening socket (the limit or memory, logged by
-            // `Stack::refused`): the listen fails, the socket stays bound.
-            s.entry(id)?.kind = Kind::Bound;
-            return Err(NetError::NoMemory);
+            // Not one listening socket (the budget or memory, logged by
+            // `Stack::refused`; the owner's quota, logged by it): the
+            // listen fails, the socket stays bound.
+            entry.kind = Kind::Bound;
+            return Err(if over_quota { NetError::OverQuota } else { NetError::NoMemory });
         }
         Ok(())
     })
@@ -952,13 +1157,22 @@ pub fn pending(id: SocketId) -> Result<(u32, Addr), NetError> {
     })
 }
 
-/// Takes the pending connection `sequence` off a listener as a new socket.
-pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetError> {
+/// Takes the pending connection `sequence` off a listener as a new socket
+/// for `owner` (its buffers are charged to it from now on; over its
+/// quota, OverQuota and the connection stays pending).
+pub fn accept(id: SocketId, sequence: u32, owner: impl Into<Owner>) -> Result<SocketId, NetError> {
+    let owner = owner.into();
     with_stack(|s| {
+        s.entries.try_reserve(1).map_err(|_| NetError::NoMemory)?;
         let Kind::Listener(l) = &mut s.entry(id)?.kind else {
             return Err(NetError::InvalidState);
         };
         let pos = l.ready.iter().position(|&(q, _)| q == sequence).ok_or(NetError::InvalidState)?;
+        let sock = l.ready[pos].1;
+        s.rebill(sock, &owner)?;
+        let Kind::Listener(l) = &mut s.entry(id)?.kind else {
+            return Err(NetError::InvalidState);
+        };
         let (_, sock) = l.ready.remove(pos);
         s.entry(id)?.last = STALE;
         // Room in the backlog: a listening socket again before the next
@@ -967,7 +1181,7 @@ pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetEr
         let local = s.tcp(sock).and_then(|t| t.local_endpoint()).map(Addr::from_endpoint);
         let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
         let local = local.unwrap_or_default();
-        match s.insert(token, local, Scope::of(local.ip), Kind::Conn { sock, connected: true }) {
+        match s.insert(owner, local, Scope::of(local.ip), Kind::Conn { sock, connected: true }) {
             Ok(new) => {
                 net_event("tcp accept", new, local, remote);
                 Ok(new)
@@ -980,16 +1194,22 @@ pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetEr
     })
 }
 
-/// Starts connecting to `remote` (binding first if needed). Completion:
-/// `connected`.
-pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketId, NetError> {
+/// Starts connecting to `remote` for `owner` (its buffers' sizes now;
+/// binding first if needed). Completion: `connected`.
+pub fn connect(
+    id: Option<SocketId>,
+    remote: Addr,
+    owner: impl Into<Owner>,
+) -> Result<SocketId, NetError> {
+    let owner = owner.into();
     let id = match id {
         Some(id) => id,
         // The unspecified address of the remote's family.
-        None => bind(Addr { ip: remote.ip.unspecified_like(), port: 0 }, token)?,
+        None => bind(Addr { ip: remote.ip.unspecified_like(), port: 0 }, owner.clone())?,
     };
     with_stack(|s| {
         let side = s.side_to(remote.ip)?;
+        let eth_ip = s.eth_ip;
         let entry = s.entry(id)?;
         if !matches!(entry.kind, Kind::Bound) {
             return Err(NetError::InvalidState);
@@ -998,10 +1218,10 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
         if local.ip.is_unspecified() {
             local.ip = match side {
                 Side::Lo => remote.ip.loopback_like(),
-                Side::Eth => Ip::V4(s.eth_ip.ok_or(NetError::Unreachable)?),
+                Side::Eth => Ip::V4(eth_ip.ok_or(NetError::Unreachable)?),
             };
         }
-        let mut socket = s.new_tcp(side)?;
+        let (mut socket, bill) = s.new_tcp(side, &owner)?;
         let context = match side {
             Side::Lo => s.lo.iface.context(),
             Side::Eth => s.eth.as_mut().ok_or(NetError::Unreachable)?.iface.context(),
@@ -1009,8 +1229,9 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
         socket
             .connect(context, remote.endpoint(), local.endpoint())
             .map_err(|_| NetError::InvalidState)?;
-        let sock = s.add(side, socket)?;
+        let sock = s.add(side, socket, bill)?;
         let entry = s.entry(id)?;
+        entry.owner = owner;
         entry.local = local;
         entry.kind = Kind::Conn { sock, connected: false };
         net_event("tcp connect", id, local, Some(remote));
@@ -1164,12 +1385,15 @@ pub fn close(id: SocketId, abort: bool) {
             let what = if abort { "tcp reset" } else { "tcp close" };
             bytes_event(what, id, entry.local, remote, bytes);
         }
+        // Lingering, its buffers are the stack's: the owner is done.
         let finish = |s: &mut Stack, sock: Sock, abort: bool| {
             if let Some(t) = s.tcp(sock) {
                 if abort { t.abort() } else { t.close() }
             }
             if s.lingering.try_push(sock).is_err() {
                 s.remove(sock);
+            } else {
+                s.unbill(sock);
             }
         };
         match entry.kind {
@@ -1583,14 +1807,23 @@ impl Stack {
         })
     }
 
-    /// A connection rebuilt from its carried state (added to its set).
-    fn adopt_conn(&mut self, c: &CarriedConn) -> Result<Sock, NetError> {
+    /// A connection rebuilt from its carried state (added to its set),
+    /// its buffers as large as they were, charged to `owner` (whatever
+    /// its limit: the process held it already).
+    fn adopt_conn(&mut self, c: &CarriedConn, owner: &Owner) -> Result<Sock, NetError> {
         let s = &c.state;
-        if s.recv_capacity as usize > BUFFER || s.send_capacity as usize > BUFFER {
-            // A smaller buffer than the window advertised from it.
-            return Err(NetError::NoMemory);
+        let (rx, tx) = (s.recv_capacity as usize, s.send_capacity as usize);
+        if rx > MAX_BUFFER || tx > MAX_BUFFER {
+            // Larger than any socket gets: not one this stack made.
+            return Err(NetError::InvalidState);
         }
-        let mut socket = new_socket().ok_or(NetError::NoMemory)?;
+        // At least the default (a smaller buffer than the window advertised
+        // from it would not do).
+        let sizes = (rx.max(BUFFER), tx.max(BUFFER));
+        let side = if s.on_card { Side::Eth } else { Side::Lo };
+        let owner = Owner { unchecked: true, ..owner.clone() };
+        let bill = self.admit(side, &owner, (sizes.0 + sizes.1) as u64)?;
+        let mut socket = new_socket(sizes).ok_or(NetError::NoMemory)?;
         socket.set_nagle_enabled(s.nagle);
         socket.set_ack_delay(duration_of(s.ack_delay_ms));
         socket.set_keep_alive(duration_of(s.keep_alive_ms));
@@ -1599,7 +1832,7 @@ impl Stack {
         socket
             .restore(&smoltcp_state(s)?, &c.received, &c.unsent)
             .map_err(|_| NetError::InvalidState)?;
-        self.add(if s.on_card { Side::Eth } else { Side::Lo }, socket)
+        self.add(side, socket, bill)
     }
 }
 
@@ -1717,7 +1950,8 @@ pub fn adopt_stack(c: &CarriedStack) -> Result<(), NetError> {
             }
         }
         for conn in &c.lingering {
-            let sock = s.adopt_conn(conn)?;
+            // The stack's own (its owner closed it).
+            let sock = s.adopt_conn(conn, &Owner::default())?;
             if s.lingering.try_push(sock).is_err() {
                 s.remove(sock);
                 return Err(NetError::NoMemory);
@@ -1727,18 +1961,19 @@ pub fn adopt_stack(c: &CarriedStack) -> Result<(), NetError> {
     })
 }
 
-/// In the next kernel: socket `c` again, reported to the notify hook with
-/// `token`.
-pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
+/// In the next kernel: socket `c` again, for `owner` (reported to the
+/// notify hook with its token; charged whatever its limit).
+pub fn adopt_entry(c: &CarriedEntry, owner: impl Into<Owner>) -> Result<SocketId, NetError> {
+    let owner = Owner { unchecked: true, ..owner.into() };
     with_stack(|s| {
         s.entries.try_reserve(1).map_err(|_| NetError::NoMemory)?;
         let kind = match &c.kind {
             CarriedKind::Bound => Kind::Bound,
             CarriedKind::Udp { peer, datagrams } => {
-                Kind::Udp(super::udp::adopt(s, c.local, *peer, datagrams)?)
+                Kind::Udp(super::udp::adopt(s, c.local, *peer, datagrams, &owner)?)
             }
             CarriedKind::Conn { conn, connected } => {
-                Kind::Conn { sock: s.adopt_conn(conn)?, connected: *connected }
+                Kind::Conn { sock: s.adopt_conn(conn, &owner)?, connected: *connected }
             }
             CarriedKind::Listener { backlog, next_sequence, ready, opening } => {
                 let mut l = Listener {
@@ -1753,11 +1988,13 @@ pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
                     l.opening.try_reserve(opening.len()).map_err(|_| NetError::NoMemory)?;
                     for (q, conn) in ready {
                         l.ready
-                            .try_push((*q, s.adopt_conn(conn)?))
+                            .try_push((*q, s.adopt_conn(conn, &owner)?))
                             .map_err(|_| NetError::NoMemory)?;
                     }
                     for conn in opening {
-                        l.opening.try_push(s.adopt_conn(conn)?).map_err(|_| NetError::NoMemory)?;
+                        l.opening
+                            .try_push(s.adopt_conn(conn, &owner)?)
+                            .map_err(|_| NetError::NoMemory)?;
                     }
                     Ok(())
                 })();
@@ -1771,7 +2008,9 @@ pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
             }
         };
         // Room was reserved: this cannot fail.
-        let id = s.insert(token, c.local, Scope::of(c.local.ip), kind)?;
+        // From here on new sockets (a listener's) are checked again.
+        let owner = Owner { unchecked: false, ..owner };
+        let id = s.insert(owner, c.local, Scope::of(c.local.ip), kind)?;
         // A listener's listening sockets, where its backlog has room.
         s.tend(id.index as usize);
         Ok(id)
@@ -1807,7 +2046,9 @@ pub(super) mod testing {
             lingering: Vec::new(),
             next_port: *EPHEMERAL.start(),
             next_generation: 1,
-            limit: socket_limit(),
+            budget: buffer_budget(),
+            bytes: 0,
+            bills: Vec::new(),
             refused_logged: false,
         });
     }
@@ -1934,6 +2175,58 @@ mod tests {
         let d = connect(None, addr, 6).unwrap();
         polls(4);
         assert_eq!(connected(d), Ok(()));
+        *STACK.lock() = None;
+    }
+
+    /// Sockets' buffers are charged to their owner's quota while it holds
+    /// them: a listener's to its owner, an accepted connection's then to
+    /// the acceptor's; over the quota a socket is refused; closing gives
+    /// the charge back (a lingering socket is the stack's).
+    #[test]
+    fn buffers_are_charged_to_their_owner() {
+        use crate::quota::{Block, Pool};
+        let _turn = turn();
+        loopback_stack();
+        let big = 256 * 1024;
+        let cost = 2 * big as u64;
+        let server = Block::with_limits(1, "server.exe", 0, 3 * cost, 0).unwrap();
+        let client = Block::with_limits(2, "client.exe", 0, cost, 0).unwrap();
+        let owner = |token, purse: &KArc<Block>| Owner {
+            token,
+            purse: Some(purse.clone()),
+            rx: big,
+            tx: big,
+            unchecked: false,
+        };
+        let used = |b: &KArc<Block>| b.pool(Pool::NonPaged).0;
+        let addr = Addr::v4([127, 0, 0, 1], 4700);
+        let listener = bind(addr, owner(1, &server)).unwrap();
+        assert_eq!(used(&server), 0, "a bound address holds no buffers");
+        listen(listener, 4, WhenFull::Refuse).unwrap();
+        assert_eq!(used(&server), cost, "its listening socket");
+        // The client's first connection fits its quota, the second not.
+        let a = connect(None, addr, owner(2, &client)).unwrap();
+        assert_eq!(used(&client), cost);
+        assert_eq!(connect(None, addr, owner(3, &client)), Err(NetError::OverQuota));
+        assert_eq!(used(&client), cost);
+        polls(4);
+        assert_eq!(connected(a), Ok(()));
+        // The listener took the SYN and has a new listening socket.
+        assert_eq!(used(&server), 2 * cost);
+        // Accepted by another owner: the charge moves to it, if it fits.
+        let (q, _) = pending(listener).unwrap();
+        assert_eq!(accept(listener, q, owner(4, &client)), Err(NetError::OverQuota));
+        assert_eq!(used(&server), 2 * cost, "still pending, still the listener's");
+        let other = Block::with_limits(3, "worker.exe", 0, cost, 0).unwrap();
+        let conn = accept(listener, q, owner(5, &other)).unwrap();
+        assert_eq!((used(&server), used(&other)), (cost, cost));
+        // Closing gives it back (the sockets linger: the stack's).
+        close(conn, false);
+        close(a, false);
+        assert_eq!((used(&other), used(&client)), (0, 0));
+        close(listener, false);
+        assert_eq!(used(&server), 0);
+        assert!(server.refused() == 0 && client.refused() == 2);
         *STACK.lock() = None;
     }
 

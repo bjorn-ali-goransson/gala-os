@@ -23,7 +23,13 @@
 //! - Options are kept and read back (SO_REUSEADDR, SO_KEEPALIVE,
 //!   SO_REUSEPORT, SO_BROADCAST, buffer sizes, SO_LINGER, the timeouts,
 //!   TCP_NODELAY, IPV6_V6ONLY) but change nothing on the stack yet except
-//!   IPV6_V6ONLY; others are ENOPROTOOPT, ledgered.
+//!   IPV6_V6ONLY and the buffer sizes (SO_RCVBUF, SO_SNDBUF: the doubled
+//!   value Linux reports is the size of the buffers the socket's
+//!   connections get, `tcp::Owner`, set before connect or listen); others
+//!   are ENOPROTOOPT, ledgered.
+//! - A socket's buffers are charged to its process's nonpaged pool quota
+//!   (`nt::quota`, as AFD's are): over it, the call that would make one
+//!   (bind, listen, connect, accept) fails with ENOBUFS.
 //!
 //! Observability: the stack's own `tcp accept`/`tcp connect`/`tcp close`
 //! events (`events=net`) name each connection; refused or unsupported
@@ -36,8 +42,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use super::dispatch::{Call, Result};
 use super::errno::{
     EADDRINUSE, EADDRNOTAVAIL, EAFNOSUPPORT, EAGAIN, EALREADY, EBADF, ECONNREFUSED, ECONNRESET,
-    EFAULT, EINPROGRESS, EINVAL, EISCONN, ENETUNREACH, ENOMEM, ENOPROTOOPT, ENOTCONN, ENOTSOCK,
-    EPIPE, EPROTONOSUPPORT,
+    EFAULT, EINPROGRESS, EINVAL, EISCONN, ENETUNREACH, ENOBUFS, ENOMEM, ENOPROTOOPT, ENOTCONN,
+    ENOTSOCK, EPIPE, EPROTONOSUPPORT,
 };
 use super::sigcalls;
 use super::state::{Fd, Object};
@@ -157,7 +163,22 @@ fn errno_of(e: NetError) -> u16 {
         NetError::NotConnected | NetError::NoSocket => ENOTCONN,
         NetError::Unreachable => ENETUNREACH,
         NetError::NoMemory => ENOMEM,
+        // Over the process's quota (socket(7)'s "no buffer space").
+        NetError::OverQuota => ENOBUFS,
         NetError::TooLarge => super::errno::EMSGSIZE,
+    }
+}
+
+/// The socket's owner for the stack: Linux sockets' token, the process's
+/// quota, the buffer sizes set (`Options::rcvbuf`, `sndbuf`).
+fn owner(call: &Call<'_>, sock: &Socket) -> tcp::Owner {
+    let o = *sock.options.lock();
+    tcp::Owner {
+        token: TOKEN,
+        purse: Some(call.process.quota.clone()),
+        rx: o.rcvbuf.unwrap_or(0) as usize,
+        tx: o.sndbuf.unwrap_or(0) as usize,
+        unchecked: false,
     }
 }
 
@@ -297,7 +318,7 @@ pub fn bind(call: &Call<'_>, fd: u64, addr: u64, len: u64) -> Result {
     if *state != SockState::Fresh {
         return Err(EINVAL);
     }
-    let id = tcp::bind_scoped(local, scope(&sock), TOKEN).map_err(errno_of)?;
+    let id = tcp::bind_scoped(local, scope(&sock), owner(call, &sock)).map_err(errno_of)?;
     *state = SockState::Bound(id);
     Ok(0)
 }
@@ -313,7 +334,8 @@ pub fn listen(call: &Call<'_>, fd: u64, backlog: u64) -> Result {
         // Not bound yet: an ephemeral port on every address.
         SockState::Fresh => {
             let any = if sock.family == AF_INET { Ip::V4([0; 4]) } else { Ip::V6([0; 16]) };
-            tcp::bind_scoped(Addr { ip: any, port: 0 }, scope(&sock), TOKEN).map_err(errno_of)?
+            tcp::bind_scoped(Addr { ip: any, port: 0 }, scope(&sock), owner(call, &sock))
+                .map_err(errno_of)?
         }
         SockState::Bound(id) | SockState::Listening(id) => id,
         SockState::Connecting(_) | SockState::Connected(_) => return Err(EINVAL),
@@ -354,7 +376,7 @@ pub fn accept4(call: &Call<'_>, fd: u64, addr: u64, len: u64, flags: u64) -> Res
             Err(e) => return Err(errno_of(e)),
         }
     };
-    let new = tcp::accept(id, sequence, TOKEN).map_err(errno_of)?;
+    let new = tcp::accept(id, sequence, owner(call, &sock)).map_err(errno_of)?;
     sock.taken.fetch_add(1, Ordering::Relaxed);
     let options = *sock.options.lock();
     let accepted = KArc::try_new(Socket {
@@ -441,7 +463,7 @@ pub fn connect(call: &Call<'_>, fd: u64, addr: u64, len: u64) -> Result {
         if sock.family == AF_INET6 && scope(&sock) == Scope::V6 && !remote.ip.is_v6() {
             return Err(ENETUNREACH);
         }
-        let id = tcp::connect(state.id(), remote, TOKEN).map_err(errno_of)?;
+        let id = tcp::connect(state.id(), remote, owner(call, &sock)).map_err(errno_of)?;
         *state = SockState::Connecting(id);
         tcp::kick();
     }
@@ -675,8 +697,21 @@ pub fn setsockopt(call: &Call<'_>, fd: u64, level: u64, name: u64, val: u64, len
         (SOL_SOCKET, SO_REUSEPORT) => o.reuseport = flag,
         (SOL_SOCKET, SO_BROADCAST) => o.broadcast = flag,
         // Linux doubles the size asked for (socket(7)).
-        (SOL_SOCKET, SO_SNDBUF) => o.sndbuf = Some(int(&b).saturating_mul(2)),
-        (SOL_SOCKET, SO_RCVBUF) => o.rcvbuf = Some(int(&b).saturating_mul(2)),
+        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) => {
+            let size = Some(int(&b).saturating_mul(2));
+            if name == SO_SNDBUF {
+                o.sndbuf = size;
+            } else {
+                o.rcvbuf = size;
+            }
+            drop(o);
+            // A bound or listening socket's next connections get them
+            // (a connection's buffers stay: they were made whole).
+            if let Some(id) = sock.state.lock().id() {
+                let _ = tcp::set_owner(id, owner(call, &sock));
+            }
+            return Ok(0);
+        }
         (SOL_SOCKET, SO_LINGER) => o.linger.copy_from_slice(&b[..8]),
         (SOL_SOCKET, SO_RCVTIMEO) => o.rcvtimeo = b,
         (SOL_SOCKET, SO_SNDTIMEO) => o.sndtimeo = b,

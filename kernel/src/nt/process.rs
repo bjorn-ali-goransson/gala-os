@@ -784,7 +784,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     };
     // Its quotas: what it holds from here on is charged (the handles it
     // starts with too, without a limit).
-    let quota = super::quota::Block::new(id, name)?;
+    let quota = super::quota::new_block(id, name)?;
     handles.attach_quota(quota.clone());
 
     // The current directory, as a handle.
@@ -1057,7 +1057,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
     let session = super::token::session_of(&token);
     let desk = super::session::ensure(session)?;
     let space = KArc::try_new(platform::SpaceLock::new(bare.space))?;
-    let quota = super::quota::Block::new(id, bare.name)?;
+    let quota = super::quota::new_block(id, bare.name)?;
     let mut handles = HandleTable::default();
     handles.attach_quota(quota.clone());
     let process = KArc::try_new(Process {
@@ -1543,7 +1543,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
     let space =
         KArc::try_new(platform::SpaceLock::new(a.space)).map_err(|_| NtStatus::NO_MEMORY)?;
     let commit = a.vad.private_commit();
-    let quota = super::quota::Block::new(a.id, a.name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let quota = super::quota::new_block(a.id, a.name).map_err(|_| NtStatus::NO_MEMORY)?;
     let mut handles = HandleTable::default();
     handles.attach_quota(quota.clone());
     let process = KArc::try_new(Process {

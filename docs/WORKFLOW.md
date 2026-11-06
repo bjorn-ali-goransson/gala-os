@@ -816,6 +816,17 @@ numbers, 0x7f.., fail there).
   crate for both ntdlls: what differs by architecture goes in its
   `x64.rs` and `x86.rs` (offsets, stubs, assembly), x86 SEH in
   `seh_x86.rs`; add `-p <name>` to CI's i686 clippy line.
+- advapi32's structures with pointer-sized fields live in
+  `user/advapi32/src/layout.rs` (SID_AND_ATTRIBUTES, TOKEN_GROUPS'
+  array offset `GROUPS_AT`, the absolute SECURITY_DESCRIPTOR and
+  `layout::part`, SECURITY_ATTRIBUTES, TRUSTEE_W, EXPLICIT_ACCESS_W),
+  with compile-time size checks for both targets: read and build them
+  through it, never at x64 byte offsets.
+- A 32-bit program reads HKLM\SOFTWARE through the registry's 32-bit
+  view (`nt/regview.rs`): a key the seed puts under `SOFTWARE` that
+  32-bit programs need (and that is not a shared key) needs its copy
+  under `SOFTWARE\WOW6432Node` in `registry.seed` too, with the 32-bit
+  values Windows has there.
 - A service a 32-bit program calls needs its conversion in wow64.dll
   (`user/wow64`: a row of argument kinds in `generic::TABLE`, or an
   information-class case in `info.rs`); one without fails with
@@ -2570,10 +2581,21 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   STATUS_INSUFFICIENT_RESOURCES at a process's quotas, not only
   STATUS_NO_MEMORY; mapping every failure to NO_MEMORY hides which
   limit a program hit (ARCHITECTURE "Pool and handle quotas").
+- **Kernel memory a process makes grow is charged when it grows**: a
+  new buffer, queue or list that a program can fill (a socket's
+  buffers, a port's packets, a token's default DACL) takes its charge
+  from the owner's quota block before it allocates (`crate::quota`:
+  `Held`, `Block::try_charge`; `nt::quota::grow` for an object's), and
+  gives it back when it goes; a refusal is the program's status
+  (STATUS_QUOTA_EXCEEDED, WSAENOBUFS, ENOBUFS), not NO_MEMORY. Core code
+  (`net/`) charges `crate::quota::Block`, never `nt` types. Something
+  retried on every poll (a listener's listening socket) asks
+  `Block::fits` first once refused, or each poll logs and counts a
+  refusal.
 - **A new `ObjectBody` variant over a few hundred bytes is boxed**:
   every object is the size of the largest variant (an unboxed 10 KiB
   thread once made every event cost 10 KiB, all of it charged to pool
-  quotas); `quota::tests::objects_stay_small` checks it.
+  quotas); `nt::quota::tests::objects_stay_small` checks it.
 - **No lock in a log line's formatting**: a `Display` that takes a lock
   runs while `print` holds the serial port's, so the port is then
   "taken before" that lock, and the first log line written under it

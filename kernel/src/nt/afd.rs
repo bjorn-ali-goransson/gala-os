@@ -16,6 +16,7 @@ use crate::mm::heap::{KArc, TryVec};
 use crate::net::tcp::{self, Addr, NetError, SocketId};
 use crate::net::udp;
 use crate::net::{Ip, Scope};
+use crate::quota::Block;
 use crate::sync::IrqMutex;
 
 pub const IOCTL_AFD_BIND: u32 = 0x12003;
@@ -34,6 +35,10 @@ pub const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
 pub const IOCTL_AFD_POLL: u32 = 0x12024;
 pub const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
 const AFD_INFO_BLOCKING_MODE: u32 = 2;
+/// SO_RCVBUF and SO_SNDBUF (ReactOS's `drivers/afd/shared.h`: a ULONG at
+/// 8): the sizes of the socket's buffers (`tcp::Owner`).
+const AFD_INFO_RECEIVE_WINDOW_SIZE: u32 = 6;
+const AFD_INFO_SEND_WINDOW_SIZE: u32 = 7;
 /// gala's own AFD_INFO class (Windows passes IPV6_V6ONLY to the transport,
 /// whose interface is undocumented): a BOOLEAN at 8, IPV6_V6ONLY.
 const GALA_AFD_INFO_V6ONLY: u32 = 0x6761_0001;
@@ -120,6 +125,17 @@ impl Transport {
 }
 
 impl EndpointState {
+    /// Its owner for the stack: its token, quota and buffer sizes.
+    fn owner(&self) -> tcp::Owner {
+        tcp::Owner {
+            token: self.token,
+            purse: self.purse.clone(),
+            rx: self.rcvbuf.load(Ordering::Acquire) as usize,
+            tx: self.sndbuf.load(Ordering::Acquire) as usize,
+            unchecked: false,
+        }
+    }
+
     /// The families its socket takes: IPv4; IPv6 only; or both (an IPv6
     /// endpoint with IPV6_V6ONLY off).
     fn scope(&self) -> Scope {
@@ -238,6 +254,14 @@ pub struct EndpointState {
     /// IPV6_V6ONLY of an IPv6 endpoint (on, Windows' default; off: dual
     /// stack), taken at bind (`scope`).
     v6only: AtomicBool,
+    /// The quota its sockets' buffers are charged to: its creator's (none
+    /// for an endpoint a kernel handover carried: its process's quota is
+    /// restored after it).
+    purse: Option<KArc<Block>>,
+    /// SO_RCVBUF and SO_SNDBUF (AFD_INFO_*_WINDOW_SIZE; 0: the default),
+    /// for the sockets it makes from then on.
+    rcvbuf: AtomicU32,
+    sndbuf: AtomicU32,
     pending: IrqMutex<Vec<Pending>>,
     /// How many polls (IOCTL_AFD_POLL) are pending: `notify` keeps the
     /// endpoint in POLLERS while there are any, without taking `pending`
@@ -565,7 +589,7 @@ fn attempt_inner(
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER.into());
             }
-            let new = tcp::accept(id, sequence, accept.token)?;
+            let new = tcp::accept(id, sequence, accept.owner())?;
             // Like Windows, an accepted socket inherits the listener's
             // non-blocking mode (Nginx relies on it).
             accept.non_blocking.store(non_blocking, Ordering::Release);
@@ -904,8 +928,9 @@ fn transport_of(packet: &[u8]) -> Result<Transport, NtStatus> {
     }
 }
 
-/// Opens an endpoint (NtCreateFile below `\Device\Afd`).
-pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
+/// Opens an endpoint (NtCreateFile below `\Device\Afd`) for the process
+/// with quota block `purse`.
+pub fn open(ea: &[u8], purse: &KArc<Block>) -> Result<ObjectRef, NtStatus> {
     let transport = if ea.is_empty() { Transport::None } else { parse_open_packet(ea)? };
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     let state = KArc::try_new(EndpointState {
@@ -917,6 +942,9 @@ pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
         modes: AtomicU32::new(0),
         non_blocking: AtomicBool::new(false),
         v6only: AtomicBool::new(true),
+        purse: Some(purse.clone()),
+        rcvbuf: AtomicU32::new(0),
+        sndbuf: AtomicU32::new(0),
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(None),
         recorded: AtomicU32::new(0),
@@ -940,6 +968,8 @@ pub fn status_of(e: NetError) -> NtStatus {
         NetError::NotConnected => NtStatus::INVALID_CONNECTION,
         NetError::Unreachable => NtStatus::NETWORK_UNREACHABLE,
         NetError::NoMemory => NtStatus::INSUFFICIENT_RESOURCES,
+        // WSAENOBUFS in ws2_32.
+        NetError::OverQuota => NtStatus::QUOTA_EXCEEDED,
         NetError::NoSocket => NtStatus::INVALID_HANDLE,
         NetError::TooLarge => NtStatus::INVALID_BUFFER_SIZE,
     }
@@ -1189,7 +1219,7 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            let id = tcp::bind_scoped(local, ep.scope(), ep.token).map_err(status_of)?;
+            let id = tcp::bind_scoped(local, ep.scope(), ep.owner()).map_err(status_of)?;
             *slot = Some(id);
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
@@ -1218,7 +1248,7 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
                     r.input_upto(4 + TRANSPORT_ADDRESS_LEN)?;
                 transport_address(&b[4..n])?
             };
-            let id = tcp::connect(current(), remote, ep.token).map_err(status_of)?;
+            let id = tcp::connect(current(), remote, ep.owner()).map_err(status_of)?;
             *ep.socket.lock() = Some(id);
             Immediate::Async(Op::Connect)
         }
@@ -1234,7 +1264,7 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            *slot = Some(tcp::accept(socket()?, sequence, accepting.token).map_err(status_of)?);
+            *slot = Some(tcp::accept(socket()?, sequence, accepting.owner()).map_err(status_of)?);
             // The listener's non-blocking mode carries over (as on Windows).
             accepting
                 .non_blocking
@@ -1298,6 +1328,24 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             match u32_at(&b, 0) {
                 AFD_INFO_BLOCKING_MODE => ep.non_blocking.store(b[8] != 0, Ordering::Release),
                 GALA_AFD_INFO_V6ONLY => ep.v6only.store(b[8] != 0, Ordering::Release),
+                class @ (AFD_INFO_RECEIVE_WINDOW_SIZE | AFD_INFO_SEND_WINDOW_SIZE) => {
+                    let size = u32_at(&b, 8);
+                    let slot =
+                        if class == AFD_INFO_RECEIVE_WINDOW_SIZE { &ep.rcvbuf } else { &ep.sndbuf };
+                    slot.store(size, Ordering::Release);
+                    // Bound or listening: its next sockets get them. A
+                    // connection's (or a bound datagram socket's) buffers
+                    // stay as they are: they are made whole at the start.
+                    if let Some(id) = current()
+                        && tcp::set_owner(id, ep.owner()).is_err()
+                    {
+                        super::ledger::record(
+                            "NtDeviceIoControlFile",
+                            "afd buffer size of a connected socket",
+                            u64::from(size),
+                        );
+                    }
+                }
                 class => {
                     super::ledger::record(
                         "NtDeviceIoControlFile",
@@ -1411,7 +1459,7 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         if let Some(id) = *slot {
             return Ok(id);
         }
-        let id = udp::bind_scoped(ep.transport.any_address(), ep.scope(), ep.token)
+        let id = udp::bind_scoped(ep.transport.any_address(), ep.scope(), ep.owner())
             .map_err(status_of)?;
         *slot = Some(id);
         Ok(id)
@@ -1424,7 +1472,7 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            let id = udp::bind_scoped(local, ep.scope(), ep.token).map_err(status_of)?;
+            let id = udp::bind_scoped(local, ep.scope(), ep.owner()).map_err(status_of)?;
             *slot = Some(id);
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
@@ -1689,6 +1737,9 @@ pub fn adopt(
         non_blocking: AtomicBool::new(c.non_blocking),
         // Carried endpoints are IPv4 (a handover refuses IPv6 ones).
         v6only: AtomicBool::new(true),
+        purse: None,
+        rcvbuf: AtomicU32::new(0),
+        sndbuf: AtomicU32::new(0),
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(c.select.clone()),
         recorded: AtomicU32::new(c.recorded),

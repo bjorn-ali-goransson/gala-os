@@ -511,6 +511,13 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32_32.dll" },
     // The 32-bit msvcrt: gala's msvcrt built for i686.
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
+    // The 32-bit advapi32 and the bcryptprimitives it imports.
+    Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32_32.dll" },
+    Dll {
+        package: "bcryptprimitives",
+        file: "bcryptprimitives.dll",
+        exported_as: "testbcryptprimitives32.dll",
+    },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -876,6 +883,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("commit_test", "kernel32.dll", "Windows/System32"),
     ("quota_test", "ntdll.dll", "Windows/System32"),
     ("quota_test", "kernel32.dll", "Windows/System32"),
+    ("quota_test", "ws2_32.dll", "Windows/System32"),
     ("gpu_stub_test", "ntdll.dll", "Windows/System32"),
     ("gpu_stub_test", "kernel32.dll", "Windows/System32"),
     ("gpu_stub_test", "dxgi.dll", "Windows/System32"),
@@ -2144,6 +2152,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_crt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_crt_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
     ("wow64_crt_test", "user/bin/wow64_crt_test.exe", "gala"),
+    // A 32-bit program on the 32-bit advapi32.
+    ("wow64_adv_test", "wow64.dll", "Windows/System32"),
+    ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_adv_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_adv_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_adv_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2291,6 +2305,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_seh_test",
     "wow64_fs_test",
     "wow64_k32_test",
+    "wow64_adv_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -4983,6 +4998,22 @@ const SCENARIOS: &[Scenario] = &[
             "quota_test: handle limit at 3000 handles",
             "over its handle limit: 3000 in use + 1 > limit 3000",
             "over its nonpaged pool:",
+            "quota_test: port quota at ",
+            "quota_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // R6: sockets' buffers are charged to their process: connections
+        // with 1 MiB buffers until one is refused (WSAENOBUFS) while a
+        // child connects its own; closing gives the charge back;
+        // ProcessQuotaLimits' pool limits need SeIncreaseQuotaPrivilege.
+        name: "quota_sockets",
+        cmdline: "qemu_exit quota=nonpaged:13M run=quota_test.exe args=sockets%2013631488",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "quota_test: socket quota at 3 connections",
+            "over its nonpaged pool:",
             "quota_test: ok",
             "exited with status 0x00000000",
         ],
@@ -6922,6 +6953,16 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // WOW64 stage 3: a 32-bit program on the 32-bit advapi32
+        // (user/wow64_adv_test): the registry and its 32-bit view, tokens,
+        // SIDs, security descriptors and ACLs in their x86 layouts,
+        // CryptGenRandom.
+        name: "wow64_adv_test",
+        cmdline: "qemu_exit run=wow64_adv_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_adv_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 3: an exception no 32-bit handler takes, through the
         // 32-bit ntdll: the crash report's 32-bit registers.
         name: "wow64_seh_crash",
@@ -7385,6 +7426,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
     ("events_match", "process_test"),
+    ("quota_sockets", "quota_test"),
     ("pk_install_zip", "pk_install_test"),
     ("pk_install_machine", "pk_install_test"),
     ("pk_install_inno", "pk_install_test"),
@@ -7972,6 +8014,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),

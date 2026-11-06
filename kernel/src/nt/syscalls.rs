@@ -4014,12 +4014,15 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
         PROCESS_QUOTA_LIMITS => {
             // QUOTA_LIMITS { PagedPoolLimit, NonPagedPoolLimit,
             // MinimumWorkingSetSize, MaximumWorkingSetSize, PagefileLimit,
-            // TimeLimit } (nt::quota; no working set or time limits: 0, and
-            // no page file: the commit limit).
+            // TimeLimit } (nt::quota; the working set as set, else 0; no
+            // time limit: 0; no page file: the commit limit).
             use super::quota::Pool;
             let mut q = [0u8; 48];
             q[0..8].copy_from_slice(&p.quota.pool(Pool::Paged).2.to_le_bytes());
             q[8..16].copy_from_slice(&p.quota.pool(Pool::NonPaged).2.to_le_bytes());
+            let (ws_min, ws_max) = p.quota.working_set();
+            q[16..24].copy_from_slice(&ws_min.to_le_bytes());
+            q[24..32].copy_from_slice(&ws_max.to_le_bytes());
             q[32..40].copy_from_slice(&(super::charge::limit() * 4096).to_le_bytes());
             return call.return_info(&q, buffer, length, ret_ptr);
         }
@@ -4194,6 +4197,9 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
 fn nt_set_information_process(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(Handle(arg!(call, 0))));
     let (class, buffer, length) = (arg!(call, 1) as u32 as u64, arg!(call, 2), arg!(call, 3));
+    if class == PROCESS_QUOTA_LIMITS {
+        return set_quota_limits(call, &entry, buffer, length);
+    }
     if class != PROCESS_PRIORITY_CLASS {
         return NtStatus::INVALID_INFO_CLASS;
     }
@@ -4210,6 +4216,60 @@ fn nt_set_information_process(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::INVALID_PARAMETER;
     }
     p.priority_class.store(info[1], core::sync::atomic::Ordering::Relaxed);
+    NtStatus::SUCCESS
+}
+
+/// NtSetInformationProcess(ProcessQuotaLimits): QUOTA_LIMITS (48 bytes)
+/// or QUOTA_LIMITS_EX (64; its first six fields), with PROCESS_SET_QUOTA.
+/// A nonzero PagedPoolLimit or NonPagedPoolLimit becomes the process's
+/// pool limit (nt::quota), which needs SeIncreaseQuotaPrivilege ("Required
+/// to adjust the memory quota for a process", Privilege Constants) else
+/// STATUS_PRIVILEGE_NOT_HELD; what is charged already stays charged.
+/// MinimumWorkingSetSize and MaximumWorkingSetSize are kept and reported
+/// (both (SIZE_T)-1 trims, which changes nothing: gala keeps no working
+/// sets; a minimum over the maximum is STATUS_INVALID_PARAMETER).
+/// PagefileLimit and TimeLimit are ledgered and ignored.
+fn set_quota_limits(call: &Call<'_>, entry: &HandleEntry, buffer: u64, length: u64) -> NtStatus {
+    use super::quota::Pool;
+    const PROCESS_SET_QUOTA: u32 = 0x0100;
+    const SE_INCREASE_QUOTA: u64 = 5;
+    let object = tri!(entry.require(PROCESS_SET_QUOTA));
+    let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if length != 48 && length != 64 {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut b = [0u8; 48];
+    if call.process.read(buffer, &mut b).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let field = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap_or([0; 8]));
+    let (paged, nonpaged, ws_min, ws_max) = (field(0), field(1), field(2), field(3));
+    if (paged != 0 || nonpaged != 0)
+        && !security_calls::effective_privilege(call, SE_INCREASE_QUOTA)
+    {
+        return NtStatus::PRIVILEGE_NOT_HELD;
+    }
+    let trim = ws_min == u64::MAX && ws_max == u64::MAX;
+    if !trim && ws_max != 0 && ws_min > ws_max {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    if field(4) != 0 || field(5) != 0 {
+        super::ledger::record("NtSetInformationProcess", "quota pagefile or time limit", field(4));
+    }
+    for (pool, limit) in [(Pool::Paged, paged), (Pool::NonPaged, nonpaged)] {
+        if limit != 0 {
+            p.quota.set_limit(pool, limit);
+            crate::info!(
+                "quota: pid {} ({}) {pool:?} pool limit set to {limit} (in use {})",
+                p.quota.pid,
+                p.quota.name,
+                p.quota.pool(pool).0
+            );
+        }
+    }
+    if !trim && (ws_min != 0 || ws_max != 0) {
+        p.quota.set_working_set(ws_min, ws_max);
+    }
     NtStatus::SUCCESS
 }
 
@@ -4876,7 +4936,7 @@ impl Call<'_> {
         let mut granted = super::object::FILE_MAPPING.map(access);
         let (object, information) = if tri!(self.names_afd(attrs_ptr)) {
             let ea = tri!(self.ea_buffer(ea.0, ea.1));
-            (tri!(super::afd::open(&ea)), file::FILE_OPENED)
+            (tri!(super::afd::open(&ea, &self.process.quota)), file::FILE_OPENED)
         } else if let Some(body) = tri!(self.names_console(attrs_ptr)) {
             let Ok(object) = KObject::new(body) else { return NtStatus::NO_MEMORY };
             (object, file::FILE_OPENED)
@@ -6048,7 +6108,8 @@ fn nt_create_io_completion(call: &mut Call<'_>) -> NtStatus {
     // TODO: the concurrency limit (Count) once there is more than one CPU.
     let port = IoCompletion {
         dispatcher: Dispatcher::new(0),
-        queue: IrqMutex::new(CompletionQueue::default()),
+        // Its packets are charged to its creator (nt::quota).
+        queue: IrqMutex::new(CompletionQueue::charged_to(call.process.quota.clone())),
     };
     let Ok(object) = KObject::new(ObjectBody::IoCompletion(port)) else {
         return NtStatus::NO_MEMORY;
@@ -6066,7 +6127,12 @@ fn nt_set_io_completion(call: &mut Call<'_>) -> NtStatus {
         arg!(call, 3) as u32,
         arg!(call, 4),
     );
-    post_packet(&port, packet)
+    let ObjectBody::IoCompletion(c) = &port.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    // Within the port creator's quota: a program that posts without
+    // taking fails here (STATUS_QUOTA_EXCEEDED), not the kernel's heap.
+    tri!(c.queue.lock().post(packet));
+    wait::set_signal(&port, 1);
+    NtStatus::SUCCESS
 }
 
 /// NtRemoveIoCompletion(Handle, *KeyContext, *ApcContext, *IoStatusBlock,

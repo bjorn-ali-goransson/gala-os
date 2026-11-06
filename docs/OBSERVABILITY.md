@@ -122,7 +122,14 @@ port. Lines that tools and agents rely on:
   leave); during the run `quota: new most per process: nonpaged pool N
   KiB (x.exe pid P)` each time that largest peak reaches a new power of
   two (from 256 KiB, or 1024 handles), so a server xtask stops before
-  the end still shows how far it went.
+  the end still shows how far it went; `quota: pid P (x.exe) NonPaged
+  pool limit set to N (in use U)` when NtSetInformationProcess
+  (ProcessQuotaLimits) changes one. A socket refused for its buffers
+  shows as the owner's `over its nonpaged pool` line (a listener refused
+  a listening socket logs it once per stretch); one refused by the
+  network stack's own budget or for memory as `net: a loopback socket is
+  refused: its N KiB of buffers are over the budget (... their buffers
+  .. KiB of the stack's .. KiB ...)`, once until a socket goes.
 - Kernel command-line options that add lines: `trace` (every system
   call; `um --trace` in gala-um), `gputrace` (every virtio-gpu command
   and its result), `logtee=C:/dir` (what programs write below a

@@ -80,13 +80,12 @@ In order:
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW**: stage 3's rest (advapi32 for x86, then kernelbase;
-   kernel32_test built for x86):
+5. **WOW**: stage 3's rest (kernelbase; kernel32_test built for x86):
    the process model under PK's x86 installers and programs (Inno
    Setup's x64 Setup runs natively; an x86 Inno installer needs stage
    3-4).
 6. **R**: R7's next part (network frames, disk reads and input in
-   record/replay), R6's leftovers (what is not charged yet), R8's Secure
+   record/replay), R6's rest (quota_test on Windows), R8's Secure
    Boot.
 7. **PK**: winget's source index (step 2's rest); step 1's rest (an
    upgrade's dependencies, UpgradeBehavior, winget's settings); an x86
@@ -156,7 +155,7 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; advapi32 next; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; kernelbase next; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -193,7 +192,7 @@ has a section under "Open items".
 | R3 | Lock-order checking | done | `sync::lockdep`; WORKFLOW "Lock-order checking (lockdep)" |
 | R4 | Flight recorder, watchdogs, crash record across reboots | done | `watchdog`, `kernel_watchdog`, `crash_record` |
 | R5 | Deterministic simulation in gala-um | done | `cargo xtask sim-test`; one refinement open |
-| R6 | Charging resources to an owner | in progress | commit charge, pool and handle quotas done |
+| R6 | Charging resources to an owner | in progress | commit charge, pool and handle quotas, sockets' buffers, completion packets, ProcessQuotaLimits done |
 | R7 | Live mocking: clock control, record/replay, device faults | in progress | clock control, record/replay of time and randomness, disk latency done |
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
@@ -1622,15 +1621,28 @@ wow64.dll converts 32-bit system calls in user mode).
   pointers, the 32-bit time_t of `time`/`gmtime`/`localtime`/`mktime`/
   `ctime`/`difftime`, and what mingw's startup imports (`__p__fmode`,
   `__p__commode`).
+  **The 32-bit advapi32** (`wow64_adv_test`, a Rust program): gala's
+  advapi32 and bcryptprimitives built for i686, shipped as
+  `C:\Windows\SysWOW64\advapi32.dll` and `bcryptprimitives.dll`
+  (`testadvapi32_32.dll`, `testbcryptprimitives32.dll`): the registry
+  (32-bit predefined HKEYs), tokens (TokenUser, TokenGroups, DuplicateTokenEx
+  with an x86 SECURITY_ATTRIBUTES, CheckTokenMembership), SIDs and
+  LookupAccountSidW, absolute (20-byte) and self-relative descriptors,
+  SetEntriesInAclW and BuildExplicitAccessWithNameW with x86
+  EXPLICIT_ACCESS_W, CryptGenRandom; its structures with pointers typed
+  in `layout.rs`; the 32-bit ntdll's absolute descriptors at its pointer
+  width; wow64.dll converts GalaLogonUser's UNICODE_STRINGs. **The
+  registry's 32-bit view** (`wow64_adv_test`; stage 4's first part, in the
+  kernel: `nt/regview.rs`): HKLM\SOFTWARE to WOW6432Node for a WOW64
+  process or KEY_WOW64_32KEY, KEY_WOW64_64KEY for the 64-bit view, the
+  shared keys of "Registry Keys Affected by WOW64" (Windows 7 and later),
+  Classes' redirected subkeys in `Classes\WOW6432Node`, names relative to
+  a handle by their full name, RegDeleteKeyEx in the view it names;
+  WOW6432Node seeded with the version keys and the 32-bit
+  ProgramFilesDir/CommonFilesDir.
 
 **Next**:
-1. Stage 3's rest, the 32-bit system DLLs: **advapi32 for x86** (it
-   compiles for i686 but for registry.rs's predefined-key test, `key >>
-   32` on a 32-bit HKEY; still to do: the `cfg_attr` link pairs of its
-   imports, bcryptprimitives for i686 (it imports it), its structures
-   with pointers typed (security.rs, trustee.rs, perf.rs, etw.rs and
-   policy.rs build them at byte offsets), a 32-bit test), then
-   kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
+1. Stage 3's rest, the 32-bit system DLLs: kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
    name: an x86 twin needs its own export name, and testdll/testdll2 for
    x86). The 32-bit kernel32's own gaps: GetProcessInformation's
    ProcessMachineTypeInfo answers AMD64; the Wow64*FsRedirection
@@ -1652,8 +1664,12 @@ wow64.dll converts 32-bit system calls in user mode).
    leftovers, each in the ledger: the job information classes, AFD's
    IOCTLs (sockets), gala's window and console services (with user32,
    stage 4), CONTEXT_FLOATING_POINT on NtSetContextThread.
-2. Stage 4: the registry's 32-bit view in the kernel (Wow6432Node,
-   KEY_WOW64_32KEY/64KEY, the shared keys); user32, gdi32, comctl32,
+   The 32-bit advapi32's own gaps: its service SIDs load bcrypt, which
+   has no 32-bit build yet (LoadLibrary fails: NT SERVICE names do not
+   resolve in a 32-bit process); its exports include ntrt's runtime
+   symbols. The registry view's: WOW6432Node's `Classes` link and
+   `HKEY_USERS\<SID>_Classes` are not modelled (ARCHITECTURE "Registry").
+2. Stage 4: user32, gdi32, comctl32,
    uxtheme, shell32, ole32 and what Delphi's VCL imports, for i686;
    then an x86 Inno Setup installer under `gala install` (the x64 one
    runs natively: `pk_install_inno`); `gala install` installing
@@ -1859,17 +1875,23 @@ counters, as rr does) for long computations, on hosts that have them.
 #### R6. Charging resources to an owner
 
 Done: the commit charge (`nt::charge`, `commit_test`; ARCHITECTURE
-"Commit charge"); kernel pool and handle quotas (`nt::quota`,
-`quota_test`, `quota=`; ARCHITECTURE "Pool and handle quotas"): objects,
-handle entries, pipe buffers and section page tables are charged to the
-process, STATUS_QUOTA_EXCEEDED and the handle limit's
-STATUS_INSUFFICIENT_RESOURCES fail the program using too much. Next:
-1. Charge what grows after an object's creation and what is not charged
-   yet (sockets' buffers, completion ports' queued packets, registry data
-   only if a reason appears: Windows does not charge it); job-wide pool
-   limits; NtSetInformationProcess(ProcessQuotaLimits).
-2. quota_test on real Windows (run-all.ps1): the handle limit's status
-   (ERROR_NO_SYSTEM_RESOURCES is assumed) and its exact count.
+"Commit charge"); kernel pool and handle quotas (`crate::quota`,
+`nt::quota`, `quota_test`, `quota_sockets`, `quota=`; ARCHITECTURE "Pool
+and handle quotas"): objects, handle entries, pipe buffers, section page
+tables, tokens (their dynamic part as a default DACL grows), completion
+ports' queued packets and sockets' buffers (AFD and Linux, sized by
+SO_RCVBUF/SO_SNDBUF) are charged to the process, STATUS_QUOTA_EXCEEDED
+(WSAENOBUFS, ENOBUFS) and the handle limit's STATUS_INSUFFICIENT_RESOURCES
+fail the program using too much; NtSetInformationProcess
+(ProcessQuotaLimits) changes the limits (SeIncreaseQuotaPrivilege).
+Registry data, image layouts and job-wide pool limits are left out by
+design (ARCHITECTURE says why). Next:
+1. quota_test on real Windows (run-all.ps1): the handle limit's status
+   (ERROR_NO_SYSTEM_RESOURCES is assumed) and its exact count; the
+   socket part (SO_RCVBUF read back, connected sockets' charge).
+2. kernel32's SetProcessWorkingSetSize through ProcessQuotaLimits; the
+   sockets of an AFD endpoint a kernel handover carried charged again
+   (its process's quota is restored after it).
 GPU memory is charged here too (item GPU).
 
 #### R7. Live mocking
@@ -2223,7 +2245,7 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
     process groups, READCONSOLE_CONTROL wake-up keys, the scroll bar,
     rewrap on resize; ConPTY rendering of cell-based console APIs into
     VT, OSC 0 titles, mouse, bracketed paste, VT input.
-  - Resources: what pool quotas do not charge yet (R6), job limit messages,
+  - Resources: job limit messages,
     charging copy-on-write section views, limits on kernel commits;
     nested jobs, job time accounting and the other job limits.
   - Files: directory notification filters for attributes and times.

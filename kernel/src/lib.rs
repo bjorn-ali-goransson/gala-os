@@ -45,6 +45,7 @@ pub mod nt;
 pub mod personality;
 #[cfg(not(feature = "hosted"))]
 pub mod platform;
+pub mod quota;
 pub mod replay;
 pub mod runtime;
 pub mod sched;

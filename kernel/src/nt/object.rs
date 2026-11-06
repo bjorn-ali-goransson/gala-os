@@ -190,30 +190,102 @@ pub struct CompletionQueue {
     /// Room is kept for the packets of I/O requests in progress
     /// (`notify::Reserved`), so their completion never fails to post.
     packets: crate::mm::heap::ReservedVec<CompletionPacket>,
+    /// The quota its packets (queued, and the slots kept for them) are
+    /// charged to: the port's creator's (none: a port a kernel handover
+    /// carried), and how many packets are charged.
+    owner: Option<KArc<Block>>,
+    charged: u64,
 }
+
+/// What one queued packet (or a slot kept for one) costs, in nonpaged
+/// pool.
+pub const PACKET_COST: u64 = core::mem::size_of::<CompletionPacket>() as u64;
 
 impl Default for CompletionQueue {
     fn default() -> Self {
         let id = NEXT_PORT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        CompletionQueue { id, packets: crate::mm::heap::ReservedVec::new() }
+        CompletionQueue {
+            id,
+            packets: crate::mm::heap::ReservedVec::new(),
+            owner: None,
+            charged: 0,
+        }
+    }
+}
+
+impl Drop for CompletionQueue {
+    fn drop(&mut self) {
+        if let Some(owner) = &self.owner {
+            owner.release(Pool::NonPaged, self.charged * PACKET_COST);
+        }
     }
 }
 
 impl CompletionQueue {
-    /// Queues `packet`, stamped with the time and the queuing thread
-    /// (`iocp post` in the event stream).
-    pub fn push(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
-        self.push_inner(packet, false)
+    /// A queue whose packets are charged to `owner` (the port's creator).
+    pub fn charged_to(owner: KArc<Block>) -> Self {
+        let mut q = Self::default();
+        q.owner = Some(owner);
+        q
     }
 
-    /// Keeps room for one packet a request in progress will post.
+    /// Charges one packet more; with `check`, within the owner's quota.
+    fn charge(&mut self, check: bool) -> Result<(), NtStatus> {
+        if let Some(owner) = &self.owner {
+            if check {
+                owner.try_charge(Pool::NonPaged, PACKET_COST).map_err(quota::status)?;
+            } else {
+                owner.charge(Pool::NonPaged, PACKET_COST);
+            }
+        }
+        self.charged += 1;
+        Ok(())
+    }
+
+    /// Gives one packet's charge back.
+    fn uncharge(&mut self) {
+        if self.charged == 0 {
+            return;
+        }
+        self.charged -= 1;
+        if let Some(owner) = &self.owner {
+            owner.release(Pool::NonPaged, PACKET_COST);
+        }
+    }
+
+    /// Queues `packet`, stamped with the time and the queuing thread
+    /// (`iocp post` in the event stream). Charged to the port's owner
+    /// whatever its limit: a completed I/O's packet cannot be refused
+    /// (they are bounded by the I/O in progress).
+    pub fn push(&mut self, packet: CompletionPacket) -> Result<(), AllocError> {
+        self.charge(false).map_err(|_| AllocError)?;
+        self.push_inner(packet, false).inspect_err(|_| self.uncharge())
+    }
+
+    /// Queues a packet a program posts (NtSetIoCompletion): within the
+    /// port owner's quota (STATUS_QUOTA_EXCEEDED: a program posting
+    /// without taking runs out of its own quota, not the kernel's
+    /// memory), else STATUS_NO_MEMORY without memory.
+    pub fn post(&mut self, packet: CompletionPacket) -> Result<(), NtStatus> {
+        self.charge(true)?;
+        self.push_inner(packet, false).map_err(|_| {
+            self.uncharge();
+            NtStatus::NO_MEMORY
+        })
+    }
+
+    /// Keeps room for one packet a request in progress will post (charged
+    /// as a queued packet, whatever the limit).
     pub fn reserve_slot(&mut self) -> Result<(), AllocError> {
-        self.packets.reserve_slot()
+        self.packets.reserve_slot()?;
+        let _ = self.charge(false);
+        Ok(())
     }
 
     /// Gives back a slot its request will not use.
     pub fn release_slot(&mut self) {
         self.packets.release_slot();
+        self.uncharge();
     }
 
     /// Posts a request's packet into the slot reserved for it (no
@@ -273,7 +345,9 @@ impl CompletionQueue {
     }
 
     pub fn pop(&mut self) -> Option<CompletionPacket> {
-        (!self.packets.is_empty()).then(|| self.packets.remove(0))
+        let p = (!self.packets.is_empty()).then(|| self.packets.remove(0))?;
+        self.uncharge();
+        Some(p)
     }
 
     pub fn len(&self) -> usize {
@@ -787,10 +861,10 @@ impl HandleTable {
     /// except a charge the object already had.
     pub fn insert(&mut self, entry: HandleEntry) -> Result<Handle, NtStatus> {
         if let Some(q) = &self.quota {
-            q.add_handle(false)?;
+            q.add_handle(false).map_err(|_| NtStatus::INSUFFICIENT_RESOURCES)?;
             if let Err(e) = q.try_charge(Pool::Paged, quota::HANDLE_ENTRY) {
                 q.remove_handle();
-                return Err(e);
+                return Err(quota::status(e));
             }
             if let Err(e) = quota::claim(&entry.object, q, true) {
                 uncharge_entry(q);
@@ -913,6 +987,30 @@ mod tests {
         assert_eq!(with_implied(0x40, Some(ImpliedKind::Process)), 0x40);
         assert_eq!(with_implied(0x400, None), 0x400);
         assert_eq!(with_implied(0x20, Some(ImpliedKind::Thread)), 0x20);
+    }
+
+    #[test]
+    fn queued_packets_are_charged_to_the_port_creator() {
+        use crate::nt::quota::{Block, Pool, QUOTA_EXCEEDED};
+        let block = Block::with_limits(4, "a.exe", 1 << 20, 3 * PACKET_COST, 100).unwrap();
+        let used = || block.pool(Pool::NonPaged).0;
+        let mut q = CompletionQueue::charged_to(block.clone());
+        let p = |key| CompletionPacket::new(key, 0, 0, 0);
+        assert_eq!(q.post(p(1)), Ok(()));
+        assert_eq!(q.post(p(2)), Ok(()));
+        // A slot kept for a request is charged as a packet.
+        q.reserve_slot().unwrap();
+        assert_eq!(used(), 3 * PACKET_COST);
+        // A posted packet is refused over the quota, a completion is not.
+        assert_eq!(q.post(p(3)), Err(QUOTA_EXCEEDED));
+        q.push(p(4)).unwrap();
+        q.push_reserved(p(5)).unwrap();
+        assert_eq!(used(), 4 * PACKET_COST);
+        // Taken packets give it back; the rest goes with the port.
+        assert_eq!(q.take().map(|p| p.key), Some(1));
+        assert_eq!(used(), 3 * PACKET_COST);
+        drop(q);
+        assert_eq!(used(), 0);
     }
 
     #[test]

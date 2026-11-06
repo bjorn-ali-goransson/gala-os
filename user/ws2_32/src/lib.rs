@@ -253,7 +253,10 @@ fn wsa_error(status: u32) -> u32 {
         0xc000_023c => WSAENETUNREACH,
         // Not a handle, or a handle to something that is not a socket.
         0xc000_0008 | 0xc000_0024 | 0xc000_0010 => WSAENOTSOCK,
-        0xc000_009a | 0xc000_0017 => WSAENOBUFS,
+        // STATUS_INSUFFICIENT_RESOURCES, STATUS_NO_MEMORY, and
+        // STATUS_QUOTA_EXCEEDED: the socket's buffers are over the
+        // process's quota.
+        0xc000_009a | 0xc000_0017 | 0xc000_0044 => WSAENOBUFS,
         0xc000_0005 => WSAEFAULT,
         0xc000_00bb => WSAEOPNOTSUPP,
         // A datagram larger than the buffer (the start copied), or than
@@ -1462,6 +1465,18 @@ pub extern "system" fn setsockopt(
         unsafe { core::ptr::copy_nonoverlapping(value, b.as_mut_ptr(), n) };
         if !options::set(s, slot, i32::from_le_bytes(b)) {
             return fail(WSAENOBUFS);
+        }
+        // SO_RCVBUF and SO_SNDBUF size the buffers of the connections the
+        // socket makes from then on (AFD_INFO_RECEIVE_WINDOW_SIZE and
+        // AFD_INFO_SEND_WINDOW_SIZE, ReactOS's numbers).
+        if level == SOL_SOCKET && (name == 0x1001 || name == 0x1002) {
+            let mut info = [0u8; 16];
+            let class: u32 = if name == 0x1002 { 6 } else { 7 };
+            info[..4].copy_from_slice(&class.to_le_bytes());
+            info[8..12].copy_from_slice(&b);
+            if let Err(e) = afd_call(s, IOCTL_AFD_SET_INFO, &info, &mut []) {
+                return e;
+            }
         }
         // IPV6_V6ONLY decides which families the socket takes: AFD binds
         // by it (gala's own AFD_INFO class).

@@ -546,6 +546,21 @@ pub(super) fn nt_set_information_token(call: &mut Call<'_>) -> NtStatus {
                 }
                 bytes
             };
+            // Its dynamic part is charged for what the new default DACL
+            // takes (nt::quota; the data's lock is not held meanwhile: the
+            // quota's is taken before it when the token is claimed).
+            let new = token::dynamic_charge(bytes.len());
+            let old = t.dynamic.swap(new, core::sync::atomic::Ordering::AcqRel);
+            if new > old
+                && let Err(e) =
+                    super::super::quota::grow(&object, super::super::quota::Pool::Paged, new - old)
+            {
+                t.dynamic.store(old, core::sync::atomic::Ordering::Release);
+                return e;
+            }
+            if new < old {
+                super::super::quota::shrink(&object, super::super::quota::Pool::Paged, old - new);
+            }
             let mut d = t.data.lock();
             d.default_dacl = bytes;
             d.modified_id = token::next_luid();
