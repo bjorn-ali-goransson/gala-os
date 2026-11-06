@@ -37,9 +37,12 @@ pub enum Op {
         size: u64,
         written: u64,
     },
+    /// The times and attributes (version 2 added the access time; a
+    /// version 1 record's is its write time).
     SetBasic {
         path: Vec<u16>,
         created: u64,
+        accessed: u64,
         written: u64,
         attributes: u32,
     },
@@ -62,7 +65,8 @@ const MAGIC: u32 = u32::from_le_bytes(*b"GLOG");
 /// this one and the ones before it; a record of a newer version ends the
 /// log for it (as an unknown record would), so an older kernel never
 /// misreads a newer one's records.
-pub const VERSION: u8 = 1;
+/// 2: SetBasic carries the access time after the attributes.
+pub const VERSION: u8 = 2;
 pub const HEADER: usize = 24;
 /// The largest payload a record may have (a Write's data is split).
 pub const MAX_PAYLOAD: usize = 128 * 1024;
@@ -146,11 +150,12 @@ impl Op {
                 put(out, &size.to_le_bytes())?;
                 put(out, &written.to_le_bytes())
             }
-            Op::SetBasic { path, created, written, attributes } => {
+            Op::SetBasic { path, created, accessed, written, attributes } => {
                 put_path(out, path)?;
                 put(out, &created.to_le_bytes())?;
                 put(out, &written.to_le_bytes())?;
-                put(out, &attributes.to_le_bytes())
+                put(out, &attributes.to_le_bytes())?;
+                put(out, &accessed.to_le_bytes())
             }
             Op::SetSecurity { path, descriptor } => {
                 put_path(out, path)?;
@@ -265,7 +270,7 @@ pub fn decode(bytes: &[u8], generation: u64) -> Decoded {
         return Decoded::End;
     }
     let mut r = Reader { b: &bytes[HEADER..HEADER + len], at: 0 };
-    let op = match parse(bytes[16], &mut r) {
+    let op = match parse(bytes[16], bytes[17].max(1), &mut r) {
         Some(Ok(op)) => op,
         Some(Err(NoMemory)) => return Decoded::NoMemory,
         None => return Decoded::End,
@@ -273,7 +278,7 @@ pub fn decode(bytes: &[u8], generation: u64) -> Decoded {
     Decoded::Record(op, total)
 }
 
-fn parse(kind: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemory>> {
+fn parse(kind: u8, version: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemory>> {
     macro_rules! path {
         () => {
             match r.path()? {
@@ -303,7 +308,9 @@ fn parse(kind: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemory>> {
         }
         4 => {
             let path = path!();
-            Op::SetBasic { path, created: r.u64()?, written: r.u64()?, attributes: r.u32()? }
+            let (created, written, attributes) = (r.u64()?, r.u64()?, r.u32()?);
+            let accessed = if version >= 2 { r.u64()? } else { written };
+            Op::SetBasic { path, created, accessed, written, attributes }
         }
         5 => {
             let path = path!();
@@ -346,6 +353,30 @@ mod tests {
         assert_eq!(decode(&newer, 5), Decoded::End);
     }
 
+    #[test]
+    fn a_version_1_set_basic_was_accessed_when_written() {
+        let path = alloc::vec![u16::from(b'f')];
+        let op = Op::SetBasic {
+            path: path.clone(),
+            created: 1,
+            accessed: 3,
+            written: 2,
+            attributes: 0x20,
+        };
+        let mut out = Vec::new();
+        op.encode(5, &mut out).unwrap();
+        // Version 1's layout: the same payload without the access time.
+        let len = u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize - 8;
+        let mut old = out[..HEADER + len].to_vec();
+        old[4..8].copy_from_slice(&(len as u32).to_le_bytes());
+        old[17] = 1;
+        old[20..24].fill(0);
+        let crc = crc32(0, &old);
+        old[20..24].copy_from_slice(&crc.to_le_bytes());
+        let want = Op::SetBasic { path, created: 1, accessed: 2, written: 2, attributes: 0x20 };
+        assert!(matches!(decode(&old, 5), Decoded::Record(op, _) if op == want));
+    }
+
     use super::*;
 
     fn w(s: &str) -> Vec<u16> {
@@ -363,7 +394,13 @@ mod tests {
             },
             Op::Write { path: w("\\d\\f"), offset: 7, data: vec![1, 2, 3], written: 9 },
             Op::SetSize { path: w("\\d\\f"), size: 2, written: 10 },
-            Op::SetBasic { path: w("\\d\\f"), created: 1, written: 2, attributes: 0x22 },
+            Op::SetBasic {
+                path: w("\\d\\f"),
+                created: 1,
+                accessed: 3,
+                written: 2,
+                attributes: 0x22,
+            },
             Op::SetSecurity { path: w("\\d"), descriptor: vec![1, 0, 4, 0x80] },
             Op::Rename { from: w("\\d\\f"), to: w("\\d\\g") },
             Op::Delete { path: w("\\d\\g") },

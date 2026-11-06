@@ -5,7 +5,8 @@
 //! GetFileInformationByHandle, GetFileSizeEx, GetFileAttributes(Ex)W,
 //! FindFirstFileW/FindNextFileW, GetFileInformationByHandleEx's directory
 //! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
-//! GetFileTime/SetFileTime, GetFullPathNameW, GetShortPathNameW,
+//! GetFileTime/SetFileTime (each time its own, the access time too),
+//! GetFullPathNameW, GetShortPathNameW,
 //! GetCompressedFileSizeW, DeleteFileW, QueryDosDeviceW (C: and NUL),
 //! WriteFileGather/ReadFileScatter (page segments, overlapped),
 //! WriteFileEx/ReadFileEx (the completion routine runs in the next
@@ -352,6 +353,17 @@ fn run() -> Result<(), u32> {
         c.ok(SetFileTime(h, &JAN_2019, null, null) != 0, GetLastError().into())?;
         c.ok(GetFileTime(h, &mut created2, null, &mut written2) != 0, GetLastError().into())?;
         c.ok(created2 == JAN_2019 && written2 == JAN_2020, created2)?;
+        // The access time is a time of its own (scp -p and tar set it
+        // apart from the write time): set alone, it reads back, through
+        // GetFileTime and GetFileInformationByHandle, the others kept.
+        const JAN_2018: u64 = 131_592_384_000_000_000;
+        c.ok(SetFileTime(h, null, &JAN_2018, null) != 0, GetLastError().into())?;
+        let mut accessed = 0u64;
+        c.ok(GetFileTime(h, &mut created2, &mut accessed, &mut written2) != 0, 0)?;
+        c.eq(accessed, JAN_2018)?;
+        c.ok(created2 == JAN_2019 && written2 == JAN_2020, written2)?;
+        c.ok(GetFileInformationByHandle(h, info.as_mut_ptr()) != 0, 0)?;
+        c.eq(u64::from(info[3]) | u64::from(info[4]) << 32, JAN_2018)?; // ftLastAccessTime
         c.ok(FlushFileBuffers(h) != 0, 0)?;
         // ntdll's NtFlushBuffersFileEx (PostgreSQL's fdatasync): the data
         // only (FLUSH_FLAGS_FILE_DATA_SYNC_ONLY); unknown flags are

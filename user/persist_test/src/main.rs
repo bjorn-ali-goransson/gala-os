@@ -8,7 +8,8 @@
 //!   starts with the two ACEs given (Everyone: all access, BUILTIN\Users:
 //!   read and execute), followed by what C:\ passes on;
 //! - a small file's contents, its attributes (SetFileAttributesW: hidden)
-//!   and its last-write time (SetFileTime);
+//!   and its last-write and last-access times (SetFileTime; read before
+//!   the contents, which Windows may count as an access);
 //! - a 200,000-byte file written in pieces, read back byte for byte;
 //! - a file truncated with SetEndOfFile (its size);
 //! - a renamed file (MoveFileExW: only the new name exists) and a deleted
@@ -207,8 +208,9 @@ const BLOB: [u8; 5] = [1, 2, 3, 0xfe, 0xff];
 
 const BIG: usize = 200_000;
 const TEXT: &[u8] = b"hello from the first boot\r\n";
-/// A fixed last-write time (a FILETIME).
+/// A fixed last-write time and an earlier last-access time (FILETIMEs).
 const WRITTEN: u64 = 0x01d9_1234_5678_9abc;
+const ACCESSED: u64 = 0x01d8_0000_1234_5678;
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -372,7 +374,7 @@ fn first_boot(c: &mut Checks) -> Result<(), u32> {
         let h = create("C:\\persist\\a.txt");
         c.ok(h as isize != -1, last_error())?;
         c.ok(write(h, TEXT), last_error())?;
-        c.ok(SetFileTime(h, core::ptr::null(), core::ptr::null(), &WRITTEN) != 0, last_error())?;
+        c.ok(SetFileTime(h, core::ptr::null(), &ACCESSED, &WRITTEN) != 0, last_error())?;
         CloseHandle(h);
         let attributes = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE;
         c.ok(SetFileAttributesW(w("C:\\persist\\a.txt").p(), attributes) != 0, last_error())?;
@@ -475,14 +477,15 @@ fn second_boot(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         let h = open("C:\\persist\\a.txt");
         c.ok(h as isize != -1, last_error())?;
-        let n = read(h, &mut buf).unwrap_or(0);
-        c.ok(&buf[..n] == TEXT, n as u64)?;
-        let mut written = 0;
+        let (mut accessed, mut written) = (0, 0);
         c.ok(
-            GetFileTime(h, core::ptr::null_mut(), core::ptr::null_mut(), &mut written) != 0,
+            GetFileTime(h, core::ptr::null_mut(), &mut accessed, &mut written) != 0,
             last_error(),
         )?;
         c.eq(written, WRITTEN)?;
+        c.eq(accessed, ACCESSED)?;
+        let n = read(h, &mut buf).unwrap_or(0);
+        c.ok(&buf[..n] == TEXT, n as u64)?;
         CloseHandle(h);
         let attributes = GetFileAttributesW(w("C:\\persist\\a.txt").p());
         c.eq(attributes.into(), (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE).into())?;

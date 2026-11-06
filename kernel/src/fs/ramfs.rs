@@ -226,13 +226,31 @@ struct Opens {
     shared_delete: u32,
 }
 
+/// The times FileBasicInformation sets (NT times; None keeps one).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Times {
+    pub created: Option<u64>,
+    pub accessed: Option<u64>,
+    pub written: Option<u64>,
+}
+
+impl Times {
+    pub fn all(created: u64, accessed: u64, written: u64) -> Self {
+        Self { created: Some(created), accessed: Some(accessed), written: Some(written) }
+    }
+}
+
 pub struct Node {
     parent: NodeId,
     name: Vec<u16>,
     kind: Kind,
     pub attributes: u32,
-    /// NT times (100 ns since 1601).
+    /// NT times (100 ns since 1601). The access time is its own: set with
+    /// the others (FileBasicInformation, scp -p) and by every write, not by
+    /// reads (as Windows with last-access updates off); the change time is
+    /// the write time.
     pub created: u64,
+    pub accessed: u64,
     pub written: u64,
     /// Changes with every change of the contents (and when a writable
     /// data section maps the file or ends), unique across all nodes: what
@@ -248,6 +266,12 @@ pub struct Node {
     /// Its security descriptor (self-relative; nt::security), if one was
     /// assigned (files gala creates at boot have none).
     pub security: Option<Vec<u8>>,
+    /// Its POSIX permission bits (`0o7777`), set when the Linux personality
+    /// creates it or changes them (lx::file); None for a node made without
+    /// them (boot files, NT programs' files), which Linux sees with a
+    /// default (`lx::file`). Not in the change log yet: they last until
+    /// reboot (ROADMAP LX seam 4).
+    pub mode: Option<u16>,
     /// Made by the boot (modules), not by a program or the change log.
     boot: bool,
     /// Created or changed since boot (or by the change log): part of a
@@ -397,6 +421,7 @@ impl RamFs {
             kind: Kind::Directory(Vec::new()),
             attributes: ATTRIBUTE_DIRECTORY,
             created: now,
+            accessed: now,
             written: now,
             version: next_version(),
             opens: Opens::default(),
@@ -405,6 +430,7 @@ impl RamFs {
             write_maps: 0,
             mapped_size: 0,
             security: None,
+            mode: None,
             boot: true,
             dirty: false,
         };
@@ -555,6 +581,7 @@ impl RamFs {
             kind,
             attributes,
             created: now,
+            accessed: now,
             written: now,
             version: next_version(),
             opens: Opens::default(),
@@ -563,6 +590,7 @@ impl RamFs {
             write_maps: 0,
             mapped_size: 0,
             security: None,
+            mode: None,
             boot: !self.recording && !self.replaying,
             dirty: self.recording || self.replaying,
         };
@@ -798,6 +826,12 @@ impl RamFs {
         Ok(())
     }
 
+    /// Sets the POSIX permission bits of `id` (`Node::mode`).
+    pub fn set_mode(&mut self, id: NodeId, mode: u16) -> Result<(), FsError> {
+        self.node_mut(id)?.mode = Some(mode & 0o7777);
+        Ok(())
+    }
+
     pub fn delete_pending(&self, id: NodeId) -> bool {
         self.node(id).is_some_and(|n| n.delete_pending)
     }
@@ -823,6 +857,7 @@ impl RamFs {
         let start = usize::try_from(offset).map_err(|_| FsError::NoMemory)?;
         contents.write_at(start, data)?;
         node.written = now;
+        node.accessed = now;
         node.version = next_version();
         let (parent, name) = (node.parent, core::mem::take(&mut node.name));
         self.note(parent, &name, false, ACTION_MODIFIED);
@@ -848,15 +883,17 @@ impl RamFs {
     pub fn set_basic(
         &mut self,
         id: NodeId,
-        created: Option<u64>,
-        written: Option<u64>,
+        times: Times,
         attributes: Option<u32>,
     ) -> Result<(), FsError> {
         let node = self.node_mut(id)?;
-        if let Some(t) = created {
+        if let Some(t) = times.created {
             node.created = t;
         }
-        if let Some(t) = written {
+        if let Some(t) = times.accessed {
+            node.accessed = t;
+        }
+        if let Some(t) = times.written {
             node.written = t;
         }
         if let Some(a) = attributes {
@@ -868,6 +905,7 @@ impl RamFs {
             Some(Op::SetBasic {
                 path,
                 created: n.created,
+                accessed: n.accessed,
                 written: n.written,
                 attributes: n.attributes,
             })
@@ -885,6 +923,7 @@ impl RamFs {
         let size = usize::try_from(size).map_err(|_| FsError::NoMemory)?;
         contents.set_len(size)?;
         node.written = now;
+        node.accessed = now;
         node.version = next_version();
         let (parent, name) = (node.parent, core::mem::take(&mut node.name));
         self.note(parent, &name, false, ACTION_MODIFIED);
@@ -1106,7 +1145,9 @@ impl RamFs {
                         self.create(parent, name, *directory, *created)?
                     }
                 };
-                self.set_basic(id, Some(*created), Some(*written), Some(*attributes))
+                // A record's file was last accessed when it was written.
+                let times = Times::all(*created, *written, *written);
+                self.set_basic(id, times, Some(*attributes))
             }
             Op::Write { path, offset, data, written } => {
                 let id = self.lookup(path)?;
@@ -1116,9 +1157,9 @@ impl RamFs {
                 let id = self.lookup(path)?;
                 self.set_size(id, *size, *written)
             }
-            Op::SetBasic { path, created, written, attributes } => {
+            Op::SetBasic { path, created, accessed, written, attributes } => {
                 let id = self.lookup(path)?;
-                self.set_basic(id, Some(*created), Some(*written), Some(*attributes))
+                self.set_basic(id, Times::all(*created, *accessed, *written), Some(*attributes))
             }
             Op::SetSecurity { path, descriptor } => {
                 let id = self.lookup(path)?;
@@ -1191,10 +1232,14 @@ impl RamFs {
                         })?;
                         at += k;
                     }
-                    // Writes set the time; the node's own comes last.
+                }
+                // Writes set the times; the node's own come last (a
+                // directory's access time is its own too).
+                if !n.is_dir() || n.accessed != n.written {
                     push(Op::SetBasic {
                         path: p()?,
                         created: n.created,
+                        accessed: n.accessed,
                         written: n.written,
                         attributes: n.attributes,
                     })?;
@@ -1542,14 +1587,24 @@ mod tests {
     fn set_basic_times_and_attributes() {
         let mut f = fs();
         let file = f.create(ROOT, &w("t.txt"), false, 5).unwrap();
-        f.set_basic(file, None, Some(99), None).unwrap();
+        let written = |t| Times { written: Some(t), ..Times::default() };
+        f.set_basic(file, written(99), None).unwrap();
         let n = f.node(file).unwrap();
-        assert_eq!((n.created, n.written, n.attributes), (5, 99, ATTRIBUTE_ARCHIVE));
-        f.set_basic(file, Some(7), None, Some(ATTRIBUTE_READONLY | ATTRIBUTE_DIRECTORY)).unwrap();
+        assert_eq!((n.created, n.accessed, n.written), (5, 5, 99));
+        assert_eq!(n.attributes, ATTRIBUTE_ARCHIVE);
+        let created = Times { created: Some(7), ..Times::default() };
+        f.set_basic(file, created, Some(ATTRIBUTE_READONLY | ATTRIBUTE_DIRECTORY)).unwrap();
         let n = f.node(file).unwrap();
         assert_eq!((n.created, n.written, n.attributes), (7, 99, ATTRIBUTE_READONLY));
+        // The access time is set alone (scp -p), and a write sets it too.
+        f.set_basic(file, Times { accessed: Some(3), ..Times::default() }, None).unwrap();
+        let n = f.node(file).unwrap();
+        assert_eq!((n.created, n.accessed, n.written), (7, 3, 99));
+        f.write(file, 0, b"x", 100).unwrap();
+        let n = f.node(file).unwrap();
+        assert_eq!((n.created, n.accessed, n.written), (7, 100, 100));
         let d = f.create(ROOT, &w("d"), true, 5).unwrap();
-        f.set_basic(d, None, None, Some(0x02)).unwrap();
+        f.set_basic(d, Times::default(), Some(0x02)).unwrap();
         assert_eq!(f.node(d).unwrap().attributes, 0x02 | ATTRIBUTE_DIRECTORY);
     }
 
@@ -1563,7 +1618,7 @@ mod tests {
         f.write(a, 0, b"MZ", 2).unwrap();
         let v2 = f.node(a).unwrap().version().unwrap();
         assert_ne!(v, v2);
-        f.set_basic(a, Some(9), Some(9), None).unwrap();
+        f.set_basic(a, Times::all(9, 9, 9), None).unwrap();
         assert_eq!(f.node(a).unwrap().version(), Some(v2));
         // A read-only data section cannot change the contents: the
         // version stays (an image section of the file shares its layout).
@@ -1608,7 +1663,9 @@ mod tests {
         f.write(a, 0, b"hello", 6).unwrap();
         f.write(a, 5, &[7u8; 70_000], 7).unwrap();
         f.set_size(a, 60_000, 8).unwrap();
-        f.set_basic(a, None, Some(42), Some(0x22)).unwrap();
+        let times = Times { accessed: Some(41), written: Some(42), ..Times::default() };
+        f.set_basic(a, times, Some(0x22)).unwrap();
+        f.set_basic(d, Times { accessed: Some(40), ..Times::default() }, None).unwrap();
         let t = f.create(d, &w("tmp"), false, 5).unwrap();
         f.rename(t, d, &w("renamed"), false).unwrap();
         let keep = f.lookup(&w("\\boot\\keep.txt")).unwrap();
@@ -1626,8 +1683,9 @@ mod tests {
         assert_eq!(&a[..5], b"hello");
         assert!(a[5..].iter().all(|&b| b == 7));
         let n = f.node(f.lookup(&w("\\data\\a.txt")).unwrap()).unwrap();
-        assert_eq!((n.written, n.attributes), (42, 0x22));
+        assert_eq!((n.accessed, n.written, n.attributes), (41, 42, 0x22));
         let d = f.node(f.lookup(&w("\\data")).unwrap()).unwrap();
+        assert_eq!(d.accessed, 40);
         assert_eq!(d.security.as_deref(), Some(&[1u8, 0, 4, 0x80][..]));
         assert!(f.lookup(&w("\\data\\tmp")).is_err());
         assert_eq!(content(f, "\\data\\renamed").unwrap(), b"");

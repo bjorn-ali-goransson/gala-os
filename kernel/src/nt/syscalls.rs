@@ -6435,8 +6435,7 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
     if class == FILE_BASIC_INFORMATION {
         // FILE_BASIC_INFORMATION { CreationTime, LastAccessTime,
         // LastWriteTime, ChangeTime, FileAttributes }: 0 (and -1, "stop
-        // updating") keep a value. Access and change times are the write
-        // time here.
+        // updating") keep a value. The change time is the write time here.
         if length < 40 {
             return NtStatus::INFO_LENGTH_MISMATCH;
         }
@@ -6453,8 +6452,9 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
         };
         let attributes = u32::from_le_bytes([b[32], b[33], b[34], b[35]]);
         let attributes = (attributes != 0).then_some(attributes);
-        let (created, written) = (time(0), time(16));
-        return match file::with_fs(|fs| fs.set_basic(file.node, created, written, attributes)) {
+        let times =
+            crate::fs::ramfs::Times { created: time(0), accessed: time(8), written: time(16) };
+        return match file::with_fs(|fs| fs.set_basic(file.node, times, attributes)) {
             Ok(()) => {
                 tri!(call.write_iosb(iosb, NtStatus::SUCCESS, 0));
                 NtStatus::SUCCESS

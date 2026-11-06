@@ -511,7 +511,7 @@ pub fn basic_information(node: NodeId) -> Result<[u8; 40], NtStatus> {
         let n = fs.node(node).ok_or(NtStatus::OBJECT_NAME_NOT_FOUND)?;
         let mut b = [0u8; 40];
         b[0..8].copy_from_slice(&n.created.to_le_bytes()); // CreationTime
-        b[8..16].copy_from_slice(&n.written.to_le_bytes()); // LastAccessTime
+        b[8..16].copy_from_slice(&n.accessed.to_le_bytes()); // LastAccessTime
         b[16..24].copy_from_slice(&n.written.to_le_bytes()); // LastWriteTime
         b[24..32].copy_from_slice(&n.written.to_le_bytes()); // ChangeTime
         b[32..36].copy_from_slice(&n.attributes.to_le_bytes());
@@ -605,7 +605,7 @@ fn encode_entry(out: &mut [u8], class: u32, e: &Entry<'_>, name_at: usize) -> bo
         put(out, 8, &(name_bytes as u32).to_le_bytes());
     } else {
         put(out, 8, &n.created.to_le_bytes());
-        put(out, 16, &n.written.to_le_bytes());
+        put(out, 16, &n.accessed.to_le_bytes()); // LastAccessTime
         put(out, 24, &n.written.to_le_bytes());
         put(out, 32, &n.written.to_le_bytes());
         put(out, 40, &n.size().to_le_bytes());
