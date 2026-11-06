@@ -811,6 +811,9 @@ pub extern "system" fn BCryptExportKey(
     if let Some(k) = rsa::key(key) {
         return rsa::export(k, blob, out, len, result);
     }
+    if let Some(k) = ecdsa::key(key) {
+        return ecdsa::export(k, blob, out, len, result);
+    }
     let Some(k) = cipher::key(key) else { return STATUS_INVALID_HANDLE };
     cipher::export(k, blob, out, len, result)
 }

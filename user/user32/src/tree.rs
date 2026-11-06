@@ -703,6 +703,22 @@ pub extern "system" fn GetDlgItem(parent: Hwnd, id: i32) -> Hwnd {
         .unwrap_or(0)
 }
 
+/// SendDlgItemMessageW: SendMessageW to the dialog's control `id` (0
+/// when there is none).
+#[unsafe(no_mangle)]
+pub extern "system" fn SendDlgItemMessageW(
+    dialog: Hwnd,
+    id: i32,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    match GetDlgItem(dialog, id) {
+        0 => 0,
+        c => crate::window::SendMessageW(c, msg, wparam, lparam),
+    }
+}
+
 /// SetDlgItemTextW: SetWindowTextW of the dialog's control `id` (FALSE,
 /// ERROR_CONTROL_ID_NOT_FOUND, when there is none).
 #[unsafe(no_mangle)]

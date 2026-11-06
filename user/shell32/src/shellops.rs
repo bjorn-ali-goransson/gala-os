@@ -593,13 +593,13 @@ pub extern "system" fn SHGetIconOverlayIndexW(_path: *const u16, _index: i32) ->
 
 #[repr(C)]
 pub struct FindData {
-    attributes: u32,
-    times: [u32; 6],
-    size_high: u32,
-    size_low: u32,
-    reserved: [u32; 2],
-    name: [u16; 260],
-    short_name: [u16; 14],
+    pub(crate) attributes: u32,
+    pub(crate) times: [u32; 6],
+    pub(crate) size_high: u32,
+    pub(crate) size_low: u32,
+    pub(crate) reserved: [u32; 2],
+    pub(crate) name: [u16; 260],
+    pub(crate) short_name: [u16; 14],
 }
 
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;

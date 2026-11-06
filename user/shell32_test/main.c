@@ -49,12 +49,45 @@
  *   KF_FLAG_CREATE) is %LOCALAPPDATA%\Programs and exists afterwards;
  *   CSIDL_COMMON_PROGRAMS is under %ProgramData%.
  *
+ * - Shell links (CLSID_ShellLink; Microsoft's IShellLinkW, IPersistFile,
+ *   IShellLinkDataList pages, [MS-SHLLINK] for the file, [MS-PROPSTORE]
+ *   for its property store, and the checks Wine's shell32/tests/
+ *   shelllink.c makes on Windows): a new link has no path (GetPath
+ *   S_FALSE, an empty string, a zeroed WIN32_FIND_DATAW), an empty
+ *   description, arguments and icon (index 0), SW_SHOWNORMAL, no hot
+ *   key, no flags, no Darwin block (CopyDataBlock E_FAIL, NULL);
+ *   SetPath(NULL) is E_INVALIDARG; a path that does not exist is kept
+ *   without its trailing backslash (the find data: no attributes, the
+ *   last part's name); an existing file's find data has its attributes,
+ *   size and name; a path with environment variables sets
+ *   SLDF_HAS_EXP_SZ and an EXP_SZ_LINK block with the unexpanded path.
+ *   IPersistFile: GetCurFile is S_FALSE with NULL before a Save or Load,
+ *   S_OK with the file's name after; IsDirty S_OK after a change, S_FALSE
+ *   after Save(name, TRUE). The saved file starts with the 76-byte
+ *   ShellLinkHeader (HeaderSize 0x4C, CLSID_ShellLink, LinkFlags with
+ *   HasName, HasWorkingDir, HasArguments, HasIconLocation and IsUnicode
+ *   and the target's place (an IDList or LinkInfo), the target's size,
+ *   the icon index, the show command, the hot key, zeroed reserved
+ *   fields), holds a PropertyStoreDataBlock for an AppUserModel ID set
+ *   through IPropertyStore, and ends with the terminal block; a new link
+ *   loaded from it gives every field back, the property's value too. The
+ *   specification's own sample (section 3.1, a link to C:\test\a.txt)
+ *   loads: its path, working directory, show command and
+ *   SLDF_ENABLE_TARGET_METADATA. SetFlags/GetFlags keep SLDF_RUNAS_USER.
+ * - SHAddToRecentDocs(SHARD_PATHW): a link named after the file in the
+ *   user's Recent folder (CSIDL_RECENT).
+ * - kernel32's EnumResourceLanguagesW (Inno Setup's compiler imports it):
+ *   one call for this program's icon group 2, with the language
+ *   FindResourceExW finds it in; ERROR_RESOURCE_NAME_NOT_FOUND and
+ *   ERROR_RESOURCE_TYPE_NOT_FOUND for what is not there.
  * Prints "shell32_test: ok" or exits with the number of the failing
  * check. Run as "shell32_test child" it just exits with 7. */
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <knownfolders.h>
+#include <shobjidl.h>
+#include <propsys.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -100,6 +133,16 @@ static int icon_width(HICON icon) {
     return w;
 }
 
+static int langs_seen;
+static WORD lang_seen;
+static BOOL CALLBACK count_lang(HMODULE m, LPCWSTR type, LPCWSTR name, WORD lang, LONG_PTR param) {
+    if (param == 7 && type == (LPCWSTR)RT_GROUP_ICON && name == MAKEINTRESOURCEW(2)) {
+        langs_seen++;
+        lang_seen = lang;
+    }
+    return TRUE;
+}
+
 static int fileop(UINT func, const wchar_t *from, const wchar_t *to, FILEOP_FLAGS flags) {
     SHFILEOPSTRUCTW op;
     memset(&op, 0, sizeof op);
@@ -108,6 +151,247 @@ static int fileop(UINT func, const wchar_t *from, const wchar_t *to, FILEOP_FLAG
     op.pTo = to;
     op.fFlags = flags | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
     return SHFileOperationW(&op);
+}
+
+static const GUID clsid_shell_link = {0x00021401, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+static const GUID iid_shell_link_w = {0x000214f9, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+static const GUID iid_persist_file = {0x0000010b, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+static const GUID iid_data_list = {0x45e2b4ae, 0xb1c3, 0x11d0, {0xb9, 0x2f, 0x00, 0xa0, 0xc9, 0x03, 0x12, 0xe1}};
+static const GUID iid_property_store = {0x886d8eeb, 0x8cf2, 0x4446, {0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd, 0xcf, 0x99}};
+static const PROPERTYKEY app_id_key = {{0x9f4c2855, 0x9f79, 0x4b39, {0xa8, 0xd0, 0xe1, 0xd4, 0x2d, 0xe1, 0xd5, 0xf3}}, 5};
+
+/* [MS-SHLLINK] 3.1: a shortcut to C:\test\a.txt, as Windows wrote it. */
+static const unsigned char spec_sample[] = {
+    0x4C,0x00,0x00,0x00,0x01,0x14,0x02,0x00,0x00,0x00,0x00,0x00,0xC0,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x46,0x9B,0x00,0x08,0x00,0x20,0x00,0x00,0x00,0xD0,0xE9,0xEE,0xF2,
+    0x15,0x15,0xC9,0x01,0xD0,0xE9,0xEE,0xF2,0x15,0x15,0xC9,0x01,0xD0,0xE9,0xEE,0xF2,
+    0x15,0x15,0xC9,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xBD,0x00,0x14,0x00,
+    0x1F,0x50,0xE0,0x4F,0xD0,0x20,0xEA,0x3A,0x69,0x10,0xA2,0xD8,0x08,0x00,0x2B,0x30,
+    0x30,0x9D,0x19,0x00,0x2F,0x43,0x3A,0x5C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x46,0x00,0x31,0x00,0x00,
+    0x00,0x00,0x00,0x2C,0x39,0x69,0xA3,0x10,0x00,0x74,0x65,0x73,0x74,0x00,0x00,0x32,
+    0x00,0x07,0x00,0x04,0x00,0xEF,0xBE,0x2C,0x39,0x65,0xA3,0x2C,0x39,0x69,0xA3,0x26,
+    0x00,0x00,0x00,0x03,0x1E,0x00,0x00,0x00,0x00,0xF5,0x1E,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x74,0x00,0x65,0x00,0x73,0x00,0x74,0x00,0x00,0x00,0x14,
+    0x00,0x48,0x00,0x32,0x00,0x00,0x00,0x00,0x00,0x2C,0x39,0x69,0xA3,0x20,0x00,0x61,
+    0x2E,0x74,0x78,0x74,0x00,0x34,0x00,0x07,0x00,0x04,0x00,0xEF,0xBE,0x2C,0x39,0x69,
+    0xA3,0x2C,0x39,0x69,0xA3,0x26,0x00,0x00,0x00,0x2D,0x6E,0x00,0x00,0x00,0x00,0x96,
+    0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x61,0x00,0x2E,0x00,0x74,
+    0x00,0x78,0x00,0x74,0x00,0x00,0x00,0x14,0x00,0x00,0x00,0x3C,0x00,0x00,0x00,0x1C,
+    0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x1C,0x00,0x00,0x00,0x2D,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x3B,0x00,0x00,0x00,0x11,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x81,
+    0x8A,0x7A,0x30,0x10,0x00,0x00,0x00,0x00,0x43,0x3A,0x5C,0x74,0x65,0x73,0x74,0x5C,
+    0x61,0x2E,0x74,0x78,0x74,0x00,0x00,0x07,0x00,0x2E,0x00,0x5C,0x00,0x61,0x00,0x2E,
+    0x00,0x74,0x00,0x78,0x00,0x74,0x00,0x07,0x00,0x43,0x00,0x3A,0x00,0x5C,0x00,0x74,
+    0x00,0x65,0x00,0x73,0x00,0x74,0x00,0x60,0x00,0x00,0x00,0x03,0x00,0x00,0xA0,0x58,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x63,0x68,0x72,0x69,0x73,0x2D,0x78,0x70,0x73,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x78,0xC7,0x94,0x47,0xFA,0xC7,0x46,0xB3,
+    0x56,0x5C,0x2D,0xC6,0xB6,0xD1,0x15,0xEC,0x46,0xCD,0x7B,0x22,0x7F,0xDD,0x11,0x94,
+    0x99,0x00,0x13,0x72,0x16,0x87,0x4A,0x40,0x78,0xC7,0x94,0x47,0xFA,0xC7,0x46,0xB3,
+    0x56,0x5C,0x2D,0xC6,0xB6,0xD1,0x15,0xEC,0x46,0xCD,0x7B,0x22,0x7F,0xDD,0x11,0x94,
+    0x99,0x00,0x13,0x72,0x16,0x87,0x4A,0x00,0x00,0x00,0x00,
+};
+
+static DWORD rd32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (DWORD)p[3] << 24; }
+
+/* The whole of a small file into buf; its size (0 if not there). */
+static DWORD slurp(const wchar_t *path, unsigned char *buf, DWORD size) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    DWORD n = 0;
+    ReadFile(h, buf, size, &n, NULL);
+    CloseHandle(h);
+    return n;
+}
+
+/* Whether `hay` holds a StringData of `s`: a 16-bit count, then UTF-16. */
+static int has_string_data(const unsigned char *hay, DWORD n, const wchar_t *s) {
+    size_t len = wcslen(s);
+    for (DWORD i = 0; i + 2 + 2 * len <= n; i++)
+        if (hay[i] == (len & 0xff) && hay[i + 1] == len >> 8 && memcmp(hay + i + 2, s, 2 * len) == 0)
+            return 1;
+    return 0;
+}
+
+static IShellLinkW *new_link(void) {
+    IShellLinkW *sl = NULL;
+    CHECK(CoCreateInstance(&clsid_shell_link, NULL, CLSCTX_INPROC_SERVER, &iid_shell_link_w, (void **)&sl) == S_OK);
+    return sl;
+}
+
+static void links(const wchar_t *self) {
+    CHECK(SUCCEEDED(CoInitialize(NULL)));
+    IShellLinkW *sl = new_link();
+    wchar_t buf[MAX_PATH], dir[MAX_PATH], link[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    int i;
+    WORD hk;
+    DWORD flags;
+
+    /* A new link. */
+    wcscpy(buf, L"garbage");
+    memset(&fd, 0xaa, sizeof fd);
+    CHECK(sl->lpVtbl->GetPath(sl, buf, MAX_PATH, &fd, SLGP_RAWPATH) == S_FALSE && !buf[0]);
+    CHECK(fd.dwFileAttributes == 0 && fd.cFileName[0] == 0);
+    wcscpy(buf, L"garbage");
+    CHECK(sl->lpVtbl->GetDescription(sl, buf, MAX_PATH) == S_OK && !buf[0]);
+    wcscpy(buf, L"garbage");
+    CHECK(sl->lpVtbl->GetArguments(sl, buf, MAX_PATH) == S_OK && !buf[0]);
+    wcscpy(buf, L"garbage");
+    i = 0xdead;
+    CHECK(sl->lpVtbl->GetIconLocation(sl, buf, MAX_PATH, &i) == S_OK && !buf[0] && i == 0);
+    CHECK(sl->lpVtbl->GetShowCmd(sl, &i) == S_OK && i == SW_SHOWNORMAL);
+    hk = 0xbeef;
+    CHECK(sl->lpVtbl->GetHotkey(sl, &hk) == S_OK && hk == 0);
+    IShellLinkDataList *dl = NULL;
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_data_list, (void **)&dl) == S_OK);
+    flags = 0xdead;
+    CHECK(dl->lpVtbl->GetFlags(dl, &flags) == S_OK && flags == 0);
+    void *block = (void *)1;
+    CHECK(dl->lpVtbl->CopyDataBlock(dl, EXP_DARWIN_ID_SIG, &block) == E_FAIL && block == NULL);
+    CHECK(sl->lpVtbl->SetPath(sl, NULL) == E_INVALIDARG);
+    CHECK(sl->lpVtbl->SetPath(sl, L"c:\\nonexistent\\file\\") == S_OK);
+    memset(&fd, 0xaa, sizeof fd);
+    CHECK(sl->lpVtbl->GetPath(sl, buf, MAX_PATH, &fd, SLGP_RAWPATH) == S_OK);
+    CHECK(_wcsicmp(buf, L"c:\\nonexistent\\file") == 0);
+    CHECK(fd.dwFileAttributes == 0 && _wcsicmp(fd.cFileName, L"file") == 0);
+    /* A path with an environment variable. */
+    CHECK(sl->lpVtbl->SetPath(sl, L"%TEMP%\\gala-link.txt") == S_OK);
+    CHECK(dl->lpVtbl->GetFlags(dl, &flags) == S_OK && (flags & SLDF_HAS_EXP_SZ));
+    EXP_SZ_LINK *exp = NULL;
+    CHECK(dl->lpVtbl->CopyDataBlock(dl, EXP_SZ_LINK_SIG, (void **)&exp) == S_OK && exp != NULL);
+    CHECK(exp->dwSignature == EXP_SZ_LINK_SIG && exp->cbSize == sizeof(EXP_SZ_LINK));
+    CHECK(_wcsicmp(exp->swzTarget, L"%TEMP%\\gala-link.txt") == 0);
+    LocalFree(exp);
+
+    /* A link to this program, saved. */
+    CHECK(GetCurrentDirectoryW(MAX_PATH, dir) > 0);
+    wcscpy(link, dir);
+    wcscat(link, L"\\sh_link.lnk");
+    CHECK(sl->lpVtbl->SetPath(sl, self) == S_OK);
+    memset(&fd, 0, sizeof fd);
+    CHECK(sl->lpVtbl->GetPath(sl, buf, MAX_PATH, &fd, SLGP_RAWPATH) == S_OK && _wcsicmp(buf, self) == 0);
+    WIN32_FILE_ATTRIBUTE_DATA self_info;
+    CHECK(GetFileAttributesExW(self, GetFileExInfoStandard, &self_info));
+    CHECK(fd.dwFileAttributes == self_info.dwFileAttributes && fd.nFileSizeLow == self_info.nFileSizeLow);
+    CHECK(_wcsicmp(fd.cFileName, L"shell32_test.exe") == 0);
+    CHECK(sl->lpVtbl->SetArguments(sl, L"/option1 \"Some string\"") == S_OK);
+    CHECK(sl->lpVtbl->SetWorkingDirectory(sl, dir) == S_OK);
+    CHECK(sl->lpVtbl->SetDescription(sl, L"gala's test link") == S_OK);
+    CHECK(sl->lpVtbl->SetIconLocation(sl, self, 1) == S_OK);
+    CHECK(sl->lpVtbl->SetShowCmd(sl, SW_SHOWMINNOACTIVE) == S_OK);
+    CHECK(sl->lpVtbl->SetHotkey(sl, 0x0241) == S_OK); /* Ctrl+A */
+    CHECK(dl->lpVtbl->GetFlags(dl, &flags) == S_OK);
+    CHECK(dl->lpVtbl->SetFlags(dl, flags | SLDF_RUNAS_USER) == S_OK);
+    CHECK(dl->lpVtbl->GetFlags(dl, &flags) == S_OK && (flags & SLDF_RUNAS_USER));
+    IPropertyStore *ps = NULL;
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_property_store, (void **)&ps) == S_OK);
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    pv.vt = VT_LPWSTR;
+    pv.pwszVal = L"Gala.Test.Link";
+    CHECK(ps->lpVtbl->SetValue(ps, &app_id_key, &pv) == S_OK);
+    CHECK(ps->lpVtbl->Commit(ps) == S_OK);
+    IPersistFile *pf = NULL;
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_persist_file, (void **)&pf) == S_OK);
+    LPOLESTR cur = (LPOLESTR)1;
+    CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_FALSE && cur == NULL);
+    CHECK(pf->lpVtbl->IsDirty(pf) == S_OK);
+    CHECK(pf->lpVtbl->Save(pf, link, TRUE) == S_OK);
+    CHECK(pf->lpVtbl->IsDirty(pf) == S_FALSE);
+    CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_OK && cur != NULL && wcscmp(cur, link) == 0);
+    CoTaskMemFree(cur);
+    pf->lpVtbl->Release(pf);
+    ps->lpVtbl->Release(ps);
+    dl->lpVtbl->Release(dl);
+    CHECK(sl->lpVtbl->Release(sl) == 0);
+
+    /* The file, as [MS-SHLLINK] lays it out. */
+    static unsigned char file[8192];
+    DWORD n = slurp(link, file, sizeof file);
+    static const unsigned char clsid[16] = {0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46};
+    CHECK(n > 0x4c + 4 && rd32(file) == 0x4c && memcmp(file + 4, clsid, 16) == 0);
+    DWORD lf = rd32(file + 0x14);
+    DWORD want = 0x4 | 0x10 | 0x20 | 0x40 | 0x80; /* HasName, HasWorkingDir, HasArguments, HasIconLocation, IsUnicode */
+    CHECK((lf & want) == want && (lf & 0x3) != 0 && (lf & 0x2000));
+    CHECK(rd32(file + 0x34) == self_info.nFileSizeLow && rd32(file + 0x38) == 1 && rd32(file + 0x3c) == 7);
+    CHECK(file[0x40] == 0x41 && file[0x41] == 0x02 && file[0x42] == 0 && file[0x43] == 0);
+    CHECK(rd32(file + 0x44) == 0 && rd32(file + 0x48) == 0);
+    CHECK(has_string_data(file, n, L"gala's test link") && has_string_data(file, n, L"/option1 \"Some string\""));
+    CHECK(has_string_data(file, n, dir));
+    int store = 0;
+    for (DWORD k = 0x4c; k + 8 <= n; k++)
+        if (rd32(file + k) == 0xa0000009 && rd32(file + k - 4) >= 0xc)
+            store = 1;
+    CHECK(store && rd32(file + n - 4) == 0);
+
+    /* Loaded back into a new link. */
+    sl = new_link();
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_persist_file, (void **)&pf) == S_OK);
+    CHECK(pf->lpVtbl->Load(pf, link, STGM_READ) == S_OK);
+    CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_OK && wcscmp(cur, link) == 0);
+    CoTaskMemFree(cur);
+    CHECK(sl->lpVtbl->GetPath(sl, buf, MAX_PATH, NULL, SLGP_RAWPATH) == S_OK && _wcsicmp(buf, self) == 0);
+    CHECK(sl->lpVtbl->GetArguments(sl, buf, MAX_PATH) == S_OK && wcscmp(buf, L"/option1 \"Some string\"") == 0);
+    CHECK(sl->lpVtbl->GetWorkingDirectory(sl, buf, MAX_PATH) == S_OK && _wcsicmp(buf, dir) == 0);
+    CHECK(sl->lpVtbl->GetDescription(sl, buf, MAX_PATH) == S_OK && wcscmp(buf, L"gala's test link") == 0);
+    CHECK(sl->lpVtbl->GetIconLocation(sl, buf, MAX_PATH, &i) == S_OK && _wcsicmp(buf, self) == 0 && i == 1);
+    CHECK(sl->lpVtbl->GetShowCmd(sl, &i) == S_OK && i == SW_SHOWMINNOACTIVE);
+    CHECK(sl->lpVtbl->GetHotkey(sl, &hk) == S_OK && hk == 0x0241);
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_data_list, (void **)&dl) == S_OK);
+    CHECK(dl->lpVtbl->GetFlags(dl, &flags) == S_OK && (flags & SLDF_RUNAS_USER));
+    dl->lpVtbl->Release(dl);
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_property_store, (void **)&ps) == S_OK);
+    PropVariantInit(&pv);
+    CHECK(ps->lpVtbl->GetValue(ps, &app_id_key, &pv) == S_OK && pv.vt == VT_LPWSTR);
+    CHECK(wcscmp(pv.pwszVal, L"Gala.Test.Link") == 0);
+    PropVariantClear(&pv);
+    ps->lpVtbl->Release(ps);
+    pf->lpVtbl->Release(pf);
+    sl->lpVtbl->Release(sl);
+    CHECK(DeleteFileW(link));
+
+    /* The specification's sample. */
+    wcscpy(link, dir);
+    wcscat(link, L"\\sh_sample.lnk");
+    HANDLE h = CreateFileW(link, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    DWORD wrote;
+    CHECK(h != INVALID_HANDLE_VALUE && WriteFile(h, spec_sample, sizeof spec_sample, &wrote, NULL));
+    CloseHandle(h);
+    sl = new_link();
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_persist_file, (void **)&pf) == S_OK);
+    CHECK(pf->lpVtbl->Load(pf, link, STGM_READ) == S_OK);
+    CHECK(sl->lpVtbl->GetPath(sl, buf, MAX_PATH, NULL, SLGP_RAWPATH) == S_OK);
+    CHECK(_wcsicmp(buf, L"C:\\test\\a.txt") == 0);
+    CHECK(sl->lpVtbl->GetWorkingDirectory(sl, buf, MAX_PATH) == S_OK && _wcsicmp(buf, L"c:\\test") == 0);
+    CHECK(sl->lpVtbl->GetShowCmd(sl, &i) == S_OK && i == SW_SHOWNORMAL);
+    CHECK(sl->lpVtbl->QueryInterface(sl, &iid_data_list, (void **)&dl) == S_OK);
+    CHECK(dl->lpVtbl->GetFlags(dl, &flags) == S_OK && (flags & SLDF_ENABLE_TARGET_METADATA));
+    dl->lpVtbl->Release(dl);
+    pf->lpVtbl->Release(pf);
+    sl->lpVtbl->Release(sl);
+    CHECK(DeleteFileW(link));
+    CoUninitialize();
+}
+
+/* SHAddToRecentDocs: a link in the Recent folder named after the file. */
+static void recent_docs(void) {
+    wchar_t doc[MAX_PATH], recent[MAX_PATH];
+    CHECK(GetCurrentDirectoryW(MAX_PATH, doc) > 0);
+    wcscat(doc, L"\\sh_recent.txt");
+    touch(doc);
+    CHECK(SHGetFolderPathW(NULL, CSIDL_RECENT, NULL, 0, recent) == S_OK);
+    wcscat(recent, L"\\sh_recent.txt.lnk");
+    DeleteFileW(recent);
+    SHAddToRecentDocs(SHARD_PATHW, doc);
+    /* (Windows may add it from another thread: give it a while.) */
+    for (int waited = 0; !exists(recent) && waited < 100; waited++)
+        Sleep(100);
+    CHECK(exists(recent));
+    DeleteFileW(recent);
+    DeleteFileW(doc);
 }
 
 int main(int argc, char **argv) {
@@ -243,6 +527,19 @@ int main(int argc, char **argv) {
     DestroyIcon(sm);
     CHECK(SHDefExtractIconW(self, 5, 0, &l, NULL, 32) == S_FALSE);
 
+    /* kernel32's EnumResourceLanguagesW (Inno Setup's compiler imports it):
+     * the icon group's one language, which FindResourceExW finds; no such
+     * name or type fails. */
+    langs_seen = 0;
+    CHECK(EnumResourceLanguagesW(NULL, (LPCWSTR)RT_GROUP_ICON, MAKEINTRESOURCEW(2), count_lang, 7));
+    CHECK(langs_seen == 1 && FindResourceExW(NULL, (LPCWSTR)RT_GROUP_ICON, MAKEINTRESOURCEW(2), lang_seen) != NULL);
+    SetLastError(0);
+    CHECK(!EnumResourceLanguagesW(NULL, (LPCWSTR)RT_GROUP_ICON, MAKEINTRESOURCEW(99), count_lang, 7));
+    CHECK(GetLastError() == ERROR_RESOURCE_NAME_NOT_FOUND);
+    SetLastError(0);
+    CHECK(!EnumResourceLanguagesW(NULL, (LPCWSTR)RT_DIALOG, MAKEINTRESOURCEW(2), count_lang, 7));
+    CHECK(GetLastError() == ERROR_RESOURCE_TYPE_NOT_FOUND);
+
     /* What Chromium delay-imports. */
     HMODULE shell = GetModuleHandleA("shell32.dll");
     UINT (WINAPI *il_size)(LPCITEMIDLIST) = (void *)GetProcAddress(shell, MAKEINTRESOURCEA(152));
@@ -287,6 +584,9 @@ int main(int argc, char **argv) {
     ULONG got = 0;
     CHECK(stream->lpVtbl->Read(stream, back, 8, &got) == S_OK && got == 4 && memcmp(back, "gala", 4) == 0);
     stream->lpVtbl->Release(stream);
+
+    links(self);
+    recent_docs();
 
     printf("shell32_test: ok\n");
     return 0;

@@ -38,6 +38,8 @@ const MAGIC_PRIVATE: u32 = 0x3241_5352; // "RSA2"
 const MAGIC_FULL: u32 = 0x3341_5352; // "RSA3"
 
 /// An RSA key object (the handle points at it).
+/// `repr(C)`: the magic first, where `key` looks for it in any handle.
+#[repr(C)]
 pub struct RsaKey {
     magic: u32,
     /// The key size BCryptGenerateKeyPair asked for, until finalized.

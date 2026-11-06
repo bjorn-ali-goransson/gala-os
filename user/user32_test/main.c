@@ -71,6 +71,21 @@
  *   DestroyMenu destroy it; SetMenu/GetMenu/DrawMenuBar; GetSystemMenu
  *   (the same menu each time, with SC_CLOSE); SetMenuInfo/GetMenuInfo
  *   keep the style and menu data (MIM_APPLYTOSUBMENUS reaches submenus).
+ * - What Inno Setup's IDE imports (Wine's menu.c test_getmenubarinfo and
+ *   dialog.c record Windows' answers): GetMenuBarInfo(OBJID_MENU) of a
+ *   window without a menu, an item past the last (-1, 200) or an unknown
+ *   object id fails with the last error untouched; a NULL window is
+ *   ERROR_INVALID_WINDOW_HANDLE, OBJID_CLIENT of a window that is no menu
+ *   ERROR_INVALID_MENU_HANDLE, a wrong cbSize ERROR_INVALID_PARAMETER;
+ *   item 0 of an empty bar is an empty rectangle with the menu; item n is
+ *   GetMenuItemRect's rectangle of item n - 1, and the whole bar holds
+ *   the items' rows. SendDlgItemMessageW sends to GetDlgItem's control
+ *   (0 when there is none).
+ * - What Scintilla (Inno Setup's IDE) imports: RegisterClassExA registers
+ *   a class CreateWindowExW finds by its name (again:
+ *   ERROR_CLASS_ALREADY_EXISTS); ImmNotifyIME of no input context fails,
+ *   leaving ERROR_SUCCESS for NULL and ERROR_INVALID_HANDLE for a handle
+ *   that is no context (Wine's imm32.c records Windows' answers).
  * - RegisterWindowMessageW: a message in 0xC000-0xFFFF, the same for the
  *   same name in any case, another for another name.
  * - Child windows (WS_CHILD): GetParent, GetDlgCtrlID/GetDlgItem (the id
@@ -172,6 +187,7 @@
  * Prints "user32_test: ok" or exits with the number of the failing
  * check. */
 #include <windows.h>
+#include <imm.h>
 #include <shellapi.h>
 #include <winnetwk.h>
 #include <shlobj.h>
@@ -507,6 +523,82 @@ static void menu_bar(void) {
     CHECK(DestroyWindow(w));
     // The menu went with the window.
     CHECK(!IsMenu(bar_menu) && !IsMenu(file));
+}
+
+/* GetMenuBarInfo and SendDlgItemMessageW (what Inno Setup's IDE imports). */
+static void menu_bar_info(void) {
+    MENUBARINFO mbi;
+    mbi.cbSize = sizeof mbi;
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"bar info", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 20, 20, 200,
+                             150, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(w != NULL);
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, 0, &mbi) && GetLastError() == 0xdeadbeef);
+    HMENU bar = CreateMenu();
+    CHECK(bar != NULL && SetMenu(w, bar));
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(NULL, OBJID_CLIENT, 0, &mbi) && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_CLIENT, 0, &mbi) && GetLastError() == ERROR_INVALID_MENU_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, -1, &mbi) && GetLastError() == 0xdeadbeef);
+    mbi.cbSize = 1000;
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, 0, &mbi) && GetLastError() == ERROR_INVALID_PARAMETER);
+    mbi.cbSize = sizeof mbi;
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, 123, 0, &mbi) && GetLastError() == 0xdeadbeef);
+    CHECK(GetMenuBarInfo(w, OBJID_MENU, 0, &mbi));
+    CHECK(mbi.rcBar.left == 0 && mbi.rcBar.top == 0 && mbi.rcBar.right == 0 && mbi.rcBar.bottom == 0);
+    CHECK(mbi.hMenu == bar && !mbi.fBarFocused && !mbi.fFocused);
+    CHECK(AppendMenuW(bar, MF_STRING, 100, L"item 1") && AppendMenuW(bar, MF_STRING, 101, L"item 2"));
+    CHECK(SetMenu(w, bar));
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, 200, &mbi) && GetLastError() == 0xdeadbeef);
+    RECT first, second;
+    CHECK(GetMenuItemRect(w, bar, 0, &first) && GetMenuItemRect(w, bar, 1, &second));
+    CHECK(first.right <= second.left && first.top == second.top && first.bottom > first.top);
+    CHECK(GetMenuBarInfo(w, OBJID_MENU, 0, &mbi) && mbi.hMenu == bar);
+    CHECK(mbi.rcBar.top == first.top && mbi.rcBar.bottom == first.bottom);
+    CHECK(mbi.rcBar.left <= first.left && mbi.rcBar.right >= second.right);
+    CHECK(GetMenuBarInfo(w, OBJID_MENU, 2, &mbi) && EqualRect(&mbi.rcBar, &second) && mbi.hMenu == bar);
+    CHECK(!mbi.fBarFocused && !mbi.fFocused);
+
+    HWND edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE, 0, 0, 80, 20, w, (HMENU)5,
+                                GetModuleHandleW(NULL), NULL);
+    CHECK(edit != NULL);
+    CHECK(SendDlgItemMessageW(w, 5, WM_SETTEXT, 0, (LPARAM)L"sent") == TRUE);
+    wchar_t text[16];
+    CHECK(GetWindowTextW(edit, text, 16) == 4 && wcscmp(text, L"sent") == 0);
+    CHECK(SendDlgItemMessageW(w, 5, WM_GETTEXTLENGTH, 0, 0) == 4);
+    CHECK(SendDlgItemMessageW(w, 99, WM_GETTEXTLENGTH, 0, 0) == 0);
+    CHECK(DestroyWindow(w));
+}
+
+/* What Scintilla (in Inno Setup's IDE) imports besides: RegisterClassExA
+ * and imm32's input-context functions. */
+static void scintilla_imports(void) {
+    WNDCLASSEXA wca;
+    memset(&wca, 0, sizeof wca);
+    wca.cbSize = sizeof wca;
+    wca.lpfnWndProc = DefWindowProcA;
+    wca.hInstance = GetModuleHandleW(NULL);
+    wca.lpszClassName = "User32TestAnsiClass";
+    ATOM atom = RegisterClassExA(&wca);
+    CHECK(atom >= 0xC000);
+    SetLastError(0);
+    CHECK(!RegisterClassExA(&wca) && GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+    HWND w = CreateWindowExW(0, L"User32TestAnsiClass", L"ansi", WS_POPUP, 0, 0, 10, 10, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    wchar_t cls[32];
+    CHECK(w != NULL && GetClassNameW(w, cls, 32) == 19 && wcscmp(cls, L"User32TestAnsiClass") == 0);
+    CHECK(DestroyWindow(w));
+    /* No input context: ImmNotifyIME fails, a NULL one leaving no error,
+     * one that is not a context ERROR_INVALID_HANDLE. */
+    SetLastError(0xdeadbeef);
+    CHECK(!ImmNotifyIME(NULL, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_SUCCESS);
+    SetLastError(0xdeadbeef);
+    CHECK(!ImmNotifyIME((HIMC)0xdeadcafe, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_INVALID_HANDLE);
 }
 
 static int monitors_seen;
@@ -1257,6 +1349,8 @@ int main(void) {
     activation();
     timers();
     menu_bar();
+    menu_bar_info();
+    scintilla_imports();
     monitors();
     menus();
     children();

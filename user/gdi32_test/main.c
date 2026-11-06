@@ -35,7 +35,10 @@
  *   FF_SWISS); extents add up; GetTextExtentExPointW gives partial
  *   widths and the fit; TextOutW draws only inside its extent;
  *   ExtTextOutW ETO_OPAQUE fills its rectangle; Courier New is fixed
- *   pitch (TMPF_FIXED_PITCH clear, equal advances).
+ *   pitch (TMPF_FIXED_PITCH clear, equal advances). The ANSI forms
+ *   (GetTextExtentPoint32A, GetTextExtentExPointA, GetTextMetricsA,
+ *   ExtTextOutA: Scintilla in Inno Setup's IDE imports them) give the
+ *   same for ASCII text.
  *   GetObjectType says OBJ_FONT; GetCurrentObject(OBJ_FONT) is the font.
  *
  * - CreateDIBitmap: a DDB of the reference DC's depth; CBM_INIT sets
@@ -253,6 +256,16 @@ static void fonts(void) {
     SIZE ex;
     CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, narrow.cx + 1, &fit, dx, &ex));
     CHECK(fit == 4 && dx[3] == narrow.cx && dx[7] == both.cx && ex.cx == both.cx && ex.cy == tm.tmHeight);
+    // The ANSI forms (what Scintilla, in Inno Setup's IDE, imports) measure
+    // the same text the same way.
+    SIZE a_both, a_ex;
+    INT a_fit = 0, a_dx[8];
+    CHECK(GetTextExtentPoint32A(screen, "iiiiWWWW", 8, &a_both) && a_both.cx == both.cx && a_both.cy == both.cy);
+    CHECK(GetTextExtentExPointA(screen, "iiiiWWWW", 8, narrow.cx + 1, &a_fit, a_dx, &a_ex));
+    CHECK(a_fit == 4 && a_dx[3] == narrow.cx && a_dx[7] == both.cx && a_ex.cx == both.cx);
+    TEXTMETRICA tma;
+    CHECK(GetTextMetricsA(screen, &tma) && tma.tmHeight == tm.tmHeight && tma.tmAscent == tm.tmAscent);
+    CHECK(tma.tmAveCharWidth == tm.tmAveCharWidth && tma.tmPitchAndFamily == tm.tmPitchAndFamily);
 
     // Drawing: TextOutW and ExtTextOutW (ETO_OPAQUE fills the rectangle)
     // into a white 32-bit DIB; black pixels only inside the text's box.
@@ -277,6 +290,9 @@ static void fonts(void) {
     SetBkColor(mem, RGB(0, 0, 255));
     CHECK(ExtTextOutW(mem, 4, 2, ETO_OPAQUE, &r, L"Hi", 2, NULL));
     CHECK((bits[31 * 64 + 63] & 0xffffff) == 0x0000ff);
+    SetBkColor(mem, RGB(0, 255, 0));
+    CHECK(ExtTextOutA(mem, 4, 2, ETO_OPAQUE, &r, "Hi", 2, NULL));
+    CHECK((bits[31 * 64 + 63] & 0xffffff) == 0x00ff00);
     SelectObject(mem, oldbmp);
     DeleteDC(mem);
     DeleteObject(dib);

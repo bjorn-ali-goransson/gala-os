@@ -801,6 +801,26 @@ pub extern "system" fn RegisterClassExW(wc: *const WndClassExW) -> u16 {
     }
 }
 
+/// RegisterClassExA: RegisterClassExW with the class and menu names
+/// widened (WNDCLASSEXA has WNDCLASSEXW's layout; an id stays an id).
+/// As with gala's other A functions, the procedure gets the wide forms of
+/// messages (gala's windows are all Unicode).
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterClassExA(wc: *const WndClassExW) -> u16 {
+    if wc.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let (mut class, mut menu) = ([0u16; 256], [0u16; 256]);
+    // SAFETY: the caller's WNDCLASSEXA, whose names are char pointers.
+    let mut w = unsafe { wc.read() };
+    w.class_name = ansi_into_ptr(w.class_name.cast(), &mut class);
+    if !w.menu_name.is_null() {
+        w.menu_name = ansi_into_ptr(w.menu_name.cast(), &mut menu);
+    }
+    RegisterClassExW(&w)
+}
+
 /// WNDCLASSW: WNDCLASSEXW without the size and the small icon.
 #[repr(C)]
 pub struct WndClassW {

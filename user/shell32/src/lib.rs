@@ -3,8 +3,9 @@
 //! same place as the environment's: USERPROFILE, APPDATA, LOCALAPPDATA,
 //! ProgramData, ProgramFiles, and the Windows and system directories.
 //! Also SHGetFileInfoW with gala's system image lists (`fileinfo.rs`),
-//! and running programs, dropped files and file operations
-//! (`shellops.rs`).
+//! running programs, dropped files and file operations (`shellops.rs`),
+//! and shell links (`link.rs`: CLSID_ShellLink, `.lnk` files,
+//! SHAddToRecentDocs).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -13,6 +14,7 @@
 mod browser;
 mod fileinfo;
 mod icons;
+mod link;
 mod shellops;
 mod unimplemented;
 
@@ -84,6 +86,7 @@ const CSIDLS: &[(i32, Folder)] = &[
     (0x05, Folder::Env("USERPROFILE", "\\Documents")), // CSIDL_PERSONAL
     (0x06, Folder::Env("USERPROFILE", "\\Favorites")), // CSIDL_FAVORITES
     (0x07, Folder::Env("APPDATA", STARTUP)),  // CSIDL_STARTUP
+    (0x08, Folder::Env("APPDATA", "\\Microsoft\\Windows\\Recent")), // CSIDL_RECENT
     (0x09, Folder::Env("APPDATA", "\\Microsoft\\Windows\\SendTo")), // CSIDL_SENDTO
     (0x0b, Folder::Env("APPDATA", START_MENU)), // CSIDL_STARTMENU
     (0x10, Folder::Env("USERPROFILE", "\\Desktop")), // CSIDL_DESKTOPDIRECTORY

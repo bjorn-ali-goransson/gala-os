@@ -308,6 +308,17 @@ fn local(rest: &str) -> W {
     w
 }
 
+/// A path under %APPDATA%.
+fn roaming(rest: &str) -> W {
+    let mut buf = [0u16; 512];
+    let name = W::new("APPDATA");
+    // SAFETY: our buffers.
+    let n = unsafe { GetEnvironmentVariableW(name.b.as_ptr(), buf.as_mut_ptr(), 512) } as usize;
+    let mut w = W::new("");
+    w.add_w(&buf[..n.min(512)]).add(rest.as_bytes());
+    w
+}
+
 fn exists(mut path: W) -> bool {
     // SAFETY: a NUL-terminated path.
     unsafe { GetFileAttributesW(path.ptr()) != INVALID_ATTRIBUTES }
@@ -995,6 +1006,22 @@ fn nsis_test() -> Result<(), u32> {
 
 const INNO_ARP: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 7_is1";
 const INNO_DIR: &str = "\\Programs\\Inno Setup 7";
+/// The Start menu group Inno Setup's [Icons] go to (per user: {group} is
+/// %APPDATA%\Microsoft\Windows\Start Menu\Programs\Inno Setup 7).
+const INNO_GROUP: &str = "\\Microsoft\\Windows\\Start Menu\\Programs\\Inno Setup 7\\";
+/// Its six shortcuts (setup.iss [Icons]; the desktop one is a task the
+/// silent install leaves off).
+const INNO_ICONS: [&str; 6] = [
+    "Inno Setup Compiler.lnk",
+    "Inno Setup Documentation.lnk",
+    "Inno Setup Documentation (Dark).lnk",
+    "Inno Setup Example Scripts.lnk",
+    "Inno Setup FAQ.lnk",
+    "Inno Setup Revision History.lnk",
+];
+/// The .iss association ISIDE.exe /assoc writes for a user who is not an
+/// administrator (IDE.FileAssocFunc: HKCU\Software\Classes).
+const ISS_PROGID: &str = "Software\\Classes\\InnoSetupScriptFile";
 
 /// `exe` (a path under %LOCALAPPDATA%) as ASCII text in `buf`.
 fn local_text<'a>(buf: &'a mut [u8], rest: &str) -> &'a str {
@@ -1020,7 +1047,11 @@ fn local_text<'a>(buf: &'a mut [u8], rest: &str) -> &'a str {
 /// What Inno Setup leaves is what its documentation says for a per-user
 /// install: the files in `{autopf}\Inno Setup 7` (per user
 /// `%LOCALAPPDATA%\Programs`), `unins000.exe` and `.dat` beside them, the
-/// entry `<AppId>_is1` under HKCU.
+/// entry `<AppId>_is1` under HKCU, the six `[Icons]` shortcuts in the
+/// per-user Start menu group, and the `.iss` association its `[Run]` entry
+/// `ISIDE.exe /assoc` registers under `HKCU\Software\Classes` (the IDE's
+/// IDE.FileAssocFunc, for a user who is not an administrator); the
+/// uninstaller removes the shortcuts and its `/unassoc` the ProgID.
 fn inno_test() -> Result<(), u32> {
     let mut c = Checks(0);
     let src = "--source C:\\pk_source";
@@ -1051,6 +1082,60 @@ fn inno_test() -> Result<(), u32> {
         "InstallLocation",
     )?;
     c.ok(inno("QuietUninstallString").is_some(), 0, "QuietUninstallString")?;
+    // Its [Icons]: shell links in the Start menu group, as [MS-SHLLINK]
+    // lays them out, the IDE's pointing at ISIDE.exe.
+    for icon in INNO_ICONS {
+        c.ok(exists(roaming(join(&mut p, &[INNO_GROUP, icon]))), 0, icon)?;
+    }
+    let ide = read_file(roaming(join(&mut p, &[INNO_GROUP, INNO_ICONS[0]])));
+    c.ok(
+        ide.as_ref().is_some_and(|o| {
+            o.text().starts_with(b"L\0\0\0\x01\x14\x02\0\0\0\0\0\xc0\0\0\0\0\0\0F")
+        }),
+        0,
+        "the IDE's shortcut's header",
+    )?;
+    c.ok(
+        ide.as_ref().is_some_and(|o| o.has(b"Inno Setup 7\\ISIDE.exe")),
+        0,
+        "the IDE's shortcut's target",
+    )?;
+    // Its [Run] entry ISIDE.exe /assoc: the .iss association in HKCU.
+    let classes = |k: &str, v: &str| hkcu(k, v, false);
+    if classes(ISS_PROGID, "").is_none() {
+        // Setup logs only the exit code: run it again here, where what it
+        // writes (a message box's text, on gala) is captured.
+        let mut e = [0u8; 300];
+        let ide = local_text(&mut e, join(&mut p, &[INNO_DIR, "\\ISIDE.exe"]));
+        let (got, o) = run(Some(ide), "ISIDE.exe /assoc");
+        out(b"pk_install_test: ISIDE.exe /assoc -> ");
+        out(&hex(got));
+        out(b":\r\n");
+        out(o.text());
+    }
+    c.ok(
+        classes("Software\\Classes\\.iss", "")
+            .is_some_and(|(s, n)| &s[..n] == b"InnoSetupScriptFile"),
+        0,
+        ".iss's ProgID",
+    )?;
+    c.ok(
+        classes("Software\\Classes\\.iss\\OpenWithProgids", "InnoSetupScriptFile").is_some(),
+        0,
+        ".iss's OpenWithProgids",
+    )?;
+    c.ok(
+        classes(join(&mut a, &[ISS_PROGID, "\\shell\\open\\command"]), "")
+            .is_some_and(|(s, n)| contains(&s[..n], b"ISIDE.exe\" \"%1\"")),
+        0,
+        "the open command",
+    )?;
+    c.ok(
+        classes(join(&mut a, &[ISS_PROGID, "\\shell\\Compile\\command"]), "")
+            .is_some_and(|(s, n)| contains(&s[..n], b"ISIDE.exe\" /cc \"%1\"")),
+        0,
+        "the Compile command",
+    )?;
     c.ok(
         inno("WinGetPackageIdentifier").is_some_and(|(s, n)| &s[..n] == b"JRSoftware.InnoSetup.7"),
         0,
@@ -1076,6 +1161,16 @@ fn inno_test() -> Result<(), u32> {
     c.ok(log_has(b"from=QuietUninstallString"), 0, "the quiet uninstall string used")?;
     c.ok(inno("DisplayName").is_none(), 0, "the entry removed")?;
     c.ok(!exists(local(join(&mut p, &[INNO_DIR, "\\ISCC.exe"]))), 0, "ISCC.exe removed")?;
+    for icon in INNO_ICONS {
+        c.ok(!exists(roaming(join(&mut p, &[INNO_GROUP, icon]))), 0, "a shortcut removed")?;
+    }
+    // [UninstallRun] ISIDE.exe /unassoc: the ProgID and its .iss value go.
+    c.ok(hkcu(ISS_PROGID, "", false).is_none(), 0, "the ProgID removed")?;
+    c.ok(
+        hkcu("Software\\Classes\\.iss\\OpenWithProgids", "InnoSetupScriptFile", false).is_none(),
+        0,
+        "the OpenWithProgids value removed",
+    )?;
     let o = c.gala("list", 0, &[])?;
     c.ok(!o.has(b"JRSoftware.InnoSetup.7"), 0, "not listed after the uninstall")?;
     Ok(())

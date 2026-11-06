@@ -87,6 +87,13 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{e22ad333-b25f-460c-83d0-0581107395c9}\InprocServer32]
 @=expand:%SystemRoot%\System32\UIAutomationCore.dll
 "ThreadingModel"=sz:Both
+; CLSID_ShellLink (shortcuts: IShellLinkW, IPersistFile; Windows serves it
+; from windows.storage.dll, gala from shell32.dll).
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{00021401-0000-0000-C000-000000000046}]
+@=sz:Shortcut
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{00021401-0000-0000-C000-000000000046}\InprocServer32]
+@=expand:%SystemRoot%\System32\shell32.dll
+"ThreadingModel"=sz:Both
 [\Registry\Machine\SOFTWARE\WOW6432Node]
 
 ; A workstation (WinNT; servers say ServerNT or LanmanNT).

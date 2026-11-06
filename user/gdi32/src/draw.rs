@@ -918,3 +918,172 @@ pub extern "system" fn GalaDrawIcon(
     })
     .unwrap_or(0)
 }
+
+// ---- The ANSI forms (the ANSI code page is UTF-8 here) ----
+
+/// `n` bytes of the caller's UTF-8 text as UTF-16 units in `out`, and for
+/// each unit the number of bytes it came from (the second unit of a
+/// surrogate pair: 0); the unit count. None when it does not fit.
+fn ansi_units(
+    text: *const u8,
+    n: i32,
+    out: &mut [u16; 512],
+    from: &mut [u8; 512],
+) -> Option<usize> {
+    if n < 0 || (text.is_null() && n > 0) {
+        return None;
+    }
+    // SAFETY: the caller's `n` bytes.
+    let s = if n == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(text, n as usize) } };
+    let mut count = 0;
+    for chunk in s.utf8_chunks() {
+        let valid = chunk.valid().chars().map(|c| (c, c.len_utf8() as u8));
+        let invalid = chunk.invalid().iter().map(|_| ('\u{fffd}', 1u8));
+        for (c, bytes) in valid.chain(invalid) {
+            let mut units = [0u16; 2];
+            let u = c.encode_utf16(&mut units);
+            if count + u.len() > out.len() {
+                return None;
+            }
+            for (k, &unit) in u.iter().enumerate() {
+                out[count] = unit;
+                from[count] = if k == 0 { bytes } else { 0 };
+                count += 1;
+            }
+        }
+    }
+    Some(count)
+}
+
+/// ExtTextOutA: ExtTextOutW of the text; `dx` has an advance per byte
+/// (a character's are added up).
+#[unsafe(no_mangle)]
+pub extern "system" fn ExtTextOutA(
+    hdc: Handle,
+    x: i32,
+    y: i32,
+    options: u32,
+    rect: *const [i32; 4],
+    text: *const u8,
+    n: u32,
+    dx: *const i32,
+) -> i32 {
+    let (mut w, mut from) = ([0u16; 512], [0u8; 512]);
+    let Some(count) = ansi_units(text, n as i32, &mut w, &mut from) else { return 0 };
+    let mut wdx = [0i32; 512];
+    let mut at = 0;
+    if !dx.is_null() {
+        if options & 0x2000 != 0 {
+            crate::unsupported(b"gdi32.dll!ExtTextOutA ETO_PDY", u64::from(options));
+        }
+        for (k, &bytes) in from[..count].iter().enumerate() {
+            for _ in 0..bytes {
+                // SAFETY: the caller's array of an advance per byte.
+                wdx[k] += unsafe { *dx.add(at) };
+                at += 1;
+            }
+        }
+    }
+    let wdx = if dx.is_null() { core::ptr::null() } else { wdx.as_ptr() };
+    ExtTextOutW(hdc, x, y, options & !0x2000, rect, w.as_ptr(), count as u32, wdx)
+}
+
+/// GetTextExtentPoint32A: GetTextExtentPoint32W of the text.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTextExtentPoint32A(
+    hdc: Handle,
+    text: *const u8,
+    n: i32,
+    size: *mut [i32; 2],
+) -> i32 {
+    let (mut w, mut from) = ([0u16; 512], [0u8; 512]);
+    let Some(count) = ansi_units(text, n, &mut w, &mut from) else { return 0 };
+    GetTextExtentPoint32W(hdc, w.as_ptr(), count as i32, size)
+}
+
+/// GetTextExtentExPointA: GetTextExtentExPointW of the text; `fit` counts
+/// bytes and `dx` has an extent per byte (each byte of a character has
+/// the extent up to its end).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTextExtentExPointA(
+    hdc: Handle,
+    text: *const u8,
+    n: i32,
+    max: i32,
+    fit: *mut i32,
+    dx: *mut i32,
+    size: *mut [i32; 2],
+) -> i32 {
+    let (mut w, mut from) = ([0u16; 512], [0u8; 512]);
+    let Some(count) = ansi_units(text, n, &mut w, &mut from) else { return 0 };
+    let (mut wfit, mut wdx) = (0i32, [0i32; 512]);
+    if GetTextExtentExPointW(hdc, w.as_ptr(), count as i32, max, &mut wfit, wdx.as_mut_ptr(), size)
+        == 0
+    {
+        return 0;
+    }
+    let mut at = 0;
+    let mut fit_bytes = 0;
+    for (k, &bytes) in from[..count].iter().enumerate() {
+        if (k as i32) < wfit {
+            fit_bytes += i32::from(bytes);
+        }
+        // A surrogate pair's extent is at its second unit.
+        let extent = if k + 1 < count && from[k + 1] == 0 { wdx[k + 1] } else { wdx[k] };
+        for _ in 0..bytes {
+            if !dx.is_null() {
+                // SAFETY: the caller's array of an extent per byte.
+                unsafe { dx.add(at).write(extent) };
+            }
+            at += 1;
+        }
+    }
+    if !fit.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { fit.write(fit_bytes) };
+    }
+    1
+}
+
+/// TEXTMETRICA: TEXTMETRICW with the four characters as bytes.
+#[repr(C)]
+pub struct TextMetricA {
+    numbers: [i32; 11],
+    chars: [u8; 4],
+    flags: [u8; 5],
+}
+
+/// GetTextMetricsA: GetTextMetricsW's, the first, last, default and
+/// break characters as bytes (at most 0xff).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetTextMetricsA(hdc: Handle, out: *mut TextMetricA) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    // SAFETY: zeroed is a valid TEXTMETRICW.
+    let mut w: font::TextMetricW = unsafe { core::mem::zeroed() };
+    if GetTextMetricsW(hdc, &mut w) == 0 {
+        return 0;
+    }
+    let byte = |c: u16| c.min(0xff) as u8;
+    let a = TextMetricA {
+        numbers: [
+            w.height,
+            w.ascent,
+            w.descent,
+            w.internal_leading,
+            w.external_leading,
+            w.ave_char_width,
+            w.max_char_width,
+            w.weight,
+            w.overhang,
+            w.digitized_aspect_x,
+            w.digitized_aspect_y,
+        ],
+        chars: [byte(w.first_char), byte(w.last_char), byte(w.default_char), byte(w.break_char)],
+        flags: [w.italic, w.underlined, w.struck_out, w.pitch_and_family, w.char_set],
+    };
+    // SAFETY: the caller's TEXTMETRICA.
+    unsafe { out.write(a) };
+    1
+}

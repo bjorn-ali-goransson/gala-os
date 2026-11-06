@@ -23,6 +23,11 @@
 //!   BCryptDecrypt of OpenSSL's OAEP and PKCS#1 ciphertexts, BCryptEncrypt
 //!   round trips; BCryptExportKey of both blobs (the imported bytes);
 //!   KeyLength; BCryptGenerateKeyPair/FinalizeKeyPair.
+//! - ECDSA P-256 (RFC 6979's key): BCryptExportKey of ECCPUBLICBLOB and
+//!   ECCPRIVATEBLOB gives the imported bytes (the size alone without a
+//!   buffer, STATUS_BUFFER_TOO_SMALL with a short one); a public key has
+//!   no private blob to export (what Inno Setup's IDE and compiler do with
+//!   their trusted keys).
 //!
 //! Prints `bcrypt_test: ok` or exits with the number of the failing check.
 
@@ -1149,9 +1154,81 @@ fn rsa(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// ECDSA P-256 key blobs: RFC 6979 A.2.5's key (X, Y, then the private
+/// d), as BCRYPT_ECCKEY_BLOB lays them out.
+fn ecdsa(c: &mut Checks) -> Result<(), u32> {
+    let (x, _) = hex_bytes("60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6");
+    let (y, _) = hex_bytes("7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299");
+    let (d, _) = hex_bytes("C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721");
+    let mut private = [0u8; 8 + 96];
+    private[..4].copy_from_slice(b"ECS2");
+    private[4] = 32;
+    private[8..40].copy_from_slice(&x[..32]);
+    private[40..72].copy_from_slice(&y[..32]);
+    private[72..].copy_from_slice(&d[..32]);
+    let mut public = [0u8; 8 + 64];
+    public.copy_from_slice(&private[..72]);
+    public[..4].copy_from_slice(b"ECS1");
+    let alg = open(c, "ECDSA_P256")?;
+    // A private key exports both blobs; the size alone without a buffer.
+    let key = import_pair(c, alg, "ECCPRIVATEBLOB", &private)?;
+    export_is(c, key, "ECCPUBLICBLOB", &public)?;
+    export_is(c, key, "ECCPRIVATEBLOB", &private)?;
+    let name = w("ECCPUBLICBLOB");
+    let mut n = 0;
+    // SAFETY: our outputs (no buffer: the size).
+    let r = unsafe {
+        BCryptExportKey(
+            key,
+            core::ptr::null_mut(),
+            name.as_ptr(),
+            core::ptr::null_mut(),
+            0,
+            &mut n,
+            0,
+        )
+    };
+    c.eq(r.into(), 0)?;
+    c.eq(n.into(), 72)?;
+    let mut small = [0u8; 16];
+    // SAFETY: our buffer of 16 bytes.
+    let r = unsafe {
+        BCryptExportKey(
+            key,
+            core::ptr::null_mut(),
+            name.as_ptr(),
+            small.as_mut_ptr(),
+            16,
+            &mut n,
+            0,
+        )
+    };
+    c.eq(r.into(), 0xc000_0023)?; // STATUS_BUFFER_TOO_SMALL
+    // A public key exports its public blob only.
+    let pkey = import_pair(c, alg, "ECCPUBLICBLOB", &public)?;
+    export_is(c, pkey, "ECCPUBLICBLOB", &public)?;
+    let mut buf = [0u8; 128];
+    let private_name = w("ECCPRIVATEBLOB");
+    // SAFETY: our buffer and outputs.
+    let r = unsafe {
+        BCryptExportKey(
+            pkey,
+            core::ptr::null_mut(),
+            private_name.as_ptr(),
+            buf.as_mut_ptr(),
+            128,
+            &mut n,
+            0,
+        )
+    };
+    c.ok(r != 0, r.into())?;
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     rsa(&mut c)?;
+    ecdsa(&mut c)?;
     random(&mut c)?;
     fips(&mut c)?;
     ciphers(&mut c)?;

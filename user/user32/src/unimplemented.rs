@@ -37,7 +37,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     DefMDIChildProcW
     GetDCEx
     GetKeyNameTextW
-    GetMenuItemRect
     GetScrollBarInfo
     LoadKeyboardLayoutW
     TranslateMDISysAccel

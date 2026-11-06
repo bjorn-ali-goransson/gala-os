@@ -184,6 +184,133 @@ fn bar_item_at(hwnd: Hwnd, x: i32) -> Option<usize> {
     rects[..n].iter().position(|&(l, r)| x >= l && x < r)
 }
 
+/// The screen rectangle (left, top, right, bottom) of `hwnd`'s menu bar
+/// (`item` None: the whole bar; an empty bar has an empty one) or of one
+/// of its items.
+fn bar_rect(hwnd: Hwnd, item: Option<usize>) -> Option<[i32; 4]> {
+    let w = window(hwnd)?;
+    if w.bar == 0 || w.parent != 0 {
+        return None;
+    }
+    let menu = menu::GetMenu(hwnd);
+    let mut rects = [(0, 0); MAX_BAR_ITEMS];
+    let n = measuring(|hdc| bar_layout(hdc, menu, &mut rects))?;
+    let (b, t) = crate::window::desktop_frame(&w);
+    let (x0, y0) = (w.x + b, w.y + t);
+    match item {
+        None if n == 0 => Some([0; 4]),
+        None => Some([x0, y0, x0 + w.cw, y0 + w.bar]),
+        Some(k) if k < n => Some([x0 + rects[k].0, y0, x0 + rects[k].1, y0 + w.bar]),
+        Some(_) => None,
+    }
+}
+
+/// MENUBARINFO (x64 layout).
+#[repr(C)]
+pub struct MenuBarInfo {
+    size: u32,
+    bar: [i32; 4],
+    menu: usize,
+    menu_window: Hwnd,
+    /// fBarFocused (bit 0) and fFocused (bit 1).
+    focus: u32,
+}
+
+const OBJID_SYSMENU: i32 = -1;
+const OBJID_MENU: i32 = -3;
+const OBJID_CLIENT: i32 = -4;
+
+/// GetMenuBarInfo: a window's menu bar (OBJID_MENU; item 0 the whole bar,
+/// item n its n-th item) in screen coordinates. No menu, an item past the
+/// last or an unknown object: FALSE with the last error untouched, as on
+/// Windows; a bad window ERROR_INVALID_WINDOW_HANDLE, a wrong cbSize
+/// ERROR_INVALID_PARAMETER, OBJID_CLIENT of a window that is not a popup
+/// menu ERROR_INVALID_MENU_HANDLE. The system menu and popup menus'
+/// windows are recorded (no rectangle for them yet).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetMenuBarInfo(
+    hwnd: Hwnd,
+    object: i32,
+    item: i32,
+    info: *mut MenuBarInfo,
+) -> i32 {
+    if crate::window::IsWindow(hwnd) == 0 {
+        crate::window::set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return 0;
+    }
+    // SAFETY: the caller's MENUBARINFO, its size checked first.
+    if info.is_null() || unsafe { (*info).size } as usize != core::mem::size_of::<MenuBarInfo>() {
+        crate::window::set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    match object {
+        OBJID_MENU => {}
+        OBJID_CLIENT => {
+            let mut class = [0u16; 8];
+            let n = crate::window::GetClassNameW(hwnd, class.as_mut_ptr(), 8);
+            if class[..n.max(0) as usize].iter().copied().eq("#32768".encode_utf16()) {
+                crate::window::unsupported(
+                    b"user32.dll!GetMenuBarInfo(OBJID_CLIENT of a popup menu)",
+                    0,
+                );
+            } else {
+                crate::window::set_last_error(1401); // ERROR_INVALID_MENU_HANDLE
+            }
+            return 0;
+        }
+        OBJID_SYSMENU => {
+            crate::window::unsupported(b"user32.dll!GetMenuBarInfo(OBJID_SYSMENU)", 0);
+            return 0;
+        }
+        _ => return 0,
+    }
+    let menu = menu::GetMenu(hwnd);
+    if menu == 0 || item < 0 {
+        return 0;
+    }
+    let which = if item == 0 { None } else { Some(item as usize - 1) };
+    let Some(r) = bar_rect(hwnd, which) else { return 0 };
+    let open = lit(&OPEN, &OPEN_ITEM, hwnd);
+    let focused = match which {
+        None => open.is_some(),
+        Some(k) => open == Some(k),
+    };
+    // SAFETY: the caller's MENUBARINFO (its size checked).
+    unsafe {
+        (*info).bar = r;
+        (*info).menu = menu;
+        (*info).menu_window = 0;
+        (*info).focus = u32::from(open.is_some()) | (u32::from(focused) << 1);
+    }
+    1
+}
+
+/// GetMenuItemRect: the screen rectangle of an item of a window's menu
+/// bar. Popup menus' items (where the popup was last shown) are recorded.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetMenuItemRect(
+    hwnd: Hwnd,
+    menu: usize,
+    item: u32,
+    out: *mut [i32; 4],
+) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    if menu == 0 || menu::GetMenu(hwnd) != menu {
+        crate::window::unsupported(b"user32.dll!GetMenuItemRect(not a menu bar)", 0);
+        return 0;
+    }
+    match bar_rect(hwnd, Some(item as usize)) {
+        Some(r) => {
+            // SAFETY: the caller's RECT.
+            unsafe { *out = r };
+            1
+        }
+        None => 0,
+    }
+}
+
 /// The bar's lit item: the window and the item (hot: under the pointer;
 /// open: its menu is showing).
 static HOT: AtomicUsize = AtomicUsize::new(0);

@@ -723,6 +723,51 @@ pub extern "system" fn CompareStringOrdinal(
     }
 }
 
+/// FindStringOrdinal: where `value` is in `source` by code unit
+/// (FIND_FROMSTART, FIND_FROMEND, FIND_STARTSWITH, FIND_ENDSWITH: exactly
+/// one), optionally ignoring case as CompareStringOrdinal does; -1 if it
+/// is not there. Any search sets the last error (0 when it ran); another
+/// flag is ERROR_INVALID_FLAGS, a NULL string ERROR_INVALID_PARAMETER.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindStringOrdinal(
+    flags: u32,
+    source: *const u16,
+    source_len: i32,
+    value: *const u16,
+    value_len: i32,
+    ignore_case: Bool,
+) -> i32 {
+    const STARTS: u32 = 0x10_0000;
+    const ENDS: u32 = 0x20_0000;
+    const FROM_START: u32 = 0x40_0000;
+    const FROM_END: u32 = 0x80_0000;
+    if !matches!(flags, STARTS | ENDS | FROM_START | FROM_END) {
+        return fail_with(1004, -1); // ERROR_INVALID_FLAGS
+    }
+    if source.is_null() || value.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, -1);
+    }
+    let (src, val) = (units(source, source_len), units(value, value_len));
+    let same = |a: &[u16]| {
+        a.iter()
+            .zip(val)
+            .all(|(&x, &y)| x == y || (ignore_case != 0 && map_case(x, true) == map_case(y, true)))
+    };
+    let at = if val.len() > src.len() {
+        None
+    } else {
+        let last = src.len() - val.len();
+        match flags {
+            STARTS => same(&src[..val.len()]).then_some(0),
+            ENDS => same(&src[last..]).then_some(last),
+            FROM_START => (0..=last).find(|&i| same(&src[i..i + val.len()])),
+            _ => (0..=last).rev().find(|&i| same(&src[i..i + val.len()])),
+        }
+    };
+    SetLastError(0);
+    at.map_or(-1, |i| i as i32)
+}
+
 const CT_CTYPE1: u32 = 1;
 const CT_CTYPE2: u32 = 2;
 const CT_CTYPE3: u32 = 4;

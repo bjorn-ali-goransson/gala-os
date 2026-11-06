@@ -4,6 +4,12 @@
 
 gala_stubs::unimplemented_exports!("kernel32.dll":
     AllocateUserPhysicalPagesNuma
+    // Inno Setup's compiler (ISCmplr.dll, which its IDE loads) writes the
+    // icons and version of the Setup it makes with these: rewriting a
+    // PE's resource section is not there yet.
+    BeginUpdateResourceW
+    EndUpdateResourceW
+    UpdateResourceW
     CancelSynchronousIo
     CheckTokenMembershipEx
     CompareStringA
