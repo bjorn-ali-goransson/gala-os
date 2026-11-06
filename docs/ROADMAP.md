@@ -162,6 +162,7 @@ has a section under "Open items".
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-3 in their first form |
+| CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations done; B3a's presenters next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
@@ -204,6 +205,9 @@ the in-process TLS 1.3 and 1.2 server included.
    host process: decide which, in GALA_UM.md.
 2. `start=` and child process creation on it; then the scenarios above
    out of `NOT_IN_UM`.
+
+Also needed by CP step 3: programs started from gala-um's interactive
+prompt are child processes.
 
 **Done when**: schannel_test and process_test pass in um-test.
 
@@ -603,6 +607,62 @@ carries sockets and pipes; consoles not yet).
 
 **Design**: ARCHITECTURE "Pseudo consoles"; SECURITY "Accounts and
 logon".
+
+### CP. An interactive console prompt
+
+**Goal**: a shell prompt typed at gala's own console, with no SSH: on
+the serial line (QEMU with `-nographic`, QEMU in a container, a VM's or
+a PC's serial port), on the screen with a PS/2 keyboard when there is
+no desktop (the server edition, `profile=server`), and in gala-um on
+the Linux terminal it was started from. Today the serial line is
+output only (`arch/x86_64/serial.rs` has no receive path), the
+sessionless console's reads return nothing (ARCHITECTURE "Consoles"),
+and the only interactive shell is busybox sh over sshd (SSH step 2).
+
+**Approach**: one path for every source. Each source is a terminal (a
+byte stream with VT sequences and a size) attached to a pseudo console,
+so programs get a real console session exactly as under sshd:
+conhost.exe `--headless` between the terminal and the processes
+(ARCHITECTURE "Pseudo consoles (ConPTY)"). The terminal is the core
+terminal object of LX seam 1, so a Linux shell can use the same
+console later.
+
+**Next** (each step test first):
+1. Serial input: the UART's receive path (polled, like the other
+   devices), its bytes into a terminal; the console prompt as a boot
+   option (a kernel flag naming the source and the shell, for example
+   `prompt=serial`), busybox sh first. Scenario: xtask writes
+   `echo hi` and `exit` to QEMU's serial chardev and reads the echo and
+   the output. Decide where kernel log lines go while a prompt owns the
+   line (held as the serial discipline holds them today, or a second
+   port), so the log never lands inside a typed line.
+2. The screen without a desktop: a text terminal drawn on the
+   framebuffer (the boot log's screen console) and the PS/2 keyboard
+   feeding it, when shasha is off or `profile=server`. Scenario: keys
+   sent through the QEMU monitor (`sendkey`), a screen check of the
+   result.
+3. gala-um: `um --prompt` attaches the host terminal (raw mode, the
+   window size from `TIOCGWINSZ` and SIGWINCH) as the terminal.
+   Builtins work at once; running programs from the prompt needs child
+   processes in gala-um (U4). Scenario: um-test drives it through a
+   host pty.
+4. Logon: the prompt asks for a user and password (LogonUserW, as
+   sshd's password logon) and runs the shell in that user's token and
+   profile; a test-only flag skips it for scenarios.
+5. gala's cmd.exe as the shell: its interactive prompt (`PROMPT`, line
+   editing through the console's cooked mode, `cd`, `dir`, `set`,
+   batch files), shared with SSH step 2; busybox sh until then.
+
+**Done when**: a scenario per source (serial, screen, gala-um) logs in,
+runs a program from cmd.exe's prompt and exits cleanly.
+Observability: the prompt's logons and the shell's start and exit in
+the event stream (`events=logon`), the terminal's bytes with
+`conpty=trace`, and a stuck prompt visible in the state dump (the
+reading thread and its wait).
+
+**Design**: ARCHITECTURE "Consoles" (with the serial line's
+discipline), "Pseudo consoles (ConPTY)"; SECURITY "Accounts and logon";
+LX seam 1.
 
 ### RS. Remote access and sessions
 
