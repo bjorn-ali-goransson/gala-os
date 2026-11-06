@@ -183,7 +183,7 @@ fn days_from_1601(y: u64, m: u64, d: u64) -> u64 {
 }
 
 /// A UTCTime or GeneralizedTime (Z form) as a FILETIME.
-fn time(t: Tlv<'_>) -> Result<u64, u32> {
+pub(crate) fn time(t: Tlv<'_>) -> Result<u64, u32> {
     let s = t.content;
     let digits = |r: core::ops::Range<usize>| -> Result<u64, u32> {
         let part = s.get(r).ok_or(CRYPT_E_ASN1_CORRUPT)?;
@@ -329,7 +329,7 @@ fn block<'a>(p: *const CertContext) -> Option<&'a mut Block> {
 }
 
 /// An algorithm identifier: (OID contents, the encoded parameters).
-fn algorithm_id<'a>(t: Tlv<'a>) -> Result<(&'a [u8], &'a [u8]), u32> {
+pub(crate) fn algorithm_id<'a>(t: Tlv<'a>) -> Result<(&'a [u8], &'a [u8]), u32> {
     if t.tag != SEQUENCE {
         return Err(CRYPT_E_ASN1_BADTAG);
     }
@@ -1689,8 +1689,9 @@ fn ecdsa_signature(der: &[u8], size: usize, out: &mut [u8; 2 * 66]) -> Option<us
 }
 
 /// CryptVerifyCertificateSignatureEx(prov, encoding, subjectType, subject,
-/// issuerType, issuer, flags, extra): whether the subject certificate
-/// (CRYPT_VERIFY_CERT_SIGN_SUBJECT_BLOB 1 or _CERT 2) is signed by the
+/// issuerType, issuer, flags, extra): whether the subject certificate or
+/// CRL (CRYPT_VERIFY_CERT_SIGN_SUBJECT_BLOB 1, _CERT 2, _CRL 3: the same
+/// signed SEQUENCE { tbs, algorithm, signature }) is signed by the
 /// issuer's key (CRYPT_VERIFY_CERT_SIGN_ISSUER_PUBKEY 1 or _CERT 2): RSA
 /// PKCS #1 v1.5 and ECDSA (P-256, P-384) with SHA-1/256/384/512, through
 /// bcrypt. A wrong signature is NTE_BAD_SIGNATURE; other algorithms
@@ -1719,6 +1720,10 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
             }
             2 => {
                 let c = &*subject.cast::<CertContext>();
+                core::slice::from_raw_parts(c.encoded, c.encoded_len as usize)
+            }
+            3 => {
+                let c = &*subject.cast::<crate::crl::CrlContext>();
                 core::slice::from_raw_parts(c.encoded, c.encoded_len as usize)
             }
             _ => return error(E_INVALIDARG, 0),

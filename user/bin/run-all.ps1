@@ -66,6 +66,9 @@ if (-not (Test-Path (Join-Path $here "schannel_test.exe"))) {
     Copy-Item (Join-Path $schannelDir "certs\*.crt") (Join-Path $prefix "conf")
     Copy-Item (Join-Path $schannelDir "certs\*.key") (Join-Path $prefix "conf")
     Copy-Item (Join-Path $here "..\nginx\html\index.html") (Join-Path $prefix "html")
+    # The test CA's CRL at the distribution point its revocation
+    # certificates name (http://127.0.0.1:8080/ca.crl): Windows fetches it.
+    Copy-Item (Join-Path $schannelDir "certs\ca.crl") (Join-Path $prefix "html")
     $schannelCa = Import-Certificate -FilePath (Join-Path $schannelDir "certs\ca.cer") `
         -CertStoreLocation Cert:\LocalMachine\Root
     $schannelNginx = Start-Process -FilePath (Join-Path $here "nginx.exe") -PassThru -WindowStyle Hidden `

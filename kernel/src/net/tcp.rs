@@ -200,6 +200,8 @@ pub(super) struct Iface<D: Device> {
     iface: Interface,
     pub(super) sockets: SocketSet<'static>,
     count: usize,
+    /// The set was found full and said so (once until a socket goes).
+    full_logged: bool,
 }
 
 impl<D: Device> Iface<D> {
@@ -215,7 +217,7 @@ impl<D: Device> Iface<D> {
         for _ in 0..MAX_SOCKETS {
             storage.try_push(SocketStorage::EMPTY).ok()?;
         }
-        Some(Self { dev, iface, sockets: SocketSet::new(storage), count: 0 })
+        Some(Self { dev, iface, sockets: SocketSet::new(storage), count: 0, full_logged: false })
     }
 
     fn poll(&mut self) -> bool {
@@ -282,11 +284,25 @@ impl Stack {
         side: Side,
         socket: S,
     ) -> Result<Sock, NetError> {
-        let count = match side {
-            Side::Lo => &mut self.lo.count,
-            Side::Eth => &mut self.eth.as_mut().ok_or(NetError::Unreachable)?.count,
+        let (count, full_logged) = match side {
+            Side::Lo => (&mut self.lo.count, &mut self.lo.full_logged),
+            Side::Eth => {
+                let e = self.eth.as_mut().ok_or(NetError::Unreachable)?;
+                (&mut e.count, &mut e.full_logged)
+            }
         };
         if *count == MAX_SOCKETS {
+            // Every socket of the interface is in use: a listener holds
+            // its backlog's (up to MAX_BACKLOG), so a few listeners can
+            // take them all and a connect fails for want of one.
+            if !*full_logged {
+                *full_logged = true;
+                crate::warn!(
+                    "net: the {} interface's {MAX_SOCKETS} sockets are all in use \
+                     (each listener holds up to {MAX_BACKLOG}): a socket is refused",
+                    if side == Side::Lo { "loopback" } else { "card" }
+                );
+            }
             return Err(NetError::NoMemory);
         }
         *count += 1;
@@ -298,10 +314,14 @@ impl Stack {
         if let Some(set) = self.sockets(side) {
             set.remove(handle);
             match side {
-                Side::Lo => self.lo.count -= 1,
+                Side::Lo => {
+                    self.lo.count -= 1;
+                    self.lo.full_logged = false;
+                }
                 Side::Eth => {
                     if let Some(e) = self.eth.as_mut() {
                         e.count -= 1;
+                        e.full_logged = false;
                     }
                 }
             }

@@ -81,7 +81,10 @@
 //!   into the caller's buffer after a size query; ERROR_MORE_DATA when
 //!   the buffer is short.
 //! - The chain engine and its policies (chain.rs: CertGetCertificateChain,
-//!   CertVerifyCertificateChainPolicy, engines with an exclusive root).
+//!   CertVerifyCertificateChainPolicy, engines with an exclusive root,
+//!   revocation from CRLs).
+//! - CRLs (crl.rs: CRL contexts, CRL stores, CertFindCertificateInCRL,
+//!   CertVerifyCRLRevocation, CertVerifyRevocation).
 //! - PFXImportCertStore (pfx.rs: PKCS #12 files from OpenSSL, modern and
 //!   legacy algorithms, the key kept or not).
 //!
@@ -308,7 +311,7 @@ unsafe extern "system" {
         prev: *const CertContext,
     ) -> *const CertContext;
     fn CertDeleteCertificateFromStore(cert: *const CertContext) -> Bool;
-    fn CertEnumCRLsInStore(store: Handle, prev: *const c_void) -> *const c_void;
+    fn CertEnumCRLsInStore(store: Handle, prev: *const crl::CrlContext) -> *const crl::CrlContext;
     fn CryptQueryObject(
         object_type: u32,
         object: *const c_void,
@@ -371,6 +374,7 @@ unsafe extern "system" {
 }
 
 mod chain;
+mod crl;
 mod pfx;
 mod vectors;
 
@@ -803,6 +807,7 @@ fn run() -> Result<(), u32> {
         query(&mut c)?;
         alt_names(&mut c)?;
         chain::chains(&mut c)?;
+        crl::crls(&mut c)?;
         pfx::pfx(&mut c)?;
     }
     Ok(())
@@ -1194,7 +1199,7 @@ fn stores(c: &mut Checks) -> Result<(), u32> {
         CertFreeCertificateContext(any);
         CertFreeCertificateContext(added);
         CertFreeCertificateContext(outside);
-        c.ok(CertEnumCRLsInStore(store, null).is_null(), 0)?;
+        c.ok(CertEnumCRLsInStore(store, core::ptr::null()).is_null(), 0)?;
         c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
         let dup = CertDuplicateStore(store);
         c.ok(dup == store, 0)?;

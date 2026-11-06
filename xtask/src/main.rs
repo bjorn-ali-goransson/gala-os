@@ -507,6 +507,8 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll32.dll" },
     // A 32-bit test DLL (wow64_import_test).
     Dll { package: "testdll32", file: "testdll32.dll", exported_as: "testdll32.dll" },
+    // The 32-bit kernel32: gala's kernel32 built for i686.
+    Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32_32.dll" },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -2068,6 +2070,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // The CA Nginx checks client certificates against (port 8447).
     ("schannel_test", "user/schannel_test/certs/ca.crt", "nginx/conf"),
     ("schannel_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    // Revocation: certificates naming the test CA's CRL (8448 revoked,
+    // 8449 not), the CRL in gala's CA store (crypt32 checks offline) and
+    // at its distribution point.
+    ("schannel_test", "user/schannel_test/certs/revoked.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/revoked.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/notrevoked.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/notrevoked.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/ca.crl", "Windows/System32/gala/ca"),
+    ("schannel_test", "user/schannel_test/certs/ca.crl", "nginx/html"),
     ("schannel_test", "user/nginx/html/index.html", "nginx/html"),
     ("schannel_test", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
@@ -2116,10 +2127,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_fs_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_fs_test", "ntdll.dll", "Windows/System32"),
     ("wow64_fs_test", "user/wow64_fs_test/hosts", "Windows/System32/drivers/etc"),
-    // A plain 32-bit program on kernel32 (PENDING: gala's kernel32 is not
-    // built for x86 yet, ROADMAP WOW stage 3).
+    // A plain 32-bit program on the 32-bit kernel32.
     ("wow64_k32_test", "wow64.dll", "Windows/System32"),
     ("wow64_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_k32_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    // A 32-bit C program (clang-built, checked-in binary) on it.
+    ("wow64_c_test", "wow64.dll", "Windows/System32"),
+    ("wow64_c_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_c_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_c_test", "user/bin/wow64_c_test.exe", "gala"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -3408,8 +3424,6 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
     "java_stress",
-    // gala's kernel32 is not built for x86 yet (ROADMAP WOW stage 3).
-    "wow64_k32_test",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -6571,6 +6585,10 @@ const SCENARIOS: &[Scenario] = &[
             "cacert untrusted: exit 60",
             "cacert other: exit 60",
             "cacert expired: exit 60",
+            // LibreSSL's curl does not check revocation.
+            "revocation: exit 0 <title>Welcome to nginx!</title>",
+            "revoked: exit 0",
+            "revoked no-revoke: exit 0",
             "curl.sh: done",
             "exited with status 0x00000000",
         ],
@@ -6597,6 +6615,12 @@ const SCENARIOS: &[Scenario] = &[
             "cacert untrusted: exit 60",
             "cacert other: exit 60",
             "cacert expired: exit 60",
+            // Revocation (SCH_CRED_REVOCATION_CHECK_CHAIN without
+            // --ssl-no-revoke), from the CRL in gala's CA store.
+            "revocation: exit 0 <title>Welcome to nginx!</title>",
+            "CRYPT_E_REVOKED (0x80092010) - The certificate is revoked.",
+            "revoked: exit 35",
+            "revoked no-revoke: exit 0",
             "resumption: exit 0 . r",
             "resumption tls1.2: exit 0 . r",
             "curl.sh: done",
@@ -6857,12 +6881,21 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_fs_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // WOW64 stage 3: a plain 32-bit program on kernel32 (PENDING until
-        // gala's kernel32 is built for x86).
+        // WOW64 stage 3: a plain 32-bit program on gala's 32-bit kernel32
+        // (SysWOW64): files, threads, what a 32-bit process is told.
         name: "wow64_k32_test",
         cmdline: "qemu_exit run=wow64_k32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wow64_k32_test: hello", "wow64_k32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: a plain 32-bit C program (user/wow64_c_test:
+        // clang-built, checked-in binary; stdcall imports through an
+        // import library, not large-address-aware) on the 32-bit kernel32.
+        name: "wow64_c_test",
+        cmdline: "qemu_exit run=wow64_c_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_c_test: hello", "wow64_c_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // WOW64 stage 3: an exception no 32-bit handler takes, through the
@@ -7913,6 +7946,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_seh_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),

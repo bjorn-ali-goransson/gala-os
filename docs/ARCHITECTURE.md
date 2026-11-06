@@ -2626,17 +2626,24 @@ ntdll imports.
   store), so a store lives until its last handle is closed and its last
   context held outside is freed, and a context's hCertStore stays
   usable, as on Windows (Schannel's remote certificate relies on it).
-  A copy keeps the added context's encoding type. No CRLs or CTLs. The "ROOT" system store (any location; CertOpenStore with
-  the system providers or "System", CertOpenSystemStoreW/A) is a memory
-  store filled with **gala's machine root store**, the certificates (DER,
-  or PEM with any number) in `%SystemRoot%\System32\gala\roots`
-  (`roots.rs`), the anchors Schannel trusts too. Collections nest
+  A copy keeps the added context's encoding type. CRLs are a second list
+  in each store with the same ownership (below); no CTLs. The "ROOT"
+  system store (any location; CertOpenStore with the system providers or
+  "System", CertOpenSystemStoreW/A) is a memory store filled with
+  **gala's machine root store**, the certificates (DER, or PEM with any
+  number) in `%SystemRoot%\System32\gala\roots` (`roots.rs`), the
+  anchors Schannel trusts too; "CA" likewise from
+  `%SystemRoot%\System32\gala\ca`: intermediate certificates and the
+  CRLs revocation is checked with (PEM `X509 CRL` blocks or DER; of one
+  issuer's CRLs the latest is kept; no directory is no CRLs, not an
+  error). Collections nest
   (enumeration and finds walk members depth first, at most 64 stores 4
   deep, a store met twice skipped): Chromium's issuer lookup searches a
   collection of its roots and intermediates collections. Programs that build
   trust from crypt32's stores (Chromium's TrustStoreWin) trust the same
   roots. The other system stores are empty memory stores (no persistent
-  certificate store; each open recorded with the store's name). CryptQueryObject
+  certificate store; each open recorded with the store's name; a CRL
+  added to "CA" at run time is not seen by another open of it). CryptQueryObject
   recognises one certificate (DER, or base64 with or without PEM lines);
   CryptDecodeObjectEx decodes GeneralNames into CERT_ALT_NAME_INFO
   (e-mail, DNS, URL as UTF-16 strings, IPs as blobs, all in one block;
@@ -2664,11 +2671,18 @@ ntdll imports.
   INVALID_EXTENSION | HAS_NOT_SUPPORTED_CRITICAL_EXT, name constraints
   (not evaluated: INVALID_NAME_CONSTRAINTS |
   HAS_NOT_SUPPORTED_NAME_CONSTRAINT, fails closed, ROADMAP "Known issues
-  and stopgaps"); with a CERT_CHAIN_REVOCATION_CHECK_* flag
-  REVOCATION_STATUS_UNKNOWN, with IS_OFFLINE_REVOCATION when the
-  certificate names a CRL or OCSP responder (revocation is not checked;
-  never on a self-signed root; the policies' CRYPT_E_REVOCATION_OFFLINE
-  or CRYPT_E_NO_REVOCATION_CHECK). Info: the issuer match
+  and stopgaps"); revocation with a CERT_CHAIN_REVOCATION_CHECK_* flag
+  (END_CERT, CHAIN, CHAIN_EXCLUDE_ROOT; never a self-signed root),
+  offline from the CRLs in hAdditionalStore and the engine's stores
+  ("CRLs and revocation" below): IS_REVOKED, REVOCATION_STATUS_UNKNOWN
+  | IS_OFFLINE_REVOCATION (out-of-date CRLs, or the CRL or OCSP
+  responder the certificate names is not there),
+  REVOCATION_STATUS_UNKNOWN alone (it names no CRL distribution
+  point); the
+  policies' CRYPT_E_REVOKED, CRYPT_E_REVOCATION_OFFLINE,
+  CRYPT_E_NO_REVOCATION_CHECK, each element kind ignorable with
+  CERT_CHAIN_POLICY_IGNORE_*_REV_UNKNOWN_FLAG and all with
+  SECURITY_FLAG_IGNORE_REVOCATION; pRevocationInfo stays NULL. Info: the issuer match
   (KEY/NAME_MATCH_ISSUER), IS_SELF_SIGNED, HAS_PREFERRED_ISSUER and
   IS_FROM_EXCLUSIVE_TRUST_STORE on a trusted root; the chain's status
   is the elements' (info without the bottom nibble).
@@ -2684,6 +2698,46 @@ ntdll imports.
   element indexes are those Wine's conformance tests record on Windows.
   A failed policy is recorded as `crypt32.dll!<policy>: <error>` with
   the chain's error bits, so a refused certificate says why.
+- **CRLs and revocation** (`crl.rs`; `cert_test` crl.rs and chain.rs,
+  CRLs made by `user/cert_test/chain/make.sh`; `schannel_test`,
+  `curl_schannel`): CertCreateCRLContext decodes a DER CRL (v1/v2) into
+  CRL_CONTEXT and CRL_INFO in one heap block with a copy of the encoding,
+  the entries (serials little-endian), their and the CRL's extensions
+  and OID strings; reference-counted, and a context a caller holds holds
+  its store, as certificate contexts do. Stores: CertAddCRLContextToStore
+  / CertAddEncodedCRLToStore (a CRL of the same issuer is the existing
+  one: ADD_NEW gives CRYPT_E_EXISTS, ADD_NEWER keeps the later
+  thisUpdate), CertEnumCRLsInStore (collections walk their members),
+  CertFindCRLInStore (ANY, ISSUED_BY with the signature flag, EXISTING),
+  CertDeleteCRLFromStore. CertFindCertificateInCRL,
+  CertVerifyCRLRevocation, CertVerifyCRLTimeValidity. **The revocation
+  decision** (`check`, shared by the chain engine and
+  CertVerifyRevocation's default provider) is **offline only**: the
+  issuer's CRLs in the stores given whose signature verifies with the
+  issuer's key (which must allow cRLSign), current at the present time
+  (not the chain's pTime, as documented), and whose scope covers the
+  certificate (RFC 5280: a delta CRL, an issuing distribution point for
+  other kinds of certificate, some reasons only or an indirect CRL is not
+  used, recorded; the distribution point's name is not compared). Listed:
+  revoked (the entry's reason code). A current CRL that does not list it:
+  good. Only out-of-date ones: offline. None: offline (not fetched,
+  recorded `crypt32.dll!revocation: CRL not fetched (offline only)`).
+  Only a certificate that names a CRL distribution point is checked by
+  CRL: one naming only an OCSP responder is offline (recorded), one
+  naming neither has no check (CRYPT_E_NO_REVOCATION_CHECK) whatever
+  the stores hold, as Windows' default provider answers even with the
+  issuer's CRL in hCrlStore (Wine's tests, testVerifyRevocation).
+  Nothing is fetched (no cryptnet, no OCSP):
+  CRLs come from gala's CA store (`gala\ca`), the caller's stores and
+  hAdditionalStore; fetching from the distribution point over winhttp is
+  the next step (ROADMAP TLS). CertVerifyRevocation: the issuer is
+  pIssuerCert, the next context with CERT_VERIFY_REV_CHAIN_FLAG, else
+  one in the given stores whose key signed it; CRLs from hCrlStore,
+  rgCertStore and the CA store; the first context revoked or unchecked
+  gives FALSE with its index, the CRYPT_E_* status and the reason (a
+  status of another size than 16 or 24 bytes E_INVALIDARG, an encoding
+  without X509_ASN_ENCODING CRYPT_E_NO_REVOCATION_DLL, as Wine's tests
+  record), recorded as `crypt32.dll!CertVerifyRevocation: CRYPT_E_...`.
 - **DPAPI** (`dpapi.rs`; `dpapi_test`): CryptProtectData/
   CryptUnprotectData with a per-machine master key (32 random bytes kept
   in `HKLM\SOFTWARE\gala\DPAPI` MasterKey, made on first use). gala's own
@@ -3054,9 +3108,10 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   client handshake recorded so it can run again, below), `tests.rs`.
 - Around it: crypt32 (`user/crypt32`) decodes certificates into
   CERT_CONTEXTs, has memory stores (`store.rs`; "ROOT" holds the
-  machine root store, the other system stores open empty) and the chain
-  engine that decides trust (`chain.rs`, "Certificate chains" under
-  "Cryptography"); ncrypt imports RSA and ECDSA keys into the
+  machine root store, "CA" the machine's CRLs, the other system stores
+  open empty), the chain engine that decides trust (`chain.rs`,
+  "Certificate chains" under "Cryptography") and the offline revocation
+  check (`crl.rs`, "CRLs and revocation"); ncrypt imports RSA and ECDSA keys into the
   Microsoft Software Key Storage Provider and signs with them (no key
   generation yet); bcrypt has hashes, AES/DES/RC2, RSA (PKCS#1 v1.5,
   PSS, OAEP) and ECDSA P-256/P-384. winhttp and wininet are HTTP(S)
@@ -3092,8 +3147,25 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   a program that validates itself (curl's `--cacert` with manual
   validation, Go, Chromium's issuer lookup) gets the same answer from
   the same engine. The host tests (`cargo test -p schannel_tls`) plug
-  in webpki with the test CA instead. Revocation is not checked (the
-  flags are recorded).
+  in webpki with the test CA instead.
+- **Revocation** (`trust.rs`): as the credential's flags ask:
+  SCH_CRED_REVOCATION_CHECK_END_CERT, _CHAIN, _CHAIN_EXCLUDE_ROOT (and
+  _CACHE_ONLY) become CertGetCertificateChain's
+  CERT_CHAIN_REVOCATION_CHECK_* flags; without one nothing is checked, as
+  on Windows (curl's `--ssl-no-revoke`, Git's
+  `http.schannelCheckRevoke=false`, winhttp and wininet, which never ask).
+  SCH_CRED_IGNORE_NO_REVOCATION_CHECK and SCH_CRED_IGNORE_REVOCATION_OFFLINE
+  excuse the elements whose revocation is unknown without and with
+  CERT_TRUST_IS_OFFLINE_REVOCATION; when all are excused the SSL policy
+  is asked again with CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS. A
+  revoked certificate fails the handshake with CRYPT_E_REVOKED, an
+  unchecked one with CRYPT_E_NO_REVOCATION_CHECK or
+  CRYPT_E_REVOCATION_OFFLINE: the statuses themselves, as Schannel
+  returns them (curl: exit 35). Through rustls they travel as
+  CertificateError::Revoked, UnknownRevocationStatus and
+  ExpiredRevocationList (rustls has no "offline" kind; schannel_tls
+  `code`). The check is crypt32's, so offline: the CRLs in gala's CA
+  store.
 - **The machine root store's contents**: every full image (`cargo
   xtask iso`, the images `image_modules` makes) ships
   `gala\roots\public-roots.pem`, the public CA bundle: Mozilla's root
@@ -3240,7 +3312,8 @@ are recorded.
   (ASC_REQ_MUTUAL_AUTH), a client certificate chosen from the MY store,
   intermediates sent with a client's or server's certificate,
   renegotiation requests (SCHANNEL_RENEGOTIATE), SCHANNEL_ALERT tokens
-  (accepted, not sent), revocation, DTLS. A client context whose first
+  (accepted, not sent), revocation information fetched from where the
+  certificate says (CRLs over HTTP, OCSP, stapled OCSP responses), DTLS. A client context whose first
   call fails still has a handle (Windows gives none).
 
 ### WinHTTP and WinINet
@@ -3605,9 +3678,14 @@ The kernel's socket API, independent of NT: `listen(local, backlog)`,
   it is closed or in TIME-WAIT, then it is removed and its buffers freed
   (`reap` in the poll loop).
 - Buffers are 64 KiB each way. Every listening socket owns full buffers
-  (128 KiB), so a listener on 0.0.0.0 with backlog 5 holds 1.25 MiB
-  (TODO: fewer listening sockets or smaller buffers for servers with
-  many listeners).
+  (128 KiB), so a listener on 0.0.0.0 with backlog 5 holds 1.25 MiB, and
+  the listening sockets come out of the interface's fixed set of 64:
+  eight listeners at backlog 8 hold all of loopback's, and further
+  sockets are refused (logged once until one goes: `net: the loopback
+  interface's 64 sockets are all in use`; ROADMAP "Known issues and
+  stopgaps", schannel_test's Nginx). TODO: listeners that do not
+  pre-allocate their backlog (fewer listening sockets, buffers on
+  establishment, a set that grows fallibly).
 - Byte counts: an entry counts what its owner sent (queued) and
   received (took); `tcp shutdown` and `tcp close`/`tcp reset`
   (`events=net`) carry them with the queues' lengths then (`unsent`:
@@ -6538,11 +6616,12 @@ Win32 Structured Exception Handling", MSJ 1997).
 | Its conversions: services by argument kind, information classes, threads and contexts, fault-safe access | `user/wow64/src/generic.rs`, `info.rs`, `thread.rs`, `mem.rs` |
 | Exceptions and APCs handed to 32-bit code; the file system redirector | `user/wow64/src/dispatch.rs`, `redirect.rs` |
 | The 32-bit ntdll (SysWOW64): the loader, the stubs, x86 SEH, the APC dispatcher | `user/testntdll` built for i686 (`x86.rs`, `seh_x86.rs`; `x64.rs` the 64-bit one's parts); the kernel's `nt/ntdll.rs` (`get32`), `nt/wow64.rs` (`through_ntdll32`, `exception_stack`), `nt/process.rs` (`deliver_to_user`) |
+| The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
 | The environment by bitness | `nt/wow64.rs` (`environment`) |
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test` (PENDING) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built) |
 
 ### Decisions
 
@@ -6756,9 +6835,26 @@ SysWOW64 as the system directory), its parts by architecture in
 <bytes>`, stdcall), the TEB32/PEB32 through FS and their offsets
 (LoaderLock +0xa0, Ldr +0x0c, ProcessHeap +0x18, the x86 LDR_* layouts),
 the memory routines and 64-bit division helpers, KiUserApcDispatcher;
-`seh_x86.rs` the x86 SEH (below). To come, as programs need them:
-kernel32, kernelbase, msvcrt, advapi32, user32, gdi32 and the rest
-(ROADMAP WOW). Arch-specific code moves behind `cfg(target_arch)`;
+`seh_x86.rs` the x86 SEH (below). Done too: the 32-bit kernel32, gala's
+kernel32 built for i686 (`user/kernel32`): what differs by architecture
+is in its `x64.rs` and `x86.rs` (TEB access through GS or FS and the
+TEB's offsets: LastErrorValue +0x34, TlsSlots +0xe10, DeallocationStack
++0xe0c; the PEB's, the process parameters', the optional header's stack
+sizes, the CONTEXT's layout for the context functions, a new thread's
+CONTEXT: x86 stdcall arguments written on its stack, SLIST_HEADER: 8
+bytes changed by cmpxchg8b), and the structures with pointer-sized fields
+are `repr(C)` with `usize` fields, so one definition has both layouts
+(the basic information classes, whose x86 lengths wow64.dll requires,
+MEMORY_BASIC_INFORMATION, OVERLAPPED, STARTUPINFO, toolhelp's entries;
+GalaCreateProcess's block keeps its 8-byte fields, handles
+sign-extended). The compiler's runtime symbols (`memcpy`, `__aulldiv`,
+`__chkstk`) come from ntrt's x86 runtime, not from ntdll as on x64: a
+raw-dylib import does not define the symbol the compiler calls on x86.
+Its x86 answers: GetSystemInfo PROCESSOR_ARCHITECTURE_INTEL with the
+process's range (wow64.dll's SystemBasicInformation), GetNativeSystemInfo
+AMD64, GetSystemDirectory SysWOW64. To come, as programs need them:
+msvcrt, kernelbase, advapi32, user32, gdi32 and the rest (ROADMAP WOW).
+Arch-specific code moves behind `cfg(target_arch)`;
 `extern "system"` is stdcall there, which Windows' exports are, and
 exports keep their undecorated names (naked functions too; `/EXPORT:`
 for `global_asm!` symbols); imports from them are `raw-dylib` with
@@ -6766,7 +6862,8 @@ for `global_asm!` symbols); imports from them are `raw-dylib` with
 `USER_PROGRAMS_X86` with the i686 target; a scenario ships a 32-bit DLL
 as `x86/<file>` in EXTRA_MODULES (under `boot/x86` on the ISO, its name
 being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
-(`testntdll32.dll`; test DLLs under their own names: `testdll32.dll`).
+(`testntdll32.dll`, `testkernel32_32.dll`; test DLLs under their own
+names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers
 
@@ -6798,10 +6895,12 @@ being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
   and IsWow64Process2 (I386 for a WOW64 process, UNKNOWN for a native
   one, AMD64 native) from ProcessWow64Information;
   GetSystemWow64Directory(W/A): `<Windows>\SysWOW64`; the 32-bit
-  environment ("A 32-bit process"). With a 32-bit kernel32 (stage 3's
-  rest): GetSystemInfo reports PROCESSOR_ARCHITECTURE_INTEL and the 2/4
-  GiB application range, GetNativeSystemInfo AMD64, GetSystemDirectory
-  SysWOW64.
+  environment ("A 32-bit process"). The 32-bit kernel32's:
+  GetSystemInfo reports PROCESSOR_ARCHITECTURE_INTEL (PROCESSOR_INTEL_PENTIUM)
+  and the 2/4 GiB application range, GetNativeSystemInfo AMD64 with the
+  same range, GetSystemDirectory SysWOW64; Wow64DisableWow64FsRedirection,
+  Wow64RevertWow64FsRedirection and Wow64EnableWow64FsRedirection call
+  the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex).
 - **Exceptions** (`dispatch.rs`, `seh_x86.rs`): an exception in 32-bit
   code (a CS 0x23 trap frame) goes to wow64.dll's dispatcher in 64-bit
   code: `deliver_to_user` pushes the x64 CONTEXT (marked CS 0x23, the

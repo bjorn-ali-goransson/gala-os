@@ -17,7 +17,9 @@
 //! CA, which the machine's root store must trust: gala's is
 //! C:\Windows\System32\gala\roots), 8444 a self-signed one, 8445 an
 //! expired one, 8446 the first with Nginx's session cache, 8447 the first
-//! asking for a client certificate. It checks:
+//! asking for a client certificate, 8448 a revoked one and 8449 one that
+//! is not (gala: the CA's CRL in its CA store, System32\gala\ca). It
+//! checks:
 //! 1. the package: QuerySecurityPackageInfoW under both names (UNISP_NAME
 //!    and "Schannel"), EnumerateSecurityPackagesW listing both;
 //! 2. TLS 1.3 (SCH_CREDENTIALS, automatic validation, ALPN "h2" and
@@ -48,7 +50,14 @@
 //! 5. a name the certificate does not have: SEC_E_WRONG_PRINCIPAL with
 //!    automatic validation, SEC_E_OK with SCH_CRED_MANUAL_CRED_VALIDATION;
 //!    an untrusted root: SEC_E_UNTRUSTED_ROOT (manual: SEC_E_OK); an
-//!    expired certificate: SEC_E_CERT_EXPIRED;
+//!    expired certificate: SEC_E_CERT_EXPIRED; revocation (ports 8448
+//!    and 8449: certificates naming the test CA's CRL,
+//!    http://127.0.0.1:8080/ca.crl, which lists 8448's): not checked
+//!    without a SCH_CRED_REVOCATION_CHECK_* flag; with _CHAIN, _END_CERT
+//!    or _CHAIN_EXCLUDE_ROOT the revoked certificate fails with
+//!    CRYPT_E_REVOKED (also with SCH_CRED_IGNORE_NO_REVOCATION_CHECK and
+//!    SCH_CRED_IGNORE_REVOCATION_OFFLINE, which only excuse a check that
+//!    could not be made), the other passes;
 //! 6. session resumption (SECPKG_ATTR_SESSION_INFO's SSL_SESSION_RECONNECT,
 //!    Nginx's $ssl_session_reused agreeing): the second connection of a
 //!    credential handle resumes, by ticket (port 8443) or from Nginx's
@@ -518,6 +527,7 @@ const SEC_E_INCOMPLETE_MESSAGE: u32 = 0x8009_0318;
 const SEC_E_WRONG_PRINCIPAL: u32 = 0x8009_0322;
 const SEC_E_UNTRUSTED_ROOT: u32 = 0x8009_0325;
 const SEC_E_CERT_EXPIRED: u32 = 0x8009_0328;
+const CRYPT_E_REVOKED: u32 = 0x8009_2010;
 
 const SECPKG_CRED_INBOUND: u32 = 1;
 const SECPKG_CRED_OUTBOUND: u32 = 2;
@@ -556,6 +566,11 @@ const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x8;
 const SCH_CRED_NO_DEFAULT_CREDS: u32 = 0x10;
 const SCH_CRED_AUTO_CRED_VALIDATION: u32 = 0x20;
 const SCH_USE_STRONG_CRYPTO: u32 = 0x40_0000;
+const SCH_CRED_REVOCATION_CHECK_END_CERT: u32 = 0x100;
+const SCH_CRED_REVOCATION_CHECK_CHAIN: u32 = 0x200;
+const SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT: u32 = 0x400;
+const SCH_CRED_IGNORE_NO_REVOCATION_CHECK: u32 = 0x800;
+const SCH_CRED_IGNORE_REVOCATION_OFFLINE: u32 = 0x1000;
 
 const SECPKG_ATTR_STREAM_SIZES: u32 = 4;
 const SECPKG_ATTR_PACKAGE_INFO: u32 = 10;
@@ -1710,8 +1725,15 @@ fn tls12_parameters(c: &mut Checks) -> Result<(), u32> {
 /// A handshake with `target` on `port` with automatic or manual
 /// validation; its final status.
 fn validation(c: &mut Checks, port: u16, target: &str, manual: bool) -> Result<u32, u32> {
-    let flags = SCH_CRED_NO_DEFAULT_CREDS
-        | if manual { SCH_CRED_MANUAL_CRED_VALIDATION } else { SCH_CRED_AUTO_CRED_VALIDATION };
+    let flags =
+        if manual { SCH_CRED_MANUAL_CRED_VALIDATION } else { SCH_CRED_AUTO_CRED_VALIDATION };
+    validation_with(c, port, target, flags)
+}
+
+/// A handshake with `target` on `port` with a credential of these
+/// SCHANNEL_CRED flags (and SCH_CRED_NO_DEFAULT_CREDS); its final status.
+fn validation_with(c: &mut Checks, port: u16, target: &str, flags: u32) -> Result<u32, u32> {
+    let flags = SCH_CRED_NO_DEFAULT_CREDS | flags;
     let cred = acquire(c, Creds::Old(0, flags), Abi::Wide)?;
     let mut client = Client::connect(c, port, cred, target)?;
     let r = client.handshake(c, &[])?;
@@ -1736,6 +1758,37 @@ fn validations(c: &mut Checks) -> Result<(), u32> {
     c.step(b"validation: expired");
     let r = validation(c, 8445, "localhost", false)?;
     c.status(r as i32, SEC_E_CERT_EXPIRED)?;
+    Ok(())
+}
+
+/// Revocation, as the credential's SCH_CRED_REVOCATION_CHECK_* flags ask
+/// for it: 8448's certificate is listed in the test CA's CRL (gala: in
+/// its CA store; Windows fetches it from the distribution point the
+/// certificate names, which Nginx serves), 8449's is not.
+fn revocation(c: &mut Checks) -> Result<(), u32> {
+    let auto = SCH_CRED_AUTO_CRED_VALIDATION;
+    c.step(b"revocation: not asked for");
+    let r = validation_with(c, 8448, "localhost", auto)?;
+    c.status(r as i32, SEC_E_OK)?;
+    c.step(b"revocation: revoked");
+    for flags in [
+        SCH_CRED_REVOCATION_CHECK_CHAIN,
+        SCH_CRED_REVOCATION_CHECK_END_CERT,
+        SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
+        // curl's --ssl-revoke-best-effort: what could not be checked
+        // passes, a revoked certificate does not.
+        SCH_CRED_REVOCATION_CHECK_CHAIN
+            | SCH_CRED_IGNORE_NO_REVOCATION_CHECK
+            | SCH_CRED_IGNORE_REVOCATION_OFFLINE,
+    ] {
+        let r = validation_with(c, 8448, "localhost", auto | flags)?;
+        c.status(r as i32, CRYPT_E_REVOKED)?;
+    }
+    c.step(b"revocation: not revoked");
+    for flags in [SCH_CRED_REVOCATION_CHECK_CHAIN, SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT] {
+        let r = validation_with(c, 8449, "localhost", auto | flags)?;
+        c.status(r as i32, SEC_E_OK)?;
+    }
     Ok(())
 }
 
@@ -2161,6 +2214,7 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     tls12_trickle(c)?;
     tls12_parameters(c)?;
     validations(c)?;
+    revocation(c)?;
     resumption(c)?;
     client_certificates(c)?;
     c.step(b"server certificate");

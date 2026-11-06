@@ -1,14 +1,18 @@
 //! Certificate stores, as documented: memory stores (CertOpenStore's
-//! CERT_STORE_PROV_MEMORY and, empty, the system stores: gala has no
+//! CERT_STORE_PROV_MEMORY and the system stores: ROOT and CA filled from
+//! gala's directories, `roots.rs`; the others empty, as gala has no
 //! persistent certificate store yet, recorded once per open), adding
-//! encoded certificates and contexts with the CERT_STORE_ADD_*
+//! encoded certificates, CRLs and contexts with the CERT_STORE_ADD_*
 //! dispositions, enumerating, finding, deleting, duplicating and closing.
 //! A store holds one reference to each of its contexts, which are copies
 //! whose hCertStore is the store; a context a caller holds holds the
-//! store (cert.rs `Block`), so the store lives until its last handle is
-//! closed and its last context held outside is freed, as on Windows (a
-//! context's hCertStore stays usable). No CRLs or CTLs. Built on
-//! cert.rs's contexts through their public functions.
+//! store (cert.rs `Block`, crl.rs `CrlBlock`), so the store lives until
+//! its last handle is closed and its last context held outside is freed,
+//! as on Windows (a context's hCertStore stays usable). CRLs are a second
+//! list beside the certificates (crl.rs); a CRL "exists" in a store when
+//! one of the same issuer is there (CERT_STORE_ADD_NEWER compares their
+//! thisUpdate). No CTLs. Built on cert.rs's and crl.rs's contexts through
+//! their public functions.
 
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -18,6 +22,7 @@ use crate::cert::{
     CertFreeCertificateContext, CertGetCertificateContextProperty, CertGetNameStringW, adopt,
     disown,
 };
+use crate::crl::{CertCreateCRLContext, CertDuplicateCRLContext, CertFreeCRLContext, CrlContext};
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -67,6 +72,67 @@ pub struct Store {
     /// first.
     members: [(*mut c_void, u32, u32); MAX_MEMBERS],
     member_count: usize,
+    /// The store's CRL contexts (each holding one reference).
+    crls: List<CrlContext>,
+}
+
+/// A growable array of context pointers in the process heap.
+#[repr(C)]
+struct List<T> {
+    items: *mut *const T,
+    len: usize,
+    cap: usize,
+}
+
+impl<T> List<T> {
+    const fn new() -> List<T> {
+        List { items: core::ptr::null_mut(), len: 0, cap: 0 }
+    }
+    fn items(&self) -> &[*const T] {
+        if self.items.is_null() {
+            return &[];
+        }
+        // SAFETY: our array of `len` pointers.
+        unsafe { core::slice::from_raw_parts(self.items, self.len) }
+    }
+    fn push(&mut self, p: *const T) -> bool {
+        if self.len == self.cap {
+            let cap = (self.cap * 2).max(8);
+            let bytes = cap * core::mem::size_of::<*const T>();
+            // SAFETY: our array (or a new one).
+            let n = unsafe {
+                if self.items.is_null() {
+                    HeapAlloc(GetProcessHeap(), 0, bytes)
+                } else {
+                    HeapReAlloc(GetProcessHeap(), 0, self.items.cast(), bytes)
+                }
+            };
+            if n.is_null() {
+                return false;
+            }
+            self.items = n.cast();
+            self.cap = cap;
+        }
+        // SAFETY: inside the array's capacity.
+        unsafe { *self.items.add(self.len) = p };
+        self.len += 1;
+        true
+    }
+    fn remove(&mut self, i: usize) -> *const T {
+        // SAFETY: `i` < len; the rest moves down.
+        unsafe {
+            let p = *self.items.add(i);
+            core::ptr::copy(self.items.add(i + 1), self.items.add(i), self.len - i - 1);
+            self.len -= 1;
+            p
+        }
+    }
+    fn free(&mut self) {
+        if !self.items.is_null() {
+            // SAFETY: our array.
+            unsafe { HeapFree(GetProcessHeap(), 0, self.items.cast()) };
+        }
+    }
 }
 
 /// The most stores a collection holds.
@@ -180,6 +246,7 @@ fn new_store() -> *mut c_void {
             cap: 0,
             members: [(core::ptr::null_mut(), 0, 0); MAX_MEMBERS],
             member_count: 0,
+            crls: List::new(),
         })
     };
     p.cast()
@@ -207,14 +274,21 @@ fn provider_is(p: *const u8, name: &[u8]) -> bool {
 
 /// A system store by name: "ROOT" (any location) holds gala's machine
 /// root store (`roots`: the certificates in System32\gala\roots, the
-/// anchors Schannel trusts too); the others are empty in gala, reported
-/// with the name's first characters so a program that expects
-/// certificates there shows up.
+/// anchors Schannel trusts too), "CA" the intermediate certificates and
+/// CRLs in System32\gala\ca (the CRLs revocation is checked with,
+/// offline); the others are empty in gala, reported with the name's first
+/// characters so a program that expects certificates there shows up.
 fn system_store(name: &[u8]) -> *mut c_void {
     let store = new_store();
     if name.eq_ignore_ascii_case(b"ROOT") {
         if !store.is_null() {
-            super::roots::load(store);
+            super::roots::load(store, super::roots::Directory::Roots);
+        }
+        return store;
+    }
+    if name.eq_ignore_ascii_case(b"CA") {
+        if !store.is_null() {
+            super::roots::load(store, super::roots::Directory::Ca);
         }
         return store;
     }
@@ -356,6 +430,11 @@ pub extern "system" fn CertCloseStore(h: *mut c_void, _flags: u32) -> i32 {
             disown(c);
             CertFreeCertificateContext(c);
         }
+        for &c in s.crls.items() {
+            crate::crl::disown(c);
+            CertFreeCRLContext(c);
+        }
+        s.crls.free();
         let members = s.members;
         for m in &members[..s.member_count] {
             CertCloseStore(m.0, 0);
@@ -763,10 +842,295 @@ pub extern "system" fn CertDeleteCertificateFromStore(cert: *const CertContext) 
     1
 }
 
-/// CertEnumCRLsInStore: gala's stores hold no CRLs (CRYPT_E_NOT_FOUND).
+// ---- CRLs ----
+
+fn crl_encoding<'a>(c: *const CrlContext) -> &'a [u8] {
+    // SAFETY: a CRL context of ours (its encoding).
+    unsafe { core::slice::from_raw_parts((*c).encoded, (*c).encoded_len as usize) }
+}
+
+fn crl_issuer<'a>(c: *const CrlContext) -> &'a [u8] {
+    // SAFETY: a CRL context of ours: its CRL_INFO's issuer blob.
+    unsafe {
+        let info = &*(*c).info;
+        core::slice::from_raw_parts(info.issuer.data, info.issuer.size as usize)
+    }
+}
+
+fn this_update(c: *const CrlContext) -> u64 {
+    // SAFETY: a CRL context of ours.
+    unsafe { (*(*c).info).this_update }
+}
+
+/// Adds a copy of `crl` to the store as `disposition` says (a CRL of the
+/// same issuer is the existing one); the CRL in the store (one more
+/// reference) into `out`.
+fn add_crl(
+    h: *mut c_void,
+    crl: *const CrlContext,
+    disposition: u32,
+    out: *mut *const CrlContext,
+) -> i32 {
+    if crl.is_null() || !(1..=7).contains(&disposition) {
+        return error(E_INVALIDARG, 0);
+    }
+    if !out.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *out = core::ptr::null() };
+    }
+    let bytes = crl_encoding(crl);
+    // SAFETY: a context of ours: its encoding type, kept by the copy.
+    let kind = unsafe { (*crl).encoding };
+    let copy = CertCreateCRLContext(kind, bytes.as_ptr(), bytes.len() as u32);
+    if copy.is_null() {
+        return 0;
+    }
+    // A collection's adds go to its member that takes them.
+    let h = store(h).map_or(h, |s| {
+        s.with(|s| {
+            s.members[..s.member_count]
+                .iter()
+                .find(|m| m.1 & CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG != 0)
+                .map_or(h, |m| m.0)
+        })
+    });
+    let Some(s) = store(h) else {
+        if out.is_null() {
+            CertFreeCRLContext(copy);
+        } else {
+            // SAFETY: as above.
+            unsafe { *out = copy };
+        }
+        return 1;
+    };
+    let result = s.with(|s| {
+        let issuer = crl_issuer(copy);
+        let existing = s.crls.items().iter().position(|&c| crl_issuer(c) == issuer);
+        let newer = existing.is_none_or(|i| this_update(copy) > this_update(s.crls.items()[i]));
+        match (existing, disposition) {
+            (Some(_), CERT_STORE_ADD_NEW) => Err(CRYPT_E_EXISTS),
+            (Some(i), CERT_STORE_ADD_USE_EXISTING) => Ok((s.crls.items()[i], true)),
+            (Some(_), CERT_STORE_ADD_NEWER | CERT_STORE_ADD_NEWER_INHERIT_PROPERTIES) if !newer => {
+                Err(CRYPT_E_EXISTS)
+            }
+            (Some(_), CERT_STORE_ADD_ALWAYS) | (None, _) => {
+                if s.crls.push(copy) {
+                    crate::crl::adopt(copy, h);
+                    Ok((copy, false))
+                } else {
+                    Err(ERROR_NOT_ENOUGH_MEMORY)
+                }
+            }
+            (Some(i), _) => {
+                // Replace (and a newer one).
+                let old = s.crls.remove(i);
+                crate::crl::disown(old);
+                CertFreeCRLContext(old);
+                if s.crls.push(copy) {
+                    crate::crl::adopt(copy, h);
+                    Ok((copy, false))
+                } else {
+                    Err(ERROR_NOT_ENOUGH_MEMORY)
+                }
+            }
+        }
+    });
+    match result {
+        Ok((c, existing)) => {
+            if existing {
+                CertFreeCRLContext(copy);
+            }
+            if !out.is_null() {
+                // SAFETY: as above.
+                unsafe { *out = CertDuplicateCRLContext(c) };
+            }
+            1
+        }
+        Err(e) => {
+            CertFreeCRLContext(copy);
+            error(e, 0)
+        }
+    }
+}
+
+/// CertAddCRLContextToStore: a copy added: CERT_STORE_ADD_NEW fails with
+/// CRYPT_E_EXISTS when the store has a CRL of the same issuer,
+/// _USE_EXISTING gives that one, _REPLACE_EXISTING replaces it, _ALWAYS
+/// adds another, _NEWER replaces it if the new one's thisUpdate is later
+/// (else CRYPT_E_EXISTS).
 #[unsafe(no_mangle)]
-pub extern "system" fn CertEnumCRLsInStore(_h: *mut c_void, _prev: *const c_void) -> *const c_void {
-    error(CRYPT_E_NOT_FOUND, core::ptr::null())
+pub extern "system" fn CertAddCRLContextToStore(
+    h: *mut c_void,
+    crl: *const CrlContext,
+    disposition: u32,
+    out: *mut *const CrlContext,
+) -> i32 {
+    add_crl(h, crl, disposition, out)
+}
+
+/// CertAddEncodedCRLToStore: the DER CRL decoded and added (see
+/// CertAddCRLContextToStore).
+#[unsafe(no_mangle)]
+pub extern "system" fn CertAddEncodedCRLToStore(
+    h: *mut c_void,
+    encoding_type: u32,
+    data: *const u8,
+    len: u32,
+    disposition: u32,
+    out: *mut *const CrlContext,
+) -> i32 {
+    let c = CertCreateCRLContext(encoding_type, data, len);
+    if c.is_null() {
+        return 0;
+    }
+    let r = add_crl(h, c, disposition, out);
+    CertFreeCRLContext(c);
+    r
+}
+
+/// The CRL after `prev` in the store and (a collection) its members, as
+/// `next_after` walks certificates.
+fn next_crl_after(
+    h: *mut c_void,
+    prev: *const CrlContext,
+    mut keep: impl FnMut(*const CrlContext) -> bool,
+) -> *const CrlContext {
+    let Some(s) = store(h) else {
+        if !prev.is_null() {
+            CertFreeCRLContext(prev);
+        }
+        return error(E_INVALIDARG, core::ptr::null());
+    };
+    let mut members = [core::ptr::null_mut(); MAX_WALKED];
+    let mut count = 0;
+    walk_members(s, &mut members, &mut count, 0);
+    let mut passed = prev.is_null();
+    let mut found = None;
+    for target in core::iter::once(h).chain(members[..count].iter().copied()) {
+        if found.is_some() {
+            break;
+        }
+        let Some(t) = store(target) else { continue };
+        found = t.with(|t| {
+            for &c in t.crls.items() {
+                if !passed {
+                    passed = c == prev;
+                    continue;
+                }
+                if keep(c) {
+                    return Some(CertDuplicateCRLContext(c));
+                }
+            }
+            None
+        });
+    }
+    for &m in &members[..count] {
+        CertCloseStore(m, 0);
+    }
+    if !prev.is_null() {
+        CertFreeCRLContext(prev);
+    }
+    found.unwrap_or_else(|| error(CRYPT_E_NOT_FOUND, core::ptr::null()))
+}
+
+/// CertEnumCRLsInStore: the next CRL (one more reference), freeing
+/// `prev`; NULL with CRYPT_E_NOT_FOUND at the end.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertEnumCRLsInStore(
+    h: *mut c_void,
+    prev: *const CrlContext,
+) -> *const CrlContext {
+    next_crl_after(h, prev, |_| true)
+}
+
+const CRL_FIND_ANY: u32 = 0;
+const CRL_FIND_ISSUED_BY: u32 = 1;
+const CRL_FIND_EXISTING: u32 = 2;
+const CRL_FIND_ISSUED_BY_AKI_FLAG: u32 = 0x1;
+const CRL_FIND_ISSUED_BY_SIGNATURE_FLAG: u32 = 0x2;
+
+/// CertFindCRLInStore(store, encoding, flags, type, para, prev): the next
+/// CRL that matches: CRL_FIND_ANY, CRL_FIND_ISSUED_BY (para: the issuer's
+/// certificate context; its subject is the CRL's issuer, and with
+/// CRL_FIND_ISSUED_BY_SIGNATURE_FLAG its key signed the CRL),
+/// CRL_FIND_EXISTING (para: a CRL of the same issuer). Others are
+/// recorded (CRYPT_E_NOT_FOUND).
+#[unsafe(no_mangle)]
+pub extern "system" fn CertFindCRLInStore(
+    h: *mut c_void,
+    _encoding: u32,
+    flags: u32,
+    kind: u32,
+    para: *const c_void,
+    prev: *const CrlContext,
+) -> *const CrlContext {
+    match kind {
+        CRL_FIND_ANY => next_crl_after(h, prev, |_| true),
+        CRL_FIND_ISSUED_BY => {
+            let issuer = para as *const CertContext;
+            if issuer.is_null() {
+                return next_crl_after(h, prev, |_| true);
+            }
+            if flags & CRL_FIND_ISSUED_BY_AKI_FLAG != 0 {
+                unsupported(b"crypt32.dll!CertFindCRLInStore(AKI flag: by name)", flags.into());
+            }
+            // SAFETY: the caller's certificate context.
+            let subject = unsafe {
+                let info = &*(*issuer).info;
+                core::slice::from_raw_parts(info.subject.data, info.subject.size as usize)
+            };
+            next_crl_after(h, prev, |c| {
+                crl_issuer(c) == subject
+                    && (flags & CRL_FIND_ISSUED_BY_SIGNATURE_FLAG == 0
+                        || crate::cert::CryptVerifyCertificateSignatureEx(
+                            0,
+                            1,
+                            3,
+                            c.cast(),
+                            2,
+                            issuer.cast(),
+                            0,
+                            core::ptr::null(),
+                        ) != 0)
+            })
+        }
+        CRL_FIND_EXISTING => {
+            let other = para as *const CrlContext;
+            if !crate::crl::is_crl(other) {
+                return error(E_INVALIDARG, core::ptr::null());
+            }
+            let issuer = crl_issuer(other);
+            next_crl_after(h, prev, |c| crl_issuer(c) == issuer)
+        }
+        _ => {
+            unsupported(b"crypt32.dll!CertFindCRLInStore(type)", kind.into());
+            if !prev.is_null() {
+                CertFreeCRLContext(prev);
+            }
+            error(CRYPT_E_NOT_FOUND, core::ptr::null())
+        }
+    }
+}
+
+/// CertDeleteCRLFromStore: the CRL removed from its store; the context is
+/// freed in any case.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertDeleteCRLFromStore(crl: *const CrlContext) -> i32 {
+    if crl.is_null() {
+        return error(E_INVALIDARG, 0);
+    }
+    // SAFETY: a context of ours.
+    let h = unsafe { (*crl).store };
+    if let Some(s) = store(h) {
+        let removed =
+            s.with(|s| s.crls.items().iter().position(|&c| c == crl).map(|i| s.crls.remove(i)));
+        if let Some(c) = removed {
+            crate::crl::disown(c);
+            CertFreeCRLContext(c);
+        }
+    }
+    CertFreeCRLContext(crl);
+    1
 }
 
 const CERT_STORE_CTRL_RESYNC: u32 = 1;

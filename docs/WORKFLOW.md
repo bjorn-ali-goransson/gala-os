@@ -767,8 +767,9 @@ numbers, 0x7f.., fail there).
   on the ISO). Without it the kernel refuses a program with imports
   (`wow64: <name> imports DLLs, and there is no ...`); with it, every
   32-bit program starts through it (its exceptions and APCs need it).
-  No 32-bit kernel32 yet. Check imports with `llvm-readobj
-  --coff-imports`.
+  One on kernel32 ships `("<scenario>", "x86/kernel32.dll",
+  "Windows/SysWOW64")` as well (`wow64_k32_test`). Check imports with
+  `llvm-readobj --coff-imports`.
 - Imports on x86 are `#[link(name = "...", kind = "raw-dylib",
   import_name_type = "undecorated")]` (without it a stdcall import is
   named `_Name@N`, which no DLL exports). Keep data imports (`static`)
@@ -776,7 +777,27 @@ numbers, 0x7f.., fail there).
   crashes rustc 1.97 ("Ty::fn_sig() called on non-fn type"). The
   memory routines the compiler calls (`memcpy`) do not come from a
   raw-dylib import: take ntrt's x86 runtime as a dependency (`use ntrt as
-  _;`) even when the program calls only kernel32.
+  _;`) even when the program calls only kernel32 (a 32-bit DLL too: the
+  32-bit kernel32 takes `memcpy`, MSVC's 64-bit division helpers,
+  `__chkstk` and `strlen` from it; its no_mangle ones become extra
+  exports).
+- `raw-dylib` blocks of a crate built for both: `import_name_type` is
+  an error on x64, so they carry `#[cfg_attr(target_arch = "x86",
+  link(name = "...", kind = "raw-dylib", import_name_type =
+  "undecorated"))]` and `#[cfg_attr(not(target_arch = "x86"), link(name
+  = "...", kind = "raw-dylib"))]` (kernel32, gala_stubs).
+- A structure with pointer-sized fields (handles, SIZE_Ts, pointers)
+  is a `repr(C)` struct with `usize` fields, its offsets `offset_of!`,
+  never byte offsets of the x64 layout; a query of an information class
+  with such fields passes the struct's size (wow64.dll answers only the
+  x86 length). TEB and PEB fields: the arch module's named offsets
+  (`teb_read(TEB_LAST_ERROR)`), never `gs:[0x68]`.
+- A 32-bit C program: `user/wow64_c_test` (main.c, `build.sh`: clang
+  for i686-pc-windows-msvc, an import library from a .def file with the
+  stdcall names `Name@N` and `llvm-dlltool -m i386 --kill-at`, lld-link
+  without a CRT); the binary is checked in (`user/bin/wow64_c_test.exe`,
+  shipped from there by its scenario); rerun `build.sh` after editing
+  main.c.
 - A 32-bit DLL (USER_DLLS_X86, exported as `test<name>32.dll` or its
   own `<name>32.dll`): its exports keep their undecorated names
   (`#[unsafe(no_mangle)] extern "system"`, naked functions too); symbols
@@ -985,11 +1006,11 @@ inheriting the listener's non-blocking mode.
 
 `schannel_test` is a TLS client of Nginx (OpenSSL) inside the guest: the
 scenario starts `nginx.exe` with `start=` and
-`user/schannel_test/nginx.conf` (ports 8443-8447 on 127.0.0.1, so no
+`user/schannel_test/nginx.conf` (ports 8443-8449 on 127.0.0.1, so no
 xtask network client is involved: 8443 the issued certificate, 8444
 self-signed, 8445 expired, 8446 resumption from Nginx's own session
-cache, 8447 client certificates), and the test retries its connect
-while Nginx starts. `/session` on 8443 and 8446 answers Nginx's
+cache, 8447 client certificates, 8448 a revoked certificate, 8449 one
+that is not), and the test retries its connect while Nginx starts. `/session` on 8443 and 8446 answers Nginx's
 `$ssl_session_reused` ("r" resumed, "." not), `/client` on 8447
 `$ssl_client_verify $ssl_client_s_dn`: what Nginx saw, the peer's
 view of a check. On Windows, run-all.ps1 starts the same Nginx from a
@@ -1009,8 +1030,11 @@ on `user/http_client`: a change to the engine boots both scenarios.
   (`openssl ca` sets a past validity, `x509 -req` cannot), a self-signed
   one, an RSA pair for the test's own server (`server-rsa.cer`/`.p8`,
   also used by the host tests), an ECDSA P-384 one for it
-  (`server-ec384.cer`/`.p8`) and a client certificate (`client.*`,
-  ECDSA P-256, clientAuth). They are valid from the moment they are
+  (`server-ec384.cer`/`.p8`), a client certificate (`client.*`,
+  ECDSA P-256, clientAuth), and the revocation set: `revoked.*` and
+  `notrevoked.*` naming the CA's CRL at http://127.0.0.1:8080/ca.crl,
+  and `ca.crl` listing the first (`sh make.sh crl` makes only these
+  with the CA that is there). They are valid from the moment they are
   made: host tests use a fixed clock after that (`TODAY` in
   `user/schannel_tls/src/tests.rs`: move it when the certificates are
   made again). Regenerating changes every file and nothing in the tests'
@@ -1040,15 +1064,35 @@ on `user/http_client`: a change to the engine boots both scenarios.
   CERT_TRUST_* error bits as detail (0x20 an untrusted root, 0x10000 a
   partial chain, 0x1 time, 0x8 a signature): Schannel and programs that
   check chains themselves (curl's `--cacert`, Go) leave the same line.
-  A root of `gala\roots` crypt32 cannot decode is recorded as
-  `crypt32.dll!ROOT store (a certificate that does not decode)`.
+  A file of `gala\roots` or `gala\ca` crypt32 cannot decode is
+  recorded as `crypt32.dll!machine store (a certificate or CRL that
+  does not decode)`.
+- Revocation is checked offline: crypt32 takes CRLs from gala's CA
+  store, `C:\Windows\System32\gala\ca` (a scenario ships its CRLs
+  there with an EXTRA_MODULES line, as schannel_test does `ca.crl`), the
+  caller's stores and hAdditionalStore, and fetches nothing. A refused
+  certificate leaves `crypt32.dll!SSL: CRYPT_E_REVOKED` (or
+  CRYPT_E_REVOCATION_OFFLINE: 0x1000040 in the bits; or
+  CRYPT_E_NO_REVOCATION_CHECK: 0x40, a certificate naming no CRL
+  distribution point, which is never checked by CRL);
+  `crypt32.dll!revocation: CRL not fetched (offline only)` says no CRL of
+  its issuer was there (OCSP: `OCSP not asked`); `crypt32.dll!revocation:
+  a CRL whose signature does not verify` (or of another scope) says a CRL
+  there was not used.
+  Schannel returns the CRYPT_E_* status itself (curl prints
+  `CRYPT_E_REVOKED (0x80092010)`, exit 35).
 - The chain engine's own tests are `cert_test`'s chain part
   (`user/cert_test/src/chain.rs`) with certificates made once by
   `user/cert_test/chain/make.sh` (RSA root, ECDSA P-384 intermediate,
   P-256 leaves; fixed validity 2025-2045, so the times in the test are
   fixed); its trust comes from an engine with hExclusiveRoot, so the
-  test needs no change to Windows' root store. Each part prints
-  `cert_test: chain: <part>` before its checks.
+  test needs no change to Windows' root store; the same `make.sh` makes
+  the CRLs of the revocation checks (`inter.crl` listing `revoked.cer`,
+  an out-of-date `inter-old.crl`, `root.crl`), which `cert_test`'s CRL
+  part (`user/cert_test/src/crl.rs`) uses too. Its keys are not kept: a
+  new CRL means making them all again (the tests' expectations stay).
+  Each part prints `cert_test: chain: <part>` (`cert_test: crl:
+  <part>`) before its checks.
 - SEC_E_INCOMPLETE_MESSAGE means the caller passes the same bytes again
   with more (schannel_tls keeps a count, `retained`); a rustls slice that
   still holds a partial handshake message must be the same buffer on the
@@ -1094,10 +1138,13 @@ on `user/http_client`: a change to the engine boots both scenarios.
   client certificate after a refused session offer: no replay")`. The
   host tests `incomplete_credentials_*` run it in memory, also with the
   server's flight a few bytes at a time.
-- Schannel's revocation check is not implemented (recorded when asked):
-  the scenarios pass curl's `--ssl-no-revoke` and Git's
-  `http.schannelCheckRevoke=false`, as on Windows a certificate without
-  a CRL distribution point may fail it.
+- Schannel checks revocation when the credential asks
+  (SCH_CRED_REVOCATION_CHECK_*: curl without `--ssl-no-revoke`). The
+  scenarios' steps against certificates that name no CRL distribution
+  point pass curl's `--ssl-no-revoke` and Git's
+  `http.schannelCheckRevoke=false`: Windows has nothing to check those
+  by. curl.sh's `revocation`/`revoked` steps (ports 8449/8448) check
+  without it.
 
 ### busybox
 
@@ -2860,7 +2907,7 @@ ARCHITECTURE "Waits".
 | gala-um's platform | `kernel/src/hosted/`, `um/` |
 | Baked fonts, icons, wallpapers | `kernel/assets/`, `fonts/selawik/` |
 | Test runtime for user programs (x64, and x86 for 32-bit ones) | `user/ntrt/` (`x64.rs`, `x86.rs`) |
-| WOW64: the kernel's part, gala's wow64.dll, the 32-bit ntdll, the 32-bit tests | `kernel/src/nt/wow64.rs`, `user/wow64/`, `user/testntdll/` (`x86.rs`, `seh_x86.rs`), `user/wow64_*_test/`, `user/testdll32/` |
+| WOW64: the kernel's part, gala's wow64.dll, the 32-bit ntdll and kernel32, the 32-bit tests | `kernel/src/nt/wow64.rs`, `user/wow64/`, `user/testntdll/` (`x86.rs`, `seh_x86.rs`), `user/kernel32/` (`x86.rs`), `user/wow64_*_test/` (`wow64_c_test`: C), `user/testdll32/` |
 | Test programs, test DLLs, stand-in ntdll | `user/*_test/`, `user/testdll*`, `user/testntdll/` |
 | Linux test programs, their binaries and transcripts | `user/lx/`, `user/lx/bin/` |
 | `gala install` (winget packages): library, commands, downloads, test source | `user/galapkg/`, `user/gala/src/pkg.rs`, `user/gala/src/fetch.rs`, `user/pk_install_test/` |

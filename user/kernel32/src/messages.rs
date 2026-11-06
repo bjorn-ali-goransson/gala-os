@@ -96,6 +96,13 @@ const MESSAGES: &[(u32, &str)] = &[
         0x8009_0331,
         "The client and server cannot communicate, because they do not possess a common algorithm.",
     ),
+    // Revocation (winerror.h's texts), which Schannel returns as such.
+    (0x8009_2010, "The certificate is revoked."),
+    (0x8009_2012, "The revocation function was unable to check revocation for the certificate."),
+    (
+        0x8009_2013,
+        "The revocation function was unable to check revocation because the revocation server was offline.",
+    ),
 ];
 
 const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x200;

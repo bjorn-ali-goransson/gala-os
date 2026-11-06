@@ -48,12 +48,33 @@
 //! 8. A certificate signed by a CA:FALSE one: CERT_TRUST_INVALID_BASIC_
 //!    CONSTRAINTS on the signer (element 1), TRUST_E_BASIC_CONSTRAINTS
 //!    from CERT_CHAIN_POLICY_BASIC_CONSTRAINTS.
-//! 9. Revocation asked for (CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT)
-//!    of certificates that name no CRL or OCSP responder:
-//!    CERT_TRUST_REVOCATION_STATUS_UNKNOWN on the leaf and intermediate,
-//!    not the root; the SSL policy's CRYPT_E_NO_REVOCATION_CHECK (what
-//!    Schannel reports for such certificates on Windows), none with
-//!    SECURITY_FLAG_IGNORE_REVOCATION.
+//! 9. Revocation (CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT with
+//!    CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY: the CRLs given are all
+//!    there is, and the distribution points, on crl.chain.test, do not
+//!    resolve), with the CRLs of `chain/make.sh` in hAdditionalStore:
+//!    - none: CERT_TRUST_REVOCATION_STATUS_UNKNOWN |
+//!      CERT_TRUST_IS_OFFLINE_REVOCATION on the leaf and intermediate
+//!      (each names a CRL), not the root; the SSL policy's
+//!      CRYPT_E_REVOCATION_OFFLINE at element 0, at element 1 with
+//!      CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG, none with
+//!      SECURITY_FLAG_IGNORE_REVOCATION; only the leaf with
+//!      CERT_CHAIN_REVOCATION_CHECK_END_CERT;
+//!    - the intermediate's and the root's current CRLs: no error, also
+//!      with CERT_CHAIN_REVOCATION_CHECK_CHAIN (a self-signed root is not
+//!      checked); a leaf that names no CRL (client.cer) is not checked by
+//!      them: CERT_TRUST_REVOCATION_STATUS_UNKNOWN alone and
+//!      CRYPT_E_NO_REVOCATION_CHECK (what Schannel reports for such
+//!      certificates on Windows), none with
+//!      CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG;
+//!    - a leaf the intermediate's CRL lists: CERT_TRUST_IS_REVOKED on it
+//!      (and the chain), CRYPT_E_REVOKED at element 0 from the SSL and
+//!      base policies, none with SECURITY_FLAG_IGNORE_REVOCATION;
+//!    - that leaf (it names a distribution point) with only an
+//!      out-of-date CRL of the intermediate, or none:
+//!      CERT_TRUST_REVOCATION_STATUS_UNKNOWN |
+//!      CERT_TRUST_IS_OFFLINE_REVOCATION, CRYPT_E_REVOCATION_OFFLINE;
+//!      with the current CRL's signature broken it is not revoked
+//!      either (a CRL that does not verify is not used).
 //! 10. The machine's roots (the default engine, HCCE_CURRENT_USER and
 //!     HCCE_LOCAL_MACHINE): the schannel test CA's RSA localhost
 //!     certificate is trusted with no additional store, matches
@@ -74,6 +95,12 @@ const LEAF: &[u8] = include_bytes!("../chain/leaf.cer");
 const CLIENT: &[u8] = include_bytes!("../chain/client.cer");
 const NOTCA: &[u8] = include_bytes!("../chain/notca.cer");
 const UNDERLING: &[u8] = include_bytes!("../chain/underling.cer");
+const REVOKED: &[u8] = include_bytes!("../chain/revoked.cer");
+/// The intermediate's CRL (lists REVOKED), its CRL of 2020..2021, the
+/// root's (empty).
+const INTER_CRL: &[u8] = include_bytes!("../chain/inter.crl");
+const INTER_OLD_CRL: &[u8] = include_bytes!("../chain/inter-old.crl");
+const ROOT_CRL: &[u8] = include_bytes!("../chain/root.crl");
 /// The schannel test CA's RSA localhost certificate (DNS:localhost,
 /// IP:127.0.0.1), issued by the CA in the machine's roots.
 const LOCALHOST: &[u8] = include_bytes!("../../schannel_test/certs/server-rsa.cer");
@@ -223,6 +250,14 @@ unsafe extern "system" {
         para: *const PolicyPara,
         status: *mut PolicyStatus,
     ) -> Bool;
+    fn CertAddEncodedCRLToStore(
+        store: Handle,
+        encoding: u32,
+        data: *const u8,
+        len: u32,
+        disposition: u32,
+        out: *mut *const super::crl::CrlContext,
+    ) -> Bool;
 }
 
 const E_INVALIDARG: u64 = 0x8007_0057;
@@ -232,7 +267,9 @@ const CERT_TRUST_IS_NOT_TIME_VALID: u32 = 0x1;
 const CERT_TRUST_IS_NOT_SIGNATURE_VALID: u32 = 0x8;
 const CERT_TRUST_IS_NOT_VALID_FOR_USAGE: u32 = 0x10;
 const CERT_TRUST_IS_UNTRUSTED_ROOT: u32 = 0x20;
+const CERT_TRUST_IS_REVOKED: u32 = 0x4;
 const CERT_TRUST_REVOCATION_STATUS_UNKNOWN: u32 = 0x40;
+const CERT_TRUST_IS_OFFLINE_REVOCATION: u32 = 0x100_0000;
 const CERT_TRUST_INVALID_BASIC_CONSTRAINTS: u32 = 0x400;
 const CERT_TRUST_IS_PARTIAL_CHAIN: u32 = 0x1_0000;
 const CERT_TRUST_HAS_KEY_MATCH_ISSUER: u32 = 0x2;
@@ -250,7 +287,11 @@ const SECURITY_FLAG_IGNORE_UNKNOWN_CA: u32 = 0x100;
 const SECURITY_FLAG_IGNORE_CERT_CN_INVALID: u32 = 0x1000;
 const SECURITY_FLAG_IGNORE_CERT_DATE_INVALID: u32 = 0x2000;
 const AUTHTYPE_SERVER: u32 = 2;
+const CERT_CHAIN_REVOCATION_CHECK_END_CERT: u32 = 0x1000_0000;
+const CERT_CHAIN_REVOCATION_CHECK_CHAIN: u32 = 0x2000_0000;
 const CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT: u32 = 0x4000_0000;
+const CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY: u32 = 0x8000_0000;
+const CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG: u32 = 0x100;
 const USAGE_MATCH_TYPE_OR: u32 = 1;
 
 const CERT_E_EXPIRED: u64 = 0x800b_0101;
@@ -260,7 +301,9 @@ const CERT_E_CN_NO_MATCH: u64 = 0x800b_010f;
 const CERT_E_WRONG_USAGE: u64 = 0x800b_0110;
 const TRUST_E_CERT_SIGNATURE: u64 = 0x8009_6004;
 const TRUST_E_BASIC_CONSTRAINTS: u64 = 0x8009_6019;
+const CRYPT_E_REVOKED: u64 = 0x8009_2010;
 const CRYPT_E_NO_REVOCATION_CHECK: u64 = 0x8009_2012;
+const CRYPT_E_REVOCATION_OFFLINE: u64 = 0x8009_2013;
 
 const CERT_STORE_PROV_MEMORY: usize = 2;
 const CERT_STORE_ADD_ALWAYS: u32 = 4;
@@ -286,6 +329,40 @@ fn store_of(c: &mut Checks, certs: &[&[u8]]) -> Result<Handle, u32> {
         }
         Ok(s)
     }
+}
+
+/// A memory store holding `certs` and the CRLs `crls`.
+fn store_with_crls(c: &mut Checks, certs: &[&[u8]], crls: &[&[u8]]) -> Result<Handle, u32> {
+    let s = store_of(c, certs)?;
+    for der in crls {
+        // SAFETY: our store and DER CRL.
+        let ok = unsafe {
+            CertAddEncodedCRLToStore(
+                s,
+                X509_ASN_ENCODING,
+                der.as_ptr(),
+                der.len() as u32,
+                CERT_STORE_ADD_ALWAYS,
+                null_mut(),
+            )
+        };
+        // SAFETY: plain call.
+        c.ok(ok != 0, unsafe { GetLastError() }.into())?;
+    }
+    Ok(s)
+}
+
+/// Each element's revocation bits (IS_REVOKED, REVOCATION_STATUS_UNKNOWN,
+/// IS_OFFLINE_REVOCATION).
+fn revocation_bits(chain: *const ChainContext) -> [u32; 3] {
+    let mask = CERT_TRUST_IS_REVOKED
+        | CERT_TRUST_REVOCATION_STATUS_UNKNOWN
+        | CERT_TRUST_IS_OFFLINE_REVOCATION;
+    let mut bits = [0; 3];
+    for (i, slot) in bits.iter_mut().enumerate().take(elements(chain).len()) {
+        *slot = element(chain, i).status.error & mask;
+    }
+    bits
 }
 
 fn context(c: &mut Checks, der: &[u8]) -> Result<*const CertContext, u32> {
@@ -660,18 +737,89 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     free(constrained);
 
     super::out(b"cert_test: chain: revocation\r\n");
-    // 9. Revocation is not checked: its status is unknown.
-    let flags = CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
+    // 9. Revocation, from the CRLs in hAdditionalStore (offline).
+    let unknown = CERT_TRUST_REVOCATION_STATUS_UNKNOWN;
+    let offline = unknown | CERT_TRUST_IS_OFFLINE_REVOCATION;
+    let cache = CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY;
+    let flags = CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT | cache;
+    // No CRLs: the ones they name are out of reach.
     let revoke = chain(c, engine, leaf, Some(T2030), inter_store, &p, flags)?;
-    for (i, want) in [true, true, false].iter().enumerate() {
-        let unknown = element(revoke, i).status.error & CERT_TRUST_REVOCATION_STATUS_UNKNOWN != 0;
-        c.ok(unknown == *want, i as u64)?;
-    }
+    let bits = revocation_bits(revoke);
+    c.ok(bits == [offline, offline, 0], bits[0].into())?;
     let r = ssl(c, revoke, "www.chain.test", 0)?;
-    c.ok(r == (CRYPT_E_NO_REVOCATION_CHECK, 0, 0), r.0)?;
+    c.ok(r == (CRYPT_E_REVOCATION_OFFLINE, 0, 0), r.0)?;
+    let flags_end = CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG;
+    let r = policy(c, CERT_CHAIN_POLICY_BASE, revoke, flags_end, None)?;
+    c.ok(r == (CRYPT_E_REVOCATION_OFFLINE, 0, 1), r.0)?;
     let r = ssl(c, revoke, "www.chain.test", SECURITY_FLAG_IGNORE_REVOCATION)?;
     c.ok(r == PASS, r.0)?;
     free(revoke);
+    let end_only = CERT_CHAIN_REVOCATION_CHECK_END_CERT | cache;
+    let revoke = chain(c, engine, leaf, Some(T2030), inter_store, &p, end_only)?;
+    let bits = revocation_bits(revoke);
+    c.ok(bits == [offline, 0, 0], bits[1].into())?;
+    free(revoke);
+    // The current CRLs: not revoked.
+    let current = store_with_crls(c, &[INTER], &[INTER_CRL, ROOT_CRL])?;
+    for f in [flags, CERT_CHAIN_REVOCATION_CHECK_CHAIN | cache] {
+        let good = chain(c, engine, leaf, Some(T2030), current, &p, f)?;
+        // SAFETY: the chain crypt32 gave.
+        unsafe { c.eq((*good).status.error.into(), 0)? };
+        let bits = revocation_bits(good);
+        c.ok(bits == [0, 0, 0], bits[0].into())?;
+        let r = ssl(c, good, "www.chain.test", 0)?;
+        c.ok(r == PASS, r.0)?;
+        free(good);
+    }
+    // A leaf naming no CRL: not checked by them.
+    let client = context(c, CLIENT)?;
+    let unchecked = chain(c, engine, client, Some(T2030), current, &p, flags)?;
+    let bits = revocation_bits(unchecked);
+    c.ok(bits == [unknown, 0, 0], bits[0].into())?;
+    let r = policy(c, CERT_CHAIN_POLICY_BASE, unchecked, 0, None)?;
+    c.ok(r == (CRYPT_E_NO_REVOCATION_CHECK, 0, 0), r.0)?;
+    let r = policy(c, CERT_CHAIN_POLICY_BASE, unchecked, flags_end, None)?;
+    c.ok(r == PASS, r.0)?;
+    free(unchecked);
+    // SAFETY: ours.
+    unsafe { CertFreeCertificateContext(client) };
+    // A revoked leaf.
+    let revoked = context(c, REVOKED)?;
+    let gone = chain(c, engine, revoked, Some(T2030), current, &p, flags)?;
+    // SAFETY: the chain crypt32 gave.
+    unsafe { c.eq((*gone).status.error.into(), CERT_TRUST_IS_REVOKED.into())? };
+    let bits = revocation_bits(gone);
+    c.ok(bits == [CERT_TRUST_IS_REVOKED, 0, 0], bits[0].into())?;
+    let r = ssl(c, gone, "revoked.chain.test", 0)?;
+    c.ok(r == (CRYPT_E_REVOKED, 0, 0), r.0)?;
+    let r = policy(c, CERT_CHAIN_POLICY_BASE, gone, 0, None)?;
+    c.ok(r == (CRYPT_E_REVOKED, 0, 0), r.0)?;
+    let r = ssl(c, gone, "revoked.chain.test", SECURITY_FLAG_IGNORE_REVOCATION)?;
+    c.ok(r == PASS, r.0)?;
+    free(gone);
+    // Out of date, absent or not verifying: offline (it names a CRL).
+    let mut forged = [0u8; 512];
+    let forged = &mut forged[..INTER_CRL.len()];
+    forged.copy_from_slice(INTER_CRL);
+    let last = forged.len() - 1;
+    forged[last] ^= 1; // inside the signature's s
+    let old = store_with_crls(c, &[INTER], &[INTER_OLD_CRL, ROOT_CRL])?;
+    let broken = store_with_crls(c, &[INTER], &[forged, ROOT_CRL])?;
+    for (i, s) in [old, inter_store, broken].into_iter().enumerate() {
+        let stale = chain(c, engine, revoked, Some(T2030), s, &p, flags)?;
+        let bits = revocation_bits(stale);
+        c.ok(bits[0] == offline, i as u64)?;
+        let r = ssl(c, stale, "revoked.chain.test", 0)?;
+        c.ok(r == (CRYPT_E_REVOCATION_OFFLINE, 0, 0), r.0)?;
+        free(stale);
+    }
+    // SAFETY: what we made.
+    unsafe {
+        CertFreeCertificateContext(revoked);
+        for s in [current, old, broken] {
+            CertCloseStore(s, 0);
+        }
+    }
 
     super::out(b"cert_test: chain: machine roots\r\n");
     // 10. The machine's roots.

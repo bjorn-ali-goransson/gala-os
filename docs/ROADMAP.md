@@ -70,17 +70,18 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: step 6's rest (revocation, winhttp keeping its credential
-   handle so it resumes, a server asking for client certificates, the
-   MY store's automatic client certificate; ECDSA server keys, client
-   session resumption and client certificates are done).
+2. **TLS**: step 6's rest (revocation information fetched from the
+   distribution point, winhttp keeping its credential handle so it
+   resumes, a server asking for client certificates, the MY store's
+   automatic client certificate; ECDSA server keys, client session
+   resumption, client certificates and offline revocation are done).
 3. **LX**: seams 1 and 5 as their areas are touched, seam 4's NT surface;
    milestone 2's rest (busybox runs; threads, futex, fs_test's links
    done) as filler.
 4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW**: stage 3's rest (gala's kernel32 built for x86, so the
-   PENDING `wow64_k32_test` passes; then kernelbase, msvcrt, advapi32):
+5. **WOW**: stage 3's rest (msvcrt for x86, then kernelbase, advapi32;
+   kernel32_test built for x86):
    the process model under PK's x86 installers and programs (Inno
    Setup's x64 Setup runs natively; an x86 Inno installer needs stage
    3-4).
@@ -155,11 +156,11 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; kernel32 next (`wow64_k32_test`, PENDING); ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | in progress | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; msvcrt next; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates done; revocation next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
@@ -1145,10 +1146,7 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    SSPI texts in FormatMessage, wldap32 stubs. Still open there: the
    pinned curl.se version is fetched from curl.se, which keeps versions
    from 8.17.0 on; a smart-HTTP Git server (`git
-   http-backend`) and pushes; Schannel's revocation check (the
-   scenarios pass `--ssl-no-revoke` / `http.schannelCheckRevoke=false`;
-   what Windows does for a certificate with no CRL distribution point
-   is to be checked there); what the ledger shows besides
+   http-backend`) and pushes; what the ledger shows besides
    (msvcrt's _localtime64_s, userenv's GetUserProfileDirectoryA, bcrypt's
    DH/DSA and chaining-mode property for libssh2's WinCNG probe,
    WSAIoctl's SIO_IDEAL_SEND_BACKLOG_QUERY).
@@ -1181,19 +1179,14 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    carries the server's chain in it (what curl's `--cacert` check
    reads). Schannel's automatic validation is the same engine and SSL
    policy (one trust decision; webpki only in the host tests). Still
-   open there: revocation (not checked: with a CERT_CHAIN_REVOCATION_*
-   flag the elements get CERT_TRUST_REVOCATION_STATUS_UNKNOWN, with
-   CERT_TRUST_IS_OFFLINE_REVOCATION when they name a CRL or OCSP
-   responder, and the policies CRYPT_E_REVOCATION_OFFLINE or
-   CRYPT_E_NO_REVOCATION_CHECK, as for a certificate Windows cannot
-   check; the scenarios pass `--ssl-no-revoke`); name constraints (a
+   open there: name constraints (a
    stopgap: "Known issues and stopgaps"); P-521 keys (one root of the
    public bundle cannot verify what it signs, recorded); RSA-PSS
    signatures; issuance policies; AIA fetching of missing
    intermediates (a chain the server sends incomplete stays partial);
-   CTLs, CRL stores, lower-quality chains; no Windows run of
-   `cert_test`'s chain part yet (its root is an exclusive one, so it
-   needs no administrator).
+   CTLs, lower-quality chains; no Windows run of `cert_test`'s chain
+   part yet (its root is an exclusive one, so it needs no
+   administrator).
 6. Done: ECDSA server keys, session resumption, client certificates
    (`schannel_test` against Nginx on ports 8443-8447 and its in-process
    server, host tests `cargo test -p schannel_tls`, `curl_schannel`'s
@@ -1208,8 +1201,29 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    certificate sent when asked; SEC_I_INCOMPLETE_CREDENTIALS with
    SECPKG_ATTR_ISSUER_LIST_EX, then a credential with a certificate (the
    handshake run again from its recording) or ISC_REQ_USE_SUPPLIED_CREDS
-   (none). Still open there: revocation (offline CRLs first; the
-   scenarios pass `--ssl-no-revoke`); winhttp/wininet keeping a
+   (none). Revocation, offline (`cert_test` crl.rs and chain.rs,
+   `schannel_test` on ports 8448/8449, `curl_schannel`'s `revocation`
+   and `revoked` steps; ARCHITECTURE "CRLs and revocation"): crypt32's
+   CRL contexts and CRL stores (gala's CA store from
+   `System32\gala\ca`), CertFindCertificateInCRL,
+   CertVerifyCRLRevocation, CertVerifyRevocation's default provider, the
+   chain engine's CERT_CHAIN_REVOCATION_CHECK_* (CERT_TRUST_IS_REVOKED,
+   REVOCATION_STATUS_UNKNOWN, IS_OFFLINE_REVOCATION) and the policies'
+   CRYPT_E_* answers; Schannel's SCH_CRED_REVOCATION_CHECK_* and
+   SCH_CRED_IGNORE_* flags, a revoked server certificate failing with
+   CRYPT_E_REVOKED (curl 35). Decided: offline first, nothing fetched
+   (crypt32 does not depend on winhttp; Windows fetches through
+   cryptnet). Still open there: fetching a CRL from the distribution
+   point the certificate names (cryptnet's CryptRetrieveObjectByUrl over
+   winhttp, cached; the test certificates name Nginx's
+   http://127.0.0.1:8080/ca.crl, which run-all.ps1 serves on Windows),
+   OCSP and stapled OCSP responses, delta CRLs and partitioned
+   (issuing distribution point) CRLs, CERT_REVOCATION_INFO in the chain
+   elements, WinHTTP's WINHTTP_ENABLE_SSL_REVOCATION and WinINet's
+   revocation option; a Windows run of `cert_test`'s CRL part and
+   schannel_test's revocation checks (the expectations are the
+   documented ones and Wine's recorded results);
+   winhttp/wininet keeping a
    credential handle per session so they resume (they acquire one per
    connection); a server asking for client certificates
    (ASC_REQ_MUTUAL_AUTH, recorded) and checking them; the MY store
@@ -1578,28 +1592,40 @@ wow64.dll converts 32-bit system calls in user mode).
   file thunks, Sysnative, the documented exemptions, per-thread
   RtlWow64EnableFsRedirection(Ex); PROCESSOR_ARCHITECTURE=x86,
   PROCESSOR_ARCHITEW6432, ProgramFiles and CommonProgramFiles the (x86)
-  directories, ProgramW6432, `C:\Program Files (x86)`.
+  directories, ProgramW6432, `C:\Program Files (x86)`. **The 32-bit
+  kernel32** (`wow64_k32_test`, a Rust program; `wow64_c_test`, a C
+  program built by clang with stdcall imports through an import library,
+  not large-address-aware): gala's kernel32 built for i686, shipped as
+  `C:\Windows\SysWOW64\kernel32.dll` (`testkernel32_32.dll`), what
+  differs by architecture in its `x64.rs`/`x86.rs` (TEB access, the TEB,
+  PEB, process parameter, CONTEXT and optional header offsets,
+  SLIST_HEADER, the new thread's CONTEXT) and the structures with
+  pointer-sized fields typed (`repr(C)` with `usize`: the basic
+  information classes, MEMORY_BASIC_INFORMATION, OVERLAPPED,
+  STARTUPINFO, SECURITY_ATTRIBUTES, EXCEPTION_RECORD, toolhelp's
+  entries, psapi's counters, the processor information); GetSystemInfo's
+  32-bit answers (PROCESSOR_ARCHITECTURE_INTEL, the process's 2/4 GiB
+  range), GetNativeSystemInfo's AMD64, GetSystemDirectory's SysWOW64,
+  Wow64Disable/Revert/EnableWow64FsRedirection; wow64.dll converts
+  GalaConsoleMode and GalaConsoleCtrl (the console control thread).
 
 **Next**:
-1. Stage 3's rest, the 32-bit system DLLs: **kernel32 for x86**, so the
-   PENDING `wow64_k32_test` (a plain 32-bit program: GetStdHandle,
-   WriteFile, CreateFileW, CreateThread, GetSystemInfo,
-   GetNativeSystemInfo, GetSystemDirectoryW, IsWow64Process,
-   Wow64DisableWow64FsRedirection, ExitProcess) passes once
-   `x86/kernel32.dll` joins its modules and USER_DLLS_X86: the
-   `raw-dylib` blocks with `import_name_type = "undecorated"` on x86;
-   the TEB, PEB, process parameters, CONTEXT (CreateThread, the context
-   functions) and PE header offsets behind named constants per
-   architecture (as testntdll's `x64.rs`/`x86.rs`; about 90 places in
-   lib.rs, process.rs, mapping.rs, runtime.rs, sync.rs, heap.rs,
-   resource.rs, context.rs, procinfo.rs, sysmem.rs, toolhelp.rs,
-   actctx.rs); `core::arch::x86` for cpuid; GetSystemInfo's 32-bit
-   answers (PROCESSOR_ARCHITECTURE_INTEL, the 2/4 GiB range),
-   GetSystemDirectory's SysWOW64, Wow64Disable/Revert/
-   EnableWow64FsRedirection on the 32-bit ntdll's
-   RtlWow64EnableFsRedirection(Ex); then kernel32_test built for x86
-   and a C program (clang, i686-pc-windows-msvc). Then kernelbase,
-   msvcrt, advapi32. Also: the redirector for GalaCreateProcess's image
+1. Stage 3's rest, the 32-bit system DLLs: **msvcrt for x86**: its
+   va_list walkers take 8-byte slots (`*const u64`) where x86 passes
+   4-byte ones (doubles and 64-bit integers 8), its variadic entry points
+   (`global_asm!` in stdio.rs, scan.rs, wide.rs) spill x64 registers,
+   setjmp/longjmp have x64's jmp_buf, the stdio FILE, `_iob` and lconv
+   hold pointers, MXCSR is x64's floating-point control (x86 also has the
+   x87 control word). Then kernelbase, advapi32; kernel32_test built for
+   x86 as a second scenario (xtask builds a package for one target per
+   name: an x86 twin needs its own export name, and testdll/testdll2 for
+   x86). The 32-bit kernel32's own gaps: GetProcessInformation's
+   ProcessMachineTypeInfo answers AMD64; the Wow64*FsRedirection
+   functions are x86-only (64-bit Windows' kernel32 exports them too:
+   what they answer in a 64-bit process is to be observed); the console services
+   besides GalaConsoleMode/Ctrl are not converted by wow64.dll (the
+   ledger names them); its exports include ntrt's runtime symbols
+   (memcmp, strlen, bcmp, __CxxFrameHandler3). Also: the redirector for GalaCreateProcess's image
    path and names relative to a RootDirectory handle (it rewrites full
    NT paths only); nested exceptions and collided unwinds in the x86
    dispatcher; ThreadWow64Context for 64-bit debuggers. Stage 2's
@@ -1991,6 +2017,19 @@ Each entry: what, why it matters, the structural fix, the owning item.
   status codes) are unchecked. Structural fix: record both transcripts
   by running the same pinned binary on a Linux machine (or a Linux VM
   xtask boots), and let `lx-expect` regenerate them. Item LX.
+
+- **`backlog=2` in schannel_test's Nginx** (`user/schannel_test/nginx.conf`,
+  ports 8444-8449): gala's TCP listener keeps its backlog (clamped to
+  `MAX_BACKLOG`, 8) of listening smoltcp sockets, each with full
+  buffers, out of the interface's fixed set of `MAX_SOCKETS` (64,
+  `kernel/src/net/tcp.rs`); Nginx listens with backlog 511, so eight
+  listeners on loopback held all 64 and every client connect failed
+  (now logged once: `net: the loopback interface's 64 sockets are all
+  in use`). Real servers with many listeners hit the same wall.
+  Structural fix: listeners that do not pre-allocate their backlog from
+  a fixed set (a socket set that grows fallibly, or listening sockets
+  made as SYNs arrive, with buffers allocated on establishment; ARCHITECTURE
+  "TCP: net::tcp" TODO); then the option goes. Item N1 (networking).
 
 - **`--no-sandbox` in the Chromium scenarios**: Chromium's renderers
   normally run in a sandbox (restricted, low-integrity and
