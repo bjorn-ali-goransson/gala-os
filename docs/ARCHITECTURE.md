@@ -6091,7 +6091,9 @@ The running parts (milestone 1; `lxrun=`):
   (gala-um refuses: its host libc owns FS). FSGSBASE stays off, so user
   code cannot change them behind the kernel's back.
 - **State** (`lx::state`, a table keyed by pid): the break, the fd table
-  (fds 0-2 on the console; pipes), the stdout/stderr line buffers;
+  (fds 0-2 on the console; pipes: slots holding a shared open file
+  description, `Fd`, whose O_NONBLOCK every dup sees, and the fd's own
+  close-on-exec flag), the stdout/stderr line buffers;
   dropped in `nt::process::finish` (`lx::process_ended`).
 - **Memory** (`lx::mm`): anonymous mmap (the hint if free, else
   top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
@@ -6106,11 +6108,20 @@ The running parts (milestone 1; `lxrun=`):
   entries indexed by number): read, write, close, mmap, mprotect,
   munmap, brk, rt_sigprocmask (stub: no signals), ioctl (ENOTTY),
   writev, getpid, gettid, exit (the thread), exit_group (the process,
-  status & 0xff), fcntl (F_GETPIPE_SZ, F_GETFL; F_GETFD/SETFD/SETFL
-  accepted), getuid/geteuid/getgid/getegid, arch_prctl (SET/GET FS/GS; a
-  base at or above TASK_SIZE is EPERM), set_tid_address (returns the
-  tid), pipe2 (64 KiB, O_NONBLOCK; blocking reads and writes poll every
-  ms until the process ends: no wait queue yet). Anything else:
+  status & 0xff), fcntl (F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD/F_SETFD
+  (FD_CLOEXEC only), F_GETFL/F_SETFL (O_NONBLOCK; the access mode
+  ignored), F_GETPIPE_SZ/F_SETPIPE_SZ), dup, dup2, dup3 (O_CLOEXEC;
+  the lowest free fd, a negative target EBADF), lseek (ESPIPE: only
+  pipes and the console exist), getuid/geteuid/getgid/getegid,
+  arch_prctl (SET/GET FS/GS; a base at or above TASK_SIZE is EPERM),
+  set_tid_address (returns the tid), pipe and pipe2 (O_NONBLOCK,
+  O_CLOEXEC; blocking reads and writes poll every ms until the process
+  ends: no wait queue yet). A pipe keeps its bytes as Linux does, in
+  whole pages: 64 KiB by default, F_SETPIPE_SZ rounds up to a power of
+  two pages (at most 1 MiB unprivileged, EPERM; EBUSY under what it
+  holds); its first page is free only once read through, so a full pipe
+  that gave up a few bytes still refuses a small write; writes up to
+  PIPE_BUF (4096) are whole or nothing. Anything else:
   `errno::to_return(ENOSYS)`.
 - **Errors**: a user buffer is copied whole before anything happens, so
   a fault is EFAULT with nothing done (as Linux's transcripts show for

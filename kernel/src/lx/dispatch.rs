@@ -17,9 +17,9 @@
 use alloc::vec::Vec;
 
 use super::errno::{
-    self, EAGAIN, EBADF, EFAULT, EINTR, EINVAL, ENOMEM, ENOSYS, ENOTTY, EPERM, EPIPE,
+    self, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, ENOMEM, ENOSYS, ENOTTY, EPERM, EPIPE, ESPIPE,
 };
-use super::state::{self, Fd, LxProcess, Object, PIPE_CAPACITY, Stream};
+use super::state::{self, Fd, LxProcess, Object, PIPE_MAX, PIPE_PAGE, Stream};
 use super::syscalls::{self, nr};
 use crate::mm::heap::{KArc, TryVec};
 use crate::nt::object::ObjectBody;
@@ -49,7 +49,13 @@ const F_GETFD: u64 = 1;
 const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
+const F_DUPFD: u64 = 0;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+const F_SETPIPE_SZ: u64 = 1031;
 const F_GETPIPE_SZ: u64 = 1032;
+const FD_CLOEXEC: u64 = 1;
+/// Writes up to this size to a pipe are atomic (PIPE_BUF).
+const PIPE_BUF: usize = 4096;
 const ARCH_SET_GS: u64 = 0x1001;
 const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
@@ -153,6 +159,14 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
             Ok(call.tid)
         }
         nr::PIPE2 => pipe2(call, a(0), a(1)),
+        nr::PIPE => pipe2(call, a(0), 0),
+        nr::DUP => {
+            let f = call.lx.fd(a(0)).ok_or(EBADF)?;
+            call.lx.install(f)
+        }
+        nr::DUP2 => dup_to(call, a(0), a(1), None),
+        nr::DUP3 => dup_to(call, a(0), a(1), Some(a(2))),
+        nr::LSEEK => lseek(call, a(0)),
         _ => missing(call, number),
     }
 }
@@ -228,25 +242,52 @@ fn arch_prctl(call: &Call<'_>, code: u64, addr: u64) -> Result {
 
 fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
     let f = call.lx.fd(fd).ok_or(EBADF)?;
+    let pipe = match &f.object {
+        Object::PipeRead(p) | Object::PipeWrite(p) => Some(p),
+        Object::Console(_) => None,
+    };
     match cmd {
-        F_GETPIPE_SZ => match f.object {
-            Object::PipeRead(_) | Object::PipeWrite(_) => Ok(PIPE_CAPACITY as u64),
-            Object::Console(_) => Err(EBADF),
-        },
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            // The argument is an int: negative is EINVAL.
+            if (arg as i32) < 0 {
+                return Err(EINVAL);
+            }
+            call.lx.install_from(f, cmd == F_DUPFD_CLOEXEC, u64::from(arg as u32))
+        }
+        F_GETFD => Ok(u64::from(call.lx.cloexec(fd).ok_or(EBADF)?)),
+        F_SETFD => {
+            call.lx.set_cloexec(fd, arg & FD_CLOEXEC != 0);
+            Ok(0)
+        }
         F_GETFL => {
             let access = match f.object {
                 Object::PipeRead(_) | Object::Console(Stream::Stdin) => 0,
                 Object::PipeWrite(_) => 1,
                 Object::Console(_) => 2,
             };
-            Ok(access | if f.nonblock { O_NONBLOCK } else { 0 })
+            Ok(access | if f.nonblock() { O_NONBLOCK } else { 0 })
         }
-        F_GETFD | F_SETFD | F_SETFL => {
-            // Close-on-exec and status flags are kept once exec and
-            // shared descriptions exist.
-            ledger::record("fcntl", "linux syscall stub", cmd);
-            let _ = arg;
+        F_SETFL => {
+            // The access mode is ignored; O_NONBLOCK is the status flag
+            // kept (for every dup of the description).
+            f.nonblock.store(arg & O_NONBLOCK != 0, core::sync::atomic::Ordering::Relaxed);
             Ok(0)
+        }
+        F_GETPIPE_SZ => Ok(pipe.ok_or(EBADF)?.state.lock().capacity as u64),
+        F_SETPIPE_SZ => {
+            let pipe = pipe.ok_or(EBADF)?;
+            // Whole pages, a power of two of them, at least one.
+            let pages = (arg as u32 as usize).div_ceil(PIPE_PAGE).max(1).next_power_of_two();
+            let size = pages * PIPE_PAGE;
+            if size > PIPE_MAX {
+                return Err(EPERM);
+            }
+            let mut st = pipe.state.lock();
+            if st.head + st.data.len() > size {
+                return Err(EBUSY);
+            }
+            st.capacity = size;
+            Ok(size as u64)
         }
         _ => {
             ledger::record("fcntl", "linux option missing", cmd);
@@ -255,16 +296,43 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
     }
 }
 
+/// dup2 (`flags` None) and dup3 (O_CLOEXEC or nothing).
+fn dup_to(call: &Call<'_>, old: u64, new: u64, flags: Option<u64>) -> Result {
+    if let Some(flags) = flags
+        && (flags & !O_CLOEXEC != 0 || old == new)
+    {
+        return Err(EINVAL);
+    }
+    let f = call.lx.fd(old).ok_or(EBADF)?;
+    if old == new {
+        return Ok(new);
+    }
+    // The argument is an int: negative is EBADF.
+    if (new as i32) < 0 {
+        return Err(EBADF);
+    }
+    call.lx.install_at(u64::from(new as u32), f, flags.unwrap_or(0) & O_CLOEXEC != 0)?;
+    Ok(new)
+}
+
+/// lseek: a pipe or the console cannot seek.
+fn lseek(call: &Call<'_>, fd: u64) -> Result {
+    match call.lx.fd(fd).ok_or(EBADF)?.object {
+        Object::PipeRead(_) | Object::PipeWrite(_) | Object::Console(_) => Err(ESPIPE),
+    }
+}
+
 fn pipe2(call: &Call<'_>, fds: u64, flags: u64) -> Result {
     if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
         return Err(EINVAL);
     }
     let nonblock = flags & O_NONBLOCK != 0;
+    let cloexec = flags & O_CLOEXEC != 0;
     let pipe = state::new_pipe().map_err(|_| ENOMEM)?;
     let r = KArc::try_new(Fd::new(Object::PipeRead(pipe.clone()), nonblock)).map_err(|_| ENOMEM)?;
     let w = KArc::try_new(Fd::new(Object::PipeWrite(pipe), nonblock)).map_err(|_| ENOMEM)?;
-    let rfd = call.lx.install(r)?;
-    let wfd = match call.lx.install(w) {
+    let rfd = call.lx.install_from(r, cloexec, 0)?;
+    let wfd = match call.lx.install_from(w, cloexec, 0) {
         Ok(w) => w,
         Err(e) => {
             call.lx.close(rfd);
@@ -319,14 +387,14 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
                 if writers == 0 {
                     return Ok(0);
                 }
-                if f.nonblock {
+                if f.nonblock() {
                     return Err(EAGAIN);
                 }
                 pause(call)?;
                 continue;
             }
             call.process.write(buf, &data).map_err(|_| EFAULT)?;
-            pipe.state.lock().data.drain(..data.len());
+            pipe.state.lock().consumed(data.len());
             return Ok(data.len() as u64);
         },
     }
@@ -363,25 +431,27 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
             }
             let (room, readers) = {
                 let st = pipe.state.lock();
-                (PIPE_CAPACITY - st.data.len(), st.readers)
+                (st.free(), st.readers)
             };
             if readers == 0 {
                 // SIGPIPE is not delivered yet: only the error.
                 ledger::record("write", "linux SIGPIPE not delivered", 0);
                 return Err(EPIPE);
             }
-            if room == 0 {
-                if f.nonblock {
+            let count = count as usize;
+            // Up to PIPE_BUF bytes go in whole or not at all; more are
+            // written as room allows (all of it in blocking mode, which
+            // waits for the rest).
+            let fits = if count <= PIPE_BUF { room >= count } else { room > 0 };
+            if !fits {
+                if f.nonblock() {
                     return Err(EAGAIN);
                 }
                 pause(call)?;
                 continue;
             }
-            // Writes of up to a pipe's capacity are whole or nothing in
-            // blocking mode (atomic up to PIPE_BUF; simpler here: all of
-            // it must fit or we wait), non-blocking ones take what fits.
-            let n = (count as usize).min(room);
-            if !f.nonblock && n < count as usize && (count as usize) <= PIPE_CAPACITY {
+            let n = count.min(room);
+            if !f.nonblock() && n < count {
                 pause(call)?;
                 continue;
             }
@@ -452,7 +522,7 @@ fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
             if st.readers == 0 {
                 return Err(EPIPE);
             }
-            let n = data.len().min(PIPE_CAPACITY - st.data.len());
+            let n = data.len().min(st.free());
             if n == 0 {
                 return Err(EAGAIN);
             }

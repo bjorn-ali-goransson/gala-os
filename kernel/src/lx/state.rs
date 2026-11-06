@@ -16,6 +16,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::mm::heap::{AllocError, KArc, TryVec};
 use crate::nt::status::NtStatus;
@@ -47,11 +48,36 @@ impl Stream {
     }
 }
 
+/// A page of a pipe's ring (Linux keeps a pipe's bytes in whole pages).
+pub const PIPE_PAGE: usize = 4096;
+/// The largest pipe an unprivileged process may ask for (the default
+/// /proc/sys/fs/pipe-max-size).
+pub const PIPE_MAX: usize = 1 << 20;
+
 /// The bytes in a pipe and its open ends.
 pub struct PipeState {
     pub data: VecDeque<u8>,
     pub readers: u32,
     pub writers: u32,
+    /// Its size in bytes, whole pages (F_GETPIPE_SZ, F_SETPIPE_SZ).
+    pub capacity: usize,
+    /// How far into its first page the bytes start (read from it already):
+    /// that page is not free again until it is read through.
+    pub head: usize,
+}
+
+impl PipeState {
+    /// Bytes a write may add: the whole pages free, plus what is left of
+    /// the last page in use (writes fill it before taking a new one).
+    pub fn free(&self) -> usize {
+        self.capacity.saturating_sub(self.head + self.data.len())
+    }
+
+    /// `n` bytes were read from the front.
+    pub fn consumed(&mut self, n: usize) {
+        self.data.drain(..n);
+        self.head = if self.data.is_empty() { 0 } else { (self.head + n) % PIPE_PAGE };
+    }
 }
 
 pub struct Pipe {
@@ -76,12 +102,12 @@ impl Drop for Fd {
     }
 }
 
-/// An open file description (shared by dup'ed fds once dup exists; one
-/// per fd for now).
+/// An open file description, shared by the fds dup'ed from it (their
+/// status flags with it; close-on-exec is each fd's own: `Slot`).
 pub struct Fd {
     pub object: Object,
-    /// O_NONBLOCK.
-    pub nonblock: bool,
+    /// O_NONBLOCK (F_SETFL changes it for every dup).
+    pub nonblock: AtomicBool,
 }
 
 impl Fd {
@@ -91,8 +117,18 @@ impl Fd {
             Object::PipeWrite(p) => p.state.lock().writers += 1,
             Object::Console(_) => {}
         }
-        Fd { object, nonblock }
+        Fd { object, nonblock: AtomicBool::new(nonblock) }
     }
+
+    pub fn nonblock(&self) -> bool {
+        self.nonblock.load(Ordering::Relaxed)
+    }
+}
+
+/// An fd: its description and its own close-on-exec flag (FD_CLOEXEC).
+pub struct Slot {
+    pub fd: KArc<Fd>,
+    pub cloexec: bool,
 }
 
 /// The program break (brk(2)): `start` is fixed at exec, `current` is
@@ -107,7 +143,7 @@ pub struct LxProcess {
     pub pid: u64,
     pub brk: IrqMutex<Brk>,
     /// Indexed by fd; None: closed.
-    pub fds: IrqMutex<Vec<Option<KArc<Fd>>>>,
+    pub fds: IrqMutex<Vec<Option<Slot>>>,
     /// stdout's and stderr's bytes since their last newline.
     lines: IrqMutex<[Vec<u8>; 2]>,
     /// The unimplemented system calls already logged (once each).
@@ -121,7 +157,8 @@ static TABLE: IrqMutex<Vec<KArc<LxProcess>>> = IrqMutex::new(Vec::new());
 pub fn create(pid: u64, brk: u64) -> Result<KArc<LxProcess>, AllocError> {
     let mut fds = Vec::new();
     for stream in [Stream::Stdin, Stream::Stdout, Stream::Stderr] {
-        fds.try_push(Some(KArc::try_new(Fd::new(Object::Console(stream), false))?))?;
+        let fd = KArc::try_new(Fd::new(Object::Console(stream), false))?;
+        fds.try_push(Some(Slot { fd, cloexec: false }))?;
     }
     let state = KArc::try_new(LxProcess {
         pid,
@@ -223,21 +260,76 @@ impl LxProcess {
     /// The open file description of `fd`.
     pub fn fd(&self, fd: u64) -> Option<KArc<Fd>> {
         let fds = self.fds.lock();
-        usize::try_from(fd).ok().and_then(|i| fds.get(i)).and_then(|f| f.clone())
+        usize::try_from(fd)
+            .ok()
+            .and_then(|i| fds.get(i))
+            .and_then(|s| s.as_ref())
+            .map(|s| s.fd.clone())
+    }
+
+    /// `fd`'s close-on-exec flag; None if it is not open.
+    pub fn cloexec(&self, fd: u64) -> Option<bool> {
+        let fds = self.fds.lock();
+        usize::try_from(fd)
+            .ok()
+            .and_then(|i| fds.get(i))
+            .and_then(|s| s.as_ref())
+            .map(|s| s.cloexec)
+    }
+
+    /// Sets `fd`'s close-on-exec flag; false if it is not open.
+    pub fn set_cloexec(&self, fd: u64, on: bool) -> bool {
+        let mut fds = self.fds.lock();
+        match usize::try_from(fd).ok().and_then(|i| fds.get_mut(i)).and_then(|s| s.as_mut()) {
+            Some(s) => {
+                s.cloexec = on;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Puts `fd` in the lowest free slot; EMFILE when there is none.
     pub fn install(&self, fd: KArc<Fd>) -> Result<u64, u16> {
+        self.install_from(fd, false, 0)
+    }
+
+    /// Puts `fd` in the lowest free slot at or above `min` (F_DUPFD);
+    /// EMFILE when there is none, EINVAL for `min` beyond the limit.
+    pub fn install_from(&self, fd: KArc<Fd>, cloexec: bool, min: u64) -> Result<u64, u16> {
+        let min = usize::try_from(min).ok().filter(|&m| m < MAX_FDS).ok_or(super::errno::EINVAL)?;
         let mut fds = self.fds.lock();
-        if let Some(i) = fds.iter().position(Option::is_none) {
-            fds[i] = Some(fd);
+        let slot = Some(Slot { fd, cloexec });
+        if let Some(i) = (min..fds.len()).find(|&i| fds[i].is_none()) {
+            fds[i] = slot;
             return Ok(i as u64);
         }
-        if fds.len() >= MAX_FDS {
+        let at = fds.len().max(min);
+        if at >= MAX_FDS {
             return Err(super::errno::EMFILE);
         }
-        fds.try_push(Some(fd)).map_err(|_| super::errno::ENOMEM)?;
-        Ok(fds.len() as u64 - 1)
+        while fds.len() < at {
+            fds.try_push(None).map_err(|_| super::errno::ENOMEM)?;
+        }
+        fds.try_push(slot).map_err(|_| super::errno::ENOMEM)?;
+        Ok(at as u64)
+    }
+
+    /// Puts `fd` at slot `target` (dup2, dup3), closing what was there;
+    /// EBADF for a slot beyond the limit.
+    pub fn install_at(&self, target: u64, fd: KArc<Fd>, cloexec: bool) -> Result<(), u16> {
+        let at =
+            usize::try_from(target).ok().filter(|&t| t < MAX_FDS).ok_or(super::errno::EBADF)?;
+        let old = {
+            let mut fds = self.fds.lock();
+            while fds.len() <= at {
+                fds.try_push(None).map_err(|_| super::errno::ENOMEM)?;
+            }
+            fds[at].replace(Slot { fd, cloexec })
+        };
+        // Dropped outside the table's lock (a pipe end counts down).
+        drop(old);
+        Ok(())
     }
 
     /// Closes `fd`; false if it was not open.
@@ -269,7 +361,13 @@ impl fmt::Display for Lossy<'_> {
 /// A new pipe (no ends yet: `Fd::new` counts them).
 pub fn new_pipe() -> Result<KArc<Pipe>, AllocError> {
     KArc::try_new(Pipe {
-        state: IrqMutex::new(PipeState { data: VecDeque::new(), readers: 0, writers: 0 }),
+        state: IrqMutex::new(PipeState {
+            data: VecDeque::new(),
+            readers: 0,
+            writers: 0,
+            capacity: PIPE_CAPACITY,
+            head: 0,
+        }),
     })
 }
 
@@ -283,6 +381,25 @@ mod tests {
         assert_eq!(alloc::format!("{}", Ending(NtStatus(0))), "-- exit status 0");
         let segv = alloc::format!("{}", Ending(NtStatus::ACCESS_VIOLATION));
         assert_eq!(segv, "-- killed by signal 11");
+    }
+
+    #[test]
+    fn a_pipe_frees_whole_pages() {
+        // pipe_test on Linux: a full pipe that gave up 100 bytes takes no
+        // 100-byte write (its first page is still in use); once 4096 more
+        // are read, one page is free.
+        let pipe = new_pipe().unwrap();
+        let mut st = pipe.state.lock();
+        st.data.extend(core::iter::repeat_n(0u8, PIPE_CAPACITY));
+        assert_eq!(st.free(), 0);
+        st.consumed(100);
+        assert_eq!(st.free(), 0);
+        st.consumed(4096);
+        assert_eq!(st.free(), 4096);
+        // Read empty, the next write starts on a fresh page.
+        let n = st.data.len();
+        st.consumed(n);
+        assert_eq!((st.head, st.free()), (0, PIPE_CAPACITY));
     }
 
     #[test]

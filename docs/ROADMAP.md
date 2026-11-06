@@ -863,8 +863,18 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   `kernel/lx_abi` crate (signal, termios, stat/statx/dirent64/epoll/poll
   layouts) host-tested against them.
 
+- Milestone 2 under way: pipes as Linux keeps them (whole pages:
+  F_GETPIPE_SZ/F_SETPIPE_SZ, a full pipe takes a small write only when
+  a page is free), the old `pipe` call, lseek (ESPIPE), dup, dup2, dup3,
+  F_DUPFD(_CLOEXEC), close-on-exec per fd, O_NONBLOCK shared by dups
+  (F_SETFL). Scenario `lx_pipe` (PENDING) matches pipe_test's transcript
+  except its SIGPIPE and fork sections.
+
 **Next**:
-1. Milestone 2, static busybox: files and directories, wait4, execve,
+1. Milestone 2, static busybox: signals (rt_sigaction, rt_sigprocmask,
+   pending sets, rt_sigtimedwait, frames with SA_RESTORER and
+   rt_sigreturn: pipe_test's SIGPIPE section first), fork and wait4
+   (its child), then files and directories, execve,
    clone, futex (priorities from `strace` on real Linux and the
    ledger); signals (SIGSEGV, SIGPIPE; frames from `lx_abi::signal`);
    wait queues for pipes; `lx::state` onto the core process. Each corpus

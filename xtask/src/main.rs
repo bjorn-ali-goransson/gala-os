@@ -825,6 +825,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_write_exit", "user/lx/bin/write_exit_test", "lx"),
     ("lx_write_exit_pie", "user/lx/bin/write_exit_test-pie", "lx"),
     ("lx_brk", "user/lx/bin/brk_test", "lx"),
+    ("lx_pipe", "user/lx/bin/pipe_test", "lx"),
     ("lx_brk_pie", "user/lx/bin/brk_test-pie", "lx"),
     ("lx_mmap", "user/lx/bin/mmap_test", "lx"),
     ("lx_mmap_pie", "user/lx/bin/mmap_test-pie", "lx"),
@@ -835,6 +836,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
+    ("wininet_test", "msvcrt.dll", "Windows/System32"),
+    ("wininet_test", "wininet.dll", "Windows/System32"),
+    ("wininet_test", "user/bin/wininet_test.exe", "gala"),
     ("gdi32_test", "ntdll.dll", "Windows/System32"),
     ("gdi32_test", "kernel32.dll", "Windows/System32"),
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
@@ -3030,6 +3034,8 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
+    // LX milestone 2: matches Linux up to SIGPIPE; signals and fork next.
+    "lx_pipe",
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
@@ -5840,6 +5846,15 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["winhttp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // TLS step 2: WinINet's HTTP functions (on winhttp's engine,
+        // user/http_client) against the same Nginx.
+        name: "wininet_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wininet_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wininet_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Schannel (secur32 + schannel.dll): TLS 1.3 and 1.2 clients
         // against Nginx (OpenSSL) on the loopback address, certificate
         // validation, and a server (AcceptSecurityContext) in-process.
@@ -6170,6 +6185,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/write_exit_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/pipe_test (LX milestone 2): its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_pipe",
+        cmdline: "qemu_exit lxrun=/lx/pipe_test lxargs=./pipe_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/pipe_test", BOOT_OK_MARKER],
+    },
+    Scenario {
         // user/lx/brk_test, static (ET_EXEC): its transcript must be its
         // expected.txt (real Linux's; `lx_expect::check_boot`).
         name: "lx_brk",
@@ -6363,6 +6386,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
     ("winhttp_test", "schannel_test"),
+    ("wininet_test", "wininet_test"),
+    ("wininet_test", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
 ];
 
