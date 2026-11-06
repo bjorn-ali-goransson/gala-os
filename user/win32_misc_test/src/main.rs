@@ -32,6 +32,9 @@
 //!   (GlobalAddAtomW, GlobalFindAtomW, GlobalGetAtomNameW,
 //!   GlobalDeleteAtom), winspool.drv on a machine without printers
 //!   (EnumPrintersW, GetDefaultPrinterW, OpenPrinterW).
+//! - WOW64 (`wow64`): x86 supported (IsWow64GuestMachineSupported), the
+//!   SysWOW64 directory, IsWow64Process and IsWow64Process2 of this
+//!   process and of a 32-bit child (wow64_test.exe).
 //!
 //! Prints `win32_misc_test: ok` or exits with the number of the failing
 //! check.
@@ -53,6 +56,22 @@ unsafe extern "system" {
     fn GlobalAddAtomW(name: *const u16) -> u16;
     fn IsWow64GuestMachineSupported(machine: u16, supported: *mut Bool) -> i32;
     fn GetSystemWow64DirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn IsWow64Process(process: Handle, wow64: *mut Bool) -> Bool;
+    fn IsWow64Process2(process: Handle, machine: *mut u16, native: *mut u16) -> Bool;
+    fn GetCurrentProcess() -> Handle;
+    fn TerminateProcess(process: Handle, code: u32) -> Bool;
+    fn CreateProcessW(
+        application: *const u16,
+        command_line: *mut u16,
+        process_attributes: *mut c_void,
+        thread_attributes: *mut c_void,
+        inherit: Bool,
+        flags: u32,
+        environment: *mut c_void,
+        directory: *const u16,
+        startup: *mut u8,
+        information: *mut [usize; 3],
+    ) -> Bool;
     fn GlobalFindAtomW(name: *const u16) -> u16;
     fn GlobalDeleteAtom(atom: u16) -> u16;
     fn GlobalGetAtomNameW(atom: u16, buf: *mut u16, size: i32) -> u32;
@@ -1085,24 +1104,91 @@ fn inno_startup(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// WOW64 as 64-bit Windows on x64 answers about it (Inno Setup's Setup
+/// refuses to run without x86 support): x86 is a supported guest machine
+/// (IsWow64GuestMachineSupported; ARM and ARM64 are not); the SysWOW64
+/// directory is `<Windows>\SysWOW64` (the length without the NUL; with
+/// too small a buffer, the size needed) and exists; this process is
+/// native (IsWow64Process FALSE; IsWow64Process2 UNKNOWN on AMD64) and a
+/// 32-bit child (wow64_test.exe, started suspended) runs through WOW64
+/// (TRUE; I386 on AMD64).
+fn wow64(c: &mut Checks) -> Result<(), u32> {
+    const I386: u64 = 0x14c;
+    const AMD64: u64 = 0x8664;
+    // SAFETY: plain calls with our buffers and outputs.
+    unsafe {
+        for (machine, want) in [(0x14c, 1), (0xaa64, 0), (0x1c4, 0)] {
+            let mut supported = 7;
+            c.eq(IsWow64GuestMachineSupported(machine, &mut supported) as u64, 0)?;
+            c.eq(supported as u64, want)?;
+        }
+        let mut dir = [0u16; 64];
+        let n = GetSystemWow64DirectoryW(dir.as_mut_ptr(), 64);
+        let mut want = [0u16; 64];
+        let m = GetWindowsDirectoryW(want.as_mut_ptr(), 64) as usize;
+        for (i, b) in "\\SysWOW64".bytes().enumerate() {
+            want[m + i] = u16::from(b);
+        }
+        c.eq(n.into(), m as u64 + 9)?;
+        let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 32 } else { c };
+        c.ok(dir.iter().zip(want.iter()).all(|(&a, &b)| lower(a) == lower(b)), 0)?;
+        c.eq(GetSystemWow64DirectoryW(dir.as_mut_ptr(), 3).into(), m as u64 + 10)?;
+        c.eq((GetFileAttributesW(want.as_ptr()) & 0x10).into(), 0x10)?;
+
+        let mut wow = 7;
+        c.ok(IsWow64Process(GetCurrentProcess(), &mut wow) != 0, 0)?;
+        c.eq(wow as u64, 0)?;
+        let (mut machine, mut native) = (7u16, 7u16);
+        c.ok(IsWow64Process2(GetCurrentProcess(), &mut machine, &mut native) != 0, 0)?;
+        c.eq(machine.into(), 0)?;
+        c.eq(native.into(), AMD64)?;
+
+        let mut startup = [0u8; 104];
+        startup[0] = 104;
+        let mut info = [0usize; 3];
+        let mut line = w("wow64_test.exe");
+        const CREATE_SUSPENDED: u32 = 4;
+        let created = CreateProcessW(
+            core::ptr::null(),
+            line.as_mut_ptr(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0,
+            CREATE_SUSPENDED,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            startup.as_mut_ptr(),
+            &mut info,
+        );
+        c.ok(created != 0, GetLastError().into())?;
+        let child = info[0] as Handle;
+        let mut wow = 7;
+        c.ok(IsWow64Process(child, &mut wow) != 0, GetLastError().into())?;
+        c.eq(wow as u64, 1)?;
+        let (mut machine, mut native) = (7u16, 7u16);
+        c.ok(IsWow64Process2(child, &mut machine, &mut native) != 0, 0)?;
+        c.eq(machine.into(), I386)?;
+        c.eq(native.into(), AMD64)?;
+        c.ok(TerminateProcess(child, 3) != 0, 0)?;
+        c.eq(WaitForSingleObject(child, 10_000).into(), 0)?;
+        CloseHandle(info[1] as Handle);
+        CloseHandle(child);
+    }
+    Ok(())
+}
+
 /// What Delphi's VCL (Inno Setup's Setup) calls as it starts, with
-/// Windows' documented results where gala has no WOW64, no paint buffers
-/// and no touch input: IsWow64GuestMachineSupported (S_OK, no x86),
-/// GetSystemWow64DirectoryW (ERROR_CALL_NOT_IMPLEMENTED), the *ForDpi
-/// forms (96 DPI), gesture handles (none valid), the clipboard's format
+/// Windows' documented results where gala has no paint buffers and no
+/// touch input: IsWow64GuestMachineSupported and GetSystemWow64DirectoryW
+/// (`wow64`), the *ForDpi forms (96 DPI), gesture handles (none valid), the clipboard's format
 /// count, IsEqualGUID, GetCurrentPositionEx after MoveToEx, uxtheme's
 /// buffered painting (Init succeeds, no buffer is started) and
 /// OpenThemeDataForDpi (no theme).
 fn vcl(c: &mut Checks) -> Result<(), u32> {
+    wow64(c)?;
     // SAFETY: plain calls with our buffers; exports looked up by name
     // with their documented signatures.
     unsafe {
-        let mut supported = 7;
-        c.eq(IsWow64GuestMachineSupported(0x14c, &mut supported) as u64, 0)?;
-        c.eq(supported as u64, 0)?;
-        let mut dir = [0u16; 64];
-        c.eq(GetSystemWow64DirectoryW(dir.as_mut_ptr(), 64).into(), 0)?;
-        c.eq(GetLastError().into(), 120)?;
         let (mut a, mut b) = ([0, 0, 100, 100], [0, 0, 100, 100]);
         c.ok(AdjustWindowRectEx(&mut a, 0x00cf_0000, 0, 0) != 0, 0)?;
         c.ok(AdjustWindowRectExForDpi(&mut b, 0x00cf_0000, 0, 0, 96) != 0, 0)?;

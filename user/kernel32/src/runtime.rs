@@ -261,36 +261,43 @@ pub extern "system" fn QueryMemoryResourceNotification(h: Handle, state: *mut Bo
 }
 
 /// IsWow64GuestMachineSupported(machine, *supported): whether WOW64 runs
-/// programs of that machine type. gala has no WOW64 (ROADMAP "WOW64"): S_OK
-/// and FALSE for every machine, x86 included, so programs that check
-/// (Inno Setup's Setup) see a 64-bit Windows without 32-bit support.
+/// programs of that machine type: x86 (IMAGE_FILE_MACHINE_I386), as on
+/// 64-bit Windows on x64 (ARCHITECTURE "Plan: WOW64"); no other.
 #[unsafe(no_mangle)]
-pub extern "system" fn IsWow64GuestMachineSupported(_machine: u16, supported: *mut Bool) -> i32 {
+pub extern "system" fn IsWow64GuestMachineSupported(machine: u16, supported: *mut Bool) -> i32 {
     const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
     if supported.is_null() {
         return E_INVALIDARG;
     }
     // SAFETY: the caller's output.
-    unsafe { *supported = FALSE };
+    unsafe { *supported = Bool::from(machine == IMAGE_FILE_MACHINE_I386) };
     0
 }
 
-/// IsWow64Process2: every gala process is native x64
-/// (IMAGE_FILE_MACHINE_UNKNOWN for the process, AMD64 for the machine).
+const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+/// IsWow64Process2(process, *processMachine, *nativeMachine): the
+/// process's machine if it runs through WOW64 (x86), else
+/// IMAGE_FILE_MACHINE_UNKNOWN; the native machine is AMD64.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWow64Process2(
-    _process: Handle,
+    process: Handle,
     machine: *mut u16,
     native: *mut u16,
 ) -> Bool {
     if machine.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
+    let wow64 = match super::process::is_wow64(process) {
+        Ok(w) => w,
+        Err(status) => return fail(status, FALSE),
+    };
     // SAFETY: the caller's outputs.
     unsafe {
-        *machine = 0;
+        *machine = if wow64 { IMAGE_FILE_MACHINE_I386 } else { 0 };
         if !native.is_null() {
-            *native = 0x8664;
+            *native = IMAGE_FILE_MACHINE_AMD64;
         }
     }
     TRUE

@@ -34,8 +34,12 @@ pub struct Note {
     pub tid: u64,
     /// rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15 (CONTEXT order).
     pub regs: [u64; 16],
-    /// The values at rsp, rsp + 8, ... (None: unreadable).
+    /// The values at rsp, rsp + 8, ... (None: unreadable); for 32-bit
+    /// code the 4-byte values at esp, esp + 4, ...
     pub stack: [Option<u64>; STACK_WORDS],
+    /// It happened in 32-bit code (a WOW64 process's, CS 0x23): the
+    /// registers are those of x86, in their low halves.
+    pub x86: bool,
 }
 
 impl Note {
@@ -47,6 +51,7 @@ impl Note {
         rip: u64,
         access: Option<(u64, u64)>,
         regs: [u64; 16],
+        x86: bool,
     ) -> Note {
         let tid = super::thread::current()
             .and_then(|t| match &t.body {
@@ -56,9 +61,18 @@ impl Note {
             .unwrap_or(0);
         let mut stack = [None; STACK_WORDS];
         for (i, slot) in stack.iter_mut().enumerate() {
-            *slot = process.read_u64(regs[4].wrapping_add(8 * i as u64)).ok();
+            *slot = if x86 {
+                let mut word = [0u8; 4];
+                let at = (regs[4] as u32).wrapping_add(4 * i as u32);
+                process
+                    .read(u64::from(at), &mut word)
+                    .ok()
+                    .map(|()| u32::from_le_bytes(word).into())
+            } else {
+                process.read_u64(regs[4].wrapping_add(8 * i as u64)).ok()
+            };
         }
-        Note { status, rip, access, tid, regs, stack }
+        Note { status, rip, access, tid, regs, stack, x86 }
     }
 }
 
@@ -153,7 +167,11 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             process.name, process.id, status.0, note.tid
         );
     }
-    info!("crash report:   personality {}, session {}", process.personality, process.session);
+    let machine = if note.x86 { ", 32-bit x86 (WOW64)" } else { "" };
+    info!(
+        "crash report:   personality {}{machine}, session {}",
+        process.personality, process.session
+    );
     match note.access {
         Some((addr, kind)) => info!(
             "crash report:   at {at}, {} address {addr:#x}",
@@ -166,6 +184,10 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
         None => info!("crash report:   at {at}"),
     }
     let r = &note.regs;
+    if note.x86 {
+        report_x86(process, note, &stack);
+        return;
+    }
     info!(
         "crash report:   rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
         r[0], r[3], r[1], r[2]
@@ -187,6 +209,29 @@ pub fn report(process: &Process, note: &Note, status: NtStatus) {
             Some(v) => info!("crash report:   [rsp+{:#04x}] {v}", 8 * i),
             None => {
                 info!("crash report:   [rsp+{:#04x}] (unreadable)", 8 * i);
+                break;
+            }
+        }
+    }
+}
+
+/// The registers and stack of an exception in 32-bit code.
+fn report_x86(_process: &Process, note: &Note, stack: &[Option<At>; STACK_WORDS]) {
+    let r = note.regs.map(|v| v as u32);
+    info!(
+        "crash report:   eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x}",
+        r[0], r[3], r[1], r[2]
+    );
+    info!(
+        "crash report:   esi={:#010x} edi={:#010x} ebp={:#010x} esp={:#010x}",
+        r[6], r[7], r[5], r[4]
+    );
+    info!("crash report:   eip={:#010x}", note.rip as u32);
+    for (i, v) in stack.iter().enumerate() {
+        match v {
+            Some(v) => info!("crash report:   [esp+{:#04x}] {v}", 4 * i),
+            None => {
+                info!("crash report:   [esp+{:#04x}] (unreadable)", 4 * i);
                 break;
             }
         }

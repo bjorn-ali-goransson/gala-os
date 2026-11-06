@@ -12,6 +12,7 @@ const PE32_PLUS_MAGIC: u16 = 0x20b;
 const IMAGE_FILE_EXECUTABLE_IMAGE: u16 = 0x0002;
 const IMAGE_FILE_DLL: u16 = 0x2000;
 const IMAGE_FILE_RELOCS_STRIPPED: u16 = 0x0001;
+const IMAGE_FILE_LARGE_ADDRESS_AWARE: u16 = 0x0020;
 
 pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 pub const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
@@ -105,17 +106,19 @@ pub struct PeImage<'a> {
     pub is_dll: bool,
     /// Whether the image can be loaded away from `image_base`.
     pub relocatable: bool,
-    /// A 32-bit (PE32) image: it can be mapped, not run.
+    /// A 32-bit (PE32, x86) image: an executable runs through WOW64
+    /// (ARCHITECTURE "Plan: WOW64").
     pub pe32: bool,
+    /// IMAGE_FILE_LARGE_ADDRESS_AWARE: a 32-bit process may use addresses
+    /// up to 4 GiB rather than 2.
+    pub large_address_aware: bool,
 }
 
 impl<'a> PeImage<'a> {
-    /// Parses an executable (.exe) image.
+    /// Parses an executable (.exe) image: x64 (PE32+) or x86 (PE32, run
+    /// through WOW64).
     pub fn parse(data: &'a [u8]) -> Result<Self, PeError> {
         let image = Self::parse_image(data)?;
-        if image.pe32 {
-            return Err(PeError::NotPe32Plus);
-        }
         if image.is_dll {
             return Err(PeError::NotExecutable);
         }
@@ -203,6 +206,7 @@ impl<'a> PeImage<'a> {
             is_dll,
             relocatable: false,
             pe32,
+            large_address_aware: characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE != 0,
         };
         let mut prev_end = size_of_headers;
         for i in 0..section_count {

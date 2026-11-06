@@ -113,8 +113,13 @@ struct UserThread {
     /// GS base in user mode (the TEB; a Linux thread's arch_prctl value).
     gs_base: u64,
     /// FS base in user mode: 0 for NT threads; a Linux thread's
-    /// arch_prctl(ARCH_SET_FS) value (its TLS).
+    /// arch_prctl(ARCH_SET_FS) value (its TLS); a WOW64 thread's 32-bit
+    /// TEB.
     fs_base: u64,
+    /// A WOW64 thread (`set_teb32`): its FS is the TEB32 segment, loaded
+    /// with DS and ES at every switch to it (they are per CPU, and 32-bit
+    /// code needs them).
+    teb32: bool,
     /// Its process's personality: which dispatcher its system calls go to
     /// (`crate::personality`; fixed for the thread's life).
     personality: Personality,
@@ -344,7 +349,7 @@ pub fn spawn_user(
         name,
         entry,
         arg,
-        Some(UserThread { space, root, gs_base, fs_base: 0, personality, client }),
+        Some(UserThread { space, root, gs_base, fs_base: 0, teb32: false, personality, client }),
     )
 }
 
@@ -425,6 +430,22 @@ pub fn user_bases() -> (u64, u64) {
     with(|s| {
         let id = s.current();
         s.thread(id).user.as_ref().map_or((0, 0), |u| (u.fs_base, u.gs_base))
+    })
+}
+
+/// Makes the current user thread one that runs 32-bit code (WOW64), with
+/// its 32-bit TEB at `teb32` (below 4 GiB) as FS from this return to user
+/// mode on (ARCHITECTURE "Plan: WOW64"). False for a kernel thread or an
+/// address above 4 GiB.
+pub fn set_teb32(teb32: u64) -> bool {
+    let Ok(base) = u32::try_from(teb32) else { return false };
+    with(|s| {
+        let id = s.current();
+        let Some(u) = s.thread(id).user.as_mut() else { return false };
+        u.fs_base = teb32;
+        u.teb32 = true;
+        percpu::load_teb32(base);
+        true
     })
 }
 
@@ -630,6 +651,7 @@ fn schedule() {
                 root: n.user.as_ref().map_or_else(paging::kernel_root, |u| u.root),
                 user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
                 user_fs_base: n.user.as_ref().map_or(0, |u| u.fs_base),
+                teb32: n.user.as_ref().is_some_and(|u| u.teb32),
                 personality: n.user.as_ref().map_or(Personality::Nt, |u| u.personality),
                 client: n.user.as_ref().map_or(0, |u| u.client),
             };

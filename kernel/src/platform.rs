@@ -141,6 +141,9 @@ impl UserEntry for Kernel {
     fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
         sched::set_user_bases(fs, gs)
     }
+    fn set_teb32(teb32: u64) -> bool {
+        sched::set_teb32(teb32)
+    }
 }
 
 impl UserMemory for Kernel {

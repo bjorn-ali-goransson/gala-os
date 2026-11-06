@@ -26,6 +26,8 @@ pub struct NtThread {
     /// ClientId.UniqueThread.
     pub id: u64,
     pub teb: u64,
+    /// A WOW64 thread's 32-bit TEB (its FS in 32-bit code); 0 otherwise.
+    pub teb32: u64,
     pub process: KArc<Process>,
     /// Scheduler thread, once spawned.
     sched_id: IrqMutex<Option<ThreadId>>,
@@ -300,7 +302,22 @@ pub fn create(
     stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
-    create_inner(process, regs, win32_start, mxcsr, stack, suspended, None)
+    create_inner(process, regs, win32_start, mxcsr, stack, suspended, Begin::Start)
+}
+
+/// Creates a thread of WOW64 process `process` that starts in 32-bit code
+/// as `start` says: in its wow64.dll's GalaWow64Start (rcx = its CPU
+/// area, on its 64-bit stack `stack`), which enters 32-bit code with the
+/// area's context; it gets a TEB32 beside its TEB.
+pub fn create_wow64(
+    process: &KArc<Process>,
+    start: super::wow64::Start32,
+    stack: (u64, u64, u64),
+    suspended: bool,
+) -> Result<ObjectRef, NtStatus> {
+    let regs = UserRegs { gpr: [0; 16], rip: 0, rflags: 0 };
+    let win32_start = u64::from(start.eip);
+    create_inner(process, regs, win32_start, None, stack, suspended, Begin::Wow64(start))
 }
 
 /// Creates a thread of the Linux personality that goes on in user mode
@@ -315,14 +332,28 @@ pub fn create_forked(
     bases: (u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
-    let resume = Some((Resume::User { regs, fx }, bases));
-    create_inner(process, regs, regs.rip, None, (0, 0, 0), suspended, resume)
+    let begin = Begin::Resume((Resume::User { regs, fx }, bases));
+    create_inner(process, regs, regs.rip, None, (0, 0, 0), suspended, begin)
 }
 
 /// A thread object's id (its NT ClientId thread; a Linux thread's core
 /// id).
 pub fn id_of(object: &ObjectRef) -> u64 {
     as_thread(object).id
+}
+
+/// How a new thread first enters user mode. Passed once, by value, to
+/// `create_inner` (as the resumed state always was): no box, which
+/// would be an allocation to fail.
+#[allow(clippy::large_enum_variant)]
+enum Begin {
+    /// At its start registers.
+    Start,
+    /// As a Linux fork's child or clone'd thread goes on: the state and
+    /// its FS and GS bases.
+    Resume((Resume, (u64, u64))),
+    /// A WOW64 thread: in wow64.dll, which enters 32-bit code.
+    Wow64(super::wow64::Start32),
 }
 
 fn create_inner(
@@ -332,9 +363,14 @@ fn create_inner(
     mxcsr: Option<u32>,
     stack: (u64, u64, u64),
     suspended: bool,
-    resume: Option<(Resume, (u64, u64))>,
+    begin: Begin,
 ) -> Result<ObjectRef, NtStatus> {
-    if !regs.is_valid() {
+    let (resume, wow64) = match begin {
+        Begin::Start => (None, None),
+        Begin::Resume(r) => (Some(r), None),
+        Begin::Wow64(start) => (None, Some(start)),
+    };
+    if wow64.is_none() && !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let id = next_id();
@@ -345,9 +381,27 @@ fn create_inner(
     } else {
         0
     };
+    // A WOW64 thread: its TEB32 and CPU area, and its start in wow64.dll.
+    let (regs, teb32) = match (wow64, process.wow64.as_ref()) {
+        (Some(start), Some(state)) => {
+            let teb32 = super::wow64::allocate_teb32(process, state, teb_addr, id, &start)?;
+            let mut gpr = [0u64; 16];
+            gpr[1] = teb_addr + layout::wow64::TEB64_CPU_AREA;
+            // As if called: rsp % 16 == 8, a shadow area above.
+            gpr[4] = (start.stack64 & !0xf) - 0x28;
+            let entry = state.start.load(Ordering::Relaxed);
+            (UserRegs { gpr, rip: entry, rflags: 0 }, teb32)
+        }
+        (Some(_), None) => return Err(NtStatus::INVALID_PARAMETER),
+        (None, _) => (regs, 0),
+    };
+    if !regs.is_valid() {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
     let thread = NtThread {
         id,
         teb: teb_addr,
+        teb32,
         process: process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(platform::online_mask()),
@@ -396,7 +450,7 @@ fn create_inner(
                 crate::events::Category::Thread,
                 "thread create",
                 format_args!(
-                    r#""pid":{},"tid":{id},"start":{},"teb":{teb_addr}"#,
+                    r#""pid":{},"tid":{id},"start":{},"teb":{teb_addr},"teb32":{teb32}"#,
                     process.id, win32_start
                 ),
             );
@@ -454,6 +508,16 @@ fn thread_entry(id: usize) {
     let resume = t.resume.lock().take();
     if let Some((fs, gs)) = t.start_bases {
         platform::set_user_bases(Some(fs), Some(gs));
+    }
+    // A WOW64 thread: its TEB32 as FS (and the segments 32-bit code needs)
+    // from now on.
+    if t.teb32 != 0 && !platform::set_teb32(t.teb32) {
+        warn!(
+            "wow64: {} (pid {}) thread {}: this platform cannot run 32-bit code",
+            t.process.name, t.process.id, t.id
+        );
+        drop(object);
+        exit_current(NtStatus::NOT_SUPPORTED);
     }
     let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
     match resume {
@@ -930,6 +994,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
     let thread = NtThread {
         id: a.id,
         teb: a.teb,
+        teb32: 0,
         process: a.process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(affinity),
@@ -1074,6 +1139,19 @@ pub fn dump() {
         };
         let name = super::syscalls::service_name(number);
         info!("thread:   {name} from rip {:#x}", regs.rip);
+        // A WOW64 thread: the 32-bit code that made the call (its CPU
+        // area, where wow64.dll keeps the caller's registers).
+        if t.teb32 != 0 {
+            match super::wow64::saved_registers(&t.process, t.teb) {
+                Some(r) => info!(
+                    "thread:   called from 32-bit code: eip={:#010x} esp={:#010x} eax={:#010x} \
+                     ebx={:#010x} ecx={:#010x} edx={:#010x} esi={:#010x} edi={:#010x} \
+                     ebp={:#010x}",
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]
+                ),
+                None => info!("thread:   called from 32-bit code (its CPU area is unreadable)"),
+            }
+        }
         // The first argument (r10), as a handle: what a wait is on.
         let handle = super::object::Handle(regs.gpr[10]);
         if let Some(e) = t.process.handles.lock().get(handle) {

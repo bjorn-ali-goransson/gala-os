@@ -734,9 +734,9 @@ pub extern "system" fn AreFileApisANSI() -> Bool {
 }
 
 /// The Windows directory, KUSER_SHARED_DATA.NtSystemRoot (`C:\\Windows`),
-/// as bytes in `out`, with `\\system32` after it for the system directory
-/// (as Windows spells it); the length.
-fn system_root(out: &mut [u8; 280], system32: bool) -> usize {
+/// as bytes in `out`, then `sub` (`\\system32`, as Windows spells it, or
+/// `\\SysWOW64`); the length.
+fn system_root(out: &mut [u8; 280], sub: &[u8]) -> usize {
     let mut n = 0;
     // SAFETY: KUSER_SHARED_DATA.NtSystemRoot, a NUL-terminated WCHAR[260].
     unsafe {
@@ -749,21 +749,23 @@ fn system_root(out: &mut [u8; 280], system32: bool) -> usize {
             n += 1;
         }
     }
-    if system32 {
-        for &b in b"\\system32" {
-            out[n] = b;
-            n += 1;
-        }
+    for &b in sub {
+        out[n] = b;
+        n += 1;
     }
     n
 }
 
+/// The Windows directory's subdirectories these functions return.
+const SYSTEM32: &[u8] = b"\\system32";
+const SYSWOW64: &[u8] = b"\\SysWOW64";
+
 /// GetWindowsDirectoryW / A, GetSystemWindowsDirectoryW, GetSystemDirectoryW
 /// / A: the length without the NUL, or the size needed with it if `buf` is
 /// too small.
-fn put_directory<T: From<u8> + Copy>(system32: bool, buf: *mut T, size: u32) -> u32 {
+fn put_directory<T: From<u8> + Copy>(sub: &[u8], buf: *mut T, size: u32) -> u32 {
     let mut path = [0u8; 280];
-    let n = system_root(&mut path, system32);
+    let n = system_root(&mut path, sub);
     if buf.is_null() || (size as usize) <= n {
         return n as u32 + 1;
     }
@@ -779,35 +781,40 @@ fn put_directory<T: From<u8> + Copy>(system32: bool, buf: *mut T, size: u32) -> 
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(false, buf, size)
+    put_directory(b"", buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowsDirectoryA(buf: *mut u8, size: u32) -> u32 {
-    put_directory(false, buf, size)
+    put_directory(b"", buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(false, buf, size)
+    put_directory(b"", buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(true, buf, size)
+    put_directory(SYSTEM32, buf, size)
 }
 
-/// GetSystemWow64DirectoryW: gala runs no 32-bit programs (no WOW64),
-/// so there is no SysWOW64 directory: the failure Windows gives where
-/// WOW64 is absent, ERROR_CALL_NOT_IMPLEMENTED.
+/// GetSystemWow64DirectoryW / A: where the 32-bit system DLLs are
+/// (`<Windows>\SysWOW64`; gala runs x86 programs through WOW64,
+/// ARCHITECTURE "Plan: WOW64").
 #[unsafe(no_mangle)]
-pub extern "system" fn GetSystemWow64DirectoryW(_buf: *mut u16, _size: u32) -> u32 {
-    fail_with(120, 0)
+pub extern "system" fn GetSystemWow64DirectoryW(buf: *mut u16, size: u32) -> u32 {
+    put_directory(SYSWOW64, buf, size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemWow64DirectoryA(buf: *mut u8, size: u32) -> u32 {
+    put_directory(SYSWOW64, buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryA(buf: *mut u8, size: u32) -> u32 {
-    put_directory(true, buf, size)
+    put_directory(SYSTEM32, buf, size)
 }
 
 /// The AddDllDirectory directories (full paths, NUL-terminated), at most

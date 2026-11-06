@@ -119,6 +119,9 @@ pub struct Process {
     /// is NT): its threads' system calls go to that personality's
     /// dispatcher (`crate::personality`, ROADMAP LX seam 2).
     pub personality: Personality,
+    /// A 32-bit (x86) process's WOW64 state (`nt::wow64`); None for a
+    /// 64-bit one.
+    pub wow64: Option<super::wow64::Wow64Process>,
 }
 
 impl core::ops::Deref for Process {
@@ -372,6 +375,8 @@ pub fn current() -> Option<KArc<Process>> {
 pub enum LoadError {
     Pe(PeError),
     ImportsNotSupported,
+    /// A 32-bit program, and no wow64.dll to run it (nt::wow64).
+    NoWow64,
     BadImageBase,
     OutOfMemory,
     Paging(PagingError),
@@ -417,6 +422,12 @@ impl From<UserFault> for LoadError {
 /// Page flags for an image section: writable sections are copy-on-write,
 /// mapped read-only until written.
 const USER_RW: PageFlags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+
+/// The page flags of a process's private read/write structures (PEB,
+/// parameters, TEBs).
+pub fn user_rw_flags() -> PageFlags {
+    USER_RW
+}
 
 fn put_u64(space: &mut UserSpace, addr: u64, value: u64) -> Result<(), UserFault> {
     space.write_initial(addr, &value.to_le_bytes())
@@ -676,11 +687,20 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         return Err(LoadError::Pe(PeError::NotExecutable));
     }
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
-    if info.has_imports && super::ntdll::get().is_none() {
+    if info.has_imports && !info.x86 && super::ntdll::get().is_none() {
+        return Err(LoadError::ImportsNotSupported);
+    }
+    // A 32-bit program runs through WOW64 (nt::wow64); its imports need a
+    // 32-bit ntdll, which gala does not have yet (ROADMAP WOW stage 2).
+    if info.x86 && info.has_imports {
+        warn!("wow64: {name} imports DLLs: 32-bit programs with imports need a 32-bit ntdll");
         return Err(LoadError::ImportsNotSupported);
     }
     let mut space = UserSpace::new()?;
     let mut vad = Vad::default();
+    if info.x86 {
+        vad.set_limit(super::wow64::limit(info.large_address_aware));
+    }
     let base = map_image(&mut space, &mut vad, &image)?;
     let id = thread::next_id();
     crate::events::emit(
@@ -714,6 +734,20 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     let stack_limit = stack_top - commit;
     vad.commit(stack_limit, commit, vad::PAGE_READWRITE)?;
     vad.commit(stack_limit - PAGE_SIZE, PAGE_SIZE, vad::PAGE_READWRITE | vad::PAGE_GUARD)?;
+    // A WOW64 process's main thread also has a 64-bit stack, for its
+    // wow64.dll code (system call thunks), laid out the same way.
+    let stack64 = if info.x86 {
+        use super::layout::wow64::{STACK64_COMMIT, STACK64_RESERVE};
+        let (bottom, _) =
+            vad.reserve(None, STACK64_RESERVE, vad::PAGE_READWRITE, vad::MEM_PRIVATE, false)?;
+        let top = bottom + STACK64_RESERVE;
+        let limit = top - STACK64_COMMIT;
+        vad.commit(limit, STACK64_COMMIT, vad::PAGE_READWRITE)?;
+        vad.commit(limit - PAGE_SIZE, PAGE_SIZE, vad::PAGE_READWRITE | vad::PAGE_GUARD)?;
+        Some((top, limit, bottom))
+    } else {
+        None
+    };
 
     super::kuser::map_into(&mut space, &mut vad)?;
 
@@ -806,6 +840,36 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     let session = super::token::session_of(&token);
     let desk = super::session::ensure(session)?;
     put_u32(&mut space, peb_addr + peb::SESSION_ID, session)?;
+    // A WOW64 process: the PEB32 and the 32-bit parameters (the same
+    // values), below its 32-bit limit.
+    let wow64 = if info.x86 {
+        let params = super::params::ProcessParameters {
+            image_path: path,
+            command_line,
+            current_directory,
+            current_directory_handle: cwd_handle,
+            dll_path: "",
+            std_handles,
+            environment: environment.unwrap_or(&environment_default),
+            runtime_data,
+        };
+        // The block's size first (it does not depend on where it goes).
+        let size = super::params::build32(&params, 0).map_err(|_| LoadError::OutOfMemory)?.len();
+        let at = (layout::wow64::PEB32_ADDRESS - size as u64) & !(vad::ALLOCATION_GRANULARITY - 1);
+        let block = super::params::build32(&params, at).map_err(|_| LoadError::OutOfMemory)?;
+        let peb32 = super::wow64::Peb32 {
+            image_base: base as u32,
+            params: at as u32,
+            cpus,
+            subsystem: info.subsystem,
+            subsystem_version: info.subsystem_version,
+            session,
+        };
+        super::wow64::set_up_space(&mut space, &mut vad, at, &block, &peb32)?;
+        Some(super::wow64::Wow64Process::new(layout::wow64::PEB32_ADDRESS))
+    } else {
+        None
+    };
     let space = KArc::try_new(platform::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
         core: Core {
@@ -844,9 +908,47 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         ui: super::winsta::Connection::new(),
         // A PE image: the NT personality (an ELF loader would choose Linux).
         personality: Personality::Nt,
+        wow64,
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;
+
+    // A WOW64 process: gala's wow64.dll, then the main thread, which starts
+    // there and enters 32-bit code at the entry point (stdcall, the PEB32
+    // as its argument above a null return address).
+    if let (Some(state), Some(stack64)) = (process.wow64.as_ref(), stack64) {
+        let entry = (base + u64::from(info.entry_rva)) as u32;
+        let peb32 = state.peb32 as u32;
+        let esp = (stack_top - 8) as u32;
+        let mut frame = [0u8; 8];
+        frame[4..].copy_from_slice(&peb32.to_le_bytes());
+        let started = super::wow64::map_dll(&process)
+            .and_then(|()| process.write(u64::from(esp), &frame).map_err(|_| NtStatus::NO_MEMORY))
+            .and_then(|()| {
+                let start = super::wow64::Start32 {
+                    eip: entry,
+                    esp,
+                    eax: entry,
+                    ebx: peb32,
+                    stack: (stack_top as u32, stack_limit as u32, stack_bottom as u32),
+                    stack64: stack64.0,
+                };
+                thread::create_wow64(&process, start, stack64, suspended)
+            });
+        let main = match started {
+            Ok(t) => t,
+            Err(status) => {
+                PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, &process));
+                return Err(if status == NtStatus::INVALID_IMAGE_FORMAT {
+                    LoadError::NoWow64
+                } else {
+                    LoadError::from(status)
+                });
+            }
+        };
+        announce_start(&process, u64::from(entry), command_line);
+        return Ok((process, main));
+    }
 
     // Main thread: starts at the entry point with rcx = PEB, and rsp as if
     // called (rsp % 16 == 8, 32-byte shadow area above the null return);
@@ -888,15 +990,18 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
         p => (p, crate::events::current_client()),
     };
     crate::events::note_process(id, command_line);
+    let (machine, wow64) =
+        if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { ("x64", "") };
     info!(
-        "process {} (pid {id}, session {session}): starting at {rip:#x}, personality {personality}",
+        "process {} (pid {id}, session {session}): starting at {rip:#x}, personality \
+         {personality}{wow64}",
         process.name
     );
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
             crate::events::Str(process.name),
             process.image.0,
             crate::events::Str(command_line)
@@ -967,6 +1072,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
         unhandled_exception: IrqMutex::new(None),
         ui: super::winsta::Connection::new(),
         personality: bare.personality,
+        wow64: None,
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;
@@ -1195,7 +1301,9 @@ fn keep_note(process: &Process, frame: &TrapFrame, status: NtStatus, rip: u64, c
         frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi, frame.rdi,
         frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
     ];
-    let note = super::crashreport::Note::new(process, status, rip, access, regs);
+    // CS 0x23: 32-bit code (WOW64).
+    let x86 = frame.cs == u64::from(super::layout::wow64::CS32);
+    let note = super::crashreport::Note::new(process, status, rip, access, regs, x86);
     *process.last_exception.lock() = Some(note);
 }
 
@@ -1420,6 +1528,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         // The handover's PROCESSES record has no personality yet: NT is
         // the only one with processes (a second needs a record version).
         personality: Personality::Nt,
+        wow64: None,
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     {

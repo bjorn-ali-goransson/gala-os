@@ -2612,6 +2612,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64"
+version = "0.1.0"
+
+[[package]]
+name = "wow64_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ws2_32"
 version = "0.1.0"
 dependencies = [

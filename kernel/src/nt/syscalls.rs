@@ -1564,7 +1564,7 @@ fn nt_open_directory_object(call: &mut Call<'_>) -> NtStatus {
 /// GalaWindowCreate(x, y, width, height, *title, title_length, *id, style):
 /// a hidden top-level window of that outer size on the desktop (gala's own
 /// service; its frame is the desktop's; style 1: a frameless popup, all
-/// client area); STATUS_NOT_SUPPORTED without a screen.
+/// client area); kept whether or not anything shows the desktop.
 fn gala_window_create(call: &mut Call<'_>) -> NtStatus {
     let (x, y) = (arg!(call, 0) as u32 as i32, arg!(call, 1) as u32 as i32);
     let (w, h) = (arg!(call, 2) as u32, arg!(call, 3) as u32);
@@ -2639,8 +2639,9 @@ fn gala_window_set_title(call: &mut Call<'_>) -> NtStatus {
 }
 
 /// GalaScreenInfo(*Info): the screen and its work area (without the
-/// taskbar) as two RECTs (left, top, right, bottom as i32);
-/// STATUS_NOT_SUPPORTED without a screen.
+/// taskbar) as two RECTs (left, top, right, bottom as i32); DEFAULT_SIZE
+/// for a desktop nothing shows; STATUS_NOT_SUPPORTED only when it cannot
+/// be laid out.
 fn gala_screen_info(call: &mut Call<'_>) -> NtStatus {
     let Some((w, h)) = super::desktop::screen(&call.process.desk.shell) else {
         return NtStatus::NOT_SUPPORTED;
@@ -3864,7 +3865,10 @@ fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
     for (i, r) in regs.iter_mut().enumerate() {
         *r = tri!(call.read_u64(context + 0x78 + 8 * i as u64));
     }
-    let note = super::crashreport::Note::new(&call.process, NtStatus(code), rip, access, regs);
+    // A 64-bit ntdll's report (32-bit code's exceptions come with WOW64's
+    // 32-bit ntdll: ROADMAP WOW stage 3).
+    let note =
+        super::crashreport::Note::new(&call.process, NtStatus(code), rip, access, regs, false);
     *call.process.unhandled_exception.lock() = Some(note);
     NtStatus::SUCCESS
 }
@@ -3937,9 +3941,14 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     let ObjectBody::Process(p) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
     match class {
         0 => {}
-        PROCESS_DEBUG_PORT | PROCESS_WOW64_INFORMATION => {
-            // No debugger; not a WOW64 process.
+        PROCESS_DEBUG_PORT => {
+            // No debugger.
             return call.return_info(&0u64.to_le_bytes(), buffer, length, ret_ptr);
+        }
+        PROCESS_WOW64_INFORMATION => {
+            // A ULONG_PTR: a WOW64 process's PEB32, 0 for a 64-bit one.
+            let peb32 = p.wow64.as_ref().map_or(0, |w| w.peb32);
+            return call.return_info(&peb32.to_le_bytes(), buffer, length, ret_ptr);
         }
         PROCESS_TIMES => {
             // KERNEL_USER_TIMES { CreateTime, ExitTime, KernelTime,
@@ -5504,7 +5513,10 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     });
     let (child, thread_object) = match spawned {
         Ok(p) => p,
-        Err(process::LoadError::Pe(_)) => return NtStatus::INVALID_IMAGE_FORMAT,
+        // A 32-bit program without wow64.dll: as a Windows without WOW64.
+        Err(process::LoadError::Pe(_) | process::LoadError::NoWow64) => {
+            return NtStatus::INVALID_IMAGE_FORMAT;
+        }
         Err(_) => return NtStatus::NO_MEMORY,
     };
     job_calls::join(&child, job);

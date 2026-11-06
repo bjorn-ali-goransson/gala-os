@@ -1050,12 +1050,37 @@ pub extern "system" fn WTSGetActiveConsoleSessionId() -> u32 {
     unsafe { core::ptr::read_volatile(0x7ffe_02d8 as *const u32) }
 }
 
-/// IsWow64Process: gala runs 64-bit processes only.
+/// Whether `process` is a 32-bit (WOW64) process: ProcessWow64Information
+/// (its PEB32, 0 for a 64-bit process); the status on failure.
+pub(crate) fn is_wow64(process: Handle) -> Result<bool, u32> {
+    let mut peb32 = 0u64;
+    // SAFETY: an 8-byte ULONG_PTR buffer.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            26,
+            (&raw mut peb32).cast(),
+            8,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return Err(status);
+    }
+    Ok(peb32 != 0)
+}
+
+/// IsWow64Process: whether `process` is a 32-bit program running through
+/// WOW64 (ARCHITECTURE "Plan: WOW64").
 #[unsafe(no_mangle)]
-pub extern "system" fn IsWow64Process(_process: Handle, wow64: *mut Bool) -> Bool {
+pub extern "system" fn IsWow64Process(process: Handle, wow64: *mut Bool) -> Bool {
+    let answer = match is_wow64(process) {
+        Ok(w) => w,
+        Err(status) => return fail(status, FALSE),
+    };
     if !wow64.is_null() {
         // SAFETY: the caller's output pointer.
-        unsafe { *wow64 = FALSE };
+        unsafe { *wow64 = Bool::from(answer) };
     }
     TRUE
 }

@@ -103,6 +103,10 @@ pub struct ImageInfo {
     /// SizeOfStackReserve / SizeOfStackCommit (the main thread's stack).
     pub stack_reserve: u64,
     pub stack_commit: u64,
+    /// A 32-bit (x86) image: an executable runs through WOW64.
+    pub x86: bool,
+    /// IMAGE_FILE_LARGE_ADDRESS_AWARE (a 32-bit process's 4 GiB limit).
+    pub large_address_aware: bool,
 }
 
 impl Drop for ImageLayout {
@@ -183,6 +187,8 @@ impl ImageLayout {
             has_imports: image.has_imports(),
             stack_reserve: image.stack_reserve,
             stack_commit: image.stack_commit,
+            x86: image.pe32,
+            large_address_aware: image.large_address_aware,
         };
         Ok(ImageLayout {
             base: image.image_base,
@@ -675,12 +681,22 @@ fn map_image_view(
     let reserve = |vad: &mut vad::Vad, at: Option<u64>| {
         vad.reserve(at, size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)
     };
-    let reserved = match reserve(&mut vad, Some(wanted)) {
+    // Without a given address, an image goes below the process's limit
+    // (a WOW64 process's 2 or 4 GiB: its 32-bit code must reach it), so a
+    // preferred or alternative base above it counts as taken.
+    let limit = vad.limit();
+    let fits = |b: u64| b.checked_add(size).is_some_and(|end| end <= limit);
+    let first = if base == 0 && image.relocatable && !fits(wanted) {
+        Err(NtStatus::CONFLICTING_ADDRESSES)
+    } else {
+        reserve(&mut vad, Some(wanted))
+    };
+    let reserved = match first {
         Ok(r) => r,
         Err(NtStatus::CONFLICTING_ADDRESSES | NtStatus::INVALID_PARAMETER)
             if base == 0 && image.relocatable =>
         {
-            match image.dynamic_base().map(|b| reserve(&mut vad, Some(b))) {
+            match image.dynamic_base().filter(|&b| fits(b)).map(|b| reserve(&mut vad, Some(b))) {
                 Some(Ok(r)) => r,
                 _ => reserve(&mut vad, None)?,
             }

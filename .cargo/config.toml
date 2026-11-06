@@ -20,3 +20,19 @@ rustflags = [
     "-C", "debuginfo=0",
     "-C", "link-arg=/DEBUG:NONE",
 ]
+
+[target.i686-pc-windows-msvc]
+# 32-bit (x86) test programs, run through WOW64 (ARCHITECTURE "Plan:
+# WOW64"): linked as the x64 ones are; no SafeSEH tables (nothing here
+# raises SEH exceptions through the image's handlers yet).
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=lld-link",
+    "-C", "link-arg=/ENTRY:mainCRTStartup",
+    "-C", "link-arg=/SUBSYSTEM:CONSOLE",
+    "-C", "link-arg=/NODEFAULTLIB",
+    "-C", "link-arg=/SAFESEH:NO",
+    "-C", "link-arg=/Brepro",
+    "-C", "debuginfo=0",
+    "-C", "link-arg=/DEBUG:NONE",
+]

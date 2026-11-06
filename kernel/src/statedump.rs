@@ -204,10 +204,16 @@ mod nmi {
     /// `<prefix> N backtrace: ..` for kernel code (xtask symbolizes it).
     fn print_cpu(prefix: &str, cpu: usize, snap: &Snapshot) {
         let rip = snap.rip.load(Ordering::Relaxed);
-        let user = snap.cs.load(Ordering::Relaxed) & 3 != 0;
+        let cs = snap.cs.load(Ordering::Relaxed);
+        let user = cs & 3 != 0;
+        // 32-bit code (a WOW64 thread): its eip and esp.
+        let mode = match (user, cs == u64::from(crate::arch::gdt::USER32_CS)) {
+            (true, true) => "user 32-bit",
+            (true, false) => "user",
+            _ => "kernel",
+        };
         emergency_line(format_args!(
-            "{prefix} {cpu} {} rip {rip:#x} rsp {:#x}",
-            if user { "user" } else { "kernel" },
+            "{prefix} {cpu} {mode} rip {rip:#x} rsp {:#x}",
             snap.rsp.load(Ordering::Relaxed)
         ));
         if user {

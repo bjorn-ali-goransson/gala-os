@@ -156,6 +156,13 @@ pub trait UserEntry {
         let _ = (fs, gs);
         false
     }
+    /// Makes the calling thread one that runs 32-bit code (WOW64), its
+    /// 32-bit TEB at `teb32` as FS from now on; false where the platform
+    /// cannot (gala-um: its segments are the host's).
+    fn set_teb32(teb32: u64) -> bool {
+        let _ = teb32;
+        false
+    }
 }
 
 /// User memory: the address space of a process (`UserSpace`, whose
@@ -378,6 +385,10 @@ pub fn user_bases() -> (u64, u64) {
 #[inline]
 pub fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
     <P as UserEntry>::set_user_bases(fs, gs)
+}
+#[inline]
+pub fn set_teb32(teb32: u64) -> bool {
+    <P as UserEntry>::set_teb32(teb32)
 }
 
 #[inline]

@@ -223,6 +223,11 @@ pub struct Vad {
     /// Committed pages in MEM_PRIVATE allocations: what the process is
     /// charged for (nt::charge, the commit charge).
     private_commit: u64,
+    /// The end of the range addresses are chosen in (`find_free`): a
+    /// 32-bit process's 2 or 4 GiB (WOW64); 0 for the whole user half.
+    /// Placements at a given address are not limited by it (the 64-bit
+    /// PEB and TEBs of a WOW64 process stay where they always are).
+    limit: u64,
 }
 
 fn page_round(start: u64, size: u64) -> Result<(u64, u64), NtStatus> {
@@ -260,22 +265,37 @@ impl Vad {
                 runs,
             })?;
         }
-        Ok(Vad { allocs, private_commit: self.private_commit })
+        Ok(Vad { allocs, private_commit: self.private_commit, limit: self.limit })
+    }
+
+    /// Limits the addresses chosen for allocations without a given address
+    /// to below `limit` (a WOW64 process's 32-bit address space).
+    pub fn set_limit(&mut self, limit: u64) {
+        self.limit = limit.min(USER_MAX);
+    }
+
+    /// The end of the range `find_free` chooses in.
+    pub fn limit(&self) -> u64 {
+        if self.limit == 0 { USER_MAX } else { self.limit }
     }
 
     /// Lowest (or highest, if `top_down`) free 64K-aligned range of `size`.
     fn find_free(&self, size: u64, top_down: bool) -> Option<u64> {
         let mut gaps: Vec<(u64, u64)> = Vec::new();
         gaps.try_reserve(self.allocs.len() + 1).ok()?;
+        let limit = self.limit();
         let mut prev = USER_MIN;
         for a in &self.allocs {
+            if a.base >= limit {
+                break;
+            }
             if a.base > prev {
                 let _ = gaps.try_push((prev, a.base));
             }
             prev = prev.max(a.end());
         }
-        if prev < USER_MAX {
-            let _ = gaps.try_push((prev, USER_MAX));
+        if prev < limit {
+            let _ = gaps.try_push((prev, limit));
         }
         let fit = |&(s, e): &(u64, u64)| -> Option<u64> {
             if top_down {
@@ -684,7 +704,7 @@ impl Vad {
                 .try_push(Allocation { base, pages, kind, alloc_protect, runs })
                 .map_err(|_| NtStatus::NO_MEMORY)?;
         }
-        Ok(Vad { allocs, private_commit })
+        Ok(Vad { allocs, private_commit, limit: 0 })
     }
 }
 
@@ -719,6 +739,26 @@ mod tests {
         assert_eq!(v.private_commit(), 0);
         assert!(v.is_range_free(base, base + 3 * PAGE));
         assert!(v.unmap_range(base + 1, base + PAGE).is_err());
+    }
+
+    /// A WOW64 process's allocations stay below its 32-bit limit; given
+    /// addresses above it are still placed (its 64-bit PEB and TEBs).
+    #[test]
+    fn the_limit_bounds_chosen_addresses_only() {
+        let mut v = Vad::default();
+        v.set_limit(0x8000_0000);
+        let high = 0x7ff0_0000_0000;
+        v.reserve(Some(high), PAGE, rw(), MEM_PRIVATE, false).unwrap();
+        let (top, _) = v.reserve(None, 0x1_0000, rw(), MEM_PRIVATE, true).unwrap();
+        assert_eq!(top, 0x8000_0000 - 0x1_0000);
+        let (low, _) = v.reserve(None, 0x1_0000, rw(), MEM_PRIVATE, false).unwrap();
+        assert_eq!(low, USER_MIN);
+        assert_eq!(
+            v.reserve(None, 0x8000_0000, rw(), MEM_PRIVATE, false),
+            Err(NtStatus::NO_MEMORY)
+        );
+        assert_eq!(v.try_clone().unwrap().limit(), 0x8000_0000);
+        assert_eq!(Vad::default().limit(), USER_MAX);
     }
 
     /// A Linux fork's child starts with the same map, then they differ.

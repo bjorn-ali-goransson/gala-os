@@ -10,8 +10,11 @@ pub(super) struct Target {
     /// PML4 to load: the thread's user space, or the kernel's.
     pub root: u64,
     pub user_gs_base: u64,
-    /// The user FS base (0 but for Linux threads).
+    /// The user FS base (0 but for Linux threads and WOW64 threads).
     pub user_fs_base: u64,
+    /// The thread runs 32-bit code (WOW64): `user_fs_base` is its 32-bit
+    /// TEB, loaded as the FS segment.
+    pub teb32: bool,
     /// Its personality (where its system calls are dispatched).
     pub personality: crate::personality::Personality,
     /// Its client id (0: a kernel thread).
@@ -33,6 +36,10 @@ pub(super) fn switch(from: *const Context, to: Target) {
         percpu::set_kernel_stack(top);
     }
     percpu::set_user_gs_base(to.user_gs_base);
+    if to.teb32 {
+        // A WOW64 thread: its 32-bit TEB (its FS base) as the FS segment.
+        percpu::load_teb32(to.user_fs_base as u32);
+    }
     percpu::set_user_fs_base(to.user_fs_base);
     percpu::set_personality(to.personality);
     percpu::set_client(to.client);

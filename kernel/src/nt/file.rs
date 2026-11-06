@@ -69,6 +69,8 @@ pub const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 /// AppData folders, the shared ones.
 const DIRECTORIES: &[&[&str]] = &[
     &["Windows", "System32"],
+    // The 32-bit system DLLs' directory (WOW64; GetSystemWow64DirectoryW).
+    &["Windows", "SysWOW64"],
     &["Users", "Public"],
     &["Users", "gala", "AppData", "Roaming"],
     &["Users", "gala", "AppData", "Local", "Temp"],
