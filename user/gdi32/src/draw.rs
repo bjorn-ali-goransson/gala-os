@@ -144,6 +144,21 @@ pub extern "system" fn MoveToEx(hdc: Handle, x: i32, y: i32, prev: *mut [i32; 2]
     .unwrap_or(0)
 }
 
+/// GetCurrentPositionEx: the current position (MoveToEx, LineTo), in
+/// logical coordinates.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCurrentPositionEx(hdc: Handle, out: *mut [i32; 2]) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    with_dc(hdc, |dc, _| {
+        // SAFETY: the caller's POINT.
+        unsafe { *out = [dc.pos.0, dc.pos.1] };
+        1
+    })
+    .unwrap_or(0)
+}
+
 /// LineTo: a line from the current position to (x, y), the end point
 /// excluded (Bresenham), in the pen's colour and width.
 #[unsafe(no_mangle)]

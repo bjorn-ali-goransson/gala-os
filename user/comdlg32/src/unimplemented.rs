@@ -5,6 +5,7 @@
 gala_stubs::unimplemented_exports!("comdlg32.dll":
     ChooseFontW
     CommDlgExtendedError
+    FindTextW
     GetOpenFileNameW
     GetSaveFileNameW
 );

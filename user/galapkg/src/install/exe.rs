@@ -117,13 +117,6 @@ pub(super) fn arp_keys(host: &mut dyn Host) -> Vec<(Root, String)> {
     out
 }
 
-fn root_name(root: Root) -> &'static str {
-    match root {
-        Root::CurrentUser => "HKCU",
-        Root::LocalMachine => "HKLM",
-    }
-}
-
 /// The ARP entry the installer registered (see the module comment):
 /// (root, key name, how it was found).
 fn find_entry(
@@ -249,13 +242,41 @@ fn run_installer(host: &mut dyn Host, p: &Prepared) -> Result<(), Error> {
                     host.log("restart-required (the installer says so; gala does not restart)");
                     Ok(())
                 }
-                _ => Err(Error::failed(format!(
-                    "the installer {file} exited with code {code} ({code:#x}); what it changed \
-                     stays (gala cannot undo a vendor's installer){}",
-                    log_path.map(|l| format!("; its log, if any: {l}")).unwrap_or_default()
-                ))),
+                _ => {
+                    if let Some(l) = &log_path {
+                        tee_setup_log(host, l);
+                    }
+                    Err(Error::failed(format!(
+                        "the installer {file} exited with code {code} ({code:#x}); what it \
+                         changed stays (gala cannot undo a vendor's installer){}",
+                        log_path.map(|l| format!("; its log, if any: {l}")).unwrap_or_default()
+                    )))
+                }
             }
         }
+    }
+}
+
+/// How much of a failed installer's own log goes into the install log.
+const SETUP_LOG_TAIL: usize = 40;
+
+/// The last lines of a failed installer's own log (its Log switch's
+/// file: Inno's /LOG), copied into the install log as `setup-log:` lines
+/// so the failure's reason is beside gala's steps (and in a test's
+/// serial log); `setup-log none` when the installer wrote none.
+fn tee_setup_log(host: &mut dyn Host, path: &str) {
+    let Ok(bytes) = host.read_file(path) else {
+        host.log(&format!("setup-log none path={path}"));
+        return;
+    };
+    // Inno writes UTF-8 (with a BOM); anything else is shown lossily.
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> =
+        text.trim_start_matches('\u{feff}').lines().filter(|l| !l.trim().is_empty()).collect();
+    let skip = lines.len().saturating_sub(SETUP_LOG_TAIL);
+    host.log(&format!("setup-log path={path} lines={} shown={}", lines.len(), lines.len() - skip));
+    for l in &lines[skip..] {
+        host.log(&format!("setup-log: {}", l.trim_end()));
     }
 }
 

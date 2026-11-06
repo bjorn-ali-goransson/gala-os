@@ -10,6 +10,9 @@
 //!   instead, as winget does;
 //! - an uninstall record (ARP entry) under
 //!   `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<id>_<source>`
+//!   (machine scope, [`Layout`]: `%ProgramFiles%\WinGet\{Packages,Links}`,
+//!   the entry in HKLM, the machine's PATH, and only with administrator
+//!   rights, [`require_admin`])
 //!   with winget's values (DisplayName, DisplayVersion, Publisher,
 //!   InstallLocation, UninstallString, WinGetPackageIdentifier,
 //!   WinGetSourceIdentifier, WinGetInstallerType...) and gala's (GalaLinks,
@@ -174,6 +177,10 @@ pub trait Host {
     fn run(&mut self, command_line: &str, timeout_ms: u32) -> Result<u32, HostError>;
     /// Waits (polling for an uninstaller to finish).
     fn sleep(&mut self, ms: u32);
+    /// Whether the caller has administrator rights: its token is a member
+    /// of BUILTIN\\Administrators (CheckTokenMembership, as Microsoft's
+    /// documentation tests for an administrator).
+    fn is_admin(&mut self) -> bool;
 }
 
 /// What went wrong, with the exit code `gala` returns for it.
@@ -195,6 +202,10 @@ pub enum Kind {
     Failed,
     /// 5: the download's SHA-256 is not the manifest's.
     HashMismatch,
+    /// 6: the command needs administrator rights (a machine-scope
+    /// portable install or uninstall; winget's
+    /// APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN, 0x8A150019).
+    RequiresAdmin,
 }
 
 impl Kind {
@@ -205,6 +216,7 @@ impl Kind {
             Kind::Unsupported => 3,
             Kind::Failed => 4,
             Kind::HashMismatch => 5,
+            Kind::RequiresAdmin => 6,
         }
     }
 }
@@ -231,26 +243,105 @@ impl fmt::Display for Error {
 }
 
 pub const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+/// The user's environment (HKCU).
 pub const ENVIRONMENT_KEY: &str = "Environment";
+/// The machine's environment (HKLM), where a machine-wide PATH lives.
+pub const MACHINE_ENVIRONMENT_KEY: &str =
+    "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
 
-/// The directories of the per-user install.
+/// Where a portable install of a scope goes (winget's layout; `winget
+/// --info` lists the same directories): per user
+/// `%LOCALAPPDATA%\\Microsoft\\WinGet\\{Packages,Links}` with the ARP entry
+/// and PATH in HKCU; per machine `%ProgramFiles%\\WinGet\\{Packages,Links}`
+/// (winget's portablePackageMachineRoot default) with the ARP entry in
+/// HKLM and the machine's PATH.
 pub struct Layout {
+    pub scope: Scope,
     pub packages: String,
     pub links: String,
 }
 
 impl Layout {
-    pub fn new(host: &mut dyn Host) -> Result<Layout, Error> {
-        let local = host
-            .env("LOCALAPPDATA")
+    pub fn new(host: &mut dyn Host, scope: Scope) -> Result<Layout, Error> {
+        let (var, under) = match scope {
+            Scope::User => ("LOCALAPPDATA", "Microsoft\\WinGet"),
+            Scope::Machine => ("ProgramFiles", "WinGet"),
+        };
+        let base = host
+            .env(var)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::failed("LOCALAPPDATA is not set"))?;
-        let local = local.trim_end_matches('\\');
+            .ok_or_else(|| Error::failed(format!("{var} is not set")))?;
+        let base = base.trim_end_matches('\\');
         Ok(Layout {
-            packages: format!("{local}\\Microsoft\\WinGet\\Packages"),
-            links: format!("{local}\\Microsoft\\WinGet\\Links"),
+            scope,
+            packages: format!("{base}\\{under}\\Packages"),
+            links: format!("{base}\\{under}\\Links"),
         })
     }
+
+    /// The registry root of the scope's ARP entries and PATH.
+    pub fn root(&self) -> Root {
+        root_of(self.scope)
+    }
+
+    /// The key whose `Path` value is the scope's PATH.
+    pub fn environment_key(&self) -> &'static str {
+        match self.scope {
+            Scope::User => ENVIRONMENT_KEY,
+            Scope::Machine => MACHINE_ENVIRONMENT_KEY,
+        }
+    }
+}
+
+/// The registry root of a scope's ARP entries.
+pub fn root_of(scope: Scope) -> Root {
+    match scope {
+        Scope::User => Root::CurrentUser,
+        Scope::Machine => Root::LocalMachine,
+    }
+}
+
+/// A root's short name, as log lines and messages give it.
+pub fn root_name(root: Root) -> &'static str {
+    match root {
+        Root::CurrentUser => "HKCU",
+        Root::LocalMachine => "HKLM",
+    }
+}
+
+/// The scope an ARP entry's root means.
+pub fn scope_of(root: Root) -> Scope {
+    match root {
+        Root::CurrentUser => Scope::User,
+        Root::LocalMachine => Scope::Machine,
+    }
+}
+
+/// The scope a portable installer installs in: its own Scope, else the
+/// one asked for (`--scope`), else the user's (winget's default for
+/// portable packages).
+pub fn portable_scope(i: &Installer, asked: Option<Scope>) -> Scope {
+    i.scope.or(asked).unwrap_or(Scope::User)
+}
+
+/// Refuses a machine-wide change without administrator rights, before
+/// anything changes, as winget does
+/// (APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN, "Command requires
+/// administrator privileges to run").
+pub fn require_admin(host: &mut dyn Host, what: &str) -> Result<(), Error> {
+    if host.is_admin() {
+        host.log("elevation administrator=yes");
+        return Ok(());
+    }
+    host.log(&format!("error requires-admin administrator=no for={what}"));
+    Err(Error {
+        kind: Kind::RequiresAdmin,
+        message: format!(
+            "{what} is machine-wide and needs administrator rights (winget's \
+             APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN, 0x8A150019); run it as an \
+             administrator, or --scope user installs it for this user; nothing was changed"
+        ),
+    })
 }
 
 /// The key of an install (the package directory's and the ARP entry's
@@ -493,18 +584,16 @@ pub struct Gap {
     /// The ledger line (`gala.exe!install(...)`).
     pub ledger: String,
     pub why: String,
-    /// Whether another installer of the package may be used instead: a
-    /// type or an architecture gala lacks, yes; a scope (where the
-    /// program lands, which the user chose or winget's order did) no.
+    /// Whether another installer of the package may be used instead (a
+    /// type or an architecture gala lacks: yes).
     pub fallback: bool,
 }
 
 /// What gala cannot install (None: it can): portable programs and zips
-/// of them, per user, not x86 (no WOW64); installers that are programs
-/// (inno, nullsoft, exe: [`exe`]). The rest is ROADMAP PK stages 4 and 5.
-/// `scope`: the scope asked for, which a portable installer without
-/// Scope installs in (winget's `--scope`).
-pub fn gap(i: &Installer, scope: Option<Scope>) -> Option<Gap> {
+/// of them, per user or machine-wide, not x86 (no WOW64); installers that
+/// are programs (inno, nullsoft, exe: [`exe`]). The rest is ROADMAP PK
+/// stages 4 and 5.
+pub fn gap(i: &Installer) -> Option<Gap> {
     let type_name = |i: &Installer| match (i.installer_type, i.nested_installer_type) {
         (Some(InstallerType::Zip), Some(n)) => format!("zip of {}", n.as_str()),
         (Some(t), _) => t.as_str().to_string(),
@@ -516,16 +605,6 @@ pub fn gap(i: &Installer, scope: Option<Scope>) -> Option<Gap> {
                 ledger: "gala.exe!install(x86 portable: WOW64)".to_string(),
                 why: "an x86 program, which gala cannot run yet (no WOW64)".to_string(),
                 fallback: true,
-            });
-        }
-        if i.scope.or(scope) == Some(Scope::Machine) {
-            return Some(Gap {
-                ledger: "gala.exe!install(machine scope portable)".to_string(),
-                why: "a portable package for machine scope (winget's Program Files layout and \
-                      HKLM entry are not built yet; ROADMAP PK); --scope user installs it for \
-                      this user"
-                    .to_string(),
-                fallback: false,
             });
         }
         return None;
@@ -672,14 +751,49 @@ fn path_entries(path: &str) -> impl Iterator<Item = &str> {
         .filter(|e| !e.is_empty())
 }
 
-/// Puts `dir` on the user's PATH (HKCU\Environment\Path) if it is not
-/// there; whether it was added.
-fn add_to_path(tx: &mut Tx, dir: &str) -> Result<bool, Error> {
-    let old = tx.host.reg_get(Root::CurrentUser, ENVIRONMENT_KEY, "Path");
-    let text = old.as_ref().and_then(RegValue::text).unwrap_or("");
-    let local = tx.host.env("LOCALAPPDATA").unwrap_or_default();
-    let expanded = |e: &str| e.replace("%LOCALAPPDATA%", &local).replace("%localappdata%", &local);
-    if path_entries(text).any(|e| eq_ci(&expanded(e), dir)) {
+/// A PATH entry with its `%VARIABLE%`s expanded from the environment
+/// (an unknown one is kept as written, as ExpandEnvironmentStrings does).
+fn expand(host: &mut dyn Host, entry: &str) -> String {
+    let mut out = String::new();
+    let mut rest = entry;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        match after.find('%') {
+            Some(j) if j > 0 => {
+                let name = &after[..j];
+                match host.env(name) {
+                    Some(v) => out.push_str(&v),
+                    None => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[j + 1..];
+            }
+            _ => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Puts `dir` on the scope's PATH (the user's `HKCU\Environment\Path`,
+/// or the machine's in `HKLM\SYSTEM\...\Session Manager\Environment`)
+/// if it is not there; whether it was added.
+fn add_to_path(tx: &mut Tx, layout: &Layout, dir: &str) -> Result<bool, Error> {
+    let (root, key) = (layout.root(), layout.environment_key());
+    let old = tx.host.reg_get(root, key, "Path");
+    let text = old.as_ref().and_then(RegValue::text).unwrap_or("").to_string();
+    let present = path_entries(&text).any(|e| {
+        let e = expand(&mut *tx.host, e);
+        eq_ci(e.trim_end_matches('\\'), dir)
+    });
+    if present {
         return Ok(false);
     }
     let new = if text.is_empty() {
@@ -691,14 +805,15 @@ fn add_to_path(tx: &mut Tx, dir: &str) -> Result<bool, Error> {
         Some(RegValue::Sz(_)) => RegValue::Sz(new),
         _ => RegValue::ExpandSz(new),
     };
-    tx.set_value(Root::CurrentUser, ENVIRONMENT_KEY, "Path", value)?;
-    tx.host.log(&format!("path added dir={dir}"));
+    tx.set_value(root, key, "Path", value)?;
+    tx.host.log(&format!("path added dir={dir} scope={}", layout.scope.as_str()));
     Ok(true)
 }
 
-/// Takes `dir` off the user's PATH.
-fn remove_from_path(tx: &mut Tx, dir: &str) -> Result<(), Error> {
-    let Some(old) = tx.host.reg_get(Root::CurrentUser, ENVIRONMENT_KEY, "Path") else {
+/// Takes `dir` off the scope's PATH.
+fn remove_from_path(tx: &mut Tx, layout: &Layout, dir: &str) -> Result<(), Error> {
+    let (root, key) = (layout.root(), layout.environment_key());
+    let Some(old) = tx.host.reg_get(root, key, "Path") else {
         return Ok(());
     };
     let Some(text) = old.text() else { return Ok(()) };
@@ -712,8 +827,8 @@ fn remove_from_path(tx: &mut Tx, dir: &str) -> Result<(), Error> {
             RegValue::Sz(_) => RegValue::Sz(new),
             _ => RegValue::ExpandSz(new),
         };
-        tx.set_value(Root::CurrentUser, ENVIRONMENT_KEY, "Path", value)?;
-        tx.host.log(&format!("path removed dir={dir}"));
+        tx.set_value(root, key, "Path", value)?;
+        tx.host.log(&format!("path removed dir={dir} scope={}", layout.scope.as_str()));
     }
     Ok(())
 }
@@ -780,8 +895,8 @@ pub fn installed(host: &mut dyn Host) -> Vec<Installed> {
 }
 
 /// The installed package `what` names: its identifier, its ARP key
-/// (`--product-code`) or its name (any case). Only the user's gala or
-/// winget installs can be removed by gala (stage 2).
+/// (`--product-code`) or its name (any case), the user's entries before
+/// the machine's.
 pub fn find_installed(host: &mut dyn Host, what: &str) -> Result<Installed, Error> {
     let all = installed(host);
     let by_id = all.iter().find(|i| i.id.as_deref().is_some_and(|id| eq_ci(id, what)));
@@ -919,15 +1034,13 @@ pub enum Refused {
 /// ([`Gap::fallback`]).
 pub fn choose(package: &Package, request: &wsel::Request) -> Result<Chosen, Refused> {
     let s = wsel::select(package, &machine(), request).map_err(Refused::NoInstaller)?;
-    let scope = request.scope.values.first().copied();
-    let Some(g) = gap(s.installer, scope) else {
+    let Some(g) = gap(s.installer) else {
         return Ok(Chosen { index: s.installer.index, instead_of: None });
     };
     if !g.fallback {
         return Err(Refused::Gap(g));
     }
-    let usable =
-        s.runners_up.iter().copied().find(|&i| gap(&package.installers[i], scope).is_none());
+    let usable = s.runners_up.iter().copied().find(|&i| gap(&package.installers[i]).is_none());
     match usable {
         Some(index) => Ok(Chosen { index, instead_of: Some((s.installer.index, g)) }),
         None => Err(Refused::Gap(g)),
@@ -1095,7 +1208,7 @@ fn apply(
     let mut links = Vec::new();
     let mut added_dir_to_path = false;
     if p.plan.dir_on_path {
-        added_dir_to_path = add_to_path(tx, &dir)?;
+        added_dir_to_path = add_to_path(tx, layout, &dir)?;
     } else if !p.plan.commands.is_empty() {
         tx.create_dir_all(&layout.links)?;
         let exe_path = tx.host.self_exe();
@@ -1124,7 +1237,7 @@ fn apply(
             links.push(link);
             links.push(shim_file);
         }
-        add_to_path(tx, &layout.links)?;
+        add_to_path(tx, layout, &layout.links)?;
     }
     // The uninstall record.
     let arp = format!("{UNINSTALL_KEY}\\{key}");
@@ -1156,23 +1269,30 @@ fn apply(
     if let Some(url) = &m.default_locale.package_url {
         values.push(("URLInfoAbout", RegValue::Sz(url.clone())));
     }
+    let root = layout.root();
     for (name, v) in values {
-        tx.set_value(Root::CurrentUser, &arp, name, v)?;
+        tx.set_value(root, &arp, name, v)?;
     }
-    tx.host.log(&format!("registered key=HKCU\\{arp}"));
+    tx.host.log(&format!(
+        "registered key={}\\{arp} scope={}",
+        root_name(root),
+        layout.scope.as_str()
+    ));
     Ok(dir)
 }
 
 /// Removes an installed package (inside `tx`).
 fn remove(tx: &mut Tx, layout: &Layout, i: &Installed) -> Result<(), Error> {
-    if i.root != Root::CurrentUser || i.id.is_none() {
+    if i.id.is_none() {
         return Err(Error::unsupported(format!(
-            "{} was not installed by gala or winget for this user; gala runs only the uninstallers of programs it installed (TODO: any entry's QuietUninstallString)",
+            "{} was not installed by gala or winget; gala runs only the uninstallers of programs it installed (TODO: any entry's QuietUninstallString)",
             i.name
         )));
     }
+    debug_assert_eq!(layout.root(), i.root);
+    let root = i.root;
     let arp = format!("{UNINSTALL_KEY}\\{}", i.key);
-    let links = match tx.host.reg_get(Root::CurrentUser, &arp, "GalaLinks") {
+    let links = match tx.host.reg_get(root, &arp, "GalaLinks") {
         Some(RegValue::MultiSz(v)) => v,
         _ => Vec::new(),
     };
@@ -1193,14 +1313,12 @@ fn remove(tx: &mut Tx, layout: &Layout, i: &Installed) -> Result<(), Error> {
         if tx.host.exists(dir) == Some(true) {
             tx.remove_tree(dir)?;
         }
-        if tx.host.reg_get(Root::CurrentUser, &arp, "InstallDirectoryAddedToPath")
-            == Some(RegValue::Dword(1))
-        {
-            remove_from_path(tx, dir)?;
+        if tx.host.reg_get(root, &arp, "InstallDirectoryAddedToPath") == Some(RegValue::Dword(1)) {
+            remove_from_path(tx, layout, dir)?;
         }
     }
-    tx.delete_key(Root::CurrentUser, &arp)?;
-    tx.host.log(&format!("unregistered key=HKCU\\{arp}"));
+    tx.delete_key(root, &arp)?;
+    tx.host.log(&format!("unregistered key={}\\{arp}", root_name(root)));
     Ok(())
 }
 
@@ -1299,7 +1417,6 @@ fn install_inner(
         req.version.unwrap_or("latest"),
         source.root
     ));
-    let layout = Layout::new(host)?;
     if let Some(i) = find_installed(host, req.id).ok().filter(|i| i.id.is_some()) {
         let want = match req.version {
             Some(v) => v.to_string(),
@@ -1320,6 +1437,10 @@ fn install_inner(
     let package = read_package(host, source, req.id, req.version)?;
     let request = req.options.request(None);
     let index = select_installer(host, &package, &request)?;
+    // A portable install's layout follows its scope; machine-wide needs
+    // administrator rights, checked before anything changes (the
+    // dependencies included).
+    let layout = portable_layout(host, &package, index, req.options.scope)?;
     let mut dependencies = Vec::new();
     if req.options.skip_dependencies && !planned {
         if !package.installers[index].dependencies.packages.is_empty() {
@@ -1363,6 +1484,9 @@ fn install_inner(
             effective_name(&p.installer)
         )));
     }
+    let Some(layout) = layout else {
+        return Err(Error::failed("a portable install without its layout"));
+    };
     let mut tx = Tx::new(host);
     match apply(&mut tx, &layout, &p, req.source_location) {
         Ok(location) => {
@@ -1378,6 +1502,35 @@ fn install_inner(
         }
         Err(e) => Err(fail(tx, e)),
     }
+}
+
+/// The layout of a portable installer's install (None for the others),
+/// after the elevation check of a machine-wide one; logged.
+fn portable_layout(
+    host: &mut dyn Host,
+    package: &Package,
+    index: usize,
+    asked: Option<Scope>,
+) -> Result<Option<Layout>, Error> {
+    let installer = &package.installers[index];
+    if !is_portable(installer) {
+        return Ok(None);
+    }
+    let scope = portable_scope(installer, asked);
+    if scope == Scope::Machine {
+        require_admin(host, &format!("installing {} for the machine", package.id))?;
+    }
+    let layout = Layout::new(host, scope)?;
+    host.log(&format!(
+        "layout scope={} packages={} links={} arp={} path={}\\{}",
+        scope.as_str(),
+        layout.packages,
+        layout.links,
+        root_name(layout.root()),
+        root_name(layout.root()),
+        layout.environment_key()
+    ));
+    Ok(Some(layout))
 }
 
 /// One planned dependency: installed, or (installed at a version below
@@ -1423,13 +1576,17 @@ fn fail(tx: Tx, mut e: Error) -> Error {
 /// `gala uninstall`.
 pub fn uninstall(host: &mut dyn Host, what: &str) -> Result<Outcome, Error> {
     host.log(&format!("uninstall what={what}"));
-    let layout = Layout::new(host)?;
     let i = find_installed(host, what)?;
     if let Some(t) = exe::installed_type(host, &i).filter(|t| exe::is_program(t)) {
         exe::uninstall_program(host, &i, &t)?;
         host.log(&format!("uninstalled key={}", i.key));
         return Ok(Outcome::Uninstalled { id: i.id.unwrap_or(i.key), version: i.version });
     }
+    let scope = scope_of(i.root);
+    if scope == Scope::Machine && i.id.is_some() {
+        require_admin(host, &format!("uninstalling {} from the machine", i.name))?;
+    }
+    let layout = Layout::new(host, scope)?;
     let mut tx = Tx::new(host);
     match remove(&mut tx, &layout, &i) {
         Ok(()) => {
@@ -1477,10 +1634,7 @@ pub fn arp_record(i: &Installed) -> ArpRecord {
         display_version: i.display_version.clone(),
         upgrade_code: None,
         winget_id: i.id.clone(),
-        scope: Some(match i.root {
-            Root::CurrentUser => Scope::User,
-            Root::LocalMachine => Scope::Machine,
-        }),
+        scope: Some(scope_of(i.root)),
         windows_installer: i.windows_installer,
     }
 }
@@ -1646,7 +1800,6 @@ pub fn upgrade(
     options: &Options,
 ) -> Result<Outcome, Error> {
     host.log(&format!("upgrade what={what}"));
-    let layout = Layout::new(host)?;
     let (i, id) = find_for_upgrade(host, source, what)?;
     let mut owned = None;
     let s = source_for(source, &i, &mut owned)?;
@@ -1664,10 +1817,7 @@ pub fn upgrade(
         .as_deref()
         .and_then(InstallerType::parse)
         .or_else(|| arp::installed_type(&arp_record(&i), &package));
-    let scope = match i.root {
-        Root::CurrentUser => Scope::User,
-        Root::LocalMachine => Scope::Machine,
-    };
+    let scope = scope_of(i.root);
     host.log(&format!(
         "installed scope={} type={} key={}",
         scope.as_str(),
@@ -1677,6 +1827,10 @@ pub fn upgrade(
     let request =
         options.request(Some(wsel::Installed { installer_type: old_type, scope: Some(scope) }));
     let index = select_installer(host, &package, &request)?;
+    // A portable upgrade removes the old version from its scope's layout
+    // and installs the new one into the new installer's (the installed
+    // scope unless the new version has no installer for it).
+    let new_layout = portable_layout(host, &package, index, Some(scope))?;
     let p = prepare(host, s, package, index, options, None, true)?;
     let location = s.root.clone();
     // A portable install is gala's (its files recorded); anything else,
@@ -1698,8 +1852,16 @@ pub fn upgrade(
         host.log(&format!("upgraded id={id} from={} to={}", i.version, p.package.version));
         return Ok(Outcome::Upgraded { id, from: i.version, to: p.package.version.clone() });
     }
+    if scope == Scope::Machine && new_layout.as_ref().is_some_and(|l| l.scope != scope) {
+        require_admin(host, &format!("removing {id}'s machine-wide install"))?;
+    }
+    let old_layout = Layout::new(host, scope)?;
+    let Some(new_layout) = new_layout else {
+        return Err(Error::failed("a portable upgrade without its layout"));
+    };
     let mut tx = Tx::new(host);
-    let r = remove(&mut tx, &layout, &i).and_then(|()| apply(&mut tx, &layout, &p, &location));
+    let r =
+        remove(&mut tx, &old_layout, &i).and_then(|()| apply(&mut tx, &new_layout, &p, &location));
     match r {
         Ok(_) => {
             tx.commit();

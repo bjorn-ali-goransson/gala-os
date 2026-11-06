@@ -3,7 +3,9 @@
 //! OpenThemeData gives NULL (programs then draw controls themselves), the
 //! functions taking a theme fail with E_HANDLE for NULL except
 //! GetThemeSysColor/GetThemeSysFont, which give the system's (documented
-//! for a NULL theme); SetWindowTheme is accepted.
+//! for a NULL theme); SetWindowTheme is accepted. Buffered painting: Init
+//! and UnInit succeed; no paint buffer or animation is ever started
+//! (NULL, recorded in the ledger).
 
 #![no_std]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -104,7 +106,108 @@ no_theme!(
     DrawThemeBackground DrawThemeBackgroundEx GetThemeBackgroundContentRect GetThemeBackgroundExtent
     GetThemeColor
     GetThemeFont GetThemeInt GetThemeMargins GetThemePartSize DrawThemeParentBackground
+    DrawThemeTextEx
 );
+
+/// OpenThemeDataForDpi: NULL, as OpenThemeData (no theme is active).
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenThemeDataForDpi(_hwnd: usize, _classes: *const u16, _dpi: u32) -> usize {
+    0
+}
+
+// ---- Buffered painting -----------------------------------------------
+//
+// Init and UnInit pair up per thread (documented: call before any other
+// buffered paint function); gala has no paint buffers yet, so starting
+// one fails (NULL, as documented on failure; the program then paints
+// directly) and is recorded in the ledger; no animation ever runs.
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
+}
+
+fn unsupported(what: &[u8]) {
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, 0) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn BufferedPaintInit() -> i32 {
+    S_OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn BufferedPaintUnInit() -> i32 {
+    S_OK
+}
+
+/// BeginBufferedPaint: no paint buffer (NULL; recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn BeginBufferedPaint(
+    _target: usize,
+    _rect: *const i32,
+    _format: u32,
+    _params: *const u8,
+    dc: *mut usize,
+) -> usize {
+    unsupported(b"uxtheme.dll!BeginBufferedPaint");
+    if !dc.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *dc = 0 };
+    }
+    0
+}
+
+/// BeginBufferedAnimation: no animation (NULL; recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn BeginBufferedAnimation(
+    _hwnd: usize,
+    _target: usize,
+    _rect: *const i32,
+    _format: u32,
+    _params: *const u8,
+    _animation: *const u8,
+    from: *mut usize,
+    to: *mut usize,
+) -> usize {
+    unsupported(b"uxtheme.dll!BeginBufferedAnimation");
+    for out in [from, to] {
+        if !out.is_null() {
+            // SAFETY: the caller's output.
+            unsafe { *out = 0 };
+        }
+    }
+    0
+}
+
+/// The functions on a paint buffer or animation: none is ever given out
+/// (E_HANDLE).
+#[unsafe(no_mangle)]
+pub extern "system" fn EndBufferedPaint(_buffer: usize, _update: i32) -> i32 {
+    E_HANDLE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn EndBufferedAnimation(_animation: usize, _update: i32) -> i32 {
+    E_HANDLE
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn BufferedPaintSetAlpha(_buffer: usize, _rect: *const i32, _alpha: u8) -> i32 {
+    E_HANDLE
+}
+
+/// BufferedPaintRenderAnimation: FALSE, no animation is running.
+#[unsafe(no_mangle)]
+pub extern "system" fn BufferedPaintRenderAnimation(_hwnd: usize, _dc: usize) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn BufferedPaintStopAllAnimations(_hwnd: usize) -> i32 {
+    S_OK
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn IsThemeBackgroundPartiallyTransparent(

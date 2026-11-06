@@ -1359,3 +1359,11 @@ pub extern "system" fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle
     }
     h as Handle
 }
+
+/// SetProcessDEPPolicy: for 32-bit processes only; a 64-bit process (all
+/// of gala's: DEP is always on for them) gets ERROR_NOT_SUPPORTED, as
+/// documented.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetProcessDEPPolicy(_flags: u32) -> Bool {
+    fail_with(ERROR_NOT_SUPPORTED, FALSE)
+}

@@ -26,6 +26,13 @@
 //!   leaving the file alone now), shfolder's SHGetFolderPathW, user32's CharPrevW and wsprintfW/wvsprintfW
 //!   (documented format), gdi32's CreateBrushIndirect.
 //!
+//! - What Inno Setup's start-up calls (`inno_startup`): SetSearchPathMode,
+//!   SetProcessDEPPolicy, GetThreadUILanguage,
+//!   SetThreadPreferredUILanguages; what Delphi's VCL calls: global atoms
+//!   (GlobalAddAtomW, GlobalFindAtomW, GlobalGetAtomNameW,
+//!   GlobalDeleteAtom), winspool.drv on a machine without printers
+//!   (EnumPrintersW, GetDefaultPrinterW, OpenPrinterW).
+//!
 //! Prints `win32_misc_test: ok` or exits with the number of the failing
 //! check.
 
@@ -40,6 +47,16 @@ type Handle = *mut c_void;
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetLastError() -> u32;
+    fn SetSearchPathMode(flags: u32) -> Bool;
+    fn SetProcessDEPPolicy(flags: u32) -> Bool;
+    fn GetThreadUILanguage() -> u16;
+    fn GlobalAddAtomW(name: *const u16) -> u16;
+    fn IsWow64GuestMachineSupported(machine: u16, supported: *mut Bool) -> i32;
+    fn GetSystemWow64DirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn GlobalFindAtomW(name: *const u16) -> u16;
+    fn GlobalDeleteAtom(atom: u16) -> u16;
+    fn GlobalGetAtomNameW(atom: u16, buf: *mut u16, size: i32) -> u32;
+    fn SetThreadPreferredUILanguages(flags: u32, list: *const u16, count: *mut u32) -> Bool;
     fn FormatMessageW(
         flags: u32,
         source: *const c_void,
@@ -114,6 +131,26 @@ unsafe extern "C" {
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn wvsprintfW(buf: *mut u16, fmt: *const u16, args: *const u64) -> i32;
+    fn SystemParametersInfoW(action: u32, param: u32, out: *mut c_void, ini: u32) -> Bool;
+    fn CharLowerW(s: *mut u16) -> *mut u16;
+    fn AdjustWindowRectEx(rect: *mut [i32; 4], style: u32, menu: Bool, ex: u32) -> Bool;
+    fn AdjustWindowRectExForDpi(
+        rect: *mut [i32; 4],
+        style: u32,
+        menu: Bool,
+        ex: u32,
+        dpi: u32,
+    ) -> Bool;
+    fn GetGestureInfo(gesture: usize, info: *mut u8) -> Bool;
+    fn SetGestureConfig(
+        hwnd: Handle,
+        reserved: u32,
+        count: u32,
+        config: *const u8,
+        size: u32,
+    ) -> Bool;
+    fn CountClipboardFormats() -> i32;
+    fn IsWindowUnicode(hwnd: Handle) -> Bool;
     fn CharNextExA(code_page: u16, s: *const u8, flags: u32) -> *const u8;
     fn CharUpperW(s: *mut u16) -> *mut u16;
     fn CharUpperBuffW(s: *mut u16, n: u32) -> u32;
@@ -134,6 +171,10 @@ unsafe extern "system" {
 #[link(name = "gdi32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn CreateBrushIndirect(lb: *const [usize; 2]) -> Handle;
+    fn CreateCompatibleDC(dc: Handle) -> Handle;
+    fn DeleteDC(dc: Handle) -> Bool;
+    fn MoveToEx(dc: Handle, x: i32, y: i32, prev: *mut [i32; 2]) -> Bool;
+    fn GetCurrentPositionEx(dc: Handle, out: *mut [i32; 2]) -> Bool;
     fn DeleteObject(h: Handle) -> Bool;
     fn GetObjectType(h: Handle) -> u32;
 }
@@ -938,8 +979,192 @@ fn installer_helpers(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// What Inno Setup's start-up calls (its SafeDLLPath unit and the Delphi
+/// run-time library), with their documented results on 64-bit Windows:
+/// SetSearchPathMode (exactly one of enable and disable, PERMANENT only
+/// with enable; after a permanent enable, disabling is
+/// ERROR_ACCESS_DENIED), SetProcessDEPPolicy (32-bit processes only:
+/// ERROR_NOT_SUPPORTED), GetThreadUILanguage (en-US, 0x409, the
+/// machine's UI language), SetThreadPreferredUILanguages (en-US by name
+/// or id; a null list clears; a filter flag alone).
+fn inno_startup(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls with our NUL-terminated lists and outputs.
+    unsafe {
+        c.ok(SetSearchPathMode(0x1_0001) == 0, 0)?; // enable and disable
+        c.eq(GetLastError().into(), 87)?;
+        c.ok(SetSearchPathMode(0x1_8000) == 0, 0)?; // disable, permanent
+        c.eq(GetLastError().into(), 87)?;
+        c.ok(SetSearchPathMode(0) == 0, 0)?;
+        c.eq(GetLastError().into(), 87)?;
+        c.ok(SetSearchPathMode(0x1_0000) != 0, 0)?; // disable
+        c.ok(SetSearchPathMode(0x8001) != 0, 0)?; // enable, permanent
+        c.ok(SetSearchPathMode(0x1_0000) == 0, 0)?;
+        c.eq(GetLastError().into(), 5)?; // ERROR_ACCESS_DENIED
+        c.ok(SetProcessDEPPolicy(1) == 0, 0)?; // PROCESS_DEP_ENABLE
+        c.eq(GetLastError().into(), 50)?; // ERROR_NOT_SUPPORTED
+        c.eq(GetThreadUILanguage().into(), 0x409)?;
+        let names = w("en-US\0");
+        let mut n = 7u32;
+        c.ok(SetThreadPreferredUILanguages(0x8, names.as_ptr(), &mut n) != 0, 0)?;
+        c.eq(n.into(), 1)?;
+        let ids = w("0409\0");
+        n = 7;
+        c.ok(SetThreadPreferredUILanguages(0x4, ids.as_ptr(), &mut n) != 0, 0)?;
+        c.eq(n.into(), 1)?;
+        c.ok(SetThreadPreferredUILanguages(0, core::ptr::null(), core::ptr::null_mut()) != 0, 0)?;
+        c.ok(SetThreadPreferredUILanguages(0x1, core::ptr::null(), core::ptr::null_mut()) != 0, 0)?;
+        c.ok(SetThreadPreferredUILanguages(0x1, names.as_ptr(), &mut n) == 0, 0)?;
+        c.eq(GetLastError().into(), 87)?;
+        c.eq(GetThreadUILanguage().into(), 0x409)?;
+        // Global atoms (Delphi's VCL makes its property atoms so): one
+        // atom per name in any case, counted; integer atoms are their
+        // value.
+        let a = GlobalAddAtomW(w("GalaAtomTest").as_ptr());
+        c.ok(a >= 0xc000, a.into())?;
+        c.eq(GlobalAddAtomW(w("galaatomtest").as_ptr()).into(), a.into())?;
+        c.eq(GlobalFindAtomW(w("GALAATOMTEST").as_ptr()).into(), a.into())?;
+        let mut name = [0u16; 64];
+        c.eq(GlobalGetAtomNameW(a, name.as_mut_ptr(), 64).into(), 12)?;
+        c.text(name.as_ptr(), "GalaAtomTest")?;
+        c.eq(GlobalDeleteAtom(a).into(), 0)?;
+        c.eq(GlobalFindAtomW(w("GalaAtomTest").as_ptr()).into(), a.into())?; // one left
+        c.eq(GlobalDeleteAtom(a).into(), 0)?;
+        c.eq(GlobalFindAtomW(w("GalaAtomTest").as_ptr()).into(), 0)?;
+        c.eq(GetLastError().into(), 2)?; // ERROR_FILE_NOT_FOUND
+        c.eq(GlobalAddAtomW(w("#1234").as_ptr()).into(), 1234)?;
+        c.eq(GlobalAddAtomW(0x42 as *const u16).into(), 0x42)?;
+        c.eq(GlobalGetAtomNameW(1234, name.as_mut_ptr(), 64).into(), 5)?;
+        c.text(name.as_ptr(), "#1234")?;
+        c.eq(GlobalDeleteAtom(1234).into(), 0)?;
+        // SPI_GETMOUSEWHEELROUTING: MOUSEWHEEL_ROUTING_HYBRID (2), the
+        // default since Windows 10.
+        let mut routing = 7u32;
+        c.ok(SystemParametersInfoW(0x201c, 0, (&raw mut routing).cast(), 0) != 0, 0)?;
+        c.eq(routing.into(), 2)?;
+        // CharLowerW: in place, or one character in the low word.
+        let mut mixed = w("MiXeD");
+        c.eq(CharLowerW(mixed.as_mut_ptr()) as u64, mixed.as_ptr() as u64)?;
+        c.text(mixed.as_ptr(), "mixed")?;
+        c.eq(CharLowerW(u16::from(b'Q') as usize as *mut u16) as u64, u64::from(b'q'))?;
+    }
+    vcl(c)?;
+    // winspool.drv on a machine without printers: none enumerated, no
+    // default printer (ERROR_FILE_NOT_FOUND), none to open
+    // (ERROR_INVALID_PRINTER_NAME).
+    type EnumPrinters =
+        unsafe extern "system" fn(u32, *const u16, u32, *mut u8, u32, *mut u32, *mut u32) -> Bool;
+    type GetDefaultPrinter = unsafe extern "system" fn(*mut u16, *mut u32) -> Bool;
+    type OpenPrinter = unsafe extern "system" fn(*const u16, *mut usize, *const u8) -> Bool;
+    // SAFETY: winspool's exports with their documented signatures; our
+    // buffers and outputs.
+    unsafe {
+        let m = LoadLibraryA(c"winspool.drv".as_ptr().cast());
+        c.ok(!m.is_null(), GetLastError().into())?;
+        let f = |n: &[u8]| GetProcAddress(m, n.as_ptr());
+        let (e, d, o) = (f(b"EnumPrintersW\0"), f(b"GetDefaultPrinterW\0"), f(b"OpenPrinterW\0"));
+        c.ok(!e.is_null() && !d.is_null() && !o.is_null(), 0)?;
+        let e = core::mem::transmute::<*mut c_void, EnumPrinters>(e);
+        let d = core::mem::transmute::<*mut c_void, GetDefaultPrinter>(d);
+        let o = core::mem::transmute::<*mut c_void, OpenPrinter>(o);
+        let (mut needed, mut returned) = (7u32, 7u32);
+        // PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, level 2.
+        c.ok(
+            e(0x6, core::ptr::null(), 2, core::ptr::null_mut(), 0, &mut needed, &mut returned) != 0,
+            0,
+        )?;
+        c.eq(u64::from(needed) << 32 | u64::from(returned), 0)?;
+        let mut name = [0u16; 64];
+        let mut size = 64u32;
+        c.ok(d(name.as_mut_ptr(), &mut size) == 0, 0)?;
+        c.eq(GetLastError().into(), 2)?;
+        let mut h = 7usize;
+        c.ok(o(w("Printer").as_ptr(), &mut h, core::ptr::null()) == 0, 0)?;
+        c.eq(GetLastError().into(), 1801)?;
+        c.eq(h as u64, 0)?;
+    }
+    Ok(())
+}
+
+/// What Delphi's VCL (Inno Setup's Setup) calls as it starts, with
+/// Windows' documented results where gala has no WOW64, no paint buffers
+/// and no touch input: IsWow64GuestMachineSupported (S_OK, no x86),
+/// GetSystemWow64DirectoryW (ERROR_CALL_NOT_IMPLEMENTED), the *ForDpi
+/// forms (96 DPI), gesture handles (none valid), the clipboard's format
+/// count, IsEqualGUID, GetCurrentPositionEx after MoveToEx, uxtheme's
+/// buffered painting (Init succeeds, no buffer is started) and
+/// OpenThemeDataForDpi (no theme).
+fn vcl(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls with our buffers; exports looked up by name
+    // with their documented signatures.
+    unsafe {
+        let mut supported = 7;
+        c.eq(IsWow64GuestMachineSupported(0x14c, &mut supported) as u64, 0)?;
+        c.eq(supported as u64, 0)?;
+        let mut dir = [0u16; 64];
+        c.eq(GetSystemWow64DirectoryW(dir.as_mut_ptr(), 64).into(), 0)?;
+        c.eq(GetLastError().into(), 120)?;
+        let (mut a, mut b) = ([0, 0, 100, 100], [0, 0, 100, 100]);
+        c.ok(AdjustWindowRectEx(&mut a, 0x00cf_0000, 0, 0) != 0, 0)?;
+        c.ok(AdjustWindowRectExForDpi(&mut b, 0x00cf_0000, 0, 0, 96) != 0, 0)?;
+        c.ok(a == b, 0)?;
+        c.ok(GetGestureInfo(0x1234, core::ptr::null_mut()) == 0, 0)?;
+        c.eq(GetLastError().into(), 6)?;
+        c.ok(SetGestureConfig(core::ptr::null_mut(), 0, 0, core::ptr::null(), 0) == 0, 0)?;
+        c.eq(GetLastError().into(), 1400)?;
+        c.eq(CountClipboardFormats() as u64, 0)?;
+        c.ok(IsWindowUnicode(core::ptr::null_mut()) == 0, 0)?;
+        let dc = CreateCompatibleDC(core::ptr::null_mut());
+        c.ok(!dc.is_null(), 0)?;
+        c.ok(MoveToEx(dc, 5, 7, core::ptr::null_mut()) != 0, 0)?;
+        let mut pos = [0i32; 2];
+        c.ok(GetCurrentPositionEx(dc, &mut pos) != 0 && pos == [5, 7], pos[0] as u64)?;
+        DeleteDC(dc);
+
+        type IsEqualGuid = unsafe extern "system" fn(*const u8, *const u8) -> Bool;
+        let ole = LoadLibraryA(c"ole32.dll".as_ptr().cast());
+        let f = GetProcAddress(ole, c"IsEqualGUID".as_ptr().cast());
+        c.ok(!f.is_null(), 0)?;
+        let eq = core::mem::transmute::<*mut c_void, IsEqualGuid>(f);
+        let (x, mut y) = ([7u8; 16], [7u8; 16]);
+        c.ok(eq(x.as_ptr(), y.as_ptr()) != 0, 0)?;
+        y[15] = 8;
+        c.ok(eq(x.as_ptr(), y.as_ptr()) == 0, 0)?;
+
+        type Init = unsafe extern "system" fn() -> i32;
+        type Begin =
+            unsafe extern "system" fn(Handle, *const i32, u32, *const u8, *mut Handle) -> Handle;
+        type OpenForDpi = unsafe extern "system" fn(Handle, *const u16, u32) -> Handle;
+        let ux = LoadLibraryA(c"uxtheme.dll".as_ptr().cast());
+        let p = |n: &core::ffi::CStr| GetProcAddress(ux, n.as_ptr().cast());
+        let procs = [
+            p(c"BufferedPaintInit"),
+            p(c"BeginBufferedPaint"),
+            p(c"BufferedPaintUnInit"),
+            p(c"OpenThemeDataForDpi"),
+        ];
+        c.ok(procs.iter().all(|f| !f.is_null()), 0)?;
+        let init = core::mem::transmute::<*mut c_void, Init>(procs[0]);
+        let begin = core::mem::transmute::<*mut c_void, Begin>(procs[1]);
+        let uninit = core::mem::transmute::<*mut c_void, Init>(procs[2]);
+        let open = core::mem::transmute::<*mut c_void, OpenForDpi>(procs[3]);
+        c.eq(init() as u64, 0)?;
+        let rect = [0i32, 0, 10, 10];
+        let mut paint_dc: Handle = 7 as Handle;
+        c.ok(
+            begin(core::ptr::null_mut(), rect.as_ptr(), 0, core::ptr::null(), &mut paint_dc)
+                .is_null(),
+            0,
+        )?;
+        c.ok(paint_dc.is_null(), 0)?;
+        c.eq(uninit() as u64, 0)?;
+        c.ok(open(core::ptr::null_mut(), w("BUTTON").as_ptr(), 96).is_null(), 0)?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
+    inno_startup(&mut c)?;
     installer_helpers(&mut c)?;
     characters(&mut c)?;
     sspi(&mut c)?;

@@ -50,4 +50,10 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     CredReadW
     CredWriteW
     CryptSignHashA
+    // Inno Setup's Setup (Delphi's VCL) imports these.
+    RegLoadKeyW
+    RegReplaceKeyW
+    RegRestoreKeyW
+    RegSaveKeyW
+    RegUnLoadKeyW
 );

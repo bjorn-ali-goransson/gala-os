@@ -43,6 +43,10 @@ struct Fake {
     sleeps: u32,
     /// URLs fetched, in order.
     fetches: Vec<String>,
+    /// The caller is an administrator (Host::is_admin).
+    admin: bool,
+    /// GalaTest.InnoSetup's stand-in fails as Inno does, writing its log.
+    inno_fails: bool,
 }
 
 fn root_n(r: Root) -> u8 {
@@ -57,6 +61,7 @@ fn lc(s: &str) -> String {
 }
 
 const LOCAL: &str = "C:\\Users\\gala\\AppData\\Local";
+const PROGRAM_FILES: &str = "C:\\Program Files";
 const GALA: &str = "C:\\gala\\gala.exe";
 const SRC: &str = "C:\\pk_source";
 
@@ -73,20 +78,30 @@ impl Fake {
             pending: None,
             sleeps: 0,
             fetches: Vec::new(),
+            admin: false,
+            inno_fails: false,
         };
-        for d in
-            ["C:", "C:\\gala", "C:\\Users", "C:\\Users\\gala", "C:\\Users\\gala\\AppData", LOCAL]
-        {
+        for d in [
+            "C:",
+            "C:\\gala",
+            "C:\\Users",
+            "C:\\Users\\gala",
+            "C:\\Users\\gala\\AppData",
+            LOCAL,
+            PROGRAM_FILES,
+        ] {
             f.m.files.insert(lc(d), (d.into(), None));
         }
         f.m.files.insert(lc(GALA), (GALA.into(), Some(b"MZ gala.exe".to_vec())));
-        let mut k = UNINSTALL_KEY;
-        loop {
-            f.m.keys.insert((0, lc(k)), (k.into(), vec![]));
-            if !k.contains('\\') {
-                break;
+        for (root, key) in [(0, UNINSTALL_KEY), (1, UNINSTALL_KEY), (1, MACHINE_ENVIRONMENT_KEY)] {
+            let mut k = key;
+            loop {
+                f.m.keys.insert((root, lc(k)), (k.into(), vec![]));
+                if !k.contains('\\') {
+                    break;
+                }
+                k = parent_of(k);
             }
-            k = parent_of(k);
         }
         f.m.keys.insert(
             (0, lc(ENVIRONMENT_KEY)),
@@ -95,6 +110,17 @@ impl Fake {
                 vec![(
                     "TEMP".into(),
                     RegValue::ExpandSz("%USERPROFILE%\\AppData\\Local\\Temp".into()),
+                )],
+            ),
+        );
+        // The machine's environment, as gala's registry seed has it.
+        f.m.keys.insert(
+            (1, lc(MACHINE_ENVIRONMENT_KEY)),
+            (
+                MACHINE_ENVIRONMENT_KEY.into(),
+                vec![(
+                    "Path".into(),
+                    RegValue::ExpandSz("%SystemRoot%\\system32;%SystemRoot%".into()),
                 )],
             ),
         );
@@ -368,7 +394,16 @@ impl Host for Fake {
         Err(HostError { code: 50 })
     }
     fn env(&mut self, name: &str) -> Option<String> {
+        if name.eq_ignore_ascii_case("ProgramFiles") {
+            return Some(PROGRAM_FILES.into());
+        }
+        if name.eq_ignore_ascii_case("SystemRoot") {
+            return Some("C:\\Windows".into());
+        }
         name.eq_ignore_ascii_case("LOCALAPPDATA").then(|| LOCAL.into())
+    }
+    fn is_admin(&mut self) -> bool {
+        self.admin
     }
     fn self_exe(&mut self) -> String {
         GALA.into()
@@ -409,6 +444,14 @@ impl Host for Fake {
                 ],
             );
             return Ok(0);
+        }
+        if name == "innosetup-2.0.exe" && self.inno_fails {
+            // Inno Setup failing to start: its /LOG file says why, exit 1.
+            let i = args.find("/LOG=\"").unwrap();
+            let log = args[i + 6..].split('"').next().unwrap().to_string();
+            let text = "\u{feff}Log opened.\r\nSetup version: Inno Setup version 7.1.1\r\n\r\nInitialization error: no.\r\n";
+            self.m.files.insert(lc(&log), (log.clone(), Some(text.as_bytes().to_vec())));
+            return Ok(1);
         }
         if name == "innosetup-2.0.exe" {
             assert!(
@@ -1292,24 +1335,132 @@ fn scope_is_required_and_kept_on_upgrade() {
         "{:#?}",
         f.log
     );
-    // --scope machine: winget's machine-wide portable layout (Program
-    // Files, HKLM) is not built: refused before any change.
+    // --scope machine without administrator rights: refused before any
+    // change (winget's APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN).
     let mut f = Fake::new();
     let before = f.m.clone();
     let e = install_with(&mut f, "GalaTest.PkScoped", None, machine).unwrap_err();
-    assert_eq!(e.kind, Kind::Unsupported);
-    assert!(e.message.contains("machine scope"), "{}", e.message);
-    assert_eq!(f.missing, vec!["gala.exe!install(machine scope portable)".to_string()]);
+    assert_eq!(e.kind, Kind::RequiresAdmin);
+    assert_eq!(e.kind.exit_code(), 6);
+    assert!(e.message.contains("administrator"), "{}", e.message);
+    assert!(log_has(&f, "error requires-admin administrator=no"), "{:#?}", f.log);
+    assert!(f.missing.is_empty(), "{:?}", f.missing);
     assert!(f.m == before);
     // No scope asked: winget's order (no preference: the manifest's), the
     // machine installer, refused the same way.
     let e = install_id(&mut f, "GalaTest.PkScoped", None).unwrap_err();
-    assert_eq!(e.kind, Kind::Unsupported);
-    // A scope no installer has.
-    let only_user = Options { scope: Some(Scope::Machine), ..Options::default() };
-    let e = install_with(&mut f, "GalaTest.PkHello", None, only_user).unwrap_err();
-    assert_eq!(e.kind, Kind::Unsupported);
+    assert_eq!(e.kind, Kind::RequiresAdmin);
+    assert!(f.m == before);
+    // A scope no installer has (PkHello's has none: the asked scope).
+    let only_machine = Options { scope: Some(Scope::Machine), ..Options::default() };
+    let e = install_with(&mut f, "GalaTest.PkHello", None, only_machine).unwrap_err();
+    assert_eq!(e.kind, Kind::RequiresAdmin);
     let _ = user;
+}
+
+const PF_PACKAGES: &str = "C:\\Program Files\\WinGet\\Packages";
+const PF_LINKS: &str = "C:\\Program Files\\WinGet\\Links";
+
+fn machine_path(f: &Fake) -> String {
+    match f.value(Root::LocalMachine, MACHINE_ENVIRONMENT_KEY, "Path") {
+        Some(RegValue::ExpandSz(p)) => p,
+        other => panic!("the machine's Path: {other:?}"),
+    }
+}
+
+#[test]
+fn machine_scope_portable_install_list_upgrade_uninstall() {
+    use crate::winget::Scope;
+    let machine = Options { scope: Some(Scope::Machine), ..Options::default() };
+    let mut f = Fake::new();
+    f.admin = true;
+    let before = f.m.clone();
+    let out = install_with(&mut f, "GalaTest.PkScoped", Some("1.0.0"), machine.clone()).unwrap();
+    assert!(
+        matches!(&out, Outcome::Installed { location, .. }
+        if location == &format!("{PF_PACKAGES}\\GalaTest.PkScoped_Microsoft.Winget.Source_8wekyb3d8bbwe")),
+        "{out:?}"
+    );
+    assert!(log_has(&f, "elevation administrator=yes"), "{:#?}", f.log);
+    assert!(log_has(&f, "layout scope=machine packages=C:\\Program Files\\WinGet\\Packages"));
+    assert!(
+        log_has(&f, "url=https://packages.gala.invalid/pkscoped-1.0.0-machine.zip"),
+        "{:#?}",
+        f.log
+    );
+    // Program Files, the machine's Links on the machine's PATH, the
+    // entry in HKLM; nothing per user.
+    assert!(f.file(&format!("{PF_LINKS}\\pkscoped.exe")).is_some());
+    assert!(f.file(&format!("{PF_LINKS}\\pkscoped.shim")).is_some());
+    assert_eq!(machine_path(&f), format!("%SystemRoot%\\system32;%SystemRoot%;{PF_LINKS}"));
+    assert!(f.value(Root::CurrentUser, ENVIRONMENT_KEY, "Path").is_none());
+    let key = arp_of("GalaTest.PkScoped");
+    assert!(!f.reg_key_exists(Root::CurrentUser, &key));
+    assert_eq!(
+        f.value(Root::LocalMachine, &key, "WinGetPackageIdentifier"),
+        Some(RegValue::Sz("GalaTest.PkScoped".into()))
+    );
+    assert!(log_has(&f, "registered key=HKLM\\"), "{:#?}", f.log);
+    // Listed as machine-wide; again is "already installed".
+    let l = list(&mut f, None);
+    let row = l.iter().find(|r| r.id.as_deref() == Some("GalaTest.PkScoped")).unwrap();
+    assert_eq!(row.installed.root, Root::LocalMachine);
+    assert!(matches!(
+        install_with(&mut f, "GalaTest.PkScoped", Some("1.0.0"), machine.clone()).unwrap(),
+        Outcome::AlreadyInstalled { .. }
+    ));
+    // Upgrade keeps machine scope (1.1.0's machine installer).
+    f.log.clear();
+    let out = upgrade_id(&mut f, "GalaTest.PkScoped").unwrap();
+    assert!(matches!(out, Outcome::Upgraded { .. }), "{out:?}");
+    assert!(log_has(&f, "installed scope=machine type=portable"), "{:#?}", f.log);
+    assert!(
+        log_has(&f, "url=https://packages.gala.invalid/pkscoped-1.1.0-machine.zip"),
+        "{:#?}",
+        f.log
+    );
+    assert_eq!(
+        f.value(Root::LocalMachine, &key, "DisplayVersion"),
+        Some(RegValue::Sz("1.1.0".into()))
+    );
+    // Without administrator rights neither uninstall nor upgrade touches it.
+    f.admin = false;
+    let installed = f.m.clone();
+    let e = uninstall(&mut f, "GalaTest.PkScoped").unwrap_err();
+    assert_eq!(e.kind, Kind::RequiresAdmin);
+    assert!(f.m == installed);
+    // Uninstall: files, links, the PATH entry and the entry gone; the
+    // machine as before.
+    f.admin = true;
+    uninstall(&mut f, "GalaTest.PkScoped").unwrap();
+    assert!(f.file(&format!("{PF_LINKS}\\pkscoped.exe")).is_none());
+    assert!(!f.reg_key_exists(Root::LocalMachine, &key));
+    // The Links directory stays on PATH and on disk, as for user installs.
+    let mut after = f.m.clone();
+    for k in [PF_LINKS, "C:\\Program Files\\WinGet", PF_PACKAGES] {
+        after.files.remove(&lc(k));
+    }
+    after.keys.insert(
+        (1, lc(MACHINE_ENVIRONMENT_KEY)),
+        before.keys[&(1, lc(MACHINE_ENVIRONMENT_KEY))].clone(),
+    );
+    assert!(after == before, "{}", diff(&after, &before));
+}
+
+#[test]
+fn machine_scope_failures_roll_back() {
+    use crate::winget::Scope;
+    let machine = || Options { scope: Some(Scope::Machine), ..Options::default() };
+    let admin = |f: &mut Fake| f.admin = true;
+    let n =
+        fail_each_step(admin, |f| install_with(f, "GalaTest.PkScoped", Some("1.0.0"), machine()));
+    assert!(n > 10, "{n}");
+    let setup = |f: &mut Fake| {
+        f.admin = true;
+        install_with(f, "GalaTest.PkScoped", Some("1.0.0"), machine()).unwrap();
+    };
+    fail_each_step(setup, |f| upgrade_id(f, "GalaTest.PkScoped"));
+    fail_each_step(setup, |f| uninstall(f, "GalaTest.PkScoped"));
 }
 
 #[test]
@@ -1490,4 +1641,47 @@ fn a_tree_served_over_https() {
         e.message
     );
     assert!(log_has(&f, "error source list JSON at byte 0: not a JSON value"), "{:#?}", f.log);
+}
+
+#[test]
+fn inno_setup_7_runs_with_winget_switches_per_scope() {
+    // winget-pkgs' real manifest of Inno Setup 7.1.1 (pk_install_inno
+    // installs it): one x64 installer per scope, told apart by Custom.
+    use crate::winget::Scope;
+    use crate::winget::select::{CommandOptions, Mode};
+    let mut f = Fake::new();
+    let p = source().find(&mut f, "JRSoftware.InnoSetup.7", None).unwrap();
+    assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    let pick = |f: &mut Fake, scope| {
+        let o = Options { scope: Some(scope), ..Options::default() };
+        select_installer(f, &p, &o.request(None)).unwrap()
+    };
+    let user = pick(&mut f, Scope::User);
+    let machine = pick(&mut f, Scope::Machine);
+    assert_eq!((user, machine), (1, 0));
+    let i = &p.installers[user];
+    assert_eq!(i.product_code.as_deref(), Some("Inno Setup 7_is1"));
+    assert!(gap(i).is_none(), "an x64 inno installer is gala's to run");
+    let opts = CommandOptions { mode: Mode::Silent, log: Some("L".into()), ..Default::default() };
+    assert_eq!(
+        exe::install_command(i, "C:\\t\\innosetup-7.1.1-x64.exe", &opts).unwrap(),
+        "\"C:\\t\\innosetup-7.1.1-x64.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART \
+         /LOG=\"L\" /CURRENTUSER"
+    );
+    assert_eq!(
+        exe::install_command(&p.installers[machine], "s.exe", &opts).unwrap(),
+        "\"s.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=\"L\" /ALLUSERS"
+    );
+}
+
+#[test]
+fn a_failed_installer_s_own_log_is_in_the_install_log() {
+    let mut f = Fake::new();
+    f.inno_fails = true;
+    let e = install_id(&mut f, "GalaTest.InnoSetup", None).unwrap_err();
+    assert_eq!(e.kind, Kind::Failed);
+    assert!(e.message.contains("exited with code 1"), "{e}");
+    assert!(log_has(&f, "setup-log path="), "{:#?}", f.log);
+    assert!(log_has(&f, "setup-log: Setup version: Inno Setup version 7.1.1"), "{:#?}", f.log);
+    assert!(log_has(&f, "setup-log: Initialization error: no."), "{:#?}", f.log);
 }

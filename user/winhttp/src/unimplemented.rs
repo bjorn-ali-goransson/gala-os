@@ -3,6 +3,8 @@
 //! ledger and ends the process.
 
 gala_stubs::unimplemented_exports!("winhttp.dll":
+    WinHttpQueryAuthSchemes
+    WinHttpSetCredentials
     WinHttpSetStatusCallback
     WinHttpTimeFromSystemTime
 );

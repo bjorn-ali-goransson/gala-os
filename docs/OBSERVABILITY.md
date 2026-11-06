@@ -241,8 +241,8 @@ hit (scenario `ledger_test`).
   missing` (a call it lacks, by number), `linux syscall stub` (accepted
   without its effect: ioctl, wait4's rusage), `linux
   option missing` (a flag, family, option or case not supported: open
-  flags, socket families and options, CPU-time clocks, unlink of an open
-  file, process groups...), `linux clone flags missing` (clone flags;
+  flags, socket families and options, CPU-time clocks, an unlink or
+  rename an NT program's open refuses, process groups...), `linux clone flags missing` (clone flags;
   vfork's CLONE_VM, its memory being a copy). ARCHITECTURE "The lx
   module", "Observability", lists them with the `lx:` log lines (`lx:
   pid <p> execve <path>`, `lx: pid <p> vfork: child pid <c> ...`).

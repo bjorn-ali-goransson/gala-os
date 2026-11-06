@@ -63,6 +63,7 @@ pub extern "system" fn SystemParametersInfoW(
         0x1042 => Some(0),          // SPI_GETCLIENTAREAANIMATION
         0x2006 => Some(1),          // SPI_GETCARETWIDTH
         0x200e | 0x2010 => Some(1), // SPI_GETFOCUSBORDERWIDTH/HEIGHT
+        0x201c => Some(2),          // SPI_GETMOUSEWHEELROUTING (hybrid, the default)
         _ => None,
     };
     if let Some(v) = value {

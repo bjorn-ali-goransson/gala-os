@@ -23,6 +23,7 @@ use core::ffi::c_void;
 mod actctx;
 mod address_wait;
 mod ansi;
+mod atom;
 mod calendar;
 mod console;
 mod context;

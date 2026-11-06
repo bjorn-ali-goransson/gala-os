@@ -559,16 +559,25 @@ pub extern "system" fn SearchPathW(
         wide_slice(path)
     } else {
         // The default order: the program's directory, the system
-        // directories, the current directory, then PATH.
+        // directories, the current directory, then PATH (safe search
+        // mode, Windows' default); without safe search mode
+        // (SetSearchPathMode) the current directory comes before the
+        // system directories.
         let mut n =
             super::process::GetModuleFileNameW(core::ptr::null_mut(), list.as_mut_ptr(), 520)
                 as usize;
         n = list[..n.min(520)].iter().rposition(|&c| is_sep(c)).unwrap_or(0);
-        for s in [
+        let (system, windows, current) = (
             &ascii16::<19>(b"C:\\Windows\\System32")[..],
-            &ascii16::<10>(b"C:\\Windows"),
-            &[u16::from(b'.')],
-        ] {
+            &ascii16::<10>(b"C:\\Windows")[..],
+            &[u16::from(b'.')][..],
+        );
+        let order = if safe_search_mode() {
+            [system, windows, current]
+        } else {
+            [current, system, windows]
+        };
+        for s in order {
             list[n] = u16::from(b';');
             list[n + 1..n + 1 + s.len()].copy_from_slice(s);
             n += 1 + s.len();
@@ -589,6 +598,43 @@ pub extern "system" fn SearchPathW(
         }
     }
     fail_with(ERROR_FILE_NOT_FOUND_, 0)
+}
+
+/// SetSearchPathMode's state: 0 not set (Windows' default, safe search
+/// mode), else SEARCH_SAFE or SEARCH_UNSAFE, with SEARCH_PERMANENT.
+static SEARCH_MODE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+const SEARCH_SAFE: u32 = 1;
+const SEARCH_UNSAFE: u32 = 2;
+const SEARCH_PERMANENT: u32 = 4;
+const ERROR_ACCESS_DENIED: u32 = 5;
+
+fn safe_search_mode() -> bool {
+    SEARCH_MODE.load(core::sync::atomic::Ordering::Acquire) & SEARCH_UNSAFE == 0
+}
+
+/// SetSearchPathMode: the process's search mode for SearchPath
+/// (BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE 1, DISABLE 0x10000, PERMANENT
+/// 0x8000 with ENABLE only): exactly one of enable and disable, else
+/// ERROR_INVALID_PARAMETER; once made permanent, a change is
+/// ERROR_ACCESS_DENIED.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSearchPathMode(flags: u32) -> Bool {
+    use core::sync::atomic::Ordering;
+    const ENABLE: u32 = 0x1;
+    const DISABLE: u32 = 0x1_0000;
+    const PERMANENT: u32 = 0x8000;
+    let valid = matches!(flags, ENABLE | DISABLE) || flags == ENABLE | PERMANENT;
+    if !valid {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let want = if flags & ENABLE != 0 { SEARCH_SAFE } else { SEARCH_UNSAFE };
+    let permanent = if flags & PERMANENT != 0 { SEARCH_PERMANENT } else { 0 };
+    let old = SEARCH_MODE.load(Ordering::Acquire);
+    if old & SEARCH_PERMANENT != 0 && want != SEARCH_SAFE {
+        return fail_with(ERROR_ACCESS_DENIED, FALSE);
+    }
+    SEARCH_MODE.store(want | permanent | (old & SEARCH_PERMANENT), Ordering::Release);
+    TRUE
 }
 
 /// ASCII `s` as UTF-16.
@@ -749,6 +795,14 @@ pub extern "system" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
     put_directory(true, buf, size)
+}
+
+/// GetSystemWow64DirectoryW: gala runs no 32-bit programs (no WOW64),
+/// so there is no SysWOW64 directory: the failure Windows gives where
+/// WOW64 is absent, ERROR_CALL_NOT_IMPLEMENTED.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemWow64DirectoryW(_buf: *mut u16, _size: u32) -> u32 {
+    fail_with(120, 0)
 }
 
 #[unsafe(no_mangle)]

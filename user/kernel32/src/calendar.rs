@@ -1,4 +1,4 @@
-//! Calendar information (GetCalendarInfoEx/W, EnumCalendarInfoExEx), as
+//! Calendar information (GetCalendarInfoEx/W, EnumCalendarInfoExEx/W), as
 //! documented, for gala's one locale (en-US, also the invariant locale and
 //! the defaults) and its one calendar, the localized Gregorian calendar
 //! (CAL_GREGORIAN, 1), with the values Windows gives for en-US.
@@ -153,10 +153,35 @@ pub extern "system" fn GetCalendarInfoW(
 }
 
 type EnumProcExEx = extern "system" fn(*const u16, u32, *const u16, isize) -> Bool;
+type EnumProcW = extern "system" fn(*const u16) -> Bool;
 
-/// EnumCalendarInfoExEx: each value of CalType for the calendar (or for
-/// every calendar, ENUM_ALL_CALENDARS: Gregorian only), until the
-/// callback returns FALSE.
+/// Each value of CalType for the calendar (or for every calendar,
+/// ENUM_ALL_CALENDARS: Gregorian only), given to `f` with its calendar
+/// until it returns FALSE; `api` names the caller in the ledger.
+fn enum_calendar(
+    api: &[u8],
+    calendar: u32,
+    kind: u32,
+    mut f: impl FnMut(*const u16, u32) -> Bool,
+) -> Bool {
+    if !(calendar == CAL_GREGORIAN || calendar == ENUM_ALL_CALENDARS) {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let base = kind & !CAL_MODIFIERS;
+    let single = name(base);
+    let list: &[&str] = match (values(base), &single) {
+        (Some(v), _) => v,
+        (None, Some(n)) => core::slice::from_ref(n),
+        (None, None) => {
+            unsupported(api, base.into());
+            return fail_with(ERROR_INVALID_FLAGS, FALSE);
+        }
+    };
+    each(list, |text| f(text, CAL_GREGORIAN));
+    TRUE
+}
+
+/// EnumCalendarInfoExEx: [`enum_calendar`] for a locale name.
 #[unsafe(no_mangle)]
 pub extern "system" fn EnumCalendarInfoExEx(
     callback: Option<EnumProcExEx>,
@@ -167,29 +192,32 @@ pub extern "system" fn EnumCalendarInfoExEx(
     param: isize,
 ) -> Bool {
     let Some(callback) = callback else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
-    if !known_locale(locale) || !(calendar == CAL_GREGORIAN || calendar == ENUM_ALL_CALENDARS) {
+    if !known_locale(locale) {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let base = kind & !CAL_MODIFIERS;
-    let single = name(base);
-    let list: &[&str] = match (values(base), &single) {
-        (Some(v), _) => v,
-        (None, Some(n)) => core::slice::from_ref(n),
-        (None, None) => {
-            unsupported(b"kernel32.dll!EnumCalendarInfoExEx(CalType)", base.into());
-            return fail_with(ERROR_INVALID_FLAGS, FALSE);
-        }
-    };
-    for text in list {
-        let mut wide = [0u16; 64];
-        for (d, c) in wide.iter_mut().zip(text.encode_utf16()) {
-            *d = c;
-        }
-        if callback(wide.as_ptr(), CAL_GREGORIAN, core::ptr::null(), param) == FALSE {
-            break;
-        }
+    enum_calendar(b"kernel32.dll!EnumCalendarInfoExEx(CalType)", calendar, kind, |text, id| {
+        callback(text, id, core::ptr::null(), param)
+    })
+}
+
+/// EnumCalendarInfoW: [`enum_calendar`] for an LCID (gala's locale,
+/// 0x409, and the defaults, as GetCalendarInfoW takes them); the callback
+/// gets only the text. Delphi's run-time library reads the era names
+/// with it (CAL_SERASTRING) as it starts.
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumCalendarInfoW(
+    callback: Option<EnumProcW>,
+    lcid: u32,
+    calendar: u32,
+    kind: u32,
+) -> Bool {
+    let Some(callback) = callback else { return fail_with(ERROR_INVALID_PARAMETER, FALSE) };
+    if !matches!(lcid, 0x409 | 0x400 | 0x800 | 0x7f | 0) {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    TRUE
+    enum_calendar(b"kernel32.dll!EnumCalendarInfoW(CalType)", calendar, kind, |text, _| {
+        callback(text)
+    })
 }
 
 type TimeFormatProc = extern "system" fn(*const u16, isize) -> Bool;

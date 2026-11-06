@@ -6,7 +6,10 @@
 //!   lpCreateParams given; the client rectangle starts at (0, 0) and is
 //!   smaller than the window; the window starts hidden (IsWindowVisible).
 //! - The class's icon (CreateIconIndirect: an orange square) is the
-//!   window's: its taskbar button shows it.
+//!   window's: its taskbar button shows it. SetClassLongPtrW changes the
+//!   class's small icon (the old value returned); IsWindowUnicode,
+//!   SetGestureConfig and PhysicalToLogicalPoint (no scaling) as Delphi's
+//!   VCL calls them.
 //! - ShowWindow(SW_SHOW) returns 0 (it was hidden); UpdateWindow sends
 //!   WM_PAINT; BeginPaint gives a DC and rcPaint covering the client
 //!   area; FillRect paints a red rectangle at (20, 20)-(200, 120) and
@@ -143,6 +146,12 @@ unsafe extern "system" {
     fn IsWindowVisible(hwnd: Hwnd) -> i32;
     fn IsWindow(hwnd: Hwnd) -> i32;
     fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+    fn GetClassLongPtrW(hwnd: Hwnd, index: i32) -> usize;
+    fn SetClassLongPtrW(hwnd: Hwnd, index: i32, value: usize) -> usize;
+    fn IsWindowUnicode(hwnd: Hwnd) -> i32;
+    fn SetGestureConfig(hwnd: Hwnd, reserved: u32, count: u32, config: *const u8, size: u32)
+    -> i32;
+    fn PhysicalToLogicalPoint(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
     fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle;
     fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32;
     fn FillRect(hdc: Handle, rect: *const Rect, brush: Handle) -> i32;
@@ -722,6 +731,20 @@ fn run() -> Result<(), u32> {
             client.right > 0 && client.right < 400 && client.bottom > 0 && client.bottom < 300,
             client.right as u64,
         )?;
+        // The class as SetClassLongPtrW changes it (GCLP_HICONSM: the old
+        // value back, then the new one read), and what Delphi's VCL asks
+        // of a window: a Unicode window, gestures configurable, points
+        // unscaled.
+        const GCLP_HICON: i32 = -14;
+        const GCLP_HICONSM: i32 = -34;
+        check(GetClassLongPtrW(hwnd, GCLP_HICON) == icon as usize, 0)?;
+        check(SetClassLongPtrW(hwnd, GCLP_HICONSM, icon as usize) == 0, 0)?;
+        check(GetClassLongPtrW(hwnd, GCLP_HICONSM) == icon as usize, 0)?;
+        check(SetClassLongPtrW(hwnd, GCLP_HICONSM, 0) == icon as usize, 0)?;
+        check(IsWindowUnicode(hwnd) != 0, 0)?;
+        check(SetGestureConfig(hwnd, 0, 0, core::ptr::null(), 0) != 0, 0)?;
+        let mut point = [10, 20];
+        check(PhysicalToLogicalPoint(hwnd, &mut point) != 0 && point == [10, 20], 0)?;
         check(IsWindowVisible(hwnd) == 0, 0)?;
         check(ShowWindow(hwnd, SW_SHOW) == 0, 0)?; // was hidden
         check(IsWindowVisible(hwnd) != 0, 0)?;

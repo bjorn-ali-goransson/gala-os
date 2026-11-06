@@ -2590,6 +2590,10 @@ name = "winsock_test"
 version = "0.1.0"
 
 [[package]]
+name = "winspool"
+version = "0.1.0"
+
+[[package]]
 name = "winsta_test"
 version = "0.1.0"
 

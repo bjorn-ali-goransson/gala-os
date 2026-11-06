@@ -74,16 +74,19 @@ In order:
    handle so it resumes, a server asking for client certificates, the
    MY store's automatic client certificate; ECDSA server keys, client
    session resumption and client certificates are done).
-3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2's
-   rest (busybox runs; threads, futex, fs_test's links) as filler.
+3. **LX**: seams 1 and 5 as their areas are touched, seam 4's NT surface;
+   milestone 2's rest (busybox runs; threads, futex, fs_test's links
+   done) as filler.
 4. **RS**: step B3a's next part (the desktop kernel's desktops without
    a presenter keeping their windows as the server kernel's do; then
    B3b's remote presenter).
 5. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's leftovers (what is not charged yet), R8's Secure
    Boot.
-6. **PK**: winget's source index (step 2's rest); machine-scope portable
-   installs; a real Inno Setup installer.
+6. **PK**: winget's source index (step 2's rest); step 1's rest (an
+   upgrade's dependencies, UpgradeBehavior, winget's settings); a real
+   Inno Setup installer once WOW64 is there (its x64 Setup refuses a
+   Windows without x86 support).
 7. **BR** stage 1's rest (the profile's hotspots).
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: the client against the host's sshd, agent forwarding;
@@ -154,7 +157,7 @@ has a section under "Open items".
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates done; revocation next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
-| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done; static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
+| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 
 ### Desktop, sessions and remote access
@@ -190,7 +193,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
-| PK | `gala install` over winget manifests | in progress | zip/portable and NSIS installs on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
+| PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs, on the winget resolver (selection, dependencies, ARP matching); a real Inno Setup installer runs up to its WOW64 check; MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
 ## Open items
@@ -1365,6 +1368,17 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   polling for pipes, poll/select/epoll over pipes, sleeps,
   rt_sigsuspend, pause, rt_sigtimedwait and wait4, and a signal for a
   blocked thread wakes it.
+- Seam 4's Linux side, one file system for both (`lx_fs` with fs_test,
+  each also `_pie`; ARCHITECTURE "Files", "The lx module"): symbolic
+  links (symlink, readlink, lstat, followed in path walks, ELOOP past
+  40), hard links (link, linkat, nlink), unlink of an open file (the
+  name goes at once, the file lives on), statx, RENAME_EXCHANGE;
+  directories a Linux program makes are case-sensitive (Windows'
+  per-directory flag, honoured for NT callers too), so two names
+  differing only in case live in one; POSIX modes, case sensitivity,
+  symbolic and hard links kept across reboots (`fs::log` record
+  version 3, older records still read; host tests). busybox's applets
+  run by their own names through symbolic links (`lx_busybox`).
 
 **Next**:
 1. Milestone 2's rest: the rest of signal_test and fork_test
@@ -1374,18 +1388,21 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    sharing memory and copy-on-write for fork (shared frames,
    `vm::copy_on_write` for private pages; MAP_SHARED anonymous memory
    shared with the child, then futexes keyed by the shared page);
-   execve ending the other threads first; fs_test (symlinks, hard
-   links, unlink of an open file, statx: seam 4); per-thread CPU time
+   execve ending the other threads first; per-thread CPU time
    for clock_test's CPU clocks; wait queues on sockets instead of their
    1 ms look (seam 5: the stack's notify hook is AFD's alone);
    `lx::state` onto the core process; an `lx_pipe_pie` scenario.
    Each corpus program becomes a boot scenario as its calls land; the
-   busybox scripts grow with them (applets by name once symlinks exist).
+   busybox scripts grow with them.
 2. Milestone 3: clocks, ptys over the core terminal object, /proc.
 3. Seam 1: the pty as a core terminal object under ConPTY.
-4. Seam 4: file-system metadata: per-directory case sensitivity
-   (FileCaseSensitiveInformation), POSIX metadata per file, a plan for
-   symlinks, hard links, POSIX delete and rename.
+4. Seam 4's NT surface, each test first against real Windows:
+   FileCaseSensitiveInformation (query, and set on an empty directory),
+   FILE_DISPOSITION_POSIX_SEMANTICS and FILE_RENAME_POSIX_SEMANTICS,
+   CreateHardLinkW (FileLinkInformation), CreateSymbolicLinkW; an NT
+   delete through a hard link's name removing that name; uid/gid per
+   file with more than one Linux user; a reboot scenario for Linux
+   files (modes and links are host-tested only).
 5. Seam 5: shared core objects when pipes, sockets or files are
    reworked.
 6. Also open (ARCHITECTURE "The lx module"): address randomization, a
@@ -1483,6 +1500,17 @@ from the command line first (CLI parity; the server profile too).
   shims (gala.exe + `.shim`) in `WinGet\Links` on the user's PATH,
   winget's ARP entry, transactions with rollback (upgrade included), an
   install log and ledger records; CreateProcess searches PATH.
+- Machine-scope portable installs (scenario `pk_install_machine`,
+  `pk_install_test machine` run as SYSTEM; host tests
+  `machine_scope_*`): `--scope machine` (or a portable installer whose
+  Scope is machine) installs to `%ProgramFiles%\WinGet\Packages` with
+  its commands in `%ProgramFiles%\WinGet\Links` on the machine's PATH
+  (`HKLM\SYSTEM\...\Session Manager\Environment`) and the ARP entry in
+  HKLM; list, upgrade (keeping machine scope) and uninstall; without
+  administrator rights (the token not in BUILTIN\Administrators,
+  CheckTokenMembership) install and uninstall are refused before any
+  change, exit 6, as winget's APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN
+  (the zip scenario checks the boot user is refused).
 - The winget resolver (`galapkg::winget`, host-tested on 400 real
   winget-pkgs version directories): schemas 1.0.0-1.28.0, installer
   selection as winget does it with every rejection's reason, switches,
@@ -1507,7 +1535,23 @@ from the command line first (CLI parity; the server profile too).
   Quiet/UninstallString with the silent switch and waits for the entry
   to go. A real x64 NSIS installer (made with makensis from
   `user/pk_install_test/nsis`) installs, runs, upgrades, uninstalls and
-  installs with /D= under gala. Inno Setup is host-tested only.
+  installs with /D= under gala. A real Inno Setup installer (scenario
+  `pk_install_inno`, PENDING: Inno Setup 7.1.1's own x64 installer with
+  winget-pkgs' manifest, PREBUILT `innosetup`) is run by `gala install`
+  with winget's switches: its loader unpacks Setup to %TEMP% and runs
+  it, Setup (Delphi's VCL) starts, writes its /LOG (copied into the
+  install log on failure: `setup-log:` lines) and stops at its own
+  check that the machine runs x86 programs ("This program does not
+  support the version of Windows your computer is running": every Inno
+  Setup, x64 builds included, requires WOW64). What it needed of gala
+  on the way is built and tested (win32_misc_test, kernel32_locale_test,
+  gui_test): EnumCalendarInfoW, SetSearchPathMode, SetProcessDEPPolicy,
+  GetThreadUILanguage, SetThreadPreferredUILanguages, global atoms,
+  IsWow64GuestMachineSupported, GetSystemWow64DirectoryW, the en-US
+  LCTYPEs Delphi reads (and the hand-typed ones corrected), winspool.drv
+  (no printers), SetClassLongPtrW, the *ForDpi and gesture functions,
+  GetCurrentPositionEx, uxtheme's buffered painting (no buffers), and
+  stubs for the rest of its static imports.
 - Stage 4 groundwork: the MSIX/AppX reader (packages and bundles,
   AppxManifest.xml, block-map hashes per 64 KiB block, package full and
   family names); AppxSignature.p7x presence only.
@@ -1516,10 +1560,8 @@ from the command line first (CLI parity; the server profile too).
   (`msi::plan`).
 
 **Next**:
-1. The resolver's rest on the install path: machine-scope portable
-   installs (`%ProgramFiles%\WinGet\Packages` and `Links`, the HKLM
-   entry and machine PATH, elevation), dependencies of an upgrade's new
-   version, UpgradeBehavior (`uninstallPrevious`, `deny`),
+1. The resolver's rest on the install path: dependencies of an
+   upgrade's new version, UpgradeBehavior (`uninstallPrevious`, `deny`),
    RequireExplicitUpgrade, the user's winget settings
    (`installBehavior.preferences`/`requirements`) and locale.
 2. winget's source index for search and listing
@@ -1528,11 +1570,15 @@ from the command line first (CLI parity; the server profile too).
    real-world install against GitHub when a scenario can reach it
    (`sigoden.AIChat`, item AI); real symbolic links for commands; the
    logon environment from `HKCU\Environment`.
-3. Stage 3's rest: a real Inno Setup installer in a scenario (they are
-   32-bit, so WOW64 first; the compiler runs only on Windows, so a
-   stand-in checks the switches and the "no uninstall entry" failure
-   meanwhile); Scope switches and elevation for machine-wide
-   installers; the manifest's success codes; a tracking catalog of
+3. Stage 3's rest: `pk_install_inno` passing (WOW64 first: Inno
+   Setup's Setup checks for x86 support and SysWOW64 even in its x64
+   build; then whatever its install and uninstaller need, as the ledger
+   names it: its Setup's static imports that are still stubs are listed
+   by `tools/inno_setup_exe.py` and `tools/import_survey.py`); its
+   machine install as an administrator (`/ALLUSERS`); Scope switches and
+   elevation for machine-wide installers (a non-portable machine
+   installer run by a standard user: winget leaves elevation to the
+   installer, gala's UAC has no prompt yet); the manifest's success codes; a tracking catalog of
    gala's own instead of tagging vendors' ARP keys; the needs of other
    vendors' installers (IShellLink shortcuts, file associations, UAC
    manifests as the admin token) as the ledger names them.
@@ -1825,12 +1871,19 @@ Each entry: what, why it matters, the structural fix, the owning item.
   `fallback installer=N instead of installer=M` and recorded in the
   ledger. Without it a package that offers both an MSI and a zip would
   not install at all; with it the program lands where the zip's layout
-  puts it, not where winget would. Scope never falls back (`--scope
-  machine` for a portable package is refused). Structural fix: PK stages
-  4 and 5 (MSIX, MSI) and WOW64, then gala installs winget's choice and
-  the fallback goes. Item PK.
+  puts it, not where winget would. Scope never falls back. Structural
+  fix: PK stages 4 and 5 (MSIX, MSI) and WOW64, then gala installs
+  winget's choice and the fallback goes. Item PK.
 
 ### Defects known, not yet fixed
+
+- **An NT delete through a hard link's second name removes the first
+  name**: hard links exist (Linux link/linkat, seam 4), but NT's delete
+  (FILE_DISPOSITION / DeleteFileW) acts on the node's first name, not the
+  name it was opened by. Only a Linux-made link deleted from Windows
+  shows it today (NT has no CreateHardLinkW yet). Fix: NT file objects
+  remember the name they were opened through and delete that one. Item
+  LX (seam 4's NT side).
 
 - **console_window step 5 under load**: about 1 run in 20 of the full
   suite, the wheel scrolls conhost back 15 lines instead of 18 (the
@@ -1914,7 +1967,9 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   AHCI/NVMe, xHCI, e1000; device interrupts (all devices are polled
   today).
 - **WOW64**: 32-bit programs (a 32-bit ntdll and thunks); the official
-  Nginx build and many installers are PE32.
+  Nginx build and many installers are PE32, and every Inno Setup
+  installer needs it (its x64 Setup checks for x86 support and
+  SysWOW64\kernel32.dll: `pk_install_inno`, PK step 3).
 - **ARM64**: a second arch port (boot, MMU, exceptions, timer, context
   switch), ARM64 PE images and ARM64 builds of gala's DLLs; the NT layer
   above is portable. x86_64 (Intel and AMD) is the only port today.

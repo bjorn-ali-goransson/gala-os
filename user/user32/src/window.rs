@@ -119,7 +119,6 @@ pub(crate) struct Class {
     pub(crate) spelled: [u16; 64],
     pub(crate) proc_: Option<WndProc>,
     background: usize,
-    #[allow(dead_code)]
     style: u32,
     /// The class's icons (WNDCLASSEX hIcon, hIconSm).
     pub(crate) icon: usize,
@@ -2995,6 +2994,21 @@ pub extern "system" fn SetCursor(_cursor: Handle) -> Handle {
     0x0001_0003 as Handle
 }
 
+/// GetCursor: the cursor SetCursor last set (gala draws no pointer of
+/// its own yet: the same stand-in handle).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetCursor() -> Handle {
+    0x0001_0003 as Handle
+}
+
+/// IsWindowUnicode: every window gala's user32 makes is a Unicode window
+/// (its ANSI functions convert and call the W ones); FALSE for a handle
+/// that is not a window.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsWindowUnicode(hwnd: Hwnd) -> i32 {
+    IsWindow(hwnd)
+}
+
 /// GetDoubleClickTime: Windows' default, 500 ms (gala has no setting to
 /// change it; comctl32's tooltips derive their delays from it).
 #[unsafe(no_mangle)]
@@ -3248,4 +3262,79 @@ pub extern "system" fn GetClassLongPtrW(hwnd: Hwnd, index: i32) -> usize {
         -26 => c.style as usize,
         _ => 0,
     }
+}
+
+/// SetClassLongPtrW(hWnd, nIndex, value): changes the window's class
+/// (for every window of the class, as documented) and returns the old
+/// value: the procedure (GCLP_WNDPROC), background (GCLP_HBRBACKGROUND),
+/// icons (GCLP_HICON, GCLP_HICONSM) and style (GCL_STYLE), the ones
+/// GetClassLongPtrW reads. Another index (extra class bytes, the
+/// cursor, the menu name) is not kept: recorded in the ledger, 0 returned
+/// with ERROR_INVALID_INDEX.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetClassLongPtrW(hwnd: Hwnd, index: i32, value: usize) -> usize {
+    let Some(w) = window(hwnd) else {
+        set_last_error(1400);
+        return 0;
+    };
+    let old = with(|s| {
+        let c = &mut s.classes[w.class];
+        Some(match index {
+            -24 => {
+                let old = c.proc_.map_or(0, |p| p as usize);
+                // SAFETY: the caller gives a window procedure (or NULL), as
+                // SetClassLongPtr requires.
+                c.proc_ = unsafe { core::mem::transmute::<usize, Option<WndProc>>(value) };
+                old
+            }
+            -10 => core::mem::replace(&mut c.background, value),
+            -14 => core::mem::replace(&mut c.icon, value),
+            -34 => core::mem::replace(&mut c.icon_small, value),
+            -26 => core::mem::replace(&mut c.style, value as u32) as usize,
+            _ => return None,
+        })
+    });
+    match old {
+        Some(v) => {
+            set_last_error(0);
+            v
+        }
+        None => {
+            unsupported(b"user32.dll!SetClassLongPtrW(index)", index as u64);
+            set_last_error(1413); // ERROR_INVALID_INDEX
+            0
+        }
+    }
+}
+
+/// SetGestureConfig: accepted for an existing window (gala has no touch
+/// input, so no gesture is ever delivered).
+#[unsafe(no_mangle)]
+pub extern "system" fn SetGestureConfig(
+    hwnd: Hwnd,
+    _reserved: u32,
+    _count: u32,
+    _config: *const u8,
+    _size: u32,
+) -> i32 {
+    if IsWindow(hwnd) == 0 {
+        set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return 0;
+    }
+    1
+}
+
+/// GetGestureInfo: no WM_GESTURE is ever sent, so no gesture handle is
+/// valid (ERROR_INVALID_HANDLE).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetGestureInfo(_gesture: usize, _info: *mut u8) -> i32 {
+    set_last_error(6);
+    0
+}
+
+/// CloseGestureInfoHandle: as GetGestureInfo, no handle is valid.
+#[unsafe(no_mangle)]
+pub extern "system" fn CloseGestureInfoHandle(_gesture: usize) -> i32 {
+    set_last_error(6);
+    0
 }

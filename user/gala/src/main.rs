@@ -30,7 +30,8 @@
 //! followed). Exit codes there: 0 done, 1 usage, 2 not found, 3 an
 //! installer type or source gala cannot handle yet, 4 failed (rolled
 //! back; a download that failed too), 5 the download's SHA-256 is not
-//! the manifest's. gala.exe
+//! the manifest's, 6 needs administrator rights (a machine-wide portable
+//! install or uninstall). gala.exe
 //! copied into WinGet\Links under a command's name is that command's
 //! shim (`pkg::shim_main`).
 //!
@@ -143,7 +144,8 @@ A window is its HWND (as `gala windows` prints it) or its title (whole,
 or a part only one title has; any case).
 Exit codes: 0 done, 1 usage, 2 not found, 3 not supported here (no
 graphical shell; an installer type or source not supported yet), 4 failed
-(an install rolled back), 5 a download whose SHA-256 is not the manifest's.
+(an install rolled back), 5 a download whose SHA-256 is not the manifest's,
+6 needs administrator rights (--scope machine for a portable package).
 ";
 
 const EXIT_USAGE: u32 = 1;

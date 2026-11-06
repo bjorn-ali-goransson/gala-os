@@ -1386,10 +1386,45 @@ limits) and NtIsProcessInJob (0x7f0a-0x7f0e).
 ### Files
 
 `fs::ramfs` (the file system) and `nt::file` (the services). ramfs is an
-in-memory file system: node arena, case-insensitive names, NT
+in-memory file system: node arena, case-preserving names, NT
 share-access accounting, delete pending until the last open closes. It is
 the volume device `\Device\HarddiskVolume1`, linked as `\??\C:`; with
-`persist` its changes are kept on the disk ("Disk").
+`persist` its changes are kept on the disk ("Disk"). Both personalities
+share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
+
+- **Case sensitivity per directory**: names compare case-insensitively
+  (NTFS collation, ASCII folding so far) unless the directory's
+  `case_sensitive` flag is set, Windows' per-directory case sensitivity
+  (learn.microsoft.com, WSL "Case sensitivity"): then exactly, for NT
+  callers too, as Windows treats a flagged directory. Every directory a
+  Linux program makes has the flag (`create_posix`); one NT makes
+  inherits its parent's (Windows' inheritance rule); the boot's have
+  none. A pair such as `Case` and `case` made by a Linux program is two
+  files to NT as well: listed apart (directory order is collation, then
+  the UTF-16 units: `ramfs::order`), each opened only by its exact name;
+  in a directory without the flag the second name is a collision for
+  both personalities. Not yet: FileCaseSensitiveInformation (query and
+  set from NT; Windows sets it only on an empty directory).
+- **Hard links**: a node's own `parent`/`name` is its first name (what
+  `path_of`, FileNameInformation and the change notifications use);
+  further names are `RamFs::links` entries (`link`). `find` and
+  `entries` (getdents64, NtQueryDirectoryFile) see every name;
+  NumberOfLinks and st_nlink count them. Removing a first name while
+  links remain moves the node to one of them (`promote`). Directories
+  have exactly one name. Limit: an NT delete of a handle opened by a
+  link name removes the node's first name.
+- **Symbolic links**: `Kind::Symlink` keeps the target bytes as Linux
+  gave them; `lx::file` follows them. NT sees one as a file with
+  FILE_ATTRIBUTE_REPARSE_POINT whose open fails with
+  STATUS_IO_REPARSE_TAG_NOT_HANDLED unless FILE_OPEN_REPARSE_POINT is
+  given (how Windows answers a WSL symlink); NT symbolic links
+  (CreateSymbolicLinkW, reparse data) are not built.
+- **Two ways to delete**: NT's (`set_delete_pending`, then the last
+  close removes the node: the name stays taken until then) and Linux's
+  (`unlink`, POSIX semantics: the name goes at once; a node still open
+  lives on *detached*, nlink 0, freed at its last close, never recorded
+  again). `exchange` swaps two names (renameat2's RENAME_EXCHANGE) by
+  three renames under the file system's lock.
 
 - **Contents from boot modules**: modules appear read-only in `C:\gala`
   (or the directory their module string names), copied to the heap on
@@ -3964,23 +3999,31 @@ the disk is only written (never read) while running.
 
 - `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
   not survive a reboot): Create (directory or file, attributes, times; a
-  file that exists is emptied), Write (offset, data of at most 64 KiB,
-  time), SetSize, SetBasic (creation, access and write times,
-  attributes; record version 2 added the access time after the
-  attributes, a version 1 record's is its write time), SetSecurity (the
-  self-relative descriptor), Rename, Delete (with everything below).
-  Each record carries the log's generation and a CRC-32; the first
-  record that does not check out ends the log.
+  file that exists is emptied; version 3 added the POSIX mode, or none,
+  and a directory's case sensitivity, which older records lack),
+  Write (offset, data of at most 64 KiB, time), SetSize, SetBasic
+  (creation, access and write times, attributes; record version 2 added
+  the access time after the attributes, a version 1 record's is its
+  write time), SetSecurity (the self-relative descriptor), Rename (of a
+  name: a first name or a hard link), Delete (of a name: a directory
+  with everything below it; a file with other names lives on there),
+  and, from version 3, SetMode, Symlink (target, creation time) and
+  Link (an existing path, the new name). Each record carries the log's
+  generation, its format version and a CRC-32; the first record that
+  does not check out, or is of a newer version, ends the log.
 - `RamFs` (`fs::ramfs`) records while `recording` is on: each mutator
-  (create, write, set_size, set_basic, set_security, rename, and
-  removal when the last handle of a delete-pending node closes) pushes
-  its record and marks the node *dirty*. Nodes the boot made are *boot*
+  (create, write, set_size, set_basic, set_security, set_mode, symlink,
+  link, rename, unlink, and removal when the last handle of a
+  delete-pending node closes) pushes its record and marks the node
+  *dirty*. A node unlinked while open (detached) records nothing more:
+  its old path may name another file by then. Nodes the boot made are *boot*
   nodes; when one is removed or renamed away its path becomes a
   *tombstone* (the boot will make it again). Renaming a directory marks
   everything below it dirty. `apply` replays a record (not recording
   it; a missing path is skipped); `snapshot` describes the same state
   from scratch: Delete for each tombstone, then every dirty node in tree
-  order with its descriptor, contents and times. A record that cannot be
+  order with its descriptor, mode, contents and times (a symbolic link
+  as Symlink), then a Link for every hard link. A record that cannot be
   made (no memory) makes the next sync write a snapshot instead.
 - `fs::volume` (over a `Blocks` trait, so host tests run it on a disk
   in memory, crashes included): sector 0 is the superblock (magic,
@@ -4003,8 +4046,12 @@ the disk is only written (never read) while running.
   `DiskScenario::earlier_boots`): the first boot makes files and
   directories (a descriptor, attributes, a time, a 200,000-byte file, a
   truncation, a rename, a delete, nested directories), the second
-  checks them. Host tests: the record format, replay and snapshot over
-  a boot tree (tombstones, a renamed boot directory), the volume
+  checks them. Host tests: the record format (every kind; a version 2
+  Create read as one without a mode), replay and snapshot over a boot
+  tree (tombstones, a renamed boot directory; modes, a case-sensitive
+  directory with a case pair, symbolic and hard links, a boot file whose
+  first name went while a link kept it, an unlinked open file:
+  `posix_changes_replay_and_snapshot`), the volume
   (remounts, compaction into either area, torn writes and cut-short
   compactions). `sqllocaldb_persist` (pending: needs the LocalDB
   download and 3 GiB) keeps a SQL Server LocalDB database across a
@@ -5276,10 +5323,10 @@ ROADMAP PK has the stages and their status; in short:
 
 | Piece | State |
 |---|---|
-| Client commands, winget-pkgs trees, zip and portable installs, shims, transactions (PK stages 1-2) | in use; scenario `pk_install_zip` |
+| Client commands, winget-pkgs trees, zip and portable installs (per user and machine-wide), shims, transactions (PK stages 1-2) | in use; scenarios `pk_install_zip`, `pk_install_machine` |
 | Downloads and manifests over HTTP(S) (PK stages 1-2, TLS step 4) | in use: gala.exe over winhttp and Schannel; GitHub sources host-tested; scenario `pk_install_https` |
 | The winget resolver (`galapkg::winget`) | in use by every package command: selection, dependencies, ARP matching; scenarios `pk_install_zip`, `pk_install_nsis` |
-| Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`); Inno host-tested |
+| Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`); a real Inno Setup installer runs up to its own WOW64 check (`pk_install_inno`, PENDING) |
 | MSIX/AppX reading (PK stage 4 groundwork) | built, host-tested; nothing installed |
 | MSI reading, LZX, install plans (PK stage 5 groundwork) | built, host-tested; nothing runs an installer |
 
@@ -5327,8 +5374,9 @@ meet them is rejected, with its reason in the log), `-h|--silent`,
 `-l|--location`. winget's no-op flags (`-e`, the agreements) are
 accepted. Exit codes: 0, 1 usage, 2 not found (package, version, an
 applicable installer, a dependency), 3 not supported yet (installer
-type, machine scope, HTTP(S) sources), 4 failed (rolled back), 5
-SHA-256 mismatch.
+type, HTTP(S) sources), 4 failed (rolled back), 5 SHA-256 mismatch, 6
+needs administrator rights (a machine-wide portable install or
+uninstall; winget's APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN).
 
 ### Sources and downloads
 
@@ -5410,6 +5458,29 @@ portable):
   (and uninstall takes it off).
 - Installing what is installed at the same version says so (exit 0);
   another version is `gala upgrade`'s.
+- **Scope** (`install::Layout`): the installer's Scope, else `--scope`,
+  else user (winget's default for portable packages). Machine scope is
+  winget's machine layout (its portablePackageMachineRoot default;
+  `winget --info` lists the Links directory): files in
+  `%ProgramFiles%\WinGet\Packages\<key>`, commands in
+  `%ProgramFiles%\WinGet\Links`, that directory on the machine's PATH
+  (`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\Path`,
+  `%VAR%`s expanded when looking for it), the ARP entry under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\<key>`.
+  An upgrade removes from the installed entry's layout (HKCU user, HKLM
+  machine) and installs into the new installer's (the same unless the
+  new version has no installer for that scope).
+- **Elevation**: a machine-wide install, upgrade or uninstall of a
+  portable package needs administrator rights, checked before anything
+  changes (dependencies included) through `Host::is_admin`: gala.exe
+  asks CheckTokenMembership(NULL, BUILTIN\Administrators), as
+  Microsoft's documentation tests for an administrator. Without them:
+  exit 6, "needs administrator rights", nothing changed. The check is
+  gala's own (gala's default descriptors let the boot user write
+  Program Files and HKLM, so the access checks would not refuse): the
+  boot user is a standard user; SYSTEM (`as=system`) is an
+  administrator. Installers that are programs elevate themselves on
+  Windows (UAC); gala does not check for them.
 
 ### Command shims
 
@@ -5475,10 +5546,18 @@ as it was.**
   ...` per undo step), timestamped with the process id; `--verbose`
   copies it to stderr.
 - What gala cannot install is recorded in the ledger
-  (`gala.exe!install(InstallerType msix)`, `gala.exe!install(machine
-  scope portable)`, `gala.exe!install(x86 portable: WOW64)`,
+  (`gala.exe!install(InstallerType msix)`,
+  `gala.exe!install(x86 portable: WOW64)`,
   `gala.exe!install(WindowsFeatures <name>)`), so `cargo xtask report`
   lists what real packages needed.
+- Scope and elevation: `layout scope= packages= links= arp= path=` for a
+  portable install, `elevation administrator=yes` or `error
+  requires-admin administrator=no for=<what>` (then `failed exit=6`).
+- A program installer that fails with a Log switch's file (Inno's /LOG)
+  has that file's last 40 lines copied into the install log as
+  `setup-log: <line>` after `setup-log path= lines= shown=` (or
+  `setup-log none path=`): Inno's own reason ("This program does not
+  support the version of Windows...") is beside gala's steps.
 - The scenario tees the log into the serial log (`logtee=`), and
   pk_install_test prints it when a check fails.
 
@@ -5508,6 +5587,12 @@ as winget runs them:
   `restart-required`); anything else is exit 4 naming the code.
   ERROR_BAD_EXE_FORMAT (a 32-bit installer: gala has no WOW64) is exit
   3 and the ledger line `gala.exe!install(32-bit installer: WOW64)`.
+  Inno Setup 7 builds x64 installers (SetupArchitecture=x64), which
+  gala starts, but every Inno Setup refuses a Windows without x86
+  support ("Machine types supported by system: x64" in its log, then
+  "This program does not support the version of Windows..."; it asks
+  IsWow64GuestMachineSupported and looks for SysWOW64\kernel32.dll),
+  so a real Inno install waits for WOW64 (`pk_install_inno`).
 - **Finding the install**: through its ARP entry, from a snapshot of the
   HKCU and HKLM Uninstall keys taken before the run: the manifest's
   ProductCode if that key exists; else the one new key, or the new key
@@ -5548,6 +5633,41 @@ as winget runs them:
   win32_misc_test. DialogBoxParamW, MessageBoxIndirectW,
   SetClassLongPtrW, WritePrivateProfileStringW and SHCLSIDFromString are
   stubs (UI and INI paths a silent install does not take).
+- **What Inno Setup's loader and Setup (Delphi's VCL) need of gala**
+  (win32_misc_test, kernel32_locale_test, gui_test): kernel32's
+  EnumCalendarInfoW (the era, by LCID), SetSearchPathMode (the mode
+  SearchPathW follows: safe search puts the current directory after
+  the system directories; PERMANENT then refuses a change,
+  ERROR_ACCESS_DENIED), SetProcessDEPPolicy (ERROR_NOT_SUPPORTED, as
+  for every 64-bit process), GetThreadUILanguage and
+  SetThreadPreferredUILanguages (en-US is the only valid language: the
+  thread's list is en-US or empty, nothing is kept; another language is
+  skipped and recorded), the global atom table (GlobalAddAtomW,
+  GlobalFindAtomW, GlobalDeleteAtom, GlobalGetAtomNameW: integer atoms
+  and counted string atoms from 0xC000; **limit**: per process, where
+  Windows keeps one per session, so other processes do not see them),
+  IsWow64GuestMachineSupported (S_OK, FALSE for every machine) and
+  GetSystemWow64DirectoryW (ERROR_CALL_NOT_IMPLEMENTED): no WOW64, which
+  is what stops Inno; the LCTYPEs Delphi reads (LOCALE_SSHORTTIME,
+  ITIMEMARKPOSN, ICALENDARTYPE, IOPTIONALCALENDAR, IFIRSTDAYOFWEEK,
+  IFIRSTWEEKOFYEAR, IDIGITSUBSTITUTION; their numbers checked against
+  winnls.h); user32's SetClassLongPtrW (procedure, background, icons,
+  style; another index recorded, ERROR_INVALID_INDEX), CharLowerW,
+  GetCursor, IsWindowUnicode (every gala window), CountClipboardFormats,
+  AdjustWindowRectExForDpi and PhysicalToLogicalPoint (96 DPI, no
+  scaling), SetGestureConfig, GetGestureInfo and CloseGestureInfoHandle
+  (no touch input: no gesture handle is valid),
+  SPI_GETMOUSEWHEELROUTING (hybrid); gdi32's GetCurrentPositionEx;
+  ole32's IsEqualGUID; uxtheme's buffered painting (BufferedPaintInit
+  and UnInit succeed; BeginBufferedPaint and BeginBufferedAnimation give
+  NULL and are recorded: the program paints directly) and
+  OpenThemeDataForDpi (no theme); winspool.drv (`user/winspool`, a
+  machine without printers: EnumPrintersW lists none, GetDefaultPrinterW
+  ERROR_FILE_NOT_FOUND, OpenPrinterW ERROR_INVALID_PRINTER_NAME); the
+  UCRT (Microsoft's ucrtbase.dll, as other scenarios ship it). The rest
+  of Setup's static imports (FlatSB_*, ImageList_*, MDI, metafile,
+  printing and profile functions) are stubs; `tools/inno_setup_exe.py`
+  writes Setup out of an installer for `tools/import_survey.py`.
 
 ### Tests
 
@@ -5566,9 +5686,20 @@ that fails (no winhttp.dll in that image). Its expected results are
 winget's documented behaviour: x64 chosen over x86, Inno's progress
 switches by default and `/VERYSILENT` with `--silent`, a dependency
 installed first and left by the dependant's uninstall, a missing
-dependency changing nothing (exit 2), `--scope machine` refused (exit
-3), `--scope user` taking the second installer and the upgrade keeping
-user scope. `pk_install_test https` (scenario `pk_install_https`, with
+dependency changing nothing (exit 2), `--scope machine` refused to
+the boot user, a standard user (exit 6, nothing in Program Files),
+`--scope user` taking the second installer and the upgrade keeping
+user scope. `pk_install_test machine` (scenario `pk_install_machine`,
+`as=system`: an administrator) installs PkScoped machine-wide (Program
+Files, the HKLM entry, Links on the machine's PATH), runs its command
+from that PATH, lists, upgrades it keeping machine scope and
+uninstalls it. `pk_install_test inno` (scenario `pk_install_inno`,
+PENDING until WOW64) installs JRSoftware.InnoSetup.7 (winget-pkgs' real
+manifest; the installer, PREBUILT `innosetup`, in the snapshot's
+mirror) with `--scope user --silent` and expects Inno's files, its
+`Inno Setup 7_is1` entry found by ProductCode, ISCC.exe running, `list`,
+and uninstall through its QuietUninstallString; today it ends at
+Setup's own WOW64 check (the install log's `setup-log:` lines). `pk_install_test https` (scenario `pk_install_https`, with
 schannel_test's Nginx in the guest) installs GalaTest.PkHttps, whose
 zip is not mirrored: Nginx serves it (`user/pk_install_test/served`)
 behind a release URL that answers 302, so gala downloads it over
@@ -5672,11 +5803,10 @@ more).
   the selected installer, the runners-up and every rejection's reason.
   `install::gap` says what gala cannot install: a type of a later stage
   (msi, wix, burn, msix, appx, a zip of those), an x86 portable program
-  (no WOW64), a portable package for machine scope (Program Files and
-  HKLM are not built; a portable installer without Scope takes the scope
-  asked for). For the first two `choose` takes the best-ranked runner-up
-  gala can install (a stopgap, ROADMAP "Known issues and stopgaps");
-  scope never falls back. Each gap is a ledger line.
+  (no WOW64). For both `choose` takes the best-ranked runner-up gala can
+  install (a stopgap, ROADMAP "Known issues and stopgaps"); scope never
+  falls back (a portable installer without Scope takes the scope asked
+  for, `install::portable_scope`). Each gap is a ledger line.
 - **Dependencies**: `deps::plan_with` with gala's chooser and a
   `Catalog` over the source and the ARP entries; the plan's lines go to
   the log. Each dependency not installed at its MinimumVersion is
@@ -5699,9 +5829,11 @@ more).
   --source` upgrades a matched program (an installer that is a program
   runs over it and gala then tags its entry; a portable upgrade of an
   untagged entry is refused: gala has no record of its files).
-- TODO (ROADMAP PK step 1): machine-scope portable installs, an
-  upgrade's new dependencies, UpgradeBehavior and RequireExplicitUpgrade,
-  winget's settings (preferences, requirements), the user's locale.
+- TODO (ROADMAP PK step 1): an upgrade's new dependencies,
+  UpgradeBehavior and RequireExplicitUpgrade, winget's settings
+  (preferences, requirements; portablePackageMachineRoot), the user's
+  locale; x86 portable programs machine-wide in `%ProgramFiles(x86)%`
+  (with WOW64).
 
 ### Reading MSI packages
 
@@ -6035,19 +6167,14 @@ packages (.eappx), flat bundles; AppxSignature.p7x is only noticed.
 
 ### Limits and next steps
 
-In ROADMAP PK's order: the HTTPS fetcher (on winhttp and Schannel);
-stage 3's rest (a real Inno Setup installer in a scenario: they are
-32-bit, so WOW64 first, and Inno's compiler runs only on Windows; the
-manifest's InstallerSuccessCodes/ExpectedReturnCodes; Scope switches
-and elevation for machine-wide installers; a tracking catalog of
-gala's own instead of tagging vendors' ARP keys); stage 4
-(MSIX on the reader above: signature validation against trusted
-certificates, staging under WindowsApps, registration, package identity
-for full-trust apps); stage 5 (MSI, on the plan above); machine scope
-(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); the install
-command switched over to `galapkg::winget`, which brings dependencies
-and `gala list` matching ARP entries to packages by
-ProductCode/AppsAndFeaturesEntries.
+In ROADMAP PK's order: winget's source index; stage 3's rest (a real
+Inno Setup install: WOW64 first, which every Inno Setup checks for;
+the manifest's InstallerSuccessCodes/ExpectedReturnCodes; Scope
+switches and elevation for machine-wide installers that are programs;
+a tracking catalog of gala's own instead of tagging vendors' ARP keys);
+stage 4 (MSIX on the reader above: signature validation against
+trusted certificates, staging under WindowsApps, registration, package
+identity for full-trust apps); stage 5 (MSI, on the plan above).
 
 ## A web browser: Chromium, then Edge
 
@@ -6703,7 +6830,7 @@ Design rules:
 | 1. Terminal core | planned |
 | 2. Per-process system-call dispatch | built |
 | 3. Core process vs NT process | built (the `Core` still lives in `nt`) |
-| 4. File-system metadata | planned |
+| 4. File-system metadata | built for Linux (NT surface planned) |
 | 5. Shared objects | planned |
 | 6. `net` free of `nt` | built |
 
@@ -6765,14 +6892,19 @@ Design rules:
    TODO (LX): `Core` still lives in `nt::process` and uses NT types (the
    token, ObjectRef threads); moving it out of `nt` comes with seam 5's
    core objects.
-4. **File-system metadata**, while persistence is young: a
-   per-directory case-sensitivity flag exposed to NT as Windows'
-   FileCaseSensitiveInformation (testable against Windows 10 1803+); a
-   persisted slot for POSIX metadata per file (uid, gid, mode, device
-   numbers; NT ignores it); symlinks, hard links and POSIX delete/rename
-   of open files, with FILE_DISPOSITION_POSIX_SEMANTICS and
-   FILE_RENAME_POSIX_SEMANTICS as the NT-side surface (testable on real
-   Windows).
+4. **File-system metadata** (ramfs, "Files"; fs_test, `lx_fs`): a
+   per-directory case-sensitivity flag (set on every directory Linux
+   makes, inherited by NT's, honoured for both personalities as Windows
+   honours its flag); the POSIX mode per node, kept by the change log
+   (record version 3; uid/gid and device numbers not yet: one user);
+   symbolic links (followed by `lx::file`, a reparse point NT does not
+   follow); hard links; POSIX unlink of open files (the name goes at
+   once, the node lives on detached). Still planned, each testable on
+   real Windows: FileCaseSensitiveInformation to query and set the flag
+   from NT, FILE_DISPOSITION_POSIX_SEMANTICS and
+   FILE_RENAME_POSIX_SEMANTICS (NT's surface for the same unlink and
+   rename), CreateHardLinkW (FileLinkInformation) and NT symbolic links
+   (CreateSymbolicLinkW).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
 6. **`net` free of `nt`**: `kernel/src/net/` reaches threads, waits and
@@ -6793,7 +6925,7 @@ calls; priorities come from `strace` of target programs on real Linux.
 | Milestone | Scope | State |
 |---|---|---|
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
-| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run (`lx_busybox`); threads, futex and musl's pthreads run (`lx_thread`) |
+| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run, by name through symbolic links (`lx_busybox`); links, unlink of open files, case-sensitive directories (`lx_fs`); threads, futex and musl's pthreads run (`lx_thread`) |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
 | 4 | dynamic linking (ld.so, glibc), epoll, sockets | TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
@@ -6802,13 +6934,14 @@ Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
 mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_hello`, `lx_write_exit`, `lx_brk`, `lx_mmap`, `lx_arch_prctl`,
 `lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
-exec_test, socket_test, thread_test, poll_test and epoll_test
+exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
-`lx_epoll`, each also `_pie`), and clock_test, fork_test, fs_test,
+`lx_epoll`, `lx_fs`, each also `_pie`), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
 static busybox from busybox.net (a `PREBUILT`) runs our scripts in
-`user/lx/busybox/` (`lx_busybox`: the shell and coreutils-style applets;
+`user/lx/busybox/` (`lx_busybox`: the shell and coreutils-style applets,
+called by their own names through symbolic links to busybox;
 `lx_httpd`: httpd and wget over loopback).
 
 ### The lx module
@@ -6968,40 +7101,60 @@ The running parts (milestone 1; `lxrun=`):
   a buffer fault before anything was written is EFAULT). readv reads
   into one vector after another while each fills. Anything else:
   `errno::to_return(ENOSYS)`.
-- **Files** (`lx::file`; fileio_test, fs_test the fuller spec): Linux
-  paths walked on the shared ramfs (`/` separators, `.` and `..` by the
-  walk, ENOTDIR/ENOENT on the way, a trailing slash makes the last a
-  directory, UTF-8 names of up to 255 bytes: other bytes or a `\` are
-  EINVAL, ledgered; names compare case-insensitively as the file
-  system's: seam 4). An open registers with the file system sharing
+- **Files** (`lx::file`; fileio_test and fs_test, `lx_fileio`,
+  `lx_fs`): Linux paths walked on the shared ramfs (`/` separators, `.`
+  and `..` by the walk, ENOTDIR/ENOENT on the way, a trailing slash makes
+  the last a directory, UTF-8 names of up to 255 bytes: other bytes or a
+  `\` are EINVAL, ledgered). Symbolic links are followed in the middle
+  of a path and at its end unless the call says not to (lstat,
+  O_NOFOLLOW, AT_SYMLINK_NOFOLLOW, linkat without AT_SYMLINK_FOLLOW,
+  unlink, rename, mkdir, symlink, readlink; O_CREAT|O_EXCL), a trailing
+  slash following one too; a target is spliced into the components left
+  and walked from the link's directory (or the root), at most 40 links
+  per walk (ELOOP, path_resolution(7)). Names compare as their
+  directory's: exactly in a directory a Linux program made, otherwise
+  case-insensitively (the boot's `/lx`, NT's directories; ramfs
+  "Files"). An open registers with the file system sharing
   everything and keeps the offset in the description (dup'ed and
   inherited fds share it; its lock is never held across user memory).
   The calls: open/openat/creat (O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
-  O_DIRECTORY, O_PATH, O_CLOEXEC, O_NONBLOCK; O_TMPFILE EOPNOTSUPP), read,
+  O_DIRECTORY, O_PATH, O_CLOEXEC, O_NONBLOCK, O_NOFOLLOW: a link at the
+  end is ELOOP, or ENOTDIR with O_DIRECTORY, and opens as itself with
+  O_PATH; O_TMPFILE EOPNOTSUPP), read,
   write, pread64/pwrite64, readv/writev, lseek (SEEK_DATA/HOLE: one hole
   at the end; a directory only back to an offset getdents64 gave),
   ftruncate/truncate, fsync/fdatasync, the stat family (stat, lstat,
-  fstat, newfstatat with AT_EMPTY_PATH), getdents64 (`.` and `..` first,
-  then the entries in the file system's order; it goes on after the last
-  name it returned, so `rm -r` deleting between calls skips nothing;
-  d_ino the node + 1, d_off the entry's index + 1), mkdir/mkdirat,
-  unlink/unlinkat/rmdir, rename/renameat/renameat2 (RENAME_NOREPLACE;
-  an empty directory replaced; into itself EINVAL), access/faccessat/
+  fstat, newfstatat with AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW, statx
+  with STATX_BASIC_STATS whatever the mask asks, a reserved mask bit
+  EINVAL), getdents64 (`.` and `..` first,
+  then every name, hard links included, in the file system's order; it
+  goes on after the last name it returned, so `rm -r` deleting between
+  calls skips nothing; d_ino the node + 1, d_off the entry's index + 1;
+  DT_LNK for a link), mkdir/mkdirat,
+  unlink/unlinkat/rmdir (the name goes at once: `ramfs::RamFs::unlink`;
+  an open file lives on with nlink 0, its name free for a new file),
+  rename/renameat/renameat2 (RENAME_NOREPLACE, RENAME_EXCHANGE; an
+  existing target, open or not, replaced the same way; an empty
+  directory replaced; into itself EINVAL; two names of one file: a
+  no-op), link/linkat (AT_SYMLINK_FOLLOW; a directory EPERM;
+  AT_EMPTY_PATH ledgered, EINVAL), symlink/symlinkat (the target kept as
+  given; empty ENOENT), readlink/readlinkat (cut to the buffer, no NUL;
+  EINVAL for what is not a link), access/faccessat/
   faccessat2 (the owner's bits: every file is uid 1000's),
-  chdir/fchdir/getcwd, readlink (EINVAL: no symlinks yet),
-  chmod/fchmod/fchmodat, chown and friends (to the ids it has, else
-  EPERM), umask, utimensat/utimes/futimesat (UTIME_NOW, UTIME_OMIT; to
-  the 100 ns the file system keeps), sendfile. Metadata: the type from the node, the
-  permission bits the node's POSIX mode (`ramfs::Node::mode`, set at
-  creation from the mode and umask, or by chmod; not in the change log
-  yet), else 0755 (0555 for a read-only file); nlink 1 for a file, 2 +
-  subdirectories for a directory; atime the access time, mtime and ctime
-  the write time. Unlink and
-  rmdir mark the node delete-pending and close a delete open: an open
-  node stays until its last close, its name taken meanwhile (Linux frees
-  it at once; ledgered). Character devices by exact path (no /dev
-  directory yet): /dev/null, zero, full, random, urandom; /dev/tty is
-  ENXIO (no controlling terminal).
+  chdir/fchdir/getcwd, chmod/fchmod/fchmodat, chown and friends (to the
+  ids it has, else EPERM), umask, utimensat/utimes/futimesat (UTIME_NOW,
+  UTIME_OMIT; to the 100 ns the file system keeps), sendfile. Metadata:
+  the type from the node, the permission bits the node's POSIX mode
+  (`ramfs::Node::mode`, set at creation from the mode and umask, or by
+  chmod; kept across reboots by the change log), else 0755 (0555 for a
+  read-only file), 0777 for a link; nlink the node's names (0 once
+  unlinked while open), 2 + subdirectories for a directory; a link's
+  size its target's length; atime the access time, mtime and ctime the
+  write time. An NT program's open that does not share delete access
+  refuses an unlink or a replacing rename (EBUSY, ledgered), as does a
+  name NT's delete keeps until its last close. Character devices by
+  exact path (no /dev directory yet): /dev/null, zero, full, random,
+  urandom; /dev/tty is ENXIO (no controlling terminal).
 - **vfork** (and clone(CLONE_VM|CLONE_VFORK), posix_spawn's): a fork
   whose parent then waits until the child execs or ends (`state::Vfork`,
   woken by `release_vfork`); the child's memory is a copy, not shared
@@ -7243,8 +7396,8 @@ The running parts (milestone 1; `lxrun=`):
   `linux clone flags missing` (and vfork's CLONE_VM, unsupported thread
   flag sets), `linux signal action missing`
   (Stop), `linux signal option missing` (SA_ONSTACK), `linux option
-  missing` (wait4's and kill's process groups, open flags, unlink of an
-  open file, a rename onto an open file, names the file system cannot
+  missing` (wait4's and kill's process groups, open flags, an unlink or
+  rename an NT program's open refuses, names the file system cannot
   hold, socket families and types, socket options, CPU-time clocks and
   timers, a script as interpreter, futex ops not supported, an execve
   with other threads running), `linux syscall stub` (ioctl,
@@ -7274,9 +7427,8 @@ The running parts (milestone 1; `lxrun=`):
   sharing its parent's memory; execve ending the other threads first;
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
-  ITIMER_VIRTUAL/PROF, rusage); symlinks, hard links, POSIX unlink of an
-  open file, case-sensitive names and POSIX metadata in the change log
-  (seam 4: fs_test is the spec); a /dev
+  ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
+  (seam 4's rest; one user so far); a /dev
   directory and /proc; datagram and Unix sockets; process groups
   and sessions; a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not

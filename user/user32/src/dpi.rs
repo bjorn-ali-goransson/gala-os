@@ -145,3 +145,26 @@ fn set_error(code: u32) {
     // SAFETY: plain call.
     unsafe { super::SetLastError(code) };
 }
+
+/// AdjustWindowRectExForDpi: the plain form (every DPI is 96 here).
+#[unsafe(no_mangle)]
+pub extern "system" fn AdjustWindowRectExForDpi(
+    rect: *mut [i32; 4],
+    style: u32,
+    menu: i32,
+    ex: u32,
+    _dpi: u32,
+) -> i32 {
+    crate::window::AdjustWindowRectEx(rect, style, menu, ex)
+}
+
+/// PhysicalToLogicalPoint: no DPI virtualization (gala never scales a
+/// window), so the point is unchanged; FALSE for a null window.
+#[unsafe(no_mangle)]
+pub extern "system" fn PhysicalToLogicalPoint(hwnd: usize, point: *mut [i32; 2]) -> i32 {
+    if hwnd == 0 || point.is_null() {
+        set_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    1
+}

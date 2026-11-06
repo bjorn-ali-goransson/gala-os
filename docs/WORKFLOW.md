@@ -702,6 +702,9 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   DLLs loaded at run time (LoadLibrary: the JDK's launcher loads msvcp140
   and jvm.dll) are not in the closure: boot and read the ledger
   (`"what":"missing dll"`, `missing export`).
+- A DLL Windows names other than `.dll` (`winspool.drv`): its
+  USER_DLLS entry's `file` is that name; cargo builds `<package>.dll`
+  and xtask's `built_dll` ships it under the right name.
 - Exports by ordinal (ws2_32's) come from a build.rs printing
   `/EXPORT:name,@n`; lld warns that rustc's .def names them too and
   keeps the ordinal one (the warning cannot be silenced).
@@ -779,7 +782,10 @@ source).
   or build modes. Print relations, not pids/addresses/times/inodes; sort
   directory listings; directory sizes and nlinks are file-system
   specific and not printed; nothing depends on root (EACCES checks
-  would).
+  would). A test that lists or names its directory's entries works in
+  a directory it makes (fs_test's `w`): gala runs it in `/lx`, beside
+  every other binary, and only a directory a Linux program makes is
+  case-sensitive there.
 - **Determinism**: children report through exit status or a pipe and
   the parent waits before printing on; never rely on timing for an
   ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
@@ -855,11 +861,13 @@ source).
   `lxenv=PATH=/lx`). Their transcript is per scenario,
   `user/lx/<program>/<scenario>.txt` (`lx_expect::check_boot`), written
   from POSIX's and the program's documented output, one labelled line per
-  check; cross-check it with the host's dash and coreutils behind a
-  `busybox() { "$@"; }` shim (a program from the internet runs only
-  inside gala, never on the host). busybox.net's build has no standalone
-  shell and gala no symlinks yet, so scripts call applets as `busybox
-  <applet>`. To try a command line quickly, change `lx_busybox`'s
+  check; cross-check it with the host's dash and coreutils (shell.sh's
+  part after its setup, or httpd.sh behind a `busybox() { "$@"; }`
+  shim; a program from the internet runs only inside gala, never on the
+  host). busybox.net's build has no standalone shell, so `shell.sh`
+  first makes `/lx/bb.bin/<applet>` symbolic links to busybox and puts
+  that directory first in PATH (an applet it needs goes in that list);
+  httpd.sh still calls `busybox <applet>`. To try a command line quickly, change `lx_busybox`'s
   `lxargs=` (percent-encoded) and read the `lx: pid N stdout:` lines.
 - **Pitfalls met**: a C argument evaluated twice in one call
   (`say(name, poll(&rev), rev)`) reads in an unspecified order: compute
@@ -1396,6 +1404,29 @@ about a minute under TCG. Read, in order:
   the ledger naming it). The Fake host in `install/tests.rs` plays the
   installers (`run`), the NSIS uninstaller's late removal (`sleep`) and
   an Inno Setup installer (`inno_registers`).
+- **Machine scope** is `cargo xtask boot-test pk_install_machine`
+  (`pk_install_test machine`, booted `as=system`: SYSTEM is an
+  administrator, the boot user is not, and the zip run checks the boot
+  user's refusal, exit 6). Host tests: `cargo test -p galapkg
+  machine_scope`. The install log says which layout and whether the
+  caller was an administrator (`layout scope=`, `elevation`, `error
+  requires-admin`).
+- **A real Inno Setup installer** is `cargo xtask boot-test
+  pk_install_inno` (PENDING: Inno's Setup stops at its own WOW64 check,
+  ROADMAP PK step 3): Inno Setup 7.1.1's x64 installer (PREBUILT
+  `innosetup`, put in the snapshot's `installers\` mirror by
+  EXTRA_MODULES) with winget-pkgs' manifest
+  (`manifests/j/JRSoftware/InnoSetup/7/7.1.1`, real: leave it). Inno's
+  own log (`/LOG`, under `%LOCALAPPDATA%\gala\logs`) is teed into the
+  serial log, and on a failure its last lines are in the install log
+  (`setup-log:`). Before booting, list what Setup imports that gala
+  lacks: `python3 -I tools/inno_setup_exe.py
+  target/prebuilt/innosetup/innosetup-7.1.1-x64.exe <dir>/setup.tmp`
+  (the program the loader unpacks to `%TEMP%\is-*.tmp`; never run it),
+  then `tools/import_survey.py` on it. A delay import that is missing
+  or only a stub ends Setup with 0xc06d007f (the ledger's `missing
+  export` names it); Inno's source (github.com/jrsoftware/issrc) says
+  what Setup expects of Windows, read as documentation (as CoreCLR's).
 - **A vendor installer exits with an odd code and no ledger line**:
   boot with `XTASK_EVENTS=syscall,image` and list the installer's system
   calls (its pid from the `image` event; skip the memory calls and the
@@ -2510,6 +2541,13 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   null and drops the checks that lead there (ntdll's function table
   search lost its loop exit and spun on a miss). Use
   `cond.then(|| f(x))`.
+
+- **Table rows keyed by numbers typed from memory drift**: kernel32's
+  LCTYPE table once had LOCALE_IFIRSTDAYOFWEEK at 0x1009 (it is
+  LOCALE_ICALENDARTYPE) and three more rows one or more places off;
+  nothing failed until Delphi asked for the real ones. Check each new
+  row's number against the mingw-w64 header
+  (`/usr/share/mingw-w64/include/winnls.h`) and test it by number.
 
 - **An HGLOBAL is not a pointer**: GMEM_MOVEABLE memory (what
   CreateStreamOnHGlobal, the clipboard, STGMEDIUM and DDE hand around)

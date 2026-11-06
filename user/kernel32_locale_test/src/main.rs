@@ -19,7 +19,8 @@
 //! - Get{User,System}PreferredUILanguages: en-US, by name or id.
 //! - GetCPInfoExW of CP_ACP (the ANSI code page and its name).
 //! - The en-US Gregorian calendar: GetCalendarInfoEx (names, formats, the
-//!   two-digit year window 2049, the era), EnumCalendarInfoExEx;
+//!   two-digit year window 2049, the era), EnumCalendarInfoExEx and
+//!   EnumCalendarInfoW (by LCID: the era, as Delphi reads it);
 //!   EnumTimeFormatsEx (with and without seconds), EnumDateFormatsExEx.
 //! - FindNLSStringEx: starts with, ends with, first and last occurrence.
 //! - GetNLSVersionEx: a version for COMPARE_STRING; ERROR_INSUFFICIENT_BUFFER
@@ -65,6 +66,12 @@ unsafe extern "system" {
         len: i32,
         value: *mut u32,
     ) -> i32;
+    fn EnumCalendarInfoW(
+        callback: extern "system" fn(*const u16) -> Bool,
+        lcid: u32,
+        calendar: u32,
+        kind: u32,
+    ) -> Bool;
     fn EnumCalendarInfoExEx(
         callback: extern "system" fn(*const u16, u32, *const u16, isize) -> Bool,
         locale: *const u16,
@@ -336,6 +343,25 @@ fn locales(c: &mut Checks) -> Result<(), u32> {
         c.text(&buf, "US")?;
         c.eq(GetLocaleInfoW(0x409, LOCALE_IDEFAULTCODEPAGE, buf.as_mut_ptr(), 16) as u64, 4)?;
         c.text(&buf, "437")?;
+        // What Delphi's run-time library reads as it starts (the LCTYPE
+        // values are winnls.h's): the short time, the AM/PM position, the
+        // calendar, the first day of the week and of the year.
+        for (kind, text) in [
+            (0x79, "h:mm tt"),     // LOCALE_SSHORTTIME
+            (0x1005, "0"),         // LOCALE_ITIMEMARKPOSN
+            (0x1006, "MMMM yyyy"), // LOCALE_SYEARMONTH
+            (0x1009, "1"),         // LOCALE_ICALENDARTYPE
+            (0x100c, "6"),         // LOCALE_IFIRSTDAYOFWEEK
+            (0x100d, "0"),         // LOCALE_IFIRSTWEEKOFYEAR
+            (0x1012, "037"),       // LOCALE_IDEFAULTEBCDICCODEPAGE
+        ] {
+            buf = [0xffff; 16];
+            let n = GetLocaleInfoW(0x409, kind, buf.as_mut_ptr(), 16) as usize;
+            let same = n == text.len() + 1
+                && buf[..text.len()].iter().zip(text.bytes()).all(|(&a, b)| a == u16::from(b))
+                && buf[text.len()] == 0;
+            c.ok(same, kind.into())?; // the failing LCTYPE
+        }
         // A size query, then a buffer too small.
         c.eq(GetLocaleInfoW(0x409, LOCALE_SISO639LANGNAME, core::ptr::null_mut(), 0) as u64, 3)?;
         SetLastError(0);
@@ -573,6 +599,10 @@ extern "system" fn on_calendar_info(
     1
 }
 
+extern "system" fn on_calendar_text(text: *const u16) -> Bool {
+    on_calendar_info(text, 1, core::ptr::null(), 0)
+}
+
 /// The Gregorian calendar of en-US (calendar 1): its name, two-digit year
 /// window, formats, day and month names, era (GetCalendarInfoEx), and
 /// the lists EnumCalendarInfoExEx gives.
@@ -677,6 +707,14 @@ fn calendars(c: &mut Checks) -> Result<(), u32> {
         c.ok(CAL_SEEN.load(Ordering::SeqCst) >= 2, CAL_SEEN.load(Ordering::SeqCst).into())?;
         c.eq(CAL_FIRST.load(Ordering::SeqCst).into(), u64::from(b'M'))?; // "M/d/yyyy" first
         c.eq(CAL_ID.load(Ordering::SeqCst).into(), 1)?;
+        // By LCID: en-US's era (CAL_SERASTRING, "A.D."), as Delphi's
+        // run-time library reads it; an unknown LCID is refused.
+        CAL_SEEN.store(0, Ordering::SeqCst);
+        c.ok(EnumCalendarInfoW(on_calendar_text, 0x409, 1, 0x4) != 0, 0)?;
+        c.eq(CAL_SEEN.load(Ordering::SeqCst).into(), 1)?;
+        c.eq(CAL_FIRST.load(Ordering::SeqCst).into(), u64::from(b'A'))?;
+        c.ok(EnumCalendarInfoW(on_calendar_text, 0x12345, 1, 0x4) == 0, 0)?;
+        c.eq(GetLastError().into(), 87)?;
 
         // Time formats ("h:mm:ss tt" first), without seconds ("h:mm tt").
         FORMATS.store(0, Ordering::SeqCst);

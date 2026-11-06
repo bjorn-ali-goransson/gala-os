@@ -792,6 +792,18 @@ pub extern "system" fn CoGetObjectContext(iid: *const Guid, out: *mut *mut c_voi
 
 // ---- GUIDs and classes ----
 
+/// IsEqualGUID: whether the two GUIDs are the same 16 bytes (ole32
+/// exports the function as well as objbase.h's macro).
+#[unsafe(no_mangle)]
+pub extern "system" fn IsEqualGUID(a: *const Guid, b: *const Guid) -> i32 {
+    if a.is_null() || b.is_null() {
+        return i32::from(a == b);
+    }
+    // SAFETY: the caller's two GUIDs (16 bytes each).
+    let (x, y) = unsafe { (core::ptr::read_unaligned(a), core::ptr::read_unaligned(b)) };
+    i32::from(x == y)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CoCreateGuid(guid: *mut Guid) -> HResult {
     if guid.is_null() {

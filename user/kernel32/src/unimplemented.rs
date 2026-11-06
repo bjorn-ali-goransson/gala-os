@@ -95,4 +95,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     IsBadReadPtr
     ReadConsoleOutputCharacterA
     WritePrivateProfileStringW
+    // Inno Setup's Setup (Delphi's VCL) imports these.
+    WriteProfileStringW
 );

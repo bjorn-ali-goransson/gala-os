@@ -15,6 +15,7 @@ use core::ffi::c_void;
 mod conversions;
 mod date;
 mod safearray;
+mod unimplemented;
 mod variant;
 
 #[allow(dead_code)]

@@ -355,6 +355,19 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["busybox"],
         excludes: &[],
     },
+    // Inno Setup 7.1.1's own installer, x64 edition (jrsoftware.org's
+    // GitHub release; the SHA-256 is winget-pkgs' JRSoftware.InnoSetup.7
+    // 7.1.1 manifest's): an Inno Setup installer built with
+    // SetupArchitecture=x64 (Inno Setup 7), so x64 Setup and uninstaller
+    // gala can run without WOW64. Not unpacked: `gala install` runs it
+    // (ROADMAP PK stage 3, scenario pk_install_inno); inside gala only.
+    Prebuilt {
+        name: "innosetup",
+        url: "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe",
+        checksum: "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0",
+        members: &["innosetup-7.1.1-x64.exe"],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -433,6 +446,9 @@ const USER_DLLS: &[Dll] = &[
     },
     Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr.dll" },
     Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg32.dll" },
+    // winspool.drv: no print spooler, no printers (Delphi's VCL imports it:
+    // Inno Setup's Setup, PK).
+    Dll { package: "winspool", file: "winspool.drv", exported_as: "testwinspool.drv" },
     // DWrite.dll: chrome.dll imports it (BR).
     Dll { package: "dwrite", file: "dwrite.dll", exported_as: "testdwrite.dll" },
     // shcore.dll: the DPI scaling API set (BR).
@@ -472,6 +488,17 @@ const USER_DLLS: &[Dll] = &[
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
 ];
+
+/// Where the build puts the USER_DLLS file `file`: cargo names a cdylib
+/// `<package>.dll`, so a DLL Windows calls otherwise (winspool.drv) is
+/// built under its package's name and shipped under its own.
+fn built_dll(file: &str) -> PathBuf {
+    let release = target_dir().join(USER_TARGET).join("release");
+    match USER_DLLS.iter().find(|d| d.file == file) {
+        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        _ => release.join(file),
+    }
+}
 
 /// Directory trees shipped writable (`tarw:`): data a program changes, as
 /// an installer leaves it (SQL Server's databases).
@@ -649,6 +676,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("win32_misc_test", "secur32.dll", "Windows/System32"),
     ("win32_misc_test", "shell32.dll", "Windows/System32"),
     ("win32_misc_test", "shfolder.dll", "Windows/System32"),
+    ("win32_misc_test", "winspool.drv", "Windows/System32"),
+    ("win32_misc_test", "ole32.dll", "Windows/System32"),
+    ("win32_misc_test", "uxtheme.dll", "Windows/System32"),
     ("win32_misc_test", "version.dll", "Windows/System32"),
     ("win32_misc_test", "iphlpapi.dll", "Windows/System32"),
     ("win32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
@@ -920,6 +950,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_poll_pie", "user/lx/bin/poll_test-pie", "lx"),
     ("lx_epoll", "user/lx/bin/epoll_test", "lx"),
     ("lx_epoll_pie", "user/lx/bin/epoll_test-pie", "lx"),
+    ("lx_fs", "user/lx/bin/fs_test", "lx"),
+    ("lx_fs_pie", "user/lx/bin/fs_test-pie", "lx"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -1038,6 +1070,40 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_nsis", "ole32.dll", "Windows/System32"),
     ("pk_install_nsis", "shell32.dll", "Windows/System32"),
     ("pk_install_nsis", "shfolder.dll", "Windows/System32"),
+    // pk_install_inno: a real Inno Setup installer (PREBUILT innosetup,
+    // in the snapshot's installers mirror under its URL's file name) and
+    // what its Setup and uninstaller load.
+    (
+        "pk_install_inno",
+        "target/prebuilt/innosetup/innosetup-7.1.1-x64.exe",
+        "pk_source/installers",
+    ),
+    ("pk_install_inno", "user32.dll", "Windows/System32"),
+    ("pk_install_inno", "gdi32.dll", "Windows/System32"),
+    ("pk_install_inno", "comctl32.dll", "Windows/System32"),
+    ("pk_install_inno", "ole32.dll", "Windows/System32"),
+    ("pk_install_inno", "oleaut32.dll", "Windows/System32"),
+    ("pk_install_inno", "shell32.dll", "Windows/System32"),
+    ("pk_install_inno", "bcrypt.dll", "Windows/System32"),
+    // What Setup (the program the installer unpacks to %TEMP% and runs)
+    // links: Delphi's VCL and Inno's own imports.
+    ("pk_install_inno", "mpr.dll", "Windows/System32"),
+    ("pk_install_inno", "shlwapi.dll", "Windows/System32"),
+    ("pk_install_inno", "winspool.drv", "Windows/System32"),
+    ("pk_install_inno", "comdlg32.dll", "Windows/System32"),
+    ("pk_install_inno", "version.dll", "Windows/System32"),
+    ("pk_install_inno", "wtsapi32.dll", "Windows/System32"),
+    ("pk_install_inno", "winhttp.dll", "Windows/System32"),
+    ("pk_install_inno", "secur32.dll", "Windows/System32"),
+    ("pk_install_inno", "ws2_32.dll", "Windows/System32"),
+    ("pk_install_inno", "uxtheme.dll", "Windows/System32"),
+    ("pk_install_inno", "imm32.dll", "Windows/System32"),
+    ("pk_install_inno", "dwmapi.dll", "Windows/System32"),
+    ("pk_install_inno", "crypt32.dll", "Windows/System32"),
+    ("pk_install_inno", "msimg32.dll", "Windows/System32"),
+    // The UCRT (ucrtbase.dll ships with Windows; gala has none of its own:
+    // Microsoft's redistributable copy from the JDK, as other scenarios).
+    ("pk_install_inno", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
     // pk_install_https: `gala install` downloads over winhttp from
     // schannel_test's Nginx (MODULE_SETS), which serves the package; the
     // machine root store holds the public CA bundle beside the test CA.
@@ -2734,7 +2800,7 @@ fn make_iso_unchecked(
         }
         let (source, name) = match file.rsplit_once('/') {
             Some((_, name)) => (root().join(file), name),
-            None => (target_dir().join(USER_TARGET).join("release").join(file), *file),
+            None => (built_dll(file), *file),
         };
         copy(&source, &boot.join(name))?;
         modules += &format!("    module_path: boot():/boot/{name}\n    module_string: {dir}\n");
@@ -3217,6 +3283,12 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
+    // Inno Setup's x64 Setup runs (its loader unpacks it, it starts, logs
+    // and reads the machine) but refuses a Windows without x86 support
+    // ("This program does not support the version of Windows your
+    // computer is running": no SysWOW64, IsWow64GuestMachineSupported
+    // says no): it needs WOW64 (ROADMAP PK step 3).
+    "pk_install_inno",
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
@@ -4470,6 +4542,44 @@ const SCENARIOS: &[Scenario] = &[
             "plan install GalaTest.PkLib 1.0.0 installer 1 (for GalaTest.PkDep)",
             "installed id=GalaTest.PkLib version=1.0.0",
             "upgraded id=GalaTest.PkScoped from=1.0.0 to=1.1.0",
+            "error requires-admin administrator=no",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP PK: a machine-scope portable install (winget's
+        // %ProgramFiles%\WinGet layout, the HKLM entry, the machine's
+        // PATH) with administrator rights (`as=system`): installed, run,
+        // listed, upgraded keeping machine scope, uninstalled. The zip
+        // run checks the boot user is refused one (exit 6).
+        name: "pk_install_machine",
+        cmdline: "qemu_exit as=system logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=machine",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "elevation administrator=yes",
+            "registered key=HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GalaTest.PkScoped_Microsoft.Winget.Source_8wekyb3d8bbwe scope=machine",
+            "upgraded id=GalaTest.PkScoped from=1.0.0 to=1.1.0",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP PK stage 3: `gala install` of a real Inno Setup
+        // installer (Inno Setup 7.1.1's own, x64; winget-pkgs' manifest
+        // JRSoftware.InnoSetup.7) from the snapshot's mirror: run with
+        // winget's Inno switches (--silent: /VERYSILENT, the manifest's
+        // /CURRENTUSER for --scope user), found through its ProductCode's
+        // uninstall entry, its compiler run, listed, uninstalled through
+        // its QuietUninstallString.
+        name: "pk_install_inno",
+        cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=inno",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "innosetup-7.1.1-x64.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+            "found-by=ProductCode",
+            "installed id=JRSoftware.InnoSetup.7 version=7.1.1",
+            "arp-entry-gone key=HKCU",
             "pk_install_test: ok",
             "exited with status 0x00000000",
         ],
@@ -6826,6 +6936,23 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/epoll_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/fs_test (LX seam 4): symbolic and hard links, unlink of
+        // an open file, names differing only in case, the stat family and
+        // statx, renameat2; its transcript must be its expected.txt (real
+        // Linux's; `lx_expect::check_boot`).
+        name: "lx_fs",
+        cmdline: "qemu_exit lxrun=/lx/fs_test lxargs=./fs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/fs_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/fs_test as a static-pie.
+        name: "lx_fs_pie",
+        cmdline: "qemu_exit lxrun=/lx/fs_test-pie lxargs=./fs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/fs_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
         // A static Linux busybox (ROADMAP LX milestone 2): its shell runs
         // user/lx/busybox/shell.sh (pipes, redirections, the coreutils-style
         // applets through execve); the transcript must be
@@ -6919,6 +7046,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_pid", "process_test"),
     ("events_match", "process_test"),
     ("pk_install_zip", "pk_install_test"),
+    ("pk_install_machine", "pk_install_test"),
+    ("pk_install_inno", "pk_install_test"),
+    ("pk_install_inno", "pk_install_inno"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),
     ("pk_install_https", "pk_install_test"),
@@ -12261,7 +12391,7 @@ fn export_tests() -> Result {
         copy(&exe, &dir.join(format!("{program}.exe")))?;
     }
     for dll in USER_DLLS {
-        let file = target_dir().join(USER_TARGET).join("release").join(dll.file);
+        let file = built_dll(dll.file);
         copy(&file, &dir.join(dll.exported_as))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());

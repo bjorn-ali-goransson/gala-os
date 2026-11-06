@@ -31,6 +31,14 @@
 //! old files gone); uninstall removes files, command and record; the
 //! command is gone from PATH.
 //!
+//! With the argument `machine` (scenario pk_install_machine, run as
+//! SYSTEM: an administrator) it checks a machine-scope portable install
+//! (`machine_test`); the zip run checks that the boot user, no
+//! administrator, is refused one (exit 6).
+//!
+//! With the argument `inno` (scenario pk_install_inno) it installs,
+//! runs and uninstalls a real Inno Setup installer (`inno_test`).
+//!
 //! With the argument `nsis` (scenario pk_install_nsis) it checks an NSIS
 //! installer instead (`nsis_test`); the zip run also checks an Inno Setup
 //! stand-in that registers nothing (exit 4) and an MSIX (exit 3). With
@@ -137,6 +145,7 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
 
 const STARTF_USESTDHANDLES: u32 = 0x100;
 const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+const HKEY_LOCAL_MACHINE: isize = 0x8000_0002u32 as i32 as isize;
 const RRF_RT_REG_SZ: u32 = 0x2;
 const RRF_RT_REG_EXPAND_SZ_NOEXPAND: u32 = 0x1000_0004;
 const INVALID_ATTRIBUTES: u32 = u32::MAX;
@@ -307,6 +316,15 @@ fn exists(mut path: W) -> bool {
 /// A REG_SZ (or REG_EXPAND_SZ, unexpanded) value of HKCU as ASCII
 /// (None if absent).
 fn hkcu(subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> {
+    reg_text(HKEY_CURRENT_USER, subkey, value, expand)
+}
+
+/// The same of HKLM.
+fn hklm(subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> {
+    reg_text(HKEY_LOCAL_MACHINE, subkey, value, expand)
+}
+
+fn reg_text(root: isize, subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> {
     let mut key = W::new(subkey);
     let mut name = W::new(value);
     let mut data = [0u16; 2048];
@@ -316,7 +334,7 @@ fn hkcu(subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> 
     // SAFETY: our buffers with their lengths.
     let e = unsafe {
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            root,
             key.ptr(),
             name.ptr(),
             flags,
@@ -619,9 +637,13 @@ fn dependencies_and_scope(c: &mut Checks) -> Result<(), u32> {
     )?;
 
     // Scope: --scope machine (Program Files and HKLM for a portable
-    // package) is not built: refused, nothing changed.
+    // package) needs administrator rights, which the boot user lacks:
+    // refused before any change (winget's
+    // APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN; gala's exit 6).
     let args = join(&mut a, &["install GalaTest.PkScoped --scope machine ", src]);
-    c.gala(args, 3, &[b"machine scope"])?;
+    c.gala(args, 6, &[b"administrator"])?;
+    c.ok(log_has(b"error requires-admin administrator=no"), 0, "the elevation check logged")?;
+    c.ok(!exists(W::new(MACHINE_LINKS)), 0, "nothing in Program Files")?;
     let args = join(&mut a, &["install GalaTest.PkScoped --scope user --version 1.0.0 ", src]);
     c.gala(args, 0, &[b"Successfully installed"])?;
     c.ok(
@@ -637,6 +659,84 @@ fn dependencies_and_scope(c: &mut Checks) -> Result<(), u32> {
     refresh_path();
     c.command_runs("pkscoped")?;
     c.gala("uninstall GalaTest.PkScoped", 0, &[b"Successfully uninstalled"])?;
+    Ok(())
+}
+
+// ---- Machine scope (scenario pk_install_machine, as SYSTEM) -----------
+
+const MACHINE_LINKS: &str = "C:\\Program Files\\WinGet\\Links";
+const MACHINE_ENV: &str = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
+const SCOPED_ARP: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GalaTest.PkScoped_Microsoft.Winget.Source_8wekyb3d8bbwe";
+
+/// PATH as a new logon would make it from the machine's
+/// `Session Manager\Environment\Path` (`%SystemRoot%` expanded).
+fn machine_path() {
+    let mut path = W::new("");
+    if let Some((m, len)) = hklm(MACHINE_ENV, "Path", true) {
+        let var = b"%SystemRoot%";
+        let mut i = 0;
+        while i < len {
+            if m[i..len].starts_with(var) {
+                path.add(b"C:\\Windows");
+                i += var.len();
+            } else {
+                path.add(&m[i..i + 1]);
+                i += 1;
+            }
+        }
+    }
+    let mut name = W::new("Path");
+    // SAFETY: NUL-terminated strings.
+    unsafe { SetEnvironmentVariableW(name.ptr(), path.ptr()) };
+}
+
+/// winget's machine-scope portable install (its documented layout:
+/// `%ProgramFiles%\WinGet\Packages` and `Links`, as `winget --info`
+/// lists them; the ARP entry under HKLM; the Links directory on the
+/// machine's PATH), run with administrator rights (the boot option
+/// `as=system`: SYSTEM's token has BUILTIN\Administrators): installed,
+/// run from the machine's PATH, listed, upgraded keeping machine scope,
+/// uninstalled.
+fn machine_test() -> Result<(), u32> {
+    let mut c = Checks(0);
+    let src = "--source C:\\pk_source";
+    let mut a = [0u8; 300];
+    let args = join(&mut a, &["install GalaTest.PkScoped --scope machine --version 1.0.0 ", src]);
+    c.gala(args, 0, &[b"Successfully installed", b"Program Files\\WinGet\\Packages"])?;
+    c.ok(log_has(b"elevation administrator=yes"), 0, "the elevation check logged")?;
+    c.ok(log_has(b"url=https://packages.gala.invalid/pkscoped-1.0.0-machine.zip"), 0, "machine's")?;
+    c.ok(
+        exists(W::new("C:\\Program Files\\WinGet\\Packages\\GalaTest.PkScoped_Microsoft.Winget.Source_8wekyb3d8bbwe\\pkscoped-1.0.0\\pkscoped.exe")),
+        0,
+        "the program in Program Files",
+    )?;
+    c.ok(exists(W::new("C:\\Program Files\\WinGet\\Links\\pkscoped.exe")), 0, "the command")?;
+    let p = hklm(MACHINE_ENV, "Path", true);
+    c.ok(
+        p.is_some_and(|(s, n)| contains(&s[..n], MACHINE_LINKS.as_bytes())),
+        0,
+        "Links on the machine's PATH",
+    )?;
+    let v = hklm(SCOPED_ARP, "WinGetPackageIdentifier", false);
+    c.ok(v.is_some_and(|(s, n)| &s[..n] == b"GalaTest.PkScoped"), 0, "the HKLM entry")?;
+    c.ok(hkcu(SCOPED_ARP, "DisplayName", false).is_none(), 0, "no HKCU entry")?;
+    machine_path();
+    c.command_runs("pkscoped")?;
+    c.gala("list", 0, &[b"GalaTest.PkScoped", b"1.0.0"])?;
+    c.gala("upgrade GalaTest.PkScoped", 0, &[b"Successfully upgraded", b"1.1.0"])?;
+    c.ok(log_has(b"installed scope=machine type=portable"), 0, "the installed scope read")?;
+    c.ok(log_has(b"url=https://packages.gala.invalid/pkscoped-1.1.0-machine.zip"), 0, "kept")?;
+    machine_path();
+    c.command_runs("pkscoped")?;
+    c.gala("uninstall GalaTest.PkScoped", 0, &[b"Successfully uninstalled"])?;
+    c.ok(hklm(SCOPED_ARP, "DisplayName", false).is_none(), 0, "the HKLM entry removed")?;
+    c.ok(
+        !exists(W::new("C:\\Program Files\\WinGet\\Links\\pkscoped.exe")),
+        0,
+        "the command removed",
+    )?;
+    let (got, _) = run(None, "pkscoped");
+    c.ok(got == 0xfffe_0000 | ERROR_FILE_NOT_FOUND, got, "pkscoped after the uninstall")?;
     Ok(())
 }
 
@@ -891,6 +991,96 @@ fn nsis_test() -> Result<(), u32> {
     Ok(())
 }
 
+// ---- A real Inno Setup installer (scenario pk_install_inno) -----------
+
+const INNO_ARP: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 7_is1";
+const INNO_DIR: &str = "\\Programs\\Inno Setup 7";
+
+/// `exe` (a path under %LOCALAPPDATA%) as ASCII text in `buf`.
+fn local_text<'a>(buf: &'a mut [u8], rest: &str) -> &'a str {
+    let w = local(rest);
+    let mut n = 0;
+    for &u in w.text() {
+        if n < buf.len() {
+            buf[n] = if u < 0x80 { u as u8 } else { b'?' };
+            n += 1;
+        }
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("")
+}
+
+/// `gala install` of a real Inno Setup installer: Inno Setup 7.1.1's own
+/// (x64: Inno Setup 7 builds x64 Setups), with winget-pkgs' manifest
+/// JRSoftware.InnoSetup.7 (a machine installer with `/ALLUSERS`, a user
+/// one with `/CURRENTUSER`). Run as winget runs Inno installers
+/// (`--silent`: `/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, `/LOG=`,
+/// the manifest's Custom switch), found through the manifest's
+/// ProductCode `Inno Setup 7_is1`, its command-line compiler run,
+/// listed, uninstalled through the QuietUninstallString Inno writes.
+/// What Inno Setup leaves is what its documentation says for a per-user
+/// install: the files in `{autopf}\Inno Setup 7` (per user
+/// `%LOCALAPPDATA%\Programs`), `unins000.exe` and `.dat` beside them, the
+/// entry `<AppId>_is1` under HKCU.
+fn inno_test() -> Result<(), u32> {
+    let mut c = Checks(0);
+    let src = "--source C:\\pk_source";
+    let mut a = [0u8; 300];
+    let mut p = [0u8; 300];
+    c.gala("search inno --source C:\\pk_source", 0, &[b"JRSoftware.InnoSetup.7", b"7.1.1"])?;
+    let args = join(&mut a, &["install JRSoftware.InnoSetup.7 --scope user --silent ", src]);
+    c.gala(args, 0, &[b"Successfully installed", b"Inno Setup 7"])?;
+    c.ok(
+        log_has(b"innosetup-7.1.1-x64.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="),
+        0,
+        "run with winget's Inno switches",
+    )?;
+    c.ok(log_has(b".setup.log\" /CURRENTUSER"), 0, "the user installer's Custom switch")?;
+    c.ok(log_has(b"exit code=0 (0x0)"), 0, "Setup's exit code logged")?;
+    c.ok(log_has(b"Uninstall\\Inno Setup 7_is1 found-by=ProductCode"), 0, "the entry")?;
+    c.ok(exists(local(join(&mut p, &[INNO_DIR, "\\ISCC.exe"]))), 0, "Setup wrote ISCC.exe")?;
+    c.ok(exists(local(join(&mut p, &[INNO_DIR, "\\unins000.exe"]))), 0, "its uninstaller")?;
+    c.ok(exists(local(join(&mut p, &[INNO_DIR, "\\unins000.dat"]))), 0, "its uninstall log")?;
+    let setup_log = read_file(local("\\gala\\logs\\JRSoftware.InnoSetup.7-7.1.1.setup.log"));
+    show_file("the setup log", &setup_log);
+    c.ok(setup_log.is_some_and(|o| o.has(b"Setup version: Inno Setup")), 0, "Inno's /LOG")?;
+    let inno = |v: &str| hkcu(INNO_ARP, v, false);
+    c.ok(inno("DisplayVersion").is_some_and(|(s, n)| &s[..n] == b"7.1.1"), 0, "DisplayVersion")?;
+    c.ok(
+        inno("InstallLocation").is_some_and(|(s, n)| contains(&s[..n], b"Programs\\Inno Setup 7")),
+        0,
+        "InstallLocation",
+    )?;
+    c.ok(inno("QuietUninstallString").is_some(), 0, "QuietUninstallString")?;
+    c.ok(
+        inno("WinGetPackageIdentifier").is_some_and(|(s, n)| &s[..n] == b"JRSoftware.InnoSetup.7"),
+        0,
+        "gala's tag",
+    )?;
+    // The installed compiler runs (its usage text).
+    let mut e = [0u8; 300];
+    let iscc = local_text(&mut e, join(&mut p, &[INNO_DIR, "\\ISCC.exe"]));
+    let (got, o) = run(Some(iscc), "ISCC.exe /?");
+    if !o.has(b"Inno Setup 7 Command-Line Compiler") {
+        out(b"pk_install_test: ISCC.exe /? -> ");
+        out(&hex(got));
+        out(b":\r\n");
+        out(o.text());
+    }
+    c.ok(o.has(b"Inno Setup 7 Command-Line Compiler"), got, "ISCC.exe runs")?;
+    c.gala("list", 0, &[b"JRSoftware.InnoSetup.7", b"7.1.1"])?;
+    let args = join(&mut a, &["install JRSoftware.InnoSetup.7 --scope user ", src]);
+    c.gala(args, 0, &[b"already installed"])?;
+    // Uninstall: Inno's QuietUninstallString (unins000.exe /SILENT), which
+    // runs a copy of itself from %TEMP%; gala waits for the entry to go.
+    c.gala("uninstall JRSoftware.InnoSetup.7", 0, &[b"Successfully uninstalled"])?;
+    c.ok(log_has(b"from=QuietUninstallString"), 0, "the quiet uninstall string used")?;
+    c.ok(inno("DisplayName").is_none(), 0, "the entry removed")?;
+    c.ok(!exists(local(join(&mut p, &[INNO_DIR, "\\ISCC.exe"]))), 0, "ISCC.exe removed")?;
+    let o = c.gala("list", 0, &[])?;
+    c.ok(!o.has(b"JRSoftware.InnoSetup.7"), 0, "not listed after the uninstall")?;
+    Ok(())
+}
+
 // ---- Downloads over HTTPS (scenario pk_install_https) -----------------
 
 /// Whether crypt32's "ROOT" system store has a certificate whose subject
@@ -1068,6 +1258,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
         nsis_test()
     } else if has_arg("https") {
         https_test()
+    } else if has_arg("machine") {
+        machine_test()
+    } else if has_arg("inno") {
+        inno_test()
     } else {
         test()
     };

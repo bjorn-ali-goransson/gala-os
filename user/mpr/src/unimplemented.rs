@@ -3,4 +3,8 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("mpr.dll":
+    WNetCloseEnum
+    WNetEnumResourceW
+    WNetGetUniversalNameW
+    WNetOpenEnumW
 );

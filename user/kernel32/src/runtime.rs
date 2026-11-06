@@ -260,6 +260,21 @@ pub extern "system" fn QueryMemoryResourceNotification(h: Handle, state: *mut Bo
     }
 }
 
+/// IsWow64GuestMachineSupported(machine, *supported): whether WOW64 runs
+/// programs of that machine type. gala has no WOW64 (ROADMAP "WOW64"): S_OK
+/// and FALSE for every machine, x86 included, so programs that check
+/// (Inno Setup's Setup) see a 64-bit Windows without 32-bit support.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsWow64GuestMachineSupported(_machine: u16, supported: *mut Bool) -> i32 {
+    const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+    if supported.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's output.
+    unsafe { *supported = FALSE };
+    0
+}
+
 /// IsWow64Process2: every gala process is native x64
 /// (IMAGE_FILE_MACHINE_UNKNOWN for the process, AMD64 for the machine).
 #[unsafe(no_mangle)]

@@ -107,13 +107,20 @@ fn locale_value(kind: u32) -> Option<&'static str> {
         0x68 => "USA",             // LOCALE_SISO3166CTRYNAME2
         0x1001 => "English",       // LOCALE_SENGLISHLANGUAGENAME
         0x1002 => "United States", // LOCALE_SENGLISHCOUNTRYNAME
+        0x79 => "h:mm tt",         // LOCALE_SSHORTTIME
         0x1003 => "h:mm:ss tt",    // LOCALE_STIMEFORMAT
-        0x1009 => "6",             // LOCALE_IFIRSTDAYOFWEEK (Sunday)
-        0x100c => "0",             // LOCALE_IFIRSTWEEKOFYEAR
-        0x1011 => "10000",         // LOCALE_IDEFAULTMACCODEPAGE
-        0x1012 => "1",             // LOCALE_IOPTIONALCALENDAR
-        0x1014 => "037",           // LOCALE_IDEFAULTEBCDICCODEPAGE
-        0x1019 => "MMMM yyyy",     // LOCALE_SYEARMONTH
+        0x1005 => "0",             // LOCALE_ITIMEMARKPOSN (AM/PM after the time)
+        0x1006 => "MMMM yyyy",     // LOCALE_SYEARMONTH
+        0x1009 => "1",             // LOCALE_ICALENDARTYPE (Gregorian)
+        0x100a => "1",             // LOCALE_IPAPERSIZE (letter)
+        // gala's one calendar, CAL_GREGORIAN (TODO: compare on Windows,
+        // which may list CAL_GREGORIAN_US, 2, as en-US's optional one).
+        0x100b => "1",     // LOCALE_IOPTIONALCALENDAR
+        0x100c => "6",     // LOCALE_IFIRSTDAYOFWEEK (Sunday)
+        0x100d => "0",     // LOCALE_IFIRSTWEEKOFYEAR
+        0x1011 => "10000", // LOCALE_IDEFAULTMACCODEPAGE
+        0x1012 => "037",   // LOCALE_IDEFAULTEBCDICCODEPAGE
+        0x1014 => "1",     // LOCALE_IDIGITSUBSTITUTION (none)
         _ => return None,
     })
 }
@@ -1289,6 +1296,75 @@ pub extern "system" fn GetSystemPreferredUILanguages(
     len: *mut u32,
 ) -> Bool {
     preferred_ui_languages(flags, count, buf, len)
+}
+
+/// GetThreadUILanguage: the thread's first UI language. gala has one UI
+/// language, en-US (the user's and the system's, and the only valid
+/// thread language: SetThreadPreferredUILanguages).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadUILanguage() -> u16 {
+    LANG_EN_US as u16
+}
+
+/// SetThreadPreferredUILanguages: up to five valid languages of the list
+/// (MUI_LANGUAGE_NAME 0x8, the default, or MUI_LANGUAGE_ID 0x4: four hex
+/// digits), their count in `*count`; a null or empty list clears it; a
+/// filter flag (MUI_RESET_FILTERS 0x1, MUI_CONSOLE_FILTER 0x100,
+/// MUI_COMPLEX_SCRIPT_FILTER 0x200) alone with null arguments. The one
+/// valid language on gala is en-US, so the thread's list is en-US or
+/// empty, and either way resources resolve to en-US, the user's
+/// language: nothing is kept. A language gala lacks is skipped (as
+/// Windows skips invalid ones) and recorded in the ledger.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetThreadPreferredUILanguages(
+    flags: u32,
+    list: *const u16,
+    count: *mut u32,
+) -> Bool {
+    const ID: u32 = 0x4;
+    const NAME: u32 = 0x8;
+    const FILTERS: u32 = 0x1 | 0x100 | 0x200;
+    let filter = flags & FILTERS;
+    if flags & !(ID | NAME | FILTERS) != 0
+        || flags & (ID | NAME) == ID | NAME
+        || filter.count_ones() > 1
+        || (filter != 0 && (flags & (ID | NAME) != 0 || !list.is_null() || !count.is_null()))
+    {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if filter != 0 {
+        return TRUE;
+    }
+    let mut valid = 0u32;
+    if !list.is_null() {
+        let mut p = list;
+        loop {
+            let item = wide_slice(p);
+            if item.is_empty() {
+                break;
+            }
+            let ok = if flags & ID != 0 {
+                item.len() == 4 && item.iter().map(|&c| c as u8).eq(*b"0409")
+            } else {
+                is_en_us(item)
+            };
+            if ok && valid < 5 {
+                valid += 1;
+            } else if !ok {
+                unsupported(
+                    b"kernel32.dll!SetThreadPreferredUILanguages(language)",
+                    item.len() as u64,
+                );
+            }
+            // SAFETY: the double-NUL-terminated list goes on past this item.
+            p = unsafe { p.add(item.len() + 1) };
+        }
+    }
+    if !count.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *count = valid.min(1) };
+    }
+    TRUE
 }
 
 /// GetThreadPreferredUILanguages: no thread languages are ever set, so

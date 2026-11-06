@@ -205,6 +205,18 @@ pub extern "system" fn CharUpperW(s: *mut u16) -> *mut u16 {
     s
 }
 
+/// CharLowerW: as CharUpperW, to lower case.
+#[unsafe(no_mangle)]
+pub extern "system" fn CharLowerW(s: *mut u16) -> *mut u16 {
+    if (s as usize) >> 16 == 0 {
+        let mut c = s as usize as u16;
+        map_case(&mut c, 1, LCMAP_LOWERCASE);
+        return c as usize as *mut u16;
+    }
+    map_case(s, wide_len(s), LCMAP_LOWERCASE);
+    s
+}
+
 /// CharUpperBuffW: `n` characters converted in place; returns `n`.
 #[unsafe(no_mangle)]
 pub extern "system" fn CharUpperBuffW(s: *mut u16, n: u32) -> u32 {

@@ -682,6 +682,12 @@ pub extern "system" fn EnumClipboardFormats(format: u32) -> u32 {
     })
 }
 
+/// CountClipboardFormats: how many formats the clipboard holds.
+#[unsafe(no_mangle)]
+pub extern "system" fn CountClipboardFormats() -> i32 {
+    with_clipboard(|c| c.count as i32)
+}
+
 /// The clipboard's change count (GetClipboardSequenceNumber).
 fn clipboard_sequence() -> u32 {
     CLIP_SEQUENCE.load(Ordering::Relaxed)

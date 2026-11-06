@@ -31,5 +31,18 @@ gala_stubs::unimplemented_exports!("user32.dll":
     mouse_event
     DialogBoxParamW
     MessageBoxIndirectW
-    SetClassLongPtrW
+    // Inno Setup's Setup (Delphi's VCL) imports these.
+    ActivateKeyboardLayout
+    CopyImage
+    CreateIcon
+    DefFrameProcW
+    DefMDIChildProcW
+    GetDCEx
+    GetKeyNameTextW
+    GetLastActivePopup
+    GetMenuItemRect
+    GetScrollBarInfo
+    LoadKeyboardLayoutW
+    ShowOwnedPopups
+    TranslateMDISysAccel
 );
