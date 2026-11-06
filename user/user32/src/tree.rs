@@ -1368,6 +1368,12 @@ pub(crate) fn snap(hwnd: Hwnd, x: i32, y: i32, w: i32, h: i32) {
         return;
     }
     with(|s| s.windows[i].zoomed = false);
+    // The desktop places its own window: for a frame the program draws,
+    // that is the client area, inside the program's borders.
+    let (x, y, w, h) = match window(hwnd).and_then(|w| w.custom) {
+        Some((b, t)) => (x - b, y - t, w + 2 * b, h + t + b),
+        None => (x, y, w, h),
+    };
     SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER | 0x10);
 }
 

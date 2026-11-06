@@ -4048,8 +4048,14 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (ledger). A left-button press in such a window goes first to its
   WM_NCHITTEST (on its thread, posted GALA_WM_NCDOWN): HTCAPTION makes the
   desktop drag it (GalaWindowDrag, 0x7f54: while the button stays down;
-  logged), anything else is the click it was; DefWindowProc answers
-  HTCLIENT. Not yet: resizing by its own borders. gdi32 is loaded lazily with LoadLibrary,
+  logged), a border (HTLEFT..HTBOTTOMRIGHT) a resize (GalaWindowResize,
+  0x7f55, edges 1 left, 2 top, 4 right, 8 bottom: the rectangle follows
+  the pointer, at least 120 x 60, and goes to the program as
+  GALA_WM_PLACE when the button is released; no outline is drawn
+  meanwhile), anything else is the click it was; DefWindowProc answers
+  HTCLIENT. GALA_WM_PLACE names the desktop's window, which for such a
+  frame is the client area: user32 adds the program's borders back
+  (Snap places these windows right too). gdi32 is loaded lazily with LoadLibrary,
   so console programs that import user32 do not need it. GetDC(NULL) is
   the display DC.
 - **Deferred presenting**: EndPaint and ReleaseDC add the area to the
@@ -6947,6 +6953,7 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 | GalaWindowSurface(hwnd, section, offset, width, height) | 0x7f52 | the caller's top-level window keeps its pixels in that section |
 | GalaWindowSurfaceOpen(hwnd, \*section, \*info) | 0x7f53 | a handle to any window's surface section on the caller's desktop |
 | GalaWindowDrag(id) | 0x7f54 | the caller's window follows the pointer while the left button is down (its own caption) |
+| GalaWindowResize(id, edges) | 0x7f55 | the caller's window is resized from those edges by the pointer, placed when the button goes up (its own border) |
 
 **The registry and its record** (step 1):
 

@@ -150,6 +150,8 @@ pub const GALA_WINDOW_SURFACE: u32 = 0x7f52;
 pub const GALA_WINDOW_SURFACE_OPEN: u32 = 0x7f53;
 /// A window that draws its own caption asks the desktop to drag it.
 pub const GALA_WINDOW_DRAG: u32 = 0x7f54;
+/// ... or resize it by its own border.
+pub const GALA_WINDOW_RESIZE: u32 = 0x7f55;
 /// UIPI's message filters (ChangeWindowMessageFilter(Ex)).
 pub const GALA_WINDOW_FILTER: u32 = 0x7f6a;
 /// WinEvents across processes (SetWinEventHook, UnhookWinEvent,
@@ -382,6 +384,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_WINDOW_SURFACE, "GalaWindowSurface", 5, gala_window_surface),
     (GALA_WINDOW_SURFACE_OPEN, "GalaWindowSurfaceOpen", 3, gala_window_surface_open),
     (GALA_WINDOW_DRAG, "GalaWindowDrag", 1, gala_window_drag),
+    (GALA_WINDOW_RESIZE, "GalaWindowResize", 2, gala_window_resize),
     (GALA_WINDOW_FILTER, "GalaWindowFilter", 4, gala_window_filter),
     (GALA_WIN_EVENT_HOOK, "GalaWinEventHook", 6, gala_win_event_hook),
     (GALA_WIN_EVENT_UNHOOK, "GalaWinEventUnhook", 1, gala_win_event_unhook),
@@ -2155,6 +2158,20 @@ fn gala_window_drag(call: &mut Call<'_>) -> NtStatus {
     let owner = call.process.id;
     tri!(super::desktop::with(&call.process.desk.shell, |d| {
         d.begin_drag(id, owner)?;
+        Ok(((), None))
+    }));
+    NtStatus::SUCCESS
+}
+
+/// GalaWindowResize(id, edges): the caller's window `id` is resized from
+/// `edges` (1 left, 2 top, 4 right, 8 bottom) by the pointer while the
+/// left button stays down; the program gets the rectangle (GALA_WM_PLACE)
+/// when it goes up. STATUS_INVALID_DEVICE_STATE when the button is up.
+fn gala_window_resize(call: &mut Call<'_>) -> NtStatus {
+    let (id, edges) = (arg!(call, 0) as u32, arg!(call, 1) as u32);
+    let owner = call.process.id;
+    tri!(super::desktop::with(&call.process.desk.shell, |d| {
+        d.begin_resize(id, owner, edges)?;
         Ok(((), None))
     }));
     NtStatus::SUCCESS

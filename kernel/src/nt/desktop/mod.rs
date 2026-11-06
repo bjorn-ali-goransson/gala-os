@@ -180,6 +180,27 @@ const VK_MENU: u8 = 0x12;
 
 /// GalaWindowCreate's style: a frameless popup.
 pub const STYLE_POPUP: u32 = 0x1;
+/// GalaWindowResize's edges (a program's own border: WM_NCHITTEST's
+/// HTLEFT..HTBOTTOMRIGHT).
+pub const RESIZE_LEFT: u32 = 0x1;
+pub const RESIZE_TOP: u32 = 0x2;
+pub const RESIZE_RIGHT: u32 = 0x4;
+pub const RESIZE_BOTTOM: u32 = 0x8;
+/// A resize by a program's own border (`begin_resize`).
+#[derive(Clone, Copy)]
+struct Resize {
+    id: u32,
+    /// RESIZE_* bits.
+    edges: u32,
+    /// The pointer where it began.
+    start: (i64, i64),
+    /// The rectangle then and now (x, y, w, h).
+    from: [i64; 4],
+    to: [i64; 4],
+}
+
+/// The smallest size a resize gives a window.
+const RESIZE_MIN: (i64, i64) = (120, 60);
 /// GalaWindowCreate's style: an application window that draws its own
 /// frame (WM_NCCALCSIZE took gala's away): all client area, otherwise as
 /// a framed window (active, on the taskbar, in the usual order).
@@ -596,6 +617,9 @@ pub struct Desktop {
     pressed: Hit,
     /// A window being dragged by its caption: (id, grab offset).
     drag: Option<(u32, i64, i64)>,
+    /// A resize by a program's own border (sent as GALA_WM_PLACE when the
+    /// button goes up).
+    resize: Option<Resize>,
     active: Option<u32>,
     /// The minute the clock shows.
     minute: u64,
@@ -648,6 +672,7 @@ impl Desktop {
             hover: Hit::Nothing,
             pressed: Hit::Nothing,
             drag: None,
+            resize: None,
             active: None,
             minute: 0,
             damage: Vec::new(),
@@ -1610,6 +1635,7 @@ impl Desktop {
         if let Some((id, gx, gy)) = self.drag {
             self.move_to(id, x - gx, y - gy);
         }
+        self.resize_to(x, y);
         let hit = self.hit(x, y);
         self.set_hover(hit);
         let pressed = buttons & !self.buttons;
@@ -1625,6 +1651,7 @@ impl Desktop {
         };
         if (dx, dy) != (0, 0)
             && self.drag.is_none()
+            && self.resize.is_none()
             && let Some(id) = target
         {
             let lp = self.client_lparam(id, x, y);
@@ -1750,7 +1777,62 @@ impl Desktop {
         Ok(())
     }
 
+    /// `owner`'s window `id` asks to be resized by the pointer from its
+    /// `edges` (RESIZE_*) while the left button stays down (its
+    /// WM_NCHITTEST answered a border); the program gets the rectangle
+    /// (GALA_WM_PLACE) when the button goes up.
+    pub fn begin_resize(&mut self, id: u32, owner: u64, edges: u32) -> Result<(), NtStatus> {
+        let start = self.pointer;
+        let w = self.find(id, owner)?;
+        let rect = [i64::from(w.x), i64::from(w.y), i64::from(w.w), i64::from(w.h)];
+        if self.buttons & 1 == 0 {
+            return Err(NtStatus::INVALID_DEVICE_STATE);
+        }
+        if edges == 0 || edges & !0xf != 0 {
+            return Err(NtStatus::INVALID_PARAMETER);
+        }
+        self.raise(id);
+        self.activate(Some(id));
+        self.resize = Some(Resize { id, edges, start, from: rect, to: rect });
+        #[cfg(not(test))]
+        crate::info!("desktop: resizing window {id} for its program (edges {edges:#x})");
+        Ok(())
+    }
+
+    /// A resize follows the pointer at (x, y).
+    fn resize_to(&mut self, x: i64, y: i64) {
+        let Some(Resize { id, edges, start: (sx, sy), from: [rx, ry, rw, rh], .. }) = self.resize
+        else {
+            return;
+        };
+        let (dx, dy) = (x - sx, y - sy);
+        let (mut l, mut t, mut r, mut b) = (rx, ry, rx + rw, ry + rh);
+        if edges & RESIZE_LEFT != 0 {
+            l = (l + dx).min(r - RESIZE_MIN.0);
+        }
+        if edges & RESIZE_RIGHT != 0 {
+            r = (r + dx).max(l + RESIZE_MIN.0);
+        }
+        if edges & RESIZE_TOP != 0 {
+            t = (t + dy).min(b - RESIZE_MIN.1);
+        }
+        if edges & RESIZE_BOTTOM != 0 {
+            b = (b + dy).max(t + RESIZE_MIN.1);
+        }
+        self.resize = Some(Resize {
+            id,
+            edges,
+            start: (sx, sy),
+            from: [rx, ry, rw, rh],
+            to: [l, t, r - l, b - t],
+        });
+    }
+
     fn left_up(&mut self, hit: Hit, x: i64, y: i64, keys: u64) {
+        // A resize that ends: the program places its window there.
+        if let Some(Resize { id, to: [l, t, w, h], .. }) = self.resize.take() {
+            self.send_place(id, (l as i32, t as i32, w as u32, h as u32));
+        }
         let pressed = core::mem::replace(&mut self.pressed, Hit::Nothing);
         // A drag that ends tells the program where its client area went
         // (WM_MOVE: the client area's screen position).

@@ -292,6 +292,41 @@ fn a_frameless_window_is_dragged_when_its_program_asks() {
 }
 
 #[test]
+fn a_frameless_window_is_resized_when_its_program_asks() {
+    // A press on the program's own border (WM_NCHITTEST HTBOTTOMRIGHT,
+    // then HTLEFT): the rectangle follows the pointer and goes to the
+    // program as GALA_WM_PLACE when the button is released.
+    let (mut d, _) = desktop_with_window();
+    let f = d.create(7, 300, 120, 200, 100, &title("own frame"), STYLE_FRAMELESS).unwrap();
+    d.show(f, 7, true).unwrap();
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    let place = |wparam: u64, lparam: u64| {
+        (wparam as u32 as i32, (wparam >> 32) as u32 as i32, lparam as u32, (lparam >> 32) as u32)
+    };
+    go(&mut d, 498, 218, 0);
+    go(&mut d, 498, 218, 1);
+    assert_eq!(d.begin_resize(f, 8, RESIZE_RIGHT | RESIZE_BOTTOM), Err(NtStatus::INVALID_HANDLE));
+    d.begin_resize(f, 7, RESIZE_RIGHT | RESIZE_BOTTOM).unwrap();
+    go(&mut d, 548, 248, 1);
+    d.take_input(7, &mut out);
+    go(&mut d, 548, 248, 0);
+    let n = d.take_input(7, &mut out);
+    let e = out[..n].iter().find(|e| e.message == GALA_WM_PLACE).unwrap();
+    assert_eq!(place(e.wparam, e.lparam), (300, 120, 250, 130));
+    // The left edge: x moves, the right edge stays.
+    go(&mut d, 301, 150, 1);
+    d.begin_resize(f, 7, RESIZE_LEFT).unwrap();
+    go(&mut d, 281, 150, 1);
+    d.take_input(7, &mut out);
+    go(&mut d, 281, 150, 0);
+    let n = d.take_input(7, &mut out);
+    let e = out[..n].iter().find(|e| e.message == GALA_WM_PLACE).unwrap();
+    assert_eq!(place(e.wparam, e.lparam), (280, 120, 220, 100));
+    // No button down: refused.
+    assert_eq!(d.begin_resize(f, 7, RESIZE_LEFT), Err(NtStatus::INVALID_DEVICE_STATE));
+}
+
+#[test]
 fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     let (mut d, a) = desktop_with_window();
     let p = d.create(7, 320, 150, 100, 60, &title("menu"), STYLE_POPUP).unwrap();

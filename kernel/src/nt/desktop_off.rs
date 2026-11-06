@@ -113,6 +113,9 @@ impl Desktop {
     pub fn begin_drag(&mut self, _: u32, _: u64) -> Result<(), NtStatus> {
         match *self {}
     }
+    pub fn begin_resize(&mut self, _: u32, _: u64, _: u32) -> Result<(), NtStatus> {
+        match *self {}
+    }
     pub fn present(&mut self, _: u32, _: Rect, _: &[u32], _: usize) -> Result<Rect, NtStatus> {
         match *self {}
     }

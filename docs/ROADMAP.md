@@ -680,9 +680,10 @@ samples).
    colours on the screen, then Alt+F4 ends Chromium with 0 (about 2
    minutes of kernel time). Dragging by its own caption (WM_NCHITTEST
    HTCAPTION on a press: GalaWindowDrag; the scenario drags Chromium by
-   its tab strip). Next: resizing by its own frame (HTLEFT..HTBOTTOMRIGHT),
-   IME off, a click on a link, FlaUI reading the page's accessibility
-   tree.
+   its tab strip) and resizing by its own border (HTLEFT..HTBOTTOMRIGHT:
+   GalaWindowResize; desktop unit test, no outline while resizing yet).
+   Next: IME off, a click on a link, FlaUI reading the page's
+   accessibility tree.
    Then a conformance report (the owner): a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
