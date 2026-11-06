@@ -21,6 +21,9 @@
 //! - [`Session::encrypt`] is EncryptMessage: one record.
 //! - [`Session::shutdown`] is ApplyControlToken(SCHANNEL_SHUTDOWN): the
 //!   next token call gives close_notify.
+//! - A credential's session cache ([`ClientCache`], [`ServerCache`]; the
+//!   `cache` module) lets its next contexts resume ([`Session::resumed`],
+//!   QueryContextAttributes' SECPKG_ATTR_SESSION_INFO).
 //!
 //! Invariants (the SSPI rules rustls does not have):
 //! - Handshake input is copied into the context (`pending`) and handed
@@ -61,12 +64,18 @@ use rustls::{
 
 pub use rustls;
 
+mod cache;
+mod replay;
+pub use cache::{ClientCache, ServerCache};
+pub use replay::set_thread_id;
+
 /// The SSPI status codes the engine returns.
 pub mod sec {
     pub const E_OK: u32 = 0;
     pub const I_CONTINUE_NEEDED: u32 = 0x0009_0312;
     pub const I_CONTEXT_EXPIRED: u32 = 0x0009_0317;
     pub const I_RENEGOTIATE: u32 = 0x0009_0321;
+    pub const I_INCOMPLETE_CREDENTIALS: u32 = 0x0009_0320;
     pub const E_INSUFFICIENT_MEMORY: u32 = 0x8009_0300;
     pub const E_INTERNAL_ERROR: u32 = 0x8009_0304;
     pub const E_INVALID_TOKEN: u32 = 0x8009_0308;
@@ -99,6 +108,9 @@ const SUITE_ORDER: [u16; 9] =
 /// suites in Windows' order.
 pub fn provider() -> CryptoProvider {
     let mut p = rustls_rustcrypto::provider();
+    // A client handshake's randomness goes through its tape (replay.rs).
+    p.secure_random = &replay::Random;
+    p.kx_groups = replay::KX_GROUPS.to_vec();
     let rank = |s: &SupportedCipherSuite| {
         let id = u16::from(s.suite());
         SUITE_ORDER.iter().position(|&x| x == id).unwrap_or(SUITE_ORDER.len())
@@ -161,6 +173,13 @@ pub struct ClientSettings<'a> {
     pub target: &'a str,
     /// ALPN protocol names (SECBUFFER_APPLICATION_PROTOCOLS).
     pub alpn: Vec<Vec<u8>>,
+    /// The client certificate the credential holds, sent if the server
+    /// asks.
+    pub certificate: Option<Arc<CertifiedKey>>,
+    /// Without a certificate, when the server asks for one: stop with
+    /// SEC_I_INCOMPLETE_CREDENTIALS (false: ISC_REQ_USE_SUPPLIED_CREDS,
+    /// send none).
+    pub ask: bool,
 }
 
 /// A server context's settings.
@@ -170,6 +189,12 @@ pub struct ServerSettings {
     pub chain: Vec<CertificateDer<'static>>,
     pub key: Arc<dyn SigningKey>,
     pub alpn: Vec<Vec<u8>>,
+    /// The credential's session cache (TLS 1.2 session IDs, TLS 1.3
+    /// tickets naming a stored session).
+    pub cache: Arc<ServerCache>,
+    /// Ask the client for a certificate, checked by this (None: no
+    /// request).
+    pub client_auth: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>,
 }
 
 /// The SSPI status of an error from rustls.
@@ -507,6 +532,89 @@ pub struct Decrypted {
     pub missing: usize,
 }
 
+/// The server name of a target (SNI and the session key), and whether it
+/// is one: an empty or unusable target gives an unspecified address,
+/// which is never sent nor checked.
+fn server_name(target: &str) -> (ServerName<'static>, bool) {
+    match ServerName::try_from(target) {
+        Ok(n) if !target.is_empty() => (n.to_owned(), true),
+        _ => (ServerName::IpAddress(rustls::pki_types::IpAddr::V4([0, 0, 0, 0].into())), false),
+    }
+}
+
+impl ClientCache {
+    /// The configuration of this credential's contexts for `target` with
+    /// `validation`: the one made before (whose sessions it resumes), or
+    /// a new one, kept (a target without a name gets one of its own and
+    /// resumes nothing).
+    pub fn config_for(
+        &self,
+        provider: &Arc<CryptoProvider>,
+        time: Arc<dyn TimeProvider>,
+        protocols: Protocols,
+        validation: Validation,
+        target: &str,
+    ) -> Result<(ServerName<'static>, Arc<ClientConfig>), u32> {
+        let (name, named) = server_name(target);
+        let mode = match &validation {
+            Validation::Manual => 0,
+            Validation::Auto { check_name: true, .. } => 1,
+            Validation::Auto { check_name: false, .. } => 2,
+        };
+        let cached = named && self.enabled();
+        if let Some(config) = self.config(target, mode).filter(|_| cached) {
+            return Ok((name, config));
+        }
+        let store = cached.then(|| self.store());
+        let named_target = named.then_some(target);
+        let config =
+            Arc::new(client_config(provider, time, protocols, validation, named_target, store)?);
+        if cached {
+            self.keep(target, mode, config.clone());
+        }
+        Ok((name, config))
+    }
+}
+
+/// A client configuration: the protocols, the validation (with the name
+/// `target` if given), and the session store resumption uses (none:
+/// disabled).
+fn client_config(
+    provider: &Arc<CryptoProvider>,
+    time: Arc<dyn TimeProvider>,
+    protocols: Protocols,
+    validation: Validation,
+    target: Option<&str>,
+    store: Option<Arc<dyn rustls::client::ClientSessionStore>>,
+) -> Result<ClientConfig, u32> {
+    let (trust, wanted) = match validation {
+        Validation::Manual => (None, None),
+        Validation::Auto { trust, check_name } => {
+            (Some(trust), target.filter(|_| check_name).map(alloc::string::String::from))
+        }
+    };
+    let verifier =
+        Verifier { trust, name: wanted, algorithms: provider.signature_verification_algorithms };
+    let versions = protocols.versions();
+    if versions.is_empty() {
+        return Err(sec::E_ALGORITHM_MISMATCH);
+    }
+    // The clock and the certificate decision are the running context's
+    // (replay.rs), so that a handshake can be run again.
+    let time = Arc::new(replay::Clock(time));
+    let mut config = ClientConfig::builder_with_details(provider.clone(), time)
+        .with_protocol_versions(&versions)
+        .map_err(|_| sec::E_ALGORITHM_MISMATCH)?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_client_cert_resolver(Arc::new(replay::Resolver));
+    config.resumption = match store {
+        Some(store) => rustls::client::Resumption::store(store),
+        None => rustls::client::Resumption::disabled(),
+    };
+    Ok(config)
+}
+
 /// A context.
 pub struct Session {
     conn: Conn,
@@ -528,7 +636,52 @@ pub struct Session {
     failed: Option<u32>,
     /// rustls' error behind `failed`, for the ledger.
     reason: Option<Error>,
+    /// The ServerHello's session ID (SECPKG_ATTR_SESSION_INFO).
+    session_id: Option<Vec<u8>>,
+    /// A client's handshake, recorded until it is established.
+    client: Option<Box<ClientState>>,
+    /// The issuers the server named asking for a client certificate
+    /// (SECPKG_ATTR_ISSUER_LIST_EX).
+    issuers: Option<Vec<Vec<u8>>>,
 }
+
+/// A client's handshake as far as it went: enough to run it again with
+/// a certificate (replay.rs).
+struct ClientState {
+    /// Owned (Box::into_raw); reached through a raw pointer only, since
+    /// rustls' callbacks reach it through the registry during calls.
+    tape: *mut replay::Tape,
+    config: Arc<ClientConfig>,
+    name: ServerName<'static>,
+    alpn: Vec<Vec<u8>>,
+    /// The server's records given to rustls, in order, as received.
+    received: Vec<u8>,
+    /// The bytes the caller was given.
+    sent: Vec<u8>,
+    /// The reply held back with SEC_I_INCOMPLETE_CREDENTIALS, until the
+    /// next call says whether to send it or run again with a certificate.
+    held: Option<Vec<u8>>,
+}
+
+impl ClientState {
+    fn tape(&mut self) -> &mut replay::Tape {
+        // SAFETY: our tape; no rustls call is running (callers use this
+        // between them).
+        unsafe { &mut *self.tape }
+    }
+}
+
+impl Drop for ClientState {
+    fn drop(&mut self) {
+        // SAFETY: the tape Box::into_raw gave, freed once.
+        drop(unsafe { Box::from_raw(self.tape) });
+    }
+}
+
+// SAFETY: the tape is owned and only reached by the thread running a call
+// on its context.
+unsafe impl Send for ClientState {}
+unsafe impl Sync for ClientState {}
 
 impl Session {
     fn new(conn: Conn) -> Session {
@@ -544,43 +697,42 @@ impl Session {
             peer_closed: false,
             failed: None,
             reason: None,
+            session_id: None,
+            client: None,
+            issuers: None,
         }
     }
 
-    /// A client context.
+    /// A client context of a credential whose session cache is `cache`:
+    /// it resumes a session of the same target name if the cache has one.
     pub fn client(
         provider: &Arc<CryptoProvider>,
         time: Arc<dyn TimeProvider>,
         s: ClientSettings<'_>,
+        cache: &ClientCache,
     ) -> Result<Session, u32> {
-        let (name, named) = match ServerName::try_from(s.target) {
-            Ok(n) if !s.target.is_empty() => (n.to_owned(), true),
-            _ => (ServerName::IpAddress(rustls::pki_types::IpAddr::V4([0, 0, 0, 0].into())), false),
+        let (name, config) =
+            cache.config_for(provider, time, s.protocols, s.validation, s.target)?;
+        let mut tape = Box::new(replay::Tape::default());
+        tape.auth.cert = s.certificate;
+        tape.auth.ask = s.ask;
+        let state = Box::new(ClientState {
+            tape: Box::into_raw(tape),
+            config: config.clone(),
+            name: name.clone(),
+            alpn: s.alpn.clone(),
+            received: Vec::new(),
+            sent: Vec::new(),
+            held: None,
+        });
+        let conn = {
+            // SAFETY: the tape just made, ours.
+            let _active = replay::Active::new(unsafe { &mut *state.tape });
+            UnbufferedClientConnection::new_with_alpn(config, name, s.alpn).map_err(|e| code(&e))?
         };
-        let (trust, wanted) = match s.validation {
-            Validation::Manual => (None, None),
-            Validation::Auto { trust, check_name } => {
-                (Some(trust), (check_name && named).then(|| s.target.into()))
-            }
-        };
-        let verifier = Verifier {
-            trust,
-            name: wanted,
-            algorithms: provider.signature_verification_algorithms,
-        };
-        let versions = s.protocols.versions();
-        if versions.is_empty() {
-            return Err(sec::E_ALGORITHM_MISMATCH);
-        }
-        let mut config = ClientConfig::builder_with_details(provider.clone(), time)
-            .with_protocol_versions(&versions)
-            .map_err(|_| sec::E_ALGORITHM_MISMATCH)?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_no_client_auth();
-        config.alpn_protocols = s.alpn;
-        let conn = UnbufferedClientConnection::new(Arc::new(config), name).map_err(|e| code(&e))?;
-        Ok(Session::new(Conn::Client(Box::new(conn))))
+        let mut session = Session::new(Conn::Client(Box::new(conn)));
+        session.client = Some(state);
+        Ok(session)
     }
 
     /// A server context.
@@ -597,10 +749,16 @@ impl Session {
         let mut config = ServerConfig::builder_with_details(provider.clone(), time)
             .with_protocol_versions(&versions)
             .map_err(|_| sec::E_ALGORITHM_MISMATCH)?
-            .with_no_client_auth()
+            .with_client_cert_verifier(match s.client_auth {
+                Some(v) => v,
+                None => Arc::new(rustls::server::NoClientAuth),
+            })
             .with_cert_resolver(Arc::new(Single(key)));
         config.alpn_protocols = s.alpn;
-        config.send_tls13_tickets = 0;
+        // Sessions in the credential's cache: TLS 1.2 session IDs, one
+        // TLS 1.3 ticket per connection naming its stored session.
+        config.send_tls13_tickets = usize::from(s.cache.enabled());
+        config.session_storage = s.cache;
         let conn = UnbufferedServerConnection::new(Arc::new(config)).map_err(|e| code(&e))?;
         Ok(Session::new(Conn::Server(Box::new(conn))))
     }
@@ -634,6 +792,127 @@ impl Session {
     /// peer's bytes `input` (the input SECBUFFER_TOKEN; empty for a
     /// client's first call).
     pub fn token(&mut self, input: &[u8]) -> Token {
+        // A client's handshake is recorded (replay.rs): its tape is the
+        // running one during the call, and what it sends is kept.
+        let mut client = self.client.take();
+        let active = client.as_mut().map(|c| {
+            replay::Active::new(
+                // SAFETY: our tape, lent to the registry for the call.
+                unsafe { &mut *c.tape },
+            )
+        });
+        let mut t = self.step(input, client.as_deref_mut());
+        drop(active);
+        if let Some(mut c) = client {
+            if c.sent.try_reserve(t.output.len()).is_err() {
+                return Token::status(self.fail(sec::E_INSUFFICIENT_MEMORY));
+            }
+            c.sent.extend_from_slice(&t.output);
+            if let Some(i) = c.tape().auth.issuers.take() {
+                self.issuers = Some(i);
+            }
+            if t.status == sec::I_INCOMPLETE_CREDENTIALS {
+                t.output = Vec::new();
+            }
+            // Kept until the handshake is over (or failed).
+            if !self.established && self.failed.is_none() {
+                self.client = Some(c);
+            }
+        }
+        t
+    }
+
+    /// Whether the context stopped with SEC_I_INCOMPLETE_CREDENTIALS and
+    /// waits for the caller's decision ([`Session::supply`]).
+    pub fn awaiting_credentials(&self) -> bool {
+        self.client.as_ref().is_some_and(|c| c.held.is_some())
+    }
+
+    /// After SEC_I_INCOMPLETE_CREDENTIALS, the next call's credential:
+    /// with a certificate (and that credential's configuration for the
+    /// target, [`ClientCache::config_for`], whose cache the session goes
+    /// to), the handshake runs again with it (the replies so far must
+    /// come out the same); without, the reply held back goes out as it was
+    /// (no certificate).
+    pub fn supply(
+        &mut self,
+        certificate: Option<(Arc<CertifiedKey>, Arc<ClientConfig>)>,
+    ) -> Result<(), u32> {
+        let Some((cert, config)) = certificate else { return Ok(()) };
+        let Some(mut c) = self.client.take() else { return Ok(()) };
+        let r = self.replay(&mut c, cert, config);
+        self.client = Some(c);
+        r.map_err(|e| self.fail_with(e))
+    }
+
+    /// Runs the handshake again with `cert` under `config` (replay.rs).
+    fn replay(
+        &mut self,
+        c: &mut ClientState,
+        cert: Arc<CertifiedKey>,
+        config: Arc<ClientConfig>,
+    ) -> Result<(), Error> {
+        let general = |why: &str| Error::General(alloc::string::String::from(why));
+        if c.tape().offered_session() {
+            // Only a server that refused the session asks (RFC 8446 4.3.2;
+            // TLS 1.2 resumes without certificates); rustls offers a
+            // session only under the configuration that made it.
+            return Err(general("a client certificate after a refused session offer: no replay"));
+        }
+        c.config = config;
+        let tape = c.tape();
+        tape.rewind();
+        tape.auth.cert = Some(cert);
+        tape.auth.ask = false;
+        let mut pending = Vec::new();
+        pending.try_reserve(c.received.len()).map_err(|_| general("out of memory"))?;
+        pending.extend_from_slice(&c.received);
+        let (config, name, alpn) = (c.config.clone(), c.name.clone(), c.alpn.clone());
+        // SAFETY: our tape, lent to the registry while rustls runs.
+        let active = replay::Active::new(unsafe { &mut *c.tape });
+        let mut conn = UnbufferedClientConnection::new_with_alpn(config, name, alpn)?;
+        let mut out = Vec::new();
+        let mut given = 0;
+        // The records as the first run got them, one at a time.
+        loop {
+            let (consumed, event) = drive(&mut conn, &mut pending[..given], &mut out, Then::Stop);
+            pending.drain(..consumed);
+            given -= consumed;
+            match event {
+                Event::Blocked => match record_end(&pending, given) {
+                    Ok(end) => given = end,
+                    Err(_) => break,
+                },
+                Event::Failed(e) => return Err(e),
+                Event::NoMemory => return Err(general("out of memory")),
+                _ => break,
+            }
+        }
+        drop(active);
+        // The same records taken (rustls may hold the end of one), the
+        // same replies up to the point the certificate changes them.
+        if given != pending.len() || given != self.given || !out.starts_with(&c.sent) {
+            return Err(general("the handshake run again differs"));
+        }
+        out.drain(..c.sent.len());
+        // What rustls holds is in this buffer now: it becomes the
+        // context's, with the bytes not yet given behind it.
+        let rest = &self.pending[self.given..];
+        pending.try_reserve(rest.len()).map_err(|_| general("out of memory"))?;
+        pending.extend_from_slice(rest);
+        self.pending = pending;
+        c.held = Some(out);
+        self.conn = Conn::Client(Box::new(conn));
+        Ok(())
+    }
+
+    /// The issuers the server named when it asked for a client
+    /// certificate (DER names), if it did.
+    pub fn issuers(&self) -> Option<&[Vec<u8>]> {
+        self.issuers.as_deref()
+    }
+
+    fn step(&mut self, input: &[u8], mut client: Option<&mut ClientState>) -> Token {
         if let Some(status) = self.failed {
             return Token::status(status);
         }
@@ -655,6 +934,15 @@ impl Session {
             self.renegotiate -= skip;
             return Token { status: sec::E_OK, output: out, extra: input.len() - skip, missing: 0 };
         }
+        if let Some(held) = client.as_mut().and_then(|c| c.held.take()) {
+            // After SEC_I_INCOMPLETE_CREDENTIALS: the reply decided by
+            // `supply`; the caller passes the same bytes again (the
+            // documented loop) or none.
+            out.extend_from_slice(&held);
+            if input.is_empty() {
+                self.retained = 0;
+            }
+        }
         if input.len() < self.retained {
             return Token::status(sec::E_INVALID_TOKEN);
         }
@@ -670,10 +958,35 @@ impl Session {
             self.pending.drain(..consumed);
             self.given -= consumed;
             progress |= consumed > 0 || !out.is_empty();
+            if let Some(c) = client.as_mut()
+                && !matches!(event, Event::Failed(_))
+                && core::mem::take(&mut c.tape().auth.asked)
+            {
+                // The server asks for a certificate the credential lacks:
+                // the reply waits for the caller's (the same bytes are
+                // passed again, or none).
+                c.held = Some(out);
+                self.retained = input.len();
+                return Token { status: sec::I_INCOMPLETE_CREDENTIALS, ..Token::default() };
+            }
             match event {
                 Event::Blocked => match record_end(&self.pending, self.given) {
                     // One more record for rustls.
-                    Ok(end) => self.given = end,
+                    Ok(end) => {
+                        let record = &self.pending[self.given..end];
+                        if self.session_id.is_none() {
+                            self.session_id = server_hello_session_id(record);
+                        }
+                        if let Some(c) = client.as_mut() {
+                            // As received (rustls decrypts in place), for
+                            // a run again.
+                            if c.received.try_reserve(record.len()).is_err() {
+                                return Token::status(self.fail(sec::E_INSUFFICIENT_MEMORY));
+                            }
+                            c.received.extend_from_slice(record);
+                        }
+                        self.given = end;
+                    }
                     Err(missing) => {
                         if progress {
                             self.retained = 0;
@@ -870,6 +1183,37 @@ impl Session {
     pub fn peer_certificates(&self) -> Option<&[CertificateDer<'static>]> {
         self.conn.common().peer_certificates()
     }
+
+    /// Whether the handshake resumed a session of the credential's cache
+    /// (SSL_SESSION_RECONNECT).
+    pub fn resumed(&self) -> bool {
+        self.conn.common().handshake_kind() == Some(rustls::HandshakeKind::Resumed)
+    }
+
+    /// The session ID of the server's ServerHello (a client's view; TLS
+    /// 1.3 echoes the client's legacy_session_id there).
+    pub fn session_id(&self) -> Option<&[u8]> {
+        self.session_id.as_deref()
+    }
+}
+
+/// The legacy session ID of a plaintext ServerHello in `record` (a
+/// handshake record whose first message is ServerHello: type 2, length,
+/// version, random, then the ID with its length byte).
+fn server_hello_session_id(record: &[u8]) -> Option<Vec<u8>> {
+    if record.first() != Some(&22) {
+        return None;
+    }
+    let body = record.get(5..)?;
+    if body.first() != Some(&2) {
+        return None;
+    }
+    let n = usize::from(*body.get(4 + 2 + 32)?);
+    let id = body.get(4 + 2 + 32 + 1..4 + 2 + 32 + 1 + n)?;
+    let mut v = Vec::new();
+    v.try_reserve(id.len()).ok()?;
+    v.extend_from_slice(id);
+    Some(v)
 }
 
 #[cfg(test)]

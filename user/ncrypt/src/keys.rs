@@ -1,14 +1,17 @@
-//! Keys of the Microsoft Software Key Storage Provider: RSA private keys
-//! imported (NCryptImportKey: PKCS#8 PrivateKeyInfo, as
-//! NCRYPT_PKCS8_PRIVATE_KEY_BLOB, or bcrypt's RSAPRIVATEBLOB /
-//! RSAFULLPRIVATEBLOB), named ones kept under their name
-//! (NCRYPTBUFFER_PKCS_KEY_NAME) and opened again by it (NCryptOpenKey),
-//! deleted (NCryptDeleteKey), and signing (NCryptSignHash) with bcrypt's
-//! RSA. A key handle owns a bcrypt key made from the stored blob.
+//! Keys of the Microsoft Software Key Storage Provider: RSA and ECDSA
+//! (P-256, P-384) private keys imported (NCryptImportKey: PKCS#8
+//! PrivateKeyInfo, as NCRYPT_PKCS8_PRIVATE_KEY_BLOB, or bcrypt's
+//! RSAPRIVATEBLOB / RSAFULLPRIVATEBLOB / ECCPRIVATEBLOB), named ones kept
+//! under their name (NCRYPTBUFFER_PKCS_KEY_NAME) and opened again by it
+//! (NCryptOpenKey), deleted (NCryptDeleteKey), and signing
+//! (NCryptSignHash) with bcrypt's RSA or ECDSA. A key handle owns a
+//! bcrypt key made from the stored blob (an RSAPRIVATEBLOB or an
+//! ECCPRIVATEBLOB; its magic says which).
 //!
 //! TODO: named keys live as long as the process (Windows keeps them in
-//! the user's profile, across processes); other algorithms (ECDSA),
-//! encrypted PKCS#8 and export are not supported (recorded).
+//! the user's profile, across processes); other algorithms (P-521, DSA,
+//! DH), a PKCS#8 EC key without its public point, encrypted PKCS#8 and
+//! export are not supported (recorded).
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -47,7 +50,7 @@ fn free(p: *mut u8) {
     }
 }
 
-/// A named key in the store: its name and RSAPRIVATEBLOB.
+/// A named key in the store: its name and private blob.
 struct Entry {
     name: [u16; NAME_MAX],
     name_len: usize,
@@ -86,10 +89,61 @@ struct Key {
     magic: u32,
     name: [u16; NAME_MAX],
     name_len: usize,
-    /// bcrypt's RSA algorithm and the key made from the blob.
+    /// bcrypt's algorithm and the key made from the blob.
     algorithm: usize,
     key: usize,
     bits: u32,
+    kind: Algorithm,
+}
+
+/// A key's algorithm, from its blob's magic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Algorithm {
+    Rsa,
+    EcdsaP256,
+    EcdsaP384,
+}
+
+const RSA_PRIVATE_MAGIC: u32 = 0x3241_5352; // "RSA2"
+const ECDSA_P256_PRIVATE_MAGIC: u32 = 0x3253_4345; // "ECS2"
+const ECDSA_P384_PRIVATE_MAGIC: u32 = 0x3453_4345; // "ECS4"
+
+impl Algorithm {
+    /// The algorithm of a private blob, and its size in bits.
+    fn of(blob: &[u8]) -> Option<(Algorithm, u32)> {
+        let word = |i: usize| Some(u32::from_le_bytes(blob.get(i..i + 4)?.try_into().ok()?));
+        match word(0)? {
+            RSA_PRIVATE_MAGIC => Some((Algorithm::Rsa, word(4)?)),
+            ECDSA_P256_PRIVATE_MAGIC => Some((Algorithm::EcdsaP256, 256)),
+            ECDSA_P384_PRIVATE_MAGIC => Some((Algorithm::EcdsaP384, 384)),
+            _ => None,
+        }
+    }
+
+    /// bcrypt's algorithm id, NCRYPT_ALGORITHM_PROPERTY.
+    fn name(self) -> &'static str {
+        match self {
+            Algorithm::Rsa => "RSA",
+            Algorithm::EcdsaP256 => "ECDSA_P256",
+            Algorithm::EcdsaP384 => "ECDSA_P384",
+        }
+    }
+
+    /// NCRYPT_ALGORITHM_GROUP_PROPERTY.
+    fn group(self) -> &'static str {
+        match self {
+            Algorithm::Rsa => "RSA",
+            _ => "ECDSA",
+        }
+    }
+
+    /// bcrypt's blob type for the stored blob.
+    fn blob_type(self) -> &'static str {
+        match self {
+            Algorithm::Rsa => "RSAPRIVATEBLOB",
+            _ => "ECCPRIVATEBLOB",
+        }
+    }
 }
 
 fn key<'a>(h: usize) -> Option<&'a mut Key> {
@@ -110,21 +164,21 @@ pub fn is_key(h: usize) -> bool {
 type ImportFn =
     extern "system" fn(usize, usize, *const u16, *mut usize, *const u8, u32, u32) -> i32;
 
-/// A bcrypt key of an RSAPRIVATEBLOB: (algorithm, key).
-fn bcrypt_key(blob: &[u8]) -> Option<(usize, usize)> {
+/// A bcrypt key of a private blob of `kind`: (algorithm, key).
+fn bcrypt_key(kind: Algorithm, blob: &[u8]) -> Option<(usize, usize)> {
     type OpenFn = extern "system" fn(*mut usize, *const u16, *const u16, u32) -> i32;
     let open = super::bcrypt(b"BCryptOpenAlgorithmProvider\0");
     let import = super::bcrypt(b"BCryptImportKeyPair\0");
     if open == 0 || import == 0 {
         return None;
     }
-    let rsa = wide::<4>("RSA");
-    let blob_type = wide::<16>("RSAPRIVATEBLOB");
+    let name = wide::<16>(kind.name());
+    let blob_type = wide::<16>(kind.blob_type());
     let (mut alg, mut k) = (0usize, 0usize);
     // SAFETY: bcrypt.dll's functions of these signatures; our buffers.
     unsafe {
         let open = core::mem::transmute::<usize, OpenFn>(open);
-        if open(&mut alg, rsa.as_ptr(), core::ptr::null(), 0) != 0 {
+        if open(&mut alg, name.as_ptr(), core::ptr::null(), 0) != 0 {
             return None;
         }
         let import = core::mem::transmute::<usize, ImportFn>(import);
@@ -145,17 +199,25 @@ fn wide<const N: usize>(s: &str) -> [u16; N] {
 
 /// A new handle for a key of `blob` named `name`.
 fn new_handle(name: &[u16], blob: &[u8]) -> Result<usize, i32> {
-    let Some((algorithm, k)) = bcrypt_key(blob) else { return Err(NTE_BAD_DATA) };
+    let Some((kind, bits)) = Algorithm::of(blob) else { return Err(NTE_BAD_DATA) };
+    let Some((algorithm, k)) = bcrypt_key(kind, blob) else { return Err(NTE_BAD_DATA) };
     let p = alloc(size_of::<Key>()).cast::<Key>();
     if p.is_null() {
         return Err(NTE_NO_MEMORY);
     }
-    let bits = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
     let mut n = [0u16; NAME_MAX];
     n[..name.len()].copy_from_slice(name);
     // SAFETY: a fresh block of a Key.
     unsafe {
-        p.write(Key { magic: KEY_MAGIC, name: n, name_len: name.len(), algorithm, key: k, bits })
+        p.write(Key {
+            magic: KEY_MAGIC,
+            name: n,
+            name_len: name.len(),
+            algorithm,
+            key: k,
+            bits,
+            kind,
+        })
     };
     Ok(p as usize)
 }
@@ -223,9 +285,13 @@ fn integer(b: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 const RSA_OID: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1];
+/// id-ecPublicKey (RFC 5480) and the named curves prime256v1, secp384r1.
+const EC_OID: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 2, 1];
+const P256_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 3, 1, 7];
+const P384_OID: [u8; 5] = [0x2b, 0x81, 0x04, 0, 34];
 
-/// The RSAPRIVATEBLOB of a PKCS#8 PrivateKeyInfo with an RSA key, into
-/// `out`; its length.
+/// The private blob (RSAPRIVATEBLOB or ECCPRIVATEBLOB) of a PKCS#8
+/// PrivateKeyInfo, into `out`; its length.
 fn pkcs8_to_blob(p8: &[u8], out: &mut [u8]) -> Option<usize> {
     let (tag, info, _) = der(p8)?;
     if tag != 0x30 {
@@ -233,13 +299,16 @@ fn pkcs8_to_blob(p8: &[u8], out: &mut [u8]) -> Option<usize> {
     }
     let (_, rest) = integer(info)?; // version
     let (tag, alg, rest) = der(rest)?;
-    let (oid_tag, oid, _) = der(alg)?;
-    if tag != 0x30 || oid_tag != 6 || oid != RSA_OID {
-        unsupported(b"ncrypt.dll!NCryptImportKey(PKCS8 key other than RSA)");
+    let (oid_tag, oid, params) = der(alg)?;
+    let (key_tag, key, _) = der(rest)?;
+    if tag != 0x30 || oid_tag != 6 || key_tag != 4 {
         return None;
     }
-    let (tag, key, _) = der(rest)?;
-    if tag != 4 {
+    if oid == EC_OID {
+        return ec_pkcs8_to_blob(params, key, out);
+    }
+    if oid != RSA_OID {
+        unsupported(b"ncrypt.dll!NCryptImportKey(PKCS8 key other than RSA and ECDSA)");
         return None;
     }
     let (tag, seq, _) = der(key)?;
@@ -268,6 +337,60 @@ fn pkcs8_to_blob(p8: &[u8], out: &mut [u8]) -> Option<usize> {
         at += part.len();
     }
     Some(at)
+}
+
+/// The ECCPRIVATEBLOB of a PKCS#8 EC key: the curve from the
+/// algorithm's parameters (a named curve), then RFC 5915's ECPrivateKey
+/// (version 1, the private scalar, [0] parameters, [1] the public point,
+/// which the blob needs: a key without it is recorded and refused).
+fn ec_pkcs8_to_blob(params: &[u8], key: &[u8], out: &mut [u8]) -> Option<usize> {
+    let (tag, curve, _) = der(params)?;
+    let (magic, size) = match curve {
+        c if tag == 6 && c == P256_OID => (ECDSA_P256_PRIVATE_MAGIC, 32),
+        c if tag == 6 && c == P384_OID => (ECDSA_P384_PRIVATE_MAGIC, 48),
+        _ => {
+            unsupported(b"ncrypt.dll!NCryptImportKey(PKCS8 EC curve other than P-256 and P-384)");
+            return None;
+        }
+    };
+    let (tag, seq, _) = der(key)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (_, rest) = integer(seq)?; // version 1
+    let (tag, d, mut rest) = der(rest)?;
+    if tag != 4 || d.len() > size {
+        return None;
+    }
+    let mut point = None;
+    while !rest.is_empty() {
+        let (tag, value, next) = der(rest)?;
+        if tag == 0xa1 {
+            // BIT STRING: no unused bits, then 04 || X || Y.
+            let (tag, bits, _) = der(value)?;
+            if tag != 3 || bits.len() != 2 + 2 * size || bits[0] != 0 || bits[1] != 4 {
+                return None;
+            }
+            point = Some(&bits[2..]);
+        }
+        rest = next;
+    }
+    let Some(point) = point else {
+        unsupported(b"ncrypt.dll!NCryptImportKey(PKCS8 EC key without its public key)");
+        return None;
+    };
+    let total = 8 + 3 * size;
+    if total > out.len() {
+        return None;
+    }
+    out[..4].copy_from_slice(&magic.to_le_bytes());
+    out[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+    out[8..8 + 2 * size].copy_from_slice(point);
+    // d, left-padded to the curve's size.
+    let at = 8 + 2 * size;
+    out[at..total].fill(0);
+    out[total - d.len()..total].copy_from_slice(d);
+    Some(total)
 }
 
 /// The UTF-16 string of `size` bytes at `p` (without a trailing NUL).
@@ -381,10 +504,25 @@ pub extern "system" fn NCryptImportKey(
         converted[..n].copy_from_slice(&input[..n]);
         converted[..4].copy_from_slice(&0x3241_5352u32.to_le_bytes());
         &converted[..n]
+    } else if wide_eq(blob_type, "ECCPRIVATEBLOB") {
+        // ECCPRIVATEBLOB: magic, cbKey, X, Y, d.
+        let n = if input.len() >= 8 {
+            8 + 3 * u32::from_le_bytes([input[4], input[5], input[6], input[7]]) as usize
+        } else {
+            0
+        };
+        if n < 8 || n != input.len() || n > converted.len() {
+            return NTE_BAD_DATA;
+        }
+        converted[..n].copy_from_slice(input);
+        &converted[..n]
     } else {
         unsupported(b"ncrypt.dll!NCryptImportKey(blob type)");
         return NTE_NOT_SUPPORTED;
     };
+    if Algorithm::of(blob).is_none() {
+        return NTE_BAD_DATA;
+    }
     if !name.is_empty() {
         let stored = with_store(|s| {
             let at = s.slots.iter().position(|&e| {
@@ -536,18 +674,20 @@ pub extern "system" fn NCryptSignHash(
     }
 }
 
-/// A key's "Length" (bits) and "Algorithm Group" ("RSA").
+/// A key's "Length" (bits), "Algorithm Group" ("RSA", "ECDSA") and
+/// "Algorithm Name" ("RSA", "ECDSA_P256", "ECDSA_P384").
 pub fn property(h: usize, name: *const u16, out: *mut u8, size: u32, result: *mut u32) -> i32 {
     let Some(k) = key(h) else { return NTE_INVALID_HANDLE };
-    let mut value = [0u8; 16];
+    let mut value = [0u8; 32];
     let n = if wide_eq(name, "Length") {
         value[..4].copy_from_slice(&k.bits.to_le_bytes());
         4
     } else if wide_eq(name, "Algorithm Group") || wide_eq(name, "Algorithm Name") {
-        for (i, b) in b"RSA\0".iter().enumerate() {
-            value[2 * i] = *b;
+        let text = if wide_eq(name, "Algorithm Group") { k.kind.group() } else { k.kind.name() };
+        for (i, b) in text.bytes().enumerate() {
+            value[2 * i] = b;
         }
-        8
+        2 * text.len() + 2
     } else {
         unsupported(b"ncrypt.dll!NCryptGetProperty(key property)");
         return NTE_NOT_SUPPORTED;

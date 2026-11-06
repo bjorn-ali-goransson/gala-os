@@ -16,7 +16,8 @@
 //! port 8443 serves `certs/server.crt` (CN=localhost, issued by the test
 //! CA, which the machine's root store must trust: gala's is
 //! C:\Windows\System32\gala\roots), 8444 a self-signed one, 8445 an
-//! expired one. It checks:
+//! expired one, 8446 the first with Nginx's session cache, 8447 the first
+//! asking for a client certificate. It checks:
 //! 1. the package: QuerySecurityPackageInfoW under both names (UNISP_NAME
 //!    and "Schannel"), EnumerateSecurityPackagesW listing both;
 //! 2. TLS 1.3 (SCH_CREDENTIALS, automatic validation, ALPN "h2" and
@@ -47,14 +48,26 @@
 //! 5. a name the certificate does not have: SEC_E_WRONG_PRINCIPAL with
 //!    automatic validation, SEC_E_OK with SCH_CRED_MANUAL_CRED_VALIDATION;
 //!    an untrusted root: SEC_E_UNTRUSTED_ROOT (manual: SEC_E_OK); an
-//!    expired certificate: SEC_E_CERT_EXPIRED.
+//!    expired certificate: SEC_E_CERT_EXPIRED;
+//! 6. session resumption (SECPKG_ATTR_SESSION_INFO's SSL_SESSION_RECONNECT,
+//!    Nginx's $ssl_session_reused agreeing): the second connection of a
+//!    credential handle resumes, by ticket (port 8443) or from Nginx's
+//!    session cache (8446: TLS 1.2 session IDs), TLS 1.3 and 1.2; a new
+//!    handle or SCH_CRED_DISABLE_RECONNECTS does not;
+//! 7. client certificates (port 8447, Nginx's ssl_verify_client): one in
+//!    the credential is sent; without one SEC_I_INCOMPLETE_CREDENTIALS,
+//!    SECPKG_ATTR_ISSUER_LIST_EX naming the test CA, then a credential
+//!    with the certificate, or ISC_REQ_USE_SUPPLIED_CREDS for none.
 //!
 //! As a server (AcceptSecurityContext) with `certs/server-rsa`: the key
 //! imported as a named CNG key (NCryptImportKey, PKCS#8), the
 //! certificate's CERT_KEY_PROV_INFO_PROP_ID naming it, both sides in this
-//! process (tokens passed in memory): 6. TLS 1.3 and TLS 1.2 handshakes,
+//! process (tokens passed in memory): 8. TLS 1.3 and TLS 1.2 handshakes,
 //! messages both ways, the server's shutdown (close_notify as
-//! SEC_I_CONTEXT_EXPIRED at the client).
+//! SEC_I_CONTEXT_EXPIRED at the client); 9. the same with
+//! `certs/server-ec384` (an ECDSA P-384 key: the TLS 1.2 suite is
+//! ECDHE_ECDSA), the client validating the certificate automatically
+//! (crypt32 chains the P-384 leaf to the test CA).
 //!
 //! Prints `schannel_test: ok` or exits with the number of the failing
 //! check (each failure prints the check's number, the value seen and the
@@ -549,6 +562,25 @@ const SECPKG_ATTR_PACKAGE_INFO: u32 = 10;
 const SECPKG_ATTR_APPLICATION_PROTOCOL: u32 = 35;
 const SECPKG_ATTR_REMOTE_CERT_CONTEXT: u32 = 0x53;
 const SECPKG_ATTR_CONNECTION_INFO: u32 = 0x5a;
+const SECPKG_ATTR_SESSION_INFO: u32 = 0x5d;
+const SSL_SESSION_RECONNECT: u32 = 1;
+const SCH_CRED_DISABLE_RECONNECTS: u32 = 0x80;
+const SEC_I_INCOMPLETE_CREDENTIALS: u32 = 0x0009_0320;
+const SECPKG_ATTR_ISSUER_LIST_EX: u32 = 0x59;
+const ISC_REQ_USE_SUPPLIED_CREDS: u32 = 0x80;
+
+/// SecPkgContext_IssuerListInfoEx and its CERT_NAME_BLOBs.
+#[repr(C)]
+struct IssuerListEx {
+    issuers: *const NameBlob,
+    count: u32,
+}
+
+#[repr(C)]
+struct NameBlob {
+    size: u32,
+    data: *const u8,
+}
 const SECPKG_ATTR_CIPHER_INFO: u32 = 0x64;
 
 const SCHANNEL_SHUTDOWN: u32 = 1;
@@ -562,9 +594,14 @@ const CERT_KEY_PROV_INFO_PROP_ID: u32 = 2;
 const NCRYPTBUFFER_PKCS_KEY_NAME: u32 = 45;
 const NCRYPT_OVERWRITE_KEY_FLAG: u32 = 0x80;
 
-/// The test CA's certificate and the server's RSA pair (certs/make.sh).
+/// The server's pairs, issued by the test CA (certs/make.sh): RSA 2048
+/// and ECDSA P-384; and the client's (ECDSA P-256, clientAuth).
 static SERVER_CERT: &[u8] = include_bytes!("../certs/server-rsa.cer");
 static SERVER_KEY: &[u8] = include_bytes!("../certs/server-rsa.p8");
+static SERVER_EC_CERT: &[u8] = include_bytes!("../certs/server-ec384.cer");
+static SERVER_EC_KEY: &[u8] = include_bytes!("../certs/server-ec384.p8");
+static CLIENT_CERT: &[u8] = include_bytes!("../certs/client.cer");
+static CLIENT_KEY: &[u8] = include_bytes!("../certs/client.p8");
 
 /// A NUL-terminated UTF-16 copy of an ASCII string.
 fn w(s: &str) -> [u16; 64] {
@@ -709,6 +746,17 @@ struct Client {
     /// them with ISC_REQ_ALLOCATE_MEMORY); the token comes back in them
     /// as SECBUFFER_TOKEN.
     empty_output: bool,
+    /// ISC_REQ_ flags besides ISC_FLAGS.
+    extra_flags: u32,
+    /// What to do on SEC_I_INCOMPLETE_CREDENTIALS: call again with this
+    /// credential (with a certificate), or with ISC_REQ_USE_SUPPLIED_CREDS
+    /// (None); the same input either way (the documented loop).
+    new_cred: Option<SecHandle>,
+    saw_incomplete_credentials: bool,
+    /// The issuers SECPKG_ATTR_ISSUER_LIST_EX gave then, and whether the
+    /// test CA was one.
+    issuers: u32,
+    issuer_is_ca: bool,
 }
 
 impl Client {
@@ -750,6 +798,11 @@ impl Client {
             saw_renegotiate: false,
             attributes: 0,
             empty_output: false,
+            extra_flags: 0,
+            new_cred: None,
+            saw_incomplete_credentials: false,
+            issuers: 0,
+            issuer_is_ca: false,
         })
     }
 
@@ -794,7 +847,7 @@ impl Client {
                     &mut self.cred,
                     ctx,
                     self.target.as_ptr(),
-                    ISC_FLAGS,
+                    ISC_FLAGS | self.extra_flags,
                     0,
                     0,
                     input,
@@ -809,7 +862,7 @@ impl Client {
                     &mut self.cred,
                     ctx,
                     wide.as_ptr(),
-                    ISC_FLAGS,
+                    ISC_FLAGS | self.extra_flags,
                     0,
                     0,
                     input,
@@ -889,6 +942,36 @@ impl Client {
                     self.saw_missing = true;
                 }
                 read = true;
+                continue;
+            }
+            if r == SEC_I_INCOMPLETE_CREDENTIALS {
+                // The server asks for a certificate: which issuers it
+                // takes, then the same bytes again with a credential that
+                // has one, or without (ISC_REQ_USE_SUPPLIED_CREDS).
+                self.saw_incomplete_credentials = true;
+                c.ok(ob[0].data.is_null() || ob[0].size == 0, ob[0].size.into())?;
+                let mut list = IssuerListEx { issuers: null(), count: 0 };
+                query(c, &mut self.ctx, SECPKG_ATTR_ISSUER_LIST_EX, &mut list)?;
+                self.issuers = list.count;
+                for i in 0..list.count as usize {
+                    // SAFETY: the package's array of `count` blobs.
+                    let blob = unsafe { &*list.issuers.add(i) };
+                    // SAFETY: the blob's bytes.
+                    let name =
+                        unsafe { core::slice::from_raw_parts(blob.data, blob.size as usize) };
+                    if name.first() == Some(&0x30) && contains(name, b"gala schannel test CA") {
+                        self.issuer_is_ca = true;
+                    }
+                }
+                if !list.issuers.is_null() {
+                    // SAFETY: allocated by the package.
+                    unsafe { FreeContextBuffer(list.issuers.cast_mut().cast()) };
+                }
+                match self.new_cred.take() {
+                    Some(cred) => self.cred = cred,
+                    None => self.extra_flags |= ISC_REQ_USE_SUPPLIED_CREDS,
+                }
+                read = false;
                 continue;
             }
             if r == SEC_E_OK || r == SEC_I_CONTINUE_NEEDED {
@@ -1258,6 +1341,267 @@ fn close(c: &mut Checks, client: &mut Client, tls13: bool) -> Result<(), u32> {
     Ok(())
 }
 
+/// SecPkgContext_SessionInfo.
+#[repr(C)]
+struct SessionInfo {
+    flags: u32,
+    id_size: u32,
+    id: [u8; 32],
+}
+
+/// One connection of credential `cred` to `port`: the handshake, its
+/// SECPKG_ATTR_SESSION_INFO, the remote certificate, then GET /session,
+/// whose body is Nginx's $ssl_session_reused ("r" or ".") with the
+/// connection closed by the server.
+fn session(c: &mut Checks, cred: SecHandle, port: u16, tls13: bool) -> Result<SessionInfo, u32> {
+    let mut client = Client::connect(c, port, cred, "localhost")?;
+    let r = client.handshake(c, &[])?;
+    c.status(r as i32, SEC_E_OK)?;
+    let mut info = [0u32; 7];
+    query(c, &mut client.ctx, SECPKG_ATTR_CONNECTION_INFO, &mut info)?;
+    let protocol = if tls13 { SP_PROT_TLS1_3_CLIENT } else { SP_PROT_TLS1_2_CLIENT };
+    c.eq(info[0].into(), protocol.into())?;
+    let mut session = SessionInfo { flags: 0xffff, id_size: 0xffff, id: [0; 32] };
+    query(c, &mut client.ctx, SECPKG_ATTR_SESSION_INFO, &mut session)?;
+    c.ok(session.id_size <= 32, session.id_size.into())?;
+    // A resumed session still has the server's certificate.
+    let mut cert: *const c_void = null();
+    query(c, &mut client.ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut cert)?;
+    let mut name = [0u16; 64];
+    // SAFETY: the context Schannel made; our buffer.
+    unsafe {
+        CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, null(), name.as_mut_ptr(), 64);
+        c.ok(same(name.as_ptr(), "localhost"), 0)?;
+        CertFreeCertificateContext(cert);
+    }
+    let mut sizes = [0u32; 5];
+    query(c, &mut client.ctx, SECPKG_ATTR_STREAM_SIZES, &mut sizes)?;
+    client.write(
+        c,
+        b"GET /session HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        &sizes,
+    )?;
+    let mut plain = [0u8; 1024];
+    let mut got = 0;
+    let closed = client.read_until(c, &mut plain, &mut got, b"\0never\0")?;
+    c.ok(closed && plain.starts_with(b"HTTP/1.1 200 OK\r\n"), got as u64)?;
+    let reused = session.flags & SSL_SESSION_RECONNECT != 0;
+    let body: &[u8] = if reused { b"\r\n\r\nr\n" } else { b"\r\n\r\n.\n" };
+    // Nginx agrees on whether the session was resumed.
+    c.ok(plain[..got].ends_with(body), session.flags.into())?;
+    client.close();
+    Ok(session)
+}
+
+/// Session resumption: a second connection of the same credential handle
+/// and target name resumes (SSL_SESSION_RECONNECT; Nginx's
+/// $ssl_session_reused), with TLS 1.3 tickets and TLS 1.2 tickets on
+/// port 8443, TLS 1.3 stateful tickets and TLS 1.2 session IDs on 8446
+/// (Nginx's session cache, tickets off); a new credential handle, or one
+/// with SCH_CRED_DISABLE_RECONNECTS, does not.
+fn resumption(c: &mut Checks) -> Result<(), u32> {
+    for (port, tls13, step) in [
+        (8443, true, &b"resumption: tls1.3 ticket"[..]),
+        (8443, false, b"resumption: tls1.2 ticket"),
+        (8446, true, b"resumption: tls1.3 ticket, server's cache"),
+        (8446, false, b"resumption: tls1.2 session id"),
+    ] {
+        c.step(step);
+        let protocols = if tls13 { 0 } else { SP_PROT_TLS1_2_CLIENT };
+        let mut cred = acquire(c, Creds::Old(protocols, SCH_CRED_NO_DEFAULT_CREDS), Abi::Wide)?;
+        let first = session(c, cred, port, tls13)?;
+        c.eq(first.flags.into(), 0)?;
+        let second = session(c, cred, port, tls13)?;
+        c.eq(second.flags.into(), SSL_SESSION_RECONNECT.into())?;
+        if port == 8446 && !tls13 {
+            // The session ID the server gave first.
+            c.eq(second.id_size.into(), 32)?;
+            c.ok(first.id_size == 32 && first.id == second.id, first.id_size.into())?;
+        }
+        // Another credential handle: a full handshake.
+        let mut other = acquire(c, Creds::Old(protocols, SCH_CRED_NO_DEFAULT_CREDS), Abi::Wide)?;
+        let third = session(c, other, port, tls13)?;
+        c.eq(third.flags.into(), 0)?;
+        // SAFETY: our handles.
+        unsafe {
+            FreeCredentialsHandle(&mut other);
+            FreeCredentialsHandle(&mut cred);
+        }
+    }
+    c.step(b"resumption: SCH_CRED_DISABLE_RECONNECTS");
+    let flags = SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_DISABLE_RECONNECTS;
+    let mut cred = acquire(c, Creds::Old(0, flags), Abi::Wide)?;
+    for _ in 0..2 {
+        let s = session(c, cred, 8443, true)?;
+        c.eq(s.flags.into(), 0)?;
+    }
+    // SAFETY: our handle.
+    unsafe { FreeCredentialsHandle(&mut cred) };
+    Ok(())
+}
+
+/// A client credential holding `cert`: SCH_CREDENTIALS (`new`) or
+/// SCHANNEL_CRED, TLS 1.2 only unless `tls13`.
+fn acquire_with_cert(
+    c: &mut Checks,
+    cert: *const c_void,
+    new: bool,
+    tls13: bool,
+) -> Result<SecHandle, u32> {
+    let certs = [cert];
+    let mut cred = NO_HANDLE;
+    let tls = [TlsParameters {
+        alpn_ids: 0,
+        alpn: null(),
+        disabled_protocols: SP_PROT_TLS1_3_CLIENT,
+        disabled_crypto: 0,
+        crypto: null(),
+        flags: 0,
+    }];
+    let v5 = SchCredentials {
+        version: SCH_CREDENTIALS_VERSION,
+        format: 0,
+        creds: 1,
+        cred: certs.as_ptr(),
+        root_store: null_mut(),
+        mappers: 0,
+        mapper: null(),
+        lifespan: 0,
+        flags: SCH_CRED_NO_DEFAULT_CREDS,
+        tls_parameters: u32::from(!tls13),
+        tls: if tls13 { null() } else { tls.as_ptr() },
+    };
+    let v4 = SchannelCred {
+        version: SCHANNEL_CRED_VERSION,
+        creds: 1,
+        cred: certs.as_ptr(),
+        root_store: null_mut(),
+        mappers: 0,
+        mapper: null(),
+        algs: 0,
+        alg: null(),
+        enabled_protocols: if tls13 { 0 } else { SP_PROT_TLS1_2_CLIENT },
+        min_strength: 0,
+        max_strength: 0,
+        lifespan: 0,
+        flags: SCH_CRED_NO_DEFAULT_CREDS,
+        format: 0,
+    };
+    let auth: *const c_void = if new {
+        (&v5 as *const SchCredentials).cast()
+    } else {
+        (&v4 as *const SchannelCred).cast()
+    };
+    // SAFETY: credentials structures of ours.
+    let r = unsafe {
+        AcquireCredentialsHandleW(
+            null(),
+            w(UNISP).as_ptr(),
+            SECPKG_CRED_OUTBOUND,
+            null_mut(),
+            auth,
+            0,
+            0,
+            &mut cred,
+            null_mut(),
+        )
+    };
+    c.status(r, SEC_E_OK)?;
+    Ok(cred)
+}
+
+/// A handshake with port 8447 (Nginx asks for a client certificate the
+/// test CA issued, optionally), then GET /client: Nginx's
+/// "$ssl_client_verify $ssl_client_s_dn".
+fn client_auth(
+    c: &mut Checks,
+    cred: SecHandle,
+    new_cred: Option<SecHandle>,
+    tls13: bool,
+    want: &[u8],
+) -> Result<Client, u32> {
+    let mut client = Client::connect(c, 8447, cred, "localhost")?;
+    client.new_cred = new_cred;
+    let r = client.handshake(c, &[])?;
+    c.status(r as i32, SEC_E_OK)?;
+    let mut info = [0u32; 7];
+    query(c, &mut client.ctx, SECPKG_ATTR_CONNECTION_INFO, &mut info)?;
+    let protocol = if tls13 { SP_PROT_TLS1_3_CLIENT } else { SP_PROT_TLS1_2_CLIENT };
+    c.eq(info[0].into(), protocol.into())?;
+    let mut sizes = [0u32; 5];
+    query(c, &mut client.ctx, SECPKG_ATTR_STREAM_SIZES, &mut sizes)?;
+    let get = b"GET /client HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    client.write(c, get, &sizes)?;
+    let mut plain = [0u8; 1024];
+    let mut got = 0;
+    let closed = client.read_until(c, &mut plain, &mut got, b"\0never\0")?;
+    c.ok(closed && plain.starts_with(b"HTTP/1.1 200 OK\r\n"), got as u64)?;
+    c.ok(plain[..got].ends_with(want), got as u64)?;
+    Ok(client)
+}
+
+/// Client certificates against Nginx's ssl_verify_client (port 8447),
+/// TLS 1.3 and 1.2: a credential holding the certificate (SCH_CREDENTIALS,
+/// with its CNG key) sends it; one without (SCH_CRED_NO_DEFAULT_CREDS)
+/// stops with SEC_I_INCOMPLETE_CREDENTIALS, names the issuers the server
+/// takes (SECPKG_ATTR_ISSUER_LIST_EX: the test CA), and the same bytes
+/// passed again with a new credential (SCHANNEL_CRED holding the
+/// certificate) send it, or with ISC_REQ_USE_SUPPLIED_CREDS send none.
+fn client_certificates(c: &mut Checks) -> Result<(), u32> {
+    c.step(b"client certificate");
+    let cert = key_certificate(c, "gala-schannel-test-client", CLIENT_CERT, CLIENT_KEY)?;
+    let r = (|| {
+        let verified = b"\r\n\r\nSUCCESS CN=gala schannel test client\n";
+        for tls13 in [true, false] {
+            c.step(if tls13 {
+                b"client certificate: tls1.3, in the credential"
+            } else {
+                b"client certificate: tls1.2, in the credential"
+            });
+            let mut cred = acquire_with_cert(c, cert, true, tls13)?;
+            let client = client_auth(c, cred, None, tls13, verified)?;
+            c.ok(!client.saw_incomplete_credentials, 0)?;
+            client.close();
+            // SAFETY: our handle.
+            unsafe { FreeCredentialsHandle(&mut cred) };
+
+            c.step(if tls13 {
+                b"client certificate: tls1.3, SEC_I_INCOMPLETE_CREDENTIALS"
+            } else {
+                b"client certificate: tls1.2, SEC_I_INCOMPLETE_CREDENTIALS"
+            });
+            let protocols = if tls13 { 0 } else { SP_PROT_TLS1_2_CLIENT };
+            let mut plain =
+                acquire(c, Creds::Old(protocols, SCH_CRED_NO_DEFAULT_CREDS), Abi::Wide)?;
+            let mut with = acquire_with_cert(c, cert, false, tls13)?;
+            let client = client_auth(c, plain, Some(with), tls13, verified)?;
+            c.ok(client.saw_incomplete_credentials, 0)?;
+            c.eq(client.issuers.into(), 1)?;
+            c.ok(client.issuer_is_ca, 0)?;
+            client.close();
+
+            c.step(if tls13 {
+                b"client certificate: tls1.3, ISC_REQ_USE_SUPPLIED_CREDS"
+            } else {
+                b"client certificate: tls1.2, ISC_REQ_USE_SUPPLIED_CREDS"
+            });
+            let client = client_auth(c, plain, None, tls13, b"\r\n\r\nNONE \n")?;
+            c.ok(client.saw_incomplete_credentials, 0)?;
+            client.close();
+            // SAFETY: our handles.
+            unsafe {
+                FreeCredentialsHandle(&mut with);
+                FreeCredentialsHandle(&mut plain);
+            }
+        }
+        Ok(())
+    })();
+    // SAFETY: our context.
+    unsafe { CertFreeCertificateContext(cert) };
+    delete_key("gala-schannel-test-client");
+    r
+}
+
 fn package(c: &mut Checks) -> Result<(), u32> {
     c.step(b"package");
     let mut info: *mut SecPkgInfo = null_mut();
@@ -1533,17 +1877,22 @@ fn message(
     }
 }
 
-/// Imports the server's key as a named CNG key and gives the certificate
-/// context naming it (CERT_KEY_PROV_INFO_PROP_ID).
-fn server_certificate(c: &mut Checks) -> Result<*const c_void, u32> {
+/// Imports a PKCS#8 key as the named CNG key `name` and gives the
+/// certificate context naming it (CERT_KEY_PROV_INFO_PROP_ID).
+fn key_certificate(
+    c: &mut Checks,
+    name: &str,
+    cert: &[u8],
+    pkcs8: &[u8],
+) -> Result<*const c_void, u32> {
     let provider_name = w("Microsoft Software Key Storage Provider");
-    let key_name = w("gala-schannel-test");
+    let key_name = w(name);
     // SAFETY: CNG and crypt32 calls with buffers of ours.
     unsafe {
         let mut provider = 0;
         c.status(NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0), 0)?;
         let name = NCryptBuffer {
-            size: 2 * ("gala-schannel-test".len() as u32 + 1),
+            size: 2 * (name.len() as u32 + 1),
             kind: NCRYPTBUFFER_PKCS_KEY_NAME,
             data: key_name.as_ptr().cast(),
         };
@@ -1555,8 +1904,8 @@ fn server_certificate(c: &mut Checks) -> Result<*const c_void, u32> {
             w("PKCS8_PRIVATEKEY").as_ptr(),
             &params,
             &mut key,
-            SERVER_KEY.as_ptr(),
-            SERVER_KEY.len() as u32,
+            pkcs8.as_ptr(),
+            pkcs8.len() as u32,
             NCRYPT_OVERWRITE_KEY_FLAG,
         );
         c.status(r, 0)?;
@@ -1564,8 +1913,8 @@ fn server_certificate(c: &mut Checks) -> Result<*const c_void, u32> {
         NCryptFreeObject(provider);
         let cert = CertCreateCertificateContext(
             X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-            SERVER_CERT.as_ptr(),
-            SERVER_CERT.len() as u32,
+            cert.as_ptr(),
+            cert.len() as u32,
         );
         c.ok(!cert.is_null(), 0)?;
         let info = KeyProvInfo {
@@ -1588,13 +1937,13 @@ fn server_certificate(c: &mut Checks) -> Result<*const c_void, u32> {
     }
 }
 
-fn delete_server_key() {
+fn delete_key(name: &str) {
     let provider_name = w("Microsoft Software Key Storage Provider");
     // SAFETY: CNG calls with outputs of ours.
     unsafe {
         let (mut provider, mut key) = (0, 0);
         if NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0) == 0 {
-            if NCryptOpenKey(provider, &mut key, w("gala-schannel-test").as_ptr(), 0, 0) == 0 {
+            if NCryptOpenKey(provider, &mut key, w(name).as_ptr(), 0, 0) == 0 {
                 NCryptDeleteKey(key, 0);
             }
             NCryptFreeObject(provider);
@@ -1604,8 +1953,16 @@ fn delete_server_key() {
 
 /// Both sides in this process: the handshake, messages both ways, the
 /// server's shutdown.
-fn server(c: &mut Checks, cert: *const c_void, tls13: bool) -> Result<(), u32> {
-    c.step(if tls13 { b"tls1.3 server" } else { b"tls1.2 server" });
+///
+/// With `ecdsa` (the server's key is ECDSA P-384) the client validates
+/// the certificate automatically: crypt32 chains it to the test CA.
+fn server(c: &mut Checks, cert: *const c_void, tls13: bool, ecdsa: bool) -> Result<(), u32> {
+    c.step(match (tls13, ecdsa) {
+        (true, false) => b"tls1.3 server",
+        (false, false) => b"tls1.2 server",
+        (true, true) => b"tls1.3 server, ECDSA P-384",
+        (false, true) => b"tls1.2 server, ECDSA P-384",
+    });
     let certs = [cert];
     let server_creds = SchannelCred {
         version: SCHANNEL_CRED_VERSION,
@@ -1641,11 +1998,9 @@ fn server(c: &mut Checks, cert: *const c_void, tls13: bool) -> Result<(), u32> {
         c.status(r, SEC_E_OK)?;
     }
     let protocols = if tls13 { 0 } else { SP_PROT_TLS1_2_CLIENT };
-    let mut cc = acquire(
-        c,
-        Creds::Old(protocols, SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_MANUAL_CRED_VALIDATION),
-        Abi::Wide,
-    )?;
+    let validation = if ecdsa { 0 } else { SCH_CRED_MANUAL_CRED_VALIDATION };
+    let mut cc =
+        acquire(c, Creds::Old(protocols, SCH_CRED_NO_DEFAULT_CREDS | validation), Abi::Wide)?;
     let (mut to_server, mut to_client) = (Pipe::new(), Pipe::new());
     let (mut cx, mut sx) = (NO_HANDLE, NO_HANDLE);
     let target = w("localhost");
@@ -1735,6 +2090,16 @@ fn server(c: &mut Checks, cert: *const c_void, tls13: bool) -> Result<(), u32> {
         query(c, &mut cx, SECPKG_ATTR_CONNECTION_INFO, &mut info)?;
         let protocol = if tls13 { SP_PROT_TLS1_3_CLIENT } else { SP_PROT_TLS1_2_CLIENT };
         c.eq(info[0].into(), protocol.into())?;
+        // The suite names the server key's algorithm in TLS 1.2 (AES-256
+        // first in Windows' order).
+        let mut cipher: CipherInfo = core::mem::zeroed();
+        query(c, &mut cx, SECPKG_ATTR_CIPHER_INFO, &mut cipher)?;
+        let suite = match (tls13, ecdsa) {
+            (true, _) => 0x1302,
+            (false, true) => 0xc02c,
+            (false, false) => 0xc030,
+        };
+        c.eq(cipher.suite.into(), suite)?;
         let mut remote: *const c_void = null();
         query(c, &mut cx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut remote)?;
         let mut name = [0u16; 64];
@@ -1796,12 +2161,21 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     tls12_trickle(c)?;
     tls12_parameters(c)?;
     validations(c)?;
+    resumption(c)?;
+    client_certificates(c)?;
     c.step(b"server certificate");
-    let cert = server_certificate(c)?;
-    let r = server(c, cert, true).and_then(|()| server(c, cert, false));
+    let cert = key_certificate(c, "gala-schannel-test", SERVER_CERT, SERVER_KEY)?;
+    let r = server(c, cert, true, false).and_then(|()| server(c, cert, false, false));
     // SAFETY: our context.
     unsafe { CertFreeCertificateContext(cert) };
-    delete_server_key();
+    delete_key("gala-schannel-test");
+    r?;
+    c.step(b"server certificate, ECDSA P-384");
+    let cert = key_certificate(c, "gala-schannel-test-ec", SERVER_EC_CERT, SERVER_EC_KEY)?;
+    let r = server(c, cert, true, true).and_then(|()| server(c, cert, false, true));
+    // SAFETY: our context.
+    unsafe { CertFreeCertificateContext(cert) };
+    delete_key("gala-schannel-test-ec");
     r
 }
 

@@ -501,9 +501,12 @@ pub extern "system" fn BCryptSignHash(
     result: *mut u32,
     flags: u32,
 ) -> Status {
-    if super::ecdsa::key(h).is_some() {
-        missing(b"bcrypt.dll!BCryptSignHash(ECDSA)", 0);
-        return STATUS_NOT_SUPPORTED;
+    if let Some(k) = super::ecdsa::key(h) {
+        if !info.is_null() || flags != 0 {
+            // ECDSA takes no padding.
+            return STATUS_INVALID_PARAMETER;
+        }
+        return super::ecdsa::sign(k, bytes(hash, hash_len), out, out_len, result);
     }
     let Some(k) = key(h) else { return STATUS_INVALID_HANDLE };
     let Some(public) = &k.public else { return STATUS_INVALID_HANDLE };

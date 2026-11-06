@@ -14,6 +14,12 @@
 #   untrusted.crt/.key         CN=localhost, self-signed (port 8444)
 #   server-rsa.crt/.key, .cer  CN=localhost, RSA 2048, issued by the CA:
 #                              the test's own server (AcceptSecurityContext)
+#   server-ec384.cer, .p8      CN=localhost, ECDSA P-384, issued by the CA:
+#                              the test's own server with an ECDSA key
+#   client.crt/.key, .cer, .p8 CN=gala schannel test client, ECDSA P-256,
+#                              clientAuth, issued by the CA: the client
+#                              certificate (nginx's ssl_verify_client, port
+#                              8447, trusts ca.crt)
 set -eu
 cd "$(dirname "$0")"
 days=36500
@@ -24,6 +30,10 @@ basicConstraints = critical, CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = DNS:localhost, IP:127.0.0.1
+[client]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = clientAuth
 [ca]
 basicConstraints = critical, CA:TRUE
 keyUsage = critical, keyCertSign, cRLSign
@@ -67,7 +77,19 @@ openssl pkcs8 -topk8 -nocrypt -in server-rsa.pem -out server-rsa.key
 openssl req -new -key server-rsa.key -subj "/CN=localhost" -out server-rsa.csr
 openssl x509 -req -in server-rsa.csr -CA ca.crt -CAkey ca.key -set_serial 4 -days $days \
     -extfile "$ext" -extensions leaf -out server-rsa.crt
+openssl ecparam -name secp384r1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out server-ec384.key
+openssl req -new -key server-ec384.key -subj "/CN=localhost" -out server-ec384.csr
+openssl x509 -req -in server-ec384.csr -CA ca.crt -CAkey ca.key -set_serial 5 -days $days \
+    -extfile "$ext" -extensions leaf -out server-ec384.crt
+ec client.key
+openssl req -new -key client.key -subj "/CN=gala schannel test client" -out client.csr
+openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -set_serial 6 -days $days \
+    -extfile "$ext" -extensions client -out client.crt
 openssl x509 -in ca.crt -outform der -out ca.cer
 openssl x509 -in server-rsa.crt -outform der -out server-rsa.cer
 openssl pkcs8 -topk8 -nocrypt -in server-rsa.key -outform der -out server-rsa.p8
-rm -rf ca.db ca.cnf "$ext" ./*.csr server-rsa.pem
+for name in server-ec384 client; do
+    openssl x509 -in $name.crt -outform der -out $name.cer
+    openssl pkcs8 -topk8 -nocrypt -in $name.key -outform der -out $name.p8
+done
+rm -rf ca.db ca.cnf "$ext" ./*.csr server-rsa.pem server-ec384.crt server-ec384.key

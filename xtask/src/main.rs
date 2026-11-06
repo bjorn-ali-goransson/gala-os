@@ -1949,6 +1949,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("schannel_test", "user/schannel_test/certs/untrusted.key", "nginx/conf"),
     ("schannel_test", "user/schannel_test/certs/expired.crt", "nginx/conf"),
     ("schannel_test", "user/schannel_test/certs/expired.key", "nginx/conf"),
+    // The CA Nginx checks client certificates against (port 8447).
+    ("schannel_test", "user/schannel_test/certs/ca.crt", "nginx/conf"),
     ("schannel_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
     ("schannel_test", "user/nginx/html/index.html", "nginx/html"),
     ("schannel_test", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
@@ -2566,7 +2568,7 @@ fn server_target_dir() -> PathBuf {
 }
 
 /// Scenarios booted with the server kernel (no `shasha` feature).
-const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel"];
+const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel", "server_windows"];
 
 /// R9 (d): scenarios that hand over between the default kernel and the
 /// `handover_next` build (a stand-in for the next release, with a changed
@@ -3098,6 +3100,15 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
             r#""session":0,"class":"GalaSessionTestS0""#,
             r#""session":1,"class":"GalaSessionTestS1""#,
             r#""ev":"window","op":"other session""#,
+        ],
+    ),
+    (
+        // RS step B3a on the server kernel: session 2's window state is
+        // kept with nothing to compose it.
+        "server_windows",
+        &[
+            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800"#,
+            r#""ev":"window","op":"create""#,
         ],
     ),
     (
@@ -4903,19 +4914,42 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["user32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // ROADMAP SD: the server kernel, built without the desktop (no
-        // compositor in the binary), booted with a screen: GUI calls fail
-        // as with no screen, windows still work, a console program runs.
+        // ROADMAP SD: the server kernel, built without shasha (no
+        // compositor in the binary): windows are kept as on a desktop
+        // nobody shows (server_windows), nothing is drawn, a console
+        // program runs.
         name: "server_kernel",
         // gala_cli_test server: `gala`'s window commands are not
         // supported (exit code 3), start, ps and kill work.
         cmdline: "qemu_exit run=hello.exe,user32_test.exe,gala_cli_test.exe args=,,server",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            "desktop: not in this kernel (server build)",
+            "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)",
             "Hello from user mode!",
             "user32_test: ok",
             "gala_cli_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP RS B3a / SD: the server kernel keeps a session's window
+        // state with nothing to compose it (user/presenter_test `server`):
+        // session 2's window is made, shown and painted, GalaSession's
+        // query reports it on a desktop shown by none, frames, injected
+        // input and Test/Console presenters are refused, and the window
+        // is closed.
+        name: "server_windows",
+        cmdline: "qemu_exit as=system events=window run=presenter_test.exe args=server",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)",
+            "session: 2 made, named objects in \\Sessions\\2\\BaseNamedObjects",
+            "desktop: session 2 keeps its windows (1280x800), shown by none (no compositor in this kernel)",
+            "presenter_test: child painted",
+            "desktop: session 2 cannot be shown by test: no compositor in this kernel",
+            "presenter_test: the window is kept with nothing showing it",
+            "presenter_test: the window was closed",
+            "presenter_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -6267,6 +6301,8 @@ const SCENARIOS: &[Scenario] = &[
             "cacert untrusted: exit 60",
             "cacert other: exit 60",
             "cacert expired: exit 60",
+            "resumption: exit 0 . r",
+            "resumption tls1.2: exit 0 . r",
             "curl.sh: done",
             "exited with status 0x00000000",
         ],
@@ -6893,6 +6929,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("service_restart", "hello"),
     ("server_profile", "user32_test"),
     ("server_kernel", "user32_test"),
+    ("server_windows", "presenter_test"),
     ("gala_cli", "gui_test"),
     ("virtio_gpu", "gui_test"),
     ("gui_test_headless", "gui_test"),

@@ -1863,8 +1863,12 @@ version = "0.1.0"
 name = "schannel_tls"
 version = "0.1.0"
 dependencies = [
+ "p256",
+ "p384",
+ "rand_core",
  "rustls",
  "rustls-rustcrypto",
+ "x25519-dalek",
 ]
 
 [[package]]

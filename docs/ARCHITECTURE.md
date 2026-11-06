@@ -2503,12 +2503,16 @@ ntdll imports.
     and BCRYPT_PAD_PSS (STATUS_INVALID_SIGNATURE when it does not
     verify), BCryptEncrypt/Decrypt with PKCS1, OAEP (a UTF-8 label only)
     and PAD_NONE; KeyLength/KeyStrength/BlockLength of a key.
-  - ECDSA (`ecdsa.rs`, RustCrypto's `p256`/`p384`): public keys on P-256
-    and P-384 (BCRYPT_ECDSA_P256/P384_ALGORITHM and their
-    pseudo-handles) imported from an ECCPUBLICBLOB, BCryptVerifySignature
-    of a hash with an r || s signature (STATUS_INVALID_SIGNATURE when it
-    does not verify): crypt32's certificate signatures. No private keys,
-    signing, generation, export or P-521 (recorded). The RSA pseudo-handle
+  - ECDSA (`ecdsa.rs`, RustCrypto's `p256`/`p384`): keys on P-256 and
+    P-384 (BCRYPT_ECDSA_P256/P384_ALGORITHM and their pseudo-handles)
+    imported from an ECCPUBLICBLOB or an ECCPRIVATEBLOB (X, Y, d: the
+    scalar must be the point's, else STATUS_INVALID_PARAMETER; a private
+    blob also imports as public), BCryptVerifySignature of a hash with an
+    r || s signature (STATUS_INVALID_SIGNATURE when it does not verify:
+    crypt32's certificate signatures), BCryptSignHash with a private key
+    (no padding info or flags; r || s, cbKey bytes each; RFC 6979's nonce,
+    where Windows draws a random one: both are valid signatures; ncrypt's
+    ECDSA keys). No generation, export or P-521 (recorded). The RSA pseudo-handle
     (0xe1) imports RSA keys without opening a provider.
   - The `rsa` crate needs `alloc`: `user/gala_heap` makes the process
     heap the global allocator (in bcrypt, and in secur32 because Cargo
@@ -2518,14 +2522,17 @@ ntdll imports.
   - Key derivation fails with STATUS_NOT_SUPPORTED. Unknown algorithm
     names are recorded (`bcrypt.dll!algorithm <name>`).
 - **ncrypt** (`user/ncrypt`): the Microsoft Software Key Storage Provider
-  opens (also for a null name); RSA private keys are imported into it
-  (`keys.rs`: NCryptImportKey of PKCS#8 or RSAPRIVATEBLOB, named with
-  NCRYPTBUFFER_PKCS_KEY_NAME and opened again by NCryptOpenKey,
-  NCryptSignHash through bcrypt's RSA, NCryptDeleteKey; Schannel's server
-  keys). Other providers (TPM, smart cards) do not exist. TODO: named
-  keys last as long as the process (Windows keeps them in the profile);
-  no ECDSA, no generation (NCryptCreatePersistedKey, recorded), no
-  export.
+  opens (also for a null name); RSA and ECDSA (P-256, P-384) private keys
+  are imported into it (`keys.rs`: NCryptImportKey of PKCS#8 (RSA, or an
+  EC key with a named curve and its public point), RSAPRIVATEBLOB or
+  ECCPRIVATEBLOB, named with NCRYPTBUFFER_PKCS_KEY_NAME and opened again
+  by NCryptOpenKey, NCryptSignHash through bcrypt's RSA or ECDSA (the
+  stored blob's magic says which), NCryptDeleteKey, "Algorithm Group"
+  RSA/ECDSA; Schannel's server and client keys). Other providers (TPM,
+  smart cards) do not exist. TODO: named keys last as long as the process
+  (Windows keeps them in the profile); no generation
+  (NCryptCreatePersistedKey, recorded), no export, no PKCS#8 EC key
+  without its public point (recorded).
 - **Certificates** (crypt32 `cert.rs`; `cert_test`):
   CertCreateCertificateContext decodes DER X.509 (its own small DER
   reader: definite lengths, v1-v3, UTCTime/GeneralizedTime, unique ids,
@@ -2953,16 +2960,18 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   gala's freestanding DLLs cannot have; the RustCrypto provider is pure
   Rust (ring and aws-lc need a C toolchain for the MSVC target).
   `getrandom` is patched (`vendor/getrandom`: ProcessPrng by
-  `raw-dylib`, since the DLLs link without import libraries).
+  `raw-dylib`, since the DLLs link without import libraries). Its
+  modules: `cache.rs` (the credentials' session caches), `replay.rs` (a
+  client handshake recorded so it can run again, below), `tests.rs`.
 - Around it: crypt32 (`user/crypt32`) decodes certificates into
   CERT_CONTEXTs, has memory stores (`store.rs`; "ROOT" holds the
   machine root store, the other system stores open empty) and the chain
   engine that decides trust (`chain.rs`, "Certificate chains" under
-  "Cryptography"); ncrypt imports RSA keys into the Microsoft
-  Software Key Storage Provider and signs with them (no key generation
-  yet); bcrypt has hashes, AES/DES/RC2 and RSA (PKCS#1 v1.5, PSS,
-  OAEP). winhttp and wininet are HTTP(S) clients over it, on one
-  engine ("WinHTTP and WinINet" below).
+  "Cryptography"); ncrypt imports RSA and ECDSA keys into the
+  Microsoft Software Key Storage Provider and signs with them (no key
+  generation yet); bcrypt has hashes, AES/DES/RC2, RSA (PKCS#1 v1.5,
+  PSS, OAEP) and ECDSA P-256/P-384. winhttp and wininet are HTTP(S)
+  clients over it, on one engine ("WinHTTP and WinINet" below).
 
 ### Credentials and certificate validation
 
@@ -3019,9 +3028,64 @@ test's own in-process server) and the host tests of `user/schannel_tls`
 - **Server credentials**: the certificate (paCred[0]) and the CNG key it
   names (CERT_NCRYPT_KEY_HANDLE_PROP_ID, or CERT_KEY_PROV_INFO_PROP_ID's
   provider and container, opened with NCryptOpenKey). rustls signs the
-  handshake through NCryptSignHash (RSA: PSS for TLS 1.3, PSS or PKCS#1
-  for 1.2), so the key stays in ncrypt. Only RSA server keys; client
-  certificates are not sent (recorded).
+  handshake through NCryptSignHash, so the key stays in ncrypt: RSA (PSS
+  for TLS 1.3, PSS or PKCS#1 for 1.2) or ECDSA on P-256 or P-384 (the
+  curve's own hash, ecdsa_secp256r1_sha256 / secp384r1_sha384; CNG's
+  r || s made DER for TLS); the key's algorithm comes from the
+  certificate's SubjectPublicKeyInfo (others: recorded,
+  SEC_E_NO_CREDENTIALS). A server does not ask for client certificates
+  yet (ASC_REQ_MUTUAL_AUTH recorded); the engine can
+  (`ServerSettings::client_auth`, used by the host tests).
+- **Client certificates**: a client credential's paCred[0] with its CNG
+  key (as a server's) is sent when the server asks (only the
+  certificate: no intermediates from the stores yet). Without one, the
+  server's request stops the handshake with SEC_I_INCOMPLETE_CREDENTIALS
+  (nothing sent; SECPKG_ATTR_ISSUER_LIST_EX names the issuers the
+  server takes, CERT_NAME_BLOBs in one FreeContextBuffer block), and the
+  next call decides: a credential holding a certificate sends it, the
+  same one (or ISC_REQ_USE_SUPPLIED_CREDS) sends none; it may pass the
+  same bytes again (the documented loop, curl) or none. With
+  ISC_REQ_USE_SUPPLIED_CREDS from the start it never stops. Windows
+  first looks for a certificate in the MY store when the credential has
+  no SCH_CRED_NO_DEFAULT_CREDS; gala's MY store is empty, so it stops
+  the same way (recorded: `schannel.dll!client certificate chosen from
+  the MY store`; ISC_RET_USED_COLLECTED_CREDS is never given).
+  How the stop works: rustls asks for the certificate in the middle of
+  the server's flight (TLS 1.3's is encrypted), so the engine lets it go
+  on without one, holds the reply back and, given a certificate, runs
+  the handshake again with it (`replay.rs`): everything a client
+  handshake draws from outside rustls (random bytes and key shares, the
+  clock, the session store's answers, the certificate decision) goes
+  through the context's tape, recorded the first time and played back
+  the second, with the server's records fed again as received (rustls
+  decrypts in place, so they are copied before). The replies up to the
+  certificate must come out byte for byte the same (else the context
+  fails: `the handshake run again differs`). The new connection uses the
+  new credential's configuration, so the session goes to that
+  credential's cache. A handshake that offered a session to resume
+  cannot run again (rustls offers it only under the configuration that
+  made it, and a TLS 1.3 ticket is used once; only a server that
+  refused the session asks, RFC 8446 4.3.2): that context fails with
+  `a client certificate after a refused session offer`. rustls'
+  callbacks are `'static` or shared by a credential's contexts, so they
+  find the running context's tape by thread (schannel.dll names threads
+  with GetCurrentThreadId, `set_thread_id`).
+- **Session resumption** (`cache.rs`): each credential handle has a
+  session cache. A client's contexts with the same target name resume
+  what an earlier one of the same handle got (TLS 1.2 session IDs and
+  RFC 5077 tickets, TLS 1.3 tickets: rustls' client session store over
+  the handle's servers, up to 32, 4 TLS 1.3 tickets each); rustls
+  resumes only under the configuration that made the session (the same
+  verifier object), so the handle keeps one configuration per target
+  name and validation mode (up to 32). An empty target never resumes. A
+  server's handle keeps up to 256 sessions (TLS 1.2 session IDs, one TLS
+  1.3 ticket per connection naming a stored session). Programs that
+  want resumption keep their credential handle (curl does; gala's
+  winhttp acquires one per connection, so it does not resume yet).
+  SCH_CRED_DISABLE_RECONNECTS turns the handle's cache off.
+  SECPKG_ATTR_SESSION_INFO: SSL_SESSION_RECONNECT for a resumed session
+  and the ServerHello's session ID (TLS 1.3: the echo of the client's
+  legacy ID).
 
 ### A context is a state machine
 
@@ -3073,8 +3137,9 @@ QueryContextAttributesW: STREAM_SIZES, CONNECTION_INFO (SP_PROT_* of
 the side, CALG_AES_*, CALG_SHA_*, CALG_ECDH_EPHEM), CIPHER_INFO (IANA
 names), REMOTE_CERT_CONTEXT and LOCAL_CERT_CONTEXT (CERT_CONTEXTs from
 crypt32, freed by the caller), APPLICATION_PROTOCOL (ALPN from the
-first call's SECBUFFER_APPLICATION_PROTOCOLS), PACKAGE_INFO,
-NEGOTIATION_INFO, SIZES; other attributes are recorded.
+first call's SECBUFFER_APPLICATION_PROTOCOLS), SESSION_INFO,
+ISSUER_LIST_EX, PACKAGE_INFO, NEGOTIATION_INFO, SIZES; other attributes
+are recorded.
 
 ### Failures and limits
 
@@ -3082,12 +3147,12 @@ NEGOTIATION_INFO, SIZES; other attributes are recorded.
   DecryptMessage, ...) in the ledger with the SSPI status as detail; a
   panic in schannel.dll (a bug) records its location and ends the
   process with 0xC0000409.
-- TODO (ROADMAP TLS): session resumption (rustls' is off: no cache
-  without `std`), client certificates, ECDSA server keys, renegotiation
-  requests (SCHANNEL_RENEGOTIATE), SCHANNEL_ALERT tokens (accepted, not
-  sent), revocation, a server chain with intermediates from crypt32's
-  stores, DTLS. A client context
-  whose first call fails still has a handle (Windows gives none).
+- TODO (ROADMAP TLS): a server asking for client certificates
+  (ASC_REQ_MUTUAL_AUTH), a client certificate chosen from the MY store,
+  intermediates sent with a client's or server's certificate,
+  renegotiation requests (SCHANNEL_RENEGOTIATE), SCHANNEL_ALERT tokens
+  (accepted, not sent), revocation, DTLS. A client context whose first
+  call fails still has a handle (Windows gives none).
 
 ### WinHTTP and WinINet
 
@@ -3997,13 +4062,18 @@ sessions and remote shasha" (one desktop per session).
 
 ### The kernel side: `nt::desktop`
 
-Code: `kernel/src/nt/desktop/` (`mod.rs`: windows, shell, input,
-actions; `paint.rs`: drawing; `tests.rs`), `kernel/src/console.rs`
-(boot splash), `kernel/src/input.rs` and `arch::ps2` (devices),
-`nt::platform::Display` (the screen), `desktop/present.rs`
-(presenters). Each session's desktop is a `Shell` (its windows, Z order,
-focus, capture, pixels, input queue and presenter behind its own
-`IrqMutex<Desktop>`; `nt::session::Desk` holds it). Every session's
+Code: `kernel/src/nt/winstate/` (the window state both kernels keep:
+windows, Z order, focus, capture, client pixels, input for programs,
+the named actions; host tests in `winstate/tests.rs`),
+`kernel/src/nt/desktop/` (`mod.rs`: the compositor and shell on top of
+it: frames, taskbar, start menu, pointer, the mouse and keys; `paint.rs`:
+drawing; `tests.rs`), `kernel/src/console.rs` (boot splash),
+`kernel/src/input.rs` and `arch::ps2` (devices), `nt::platform::Display`
+(the screen), `desktop/present.rs` (presenters). Each session's desktop
+is a `Shell` (a `Desktop` behind its own `IrqMutex`: the window state,
+`winstate::State<Chrome>`, and the compositor's own: presenter,
+wallpaper, taskbar, start menu, pointer, drag; `nt::session::Desk` holds
+it). Every session's
 desktop keeps its windows and their pixels whether or not anything shows
 it; the console session's (`session::CONSOLE`) is shown by the screen
 (or what `presenter=` names) and gets the keyboard and mouse; another
@@ -4047,10 +4117,13 @@ session's is shown by nothing unless GalaSession attaches a presenter
 
 #### Compositor and look
 
-- **Windows**: top-level windows bottom to top, each with an owner
-  process, a screen position, its outer size, a title, a rendered
-  caption bar, an icon and a client pixel buffer (0x00RRGGBB; the fourth
-  byte is ignored). Windows of a process that ends are destroyed.
+- **Windows** (`winstate::Window`): top-level windows bottom to top,
+  each with an owner process, a screen position, its outer size, a
+  title, an icon and a client pixel buffer (0x00RRGGBB; the fourth byte
+  is ignored); the compositor keeps a rendered caption bar per window
+  (`Window::chrome`, drawn again when the window's `look` count moves
+  on: title, icon, size, maximized). Windows of a process that ends are
+  destroyed.
 - **Composition** (`Desktop::pixel`), layer by layer: the wallpaper;
   each shown window (not hidden, not minimized) with a soft shadow
   below it and its rounded shape (radius 8, anti-aliased by 4 x 4
@@ -4216,10 +4289,16 @@ registry ("Plan: windows across processes").
   bounds).
 - The desktop's keyboard focus is the active top-level window; focus
   among child windows is user32's.
-- Without a screen and without `presenter=` (or in the server profile),
-  desktop calls are STATUS_NOT_SUPPORTED and the window registry still
-  works. A session the console does not show keeps a live desktop
+- In the desktop kernel without a screen and without `presenter=` (or
+  in the server profile), desktop calls are STATUS_NOT_SUPPORTED and the
+  window registry still works; the server kernel keeps every session's
+  window state with nothing to compose it ("Server and desktop
+  workloads"). A session the console does not show keeps a live desktop
   (presenter None).
+- `nt::winstate` holds what a window is and what the named actions do;
+  `nt::desktop` only draws it. Damage rectangles come from the window
+  state (with the compositor's shadow margin, `winstate::Shadow`; none in
+  the server kernel, which drops them).
 - TODO: the shell belongs in a user-mode program (an explorer.exe of
   gala's); the clock is UTC; popups and hidden windows are not listed by
   GalaDesktopAction's Windows (the registry has them:
@@ -4253,13 +4332,30 @@ draws nothing; user32 loads gdi32 lazily).
   logged once as "desktop: not drawn (server profile)"),
   GalaWindowListen and GalaScreenInfo answer as without a screen, and
   `console=` starts no conhost.exe. The screen keeps the text console.
-- **The server kernel** (scenario `server_kernel`): the kernel's
-  `shasha` feature is on by default; without it
+- **The server kernel** (scenarios `server_kernel`, `server_windows`):
+  the kernel's `shasha` feature is on by default; without it
   (`--no-default-features`) `nt::desktop` is `nt/desktop_off.rs`, the
-  same interface with nothing behind it (every window call
-  STATUS_NOT_SUPPORTED, as with no screen; `Desktop` is an empty enum
-  so `with` never runs its closure). The compositor, wallpapers and
-  start menu are not in the binary (2.5 MB less in release). xtask
+  same interface over the window state alone (`nt::winstate`): each
+  session's desktop keeps its windows, their last client pixels, Z
+  order, focus, capture and input for programs as on a machine whose
+  desktop nobody shows (live at DEFAULT_SIZE, 1280 x 800, on its first
+  GUI call; GalaScreenInfo reports it with the taskbar's rows out of the
+  work area; damage is dropped). Nothing composes it: GalaSession's
+  query reports the windows (shown by none), a frame and injected input
+  are STATUS_INVALID_DEVICE_STATE (no Test frame shows it), presenter
+  none is accepted and Test and Console are STATUS_NOT_SUPPORTED;
+  GalaWindowDrag/Resize are STATUS_INVALID_DEVICE_STATE (no button is
+  down where no pointer moves); the shell's window actions, lists and
+  wallpaper are STATUS_NOT_SUPPORTED (`desktop::has_shell` false: no
+  shell). The compositor, wallpapers and start menu are not in the
+  binary (2.5 MB less in release). Logged: `desktop: no compositor in
+  this kernel (server build: windows are kept, nothing draws them)` at
+  boot, `desktop: session 2 keeps its windows (1280x800), shown by none
+  (no compositor in this kernel)` (event `presenter`, op `live`) per
+  session, a refused presenter as a warning. Limit: the desktop kernel
+  without a screen or `presenter=`, and with `profile=server`, still
+  refuses GUI calls, where the server kernel keeps the windows (ROADMAP
+  SD: the shasha feature should only add). xtask
   builds it into `target/server` beside the normal one; scenarios in
   `SERVER_KERNEL_SCENARIOS` boot it; CI runs clippy on it.
   **Invariant: a change to `nt::desktop`'s public interface needs the
@@ -4297,11 +4393,12 @@ CLI-first.
     lock, then swapped in and the screen redrawn; "drawn" is the drawn
     one).
   Windows are named by their HWND: the window registry's record
-  (version 2) carries the window's id on shasha's screen, so the kernel
-  goes from HWND to the screen's window and back. Without shasha on the
-  screen (the server kernel, `profile=server`, no screen) the window
-  actions, Windows, Programs and Wallpaper are STATUS_NOT_SUPPORTED,
-  checked before the window, so a server always says so. List output
+  (version 2) carries the window's id on the desktop, so the kernel
+  goes from HWND to the desktop's window and back. Without shasha's
+  shell (`desktop::has_shell`: the server kernel, which keeps windows
+  but has no shell; `profile=server`; no screen) the window actions,
+  Windows, Programs and Wallpaper are STATUS_NOT_SUPPORTED, checked
+  before the window, so a server always says so. List output
   that does not fit is cut at a whole entry.
 - **Access**: the window actions pass UIPI against the window's process
   (the caller's integrity level at least the window's:
@@ -6105,8 +6202,10 @@ What this builds on:
   (GalaWindow*, GalaScreenInfo, the console host calls,
   GalaDesktopAction); every shell action is a named `Action` through
   `Desktop::act`; the only hardware seams are `platform::Display` and the
-  PS/2 input thread. `kernel/src/nt/desktop_off.rs` (the server kernel's
-  empty `Shell`) shows the interface can be swapped.
+  PS/2 input thread; the window state is `nt::winstate`, apart from the
+  compositor, and `kernel/src/nt/desktop_off.rs` (the server kernel's
+  `Shell`: that state with no compositor) shows the compositor can be
+  left out.
 
 ### Sessions and named objects (B1)
 
@@ -6184,7 +6283,7 @@ while another session's is taken:
 |---|---|---|
 | `windows` | `window::Windows` | the window registry: windows, message queues, posted and sent messages, listeners, UIPI filters |
 | `hooks` | `winevent::Hooks` | SetWinEventHook's hooks and waiting events |
-| `shell` | `desktop::Shell` | shasha's `Desktop` and its presenter (`desktop_off::Shell`, empty, in the server kernel) |
+| `shell` | `desktop::Shell` | the desktop's window state (`nt::winstate`) and, in the desktop kernel, shasha's compositor and its presenter (`desktop_off::Shell`: the window state alone, in the server kernel) |
 
 - HWNDs come from one global counter (`window::NEXT_HWND`), so a value
   is never reused across sessions.
@@ -6231,8 +6330,8 @@ about window 0x20000 of pid 4 in session 0: not visible across
 sessions`), so an ERROR_INVALID_WINDOW_HANDLE across sessions explains
 itself. The state dump's sessions part (`session::dump`): per session
 its top-level windows, queues, posted and sent messages, filters, hooks
-and waiting events, whether its shasha desktop is live, how many windows
-it has there and what shows it (`shasha: live (1 windows, presenter
+and waiting events, whether its desktop is live, how many windows
+it has there and what shows it (`desktop: live (1 windows, presenter
 test)`), then each top-level window (hwnd, pid, tid, class, text,
 rectangle, flags; at most 16), and how many times a window was asked
 for across sessions.
@@ -6326,16 +6425,22 @@ same program as SYSTEM).
 `desktop/tests.rs`), `kernel/src/nt/session_calls.rs` (GalaSession),
 `nt::session::active_console` (the session the console shows). Test
 programs: `user/presenter_test` (scenario `presenter_test`, with a
-screen check of the console switch) and gui_test on a headless desktop
-(scenario `gui_test_headless`).
+screen check of the console switch; its `server` mode, scenario
+`server_windows`, on the server kernel) and gui_test on a headless
+desktop (scenario `gui_test_headless`); host tests of the window state
+alone in `winstate/tests.rs`.
 
-- **Window state apart from composition**: a session's desktop (its
-  windows, Z order, focus and each window's client pixels) is kept
+- **Window state apart from composition** (`nt::winstate::State`, in
+  both kernels): a session's desktop (its windows, Z order, focus,
+  capture, each window's client pixels, input for programs) is kept
   whether or not anything shows it. Composition is the presenter's
-  business: `redraw` composes a damaged area only while a presenter
-  shows the desktop, and hands it the rows (`write_row`) and the area
-  (`flush`). With none, damage is dropped; attaching one draws the
-  desktop whole.
+  business: the compositor (`nt::desktop::Desktop`, the shasha kernel's)
+  holds the state and draws it; `redraw` composes a damaged area only
+  while a presenter shows the desktop, and hands it the rows
+  (`write_row`) and the area (`flush`). With none, damage is dropped;
+  attaching one draws the desktop whole. The server kernel holds the
+  same state with no compositor: its desktops are shown by none, always
+  ("Server and desktop workloads").
 - **Presenters** (`Presenter`), one per desktop:
   - **Console**: the screen through `platform::Display`, on a machine
     with a screen; at most one desktop has it, the one the console
@@ -6401,7 +6506,8 @@ screen check of the console switch) and gui_test on a headless desktop
 - **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
   another session's pixels are its users'; STATUS_NOT_FOUND for a
   session that does not exist; STATUS_NOT_SUPPORTED where there are no
-  desktops):
+  desktops; the server kernel's answers are in "Server and desktop
+  workloads", tested by presenter_test's `server` mode):
   - SESSION_QUERY (0): what shows the desktop (0 none, 1 console, 2
     test), whether it is live, its size, its windows; nothing is made
     live;
@@ -6445,9 +6551,7 @@ screen check of the console switch) and gui_test on a headless desktop
   WM_WTSSESSION_CHANGE notifications (WTSRegisterSessionNotification)
   and no keys released by WM_KEYUP when the console leaves; `gala
   attach` needs SeTcbPrivilege until B4 checks who may attach where; a
-  kernel handover puts the console back on session 1 (B5); the window
-  state is still part of the compositor's `Desktop` in the `shasha`
-  kernel, so the server kernel keeps no window pixels yet; gala-um takes
+  kernel handover puts the console back on session 1 (B5); gala-um takes
   no `presenter=` (its sessions have no desktops); frames are read, not
   recorded over time.
 
@@ -6465,9 +6569,9 @@ Numbering: 0 for services and SYSTEM (sshd and its logons are session 0
 on Windows too), 1 for the local console, 2+ for remote logons.
 
 1. **Window state apart from composition** (gala's own addition; B3a;
-   built in the desktop kernel, "Presenters (B3a)"; the server kernel's
-   is to come): the desktop's window state and each window's last pixels
-   are kept in every kernel; the compositor (frames, taskbar, start menu, wallpaper,
+   built: `nt::winstate` in both kernels, "Presenters (B3a)", "Server and
+   desktop workloads"): the desktop's window state and each window's
+   last pixels are kept in every kernel; the compositor (frames, taskbar, start menu, wallpaper,
    fonts) is a presenter. So the server kernel (no `shasha` feature,
    ROADMAP SD) can serve GUI programs to a remote shasha client without a
    compositor of its own, and a desktop with no presenter keeps its

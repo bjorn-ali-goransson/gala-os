@@ -915,9 +915,14 @@ inheriting the listener's non-blocking mode.
 
 `schannel_test` is a TLS client of Nginx (OpenSSL) inside the guest: the
 scenario starts `nginx.exe` with `start=` and
-`user/schannel_test/nginx.conf` (ports 8443-8445 on 127.0.0.1, so no
-xtask network client is involved), and the test retries its connect
-while Nginx starts. On Windows, run-all.ps1 starts the same Nginx from a
+`user/schannel_test/nginx.conf` (ports 8443-8447 on 127.0.0.1, so no
+xtask network client is involved: 8443 the issued certificate, 8444
+self-signed, 8445 expired, 8446 resumption from Nginx's own session
+cache, 8447 client certificates), and the test retries its connect
+while Nginx starts. `/session` on 8443 and 8446 answers Nginx's
+`$ssl_session_reused` ("r" resumed, "." not), `/client` on 8447
+`$ssl_client_verify $ssl_client_s_dn`: what Nginx saw, the peer's
+view of a check. On Windows, run-all.ps1 starts the same Nginx from a
 prefix in TEMP and, as an administrator, imports the test CA into
 LocalMachine\Root for the run (skipped otherwise). `nginx_tls` instead
 uses the host's `curl -k` as the client. `winhttp_test` and
@@ -933,9 +938,13 @@ on `user/http_client`: a change to the engine boots both scenarios.
   a CA, an issued `localhost` certificate (ECDSA), an expired one
   (`openssl ca` sets a past validity, `x509 -req` cannot), a self-signed
   one, an RSA pair for the test's own server (`server-rsa.cer`/`.p8`,
-  also used by the host tests). They are valid from the moment they are
-  made: host tests use a clock two days later. Regenerating changes
-  every file and nothing in the tests' expectations.
+  also used by the host tests), an ECDSA P-384 one for it
+  (`server-ec384.cer`/`.p8`) and a client certificate (`client.*`,
+  ECDSA P-256, clientAuth). They are valid from the moment they are
+  made: host tests use a fixed clock after that (`TODAY` in
+  `user/schannel_tls/src/tests.rs`: move it when the certificates are
+  made again). Regenerating changes every file and nothing in the tests'
+  expectations.
 - gala's machine root store is `C:\Windows\System32\gala\roots`: a
   scenario that needs a trusted root ships the CA there (an
   EXTRA_MODULES line). Without one, automatic validation gives
@@ -1000,6 +1009,21 @@ on `user/http_client`: a change to the engine boots both scenarios.
   the loose objects (made with fixed author and committer dates, so the
   commit id in the scenario stays). To serve more, make it the same way
   on the host and check the files in.
+- Resumption and client certificates are per credential handle: a test
+  (or a program) that wants a resumed handshake keeps its handle, and a
+  check that wants a full one takes a new handle (or
+  SCH_CRED_DISABLE_RECONNECTS). A session made after a client
+  certificate came with a new credential belongs to that credential.
+  SECPKG_ATTR_SESSION_INFO says SSL_SESSION_RECONNECT; Nginx's
+  `/session` must agree.
+- SEC_I_INCOMPLETE_CREDENTIALS then a new credential runs the client's
+  handshake again from its recording (schannel_tls `replay.rs`). If it
+  fails, the ledger has `schannel.dll!ISC: General("the handshake run
+  again differs")` (something rustls draws escaped the tape: a new
+  source of randomness or time must go through it) or `General("a
+  client certificate after a refused session offer: no replay")`. The
+  host tests `incomplete_credentials_*` run it in memory, also with the
+  server's flight a few bytes at a time.
 - Schannel's revocation check is not implemented (recorded when asked):
   the scenarios pass curl's `--ssl-no-revoke` and Git's
   `http.schannelCheckRevoke=false`, as on Windows a certificate without
@@ -2464,7 +2488,12 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   with `--test-threads=1` or by filtering module names.
 - **Changing `nt::desktop`'s public functions or types**: the server
   kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
-  `--no-default-features` clippy line in CI fails.
+  `--no-default-features` clippy line in CI fails. What a window is
+  (rectangles, Z order, focus, capture, client pixels, input for
+  programs, the named actions) belongs in `nt::winstate`, which both
+  kernels build; `nt::desktop` only draws it (frames, taskbar, start
+  menu, pointer). A change to window behaviour made in the compositor
+  instead is missing from the server kernel (`server_windows`).
 - **Windows live in a session**: kernel code reaches the window
   registry, WinEvent hooks and shasha's desktop through the process
   (`process.desk.windows` / `.hooks` / `.shell`), never a global;

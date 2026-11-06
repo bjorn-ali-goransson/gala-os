@@ -40,7 +40,7 @@ $arguments = @{ "args_test" = 'alpha "beta gamma"'; "go_http" = 'self'; "handove
 
 $results = @()
 
-# schannel_test talks TLS to Nginx on 127.0.0.1:8443-8445 (its scenario
+# schannel_test talks TLS to Nginx on 127.0.0.1:8443-8447 (its scenario
 # starts Nginx with `start=`): Nginx runs from a prefix made in TEMP with
 # ..\schannel_test\nginx.conf and its certificates, and the test CA must be
 # a trusted root of the machine, which only an administrator can make it

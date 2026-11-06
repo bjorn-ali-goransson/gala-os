@@ -6,8 +6,8 @@
 //! digests come from the RustCrypto crates (THIRD_PARTY.md); MD2 and MD4
 //! too. Symmetric ciphers (AES, DES, 3DES, 3DES_112, RC2, RC4) with keys
 //! (`cipher`). RSA key pairs, signatures and encryption (`rsa`). ECDSA
-//! public keys on P-256 and P-384 and their signature checks (`ecdsa`,
-//! crypt32's certificate signatures). Key
+//! keys on P-256 and P-384, signatures and their checks (`ecdsa`:
+//! crypt32's certificate signatures, ncrypt's ECDSA keys). Key
 //! derivation is not there: it fails with STATUS_NOT_SUPPORTED, recorded
 //! in the ledger.
 //!
@@ -121,7 +121,7 @@ pub enum Kind {
     Rc2,
     Rc4,
     Rsa,
-    /// ECDSA on P-256 and P-384: public keys and signature checks.
+    /// ECDSA on P-256 and P-384: keys, signatures and their checks.
     EcdsaP256,
     EcdsaP384,
 }

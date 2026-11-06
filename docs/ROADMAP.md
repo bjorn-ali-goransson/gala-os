@@ -70,13 +70,15 @@ In order:
    rendering on shasha.
 1. **HS**: the next sweep (after the next change of assumptions,
    otherwise a month after the first).
-2. **TLS**: step 6 (session resumption, client certificates, ECDSA
-   server keys, revocation; step 5, crypt32's chain engine as the one
-   trust decision, is done).
+2. **TLS**: step 6's rest (revocation, winhttp keeping its credential
+   handle so it resumes, a server asking for client certificates, the
+   MY store's automatic client certificate; ECDSA server keys, client
+   session resumption and client certificates are done).
 3. **LX**: seams 1, 4 and 5 as their areas are touched; milestone 2's
    rest (busybox runs; threads, futex, fs_test's links) as filler.
-4. **RS**: step B3a's next part (the window state apart from the
-   compositor in the server kernel).
+4. **RS**: step B3a's next part (the desktop kernel's desktops without
+   a presenter keeping their windows as the server kernel's do; then
+   B3b's remote presenter).
 5. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's leftovers (what is not charged yet), R8's Secure
    Boot.
@@ -150,7 +152,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
-| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision) done; revocation, session resumption next |
+| TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates done; revocation next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 11 groups done; filler |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done; static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
@@ -169,7 +171,7 @@ has a section under "Open items".
 | SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel done |
 | SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
-| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters and console switch done; the window state in the server kernel next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (server kernel too) done; B3b next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
@@ -660,13 +662,19 @@ desktop can do is reachable from the command line.
   token (`uipi_test`, SECURITY S6).
 - The server kernel (cargo feature `shasha` off; scenario
   `server_kernel`): no compositor, wallpapers or start menu (2.5 MB
-  smaller). A server image without user32/gdi32 is not planned: many
+  smaller); it keeps GUI programs' windows and their pixels as on a
+  desktop nobody shows (`nt::winstate`, scenario `server_windows`), with
+  no shell (window actions STATUS_NOT_SUPPORTED). A server image without user32/gdi32 is not planned: many
   console and server programs import them, and loading them starts
   nothing; only wallpapers, fonts and GUI-only programs (conhost.exe,
   FileZilla) stay out of a server image.
 
-**Next**: the wallpaper kept across boots; a `gala` command for each new
-shasha feature (it comes first).
+**Next**: the desktop kernel without a screen or `presenter=`, and with
+`profile=server`, keeping GUI programs' windows as the server kernel
+does instead of refusing the calls (the shasha feature should only add;
+every BIOS GUI scenario and gala-um to check); the wallpaper kept
+across boots; a `gala` command for each new shasha feature (it comes
+first).
 
 **Design**: ARCHITECTURE "Server and desktop workloads".
 
@@ -824,10 +832,17 @@ own session and shell.
   click injected into session 2's frame, session 1's window on the
   screen, `gala attach 2`, PS/2 clicks reaching session 2's window,
   back to session 1 with its window kept (a screen check).
+- B3a, the window state apart from the compositor (`nt::winstate`, in
+  both kernels; shasha's `Desktop` draws it): the server kernel keeps
+  each session's windows, their last pixels, Z order, focus, capture and
+  input as on a desktop nobody shows (GalaSession's query reports them,
+  frames and Test/Console presenters refused; `server_windows`,
+  presenter_test's `server` mode; host tests in `winstate/tests.rs`).
 
 **Next**:
-1. B3a: the window state apart from the compositor's `Desktop`, so the
-   server kernel keeps window pixels too; `presenter=` in gala-um
+1. B3a: the desktop kernel's desktops without a presenter (no screen,
+   `profile=server`) keeping their windows as the server kernel's do
+   (SD); `presenter=` in gala-um
    (screen checks there; its sessions have no desktops yet); xtask's
    headless screen checks sending their input through SESSION_INPUT
    instead of PS/2; Test frames recorded over time; the console switch's
@@ -1074,7 +1089,8 @@ and wininet's synchronous clients over it, on one engine (steps 1 and
 2 below); unmodified curl and Git over it (`curl_schannel`,
 `git_https`; step 3); `gala install`'s downloads over winhttp, with the
 public CA bundle in gala's machine root store (`pk_install_https`; step
-4).
+4); ECDSA server keys, session resumption and client certificates
+(step 6).
 
 **Next**:
 1. Done: winhttp over Schannel, synchronous (`winhttp_test` against the
@@ -1164,8 +1180,31 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    CTLs, CRL stores, lower-quality chains; no Windows run of
    `cert_test`'s chain part yet (its root is an exclusive one, so it
    needs no administrator).
-6. Also open: session resumption, client certificates, ECDSA server
-   keys, revocation, keys persisted across processes.
+6. Done: ECDSA server keys, session resumption, client certificates
+   (`schannel_test` against Nginx on ports 8443-8447 and its in-process
+   server, host tests `cargo test -p schannel_tls`, `curl_schannel`'s
+   resumption steps; ARCHITECTURE "Schannel (TLS)"). ECDSA: bcrypt signs
+   with P-256/P-384 private keys (ECCPRIVATEBLOB), ncrypt imports them
+   (PKCS#8, ECCPRIVATEBLOB) and signs, Schannel serves with them (and
+   validates a P-384 leaf through crypt32). Resumption: each credential
+   handle's session cache (client: per target name; TLS 1.2 session IDs
+   and tickets, TLS 1.3 tickets; server: session IDs and stateful TLS
+   1.3 tickets), SCH_CRED_DISABLE_RECONNECTS, SECPKG_ATTR_SESSION_INFO;
+   Nginx's $ssl_session_reused agrees. Client certificates: paCred's
+   certificate sent when asked; SEC_I_INCOMPLETE_CREDENTIALS with
+   SECPKG_ATTR_ISSUER_LIST_EX, then a credential with a certificate (the
+   handshake run again from its recording) or ISC_REQ_USE_SUPPLIED_CREDS
+   (none). Still open there: revocation (offline CRLs first; the
+   scenarios pass `--ssl-no-revoke`); winhttp/wininet keeping a
+   credential handle per session so they resume (they acquire one per
+   connection); a server asking for client certificates
+   (ASC_REQ_MUTUAL_AUTH, recorded) and checking them; the MY store
+   (persistent, and Schannel's automatic choice from it,
+   ISC_RET_USED_COLLECTED_CREDS); intermediates sent with a certificate;
+   a client certificate after a refused session offer (the replay cannot
+   be made: the context fails, named in the ledger); keys persisted
+   across processes; curl.se's LibreSSL curl resuming (it does not here:
+   to be compared with Windows).
 
 **Design**: ARCHITECTURE "Schannel (TLS)"; WORKFLOW "TLS tests
 (Schannel)".

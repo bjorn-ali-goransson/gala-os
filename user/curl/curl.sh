@@ -23,6 +23,17 @@
 # CA's certificate passes; a self-signed one, a CA file that does not
 # hold the issuer (C:\gala\untrusted.crt, the self-signed certificate)
 # and the expired certificate give 60.
+#
+# Session resumption: two requests in one run, each on its own
+# connection (Connection: close), to /session, whose body is Nginx's
+# $ssl_session_reused ("." for a full handshake, "r" for a resumed one).
+# Schannel's curl keeps its credential handle for the second connection
+# (curl's session cache), and Schannel resumes the session cached under
+# it for that target name: TLS 1.3, then TLS 1.2 (--tls-max 1.2: Nginx's
+# TLS 1.2 session tickets). Checked in curl_schannel only: curl.se's
+# LibreSSL build resumes neither here (". ." twice), which is that
+# library's and curl's business, not gala's TLS (not compared with
+# Windows yet).
 curl=C:/curl/curl.exe
 
 echo "version: $($curl -V | head -n 1)"
@@ -54,5 +65,11 @@ echo "cacert other: exit $?"
 
 $curl -sS --ssl-no-revoke --cacert C:/gala/ca.crt https://localhost:8445/ >/dev/null
 echo "cacert expired: exit $?"
+
+out=$($curl -sS --ssl-no-revoke -H 'Connection: close' https://localhost:8443/session https://localhost:8443/session)
+echo "resumption: exit $? $(echo $out)"
+
+out=$($curl -sS --ssl-no-revoke --tls-max 1.2 -H 'Connection: close' https://localhost:8443/session https://localhost:8443/session)
+echo "resumption tls1.2: exit $? $(echo $out)"
 
 echo "curl.sh: done"

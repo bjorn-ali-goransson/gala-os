@@ -12,6 +12,8 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 static CA: &[u8] = include_bytes!("../../schannel_test/certs/ca.cer");
 static CERT: &[u8] = include_bytes!("../../schannel_test/certs/server-rsa.cer");
 static KEY: &[u8] = include_bytes!("../../schannel_test/certs/server-rsa.p8");
+static CLIENT_CERT: &[u8] = include_bytes!("../../schannel_test/certs/client.cer");
+static CLIENT_KEY: &[u8] = include_bytes!("../../schannel_test/certs/client.p8");
 
 #[derive(Debug)]
 struct Now(u64);
@@ -22,8 +24,9 @@ impl TimeProvider for Now {
     }
 }
 
-/// 2026-11-05 (the certificates were made on 2026-11-03).
-const TODAY: u64 = 1_793_836_800;
+/// 2026-11-08 (the certificates were made on 2026-11-03, the client's
+/// and the P-384 server's on 2026-11-06).
+const TODAY: u64 = 1_794_096_000;
 const BOTH: Protocols = Protocols { tls12: true, tls13: true };
 
 fn provider() -> Arc<CryptoProvider> {
@@ -36,16 +39,45 @@ fn client(
     validation: Validation,
     target: &str,
 ) -> Session {
+    client_of(p, protocols, validation, target, &ClientCache::new(true))
+}
+
+/// A client context of the credential whose cache is `cache`.
+fn client_of(
+    p: &Arc<CryptoProvider>,
+    protocols: Protocols,
+    validation: Validation,
+    target: &str,
+    cache: &ClientCache,
+) -> Session {
     let s = ClientSettings {
         protocols,
         validation,
         target,
         alpn: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+        certificate: None,
+        ask: false,
     };
-    Session::client(p, Arc::new(Now(TODAY)), s).unwrap()
+    Session::client(p, Arc::new(Now(TODAY)), s, cache).unwrap()
 }
 
 fn server(p: &Arc<CryptoProvider>, protocols: Protocols) -> Session {
+    server_of(p, protocols, &Arc::new(ServerCache::new(true)))
+}
+
+/// A server context of the credential whose cache is `cache`.
+fn server_of(p: &Arc<CryptoProvider>, protocols: Protocols, cache: &Arc<ServerCache>) -> Session {
+    server_with(p, protocols, cache, None)
+}
+
+/// A server context that asks for a client certificate, checked by
+/// `client_auth`.
+fn server_with(
+    p: &Arc<CryptoProvider>,
+    protocols: Protocols,
+    cache: &Arc<ServerCache>,
+    client_auth: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>,
+) -> Session {
     let key = p
         .key_provider
         .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY.to_vec())))
@@ -55,6 +87,8 @@ fn server(p: &Arc<CryptoProvider>, protocols: Protocols) -> Session {
         chain: vec![CertificateDer::from(CERT.to_vec())],
         key,
         alpn: vec![b"http/1.1".to_vec()],
+        cache: cache.clone(),
+        client_auth,
     };
     Session::server(p, Arc::new(Now(TODAY)), s).unwrap()
 }
@@ -149,6 +183,9 @@ fn feed(s: &mut Session, bytes: &[u8], step: usize, incomplete: &mut usize) -> (
 }
 
 /// The handshake; the server's and the client's bytes `step` at a time.
+/// What the server sends after the client's handshake is done (TLS 1.3
+/// tickets) goes through the client's DecryptMessage: SEC_I_RENEGOTIATE,
+/// then the token call, as the documented loop does.
 fn handshake(c: &mut Session, s: &mut Session, step: usize) -> usize {
     let mut incomplete = 0;
     let first = c.token(&[]);
@@ -158,8 +195,9 @@ fn handshake(c: &mut Session, s: &mut Session, step: usize) -> usize {
         let (t, rest) = feed(s, &to_server, step, &mut incomplete);
         assert!(rest.is_empty());
         assert!(t.status == sec::E_OK || t.status == sec::I_CONTINUE_NEEDED, "{:x}", t.status);
-        let to_client = t.output;
-        if c.established() && to_client.is_empty() {
+        let mut to_client = t.output;
+        if c.established() {
+            post_handshake(c, &mut to_client);
             break;
         }
         let (t, rest) = feed(c, &to_client, step, &mut incomplete);
@@ -172,6 +210,20 @@ fn handshake(c: &mut Session, s: &mut Session, step: usize) -> usize {
     }
     assert!(c.established() && s.established());
     incomplete
+}
+
+/// Post-handshake records from the server (TLS 1.3 tickets) through the
+/// client's DecryptMessage and token call.
+fn post_handshake(c: &mut Session, bytes: &mut Vec<u8>) {
+    while !bytes.is_empty() {
+        let d = c.decrypt(bytes);
+        assert_eq!(d.status, sec::I_RENEGOTIATE);
+        assert_eq!(d.extra, bytes.len());
+        let t = c.token(bytes);
+        assert_eq!(t.status, sec::E_OK);
+        assert!(t.output.is_empty());
+        bytes.drain(..bytes.len() - t.extra);
+    }
 }
 
 /// `text` from `a` to `b` through encrypt and decrypt in place.
@@ -271,7 +323,15 @@ fn expired_certificate() {
     let mut c = Session::client(
         &p,
         Arc::new(Now(4_102_444_800 * 2)), // after the certificates' end
-        ClientSettings { protocols: BOTH, validation: auto(), target: "localhost", alpn: vec![] },
+        ClientSettings {
+            protocols: BOTH,
+            validation: auto(),
+            target: "localhost",
+            alpn: vec![],
+            certificate: None,
+            ask: false,
+        },
+        &ClientCache::new(true),
     )
     .unwrap();
     let mut s = server(&p, BOTH);
@@ -352,6 +412,235 @@ fn renegotiate_on_post_handshake_message() {
     let d = c.decrypt(&mut bytes[key_update..]);
     assert_eq!(d.status, sec::E_OK);
     assert_eq!(d.data, 5);
+}
+
+/// Two connections of the same client and server credentials: the
+/// second resumes (TLS 1.3: a ticket; TLS 1.2: the session ID), with the
+/// same server certificate; another target name, another client
+/// credential or a disabled cache do not.
+#[test]
+fn resumption_per_credential_and_target() {
+    for protocols in [BOTH, Protocols { tls12: true, tls13: false }] {
+        let p = provider();
+        let (cc, sc) = (ClientCache::new(true), Arc::new(ServerCache::new(true)));
+        let connect = |cache: &ClientCache, target: &str| {
+            let mut c = client_of(&p, protocols, auto(), target, cache);
+            let mut s = server_of(&p, protocols, &sc);
+            handshake(&mut c, &mut s, usize::MAX);
+            message(&mut c, &mut s, b"ping");
+            assert_eq!(c.resumed(), s.resumed());
+            c
+        };
+        let first = connect(&cc, "localhost");
+        assert!(!first.resumed());
+        let id = first.session_id().unwrap().to_vec();
+        assert_eq!(id.len(), 32);
+        let second = connect(&cc, "localhost");
+        assert!(second.resumed(), "{protocols:?}");
+        assert_eq!(second.peer_certificates().unwrap()[0].as_ref(), CERT);
+        if !protocols.tls13 {
+            // TLS 1.2 resumes the session the ID names.
+            assert_eq!(second.session_id(), Some(&id[..]));
+        }
+        assert!(connect(&cc, "localhost").resumed());
+        // Another target name: its own sessions (none yet).
+        assert!(!connect(&cc, "127.0.0.1").resumed());
+        // Another credential: none.
+        assert!(!connect(&ClientCache::new(true), "localhost").resumed());
+        // SCH_CRED_DISABLE_RECONNECTS.
+        let off = ClientCache::new(false);
+        assert!(!connect(&off, "localhost").resumed());
+        assert!(!connect(&off, "localhost").resumed());
+        assert_eq!(off.servers(), 0);
+    }
+}
+
+/// A server whose cache is off (SCH_CRED_DISABLE_RECONNECTS) never
+/// resumes.
+#[test]
+fn server_cache_off() {
+    for protocols in [BOTH, Protocols { tls12: true, tls13: false }] {
+        let p = provider();
+        let (cc, sc) = (ClientCache::new(true), Arc::new(ServerCache::new(false)));
+        for _ in 0..2 {
+            let mut c = client_of(&p, protocols, auto(), "localhost", &cc);
+            let mut s = server_of(&p, protocols, &sc);
+            handshake(&mut c, &mut s, usize::MAX);
+            assert!(!c.resumed() && !s.resumed());
+        }
+    }
+}
+
+/// Names this thread for the replay registry (replay.rs), as schannel.dll
+/// does with GetCurrentThreadId.
+fn name_threads() {
+    std::thread_local!(static MARK: u8 = const { 0 });
+    set_thread_id(|| MARK.with(|m| m as *const u8 as u64));
+}
+
+/// The client certificate and its key (ECDSA P-256).
+fn client_certificate(p: &Arc<CryptoProvider>) -> Arc<rustls::sign::CertifiedKey> {
+    let key = p
+        .key_provider
+        .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(CLIENT_KEY.to_vec())))
+        .unwrap();
+    Arc::new(rustls::sign::CertifiedKey::new(vec![CertificateDer::from(CLIENT_CERT.to_vec())], key))
+}
+
+/// A server that asks for a client certificate issued by the test CA
+/// (`optional`: one without is let through).
+fn asking_server(p: &Arc<CryptoProvider>, protocols: Protocols, optional: bool) -> Session {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from(CA.to_vec())).unwrap();
+    let mut b =
+        rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), p.clone());
+    if optional {
+        b = b.allow_unauthenticated();
+    }
+    let verifier = b.build().unwrap();
+    server_with(p, protocols, &Arc::new(ServerCache::new(true)), Some(verifier))
+}
+
+/// A client with a certificate (or none) and `ask`.
+fn client_with(
+    p: &Arc<CryptoProvider>,
+    protocols: Protocols,
+    certificate: Option<Arc<rustls::sign::CertifiedKey>>,
+    ask: bool,
+) -> Session {
+    let s = ClientSettings {
+        protocols,
+        validation: auto(),
+        target: "localhost",
+        alpn: vec![],
+        certificate,
+        ask,
+    };
+    Session::client(p, Arc::new(Now(TODAY)), s, &ClientCache::new(true)).unwrap()
+}
+
+/// A client's certificate in the credential goes out when the server
+/// asks, and the server sees it.
+#[test]
+fn client_certificate_in_the_credential() {
+    name_threads();
+    for protocols in [BOTH, Protocols { tls12: true, tls13: false }] {
+        let p = provider();
+        let mut c = client_with(&p, protocols, Some(client_certificate(&p)), true);
+        let mut s = asking_server(&p, protocols, false);
+        handshake(&mut c, &mut s, usize::MAX);
+        assert_eq!(s.peer_certificates().unwrap()[0].as_ref(), CLIENT_CERT);
+        message(&mut c, &mut s, b"ping");
+    }
+}
+
+/// The server's flight up to the client's reply: SEC_I_INCOMPLETE_
+/// CREDENTIALS with nothing sent, the server's acceptable issuers known;
+/// then (`supply`) a certificate or none, the same bytes passed again
+/// (or none, `again` false), and the handshake goes on.
+fn incomplete_credentials(
+    protocols: Protocols,
+    supply: bool,
+    again: bool,
+    step: usize,
+) -> (Session, Session) {
+    let p = provider();
+    let mut c = client_with(&p, protocols, None, true);
+    let mut s = asking_server(&p, protocols, true);
+    let hello = c.token(&[]).output;
+    let flight = s.token(&hello).output;
+    // The flight `step` bytes at a time until the client stops; what it
+    // sends before (TLS 1.3's compatibility ChangeCipherSpec) goes on.
+    let mut early = Vec::new();
+    let mut held = Vec::new();
+    let mut at = 0;
+    let t = loop {
+        let n = step.min(flight.len() - at);
+        held.extend_from_slice(&flight[at..at + n]);
+        at += n;
+        let mut t = c.token(&held);
+        match t.status {
+            sec::E_INCOMPLETE_MESSAGE => {}
+            sec::I_CONTINUE_NEEDED => {
+                early.append(&mut t.output);
+                held.drain(..held.len() - t.extra);
+            }
+            _ => break t,
+        }
+    };
+    assert_eq!(t.status, sec::I_INCOMPLETE_CREDENTIALS, "{:x}", t.status);
+    assert!(t.output.is_empty());
+    assert!(c.awaiting_credentials());
+    let issuers = c.issuers().unwrap();
+    assert_eq!(issuers.len(), 1);
+    assert!(issuers[0].windows(21).any(|w| w == b"gala schannel test CA"));
+    // The certificate comes with another credential (its own cache).
+    let other = ClientCache::new(true);
+    let certificate = supply.then(|| {
+        let (_, config) =
+            other.config_for(&p, Arc::new(Now(TODAY)), protocols, auto(), "localhost").unwrap();
+        (client_certificate(&p), config)
+    });
+    c.supply(certificate).unwrap();
+    // The rest of the flight, behind the same bytes again (the documented
+    // loop) or alone.
+    let rest = &flight[at..];
+    let input = if again { [held.as_slice(), rest].concat() } else { rest.to_vec() };
+    let mut t = c.token(&input);
+    assert!(!c.awaiting_credentials());
+    assert!(t.status == sec::E_OK || t.status == sec::I_CONTINUE_NEEDED, "{:x}", t.status);
+    early.append(&mut t.output);
+    let mut to_server = early;
+    for _ in 0..4 {
+        let t = s.token(&to_server);
+        assert!(t.status == sec::E_OK || t.status == sec::I_CONTINUE_NEEDED, "{:x}", t.status);
+        let mut to_client = t.output;
+        if c.established() {
+            post_handshake(&mut c, &mut to_client);
+            if s.established() {
+                break;
+            }
+            to_server = Vec::new();
+            continue;
+        }
+        let t = c.token(&to_client);
+        to_server = t.output;
+    }
+    assert!(c.established() && s.established());
+    message(&mut c, &mut s, b"ping");
+    message(&mut s, &mut c, b"pong");
+    (c, s)
+}
+
+#[test]
+fn incomplete_credentials_then_a_certificate() {
+    name_threads();
+    for protocols in [BOTH, Protocols { tls12: true, tls13: false }] {
+        for (again, step) in [(true, usize::MAX), (false, usize::MAX), (true, 7)] {
+            let (_, s) = incomplete_credentials(protocols, true, again, step);
+            assert_eq!(s.peer_certificates().unwrap()[0].as_ref(), CLIENT_CERT, "{protocols:?}");
+        }
+    }
+}
+
+#[test]
+fn incomplete_credentials_then_none() {
+    name_threads();
+    for protocols in [BOTH, Protocols { tls12: true, tls13: false }] {
+        let (_, s) = incomplete_credentials(protocols, false, true, usize::MAX);
+        assert!(s.peer_certificates().is_none());
+    }
+}
+
+/// ISC_REQ_USE_SUPPLIED_CREDS (`ask` false): no certificate, no stop.
+#[test]
+fn supplied_credentials_only() {
+    name_threads();
+    let p = provider();
+    let mut c = client_with(&p, BOTH, None, false);
+    let mut s = asking_server(&p, BOTH, true);
+    handshake(&mut c, &mut s, usize::MAX);
+    assert!(s.peer_certificates().is_none());
 }
 
 /// The public CA bundle gala ships in the machine root store

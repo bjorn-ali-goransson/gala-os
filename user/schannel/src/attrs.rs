@@ -39,6 +39,8 @@ const SECPKG_ATTR_APPLICATION_PROTOCOL: u32 = 35;
 const SECPKG_ATTR_REMOTE_CERT_CONTEXT: u32 = 0x53;
 const SECPKG_ATTR_LOCAL_CERT_CONTEXT: u32 = 0x54;
 const SECPKG_ATTR_CONNECTION_INFO: u32 = 0x5a;
+const SECPKG_ATTR_SESSION_INFO: u32 = 0x5d;
+const SECPKG_ATTR_ISSUER_LIST_EX: u32 = 0x59;
 const SECPKG_ATTR_CIPHER_INFO: u32 = 0x64;
 
 /// The package's SecPkgInfoW, as QuerySecurityPackageInfo gives it.
@@ -241,6 +243,50 @@ pub extern "system" fn QueryContextAttributesW(
             let info = [protocol(ctx), alg, cipher_bits, hash_alg, hash_bits, 0xae06, exchange];
             unsafe { buffer.cast::<[u32; 7]>().write_unaligned(info) };
         }
+        SECPKG_ATTR_SESSION_INFO => {
+            // SecPkgContext_SessionInfo: dwFlags (SSL_SESSION_RECONNECT
+            // for a resumed session), cbSessionId, rgbSessionId[32].
+            if !ctx.session.established() {
+                return sec::E_OUT_OF_SEQUENCE;
+            }
+            let mut v = [0u8; 40];
+            v[..4].copy_from_slice(&u32::from(ctx.session.resumed()).to_le_bytes());
+            let id = ctx.session.session_id().unwrap_or(&[]);
+            let n = id.len().min(32);
+            v[4..8].copy_from_slice(&(n as u32).to_le_bytes());
+            v[8..8 + n].copy_from_slice(&id[..n]);
+            unsafe { buffer.cast::<[u8; 40]>().write_unaligned(v) };
+        }
+        SECPKG_ATTR_ISSUER_LIST_EX => {
+            // SecPkgContext_IssuerListInfoEx: aIssuers (CERT_NAME_BLOBs:
+            // cbData, pbData; the DER names the server's CertificateRequest
+            // gave, in one block FreeContextBuffer frees), cIssuers.
+            let issuers = ctx.session.issuers().unwrap_or(&[]);
+            let block = if issuers.is_empty() {
+                core::ptr::null_mut()
+            } else {
+                let size: usize = issuers.iter().map(|i| 16 + i.len()).sum();
+                let block = ffi::allocate(size);
+                if block.is_null() {
+                    return SEC_E_INSUFFICIENT_MEMORY;
+                }
+                let mut data = 16 * issuers.len();
+                for (n, name) in issuers.iter().enumerate() {
+                    unsafe {
+                        let blob = block.add(16 * n);
+                        blob.cast::<u32>().write(name.len() as u32);
+                        blob.add(8).cast::<*mut u8>().write(block.add(data));
+                        core::ptr::copy_nonoverlapping(name.as_ptr(), block.add(data), name.len());
+                    }
+                    data += name.len();
+                }
+                block
+            };
+            unsafe {
+                buffer.cast::<*mut u8>().write_unaligned(block);
+                buffer.add(8).cast::<u32>().write_unaligned(issuers.len() as u32);
+            }
+        }
         SECPKG_ATTR_CIPHER_INFO => {
             // SecPkgContext_CipherInfo (version 1): dwVersion, dwProtocol,
             // dwCipherSuite, dwBaseCipherSuite, szCipherSuite[64],
@@ -286,8 +332,13 @@ pub extern "system" fn QueryContextAttributesW(
             ffi::put_wide(&mut info.cipher, cipher);
             ffi::put_wide(&mut info.hash, hash);
             ffi::put_wide(&mut info.exchange, "ECDH");
-            let rsa = suite_id == 0xc02f || suite_id == 0xc030 || suite_id == 0xcca8;
-            ffi::put_wide(&mut info.certificate, if rsa { "RSA" } else { "" });
+            // The certificate's algorithm a TLS 1.2 suite names.
+            let certificate = match suite_id {
+                0xc02f | 0xc030 | 0xcca8 => "RSA",
+                0xc02b | 0xc02c | 0xcca9 => "ECDSA",
+                _ => "",
+            };
+            ffi::put_wide(&mut info.certificate, certificate);
             unsafe { buffer.cast::<CipherInfo>().write_unaligned(info) };
         }
         _ => {

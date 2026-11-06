@@ -1,7 +1,7 @@
 //! gala's ncrypt.dll (CNG key storage): the Microsoft Software Key
-//! Storage Provider opens (also as the default), with RSA keys imported
-//! into it (`keys`: NCryptImportKey, named keys opened again, signing;
-//! Schannel's server keys); generating one (NCryptCreatePersistedKey) is
+//! Storage Provider opens (also as the default), with RSA and ECDSA
+//! (P-256, P-384) keys imported into it (`keys`: NCryptImportKey, named
+//! keys opened again, signing; Schannel's server and client keys); generating one (NCryptCreatePersistedKey) is
 //! not supported yet (recorded in the ledger). Other providers (the
 //! TPM's Platform Crypto Provider, smart cards) do not exist here.
 

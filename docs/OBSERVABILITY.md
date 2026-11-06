@@ -74,7 +74,12 @@ port. Lines that tools and agents rely on:
 - `desktop: session S is live (WxH), shown by none|console|test`, `desktop:
   session S is now shown by test (WxH; was none)`, `presenter: test frame
   for session S: WxH at 0x... (...)` (where xtask's headless screen checks
-  read it), `desktop: no screen and no presenter= (...)`, `desktop: the
+  read it), `desktop: no screen and no presenter= (...)`; the server
+  kernel's `desktop: no compositor in this kernel (server build: windows
+  are kept, nothing draws them)` at boot, `desktop: session S keeps its
+  windows (WxH), shown by none (no compositor in this kernel)` and the
+  warning `desktop: session S cannot be shown by test: no compositor in
+  this kernel`; `desktop: the
   console now shows session S (WxH; was session T, which keeps its N
   windows shown by none)` (a console switch; a warning `the console
   could not move ...; it stays` when it fails), `desktop: pid P's input
@@ -149,7 +154,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
 | `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names) |
-| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenario `presenter_test` |
+| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none) |
 
 A `record` boot's recording also goes to this port (`"ev":"rec"`,
 whatever the mask; extracted to `<iso>.rec`).

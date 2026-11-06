@@ -1,6 +1,7 @@
 //! Credentials: SCHANNEL_CRED and SCH_CREDENTIALS as AcquireCredentialsHandle
-//! gets them, a server's certificate and its CNG key (signing through
-//! ncrypt), the clock. Trust is crypt32's (`trust`).
+//! gets them, a server's or client's certificate and its CNG key (RSA or
+//! ECDSA, signing through ncrypt), the handle's session caches, the
+//! clock. Trust is crypt32's (`trust`).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -10,10 +11,10 @@ use core::ffi::c_void;
 
 use schannel_tls::rustls::crypto::CryptoProvider;
 use schannel_tls::rustls::pki_types::{CertificateDer, UnixTime};
-use schannel_tls::rustls::sign::{Signer, SigningKey};
+use schannel_tls::rustls::sign::{CertifiedKey, Signer, SigningKey};
 use schannel_tls::rustls::time_provider::TimeProvider;
 use schannel_tls::rustls::{Error, SignatureAlgorithm, SignatureScheme};
-use schannel_tls::{Protocols, sec};
+use schannel_tls::{ClientCache, Protocols, ServerCache, sec};
 
 use crate::ffi::{self, missing};
 
@@ -70,12 +71,21 @@ impl TimeProvider for Clock {
     }
 }
 
-/// A server key in CNG (an NCRYPT_KEY_HANDLE): rustls signs through
-/// NCryptSignHash, so the key stays in ncrypt.
+/// A certificate's key in CNG (an NCRYPT_KEY_HANDLE): rustls signs
+/// through NCryptSignHash, so the key stays in ncrypt.
 #[derive(Debug)]
 pub struct CngKey {
     handle: usize,
     owned: bool,
+    kind: KeyKind,
+}
+
+/// A certificate's key algorithm (from its SubjectPublicKeyInfo).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyKind {
+    Rsa,
+    EcdsaP256,
+    EcdsaP384,
 }
 
 impl Drop for CngKey {
@@ -99,12 +109,25 @@ const RSA_SCHEMES: [SignatureScheme; 6] = [
 
 impl SigningKey for CngKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
-        let scheme = RSA_SCHEMES.into_iter().find(|s| offered.contains(s))?;
+        // ECDSA: the curve's own hash (TLS 1.3 binds them; Windows signs
+        // so in TLS 1.2 too).
+        let scheme = match self.kind {
+            KeyKind::Rsa => RSA_SCHEMES.into_iter().find(|s| offered.contains(s))?,
+            KeyKind::EcdsaP256 => {
+                Some(SignatureScheme::ECDSA_NISTP256_SHA256).filter(|s| offered.contains(s))?
+            }
+            KeyKind::EcdsaP384 => {
+                Some(SignatureScheme::ECDSA_NISTP384_SHA384).filter(|s| offered.contains(s))?
+            }
+        };
         Some(Box::new(CngSigner { handle: self.handle, scheme }))
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
-        SignatureAlgorithm::RSA
+        match self.kind {
+            KeyKind::Rsa => SignatureAlgorithm::RSA,
+            _ => SignatureAlgorithm::ECDSA,
+        }
     }
 }
 
@@ -123,14 +146,22 @@ impl Signer for CngSigner {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
         use sha2::Digest;
         let (hash, alg): (Vec<u8>, &str) = match self.scheme {
-            SignatureScheme::RSA_PSS_SHA256 | SignatureScheme::RSA_PKCS1_SHA256 => {
+            SignatureScheme::RSA_PSS_SHA256
+            | SignatureScheme::RSA_PKCS1_SHA256
+            | SignatureScheme::ECDSA_NISTP256_SHA256 => {
                 (sha2::Sha256::digest(message).to_vec(), "SHA256")
             }
-            SignatureScheme::RSA_PSS_SHA384 | SignatureScheme::RSA_PKCS1_SHA384 => {
+            SignatureScheme::RSA_PSS_SHA384
+            | SignatureScheme::RSA_PKCS1_SHA384
+            | SignatureScheme::ECDSA_NISTP384_SHA384 => {
                 (sha2::Sha384::digest(message).to_vec(), "SHA384")
             }
             _ => (sha2::Sha512::digest(message).to_vec(), "SHA512"),
         };
+        let ecdsa = matches!(
+            self.scheme,
+            SignatureScheme::ECDSA_NISTP256_SHA256 | SignatureScheme::ECDSA_NISTP384_SHA384
+        );
         let mut alg_w = [0u16; 8];
         ffi::put_wide(&mut alg_w, alg);
         let pss = matches!(
@@ -147,14 +178,23 @@ impl Signer for CngSigner {
             salt: u32,
         }
         let padding = Padding { alg: alg_w.as_ptr(), salt: hash.len() as u32 };
-        let flags = if pss { 8 } else { 2 }; // BCRYPT_PAD_PSS / BCRYPT_PAD_PKCS1
+        // BCRYPT_PAD_PSS / BCRYPT_PAD_PKCS1; ECDSA has no padding.
+        let flags = if ecdsa {
+            0
+        } else if pss {
+            8
+        } else {
+            2
+        };
+        let padding: *const c_void =
+            if ecdsa { core::ptr::null() } else { (&padding as *const Padding).cast() };
         let mut sig = alloc::vec![0u8; 1024];
         let mut n = 0u32;
         // SAFETY: the key handle; our buffers.
         let status = unsafe {
             NCryptSignHash(
                 self.handle,
-                (&padding as *const Padding).cast(),
+                padding,
                 hash.as_ptr(),
                 hash.len() as u32,
                 sig.as_mut_ptr(),
@@ -168,6 +208,10 @@ impl Signer for CngSigner {
             return Err(Error::General(String::from("NCryptSignHash failed")));
         }
         sig.truncate(n as usize);
+        if ecdsa {
+            // CNG gives r || s; TLS wants DER's Ecdsa-Sig-Value.
+            return ecdsa_der(&sig).ok_or_else(|| Error::General(String::from("ECDSA signature")));
+        }
         Ok(sig)
     }
 
@@ -180,6 +224,35 @@ impl Signer for CngSigner {
 unsafe impl Send for CngSigner {}
 unsafe impl Sync for CngSigner {}
 
+/// An ECDSA signature r || s (two halves of equal size) as DER's
+/// Ecdsa-Sig-Value: SEQUENCE { INTEGER r, INTEGER s }.
+fn ecdsa_der(rs: &[u8]) -> Option<Vec<u8>> {
+    if rs.is_empty() || !rs.len().is_multiple_of(2) || rs.len() > 132 {
+        return None;
+    }
+    let mut body = Vec::new();
+    for half in rs.chunks(rs.len() / 2) {
+        // Minimal: no leading zeros, one zero before a high bit.
+        let start = half.iter().position(|&b| b != 0).unwrap_or(half.len() - 1);
+        let v = &half[start..];
+        let pad = v[0] & 0x80 != 0;
+        body.push(2);
+        body.push((v.len() + usize::from(pad)) as u8);
+        if pad {
+            body.push(0);
+        }
+        body.extend_from_slice(v);
+    }
+    let mut der = Vec::new();
+    der.push(0x30);
+    if body.len() >= 0x80 {
+        der.push(0x81);
+    }
+    der.push(body.len() as u8);
+    der.extend_from_slice(&body);
+    Some(der)
+}
+
 /// CERT_CONTEXT's pbCertEncoded/cbCertEncoded.
 fn encoded<'a>(cert: *const c_void) -> &'a [u8] {
     // SAFETY: the caller's CERT_CONTEXT.
@@ -190,10 +263,10 @@ fn encoded<'a>(cert: *const c_void) -> &'a [u8] {
     }
 }
 
-/// The CNG key of a server certificate: CERT_NCRYPT_KEY_HANDLE_PROP_ID,
-/// or the key CERT_KEY_PROV_INFO_PROP_ID names (opened from its
-/// provider).
-fn certificate_key(cert: *const c_void) -> Result<CngKey, u32> {
+/// The CNG key of a certificate (a server's, or a client's):
+/// CERT_NCRYPT_KEY_HANDLE_PROP_ID, or the key CERT_KEY_PROV_INFO_PROP_ID
+/// names (opened from its provider).
+pub fn certificate_key(cert: *const c_void, kind: KeyKind) -> Result<CngKey, u32> {
     let mut handle = 0u64;
     let mut size = 8u32;
     // SAFETY: crypt32's property of the caller's context; our output.
@@ -201,7 +274,7 @@ fn certificate_key(cert: *const c_void) -> Result<CngKey, u32> {
         CertGetCertificateContextProperty(cert, 78, (&mut handle as *mut u64).cast(), &mut size)
     } != 0
     {
-        return Ok(CngKey { handle: handle as usize, owned: false });
+        return Ok(CngKey { handle: handle as usize, owned: false, kind });
     }
     let mut info = [0u64; 300];
     let mut size = (info.len() * 8) as u32;
@@ -209,7 +282,7 @@ fn certificate_key(cert: *const c_void) -> Result<CngKey, u32> {
     if unsafe { CertGetCertificateContextProperty(cert, 2, info.as_mut_ptr().cast(), &mut size) }
         == 0
     {
-        missing(b"schannel.dll!server certificate without a private key", 0);
+        missing(b"schannel.dll!certificate without a private key", 0);
         return Err(sec::E_NO_CREDENTIALS);
     }
     let container = info[0] as *const u16;
@@ -218,7 +291,7 @@ fn certificate_key(cert: *const c_void) -> Result<CngKey, u32> {
     let spec = info[5] as u32;
     if provider_type != 0 {
         // A CryptoAPI (CSP) key container: not in gala.
-        missing(b"schannel.dll!server key in a CryptoAPI provider", provider_type.into());
+        missing(b"schannel.dll!certificate key in a CryptoAPI provider", provider_type.into());
         return Err(sec::E_NO_CREDENTIALS);
     }
     let (mut p, mut key) = (0usize, 0usize);
@@ -234,14 +307,27 @@ fn certificate_key(cert: *const c_void) -> Result<CngKey, u32> {
             return Err(sec::E_NO_CREDENTIALS);
         }
     }
-    Ok(CngKey { handle: key, owned: true })
+    Ok(CngKey { handle: key, owned: true, kind })
 }
 
-/// Whether a certificate's key is RSA (rsaEncryption in its
-/// SubjectPublicKeyInfo).
-fn is_rsa(der: &[u8]) -> bool {
+/// A certificate's key algorithm: rsaEncryption, or id-ecPublicKey on
+/// P-256 or P-384, in its SubjectPublicKeyInfo (the OIDs as DER encodes
+/// them; the signature algorithm's OIDs differ from these).
+pub fn key_kind(der: &[u8]) -> Option<KeyKind> {
     const RSA: [u8; 11] = [6, 9, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1];
-    der.windows(RSA.len()).any(|w| w == RSA)
+    const EC: [u8; 9] = [6, 7, 0x2a, 0x86, 0x48, 0xce, 0x3d, 2, 1];
+    const P256: [u8; 10] = [6, 8, 0x2a, 0x86, 0x48, 0xce, 0x3d, 3, 1, 7];
+    const P384: [u8; 7] = [6, 5, 0x2b, 0x81, 0x04, 0, 34];
+    let has = |oid: &[u8]| der.windows(oid.len()).any(|w| w == oid);
+    if has(&RSA) {
+        Some(KeyKind::Rsa)
+    } else if has(&EC) && has(&P256) {
+        Some(KeyKind::EcdsaP256)
+    } else if has(&EC) && has(&P384) {
+        Some(KeyKind::EcdsaP384)
+    } else {
+        None
+    }
 }
 
 /// A credential handle's state.
@@ -253,6 +339,16 @@ pub struct Credential {
     pub chain: Vec<CertificateDer<'static>>,
     pub key: Option<Arc<dyn SigningKey>>,
     pub provider: Arc<CryptoProvider>,
+    /// The session caches of the handle (a client's or a server's):
+    /// contexts of the same handle (and, for a client, target name)
+    /// resume.
+    pub client_cache: ClientCache,
+    pub server_cache: Arc<ServerCache>,
+    /// A client's certificate (paCred[0]) with its CNG key, sent when
+    /// the server asks.
+    pub client_cert: Option<Arc<CertifiedKey>>,
+    /// SCH_CRED_NO_DEFAULT_CREDS: no automatic choice from the MY store.
+    pub no_default_creds: bool,
 }
 
 const SP_PROT_TLS1_2: u32 = 0xc00;
@@ -263,6 +359,8 @@ const SP_PROT_SERVER: u32 = 0x5_5555;
 const SP_PROT_CLIENT: u32 = 0xa_aaaa;
 const SCH_CRED_NO_SERVERNAME_CHECK: u32 = 0x4;
 const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x8;
+const SCH_CRED_NO_DEFAULT_CREDS: u32 = 0x10;
+const SCH_CRED_DISABLE_RECONNECTS: u32 = 0x80;
 const SCH_CRED_REVOCATION_CHECKS: u32 = 0x100 | 0x200 | 0x400;
 
 fn read32(p: *const u8, at: usize) -> u32 {
@@ -340,6 +438,8 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
         missing(b"schannel.dll!protocols other than TLS 1.2 and 1.3", (enabled | disabled).into());
     }
     let manual = flags & SCH_CRED_MANUAL_CRED_VALIDATION != 0;
+    // SCH_CRED_DISABLE_RECONNECTS: full handshakes only.
+    let reconnects = flags & SCH_CRED_DISABLE_RECONNECTS == 0;
     let mut credential = Credential {
         inbound,
         protocols,
@@ -348,6 +448,10 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
         chain: Vec::new(),
         key: None,
         provider: Arc::new(schannel_tls::provider()),
+        client_cache: ClientCache::new(reconnects && !inbound),
+        server_cache: Arc::new(ServerCache::new(reconnects && inbound)),
+        client_cert: None,
+        no_default_creds: flags & SCH_CRED_NO_DEFAULT_CREDS != 0,
     };
     if count > 0 && !certs.is_null() {
         // SAFETY: the caller's array of `count` PCCERT_CONTEXT.
@@ -356,15 +460,21 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
             let der = encoded(cert);
             credential.chain.push(CertificateDer::from(der.to_vec()));
             if inbound {
-                if !is_rsa(der) {
-                    missing(b"schannel.dll!server key other than RSA", 0);
+                let Some(kind) = key_kind(der) else {
+                    missing(b"schannel.dll!server key other than RSA, ECDSA P-256 and P-384", 0);
                     return Err(sec::E_NO_CREDENTIALS);
-                }
-                credential.key = Some(Arc::new(certificate_key(cert)?));
+                };
+                credential.key = Some(Arc::new(certificate_key(cert, kind)?));
             } else {
-                // Client certificates (mutual TLS) are not sent yet.
-                missing(b"schannel.dll!client certificate", 0);
-                credential.chain.clear();
+                // The client's certificate, for a server that asks (only
+                // the certificate: no intermediates from the stores yet).
+                let Some(kind) = key_kind(der) else {
+                    missing(b"schannel.dll!client key other than RSA, ECDSA P-256 and P-384", 0);
+                    return Err(sec::E_NO_CREDENTIALS);
+                };
+                let key: Arc<dyn SigningKey> = Arc::new(certificate_key(cert, kind)?);
+                let chain = core::mem::take(&mut credential.chain);
+                credential.client_cert = Some(Arc::new(CertifiedKey::new(chain, key)));
             }
         }
     }

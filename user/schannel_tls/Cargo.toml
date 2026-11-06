@@ -14,3 +14,9 @@ bench = false
 [dependencies]
 rustls = { version = "0.23.46", default-features = false, features = ["tls12"] }
 rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12"] }
+# The key exchanges and random source a client handshake records and
+# replays (src/replay.rs): the crates rustls-rustcrypto uses for them.
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+x25519-dalek = { version = "2", default-features = false }
+p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdh"] }

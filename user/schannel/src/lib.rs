@@ -63,6 +63,7 @@ unsafe extern "C" {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
+    fn GetCurrentThreadId() -> u32;
 }
 
 /// MSVC-target codegen references this marker symbol directly.
@@ -81,9 +82,11 @@ const SEC_E_SECPKG_NOT_FOUND: u32 = 0x8009_0305;
 
 /// ISC_REQ_/ASC_REQ_ flags.
 const ALLOCATE_MEMORY: u32 = 0x100;
+const ISC_REQ_USE_SUPPLIED_CREDS: u32 = 0x80;
 const ISC_REQ_EXTENDED_ERROR: u32 = 0x4000;
 const ISC_REQ_MANUAL_CRED_VALIDATION: u32 = 0x8_0000;
 const ASC_REQ_EXTENDED_ERROR: u32 = 0x8000;
+const ASC_REQ_MUTUAL_AUTH: u32 = 0x2;
 /// What a client may ask for and get (ISC_RET_ has the same bits):
 /// REPLAY_DETECT, SEQUENCE_DETECT, CONFIDENTIALITY, USE_SUPPLIED_CREDS,
 /// EXTENDED_ERROR, STREAM, INTEGRITY, MANUAL_CRED_VALIDATION.
@@ -101,6 +104,8 @@ pub struct Context {
     pub alpn_offered: bool,
     /// A server's certificate (SECPKG_ATTR_LOCAL_CERT_CONTEXT).
     pub local: Option<Vec<u8>>,
+    /// A client's target name (pszTargetName of the first call).
+    pub target: String,
 }
 
 /// AcquireCredentialsHandleW with UNISP_NAME or SCHANNEL_NAME.
@@ -418,6 +423,17 @@ pub extern "system" fn InitializeSecurityContextA(
     )
 }
 
+/// How a client context of `cred` validates the server's certificate:
+/// manually (SCH_CRED_MANUAL_CRED_VALIDATION, ISC_REQ_MANUAL_CRED_VALIDATION)
+/// or by crypt32.
+fn validation(cred: &creds::Credential, flags: u32) -> Validation {
+    if cred.manual || flags & ISC_REQ_MANUAL_CRED_VALIDATION != 0 {
+        Validation::Manual
+    } else {
+        Validation::Auto { trust: Arc::new(trust::Crypt32), check_name: cred.check_name }
+    }
+}
+
 fn initialize(
     credential: *mut SecHandle,
     context: *mut SecHandle,
@@ -434,7 +450,44 @@ fn initialize(
         if ctx.server {
             return sec::E_OUT_OF_SEQUENCE;
         }
+        if ctx.session.awaiting_credentials() {
+            // After SEC_I_INCOMPLETE_CREDENTIALS: this call's credential
+            // (a new one with a certificate, or the same to go on without).
+            let mut supplied = None;
+            if let Some(cred) = state::<creds::Credential>(credential, CREDENTIAL_TAG)
+                && let Some(cert) = cred.client_cert.clone()
+            {
+                // The session then belongs to this credential (its cache).
+                match cred.client_cache.config_for(
+                    &cred.provider,
+                    Arc::new(creds::Clock),
+                    cred.protocols,
+                    validation(cred, flags),
+                    &ctx.target,
+                ) {
+                    Ok((_, config)) => supplied = Some((cert, config)),
+                    Err(e) => {
+                        ffi::failed("ISC", &FailedStatus(e), e);
+                        return e;
+                    }
+                }
+            }
+            if let Err(e) = ctx.session.supply(supplied) {
+                match ctx.session.failure() {
+                    Some(reason) => ffi::failed("ISC", reason, e),
+                    None => ffi::failed("ISC", &FailedStatus(e), e),
+                }
+                return e;
+            }
+        }
         let r = step(ctx, "ISC", input, flags, output, attributes);
+        if r == sec::I_INCOMPLETE_CREDENTIALS
+            && state::<creds::Credential>(credential, CREDENTIAL_TAG)
+                .is_some_and(|c| !c.no_default_creds)
+        {
+            // Windows would first look for a certificate in the MY store.
+            missing(b"schannel.dll!client certificate chosen from the MY store", 0);
+        }
         same_context(context, new_context);
         return r;
     }
@@ -445,26 +498,32 @@ fn initialize(
         return SEC_E_INVALID_HANDLE;
     }
     let alpn = alpn_list(input);
-    let manual = cred.manual || flags & ISC_REQ_MANUAL_CRED_VALIDATION != 0;
-    let validation = if manual {
-        Validation::Manual
-    } else {
-        Validation::Auto { trust: Arc::new(trust::Crypt32), check_name: cred.check_name }
-    };
     let settings = ClientSettings {
         protocols: cred.protocols,
-        validation,
+        validation: validation(cred, flags),
         target,
         alpn: alpn.clone().unwrap_or_default(),
+        certificate: cred.client_cert.clone(),
+        // ISC_REQ_USE_SUPPLIED_CREDS: send what the credential has, never
+        // stop for more.
+        ask: flags & ISC_REQ_USE_SUPPLIED_CREDS == 0,
     };
-    let session = match Session::client(&cred.provider, Arc::new(creds::Clock), settings) {
-        Ok(s) => s,
-        Err(e) => {
-            ffi::failed("ISC", &FailedStatus(e), e);
-            return e;
-        }
+    let session =
+        match Session::client(&cred.provider, Arc::new(creds::Clock), settings, &cred.client_cache)
+        {
+            Ok(s) => s,
+            Err(e) => {
+                ffi::failed("ISC", &FailedStatus(e), e);
+                return e;
+            }
+        };
+    let ctx = Context {
+        session,
+        server: false,
+        alpn_offered: alpn.is_some(),
+        local: None,
+        target: String::from(target),
     };
-    let ctx = Context { session, server: false, alpn_offered: alpn.is_some(), local: None };
     let p = match store_context(ctx, new_context) {
         Ok(p) => p,
         Err(e) => return e,
@@ -504,11 +563,17 @@ pub extern "system" fn AcceptSecurityContext(
         return SEC_E_INVALID_HANDLE;
     };
     let alpn = alpn_list(input);
+    if flags & ASC_REQ_MUTUAL_AUTH != 0 {
+        missing(b"schannel.dll!ASC_REQ_MUTUAL_AUTH (client certificates)", 0);
+    }
     let settings = ServerSettings {
         protocols: cred.protocols,
         chain: cred.chain.clone(),
         key,
         alpn: alpn.clone().unwrap_or_default(),
+        cache: cred.server_cache.clone(),
+        // ASC_REQ_MUTUAL_AUTH is not asked of clients yet (recorded).
+        client_auth: None,
     };
     let session = match Session::server(&cred.provider, Arc::new(creds::Clock), settings) {
         Ok(s) => s,
@@ -518,7 +583,13 @@ pub extern "system" fn AcceptSecurityContext(
         }
     };
     let local = cred.chain.first().map(|c| c.as_ref().to_vec());
-    let ctx = Context { session, server: true, alpn_offered: alpn.is_some(), local };
+    let ctx = Context {
+        session,
+        server: true,
+        alpn_offered: alpn.is_some(),
+        local,
+        target: String::new(),
+    };
     let mut handle = SecHandle { lower: 0, upper: 0 };
     let p = match store_context(ctx, &mut handle) {
         Ok(p) => p,
@@ -689,9 +760,16 @@ pub extern "system" fn FreeContextBuffer(buffer: *mut u8) -> u32 {
     sec::E_OK
 }
 
-/// DllMain (the entry point our link flags name).
+/// DllMain (the entry point our link flags name): names threads for the
+/// engine's replay registry (schannel_tls replay.rs).
 #[unsafe(no_mangle)]
-pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved: usize) -> i32 {
+pub extern "system" fn mainCRTStartup(_instance: usize, reason: u32, _reserved: usize) -> i32 {
+    if reason == 1 {
+        schannel_tls::set_thread_id(|| {
+            // SAFETY: plain call.
+            u64::from(unsafe { GetCurrentThreadId() })
+        });
+    }
     1
 }
 
