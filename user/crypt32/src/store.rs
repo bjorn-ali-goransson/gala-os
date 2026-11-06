@@ -4,17 +4,19 @@
 //! encoded certificates and contexts with the CERT_STORE_ADD_*
 //! dispositions, enumerating, finding, deleting, duplicating and closing.
 //! A store holds one reference to each of its contexts, which are copies
-//! whose hCertStore is the store; closing the last store reference
-//! releases them (contexts still held by callers then keep a dangling
-//! hCertStore: Windows keeps the store until they are freed). No CRLs or
-//! CTLs. Built on cert.rs's contexts through their public functions.
+//! whose hCertStore is the store; a context a caller holds holds the
+//! store (cert.rs `Block`), so the store lives until its last handle is
+//! closed and its last context held outside is freed, as on Windows (a
+//! context's hCertStore stays usable). No CRLs or CTLs. Built on
+//! cert.rs's contexts through their public functions.
 
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use crate::cert::{
     CertContext, CertCreateCertificateContext, CertDuplicateCertificateContext,
-    CertFreeCertificateContext, CertGetCertificateContextProperty, CertGetNameStringW,
+    CertFreeCertificateContext, CertGetCertificateContextProperty, CertGetNameStringW, adopt,
+    disown,
 };
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -44,7 +46,6 @@ pub(crate) fn error<T>(code: u32, value: T) -> T {
     value
 }
 
-const X509_ASN_ENCODING: u32 = 1;
 const E_INVALIDARG: u32 = 0x8007_0057;
 const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
 const CRYPT_E_EXISTS: u32 = 0x8009_2005;
@@ -332,13 +333,27 @@ pub extern "system" fn CertDuplicateStore(h: *mut c_void) -> *mut c_void {
     h
 }
 
-/// CertCloseStore: one reference less; the last releases the store's
-/// contexts.
+/// A reference to the store held by a context a caller holds (cert.rs).
+pub(crate) fn hold(h: *mut c_void) {
+    if let Some(s) = store(h) {
+        s.refs.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// The reference `hold` took.
+pub(crate) fn release(h: *mut c_void) {
+    CertCloseStore(h, 0);
+}
+
+/// CertCloseStore: one reference less (handles, and the contexts callers
+/// hold); the last releases the store's contexts.
 #[unsafe(no_mangle)]
 pub extern "system" fn CertCloseStore(h: *mut c_void, _flags: u32) -> i32 {
     let Some(s) = store(h) else { return 1 };
     if s.refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+        // No caller holds a context of it (each would hold the store).
         for &c in s.items() {
+            disown(c);
             CertFreeCertificateContext(c);
         }
         let members = s.members;
@@ -361,11 +376,6 @@ pub extern "system" fn CertCloseStore(h: *mut c_void, _flags: u32) -> i32 {
 fn encoding<'a>(c: *const CertContext) -> &'a [u8] {
     // SAFETY: a context of ours (its encoding).
     unsafe { core::slice::from_raw_parts((*c).encoded, (*c).encoded_len as usize) }
-}
-
-fn set_store(c: *const CertContext, h: *mut c_void) {
-    // SAFETY: a context of ours, made for this store: its public field.
-    unsafe { (*c.cast_mut()).store = h };
 }
 
 const CERT_STORE_ADD_NEW: u32 = 1;
@@ -392,7 +402,9 @@ fn add(
         unsafe { *out = core::ptr::null() };
     }
     let bytes = encoding(cert);
-    let copy = CertCreateCertificateContext(X509_ASN_ENCODING, bytes.as_ptr(), bytes.len() as u32);
+    // SAFETY: a context of ours: its dwCertEncodingType, kept by the copy.
+    let kind = unsafe { (*cert).encoding };
+    let copy = CertCreateCertificateContext(kind, bytes.as_ptr(), bytes.len() as u32);
     if copy.is_null() {
         return 0;
     }
@@ -418,7 +430,6 @@ fn add(
     if matches!(disposition, CERT_STORE_ADD_NEWER | CERT_STORE_ADD_NEWER_INHERIT_PROPERTIES) {
         unsupported(b"crypt32.dll!CertAddCertificateContextToStore(ADD_NEWER)", disposition.into());
     }
-    set_store(copy, h);
     let result = s.with(|s| {
         let existing = s.items().iter().position(|&c| encoding(c) == bytes);
         match (existing, disposition) {
@@ -426,6 +437,7 @@ fn add(
             (Some(i), CERT_STORE_ADD_USE_EXISTING) => Ok((s.items()[i], true)),
             (Some(_), CERT_STORE_ADD_ALWAYS) | (None, _) => {
                 if s.push(copy) {
+                    adopt(copy, h);
                     Ok((copy, false))
                 } else {
                     Err(ERROR_NOT_ENOUGH_MEMORY)
@@ -434,8 +446,14 @@ fn add(
             (Some(i), _) => {
                 // Replace (and the ADD_NEWER kinds, as replace).
                 let old = s.remove(i);
+                disown(old);
                 CertFreeCertificateContext(old);
-                if s.push(copy) { Ok((copy, false)) } else { Err(ERROR_NOT_ENOUGH_MEMORY) }
+                if s.push(copy) {
+                    adopt(copy, h);
+                    Ok((copy, false))
+                } else {
+                    Err(ERROR_NOT_ENOUGH_MEMORY)
+                }
             }
         }
     });
@@ -737,6 +755,7 @@ pub extern "system" fn CertDeleteCertificateFromStore(cert: *const CertContext) 
     if let Some(s) = store(h) {
         let removed = s.with(|s| s.items().iter().position(|&c| c == cert).map(|i| s.remove(i)));
         if let Some(c) = removed {
+            disown(c);
             CertFreeCertificateContext(c);
         }
     }
@@ -797,7 +816,7 @@ pub extern "system" fn CertFindChainInStore(
     prev: *const u8,
 ) -> *const u8 {
     if !prev.is_null() {
-        crate::chain::CertFreeCertificateChain(prev);
+        crate::chain::CertFreeCertificateChain(prev.cast());
     }
     if store(h).is_none() {
         return error(E_INVALIDARG, core::ptr::null());

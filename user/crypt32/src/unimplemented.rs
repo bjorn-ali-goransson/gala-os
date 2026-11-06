@@ -24,14 +24,12 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertCreateCRLContext
     CertCreateCTLContext
     CertCreateCTLEntryFromCertificateContextProperties
-    CertCreateCertificateChainEngine
     CertCreateContext
     CertCreateSelfSignCertificate
     CertDeleteCRLFromStore
     CertDeleteCTLFromStore
     CertDuplicateCRLContext
     CertDuplicateCTLContext
-    CertDuplicateCertificateChain
     CertEnumCRLContextProperties
     CertEnumCTLContextProperties
     CertEnumCTLsInStore
@@ -48,7 +46,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertFindSubjectInSortedCTL
     CertFreeCRLContext
     CertFreeCTLContext
-    CertFreeCertificateChainEngine
     CertFreeCertificateChainList
     CertFreeServerOcspResponseContext
     CertGetCRLContextProperty
@@ -70,7 +67,6 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertRegisterPhysicalStore
     CertRegisterSystemStore
     CertRemoveEnhancedKeyUsageIdentifier
-    CertResyncCertificateChainEngine
     CertRetrieveLogoOrBiometricInfo
     CertSaveStore
     CertSelectCertificateChains

@@ -59,8 +59,53 @@ fn server(p: &Arc<CryptoProvider>, protocols: Protocols) -> Session {
     Session::server(p, Arc::new(Now(TODAY)), s).unwrap()
 }
 
+/// Automatic validation's decision in the host tests: webpki's, with
+/// `roots` (schannel.dll asks crypt32's chain engine instead).
+#[derive(Debug)]
+struct WebPki(Vec<CertificateDer<'static>>);
+
+impl Trust for WebPki {
+    fn check(
+        &self,
+        end_entity: &[u8],
+        intermediates: &[&[u8]],
+        name: Option<&str>,
+        now: UnixTime,
+    ) -> Result<(), CertificateError> {
+        let mut store = rustls::RootCertStore::empty();
+        for r in &self.0 {
+            store.add(r.clone()).unwrap();
+        }
+        if store.is_empty() {
+            return Err(CertificateError::UnknownIssuer);
+        }
+        let v = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(store),
+            provider(),
+        )
+        .build()
+        .unwrap();
+        let inter: Vec<CertificateDer<'_>> =
+            intermediates.iter().map(|c| CertificateDer::from(*c)).collect();
+        let server = ServerName::try_from(name.unwrap_or("localhost")).unwrap();
+        match v.verify_server_cert(&CertificateDer::from(end_entity), &inter, &server, &[], now) {
+            Ok(_) => Ok(()),
+            Err(Error::InvalidCertificate(
+                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
+            )) if name.is_none() => Ok(()),
+            Err(Error::InvalidCertificate(e)) => Err(e),
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+}
+
+fn trusting(roots: &[&[u8]], check_name: bool) -> Validation {
+    let roots = roots.iter().map(|r| CertificateDer::from(r.to_vec())).collect();
+    Validation::Auto { trust: Arc::new(WebPki(roots)), check_name }
+}
+
 fn auto() -> Validation {
-    Validation::Auto { roots: vec![CertificateDer::from(CA.to_vec())], check_name: true }
+    trusting(&[CA], true)
 }
 
 /// Feeds `bytes` to `s` as a caller of the documented loop does: on
@@ -209,11 +254,8 @@ fn validation_results() {
     assert_eq!(validation(auto(), "localhost"), sec::E_OK);
     assert_eq!(validation(auto(), "gala.invalid"), sec::E_WRONG_PRINCIPAL);
     assert_eq!(validation(Validation::Manual, "gala.invalid"), sec::E_OK);
-    let no_roots = Validation::Auto { roots: vec![], check_name: true };
-    assert_eq!(validation(no_roots, "localhost"), sec::E_UNTRUSTED_ROOT);
-    let no_name =
-        Validation::Auto { roots: vec![CertificateDer::from(CA.to_vec())], check_name: false };
-    assert_eq!(validation(no_name, "gala.invalid"), sec::E_OK);
+    assert_eq!(validation(trusting(&[], true), "localhost"), sec::E_UNTRUSTED_ROOT);
+    assert_eq!(validation(trusting(&[CA], false), "gala.invalid"), sec::E_OK);
     // Errors stay.
     let p = provider();
     let (mut c, mut s) = (client(&p, BOTH, auto(), "gala.invalid"), server(&p, BOTH));
@@ -314,12 +356,12 @@ fn renegotiate_on_post_handshake_message() {
 
 /// The public CA bundle gala ships in the machine root store
 /// (user/roots/public-roots.pem, THIRD_PARTY.md): every certificate in it
-/// is a trust anchor the client's verifier takes (a root that does not
-/// parse would be dropped silently by `Session::client`).
+/// is a well-formed trust anchor (webpki's reading; crypt32, which
+/// decides for Schannel, records one it cannot decode).
 #[test]
 fn public_roots_are_all_trust_anchors() {
     let text = include_str!("../../roots/public-roots.pem");
-    let mut store = RootCertStore::empty();
+    let mut store = rustls::RootCertStore::empty();
     let mut count = 0;
     for block in text.split("-----BEGIN CERTIFICATE-----").skip(1) {
         let body = block.split("-----END CERTIFICATE-----").next().unwrap();

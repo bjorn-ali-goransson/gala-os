@@ -4,8 +4,10 @@
 //! exported under their SSPI names, as Windows' schannel.dll does.
 //!
 //! - `creds`: AcquireCredentialsHandle's SCHANNEL_CRED / SCH_CREDENTIALS,
-//!   the trust anchors (gala's machine root store), a server's
-//!   certificate and CNG key.
+//!   a server's certificate and CNG key.
+//! - `trust`: automatic validation, by crypt32's chain engine and SSL
+//!   policy (gala's machine root store), the decision programs that
+//!   validate themselves get too.
 //! - here: InitializeSecurityContext, AcceptSecurityContext,
 //!   EncryptMessage, DecryptMessage, ApplyControlToken, contexts, with the
 //!   SecBuffer rules (learn.microsoft.com: the Schannel pages of those
@@ -30,6 +32,7 @@ use gala_heap as _;
 mod attrs;
 mod creds;
 mod ffi;
+mod trust;
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -446,7 +449,7 @@ fn initialize(
     let validation = if manual {
         Validation::Manual
     } else {
-        Validation::Auto { roots: cred.roots.clone(), check_name: cred.check_name }
+        Validation::Auto { trust: Arc::new(trust::Crypt32), check_name: cred.check_name }
     };
     let settings = ClientSettings {
         protocols: cred.protocols,

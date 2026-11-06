@@ -1,8 +1,8 @@
 //! gala's crypt32.dll: certificate contexts (`cert`: X.509 decoding,
-//! properties, names, public keys), chains without a chain engine yet
-//! (`chain`: untrusted, recorded), DPAPI (`dpapi`), memory certificate
-//! stores (`store`; the system stores open empty: gala installs no
-//! certificates yet), CryptQueryObject and CryptDecodeObjectEx for
+//! properties, names, public keys, signatures), the chain engine and its
+//! policies (`chain`), DPAPI (`dpapi`), memory certificate stores
+//! (`store`; ROOT holds gala's machine root store, `roots`; the other
+//! system stores open empty), CryptQueryObject and CryptDecodeObjectEx for
 //! alternative names (`query`), and smaller helpers (`misc`).
 
 #![no_std]

@@ -25,7 +25,10 @@
 //!    to the front), the returned ISC_RET_ attributes, STREAM_SIZES,
 //!    CONNECTION_INFO, CIPHER_INFO, APPLICATION_PROTOCOL (http/1.1), the
 //!    remote certificate (a CERT_CONTEXT: subject localhost, issuer the
-//!    CA), PACKAGE_INFO; an HTTP GET with EncryptMessage (STREAM_HEADER,
+//!    CA; its hCertStore holds what the server sent, and the chain engine
+//!    with that store trusts it and the SSL policy accepts "localhost",
+//!    as curl checks it with SCH_CRED_MANUAL_CRED_VALIDATION),
+//!    PACKAGE_INFO; an HTTP GET with EncryptMessage (STREAM_HEADER,
 //!    DATA, STREAM_TRAILER, EMPTY) and the answer with DecryptMessage in
 //!    place (DATA, EXTRA, SEC_E_INCOMPLETE_MESSAGE with SECBUFFER_MISSING,
 //!    SEC_I_RENEGOTIATE for TLS 1.3's NewSessionTicket handed back to
@@ -160,6 +163,47 @@ struct CertContext {
     encoded_size: u32,
     info: *const c_void,
     store: Handle,
+}
+
+/// CERT_CHAIN_PARA (no requested usage).
+#[repr(C)]
+struct ChainPara {
+    size: u32,
+    usage: [u64; 3],
+}
+
+/// CERT_CHAIN_CONTEXT's start: cbSize, TrustStatus (error, info).
+#[repr(C)]
+struct ChainContext {
+    size: u32,
+    error: u32,
+    info: u32,
+}
+
+/// CERT_CHAIN_POLICY_PARA with SSL_EXTRA_CERT_CHAIN_POLICY_PARA.
+#[repr(C)]
+struct PolicyPara {
+    size: u32,
+    flags: u32,
+    extra: *const SslPolicyPara,
+}
+
+#[repr(C)]
+struct SslPolicyPara {
+    size: u32,
+    auth_type: u32,
+    checks: u32,
+    server_name: *const u16,
+}
+
+/// CERT_CHAIN_POLICY_STATUS.
+#[repr(C)]
+struct PolicyStatus {
+    size: u32,
+    error: u32,
+    chain_index: i32,
+    element_index: i32,
+    extra: *mut c_void,
 }
 
 /// CRYPT_KEY_PROV_INFO.
@@ -315,6 +359,24 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn CertCreateCertificateContext(encoding: u32, data: *const u8, size: u32) -> *const c_void;
     fn CertFreeCertificateContext(cert: *const c_void) -> i32;
+    fn CertEnumCertificatesInStore(store: Handle, prev: *const c_void) -> *const c_void;
+    fn CertGetCertificateChain(
+        engine: Handle,
+        cert: *const c_void,
+        time: *const u64,
+        additional: Handle,
+        para: *const ChainPara,
+        flags: u32,
+        reserved: *const c_void,
+        chain: *mut *const ChainContext,
+    ) -> i32;
+    fn CertVerifyCertificateChainPolicy(
+        policy: usize,
+        chain: *const ChainContext,
+        para: *const PolicyPara,
+        status: *mut PolicyStatus,
+    ) -> i32;
+    fn CertFreeCertificateChain(chain: *const ChainContext);
     fn CertGetNameStringW(
         cert: *const c_void,
         kind: u32,
@@ -1113,6 +1175,53 @@ fn check_connection(c: &mut Checks, client: &mut Client, tls13: bool) -> Result<
             64,
         );
         c.ok(same(name.as_ptr(), "gala schannel test CA"), 0)?;
+        // Its store holds the certificates the server sent; validating
+        // them as curl does with SCH_CRED_MANUAL_CRED_VALIDATION (the
+        // chain engine with that store as the additional store, then the
+        // SSL policy for the name) trusts them.
+        c.step(b"tls1.3 client: the remote certificate's chain");
+        c.ok(!ctx.store.is_null(), 0)?;
+        let first = CertEnumCertificatesInStore(ctx.store, null());
+        c.ok(!first.is_null(), 0)?;
+        CertFreeCertificateContext(first);
+        let para = ChainPara { size: size_of::<ChainPara>() as u32, usage: [0; 3] };
+        let mut chain: *const ChainContext = null();
+        c.ok(
+            CertGetCertificateChain(
+                null_mut(),
+                cert,
+                null(),
+                ctx.store,
+                &para,
+                0,
+                null(),
+                &mut chain,
+            ) != 0,
+            0,
+        )?;
+        // The chain's error bits as the value seen.
+        c.eq((*chain).error.into(), 0)?;
+        let mut host = [0u16; 16];
+        for (slot, ch) in host.iter_mut().zip("localhost".encode_utf16()) {
+            *slot = ch;
+        }
+        let ssl = SslPolicyPara {
+            size: size_of::<SslPolicyPara>() as u32,
+            auth_type: 2, // AUTHTYPE_SERVER
+            checks: 0,
+            server_name: host.as_ptr(),
+        };
+        let policy = PolicyPara { size: size_of::<PolicyPara>() as u32, flags: 0, extra: &ssl };
+        let mut status = PolicyStatus {
+            size: 24,
+            error: 1,
+            chain_index: 0,
+            element_index: 0,
+            extra: null_mut(),
+        };
+        c.ok(CertVerifyCertificateChainPolicy(4, chain, &policy, &mut status) != 0, 0)?;
+        c.eq(status.error.into(), 0)?;
+        CertFreeCertificateChain(chain);
         c.ok(CertFreeCertificateContext(cert) != 0, 0)?;
     }
     let mut package: *mut SecPkgInfo = null_mut();

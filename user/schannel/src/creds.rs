@@ -1,6 +1,6 @@
 //! Credentials: SCHANNEL_CRED and SCH_CREDENTIALS as AcquireCredentialsHandle
-//! gets them, the trust anchors of gala's machine root store, a server's
-//! certificate and its CNG key (signing through ncrypt), the clock.
+//! gets them, a server's certificate and its CNG key (signing through
+//! ncrypt), the clock. Trust is crypt32's (`trust`).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -20,21 +20,6 @@ use crate::ffi::{self, missing};
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
-    fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
-    fn FindFirstFileW(name: *const u16, data: *mut FindData) -> usize;
-    fn FindNextFileW(find: usize, data: *mut FindData) -> i32;
-    fn FindClose(find: usize) -> i32;
-    fn CreateFileW(
-        name: *const u16,
-        access: u32,
-        share: u32,
-        security: *const c_void,
-        disposition: u32,
-        flags: u32,
-        template: usize,
-    ) -> usize;
-    fn ReadFile(file: usize, buffer: *mut u8, size: u32, read: *mut u32, overlapped: usize) -> i32;
-    fn CloseHandle(handle: usize) -> i32;
 }
 
 #[link(name = "crypt32", kind = "raw-dylib")]
@@ -70,19 +55,6 @@ unsafe extern "system" {
     fn NCryptFreeObject(object: usize) -> i32;
 }
 
-/// WIN32_FIND_DATAW.
-#[repr(C)]
-struct FindData {
-    attributes: u32,
-    times: [u32; 6],
-    size_high: u32,
-    size_low: u32,
-    reserved: [u32; 2],
-    name: [u16; 260],
-    short_name: [u16; 14],
-    _obsolete: [u32; 3],
-}
-
 /// The clock rustls checks certificates' validity with.
 #[derive(Debug)]
 pub struct Clock;
@@ -96,116 +68,6 @@ impl TimeProvider for Clock {
         let secs = (t / 10_000_000).checked_sub(11_644_473_600)?;
         Some(UnixTime::since_unix_epoch(core::time::Duration::from_secs(secs)))
     }
-}
-
-/// gala's machine root store: the certificates (DER or PEM) in
-/// %SystemRoot%\System32\gala\roots, which crypt32's "ROOT" system
-/// store holds too (user/crypt32/src/roots.rs).
-pub fn machine_roots() -> Vec<CertificateDer<'static>> {
-    let mut roots = Vec::new();
-    let mut dir = [0u16; 300];
-    // SAFETY: our buffer.
-    let n = unsafe { GetSystemDirectoryW(dir.as_mut_ptr(), 260) } as usize;
-    if n == 0 || n > 260 {
-        return roots;
-    }
-    let mut path: Vec<u16> = dir[..n].to_vec();
-    path.extend("\\gala\\roots\\".encode_utf16());
-    let base = path.len();
-    let mut pattern = path.clone();
-    pattern.extend([u16::from(b'*'), 0]);
-    // SAFETY: plain data, written by the call.
-    let mut data: FindData = unsafe { core::mem::zeroed() };
-    // SAFETY: a NUL-terminated pattern; our output.
-    let find = unsafe { FindFirstFileW(pattern.as_ptr(), &mut data) };
-    if find == usize::MAX {
-        missing(b"schannel.dll!machine root store (no gala/roots directory)", 0);
-        return roots;
-    }
-    loop {
-        if data.attributes & 0x10 == 0 {
-            let len = data.name.iter().position(|&c| c == 0).unwrap_or(0);
-            path.truncate(base);
-            path.extend_from_slice(&data.name[..len]);
-            path.push(0);
-            if let Some(bytes) = read_file(&path) {
-                roots.extend(certificates(&bytes));
-            }
-        }
-        // SAFETY: the search handle; our output.
-        if unsafe { FindNextFileW(find, &mut data) } == 0 {
-            break;
-        }
-    }
-    // SAFETY: the search handle.
-    unsafe { FindClose(find) };
-    roots
-}
-
-fn read_file(path: &[u16]) -> Option<Vec<u8>> {
-    // SAFETY: a NUL-terminated path; GENERIC_READ, FILE_SHARE_READ,
-    // OPEN_EXISTING.
-    let file = unsafe { CreateFileW(path.as_ptr(), 0x8000_0000, 1, core::ptr::null(), 3, 0, 0) };
-    if file == usize::MAX {
-        return None;
-    }
-    let mut out = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let mut n = 0u32;
-        // SAFETY: our buffer and output.
-        let ok = unsafe { ReadFile(file, chunk.as_mut_ptr(), 4096, &mut n, 0) };
-        if ok == 0 || n == 0 || out.try_reserve(n as usize).is_err() || out.len() > 1 << 20 {
-            break;
-        }
-        out.extend_from_slice(&chunk[..n as usize]);
-    }
-    // SAFETY: our handle.
-    unsafe { CloseHandle(file) };
-    Some(out)
-}
-
-/// The certificates of a file: DER (one), or PEM (any number).
-fn certificates(bytes: &[u8]) -> Vec<CertificateDer<'static>> {
-    let mut out = Vec::new();
-    if bytes.first() == Some(&0x30) {
-        out.push(CertificateDer::from(bytes.to_vec()));
-        return out;
-    }
-    let text = core::str::from_utf8(bytes).unwrap_or("");
-    let mut rest = text;
-    while let Some(start) = rest.find("-----BEGIN CERTIFICATE-----") {
-        let body = &rest[start + 27..];
-        let Some(end) = body.find("-----END CERTIFICATE-----") else { break };
-        if let Some(der) = base64(&body[..end]) {
-            out.push(CertificateDer::from(der));
-        }
-        rest = &body[end..];
-    }
-    out
-}
-
-fn base64(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let (mut acc, mut bits) = (0u32, 0);
-    for c in text.bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' | b'\r' | b'\n' | b' ' | b'\t' => continue,
-            _ => return None,
-        };
-        acc = (acc << 6) | u32::from(v);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
 }
 
 /// A server key in CNG (an NCRYPT_KEY_HANDLE): rustls signs through
@@ -388,7 +250,6 @@ pub struct Credential {
     pub protocols: Protocols,
     pub manual: bool,
     pub check_name: bool,
-    pub roots: Vec<CertificateDer<'static>>,
     pub chain: Vec<CertificateDer<'static>>,
     pub key: Option<Arc<dyn SigningKey>>,
     pub provider: Arc<CryptoProvider>,
@@ -484,7 +345,6 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
         protocols,
         manual,
         check_name: flags & SCH_CRED_NO_SERVERNAME_CHECK == 0,
-        roots: Vec::new(),
         chain: Vec::new(),
         key: None,
         provider: Arc::new(schannel_tls::provider()),
@@ -510,9 +370,6 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
     }
     if inbound && credential.key.is_none() {
         return Err(sec::E_NO_CREDENTIALS);
-    }
-    if !inbound && !manual {
-        credential.roots = machine_roots();
     }
     Ok(credential)
 }

@@ -46,8 +46,8 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use rustls::client::UnbufferedClientConnection;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{UnbufferedClientConnection, WebPkiServerVerifier};
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::{ClientHello, ResolvesServerCert, UnbufferedServerConnection};
@@ -55,8 +55,8 @@ use rustls::sign::{CertifiedKey, SigningKey};
 use rustls::time_provider::TimeProvider;
 use rustls::unbuffered::{ConnectionState, EncodeError, EncryptError, UnbufferedStatus};
 use rustls::{
-    CertificateError, ClientConfig, DigitallySignedStruct, Error, ProtocolVersion, RootCertStore,
-    ServerConfig, SignatureScheme, SupportedCipherSuite, SupportedProtocolVersion,
+    CertificateError, ClientConfig, DigitallySignedStruct, Error, ProtocolVersion, ServerConfig,
+    SignatureScheme, SupportedCipherSuite, SupportedProtocolVersion,
 };
 
 pub use rustls;
@@ -80,6 +80,7 @@ pub mod sec {
     pub const E_ILLEGAL_MESSAGE: u32 = 0x8009_0326;
     pub const E_CERT_UNKNOWN: u32 = 0x8009_0327;
     pub const E_CERT_EXPIRED: u32 = 0x8009_0328;
+    pub const E_CERT_WRONG_USAGE: u32 = 0x8009_0349;
     pub const E_DECRYPT_FAILURE: u32 = 0x8009_0330;
     pub const E_ALGORITHM_MISMATCH: u32 = 0x8009_0331;
     pub const E_NO_CREDENTIALS: u32 = 0x8009_030e;
@@ -126,14 +127,29 @@ impl Protocols {
     }
 }
 
+/// The decision of automatic validation: whether the server's
+/// certificate (with the intermediates it sent) chains to a trusted root,
+/// is valid at `now` and, given a `name`, is for that name. schannel.dll
+/// asks crypt32's chain engine and SSL policy (the decision programs get
+/// from CertGetCertificateChain), so Schannel and the programs that check
+/// certificates themselves decide alike; the host tests use webpki.
+pub trait Trust: Send + Sync + core::fmt::Debug {
+    fn check(
+        &self,
+        end_entity: &[u8],
+        intermediates: &[&[u8]],
+        name: Option<&str>,
+        now: UnixTime,
+    ) -> Result<(), CertificateError>;
+}
+
 /// How a client checks the server's certificate.
 pub enum Validation {
     /// SCH_CRED_MANUAL_CRED_VALIDATION: the caller does (the handshake's
     /// signatures are still checked).
     Manual,
-    /// Automatic: a path to one of `roots`, validity, and (if
-    /// `check_name`) the target name.
-    Auto { roots: Vec<CertificateDer<'static>>, check_name: bool },
+    /// Automatic: `trust` decides, with the target name if `check_name`.
+    Auto { trust: Arc<dyn Trust>, check_name: bool },
 }
 
 /// A client context's settings (from the credentials and the first
@@ -159,18 +175,21 @@ pub struct ServerSettings {
 /// The SSPI status of an error from rustls.
 pub fn code(e: &Error) -> u32 {
     match e {
-        Error::InvalidCertificate(c) => match c {
-            CertificateError::UnknownIssuer => sec::E_UNTRUSTED_ROOT,
-            CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. } => {
-                sec::E_WRONG_PRINCIPAL
+        Error::InvalidCertificate(c) => {
+            match c {
+                CertificateError::UnknownIssuer => sec::E_UNTRUSTED_ROOT,
+                CertificateError::NotValidForName
+                | CertificateError::NotValidForNameContext { .. } => sec::E_WRONG_PRINCIPAL,
+                CertificateError::Expired
+                | CertificateError::ExpiredContext { .. }
+                | CertificateError::NotValidYet
+                | CertificateError::NotValidYetContext { .. } => sec::E_CERT_EXPIRED,
+                CertificateError::Revoked => sec::CRYPT_E_REVOKED,
+                CertificateError::InvalidPurpose
+                | CertificateError::InvalidPurposeContext { .. } => sec::E_CERT_WRONG_USAGE,
+                _ => sec::E_CERT_UNKNOWN,
             }
-            CertificateError::Expired
-            | CertificateError::ExpiredContext { .. }
-            | CertificateError::NotValidYet
-            | CertificateError::NotValidYetContext { .. } => sec::E_CERT_EXPIRED,
-            CertificateError::Revoked => sec::CRYPT_E_REVOKED,
-            _ => sec::E_CERT_UNKNOWN,
-        },
+        }
         Error::DecryptError => sec::E_DECRYPT_FAILURE,
         Error::PeerIncompatible(_) | Error::NoApplicationProtocol => sec::E_ALGORITHM_MISMATCH,
         Error::NoCertificatesPresented => sec::E_NO_CREDENTIALS,
@@ -187,9 +206,10 @@ pub fn code(e: &Error) -> u32 {
 /// Automatic or manual validation, with the handshake's signature checks.
 #[derive(Debug)]
 struct Verifier {
-    inner: Option<Arc<WebPkiServerVerifier>>,
-    manual: bool,
-    check_name: bool,
+    /// None: manual validation.
+    trust: Option<Arc<dyn Trust>>,
+    /// The name the certificate must have (None: not checked).
+    name: Option<alloc::string::String>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
@@ -198,22 +218,17 @@ impl ServerCertVerifier for Verifier {
         &self,
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
-        ocsp: &[u8],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        if self.manual {
-            return Ok(ServerCertVerified::assertion());
-        }
-        let Some(v) = &self.inner else {
-            return Err(Error::InvalidCertificate(CertificateError::UnknownIssuer));
-        };
-        match v.verify_server_cert(end_entity, intermediates, server_name, ocsp, now) {
-            Err(Error::InvalidCertificate(
-                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
-            )) if !self.check_name => Ok(ServerCertVerified::assertion()),
-            r => r,
-        }
+        let Some(trust) = &self.trust else { return Ok(ServerCertVerified::assertion()) };
+        let mut chain: Vec<&[u8]> = Vec::new();
+        chain.extend(intermediates.iter().map(|c| c.as_ref()));
+        trust
+            .check(end_entity.as_ref(), &chain, self.name.as_deref(), now)
+            .map_err(Error::InvalidCertificate)?;
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -542,28 +557,15 @@ impl Session {
             Ok(n) if !s.target.is_empty() => (n.to_owned(), true),
             _ => (ServerName::IpAddress(rustls::pki_types::IpAddr::V4([0, 0, 0, 0].into())), false),
         };
-        let (inner, manual, check_name) = match s.validation {
-            Validation::Manual => (None, true, false),
-            Validation::Auto { roots, check_name } => {
-                let mut store = RootCertStore::empty();
-                for r in roots {
-                    // A root that does not parse is no anchor.
-                    let _ = store.add(r);
-                }
-                let v = if store.is_empty() {
-                    None
-                } else {
-                    WebPkiServerVerifier::builder_with_provider(Arc::new(store), provider.clone())
-                        .build()
-                        .ok()
-                };
-                (v, false, check_name && named)
+        let (trust, wanted) = match s.validation {
+            Validation::Manual => (None, None),
+            Validation::Auto { trust, check_name } => {
+                (Some(trust), (check_name && named).then(|| s.target.into()))
             }
         };
         let verifier = Verifier {
-            inner,
-            manual,
-            check_name,
+            trust,
+            name: wanted,
             algorithms: provider.signature_verification_algorithms,
         };
         let versions = s.protocols.versions();

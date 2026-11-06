@@ -15,6 +15,14 @@
 # verification failure. --ssl-no-revoke (Schannel's revocation check):
 # the test certificates name no CRL distribution point, so there is
 # nothing to ask.
+#
+# Then with --cacert (C:\gala\ca.crt, the test CA in PEM; the CA file is
+# the only trust, as documented for both backends): Schannel's curl
+# checks the chain itself, through crypt32's chain engine with the file
+# as an exclusive root store (SCH_CRED_MANUAL_CRED_VALIDATION). The test
+# CA's certificate passes; a self-signed one, a CA file that does not
+# hold the issuer (C:\gala\untrusted.crt, the self-signed certificate)
+# and the expired certificate give 60.
 curl=C:/curl/curl.exe
 
 echo "version: $($curl -V | head -n 1)"
@@ -34,5 +42,17 @@ echo "untrusted: exit $?"
 
 $curl -sS --ssl-no-revoke https://localhost:8445/ >/dev/null
 echo "expired: exit $?"
+
+out=$($curl -sS --ssl-no-revoke --cacert C:/gala/ca.crt https://localhost:8443/)
+echo "cacert: exit $? $(echo "$out" | grep -o '<title>[^<]*</title>')"
+
+$curl -sS --ssl-no-revoke --cacert C:/gala/ca.crt https://localhost:8444/ >/dev/null
+echo "cacert untrusted: exit $?"
+
+$curl -sS --ssl-no-revoke --cacert C:/gala/untrusted.crt https://localhost:8443/ >/dev/null
+echo "cacert other: exit $?"
+
+$curl -sS --ssl-no-revoke --cacert C:/gala/ca.crt https://localhost:8445/ >/dev/null
+echo "cacert expired: exit $?"
 
 echo "curl.sh: done"

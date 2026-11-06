@@ -80,6 +80,8 @@
 //!   CERT_ALT_NAME_INFO, allocated (CRYPT_DECODE_ALLOC_FLAG, LocalFree) or
 //!   into the caller's buffer after a size query; ERROR_MORE_DATA when
 //!   the buffer is short.
+//! - The chain engine and its policies (chain.rs: CertGetCertificateChain,
+//!   CertVerifyCertificateChainPolicy, engines with an exclusive root).
 //!
 //! Prints `cert_test: ok` or exits with the number of the failing check.
 
@@ -366,6 +368,7 @@ unsafe extern "system" {
     fn BCryptDestroyKey(key: Handle) -> u32;
 }
 
+mod chain;
 mod vectors;
 
 #[allow(dead_code)]
@@ -796,6 +799,7 @@ fn run() -> Result<(), u32> {
         usage(&mut c)?;
         query(&mut c)?;
         alt_names(&mut c)?;
+        chain::chains(&mut c)?;
     }
     Ok(())
 }

@@ -5,7 +5,9 @@
 //! (create, hash data, finish, duplicate, reusable) or one shot. The
 //! digests come from the RustCrypto crates (THIRD_PARTY.md); MD2 and MD4
 //! too. Symmetric ciphers (AES, DES, 3DES, 3DES_112, RC2, RC4) with keys
-//! (`cipher`). RSA key pairs, signatures and encryption (`rsa`). Key
+//! (`cipher`). RSA key pairs, signatures and encryption (`rsa`). ECDSA
+//! public keys on P-256 and P-384 and their signature checks (`ecdsa`,
+//! crypt32's certificate signatures). Key
 //! derivation is not there: it fails with STATUS_NOT_SUPPORTED, recorded
 //! in the ledger.
 //!
@@ -25,6 +27,7 @@
 extern crate alloc;
 
 mod cipher;
+mod ecdsa;
 mod rsa;
 mod unimplemented;
 
@@ -117,9 +120,10 @@ pub enum Kind {
     Des3_112,
     Rc2,
     Rc4,
-    /// RSA: the provider opens; its key operations are not there yet
-    /// (recorded).
     Rsa,
+    /// ECDSA on P-256 and P-384: public keys and signature checks.
+    EcdsaP256,
+    EcdsaP384,
 }
 
 /// A block cipher's chaining mode (BCRYPT_CHAINING_MODE).
@@ -139,7 +143,7 @@ impl Mode {
 }
 
 impl Kind {
-    const ALL: [Kind; 15] = [
+    const ALL: [Kind; 17] = [
         Kind::Md5,
         Kind::Sha1,
         Kind::Sha256,
@@ -155,6 +159,8 @@ impl Kind {
         Kind::Rc2,
         Kind::Rc4,
         Kind::Rsa,
+        Kind::EcdsaP256,
+        Kind::EcdsaP384,
     ];
 
     fn is_hash(self) -> bool {
@@ -192,7 +198,7 @@ impl Kind {
             Kind::Md2 | Kind::Aes => 16,
             Kind::Des | Kind::Des3 | Kind::Des3_112 | Kind::Rc2 => 8,
             Kind::Rc4 => 1,
-            Kind::Rng | Kind::Rsa => 0,
+            Kind::Rng | Kind::Rsa | Kind::EcdsaP256 | Kind::EcdsaP384 => 0,
             _ => 64,
         }
     }
@@ -207,6 +213,8 @@ impl Kind {
             Kind::Rc2 => [16, 128, 8],
             Kind::Rc4 => [8, 512, 8],
             Kind::Rsa => [512, 16384, 64],
+            Kind::EcdsaP256 => [256, 256, 0],
+            Kind::EcdsaP384 => [384, 384, 0],
             _ => return None,
         })
     }
@@ -228,6 +236,8 @@ impl Kind {
             Kind::Rc2 => "RC2",
             Kind::Rc4 => "RC4",
             Kind::Rsa => "RSA",
+            Kind::EcdsaP256 => "ECDSA_P256",
+            Kind::EcdsaP384 => "ECDSA_P384",
         }
     }
 }
@@ -260,7 +270,8 @@ struct Provider {
 }
 
 /// The algorithm a handle names: a provider of ours or a pseudo-handle
-/// ("CNG Algorithm Pseudo-handles": 0x21 MD5 ... 0xd1 HMAC-SHA512).
+/// ("CNG Algorithm Pseudo-handles": 0x21 MD5 ... 0xd1 HMAC-SHA512, 0xe1
+/// RSA, 0x2e1 and 0x2f1 ECDSA P-256 and P-384).
 pub fn algorithm(h: usize) -> Option<Algorithm> {
     let pseudo = |kind, hmac| Some(Algorithm::new(kind, hmac));
     match h {
@@ -275,6 +286,9 @@ pub fn algorithm(h: usize) -> Option<Algorithm> {
         0xb1 => pseudo(Kind::Sha256, true),
         0xc1 => pseudo(Kind::Sha384, true),
         0xd1 => pseudo(Kind::Sha512, true),
+        0xe1 => pseudo(Kind::Rsa, false),
+        0x2e1 => pseudo(Kind::EcdsaP256, false),
+        0x2f1 => pseudo(Kind::EcdsaP384, false),
         0 => None,
         _ if h < 0x1000 => None,
         _ => {
@@ -609,6 +623,7 @@ enum Object<'a> {
     Hash(&'a mut Hash),
     Key(&'a mut cipher::Key),
     RsaKey(&'a mut rsa::RsaKey),
+    EcKey(&'a mut ecdsa::EcKey),
 }
 
 fn object<'a>(h: usize) -> Option<Object<'a>> {
@@ -620,6 +635,9 @@ fn object<'a>(h: usize) -> Option<Object<'a>> {
     }
     if let Some(k) = rsa::key(h) {
         return Some(Object::RsaKey(k));
+    }
+    if let Some(k) = ecdsa::key(h) {
+        return Some(Object::EcKey(k));
     }
     cipher::key(h).map(Object::Key)
 }
@@ -645,6 +663,10 @@ pub extern "system" fn BCryptGetProperty(
         Object::Hash(x) => (x.alg.kind, Mode::Cbc, 0, None),
         Object::Key(k) => (k.kind, k.mode, 0, Some(k.key_bits())),
         Object::RsaKey(k) => (Kind::Rsa, Mode::Cbc, 0, Some(k.bits())),
+        Object::EcKey(k) => {
+            let kind = if k.bits() == 256 { Kind::EcdsaP256 } else { Kind::EcdsaP384 };
+            (kind, Mode::Cbc, 0, Some(k.bits()))
+        }
     };
     let mut text = [0u8; 64];
     let dword = |text: &mut [u8; 64], v: u32| {
@@ -793,8 +815,12 @@ pub extern "system" fn BCryptExportKey(
     cipher::export(k, blob, out, len, result)
 }
 
-/// A handle that is not a symmetric key: an RSA key, or invalid.
+/// A handle that is not a symmetric key: an RSA or ECDSA key, or
+/// invalid.
 pub fn rsa_destroy(h: usize) -> Status {
+    if ecdsa::key(h).is_some() {
+        return ecdsa::destroy(h);
+    }
     rsa::destroy(h)
 }
 

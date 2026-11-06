@@ -146,6 +146,8 @@ dependencies = [
  "md2",
  "md4",
  "num-bigint-dig",
+ "p256",
+ "p384",
  "rand_core",
  "rc2",
  "rsa",
@@ -1578,6 +1580,10 @@ version = "0.1.0"
 
 [[package]]
 name = "psapi"
+version = "0.1.0"
+
+[[package]]
+name = "quota_test"
 version = "0.1.0"
 
 [[package]]

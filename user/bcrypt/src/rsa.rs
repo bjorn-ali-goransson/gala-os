@@ -108,6 +108,10 @@ pub extern "system" fn BCryptGenerateKeyPair(
     _flags: u32,
 ) -> Status {
     if !is_rsa(alg) {
+        if super::algorithm(alg).is_some() {
+            missing(b"bcrypt.dll!BCryptGenerateKeyPair(algorithm)", 0);
+            return STATUS_NOT_SUPPORTED;
+        }
         return STATUS_INVALID_HANDLE;
     }
     if out.is_null() || !(512..=16384).contains(&bits) || !bits.is_multiple_of(64) {
@@ -154,6 +158,14 @@ pub extern "system" fn BCryptImportKeyPair(
     len: u32,
     _flags: u32,
 ) -> Status {
+    if let Some(a) = super::algorithm(alg)
+        && matches!(a.kind, super::Kind::EcdsaP256 | super::Kind::EcdsaP384)
+    {
+        if import != 0 {
+            return STATUS_INVALID_PARAMETER;
+        }
+        return super::ecdsa::import(a.kind, blob_type, out, input, len);
+    }
     if !is_rsa(alg) {
         missing(b"bcrypt.dll!BCryptImportKeyPair(algorithm)", 0);
         return STATUS_NOT_SUPPORTED;
@@ -489,6 +501,10 @@ pub extern "system" fn BCryptSignHash(
     result: *mut u32,
     flags: u32,
 ) -> Status {
+    if super::ecdsa::key(h).is_some() {
+        missing(b"bcrypt.dll!BCryptSignHash(ECDSA)", 0);
+        return STATUS_NOT_SUPPORTED;
+    }
     let Some(k) = key(h) else { return STATUS_INVALID_HANDLE };
     let Some(public) = &k.public else { return STATUS_INVALID_HANDLE };
     let size = public.size();
@@ -532,6 +548,9 @@ pub extern "system" fn BCryptVerifySignature(
     sig_len: u32,
     flags: u32,
 ) -> Status {
+    if let Some(k) = super::ecdsa::key(h) {
+        return super::ecdsa::verify(k, bytes(hash, hash_len), bytes(sig, sig_len));
+    }
     let Some(k) = key(h) else { return STATUS_INVALID_HANDLE };
     let Some(public) = &k.public else { return STATUS_INVALID_HANDLE };
     let digest = bytes(hash, hash_len);

@@ -122,6 +122,13 @@ fn add(store: *mut c_void, der: &[u8]) -> u32 {
         CERT_STORE_ADD_USE_EXISTING,
         core::ptr::null_mut(),
     );
+    if ok == 0 {
+        // Not a trust anchor then: say so (the length as detail).
+        super::store::unsupported(
+            b"crypt32.dll!ROOT store (a certificate that does not decode)",
+            der.len() as u64,
+        );
+    }
     u32::from(ok != 0)
 }
 

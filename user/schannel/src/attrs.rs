@@ -13,6 +13,22 @@ use schannel_tls::sec;
 #[link(name = "crypt32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn CertCreateCertificateContext(encoding: u32, data: *const u8, size: u32) -> *const c_void;
+    fn CertOpenStore(
+        provider: usize,
+        encoding: u32,
+        prov: usize,
+        flags: u32,
+        para: *const c_void,
+    ) -> *mut c_void;
+    fn CertCloseStore(store: *mut c_void, flags: u32) -> i32;
+    fn CertAddEncodedCertificateToStore(
+        store: *mut c_void,
+        encoding: u32,
+        data: *const u8,
+        size: u32,
+        disposition: u32,
+        out: *mut *const c_void,
+    ) -> i32;
 }
 
 const SECPKG_ATTR_SIZES: u32 = 0;
@@ -105,6 +121,36 @@ fn certificate(der: &[u8]) -> *const c_void {
     unsafe { CertCreateCertificateContext(1 | 0x1_0000, der.as_ptr(), der.len() as u32) }
 }
 
+/// The CERT_CONTEXT of the first of `chain` (the peer's certificates as
+/// sent, its own first), in a memory store holding them all: its
+/// hCertStore, which curl and others pass to CertGetCertificateChain as
+/// the additional store. The context keeps the store (crypt32).
+fn certificate_in_store(chain: &[&[u8]]) -> *const c_void {
+    // SAFETY: crypt32's documented calls with DER certificates; the
+    // store's handle is closed, the context keeps the store.
+    unsafe {
+        let store = CertOpenStore(2, 0, 0, 0, core::ptr::null()); // CERT_STORE_PROV_MEMORY
+        if store.is_null() {
+            return core::ptr::null();
+        }
+        let mut first = core::ptr::null();
+        for (i, der) in chain.iter().enumerate() {
+            let out = if i == 0 { &raw mut first } else { core::ptr::null_mut() };
+            // CERT_STORE_ADD_ALWAYS.
+            CertAddEncodedCertificateToStore(
+                store,
+                1 | 0x1_0000,
+                der.as_ptr(),
+                der.len() as u32,
+                4,
+                out,
+            );
+        }
+        CertCloseStore(store, 0);
+        first
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn QueryContextAttributesW(
     context: *mut SecHandle,
@@ -163,13 +209,16 @@ pub extern "system" fn QueryContextAttributesW(
             unsafe { buffer.cast::<[u8; 264]>().write_unaligned(v) };
         }
         SECPKG_ATTR_REMOTE_CERT_CONTEXT | SECPKG_ATTR_LOCAL_CERT_CONTEXT => {
-            let der = if attribute == SECPKG_ATTR_LOCAL_CERT_CONTEXT {
-                ctx.local.as_deref()
+            let cert = if attribute == SECPKG_ATTR_LOCAL_CERT_CONTEXT {
+                let Some(der) = ctx.local.as_deref() else { return sec::E_NO_CREDENTIALS };
+                certificate(der)
             } else {
-                ctx.session.peer_certificates().and_then(|c| c.first()).map(|c| c.as_ref())
+                let Some(peer) = ctx.session.peer_certificates().filter(|c| !c.is_empty()) else {
+                    return sec::E_NO_CREDENTIALS;
+                };
+                let chain: alloc::vec::Vec<&[u8]> = peer.iter().map(|c| c.as_ref()).collect();
+                certificate_in_store(&chain)
             };
-            let Some(der) = der else { return sec::E_NO_CREDENTIALS };
-            let cert = certificate(der);
             if cert.is_null() {
                 return SEC_E_INSUFFICIENT_MEMORY;
             }

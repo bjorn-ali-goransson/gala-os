@@ -6,9 +6,11 @@
 //! a list of properties; the hash properties are computed with bcrypt
 //! (loaded on first use, like DPAPI's). Names are read from the encoded
 //! Name (CertGetNameStringW, CertNameToStrW); CryptImportPublicKeyInfoEx2
-//! makes a bcrypt RSA key of the public key.
+//! makes a bcrypt key of an RSA or ECDSA (P-256, P-384) public key, with
+//! which CryptVerifyCertificateSignatureEx checks signatures.
 //!
-//! No certificate stores yet: hCertStore is null.
+//! A context made here belongs to no store (hCertStore null); stores keep
+//! copies (store.rs).
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -44,27 +46,27 @@ fn error<T>(code: u32, value: T) -> T {
 
 /// One TLV: its tag, contents and the whole encoding.
 #[derive(Clone, Copy)]
-struct Tlv<'a> {
-    tag: u8,
-    content: &'a [u8],
-    whole: &'a [u8],
+pub(crate) struct Tlv<'a> {
+    pub tag: u8,
+    pub content: &'a [u8],
+    pub whole: &'a [u8],
 }
 
 /// Reads TLVs from `data` in order.
-struct Der<'a> {
-    data: &'a [u8],
+pub(crate) struct Der<'a> {
+    pub data: &'a [u8],
 }
 
 impl<'a> Der<'a> {
-    fn new(data: &'a [u8]) -> Der<'a> {
+    pub fn new(data: &'a [u8]) -> Der<'a> {
         Der { data }
     }
 
-    fn peek_tag(&self) -> Option<u8> {
+    pub fn peek_tag(&self) -> Option<u8> {
         self.data.first().copied()
     }
 
-    fn next(&mut self) -> Result<Tlv<'a>, u32> {
+    pub fn next(&mut self) -> Result<Tlv<'a>, u32> {
         let d = self.data;
         if d.len() < 2 {
             return Err(CRYPT_E_ASN1_EOD);
@@ -94,23 +96,23 @@ impl<'a> Der<'a> {
     }
 
     /// The next TLV, which must have tag `tag`.
-    fn expect(&mut self, tag: u8) -> Result<Tlv<'a>, u32> {
+    pub fn expect(&mut self, tag: u8) -> Result<Tlv<'a>, u32> {
         let t = self.next()?;
         if t.tag != tag { Err(CRYPT_E_ASN1_BADTAG) } else { Ok(t) }
     }
 }
 
-const SEQUENCE: u8 = 0x30;
-const SET: u8 = 0x31;
-const INTEGER: u8 = 0x02;
-const BIT_STRING: u8 = 0x03;
-const OCTET_STRING: u8 = 0x04;
-const OID: u8 = 0x06;
-const BOOLEAN: u8 = 0x01;
+pub(crate) const SEQUENCE: u8 = 0x30;
+pub(crate) const SET: u8 = 0x31;
+pub(crate) const INTEGER: u8 = 0x02;
+pub(crate) const BIT_STRING: u8 = 0x03;
+pub(crate) const OCTET_STRING: u8 = 0x04;
+pub(crate) const OID: u8 = 0x06;
+pub(crate) const BOOLEAN: u8 = 0x01;
 
 /// The dotted text of OID contents `oid` into `out` (NUL-terminated);
 /// its length without the NUL.
-fn oid_text(oid: &[u8], out: &mut [u8]) -> Result<usize, u32> {
+pub(crate) fn oid_text(oid: &[u8], out: &mut [u8]) -> Result<usize, u32> {
     let mut at = 0;
     let mut put = |text: &[u8]| -> Result<(), u32> {
         if at + text.len() + 1 > out.len() {
@@ -284,6 +286,15 @@ const CERT_MAGIC: u32 = 0x6761_6c63; // "galc"
 
 /// The heap block of a context: this header, then the extensions, the
 /// serial number (reversed), the OID strings and the encoding.
+///
+/// `refs` counts the references, with `OWNED` set while the context is
+/// in a store's list (its hCertStore): the store holds one of the
+/// references, and while any other is held the context holds one
+/// reference to the store, so a store closed by its last handle lives
+/// on until the contexts callers still hold are freed, as Windows keeps
+/// it. The flag and the count change together, so the store reference is
+/// taken and dropped exactly when "owned and held by a caller" starts and
+/// ends (duplicate 1 -> 2, free 2 -> 1, `disown` with callers holding).
 #[repr(C)]
 struct Block {
     magic: u32,
@@ -539,20 +550,55 @@ pub extern "system" fn CertCreateCertificateContext(
     }
 }
 
+/// `Block::refs`' flag: the context is in its store's list.
+const OWNED: u32 = 0x8000_0000;
+
 #[unsafe(no_mangle)]
 pub extern "system" fn CertDuplicateCertificateContext(
     p: *const CertContext,
 ) -> *const CertContext {
     if let Some(b) = block(p) {
-        b.refs.fetch_add(1, Ordering::AcqRel);
+        let old = b.refs.fetch_add(1, Ordering::AcqRel);
+        if old == OWNED | 1 {
+            // The first caller's reference: it keeps the store.
+            crate::store::hold(b.context.store);
+        }
     }
     p
+}
+
+/// Puts context `p` (a new copy with the one reference the store will
+/// hold) in store `h`'s list: its hCertStore.
+pub(crate) fn adopt(p: *const CertContext, h: *mut c_void) {
+    if let Some(b) = block(p) {
+        b.context.store = h;
+        b.refs.fetch_or(OWNED, Ordering::AcqRel);
+    }
+}
+
+/// Takes context `p` out of its store's list (the store still drops its
+/// reference with CertFreeCertificateContext): if callers hold it, the
+/// store reference they kept is released.
+pub(crate) fn disown(p: *const CertContext) {
+    if let Some(b) = block(p) {
+        let old = b.refs.fetch_and(!OWNED, Ordering::AcqRel);
+        if old & OWNED != 0 && old & !OWNED >= 2 {
+            crate::store::release(b.context.store);
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn CertFreeCertificateContext(p: *const CertContext) -> i32 {
     let Some(b) = block(p) else { return 1 };
-    if b.refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+    let old = b.refs.fetch_sub(1, Ordering::AcqRel);
+    if old == OWNED | 2 {
+        // The last caller's reference: the store may go now (and with it
+        // this context, whose block is not touched again here).
+        crate::store::release(b.context.store);
+        return 1;
+    }
+    if old & !OWNED == 1 {
         let mut prop = b.props;
         while !prop.is_null() {
             // SAFETY: our property list.
@@ -685,7 +731,7 @@ fn give(data: &[u8], out: *mut u8, len: *mut u32) -> i32 {
 }
 
 /// The subject key identifier extension's key id, if there is one.
-fn subject_key_id(info: &CertInfo) -> Option<&'static [u8]> {
+pub(crate) fn subject_key_id(info: &CertInfo) -> Option<&'static [u8]> {
     let ext =
         CertFindExtension(c"2.5.29.14".as_ptr().cast(), info.extension_count, info.extensions);
     if ext.is_null() {
@@ -973,7 +1019,7 @@ fn rsa_key(info: &PublicKeyInfo) -> Option<(&'static [u8], &'static [u8])> {
 ///
 /// # Safety
 /// `p` is a valid NUL-terminated string that outlives the result.
-unsafe fn c_text(p: *const u8) -> &'static [u8] {
+pub(crate) unsafe fn c_text(p: *const u8) -> &'static [u8] {
     if p.is_null() {
         return &[];
     }
@@ -993,7 +1039,11 @@ pub extern "system" fn CertGetPublicKeyLength(_encoding: u32, info: *const Publi
         return error(E_INVALIDARG, 0);
     }
     // SAFETY: the caller's structure.
-    match rsa_key(unsafe { &*info }) {
+    let info = unsafe { &*info };
+    if let Some((_, _, size, _)) = ec_key(info) {
+        return 8 * size as u32;
+    }
+    match rsa_key(info) {
         Some((n, _)) => {
             let top = n.first().copied().unwrap_or(0);
             (n.len() as u32 - 1) * 8 + (8 - top.leading_zeros())
@@ -1002,8 +1052,59 @@ pub extern "system" fn CertGetPublicKeyLength(_encoding: u32, info: *const Publi
     }
 }
 
-/// CryptImportPublicKeyInfoEx2: an RSA public key as a bcrypt key (an
-/// RSAPUBLICBLOB imported on bcrypt's RSA provider).
+/// An EC SubjectPublicKeyInfo on a curve bcrypt has: (bcrypt's ECDSA
+/// pseudo-handle, BCRYPT_ECCKEY_BLOB magic, coordinate size, the point's
+/// X || Y).
+fn ec_key(info: &PublicKeyInfo) -> Option<(usize, u32, usize, &'static [u8])> {
+    // SAFETY: the OID string of a CERT_PUBLIC_KEY_INFO.
+    let text = unsafe { c_text(info.algorithm.oid) };
+    if text != b"1.2.840.10045.2.1" {
+        return None;
+    }
+    let params = &info.algorithm.parameters;
+    // SAFETY: the parameters blob of the caller's structure.
+    let params = unsafe { core::slice::from_raw_parts(params.data, params.size as usize) };
+    const P256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    const P384: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+    let (alg, magic, size) = match params {
+        P256 => (0x2e1, 0x3153_4345, 32), // BCRYPT_ECDSA_P256_ALG_HANDLE, "ECS1"
+        P384 => (0x2f1, 0x3353_4345, 48), // BCRYPT_ECDSA_P384_ALG_HANDLE, "ECS3"
+        _ => return None,
+    };
+    // SAFETY: the key bits of the caller's structure.
+    let bits = unsafe { core::slice::from_raw_parts(info.key.data, info.key.size as usize) };
+    // An uncompressed point: 04 || X || Y.
+    match bits.split_first() {
+        Some((4, point)) if point.len() == 2 * size => Some((alg, magic, size, point)),
+        _ => None,
+    }
+}
+
+/// BCryptImportKeyPair(alg, blob type, blob) into `key`.
+fn import_key(alg: usize, blob_type: &[u16], blob: &[u8], key: *mut usize) -> i32 {
+    type Import =
+        unsafe extern "system" fn(usize, usize, *const u16, *mut usize, *const u8, u32, u32) -> u32;
+    let Some(import) = bcrypt(c"BCryptImportKeyPair") else { return error(NTE_BAD_ALGID, 0) };
+    // SAFETY: bcrypt's documented signature; our buffers. `alg` is one of
+    // CNG's algorithm pseudo-handles, so no provider is opened (or left
+    // open) for the key.
+    let status = unsafe {
+        core::mem::transmute::<usize, Import>(import)(
+            alg,
+            0,
+            blob_type.as_ptr(),
+            key,
+            blob.as_ptr(),
+            blob.len() as u32,
+            0,
+        )
+    };
+    if status != 0 { error(status, 0) } else { 1 }
+}
+
+/// CryptImportPublicKeyInfoEx2: a public key as a bcrypt key: RSA (an
+/// RSAPUBLICBLOB), ECDSA on P-256 or P-384 (an ECCPUBLICBLOB); other
+/// algorithms are NTE_BAD_ALGID (recorded).
 #[unsafe(no_mangle)]
 pub extern "system" fn CryptImportPublicKeyInfoEx2(
     _encoding: u32,
@@ -1016,8 +1117,20 @@ pub extern "system" fn CryptImportPublicKeyInfoEx2(
         return error(E_INVALIDARG, 0);
     }
     // SAFETY: the caller's structure.
-    let Some((n, e)) = rsa_key(unsafe { &*info }) else { return error(NTE_BAD_ALGID, 0) };
+    let info = unsafe { &*info };
     let mut blob = [0u8; 24 + 8 + 2048];
+    if let Some((alg, magic, size, point)) = ec_key(info) {
+        blob[..4].copy_from_slice(&magic.to_le_bytes());
+        blob[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+        blob[8..8 + point.len()].copy_from_slice(point);
+        let ecc_public: [u16; 14] =
+            [0x45, 0x43, 0x43, 0x50, 0x55, 0x42, 0x4c, 0x49, 0x43, 0x42, 0x4c, 0x4f, 0x42, 0]; // "ECCPUBLICBLOB"
+        return import_key(alg, &ecc_public, &blob[..8 + point.len()], key);
+    }
+    let Some((n, e)) = rsa_key(info) else {
+        crate::store::unsupported(b"crypt32.dll!CryptImportPublicKeyInfoEx2(algorithm)", 0);
+        return error(NTE_BAD_ALGID, 0);
+    };
     if e.len() > 8 || n.len() > 2048 {
         return error(NTE_BAD_ALGID, 0);
     }
@@ -1029,32 +1142,9 @@ pub extern "system" fn CryptImportPublicKeyInfoEx2(
     blob[24..24 + e.len()].copy_from_slice(e);
     blob[24 + e.len()..24 + e.len() + n.len()].copy_from_slice(n);
     let size = 24 + e.len() + n.len();
-    type Open = unsafe extern "system" fn(*mut usize, *const u16, *const u16, u32) -> u32;
-    type Import =
-        unsafe extern "system" fn(usize, usize, *const u16, *mut usize, *const u8, u32, u32) -> u32;
-    let (Some(open), Some(import)) =
-        (bcrypt(c"BCryptOpenAlgorithmProvider"), bcrypt(c"BCryptImportKeyPair"))
-    else {
-        return error(NTE_BAD_ALGID, 0);
-    };
-    let rsa: [u16; 4] = [0x52, 0x53, 0x41, 0];
     let public: [u16; 14] =
         [0x52, 0x53, 0x41, 0x50, 0x55, 0x42, 0x4c, 0x49, 0x43, 0x42, 0x4c, 0x4f, 0x42, 0]; // "RSAPUBLICBLOB"
-    // SAFETY: bcrypt's documented signatures; our buffers. The provider
-    // stays open (the key needs it; bcrypt keys do not keep a reference).
-    unsafe {
-        let open = core::mem::transmute::<usize, Open>(open);
-        let import = core::mem::transmute::<usize, Import>(import);
-        let mut alg = 0;
-        if open(&mut alg, rsa.as_ptr(), core::ptr::null(), 0) != 0 {
-            return error(NTE_BAD_ALGID, 0);
-        }
-        let status = import(alg, 0, public.as_ptr(), key, blob.as_ptr(), size as u32, 0);
-        if status != 0 {
-            return error(status, 0);
-        }
-    }
-    1
+    import_key(0xe1, &public, &blob[..size], key) // BCRYPT_RSA_ALG_HANDLE
 }
 
 // ---- Names ----
@@ -1205,6 +1295,8 @@ const CERT_NAME_RDN_TYPE: u32 = 2;
 const CERT_NAME_ATTR_TYPE: u32 = 3;
 const CERT_NAME_SIMPLE_DISPLAY_TYPE: u32 = 4;
 const CERT_NAME_FRIENDLY_DISPLAY_TYPE: u32 = 5;
+const CERT_NAME_DNS_TYPE: u32 = 6;
+const CERT_NAME_SEARCH_ALL_NAMES_FLAG: u32 = 2;
 const CERT_NAME_ISSUER_FLAG: u32 = 1;
 const CERT_NAME_STR_REVERSE_FLAG: u32 = 0x0200_0000;
 const CERT_FRIENDLY_NAME_PROP_ID: u32 = 11;
@@ -1287,6 +1379,32 @@ pub extern "system" fn CertGetNameStringW(
                 if kind_para.is_null() { 0 } else { unsafe { kind_para.cast::<u32>().read_unaligned() } };
             name_to_str(name, str_flags & CERT_NAME_STR_REVERSE_FLAG != 0, &mut s);
         }
+        CERT_NAME_DNS_TYPE => {
+            // The DNS names of the alternative name extension (subject's,
+            // or issuer's with CERT_NAME_ISSUER_FLAG), else the CN: the
+            // first, or with CERT_NAME_SEARCH_ALL_NAMES_FLAG all of them
+            // as a multi-string (each NUL-terminated, then one more NUL).
+            let all = flags & CERT_NAME_SEARCH_ALL_NAMES_FLAG != 0;
+            let ext = if flags & CERT_NAME_ISSUER_FLAG != 0 { c"2.5.29.18" } else { c"2.5.29.17" };
+            let mut found = false;
+            if let Some(value) = extension_value(&b.info, ext)
+                && let Ok(seq) = Der::new(value).expect(SEQUENCE)
+            {
+                let mut d = Der::new(seq.content);
+                while let Ok(t) = d.next() {
+                    if t.tag == 0x82 && (all || !found) {
+                        push_value(&mut s, 0x16, t.content);
+                        if all {
+                            s.push(0);
+                        }
+                        found = true;
+                    }
+                }
+            }
+            if !found && attribute(name, CN, &mut s) && all {
+                s.push(0);
+            }
+        }
         _ => {
             super::missing_detail(b"crypt32.dll!CertGetNameStringW(type)", u64::from(kind));
         }
@@ -1315,7 +1433,7 @@ pub extern "system" fn CertNameToStrW(
 // ---- Usage, names, time and signatures ----
 
 /// An extension's value (the bytes inside its OCTET STRING) by OID text.
-fn extension_value(info: &CertInfo, oid: &core::ffi::CStr) -> Option<&'static [u8]> {
+pub(crate) fn extension_value(info: &CertInfo, oid: &core::ffi::CStr) -> Option<&'static [u8]> {
     let ext = CertFindExtension(oid.as_ptr().cast(), info.extension_count, info.extensions);
     if ext.is_null() {
         return None;
@@ -1498,32 +1616,78 @@ pub extern "system" fn CertVerifyTimeValidity(time: *const u64, info: *const Cer
 
 const NTE_BAD_SIGNATURE: u32 = 0x8009_0006;
 
-/// The bcrypt hash pseudo-handle and name of an RSA signature algorithm
-/// (sha1/256/384/512WithRSAEncryption).
-fn rsa_hash(oid: &[u8]) -> Option<(usize, usize, &'static [u16])> {
+/// A signature algorithm: RSA PKCS #1 v1.5 or ECDSA, with its hash's
+/// bcrypt pseudo-handle, length and name.
+#[derive(Clone, Copy, PartialEq)]
+enum Scheme {
+    Rsa,
+    Ecdsa,
+}
+
+/// The scheme and hash of signature algorithm OID contents `oid`:
+/// sha1/256/384/512WithRSAEncryption, ecdsa-with-SHA1/256/384/512.
+fn signature_algorithm(oid: &[u8]) -> Option<(Scheme, usize, usize, &'static [u16])> {
     const PKCS1: [u8; 8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+    const ECDSA_SHA1: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01];
+    const ECDSA_SHA2: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03];
     const SHA1: [u16; 5] = [0x53, 0x48, 0x41, 0x31, 0];
     const SHA256: [u16; 7] = [0x53, 0x48, 0x41, 0x32, 0x35, 0x36, 0];
     const SHA384: [u16; 7] = [0x53, 0x48, 0x41, 0x33, 0x38, 0x34, 0];
     const SHA512: [u16; 7] = [0x53, 0x48, 0x41, 0x35, 0x31, 0x32, 0];
-    if oid.len() != 9 || oid[..8] != PKCS1 {
+    let sha1 = (0x31, 20, &SHA1[..]);
+    let sha256 = (0x41, 32, &SHA256[..]);
+    let sha384 = (0x51, 48, &SHA384[..]);
+    let sha512 = (0x61, 64, &SHA512[..]);
+    let (scheme, (alg, len, name)) = if oid.len() == 9 && oid[..8] == PKCS1 {
+        let hash = match oid[8] {
+            5 => sha1,
+            11 => sha256,
+            12 => sha384,
+            13 => sha512,
+            _ => return None,
+        };
+        (Scheme::Rsa, hash)
+    } else if oid == ECDSA_SHA1 {
+        (Scheme::Ecdsa, sha1)
+    } else if oid.len() == 8 && oid[..7] == ECDSA_SHA2 {
+        let hash = match oid[7] {
+            2 => sha256,
+            3 => sha384,
+            4 => sha512,
+            _ => return None,
+        };
+        (Scheme::Ecdsa, hash)
+    } else {
         return None;
+    };
+    Some((scheme, alg, len, name))
+}
+
+/// An ECDSA signature (Ecdsa-Sig-Value: SEQUENCE { r INTEGER, s INTEGER })
+/// as bcrypt takes it: r || s, each `size` bytes.
+fn ecdsa_signature(der: &[u8], size: usize, out: &mut [u8; 2 * 66]) -> Option<usize> {
+    let seq = Der::new(der).expect(SEQUENCE).ok()?;
+    let mut d = Der::new(seq.content);
+    for half in 0..2 {
+        let int = d.expect(INTEGER).ok()?.content;
+        let lead = int.iter().take_while(|&&b| b == 0).count();
+        let v = &int[lead..];
+        if v.len() > size {
+            return None;
+        }
+        let at = half * size + size - v.len();
+        out[at..at + v.len()].copy_from_slice(v);
     }
-    match oid[8] {
-        5 => Some((0x31, 20, &SHA1)),
-        11 => Some((0x41, 32, &SHA256)),
-        12 => Some((0x51, 48, &SHA384)),
-        13 => Some((0x61, 64, &SHA512)),
-        _ => None,
-    }
+    Some(2 * size)
 }
 
 /// CryptVerifyCertificateSignatureEx(prov, encoding, subjectType, subject,
 /// issuerType, issuer, flags, extra): whether the subject certificate
 /// (CRYPT_VERIFY_CERT_SIGN_SUBJECT_BLOB 1 or _CERT 2) is signed by the
 /// issuer's key (CRYPT_VERIFY_CERT_SIGN_ISSUER_PUBKEY 1 or _CERT 2): RSA
-/// PKCS #1 v1.5 with SHA-1/256/384/512, through bcrypt. A wrong signature
-/// is NTE_BAD_SIGNATURE; other algorithms NTE_BAD_ALGID (recorded).
+/// PKCS #1 v1.5 and ECDSA (P-256, P-384) with SHA-1/256/384/512, through
+/// bcrypt. A wrong signature is NTE_BAD_SIGNATURE; other algorithms
+/// NTE_BAD_ALGID (recorded).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "system" fn CryptVerifyCertificateSignatureEx(
@@ -1572,9 +1736,22 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
         Ok::<_, u32>((tbs.whole, alg, sig.content.get(1..).unwrap_or(&[])))
     })();
     let Ok((tbs, alg, signature)) = parts else { return error(CRYPT_E_ASN1_CORRUPT, 0) };
-    let Some((hash_alg, hash_len, hash_name)) = rsa_hash(alg) else {
+    let Some((scheme, hash_alg, hash_len, hash_name)) = signature_algorithm(alg) else {
         crate::store::unsupported(b"crypt32.dll!CryptVerifyCertificateSignatureEx(algorithm)", 0);
         return error(NTE_BAD_ALGID, 0);
+    };
+    let mut raw = [0u8; 2 * 66];
+    let signature = if scheme == Scheme::Ecdsa {
+        // SAFETY: the caller's CERT_PUBLIC_KEY_INFO.
+        let Some((_, _, size, _)) = ec_key(unsafe { &*key_info }) else {
+            return error(NTE_BAD_ALGID, 0);
+        };
+        match ecdsa_signature(signature, size, &mut raw) {
+            Some(n) => &raw[..n],
+            None => return error(NTE_BAD_SIGNATURE, 0),
+        }
+    } else {
+        signature
     };
     let mut hash = [0u8; 64];
     if !digest(hash_alg, tbs, &mut hash[..hash_len]) {
@@ -1595,17 +1772,22 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
     };
     let padding = hash_name.as_ptr();
     // SAFETY: bcrypt's documented signatures; BCRYPT_PKCS1_PADDING_INFO
-    // is the algorithm name's pointer; our buffers.
+    // is the algorithm name's pointer (RSA; ECDSA takes none); our
+    // buffers.
     let status = unsafe {
         let verify = core::mem::transmute::<usize, Verify>(verify);
+        let (info, flags): (*const c_void, u32) = match scheme {
+            Scheme::Rsa => ((&raw const padding).cast(), 2), // BCRYPT_PAD_PKCS1
+            Scheme::Ecdsa => (core::ptr::null(), 0),
+        };
         let status = verify(
             key,
-            (&raw const padding).cast(),
+            info,
             hash.as_ptr(),
             hash_len as u32,
             signature.as_ptr(),
             signature.len() as u32,
-            2, // BCRYPT_PAD_PKCS1
+            flags,
         );
         core::mem::transmute::<usize, Destroy>(destroy)(key);
         status
