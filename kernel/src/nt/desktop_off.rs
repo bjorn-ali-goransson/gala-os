@@ -1,16 +1,28 @@
-//! The desktop left out: a server kernel, built without the `shasha`
-//! feature (the graphical shell; ROADMAP SD, ARCHITECTURE "Server and
-//! desktop workloads"). Same interface as `nt::desktop`, nothing behind
-//! it: every window call and GalaDesktopAction's window actions are
-//! STATUS_NOT_SUPPORTED, as on a machine without a screen, so user32
-//! keeps its windows in the registry and draws nothing. The compositor,
-//! wallpapers, fonts and the start menu are not in the binary.
+//! The desktop without a compositor: a server kernel, built without the
+//! `shasha` feature (the graphical shell; ROADMAP SD, ARCHITECTURE
+//! "Server and desktop workloads"). Same interface as `nt::desktop`.
+//!
+//! Each session's desktop keeps its window state (`nt::winstate`: windows,
+//! Z order, focus, capture, each window's last client pixels, input for
+//! programs) as on a machine whose desktop nobody shows: GUI programs
+//! make, show, paint and close their windows, GalaSession's query reports
+//! them, and a remote presenter (ROADMAP RS B3b) will show them. Nothing
+//! composes them here: the only presenter is none (a frame, injected input
+//! and the Test and Console presenters are refused), and the shell's
+//! window actions, its window and program lists and the wallpaper are
+//! STATUS_NOT_SUPPORTED (no shell). The compositor, wallpapers, fonts and
+//! the start menu are not in the binary.
 
 use super::object::ObjectRef;
 use super::status::NtStatus;
+use super::winstate::{Shadow, State};
+use crate::sync::IrqMutex;
 use alloc::vec::Vec;
 
-pub const TASKBAR: u32 = 48;
+pub use super::winstate::{
+    Action, DEFAULT_SIZE, InputEvent, LISTED_ACTIVE, LISTED_TITLE, Listed, Rect, SnapTo, TASKBAR,
+};
+
 /// The largest Test frame side (nt::desktop's).
 pub const MAX_FRAME_SIDE: u32 = 4096;
 
@@ -20,74 +32,62 @@ pub struct Program {
     pub path: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SnapTo {
-    Left,
-    Right,
-    Up,
-    Down,
+/// A desktop with nothing to compose it: the window state alone, as the
+/// system calls use it (`with`).
+pub struct Desktop(State<()>);
+
+impl core::ops::Deref for Desktop {
+    type Target = State<()>;
+    fn deref(&self) -> &State<()> {
+        &self.0
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    Activate,
-    Minimize,
-    Maximize,
-    Restore,
-    Close,
-    Snap(SnapTo),
-    Place { x: i32, y: i32, w: u32, h: u32 },
+impl core::ops::DerefMut for Desktop {
+    fn deref_mut(&mut self) -> &mut State<()> {
+        &mut self.0
+    }
 }
 
-pub const LISTED_TITLE: usize = 128;
-pub const LISTED_ACTIVE: u32 = 4;
+impl Desktop {
+    /// GalaWindowDrag: no pointer moves on a desktop nobody shows, so no
+    /// button is down (STATUS_INVALID_DEVICE_STATE, as with the button up
+    /// on a screen); STATUS_INVALID_HANDLE for another's window.
+    pub fn begin_drag(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        self.0.owned(id, owner).ok_or(NtStatus::INVALID_HANDLE)?;
+        Err(NtStatus::INVALID_DEVICE_STATE)
+    }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Listed {
-    pub id: u32,
-    pub owner: u64,
-    pub flags: u32,
-    pub rect: [i32; 4],
-    pub title: [u16; LISTED_TITLE],
-    pub title_len: usize,
+    /// GalaWindowResize: as `begin_drag`.
+    pub fn begin_resize(&mut self, id: u32, owner: u64, _edges: u32) -> Result<(), NtStatus> {
+        self.begin_drag(id, owner)
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rect {
-    pub x: i64,
-    pub y: i64,
-    pub w: i64,
-    pub h: i64,
+/// One session's desktop (nt::session::Desk holds it): its window state
+/// behind its own lock.
+pub struct Shell {
+    session: u32,
+    d: IrqMutex<Desktop>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InputEvent {
-    pub owner: u64,
-    pub window: u32,
-    pub message: u32,
-    pub wparam: u64,
-    pub lparam: u64,
-}
-
-/// No desktop can exist: `with` never calls its closure.
-pub enum Desktop {}
-
-/// A session's desktop as shasha would keep it: nothing here (the window
-/// registry, nt::window, still serves the session's windows).
-pub struct Shell;
+/// No compositor: a window's damage is its own rectangle (and is dropped:
+/// nothing composes it).
+const NO_SHADOW: Shadow = Shadow { reach: 0, drop: 0 };
 
 impl Shell {
-    pub const fn new(_session: u32) -> Shell {
-        Shell
+    pub const fn new(session: u32) -> Shell {
+        Shell { session, d: IrqMutex::new(Desktop(State::new(NO_SHADOW))) }
     }
 
-    /// (windows, live, what shows it): none, never, nothing.
+    /// (windows, live, what shows it): the state dump's figures.
     pub fn counts(&self) -> (usize, bool, Kind) {
-        (0, false, Kind::None)
+        let d = self.d.lock();
+        (d.windows.len(), d.live, Kind::None)
     }
 }
 
-/// The kinds of presenter (nt::desktop's; none can attach here).
+/// The kinds of presenter (nt::desktop's; only none here).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     None = 0,
@@ -114,100 +114,108 @@ impl Kind {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-impl Desktop {
-    pub fn create(
-        &mut self,
-        _: u64,
-        _: i32,
-        _: i32,
-        _: u32,
-        _: u32,
-        _: &[u16],
-        _: u32,
-    ) -> Result<u32, NtStatus> {
-        match *self {}
-    }
-    pub fn show(&mut self, _: u32, _: u64, _: bool) -> Result<Rect, NtStatus> {
-        match *self {}
-    }
-    pub fn show_minimized(&mut self, _: u32, _: u64) -> Result<Rect, NtStatus> {
-        match *self {}
-    }
-    pub fn begin_drag(&mut self, _: u32, _: u64) -> Result<(), NtStatus> {
-        match *self {}
-    }
-    pub fn begin_resize(&mut self, _: u32, _: u64, _: u32) -> Result<(), NtStatus> {
-        match *self {}
-    }
-    pub fn present(&mut self, _: u32, _: Rect, _: &[u32], _: usize) -> Result<Rect, NtStatus> {
-        match *self {}
-    }
-    pub fn place(
-        &mut self,
-        _: u32,
-        _: u64,
-        _: i32,
-        _: i32,
-        _: u32,
-        _: u32,
-    ) -> Result<Rect, NtStatus> {
-        match *self {}
-    }
-    pub fn set_title(&mut self, _: u32, _: u64, _: &[u16]) -> Result<Rect, NtStatus> {
-        match *self {}
-    }
-    pub fn set_icon(&mut self, _: u32, _: u64, _: &[u32], _: usize) -> Result<(), NtStatus> {
-        match *self {}
-    }
-    pub fn capture(&mut self, _: u32, _: u64) -> Result<(), NtStatus> {
-        match *self {}
-    }
-    pub fn destroy(&mut self, _: u32, _: u64) -> Result<Rect, NtStatus> {
-        match *self {}
-    }
-}
-
 pub fn choose_wallpaper(_: Option<&str>) {}
 
 pub fn set_server_profile() {}
 
-/// `presenter=`: accepted (and without effect: there are no desktops).
+/// `presenter=`: accepted (and without effect: nothing composes here).
 pub fn set_local_presenter(name: &str) -> bool {
     matches!(name, "test" | "none")
 }
 
-/// GalaSession's presenters: no desktop to show.
-pub fn attach(_: &Shell, _: Kind, _: Option<(u32, u32)>) -> Result<Kind, NtStatus> {
-    Err(NtStatus::NOT_SUPPORTED)
-}
-
-pub fn query(_: &Shell) -> (Kind, bool, (u32, u32), usize) {
-    (Kind::None, false, (0, 0), 0)
-}
-
-pub fn read_frame(_: &Shell, _: Rect, _: &mut [u32]) -> Result<((u32, u32), u64), NtStatus> {
-    Err(NtStatus::NOT_SUPPORTED)
-}
-
-/// Always the server profile: there is no desktop to bring up.
+/// Always the server profile: no console windows, no shell.
 pub fn server_profile() -> bool {
     true
 }
 
-pub fn screen(_: &Shell) -> Option<(u32, u32)> {
-    None
+/// Makes `shell`'s desktop live if it is not: DEFAULT_SIZE, shown by
+/// none (logged once per session, with the presenter event).
+fn ensure_live(shell: &Shell, d: &mut Desktop) {
+    if d.live {
+        return;
+    }
+    let (w, h) = DEFAULT_SIZE;
+    d.screen = (i64::from(w), i64::from(h));
+    d.live = true;
+    crate::info!(
+        "desktop: session {} keeps its windows ({w}x{h}), shown by none (no compositor in this kernel)",
+        shell.session
+    );
+    crate::events::emit(
+        crate::events::Category::Window,
+        "presenter",
+        format_args!(
+            r#""op":"live","session":{},"presenter":"none","w":{w},"h":{h}"#,
+            shell.session
+        ),
+    );
 }
 
+/// The size of `shell`'s desktop (made live if it was not).
+pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d);
+    Some((d.screen.0 as u32, d.screen.1 as u32))
+}
+
+/// Whether shasha's shell (taskbar, start menu, named window actions)
+/// runs on `shell`'s desktop: never in this kernel.
+pub fn has_shell(_: &Shell) -> bool {
+    false
+}
+
+/// Runs `f` on the desktop's window state (made live if it was not); the
+/// damage it leaves is dropped (nothing composes it).
 pub fn with<R>(
-    _: &Shell,
-    _: impl FnOnce(&mut Desktop) -> Result<(R, Option<Rect>), NtStatus>,
+    shell: &Shell,
+    f: impl FnOnce(&mut Desktop) -> Result<(R, Option<Rect>), NtStatus>,
 ) -> Result<R, NtStatus> {
-    Err(NtStatus::NOT_SUPPORTED)
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d);
+    let result = f(&mut d);
+    d.damage.clear();
+    Ok(result?.0)
 }
 
-pub fn process_ended(_: &Shell, _: u64) {}
+/// GalaSession's presenters: none is what shows it already (the desktop
+/// goes live); Test and Console need a compositor (STATUS_NOT_SUPPORTED).
+pub fn attach(shell: &Shell, kind: Kind, _: Option<(u32, u32)>) -> Result<Kind, NtStatus> {
+    if kind != Kind::None {
+        crate::warn!(
+            "desktop: session {} cannot be shown by {}: no compositor in this kernel",
+            shell.session,
+            kind.name()
+        );
+        return Err(NtStatus::NOT_SUPPORTED);
+    }
+    let mut d = shell.d.lock();
+    ensure_live(shell, &mut d);
+    Ok(Kind::None)
+}
 
+/// What shows the desktop (none), whether it is live, its size and its
+/// windows; nothing is made live.
+pub fn query(shell: &Shell) -> (Kind, bool, (u32, u32), usize) {
+    let d = shell.d.lock();
+    (Kind::None, d.live, (d.screen.0 as u32, d.screen.1 as u32), d.windows.len())
+}
+
+/// No Test frame shows a desktop here.
+pub fn read_frame(_: &Shell, _: Rect, _: &mut [u32]) -> Result<((u32, u32), u64), NtStatus> {
+    Err(NtStatus::INVALID_DEVICE_STATE)
+}
+
+/// A process ended: its windows go.
+pub fn process_ended(shell: &Shell, owner: u64) {
+    let mut d = shell.d.lock();
+    if !d.live {
+        return;
+    }
+    d.destroy_owned(owner);
+    d.damage.clear();
+}
+
+/// No local keyboard or mouse reaches a desktop here.
 pub fn pointer_event(_: i64, _: i64, _: u8) -> Option<(u32, &'static Program)> {
     None
 }
@@ -220,33 +228,44 @@ pub enum Injected {
     Wheel(i64),
 }
 
-/// No desktop to bring input to.
+/// Only a desktop a Test frame shows takes injected input: none here.
 pub fn inject(_: &Shell, _: Injected) -> Result<Option<&'static Program>, NtStatus> {
-    Err(NtStatus::NOT_SUPPORTED)
+    Err(NtStatus::INVALID_DEVICE_STATE)
 }
 
 pub fn wheel_event(_: i64) {}
 
 pub fn key_event(_: u8, _: u8, _: bool, _: bool) {}
 
-pub fn listen(_: &Shell, _: u64, _: ObjectRef) -> Result<(), NtStatus> {
-    Err(NtStatus::NOT_SUPPORTED)
+/// GalaWindowListen: `owner`'s input event.
+pub fn listen(shell: &Shell, owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
+    let mut d = shell.d.lock();
+    d.listen(owner, event)?;
+    let wakes = d.take_wakes();
+    drop(d);
+    for e in wakes {
+        super::wait::set_signal(&e, 1);
+    }
+    Ok(())
 }
 
 pub fn tick() {}
 
-pub fn take_input(_: &Shell, _: u64, _: &mut [InputEvent]) -> usize {
-    0
+/// Takes input waiting for `owner`'s windows into `out`; how many.
+pub fn take_input(shell: &Shell, owner: u64, out: &mut [InputEvent]) -> usize {
+    shell.d.lock().take_input(owner, out)
 }
 
 pub fn start_menu() -> Vec<&'static Program> {
     Vec::new()
 }
 
+/// No shell: no named window actions.
 pub fn window_action(_: &Shell, _: u64, _: u32, _: Action) -> Result<(), NtStatus> {
     Err(NtStatus::NOT_SUPPORTED)
 }
 
+/// No taskbar to list.
 pub fn list_windows(_: &Shell) -> Result<Vec<Listed>, NtStatus> {
     Err(NtStatus::NOT_SUPPORTED)
 }

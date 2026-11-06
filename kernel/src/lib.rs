@@ -251,7 +251,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         }
     }
     #[cfg(not(feature = "shasha"))]
-    info!("desktop: not in this kernel (server build)");
+    info!(
+        "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)"
+    );
     // `profile=server` (ROADMAP SD): no graphical interface, ever.
     if cmdline.value("profile") == Some("server") {
         nt::desktop::set_server_profile();

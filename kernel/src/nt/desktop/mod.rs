@@ -11,7 +11,9 @@
 //! Changes collect damage rectangles which `with`/`pointer_event`/`tick`
 //! compose and hand to the desktop's presenter (`present`: the screen, a
 //! frame in memory, or nothing; the windows and their pixels are kept
-//! either way).
+//! either way). The window state itself (windows, Z order, focus,
+//! capture, client pixels, input for programs) is `nt::winstate`'s, which
+//! the server kernel keeps too; this module is the compositor on top.
 //!
 //! The mouse: a click raises and activates a window, its caption drags
 //! it, the caption buttons minimize it or ask it to close (WM_CLOSE to the
@@ -32,22 +34,26 @@ mod present;
 use super::object::ObjectRef;
 use super::platform;
 use super::status::NtStatus;
+/// The window state's names, as the desktop's (the system calls, the
+/// named actions and the server kernel's `desktop_off` use them).
+pub use super::winstate::{
+    Action, BORDER, CAPTION, GALA_WM_MINIMIZED, GALA_WM_PLACE, ICON, InputEvent, LISTED_ACTIVE,
+    LISTED_MAXIMIZED, LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Rect, SC_CLOSE,
+    SC_MAXIMIZE, SC_RESTORE, SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR,
+    WHEEL_DELTA, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_MOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, scale_icon, scale_icon_to,
+};
+use super::winstate::{CAPTION_BUTTON, Shadow, State, VK_MENU, Window};
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
 use paint::{Canvas, Font, Picture, Wallpaper, blend, over, round_coverage2, shadow_alpha};
 pub use present::{DEFAULT_SIZE, Frame, Kind, MAX_SIDE as MAX_FRAME_SIDE, Presenter};
 
-/// Frame metrics (what user32's GetSystemMetrics reports): Windows 11's
-/// (a 1-pixel border, a 32-pixel caption, 46 x 32 caption buttons, 8-pixel
-/// rounded corners).
-pub const BORDER: u32 = 1;
-pub const CAPTION: u32 = 32;
-/// Corner radii of a window: above and below.
+/// Corner radii of a window (Windows 11's 8 pixels): above and below.
 const RADIUS: i64 = 8;
 const RADIUS_BOTTOM: i64 = 8;
-/// The caption buttons' width.
-const CAPTION_BUTTON: i64 = 46;
 /// Soft shadows (Windows 11's are wide and light): reach, drop, darkness.
 const SHADOW_REACH: i64 = 26;
 const SHADOW_DROP: i64 = 6;
@@ -73,9 +79,9 @@ const ACCENT: u32 = 0x00_00_5f_b8;
 const TEXT: u32 = 0x00_1b_1b_1b;
 const TEXT_DIM: u32 = 0x00_5d_5d_5d;
 
-/// The taskbar: the bottom rows of the screen, translucent light; the
-/// start button and the windows' buttons centred, the clock at the right.
-pub const TASKBAR: u32 = 48;
+/// The taskbar (TASKBAR rows at the bottom of the screen): translucent
+/// light; the start button and the windows' buttons centred, the clock at
+/// the right.
 const TASKBAR_COLOR: u32 = 0x00_ee_f1_f6;
 const TASKBAR_ALPHA: u32 = 236;
 const TASKBAR_LINE: u32 = 0x00_d7_dc_e3;
@@ -149,41 +155,6 @@ pub const PROGRAMS: &[Program] = &[
     },
 ];
 
-/// The largest window gala accepts (each pixel is kept twice).
-const MAX_SIDE: u32 = 4096;
-/// Input waiting for programs (oldest dropped beyond this).
-const MAX_INPUT: usize = 512;
-
-/// Window messages the desktop sends to programs.
-pub const WM_MOVE: u32 = 0x0003;
-pub const WM_CLOSE: u32 = 0x0010;
-pub const WM_SYSCOMMAND: u32 = 0x0112;
-pub const SC_CLOSE: u64 = 0xf060;
-pub const SC_MAXIMIZE: u64 = 0xf030;
-pub const SC_RESTORE: u64 = 0xf120;
-/// gala's request to a window's program to move it (Snap): wParam the
-/// left and top, lParam the width and height (low and high 32 bits).
-/// Above 0xFFFF: no Windows message has this number.
-pub const GALA_WM_PLACE: u32 = 0x0001_0001;
-/// gala's notice to a window's program that the desktop minimized
-/// (wParam 1) or restored (0) its window itself (user32 keeps IsIconic).
-pub const GALA_WM_MINIMIZED: u32 = 0x0001_0002;
-pub const WM_MOUSEMOVE: u32 = 0x0200;
-pub const WM_MOUSEWHEEL: u32 = 0x020a;
-/// One wheel notch (WHEEL_DELTA).
-pub const WHEEL_DELTA: i64 = 120;
-pub const WM_LBUTTONDOWN: u32 = 0x0201;
-pub const WM_LBUTTONUP: u32 = 0x0202;
-pub const WM_RBUTTONDOWN: u32 = 0x0204;
-pub const WM_RBUTTONUP: u32 = 0x0205;
-pub const WM_KEYDOWN: u32 = 0x0100;
-pub const WM_KEYUP: u32 = 0x0101;
-pub const WM_SYSKEYDOWN: u32 = 0x0104;
-pub const WM_SYSKEYUP: u32 = 0x0105;
-const VK_MENU: u8 = 0x12;
-
-/// GalaWindowCreate's style: a frameless popup.
-pub const STYLE_POPUP: u32 = 0x1;
 /// GalaWindowResize's edges (a program's own border: WM_NCHITTEST's
 /// HTLEFT..HTBOTTOMRIGHT).
 pub const RESIZE_LEFT: u32 = 0x1;
@@ -205,90 +176,6 @@ struct Resize {
 
 /// The smallest size a resize gives a window.
 const RESIZE_MIN: (i64, i64) = (120, 60);
-/// GalaWindowCreate's style: an application window that draws its own
-/// frame (WM_NCCALCSIZE took gala's away): all client area, otherwise as
-/// a framed window (active, on the taskbar, in the usual order).
-pub const STYLE_FRAMELESS: u32 = 0x2;
-
-/// Whether an outer size suits a window (a framed one needs room for its
-/// caption and buttons).
-fn size_fits(w: u32, h: u32, popup: bool) -> bool {
-    let (min_w, min_h) = if popup {
-        (1, 1)
-    } else {
-        (2 * BORDER + 2 * CAPTION_BUTTON as u32 + 40, 2 * BORDER + CAPTION + 1)
-    };
-    w >= min_w && h >= min_h && w <= MAX_SIDE && h <= MAX_SIDE
-}
-
-/// Input for a program's window: a window message and its parameters
-/// (mouse positions in client coordinates).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InputEvent {
-    pub owner: u64,
-    pub window: u32,
-    pub message: u32,
-    pub wparam: u64,
-    pub lparam: u64,
-}
-
-/// Where Snap puts a window (Win+arrow keys, `gala snap`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SnapTo {
-    /// The left or right half of the work area.
-    Left,
-    Right,
-    /// Maximized.
-    Up,
-    /// Back from maximized or snapped, else minimized.
-    Down,
-}
-
-/// The shell's named actions on a top-level window: what the taskbar,
-/// the caption buttons and the Snap keys do, and what GalaDesktopAction
-/// asks for (ARCHITECTURE "Server and desktop workloads": CLI parity).
-/// The program moves its own window (WM_SYSCOMMAND, GALA_WM_PLACE), as
-/// with the mouse.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    /// On top and active (a minimized one restored): a taskbar click.
-    Activate,
-    Minimize,
-    /// SC_MAXIMIZE (a minimized one restored first).
-    Maximize,
-    /// Back from minimized, maximized (SC_RESTORE) or snapped.
-    Restore,
-    /// SC_CLOSE (the program decides).
-    Close,
-    Snap(SnapTo),
-    /// To this outer rectangle.
-    Place {
-        x: i32,
-        y: i32,
-        w: u32,
-        h: u32,
-    },
-}
-
-/// A window as the taskbar lists it (GalaDesktopAction's window list).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Listed {
-    pub id: u32,
-    pub owner: u64,
-    /// LISTED_MINIMIZED, LISTED_MAXIMIZED, LISTED_ACTIVE, LISTED_SNAPPED.
-    pub flags: u32,
-    /// The outer rectangle: x, y, width, height.
-    pub rect: [i32; 4],
-    pub title: [u16; LISTED_TITLE],
-    pub title_len: usize,
-}
-
-pub const LISTED_TITLE: usize = 128;
-pub const LISTED_MINIMIZED: u32 = 1;
-pub const LISTED_MAXIMIZED: u32 = 2;
-pub const LISTED_ACTIVE: u32 = 4;
-/// Against the left or right edge, the work area's height (Snap).
-pub const LISTED_SNAPPED: u32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptionButton {
@@ -312,153 +199,16 @@ enum Hit {
     Frame(u32),
 }
 
-pub struct Window {
-    pub id: u32,
-    pub owner: u64,
-    x: i32,
-    y: i32,
-    /// The outer size (frame included).
-    w: u32,
-    h: u32,
-    /// Shown by its program.
-    visible: bool,
-    /// Minimized by the user (on the taskbar only).
-    minimized: bool,
-    /// It fills the work area (square corners, no shadow; the maximize
-    /// button shows "restore").
-    maximized: bool,
-    /// It fills the work area's height against its left or right edge
-    /// (docked, as Snap puts it): square corners and no shadow too.
-    docked: bool,
-    /// The caption bar's pixels (w x CAPTION) and the state they show.
+/// The compositor's own per-window data (`Window::chrome`): its caption
+/// bar's pixels and what they were drawn for (the window's `look`, active,
+/// the button under the pointer, maximized).
+#[derive(Default)]
+pub struct Chrome {
     caption: Option<Canvas>,
-    caption_state: Option<(bool, Option<CaptionButton>, bool)>,
-    /// The client area's pixels (client_w * client_h), white at first.
-    client: Vec<u32>,
-    /// The title (UTF-16).
-    title: Vec<u16>,
-    /// A frameless popup (STYLE_POPUP: a menu, a drop-down list, a
-    /// tooltip): all client area, above the framed windows, not on the
-    /// taskbar, never active.
-    popup: bool,
-    /// An application window without gala's frame (STYLE_FRAMELESS).
-    frameless: bool,
-    /// Its icon (GalaWindowSetIcon), ICON x ICON 0xAARRGGBB pixels
-    /// (straight alpha); empty: none (the taskbar shows a lettered tile).
-    icon: Vec<u32>,
-    /// The same at SMALL_ICON for the caption.
-    small_icon: Vec<u32>,
-    /// Its rectangle before Snap put it on a half of the screen (Win+Down
-    /// gives it back).
-    unsnapped: Option<(i32, i32, u32, u32)>,
+    caption_state: Option<(u32, bool, Option<CaptionButton>, bool)>,
 }
 
-/// The size the taskbar draws a window's icon at.
-pub const ICON: usize = 24;
-
-/// An icon of `size` x `size` 0xAARRGGBB pixels scaled to ICON x ICON:
-/// each output pixel averages the source area it covers (box filter,
-/// weighted by alpha so transparent pixels don't darken the edges).
-pub fn scale_icon(src: &[u32], size: usize) -> Option<Vec<u32>> {
-    scale_icon_to(src, size, ICON)
-}
-
-/// The caption's icon size (Windows' small icon, SM_CXSMICON).
-pub const SMALL_ICON: usize = 16;
-
-/// `scale_icon` to `to` x `to` pixels.
-pub fn scale_icon_to(src: &[u32], size: usize, to: usize) -> Option<Vec<u32>> {
-    let mut out = Vec::new();
-    out.try_reserve_exact(to * to).ok()?;
-    if size == 0 || src.len() < size * size {
-        return None;
-    }
-    for oy in 0..to {
-        for ox in 0..to {
-            // The source span [x0, x1) in units of 1/to of a source pixel.
-            let (x0, x1) = (ox * size, (ox + 1) * size);
-            let (y0, y1) = (oy * size, (oy + 1) * size);
-            let (mut a, mut r, mut g, mut b, mut area) = (0u64, 0u64, 0u64, 0u64, 0u64);
-            for sy in y0 / to..y1.div_ceil(to) {
-                let hy = ((sy + 1) * to).min(y1) - (sy * to).max(y0);
-                for sx in x0 / to..x1.div_ceil(to) {
-                    let wx = ((sx + 1) * to).min(x1) - (sx * to).max(x0);
-                    let wgt = (wx * hy) as u64;
-                    let p = src[sy * size + sx];
-                    let pa = u64::from(p >> 24);
-                    a += pa * wgt;
-                    r += u64::from((p >> 16) & 0xff) * pa * wgt;
-                    g += u64::from((p >> 8) & 0xff) * pa * wgt;
-                    b += u64::from(p & 0xff) * pa * wgt;
-                    area += wgt;
-                }
-            }
-            let pixel = if a == 0 {
-                0
-            } else {
-                let alpha = (a + area / 2) / area;
-                let c = |v: u64| ((v + a / 2) / a) as u32;
-                ((alpha as u32) << 24) | (c(r) << 16) | (c(g) << 8) | c(b)
-            };
-            out.try_push(pixel).ok()?;
-        }
-    }
-    Some(out)
-}
-
-impl Window {
-    /// The frame's left/right/bottom width and its top (caption) height.
-    fn frame(&self) -> (u32, u32) {
-        if self.popup || self.frameless { (0, 0) } else { (BORDER, BORDER + CAPTION) }
-    }
-
-    fn client_size(&self) -> (u32, u32) {
-        let (b, top) = self.frame();
-        (self.w - 2 * b, self.h - top - b)
-    }
-
-    fn shown(&self) -> bool {
-        self.visible && !self.minimized
-    }
-
-    /// The screen rectangle it covers.
-    fn rect(&self) -> Rect {
-        Rect { x: i64::from(self.x), y: i64::from(self.y), w: self.w.into(), h: self.h.into() }
-    }
-
-    /// With its shadow.
-    /// Square corners and no shadow: maximized or docked.
-    fn square(&self) -> bool {
-        self.maximized || self.docked
-    }
-
-    fn bounds(&self) -> Rect {
-        let r = self.rect();
-        if self.square() || self.popup {
-            return r;
-        }
-        Rect {
-            x: r.x - SHADOW_REACH,
-            y: r.y - SHADOW_REACH,
-            w: r.w + 2 * SHADOW_REACH,
-            h: r.h + 2 * SHADOW_REACH + SHADOW_DROP,
-        }
-    }
-
-    fn client_origin(&self) -> (i64, i64) {
-        let (b, top) = self.frame();
-        (i64::from(self.x) + i64::from(b), i64::from(self.y) + i64::from(top))
-    }
-
-    fn caption_rect(&self) -> Rect {
-        Rect {
-            x: i64::from(self.x),
-            y: i64::from(self.y),
-            w: self.w.into(),
-            h: i64::from(BORDER + CAPTION),
-        }
-    }
-
+impl Window<Chrome> {
     /// How much of window point (lx, ly) its rounded shape covers.
     fn coverage(&self, lx: i64, ly: i64) -> u8 {
         let square = self.square() || self.popup;
@@ -484,7 +234,10 @@ impl Window {
             return outline;
         }
         let c = if ly < b + i64::from(CAPTION) {
-            self.caption.as_ref().map_or(CAPTION_INACTIVE, |c| c.get(lx, ly - b) & 0x00ff_ffff)
+            self.chrome
+                .caption
+                .as_ref()
+                .map_or(CAPTION_INACTIVE, |c| c.get(lx, ly - b) & 0x00ff_ffff)
         } else {
             let (cw, _) = self.client_size();
             let (cx, cy) = (lx - b, ly - b - i64::from(CAPTION));
@@ -501,13 +254,19 @@ impl Window {
     /// the left, minimize, maximize (or restore) and close at the right
     /// with thin glyphs.
     fn render_caption(&mut self, active: bool, hover: Option<CaptionButton>) {
-        let state = (active, hover, self.maximized);
-        if self.caption_state == Some(state) && self.caption.is_some() {
+        let state = (self.look, active, hover, self.maximized);
+        if self.chrome.caption_state == Some(state) && self.chrome.caption.is_some() {
             return;
         }
         let (w, h) = (i64::from(self.w), i64::from(CAPTION));
         let bg = if active { CAPTION_ACTIVE } else { CAPTION_INACTIVE };
-        let Some(mut c) = Canvas::new(w, h, 0xff00_0000 | bg) else { return };
+        let Some(mut c) = Canvas::new(w, h, 0xff00_0000 | bg) else {
+            // No caption bar (the plain caption colour shows) rather
+            // than one of another size.
+            self.chrome.caption = None;
+            self.chrome.caption_state = None;
+            return;
+        };
         let close_x = w - CAPTION_BUTTON - 1;
         let max_x = close_x - CAPTION_BUTTON;
         let min_x = max_x - CAPTION_BUTTON;
@@ -565,49 +324,23 @@ impl Window {
         }
         let title = char::decode_utf16(self.title.iter().copied()).map(|c| c.unwrap_or('?'));
         c.text(text_x, (h - Font::Ui12.height()) / 2, title, glyph, Font::Ui12, min_x - 8);
-        self.caption = Some(c);
-        self.caption_state = Some(state);
+        self.chrome.caption = Some(c);
+        self.chrome.caption_state = Some(state);
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rect {
-    pub x: i64,
-    pub y: i64,
-    pub w: i64,
-    pub h: i64,
-}
-
-impl Rect {
-    fn contains(&self, x: i64, y: i64) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
-    }
-
-    /// Clipped to the screen `(0, 0, sw, sh)`.
-    fn clip(self, sw: i64, sh: i64) -> Option<Rect> {
-        let (x0, y0) = (self.x.max(0), self.y.max(0));
-        let (x1, y1) = ((self.x + self.w).min(sw), (self.y + self.h).min(sh));
-        (x1 > x0 && y1 > y0).then_some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
-    }
-
-    fn offset(self, dx: i64, dy: i64) -> Rect {
-        Rect { x: self.x + dx, y: self.y + dy, ..self }
-    }
-}
-
+/// A session's desktop as shasha shows it: the window state
+/// (`nt::winstate`: windows, Z order, focus, capture, client pixels,
+/// input for programs) and, on top of it, the compositor's own: the
+/// presenter, the wallpaper, the taskbar, the start menu, the pointer and
+/// what the mouse and keys are doing.
 pub struct Desktop {
-    /// Bottom to top.
-    windows: Vec<Window>,
-    next_id: u32,
-    /// Laid out at its size (wallpaper, taskbar, pointer): the desktop
+    /// The window state (laid out at `s.screen` once live; the desktop
     /// keeps its windows and their pixels from then on, whether or not a
-    /// presenter shows it.
-    live: bool,
+    /// presenter shows it).
+    s: State<Chrome>,
     /// What shows it (ROADMAP RS B3a): composed rows go there.
     presenter: Presenter,
-    /// The desktop's size (0 x 0 until known: no shell or pointer): its
-    /// presenter's, or the one it was last shown at.
-    screen: (i64, i64),
     wallpaper: Option<Wallpaper>,
     /// The taskbar's pixels (screen width x TASKBAR, ARGB).
     taskbar: Option<Canvas>,
@@ -629,11 +362,8 @@ pub struct Desktop {
     /// A resize by a program's own border (sent as GALA_WM_PLACE when the
     /// button goes up).
     resize: Option<Resize>,
-    active: Option<u32>,
     /// The minute the clock shows.
     minute: u64,
-    damage: Vec<Rect>,
-    input: Vec<InputEvent>,
     /// A program the start menu asked to start (index into PROGRAMS).
     launch: Option<usize>,
     /// What was typed in the start menu (ASCII, filters the programs).
@@ -642,19 +372,12 @@ pub struct Desktop {
     /// The programs started from the menu, most recent first (PROGRAMS
     /// indices; usize::MAX: none).
     recent: [usize; 4],
-    /// Each process's event to signal when input arrives for it
-    /// (GalaWindowListen), and the processes with new input.
-    listeners: Vec<(u64, ObjectRef)>,
-    woken: Vec<u64>,
     /// Alt is held (WM_SYSKEYDOWN).
     alt: bool,
     /// The Windows key is held, and whether a key went with it (then its
     /// release doesn't open the start menu).
     win_key: bool,
     win_used: bool,
-    /// The window with the mouse capture (GalaWindowCapture): it gets all
-    /// mouse input, wherever the pointer is.
-    captured: Option<u32>,
 }
 
 impl Default for Desktop {
@@ -663,14 +386,14 @@ impl Default for Desktop {
     }
 }
 
+/// What the compositor draws outside a window: its soft shadow.
+const SHADOW: Shadow = Shadow { reach: SHADOW_REACH, drop: SHADOW_DROP };
+
 impl Desktop {
     pub const fn new() -> Self {
         Desktop {
-            windows: Vec::new(),
-            next_id: 1,
-            live: false,
+            s: State::new(SHADOW),
             presenter: Presenter::None,
-            screen: (0, 0),
             wallpaper: None,
             taskbar: None,
             taskbar_dirty: true,
@@ -683,20 +406,14 @@ impl Desktop {
             pressed: Hit::Nothing,
             drag: None,
             resize: None,
-            active: None,
             minute: 0,
-            damage: Vec::new(),
-            input: Vec::new(),
             launch: None,
             search: [0; 32],
             search_len: 0,
             recent: [usize::MAX; 4],
-            listeners: Vec::new(),
-            woken: Vec::new(),
             alt: false,
             win_key: false,
             win_used: false,
-            captured: None,
         }
     }
 
@@ -706,7 +423,7 @@ impl Desktop {
         let (w, h) = (i64::from(w), i64::from(h));
         let wallpaper = Wallpaper::new(w, h, PICTURE.lock().as_ref());
         self.wallpaper = Some(wallpaper.ok_or(NtStatus::NO_MEMORY)?);
-        self.screen = (w, h);
+        self.s.screen = (w, h);
         self.pointer = (w / 2, h / 2);
         self.taskbar_dirty = true;
         self.refresh();
@@ -718,13 +435,13 @@ impl Desktop {
     /// Returns the presenter it replaced.
     pub fn set_presenter(&mut self, presenter: Presenter) -> Result<Presenter, NtStatus> {
         if let Some((w, h)) = presenter.size()
-            && (i64::from(w), i64::from(h)) != self.screen
+            && (i64::from(w), i64::from(h)) != self.s.screen
         {
             self.set_screen(w, h)?;
         }
         let old = core::mem::replace(&mut self.presenter, presenter);
-        self.damage.clear();
-        let (w, h) = self.screen;
+        self.s.damage.clear();
+        let (w, h) = self.s.screen;
         redraw(self, Rect { x: 0, y: 0, w, h });
         Ok(old)
     }
@@ -739,7 +456,7 @@ impl Desktop {
         if self.menu.is_some() {
             self.close_menu();
             self.refresh();
-            for r in core::mem::take(&mut self.damage) {
+            for r in core::mem::take(&mut self.s.damage) {
                 let _ = damage.try_push(r);
             }
         }
@@ -754,38 +471,9 @@ impl Desktop {
         self.pointer(dx, dy, buttons)
     }
 
-    fn add_damage(&mut self, r: Rect) {
-        if self.damage.len() >= 64 {
-            self.damage.clear();
-            let _ = self.damage.try_push(Rect { x: 0, y: 0, w: self.screen.0, h: self.screen.1 });
-        } else if !self
-            .damage
-            .iter()
-            .any(|d| d.contains(r.x, r.y) && d.contains(r.x + r.w - 1, r.y + r.h - 1))
-        {
-            let _ = self.damage.try_push(r);
-        }
-    }
+    // ---- What programs do (the window state's, then drawn) -------------
 
-    fn find(&mut self, id: u32, owner: u64) -> Result<&mut Window, NtStatus> {
-        self.windows
-            .iter_mut()
-            .find(|w| w.id == id && w.owner == owner)
-            .ok_or(NtStatus::INVALID_HANDLE)
-    }
-
-    fn window(&self, id: u32) -> Option<&Window> {
-        self.windows.iter().find(|w| w.id == id)
-    }
-
-    fn index(&self, id: u32) -> Option<usize> {
-        self.windows.iter().position(|w| w.id == id)
-    }
-
-    // ---- What programs do ----------------------------------------------
-
-    /// A new hidden window of outer size w x h at (x, y) titled `title`;
-    /// `style` STYLE_POPUP: a frameless popup.
+    /// A new hidden window (`State::create`).
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &mut self,
@@ -797,106 +485,25 @@ impl Desktop {
         title: &[u16],
         style: u32,
     ) -> Result<u32, NtStatus> {
-        let popup = style & STYLE_POPUP != 0;
-        let frameless = style & STYLE_FRAMELESS != 0;
-        if style & !(STYLE_POPUP | STYLE_FRAMELESS) != 0
-            || (popup && frameless)
-            || !size_fits(w, h, popup || frameless)
-        {
-            return Err(NtStatus::INVALID_PARAMETER);
-        }
-        let (b, top) = if popup || frameless { (0, 0) } else { (BORDER, BORDER + CAPTION) };
-        let mut client = Vec::new();
-        let n = ((w - 2 * b) * (h - top - b)) as usize;
-        client.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;
-        client.resize(n, 0x00_ff_ff_ff);
-        let mut name = Vec::new();
-        name.try_extend_from_slice(title).map_err(|_| NtStatus::NO_MEMORY)?;
-        let id = self.next_id;
-        let window = Window {
-            id,
-            owner,
-            x,
-            y,
-            w,
-            h,
-            visible: false,
-            minimized: false,
-            maximized: false,
-            docked: false,
-            caption: None,
-            caption_state: None,
-            client,
-            title: name,
-            icon: Vec::new(),
-            small_icon: Vec::new(),
-            unsnapped: None,
-            popup,
-            frameless,
-        };
-        self.windows.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
-        self.windows.try_push(window).map_err(|_| NtStatus::NO_MEMORY)?;
-        self.next_id += 1;
-        Ok(id)
+        self.s.create(owner, x, y, w, h, title, style)
     }
 
     /// Shows or hides a window (shown: on top and active).
     pub fn show(&mut self, id: u32, owner: u64, visible: bool) -> Result<Rect, NtStatus> {
-        let win = self.find(id, owner)?;
-        let was = win.visible;
-        let was_minimized = win.minimized;
-        win.visible = visible;
-        win.minimized = false;
-        let bounds = win.bounds();
-        if visible && !was {
-            // The title, ASCII, for the log (screen checks wait for it; not
-            // in host unit tests, which have no console).
-            #[cfg(not(test))]
-            {
-                let mut text = [0u8; 64];
-                let n = win.title.len().min(text.len());
-                for (t, &c) in text.iter_mut().zip(&win.title[..n]) {
-                    *t = if (0x20..0x7f).contains(&c) { c as u8 } else { b'?' };
-                }
-                crate::info!(
-                    "desktop: shown window '{}'",
-                    core::str::from_utf8(&text[..n]).unwrap_or("?")
-                );
-            }
-            let popup = self.window(id).is_some_and(|w| w.popup);
-            self.raise(id);
-            if !popup {
-                self.active = Some(id);
-            }
-        }
-        if visible && was && was_minimized {
-            // Restored (SC_RESTORE of a minimized window): on top and
-            // active again.
-            self.raise(id);
-            self.activate(Some(id));
-        }
-        if !visible && self.active == Some(id) {
-            self.activate_top();
-        }
-        self.taskbar_dirty = true;
-        self.add_damage(bounds);
+        let r = self.s.show(id, owner, visible)?;
         self.refresh();
-        Ok(bounds)
+        Ok(r)
     }
 
-    /// Shows a window minimized (GalaWindowShow 2: the program's
-    /// SC_MINIMIZE or ShowWindow SW_MINIMIZE): on the taskbar only.
+    /// Shows a window minimized: on the taskbar only.
     pub fn show_minimized(&mut self, id: u32, owner: u64) -> Result<Rect, NtStatus> {
-        let win = self.find(id, owner)?;
-        win.visible = true;
-        let bounds = win.bounds();
-        self.set_minimized(id);
+        let r = self.s.show_minimized(id, owner)?;
         self.refresh();
-        Ok(bounds)
+        Ok(r)
     }
 
-    /// Copies a w x h rectangle at (x, y) of the client area from `pixels`
-    /// (rows of `stride` pixels); the screen area to redraw.
+    /// Copies client pixels in (`State::present`); the screen area to
+    /// redraw.
     pub fn present(
         &mut self,
         id: u32,
@@ -904,31 +511,10 @@ impl Desktop {
         pixels: &[u32],
         stride: usize,
     ) -> Result<Rect, NtStatus> {
-        let win = self.windows.iter_mut().find(|w| w.id == id).ok_or(NtStatus::INVALID_HANDLE)?;
-        let (cw, ch) = win.client_size();
-        let clipped = r.clip(cw.into(), ch.into()).ok_or(NtStatus::INVALID_PARAMETER)?;
-        let (dx, dy) = (clipped.x - r.x, clipped.y - r.y);
-        for row in 0..clipped.h {
-            let src = ((dy + row) as usize) * stride + dx as usize;
-            let dst = ((clipped.y + row) as u32 * cw) as usize + clipped.x as usize;
-            let n = clipped.w as usize;
-            let (Some(from), Some(to)) =
-                (pixels.get(src..src + n), win.client.get_mut(dst..dst + n))
-            else {
-                return Err(NtStatus::INVALID_PARAMETER);
-            };
-            to.copy_from_slice(from);
-        }
-        let origin = win.client_origin();
-        let area = clipped.offset(origin.0, origin.1);
-        if win.shown() {
-            self.add_damage(area);
-        }
-        Ok(area)
+        self.s.present(id, r, pixels, stride)
     }
 
-    /// Moves and resizes a window (outer rectangle); its client pixels
-    /// keep what fits, new ones white. The area to redraw.
+    /// Moves and resizes a window (outer rectangle). The area to redraw.
     pub fn place(
         &mut self,
         id: u32,
@@ -938,65 +524,19 @@ impl Desktop {
         w: u32,
         h: u32,
     ) -> Result<Rect, NtStatus> {
-        let win = self.find(id, owner)?;
-        let popup = win.popup || win.frameless;
-        if !size_fits(w, h, popup) {
-            return Err(NtStatus::INVALID_PARAMETER);
-        }
-        let win = self.find(id, owner)?;
-        let old = win.bounds();
-        if (w, h) != (win.w, win.h) {
-            let (ow, oh) = win.client_size();
-            let (b, top) = win.frame();
-            let (nw, nh) = (w - 2 * b, h - top - b);
-            let mut client = Vec::new();
-            client.try_reserve_exact((nw * nh) as usize).map_err(|_| NtStatus::NO_MEMORY)?;
-            client.resize((nw * nh) as usize, 0x00_ff_ff_ff);
-            for y in 0..oh.min(nh) {
-                for x in 0..ow.min(nw) {
-                    client[(y * nw + x) as usize] = win.client[(y * ow + x) as usize];
-                }
-            }
-            win.client = client;
-            win.w = w;
-            win.h = h;
-            win.caption = None;
-            win.caption_state = None;
-        }
-        win.x = x;
-        win.y = y;
-        let work = (self.screen.0, self.screen.1 - i64::from(TASKBAR));
-        let win = self.find(id, owner)?;
-        win.maximized = (x, y) == (0, 0) && (i64::from(w), i64::from(h)) == work && work.0 > 0;
-        win.docked = !win.maximized
-            && work.0 > 0
-            && y == 0
-            && i64::from(h) == work.1
-            && (x == 0 || i64::from(x) + i64::from(w) == work.0);
-        win.caption_state = None;
-        let new = win.bounds();
-        self.add_damage(old);
-        self.add_damage(new);
-        self.refresh();
-        Ok(new)
-    }
-
-    /// A window's new title (the caption and the taskbar show it).
-    pub fn set_title(&mut self, id: u32, owner: u64, title: &[u16]) -> Result<Rect, NtStatus> {
-        let mut name = Vec::new();
-        name.try_extend_from_slice(title).map_err(|_| NtStatus::NO_MEMORY)?;
-        let win = self.find(id, owner)?;
-        win.title = name;
-        win.caption_state = None;
-        let r = win.caption_rect();
-        self.taskbar_dirty = true;
-        self.add_damage(r);
+        let r = self.s.place(id, owner, x, y, w, h)?;
         self.refresh();
         Ok(r)
     }
 
-    /// `owner`'s window `id`'s icon: `size` x `size` 0xAARRGGBB pixels
-    /// (none when empty), shown on its taskbar button.
+    /// A window's new title (the caption and the taskbar show it).
+    pub fn set_title(&mut self, id: u32, owner: u64, title: &[u16]) -> Result<Rect, NtStatus> {
+        let r = self.s.set_title(id, owner, title)?;
+        self.refresh();
+        Ok(r)
+    }
+
+    /// A window's icon, shown on its taskbar button and caption.
     pub fn set_icon(
         &mut self,
         id: u32,
@@ -1004,21 +544,7 @@ impl Desktop {
         pixels: &[u32],
         size: usize,
     ) -> Result<(), NtStatus> {
-        let (icon, small) = if pixels.is_empty() {
-            (Vec::new(), Vec::new())
-        } else {
-            (
-                scale_icon(pixels, size).ok_or(NtStatus::NO_MEMORY)?,
-                scale_icon_to(pixels, size, SMALL_ICON).ok_or(NtStatus::NO_MEMORY)?,
-            )
-        };
-        let win = self.find(id, owner)?;
-        win.icon = icon;
-        win.small_icon = small;
-        win.caption_state = None;
-        let r = win.caption_rect();
-        self.add_damage(r);
-        self.taskbar_dirty = true;
+        self.s.set_icon(id, owner, pixels, size)?;
         self.refresh();
         Ok(())
     }
@@ -1026,132 +552,69 @@ impl Desktop {
     /// Gives `owner`'s window `id` the mouse capture (0: releases the
     /// capture if one of `owner`'s windows has it).
     pub fn capture(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
-        if id == 0 {
-            if self.captured.and_then(|c| self.window(c)).is_some_and(|w| w.owner == owner) {
-                self.captured = None;
-            }
-            return Ok(());
+        self.s.capture(id, owner)?;
+        if id != 0 {
+            // No caption drag or press carries on underneath.
+            self.drag = None;
+            self.pressed = Hit::Nothing;
         }
-        self.find(id, owner)?;
-        self.captured = Some(id);
-        // No caption drag or press carries on underneath.
-        self.drag = None;
-        self.pressed = Hit::Nothing;
         Ok(())
     }
 
     pub fn destroy(&mut self, id: u32, owner: u64) -> Result<Rect, NtStatus> {
-        let i = self.windows.iter().position(|w| w.id == id && w.owner == owner);
-        let i = i.ok_or(NtStatus::INVALID_HANDLE)?;
-        let bounds = self.windows.remove(i).bounds();
-        self.forget(id);
-        self.add_damage(bounds);
+        let r = self.s.destroy(id, owner)?;
+        self.forget_gone();
         self.refresh();
-        Ok(bounds)
+        Ok(r)
     }
 
-    /// Removes `owner`'s windows (and adds their areas to the damage).
-    /// A process's end: allocates nothing, so nothing is left behind
-    /// (a capture or activation of a window that is gone).
+    /// Removes `owner`'s windows (a process's end).
     pub fn destroy_owned(&mut self, owner: u64) {
-        let mut i = 0;
-        while i < self.windows.len() {
-            if self.windows[i].owner != owner {
-                i += 1;
-                continue;
-            }
-            let w = self.windows.remove(i);
-            self.forget(w.id);
-            self.add_damage(w.bounds());
-        }
-        self.input.retain(|e| e.owner != owner);
-        self.listeners.retain(|(o, _)| *o != owner);
-        self.woken.retain(|o| *o != owner);
+        self.s.destroy_owned(owner);
+        self.forget_gone();
         self.refresh();
     }
 
-    /// A window went: nothing refers to it any more.
-    fn forget(&mut self, id: u32) {
-        if self.captured == Some(id) {
-            self.captured = None;
-        }
-        if self.active == Some(id) {
-            self.activate_top();
-        }
-        if self.drag.is_some_and(|d| d.0 == id) {
+    /// A drag of a window that is gone ends.
+    fn forget_gone(&mut self) {
+        if self.drag.is_some_and(|d| self.s.window(d.0).is_none()) {
             self.drag = None;
         }
-        self.input.retain(|e| e.window != id);
-        self.taskbar_dirty = true;
     }
 
     /// Input waiting for `owner`'s windows, oldest first, at most
     /// `out.len()`; how many.
     pub fn take_input(&mut self, owner: u64, out: &mut [InputEvent]) -> usize {
-        let mut n = 0;
-        self.input.retain(|e| {
-            if e.owner == owner && n < out.len() {
-                out[n] = *e;
-                n += 1;
-                false
-            } else {
-                true
-            }
-        });
-        n
+        self.s.take_input(owner, out)
     }
 
     pub fn has_input(&self, owner: u64) -> bool {
-        self.input.iter().any(|e| e.owner == owner)
+        self.s.has_input(owner)
     }
 
-    fn send(&mut self, window: u32, message: u32, wparam: u64, lparam: u64) {
-        let Some(owner) = self.window(window).map(|w| w.owner) else { return };
-        // A move replaces the window's previous unread one.
-        if message == WM_MOUSEMOVE
-            && let Some(last) = self.input.last_mut()
-            && last.window == window
-            && last.message == WM_MOUSEMOVE
-        {
-            last.wparam = wparam;
-            last.lparam = lparam;
-            return;
-        }
-        if self.input.len() >= MAX_INPUT {
-            self.input.remove(0);
-        }
-        let _ = self.input.try_push(InputEvent { owner, window, message, wparam, lparam });
-        if !self.woken.contains(&owner) {
-            let _ = self.woken.try_push(owner);
-        }
-    }
-
-    /// `owner`'s event to signal when input arrives for it (one per
-    /// process; a new one replaces the old).
+    /// `owner`'s event to signal when input arrives for it.
     pub fn listen(&mut self, owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
-        self.listeners.retain(|(o, _)| *o != owner);
-        self.listeners.try_push((owner, event)).map_err(|_| NtStatus::NO_MEMORY)?;
-        if self.has_input(owner) && !self.woken.contains(&owner) {
-            let _ = self.woken.try_push(owner);
-        }
+        self.s.listen(owner, event)
+    }
+
+    /// The windows the taskbar shows (in its order).
+    pub fn list(&self) -> Vec<Listed> {
+        self.s.list()
+    }
+
+    /// Does `action` to window `id` (`State::act`: the one path for the
+    /// taskbar, the caption buttons, the Snap keys and
+    /// GalaDesktopAction), then draws what changed.
+    pub fn act(&mut self, id: u32, action: Action) -> Result<(), NtStatus> {
+        self.s.act(id, action)?;
+        self.refresh();
         Ok(())
     }
 
-    /// The events to signal for processes with new input (signalled by the
-    /// caller after letting go of the desktop).
-    fn take_wakes(&mut self) -> Vec<ObjectRef> {
-        let mut out = Vec::new();
-        for owner in core::mem::take(&mut self.woken) {
-            if let Some((_, e)) = self.listeners.iter().find(|(o, _)| *o == owner) {
-                let _ = out.try_push(e.clone());
-            }
-        }
-        out
-    }
-
     /// A key went down or up: virtual key `vk`, `scan` code, `extended`
-    /// (E0-prefixed). To the active window, as WM_KEYDOWN/WM_KEYUP (with
-    /// Alt held: WM_SYSKEYDOWN/WM_SYSKEYUP), lParam as Windows packs it.
+    /// (E0-prefixed). The shell's keys (the Windows key, Snap, the start
+    /// menu's search) are the shell's; the others go to the active window
+    /// (`State::key_to_active`).
     pub fn key(&mut self, vk: u8, scan: u8, extended: bool, down: bool) {
         if vk == VK_MENU {
             self.alt = down;
@@ -1179,7 +642,7 @@ impl Desktop {
                 0x27 => SnapTo::Right,
                 _ => SnapTo::Down,
             };
-            if down && let Some(id) = self.active {
+            if down && let Some(id) = self.s.active {
                 let _ = self.act(id, Action::Snap(to));
             }
             return;
@@ -1210,31 +673,7 @@ impl Desktop {
             }
             return;
         }
-        let Some(id) = self.active else { return };
-        let mut lparam = 1u64 | u64::from(scan) << 16 | u64::from(extended) << 24;
-        if self.alt {
-            lparam |= 1 << 29;
-        }
-        if !down {
-            lparam |= 3 << 30;
-        }
-        let message = match (self.alt || vk == VK_MENU, down) {
-            (false, true) => WM_KEYDOWN,
-            (false, false) => WM_KEYUP,
-            (true, true) => WM_SYSKEYDOWN,
-            (true, false) => WM_SYSKEYUP,
-        };
-        // Where a key went (`events=window`): a program that does not
-        // react to one shows whether it had it.
-        let owner = self.window(id).map_or(0, |w| w.owner);
-        crate::events::emit(
-            crate::events::Category::Window,
-            "key",
-            format_args!(
-                r#""vk":{vk},"down":{down},"message":{message},"window":{id},"owner":{owner}"#
-            ),
-        );
-        self.send(id, message, u64::from(vk), lparam);
+        self.s.key_to_active(vk, scan, extended, down, self.alt);
     }
 
     /// The wheel turned `notches` (positive away from the user): a
@@ -1244,293 +683,49 @@ impl Desktop {
     /// the client position (user32 makes it the screen position).
     pub fn wheel(&mut self, notches: i64) {
         let (x, y) = self.pointer;
-        let id = match (self.captured, self.hit(x, y)) {
+        let id = match (self.s.captured, self.hit(x, y)) {
             (Some(id), _) => id,
             (None, Hit::Client(id)) => id,
-            _ => match self.active {
+            _ => match self.s.active {
                 Some(id) => id,
                 None => return,
             },
         };
         let delta = (notches * WHEEL_DELTA).clamp(-0x8000, 0x7fff) as i16 as u16;
-        let lp = self.client_lparam(id, x, y);
-        self.send(id, WM_MOUSEWHEEL, u64::from(delta) << 16, lp);
+        let lp = self.s.client_lparam(id, x, y);
+        self.s.send(id, WM_MOUSEWHEEL, u64::from(delta) << 16, lp);
     }
 
-    // ---- Window management ---------------------------------------------
-
-    /// Does `action` to window `id` (a framed window its program shows):
-    /// the one path for the taskbar, the caption buttons, the Snap keys
-    /// and GalaDesktopAction. STATUS_INVALID_HANDLE for another window
-    /// (none, a popup, a hidden one), STATUS_INVALID_PARAMETER for a size
-    /// no window may have.
-    pub fn act(&mut self, id: u32, action: Action) -> Result<(), NtStatus> {
-        let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
-        let w = &self.windows[i];
-        if w.popup || !w.visible {
-            return Err(NtStatus::INVALID_HANDLE);
-        }
-        let (minimized, maximized) = (w.minimized, w.maximized);
-        match action {
-            Action::Activate if minimized => self.restore(id),
-            Action::Activate => {
-                self.raise(id);
-                self.activate(Some(id));
-            }
-            Action::Minimize => {
-                if !minimized {
-                    self.minimize(id);
-                }
-            }
-            Action::Maximize => {
-                if minimized {
-                    self.restore(id);
-                }
-                if !maximized {
-                    self.send(id, WM_SYSCOMMAND, SC_MAXIMIZE, 0);
-                }
-                self.raise(id);
-                self.activate(Some(id));
-            }
-            Action::Restore if minimized => self.restore(id),
-            Action::Restore if maximized => self.send(id, WM_SYSCOMMAND, SC_RESTORE, 0),
-            Action::Restore => {
-                if let Some(r) = self.windows[i].unsnapped.take() {
-                    self.send_place(id, r);
-                }
-            }
-            Action::Close => self.send(id, WM_SYSCOMMAND, SC_CLOSE, 0),
-            Action::Snap(to) => self.snap(id, to)?,
-            Action::Place { x, y, w, h } => {
-                if !size_fits(w, h, false) {
-                    return Err(NtStatus::INVALID_PARAMETER);
-                }
-                if minimized {
-                    self.restore(id);
-                }
-                // restore() raises it: its index may have changed.
-                let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
-                self.windows[i].unsnapped = None;
-                self.send_place(id, (x, y, w, h));
-            }
-        }
-        self.refresh();
-        Ok(())
-    }
-
-    /// GALA_WM_PLACE: the program moves its window to (x, y, w, h).
-    fn send_place(&mut self, id: u32, (x, y, w, h): (i32, i32, u32, u32)) {
-        self.send(
-            id,
-            GALA_WM_PLACE,
-            u64::from(x as u32) | u64::from(y as u32) << 32,
-            u64::from(w) | u64::from(h) << 32,
-        );
-    }
-
-    /// Snap, as Windows 11 does it with the Windows key: Left and Right
-    /// put the window on that half of the work area, Up maximizes it,
-    /// Down restores it (a maximized or snapped one) or minimizes it.
-    /// The program moves its window (GALA_WM_PLACE, WM_SYSCOMMAND).
-    fn snap(&mut self, id: u32, to: SnapTo) -> Result<(), NtStatus> {
-        let (sw, sh) = self.screen;
-        let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
-        if sw <= 0 {
-            return Err(NtStatus::NOT_SUPPORTED);
-        }
-        let w = &self.windows[i];
-        let (minimized, maximized) = (w.minimized, w.maximized);
-        if minimized {
-            // Down leaves a minimized window alone; the others bring it
-            // back first.
-            if to == SnapTo::Down {
-                return Ok(());
-            }
-            self.restore(id);
-        }
-        // restore() raises it: its index may have changed.
-        let i = self.index(id).ok_or(NtStatus::INVALID_HANDLE)?;
-        let work_h = (sh - i64::from(TASKBAR)).max(1) as u32;
-        match to {
-            SnapTo::Up if !maximized => self.send(id, WM_SYSCOMMAND, SC_MAXIMIZE, 0),
-            SnapTo::Up => {}
-            SnapTo::Down if maximized => self.send(id, WM_SYSCOMMAND, SC_RESTORE, 0),
-            SnapTo::Down => match self.windows[i].unsnapped.take() {
-                Some(r) => self.send_place(id, r),
-                None => self.minimize(id),
-            },
-            SnapTo::Left | SnapTo::Right => {
-                let half = (sw / 2) as u32;
-                let (x, width) =
-                    if to == SnapTo::Left { (0, half) } else { (half as i32, sw as u32 - half) };
-                let w = &self.windows[i];
-                if w.unsnapped.is_none() && !maximized {
-                    self.windows[i].unsnapped = Some((w.x, w.y, w.w, w.h));
-                }
-                self.send_place(id, (x, 0, width, work_h));
-            }
-        }
-        if to != SnapTo::Down {
-            self.raise(id);
-            self.activate(Some(id));
-        }
-        Ok(())
-    }
-
-    /// The windows the taskbar shows (in its order).
-    pub fn list(&self) -> Vec<Listed> {
-        let mut out = Vec::new();
-        let work = (self.screen.0, self.screen.1 - i64::from(TASKBAR));
-        for id in self.visible_windows() {
-            let Some(w) = self.window(id) else { continue };
-            let mut flags = 0;
-            if w.minimized {
-                flags |= LISTED_MINIMIZED;
-            }
-            if w.maximized {
-                flags |= LISTED_MAXIMIZED;
-            }
-            if self.active == Some(id) {
-                flags |= LISTED_ACTIVE;
-            }
-            if w.docked && work.0 > 0 {
-                flags |= LISTED_SNAPPED;
-            }
-            let mut title = [0u16; LISTED_TITLE];
-            let n = w.title.len().min(LISTED_TITLE);
-            title[..n].copy_from_slice(&w.title[..n]);
-            let entry = Listed {
-                id,
-                owner: w.owner,
-                flags,
-                rect: [w.x, w.y, w.w as i32, w.h as i32],
-                title,
-                title_len: n,
-            };
-            if out.try_push(entry).is_err() {
-                break;
-            }
-        }
-        out
-    }
-
-    /// To the top of its layer: framed windows stay below the popups.
-    fn raise(&mut self, id: u32) {
-        let Some(i) = self.index(id) else { return };
-        let w = self.windows.remove(i);
-        let bounds = w.bounds();
-        let at = if w.popup {
-            self.windows.len()
-        } else {
-            self.windows.iter().position(|o| o.popup).unwrap_or(self.windows.len())
-        };
-        // Back in (the capacity it left), then into place.
-        let _ = self.windows.try_push(w);
-        self.windows[at..].rotate_right(1);
-        if at != i {
-            self.add_damage(bounds);
-        }
-    }
-
-    fn activate(&mut self, id: Option<u32>) {
-        if self.active != id {
-            self.active = id;
-            self.taskbar_dirty = true;
-        }
-    }
-
-    /// The topmost shown window becomes active (or none).
-    fn activate_top(&mut self) {
-        let top = self.windows.iter().rev().find(|w| w.shown() && !w.popup).map(|w| w.id);
-        self.activate(top);
-    }
-
-    /// The user minimizes a window: its program is told
-    /// (GALA_WM_MINIMIZED), so IsIconic says so.
-    fn minimize(&mut self, id: u32) {
-        self.set_minimized(id);
-        self.send(id, GALA_WM_MINIMIZED, 1, 0);
-    }
-
-    fn set_minimized(&mut self, id: u32) {
-        let Some(i) = self.index(id) else { return };
-        self.windows[i].minimized = true;
-        let bounds = self.windows[i].bounds();
-        self.add_damage(bounds);
-        if self.active == Some(id) {
-            self.activate_top();
-        }
-        self.taskbar_dirty = true;
-    }
-
-    /// The user restores a minimized window (its taskbar button).
-    fn restore(&mut self, id: u32) {
-        let Some(i) = self.index(id) else { return };
-        self.send(id, GALA_WM_MINIMIZED, 0, 0);
-        self.windows[i].minimized = false;
-        let bounds = self.windows[i].bounds();
-        self.add_damage(bounds);
-        self.raise(id);
-        self.activate(Some(id));
-        self.taskbar_dirty = true;
-    }
-
-    /// Moves a window to (x, y), its caption kept on the screen.
-    fn move_to(&mut self, id: u32, x: i64, y: i64) {
-        let (sw, sh) = self.screen;
-        let Some(i) = self.index(id) else { return };
-        let w = &self.windows[i];
-        let (ww, wh) = (i64::from(w.w), i64::from(w.h));
-        let _ = wh;
-        let x = x.clamp(-ww + 80, (sw - 80).max(0));
-        let y = y.clamp(0, (sh - i64::from(TASKBAR) - i64::from(CAPTION)).max(0));
-        if (x, y) == (i64::from(w.x), i64::from(w.y)) {
-            return;
-        }
-        let old = w.bounds();
-        let w = &mut self.windows[i];
-        w.x = x as i32;
-        w.y = y as i32;
-        let new = w.bounds();
-        self.add_damage(old);
-        self.add_damage(new);
+    fn take_wakes(&mut self) -> Vec<ObjectRef> {
+        self.s.take_wakes()
     }
 
     // ---- The shell's layout --------------------------------------------
 
     fn taskbar_rect(&self) -> Rect {
         let h = i64::from(TASKBAR);
-        Rect { x: 0, y: self.screen.1 - h, w: self.screen.0, h }
+        Rect { x: 0, y: self.s.screen.1 - h, w: self.s.screen.0, h }
     }
 
     /// The centred group of taskbar buttons: the start button and one per
     /// window the programs show; its left edge.
     fn group_x(&self, windows: usize) -> i64 {
         let n = 1 + windows as i64;
-        (self.screen.0 - (n * TASK_BUTTON + (n - 1) * TASK_GAP)) / 2
-    }
-
-    fn visible_windows(&self) -> Vec<u32> {
-        let mut ids: Vec<u32> = Vec::new();
-        for w in self.windows.iter().filter(|w| w.visible && !w.popup) {
-            let _ = ids.try_push(w.id);
-        }
-        ids.sort_unstable();
-        ids
+        (self.s.screen.0 - (n * TASK_BUTTON + (n - 1) * TASK_GAP)) / 2
     }
 
     /// The start button (the first of the centred group).
     fn start_rect(&self) -> Rect {
-        let top = self.screen.1 - i64::from(TASKBAR) + 4;
-        Rect { x: self.group_x(self.visible_windows().len()), y: top, w: TASK_BUTTON, h: 40 }
+        let top = self.s.screen.1 - i64::from(TASKBAR) + 4;
+        Rect { x: self.group_x(self.s.visible_windows().len()), y: top, w: TASK_BUTTON, h: 40 }
     }
 
     /// The taskbar's window buttons (in the order the windows were made)
     /// and their rectangles, after the start button.
     fn tasks(&self) -> Vec<(u32, Rect)> {
-        let ids = self.visible_windows();
+        let ids = self.s.visible_windows();
         let x0 = self.group_x(ids.len()) + TASK_BUTTON + TASK_GAP;
-        let top = self.screen.1 - i64::from(TASKBAR) + 4;
+        let top = self.s.screen.1 - i64::from(TASKBAR) + 4;
         let mut out = Vec::new();
         for (i, id) in ids.into_iter().enumerate() {
             let _ = out.try_push((
@@ -1542,9 +737,14 @@ impl Desktop {
     }
 
     fn menu_rect(&self) -> Rect {
-        let w = i64::from(MENU_W).min(self.screen.0 - 24);
-        let h = i64::from(MENU_H).min(self.screen.1 - i64::from(TASKBAR) - 24);
-        Rect { x: (self.screen.0 - w) / 2, y: self.screen.1 - i64::from(TASKBAR) - 12 - h, w, h }
+        let w = i64::from(MENU_W).min(self.s.screen.0 - 24);
+        let h = i64::from(MENU_H).min(self.s.screen.1 - i64::from(TASKBAR) - 24);
+        Rect {
+            x: (self.s.screen.0 - w) / 2,
+            y: self.s.screen.1 - i64::from(TASKBAR) - 12 - h,
+            w,
+            h,
+        }
     }
 
     fn menu_bounds(&self) -> Rect {
@@ -1587,7 +787,7 @@ impl Desktop {
     }
 
     fn hit(&self, x: i64, y: i64) -> Hit {
-        if self.screen.0 == 0 {
+        if self.s.screen.0 == 0 {
             return Hit::Nothing;
         }
         if self.menu.is_some() && self.menu_rect().contains(x, y) {
@@ -1609,7 +809,7 @@ impl Desktop {
             }
             return Hit::Taskbar;
         }
-        for w in self.windows.iter().rev().filter(|w| w.shown()) {
+        for w in self.s.windows.iter().rev().filter(|w| w.shown()) {
             let (lx, ly) = (x - i64::from(w.x), y - i64::from(w.y));
             if !w.rect().contains(x, y) || w.coverage(lx, ly) < 128 {
                 continue;
@@ -1646,45 +846,45 @@ impl Desktop {
     /// The pointer moved by (dx, dy) (screen directions) with `buttons`
     /// held; the areas to redraw.
     pub fn pointer(&mut self, dx: i64, dy: i64, buttons: u8) -> Vec<Rect> {
-        if self.screen.0 == 0 {
+        if self.s.screen.0 == 0 {
             return Vec::new();
         }
         let old_cursor = self.cursor_rect();
-        self.pointer.0 = (self.pointer.0 + dx).clamp(0, self.screen.0 - 1);
-        self.pointer.1 = (self.pointer.1 + dy).clamp(0, self.screen.1 - 1);
+        self.pointer.0 = (self.pointer.0 + dx).clamp(0, self.s.screen.0 - 1);
+        self.pointer.1 = (self.pointer.1 + dy).clamp(0, self.s.screen.1 - 1);
         let (x, y) = self.pointer;
         if old_cursor != self.cursor_rect() {
-            self.add_damage(old_cursor);
+            self.s.add_damage(old_cursor);
             let c = self.cursor_rect();
-            self.add_damage(c);
+            self.s.add_damage(c);
         }
         // The capture gets every mouse message, in its client coordinates.
-        if let Some(id) = self.captured
-            && self.window(id).is_some()
+        if let Some(id) = self.s.captured
+            && self.s.window(id).is_some()
         {
             let keys = u64::from(buttons & 1) | u64::from(buttons & 2);
-            let lp = self.client_lparam(id, x, y);
+            let lp = self.s.client_lparam(id, x, y);
             let pressed = buttons & !self.buttons;
             let released = self.buttons & !buttons;
             self.buttons = buttons;
             if (dx, dy) != (0, 0) {
-                self.send(id, WM_MOUSEMOVE, keys, lp);
+                self.s.send(id, WM_MOUSEMOVE, keys, lp);
             }
             for (bit, down, up) in
                 [(1, WM_LBUTTONDOWN, WM_LBUTTONUP), (2, WM_RBUTTONDOWN, WM_RBUTTONUP)]
             {
                 if pressed & bit != 0 {
-                    self.send(id, down, keys, lp);
+                    self.s.send(id, down, keys, lp);
                 }
                 if released & bit != 0 {
-                    self.send(id, up, keys, lp);
+                    self.s.send(id, up, keys, lp);
                 }
             }
             self.refresh();
-            return core::mem::take(&mut self.damage);
+            return core::mem::take(&mut self.s.damage);
         }
         if let Some((id, gx, gy)) = self.drag {
-            self.move_to(id, x - gx, y - gy);
+            self.s.move_to(id, x - gx, y - gy);
         }
         self.resize_to(x, y);
         let hit = self.hit(x, y);
@@ -1705,8 +905,8 @@ impl Desktop {
             && self.resize.is_none()
             && let Some(id) = target
         {
-            let lp = self.client_lparam(id, x, y);
-            self.send(id, WM_MOUSEMOVE, keys, lp);
+            let lp = self.s.client_lparam(id, x, y);
+            self.s.send(id, WM_MOUSEMOVE, keys, lp);
         }
         if pressed & 1 != 0 {
             self.left_down(hit, x, y, keys);
@@ -1717,27 +917,21 @@ impl Desktop {
         if pressed & 2 != 0
             && let Hit::Client(id) = hit
         {
-            self.raise(id);
-            if !self.window(id).is_some_and(|w| w.popup) {
-                self.activate(Some(id));
+            self.s.raise(id);
+            if !self.s.window(id).is_some_and(|w| w.popup) {
+                self.s.activate(Some(id));
             }
-            let lp = self.client_lparam(id, x, y);
-            self.send(id, WM_RBUTTONDOWN, keys, lp);
+            let lp = self.s.client_lparam(id, x, y);
+            self.s.send(id, WM_RBUTTONDOWN, keys, lp);
         }
         if released & 2 != 0
             && let Hit::Client(id) = hit
         {
-            let lp = self.client_lparam(id, x, y);
-            self.send(id, WM_RBUTTONUP, keys, lp);
+            let lp = self.s.client_lparam(id, x, y);
+            self.s.send(id, WM_RBUTTONUP, keys, lp);
         }
         self.refresh();
-        core::mem::take(&mut self.damage)
-    }
-
-    fn client_lparam(&self, id: u32, x: i64, y: i64) -> u64 {
-        let (ox, oy) = self.window(id).map_or((0, 0), |w| w.client_origin());
-        let (cx, cy) = ((x - ox) as i16 as u16, (y - oy) as i16 as u16);
-        u64::from(cy) << 16 | u64::from(cx)
+        core::mem::take(&mut self.s.damage)
     }
 
     fn set_hover(&mut self, hit: Hit) {
@@ -1775,9 +969,9 @@ impl Desktop {
             Hit::Task(id) => {
                 // A click minimizes the active window on top, else
                 // activates (restores) it.
-                let minimized = self.window(id).is_some_and(|w| w.minimized);
-                let top = self.windows.iter().rev().find(|w| w.shown()).map(|w| w.id);
-                let action = if !minimized && self.active == Some(id) && top == Some(id) {
+                let minimized = self.s.window(id).is_some_and(|w| w.minimized);
+                let top = self.s.windows.iter().rev().find(|w| w.shown()).map(|w| w.id);
+                let action = if !minimized && self.s.active == Some(id) && top == Some(id) {
                     Action::Minimize
                 } else {
                     Action::Activate
@@ -1785,23 +979,23 @@ impl Desktop {
                 let _ = self.act(id, action);
             }
             Hit::Caption(id) => {
-                self.raise(id);
-                self.activate(Some(id));
-                if let Some(w) = self.window(id) {
+                self.s.raise(id);
+                self.s.activate(Some(id));
+                if let Some(w) = self.s.window(id) {
                     self.drag = Some((id, x - i64::from(w.x), y - i64::from(w.y)));
                 }
             }
             Hit::Button(id, _) | Hit::Frame(id) => {
-                self.raise(id);
-                self.activate(Some(id));
+                self.s.raise(id);
+                self.s.activate(Some(id));
             }
             Hit::Client(id) => {
-                self.raise(id);
-                if !self.window(id).is_some_and(|w| w.popup) {
-                    self.activate(Some(id));
+                self.s.raise(id);
+                if !self.s.window(id).is_some_and(|w| w.popup) {
+                    self.s.activate(Some(id));
                 }
-                let lp = self.client_lparam(id, x, y);
-                self.send(id, WM_LBUTTONDOWN, keys, lp);
+                let lp = self.s.client_lparam(id, x, y);
+                self.s.send(id, WM_LBUTTONDOWN, keys, lp);
             }
             Hit::Menu | Hit::MenuItem(_) => self.menu_dirty = true,
             Hit::Nothing | Hit::Taskbar => {}
@@ -1814,13 +1008,13 @@ impl Desktop {
     /// the button is up already.
     pub fn begin_drag(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
         let (x, y) = self.pointer;
-        let w = self.find(id, owner)?;
+        let w = self.s.owned(id, owner).ok_or(NtStatus::INVALID_HANDLE)?;
         let (wx, wy) = (i64::from(w.x), i64::from(w.y));
         if self.buttons & 1 == 0 {
             return Err(NtStatus::INVALID_DEVICE_STATE);
         }
-        self.raise(id);
-        self.activate(Some(id));
+        self.s.raise(id);
+        self.s.activate(Some(id));
         // As Windows' move loop: the drag takes the mouse capture.
         self.release_capture_for_loop(id);
         self.drag = Some((id, x - wx, y - wy));
@@ -1836,7 +1030,7 @@ impl Desktop {
     /// (GALA_WM_PLACE) when the button goes up.
     pub fn begin_resize(&mut self, id: u32, owner: u64, edges: u32) -> Result<(), NtStatus> {
         let start = self.pointer;
-        let w = self.find(id, owner)?;
+        let w = self.s.owned(id, owner).ok_or(NtStatus::INVALID_HANDLE)?;
         let rect = [i64::from(w.x), i64::from(w.y), i64::from(w.w), i64::from(w.h)];
         if self.buttons & 1 == 0 {
             return Err(NtStatus::INVALID_DEVICE_STATE);
@@ -1844,8 +1038,8 @@ impl Desktop {
         if edges == 0 || edges & !0xf != 0 {
             return Err(NtStatus::INVALID_PARAMETER);
         }
-        self.raise(id);
-        self.activate(Some(id));
+        self.s.raise(id);
+        self.s.activate(Some(id));
         self.release_capture_for_loop(id);
         self.resize = Some(Resize { id, edges, start, from: rect, to: rect });
         #[cfg(not(test))]
@@ -1857,7 +1051,7 @@ impl Desktop {
     /// whichever window held it (otherwise every move would go to the
     /// capture and the window would not follow the pointer).
     fn release_capture_for_loop(&mut self, id: u32) {
-        if let Some(c) = self.captured.take() {
+        if let Some(c) = self.s.captured.take() {
             #[cfg(not(test))]
             crate::info!("desktop: window {c} loses the mouse capture to the move of {id}");
             #[cfg(test)]
@@ -1897,17 +1091,17 @@ impl Desktop {
     fn left_up(&mut self, hit: Hit, x: i64, y: i64, keys: u64) {
         // A resize that ends: the program places its window there.
         if let Some(Resize { id, to: [l, t, w, h], .. }) = self.resize.take() {
-            self.send_place(id, (l as i32, t as i32, w as u32, h as u32));
+            self.s.send_place(id, (l as i32, t as i32, w as u32, h as u32));
         }
         let pressed = core::mem::replace(&mut self.pressed, Hit::Nothing);
         // A drag that ends tells the program where its client area went
         // (WM_MOVE: the client area's screen position).
         if let Some((id, _, _)) = self.drag.take()
-            && let Some(w) = self.window(id)
+            && let Some(w) = self.s.window(id)
         {
             let (cx, cy) = w.client_origin();
             let lp = u64::from(cy as i16 as u16) << 16 | u64::from(cx as i16 as u16);
-            self.send(id, WM_MOVE, 0, lp);
+            self.s.send(id, WM_MOVE, 0, lp);
         }
         match (pressed, hit) {
             // As Windows: the caption buttons are WM_SYSCOMMANDs to the
@@ -1920,7 +1114,7 @@ impl Desktop {
             (Hit::Button(a, CaptionButton::Maximize), Hit::Button(b, CaptionButton::Maximize))
                 if a == b =>
             {
-                let maximized = self.window(a).is_some_and(|w| w.maximized);
+                let maximized = self.s.window(a).is_some_and(|w| w.maximized);
                 let _ = self.act(a, if maximized { Action::Restore } else { Action::Maximize });
             }
             (Hit::Button(a, CaptionButton::Minimize), Hit::Button(b, CaptionButton::Minimize))
@@ -1933,8 +1127,8 @@ impl Desktop {
                 self.close_menu();
             }
             (Hit::Client(id), _) => {
-                let lp = self.client_lparam(id, x, y);
-                self.send(id, WM_LBUTTONUP, keys, lp);
+                let lp = self.s.client_lparam(id, x, y);
+                self.s.send(id, WM_LBUTTONUP, keys, lp);
             }
             (Hit::Menu | Hit::MenuItem(_), _) => self.menu_dirty = true,
             _ => {}
@@ -1945,7 +1139,7 @@ impl Desktop {
         self.search_len = 0;
         if self.menu.take().is_some() {
             let b = self.menu_bounds();
-            self.add_damage(b);
+            self.s.add_damage(b);
             self.taskbar_dirty = true;
         }
     }
@@ -1968,7 +1162,7 @@ impl Desktop {
         self.menu_dirty = true;
         self.menu = Canvas::new(1, 1, 0); // rendered by refresh
         let b = self.menu_bounds();
-        self.add_damage(b);
+        self.s.add_damage(b);
         self.taskbar_dirty = true;
     }
 
@@ -2005,18 +1199,18 @@ impl Desktop {
     /// Brings the captions, the taskbar and the menu up to date with the
     /// state, collecting damage.
     fn refresh(&mut self) {
-        if self.screen.0 == 0 {
+        if self.s.screen.0 == 0 {
             // Windows alone (host tests): captions only.
-            let active = self.active;
-            for w in self.windows.iter_mut().filter(|w| !w.popup) {
+            let active = self.s.active;
+            for w in self.s.windows.iter_mut().filter(|w| !w.popup) {
                 w.render_caption(active == Some(w.id), None);
             }
             return;
         }
-        let active = self.active;
+        let active = self.s.active;
         let hover = self.hover;
         let mut changed = Vec::new();
-        for w in self.windows.iter_mut() {
+        for w in self.s.windows.iter_mut() {
             let button = match hover {
                 Hit::Button(id, b) if id == w.id => Some(b),
                 _ => None,
@@ -2024,26 +1218,29 @@ impl Desktop {
             if w.popup {
                 continue;
             }
-            let before = w.caption_state;
+            let before = w.chrome.caption_state;
             w.render_caption(active == Some(w.id), button);
-            if before != w.caption_state && w.shown() {
+            if before != w.chrome.caption_state && w.shown() {
                 let _ = changed.try_push(w.caption_rect());
             }
         }
         for r in changed {
-            self.add_damage(r);
+            self.s.add_damage(r);
         }
-        if self.taskbar_dirty || self.taskbar.is_none() {
+        // The taskbar's own changes (hover, the menu, the clock) and the
+        // window state's (what it lists).
+        if self.taskbar_dirty || self.s.listing_changed || self.taskbar.is_none() {
             self.taskbar = self.render_taskbar();
             self.taskbar_dirty = false;
+            self.s.listing_changed = false;
             let r = self.taskbar_rect();
-            self.add_damage(r);
+            self.s.add_damage(r);
         }
         if self.menu.is_some() && self.menu_dirty {
             self.menu = self.render_menu();
             self.menu_dirty = false;
             let r = self.menu_rect();
-            self.add_damage(r);
+            self.s.add_damage(r);
         }
     }
 
@@ -2053,7 +1250,7 @@ impl Desktop {
     /// pill on a lit button; the others: a short grey one); the clock and
     /// date at the right.
     fn render_taskbar(&self) -> Option<Canvas> {
-        let (w, h) = (self.screen.0, i64::from(TASKBAR));
+        let (w, h) = (self.s.screen.0, i64::from(TASKBAR));
         let mut c = Canvas::new(w, h, 0)?;
         for y in 0..h {
             let (row, a) =
@@ -2062,7 +1259,7 @@ impl Desktop {
                 c.put(x, y, row, a);
             }
         }
-        let top = self.screen.1 - h;
+        let top = self.s.screen.1 - h;
         let s = self.start_rect();
         let glow = if self.menu.is_some() {
             170
@@ -2084,9 +1281,9 @@ impl Desktop {
             255,
         );
         for (id, r) in self.tasks() {
-            let Some(win) = self.window(id) else { continue };
+            let Some(win) = self.s.window(id) else { continue };
             let (x, y) = (r.x, r.y - top);
-            let active = self.active == Some(id) && win.shown();
+            let active = self.s.active == Some(id) && win.shown();
             let alpha = if active {
                 190
             } else if self.hover == Hit::Task(id) {
@@ -2275,13 +1472,13 @@ impl Desktop {
     /// The colour of screen point (x, y), all layers composed.
     pub fn pixel(&self, x: i64, y: i64) -> u32 {
         let mut c = self.wallpaper.as_ref().map_or(DESKTOP_COLOR, |w| w.pixel(x, y));
-        for w in self.windows.iter().filter(|w| w.shown()) {
-            if !w.bounds().contains(x, y) {
+        for w in self.s.windows.iter().filter(|w| w.shown()) {
+            if !w.bounds(SHADOW).contains(x, y) {
                 continue;
             }
             let (lx, ly) = (x - i64::from(w.x), y - i64::from(w.y));
             let cov = w.coverage(lx, ly);
-            let active = self.active == Some(w.id);
+            let active = self.s.active == Some(w.id);
             if cov < 255 && !w.square() {
                 let r = w.rect();
                 let rect = (r.x + 3, r.y + SHADOW_DROP, r.x + r.w - 3, r.y + r.h + SHADOW_DROP - 2);
@@ -2292,7 +1489,7 @@ impl Desktop {
                 c = blend(c, w.body(lx, ly, active), cov);
             }
         }
-        if self.screen.0 == 0 {
+        if self.s.screen.0 == 0 {
             return c;
         }
         let t = self.taskbar_rect();
@@ -2428,7 +1625,7 @@ impl Shell {
     /// (windows, live, what shows it): the state dump's figures.
     pub fn counts(&self) -> (usize, bool, Kind) {
         let d = self.d.lock();
-        (d.windows.len(), d.live, d.presenter.kind())
+        (d.s.windows.len(), d.s.live, d.presenter.kind())
     }
 }
 
@@ -2489,7 +1686,7 @@ fn redraw(d: &mut Desktop, r: Rect) {
     if d.presenter.kind() == Kind::None {
         return;
     }
-    let Some(r) = r.clip(d.screen.0, d.screen.1) else { return };
+    let Some(r) = r.clip(d.s.screen.0, d.s.screen.1) else { return };
     let mut row = Vec::new();
     if row.try_reserve_exact(r.w as usize).is_err() {
         return;
@@ -2507,7 +1704,7 @@ fn redraw(d: &mut Desktop, r: Rect) {
 }
 
 fn redraw_damage(d: &mut Desktop) {
-    let damage = core::mem::take(&mut d.damage);
+    let damage = core::mem::take(&mut d.s.damage);
     for r in damage {
         redraw(d, r);
     }
@@ -2589,7 +1786,7 @@ fn note_frame(session: u32, presenter: &Presenter) {
 /// another session's none. STATUS_NOT_SUPPORTED where there are no
 /// desktops (`available`).
 fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
-    if d.live {
+    if d.s.live {
         return Ok(());
     }
     if !available() {
@@ -2600,7 +1797,7 @@ fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
     let (w, h) = presenter.size().unwrap_or(DEFAULT_SIZE);
     d.set_screen(w, h)?;
     d.set_minute(platform::system_time() / 600_000_000);
-    d.live = true;
+    d.s.live = true;
     let kind = presenter.kind();
     note_frame(shell.session, &presenter);
     d.set_presenter(presenter)?;
@@ -2637,7 +1834,14 @@ fn ensure_live(shell: &Shell, d: &mut Desktop) -> Result<(), NtStatus> {
 pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
     let mut d = shell.d.lock();
     ensure_live(shell, &mut d).ok()?;
-    Some((d.screen.0 as u32, d.screen.1 as u32))
+    Some((d.s.screen.0 as u32, d.s.screen.1 as u32))
+}
+
+/// Whether shasha's shell (taskbar, start menu, the named window
+/// actions) runs on `shell`'s desktop: wherever the desktop exists (made
+/// live if it was not; the server kernel has none).
+pub fn has_shell(shell: &Shell) -> bool {
+    screen(shell).is_some()
 }
 
 /// Runs `f` on the desktop and redraws what it changed; STATUS_NOT_SUPPORTED
@@ -2651,7 +1855,7 @@ pub fn with<R>(
     ensure_live(shell, &mut d)?;
     let (r, area) = f(&mut d)?;
     if let Some(area) = area {
-        d.add_damage(area);
+        d.s.add_damage(area);
     }
     redraw_damage(&mut d);
     Ok(r)
@@ -2678,7 +1882,7 @@ pub fn attach(shell: &Shell, kind: Kind, size: Option<(u32, u32)>) -> Result<Kin
     let current = {
         let mut d = shell.d.lock();
         ensure_live(shell, &mut d)?;
-        (d.screen.0 as u32, d.screen.1 as u32)
+        (d.s.screen.0 as u32, d.s.screen.1 as u32)
     };
     // A frame (megabytes) is made outside the desktop's lock.
     let presenter = match kind {
@@ -2692,7 +1896,7 @@ pub fn attach(shell: &Shell, kind: Kind, size: Option<(u32, u32)>) -> Result<Kin
     note_frame(shell.session, &presenter);
     let mut d = shell.d.lock();
     let old = d.set_presenter(presenter)?;
-    let (w, h) = d.screen;
+    let (w, h) = d.s.screen;
     drop(d);
     let was = old.kind();
     // The old frame is freed outside the lock.
@@ -2796,7 +2000,7 @@ fn move_console(shell: &Shell, to: Option<Presenter>) -> Result<Kind, NtStatus> 
     let old = match to {
         Some(p) => d.set_presenter(p)?,
         None => {
-            if !d.live || was != Kind::Console {
+            if !d.s.live || was != Kind::Console {
                 return Ok(was);
             }
             for r in d.leave_console() {
@@ -2818,7 +2022,7 @@ fn move_console(shell: &Shell, to: Option<Presenter>) -> Result<Kind, NtStatus> 
 /// is made live.
 pub fn query(shell: &Shell) -> (Kind, bool, (u32, u32), usize) {
     let d = shell.d.lock();
-    (d.presenter.kind(), d.live, (d.screen.0 as u32, d.screen.1 as u32), d.windows.len())
+    (d.presenter.kind(), d.s.live, (d.s.screen.0 as u32, d.s.screen.1 as u32), d.s.windows.len())
 }
 
 /// Copies area `r` of the Test frame that shows `shell`'s desktop into
@@ -2837,7 +2041,7 @@ pub fn read_frame(shell: &Shell, r: Rect, out: &mut [u32]) -> Result<((u32, u32)
 /// A process ended: its windows go (shown or not).
 pub fn process_ended(shell: &Shell, owner: u64) {
     let mut d = shell.d.lock();
-    if !d.live {
+    if !d.s.live {
         return;
     }
     d.destroy_owned(owner);
@@ -2866,7 +2070,7 @@ fn pointer_on(
     // Which programs exist (outside the desktop's lock: the file system).
     let (available, n) = if buttons & 1 != 0 { available_programs() } else { ([0; 8], 0) };
     let mut d = shell.d.lock();
-    if !d.live {
+    if !d.s.live {
         return None;
     }
     if buttons & 1 != 0 && !d.menu_open() {
@@ -2902,7 +2106,7 @@ pub enum Injected {
 pub fn inject(shell: &Shell, input: Injected) -> Result<Option<&'static Program>, NtStatus> {
     {
         let d = shell.d.lock();
-        if !d.live || d.presenter.kind() != Kind::Test {
+        if !d.s.live || d.presenter.kind() != Kind::Test {
             return Err(NtStatus::INVALID_DEVICE_STATE);
         }
     }
@@ -2963,7 +2167,7 @@ pub fn window_action(shell: &Shell, owner: u64, id: u32, action: Action) -> Resu
         return Err(NtStatus::NOT_SUPPORTED);
     }
     let mut d = shell.d.lock();
-    if d.window(id).is_none_or(|w| w.owner != owner) {
+    if d.s.window(id).is_none_or(|w| w.owner != owner) {
         return Err(NtStatus::INVALID_HANDLE);
     }
     let result = d.act(id, action);
@@ -3004,7 +2208,7 @@ pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     };
     // The new layout is made outside the desktop's lock (it scales the
     // picture to the screen), then swapped in.
-    let screen = shell.d.lock().screen;
+    let screen = shell.d.lock().s.screen;
     let layout = if screen.0 > 0 {
         Some(Wallpaper::new(screen.0, screen.1, picture.as_ref()).ok_or(NtStatus::NO_MEMORY)?)
     } else {
@@ -3013,11 +2217,11 @@ pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     *PICTURE.lock() = picture;
     let mut d = shell.d.lock();
     if let Some(layout) = layout
-        && d.live
-        && d.screen == screen
+        && d.s.live
+        && d.s.screen == screen
     {
         d.wallpaper = Some(layout);
-        d.add_damage(Rect { x: 0, y: 0, w: screen.0, h: screen.1 });
+        d.s.add_damage(Rect { x: 0, y: 0, w: screen.0, h: screen.1 });
         redraw_damage(&mut d);
     }
     drop(d);
@@ -3043,7 +2247,7 @@ pub fn wheel_event(notches: i64) {
 
 fn wheel_on(shell: &Shell, notches: i64) {
     let mut d = shell.d.lock();
-    if !d.live {
+    if !d.s.live {
         return;
     }
     d.wheel(notches);
@@ -3060,7 +2264,7 @@ pub fn key_event(vk: u8, scan: u8, extended: bool, down: bool) {
 
 fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) {
     let mut d = shell.d.lock();
-    if !d.live {
+    if !d.s.live {
         return;
     }
     d.key(vk, scan, extended, down);
@@ -3090,7 +2294,7 @@ pub fn tick() {
     for id in ids {
         let Some(desk) = super::session::desk(id) else { continue };
         let mut d = desk.shell.d.lock();
-        if !d.live {
+        if !d.s.live {
             continue;
         }
         if let Some((w, h)) = changed
@@ -3108,7 +2312,7 @@ pub fn tick() {
 /// docked ones and sends WM_DISPLAYCHANGE: ARCHITECTURE "Plan: graphics
 /// and GPU").
 fn resize(d: &mut Desktop, w: u32, h: u32) {
-    if d.screen == (i64::from(w), i64::from(h)) {
+    if d.s.screen == (i64::from(w), i64::from(h)) {
         return;
     }
     crate::info!("desktop: the screen is now {w}x{h}");
@@ -3116,7 +2320,7 @@ fn resize(d: &mut Desktop, w: u32, h: u32) {
         crate::warn!("desktop: no memory to lay out a {w}x{h} screen");
         return;
     }
-    d.damage.clear();
+    d.s.damage.clear();
     redraw(d, Rect { x: 0, y: 0, w: w.into(), h: h.into() });
 }
 

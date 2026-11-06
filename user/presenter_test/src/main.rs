@@ -55,6 +55,16 @@
 //! - The children end (exit code 0): session 2's window goes from a new
 //!   Test frame.
 //!
+//! `server` (scenario `server_windows`, the server kernel: no compositor,
+//! ROADMAP SD): a desktop nobody shows, as on a machine whose desktop no
+//! presenter shows. Session 2's child makes, shows and paints its window
+//! as above (1280 x 800, visible); the query says live, shown by none,
+//! 1280 x 800, one window; a frame and injected input are
+//! STATUS_INVALID_DEVICE_STATE; presenter none is accepted, Test and
+//! Console are STATUS_NOT_SUPPORTED (nothing in this kernel composes);
+//! the child repaints while nothing shows it, then destroys its window
+//! (IsWindow FALSE) and ends: the query counts no window.
+//!
 //! Prints `presenter_test: ok` or exits with the number of the failing
 //! check (the child's failures are 0x100 + its check, seen as its exit
 //! code).
@@ -201,6 +211,8 @@ unsafe extern "system" {
     fn UpdateWindow(hwnd: Hwnd) -> i32;
     fn InvalidateRect(hwnd: Hwnd, rect: *const Rect, erase: Bool) -> Bool;
     fn IsWindowVisible(hwnd: Hwnd) -> i32;
+    fn IsWindow(hwnd: Hwnd) -> i32;
+    fn DestroyWindow(hwnd: Hwnd) -> Bool;
     fn GetSystemMetrics(index: i32) -> i32;
     fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle;
     fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32;
@@ -487,6 +499,9 @@ fn child([x, paint, ready, step, ack, quit, clicked]: [usize; 7]) -> u32 {
                 // A give-up only: the parent waits for xtask's clicks.
                 let woke = MsgWaitForMultipleObjects(2, waits.as_ptr(), 0, 300_000, QS_ALLINPUT);
                 if woke == 1 {
+                    // Closed by its program: gone from the desktop.
+                    c.ok(DestroyWindow(hwnd) != 0, last_error())?;
+                    c.ok(IsWindow(hwnd) == 0, 0)?;
                     break;
                 }
                 if woke == 2 {
@@ -506,7 +521,6 @@ fn child([x, paint, ready, step, ack, quit, clicked]: [usize; 7]) -> u32 {
                 c.ok(SetEvent(ack as Handle) != 0, last_error())?;
             }
         }
-        // The window goes with the process.
         Ok(())
     };
     run().err().unwrap_or(0)
@@ -889,11 +903,90 @@ fn run() -> Result<bool, u32> {
     Ok(true)
 }
 
+/// Whether the command line's last word is `server`.
+fn server_mode() -> bool {
+    // SAFETY: the process's command line, NUL-terminated.
+    let line = unsafe {
+        let p = GetCommandLineW();
+        core::slice::from_raw_parts(p, (0..).take_while(|&i| *p.add(i) != 0).count())
+    };
+    line.split(|&c| c == u16::from(b' '))
+        .rfind(|w| !w.is_empty())
+        .is_some_and(|w| w.iter().copied().eq("server".encode_utf16()))
+}
+
+/// `server`: session 2's desktop on the server kernel, which nothing in
+/// the kernel composes: its window is kept, queried and closed.
+fn run_server() -> Result<bool, u32> {
+    let c = Checks::new(0, false);
+    let (st, _) = session_query(SESSION);
+    if st == STATUS_INVALID_SYSTEM_SERVICE {
+        return Ok(false);
+    }
+    c.eq(st.into(), STATUS_NOT_FOUND.into())?;
+    let two = Events::new(&c)?;
+    let info = spawn(&c, SESSION, 100, 0, &two)?;
+    let process = info[0] as Handle;
+    out(b"presenter_test: child painted\r\n");
+
+    // Live, shown by none, the default size, its window.
+    let (st, q) = session_query(SESSION);
+    c.eq(st.into(), STATUS_SUCCESS.into())?;
+    c.eq(q[0].into(), PRESENTER_NONE)?;
+    c.eq(q[1].into(), 1)?;
+    c.eq(u64::from(q[2]) << 32 | u64::from(q[3]), 1280 << 32 | 800)?;
+    c.eq(q[4].into(), 1)?;
+    let mut p = [0u32; 1];
+    c.eq(
+        session_frame(SESSION, [0, 0, 1, 1], &mut p).0.into(),
+        STATUS_INVALID_DEVICE_STATE.into(),
+    )?;
+    c.eq(
+        session_input(SESSION, [0, INJECTED.0, INJECTED.1, 0]).into(),
+        STATUS_INVALID_DEVICE_STATE.into(),
+    )?;
+    // Nothing here composes: no Test frame, no console; none is what
+    // shows it already.
+    c.eq(present(PRESENTER_NONE).into(), STATUS_SUCCESS.into())?;
+    c.eq(present(PRESENTER_TEST).into(), STATUS_NOT_SUPPORTED.into())?;
+    c.eq(present(PRESENTER_CONSOLE).into(), STATUS_NOT_SUPPORTED.into())?;
+    c.eq(present(7).into(), STATUS_INVALID_PARAMETER.into())?;
+    out(b"presenter_test: the window is kept with nothing showing it\r\n");
+
+    // It repaints while nothing shows it (its pixels go to the desktop).
+    repaint(&c, two.step, two.ack, process)?;
+    let (st, q) = session_query(SESSION);
+    c.eq(st.into(), STATUS_SUCCESS.into())?;
+    c.eq(u64::from(q[0]) << 32 | u64::from(q[4]), PRESENTER_NONE << 32 | 1)?;
+
+    // Closed: the child destroys its window and ends.
+    // SAFETY: our handles.
+    unsafe {
+        c.ok(SetEvent(two.quit) != 0, last_error())?;
+        c.eq(WaitForSingleObject(process, 30_000).into(), 0)?;
+        let mut code = 0;
+        c.ok(GetExitCodeProcess(process, &mut code) != 0, last_error())?;
+        c.eq(code.into(), 0)?;
+        for h in [info[0], info[1]] {
+            CloseHandle(h as Handle);
+        }
+        for h in two.all() {
+            CloseHandle(h);
+        }
+    }
+    let (st, q) = session_query(SESSION);
+    c.eq(st.into(), STATUS_SUCCESS.into())?;
+    c.eq(u64::from(q[1]) << 32 | u64::from(q[4]), 1 << 32)?;
+    out(b"presenter_test: the window was closed\r\n");
+    Ok(true)
+}
+
 fn main() -> u32 {
     if let Some(args) = child_args() {
         return child(args);
     }
-    match run() {
+    let result = if server_mode() { run_server() } else { run() };
+    match result {
         Ok(true) => {
             out(b"presenter_test: ok\r\n");
             0

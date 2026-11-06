@@ -46,7 +46,7 @@ fn desktop_with_window() -> (Desktop, u32) {
     d.set_screen(1024, 768).unwrap();
     let a = d.create(7, 300, 100, 400, 300, &title("Notes"), 0).unwrap();
     d.show(a, 7, true).unwrap();
-    d.damage.clear();
+    d.s.damage.clear();
     (d, a)
 }
 
@@ -116,7 +116,7 @@ fn the_caption_drags_and_its_buttons_minimize_and_close() {
     go(&mut d, 400, 160, 1);
     go(&mut d, 450, 210, 1);
     go(&mut d, 450, 210, 0);
-    let w = d.window(a).unwrap();
+    let w = d.s.window(a).unwrap();
     assert_eq!((w.x, w.y), (400, 200));
     // The drag's end: WM_MOVE with the client area's screen position.
     // Close: WM_SYSCOMMAND SC_CLOSE for the program (on release over the
@@ -135,15 +135,15 @@ fn the_caption_drags_and_its_buttons_minimize_and_close() {
     // Minimize: gone from the screen, still on the taskbar; its taskbar
     // button brings it back.
     click(&mut d, 400 + 400 - 2 * 46 - 20, 215);
-    assert!(d.window(a).unwrap().minimized);
+    assert!(d.s.window(a).unwrap().minimized);
     assert_eq!(d.hit(600, 300), Hit::Nothing);
     // The program is told (IsIconic), and again when it comes back.
     let n = d.take_input(7, &mut out);
     assert_eq!((n, out[0].window, out[0].message, out[0].wparam), (1, a, GALA_WM_MINIMIZED, 1));
     let (_, button) = d.tasks()[0];
     click(&mut d, button.x + 10, button.y + 10);
-    assert!(!d.window(a).unwrap().minimized);
-    assert_eq!(d.active, Some(a));
+    assert!(!d.s.window(a).unwrap().minimized);
+    assert_eq!(d.s.active, Some(a));
     let n = d.take_input(7, &mut out);
     assert_eq!((n, out[0].message, out[0].wparam), (1, GALA_WM_MINIMIZED, 0));
 }
@@ -154,23 +154,23 @@ fn a_program_minimizes_and_restores_its_window() {
     // GalaWindowShow 2 (user32's SC_MINIMIZE): on the taskbar only, not
     // active, and nothing is sent back.
     d.show_minimized(a, 7).unwrap();
-    assert!(d.window(a).unwrap().minimized);
+    assert!(d.s.window(a).unwrap().minimized);
     assert_eq!(d.hit(600, 300), Hit::Nothing);
-    assert_ne!(d.active, Some(a));
+    assert_ne!(d.s.active, Some(a));
     assert_eq!(d.tasks().len(), 1);
-    assert!(d.input.is_empty());
+    assert!(d.s.input.is_empty());
     // Another process may not.
     assert!(d.show_minimized(a, 8).is_err());
     // GalaWindowShow 1 (SC_RESTORE): back.
     d.show(a, 7, true).unwrap();
-    assert!(!d.window(a).unwrap().minimized);
-    assert_eq!(d.active, Some(a));
+    assert!(!d.s.window(a).unwrap().minimized);
+    assert_eq!(d.s.active, Some(a));
 }
 
 #[test]
 fn clicks_in_a_client_area_go_to_its_program() {
     let (mut d, a) = desktop_with_window();
-    let (ox, oy) = d.window(a).unwrap().client_origin();
+    let (ox, oy) = d.s.window(a).unwrap().client_origin();
     click(&mut d, ox + 10, oy + 20);
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 8];
     let n = d.take_input(7, &mut out);
@@ -197,14 +197,14 @@ fn place_resizes_keeping_the_client_pixels_and_set_title_renames() {
     let red = [0x00ff_0000u32; 4];
     d.present(a, Rect { x: 0, y: 0, w: 2, h: 2 }, &red, 2).unwrap();
     d.place(a, 7, 100, 50, 500, 400).unwrap();
-    let w = d.window(a).unwrap();
+    let w = d.s.window(a).unwrap();
     assert_eq!((w.x, w.y, w.w, w.h), (100, 50, 500, 400));
     let (ox, oy) = w.client_origin();
     assert_eq!(d.pixel(ox + 1, oy + 1), 0x00ff_0000);
     assert_eq!(d.pixel(ox + 450, oy + 300), 0x00ff_ffff);
     assert_eq!(d.place(a, 8, 0, 0, 500, 400).err(), Some(NtStatus::INVALID_HANDLE));
     d.set_title(a, 7, &title("Renamed")).unwrap();
-    assert_eq!(d.window(a).unwrap().title, title("Renamed"));
+    assert_eq!(d.s.window(a).unwrap().title, title("Renamed"));
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn a_frameless_window_is_all_client_area_yet_an_application_window() {
     // A program that draws its own frame (Chromium's WM_NCCALCSIZE).
     let (mut d, a) = desktop_with_window();
     let f = d.create(7, 300, 120, 200, 100, &title("own frame"), STYLE_FRAMELESS).unwrap();
-    let w = d.window(f).unwrap();
+    let w = d.s.window(f).unwrap();
     assert_eq!((w.client_size(), w.client_origin()), ((200, 100), (300, 120)));
     let blue = [0x0000_00ffu32; 4];
     d.present(f, Rect { x: 100, y: 0, w: 2, h: 2 }, &blue, 2).unwrap();
@@ -248,7 +248,7 @@ fn a_frameless_window_is_all_client_area_yet_an_application_window() {
     // Its top rows are its own (no caption), it is active and on the
     // taskbar.
     assert_eq!(d.pixel(400, 120), 0x0000_00ff);
-    assert_eq!(d.active, Some(f));
+    assert_eq!(d.s.active, Some(f));
     assert_eq!(d.tasks().len(), 2);
     // A click on its top row is the program's, in its coordinates.
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
@@ -258,7 +258,7 @@ fn a_frameless_window_is_all_client_area_yet_an_application_window() {
     let down = out[..n].iter().find(|e| e.message == WM_LBUTTONDOWN).unwrap();
     assert_eq!((down.window, down.lparam), (f, 1 << 16 | 160));
     // Another window raised above it stays above it.
-    d.raise(a);
+    d.s.raise(a);
     assert_ne!(d.pixel(400, 120), 0x0000_00ff);
     // Popup and frameless together are refused.
     assert!(d.create(7, 0, 0, 10, 10, &[], STYLE_POPUP | STYLE_FRAMELESS).is_err());
@@ -278,7 +278,7 @@ fn a_frameless_window_is_dragged_when_its_program_asks() {
     assert_eq!(d.begin_drag(f, 8), Err(NtStatus::INVALID_HANDLE));
     d.begin_drag(f, 7).unwrap();
     go(&mut d, 400, 175, 1);
-    assert_eq!(d.window(f).map(|w| (w.x, w.y)), Some((350, 170)));
+    assert_eq!(d.s.window(f).map(|w| (w.x, w.y)), Some((350, 170)));
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
     d.take_input(7, &mut out);
     go(&mut d, 400, 175, 0);
@@ -331,17 +331,17 @@ fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     let (mut d, a) = desktop_with_window();
     let p = d.create(7, 320, 150, 100, 60, &title("menu"), STYLE_POPUP).unwrap();
     // The whole window is its client area.
-    let w = d.window(p).unwrap();
+    let w = d.s.window(p).unwrap();
     assert_eq!((w.client_size(), w.client_origin()), ((100, 60), (320, 150)));
     let green = [0x0000_ff00u32; 1];
     d.present(p, Rect { x: 0, y: 0, w: 1, h: 1 }, &green, 1).unwrap();
     d.show(p, 7, true).unwrap();
     assert_eq!(d.pixel(320, 150), 0x0000_ff00);
     // Not active, not on the taskbar.
-    assert_eq!(d.active, Some(a));
+    assert_eq!(d.s.active, Some(a));
     assert_eq!(d.tasks().len(), 1);
     // Raising the frame keeps the popup above it.
-    let (ox, oy) = d.window(a).unwrap().client_origin();
+    let (ox, oy) = d.s.window(a).unwrap().client_origin();
     click(&mut d, ox + 5, oy + 200);
     assert_eq!(d.pixel(320, 150), 0x0000_ff00);
     // A click on it goes to it, in its coordinates.
@@ -351,7 +351,7 @@ fn a_popup_has_no_frame_stays_on_top_and_does_not_activate() {
     let n = d.take_input(7, &mut out);
     let down = out[..n].iter().find(|e| e.message == WM_LBUTTONDOWN).unwrap();
     assert_eq!((down.window, down.lparam), (p, 10 << 16 | 10));
-    assert_eq!(d.active, Some(a));
+    assert_eq!(d.s.active, Some(a));
     // Too small for a frame is fine for a popup; unknown styles are not.
     assert!(d.create(7, 0, 0, 2, 2, &title(""), STYLE_POPUP).is_ok());
     assert!(d.create(7, 0, 0, 2, 2, &title(""), 0).is_err());
@@ -379,14 +379,14 @@ fn the_capture_gets_the_mouse_everywhere() {
     assert!(!d.menu_open());
     // Released: the frame's caption works again.
     d.capture(0, 7).unwrap();
-    let (ox, oy) = d.window(a).unwrap().client_origin();
+    let (ox, oy) = d.s.window(a).unwrap().client_origin();
     click(&mut d, ox + 5, oy + 200);
     let n = d.take_input(7, &mut out);
     assert!(out[..n].iter().any(|e| e.window == a && e.message == WM_LBUTTONDOWN));
     // A destroyed window loses it.
     d.capture(p, 7).unwrap();
     d.destroy(p, 7).unwrap();
-    assert_eq!(d.captured, None);
+    assert_eq!(d.s.captured, None);
 }
 
 #[test]
@@ -417,7 +417,7 @@ fn icons_scale_by_area_and_show_on_the_taskbar_button() {
     d.set_icon(a, 7, &green, 32).unwrap();
     assert_eq!(d.pixel(ix, iy), 0x0000_c000);
     // And at the caption's left, 16 x 16, before the title.
-    let caption = d.window(a).unwrap().caption_rect();
+    let caption = d.s.window(a).unwrap().caption_rect();
     assert_eq!(d.pixel(caption.x + 12 + 8, caption.y + i64::from(CAPTION) / 2), 0x0000_c000);
     assert_eq!(d.set_icon(a, 8, &green, 32).err(), Some(NtStatus::INVALID_HANDLE));
     d.set_icon(a, 7, &[], 0).unwrap();
@@ -427,7 +427,7 @@ fn icons_scale_by_area_and_show_on_the_taskbar_button() {
 #[test]
 fn the_windows_key_with_arrows_snaps_the_active_window() {
     let (mut d, a) = desktop_with_window();
-    d.input.clear();
+    d.s.input.clear();
     let snap = |d: &mut Desktop, vk: u8| {
         d.key(0x5b, 0x5b, true, true);
         d.key(vk, 0, true, true);
@@ -440,39 +440,39 @@ fn the_windows_key_with_arrows_snaps_the_active_window() {
     assert!(!d.menu_open());
     let work_h = 768 - u64::from(TASKBAR);
     let placed: Vec<_> =
-        d.input.iter().map(|e| (e.window, e.message, e.wparam, e.lparam)).collect();
+        d.s.input.iter().map(|e| (e.window, e.message, e.wparam, e.lparam)).collect();
     assert_eq!(placed, [(a, GALA_WM_PLACE, 0, 512 | work_h << 32)]);
     // The program moves it; Win+Right: the right half.
     d.place(a, 7, 0, 0, 512, work_h as u32).unwrap();
-    d.input.clear();
+    d.s.input.clear();
     snap(&mut d, 0x27);
-    assert_eq!(d.input[0].wparam, 512);
+    assert_eq!(d.s.input[0].wparam, 512);
     // Win+Down: back to where it was before the first snap.
-    d.input.clear();
+    d.s.input.clear();
     snap(&mut d, 0x28);
-    assert_eq!(d.input[0].message, GALA_WM_PLACE);
-    assert_eq!(d.input[0].wparam, 300 | 100 << 32);
-    assert_eq!(d.input[0].lparam, 400 | 300 << 32);
+    assert_eq!(d.s.input[0].message, GALA_WM_PLACE);
+    assert_eq!(d.s.input[0].wparam, 300 | 100 << 32);
+    assert_eq!(d.s.input[0].lparam, 400 | 300 << 32);
     // Win+Up maximizes; Win+Down on a window not snapped minimizes it.
-    d.input.clear();
+    d.s.input.clear();
     snap(&mut d, 0x26);
-    assert_eq!((d.input[0].message, d.input[0].wparam), (WM_SYSCOMMAND, SC_MAXIMIZE));
-    d.input.clear();
+    assert_eq!((d.s.input[0].message, d.s.input[0].wparam), (WM_SYSCOMMAND, SC_MAXIMIZE));
+    d.s.input.clear();
     snap(&mut d, 0x28);
-    assert!(d.window(a).unwrap().minimized);
+    assert!(d.s.window(a).unwrap().minimized);
 }
 
 #[test]
 fn the_wheel_goes_to_the_window_under_the_pointer() {
     let (mut d, a) = desktop_with_window();
     go(&mut d, 500, 300, 0);
-    d.input.clear();
+    d.s.input.clear();
     d.wheel(-2);
-    let e = &d.input[0];
+    let e = &d.s.input[0];
     assert_eq!((e.window, e.message), (a, WM_MOUSEWHEEL));
     assert_eq!((e.wparam >> 16) as u16 as i16, -240);
-    let (ox, oy) = d.window(a).unwrap().client_origin();
-    assert_eq!(e.lparam, d.client_lparam(a, 500, 300));
+    let (ox, oy) = d.s.window(a).unwrap().client_origin();
+    assert_eq!(e.lparam, d.s.client_lparam(a, 500, 300));
     assert_eq!(e.lparam & 0xffff, (500 - ox) as u64);
     assert_eq!((e.lparam >> 16) & 0xffff, (300 - oy) as u64);
 }
@@ -490,15 +490,15 @@ fn a_docked_window_has_square_corners_and_no_shadow() {
     // Docked left: the top-left corner is the window's outline, not the
     // desktop showing through a rounding, and no shadow beside it.
     d.place(a, 7, 0, 0, 512, work_h).unwrap();
-    assert!(d.window(a).unwrap().docked);
+    assert!(d.s.window(a).unwrap().docked);
     assert_ne!(d.pixel(0, 0), corner);
     assert_eq!(d.pixel(0, 0), d.pixel(0, 1));
     assert_eq!(d.pixel(515, 200), beside);
     // Docked right too; floating again rounds it.
     d.place(a, 7, 512, 0, 512, work_h).unwrap();
-    assert!(d.window(a).unwrap().docked);
+    assert!(d.s.window(a).unwrap().docked);
     d.place(a, 7, 100, 100, 400, 300).unwrap();
-    assert!(!d.window(a).unwrap().docked);
+    assert!(!d.s.window(a).unwrap().docked);
 }
 
 /// What `act` sent the program: (window, message, wParam, lParam).
@@ -513,14 +513,14 @@ fn named_actions_do_what_the_mouse_and_keys_do() {
     let (mut d, a) = desktop_with_window();
     let b = d.create(7, 50, 60, 300, 200, &title("Other"), 0).unwrap();
     d.show(b, 7, true).unwrap();
-    d.input.clear();
+    d.s.input.clear();
     let work_h = 768 - u64::from(TASKBAR);
     // Snap left a window that is not active: placed, raised, active.
-    assert_eq!(d.active, Some(b));
+    assert_eq!(d.s.active, Some(b));
     d.act(a, Action::Snap(SnapTo::Left)).unwrap();
     assert_eq!(sent(&mut d), [(a, GALA_WM_PLACE, 0, 512 | work_h << 32)]);
-    assert_eq!(d.active, Some(a));
-    assert_eq!(d.windows.last().map(|w| w.id), Some(a));
+    assert_eq!(d.s.active, Some(a));
+    assert_eq!(d.s.windows.last().map(|w| w.id), Some(a));
     // The program moves it: the list shows it snapped.
     d.place(a, 7, 0, 0, 512, work_h as u32).unwrap();
     let listed = d.list();
@@ -546,13 +546,13 @@ fn named_actions_do_what_the_mouse_and_keys_do() {
     d.place(a, 7, 300, 100, 400, 300).unwrap();
     // Minimize and Activate: as its taskbar button.
     d.act(a, Action::Minimize).unwrap();
-    assert!(d.window(a).unwrap().minimized);
-    assert_eq!(d.active, Some(b));
+    assert!(d.s.window(a).unwrap().minimized);
+    assert_eq!(d.s.active, Some(b));
     assert_eq!(d.list()[0].flags, LISTED_MINIMIZED);
     assert_eq!(sent(&mut d), [(a, GALA_WM_MINIMIZED, 1, 0)]);
     d.act(a, Action::Activate).unwrap();
-    assert!(!d.window(a).unwrap().minimized);
-    assert_eq!(d.active, Some(a));
+    assert!(!d.s.window(a).unwrap().minimized);
+    assert_eq!(d.s.active, Some(a));
     assert_eq!(sent(&mut d), [(a, GALA_WM_MINIMIZED, 0, 0)]);
     // Move: the program places it; a size no window may have is refused.
     d.act(b, Action::Place { x: 10, y: 20, w: 300, h: 200 }).unwrap();
@@ -578,14 +578,14 @@ fn named_actions_do_what_the_mouse_and_keys_do() {
 fn snap_down_leaves_a_minimized_window_and_up_brings_it_back() {
     let (mut d, a) = desktop_with_window();
     d.act(a, Action::Minimize).unwrap();
-    d.input.clear();
+    d.s.input.clear();
     d.act(a, Action::Snap(SnapTo::Down)).unwrap();
-    assert!(d.window(a).unwrap().minimized);
+    assert!(d.s.window(a).unwrap().minimized);
     assert_eq!(sent(&mut d), []);
     d.act(a, Action::Snap(SnapTo::Up)).unwrap();
-    assert!(!d.window(a).unwrap().minimized);
+    assert!(!d.s.window(a).unwrap().minimized);
     assert_eq!(sent(&mut d), [(a, GALA_WM_MINIMIZED, 0, 0), (a, WM_SYSCOMMAND, SC_MAXIMIZE, 0)]);
-    assert_eq!(d.active, Some(a));
+    assert_eq!(d.s.active, Some(a));
 }
 
 #[test]
@@ -596,8 +596,8 @@ fn snapping_a_minimized_window_below_another_remembers_its_own_rectangle() {
     d.act(a, Action::Minimize).unwrap();
     // Restoring raises `a` above `b` (their places in the list change).
     d.act(a, Action::Snap(SnapTo::Left)).unwrap();
-    assert_eq!(d.window(a).unwrap().unsnapped, Some((300, 100, 400, 300)));
-    assert_eq!(d.window(b).unwrap().unsnapped, None);
+    assert_eq!(d.s.window(a).unwrap().unsnapped, Some((300, 100, 400, 300)));
+    assert_eq!(d.s.window(b).unwrap().unsnapped, None);
 }
 
 #[test]
@@ -614,7 +614,7 @@ fn a_drag_takes_the_capture_from_its_window() {
     d.capture(f, 7).unwrap();
     d.begin_drag(f, 7).unwrap();
     let damage = go(&mut d, 400, 175, 1);
-    assert_eq!(d.window(f).map(|w| (w.x, w.y)), Some((350, 170)));
+    assert_eq!(d.s.window(f).map(|w| (w.x, w.y)), Some((350, 170)));
     assert!(
         damage.iter().any(|r| r.x <= 350 && r.y <= 170 && r.x + r.w >= 550 && r.y + r.h >= 270)
     );
@@ -636,12 +636,12 @@ fn a_drag_takes_the_capture_from_its_window() {
 fn unshown_desktop_with_red_window() -> (Desktop, u32) {
     let mut d = Desktop::new();
     d.set_screen(640, 480).unwrap();
-    d.live = true;
+    d.s.live = true;
     let a = d.create(9, 40, 30, 300, 200, &title("Kept"), 0).unwrap();
     d.show(a, 9, true).unwrap();
     let red = [0x00ff_0000u32; 100 * 50];
     let area = d.present(a, Rect { x: 0, y: 0, w: 100, h: 50 }, &red, 100).unwrap();
-    d.add_damage(area);
+    d.s.add_damage(area);
     redraw_damage(&mut d);
     (d, a)
 }
@@ -657,7 +657,7 @@ fn test_frame(d: &Desktop) -> &Frame {
 fn frame_matches(d: &Desktop) {
     let f = test_frame(d);
     let (w, h) = f.size();
-    assert_eq!((i64::from(w), i64::from(h)), d.screen);
+    assert_eq!((i64::from(w), i64::from(h)), d.s.screen);
     for y in 0..h {
         for x in 0..w {
             assert_eq!(f.pixel(x, y), Some(d.pixel(x.into(), y.into())), "at ({x}, {y})");
@@ -671,7 +671,7 @@ fn a_desktop_shown_by_nothing_keeps_its_windows_and_pixels() {
     // Nothing shows it: no damage left over, the window and its pixels
     // are the desktop's.
     assert_eq!(d.presenter.kind(), Kind::None);
-    assert!(d.damage.is_empty());
+    assert!(d.s.damage.is_empty());
     assert_eq!(d.pixel(41 + 10, 63 + 10), 0x00ff_0000);
     // A Test frame attached gets the whole desktop.
     let old = d.set_presenter(Presenter::Test(Frame::new(640, 480).unwrap())).unwrap();
@@ -682,7 +682,7 @@ fn a_desktop_shown_by_nothing_keeps_its_windows_and_pixels() {
     // A change is damage, which reaches the frame.
     let green = [0x0000_c000u32; 4];
     let area = d.present(a, Rect { x: 10, y: 10, w: 2, h: 2 }, &green, 2).unwrap();
-    d.add_damage(area);
+    d.s.add_damage(area);
     redraw_damage(&mut d);
     assert_eq!(test_frame(&d).pixel(41 + 10, 63 + 10), Some(0x0000_c000));
     assert_eq!(test_frame(&d).flushes(), 2);
@@ -692,7 +692,7 @@ fn a_desktop_shown_by_nothing_keeps_its_windows_and_pixels() {
     let old = d.set_presenter(Presenter::None).unwrap();
     let blue = [0x0000_00ffu32; 4];
     let area = d.present(a, Rect { x: 10, y: 10, w: 2, h: 2 }, &blue, 2).unwrap();
-    d.add_damage(area);
+    d.s.add_damage(area);
     redraw_damage(&mut d);
     match &old {
         Presenter::Test(f) => assert_eq!(f.pixel(41 + 10, 63 + 10), Some(0x0000_c000)),
@@ -712,7 +712,7 @@ fn a_desktop_shown_by_nothing_keeps_its_windows_and_pixels() {
 fn a_frame_of_another_size_lays_the_desktop_out_again() {
     let (mut d, _) = unshown_desktop_with_red_window();
     d.set_presenter(Presenter::Test(Frame::new(800, 600).unwrap())).unwrap();
-    assert_eq!(d.screen, (800, 600));
+    assert_eq!(d.s.screen, (800, 600));
     // The window keeps its place; the taskbar is at the new bottom.
     assert_eq!(test_frame(&d).pixel(41 + 10, 63 + 10), Some(0x00ff_0000));
     frame_matches(&d);
@@ -743,12 +743,12 @@ fn shell_with_window(session: u32, owner: u64, colour: u32) -> (Shell, u32) {
     let id = {
         let mut d = shell.d.lock();
         d.set_screen(640, 480).unwrap();
-        d.live = true;
+        d.s.live = true;
         let a = d.create(owner, 40, 30, 300, 200, &title("Kept"), 0).unwrap();
         d.show(a, owner, true).unwrap();
         let pixels = [colour; 100 * 50];
         let area = d.present(a, Rect { x: 0, y: 0, w: 100, h: 50 }, &pixels, 100).unwrap();
-        d.add_damage(area);
+        d.s.add_damage(area);
         redraw_damage(&mut d);
         a
     };
@@ -773,7 +773,7 @@ fn the_console_moves_between_desktops_keeping_their_windows() {
     // The left button goes down in session 1's window and stays down.
     {
         let mut d = one.d.lock();
-        let (ox, oy) = d.window(a).unwrap().client_origin();
+        let (ox, oy) = d.s.window(a).unwrap().client_origin();
         go(&mut d, ox + 5, oy + 6, 0);
         go(&mut d, ox + 5, oy + 6, 1);
         messages(&mut d, 9);
@@ -786,7 +786,7 @@ fn the_console_moves_between_desktops_keeping_their_windows() {
         assert_eq!(d.buttons, 0);
         assert_eq!(messages(&mut d, 9), [(WM_LBUTTONUP, 6 << 16 | 5)]);
         assert_eq!(d.pixel(41 + 10, 63 + 10), 0x00ff_ff00);
-        assert_eq!(d.windows.len(), 1);
+        assert_eq!(d.s.windows.len(), 1);
     }
     // It arrives at session 2.
     assert_eq!(move_console(&two, Some(Presenter::Console)), Ok(Kind::None));
@@ -823,7 +823,7 @@ fn injected_input_reaches_a_desktop_a_test_frame_shows() {
     assert!(matches!(inject(&two, key), Ok(None)));
     assert!(matches!(inject(&two, Injected::Wheel(1)), Ok(None)));
     let mut d = two.d.lock();
-    assert_eq!(d.active, Some(b));
+    assert_eq!(d.s.active, Some(b));
     let lp = 20 << 16 | 30;
     assert_eq!(
         messages(&mut d, 10),

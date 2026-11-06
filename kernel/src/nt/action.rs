@@ -2,8 +2,9 @@
 //! for the `gala` command (user/gala) as for shasha's own mouse and keys
 //! (ROADMAP SD "CLI parity", ARCHITECTURE "Server and desktop
 //! workloads"). Starting a program works on every kernel; the window
-//! actions are shasha's (`nt::desktop::Action`) and fail with
-//! STATUS_NOT_SUPPORTED on the server kernel and with `profile=server`.
+//! actions are shasha's shell's (`nt::desktop::Action`, `has_shell`) and
+//! fail with STATUS_NOT_SUPPORTED on the server kernel (which keeps
+//! windows but has no shell) and with `profile=server`.
 //!
 //! The request (little-endian, version 1):
 //!
@@ -148,7 +149,7 @@ pub fn run(
         // Without shasha nothing is on the screen to act on (checked
         // before the window, so a server always says so).
         let shell = &caller.desk.shell;
-        if desktop::screen(shell).is_none() {
+        if !desktop::has_shell(shell) {
             return Err(NtStatus::NOT_SUPPORTED);
         }
         let info = caller.desk.windows.query(r.hwnd).ok_or(NtStatus::INVALID_HANDLE)?;
@@ -177,7 +178,7 @@ pub fn run(
             }
         }
         ACTION_PROGRAMS => {
-            if desktop::screen(&caller.desk.shell).is_none() {
+            if !desktop::has_shell(&caller.desk.shell) {
                 return Err(NtStatus::NOT_SUPPORTED);
             }
             let programs = desktop::start_menu();
@@ -332,7 +333,7 @@ fn resolve(name: &str, shell: &desktop::Shell) -> Result<&'static str, NtStatus>
     let has_drive = name.len() > 2 && name.as_bytes()[1] == b':';
     if !has_drive {
         // A start menu name.
-        if desktop::screen(shell).is_some()
+        if desktop::has_shell(shell)
             && let Some(p) =
                 desktop::start_menu().iter().find(|p| p.name.eq_ignore_ascii_case(name))
         {

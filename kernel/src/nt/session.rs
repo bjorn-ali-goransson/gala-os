@@ -80,8 +80,10 @@ pub struct Desk {
     pub windows: super::window::Windows,
     /// SetWinEventHook's hooks and their waiting events.
     pub hooks: super::winevent::Hooks,
-    /// shasha's desktop: its windows and their pixels, and what shows it
-    /// (ROADMAP RS B3a's presenters).
+    /// The desktop's window state (nt::winstate: its windows and their
+    /// pixels) and, in the desktop kernel, shasha's compositor and what
+    /// shows it (ROADMAP RS B3a's presenters); the server kernel's has no
+    /// compositor (desktop_off.rs).
     pub shell: super::desktop::Shell,
 }
 
@@ -377,7 +379,7 @@ pub fn dump() {
         let (on_desktop, live, presenter) = d.shell.counts();
         log!(
             info,
-            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), shasha: {} ({} windows, presenter {})",
+            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), desktop: {} ({} windows, presenter {})",
             d.session,
             c.windows,
             c.top_level,

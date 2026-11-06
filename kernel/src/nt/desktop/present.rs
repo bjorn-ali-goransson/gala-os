@@ -14,10 +14,9 @@ use super::Rect;
 use super::platform;
 use alloc::vec::Vec;
 
-/// The size of a desktop no screen sizes: a session's desktop made while
-/// nothing shows it, `presenter=test`'s frame. QEMU's default UEFI mode,
-/// and what user32 assumes without screen information.
-pub const DEFAULT_SIZE: (u32, u32) = (1280, 800);
+/// The size of a desktop no screen sizes (the window state's, which the
+/// server kernel's desktops have too).
+pub use super::super::winstate::DEFAULT_SIZE;
 
 /// The largest side of a Test frame (as of a window).
 pub const MAX_SIDE: u32 = 4096;
