@@ -20,14 +20,26 @@
 //! - [`dispatch`]: the Linux system calls, registered as that
 //!   personality's dispatcher.
 //! - [`mm`]: anonymous mmap, munmap, mprotect and brk on the VAD.
-//! - [`state`]: per-process Linux state (break, fds, pipes, the output
-//!   lines logged as `lx: pid <p> stdout: ..`).
+//! - [`state`]: per-process Linux state (break, fds, pipes, signals,
+//!   parent and children, the output lines logged as `lx: pid <p>
+//!   stdout: ..`).
+//!
+//! Milestone 2 so far:
+//! - [`signal`]: signal actions, pending sets, masks, delivery decisions
+//!   and the handler's frame (plain data, host-tested), on
+//!   `lx_abi::signal`'s layouts; [`sigcalls`]: the signal system calls,
+//!   SIGPIPE, and delivery on the way back from a system call.
+//! - [`fork`]: fork (clone as a fork) with a copied address space, and
+//!   wait4.
 
 pub mod dispatch;
 pub mod elf;
 pub mod errno;
 pub mod exec;
+pub mod fork;
 pub mod mm;
+pub mod sigcalls;
+pub mod signal;
 pub mod stack;
 pub mod state;
 pub mod syscalls;

@@ -11,19 +11,27 @@
 //! system call <name> (<nr>) (dispatcher lx::dispatch, personality linux)`
 //! and counts in the ledger as `{"service":"<name>","what":"linux
 //! syscall missing","detail":<nr>}`, so the next ones are chosen from
-//! data. Calls accepted without their effect (rt_sigprocmask: no signals
-//! yet) count as `"what":"linux syscall stub"`.
+//! data. Calls accepted without their effect (ioctl's ENOTTY, wait4's
+//! rusage) count as `"what":"linux syscall stub"`.
+//!
+//! The way back: after the call, signals pending and not blocked are
+//! delivered (`sigcalls::deliver`); when a handler frame was pushed, or
+//! rt_sigreturn put back a saved context (`Call::resume`), the call
+//! returns with every register (`platform::continue_with`) instead of
+//! SYSRET's rcx/r11 convention.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use super::errno::{
     self, EAGAIN, EBADF, EBUSY, EFAULT, EINTR, EINVAL, ENOMEM, ENOSYS, ENOTTY, EPERM, EPIPE, ESPIPE,
 };
+use super::sigcalls;
 use super::state::{self, Fd, LxProcess, Object, PIPE_MAX, PIPE_PAGE, Stream};
 use super::syscalls::{self, nr};
 use crate::mm::heap::{KArc, TryVec};
 use crate::nt::object::ObjectBody;
-use crate::nt::platform::{self, Personality, SyscallFrame};
+use crate::nt::platform::{self, Personality, SyscallFrame, UserRegs};
 use crate::nt::process::{self, Process};
 use crate::nt::status::NtStatus;
 use crate::nt::{ledger, thread};
@@ -62,11 +70,13 @@ const ARCH_GET_FS: u64 = 0x1003;
 const ARCH_GET_GS: u64 = 0x1004;
 
 /// One system call's context.
-struct Call<'a> {
-    process: KArc<Process>,
-    lx: KArc<LxProcess>,
-    frame: &'a SyscallFrame,
-    tid: u64,
+pub struct Call<'a> {
+    pub process: KArc<Process>,
+    pub lx: KArc<LxProcess>,
+    pub frame: &'a SyscallFrame,
+    pub tid: u64,
+    /// Set by rt_sigreturn: the registers the call returns with.
+    pub resume: Cell<Option<UserRegs>>,
 }
 
 impl Call<'_> {
@@ -76,7 +86,21 @@ impl Call<'_> {
     }
 }
 
-type Result = core::result::Result<u64, u16>;
+pub type Result = core::result::Result<u64, u16>;
+
+/// The user registers a system call returns with through SYSRET: rcx
+/// holds the return address and r11 the flags (the `syscall`
+/// instruction's convention, which Linux programs expect).
+pub fn return_regs(f: &SyscallFrame) -> UserRegs {
+    UserRegs {
+        gpr: [
+            f.rax, f.rip, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10, f.rflags,
+            f.r12, f.r13, f.r14, f.r15,
+        ],
+        rip: f.rip,
+        rflags: f.rflags,
+    }
+}
 
 fn dispatch(frame: &mut SyscallFrame) {
     let number = frame.rax;
@@ -93,14 +117,21 @@ fn dispatch(frame: &mut SyscallFrame) {
         frame.rax = errno::to_return(ENOSYS);
         return;
     };
-    let call = Call { process, lx, frame, tid };
+    let call = Call { process, lx, frame, tid, resume: Cell::new(None) };
     let result = handle(&call, number);
     let rax = match result {
         Ok(v) => v,
         Err(e) => errno::to_return(e),
     };
     crate::flight::record(crate::flight::Kind::SyscallDone, number, rax);
+    let Call { process, lx, resume, .. } = call;
     frame.rax = rax;
+    let resume = resume.take();
+    let mut regs = resume.unwrap_or_else(|| return_regs(frame));
+    let delivered = sigcalls::deliver(&process, &lx, tid, number, resume.is_some(), &mut regs);
+    if delivered || resume.is_some() {
+        platform::continue_with(regs);
+    }
 }
 
 fn handle(call: &Call<'_>, number: u64) -> Result {
@@ -120,16 +151,14 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::MPROTECT => super::mm::mprotect(&call.process, a(0), a(1), a(2)),
         nr::MUNMAP => super::mm::munmap(&call.process, a(0), a(1)),
         nr::BRK => Ok(super::mm::brk(&call.process, &call.lx.brk, a(0))),
-        nr::RT_SIGPROCMASK => {
-            // No signals are delivered yet: every mask is accepted (the
-            // old one reads as empty).
-            ledger::record("rt_sigprocmask", "linux syscall stub", 0);
-            let old = a(2);
-            if old != 0 {
-                call.process.write(old, &0u64.to_le_bytes()).map_err(|_| EFAULT)?;
-            }
-            Ok(0)
-        }
+        nr::RT_SIGACTION => sigcalls::rt_sigaction(call, a(0), a(1), a(2), a(3)),
+        nr::RT_SIGPROCMASK => sigcalls::rt_sigprocmask(call, a(0), a(1), a(2), a(3)),
+        nr::RT_SIGRETURN => sigcalls::rt_sigreturn(call),
+        nr::RT_SIGPENDING => sigcalls::rt_sigpending(call, a(0), a(1)),
+        nr::RT_SIGTIMEDWAIT => sigcalls::rt_sigtimedwait(call, a(0), a(1), a(2), a(3)),
+        nr::FORK => super::fork::fork(call, None),
+        nr::CLONE => super::fork::clone(call, a(0), a(1)),
+        nr::WAIT4 => super::fork::wait4(call, a(0), a(1), a(2), a(3)),
         nr::IOCTL => match call.lx.fd(a(0)) {
             None => Err(EBADF),
             Some(_) => {
@@ -351,9 +380,11 @@ fn pipe2(call: &Call<'_>, fds: u64, flags: u64) -> Result {
 }
 
 /// Waits a little for a pipe to change (no wait queue yet: a blocking
-/// pipe operation polls); EINTR once the process is ending.
+/// pipe operation polls); EINTR once the process is ending or a signal
+/// is to be delivered (restarted after it if its handler has
+/// SA_RESTART: `sigcalls::deliver`).
 fn pause(call: &Call<'_>) -> core::result::Result<(), u16> {
-    if call.process.exit_status().is_some() {
+    if call.process.exit_status().is_some() || call.lx.signals.lock().deliverable().is_some() {
         return Err(EINTR);
     }
     platform::sleep_ms(1);
@@ -434,8 +465,7 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
                 (st.free(), st.readers)
             };
             if readers == 0 {
-                // SIGPIPE is not delivered yet: only the error.
-                ledger::record("write", "linux SIGPIPE not delivered", 0);
+                sigcalls::sigpipe(call);
                 return Err(EPIPE);
             }
             let count = count as usize;
@@ -520,6 +550,8 @@ fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
         Object::PipeWrite(pipe) => {
             let mut st = pipe.state.lock();
             if st.readers == 0 {
+                drop(st);
+                sigcalls::sigpipe(call);
                 return Err(EPIPE);
             }
             let n = data.len().min(st.free());

@@ -861,8 +861,8 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   static or static-pie ELF as a `Personality::Linux` process
   (`lx::exec`); `lx::dispatch` serves read, write, writev, close, pipe2,
   fcntl, mmap, munmap, mprotect, brk, arch_prctl, exit, exit_group,
-  set_tid_address, the get*id calls, and rt_sigprocmask and ioctl as
-  stubs; ENOSYS for the rest, logged by name and in the ledger
+  set_tid_address, the get*id calls, and ioctl as a stub; ENOSYS for
+  the rest, logged by name and in the ledger
   (`linux syscall missing`). Scenarios `lx_hello`, `lx_write_exit`,
   `lx_brk`, `lx_mmap`, `lx_arch_prctl`, `lx_auxv`, each also `_pie`,
   match real Linux's transcripts exactly.
@@ -876,18 +876,27 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   F_GETPIPE_SZ/F_SETPIPE_SZ, a full pipe takes a small write only when
   a page is free), the old `pipe` call, lseek (ESPIPE), dup, dup2, dup3,
   F_DUPFD(_CLOEXEC), close-on-exec per fd, O_NONBLOCK shared by dups
-  (F_SETFL). Scenario `lx_pipe` (PENDING) matches pipe_test's transcript
-  except its SIGPIPE and fork sections.
+  (F_SETFL). Signals (`lx::signal`, `lx::sigcalls`, on `lx_abi`, now a
+  kernel dependency): rt_sigaction, rt_sigprocmask, rt_sigpending,
+  rt_sigtimedwait, rt_sigreturn; SIGPIPE from a pipe with no reader;
+  delivery on the way back from a system call (default actions, SIG_IGN,
+  handlers on an rt_sigframe with SA_RESTORER, SA_RESTART for
+  read/write/wait4). fork (and clone with only SIGCHLD) with an eagerly
+  copied address space, wait4, SIGCHLD at the child's end. Scenario
+  `lx_pipe` matches pipe_test's transcript exactly.
 
 **Next**:
-1. Milestone 2, static busybox: signals (rt_sigaction, rt_sigprocmask,
-   pending sets, rt_sigtimedwait, frames with SA_RESTORER and
-   rt_sigreturn: pipe_test's SIGPIPE section first), fork and wait4
-   (its child), then files and directories, execve,
-   clone, futex (priorities from `strace` on real Linux and the
-   ledger); signals (SIGSEGV, SIGPIPE; frames from `lx_abi::signal`);
-   wait queues for pipes; `lx::state` onto the core process. Each corpus
-   program becomes a boot scenario as its calls land.
+1. Milestone 2, static busybox: the rest of signal_test and fork_test
+   (kill, tgkill, rt_sigqueueinfo, rt_sigsuspend, sigaltstack, faults
+   as SIGSEGV/SIGBUS/SIGFPE through the exception path, delivery to a
+   thread running user code, stop/continue), copy-on-write for fork
+   (shared frames, `vm::copy_on_write` for private pages; MAP_SHARED
+   anonymous memory shared with the child), then files and directories,
+   execve, clone of threads, futex (priorities from `strace` on real
+   Linux and the ledger); wait queues for pipes, rt_sigtimedwait and
+   wait4's signal check (they poll or rely on one waker today);
+   `lx::state` onto the core process; an `lx_pipe_pie` scenario. Each
+   corpus program becomes a boot scenario as its calls land.
 2. Milestone 3: threads and futex, clocks and polling, ptys over the
    core terminal object, /proc.
 3. Seam 1: the pty as a core terminal object under ConPTY.
@@ -897,8 +906,7 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
 5. Seam 5: shared core objects when pipes, sockets or files are
    reworked.
 6. Also open (ARCHITECTURE "The lx module"): address randomization, a
-   vDSO, Linux in gala-um, the system-call numbers 462..=469; `lx_abi`
-   becomes a kernel dependency with the signal, pty and file calls.
+   vDSO, Linux in gala-um, the system-call numbers 462..=469.
 
 **Done when** (each milestone): every corpus program of the milestone
 runs as a boot scenario whose transcript equals its `expected.txt`.

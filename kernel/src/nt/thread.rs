@@ -67,9 +67,12 @@ pub struct NtThread {
     /// same on every platform and every run of a program, unlike thread
     /// ids (record/replay's streams).
     pub ordinal: u32,
-    /// A thread a kernel handover carried over: how it goes on when it
-    /// starts (instead of `start`).
+    /// A thread a kernel handover carried over, or a Linux fork's child:
+    /// how it goes on when it starts (instead of `start`).
     resume: IrqMutex<Option<Resume>>,
+    /// The user FS and GS bases it starts with (a Linux fork's child
+    /// keeps its parent's); None: 0, or the TEB's for an NT thread.
+    start_bases: Option<(u64, u64)>,
     /// While a kernel handover holds it on its way back to user mode
     /// (`hold_for_handover`): its full user state.
     held: IrqMutex<Option<Parked>>,
@@ -295,6 +298,31 @@ pub fn create(
     stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
+    create_inner(process, regs, win32_start, mxcsr, stack, suspended, None)
+}
+
+/// Creates the thread of a Linux fork's child (`lx::fork`): it goes
+/// on in user mode with exactly `regs`, the x87/SSE state `fx` and the
+/// FS and GS bases `bases` (its parent's, at the fork).
+pub fn create_forked(
+    process: &KArc<Process>,
+    regs: UserRegs,
+    fx: platform::XState,
+    bases: (u64, u64),
+) -> Result<ObjectRef, NtStatus> {
+    let resume = Some((Resume::User { regs, fx }, bases));
+    create_inner(process, regs, regs.rip, None, (0, 0, 0), false, resume)
+}
+
+fn create_inner(
+    process: &KArc<Process>,
+    regs: UserRegs,
+    win32_start: u64,
+    mxcsr: Option<u32>,
+    stack: (u64, u64, u64),
+    suspended: bool,
+    resume: Option<(Resume, (u64, u64))>,
+) -> Result<ObjectRef, NtStatus> {
     if !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
@@ -329,7 +357,8 @@ pub fn create(
         in_syscall: IrqMutex::new(None),
         impersonation: IrqMutex::new(None),
         ordinal: process.threads_created.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
-        resume: IrqMutex::new(None),
+        start_bases: resume.as_ref().map(|r| r.1),
+        resume: IrqMutex::new(resume.map(|r| r.0)),
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),
@@ -411,6 +440,9 @@ fn thread_entry(id: usize) {
     bind_sched(platform::current(), &object);
     t.apply_affinity();
     let resume = t.resume.lock().take();
+    if let Some((fs, gs)) = t.start_bases {
+        platform::set_user_bases(Some(fs), Some(gs));
+    }
     let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
     match resume {
         Some(Resume::Syscall { number, regs, fx, deadline }) => {
@@ -877,6 +909,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         impersonation: IrqMutex::new(None),
         ordinal: a.ordinal,
         resume: IrqMutex::new(a.resume),
+        start_bases: None,
         restart_deadline: IrqMutex::new(None),
         held: IrqMutex::new(None),
         entered: core::sync::atomic::AtomicBool::new(false),

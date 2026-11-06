@@ -807,7 +807,10 @@ source).
   `C:\lx\<binary>` by an EXTRA_MODULES entry with its repository path.
   xtask rebuilds the transcript from the kernel's `lx: pid N stdout: ..`
   / `-- exit status` lines and requires it to equal expected.txt (a diff
-  on mismatch; `lx_expect::check_boot`). A new user/lx test that should
+  on mismatch; `lx_expect::check_boot`). The transcript joins the
+  stdout lines of every pid (a forked child's too) and ends with the
+  last `--` line logged, so a test's children print nothing and end
+  before it (pipe_test waits for each). A new user/lx test that should
   boot needs its two entries in EXTRA_MODULES and SCENARIOS (copy an
   `lx_` pair).
 - **Bring-up of a new Linux program**: run it with `lxrun=`, then read

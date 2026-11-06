@@ -6141,8 +6141,13 @@ The running parts (milestone 1; `lxrun=`):
 - **State** (`lx::state`, a table keyed by pid): the break, the fd table
   (fds 0-2 on the console; pipes: slots holding a shared open file
   description, `Fd`, whose O_NONBLOCK every dup sees, and the fd's own
-  close-on-exec flag), the stdout/stderr line buffers;
-  dropped in `nt::process::finish` (`lx::process_ended`).
+  close-on-exec flag), the signal state (`lx::signal::Signals`), the
+  parent's pid and the exit signal, the children (running, ended
+  zombies with their status, threads waiting in wait4), the
+  stdout/stderr line buffers; dropped in `nt::process::finish`
+  (`lx::process_ended`): the fds close first, then the parent is told
+  (a zombie, SIGCHLD, its wait4 waiters woken), so a parent woken by a
+  child's end reads EOF from a pipe only the child held.
 - **Memory** (`lx::mm`): anonymous mmap (the hint if free, else
   top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
   gives EEXIST), munmap (cuts VAD allocations: `Vad::unmap_range`),
@@ -6151,10 +6156,12 @@ The running parts (milestone 1; `lxrun=`):
   the old break). Pages are demand-zero through the core fault path;
   `vm::sync_range` frees the frames of removed pages. Linux overcommits:
   the commit charge counts but never refuses. MAP_SHARED anonymous is
-  private until fork exists.
+  private: a fork copies it (not yet shared with the child).
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
-  munmap, brk, rt_sigprocmask (stub: no signals), ioctl (ENOTTY),
+  munmap, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
+  rt_sigpending, rt_sigtimedwait (below), fork, clone (only an exit
+  signal of SIGCHLD: a fork; other flags ENOSYS), wait4, ioctl (ENOTTY),
   writev, getpid, gettid, exit (the thread), exit_group (the process,
   status & 0xff), fcntl (F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD/F_SETFD
   (FD_CLOEXEC only), F_GETFL/F_SETFL (O_NONBLOCK; the access mode
@@ -6171,14 +6178,87 @@ The running parts (milestone 1; `lxrun=`):
   that gave up a few bytes still refuses a small write; writes up to
   PIPE_BUF (4096) are whole or nothing. Anything else:
   `errno::to_return(ENOSYS)`.
+- **Signals** (`lx::signal`: plain data, host-tested; `lx::sigcalls`:
+  the calls and delivery; layouts and numbers from `lx_abi::signal`):
+  - the actions are the process's; the blocked mask and the
+    thread-directed pending set (SIGPIPE, later faults and tgkill) are a
+    thread's (`ThreadSignals`), the process-directed one (SIGCHLD,
+    later kill) the process's. One thread per process today, so
+    `Signals` holds one `ThreadSignals`; it becomes one per thread with
+    clone of threads;
+  - a standard signal is pending once (merged), a real-time one queues
+    each siginfo; generation discards an ignored signal (SIG_IGN, or
+    SIG_DFL with an Ign default) unless blocked: a blocked one stays
+    pending; an action set to ignore discards what is pending;
+  - rt_sigaction (EINVAL: sigsetsize != 8, a bad number, changing
+    SIGKILL/SIGSTOP; the new action read before the change, the old
+    written after; sa_mask without SIGKILL/SIGSTOP), rt_sigprocmask
+    (`how` checked only with a set), rt_sigpending (pending and
+    blocked), rt_sigtimedwait (the lowest pending in the set; EAGAIN at
+    the timeout, EINTR if another signal is deliverable; polls every
+    ms);
+  - SIGPIPE: a write (or writev) to a pipe with no reader raises it for
+    the writer (si_code SI_USER, its pid and uid, as Linux shows) and
+    fails with EPIPE;
+  - delivery on the way back from every system call (`lx::dispatch`
+    after the call): the lowest deliverable signal; Ignore, Continue
+    (and Stop, ledgered: no job control) drop it; Term/Core ends the
+    process with `signal::killed_status(sig)` (an NTSTATUS
+    0xe4c580nn, read back by `signal::killed_by` for `-- killed by
+    signal n` and wait4); a handler gets an rt_sigframe: below the
+    128-byte red zone, the XSAVE state (`xstate::size()` bytes)
+    64-aligned, then the 440-byte frame with rsp + 8 16-aligned
+    (pretcode = sa_restorer at rsp, the ucontext at +8 with uc_flags
+    UC_SIGCONTEXT_SS|UC_STRICT_RESTORE_SS, no alternate stack, the
+    interrupted mask in uc_sigmask and oldmask, siginfo at +312); the
+    handler starts with rdi = sig, rsi = &siginfo, rdx = &ucontext, rax
+    0, DF and TF clear, the mask plus sa_mask plus the signal (unless
+    SA_NODEFER); SA_RESETHAND leaves SIG_DFL with the flags kept. One
+    handler frame per return: the next is delivered when rt_sigreturn
+    returns. The new registers go to user mode through
+    `platform::continue_with` (every register, IRETQ);
+  - rt_sigreturn reads the ucontext at rsp (the restorer popped the
+    return address), restores every register (flags filtered by the
+    return), the XSAVE state and the mask; a frame it cannot read, or
+    whose rip/rsp leave user space, kills with SIGSEGV, as does a frame
+    that cannot be written or an action without SA_RESTORER;
+  - EINTR: blocking pipe reads and writes, wait4 and rt_sigtimedwait
+    end with EINTR when a signal is deliverable; read, write, writev and
+    wait4 are restarted (rip back over `syscall`, rax the number) after
+    a handler with SA_RESTART or a signal that turned out ignored.
+  - Not yet: kill, tgkill, rt_sigqueueinfo, rt_sigsuspend,
+    sigaltstack (SA_ONSTACK is ledgered and the current stack used),
+    CPU faults as signals (an exception still ends the process with its
+    NT status, read as SIGSEGV etc.), delivery to a thread running user
+    code (only at a system call's return), stop/continue, UC_FP_XSTATE's
+    software-reserved bytes in the FPU state.
+- **Fork** (`lx::fork`): fork, and clone with only SIGCHLD (the C
+  library's fork), make a child core process (`create_bare`, parent_id
+  set) with the parent's VAD cloned (`Vad::try_clone`) and every mapped
+  page copied into its own frame at once (`map_private_copy`; no
+  copy-on-write yet, untouched pages stay demand-zero in both); the
+  charge follows (`charge::sync`, Linux overcommits); its Linux state is
+  `state::fork`'s (the same open file descriptions in the same slots,
+  so pipe ends stay open while either holds them; the same actions and
+  mask; nothing pending); its thread (`thread::create_forked`) goes on
+  from the parent's `syscall` with rax 0, the parent's registers
+  (rcx/r11 as SYSRET leaves them), XSAVE state and FS/GS bases. wait4
+  reaps a zombie (pid > 0, or -1/0: any; < -1 is ledgered and taken as
+  any: no process groups yet), writes the wait status (exit code << 8,
+  or the signal; no core flag: no core files) and returns its pid;
+  WNOHANG gives 0, no such child ECHILD, rusage is zeros (ledgered);
+  it blocks with `prepare_wait`/`wait` and is woken by the child's end
+  (or the process's termination). A parent whose SIGCHLD is SIG_IGN or
+  SA_NOCLDWAIT keeps no zombies (wait(2)).
 - **Errors**: a user buffer is copied whole before anything happens, so
   a fault is EFAULT with nothing done (as Linux's transcripts show for
   pipes); a pipe read copies out before it takes the bytes (an EFAULT
   read leaves them).
 - **Output**: fds 1 and 2 on the console are logged a line at a time
   (`lx: pid <p> stdout: <line>`, `stderr`), and the end as `lx: pid <p>
-  -- exit status <n>` or `-- killed by signal <n>` (an exception: SIGSEGV
-  for an access violation). xtask's `lx_expect::check_boot` rebuilds the
+  -- exit status <n>` or `-- killed by signal <n>` (a signal's default
+  action, or an exception: SIGSEGV for an access violation). xtask's
+  `lx_expect::check_boot` rebuilds the
   program's transcript from those lines and compares it with
   expected.txt exactly.
 - **Observability**: `lx: exec <path> (<n> bytes): <plan>` (bias, entry,
@@ -6191,13 +6271,32 @@ The running parts (milestone 1; `lxrun=`):
   personality linux): ENOSYS` once per process and number, and goes to
   the ledger every time as `{"service":"<name>","what":"linux syscall
   missing","detail":<nr>}` (printed at `run: end`); stubs as `"what":
-  "linux syscall stub"`.
+  "linux syscall stub"`. Signals: an `lx signal` event for each one
+  generated or acted on (pid, tid, signal, code, what: pending, merged,
+  discarded, ignored, handler, killed, taken); `lx: pid <p> (thread
+  <t>): killed by signal <n> (<name>), its default action`; a frame that
+  cannot be written or read back logs why. Fork: `lx: pid <p> fork:
+  child pid <c> (<n> pages copied)` then the core's process line and
+  `process start` event (ppid); a failed fork logs why; an `lx child
+  ended` event (pid, child, wait status, signal, whether the SIGCHLD was
+  discarded, whether reaped at once). Ledger: `linux clone flags
+  missing`, `linux signal action missing` (Stop), `linux signal option
+  missing` (SA_ONSTACK), `linux option missing` (wait4's process
+  groups).
 - **Invariants**: a Linux process is never handed over (carry refuses "a
   personality other than NT"); its threads have no TEB; NT threads' FS
-  base is 0.
+  base is 0. Signals are delivered only on the way back from a Linux
+  system call, never while the process is ending; a signal's state is
+  changed only under `LxProcess::signals`, which is never held across a
+  user-memory access or a wait. A child is listed and counted as
+  running in its parent before its thread starts; a process's fds are
+  closed before its parent learns it ended. Lock order: `children`
+  before `signals` (wait4), each taken alone elsewhere.
 - **TODO** (ROADMAP LX): randomization (the stack gap, AT_RANDOM's
-  source, the bases); PT_INTERP and dynamic linking; signals (SIGPIPE,
-  SIGSEGV delivery); fork/clone; wait queues for pipes; files and the
+  source, the bases); PT_INTERP and dynamic linking; the signal calls
+  and deliveries listed as not yet above; copy-on-write fork and shared
+  MAP_SHARED memory; clone of threads; wait queues for pipes and
+  rt_sigtimedwait; files and the
   fd-based calls (milestone 2); a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
   name them yet).
@@ -6209,9 +6308,14 @@ dependencies, no allocation, `#![forbid(unsafe_code)]`) holding the
 Linux ABI's plain data for milestones 2 and 3. It builds and is
 host-tested on its own (`cargo test -p lx_abi`, part of `cargo xtask
 test`); CI runs clippy on it for the host with tests and for
-x86_64-unknown-none; kernel/clippy.toml applies. The kernel does not
-depend on it yet: it adds `lx_abi = { path = "lx_abi" }` when the Linux
-signal, pty and file calls are built.
+x86_64-unknown-none; kernel/clippy.toml applies. The kernel depends on
+it (`lx_abi = { path = "lx_abi" }`): `lx::signal` and `lx::sigcalls`
+use its signal data; the pty and file calls will use the rest. Besides
+the layouts it encodes and decodes them as user memory holds them
+(`KSigaction::{from,to}_bytes`, `Siginfo::to_bytes`,
+`Ucontext::{from,to}_bytes`, `RtSigframe::to_bytes`: little-endian
+fields at the `repr(C)` offsets, host-tested), since `lx` has no
+`unsafe`.
 
 - **`lx_abi::signal`**: signal numbers 1..=64 (SIGRTMIN 32, the
   kernel's; musl's is 35); `SA_*`, `SI_*`/`SEGV_*`/`CLD_*` codes;

@@ -351,6 +351,237 @@ pub const PF_PRESENT: u64 = 1;
 pub const PF_WRITE: u64 = 2;
 pub const PF_USER: u64 = 4;
 
+/// Bytes of a `KSigaction`, a `siginfo_t`, the kernel's ucontext and the
+/// rt_sigframe as user memory holds them.
+pub const KSIGACTION_SIZE: usize = 32;
+pub const SIGINFO_SIZE: usize = 128;
+pub const UCONTEXT_SIZE: usize = 304;
+pub const RT_SIGFRAME_SIZE: usize = 440;
+
+/// Little-endian fields written at increasing offsets.
+struct Out<'a> {
+    buf: &'a mut [u8],
+    at: usize,
+}
+
+impl Out<'_> {
+    fn bytes(&mut self, b: &[u8]) {
+        self.buf[self.at..self.at + b.len()].copy_from_slice(b);
+        self.at += b.len();
+    }
+    fn u64(&mut self, v: u64) {
+        self.bytes(&v.to_le_bytes());
+    }
+    fn u32(&mut self, v: u32) {
+        self.bytes(&v.to_le_bytes());
+    }
+    fn u16(&mut self, v: u16) {
+        self.bytes(&v.to_le_bytes());
+    }
+}
+
+/// Little-endian fields read at increasing offsets.
+struct In<'a> {
+    buf: &'a [u8],
+    at: usize,
+}
+
+impl In<'_> {
+    fn take<const N: usize>(&mut self) -> [u8; N] {
+        let mut b = [0; N];
+        b.copy_from_slice(&self.buf[self.at..self.at + N]);
+        self.at += N;
+        b
+    }
+    fn u64(&mut self) -> u64 {
+        u64::from_le_bytes(self.take())
+    }
+    fn u32(&mut self) -> u32 {
+        u32::from_le_bytes(self.take())
+    }
+    fn u16(&mut self) -> u16 {
+        u16::from_le_bytes(self.take())
+    }
+}
+
+impl KSigaction {
+    pub fn from_bytes(b: &[u8; KSIGACTION_SIZE]) -> KSigaction {
+        let mut i = In { buf: b, at: 0 };
+        KSigaction { handler: i.u64(), flags: i.u64(), restorer: i.u64(), mask: i.u64() }
+    }
+    pub fn to_bytes(&self) -> [u8; KSIGACTION_SIZE] {
+        let mut b = [0; KSIGACTION_SIZE];
+        let mut o = Out { buf: &mut b, at: 0 };
+        for v in [self.handler, self.flags, self.restorer, self.mask] {
+            o.u64(v);
+        }
+        b
+    }
+}
+
+impl Siginfo {
+    pub fn to_bytes(&self) -> [u8; SIGINFO_SIZE] {
+        let mut b = [0; SIGINFO_SIZE];
+        let mut o = Out { buf: &mut b, at: 0 };
+        o.u32(self.signo as u32);
+        o.u32(self.errno as u32);
+        o.u32(self.code as u32);
+        o.u32(0);
+        for v in self.fields {
+            o.u32(v);
+        }
+        b
+    }
+}
+
+impl Sigcontext {
+    fn write(&self, o: &mut Out<'_>) {
+        for v in [
+            self.r8,
+            self.r9,
+            self.r10,
+            self.r11,
+            self.r12,
+            self.r13,
+            self.r14,
+            self.r15,
+            self.rdi,
+            self.rsi,
+            self.rbp,
+            self.rbx,
+            self.rdx,
+            self.rax,
+            self.rcx,
+            self.rsp,
+            self.rip,
+            self.eflags,
+        ] {
+            o.u64(v);
+        }
+        for v in [self.cs, self.gs, self.fs, self.ss] {
+            o.u16(v);
+        }
+        for v in [self.err, self.trapno, self.oldmask, self.cr2, self.fpstate] {
+            o.u64(v);
+        }
+        for v in self.reserved {
+            o.u64(v);
+        }
+    }
+
+    fn read(i: &mut In<'_>) -> Sigcontext {
+        let mut g = [0u64; 18];
+        for v in &mut g {
+            *v = i.u64();
+        }
+        let [
+            r8,
+            r9,
+            r10,
+            r11,
+            r12,
+            r13,
+            r14,
+            r15,
+            rdi,
+            rsi,
+            rbp,
+            rbx,
+            rdx,
+            rax,
+            rcx,
+            rsp,
+            rip,
+            eflags,
+        ] = g;
+        let (cs, gs, fs, ss) = (i.u16(), i.u16(), i.u16(), i.u16());
+        let (err, trapno, oldmask, cr2, fpstate) = (i.u64(), i.u64(), i.u64(), i.u64(), i.u64());
+        let mut reserved = [0u64; 8];
+        for v in &mut reserved {
+            *v = i.u64();
+        }
+        Sigcontext {
+            r8,
+            r9,
+            r10,
+            r11,
+            r12,
+            r13,
+            r14,
+            r15,
+            rdi,
+            rsi,
+            rbp,
+            rbx,
+            rdx,
+            rax,
+            rcx,
+            rsp,
+            rip,
+            eflags,
+            cs,
+            gs,
+            fs,
+            ss,
+            err,
+            trapno,
+            oldmask,
+            cr2,
+            fpstate,
+            reserved,
+        }
+    }
+}
+
+impl Ucontext {
+    fn write(&self, o: &mut Out<'_>) {
+        o.u64(self.uc_flags);
+        o.u64(self.uc_link);
+        o.u64(self.uc_stack.ss_sp);
+        o.u32(self.uc_stack.ss_flags as u32);
+        o.u32(0);
+        o.u64(self.uc_stack.ss_size);
+        self.uc_mcontext.write(o);
+        o.u64(self.uc_sigmask);
+    }
+
+    pub fn to_bytes(&self) -> [u8; UCONTEXT_SIZE] {
+        let mut b = [0; UCONTEXT_SIZE];
+        self.write(&mut Out { buf: &mut b, at: 0 });
+        b
+    }
+
+    /// The ucontext rt_sigreturn finds on the user stack.
+    pub fn from_bytes(b: &[u8; UCONTEXT_SIZE]) -> Ucontext {
+        let mut i = In { buf: b, at: 0 };
+        let (uc_flags, uc_link) = (i.u64(), i.u64());
+        let ss_sp = i.u64();
+        let ss_flags = i.u32() as i32;
+        let _pad = i.u32();
+        let ss_size = i.u64();
+        let uc_mcontext = Sigcontext::read(&mut i);
+        let uc_sigmask = i.u64();
+        Ucontext {
+            uc_flags,
+            uc_link,
+            uc_stack: Stack { ss_sp, ss_flags, ss_size },
+            uc_mcontext,
+            uc_sigmask,
+        }
+    }
+}
+
+impl RtSigframe {
+    pub fn to_bytes(&self) -> [u8; RT_SIGFRAME_SIZE] {
+        let mut b = [0; RT_SIGFRAME_SIZE];
+        let mut o = Out { buf: &mut b, at: 0 };
+        o.u64(self.pretcode);
+        self.uc.write(&mut o);
+        o.bytes(&self.info.to_bytes());
+        b
+    }
+}
+
 const _: () = {
     assert!(size_of::<KSigaction>() == 32);
     assert!(size_of::<Siginfo>() == 128);
@@ -359,6 +590,10 @@ const _: () = {
     assert!(size_of::<Ucontext>() == 304);
     assert!(offset_of!(RtSigframe, uc) == 8);
     assert!(offset_of!(RtSigframe, info) == 312);
+    assert!(size_of::<KSigaction>() == KSIGACTION_SIZE);
+    assert!(size_of::<Siginfo>() == SIGINFO_SIZE);
+    assert!(size_of::<Ucontext>() == UCONTEXT_SIZE);
+    assert!(size_of::<RtSigframe>() == RT_SIGFRAME_SIZE);
 };
 
 #[cfg(test)]
@@ -525,6 +760,77 @@ mod tests {
             text(SIGNAL, "  SIGUSR2 after")
                 .contains(&format!("flags {:#x}", SA_RESETHAND | SA_RESTORER | SA_SIGINFO))
         );
+    }
+
+    /// The bytes put each field at its `repr(C)` offset (which the tests
+    /// above check against Linux), and read back the same.
+    #[test]
+    fn frames_encode_at_the_layout_offsets() {
+        let mut m = Sigcontext::default();
+        let fields: [&mut u64; 18] = [
+            &mut m.r8,
+            &mut m.r9,
+            &mut m.r10,
+            &mut m.r11,
+            &mut m.r12,
+            &mut m.r13,
+            &mut m.r14,
+            &mut m.r15,
+            &mut m.rdi,
+            &mut m.rsi,
+            &mut m.rbp,
+            &mut m.rbx,
+            &mut m.rdx,
+            &mut m.rax,
+            &mut m.rcx,
+            &mut m.rsp,
+            &mut m.rip,
+            &mut m.eflags,
+        ];
+        for (n, f) in fields.into_iter().enumerate() {
+            *f = 0x1111 * (n as u64 + 1);
+        }
+        (m.cs, m.gs, m.fs, m.ss) = (USER_CS, 1, 2, USER_SS);
+        (m.err, m.trapno, m.oldmask, m.cr2, m.fpstate) = (4, 14, 0x1000, 0xdead, 0x7fff_0040);
+        m.reserved[7] = 9;
+        let uc = Ucontext {
+            uc_flags: UC_SIGCONTEXT_SS | UC_STRICT_RESTORE_SS,
+            uc_link: 0x55,
+            uc_stack: Stack { ss_sp: 0x7000, ss_flags: SS_DISABLE, ss_size: 0x2000 },
+            uc_mcontext: m,
+            uc_sigmask: 0x4000,
+        };
+        let info = Siginfo::from_process(SIGPIPE as i32, SI_USER, 77, 1000);
+        let frame = RtSigframe { pretcode: 0x401000, uc, info };
+        let b = frame.to_bytes();
+        let u64_at = |off: usize| u64::from_le_bytes(b[off..off + 8].try_into().unwrap());
+        let u32_at = |off: usize| u32::from_le_bytes(b[off..off + 4].try_into().unwrap());
+        let mc = offset_of!(RtSigframe, uc) + offset_of!(Ucontext, uc_mcontext);
+        assert_eq!(u64_at(offset_of!(RtSigframe, pretcode)), 0x401000);
+        assert_eq!(u64_at(mc + offset_of!(Sigcontext, r8)), 0x1111);
+        assert_eq!(u64_at(mc + offset_of!(Sigcontext, rax)), 0x1111 * 14);
+        assert_eq!(u64_at(mc + offset_of!(Sigcontext, eflags)), 0x1111 * 18);
+        assert_eq!(b[mc + offset_of!(Sigcontext, cs)], USER_CS as u8);
+        assert_eq!(b[mc + offset_of!(Sigcontext, ss)], USER_SS as u8);
+        assert_eq!(u64_at(mc + offset_of!(Sigcontext, oldmask)), 0x1000);
+        assert_eq!(u64_at(mc + offset_of!(Sigcontext, fpstate)), 0x7fff_0040);
+        assert_eq!(u64_at(mc + offset_of!(Sigcontext, reserved) + 56), 9);
+        let ucb = offset_of!(RtSigframe, uc);
+        assert_eq!(u64_at(ucb + offset_of!(Ucontext, uc_sigmask)), 0x4000);
+        assert_eq!(u64_at(ucb + offset_of!(Ucontext, uc_link)), 0x55);
+        let st = ucb + offset_of!(Ucontext, uc_stack);
+        assert_eq!(u32_at(st + offset_of!(Stack, ss_flags)) as i32, SS_DISABLE);
+        assert_eq!(u64_at(st + offset_of!(Stack, ss_size)), 0x2000);
+        let si = offset_of!(RtSigframe, info);
+        assert_eq!(u32_at(si + offset_of!(Siginfo, signo)), SIGPIPE);
+        assert_eq!(u32_at(si + offset_of!(Siginfo, code)), SI_USER as u32);
+        assert_eq!(u32_at(si + SI_PID_OFFSET), 77);
+        assert_eq!(u32_at(si + SI_UID_OFFSET), 1000);
+        let back = Ucontext::from_bytes(b[ucb..ucb + UCONTEXT_SIZE].try_into().unwrap());
+        assert_eq!(back, uc);
+        let sa = KSigaction { handler: 1, flags: SA_SIGINFO | SA_RESTORER, restorer: 3, mask: 4 };
+        assert_eq!(KSigaction::from_bytes(&sa.to_bytes()), sa);
+        assert_eq!(sa.to_bytes()[8..16], (SA_SIGINFO | SA_RESTORER).to_le_bytes());
     }
 
     /// signal_test sent every signal to a child left at SIG_DFL.

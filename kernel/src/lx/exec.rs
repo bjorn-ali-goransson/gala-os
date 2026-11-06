@@ -231,6 +231,7 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
         vad,
         image: (plan.start, plan.end - plan.start),
         personality: Personality::Linux,
+        parent_id: 0,
     })
     .map_err(|_| ExecError::OutOfMemory)?;
     if state::create(process.id, plan.brk).is_err() {

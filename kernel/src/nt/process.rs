@@ -884,6 +884,8 @@ pub struct Bare {
     /// The executable's span: (base, size).
     pub image: (u64, u64),
     pub personality: Personality,
+    /// The process that created it (a Linux fork's parent); 0: none.
+    pub parent_id: u64,
 }
 
 /// Creates the process record for `bare` and lists it (no thread yet).
@@ -896,7 +898,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
     let process = KArc::try_new(Process {
         core: Core {
             id,
-            parent_id: 0,
+            parent_id: bare.parent_id,
             name: bare.name,
             path: bare.path,
             space,

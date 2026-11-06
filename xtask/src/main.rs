@@ -3034,8 +3034,6 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
-    // LX milestone 2: matches Linux up to SIGPIPE; signals and fork next.
-    "lx_pipe",
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.

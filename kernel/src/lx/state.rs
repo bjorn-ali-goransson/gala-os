@@ -1,10 +1,14 @@
 //! A Linux process's own state beside its core process (`nt::Process`
 //! until ROADMAP LX seam 3 splits the core from NT): the program break,
-//! the file-descriptor table, pipes, and the line buffers that carry
-//! stdout and stderr to the log.
+//! the file-descriptor table, pipes, signals (`lx::signal`), its parent
+//! and children (fork, wait4), and the line buffers that carry stdout
+//! and stderr to the log.
 //!
-//! Kept in a table keyed by pid (`get`), added by `exec` and dropped when
-//! the process ends (`ended`, from `nt::process::finish`).
+//! Kept in a table keyed by pid (`get`), added by `exec` or `fork` and
+//! dropped when the process ends (`ended`, from `nt::process::finish`):
+//! its fds close first (pipe ends counted down), then its parent learns
+//! of the end (a zombie for wait4, SIGCHLD, its waiters woken), so a
+//! parent woken by the end reads EOF from a pipe only the child held.
 //!
 //! Output: what a Linux program writes to fd 1 or 2 (while they are the
 //! console) is logged a line at a time as `lx: pid <pid> stdout: <line>`
@@ -18,7 +22,11 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use lx_abi::signal::{SA_NOCLDWAIT, SIG_IGN, SIGCHLD, Siginfo};
+
+use super::signal::{self, Signals};
 use crate::mm::heap::{AllocError, KArc, TryVec};
+use crate::nt::platform::{self, ThreadId};
 use crate::nt::status::NtStatus;
 use crate::sync::IrqMutex;
 
@@ -139,9 +147,26 @@ pub struct Brk {
     pub current: u64,
 }
 
+/// A process's children: those running, those ended and not yet waited
+/// for (zombies: pid and how they ended), and the threads blocked in
+/// wait4.
+#[derive(Default)]
+pub struct Children {
+    pub running: Vec<u64>,
+    pub ended: Vec<(u64, NtStatus)>,
+    pub waiters: Vec<ThreadId>,
+}
+
 pub struct LxProcess {
     pub pid: u64,
+    /// The parent's pid; 0 for a process the kernel started (`lxrun=`).
+    pub parent: u64,
+    /// The signal the parent gets when this process ends (SIGCHLD for a
+    /// fork; clone's low byte).
+    pub exit_signal: u32,
     pub brk: IrqMutex<Brk>,
+    pub signals: IrqMutex<Signals>,
+    pub children: IrqMutex<Children>,
     /// Indexed by fd; None: closed.
     pub fds: IrqMutex<Vec<Option<Slot>>>,
     /// stdout's and stderr's bytes since their last newline.
@@ -162,13 +187,63 @@ pub fn create(pid: u64, brk: u64) -> Result<KArc<LxProcess>, AllocError> {
     }
     let state = KArc::try_new(LxProcess {
         pid,
+        parent: 0,
+        exit_signal: SIGCHLD,
         brk: IrqMutex::new(Brk { start: brk, current: brk }),
+        signals: IrqMutex::new(Signals::default()),
+        children: IrqMutex::new(Children::default()),
         fds: IrqMutex::new(fds),
         lines: IrqMutex::new([Vec::new(), Vec::new()]),
         missing: IrqMutex::new(Vec::new()),
     })?;
     TABLE.lock().try_push(state.clone())?;
     Ok(state)
+}
+
+/// The state of a forked child `pid` of `parent`: the same break, the
+/// same open file descriptions in the same slots (shared: a pipe end
+/// stays open while either holds it), the same signal actions and mask,
+/// nothing pending, no children. It is listed, and counted as a running
+/// child of `parent`, before its thread starts.
+pub fn fork(parent: &LxProcess, pid: u64) -> Result<KArc<LxProcess>, AllocError> {
+    let mut fds = Vec::new();
+    {
+        let from = parent.fds.lock();
+        fds.try_reserve_exact(from.len()).map_err(|_| AllocError)?;
+        for slot in from.iter() {
+            fds.try_push(slot.as_ref().map(|s| Slot { fd: s.fd.clone(), cloexec: s.cloexec }))?;
+        }
+    }
+    let brk = *parent.brk.lock();
+    let signals = parent.signals.lock().forked();
+    let state = KArc::try_new(LxProcess {
+        pid,
+        parent: parent.pid,
+        exit_signal: SIGCHLD,
+        brk: IrqMutex::new(brk),
+        signals: IrqMutex::new(signals),
+        children: IrqMutex::new(Children::default()),
+        fds: IrqMutex::new(fds),
+        lines: IrqMutex::new([Vec::new(), Vec::new()]),
+        missing: IrqMutex::new(Vec::new()),
+    })?;
+    parent.children.lock().running.try_push(pid)?;
+    if let Err(e) = TABLE.lock().try_push(state.clone()) {
+        parent.children.lock().running.retain(|&c| c != pid);
+        return Err(e);
+    }
+    Ok(state)
+}
+
+/// Undoes `fork` for a child whose thread could not start: unlisted, no
+/// longer the parent's child, its fds closed; nobody is told.
+pub fn discard(child: &LxProcess) {
+    TABLE.lock().retain(|p| p.pid != child.pid);
+    if let Some(parent) = get(child.parent) {
+        parent.children.lock().running.retain(|&c| c != child.pid);
+    }
+    let fds = core::mem::take(&mut *child.fds.lock());
+    drop(fds);
 }
 
 /// The state of Linux process `pid`.
@@ -178,30 +253,23 @@ pub fn get(pid: u64) -> Option<KArc<LxProcess>> {
 
 /// How a Linux process ended, as a shell (and `cargo xtask lx-expect`)
 /// reports it: an exit status (exit_group's argument & 0xff), or the
-/// signal an exception stands for (an NT exception status ends it today:
-/// no signal delivery yet).
+/// signal that killed it (a signal's default action,
+/// `signal::killed_status`, or the signal a CPU exception stands for: an
+/// NT exception status ends it while faults are not yet signals).
 pub struct Ending(pub NtStatus);
 
 impl fmt::Display for Ending {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = self.0;
-        if s.0 <= 0xff {
-            return write!(f, "-- exit status {}", s.0);
+        match signal::killed_by(self.0) {
+            Some(sig) => write!(f, "-- killed by signal {sig}"),
+            None => write!(f, "-- exit status {}", self.0.0),
         }
-        let signal = match s {
-            NtStatus::ACCESS_VIOLATION => 11,      // SIGSEGV
-            NtStatus::ILLEGAL_INSTRUCTION => 4,    // SIGILL
-            NtStatus::INTEGER_DIVIDE_BY_ZERO => 8, // SIGFPE
-            NtStatus::BREAKPOINT => 5,             // SIGTRAP
-            NtStatus::STACK_OVERFLOW => 11,
-            _ => 9, // SIGKILL: ended from outside
-        };
-        write!(f, "-- killed by signal {signal}")
     }
 }
 
 /// Linux process `pid` has ended with `status`: what is left of its
-/// output lines is logged, then how it ended; its state goes.
+/// output lines is logged, then how it ended; its state goes, its fds
+/// close, and then its parent is told (`child_ended`).
 pub fn ended(pid: u64, status: NtStatus) {
     let state = {
         let mut table = TABLE.lock();
@@ -219,9 +287,64 @@ pub fn ended(pid: u64, status: NtStatus) {
         }
     }
     crate::info!("lx: pid {pid} {}", Ending(status));
-    // The fds close with the state (pipe ends counted down).
+    // The fds close with the state (pipe ends counted down), before the
+    // parent hears of it.
     let fds = core::mem::take(&mut *state.fds.lock());
     drop(fds);
+    // Its own children are nobody's now (no reaper yet: they are not
+    // waited for).
+    state.children.lock().ended.clear();
+    if state.parent != 0
+        && let Some(parent) = get(state.parent)
+    {
+        child_ended(&parent, &state, status);
+    }
+}
+
+/// Child `child` of `parent` ended with `status`: it becomes a zombie
+/// for wait4 (unless the parent ignores SIGCHLD or set SA_NOCLDWAIT:
+/// then it is reaped at once, wait(2)), the parent gets its exit signal
+/// (SIGCHLD: discarded at its default action), and threads waiting in
+/// wait4 wake.
+fn child_ended(parent: &LxProcess, child: &LxProcess, status: NtStatus) {
+    let reap_now = {
+        let sigs = parent.signals.lock();
+        let chld = sigs.action(SIGCHLD);
+        chld.handler == SIG_IGN || chld.flags & SA_NOCLDWAIT != 0
+    };
+    let waiters = {
+        let mut c = parent.children.lock();
+        c.running.retain(|&p| p != child.pid);
+        if !reap_now && c.ended.try_push((child.pid, status)).is_err() {
+            crate::warn!(
+                "lx: pid {}: no memory to keep child {}'s status: wait4 will not see it",
+                parent.pid,
+                child.pid
+            );
+        }
+        core::mem::take(&mut c.waiters)
+    };
+    let (code, value) = signal::child_code(status);
+    let info = if child.exit_signal == SIGCHLD {
+        Siginfo::child(code, child.pid as i32, super::exec::UID as u32, value)
+    } else {
+        Siginfo::from_process(child.exit_signal as i32, 0, child.pid as i32, 0)
+    };
+    let raised = parent.signals.lock().raise(info, false);
+    crate::events::emit(
+        crate::events::Category::Process,
+        "lx child ended",
+        format_args!(
+            r#""pid":{},"child":{},"wait_status":{},"signal":{},"raised":"{raised:?}","reaped":{reap_now}"#,
+            parent.pid,
+            child.pid,
+            signal::wait_status(status),
+            child.exit_signal
+        ),
+    );
+    for w in waiters {
+        platform::wake(w);
+    }
 }
 
 fn log_line(pid: u64, stream: Stream, line: &[u8]) {
@@ -381,6 +504,9 @@ mod tests {
         assert_eq!(alloc::format!("{}", Ending(NtStatus(0))), "-- exit status 0");
         let segv = alloc::format!("{}", Ending(NtStatus::ACCESS_VIOLATION));
         assert_eq!(segv, "-- killed by signal 11");
+        // pipe_test: a child at SIGPIPE's default action.
+        let pipe = alloc::format!("{}", Ending(signal::killed_status(13)));
+        assert_eq!(pipe, "-- killed by signal 13");
     }
 
     #[test]
