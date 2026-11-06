@@ -1199,7 +1199,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 
 /// Each DC slot's accumulated bounds (SetBoundsRect, GetBoundsRect).
-static BOUNDS: [surface::Bounds; SLOTS] = [const { surface::Bounds::EMPTY }; SLOTS];
+static BOUNDS: [surface::Bounds; SLOTS] = [const { surface::Bounds::empty() }; SLOTS];
 
 const DCB_RESET: u32 = 0x1;
 const DCB_ACCUMULATE: u32 = 0x2;

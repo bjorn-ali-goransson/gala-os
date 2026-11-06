@@ -32,14 +32,16 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    pub const EMPTY: Bounds = Bounds {
-        rect: [
-            core::sync::atomic::AtomicI32::new(i32::MAX),
-            core::sync::atomic::AtomicI32::new(i32::MAX),
-            core::sync::atomic::AtomicI32::new(i32::MIN),
-            core::sync::atomic::AtomicI32::new(i32::MIN),
-        ],
-    };
+    pub const fn empty() -> Bounds {
+        Bounds {
+            rect: [
+                core::sync::atomic::AtomicI32::new(i32::MAX),
+                core::sync::atomic::AtomicI32::new(i32::MAX),
+                core::sync::atomic::AtomicI32::new(i32::MIN),
+                core::sync::atomic::AtomicI32::new(i32::MIN),
+            ],
+        }
+    }
 
     pub fn reset(&self) {
         use core::sync::atomic::Ordering::Relaxed;
