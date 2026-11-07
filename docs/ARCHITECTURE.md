@@ -498,7 +498,9 @@ numbers and the version reported to programs depend on it.
   NtOpenThread (the thread's own object by its ClientId; kernel32's
   OpenThread).
   NtQuerySection is exported by ntdll; NtQueryInformationProcess answers
-  ProcessHandleCount (class 20). NtLockFile
+  ProcessHandleCount (class 20), and ProcessBasicInformation's
+  InheritedFromUniqueProcessId is the creator's id (`Process::parent_id`;
+  0 for processes the kernel started). NtLockFile
   (0x123), NtUnlockFile (0x1c5) and NtSetValueKey (0x60) use Windows-range
   numbers that are UNVERIFIED for the pinned build.
 - **Tracing and counters**: `trace` logs every call; `events=syscall`
@@ -2523,7 +2525,8 @@ ntdll imports.
   drive), NeedCurrentDirectoryForExePathW, CopyFile2 (CopyFileExW's
   flags, an HRESULT), SetWaitableTimerEx (no wake context or coalescing),
   GetNamedPipeHandleStateW (modes and instance count; no client user
-  name), and process snapshots: PssCaptureSnapshot keeps the process's
+  name), VerifyVersionInfoA (OSVERSIONINFOEXA translated to the W
+  form), and process snapshots: PssCaptureSnapshot keeps the process's
   PSS_PROCESS_INFORMATION (basic information, times, priority class, VM
   counters, image path) in a heap block, PssQuerySnapshot answers that
   class only (64-bit; the other capture flags are recorded and not
@@ -4028,8 +4031,19 @@ endpoint's I/O completion port.
   the endpoint's pending lock: perform the operation, write the
   IO_STATUS_BLOCK, set the event, signal the endpoint (unless
   FILE_SKIP_SET_EVENT_ON_HANDLE), post (key, ApcContext, status,
-  information) to the port. **Lock order: pending, then the stack, the
-  address space, the dispatcher.**
+  information) to the port. **Lock order: pending, then the endpoint's
+  socket slot, the stack, the address space, the dispatcher.**
+- **An endpoint learns its socket before the stack can report on it**:
+  BIND, CONNECT, ACCEPT and AcceptEx store the new socket id under the
+  endpoint's socket lock held across the stack call that makes it, so
+  the `net` thread's notify (which takes that lock) never finds an
+  endpoint without its socket. A change reported then would be lost:
+  with WSAEventSelect(FD_CONNECT) and a non-blocking connect (Chromium's
+  way) the handshake's report is the only one, and Chromium waits for
+  its 240 s connect timeout. `winsock_async_test`'s FD_CONNECT rounds
+  check it (busy threads and `events=sample`'s interrupts preempt
+  connect's thread often enough to hit the moment); `events=net`
+  "afd notify before its socket" shows a violation.
 - A request that completes at once returns its status and is also
   posted to the port, unless the endpoint has
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (what Go asks for, after
@@ -8848,7 +8862,9 @@ write such tests: WORKFLOW "FlaUI".
   CreateInstance (vtable index 3). ThreadingModel is ignored (no
   marshaling: every object is used on the caller's thread).
   Out-of-process contexts and unregistered classes give
-  REGDB_E_CLASSNOTREG (recorded in the ledger).
+  REGDB_E_CLASSNOTREG (recorded in the ledger). ProgIDFromCLSID reads
+  the class's `ProgID` subkey the same way (REGDB_E_CLASSNOTREG, a null
+  output, without one).
 - The registry seed registers CUIAutomation
   ({ff48dba4-60ef-4201-aa87-54103eef594e}) and CUIAutomation8
   ({e22ad333-b25f-460c-83d0-0581107395c9}) as

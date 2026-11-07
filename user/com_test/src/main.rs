@@ -18,6 +18,7 @@
 //!   CoTaskMem*,
 //!   CoCreateGuid (random version-4 GUIDs), CoGetClassObject
 //!   (REGDB_E_CLASSNOTREG), CLSIDFromProgID (CO_E_CLASSSTRING),
+//!   ProgIDFromCLSID (REGDB_E_CLASSNOTREG, the output null),
 //!   CreateStreamOnHGlobal (an IStream: write, seek, read, stat),
 //!   CoCreateFreeThreadedMarshaler (IMarshal), CoWaitForMultipleHandles
 //!   (RPC_S_CALLPENDING on timeout).
@@ -159,6 +160,7 @@ unsafe extern "system" {
         out: *mut *mut c_void,
     ) -> HResult;
     fn CLSIDFromProgID(progid: *const u16, clsid: *mut Guid) -> HResult;
+    fn ProgIDFromCLSID(clsid: *const Guid, progid: *mut *mut u16) -> HResult;
     fn CreateStreamOnHGlobal(global: Handle, delete: Bool, out: *mut *mut c_void) -> HResult;
     fn CoCreateFreeThreadedMarshaler(outer: *mut c_void, out: *mut *mut c_void) -> HResult;
     fn CoWaitForMultipleHandles(
@@ -613,6 +615,9 @@ fn memory_guids_classes(c: &mut Checks) -> Result<(), u32> {
         let progid = w("Gala.NoSuchProgID");
         let mut clsid = [7u8; 16];
         c.eq(hr(CLSIDFromProgID(progid.as_ptr(), &mut clsid)), 0x8004_01f3)?; // CO_E_CLASSSTRING
+        let mut text = 7 as *mut u16;
+        c.eq(hr(ProgIDFromCLSID(&NOBODY, &mut text)), 0x8004_0154)?; // REGDB_E_CLASSNOTREG
+        c.ok(text.is_null(), text as u64)?;
 
         // An IStream on memory.
         let mut stream = core::ptr::null_mut();

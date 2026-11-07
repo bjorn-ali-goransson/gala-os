@@ -445,18 +445,23 @@ boot-test <name>`, see "Pending scenarios" below):
    ProcessVmCounters, then fork emulation; the `bin\bash.exe` launcher
    exits 1 without output.
 6. Python (the owner's interest): the embeddable CPython 3.13.1 for x64
-   (PREBUILT `python`) runs: `python_hello` evaluates `print(6*7)`, with
-   the kernel32 imports it lacked (`kernel32_py_test`: PathCch, Pss
-   snapshots, CopyFile2, SetWaitableTimerEx,
-   NeedCurrentDirectoryForExePathW, GetNamedPipeHandleStateW). Next, test
-   first: a script using sockets, threads, subprocess and the standard
-   library's extension modules (_socket, select, _ssl, _sqlite3,
-   _ctypes). Its ledger so far (optional probes): kernelbase.dll and
+   (PREBUILT `python`) runs: `python_hello` evaluates `print(6*7)`;
+   `python_script` runs `user/python/python_test.py`: threads, a TCP
+   socket over loopback, select, a subprocess (`os.getppid` in it),
+   hashlib (OpenSSL), zlib, json, sqlite3 and ctypes. The gaps it had,
+   each test first: kernel32's PathCch, Pss snapshots, CopyFile2,
+   SetWaitableTimerEx, NeedCurrentDirectoryForExePathW,
+   GetNamedPipeHandleStateW, VerifyVersionInfoA (`kernel32_py_test`);
+   ProcessBasicInformation's parent id (`process_test`); ole32's
+   ProgIDFromCLSID (`com_test`). Next: pip (an https download on
+   Schannel... CPython brings its own OpenSSL, so its certificate store
+   is what matters), venv, asyncio's proactor (IOCP), multiprocessing.
+   Its ledger (optional probes): kernelbase.dll and
    api-ms-win-appmodel-runtime-l1-1-2 (absent), NtAllocateVirtualMemoryEx,
    GetNumaNodeProcessorMaskEx, GetFileInformationByName,
-   GetFileInformationByHandleEx class 18. Imports of extension modules
-   not yet loaded: VerifyVersionInfoA; ws2_32's ordinal 53; advapi32's
-   RegSaveKeyW, RegLoadKeyW and RegConnectRegistryW.
+   GetFileInformationByHandleEx class 18. Not yet seen loading:
+   ws2_32's ordinal 53; advapi32's RegSaveKeyW, RegLoadKeyW and
+   RegConnectRegistryW.
 
 **Done when**: each program's scenario passes; pending ones are moved
 into `cargo xtask test` when CI can afford them.

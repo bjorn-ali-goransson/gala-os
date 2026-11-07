@@ -688,6 +688,28 @@ fn version_fields(info: *const u32) -> [(u32, u64, u64); 6] {
     ]
 }
 
+/// VerifyVersionInfoA: VerifyVersionInfoW on the same fields;
+/// OSVERSIONINFOEXA (156 bytes) has an ANSI szCSDVersion[128], so its
+/// service pack WORDs are at +148/+150 (the W form's at +276/+278).
+#[unsafe(no_mangle)]
+pub extern "system" fn VerifyVersionInfoA(info: *mut u8, kind: u32, mask: u64) -> Bool {
+    if info.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let mut wide = [0u32; 71]; // OSVERSIONINFOEXW, 284 bytes
+    // SAFETY: the caller's OSVERSIONINFOEXA: the five DWORDs, then the
+    // service pack WORDs after szCSDVersion.
+    unsafe {
+        for (i, w) in wide.iter_mut().enumerate().take(5) {
+            *w = info.cast::<u32>().add(i).read_unaligned();
+        }
+        let sp = info.add(148).cast::<u32>().read_unaligned();
+        wide.as_mut_ptr().cast::<u8>().add(276).cast::<u32>().write_unaligned(sp);
+    }
+    wide[0] = 284;
+    VerifyVersionInfoW(wide.as_mut_ptr(), kind, mask)
+}
+
 /// VerifyVersionInfoW: compares the requested fields with the version
 /// reported to this program (its manifest decides, as for GetVersionEx;
 /// no service pack); ERROR_OLD_WIN_VERSION when they

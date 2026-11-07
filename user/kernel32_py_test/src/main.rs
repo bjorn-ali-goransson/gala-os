@@ -22,6 +22,10 @@
 //!   bytes on x64 (ProcessId at 28, ParentProcessId at 32); another size
 //!   is ERROR_BAD_LENGTH.
 //!
+//! - VerifyVersionInfoA (what _socket.pyd imports): OSVERSIONINFOEXA's
+//!   layout (156 bytes); major version >= 6 holds, >= 99 is FALSE with
+//!   ERROR_OLD_WIN_VERSION.
+//!
 //! Prints `kernel32_py_test: ok` or exits with the number of the failing
 //! check.
 
@@ -89,6 +93,8 @@ unsafe extern "system" {
     -> u32;
     fn PssQuerySnapshot(snapshot: Handle, class: u32, buf: *mut u8, len: u32) -> u32;
     fn PssFreeSnapshot(process: Handle, snapshot: Handle) -> u32;
+    fn VerifyVersionInfoA(info: *mut u8, type_mask: u32, condition: u64) -> Bool;
+    fn VerSetConditionMask(mask: u64, type_mask: u32, condition: u8) -> u64;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -384,12 +390,37 @@ fn snapshots(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+fn versions(c: &mut Checks) -> Result<(), u32> {
+    const VER_MAJORVERSION: u32 = 2;
+    const VER_GREATER_EQUAL: u8 = 3;
+    const ERROR_OLD_WIN_VERSION: u32 = 1150;
+    // OSVERSIONINFOEXA: dwOSVersionInfoSize, major, minor, build, platform,
+    // szCSDVersion[128], service pack major and minor, suite mask, product
+    // type, reserved: 156 bytes.
+    let mut info = [0u8; 156];
+    info[0..4].copy_from_slice(&156u32.to_le_bytes());
+    // SAFETY: a structure of ours.
+    unsafe {
+        let mask = VerSetConditionMask(0, VER_MAJORVERSION, VER_GREATER_EQUAL);
+        info[4..8].copy_from_slice(&6u32.to_le_bytes());
+        c.ok(
+            VerifyVersionInfoA(info.as_mut_ptr(), VER_MAJORVERSION, mask) != 0,
+            GetLastError().into(),
+        )?;
+        info[4..8].copy_from_slice(&99u32.to_le_bytes());
+        c.eq(VerifyVersionInfoA(info.as_mut_ptr(), VER_MAJORVERSION, mask) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_OLD_WIN_VERSION.into())?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     paths(&mut c)?;
     copy(&mut c)?;
     timer_and_pipe(&mut c)?;
-    snapshots(&mut c)
+    snapshots(&mut c)?;
+    versions(&mut c)
 }
 
 #[unsafe(no_mangle)]

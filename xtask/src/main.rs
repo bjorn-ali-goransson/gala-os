@@ -1709,6 +1709,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("python_hello", "rpcrt4.dll", "Windows/System32"),
     ("python_hello", "user32.dll", "Windows/System32"),
     ("python_hello", "msvcrt.dll", "Windows/System32"),
+    ("python_hello", "ole32.dll", "Windows/System32"),
+    ("python_hello", "oleaut32.dll", "Windows/System32"),
+    ("python_script", "user/python/python_test.py", "gala"),
     ("pwsh", "target/prebuilt/pwsh/", "pwsh"),
     ("pwsh", "ntdll.dll", "Windows/System32"),
     ("pwsh", "kernel32.dll", "Windows/System32"),
@@ -3606,6 +3609,8 @@ const PENDING: &[&str] = &[
     // BR's conformance report: a report run of hours, not a gate check.
     "chromium_wpt",
     "java_stress",
+    // P1 step 6, test first: CPython's standard library (ROADMAP P1).
+    "python_script",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
@@ -5250,7 +5255,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // N1c: overlapped Winsock with a completion port (what Go uses).
         name: "winsock_async_test",
-        cmdline: "qemu_exit run=winsock_async_test.exe",
+        cmdline: "qemu_exit events=sample run=winsock_async_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["winsock_async_test: ok", "exited with status 0x00000000"],
     },
@@ -6582,6 +6587,15 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["\n42\r", "python.exe finished with status 0x00000000"],
     },
     Scenario {
+        // P1 step 6: CPython running user/python/python_test.py: threads,
+        // sockets, select, a subprocess, hashlib/zlib/json/sqlite3/ctypes;
+        // each check as on Windows.
+        name: "python_script",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_test.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_test: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -7794,6 +7808,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("filezilla_flaui", "dotnet"),
     ("filezilla_flaui", "filezilla"),
     ("pwsh_hello", "pwsh"),
+    ("python_script", "python_hello"),
+    ("python_script", "python_script"),
     ("chromium_version", "chromium"),
     ("chromium_dump", "chromium"),
     ("chromium_https", "chromium"),

@@ -8,6 +8,8 @@
 //! missing program fails with ERROR_FILE_NOT_FOUND. OpenProcess by id
 //! opens an exited child (while a handle keeps it), a suspended one and
 //! the caller; id 0 or an unused id fail with ERROR_INVALID_PARAMETER.
+//! The child's ProcessBasicInformation names us as its parent
+//! (InheritedFromUniqueProcessId).
 //! A Toolhelp snapshot lists the suspended child (parent, threads, name)
 //! and its thread. VirtualAllocEx/VirtualQueryEx/VirtualFreeEx reach the
 //! suspended child's address space (PROCESS_VM_OPERATION needed).
@@ -118,6 +120,17 @@ unsafe extern "system" {
     fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn ExitProcess(code: u32) -> !;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueryInformationProcess(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> i32;
 }
 
 #[allow(dead_code)]
@@ -541,6 +554,20 @@ fn run() -> Result<(), u32> {
         let opened = OpenProcess(SYNCHRONIZE, 0, info.process_id);
         c.ok(!opened.is_null(), GetLastError().into())?;
         c.eq(WaitForSingleObject(opened, 0).into(), WAIT_TIMEOUT.into())?;
+        // PROCESS_BASIC_INFORMATION (x64): UniqueProcessId at 32,
+        // InheritedFromUniqueProcessId (the creator) at 40.
+        let mut basic = [0u8; 48];
+        let st = NtQueryInformationProcess(
+            info.process,
+            0,
+            basic.as_mut_ptr(),
+            48,
+            core::ptr::null_mut(),
+        );
+        c.eq(st as u32 as u64, 0)?;
+        let field = |at: usize| u64::from_le_bytes(basic[at..at + 8].try_into().unwrap_or([0; 8]));
+        c.eq(field(32), info.process_id.into())?;
+        c.eq(field(40), GetCurrentProcessId().into())?;
         toolhelp(&mut c, &info)?;
         // Its address space through the process handle (PostgreSQL
         // reserves its shared memory in a suspended child so): a region

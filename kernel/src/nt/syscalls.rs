@@ -4145,6 +4145,9 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
     b[16..24].copy_from_slice(&platform::online_mask().to_le_bytes());
     b[24..28].copy_from_slice(&8u32.to_le_bytes());
     b[32..40].copy_from_slice(&p.id.to_le_bytes());
+    // InheritedFromUniqueProcessId: the creator (0 for processes the
+    // kernel started).
+    b[40..48].copy_from_slice(&p.parent_id.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
 }
 

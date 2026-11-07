@@ -75,23 +75,19 @@ const REG_SZ: u32 = 1;
 const REG_EXPAND_SZ: u32 = 2;
 const MAX_PATH: usize = 260;
 
-/// The registered in-process server of `clsid` (a NUL-terminated path
-/// with environment variables expanded), if any.
-fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
+/// The default value of `HKCR\CLSID\{clsid}\<subkey>` (REG_SZ or
+/// REG_EXPAND_SZ, unexpanded, NUL-terminated), if any.
+fn class_value(clsid: &Guid, subkey: &str) -> Option<[u16; MAX_PATH]> {
     let prefix = "\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\";
-    let suffix = "\\InprocServer32";
     let mut name = [0u16; 128];
     let mut n = 0;
-    for c in prefix.encode_utf16() {
-        name[n] = c;
-        n += 1;
-    }
-    for c in guid_text(clsid) {
-        name[n] = c;
-        n += 1;
-    }
-    for c in suffix.encode_utf16() {
-        name[n] = c;
+    for c in prefix
+        .encode_utf16()
+        .chain(guid_text(clsid))
+        .chain("\\".encode_utf16())
+        .chain(subkey.encode_utf16())
+    {
+        *name.get_mut(n)? = c;
         n += 1;
     }
     let us =
@@ -136,10 +132,49 @@ fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
         core::slice::from_raw_parts(buf.as_ptr().add(3).cast::<u16>(), len.min(MAX_PATH - 1))
     };
     raw[..data.len()].copy_from_slice(data);
+    // Without a terminating NUL in the data: it ends at the data's end.
+    if let Some(end) = raw.iter().position(|&c| c == 0) {
+        raw[end..].fill(0);
+    }
+    Some(raw)
+}
+
+/// The registered in-process server of `clsid` (a NUL-terminated path
+/// with environment variables expanded), if any.
+fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
+    let raw = class_value(clsid, "InprocServer32")?;
     let mut path = [0u16; MAX_PATH];
     // SAFETY: a NUL-terminated source and a buffer of MAX_PATH characters.
     let n = unsafe { ExpandEnvironmentStringsW(raw.as_ptr(), path.as_mut_ptr(), MAX_PATH as u32) };
     (n != 0 && n as usize <= MAX_PATH).then_some(path)
+}
+
+/// ProgIDFromCLSID(clsid, *lplpszProgID): the class's ProgID (the
+/// default value of its `ProgID` subkey) in task memory;
+/// REGDB_E_CLASSNOTREG (and a null output) when it has none.
+#[unsafe(no_mangle)]
+pub extern "system" fn ProgIDFromCLSID(clsid: *const Guid, progid: *mut *mut u16) -> HResult {
+    if clsid.is_null() || progid.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's output.
+    unsafe { *progid = core::ptr::null_mut() };
+    // SAFETY: the caller's CLSID.
+    let Some(text) = class_value(unsafe { &*clsid }, "ProgID") else {
+        return REGDB_E_CLASSNOTREG;
+    };
+    let n = text.iter().position(|&c| c == 0).unwrap_or(MAX_PATH - 1);
+    let p = super::CoTaskMemAlloc((n + 1) * 2).cast::<u16>();
+    if p.is_null() {
+        return super::E_OUTOFMEMORY;
+    }
+    // SAFETY: a fresh block of n + 1 characters; the caller's output.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), p, n);
+        *p.add(n) = 0;
+        *progid = p;
+    }
+    super::S_OK
 }
 
 type GetClassObject = extern "system" fn(*const Guid, *const Guid, *mut *mut c_void) -> HResult;
