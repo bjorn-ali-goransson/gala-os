@@ -1528,12 +1528,21 @@ and 8889; its first start makes a Python virtualenv with its pip
 packages; its log is `target/wpt/wptserve.log`). WPT's host names must
 resolve to the loopback first: `cd target/prebuilt/wpt && ./wpt
 make-hosts-file >> /etc/hosts` (the run says so when they do not). The
-guest reaches it as 10.0.2.100 on those ports (`xtask relay <port>` per
-connection) and Chromium maps web-platform.test and its subdomains
+guest reaches it as 10.0.2.100 on those ports (QEMU runs `xtask relay
+<port> <log>` per connection; each logs a line in `target/wpt/relay.log`:
+bytes each way, or why it could not connect) and Chromium maps web-platform.test and its subdomains
 there (`--host-resolver-rules`); our testharnessreport.js replaces the
 tree's (the file WPT leaves to vendors). Each test waits for its
 results as long as testharness's own timeout allows, times 4, plus
-20 s. `XTASK_WPT_FILTER=<substring>` and
+20 s; a test without results is a TIMEOUT whose message says what the
+page was doing (its URL, an error page's being chrome-error://,
+readyState, title, whether testharness.js ran, each fetched resource
+with its status). Before the VM boots, the run checks the path: it
+refuses to start when something already listens on a WPT port (a
+stale server would answer for this tree), and runs the relay as QEMU
+will, failing at once unless our testharnessreport.js comes back. The
+server runs in a process group of its own, ended as a whole (its
+servers are child processes that outlived the parent). `XTASK_WPT_FILTER=<substring>` and
 `XTASK_WPT_LIMIT=<n>` narrow the run (`XTASK_WPT_LIMIT=5 cargo xtask
 boot-test 'chromium_wpt$'`, about 3 minutes); xtask fetches WPT_COMMIT
 into `target/prebuilt/wpt` with the host's git. Each test's line

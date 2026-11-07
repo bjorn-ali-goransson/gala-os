@@ -2661,7 +2661,9 @@ fn main() -> ExitCode {
             Some("perfetto") => perfetto_cli(&args[1..]),
             Some("serve-page") => serve_page(),
             Some("wpt-compare") => wpt::compare(),
-            Some("relay") => wpt::relay(args.get(2).map_or("", String::as_str)),
+            Some("relay") => {
+                wpt::relay(args.get(1).map_or("", String::as_str), args.get(2).map(String::as_str))
+            }
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),

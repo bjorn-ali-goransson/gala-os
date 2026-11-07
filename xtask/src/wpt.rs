@@ -12,6 +12,7 @@
 //! target/wpt/wptreport.json (wptrunner's format, what wpt.fyi takes).
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -90,13 +91,32 @@ add_completion_callback(function (tests, status) {
 "#;
 
 /// wptserve on the host: started for a run, stopped with it.
+/// `./wpt serve` in a process group of its own: its servers are
+/// multiprocessing children that outlive a killed parent (and kept the
+/// ports, so a later run talked to a stale server), so the whole group
+/// is ended: SIGTERM, then SIGKILL for what is left after 5 s.
 pub struct Server(std::process::Child);
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.0.kill();
+        let group = format!("-{}", self.0.id());
+        let signal = |sig: &str| {
+            let _ = Command::new("kill").args([sig, "--", &group]).status();
+        };
+        signal("-TERM");
+        for _ in 0..50 {
+            if !port_answers(8000) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        signal("-KILL");
         let _ = self.0.wait();
     }
+}
+
+fn port_answers(port: u16) -> bool {
+    std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
 
 /// Starts `./wpt serve` (HTTP/2 off) with PORTS fixed (gala-config.json
@@ -113,6 +133,14 @@ pub fn start_server() -> Result<Server> {
             root.display()
         ));
     }
+    // A server already there would answer for ours (a stale one from an
+    // earlier run, of another tree or configuration).
+    if let Some(port) = PORTS.iter().copied().find(|&p| port_answers(p)) {
+        return Err(format!(
+            "something already listens on port {port} (a stale `wpt serve` from an earlier \
+             run?): end it first"
+        ));
+    }
     let config =
         r#"{"ports": {"http": [8000, 8001], "https": [8443, 8444], "ws": [8666], "wss": [8889]}}"#;
     fs::write(root.join("gala-config.json"), config).map_err(|e| e.to_string())?;
@@ -122,13 +150,15 @@ pub fn start_server() -> Result<Server> {
     let child = Command::new("./wpt")
         .args(["serve", "--no-h2", "--config", "gala-config.json"])
         .current_dir(&root)
+        .process_group(0)
         .stdout(log)
         .stderr(err)
         .spawn()
         .map_err(|e| format!("./wpt serve: {e}"))?;
     let mut server = Server(child);
     for _ in 0..600 {
-        if std::net::TcpStream::connect(("127.0.0.1", 8000)).is_ok() {
+        if port_answers(8000) {
+            relay_preflight()?;
             return Ok(server);
         }
         if let Ok(Some(status)) = server.0.try_wait() {
@@ -139,26 +169,98 @@ pub fn start_server() -> Result<Server> {
     Err("./wpt serve did not answer on port 8000 in 300 s (target/wpt/wptserve.log)".into())
 }
 
-/// The `-netdev user` options forwarding the guest's 10.0.2.100 on PORTS
-/// to wptserve, through `xtask relay <port>` (QEMU runs it per
-/// connection).
-pub fn guestfwd() -> Result<String> {
+/// Where each relayed connection is logged (one line: port, bytes each
+/// way, or the error), absolute: QEMU runs the relay.
+fn relay_log() -> Result<String> {
+    let log = std::env::current_dir().map_err(|e| e.to_string())?.join("target/wpt/relay.log");
+    let log = log.display().to_string();
+    if log.contains(',') || log.contains(' ') {
+        return Err(format!("the relay log's path {log:?} cannot go in a -netdev option"));
+    }
+    Ok(log)
+}
+
+/// The command QEMU runs for a guest connection to `port`.
+fn relay_command() -> Result<(String, String)> {
     let exe = std::env::current_exe().map_err(|e| format!("xtask's own path: {e}"))?;
     let exe = exe.display().to_string();
     if exe.contains(',') || exe.contains(' ') {
         return Err(format!("xtask's path {exe:?} cannot go in a -netdev option"));
     }
-    Ok(PORTS.iter().map(|p| format!(",guestfwd=tcp:10.0.2.100:{p}-cmd:{exe} relay {p}")).collect())
+    Ok((exe, relay_log()?))
 }
 
-/// `cargo xtask relay <port>`: one guest connection (standard input and
-/// output) to 127.0.0.1:<port>, both ways, until either side closes.
-pub fn relay(port: &str) -> Result {
+/// The `-netdev user` options forwarding the guest's 10.0.2.100 on PORTS
+/// to wptserve, through `xtask relay <port> <log>` (QEMU runs it per
+/// connection).
+pub fn guestfwd() -> Result<String> {
+    let (exe, log) = relay_command()?;
+    Ok(PORTS
+        .iter()
+        .map(|p| format!(",guestfwd=tcp:10.0.2.100:{p}-cmd:{exe} relay {p} {log}"))
+        .collect())
+}
+
+/// Runs the relay as QEMU will (its command line, a request on standard
+/// input) and checks that wptserve's answer comes back: a broken relay
+/// fails the run here, in seconds, not as every test timing out.
+fn relay_preflight() -> Result {
     use std::io::{Read, Write};
-    let port: u16 = port.parse().map_err(|_| format!("relay: bad port {port:?}"))?;
-    let stream = std::net::TcpStream::connect(("127.0.0.1", port))
-        .map_err(|e| format!("relay {port}: {e}"))?;
+    let (exe, log) = relay_command()?;
+    let _ = fs::remove_file(&log);
+    let mut child = Command::new(&exe)
+        .args(["relay", "8000", &log])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("relay preflight: {e}"))?;
+    let request = "GET /resources/testharnessreport.js HTTP/1.1\r\nHost: web-platform.test:8000\r\nConnection: close\r\n\r\n";
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(request.as_bytes()).map_err(|e| format!("relay preflight: {e}"))?;
+    }
+    let mut answer = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut answer);
+    }
+    let _ = child.wait();
+    let status = answer.lines().next().unwrap_or("").to_string();
+    if !status.starts_with("HTTP/1.1 200") || !answer.contains("__gala_wpt") {
+        let logged = fs::read_to_string(&log).unwrap_or_default();
+        return Err(format!(
+            "relay preflight: `{exe} relay 8000` did not bring back our testharnessreport.js \
+             (status line {status:?}; relay log: {})",
+            logged.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// `cargo xtask relay <port> [<log>]`: one guest connection (standard
+/// input and output) to 127.0.0.1:<port>, both ways, until either side
+/// closes; a line for it in <log> (bytes each way, or the error).
+pub fn relay(port: &str, log: Option<&str>) -> Result {
+    use std::io::{Read, Write};
+    let note = |line: String| {
+        if let Some(path) = log
+            && let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        note(format!("relay: bad port {port:?}"));
+        return Err(format!("relay: bad port {port:?}"));
+    };
+    let stream = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+        Ok(s) => s,
+        Err(e) => {
+            note(format!("relay {port}: connect: {e}"));
+            return Err(format!("relay {port}: {e}"));
+        }
+    };
     let mut up = stream.try_clone().map_err(|e| e.to_string())?;
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = sent.clone();
     let to_server = thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 16384];
@@ -166,18 +268,24 @@ pub fn relay(port: &str) -> Result {
             if n == 0 || up.write_all(&buf[..n]).is_err() {
                 break;
             }
+            counted.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
         }
         let _ = up.shutdown(std::net::Shutdown::Write);
     });
     let mut down = stream;
     let mut out = std::io::stdout().lock();
     let mut buf = [0u8; 16384];
+    let mut received = 0u64;
     while let Ok(n) = down.read(&mut buf) {
         if n == 0 || out.write_all(&buf[..n]).and_then(|()| out.flush()).is_err() {
             break;
         }
+        received += n as u64;
     }
+    // The guest's side may stay open after the answer: the count so far.
     drop(to_server);
+    let sent = sent.load(std::sync::atomic::Ordering::Relaxed);
+    note(format!("relay {port}: {sent} bytes to the server, {received} back"));
     Ok(())
 }
 
@@ -388,9 +496,13 @@ fn run_one(port: u16, id: &str, test: &str, wait: Duration) -> Outcome {
         thread::sleep(Duration::from_secs(1));
     };
     let Some(text) = results else {
+        let state = page_state(port, id);
         return Outcome {
-            line: format!("{test}: no results in {} s", wait.as_secs()),
-            result: result("TIMEOUT", format!("no results in {} s", wait.as_secs())),
+            line: format!("{test}: no results in {} s; the page: {state}", wait.as_secs()),
+            result: result(
+                "TIMEOUT",
+                format!("no results in {} s; the page: {state}", wait.as_secs()),
+            ),
             lost: false,
         };
     };
@@ -411,6 +523,22 @@ fn run_one(port: u16, id: &str, test: &str, wait: Duration) -> Outcome {
         line: format!("{test}: {status} {pass}/{}", r.subtests.len()),
         result: r,
         lost: false,
+    }
+}
+
+/// What a page that gave no results is doing, for its TIMEOUT message:
+/// its URL (an error page's is chrome-error://), readyState, title,
+/// whether testharness.js ran (add_completion_callback defined) and the
+/// resources it fetched (name and response status, where the browser
+/// gives one).
+fn page_state(port: u16, id: &str) -> String {
+    let script = r#"{"script":"var r = performance.getEntriesByType('resource').map(function (e) { return e.name.replace(location.origin, '') + ' ' + (e.responseStatus || '?'); }); return [location.href, document.readyState, JSON.stringify(document.title), typeof add_completion_callback === 'function' ? 'testharness ran' : 'testharness did not run', 'resources: ' + (r.join(', ') || 'none')].join('; ')","args":[]}"#;
+    match webdriver(port, "POST", &format!("/session/{id}/execute/sync"), script, 60) {
+        Ok((200, answer)) => value_text(&answer).unwrap_or_else(|| "(no answer)".into()),
+        Ok((status, answer)) => {
+            format!("(asked: {status} {})", answer.chars().take(120).collect::<String>())
+        }
+        Err(e) => format!("(asked: {e})"),
     }
 }
 

@@ -1066,8 +1066,10 @@ samples).
    (PENDING: a report run) runs WPT's own server on the host (pinned
    commit, `dom/nodes`) and each test page in headless Chromium through
    ChromeDriver, the report as wptreport.json, `cargo xtask
-   wpt-compare` against Edge 159 on Windows on wpt.fyi. Next: the whole
-   directory, then the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
+   wpt-compare` against Edge 159 on Windows on wpt.fyi. The first five
+   tests through wptserve: all harness OK, 47 of 47 subtests, as Edge.
+   Next: the whole directory, then the comparison with Chrome on
+   Windows (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
    snapshot's revision, the WPT server on the host reached as
