@@ -815,6 +815,17 @@ impl<X: Default> State<X> {
         for e in &out[..n] {
             if is_noted(e.message) {
                 self.settle_note(e.window, e.message, false);
+                // `events=window`: the taking, on the thread that took it
+                // (the export links it to its `button` or `key`, which
+                // reach a window in order).
+                crate::events::emit(
+                    crate::events::Category::Window,
+                    "input taken",
+                    format_args!(
+                        r#""message":{},"window":{},"owner":{owner}"#,
+                        e.message, e.window
+                    ),
+                );
             }
         }
         n

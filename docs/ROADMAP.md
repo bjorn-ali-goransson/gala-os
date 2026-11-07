@@ -2077,12 +2077,12 @@ from bounded queues (drops counted), retried with backoff and
 in-guest exporter too); a hand-written encoder checked by decoding it
 back against the JSON form; `OTEL_EXPORTER_OTLP_PROTOCOL=http/json`
 selectable, files still OTLP/JSON, profiles still JSON on the wire
-(OBSERVABILITY "OpenTelemetry export").
+(OBSERVABILITY "OpenTelemetry export"). The input path as pipes and
+completion ports have it: the kernel's `input taken` event, each
+taking linked to its `button` or `key` delivery, `otel: slow input`
+among the slowest hand-offs.
 
 **Next**:
-0. The input path as the pipes and completion ports have it: a kernel
-   `input taken` event, a link from a delivery to its taking, `otel:
-   slow input` among the slowest hand-offs.
 1. OT2: trace context in the kernel; system calls, waits, faults, I/O
    and network as spans; per-CPU rings; user-mode stacks on samples
    (the unwind tables of x64 images). Still open of OT1's gaps: an

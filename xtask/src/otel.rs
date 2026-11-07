@@ -92,6 +92,9 @@ pub struct Report {
     /// at most `SLOWEST` of each kind.
     pub slow_pipes: Vec<(u64, String)>,
     pub slow_completions: Vec<(u64, String)>,
+    /// Buttons and keys that waited longest for their program to take
+    /// them (`button`/`key` to `input taken`).
+    pub slow_input: Vec<(u64, String)>,
 }
 
 /// How many of the slowest IPC hand-offs the report keeps.
@@ -138,6 +141,13 @@ impl Report {
             let _ = writeln!(
                 o,
                 "otel: slow pipe data: {:.1} ms from write to read: {what}",
+                *ns as f64 / 1e6
+            );
+        }
+        for (ns, what) in &self.slow_input {
+            let _ = writeln!(
+                o,
+                "otel: slow input: {:.1} ms delivered before taken: {what}",
                 *ns as f64 / 1e6
             );
         }
@@ -235,6 +245,12 @@ impl Json {
         }
     }
     pub fn u64(&self, key: &str) -> Option<u64> {
+        match self.get(key)? {
+            Json::Num(n) => n.parse().ok(),
+            _ => None,
+        }
+    }
+    pub fn i64(&self, key: &str) -> Option<i64> {
         match self.get(key)? {
             Json::Num(n) => n.parse().ok(),
             _ => None,
@@ -730,6 +746,9 @@ pub fn convert(boot: &Boot) -> Export {
     let mut pipe_names: HashMap<u64, String> = HashMap::new();
     let mut pipe_writes: PipeWrites = HashMap::new();
     let mut posts: Posts = HashMap::new();
+    // Delivered buttons and keys per (window, message), oldest first: a
+    // window gets them in order, so the next `input taken` is the oldest.
+    let mut deliveries: Posts = HashMap::new();
     for (t, ev) in &events {
         let t = *t;
         last = last.max(t);
@@ -809,6 +828,52 @@ pub fn convert(boot: &Boot) -> Export {
                     }
                 }
                 st.report.mapped(&kind, "span, linked write to read");
+            }
+            "button" | "key" => {
+                let (window, message) =
+                    (ev.u64("window").unwrap_or(0), ev.u64("message").unwrap_or(0));
+                let mut attrs: Attrs = vec![
+                    ("gala.input.window".into(), Val::Int(window as i64)),
+                    ("gala.input.message".into(), hex(message)),
+                    ("gala.input.owner".into(), Val::Int(ev.u64("owner").unwrap_or(0) as i64)),
+                ];
+                if kind == "key" {
+                    attrs.push(("gala.input.vk".into(), hex(ev.u64("vk").unwrap_or(0))));
+                } else {
+                    attrs.push(("gala.input.x".into(), Val::Int(ev.i64("x").unwrap_or(0))));
+                    attrs.push(("gala.input.y".into(), Val::Int(ev.i64("y").unwrap_or(0))));
+                }
+                let sp = ipc_span(&mut st, &kind, attrs);
+                deliveries.entry((window, message)).or_default().push_back(sp);
+                st.report.mapped(&kind, "span, linked delivery to taking");
+            }
+            "input taken" => {
+                let (window, message) =
+                    (ev.u64("window").unwrap_or(0), ev.u64("message").unwrap_or(0));
+                let mut attrs: Attrs = vec![
+                    ("gala.input.window".into(), Val::Int(window as i64)),
+                    ("gala.input.message".into(), hex(message)),
+                ];
+                let from = deliveries.get_mut(&(window, message)).and_then(|q| q.pop_front());
+                if let Some(d) = from {
+                    let waited = t.saturating_sub(st.spans[d].start);
+                    attrs.push(("gala.input.queued_ns".into(), Val::Int(waited as i64)));
+                    keep_slowest(&mut st.report.slow_input, waited, || {
+                        format!(
+                            "window {window} message {message:#x}, delivered at {} ns, taken by thread {} at {t} ns",
+                            st.spans[d].start,
+                            by.unwrap_or(0)
+                        )
+                    });
+                }
+                let sp = ipc_span(&mut st, &kind, attrs);
+                match from {
+                    Some(d) => {
+                        st.spans[sp].links.push((d, vec![("gala.link".into(), s("input from"))]))
+                    }
+                    None => st.report.gap("input taken without its delivery"),
+                }
+                st.report.mapped(&kind, "span, linked delivery to taking");
             }
             "iocp post" | "iocp dequeue" => {
                 let (port, ctx) = (ev.u64("port").unwrap_or(0), ev.u64("ctx").unwrap_or(0));

@@ -1320,6 +1320,55 @@ fn reads_link_the_writes_they_took_and_dequeues_their_posts() {
     assert!(lines.contains("otel: slow pipe data: 0.0 ms from write to read: pipe 3 \\mojo.1 end 0, 16 bytes at offset 0, written by thread 24"), "{lines}");
 }
 
+const INPUT: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":8,"start":1,"teb":2}
+{"t":200,"cpu":0,"by":0,"ev":"button","message":513,"x":600,"y":390,"window":5,"owner":4,"captured":false}
+{"t":210,"cpu":0,"by":0,"ev":"button","message":514,"x":600,"y":390,"window":5,"owner":4,"captured":false}
+{"t":300,"cpu":0,"by":0,"ev":"key","vk":71,"down":true,"message":256,"window":5,"owner":4}
+{"t":5000,"cpu":1,"by":8,"ev":"input taken","message":513,"window":5,"owner":4}
+{"t":5000,"cpu":1,"by":8,"ev":"input taken","message":514,"window":5,"owner":4}
+{"t":9000,"cpu":0,"by":8,"ev":"thread exit","pid":4,"tid":8,"status":0}
+"#;
+
+#[test]
+fn takings_link_the_input_they_took() {
+    let e = convert(&Boot {
+        serial: "",
+        events: INPUT,
+        scenario: "input",
+        build: "debug 1",
+        start_unix_ns: BASE,
+        symbols: None,
+    });
+    let all = spans(&e);
+    let named = |n: &str| all.iter().filter(|s| s.name == n).collect::<Vec<_>>();
+    let thread8 = all.iter().find(|s| s.name == "thread 8").unwrap();
+    let presses = named("button");
+    assert_eq!(presses.len(), 2);
+    assert_eq!(named("key").len(), 1);
+    // Each taking, on the program's thread, links its own delivery.
+    let taken = named("input taken");
+    assert_eq!(taken.len(), 2);
+    assert!(taken.iter().all(|t| t.parent.as_deref() == Some(thread8.id.as_str())));
+    let down = presses.iter().find(|p| p.start == BASE + 200).unwrap();
+    let first = taken
+        .iter()
+        .find(|t| attr_str(&t.attrs, "gala.input.message").as_deref() == Some("0x201"))
+        .unwrap();
+    assert_eq!(first.links.len(), 1);
+    assert_eq!(first.links[0].0, down.id);
+    assert_eq!(attr_str(&first.links[0].1, "gala.link").as_deref(), Some("input from"));
+    assert_eq!(attr_str(&first.attrs, "gala.input.queued_ns").as_deref(), Some("4800"));
+    assert_eq!(attr_str(&down.attrs, "gala.input.x").as_deref(), Some("600"));
+    // The key was never taken: no link, no gap (only a taking without
+    // its delivery is one); the report names the slowest.
+    assert_eq!(e.report.gaps.get("input taken without its delivery"), None);
+    let lines = e.report.lines();
+    assert!(
+        lines.contains("otel: slow input: 0.0 ms delivered before taken: window 5 message 0x201, delivered at 200 ns, taken by thread 8 at 5000 ns"),
+        "{lines}"
+    );
+}
+
 const PROFILED: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"process start","pid":4,"session":1,"name":"a.exe","personality":"nt","ppid":0,"ptid":0,"image_base":5368709120,"entry":1,"cmdline":"a.exe"}
 {"t":200,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":8,"start":1,"teb":2}
 {"t":300,"cpu":0,"by":0,"ev":"image","pid":4,"name":"a.exe","base":5368709120,"size":65536}
