@@ -193,7 +193,8 @@ copied next to a failed log as `<scenario>.events.jsonl`.
 ### OpenTelemetry export
 
 `xtask/src/otel.rs` turns one boot's event stream and serial log into
-OTLP/JSON (stage OT1 of ROADMAP OT): `cargo xtask otel <serial log |
+OTLP/JSON (stage OT1 of ROADMAP OT; the wire format is to become
+batched OTLP/HTTP protobuf, ROADMAP OT next 0, with JSON kept for files): `cargo xtask otel <serial log |
 events.jsonl | scenario> [<events.jsonl>] [--out <prefix>] [--endpoint
 http://host:4318]` (or `OTEL_EXPORTER_OTLP_ENDPOINT`), and `XTASK_OTEL=1`
 makes boot-test write it for every boot. How to view it: WORKFLOW

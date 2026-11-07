@@ -2073,6 +2073,19 @@ the profile names a hot kernel function's callers (user-mode stacks
 need unwinding: next).
 
 **Next**:
+0. The wire format (the owner): OTLP/HTTP with binary protobuf
+   (`application/x-protobuf`, gzip), batched: at most 512 items a
+   request, flushed every second or when full, a bounded queue whose
+   drops are counted and reported, a failed batch retried with backoff
+   (429/503 and Retry-After honoured); for the export after a boot and
+   the in-guest exporter (OT5) alike. A hand-written encoder from
+   opentelemetry-proto's field numbers (no protoc, no crate), checked by
+   decoding it back against the JSON form; `OTEL_EXPORTER_OTLP_PROTOCOL`
+   defaults to `http/protobuf`, `http/json` stays selectable, and
+   `--out` files stay OTLP/JSON (for reading and diffing). Then the
+   input path as the pipes and completion ports have it: a kernel
+   `input taken` event, a link from a delivery to its taking, `otel:
+   slow input` among the slowest hand-offs.
 1. OT2: trace context in the kernel; system calls, waits, faults, I/O
    and network as spans; per-CPU rings; user-mode stacks on samples
    (the unwind tables of x64 images). Still open of OT1's gaps: an
