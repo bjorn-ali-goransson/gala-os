@@ -4216,6 +4216,10 @@ SOCKET values are the endpoint handles.
   send). WSAStringToAddressA/W parse `a.b.c.d[:port]` and IPv6 `addr`,
   `addr%scope`, `[addr]` and `[addr]:port` (WSAEINVAL otherwise,
   WSAEFAULT with the needed length for a short buffer).
+- SO_ERROR is asked of AFD with a poll that does not wait: a connect
+  that failed (AFD_POLL_CONNECT_FAIL, select's except set) is
+  WSAECONNREFUSED, otherwise 0; kept while the socket stays failed
+  (Windows clears it on read).
 - Socket options: those that only tune the stack (TCP_NODELAY,
   keepalive, SO_UPDATE_*_CONTEXT) are accepted and have no effect yet;
   SO_RCVBUF and SO_SNDBUF go to AFD as well (SET_INFO classes 6 and 7)
@@ -6822,7 +6826,9 @@ stations and desktops a program creates are refused until stage 3).
   member flagged CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG, else to the
   collection's own list); CertGetIntendedKeyUsage and
   CertGetEnhancedKeyUsage from the extensions (no EKU: every usage,
-  CRYPT_E_NOT_FOUND); CertCompareCertificateName; CertVerifyTimeValidity;
+  CRYPT_E_NOT_FOUND; asked for the property alone, none is kept, or for
+  the extension alone and there is none: FALSE with CRYPT_E_NOT_FOUND,
+  which Python's enum_certificates reads as trusted for every purpose); CertCompareCertificateName; CertVerifyTimeValidity;
   CryptVerifyCertificateSignatureEx (RSA PKCS #1 and ECDSA P-256/P-384
   with SHA-1/2 through bcrypt); CertControlStore (nothing outside changes a store: resyncs do
   nothing, change notifications never fire, recorded); CertFindChainInStore

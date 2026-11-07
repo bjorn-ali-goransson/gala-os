@@ -475,10 +475,17 @@ boot-test <name>`, see "Pending scenarios" below):
    as DOS wildcards (`*.*` lists dot-less names; `kernel32_file_test`,
    `ramfs` host tests), LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (`loader_test`),
    SetHandleCount and PathCchRemoveFileSpec (`kernel32_py_test`),
-   shell32 and crypt32 shipped. Next: `pip install` from an index over
-   https (CPython's own OpenSSL, its certificate store from crypt32's
-   ROOT store), a venv with pip (ensurepip), packages with C extensions
-   (numpy's wheels).
+   shell32 and crypt32 shipped. `python_pip_https`: pip installs from a
+   PEP 503 index over https (Nginx, the test CA in the machine's root
+   store; pip's truststore asks crypt32's chain engine) and refuses an
+   untrusted one (CERT_E_UNTRUSTEDROOT); the standard library's ssl
+   trusts the ROOT store too. Its gaps: SO_ERROR of a refused
+   non-blocking connect (`winsock_test`; Python's create_connection kept
+   the refused `::1` socket), CertGetEnhancedKeyUsage's PROP_ONLY and
+   EXT_ONLY flags (`cert_test`; Python's enum_certificates gave roots no
+   purpose). Next: a venv with pip (ensurepip), packages with C
+   extensions (numpy's wheels), WSAID_TRANSMITPACKETS (asked for by
+   _overlapped, unused so far).
    Its ledger (optional probes): propsys.dll (from shell32),
    kernelbase.dll and
    api-ms-win-appmodel-runtime-l1-1-2 (absent), NtAllocateVirtualMemoryEx,

@@ -1584,8 +1584,32 @@ pub extern "system" fn setsockopt(
     0
 }
 
-/// getsockopt: SO_ERROR (0), SO_TYPE (stream or datagram), and the
-/// integer options setsockopt keeps (their Windows defaults until set).
+/// SO_ERROR: a connect that failed (a non-blocking one, reported by
+/// select's except set) is WSAECONNREFUSED; otherwise 0. Asked of AFD
+/// with a poll that does not wait (AFD_POLL_CONNECT_FAIL). The error is
+/// kept while the socket stays failed (Windows clears it on read; a
+/// failed socket is only closed after, as Python and libuv do).
+fn socket_error(s: Socket) -> i32 {
+    const AFD_POLL_CONNECT_FAIL: u32 = 0x100;
+    let mut input = [0u8; 16 + 16];
+    afd::put_poll(&mut input, 0, s, AFD_POLL_CONNECT_FAIL);
+    input[..8].copy_from_slice(&0i64.to_le_bytes());
+    input[8..12].copy_from_slice(&1u32.to_le_bytes());
+    let mut output = [0u8; 16 + 16];
+    if poll(s, &input[..afd::poll_len(1)], &mut output, Some(0)) != 0 {
+        return 0;
+    }
+    let ready = u32::from_le_bytes([output[8], output[9], output[10], output[11]]);
+    if ready != 0 && afd::get_poll(&output, 0).1 & AFD_POLL_CONNECT_FAIL != 0 {
+        WSAECONNREFUSED as i32
+    } else {
+        0
+    }
+}
+
+/// getsockopt: SO_ERROR (`socket_error`), SO_TYPE (stream or datagram),
+/// and the integer options setsockopt keeps (their Windows defaults until
+/// set).
 #[unsafe(no_mangle)]
 pub extern "system" fn getsockopt(
     s: Socket,
@@ -1595,7 +1619,7 @@ pub extern "system" fn getsockopt(
     len: *mut i32,
 ) -> i32 {
     let v: i32 = match (level, name) {
-        (SOL_SOCKET, 0x1007) => 0, // SO_ERROR
+        (SOL_SOCKET, 0x1007) => socket_error(s), // SO_ERROR
         _ if options::slot(level, name).is_some() => {
             options::get(s, options::slot(level, name).unwrap_or(0))
         }

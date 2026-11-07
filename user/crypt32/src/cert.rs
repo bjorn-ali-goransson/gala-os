@@ -1483,14 +1483,16 @@ pub extern "system" fn CertGetIntendedKeyUsage(
     1
 }
 
+const CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG: u32 = 2;
 const CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG: u32 = 4;
 
 /// CertGetEnhancedKeyUsage(cert, flags, usage, size): the extended key
 /// usage extension's OIDs as CERT_ENHKEY_USAGE (count, pointer array,
 /// then the strings; the size with a NULL buffer, ERROR_MORE_DATA when
 /// short). No extension: an empty list and CRYPT_E_NOT_FOUND (good for
-/// every usage). The CERT_ENHKEY_USAGE_PROP_ID property is not kept, so
-/// CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG finds nothing.
+/// every usage), or, asked for the extension alone
+/// (CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG), FALSE with CRYPT_E_NOT_FOUND. The CERT_ENHKEY_USAGE_PROP_ID property is not kept, so
+/// CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG fails with CRYPT_E_NOT_FOUND.
 #[unsafe(no_mangle)]
 pub extern "system" fn CertGetEnhancedKeyUsage(
     cert: *const CertContext,
@@ -1504,7 +1506,10 @@ pub extern "system" fn CertGetEnhancedKeyUsage(
     // SAFETY: the caller's context and its CERT_INFO.
     let info = unsafe { &*(*cert).info };
     let value = if flags & CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG != 0 {
-        None
+        // No usage property is kept: asked for the property alone, there
+        // is none (FALSE, CRYPT_E_NOT_FOUND; Python's enum_certificates
+        // reads it as trusted for every purpose).
+        return error(CRYPT_E_NOT_FOUND, 0);
     } else {
         extension_value(info, c"2.5.29.37")
     };
@@ -1558,7 +1563,10 @@ pub extern "system" fn CertGetEnhancedKeyUsage(
         }
     }
     if value.is_none() {
-        return error(CRYPT_E_NOT_FOUND, 1);
+        // Asked for the extension alone: none is a failure; asked for both,
+        // an empty list (good for every usage), as documented.
+        let ext_only = flags & CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG != 0;
+        return error(CRYPT_E_NOT_FOUND, if ext_only { 0 } else { 1 });
     }
     1
 }

@@ -6664,6 +6664,20 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["python_pip: ok", "python.exe finished with status 0x00000000"],
     },
     Scenario {
+        // P1 step 6: pip from a package index over https: Nginx (from
+        // schannel_test, MODULE_SETS) serves the index python_pip.py
+        // writes; the test CA is in the machine's root store.
+        name: "python_pip_https",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=python.exe args=C:\\gala\\python_pip.py%20https",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "python_pip: pip install over https ok",
+            "python_pip: ok",
+            "python.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
         // P1 step 6: multiprocessing (spawned children over inherited
         // pipes): Process, Queue, Pool, a shared Value and Lock, Pipe,
         // shared_memory; user/python/python_mp.py, as on Windows.
@@ -7885,6 +7899,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("filezilla_flaui", "dotnet"),
     ("filezilla_flaui", "filezilla"),
     ("pwsh_hello", "pwsh"),
+    ("python_pip_https", "python_pip"),
+    ("python_pip_https", "schannel_test"),
     ("python_script", "python_hello"),
     ("python_script", "python_script"),
     ("python_async", "python_hello"),

@@ -6,7 +6,8 @@
 //! loopback address, getsockname (an ephemeral port after binding port 0;
 //! accept reports the client's address), send/recv round trips in both
 //! directions (with MSG_PEEK), a 16 KiB transfer, a graceful close (recv
-//! returns 0), WSAECONNREFUSED for a port nobody listens on, WSAENOTSOCK
+//! returns 0), WSAECONNREFUSED for a port nobody listens on (a
+//! non-blocking connect's in select's except set and SO_ERROR), WSAENOTSOCK
 //! for a closed socket, WSADuplicateSocketW and WSASocketW from its
 //! protocol information (a second socket for the connection; also
 //! WSADuplicateSocketA with WSASocketA), WSAConnect
@@ -128,6 +129,14 @@ unsafe extern "system" {
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
     fn getsockopt(s: Socket, level: i32, name: i32, value: *mut u8, len: *mut i32) -> i32;
     fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> i32;
+    fn select(
+        n: i32,
+        read: *mut FdSet,
+        write: *mut FdSet,
+        except: *mut FdSet,
+        timeout: *const [i32; 2],
+    ) -> i32;
+    fn getpeername(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn WSAStringToAddressA(
         text: *const u8,
         af: i32,
@@ -178,6 +187,21 @@ struct WsaData {
 /// SOCKADDR_IN: family, port and address in network byte order.
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// fd_set (winsock2.h): a count and up to FD_SETSIZE (64) sockets.
+#[repr(C)]
+struct FdSet {
+    count: u32,
+    sockets: [Socket; 64],
+}
+
+impl FdSet {
+    fn one(s: Socket) -> FdSet {
+        let mut f = FdSet { count: 1, sockets: [0; 64] };
+        f.sockets[0] = s;
+        f
+    }
+}
+
 /// WSAPOLLFD.
 #[repr(C)]
 struct PollFd {
@@ -582,6 +606,31 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(connect(refused, &target, ADDR_LEN) as u64, SOCKET_ERROR as u64)?;
         c.eq(WSAGetLastError() as u64, WSAECONNREFUSED as u64)?;
         c.eq(closesocket(refused) as u64, 0)?;
+
+        // The same refusal on a non-blocking connect (Python's
+        // create_connection with a timeout): select reports it in the
+        // except set, not the write set; SO_ERROR holds WSAECONNREFUSED;
+        // the socket has no peer (WSAENOTCONN).
+        const SOL_SOCKET: i32 = 0xffff;
+        const SO_ERROR: i32 = 0x1007;
+        const WSAENOTCONN: i32 = 10057;
+        let nb = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        let mut on = 1u32;
+        c.eq(ioctlsocket(nb, FIONBIO, &mut on) as u64, 0)?;
+        c.eq(connect(nb, &target, ADDR_LEN) as u64, SOCKET_ERROR as u64)?;
+        c.eq(WSAGetLastError() as u64, WSAEWOULDBLOCK as u64)?;
+        let (mut w, mut e) = (FdSet::one(nb), FdSet::one(nb));
+        c.eq(select(0, null_mut(), &mut w, &mut e, &[10, 0]) as u64, 1)?;
+        c.eq(w.count.into(), 0)?;
+        c.eq(e.count.into(), 1)?;
+        let (mut error, mut elen) = (0i32, 4i32);
+        c.eq(getsockopt(nb, SOL_SOCKET, SO_ERROR, (&raw mut error).cast(), &mut elen) as u64, 0)?;
+        c.eq(error as u64, WSAECONNREFUSED as u64)?;
+        let mut peer = SockaddrIn::new([0; 4], 0);
+        len = ADDR_LEN;
+        c.eq(getpeername(nb, &mut peer, &mut len) as u64, SOCKET_ERROR as u64)?;
+        c.eq(WSAGetLastError() as u64, WSAENOTCONN as u64)?;
+        c.eq(closesocket(nb) as u64, 0)?;
 
         // A closed socket is no socket.
         c.eq(send(refused, b"x".as_ptr(), 1, 0) as u64, SOCKET_ERROR as u64)?;

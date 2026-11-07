@@ -62,7 +62,11 @@
 //!   serverAuth and clientAuth) CertGetIntendedKeyUsage gives the bits
 //!   0xa0 and CertGetEnhancedKeyUsage the two OIDs (size first); with CERT
 //!   (neither extension) the first is FALSE with last error 0 and the
-//!   second an empty list with CRYPT_E_NOT_FOUND (every usage);
+//!   second an empty list with CRYPT_E_NOT_FOUND (every usage); with
+//!   CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG and no usage property set, or
+//!   CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG and no extension, it fails with
+//!   CRYPT_E_NOT_FOUND (Python's enum_certificates: trusted for every
+//!   purpose);
 //!   CertCompareCertificateName of a name with itself and with another;
 //!   CertVerifyTimeValidity before, inside and after the validity;
 //!   CryptVerifyCertificateSignatureEx of each self-signed certificate by
@@ -912,6 +916,23 @@ fn usage(c: &mut Checks) -> Result<(), u32> {
         c.ok(CertGetEnhancedKeyUsage(plain, 0, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
         c.eq(buf[0] as u32 as u64, 0)?;
         c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        // Asking for the property only (CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG,
+        // Python's enum_certificates): none set fails with
+        // CRYPT_E_NOT_FOUND, which callers read as "every usage".
+        size = core::mem::size_of_val(&buf) as u32;
+        c.eq(CertGetEnhancedKeyUsage(plain, 4, buf.as_mut_ptr().cast(), &mut size) as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        let mut size = 0u32;
+        c.eq(CertGetEnhancedKeyUsage(eku, 4, core::ptr::null_mut(), &mut size) as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        // The extension alone (CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG): none
+        // fails the same way; EKU_CERT's two OIDs.
+        size = core::mem::size_of_val(&buf) as u32;
+        c.eq(CertGetEnhancedKeyUsage(plain, 2, buf.as_mut_ptr().cast(), &mut size) as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        size = core::mem::size_of_val(&buf) as u32;
+        c.ok(CertGetEnhancedKeyUsage(eku, 2, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
+        c.eq(buf[0] as u32 as u64, 2)?;
 
         let info = &*(*plain).info;
         let other = &*(*eku).info;

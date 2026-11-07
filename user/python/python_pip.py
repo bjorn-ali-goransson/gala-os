@@ -9,7 +9,9 @@ writes (distlib's t64.exe with the script appended). Then a virtual
 environment: `python -m venv` with its launcher python.exe, which starts
 the base interpreter with the environment's prefix. Prints one line per
 check and `python_pip: ok`, or the failing check's traceback and exits
-1."""
+1. With the argument `https` (the `python_pip_https` scenario), pip
+installs the wheel from a package index over https instead, and refuses
+an index whose certificate is not trusted."""
 
 import base64
 import hashlib
@@ -106,13 +108,60 @@ def venv(work):
         check("pyvenv.cfg", any(line.startswith("home = ") for line in f), True)
 
 
+def https_index(work):
+    """`pip install` from a package index over https: a PEP 503 simple
+    index written where the scenario's Nginx serves it (C:\\nginx\\html;
+    port 8443 has a certificate from the test CA in the machine's root
+    store, 8444 a self-signed one). pip checks the server through the
+    Windows certificate store and chain engine (truststore), as on
+    Windows."""
+    project = os.path.join("C:\\nginx\\html\\simple", NAME)
+    os.makedirs(project, exist_ok=True)
+    wheel = build_wheel(project)
+    with open(wheel, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    file = os.path.basename(wheel)
+    with open(os.path.join(project, "index.html"), "w") as f:
+        f.write(f'<!DOCTYPE html><html><body><a href="{file}#sha256={digest}">{file}</a></body></html>\n')
+    # What pip's https stack stands on: a connection made with a timeout
+    # (a non-blocking connect) knows its peer, and the standard library's
+    # TLS verifies the server against the Windows root store.
+    import socket
+    import ssl
+
+    with open("C:\\Windows\\System32\\gala\\roots\\ca.cer", "rb") as f:
+        test_ca = f.read()
+    # With no enhanced key usage restriction a root is trusted for every
+    # purpose (`True`), as Python's load_default_certs needs.
+    roots = {der: trust for der, encoding, trust in ssl.enum_certificates("ROOT") if encoding == "x509_asn"}
+    check("test CA in the ROOT store", roots.get(test_ca), True)
+    with socket.create_connection(("localhost", 8443), timeout=30) as raw:
+        check("getpeername after a timed connect", raw.getpeername()[1], 8443)
+        context = ssl.create_default_context()
+        with context.wrap_socket(raw, server_hostname="localhost") as tls:
+            check("TLS to the index", tls.version() in ("TLSv1.2", "TLSv1.3"), True)
+    target = os.path.join(work, "site-https")
+    common = ["--no-cache-dir", "--disable-pip-version-check", "--target", target, NAME]
+    out = run(sys.executable, "-m", "pip", "install", "--index-url", "https://localhost:8443/simple/", *common)
+    check("pip install over https", out.returncode, 0)
+    out = run(sys.executable, "-c", f"import {NAME}; print({NAME}.GREETING)", env={**os.environ, "PYTHONPATH": target})
+    check("import from the index", out.stdout.strip(), "hello from a wheel")
+    out = run(sys.executable, "-m", "pip", "install", "--retries", "0", "--index-url", "https://localhost:8444/simple/", *common)
+    # truststore asks the Windows chain engine: CERT_E_UNTRUSTEDROOT.
+    refused = out.returncode != 0 and "Certificate chain policy error 0x800b0109" in (out.stdout + out.stderr)
+    check("untrusted index refused", refused, True)
+
+
 def main():
     print(f"python_pip: Python {sys.version.split()[0]} on {sys.platform}")
     layout()
     pip_version()
     with tempfile.TemporaryDirectory() as work:
-        pip_install(work)
-        venv(work)
+        if sys.argv[1:] == ["https"]:
+            https_index(work)
+        else:
+            pip_install(work)
+            venv(work)
     print("python_pip: ok")
 
 
