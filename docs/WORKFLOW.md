@@ -152,6 +152,18 @@ there, then `cargo xtask compare windows.json` here. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
 
+Antivirus is what goes wrong there: the test binaries are unsigned and
+freshly built, which Microsoft Defender's machine-learning heuristic
+takes for malware (`bench.exe` as `Trojan:Win32/Bearfoos.A!ml`). A
+program Windows refuses to start, and one already quarantined out of the
+directory, are both reported as `skipped` with the reason (for a
+quarantined one the threat name, read from Defender's own detection
+history) and the run goes on, so one such program costs its own result
+and no other; `cargo xtask compare` shows them as missing on the Windows
+side, never as a check that passed or failed. An administrator's
+`Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
+long as that exclusion stands.
+
 Requirements (README "Requirements"): Linux, rustup (the pinned
 toolchain in `rust-toolchain.toml` installs itself), `git`, `xorriso`,
 QEMU, OVMF for UEFI boots (`OVMF_CODE`, `OVMF_VARS` if it is somewhere

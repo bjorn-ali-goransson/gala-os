@@ -24,6 +24,11 @@ param(
 Set-StrictMode -Version 2
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+# `-Out windows.json`, the documented form, has no directory part, and
+# Split-Path would give an empty string for it: resolve it against the
+# current directory, so the files written beside the report have a path.
+if (-not [IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location).Path $Out }
+$outDir = Split-Path -Parent $Out
 
 # A crashing program (crash.exe crashes on purpose) must not open a Windows
 # Error Reporting dialog; the error mode is inherited by child processes.
@@ -94,7 +99,32 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.CreateNoWindow = $true
-    $process = [System.Diagnostics.Process]::Start($psi)
+    # Antivirus can refuse to start a program, and may have taken the file
+    # between Get-ChildItem and here: the test binaries are unsigned and
+    # freshly built, which Microsoft Defender's machine-learning heuristic
+    # takes for malware (bench.exe as Trojan:Win32/Bearfoos.A!ml). Record
+    # why and go on; one program the machine will not run must not cost
+    # every other program's result.
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        # A .NET method's exception reaches us inside a
+        # MethodInvocationException, so look for the Win32 one.
+        $ex = $_.Exception
+        while ($ex -isnot [ComponentModel.Win32Exception] -and $null -ne $ex.InnerException) {
+            $ex = $ex.InnerException
+        }
+        $errno = if ($ex -is [ComponentModel.Win32Exception]) { $ex.NativeErrorCode } else { 0 }
+        $why = switch ($errno) {
+            225 { "antivirus blocked it (ERROR_VIRUS_INFECTED)" }      # 0xe1
+            226 { "antivirus deleted it (ERROR_VIRUS_DELETED)" }       # 0xe2
+            default { "did not start: " + $ex.Message.Trim() }
+        }
+        $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $why }
+        Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
+    }
+    if ($null -eq $process) { continue }
     $stdout = $process.StandardOutput.ReadToEndAsync()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $process.Kill()
@@ -116,13 +146,43 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     $results += [ordered]@{ program = $name; exit = $code; line = $line }
     # The benchmarks' numbers, for `cargo xtask bench <this file>`.
     if ($name -eq "bench") {
-        $text | Set-Content -Path (Join-Path (Split-Path -Parent $Out) "bench-windows.txt") -Encoding UTF8
+        $text | Set-Content -Path (Join-Path $outDir "bench-windows.txt") -Encoding UTF8
     }
     Write-Host ("{0,-18} {1:x8}  {2}" -f $name, $code, $line)
 }
 
 if ($null -ne $schannelNginx) { Stop-Process -Id $schannelNginx.Id -Force -ErrorAction SilentlyContinue }
 if ($null -ne $schannelCa) { $schannelCa | Remove-Item -ErrorAction SilentlyContinue }
+
+# A quarantined program is gone from the directory, so the loop above never
+# saw it and the report would just lack it, with nothing to say why.
+# Microsoft Defender's own history names the file and the threat; this is
+# best-effort (another antivirus, or no Defender module, leaves it out).
+try {
+    $threatNames = @{}
+    foreach ($t in Get-MpThreat -ErrorAction Stop) {
+        $threatNames[[string]$t.ThreatID] = $t.ThreatName
+    }
+    foreach ($d in Get-MpThreatDetection -ErrorAction Stop) {
+        foreach ($res in @($d.Resources)) {
+            # Resources read "file:_C:\path\to\it.exe".
+            if ($res -notlike "file:_*") { continue }
+            $path = $res.Substring(6)
+            if ([IO.Path]::GetDirectoryName($path) -ne $here) { continue }
+            if ([IO.Path]::GetExtension($path) -ne ".exe") { continue }
+            if (Test-Path $path) { continue }
+            $gone = [IO.Path]::GetFileNameWithoutExtension($path)
+            if ($results | Where-Object { $_.program -eq $gone }) { continue }
+            $threat = $threatNames[[string]$d.ThreatID]
+            if (-not $threat) { $threat = "threat $($d.ThreatID)" }
+            $why = "quarantined by Microsoft Defender as $threat"
+            $results += [ordered]@{ program = $gone; exit = $null; line = ""; skipped = $why }
+            Write-Host ("{0,-18} skipped: {1}" -f $gone, $why)
+        }
+    }
+} catch {
+    Write-Host ("note: no antivirus detections read ({0})" -f $_.Exception.Message.Trim())
+}
 
 # Scripts run by busybox sh (the busybox_files, busybox_script and tcc
 # scenarios): their full output goes to <name>-windows.txt next to the
@@ -147,7 +207,7 @@ foreach ($s in $scripts) {
     if (-not (Test-Path $path) -or -not (Test-Path (Join-Path $here "busybox.exe"))) { continue }
     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>&1 | Out-String
     $code = $LASTEXITCODE
-    $text | Set-Content -Path (Join-Path (Split-Path -Parent $Out) "$($s.name)-windows.txt") -Encoding UTF8
+    $text | Set-Content -Path (Join-Path $outDir "$($s.name)-windows.txt") -Encoding UTF8
     $last = @($text -split "`r?`n" | Where-Object { $_ -ne "" }) | Select-Object -Last 1
     $results += [ordered]@{ program = $s.name; exit = $code; line = $last }
     Write-Host ("{0,-18} {1:x8}  {2}" -f $s.name, $code, $last)
