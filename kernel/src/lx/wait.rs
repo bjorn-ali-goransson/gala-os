@@ -83,6 +83,7 @@ fn ticks_at(at: u64) -> u64 {
 
 /// The first half of a wait, until the monotonic clock reads `deadline`
 /// (None: no deadline) or, earlier, ITIMER_REAL's expiry.
+#[track_caller]
 pub fn prepare(call: &Call<'_>, deadline: Option<u64>) {
     let alarm = super::timer::next_deadline(call);
     let at = match (deadline, alarm) {

@@ -21,6 +21,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt;
+use core::panic::Location;
 
 use crate::arch::context::{Context, KernelStack, StackError};
 use crate::arch::paging::{self, SharedUserSpace};
@@ -84,6 +85,9 @@ struct Thread {
     user: Option<UserThread>,
     /// Why the last `wait` ended.
     wake_reason: WakeReason,
+    /// Where the last `prepare_wait` was called from (printed beside
+    /// `Waiting` in the state dump: which wait a stuck thread is in).
+    wait_site: Option<&'static Location<'static>>,
     /// Some CPU is running on this thread's stack (see the module docs).
     on_cpu: bool,
     /// CPUs this thread may run on.
@@ -272,6 +276,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
         joiners: Vec::new(),
         user: None,
         wake_reason: WakeReason::Woken,
+        wait_site: None,
         on_cpu: true,
         affinity,
         is_idle,
@@ -371,6 +376,7 @@ fn spawn_inner(
         joiners: Vec::new(),
         user,
         wake_reason: WakeReason::Woken,
+        wait_site: None,
         on_cpu: false,
         affinity: ALL_CPUS,
         is_idle: false,
@@ -759,11 +765,14 @@ pub fn reap() -> usize {
 /// or the tick `deadline`). The caller then releases the locks that protect
 /// its wait condition and calls [`wait`]. A `wake` in between is not lost:
 /// the thread is simply already runnable when it calls `wait`.
+#[track_caller]
 pub fn prepare_wait(deadline: Option<u64>) {
+    let site = Location::caller();
     with(|s| {
         let id = s.current();
         let t = s.thread(id);
         t.wake_reason = WakeReason::Woken;
+        t.wait_site = Some(site);
         t.state = State::Waiting { until_tick: deadline };
         if deadline.is_some_and(|d| d <= time::ticks()) {
             t.wake_reason = WakeReason::TimedOut;
@@ -930,8 +939,11 @@ pub fn dump() {
     with(|s| {
         for (i, t) in s.threads.iter().enumerate() {
             info!(
-                "sched: thread {i} ({}) {:?} affinity {:#x} (now tick {now})",
-                t.name, t.state, t.affinity
+                "sched: thread {i} ({}) {:?}{} affinity {:#x} (now tick {now})",
+                t.name,
+                t.state,
+                WaitSite(&t.state, t.wait_site),
+                t.affinity
             );
         }
     });
@@ -952,6 +964,18 @@ pub fn try_cpu_threads(mut f: impl FnMut(usize, usize, &'static str, &'static st
         }
     }
     true
+}
+
+/// ` at <file:line>` for a waiting thread whose wait site is known.
+struct WaitSite<'a>(&'a State, Option<&'static Location<'static>>);
+
+impl fmt::Display for WaitSite<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.0, self.1) {
+            (State::Waiting { .. }, Some(at)) => write!(f, " at {}:{}", at.file(), at.line()),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn state_name(state: &State) -> &'static str {

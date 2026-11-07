@@ -416,7 +416,11 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB; paged U/L (peak P) nonpaged
    U/L (peak P) handles N/L (peak P) refused R`, bytes), every
-   scheduler thread, the ledger, each Linux thread (`lx: pid P thread
+   scheduler thread (a waiting one with where its wait began:
+   `sched: thread N (x) Waiting { until_tick: None } at
+   kernel/src/lx/futex.rs:304`, the caller of `prepare_wait` through
+   `#[track_caller]` wrappers; the only clue for a Linux thread, which
+   has no NT system-call record), the ledger, each Linux thread (`lx: pid P thread
    T (core C): mask .. pending .. process pending .. blocked|running`),
    each epoll set's entries (`lx: pid P epoll fd N: fd ..`) and every
    futex waiter (`lx: futex waiter: pid P address A bitset B thread

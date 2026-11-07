@@ -67,6 +67,7 @@ impl Threads for Kernel {
     fn sleep_ms(ms: u64) {
         sched::sleep_ms(ms)
     }
+    #[track_caller]
     fn prepare_wait(deadline: Option<u64>) {
         sched::prepare_wait(deadline)
     }

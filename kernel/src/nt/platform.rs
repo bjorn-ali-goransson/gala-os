@@ -88,6 +88,7 @@ pub trait Threads {
     fn yield_now();
     fn sleep_ms(ms: u64);
     /// The next `wait` ends at `deadline` (in ticks) if not woken first.
+    #[track_caller]
     fn prepare_wait(deadline: Option<u64>);
     fn wait() -> WakeReason;
     fn wake(id: ThreadId);
@@ -290,6 +291,7 @@ pub fn sleep_ms(ms: u64) {
     <P as Threads>::sleep_ms(ms)
 }
 #[inline]
+#[track_caller]
 pub fn prepare_wait(deadline: Option<u64>) {
     <P as Threads>::prepare_wait(deadline)
 }
