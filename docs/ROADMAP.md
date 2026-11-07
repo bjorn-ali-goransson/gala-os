@@ -161,7 +161,7 @@ has a section under "Open items".
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
 | WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
-| P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server done; Git Bash parked |
+| P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
@@ -428,6 +428,22 @@ boot-test <name>`, see "Pending scenarios" below):
 - PostgreSQL 17.2: initdb, the server, the host's psql (`postgres`).
 - MinGit 2.47.1: init, add, commit, log (`mingit`, pending); a clone
   over https on Schannel (`git_https`, ROADMAP TLS).
+- Python (the owner's interest; done), CPython 3.13.1 for x64, each
+  scenario's checks as on Windows: the embeddable package (PREBUILT
+  `python`): `python_hello`, `python_script` (threads, sockets, select,
+  subprocess, hashlib, zlib, json, sqlite3, ctypes), `python_async`
+  (asyncio's proactor loop: TCP, UDP, subprocess pipes, the executor),
+  `python_mp` (multiprocessing: Process, Queue, Pool, shared Value and
+  Lock, Pipe, shared_memory); the full layout (NuGet's `python`
+  package, PREBUILT `python-full`): `python_pip` (pip installs a wheel,
+  its console-script launcher, `pip list`, venvs with and without pip),
+  `python_pip_https` (pip from a package index over https through the
+  Windows root store and chain engine; an untrusted index refused),
+  `python_numpy` (numpy 2.2.1's wheel: C extensions, its bundled
+  OpenBLAS, LAPACK, FFT). The Windows behaviour they needed is in the
+  tests named in the commits (`kernel32_py_test`, `winsock_test`,
+  `pipe_test`, `loader_test`, `kernel32_file_test`, `cert_test`, ...)
+  and ARCHITECTURE.
 - Git Bash (PortableGit 2.47.1): **parked**; msys-2.0.dll loads and
   bash gets past its startup deadlock, then dies with an access
   violation at address 0 after looking up kernelbase's VirtualAlloc2
@@ -452,50 +468,14 @@ boot-test <name>`, see "Pending scenarios" below):
    address requirements Cygwin's mmap and stacks use),
    ProcessVmCounters, then fork emulation; the `bin\bash.exe` launcher
    exits 1 without output.
-6. Python (the owner's interest): the embeddable CPython 3.13.1 for x64
-   (PREBUILT `python`) runs: `python_hello` evaluates `print(6*7)`;
-   `python_script` runs `user/python/python_test.py`: threads, a TCP
-   socket over loopback, select, a subprocess (`os.getppid` in it),
-   hashlib (OpenSSL), zlib, json, sqlite3 and ctypes. The gaps it had,
-   each test first: kernel32's PathCch, Pss snapshots, CopyFile2,
-   SetWaitableTimerEx, NeedCurrentDirectoryForExePathW,
-   GetNamedPipeHandleStateW, VerifyVersionInfoA (`kernel32_py_test`);
-   ProcessBasicInformation's parent id (`process_test`); ole32's
-   ProgIDFromCLSID (`com_test`). `python_async`: asyncio's proactor
-   loop (TCP and UDP, a subprocess's pipes, the executor, tasks);
-   `python_mp`: multiprocessing (Process, Queue, Pool, a shared Value
-   and Lock, Pipe, shared_memory). Their gaps: DisconnectEx, TransmitFile's
-   pointer and WSAStringToAddressA/W (`winsock_test`); a request failing
-   in its call writes no status block, sets no event; a zero-byte pipe
-   read waits for data; GetOverlappedResult on NT_SUCCESS (`pipe_test`).
-   `python_pip` (the full layout: NuGet's `python` package, PREBUILT
-   `python-full`): pip 24.3.1 installs a wheel the script builds, the
-   console script runs through distlib's launcher .exe, `pip list`,
-   `python -m venv` and the venv's launcher. Their gaps: Win32 patterns
-   as DOS wildcards (`*.*` lists dot-less names; `kernel32_file_test`,
-   `ramfs` host tests), LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (`loader_test`),
-   SetHandleCount and PathCchRemoveFileSpec (`kernel32_py_test`),
-   shell32 and crypt32 shipped. `python_pip_https`: pip installs from a
-   PEP 503 index over https (Nginx, the test CA in the machine's root
-   store; pip's truststore asks crypt32's chain engine) and refuses an
-   untrusted one (CERT_E_UNTRUSTEDROOT); the standard library's ssl
-   trusts the ROOT store too. Its gaps: SO_ERROR of a refused
-   non-blocking connect (`winsock_test`; Python's create_connection kept
-   the refused `::1` socket), CertGetEnhancedKeyUsage's PROP_ONLY and
-   EXT_ONLY flags (`cert_test`; Python's enum_certificates gave roots no
-   purpose). A venv with pip (ensurepip installs it; the venv's pip.exe
-   installs into it, its console script runs): `python_pip`, ~180 s of
-   run time under TCG (SLOW_SCENARIOS). `python_numpy`: pip installs
-   numpy 2.2.1's wheel; arithmetic, random, LAPACK and a threaded matrix
-   product through its OpenBLAS, FFT (its gap: AddDllDirectory's
-   directories for a load's dependencies, `loader_test`). Next: WSAID_TRANSMITPACKETS (asked for by
-   _overlapped, unused so far).
-   Its ledger (optional probes): propsys.dll (from shell32),
-   kernelbase.dll and
+6. Python's leftovers: the interactive prompt (console input, as
+   PowerShell's in item 1); WSAID_TRANSMITPACKETS (asked for by asyncio's
+   _overlapped, unused so far). Its ledger (optional probes):
+   propsys.dll (from shell32), kernelbase.dll and
    api-ms-win-appmodel-runtime-l1-1-2 (absent), NtAllocateVirtualMemoryEx,
    GetNumaNodeProcessorMaskEx, GetFileInformationByName,
-   GetFileInformationByHandleEx class 18. Not yet seen loading:
-   ws2_32's ordinal 53; advapi32's RegSaveKeyW, RegLoadKeyW and
+   GetFileInformationByHandleEx class 18. Not yet seen loading: ws2_32's
+   ordinal 53; advapi32's RegSaveKeyW, RegLoadKeyW and
    RegConnectRegistryW.
 
 **Done when**: each program's scenario passes; pending ones are moved
