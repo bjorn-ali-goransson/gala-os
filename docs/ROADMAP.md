@@ -1053,7 +1053,10 @@ samples).
    its rectangle and invokes it; Chromium builds its tree once asked,
    about 80 s under TCG). Ledger line left there:
    `oleacc.dll!CreateStdAccessibleObject` (unsupported; Chromium goes
-   on). Next: IME off.
+   on). Typing with no IME (imm32 has no input contexts):
+   `chromium_window` clicks a text field and types "gala" through the
+   emulated keyboard, the page sees it (its `input` event's marker).
+   Next: the conformance report below.
    Then a conformance report (the owner): a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the

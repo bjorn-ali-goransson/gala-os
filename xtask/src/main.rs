@@ -6440,6 +6440,8 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "gala window painted",
+            "gala text focused",
+            "gala typed gala",
             "gala link followed",
             "xtask: screen ok",
             "chrome.exe finished with status 0x00000000",
@@ -9715,8 +9717,8 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         // below Chromium's own tab strip and toolbar: the green body, the
         // magenta box at page (100, 100) - (300, 200) and the gold link
         // block at page (400, 100) - (600, 200). Then dragged by its own
-        // tab strip, the link clicked (window2.html: a blue body), and
-        // Alt+F4.
+        // tab strip, "gala" typed into the text field (page (100, 250)),
+        // the link clicked (window2.html: a blue body), and Alt+F4.
         "chromium_window",
         ScreenCheck {
             marker: "gala window painted",
@@ -9752,11 +9754,27 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 },
                 ScreenStep {
                     after: "",
+                    // A click in the text field (page (100, 250) -
+                    // (300, 290): 200..400 x 493..533 on the screen after
+                    // the drag; the pointer is at (600, 120)): it takes
+                    // the focus.
+                    input: &["mouse_move -300 393", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "gala text focused",
+                    // Typing with no IME (imm32 has no input contexts):
+                    // the keys' WM_KEYDOWN and WM_CHAR reach the page.
+                    input: &["sendkey g", "sendkey a", "sendkey l", "sendkey a"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "gala typed gala",
                     // A click on the link block's middle (the pointer is at
-                    // (600, 120) after the drag; the block spans 500..700 x
-                    // 343..443 now, below the toolbar and the --no-sandbox
-                    // infobar): Chromium follows it.
-                    input: &["mouse_move 0 270", "mouse_button 1", "mouse_button 0"],
+                    // (300, 513); the block spans 500..700 x 343..443 now,
+                    // below the toolbar and the --no-sandbox infobar):
+                    // Chromium follows it.
+                    input: &["mouse_move 300 -123", "mouse_button 1", "mouse_button 0"],
                     pixels: &[],
                 },
                 ScreenStep {
