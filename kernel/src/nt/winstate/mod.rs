@@ -374,6 +374,27 @@ pub struct State<X> {
     /// (GalaWindowListen), and the processes with new input.
     listeners: Vec<(u64, ObjectRef)>,
     woken: Vec<u64>,
+    /// The last mouse buttons delivered (`note_button`), newest at
+    /// `buttons_at - 1`: the state dump shows them, so a click a program
+    /// did not act on shows where it went without a trace switched on
+    /// (one that changes the timing it is about).
+    recent_buttons: [ButtonNote; RECENT_BUTTONS],
+    buttons_at: usize,
+}
+
+/// How many deliveries `recent_buttons` keeps.
+pub const RECENT_BUTTONS: usize = 8;
+
+/// A mouse button delivered: when (monotonic ns), the message, the
+/// screen point, the window, whether a capture took it.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ButtonNote {
+    pub t: u64,
+    pub message: u32,
+    pub x: i64,
+    pub y: i64,
+    pub window: u32,
+    pub captured: bool,
 }
 
 impl<X: Default> State<X> {
@@ -391,7 +412,22 @@ impl<X: Default> State<X> {
             input: Vec::new(),
             listeners: Vec::new(),
             woken: Vec::new(),
+            recent_buttons: [ButtonNote {
+                t: 0,
+                message: 0,
+                x: 0,
+                y: 0,
+                window: 0,
+                captured: false,
+            }; RECENT_BUTTONS],
+            buttons_at: 0,
         }
+    }
+
+    /// The last mouse buttons delivered, oldest first.
+    pub fn recent_buttons(&self) -> impl Iterator<Item = &ButtonNote> {
+        let n = self.buttons_at.min(RECENT_BUTTONS);
+        (self.buttons_at - n..self.buttons_at).map(|i| &self.recent_buttons[i % RECENT_BUTTONS])
     }
 
     pub fn shadow(&self) -> Shadow {
@@ -825,7 +861,11 @@ impl<X: Default> State<X> {
     /// window, the message, the screen point, the owner, and whether a
     /// capture took it. A click a program does not act on shows whether
     /// and where it had it.
-    pub fn note_button(&self, id: u32, message: u32, x: i64, y: i64, captured: bool) {
+    pub fn note_button(&mut self, id: u32, message: u32, x: i64, y: i64, captured: bool) {
+        let t = crate::nt::platform::monotonic_ns();
+        self.recent_buttons[self.buttons_at % RECENT_BUTTONS] =
+            ButtonNote { t, message, x, y, window: id, captured };
+        self.buttons_at += 1;
         let owner = self.window(id).map_or(0, |w| w.owner);
         crate::events::emit(
             crate::events::Category::Window,

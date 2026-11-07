@@ -90,6 +90,13 @@ impl Shell {
         let d = self.d.lock();
         (d.windows.len(), d.live, Kind::None, Some(BARE))
     }
+
+    /// No desktop delivers mouse buttons here.
+    pub fn recent_buttons(
+        &self,
+    ) -> [Option<crate::nt::winstate::ButtonNote>; crate::nt::winstate::RECENT_BUTTONS] {
+        [None; crate::nt::winstate::RECENT_BUTTONS]
+    }
 }
 
 /// The kinds of presenter (nt::desktop's; only none here).

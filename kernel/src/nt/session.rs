@@ -398,6 +398,19 @@ pub fn dump() {
             bare.unwrap_or(""),
         );
         dump_stations(d.session);
+        for b in d.shell.recent_buttons().iter().flatten() {
+            log!(
+                info,
+                "statedump: session {} button {:#x} at ({}, {}) to window {}{} ({} ms ago)",
+                d.session,
+                b.message,
+                b.x,
+                b.y,
+                b.window,
+                if b.captured { " (its capture)" } else { "" },
+                crate::nt::platform::monotonic_ns().saturating_sub(b.t) / 1_000_000,
+            );
+        }
         let mut top = [super::window::Info::default(); 16];
         let n = d.windows.top_level(&mut top);
         for w in &top[..n] {

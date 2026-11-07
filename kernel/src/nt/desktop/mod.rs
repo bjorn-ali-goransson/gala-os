@@ -1644,6 +1644,19 @@ impl Shell {
         let d = self.d.lock();
         (d.s.windows.len(), d.s.live, d.presenter.kind(), d.bare)
     }
+
+    /// The last mouse buttons the desktop delivered, oldest first (the
+    /// state dump's lines).
+    pub fn recent_buttons(
+        &self,
+    ) -> [Option<crate::nt::winstate::ButtonNote>; crate::nt::winstate::RECENT_BUTTONS] {
+        let d = self.d.lock();
+        let mut out = [None; crate::nt::winstate::RECENT_BUTTONS];
+        for (slot, b) in out.iter_mut().zip(d.s.recent_buttons()) {
+            *slot = Some(*b);
+        }
+        out
+    }
 }
 
 /// The desktop the console shows (the input thread's), if any: none
