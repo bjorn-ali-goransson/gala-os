@@ -9,7 +9,10 @@
 //!   around initialization with the apartment reference counts),
 //!   CoGetMalloc (the task allocator), GUID strings (CLSIDFromString,
 //!   IIDFromString, StringFromCLSID/IID), CoGetContextToken (CO_E_NOTINITIALIZED outside an apartment),
-//!   CoGetObjectContext and CoGetApartmentType (MTA), CoTaskMem*,
+//!   CoGetObjectContext and CoGetApartmentType (MTA; on a thread that
+//!   never initialized COM while the MTA exists: MTA, qualifier
+//!   APTTYPEQUALIFIER_IMPLICIT_MTA; CO_E_NOTINITIALIZED with no MTA),
+//!   CoTaskMem*,
 //!   CoCreateGuid (random version-4 GUIDs), CoGetClassObject
 //!   (REGDB_E_CLASSNOTREG), CLSIDFromProgID (CO_E_CLASSSTRING),
 //!   CreateStreamOnHGlobal (an IStream: write, seek, read, stat),
@@ -40,6 +43,50 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn CloseHandle(h: Handle) -> Bool;
     fn CreateEventW(attrs: *mut c_void, manual: Bool, initial: Bool, name: *const u16) -> Handle;
+    fn CreateThread(
+        attrs: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+}
+
+/// What an uninitialized thread's CoGetApartmentType gave: the HRESULT,
+/// the type and the qualifier.
+static mut IMPLICIT: [i32; 3] = [0; 3];
+
+extern "system" fn implicit_thread(_: *mut c_void) -> u32 {
+    let (mut kind, mut qualifier) = (-1, -1);
+    // SAFETY: plain calls; the static is read after the thread ends.
+    unsafe {
+        let hr = CoGetApartmentType(&mut kind, &mut qualifier);
+        IMPLICIT = [hr, kind, qualifier];
+    }
+    0
+}
+
+/// CoGetApartmentType on a new thread that never initializes COM.
+fn on_uninitialized_thread() -> [i32; 3] {
+    // SAFETY: plain calls; the thread has ended when the static is read.
+    unsafe {
+        let t = CreateThread(
+            core::ptr::null_mut(),
+            0,
+            implicit_thread,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        if t.is_null() {
+            return [-1; 3];
+        }
+        WaitForSingleObject(t, 0xffff_ffff);
+        CloseHandle(t);
+        IMPLICIT
+    }
 }
 
 #[link(name = "ole32", kind = "raw-dylib")]
@@ -456,6 +503,12 @@ fn apartments(c: &mut Checks) -> Result<(), u32> {
         let (mut kind, mut qualifier) = (-1, -1);
         c.eq(hr(CoGetApartmentType(&mut kind, &mut qualifier)), S_OK)?;
         c.eq(kind as u64, 1)?; // APTTYPE_MTA
+        // While the MTA exists, a thread that never initialized COM is in
+        // it implicitly: APTTYPE_MTA, APTTYPEQUALIFIER_IMPLICIT_MTA (1).
+        let [implicit_hr, implicit_kind, implicit_qualifier] = on_uninitialized_thread();
+        c.eq(hr(implicit_hr), S_OK)?;
+        c.eq(implicit_kind as u64, 1)?;
+        c.eq(implicit_qualifier as u64, 1)?;
         let mut context = core::ptr::null_mut();
         c.eq(hr(CoGetObjectContext(&IID_IUNKNOWN, &mut context)), S_OK)?;
         let mut info = core::ptr::null_mut();
@@ -472,6 +525,8 @@ fn apartments(c: &mut Checks) -> Result<(), u32> {
         CoUninitialize();
         c.ok((*me).post_uninit == 2 && (*me).last_refs == 0, (*me).last_refs.into())?;
         c.eq(hr(CoGetContextToken(&mut token)), 0x8004_01f0)?;
+        // The MTA's last thread has left: no implicit MTA any more.
+        c.eq(hr(on_uninitialized_thread()[0]), 0x8004_01f0)?; // CO_E_NOTINITIALIZED
         c.eq(hr(CoRevokeInitializeSpy(cookie)), S_OK)?;
         c.eq(hr(CoRevokeInitializeSpy(cookie)), 0x8007_0057)?; // E_INVALIDARG
         // Revoked: no longer told.

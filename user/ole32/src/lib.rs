@@ -513,8 +513,8 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
     }
 }
 
-/// Threads in the MTA (any thread of the process may then use COM as an
-/// implicit MTA member; not modelled yet).
+/// Threads in the MTA (while there are any, a thread that never
+/// initialized COM is an implicit MTA member: CoGetApartmentType).
 static MTA_THREADS: AtomicU32 = AtomicU32::new(0);
 
 // ---- Apartments ----
@@ -674,7 +674,9 @@ fn apartment() -> Option<u32> {
     thread_state().filter(|s| s.refs > 0).map(|s| s.kind)
 }
 
-/// APTTYPE: STA 0, MTA 1.
+/// APTTYPE: STA 0, MTA 1. A thread that never initialized COM while
+/// some thread holds the MTA is an implicit MTA member: APTTYPE_MTA with
+/// APTTYPEQUALIFIER_IMPLICIT_MTA (1); with no MTA, CO_E_NOTINITIALIZED.
 #[unsafe(no_mangle)]
 pub extern "system" fn CoGetApartmentType(kind: *mut i32, qualifier: *mut i32) -> HResult {
     if kind.is_null() || qualifier.is_null() {
@@ -684,6 +686,11 @@ pub extern "system" fn CoGetApartmentType(kind: *mut i32, qualifier: *mut i32) -
         Some(k) => {
             put(kind, if k == 2 { 0 } else { 1 });
             put(qualifier, 0);
+            S_OK
+        }
+        None if MTA_THREADS.load(Ordering::Relaxed) > 0 => {
+            put(kind, 1);
+            put(qualifier, 1);
             S_OK
         }
         None => {

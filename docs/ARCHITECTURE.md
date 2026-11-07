@@ -2922,7 +2922,11 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
 `ole32_test`, `oleaut32_test`).
 
 - **ole32**: apartments per thread behind TEB.ReservedForOle (MTA/STA
-  with reference counts, initialize spies, the error object), one MTA
+  with reference counts, initialize spies, the error object; while any
+  thread holds the MTA, a thread that never initialized COM is an
+  implicit MTA member: CoGetApartmentType gives APTTYPE_MTA with
+  APTTYPEQUALIFIER_IMPLICIT_MTA, as Chromium's thread-pool checks
+  expect), one MTA
   context object and one per STA thread (CoGetContextToken,
   CoGetObjectContext with IComThreadingInfo), task memory on the process
   heap, version-4 GUIDs and their braced string forms
