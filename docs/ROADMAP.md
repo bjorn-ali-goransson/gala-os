@@ -1057,7 +1057,12 @@ samples).
    `chromium_window` clicks a text field and types "gala" through the
    emulated keyboard, the page sees it (its `input` event's marker).
    Next: the conformance report below.
-   Then a conformance report (the owner): a subset of web-platform-tests
+   Then a conformance report (the owner). Step 1 under way:
+   `chromium_driver` (PENDING): ChromeDriver from the snapshot
+   (PREBUILT `chromedriver`) serves WebDriver on port 7, xtask opens a
+   session on headless Chromium (it starts and DevTools connects), then
+   the browser ends at the first navigation (a FATAL in chrome.dll,
+   0xffff7002) and the session is lost. The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
    snapshot's revision, the WPT server on the host reached as

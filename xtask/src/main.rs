@@ -344,6 +344,15 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // BR's conformance report: ChromeDriver from the same snapshot (the
+    // Win_x64 build's chromedriver_win32.zip holds the x64 driver).
+    Prebuilt {
+        name: "chromedriver",
+        url: "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/1733063/chromedriver_win32.zip",
+        checksum: "34e5c461af9fadaabf5582b5f3c227b354e64667fdc7c1b03787114a24f015e2",
+        members: &["chromedriver_win32/chromedriver.exe"],
+        excludes: &[],
+    },
     // busybox 1.35.0 for Linux, static (musl), as busybox.net publishes
     // it (a single ELF file, not an archive: the file is the download;
     // no published checksum, the SHA-256 pinned at the first fetch). The
@@ -1772,6 +1781,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "user/chromium/window.html", "gala"),
     ("chromium", "user/chromium/window2.html", "gala"),
     ("chromium_uia", "user/bin/uia_chromium_test.exe", "gala"),
+    (
+        "chromium_driver",
+        "target/prebuilt/chromedriver/chromedriver_win32/chromedriver.exe",
+        "chromium",
+    ),
     ("chromium", "ntdll.dll", "Windows/System32"),
     ("chromium", "kernel32.dll", "Windows/System32"),
     ("chromium", "kernelbase.dll", "Windows/System32"),
@@ -3544,6 +3558,9 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
+    // BR's conformance report, step 1: the browser ends at the session's
+    // first navigation (ROADMAP BR).
+    "chromium_driver",
     "java_stress",
     "elasticsearch",
     "filezilla",
@@ -3624,6 +3641,9 @@ enum NetClient {
     /// Logs on to an FTP server as `gala` and asks for the directory
     /// (`ftp_client`: the control connection only).
     Ftp,
+    /// A WebDriver session with ChromeDriver (`webdriver_client`):
+    /// headless Chromium loads page.html, a script reads it.
+    WebDriver,
     /// handover_net_test's line protocol across a kernel handover
     /// (`handover_net_client`).
     HandoverNet,
@@ -3659,6 +3679,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("sshd_client", "Server listening on", NetClient::SshInner),
     ("postgres", "database system is ready to accept connections", NetClient::Psql),
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
+    ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -6465,6 +6486,18 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // BR's conformance report, step 1: ChromeDriver (PREBUILT, the
+        // snapshot's) serves WebDriver on port 7; xtask (the host) opens a
+        // session on headless Chromium, loads page.html, reads its title
+        // and text through a script and ends the session
+        // (`webdriver_client`).
+        name: "chromium_driver",
+        cmdline: "qemu_exit run=chromedriver.exe args=--port=7%20--allowed-ips=%20--verbose%20--log-path=C:\\chromium\\chromedriver.log \
+                  dump=C:/chromium/chromedriver.log,C:/tmp/chrd/chrome_debug.log",
+        exit_status: XTASK_STOPS,
+        expect: &["xtask: net client: webdriver ok"],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -7684,6 +7717,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_window", "chromium"),
     ("chromium_uia", "chromium"),
     ("chromium_uia", "chromium_uia"),
+    ("chromium_driver", "chromium"),
+    ("chromium_driver", "chromium_driver"),
     ("chromium_host", "chromium_host"),
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
@@ -9216,6 +9251,7 @@ fn run_vm_once(
                 NetClient::SshInner => ssh_inner_client(port),
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
+                NetClient::WebDriver => webdriver_client(port),
                 NetClient::HandoverNet => handover_net_client(port),
                 NetClient::Udp => udp_client(port),
             }));
@@ -9348,6 +9384,7 @@ fn run_vm_once(
                     NetClient::Ftp => "ftp",
                     NetClient::HandoverNet => "handover",
                     NetClient::Udp => "udp",
+                    NetClient::WebDriver => "webdriver",
                     _ => "http",
                 }
             ),
@@ -11058,6 +11095,92 @@ fn psql_client(port: u16) -> Result {
         out.status.code(),
         String::from_utf8_lossy(&out.stderr)
     ))
+}
+
+/// One WebDriver command (W3C WebDriver over HTTP/1.1): its status code
+/// and body. ChromeDriver checks the Host header (localhost or an IP
+/// literal); `timeout` covers commands that start Chromium under TCG.
+fn webdriver(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: &str,
+    timeout: u64,
+) -> Result<(u32, String)> {
+    use std::io::Write;
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(timeout))).map_err(|e| e.to_string())?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).map_err(|e| format!("send: {e}"))?;
+    let mut response = Vec::new();
+    let read = stream.read_to_end(&mut response);
+    if response.is_empty() {
+        let why = read.err().map_or("closed".to_string(), |e| e.to_string());
+        return Err(format!("{method} {path}: no response: {why}"));
+    }
+    let split = response.windows(4).position(|w| w == b"\r\n\r\n").ok_or("no end of headers")?;
+    let head = String::from_utf8_lossy(&response[..split]).into_owned();
+    let mut raw = response[split + 4..].to_vec();
+    if head.lines().any(|l| l.eq_ignore_ascii_case("Transfer-Encoding: chunked")) {
+        raw = dechunk(&raw).ok_or("bad chunked body")?;
+    }
+    let status = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    Ok((status, String::from_utf8_lossy(&raw).into_owned()))
+}
+
+/// The JSON string value of `"key":"..."` in `body` (no escapes: the
+/// values read here have none).
+fn json_string<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    let at = body.find(&format!("\"{key}\""))?;
+    let rest = body[at + key.len() + 2..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    Some(&rest[..rest.find('"')?])
+}
+
+/// The host side of `chromium_driver`: ChromeDriver's /status, then a
+/// session on headless Chromium (software rendering, no sandbox, its
+/// own profile), page.html loaded from C:, a script returning its title
+/// and its script-written paragraph, and the session ended (Chromium
+/// exits). Each step's failure names the step and the driver's answer.
+fn webdriver_client(port: u16) -> Result {
+    let mut ready = Err("no answer".to_string());
+    for _ in 0..60 {
+        ready = webdriver(port, "GET", "/status", "", 60);
+        if matches!(ready, Ok((200, ref b)) if b.contains("\"ready\":true")) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    match ready {
+        Ok((200, ref b)) if b.contains("\"ready\":true") => {}
+        other => return Err(format!("GET /status: {other:?}")),
+    }
+    let capabilities = r#"{"capabilities":{"alwaysMatch":{"goog:chromeOptions":{"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrd","--enable-logging=stderr","--ipc-connection-timeout=120"]}}}}"#;
+    let (status, body) = webdriver(port, "POST", "/session", capabilities, 600)?;
+    let Some(id) = json_string(&body, "sessionId").filter(|_| status == 200) else {
+        return Err(format!("POST /session: {status} {body}"));
+    };
+    let id = id.to_string();
+    let step = |method: &str, path: &str, body: &str| -> Result<String> {
+        let (status, answer) = webdriver(port, method, &format!("/session/{id}{path}"), body, 300)?;
+        if status != 200 {
+            return Err(format!("{method} /session/{{id}}{path}: {status} {answer}"));
+        }
+        Ok(answer)
+    };
+    step("POST", "/url", r#"{"url":"file:///C:/gala/page.html"}"#)?;
+    let script = r#"{"script":"return document.title + '|' + document.getElementById('dynamic').textContent","args":[]}"#;
+    let answer = step("POST", "/execute/sync", script)?;
+    if json_string(&answer, "value") != Some("gala page|V8 ran: 42") {
+        return Err(format!("the script's value: {answer}"));
+    }
+    step("DELETE", "", "")?;
+    Ok(())
 }
 
 /// The host side of `filezilla_server`: the FTP control connection (RFC
