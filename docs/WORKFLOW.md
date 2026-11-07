@@ -193,7 +193,10 @@ ARCHITECTURE "Kernel command line").
 A boot scenario (`SCENARIOS` in xtask) is a kernel command line, the
 boot modules, the expected exit status and the lines its serial log must
 contain. Expected lines are only searched for, so a program that prints
-several similar steps labels each line with its step. The lists in
+several similar steps labels each line with its step. An expected line
+never pins a measured number (a duration's leading digit): the program
+checks its own bounds (handover_test bounds a sleep by the measured
+pause) and the scenario expects only its label. The lists in
 xtask that change how a scenario boots:
 
 | List | Effect |
