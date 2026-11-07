@@ -11,7 +11,9 @@
 //! processor and a group affinity in its attribute list (and the
 //! mitigation policy attribute, 8 or 16 bytes, accepted); OpenThread of
 //! another thread by its id (waited on through that handle; an unknown id
-//! is ERROR_INVALID_PARAMETER). Prints `kernel32_thread_test: ok` or
+//! is ERROR_INVALID_PARAMETER); a CreateThread thread's
+//! ThreadQuerySetWin32StartAddress is the start routine it was given.
+//! Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -102,6 +104,17 @@ unsafe extern "system" {
     ) -> Bool;
     fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle;
     fn GetThreadId(h: Handle) -> u32;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueryInformationThread(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> i32;
 }
 
 #[allow(dead_code)]
@@ -287,6 +300,12 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         let other = OpenThread(0x0010_0000 | 0x0040 | 0x0002, 0, tid); // SYNCHRONIZE, QUERY, SUSPEND_RESUME
         c.ok(!other.is_null(), GetLastError().into())?;
         c.eq(GetThreadId(other).into(), tid.into())?;
+        // ThreadQuerySetWin32StartAddress (9): the start routine given to
+        // CreateThread (not kernel32's thunk).
+        let mut start = 0usize;
+        let st = NtQueryInformationThread(t, 9, (&raw mut start).cast(), 8, core::ptr::null_mut());
+        c.eq(st as u64, 0)?;
+        c.eq(start as u64, worker as *const () as u64)?;
         c.ok(ResumeThread(other) == 1, 0)?;
         c.eq(WaitForSingleObject(other, 10_000).into(), 0)?;
         let mut code = 0;

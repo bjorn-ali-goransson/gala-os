@@ -341,7 +341,9 @@ pub fn create_wow64(
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
     let regs = UserRegs { gpr: [0; 16], rip: 0, rflags: 0 };
-    let win32_start = u64::from(start.eip);
+    // As for 64-bit threads (`nt_create_thread`): the return register,
+    // where kernel32's thunk takes the start routine; else the start eip.
+    let win32_start = u64::from(if start.gpr[0] != 0 { start.gpr[0] } else { start.eip });
     create_inner(process, regs, win32_start, None, stack, suspended, Begin::Wow64(start))
 }
 
@@ -1163,11 +1165,12 @@ pub fn dump() {
         let sched = *t.sched_id.lock();
         let suspended = *t.suspend_count.lock();
         info!(
-            "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {} \
+            "thread: pid {} tid {} (sched {:?}) start {:#x} suspend {} exited {} in a system call {} \
              session {} personality {} ({})",
             t.process.id,
             t.id,
             sched,
+            t.win32_start,
             suspended,
             t.has_exited(),
             in_syscall.is_some(),

@@ -137,6 +137,9 @@ pub fn thread_context(entry: usize, args: [usize; 2], top: usize) -> Context {
     context.segs = [0x33, 0x2b, 0x2b, 0x53, 0x2b, 0x2b];
     context.eflags = 0x200;
     context.rip = entry as u64;
+    // The start routine also in rax, where NtCreateThread takes the
+    // thread's Win32 start address (ThreadQuerySetWin32StartAddress).
+    context.gpr[0] = args[0] as u64; // rax
     context.gpr[1] = args[0] as u64; // rcx
     context.gpr[2] = args[1] as u64; // rdx
     context.gpr[4] = (top - 0x28) as u64; // rsp, as if called

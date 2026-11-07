@@ -3476,8 +3476,11 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
             &call.process,
             regs,
             // As ReactOS does: the "return register" of the start context
-            // (kernel32's thunks pass the Win32 start routine there).
-            regs.gpr[0],
+            // (kernel32's thunks pass the Win32 start routine there); a
+            // context without it reports its start rip (never 0: the
+            // thread's events and ThreadQuerySetWin32StartAddress name
+            // where it starts).
+            if regs.gpr[0] != 0 { regs.gpr[0] } else { regs.rip },
             mxcsr,
             (stack_base, stack_limit, stack_bottom),
             suspended

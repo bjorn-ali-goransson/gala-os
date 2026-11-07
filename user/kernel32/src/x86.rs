@@ -149,6 +149,9 @@ pub fn thread_context(entry: usize, args: [usize; 2], top: usize) -> Context {
     context.seg_ss = 0x2b;
     context.eflags = 0x200;
     context.eip = entry as u32;
+    // The start routine in eax, where NtCreateThread takes the thread's
+    // Win32 start address (ThreadQuerySetWin32StartAddress).
+    context.gpr[5] = args[0] as u32; // eax
     context.esp = esp as u32;
     context
 }
