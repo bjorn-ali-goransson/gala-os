@@ -10603,23 +10603,25 @@ fn serve_page() -> Result {
         // The WPT tree: only failures are logged (a run makes thousands of
         // requests).
         let target = first.split_whitespace().nth(1).unwrap_or("/");
-        let (status, kind, body) = wpt::file(Path::new(&root), target);
-        if status != 200
+        let r = wpt::file(Path::new(&root), target);
+        if r.status != 200
             && let Ok(path) = env::var("XTASK_SERVE_PAGE_LOG")
             && let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(path)
         {
-            let _ = writeln!(log, "xtask: serve-page: {first:?}: {status}");
+            let _ = writeln!(log, "xtask: serve-page: {first:?}: {}", r.status);
         }
-        let reason = if status == 200 { "OK" } else { "Not Found" };
-        let mut out = std::io::stdout().lock();
-        let head = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
-             Cache-Control: no-store\r\nConnection: close\r\n\r\n",
-            body.len()
+        let mut head = format!("HTTP/1.1 {} {}\r\n", r.status, r.reason());
+        for (name, value) in &r.headers {
+            head += &format!("{name}: {value}\r\n");
+        }
+        head += &format!(
+            "Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            r.body.len()
         );
+        let mut out = std::io::stdout().lock();
         return out
             .write_all(head.as_bytes())
-            .and_then(|()| out.write_all(&body))
+            .and_then(|()| out.write_all(&r.body))
             .and_then(|()| out.flush())
             .map_err(|e| e.to_string());
     }

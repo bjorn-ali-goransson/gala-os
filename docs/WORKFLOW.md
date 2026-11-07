@@ -1510,7 +1510,11 @@ Implementing what FlaUI needs (gala's UIAutomationCore, user32):
 ### Chromium (BR)
 
 `chromium_wpt` (PENDING; web-platform-tests through ChromeDriver,
-`xtask/src/wpt.rs`): `XTASK_WPT_FILTER=<substring>` and
+`xtask/src/wpt.rs`; serve-page stands in for wptserve: files with
+wptserve's MIME types, `<file>.headers`, the `pipe=header(..)` and
+`status(..)` options; a test that needs a `.py` handler is reported
+SKIP, and each test waits for its results as long as testharness's own
+timeout allows, times 4, plus 20 s): `XTASK_WPT_FILTER=<substring>` and
 `XTASK_WPT_LIMIT=<n>` narrow the run (`XTASK_WPT_LIMIT=5 cargo xtask
 boot-test 'chromium_wpt$'`, about 3 minutes); xtask fetches WPT_COMMIT
 into `target/prebuilt/wpt` with the host's git. Each test's line

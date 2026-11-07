@@ -103,30 +103,44 @@ fn wrapper(js: &Path, name: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// What serve-page answers for `target` (a request's path) in the tree
-/// at `root`: (status, content type, body).
-pub fn file(root: &Path, target: &str) -> (u16, &'static str, Vec<u8>) {
-    let path = target.split(['?', '#']).next().unwrap_or("/").replace("%20", " ");
-    let not_found = (404, "text/plain", b"not found\n".to_vec());
-    if path.split('/').any(|part| part == "..") {
-        return not_found;
+/// What serve-page sends: a status, headers (Content-Type among them),
+/// the body.
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Response {
+    fn new(status: u16, kind: &str, body: Vec<u8>) -> Response {
+        Response { status, headers: vec![("Content-Type".into(), kind.into())], body }
     }
-    if path == "/resources/testharnessreport.js" {
-        return (200, "text/javascript", REPORTER.as_bytes().to_vec());
+
+    /// Sets a header (replacing one of the same name).
+    fn set(&mut self, name: &str, value: &str) {
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        self.headers.push((name.to_string(), value.to_string()));
     }
-    let rel = path.trim_start_matches('/');
-    for (page, script) in [(".window.html", ".window.js"), (".any.html", ".any.js")] {
-        if let Some(stem) = rel.strip_suffix(page) {
-            let js = root.join(format!("{stem}{script}"));
-            let name = js.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if js.is_file() {
-                return (200, "text/html", wrapper(&js, &name));
-            }
+
+    pub fn reason(&self) -> &'static str {
+        match self.status {
+            200 => "OK",
+            204 => "No Content",
+            301 => "Moved Permanently",
+            302 => "Found",
+            304 => "Not Modified",
+            400 => "Bad Request",
+            403 => "Forbidden",
+            404 => "Not Found",
+            500 => "Internal Server Error",
+            _ => "Status",
         }
     }
-    let file = root.join(rel);
-    let Ok(body) = fs::read(&file) else { return not_found };
-    let kind = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
+}
+
+/// A file's MIME type, as wptserve gives it (by extension).
+fn mime(file: &Path) -> &'static str {
+    match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" | "htm" => "text/html",
         "xhtml" | "xht" => "application/xhtml+xml",
         "svg" => "image/svg+xml",
@@ -138,9 +152,78 @@ pub fn file(root: &Path, target: &str) -> (u16, &'static str, Vec<u8>) {
         "png" => "image/png",
         "gif" => "image/gif",
         "jpg" | "jpeg" => "image/jpeg",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "webp" => "image/webp",
+        "wasm" => "application/wasm",
         _ => "application/octet-stream",
+    }
+}
+
+/// wptserve's `pipe=` options the tests in WPT_DIRS use: `header(name,
+/// value)` and `status(code)`, joined with `|`; others are ignored.
+fn apply_pipes(response: &mut Response, query: &str) {
+    let Some(pipes) = query.split('&').find_map(|p| p.strip_prefix("pipe=")) else { return };
+    let pipes = pipes.replace("%2C", ",").replace("%20", " ").replace("%7C", "|");
+    for pipe in pipes.split('|') {
+        if let Some(args) = pipe.strip_prefix("header(").and_then(|a| a.strip_suffix(')'))
+            && let Some((name, value)) = args.split_once(',')
+        {
+            response.set(name.trim(), value.trim());
+        } else if let Some(code) = pipe.strip_prefix("status(").and_then(|a| a.strip_suffix(')'))
+            && let Ok(code) = code.trim().parse()
+        {
+            response.status = code;
+        }
+    }
+}
+
+/// What serve-page answers for `target` (a request's path and query) in
+/// the tree at `root`: a file with its MIME type and its `.headers`
+/// file's headers, a generated page for `.window.js`/`.any.js` tests,
+/// our testharnessreport.js; then the query's `pipe=` options.
+pub fn file(root: &Path, target: &str) -> Response {
+    let (path, query) =
+        target.split('#').next().unwrap_or("/").split_once('?').unwrap_or((target, ""));
+    let path = path.replace("%20", " ");
+    let not_found = || Response::new(404, "text/plain", b"not found\n".to_vec());
+    if path.split('/').any(|part| part == "..") {
+        return not_found();
+    }
+    let mut response = if path == "/resources/testharnessreport.js" {
+        Response::new(200, "text/javascript", REPORTER.as_bytes().to_vec())
+    } else {
+        let rel = path.trim_start_matches('/');
+        let generated = [(".window.html", ".window.js"), (".any.html", ".any.js")].iter().find_map(
+            |(page, script)| {
+                let stem = rel.strip_suffix(page)?;
+                let js = root.join(format!("{stem}{script}"));
+                let name = js.file_name()?.to_string_lossy().into_owned();
+                js.is_file().then(|| Response::new(200, "text/html", wrapper(&js, &name)))
+            },
+        );
+        match generated {
+            Some(r) => r,
+            None => {
+                let file = root.join(rel);
+                let Ok(body) = fs::read(&file) else { return not_found() };
+                let mut r = Response::new(200, mime(&file), body);
+                // `<file>.headers`: one `Name: value` a line.
+                let mut headers = file.clone().into_os_string();
+                headers.push(".headers");
+                if let Ok(text) = fs::read_to_string(&headers) {
+                    for line in text.lines() {
+                        if let Some((name, value)) = line.split_once(':') {
+                            r.set(name.trim(), value.trim());
+                        }
+                    }
+                }
+                r
+            }
+        }
     };
-    (200, kind, body)
+    apply_pipes(&mut response, query);
+    response
 }
 
 /// The testharness tests under TEST_DIRS, as URL paths: pages that load
@@ -277,7 +360,33 @@ struct Outcome {
     lost: bool,
 }
 
-fn run_one(port: u16, id: &str, test: &str) -> Outcome {
+/// A test's source: its page, or the `.window.js`/`.any.js` it wraps.
+fn source(root: &Path, test: &str) -> String {
+    let rel = test.trim_start_matches('/');
+    let rel = rel
+        .strip_suffix(".window.html")
+        .map(|s| format!("{s}.window.js"))
+        .or_else(|| rel.strip_suffix(".any.html").map(|s| format!("{s}.any.js")))
+        .unwrap_or_else(|| rel.to_string());
+    fs::read_to_string(root.join(rel)).unwrap_or_default()
+}
+
+/// How long to wait for a test's results: testharness's own timeout (10
+/// s, 60 s for `<meta name="timeout" content="long">`) times REPORTER's
+/// multiplier (4), and 20 s for the harness to report it.
+fn wait_for(source: &str) -> Duration {
+    let long = source.contains("name=\"timeout\" content=\"long\"")
+        || source.contains("META: timeout=long");
+    Duration::from_secs(if long { 60 } else { 10 } * 4 + 20)
+}
+
+/// Why a test cannot run against serve-page (it needs wptserve's Python
+/// handlers: a `.py` resource), if so.
+fn unservable(source: &str) -> Option<&'static str> {
+    source.contains(".py").then_some("needs wptserve's Python handlers (serve-page serves files)")
+}
+
+fn run_one(port: u16, id: &str, test: &str, wait: Duration) -> Outcome {
     let started = std::time::Instant::now();
     let result = |status: &'static str, message: String| TestResult {
         test: test.to_string(),
@@ -324,15 +433,15 @@ fn run_one(port: u16, id: &str, test: &str) -> Outcome {
             }
             _ => {}
         }
-        if started.elapsed() > Duration::from_secs(300) {
+        if started.elapsed() > wait {
             break None;
         }
         thread::sleep(Duration::from_secs(1));
     };
     let Some(text) = results else {
         return Outcome {
-            line: format!("{test}: no results in 300 s"),
-            result: result("TIMEOUT", "no results in 300 s".into()),
+            line: format!("{test}: no results in {} s", wait.as_secs()),
+            result: result("TIMEOUT", format!("no results in {} s", wait.as_secs())),
             lost: false,
         };
     };
@@ -455,7 +564,19 @@ fn run(port: u16, log: &Path) -> Result {
     fs::create_dir_all("target/wpt").map_err(|e| e.to_string())?;
     let mut results = Vec::new();
     for test in &list {
-        let outcome = run_one(port, &id, test);
+        let text = source(&root, test);
+        if let Some(why) = unservable(&text) {
+            note(&format!("{test}: SKIP: {why}"));
+            results.push(TestResult {
+                test: test.clone(),
+                status: "SKIP",
+                message: why.into(),
+                subtests: Vec::new(),
+                duration_ms: 0,
+            });
+            continue;
+        }
+        let outcome = run_one(port, &id, test, wait_for(&text));
         note(&outcome.line);
         results.push(outcome.result);
         if outcome.lost {
@@ -765,19 +886,30 @@ mod tests {
             "// META: title=B\n// META: script=../common.js\ntest(() => {});\n",
         )
         .unwrap();
-        let (status, kind, body) = file(&root, "/dom/nodes/a.html?x=1");
-        assert_eq!((status, kind, body), (200, "text/html", b"<p>".to_vec()));
-        assert_eq!(file(&root, "/dom/nodes/missing.html").0, 404);
-        assert_eq!(file(&root, "/dom/../../etc/passwd").0, 404);
-        let (_, kind, reporter) = file(&root, "/resources/testharnessreport.js");
-        assert_eq!(kind, "text/javascript");
-        assert!(String::from_utf8(reporter).unwrap().contains("__gala_wpt"));
-        let (status, kind, page) = file(&root, "/dom/nodes/b.window.html");
-        let page = String::from_utf8(page).unwrap();
-        assert_eq!((status, kind), (200, "text/html"));
-        assert!(page.contains("<title>B</title>"));
-        assert!(page.contains("<script src=\"../common.js\"></script>"));
-        assert!(page.contains("<script src=\"b.window.js\"></script>"));
+        let r = file(&root, "/dom/nodes/a.html?x=1");
+        assert_eq!((r.status, r.body.as_slice()), (200, b"<p>".as_slice()));
+        assert_eq!(r.headers, [("Content-Type".to_string(), "text/html".to_string())]);
+        assert_eq!(file(&root, "/dom/nodes/missing.html").status, 404);
+        assert_eq!(file(&root, "/dom/../../etc/passwd").status, 404);
+        let reporter = file(&root, "/resources/testharnessreport.js");
+        assert!(String::from_utf8(reporter.body).unwrap().contains("__gala_wpt"));
+        let page = file(&root, "/dom/nodes/b.window.html");
+        let text = String::from_utf8(page.body).unwrap();
+        assert_eq!(page.status, 200);
+        assert!(text.contains("<title>B</title>"));
+        assert!(text.contains("<script src=\"../common.js\"></script>"));
+        assert!(text.contains("<script src=\"b.window.js\"></script>"));
+        // A .headers file and pipes.
+        fs::write(root.join("dom/nodes/t.bmp"), "BM").unwrap();
+        fs::write(root.join("dom/nodes/t.bmp.headers"), "X-Test: 1\nContent-Type: image/x-test\n")
+            .unwrap();
+        let bmp = file(&root, "/dom/nodes/t.bmp");
+        assert!(bmp.headers.contains(&("Content-Type".into(), "image/x-test".into())));
+        assert!(bmp.headers.contains(&("X-Test".into(), "1".into())));
+        let piped =
+            file(&root, "/dom/nodes/a.html?pipe=header(Content-Type,text/plain)|status(404)");
+        assert_eq!(piped.status, 404);
+        assert!(piped.headers.contains(&("Content-Type".into(), "text/plain".into())));
         let _ = fs::remove_dir_all(&root);
     }
 }
