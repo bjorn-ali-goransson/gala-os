@@ -44,8 +44,9 @@ The ordering rules in force (set by the owner):
    explains its failures (OBSERVABILITY's rule); a gap a failure exposes
    is filled before or with the fix.
 4. **Hygiene sweeps.** Existing code is read for one class of defect at
-   a time (item HS; checklist in WORKFLOW "Hygiene sweeps"), after a
-   change of assumptions and otherwise about monthly.
+   a time (item HS; checklist in WORKFLOW "Hygiene sweeps"). Parked
+   until gala runs live (the owner); a flaky scenario with no
+   explanation still gets the checklist.
 5. **Token-heavy implementation as filler.** When an agent slot frees up
    and nothing more foundational waits: item LX's Linux system calls
    (milestone by milestone, test first against real Linux) and item AG's
@@ -66,32 +67,31 @@ The ordering rules in force (set by the owner):
 In order:
 
 0. **BR stage 2** first (the owner: Chromium working, then the rest of
-   this list): `chromium_window`, headful Chromium with software
-   rendering on shasha.
-1. **HS**: the next sweep (after the next change of assumptions,
-   otherwise a month after the first).
-2. **TLS**: step 6's rest (revocation information fetched from the
+   this list): its window, input and accessibility tree are done
+   (`chromium_window`, `chromium_uia`); now ChromeDriver
+   (`chromium_driver`, PENDING) and the conformance report.
+1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
    automatic client certificate; ECDSA server keys, client session
    resumption, client certificates and offline revocation are done).
-3. **LX**: seams 1 and 5 as their areas are touched, seam 4's NT surface;
+2. **LX**: seams 1 and 5 as their areas are touched, seam 4's NT surface;
    milestone 2's rest (busybox runs; threads, futex, fs_test's links
    done) as filler.
-4. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
+3. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
-5. **WOW** follow-ups (done otherwise): the x86 Inno runs' other ledger
+4. **WOW** follow-ups (done otherwise): the x86 Inno runs' other ledger
    gaps; kernelbase; kernel32_test built for x86.
-6. **R**: R7's next part (network frames, disk reads and input in
+5. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's rest (quota_test on Windows), R8's Secure
    Boot.
-7. **PK**: winget's source index (step 2's rest); step 1's rest (an
+6. **PK**: winget's source index (step 2's rest); step 1's rest (an
    upgrade's dependencies, UpgradeBehavior, winget's settings).
-8. **BR** stage 1's rest (the profile's hotspots).
-9. **AG**: the remaining stubs (filler).
-10. **SSH**: the client against the host's sshd, agent forwarding;
-    **H11**: busybox-w32's httpd and wget over loopback (the Linux
-    busybox's run: `lx_httpd`).
+7. **BR** stage 1's rest (the profile's hotspots).
+8. **AG**: the remaining stubs (filler).
+9. **SSH**: the client against the host's sshd, agent forwarding;
+   **H11**: busybox-w32's httpd and wget over loopback (the Linux
+   busybox's run: `lx_httpd`).
 
 ## Status at a glance
 
@@ -121,7 +121,7 @@ has a section under "Open items".
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
-| HS | Hygiene sweeps | in progress | recurring; first sweep and its four leftovers done; the next sweep after the next change of assumptions |
+| HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
 
 ### NT core services (done, by test)
 
@@ -352,8 +352,7 @@ Windows first):
    exiting thread could count a suspension the thread never saw: the
    exit is marked under the suspend count too, which suspending checks
    under (THREAD_IS_TERMINATING).
-5. The next sweep: after the next change of assumptions, otherwise a
-   month after the first.
+5. Further sweeps: parked until gala runs live (the owner).
 
 **Done when**: each leftover has a test whose results match Windows and
 passes on gala and gala-um.

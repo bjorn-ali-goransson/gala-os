@@ -2915,10 +2915,9 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 A sweep reads existing code for one class of fault at a time instead of
 waiting for a flaky scenario to point at it. The kernel's primitives
-were written for one CPU at a time and SMP came after. Do one after a
-change of assumptions (more CPUs, preemption in new places, a new kind
-of object or teardown path), otherwise about once a month, or when a
-flaky scenario has no explanation yet.
+were written for one CPU at a time and SMP came after. Periodic sweeps
+are parked until gala runs live (ROADMAP HS); until then use the
+checklist when a flaky scenario has no explanation yet.
 
 **What to check** (each item: what the bug looks like, where to look):
 
