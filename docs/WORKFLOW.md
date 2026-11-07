@@ -1546,9 +1546,10 @@ servers are child processes that outlived the parent). A test whose
 load gets no answer first asks the guest for a state dump (`nmi`
 through QEMU's monitor; read-only: the `statedump:` lines in the
 serial log show each thread's system call and wait at the hang), then
-ends its session (ChromeDriver then ends its
-Chrome, which holds the profile directory) and the run goes on in a
-new one; if none can be made, the rest are SKIP ("not run: ...") in
+ends its session and the run goes on in a new
+one, its Chrome on a profile directory of its own (`C:\tmp\chrw-<n>`,
+as wptrunner starts each browser: the old Chrome may still be exiting,
+and a new one on its profile would hand over to it and exit); if none can be made, the rest are SKIP ("not run: ...") in
 the report, which is written either way. `XTASK_WPT_FILTER=<substring>` and
 `XTASK_WPT_LIMIT=<n>` narrow the run (`XTASK_WPT_LIMIT=5 cargo xtask
 boot-test 'chromium_wpt$'`, about 3 minutes); xtask fetches WPT_COMMIT
