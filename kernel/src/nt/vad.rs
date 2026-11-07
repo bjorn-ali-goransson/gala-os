@@ -385,6 +385,13 @@ impl Vad {
     }
 
     /// Committed pages of MEM_PRIVATE allocations.
+    /// (reservations, regions): how many allocations, and how many runs
+    /// of pages with one state in them (what a walk with
+    /// NtQueryVirtualMemory visits, besides the free gaps).
+    pub fn shape(&self) -> (usize, usize) {
+        (self.allocs.len(), self.allocs.iter().map(|a| a.runs.len()).sum())
+    }
+
     pub fn private_commit(&self) -> u64 {
         self.private_commit
     }

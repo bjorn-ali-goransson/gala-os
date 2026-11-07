@@ -356,7 +356,7 @@ pub fn running() -> Result<Vec<KArc<Process>>, AllocError> {
 }
 
 /// The state dump's process lines: each running process's commit charge
-/// and its pool and handle quotas (`process: pid P (x.exe) commit N KiB;
+/// and its pool and handle quotas (`process: pid P (x.exe) commit N KiB, R reservations, G regions;
 /// paged U/L (peak P) ...`).
 pub fn dump() {
     let Ok(list) = running() else {
@@ -364,8 +364,11 @@ pub fn dump() {
         return;
     };
     for p in list.iter() {
+        // One lock at a time (format arguments' guards live to the end of
+        // the statement).
+        let (reservations, regions) = p.vad.lock().shape();
         info!(
-            "process: pid {} ({}) commit {} KiB; {}",
+            "process: pid {} ({}) commit {} KiB, {reservations} reservations, {regions} regions; {}",
             p.id,
             p.name,
             p.commit.load(core::sync::atomic::Ordering::Relaxed) * 4,

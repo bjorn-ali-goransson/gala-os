@@ -416,7 +416,7 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    thread also the 32-bit code that made the call, from its CPU area:
    `called from 32-bit code: eip=... esp=...`), every
    running process's commit charge and pool and handle quotas
-   (`process: pid P (x.exe) commit N KiB; paged U/L (peak P) nonpaged
+   (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
    U/L (peak P) handles N/L (peak P) refused R`, bytes), every
    scheduler thread (a waiting one with where its wait began:
    `sched: thread N (x) Waiting { until_tick: None } at
