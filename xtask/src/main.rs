@@ -5260,8 +5260,12 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         // N1c: overlapped Winsock with a completion port (what Go uses).
+        // events=net,sample: the sampling interrupts and the net events
+        // written under the stack's lock preempt connect's thread often
+        // enough that the FD_CONNECT rounds hit the moment the endpoint
+        // once lost its handshake's report (every run without the fix).
         name: "winsock_async_test",
-        cmdline: "qemu_exit events=sample run=winsock_async_test.exe",
+        cmdline: "qemu_exit events=net,sample run=winsock_async_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["winsock_async_test: ok", "exited with status 0x00000000"],
     },

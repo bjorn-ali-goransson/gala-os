@@ -4041,7 +4041,8 @@ endpoint's I/O completion port.
   with WSAEventSelect(FD_CONNECT) and a non-blocking connect (Chromium's
   way) the handshake's report is the only one, and Chromium waits for
   its 240 s connect timeout. `winsock_async_test`'s FD_CONNECT rounds
-  check it (busy threads and `events=sample`'s interrupts preempt
+  check it (busy threads, `events=net,sample`'s interrupts and the
+  event written under the stack's lock preempt
   connect's thread often enough to hit the moment); `events=net`
   "afd notify before its socket" shows a violation.
 - A request that completes at once returns its status and is also
@@ -4076,7 +4077,11 @@ endpoint's I/O completion port.
   changes (and at once), and sets the event; the socket becomes
   non-blocking. IOCTL_AFD_GET_EVENTS (WSAEnumNetworkEvents) returns and
   clears what was recorded; ws2_32 resets the event. Level-triggered: an
-  event that still holds is recorded again at the next change.
+  event that still holds is recorded again at the next change, except
+  FD_CONNECT (connected or refused), recorded once per socket: Windows
+  documents no function that re-enables it, and a closing connection's
+  changes must not report it again (on an event the program has
+  already reused for its next socket).
 - **Cancellation**: NtCancelIoFileEx (CancelIoEx; gala's service number
   0x7f01 until Windows' is verified) completes the matching pending
   requests (all of the process's, or the one whose IO_STATUS_BLOCK is

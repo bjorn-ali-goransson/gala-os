@@ -10,7 +10,7 @@
 //! WSASend with lpCompletionRoutine: queued to the thread, run in SleepEx's
 //! alertable wait, also for a receive that completed at once);
 //! WSAEventSelect/WSAEnumNetworkEvents (FD_ACCEPT, FD_READ, FD_CLOSE; the
-//! event reset); a shutdown(SD_SEND) while an overlapped send is still
+//! event reset; FD_CONNECT of a non-blocking connect, Chromium's way); a shutdown(SD_SEND) while an overlapped send is still
 //! pending (the FIN follows that send's bytes; a later send fails with
 //! WSAESHUTDOWN). Prints `winsock_async_test: ok`
 //! or exits with the number of the failing check.
@@ -107,6 +107,14 @@ unsafe extern "system" {
         name: *const u16,
     ) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn CreateThread(
+        attrs: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -325,6 +333,18 @@ static mut DONE_OV: *mut Overlapped = core::ptr::null_mut();
 const WAIT_IO_COMPLETION: u32 = 0xc0;
 const SD_SEND: i32 = 1;
 const WSAESHUTDOWN: i32 = 10058;
+const WSAEWOULDBLOCK: i32 = 10035;
+/// Rounds of the FD_CONNECT check, and the busy threads during them.
+const CONNECT_ROUNDS: u64 = 1000;
+const SPINNERS: usize = 4;
+static STOP_SPINNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+extern "system" fn spin(_: *mut c_void) -> u32 {
+    while !STOP_SPINNING.load(core::sync::atomic::Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    0
+}
 /// More than a loopback connection's send and receive buffers together,
 /// so an overlapped send of it pends.
 const BIG_LEN: usize = 256 * 1024;
@@ -652,6 +672,61 @@ fn run() -> Result<(), u32> {
             c.eq(closesocket(s) as u64, 0)?;
         }
         CloseHandle(ev);
+
+        // WSAEventSelect(FD_CONNECT) before a non-blocking connect
+        // (Chromium's tcp_socket_win.cc): connect fails with WSAEWOULDBLOCK,
+        // then the event is set and WSAEnumNetworkEvents reports FD_CONNECT
+        // without error, however soon the handshake finishes (over loopback
+        // it can finish on another CPU before connect returns). Many
+        // rounds: the moment that lost it in gala was narrow (the stack
+        // reported the connection before the endpoint knew its socket, and
+        // Chromium waited for its 240 s connect timeout).
+        const FD_CONNECT: i32 = 16;
+        const FD_CONNECT_BIT: usize = 4;
+        let l5 = overlapped_socket();
+        c.eq(bind(l5, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.eq(listen(l5, 5) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(l5, &mut name, &mut len) as u64, 0)?;
+        let ev5 = CreateEventW(core::ptr::null_mut(), 1, 0, core::ptr::null());
+        // Threads that keep every CPU busy, so that connect's thread is
+        // often preempted (where the stack had already reported).
+        let spinners = [0; SPINNERS].map(|_| {
+            CreateThread(
+                core::ptr::null_mut(),
+                0,
+                spin,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+            )
+        });
+        c.ok(spinners.iter().all(|h| !h.is_null()), GetLastError().into())?;
+        // Every round has the same check numbers.
+        let base = c.0;
+        for round in 0..CONNECT_ROUNDS {
+            c.0 = base;
+            let c5 = overlapped_socket();
+            c.eq(WSAEventSelect(c5, ev5, FD_CONNECT) as u64, 0)?;
+            let r = connect(c5, &name, ADDR_LEN);
+            c.ok(r != 0 && WSAGetLastError() == WSAEWOULDBLOCK, WSAGetLastError() as u64)?;
+            // The round that lost it, as the failing check's value.
+            c.ok(WaitForSingleObject(ev5, 5000) == 0, round)?;
+            c.eq(WSAEnumNetworkEvents(c5, ev5, ne.as_mut_ptr()) as u64, 0)?;
+            c.ok(ne[0] & FD_CONNECT != 0 && ne[1 + FD_CONNECT_BIT] == 0, ne[0] as u64)?;
+            let a5 = accept(l5, core::ptr::null_mut(), core::ptr::null_mut());
+            c.ok(a5 != INVALID_SOCKET, WSAGetLastError() as u64)?;
+            for s in [a5, c5] {
+                c.eq(closesocket(s) as u64, 0)?;
+            }
+        }
+        STOP_SPINNING.store(true, core::sync::atomic::Ordering::Release);
+        for h in spinners {
+            c.eq(WaitForSingleObject(h, 5000).into(), 0)?;
+            CloseHandle(h);
+        }
+        c.eq(closesocket(l5) as u64, 0)?;
+        CloseHandle(ev5);
 
         // A graceful shutdown comes after the sends issued before it
         // (Win32-OpenSSH's channels, `sshd_forward`: one overlapped WSASend

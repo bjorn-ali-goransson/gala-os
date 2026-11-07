@@ -273,6 +273,9 @@ pub struct EndpointState {
     /// The selected events that happened since WSAEnumNetworkEvents last
     /// read them.
     recorded: AtomicU32,
+    /// Of ONCE (FD_CONNECT's AFD_POLL_* events), those already recorded:
+    /// never recorded again for this endpoint.
+    recorded_once: AtomicU32,
     /// The sending side (`send_side`): open, shut down with the FIN
     /// waiting for the sends issued before it, or shut down. Changed under
     /// `pending`'s lock.
@@ -313,6 +316,16 @@ static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 fn notify(token: u64) {
     let state = REGISTRY.lock().iter().find(|e| e.token == token).cloned();
     if let Some(state) = state {
+        // A readiness change for an endpoint that does not know its socket
+        // yet would be lost (to WSAEventSelect, to a pending poll): the
+        // socket is stored under the lock held across the stack call that
+        // makes it (BIND, CONNECT, ACCEPT), so this should never be seen.
+        if state.socket.lock().is_none() && !state.transport.is_udp() {
+            let selected = state.select.lock().as_ref().map_or(0, |s| s.1);
+            afd_event(&state, "afd notify before its socket", |f| {
+                write!(f, r#","token":{token},"selected":{selected}"#)
+            });
+        }
         try_complete(&state);
         check_select(&state);
     }
@@ -367,12 +380,19 @@ fn poll_events(state: &EndpointState) -> u32 {
     events
 }
 
+/// The AFD_POLL_* events of FD_CONNECT: WSAEventSelect reports them once
+/// per socket (Windows documents no function that re-enables FD_CONNECT),
+/// where the others are recorded again while they hold.
+const ONCE: u32 = AFD_POLL_CONNECT | AFD_POLL_CONNECT_ERR;
+
 /// WSAEventSelect's half of a readiness change: the selected events that
-/// hold now are recorded and the event is set.
+/// hold now are recorded (those of ONCE only the first time) and the
+/// event is set.
 fn check_select(state: &EndpointState) {
     let Some((event, mask)) = state.select.lock().clone() else { return };
-    let ready = poll_events(state) & mask;
+    let ready = poll_events(state) & mask & !state.recorded_once.load(Ordering::Acquire);
     if ready != 0 {
+        state.recorded_once.fetch_or(ready & ONCE, Ordering::AcqRel);
         state.recorded.fetch_or(ready, Ordering::AcqRel);
         wait::set_signal(&event, 1);
     }
@@ -953,6 +973,7 @@ pub fn open(ea: &[u8], purse: &KArc<Block>) -> Result<ObjectRef, NtStatus> {
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(None),
         recorded: AtomicU32::new(0),
+        recorded_once: AtomicU32::new(0),
         polls: AtomicUsize::new(0),
         send_side: AtomicU32::new(send_side::OPEN),
     })
@@ -1260,8 +1281,15 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
                     r.input_upto(4 + TRANSPORT_ADDRESS_LEN)?;
                 transport_address(&b[4..n])?
             };
-            let id = tcp::connect(current(), remote, ep.owner()).map_err(status_of)?;
-            *ep.socket.lock() = Some(id);
+            // The endpoint learns its socket under the lock held across
+            // the stack's connect (as BIND and ACCEPT do): the stack may
+            // report the handshake from the `net` thread before connect
+            // returns here, and that notify (WSAEventSelect's FD_CONNECT)
+            // must find the socket, not None. Lost, it was the only
+            // report: Chromium waited for its 240 s connect timeout.
+            let owner = ep.owner();
+            let mut slot = ep.socket.lock();
+            *slot = Some(tcp::connect(*slot, remote, owner).map_err(status_of)?);
             Immediate::Async(Op::Connect)
         }
         IOCTL_AFD_WAIT_FOR_LISTEN => {
@@ -1765,6 +1793,9 @@ pub fn adopt(
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(c.select.clone()),
         recorded: AtomicU32::new(c.recorded),
+        // Not carried: a carried connection may report FD_CONNECT once
+        // more after the handover.
+        recorded_once: AtomicU32::new(0),
         polls: AtomicUsize::new(0),
         send_side: AtomicU32::new(c.send_side),
     })
