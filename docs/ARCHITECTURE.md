@@ -9187,7 +9187,15 @@ ignored.
     property (cookie), the root's first child (cookie: QI
     IRawElementProviderFragment, Navigate), a fragment's property, a
     fragment's Navigate (a handle, -1 for a fragment root: the window's
-    element, 0 for none), whether a handle is alive. A value operation's
+    element, 0 for none), whether a handle is alive, whether a
+    fragment has a pattern (GetPatternProvider, then QI for the pattern's
+    provider interface), Invoke (IInvokeProvider::Invoke), SetValue
+    (IValueProvider::SetValue; its text, NUL-terminated UTF-16 cut at
+    2047 characters (recorded), goes in the buffer: wParam's bit 31,
+    GALA_UIA_INPUT, makes `foreign` marshal the buffer in instead of
+    out). Invoke and SetValue give 1 for S_OK or the provider's failure
+    HRESULT; 0 (not served) becomes UIA_E_ELEMENTNOTAVAILABLE. A value
+    operation's
     0 is recorded on the client ("GALA_UIA(not served)"), and the missing
     answer in the provider's process.
   - The value's wire form: vt (u16), reserved u16, a count (u32), the
@@ -9214,7 +9222,11 @@ ignored.
     get_BoundingRectangle; what the provider leaves empty takes the
     defaults of a provider-only element (its window's ProcessId,
     ControlType Custom, enabled, a control and content element, empty
-    strings, no window handle, no patterns).
+    strings, no window handle). Patterns: the fragment's pattern objects,
+    Invoke and Value so far (Is*PatternAvailable asks the provider; the
+    client's Invoke and Value pattern objects call the operations above;
+    Value.Value and IsReadOnly come from IValueProvider's getters, served
+    as the fragment's properties 30045 and 30046).
   A root provider's value wins over the window's; VT_EMPTY (or a failed
   call) falls back to the window's own value, which is what the host
   provider would give, so the provider's HostRawElementProvider is not
@@ -9269,8 +9281,10 @@ ledger has no UIAutomationCore lines.
 TODO (ROADMAP UIA):
 
 - providers inside programs give properties (strings, integers,
-  booleans, doubles and their vectors across processes) and their
-  fragment tree; not their patterns (GetPatternProvider), focus
+  booleans, doubles and their vectors across processes), their
+  fragment tree and their fragments' Invoke and Value patterns; not the
+  other patterns, nor a root provider's own patterns (the window's
+  element has the window's), focus
   (GetFocus, SetFocus), ElementProviderFromPoint (ElementFromPoint
   gives the window), embedded fragment roots or ProviderOptions;
   provider elements raise no events; 32-bit processes have no

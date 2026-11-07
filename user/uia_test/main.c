@@ -109,7 +109,11 @@
  *   element's children (FindFirst by AutomationId "frag-b"; the raw
  *   walker's first, next, last child), with the provider's rectangles
  *   (BoundingRectangle), no window handle, distinct runtime ids, and the
- *   window as parent; in this process and in the child's window.
+ *   window as parent; in this process and in the child's window. Their
+ *   patterns are the provider's (GetPatternProvider): Fragment B's
+ *   Invoke (IsInvokePatternAvailable; the window is retitled "fragment
+ *   invoked"), Fragment A's Value ("start", set to "typed" and read
+ *   back, not read-only); A has no Invoke, B no Value.
  *
  * Prints "uia_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
@@ -306,8 +310,12 @@ typedef struct Frag {
     IRawElementProviderSimple simple;
     IRawElementProviderFragment frag;
     IRawElementProviderFragmentRoot root;
+    IInvokeProvider invoke;  /* Fragment B's */
+    IValueProvider value;    /* Fragment A's */
     int index;
 } Frag;
+/* Fragment A's value (the Value pattern's). */
+static WCHAR frag_value[64] = L"start";
 static Frag frags[3];
 
 #define FRAG_OF(p, member) ((Frag *)((char *)(p) - offsetof(Frag, member)))
@@ -355,9 +363,14 @@ static HRESULT STDMETHODCALLTYPE prov_options(IRawElementProviderSimple *This, e
     return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE prov_pattern(IRawElementProviderSimple *This, PATTERNID id, IUnknown **out) {
-    (void)This;
-    (void)id;
+    Frag *f = FRAG_OF(This, simple);
     *out = NULL;
+    if (f->index == 2 && id == UIA_InvokePatternId)
+        *out = (IUnknown *)&f->invoke;
+    else if (f->index == 1 && id == UIA_ValuePatternId)
+        *out = (IUnknown *)&f->value;
+    if (*out)
+        InterlockedIncrement(&provider_refs);
     return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE prov_property(IRawElementProviderSimple *This, PROPERTYID id, VARIANT *out) {
@@ -483,11 +496,59 @@ static IRawElementProviderFragmentRootVtbl root_vtbl = {
     rt_qi, (void *)frag_addref, (void *)frag_release, rt_from_point, rt_focus,
 };
 
+/* Fragment B's Invoke: the window is retitled "fragment invoked". */
+static HRESULT STDMETHODCALLTYPE inv_qi(IInvokeProvider *This, REFIID riid, void **out) {
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IInvokeProvider)) {
+        *out = This;
+        InterlockedIncrement(&provider_refs);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT STDMETHODCALLTYPE inv_invoke(IInvokeProvider *This) {
+    (void)This;
+    SetWindowTextW(provided_hwnd, L"fragment invoked");
+    return S_OK;
+}
+static IInvokeProviderVtbl invoke_vtbl = { inv_qi, (void *)frag_addref, (void *)frag_release, inv_invoke };
+
+/* Fragment A's Value: frag_value, writable. */
+static HRESULT STDMETHODCALLTYPE val_qi(IValueProvider *This, REFIID riid, void **out) {
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IValueProvider)) {
+        *out = This;
+        InterlockedIncrement(&provider_refs);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT STDMETHODCALLTYPE val_set(IValueProvider *This, LPCWSTR v) {
+    (void)This;
+    lstrcpynW(frag_value, v, 64);
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE val_get(IValueProvider *This, BSTR *out) {
+    (void)This;
+    *out = SysAllocString(frag_value);
+    return *out ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT STDMETHODCALLTYPE val_readonly(IValueProvider *This, BOOL *out) {
+    (void)This;
+    *out = FALSE;
+    return S_OK;
+}
+static IValueProviderVtbl value_vtbl = {
+    val_qi, (void *)frag_addref, (void *)frag_release, val_set, val_get, val_readonly,
+};
+
 static void init_frags(void) {
     for (int i = 0; i < 3; i++) {
         frags[i].simple.lpVtbl = &provider_vtbl;
         frags[i].frag.lpVtbl = &fragment_vtbl;
         frags[i].root.lpVtbl = &root_vtbl;
+        frags[i].invoke.lpVtbl = &invoke_vtbl;
+        frags[i].value.lpVtbl = &value_vtbl;
         frags[i].index = i;
     }
 }
@@ -1224,6 +1285,42 @@ static void fragments(IUIAutomation *uia, IUIAutomationElement *win, HWND hwnd) 
     CHECK(same_element(uia, parent, win));
     IUIAutomationElement *none = NULL;
     CHECK(IUIAutomationTreeWalker_GetNextSiblingElement(raw, b, &none) == S_OK && none == NULL);
+    /* Patterns from the provider: B's Invoke retitles the window; A's
+     * Value is set and read back; neither has the other's. */
+    VARIANT avail;
+    CHECK(IUIAutomationElement_GetCurrentPropertyValue(b, UIA_IsInvokePatternAvailablePropertyId, &avail) == S_OK);
+    CHECK(avail.vt == VT_BOOL && avail.boolVal == VARIANT_TRUE);
+    CHECK(IUIAutomationElement_GetCurrentPropertyValue(b, UIA_IsValuePatternAvailablePropertyId, &avail) == S_OK);
+    CHECK(avail.vt == VT_BOOL && avail.boolVal == VARIANT_FALSE);
+    IUnknown *unk = NULL;
+    CHECK(IUIAutomationElement_GetCurrentPattern(b, UIA_InvokePatternId, &unk) == S_OK && unk != NULL);
+    IUIAutomationInvokePattern *invoke = NULL;
+    CHECK(IUnknown_QueryInterface(unk, &IID_IUIAutomationInvokePattern, (void **)&invoke) == S_OK && invoke);
+    IUnknown_Release(unk);
+    CHECK(IUIAutomationInvokePattern_Invoke(invoke) == S_OK);
+    IUIAutomationInvokePattern_Release(invoke);
+    WCHAR title[64] = L"";
+    for (int i = 0; i < 100 && wcscmp(title, L"fragment invoked") != 0; i++) {
+        Sleep(20);
+        GetWindowTextW(hwnd, title, 64);
+    }
+    CHECK(wcscmp(title, L"fragment invoked") == 0);
+    CHECK(IUIAutomationElement_GetCurrentPattern(a, UIA_InvokePatternId, &unk) == S_OK && unk == NULL);
+    CHECK(IUIAutomationElement_GetCurrentPattern(a, UIA_ValuePatternId, &unk) == S_OK && unk != NULL);
+    IUIAutomationValuePattern *value = NULL;
+    CHECK(IUnknown_QueryInterface(unk, &IID_IUIAutomationValuePattern, (void **)&value) == S_OK && value);
+    IUnknown_Release(unk);
+    BSTR text = NULL;
+    CHECK(IUIAutomationValuePattern_get_CurrentValue(value, &text) == S_OK && bstr_is(text, L"start"));
+    SysFreeString(text);
+    BSTR typed = SysAllocString(L"typed");
+    CHECK(IUIAutomationValuePattern_SetValue(value, typed) == S_OK);
+    SysFreeString(typed);
+    CHECK(IUIAutomationValuePattern_get_CurrentValue(value, &text) == S_OK && bstr_is(text, L"typed"));
+    SysFreeString(text);
+    BOOL ro = TRUE;
+    CHECK(IUIAutomationValuePattern_get_CurrentIsReadOnly(value, &ro) == S_OK && !ro);
+    IUIAutomationValuePattern_Release(value);
     IUIAutomationElement_Release(parent);
     IUIAutomationElement_Release(last);
     IUIAutomationElement_Release(next);

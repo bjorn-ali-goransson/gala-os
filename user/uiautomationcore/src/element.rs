@@ -677,7 +677,9 @@ fn fragment_lookup(n: Node, handle: u32, id: i32) -> Option<Variant> {
             Variant::boolean(false)
         }
         PROVIDER_DESCRIPTION => Variant::bstr(bstr_str("[gala: provider fragment]")),
-        30027..=30044 => Variant::boolean(false),
+        30027..=30044 => {
+            Variant::boolean(pattern::supports(n, PATTERN_AVAILABLE[(id - 30027) as usize]))
+        }
         _ => return None,
     })
 }

@@ -632,14 +632,14 @@ patterns and read their state, so one test runs on Windows and on gala
   WM_GETOBJECT answered through UiaReturnRawElementProvider, the
   provider's properties first (across processes through gala's
   GALA_UIA message), the window's (UiaHostProviderFromHwnd) where it
-  gives none; a fragment root's fragments as the window's descendants
-  (`uia_test`).
+  gives none; a fragment root's fragments as the window's descendants,
+  with their Invoke and Value patterns (`uia_test`).
 
 **Next**:
-1. Providers' patterns (GetPatternProvider: Invoke, Value, Toggle,
-   ExpandCollapse, Selection), ElementProviderFromPoint and GetFocus;
-   then Chromium's accessibility tree read through them (BR stage 2:
-   FlaUI reading the page).
+1. Chromium's accessibility tree through its provider (BR stage 2:
+   FlaUI reading and clicking the page), adding what it needs: more
+   patterns (Toggle, ExpandCollapse, Selection, Text),
+   ElementProviderFromPoint, GetFocus, a root provider's own patterns.
 2. IUIAutomation3..6's event handlers and handler groups.
 3. Combo box and tree-view items, GetParent of owned popups, the system
    menu in the title bar.

@@ -15,6 +15,7 @@ use crate::frame::{self, TITLE};
 use crate::grid;
 use crate::items::{self, How, Kind};
 use crate::menus;
+use crate::providers;
 use crate::{
     E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, Guid, HResult, Hwnd, IID_IUNKNOWN, IsWindowEnabled,
     List, PostMessageW, S_OK, SendMessageW, UIA_E_ELEMENTNOTAVAILABLE, UIA_E_ELEMENTNOTENABLED,
@@ -63,9 +64,10 @@ const ES_READONLY: u32 = 0x0800;
 /// Whether the element has the pattern.
 pub fn supports(n: Node, id: i32) -> bool {
     let h = n.hwnd;
-    if n.menu == element::FRAGMENT {
-        // A provider's fragment: its patterns are not used yet.
-        return false;
+    if let Some(handle) = element::fragment_handle(n) {
+        // A provider's fragment: its pattern objects (Invoke and Value
+        // carried so far).
+        return providers::has_pattern(h, handle, id);
     }
     if grid::supports(n, id) {
         return true;
@@ -159,6 +161,10 @@ fn selection(h: Hwnd) -> Option<List<Node>> {
 /// (Selection), as UIA's client API gives them (FlaUI converts them so).
 pub fn property(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
+    if let Some(handle) = element::fragment_handle(n) {
+        // The provider's pattern object answers (providers.rs).
+        return providers::fragment_property(h, handle, id);
+    }
     if n.menu == TITLE || element::is_grid_node(n) {
         return None;
     }
@@ -318,6 +324,9 @@ extern "system" fn invoke(this: *mut Pattern) -> HResult {
         Err(e) => return e,
     };
     let n = node(this);
+    if let Some(handle) = element::fragment_handle(n) {
+        return providers::invoke(h, handle);
+    }
     if n.menu == TITLE {
         return frame::invoke(n);
     }
@@ -346,6 +355,9 @@ extern "system" fn set_value(this: *mut Pattern, value: *const u16) -> HResult {
         Ok(h) => h,
         Err(e) => return e,
     };
+    if let Some(handle) = element::fragment_handle(node(this)) {
+        return providers::set_value(h, handle, value);
+    }
     if read_only(h) {
         return UIA_E_INVALIDOPERATION;
     }
@@ -362,6 +374,18 @@ extern "system" fn get_value(this: *mut Pattern, out: *mut *mut u16) -> HResult 
         return E_POINTER;
     }
     put(out, core::ptr::null_mut());
+    if element::fragment_handle(node(this)).is_some() {
+        return match property(node(this), VALUE_VALUE) {
+            Some(v) if v.vt == crate::VT_BSTR => {
+                put(out, v.as_bstr());
+                S_OK
+            }
+            _ => {
+                put(out, bstr(&[]));
+                if element::exists(node(this)) { S_OK } else { UIA_E_ELEMENTNOTAVAILABLE }
+            }
+        };
+    }
     match alive(this) {
         Ok(h) => {
             let s = element::window_text(h, false);
@@ -377,6 +401,11 @@ extern "system" fn get_read_only(this: *mut Pattern, out: *mut i32) -> HResult {
         return E_POINTER;
     }
     put(out, 0);
+    if element::fragment_handle(node(this)).is_some() {
+        let ro = property(node(this), VALUE_IS_READ_ONLY).is_some_and(|v| v.as_bool());
+        put(out, i32::from(ro));
+        return if element::exists(node(this)) { S_OK } else { UIA_E_ELEMENTNOTAVAILABLE };
+    }
     match alive(this) {
         Ok(h) => {
             put(out, i32::from(read_only(h)));

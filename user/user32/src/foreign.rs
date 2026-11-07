@@ -664,6 +664,9 @@ pub(crate) fn send_remote(
         crate::track::GALA_MENU if lparam != 0 => {
             (out_ptr, out_max) = (lparam as u64, crate::track::MENU_INFO_SIZE);
         }
+        crate::uia::GALA_UIA if lparam != 0 && wparam & crate::uia::GALA_UIA_INPUT != 0 => {
+            (in_ptr, in_len) = (lparam as u64, crate::uia::UIA_VALUE_SIZE);
+        }
         crate::uia::GALA_UIA if lparam != 0 => {
             (out_ptr, out_max) = (lparam as u64, crate::uia::UIA_VALUE_SIZE);
         }

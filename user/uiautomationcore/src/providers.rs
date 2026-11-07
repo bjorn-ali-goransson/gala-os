@@ -86,7 +86,29 @@ enum Op {
     Navigate = 3,
     /// Whether a handle still names a fragment (1) or not (0).
     Alive = 4,
+    /// Whether a fragment has a pattern (handle, id the pattern; 1 or 0).
+    HasPattern = 5,
+    /// The Invoke pattern's Invoke (handle; 1, or the failure HRESULT).
+    Invoke = 6,
+    /// The Value pattern's SetValue (handle; the text, NUL-terminated
+    /// UTF-16, in the buffer, which goes in: GALA_UIA_INPUT; as Invoke).
+    SetValue = 7,
 }
+
+/// wParam's flag (the direction byte's top bit) for an operation whose
+/// buffer goes in, not out (user32's uia.rs agrees).
+const GALA_UIA_INPUT: u64 = 1 << 31;
+
+pub const INVOKE: i32 = 10000;
+pub const VALUE: i32 = 10002;
+const VALUE_VALUE: i32 = 30045;
+const VALUE_IS_READ_ONLY: i32 = 30046;
+/// IID_IInvokeProvider {54fcb24b-e18e-47a2-b4d3-eccbe77599a2}.
+const IID_IINVOKE_PROVIDER: Guid =
+    guid(0x54fcb24b, 0xe18e, 0x47a2, [0xb4, 0xd3, 0xec, 0xcb, 0xe7, 0x75, 0x99, 0xa2]);
+/// IID_IValueProvider {c7935180-6fb3-4201-b174-7df73adbf64a}.
+const IID_IVALUE_PROVIDER: Guid =
+    guid(0xc7935180, 0x6fb3, 0x4201, [0xb1, 0x74, 0x7d, 0xf7, 0x3a, 0xdb, 0xf6, 0x4a]);
 
 // ---- COM calls on a program's provider ----
 
@@ -221,6 +243,68 @@ pub fn doubles(v: &Variant) -> crate::List<f64> {
         return crate::List::new();
     }
     elements::<f64>(v.data[0] as usize as *mut c_void)
+}
+
+/// The fragment's pattern object for `pattern` as interface `iid` (one
+/// reference), or null (GetPatternProvider, slot 4 of its
+/// IRawElementProviderSimple).
+fn pattern_provider(f: *mut c_void, pattern: i32, iid: &Guid) -> *mut c_void {
+    let s = query(f, &IID_IRAW_ELEMENT_PROVIDER_SIMPLE);
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut unk: *mut c_void = core::ptr::null_mut();
+    // SAFETY: IRawElementProviderSimple::GetPatternProvider.
+    let call: extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HResult =
+        unsafe { core::mem::transmute(method(s, 4)) };
+    let hr = call(s, pattern, &mut unk);
+    release(s);
+    if hr != S_OK || unk.is_null() {
+        return core::ptr::null_mut();
+    }
+    let p = query(unk, iid);
+    release(unk);
+    p
+}
+
+/// The interface the client's pattern objects use for `pattern` (None:
+/// a pattern gala does not carry for providers yet).
+fn pattern_iid(pattern: i32) -> Option<Guid> {
+    match pattern {
+        INVOKE => Some(IID_IINVOKE_PROVIDER),
+        VALUE => Some(IID_IVALUE_PROVIDER),
+        _ => None,
+    }
+}
+
+/// A Value pattern property from the fragment's pattern object (VT_EMPTY
+/// without the pattern).
+fn value_property(f: *mut c_void, id: i32) -> Variant {
+    let v = pattern_provider(f, VALUE, &IID_IVALUE_PROVIDER);
+    if v.is_null() {
+        return Variant::EMPTY;
+    }
+    let r = if id == VALUE_VALUE {
+        let mut s: *mut u16 = core::ptr::null_mut();
+        // SAFETY: IValueProvider::get_Value (slot 4).
+        let call: extern "system" fn(*mut c_void, *mut *mut u16) -> HResult =
+            unsafe { core::mem::transmute(method(v, 4)) };
+        if call(v, &mut s) == S_OK { Variant::bstr(s) } else { Variant::EMPTY }
+    } else {
+        let mut b = 0i32;
+        // SAFETY: IValueProvider::get_IsReadOnly (slot 5).
+        let call: extern "system" fn(*mut c_void, *mut i32) -> HResult =
+            unsafe { core::mem::transmute(method(v, 5)) };
+        if call(v, &mut b) == S_OK { Variant::boolean(b != 0) } else { Variant::EMPTY }
+    };
+    release(v);
+    r
+}
+
+/// An HRESULT as an operation's result: 1 for S_OK (0 means "not
+/// served"), else the failure.
+fn op_result(hr: HResult) -> isize {
+    if hr == S_OK { 1 } else { hr as isize }
 }
 
 // ---- The table of answers ----
@@ -379,7 +463,7 @@ fn handle_of(hwnd: Hwnd, to: *mut c_void) -> isize {
 pub extern "system" fn GalaUiaServe(hwnd: Hwnd, wparam: usize, lparam: isize) -> isize {
     let w = wparam as u64;
     let id = (w & 0xffff) as i32;
-    let (op, dir, arg) = ((w >> 16) as u8, (w >> 24) as u8, (w >> 32) as u32);
+    let (op, dir, arg) = ((w >> 16) as u8, (w >> 24) as u8 & 0x7f, (w >> 32) as u32);
     let out = if lparam == 0 {
         None
     } else {
@@ -423,6 +507,7 @@ pub extern "system" fn GalaUiaServe(hwnd: Hwnd, wparam: usize, lparam: isize) ->
             let mut v = match id {
                 RUNTIME_ID => runtime_id(f, hwnd, arg),
                 BOUNDING_RECTANGLE => bounding_rectangle(f),
+                VALUE_VALUE | VALUE_IS_READ_ONLY => value_property(f, id),
                 _ => {
                     let s = query(f, &IID_IRAW_ELEMENT_PROVIDER_SIMPLE);
                     if s.is_null() {
@@ -446,6 +531,55 @@ pub extern "system" fn GalaUiaServe(hwnd: Hwnd, wparam: usize, lparam: isize) ->
             handle_of(hwnd, to)
         }
         4 => isize::from(fragment(hwnd, arg).map(release).is_some()),
+        5 => {
+            let Some(f) = fragment(hwnd, arg) else { return 0 };
+            let Some(iid) = pattern_iid(id) else {
+                release(f);
+                return 0;
+            };
+            let p = pattern_provider(f, id, &iid);
+            release(f);
+            if p.is_null() {
+                return 0;
+            }
+            release(p);
+            1
+        }
+        6 | 7 => {
+            let Some(f) = fragment(hwnd, arg) else { return 0 };
+            let (pattern, iid) =
+                if op == 6 { (INVOKE, IID_IINVOKE_PROVIDER) } else { (VALUE, IID_IVALUE_PROVIDER) };
+            let p = pattern_provider(f, pattern, &iid);
+            release(f);
+            if p.is_null() {
+                return op_result(crate::UIA_E_ELEMENTNOTAVAILABLE);
+            }
+            let empty = [0u16];
+            let hr = if op == 6 {
+                // SAFETY: IInvokeProvider::Invoke (slot 3).
+                let call: extern "system" fn(*mut c_void) -> HResult =
+                    unsafe { core::mem::transmute(method(p, 3)) };
+                call(p)
+            } else {
+                // The text: NUL-terminated in the buffer (its last
+                // character forced to NUL).
+                let text = match out {
+                    Some(buf) => {
+                        let n = buf.len();
+                        buf[n - 2..].fill(0);
+                        buf.as_ptr().cast::<u16>()
+                    }
+                    None => empty.as_ptr(),
+                };
+                // SAFETY: IValueProvider::SetValue (slot 3) with a
+                // NUL-terminated string.
+                let call: extern "system" fn(*mut c_void, *const u16) -> HResult =
+                    unsafe { core::mem::transmute(method(p, 3)) };
+                call(p, text)
+            };
+            release(p);
+            op_result(hr)
+        }
         _ => {
             crate::missing(b"UIAutomationCore.dll!GalaUiaServe(operation)", u64::from(op));
             0
@@ -472,9 +606,12 @@ fn bounding_rectangle(f: *mut c_void) -> Variant {
 /// process's window, else through GALA_UIA. `buf` is a UIA_VALUE_SIZE
 /// buffer for a value, or null.
 fn ask(hwnd: Hwnd, op: Op, dir: u8, arg: u32, id: i32, buf: *mut u8) -> isize {
-    let wparam =
-        (id as u16 as u64 | (op as u64) << 16 | u64::from(dir) << 24 | u64::from(arg) << 32)
-            as usize;
+    let input = if matches!(op, Op::SetValue) { GALA_UIA_INPUT } else { 0 };
+    let wparam = (id as u16 as u64
+        | (op as u64) << 16
+        | u64::from(dir) << 24
+        | input
+        | u64::from(arg) << 32) as usize;
     let mut pid = 0;
     // SAFETY: our output.
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
@@ -562,6 +699,55 @@ pub fn navigate_from(hwnd: Hwnd, handle: u32, dir: u8) -> Toward {
         h if h > 0 => Toward::Fragment(h as u32),
         _ => Toward::Nothing,
     }
+}
+
+/// Whether fragment `handle` has pattern `pattern` (one gala carries for
+/// providers: Invoke, Value).
+pub fn has_pattern(hwnd: Hwnd, handle: u32, pattern: i32) -> bool {
+    pattern_iid(pattern).is_some()
+        && ask(hwnd, Op::HasPattern, 0, handle, pattern, core::ptr::null_mut()) == 1
+}
+
+/// An operation's result as an HRESULT (not served: the element is
+/// gone).
+fn hresult(r: isize) -> HResult {
+    match r {
+        1 => S_OK,
+        0 => crate::UIA_E_ELEMENTNOTAVAILABLE,
+        e => e as HResult,
+    }
+}
+
+/// The fragment's Invoke pattern's Invoke.
+pub fn invoke(hwnd: Hwnd, handle: u32) -> HResult {
+    hresult(ask(hwnd, Op::Invoke, 0, handle, 0, core::ptr::null_mut()))
+}
+
+/// The fragment's Value pattern's SetValue (`text` NUL-terminated, null
+/// for empty; cut at the buffer's 2047 characters, recorded).
+pub fn set_value(hwnd: Hwnd, handle: u32, text: *const u16) -> HResult {
+    let buf = alloc(UIA_VALUE_SIZE);
+    if buf.is_null() {
+        return crate::E_OUTOFMEMORY;
+    }
+    let chars = UIA_VALUE_SIZE / 2;
+    // SAFETY: our buffer of UIA_VALUE_SIZE bytes; the caller's
+    // NUL-terminated string, read up to its NUL or the buffer's end.
+    unsafe {
+        let dst = buf.cast::<u16>();
+        let mut n = 0;
+        while !text.is_null() && n < chars - 1 && *text.add(n) != 0 {
+            dst.add(n).write(*text.add(n));
+            n += 1;
+        }
+        if n == chars - 1 && *text.add(n) != 0 {
+            crate::missing(b"UIAutomationCore.dll!SetValue(text cut)", n as u64);
+        }
+        dst.add(n).write(0);
+    }
+    let r = hresult(ask(hwnd, Op::SetValue, 0, handle, 0, buf));
+    free(buf);
+    r
 }
 
 /// Whether `handle` still names a fragment of window `hwnd`.
