@@ -6490,11 +6490,13 @@ const SCENARIOS: &[Scenario] = &[
         // snapshot's) serves WebDriver on port 7; xtask (the host) opens a
         // session on headless Chromium, loads page.html, reads its title
         // and text through a script and ends the session
-        // (`webdriver_client`).
+        // (`webdriver_client`), then asks ChromeDriver to shut down, so
+        // the run ends and `dump=` copies ChromeDriver's log and
+        // Chromium's (ChromeDriver does not pass Chromium its stderr).
         name: "chromium_driver",
         cmdline: "qemu_exit run=chromedriver.exe args=--port=7%20--allowed-ips=%20--verbose%20--log-path=C:\\chromium\\chromedriver.log \
-                  dump=C:/chromium/chromedriver.log,C:/tmp/chrd/chrome_debug.log",
-        exit_status: XTASK_STOPS,
+                  dump=C:/chromium/chromedriver.log,C:/chromium/chrome_driven.log",
+        exit_status: QEMU_EXIT_SUCCESS,
         expect: &["xtask: net client: webdriver ok"],
     },
     Scenario {
@@ -11148,6 +11150,14 @@ fn json_string<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 /// and its script-written paragraph, and the session ended (Chromium
 /// exits). Each step's failure names the step and the driver's answer.
 fn webdriver_client(port: u16) -> Result {
+    let verdict = webdriver_session(port);
+    // ChromeDriver ends (its /shutdown), and with it the run: `dump=`
+    // then copies the logs, whatever the verdict.
+    let _ = webdriver(port, "GET", "/shutdown", "", 60);
+    verdict
+}
+
+fn webdriver_session(port: u16) -> Result {
     let mut ready = Err("no answer".to_string());
     for _ in 0..60 {
         ready = webdriver(port, "GET", "/status", "", 60);
@@ -11160,7 +11170,7 @@ fn webdriver_client(port: u16) -> Result {
         Ok((200, ref b)) if b.contains("\"ready\":true") => {}
         other => return Err(format!("GET /status: {other:?}")),
     }
-    let capabilities = r#"{"capabilities":{"alwaysMatch":{"goog:chromeOptions":{"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrd","--enable-logging=stderr","--ipc-connection-timeout=120"]}}}}"#;
+    let capabilities = r#"{"capabilities":{"alwaysMatch":{"goog:chromeOptions":{"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrd","--enable-logging","--log-file=C:\\chromium\\chrome_driven.log","--ipc-connection-timeout=120"]}}}}"#;
     let (status, body) = webdriver(port, "POST", "/session", capabilities, 600)?;
     let Some(id) = json_string(&body, "sessionId").filter(|_| status == 200) else {
         return Err(format!("POST /session: {status} {body}"));
