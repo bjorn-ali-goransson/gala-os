@@ -482,6 +482,40 @@ pub fn init() -> Result<(), NtStatus> {
     ensure(CONSOLE).map(drop)
 }
 
+/// A noted input as the state dump names it: a button with its screen
+/// point, a key with its virtual key.
+#[cfg_attr(test, allow(dead_code))] // test builds' log! drops its arguments
+struct InputWhat<'a>(&'a crate::nt::winstate::InputNote);
+
+impl core::fmt::Display for InputWhat<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let b = self.0;
+        if (0x100..=0x105).contains(&b.message) {
+            write!(f, "key {:#x} vk {:#x}", b.message, b.x)
+        } else {
+            write!(f, "button {:#x} at ({}, {})", b.message, b.x, b.y)
+        }
+    }
+}
+
+/// What became of a noted input: taken by its program (after how long),
+/// dropped by the full queue, or still waiting.
+#[cfg_attr(test, allow(dead_code))]
+struct InputFate<'a>(&'a crate::nt::winstate::InputNote);
+
+impl core::fmt::Display for InputFate<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let b = self.0;
+        if b.dropped {
+            f.write_str("dropped (queue full)")
+        } else if b.taken == 0 {
+            f.write_str("not taken by its program")
+        } else {
+            write!(f, "taken after {} ms", b.taken.saturating_sub(b.t) / 1_000_000)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,37 +667,5 @@ mod tests {
         assert_eq!(window_stations_path(3).unwrap(), w("\\Sessions\\3\\Windows\\WindowStations"));
         a.windows.process_ended(1101);
         b.windows.process_ended(1201);
-    }
-}
-
-/// A noted input as the state dump names it: a button with its screen
-/// point, a key with its virtual key.
-struct InputWhat<'a>(&'a crate::nt::winstate::InputNote);
-
-impl core::fmt::Display for InputWhat<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let b = self.0;
-        if (0x100..=0x105).contains(&b.message) {
-            write!(f, "key {:#x} vk {:#x}", b.message, b.x)
-        } else {
-            write!(f, "button {:#x} at ({}, {})", b.message, b.x, b.y)
-        }
-    }
-}
-
-/// What became of a noted input: taken by its program (after how long),
-/// dropped by the full queue, or still waiting.
-struct InputFate<'a>(&'a crate::nt::winstate::InputNote);
-
-impl core::fmt::Display for InputFate<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let b = self.0;
-        if b.dropped {
-            f.write_str("dropped (queue full)")
-        } else if b.taken == 0 {
-            f.write_str("not taken by its program")
-        } else {
-            write!(f, "taken after {} ms", b.taken.saturating_sub(b.t) / 1_000_000)
-        }
     }
 }

@@ -812,9 +812,9 @@ impl<X: Default> State<X> {
                 true
             }
         });
-        for i in 0..n {
-            if is_noted(out[i].message) {
-                self.settle_note(out[i].window, out[i].message, false);
+        for e in &out[..n] {
+            if is_noted(e.message) {
+                self.settle_note(e.window, e.message, false);
             }
         }
         n
