@@ -9159,8 +9159,29 @@ ignored.
 - Provider API: UiaClientsAreListening is FALSE;
   UiaRaiseAutomationEvent / ...PropertyChangedEvent /
   ...StructureChangedEvent / UiaDisconnect(All)Provider(s) succeed doing
-  nothing; UiaReturnRawElementProvider returns 0 (recorded);
-  UiaHostProviderFromHwnd is E_NOTIMPL.
+  nothing.
+- Providers inside programs (providers.rs), this process's windows
+  only: for a window node (not an item, menu or grid part) of the
+  client's own process, every property read first sends the window
+  WM_GETOBJECT (wParam 0, lParam UiaRootObjectId -25). The window
+  answers with UiaReturnRawElementProvider(hwnd, wParam, lParam, its
+  IRawElementProviderSimple), which AddRefs the provider into a
+  32-slot table and returns a cookie (a non-zero counter; the slot is
+  cookie mod 32); any other object id gives 0. The client claims the
+  cookie (it must name the same window: anything else is recorded as
+  "WM_GETOBJECT(answer not ours)"), which takes the reference out of the
+  table, calls GetPropertyValue and releases it; an answer never claimed
+  is released when its slot is reused. A provider's value wins; VT_EMPTY
+  (or a failed call) falls back to the window's own value, which is
+  what the host provider would give, so the provider's
+  HostRawElementProvider is not called. Conditions, searches and events
+  read properties the same way, so they see the provider's values.
+  UiaHostProviderFromHwnd makes a counted IRawElementProviderSimple
+  (ProviderOptions_ClientSideProvider, no patterns, no host) whose
+  GetPropertyValue is the window's own value (`element::window_property`,
+  which skips the provider). Invariant: a window's provider is asked
+  afresh for every read (no cache), so a provider that changes answers
+  is seen at once.
 
 ### Programs driven through UI Automation
 
@@ -9200,9 +9221,14 @@ ledger has no UIAutomationCore lines.
 
 TODO (ROADMAP UIA):
 
-- providers inside programs (WM_GETOBJECT answered with
-  IRawElementProviderSimple via UiaReturnRawElementProvider, which wx
-  and Qt implement) are not consulted; UiaRaise* do nothing;
+- providers inside programs are consulted only for the client's own
+  process's windows, and only for properties: other processes' windows
+  (wx and Qt implement IRawElementProviderSimple) give their HWND
+  properties, as the answer would have to cross processes (COM
+  marshaling of the provider); providers' patterns
+  (GetPatternProvider), fragments (IRawElementProviderFragment and its
+  roots, Navigate) and ProviderOptions are not used; UiaRaise* do
+  nothing;
 - events only through IUIAutomation's own Add*EventHandler;
   IUIAutomation3..6's handlers (text edit, changes, notification,
   handler groups, active text position), AutomationFocusChanged,

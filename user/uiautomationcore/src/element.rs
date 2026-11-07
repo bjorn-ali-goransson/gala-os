@@ -19,6 +19,7 @@ use crate::frame::{self, TITLE};
 use crate::grid;
 use crate::items::{self, Kind};
 use crate::menus;
+use crate::providers;
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, EnumWindows, GetAncestor, GetClassNameW,
     GetDesktopWindow, GetDlgCtrlID, GetFocus, GetWindow, GetWindowLongW, GetWindowRect,
@@ -576,7 +577,34 @@ pub fn property(n: Node, id: i32) -> Variant {
 }
 
 /// A property's current value; None when the element does not support it.
+/// A window with a provider in this process (providers.rs) answers first.
 fn lookup(n: Node, id: i32) -> Option<Variant> {
+    if n.item.is_none()
+        && n.menu == 0
+        && !is_grid_node(n)
+        && let Some(p) = providers::of(n.hwnd)
+    {
+        let v = providers::property(p, id);
+        providers::release(p);
+        if v.vt != crate::VT_EMPTY {
+            return Some(v);
+        }
+    }
+    window_lookup(n, id)
+}
+
+/// The window's own value of a property (the host provider's), whatever
+/// provider the window has: as `property`.
+pub fn window_property(n: Node, id: i32) -> Variant {
+    window_lookup(n, id).unwrap_or(if id == NATIVE_WINDOW_HANDLE {
+        Variant::int(0)
+    } else {
+        Variant::EMPTY
+    })
+}
+
+/// A property's value from the node itself (the window, item or part).
+fn window_lookup(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
     if is_grid_node(n) {
         return grid_lookup(n, id);

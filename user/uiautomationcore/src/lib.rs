@@ -42,8 +42,13 @@
 //!   one static IUnknown, returned for properties an element lacks when
 //!   the client asks GetCurrentPropertyValueEx to ignore defaults.
 //!
-//! Not there yet (recorded in the ledger, E_NOTIMPL): providers inside
-//! programs (WM_GETOBJECT, IRawElementProviderSimple).
+//! - Providers inside programs (providers.rs): a window of this process
+//!   that answers WM_GETOBJECT (UiaRootObjectId) through
+//!   UiaReturnRawElementProvider gives its element's properties first;
+//!   the window's fill what it leaves empty (UiaHostProviderFromHwnd).
+//!
+//! Not there yet: other processes' providers (their windows give the
+//! HWND properties), providers' patterns and fragments.
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -73,6 +78,7 @@ mod grid;
 mod items;
 mod menus;
 mod pattern;
+mod providers;
 mod walker;
 
 #[allow(dead_code)]
@@ -673,27 +679,23 @@ pub extern "system" fn UiaClientsAreListening() -> i32 {
     0
 }
 
-/// UiaReturnRawElementProvider (a window's WM_GETOBJECT answer): providers
-/// in programs are not used yet, so the message stays unanswered (0).
+/// UiaReturnRawElementProvider (a window's WM_GETOBJECT answer): for
+/// UiaRootObjectId, a cookie the asking client in this process claims
+/// (providers.rs); 0 for other object ids.
 #[unsafe(no_mangle)]
 pub extern "system" fn UiaReturnRawElementProvider(
-    _hwnd: Hwnd,
+    hwnd: Hwnd,
     _wparam: usize,
-    _lparam: isize,
-    _el: *mut c_void,
+    lparam: isize,
+    el: *mut c_void,
 ) -> isize {
-    missing(b"UIAutomationCore.dll!UiaReturnRawElementProvider", 0);
-    0
+    providers::answer(hwnd, lparam, el)
 }
 
-/// UiaHostProviderFromHwnd: not yet (E_NOTIMPL, recorded).
+/// UiaHostProviderFromHwnd: a provider with the window's own properties.
 #[unsafe(no_mangle)]
-pub extern "system" fn UiaHostProviderFromHwnd(_hwnd: Hwnd, out: *mut *mut c_void) -> HResult {
-    if !out.is_null() {
-        put(out, core::ptr::null_mut());
-    }
-    missing(b"UIAutomationCore.dll!UiaHostProviderFromHwnd", 0);
-    E_NOTIMPL
+pub extern "system" fn UiaHostProviderFromHwnd(hwnd: Hwnd, out: *mut *mut c_void) -> HResult {
+    providers::host(hwnd, out)
 }
 
 /// UiaRaiseAutomationEvent and friends: no client listens, so there is
