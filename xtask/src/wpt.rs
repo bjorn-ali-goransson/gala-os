@@ -394,7 +394,7 @@ fn subtest_status(code: &str) -> &'static str {
     }
 }
 
-const CAPABILITIES: &str = r#"{"capabilities":{"alwaysMatch":{"timeouts":{"pageLoad":300000,"script":60000},"goog:chromeOptions":{"browserStartupTimeout":180000,"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrw-{n}","--enable-logging","--log-file=C:\\chromium\\chrome_driven.log","--ipc-connection-timeout=120","--host-resolver-rules=MAP web-platform.test 10.0.2.100,MAP *.web-platform.test 10.0.2.100,MAP not-web-platform.test 10.0.2.100,MAP *.not-web-platform.test 10.0.2.100","--ignore-certificate-errors"]}}}}"#;
+const CAPABILITIES: &str = r#"{"capabilities":{"alwaysMatch":{"timeouts":{"pageLoad":300000,"script":60000},"goog:chromeOptions":{"browserStartupTimeout":180000,"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrw-{n}","--enable-logging","--log-file=C:\\chromium\\chrome_wpt-{n}.log","--ipc-connection-timeout=120","--host-resolver-rules=MAP web-platform.test 10.0.2.100,MAP *.web-platform.test 10.0.2.100,MAP not-web-platform.test 10.0.2.100,MAP *.not-web-platform.test 10.0.2.100","--ignore-certificate-errors"]}}}}"#;
 
 /// A new session's id.
 /// A new session, its Chrome on a profile directory of its own (as

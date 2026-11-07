@@ -6521,14 +6521,17 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         // BR's conformance report, step 2: web-platform-tests (WPT_DIRS
-        // at WPT_COMMIT, fetched by xtask) served from the host as
-        // http://10.0.2.100/ (`serve-page` over the tree), run one page at
-        // a time in headless Chromium through ChromeDriver
-        // (`wpt_client`); each test's line goes into the serial log
-        // (`xtask: wpt: ...`), the results to target/wpt/.
+        // at WPT_COMMIT, fetched by xtask) served by WPT's own server on
+        // the host (wpt.rs), run one page at a time in headless Chromium
+        // through ChromeDriver (`wpt::client`); each test's line goes into
+        // the serial log (`xtask: wpt: ...`), the results to target/wpt/.
+        // Each session's Chrome logs to its own file (a FATAL in one
+        // stays when the next session starts), the first eight dumped.
         name: "chromium_wpt",
         cmdline: "qemu_exit run=chromedriver.exe args=--port=7%20--allowed-ips=%20--log-path=C:\\chromium\\chromedriver.log \
-                  dump=C:/chromium/chrome_driven.log",
+                  dump=C:/chromium/chromedriver.log,C:/chromium/chrome_wpt-0.log,C:/chromium/chrome_wpt-1.log,\
+                  C:/chromium/chrome_wpt-2.log,C:/chromium/chrome_wpt-3.log,C:/chromium/chrome_wpt-4.log,\
+                  C:/chromium/chrome_wpt-5.log,C:/chromium/chrome_wpt-6.log,C:/chromium/chrome_wpt-7.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["xtask: wpt: summary", "xtask: net client: wpt ok"],
     },
