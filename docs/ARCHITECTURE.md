@@ -9161,45 +9161,74 @@ ignored.
   UiaRaiseAutomationEvent / ...PropertyChangedEvent /
   ...StructureChangedEvent / UiaDisconnect(All)Provider(s) succeed doing
   nothing.
-- Providers inside programs (providers.rs): for a window node (not an
+- Providers inside programs (providers.rs). For a window node (not an
   item, menu or grid part), every property read first sends the window
   WM_GETOBJECT (wParam 0, lParam UiaRootObjectId -25), across processes
   as any message. The window answers with
   UiaReturnRawElementProvider(hwnd, wParam, lParam, its
   IRawElementProviderSimple), which AddRefs the provider into a 32-slot
-  table of the window's process and returns a cookie (1..=0xffff,
-  counting; the slot is cookie mod 32); any other object id gives 0. The
-  cookie is claimed once, which takes the reference out of the table; an
+  answer table of the window's process and returns a cookie
+  (1..=0xffff, counting; the slot is cookie mod 32); any other object id
+  gives 0, and an answer outside 1..=0xffff is recorded as
+  "WM_GETOBJECT(answer not ours)". The cookie is claimed once, by the
+  operation that uses it, which takes the reference out of the table; an
   answer never claimed is released when its slot is reused.
-  - The client's own process: the client claims it (the cookie must name
-    the same window: anything else is recorded as "WM_GETOBJECT(answer
-    not ours)"), calls GetPropertyValue and releases it.
-  - Another process: the client sends gala's GALA_UIA (0x03f3; wParam
-    the property id in the low 16 bits and the cookie in the high 16, so
-    it fits a 32-bit process's wParam; lParam a 4096-byte value buffer
-    that `foreign` marshals back). user32 there answers it itself on the
-    window's thread, as GALA_MENU: it calls UIAutomationCore's
+  - Operations: everything the client asks of a provider is an
+    operation that GalaUiaServe, in the provider's process, serves:
+    called directly when the window is the client's process's, else
+    through gala's GALA_UIA (0x03f3) sent to the window. wParam: the
+    property id (bits 0-15), the operation (16-23), a NavigateDirection
+    (24-31), a cookie or fragment handle (32-63; 64-bit processes only,
+    as 32-bit ones have no UIAutomationCore); lParam: a 4096-byte value
+    buffer that `foreign` marshals back, or 0. user32 there answers
+    GALA_UIA itself on the window's thread, as GALA_MENU, by calling
     GalaUiaServe (found with GetModuleHandle: the process made the
-    cookie, so the DLL is loaded), which claims the answer, asks the
-    provider and writes the value: vt (u16), reserved u16, a BSTR's
-    length (u32), the value (u64: VT_I4, VT_BOOL, VT_R8), the BSTR's
-    characters from byte 16 (2040 at most: longer ones are cut,
-    recorded). Other types (arrays, objects) come back VT_EMPTY
-    (recorded in the provider's process). GALA_UIA's 1 means served; 0
-    is recorded on the client ("GALA_UIA(not served)") and in the
-    provider's process (which answer it lacked).
-  A provider's value wins; VT_EMPTY (or a failed call) falls back to the
-  window's own value, which is what the host provider would give, so
-  the provider's HostRawElementProvider is not called. Conditions,
-  searches and events read properties the same way, so they see the
-  provider's values. UiaHostProviderFromHwnd makes a counted
-  IRawElementProviderSimple (ProviderOptions_ClientSideProvider, no
-  patterns, no host) whose GetPropertyValue is the window's own value
+    cookie, so the DLL is loaded; without it, 0). Operations: the root's
+    property (cookie), the root's first child (cookie: QI
+    IRawElementProviderFragment, Navigate), a fragment's property, a
+    fragment's Navigate (a handle, -1 for a fragment root: the window's
+    element, 0 for none), whether a handle is alive. A value operation's
+    0 is recorded on the client ("GALA_UIA(not served)"), and the missing
+    answer in the provider's process.
+  - The value's wire form: vt (u16), reserved u16, a count (u32), the
+    value (u64: VT_I4, VT_BOOL, VT_R8), then from byte 16 a BSTR's
+    characters (2040 at most: longer ones are cut, recorded) or a VT_I4
+    or VT_R8 vector's elements. Other types (objects, other arrays) come
+    back VT_EMPTY (recorded in the provider's process).
+  - Fragments: a window whose provider is a fragment root has, after
+    its other children, the root's FirstChild and that fragment's
+    NextSiblings (4096 at most, recorded). A fragment is a node
+    (Node::fragment: the window and a handle) naming a slot of the
+    provider's process's 1024-slot fragment table, which holds one
+    reference to each fragment handed out; the handle is the slot (10
+    bits) and a generation (22 bits), so a handle whose slot was reused
+    (round robin) names nothing and its element is not available. A
+    fragment already in the table (same IUnknown identity, same window)
+    keeps its handle, so elements for one fragment are equal
+    (CompareElements compares nodes). A fragment's parent is Navigate's
+    Parent (a fragment root: the window), its children FirstChild and
+    the siblings. Its properties: the provider's GetPropertyValue (QI
+    IRawElementProviderSimple); RuntimeId from GetRuntimeId (after the
+    host's {42, window} when it starts with UiaAppendRuntimeId; {42,
+    window, handle} when it gives none); BoundingRectangle from
+    get_BoundingRectangle; what the provider leaves empty takes the
+    defaults of a provider-only element (its window's ProcessId,
+    ControlType Custom, enabled, a control and content element, empty
+    strings, no window handle, no patterns).
+  A root provider's value wins over the window's; VT_EMPTY (or a failed
+  call) falls back to the window's own value, which is what the host
+  provider would give, so the provider's HostRawElementProvider is not
+  called. Conditions, searches and events read properties the same way,
+  so they see the provider's values. UiaHostProviderFromHwnd makes a
+  counted IRawElementProviderSimple (ProviderOptions_ClientSideProvider,
+  no patterns, no host) whose GetPropertyValue is the window's own value
   (`element::window_property`, which skips the provider). Invariant: a
-  window's provider is asked afresh for every read (no cache), so a
-  provider that changes answers is seen at once; the price is a
-  WM_GETOBJECT per read (and a GALA_UIA when the window has a provider
-  in another process).
+  provider is asked afresh for every read (no cache), so one that
+  changes answers is seen at once; the price is a WM_GETOBJECT per read
+  of a window (and an operation per read when it has a provider), and
+  for a fragment one operation per property and per step of the tree
+  (a sibling is found from the parent's children list, so walking a
+  long list of fragments is quadratic).
 
 ### Programs driven through UI Automation
 
@@ -9239,11 +9268,12 @@ ledger has no UIAutomationCore lines.
 
 TODO (ROADMAP UIA):
 
-- providers inside programs give properties only (strings, integers,
-  booleans and doubles across processes): their patterns
-  (GetPatternProvider), fragments (IRawElementProviderFragment and its
-  roots, Navigate, so a provider's children such as a web page's
-  elements) and ProviderOptions are not used; 32-bit processes have no
+- providers inside programs give properties (strings, integers,
+  booleans, doubles and their vectors across processes) and their
+  fragment tree; not their patterns (GetPatternProvider), focus
+  (GetFocus, SetFocus), ElementProviderFromPoint (ElementFromPoint
+  gives the window), embedded fragment roots or ProviderOptions;
+  provider elements raise no events; 32-bit processes have no
   UIAutomationCore, so no providers; UiaRaise* do nothing;
 - events only through IUIAutomation's own Add*EventHandler;
   IUIAutomation3..6's handlers (text edit, changes, notification,

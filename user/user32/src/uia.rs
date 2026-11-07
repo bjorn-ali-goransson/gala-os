@@ -1,8 +1,8 @@
 //! gala's UI Automation message (0x03f3, in the system range): another
 //! process's UIAutomationCore asking for a property of the provider one
-//! of our windows gave it (its WM_GETOBJECT answer). wParam: the property
-//! id in the low 16 bits, the answer's cookie in the high 16; lParam: a
-//! UIA_VALUE_SIZE buffer for the value (marshaled back by `foreign`).
+//! of our windows gave it (its WM_GETOBJECT answer) or of its fragments.
+//! wParam: the operation (UIAutomationCore's providers.rs); lParam: a
+//! UIA_VALUE_SIZE buffer for a value (marshaled back by `foreign`) or 0.
 //! user32 answers it itself, never the window procedure, by handing it to
 //! this process's UIAutomationCore (GalaUiaServe), which is loaded: it
 //! made the cookie.
@@ -33,12 +33,8 @@ type Serve = extern "system" fn(Hwnd, usize, isize) -> isize;
 static SERVE: AtomicUsize = AtomicUsize::new(0);
 
 /// GALA_UIA for our window `hwnd`: what UIAutomationCore's GalaUiaServe
-/// gave (1 a value written, 0 none: no such answer, or no
-/// UIAutomationCore in this process).
+/// gave (0 when there is no UIAutomationCore in this process).
 pub(crate) fn uia_message(hwnd: Hwnd, wparam: usize, lparam: isize) -> isize {
-    if lparam == 0 {
-        return 0;
-    }
     let mut f = SERVE.load(Ordering::Acquire);
     if f == 0 {
         let mut name = [0u16; 21];

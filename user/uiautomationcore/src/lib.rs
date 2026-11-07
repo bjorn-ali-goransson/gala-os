@@ -123,6 +123,7 @@ unsafe extern "system" {
     pub fn SafeArrayPutElement(sa: *mut c_void, index: *const i32, value: *const c_void)
     -> HResult;
     pub fn SafeArrayGetDim(sa: *mut c_void) -> u32;
+    pub fn SafeArrayDestroy(sa: *mut c_void) -> HResult;
     pub fn SafeArrayGetElemsize(sa: *mut c_void) -> u32;
     pub fn SafeArrayGetLBound(sa: *mut c_void, dim: u32, out: *mut i32) -> HResult;
     pub fn SafeArrayGetUBound(sa: *mut c_void, dim: u32, out: *mut i32) -> HResult;

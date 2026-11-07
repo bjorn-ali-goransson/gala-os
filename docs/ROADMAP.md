@@ -632,13 +632,14 @@ patterns and read their state, so one test runs on Windows and on gala
   WM_GETOBJECT answered through UiaReturnRawElementProvider, the
   provider's properties first (across processes through gala's
   GALA_UIA message), the window's (UiaHostProviderFromHwnd) where it
-  gives none (`uia_test`).
+  gives none; a fragment root's fragments as the window's descendants
+  (`uia_test`).
 
 **Next**:
-1. Providers' fragments (IRawElementProviderFragment and
-   FragmentRoot: Navigate, ElementProviderFromPoint, so a provider's
-   children are elements: Chromium's accessibility tree for BR stage 2,
-   wx and Qt) and patterns (GetPatternProvider: Invoke, Value).
+1. Providers' patterns (GetPatternProvider: Invoke, Value, Toggle,
+   ExpandCollapse, Selection), ElementProviderFromPoint and GetFocus;
+   then Chromium's accessibility tree read through them (BR stage 2:
+   FlaUI reading the page).
 2. IUIAutomation3..6's event handlers and handler groups.
 3. Combo box and tree-view items, GetParent of owned popups, the system
    menu in the title bar.

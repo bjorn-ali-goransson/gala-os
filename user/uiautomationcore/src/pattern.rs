@@ -63,6 +63,10 @@ const ES_READONLY: u32 = 0x0800;
 /// Whether the element has the pattern.
 pub fn supports(n: Node, id: i32) -> bool {
     let h = n.hwnd;
+    if n.menu == element::FRAGMENT {
+        // A provider's fragment: its patterns are not used yet.
+        return false;
+    }
     if grid::supports(n, id) {
         return true;
     }
