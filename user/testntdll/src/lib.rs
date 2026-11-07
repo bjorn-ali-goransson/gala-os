@@ -594,6 +594,16 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
     if let Search::Dir(dir) = search {
         return open_dll(dir, dll);
     }
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: the directory of the DLL being
+    // loaded, first, for every dependency of this load.
+    // SAFETY: under the loader lock (as `map_dll` is).
+    let (load_dir, load_len) = unsafe { *LOAD_DIR.0.get() };
+    if load_len != 0 {
+        match open_dll(&load_dir[..load_len], dll) {
+            Err(STATUS_DLL_NOT_FOUND) => {}
+            other => return other,
+        }
+    }
     let system32_only = matches!(search, Search::System32);
     let image_path = image_path();
     let dir_len = image_path.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
@@ -630,6 +640,12 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
     }
     open_dll(&system32[..n], dll)
 }
+
+/// The directory LdrLoadDll's LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR adds in
+/// front of the search for the dependencies of the DLL it loads (ends
+/// with a backslash; empty: none), set for that call, under the loader
+/// lock.
+static LOAD_DIR: DllDirectory = DllDirectory(core::cell::UnsafeCell::new(([0; MAX_PATH], 0)));
 
 /// SetDllDirectory's directory (ends with a backslash; empty: none), used
 /// under the loader lock.
@@ -1594,7 +1610,9 @@ fn unicode_name(name: *const UnicodeString, out: &mut [u8; MAX_NAME]) -> Result<
 }
 
 /// LdrLoadDll(DllPath, DllCharacteristics, DllName, DllHandle): loads a DLL
-/// from the executable's directory (the search path is ignored).
+/// (a path's from its directory; a name from the executable's, then
+/// System32), its dependencies first from the DLL's own directory with
+/// LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.
 ///
 /// # Safety
 /// `name` must be a valid UNICODE_STRING and `handle` writable.
@@ -1615,8 +1633,24 @@ unsafe extern "system" fn ldr_load_dll(
         None if flags & LOAD_LIBRARY_SEARCH_SYSTEM32 != 0 => Search::System32,
         None => Search::Default,
     };
+    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: usize = 0x100;
+    // SAFETY: under the loader lock (LdrLoadDll holds it); the outer
+    // load's directory is kept for a DllMain that loads another DLL.
+    let saved = unsafe { *LOAD_DIR.0.get() };
+    if let Some(d) =
+        dir.filter(|d| flags & LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR != 0 && d.len() <= MAX_PATH)
+    {
+        // SAFETY: as above.
+        unsafe {
+            let slot = &mut *LOAD_DIR.0.get();
+            slot.0[..d.len()].copy_from_slice(d);
+            slot.1 = d.len();
+        }
+    }
     let mut buf = [0u8; MAX_NAME];
     let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n], search));
+    // SAFETY: as above.
+    unsafe { *LOAD_DIR.0.get() = saved };
     match loaded {
         Ok(slot) => {
             // SAFETY: the caller passes a writable handle.

@@ -44,7 +44,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     PathCchCombine
     PathCchRemoveBackslash
     PathCchRemoveExtension
-    PathCchRemoveFileSpec
     PrepareTape
     QueueUserWorkItem
     ReadConsoleOutputA

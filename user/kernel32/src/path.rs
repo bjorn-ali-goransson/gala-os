@@ -5,6 +5,7 @@
 use super::*;
 
 const S_OK: i32 = 0;
+const S_FALSE: i32 = 1;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 /// HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER).
 const HR_INSUFFICIENT_BUFFER: i32 = 0x8007_007au32 as i32;
@@ -194,6 +195,32 @@ pub extern "system" fn PathCchCombineEx(
         core::ptr::copy_nonoverlapping(canon.as_ptr(), out, len);
         *out.add(len) = 0;
     }
+    S_OK
+}
+
+/// PathCchRemoveFileSpec(pszPath, cchPath): removes the last element, file
+/// or directory, with the backslash before it, never the root (`C:\a` is
+/// `C:\`); S_OK when something was removed, S_FALSE when not (a root
+/// alone, an empty path); E_INVALIDARG for no path or a size of 0 or over
+/// PATHCCH_MAX_CCH.
+#[unsafe(no_mangle)]
+pub extern "system" fn PathCchRemoveFileSpec(path: *mut u16, cch: usize) -> i32 {
+    if path.is_null() || cch == 0 || cch > PATHCCH_MAX_CCH {
+        return E_INVALIDARG;
+    }
+    let p = chars(path);
+    let root = root_len(p).unwrap_or(0);
+    if p.len() <= root {
+        return S_FALSE;
+    }
+    // The last backslash after the root ends the kept part; with none, the
+    // root (or nothing, for a relative name) stays.
+    let end = match p[root..].iter().rposition(|&c| c == SLASH) {
+        Some(i) => root + i,
+        None => root,
+    };
+    // SAFETY: `end` is within the caller's string.
+    unsafe { *path.add(end) = 0 };
     S_OK
 }
 

@@ -3,7 +3,8 @@
 //! CreateFileW (CREATE_NEW, OPEN_EXISTING, directories with
 //! FILE_FLAG_BACKUP_SEMANTICS), WriteFile/ReadFile/SetFilePointerEx,
 //! GetFileInformationByHandle, GetFileSizeEx, GetFileAttributes(Ex)W,
-//! FindFirstFileW/FindNextFileW, GetFileInformationByHandleEx's directory
+//! FindFirstFileW/FindNextFileW (DOS wildcards: `*.*` lists names
+//! without a dot too), GetFileInformationByHandleEx's directory
 //! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
 //! GetFileTime/SetFileTime (each time its own, the access time too),
 //! GetFullPathNameW, GetShortPathNameW,
@@ -414,6 +415,52 @@ fn run() -> Result<(), u32> {
         c.ok(seen, 0)?;
         c.eq(GetLastError().into(), ERROR_NO_MORE_FILES.into())?;
         c.ok(FindClose(f) != 0, 0)?;
+
+        // Win32 patterns are DOS wildcards: `*.*` lists every name, ones
+        // without a dot too (CPython lists its Lib so), `*.txt` only that
+        // extension, `?` one character, `a.b*` a prefix with a dot.
+        for name in [&b"gala_k32\\noext"[..], b"gala_k32\\a.b.c"] {
+            let h = CreateFileW(
+                Path::new(temp, name).ptr(),
+                GENERIC_WRITE,
+                SHARE_ALL,
+                core::ptr::null_mut(),
+                2, // CREATE_ALWAYS
+                0,
+                core::ptr::null_mut(),
+            );
+            c.ok(h != INVALID_HANDLE_VALUE, GetLastError().into())?;
+            CloseHandle(h);
+        }
+        for (pattern, want) in [
+            (&b"gala_k32\\*.*"[..], 0b111u32),
+            (b"gala_k32\\*.txt", 0b001),
+            (b"gala_k32\\?.txt", 0b001),
+            (b"gala_k32\\no?xt", 0b010),
+            (b"gala_k32\\a.b*", 0b100),
+            (b"gala_k32\\*.c", 0b100),
+        ] {
+            let f = FindFirstFileW(Path::new(temp, pattern).ptr(), find.as_mut_ptr());
+            c.ok(f != INVALID_HANDLE_VALUE, GetLastError().into())?;
+            let mut got = 0u32;
+            loop {
+                let name = &find[22..];
+                let len = name.iter().position(|&ch| ch == 0).unwrap_or(0);
+                for (bit, known) in [&b"a.txt"[..], b"noext", b"a.b.c"].iter().enumerate() {
+                    if names_eq(&name[..len], known) {
+                        got |= 1 << bit;
+                    }
+                }
+                if FindNextFileW(f, find.as_mut_ptr()) == 0 {
+                    break;
+                }
+            }
+            FindClose(f);
+            c.eq(got.into(), want.into())?;
+        }
+        for name in [&b"gala_k32\\noext"[..], b"gala_k32\\a.b.c"] {
+            c.ok(DeleteFileW(Path::new(temp, name).ptr()) != 0, GetLastError().into())?;
+        }
 
         // The directory as a handle: volume flags and Go's listing classes.
         let d = CreateFileW(

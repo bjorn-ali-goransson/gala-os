@@ -7,6 +7,8 @@
 //! - PathCchCombineEx: joined and canonicalized ("..", an absolute or a
 //!   rooted second path); a buffer too small is
 //!   HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER).
+//! - PathCchRemoveFileSpec: the last element goes, never the root
+//!   (S_FALSE when nothing was removed).
 //! - NeedCurrentDirectoryForExePathW: TRUE for a bare name unless
 //!   NoDefaultCurrentDirectoryInExePath is set; TRUE for a name with a
 //!   backslash either way.
@@ -25,6 +27,8 @@
 //! - VerifyVersionInfoA (what _socket.pyd imports): OSVERSIONINFOEXA's
 //!   layout (156 bytes); major version >= 6 holds, >= 99 is FALSE with
 //!   ERROR_OLD_WIN_VERSION.
+//! - SetHandleCount (distlib's script launcher, pip's console scripts):
+//!   no effect, returns the number given.
 //!
 //! Prints `kernel32_py_test: ok` or exits with the number of the failing
 //! check.
@@ -94,6 +98,7 @@ unsafe extern "system" {
     fn PssQuerySnapshot(snapshot: Handle, class: u32, buf: *mut u8, len: u32) -> u32;
     fn PssFreeSnapshot(process: Handle, snapshot: Handle) -> u32;
     fn VerifyVersionInfoA(info: *mut u8, type_mask: u32, condition: u64) -> Bool;
+    fn SetHandleCount(number: u32) -> u32;
     fn VerSetConditionMask(mask: u64, type_mask: u32, condition: u8) -> u64;
     fn ExitProcess(code: u32) -> !;
 }
@@ -101,6 +106,7 @@ unsafe extern "system" {
 #[link(name = "api-ms-win-core-path-l1-1-0", kind = "raw-dylib")]
 unsafe extern "system" {
     fn PathCchSkipRoot(path: *const u16, root_end: *mut *const u16) -> i32;
+    fn PathCchRemoveFileSpec(path: *mut u16, cch: usize) -> i32;
     fn PathCchCombineEx(out: *mut u16, cch: usize, a: *const u16, b: *const u16, flags: u32)
     -> i32;
 }
@@ -246,6 +252,23 @@ fn paths(c: &mut Checks) -> Result<(), u32> {
         c.eq(combine(&mut buf, w!("C:\\a\\b"), w!("\\y"), 64), 0)?;
         c.ok(is(buf.as_ptr(), b"C:\\y"), 0)?;
         c.eq(combine(&mut buf, w!("C:\\a"), w!("bcdef"), 5), HR_INSUFFICIENT_BUFFER.into())?;
+
+        // PathCchRemoveFileSpec (venv's base interpreter): the last element
+        // and its backslash go, never the root; S_FALSE (1) when nothing
+        // was removed.
+        for (path, want, status) in [
+            ("C:\\a\\b.txt", &b"C:\\a"[..], 0u64),
+            ("C:\\a", b"C:\\", 0),
+            ("C:\\", b"C:\\", 1),
+            ("a\\b", b"a", 0),
+        ] {
+            let mut p = [0u16; 64];
+            for (d, s) in p.iter_mut().zip(path.bytes()) {
+                *d = u16::from(s);
+            }
+            c.eq(PathCchRemoveFileSpec(p.as_mut_ptr(), 64) as u32 as u64, status)?;
+            c.ok(is(p.as_ptr(), want), 0)?;
+        }
 
         c.ok(NeedCurrentDirectoryForExePathW(w!("python.exe")) != 0, 0)?;
         c.ok(NeedCurrentDirectoryForExePathW(w!("x\\python.exe")) != 0, 0)?;
@@ -420,7 +443,12 @@ fn run() -> Result<(), u32> {
     copy(&mut c)?;
     timer_and_pipe(&mut c)?;
     snapshots(&mut c)?;
-    versions(&mut c)
+    versions(&mut c)?;
+    // SetHandleCount (what distlib's script launcher, pip's console
+    // scripts, imports): no effect, returns the number given.
+    // SAFETY: a plain call.
+    c.eq(unsafe { SetHandleCount(50) }.into(), 50)?;
+    c.eq(unsafe { SetHandleCount(0) }.into(), 0)
 }
 
 #[unsafe(no_mangle)]

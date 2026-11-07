@@ -468,13 +468,19 @@ boot-test <name>`, see "Pending scenarios" below):
    pointer and WSAStringToAddressA/W (`winsock_test`); a request failing
    in its call writes no status block, sets no event; a zero-byte pipe
    read waits for data; GetOverlappedResult on NT_SUCCESS (`pipe_test`).
-   Next: pip and venv on the full CPython layout (the NuGet `python`
-   package 3.13.1 has pip 24.3.1 and the venv launchers; the embeddable
-   one has neither): `pip install` of a local wheel (its RECORD and a
-   script launcher .exe), then from an index over https (CPython's own
-   OpenSSL, so its certificate store is what matters); `python -m venv`
-   and its launcher.
-   Its ledger (optional probes): kernelbase.dll and
+   `python_pip` (the full layout: NuGet's `python` package, PREBUILT
+   `python-full`): pip 24.3.1 installs a wheel the script builds, the
+   console script runs through distlib's launcher .exe, `pip list`,
+   `python -m venv` and the venv's launcher. Their gaps: Win32 patterns
+   as DOS wildcards (`*.*` lists dot-less names; `kernel32_file_test`,
+   `ramfs` host tests), LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (`loader_test`),
+   SetHandleCount and PathCchRemoveFileSpec (`kernel32_py_test`),
+   shell32 and crypt32 shipped. Next: `pip install` from an index over
+   https (CPython's own OpenSSL, its certificate store from crypt32's
+   ROOT store), a venv with pip (ensurepip), packages with C extensions
+   (numpy's wheels).
+   Its ledger (optional probes): propsys.dll (from shell32),
+   kernelbase.dll and
    api-ms-win-appmodel-runtime-l1-1-2 (absent), NtAllocateVirtualMemoryEx,
    GetNumaNodeProcessorMaskEx, GetFileInformationByName,
    GetFileInformationByHandleEx class 18. Not yet seen loading:

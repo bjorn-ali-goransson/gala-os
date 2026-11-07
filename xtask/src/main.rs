@@ -110,6 +110,18 @@ const PREBUILT: &[Prebuilt] = &[
         members: &[],
         excludes: &[],
     },
+    // CPython 3.13.1's full layout for x64: NuGet's `python` package
+    // (the one python.org publishes for build machines; SHA-256 measured,
+    // nuget.org verifies its packages by signature): the standard library
+    // as files with pip 24.3.1 in site-packages, distlib's script
+    // launchers and venv's launcher, which the embeddable one lacks.
+    Prebuilt {
+        name: "python-full",
+        url: "https://api.nuget.org/v3-flatcontainer/python/3.13.1/python.3.13.1.nupkg",
+        checksum: "eba9c88a4b0bed9a1b48a18910f10db066eebf27b58443f329775d15984ac2df",
+        members: &["tools/*"],
+        excludes: &[],
+    },
     Prebuilt {
         name: "pwsh",
         url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.zip",
@@ -633,6 +645,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("loader_test", "ntdll.dll", "Windows/System32"),
     ("loader_test", "testdll.dll", "gala"),
     ("loader_test", "testdll2.dll", "gala"),
+    ("loader_test", "testdll.dll", "gala/sub"),
+    ("loader_test", "testdll2.dll", "gala/sub"),
     ("smpsched_test", "ntdll.dll", "Windows/System32"),
     ("smpmem_test", "ntdll.dll", "Windows/System32"),
     ("smpcow_test", "ntdll.dll", "Windows/System32"),
@@ -1712,9 +1726,32 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("python_hello", "msvcrt.dll", "Windows/System32"),
     ("python_hello", "ole32.dll", "Windows/System32"),
     ("python_hello", "oleaut32.dll", "Windows/System32"),
+    ("python_hello", "crypt32.dll", "Windows/System32"),
     ("python_script", "user/python/python_test.py", "gala"),
     ("python_async", "user/python/python_async.py", "gala"),
     ("python_mp", "user/python/python_mp.py", "gala"),
+    // P1 step 6: pip and venv on the full CPython layout (PREBUILT
+    // `python-full`) in C:\python, as python_hello's.
+    ("python_pip", "target/prebuilt/python-full/tools/", "python"),
+    ("python_pip", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_pip", "ntdll.dll", "Windows/System32"),
+    ("python_pip", "kernel32.dll", "Windows/System32"),
+    ("python_pip", "advapi32.dll", "Windows/System32"),
+    ("python_pip", "version.dll", "Windows/System32"),
+    ("python_pip", "ws2_32.dll", "Windows/System32"),
+    ("python_pip", "mswsock.dll", "Windows/System32"),
+    ("python_pip", "bcrypt.dll", "Windows/System32"),
+    ("python_pip", "bcryptprimitives.dll", "Windows/System32"),
+    ("python_pip", "iphlpapi.dll", "Windows/System32"),
+    ("python_pip", "rpcrt4.dll", "Windows/System32"),
+    ("python_pip", "user32.dll", "Windows/System32"),
+    ("python_pip", "msvcrt.dll", "Windows/System32"),
+    ("python_pip", "ole32.dll", "Windows/System32"),
+    ("python_pip", "oleaut32.dll", "Windows/System32"),
+    ("python_pip", "crypt32.dll", "Windows/System32"),
+    ("python_pip", "shell32.dll", "Windows/System32"),
+    ("python_pip", "shlwapi.dll", "Windows/System32"),
+    ("python_pip", "user/python/python_pip.py", "gala"),
     ("pwsh", "target/prebuilt/pwsh/", "pwsh"),
     ("pwsh", "ntdll.dll", "Windows/System32"),
     ("pwsh", "kernel32.dll", "Windows/System32"),
@@ -6615,6 +6652,16 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_async.py",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["python_async: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: pip and venv (the full CPython layout): pip installs a
+        // wheel the script builds, its console-script launcher runs,
+        // `python -m venv` and the venv's launcher;
+        // user/python/python_pip.py, as on Windows.
+        name: "python_pip",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_pip.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_pip: ok", "python.exe finished with status 0x00000000"],
     },
     Scenario {
         // P1 step 6: multiprocessing (spawned children over inherited

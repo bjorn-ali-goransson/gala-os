@@ -20,8 +20,12 @@
 //! RTL_UNLOAD_EVENT_TRACE's 100 bytes), the count, and the address of the
 //! pointer to the array; after testdll2 and testdll are unloaded the
 //! array holds both (base, image size, name), testdll's sequence after
-//! testdll2's. Prints `loader_test: ok` or exits with the number of the
-//! failing check.
+//! testdll2's.
+//!
+//! A DLL loaded by path takes its dependencies from the usual places, or
+//! with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR from its own directory first
+//! (copies of both DLLs in C:\gala\sub). Prints `loader_test: ok` or
+//! exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -398,6 +402,29 @@ fn run() -> Result<(), u32> {
     c.ok(seq2.is_some(), 0)?;
     c.ok(seq.is_some(), 0)?;
     c.ok(seq > seq2, u64::from(seq.unwrap_or(0)))?;
+
+    // A DLL loaded by path: its dependencies come from the usual places
+    // (testdll next to the exe), or, with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+    // (0x100, passed in DllPath with its low bit set, as LoadLibraryExW
+    // does), from the DLL's own directory first (C:\gala\sub's testdll;
+    // CPython loads _ctypes.pyd and its libffi-8.dll from DLLs so).
+    let sub2 = wide!("C:\\gala\\sub\\testdll2.dll");
+    for (flags, dir) in [(0usize, "\\gala\\testdll.dll"), (0x101, "\\sub\\testdll.dll")] {
+        let mut dll2 = 0;
+        let path = if flags == 0 { core::ptr::null() } else { flags as *const u16 };
+        let s = (api.load)(path, core::ptr::null(), &UnicodeString::new(&sub2), &mut dll2);
+        c.eq(s.into(), STATUS_SUCCESS.into())?;
+        let (s, dep) = api.handle(&wide!("testdll.dll"));
+        c.eq(s.into(), STATUS_SUCCESS.into())?;
+        let mut buf = [0u8; 600];
+        c.ok(
+            mapped_file_name(dep, &mut buf).is_ok_and(|name| ends_with_ci(name, dir)),
+            flags as u64,
+        )?;
+        c.eq((api.unload)(dll2).into(), STATUS_SUCCESS.into())?;
+        let (s, _) = api.handle(&wide!("testdll.dll"));
+        c.eq(s.into(), STATUS_DLL_NOT_FOUND.into())?;
+    }
     Ok(())
 }
 

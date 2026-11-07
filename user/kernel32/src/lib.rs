@@ -686,10 +686,12 @@ pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32
     // data file, 2 for an image resource), as LDR_IS_DATAFILE and
     // LDR_IS_IMAGEMAPPING test them.
     const DATA_FLAGS: u32 = 0x2 | 0x20 | 0x40;
-    // LOAD_WITH_ALTERED_SEARCH_PATH (8): a path's DLL is loaded from there;
-    // its dependencies are looked for in the usual places (TODO: its own
-    // directory first, as Windows does).
+    // LOAD_WITH_ALTERED_SEARCH_PATH (8): a path's DLL is loaded from there
+    // and its dependencies are looked for in its directory first (passed
+    // on as LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR; Windows then skips the
+    // executable's directory, gala looks there after).
     const ALTERED: u32 = 0x8;
+    const DLL_LOAD_DIR: u32 = 0x100;
     if !file.is_null() || flags & !(SEARCH_FLAGS | DATA_FLAGS | ALTERED) != 0 {
         unsupported(b"kernel32.dll!LoadLibraryExW(flags)", u64::from(flags));
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
@@ -700,6 +702,7 @@ pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32
             Err(e) => fail_with(e, core::ptr::null_mut()),
         };
     }
+    let altered = flags & ALTERED != 0;
     let flags = flags & !ALTERED;
     // No search flags: those of SetDefaultDllDirectories, if any.
     let flags = if flags & SEARCH_FLAGS == 0 {
@@ -716,8 +719,11 @@ pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32
     }
     // LOAD_LIBRARY_SEARCH_SYSTEM32 alone restricts the search to System32;
     // the default-directories flags include the application directory.
-    let search = if flags & SEARCH_FLAGS == 0x800 { 0x800 } else { 0 };
-    load_library(name, wide_len(name), search)
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR goes to the loader as is: the
+    // directory of a DLL given by path, first, for its dependencies.
+    let system32 = if flags & SEARCH_FLAGS & !DLL_LOAD_DIR == 0x800 { 0x800 } else { 0 };
+    let load_dir = if altered || flags & DLL_LOAD_DIR != 0 { DLL_LOAD_DIR } else { 0 };
+    load_library(name, wide_len(name), system32 | load_dir)
 }
 
 /// SetDefaultDllDirectories' flags (0: none set).
@@ -1810,8 +1816,27 @@ fn next_entry(directory: Handle, mask: Option<&UnicodeString>, data: *mut u16) -
     Ok(())
 }
 
+/// A Win32 pattern as the NT wildcards that keep its DOS meaning: `?`
+/// becomes DOS_QM (`>`), a `.` before `?` or `*` DOS_DOT (`"`), a `*`
+/// before `.` DOS_STAR (`<`); so `*.*` (`<"*`) matches names without a
+/// dot too, and `*.txt` only that extension. The length written to `out`.
+fn dos_wildcards(mask: &[u16], out: &mut [u16]) -> usize {
+    let n = mask.len().min(out.len());
+    for i in 0..n {
+        let next = mask.get(i + 1).copied();
+        let (star, dot, qm) = (u16::from(b'*'), u16::from(b'.'), u16::from(b'?'));
+        out[i] = match mask[i] {
+            c if c == qm => u16::from(b'>'),
+            c if c == dot && (next == Some(qm) || next == Some(star)) => u16::from(b'"'),
+            c if c == star && next == Some(dot) => u16::from(b'<'),
+            c => c,
+        };
+    }
+    n
+}
+
 /// FindFirstFileW: opens the pattern's directory and returns the first
-/// entry matching its last component.
+/// entry matching its last component (`dos_wildcards`).
 #[unsafe(no_mangle)]
 pub extern "system" fn FindFirstFileW(pattern: *const u16, data: *mut u16) -> Handle {
     let full = match full_path(wide_slice(pattern)) {
@@ -1835,10 +1860,12 @@ pub extern "system" fn FindFirstFileW(pattern: *const u16, data: *mut u16) -> Ha
         Ok(o) => o,
         Err(e) => return fail_with(e, INVALID_HANDLE_VALUE),
     };
+    let mut dos = [0u16; MAX_PATH_CHARS + 1];
+    let n = dos_wildcards(mask, &mut dos);
     let mask = UnicodeString {
-        length: (mask.len() * 2) as u16,
-        maximum_length: (mask.len() * 2) as u16,
-        buffer: mask.as_ptr(),
+        length: (n * 2) as u16,
+        maximum_length: (n * 2) as u16,
+        buffer: dos.as_ptr(),
     };
     if let Err(e) = next_entry(directory, Some(&mask), data) {
         CloseHandle(directory);
@@ -1949,6 +1976,14 @@ static WER_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32:
 #[unsafe(no_mangle)]
 pub extern "system" fn SetErrorMode(mode: u32) -> u32 {
     ERROR_MODE.swap(mode, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// SetHandleCount: obsolete (a 16-bit Windows limit); no effect, returns
+/// the number given, as documented. distlib's script launchers (pip's
+/// console-script .exe files) import it.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetHandleCount(number: u32) -> u32 {
+    number
 }
 
 #[unsafe(no_mangle)]

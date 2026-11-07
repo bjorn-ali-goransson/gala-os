@@ -60,6 +60,16 @@ def build_wheel(directory):
     return wheel
 
 
+def layout():
+    import ctypes
+
+    check("ctypes", ctypes.windll.kernel32.GetCurrentProcessId(), os.getpid())
+    # Where pip keeps its cache: the shell's known folder.
+    buf = ctypes.create_unicode_buffer(260)
+    check("SHGetFolderPathW", ctypes.windll.shell32.SHGetFolderPathW(None, 28, None, 0, buf), 0)  # CSIDL_LOCAL_APPDATA
+    check("local appdata", os.path.normcase(buf.value), os.path.normcase(os.environ["LOCALAPPDATA"]))
+
+
 def pip_version():
     out = run(sys.executable, "-m", "pip", "--version")
     check("pip --version", (out.returncode, out.stdout.split()[:2]), (0, ["pip", "24.3.1"]))
@@ -98,6 +108,7 @@ def venv(work):
 
 def main():
     print(f"python_pip: Python {sys.version.split()[0]} on {sys.platform}")
+    layout()
     pip_version()
     with tempfile.TemporaryDirectory() as work:
         pip_install(work)

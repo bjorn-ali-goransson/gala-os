@@ -1503,7 +1503,15 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   `DirScan` (mask fixed by the first query, "." and ".." outside the
   root, then children in NTFS collation order, resuming after the last
   returned name); an empty first result is STATUS_NO_SUCH_FILE, later
-  ones STATUS_NO_MORE_FILES.
+  ones STATUS_NO_MORE_FILES. The mask matches as FsRtlIsNameInExpression
+  does: `*` and `?`, and the DOS forms kernel32's FindFirstFileW makes of
+  a Win32 pattern (`?` to DOS_QM `>`, a `.` before `?` or `*` to DOS_DOT
+  `"`, a `*` before `.` to DOS_STAR `<`): DOS_STAR takes any run up to
+  the name's final period, DOS_QM one character or none at a period or
+  the end, DOS_DOT a period or none at the end. So `*.*` lists every name
+  (CPython lists its Lib so: `encodings` has no dot) while NT's own
+  `*.*` keeps its literal period (`ramfs::wildcard_match`, a set of mask
+  positions, no backtracking).
 - **Rename and delete**: FileRenameInformation (DELETE access) moves the
   node; FILE_DELETE_ON_CLOSE needs DELETE and takes effect when that open
   closes.
@@ -2280,9 +2288,13 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   directory (LdrSetDllDirectory, kept under the loader lock), then
   `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A name with an
   absolute directory (`C:\jdk\bin\server\jvm.dll`) is loaded from that
-  directory only; its imports are searched as usual.
-  LOAD_WITH_ALTERED_SEARCH_PATH loads normally (TODO: the DLL's own
-  directory first for its dependencies).
+  directory only; its imports are searched as usual, or, with
+  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (LdrLoadDll's DllPath with its low bit
+  set, from LoadLibraryExW), first in that directory, for every
+  dependency of that load (CPython loads `DLLs\_ctypes.pyd` and its
+  `libffi-8.dll` so). LOAD_WITH_ALTERED_SEARCH_PATH is passed on as that
+  flag (Windows also leaves the executable's directory out then; gala
+  looks there after).
 - **API sets** (`api-ms-win-*`) are resolved in name normalization, as
   the schema does on Windows whatever files exist: `crt-` sets to
   ucrtbase, `core-com-`/`core-winrt-` to ole32 (no combase),

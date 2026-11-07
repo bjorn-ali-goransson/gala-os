@@ -417,32 +417,68 @@ pub fn collate(a: &[u16], b: &[u16]) -> core::cmp::Ordering {
     a.iter().map(|&c| fold(c)).cmp(b.iter().map(|&c| fold(c)))
 }
 
-/// Case-insensitive wildcard match: `*` any run, `?` one unit, and the DOS
-/// forms `<` (as `*`), `>` (as `?`) and `"` (as `.`).
+/// Case-insensitive wildcard match (FsRtlIsNameInExpression's rules): `*`
+/// any run, `?` one unit, and the DOS forms kernel32 makes of Win32
+/// patterns: `<` (DOS_STAR) any run up to the name's final period,
+/// `>` (DOS_QM) one unit, or none at a period or the end of the name,
+/// `"` (DOS_DOT) a period, or none at the end. Run as a set of mask
+/// positions (an NFA, no backtracking); a mask over 319 units matches
+/// nothing (names are at most 255).
 pub fn wildcard_match(mask: &[u16], name: &[u16]) -> bool {
-    const STAR: [u16; 2] = [b'*' as u16, b'<' as u16];
-    const QM: [u16; 2] = [b'?' as u16, b'>' as u16];
-    let (mut m, mut n) = (0, 0);
-    // Backtracking point: (mask index after the star, name index).
-    let mut star: Option<(usize, usize)> = None;
-    while n < name.len() {
-        let unit = |c: u16| if c == u16::from(b'"') { u16::from(b'.') } else { c };
-        if m < mask.len() && STAR.contains(&mask[m]) {
-            star = Some((m + 1, n));
-            m += 1;
-        } else if m < mask.len() && (QM.contains(&mask[m]) || fold(unit(mask[m])) == fold(name[n]))
-        {
-            m += 1;
-            n += 1;
-        } else if let Some((sm, sn)) = star {
-            m = sm;
-            n = sn + 1;
-            star = Some((sm, sn + 1));
-        } else {
+    const WORDS: usize = 5;
+    type Set = [u64; WORDS];
+    if mask.len() >= WORDS * 64 {
+        return false;
+    }
+    let (star, dos_star, qm, dos_qm, dos_dot, dot) =
+        (b'*' as u16, b'<' as u16, b'?' as u16, b'>' as u16, b'"' as u16, b'.' as u16);
+    let has = |s: &Set, m: usize| s[m / 64] & (1 << (m % 64)) != 0;
+    let add = |s: &mut Set, m: usize| s[m / 64] |= 1 << (m % 64);
+    // Positions reachable without consuming name[n] (or at the end).
+    let closure = |s: &mut Set, n: usize| {
+        let at_end = n == name.len();
+        for (m, &c) in mask.iter().enumerate() {
+            if !has(s, m) {
+                continue;
+            }
+            let skip = c == star
+                || c == dos_star
+                || (c == dos_qm && (at_end || name[n] == dot))
+                || (c == dos_dot && at_end);
+            if skip {
+                add(s, m + 1);
+            }
+        }
+    };
+    let mut set: Set = [0; WORDS];
+    add(&mut set, 0);
+    closure(&mut set, 0);
+    for n in 0..name.len() {
+        let unit = name[n];
+        // DOS_STAR stops at the final period (it may take earlier ones).
+        let final_dot = unit == dot && !name[n + 1..].contains(&dot);
+        let mut next: Set = [0; WORDS];
+        for (m, &c) in mask.iter().enumerate() {
+            if !has(&set, m) {
+                continue;
+            }
+            if c == star || (c == dos_star && !final_dot) {
+                add(&mut next, m);
+            } else if c == qm
+                || (c == dos_qm && unit != dot)
+                || (c == dos_dot && unit == dot)
+                || (c != dos_star && c != dos_qm && c != dos_dot && fold(c) == fold(unit))
+            {
+                add(&mut next, m + 1);
+            }
+        }
+        if next.iter().all(|&w| w == 0) {
             return false;
         }
+        set = next;
+        closure(&mut set, n + 1);
     }
-    mask[m..].iter().all(|c| STAR.contains(c))
+    has(&set, mask.len())
 }
 
 pub fn has_wildcards(mask: &[u16]) -> bool {
@@ -1889,6 +1925,25 @@ mod tests {
         assert!(!m("a*b*c", "aXXbYY"));
         assert!(m("B.TXT", "b.txt"));
         assert!(m("<.txt", "x.txt"));
+        // kernel32's `*.*` (`<"*`): every name, with or without a dot.
+        for name in ["noext", "a.txt", "a.b.c", ".hidden", "x."] {
+            assert!(m("<\"*", name), "{name}");
+        }
+        // `*.c` (`<.c`): DOS_STAR takes earlier periods, not the last.
+        assert!(m("<.c", "a.b.c"));
+        assert!(!m("<.c", "a.c.d"));
+        assert!(!m("<.txt", "b.txt.bak"));
+        // DOS_QM: one unit, or none at a period or the end.
+        assert!(m(">.txt", "a.txt"));
+        assert!(m(">>>.txt", "a.txt"));
+        assert!(!m(">.txt", "ab.txt"));
+        assert!(m("ab>>", "ab"));
+        // DOS_DOT: a period, or none at the end.
+        assert!(m("abc\"*", "abc"));
+        assert!(m("abc\"*", "abc.d"));
+        assert!(!m("abc\"*", "abcd"));
+        // NT's plain `*.*` keeps its literal period.
+        assert!(!m("*.*", "noext"));
         assert!(!has_wildcards(&w("plain.txt")));
         assert!(has_wildcards(&w("p?ain")));
     }
