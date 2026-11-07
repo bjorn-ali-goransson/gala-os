@@ -49,6 +49,9 @@
  *   SHGetPathFromIDListW (none for CSIDL_DRIVES), SHGetMalloc.
  * - mpr's WNetGetConnectionW: ERROR_NOT_CONNECTED for C:, ERROR_BAD_DEVICE
  *   for a name that is no device.
+ * - The posted-message queue is first in, first out: three posted, one
+ *   taken, one more posted; the rest come out in posting order (a freed
+ *   place in the queue does not put the newest first).
  * - Hooks: SetWindowsHookExW for the calling thread returns a handle;
  *   the newest hook is called first and CallNextHookEx passes on to the
  *   older one (0 after the last). WH_CBT: HCBT_CREATEWND before the
@@ -1349,6 +1352,18 @@ static void wnet(void) {
     CHECK(WNetCancelConnection2W(L"Z:", 0, FALSE) == ERROR_NOT_CONNECTED);
 }
 
+/* Posted messages come out in the order they were posted. */
+static void posted_order(void) {
+    MSG m;
+    for (int i = 1; i <= 3; i++)
+        CHECK(PostMessageW(NULL, WM_APP + 7, i, 0));
+    CHECK(PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE) && m.wParam == 1);
+    CHECK(PostMessageW(NULL, WM_APP + 7, 4, 0));
+    for (int i = 2; i <= 4; i++)
+        CHECK(PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE) && m.wParam == (WPARAM)i);
+    CHECK(!PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE));
+}
+
 int main(void) {
     bitmaps();
     wnet();
@@ -1356,6 +1371,7 @@ int main(void) {
     file_info();
     clipboard_formats();
     hooks();
+    posted_order();
     redraw();
     unknown_class();
     classes();

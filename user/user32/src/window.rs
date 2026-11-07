@@ -348,10 +348,13 @@ pub struct Msg {
     pub private: u32,
 }
 
+/// A posted message waiting in the queue. `seq` orders the queue: the
+/// slots are reused in any order, and messages come out oldest first.
 #[derive(Clone, Copy)]
 struct Queued {
     used: bool,
     thread: u32,
+    seq: u64,
     msg: Msg,
 }
 
@@ -417,6 +420,8 @@ pub(crate) struct State {
     pub(crate) classes: [Class; MAX_CLASSES],
     pub(crate) windows: [Window; MAX_WINDOWS],
     queue: [Queued; QUEUE],
+    /// Messages posted so far (the next one's `seq`).
+    posted: u64,
     pub(crate) next_atom: u16,
 }
 
@@ -433,7 +438,8 @@ static SHARED: Shared = Shared {
     state: UnsafeCell::new(State {
         classes: [NO_CLASS; MAX_CLASSES],
         windows: [NO_WINDOW; MAX_WINDOWS],
-        queue: [Queued { used: false, thread: 0, msg: NO_MSG }; QUEUE],
+        queue: [Queued { used: false, thread: 0, seq: 0, msg: NO_MSG }; QUEUE],
+        posted: 0,
         next_atom: 0,
     }),
 };
@@ -2489,12 +2495,16 @@ pub extern "system" fn PostThreadMessageA(
 }
 
 fn post(thread: u32, msg: Msg) -> bool {
-    let ok = with(|s| match s.queue.iter_mut().find(|q| !q.used) {
-        Some(q) => {
-            *q = Queued { used: true, thread, msg };
-            true
+    let ok = with(|s| {
+        let seq = s.posted;
+        match s.queue.iter_mut().find(|q| !q.used) {
+            Some(q) => {
+                *q = Queued { used: true, thread, seq, msg };
+                s.posted += 1;
+                true
+            }
+            None => false,
         }
-        None => false,
     });
     if ok {
         wake();
@@ -2902,8 +2912,11 @@ fn next_raw_inner(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
             && ((min == 0 && max == 0) || (min..=max).contains(&m.message))
     };
     with(|s| {
-        if let Some(q) =
-            s.queue.iter_mut().filter(|q| q.used && q.thread == thread).find(|q| fits(&q.msg))
+        if let Some(q) = s
+            .queue
+            .iter_mut()
+            .filter(|q| q.used && q.thread == thread && fits(&q.msg))
+            .min_by_key(|q| q.seq)
         {
             if remove {
                 q.used = false;

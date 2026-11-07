@@ -4883,7 +4883,14 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   and shown; ShowOwnedPopups hides the shown owned popups and shows the
   ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
 - **The message queue**: one per process (256 entries, an auto-reset
-  event), filtered by thread. WM_PAINT is synthesised by GetMessage /
+  event), filtered by thread. Invariant: a thread's messages come out
+  oldest first (each queued message has a sequence number; the entries
+  are reused in any order, so the first matching entry is not the
+  oldest). The desktop's input is posted into the same queue as
+  PostMessage's when user32 takes it (`pump`): unlike Windows, which
+  keeps hardware input in its own queue and hands it out only when no
+  posted message waits, so a WM_CHAR from TranslateMessage lands after
+  input already taken (ROADMAP "Known issues"). WM_PAINT is synthesised by GetMessage /
   PeekMessage when a visible window is invalid and the queue is empty,
   as on Windows. GetMessageTime/Pos are the last retrieved message's
   (pt: the pointer when it was queued).
