@@ -1,6 +1,8 @@
 //! The keyboard layout (US English, the one gala's PS/2 keyboard maps):
 //! VkKeyScanW (a character's virtual key and shift state), MapVirtualKeyW
-//! (virtual keys, scan codes and characters) and GetKeyboardLayout.
+//! (virtual keys, scan codes and characters), GetKeyboardLayout,
+//! LoadKeyboardLayoutW (only US's KLID) and ToUnicode(Ex) (a key and a
+//! key state to characters).
 
 /// Set 1 scan codes of the virtual keys that have one (index: VK).
 fn scan_of(vk: u32) -> u32 {
@@ -148,5 +150,148 @@ pub extern "system" fn MapVirtualKeyA(code: u32, kind: u32) -> u32 {
 /// GetKeyboardLayout: US English (0x04090409).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetKeyboardLayout(_thread: u32) -> usize {
-    0x0409_0409
+    US
+}
+
+/// The US layout's handle (its HKL: language and device both 0x0409).
+const US: usize = 0x0409_0409;
+
+/// LoadKeyboardLayoutW: the layout named by its KLID (eight hex digits).
+/// Only US English (00000409) is there: it is the thread's layout already
+/// (KLF_ACTIVATE changes nothing); any other is recorded and fails (NULL,
+/// ERROR_FILE_NOT_FOUND: no layout DLL).
+#[unsafe(no_mangle)]
+pub extern "system" fn LoadKeyboardLayoutW(klid: *const u16, _flags: u32) -> usize {
+    let mut id = 0u32;
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string, read up to 9 characters.
+    while n < 9 && !klid.is_null() && unsafe { *klid.add(n) } != 0 {
+        // SAFETY: as above.
+        let c = unsafe { *klid.add(n) };
+        let Some(d) = char::from_u32(u32::from(c)).and_then(|c| c.to_digit(16)) else {
+            id = u32::MAX;
+            break;
+        };
+        id = id.wrapping_shl(4) | d;
+        n += 1;
+    }
+    if n == 8 && id == 0x0000_0409 {
+        return US;
+    }
+    crate::window::unsupported(b"user32.dll!LoadKeyboardLayoutW(layout)", u64::from(id));
+    crate::window::set_last_error(2);
+    0
+}
+
+const VK_SHIFT: usize = 0x10;
+const VK_CONTROL: usize = 0x11;
+const VK_MENU: usize = 0x12;
+const VK_CAPITAL: usize = 0x14;
+
+/// The character of `vk` with Shift (0: none).
+fn shifted_of(vk: u32) -> u32 {
+    const DIGITS: &[u8; 10] = b")!@#$%^&*(";
+    match vk {
+        0x41..=0x5a => vk,
+        0x30..=0x39 => u32::from(DIGITS[(vk - 0x30) as usize]),
+        0xba => u32::from(b':'),
+        0xbb => u32::from(b'+'),
+        0xbc => u32::from(b'<'),
+        0xbd => u32::from(b'_'),
+        0xbe => u32::from(b'>'),
+        0xbf => u32::from(b'?'),
+        0xc0 => u32::from(b'~'),
+        0xdb => u32::from(b'{'),
+        0xdc => u32::from(b'|'),
+        0xdd => u32::from(b'}'),
+        0xde => u32::from(b'"'),
+        _ => char_of(vk),
+    }
+}
+
+/// The keypad's characters (NumLock's digits and the operators).
+fn keypad_of(vk: u32) -> u32 {
+    match vk {
+        0x60..=0x69 => vk - 0x60 + u32::from(b'0'),
+        0x6a => u32::from(b'*'),
+        0x6b => u32::from(b'+'),
+        0x6d => u32::from(b'-'),
+        0x6e => u32::from(b'.'),
+        0x6f => u32::from(b'/'),
+        _ => 0,
+    }
+}
+
+/// ToUnicodeEx: the character `vk` types in the US layout with the key
+/// state (high bit: down; VK_CAPITAL's low bit: Caps Lock on): letters
+/// follow Shift and Caps Lock, the other keys Shift; Ctrl with a letter
+/// gives its control character, Ctrl+[ \ ] ESC FS GS, Ctrl+Enter LF,
+/// Ctrl+Backspace DEL; Ctrl+Alt (AltGr: none in US) and keys without a
+/// character give 0. No dead keys. 1 with the character written, 0 else.
+#[unsafe(no_mangle)]
+pub extern "system" fn ToUnicodeEx(
+    vk: u32,
+    _scan: u32,
+    state: *const u8,
+    buf: *mut u16,
+    len: i32,
+    _flags: u32,
+    _layout: usize,
+) -> i32 {
+    if state.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's 256-byte key state.
+    let down = |k: usize| unsafe { *state.add(k) } & 0x80 != 0;
+    // SAFETY: as above.
+    let caps = unsafe { *state.add(VK_CAPITAL) } & 1 != 0;
+    let (shift, ctrl, alt) = (down(VK_SHIFT), down(VK_CONTROL), down(VK_MENU));
+    let letter = (0x41..=0x5a).contains(&vk);
+    let c = if ctrl && alt {
+        0
+    } else if ctrl {
+        match vk {
+            0x41..=0x5a => vk - 0x40,
+            0xdb => 0x1b,
+            0xdc => 0x1c,
+            0xdd => 0x1d,
+            0x0d => 0x0a,
+            0x08 => 0x7f,
+            0x20 => 0x20,
+            _ => 0,
+        }
+    } else if letter {
+        if shift != caps { vk } else { vk + 32 }
+    } else if shift {
+        shifted_of(vk)
+    } else {
+        match keypad_of(vk) {
+            0 => char_of(vk),
+            k => k,
+        }
+    };
+    if c == 0 || len < 1 || buf.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's buffer of `len` characters.
+    unsafe {
+        *buf = c as u16;
+        if len > 1 {
+            *buf.add(1) = 0;
+        }
+    }
+    1
+}
+
+/// ToUnicode: ToUnicodeEx with the thread's layout.
+#[unsafe(no_mangle)]
+pub extern "system" fn ToUnicode(
+    vk: u32,
+    scan: u32,
+    state: *const u8,
+    buf: *mut u16,
+    len: i32,
+    flags: u32,
+) -> i32 {
+    ToUnicodeEx(vk, scan, state, buf, len, flags, US)
 }

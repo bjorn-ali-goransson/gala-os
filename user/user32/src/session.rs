@@ -895,39 +895,6 @@ pub extern "system" fn SendInput(count: u32, _inputs: *const u8, _size: i32) -> 
     0
 }
 
-/// ToUnicodeEx(wVirtKey, wScanCode, lpKeyState, pwszBuff, cchBuff,
-/// wFlags, dwhkl): the US English character of the key for letters,
-/// digits and the space (with shift and caps lock); 0 (no character) for
-/// the other keys.
-#[unsafe(no_mangle)]
-pub extern "system" fn ToUnicodeEx(
-    vk: u32,
-    _scan: u32,
-    state: *const u8,
-    buf: *mut u16,
-    count: i32,
-    _flags: u32,
-    _layout: usize,
-) -> i32 {
-    if buf.is_null() || count < 1 || state.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller's 256-byte key state.
-    let (shift, caps) = unsafe { (*state.add(0x10) & 0x80 != 0, *state.add(0x14) & 1 != 0) };
-    let c = match vk {
-        0x41..=0x5a => {
-            let upper = shift != caps;
-            if upper { vk as u16 } else { vk as u16 + 32 }
-        }
-        0x30..=0x39 if !shift => vk as u16,
-        0x20 => 0x20,
-        _ => return 0,
-    };
-    // SAFETY: the caller's buffer of at least one character.
-    unsafe { *buf = c };
-    1
-}
-
 /// FrameRect(hDC, lprc, hbr): a one-pixel border with the brush (four
 /// FillRect bands).
 #[unsafe(no_mangle)]

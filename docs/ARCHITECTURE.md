@@ -5045,7 +5045,13 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 
 - **Keyboard layout** (`keyboard.rs`, US English): VkKeyScanW,
   MapVirtualKeyW (virtual keys, set 1 scan codes, characters),
-  GetKeyboardLayout.
+  GetKeyboardLayout (0x04090409); LoadKeyboardLayoutW gives it for KLID
+  00000409 and fails for any other (NULL, ERROR_FILE_NOT_FOUND,
+  recorded: there are no layout DLLs); ToUnicode(Ex) with a key state:
+  letters by Shift and Caps Lock, the shifted row and OEM keys by Shift,
+  the keypad's characters, Ctrl+letter its control character (Ctrl+[ \ ]
+  ESC FS GS, Ctrl+Enter LF, Ctrl+Backspace DEL), nothing for Ctrl+Alt
+  (US has no AltGr) or keys without a character; no dead keys.
 - **Accelerators** (`accel.rs`): HACCEL tables (create, copy, destroy,
   RT_ACCELERATOR resources); TranslateAcceleratorW turns a matching key
   down (with the modifiers held now) or character into WM_COMMAND (high

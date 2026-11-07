@@ -22,7 +22,6 @@ gala_stubs::unimplemented_exports!("user32.dll":
     SetCaretBlinkTime
     SetCaretPos
     ShowCaret
-    ToUnicode
     ValidateRgn
     WaitForInputIdle
     keybd_event
@@ -38,6 +37,5 @@ gala_stubs::unimplemented_exports!("user32.dll":
     GetDCEx
     GetKeyNameTextW
     GetScrollBarInfo
-    LoadKeyboardLayoutW
     TranslateMDISysAccel
 );

@@ -117,7 +117,11 @@
  *   SetWindowTheme S_OK.
  * - The keyboard layout (US): VkKeyScanW gives the virtual key and the
  *   shift state ('a' -> 'A', 'A' -> Shift+'A', '!' -> Shift+'1', none:
- *   -1); MapVirtualKeyW between virtual keys, scan codes and characters.
+ *   -1); MapVirtualKeyW between virtual keys, scan codes and characters;
+ *   LoadKeyboardLayoutW("00000409") is the thread's layout; ToUnicode
+ *   and ToUnicodeEx translate keys with a key state (Shift: capitals and
+ *   the shifted row, Ctrl+letter: its control character, Enter '\r',
+ *   arrows nothing).
  * - Accelerators: CreateAcceleratorTableW; CopyAcceleratorTableW (the
  *   count with no buffer, the entries back); TranslateAcceleratorW turns a
  *   matching WM_KEYDOWN into WM_COMMAND (high word 1) and returns TRUE, a
@@ -1413,6 +1417,23 @@ int main(void) {
     CHECK(VkKeyScanW(L' ') == 0x20 && VkKeyScanW(L';') == 0xba && VkKeyScanW(0x263a) == -1);
     CHECK(MapVirtualKeyW('A', MAPVK_VK_TO_VSC) == 0x1e && MapVirtualKeyW(0x1e, MAPVK_VSC_TO_VK) == 'A');
     CHECK(MapVirtualKeyW('A', MAPVK_VK_TO_CHAR) == 'A' && MapVirtualKeyW(VK_OEM_1, MAPVK_VK_TO_CHAR) == ';');
+    /* The US layout, loaded by its KLID, is the thread's; ToUnicode
+     * translates with the given key state. */
+    HKL us = LoadKeyboardLayoutW(L"00000409", 0);
+    CHECK(us != NULL && us == GetKeyboardLayout(0));
+    BYTE kbstate[256] = { 0 };
+    WCHAR typed[4] = { 0 };
+    CHECK(ToUnicode('A', 0x1e, kbstate, typed, 4, 0) == 1 && typed[0] == L'a');
+    CHECK(ToUnicode(VK_SPACE, 0x39, kbstate, typed, 4, 0) == 1 && typed[0] == L' ');
+    CHECK(ToUnicode(VK_RETURN, 0x1c, kbstate, typed, 4, 0) == 1 && typed[0] == L'\r');
+    CHECK(ToUnicode(VK_LEFT, 0x4b, kbstate, typed, 4, 0) == 0);
+    kbstate[VK_SHIFT] = 0x80;
+    CHECK(ToUnicode('A', 0x1e, kbstate, typed, 4, 0) == 1 && typed[0] == L'A');
+    CHECK(ToUnicode('1', 0x02, kbstate, typed, 4, 0) == 1 && typed[0] == L'!');
+    CHECK(ToUnicodeEx(VK_OEM_1, 0x27, kbstate, typed, 4, 0, us) == 1 && typed[0] == L':');
+    kbstate[VK_SHIFT] = 0;
+    kbstate[VK_CONTROL] = 0x80;
+    CHECK(ToUnicode('C', 0x2e, kbstate, typed, 4, 0) == 1 && typed[0] == 3);
     CHECK(!IsAppThemed() && !IsThemeActive());
     HWND tw = CreateWindowExW(0, L"User32TestHooks", L"themes", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL, NULL,
                               GetModuleHandleW(NULL), NULL);
