@@ -577,18 +577,14 @@ pub fn property(n: Node, id: i32) -> Variant {
 }
 
 /// A property's current value; None when the element does not support it.
-/// A window with a provider in this process (providers.rs) answers first.
+/// A window with a provider (providers.rs) answers first.
 fn lookup(n: Node, id: i32) -> Option<Variant> {
     if n.item.is_none()
         && n.menu == 0
         && !is_grid_node(n)
-        && let Some(p) = providers::of(n.hwnd)
+        && let Some(v) = providers::provided(n.hwnd, id)
     {
-        let v = providers::property(p, id);
-        providers::release(p);
-        if v.vt != crate::VT_EMPTY {
-            return Some(v);
-        }
+        return Some(v);
     }
     window_lookup(n, id)
 }

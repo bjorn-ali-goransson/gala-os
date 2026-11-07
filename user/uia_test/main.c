@@ -99,6 +99,10 @@
  *   (the window's) ClassName, NativeWindowHandle and ProcessId where the
  *   provider gives none (VT_EMPTY); the provider was asked. FindFirst
  *   under the desktop by AutomationId "provided-id" finds the window.
+ *   The same across processes: the child's provided window is found by
+ *   its provider's AutomationId ("remote-provided-id") and gives its
+ *   provider's Name and ControlType and the window's ClassName, handle
+ *   and ProcessId (the child's).
  *
  * Prints "uia_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
@@ -279,6 +283,85 @@ static HWND make_list_view(HWND parent, int id, int x, int y, const wchar_t *pre
     return lv;
 }
 
+/* ---- A provider (WM_GETOBJECT), in this process and in the child ---- */
+
+static HWND provided_hwnd;
+/* What the provider answers (the child's differ: both windows are top-level). */
+static const wchar_t *provided_name = L"Provided", *provided_id = L"provided-id";
+static volatile LONG provider_refs = 1, provider_asked;
+
+static HRESULT STDMETHODCALLTYPE prov_qi(IRawElementProviderSimple *This, REFIID riid, void **out) {
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IRawElementProviderSimple)) {
+        *out = This;
+        InterlockedIncrement(&provider_refs);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE prov_addref(IRawElementProviderSimple *This) {
+    (void)This;
+    return (ULONG)InterlockedIncrement(&provider_refs);
+}
+static ULONG STDMETHODCALLTYPE prov_release(IRawElementProviderSimple *This) {
+    (void)This;
+    return (ULONG)InterlockedDecrement(&provider_refs);
+}
+static HRESULT STDMETHODCALLTYPE prov_options(IRawElementProviderSimple *This, enum ProviderOptions *out) {
+    (void)This;
+    *out = ProviderOptions_ServerSideProvider;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE prov_pattern(IRawElementProviderSimple *This, PATTERNID id, IUnknown **out) {
+    (void)This;
+    (void)id;
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE prov_property(IRawElementProviderSimple *This, PROPERTYID id, VARIANT *out) {
+    (void)This;
+    InterlockedIncrement(&provider_asked);
+    VariantInit(out);
+    if (id == UIA_NamePropertyId) {
+        out->vt = VT_BSTR;
+        out->bstrVal = SysAllocString(provided_name);
+    } else if (id == UIA_AutomationIdPropertyId) {
+        out->vt = VT_BSTR;
+        out->bstrVal = SysAllocString(provided_id);
+    } else if (id == UIA_ControlTypePropertyId) {
+        out->vt = VT_I4;
+        out->lVal = UIA_ButtonControlTypeId;
+    }
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE prov_host(IRawElementProviderSimple *This, IRawElementProviderSimple **out) {
+    (void)This;
+    return UiaHostProviderFromHwnd(provided_hwnd, out);
+}
+static IRawElementProviderSimpleVtbl provider_vtbl = {
+    prov_qi, prov_addref, prov_release, prov_options, prov_pattern, prov_property, prov_host,
+};
+static IRawElementProviderSimple provider = { &provider_vtbl };
+
+static LRESULT CALLBACK provided_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_GETOBJECT && (LONG)lparam == UiaRootObjectId)
+        return UiaReturnRawElementProvider(hwnd, wparam, lparam, &provider);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/* The provided window, titled `title`. */
+static HWND make_provided(const wchar_t *title) {
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = provided_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"UiaProvided";
+    if (!RegisterClassW(&wc))
+        return NULL;
+    provided_hwnd = CreateWindowExW(0, L"UiaProvided", title, WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40, 200, 100,
+                                    NULL, NULL, wc.hInstance, NULL);
+    return provided_hwnd;
+}
+
 static LRESULT CALLBACK child_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_COMMAND && LOWORD(wparam) == 101 && HIWORD(wparam) == BN_CLICKED) {
         SetWindowTextW(hwnd, L"pressed");
@@ -337,6 +420,10 @@ static int child(void) {
     if (!frame_closed || !register_frame_class() || !make_frame(L"UIA Frame", 300, 300, NULL, WS_OVERLAPPEDWINDOW) ||
         !make_frame(L"UIA Closable", 340, 340, NULL, WS_OVERLAPPEDWINDOW))
         return 7;
+    provided_name = L"Remote provided";
+    provided_id = L"remote-provided-id";
+    if (!make_provided(L"UIA Remote Provided"))
+        return 8;
     SetEvent(ready);
     for (;;) {
         DWORD r = MsgWaitForMultipleObjects(1, &done, FALSE, 30000, QS_ALLINPUT);
@@ -1078,6 +1165,19 @@ static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
 
     remote_frames(uia, root);
 
+    // The child's provided window: the child's provider answers across
+    // processes; the host (the window) gives the rest.
+    IUIAutomationCondition *rid = prop_str(uia, UIA_AutomationIdPropertyId, L"remote-provided-id");
+    IUIAutomationElement *rp = NULL;
+    CHECK(IUIAutomationElement_FindFirst(root, TreeScope_Children, rid, &rp) == S_OK && rp != NULL);
+    CHECK(name_is(rp, L"Remote provided"));
+    CHECK(control_type(rp) == UIA_ButtonControlTypeId);
+    CHECK(class_is(rp, L"UiaProvided"));
+    CHECK(IUIAutomationElement_get_CurrentProcessId(rp, &pid) == S_OK && pid == (int)pi.dwProcessId);
+    CHECK(element_hwnd(rp) == FindWindowW(L"UiaProvided", L"UIA Remote Provided"));
+    IUIAutomationElement_Release(rp);
+    IUIAutomationCondition_Release(rid);
+
     IUIAutomationElement_Release(box);
     IUIAutomationCondition_Release(id103);
     IUIAutomationElement_Release(field);
@@ -1090,79 +1190,8 @@ static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
     CHECK(WaitForSingleObject(pi.hProcess, 20000) == WAIT_OBJECT_0);
 }
 
-/* ---- A provider in this process (WM_GETOBJECT) ---- */
-
-static HWND provided_hwnd;
-static volatile LONG provider_refs = 1, provider_asked;
-
-static HRESULT STDMETHODCALLTYPE prov_qi(IRawElementProviderSimple *This, REFIID riid, void **out) {
-    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IRawElementProviderSimple)) {
-        *out = This;
-        InterlockedIncrement(&provider_refs);
-        return S_OK;
-    }
-    *out = NULL;
-    return E_NOINTERFACE;
-}
-static ULONG STDMETHODCALLTYPE prov_addref(IRawElementProviderSimple *This) {
-    (void)This;
-    return (ULONG)InterlockedIncrement(&provider_refs);
-}
-static ULONG STDMETHODCALLTYPE prov_release(IRawElementProviderSimple *This) {
-    (void)This;
-    return (ULONG)InterlockedDecrement(&provider_refs);
-}
-static HRESULT STDMETHODCALLTYPE prov_options(IRawElementProviderSimple *This, enum ProviderOptions *out) {
-    (void)This;
-    *out = ProviderOptions_ServerSideProvider;
-    return S_OK;
-}
-static HRESULT STDMETHODCALLTYPE prov_pattern(IRawElementProviderSimple *This, PATTERNID id, IUnknown **out) {
-    (void)This;
-    (void)id;
-    *out = NULL;
-    return S_OK;
-}
-static HRESULT STDMETHODCALLTYPE prov_property(IRawElementProviderSimple *This, PROPERTYID id, VARIANT *out) {
-    (void)This;
-    InterlockedIncrement(&provider_asked);
-    VariantInit(out);
-    if (id == UIA_NamePropertyId) {
-        out->vt = VT_BSTR;
-        out->bstrVal = SysAllocString(L"Provided");
-    } else if (id == UIA_AutomationIdPropertyId) {
-        out->vt = VT_BSTR;
-        out->bstrVal = SysAllocString(L"provided-id");
-    } else if (id == UIA_ControlTypePropertyId) {
-        out->vt = VT_I4;
-        out->lVal = UIA_ButtonControlTypeId;
-    }
-    return S_OK;
-}
-static HRESULT STDMETHODCALLTYPE prov_host(IRawElementProviderSimple *This, IRawElementProviderSimple **out) {
-    (void)This;
-    return UiaHostProviderFromHwnd(provided_hwnd, out);
-}
-static IRawElementProviderSimpleVtbl provider_vtbl = {
-    prov_qi, prov_addref, prov_release, prov_options, prov_pattern, prov_property, prov_host,
-};
-static IRawElementProviderSimple provider = { &provider_vtbl };
-
-static LRESULT CALLBACK provided_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-    if (msg == WM_GETOBJECT && (LONG)lparam == UiaRootObjectId)
-        return UiaReturnRawElementProvider(hwnd, wparam, lparam, &provider);
-    return DefWindowProcW(hwnd, msg, wparam, lparam);
-}
-
 static void providers(IUIAutomation *uia) {
-    WNDCLASSW wc = { 0 };
-    wc.lpfnWndProc = provided_proc;
-    wc.hInstance = GetModuleHandleW(NULL);
-    wc.lpszClassName = L"UiaProvided";
-    CHECK(RegisterClassW(&wc) != 0);
-    provided_hwnd = CreateWindowExW(0, L"UiaProvided", L"UIA Provided", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                                    40, 40, 200, 100, NULL, NULL, wc.hInstance, NULL);
-    CHECK(provided_hwnd != NULL);
+    CHECK(make_provided(L"UIA Provided") != NULL);
     IUIAutomationElement *e = NULL;
     CHECK(IUIAutomation_ElementFromHandle(uia, provided_hwnd, &e) == S_OK && e != NULL);
     CHECK(name_is(e, L"Provided"));

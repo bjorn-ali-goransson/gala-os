@@ -5695,7 +5695,8 @@ process never reach the kernel's check (one level).
   Low, or another process's window: STATUS_ACCESS_DENIED. Filters go
   with their window (unregister, its thread's end) and process.
 - The always-passing messages and gala's own messages (0x3f0..0x3ff:
-  GALA_MENU, GALA_SETWINDOWPOS, GALA_SHOWWINDOW 0x3f2) are never stored:
+  GALA_MENU, GALA_SETWINDOWPOS, GALA_SHOWWINDOW 0x3f2, GALA_UIA 0x3f3)
+  are never stored:
   the first always pass, the second never do from a lower level.
 - SetWindowPos and ShowWindow of another process's window are sent to
   it as GALA_SETWINDOWPOS and GALA_SHOWWINDOW, which user32 answers
@@ -9160,28 +9161,45 @@ ignored.
   UiaRaiseAutomationEvent / ...PropertyChangedEvent /
   ...StructureChangedEvent / UiaDisconnect(All)Provider(s) succeed doing
   nothing.
-- Providers inside programs (providers.rs), this process's windows
-  only: for a window node (not an item, menu or grid part) of the
-  client's own process, every property read first sends the window
-  WM_GETOBJECT (wParam 0, lParam UiaRootObjectId -25). The window
-  answers with UiaReturnRawElementProvider(hwnd, wParam, lParam, its
-  IRawElementProviderSimple), which AddRefs the provider into a
-  32-slot table and returns a cookie (a non-zero counter; the slot is
-  cookie mod 32); any other object id gives 0. The client claims the
-  cookie (it must name the same window: anything else is recorded as
-  "WM_GETOBJECT(answer not ours)"), which takes the reference out of the
-  table, calls GetPropertyValue and releases it; an answer never claimed
-  is released when its slot is reused. A provider's value wins; VT_EMPTY
-  (or a failed call) falls back to the window's own value, which is
-  what the host provider would give, so the provider's
-  HostRawElementProvider is not called. Conditions, searches and events
-  read properties the same way, so they see the provider's values.
-  UiaHostProviderFromHwnd makes a counted IRawElementProviderSimple
-  (ProviderOptions_ClientSideProvider, no patterns, no host) whose
-  GetPropertyValue is the window's own value (`element::window_property`,
-  which skips the provider). Invariant: a window's provider is asked
-  afresh for every read (no cache), so a provider that changes answers
-  is seen at once.
+- Providers inside programs (providers.rs): for a window node (not an
+  item, menu or grid part), every property read first sends the window
+  WM_GETOBJECT (wParam 0, lParam UiaRootObjectId -25), across processes
+  as any message. The window answers with
+  UiaReturnRawElementProvider(hwnd, wParam, lParam, its
+  IRawElementProviderSimple), which AddRefs the provider into a 32-slot
+  table of the window's process and returns a cookie (1..=0xffff,
+  counting; the slot is cookie mod 32); any other object id gives 0. The
+  cookie is claimed once, which takes the reference out of the table; an
+  answer never claimed is released when its slot is reused.
+  - The client's own process: the client claims it (the cookie must name
+    the same window: anything else is recorded as "WM_GETOBJECT(answer
+    not ours)"), calls GetPropertyValue and releases it.
+  - Another process: the client sends gala's GALA_UIA (0x03f3; wParam
+    the property id in the low 16 bits and the cookie in the high 16, so
+    it fits a 32-bit process's wParam; lParam a 4096-byte value buffer
+    that `foreign` marshals back). user32 there answers it itself on the
+    window's thread, as GALA_MENU: it calls UIAutomationCore's
+    GalaUiaServe (found with GetModuleHandle: the process made the
+    cookie, so the DLL is loaded), which claims the answer, asks the
+    provider and writes the value: vt (u16), reserved u16, a BSTR's
+    length (u32), the value (u64: VT_I4, VT_BOOL, VT_R8), the BSTR's
+    characters from byte 16 (2040 at most: longer ones are cut,
+    recorded). Other types (arrays, objects) come back VT_EMPTY
+    (recorded in the provider's process). GALA_UIA's 1 means served; 0
+    is recorded on the client ("GALA_UIA(not served)") and in the
+    provider's process (which answer it lacked).
+  A provider's value wins; VT_EMPTY (or a failed call) falls back to the
+  window's own value, which is what the host provider would give, so
+  the provider's HostRawElementProvider is not called. Conditions,
+  searches and events read properties the same way, so they see the
+  provider's values. UiaHostProviderFromHwnd makes a counted
+  IRawElementProviderSimple (ProviderOptions_ClientSideProvider, no
+  patterns, no host) whose GetPropertyValue is the window's own value
+  (`element::window_property`, which skips the provider). Invariant: a
+  window's provider is asked afresh for every read (no cache), so a
+  provider that changes answers is seen at once; the price is a
+  WM_GETOBJECT per read (and a GALA_UIA when the window has a provider
+  in another process).
 
 ### Programs driven through UI Automation
 
@@ -9221,14 +9239,12 @@ ledger has no UIAutomationCore lines.
 
 TODO (ROADMAP UIA):
 
-- providers inside programs are consulted only for the client's own
-  process's windows, and only for properties: other processes' windows
-  (wx and Qt implement IRawElementProviderSimple) give their HWND
-  properties, as the answer would have to cross processes (COM
-  marshaling of the provider); providers' patterns
+- providers inside programs give properties only (strings, integers,
+  booleans and doubles across processes): their patterns
   (GetPatternProvider), fragments (IRawElementProviderFragment and its
-  roots, Navigate) and ProviderOptions are not used; UiaRaise* do
-  nothing;
+  roots, Navigate, so a provider's children such as a web page's
+  elements) and ProviderOptions are not used; 32-bit processes have no
+  UIAutomationCore, so no providers; UiaRaise* do nothing;
 - events only through IUIAutomation's own Add*EventHandler;
   IUIAutomation3..6's handlers (text edit, changes, notification,
   handler groups, active text position), AutomationFocusChanged,
@@ -9359,7 +9375,8 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 - Marshaled: WM_SETTEXT's string in; WM_GETTEXT's buffer out (written
   straight into the sender's buffer); WM_COPYDATA (the 24-byte
   COPYDATASTRUCT and its cbData bytes in one block; the receiver points
-  lpData at its copy); GALA_MENU and GALA_SETWINDOWPOS. Other messages go
+  lpData at its copy); GALA_MENU, GALA_SETWINDOWPOS and GALA_UIA (its
+  4096-byte value buffer out). Other messages go
   as numbers. GetWindowText of another process's window returns the
   mirrored text, as documented (it does not send WM_GETTEXT across
   processes; programs send WM_GETTEXT themselves).

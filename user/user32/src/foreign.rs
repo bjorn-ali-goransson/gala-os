@@ -442,6 +442,7 @@ pub(crate) fn carries_pointer(msg: u32) -> bool {
             | 0x0083 // WM_NCCALCSIZE
     ) || in_string(msg)
         || msg == crate::track::GALA_MENU
+        || msg == crate::uia::GALA_UIA
         || msg == crate::tree::GALA_SETWINDOWPOS
         || matches!(msg, LB_GETTEXT | LB_GETITEMRECT | LB_GETSELITEMS | CB_GETLBTEXT)
 }
@@ -662,6 +663,9 @@ pub(crate) fn send_remote(
         LB_GETITEMRECT if lparam != 0 => (out_ptr, out_max) = (lparam as u64, 16),
         crate::track::GALA_MENU if lparam != 0 => {
             (out_ptr, out_max) = (lparam as u64, crate::track::MENU_INFO_SIZE);
+        }
+        crate::uia::GALA_UIA if lparam != 0 => {
+            (out_ptr, out_max) = (lparam as u64, crate::uia::UIA_VALUE_SIZE);
         }
         crate::tree::GALA_SETWINDOWPOS if lparam != 0 => {
             (in_ptr, in_len) = (lparam as u64, crate::tree::SETWINDOWPOS_SIZE);

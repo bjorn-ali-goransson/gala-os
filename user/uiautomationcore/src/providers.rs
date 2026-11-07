@@ -4,11 +4,16 @@
 //! element for that window takes its properties from the provider first,
 //! then from the window (the host provider: UiaHostProviderFromHwnd).
 //!
-//! In-process only for now: the answer is a cookie naming a slot of
-//! this process's table, which holds one reference to the provider until
-//! the asker claims it (`of`); an answer nobody claims is released when
-//! its slot is reused. Windows of other processes are not asked (their
-//! answers would have to cross processes: the next step).
+//! The answer is a cookie (1..=0xffff) naming a slot of the answering
+//! process's table, which holds one reference to the provider until it
+//! is claimed; an answer nobody claims is released when its slot is
+//! reused. A client in the same process claims it itself (`of`). For
+//! another process's window the client sends gala's GALA_UIA message
+//! (user32's uia.rs: the property id and the cookie in wParam, a value
+//! buffer in lParam, marshaled back); user32 there hands it to this DLL's
+//! GalaUiaServe, which claims the answer, asks the provider on the
+//! window's thread and writes the value in the wire form below. Each read
+//! asks afresh (a WM_GETOBJECT, then one claim).
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -16,10 +21,15 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::element::{self, Node};
 use crate::{
     E_NOINTERFACE, E_POINTER, GetCurrentProcessId, GetWindowThreadProcessId, Guid, HResult, Hwnd,
-    IID_IUNKNOWN, S_OK, SendMessageW, VTable, Variant, alloc, free, guid, iid_at, put,
+    IID_IUNKNOWN, S_OK, SendMessageW, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VT_R8, VTable, Variant,
+    alloc, free, guid, iid_at, put,
 };
 
 const WM_GETOBJECT: u32 = 0x003d;
+/// gala's message to another process's window (user32's uia.rs).
+const GALA_UIA: u32 = 0x03f3;
+/// The value buffer GALA_UIA fills (user32's UIA_VALUE_SIZE agrees).
+const UIA_VALUE_SIZE: usize = 4096;
 /// UiaRootObjectId: the object id UI Automation asks windows for.
 pub const UIA_ROOT_OBJECT_ID: i32 = -25;
 
@@ -40,7 +50,7 @@ fn add_ref(p: *mut c_void) {
     f(p);
 }
 
-pub fn release(p: *mut c_void) {
+fn release(p: *mut c_void) {
     // SAFETY: IUnknown::Release.
     let f: extern "system" fn(*mut c_void) -> u32 = unsafe { core::mem::transmute(method(p, 2)) };
     f(p);
@@ -82,8 +92,8 @@ unsafe impl Sync for Table {}
 
 static TABLE: Table =
     Table { lock: AtomicBool::new(false), slots: core::cell::UnsafeCell::new([None; SLOTS]) };
-/// The last cookie handed out (cookies count from 1, never 0: 0 is "no
-/// answer").
+/// How many cookies were handed out (cookies are 1..=0xffff, never 0:
+/// 0 is "no answer").
 static COOKIES: AtomicU32 = AtomicU32::new(0);
 
 fn with<R>(f: impl FnOnce(&mut [Option<Answer>; SLOTS]) -> R) -> R {
@@ -100,12 +110,9 @@ fn with<R>(f: impl FnOnce(&mut [Option<Answer>; SLOTS]) -> R) -> R {
 /// cookie, the WM_GETOBJECT result.
 fn keep(hwnd: Hwnd, provider: *mut c_void) -> isize {
     add_ref(provider);
-    let cookie = loop {
-        let c = COOKIES.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        if c != 0 {
-            break c;
-        }
-    };
+    // 16 bits: the cookie travels in GALA_UIA's wParam with the property
+    // id (32 bits in a 32-bit process).
+    let cookie = COOKIES.fetch_add(1, Ordering::Relaxed) % 0xffff + 1;
     let evicted = with(|slots| {
         let i = (cookie as usize) % SLOTS;
         let old = slots[i].take();
@@ -135,15 +142,15 @@ fn claim(hwnd: Hwnd, cookie: isize) -> Option<*mut c_void> {
     })
 }
 
-/// The provider of a window of this process (one reference, for the
-/// caller to release), asked with WM_GETOBJECT; None when the window has
-/// none or is another process's.
-pub fn of(hwnd: Hwnd) -> Option<*mut c_void> {
+/// A window's provider's value of property `id`: None when the window
+/// has no provider (or it gives VT_EMPTY). The window is asked with
+/// WM_GETOBJECT; its answer is claimed here (this process's window) or
+/// through GALA_UIA (another's).
+pub fn provided(hwnd: Hwnd, id: i32) -> Option<Variant> {
     let mut pid = 0;
     // SAFETY: our output.
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-    // SAFETY: a plain call.
-    if pid == 0 || pid != unsafe { GetCurrentProcessId() } {
+    if pid == 0 {
         return None;
     }
     // SAFETY: no pointers in the message.
@@ -151,13 +158,126 @@ pub fn of(hwnd: Hwnd) -> Option<*mut c_void> {
     if r == 0 {
         return None;
     }
-    let p = claim(hwnd, r);
-    if p.is_none() {
-        // An answer that is not one of ours (an MSAA object's LRESULT,
-        // or one already claimed).
-        crate::missing(b"UIAutomationCore.dll!WM_GETOBJECT(answer not ours)", r as u64);
+    // SAFETY: a plain call.
+    let v = if pid == unsafe { GetCurrentProcessId() } {
+        let Some(p) = claim(hwnd, r) else {
+            // An answer that is not one of ours (an MSAA object's
+            // LRESULT, or one already claimed).
+            crate::missing(b"UIAutomationCore.dll!WM_GETOBJECT(answer not ours)", r as u64);
+            return None;
+        };
+        let v = property(p, id);
+        release(p);
+        v
+    } else {
+        remote(hwnd, r, id)?
+    };
+    (v.vt != VT_EMPTY).then_some(v)
+}
+
+/// Another process's provider's value, through GALA_UIA.
+fn remote(hwnd: Hwnd, cookie: isize, id: i32) -> Option<Variant> {
+    if !(1..=0xffff).contains(&cookie) || !(0..=0xffff).contains(&id) {
+        crate::missing(b"UIAutomationCore.dll!WM_GETOBJECT(answer not ours)", cookie as u64);
+        return None;
     }
-    p
+    let buf = alloc(UIA_VALUE_SIZE);
+    if buf.is_null() {
+        return None;
+    }
+    let wparam = id as usize | (cookie as usize) << 16;
+    // SAFETY: our buffer of UIA_VALUE_SIZE bytes (user32 marshals it back).
+    let served = unsafe { SendMessageW(hwnd, GALA_UIA, wparam, buf as isize) };
+    let v = if served == 1 {
+        // SAFETY: the buffer, filled by the window's process.
+        Some(decode(unsafe { core::slice::from_raw_parts(buf, UIA_VALUE_SIZE) }))
+    } else {
+        crate::missing(b"UIAutomationCore.dll!GALA_UIA(not served)", served as u64);
+        None
+    };
+    free(buf);
+    v
+}
+
+// ---- The wire form of a value (GALA_UIA's buffer) ----
+//
+// vt (u16), 2 bytes reserved, a length (u32: a BSTR's characters), the
+// value (u64: VT_I4's and VT_BOOL's bits, VT_R8's), then a BSTR's
+// characters from byte 16. Other types (arrays, objects) are not carried
+// (VT_EMPTY, recorded where the provider gave them).
+
+const WIRE_HEAD: usize = 16;
+const WIRE_CHARS: usize = (UIA_VALUE_SIZE - WIRE_HEAD) / 2;
+
+fn encode(v: &Variant, out: &mut [u8]) {
+    let mut vt = v.vt;
+    let mut len = 0usize;
+    match v.vt {
+        VT_I4 | VT_BOOL | VT_R8 | VT_EMPTY => {}
+        VT_BSTR => {
+            let chars = crate::bstr_chars(v.as_bstr());
+            if chars.len() > WIRE_CHARS {
+                crate::missing(b"UIAutomationCore.dll!GALA_UIA(string cut)", chars.len() as u64);
+            }
+            len = chars.len().min(WIRE_CHARS);
+            for (i, c) in chars[..len].iter().enumerate() {
+                out[WIRE_HEAD + 2 * i..WIRE_HEAD + 2 * i + 2].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+        other => {
+            crate::missing(b"UIAutomationCore.dll!GALA_UIA(type not carried)", u64::from(other));
+            vt = VT_EMPTY;
+        }
+    }
+    out[0..2].copy_from_slice(&vt.to_le_bytes());
+    out[4..8].copy_from_slice(&(len as u32).to_le_bytes());
+    out[8..16].copy_from_slice(&v.data[0].to_le_bytes());
+}
+
+fn decode(b: &[u8]) -> Variant {
+    let vt = u16::from_le_bytes([b[0], b[1]]);
+    let len = (u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize).min(WIRE_CHARS);
+    let mut value = [0u8; 8];
+    value.copy_from_slice(&b[8..16]);
+    let value = u64::from_le_bytes(value);
+    match vt {
+        VT_I4 | VT_BOOL | VT_R8 => Variant { vt, reserved: [0; 3], data: [value, 0] },
+        VT_BSTR => {
+            let mut chars = crate::List::<u16>::new();
+            for i in 0..len {
+                let at = WIRE_HEAD + 2 * i;
+                if !chars.push(u16::from_le_bytes([b[at], b[at + 1]])) {
+                    return Variant::EMPTY;
+                }
+            }
+            Variant::bstr(crate::bstr(chars.as_slice()))
+        }
+        _ => Variant::EMPTY,
+    }
+}
+
+/// GalaUiaServe (user32 calls it for GALA_UIA, on our window's thread):
+/// claims the answer `wparam >> 16` our window gave, writes its
+/// provider's value of property `wparam & 0xffff` into the
+/// UIA_VALUE_SIZE buffer at `lparam`; 1, or 0 when there is no such
+/// answer.
+#[unsafe(no_mangle)]
+pub extern "system" fn GalaUiaServe(hwnd: Hwnd, wparam: usize, lparam: isize) -> isize {
+    let (id, cookie) = ((wparam & 0xffff) as i32, ((wparam >> 16) & 0xffff) as isize);
+    if lparam == 0 {
+        return 0;
+    }
+    let Some(p) = claim(hwnd, cookie) else {
+        crate::missing(b"UIAutomationCore.dll!GalaUiaServe(no such answer)", cookie as u64);
+        return 0;
+    };
+    let mut v = property(p, id);
+    release(p);
+    // SAFETY: user32's buffer of UIA_VALUE_SIZE bytes.
+    let out = unsafe { core::slice::from_raw_parts_mut(lparam as *mut u8, UIA_VALUE_SIZE) };
+    encode(&v, out);
+    v.clear();
+    1
 }
 
 /// UiaReturnRawElementProvider: the window's answer to WM_GETOBJECT.

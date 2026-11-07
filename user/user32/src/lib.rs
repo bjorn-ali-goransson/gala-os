@@ -35,6 +35,7 @@ mod text;
 mod timer;
 mod track;
 mod tree;
+mod uia;
 mod unimplemented;
 mod window;
 mod winevent;

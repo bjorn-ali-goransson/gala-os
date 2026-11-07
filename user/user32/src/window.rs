@@ -2235,6 +2235,7 @@ fn handled_here(hwnd: Hwnd, msg: u32) -> bool {
     window(hwnd).is_some_and(|w| {
         w.thread == me()
             || msg == crate::track::GALA_MENU
+            || msg == crate::uia::GALA_UIA
             || msg == crate::tree::GALA_SETWINDOWPOS
             || msg == crate::tree::GALA_SHOWWINDOW
     })
@@ -2261,6 +2262,11 @@ pub(crate) fn send_with(
     // gala's menu message for UI Automation: user32's own.
     if msg == crate::track::GALA_MENU && window(hwnd).is_some() {
         return Ok(crate::track::menu_message(hwnd, wparam, lparam));
+    }
+    // Another process's UI Automation asking our provider: user32's own,
+    // handed to our UIAutomationCore.
+    if msg == crate::uia::GALA_UIA && window(hwnd).is_some() {
+        return Ok(crate::uia::uia_message(hwnd, wparam, lparam));
     }
     // Another process's SetWindowPos of our window: user32's own too.
     if msg == crate::tree::GALA_SETWINDOWPOS && window(hwnd).is_some() {

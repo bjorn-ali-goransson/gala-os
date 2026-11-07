@@ -628,15 +628,17 @@ patterns and read their state, so one test runs on Windows and on gala
   from WinEvents (`winevent_test`); every message sent with
   SendMessageTimeout and SMTO_ABORTIFHUNG.
 - `filezilla_flaui`: the first real program driven through UIA.
-- Providers in the client's own process: WM_GETOBJECT answered through
-  UiaReturnRawElementProvider, the provider's properties first, the
-  window's (UiaHostProviderFromHwnd) where it gives none (`uia_test`).
+- Providers inside programs, in the client's process and in others:
+  WM_GETOBJECT answered through UiaReturnRawElementProvider, the
+  provider's properties first (across processes through gala's
+  GALA_UIA message), the window's (UiaHostProviderFromHwnd) where it
+  gives none (`uia_test`).
 
 **Next**:
-1. Providers in other processes (wx and Qt implement
-   IRawElementProviderSimple; Chromium's accessibility tree for BR
-   stage 2): the WM_GETOBJECT answer handed across processes (COM
-   marshaling of the provider), then providers' patterns and fragments.
+1. Providers' fragments (IRawElementProviderFragment and
+   FragmentRoot: Navigate, ElementProviderFromPoint, so a provider's
+   children are elements: Chromium's accessibility tree for BR stage 2,
+   wx and Qt) and patterns (GetPatternProvider: Invoke, Value).
 2. IUIAutomation3..6's event handlers and handler groups.
 3. Combo box and tree-view items, GetParent of owned popups, the system
    menu in the title bar.
