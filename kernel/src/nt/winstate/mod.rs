@@ -821,6 +821,21 @@ impl<X: Default> State<X> {
         self.send(id, message, u64::from(vk), lparam);
     }
 
+    /// Where a mouse button went (`events=window`, as `key` for keys): the
+    /// window, the message, the screen point, the owner, and whether a
+    /// capture took it. A click a program does not act on shows whether
+    /// and where it had it.
+    pub fn note_button(&self, id: u32, message: u32, x: i64, y: i64, captured: bool) {
+        let owner = self.window(id).map_or(0, |w| w.owner);
+        crate::events::emit(
+            crate::events::Category::Window,
+            "button",
+            format_args!(
+                r#""message":{message},"x":{x},"y":{y},"window":{id},"owner":{owner},"captured":{captured}"#
+            ),
+        );
+    }
+
     /// Screen point (x, y) in window `id`'s client coordinates, as a
     /// mouse message's lParam.
     pub fn client_lparam(&self, id: u32, x: i64, y: i64) -> u64 {

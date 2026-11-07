@@ -880,9 +880,11 @@ impl Desktop {
                 [(1, WM_LBUTTONDOWN, WM_LBUTTONUP), (2, WM_RBUTTONDOWN, WM_RBUTTONUP)]
             {
                 if pressed & bit != 0 {
+                    self.s.note_button(id, down, x, y, true);
                     self.s.send(id, down, keys, lp);
                 }
                 if released & bit != 0 {
+                    self.s.note_button(id, up, x, y, true);
                     self.s.send(id, up, keys, lp);
                 }
             }
@@ -928,12 +930,14 @@ impl Desktop {
                 self.s.activate(Some(id));
             }
             let lp = self.s.client_lparam(id, x, y);
+            self.s.note_button(id, WM_RBUTTONDOWN, x, y, false);
             self.s.send(id, WM_RBUTTONDOWN, keys, lp);
         }
         if released & 2 != 0
             && let Hit::Client(id) = hit
         {
             let lp = self.s.client_lparam(id, x, y);
+            self.s.note_button(id, WM_RBUTTONUP, x, y, false);
             self.s.send(id, WM_RBUTTONUP, keys, lp);
         }
         self.refresh();
@@ -1001,6 +1005,7 @@ impl Desktop {
                     self.s.activate(Some(id));
                 }
                 let lp = self.s.client_lparam(id, x, y);
+                self.s.note_button(id, WM_LBUTTONDOWN, x, y, false);
                 self.s.send(id, WM_LBUTTONDOWN, keys, lp);
             }
             Hit::Menu | Hit::MenuItem(_) => self.menu_dirty = true,
@@ -1134,6 +1139,7 @@ impl Desktop {
             }
             (Hit::Client(id), _) => {
                 let lp = self.s.client_lparam(id, x, y);
+                self.s.note_button(id, WM_LBUTTONUP, x, y, false);
                 self.s.send(id, WM_LBUTTONUP, keys, lp);
             }
             (Hit::Menu | Hit::MenuItem(_), _) => self.menu_dirty = true,
