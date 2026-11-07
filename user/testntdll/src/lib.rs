@@ -581,10 +581,9 @@ fn export_at_depth(base: usize, name: &[u8], ordinal: u32, depth: u32) -> Option
 /// Where a DLL is looked for.
 #[derive(Clone, Copy)]
 enum Search<'a> {
-    /// Next to the executable, then System32.
+    /// As the load's LOAD_LIBRARY_SEARCH_* flags say (`LOAD_FLAGS`; none:
+    /// next to the executable, SetDllDirectory's directory, System32).
     Default,
-    /// System32 only (LOAD_LIBRARY_SEARCH_SYSTEM32).
-    System32,
     /// This directory only (a path with a directory was given; ends with
     /// a backslash).
     Dir(&'a [u16]),
@@ -594,17 +593,23 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
     if let Search::Dir(dir) = search {
         return open_dll(dir, dll);
     }
-    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: the directory of the DLL being
-    // loaded, first, for every dependency of this load.
+    // Tries `dir`; Ok(None) when the DLL is not there.
+    let try_dir = |dir: &[u16]| match open_dll(dir, dll) {
+        Err(STATUS_DLL_NOT_FOUND) => Ok(None),
+        Err(e) => Err(e),
+        Ok(base) => Ok(Some(base)),
+    };
     // SAFETY: under the loader lock (as `map_dll` is).
     let (load_dir, load_len) = unsafe { *LOAD_DIR.0.get() };
-    if load_len != 0 {
-        match open_dll(&load_dir[..load_len], dll) {
-            Err(STATUS_DLL_NOT_FOUND) => {}
-            other => return other,
-        }
+    // SAFETY: as above.
+    let flags = unsafe { *LOAD_FLAGS.0.get() };
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: the directory of the DLL being
+    // loaded, first, for every dependency of this load.
+    if load_len != 0
+        && let Some(base) = try_dir(&load_dir[..load_len])?
+    {
+        return Ok(base);
     }
-    let system32_only = matches!(search, Search::System32);
     let image_path = image_path();
     let dir_len = image_path.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
     let mut system32 = [0u16; 280];
@@ -621,25 +626,77 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
         system32[n] = u16::from(b);
         n += 1;
     }
-    if system32_only {
+    let where_flags =
+        SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32 | SEARCH_DEFAULT_DIRS;
+    if flags & where_flags == 0 {
+        // The standard order: the executable's directory, then
+        // SetDllDirectory's (as documented), then System32.
+        if let Some(base) = try_dir(&image_path[..dir_len])? {
+            return Ok(base);
+        }
+        // SAFETY: under the loader lock (as `map_dll` is).
+        let (dir, len) = unsafe { *DLL_DIRECTORY.0.get() };
+        if len != 0
+            && let Some(base) = try_dir(&dir[..len])?
+        {
+            return Ok(base);
+        }
         return open_dll(&system32[..n], dll);
     }
-    // The executable's directory, then SetDllDirectory's (as documented
-    // for the standard search order), then System32.
-    match open_dll(&image_path[..dir_len], dll) {
-        Err(STATUS_DLL_NOT_FOUND) => {}
-        other => return other,
+    // LOAD_LIBRARY_SEARCH_*: the application's directory, the
+    // AddDllDirectory directories, System32, each when asked for
+    // (DEFAULT_DIRS: all three, in that order).
+    let default = flags & SEARCH_DEFAULT_DIRS != 0;
+    if (default || flags & SEARCH_APPLICATION_DIR != 0)
+        && let Some(base) = try_dir(&image_path[..dir_len])?
+    {
+        return Ok(base);
     }
-    // SAFETY: under the loader lock (as `map_dll` is).
-    let (dir, len) = unsafe { *DLL_DIRECTORY.0.get() };
-    if len != 0 {
-        match open_dll(&dir[..len], dll) {
-            Err(STATUS_DLL_NOT_FOUND) => {}
-            other => return other,
+    if default || flags & SEARCH_USER_DIRS != 0 {
+        for slot in 0..USER_DIRS {
+            // SAFETY: under the loader lock.
+            let (dir, len) = unsafe { (*USER_DIR_LIST.0.get())[slot] };
+            if len != 0
+                && let Some(base) = try_dir(&dir[..len])?
+            {
+                return Ok(base);
+            }
         }
     }
-    open_dll(&system32[..n], dll)
+    if default || flags & SEARCH_SYSTEM32 != 0 {
+        return open_dll(&system32[..n], dll);
+    }
+    Err(STATUS_DLL_NOT_FOUND)
 }
+
+/// LoadLibraryExW's LOAD_LIBRARY_SEARCH_* flags (passed in LdrLoadDll's
+/// DllPath with its low bit set).
+const SEARCH_DLL_LOAD_DIR: usize = 0x100;
+const SEARCH_APPLICATION_DIR: usize = 0x200;
+const SEARCH_USER_DIRS: usize = 0x400;
+const SEARCH_SYSTEM32: usize = 0x800;
+const SEARCH_DEFAULT_DIRS: usize = 0x1000;
+
+/// The search flags of the LdrLoadDll in progress (its dependencies are
+/// searched the same way), under the loader lock.
+struct LoadFlags(core::cell::UnsafeCell<usize>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for LoadFlags {}
+
+static LOAD_FLAGS: LoadFlags = LoadFlags(core::cell::UnsafeCell::new(0));
+
+/// LdrAddDllDirectory's directories (each ends with a backslash; length 0:
+/// a free slot; a cookie is its slot + 1), under the loader lock.
+const USER_DIRS: usize = 16;
+
+struct UserDirs(core::cell::UnsafeCell<[([u16; MAX_PATH], usize); USER_DIRS]>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for UserDirs {}
+
+static USER_DIR_LIST: UserDirs =
+    UserDirs(core::cell::UnsafeCell::new([([0; MAX_PATH], 0); USER_DIRS]));
 
 /// The directory LdrLoadDll's LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR adds in
 /// front of the search for the dependencies of the DLL it loads (ends
@@ -1625,21 +1682,19 @@ unsafe extern "system" fn ldr_load_dll(
     // As on newer Windows, LoadLibraryExW's LOAD_LIBRARY_SEARCH_* flags come
     // in `path` with its low bit set (a real path is 2-byte aligned).
     let flags = if path as usize & 1 != 0 { path as usize & !1 } else { 0 };
-    const LOAD_LIBRARY_SEARCH_SYSTEM32: usize = 0x800;
     // A name with an absolute directory loads from that directory only.
     let dir = explicit_dir(name);
     let search = match dir {
         Some(d) => Search::Dir(d),
-        None if flags & LOAD_LIBRARY_SEARCH_SYSTEM32 != 0 => Search::System32,
         None => Search::Default,
     };
-    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: usize = 0x100;
     // SAFETY: under the loader lock (LdrLoadDll holds it); the outer
-    // load's directory is kept for a DllMain that loads another DLL.
-    let saved = unsafe { *LOAD_DIR.0.get() };
-    if let Some(d) =
-        dir.filter(|d| flags & LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR != 0 && d.len() <= MAX_PATH)
-    {
+    // load's directory and flags are kept for a DllMain that loads
+    // another DLL.
+    let (saved, saved_flags) = unsafe { (*LOAD_DIR.0.get(), *LOAD_FLAGS.0.get()) };
+    // SAFETY: as above.
+    unsafe { *LOAD_FLAGS.0.get() = flags };
+    if let Some(d) = dir.filter(|d| flags & SEARCH_DLL_LOAD_DIR != 0 && d.len() <= MAX_PATH) {
         // SAFETY: as above.
         unsafe {
             let slot = &mut *LOAD_DIR.0.get();
@@ -1650,7 +1705,10 @@ unsafe extern "system" fn ldr_load_dll(
     let mut buf = [0u8; MAX_NAME];
     let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n], search));
     // SAFETY: as above.
-    unsafe { *LOAD_DIR.0.get() = saved };
+    unsafe {
+        *LOAD_DIR.0.get() = saved;
+        *LOAD_FLAGS.0.get() = saved_flags;
+    }
     match loaded {
         Ok(slot) => {
             // SAFETY: the caller passes a writable handle.
@@ -2446,6 +2504,71 @@ pub unsafe extern "system" fn LdrGetProcedureAddress(
 #[unsafe(no_mangle)]
 pub extern "system" fn LdrUnloadDll(module: usize) -> u32 {
     with_loader_lock(|| ldr_unload_dll(module))
+}
+
+/// LdrAddDllDirectory(*Directory, *Cookie) (kernel32's AddDllDirectory):
+/// a directory searched with LOAD_LIBRARY_SEARCH_USER_DIRS or
+/// _DEFAULT_DIRS, for the DLL and its dependencies. A full path (a drive
+/// and a separator) only; STATUS_INVALID_PARAMETER otherwise,
+/// STATUS_NO_MEMORY when all slots are taken.
+///
+/// # Safety
+/// `dir` must point at a valid UNICODE_STRING and `cookie` be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrAddDllDirectory(
+    dir: *const UnicodeString,
+    cookie: *mut usize,
+) -> u32 {
+    const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
+    if dir.is_null() || cookie.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's UNICODE_STRING.
+    let text = unsafe {
+        let us = &*dir;
+        if us.buffer.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        core::slice::from_raw_parts(us.buffer, usize::from(us.length) / 2)
+    };
+    let sep = |c: u16| c == u16::from(b'\\') || c == u16::from(b'/');
+    if text.len() < 3 || text[1] != u16::from(b':') || !sep(text[2]) || text.len() + 1 > MAX_PATH {
+        return STATUS_INVALID_PARAMETER;
+    }
+    with_loader_lock(|| {
+        // SAFETY: under the loader lock.
+        let list = unsafe { &mut *USER_DIR_LIST.0.get() };
+        let Some(slot) = list.iter().position(|(_, len)| *len == 0) else {
+            return STATUS_NO_MEMORY;
+        };
+        let (buf, len) = &mut list[slot];
+        buf[..text.len()].copy_from_slice(text);
+        *len = text.len();
+        if !sep(buf[*len - 1]) {
+            buf[*len] = u16::from(b'\\');
+            *len += 1;
+        }
+        // SAFETY: the caller's cookie.
+        unsafe { cookie.write(slot + 1) };
+        STATUS_SUCCESS
+    })
+}
+
+/// LdrRemoveDllDirectory(Cookie) (RemoveDllDirectory): takes the directory
+/// out of the search; STATUS_INVALID_PARAMETER for an unknown cookie.
+#[unsafe(no_mangle)]
+pub extern "system" fn LdrRemoveDllDirectory(cookie: usize) -> u32 {
+    with_loader_lock(|| {
+        // SAFETY: under the loader lock.
+        let list = unsafe { &mut *USER_DIR_LIST.0.get() };
+        match cookie.checked_sub(1).and_then(|i| list.get_mut(i)) {
+            Some((_, len)) if *len != 0 => {
+                *len = 0;
+                STATUS_SUCCESS
+            }
+            _ => 0xc000_000d,
+        }
+    })
 }
 
 /// LdrSetDllDirectory(*Directory): the directory searched for DLLs after

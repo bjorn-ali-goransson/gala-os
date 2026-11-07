@@ -710,20 +710,13 @@ pub extern "system" fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32
     } else {
         flags
     };
-    // LOAD_LIBRARY_SEARCH_USER_DIRS (or DEFAULT_DIRS, which includes it):
-    // the AddDllDirectory directories first.
-    if flags & (0x400 | 0x1000) != 0
-        && let Some(h) = files::load_from_dll_directories(name)
-    {
-        return h;
-    }
-    // LOAD_LIBRARY_SEARCH_SYSTEM32 alone restricts the search to System32;
-    // the default-directories flags include the application directory.
-    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR goes to the loader as is: the
-    // directory of a DLL given by path, first, for its dependencies.
-    let system32 = if flags & SEARCH_FLAGS & !DLL_LOAD_DIR == 0x800 { 0x800 } else { 0 };
-    let load_dir = if altered || flags & DLL_LOAD_DIR != 0 { DLL_LOAD_DIR } else { 0 };
-    load_library(name, wide_len(name), system32 | load_dir)
+    // The LOAD_LIBRARY_SEARCH_* flags go to the loader as they are: where
+    // the DLL and every dependency of this load are looked for (ntdll's
+    // `map_dll`: the DLL's own directory, the application's, the
+    // AddDllDirectory directories, System32). LOAD_WITH_ALTERED_SEARCH_PATH
+    // is passed on as LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.
+    let search = (flags & SEARCH_FLAGS) | if altered { DLL_LOAD_DIR } else { 0 };
+    load_library(name, wide_len(name), search)
 }
 
 /// SetDefaultDllDirectories' flags (0: none set).

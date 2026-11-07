@@ -881,94 +881,44 @@ pub extern "system" fn Wow64EnableWow64FsRedirection(enable: u8) -> u8 {
     if status != 0 { fail(status, 0) } else { 1 }
 }
 
-/// The AddDllDirectory directories (full paths, NUL-terminated), at most
-/// DLL_DIRECTORIES; a cookie is its slot + 1.
-const DLL_DIRECTORIES: usize = 8;
-static mut DLL_DIRS: [[u16; 260]; DLL_DIRECTORIES] = [[0; 260]; DLL_DIRECTORIES];
-static DLL_DIRS_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-fn with_dll_dirs<R>(f: impl FnOnce(&mut [[u16; 260]; DLL_DIRECTORIES]) -> R) -> R {
-    use core::sync::atomic::Ordering;
-    while DLL_DIRS_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    let dirs = &raw mut DLL_DIRS;
-    // SAFETY: the table, under its lock.
-    let r = f(unsafe { &mut *dirs });
-    DLL_DIRS_LOCK.store(false, Ordering::Release);
-    r
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn LdrAddDllDirectory(dir: *const UnicodeString, cookie: *mut usize) -> u32;
+    safe fn LdrRemoveDllDirectory(cookie: usize) -> u32;
 }
 
 /// AddDllDirectory(path): a full path searched by LoadLibraryEx with
-/// LOAD_LIBRARY_SEARCH_USER_DIRS; a cookie for RemoveDllDirectory.
+/// LOAD_LIBRARY_SEARCH_USER_DIRS or _DEFAULT_DIRS (for the DLL and its
+/// dependencies), kept by the loader (LdrAddDllDirectory); a cookie for
+/// RemoveDllDirectory. ERROR_INVALID_PARAMETER for anything but a full
+/// path.
 #[unsafe(no_mangle)]
 pub extern "system" fn AddDllDirectory(path: *const u16) -> *mut c_void {
     if path.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
     }
     let p = wide_slice(path);
-    // A full path: a drive and a separator.
-    if p.len() < 3 || p.len() >= 259 || p[1] != u16::from(b':') || !is_sep(p[2]) {
-        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
-    }
-    let slot = with_dll_dirs(|dirs| {
-        let i = dirs.iter().position(|d| d[0] == 0)?;
-        dirs[i][..p.len()].copy_from_slice(p);
-        dirs[i][p.len()] = 0;
-        Some(i)
-    });
-    match slot {
-        Some(i) => (i + 1) as *mut c_void,
-        None => fail_with(ERROR_NOT_ENOUGH_MEMORY, core::ptr::null_mut()),
+    let us = UnicodeString {
+        length: (p.len() * 2) as u16,
+        maximum_length: (p.len() * 2) as u16,
+        buffer: p.as_ptr(),
+    };
+    let mut cookie = 0usize;
+    // SAFETY: a valid UNICODE_STRING and cookie.
+    match unsafe { LdrAddDllDirectory(&us, &mut cookie) } {
+        0 => cookie as *mut c_void,
+        status => fail(status, core::ptr::null_mut()),
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn RemoveDllDirectory(cookie: *mut c_void) -> Bool {
-    let i = (cookie as usize).wrapping_sub(1);
-    let removed = with_dll_dirs(|dirs| match dirs.get_mut(i) {
-        Some(d) if d[0] != 0 => {
-            d[0] = 0;
-            true
-        }
-        _ => false,
-    });
-    if removed { TRUE } else { fail_with(ERROR_INVALID_PARAMETER, FALSE) }
-}
-
-/// LoadLibrary of a bare `name` from the AddDllDirectory directories.
-pub(crate) fn load_from_dll_directories(name: *const u16) -> Option<Handle> {
-    let n = wide_slice(name);
-    if n.iter().any(|&c| is_sep(c) || c == u16::from(b':')) {
-        return None;
+    match LdrRemoveDllDirectory(cookie as usize) {
+        0 => TRUE,
+        status => fail(status, FALSE),
     }
-    for i in 0..DLL_DIRECTORIES {
-        let mut full = [0u16; 520];
-        let len = with_dll_dirs(|dirs| {
-            let d = &dirs[i];
-            let dl = d.iter().position(|&c| c == 0).unwrap_or(0);
-            if dl == 0 {
-                return 0;
-            }
-            full[..dl].copy_from_slice(&d[..dl]);
-            let mut at = dl;
-            if !is_sep(d[dl - 1]) {
-                full[at] = BACKSLASH;
-                at += 1;
-            }
-            if at + n.len() >= full.len() {
-                return 0;
-            }
-            full[at..at + n.len()].copy_from_slice(n);
-            at + n.len()
-        });
-        if len == 0 || GetFileAttributesW(full.as_ptr()) == u32::MAX {
-            continue;
-        }
-        return Some(LoadLibraryW(full.as_ptr()));
-    }
-    None
 }

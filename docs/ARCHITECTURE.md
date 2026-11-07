@@ -2294,7 +2294,15 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   dependency of that load (CPython loads `DLLs\_ctypes.pyd` and its
   `libffi-8.dll` so). LOAD_WITH_ALTERED_SEARCH_PATH is passed on as that
   flag (Windows also leaves the executable's directory out then; gala
-  looks there after).
+  looks there after). The other LOAD_LIBRARY_SEARCH_* flags (LdrLoadDll's
+  DllPath with its low bit set; kernel32 passes LoadLibraryExW's, or
+  SetDefaultDllDirectories', through) choose where the DLL and every
+  dependency of that load are looked for, in this order:
+  APPLICATION_DIR, USER_DIRS (the directories of LdrAddDllDirectory,
+  kernel32's AddDllDirectory, up to 16, kept by the loader), SYSTEM32;
+  DEFAULT_DIRS is all three; SetDllDirectory's directory is not used
+  then (numpy finds the OpenBLAS in `numpy.libs` through
+  os.add_dll_directory so).
 - **API sets** (`api-ms-win-*`) are resolved in name normalization, as
   the schema does on Windows whatever files exist: `crt-` sets to
   ucrtbase, `core-com-`/`core-winrt-` to ole32 (no combase),

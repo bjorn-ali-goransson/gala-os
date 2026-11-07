@@ -24,8 +24,10 @@
 //!
 //! A DLL loaded by path takes its dependencies from the usual places, or
 //! with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR from its own directory first
-//! (copies of both DLLs in C:\gala\sub). Prints `loader_test: ok` or
-//! exits with the number of the failing check.
+//! (copies of both DLLs in C:\gala\sub), or with
+//! LOAD_LIBRARY_SEARCH_USER_DIRS from LdrAddDllDirectory's directories
+//! only (found nowhere once LdrRemoveDllDirectory took it out). Prints
+//! `loader_test: ok` or exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
@@ -425,6 +427,48 @@ fn run() -> Result<(), u32> {
         let (s, _) = api.handle(&wide!("testdll.dll"));
         c.eq(s.into(), STATUS_DLL_NOT_FOUND.into())?;
     }
+
+    // LdrAddDllDirectory (kernel32's AddDllDirectory): with
+    // LOAD_LIBRARY_SEARCH_USER_DIRS (0x400) alone, the dependencies come
+    // from the added directories only (numpy finds its OpenBLAS so);
+    // once removed, testdll is found nowhere.
+    let ntdll = find_ntdll().unwrap_or(0);
+    let (Some(add), Some(remove)) =
+        (find_export(ntdll, b"LdrAddDllDirectory"), find_export(ntdll, b"LdrRemoveDllDirectory"))
+    else {
+        return c.ok(false, 0);
+    };
+    // SAFETY: ntdll's exports with these signatures.
+    let (add, remove) = unsafe {
+        (
+            core::mem::transmute::<
+                usize,
+                extern "system" fn(*const UnicodeString, *mut usize) -> NtStatus,
+            >(add),
+            core::mem::transmute::<usize, extern "system" fn(usize) -> NtStatus>(remove),
+        )
+    };
+    let mut cookie = 0usize;
+    c.eq(
+        add(&UnicodeString::new(&wide!("C:\\gala\\sub")), &mut cookie).into(),
+        STATUS_SUCCESS.into(),
+    )?;
+    c.ok(cookie != 0, 0)?;
+    let user_dirs = 0x401 as *const u16;
+    let mut dll2 = 0;
+    let s = (api.load)(user_dirs, core::ptr::null(), &UnicodeString::new(&sub2), &mut dll2);
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    let (s, dep) = api.handle(&wide!("testdll.dll"));
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    let mut buf = [0u8; 600];
+    c.ok(
+        mapped_file_name(dep, &mut buf).is_ok_and(|name| ends_with_ci(name, "\\sub\\testdll.dll")),
+        0,
+    )?;
+    c.eq((api.unload)(dll2).into(), STATUS_SUCCESS.into())?;
+    c.eq(remove(cookie).into(), STATUS_SUCCESS.into())?;
+    let s = (api.load)(user_dirs, core::ptr::null(), &UnicodeString::new(&sub2), &mut dll2);
+    c.eq(s.into(), STATUS_DLL_NOT_FOUND.into())?;
     Ok(())
 }
 

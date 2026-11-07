@@ -122,6 +122,16 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["tools/*"],
         excludes: &[],
     },
+    // numpy 2.2.1's wheel for CPython 3.13 on x64 (PyPI; the SHA-256 is
+    // PyPI's published digest): extension modules with OpenBLAS and
+    // msvcp140 bundled in numpy.libs. pip installs it in the guest.
+    Prebuilt {
+        name: "numpy",
+        url: "https://files.pythonhosted.org/packages/44/be/0e5cd009d2162e4138d79a5afb3b5d2341f0fe4777ab6e675aa3d4a42e21/numpy-2.2.1-cp313-cp313-win_amd64.whl",
+        checksum: "164a829b6aacf79ca47ba4814b130c4020b202522a93d7bff2202bfb33b61c60",
+        members: &["numpy-2.2.1-cp313-cp313-win_amd64.whl"],
+        excludes: &[],
+    },
     Prebuilt {
         name: "pwsh",
         url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.zip",
@@ -1752,6 +1762,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("python_pip", "shell32.dll", "Windows/System32"),
     ("python_pip", "shlwapi.dll", "Windows/System32"),
     ("python_pip", "user/python/python_pip.py", "gala"),
+    // P1 step 6: numpy (C extensions, OpenBLAS) on the full layout.
+    ("python_numpy", "user/python/python_numpy.py", "gala"),
+    ("python_numpy", "target/prebuilt/numpy/numpy-2.2.1-cp313-cp313-win_amd64.whl", "gala"),
     ("pwsh", "target/prebuilt/pwsh/", "pwsh"),
     ("pwsh", "ntdll.dll", "Windows/System32"),
     ("pwsh", "kernel32.dll", "Windows/System32"),
@@ -2524,6 +2537,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "filezilla",
     "python_pip",
     "python_pip_https",
+    "python_numpy",
 ];
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
@@ -6682,6 +6696,16 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // P1 step 6: a package with C extensions: pip installs numpy's
+        // wheel from the file; arithmetic, random, LAPACK through its
+        // OpenBLAS, a threaded matrix product, FFT;
+        // user/python/python_numpy.py, as on Windows.
+        name: "python_numpy",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_numpy.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_numpy: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
         // P1 step 6: multiprocessing (spawned children over inherited
         // pipes): Process, Queue, Pool, a shared Value and Lock, Pipe,
         // shared_memory; user/python/python_mp.py, as on Windows.
@@ -7904,6 +7928,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("filezilla_flaui", "filezilla"),
     ("pwsh_hello", "pwsh"),
     ("python_pip_https", "python_pip"),
+    ("python_numpy", "python_pip"),
+    ("python_numpy", "python_numpy"),
     ("python_pip_https", "schannel_test"),
     ("python_script", "python_hello"),
     ("python_script", "python_script"),

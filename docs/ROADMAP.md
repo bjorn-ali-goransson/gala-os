@@ -485,8 +485,10 @@ boot-test <name>`, see "Pending scenarios" below):
    EXT_ONLY flags (`cert_test`; Python's enum_certificates gave roots no
    purpose). A venv with pip (ensurepip installs it; the venv's pip.exe
    installs into it, its console script runs): `python_pip`, ~180 s of
-   run time under TCG (SLOW_SCENARIOS). Next: packages with C extensions
-   (numpy's wheels), WSAID_TRANSMITPACKETS (asked for by
+   run time under TCG (SLOW_SCENARIOS). `python_numpy`: pip installs
+   numpy 2.2.1's wheel; arithmetic, random, LAPACK and a threaded matrix
+   product through its OpenBLAS, FFT (its gap: AddDllDirectory's
+   directories for a load's dependencies, `loader_test`). Next: WSAID_TRANSMITPACKETS (asked for by
    _overlapped, unused so far).
    Its ledger (optional probes): propsys.dll (from shell32),
    kernelbase.dll and

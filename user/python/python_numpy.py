@@ -47,7 +47,11 @@ def use():
     check("det", round(float(np.linalg.det(a)), 9), -3.0)
     # A matrix product large enough for OpenBLAS's threads.
     m = np.arange(40000, dtype=np.float64).reshape(200, 200) / 40000
-    check("matmul", round(float((m @ m.T).trace()), 6), 13332.833337)
+    # The exact trace is 13332.8333375 (the sum of k^2 / 40000^2): BLAS
+    # kernels sum in their own order, so a relative tolerance.
+    import math
+
+    check("matmul", math.isclose(float((m @ m.T).trace()), 13332.8333375, rel_tol=1e-12), True)
     check("fft", np.fft.fft([1, 0, 0, 0]).tolist(), [1 + 0j] * 4)
 
 
