@@ -613,9 +613,9 @@ fn epoch_ms() -> u128 {
 /// target/wpt/wptreport.json, a summary line last; then ChromeDriver's
 /// /shutdown ends the run. Failing tests are the report, not a failure:
 /// Err only when no session can be made.
-pub fn client(port: u16, log: &Path) -> Result {
+pub fn client(port: u16, log: &Path, monitor: &Path) -> Result {
     let verdict = start_server().and_then(|server| {
-        let v = run(port, log);
+        let v = run(port, log, monitor);
         drop(server);
         v
     });
@@ -623,7 +623,7 @@ pub fn client(port: u16, log: &Path) -> Result {
     verdict
 }
 
-fn run(port: u16, log: &Path) -> Result {
+fn run(port: u16, log: &Path, monitor: &Path) -> Result {
     use std::io::Write;
     let note = |line: &str| {
         if let Ok(mut f) = fs::OpenOptions::new().append(true).create(true).open(log) {
@@ -662,6 +662,10 @@ fn run(port: u16, log: &Path) -> Result {
         note(&outcome.line);
         results.push(outcome.result);
         if outcome.lost {
+            // What the guest is doing while the load hangs: its state dump
+            // (each thread's system call and wait, in the serial log),
+            // before anything is torn down.
+            note(&format!("{test}: {}", state_dump(monitor)));
             // End the old session first: ChromeDriver then ends its
             // Chrome, which holds the profile directory a new Chrome
             // needs (otherwise the new one exits at once: "DevToolsActivePort
@@ -692,6 +696,24 @@ fn run(port: u16, log: &Path) -> Result {
         list.len()
     ));
     Ok(())
+}
+
+/// Asks the guest for a state dump (QEMU's `nmi` through the monitor;
+/// read-only, the guest goes on) and gives it 60 s to print.
+fn state_dump(monitor: &Path) -> String {
+    use std::io::Write;
+    match std::os::unix::net::UnixStream::connect(monitor).and_then(|mut m| {
+        m.write_all(b"nmi\n")?;
+        m.flush()?;
+        Ok(m)
+    }) {
+        Ok(m) => {
+            thread::sleep(Duration::from_secs(60));
+            drop(m);
+            "a state dump asked for (statedump: lines in the serial log)".into()
+        }
+        Err(e) => format!("no state dump (monitor: {e})"),
+    }
 }
 
 /// A WebDriver answer in a few words, for the run's log.

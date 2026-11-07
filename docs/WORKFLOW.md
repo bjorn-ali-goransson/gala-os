@@ -1543,7 +1543,10 @@ stale server would answer for this tree), and runs the relay as QEMU
 will, failing at once unless our testharnessreport.js comes back. The
 server runs in a process group of its own, ended as a whole (its
 servers are child processes that outlived the parent). A test whose
-load gets no answer ends its session (ChromeDriver then ends its
+load gets no answer first asks the guest for a state dump (`nmi`
+through QEMU's monitor; read-only: the `statedump:` lines in the
+serial log show each thread's system call and wait at the hang), then
+ends its session (ChromeDriver then ends its
 Chrome, which holds the profile directory) and the run goes on in a
 new one; if none can be made, the rest are SKIP ("not run: ...") in
 the report, which is written either way. `XTASK_WPT_FILTER=<substring>` and

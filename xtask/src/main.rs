@@ -9280,6 +9280,7 @@ fn run_vm_once(
             && fs::read(&log).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
         {
             let serve_log = iso.with_extension("serve.log");
+            let monitor = socket.clone();
             client = Some(thread::spawn(move || match kind {
                 NetClient::Echo => net_client(port),
                 NetClient::Http(page) => http_client(port, page),
@@ -9297,7 +9298,7 @@ fn run_vm_once(
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
                 NetClient::WebDriver => webdriver_client(port),
-                NetClient::Wpt => wpt::client(port, &serve_log),
+                NetClient::Wpt => wpt::client(port, &serve_log, &monitor),
                 NetClient::HandoverNet => handover_net_client(port),
                 NetClient::Udp => udp_client(port),
             }));
