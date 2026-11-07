@@ -1510,11 +1510,18 @@ Implementing what FlaUI needs (gala's UIAutomationCore, user32):
 ### Chromium (BR)
 
 `chromium_wpt` (PENDING; web-platform-tests through ChromeDriver,
-`xtask/src/wpt.rs`; serve-page stands in for wptserve: files with
-wptserve's MIME types, `<file>.headers`, the `pipe=header(..)` and
-`status(..)` options; a test that needs a `.py` handler is reported
-SKIP, and each test waits for its results as long as testharness's own
-timeout allows, times 4, plus 20 s): `XTASK_WPT_FILTER=<substring>` and
+`xtask/src/wpt.rs`) runs WPT's own server on the host (`./wpt serve`
+in `target/prebuilt/wpt`, HTTP/2 off, ports 8000, 8001, 8443, 8444, 8666
+and 8889; its first start makes a Python virtualenv with its pip
+packages; its log is `target/wpt/wptserve.log`). WPT's host names must
+resolve to the loopback first: `cd target/prebuilt/wpt && ./wpt
+make-hosts-file >> /etc/hosts` (the run says so when they do not). The
+guest reaches it as 10.0.2.100 on those ports (`xtask relay <port>` per
+connection) and Chromium maps web-platform.test and its subdomains
+there (`--host-resolver-rules`); our testharnessreport.js replaces the
+tree's (the file WPT leaves to vendors). Each test waits for its
+results as long as testharness's own timeout allows, times 4, plus
+20 s. `XTASK_WPT_FILTER=<substring>` and
 `XTASK_WPT_LIMIT=<n>` narrow the run (`XTASK_WPT_LIMIT=5 cargo xtask
 boot-test 'chromium_wpt$'`, about 3 minutes); xtask fetches WPT_COMMIT
 into `target/prebuilt/wpt` with the host's git. Each test's line

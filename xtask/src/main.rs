@@ -2549,6 +2549,8 @@ commands:
                events <events.jsonl>
   serve-page   answer one HTTP request on standard input/output with the
                host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
+  relay <port> one connection on standard input/output to 127.0.0.1:<port>
+               (QEMU runs it per connection: chromium_wpt's wptserve)
   wpt-compare  chromium_wpt's report against wpt.fyi's Edge on Windows and
                Chrome on Linux (target/wpt/compare.txt)
   perfetto     a boot's event stream as a Perfetto trace (tracks per thread,
@@ -2659,6 +2661,7 @@ fn main() -> ExitCode {
             Some("perfetto") => perfetto_cli(&args[1..]),
             Some("serve-page") => serve_page(),
             Some("wpt-compare") => wpt::compare(),
+            Some("relay") => wpt::relay(args.get(2).map_or("", String::as_str)),
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -10563,8 +10566,9 @@ fn add_host_page_net(cmd: &mut Command, log: &Path) -> Result {
 }
 
 /// The `-netdev user` option that sends 10.0.2.100:80 to `xtask
-/// serve-page` (",guestfwd=..."), its log and, for chromium_wpt, the WPT
-/// tree it serves set in QEMU's environment (serve-page inherits it).
+/// serve-page` (",guestfwd=..."), its log set in QEMU's environment
+/// (serve-page inherits it); for chromium_wpt, wptserve's ports instead
+/// (`wpt::guestfwd`), the log still the client's.
 fn host_page_fwd(cmd: &mut Command, log: &Path) -> Result<String> {
     let exe = env::current_exe().map_err(|e| format!("xtask's own path: {e}"))?;
     let exe = exe.display().to_string();
@@ -10575,7 +10579,7 @@ fn host_page_fwd(cmd: &mut Command, log: &Path) -> Result<String> {
     // request to `log`, which the run adds to the serial log.
     cmd.env("XTASK_SERVE_PAGE_LOG", log);
     if log.to_string_lossy().contains("chromium_wpt") {
-        cmd.env("XTASK_WPT_ROOT", wpt::tree()?);
+        return wpt::guestfwd();
     }
     Ok(format!(",guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
 }
@@ -10599,32 +10603,6 @@ fn serve_page() -> Result {
     }
     let first =
         String::from_utf8_lossy(head.split(|&b| b == b'\r').next().unwrap_or(&[])).into_owned();
-    if let Ok(root) = env::var("XTASK_WPT_ROOT") {
-        // The WPT tree: only failures are logged (a run makes thousands of
-        // requests).
-        let target = first.split_whitespace().nth(1).unwrap_or("/");
-        let r = wpt::file(Path::new(&root), target);
-        if r.status != 200
-            && let Ok(path) = env::var("XTASK_SERVE_PAGE_LOG")
-            && let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(path)
-        {
-            let _ = writeln!(log, "xtask: serve-page: {first:?}: {}", r.status);
-        }
-        let mut head = format!("HTTP/1.1 {} {}\r\n", r.status, r.reason());
-        for (name, value) in &r.headers {
-            head += &format!("{name}: {value}\r\n");
-        }
-        head += &format!(
-            "Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-            r.body.len()
-        );
-        let mut out = std::io::stdout().lock();
-        return out
-            .write_all(head.as_bytes())
-            .and_then(|()| out.write_all(&r.body))
-            .and_then(|()| out.flush())
-            .map_err(|e| e.to_string());
-    }
     if let Ok(path) = env::var("XTASK_SERVE_PAGE_LOG")
         && let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(path)
     {

@@ -1,10 +1,13 @@
 //! BR's conformance report: web-platform-tests in Chromium on gala
 //! (`chromium_wpt`). xtask fetches WPT at WPT_COMMIT (WPT_DIRS only, a
-//! sparse checkout), QEMU forwards the guest's 10.0.2.100:80 to `xtask
-//! serve-page`, which serves the tree (`file`), and `client` drives one
-//! headless Chromium session through ChromeDriver: each test page is
-//! loaded and its testharness results read back through our own
-//! testharnessreport.js (`REPORTER`). Each test's line goes into the
+//! sparse checkout) and runs WPT's own server, wptserve (`./wpt serve`,
+//! on the host, with WPT's hosts in /etc/hosts), on PORTS; QEMU forwards
+//! the guest's 10.0.2.100 on those ports to it (`xtask relay <port>` per
+//! connection), Chromium maps web-platform.test and its subdomains to
+//! 10.0.2.100 (as wptrunner does), and `client` drives one headless
+//! Chromium session through ChromeDriver: each test page is loaded and
+//! its testharness results read back through our testharnessreport.js
+//! (`REPORTER`, written into the tree: the file WPT leaves to vendors). Each test's line goes into the
 //! serial log (`xtask: wpt: <path>: ...`); the run's results into
 //! target/wpt/wptreport.json (wptrunner's format, what wpt.fyi takes).
 
@@ -20,7 +23,11 @@ use crate::{Result, webdriver};
 /// github.com/web-platform-tests/wpt).
 pub const WPT_COMMIT: &str = "dd216d1d4f61489b09f566bec2c52d229baa7f49";
 /// What is checked out: the harness and the directories whose tests run.
-const WPT_DIRS: &[&str] = &["resources", "dom/nodes"];
+/// (`tools` and `docs` for `./wpt serve`, `common` for the tests).
+const WPT_DIRS: &[&str] = &["resources", "common", "docs", "tools", "dom/nodes"];
+/// wptserve's ports (http, http alternate, https, https alternate, ws,
+/// wss), forwarded from the guest's 10.0.2.100.
+pub const PORTS: &[u16] = &[8000, 8001, 8443, 8444, 8666, 8889];
 /// The directories whose tests run (WPT_DIRS less the harness).
 const TEST_DIRS: &[&str] = &["dom/nodes"];
 
@@ -31,6 +38,8 @@ pub fn tree() -> Result<PathBuf> {
     let stamp = dir.join(".gala-commit");
     let want = format!("{WPT_COMMIT} {}", WPT_DIRS.join(" "));
     if fs::read_to_string(&stamp).is_ok_and(|s| s == want) {
+        fs::write(dir.join("resources/testharnessreport.js"), REPORTER)
+            .map_err(|e| e.to_string())?;
         return fs::canonicalize(&dir).map_err(|e| e.to_string());
     }
     eprintln!("xtask: fetching web-platform-tests at {WPT_COMMIT} ({})", WPT_DIRS.join(", "));
@@ -58,6 +67,7 @@ pub fn tree() -> Result<PathBuf> {
     git(&["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", WPT_COMMIT])?;
     git(&["checkout", "-q", "FETCH_HEAD"])?;
     fs::write(&stamp, want).map_err(|e| e.to_string())?;
+    fs::write(dir.join("resources/testharnessreport.js"), REPORTER).map_err(|e| e.to_string())?;
     fs::canonicalize(&dir).map_err(|e| e.to_string())
 }
 
@@ -79,151 +89,96 @@ add_completion_callback(function (tests, status) {
 });
 "#;
 
-/// The page that runs a `.window.js` or `.any.js` test in a window (as
-/// wptserve makes it): the harness, the `// META: script=` scripts, the
-/// test.
-fn wrapper(js: &Path, name: &str) -> Vec<u8> {
-    let source = fs::read_to_string(js).unwrap_or_default();
-    let mut scripts = String::new();
-    let mut title = String::new();
-    for line in source.lines().take_while(|l| l.starts_with("//")) {
-        let Some(meta) = line.strip_prefix("// META:") else { continue };
-        let meta = meta.trim();
-        if let Some(src) = meta.strip_prefix("script=") {
-            scripts += &format!("<script src=\"{src}\"></script>\n");
-        } else if let Some(t) = meta.strip_prefix("title=") {
-            title = format!("<title>{t}</title>\n");
+/// wptserve on the host: started for a run, stopped with it.
+pub struct Server(std::process::Child);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts `./wpt serve` (HTTP/2 off) with PORTS fixed (gala-config.json
+/// in the tree), its output in target/wpt/wptserve.log, and waits until
+/// it answers on 8000 (the first start makes its virtualenv: minutes).
+/// WPT's hosts must resolve to the loopback first
+/// (`./wpt make-hosts-file >> /etc/hosts`): an error says so.
+pub fn start_server() -> Result<Server> {
+    let root = tree()?;
+    let hosts = fs::read_to_string("/etc/hosts").unwrap_or_default();
+    if !hosts.contains("web-platform.test") {
+        return Err(format!(
+            "WPT's hosts are not in /etc/hosts: run `cd {} && ./wpt make-hosts-file >> /etc/hosts`",
+            root.display()
+        ));
+    }
+    let config =
+        r#"{"ports": {"http": [8000, 8001], "https": [8443, 8444], "ws": [8666], "wss": [8889]}}"#;
+    fs::write(root.join("gala-config.json"), config).map_err(|e| e.to_string())?;
+    fs::create_dir_all("target/wpt").map_err(|e| e.to_string())?;
+    let log = fs::File::create("target/wpt/wptserve.log").map_err(|e| e.to_string())?;
+    let err = log.try_clone().map_err(|e| e.to_string())?;
+    let child = Command::new("./wpt")
+        .args(["serve", "--no-h2", "--config", "gala-config.json"])
+        .current_dir(&root)
+        .stdout(log)
+        .stderr(err)
+        .spawn()
+        .map_err(|e| format!("./wpt serve: {e}"))?;
+    let mut server = Server(child);
+    for _ in 0..600 {
+        if std::net::TcpStream::connect(("127.0.0.1", 8000)).is_ok() {
+            return Ok(server);
         }
-    }
-    format!(
-        "<!doctype html>\n<meta charset=utf-8>\n{title}<script src=\"/resources/testharness.js\"></script>\n\
-         <script src=\"/resources/testharnessreport.js\"></script>\n{scripts}<div id=log></div>\n\
-         <script src=\"{name}\"></script>\n"
-    )
-    .into_bytes()
-}
-
-/// What serve-page sends: a status, headers (Content-Type among them),
-/// the body.
-pub struct Response {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
-
-impl Response {
-    fn new(status: u16, kind: &str, body: Vec<u8>) -> Response {
-        Response { status, headers: vec![("Content-Type".into(), kind.into())], body }
-    }
-
-    /// Sets a header (replacing one of the same name).
-    fn set(&mut self, name: &str, value: &str) {
-        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
-        self.headers.push((name.to_string(), value.to_string()));
-    }
-
-    pub fn reason(&self) -> &'static str {
-        match self.status {
-            200 => "OK",
-            204 => "No Content",
-            301 => "Moved Permanently",
-            302 => "Found",
-            304 => "Not Modified",
-            400 => "Bad Request",
-            403 => "Forbidden",
-            404 => "Not Found",
-            500 => "Internal Server Error",
-            _ => "Status",
+        if let Ok(Some(status)) = server.0.try_wait() {
+            return Err(format!("./wpt serve ended ({status}): see target/wpt/wptserve.log"));
         }
+        thread::sleep(Duration::from_millis(500));
     }
+    Err("./wpt serve did not answer on port 8000 in 300 s (target/wpt/wptserve.log)".into())
 }
 
-/// A file's MIME type, as wptserve gives it (by extension).
-fn mime(file: &Path) -> &'static str {
-    match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "html" | "htm" => "text/html",
-        "xhtml" | "xht" => "application/xhtml+xml",
-        "svg" => "image/svg+xml",
-        "xml" => "application/xml",
-        "js" | "mjs" => "text/javascript",
-        "css" => "text/css",
-        "json" => "application/json",
-        "txt" => "text/plain",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "jpg" | "jpeg" => "image/jpeg",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        "webp" => "image/webp",
-        "wasm" => "application/wasm",
-        _ => "application/octet-stream",
+/// The `-netdev user` options forwarding the guest's 10.0.2.100 on PORTS
+/// to wptserve, through `xtask relay <port>` (QEMU runs it per
+/// connection).
+pub fn guestfwd() -> Result<String> {
+    let exe = std::env::current_exe().map_err(|e| format!("xtask's own path: {e}"))?;
+    let exe = exe.display().to_string();
+    if exe.contains(',') || exe.contains(' ') {
+        return Err(format!("xtask's path {exe:?} cannot go in a -netdev option"));
     }
+    Ok(PORTS.iter().map(|p| format!(",guestfwd=tcp:10.0.2.100:{p}-cmd:{exe} relay {p}")).collect())
 }
 
-/// wptserve's `pipe=` options the tests in WPT_DIRS use: `header(name,
-/// value)` and `status(code)`, joined with `|`; others are ignored.
-fn apply_pipes(response: &mut Response, query: &str) {
-    let Some(pipes) = query.split('&').find_map(|p| p.strip_prefix("pipe=")) else { return };
-    let pipes = pipes.replace("%2C", ",").replace("%20", " ").replace("%7C", "|");
-    for pipe in pipes.split('|') {
-        if let Some(args) = pipe.strip_prefix("header(").and_then(|a| a.strip_suffix(')'))
-            && let Some((name, value)) = args.split_once(',')
-        {
-            response.set(name.trim(), value.trim());
-        } else if let Some(code) = pipe.strip_prefix("status(").and_then(|a| a.strip_suffix(')'))
-            && let Ok(code) = code.trim().parse()
-        {
-            response.status = code;
-        }
-    }
-}
-
-/// What serve-page answers for `target` (a request's path and query) in
-/// the tree at `root`: a file with its MIME type and its `.headers`
-/// file's headers, a generated page for `.window.js`/`.any.js` tests,
-/// our testharnessreport.js; then the query's `pipe=` options.
-pub fn file(root: &Path, target: &str) -> Response {
-    let (path, query) =
-        target.split('#').next().unwrap_or("/").split_once('?').unwrap_or((target, ""));
-    let path = path.replace("%20", " ");
-    let not_found = || Response::new(404, "text/plain", b"not found\n".to_vec());
-    if path.split('/').any(|part| part == "..") {
-        return not_found();
-    }
-    let mut response = if path == "/resources/testharnessreport.js" {
-        Response::new(200, "text/javascript", REPORTER.as_bytes().to_vec())
-    } else {
-        let rel = path.trim_start_matches('/');
-        let generated = [(".window.html", ".window.js"), (".any.html", ".any.js")].iter().find_map(
-            |(page, script)| {
-                let stem = rel.strip_suffix(page)?;
-                let js = root.join(format!("{stem}{script}"));
-                let name = js.file_name()?.to_string_lossy().into_owned();
-                js.is_file().then(|| Response::new(200, "text/html", wrapper(&js, &name)))
-            },
-        );
-        match generated {
-            Some(r) => r,
-            None => {
-                let file = root.join(rel);
-                let Ok(body) = fs::read(&file) else { return not_found() };
-                let mut r = Response::new(200, mime(&file), body);
-                // `<file>.headers`: one `Name: value` a line.
-                let mut headers = file.clone().into_os_string();
-                headers.push(".headers");
-                if let Ok(text) = fs::read_to_string(&headers) {
-                    for line in text.lines() {
-                        if let Some((name, value)) = line.split_once(':') {
-                            r.set(name.trim(), value.trim());
-                        }
-                    }
-                }
-                r
+/// `cargo xtask relay <port>`: one guest connection (standard input and
+/// output) to 127.0.0.1:<port>, both ways, until either side closes.
+pub fn relay(port: &str) -> Result {
+    use std::io::{Read, Write};
+    let port: u16 = port.parse().map_err(|_| format!("relay: bad port {port:?}"))?;
+    let stream = std::net::TcpStream::connect(("127.0.0.1", port))
+        .map_err(|e| format!("relay {port}: {e}"))?;
+    let mut up = stream.try_clone().map_err(|e| e.to_string())?;
+    let to_server = thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 16384];
+        while let Ok(n) = stdin.read(&mut buf) {
+            if n == 0 || up.write_all(&buf[..n]).is_err() {
+                break;
             }
         }
-    };
-    apply_pipes(&mut response, query);
-    response
+        let _ = up.shutdown(std::net::Shutdown::Write);
+    });
+    let mut down = stream;
+    let mut out = std::io::stdout().lock();
+    let mut buf = [0u8; 16384];
+    while let Ok(n) = down.read(&mut buf) {
+        if n == 0 || out.write_all(&buf[..n]).and_then(|()| out.flush()).is_err() {
+            break;
+        }
+    }
+    drop(to_server);
+    Ok(())
 }
 
 /// The testharness tests under TEST_DIRS, as URL paths: pages that load
@@ -331,7 +286,7 @@ fn subtest_status(code: &str) -> &'static str {
     }
 }
 
-const CAPABILITIES: &str = r#"{"capabilities":{"alwaysMatch":{"timeouts":{"pageLoad":300000,"script":60000},"goog:chromeOptions":{"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrw","--enable-logging","--log-file=C:\\chromium\\chrome_driven.log","--ipc-connection-timeout=120"]}}}}"#;
+const CAPABILITIES: &str = r#"{"capabilities":{"alwaysMatch":{"timeouts":{"pageLoad":300000,"script":60000},"goog:chromeOptions":{"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrw","--enable-logging","--log-file=C:\\chromium\\chrome_driven.log","--ipc-connection-timeout=120","--host-resolver-rules=MAP web-platform.test 10.0.2.100,MAP *.web-platform.test 10.0.2.100,MAP not-web-platform.test 10.0.2.100,MAP *.not-web-platform.test 10.0.2.100","--ignore-certificate-errors"]}}}}"#;
 
 /// A new session's id.
 fn session(port: u16) -> Result<String> {
@@ -380,12 +335,6 @@ fn wait_for(source: &str) -> Duration {
     Duration::from_secs(if long { 60 } else { 10 } * 4 + 20)
 }
 
-/// Why a test cannot run against serve-page (it needs wptserve's Python
-/// handlers: a `.py` resource), if so.
-fn unservable(source: &str) -> Option<&'static str> {
-    source.contains(".py").then_some("needs wptserve's Python handlers (serve-page serves files)")
-}
-
 fn run_one(port: u16, id: &str, test: &str, wait: Duration) -> Outcome {
     let started = std::time::Instant::now();
     let result = |status: &'static str, message: String| TestResult {
@@ -397,7 +346,7 @@ fn run_one(port: u16, id: &str, test: &str, wait: Duration) -> Outcome {
     };
     let lost =
         |answer: &str| answer.contains("invalid session id") || answer.contains("disconnected");
-    let url = format!("{{\"url\":\"http://10.0.2.100{test}\"}}");
+    let url = format!("{{\"url\":\"http://web-platform.test:8000{test}\"}}");
     match webdriver(port, "POST", &format!("/session/{id}/url"), &url, 330) {
         Ok((200, _)) => {}
         Ok((status, answer)) => {
@@ -537,7 +486,11 @@ fn epoch_ms() -> u128 {
 /// /shutdown ends the run. Failing tests are the report, not a failure:
 /// Err only when no session can be made.
 pub fn client(port: u16, log: &Path) -> Result {
-    let verdict = run(port, log);
+    let verdict = start_server().and_then(|server| {
+        let v = run(port, log);
+        drop(server);
+        v
+    });
     let _ = webdriver(port, "GET", "/shutdown", "", 60);
     verdict
 }
@@ -565,17 +518,6 @@ fn run(port: u16, log: &Path) -> Result {
     let mut results = Vec::new();
     for test in &list {
         let text = source(&root, test);
-        if let Some(why) = unservable(&text) {
-            note(&format!("{test}: SKIP: {why}"));
-            results.push(TestResult {
-                test: test.clone(),
-                status: "SKIP",
-                message: why.into(),
-                subtests: Vec::new(),
-                duration_ms: 0,
-            });
-            continue;
-        }
         let outcome = run_one(port, &id, test, wait_for(&text));
         note(&outcome.line);
         results.push(outcome.result);
@@ -873,43 +815,5 @@ mod tests {
         assert!(json.contains(
             r#"{"test":"/dom/nodes/a.html","status":"OK","message":null,"duration":1234,"subtests":[{"name":"first \"one\"","status":"PASS","message":null},{"name":"second","status":"FAIL","message":"assert_equals: got 1\nwant 2"}]}"#
         ));
-    }
-
-    #[test]
-    fn serves_the_tree_and_its_generated_pages() {
-        let root = std::env::temp_dir().join(format!("gala-wpt-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("dom/nodes")).unwrap();
-        fs::write(root.join("dom/nodes/a.html"), "<p>").unwrap();
-        fs::write(
-            root.join("dom/nodes/b.window.js"),
-            "// META: title=B\n// META: script=../common.js\ntest(() => {});\n",
-        )
-        .unwrap();
-        let r = file(&root, "/dom/nodes/a.html?x=1");
-        assert_eq!((r.status, r.body.as_slice()), (200, b"<p>".as_slice()));
-        assert_eq!(r.headers, [("Content-Type".to_string(), "text/html".to_string())]);
-        assert_eq!(file(&root, "/dom/nodes/missing.html").status, 404);
-        assert_eq!(file(&root, "/dom/../../etc/passwd").status, 404);
-        let reporter = file(&root, "/resources/testharnessreport.js");
-        assert!(String::from_utf8(reporter.body).unwrap().contains("__gala_wpt"));
-        let page = file(&root, "/dom/nodes/b.window.html");
-        let text = String::from_utf8(page.body).unwrap();
-        assert_eq!(page.status, 200);
-        assert!(text.contains("<title>B</title>"));
-        assert!(text.contains("<script src=\"../common.js\"></script>"));
-        assert!(text.contains("<script src=\"b.window.js\"></script>"));
-        // A .headers file and pipes.
-        fs::write(root.join("dom/nodes/t.bmp"), "BM").unwrap();
-        fs::write(root.join("dom/nodes/t.bmp.headers"), "X-Test: 1\nContent-Type: image/x-test\n")
-            .unwrap();
-        let bmp = file(&root, "/dom/nodes/t.bmp");
-        assert!(bmp.headers.contains(&("Content-Type".into(), "image/x-test".into())));
-        assert!(bmp.headers.contains(&("X-Test".into(), "1".into())));
-        let piped =
-            file(&root, "/dom/nodes/a.html?pipe=header(Content-Type,text/plain)|status(404)");
-        assert_eq!(piped.status, 404);
-        assert!(piped.headers.contains(&("Content-Type".into(), "text/plain".into())));
-        let _ = fs::remove_dir_all(&root);
     }
 }
