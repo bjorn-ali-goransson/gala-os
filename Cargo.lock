@@ -2394,6 +2394,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuf"
+version = "0.1.0"
+dependencies = [
+ "ed25519-compact",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2788,6 +2795,7 @@ dependencies = [
  "flate2",
  "fontdue",
  "resvg",
+ "tuf",
 ]
 
 [[package]]

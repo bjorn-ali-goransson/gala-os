@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod feed;
 mod lx_expect;
 mod stub_audit;
 mod telemetry;
@@ -2570,6 +2571,10 @@ commands:
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
+  feed         the update feed (TUF metadata over content-addressed files; R8):
+               feed publish <files dir> <feed dir> [--release N] [--floor F] |
+               feed refresh <feed dir> (re-sign snapshot and timestamp) |
+               feed check <feed dir> [--root <trusted root.json>]
   symbolize    resolve the kernel backtraces in a serial log to functions
                and source lines: symbolize <log> [--release]
   triage       what a (failed) boot's log says, in one block: verdict, guest CPUs and
@@ -2689,6 +2694,7 @@ fn main() -> ExitCode {
                     .map(|text| print!("{}", triage::events_summary(&text))),
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
+            Some("feed") => feed::cli(&args[1..]),
             Some("otel") => otel_cli(&args[1..]),
             Some("profile") => profile_cli(&args[1..]),
             Some("perfetto") => perfetto_cli(&args[1..]),
@@ -2788,7 +2794,9 @@ fn unit_tests() -> Result {
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
-    run_cmd(cargo().args(["test", "--package", "schannel_tls"]))
+    run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
+    // The update feed's TUF metadata and the client's refusals (R8).
+    run_cmd(cargo().args(["test", "--package", "tuf"]))
 }
 
 /// `cargo xtask alloc-audit`: disassembles the kernel (the debug build

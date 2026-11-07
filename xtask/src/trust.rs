@@ -86,7 +86,14 @@ fn key_dir() -> PathBuf {
 /// The test signing key: its 32-byte seed in `target/trust/test-signing.seed`,
 /// made from the system's random source the first time.
 pub fn test_key() -> Result<KeyPair> {
-    let path = key_dir().join("test-signing.seed");
+    named_key("test-signing")
+}
+
+/// A test key by name: its 32-byte seed in `target/trust/<name>.seed`, made
+/// from the system's random source the first time (the public half beside
+/// it in `<name>.pub`).
+pub fn named_key(name: &str) -> Result<KeyPair> {
+    let path = key_dir().join(format!("{name}.seed"));
     let seed = match fs::read(&path) {
         Ok(seed) => seed,
         Err(_) => {
@@ -99,9 +106,9 @@ pub fn test_key() -> Result<KeyPair> {
             let pair = KeyPair::try_from_seed(Seed::from_slice(&seed).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("test key: {e}"))?;
             let public = hex(&pair.pk[..]);
-            let _ = fs::write(key_dir().join("test-signing.pub"), format!("{public}\n"));
+            let _ = fs::write(key_dir().join(format!("{name}.pub")), format!("{public}\n"));
             eprintln!(
-                "xtask: made the test signing key {} (id {:016x})",
+                "xtask: made the test key {} (id {:016x})",
                 path.display(),
                 manifest::key_id(&pair.pk)
             );

@@ -1,0 +1,16 @@
+[package]
+name = "tuf"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# R8 step 4, the update feed (ARCHITECTURE "The update feed"): TUF's
+# metadata (The Update Framework, specification 1.0) written, signed and
+# checked. Safe, no_std with alloc, host-tested; xtask writes and checks
+# feeds with it, gala's update client checks them with it.
+[lib]
+bench = false
+
+[dependencies]
+ed25519-compact = { version = "=2.6.0", default-features = false }

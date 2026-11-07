@@ -2011,32 +2011,32 @@ floor in the superblock's sector. Next:
 3. A release key separate from the test key; the rollback floor kept in
    a TPM NV counter, and raised only after the new release's self-check.
 4. The update feed (the owner): releases published to object storage as
-   static files in TUF's metadata format (The Update Framework, CNCF),
-   so any bucket, CDN or mirror can serve them untrusted:
-   - Layout: `root.json` (the trusted keys and thresholds; root keys
-     offline, a threshold such as 2 of 3; key rotation by a new root
-     signed by the old), `targets` (the release key: each release's
-     files with sizes and SHA-256; the GALAMANI manifest becomes, or is
-     derived from, this role), `snapshot` and `timestamp` (an online
-     key, short expiry), and the files content-addressed under
-     `blobs/sha256/<digest>`.
-   - One rolling channel, no LTS (the owner: none unless paid for): CI
-     publishes every release that passes the gate on main (build, sign
-     targets with the release key from a KMS or HSM, upload the blobs,
-     then re-sign snapshot and timestamp); the timestamp is re-signed on
-     a schedule even without a release, so a client can tell a frozen
-     feed from a quiet one. A staged rollout is a field in the targets
-     metadata (a share of machines by machine-id hash).
-   - The client (in gala): timestamp, snapshot, targets, then only the
-     blobs it lacks, each checked by digest; refuses expired metadata
-     (freeze), versions below what it has seen (rollback), files not in
-     the signed targets (mix-and-match); hands the staged image to R9's
-     live update; raises the rollback floor after the self-check. Every
-     step and refusal as events.
-   - Test first: a scenario where xtask serves a feed from a local
-     directory (a fake bucket) and gala updates from it, and refusal
-     scenarios for an expired timestamp, a rolled-back targets version,
-     a tampered blob and a key not in root.
+   static files in TUF's format, so any bucket, CDN or mirror serves
+   them untrusted; one rolling channel, no LTS (the owner: none unless
+   paid for). Done: the metadata, writer and client checks (`user/tuf`,
+   host tests for every refusal: expired timestamp, rolled-back
+   versions, tampered metadata and blobs, keys not in root, root
+   rotation), `cargo xtask feed publish|refresh|check`, checked against
+   python-tuf 6.0.0 (ARCHITECTURE "The update feed"; WORKFLOW "The
+   update feed"). Next:
+   - The client in gala (test first): a scenario where xtask serves a
+     feed from a local directory (a fake bucket) and gala's updater
+     (on `user/tuf`'s `Client`, trusted root in the image, metadata
+     kept on C:) fetches timestamp, snapshot, targets, then only the
+     blobs it lacks, and hands the staged release to R9's live update;
+     raises the rollback floor after the self-check. Refusal scenarios
+     for an expired timestamp, a rolled-back targets version, a
+     tampered blob and a key not in root. Every step and refusal as
+     events.
+   - The GALAMANI manifest derived from targets (or replaced by it):
+     one signed list of a release's files, not two.
+   - CI: publish every release that passes the gate on main (upload the
+     blobs, then targets, snapshot, timestamp) and run `feed refresh`
+     on a schedule. Stopgap until then, named: the feed is signed with
+     test keys from `target/trust/feed-*` (root keys belong offline,
+     the targets key in a KMS or HSM).
+   - A staged rollout field in targets (a share of machines by
+     machine-id hash).
    - Out of it: distributions inside LX update themselves (their own
      package managers); programs from `gala install` keep winget's
      vendor-pinned installers (PK).

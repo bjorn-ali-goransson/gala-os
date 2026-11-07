@@ -553,6 +553,33 @@ code `xtask/src/trust.rs`).
   below the rollback floor 2`) was used by a newer release; make a fresh
   one (the floor lives in sector 0 at byte 64).
 
+### The update feed
+
+`cargo xtask feed` writes and checks the update feed (R8; ARCHITECTURE
+"The update feed"; `xtask/src/feed.rs` over `user/tuf`):
+
+- `cargo xtask feed publish <files dir> <feed dir> [--release N]
+  [--floor F]`: a release of every file under `<files dir>` (paths
+  relative to it). The first publish writes `1.root.json`; the release
+  number defaults to the last one plus 1, the floor to the last floor;
+  a release or floor below the last is refused. Blobs already in the
+  feed are kept (and must hash to their name).
+- `cargo xtask feed refresh <feed dir>`: new snapshot and timestamp
+  over the same targets (what a scheduled CI job runs, more often than
+  the timestamp's 1-day expiry).
+- `cargo xtask feed check <feed dir> [--root <trusted root.json>]`:
+  the feed as gala's client sees it now, every blob hashed; prints the
+  versions, expiries and release, or the first refusal
+  (`timestamp.json: refused: timestamp: expired at ...`).
+- Keys: test keys made on first use in `target/trust/feed-root-{1,2,3}`,
+  `feed-targets`, `feed-snapshot`, `feed-timestamp` (`.seed`, mode 0600;
+  `.pub`). A new `target/trust/` means a new root: start a new feed
+  directory.
+- Cross-check with python-tuf (optional, host only): `python3 -m venv
+  <dir> && <dir>/bin/pip install tuf==6.0.0`, then load each role with
+  `Metadata.from_bytes`, `root.verify_delegate(role, md)` and
+  `meta.verify_length_and_hashes(bytes)`.
+
 ## Writing tests and adding functions
 
 ### Test programs

@@ -9,6 +9,8 @@ publish.workspace = true
 # R8: signs the test images' manifests (xtask/src/trust.rs); the kernel
 # verifies with the same crate.
 ed25519-compact = { version = "=2.6.0", default-features = false }
+# R8 step 4: the update feed's TUF metadata (user/tuf; xtask/src/feed.rs).
+tuf = { path = "../user/tuf" }
 # OT: gzip of the OTLP requests xtask sends (xtask/src/otel/send.rs).
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 fontdue = { version = "0.9.5", default-features = false, features = ["hashbrown"] }

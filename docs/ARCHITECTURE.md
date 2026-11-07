@@ -10778,6 +10778,64 @@ manifest), and how a developer's machine runs unsigned builds with
 Secure Boot (Secure Boot off, and a kernel built to accept unsigned
 images refuses to raise the rollback floor).
 
+### The update feed
+
+How releases reach machines (ROADMAP R8 step 4): static files in TUF's
+format (The Update Framework, specification 1.0) that any bucket, CDN or
+mirror serves without being trusted. The metadata code is `user/tuf`
+(safe, `no_std` with `alloc`, host-tested): xtask writes and checks
+feeds with it (`xtask/src/feed.rs`, `cargo xtask feed`), and gala's
+update client will check them with the same `Client`.
+
+- **Layout** (consistent snapshots: every version of a role is its own
+  file, so a mirror caught mid-upload never mixes two):
+  `<N>.root.json`, `<N>.targets.json`, `<N>.snapshot.json`,
+  `timestamp.json`, and the release's files under
+  `blobs/sha256/<hex digest>` (unchanged files are shared between
+  releases). Uploads go blobs, targets, snapshot, then timestamp, the
+  one file a client reads first.
+- **Roles and keys** (Ed25519, key id = SHA-256 of the key object's
+  canonical JSON): root (3 keys, threshold 2, offline; root N+1 must
+  carry a threshold of root N's root keys and of its own), targets (the
+  release key: each file's length and SHA-256, the release number and
+  rollback floor in `custom`), snapshot (the targets metadata's version,
+  length and hash), timestamp (the snapshot's). Expiry: root 730 days,
+  targets 365, snapshot 7, timestamp 1; `feed refresh` re-signs snapshot
+  and timestamp on a schedule (online keys), so a client can tell a
+  frozen feed (expired timestamp) from a quiet one (a new timestamp,
+  same snapshot).
+- **Signatures** cover the canonical JSON (OLPC canonical JSON as
+  python-tuf and go-tuf sign it: no whitespace, keys sorted by bytes,
+  integers only, only `"` and `\` escaped) of the `signed` value; the
+  reader re-encodes what it parsed. The parser refuses duplicate keys,
+  fractions and nesting deeper than 32. Signatures by keys root does not
+  list for that role, and repeated signatures by one key, count for
+  nothing.
+- **The client's checks** (`tuf::Client`, the specification's section
+  5): roots one version at a time; an expired root stops it; timestamp,
+  snapshot and targets each signed by their role's threshold; snapshot
+  and targets must be the bytes (length, SHA-256) and version their
+  parent lists; no role's version, nor the snapshot version timestamp
+  lists, nor the targets version snapshot lists, may go below the
+  trusted one (rollback); a role past its expiry is refused (freeze); a
+  file must be in the signed targets with its length and SHA-256
+  (mix-and-match, tampering). A rotation of the timestamp or snapshot
+  keys in a new root drops the trusted timestamp and snapshot (recovery
+  from versions an attacker pushed far ahead). Metadata from the
+  client's own store is checked again (signatures, order) but not for
+  expiry. Each refusal is a `tuf::Refusal` whose text names the role
+  and the numbers (`timestamp: expired at ... (now ...): a frozen
+  feed`, `targets: version 2 below the trusted 3: a rollback`).
+- **Checked against python-tuf**: a feed `cargo xtask feed publish`
+  writes is read and verified by python-tuf 6.0.0 (`Metadata`,
+  `verify_delegate`, `verify_length_and_hashes` over every role and
+  blob), and its canonical bytes equal securesystemslib's
+  `encode_canonical` (WORKFLOW "The update feed").
+- **Limits**: the keys are test keys in `target/trust/feed-*.seed`
+  (ROADMAP R8: root keys offline, the targets key in a KMS or HSM);
+  no delegations, no staged rollout field yet; files are hashed whole
+  in memory.
+
 ## Known limits
 
 Gaps not covered in a subsystem's own section; the plan for each is in

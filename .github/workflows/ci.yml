@@ -41,6 +41,7 @@ jobs:
           cargo clippy -p lx_abi --tests -- -D warnings
           cargo clippy -p afd_abi --tests -- -D warnings
           cargo clippy -p schannel_tls --tests -- -D warnings
+          cargo clippy -p tuf --tests -- -D warnings
           cargo clippy -p lx_abi --target x86_64-unknown-none -- -D warnings
           cargo build --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives
           cargo clippy --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives -p advapi32 -p comctl32 -p powrprof -p shell32 -p version -p psapi -p ole32 -p oleaut32 -p bcrypt -p tlsdll -p iphlpapi -p secur32 -p winhttp -p http_client -p gala_stubs -p gala_heap -p netapi32 -p pdh -p setupapi -p shlwapi -p rpcrt4 -p urlmon -p wininet -p userenv -p xolehlp -p odbc32 -p wldap32 -p wsock32 -p kernelbase -p gdi32 -p authz -p wintrust -p webservices -p dhcpcsvc -p dbghelp -p msvcrt -p crypt32 -p shfolder -p dwmapi -p dwrite -p imm32 -p shcore -p wtsapi32 -p msctf -p xmllite -p uxtheme -p comdlg32 -p oleacc -p uiautomationcore -p mpr -p winspool -p msimg32 -p richedit -p riched20 -p msftedit -p clusapi -p resutils -p security -p normaliz -p schannel_tls -p schannel -p schannel_test -p wow64 -p user32 -- -D warnings
