@@ -92,7 +92,9 @@ In order:
 9. **SSH**: the client against the host's sshd, agent forwarding;
    **H11**: busybox-w32's httpd and wget over loopback (the Linux
    busybox's run: `lx_httpd`).
-10. **Last, once everything above is done** (the owner): a performance
+10. **PT**: the portability seams for a second architecture (the owner:
+    the ARM64 port itself later), when the machine is free.
+11. **Last, once everything above is done** (the owner): a performance
     profile on a real Windows machine, then optimization. The same
     workloads (the scenarios' programs, `bench`, Chromium's page loads,
     Python) are profiled on Windows (Windows Performance Recorder/WPA,
@@ -129,6 +131,7 @@ has a section under "Open items".
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
+| PT | Portability seams for a second architecture | planned | x86 specifics outside `kernel/src/arch` in 38 files (Linux personality 13, NT layer 7, handover 4, others); the ARM64 port itself is in "Later" |
 | HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
 
 ### NT core services (done, by test)
@@ -319,6 +322,37 @@ decision, not yet taken; step 5 waits on it.
 
 **Design**: GALA_UM.md ("How a Windows program runs inside a Linux
 process", "Limits and open questions"); ARCHITECTURE "UI Automation".
+
+### PT. Portability seams for a second architecture
+
+**Goal**: the kernel and gala's DLLs keep every architecture-specific
+part behind the `arch` layer, so an ARM64 port ("Later") starts from a
+clean seam and new code cannot add x86 coupling unnoticed. Not the port
+itself (the owner: later).
+
+**Next**:
+1. An audit, written down: each x86 assumption outside
+   `kernel/src/arch` (38 files: the Linux personality's x86-64 system
+   call ABI and arch_prctl, the NT layer's CONTEXT and system call
+   frames, the handover's saved registers, the TSC in time and
+   simulation, the state dump's registers), and in user mode (ntdll's
+   system call stubs, CONTEXT, unwinding, the x64 and x86 thunks), each
+   with where it belongs.
+2. Kernel: those parts behind `arch` traits or modules (the register
+   frame of a system call and an exception, a thread's saved context,
+   the cycle counter, the personality's system call numbers and
+   argument registers), x86_64 the only implementation; nothing changes
+   for programs (every scenario passes as before).
+3. CI: the kernel compiled for `aarch64-unknown-none` (no boot; the
+   arch layer for it a stub that compiles), so an x86 assumption outside
+   `arch` fails the build. gala's DLLs compiled for
+   `aarch64-pc-windows-msvc` where they have no architecture-specific
+   code, as the same guard for user mode.
+4. ARCHITECTURE: the seam (what an architecture provides) and the rule
+   in WORKFLOW's "Rules for every change".
+
+**Done when**: the aarch64 builds pass in CI and the audit's list is
+empty or each remaining item is named in it with why it stays.
 
 ### HS. Hygiene sweeps
 
@@ -2364,8 +2398,11 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   AHCI/NVMe, xHCI, e1000; device interrupts (all devices are polled
   today).
 - **ARM64**: a second arch port (boot, MMU, exceptions, timer, context
-  switch), ARM64 PE images and ARM64 builds of gala's DLLs; the NT layer
-  above is portable. x86_64 (Intel and AMD) is the only port today.
+  switch), ARM64 PE images and ARM64 builds of gala's DLLs, on the seams
+  item PT prepares. x86_64 (Intel and AMD) is the only port today; most
+  Windows programs ship for x64 only, so without the translator below
+  an ARM64 gala runs native ARM64 builds (Chromium/Edge, .NET, Python,
+  Node, Git, ...).
 - **Raspberry Pi** (on the ARM64 port): Pi 4/5, QEMU's `raspi4b`/`virt`
   first; Limine or the Pi's firmware loading the kernel, the GIC and the
   generic timer, the PL011 UART, the mailbox framebuffer, then EMMC2/SD,
