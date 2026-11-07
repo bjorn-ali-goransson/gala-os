@@ -697,18 +697,31 @@ pub extern "system" fn GetOverlappedResult(
                 return fail_with(ERROR_IO_INCOMPLETE, FALSE);
             }
             let event = (*overlapped.cast::<Overlapped>()).event as Handle;
-            let on = if event.is_null() { file } else { event };
-            while status() == STATUS_PENDING {
-                if NtWaitForSingleObject(on, 0, core::ptr::null()) != 0 {
-                    break;
+            if event.is_null() {
+                // The file handle is signaled by any of its I/Os ending:
+                // wait until this one has.
+                while status() == STATUS_PENDING {
+                    if NtWaitForSingleObject(file, 0, core::ptr::null()) != 0 {
+                        break;
+                    }
                 }
+            } else {
+                // The caller's event: one wait. A caller may set it
+                // itself, for a request that failed in its call and so
+                // never wrote the OVERLAPPED (asyncio after
+                // ConnectNamedPipe's ERROR_PIPE_CONNECTED); the status
+                // still reads pending then, which is not an error.
+                NtWaitForSingleObject(event, 0, core::ptr::null());
             }
         }
         if !bytes.is_null() {
             *bytes = *overlapped.add(1) as u32;
         }
+        // NT_SUCCESS: success, and a pending status the caller's own event
+        // ended the wait for; warnings (STATUS_BUFFER_OVERFLOW: part of a
+        // message, ERROR_MORE_DATA) and errors fail.
         match status() {
-            STATUS_SUCCESS => TRUE,
+            s if s < 0x8000_0000 => TRUE,
             s => fail(s, FALSE),
         }
     }

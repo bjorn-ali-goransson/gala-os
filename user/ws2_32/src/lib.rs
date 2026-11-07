@@ -1254,6 +1254,51 @@ extern "system" fn connect_ex(
     i32::from(overlapped_result(status) == 0)
 }
 
+/// DisconnectEx (handed out by WSAIoctl): a graceful close of both
+/// directions (IOCTL_AFD_DISCONNECT, as shutdown(SD_BOTH)), overlapped when
+/// given an OVERLAPPED (completing through its event or the socket's
+/// completion port), else synchronous. dwReserved must be 0 (WSAEINVAL).
+/// TF_REUSE_SOCKET (the socket used again by AcceptEx or ConnectEx) is not
+/// supported: WSAEOPNOTSUPP, recorded.
+extern "system" fn disconnect_ex(s: Socket, ov: *mut Overlapped, flags: u32, reserved: u32) -> i32 {
+    if reserved != 0 {
+        fail(WSAEINVAL);
+        return 0;
+    }
+    if flags & TF_REUSE_SOCKET != 0 {
+        missing(b"ws2_32.dll!DisconnectEx(TF_REUSE_SOCKET)", flags.into());
+        fail(WSAEOPNOTSUPP);
+        return 0;
+    }
+    // {u32 type (3: send and receive); LARGE_INTEGER timeout (-1: none)}.
+    let mut input = [0u8; 16];
+    input[..4].copy_from_slice(&3u32.to_le_bytes());
+    input[8..].copy_from_slice(&(-1i64).to_le_bytes());
+    if ov.is_null() {
+        return i32::from(afd_call(s, IOCTL_AFD_DISCONNECT, &input, &mut []).is_ok());
+    }
+    let status = afd_overlapped(s, IOCTL_AFD_DISCONNECT, &input, core::ptr::null_mut(), 0, ov);
+    i32::from(overlapped_result(status) == 0)
+}
+
+/// TransmitFile (exported here, forwarded from mswsock, handed out by
+/// WSAIoctl): not supported (WSAEOPNOTSUPP, recorded); callers such as the
+/// JDK and asyncio's sendfile fall back to reading the file and sending it.
+#[unsafe(no_mangle)]
+pub extern "system" fn TransmitFile(
+    _socket: Socket,
+    _file: usize,
+    _bytes: u32,
+    _per_send: u32,
+    _overlapped: *mut Overlapped,
+    _buffers: usize,
+    _flags: u32,
+) -> i32 {
+    missing(b"ws2_32.dll!TransmitFile", 0);
+    fail(WSAEOPNOTSUPP);
+    0
+}
+
 const SIO_GET_EXTENSION_FUNCTION_POINTER: u32 = 0xc800_0006;
 const SIO_KEEPALIVE_VALS: u32 = 0x9800_0004;
 const SIO_TCP_INITIAL_RTO: u32 = 0x9800_0011;
@@ -1265,6 +1310,13 @@ const WSAID_CONNECTEX: [u8; 16] =
     guid(0x25a2_07b9, 0xddf3, 0x4660, [0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e]);
 const WSAID_GETACCEPTEXSOCKADDRS: [u8; 16] =
     guid(0xb536_7df2, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
+const WSAID_DISCONNECTEX: [u8; 16] =
+    guid(0x7fda_2e11, 0x8630, 0x436f, [0xa0, 0x31, 0xf5, 0x36, 0xa6, 0xee, 0xc1, 0x57]);
+const WSAID_TRANSMITFILE: [u8; 16] =
+    guid(0xb536_7df0, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
+/// DisconnectEx's flag to make the socket reusable by AcceptEx or
+/// ConnectEx (mswsock.h).
+const TF_REUSE_SOCKET: u32 = 0x02;
 
 // SIO_BASE_HANDLE and SIO_BSP_HANDLE(_SELECT/_POLL) (mswsock.h, ws2def.h).
 const SIO_BASE_HANDLE: u32 = 0x4800_0022;
@@ -1307,6 +1359,8 @@ pub extern "system" fn WSAIoctl(
                 WSAID_ACCEPTEX => AcceptEx as *const () as usize,
                 WSAID_CONNECTEX => connect_ex as *const () as usize,
                 WSAID_GETACCEPTEXSOCKADDRS => GetAcceptExSockaddrs as *const () as usize,
+                WSAID_DISCONNECTEX => disconnect_ex as *const () as usize,
+                WSAID_TRANSMITFILE => TransmitFile as *const () as usize,
                 _ => {
                     missing(
                         b"ws2_32.dll!WSAIoctl(extension function)",
@@ -2993,6 +3047,138 @@ pub extern "system" fn WSAAddressToStringA(
         }
         *out.add(at) = 0;
         *out_len = need as u32;
+    }
+    0
+}
+
+/// A socket address in text, as WSAStringToAddress reads it: for AF_INET
+/// `a.b.c.d` or `a.b.c.d:port`; for AF_INET6 `addr`, `addr%scope`,
+/// `[addr]`, `[addr%scope]` and either bracketed form with `:port`. The
+/// SOCKADDR_IN or SOCKADDR_IN6 (port in network order, the rest zero).
+fn parse_socket_address(text: &[u8], af: i32) -> Option<Sa> {
+    let mut sa = Sa { b: [0; 28], len: 0 };
+    let port_of = |p: Option<&[u8]>| match p {
+        None => Some(0),
+        Some(p) => parse_u16(p),
+    };
+    match af {
+        AF_INET => {
+            let (host, port) = match text.iter().position(|&c| c == b':') {
+                Some(i) => (&text[..i], Some(&text[i + 1..])),
+                None => (text, None),
+            };
+            let a = parse_ipv4(host)?;
+            sa.b[..2].copy_from_slice(&(AF_INET as u16).to_le_bytes());
+            sa.b[2..4].copy_from_slice(&port_of(port)?.to_be_bytes());
+            sa.b[4..8].copy_from_slice(&a);
+            sa.len = 16;
+        }
+        AF_INET6 => {
+            let (inner, port) = match text.strip_prefix(b"[") {
+                Some(rest) => {
+                    let close = rest.iter().position(|&c| c == b']')?;
+                    let after = &rest[close + 1..];
+                    let port = match after {
+                        [] => None,
+                        [b':', p @ ..] => Some(p),
+                        _ => return None,
+                    };
+                    (&rest[..close], port)
+                }
+                None => (text, None),
+            };
+            let (host, scope) = match inner.iter().position(|&c| c == b'%') {
+                Some(i) => {
+                    let digits = &inner[i + 1..];
+                    if digits.is_empty()
+                        || digits.len() > 10
+                        || !digits.iter().all(u8::is_ascii_digit)
+                    {
+                        return None;
+                    }
+                    let v = digits.iter().fold(0u64, |v, &d| v * 10 + u64::from(d - b'0'));
+                    (&inner[..i], u32::try_from(v).ok()?)
+                }
+                None => (inner, 0),
+            };
+            let a = parse_ipv6(host)?;
+            sa.b[..2].copy_from_slice(&(AF_INET6 as u16).to_le_bytes());
+            sa.b[2..4].copy_from_slice(&port_of(port)?.to_be_bytes());
+            sa.b[8..24].copy_from_slice(&a);
+            sa.b[24..28].copy_from_slice(&scope.to_le_bytes());
+            sa.len = 28;
+        }
+        _ => return None,
+    }
+    Some(sa)
+}
+
+/// WSAStringToAddressA(text, af, lpProtocolInfo, lpAddress,
+/// lpAddressLength): the address `parse_socket_address` reads, its length
+/// in *lpAddressLength; WSAEINVAL for text that is no address of the
+/// family, WSAEFAULT for a buffer shorter than the family's SOCKADDR.
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAStringToAddressA(
+    text: *const u8,
+    af: i32,
+    _info: *const u8,
+    addr: *mut u8,
+    len: *mut i32,
+) -> i32 {
+    if text.is_null() {
+        return fail(WSAEINVAL);
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let s = unsafe { core::slice::from_raw_parts(text, strlen(text)) };
+    string_to_address(s, af, addr, len)
+}
+
+/// WSAStringToAddressW: WSAStringToAddressA with UTF-16 text (an address
+/// is ASCII; anything else is WSAEINVAL).
+#[unsafe(no_mangle)]
+pub extern "system" fn WSAStringToAddressW(
+    text: *const u16,
+    af: i32,
+    _info: *const u8,
+    addr: *mut u8,
+    len: *mut i32,
+) -> i32 {
+    if text.is_null() {
+        return fail(WSAEINVAL);
+    }
+    let mut narrow = [0u8; 64];
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        while *text.add(n) != 0 {
+            let c = *text.add(n);
+            if c > 0x7f || n == narrow.len() {
+                return fail(WSAEINVAL);
+            }
+            narrow[n] = c as u8;
+            n += 1;
+        }
+    }
+    string_to_address(&narrow[..n], af, addr, len)
+}
+
+fn string_to_address(text: &[u8], af: i32, addr: *mut u8, len: *mut i32) -> i32 {
+    if !started() {
+        return fail(WSANOTINITIALISED);
+    }
+    let Some(sa) = parse_socket_address(text, af) else {
+        return fail(WSAEINVAL);
+    };
+    // SAFETY: the caller's length and buffer of that length.
+    unsafe {
+        if addr.is_null() || len.is_null() || (*len as usize) < sa.len {
+            if !len.is_null() {
+                *len = sa.len as i32;
+            }
+            return fail(WSAEFAULT);
+        }
+        core::ptr::copy_nonoverlapping(sa.b.as_ptr(), addr, sa.len);
+        *len = sa.len as i32;
     }
     0
 }

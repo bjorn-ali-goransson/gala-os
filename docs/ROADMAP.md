@@ -461,9 +461,19 @@ boot-test <name>`, see "Pending scenarios" below):
    SetWaitableTimerEx, NeedCurrentDirectoryForExePathW,
    GetNamedPipeHandleStateW, VerifyVersionInfoA (`kernel32_py_test`);
    ProcessBasicInformation's parent id (`process_test`); ole32's
-   ProgIDFromCLSID (`com_test`). Next: pip (an https download on
-   Schannel... CPython brings its own OpenSSL, so its certificate store
-   is what matters), venv, asyncio's proactor (IOCP), multiprocessing.
+   ProgIDFromCLSID (`com_test`). `python_async`: asyncio's proactor
+   loop (TCP and UDP, a subprocess's pipes, the executor, tasks);
+   `python_mp`: multiprocessing (Process, Queue, Pool, a shared Value
+   and Lock, Pipe, shared_memory). Their gaps: DisconnectEx, TransmitFile's
+   pointer and WSAStringToAddressA/W (`winsock_test`); a request failing
+   in its call writes no status block, sets no event; a zero-byte pipe
+   read waits for data; GetOverlappedResult on NT_SUCCESS (`pipe_test`).
+   Next: pip and venv on the full CPython layout (the NuGet `python`
+   package 3.13.1 has pip 24.3.1 and the venv launchers; the embeddable
+   one has neither): `pip install` of a local wheel (its RECORD and a
+   script launcher .exe), then from an index over https (CPython's own
+   OpenSSL, so its certificate store is what matters); `python -m venv`
+   and its launcher.
    Its ledger (optional probes): kernelbase.dll and
    api-ms-win-appmodel-runtime-l1-1-2 (absent), NtAllocateVirtualMemoryEx,
    GetNumaNodeProcessorMaskEx, GetFileInformationByName,

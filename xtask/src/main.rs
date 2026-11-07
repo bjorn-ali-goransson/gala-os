@@ -1713,6 +1713,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("python_hello", "ole32.dll", "Windows/System32"),
     ("python_hello", "oleaut32.dll", "Windows/System32"),
     ("python_script", "user/python/python_test.py", "gala"),
+    ("python_async", "user/python/python_async.py", "gala"),
+    ("python_mp", "user/python/python_mp.py", "gala"),
     ("pwsh", "target/prebuilt/pwsh/", "pwsh"),
     ("pwsh", "ntdll.dll", "Windows/System32"),
     ("pwsh", "kernel32.dll", "Windows/System32"),
@@ -6606,6 +6608,24 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["python_test: ok", "python.exe finished with status 0x00000000"],
     },
     Scenario {
+        // P1 step 6: asyncio's proactor loop (I/O completion ports through
+        // _overlapped): TCP and UDP over loopback, a subprocess's pipes,
+        // the executor, tasks; user/python/python_async.py, as on Windows.
+        name: "python_async",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_async.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_async: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: multiprocessing (spawned children over inherited
+        // pipes): Process, Queue, Pool, a shared Value and Lock, Pipe,
+        // shared_memory; user/python/python_mp.py, as on Windows.
+        name: "python_mp",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_mp.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_mp: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -7820,6 +7840,10 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("pwsh_hello", "pwsh"),
     ("python_script", "python_hello"),
     ("python_script", "python_script"),
+    ("python_async", "python_hello"),
+    ("python_async", "python_async"),
+    ("python_mp", "python_hello"),
+    ("python_mp", "python_mp"),
     ("chromium_version", "chromium"),
     ("chromium_dump", "chromium"),
     ("chromium_https", "chromium"),

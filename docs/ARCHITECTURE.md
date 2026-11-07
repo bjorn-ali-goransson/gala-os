@@ -1610,7 +1610,10 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
     quotas, bytes waiting and room, state, end) at most one message, STATUS_BUFFER_OVERFLOW
     (ERROR_MORE_DATA) with the part that fits and the rest left for the
     next read; STATUS_PIPE_BROKEN (ERROR_BROKEN_PIPE) once the other end
-    is closed and the queue is empty.
+    is closed and the queue is empty. A zero-byte read waits as well
+    (libuv's and multiprocessing's way to wait for a readable pipe): it
+    ends when data comes with no bytes, or with STATUS_BUFFER_OVERFLOW
+    for a message, which stays; a zero-length message is read by it.
   - NtWriteFile completes fully, waiting while the queue is full (a
     message waits until it fits whole or the queue is empty), and fails
     with STATUS_PIPE_CLOSING (ERROR_NO_DATA; Windows' exact code here is
@@ -1632,7 +1635,13 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
   (SetFileCompletionNotificationModes) works as on sockets:
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS posts no packet for an I/O that
   completed in its call, FILE_SKIP_SET_EVENT_ON_HANDLE leaves the end's
-  signal alone. Writes on asynchronous ends still wait in the call (a
+  signal alone. A request that fails in its call with an error status
+  (STATUS_PIPE_CONNECTED for a client already there, ...) is only its
+  return value, as in NT: no status block written, no event set, no
+  packet; asyncio sets the event itself after ConnectNamedPipe's
+  ERROR_PIPE_CONNECTED, and kernel32's GetOverlappedResult waits once on
+  a caller's event and succeeds for any NT_SUCCESS status (a status
+  still pending included), failing for warnings and errors. Writes on asynchronous ends still wait in the call (a
   documented simplification).
 - **Waiters**: synchronous waiters are on the pipe's waiter list, woken
   on every change; they leave on termination.
@@ -4183,10 +4192,18 @@ SOCKET values are the endpoint handles.
   (WSAGetLastError is GetLastError, as on Windows);
   STATUS_BUFFER_OVERFLOW and STATUS_INVALID_BUFFER_SIZE map to
   WSAEMSGSIZE.
-- AcceptEx, GetAcceptExSockaddrs and ConnectEx are in ws2_32 (also
-  handed out by WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)); gala's
-  mswsock.dll forwards its AcceptEx and GetAcceptExSockaddrs exports
-  there (Go imports them from mswsock).
+- AcceptEx, GetAcceptExSockaddrs, ConnectEx, DisconnectEx and
+  TransmitFile are in ws2_32 (handed out by
+  WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER); asyncio's _overlapped
+  asks for all of them at import); gala's mswsock.dll forwards its
+  AcceptEx, GetAcceptExSockaddrs and TransmitFile exports there (Go
+  imports them from mswsock). DisconnectEx closes both directions
+  gracefully (IOCTL_AFD_DISCONNECT), overlapped or not; its
+  TF_REUSE_SOCKET is not supported (WSAEOPNOTSUPP, ledgered), nor is
+  TransmitFile (WSAEOPNOTSUPP, ledgered; callers fall back to read and
+  send). WSAStringToAddressA/W parse `a.b.c.d[:port]` and IPv6 `addr`,
+  `addr%scope`, `[addr]` and `[addr]:port` (WSAEINVAL otherwise,
+  WSAEFAULT with the needed length for a short buffer).
 - Socket options: those that only tune the stack (TCP_NODELAY,
   keepalive, SO_UPDATE_*_CONTEXT) are accepted and have no effect yet;
   SO_RCVBUF and SO_SNDBUF go to AFD as well (SET_INFO classes 6 and 7)

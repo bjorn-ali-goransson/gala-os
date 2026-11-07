@@ -988,6 +988,17 @@ fn pipe_finish(
         }
         return status;
     }
+    if status.0 >= 0xc000_0000 {
+        // A request that fails in its call (STATUS_PIPE_CONNECTED for a
+        // client already there, STATUS_PIPE_BROKEN, ...) is only its
+        // return value, as in NT: no status block written, the caller's
+        // event left alone, no completion packet (asyncio sets the event
+        // itself after ERROR_PIPE_CONNECTED, then asks
+        // GetOverlappedResult). The file object is signaled again, as
+        // start_io left it unsignaled.
+        wait::set_signal(&entry.object, 1);
+        return status;
+    }
     if !data.is_empty() && call.process.write(request.buffer, &data).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }

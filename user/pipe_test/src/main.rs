@@ -32,7 +32,12 @@
 //!   (ERROR_IO_PENDING) and complete when a client connects and writes,
 //!   through the event and the completion port;
 //!   SetFileCompletionNotificationModes(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)
-//!   leaves the port alone for a read that completes at once.
+//!   leaves the port alone for a read that completes at once; a client
+//!   before an overlapped ConnectNamedPipe: ERROR_PIPE_CONNECTED with no
+//!   status written, event set or packet posted (a request that fails in
+//!   its call), and GetOverlappedResult succeeds once the caller sets the
+//!   event (asyncio's pipes); a pending zero-byte read of a message pipe
+//!   ends with ERROR_MORE_DATA, the message kept (multiprocessing's wait).
 //! - the ANSI CreateNamedPipeA and CreateFileA, as Win32-OpenSSH's pipe()
 //!   uses them: an overlapped duplex pipe whose ends are pipes (GetFileType)
 //!   and inheritable; a read pending on its server end fails with
@@ -109,6 +114,8 @@ unsafe extern "system" {
         id: *mut u32,
     ) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn SetEvent(h: Handle) -> Bool;
+    fn ResetEvent(h: Handle) -> Bool;
     fn GetExitCodeThread(h: Handle, code: *mut u32) -> Bool;
     fn GetLastError() -> u32;
     fn CloseHandle(h: Handle) -> Bool;
@@ -563,6 +570,57 @@ fn named(c: &mut Checks) -> Result<(), u32> {
         let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 0);
         c.eq(dequeued as u64, 0)?;
         c.eq(GetLastError().into(), 258)?; // WAIT_TIMEOUT
+
+        // A client before an overlapped ConnectNamedPipe (asyncio's
+        // pipes): ERROR_PIPE_CONNECTED at once, and as for any request
+        // that fails in its call, no status in the OVERLAPPED, no event
+        // set, no completion packet; the caller sets the event and
+        // GetOverlappedResult then succeeds.
+        let name = wide("\\\\.\\pipe\\gala_test\\early");
+        let early = CreateNamedPipeW(name.as_ptr(), open, 0, 1, 4096, 4096, 0, core::ptr::null());
+        c.ok(early != INVALID_HANDLE, GetLastError().into())?;
+        c.ok(!CreateIoCompletionPort(early, port, 78, 0).is_null(), GetLastError().into())?;
+        let cl3 = client(&name, FILE_FLAG_OVERLAPPED);
+        c.ok(cl3 != INVALID_HANDLE, GetLastError().into())?;
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        c.ok(ResetEvent(event) != 0, GetLastError().into())?;
+        c.eq(ConnectNamedPipe(early, &mut ov) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_PIPE_CONNECTED.into())?;
+        c.eq(WaitForSingleObject(event, 0).into(), 0x102)?; // WAIT_TIMEOUT
+        let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 0);
+        c.eq(dequeued as u64, 0)?;
+        c.ok(SetEvent(event) != 0, GetLastError().into())?;
+        c.ok(GetOverlappedResult(early, &mut ov, &mut got, 1) != 0, GetLastError().into())?;
+        CloseHandle(cl3);
+        CloseHandle(early);
+
+        // multiprocessing's wait(): a zero-byte overlapped read pending on
+        // a message pipe ends, when a message arrives, with ERROR_MORE_DATA
+        // and no bytes, the message left for the next read.
+        let name = wide("\\\\.\\pipe\\gala_test\\zero");
+        let message = PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE;
+        let zero =
+            CreateNamedPipeW(name.as_ptr(), open, message, 1, 4096, 4096, 0, core::ptr::null());
+        c.ok(zero != INVALID_HANDLE, GetLastError().into())?;
+        let cl4 = client(&name, 0);
+        c.ok(cl4 != INVALID_HANDLE, GetLastError().into())?;
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        let ok = ReadFile(zero, buf.as_mut_ptr(), 0, &mut got, (&mut ov as *mut Overlapped).cast());
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_IO_PENDING.into())?;
+        c.ok(write(cl4, b"abc"), GetLastError().into())?;
+        got = 99;
+        c.eq(GetOverlappedResult(zero, &mut ov, &mut got, 1) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_MORE_DATA.into())?;
+        c.eq(got.into(), 0)?;
+        c.ok(
+            ReadFile(zero, buf.as_mut_ptr(), 64, &mut got, (&mut ov as *mut Overlapped).cast())
+                != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(got == 3 && &buf[..3] == b"abc", got.into())?;
+        CloseHandle(cl4);
+        CloseHandle(zero);
         CloseHandle(cl);
         CloseHandle(server);
         CloseHandle(port);
