@@ -1514,7 +1514,8 @@ boot-test 'chromium_wpt$'`, about 3 minutes); xtask fetches WPT_COMMIT
 into `target/prebuilt/wpt` with the host's git. Each test's line
 (`xtask: wpt: /dom/nodes/X.html: OK 9/9`) and the summary are in the
 run's serve log (`target/debug/test-chromium_wpt.serve.log`, appended to
-the scenario's log), every subtest in `target/wpt/results.tsv`.
+the scenario's log), the run as `target/wpt/wptreport.json` (wptrunner's format, what wpt.fyi
+takes: `run_info`, each test's status, duration and subtests).
 
 `chromium_uia` (a UIA client over Chromium's accessibility tree:
 user/uia_chromium_test, built by its build.sh) prints each step with

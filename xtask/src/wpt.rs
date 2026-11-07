@@ -5,8 +5,8 @@
 //! headless Chromium session through ChromeDriver: each test page is
 //! loaded and its testharness results read back through our own
 //! testharnessreport.js (`REPORTER`). Each test's line goes into the
-//! serial log (`xtask: wpt: <path>: ...`); every subtest's result into
-//! target/wpt/results.tsv.
+//! serial log (`xtask: wpt: <path>: ...`); the run's results into
+//! target/wpt/wptreport.json (wptrunner's format, what wpt.fyi takes).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -259,36 +259,55 @@ fn session(port: u16) -> Result<String> {
     }
 }
 
-/// One test's outcome: its line for the log and its rows for the report.
+/// One test's result as wptreport.json has it (wptrunner's format, what
+/// wpt.fyi takes): the harness status and message, each subtest's.
+pub struct TestResult {
+    pub test: String,
+    pub status: &'static str,
+    pub message: String,
+    pub subtests: Vec<(String, &'static str, String)>,
+    pub duration_ms: u128,
+}
+
+/// One test's outcome: its line for the log and its result.
 struct Outcome {
     line: String,
-    rows: Vec<String>,
+    result: TestResult,
     /// The session ended (the browser went away): start another.
     lost: bool,
 }
 
 fn run_one(port: u16, id: &str, test: &str) -> Outcome {
+    let started = std::time::Instant::now();
+    let result = |status: &'static str, message: String| TestResult {
+        test: test.to_string(),
+        status,
+        message,
+        subtests: Vec::new(),
+        duration_ms: started.elapsed().as_millis(),
+    };
     let lost =
         |answer: &str| answer.contains("invalid session id") || answer.contains("disconnected");
     let url = format!("{{\"url\":\"http://10.0.2.100{test}\"}}");
     match webdriver(port, "POST", &format!("/session/{id}/url"), &url, 330) {
         Ok((200, _)) => {}
         Ok((status, answer)) => {
+            let message = answer.chars().take(200).collect::<String>();
             return Outcome {
-                line: format!(
-                    "{test}: load failed: {status} {}",
-                    answer.chars().take(200).collect::<String>()
-                ),
-                rows: vec![format!("{test}\t\tLOAD_FAILED\t{status}")],
+                line: format!("{test}: load failed: {status} {message}"),
+                result: result("ERROR", format!("load failed: {status} {message}")),
                 lost: lost(&answer),
             };
         }
         Err(e) => {
-            return Outcome { line: format!("{test}: load failed: {e}"), rows: vec![], lost: true };
+            return Outcome {
+                line: format!("{test}: load failed: {e}"),
+                result: result("ERROR", format!("load failed: {e}")),
+                lost: true,
+            };
         }
     }
     let script = r#"{"script":"return window.__gala_wpt || null","args":[]}"#;
-    let started = std::time::Instant::now();
     let results = loop {
         match webdriver(port, "POST", &format!("/session/{id}/execute/sync"), script, 120) {
             Ok((200, answer)) => {
@@ -297,7 +316,11 @@ fn run_one(port: u16, id: &str, test: &str) -> Outcome {
                 }
             }
             Ok((_, answer)) if lost(&answer) => {
-                return Outcome { line: format!("{test}: session lost"), rows: vec![], lost: true };
+                return Outcome {
+                    line: format!("{test}: session lost"),
+                    result: result("CRASH", "the browser went away".into()),
+                    lost: true,
+                };
             }
             _ => {}
         }
@@ -309,36 +332,99 @@ fn run_one(port: u16, id: &str, test: &str) -> Outcome {
     let Some(text) = results else {
         return Outcome {
             line: format!("{test}: no results in 300 s"),
-            rows: vec![format!("{test}\t\tNO_RESULTS\t")],
+            result: result("TIMEOUT", "no results in 300 s".into()),
             lost: false,
         };
     };
     let mut lines = text.lines();
     let harness: Vec<&str> = lines.next().unwrap_or("").split('\t').collect();
-    let harness_name = harness_status(harness.get(1).copied().unwrap_or(""));
-    let mut rows =
-        vec![format!("{test}\t\t{harness_name}\t{}", harness.get(2).copied().unwrap_or(""))];
-    let (mut pass, mut total) = (0, 0);
+    let status = harness_status(harness.get(1).copied().unwrap_or(""));
+    let mut r = result(status, harness.get(2).copied().unwrap_or("").to_string());
     for line in lines {
         let parts: Vec<&str> = line.splitn(3, '\t').collect();
-        let status = subtest_status(parts.first().copied().unwrap_or(""));
-        total += 1;
-        if status == "PASS" {
-            pass += 1;
-        }
-        rows.push(format!(
-            "{test}\t{}\t{status}\t{}",
-            parts.get(1).copied().unwrap_or(""),
-            parts.get(2).copied().unwrap_or("")
+        r.subtests.push((
+            parts.get(1).copied().unwrap_or("").to_string(),
+            subtest_status(parts.first().copied().unwrap_or("")),
+            parts.get(2).copied().unwrap_or("").to_string(),
         ));
     }
-    Outcome { line: format!("{test}: {harness_name} {pass}/{total}"), rows, lost: false }
+    let pass = r.subtests.iter().filter(|s| s.1 == "PASS").count();
+    Outcome {
+        line: format!("{test}: {status} {pass}/{}", r.subtests.len()),
+        result: r,
+        lost: false,
+    }
+}
+
+/// A JSON string literal (quoted, escaped).
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A message as wptreport has it: null when empty.
+fn json_message(s: &str) -> String {
+    if s.is_empty() { "null".into() } else { json_str(s) }
+}
+
+/// The run as wptreport.json: `run_info` (the browser, gala as the OS,
+/// the WPT revision), the start and end (ms since the epoch), each
+/// test's result.
+pub fn wptreport(results: &[TestResult], time_start: u128, time_end: u128) -> String {
+    let mut out = format!(
+        "{{\"run_info\":{{\"product\":\"chrome\",\"browser_version\":\"159.0.8140.0\",\
+         \"os\":\"gala\",\"os_version\":\"10.0.26100\",\"processor\":\"x86_64\",\
+         \"headless\":true,\"revision\":\"{WPT_COMMIT}\"}},\
+         \"time_start\":{time_start},\"time_end\":{time_end},\"results\":["
+    );
+    for (i, r) in results.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out += &format!(
+            "{{\"test\":{},\"status\":\"{}\",\"message\":{},\"duration\":{},\"subtests\":[",
+            json_str(&r.test),
+            r.status,
+            json_message(&r.message),
+            r.duration_ms
+        );
+        for (j, (name, status, message)) in r.subtests.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            out += &format!(
+                "{{\"name\":{},\"status\":\"{status}\",\"message\":{}}}",
+                json_str(name),
+                json_message(message)
+            );
+        }
+        out += "]}";
+    }
+    out += "]}\n";
+    out
+}
+
+fn epoch_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
 }
 
 /// The host side of `chromium_wpt`: every test in one session (a new one
 /// when the browser goes away), each test's line appended to `log` (the
-/// run's serve log, which goes into the serial log), the rows to
-/// target/wpt/results.tsv, a summary line last; then ChromeDriver's
+/// run's serve log, which goes into the serial log), the results to
+/// target/wpt/wptreport.json, a summary line last; then ChromeDriver's
 /// /shutdown ends the run. Failing tests are the report, not a failure:
 /// Err only when no session can be made.
 pub fn client(port: u16, log: &Path) -> Result {
@@ -364,32 +450,27 @@ fn run(port: u16, log: &Path) -> Result {
         }
         thread::sleep(Duration::from_millis(500));
     }
+    let time_start = epoch_ms();
     let mut id = session(port)?;
     fs::create_dir_all("target/wpt").map_err(|e| e.to_string())?;
-    let mut report = String::from("test\tsubtest\tstatus\tmessage\n");
-    let (mut ok, mut pass, mut total) = (0, 0, 0);
+    let mut results = Vec::new();
     for test in &list {
         let outcome = run_one(port, &id, test);
         note(&outcome.line);
-        for row in &outcome.rows {
-            report += row;
-            report += "\n";
-            let status = row.split('\t').nth(2).unwrap_or("");
-            if row.split('\t').nth(1) == Some("") {
-                ok += usize::from(status == "OK");
-            } else {
-                total += 1;
-                pass += usize::from(status == "PASS");
-            }
-        }
+        results.push(outcome.result);
         if outcome.lost {
             id = session(port)?;
         }
     }
     let _ = webdriver(port, "DELETE", &format!("/session/{id}"), "", 120);
-    fs::write("target/wpt/results.tsv", report).map_err(|e| e.to_string())?;
+    fs::write("target/wpt/wptreport.json", wptreport(&results, time_start, epoch_ms()))
+        .map_err(|e| e.to_string())?;
+    let ok = results.iter().filter(|r| r.status == "OK").count();
+    let total: usize = results.iter().map(|r| r.subtests.len()).sum();
+    let pass: usize =
+        results.iter().map(|r| r.subtests.iter().filter(|s| s.1 == "PASS").count()).sum();
     note(&format!(
-        "summary: {} tests, {ok} harness OK, {pass} of {total} subtests pass (target/wpt/results.tsv)",
+        "summary: {} tests, {ok} harness OK, {pass} of {total} subtests pass (target/wpt/wptreport.json)",
         list.len()
     ));
     Ok(())
@@ -406,6 +487,26 @@ mod tests {
         assert_eq!(rest, r#" ,"x""#);
         assert_eq!(value_text(r#"{"value":"HARNESS\t0\t"}"#).as_deref(), Some("HARNESS\t0\t"));
         assert_eq!(value_text(r#"{"value":null}"#), None);
+    }
+
+    #[test]
+    fn writes_wptreport_json() {
+        let results = [TestResult {
+            test: "/dom/nodes/a.html".into(),
+            status: "OK",
+            message: String::new(),
+            subtests: vec![
+                ("first \"one\"".into(), "PASS", String::new()),
+                ("second".into(), "FAIL", "assert_equals: got 1\nwant 2".into()),
+            ],
+            duration_ms: 1234,
+        }];
+        let json = wptreport(&results, 10, 20);
+        assert!(json.contains(r#""time_start":10,"time_end":20"#));
+        assert!(json.contains(r#""revision":"dd216d1d4f61489b09f566bec2c52d229baa7f49""#));
+        assert!(json.contains(
+            r#"{"test":"/dom/nodes/a.html","status":"OK","message":null,"duration":1234,"subtests":[{"name":"first \"one\"","status":"PASS","message":null},{"name":"second","status":"FAIL","message":"assert_equals: got 1\nwant 2"}]}"#
+        ));
     }
 
     #[test]
