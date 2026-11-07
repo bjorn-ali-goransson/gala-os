@@ -1542,7 +1542,11 @@ refuses to start when something already listens on a WPT port (a
 stale server would answer for this tree), and runs the relay as QEMU
 will, failing at once unless our testharnessreport.js comes back. The
 server runs in a process group of its own, ended as a whole (its
-servers are child processes that outlived the parent). `XTASK_WPT_FILTER=<substring>` and
+servers are child processes that outlived the parent). A test whose
+load gets no answer ends its session (ChromeDriver then ends its
+Chrome, which holds the profile directory) and the run goes on in a
+new one; if none can be made, the rest are SKIP ("not run: ...") in
+the report, which is written either way. `XTASK_WPT_FILTER=<substring>` and
 `XTASK_WPT_LIMIT=<n>` narrow the run (`XTASK_WPT_LIMIT=5 cargo xtask
 boot-test 'chromium_wpt$'`, about 3 minutes); xtask fetches WPT_COMMIT
 into `target/prebuilt/wpt` with the host's git. Each test's line

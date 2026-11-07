@@ -644,27 +644,62 @@ fn run(port: u16, log: &Path) -> Result {
     let mut id = session(port)?;
     fs::create_dir_all("target/wpt").map_err(|e| e.to_string())?;
     let mut results = Vec::new();
+    let mut stopped: Option<String> = None;
     for test in &list {
+        if let Some(why) = &stopped {
+            // Not run: in the report as such, so that it is complete.
+            results.push(TestResult {
+                test: test.clone(),
+                status: "SKIP",
+                message: format!("not run: {why}"),
+                subtests: Vec::new(),
+                duration_ms: 0,
+            });
+            continue;
+        }
         let text = source(&root, test);
         let outcome = run_one(port, &id, test, wait_for(&text));
         note(&outcome.line);
         results.push(outcome.result);
         if outcome.lost {
-            id = session(port)?;
+            // End the old session first: ChromeDriver then ends its
+            // Chrome, which holds the profile directory a new Chrome
+            // needs (otherwise the new one exits at once: "DevToolsActivePort
+            // file doesn't exist").
+            let ended = webdriver(port, "DELETE", &format!("/session/{id}"), "", 120);
+            note(&format!("the session after {test} ended: {}", brief(&ended)));
+            match session(port) {
+                Ok(new) => id = new,
+                Err(e) => {
+                    note(&format!("no new session after {test}: {e}; the rest is not run"));
+                    stopped = Some(format!("no session after {test}"));
+                }
+            }
         }
     }
-    let _ = webdriver(port, "DELETE", &format!("/session/{id}"), "", 120);
+    if stopped.is_none() {
+        let _ = webdriver(port, "DELETE", &format!("/session/{id}"), "", 120);
+    }
     fs::write("target/wpt/wptreport.json", wptreport(&results, time_start, epoch_ms()))
         .map_err(|e| e.to_string())?;
     let ok = results.iter().filter(|r| r.status == "OK").count();
     let total: usize = results.iter().map(|r| r.subtests.len()).sum();
     let pass: usize =
         results.iter().map(|r| r.subtests.iter().filter(|s| s.1 == "PASS").count()).sum();
+    let skipped = results.iter().filter(|r| r.status == "SKIP").count();
     note(&format!(
-        "summary: {} tests, {ok} harness OK, {pass} of {total} subtests pass (target/wpt/wptreport.json)",
+        "summary: {} tests, {ok} harness OK, {pass} of {total} subtests pass, {skipped} not run (target/wpt/wptreport.json)",
         list.len()
     ));
     Ok(())
+}
+
+/// A WebDriver answer in a few words, for the run's log.
+fn brief(answer: &Result<(u32, String)>) -> String {
+    match answer {
+        Ok((status, body)) => format!("{status} {}", body.chars().take(120).collect::<String>()),
+        Err(e) => e.chars().take(160).collect(),
+    }
 }
 
 // ---- The comparison with wpt.fyi ----
