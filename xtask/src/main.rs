@@ -2504,11 +2504,13 @@ const QEMU_EXIT_FAILURE: i32 = 35;
 const LEAK_MARKER: &str = "address space still referenced";
 const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Scenarios that run whole language runtimes (a JVM, CoreCLR) or a whole
-/// database (PostgreSQL: initdb, then the server's ~20 processes) under
-/// TCG: tens of seconds locally, over twice that on a slow CI runner or
-/// under the full suite (postgres took ~45 s alone and hit 120 s there).
-/// They get this much instead of BOOT_TEST_TIMEOUT.
+/// Scenarios that run whole language runtimes (a JVM, CoreCLR, CPython
+/// running pip: python_pip's venv installs pip itself with ensurepip,
+/// ~180 s of run time under TCG) or a whole database (PostgreSQL: initdb,
+/// then the server's ~20 processes) under TCG: tens of seconds locally,
+/// over twice that on a slow CI runner or under the full suite (postgres
+/// took ~45 s alone and hit 120 s there). They get this much instead of
+/// BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &[
     "java_version",
     "java_hello",
@@ -2520,6 +2522,8 @@ const SLOW_SCENARIOS: &[&str] = &[
     "pwsh_hello",
     "postgres",
     "filezilla",
+    "python_pip",
+    "python_pip_https",
 ];
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;

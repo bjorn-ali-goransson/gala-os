@@ -107,6 +107,22 @@ def venv(work):
     with open(os.path.join(env_dir, "pyvenv.cfg")) as f:
         check("pyvenv.cfg", any(line.startswith("home = ") for line in f), True)
 
+    # The default venv has pip (ensurepip installs its bundled wheel,
+    # offline); the venv's pip.exe launcher installs into the venv.
+    with_pip = os.path.join(work, "venv-pip")
+    out = run(sys.executable, "-m", "venv", with_pip)
+    check("venv with pip", out.returncode, 0)
+    pip = os.path.join(with_pip, "Scripts", "pip.exe")
+    out = run(pip, "--version")
+    check("venv pip.exe", (out.returncode, out.stdout.split()[:2]), (0, ["pip", "24.3.1"]))
+    out = run(pip, "install", "--no-index", "--no-cache-dir", "--disable-pip-version-check", build_wheel(work))
+    check("pip install into the venv", out.returncode, 0)
+    venv_python = os.path.join(with_pip, "Scripts", "python.exe")
+    out = run(venv_python, "-c", f"import {NAME}, os; print(os.path.dirname({NAME}.__file__).lower().startswith(os.path.normcase(r'{with_pip}')))")
+    check("installed in the venv", out.stdout.strip(), "True")
+    out = run(os.path.join(with_pip, "Scripts", f"{NAME}.exe"))
+    check("venv console script", (out.returncode, out.stdout.strip()), (0, "galahello from a console script"))
+
 
 def https_index(work):
     """`pip install` from a package index over https: a PEP 503 simple

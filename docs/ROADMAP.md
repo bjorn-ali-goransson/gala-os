@@ -483,8 +483,10 @@ boot-test <name>`, see "Pending scenarios" below):
    non-blocking connect (`winsock_test`; Python's create_connection kept
    the refused `::1` socket), CertGetEnhancedKeyUsage's PROP_ONLY and
    EXT_ONLY flags (`cert_test`; Python's enum_certificates gave roots no
-   purpose). Next: a venv with pip (ensurepip), packages with C
-   extensions (numpy's wheels), WSAID_TRANSMITPACKETS (asked for by
+   purpose). A venv with pip (ensurepip installs it; the venv's pip.exe
+   installs into it, its console script runs): `python_pip`, ~180 s of
+   run time under TCG (SLOW_SCENARIOS). Next: packages with C extensions
+   (numpy's wheels), WSAID_TRANSMITPACKETS (asked for by
    _overlapped, unused so far).
    Its ledger (optional probes): propsys.dll (from shell32),
    kernelbase.dll and
