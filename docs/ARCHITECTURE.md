@@ -10874,6 +10874,20 @@ update client will check them with the same `Client`.
   expiry. Each refusal is a `tuf::Refusal` whose text names the role
   and the numbers (`timestamp: expired at ... (now ...): a frozen
   feed`, `targets: version 2 below the trusted 3: a rollback`).
+- **The client's flow** (`tuf::update::update`, over a `Remote` the
+  caller provides for the feed's files and a `Store` for what it keeps):
+  the stored root (else the one shipped in the image), each newer
+  `<N>.root.json`, the expired-root check; the store's timestamp,
+  snapshot and targets loaded as the rollback floor (one that no longer
+  checks out is dropped and fetched again); timestamp, snapshot and
+  targets fetched with at most the length their parent signed; then only
+  the release's files the store lacks, each checked before it is kept.
+  Each metadata file taken is saved at once; nothing refused is saved.
+  Every step is an `update::Event` (`root 2 taken`, `timestamp 3
+  unchanged`, `boot/kernel: 8 bytes fetched and checked`, `snapshot in
+  the store dropped: ...`). `cargo xtask feed check` runs the same flow
+  over the feed's directory with an empty store; gala's updater gives
+  it HTTPS and its disk.
 - **Checked against python-tuf**: a feed `cargo xtask feed publish`
   writes is read and verified by python-tuf 6.0.0 (`Metadata`,
   `verify_delegate`, `verify_length_and_hashes` over every role and

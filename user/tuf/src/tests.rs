@@ -302,3 +302,194 @@ fn key_ids_are_the_canonical_keys_hash() {
     );
     assert_eq!(key_id(&k.pk), hex(&sha256::digest(text.as_bytes())));
 }
+
+// ---- the update flow (update.rs) over an in-memory feed and store ----
+
+mod flow {
+    use super::*;
+    use crate::update::{Error, Event, Outcome, Remote, Store, update};
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
+
+    /// A bucket: files by path; records what was fetched.
+    #[derive(Default)]
+    struct Bucket {
+        files: BTreeMap<String, Vec<u8>>,
+        fetched: Vec<String>,
+    }
+
+    impl Remote for Bucket {
+        fn fetch(&mut self, path: &str, max: u64) -> Option<Vec<u8>> {
+            self.fetched.push(path.into());
+            self.files.get(path).map(|b| b[..b.len().min(max as usize + 1)].to_vec())
+        }
+    }
+
+    #[derive(Default)]
+    struct Disk {
+        meta: BTreeMap<String, Vec<u8>>,
+        blobs: BTreeMap<[u8; 32], Vec<u8>>,
+    }
+
+    impl Store for Disk {
+        fn load(&self, role: &str) -> Option<Vec<u8>> {
+            self.meta.get(role).cloned()
+        }
+        fn save(&mut self, role: &str, bytes: &[u8]) -> core::result::Result<(), String> {
+            self.meta.insert(role.into(), bytes.to_vec());
+            Ok(())
+        }
+        fn has_blob(&self, sha256: &[u8; 32]) -> bool {
+            self.blobs.contains_key(sha256)
+        }
+        fn put_blob(
+            &mut self,
+            sha256: &[u8; 32],
+            bytes: &[u8],
+        ) -> core::result::Result<(), String> {
+            self.blobs.insert(*sha256, bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    /// The bucket a publish of `f` (version `v`, plus a second file that
+    /// never changes) leaves.
+    fn bucket(k: &Keys, v: u64, kernel: &[u8]) -> Bucket {
+        let lib = b"a library that stays".to_vec();
+        let files = [("boot/kernel", Target::of(kernel)), ("boot/lib.dll", Target::of(&lib))];
+        let t = sign(
+            &targets(v, NOW + 30 * DAY, Release { number: v, floor: 1 }, &files),
+            &[&k.targets],
+        );
+        let s = sign(&snapshot(v, NOW + 7 * DAY, &MetaFile::of(v, &t)), &[&k.snapshot]);
+        let ts = sign(&timestamp(v, NOW + DAY, &MetaFile::of(v, &s)), &[&k.timestamp]);
+        let mut b = Bucket::default();
+        b.files.insert("timestamp.json".into(), ts);
+        b.files.insert(format!("{v}.snapshot.json"), s);
+        b.files.insert(format!("{v}.targets.json"), t);
+        b.files.insert(Target::of(kernel).blob_path(), kernel.to_vec());
+        b.files.insert(Target::of(&lib).blob_path(), lib);
+        b
+    }
+
+    fn shipped(k: &Keys) -> Vec<u8> {
+        sign(&root_signed(k, 1, NOW + 365 * DAY), &[&k.root[0], &k.root[1]])
+    }
+
+    fn run(
+        b: &mut Bucket,
+        d: &mut Disk,
+        root: &[u8],
+        now: i64,
+    ) -> (core::result::Result<Outcome, Error>, Vec<Event>) {
+        let mut events = Vec::new();
+        let r = update(b, d, root, now, &mut |e| events.push(e.clone()));
+        (r, events)
+    }
+
+    #[test]
+    fn first_update_takes_everything_then_a_quiet_feed_nothing() {
+        let k = keys();
+        let (root, mut d) = (shipped(&k), Disk::default());
+        let mut b = bucket(&k, 1, b"kernel 1");
+        let (r, events) = run(&mut b, &mut d, &root, NOW);
+        let o = r.unwrap();
+        assert_eq!(
+            (o.release, o.newer, o.fetched, o.files, o.versions),
+            (Release { number: 1, floor: 1 }, true, 2, 2, [1, 1, 1, 1])
+        );
+        assert_eq!(d.blobs.len(), 2);
+        assert!(d.meta.contains_key("timestamp") && d.meta.contains_key("targets"));
+        assert!(events.contains(&Event::Fetched { path: "boot/kernel".into(), bytes: 8 }));
+        // Again: only the timestamp is fetched; nothing changes.
+        b.fetched.clear();
+        let (r, _) = run(&mut b, &mut d, &root, NOW);
+        assert_eq!(r.map(|o| (o.newer, o.fetched)), Ok((false, 0)));
+        assert_eq!(b.fetched, ["2.root.json", "timestamp.json"]);
+    }
+
+    #[test]
+    fn a_new_release_fetches_only_what_changed() {
+        let k = keys();
+        let (root, mut d) = (shipped(&k), Disk::default());
+        run(&mut bucket(&k, 1, b"kernel 1"), &mut d, &root, NOW).0.unwrap();
+        let mut b = bucket(&k, 2, b"kernel 2");
+        let (r, _) = run(&mut b, &mut d, &root, NOW);
+        let o = r.unwrap();
+        assert_eq!(
+            (o.release, o.newer, o.fetched, o.versions),
+            (Release { number: 2, floor: 1 }, true, 1, [1, 2, 2, 2])
+        );
+        assert!(b.fetched.contains(&Target::of(b"kernel 2").blob_path()));
+        assert!(
+            !b.fetched
+                .iter()
+                .any(|p| p.contains(&hex(&Target::of(b"a library that stays").sha256)))
+        );
+    }
+
+    #[test]
+    fn refusals_keep_nothing() {
+        let k = keys();
+        let root = shipped(&k);
+        // A tampered blob: no blob kept.
+        let mut d = Disk::default();
+        let mut b = bucket(&k, 1, b"kernel 1");
+        b.files.insert(Target::of(b"kernel 1").blob_path(), b"kernel X".to_vec());
+        let (r, _) = run(&mut b, &mut d, &root, NOW);
+        assert!(matches!(r, Err(Error::Refused { refusal: Refusal::Hash { .. }, .. })), "{r:?}");
+        assert!(!d.blobs.contains_key(&Target::of(b"kernel 1").sha256));
+        // A frozen feed: its timestamp expired; nothing saved.
+        let mut d = Disk::default();
+        let (r, _) = run(&mut bucket(&k, 1, b"kernel 1"), &mut d, &root, NOW + 2 * DAY);
+        assert!(
+            matches!(
+                r,
+                Err(Error::Refused { refusal: Refusal::Expired { role: "timestamp", .. }, .. })
+            ),
+            "{r:?}"
+        );
+        assert!(d.meta.is_empty() && d.blobs.is_empty());
+        // A rollback: after release 2, a feed showing release 1 again.
+        let mut d = Disk::default();
+        run(&mut bucket(&k, 2, b"kernel 2"), &mut d, &root, NOW).0.unwrap();
+        let (r, _) = run(&mut bucket(&k, 1, b"kernel 1"), &mut d, &root, NOW);
+        assert!(
+            matches!(
+                r,
+                Err(Error::Refused { refusal: Refusal::Rollback { role: "timestamp", .. }, .. })
+            ),
+            "{r:?}"
+        );
+        // A file the signed targets name but the feed lacks.
+        let mut d = Disk::default();
+        let mut b = bucket(&k, 1, b"kernel 1");
+        b.files.remove(&Target::of(b"kernel 1").blob_path());
+        let (r, _) = run(&mut b, &mut d, &root, NOW);
+        assert_eq!(r, Err(Error::Missing { file: Target::of(b"kernel 1").blob_path() }));
+    }
+
+    #[test]
+    fn a_new_root_is_taken_and_kept() {
+        let k = keys();
+        let (root, mut d) = (shipped(&k), Disk::default());
+        let mut b = bucket(&k, 1, b"kernel 1");
+        let r2 = sign(&root_signed(&k, 2, NOW + 365 * DAY), &[&k.root[0], &k.root[1]]);
+        b.files.insert("2.root.json".into(), r2.clone());
+        let (r, events) = run(&mut b, &mut d, &root, NOW);
+        assert!(r.is_ok(), "{r:?}");
+        assert!(events.contains(&Event::Root { version: 2 }));
+        assert_eq!(d.meta.get("root"), Some(&r2));
+        // A root signed by too few of root 2's keys is refused.
+        let mut b = bucket(&k, 1, b"kernel 1");
+        b.files.insert("3.root.json".into(), sign(&root_signed(&k, 3, NOW + DAY), &[&k.root[0]]));
+        let (r, _) = run(&mut b, &mut d, &root, NOW);
+        assert!(
+            matches!(
+                r,
+                Err(Error::Refused { refusal: Refusal::Signatures { role: "root", .. }, .. })
+            ),
+            "{r:?}"
+        );
+    }
+}

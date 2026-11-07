@@ -16,7 +16,7 @@ use ed25519_compact::KeyPair;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tuf::{Client, MetaFile, Release, RoleKeys, Target, Updated};
+use tuf::{Client, MetaFile, Release, RoleKeys, Target};
 
 const DAY: i64 = 86400;
 /// How long each role's metadata stays valid. Timestamp and snapshot are
@@ -279,47 +279,71 @@ pub fn refresh(feed: &Path, now: i64) -> Result {
     sign_snapshot_and_timestamp(feed, &k, Some(&c), targets, now)
 }
 
-/// Checks a feed as gala's client does, from `root` (default: the feed's
-/// own first root) at time `now`; a summary, or the first refusal.
-pub fn check(feed: &Path, root: Option<&Path>, now: i64) -> Result<String> {
-    let at = |p: &Path, r: tuf::Refusal| format!("{}: refused: {r}", p.display());
-    let root_path = root.map_or_else(|| feed.join("1.root.json"), Path::to_path_buf);
-    let mut c = Client::new(&read(&root_path)?).map_err(|r| at(&root_path, r))?;
-    roots(feed, &mut c)?;
-    c.check_root(now).map_err(|r| at(&feed.join(format!("{}.root.json", c.root.version)), r))?;
-    let ts = feed.join("timestamp.json");
-    c.update_timestamp(&read(&ts)?, Some(now)).map_err(|r| at(&ts, r))?;
-    let v = c.timestamp.as_ref().map_or(0, |t| t.snapshot.version);
-    let snap = feed.join(format!("{v}.snapshot.json"));
-    c.update_snapshot(&read(&snap)?, Some(now)).map_err(|r| at(&snap, r))?;
-    let v = c.snapshot.as_ref().map_or(0, |s| s.targets.version);
-    let targets = feed.join(format!("{v}.targets.json"));
-    let updated = c.update_targets(&read(&targets)?, Some(now)).map_err(|r| at(&targets, r))?;
-    debug_assert_eq!(updated, Updated::Newer);
-    let t = c.targets.as_ref().ok_or("no targets")?;
-    let mut bytes = 0;
-    for (name, target) in &t.files {
-        let blob = feed.join(target.blob_path());
-        c.check_target(name, &read(&blob)?).map_err(|r| at(&blob, r))?;
-        bytes += target.length;
+/// The feed's directory as the client's remote (what gala fetches over
+/// HTTPS).
+struct DirRemote<'a>(&'a Path);
+
+impl tuf::update::Remote for DirRemote<'_> {
+    fn fetch(&mut self, path: &str, max: u64) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let file = fs::File::open(self.0.join(path)).ok()?;
+        file.take(max + 1).read_to_end(&mut bytes).ok()?;
+        Some(bytes)
     }
-    let ts = c.timestamp.as_ref().ok_or("no timestamp")?;
-    let snap = c.snapshot.as_ref().ok_or("no snapshot")?;
+}
+
+/// A client's store that starts empty (a machine that never updated).
+#[derive(Default)]
+struct MemStore {
+    meta: std::collections::BTreeMap<String, Vec<u8>>,
+    blobs: std::collections::BTreeSet<[u8; 32]>,
+}
+
+impl tuf::update::Store for MemStore {
+    fn load(&self, role: &str) -> Option<Vec<u8>> {
+        self.meta.get(role).cloned()
+    }
+    fn save(&mut self, role: &str, bytes: &[u8]) -> std::result::Result<(), String> {
+        self.meta.insert(role.to_string(), bytes.to_vec());
+        Ok(())
+    }
+    fn has_blob(&self, sha256: &[u8; 32]) -> bool {
+        self.blobs.contains(sha256)
+    }
+    fn put_blob(&mut self, sha256: &[u8; 32], _bytes: &[u8]) -> std::result::Result<(), String> {
+        self.blobs.insert(*sha256);
+        Ok(())
+    }
+}
+
+/// Checks a feed as gala's client does (`tuf::update::update`, the same
+/// code), from `root` (default: the feed's own first root) at time `now`,
+/// as a machine that never updated: every file fetched and checked. A
+/// summary, or the first refusal.
+pub fn check(feed: &Path, root: Option<&Path>, now: i64) -> Result<String> {
+    let root_path = root.map_or_else(|| feed.join("1.root.json"), Path::to_path_buf);
+    let shipped = read(&root_path)?;
+    let mut log = String::new();
+    let outcome = tuf::update::update(
+        &mut DirRemote(feed),
+        &mut MemStore::default(),
+        &shipped,
+        now,
+        &mut |e| {
+            log += &format!("  {e}\n");
+        },
+    )
+    .map_err(|e| format!("{}: {e}\n{log}", feed.display()))?;
+    let [root, ts, snap, targets] = outcome.versions;
     Ok(format!(
-        "feed {}: root {} (expires {}), timestamp {} (expires {}), snapshot {} (expires {}), \
-         targets {} (expires {}): release {} (floor {}), {} files, {bytes} bytes, all match\n",
+        "feed {}: root {root}, timestamp {ts}, snapshot {snap}, targets {targets}: release {} (floor {}), \
+         {} files, {} bytes, all match\n{log}",
         feed.display(),
-        c.root.version,
-        tuf::Time(c.root.expires),
-        ts.version,
-        tuf::Time(ts.expires),
-        snap.version,
-        tuf::Time(snap.expires),
-        t.version,
-        tuf::Time(t.expires),
-        t.release.number,
-        t.release.floor,
-        t.files.len(),
+        outcome.release.number,
+        outcome.release.floor,
+        outcome.files,
+        outcome.bytes,
     ))
 }
 
@@ -345,7 +369,10 @@ mod tests {
         fs::write(files.join("boot/gala.manifest"), b"manifest 1").unwrap();
         publish(&files, &feed, None, None, NOW).unwrap();
         let r = check(&feed, None, NOW).unwrap();
-        assert!(r.contains("timestamp 1 ") && r.contains("release 1 (floor 1), 2 files"), "{r}");
+        assert!(
+            r.contains("root 1, timestamp 1, snapshot 1, targets 1: release 1 (floor 1), 2 files"),
+            "{r}"
+        );
 
         // A day later the timestamp has expired: a frozen feed...
         let later = NOW + 2 * DAY;
@@ -354,16 +381,13 @@ mod tests {
         // ...until refreshed.
         refresh(&feed, later).unwrap();
         let r = check(&feed, None, later).unwrap();
-        assert!(
-            r.contains("timestamp 2 ") && r.contains("snapshot 2 ") && r.contains("targets 1 "),
-            "{r}"
-        );
+        assert!(r.contains("timestamp 2, snapshot 2, targets 1: release 1"), "{r}");
 
         // Release 2 shares the unchanged blob.
         fs::write(files.join("boot/kernel"), b"kernel 2").unwrap();
         publish(&files, &feed, None, Some(2), later).unwrap();
         let r = check(&feed, None, later).unwrap();
-        assert!(r.contains("targets 2 ") && r.contains("release 2 (floor 2)"), "{r}");
+        assert!(r.contains("targets 2: release 2 (floor 2)"), "{r}");
         assert_eq!(fs::read_dir(feed.join("blobs/sha256")).unwrap().count(), 3);
         // Releases only move forward.
         let e = publish(&files, &feed, Some(2), None, later).unwrap_err();

@@ -2031,14 +2031,17 @@ floor in the superblock's sector. Next:
    paid for). Done: the metadata, writer and client checks (`user/tuf`,
    host tests for every refusal: expired timestamp, rolled-back
    versions, tampered metadata and blobs, keys not in root, root
-   rotation), `cargo xtask feed publish|refresh|check`, checked against
-   python-tuf 6.0.0 (ARCHITECTURE "The update feed"; WORKFLOW "The
-   update feed"). Next:
-   - The client in gala (test first): a scenario where xtask serves a
+   rotation), the client's whole flow over a feed and a store the caller
+   provides (`tuf::update`, host tests: a first update, a quiet feed, a
+   release fetching only what changed, a new root; a tampered blob, a
+   frozen feed, a rollback and a missing file each refused with nothing
+   kept), `cargo xtask feed publish|refresh|check` (check runs that
+   flow), checked against python-tuf 6.0.0 (ARCHITECTURE "The update
+   feed"; WORKFLOW "The update feed"). Next:
+   - The updater in gala (test first): a scenario where xtask serves a
      feed from a local directory (a fake bucket) and gala's updater
-     (on `user/tuf`'s `Client`, trusted root in the image, metadata
-     kept on C:) fetches timestamp, snapshot, targets, then only the
-     blobs it lacks, and hands the staged release to R9's live update;
+     (`tuf::update` over winhttp and C:, the trusted root in the image)
+     takes a release, and hands the staged release to R9's live update;
      raises the rollback floor after the self-check. Refusal scenarios
      for an expired timestamp, a rolled-back targets version, a
      tampered blob and a key not in root. Every step and refusal as

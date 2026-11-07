@@ -13,7 +13,8 @@
 //!   schedule, so a client tells a frozen feed from a quiet one.
 //! - `blobs/sha256/<hex>`: the files, by content.
 //!
-//! [`Client`] checks a feed the way the specification's client workflow
+//! [`update::update`] runs the client's whole flow over a feed and a store
+//! the caller provides; [`Client`] checks a feed the way the specification's client workflow
 //! (section 5) does and refuses (each a [`Refusal`]): metadata past its
 //! expiry (a freeze), versions below what it trusts (a rollback), metadata
 //! or files whose length or hash differ from what the signed parent lists
@@ -31,6 +32,7 @@ extern crate std;
 pub mod json;
 #[path = "../../../kernel/src/trust/sha256.rs"]
 pub mod sha256;
+pub mod update;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -587,7 +589,7 @@ fn check_meta(what: &str, meta: &MetaFile, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn not_expired(role: &'static str, expires: i64, now: Option<i64>) -> Result<()> {
+pub(crate) fn not_expired(role: &'static str, expires: i64, now: Option<i64>) -> Result<()> {
     match now {
         Some(now) if expires <= now => Err(Refusal::Expired { role, expires, now }),
         _ => Ok(()),
