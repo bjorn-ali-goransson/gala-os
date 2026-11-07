@@ -1014,8 +1014,8 @@ source).
   from POSIX's and the program's documented output, one labelled line per
   check; cross-check it with the host's dash and coreutils (shell.sh's
   part after its setup, or httpd.sh behind a `busybox() { "$@"; }`
-  shim; a program from the internet runs only inside gala, never on the
-  host). busybox.net's build has no standalone shell, so `shell.sh`
+  shim; busybox is a test subject: it runs inside gala, where its
+  behaviour is what is tested; see "Third-party code on the host"). busybox.net's build has no standalone shell, so `shell.sh`
   first makes `/lx/bb.bin/<applet>` symbolic links to busybox and puts
   that directory first in PATH (an applet it needs goes in that list);
   httpd.sh still calls `busybox <applet>`. To try a command line quickly, change `lx_busybox`'s
@@ -1507,6 +1507,18 @@ Implementing what FlaUI needs (gala's UIAutomationCore, user32):
   entry in `carries_pointer` (it cannot be posted), and its answer in
   `SendMessageW` before the window procedure.
 
+### Third-party code on the host
+
+Two kinds of downloaded code, two places:
+- **Test subjects** (the Windows and Linux programs gala is tested with:
+  Chromium, busybox, installers, servers in the guest) run inside gala:
+  their behaviour on gala is the point, and most cannot run on the host
+  anyway.
+- **Host-side tools** that drive or serve a test (WPT's `./wpt serve`,
+  the host's curl, ssh, psql) may run on the host when they come from a
+  well-known source, are pinned (a commit or a checksum, fetched by
+  xtask) and are recorded in THIRD_PARTY.md, as wptserve is.
+
 ### Chromium (BR)
 
 `chromium_wpt` (PENDING; web-platform-tests through ChromeDriver,
@@ -1617,7 +1629,8 @@ about a minute under TCG. Read, in order:
   installer, which gala can run: there is no WOW64 for 32-bit ones; it
   has no amd64 plug-ins, so the script uses none). The build is
   reproducible; without makensis the checked-in installers are kept.
-  Third-party installers run only inside QEMU, never on the host. The
+  Third-party installers are test subjects: they run inside QEMU (see
+  "Third-party code on the host"). The
   boot test is `cargo xtask boot-test pk_install_nsis`; a missing import
   of the installer stops its load before anything runs (exit 3/4 with
   the ledger naming it). The Fake host in `install/tests.rs` plays the
