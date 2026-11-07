@@ -2180,13 +2180,15 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Defects known, not yet fixed
 
-- **chromium_window's link click, untraced, failed twice in three runs**
-  before the state dump listed the desktop's last button deliveries
-  (and passed in all six runs since, and in all three with
-  `events=window`): the click reached nothing Chromium acted on, and
-  which step lost it is not known. A failure now leaves
-  `statedump: session 1 button ...` lines (whether the click reached
-  Chromium's window, and when). Item BR.
+- **chromium_window: input that reaches Chromium's window but not the
+  page**, about 1 run in 4 since the typing step: once the link click
+  (delivered at the link's place to Chromium's window, the button ring
+  shows), once the typed keys (the page saw the field's click, then no
+  key). Whether Chromium's UI thread took that input from gala's queue is
+  what the state dump now says (each recent button and key: taken after
+  N ms, not taken, or dropped), and window.html logs every mousedown,
+  click and keydown it gets; the next failure tells gala's side from
+  Chromium's. Item BR.
 
 - **An NT delete through a hard link's second name removes the first
   name**: hard links exist (Linux link/linkat, seam 4), but NT's delete
