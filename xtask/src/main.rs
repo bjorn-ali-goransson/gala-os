@@ -3609,8 +3609,6 @@ const PENDING: &[&str] = &[
     // BR's conformance report: a report run of hours, not a gate check.
     "chromium_wpt",
     "java_stress",
-    // P1 step 6, test first: CPython's standard library (ROADMAP P1).
-    "python_script",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
