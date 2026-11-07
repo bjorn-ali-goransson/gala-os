@@ -2003,6 +2003,37 @@ floor in the superblock's sector. Next:
 2. Images from the system tree checked against the manifest.
 3. A release key separate from the test key; the rollback floor kept in
    a TPM NV counter, and raised only after the new release's self-check.
+4. The update feed (the owner): releases published to object storage as
+   static files in TUF's metadata format (The Update Framework, CNCF),
+   so any bucket, CDN or mirror can serve them untrusted:
+   - Layout: `root.json` (the trusted keys and thresholds; root keys
+     offline, a threshold such as 2 of 3; key rotation by a new root
+     signed by the old), `targets` (the release key: each release's
+     files with sizes and SHA-256; the GALAMANI manifest becomes, or is
+     derived from, this role), `snapshot` and `timestamp` (an online
+     key, short expiry), and the files content-addressed under
+     `blobs/sha256/<digest>`.
+   - One rolling channel, no LTS (the owner: none unless paid for): CI
+     publishes every release that passes the gate on main (build, sign
+     targets with the release key from a KMS or HSM, upload the blobs,
+     then re-sign snapshot and timestamp); the timestamp is re-signed on
+     a schedule even without a release, so a client can tell a frozen
+     feed from a quiet one. A staged rollout is a field in the targets
+     metadata (a share of machines by machine-id hash).
+   - The client (in gala): timestamp, snapshot, targets, then only the
+     blobs it lacks, each checked by digest; refuses expired metadata
+     (freeze), versions below what it has seen (rollback), files not in
+     the signed targets (mix-and-match); hands the staged image to R9's
+     live update; raises the rollback floor after the self-check. Every
+     step and refusal as events.
+   - Test first: a scenario where xtask serves a feed from a local
+     directory (a fake bucket) and gala updates from it, and refusal
+     scenarios for an expired timestamp, a rolled-back targets version,
+     a tampered blob and a key not in root.
+   - Out of it: distributions inside LX update themselves (their own
+     package managers); programs from `gala install` keep winget's
+     vendor-pinned installers (PK).
+   - Open: which object store and CDN; where the release key lives.
 
 WORKFLOW "Signed images".
 
