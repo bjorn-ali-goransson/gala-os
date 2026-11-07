@@ -3558,9 +3558,6 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
-    // BR's conformance report, step 1: the browser ends at the session's
-    // first navigation (ROADMAP BR).
-    "chromium_driver",
     "java_stress",
     "elasticsearch",
     "filezilla",
@@ -11119,15 +11116,48 @@ fn webdriver(
         body.len()
     );
     stream.write_all(request.as_bytes()).map_err(|e| format!("send: {e}"))?;
+    // ChromeDriver keeps the connection open whatever the request says:
+    // read until the body is complete (its Content-Length, or a chunked
+    // body's last chunk), not until the connection closes.
     let mut response = Vec::new();
-    let read = stream.read_to_end(&mut response);
-    if response.is_empty() {
-        let why = read.err().map_or("closed".to_string(), |e| e.to_string());
-        return Err(format!("{method} {path}: no response: {why}"));
-    }
-    let split = response.windows(4).position(|w| w == b"\r\n\r\n").ok_or("no end of headers")?;
-    let head = String::from_utf8_lossy(&response[..split]).into_owned();
-    let mut raw = response[split + 4..].to_vec();
+    let mut buf = [0u8; 16384];
+    let (head, mut raw) = loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => 0,
+            Ok(n) => n,
+            Err(e) if response.is_empty() => {
+                return Err(format!("{method} {path}: no response: {e}"));
+            }
+            Err(e) => return Err(format!("{method} {path}: response cut: {e}")),
+        };
+        response.extend_from_slice(&buf[..n]);
+        if let Some(split) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&response[..split]).into_owned();
+            let body = &response[split + 4..];
+            let length = head.lines().find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.trim()
+                    .eq_ignore_ascii_case("Content-Length")
+                    .then(|| v.trim().parse::<usize>().ok())?
+            });
+            let chunked =
+                head.lines().any(|l| l.eq_ignore_ascii_case("Transfer-Encoding: chunked"));
+            let complete = match length {
+                Some(len) => body.len() >= len,
+                None if chunked => body.ends_with(b"0\r\n\r\n"),
+                None => n == 0,
+            };
+            if complete || n == 0 {
+                let mut raw = body.to_vec();
+                if let Some(len) = length {
+                    raw.truncate(len);
+                }
+                break (head, raw);
+            }
+        } else if n == 0 {
+            return Err(format!("{method} {path}: no end of headers"));
+        }
+    };
     if head.lines().any(|l| l.eq_ignore_ascii_case("Transfer-Encoding: chunked")) {
         raw = dechunk(&raw).ok_or("bad chunked body")?;
     }

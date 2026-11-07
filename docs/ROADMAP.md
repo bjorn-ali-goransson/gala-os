@@ -68,8 +68,8 @@ In order:
 
 0. **BR stage 2** first (the owner: Chromium working, then the rest of
    this list): its window, input and accessibility tree are done
-   (`chromium_window`, `chromium_uia`); now ChromeDriver
-   (`chromium_driver`, PENDING) and the conformance report.
+   (`chromium_window`, `chromium_uia`), ChromeDriver too
+   (`chromium_driver`); now the conformance report.
 1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
@@ -1056,12 +1056,14 @@ samples).
    `chromium_window` clicks a text field and types "gala" through the
    emulated keyboard, the page sees it (its `input` event's marker).
    Next: the conformance report below.
-   Then a conformance report (the owner). Step 1 under way:
-   `chromium_driver` (PENDING): ChromeDriver from the snapshot
-   (PREBUILT `chromedriver`) serves WebDriver on port 7, xtask opens a
-   session on headless Chromium (it starts and DevTools connects), then
-   the browser ends at the first navigation (a FATAL in chrome.dll,
-   0xffff7002) and the session is lost. The report itself: a subset of web-platform-tests
+   Then a conformance report (the owner). Step 1 done:
+   `chromium_driver`: ChromeDriver from the snapshot (PREBUILT
+   `chromedriver`) serves WebDriver on port 7, xtask opens a session on
+   headless Chromium, loads page.html, reads it through a script and
+   ends the session (about 2 minutes of kernel time; it needed
+   user32's LoadKeyboardLayoutW/ToUnicode and ole32's thread OLE data
+   in the layout Chromium reads). Next, step 2: the WPT server on the
+   host and a first directory. The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
    snapshot's revision, the WPT server on the host reached as
