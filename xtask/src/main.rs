@@ -4726,6 +4726,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: painted",
             "gui_test: click",
             "gui_test: typed hi",
+            "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
             "xtask: screen ok",
@@ -4748,6 +4749,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: painted",
             "gui_test: click",
             "gui_test: typed hi",
+            "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
             "xtask: screen ok",
@@ -4769,6 +4771,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: painted",
             "gui_test: click",
             "gui_test: typed hi",
+            "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
             "xtask: screen ok",
@@ -9684,6 +9687,14 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "",
+            // Keys typed while the program is busy: `q` keeps its window
+            // procedure in Sleep (3 s) while x and y come; it says
+            // whether their messages came in Windows' order.
+            input: &["sendkey q", "sendkey x", "sendkey y"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "gui_test: keys typed while busy",
             // A right click at client (250, 50): the popup menu
             // (One, Two) at (351, 183), over the window.
             input: &["mouse_button 2", "mouse_button 0"],

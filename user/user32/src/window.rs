@@ -355,6 +355,9 @@ struct Queued {
     used: bool,
     thread: u32,
     seq: u64,
+    /// Input from the desktop (`pump`), which comes out only when no
+    /// posted message waits, as from Windows' input queue.
+    input: bool,
     msg: Msg,
 }
 
@@ -438,7 +441,7 @@ static SHARED: Shared = Shared {
     state: UnsafeCell::new(State {
         classes: [NO_CLASS; MAX_CLASSES],
         windows: [NO_WINDOW; MAX_WINDOWS],
-        queue: [Queued { used: false, thread: 0, seq: 0, msg: NO_MSG }; QUEUE],
+        queue: [Queued { used: false, thread: 0, seq: 0, input: false, msg: NO_MSG }; QUEUE],
         posted: 0,
         next_atom: 0,
     }),
@@ -2495,11 +2498,20 @@ pub extern "system" fn PostThreadMessageA(
 }
 
 fn post(thread: u32, msg: Msg) -> bool {
+    queue(thread, msg, false)
+}
+
+/// Queues the desktop's input for `thread` (after posted messages).
+fn post_input(thread: u32, msg: Msg) -> bool {
+    queue(thread, msg, true)
+}
+
+fn queue(thread: u32, msg: Msg, input: bool) -> bool {
     let ok = with(|s| {
         let seq = s.posted;
         match s.queue.iter_mut().find(|q| !q.used) {
             Some(q) => {
-                *q = Queued { used: true, thread, seq, msg };
+                *q = Queued { used: true, thread, seq, input, msg };
                 s.posted += 1;
                 true
             }
@@ -2641,12 +2653,12 @@ fn pump() {
                 // list) leaves the activation where it is, as ShowWindow
                 // does.
                 if (message == 0x0201 || message == 0x0204) && !with(|s| s.windows[i].popup) {
-                    post(thread, message_at(top, GALA_WM_ACTIVATE, WA_CLICKACTIVE, 0));
+                    post_input(thread, message_at(top, GALA_WM_ACTIVATE, WA_CLICKACTIVE, 0));
                 }
                 // In a frame the program draws, its WM_NCHITTEST says
                 // whether a press is on its caption.
                 if message == 0x0201 && with(|s| s.windows[i].custom.is_some()) {
-                    post(thread, message_at(top, GALA_WM_NCDOWN, wparam, lparam));
+                    post_input(thread, message_at(top, GALA_WM_NCDOWN, wparam, lparam));
                     continue;
                 }
                 // The desktop moved the window (a drag): its position.
@@ -2655,7 +2667,7 @@ fn pump() {
                 }
                 // Snap: the window's thread moves it (DispatchMessage).
                 if message == GALA_WM_PLACE || message == GALA_WM_MINIMIZED {
-                    post(thread, message_at(top, message, wparam, lparam));
+                    post_input(thread, message_at(top, message, wparam, lparam));
                     continue;
                 }
                 // Mouse input goes to the child under the pointer (or the
@@ -2678,7 +2690,7 @@ fn pump() {
                 if message == 0x0200 && tracked != 0 && tracked != to {
                     TRACKED.store(0, Ordering::Relaxed);
                     if let Some(w) = window(tracked) {
-                        post(w.thread, message_at(tracked, WM_MOUSELEAVE, 0, 0));
+                        post_input(w.thread, message_at(tracked, WM_MOUSELEAVE, 0, 0));
                     }
                 }
                 // Keys go to the focus as it is when the message is taken
@@ -2687,10 +2699,10 @@ fn pump() {
                 if (0x0100..=0x0109).contains(&message) {
                     let mut m = message_at(top, message, wparam, lparam);
                     m.private = ROUTE_KEY;
-                    post(thread, m);
+                    post_input(thread, m);
                     continue;
                 }
-                post(thread, message_at(to, message, wparam, lparam));
+                post_input(thread, message_at(to, message, wparam, lparam));
             }
         }
         if n < 32 {
@@ -2916,7 +2928,9 @@ fn next_raw_inner(hwnd: Hwnd, min: u32, max: u32, remove: bool) -> Option<Msg> {
             .queue
             .iter_mut()
             .filter(|q| q.used && q.thread == thread && fits(&q.msg))
-            .min_by_key(|q| q.seq)
+            // Posted messages first, oldest first; then input, as
+            // GetMessage takes them on Windows (sent, posted, input).
+            .min_by_key(|q| (q.input, q.seq))
         {
             if remove {
                 q.used = false;

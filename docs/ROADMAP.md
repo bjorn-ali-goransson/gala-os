@@ -2193,15 +2193,6 @@ Each entry: what, why it matters, the structural fix, the owning item.
 
 ### Defects known, not yet fixed
 
-- **user32 posts the desktop's input into the posted-message queue**:
-  Windows keeps hardware input in its own queue, read only when no
-  posted message waits, so a WM_CHAR that TranslateMessage posts comes
-  before the next keystroke; in gala it comes after the input user32
-  already took. Programs that pair WM_KEYDOWN with the WM_CHAR after it
-  can see them apart. Fix: a separate input queue per thread, read after
-  the posted messages (as GetMessage's order: sent, posted, input,
-  paint, timers). Item W (user32).
-
 - **An NT delete through a hard link's second name removes the first
   name**: hard links exist (Linux link/linkat, seam 4), but NT's delete
   (FILE_DISPOSITION / DeleteFileW) acts on the node's first name, not the
