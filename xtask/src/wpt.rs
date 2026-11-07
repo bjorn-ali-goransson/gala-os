@@ -476,6 +476,223 @@ fn run(port: u16, log: &Path) -> Result {
     Ok(())
 }
 
+// ---- The comparison with wpt.fyi ----
+
+/// wpt.fyi's runs the report is compared with (the Chromium of our
+/// snapshot's line: Edge on Windows, the same Blink on the same OS, and
+/// Chrome on Linux), pinned so a comparison can be repeated.
+const REFERENCE_RUNS: &[(&str, &str)] =
+    &[("edge-159-win", "5094276917362688"), ("chrome-159-linux", "6250565395546112")];
+
+/// A JSON value (enough of JSON for wptreport.json and wpt.fyi's API).
+#[derive(Debug, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+impl Json {
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+    pub fn str(&self) -> Option<&str> {
+        if let Json::Str(s) = self { Some(s) } else { None }
+    }
+    pub fn num(&self) -> Option<f64> {
+        if let Json::Num(n) = self { Some(*n) } else { None }
+    }
+    pub fn arr(&self) -> &[Json] {
+        if let Json::Arr(a) = self { a } else { &[] }
+    }
+}
+
+/// Parses a JSON document.
+pub fn parse_json(text: &str) -> Option<Json> {
+    let (v, rest) = value(text.trim_start())?;
+    rest.trim().is_empty().then_some(v)
+}
+
+fn value(s: &str) -> Option<(Json, &str)> {
+    let s = s.trim_start();
+    match s.chars().next()? {
+        '"' => json_text(s).map(|(t, r)| (Json::Str(t), r)),
+        '{' => {
+            let mut fields = Vec::new();
+            let mut s = s[1..].trim_start();
+            if let Some(r) = s.strip_prefix('}') {
+                return Some((Json::Obj(fields), r));
+            }
+            loop {
+                let (k, r) = json_text(s.trim_start())?;
+                let r = r.trim_start().strip_prefix(':')?;
+                let (v, r) = value(r)?;
+                fields.push((k, v));
+                let r = r.trim_start();
+                if let Some(r) = r.strip_prefix(',') {
+                    s = r;
+                } else {
+                    return Some((Json::Obj(fields), r.strip_prefix('}')?));
+                }
+            }
+        }
+        '[' => {
+            let mut items = Vec::new();
+            let mut s = s[1..].trim_start();
+            if let Some(r) = s.strip_prefix(']') {
+                return Some((Json::Arr(items), r));
+            }
+            loop {
+                let (v, r) = value(s)?;
+                items.push(v);
+                let r = r.trim_start();
+                if let Some(r) = r.strip_prefix(',') {
+                    s = r;
+                } else {
+                    return Some((Json::Arr(items), r.strip_prefix(']')?));
+                }
+            }
+        }
+        't' => s.strip_prefix("true").map(|r| (Json::Bool(true), r)),
+        'f' => s.strip_prefix("false").map(|r| (Json::Bool(false), r)),
+        'n' => s.strip_prefix("null").map(|r| (Json::Null, r)),
+        _ => {
+            let end =
+                s.find(|c: char| !(c.is_ascii_digit() || "+-.eE".contains(c))).unwrap_or(s.len());
+            s[..end].parse().ok().map(|n| (Json::Num(n), &s[end..]))
+        }
+    }
+}
+
+/// One test on both sides: gala's subtests passed and run (its harness
+/// status), a reference run's passes and total.
+struct Row {
+    test: String,
+    gala: (usize, usize, String),
+    reference: Vec<Option<(u64, u64)>>,
+    /// gala's first failing subtest and its message.
+    first_failure: String,
+}
+
+/// `cargo xtask wpt-compare`: target/wpt/wptreport.json against
+/// REFERENCE_RUNS on wpt.fyi (its search API, by test: passes and total,
+/// fetched with the host's curl): per directory, and every test that
+/// passes fewer subtests on gala than on the first reference (gala-only
+/// failures, with gala's first failing subtest). Printed and written to
+/// target/wpt/compare.txt.
+pub fn compare() -> Result {
+    let report = fs::read_to_string("target/wpt/wptreport.json")
+        .map_err(|e| format!("target/wpt/wptreport.json: {e} (run chromium_wpt first)"))?;
+    let report = parse_json(&report).ok_or("target/wpt/wptreport.json: not JSON")?;
+    let mut rows = Vec::new();
+    let mut dirs = std::collections::BTreeSet::new();
+    for r in report.get("results").map(Json::arr).unwrap_or(&[]) {
+        let test = r.get("test").and_then(Json::str).unwrap_or("").to_string();
+        let status = r.get("status").and_then(Json::str).unwrap_or("").to_string();
+        let subtests = r.get("subtests").map(Json::arr).unwrap_or(&[]);
+        let pass =
+            subtests.iter().filter(|s| s.get("status").and_then(Json::str) == Some("PASS")).count();
+        let first_failure = subtests
+            .iter()
+            .find(|s| s.get("status").and_then(Json::str) != Some("PASS"))
+            .map(|s| {
+                format!(
+                    "{}: {} {}",
+                    s.get("name").and_then(Json::str).unwrap_or(""),
+                    s.get("status").and_then(Json::str).unwrap_or(""),
+                    s.get("message").and_then(Json::str).unwrap_or("")
+                )
+            })
+            .unwrap_or_default();
+        if let Some(dir) = test.rsplit_once('/').map(|(d, _)| d.to_string()) {
+            dirs.insert(dir);
+        }
+        rows.push(Row {
+            test,
+            gala: (pass, subtests.len(), status),
+            reference: vec![None; REFERENCE_RUNS.len()],
+            first_failure,
+        });
+    }
+    let ids: Vec<&str> = REFERENCE_RUNS.iter().map(|r| r.1).collect();
+    for dir in &dirs {
+        let url = format!("https://wpt.fyi/api/search?run_ids={}&q={dir}/", ids.join(","));
+        let out = Command::new("curl")
+            .args(["-sSf", "--max-time", "120", &url])
+            .output()
+            .map_err(|e| format!("curl: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("{url}: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+        let answer = parse_json(&String::from_utf8_lossy(&out.stdout))
+            .ok_or_else(|| format!("{url}: not JSON"))?;
+        for r in answer.get("results").map(Json::arr).unwrap_or(&[]) {
+            let test = r.get("test").and_then(Json::str).unwrap_or("");
+            let Some(row) = rows.iter_mut().find(|row| row.test == test) else { continue };
+            for (i, s) in r.get("legacy_status").map(Json::arr).unwrap_or(&[]).iter().enumerate() {
+                if let (Some(p), Some(t)) =
+                    (s.get("passes").and_then(Json::num), s.get("total").and_then(Json::num))
+                    && i < row.reference.len()
+                {
+                    row.reference[i] = Some((p as u64, t as u64));
+                }
+            }
+        }
+    }
+    let mut text = format!(
+        "wpt-compare: gala (chromium_wpt, WPT {WPT_COMMIT}) against {}\n",
+        REFERENCE_RUNS
+            .iter()
+            .map(|r| format!("{} (run {})", r.0, r.1))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let sum = |f: &dyn Fn(&Row) -> Option<(u64, u64)>| {
+        rows.iter().filter_map(f).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+    };
+    let gala = sum(&|r| Some((r.gala.0 as u64, r.gala.1 as u64)));
+    text += &format!("tests: {}; subtests passed: gala {} of {}", rows.len(), gala.0, gala.1);
+    for (i, (name, _)) in REFERENCE_RUNS.iter().enumerate() {
+        let r = sum(&|row| row.reference[i]);
+        text += &format!(", {name} {} of {}", r.0, r.1);
+    }
+    text += "\n";
+    let mut worse: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.reference[0].is_some_and(|(p, _)| (r.gala.0 as u64) < p))
+        .collect();
+    worse.sort_by(|a, b| a.test.cmp(&b.test));
+    text += &format!(
+        "gala-only failures (fewer passes than {}): {}\n",
+        REFERENCE_RUNS[0].0,
+        worse.len()
+    );
+    for r in &worse {
+        let reference = r.reference[0].map_or("?".to_string(), |(p, t)| format!("{p}/{t}"));
+        text += &format!(
+            "  {}: gala {}/{} ({}), {} {reference}; first failure: {}\n",
+            r.test,
+            r.gala.0,
+            r.gala.1,
+            r.gala.2,
+            REFERENCE_RUNS[0].0,
+            r.first_failure.chars().take(200).collect::<String>()
+        );
+    }
+    let unknown = rows.iter().filter(|r| r.reference[0].is_none()).count();
+    if unknown > 0 {
+        text += &format!("not in {}: {unknown} tests\n", REFERENCE_RUNS[0].0);
+    }
+    print!("{text}");
+    fs::write("target/wpt/compare.txt", &text).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +704,34 @@ mod tests {
         assert_eq!(rest, r#" ,"x""#);
         assert_eq!(value_text(r#"{"value":"HARNESS\t0\t"}"#).as_deref(), Some("HARNESS\t0\t"));
         assert_eq!(value_text(r#"{"value":null}"#), None);
+    }
+
+    #[test]
+    fn parses_json() {
+        let v = parse_json(
+            r#" {"a": [1, 2.5, -3e2], "b": {"c": "d\"e"}, "t": true, "n": null, "e": []} "#,
+        )
+        .unwrap();
+        assert_eq!(
+            v.get("a").unwrap().arr().iter().filter_map(Json::num).collect::<Vec<_>>(),
+            [1.0, 2.5, -300.0]
+        );
+        assert_eq!(v.get("b").and_then(|b| b.get("c")).and_then(Json::str), Some("d\"e"));
+        assert_eq!(v.get("t"), Some(&Json::Bool(true)));
+        assert_eq!(v.get("n"), Some(&Json::Null));
+        assert!(v.get("e").unwrap().arr().is_empty());
+        assert!(parse_json("{\"a\": }").is_none());
+        // Our own report reads back.
+        let results = [TestResult {
+            test: "/x.html".into(),
+            status: "OK",
+            message: String::new(),
+            subtests: vec![("s".into(), "PASS", String::new())],
+            duration_ms: 1,
+        }];
+        let back = parse_json(&wptreport(&results, 1, 2)).unwrap();
+        let r = &back.get("results").unwrap().arr()[0];
+        assert_eq!(r.get("test").and_then(Json::str), Some("/x.html"));
     }
 
     #[test]

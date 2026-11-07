@@ -2549,6 +2549,8 @@ commands:
                events <events.jsonl>
   serve-page   answer one HTTP request on standard input/output with the
                host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
+  wpt-compare  chromium_wpt's report against wpt.fyi's Edge on Windows and
+               Chrome on Linux (target/wpt/compare.txt)
   perfetto     a boot's event stream as a Perfetto trace (tracks per thread,
                system calls, IPC flows, samples): <events.jsonl | scenario>
                [--out FILE]; open it in ui.perfetto.dev
@@ -2655,6 +2657,7 @@ fn main() -> ExitCode {
             Some("profile") => profile_cli(&args[1..]),
             Some("perfetto") => perfetto_cli(&args[1..]),
             Some("serve-page") => serve_page(),
+            Some("wpt-compare") => wpt::compare(),
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),

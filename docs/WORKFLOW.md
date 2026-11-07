@@ -1516,6 +1516,11 @@ into `target/prebuilt/wpt` with the host's git. Each test's line
 run's serve log (`target/debug/test-chromium_wpt.serve.log`, appended to
 the scenario's log), the run as `target/wpt/wptreport.json` (wptrunner's format, what wpt.fyi
 takes: `run_info`, each test's status, duration and subtests).
+`cargo xtask wpt-compare` compares that report with wpt.fyi's pinned
+reference runs (Edge 159 on Windows first, Chrome 159 on Linux; the
+search API through the host's curl): per-test passes, the totals, and
+every test that passes fewer subtests on gala than on Edge with gala's
+first failing subtest (`target/wpt/compare.txt`).
 
 `chromium_uia` (a UIA client over Chromium's accessibility tree:
 user/uia_chromium_test, built by its build.sh) prints each step with
