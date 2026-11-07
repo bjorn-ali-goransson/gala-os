@@ -92,6 +92,14 @@ In order:
 9. **SSH**: the client against the host's sshd, agent forwarding;
    **H11**: busybox-w32's httpd and wget over loopback (the Linux
    busybox's run: `lx_httpd`).
+10. **Last, once everything above is done** (the owner): a performance
+    profile on a real Windows machine, then optimization. The same
+    workloads (the scenarios' programs, `bench`, Chromium's page loads,
+    Python) are profiled on Windows (Windows Performance Recorder/WPA,
+    the owner's laptop) and on gala on hardware or KVM (not TCG:
+    `cargo xtask profile`), and compared operation by operation;
+    gala's hot spots are fixed in order of the gap, each with a
+    benchmark kept in `bench` and its numbers in PERF.md.
 
 ## Status at a glance
 
