@@ -2558,7 +2558,8 @@ commands:
                [--tid N] [--from S --to S] [--top N] [--symbols DIR] (boot
                with events=sample,image,thread,process; sample_hz=, default 100)
   otel         convert a boot's event stream and serial log to OpenTelemetry
-               (OTLP/JSON traces, logs, metrics; view in Jaeger or an OTel
+               (OTLP/JSON files of traces, logs, metrics, posted as batched
+               protobuf, OTEL_EXPORTER_OTLP_PROTOCOL; view in Jaeger or an OTel
                collector, docs/WORKFLOW.md, OpenTelemetry): otel <serial log |
                events.jsonl | scenario> [<events.jsonl>] [--out <prefix>]
                [--endpoint http://host:4318 (or OTEL_EXPORTER_OTLP_ENDPOINT)];

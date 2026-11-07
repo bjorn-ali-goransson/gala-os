@@ -178,6 +178,8 @@ shasha) is built into `target/server`, the `handover_next` kernel into
 | `XTASK_RECORD=1` | record every boot's outside inputs ("Clock control, record/replay") |
 | `XTASK_OTEL=1` | write OTLP files for every boot |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | where `otel` and `XTASK_OTEL=1` post |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json` for what is posted |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` (default) or `none` for what is posted |
 | `XTASK_UNSIGNED=1` | unsigned kernels and images ("Signed images") |
 | `XTASK_DOCKER_CA` (or `SSL_CERT_FILE`) | a CA for `docker-test` to trust (behind a proxy) |
 | `GALAPKG_BLESS=1` | regenerate galapkg's winget golden file ("Installing software") |
@@ -1925,7 +1927,7 @@ every byte between the terminal and the console.
 ### OpenTelemetry
 
 `cargo xtask otel` converts a boot's event stream and serial log to
-OTLP/JSON (ROADMAP OT1; the mapping table is in OBSERVABILITY
+OpenTelemetry (OTLP/JSON files; ROADMAP OT1; the mapping table is in OBSERVABILITY
 "OpenTelemetry export"): the boot is one trace, processes and threads are
 spans, system calls spans under their thread, faults, image loads and
 other events span events, the serial log log records (a crash report or
@@ -1950,8 +1952,14 @@ XTASK_EVENTS=all XTASK_OTEL=1 cargo xtask boot-test 'hello$'  # every boot
   and metrics.
 - **Sending**: `--endpoint http://host:4318` or
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4318` (also honoured by
-  `XTASK_OTEL=1` boot tests) POSTs it over OTLP/HTTP with JSON (plain
-  http only).
+  `XTASK_OTEL=1` boot tests) POSTs it over OTLP/HTTP (plain http only):
+  binary protobuf, gzipped, at most 512 spans, records or points a
+  request (OBSERVABILITY "OpenTelemetry export");
+  `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` sends OTLP/JSON instead and
+  `OTEL_EXPORTER_OTLP_COMPRESSION=none` leaves gzip out (to read the
+  requests in a capture). The `otel: sent to` line says per signal the
+  requests, items and bytes, the retries (and why the last one
+  happened), drops, and anything FAILED, NOT SENT or REJECTED.
 - **Large boots**: a system-call-heavy boot (a JVM) is hundreds of
   thousands of spans; Jaeger's UI gets slow past about 50k spans in one
   trace. Convert a shorter run, or filter the stream first (`grep -v
@@ -1960,8 +1968,9 @@ XTASK_EVENTS=all XTASK_OTEL=1 cargo xtask boot-test 'hello$'  # every boot
 **Viewing in Jaeger** (traces only; Jaeger 1.35+ takes OTLP by default).
 This recipe has not yet been run against a real Jaeger (the output was
 checked against the OTLP protobuf messages with python's strict
-`json_format`, and xtask's unit tests check the shape and the HTTP
-post): fix it if a step differs.
+`json_format`, and xtask's unit tests check the shape, decode the
+protobuf back against the JSON, and check the batched, gzipped, retried
+posts): fix it if a step differs.
 
 ```sh
 docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:1.62.0
@@ -3012,7 +3021,7 @@ ARCHITECTURE "Waits".
 | winget manifest resolver and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Third-party program builds, scripts and configuration | `user/<program>/` (`build.sh`) |
 | Checked-in binaries, Windows runner (`run-all.ps1`) | `user/bin/` |
-| Build, boot tests, scenarios, reports | `xtask/src/main.rs`; signing `xtask/src/trust.rs`; triage `triage.rs`; OTLP `otel.rs`; lx transcripts `lx_expect.rs`; audit `alloc_audit.rs`; clock check `clockcheck.rs` |
+| Build, boot tests, scenarios, reports | `xtask/src/main.rs`; signing `xtask/src/trust.rs`; triage `triage.rs`; OTLP `otel.rs` (encoders `otel/wire.rs`, batching and sending `otel/send.rs`); lx transcripts `lx_expect.rs`; audit `alloc_audit.rs`; clock check `clockcheck.rs` |
 | Docker test image | `docker/test.Dockerfile` |
 | Vendored dependencies (smoltcp with gala's handover patch) | `vendor/` |
 

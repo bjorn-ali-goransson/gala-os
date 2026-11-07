@@ -2070,20 +2070,17 @@ and the converter names the slowest hand-offs. The sampling profiler's
 samples go to OTLP's profiles signal (v1development), each linked to
 its thread's span; kernel samples carry their frame-pointer stack, so
 the profile names a hot kernel function's callers (user-mode stacks
-need unwinding: next).
+need unwinding: next). The wire format (the owner): what is sent is
+OTLP/HTTP binary protobuf, gzipped, in batches of at most 512 items
+from bounded queues (drops counted), retried with backoff and
+`Retry-After` (`xtask/src/otel/send.rs`, its `Batcher` meant for OT5's
+in-guest exporter too); a hand-written encoder checked by decoding it
+back against the JSON form; `OTEL_EXPORTER_OTLP_PROTOCOL=http/json`
+selectable, files still OTLP/JSON, profiles still JSON on the wire
+(OBSERVABILITY "OpenTelemetry export").
 
 **Next**:
-0. The wire format (the owner): OTLP/HTTP with binary protobuf
-   (`application/x-protobuf`, gzip), batched: at most 512 items a
-   request, flushed every second or when full, a bounded queue whose
-   drops are counted and reported, a failed batch retried with backoff
-   (429/503 and Retry-After honoured); for the export after a boot and
-   the in-guest exporter (OT5) alike. A hand-written encoder from
-   opentelemetry-proto's field numbers (no protoc, no crate), checked by
-   decoding it back against the JSON form; `OTEL_EXPORTER_OTLP_PROTOCOL`
-   defaults to `http/protobuf`, `http/json` stays selectable, and
-   `--out` files stay OTLP/JSON (for reading and diffing). Then the
-   input path as the pipes and completion ports have it: a kernel
+0. The input path as the pipes and completion ports have it: a kernel
    `input taken` event, a link from a delivery to its taking, `otel:
    slow input` among the slowest hand-offs.
 1. OT2: trace context in the kernel; system calls, waits, faults, I/O

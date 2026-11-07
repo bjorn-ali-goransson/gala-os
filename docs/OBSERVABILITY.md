@@ -193,15 +193,56 @@ copied next to a failed log as `<scenario>.events.jsonl`.
 ### OpenTelemetry export
 
 `xtask/src/otel.rs` turns one boot's event stream and serial log into
-OTLP/JSON (stage OT1 of ROADMAP OT; the wire format is to become
-batched OTLP/HTTP protobuf, ROADMAP OT next 0, with JSON kept for files): `cargo xtask otel <serial log |
+OpenTelemetry (stage OT1 of ROADMAP OT): `cargo xtask otel <serial log |
 events.jsonl | scenario> [<events.jsonl>] [--out <prefix>] [--endpoint
 http://host:4318]` (or `OTEL_EXPORTER_OTLP_ENDPOINT`), and `XTASK_OTEL=1`
 makes boot-test write it for every boot. How to view it: WORKFLOW
 "OpenTelemetry". The kernel is unchanged: this maps what the stream has
-today. A hand-written encoder (no OTel crate) follows the OTLP/JSON
-mapping of opentelemetry-proto: ids in hex, 64-bit integers as decimal
-strings, enums as numbers.
+today. The conversion builds one model of the export (`otel/wire.rs`
+`Data`: spans, log records, data points, in absolute times) that two
+hand-written encoders (no protoc, no OTel crate) write from
+opentelemetry-proto's definitions:
+
+- **Files are OTLP/JSON** (for reading and diffing): ids in hex, 64-bit
+  integers as decimal strings, enums as numbers; one request a line, at
+  most 5000 spans or records a request.
+- **What is sent is OTLP/HTTP binary protobuf** (`application/x-protobuf`)
+  by the field numbers of common/v1, resource/v1, trace/v1, logs/v1,
+  metrics/v1 and the collector's `Export*ServiceRequest`: ids as raw
+  bytes (16 and 8), times fixed64, enums varints, `as_int` sfixed64,
+  proto3 defaults left out except inside a oneof (an `AnyValue` of 0,
+  false or "" is written). `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` sends
+  the same batches as OTLP/JSON instead; any other value (`grpc`) is
+  refused. The unit tests decode the protobuf back, by the field
+  numbers, and compare it with the JSON form.
+- **Profiles stay OTLP/JSON** on the wire too (POSTed as
+  `application/json`, which OTLP/HTTP receivers take beside protobuf):
+  their dictionary is built as JSON tables, and profiles/v1development's
+  field numbers still change between releases.
+- **Compression**: gzip (`Content-Encoding: gzip`, flate2 over
+  miniz_oxide) unless `OTEL_EXPORTER_OTLP_COMPRESSION=none`.
+- **Batching** (`otel/send.rs`, built for the in-guest exporter of OT5
+  as much as for the export after a boot): each signal has a `Batcher`,
+  a bounded queue (4096 items) that gives a batch of at most 512 items
+  (spans, log records or data points; a request groups consecutive
+  points of one metric) when one is full or a second after the last
+  batch was done. A push to a full queue is refused and counted. The
+  export after a boot queues items as a live exporter would and sends
+  what is due (`tick`), so a full batch leaves before the next item is
+  queued, then flushes the rest.
+- **Retries**: a request that fails to connect, or gets 429, 502, 503 or
+  504, is retried up to 5 attempts in all, waiting 1 s and doubling up
+  to 16 s; a `Retry-After` of seconds on 429 or 503 replaces the wait
+  (at most 60 s; an HTTP-date is not read, the backoff applies). Other
+  statuses are not retried. A batch that fails for good stops the
+  export: its items count as FAILED and those never sent as NOT SENT. An
+  accepted request's partial success (`rejected_*`, `error_message`) is
+  read in either encoding and counted as REJECTED.
+- **Its report**: `otel: sent to <endpoint>: http/protobuf, gzip; traces
+  N requests, N spans, N KiB (N KiB before gzip); logs ...; metrics ...;
+  profiles ... (JSON); N retries (last: why, which path, how long); N
+  dropped`, with DROPPED, FAILED, NOT SENT and REJECTED per signal when
+  not zero; a failure prints the error followed by the same line.
 
 | Source | OTel | Names (semantic conventions first, else `gala.`) |
 |---|---|---|

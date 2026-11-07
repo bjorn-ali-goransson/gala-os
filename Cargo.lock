@@ -2781,6 +2781,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "ed25519-compact",
+ "flate2",
  "fontdue",
  "resvg",
 ]
