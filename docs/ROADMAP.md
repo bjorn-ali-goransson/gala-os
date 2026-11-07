@@ -634,12 +634,15 @@ patterns and read their state, so one test runs on Windows and on gala
   GALA_UIA message), the window's (UiaHostProviderFromHwnd) where it
   gives none; a fragment root's fragments as the window's descendants,
   with their Invoke and Value patterns (`uia_test`).
+- `chromium_uia`: Chromium's page read and its link invoked through
+  Chromium's own provider.
 
 **Next**:
-1. Chromium's accessibility tree through its provider (BR stage 2:
-   FlaUI reading and clicking the page), adding what it needs: more
-   patterns (Toggle, ExpandCollapse, Selection, Text),
-   ElementProviderFromPoint, GetFocus, a root provider's own patterns.
+1. More of what providers give, as programs need it (Chromium's tree
+   is read and its links invoked: `chromium_uia`): more patterns
+   (Toggle, ExpandCollapse, Selection, Text), ElementProviderFromPoint,
+   GetFocus, a root provider's own patterns, events from providers
+   (UiaRaise*); oleacc's CreateStdAccessibleObject.
 2. IUIAutomation3..6's event handlers and handler groups.
 3. Combo box and tree-view items, GetParent of owned popups, the system
    menu in the title bar.
@@ -1044,8 +1047,13 @@ samples).
    GalaWindowResize; desktop unit test, no outline while resizing yet).
    A click on a link: the scenario clicks window.html's link block
    after the drag, Chromium opens window2.html (its marker in the log,
-   its blue on the screen). Next: IME off, FlaUI reading the page's
-   accessibility tree.
+   its blue on the screen). The page's accessibility tree through
+   Chromium's own UIA provider (`chromium_uia`: a UIA client, the API
+   FlaUI calls, finds the link by ControlType Hyperlink and Name, reads
+   its rectangle and invokes it; Chromium builds its tree once asked,
+   about 80 s under TCG). Ledger line left there:
+   `oleacc.dll!CreateStdAccessibleObject` (unsupported; Chromium goes
+   on). Next: IME off.
    Then a conformance report (the owner): a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the

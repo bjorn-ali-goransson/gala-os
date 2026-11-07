@@ -1771,6 +1771,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "user/chromium/page.html", "gala"),
     ("chromium", "user/chromium/window.html", "gala"),
     ("chromium", "user/chromium/window2.html", "gala"),
+    ("chromium_uia", "user/bin/uia_chromium_test.exe", "gala"),
     ("chromium", "ntdll.dll", "Windows/System32"),
     ("chromium", "kernel32.dll", "Windows/System32"),
     ("chromium", "kernelbase.dll", "Windows/System32"),
@@ -6443,6 +6444,23 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // BR stage 2 and UIA: a UI Automation client
+        // (user/uia_chromium_test, mingw) starts Chromium on window.html
+        // (chromium_window's flags), finds the page's link in Chromium's
+        // accessibility tree (its UIA provider, through gala's
+        // UIAutomationCore) by ControlType and Name, invokes it
+        // (window2.html's title) and closes Chromium with WM_CLOSE.
+        name: "chromium_uia",
+        cmdline: "qemu_exit run=uia_chromium_test.exe dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "uia_chromium_test: link found",
+            "uia_chromium_test: link followed",
+            "uia_chromium_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -7660,6 +7678,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_https", "chromium"),
     ("chromium_host", "chromium"),
     ("chromium_window", "chromium"),
+    ("chromium_uia", "chromium"),
+    ("chromium_uia", "chromium_uia"),
     ("chromium_host", "chromium_host"),
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),

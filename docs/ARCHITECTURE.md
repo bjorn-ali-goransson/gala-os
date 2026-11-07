@@ -9262,6 +9262,19 @@ FlaUI's Application uses Process.Start (CreateProcessW), GetMainWindow
 across processes; .NET skips owned windows) and Process.CloseMainWindow
 (PostMessage WM_CLOSE across processes).
 
+**Chromium** (`chromium_uia`): the first program read through its own
+provider. Chromium's top-level window (Chrome_WidgetWin_1) answers
+WM_GETOBJECT with UiaRootObjectId through UiaReturnRawElementProvider
+(its fragment root, in the browser process), and builds its
+accessibility tree once a client asks: the page's elements are
+fragments under the window. The test finds window.html's link (an
+`<a>` with aria-label "gala link") by ControlType Hyperlink and Name
+about 80 s after the window shows under TCG, reads its
+BoundingRectangle (screen coordinates, inside the window) and invokes
+it through the fragment's IInvokeProvider; Chromium follows the link.
+Chromium also asks oleacc for CreateStdAccessibleObject (unsupported,
+recorded) and goes on.
+
 **FileZilla** (`filezilla_flaui`): wx's controls are plain Win32
 windows (Edit, Button, Static, SysListView32, ToolbarWindow32,
 msctls_statusbar32; panels and splitters are wxWindowNR panes whose

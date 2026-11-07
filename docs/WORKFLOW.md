@@ -1504,6 +1504,12 @@ Implementing what FlaUI needs (gala's UIAutomationCore, user32):
 
 ### Chromium (BR)
 
+`chromium_uia` (a UIA client over Chromium's accessibility tree:
+user/uia_chromium_test, built by its build.sh) prints each step with
+its time (`uia_chromium_test: link found (147659 ms)`); when the link
+is not found it prints the window's element tree four levels deep
+(`uia_chromium_test: tree <control type> "<name>"`) before failing.
+
 `cargo xtask boot-test chromium_version` (PENDING; PREBUILT `chromium`:
 370 MB download, ~430 MB unpacked, a 430 MB ISO per run: delete
 `target/debug/test-chromium_*.iso` after a failed run). A run takes
