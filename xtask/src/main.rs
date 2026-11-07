@@ -98,6 +98,17 @@ const PREBUILT: &[Prebuilt] = &[
     },
     // PowerShell 7.4 (a self-contained .NET 8 application); the SHA-256 is
     // the one in the release's hashes.sha256.
+    // CPython 3.13.1's embeddable package for x64 (python.org; the
+    // SHA-256 is python.org's published one): python.exe, python313.dll,
+    // the standard library as python313.zip and its extension modules.
+    // The UCRT it needs is the JDK's (gala has none of its own).
+    Prebuilt {
+        name: "python",
+        url: "https://www.python.org/ftp/python/3.13.1/python-3.13.1-embed-amd64.zip",
+        checksum: "7b7923ff0183a8b8fca90f6047184b419b108cb437f75fc1c002f9d2f8bcec16",
+        members: &[],
+        excludes: &[],
+    },
     Prebuilt {
         name: "pwsh",
         url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.zip",
@@ -695,6 +706,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("handover_k32_test", "ntdll.dll", "Windows/System32"),
     ("handover_k32_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_py_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
     ("gui_test", "kernel/assets/wallpapers/dunes.qoi", "Windows/Web/Wallpaper"),
     ("gui_test", "kernel/assets/wallpapers/ribbons.qoi", "Windows/Web/Wallpaper"),
@@ -892,6 +904,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_system_test", "psapi.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_py_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("xstate_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
@@ -1680,6 +1693,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "shell32.dll", "Windows/System32"),
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
+    // P1 step 6: the embeddable CPython (PREBUILT `python`) in C:\python,
+    // gala's DLLs it imports, the JDK's UCRT beside it.
+    ("python_hello", "target/prebuilt/python/", "python"),
+    ("python_hello", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_hello", "ntdll.dll", "Windows/System32"),
+    ("python_hello", "kernel32.dll", "Windows/System32"),
+    ("python_hello", "advapi32.dll", "Windows/System32"),
+    ("python_hello", "version.dll", "Windows/System32"),
+    ("python_hello", "ws2_32.dll", "Windows/System32"),
+    ("python_hello", "mswsock.dll", "Windows/System32"),
+    ("python_hello", "bcrypt.dll", "Windows/System32"),
+    ("python_hello", "bcryptprimitives.dll", "Windows/System32"),
+    ("python_hello", "iphlpapi.dll", "Windows/System32"),
+    ("python_hello", "rpcrt4.dll", "Windows/System32"),
+    ("python_hello", "user32.dll", "Windows/System32"),
+    ("python_hello", "msvcrt.dll", "Windows/System32"),
     ("pwsh", "target/prebuilt/pwsh/", "pwsh"),
     ("pwsh", "ntdll.dll", "Windows/System32"),
     ("pwsh", "kernel32.dll", "Windows/System32"),
@@ -2345,6 +2374,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
+    "kernel32_py_test",
     "kernel32_locale_test",
     "disk_test",
     "rtl_test",
@@ -5023,6 +5053,14 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["kernel32_sync_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // P1 step 6: what CPython imports from kernel32 (PathCch, Pss
+        // snapshots, CopyFile2, SetWaitableTimerEx, pipe state, ...).
+        name: "kernel32_py_test",
+        cmdline: "qemu_exit run=kernel32_py_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_py_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         name: "xstate_test",
         cmdline: "qemu_exit run=xstate_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -6534,6 +6572,14 @@ const SCENARIOS: &[Scenario] = &[
                   C:/chromium/chrome_wpt-5.log,C:/chromium/chrome_wpt-6.log,C:/chromium/chrome_wpt-7.log",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["xtask: wpt: summary", "xtask: net client: wpt ok"],
+    },
+    Scenario {
+        // P1 step 6: the embeddable CPython 3.13.1 (PREBUILT `python`)
+        // evaluating one expression; expected as on Windows.
+        name: "python_hello",
+        cmdline: "qemu_exit run=python.exe args=-c%20print(6*7)",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["\n42\r", "python.exe finished with status 0x00000000"],
     },
     Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained

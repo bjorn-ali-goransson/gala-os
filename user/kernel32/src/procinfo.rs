@@ -937,3 +937,175 @@ pub extern "system" fn GetApplicationRestartSettings(
         0
     })
 }
+
+// ---- Process snapshots (processsnapshot.h: PssCaptureSnapshot and friends) ----
+//
+// A snapshot here holds the process's PSS_PROCESS_INFORMATION, captured
+// from the kernel's process queries: the one class CPython reads (its
+// os.getppid). Clones of the address space, handle and thread lists
+// (the other PSS_CAPTURE flags) are not taken: those flags are recorded
+// in the ledger and their query classes answer ERROR_NOT_FOUND.
+
+/// sizeof(PSS_PROCESS_INFORMATION) on x64: ExitStatus, PebBaseAddress,
+/// AffinityMask, BasePriority, ProcessId (28), ParentProcessId (32),
+/// Flags, the four times (40..72), PriorityClass (72), the VM counters
+/// (80..176), ExecuteFlags (176), ImageFileName[MAX_PATH] (180).
+#[cfg(target_arch = "x86_64")]
+const PSS_PROCESS_INFORMATION_SIZE: usize = 704;
+const PSS_QUERY_PROCESS_INFORMATION: u32 = 0;
+
+/// PssCaptureSnapshot(ProcessHandle, CaptureFlags, ThreadContextFlags,
+/// *SnapshotHandle): the process's information, now.
+#[unsafe(no_mangle)]
+pub extern "system" fn PssCaptureSnapshot(
+    process: Handle,
+    flags: u32,
+    _context_flags: u32,
+    snapshot: *mut Handle,
+) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if snapshot.is_null() {
+            return ERROR_INVALID_PARAMETER;
+        }
+        // PSS_CAPTURE_VA_CLONE and the other capture flags (handles,
+        // threads, the address space) are not taken.
+        if flags != 0 {
+            unsupported(b"kernel32.dll!PssCaptureSnapshot(capture flags)", flags.into());
+        }
+        let mut info = [0u8; PSS_PROCESS_INFORMATION_SIZE];
+        if let Err(e) = capture(process, &mut info) {
+            return e;
+        }
+        let block =
+            super::heap::HeapAlloc(super::heap::GetProcessHeap(), 0, info.len()).cast::<u8>();
+        if block.is_null() {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        // SAFETY: a fresh block of the size; the caller's output.
+        unsafe {
+            core::ptr::copy_nonoverlapping(info.as_ptr(), block, info.len());
+            *snapshot = block.cast();
+        }
+        0
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (process, flags, snapshot);
+        unsupported(b"kernel32.dll!PssCaptureSnapshot(32-bit)", 0);
+        ERROR_NOT_SUPPORTED
+    }
+}
+
+/// PSS_PROCESS_INFORMATION of `process` from ProcessBasicInformation,
+/// ProcessTimes, ProcessVmCounters, its priority class and (for this
+/// process) its image's path.
+#[cfg(target_arch = "x86_64")]
+fn capture(process: Handle, info: &mut [u8; PSS_PROCESS_INFORMATION_SIZE]) -> Result<(), u32> {
+    let query = |class: u32, buf: &mut [u8]| -> Result<(), u32> {
+        // SAFETY: our buffer of its size.
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process as isize,
+                class,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                core::ptr::null_mut(),
+            )
+        };
+        if status != STATUS_SUCCESS {
+            // SAFETY: plain call.
+            return Err(unsafe { RtlNtStatusToDosError(status) });
+        }
+        Ok(())
+    };
+    // PROCESS_BASIC_INFORMATION: ExitStatus, PebBaseAddress, AffinityMask,
+    // BasePriority, UniqueProcessId, InheritedFromUniqueProcessId.
+    let mut basic = [0u8; 48];
+    query(0, &mut basic)?;
+    let field =
+        |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap_or([0; 8]));
+    info[0..4].copy_from_slice(&basic[0..4]);
+    info[8..16].copy_from_slice(&basic[8..16]);
+    info[16..24].copy_from_slice(&basic[16..24]);
+    info[24..28].copy_from_slice(&basic[24..28]);
+    info[28..32].copy_from_slice(&(field(&basic, 32) as u32).to_le_bytes());
+    info[32..36].copy_from_slice(&(field(&basic, 40) as u32).to_le_bytes());
+    // KERNEL_USER_TIMES: CreateTime, ExitTime, KernelTime, UserTime.
+    let mut times = [0u8; 32];
+    if query(4, &mut times).is_ok() {
+        info[40..72].copy_from_slice(&times);
+    }
+    info[72..76].copy_from_slice(&super::runtime::GetPriorityClass(process).to_le_bytes());
+    // VM_COUNTERS_EX (96 bytes): PeakVirtualSize .. PrivateUsage, laid out
+    // as PSS_PROCESS_INFORMATION has them from PeakVirtualSize on.
+    let mut vm = [0u8; 96];
+    if query(3, &mut vm).is_ok() {
+        info[80..176].copy_from_slice(&vm);
+    }
+    if process == GetCurrentProcess()
+        || super::process::GetProcessId(process) == GetCurrentProcessId()
+    {
+        let name = &mut info[180..180 + 520];
+        let mut path = [0u16; 260];
+        let n = super::process::GetModuleFileNameW(core::ptr::null_mut(), path.as_mut_ptr(), 260)
+            as usize;
+        for (i, c) in path[..n.min(259)].iter().enumerate() {
+            name[2 * i..2 * i + 2].copy_from_slice(&c.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// PssQuerySnapshot(SnapshotHandle, InformationClass, Buffer,
+/// BufferLength): PSS_QUERY_PROCESS_INFORMATION (the length must be the
+/// structure's); other classes were not captured (ERROR_NOT_FOUND).
+#[unsafe(no_mangle)]
+pub extern "system" fn PssQuerySnapshot(
+    snapshot: Handle,
+    class: u32,
+    buf: *mut u8,
+    len: u32,
+) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if snapshot.is_null() || buf.is_null() {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if class != PSS_QUERY_PROCESS_INFORMATION {
+            unsupported(b"kernel32.dll!PssQuerySnapshot(class)", class.into());
+            return ERROR_NOT_FOUND;
+        }
+        if len as usize != PSS_PROCESS_INFORMATION_SIZE {
+            return ERROR_BAD_LENGTH;
+        }
+        // SAFETY: our snapshot block; the caller's buffer of `len` bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(snapshot.cast::<u8>(), buf, PSS_PROCESS_INFORMATION_SIZE)
+        };
+        0
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (
+            snapshot,
+            class,
+            buf,
+            len,
+            ERROR_BAD_LENGTH,
+            ERROR_NOT_FOUND,
+            PSS_QUERY_PROCESS_INFORMATION,
+        );
+        ERROR_NOT_SUPPORTED
+    }
+}
+
+/// PssFreeSnapshot(ProcessHandle, SnapshotHandle).
+#[unsafe(no_mangle)]
+pub extern "system" fn PssFreeSnapshot(_process: Handle, snapshot: Handle) -> u32 {
+    if snapshot.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    super::heap::HeapFree(super::heap::GetProcessHeap(), 0, snapshot.cast());
+    0
+}

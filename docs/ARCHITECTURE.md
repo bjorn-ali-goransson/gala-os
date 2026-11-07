@@ -1602,7 +1602,10 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
   - NtReadFile returns what is there (at least one byte, waiting
     otherwise); in message read mode (the server's ReadMode, or
     FilePipeInformation from SetNamedPipeHandleState; clients start in
-    byte mode) at most one message, STATUS_BUFFER_OVERFLOW
+    byte mode; NtQueryInformationFile answers FilePipeInformation, the
+    read mode and FILE_PIPE_QUEUE_OPERATION, and FilePipeLocalInformation:
+    type, full duplex, maximum and current instances of the name, the
+    quotas, bytes waiting and room, state, end) at most one message, STATUS_BUFFER_OVERFLOW
     (ERROR_MORE_DATA) with the part that fits and the rest left for the
     next read; STATUS_PIPE_BROKEN (ERROR_BROKEN_PIPE) once the other end
     is closed and the queue is empty.
@@ -2513,6 +2516,18 @@ ntdll imports.
 - **Version resource**: kernel32.dll carries a VS_VERSION_INFO with the
   pinned build, 10.0.26100.<UBR of the registry seed> (`build.rs` writes
   the .res); programs read the system's version from it.
+- **What CPython imports** (`path.rs`, `procinfo.rs`; `kernel32_py_test`):
+  PathCchSkipRoot and PathCchCombineEx (the `api-ms-win-core-path` set:
+  roots `X:\`, `\\server\share\`, `\\?\`; joined and canonicalized,
+  an absolute second path replaces the first, a rooted one keeps its
+  drive), NeedCurrentDirectoryForExePathW, CopyFile2 (CopyFileExW's
+  flags, an HRESULT), SetWaitableTimerEx (no wake context or coalescing),
+  GetNamedPipeHandleStateW (modes and instance count; no client user
+  name), and process snapshots: PssCaptureSnapshot keeps the process's
+  PSS_PROCESS_INFORMATION (basic information, times, priority class, VM
+  counters, image path) in a heap block, PssQuerySnapshot answers that
+  class only (64-bit; the other capture flags are recorded and not
+  taken).
 - **Process and system queries** (what Chromium's start-up asks):
   mitigation policies kept per process and read back (not enforced),
   Get/SetProcessInformation (memory priority, power throttling,

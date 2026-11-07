@@ -45,6 +45,7 @@ mod idn;
 mod locale;
 mod mapping;
 mod messages;
+mod path;
 mod pipe;
 mod pool;
 mod process;
@@ -3324,6 +3325,22 @@ pub extern "system" fn SetWaitableTimer(
         NtSetTimer(h, due, routine, arg, u8::from(resume != 0), period, core::ptr::null_mut())
     };
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
+}
+
+/// SetWaitableTimerEx: SetWaitableTimer; the wake context (a timer that
+/// wakes the system from sleep) and the tolerable delay (coalescing) do
+/// not apply here.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetWaitableTimerEx(
+    h: Handle,
+    due: *const i64,
+    period: i32,
+    routine: usize,
+    arg: usize,
+    _wake_context: *mut c_void,
+    _tolerable_delay: u32,
+) -> Bool {
+    SetWaitableTimer(h, due, period, routine, arg, FALSE)
 }
 
 /// CancelWaitableTimer: NtCancelTimer (the timer stays as it is, it

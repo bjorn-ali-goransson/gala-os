@@ -1050,6 +1050,51 @@ impl PipeEnd {
         Ok(())
     }
 
+    /// FilePipeInformation: (ReadMode, CompletionMode): message reads,
+    /// and always FILE_PIPE_QUEUE_OPERATION (no PIPE_NOWAIT pipes).
+    pub fn pipe_information(&self) -> [u32; 2] {
+        [u32::from(self.message_reads.load(Ordering::Acquire)), 0]
+    }
+
+    /// FilePipeLocalInformation: NamedPipeType, NamedPipeConfiguration
+    /// (full duplex), MaximumInstances, CurrentInstances (of the name),
+    /// InboundQuota, ReadDataAvailable (for this end), OutboundQuota,
+    /// WriteQuotaAvailable (room in the other end's inbox),
+    /// NamedPipeState, NamedPipeEnd (0 client, 1 server).
+    pub fn local_information(&self) -> [u32; 10] {
+        const FILE_PIPE_FULL_DUPLEX: u32 = 2;
+        let (max, current) = {
+            let instances = INSTANCES.lock();
+            let name =
+                instances.iter().find(|i| KArc::ptr_eq(&i.pipe, &self.pipe)).map(|i| &i.name);
+            match name {
+                Some(name) => {
+                    let mine = instances.iter().filter(|i| &i.name == name);
+                    let max = instances.iter().find(|i| &i.name == name).map_or(1, |i| i.max);
+                    (max, mine.count() as u32)
+                }
+                // The server end closed: the instance is no longer listed.
+                None => (1, 0),
+            }
+        };
+        let state = self.state();
+        let s = self.pipe.state.lock();
+        let peer = 1 - self.end;
+        let room = s.quota[peer].saturating_sub(s.inbox[peer].len());
+        [
+            u32::from(s.message_type),
+            FILE_PIPE_FULL_DUPLEX,
+            max,
+            current,
+            s.quota[0] as u32,
+            s.inbox[self.end].len() as u32,
+            s.quota[1] as u32,
+            room as u32,
+            state,
+            u32::from(self.end == 0),
+        ]
+    }
+
     /// The NamedPipeState of this end (FilePipeLocalInformation).
     pub fn state(&self) -> u32 {
         let s = self.pipe.state.lock();

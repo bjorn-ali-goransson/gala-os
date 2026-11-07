@@ -289,6 +289,71 @@ pub extern "system" fn SetNamedPipeHandleState(
     }
 }
 
+/// GetNamedPipeHandleStateW(hNamedPipe, lpState, lpCurInstances,
+/// lpMaxCollectionCount, lpCollectDataTimeout, lpUserName,
+/// nMaxUserNameSize): the handle's modes (PIPE_NOWAIT,
+/// PIPE_READMODE_MESSAGE; FilePipeInformation) and the pipe's instance
+/// count (FilePipeLocalInformation). The collection settings belong to
+/// remote byte pipes (none here: 0); the client's user name is not kept
+/// (an empty string, recorded).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetNamedPipeHandleStateW(
+    h: Handle,
+    state: *mut u32,
+    instances: *mut u32,
+    max_collection: *mut u32,
+    timeout: *mut u32,
+    user: *mut u16,
+    user_size: u32,
+) -> Bool {
+    if !state.is_null() {
+        // FILE_PIPE_INFORMATION { ReadMode, CompletionMode }.
+        let mut info = [0u32; 2];
+        if let Err(e) = query_file(h, 23, &mut info) {
+            return fail_with(e, FALSE);
+        }
+        // SAFETY: the caller's output.
+        unsafe { *state = (info[0] << 1) | info[1] };
+    }
+    if !instances.is_null() {
+        // FILE_PIPE_LOCAL_INFORMATION: ten ULONGs, CurrentInstances fourth.
+        let mut info = [0u32; 10];
+        if let Err(e) = query_file(h, 24, &mut info) {
+            return fail_with(e, FALSE);
+        }
+        // SAFETY: the caller's output.
+        unsafe { *instances = info[3] };
+    }
+    // SAFETY: the caller's outputs.
+    unsafe {
+        if !max_collection.is_null() {
+            *max_collection = 0;
+        }
+        if !timeout.is_null() {
+            *timeout = 0;
+        }
+        if !user.is_null() && user_size > 0 {
+            unsupported(b"kernel32.dll!GetNamedPipeHandleStateW(user name)", 0);
+            *user = 0;
+        }
+    }
+    TRUE
+}
+
+/// NtQueryInformationFile of class `class` into `out` (ULONGs).
+fn query_file<const N: usize>(h: Handle, class: u32, out: &mut [u32; N]) -> Result<(), u32> {
+    let mut iosb = [0usize; 2];
+    // SAFETY: our buffer of its size.
+    let status = unsafe {
+        NtQueryInformationFile(h, &mut iosb, out.as_mut_ptr().cast(), (4 * N) as u32, class)
+    };
+    if status != STATUS_SUCCESS {
+        // SAFETY: plain call.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    Ok(())
+}
+
 /// PeekNamedPipe(hNamedPipe, lpBuffer, nBufferSize, *lpBytesRead,
 /// *lpTotalBytesAvail, *lpBytesLeftThisMessage): FSCTL_PIPE_PEEK.
 #[unsafe(no_mangle)]

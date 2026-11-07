@@ -1065,6 +1065,10 @@ name = "kernel32_pool_test"
 version = "0.1.0"
 
 [[package]]
+name = "kernel32_py_test"
+version = "0.1.0"
+
+[[package]]
 name = "kernel32_sync_test"
 version = "0.1.0"
 

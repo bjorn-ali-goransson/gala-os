@@ -6415,6 +6415,32 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::SUCCESS;
     }
     if let ObjectBody::Pipe(end) = &entry.object.body
+        && (class == FILE_PIPE_INFORMATION || class == FILE_PIPE_LOCAL_INFORMATION)
+    {
+        // FILE_PIPE_INFORMATION (2 ULONGs) or FILE_PIPE_LOCAL_INFORMATION
+        // (10): GetNamedPipeHandleState, GetNamedPipeInfo.
+        let mut words = [0u32; 10];
+        let n = if class == FILE_PIPE_INFORMATION {
+            words[..2].copy_from_slice(&end.pipe_information());
+            2
+        } else {
+            words = end.local_information();
+            10
+        };
+        let mut out = [0u8; 40];
+        for (i, w) in words[..n].iter().enumerate() {
+            out[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        if length < 4 * n {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        if call.process.write(buffer, &out[..4 * n]).is_err() {
+            return NtStatus::ACCESS_VIOLATION;
+        }
+        tri!(call.write_iosb(iosb, NtStatus::SUCCESS, (4 * n) as u64));
+        return NtStatus::SUCCESS;
+    }
+    if let ObjectBody::Pipe(end) = &entry.object.body
         && class == FILE_NAME_INFORMATION
     {
         // A named pipe's name on the pipe file system, `\<name>` (what
@@ -6525,6 +6551,8 @@ fn set_socket_information(
 /// FilePipeInformation (23): FILE_PIPE_INFORMATION { ReadMode,
 /// CompletionMode } (SetNamedPipeHandleState).
 const FILE_PIPE_INFORMATION: u64 = 23;
+/// FilePipeLocalInformation (24): FILE_PIPE_LOCAL_INFORMATION, ten ULONGs.
+const FILE_PIPE_LOCAL_INFORMATION: u64 = 24;
 
 /// NtSetInformationFile on a pipe end: the completion port, the
 /// notification modes and the read mode (the completion mode is accepted:
