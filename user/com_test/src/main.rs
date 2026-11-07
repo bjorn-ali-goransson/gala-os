@@ -12,6 +12,9 @@
 //!   CoGetObjectContext and CoGetApartmentType (MTA; on a thread that
 //!   never initialized COM while the MTA exists: MTA, qualifier
 //!   APTTYPEQUALIFIER_IMPLICIT_MTA; CO_E_NOTINITIALIZED with no MTA),
+//!   the thread's OLE data (TEB.ReservedForOle) carrying the apartment
+//!   flags where programs read them (0x140 MTA, 0x80 STA, cleared when
+//!   the thread leaves),
 //!   CoTaskMem*,
 //!   CoCreateGuid (random version-4 GUIDs), CoGetClassObject
 //!   (REGDB_E_CLASSNOTREG), CLSIDFromProgID (CO_E_CLASSSTRING),
@@ -64,6 +67,36 @@ extern "system" fn implicit_thread(_: *mut c_void) -> u32 {
     unsafe {
         let hr = CoGetApartmentType(&mut kind, &mut qualifier);
         IMPLICIT = [hr, kind, qualifier];
+    }
+    0
+}
+
+/// The apartment flags in the thread's OLE data (TEB.ReservedForOle, x64
+/// 0x1758: two pointers, the apartment id, then the flags, as Chromium's
+/// base::win::GetComApartmentTypeForThread reads them): 0x80 STA, 0x140
+/// MTA; 0 with no OLE data.
+fn ole_flags() -> u32 {
+    let teb: usize;
+    // SAFETY: gs:[0x30] is the TEB's self pointer; the OLE data, when
+    // there is some, is ole32's block of at least 24 bytes.
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly));
+        let ole = *((teb + 0x1758) as *const usize);
+        if ole == 0 { 0 } else { *((ole + 20) as *const u32) }
+    }
+}
+
+/// An STA thread's flags: [after CoInitializeEx(STA), after
+/// CoUninitialize].
+static mut STA_FLAGS: [u32; 2] = [0; 2];
+
+extern "system" fn sta_thread(_: *mut c_void) -> u32 {
+    // SAFETY: plain calls; the static is read after the thread ends.
+    unsafe {
+        CoInitializeEx(core::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+        let inside = ole_flags();
+        CoUninitialize();
+        STA_FLAGS = [inside, ole_flags()];
     }
     0
 }
@@ -509,6 +542,24 @@ fn apartments(c: &mut Checks) -> Result<(), u32> {
         c.eq(hr(implicit_hr), S_OK)?;
         c.eq(implicit_kind as u64, 1)?;
         c.eq(implicit_qualifier as u64, 1)?;
+        // The thread's OLE data says MTA where programs read it (Chromium:
+        // OleTlsData's apartment_flags), and an STA thread's says STA
+        // until it leaves.
+        c.eq(u64::from(ole_flags() & 0x1c0), 0x140)?;
+        let t = CreateThread(
+            core::ptr::null_mut(),
+            0,
+            sta_thread,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        c.ok(!t.is_null(), 0)?;
+        WaitForSingleObject(t, 0xffff_ffff);
+        CloseHandle(t);
+        let [sta_inside, sta_after] = STA_FLAGS;
+        c.eq(u64::from(sta_inside & 0x1c0), 0x80)?;
+        c.eq(u64::from(sta_after & 0x1c0), 0)?;
         let mut context = core::ptr::null_mut();
         c.eq(hr(CoGetObjectContext(&IID_IUNKNOWN, &mut context)), S_OK)?;
         let mut info = core::ptr::null_mut();
@@ -527,6 +578,7 @@ fn apartments(c: &mut Checks) -> Result<(), u32> {
         c.eq(hr(CoGetContextToken(&mut token)), 0x8004_01f0)?;
         // The MTA's last thread has left: no implicit MTA any more.
         c.eq(hr(on_uninitialized_thread()[0]), 0x8004_01f0)?; // CO_E_NOTINITIALIZED
+        c.eq(u64::from(ole_flags() & 0x1c0), 0)?;
         c.eq(hr(CoRevokeInitializeSpy(cookie)), S_OK)?;
         c.eq(hr(CoRevokeInitializeSpy(cookie)), 0x8007_0057)?; // E_INVALIDARG
         // Revoked: no longer told.

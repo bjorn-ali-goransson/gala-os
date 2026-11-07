@@ -445,7 +445,17 @@ unsafe impl<const N: usize> Sync for VTable<N> {}
 
 const MAX_SPIES: usize = 8;
 
+/// The thread's OLE data behind TEB.ReservedForOle. Its head is laid out
+/// as programs read it (Chromium's base::win::GetComApartmentTypeForThread;
+/// Wine's struct oletls agrees): two pointers, the apartment id, then the
+/// apartment flags, 0x80 in an STA and 0x140 in the MTA (APARTMENT_STA,
+/// APARTMENT_MTA below), 0 outside.
+#[repr(C)]
 pub(crate) struct ThreadState {
+    thread_base: usize,
+    allocator: usize,
+    apartment_id: u32,
+    apartment_flags: u32,
     /// 0: none, 1: MTA, 2: STA.
     pub(crate) kind: u32,
     refs: u32,
@@ -460,6 +470,22 @@ pub(crate) struct ThreadState {
     sta_context: Context,
     /// CoGetCurrentProcess's number for this thread (0 until asked).
     number: u32,
+}
+
+const APARTMENT_STA: u32 = 0x80;
+const APARTMENT_MTA: u32 = 0x140;
+
+impl ThreadState {
+    /// Enters (`kind` 1 MTA, 2 STA) or leaves (0) an apartment: the kind
+    /// and the flags programs read.
+    fn set_kind(&mut self, kind: u32) {
+        self.kind = kind;
+        self.apartment_flags = match kind {
+            1 => APARTMENT_MTA,
+            2 => APARTMENT_STA,
+            _ => 0,
+        };
+    }
 }
 
 /// TEB.ReservedForOle (x64 0x1758, x86 0xf80).
@@ -494,6 +520,10 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
                 return None;
             }
             p.write(ThreadState {
+                thread_base: 0,
+                allocator: 0,
+                apartment_id: 0,
+                apartment_flags: 0,
                 kind: 0,
                 refs: 0,
                 spies: [0; MAX_SPIES],
@@ -555,7 +585,7 @@ pub extern "system" fn CoInitializeEx(_reserved: *mut c_void, flags: u32) -> HRe
         com_call!(spy, 3, fn(u32, u32) -> HResult, flags, state.refs);
     }
     let mut hr = if state.refs == 0 {
-        state.kind = kind;
+        state.set_kind(kind);
         state.refs = 1;
         if kind == 1 {
             MTA_THREADS.fetch_add(1, Ordering::Relaxed);
@@ -604,7 +634,7 @@ pub extern "system" fn CoUninitialize() {
             if state.kind == 1 {
                 MTA_THREADS.fetch_sub(1, Ordering::Relaxed);
             }
-            state.kind = 0;
+            state.set_kind(0);
         }
     }
     for &spy in spies.iter().filter(|&&s| s != 0) {
