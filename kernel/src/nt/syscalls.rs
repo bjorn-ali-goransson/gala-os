@@ -4031,11 +4031,11 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
         }
         PROCESS_VM_COUNTERS => {
             // VM_COUNTERS (88 bytes) or VM_COUNTERS_EX (96, with
-            // PrivateUsage): the pool quota usage and the commit charge
-            // (PagefileUsage, as Windows reports it); virtual size, working
-            // set and page faults are not kept (0; kernel32's
-            // K32GetProcessMemoryInfo reads the working set from the
-            // address space).
+            // PrivateUsage): the reserved bytes (VirtualSize), the
+            // committed ones (WorkingSetSize: committed pages stay
+            // resident) with their peaks, the pool quota usage and the
+            // commit charge (PagefileUsage, as Windows reports it); page
+            // faults are not counted (0).
             use super::quota::Pool;
             let size = if length == 96 { 96 } else { 88 };
             let mut v = [0u8; 96];
@@ -4043,7 +4043,12 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             let (nonpaged, nonpaged_peak, _) = p.quota.pool(Pool::NonPaged);
             let commit = p.commit.load(core::sync::atomic::Ordering::Relaxed) * 4096;
             let commit_peak = p.commit_peak.load(core::sync::atomic::Ordering::Relaxed) * 4096;
+            let ((reserved, resident), (reserved_peak, resident_peak)) = p.vad.lock().sizes();
             for (at, value) in [
+                (0, reserved_peak),
+                (8, reserved),
+                (24, resident_peak),
+                (32, resident),
                 (40, paged_peak),
                 (48, paged),
                 (56, nonpaged_peak),

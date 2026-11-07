@@ -1121,10 +1121,17 @@ limits).
 - **Exposed**: NtQueryInformationProcess ProcessQuotaLimits (class 1,
   QUOTA_LIMITS: the pool limits, the working set's sizes as set, the
   commit limit as PagefileLimit; no time limit, 0), ProcessVmCounters (class 3,
-  VM_COUNTERS or VM_COUNTERS_EX: QuotaPeakPagedPoolUsage ...
-  QuotaNonPagedPoolUsage; virtual size, working set and page faults are
-  not kept, 0), ProcessHandleCount (GetProcessHandleCount);
-  K32GetProcessMemoryInfo takes its quota fields from ProcessVmCounters.
+  VM_COUNTERS or VM_COUNTERS_EX: VirtualSize, the reserved bytes, and
+  WorkingSetSize, the committed ones (committed pages stay resident),
+  with their peaks (the most a query has seen, `Vad::sizes`);
+  QuotaPeakPagedPoolUsage ... QuotaNonPagedPoolUsage; page faults are
+  not counted, 0), ProcessHandleCount (GetProcessHandleCount).
+  K32GetProcessMemoryInfo and GlobalMemoryStatusEx (ullAvailVirtual: the
+  user space less VirtualSize) take their figures from
+  ProcessVmCounters, one query: they walked the address space with a
+  NtQueryVirtualMemory per region, which Chromium's frequent memory
+  checks turned into thousands of system calls on its main threads.
+  Module enumeration (psapi, Toolhelp) still walks.
 - **Object size**: every `KObject` is as large as the largest
   `ObjectBody` variant, so a large body is boxed (`Thread`, about
   10 KiB of saved register states; unboxed, every event and file cost

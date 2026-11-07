@@ -228,6 +228,9 @@ pub struct Vad {
     /// Placements at a given address are not limited by it (the 64-bit
     /// PEB and TEBs of a WOW64 process stay where they always are).
     limit: u64,
+    /// The most bytes reserved and committed (all kinds) that `sizes`
+    /// has seen: VM_COUNTERS' PeakVirtualSize and PeakWorkingSetSize.
+    peaks: (u64, u64),
 }
 
 fn page_round(start: u64, size: u64) -> Result<(u64, u64), NtStatus> {
@@ -265,7 +268,12 @@ impl Vad {
                 runs,
             })?;
         }
-        Ok(Vad { allocs, private_commit: self.private_commit, limit: self.limit })
+        Ok(Vad {
+            allocs,
+            private_commit: self.private_commit,
+            limit: self.limit,
+            peaks: self.peaks,
+        })
     }
 
     /// Limits the addresses chosen for allocations without a given address
@@ -385,6 +393,24 @@ impl Vad {
     }
 
     /// Committed pages of MEM_PRIVATE allocations.
+    /// ((reserved, committed), (peak reserved, peak committed)) in bytes,
+    /// all kinds (images and views too): VM_COUNTERS' VirtualSize and
+    /// WorkingSetSize (gala keeps committed pages resident) with their
+    /// peaks. Kept in the kernel so that kernel32 need not walk the
+    /// address space for them (GlobalMemoryStatusEx is called often).
+    pub fn sizes(&mut self) -> ((u64, u64), (u64, u64)) {
+        let reserved: u64 = self.allocs.iter().map(|a| a.pages * PAGE).sum();
+        let committed: u64 = self
+            .allocs
+            .iter()
+            .flat_map(|a| a.runs.iter())
+            .filter(|r| r.state.committed)
+            .map(|r| r.pages * PAGE)
+            .sum();
+        self.peaks = (self.peaks.0.max(reserved), self.peaks.1.max(committed));
+        ((reserved, committed), self.peaks)
+    }
+
     /// (reservations, regions): how many allocations, and how many runs
     /// of pages with one state in them (what a walk with
     /// NtQueryVirtualMemory visits, besides the free gaps).
@@ -715,7 +741,7 @@ impl Vad {
                 .try_push(Allocation { base, pages, kind, alloc_protect, runs })
                 .map_err(|_| NtStatus::NO_MEMORY)?;
         }
-        Ok(Vad { allocs, private_commit, limit: 0 })
+        Ok(Vad { allocs, private_commit, limit: 0, peaks: (0, 0) })
     }
 }
 

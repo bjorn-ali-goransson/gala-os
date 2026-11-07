@@ -6,7 +6,10 @@
 //! memory limit (JOB_OBJECT_LIMIT_PROCESS_MEMORY) and its job-wide limit
 //! (JOB_OBJECT_LIMIT_JOB_MEMORY) make a commit over them fail the same
 //! way, decommitting gives the charge back, and the job reports the peak
-//! commit of its processes and of the job. Prints `commit_test: ok` or
+//! commit of its processes and of the job. Reserving 64 MiB raises the
+//! process's VirtualSize (ProcessVmCounters) and lowers
+//! GlobalMemoryStatusEx's ullAvailVirtual ("unreserved and uncommitted")
+//! by at least that; releasing it gives both back. Prints `commit_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -147,6 +150,40 @@ impl Checks {
     }
 }
 
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueryInformationProcess(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> i32;
+}
+
+/// VM_COUNTERS.VirtualSize (ProcessVmCounters, x64: at offset 8).
+fn virtual_size() -> u64 {
+    let mut vm = [0u8; 88];
+    // SAFETY: a VM_COUNTERS buffer.
+    let st = unsafe {
+        NtQueryInformationProcess(
+            GetCurrentProcess(),
+            3,
+            vm.as_mut_ptr(),
+            88,
+            core::ptr::null_mut(),
+        )
+    };
+    if st != 0 { 0 } else { u64_at(&vm, 8) }
+}
+
+fn avail_virtual() -> u64 {
+    let mut status = MemoryStatusEx { length: 64, ..Default::default() };
+    // SAFETY: a MEMORYSTATUSEX.
+    unsafe { GlobalMemoryStatusEx(&mut status) };
+    status.avail_virtual
+}
+
 /// PROCESS_MEMORY_COUNTERS_EX's PrivateUsage.
 fn private_usage() -> u64 {
     let mut counters = [0u64; 10];
@@ -189,6 +226,20 @@ fn run() -> Result<(), u32> {
         let p = VirtualAlloc(core::ptr::null_mut(), huge, MEM_RESERVE, PAGE_READWRITE);
         c.ok(!p.is_null(), GetLastError().into())?;
         c.ok(VirtualFree(p, 0, MEM_RELEASE) != 0, GetLastError().into())?;
+
+        // A reservation counts in the virtual size and against the
+        // available user address space.
+        let (size0, avail0) = (virtual_size(), avail_virtual());
+        c.ok(size0 > 0, size0)?;
+        let r = VirtualAlloc(core::ptr::null_mut(), 64 * MIB, MEM_RESERVE, PAGE_READWRITE);
+        c.ok(!r.is_null(), GetLastError().into())?;
+        let (size1, avail1) = (virtual_size(), avail_virtual());
+        c.ok(size1 >= size0 + 64 * MIB as u64, size1)?;
+        c.ok(avail1 + 64 * MIB as u64 <= avail0, avail1)?;
+        c.ok(VirtualFree(r, 0, MEM_RELEASE) != 0, GetLastError().into())?;
+        let (size2, avail2) = (virtual_size(), avail_virtual());
+        c.ok(size2 < size1 && size2 + 64 * MIB as u64 <= size1, size2)?;
+        c.ok(avail2 >= avail1 + 64 * MIB as u64, avail2)?;
 
         // Committing is charged once; reserving is free.
         let before = private_usage();

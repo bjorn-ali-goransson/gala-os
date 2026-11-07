@@ -35,16 +35,14 @@ struct Region {
     base: usize,
     allocation_base: usize,
     size: usize,
-    state: u32,
     kind: u32,
 }
 
-const MEM_COMMIT: u32 = 0x1000;
-const MEM_FREE: u32 = 0x1_0000;
-const MEM_PRIVATE: u32 = 0x2_0000;
 const MEM_IMAGE: u32 = 0x100_0000;
 
-/// The regions of this process's address space, in address order.
+/// The regions of this process's address space, in address order (a
+/// system call per region: module enumeration only; sizes come from the
+/// kernel's counters, `vm_counters`).
 fn regions(mut f: impl FnMut(&Region) -> bool) {
     let mut address = 0x1_0000usize;
     let end = user_space();
@@ -59,7 +57,6 @@ fn regions(mut f: impl FnMut(&Region) -> bool) {
             base: mbi.base,
             allocation_base: mbi.allocation_base,
             size: mbi.region_size,
-            state: mbi.state,
             kind: mbi.kind,
         };
         if r.size == 0 || !f(&r) {
@@ -69,19 +66,23 @@ fn regions(mut f: impl FnMut(&Region) -> bool) {
     }
 }
 
-/// Committed bytes: (all, private).
-fn committed() -> (u64, u64) {
-    let (mut all, mut private) = (0u64, 0u64);
-    regions(|r| {
-        if r.state == MEM_COMMIT {
-            all += r.size as u64;
-            if r.kind == MEM_PRIVATE {
-                private += r.size as u64;
-            }
-        }
-        true
-    });
-    (all, private)
+/// VM_COUNTERS (ProcessVmCounters), as SIZE_Ts: PeakVirtualSize (0),
+/// VirtualSize (1), PageFaultCount (2: a ULONG, padded on 64-bit),
+/// PeakWorkingSetSize (3), WorkingSetSize (4), the four pool quota
+/// figures (5-8), PagefileUsage (9), PeakPagefileUsage (10).
+fn vm_counters(process: Handle) -> Result<[usize; 11], u32> {
+    let mut vm = [0usize; 11];
+    // SAFETY: a VM_COUNTERS_EX buffer.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            3,
+            vm.as_mut_ptr().cast(),
+            size_of_val(&vm) as u32,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS { Err(status) } else { Ok(vm) }
 }
 
 /// MEMORYSTATUSEX (dwLength must be 64).
@@ -125,13 +126,10 @@ pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool
     }
     let (total, avail, committed, limit) = memory_pages();
     let (total, avail) = (total * 4096, (avail * 4096).min(total * 4096));
-    let mut reserved = 0u64;
-    regions(|r| {
-        if r.state != MEM_FREE {
-            reserved += r.size as u64;
-        }
-        true
-    });
+    // VirtualSize: what the process has reserved (one query; walking the
+    // address space cost a system call per region, and programs call this
+    // often: Chromium's memory checks on every main thread).
+    let reserved = vm_counters(GetCurrentProcess()).map_or(0, |vm| vm[1] as u64);
     s.load = (avail * 100).checked_div(total).map_or(0, |free| (100 - free) as u32);
     s.total_phys = total;
     s.avail_phys = avail;
@@ -433,26 +431,14 @@ pub extern "system" fn K32GetProcessMemoryInfo(
     if (size as usize) < 8 + 8 * P {
         return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
     }
-    let (all, private) = committed();
-    // VM_COUNTERS: SIZE_Ts but PageFaultCount (a ULONG, padded on x64):
-    // QuotaPeakPagedPoolUsage (5) ... QuotaNonPagedPoolUsage (8).
-    let mut vm = [0usize; 11];
-    // SAFETY: a VM_COUNTERS buffer.
-    let status = unsafe {
-        NtQueryInformationProcess(
-            process as isize,
-            3,
-            vm.as_mut_ptr().cast(),
-            size_of_val(&vm) as u32,
-            core::ptr::null_mut(),
-        )
+    // The working set and the commit charge as the kernel keeps them (one
+    // query, not a walk of the address space).
+    let vm = match vm_counters(process) {
+        Ok(vm) => vm,
+        Err(status) => return fail(status, FALSE),
     };
-    if status != STATUS_SUCCESS {
-        return fail(status, FALSE);
-    }
     let n = if size as usize >= 8 + 9 * P { 9 } else { 8 };
-    let (all, private) = (all as usize, private as usize);
-    let values = [all, all, vm[5], vm[6], vm[7], vm[8], private, private, private];
+    let values = [vm[3], vm[4], vm[5], vm[6], vm[7], vm[8], vm[9], vm[10], vm[9]];
     // SAFETY: the caller's structure of `size` >= 8 + n * P bytes.
     unsafe {
         counters.cast::<u32>().write_unaligned((8 + n * P) as u32);
