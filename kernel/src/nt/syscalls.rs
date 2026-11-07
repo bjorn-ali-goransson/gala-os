@@ -3624,6 +3624,32 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
             let done = u32::from(t.has_exited());
             return call.return_info(&done.to_le_bytes(), buffer, length, ret_ptr);
         }
+        THREAD_NAME_INFORMATION => {
+            // THREAD_NAME_INFORMATION { UNICODE_STRING ThreadName }, the
+            // characters right after it (Buffer points there).
+            let name = t.name.lock();
+            let bytes = name.len() * 2;
+            let need = 16 + bytes as u64;
+            if ret_ptr != 0 {
+                tri!(call.write_u32(ret_ptr, need as u32));
+            }
+            if length < need {
+                return NtStatus::BUFFER_TOO_SMALL;
+            }
+            let mut head = [0u8; 16];
+            head[0..2].copy_from_slice(&(bytes as u16).to_le_bytes());
+            head[2..4].copy_from_slice(&(bytes as u16).to_le_bytes());
+            head[8..16].copy_from_slice(&(buffer + 16).to_le_bytes());
+            if call.process.write(buffer, &head).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            for (i, ch) in name.iter().enumerate() {
+                if call.process.write(buffer + 16 + 2 * i as u64, &ch.to_le_bytes()).is_err() {
+                    return NtStatus::ACCESS_VIOLATION;
+                }
+            }
+            return NtStatus::SUCCESS;
+        }
         _ => return NtStatus::INVALID_INFO_CLASS,
     }
     // THREAD_BASIC_INFORMATION { ExitStatus, TebBaseAddress, ClientId,
@@ -3649,6 +3675,10 @@ const THREAD_WIN32_START_ADDRESS: u64 = 9;
 const THREAD_AM_I_LAST_THREAD: u64 = 12;
 const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
 const THREAD_IS_TERMINATED: u64 = 20;
+const THREAD_NAME_INFORMATION: u64 = 38;
+const THREAD_SET_LIMITED_INFORMATION: u32 = 0x0400;
+/// The longest thread name kept, in characters.
+const MAX_THREAD_NAME: usize = 256;
 const THREAD_SET_INFORMATION: u32 = 0x0020;
 /// Highest priority (real-time range ends at 31).
 const MAXIMUM_PRIORITY: i32 = 31;
@@ -3660,6 +3690,29 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
         (arg!(call, 1) as u32 as u64, arg!(call, 2), arg!(call, 3) as u32);
     if class == THREAD_IMPERSONATION_TOKEN {
         return token_calls::set_thread_token(call, &entry, buffer, length);
+    }
+    if class == THREAD_NAME_INFORMATION {
+        // THREAD_NAME_INFORMATION { UNICODE_STRING ThreadName }
+        // (SetThreadDescription); kept up to MAX_THREAD_NAME characters.
+        let object = tri!(entry.require(THREAD_SET_LIMITED_INFORMATION));
+        let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+        if length != 16 {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        let mut name = tri!(call.unicode_string(buffer));
+        name.truncate(MAX_THREAD_NAME);
+        crate::events::emit(
+            crate::events::Category::Thread,
+            "thread name",
+            format_args!(
+                r#""pid":{},"tid":{},"name":{}"#,
+                t.process.id,
+                t.id,
+                crate::events::Utf16(&name)
+            ),
+        );
+        *t.name.lock() = name;
+        return NtStatus::SUCCESS;
     }
     let object = tri!(entry.require(THREAD_SET_INFORMATION));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };

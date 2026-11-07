@@ -42,6 +42,9 @@ pub struct NtThread {
     start_mxcsr: Option<u32>,
     /// ThreadQuerySetWin32StartAddress.
     pub win32_start: u64,
+    /// ThreadNameInformation (SetThreadDescription), UTF-16; empty if
+    /// none was set. Not carried across a kernel handover.
+    pub name: IrqMutex<Vec<u16>>,
     /// NT times (ThreadTimes); exit time 0 while running.
     pub create_time: u64,
     pub exit_time: IrqMutex<u64>,
@@ -439,6 +442,7 @@ fn create_inner(
         start: regs,
         start_mxcsr: mxcsr,
         win32_start,
+        name: IrqMutex::named("thread.name", Vec::new()),
         create_time: platform::system_time(),
         exit_time: IrqMutex::named("thread.exit_time", 0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
@@ -1037,6 +1041,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         start: UserRegs::default(),
         start_mxcsr: None,
         win32_start: a.win32_start,
+        name: IrqMutex::named("thread.name", Vec::new()),
         create_time: a.create_time,
         exit_time: IrqMutex::named("thread.exit_time", a.exited.map_or(0, |e| e.1)),
         priority: IrqMutex::new(a.priority),
@@ -1147,6 +1152,18 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
     Err(NtStatus::UNSUCCESSFUL)
 }
 
+/// ` name "..."` for a named thread (SetThreadDescription), else nothing.
+struct NameField<'a>(&'a [u16]);
+
+impl core::fmt::Display for NameField<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        write!(f, " name {}", crate::events::Utf16(self.0))
+    }
+}
+
 /// Logs every NT thread: its process, suspend count, and the system call
 /// it is in (its user rip, and for a wait the object, its signal state, a
 /// timer's due tick and the timeout) or that it runs user code. For hangs
@@ -1164,13 +1181,15 @@ pub fn dump() {
         // the inverse of `resume`'s order).
         let sched = *t.sched_id.lock();
         let suspended = *t.suspend_count.lock();
+        let name = t.name.lock();
         info!(
-            "thread: pid {} tid {} (sched {:?}) start {:#x} suspend {} exited {} in a system call {} \
+            "thread: pid {} tid {} (sched {:?}) start {:#x}{} suspend {} exited {} in a system call {} \
              session {} personality {} ({})",
             t.process.id,
             t.id,
             sched,
             t.win32_start,
+            NameField(&name),
             suspended,
             t.has_exited(),
             in_syscall.is_some(),

@@ -355,6 +355,26 @@ fn query_thread(a: &Args) -> Res<NtStatus> {
             }
             reply(buffer, length, ret, &(b[0] as u32).to_le_bytes())
         }
+        // ThreadNameInformation: a UNICODE_STRING (32-bit: 8 bytes) and
+        // the characters after it.
+        38 => {
+            let mut b = [0u64; 2 + 64];
+            let status = query(&mut b);
+            if status != STATUS_SUCCESS {
+                return Ok(status);
+            }
+            let bytes = (b[0] & 0xffff) as usize;
+            let bytes = bytes.min(512);
+            let mut out = [0u8; 8 + 512];
+            out[0..2].copy_from_slice(&(bytes as u16).to_le_bytes());
+            out[2..4].copy_from_slice(&(bytes as u16).to_le_bytes());
+            set32(&mut out, 4, (buffer + 8) as u32);
+            // The characters after the 64-bit UNICODE_STRING (16 bytes).
+            for (i, byte) in out[8..8 + bytes].iter_mut().enumerate() {
+                *byte = (b[2 + i / 8] >> (8 * (i % 8))) as u8;
+            }
+            reply(buffer, length, ret, &out[..8 + bytes])
+        }
         // KERNEL_USER_TIMES, ULONGs.
         1 | 12 | 20 => pass(NT_QUERY_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U, K::U]),
         _ => no_class(b"wow64.dll!NtQueryInformationThread(class)", class),

@@ -70,6 +70,8 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
     let mut thread_pid: HashMap<u64, u64> = HashMap::new();
     // Each thread's Win32 start routine (the `thread create` event).
     let mut thread_start: HashMap<u64, u64> = HashMap::new();
+    // Each thread's name (`thread name`: SetThreadDescription).
+    let mut thread_name: HashMap<u64, String> = HashMap::new();
     let mut process: HashMap<u64, String> = HashMap::new();
     let mut images: HashMap<u64, Vec<Image>> = HashMap::new();
     // (t, tid, user, rip)
@@ -88,6 +90,11 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
                     if let Some(start) = ev.u64("start").filter(|&a| a != 0) {
                         thread_start.insert(t, start);
                     }
+                }
+            }
+            Some("thread name") => {
+                if let (Some(t), Some(n)) = (ev.u64("tid"), ev.str("name")) {
+                    thread_name.insert(t, n.to_string());
                 }
             }
             Some("process start") => {
@@ -213,8 +220,9 @@ pub fn report(events: &str, o: &Options, symbolize: Symbolizer) -> String {
         let u = user_by_thread.get(&tid).copied().unwrap_or(0);
         let _ = writeln!(
             out,
-            "  {n:7} {:5.1}%  tid {tid} (pid {pid} {}), {:.0}% in user mode{}",
+            "  {n:7} {:5.1}%  tid {tid}{} (pid {pid} {}), {:.0}% in user mode{}",
             pct(n, total),
+            thread_name.get(&tid).map_or(String::new(), |n| format!(" \"{n}\"")),
             name_of(pid),
             pct(u, n),
             start_of(tid)
@@ -411,6 +419,7 @@ mod tests {
 
     const EVENTS: &str = r#"{"t":1000,"cpu":0,"by":0,"ev":"process start","pid":4,"session":1,"name":"a.exe","personality":"nt","ppid":0,"ptid":0,"image_base":1,"entry":1,"cmdline":"a.exe --type=utility --utility-sub-type=network.mojom.NetworkService"}
 {"t":1100,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":8,"start":6442451456,"teb":2}
+{"t":1150,"cpu":0,"by":8,"ev":"thread name","pid":4,"tid":8,"name":"CrBrowserMain"}
 {"t":1200,"cpu":0,"by":0,"ev":"image","pid":4,"name":"a.exe","base":5368709120,"size":65536}
 {"t":1300,"cpu":0,"by":8,"ev":"image","pid":4,"name":"\\Device\\HarddiskVolume1\\x\\b.dll","base":6442450944,"size":65536}
 {"t":2000000000,"cpu":0,"by":8,"ev":"sample","mode":"user","rip":5368713216}
@@ -430,7 +439,7 @@ mod tests {
         assert!(r.contains("pid 4 a.exe utility NetworkService"), "{r}");
         assert!(
             r.contains(
-                "tid 8 (pid 4 a.exe utility NetworkService), 80% in user mode, starts at b.dll+0x200"
+                "tid 8 \"CrBrowserMain\" (pid 4 a.exe utility NetworkService), 80% in user mode, starts at b.dll+0x200"
             ),
             "{r}"
         );

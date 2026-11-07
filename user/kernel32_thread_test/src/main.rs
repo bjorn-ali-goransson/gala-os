@@ -12,7 +12,9 @@
 //! mitigation policy attribute, 8 or 16 bytes, accepted); OpenThread of
 //! another thread by its id (waited on through that handle; an unknown id
 //! is ERROR_INVALID_PARAMETER); a CreateThread thread's
-//! ThreadQuerySetWin32StartAddress is the start routine it was given.
+//! ThreadQuerySetWin32StartAddress is the start routine it was given;
+//! SetThreadDescription's name is the thread's, read back by
+//! NtQueryInformationThread(ThreadNameInformation) and GetThreadDescription.
 //! Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
@@ -29,6 +31,9 @@ type StartRoutine = extern "system" fn(*mut c_void) -> u32;
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetCurrentThread() -> Handle;
+    fn SetThreadDescription(h: Handle, text: *const u16) -> i32;
+    fn GetThreadDescription(h: Handle, text: *mut *mut u16) -> i32;
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn SetThreadPriority(h: Handle, priority: i32) -> Bool;
     fn GetThreadPriority(h: Handle) -> i32;
     fn GetLastError() -> u32;
@@ -306,6 +311,34 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         let st = NtQueryInformationThread(t, 9, (&raw mut start).cast(), 8, core::ptr::null_mut());
         c.eq(st as u64, 0)?;
         c.eq(start as u64, worker as *const () as u64)?;
+        // ThreadNameInformation (38): SetThreadDescription's name, as a
+        // UNICODE_STRING followed by its characters.
+        let name: [u16; 11] = [
+            b'g' as u16,
+            b'a' as u16,
+            b'l' as u16,
+            b'a' as u16,
+            b' ' as u16,
+            b'w' as u16,
+            b'o' as u16,
+            b'r' as u16,
+            b'k' as u16,
+            b'e' as u16,
+            0,
+        ];
+        c.eq(SetThreadDescription(t, name.as_ptr()) as u64, 0)?;
+        let mut info = [0u64; 16];
+        let mut ret = 0u32;
+        let st = NtQueryInformationThread(t, 38, info.as_mut_ptr().cast(), 128, &mut ret);
+        c.eq(st as u64, 0)?;
+        let length = (info[0] & 0xffff) as usize; // UNICODE_STRING.Length, bytes
+        c.eq(length as u64, 20)?;
+        let text = core::slice::from_raw_parts(info[1] as *const u16, length / 2);
+        c.ok(text == &name[..10], u64::from(text.first().copied().unwrap_or(0)))?;
+        let mut back: *mut u16 = core::ptr::null_mut();
+        c.eq(GetThreadDescription(t, &mut back) as u64, 0)?;
+        c.ok(!back.is_null() && core::slice::from_raw_parts(back, 11) == &name[..], 0)?;
+        LocalFree(back.cast());
         c.ok(ResumeThread(other) == 1, 0)?;
         c.eq(WaitForSingleObject(other, 10_000).into(), 0)?;
         let mut code = 0;
