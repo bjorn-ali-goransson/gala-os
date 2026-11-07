@@ -1035,7 +1035,9 @@ samples).
    HTCAPTION on a press: GalaWindowDrag; the scenario drags Chromium by
    its tab strip) and resizing by its own border (HTLEFT..HTBOTTOMRIGHT:
    GalaWindowResize; desktop unit test, no outline while resizing yet).
-   Next: IME off, a click on a link, FlaUI reading the page's
+   A click on a link: the scenario clicks window.html's link block
+   after the drag, Chromium opens window2.html (its marker in the log,
+   its blue on the screen). Next: IME off, FlaUI reading the page's
    accessibility tree.
    Then a conformance report (the owner): a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
@@ -2153,6 +2155,14 @@ Each entry: what, why it matters, the structural fix, the owning item.
   choice and the fallback goes. Item PK.
 
 ### Defects known, not yet fixed
+
+- **chromium_window's link click, untraced, failed twice in three runs**
+  before the state dump listed the desktop's last button deliveries
+  (and passed in all six runs since, and in all three with
+  `events=window`): the click reached nothing Chromium acted on, and
+  which step lost it is not known. A failure now leaves
+  `statedump: session 1 button ...` lines (whether the click reached
+  Chromium's window, and when). Item BR.
 
 - **An NT delete through a hard link's second name removes the first
   name**: hard links exist (Linux link/linkat, seam 4), but NT's delete

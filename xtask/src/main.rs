@@ -1770,6 +1770,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "target/prebuilt/chromium/chrome-win/", "chromium"),
     ("chromium", "user/chromium/page.html", "gala"),
     ("chromium", "user/chromium/window.html", "gala"),
+    ("chromium", "user/chromium/window2.html", "gala"),
     ("chromium", "ntdll.dll", "Windows/System32"),
     ("chromium", "kernel32.dll", "Windows/System32"),
     ("chromium", "kernelbase.dll", "Windows/System32"),
@@ -6436,6 +6437,7 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "gala window painted",
+            "gala link followed",
             "xtask: screen ok",
             "chrome.exe finished with status 0x00000000",
         ],
@@ -9688,9 +9690,11 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
 const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     (
         // Chromium's window at (0, 0), 800 x 600, its page (window.html)
-        // below Chromium's own tab strip and toolbar: the green body and
-        // the magenta box at page (100, 100) - (300, 200). Then dragged by
-        // its own tab strip, and Alt+F4.
+        // below Chromium's own tab strip and toolbar: the green body, the
+        // magenta box at page (100, 100) - (300, 200) and the gold link
+        // block at page (400, 100) - (600, 200). Then dragged by its own
+        // tab strip, the link clicked (window2.html: a blue body), and
+        // Alt+F4.
         "chromium_window",
         ScreenCheck {
             marker: "gala window painted",
@@ -9720,8 +9724,24 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     input: &["mouse_move 100 100", "mouse_button 0"],
                     pixels: &[
                         PixelCheck::AnyIn(220, 300, 160, 160, 0xff00ff),
+                        PixelCheck::AnyIn(520, 300, 160, 160, 0xffd700),
                         PixelCheck::At(880, 600, 0x2e8b57),
                     ],
+                },
+                ScreenStep {
+                    after: "",
+                    // A click on the link block's middle (the pointer is at
+                    // (600, 120) after the drag; the block spans 500..700 x
+                    // 343..443 now, below the toolbar and the --no-sandbox
+                    // infobar): Chromium follows it.
+                    input: &["mouse_move 0 270", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "gala link followed",
+                    // window2.html's blue where window.html's box was.
+                    input: &[],
+                    pixels: &[PixelCheck::AnyIn(220, 300, 160, 160, 0x1e90ff)],
                 },
                 ScreenStep {
                     after: "",
