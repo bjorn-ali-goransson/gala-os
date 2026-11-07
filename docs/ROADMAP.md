@@ -1062,8 +1062,11 @@ samples).
    headless Chromium, loads page.html, reads it through a script and
    ends the session (about 2 minutes of kernel time; it needed
    user32's LoadKeyboardLayoutW/ToUnicode and ole32's thread OLE data
-   in the layout Chromium reads). Next, step 2: the WPT server on the
-   host and a first directory. The report itself: a subset of web-platform-tests
+   in the layout Chromium reads). Step 2 under way: `chromium_wpt`
+   (PENDING: a report run) serves WPT (pinned commit, `dom/nodes`) from
+   the host and runs each test page in headless Chromium through
+   ChromeDriver; its first five tests run and pass. Next: the whole
+   directory, then the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
    snapshot's revision, the WPT server on the host reached as

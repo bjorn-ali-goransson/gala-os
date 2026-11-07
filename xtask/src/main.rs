@@ -17,6 +17,7 @@ mod lx_expect;
 mod stub_audit;
 mod telemetry;
 mod vmtime;
+mod wpt;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
 #[path = "../../kernel/src/trust/manifest.rs"]
@@ -2451,6 +2452,9 @@ const SLOW_SCENARIOS: &[&str] = &[
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
 const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
+/// `chromium_wpt`: a directory of web-platform-tests, each a page load
+/// and a harness run under TCG (a report run, PENDING: not in the gate).
+const WPT_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Scenarios run under an artificial host load (clockcheck::HostLoad:
@@ -2468,6 +2472,8 @@ fn scenario_timeout(name: &str) -> Duration {
     }
     let limit = if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
         DUMP_SCENARIO_TIMEOUT
+    } else if name == "chromium_wpt" {
+        WPT_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
         || name.starts_with("sqllocaldb")
@@ -3558,6 +3564,8 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
+    // BR's conformance report: a report run of hours, not a gate check.
+    "chromium_wpt",
     "java_stress",
     "elasticsearch",
     "filezilla",
@@ -3641,6 +3649,8 @@ enum NetClient {
     /// A WebDriver session with ChromeDriver (`webdriver_client`):
     /// headless Chromium loads page.html, a script reads it.
     WebDriver,
+    /// web-platform-tests through ChromeDriver (`wpt_client`).
+    Wpt,
     /// handover_net_test's line protocol across a kernel handover
     /// (`handover_net_client`).
     HandoverNet,
@@ -3677,6 +3687,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("postgres", "database system is ready to accept connections", NetClient::Psql),
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
+    ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -6497,6 +6508,19 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: webdriver ok"],
     },
     Scenario {
+        // BR's conformance report, step 2: web-platform-tests (WPT_DIRS
+        // at WPT_COMMIT, fetched by xtask) served from the host as
+        // http://10.0.2.100/ (`serve-page` over the tree), run one page at
+        // a time in headless Chromium through ChromeDriver
+        // (`wpt_client`); each test's line goes into the serial log
+        // (`xtask: wpt: ...`), the results to target/wpt/.
+        name: "chromium_wpt",
+        cmdline: "qemu_exit run=chromedriver.exe args=--port=7%20--allowed-ips=%20--log-path=C:\\chromium\\chromedriver.log \
+                  dump=C:/chromium/chrome_driven.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["xtask: wpt: summary", "xtask: net client: wpt ok"],
+    },
+    Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
         // .NET 8 application, running one command.
         name: "pwsh_hello",
@@ -7718,6 +7742,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_uia", "chromium_uia"),
     ("chromium_driver", "chromium"),
     ("chromium_driver", "chromium_driver"),
+    ("chromium_wpt", "chromium"),
+    ("chromium_wpt", "chromium_driver"),
     ("chromium_host", "chromium_host"),
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
@@ -9191,7 +9217,14 @@ fn run_vm_once(
     let port = lease.as_ref().map(|l| l.0);
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
-        add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
+        if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
+            // Both: the forwarded port and the host's pages (chromium_wpt).
+            let _ = fs::remove_file(iso.with_extension("serve.log"));
+            let guestfwd = host_page_fwd(&mut cmd, &iso.with_extension("serve.log"))?;
+            add_net_with(&mut cmd, port, guest_port(iso_scenario(iso)), &guestfwd);
+        } else {
+            add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
+        }
     } else if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
         let _ = fs::remove_file(iso.with_extension("serve.log"));
         add_host_page_net(&mut cmd, &iso.with_extension("serve.log"))?;
@@ -9234,6 +9267,7 @@ fn run_vm_once(
         if let Some(port) = port.filter(|_| client.is_none())
             && fs::read(&log).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
         {
+            let serve_log = iso.with_extension("serve.log");
             client = Some(thread::spawn(move || match kind {
                 NetClient::Echo => net_client(port),
                 NetClient::Http(page) => http_client(port, page),
@@ -9251,6 +9285,7 @@ fn run_vm_once(
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
                 NetClient::WebDriver => webdriver_client(port),
+                NetClient::Wpt => wpt::client(port, &serve_log),
                 NetClient::HandoverNet => handover_net_client(port),
                 NetClient::Udp => udp_client(port),
             }));
@@ -9384,6 +9419,7 @@ fn run_vm_once(
                     NetClient::HandoverNet => "handover",
                     NetClient::Udp => "udp",
                     NetClient::WebDriver => "webdriver",
+                    NetClient::Wpt => "wpt",
                     _ => "http",
                 }
             ),
@@ -10477,9 +10513,14 @@ fn add_net(cmd: &mut Command, port: u16) {
 
 /// The same with the guest's port `guest` (sshd's 22).
 fn add_net_to(cmd: &mut Command, port: u16, guest: u16) {
+    add_net_with(cmd, port, guest, "");
+}
+
+/// add_net_to with more `-netdev user` options (`extra`: ",guestfwd=...").
+fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
     cmd.arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:{guest},hostfwd=udp:127.0.0.1:{port}-:{guest}"
+            "user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:{guest},hostfwd=udp:127.0.0.1:{port}-:{guest}{extra}"
         ))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
@@ -10487,7 +10528,7 @@ fn add_net_to(cmd: &mut Command, port: u16, guest: u16) {
 
 /// Scenarios whose guest fetches `http://10.0.2.100/` from the host
 /// (`add_host_page_net`).
-const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host"];
+const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host", "chromium_wpt"];
 
 /// The page `serve-page` serves (user/hostnet_test checks it byte for
 /// byte).
@@ -10499,6 +10540,17 @@ const HOST_PAGE: &str = "<html><body><h1>hello from the host</h1></body></html>\
 /// input and output the connection): a page from the host network with
 /// no host port to lease or to tell the guest.
 fn add_host_page_net(cmd: &mut Command, log: &Path) -> Result {
+    let guestfwd = host_page_fwd(cmd, log)?;
+    cmd.arg("-netdev")
+        .arg(format!("user,id=n0{guestfwd}"))
+        .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+    Ok(())
+}
+
+/// The `-netdev user` option that sends 10.0.2.100:80 to `xtask
+/// serve-page` (",guestfwd=..."), its log and, for chromium_wpt, the WPT
+/// tree it serves set in QEMU's environment (serve-page inherits it).
+fn host_page_fwd(cmd: &mut Command, log: &Path) -> Result<String> {
     let exe = env::current_exe().map_err(|e| format!("xtask's own path: {e}"))?;
     let exe = exe.display().to_string();
     if exe.contains(',') || exe.contains(' ') {
@@ -10506,11 +10558,11 @@ fn add_host_page_net(cmd: &mut Command, log: &Path) -> Result {
     }
     // serve-page's standard error is the connection too: it logs each
     // request to `log`, which the run adds to the serial log.
-    cmd.env("XTASK_SERVE_PAGE_LOG", log)
-        .arg("-netdev")
-        .arg(format!("user,id=n0,guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
-        .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
-    Ok(())
+    cmd.env("XTASK_SERVE_PAGE_LOG", log);
+    if log.to_string_lossy().contains("chromium_wpt") {
+        cmd.env("XTASK_WPT_ROOT", wpt::tree()?);
+    }
+    Ok(format!(",guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
 }
 
 /// `cargo xtask serve-page` (QEMU runs it for each connection to
@@ -10532,6 +10584,30 @@ fn serve_page() -> Result {
     }
     let first =
         String::from_utf8_lossy(head.split(|&b| b == b'\r').next().unwrap_or(&[])).into_owned();
+    if let Ok(root) = env::var("XTASK_WPT_ROOT") {
+        // The WPT tree: only failures are logged (a run makes thousands of
+        // requests).
+        let target = first.split_whitespace().nth(1).unwrap_or("/");
+        let (status, kind, body) = wpt::file(Path::new(&root), target);
+        if status != 200
+            && let Ok(path) = env::var("XTASK_SERVE_PAGE_LOG")
+            && let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(path)
+        {
+            let _ = writeln!(log, "xtask: serve-page: {first:?}: {status}");
+        }
+        let reason = if status == 200 { "OK" } else { "Not Found" };
+        let mut out = std::io::stdout().lock();
+        let head = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
+             Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        return out
+            .write_all(head.as_bytes())
+            .and_then(|()| out.write_all(&body))
+            .and_then(|()| out.flush())
+            .map_err(|e| e.to_string());
+    }
     if let Ok(path) = env::var("XTASK_SERVE_PAGE_LOG")
         && let Ok(mut log) = fs::OpenOptions::new().append(true).create(true).open(path)
     {

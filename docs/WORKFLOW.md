@@ -1507,6 +1507,15 @@ Implementing what FlaUI needs (gala's UIAutomationCore, user32):
 
 ### Chromium (BR)
 
+`chromium_wpt` (PENDING; web-platform-tests through ChromeDriver,
+`xtask/src/wpt.rs`): `XTASK_WPT_FILTER=<substring>` and
+`XTASK_WPT_LIMIT=<n>` narrow the run (`XTASK_WPT_LIMIT=5 cargo xtask
+boot-test 'chromium_wpt$'`, about 3 minutes); xtask fetches WPT_COMMIT
+into `target/prebuilt/wpt` with the host's git. Each test's line
+(`xtask: wpt: /dom/nodes/X.html: OK 9/9`) and the summary are in the
+run's serve log (`target/debug/test-chromium_wpt.serve.log`, appended to
+the scenario's log), every subtest in `target/wpt/results.tsv`.
+
 `chromium_uia` (a UIA client over Chromium's accessibility tree:
 user/uia_chromium_test, built by its build.sh) prints each step with
 its time (`uia_chromium_test: link found (147659 ms)`); when the link
