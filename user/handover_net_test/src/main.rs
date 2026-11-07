@@ -189,13 +189,28 @@ fn decimal(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
 fn fail(n: u32) -> u32 {
     // SAFETY: plain Winsock call.
     let error = unsafe { WSAGetLastError() };
-    let mut d = [0u8; 20];
-    out(b"handover_net_test: check ");
-    out(decimal(u64::from(n), &mut d));
-    out(b" failed, WSAGetLastError ");
-    out(decimal(error as u64, &mut d));
-    out(b"\r\n");
+    let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
+    out_line(&[
+        b"handover_net_test: check ",
+        decimal(u64::from(n), &mut a),
+        b" failed, WSAGetLastError ",
+        decimal(error as u64, &mut b),
+        b"\r\n",
+    ]);
     n
+}
+
+/// Writes `parts` as one line in one write: the self client's thread
+/// prints too, and pieces written apart interleave with its line.
+fn out_line(parts: &[&[u8]]) {
+    let mut line = [0u8; 160];
+    let mut n = 0;
+    for p in parts {
+        let k = p.len().min(line.len() - n);
+        line[n..n + k].copy_from_slice(&p[..k]);
+        n += k;
+    }
+    out(&line[..n]);
 }
 
 /// GalaRequestHandover (gala's test-only service 0x7f5a).
@@ -557,14 +572,16 @@ fn run() -> Result<(), u32> {
             if closesocket(conn) != 0 {
                 return Err(fail(6));
             }
-            let mut d = [0u8; 20];
-            out(b"handover_net_test: connection ");
-            out(decimal(u64::from(i), &mut d));
-            out(b": ");
-            out(decimal(lines, &mut d));
-            out(b" line(s), ");
-            out(decimal(count, &mut d));
-            out(b" in all\r\n");
+            let (mut a, mut b, mut d) = ([0u8; 20], [0u8; 20], [0u8; 20]);
+            out_line(&[
+                b"handover_net_test: connection ",
+                decimal(u64::from(i), &mut a),
+                b": ",
+                decimal(lines, &mut b),
+                b" line(s), ",
+                decimal(count, &mut d),
+                b" in all\r\n",
+            ]);
         }
         if closesocket(listener) != 0 || closesocket(udp) != 0 {
             return Err(fail(7));
