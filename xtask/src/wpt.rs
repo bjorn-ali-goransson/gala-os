@@ -236,57 +236,126 @@ fn relay_preflight() -> Result {
 }
 
 /// `cargo xtask relay <port> [<log>]`: one guest connection (standard
-/// input and output) to 127.0.0.1:<port>, both ways, until either side
-/// closes; a line for it in <log> (bytes each way, or the error).
+/// input and output) to 127.0.0.1:<port>, both ways, until the server's
+/// side ends; two lines for it in <log>, keyed by the relay's pid: `open`
+/// when it starts (a connection without its second line never ended, or
+/// the relay was killed), then its start and end (host epoch seconds, as
+/// ChromeDriver's log stamps them), bytes each way, and how each side
+/// ended, in order (or the connect error).
 pub fn relay(port: &str, log: Option<&str>) -> Result {
     use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let start = now_ms();
+    let id = std::process::id();
     let note = |line: String| {
         if let Some(path) = log
             && let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path)
         {
-            let _ = writeln!(f, "{line}");
+            // One write per line: relays of concurrent connections append
+            // to the same file.
+            let _ = f.write_all(format!("{line}\n").as_bytes());
         }
     };
     let Ok(port) = port.parse::<u16>() else {
-        note(format!("relay: bad port {port:?}"));
+        note(format!("relay [{id}] {}: bad port {port:?}", stamp(start)));
         return Err(format!("relay: bad port {port:?}"));
     };
+    note(format!("relay {port} [{id}] open {}", stamp(start)));
     let stream = match std::net::TcpStream::connect(("127.0.0.1", port)) {
         Ok(s) => s,
         Err(e) => {
-            note(format!("relay {port}: connect: {e}"));
+            note(format!("relay {port} [{id}] {}: connect: {e}", span(start, now_ms())));
             return Err(format!("relay {port}: {e}"));
         }
     };
+    let connected = now_ms();
     let mut up = stream.try_clone().map_err(|e| e.to_string())?;
-    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let counted = sent.clone();
+    let sent = std::sync::Arc::new(AtomicU64::new(0));
+    // When the guest's side ended (epoch ms, 0 while it has not), and how.
+    let guest_end = std::sync::Arc::new(AtomicU64::new(0));
+    let guest_how = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let (counted, ended, how) = (sent.clone(), guest_end.clone(), guest_how.clone());
     let to_server = thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 16384];
-        while let Ok(n) = stdin.read(&mut buf) {
-            if n == 0 || up.write_all(&buf[..n]).is_err() {
-                break;
+        let why = loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break "the guest closed".to_string(),
+                Ok(n) => {
+                    if let Err(e) = up.write_all(&buf[..n]) {
+                        break format!("writing to the server: {e}");
+                    }
+                    counted.fetch_add(n as u64, Ordering::Relaxed);
+                }
+                Err(e) => break format!("reading from the guest: {e}"),
             }
-            counted.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        };
+        if let Ok(mut h) = how.lock() {
+            *h = why;
         }
+        ended.store(now_ms(), Ordering::Release);
         let _ = up.shutdown(std::net::Shutdown::Write);
     });
     let mut down = stream;
     let mut out = std::io::stdout().lock();
     let mut buf = [0u8; 16384];
     let mut received = 0u64;
-    while let Ok(n) = down.read(&mut buf) {
-        if n == 0 || out.write_all(&buf[..n]).and_then(|()| out.flush()).is_err() {
-            break;
+    let server_how = loop {
+        match down.read(&mut buf) {
+            Ok(0) => break "the server closed".to_string(),
+            Ok(n) => {
+                if let Err(e) = out.write_all(&buf[..n]).and_then(|()| out.flush()) {
+                    break format!("writing to the guest: {e}");
+                }
+                received += n as u64;
+            }
+            Err(e) => break format!("reading from the server: {e}"),
         }
-        received += n as u64;
-    }
+    };
+    let end = now_ms();
     // The guest's side may stay open after the answer: the count so far.
     drop(to_server);
-    let sent = sent.load(std::sync::atomic::Ordering::Relaxed);
-    note(format!("relay {port}: {sent} bytes to the server, {received} back"));
+    let sent = sent.load(Ordering::Relaxed);
+    let guest_at = guest_end.load(Ordering::Acquire);
+    let after = |t: u64| format!("+{}.{:03} s", (t - start) / 1000, (t - start) % 1000);
+    let ends = if guest_at == 0 {
+        format!("{server_how} {}, the guest's side still open", after(end))
+    } else {
+        let guest_how = guest_how.lock().map(|h| h.clone()).unwrap_or_default();
+        format!("{guest_how} {}, then {server_how} {}", after(guest_at), after(end))
+    };
+    note(format!(
+        "relay {port} [{id}] {}: connected {}, {sent} bytes to the server, {received} back; {ends}",
+        span(start, end),
+        after(connected),
+    ));
     Ok(())
+}
+
+/// Epoch milliseconds, for the relay's log.
+fn now_ms() -> u64 {
+    u64::try_from(epoch_ms()).unwrap_or(u64::MAX)
+}
+
+/// Epoch milliseconds as ChromeDriver stamps its log (`1762512896.789`)
+/// and as the UTC time of day.
+fn stamp(ms: u64) -> String {
+    let day = ms % 86_400_000;
+    format!(
+        "{}.{:03} ({:02}:{:02}:{:02}.{:03} UTC)",
+        ms / 1000,
+        ms % 1000,
+        day / 3_600_000,
+        day / 60_000 % 60,
+        day / 1000 % 60,
+        day % 1000
+    )
+}
+
+/// A connection's start and end, and how long it lasted.
+fn span(start: u64, end: u64) -> String {
+    let d = end.saturating_sub(start);
+    format!("{} to {} ({}.{:03} s)", stamp(start), stamp(end), d / 1000, d % 1000)
 }
 
 /// The testharness tests under TEST_DIRS, as URL paths: pages that load
@@ -950,6 +1019,16 @@ pub fn compare() -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_stamps_match_chromedriver() {
+        // 2025-11-07 01:02:03.045 UTC.
+        assert_eq!(stamp(1_762_477_323_045), "1762477323.045 (01:02:03.045 UTC)");
+        assert_eq!(
+            span(1_762_477_323_045, 1_762_477_544_100),
+            "1762477323.045 (01:02:03.045 UTC) to 1762477544.100 (01:05:44.100 UTC) (221.055 s)"
+        );
+    }
 
     #[test]
     fn json_text_unescapes() {

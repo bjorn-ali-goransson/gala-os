@@ -1529,8 +1529,11 @@ packages; its log is `target/wpt/wptserve.log`). WPT's host names must
 resolve to the loopback first: `cd target/prebuilt/wpt && ./wpt
 make-hosts-file >> /etc/hosts` (the run says so when they do not). The
 guest reaches it as 10.0.2.100 on those ports (QEMU runs `xtask relay
-<port> <log>` per connection; each logs a line in `target/wpt/relay.log`:
-bytes each way, or why it could not connect) and Chromium maps web-platform.test and its subdomains
+<port> <log>` per connection; each logs two lines in `target/wpt/relay.log`,
+keyed by the relay's pid: `open` with its start, then its start and end
+(host epoch seconds with ms, as ChromeDriver stamps its log, and UTC),
+bytes each way and how each side ended in order, or why it could not
+connect; an `open` without its second line never ended) and Chromium maps web-platform.test and its subdomains
 there (`--host-resolver-rules`); our testharnessreport.js replaces the
 tree's (the file WPT leaves to vendors). Each test waits for its
 results as long as testharness's own timeout allows, times 4, plus
