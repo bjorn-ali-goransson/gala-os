@@ -17,6 +17,11 @@
 //! - Semaphores: CreateSemaphoreW/A, waits, ReleaseSemaphore's previous
 //!   count, ERROR_TOO_MANY_POSTS past the maximum.
 //! - InitializeCriticalSectionEx.
+//! - A thread blocked on a condition variable, an SRW lock (exclusive or
+//!   shared), a critical section or another thread's InitOnce sleeps: over
+//!   300 ms its ContextSwitches (SystemProcessInformation) grow by at
+//!   most a few (a waiter that polls would switch hundreds of times).
+//!   Counted switches, not elapsed time (a loaded host only delays).
 //!
 //! Prints `kernel32_sync_test: ok` or exits with the number of the failing
 //! check.
@@ -95,6 +100,11 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> i32;
 }
 
 #[unsafe(no_mangle)]
@@ -503,6 +513,216 @@ fn semaphores(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+// --- Waiters sleep ---------------------------------------------------------
+
+const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+/// SYSTEM_PROCESS_INFORMATION's size on x64 (its threads follow it), and
+/// SYSTEM_THREAD_INFORMATION's.
+const PROCESS_ENTRY: usize = 0x100;
+const THREAD_ENTRY: usize = 0x50;
+/// How many times a thread blocked for SLEEP_MS may be switched to: a few
+/// (Windows: none or one); a polling waiter is switched to every
+/// millisecond or more often.
+const MOST_SWITCHES: u64 = 10;
+const SLEEP_MS: u32 = 300;
+
+static SNAPSHOT: Shared<[u8; 1 << 16]> = Shared(core::cell::UnsafeCell::new([0; 1 << 16]));
+
+/// Thread `tid`'s ContextSwitches (SystemProcessInformation), or None.
+fn switches(tid: u32) -> Option<u64> {
+    // SAFETY: only the main thread uses the buffer.
+    let buf = unsafe { &mut *SNAPSHOT.get() };
+    let mut ret = 0u32;
+    // SAFETY: a buffer of ours.
+    let st = unsafe {
+        NtQuerySystemInformation(
+            SYSTEM_PROCESS_INFORMATION,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut ret,
+        )
+    };
+    if st != 0 {
+        return None;
+    }
+    let read = |at: usize, n: usize| -> Option<u64> {
+        let b = buf.get(at..at + n)?;
+        let mut v = [0u8; 8];
+        v[..n].copy_from_slice(b);
+        Some(u64::from_le_bytes(v))
+    };
+    let mut at = 0;
+    loop {
+        let threads = read(at + 4, 4)? as usize;
+        for i in 0..threads {
+            let t = at + PROCESS_ENTRY + THREAD_ENTRY * i;
+            if read(t + 0x30, 8)? == u64::from(tid) {
+                return read(t + 0x40, 4);
+            }
+        }
+        match read(at, 4)? {
+            0 => return None,
+            next => at += next as usize,
+        }
+    }
+}
+
+static SLEEP_LOCK: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static SLEEP_CV: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static SLEEP_CS: Shared<CriticalSection> =
+    Shared(core::cell::UnsafeCell::new(CriticalSection([0; 5])));
+static SLEEP_ONCE: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+/// Set to let the condition-variable and InitOnce waits end.
+static RELEASED: AtomicU32 = AtomicU32::new(0);
+/// Set by a sleeper thread just before it blocks.
+static BLOCKING: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn cv_sleeper(_: *mut c_void) -> u32 {
+    // SAFETY: the test's lock and variable.
+    unsafe {
+        AcquireSRWLockExclusive(SLEEP_LOCK.get());
+        BLOCKING.store(1, Ordering::SeqCst);
+        while RELEASED.load(Ordering::SeqCst) == 0 {
+            SleepConditionVariableSRW(SLEEP_CV.get(), SLEEP_LOCK.get(), INFINITE, 0);
+        }
+        ReleaseSRWLockExclusive(SLEEP_LOCK.get());
+    }
+    0
+}
+
+extern "system" fn srw_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: the test's lock, held exclusively by the main thread.
+    unsafe {
+        AcquireSRWLockExclusive(SLEEP_LOCK.get());
+        ReleaseSRWLockExclusive(SLEEP_LOCK.get());
+    }
+    0
+}
+
+extern "system" fn shared_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: as above.
+    unsafe {
+        AcquireSRWLockShared(SLEEP_LOCK.get());
+        ReleaseSRWLockShared(SLEEP_LOCK.get());
+    }
+    0
+}
+
+extern "system" fn cs_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: the test's critical section, held by the main thread.
+    unsafe {
+        EnterCriticalSection(SLEEP_CS.get());
+        LeaveCriticalSection(SLEEP_CS.get());
+    }
+    0
+}
+
+/// An InitOnce callback that runs until RELEASED.
+extern "system" fn once_slow(_: *mut usize, _: *mut c_void, _: *mut *mut c_void) -> Bool {
+    BLOCKING.store(1, Ordering::SeqCst);
+    while RELEASED.load(Ordering::SeqCst) == 0 {
+        // SAFETY: a plain sleep.
+        unsafe { Sleep(10) };
+    }
+    1
+}
+
+extern "system" fn once_runner(_: *mut c_void) -> u32 {
+    // SAFETY: the test's INIT_ONCE.
+    unsafe {
+        InitOnceExecuteOnce(
+            SLEEP_ONCE.get(),
+            once_slow,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        )
+    };
+    0
+}
+
+extern "system" fn once_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: as above; the runner is in the callback.
+    unsafe {
+        InitOnceExecuteOnce(SLEEP_ONCE.get(), once_ok, core::ptr::null_mut(), core::ptr::null_mut())
+    };
+    0
+}
+
+/// Starts `f`, waits until it is about to block (and a little more, for
+/// it to get there), counts its switches over SLEEP_MS, runs `release`,
+/// joins it; checks the count.
+fn sleeps(c: &mut Checks, f: StartRoutine, release: impl FnOnce()) -> Result<(), u32> {
+    BLOCKING.store(0, Ordering::SeqCst);
+    let mut tid = 0u32;
+    // SAFETY: a thread running `f`.
+    let h =
+        unsafe { CreateThread(core::ptr::null_mut(), 0, f, core::ptr::null_mut(), 0, &mut tid) };
+    c.ok(!h.is_null(), 0)?;
+    while BLOCKING.load(Ordering::SeqCst) == 0 {
+        // SAFETY: a plain sleep.
+        unsafe { Sleep(1) };
+    }
+    // SAFETY: a plain sleep.
+    unsafe { Sleep(50) };
+    let before = switches(tid);
+    c.ok(before.is_some(), 0)?;
+    // SAFETY: a plain sleep.
+    unsafe { Sleep(SLEEP_MS) };
+    let after = switches(tid);
+    c.ok(after.is_some(), 0)?;
+    let grew = after.unwrap_or(0).wrapping_sub(before.unwrap_or(0));
+    release();
+    c.ok(join(h), 0)?;
+    c.ok(grew <= MOST_SWITCHES, grew)
+}
+
+fn waiters_sleep(c: &mut Checks) -> Result<(), u32> {
+    let lock = SLEEP_LOCK.get();
+    // SAFETY: the test's own objects.
+    unsafe {
+        InitializeSRWLock(lock);
+        InitializeConditionVariable(SLEEP_CV.get());
+        InitializeCriticalSection(SLEEP_CS.get());
+    }
+    // A condition variable.
+    sleeps(c, cv_sleeper, || {
+        // SAFETY: as above.
+        unsafe {
+            AcquireSRWLockExclusive(lock);
+            RELEASED.store(1, Ordering::SeqCst);
+            ReleaseSRWLockExclusive(lock);
+            WakeConditionVariable(SLEEP_CV.get());
+        }
+    })?;
+    // An SRW lock held exclusively: an exclusive and a shared waiter.
+    // SAFETY: as above.
+    unsafe { AcquireSRWLockExclusive(lock) };
+    sleeps(c, srw_sleeper, || unsafe { ReleaseSRWLockExclusive(lock) })?;
+    // SAFETY: as above.
+    unsafe { AcquireSRWLockExclusive(lock) };
+    sleeps(c, shared_sleeper, || unsafe { ReleaseSRWLockExclusive(lock) })?;
+    // A critical section.
+    // SAFETY: as above.
+    unsafe { EnterCriticalSection(SLEEP_CS.get()) };
+    sleeps(c, cs_sleeper, || unsafe { LeaveCriticalSection(SLEEP_CS.get()) })?;
+    // SAFETY: as above.
+    unsafe { DeleteCriticalSection(SLEEP_CS.get()) };
+    // Another thread's InitOnce callback running.
+    RELEASED.store(0, Ordering::SeqCst);
+    BLOCKING.store(0, Ordering::SeqCst);
+    let runner = start(once_runner);
+    while BLOCKING.load(Ordering::SeqCst) == 0 {
+        // SAFETY: a plain sleep.
+        unsafe { Sleep(1) };
+    }
+    sleeps(c, once_sleeper, || RELEASED.store(1, Ordering::SeqCst))?;
+    c.ok(join(runner), 0)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     srw(&mut c)?;
@@ -510,7 +730,8 @@ fn run() -> Result<(), u32> {
     init_once(&mut c)?;
     fls(&mut c)?;
     slist(&mut c)?;
-    semaphores(&mut c)
+    semaphores(&mut c)?;
+    waiters_sleep(&mut c)
 }
 
 #[unsafe(no_mangle)]

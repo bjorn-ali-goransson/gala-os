@@ -903,8 +903,15 @@ pub extern "system" fn RtlAbsoluteToSelfRelativeSD(
 }
 
 // ---- Critical sections (RTL_CRITICAL_SECTION, x64): DebugInfo,
-// LockCount (-1 free), RecursionCount, OwningThread, LockSemaphore,
-// SpinCount. gala's spin and yield while taken (no kernel wait) ----
+// LockCount, RecursionCount, OwningThread, LockSemaphore, SpinCount.
+//
+// LockCount is -1 when free and, while taken, the number of threads
+// waiting for it (0: none). An entering thread spins a little for it to
+// come free, then counts itself in and sleeps on a process-wide keyed
+// event keyed by the section's address. A leaving owner with waiters
+// does not free the section: it hands it to one of them (releasing the
+// key, which waits until that waiter is there), so no wake is lost and
+// no waiter polls. ----
 
 #[repr(C)]
 pub struct CriticalSection {
@@ -959,13 +966,35 @@ pub extern "system" fn RtlEnterCriticalSection(cs: *mut CriticalSection) -> u32 
         return STATUS_SUCCESS;
     }
     let mut spins = 0u32;
-    while cs.lock_count.compare_exchange(-1, 0, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        spins += 1;
-        if spins < 100 {
-            core::hint::spin_loop();
-        } else {
-            crate::NtYieldExecution();
+    loop {
+        if cs.lock_count.compare_exchange(-1, 0, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            break;
         }
+        spins += 1;
+        if spins < CS_SPINS {
+            core::hint::spin_loop();
+            continue;
+        }
+        // Count in as a waiter; -1 before means it came free meanwhile.
+        if cs.lock_count.fetch_add(1, Ordering::Acquire) == -1 {
+            break;
+        }
+        let e = cs_event();
+        if e == NO_EVENT {
+            // No keyed event (no memory): the leaving owner hands the
+            // section over through the owner field instead.
+            while cs
+                .owner
+                .compare_exchange(HANDED, me, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                crate::NtYieldExecution();
+            }
+        } else {
+            crate::NtWaitForKeyedEvent(e, key_of(cs), 0, core::ptr::null());
+        }
+        // Handed over by the leaving owner.
+        break;
     }
     cs.owner.store(me, Ordering::Release);
     cs.recursion = 1;
@@ -996,9 +1025,53 @@ pub extern "system" fn RtlLeaveCriticalSection(cs: *mut CriticalSection) -> u32 
     cs.recursion -= 1;
     if cs.recursion == 0 {
         cs.owner.store(0, Ordering::Release);
-        cs.lock_count.store(-1, Ordering::Release);
+        // 0 → -1: nobody waits, free. n > 0 → n - 1: hand it to a waiter.
+        if cs.lock_count.fetch_sub(1, Ordering::Release) > 0 {
+            let e = cs_event();
+            if e == 0
+                || crate::NtReleaseKeyedEvent(e, key_of(cs), 0, core::ptr::null()) != STATUS_SUCCESS
+            {
+                cs.owner.store(HANDED, Ordering::Release);
+            }
+        }
     }
     STATUS_SUCCESS
+}
+
+/// How many rounds an entering thread spins before it sleeps.
+const CS_SPINS: u32 = 100;
+/// OwningThread while a section is being handed over without the keyed
+/// event (an impossible thread id).
+const HANDED: usize = usize::MAX;
+/// The keyed event critical sections sleep on (created on first use; or
+/// NO_EVENT for good once creating it failed, so that waiters and owners
+/// always agree on how a handover goes).
+static CS_EVENT: AtomicUsize = AtomicUsize::new(0);
+const NO_EVENT: usize = usize::MAX;
+
+fn key_of(cs: &CriticalSection) -> usize {
+    core::ptr::from_ref(cs) as usize
+}
+
+/// The process's critical-section keyed event, or NO_EVENT.
+fn cs_event() -> usize {
+    let e = CS_EVENT.load(Ordering::Acquire);
+    if e != 0 {
+        return e;
+    }
+    let mut h = 0usize;
+    if crate::NtCreateKeyedEvent(&mut h, 0xf_0003, core::ptr::null(), 0) != STATUS_SUCCESS {
+        h = NO_EVENT;
+    }
+    match CS_EVENT.compare_exchange(0, h, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => h,
+        Err(other) => {
+            if h != NO_EVENT {
+                crate::NtClose(h);
+            }
+            other
+        }
+    }
 }
 
 // ---- Misc ----

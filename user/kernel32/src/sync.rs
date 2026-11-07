@@ -454,20 +454,35 @@ pub extern "system" fn InitializeCriticalSectionEx(
 
 // --- Waiting without a kernel object -------------------------------------
 //
-// SRW locks, condition variables and InitOnce have no kernel object: gala
-// waits by spinning, then yielding, then sleeping a millisecond at a time.
-// TODO: a kernel address wait (as WaitOnAddress) so that long waits sleep.
+// SRW locks, condition variables and InitOnce are one pointer-sized word
+// with no kernel object. A waiter spins briefly, then sleeps on the word
+// with WaitOnAddress (`address_wait`: a keyed event) until it changes;
+// whoever changes it in a way a waiter waits for wakes them
+// (WakeByAddress*, which costs no system call when nobody waits).
 
-/// One step of a wait; `spins` counts the steps so far.
-fn backoff(spins: &mut u32) {
-    *spins = spins.saturating_add(1);
-    if *spins < 64 {
+/// Spins a few rounds while the word may change soon.
+const SPINS: u32 = 64;
+
+/// One step of waiting while `*word == seen`: a spin for the first SPINS
+/// steps, then a sleep until the word is woken (or `ms` milliseconds);
+/// false if that sleep timed out.
+fn wait_step(word: *mut usize, seen: usize, spins: &mut u32, ms: u32) -> bool {
+    if *spins < SPINS {
+        *spins += 1;
         core::hint::spin_loop();
-    } else if *spins < 256 {
-        SwitchToThread();
-    } else {
-        Sleep(1);
+        return true;
     }
+    let compare = seen;
+    super::address_wait::WaitOnAddress(
+        word.cast_const().cast(),
+        (&raw const compare).cast(),
+        core::mem::size_of::<usize>(),
+        ms,
+    ) != FALSE
+}
+
+fn wake_all(word: *mut usize) {
+    super::address_wait::WakeByAddressAll(word.cast_const().cast());
 }
 
 // --- Slim reader/writer locks --------------------------------------------
@@ -496,13 +511,17 @@ pub extern "system" fn TryAcquireSRWLockExclusive(lock: *mut usize) -> u8 {
 pub extern "system" fn AcquireSRWLockExclusive(lock: *mut usize) {
     let mut spins = 0;
     while TryAcquireSRWLockExclusive(lock) == 0 {
-        backoff(&mut spins);
+        let held = srw(lock).load(Ordering::Relaxed);
+        if held != 0 {
+            wait_step(lock, held, &mut spins, INFINITE);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ReleaseSRWLockExclusive(lock: *mut usize) {
     srw(lock).store(0, Ordering::Release);
+    wake_all(lock);
 }
 
 #[unsafe(no_mangle)]
@@ -524,20 +543,27 @@ pub extern "system" fn TryAcquireSRWLockShared(lock: *mut usize) -> u8 {
 pub extern "system" fn AcquireSRWLockShared(lock: *mut usize) {
     let mut spins = 0;
     while TryAcquireSRWLockShared(lock) == 0 {
-        backoff(&mut spins);
+        let held = srw(lock).load(Ordering::Relaxed);
+        if held & EXCLUSIVE != 0 {
+            wait_step(lock, held, &mut spins, INFINITE);
+        }
     }
 }
 
+/// The last shared holder wakes the waiters (exclusive ones wait for 0).
 #[unsafe(no_mangle)]
 pub extern "system" fn ReleaseSRWLockShared(lock: *mut usize) {
-    srw(lock).fetch_sub(1, Ordering::Release);
+    if srw(lock).fetch_sub(1, Ordering::Release) == 1 {
+        wake_all(lock);
+    }
 }
 
 // --- Condition variables -------------------------------------------------
 //
 // CONDITION_VARIABLE is one pointer, here a wake counter: a sleeper waits
-// for it to change. Every wake ends every current wait, which the API
-// allows (waits may end spuriously; callers re-check their condition).
+// for it to change. WakeConditionVariable wakes one sleeping waiter; one
+// that has not gone to sleep yet sees the counter moved and returns too
+// (waits may end spuriously; callers re-check their condition).
 
 const ERROR_TIMEOUT: u32 = 1460;
 const CONDITION_VARIABLE_LOCKMODE_SHARED: u32 = 1;
@@ -550,11 +576,13 @@ pub extern "system" fn InitializeConditionVariable(cv: *mut usize) {
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeConditionVariable(cv: *mut usize) {
     srw(cv).fetch_add(1, Ordering::AcqRel);
+    super::address_wait::WakeByAddressSingle(cv.cast_const().cast());
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeAllConditionVariable(cv: *mut usize) {
     srw(cv).fetch_add(1, Ordering::AcqRel);
+    wake_all(cv);
 }
 
 /// Waits until `cv` moves past `seen` or `ms` pass; whether it was woken.
@@ -565,10 +593,17 @@ fn wait_wake(cv: *mut usize, seen: usize, ms: u32) -> bool {
         if srw(cv).load(Ordering::Acquire) != seen {
             return true;
         }
-        if ms != INFINITE && GetTickCount64() - start >= u64::from(ms) {
+        let left = if ms == INFINITE {
+            INFINITE
+        } else {
+            match u64::from(ms).checked_sub(GetTickCount64() - start) {
+                Some(left) if left > 0 => left as u32,
+                _ => return false,
+            }
+        };
+        if !wait_step(cv, seen, &mut spins, left) {
             return false;
         }
-        backoff(&mut spins);
     }
 }
 
@@ -662,16 +697,20 @@ pub extern "system" fn InitOnceExecuteOnce(
             let mut ctx: *mut c_void = core::ptr::null_mut();
             if f(once, param, &mut ctx) == 0 {
                 state.store(0, Ordering::Release);
+                wake_all(once);
                 return FALSE;
             }
             state.store((ctx as usize & !3) | ONCE_DONE, Ordering::Release);
+            wake_all(once);
             if !context.is_null() {
                 // SAFETY: as above.
                 unsafe { *context = (ctx as usize & !3) as *mut c_void };
             }
             return TRUE;
         }
-        backoff(&mut spins);
+        if v == ONCE_RUNNING {
+            wait_step(once, v, &mut spins, INFINITE);
+        }
     }
 }
 
@@ -795,7 +834,9 @@ pub extern "system" fn InitOnceBeginInitialize(
             unsafe { *pending = TRUE };
             return TRUE;
         }
-        backoff(&mut spins);
+        if v == ONCE_RUNNING {
+            wait_step(once, v, &mut spins, INFINITE);
+        }
     }
 }
 
@@ -822,5 +863,6 @@ pub extern "system" fn InitOnceComplete(
     } else {
         state.store(context as usize | ONCE_DONE, Ordering::Release);
     }
+    wake_all(once);
     TRUE
 }

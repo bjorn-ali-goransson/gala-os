@@ -2309,9 +2309,9 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
     dependency search; NtCreateThread applying FltSave beyond MxCsr and
     the XSTATE area; SEH's nested exceptions and collided unwinds.
   - Waits: wait-all satisfied only when all objects are signaled at its
-    re-check; a kernel address wait (WaitOnAddress) for kernel32's
-    lightweight locks; an atomic SignalObjectAndWait; the thread pool's
-    callback environments and freeing of closed objects.
+    re-check; an atomic SignalObjectAndWait; the thread pool's
+    WaitFor*Callbacks polls (Sleep(1)), its callback environments and
+    freeing of closed objects.
   - Pipes: WaitNamedPipe, TransactNamedPipe, PIPE_NOWAIT, pipe
     security, asynchronous writes that pend.
   - Access checks for processes, threads, pipes, devices and traversal;

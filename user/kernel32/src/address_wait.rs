@@ -10,6 +10,12 @@
 //! release is coming (it blocks until the key is waited on), so the
 //! waiter waits once more to take it and reports a wake. Spurious wakes
 //! are allowed by the documentation (callers re-check the value).
+//!
+//! WAITERS counts the nodes in the list, so that a wake with nobody
+//! waiting (most releases of an SRW lock) takes no lock: a waiter counts
+//! itself in before it reads the value, a waker changed the value before
+//! it reads the count, and both are SeqCst, so a waker that reads 0 knows
+//! every waiter to come will see its new value.
 
 use super::*;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -45,6 +51,8 @@ static LOCK: AtomicBool = AtomicBool::new(false);
 static HEAD: AtomicUsize = AtomicUsize::new(0);
 /// The keyed event, created on first use.
 static EVENT: AtomicUsize = AtomicUsize::new(0);
+/// Waiters counted in (in the list, or about to check the value).
+static WAITERS: AtomicUsize = AtomicUsize::new(0);
 
 fn lock() {
     let mut spins = 0u32;
@@ -143,7 +151,9 @@ pub extern "system" fn WaitOnAddress(
     let mut node = Waiter { address: address as usize, next: core::ptr::null_mut() };
     let w = &raw mut node;
     lock();
+    WAITERS.fetch_add(1, Ordering::SeqCst);
     if !same(address.cast(), compare.cast(), size) {
+        WAITERS.fetch_sub(1, Ordering::SeqCst);
         unlock();
         return TRUE;
     }
@@ -161,6 +171,9 @@ pub extern "system" fn WaitOnAddress(
     }
     lock();
     let mine = remove(w);
+    if mine {
+        WAITERS.fetch_sub(1, Ordering::SeqCst);
+    }
     unlock();
     if !mine {
         // A waker took the node: its release is coming.
@@ -176,6 +189,11 @@ pub extern "system" fn WaitOnAddress(
 
 /// Wakes the waiters on `address` (one, or all).
 fn wake(address: usize, all: bool) {
+    // Orders the caller's change of the value before reading the count.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    if WAITERS.load(Ordering::SeqCst) == 0 {
+        return;
+    }
     let e = EVENT.load(Ordering::Acquire);
     if e == 0 {
         return; // nobody ever waited
@@ -192,6 +210,7 @@ fn wake(address: usize, all: bool) {
                 *link = (*w).next;
                 (*w).next = taken;
                 taken = w;
+                WAITERS.fetch_sub(1, Ordering::SeqCst);
                 if !all {
                     break;
                 }

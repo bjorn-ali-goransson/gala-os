@@ -2332,6 +2332,16 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   NtQueryTimerResolution, and the critical sections: kernel32's
   Enter/LeaveCriticalSection call ntdll's RtlEnter/LeaveCriticalSection
   (one implementation, so a section works whichever DLL a program uses).
+  LockCount is -1 when free and, while taken, the number of waiters; an
+  entering thread spins 100 rounds, then counts itself in and sleeps on
+  a process-wide keyed event keyed by the section's address. A leaving
+  owner with waiters hands the section to one of them (releasing the
+  key, which waits until that waiter is there): no wake is lost, no
+  waiter polls. Invariant: a blocked thread sleeps in the kernel, as on
+  Windows (`kernel32_sync_test` counts a blocked thread's context
+  switches); a thread that polls takes processor time from the one it
+  waits for. Without the keyed event (it could not be created: no
+  memory) the handover goes through OwningThread and waiters yield.
 
 ### kernel32
 
@@ -2355,10 +2365,17 @@ ntdll imports.
 - **Synchronization** (`sync.rs`): events and waits (single and
   multiple), semaphores, completion ports, waitable timers, SRW locks,
   condition variables, InitOnce and interlocked SLists. The lightweight
-  ones have no kernel object and wait by spinning, yielding, then
-  sleeping 1 ms at a time (TODO: a kernel address wait, as
-  WaitOnAddress, so that long waits sleep); every wake ends every wait,
-  which the API allows.
+  ones are one word with no kernel object: a waiter spins 64 rounds,
+  then sleeps on the word with WaitOnAddress (`address_wait.rs`) until
+  it changes; whoever changes it in a way waiters wait for wakes them
+  (an SRW lock's release to free, the last shared release, InitOnce's
+  end, a condition variable's wake: WakeConditionVariable wakes one
+  sleeper, and a waiter not yet asleep sees the counter moved and
+  returns, a spurious wake the API allows). A wake with nobody waiting
+  costs no system call (the waiter list is in the process). Invariant:
+  a blocked thread sleeps (see the critical sections in ntdll); the
+  thread pool's WaitFor*Callbacks still polls (Sleep(1)) until the
+  callbacks finish.
 - **Global and local memory** (`global.rs`; `kernel32_misc_test`):
   GMEM_FIXED/LMEM_FIXED memory is a process-heap block (at least one
   byte) and its pointer is the handle. Moveable memory is a handle to a
