@@ -11271,7 +11271,13 @@ fn webdriver_session(port: u16) -> Result {
         Ok((200, ref b)) if b.contains("\"ready\":true") => {}
         other => return Err(format!("GET /status: {other:?}")),
     }
-    let capabilities = r#"{"capabilities":{"alwaysMatch":{"goog:chromeOptions":{"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrd","--enable-logging","--log-file=C:\\chromium\\chrome_driven.log","--ipc-connection-timeout=120"]}}}}"#;
+    // Stopgap (ROADMAP BR, "Chrome's start-up"): browserStartupTimeout
+    // 180 s instead of ChromeDriver's 60 s. Measured: the browser's UI
+    // thread answers DevTools' /json/version only after its start-up work
+    // (a CPU-bound UI thread: image page faults and relocation, lockdep in
+    // the test kernel, Chrome's own code), 40-70 s after launch under TCG
+    // with the gate's load. Removed once Chrome starts within 60 s there.
+    let capabilities = r#"{"capabilities":{"alwaysMatch":{"goog:chromeOptions":{"browserStartupTimeout":180000,"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrd","--enable-logging","--log-file=C:\\chromium\\chrome_driven.log","--ipc-connection-timeout=120"]}}}}"#;
     let (status, body) = webdriver(port, "POST", "/session", capabilities, 600)?;
     let Some(id) = json_string(&body, "sessionId").filter(|_| status == 200) else {
         return Err(format!("POST /session: {status} {body}"));

@@ -2137,6 +2137,17 @@ Each entry: what, why it matters, the structural fix, the owning item.
   by running the same pinned binary on a Linux machine (or a Linux VM
   xtask boots), and let `lx-expect` regenerate them. Item LX.
 
+- **ChromeDriver's `browserStartupTimeout` at 180 s** (`chromium_driver`,
+  `chromium_wpt`; ChromeDriver's default is 60 s): ChromeDriver gives up
+  when the browser's DevTools server has not answered `/json/version`
+  by then. The browser's UI thread answers only after its start-up work,
+  40-70 s after launch under TCG with the gate's load; profiled, that
+  thread is CPU-bound (no long waits): image page faults with their
+  relocation, lockdep in the test kernel, Chromium's own code.
+  Structural fix: Chrome's start-up under 60 s in the gate (the BR
+  profile-hotspots item: the start-up's kernel share, fewer page
+  faults); then the capability goes. Item BR.
+
 - **`--no-sandbox` in the Chromium scenarios**: Chromium's renderers
   normally run in a sandbox (restricted, low-integrity and
   AppContainer/LowBox tokens, job objects, process mitigation
