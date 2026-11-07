@@ -398,17 +398,25 @@ pub fn dump() {
             bare.unwrap_or(""),
         );
         dump_stations(d.session);
-        for b in d.shell.recent_buttons().iter().flatten() {
+        let (recent, dropped, waiting) = d.shell.recent_input();
+        log!(
+            info,
+            "statedump: session {} input queue: {} waiting, {} dropped (full)",
+            d.session,
+            waiting,
+            dropped
+        );
+        let now = crate::nt::platform::monotonic_ns();
+        for b in recent.iter().flatten() {
             log!(
                 info,
-                "statedump: session {} button {:#x} at ({}, {}) to window {}{} ({} ms ago)",
+                "statedump: session {} {} to window {}{} ({} ms ago), {}",
                 d.session,
-                b.message,
-                b.x,
-                b.y,
+                InputWhat(b),
                 b.window,
                 if b.captured { " (its capture)" } else { "" },
-                crate::nt::platform::monotonic_ns().saturating_sub(b.t) / 1_000_000,
+                now.saturating_sub(b.t) / 1_000_000,
+                InputFate(b),
             );
         }
         let mut top = [super::window::Info::default(); 16];
@@ -625,5 +633,37 @@ mod tests {
         assert_eq!(window_stations_path(3).unwrap(), w("\\Sessions\\3\\Windows\\WindowStations"));
         a.windows.process_ended(1101);
         b.windows.process_ended(1201);
+    }
+}
+
+/// A noted input as the state dump names it: a button with its screen
+/// point, a key with its virtual key.
+struct InputWhat<'a>(&'a crate::nt::winstate::InputNote);
+
+impl core::fmt::Display for InputWhat<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let b = self.0;
+        if (0x100..=0x105).contains(&b.message) {
+            write!(f, "key {:#x} vk {:#x}", b.message, b.x)
+        } else {
+            write!(f, "button {:#x} at ({}, {})", b.message, b.x, b.y)
+        }
+    }
+}
+
+/// What became of a noted input: taken by its program (after how long),
+/// dropped by the full queue, or still waiting.
+struct InputFate<'a>(&'a crate::nt::winstate::InputNote);
+
+impl core::fmt::Display for InputFate<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let b = self.0;
+        if b.dropped {
+            f.write_str("dropped (queue full)")
+        } else if b.taken == 0 {
+            f.write_str("not taken by its program")
+        } else {
+            write!(f, "taken after {} ms", b.taken.saturating_sub(b.t) / 1_000_000)
+        }
     }
 }

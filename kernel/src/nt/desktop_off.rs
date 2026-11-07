@@ -91,11 +91,12 @@ impl Shell {
         (d.windows.len(), d.live, Kind::None, Some(BARE))
     }
 
-    /// No desktop delivers mouse buttons here.
-    pub fn recent_buttons(
+    /// No desktop delivers input here.
+    pub fn recent_input(
         &self,
-    ) -> [Option<crate::nt::winstate::ButtonNote>; crate::nt::winstate::RECENT_BUTTONS] {
-        [None; crate::nt::winstate::RECENT_BUTTONS]
+    ) -> ([Option<crate::nt::winstate::InputNote>; crate::nt::winstate::RECENT_INPUT], u64, usize)
+    {
+        ([None; crate::nt::winstate::RECENT_INPUT], 0, 0)
     }
 }
 

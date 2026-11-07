@@ -17,6 +17,16 @@ body { margin: 0; background: #2e8b57; color: #ffffff; font: 32px sans-serif; }
 // After two frames the page has been painted; the log line (Chromium's
 // CONSOLE lines in the serial log) is the screen check's marker.
 requestAnimationFrame(() => requestAnimationFrame(() => console.log("gala window painted")));
+// The page's own view of the mouse: each press and click with where it
+// landed (a click that never reaches the page is told from one that
+// does).
+for (const kind of ["mousedown", "click"]) {
+  document.addEventListener(kind, (e) => console.log(
+    "gala " + kind + " at " + e.clientX + "," + e.clientY + " on " +
+    (e.target.id || e.target.tagName)), true);
+}
+document.addEventListener("keydown", (e) => console.log(
+  "gala keydown " + e.key + " on " + (e.target.id || e.target.tagName)), true);
 // Typing (keys from the keyboard, no IME): the field's focus and its
 // text are the screen check's markers.
 const text = document.getElementById("text");

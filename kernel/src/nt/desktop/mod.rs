@@ -1645,17 +1645,19 @@ impl Shell {
         (d.s.windows.len(), d.s.live, d.presenter.kind(), d.bare)
     }
 
-    /// The last mouse buttons the desktop delivered, oldest first (the
-    /// state dump's lines).
-    pub fn recent_buttons(
+    /// The last mouse buttons and keys the desktop delivered, oldest
+    /// first, and how many inputs the full queue dropped (the state
+    /// dump's lines).
+    pub fn recent_input(
         &self,
-    ) -> [Option<crate::nt::winstate::ButtonNote>; crate::nt::winstate::RECENT_BUTTONS] {
+    ) -> ([Option<crate::nt::winstate::InputNote>; crate::nt::winstate::RECENT_INPUT], u64, usize)
+    {
         let d = self.d.lock();
-        let mut out = [None; crate::nt::winstate::RECENT_BUTTONS];
-        for (slot, b) in out.iter_mut().zip(d.s.recent_buttons()) {
+        let mut out = [None; crate::nt::winstate::RECENT_INPUT];
+        for (slot, b) in out.iter_mut().zip(d.s.recent_input()) {
             *slot = Some(*b);
         }
-        out
+        (out, d.s.input_dropped, d.s.input.len())
     }
 }
 

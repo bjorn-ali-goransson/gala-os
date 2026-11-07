@@ -98,6 +98,11 @@ pub struct InputEvent {
     pub lparam: u64,
 }
 
+/// Messages `recent_input` notes: mouse buttons and keys.
+fn is_noted(message: u32) -> bool {
+    matches!(message, 0x0100..=0x0105 | 0x0201..=0x020d)
+}
+
 /// Where Snap puts a window (Win+arrow keys, `gala snap`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapTo {
@@ -374,27 +379,34 @@ pub struct State<X> {
     /// (GalaWindowListen), and the processes with new input.
     listeners: Vec<(u64, ObjectRef)>,
     woken: Vec<u64>,
-    /// The last mouse buttons delivered (`note_button`), newest at
-    /// `buttons_at - 1`: the state dump shows them, so a click a program
-    /// did not act on shows where it went without a trace switched on
-    /// (one that changes the timing it is about).
-    recent_buttons: [ButtonNote; RECENT_BUTTONS],
-    buttons_at: usize,
+    /// The last mouse buttons and keys delivered (`note_button`,
+    /// `key`), newest at `input_at - 1`, each with when its program took
+    /// it: the state dump shows them, so input a program did not act on
+    /// shows where it went and whether the program had it, without a
+    /// trace switched on (one that changes the timing it is about).
+    recent_input: [InputNote; RECENT_INPUT],
+    input_at: usize,
+    /// Input dropped because the queue was full (MAX_INPUT).
+    pub input_dropped: u64,
 }
 
-/// How many deliveries `recent_buttons` keeps.
-pub const RECENT_BUTTONS: usize = 8;
+/// How many deliveries `recent_input` keeps.
+pub const RECENT_INPUT: usize = 16;
 
-/// A mouse button delivered: when (monotonic ns), the message, the
-/// screen point, the window, whether a capture took it.
+/// A mouse button or key delivered: when (monotonic ns), the message,
+/// the screen point (a key: x its virtual key), the window, whether a
+/// capture took it; when the program took it from the queue (0: not
+/// yet), whether the full queue dropped it first.
 #[derive(Clone, Copy, Default, Debug)]
-pub struct ButtonNote {
+pub struct InputNote {
     pub t: u64,
     pub message: u32,
     pub x: i64,
     pub y: i64,
     pub window: u32,
     pub captured: bool,
+    pub taken: u64,
+    pub dropped: bool,
 }
 
 impl<X: Default> State<X> {
@@ -412,22 +424,50 @@ impl<X: Default> State<X> {
             input: Vec::new(),
             listeners: Vec::new(),
             woken: Vec::new(),
-            recent_buttons: [ButtonNote {
+            recent_input: [InputNote {
                 t: 0,
                 message: 0,
                 x: 0,
                 y: 0,
                 window: 0,
                 captured: false,
-            }; RECENT_BUTTONS],
-            buttons_at: 0,
+                taken: 0,
+                dropped: false,
+            }; RECENT_INPUT],
+            input_at: 0,
+            input_dropped: 0,
         }
     }
 
-    /// The last mouse buttons delivered, oldest first.
-    pub fn recent_buttons(&self) -> impl Iterator<Item = &ButtonNote> {
-        let n = self.buttons_at.min(RECENT_BUTTONS);
-        (self.buttons_at - n..self.buttons_at).map(|i| &self.recent_buttons[i % RECENT_BUTTONS])
+    /// The last mouse buttons and keys delivered, oldest first.
+    pub fn recent_input(&self) -> impl Iterator<Item = &InputNote> {
+        let n = self.input_at.min(RECENT_INPUT);
+        (self.input_at - n..self.input_at).map(|i| &self.recent_input[i % RECENT_INPUT])
+    }
+
+    /// Records a delivery in `recent_input`.
+    fn note_input(&mut self, note: InputNote) {
+        self.recent_input[self.input_at % RECENT_INPUT] = note;
+        self.input_at += 1;
+    }
+
+    /// The oldest note of `window`'s `message` neither taken nor dropped
+    /// (buttons and keys reach a window in order), marked as taken now
+    /// or as dropped.
+    fn settle_note(&mut self, window: u32, message: u32, dropped: bool) {
+        let n = self.input_at.min(RECENT_INPUT);
+        for i in self.input_at - n..self.input_at {
+            let note = &mut self.recent_input[i % RECENT_INPUT];
+            if note.window == window && note.message == message && note.taken == 0 && !note.dropped
+            {
+                if dropped {
+                    note.dropped = true;
+                } else {
+                    note.taken = crate::nt::platform::monotonic_ns().max(1);
+                }
+                return;
+            }
+        }
     }
 
     pub fn shadow(&self) -> Shadow {
@@ -772,6 +812,11 @@ impl<X: Default> State<X> {
                 true
             }
         });
+        for i in 0..n {
+            if is_noted(out[i].message) {
+                self.settle_note(out[i].window, out[i].message, false);
+            }
+        }
         n
     }
 
@@ -794,7 +839,11 @@ impl<X: Default> State<X> {
             return;
         }
         if self.input.len() >= MAX_INPUT {
-            self.input.remove(0);
+            let lost = self.input.remove(0);
+            self.input_dropped += 1;
+            if is_noted(lost.message) {
+                self.settle_note(lost.window, lost.message, true);
+            }
         }
         let _ = self.input.try_push(InputEvent { owner, window, message, wparam, lparam });
         if !self.woken.contains(&owner) {
@@ -847,6 +896,17 @@ impl<X: Default> State<X> {
         // Where a key went (`events=window`): a program that does not
         // react to one shows whether it had it.
         let owner = self.window(id).map_or(0, |w| w.owner);
+        let t = crate::nt::platform::monotonic_ns();
+        self.note_input(InputNote {
+            t,
+            message,
+            x: i64::from(vk),
+            y: 0,
+            window: id,
+            captured: false,
+            taken: 0,
+            dropped: false,
+        });
         crate::events::emit(
             crate::events::Category::Window,
             "key",
@@ -863,9 +923,16 @@ impl<X: Default> State<X> {
     /// and where it had it.
     pub fn note_button(&mut self, id: u32, message: u32, x: i64, y: i64, captured: bool) {
         let t = crate::nt::platform::monotonic_ns();
-        self.recent_buttons[self.buttons_at % RECENT_BUTTONS] =
-            ButtonNote { t, message, x, y, window: id, captured };
-        self.buttons_at += 1;
+        self.note_input(InputNote {
+            t,
+            message,
+            x,
+            y,
+            window: id,
+            captured,
+            taken: 0,
+            dropped: false,
+        });
         let owner = self.window(id).map_or(0, |w| w.owner);
         crate::events::emit(
             crate::events::Category::Window,

@@ -379,12 +379,15 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    futex waiter (`lx: futex waiter: pid P address A bitset B thread
    T`), the statistics, each session's
    windows (`statedump: session N: ... windows ...`) and window stations
-   (`statedump: session N window stations: WinSta0 ...`), the last
-   mouse buttons its desktop delivered (`statedump: session N button
-   0x201 at (x, y) to window W ... ms ago`: kept whether or not
-   `events=window` is on, so a click a program ignored shows where it
-   went in a run whose timing a trace would change), then
-   `statedump: end`. A machine too stuck for this still has part 1.
+   (`statedump: session N window stations: WinSta0 ...`), its input
+   queue (`statedump: session N input queue: K waiting, D dropped
+   (full)`) and the last 16 mouse buttons and keys its desktop
+   delivered, each with what became of it (`statedump: session N button
+   0x201 at (x, y) to window W ... ms ago, taken after M ms`, `key
+   0x100 vk 0x47 ...`, `not taken by its program`, `dropped (queue
+   full)`: kept whether or not `events=window` is on, so input a
+   program ignored shows where it went and whether the program took it,
+   in a run whose timing a trace would change), then `statedump: end`. A machine too stuck for this still has part 1.
 
 xtask's line says how far the dump got (`did not answer the NMI`: the
 machine is wedged or the handler is not installed yet).

@@ -881,3 +881,35 @@ fn a_bare_desktop_keeps_windows_and_draws_nothing() {
     d.destroy_owned(1);
     assert!(d.s.window(a).is_none() && d.list().is_empty());
 }
+
+#[test]
+fn delivered_input_is_noted_until_its_program_takes_it() {
+    let (mut d, a) = desktop_with_window();
+    // A click in the client area: its press and release are noted, not
+    // yet taken.
+    click(&mut d, 500, 300);
+    let fresh: Vec<_> = d.s.recent_input().copied().collect();
+    let presses: Vec<_> = fresh
+        .iter()
+        .filter(|n| n.window == a && (n.message == WM_LBUTTONDOWN || n.message == WM_LBUTTONUP))
+        .collect();
+    assert_eq!(presses.len(), 2);
+    assert!(presses.iter().all(|n| n.taken == 0 && !n.dropped));
+    // The program takes its input: both are marked taken.
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    let taken: Vec<_> =
+        d.s.recent_input()
+            .filter(|n| n.window == a && (n.message == WM_LBUTTONDOWN || n.message == WM_LBUTTONUP))
+            .map(|n| n.taken != 0)
+            .collect();
+    assert_eq!(taken, [true, true]);
+    // A second click stays "not taken" until the program asks again.
+    click(&mut d, 500, 300);
+    let waiting =
+        d.s.recent_input()
+            .filter(|n| n.window == a && n.message == WM_LBUTTONDOWN && n.taken == 0)
+            .count();
+    assert_eq!(waiting, 1);
+    assert_eq!(d.s.input_dropped, 0);
+}
