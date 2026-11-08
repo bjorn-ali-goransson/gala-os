@@ -288,7 +288,17 @@ $scripts = @(
 )
 foreach ($s in $scripts) {
     $path = Join-Path $here $s.path
-    if (-not (Test-Path $path) -or -not (Test-Path (Join-Path $here "busybox.exe"))) { continue }
+    # A scenario that cannot run is reported as skipped with the reason
+    # (its script or busybox.exe missing: not copied, or quarantined), so
+    # the report's count does not drop silently.
+    $why = $null
+    if (-not (Test-Path (Join-Path $here "busybox.exe"))) { $why = "busybox.exe is missing" }
+    elseif (-not (Test-Path $path)) { $why = "$($s.path) not found" }
+    if ($why) {
+        $results += [ordered]@{ program = $s.name; exit = $null; line = ""; skipped = $why }
+        Write-Host ("{0,-18} skipped: {1}" -f $s.name, $why)
+        continue
+    }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     # PowerShell 5.1 turns each line a native program writes to stderr into
     # an ErrorRecord when stderr is redirected, so with $ErrorActionPreference

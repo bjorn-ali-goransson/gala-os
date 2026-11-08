@@ -207,7 +207,10 @@ there, then `cargo xtask compare windows.json` here. Before the run
 there: a local account `galatest` with password `Gala-Test-1` (access,
 disk, logon, lsa, profile, session and system tests log on as it) and
 an administrator prompt for `schannel_test` (its test CA goes into
-LocalMachine\Root; it is skipped otherwise). A program that crashes
+LocalMachine\Root; it is skipped otherwise). The script scenarios need
+`user/busybox`, `user/tcc`, `user/lua`, `user/sqlite` and
+`user/msvcrt_test` copied beside `user/bin`; one whose script or
+`busybox.exe` is missing is reported as skipped with that reason. A program that crashes
 gets a `fault` field (`module+offset (exception code)`) from the
 Application log's event 1000; map the offset to a function with the
 build's PDB of that module. `cargo xtask
