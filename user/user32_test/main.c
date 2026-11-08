@@ -93,6 +93,10 @@
  *   ERROR_CLASS_ALREADY_EXISTS); ImmNotifyIME of no input context fails,
  *   leaving ERROR_SUCCESS for NULL and ERROR_INVALID_HANDLE for a handle
  *   that is no context (Wine's imm32.c records Windows' answers).
+ * - What Mesa's llvmpipe imports: RegisterClassA (as RegisterClassExA),
+ *   CreateWindowExA of that class; WindowFromDC of GetDC's DC is the
+ *   window, of a memory DC NULL; EnumDisplaySettingsA's current mode is
+ *   the screen's size, at least 24 bits per pixel, in DEVMODEA's layout.
  * - RegisterWindowMessageW: a message in 0xC000-0xFFFF, the same for the
  *   same name in any case, another for another name.
  * - Child windows (WS_CHILD): GetParent, GetDlgCtrlID/GetDlgItem (the id
@@ -618,6 +622,43 @@ static void scintilla_imports(void) {
     CHECK(!ImmNotifyIME(NULL, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_SUCCESS);
     SetLastError(0xdeadbeef);
     CHECK(!ImmNotifyIME((HIMC)0xdeadcafe, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_INVALID_HANDLE);
+}
+
+/* What Mesa's llvmpipe (libgallium_wgl.dll) imports besides: RegisterClassA
+ * registers a class CreateWindowExA finds by its name (again:
+ * ERROR_CLASS_ALREADY_EXISTS); EnumDisplaySettingsA's current mode is the
+ * screen's size (SM_CXSCREEN x SM_CYSCREEN), in DEVMODEA's own layout. */
+static void mesa_imports(void) {
+    WNDCLASSA wca;
+    memset(&wca, 0, sizeof wca);
+    wca.lpfnWndProc = DefWindowProcA;
+    wca.hInstance = GetModuleHandleW(NULL);
+    wca.lpszClassName = "User32TestAnsiPlain";
+    ATOM atom = RegisterClassA(&wca);
+    CHECK(atom >= 0xC000);
+    SetLastError(0);
+    CHECK(!RegisterClassA(&wca) && GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+    HWND w = CreateWindowExA(0, "User32TestAnsiPlain", "ansi", WS_POPUP, 0, 0, 10, 10, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    wchar_t cls[32];
+    CHECK(w != NULL && GetClassNameW(w, cls, 32) == 19 && wcscmp(cls, L"User32TestAnsiPlain") == 0);
+    /* WindowFromDC: the window a DC from GetDC draws on; a memory DC has
+     * none. */
+    HDC dc = GetDC(w);
+    CHECK(dc != NULL && WindowFromDC(dc) == w);
+    HDC mem = CreateCompatibleDC(dc);
+    CHECK(mem != NULL && WindowFromDC(mem) == NULL);
+    DeleteDC(mem);
+    ReleaseDC(w, dc);
+    CHECK(DestroyWindow(w));
+    DEVMODEA mode;
+    memset(&mode, 0, sizeof mode);
+    mode.dmSize = sizeof mode;
+    CHECK(EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &mode));
+    CHECK(mode.dmPelsWidth == (DWORD)GetSystemMetrics(SM_CXSCREEN));
+    CHECK(mode.dmPelsHeight == (DWORD)GetSystemMetrics(SM_CYSCREEN));
+    CHECK((mode.dmFields & (DM_PELSWIDTH | DM_PELSHEIGHT)) == (DM_PELSWIDTH | DM_PELSHEIGHT));
+    CHECK(mode.dmBitsPerPel >= 24);
 }
 
 static int monitors_seen;
@@ -1443,6 +1484,7 @@ int main(void) {
     menu_bar();
     menu_bar_info();
     scintilla_imports();
+    mesa_imports();
     monitors();
     menus();
     children();

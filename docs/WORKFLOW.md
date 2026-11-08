@@ -436,6 +436,31 @@ is not visible (the firmware's framebuffer is no longer shown): read the
 serial log. The kernel flag `gputrace` logs every command; `events=display`
 the modes, resets and errors.
 
+Software 3D (GPU G2) needs no device: its scenarios run Mesa (PREBUILT
+`mesa`) on the CPU and check a headless desktop's frame
+(`presenter=test`, BIOS). `gl_test` (user/gl_test, C, `build.sh`) is
+OpenGL on llvmpipe, `vk_test` (user/vk_test, C; its `build.sh` needs
+`glslangValidator`, apt `glslang-tools`, and clones the pinned
+Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
+`vulkan-runtime`), about 10 s each under TCG. When one fails:
+
+- Read the ledger first: `missing export` stops a load; `missing dll`
+  for d3d12/vulkan-1 is Mesa looking for drivers, D3DKMT* and
+  IDXGIFactory6 the Vulkan loader probing (not failures).
+- A crash report inside `vulkan-1.dll`: `llvm-symbolizer
+  --obj=target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll
+  0x180000000+<offset>` names the loader's source line (its PDB is
+  unpacked beside it; the loader's source is
+  github.com/KhronosGroup/Vulkan-Loader at the same version).
+- vk_test printing `skipped (no Vulkan driver)` means the loader found
+  no driver: the Drivers key (the scenario's `registry` module), the
+  manifest and `vulkan_lvp.dll` in System32, and `dxgi.dll` (the loader
+  takes no driver from the key without a DXGI factory).
+- Mesa's own `MESA:` lines are in the serial log.
+- A frame that renders (the read-back pixels are right) but is not on
+  the screen is user32's presentation of a kept DC (ARCHITECTURE
+  "Software 3D (G2)").
+
 ### Test speed and environments
 
 - **BIOS boot by default.** ISOs are hybrid (BIOS and UEFI). SeaBIOS
@@ -826,7 +851,11 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   guessed time while xtask looks; it waits for xtask's input
   (console_window's "q"), and a step whose input acts on output the
   program is still printing waits for that output (`ScreenStep::after`).
-  On the host side, timing xtask's own observations in a loop that does
+  A program that ends on xtask's input ends on the last thing xtask
+  sends: a click counts on WM_LBUTTONUP, not on the press, or under KVM
+  the program and QEMU are gone before xtask writes the release
+  ("screen: Broken pipe"; presenter_test, gl_test and vk_test count the
+  release). On the host side, timing xtask's own observations in a loop that does
   other work is the same mistake: xtask times `uptime_ms=` marks in a
   thread of its own.
 - **Single-CPU tests that measure ticks** pin themselves
@@ -1562,8 +1591,9 @@ it on first use.
   `busybox`) names only that file as its one member, the URL's last
   component: the download is kept as it is.
 - Unpackers: unzip for zips, msitools' `msiextract` for an MSI (`apt
-  install msitools`), 7-Zip (`7z` from p7zip-full) for an NSIS installer
-  or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
+  install msitools`), 7-Zip (`7z` from p7zip-full) for a `.7z` archive
+  (mesa-dist-win's; members are file paths such as
+  `x64/opengl32.dll`), an NSIS installer or a 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
   package: FlaUI) is a plain zip, its members paths such as
   `lib/net8.0-windows7.0/FlaUI.Core.dll`; a Debian package (`.deb`:

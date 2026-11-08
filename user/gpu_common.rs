@@ -1,6 +1,7 @@
 // Shared by gala's GPU stub DLLs (dxgi, d3d11, d3d12, dcomp; ROADMAP
 // GPU G0), included by each with `include!`: gala has no Direct3D
-// adapter yet (G2 brings software 3D), so the entry points fail as they
+// adapter (G2's software 3D comes as DXVK and vkd3d-proton beside the
+// programs that use them), so the device entry points fail as they
 // do on Windows when the system cannot provide what is asked:
 // DXGI_ERROR_UNSUPPORTED, the output pointers set to NULL, each call
 // recorded in the ledger (`<dll>!<function>`, unsupported) so a program

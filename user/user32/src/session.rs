@@ -395,10 +395,12 @@ pub extern "system" fn SetWindowDisplayAffinity(hwnd: usize, _affinity: u32) -> 
     1
 }
 
-/// WindowFromDC: gala's DCs are not tied to windows it can name (NULL).
+/// WindowFromDC: the window of a DC GetDC, GetWindowDC or BeginPaint
+/// handed out and not yet released; NULL for others (memory DCs, the
+/// screen's).
 #[unsafe(no_mangle)]
-pub extern "system" fn WindowFromDC(_dc: usize) -> usize {
-    0
+pub extern "system" fn WindowFromDC(dc: usize) -> usize {
+    super::window::dc_window(dc)
 }
 
 // ---- Window properties (SetProp/GetProp/RemoveProp) -----------------------
@@ -779,6 +781,37 @@ pub extern "system" fn EnumDisplaySettingsW(
         devmode.add(172).cast::<u32>().write_unaligned(w as u32);
         devmode.add(176).cast::<u32>().write_unaligned(h as u32);
         devmode.add(184).cast::<u32>().write_unaligned(60);
+    }
+    1
+}
+
+/// EnumDisplaySettingsA: EnumDisplaySettingsW's mode in DEVMODEA's
+/// layout (32-byte names: dmSize at 36, dmFields at 40, dmBitsPerPel at
+/// 104, the size at 108 and 112, the frequency at 120).
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumDisplaySettingsA(
+    _device: *const u8,
+    mode: u32,
+    devmode: *mut u8,
+) -> i32 {
+    if devmode.is_null() {
+        return 0;
+    }
+    let mut wide = [0u8; 220];
+    wide[68..70].copy_from_slice(&220u16.to_le_bytes());
+    if EnumDisplaySettingsW(core::ptr::null(), mode, wide.as_mut_ptr()) == 0 {
+        return 0;
+    }
+    let field =
+        |at: usize| u32::from_le_bytes([wide[at], wide[at + 1], wide[at + 2], wide[at + 3]]);
+    // SAFETY: the caller's DEVMODEA (dmSize says how much; 156 bytes).
+    unsafe {
+        let size = usize::from(devmode.add(36).cast::<u16>().read_unaligned()).max(124);
+        core::ptr::write_bytes(devmode.add(40), 0, size.min(156) - 40);
+        devmode.add(40).cast::<u32>().write_unaligned(field(72));
+        for (a, w) in [(104, 168), (108, 172), (112, 176), (120, 184)] {
+            devmode.add(a).cast::<u32>().write_unaligned(field(w));
+        }
     }
     1
 }

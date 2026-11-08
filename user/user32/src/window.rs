@@ -916,6 +916,33 @@ pub extern "system" fn RegisterClassW(wc: *const WndClassW) -> u16 {
     RegisterClassExW(&ex)
 }
 
+/// RegisterClassA: RegisterClassW with the names widened (WNDCLASSA has
+/// WNDCLASSW's layout), as RegisterClassExA.
+#[unsafe(no_mangle)]
+pub extern "system" fn RegisterClassA(wc: *const WndClassW) -> u16 {
+    if wc.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // SAFETY: the caller's WNDCLASSA.
+    let wc = unsafe { &*wc };
+    let ex = WndClassExW {
+        size: size_of::<WndClassExW>() as u32,
+        style: wc.style,
+        proc_: wc.proc_,
+        class_extra: wc.class_extra,
+        window_extra: wc.window_extra,
+        instance: wc.instance,
+        icon: wc.icon,
+        cursor: wc.cursor,
+        background: wc.background,
+        menu_name: wc.menu_name,
+        class_name: wc.class_name,
+        icon_small: core::ptr::null_mut(),
+    };
+    RegisterClassExA(&ex)
+}
+
 // ---- Windows ----
 
 #[repr(C)]
@@ -1468,16 +1495,135 @@ impl PaintStruct {
 }
 
 /// A DC on the window's client area (a child's: its part of the
-/// top-level window's buffer).
+/// top-level window's buffer), registered as handed out (`keep_dc`).
 fn client_dc(hwnd: Hwnd) -> Handle {
     let Some(g) = gdi() else { return core::ptr::null_mut() };
     let Some((root, offset, visible)) = crate::tree::placement(hwnd) else {
         return core::ptr::null_mut();
     };
-    if offset == (0, 0) && window(hwnd).is_some_and(|w| w.parent == 0) {
-        return (g.create_dc)(root.pixels, root.cw, root.ch, root.cw);
+    let hdc = if offset == (0, 0) && window(hwnd).is_some_and(|w| w.parent == 0) {
+        (g.create_dc)(root.pixels, root.cw, root.ch, root.cw)
+    } else {
+        (g.create_child_dc)(root.pixels, root.cw, root.ch, root.cw, offset.0, offset.1, &visible)
+    };
+    keep_dc(hdc, hwnd);
+    hdc
+}
+
+// ---- Window DCs a program keeps ----
+//
+// What a window's DC draws goes to the window's buffer and shows at
+// ReleaseDC or EndPaint (`present`). A program may keep its DC instead
+// (CS_OWNDC; an OpenGL program, whose SwapBuffers has the ICD draw the
+// frame into it): at the thread's idle moments (`flush`) a DC still out
+// shows the whole window the first time and from then on what it drew
+// (its bounds, which gdi32 accumulates once asked: short GetDC/ReleaseDC
+// pairs never pay for that). The table also answers WindowFromDC.
+
+/// DCs out at once; more are not tracked (in the ledger: their drawing
+/// shows at ReleaseDC only, and WindowFromDC gives NULL for them).
+const KEPT_DCS: usize = 64;
+
+#[derive(Clone, Copy)]
+struct KeptDc {
+    hdc: usize,
+    hwnd: Hwnd,
+    /// Bounds accumulate (it was out at an idle moment).
+    bounded: bool,
+}
+
+const NO_KEPT: KeptDc = KeptDc { hdc: 0, hwnd: 0, bounded: false };
+
+struct KeptTable {
+    lock: AtomicBool,
+    dcs: UnsafeCell<[KeptDc; KEPT_DCS]>,
+}
+
+// SAFETY: `dcs` is only reached under `lock`.
+unsafe impl Sync for KeptTable {}
+
+static KEPT: KeptTable =
+    KeptTable { lock: AtomicBool::new(false), dcs: UnsafeCell::new([NO_KEPT; KEPT_DCS]) };
+/// How many entries are in use (`flush` skips the table when none).
+static KEPT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn with_kept<R>(f: impl FnOnce(&mut [KeptDc; KEPT_DCS]) -> R) -> R {
+    while KEPT.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
     }
-    (g.create_child_dc)(root.pixels, root.cw, root.ch, root.cw, offset.0, offset.1, &visible)
+    // SAFETY: the lock is held.
+    let r = f(unsafe { &mut *KEPT.dcs.get() });
+    KEPT.lock.store(false, Ordering::Release);
+    r
+}
+
+fn keep_dc(hdc: Handle, hwnd: Hwnd) {
+    if hdc.is_null() {
+        return;
+    }
+    let kept = with_kept(|t| match t.iter_mut().find(|k| k.hdc == 0) {
+        Some(k) => {
+            *k = KeptDc { hdc: hdc as usize, hwnd, bounded: false };
+            KEPT_COUNT.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    });
+    if !kept {
+        unsupported(b"user32.dll!GetDC(more DCs out than tracked)", KEPT_DCS as u64);
+    }
+}
+
+/// The DC is released (ReleaseDC, EndPaint).
+fn forget_dc(hdc: Handle) {
+    with_kept(|t| {
+        if let Some(k) = t.iter_mut().find(|k| k.hdc == hdc as usize) {
+            *k = NO_KEPT;
+            KEPT_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// The window a DC handed out draws on (WindowFromDC), or 0.
+pub(crate) fn dc_window(hdc: usize) -> Hwnd {
+    if hdc == 0 || KEPT_COUNT.load(Ordering::Relaxed) == 0 {
+        return 0;
+    }
+    with_kept(|t| t.iter().find(|k| k.hdc == hdc).map_or(0, |k| k.hwnd))
+}
+
+/// Marks what DCs still out drew as due for the desktop (`flush`).
+fn present_kept() {
+    if KEPT_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let Some(g) = gdi() else { return };
+    let kept = with_kept(|t| *t);
+    for k in kept.iter().filter(|k| k.hdc != 0) {
+        if window(k.hwnd).is_none() {
+            // Its window is gone: nothing to show.
+            continue;
+        }
+        let hdc = k.hdc as Handle;
+        let drew = if k.bounded {
+            let mut drawn = [0i32; 4];
+            // DCB_RESET (1); DCB_SET (3) when something was drawn.
+            (g.get_bounds)(hdc, &mut drawn, 1) & 3 == 3
+        } else {
+            // DCB_ENABLE | DCB_RESET: accumulate from now on; what it drew
+            // before is not known, so all of it shows once.
+            (g.set_bounds)(hdc, core::ptr::null(), 4 | 1);
+            with_kept(|t| {
+                if let Some(e) = t.iter_mut().find(|e| e.hdc == k.hdc) {
+                    e.bounded = true;
+                }
+            });
+            true
+        };
+        if drew {
+            mark_dirty(k.hwnd);
+        }
+    }
 }
 
 /// A DC over `pixels` (w x h, rows `stride` pixels apart), or null.
@@ -1525,10 +1671,18 @@ const PRESENT_LAG: u32 = 50;
 /// (a screendump then caught it half done). Drawing that goes on without
 /// a break still shows every PRESENT_LAG ms.
 fn present(hwnd: Hwnd) {
-    let Some(i) = index_of(hwnd) else { return };
+    if let Some((root, true)) = mark_dirty(hwnd) {
+        flush_window(root);
+    }
+}
+
+/// Adds the window's area to its top-level window's damage: that
+/// window's slot, and whether its damage is older than PRESENT_LAG.
+fn mark_dirty(hwnd: Hwnd) -> Option<(usize, bool)> {
+    let i = index_of(hwnd)?;
     // SAFETY: a plain call.
     let now = unsafe { GetTickCount() };
-    let due = with(|s| {
+    with(|s| {
         if !s.windows[i].used {
             return None;
         }
@@ -1544,10 +1698,7 @@ fn present(hwnd: Hwnd) {
             crate::rect::union(w.dirty, [l, t, r, b])
         };
         Some((root, now.wrapping_sub(w.dirty_at) >= PRESENT_LAG))
-    });
-    if let Some((root, true)) = due {
-        flush_window(root);
-    }
+    })
 }
 
 /// Copies top-level window `i`'s drawn part to the desktop.
@@ -1580,8 +1731,10 @@ fn flush_window(i: usize) {
     };
 }
 
-/// Shows what was drawn and not yet shown, for every window (`present`).
+/// Shows what was drawn and not yet shown, for every window (`present`,
+/// and what DCs still out drew: `present_kept`).
 pub(crate) fn flush() {
+    present_kept();
     let mut pending = [0u64; MAX_WINDOWS / 64];
     let any = with(|s| {
         let mut any = false;
@@ -1640,9 +1793,11 @@ pub extern "system" fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32 {
         return 0;
     }
     present(hwnd);
+    // SAFETY: the PAINTSTRUCT BeginPaint filled.
+    let hdc = unsafe { (*ps).hdc };
+    forget_dc(hdc);
     if let Some(g) = gdi() {
-        // SAFETY: the PAINTSTRUCT BeginPaint filled.
-        (g.delete_dc)(unsafe { (*ps).hdc });
+        (g.delete_dc)(hdc);
     }
     1
 }
@@ -1669,6 +1824,7 @@ pub extern "system" fn ReleaseDC(hwnd: Hwnd, hdc: Handle) -> i32 {
         return crate::surface::release_foreign(hwnd, hdc).unwrap_or(0);
     }
     present(hwnd);
+    forget_dc(hdc);
     gdi().map_or(0, |g| (g.delete_dc)(hdc))
 }
 

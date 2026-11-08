@@ -7,7 +7,9 @@
 //!   (ERROR_PRIVILEGE_NOT_HELD), HeapQueryInformation (the
 //!   low-fragmentation heap, 2).
 //! - psapi's K32EnumProcessModules (the executable first; also through
-//!   psapi.dll's EnumProcessModules and GetModuleFileNameExA),
+//!   psapi.dll's EnumProcessModules and GetModuleFileNameExA) and
+//!   K32EnumProcessModulesEx (LIST_MODULES_DEFAULT and LIST_MODULES_ALL
+//!   give the same list in a 64-bit process),
 //!   K32GetModuleInformation, K32GetModuleFileNameExA, K32GetModuleBaseNameW
 //!   (the file name's last component),
 //!   K32GetProcessMemoryInfo; QueryFullProcessImageNameW;
@@ -78,6 +80,13 @@ unsafe extern "system" {
         ret: *mut usize,
     ) -> Bool;
     fn K32EnumProcessModules(h: Handle, mods: *mut Handle, size: u32, needed: *mut u32) -> Bool;
+    fn K32EnumProcessModulesEx(
+        h: Handle,
+        mods: *mut Handle,
+        size: u32,
+        needed: *mut u32,
+        filter: u32,
+    ) -> Bool;
     fn K32GetModuleInformation(h: Handle, module: Handle, info: *mut ModuleInfo, size: u32)
     -> Bool;
     fn K32GetModuleFileNameExA(h: Handle, module: Handle, buf: *mut u8, size: u32) -> u32;
@@ -371,6 +380,19 @@ fn process(c: &mut Checks) -> Result<(), u32> {
         let kernel32 = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         let count = (needed / 8) as usize;
         c.ok(mods[..count.min(32)].contains(&kernel32), 0)?;
+        // K32EnumProcessModulesEx (Mesa's llvmpipe calls it): in a 64-bit
+        // process LIST_MODULES_DEFAULT (0) and LIST_MODULES_ALL (3) list
+        // the same modules as K32EnumProcessModules.
+        for filter in [0, 3] {
+            let mut ex = [core::ptr::null_mut(); 32];
+            let mut needed_ex = 0;
+            c.ok(
+                K32EnumProcessModulesEx(me, ex.as_mut_ptr(), 256, &mut needed_ex, filter) != 0,
+                0,
+            )?;
+            c.eq(needed_ex.into(), needed.into())?;
+            c.ok(ex[..count.min(32)] == mods[..count.min(32)], filter.into())?;
+        }
 
         // psapi.dll's names for them (forwarded to kernel32 on Windows 7+).
         let mut via_psapi = [core::ptr::null_mut(); 32];
