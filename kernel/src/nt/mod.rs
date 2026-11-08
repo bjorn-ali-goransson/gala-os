@@ -1,11 +1,11 @@
 //! NT personality: the Windows user-mode ABI on top of the kernel core.
 
+pub mod abi;
 pub mod accounts;
 pub mod action;
 pub mod afd;
 pub mod charge;
 pub mod conhost;
-pub mod context;
 pub mod crashreport;
 #[cfg(feature = "shasha")]
 pub mod desktop;

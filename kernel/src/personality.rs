@@ -141,32 +141,19 @@ mod tests {
     use super::*;
 
     fn frame(number: u64) -> SyscallFrame {
-        SyscallFrame {
-            r15: 0,
-            r14: 0,
-            r13: 0,
-            r12: 0,
-            rbp: 0,
-            rbx: 0,
-            rsi: 0,
-            rdi: 0,
-            r9: 0,
-            r8: 0,
-            rdx: 0,
-            r10: 0,
-            rax: number,
-            rip: 0x1000,
-            rflags: 0x202,
-            rsp: 0x2000,
-        }
+        let mut regs = crate::arch::syscall::UserRegs::default();
+        regs.set_ip(0x1000);
+        regs.set_flags(0x202);
+        regs.set_sp(0x2000);
+        SyscallFrame::from_regs(&regs, number)
     }
 
     fn nt_handler(f: &mut SyscallFrame) {
-        f.rax |= 0x4e54_0000;
+        f.set_result(f.result() | 0x4e54_0000);
     }
 
     fn test_handler(f: &mut SyscallFrame) {
-        f.rax |= 0x7e57_0000;
+        f.set_result(f.result() | 0x7e57_0000);
     }
 
     /// A process of the second personality: its threads carry the
@@ -185,11 +172,11 @@ mod tests {
 
         let mut f = frame(0x12);
         assert_eq!(table.dispatch(other.personality, &mut f), Ok("test::syscalls"));
-        assert_eq!(f.rax, 0x7e57_0012, "the test dispatcher handled it, not NT's");
+        assert_eq!(f.result(), 0x7e57_0012, "the test dispatcher handled it, not NT's");
 
         let mut f = frame(0x12);
         assert_eq!(table.dispatch(windows.personality, &mut f), Ok("nt::syscalls"));
-        assert_eq!(f.rax, 0x4e54_0012, "NT stays the default");
+        assert_eq!(f.result(), 0x4e54_0012, "NT stays the default");
     }
 
     #[test]
@@ -198,7 +185,7 @@ mod tests {
         assert!(table.register(Personality::Nt, "nt::syscalls", nt_handler));
         let mut f = frame(0x12);
         assert_eq!(table.dispatch(Personality::Test, &mut f), Err(NoDispatcher(Personality::Test)));
-        assert_eq!(f.rax, 0x12, "nothing handled it");
+        assert_eq!(f.result(), 0x12, "nothing handled it");
     }
 
     #[test]

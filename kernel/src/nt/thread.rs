@@ -343,7 +343,7 @@ pub fn create_wow64(
     stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
-    let regs = UserRegs { gpr: [0; 16], rip: 0, rflags: 0 };
+    let regs = UserRegs::default();
     // As for 64-bit threads (`nt_create_thread`): the return register,
     // where kernel32's thunk takes the start routine; else the start eip.
     let win32_start = u64::from(if start.gpr[0] != 0 { start.gpr[0] } else { start.eip });
@@ -363,7 +363,7 @@ pub fn create_forked(
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
     let begin = Begin::Resume((Resume::User { regs, fx }, bases));
-    create_inner(process, regs, regs.rip, None, (0, 0, 0), suspended, begin)
+    create_inner(process, regs, regs.ip(), None, (0, 0, 0), suspended, begin)
 }
 
 /// A thread object's id (its NT ClientId thread; a Linux thread's core
@@ -415,12 +415,11 @@ fn create_inner(
     let (regs, teb32) = match (wow64, process.wow64.as_ref()) {
         (Some(start), Some(state)) => {
             let teb32 = super::wow64::allocate_teb32(process, state, teb_addr, id, &start)?;
-            let mut gpr = [0u64; 16];
-            gpr[1] = teb_addr + layout::wow64::TEB64_CPU_AREA;
-            // As if called: rsp % 16 == 8, a shadow area above.
-            gpr[4] = (start.stack64 & !0xf) - 0x28;
+            // As if called with its CPU area (rsp % 16 == 8, a shadow area
+            // above).
+            let area = teb_addr + layout::wow64::TEB64_CPU_AREA;
             let entry = state.start.load(Ordering::Relaxed);
-            (UserRegs { gpr, rip: entry, rflags: 0 }, teb32)
+            (super::abi::call_regs(entry, area, start.stack64 & !0xf), teb32)
         }
         (Some(_), None) => return Err(NtStatus::INVALID_PARAMETER),
         (None, _) => (regs, 0),
@@ -563,25 +562,7 @@ fn thread_entry(id: usize) {
             t.entered.store(true, Ordering::SeqCst);
             drop(object);
             platform::xrstor(&fx);
-            let g = &regs.gpr;
-            let mut frame = platform::SyscallFrame {
-                r15: g[15],
-                r14: g[14],
-                r13: g[13],
-                r12: g[12],
-                rbp: g[5],
-                rbx: g[3],
-                rsi: g[6],
-                rdi: g[7],
-                r9: g[9],
-                r8: g[8],
-                rdx: g[2],
-                r10: g[10],
-                rax: u64::from(number),
-                rip: regs.rip,
-                rflags: regs.rflags,
-                rsp: g[4],
-            };
+            let mut frame = platform::SyscallFrame::from_regs(&regs, u64::from(number));
             platform::reissue_syscall(&mut frame);
         }
         Some(Resume::User { regs, fx }) => {
@@ -1205,12 +1186,16 @@ pub fn dump() {
             continue;
         };
         let name = super::syscalls::service_name(number);
-        info!("thread:   {name} from rip {:#x}", regs.rip);
-        // Who called the system call stub: the return address on top of
-        // the user stack (the lock or wait in kernel32/ntdll a hang sits
-        // in), with its module.
+        info!("thread:   {name} from rip {:#x}", regs.ip());
+        // Argument `i` of the call (0 if unreadable).
+        let arg = |i: usize| match super::abi::saved_arg(&regs, i) {
+            super::abi::ArgSlot::Value(v) => v,
+            super::abi::ArgSlot::Stack(at) => t.process.read_u64(at).unwrap_or(0),
+        };
+        // Who called the system call stub: its return address (the lock
+        // or wait in kernel32/ntdll a hang sits in), with its module.
         if t.teb32 == 0
-            && let Ok(ret) = t.process.read_u64(regs.gpr[4])
+            && let Some(ret) = super::abi::stub_return_address(&t.process, &regs)
         {
             info!("thread:   called from {}", super::crashreport::At::of(&t.process, ret));
         }
@@ -1227,8 +1212,8 @@ pub fn dump() {
                 None => info!("thread:   called from 32-bit code (its CPU area is unreadable)"),
             }
         }
-        // The first argument (r10), as a handle: what a wait is on.
-        let handle = super::object::Handle(regs.gpr[10]);
+        // The first argument, as a handle: what a wait is on.
+        let handle = super::object::Handle(arg(0));
         if let Some(e) = t.process.handles.lock().get(handle) {
             if let ObjectBody::IoCompletion(c) = &e.object.body {
                 // A port is ready while it holds packets (its dispatcher
@@ -1254,7 +1239,7 @@ pub fn dump() {
             // argument), the pointer-sized value at it, and who else is
             // queued for it in this process.
             if let ObjectBody::KeyedEvent(_) = &e.object.body {
-                let key = regs.gpr[2];
+                let key = arg(1);
                 let queued = super::keyed_event::pending_for(&e.object, key, t.process.id);
                 match t.process.read_u64(key) {
                     Ok(v) => info!(
@@ -1275,9 +1260,10 @@ pub fn dump() {
                 );
             }
         }
-        // NtWaitForSingleObject's timeout (r8: *LARGE_INTEGER).
-        if name == "NtWaitForSingleObject" && regs.gpr[8] != 0 {
-            info!("thread:   timeout {:?}", t.process.read_u64(regs.gpr[8]).ok().map(|v| v as i64));
+        // NtWaitForSingleObject's timeout (the third argument:
+        // *LARGE_INTEGER).
+        if name == "NtWaitForSingleObject" && arg(2) != 0 {
+            info!("thread:   timeout {:?}", t.process.read_u64(arg(2)).ok().map(|v| v as i64));
         }
     }
 }

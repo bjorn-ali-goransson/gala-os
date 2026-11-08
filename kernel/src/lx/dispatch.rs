@@ -86,30 +86,24 @@ pub struct Call<'a> {
 }
 
 impl Call<'_> {
+    /// System call argument `i` (where the architecture's Linux ABI has
+    /// it: `machine::syscall_arg`).
     fn arg(&self, i: usize) -> u64 {
-        let f = self.frame;
-        [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9][i]
+        super::machine::syscall_arg(self.frame, i)
     }
 }
 
 pub type Result = core::result::Result<u64, u16>;
 
-/// The user registers a system call returns with through SYSRET: rcx
-/// holds the return address and r11 the flags (the `syscall`
+/// The user registers a system call returns with (x86-64's SYSRET: rcx
+/// holds the return address and r11 the flags, the `syscall`
 /// instruction's convention, which Linux programs expect).
 pub fn return_regs(f: &SyscallFrame) -> UserRegs {
-    UserRegs {
-        gpr: [
-            f.rax, f.rip, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10, f.rflags,
-            f.r12, f.r13, f.r14, f.r15,
-        ],
-        rip: f.rip,
-        rflags: f.rflags,
-    }
+    f.return_regs()
 }
 
 fn dispatch(frame: &mut SyscallFrame) {
-    let number = frame.rax;
+    let number = frame.number();
     let Some(me) = thread::current() else {
         panic!("linux syscall {number} from a thread without a process");
     };
@@ -120,7 +114,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     crate::flight::record(crate::flight::Kind::Syscall, number | (process.id << 32), tid);
     let Some(lx) = state::get(process.id) else {
         crate::warn!("lx: pid {}: system call {number} with no Linux state", process.id);
-        frame.rax = errno::to_return(ENOSYS);
+        frame.set_result(errno::to_return(ENOSYS));
         return;
     };
     let call = Call { process, lx, frame, tid, resume: Cell::new(None) };
@@ -133,7 +127,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     super::timer::fire(&call);
     crate::flight::record(crate::flight::Kind::SyscallDone, number, rax);
     let Call { process, lx, resume, .. } = call;
-    frame.rax = rax;
+    frame.set_result(rax);
     let resume = resume.take();
     let mut regs = resume.unwrap_or_else(|| return_regs(frame));
     let delivered = sigcalls::deliver(&process, &lx, tid, number, resume.is_some(), &mut regs);

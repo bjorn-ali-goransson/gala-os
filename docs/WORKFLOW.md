@@ -106,6 +106,16 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
   `ntstatus.h`; check other constants the same way when you add them.
 - **System call numbers** live in `kernel/src/nt/syscalls.rs` and
   `user/ntrt/src/lib.rs` and must match ("Test programs").
+- **Architecture-specific code only under `kernel/src/arch`**
+  (ARCHITECTURE "The architecture seam"): elsewhere use its neutral
+  accessors (`UserRegs::ip`, `SyscallFrame::number`, `TrapFrame::kind`,
+  `cpu::cycles`, `arch::timer`, ...); what is Windows' or Linux's ABI on
+  x86-64 goes in `nt/abi/x64/` or `lx/machine/x86_64.rs`, with a stub in
+  their aarch64 counterpart. The aarch64 check enforces it: `cargo clippy
+  -p kernel --target aarch64-unknown-none -- -D warnings` (CI; `rustup
+  target add aarch64-unknown-none` if the toolchain lacks it). A new
+  arch function used outside `arch` needs its aarch64 stub (it may end
+  in `unported`).
 - **shasha features: the `gala` command first.** Everything the
   graphical shell does can be done from a terminal. Make a new feature a
   named action (`nt::desktop::Action`, or a new GalaDesktopAction

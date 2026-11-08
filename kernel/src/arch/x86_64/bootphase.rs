@@ -102,6 +102,10 @@ pub fn fault(vector: u8, rip: u64, error: u64) {
     ));
 }
 
+/// The phase after the tick source is calibrated and started (its name
+/// on this architecture: the local APIC's).
+pub const TIMER: &str = "apic";
+
 /// Records a panic (its message goes to the serial log).
 pub fn panic() {
     write_line(format_args!("panic cpu {} tsc {}\n", apic_id(), cpu::rdtsc()));

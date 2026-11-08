@@ -87,9 +87,9 @@ pub use nmi::{init, on_nmi, trace_cpu};
 
 #[cfg(not(any(test, feature = "hosted")))]
 mod nmi {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-    use crate::arch::interrupts::TrapFrame;
+    use crate::arch::interrupts::{CpuMode, TrapFrame};
     use crate::arch::smp::MAX_CPUS;
     use crate::console::{emergency_line, emergency_println};
 
@@ -97,20 +97,21 @@ mod nmi {
     const FRAMES: usize = 24;
     const NS: u64 = 1_000_000_000;
 
-    /// What each CPU was doing when the NMI came: rip, rsp, cs, then the
-    /// return addresses of a kernel backtrace (0 ends them).
+    /// What each CPU was doing when the NMI came: the instruction and
+    /// stack pointers, the mode (`CpuMode` as a number), then the return
+    /// addresses of a kernel backtrace (0 ends them).
     struct Snapshot {
-        rip: AtomicU64,
-        rsp: AtomicU64,
-        cs: AtomicU64,
+        ip: AtomicU64,
+        sp: AtomicU64,
+        mode: AtomicU8,
         frames: [AtomicU64; FRAMES],
     }
 
     static SNAPSHOTS: [Snapshot; MAX_CPUS] = [const {
         Snapshot {
-            rip: AtomicU64::new(0),
-            rsp: AtomicU64::new(0),
-            cs: AtomicU64::new(0),
+            ip: AtomicU64::new(0),
+            sp: AtomicU64::new(0),
+            mode: AtomicU8::new(0),
             frames: [const { AtomicU64::new(0) }; FRAMES],
         }
     }; MAX_CPUS];
@@ -127,12 +128,12 @@ mod nmi {
     /// Asks CPU `cpu` (by NMI, which reaches it with interrupts off) to
     /// print where it is: the hang watchdog's stuck CPU.
     pub fn trace_cpu(cpu: usize) {
-        let Some((_, apic_id)) = crate::arch::smp::online_cpus().find(|&(i, _)| i as usize == cpu)
+        let Some((_, hw_id)) = crate::arch::smp::online_cpus().find(|&(i, _)| i as usize == cpu)
         else {
             return;
         };
         TRACE_ONLY.fetch_or(1 << cpu, Ordering::AcqRel);
-        crate::arch::apic::send_nmi(apic_id);
+        crate::arch::smp::send_nmi(hw_id);
     }
 
     /// Installs the NMI handler (once the per-CPU data and the clock are
@@ -156,12 +157,12 @@ mod nmi {
         }
         let cpu = me();
         let Some(snap) = SNAPSHOTS.get(cpu) else { return };
-        snap.rip.store(frame.rip, Ordering::Relaxed);
-        snap.rsp.store(frame.rsp, Ordering::Relaxed);
-        snap.cs.store(frame.cs, Ordering::Relaxed);
+        snap.ip.store(frame.ip(), Ordering::Relaxed);
+        snap.sp.store(frame.sp(), Ordering::Relaxed);
+        snap.mode.store(frame.mode() as u8, Ordering::Relaxed);
         let mut n = 0;
         if !frame.from_user_mode() {
-            crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+            crate::arch::backtrace::walk_trap(frame, |ret| {
                 if n < FRAMES {
                     snap.frames[n].store(ret, Ordering::Relaxed);
                     n += 1;
@@ -203,20 +204,15 @@ mod nmi {
     /// One CPU's snapshot: `<prefix> N user|kernel rip .. rsp ..`, then
     /// `<prefix> N backtrace: ..` for kernel code (xtask symbolizes it).
     fn print_cpu(prefix: &str, cpu: usize, snap: &Snapshot) {
-        let rip = snap.rip.load(Ordering::Relaxed);
-        let cs = snap.cs.load(Ordering::Relaxed);
-        let user = cs & 3 != 0;
+        let rip = snap.ip.load(Ordering::Relaxed);
         // 32-bit code (a WOW64 thread): its eip and esp.
-        let mode = match (user, cs == u64::from(crate::arch::gdt::USER32_CS)) {
-            (true, true) => "user 32-bit",
-            (true, false) => "user",
-            _ => "kernel",
-        };
+        let mode = CpuMode::from_u8(snap.mode.load(Ordering::Relaxed));
         emergency_line(format_args!(
-            "{prefix} {cpu} {mode} rip {rip:#x} rsp {:#x}",
-            snap.rsp.load(Ordering::Relaxed)
+            "{prefix} {cpu} {} rip {rip:#x} rsp {:#x}",
+            mode.name(),
+            snap.sp.load(Ordering::Relaxed)
         ));
-        if user {
+        if mode != CpuMode::Kernel {
             return;
         }
         // As a panic's (rip first).

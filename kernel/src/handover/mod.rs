@@ -197,16 +197,16 @@ pub fn report(info: &BootInfo) {
     }
 }
 
-/// Before the clock starts: the TSC and timer rates the first kernel
+/// Before the clock starts: the cycle counter's and timer's rates the first kernel
 /// calibrated (calibrating again gives other values, under an emulator
 /// very different ones, and the tick count would then drift from the TSC:
 /// the deadlines of carried waits are ticks).
-pub fn carried_rates(info: &BootInfo, tsc_hz: &mut u64, timer_hz: &mut u64) {
+pub fn carried_rates(info: &BootInfo, counter_hz: &mut u64, timer_hz: &mut u64) {
     let Some(r) = &info.handover else { return };
     let Some(mut s) = r.record.section(tag::CLOCK) else { return };
     let clock = record::Clock::read(&mut s);
-    if clock.tsc_hz() != 0 {
-        *tsc_hz = clock.tsc_hz();
+    if clock.counter_hz() != 0 {
+        *counter_hz = clock.counter_hz();
     }
     if clock.timer_hz() != 0 {
         *timer_hz = clock.timer_hz();
@@ -413,7 +413,7 @@ fn prepare_and_go(
             }
             None => {
                 let page = machine::OwnedPages::allocate(1).ok_or(HandoverError::OutOfMemory)?;
-                let value = crate::arch::cpu::rdtsc() ^ 0x6761_6c61_6d61_726b;
+                let value = crate::arch::cpu::cycles() ^ 0x6761_6c61_6d61_726b;
                 crate::info!("handover: marker {value:#x} set at {:#x}", page.phys());
                 (page, value)
             }

@@ -11,8 +11,8 @@
 //! the extended components at their standard offsets less 512 (x87 and
 //! SSE live in CONTEXT.FltSave).
 
-use super::platform::xstate::{self, LEGACY, LEGACY_SIZE};
-use super::platform::{UserRegs, XState};
+use crate::nt::platform::xstate::{self, LEGACY, LEGACY_SIZE};
+use crate::nt::platform::{UserRegs, XState};
 
 pub const SIZE: usize = 0x4d0;
 /// sizeof(CONTEXT_EX).
@@ -27,9 +27,9 @@ const SEG_FS: usize = 0x3e;
 const SEG_SS: usize = 0x42;
 const EFLAGS: usize = 0x44;
 const DR0: usize = 0x48;
-/// Rax..R15 (16 registers, in `UserRegs::gpr` order).
+/// Rax..R15 (16 registers, in `Gpr` order).
 const GPR: usize = 0x78;
-const RSP_INDEX: usize = 4;
+const RSP_INDEX: usize = crate::nt::platform::Gpr::Rsp as usize;
 const RIP: usize = 0xf8;
 /// FltSave (XMM_SAVE_AREA32): ControlWord and MxCsr.
 const FLT_CONTROL_WORD: usize = 0x100;
@@ -90,7 +90,7 @@ pub fn has(flags: u32, part: u32) -> bool {
 
 /// The extended components programs see (beyond x87 and SSE).
 pub fn extended_features() -> u64 {
-    super::platform::xstate_enabled() & !LEGACY
+    crate::nt::platform::xstate_enabled() & !LEGACY
 }
 
 /// The length of the XSTATE area for the enabled features (header and
@@ -104,7 +104,7 @@ pub fn xstate_len() -> usize {
 /// the 64-bit ones): CS 0x23 and FS 0x53 (the TEB32), as Windows reports
 /// them in such a thread's (64-bit) CONTEXT.
 pub fn mark_compat(b: &mut [u8], flags: u32) {
-    use super::layout::wow64::{CS32, FS32};
+    use crate::nt::layout::wow64::{CS32, FS32};
     if has(flags, CONTEXT_CONTROL) {
         put(b, SEG_CS, &(CS32 as u16).to_le_bytes());
     }
@@ -120,12 +120,12 @@ pub fn fill(b: &mut [u8], flags: u32, regs: &UserRegs, fx: Option<&XState>) {
     if has(flags, CONTEXT_CONTROL) {
         put(b, SEG_CS, &USER_CS.to_le_bytes());
         put(b, SEG_SS, &USER_DS.to_le_bytes());
-        put(b, EFLAGS, &((regs.rflags as u32) | RFLAGS_IF).to_le_bytes());
-        put(b, GPR + 8 * RSP_INDEX, &regs.gpr[RSP_INDEX].to_le_bytes());
-        put(b, RIP, &regs.rip.to_le_bytes());
+        put(b, EFLAGS, &((regs.flags() as u32) | RFLAGS_IF).to_le_bytes());
+        put(b, GPR + 8 * RSP_INDEX, &regs.sp().to_le_bytes());
+        put(b, RIP, &regs.ip().to_le_bytes());
     }
     if has(flags, CONTEXT_INTEGER) {
-        for (i, r) in regs.gpr.iter().enumerate().filter(|(i, _)| *i != RSP_INDEX) {
+        for (i, r) in regs.gprs().iter().enumerate().filter(|(i, _)| *i != RSP_INDEX) {
             put(b, GPR + 8 * i, &r.to_le_bytes());
         }
     }
@@ -190,14 +190,14 @@ pub fn from_bytes(ctx: &[u8]) -> UserRegs {
 pub fn apply(regs: &mut UserRegs, ctx: &[u8], flags: u32) {
     let word = |off: usize| u64_at(ctx, off);
     if has(flags, CONTEXT_INTEGER) {
-        for (i, r) in regs.gpr.iter_mut().enumerate().filter(|(i, _)| *i != RSP_INDEX) {
+        for (i, r) in regs.gprs_mut().iter_mut().enumerate().filter(|(i, _)| *i != RSP_INDEX) {
             *r = word(GPR + 8 * i);
         }
     }
     if has(flags, CONTEXT_CONTROL) {
-        regs.gpr[RSP_INDEX] = word(GPR + 8 * RSP_INDEX);
-        regs.rip = word(RIP);
-        regs.rflags = u64::from(u32_at(ctx, EFLAGS));
+        regs.set_sp(word(GPR + 8 * RSP_INDEX));
+        regs.set_ip(word(RIP));
+        regs.set_flags(u64::from(u32_at(ctx, EFLAGS)));
     }
 }
 
@@ -286,17 +286,12 @@ mod tests {
 
     #[test]
     fn round_trip_and_layout() {
-        let mut regs = UserRegs::default();
-        for (i, r) in regs.gpr.iter_mut().enumerate() {
-            *r = 0x1000 + i as u64;
-        }
-        regs.rip = 0x1_4000_1000;
-        regs.rflags = 0x202;
+        let regs = UserRegs::new(core::array::from_fn(|i| 0x1000 + i as u64), 0x1_4000_1000, 0x202);
         let b = to_bytes(&regs, None);
         let back = from_bytes(&b);
-        assert_eq!(back.gpr, regs.gpr);
-        assert_eq!(back.rip, regs.rip);
-        assert_eq!(back.rflags, 0x202);
+        assert_eq!(back.gprs(), regs.gprs());
+        assert_eq!(back.ip(), regs.ip());
+        assert_eq!(back.flags(), 0x202);
         // Rcx at 0x80, Rsp at 0x98 (public layout).
         assert_eq!(u64::from_le_bytes(b[0x80..0x88].try_into().unwrap()), 0x1001);
         assert_eq!(u64::from_le_bytes(b[0x98..0xa0].try_into().unwrap()), 0x1004);
@@ -307,7 +302,7 @@ mod tests {
 
     #[test]
     fn parts_follow_the_flags() {
-        let regs = UserRegs { gpr: [7; 16], rip: 0x1234, ..Default::default() };
+        let regs = UserRegs::new([7; 16], 0x1234, 0);
         let mut b = [0xeeu8; SIZE];
         fill(&mut b, CONTEXT_CONTROL, &regs, None);
         assert_eq!(u64_at(&b, RIP), 0x1234);
@@ -315,9 +310,9 @@ mod tests {
         assert_eq!(b[GPR], 0xee, "Rax is CONTEXT_INTEGER's");
         assert_eq!(b[FLT_SAVE], 0xee, "FltSave is CONTEXT_FLOATING_POINT's");
         let mut back = UserRegs::default();
-        back.gpr[0] = 3;
+        back.gprs_mut()[0] = 3;
         apply(&mut back, &b, CONTEXT_CONTROL);
-        assert_eq!((back.gpr[0], back.gpr[RSP_INDEX], back.rip), (3, 7, 0x1234));
+        assert_eq!((back.gprs()[0], back.sp(), back.ip()), (3, 7, 0x1234));
     }
 
     #[test]

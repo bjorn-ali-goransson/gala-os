@@ -93,10 +93,9 @@ In order:
    **H11**: busybox-w32's httpd and wget over loopback (the Linux
    busybox's run: `lx_httpd`).
 10. **LN**: lints before every commit (the owner: quality built in
-    before committing, not found later); started right after the
-    WSAEnumNetworkEvents fix in flight, ahead of the items above.
+    before committing, not found later).
 11. **PT**: the portability seams for a second architecture (the owner:
-    the ARM64 port itself later), when the machine is free.
+    the ARM64 port itself later): the kernel's done, user mode's next.
 12. **Last, once everything above is done** (the owner): a performance
     profile on a real Windows machine, then optimization. The same
     workloads (the scenarios' programs, `bench`, Chromium's page loads,
@@ -135,7 +134,7 @@ has a section under "Open items".
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
 | LN | Lints before every commit | in progress | `cargo xtask lint` from a committed pre-commit hook: architecture code, check-then-sleep, split atomic operations, hard-coded answers |
-| PT | Portability seams for a second architecture | in progress | the audit done (by seam: the register model, the clock and timer, boot, x86-only by nature, user mode); the ARM64 port itself is in "Later" |
+| PT | Portability seams for a second architecture | in progress | the kernel's seam done (`arch`'s interface, the per-architecture ABIs `nt::abi`/`lx::machine`, an aarch64 stub CI checks); user mode's next; the ARM64 port itself is in "Later" |
 | HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
 
 ### NT core services (done, by test)
@@ -372,51 +371,54 @@ part behind the `arch` layer, so an ARM64 port ("Later") starts from a
 clean seam and new code cannot add x86 coupling unnoticed. Not the port
 itself (the owner: later).
 
+**Done so far** (design: ARCHITECTURE "The architecture seam"; the rule
+in WORKFLOW "Rules for every change"):
+- The audit: the x86 assumptions outside `kernel/src/arch`, by seam (the
+  register model, the clock and timer, boot, x86 only by nature, user
+  mode).
+- The kernel (steps 2 and 3): everything architecture-specific is behind
+  `arch`'s interface, x86_64 its one implementation and aarch64 a stub
+  that compiles; CI's Clippy step checks the kernel for
+  `aarch64-unknown-none` (with and without `shasha`), so an x86
+  assumption outside `arch` fails the build. The register frames
+  (`UserRegs`, `SyscallFrame`, `TrapFrame`) keep their fields private to
+  `arch` behind neutral accessors; the clock reads `cpu::cycles` and
+  drives `arch::timer`; the boot steps, phase names, per-CPU snapshot and
+  NMIs are `arch`'s; PCI and virtio are shared over `pci_config` and
+  `port`. Windows' x64 ABI is `nt::abi::x64` (CONTEXT, argument
+  registers, thread starts, exception and APC frames, the CONTEXT
+  services, KUSER_SHARED_DATA's processor fields, CPUID's registry
+  values, the crash report's registers); Linux's x86-64 ABI is
+  `lx::machine::x86_64` (arguments, restart, start registers, auxv, the
+  signal frame) with the system call table `lx/syscalls.rs`; their
+  aarch64 counterparts are stubs. gala-um is x86_64-only
+  (`compile_error!` elsewhere).
+
 **Next**:
-1. The audit (done): the x86 assumptions outside `kernel/src/arch`, by
-   seam, with where each belongs:
-   - The register model: `UserRegs` (rip, rsp, 16 general registers,
-     rflags) used as such by the NT layer (`nt/process.rs`: a first
-     thread's start state, rcx = PEB and the shadow area;
-     `nt/syscalls.rs`: arguments 5 on from the user stack at
-     rsp + 0x28, NtGetContextThread/NtSetContextThread;
-     `nt/context.rs`: CONTEXT's AMD64 layout; `nt/thread.rs` and
-     `crashreport.rs`: the dump's and crash report's registers), the
-     Linux personality (`lx/signal.rs`, `sigcalls.rs`, `stack.rs`: the
-     x86-64 signal frame and ucontext; `lx/syscalls.rs`, `dispatch.rs`,
-     `errno.rs`: the x86-64 system call table and argument registers),
-     the handover (`handover/carry.rs`, `record.rs`, `mod.rs`: saved
-     registers in the state format) and the simulator (`sim.rs`:
-     SpinCapture's registers). Belongs in `arch`: a register frame type
-     with named accessors (instruction pointer, stack pointer, the
-     system call number and its arguments, the return value), CONTEXT
-     and the Linux signal frame per architecture.
-   - The clock and timer: `time.rs` (the local APIC's periodic timer,
-     the TSC), `clockcal.rs`, `flight.rs` (rdtsc stamps),
-     `platform.rs`. Belongs in `arch`: a cycle counter and a tick source.
-   - Boot: `lib.rs` (the xsave and APIC boot phases, local APIC ids),
-     `boot/limine.rs` and `boot/mod.rs` (UEFI x86_64), `statedump.rs`
-     (each CPU's rip and rsp at the NMI). Belongs in `arch`: the boot
-     phases' names and the per-CPU snapshot.
-   - By nature x86 only, kept so behind `cfg`: WOW64 (`nt/wow64.rs`,
-     `user/wow64`, the 32-bit DLLs); gala-um's host side
-     (`kernel/src/hosted`: a Linux x86_64 process's ucontext).
-   - User mode: ntdll's (`user/testntdll`) and ntrt's x64/x86 modules
-     (system call stubs, context, unwinding), kernel32's `x64.rs` and
-     `x86.rs` (a new thread's context); every other DLL is
-     architecture-neutral Rust.
-2. Kernel: those parts behind `arch` traits or modules (the register
-   frame of a system call and an exception, a thread's saved context,
-   the cycle counter, the personality's system call numbers and
-   argument registers), x86_64 the only implementation; nothing changes
-   for programs (every scenario passes as before).
-3. CI: the kernel compiled for `aarch64-unknown-none` (no boot; the
-   arch layer for it a stub that compiles), so an x86 assumption outside
-   `arch` fails the build. gala's DLLs compiled for
-   `aarch64-pc-windows-msvc` where they have no architecture-specific
-   code, as the same guard for user mode.
-4. ARCHITECTURE: the seam (what an architecture provides) and the rule
-   in WORKFLOW's "Rules for every change".
+1. User mode: gala's DLLs compiled for `aarch64-pc-windows-msvc` where
+   they have no architecture-specific code, as the same guard. Their x86
+   parts: ntdll's (`user/testntdll`) and ntrt's x64/x86 modules (system
+   call stubs, context, unwinding), kernel32's `x64.rs` and `x86.rs` (a
+   new thread's context).
+2. The kernel's remaining x86-shaped parts, each named here with why it
+   stays for now:
+   - `mm::paging` is x86-64's page-table format (entry bits, PAT), kept
+     outside `arch` so the mapper is host-tested; ARM64's (VMSAv8
+     descriptors, MAIR) moves it behind `arch` with the port.
+   - The user thread-pointer bases keep x86-64's names in `sched`, the
+     platform traits and `percpu` (`gs_base`, `fs_base`, `teb32`), as
+     does the floating-point control register (`mxcsr`: NtCreateThread's
+     start state, `set_mxcsr`); renamed when a second implementation
+     gives them a meaning (TPIDR_EL0/x18, FPCR).
+   - `boot` reads Limine's x86-64 protocol (the MP response's local APIC
+     ids, `boot::Processors::lapic_id`) and the ACPI tables the x86-64
+     calibration uses; aarch64's Limine responses come with the port.
+   - WOW64's NT part (`nt/wow64.rs`: 32-bit Windows' layouts) compiles
+     everywhere and runs only where `set_teb32` can enter 32-bit code
+     (x86-64): no `cfg` needed.
+   - Field and variable names in the handover's state format and logs
+     (`tsc_hz`, `rip` in events) stay: they are formats readers depend
+     on.
 
 **Done when**: the aarch64 builds pass in CI and the audit's list is
 empty or each remaining item is named in it with why it stays.

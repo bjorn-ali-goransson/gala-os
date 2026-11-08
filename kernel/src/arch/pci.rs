@@ -1,15 +1,8 @@
-//! PCI configuration space through the legacy I/O mechanism (ports 0xcf8
-//! and 0xcfc, "configuration mechanism #1" of the PCI Local Bus
-//! specification), and a brute-force enumeration of bus 0-255.
+//! PCI functions: their configuration space (read and written through
+//! the architecture's `pci_config`: x86-64's legacy I/O mechanism), BARs,
+//! capabilities, and a brute-force enumeration of bus 0-255.
 
-use super::port::Port;
-use crate::sync::IrqMutex;
-
-const CONFIG_ADDRESS: u16 = 0xcf8;
-const CONFIG_DATA: u16 = 0xcfc;
-
-/// Serializes the address/data port pair.
-static CONFIG: IrqMutex<()> = IrqMutex::named("pci.config", ());
+use super::pci_config::{read_u32, write_u16};
 
 /// A PCI function: bus, device, function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,37 +16,6 @@ impl core::fmt::Display for Address {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:02x}:{:02x}.{}", self.bus, self.device, self.function)
     }
-}
-
-fn config_address(at: Address, offset: u8) -> u32 {
-    0x8000_0000
-        | u32::from(at.bus) << 16
-        | u32::from(at.device & 0x1f) << 11
-        | u32::from(at.function & 7) << 8
-        | u32::from(offset & 0xfc)
-}
-
-fn read_u32(at: Address, offset: u8) -> u32 {
-    let _guard = CONFIG.lock();
-    // SAFETY: the configuration ports only select and read configuration
-    // registers; reads have no side effects on memory. The lock keeps the
-    // address/data pair consistent.
-    let (mut address, mut data) =
-        unsafe { (Port::<u32>::new(CONFIG_ADDRESS), Port::<u32>::new(CONFIG_DATA)) };
-    address.write(config_address(at, offset));
-    data.read()
-}
-
-fn write_u16(at: Address, offset: u8, value: u16) {
-    let _guard = CONFIG.lock();
-    // SAFETY: only called for the command register (see `enable`), with
-    // bits that turn on decoding and bus mastering for a device whose
-    // driver owns it; nothing else is written.
-    let (mut address, mut data) =
-        unsafe { (Port::<u32>::new(CONFIG_ADDRESS), Port::<u16>::new(CONFIG_DATA + 2)) };
-    debug_assert_eq!(offset, COMMAND);
-    address.write(config_address(at, offset));
-    data.write(value);
 }
 
 const COMMAND: u8 = 0x04;
@@ -187,7 +149,7 @@ pub fn for_each(mut f: impl FnMut(&Function)) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Address, capabilities, config_address, memory_bar};
+    use super::{capabilities, memory_bar};
 
     /// A configuration space as dwords.
     fn space(dwords: &[(u8, u32)]) -> impl Fn(u8) -> u32 + '_ {
@@ -221,12 +183,5 @@ mod tests {
         assert_eq!(n, 0);
         capabilities(space(&[(0x04, 1 << 20), (0x34, 0x40), (0x40, 0x4009)]), |_, _| n += 1);
         assert_eq!(n, 48);
-    }
-
-    #[test]
-    fn configuration_address() {
-        let at = Address { bus: 1, device: 2, function: 3 };
-        assert_eq!(config_address(at, 0x2e), 0x8001_132c);
-        assert_eq!(format!("{at}"), "01:02.3");
     }
 }
