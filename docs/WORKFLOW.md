@@ -211,10 +211,7 @@ there, then `cargo xtask compare windows.json` here. Before the run
 there: a local account `galatest` with password `Gala-Test-1` (access,
 disk, logon, lsa, profile, session and system tests log on as it) and
 an administrator prompt for `schannel_test` (its test CA goes into
-LocalMachine\Root; it is skipped otherwise). The script scenarios need
-`user/busybox`, `user/tcc`, `user/lua`, `user/sqlite` and
-`user/msvcrt_test` copied beside `user/bin`; one whose script or
-`busybox.exe` is missing is reported as skipped with that reason. A program that crashes
+LocalMachine\Root; it is skipped otherwise). A program that crashes
 gets a `fault` field (`module+offset (exception code)`) from the
 Application log's event 1000; map the offset to a function with the
 build's PDB of that module. `cargo xtask
@@ -225,11 +222,10 @@ other way round (one of the two platforms is then wrong).
 (`busybox_files`, `busybox_script`, `tcc`, `tcc_make`, `tcc_self`, `lua`,
 `sqlite`) run `busybox.exe sh ..\<dir>\<script>.sh`, so they also need
 `user/busybox`, `user/tcc`, `user/lua`, `user/sqlite` and
-`user/msvcrt_test` beside it. run-all.ps1 `continue`s past a script it
-cannot find **without writing a record**, so those programs are simply
-absent from the report rather than skipped with a reason: a round that
-copied only `user/bin` reports 169 programs instead of 176 and nothing
-says why. Copy `user/` (or those five directories) and check the count.
+`user/msvcrt_test` beside it. run-all.ps1 reports a scenario whose
+script or `busybox.exe` is missing as skipped with that reason (a round
+that copied only `user/bin` has seven such skips). Copy `user/` (or
+those five directories) and check the count.
 
 Run it from an ordinary directory, never one under `%TEMP%`: Windows
 treats a temporary path differently, so a test that works from its
