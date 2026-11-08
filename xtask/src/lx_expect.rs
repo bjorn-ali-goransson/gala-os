@@ -49,6 +49,13 @@ pub const ARGS: &[&str] = &["first", "", "third arg"];
 /// order here.
 pub const ENV: &[(&str, &str)] = &[("A", "1"), ("EMPTY", ""), ("LONGER_NAME", "some value")];
 
+/// The programs that talk to a Wayland compositor (ROADMAP LD step 2):
+/// lx-expect starts weston's headless backend for them on a socket of
+/// their own and adds `XDG_RUNTIME_DIR` (its directory) and
+/// `WAYLAND_DISPLAY` (this name) to [`ENV`].
+const WAYLAND_TESTS: &[&str] = &["wl_test"];
+const WAYLAND_DISPLAY: &str = "wayland-gala";
+
 /// How long one program may run.
 const TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -243,11 +250,13 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
                 .map_err(|e| format!("copying {} to {}: {e}", lib.display(), to.display()))?;
         }
     }
-    let mut child = Command::new(format!("./{name}"))
-        .current_dir(dir)
-        .args(ARGS)
-        .env_clear()
-        .envs(ENV.iter().copied())
+    let compositor = if WAYLAND_TESTS.contains(&name) { Some(Weston::start(dir)?) } else { None };
+    let mut command = Command::new(format!("./{name}"));
+    command.current_dir(dir).args(ARGS).env_clear().envs(ENV.iter().copied());
+    if let Some(w) = &compositor {
+        command.env("XDG_RUNTIME_DIR", &w.runtime).env("WAYLAND_DISPLAY", WAYLAND_DISPLAY);
+    }
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -275,6 +284,62 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
         err.read_to_string(&mut stderr).map_err(|e| format!("{name}'s stderr: {e}"))?;
     }
     Ok(transcript(&stdout, &stderr, status.code(), status.signal()))
+}
+
+/// weston's headless backend serving one test: its runtime directory
+/// (0700, as XDG_RUNTIME_DIR must be) holds the socket; the process ends
+/// when this is dropped. Its log goes to `weston.log` beside the test.
+struct Weston {
+    runtime: PathBuf,
+    process: std::process::Child,
+}
+
+impl Weston {
+    fn start(dir: &Path) -> Result<Weston> {
+        use std::os::unix::fs::PermissionsExt;
+        let runtime = dir.join("xdg");
+        fs::create_dir_all(&runtime).map_err(|e| format!("creating {}: {e}", runtime.display()))?;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        let log = fs::File::create(dir.join("weston.log")).map_err(|e| e.to_string())?;
+        let process = Command::new("weston")
+            .args(["--backend=headless", "--idle-time=0"])
+            .arg(format!("--socket={WAYLAND_DISPLAY}"))
+            .env_clear()
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().map_err(|e| e.to_string())?)
+            .stderr(log)
+            .spawn()
+            .map_err(|e| {
+                format!("starting weston for the Wayland tests (apt install weston): {e}")
+            })?;
+        let mut w = Weston { runtime, process };
+        // Ready when its socket exists (or it has exited: then its log
+        // says why).
+        let socket = w.runtime.join(WAYLAND_DISPLAY);
+        let start = Instant::now();
+        while !socket.exists() {
+            if let Ok(Some(status)) = w.process.try_wait() {
+                return Err(format!(
+                    "weston exited ({status}) before listening; see {}",
+                    dir.join("weston.log").display()
+                ));
+            }
+            if start.elapsed() > TIMEOUT {
+                return Err(format!("weston did not listen within {TIMEOUT:?}"));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(w)
+    }
+}
+
+impl Drop for Weston {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
 }
 
 /// The shared libraries in `bin` (`lib*.so`), sorted.

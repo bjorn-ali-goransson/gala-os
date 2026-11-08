@@ -3014,6 +3014,8 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
     // AFD's request layouts for both pointer sizes (kernel/afd_abi).
     run_cmd(cargo().args(["test", "--package", "afd_abi"]))?;
+    // The Wayland wire format (kernel/wl_abi; ROADMAP LD step 2).
+    run_cmd(cargo().args(["test", "--package", "wl_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
