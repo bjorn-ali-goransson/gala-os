@@ -53,11 +53,13 @@
 //! client's pid and object; a protocol error is also a log line; the
 //! ledger counts the requests gala lacks (`wayland request missing`,
 //! detail the opcode, service the interface) and those it accepts without
-//! acting on them (`wayland request ignored`) and the window actions
-//! Wayland windows do not follow yet (`wayland window action missing`);
+//! acting on them (`wayland request ignored`) and the window messages
+//! Wayland windows do not follow (`wayland window action missing`);
 //! `wayland input` events say where input went (enter, leave, button,
-//! axis, key, focus, unfocus, close; or dropped, for a window the client
-//! does not show); `wayland=trace` logs every request and event as
+//! axis, key, focus, unfocus, close, maximize, restore, place; or
+//! dropped, for a window the client does not show); `wayland configure`
+//! each configure's size, states and serial; `wayland=trace` logs every
+//! request and event as
 //! `WAYLAND_DEBUG=1` prints them and each window message taken from the
 //! desktop (`input:` lines); the state dump lists every client, its
 //! objects and its seat (focus, keys down, modifiers).
@@ -80,7 +82,7 @@ use crate::nt::{ledger, winstate};
 use crate::runtime::{self, ThreadId};
 use crate::sync::IrqMutex;
 use crate::unix::{self, Address, Cred, Kind, Right, Socket};
-use client::{Client, End, Host, Note};
+use client::{Act, Client, End, Host, Note};
 
 /// The socket's name in the runtime directory.
 pub const DISPLAY: &str = "wayland-0";
@@ -650,6 +652,48 @@ impl Host for KernelHost {
         });
     }
 
+    fn window_place(&mut self, id: u32, x: i32, y: i32, width: u32, height: u32, decorated: bool) {
+        let (w, h) = outer(width, height, decorated);
+        let owner = self.pid;
+        self.desktop(|d| Ok(((), Some(d.place(id, owner, x, y, w, h)?))));
+    }
+
+    fn window_outer(&mut self, id: u32) -> Option<(i32, i32, u32, u32)> {
+        let owner = self.pid;
+        self.desktop(|d| Ok((d.outer(id, owner), None))).flatten()
+    }
+
+    fn window_act(&mut self, id: u32, act: Act) {
+        let action = match act {
+            Act::Maximize => winstate::Action::Maximize,
+            Act::Restore => winstate::Action::Restore,
+            Act::Minimize => winstate::Action::Minimize,
+        };
+        let owner = self.pid;
+        // Only its own windows (act takes any window of the desktop).
+        let done = self.desktop(|d| {
+            d.outer(id, owner).ok_or(crate::nt::status::NtStatus::INVALID_HANDLE)?;
+            d.act(id, action)?;
+            Ok(((), None))
+        });
+        if done.is_none() {
+            crate::warn!("wayland: pid {owner}: the desktop refused {act:?} for window {id}");
+        }
+    }
+
+    fn work_area(&mut self) -> (u32, u32) {
+        let (w, h) = self.screen();
+        (w, h.saturating_sub(winstate::TASKBAR).max(1))
+    }
+
+    fn surface_size(&mut self, width: u32, height: u32, decorated: bool) -> (u32, u32) {
+        if !decorated {
+            return (width.max(1), height.max(1));
+        }
+        let (b, top) = (winstate::BORDER, winstate::BORDER + winstate::CAPTION);
+        (width.saturating_sub(2 * b).max(1), height.saturating_sub(top + b).max(1))
+    }
+
     fn window_present(&mut self, id: u32, y: u32, width: u32, rows: u32, pixels: &[u32]) {
         let r = Rect { x: 0, y: y.into(), w: width.into(), h: rows.into() };
         self.desktop(|d| Ok(((), Some(d.present(id, r, pixels, width as usize)?))));
@@ -693,19 +737,28 @@ impl Host for KernelHost {
                     ),
                 )
             }
-            Note::Commit { surface, buffer, rows, window } => {
+            Note::Commit { surface, buffer, rows, window, placed } => {
                 let (w, h) = buffer.unwrap_or((0, 0));
                 let (from, to) = rows.unwrap_or((0, 0));
+                let (px, py) = placed.unwrap_or((0, 0));
                 emit(
                     Category::Wayland,
                     "wayland commit",
                     format_args!(
-                        r#""pid":{pid},"client":{client},"surface":{surface},"buffer":{},"width":{w},"height":{h},"rows":[{from},{to}],"window":{}"#,
+                        r#""pid":{pid},"client":{client},"surface":{surface},"buffer":{},"width":{w},"height":{h},"rows":[{from},{to}],"window":{},"placed":{},"x":{px},"y":{py}"#,
                         buffer.is_some(),
-                        window.map_or(-1, i64::from)
+                        window.map_or(-1, i64::from),
+                        placed.is_some()
                     ),
                 )
             }
+            Note::Configure { surface, width, height, states, serial } => emit(
+                Category::Wayland,
+                "wayland configure",
+                format_args!(
+                    r#""pid":{pid},"client":{client},"surface":{surface},"width":{width},"height":{height},"states":{states},"serial":{serial}"#
+                ),
+            ),
             Note::Error { object, interface, code, message } => {
                 crate::warn!(
                     "wayland: pid {pid}: protocol error on {interface}@{object}, code {code}: {message}; disconnecting"

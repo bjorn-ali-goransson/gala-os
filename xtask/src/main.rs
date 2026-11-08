@@ -8036,8 +8036,10 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // user/lx/wl_input_test (LD step 2): wl_seat, wl_pointer and
         // wl_keyboard (an XKB keymap as a memfd), xdg_toplevel.close from
-        // the frame's close button and xdg-decoration (server-side
-        // framed, client-side frameless), driven by the PS/2 mouse and
+        // the frame's close button, configures from the desktop's
+        // maximize, restore and Snap (the Snap keys), and xdg-decoration
+        // (server-side framed, client-side frameless), driven by the
+        // PS/2 mouse and
         // keyboard from xtask's screen check (WL_INPUT_SCREEN) on a
         // headless desktop (`presenter=test`), which also checks the
         // windows' pixels. Its expected.txt is written from the
@@ -10281,7 +10283,10 @@ enum PixelCheck {
 /// shasha's frame (server-side decoration), is the first Wayland window
 /// and so at (64, 48) (kernel/src/wayland: cascaded from there), its
 /// client area from (65, 81); the second, 100 x 80 and frameless
-/// (client-side decoration), at (96, 80). Each step waits for the line
+/// (client-side decoration), at (96, 80). Between them the Snap keys
+/// maximize, restore, snap left and restore the first (the work area is
+/// 1280 x 752 above the taskbar; the frame a 1-pixel outline and a
+/// 32-row caption). Each step waits for the line
 /// the program prints once it has the input before (its transcript is
 /// the check of the events; these steps drive it and check the pixels).
 const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
@@ -10326,9 +10331,69 @@ const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
+            // Win+Up: maximized by the desktop (a configure of the work
+            // area's client size), at (0, 0), client area from (1, 33),
+            // 1278 x 718.
+            after: "pointer leave",
+            input: &["sendkey meta_l-up"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: maximized",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(300, 2, 40, 4, 0xeef2f7), // the active caption at the top
+                PixelCheck::At(1 + 600, 33 + 400, 0x2e8b57),
+                PixelCheck::At(1 + 1277, 33 + 717, 0x2e8b57), // its last pixel
+            ],
+        },
+        ScreenStep {
+            // Win+Down: restored where it was, its first buffer again.
+            after: "",
+            input: &["sendkey meta_l-down"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: restored",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep {
+            // Win+Left: the left half of the work area, (0, 0, 640, 752),
+            // its client area 638 x 718 from (1, 33).
+            after: "",
+            input: &["sendkey meta_l-left"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: snapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(1 + 300, 33 + 400, 0x8b4513),
+                PixelCheck::At(1 + 637, 33 + 717, 0x8b4513), // its last pixel
+            ],
+        },
+        ScreenStep {
+            // Win+Down: back where it was before Snap.
+            after: "",
+            input: &["sendkey meta_l-down"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: unsnapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep {
             // Up, then left along the caption (never over the client
             // area) to the close button at (240, 60), and a click.
-            after: "pointer leave",
+            after: "wl_input_test: unsnapped",
             input: &["mouse_move 0 -96", "mouse_move -125 0", "mouse_button 1", "mouse_button 0"],
             pixels: &[],
         },

@@ -2135,6 +2135,20 @@ the next breakthroughs).
   (no window is marked not responding yet). `events=wayland`'s
   `wayland input`, the trace's `input:` lines, the ledger's `wayland
   window action missing`, the seat in the state dump.
+- Step 2's server, third part: configure from the desktop (wl_input_test's
+  Snap steps in `lx_wl_input`): the desktop's maximize (SC_MAXIMIZE: the
+  caption's button, Win+Up, `gala maximize`), restore (SC_RESTORE) and
+  place (GALA_WM_PLACE: Snap, back from Snap, `gala place`) become an
+  `xdg_toplevel.configure` of the surface size (the work area or the
+  rectangle less shasha's frame) with the states maximized, activated
+  (following the desktop's active window, a configure at each change) and
+  tiled_left/right/top/bottom (xdg_toplevel 2), and the window moves to
+  the desktop's place and takes the buffer's size at the commit after
+  the client acks it; an ack may name any configure not yet acked (at
+  most 16 kept); `set_maximized`, `unset_maximized` and `set_minimized`
+  are the desktop's actions on the window; wm_capabilities maximize and
+  minimize. `events=wayland`'s `wayland configure`, `placed` in `wayland
+  commit`.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2150,9 +2164,10 @@ the next breakthroughs).
 2. The Wayland server's rest (its first part is done, above; each
    step test first, in wl_test or a client like it recorded against
    weston):
-   - configure from the desktop's resizes, maximize and Snap (they
-     reach the server as input and are ledgered: `wayland window action
-     missing`), a decoration mode change on a mapped window (the frame
+   - the `resizing` state and `xdg_toplevel.resize`/`move` (an
+     interactive resize from a client-side frame through the desktop's
+     `begin_resize`/`begin_drag`; ledgered as ignored today), fullscreen,
+     a decoration mode change on a mapped window (the frame
      put on or taken off in place; today the mode is fixed at mapping),
      popups (`xdg_positioner`, `xdg_popup`; ledgered protocol errors
      today), the middle button and horizontal wheel once the desktop

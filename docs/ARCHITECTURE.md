@@ -9345,7 +9345,7 @@ names 1 to 6).
 | a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
 | `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
 | `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
-| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The app id is kept; window geometry, move, resize, menus, sizes and states are accepted and not acted on yet (ledgered), and so are the desktop's maximize, restore and Snap for a Wayland window (`wayland window action missing`). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; window geometry, move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
 | `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side, and a toplevel without a decoration object is framed too (wl_test; programs that draw their own frame negotiate it: GTK asks for client-side). Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, the surface's size, on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
 | `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
 | `xdg_popup`, `xdg_positioner` | not yet: `create_positioner` and `get_popup` are protocol errors, ledgered (a frameless owned window, as user32's popups are, comes next) |
@@ -9359,9 +9359,46 @@ larger client area, white beyond the buffer; one larger than
 (`Client::end`); when its process ends first, `desktop::process_ended`
 takes them.
 
-Next: configure from the desktop's resizes, maximize and Snap (the
-input already carries them: GALA_WM_PLACE, SC_MAXIMIZE, SC_RESTORE);
-frame callbacks paced by composition; popups; a decoration mode change
+### Configure from the desktop
+
+A user32 program moves its own window when the desktop asks
+(SC_MAXIMIZE, SC_RESTORE, GALA_WM_PLACE in its input: "Server and
+desktop workloads"); for a Wayland window the server is that program,
+and the client draws the size it is told:
+
+- **The toplevel's sizing** (`client::Sizing`): the surface size each
+  configure carries (0x0, the client's choice, until the desktop sizes
+  the window), maximized, the tiled sides, the outer rectangle a
+  maximized window goes back to, and the outer position the desktop put
+  it at, not yet applied. Unmapping (a null buffer, the toplevel
+  destroyed) forgets it: the next window is the client's size, cascaded.
+- **Maximize** (SC_MAXIMIZE): the work area (the screen above the
+  taskbar) less shasha's frame for a framed window (1278 x 718 on a
+  1280 x 800 screen), states maximized and activated, at (0, 0); the
+  window's rectangle is kept. **Restore** (SC_RESTORE of a maximized
+  one): that rectangle's surface size and place (none kept: 0x0, the
+  client chooses). **Place** (GALA_WM_PLACE: Snap, back from Snap,
+  `gala place`): the rectangle's surface size; against the work area's
+  left or right edge and its full height (Snap), tiled on that side and
+  top and bottom, sent from xdg_toplevel 2 (the desktop marks it
+  snapped); a place filling the work area is maximized.
+- **Activated** follows the keyboard focus, which follows the desktop's
+  active window (GALA_WM_ACTIVE): each change sends the toplevel a
+  configure, as weston and mutter do. `resizing` is not sent: shasha's
+  frame has no resize border, and a client's own (`xdg_toplevel.resize`)
+  is not followed yet.
+- **Applying**: the window does not move when the configure goes out.
+  Each configure's serial is kept with the place it asked for (at most
+  `MAX_CONFIGURES`, 16, not yet acked; beyond, the oldest is forgotten
+  and acking it is `invalid_serial`); an ack may name any of them (a
+  client acks only the last it saw), and drops those before it. The
+  commit of a buffer after an ack moves the window to the acked place
+  with the buffer's size (`Desktop::place`; the desktop marks it
+  maximized or snapped from its rectangle, as for a user32 window); a
+  buffer of another size than asked is shown at its own size there.
+- wm_capabilities (xdg_toplevel 5): maximize and minimize.
+
+Next: frame callbacks paced by composition; popups; a decoration mode change
 on a mapped window (the frame put on or taken off in place). Later: `wl_data_device` (the
 clipboard, bridged to the Windows clipboard so copy and paste works
 across personalities), `wp_viewporter`, fractional scale,
@@ -9401,8 +9438,12 @@ user32 (`kernel/src/wayland/input.rs`, `Client::input`).
   from lParam's set 1 scan code and E0 bit (0x01-0x58 are the evdev
   codes; the E0 keys from a table; the virtual key is not used: the
   keymap says what a key means); SC_CLOSE is close; SC_MAXIMIZE,
-  SC_RESTORE and GALA_WM_PLACE are ledgered; WM_MOVE and
-  GALA_WM_MINIMIZED mean nothing to a Wayland client.
+  SC_RESTORE and GALA_WM_PLACE (wParam MAKELONG(left, top), lParam
+  MAKELONG(width, height)) are the desktop's sizing ("Configure from the
+  desktop"); WM_MOVE and GALA_WM_MINIMIZED mean nothing to a Wayland
+  client; any other message is ledgered.
+- **Activation** (GALA_WM_ACTIVE) moves the keyboard focus and sends
+  each toplevel whose activation changed a configure.
 - **The client's seat** (`Seat`): the surface with the pointer and
   where, buttons held, the surface with the keyboard focus, keys down
   and modifiers. A position on the surface enters it (leaving another;
@@ -9460,9 +9501,11 @@ as they keep Windows ones: the pixels are kept and nothing draws them
   why: closed, protocol error, output full, no memory; and how many
   requests), `wayland role` (surface, role, its object), `wayland map`
   (surface, window or -1), `wayland commit` (surface, whether a buffer
-  came, its size, the rows copied, the window), `wayland error`
-  (object, interface, code, message) and `wayland input` (what: enter,
-  leave, button, axis, key, focus, unfocus, close, or dropped for a
+  came, its size, the rows copied, the window, the place it was put at
+  for the configure the commit answers), `wayland configure` (surface,
+  size, states as bits, serial), `wayland error` (object, interface,
+  code, message) and `wayland input` (what: enter, leave, button, axis,
+  key, focus, unfocus, close, maximize, restore, place, or dropped for a
   window the client shows no surface in; the surface, the window, the
   button or key code, pressed or released; motion is not evented). The
   client's pid and number are in each. With `events=window` too, the
@@ -9481,13 +9524,14 @@ as they keep Windows ones: the pixels are kept and nothing draws them
 - The ledger: a request gala doesn't implement is answered with a
   protocol error and counted as `wayland request missing` (service: the
   interface, detail: the opcode); one accepted and not acted on as
-  `wayland request ignored`; a desktop action a Wayland window does not
-  follow yet as `wayland window action missing` (service: maximize,
-  restore, place; detail: the window).
+  `wayland request ignored`; a window message from the desktop a
+  Wayland window does not follow as `wayland window action missing`
+  (service: message; detail: the window).
 - The state dump lists the socket, each client (pid, objects, requests,
   bytes of events waiting) and its objects (a surface's window, size and
   frame callbacks; a buffer's size and stride; an xdg_surface's
-  configure state; a toplevel's title, app id and decoration object; a
+  configure state, the serials not acked and the place acked; a
+  toplevel's title, app id, decoration object and sizing; a
   decoration's mode asked for) and its seat (the pointer's surface and
   place, buttons held, the keyboard's surface, keys down, modifiers).
 
@@ -9519,9 +9563,15 @@ as they keep Windows ones: the pixels are kept and nothing draws them
   mouse and keyboard: a click (enter, BTN_LEFT pressed and released at
   the surface point aimed at, each in its frame), a wheel notch (source,
   discrete, axis, frame), "a", Shift+A (Shift's modifier), Left (an E0
-  key), the pointer moved off (leave), the frame's close button
+  key), the pointer moved off (leave), then the Snap keys: Win+Up
+  (a configure of the work area's surface size, maximized and activated),
+  Win+Down (the size before), Win+Left (the left half, tiled left, top
+  and bottom: it binds xdg_wm_base 6), Win+Down, each acked and answered
+  with a buffer of that size; the frame's close button
   (`xdg_toplevel.close`); then a second toplevel asking for client-side
-  decorations, shown frameless and focused; "q" ends it. Not recordable
+  decorations, shown frameless and focused; "q" ends it. It also checks
+  wm_capabilities (maximize, minimize) and the activated state once
+  shown. Not recordable
   on Linux (weston's headless backend has no input devices): its
   expected.txt is written from the protocol's specification and says so,
   and lx-expect builds it and does not run it (`INPUT_TESTS`). Scenarios
@@ -9530,7 +9580,8 @@ as they keep Windows ones: the pixels are kept and nothing draws them
   (`WL_INPUT_SCREEN`) that sends the input step by step, each after the
   line the program prints for the step before, and checks the pixels:
   the first window's buffer inside shasha's frame (the active caption
-  above it), the second's where a frame would be.
+  above it), maximized, restored, snapped left and back, the second's
+  where a frame would be.
 - The wire format: host tests in `wl_abi`. The protocol state: host
   tests in `kernel/src/wayland/tests.rs` (wl_test's flow against a fake
   desktop, the pixels and damaged rows copied, unmapping, versions,
