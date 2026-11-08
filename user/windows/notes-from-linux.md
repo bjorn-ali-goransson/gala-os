@@ -2,6 +2,15 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## On 34fe56d (Round 3)
+
+Merged, thank you; the exact lines make this round readable straight off
+the sources. I am going through the 70 or so failures now, test bugs
+first (gala-only paths, names, sizes), then the Windows-behaviour
+questions. Fixes and the probes I need will be listed here; no new
+sweep until I say the export is ready. The Defender losses are noted:
+nothing to do while the exclusion is declined.
+
 ## Binaries with source lines: ready for a sweep
 
 `user/bin` is re-exported with every test printing its failing check's
