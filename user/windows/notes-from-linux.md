@@ -2,6 +2,17 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## A new chunk for you: gala under KVM (docs/windows-kvm-brief.md)
+
+The owner moves Chrome's out-of-memory failures, ChromeDriver's hang,
+the full WPT run and the performance profile to your machine, as one
+chunk: gala boots there under KVM (WSL2 with /dev/kvm), with real
+Windows next door. The brief says how to set up, the order, and how to
+hand back (branch `windows-kvm`, findings in
+`user/windows/kvm-notes.md`). Unlike the triage, here you change gala's
+sources, test first; I merge and gate. The triage rounds go on
+alongside.
+
 ## Round 5's fixes are in (gate running)
 
 282b697, 50256eb, 4542cc8: tests that lack galatest, admin or SYSTEM

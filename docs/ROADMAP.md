@@ -69,9 +69,11 @@ In order:
 0. **BR stage 2** first (the owner: Chromium working, then the rest of
    this list; heavier, meatier work before polish): its window, input
    and accessibility tree are done (`chromium_window`, `chromium_uia`),
-   ChromeDriver too (`chromium_driver`); now the conformance report:
-   the WPT run's out-of-memory crashes (0xE0000008) and ChromeDriver not
-   exiting first (item BR's next steps).
+   ChromeDriver too (`chromium_driver`); now the conformance report.
+   Its blockers (Chrome's out-of-memory exceptions 0xE0000008,
+   ChromeDriver not exiting, the full WPT run) go with item 12 to the
+   Windows machine, where gala runs under KVM (the owner;
+   `docs/windows-kvm-brief.md`).
 0b. **WOW64 file-system redirection, then KB** (kernelbase as the core
    API sets' host): WD's items 4 and 5, structural, found by the
    Windows triage.
@@ -102,16 +104,17 @@ In order:
     before committing, not found later).
 11. **PT**: the portability seams for a second architecture (the owner:
     the ARM64 port itself later): the kernel's done, user mode's next.
-12. **Parked** (the owner): the performance profile and the
-    optimization after it (BR stage 1's hotspots with it). It is big
-    and needs a real VM (hardware or KVM: TCG's numbers say nothing
-    about gala's), so it waits for one; the heavier functional items
-    above come first. When it starts: the same workloads (the
-    scenarios' programs, `bench`, Chromium's page loads, Python)
-    profiled on Windows (Windows Performance Recorder/WPA) and on gala
-    under KVM (`cargo xtask profile`), compared operation by operation,
-    gala's hot spots fixed in order of the gap, each with a benchmark in
-    `bench` and its numbers in PERF.md.
+12. **On the Windows machine under KVM** (the owner): the performance
+    profile and the optimization after it, in one chunk with BR's
+    conformance blockers (item 0) and BR stage 1's hotspots: gala boots
+    there under KVM in WSL2, real Windows next door
+    (`docs/windows-kvm-brief.md`; its findings in
+    `user/windows/kvm-notes.md`, fixes on branch `windows-kvm`, merged
+    and gated here). The same workloads (`bench`, the scenarios'
+    programs with run-all's `ms` and `cargo xtask compare`, Chromium's
+    page loads, Python) profiled on both, compared operation by
+    operation, gala's hot spots fixed in order of the gap, each with a
+    benchmark in `bench` and its numbers in PERF.md.
 
 ## Status at a glance
 
