@@ -2068,8 +2068,14 @@ the next breakthroughs).
 2. A Wayland server in gala speaking the core protocol and `wl_shm`
    (shared-memory buffers: software-rendered clients need no GPU) and
    `xdg-shell` for top-level windows: each surface a shasha window,
-   pointer and keyboard input through `wl_seat`. Test first: a small
-   client of our own drawing known pixels, checked on the screen.
+   pointer and keyboard input through `wl_seat`. First its
+   prerequisites, each test first against real Linux: `AF_UNIX` stream
+   sockets with `SCM_RIGHTS` (`unix_test`) and `memfd_create`
+   (`memfd_test`); then the wire format as a crate of its own
+   (`kernel/wl_abi`, host-tested); then the server. Test first:
+   `wl_test`, a client of our own over raw sockets, its transcript
+   recorded against weston's headless backend, its pixels checked on
+   the screen.
 3. A first real application: a GTK 3 or 4 program (a calculator or text
    editor) from a distribution's packages, its window and input checked
    on the screen; then a Qt one.
@@ -2078,10 +2084,12 @@ the next breakthroughs).
 **Done when** (each step): its test and scenario pass, and the Linux
 programs' transcripts match real Linux's.
 
-**Design**: written in ARCHITECTURE before step 2 (where the Wayland
-server runs, its buffers as sections, its surfaces as the desktop's
-windows). Wayland's protocol XML and libwayland are open source
-(CLEAN_ROOM "Linux").
+**Design**: ARCHITECTURE "Plan: Linux applications on the desktop
+(Wayland)": the server in the kernel beside the compositor for now
+(moving to user mode with SH), `wl_shm` pools as memfd sections,
+surfaces as `winstate` windows wearing shasha's frame through
+xdg-decoration, one socket per session, the limits on client input,
+`events=wayland` and `wayland=trace`.
 
 ### AR. ARM64 port
 
