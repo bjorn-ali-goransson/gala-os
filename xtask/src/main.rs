@@ -1193,6 +1193,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_socket", "user/lx/bin/socket_test", "lx"),
     ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
+    ("lx_forkmem", "user/lx/bin/forkmem_test", "lx"),
+    ("lx_forkmem_pie", "user/lx/bin/forkmem_test-pie", "lx"),
     ("lx_thread_pie", "user/lx/bin/thread_test-pie", "lx"),
     ("lx_poll", "user/lx/bin/poll_test", "lx"),
     ("lx_poll_pie", "user/lx/bin/poll_test-pie", "lx"),
@@ -7796,6 +7798,32 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/pipe_test lxargs=./pipe_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/pipe_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/forkmem_test (LD step 1): fork's memory, its transcript
+        // real Linux's (`lx_expect::check_boot`); a fork shares its
+        // private pages copy-on-write and copies none (the fork line).
+        name: "lx_forkmem",
+        cmdline: "qemu_exit lxrun=/lx/forkmem_test lxargs=./forkmem_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "pages shared copy-on-write, 0 copied",
+            "run: end /lx/forkmem_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/forkmem_test, static-pie: as `lx_forkmem`.
+        name: "lx_forkmem_pie",
+        cmdline: "qemu_exit lxrun=/lx/forkmem_test-pie lxargs=./forkmem_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "pages shared copy-on-write, 0 copied",
+            "run: end /lx/forkmem_test-pie",
+            BOOT_OK_MARKER,
+        ],
     },
     Scenario {
         // user/lx/brk_test, static (ET_EXEC): its transcript must be its

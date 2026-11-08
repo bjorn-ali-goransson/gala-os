@@ -146,6 +146,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         panic!("scheduler: {e:?}");
     }
     arch::bootphase::mark("sched");
+    // The frames' owner counts (a fork's copy-on-write pages), from the heap.
+    mm::init_sharing();
     info!("sched: boot thread {} running, idle thread started", sched::current());
     arch::smp::init_bsp();
     arch::bootphase::mark("smp_start");
@@ -473,7 +475,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs, {} after a move to another CPU), \
          {} frames leaked by deferred frees, {} freed twice; \
          heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
-         frames free {} of {}; heap peak {} KiB, fewest frames free {}",
+         frames free {} of {}; heap peak {} KiB, fewest frames free {}; \
+         {} frames shared copy-on-write, {} copied at a write",
         arch::smp::moved_flushes(),
         arch::paging::leaked_frames(),
         mm::double_frees(),
@@ -482,7 +485,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         mm::frame_stats().0,
         mm::frame_stats().1,
         heap.peak_in_use / 1024,
-        mm::frame_low_water()
+        mm::frame_low_water(),
+        mm::sharing_stats().0,
+        mm::sharing_stats().1
     );
     // R8 step 6: this release has booted and done its work; the disk's
     // rollback floor goes up to what its manifest says.

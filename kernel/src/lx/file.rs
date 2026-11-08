@@ -266,8 +266,9 @@ fn errno_of(e: FsError) -> u16 {
         FsError::SharingViolation => EBUSY,
         FsError::UserMapped => {
             // Linux shrinks a mapped file (its pages past the end then
-            // fault with SIGBUS); the file system refuses while it is
-            // mapped, as NT does.
+            // fault with SIGBUS, as a mapping's pages past the end do
+            // here); the file system refuses while it is mapped, as NT
+            // does.
             ledger::record("lx file", "linux option missing", 3);
             EBUSY
         }

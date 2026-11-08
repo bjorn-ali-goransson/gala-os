@@ -270,6 +270,20 @@ address.
   aligned runs (DMA, large pages) use a linear scan. Double frees are
   rejected.
 - The first 1 MiB is never handed out (SMP trampolines and similar).
+- **Frames with more than one owner** (a Linux fork's copy-on-write
+  pages): a `u16` per frame counts the owners beyond the first
+  (`share`), from a table on the heap given to the allocator once the
+  heap is up (`mm::init_sharing`, logged `mm: owner counts for <n>
+  frames`); `free` by an owner while others remain only drops the
+  count, so a frame goes with its last owner, and `framecheck`'s
+  mapped-while-freed check applies to that last free. A count at its
+  limit, or no table (no memory for it), refuses another owner: the
+  caller copies the frame instead. Invariant: an owned page whose frame
+  is shared is never mapped writable (`UserSpace::set_flags` keeps it
+  read-only; only `make_writable` makes it writable, by copying it);
+  `write_initial`, which ignores page protection, is used only on a
+  space being built. Host-tested (`mm::frame`). The `stats:` line ends
+  with the frames shared and the copies made at a write since boot.
 
 ## Virtual memory
 
@@ -8217,7 +8231,9 @@ mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
 exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
-`lx_epoll`, `lx_fs`, each also `_pie`), dyn_test (glibc, dynamic:
+`lx_epoll`, `lx_fs`, each also `_pie`), forkmem_test (fork's memory:
+copy-on-write private pages, shared MAP_SHARED anonymous memory and its
+futexes: `lx_forkmem`, `_pie`), dyn_test (glibc, dynamic:
 `lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
@@ -8355,7 +8371,11 @@ The running parts (milestone 1; `lxrun=`):
   parent's pid and the exit signal, the children (running, ended
   zombies with their status, threads waiting in wait4), the
   stdout/stderr line buffers; dropped in `nt::process::finish`
-  (`lx::process_ended`): the fds close first, then the parent is told
+  (`lx::process_ended`): the memory goes first (`mm::clear`: frames it
+  shared copy-on-write are its parent's alone again, and a section's
+  frames are freed only once no page table maps them, though the
+  address space itself may outlive the process, held by a reap or by
+  `run`; `framecheck` caught the order), the fds close next, then the parent is told
   (a zombie, SIGCHLD, its wait4 waiters woken), so a parent woken by a
   child's end reads EOF from a pipe only the child held.
 - **Memory** (`lx::mm`; mmap_test, dyn_test): mmap (the hint if free,
@@ -8367,8 +8387,12 @@ The running parts (milestone 1; `lxrun=`):
   refused request returns the old break). Anonymous pages are
   demand-zero through the core fault path; `vm::sync_range` frees the
   frames of removed pages. Linux overcommits: the commit charge counts
-  but never refuses. MAP_SHARED anonymous is private: a fork copies it
-  (not yet shared with the child).
+  but never refuses. MAP_SHARED anonymous memory (and a MAP_SHARED
+  mapping of /dev/zero) is a view of a pagefile-backed section of its
+  own (`Section::new`, pages made zeroed at the first touch), MEM_MAPPED,
+  so a fork's child shares it, pages first touched after the fork
+  included (forkmem_test); an mremap growing it maps past the section's
+  end, pages that fault (Linux grows the memory).
   - **File mappings**: an mmap of a regular file is a view
     (`nt::section::View` in the process's `views`, MEM_MAPPED in the
     VAD) of a section made for it (`Section::new_linux_file`, holding the
@@ -8380,7 +8404,10 @@ The running parts (milestone 1; `lxrun=`):
     copy: `vm::copy_on_write`; a page never written shows later writes
     to the file, as Linux's page cache does); MAP_SHARED pages on a file
     open for writing write the file; pages past the file's last page
-    fault (Linux: SIGBUS; here the access violation's SIGSEGV).
+    fault with STATUS_IN_PAGE_ERROR (`vm::resolve_once`, from
+    `section::beyond_end`), which ends a Linux process with SIGBUS as
+    Linux's do (mmap_test; a system call reading or writing there
+    gets EFAULT).
     Errors as mmap(2) lists them: EBADF (no fd, O_PATH), ENODEV (a
     directory, pipe, socket or device; /dev/zero maps anonymous memory),
     EACCES (not open for reading; MAP_SHARED with PROT_WRITE without
@@ -8621,9 +8648,18 @@ The running parts (milestone 1; `lxrun=`):
   are ENOSYS, ledgered `linux clone flags missing`. set_robust_list
   keeps each thread's list head (EINVAL for a length other than 24);
   get_robust_list reads it back (0: the caller; another thread of the
-  process by its tid; ESRCH otherwise). The list is not walked at a
-  thread's exit (its futexes are not marked FUTEX_OWNER_DIED): an exit
-  with entries on it is ledgered `linux option missing`. rseq is not
+  process by its tid; ESRCH otherwise). The list is walked when the
+  thread ends (`futex::release_robust`; thread_test): at exit(2), and
+  for the threads still there when the process ends (exit_group, a
+  signal) before its memory goes. Each lock whose word holds the
+  thread's tid, list_op_pending's too, gets FUTEX_OWNER_DIED with
+  FUTEX_WAITERS kept, and one waiter wakes if it had waiters (a
+  non-private wake, so a waiter in another process sharing the memory
+  wakes); at most 2048 entries, an unreadable one ends the walk. The
+  word is read and written, not compared and exchanged as Linux does,
+  so a waiter's change from another process at that moment can be lost.
+  Logged: `lx: pid <p> thread <t> ended holding <n> robust locks (<w>
+  with waiters woken)` (and `its list is broken`). rseq is not
   implemented (ENOSYS, logged and ledgered): registering one means
   keeping its cpu_id current and aborting its critical sections on
   preemption, migration and signals; glibc then goes without (its
@@ -8634,8 +8670,11 @@ The running parts (milestone 1; `lxrun=`):
   is converted again on every wake) and WAKE_BITSET (bitset 0 EINVAL),
   with FUTEX_PRIVATE_FLAG; CLOCK_REALTIME with any other op is ENOSYS,
   as are the PI ops and WAKE_OP (ledgered). One table of waiters (key:
-  pid and address, so private and shared futexes are alike: no memory
-  is shared between processes yet), oldest first. A WAIT queues itself
+  pid and address; for a shared futex, without FUTEX_PRIVATE_FLAG, on
+  memory processes share, a view of a section that writes through such
+  as MAP_SHARED anonymous memory, the word's physical address under
+  pid 0, the same in every process: `section::shared_frame_at`;
+  forkmem_test), oldest first. A WAIT queues itself
   before it reads the word (a waker that changes the word then wakes
   either finds it queued or the read sees the change: EAGAIN), learns
   it was woken from its ticket having left the table, and takes itself
@@ -8710,13 +8749,23 @@ The running parts (milestone 1; `lxrun=`):
     software-reserved bytes in the FPU state.
 - **Fork** (`lx::fork`): fork, and clone with only SIGCHLD (the C
   library's fork), make a child core process (`create_bare`, parent_id
-  set) with the parent's VAD cloned (`Vad::try_clone`), its file
-  mappings' views with the same sections and their mapped file pages as
-  the same frames (MAP_SHARED stays shared, an unwritten MAP_PRIVATE
-  page stays copy-on-write in both), and every other mapped page copied
-  into its own frame at once (`map_private_copy`; no copy-on-write of
-  anonymous memory yet, untouched pages stay demand-zero in both); the
-  charge follows (`charge::sync`, Linux overcommits); its Linux state is
+  set) with the parent's VAD cloned (`Vad::try_clone`), its views with
+  the same sections and their mapped pages as the same frames (a file's
+  MAP_SHARED and MAP_SHARED anonymous memory stay shared, an unwritten
+  MAP_PRIVATE file page stays copy-on-write in both), and every other
+  mapped page (anonymous memory, private copies) shared copy-on-write
+  (`UserSpace::share_into`: the frame gets the child as a second owner,
+  `mm::share_frame`, and is read-only in both; untouched pages stay
+  demand-zero in both). The parent's space stays locked for the whole
+  walk, so its other processors are flushed once and none writes a
+  frame after the child has it. A write fault on such a page
+  (`vm::resolve_once`, and `vm::copy_on_write` for a file's private
+  copy) goes through `UserSpace::make_writable`: a frame still shared is
+  copied into the writer's own and given up, one whose other owners are
+  gone is made writable as it is; the kernel's own writes (read(2) into
+  the page) take the same fault path. A frame that cannot be shared (no
+  owner counts, a count at its limit) is copied at once. The charge
+  follows (`charge::sync`, Linux overcommits); its Linux state is
   `state::fork`'s (the same open file descriptions in the same slots,
   so pipe ends stay open while either holds them; the same actions and
   mask; nothing pending); its thread (`thread::create_forked`) goes on
@@ -8758,7 +8807,8 @@ The running parts (milestone 1; `lxrun=`):
   discarded, ignored, handler, killed, taken); `lx: pid <p> (thread
   <t>): killed by signal <n> (<name>), its default action`; a frame that
   cannot be written or read back logs why. Fork: `lx: pid <p> fork:
-  child pid <c> (<n> pages copied, <m> file pages shared)` then the
+  child pid <c> (<n> pages shared copy-on-write, <k> copied, <m> section
+  pages shared)` (`lx_forkmem` requires `0 copied`) then the
   core's process line and
   `process start` event (ppid); a failed fork logs why; an `lx child
   ended` event (pid, child, wait status, signal, whether the SIGCHLD was
@@ -8782,8 +8832,8 @@ The running parts (milestone 1; `lxrun=`):
   timers, a script as interpreter, futex ops not supported, an execve
   with other threads running, an mmap of what is not a regular file,
   mremap's MREMAP_DONTUNMAP and old length 0, madvise advice not taken,
-  a resource limit set but not enforced, another process's limits, a
-  thread exiting with robust futexes, the shrinking of a mapped file,
+  a resource limit set but not enforced, another process's limits, the
+  shrinking of a mapped file,
   /proc paths other than /proc/self/exe, no random generator), `linux
   syscall stub` (ioctl, wait4's rusage); a page mremap could not move
   logs why (and `out of memory`).
@@ -8807,15 +8857,13 @@ The running parts (milestone 1; `lxrun=`):
   asked.
 - **TODO** (ROADMAP LX, LD): randomization (the stack gap, AT_RANDOM's
   source, the bases); the program and its interpreter mapped as file
-  views (shared text, as libraries are) instead of copied; rseq; robust
-  futex lists released at a thread's exit; SIGBUS for a file page past
-  the end and the shrinking of a mapped file (ramfs refuses it while
+  views (shared text, as libraries are) instead of copied; rseq; the
+  shrinking of a mapped file (ramfs refuses it while
   mapped, as NT's truncation is: EBUSY); `/proc/self/exe` is a node id
   (`LxProcess::exe`), not a held file, so a program deleted while it
   runs does not read as Linux's `<path> (deleted)`; the signal calls
-  and deliveries listed as not yet above; copy-on-write fork and shared
-  MAP_SHARED memory (then shared futexes keyed by the page), vfork
-  sharing its parent's memory; execve ending the other threads first;
+  and deliveries listed as not yet above; vfork sharing its parent's
+  memory; a MAP_SHARED anonymous mapping grown by mremap; execve ending the other threads first;
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
   ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file

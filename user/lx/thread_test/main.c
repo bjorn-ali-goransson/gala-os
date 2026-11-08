@@ -409,6 +409,65 @@ static int ender(void *arg)
 	lx_exit(42);
 }
 
+/* A robust lock as glibc lays one out: the list entry, then the futex
+ * word (futex_offset 8). */
+struct robust_lock {
+	void *next;
+	volatile unsigned word;
+};
+#define FUTEX_WAITERS 0x80000000u
+#define FUTEX_OWNER_DIED 0x40000000u
+#define FUTEX_TID_MASK 0x3fffffffu
+
+/* held, held with waiters, another thread's, and the one being taken
+ * (list_op_pending); a thread that exits holding them. */
+static struct robust_lock rl_held, rl_waiters, rl_other, rl_pending;
+static struct robust_head rl_head;
+static volatile int rl_ready;
+
+/* Registers `head` (in `locks` order, plus `pending`) with this thread's
+ * tid in the words it holds. */
+static void hold_robust(struct robust_head *head, struct robust_lock **locks, int n,
+			struct robust_lock *pending, unsigned extra)
+{
+	unsigned me = (unsigned)sys0(SYS_gettid);
+	head->futex_offset = 8;
+	head->next = n ? (void *)locks[0] : (void *)head;
+	for (int i = 0; i < n; i++)
+		locks[i]->next = i + 1 < n ? (void *)locks[i + 1] : (void *)head;
+	for (int i = 0; i < n; i++)
+		if (locks[i] != &rl_other)
+			locks[i]->word = me | (locks[i] == &rl_waiters ? FUTEX_WAITERS : 0) | extra;
+	head->pending = pending;
+	if (pending)
+		pending->word = me;
+	sys2(SYS_set_robust_list, head, sizeof *head);
+}
+
+static int robust_holder(void *arg)
+{
+	(void)arg;
+	struct robust_lock *locks[] = { &rl_held, &rl_waiters, &rl_other };
+	rl_other.word = 12345;
+	hold_robust(&rl_head, locks, 3, &rl_pending, 0);
+	return 0;
+}
+
+/* In a forked child: holds a lock in shared memory, then waits for the
+ * process's exit_group. */
+static struct robust_lock *rl_shared;
+static int robust_shared_holder(void *arg)
+{
+	(void)arg;
+	static struct robust_head head;
+	struct robust_lock *locks[] = { rl_shared };
+	hold_robust(&head, locks, 1, 0, 0);
+	rl_ready = 1;
+	for (;;)
+		sys0(SYS_pause);
+	return 0;
+}
+
 static i64 spawn_with(int i, u64 flags, int *ptid, int *ctid, int (*fn)(void *), void *arg)
 {
 	tls_blocks[i][0] = (u64)&tls_blocks[i][0];
@@ -698,6 +757,30 @@ int main(void)
 		say_ret("set_robust_list(head, 23)", sys2(SYS_set_robust_list, &head, 23));
 		say_ret("get_robust_list(no such thread)", sys3(SYS_get_robust_list, 0x3ffffff0, &got, &len));
 		say_ret("get_robust_list(bad pointer)", sys3(SYS_get_robust_list, 0, 8, &len));
+
+		/* A thread exits holding robust locks: those whose word has its
+		 * tid get FUTEX_OWNER_DIED (FUTEX_WAITERS kept), the pending
+		 * one too; another thread's is left alone. */
+		static volatile int rl_ctid = -1;
+		spawn(1, &ptid, (int *)&rl_ctid, robust_holder);
+		join(&rl_ctid);
+		say_hex("exited holder's lock", rl_held.word);
+		say_hex("  one with FUTEX_WAITERS", rl_waiters.word);
+		say_hex("  list_op_pending's", rl_pending.word);
+		say("  another thread's", rl_other.word);
+		/* exit_group with a thread holding a lock in shared memory: the
+		 * parent sees it released. */
+		rl_shared = (struct robust_lock *)sys6(SYS_mmap, 0, 4096, 3, 0x21, -1, 0);
+		child = lx_fork();
+		if (child == 0) {
+			static volatile int c4 = -1;
+			spawn(2, &ptid, (int *)&c4, robust_shared_holder);
+			while (!rl_ready)
+				sys0(SYS_sched_yield);
+			sys1(SYS_exit_group, 0);
+		}
+		say_status("child ended by exit_group", wait_for(child, 0));
+		say_hex("  its thread's lock in shared memory", rl_shared->word & ~FUTEX_TID_MASK);
 	}
 
 	say_text("-- clone's errors and exits");

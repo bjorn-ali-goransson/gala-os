@@ -1887,8 +1887,8 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   rt_sigtimedwait, rt_sigreturn; SIGPIPE from a pipe with no reader;
   delivery on the way back from a system call (default actions, SIG_IGN,
   handlers on an rt_sigframe with SA_RESTORER, SA_RESTART for
-  read/write/wait4). fork (and clone with only SIGCHLD) with an eagerly
-  copied address space, wait4, SIGCHLD at the child's end. Scenario
+  read/write/wait4). fork (and clone with only SIGCHLD) with a
+  copy-on-write address space, wait4, SIGCHLD at the child's end. Scenario
   `lx_pipe` matches pipe_test's transcript exactly.
 - Milestone 2's static busybox runs: busybox.net's static musl build
   (a `PREBUILT`, run only in gala) runs a shell script of pipelines,
@@ -1938,16 +1938,20 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   `lx_mmap`); clone3, set_robust_list, get_robust_list (thread_test,
   `lx_thread`); prlimit64, getrlimit, setrlimit, getrandom,
   `/proc/self/exe` (exec_test, `lx_exec`).
+- Copy-on-write fork (LD step 1's rest; forkmem_test, `lx_forkmem`,
+  `lx_forkmem_pie`): a fork shares the parent's private pages with the
+  child (frames with owner counts in the frame allocator, read-only in
+  both until a write copies them: `UserSpace::share_into`,
+  `make_writable`), MAP_SHARED anonymous memory is a section both map,
+  and a shared futex on it is keyed by its physical address; the fork
+  line counts the pages shared and copied (`0 copied` required).
 
 **Next**:
 1. Milestone 2's rest: the rest of signal_test and fork_test
    (rt_sigqueueinfo, sigaltstack, faults as SIGSEGV/SIGBUS/SIGFPE
    through the exception path, delivery to a thread running user code,
    stop/continue, process groups and sessions, waitid, rusage), vfork
-   sharing memory and copy-on-write for fork of anonymous memory (LD
-   step 1's rest: shared frames, `vm::copy_on_write` for private pages;
-   MAP_SHARED anonymous memory shared with the child, then futexes keyed
-   by the shared page);
+   sharing memory;
    execve ending the other threads first; per-thread CPU time
    for clock_test's CPU clocks; wait queues on sockets instead of their
    1 ms look (seam 5: the stack's notify hook is AFD's alone);
@@ -2066,25 +2070,21 @@ the next breakthroughs).
   fork sharing them), mremap moving pages without copying, madvise
   (mmap_test); clone3 and set/get_robust_list (thread_test);
   prlimit64/getrlimit/setrlimit, getrandom and `/proc/self/exe`
-  (exec_test).
+  (exec_test); copy-on-write fork (forkmem_test, `lx_forkmem`: private
+  pages shared read-only until written, `0 copied` in the fork line;
+  MAP_SHARED anonymous memory and its shared futexes one for parent
+  and child); robust futex lists released when a thread ends, at exit
+  or its process's end (thread_test); SIGBUS for a file mapping's page
+  past the file's end (mmap_test).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
-   - copy-on-write `fork` of anonymous memory (shared frames,
-     `vm::copy_on_write` for private pages; file pages already stay
-     shared): a fork copies every touched page today, which a large
-     program (a GTK application forking a helper) feels; with it
-     MAP_SHARED anonymous memory shared with the child. fork_test
-     records fork's semantics; a test measuring the pages copied
-     goes with it;
    - the program and its interpreter mapped as file views (shared text
      across processes, as the libraries already are) instead of copied
      at exec;
    - rseq (glibc registers one; ENOSYS, ledgered, until the scheduler
-     keeps its cpu_id and aborts its critical sections), robust futex
-     lists released at a thread's exit, SIGBUS for a file page past the
-     end, shrinking a mapped file (ramfs refuses it while mapped: EBUSY,
-     ledgered);
+     keeps its cpu_id and aborts its critical sections), shrinking a
+     mapped file (ramfs refuses it while mapped: EBUSY, ledgered);
    - a root file system image of a distribution's libraries (more than
      glibc), as the GTK step needs; what its programs reach, from the
      ledger (`linux syscall missing`).

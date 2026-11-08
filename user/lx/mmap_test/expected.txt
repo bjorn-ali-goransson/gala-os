@@ -62,6 +62,11 @@ munmap(page 3) = 0
 page 3 after munmap: --
 page 4 stays = 68
 munmap(all) = 0
+MAP_PRIVATE of 6 pages of a 3.5-page file = yes
+its last file page's tail = 0
+a read past the file's last page: killed by 7
+a write past the file's last page: killed by 7
+munmap(6 pages) = 0
 MAP_SHARED at offset 4096 = yes
 its first byte is page 2's = 66
 the file sees the store = 115
