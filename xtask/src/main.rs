@@ -243,16 +243,17 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["bin", "cmd", "etc", "usr/bin", "mingw64/bin", "mingw64/libexec/git-core"],
         excludes: &[],
     },
-    // FileZilla Client 3.69.3 for 64-bit Windows: the official build, from
-    // the project's SourceForge files (its own site serves downloads only
-    // through JavaScript). An NSIS installer: 7-Zip reads it without running
-    // it. SHA-256 measured (SourceForge publishes the MD5
-    // e334f2446615c7ee295c27039d372165, which matches). The programs, their
-    // DLLs and resources; not the NSIS plugins, translations or docs.
+    // FileZilla Client 3.71.0 for 64-bit Windows: the official installer,
+    // as Chocolatey's package carries it (the project's site hands out
+    // download links only to browsers, and SourceForge drops old releases).
+    // The package's SHA-256 is measured; it carries the 32-bit and the
+    // 64-bit installer, and the unpack takes the 64-bit one. An NSIS
+    // installer, read by 7-Zip: the program, its DLLs and resources; not
+    // the NSIS plugins, translations or docs.
     Prebuilt {
         name: "filezilla",
-        url: "https://downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe",
-        checksum: "e87b878746e62c7d16ff04723199ec0ecbbea6680a814c4508b18b8b41ddcdad",
+        url: "https://packages.chocolatey.org/filezilla.3.71.0.nupkg",
+        checksum: "fa234cea2f88d73062de1b5b0cac509a295ea63ee13f5a8618839a5552a51780",
         members: &["*.exe", "*.dll", "resources"],
         excludes: &["$PLUGINSDIR", "uninstall.exe"],
     },
@@ -2541,6 +2542,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "dotnet_hello",
     "flaui_test",
     "filezilla_flaui",
+    "filezilla_sftp",
     "pwsh_hello",
     "postgres",
     "filezilla",
@@ -3320,6 +3322,13 @@ fn fetch_prebuilt(path: &str) -> Result {
     if full.exists() && done.exists() {
         return Ok(());
     }
+    // Another release (a re-pinned version) or a partial unpack: start
+    // from nothing, or the old release's files stay beside the new ones
+    // (and ship with a directory module).
+    if dir.exists() {
+        eprintln!("xtask: {}: no unpack of the pinned release; clearing {dir:?}", p.name);
+        fs::remove_dir_all(&dir).map_err(|e| format!("clearing {dir:?}: {e}"))?;
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
     eprintln!("xtask: fetching {} ({})", p.name, p.url);
@@ -3348,12 +3357,26 @@ fn fetch_prebuilt(path: &str) -> Result {
                 .arg(&inner),
         )?;
         let _ = fs::remove_file(&zip);
+        // A package may carry a 32-bit and a 64-bit installer (FileZilla's
+        // does): the 64-bit one, by name, whatever order the directory
+        // lists them in; otherwise the first by name.
         let tools = inner.join("tools");
-        let exe = fs::read_dir(&tools)
+        let mut exes: Vec<PathBuf> = fs::read_dir(&tools)
             .map_err(|e| format!("reading {tools:?}: {e}"))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|p| p.extension().is_some_and(|x| x == "exe"))
-            .ok_or(format!("{}: no installer in tools/", p.url))?;
+            .filter(|p| p.extension().is_some_and(|x| x == "exe"))
+            .collect();
+        let is_64 = |p: &PathBuf| {
+            let n = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            n.contains("win64") || n.contains("x64")
+        };
+        exes.sort_by_key(|p| (!is_64(p), p.clone()));
+        eprintln!(
+            "xtask: {}: installers in tools/: {:?}, using the first",
+            p.name,
+            exes.iter().filter_map(|p| p.file_name()).collect::<Vec<_>>()
+        );
+        let exe = exes.into_iter().next().ok_or(format!("{}: no installer in tools/", p.url))?;
         let moved = dir.join("download.exe");
         fs::rename(&exe, &moved).map_err(|e| format!("moving {exe:?}: {e}"))?;
         let _ = fs::remove_dir_all(&inner);
@@ -3672,6 +3695,7 @@ const PENDING: &[&str] = &[
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
+    "filezilla_sftp",
     "gitbash",
     "mingit",
     "sqllocaldb",
@@ -6221,21 +6245,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: ftp ok"],
     },
     Scenario {
-        // W3: FileZilla 3.69.3's SFTP engine (PuTTY's psftp adapted),
-        // unmodified and headless: its version report, as psftp -V prints
-        // it.
-        name: "fzsftp",
-        cmdline: "qemu_exit run=filezilla/fzsftp.exe args=-V",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "fzSftp started, protocol_version=11",
-            "psftp: 3.69.3",
-            "Build platform: 64-bit x86 Windows",
-            "exited with status 0x00000000",
-        ],
-    },
-    Scenario {
-        // W3: FileZilla 3.69.3 itself (wxWidgets 3.2): its main window and
+        // W3: FileZilla 3.71.0 itself (wxWidgets 3.2): its main window and
         // Welcome dialog on the desktop, clicked closed (SCREEN_SCENARIOS).
         name: "filezilla",
         cmdline: "qemu_exit wallpaper=dunes \
@@ -6245,7 +6255,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: screen ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // W3 and UI Automation: FileZilla 3.69.3 driven by FlaUI 5.0.0 on
+        // W3 and UI Automation: FileZilla 3.71.0 driven by FlaUI 5.0.0 on
         // .NET 8 (user/flaui_test/FileZillaFlaUI.cs) through gala's
         // UIAutomationCore, with FileZilla Server started first: the
         // Welcome dialog, Quickconnect, the connection's dialogs, the
@@ -6267,6 +6277,40 @@ const SCENARIOS: &[Scenario] = &[
             "grid=Filename,Filesize,Filetype,Last modified,Permissions,Owner/Group rows=2",
             "row=hello.txt ",
             "events=title opened=Remember passwords?,Unknown certificate",
+            "selected=hello.txt True",
+            "menu=File Exit",
+            "exited=True",
+            "filezilla_flaui: ok",
+            "dotnet.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // W3: FileZilla 3.71.0's SFTP engine (its own libfzssh) against
+        // Win32-OpenSSH's sshd: ssh-keygen -A makes the host keys, then
+        // sshd serves as a service (`start_as=system`: SYSTEM, session 0)
+        // while the boot user's FlaUI test (filezilla_flaui.dll `sftp`)
+        // Quickconnects as galatest with its password, accepts the
+        // unknown host key and lists C:\ftp over SFTP (sftp-server.exe as
+        // galatest), then File > Exit.
+        name: "filezilla_sftp",
+        cmdline: "qemu_exit logtee=C:/ProgramData/ssh/logs events=net,logon \
+                  start_as=system start=ssh-keygen.exe,sshd.exe start_args=-A, \
+                  start_wait=ssh-keygen.exe run=dotnet.exe args=C:/gala/filezilla_flaui.dll%20sftp",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "start: ssh-keygen.exe (pid ",
+            ") finished with status 0x00000000",
+            "start: sshd.exe (pid ",
+            "welcome=Welcome to FileZilla OK",
+            "quickconnect=sftp://127.0.0.1/C:/ftp galatest 22",
+            "dialog=Remember passwords? OK",
+            "dialog=Unknown host key OK",
+            "logtee: sshd.log: ",
+            "Accepted password for galatest",
+            "remote=..,hello.txt",
+            "grid=Filename,Filesize,Filetype,Last modified,Permissions,Owner/Group rows=2",
+            "row=hello.txt ",
+            "events=title opened=Remember passwords?,Unknown host key",
             "selected=hello.txt True",
             "menu=File Exit",
             "exited=True",
@@ -7859,7 +7903,6 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("failpoint_disk", "persist_test"),
     ("failpoint_disk_delay", "persist_test"),
     ("dotnet_info", "dotnet"),
-    ("fzsftp", "filezilla"),
     ("filezilla_server", "filezilla"),
     ("sshd_server", "sshd_login"),
     ("sshd_server", "sshd_server"),
@@ -7882,6 +7925,11 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("flaui_test", "dotnet"),
     ("filezilla_flaui", "dotnet"),
     ("filezilla_flaui", "filezilla"),
+    ("filezilla_sftp", "dotnet"),
+    ("filezilla_sftp", "filezilla"),
+    ("filezilla_sftp", "sshd_login"),
+    ("filezilla_sftp", "sshd_server"),
+    ("filezilla_sftp", "sshd_sftp"),
     ("pwsh_hello", "pwsh"),
     ("python_pip_https", "python_pip"),
     ("python_numpy", "python_pip"),
@@ -10420,15 +10468,15 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                     // Then, after the TLS handshake, the server's
                     // self-signed certificate: the "Unknown certificate"
-                    // dialog's OK.
-                    pixels: &[PixelCheck::AnyIn(800, 646, 60, 18, 0x005fb8)],
+                    // dialog's OK (y 632-652).
+                    pixels: &[PixelCheck::AnyIn(800, 636, 60, 12, 0x005fb8)],
                 },
                 ScreenStep {
                     after: "",
-                    // OK (833, 655): FileZilla trusts it, logs on and lists
+                    // OK (833, 642): FileZilla trusts it, logs on and lists
                     // the remote directory (C:\ftp): "hello.txt" at the left
                     // of the remote list.
-                    input: &["mouse_move 70 154", "mouse_button 1", "mouse_button 0"],
+                    input: &["mouse_move 70 141", "mouse_button 1", "mouse_button 0"],
                     pixels: &[PixelCheck::AnyIn(650, 405, 150, 40, 0x1b1b1b)],
                 },
                 ScreenStep {
@@ -10453,7 +10501,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 },
                 ScreenStep {
                     after: "",
-                    // A click in the console (300, 400) activates it, and
+                    // A click in the console (300, 387) activates it, and
                     // Win+Left snaps it to the left half: the server's log
                     // next to FileZilla.
                     input: &[

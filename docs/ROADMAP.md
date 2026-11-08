@@ -190,7 +190,7 @@ has a section under "Open items".
 |---|---|---|---|
 | W1 | Windows on the screen | done | `gui_test`; ARCHITECTURE "Windows on the screen" |
 | W2 | Styled desktop and input | done | `gui_test` |
-| W3 | FileZilla | in progress | connects to FileZilla Server, driven by pixels and by FlaUI; leftovers |
+| W3 | FileZilla | in progress | 3.71.0: connects to FileZilla Server (FTP over TLS) and to sshd (SFTP), driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
@@ -598,7 +598,7 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
 
 ### W3. FileZilla
 
-**Goal**: the FileZilla 3.69.3 client (wxWidgets) runs as on Windows.
+**Goal**: the FileZilla 3.71.0 client (wxWidgets) runs as on Windows.
 
 **Done so far**:
 - The main window with toolbar, Quickconnect bar, local and remote
@@ -606,8 +606,17 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
   edit message log, snap; it connects to FileZilla Server in the same
   boot over TLS 1.3 and lists the remote directory (`filezilla`, a
   pixel screen check, and `filezilla_flaui`, driven through UI
-  Automation; both pending).
+  Automation; both pending: slow).
+- SFTP through FileZilla's own SSH libraries (libfzssh,
+  libfzssh-client, libfzssh-crypt, inside filezilla.exe; there is no
+  separate `fzsftp.exe` engine to run headless any more):
+  `filezilla_sftp` (pending: slow) is a real session: Win32-OpenSSH's
+  sshd runs as a service (`start_as=system`, host keys from
+  `ssh-keygen -A` first with `start_wait=`), and the same FlaUI test
+  with `sftp` Quickconnects as galatest with its password, accepts the
+  unknown host key and lists C:\ftp through sftp-server.exe.
 - Rich edit controls: msftedit.dll and riched20.dll (`richedit_test`).
+- msvcrt's `_ismbblead` (3.71's mingw WinMain entry; `msvcrt_test`).
 
 **Next**:
 1. DefWindowProc's WM_WINDOWPOSCHANGING sends WM_GETMINMAXINFO and keeps
@@ -617,10 +626,11 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
    SetWindowPos's WM_NCCALCSIZE.
 2. Rich edit: RTF streams, undo, the clipboard (user32 has none yet),
    OLE callbacks (wx asks for them).
-3. A fetchable installer (see "Known issues and stopgaps").
+3. A transfer over SFTP (`filezilla_sftp` lists only): a download and
+   an upload through the queue.
 
-**Done when**: `filezilla` and `filezilla_flaui` pass from a fresh
-checkout.
+**Done when**: `filezilla`, `filezilla_flaui` and `filezilla_sftp` pass
+from a fresh checkout.
 
 **Design**: ARCHITECTURE "Windows on the screen", "UI Automation".
 
@@ -1515,13 +1525,6 @@ is left is delay-loaded or stubbed.
    font enumeration), kernel32 (13), comdlg32 (4), oleacc, winmm's
    PlaySoundW, ws2_32's inet_pton/inet_ntop (GnuTLS).
 
-**Known problem**: the FileZilla client's PREBUILT URL
-(`downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe`,
-also the `FileZilla_Client/3.69.3/` path) answers 404, so the
-`filezilla`, `filezilla_flaui` and `filezilla_server` scenarios (one
-module set) cannot be fetched on a machine without
-`target/prebuilt/filezilla`. No official mirror with the pinned SHA-256
-(e87b8787...) has been found; the URL stays until one is.
 
 ### WD. Windows divergences: the test programs on real Windows
 
@@ -2722,7 +2725,7 @@ xtask test` or CI.
 | `sqllocaldb`, `sqllocaldb_persist` | 3 GiB and a 50 MB MSI download (1 GiB disk for the second) | P1 |
 | `mingit` | not recorded (it passed when written; a PREBUILT download); a candidate for the suite | P1 |
 | `gitbash` | blocked (P1 Git Bash is parked) | P1 |
-| `filezilla`, `filezilla_flaui` | slow (about 100 s and 25 s in the kernel) and the installer's URL answers 404 (AG "Known problem") | W3 |
+| `filezilla`, `filezilla_flaui`, `filezilla_sftp` | slow (about 100 s, 45 s and 45 s in the kernel under TCG) | W3 |
 | `sshd` | `ssh-keygen -A` and `sshd -t` only; superseded by `sshd_login`, `sshd_server` | SSH (move into the suite or drop) |
 
 ### Environment

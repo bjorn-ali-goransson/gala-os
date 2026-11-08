@@ -1485,17 +1485,24 @@ it on first use.
   package: FlaUI) is a plain zip, its members paths such as
   `lib/net8.0-windows7.0/FlaUI.Core.dll`. One fetch runs at a time
   (ISOs are built in parallel), and a `.unpacked-<sha256>` marker makes
-  an interrupted unpack run again.
+  an interrupted unpack run again. An unpack (no marker for the pinned
+  checksum and selection: a new version, changed members, an interrupted
+  run) starts by clearing `target/prebuilt/<name>`, so an older
+  release's files never stay beside the new ones.
 - `members` are unzip patterns (`*` crosses `/`), `excludes` unzip `-x`
   patterns; the marker includes a hash of both, so changing them unpacks
   again. For an MSI, members are directories of the installed layout,
   each moved to `target/prebuilt/<name>/<last component>`, and excludes
   are paths removed after that; for 7-Zip archives members are
   directories.
-- A pinned release can vanish upstream (the FileZilla 3.69.3 client
-  installer's SourceForge URL answers 404; ROADMAP AG): keep a fetched
-  `target/prebuilt/<name>` around, and change a URL only for an official
-  one with the same SHA-256.
+- A pinned release can vanish upstream (SourceForge dropped FileZilla
+  3.69.3's installer): pin a release through a source that keeps old
+  versions, such as Chocolatey's package of the official installer
+  (FileZilla Client and Server), and change the pinned version when it
+  goes; a package carrying a 32-bit and a 64-bit installer is unpacked
+  from the 64-bit one (by name: `win64`/`x64`). Copy a fetched
+  `target/prebuilt/<name>` aside first to compare against the new
+  version (the re-pin clears it).
 - **Large programs**: a module path ending in `/`
   (`target/prebuilt/jdk/jdk-21.0.5+11/`) ships the whole tree as
   `C:\<dir>` with its subdirectories, packed into one USTAR archive

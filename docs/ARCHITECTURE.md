@@ -212,7 +212,9 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
 | `run=<file>[,<file>...]` | run those boot modules as user processes, one after another (each between `run: begin` and `run: end` log lines) |
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
-| `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot |
+| `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot (`start: <name> (pid <n>, as <account>)`) |
+| `start_as=system` | the `start=` programs run as SYSTEM (services, session 0) while the `run=` programs stay the boot user's (`filezilla_sftp`: sshd beside a desktop program) |
+| `start_wait=<file>[,...]` | those `start=` programs are waited for before the next one starts (`ssh-keygen -A` before sshd), logged as `start: <name> (pid <n>) finished with status <s>` (a warning every minute it has not) |
 | `console=<program>` | that `start=`/`run=` program (module or file name) gets a console window ("Console windows") |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`) |
 | `as=system` | the `run=` programs run as SYSTEM instead of the boot user ("Access tokens"; the sshd scenarios) |
@@ -3339,7 +3341,7 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   by ordinal STATUS_ORDINAL_NOT_FOUND, as a missing export), so programs probing for optional
   functions keep their fallbacks; only static imports bind to them. The
   lists were generated from the import closures of SQL Server LocalDB and
-  FileZilla (W3: FileZilla 3.69.3's imports across user32, gdi32, msvcrt,
+  FileZilla (W3: FileZilla 3.69.3's and 3.71.0's imports across user32, gdi32, msvcrt,
   comctl32, shell32, ole32 and others); a function is implemented by
   removing its name from the list.
 - **Stub-only DLLs**: pdh, urlmon, xolehlp, odbc32, authz,
