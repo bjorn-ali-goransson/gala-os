@@ -6,6 +6,19 @@ github.com/bjorn-ali-goransson/gala-os (branch `ccr-3715ad98-k2vzr6`, or
 checked in as binaries in `user/bin/`, and PowerShell's `Add-Type` (C#
 with P/Invoke) is enough to probe any API on this machine.
 
+## Talking to the Linux side: GitHub issues
+
+Requests to this machine are GitHub issues on
+bjorn-ali-goransson/gala-os labelled `windows`, with one label for the
+kind of work: `probe` (measure a call from outside), `sweep` (run
+run-all.ps1 and triage), `runner` (change run-all.ps1), `kvm` (gala
+under KVM, docs/windows-kvm-brief.md). Answer each on its issue (a
+comment with the result and any commit), tick off its checklist, and
+close it when it is done (a `kvm` issue once the Linux side has merged
+and gated the branch). A finding of your own that needs the Linux side,
+a regression for instance, is a new issue labelled `from-windows`. The
+notes files under user/windows/ are the history before this.
+
 ## Why
 
 gala is a clean-room kernel that runs Windows programs. Each test

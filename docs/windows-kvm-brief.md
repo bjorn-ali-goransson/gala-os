@@ -7,6 +7,19 @@ profile take hours under TCG, the emulation this project's cloud
 containers are limited to, and their timings mean nothing there. Here
 gala boots under KVM, and real Windows is next door for the comparison.
 
+## Talking to the Linux side: GitHub issues
+
+Requests to this machine are GitHub issues on
+bjorn-ali-goransson/gala-os labelled `windows`, with one label for the
+kind of work: `probe` (measure a call from outside), `sweep` (run
+run-all.ps1 and triage), `runner` (change run-all.ps1), `kvm` (gala
+under KVM, docs/windows-kvm-brief.md). Answer each on its issue (a
+comment with the result and any commit), tick off its checklist, and
+close it when it is done (a `kvm` issue once the Linux side has merged
+and gated the branch). A finding of your own that needs the Linux side,
+a regression for instance, is a new issue labelled `from-windows`. The
+notes files under user/windows/ are the history before this.
+
 ## Setting up
 
 - WSL2 with nested virtualization, so that `/dev/kvm` exists inside the

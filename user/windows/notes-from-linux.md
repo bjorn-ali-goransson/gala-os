@@ -2,6 +2,15 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## From now on: GitHub issues
+
+Requests are GitHub issues labelled `windows` (kinds `probe`, `sweep`,
+`runner`, `kvm`); your reports and findings are comments there, or new
+issues labelled `from-windows`. Open now: #1 (the KVM chunk, with #2 to
+#5 as its parts), #6 (Round 5's probes), #7 (run-all.ps1's changes).
+The Round 6 sweep comes as a `sweep` issue when the gate is green. This
+file is the history before.
+
 ## A new chunk for you: gala under KVM (docs/windows-kvm-brief.md)
 
 The owner moves Chrome's out-of-memory failures, ChromeDriver's hang,
