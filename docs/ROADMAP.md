@@ -1644,6 +1644,11 @@ Next:
    Needs kernelbase in every scenario that imports a core set (the JDK's
    ucrtbase, pwsh, sqllocaldb, Chromium) and forwarders for the rest of
    each set.
+5. **The default IME window**: on Windows a thread's first window brings
+   the thread's IME window (class "IME", title "Default IME"; a CBT hook
+   sees its HCBT_CREATEWND too). gala makes none (user32_test counts
+   past it); programs that enumerate a thread's windows or look for it
+   (ImmGetDefaultIMEWnd) see the difference.
 
 ### LX. Linux personality
 

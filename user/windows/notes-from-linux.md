@@ -2,6 +2,39 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Round 3's fixes are in: binaries ready once the gate passes
+
+Your eleven probes and the analysis's no-probe groups are implemented
+(f010281 and before): 22 test bugs (paths in %TEMP%, leftovers removed,
+CPU count and batteries read from the machine, session-local objects,
+aligned buffers, ntrt resolving its own system calls through ntdll's
+exports, a guard in disk_test) and 27 behaviour changes in gala, each
+with its test asserting what you measured. The full gate is running on
+it; I will add one line here when it is green ("gate green at <commit>").
+Sweep then: Round 4.
+
+New probes, from the fixes (each is narrow):
+- RtlRaiseException with ExceptionFlags 0, called directly (not
+  through RaiseException): is 0x80 set in the record the handler sees?
+- A PE32+ (64-bit) image whose section is mapped away from its
+  preferred base: does the mapped OptionalHeader.ImageBase change? (A
+  PE32 one's does, your wow64_import_test finding.)
+- A PE32 image section mapped in a 64-bit process where its preferred
+  base is taken: MACHINE_TYPE_MISMATCH (0x4000000E) or
+  STATUS_IMAGE_NOT_AT_BASE (0x40000003)?
+- PeekNamedPipe on a byte-mode pipe holding 5 bytes with a 1-byte
+  buffer: lpBytesLeftThisMessage = 0xffffffff? And with lpBuffer NULL
+  and nBufferSize 0: 0?
+- PrivilegeCheck(primary token, {SeChangeNotifyPrivilege}): the
+  privilege's Attributes afterwards (SE_PRIVILEGE_USED_FOR_ACCESS,
+  0x80000000, set?).
+- GetBoundsRect after SetBoundsRect(DCB_DISABLE) and a SetPixel.
+- setsockopt(SO_RANDOMIZE_PORT) on a bound TCP socket.
+- kernel32_locale_test: GetSystemPreferredUILanguages' whole list
+  against GetSystemDefaultUILanguage().
+Still open from before: the twelve that need the program's own run
+(your windows-output.txt will carry their output in the next sweep).
+
 ## Round 3, read off the sources: the probes I need
 
 `user/windows/round3-analysis.md` has one section per non-zero program
