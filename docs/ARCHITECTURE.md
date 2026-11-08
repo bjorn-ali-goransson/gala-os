@@ -848,8 +848,11 @@ current process, -2 = current thread.
   thread has ended (Windows frees the TEB then; gala's stays mapped
   until the process ends).
 - **NtCreateThread** takes DeallocationStack from
-  INITIAL_TEB.StackAllocationBase and applies the CONTEXT's MxCsr only
-  (TODO: the rest of FltSave and the XSTATE area). kernel32's CreateThread
+  INITIAL_TEB.StackAllocationBase and the CONTEXT's integer and control
+  registers; its floating-point part (MxCsr, FltSave, the XSTATE area) is
+  ignored whatever ContextFlags say: a new thread starts with a fresh
+  x87/SSE state, MXCSR 0x1f80 and XMM 0, as on Windows 11 (`fpu_test`).
+  NtContinue on an existing thread does load it. kernel32's CreateThread
   builds the stack and start CONTEXT itself ("kernel32").
 - **Suspension and context**: a thread with a suspend count parks in the
   user-return hook, publishing its registers and XSAVE state;
@@ -1554,9 +1557,11 @@ Invariants:
   SystemArgument2, NormalRoutine (to be checked against the pinned
   ntdll). The dispatcher calls the routine and NtContinues with
   TestAlert, which delivers the next APC first. I/O completion routines
-  use the same queue: a read or write on an asynchronous handle with an
-  ApcRoutine queues ApcRoutine(ApcContext, IoStatusBlock, 0) to the
-  caller when it completes successfully.
+  use the same queue: a read or write with an ApcRoutine queues
+  ApcRoutine(ApcContext, IoStatusBlock, 0) to the caller when it
+  completes successfully, on a synchronous handle too (the I/O completes
+  inline and the routine runs at the next alertable wait, as on Windows
+  11; files and pipe ends alike).
 
 ### Job objects
 
@@ -1565,6 +1570,10 @@ through the namespace like events), NtAssignProcessToJobObject,
 NtSet/NtQueryInformationJobObject (basic accounting, basic and extended
 limits) and NtIsProcessInJob (0x7f0a-0x7f0e).
 
+- A new job has no limits in effect (LimitFlags 0) but reports
+  PriorityClass NORMAL_PRIORITY_CLASS (32) and SchedulingClass 5 in its
+  basic limits, as Windows 11 does; what NtSetInformationJobObject sets
+  is reported back as given.
 - A process is in at most one job (`Process::job`); a process created by
   one in a job joins it. Nested jobs (Windows 8+) are not done: assigning
   a process that is in another job is STATUS_ACCESS_DENIED.
@@ -2384,7 +2393,15 @@ shutdown.
   is the NT key handle itself. The functions return Win32 errors from
   RtlNtStatusToDosError. RegGetValue filters by type (RRF_RT_*,
   REG_BINARY of 4/8 bytes for DWORD/QWORD; its flags are checked first),
-  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. The A
+  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. As
+  Windows 11 does, an expanded string is read over the stored one: the
+  stored value's tail stays after the expansion's NUL and pcbData is the
+  larger of the two sizes (the stored size when the expansion is
+  shorter), an upper bound rather than the string's length; a size query
+  for an unexpanded string reports stored + 2 (room for a NUL), and one
+  that fails with ERROR_UNSUPPORTED_TYPE still reports it.
+  RRF_RT_REG_EXPAND_SZ without RRF_NOEXPAND is that error too (the
+  expanded value is a REG_SZ). The A
   functions convert names and string data (REG_SZ, REG_EXPAND_SZ,
   REG_MULTI_SZ) through the ANSI code page (UTF-8 on gala).
 
@@ -2560,7 +2577,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 - **Static TLS** (`tls.rs`): each image with a TLS directory gets an
   index at load; each thread has an array at
   TEB.ThreadLocalStoragePointer with a block per image (the template,
-  then zero fill); a DLL loaded later gets blocks in every existing
+  then zero fill, which gala zeroes; Windows leaves the zero fill as its
+  heap had it, freed loader strings or zeros by chance, so a program
+  relying on it relies on luck and `tls_test` reads it without checking
+  it); a DLL loaded later gets blocks in every existing
   thread. Threads started by kernel32 call `GalaInitializeThread` first
   (their blocks, then DLL_THREAD_ATTACH to TLS callbacks and DllMains in
   load order; Windows does this in LdrInitializeThunk) and ExitThread
@@ -3378,7 +3398,13 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   GetProcAddress): GetNodeClusterState reports ClusterStateNotInstalled;
   functions returning handles give NULL with RPC_S_SERVER_UNAVAILABLE (no
   cluster service), state queries the Unknown state, the rest that error;
-  resutils parses CLUSPROP property lists (`clusapi_test`).
+  resutils parses CLUSPROP property lists (`clusapi_test`). A deliberate
+  difference: gala's ResUtilFind*Property find a property anywhere in the
+  list, within its size, by name; Windows' examine only the first
+  property and ignore the size, so a later property is not found or the
+  walk runs off the list (Windows 11), and a name the first property does
+  not have is answered from it all the same (Windows Server 2025). The test uses one property per list, the shape
+  both answer alike.
 - **cmd.exe** (`user/cmd`, built as a program and placed in System32;
   `cmd_test`) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -4452,7 +4478,11 @@ SOCKET values are the endpoint handles.
   WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER); asyncio's _overlapped
   asks for all of them at import); gala's mswsock.dll forwards its
   AcceptEx, GetAcceptExSockaddrs and TransmitFile exports there (Go
-  imports them from mswsock). DisconnectEx closes both directions
+  imports them from mswsock). A deliberate difference: on Windows 11
+  mswsock's GetAcceptExSockaddrs export is another function than the one
+  WSAIoctl hands out and leaves the address pointers NULL; gala's export
+  does the work (`winsock_async_test` uses WSAIoctl's, as documented).
+  DisconnectEx closes both directions
   gracefully (IOCTL_AFD_DISCONNECT), overlapped or not; its
   TF_REUSE_SOCKET is not supported (WSAEOPNOTSUPP, ledgered), nor is
   TransmitFile (WSAEOPNOTSUPP, ledgered; callers fall back to read and
@@ -5554,6 +5584,15 @@ allocator (`gala_heap`).
 the classes (once). comctl32 imports user32 (the controls are windows)
 but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
 
+- **Which comctl32** (`common::version6`): Windows gives a process
+  comctl32 6.10 (WinSxS) when its executable's manifest (RT_MANIFEST 1)
+  depends on Microsoft.Windows.Common-Controls 6, else 5.82. gala has one
+  comctl32 that answers as the one the process would get where the two
+  differ visibly: TTM_ADDTOOL takes a TOOLINFO up to lParam on 5.82 and
+  also the full one (with lpReserved) on 6, nothing larger on either
+  (Windows 11; `comctl32_test`, `gui_test` without a manifest,
+  `manifest_test` with one). A DLL's own activation context and UTF-16
+  manifests are not looked at.
 - **Common pieces** (`common.rs`): each control's state in a `Store` (by
   window, under a spin lock **that is never held while a message is
   sent**), drawing helpers (rounded fills, text through DrawTextW) and
@@ -5675,7 +5714,10 @@ then riched20.dll).
   CRLF and a lone LF into CR (a single-line control keeps the first
   paragraph); WM_GETTEXT/WM_GETTEXTLENGTH give CRLF; EM_GETTEXTEX CR or
   CRLF (GT_USECRLF), Unicode (1200) or ANSI (WideCharToMultiByte);
-  EM_GETTEXTLENGTHEX characters, CRLF characters or bytes. "RichEdit20A"
+  EM_GETTEXTLENGTHEX characters (GTL_DEFAULT, GTL_NUMCHARS) or, with any
+  other flags, bytes (GTL_USECRLF alone counts bytes; a Unicode window's
+  are UTF-16's whatever the code page, as Windows 11 counts), CRs counted
+  as CRLFs with GTL_USECRLF. "RichEdit20A"
   takes and gives ANSI text (gala's user32 passes SendMessageA's strings
   unchanged and has no ANSI windows, so the class's own procedure
   converts).
@@ -7836,8 +7878,15 @@ same program as SYSTEM).
   STATUS_HANDLE_NOT_CLOSABLE (ERROR_INVALID_HANDLE), CloseDesktop
   STATUS_DEVICE_BUSY (ERROR_BUSY), CloseWindowStation of the process's
   station too. A thread's own desktop handle is freed when it ends.
-- **Other calls**: OpenWindowStation (an unknown or empty name is
-  STATUS_OBJECT_NAME_NOT_FOUND, a backslash STATUS_OBJECT_PATH_NOT_FOUND),
+- **Other calls**: OpenWindowStation (an unknown name is
+  STATUS_OBJECT_NAME_NOT_FOUND, a backslash inside the name
+  STATUS_OBJECT_PATH_NOT_FOUND, a leading one STATUS_OBJECT_PATH_SYNTAX_BAD;
+  the empty name opens the caller's logon session's own station,
+  `Service-0x<high>-<low>$` (not visible), if the logon has one, even for
+  an interactive process connected to WinSta0, and is
+  STATUS_OBJECT_NAME_NOT_FOUND if it has none: OpenWindowStation never
+  makes it; a Windows 11 desktop's logon had one, a Windows Server 2025
+  runner's had none),
   OpenDesktop (empty: STATUS_OBJECT_TYPE_MISMATCH, a backslash
   STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
   OpenInputDesktop (the process's station's Default, a new handle each
@@ -9740,13 +9789,15 @@ HEAD).
 
 - **The tree**: the root is GetDesktopWindow(). Its children are the
   visible top-level windows without an owner (EnumWindows). A top-level
-  window's children, in order: its TitleBar (if it has a caption), its
-  MenuBar (if it has a menu), the visible top-level windows it owns
+  window's children, in order: its MenuBar (if it has a menu), the
+  visible top-level windows it owns
   (GetWindow GW_OWNER: its dialogs, its open popup menu; UIA puts owned
   windows under their owner, which FlaUI's Window.ModalWindows and Win32
   menu handling rely on), its visible child windows in z order, then a
-  list box's or list view's items in index order. An open popup menu
-  (class #32768) has its items instead.
+  list box's or list view's items in index order, a provider's
+  fragments, and last its TitleBar (if it has a caption; Windows 11's
+  proxy, measured in process). An open popup menu (class #32768) has its
+  items instead.
 - **Window properties**:
   - AutomationId: the control id in decimal (none for top-level
     windows);
@@ -9943,9 +9994,9 @@ under the root), with its items as children.
 - Their properties (30073-30078, 30087-30089) are read on any element
   (not-supported without the pattern), which FlaUI's Window.ModalWindows
   relies on (a FindAllDescendants with an IsModal condition).
-- **Title bar**: the window's first child is a TitleBar element (no
-  HWND; `Node.menu` = `frame::TITLE`, item None), Name the window's
-  title, AutomationId "TitleBar", the caption band as its rectangle
+- **Title bar**: the window's last child is a TitleBar element (no
+  HWND; `Node.menu` = `frame::TITLE`, item None) with an empty Name and
+  AutomationId (Windows 11, in process), the caption band as its rectangle
   (SM_CYCAPTION below the border). With WS_SYSMENU its children are
   Buttons (items 0-2): Minimize and Maximize when the window has
   WS_MINIMIZEBOX or WS_MAXIMIZEBOX (each enabled by its own style),

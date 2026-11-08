@@ -19,10 +19,12 @@
 //!   bytes). The A form reports the UTF-16 size when short, the ANSI
 //!   bytes on success.
 //! - OpenWindowStationW/A: a new handle to WinSta0 (any case); an
-//!   unknown name ERROR_FILE_NOT_FOUND, "" too, a name with a backslash
-//!   ERROR_PATH_NOT_FOUND. CloseDesktop of a window station handle and
-//!   CloseWindowStation of a desktop handle fail with
-//!   ERROR_INVALID_HANDLE.
+//!   unknown name (or ".") ERROR_FILE_NOT_FOUND, a name with a backslash
+//!   ERROR_PATH_NOT_FOUND, "\" ERROR_BAD_PATHNAME; "" opens the logon
+//!   session's own station, `Service-0x0-<logon id>$`, not visible, when
+//!   the logon has one (ERROR_FILE_NOT_FOUND when it has none).
+//!   CloseDesktop of a window station handle and CloseWindowStation of a
+//!   desktop handle fail with ERROR_INVALID_HANDLE.
 //! - EnumWindowStationsW lists WinSta0 and returns the callback's value.
 //! - GetThreadDesktop: "Default", type "Desktop", the same handle each
 //!   time and for every thread of the process (a second thread's too);
@@ -466,10 +468,36 @@ fn interactive(c: &mut Checks) -> Result<(), u32> {
         c.ok(CloseWindowStation(w3) != 0, last_error())?;
         let r = OpenWindowStationW(w("dummy name").as_ptr(), 0, WINSTA_ALL_ACCESS);
         c.fails(r as u64, ERROR_FILE_NOT_FOUND)?;
-        let r = OpenWindowStationW(w("").as_ptr(), 0, WINSTA_ALL_ACCESS);
-        c.fails(r as u64, ERROR_FILE_NOT_FOUND)?;
+        // "" is the logon session's own station, Service-0x<high>-<low>$,
+        // not WinSta0 and not visible, when that logon has one (a Windows
+        // 11 desktop's did); when it has none, ERROR_FILE_NOT_FOUND (a
+        // Windows Server 2025 runner; gala's interactive logon).
+        let own = OpenWindowStationW(w("").as_ptr(), 0, WINSTA_ALL_ACCESS);
+        if own.is_null() {
+            c.eq(last_error(), ERROR_FILE_NOT_FOUND.into())?;
+        } else {
+            c.ok(own != w1, 0)?;
+            let mut name = [0u16; 64];
+            let mut needed = 0;
+            let buf = name.as_mut_ptr().cast();
+            c.ok(
+                GetUserObjectInformationW(own, UOI_NAME, buf, 128, &mut needed) != 0,
+                last_error(),
+            )?;
+            let len = (needed / 2).saturating_sub(1) as usize;
+            let prefix: [u16; 12] = core::array::from_fn(|i| u16::from(b"Service-0x0-"[i]));
+            let named = len > 12 && name[..12] == prefix && name[len - 1] == u16::from(b'$');
+            c.ok(named, name[0].into())?;
+            let (_, flags) = flags_of(c, own)?;
+            c.eq((flags & WSF_VISIBLE).into(), 0)?;
+            c.ok(CloseWindowStation(own) != 0, last_error())?;
+        }
         let r = OpenWindowStationW(w("foo\\bar").as_ptr(), 0, WINSTA_ALL_ACCESS);
         c.fails(r as u64, ERROR_PATH_NOT_FOUND)?;
+        let r = OpenWindowStationW(w("\\").as_ptr(), 0, WINSTA_ALL_ACCESS);
+        c.fails(r as u64, ERROR_BAD_PATHNAME)?;
+        let r = OpenWindowStationW(w(".").as_ptr(), 0, WINSTA_ALL_ACCESS);
+        c.fails(r as u64, ERROR_FILE_NOT_FOUND)?;
         // Listing them.
         SetLastError(0);
         c.eq(EnumWindowStationsW(station_callback, 0x12345) as u64, 0x12345)?;

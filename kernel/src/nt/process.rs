@@ -986,7 +986,6 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             &process,
             regs,
             start.ip(),
-            None,
             (stack_top, stack_limit, stack_bottom),
             suspended,
         )

@@ -331,6 +331,29 @@ pub fn station_by_name(session: u32, name: &[u16]) -> Result<ObjectRef, NtStatus
     Ok(found)
 }
 
+/// The window station OpenWindowStation(`name`) opens for a process with
+/// `token` in `session`: the empty name is the process's logon session's
+/// own station, `Service-0x<high>-<low>$`, if it exists (it is not made:
+/// an interactive logon whose processes are all on WinSta0 has none, and
+/// the name is then STATUS_OBJECT_NAME_NOT_FOUND, as on a Windows Server
+/// 2025 CI runner; a Windows 11 desktop's logon had one); a name starting
+/// with a backslash is STATUS_OBJECT_PATH_SYNTAX_BAD; otherwise
+/// [`station_by_name`].
+pub fn station_to_open(
+    session: u32,
+    token: &ObjectRef,
+    name: &[u16],
+) -> Result<ObjectRef, NtStatus> {
+    if name.is_empty() {
+        let own = logon_station_name(logon_of(token).1)?;
+        return station_by_name(session, &own);
+    }
+    if name[0] == u16::from(b'\\') {
+        return Err(NtStatus::OBJECT_PATH_SYNTAX_BAD);
+    }
+    station_by_name(session, name)
+}
+
 /// The window station of logon session `luid` in `session`, made with
 /// its desktop Default if it does not exist yet ("Process Connection to
 /// a Window Station": a non-interactive logon's station).
@@ -707,6 +730,22 @@ mod tests {
         assert_eq!(station_of(&s).unwrap().name, wv("WinSta0"));
         assert_eq!(desktop_of(&d).unwrap().name, wv("Default"));
         assert_eq!(spec_of(&s, &d).unwrap(), wv("WinSta0\\Default"));
+        // OpenWindowStation(""): the logon session's own station, not
+        // WinSta0, and not visible, once it exists (never made by it).
+        assert_eq!(station_to_open(1, &user, &[]).err(), Some(NtStatus::OBJECT_NAME_NOT_FOUND));
+        logon_station(1, logon_of(&user).1).unwrap();
+        let own = station_to_open(1, &user, &[]).unwrap();
+        let own = station_of(&own).unwrap();
+        assert_eq!(own.name, logon_station_name(logon_of(&user).1).unwrap());
+        assert!(!own.interactive && !own.visible());
+        assert_eq!(
+            station_to_open(1, &user, &wv("\\")).err(),
+            Some(NtStatus::OBJECT_PATH_SYNTAX_BAD)
+        );
+        assert_eq!(
+            station_to_open(1, &user, &wv(".")).err(),
+            Some(NtStatus::OBJECT_NAME_NOT_FOUND)
+        );
         // Named.
         let (s2, _) = choose(1, &user, &wv("winsta0\\default"), None).unwrap();
         assert!(KArc::ptr_eq(&s, &s2));

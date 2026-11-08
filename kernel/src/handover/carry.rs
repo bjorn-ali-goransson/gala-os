@@ -335,7 +335,7 @@ fn check_threads() -> Result<Vec<ThreadState>, Option<Refusal>> {
             };
             Resume::Syscall { number, regs, fx, deadline }
         } else if !snap.entered && snap.suspended > 0 && matches!(state, UserWait::Waiting(_)) {
-            Resume::Start { regs: snap.start, mxcsr: snap.start_mxcsr }
+            Resume::Start { regs: snap.start }
         } else {
             return Err(refuse("runs user code", None));
         };
@@ -948,9 +948,8 @@ impl Programs {
                     (thread_state::SYSCALL, *number, *regs, Some(fx), *deadline, None)
                 }
                 Resume::User { regs, fx } => (thread_state::USER, 0, *regs, Some(fx), None, None),
-                Resume::Start { regs, mxcsr } => {
-                    (thread_state::START, 0, *regs, None, None, *mxcsr)
-                }
+                // A START thread's x87/SSE state is fresh: no MXCSR.
+                Resume::Start { regs } => (thread_state::START, 0, *regs, None, None, None),
             };
             let fx = xs.map_or([0; 512], |s| *s.legacy());
             let (xstate, blob): (u64, &[u8]) = match xs {
@@ -1711,7 +1710,9 @@ fn restore_all(rec: &Record<'_>) -> Result<(usize, usize), Failed> {
                 if !regs.is_valid() {
                     return Err(NtStatus::INVALID_PARAMETER);
                 }
-                Resume::Start { regs, mxcsr: t.mxcsr }
+                // An MXCSR from an older writer is ignored: a new thread
+                // starts with a fresh x87/SSE state.
+                Resume::Start { regs }
             }
             _ => return Err(NtStatus::INVALID_PARAMETER),
         };

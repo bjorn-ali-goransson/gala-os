@@ -96,7 +96,11 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
     the job summary (passes, and each failing program's exit and line).
     With `user/windows/ci-passing.txt` (program names) the job fails
     when a listed program does not pass on Windows: a test's expectation
-    stopped being Windows' answer.
+    stopped being Windows' answer. Each program that ended with an
+    exception status is run again under `user/windows/fault.py --report`
+    (a debugger: exception code, module+offset, address, the first-chance
+    exceptions before it), into the summary and `faults.md` in the
+    artifact; one that does not crash again says so.
 - Commit messages pass through the shell: do not put backticks in a
   double-quoted `-m`; use a heredoc with `-F -`.
 - Borrowed code or a new dependency gets a `THIRD_PARTY.md` entry in the
@@ -214,6 +218,15 @@ build's PDB of that module. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
 
+`user/bin` alone is not the whole sweep. The seven script scenarios
+(`busybox_files`, `busybox_script`, `tcc`, `tcc_make`, `tcc_self`, `lua`,
+`sqlite`) run `busybox.exe sh ..\<dir>\<script>.sh`, so they also need
+`user/busybox`, `user/tcc`, `user/lua`, `user/sqlite` and
+`user/msvcrt_test` beside it. run-all.ps1 reports a scenario whose
+script or `busybox.exe` is missing as skipped with that reason (a round
+that copied only `user/bin` has seven such skips). Copy `user/` (or
+those five directories) and check the count.
+
 Run it from an ordinary directory, never one under `%TEMP%`: Windows
 treats a temporary path differently, so a test that works from its
 current directory reads that instead of Windows. shell32_test's check
@@ -233,6 +246,40 @@ and no other; `cargo xtask compare` shows them as missing on the Windows
 side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
+
+Windows' firewall prompts for two programs, `ipv6_test` and
+`handover_net_test`, the first time each one listens: the dialog creates
+a `TCP Query User{<guid>}<path>` and a `UDP Query User{...}` rule **keyed
+on the absolute path**, so a sweep from a new directory asks again (an
+old clone's rules do not carry over). Answer Allow. Answering No writes
+a *Block* rule instead, which is permanent and would fail those two
+silently in every later round -- check with `Get-NetFirewallRule -Action
+Block | Get-NetFirewallApplicationFilter` if either starts failing. The
+permission is not actually needed: both are in CI's passing baseline
+(`user/windows/ci-passing.txt`), and CI's runner is headless with nobody
+to answer the prompt, so they talk over loopback, which the firewall
+does not filter. The prompt only costs the time it sits unanswered.
+
+**Probing a divergence from a script, rather than from the test
+program, has two traps that silently answer a different question.** A
+probe host brings its own environment:
+
+- **comctl32's version.** A process with a v6 manifest (python.exe has
+  one) loads 6.10 from WinSxS; the test programs have no manifest and
+  get 5.82, which behaves differently -- it rejects `TOOLINFOW` with
+  `cbSize` 72 where 6.10 accepts it. Print the module's path before
+  trusting a comctl32 result: `GetModuleFileNameW(GetModuleHandleW(
+  L"comctl32.dll"))` names the WinSxS directory, version and all.
+- **UI Automation in-process or out.** A client in another process sees
+  these controls as `ControlType.Pane` and does not see the non-client
+  title bar at all (three children where the test sees four); the same
+  query from inside the process that owns the window gives Button, Edit,
+  Text and a TitleBar. uia_test queries in-process, so only an
+  in-process client answers its checks (Python can, with `comtypes`).
+
+Where the environment is the question, instrument the test program
+instead: build it from the same sources, add prints, run it, revert.
+That is how the MXCSR, static-TLS and comctl32 answers were measured.
 
 Every program's whole output goes to `windows-output.txt` beside the
 report, with a header per program. The report keeps one line, the

@@ -18,8 +18,9 @@
 //!   CanRotate FALSE and Rotate UIA_E_INVALIDOPERATION, as
 //!   ITransformProvider documents when CanRotate is FALSE.
 //! - The title bar: a TitleBar element (no HWND; Node.menu TITLE, item
-//!   None), the window's first child, named by the window's title,
-//!   AutomationId "TitleBar"; with WS_SYSMENU its buttons (item 0, 1, 2):
+//!   None), the window's last child, after its child windows, with an
+//!   empty Name and AutomationId (Windows 11, measured in process); with
+//!   WS_SYSMENU its buttons (item 0, 1, 2):
 //!   Minimize and Maximize (named and identified "Restore" while the
 //!   window is maximized) when the window has WS_MINIMIZEBOX or
 //!   WS_MAXIMIZEBOX (each enabled with its own style), Close always.

@@ -2,7 +2,9 @@
 //! (documented in "Thread Local Storage" and the PE format):
 //!
 //! - The executable's own TLS: the template's values on every thread,
-//!   the zero fill zero, each thread with its own copy; its TLS callback
+//!   each thread with its own copy; the zero fill is read but not
+//!   asserted: Windows leaves it as the heap had it (freed loader strings
+//!   on 26200, zeros only by chance), so a program cannot rely on it; its TLS callback
 //!   sees DLL_PROCESS_ATTACH before the entry point, DLL_THREAD_ATTACH
 //!   and DLL_THREAD_DETACH for each new thread; a user APC it queues to
 //!   the thread during process initialization has run when the entry
@@ -235,8 +237,8 @@ type TlsSeen = extern "C" fn(u32, u32) -> u32;
 
 fn record_exe_view() {
     THREAD_SAW[0].store(get(1), Ordering::SeqCst);
-    THREAD_SAW[1].store(get(3), Ordering::SeqCst);
-    THREAD_SAW[2].store(get(4), Ordering::SeqCst);
+    // The zero fill is readable (its value is the heap's: not asserted).
+    THREAD_SAW[1].store(get(3) | get(4), Ordering::SeqCst);
     set(1, 0x7777);
 }
 
@@ -246,7 +248,7 @@ fn record_dll_view() {
         // SAFETY: tlsdll's tls_get.
         let get: TlsGet = unsafe { core::mem::transmute(f as usize) };
         THREAD_SAW[3].store(get(1), Ordering::SeqCst);
-        THREAD_SAW[4].store(get(3), Ordering::SeqCst);
+        THREAD_SAW[4].store(get(3), Ordering::SeqCst); // readable
     }
 }
 
@@ -295,13 +297,12 @@ fn run() -> Result<(), u32> {
     c.eq(get(0), 0x1010)?;
     c.eq(get(1), 0x1111)?;
     c.eq(get(2), 0x2222)?;
-    c.eq(get(3), 0)?;
-    c.eq(get(4), 0)?;
+    // The zero fill (SizeOfZeroFill bytes after the template) is readable;
+    // Windows does not zero it, so its value is not checked.
+    let _ = (get(3), get(4));
     set(1, 0x9999);
     c.ok(join(start(quick)), 0)?;
     c.eq(THREAD_SAW[0].load(Ordering::SeqCst), 0x1111)?; // its own copy
-    c.eq(THREAD_SAW[1].load(Ordering::SeqCst), 0)?;
-    c.eq(THREAD_SAW[2].load(Ordering::SeqCst), 0)?;
     c.eq(get(1), 0x9999)?; // ours untouched by the thread's write
     c.eq(seen(2), 1)?; // DLL_THREAD_ATTACH
     c.eq(seen(3), 1)?; // DLL_THREAD_DETACH
@@ -335,8 +336,7 @@ fn run() -> Result<(), u32> {
     c.eq(get_dll(0), 0x5050)?;
     c.eq(get_dll(1), 0x5151)?;
     c.eq(get_dll(2), 0x5252)?;
-    c.eq(get_dll(3), 0)?;
-    c.eq(get_dll(4), 0)?;
+    let _ = (get_dll(3), get_dll(4)); // the zero fill: readable, not checked
     set_dll(1, 0x6666);
 
     // The thread that was already running gets an initialized block.
@@ -345,7 +345,6 @@ fn run() -> Result<(), u32> {
     unsafe { SetEvent(go) };
     c.ok(join(early_thread), 0)?;
     c.eq(THREAD_SAW[3].load(Ordering::SeqCst), 0x5151)?;
-    c.eq(THREAD_SAW[4].load(Ordering::SeqCst), 0)?;
     c.eq(seen_dll(0, 2).into(), 0)?; // no DLL_THREAD_ATTACH for it
     c.eq(seen_dll(0, 3).into(), 1)?; // but DLL_THREAD_DETACH
     c.eq(seen_dll(1, 3).into(), 1)?;
