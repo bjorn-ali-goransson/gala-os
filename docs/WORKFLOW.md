@@ -148,7 +148,14 @@ alone prints the usage.
 
 To compare with Windows: copy `user/bin` to a Windows 11 machine, run
 `powershell -ExecutionPolicy Bypass -File run-all.ps1 -Out windows.json`
-there, then `cargo xtask compare windows.json` here. `cargo xtask
+there, then `cargo xtask compare windows.json` here. Before the run
+there: a local account `galatest` with password `Gala-Test-1` (access,
+disk, logon, lsa, profile, session and system tests log on as it) and
+an administrator prompt for `schannel_test` (its test CA goes into
+LocalMachine\Root; it is skipped otherwise). A program that crashes
+gets a `fault` field (`module+offset (exception code)`) from the
+Application log's event 1000; map the offset to a function with the
+build's PDB of that module. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
 

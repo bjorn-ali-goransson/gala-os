@@ -173,7 +173,36 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     if ($null -eq $line) { $line = $lines | Select-Object -First 1 }
     if ($null -eq $line) { $line = "" }
     if ($lost) { $line = "(output lost: a child it left running held the pipe open)" }
-    $results += [ordered]@{ program = $name; exit = $code; line = $line }
+    $entry = [ordered]@{ program = $name; exit = $code; line = $line }
+    # A crash (an NTSTATUS error as the exit code: 0xC0000005 and the like)
+    # leaves only its code here; Windows Error Reporting logs where it
+    # happened (Application log, event 1000, readable without
+    # administrator rights): the faulting module, exception code and
+    # offset, which `cargo xtask symbolize`-style lookups map to a function
+    # through the build's PDB. WER may take a moment to write it.
+    if ($code -ge 0xC0000000) {
+        $pidHex = "0x{0:x}" -f $process.Id
+        $fault = $null
+        foreach ($try in 1..6) {
+            $fault = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = $runStart } `
+                -ErrorAction SilentlyContinue |
+                Where-Object { $_.Message -like "*$($exe.Name)*" -and $_.Message -like "*$pidHex*" } |
+                Select-Object -First 1
+            if ($null -ne $fault) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if ($null -ne $fault) {
+            $m = $fault.Message
+            $module = if ($m -match 'Faulting module name: ([^,\r\n]+)') { $Matches[1].Trim() } else { "?" }
+            $exception = if ($m -match 'Exception code: (0x[0-9a-fA-F]+)') { $Matches[1] } else { "?" }
+            $offset = if ($m -match 'Fault offset: (0x[0-9a-fA-F]+)') { $Matches[1] } else { "?" }
+            $entry.fault = "$module+$offset ($exception)"
+            Write-Host ("{0,-18} crashed in {1}" -f $name, $entry.fault)
+        } else {
+            $entry.fault = "no Application Error event found"
+        }
+    }
+    $results += $entry
     # The benchmarks' numbers, for `cargo xtask bench <this file>`.
     if ($name -eq "bench") {
         $text | Set-Content -Path (Join-Path $outDir "bench-windows.txt") -Encoding UTF8
