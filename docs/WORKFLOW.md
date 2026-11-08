@@ -458,7 +458,14 @@ networking).
   QEMU it uses.
 - Build dependencies (Ubuntu): `libglib2.0-dev libpixman-1-dev
   libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
-  pkg-config`. CI builds it once and caches it.
+  pkg-config bzip2`. CI builds it once and caches it. `python3-venv` is
+  what provides `ensurepip`, which configure's own venv needs, and
+  `bzip2` is needed although nothing unpacks a `.bz2` here. Configure
+  does report "Compiler for language cpp ... not found" and "Program
+  iasl found: NO" on a machine without `g++` or `acpica-tools` and
+  carries on regardless, so those two are not required; it fails on a
+  missing dependency rather than warning, one at a time, so read the
+  last line of its output rather than the first.
 - Why not the distribution's: QEMU 8.1.0-8.2.5 (Ubuntu 24.04 ships
   8.2.2) keeps running stale translations of code rewritten on a
   translated block's second page, which corrupted JIT-compiled code
@@ -467,7 +474,15 @@ networking).
   and fails on 8.2.2 (check 2, round 1 gets the pre-rewrite value), so
   it is the quick way to tell whether a QEMU build has the bug. On the
   pinned QEMU `java_stress` passed 15 of 15 boots; on 8.2.2, 2 of 6
-  failed.
+  failed. A newer distribution QEMU is no safer: on 10.2.1 (Ubuntu
+  26.04's) the `hello` scenario wedges **under KVM** before the kernel
+  logs a phase, three runs of three timing out at 120 s with CPU 1 at
+  the reset vector (`EIP=0000fff0 CS=f000`, `HLT=1`) and no state dump,
+  while `lx_hello`, `lx_hello_pie` and `go_hello` passed in the same
+  runs; on the pinned 11.1.3 `hello` boots under KVM in 9-16 s. So a
+  distribution QEMU can produce what looks exactly like a kernel that
+  never starts, and the first question about any such failure is which
+  QEMU ran.
 - QEMU TCG (8.x) has no x2APIC: boot tests exercise only the xAPIC path;
   the x2APIC path runs only under KVM.
 - A cloud container is ephemeral: run `cargo xtask qemu` in the
@@ -1400,7 +1415,9 @@ it on first use.
 - A release that is a single file (busybox.net's static Linux
   `busybox`) names only that file as its one member, the URL's last
   component: the download is kept as it is.
-- Unpackers: unzip for zips, msitools' `msiextract` for an MSI (`apt
+- Unpackers: unzip for zips (`apt install unzip`; a fresh Ubuntu, WSL's
+  included, has none, and the prebuilt fails to spawn it), msitools'
+  `msiextract` for an MSI (`apt
   install msitools`), 7-Zip (`7z` from p7zip-full) for an NSIS installer
   or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
