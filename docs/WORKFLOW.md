@@ -1157,7 +1157,11 @@ source).
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
   skips the rebuild. Transcripts avoid version-dependent values because
-  CI's runner kernel differs from the recording machine's. lx-expect
+  CI's runner kernel differs from the recording machine's, and so does its
+  CPU: GitHub's runners are a mix of AMD and Intel, some with 5-level
+  paging (user space up to 2^56), so a test finds such a boundary on its
+  host (arch_prctl_test probes a mapping above 2^47) instead of assuming
+  it. lx-expect
   closes the descriptors it inherited first (it says how many): fork
   sizes a program's descriptor table by the parent's highest open
   descriptor, and answers such as select's on a descriptor beyond the
