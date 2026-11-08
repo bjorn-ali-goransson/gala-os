@@ -50,6 +50,7 @@ unsafe extern "system" {
 
 // What the compiler's code calls (path buffers are copied and zeroed):
 // ntdll's exports, as other tests take them.
+#[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;

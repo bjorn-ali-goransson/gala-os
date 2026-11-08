@@ -881,10 +881,7 @@ pub fn find_ntdll() -> Option<usize> {
                 }
             }
         }
-        match (mbi.base_address).checked_add(mbi.region_size) {
-            Some(next) => addr = next,
-            None => return None,
-        }
+        addr = mbi.base_address.checked_add(mbi.region_size)?;
     }
 }
 

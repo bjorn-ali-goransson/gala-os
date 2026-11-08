@@ -573,7 +573,7 @@ fn run() -> Result<(), u32> {
     // The region is memory of its own (as a JIT's code is), not inside
     // this image: a PC in an image is looked up in its .pdata.
     let (s, region, _) = allocate(0, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    c.ok(s == STATUS_SUCCESS && region != 0, s as u32 as u64)?;
+    c.ok(s == STATUS_SUCCESS && region != 0, s.into())?;
     // SAFETY: the page just committed holds INDIRECT.
     unsafe {
         core::ptr::copy_nonoverlapping(INDIRECT.as_ptr(), region as *mut u32, INDIRECT.len())
