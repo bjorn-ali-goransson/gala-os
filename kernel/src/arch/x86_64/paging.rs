@@ -649,6 +649,25 @@ impl UserSpace {
         self.mapper.for_each_user_leaf(&mut |virt, t| f(virt, Frame::containing(t.phys), t.flags));
     }
 
+    /// Moves the page mapped at `from` to `to` (which must be unmapped),
+    /// its frame and flags with it, owned or borrowed as it was: memory
+    /// moved without a copy (a Linux mremap). Returns whether `from` was
+    /// mapped; on an error (no memory for a page table at `to`) nothing
+    /// changed.
+    pub fn move_page(&mut self, from: u64, to: u64) -> Result<bool, PagingError> {
+        use crate::mm::paging::PageSize;
+        let (from, to) = (from / PAGE_SIZE * PAGE_SIZE, to / PAGE_SIZE * PAGE_SIZE);
+        let Some(t) = self.mapper.translate(from) else { return Ok(false) };
+        let frame = Frame::containing(t.phys);
+        self.mapper.map(to, frame.start(), PageSize::Size4K, t.flags, &mut alloc_table)?;
+        crate::mm::note_user_map(frame, true);
+        if self.mapper.unmap_4k_owned(from).is_some() {
+            crate::mm::note_user_map(frame, false);
+        }
+        self.invalidate(from);
+        Ok(true)
+    }
+
     /// The frame mapped at `virt` and whether it is borrowed.
     pub fn mapping(&mut self, virt: u64) -> Option<(Frame, bool)> {
         let t = self.mapper.translate(virt)?;

@@ -8,6 +8,9 @@
 //!   reproducible; CI then checks `git diff --exit-code user/lx/bin`).
 //!   Without it, the checked-in binaries are run. `--no-build` skips the
 //!   build.
+//! - The glibc tests (build.sh's GLIBC_TESTS, dynamically linked) are
+//!   built with the host's gcc in the same run; their shared libraries
+//!   (`user/lx/bin/lib*.so`) are copied beside each binary run.
 //! - Each `user/lx/<name>_test` has two binaries: `<name>_test` (static,
 //!   ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN). Both must give
 //!   the same transcript. Each is copied to
@@ -231,6 +234,15 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
     let copy = dir.join(name);
     fs::copy(exe, &copy)
         .map_err(|e| format!("copying {} to {}: {e}", exe.display(), copy.display()))?;
+    // The glibc tests' shared libraries (user/lx/bin/lib*.so) beside it:
+    // the programs find them through DT_RUNPATH $ORIGIN.
+    if let Some(bin) = exe.parent() {
+        for lib in shared_libraries(bin)? {
+            let to = dir.join(lib.file_name().unwrap_or_default());
+            fs::copy(&lib, &to)
+                .map_err(|e| format!("copying {} to {}: {e}", lib.display(), to.display()))?;
+        }
+    }
     let mut child = Command::new(format!("./{name}"))
         .current_dir(dir)
         .args(ARGS)
@@ -263,6 +275,22 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
         err.read_to_string(&mut stderr).map_err(|e| format!("{name}'s stderr: {e}"))?;
     }
     Ok(transcript(&stdout, &stderr, status.code(), status.signal()))
+}
+
+/// The shared libraries in `bin` (`lib*.so`), sorted.
+fn shared_libraries(bin: &Path) -> Result<Vec<PathBuf>> {
+    let entries = fs::read_dir(bin).map_err(|e| format!("reading {}: {e}", bin.display()))?;
+    let mut libs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("lib") && n.ends_with(".so"))
+        })
+        .collect();
+    libs.sort();
+    Ok(libs)
 }
 
 /// stdout, stderr and how the program ended, as expected.txt holds them.

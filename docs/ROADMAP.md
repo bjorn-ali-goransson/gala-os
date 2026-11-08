@@ -188,9 +188,9 @@ has a section under "Open items".
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
-| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
+| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | planned | dynamic glibc programs, a Wayland server (`wl_shm`), a GTK application, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); next: a Wayland server (`wl_shm`), a GTK application, Xwayland |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -1930,15 +1930,24 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   symbolic and hard links kept across reboots (`fs::log` record
   version 3, older records still read; host tests). busybox's applets
   run by their own names through symbolic links (`lx_busybox`).
+- Milestone 4's dynamic linking (LD step 1): glibc programs start
+  through their interpreter (PT_INTERP) and ld.so loads their libraries
+  (`lx_dyn`, `lx_dyn_pie`); file mappings (views of sections on the
+  file's pages: MAP_PRIVATE copy-on-write, MAP_SHARED, cut by munmap,
+  MAP_FIXED and mprotect, shared by a fork), mremap, madvise (mmap_test,
+  `lx_mmap`); clone3, set_robust_list, get_robust_list (thread_test,
+  `lx_thread`); prlimit64, getrlimit, setrlimit, getrandom,
+  `/proc/self/exe` (exec_test, `lx_exec`).
 
 **Next**:
 1. Milestone 2's rest: the rest of signal_test and fork_test
    (rt_sigqueueinfo, sigaltstack, faults as SIGSEGV/SIGBUS/SIGFPE
    through the exception path, delivery to a thread running user code,
    stop/continue, process groups and sessions, waitid, rusage), vfork
-   sharing memory and copy-on-write for fork (shared frames,
-   `vm::copy_on_write` for private pages; MAP_SHARED anonymous memory
-   shared with the child, then futexes keyed by the shared page);
+   sharing memory and copy-on-write for fork of anonymous memory (LD
+   step 1's rest: shared frames, `vm::copy_on_write` for private pages;
+   MAP_SHARED anonymous memory shared with the child, then futexes keyed
+   by the shared page);
    execve ending the other threads first; per-thread CPU time
    for clock_test's CPU clocks; wait queues on sockets instead of their
    1 ms look (seam 5: the stack's notify hook is AFD's alone);
@@ -2036,18 +2045,60 @@ distributions ship them) run on gala, each a window on shasha's desktop
 beside Windows programs, on the LX personality (the owner: the first of
 the next breakthroughs).
 
+**Done so far**:
+- Step 1, dynamically linked programs: user/lx/dyn_test, linked
+  against glibc with gcc (build.sh's `GLIBC_TESTS`; its libraries
+  libdyn.so and libdyn2.so beside it, found through DT_RUNPATH
+  `$ORIGIN`), its transcript recorded on Linux: start-up through ld.so
+  (AT_BASE, AT_PHDR, AT_PHNUM, AT_ENTRY, AT_EXECFN as glibc reads them),
+  stdio, malloc (brk and mmap'd blocks, realloc through mremap), the
+  environment, a shared library's function, variable (a copy
+  relocation), constructor, destructor and TLS (also in a second
+  thread), dlopen/dlsym/dlclose of a library of ours (its TLS) and of
+  libm. Scenarios `lx_dyn` and `lx_dyn_pie` (ET_EXEC and PIE with an
+  interpreter) match it exactly, with Ubuntu 24.04's glibc 2.39 (the
+  `libc6` .deb, a `PREBUILT`) at /lib/x86_64-linux-gnu and /lib64.
+  Built for it, each in a corpus transcript recorded on Linux
+  (ARCHITECTURE "The lx module"): PT_INTERP (the interpreter mapped
+  below the mmap base, AT_BASE); file mappings as views of sections on
+  the file's own pages (MAP_PRIVATE copy-on-write, MAP_SHARED writing
+  the file, MAP_FIXED and munmap and mprotect over parts of them, a
+  fork sharing them), mremap moving pages without copying, madvise
+  (mmap_test); clone3 and set/get_robust_list (thread_test);
+  prlimit64/getrlimit/setrlimit, getrandom and `/proc/self/exe`
+  (exec_test).
+
 **Next**:
-1. Dynamically linked programs: a glibc program through its `ld.so`
-   (PT_INTERP, the program interpreter mapped beside the program, shared
-   libraries from a root file system image, file-backed private and
-   shared mappings at their sizes, copy-on-write `fork`). Test first: a
-   corpus program linked against glibc (user/lx), its transcript
-   recorded on real Linux as the static ones are.
+1. Step 1's rest, before real applications need it:
+   - copy-on-write `fork` of anonymous memory (shared frames,
+     `vm::copy_on_write` for private pages; file pages already stay
+     shared): a fork copies every touched page today, which a large
+     program (a GTK application forking a helper) feels; with it
+     MAP_SHARED anonymous memory shared with the child. fork_test
+     records fork's semantics; a test measuring the pages copied
+     goes with it;
+   - the program and its interpreter mapped as file views (shared text
+     across processes, as the libraries already are) instead of copied
+     at exec;
+   - rseq (glibc registers one; ENOSYS, ledgered, until the scheduler
+     keeps its cpu_id and aborts its critical sections), robust futex
+     lists released at a thread's exit, SIGBUS for a file page past the
+     end, shrinking a mapped file (ramfs refuses it while mapped: EBUSY,
+     ledgered);
+   - a root file system image of a distribution's libraries (more than
+     glibc), as the GTK step needs; what its programs reach, from the
+     ledger (`linux syscall missing`).
 2. A Wayland server in gala speaking the core protocol and `wl_shm`
    (shared-memory buffers: software-rendered clients need no GPU) and
    `xdg-shell` for top-level windows: each surface a shasha window,
-   pointer and keyboard input through `wl_seat`. Test first: a small
-   client of our own drawing known pixels, checked on the screen.
+   pointer and keyboard input through `wl_seat`. First its
+   prerequisites, each test first against real Linux: `AF_UNIX` stream
+   sockets with `SCM_RIGHTS` (`unix_test`) and `memfd_create`
+   (`memfd_test`); then the wire format as a crate of its own
+   (`kernel/wl_abi`, host-tested); then the server. Test first:
+   `wl_test`, a client of our own over raw sockets, its transcript
+   recorded against weston's headless backend, its pixels checked on
+   the screen.
 3. A first real application: a GTK 3 or 4 program (a calculator or text
    editor) from a distribution's packages, its window and input checked
    on the screen; then a Qt one.
@@ -2056,10 +2107,12 @@ the next breakthroughs).
 **Done when** (each step): its test and scenario pass, and the Linux
 programs' transcripts match real Linux's.
 
-**Design**: written in ARCHITECTURE before step 2 (where the Wayland
-server runs, its buffers as sections, its surfaces as the desktop's
-windows). Wayland's protocol XML and libwayland are open source
-(CLEAN_ROOM "Linux").
+**Design**: ARCHITECTURE "Plan: Linux applications on the desktop
+(Wayland)": the server in the kernel beside the compositor for now
+(moving to user mode with SH), `wl_shm` pools as memfd sections,
+surfaces as `winstate` windows wearing shasha's frame through
+xdg-decoration, one socket per session, the limits on client input,
+`events=wayland` and `wayland=trace`.
 
 ### AR. ARM64 port
 
