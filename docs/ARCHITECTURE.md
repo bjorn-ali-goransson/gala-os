@@ -3283,8 +3283,8 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
   the internal commands `echo`, `exit`, `rem`, and programs found with
   .COM/.EXE in the current directory and the PATH (cmd's message when
-  not found, and 9009, or 1 when the line has a redirection: Windows 11
-  25H2 with `2>`). A redirection is removed from the command and the rest
+  not found, and exit code 1, with a redirection on the line or without:
+  Windows 11 25H2 with `2>`, `>`, `<` and none). A redirection is removed from the command and the rest
   stays as written: the spaces before it end the program's command line
   and `echo x > f` writes "x " (as Windows' cmd does). Pipelines, command lists, batch files, `set`/`if`/
   `for` and the prompt are recorded and end it.

@@ -34,7 +34,8 @@
  *   Segoe UI -12 has Windows' 16/13/3 cell and is proportional ("iiii"
  *   much narrower than "WWWW", TMPF_FIXED_PITCH | TMPF_TRUETYPE,
  *   FF_SWISS); extents add up; GetTextExtentExPointW gives the fit and
- *   the partial widths of what fits (all of them without lpnFit); TextOutW draws only inside its extent;
+ *   the partial widths of what fits, the rest left as they were (all of them
+ *   without lpnFit); TextOutW draws only inside its extent;
  *   ExtTextOutW ETO_OPAQUE fills its rectangle; Courier New is fixed
  *   pitch (TMPF_FIXED_PITCH clear, equal advances). The ANSI forms
  *   (GetTextExtentPoint32A, GetTextExtentExPointA, GetTextMetricsA,
@@ -264,11 +265,15 @@ static void fonts(void) {
     // lpnFit, only the first lpnFit widths are filled in (documented;
     // Windows 11 25H2's dx[7] was not the whole extent); the size is the
     // whole string's.
+    // The widths past lpnFit are left as they were (Windows 11 25H2: the
+    // -1s below stay).
     INT fit = 0, dx[8];
     SIZE ex;
+    for (int i = 0; i < 8; i++) dx[i] = -1;
     CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, narrow.cx + 1, &fit, dx, &ex));
     CHECK(fit == 4 && dx[0] > 0 && dx[0] <= dx[1] && dx[1] <= dx[2] && dx[2] <= dx[3]);
     CHECK(dx[3] == narrow.cx && ex.cx == both.cx && ex.cy == tm.tmHeight);
+    CHECK(dx[4] == -1 && dx[5] == -1 && dx[6] == -1 && dx[7] == -1);
     // Without lpnFit (nMaxExtent ignored) every width is.
     CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, 0, NULL, dx, &ex));
     CHECK(dx[3] == narrow.cx && dx[7] == both.cx && ex.cx == both.cx);

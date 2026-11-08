@@ -11,8 +11,8 @@
 //! - `echo text> file`: the text and CRLF.
 //! - Through a pipe (`_popen`'s way): the command's output arrives at the
 //!   pipe's read end, then end of file.
-//! - An unknown command: exit code 9009 (1 when the line redirects), and
-//!   on stderr "'name' is not recognized as an internal or external
+//! - An unknown command: exit code 1 (with `2> f`, `> f`, `< f` or no
+//!   redirection: Windows 11 25H2), and on stderr "'name' is not recognized as an internal or external
 //!   command," then "operable program or batch file.".
 //!
 //! - The program's command line is passed as written: the space before a
@@ -372,21 +372,37 @@ fn run_tests() -> Result<(), u32> {
         CloseHandle(r);
     }
 
-    // An unknown command: the message on stderr, and 9009; but 1 when
-    // the line redirects (Windows 11 25H2 measured 1 with `2>`).
+    // An unknown command: the message on stderr, and exit code 1 whatever
+    // the line redirects (Windows 11 25H2 measured 1 with `2>`, `>`, `<`
+    // and none).
     let want: &[u8] = b"'nosuchprogram' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";
     let mut line = W::new().s("cmd.exe /c nosuchprogram 2> \"").w(tmp).s("cmd_test_out.txt\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 1)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == want, got as u64)?;
-    // The same with stderr handed to cmd (no redirection on the line).
+    // `< f` (the input file written above) and `> f`, stderr to the file
+    // given as cmd's.
     let sa = SecurityAttributes { length: 24, descriptor: null, inherit: 1 };
+    let err_file = || W::new().w(tmp).s("cmd_test_err.txt");
+    // SAFETY: our path and attributes.
+    let err =
+        unsafe { CreateFileW(err_file().ptr(), GENERIC_WRITE, 7, &sa, CREATE_ALWAYS, 0, null) };
+    c.ok(err as isize != -1, 0)?;
+    let mut line = W::new().s("cmd.exe /c nosuchprogram < \"").w(tmp).s("cmd_test_in.txt\"");
+    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 1)?;
+    let mut line = W::new().s("cmd.exe /c nosuchprogram > \"").w(tmp).s("cmd_test_out.txt\"");
+    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 1)?;
+    // SAFETY: our handle.
+    unsafe { CloseHandle(err) };
+    let got = read_file(&mut err_file(), &mut buf);
+    c.ok(got == 2 * want.len() && buf[..want.len()] == *want, got as u64)?;
+    // The same with stderr handed to cmd (no redirection on the line).
     // SAFETY: our path and attributes.
     let err =
         unsafe { CreateFileW(out_file().ptr(), GENERIC_WRITE, 7, &sa, CREATE_ALWAYS, 0, null) };
     c.ok(err as isize != -1, 0)?;
     let mut line = W::new().s("cmd.exe /c nosuchprogram");
-    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 9009)?;
+    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 1)?;
     // SAFETY: our handle.
     unsafe { CloseHandle(err) };
     let got = read_file(&mut out_file(), &mut buf);
@@ -396,6 +412,7 @@ fn run_tests() -> Result<(), u32> {
     unsafe {
         DeleteFileW(out_file().ptr());
         DeleteFileW(in_file().ptr());
+        DeleteFileW(err_file().ptr());
     }
     Ok(())
 }

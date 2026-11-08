@@ -1692,12 +1692,13 @@ naming that process.
 Done (Round 5, Windows' behaviour, each from a measurement on 25H2):
 the unwind's handlers do not see the record's EXCEPTION_SOFTWARE_ORIGINATE
 (seh_test: 0x02 and 0x22; Round 4's probe); PFXIsPFXBlob does not look
-at the version (cert_test); cmd's unknown command exits 1 when the line
-redirects, 9009 otherwise (cmd_test); StackWalk64 is not asked to fail
+at the version (cert_test); cmd /c of an unknown command exits 1, with
+`2> f`, `> f`, `< f` or no redirection (cmd_test); StackWalk64 is not asked to fail
 for IMAGE_FILE_MACHINE_I386, which the x64 dbghelp walks (dbghelp_test
 uses 0x1234; gala records I386 as unsupported); GetTextExtentExPointW
 fills lpnDx only for the characters that fit when lpnFit is given, as
-documented (gdi32_test; the A form too).
+documented (gdi32_test; the A form too), and leaves the rest as they
+were (gdi32_test's -1s stay).
 
 Next:
 1. The next run on Windows (each fix may reveal a program's next
@@ -1747,12 +1748,9 @@ Next:
      HKCU\Software\GalaPersist and run it twice, judging the second run.
      From Round 5's fixes: RaiseException(code, EXCEPTION_NONCONTINUABLE)
      unwound (seh_test's shape): does the unwind see 0x03 or 0x02 (gala:
-     0x03, only 0x80 dropped); cmd `nosuchprogram > f` and `< f` (gala:
-     1, as `2>`); after StackWalk64(IMAGE_FILE_MACHINE_I386) with an x64
+     0x03, only 0x80 dropped); after StackWalk64(IMAGE_FILE_MACHINE_I386) with an x64
      context, frame.AddrPC/AddrFrame/AddrStack and a second call's result,
      and StackWalk64(0x1234) (dbghelp_test asserts FALSE);
-     GetTextExtentExPointW("iiiiWWWW", 8, narrow + 1, &fit, dx) with dx
-     pre-filled with -1: dx[4..8] untouched? (gala: untouched);
      BuildSecurityDescriptorW(NULL, NULL, 1 entry, 0, NULL, NULL):
      GetSecurityDescriptorControl, the SACL pointer (NULL or an ACL: its
      AclRevision, AclSize, AceCount), before browser_api_test and gala
