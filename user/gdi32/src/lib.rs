@@ -6,7 +6,8 @@
 //! LOGFONTW, bitmaps: 32-bit device-dependent ones and 24/32-bit DIB
 //! sections), drawing (PatBlt, Rectangle, pixels, BitBlt/StretchBlt with
 //! any ternary raster operation) and text in Noto Sans Mono scaled to the
-//! font's height (`font`). Coordinates go through the window and viewport
+//! font's height (`font`). OpenGL's pixel formats and SwapBuffers go to
+//! the process's opengl32 (`opengl`). Coordinates go through the window and viewport
 //! origins and are clipped to the DC's clip rectangle. Pixels are
 //! 0x00RRGGBB; COLORREFs 0x00BBGGRR. Objects live in a fixed table; a
 //! handle is 0x0100_0000 plus the slot (stock objects keep theirs).
@@ -23,6 +24,7 @@ mod dib;
 mod draw;
 mod font;
 mod older;
+mod opengl;
 mod palette;
 mod region;
 mod shapes;

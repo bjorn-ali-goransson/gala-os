@@ -427,6 +427,26 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["innosetup-6.5.4.exe"],
         excludes: &[],
     },
+    // Mesa 26.2.5 for 64-bit Windows (MIT), pal1000/mesa-dist-win's MSVC
+    // release package (the build Mesa's own documentation points Windows
+    // users to; static C runtime). No checksum is published with the
+    // release: the SHA-256 is the one we measured (THIRD_PARTY.md). GPU G2's
+    // software 3D: llvmpipe's OpenGL (`opengl32.dll`, the WGL runtime, and
+    // `libgallium_wgl.dll`, the gallium megadriver it loads) and lavapipe's
+    // Vulkan ICD (`vulkan_lvp.dll` and its manifest). 26.2.6's MSVC package
+    // lacks the OpenGL files, hence 26.2.5.
+    Prebuilt {
+        name: "mesa",
+        url: "https://github.com/pal1000/mesa-dist-win/releases/download/26.2.5/mesa3d-26.2.5-release-msvc.7z",
+        checksum: "997123ef4ce8896204ab912d5b54f19372c487ff9835bcefafa2fca23b8953c2",
+        members: &[
+            "x64/opengl32.dll",
+            "x64/libgallium_wgl.dll",
+            "x64/vulkan_lvp.dll",
+            "x64/lvp_icd.x86_64.json",
+        ],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -982,6 +1002,24 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gpu_stub_test", "d3d11.dll", "Windows/System32"),
     ("gpu_stub_test", "d3d12.dll", "Windows/System32"),
     ("gpu_stub_test", "dcomp.dll", "Windows/System32"),
+    // gl_test (GPU G2): OpenGL through Mesa's llvmpipe (PREBUILT mesa),
+    // its opengl32.dll and the gallium megadriver it loads in System32 as
+    // the system's OpenGL (ARCHITECTURE "Plan: graphics and GPU"), with
+    // what libgallium_wgl.dll imports.
+    ("gl_test", "ntdll.dll", "Windows/System32"),
+    ("gl_test", "kernel32.dll", "Windows/System32"),
+    ("gl_test", "msvcrt.dll", "Windows/System32"),
+    ("gl_test", "user32.dll", "Windows/System32"),
+    ("gl_test", "gdi32.dll", "Windows/System32"),
+    ("gl_test", "advapi32.dll", "Windows/System32"),
+    ("gl_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("gl_test", "shell32.dll", "Windows/System32"),
+    ("gl_test", "shlwapi.dll", "Windows/System32"),
+    ("gl_test", "ole32.dll", "Windows/System32"),
+    ("gl_test", "version.dll", "Windows/System32"),
+    ("gl_test", "target/prebuilt/mesa/x64/opengl32.dll", "Windows/System32"),
+    ("gl_test", "target/prebuilt/mesa/x64/libgallium_wgl.dll", "Windows/System32"),
+    ("gl_test", "user/bin/gl_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -3410,10 +3448,15 @@ fn fetch_prebuilt(path: &str) -> Result {
         fs::rename(&zip, &to).map_err(|e| format!("moving {zip:?} to {to:?}: {e}"))?;
     } else if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
-    } else if p.url.ends_with(".7z.exe") || p.url.ends_with("-setup.exe") || chocolatey {
-        // A 7-Zip self-extracting archive (Git for Windows' PortableGit) or
-        // an NSIS installer (FileZilla): 7-Zip reads it without running it.
-        // Members are directories or wildcards.
+    } else if p.url.ends_with(".7z")
+        || p.url.ends_with(".7z.exe")
+        || p.url.ends_with("-setup.exe")
+        || chocolatey
+    {
+        // A 7-Zip archive (mesa-dist-win's), a 7-Zip self-extracting
+        // archive (Git for Windows' PortableGit) or an NSIS installer
+        // (FileZilla): 7-Zip reads it without running it. Members are
+        // files, directories or wildcards.
         let mut cmd = Command::new("7z");
         cmd.args(["x", "-y", "-bd", "-bso0"]).arg(format!("-o{}", dir.display())).arg(&zip);
         cmd.args(p.members);
@@ -4822,6 +4865,21 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=gpu_stub_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["gpu_stub_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // GPU G2: OpenGL on Mesa's llvmpipe (WGL: a pixel format, a
+        // context, a frame read back and presented), on a headless desktop
+        // (`presenter=test`, BIOS) whose frame the screen check reads.
+        name: "gl_test",
+        cmdline: "qemu_exit presenter=test run=gl_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "gl_test: renderer llvmpipe",
+            "gl_test: presented",
+            "xtask: screen ok",
+            "gl_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // BR stage 1: DirectWrite's system font collection (gala's
@@ -10188,6 +10246,38 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     // no screen): the pixels are the Test presenter's frame in the
     // guest's memory (`dump_frame`), not a screendump.
     ("gui_test_headless", GUI_TEST_SCREEN),
+    (
+        // GPU G2: gl_test's frame (llvmpipe through Mesa's WGL), presented
+        // by SwapBuffers into its 400 x 300 window at (100, 100), client
+        // 398 x 266 from (101, 133): the clear colour in the client's
+        // corner, the triangle's at (199, 173) of the client; then a click
+        // there ends the program (the pointer starts at (640, 400)).
+        "gl_test",
+        ScreenCheck {
+            marker: "gl_test: presented",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(101 + 4, 133 + 4, 0x336699),
+                        PixelCheck::At(101 + 199, 133 + 173, 0xffcc00),
+                        PixelCheck::At(101 + 30, 133 + 240, 0x336699),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
     (
         // RS B3a's console switch (user/presenter_test): session 1's
         // yellow window (client from (601, 133)) on the screen, clicked;

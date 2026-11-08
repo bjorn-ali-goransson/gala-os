@@ -210,7 +210,7 @@ has a section under "Open items".
 | SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b next |
-| GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
+| GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL done); G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
 
@@ -1077,6 +1077,11 @@ the kernel.
   `Transport` trait host-tested against a fake device, `display=virtio`
   (default `fb`), `events=display`, `gputrace`, `gpureset=`; scenarios
   `virtio_gpu`, `virtio_gpu_reset`.
+- G2, OpenGL: Mesa 26.2.5's llvmpipe (PREBUILT `mesa`, mesa-dist-win's
+  MSVC build) as System32's `opengl32.dll`; gdi32's pixel formats and
+  SwapBuffers go to it; user32 shows what DCs a program keeps drew and
+  answers WindowFromDC; `gl_test` (a WGL context, a triangle read back
+  and checked on the screen).
 
 **Next**:
 1. G1's rest: shasha's pointer on the hardware cursor,
@@ -1085,12 +1090,13 @@ the kernel.
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-2. G2, software 3D for every program: `vulkan-1.dll` (Khronos loader),
-   Mesa lavapipe (fallback SwiftShader), DXVK (d3d9/10/11, dxgi),
-   vkd3d-proton (d3d12), Mesa llvmpipe `opengl32.dll`; PREBUILT,
-   registered as on Windows; `vk_test`, `d3d11_test`, `gl_test` with
-   screen checks, then DXVK's and vkd3d-proton's own tests. WARP is
-   ruled out (not redistributable).
+2. G2's rest, software 3D for every program: `vulkan-1.dll` (Khronos
+   loader), Mesa lavapipe (fallback SwiftShader), DXVK (d3d9/10/11,
+   dxgi), vkd3d-proton (d3d12); PREBUILT, registered as on Windows;
+   `vk_test`, `d3d11_test` with screen checks, then DXVK's and
+   vkd3d-proton's own tests. WARP is ruled out (not redistributable).
+   gdi32's GetGlyphOutline (Mesa's wglUseFontOutlines) is still
+   GDI_ERROR.
 3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
 4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner

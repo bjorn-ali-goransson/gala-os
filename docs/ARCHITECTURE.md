@@ -8871,8 +8871,9 @@ Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
 GPU support serves the browser first (ROADMAP BR stages 2 and 5), then
 remote shasha (RS), then programs in general; it is ordered for the
 shortest path to a rendered web page and nothing needs a GPU to work
-(every VM, servers, CI). ROADMAP GPU tracks it: G1 (virtio-gpu 2D) is
-built; G0 and G2-G4 are the planned design. Clean room: Microsoft's
+(every VM, servers, CI). ROADMAP GPU tracks it: G0 and G1 (virtio-gpu 2D) are
+built, G2 (software 3D) is being built ("Software 3D (G2)"), G3 and G4
+are the planned design. Clean room: Microsoft's
 public documentation, the Khronos and virtio specifications and
 open-source projects (Mesa, DXVK, vkd3d-proton, ANGLE, SwiftShader,
 virglrenderer, QEMU) may be read; nothing is disassembled; everything
@@ -8885,7 +8886,7 @@ shipped or borrowed is recorded in THIRD_PARTY.md with its licence.
 | DXGI | `dxgi.dll` | factories, adapters, outputs; swap chains presenting to an HWND (flip model, `DXGI_SWAP_EFFECT_FLIP_DISCARD`); shared resources as NT handles; `DXGI_ERROR_DEVICE_REMOVED` when the GPU goes away |
 | Direct3D 11, 12 (9, 10) | `d3d11.dll`, `d3d12.dll`, `d3d9.dll`, `d3d10*.dll` | devices, resources, shaders (DXBC, DXIL), command lists; the runtime is Microsoft's on Windows, gala needs an open-source one |
 | Direct2D, DirectWrite | `d2d1.dll`, `dwrite.dll` | D2D draws on D3D11 (or WARP); DirectWrite (fonts, shaping, glyphs) is CPU work needed without a GPU (Chromium's text, BR stage 1) |
-| OpenGL | `opengl32.dll`, gdi32's `ChoosePixelFormat`/`SetPixelFormat`/`SwapBuffers` | WGL (`wglCreateContext`, `wglGetProcAddress`); Microsoft's opengl32 loads a vendor ICD; gala uses Mesa's own `opengl32.dll` (gallium WGL) as the whole implementation |
+| OpenGL | `opengl32.dll`, gdi32's `ChoosePixelFormat`/`SetPixelFormat`/`SwapBuffers` | WGL (`wglCreateContext`, `wglGetProcAddress`); Microsoft's opengl32 loads a vendor ICD; gala ships Mesa's own `opengl32.dll` (gallium WGL) in System32 as the whole implementation ("Software 3D (G2)" below) |
 | Vulkan | `vulkan-1.dll` (Khronos loader, Apache-2.0) | ICDs found through `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (JSON manifests); presentation through `VK_KHR_win32_surface` |
 | DirectComposition | `dcomp.dll` | Chromium composes overlays with it on a GPU and does without when creating a DComp device fails |
 | GDI | gdi32 | exists: draws into client pixel buffers that shasha composes; stays every program's path |
@@ -8948,12 +8949,12 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 
 ### Stages
 
-| Stage | Content | Tests |
-|---|---|---|
+| Stage | Content | Tests | Status |
+|---|---|---|---|
 | G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
-| G1 | virtio-gpu 2D | built: `virtio_gpu`, `virtio_gpu_reset` |
-| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs |
-| G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) |
+| G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
+| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL built (`gl_test`); the rest in progress |
+| G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) | parked |
 | G4 (GPU presentation) | DXGI flip-model swap chains presented as resources (no readback through GDI), shasha composing resources, then BR stage 5 (Chromium `--use-angle=vulkan` on Venus) | planned |
 
 How it serves the other items: BR stage 2 needs G0 only (plus
@@ -9084,6 +9085,72 @@ The first GPU driver (G1). Code: `kernel/src/arch/virtio.rs`
   on the firmware's framebuffer, which a `virtio-gpu-pci` display no
   longer shows once the driver has started, so the screen is black until
   the desktop draws).
+
+### Software 3D (G2)
+
+Unmodified open-source Windows builds (PREBUILT, never committed:
+THIRD_PARTY.md) do the rendering on the CPU; gala supplies the Win32
+around them. Everything here runs on any machine, with or without a
+GPU or a screen (`presenter=test`).
+
+- **OpenGL: Mesa's llvmpipe as the system's OpenGL.** On Windows,
+  `opengl32.dll` is Microsoft's and loads a vendor ICD (registered under
+  `...\Windows NT\CurrentVersion\OpenGLDrivers`); on a machine with
+  no GPU driver, mesa-dist-win's system-wide deployment (what its
+  documentation gives cloud VMs and RDP sessions) installs Mesa's
+  gallium driver as that ICD. gala has no opengl32 of its own to load
+  an ICD, so it ships Mesa's own `opengl32.dll` (the WGL runtime) and
+  `libgallium_wgl.dll` (the gallium megadriver it imports) in System32:
+  every program gets Mesa's OpenGL, as after the system-wide deployment,
+  and a program that carries its own opengl32 (mesa-dist-win's
+  per-application deployment) still loads that one first (the
+  application's directory comes before System32; opengl32 is not a
+  KnownDLL). Mesa picks its driver in order d3d12 (GLonD3D12: gala's
+  G0 `d3d12.dll` fails, or there is none), zink (needs `vulkan-1.dll`
+  and a non-CPU Vulkan device), llvmpipe; `env=GALLIUM_DRIVER=llvmpipe`
+  (or `softpipe`) forces one. `GL_RENDERER` is then `llvmpipe (LLVM
+  23.1.4, 256 bits)`; LLVM JIT-compiles the shaders (VirtualAlloc and
+  VirtualProtect to executable). Mesa's binaries need AVX: TCG's
+  `-cpu max` has it.
+- **gdi32's pixel formats** (`user/gdi32/src/opengl.rs`):
+  ChoosePixelFormat, DescribePixelFormat, SetPixelFormat, GetPixelFormat
+  and SwapBuffers go to the process's opengl32 (`wglChoosePixelFormat`
+  and the rest, which Mesa exports), loading it for the first three. The
+  ICD keeps each window's format; gdi32 keeps Windows' rule that it is
+  set once (the same format again succeeds, another fails, without
+  reaching the ICD: Mesa's DrvSetPixelFormat calls SetPixelFormat back
+  only when GetPixelFormat is still 0, so there is no loop). Without an
+  opengl32 they fail (0 / FALSE, ERROR_NOT_SUPPORTED) and the ledger
+  has `gdi32.dll!<name>(no opengl32)`.
+- **Presenting a frame**: Mesa's SwapBuffers draws the back buffer into
+  the program's DC with StretchDIBits (its GDI winsys). A GL program
+  keeps that DC (CS_OWNDC) and never releases it, while a window's
+  drawing reaches the desktop at ReleaseDC or EndPaint. user32 therefore
+  tracks the DCs it hands out (`window.rs`, "Window DCs a program
+  keeps": 64 at once; more are in the ledger as `user32.dll!GetDC(more
+  DCs out than tracked)`): at the thread's idle moments (GetMessage,
+  PeekMessage, waits) a DC still out shows its whole window the first
+  time, after which gdi32 accumulates its bounds (SetBoundsRect) and
+  only what it drew shows. Short GetDC/ReleaseDC pairs never pay for
+  the bounds. The same table answers WindowFromDC, which Mesa needs to
+  find a DC's window (its framebuffers are per window, sized by
+  GetClientRect).
+- **What Mesa imports** beyond what gala had: RegisterClassA,
+  EnumDisplaySettingsA, K32EnumProcessModulesEx, GetGlyphOutlineA (for
+  wglUseFontOutlines; not implemented: GDI_ERROR and the ledger). It
+  probes `d3d12.dll`, `vulkan-1.dll` and
+  `api-ms-win-appmodel-runtime-l1-1-2.dll` with LoadLibrary (the
+  ledger's `missing dll` lines; not failures).
+- **Observability**: Mesa's own messages go to standard error, which is
+  the serial log (`MESA: error: ...`); `env=` sets its variables
+  (`MESA_DEBUG=1`, `LP_DEBUG=...`, `GALLIUM_DRIVER`). Unsupported paths
+  are in the ledger as above.
+- **Tests**: `gl_test` (user/gl_test, C): a window, a pixel format
+  (Windows' set-once rule), a WGL context, glClear and a flat triangle
+  read back with glReadPixels, SwapBuffers, the frame checked on a
+  headless desktop's screen, a click to end; about 10 s under TCG.
+- **TODO** (ROADMAP GPU): Vulkan (`vulkan-1.dll`, lavapipe registered
+  under `HKLM\SOFTWARE\Khronos\Vulkan\Drivers`), DXVK, vkd3d-proton.
 
 ## UI Automation
 

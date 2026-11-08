@@ -436,6 +436,18 @@ is not visible (the firmware's framebuffer is no longer shown): read the
 serial log. The kernel flag `gputrace` logs every command; `events=display`
 the modes, resets and errors.
 
+Software 3D (GPU G2) needs no device: its scenarios run Mesa (PREBUILT
+`mesa`) on the CPU and check a headless desktop's frame
+(`presenter=test`, BIOS). `gl_test` (user/gl_test, C, `build.sh`) is
+OpenGL on llvmpipe, about 10 s under TCG. When one fails, read the
+ledger first (Mesa's imports and probes: `missing export` stops the
+load, `missing dll` for d3d12/vulkan-1 is Mesa looking for drivers),
+then Mesa's own `MESA:` lines in the serial log; `env=MESA_DEBUG=1`,
+`env=LP_DEBUG=...` or `env=GALLIUM_DRIVER=softpipe` (no LLVM JIT) on the
+command line narrow it down. A frame that renders (glReadPixels is
+right) but is not on the screen is user32's presentation of a kept DC
+(ARCHITECTURE "Software 3D (G2)").
+
 ### Test speed and environments
 
 - **BIOS boot by default.** ISOs are hybrid (BIOS and UEFI). SeaBIOS
@@ -1532,8 +1544,9 @@ it on first use.
   `busybox`) names only that file as its one member, the URL's last
   component: the download is kept as it is.
 - Unpackers: unzip for zips, msitools' `msiextract` for an MSI (`apt
-  install msitools`), 7-Zip (`7z` from p7zip-full) for an NSIS installer
-  or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
+  install msitools`), 7-Zip (`7z` from p7zip-full) for a `.7z` archive
+  (mesa-dist-win's; members are file paths such as
+  `x64/opengl32.dll`), an NSIS installer or a 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
   package: FlaUI) is a plain zip, its members paths such as
   `lib/net8.0-windows7.0/FlaUI.Core.dll`. One fetch runs at a time
