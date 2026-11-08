@@ -214,6 +214,16 @@ build's PDB of that module. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
 
+`user/bin` alone is not the whole sweep. The seven script scenarios
+(`busybox_files`, `busybox_script`, `tcc`, `tcc_make`, `tcc_self`, `lua`,
+`sqlite`) run `busybox.exe sh ..\<dir>\<script>.sh`, so they also need
+`user/busybox`, `user/tcc`, `user/lua`, `user/sqlite` and
+`user/msvcrt_test` beside it. run-all.ps1 `continue`s past a script it
+cannot find **without writing a record**, so those programs are simply
+absent from the report rather than skipped with a reason: a round that
+copied only `user/bin` reports 169 programs instead of 176 and nothing
+says why. Copy `user/` (or those five directories) and check the count.
+
 Run it from an ordinary directory, never one under `%TEMP%`: Windows
 treats a temporary path differently, so a test that works from its
 current directory reads that instead of Windows. shell32_test's check
@@ -233,6 +243,27 @@ and no other; `cargo xtask compare` shows them as missing on the Windows
 side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
+
+**Probing a divergence from a script, rather than from the test
+program, has two traps that silently answer a different question.** A
+probe host brings its own environment:
+
+- **comctl32's version.** A process with a v6 manifest (python.exe has
+  one) loads 6.10 from WinSxS; the test programs have no manifest and
+  get 5.82, which behaves differently -- it rejects `TOOLINFOW` with
+  `cbSize` 72 where 6.10 accepts it. Print the module's path before
+  trusting a comctl32 result: `GetModuleFileNameW(GetModuleHandleW(
+  L"comctl32.dll"))` names the WinSxS directory, version and all.
+- **UI Automation in-process or out.** A client in another process sees
+  these controls as `ControlType.Pane` and does not see the non-client
+  title bar at all (three children where the test sees four); the same
+  query from inside the process that owns the window gives Button, Edit,
+  Text and a TitleBar. uia_test queries in-process, so only an
+  in-process client answers its checks (Python can, with `comtypes`).
+
+Where the environment is the question, instrument the test program
+instead: build it from the same sources, add prints, run it, revert.
+That is how the MXCSR, static-TLS and comctl32 answers were measured.
 
 Every program's whole output goes to `windows-output.txt` beside the
 report, with a header per program. The report keeps one line, the
