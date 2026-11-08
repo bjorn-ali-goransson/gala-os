@@ -1135,8 +1135,24 @@ samples).
    ChromeDriver, the report as wptreport.json, `cargo xtask
    wpt-compare` against Edge 159 on Windows on wpt.fyi. The first five
    tests through wptserve: all harness OK, 47 of 47 subtests, as Edge.
-   Next: the whole directory, then the comparison with Chrome on
-   Windows (wpt.fyi). The report itself: a subset of web-platform-tests
+   The whole directory (406 tests) once: 52 ran (49 harness OK, 1673 of
+   1698 subtests; the failures Blink's own, as Edge-159-win and
+   Chrome-159-linux score, and 8 of createDocument's qualified-name
+   checks where Chrome 8143 passes and our 8140 snapshot may predate the
+   change); then three pages hung and the rest went unrun. Next, in
+   order: (a) the page loads that stall again (connections to wptserve
+   with 0 bytes, closed by Chromium after ~240 s, its connect timeout: a
+   second lost readiness report besides the FD_CONNECT one fixed;
+   a run with `events=net` to see the stalled socket's AFD history);
+   ChromeDriver's session thread waits on its condition variable for
+   the navigation's answer meanwhile (`kernel32_sync_test`'s
+   lost-wake-up stress and the state dump's keyed-event lines found no
+   lost wake in the locks); (b) Chrome's out-of-memory exceptions
+   (0xE0000008) when a second browser starts with the first still alive,
+   with free frames left: which limit (commit, reservations, a quota);
+   (c) ChromeDriver not exiting after the client's /shutdown (the
+   scenario then runs to its limit); (d) the whole directory again, then
+   the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
    snapshot's revision, the WPT server on the host reached as

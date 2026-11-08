@@ -1206,6 +1206,14 @@ pub fn dump() {
         };
         let name = super::syscalls::service_name(number);
         info!("thread:   {name} from rip {:#x}", regs.rip);
+        // Who called the system call stub: the return address on top of
+        // the user stack (the lock or wait in kernel32/ntdll a hang sits
+        // in), with its module.
+        if t.teb32 == 0
+            && let Ok(ret) = t.process.read_u64(regs.gpr[4])
+        {
+            info!("thread:   called from {}", super::crashreport::At::of(&t.process, ret));
+        }
         // A WOW64 thread: the 32-bit code that made the call (its CPU
         // area, where wow64.dll keeps the caller's registers).
         if t.teb32 != 0 {
@@ -1240,6 +1248,24 @@ pub fn dump() {
                     handle.0,
                     e.object.type_name()
                 );
+            }
+            // A keyed event (critical sections, SRW locks, condition
+            // variables, WaitOnAddress sleep on them): the key (the second
+            // argument), the pointer-sized value at it, and who else is
+            // queued for it in this process.
+            if let ObjectBody::KeyedEvent(_) = &e.object.body {
+                let key = regs.gpr[2];
+                let queued = super::keyed_event::pending_for(&e.object, key, t.process.id);
+                match t.process.read_u64(key) {
+                    Ok(v) => info!(
+                        "thread:   key {key:#x} (value there {v:#x}); queued for it: \
+                         (waiters, releasers, all entries) {queued:?}"
+                    ),
+                    Err(_) => info!(
+                        "thread:   key {key:#x} (not readable); queued for it: \
+                         (waiters, releasers, all entries) {queued:?}"
+                    ),
+                }
             }
             if let ObjectBody::Timer(timer) = &e.object.body {
                 info!(

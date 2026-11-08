@@ -417,7 +417,15 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    event, in `cargo xtask profile`'s threads),
    system call and wait object (with `session N personality nt (name)`; for a WOW64
    thread also the 32-bit code that made the call, from its CPU area:
-   `called from 32-bit code: eip=... esp=...`), every
+   `called from 32-bit code: eip=... esp=...`; for a 64-bit one the
+   caller of the system call stub, the return address on top of its user
+   stack: `called from 0x... (kernel32.dll+0x...)`, which names the lock
+   or wait a hang sits in; for a keyed-event wait, what critical sections,
+   SRW locks, condition variables and WaitOnAddress sleep on, the key, the
+   value there and who is queued for it: `key 0x... (value there 0x...);
+   queued for it: (waiters, releasers, all entries) Some((1, 0, 1))`, so a
+   release waiting with no waiter, or a waiter whose value changed, shows),
+   every
    running process's commit charge and pool and handle quotas
    (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
    U/L (peak P) handles N/L (peak P) refused R`, bytes), every

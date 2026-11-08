@@ -4278,6 +4278,10 @@ const SCENARIOS: &[Scenario] = &[
             "NtWaitForSingleObject from rip",
             "Event signal 0",
             "in user mode at rip",
+            // The keyed-event waiter: its caller and its key.
+            "NtWaitForKeyedEvent from rip",
+            "(statedump_test.exe+0x",
+            "(value there 0x6a1a); queued for it: (waiters, releasers, all entries) Some((1, 0, 1))",
             "statedump: end",
             "the guest's state dump (NMI) took",
         ],

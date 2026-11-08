@@ -101,7 +101,7 @@ pub fn exception_name(status: NtStatus) -> &'static str {
 
 /// An image's name (the last part of its path) and base, for an address.
 #[derive(Clone, Copy)]
-struct Module {
+pub(crate) struct Module {
     name: [u8; 40],
     len: usize,
     base: u64,
@@ -133,7 +133,14 @@ fn module_at(process: &Process, addr: u64) -> Option<Module> {
 }
 
 /// `addr`, then ` (module+0xoffset)` when it is in an image.
-struct At(u64, Option<Module>);
+pub(crate) struct At(u64, Option<Module>);
+
+impl At {
+    /// `addr` in `process`, with the image containing it.
+    pub(crate) fn of(process: &Process, addr: u64) -> At {
+        At(addr, module_at(process, addr))
+    }
+}
 
 impl fmt::Display for At {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

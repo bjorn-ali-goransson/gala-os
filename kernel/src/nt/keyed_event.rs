@@ -69,6 +69,21 @@ pub fn unpaired(object: &ObjectRef, key: u64, release: bool, process: u64) -> us
     pending.iter().filter(|p| p.key == key && p.release == release && p.process == process).count()
 }
 
+/// For the state dump: how many threads of `process` are queued on keyed
+/// event `object` for `key`, as (waiters, releasers), and how many entries
+/// it holds in all; None if the queue is busy.
+pub fn pending_for(object: &ObjectRef, key: u64, process: u64) -> Option<(usize, usize, usize)> {
+    let ObjectBody::KeyedEvent(k) = &object.body else { return None };
+    let pending = k.pending.try_lock()?;
+    let mine = |release: bool| {
+        pending
+            .iter()
+            .filter(|p| p.key == key && p.process == process && p.release == release)
+            .count()
+    };
+    Some((mine(false), mine(true), pending.len()))
+}
+
 /// NtWaitForKeyedEvent (`release` false) or NtReleaseKeyedEvent (true) on
 /// `object` for `key`, by a thread of process `process`.
 pub fn meet(

@@ -22,6 +22,13 @@
 //!   300 ms its ContextSwitches (SystemProcessInformation) grow by at
 //!   most a few (a waiter that polls would switch hundreds of times).
 //!   Counted switches, not elapsed time (a loaded host only delays).
+//! - No lost wake-ups: two threads hand a turn back and forth 3000 times
+//!   through a condition variable with an SRW lock, with a critical
+//!   section, and through WaitOnAddress; four threads (more than the
+//!   CPUs, so they sleep) pass a turn round-robin through a condition
+//!   variable and through WaitOnAddress, waking all; four threads enter one
+//!   critical section 3000 times each (an exact count). A lost wake hangs
+//!   it.
 //!
 //! Prints `kernel32_sync_test: ok` or exits with the number of the failing
 //! check.
@@ -92,6 +99,15 @@ unsafe extern "system" {
     fn CreateSemaphoreW(attrs: *mut c_void, initial: i32, max: i32, name: *const u16) -> Handle;
     fn CreateSemaphoreA(attrs: *mut c_void, initial: i32, max: i32, name: *const u8) -> Handle;
     fn ReleaseSemaphore(h: Handle, count: i32, previous: *mut i32) -> Bool;
+}
+
+#[link(name = "api-ms-win-core-synch-l1-2-0", kind = "raw-dylib")]
+unsafe extern "system" {
+    // WaitOnAddress and WakeByAddressSingle: through their API set
+    // (KernelBase on Windows, kernel32 on gala).
+    fn WaitOnAddress(address: *mut c_void, compare: *const c_void, size: usize, ms: u32) -> Bool;
+    fn WakeByAddressSingle(address: *mut c_void);
+    fn WakeByAddressAll(address: *mut c_void);
 }
 
 #[allow(dead_code)]
@@ -723,6 +739,187 @@ fn waiters_sleep(c: &mut Checks) -> Result<(), u32> {
     c.ok(join(runner), 0)
 }
 
+// ---- Lost-wakeup stress: hand-offs that hang if a wake is ever lost ----
+
+/// Hand-offs per pair of threads (under TCG a few seconds in all).
+const HANDOFFS: u32 = 3000;
+
+static PP_LOCK: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static PP_CV: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static PP_CS: Shared<CriticalSection> =
+    Shared(core::cell::UnsafeCell::new(CriticalSection([0; 5])));
+static PP_CS_CV: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+/// Whose turn it is (0 or 1) and how many hand-offs were made.
+static TURN: AtomicU32 = AtomicU32::new(0);
+static DONE: AtomicU32 = AtomicU32::new(0);
+
+/// Takes `me`'s turns: waits on the condition variable (SRW lock) until
+/// TURN is `me`, passes the turn and wakes the other side.
+fn srw_ping_pong(me: u32) {
+    for _ in 0..HANDOFFS {
+        // SAFETY: the test's lock and condition variable.
+        unsafe {
+            AcquireSRWLockExclusive(PP_LOCK.get());
+            while TURN.load(Ordering::Relaxed) != me {
+                SleepConditionVariableSRW(PP_CV.get(), PP_LOCK.get(), INFINITE, 0);
+            }
+            TURN.store(1 - me, Ordering::Relaxed);
+            DONE.fetch_add(1, Ordering::Relaxed);
+            ReleaseSRWLockExclusive(PP_LOCK.get());
+            WakeConditionVariable(PP_CV.get());
+        }
+    }
+}
+
+extern "system" fn srw_pong(_: *mut c_void) -> u32 {
+    srw_ping_pong(1);
+    0
+}
+
+/// The same with a critical section, the wake given while holding it.
+fn cs_ping_pong(me: u32) {
+    for _ in 0..HANDOFFS {
+        // SAFETY: the test's critical section and condition variable.
+        unsafe {
+            EnterCriticalSection(PP_CS.get());
+            while TURN.load(Ordering::Relaxed) != me {
+                SleepConditionVariableCS(PP_CS_CV.get(), PP_CS.get(), INFINITE);
+            }
+            TURN.store(1 - me, Ordering::Relaxed);
+            DONE.fetch_add(1, Ordering::Relaxed);
+            WakeAllConditionVariable(PP_CS_CV.get());
+            LeaveCriticalSection(PP_CS.get());
+        }
+    }
+}
+
+extern "system" fn cs_pong(_: *mut c_void) -> u32 {
+    cs_ping_pong(1);
+    0
+}
+
+/// WaitOnAddress hand-offs on TURN itself.
+fn address_ping_pong(me: u32) {
+    for _ in 0..HANDOFFS {
+        loop {
+            let seen = TURN.load(Ordering::SeqCst);
+            if seen == me {
+                break;
+            }
+            // SAFETY: TURN is a 4-byte value; `seen` is what we compare.
+            unsafe { WaitOnAddress(TURN.as_ptr().cast(), (&raw const seen).cast(), 4, INFINITE) };
+        }
+        DONE.fetch_add(1, Ordering::Relaxed);
+        TURN.store(1 - me, Ordering::SeqCst);
+        // SAFETY: TURN's address.
+        unsafe { WakeByAddressSingle(TURN.as_ptr().cast()) };
+    }
+}
+
+extern "system" fn address_pong(_: *mut c_void) -> u32 {
+    address_ping_pong(1);
+    0
+}
+
+/// Round-robin among RING threads (more than the CPUs, so waiters really
+/// sleep): thread `me` waits until TURN is `me`, passes it to the next
+/// and wakes everyone. RING_ID hands each thread its number.
+const RING: u32 = 4;
+static RING_ID: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn srw_ring(_: *mut c_void) -> u32 {
+    let me = RING_ID.fetch_add(1, Ordering::SeqCst);
+    for _ in 0..HANDOFFS / 4 {
+        // SAFETY: the test's lock and condition variable.
+        unsafe {
+            AcquireSRWLockExclusive(PP_LOCK.get());
+            while TURN.load(Ordering::Relaxed) != me {
+                SleepConditionVariableSRW(PP_CV.get(), PP_LOCK.get(), INFINITE, 0);
+            }
+            TURN.store((me + 1) % RING, Ordering::Relaxed);
+            DONE.fetch_add(1, Ordering::Relaxed);
+            ReleaseSRWLockExclusive(PP_LOCK.get());
+            WakeAllConditionVariable(PP_CV.get());
+        }
+    }
+    0
+}
+
+extern "system" fn address_ring(_: *mut c_void) -> u32 {
+    let me = RING_ID.fetch_add(1, Ordering::SeqCst);
+    for _ in 0..HANDOFFS / 4 {
+        loop {
+            let seen = TURN.load(Ordering::SeqCst);
+            if seen == me {
+                break;
+            }
+            // SAFETY: TURN is a 4-byte value; `seen` is what we compare.
+            unsafe { WaitOnAddress(TURN.as_ptr().cast(), (&raw const seen).cast(), 4, INFINITE) };
+        }
+        DONE.fetch_add(1, Ordering::Relaxed);
+        TURN.store((me + 1) % RING, Ordering::SeqCst);
+        // SAFETY: TURN's address.
+        unsafe { WakeByAddressAll(TURN.as_ptr().cast()) };
+    }
+    0
+}
+
+/// Four threads entering one critical section, each many times: the
+/// count is exact and nobody is left asleep.
+static CONTENDED: Shared<CriticalSection> =
+    Shared(core::cell::UnsafeCell::new(CriticalSection([0; 5])));
+static CONTENDED_COUNT: Shared<u64> = Shared(core::cell::UnsafeCell::new(0));
+
+extern "system" fn contend(_: *mut c_void) -> u32 {
+    for _ in 0..HANDOFFS {
+        // SAFETY: the test's critical section guards the count.
+        unsafe {
+            EnterCriticalSection(CONTENDED.get());
+            *CONTENDED_COUNT.get() += 1;
+            LeaveCriticalSection(CONTENDED.get());
+        }
+    }
+    0
+}
+
+/// Lost-wakeup stress: each hand-off needs the other thread woken, so a
+/// single lost wake hangs the scenario (its timeout's state dump then
+/// names the keyed-event wait, its caller and key).
+fn lost_wakeups(c: &mut Checks) -> Result<(), u32> {
+    let pairs: [(fn(u32), StartRoutine); 3] =
+        [(srw_ping_pong, srw_pong), (cs_ping_pong, cs_pong), (address_ping_pong, address_pong)];
+    // SAFETY: the test's critical sections.
+    unsafe {
+        InitializeCriticalSection(PP_CS.get());
+        InitializeCriticalSection(CONTENDED.get());
+    }
+    for (ping, pong) in pairs {
+        TURN.store(0, Ordering::SeqCst);
+        DONE.store(0, Ordering::SeqCst);
+        let other = start(pong);
+        ping(0);
+        c.ok(join(other), 0)?;
+        c.eq(DONE.load(Ordering::SeqCst).into(), u64::from(2 * HANDOFFS))?;
+    }
+    for ring in [srw_ring as StartRoutine, address_ring] {
+        TURN.store(0, Ordering::SeqCst);
+        DONE.store(0, Ordering::SeqCst);
+        RING_ID.store(0, Ordering::SeqCst);
+        let threads = [start(ring), start(ring), start(ring), start(ring)];
+        for t in threads {
+            c.ok(join(t), 0)?;
+        }
+        c.eq(DONE.load(Ordering::SeqCst).into(), u64::from(HANDOFFS))?;
+    }
+    let threads = [start(contend), start(contend), start(contend), start(contend)];
+    for t in threads {
+        c.ok(join(t), 0)?;
+    }
+    // SAFETY: every thread has finished.
+    c.eq(unsafe { *CONTENDED_COUNT.get() }, 4 * u64::from(HANDOFFS))?;
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     srw(&mut c)?;
@@ -731,7 +928,8 @@ fn run() -> Result<(), u32> {
     fls(&mut c)?;
     slist(&mut c)?;
     semaphores(&mut c)?;
-    waiters_sleep(&mut c)
+    waiters_sleep(&mut c)?;
+    lost_wakeups(&mut c)
 }
 
 #[unsafe(no_mangle)]
