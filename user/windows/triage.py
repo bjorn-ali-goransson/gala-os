@@ -82,15 +82,20 @@ def assertion(program, check, report_line):
         return want, None, "the report names line %d, past the end of %s" % (want, src)
     if not src.endswith(".rs"):
         return None, None, "%s is C and the report names no line" % src
-    sites, first_loop = checks_mod.sites(src)
+    sites, first_loop, methods = checks_mod.sites(src)
+    if not methods:
+        return None, None, "no counting method found in %s" % src
     if check is None or check < 1 or check > len(sites):
         return None, None, "check %s is outside the %d call sites" % (check, len(sites))
-    _, line, in_loop, text = sites[check - 1]
+    _, line, in_loop, in_branch, text = sites[check - 1]
     if first_loop and check >= first_loop:
         how = ("uncertain: #%d is at or past the first call site inside a loop (#%d), "
                "so source order is no longer the run order" % (check, first_loop))
     elif in_loop:
         how = "uncertain: inside a loop"
+    elif in_branch:
+        how = ("likely: source order is the run order this far, but this call site "
+               "is inside a branch, which shifts the count when it is not taken")
     else:
         how = "exact (source order is the run order this far)"
     return line, text, how

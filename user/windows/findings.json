@@ -12,7 +12,10 @@
     "run-all.ps1's `fault` field cannot work as written: it reads the Application log's Application Error event (1000), and the runner sets SEM_NOGPFAULTERRORBOX (so crash.exe opens no dialog), which the children inherit and which stops a faulting process reporting to Windows Error Reporting. The log holds no such event from either sweep while holding four older ones, so every entry, crashes included, reads \"no Application Error event found\". user/windows/fault.py gets the same three facts by debugging the program instead.",
     "Results are not stable between runs on the same machine. Comparing the two sweeps here: com_test 0x6c -> 0x6e, kernel32_system_test 0x58 -> 0x34, security_test 0x21 -> 0x4, pipe_test 0x137 -> 0x14b, process_test 0x47 -> 0x4a, persist_test 0 -> 0x38, tds_test's line went from \"first start of the instance\". Some of that is tests that keep state across runs (persist_test, tds_test), and some is ordering or timing. A single report does not pin a divergence down.",
     "Only the first failing check of a program is ever known, so fixing one may reveal the next; a count here is of programs, not of divergences.",
-    "No test source or binary was changed, as the brief requires. The binaries are cross-compiled on Linux and CI checks user/bin against the sources, and there is no Rust toolchain on this machine."
+    "No test source or binary was changed, as the brief requires. The binaries are cross-compiled on Linux and CI checks user/bin against the sources, and there is no Rust toolchain on this machine.",
+    "Some of what a run reports is leftover state rather than a difference: kernel32_file_test fails its first check only because %TEMP%\\gala_k32 is still there from the run before. A program that leaves what it made behind reports a different check the second time, so a report is only clean on a clean machine.",
+    "Which methods count a check is worked out per test rather than assumed, and has to be: the tests use eq and ok mostly, but also st, ok0, fails and wrappers of their own, the counter is a named field in session_test and a Cell in others, and some methods carry generic parameters. Twelve mappings were wrong before that was handled, registry_test's among them, where the check moved from the ProductName line to the CurrentBuild line and the reported value then made sense.",
+    "The brief's step 1 was deliberately not done: no galatest account was created and nothing ran elevated. access_test, logon_test and profile_test (ERROR_LOGON_FAILURE), restricted_test (not an administrator) and schannel_test (skipped) are therefore unresolved by choice, not by evidence."
   ],
 
   "peb_test": {
@@ -151,6 +154,55 @@
     "class": "expectation",
     "evidence": "check 1 is user/disk_test/src/main.rs:200, c.eq(u32_at(g, 8).into(), FIXED_MEDIA.into()), and it got 5.",
     "note": "Not the galatest account, although the source mentions it elsewhere: the failing check is about the media type. Still to be probed (what IOCTL_DISK_GET_DRIVE_GEOMETRY reports for this machine's disk)."
+  },
+
+  "kernel32_sys_test": {
+    "windows": "WriteConsoleW's error depends on what the handle is: on a file handle (FILE_TYPE_DISK) it fails with ERROR_INVALID_HANDLE (6), and on a pipe (FILE_TYPE_PIPE) with ERROR_INVALID_FUNCTION (1).",
+    "class": "expectation",
+    "evidence": "probed here: WriteConsoleW on a CreateFileW handle -> 0, GetLastError 6; on a CreatePipe write end -> 0, GetLastError 1.",
+    "note": "A real divergence, and one the runner decides: the check asserts ERROR_INVALID_HANDLE for both, its comment reading \"redirected output (a file or pipe)\", and run-all.ps1 redirects standard output to a pipe, so the test gets 1. Windows separates the two cases; the test and gala do not."
+  },
+  "registry_test": {
+    "windows": "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion CurrentBuild reads \"26200\", 12 bytes with its terminator.",
+    "class": "environment",
+    "evidence": "the check got 12, which is \"26200\" plus NUL as UTF-16; probed here, ProductName is \"Windows 10 Pro\" and the key reads as the test expects otherwise.",
+    "note": "A fifth program asserting the pinned build, beside peb_test, kuser_test, manifest_test and wow64_test. The earlier mapping put this check on the ProductName line; counting the right methods (it uses ok0 as well as eq and ok) moved it to the CurrentBuild line, which the value 12 confirms."
+  },
+  "wait_test": {
+    "windows": "NtCreateEvent with an invalid EventType (2) returns STATUS_INVALID_PARAMETER (0xc000000d).",
+    "class": "expectation",
+    "evidence": "the check got c000000d where it asserts STATUS_INVALID_PARAMETER_4 (0xc00000f3); user/wait_test/src/main.rs:81.",
+    "note": "A real divergence: this build names the parameter in some rejections and not here, so gala returning STATUS_INVALID_PARAMETER_4 is wrong too. Not probed independently, the evidence being the program's own value."
+  },
+  "kernel32_file_test": {
+    "windows": "CreateDirectoryW(%TEMP%\\gala_k32) returns 0 with ERROR_ALREADY_EXISTS (183), because the directory is still there from an earlier run, holding a.txt.",
+    "class": "environment",
+    "evidence": "probed here: the directory exists with a.txt in it; CreateDirectoryW -> 0, GetLastError 183. The test's own next check asserts that a second CreateDirectoryW returns 0, so check 1 can only pass against a clean %TEMP%.",
+    "note": "NOT a divergence: leftover state. It also explains part of the run-to-run movement, this program having failed check 0x28 in the first sweep (clean) and check 1 in the second. The test does not remove what it creates; run it against a fresh %TEMP% or have it clean up first."
+  },
+  "restricted_test": {
+    "windows": "CheckTokenMembership(NULL, S-1-5-32-544) succeeds and reports is-member = 0 with GetLastError 0: this token is not in Administrators.",
+    "class": "environment",
+    "evidence": "probed here; the token's user is DESKTOP-0GMLOBR\\a, an ordinary account, and the sweep ran non-elevated as the brief's non-admin case.",
+    "note": "The test asserts the process is an administrator. The 0xbb in the report is a stale last error, since the call itself succeeded. Needs an elevated run, which was deliberately not done."
+  },
+  "system_test": {
+    "windows": "The token's user is DESKTOP-0GMLOBR\\a, SID S-1-5-21-143635261-1314383964-2185545505-1001, not LocalSystem (S-1-5-18).",
+    "class": "environment",
+    "evidence": "probed here: OpenProcessToken + GetTokenInformation(TokenUser), then LookupAccountSid.",
+    "note": "The test expects to run as LocalSystem, which its gala scenario arranges with as=system. run-all.ps1 runs it as the logged-on user, so this check cannot pass that way."
+  },
+  "session_test": {
+    "windows": "This process's session id is 1 (ProcessIdToSessionId), which is what the check got.",
+    "class": "environment",
+    "evidence": "probed here.",
+    "note": "An interactive Windows logon is session 1, while services are in session 0. The check got 1 and failed, so the test asked for another value; which one is in check_own_session's caller and was not read."
+  },
+  "sspi_test": {
+    "windows": "The name a server sees for this client is DESKTOP-0GMLOBR\\a (GetUserNameEx, NameSamCompatible).",
+    "class": "environment",
+    "evidence": "probed here; the check asserts the name is \"GALA\\gala\".",
+    "note": "The test hardcodes gala's own machine and user name, so it cannot pass on any other machine. The SSPI exchange itself got as far as this check, so the mechanism works here."
   },
 
   "clock_test": {
