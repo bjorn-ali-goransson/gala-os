@@ -93,7 +93,8 @@ In order:
    **H11**: busybox-w32's httpd and wget over loopback (the Linux
    busybox's run: `lx_httpd`).
 10. **LN**: lints before every commit (the owner: quality built in
-    before committing); first, as each class it catches recurs.
+    before committing, not found later); started right after the
+    WSAEnumNetworkEvents fix in flight, ahead of the items above.
 11. **PT**: the portability seams for a second architecture (the owner:
     the ARM64 port itself later), when the machine is free.
 12. **Last, once everything above is done** (the owner): a performance
