@@ -229,34 +229,50 @@ fn interpreter(
     read: &ReadInterp<'_>,
     program: &LoadPlan,
 ) -> Result<Interp, ExecError> {
-    let fail = |why| {
-        let mut p = Vec::new();
-        match p.try_extend_from_slice(path) {
-            Ok(()) => ExecError::Interpreter(p, why),
-            Err(_) => ExecError::OutOfMemory,
-        }
+    let data = match read(path) {
+        Ok(data) => data,
+        Err(e) => return Err(interp_error(path, InterpError::File(e))),
     };
-    let data = read(path).map_err(|e| fail(InterpError::File(e)))?;
-    let image = ElfImage::parse(&data).map_err(|e| fail(InterpError::Elf(e)))?;
+    let image = match ElfImage::parse(&data) {
+        Ok(image) => image,
+        Err(e) => return Err(interp_error(path, InterpError::Elf(e))),
+    };
     if image.interp.is_some() {
-        return Err(fail(InterpError::Nested));
+        return Err(interp_error(path, InterpError::Nested));
     }
     let span = image.span();
     let size = span.end - span.start;
     let base = match image.kind {
         Kind::Exec => span.start,
-        Kind::Dyn => mm::MMAP_TOP
-            .checked_sub(size)
-            .map(|top| top / image.max_align() * image.max_align())
-            .ok_or_else(|| fail(InterpError::NoRoom))?,
+        Kind::Dyn => match mm::MMAP_TOP.checked_sub(size) {
+            Some(top) => top / image.max_align() * image.max_align(),
+            None => return Err(interp_error(path, InterpError::NoRoom)),
+        },
     };
     // A fixed-address interpreter (ET_EXEC) must not meet the program.
     if base < program.end && program.start < base + size || base + size > mm::MMAP_TOP {
-        return Err(fail(InterpError::NoRoom));
+        return Err(interp_error(path, InterpError::NoRoom));
     }
-    let bias = image.load_bias(base).map_err(|e| fail(InterpError::Elf(e)))?;
-    let plan = image.plan(bias).map_err(|e| fail(InterpError::Elf(e)))?;
+    let bias = match image.load_bias(base) {
+        Ok(bias) => bias,
+        Err(e) => return Err(interp_error(path, InterpError::Elf(e))),
+    };
+    let plan = match image.plan(bias) {
+        Ok(plan) => plan,
+        Err(e) => return Err(interp_error(path, InterpError::Elf(e))),
+    };
     Ok(Interp { path: Vec::new(), data, plan })
+}
+
+/// The error for an unusable interpreter at `path`, the path copied
+/// fallibly. A plain function, not a closure handed to `map_err`, so no
+/// library code calls into the allocation (alloc-audit).
+fn interp_error(path: &[u8], why: InterpError) -> ExecError {
+    let mut p = Vec::new();
+    match p.try_extend_from_slice(path) {
+        Ok(()) => ExecError::Interpreter(p, why),
+        Err(_) => ExecError::OutOfMemory,
+    }
 }
 
 /// What a new image's auxv takes from the machine: AT_RANDOM's bytes and
