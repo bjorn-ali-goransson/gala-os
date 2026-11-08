@@ -5,7 +5,7 @@
  * before iMaxSockets), getaddrinfo's x86 ADDRINFOA for "localhost",
  * TCP on the loopback address (bind to port 0, getsockname, listen,
  * connect, accept with the peer's address), send/recv both ways and a
- * WSASend/WSARecv of two WSABUFs each, select's x86 fd_set (4-byte
+ * WSASend/WSARecv of two WSABUFs each (the data may come in parts), select's x86 fd_set (4-byte
  * SOCKETs), a non-blocking recv's WSAEWOULDBLOCK, a graceful close (recv
  * 0), UDP sendto/recvfrom with the sender's address.
  * Prints "wow64_sock_test: ok" or exits with the failing check's line. */
@@ -68,8 +68,24 @@ int main(void)
     char x[2], y[16];
     WSABUF in[2] = { { sizeof x, x }, { sizeof y, y } };
     n = 0;
-    CHECK(WSARecv(a, in, 2, &n, &flags, NULL, NULL) == 0 && n == 7);
-    CHECK(memcmp(x, "ab", 2) == 0 && memcmp(y, "cdefg", 5) == 0);
+    CHECK(WSARecv(a, in, 2, &n, &flags, NULL, NULL) == 0 && n >= 1 && n <= 7);
+    /* TCP may hand over part of it first (the two buffers can go as two
+     * segments, and a busy machine runs the receiver between them): the
+     * rest comes with later receives, as on Windows. */
+    DWORD total = n;
+    char got[7];
+    memcpy(got, x, total < 2 ? total : 2);
+    if (total > 2)
+        memcpy(got + 2, y, total - 2);
+    while (total < 7) {
+        int r = recv(a, got + total, 7 - total, 0);
+        if (r <= 0)
+            break;
+        total += r;
+    }
+    if (total != 7)
+        printf("wow64_sock_test: WSARecv and recv gave %lu of 7 bytes\n", (unsigned long)total);
+    CHECK(total == 7 && memcmp(got, "abcdefg", 7) == 0);
 
     /* select: the x86 fd_set; readable once data is there. */
     fd_set r;

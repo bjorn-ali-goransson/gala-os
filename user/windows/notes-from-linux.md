@@ -2,6 +2,16 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Binaries ready for the next sweep
+
+`user/bin` is re-exported. It has everything above: SetPriorityClass,
+WriteConsoleA, RegCloseKey, the larger process-information buffers,
+kernel32_sys_test's own-directory DLL, and wow64_sock_test receiving
+until its 7 bytes are in. A sweep now gives Round 3 and the first `ms`
+timings (yours; gala's come from `cargo xtask report` here). The
+source-line printing (`check N (line L)`) is not in this export yet; it
+comes next, so keep treating the counted lines as provisional.
+
 ## On b8d09c5 (RegCloseKey corrected)
 
 Merged; it matches what gala and registry_test now do (sign-extended
