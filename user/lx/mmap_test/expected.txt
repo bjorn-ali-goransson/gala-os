@@ -41,5 +41,75 @@ mmap(MAP_FIXED, kernel address) = -12
 MAP_SHARED|MAP_ANONYMOUS succeeded = yes
 shared page: rw
 munmap(shared) = 0
+file made = yes
+MAP_PRIVATE of the file = yes
+page 1's first byte = 65
+page 3's first byte = 67
+byte 4097 = 1
+the last byte of the file = 127
+past the end, in its last page = 0
+read-only private page: r-
+mprotect(rw) = 0
+written page 1 = 120
+the file keeps its byte 0 = 65
+the file keeps its byte 4097 = 1
+an unwritten private page sees a pwrite = 90
+a written private page keeps its copy = 120
+MAP_FIXED of page 4 over page 2 = yes
+page 2 now shows page 4's first byte = 68
+page 1 kept its copy = 120
+munmap(page 3) = 0
+page 3 after munmap: --
+page 4 stays = 68
+munmap(all) = 0
+MAP_SHARED at offset 4096 = yes
+its first byte is page 2's = 66
+the file sees the store = 115
+the mapping sees a pwrite = 80
+mprotect(read-only) = 0
+shared page made read-only: r-
+munmap(shared) = 0
+mmap(MAP_SHARED, PROT_WRITE, O_RDONLY) = -13 (EACCES)
+mmap(MAP_SHARED, PROT_READ, O_RDONLY) succeeded = yes
+mprotect(PROT_WRITE) of it = -13 (EACCES)
+mmap(MAP_PRIVATE, PROT_WRITE, O_RDONLY) succeeded = yes
+mmap(O_WRONLY) = -13 (EACCES)
+mmap(a directory) = -19 (ENODEV)
+mmap(a pipe) = -19 (ENODEV)
+mmap(a closed fd) = -9 (EBADF)
+mmap(offset not page aligned) = -22 (EINVAL)
+a mapping outlives its fd and name = 65
+mremap grows in place = yes
+its new last page: rw
+a page after it = yes
+mremap past it without MREMAP_MAYMOVE = -12 (ENOMEM)
+mremap(MREMAP_MAYMOVE) moved it = yes
+moved: its first page's byte = 11
+moved: its third page's byte = 12
+moved: a new page is zero = 0
+the old place: --
+mremap shrinks in place = yes
+past the shrunk end: --
+mremap(MREMAP_FIXED) to a given address = yes
+its byte there = 11
+mremap(MREMAP_FIXED without MREMAP_MAYMOVE) = -22 (EINVAL)
+mremap(unaligned) = -22 (EINVAL)
+mremap(new length 0) = -22 (EINVAL)
+mremap(bad flags) = -22 (EINVAL)
+mremap(not mapped) = -14 (EFAULT)
+a file mapping grown = yes
+its second page shows the file's third = 67
+a file mapping moved = yes
+moved: its pages show the file = 17474
+madvise(MADV_DONTNEED, page 1) = 0
+anonymous page after MADV_DONTNEED = 0
+the other page = 6
+madvise(MADV_WILLNEED) = 0
+madvise(bad advice) = -22 (EINVAL)
+madvise(unaligned) = -22 (EINVAL)
+madvise(not mapped) = -12 (ENOMEM)
+a private file page written = 119
+madvise(MADV_DONTNEED) of it = 0
+shows the file again = 65
 mmap_test: ok
 -- exit status 0

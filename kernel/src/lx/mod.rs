@@ -54,6 +54,7 @@ pub mod futex;
 pub mod machine;
 pub mod mm;
 pub mod poll;
+pub mod resource;
 pub mod sigcalls;
 pub mod signal;
 pub mod socket;
