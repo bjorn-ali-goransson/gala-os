@@ -88,6 +88,11 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
   file, line and analyzer; fix the code, or for `event-reset` justify
   the site with `// lint(event-reset): <reason>`, or for `wait-site`
   add the reviewed site to `WAIT_SITES` with the review's reason.
+- Before a push the pre-push hook runs `cargo xtask lint --full`: the
+  same, then every command of CI's Clippy step, read from
+  `.github/workflows/ci.yml` (add a crate's line there and the hook
+  runs it too). It names the commands that failed; fix them rather than
+  pushing with `--no-verify`.
 
 - **Observability is part of every change** (OBSERVABILITY.md): a new
   subsystem, driver, boot stage, format or test comes with its

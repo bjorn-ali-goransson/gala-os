@@ -344,11 +344,11 @@ first.
 flagged and one that must not):
 1. Done: `cargo xtask lint` (also first in `cargo xtask test`) and the
    committed pre-commit hook, which any xtask run enables; the
-   analyzers and `cargo fmt --check`. Next: the clippy lines ci.yml
-   lists (minutes, not seconds: a `--full` mode, or the hook runs only
-   the crates a commit touches).
-2. Architecture code only in `kernel/src/arch`: the kernel's clippy
-   for `aarch64-unknown-none` (item PT).
+   analyzers and `cargo fmt --check`; `cargo xtask lint --full` adds
+   CI's Clippy commands, read from ci.yml's Clippy step (one list), and
+   the committed pre-push hook runs it.
+2. Architecture code only in `kernel/src/arch`: done, the kernel's
+   clippy for `aarch64-unknown-none` (item PT; in the pre-push run).
 3. No check-then-sleep: `wait-site` (done) allows the kernel's raw
    `prepare_wait` only at the reviewed sites (each registers and tests
    its condition under the lock its waker takes); a new one needs a

@@ -229,9 +229,69 @@ pub fn enable_hook(root: &Path) {
     }
 }
 
-/// `cargo xtask lint`: the analyzers, then `cargo fmt --check`; a non-zero
-/// exit (and each finding as `file:line: [lint] message`) if anything fails.
-pub fn cli(root: &Path) -> Result {
+/// The commands of CI's Clippy step (`.github/workflows/ci.yml`, the
+/// `run: |` block under `- name: Clippy`): one list, which CI and
+/// `cargo xtask lint --full` both run.
+pub fn ci_clippy(workflow: &str) -> Vec<String> {
+    let mut lines = workflow.lines();
+    let mut out = Vec::new();
+    while let Some(l) = lines.next() {
+        if l.trim() != "- name: Clippy" {
+            continue;
+        }
+        let Some(run) = lines.next().filter(|r| r.trim() == "run: |") else { break };
+        let indent = run.len() - run.trim_start().len();
+        for l in lines.by_ref() {
+            if !l.trim().is_empty() && l.len() - l.trim_start().len() <= indent {
+                break;
+            }
+            let cmd = l.trim();
+            if cmd.starts_with("cargo ") {
+                out.push(cmd.to_string());
+            }
+        }
+        break;
+    }
+    out
+}
+
+/// `cargo xtask lint --full`'s part: CI's Clippy commands, each in turn,
+/// all of them run; fails naming those that failed.
+fn full(root: &Path) -> Result {
+    let path = root.join(".github/workflows/ci.yml");
+    let text = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let commands = ci_clippy(&text);
+    if commands.is_empty() {
+        return Err(format!("no Clippy step's commands in {}", path.display()));
+    }
+    let mut failed = Vec::new();
+    for (i, cmd) in commands.iter().enumerate() {
+        eprintln!("xtask: lint --full: [{}/{}] {cmd}", i + 1, commands.len());
+        let ok = std::process::Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(root)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            failed.push(cmd.clone());
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "lint --full: {} of {} Clippy commands failed: {failed:?}",
+            failed.len(),
+            commands.len()
+        ))
+    }
+}
+
+/// `cargo xtask lint [--full]`: the analyzers, then `cargo fmt --check`
+/// (and with `--full`, CI's Clippy commands: the pre-push hook's run); a
+/// non-zero exit (and each finding as `file:line: [lint] message`) if
+/// anything fails.
+pub fn cli(root: &Path, with_clippy: bool) -> Result {
     let findings = analyze(root)?;
     for f in &findings {
         eprintln!("{}:{}: [{}] {}", f.file, f.line, f.lint, f.message);
@@ -248,6 +308,9 @@ pub fn cli(root: &Path) -> Result {
             if fmt.success() { "" } else { ", and `cargo fmt --all` would change files" }
         ));
     }
+    if with_clippy {
+        full(root)?;
+    }
     eprintln!("xtask: lint: clean");
     Ok(())
 }
@@ -255,6 +318,28 @@ pub fn cli(root: &Path) -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ci_clippy_commands_are_the_steps_run_block() {
+        let yml = "      - name: Format\n        run: cargo fmt --all --check\n      - name: Clippy\n        run: |\n          cargo clippy -p kernel -- -D warnings\n          # a comment\n          cargo build -p testdll\n\n          cargo clippy -p xtask -- -D warnings\n      - name: Tests\n        run: cargo xtask test\n";
+        assert_eq!(
+            ci_clippy(yml),
+            [
+                "cargo clippy -p kernel -- -D warnings",
+                "cargo build -p testdll",
+                "cargo clippy -p xtask -- -D warnings"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_real_workflow_has_clippy_commands() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let yml = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+        let c = ci_clippy(&yml);
+        assert!(c.len() > 10, "{c:?}");
+        assert!(c.iter().any(|l| l.contains("aarch64-unknown-none")));
+    }
 
     #[test]
     fn event_reset_after_a_request_is_flagged() {

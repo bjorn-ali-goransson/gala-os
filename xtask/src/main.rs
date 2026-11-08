@@ -2630,7 +2630,8 @@ commands:
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
   lint         the analyzers (event resets, wait sites) and cargo fmt --check; the
-               pre-commit hook (hooks/, enabled by any xtask run) runs it
+               pre-commit hook (hooks/, enabled by any xtask run) runs it;
+               --full also runs CI's Clippy commands (the pre-push hook)
   feed         the update feed (TUF metadata over content-addressed files; R8):
                feed publish <files dir> <feed dir> [--release N] [--floor F] |
                feed refresh <feed dir> (re-sign snapshot and timestamp) |
@@ -2681,8 +2682,8 @@ fn main() -> ExitCode {
             Some("build") => build(release, "gala-os", "").map(drop),
             Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
             // gala-um first: it fails in seconds, before minutes of boots.
-            Some("lint") => lint::cli(&root()),
-            Some("test") => lint::cli(&root())
+            Some("lint") => lint::cli(&root(), args.iter().any(|a| a == "--full")),
+            Some("test") => lint::cli(&root(), false)
                 .and_then(|()| stub_audit::stub_audit(&root()))
                 .and_then(|()| unit_tests())
                 .and_then(|()| alloc_audit(release, None, false))

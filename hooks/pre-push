@@ -1,0 +1,6 @@
+#!/bin/sh
+# gala's pre-push check (ROADMAP LN): the analyzers, cargo fmt and CI's
+# Clippy commands (read from .github/workflows/ci.yml), so nothing reaches
+# the remote that CI's Clippy step would refuse.
+# Enabled by `git config core.hooksPath hooks` (xtask sets it on first use).
+exec cargo xtask lint --full
