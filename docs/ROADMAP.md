@@ -228,7 +228,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
-| SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, installed applications; delivery through R8 |
+| SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, vendors' security releases for installed applications; delivery through R8 |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
@@ -2775,8 +2775,9 @@ update themselves (R8).
    may be gala's too. Advisories are public documentation (CLEAN_ROOM
    allows them); Wine's and ReactOS's security fixes are the same kind
    of signal.
-4. Installed applications: their vendors' fixes, through the
-   applications' own updaters or through `gala upgrade`.
+4. Installed applications: their vendors' security releases, watched
+   by gala (next step 8) and applied through the applications' own
+   updaters or through `gala upgrade`.
 
 **Next**:
 1. Advisories for dependencies in CI: `cargo deny check advisories`
@@ -2820,10 +2821,32 @@ update themselves (R8).
    source index (PK next step 2). Programs installed outside `gala
    install` are matched through their ARP entries, as winget does.
    Every check, upgrade and refusal as events.
-8. Later: installed versions matched against known vulnerabilities
-   (winget carries no vulnerability data; matching against NVD's
-   product identifiers is noisy), so an upgrade that fixes one is
-   applied first.
+8. Vendors' security releases watched, so gala knows which upgrades
+   are security upgrades (winget's manifests do not say: a version is a
+   version). A CI job, daily, gathers advisories from CISA's Known
+   Exploited Vulnerabilities catalog, OSV, GitHub's advisory database,
+   NVD and the vendors' own bulletins (MSRC for Microsoft's
+   applications and runtimes, Mozilla's MFSAs, Chrome's release notes,
+   Oracle's quarterly patch updates, Adobe's bulletins), and maps each
+   to winget package identifiers and version ranges. The mapping
+   (vendor and product names, CPEs, to `PackageIdentifier`) is a
+   curated table checked into the repository, starting with the
+   packages gala's scenarios install and the most installed ones; an
+   advisory it cannot map is listed in the job's report, not dropped.
+   The result is published as signed metadata in R8's feed (a target
+   like any other, so clients check it as they check a release), and
+   on a machine `gala upgrade` applies security upgrades first and
+   sooner than its schedule (at once for a known-exploited one), and
+   `gala list` shows which installed versions have advisories against
+   them. Test first: a fixture feed with an advisory against an
+   installed test package; `gala upgrade` takes that package first and
+   the event names the advisory. Every advisory gathered, mapped,
+   unmapped and applied as events.
+9. A vendor's security release that does not install or run on gala
+   (its installer or updater hits a gap) is a regression of the
+   highest rank: the advisory job also installs each mapped security
+   release in a scenario and reports the ones that fail, so the gap is
+   fixed before users are left on the vulnerable version.
 
 The sandbox limits what an exploited application can do before its fix
 arrives: integrity levels and restricted tokens (SEC), job objects and
@@ -2832,7 +2855,8 @@ the browser's sandbox (BR stage 3).
 **Done when**: advisories for gala's dependencies fail CI; a fuzzer runs
 against the system calls and the parsers without a finding left open;
 an application updates itself on gala; `gala upgrade` runs on a
-schedule; a security fix can be prepared in private and shipped through
+schedule and applies vendors' security releases first, from advisories
+published in the feed; a security fix can be prepared in private and shipped through
 the feed.
 
 ## Known issues and stopgaps
