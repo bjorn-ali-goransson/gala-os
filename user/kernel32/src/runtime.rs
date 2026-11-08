@@ -740,10 +740,9 @@ pub extern "system" fn SetPriorityClass(process: Handle, class: u32) -> Bool {
         return fail_with(super::ERROR_NOT_SUPPORTED, 0);
     }
     // As Windows: the bits that are no class are ignored and, of the
-    // class bits there, IDLE wins (0x12345, 0xffffffff, 0x60, 0x4040 are
-    // IDLE: measured); a value with no class bit (0 too) is
-    // ERROR_INVALID_PARAMETER. Between the other classes the lowest is
-    // taken, which Windows has not been asked yet (ROADMAP WD).
+    // class bits there, the lowest class wins (measured over every pair:
+    // IDLE beats all, REALTIME none); a value with no class bit (0 too) is
+    // ERROR_INVALID_PARAMETER.
     let Some(&(_, nt)) = PRIORITY_ORDER.iter().find(|&&(bit, _)| class & bit != 0) else {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     };

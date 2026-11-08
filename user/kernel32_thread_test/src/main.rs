@@ -272,7 +272,8 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         // Process priority classes: NORMAL to start with; set and read
         // back. A value that is no single class: Windows ignores the bits
         // that are no class and the lowest class among the rest wins, IDLE
-        // first (0x12345, 0xffffffff, 0x60, 0x4040 are IDLE); one with no
+        // first (0x12345, 0xffffffff, 0x60, 0x4040 are IDLE; 0x4080 is
+        // BELOW_NORMAL, 0x8020 NORMAL, 0x8080 ABOVE_NORMAL); one with no
         // class bit (0, 1, 0x10000) is ERROR_INVALID_PARAMETER.
         const NORMAL: u32 = 0x20;
         const BELOW_NORMAL: u32 = 0x4000;
@@ -286,6 +287,10 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         for odd in [0x12345, 0xffff_ffff, 0x60, 0x4040] {
             c.eq(SetPriorityClass(me, odd) as u64, 1)?;
             c.eq(GetPriorityClass(me).into(), IDLE.into())?;
+        }
+        for (pair, class) in [(0x4080, BELOW_NORMAL), (0x8020, NORMAL), (0x8080, 0x8000)] {
+            c.eq(SetPriorityClass(me, pair) as u64, 1)?;
+            c.eq(GetPriorityClass(me).into(), class.into())?;
         }
         for none in [0, 1, 0x1_0000] {
             c.eq(SetPriorityClass(me, none) as u64, 0)?;

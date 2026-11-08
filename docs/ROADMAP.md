@@ -1552,10 +1552,9 @@ browser_api_test imports CompareObjectHandles through its API set.
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
-   - SetPriorityClass with two class bits neither of which is IDLE's
-     (0x4020, 0x8080, 0x4080, 0x8020): which wins (gala takes the lowest
-     class; measured so far: IDLE wins, no class bit is
-     ERROR_INVALID_PARAMETER, REALTIME without the privilege is HIGH);
+   - SetPriorityClass's REALTIME from a token that holds
+     SeIncreaseBasePriorityPrivilege disabled (an elevated prompt):
+     REALTIME or HIGH (gala: REALTIME);
    - the not-yet-probed checks in `triage.md` (75 programs classed
      "expectation" without a probe), most numerous first: the kernel32
      tests, then user32/gdi32/comctl32/shell32/shlwapi;

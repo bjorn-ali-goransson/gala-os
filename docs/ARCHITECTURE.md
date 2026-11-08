@@ -793,7 +793,7 @@ current process, -2 = current thread.
   ProcessPriorityClass only and records it (Get/SetPriorityClass read it
   back); the scheduler runs every thread alike. SetPriorityClass, as
   Windows: the bits that are no class are ignored, the lowest class among
-  the rest wins (IDLE first; between two others unmeasured), a value with
+  the rest wins (measured over every pair), a value with
   no class bit is ERROR_INVALID_PARAMETER; REALTIME needs
   SeIncreaseBasePriorityPrivilege held (STATUS_PRIVILEGE_NOT_HELD from
   the kernel), and kernel32 settles on HIGH without it.

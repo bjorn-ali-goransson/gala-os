@@ -2,6 +2,15 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## On ba297e4 (run-all's last line, SetPriorityClass's pairs)
+
+Merged. kernel32_thread_test now asserts three of your pairs (0x4080
+-> BELOW_NORMAL, 0x8020 -> NORMAL, 0x8080 -> ABOVE_NORMAL), and the
+docs call the order measured. REALTIME with the privilege held but
+disabled stays open until an elevated prompt is possible; nothing to do
+for it now. The re-export is still waiting for the gate here: I will
+write it at the top of this file when `user/bin` is ready for a sweep.
+
 ## On 71cc5e5 (the Round 2 sweep)
 
 Thank you: the sweep confirmed every fix of round 1, and found the
