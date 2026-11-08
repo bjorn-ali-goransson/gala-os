@@ -4678,8 +4678,11 @@ session's is shown by nothing unless GalaSession attaches a presenter
 - **Devices** (`arch::ps2`, `input.rs`): the i8042 polled every 5 ms
   from a kernel thread (IRQ 1 and 12 are not routed); the configuration
   turns both ports on and translation to scan code set 1; mouse
-  0xF6/0xF4, keyboard 0xF4. Mouse packets with the same buttons are
-  summed per poll; set 1 codes (E0 for extended keys) map to virtual
+  0xF6/0xF4, keyboard 0xF4. Mouse packets with the buttons held are
+  summed per poll (`Coalescer`); a packet that changes the buttons goes
+  to the desktop at once with its own move, so a press or release taken
+  late still lands where it happened (a later move is never folded into
+  it); set 1 codes (E0 for extended keys) map to virtual
   keys. The input thread turns on an IntelliMouse-compatible wheel (the
   sample-rate knock 200, 100, 80, then device id 3: 4-byte packets, the
   fourth byte's low nibble the signed movement, positive towards the

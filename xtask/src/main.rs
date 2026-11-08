@@ -9473,10 +9473,21 @@ fn run_vm_once(
             && fs::read(&log)
                 .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
         {
-            screen_verdict = Some(match check_screen(&socket, iso, check) {
-                Ok(()) => "xtask: screen ok\n".into(),
-                Err(e) => format!("xtask: screen: {e}\n"),
+            let failed = check_screen(&socket, iso, check).err();
+            screen_verdict = Some(match &failed {
+                None => "xtask: screen ok\n".into(),
+                Some(e) => format!("xtask: screen: {e}\n"),
             });
+            // A failed screen check ends the run (it cannot pass any more):
+            // the guest's state dump first, as at a timeout.
+            if let Some(e) = failed {
+                let why = format!("stopped: the screen check failed ({e})");
+                dump_note =
+                    Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
         }
         if let Some(port) = port.filter(|_| client.is_none())
             && fs::read(&log).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
@@ -9553,8 +9564,8 @@ fn run_vm_once(
                     timeout.as_secs()
                 ),
             };
-            let what = format!("{what}; {}", now.describe());
-            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &what));
+            let why = format!("timed out after {what}; {}", now.describe());
+            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -9726,7 +9737,7 @@ fn ask_for_state_dump(
     log: &Path,
     child: &mut std::process::Child,
     vm_clock: &mut vmtime::VmClock,
-    what: &str,
+    why: &str,
 ) -> String {
     use std::io::Write as _;
     let seen = |mark: &str| {
@@ -9758,20 +9769,20 @@ fn ask_for_state_dump(
     }
     let wait = STATEDUMP_WAIT.as_secs();
     match sent {
-        Err(e) => format!("\nxtask: timed out after {what}; no state dump (monitor: {e})\n"),
+        Err(e) => format!("\nxtask: {why}; no state dump (monitor: {e})\n"),
         Ok(()) if seen(STATEDUMP_END) => format!(
-            "\nxtask: timed out after {what}; the guest's state dump (NMI) took {:.1}s\n",
+            "\nxtask: {why}; the guest's state dump (NMI) took {:.1}s\n",
             asked.elapsed().as_secs_f64()
         ),
         Ok(()) if seen(STATEDUMP_NMI_DONE) => format!(
-            "\nxtask: timed out after {what}; the state dump's NMI part came, its threads part \
+            "\nxtask: {why}; the state dump's NMI part came, its threads part \
              did not within {wait}s of run time (the boot thread could not run: the scheduler or a lock stuck?)\n"
         ),
         Ok(()) if seen(STATEDUMP_BEGIN) => format!(
-            "\nxtask: timed out after {what}; the state dump began but did not end within {wait}s of run time\n"
+            "\nxtask: {why}; the state dump began but did not end within {wait}s of run time\n"
         ),
         Ok(()) => format!(
-            "\nxtask: timed out after {what}; the guest did not answer the NMI within {wait}s of run time \
+            "\nxtask: {why}; the guest did not answer the NMI within {wait}s of run time \
              (no NMI handler yet: early boot, or the machine is wedged)\n"
         ),
     }
@@ -12787,6 +12798,10 @@ fn judge_log_inner(
         && !serial.contains(LEAK_MARKER)
     {
         return Ok(());
+    }
+    // A failed screen check stopped the VM (run_vm): that, not a timeout.
+    if let Some(line) = serial.lines().find(|l| l.starts_with("xtask: screen: ")) {
+        return Err(line.trim_start_matches("xtask: ").to_string());
     }
     match status {
         _ if timed_out => Err(format!(

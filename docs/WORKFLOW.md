@@ -1919,7 +1919,9 @@ and panics red). The boot splash replaces the text console: add
 A scenario in `SCREEN_SCENARIOS` gets a QEMU monitor socket; when its
 serial log shows the trigger line (a program's can be the desktop's
 `desktop: shown window '<title>'`), xtask runs the check's steps and
-logs `xtask: screen ok` or the mismatch. Such scenarios must boot by
+logs `xtask: screen ok` or the mismatch; a mismatch (or a step's
+`after` line not coming within 120 s) ends the run at once, after the
+guest's state dump, and is the scenario's verdict. Such scenarios must boot by
 UEFI (BIOS boots have no framebuffer), unless their desktop is headless
 (`presenter=test`, below).
 
