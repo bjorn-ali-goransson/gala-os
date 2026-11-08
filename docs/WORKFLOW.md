@@ -851,7 +851,11 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   guessed time while xtask looks; it waits for xtask's input
   (console_window's "q"), and a step whose input acts on output the
   program is still printing waits for that output (`ScreenStep::after`).
-  On the host side, timing xtask's own observations in a loop that does
+  A program that ends on xtask's input ends on the last thing xtask
+  sends: a click counts on WM_LBUTTONUP, not on the press, or under KVM
+  the program and QEMU are gone before xtask writes the release
+  ("screen: Broken pipe"; presenter_test, gl_test and vk_test count the
+  release). On the host side, timing xtask's own observations in a loop that does
   other work is the same mistake: xtask times `uptime_ms=` marks in a
   thread of its own.
 - **Single-CPU tests that measure ticks** pin themselves
