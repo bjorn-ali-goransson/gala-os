@@ -196,8 +196,8 @@ static void edits(HWND parent) {
 }
 
 /* COMBOBOX: items added, inserted, found, deleted, counted, with data;
- * the selection (CB_SETCURSEL, -1 at first and for an index past the
- * end); a drop-down list's text is the selected item's; GetComboBoxInfo
+ * the selection (CB_SETCURSEL; -1 at first; an index past the end is
+ * CB_ERR and keeps it); a drop-down list's text is the selected item's; GetComboBoxInfo
  * names the combo box, its edit (a child, for CBS_DROPDOWN) and its
  * list. */
 static void combos(HWND parent) {
@@ -218,7 +218,9 @@ static void combos(HWND parent) {
     CHECK(SendMessageW(c, CB_SETITEMDATA, 1, 1234) != CB_ERR && SendMessageW(c, CB_GETITEMDATA, 1, 0) == 1234);
     CHECK(SendMessageW(c, CB_SETCURSEL, 1, 0) == 1 && SendMessageW(c, CB_GETCURSEL, 0, 0) == 1);
     CHECK(GetWindowTextW(c, text, 32) == 4 && wcscmp(text, L"beta") == 0);
-    CHECK(SendMessageW(c, CB_SETCURSEL, 7, 0) == CB_ERR && SendMessageW(c, CB_GETCURSEL, 0, 0) == CB_ERR);
+    /* Past the end: CB_ERR, the selection kept (Windows 11 25H2). */
+    CHECK(SendMessageW(c, CB_SETCURSEL, 7, 0) == CB_ERR);
+    CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == 1);
     CHECK(SendMessageW(c, CB_DELETESTRING, 0, 0) == 2);
     CHECK(SendMessageW(c, CB_RESETCONTENT, 0, 0) == CB_OKAY && SendMessageW(c, CB_GETCOUNT, 0, 0) == 0);
 

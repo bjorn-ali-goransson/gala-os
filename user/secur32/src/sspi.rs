@@ -30,7 +30,7 @@ const SEC_E_LOGON_DENIED: u32 = 0x8009_030c;
 const SEC_E_MESSAGE_ALTERED: u32 = 0x8009_030f;
 const SEC_E_BUFFER_TOO_SMALL: u32 = 0x8009_0321;
 const SEC_E_OUT_OF_SEQUENCE: u32 = 0x8009_0310;
-const SEC_E_NO_AUTHENTICATING_AUTHORITY: u32 = 0x8009_0311;
+const SEC_E_NO_CREDENTIALS: u32 = 0x8009_030e;
 
 const SECBUFFER_DATA: u32 = 1;
 const SECBUFFER_TOKEN: u32 = 2;
@@ -617,8 +617,10 @@ pub extern "system" fn InitializeSecurityContextW(
                 return SEC_E_INVALID_HANDLE;
             };
             if credential.package == Package::Kerberos {
-                // No domain controller to ask for a ticket.
-                return SEC_E_NO_AUTHENTICATING_AUTHORITY;
+                // gala is a workgroup machine: the Kerberos package has no
+                // credentials (SEC_E_NO_CREDENTIALS, as Windows 11 25H2 off
+                // a domain gives; a domain member without a KDC may differ).
+                return SEC_E_NO_CREDENTIALS;
             }
             let (ctx, n) = match Context::negotiate(credential.ntlm, &mut token) {
                 Ok(r) => r,

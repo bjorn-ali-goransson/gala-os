@@ -1568,6 +1568,37 @@ gala's own numbers; oleaut32_test no longer passes VarBstrFromCy a NULL
 output; disk_test writes nothing unless the disk is 16 MiB long with
 xtask's marker in sector 1 (exit 0xd15c otherwise).
 
+Done (Round 3, Windows' behaviour, each from a measurement on 25H2):
+TokenIntegrityLevel's attributes are 0x60 (advapi32_test);
+CERT_CONTEXT keeps only the certificate encoding (cert_test);
+RaiseException sets EXCEPTION_SOFTWARE_ORIGINATE (kernel32_misc_test);
+SetThreadDescription returns 0x10000000 (kernel32_thread_test, rtl_test,
+kernel32_clr_test); LdrGetProcedureAddress of a missing name is
+STATUS_ENTRYPOINT_NOT_FOUND (loader_test); a PE32 view in a 64-bit
+process is STATUS_IMAGE_MACHINE_TYPE_MISMATCH (image_test) and a
+relocated PE32 header names its load address (wow64_import_test);
+PeekNamedPipe's bytes left go below 0 on a byte pipe (pipe_test); an
+ended thread's TebBaseAddress is NULL (thread_test, wow64_thread_test);
+PrivilegeCheck takes a primary token (token_test); GetGestureInfo(NULL)
+is ERROR_INVALID_PARAMETER (win32_misc_test); MEM_DECOMMIT of size 0
+away from the base is STATUS_FREE_VM_NOT_AT_BASE (vmcycle_test);
+Kerberos's ISC is SEC_E_NO_CREDENTIALS (sspi_test);
+LsaRegisterLogonProcess without SeTcbPrivilege is
+STATUS_PORT_CONNECTION_REFUSED, and lsa_test stops there, "skipped"
+(lsa_test); GetBoundsRect gives DCB_SET or DCB_RESET only (gdi32_test);
+SystemQueryPerformanceCounterInformation needs Version 1 (sysinfo_test);
+SO_RANDOMIZE_PORT is for unbound sockets (udp_test);
+AssocQueryStringW(ASSOCSTR_EXECUTABLE) of a missing program is
+CO_E_APPNOTFOUND (shlwapi_test); SHGetIconOverlayIndexW hands out an
+index per path (shell32_test); SafeArrayAllocDescriptorEx leaves
+cbElements 0 (com_test); CoCreateInstanceEx wants every MULTI_QI's
+pItf NULL (ole32_test); SymSrvGetFileIndexInfoW refuses an image
+without a debug directory (dbghelp_test, which now indexes
+kernel32.dll); CB_SETCURSEL past the end keeps the selection
+(controls_test); WSB_PROP_WINSTYLE has a low bit per scroll bar
+(comctl32_test); user32_test counts only its own windows in its CBT hook
+(Windows adds the thread's "Default IME" window).
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
@@ -1583,6 +1614,17 @@ Next:
    - clusapi_test (resutils.dll faults, no cluster installed): the call
      it makes last (it prints nothing first: a line per step would
      tell);
+   - what Round 3's changes left unmeasured: whether RtlRaiseException
+     itself sets EXCEPTION_SOFTWARE_ORIGINATE; a PE32+ image's mapped
+     ImageBase when relocated (gala keeps the preferred base); which of
+     IMAGE_MACHINE_TYPE_MISMATCH and IMAGE_NOT_AT_BASE a relocated PE32
+     view in a 64-bit process gets; PeekNamedPipe peeking 1 byte
+     (0xffffffff expected) and with no buffer (0); PrivilegeCheck's
+     attributes on a primary token (SE_PRIVILEGE_USED_FOR_ACCESS);
+     GetBoundsRect after SetBoundsRect(DCB_DISABLE) (gala: DCB_RESET);
+     SO_RANDOMIZE_PORT on a bound TCP socket; seh_test's lookup of a
+     dynamic table's indirect entry (the test now registers it for
+     VirtualAlloc'd memory);
    - kernel32_locale_test's GetSystemPreferredUILanguages (the whole
      list, against GetSystemDefaultUILanguage), before its expectation
      changes; persist_test needs run-all.ps1 to remove C:\persist and

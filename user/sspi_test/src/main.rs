@@ -10,7 +10,7 @@
 //! (EncryptMessage/DecryptMessage), and a wrong password
 //! (SEC_E_LOGON_DENIED). Kerberos on a machine in a workgroup: the
 //! package (RPC id 16) and credentials exist, but a context cannot start
-//! (SEC_E_NO_AUTHENTICATING_AUTHORITY: no domain controller). Negotiate
+//! (SEC_E_NO_CREDENTIALS, as on Windows off a domain). Negotiate
 //! (its context reports NTLM as the negotiated package: NEGOTIATION_INFO,
 //! PACKAGE_INFO)
 //! (RPC id 9) authenticates with NTLM. Schannel's package information
@@ -579,7 +579,9 @@ fn run() -> Result<(), u32> {
             &mut attrs,
             &mut expiry,
         );
-        c.eq(r as u32 as u64, 0x8009_0311)?; // SEC_E_NO_AUTHENTICATING_AUTHORITY
+        // On a workgroup machine (gala's model): SEC_E_NO_CREDENTIALS
+        // (Windows 11 25H2, not joined to a domain).
+        c.eq(r as u32 as u64, 0x8009_030e)?;
         c.eq(FreeCredentialsHandle(&mut krb) as u64, SEC_E_OK)?;
 
         let negotiate = w("Negotiate");

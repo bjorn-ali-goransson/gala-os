@@ -126,7 +126,9 @@ pub extern "system" fn UninitializeFlatSB(hwnd: Hwnd) -> i32 {
 
 /// FlatSB_GetScrollProp(hwnd, index, *value): the property; FALSE for a
 /// window that was not initialized, an unknown index or no pointer.
-/// WSB_PROP_WINSTYLE is the window's WS_HSCROLL and WS_VSCROLL bits.
+/// WSB_PROP_WINSTYLE is the window's WS_HSCROLL and WS_VSCROLL bits with
+/// a low bit per scroll bar, 0x2 vertical and 0x4 horizontal (Windows 11
+/// 25H2, comctl32 5: 0x00200002 for a WS_VSCROLL window).
 #[unsafe(no_mangle)]
 pub extern "system" fn FlatSB_GetScrollProp(hwnd: Hwnd, index: u32, value: *mut i32) -> i32 {
     let Some(props) = WINDOWS.find(hwnd, |p| *p) else { return 0 };
@@ -135,7 +137,10 @@ pub extern "system" fn FlatSB_GetScrollProp(hwnd: Hwnd, index: u32, value: *mut 
     }
     let v = if index == WSB_PROP_WINSTYLE {
         // SAFETY: plain call.
-        (unsafe { GetWindowLongW(hwnd, GWL_STYLE) } & (WS_HSCROLL | WS_VSCROLL)) as isize
+        let bars = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } & (WS_HSCROLL | WS_VSCROLL);
+        let low = if bars & WS_VSCROLL != 0 { 0x2 } else { 0 }
+            | if bars & WS_HSCROLL != 0 { 0x4 } else { 0 };
+        (bars | low) as isize
     } else {
         let Some(i) = slot(index) else {
             crate::unsupported(b"comctl32.dll!FlatSB_GetScrollProp(index)", u64::from(index));

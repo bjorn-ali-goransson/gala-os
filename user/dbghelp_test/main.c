@@ -13,11 +13,13 @@
  *
  * - ImageNtHeader: the IMAGE_NT_HEADERS of a mapped image ("PE\0\0" at
  *   e_lfanew), NULL for memory that is not one.
- * - SymSrvGetFileIndexInfoW: for an image file, its name, TimeDateStamp,
- *   SizeOfImage and whether its debug information is stripped
- *   (IMAGE_FILE_DEBUG_STRIPPED); a CodeView (RSDS) record's PDB name,
- *   GUID and age when there is one (none here); FALSE with
- *   ERROR_FILE_NOT_FOUND for a file that is not there.
+ * - SymSrvGetFileIndexInfoW: for an image file with a debug directory
+ *   (kernel32.dll), its name, TimeDateStamp, SizeOfImage and whether its
+ *   debug information is stripped (IMAGE_FILE_DEBUG_STRIPPED); an image
+ *   without one (this program) is ERROR_BAD_EXE_FORMAT, a structure
+ *   size other than 1608 ERROR_INVALID_PARAMETER (both measured on
+ *   Windows 11 25H2); FALSE with ERROR_FILE_NOT_FOUND for a file that is
+ *   not there.
  * - SymInitializeW, SymLoadModuleExW (the base; a module already
  *   loaded is 0 with ERROR_SUCCESS), SymFromAddr (a symbol's name,
  *   address, module base and the displacement into it), SymUnloadModule64
@@ -128,20 +130,32 @@ int main(void) {
     CHECK(image_nt_header(junk) == NULL);
     CHECK(image_nt_header(NULL) == NULL);
 
-    /* SymSrvGetFileIndexInfoW on this program's file. */
+    /* SymSrvGetFileIndexInfoW: this program has no debug directory (gcc
+       -s), which is ERROR_BAD_EXE_FORMAT; kernel32.dll has one. The
+       structure's size must be exactly 1608 (Windows 11 25H2: 1604, 1607,
+       1609, 0 and 4096 are ERROR_INVALID_PARAMETER). */
     WCHAR self[MAX_PATH];
     CHECK(GetModuleFileNameW(NULL, self, MAX_PATH) > 0);
     static INDEX_INFOW info;
+    CHECK(sizeof info == 1608);
     memset(&info, 0xcc, sizeof info);
     info.sizeofstruct = sizeof info;
-    CHECK(index_info(self, &info, 0));
-    CHECK(wcscmp(info.file, L"dbghelp_test.exe") == 0);
-    CHECK(info.timestamp == nt->FileHeader.TimeDateStamp);
-    CHECK(info.size == nt->OptionalHeader.SizeOfImage);
-    CHECK(info.stripped == ((nt->FileHeader.Characteristics & IMAGE_FILE_DEBUG_STRIPPED) != 0));
-    CHECK(info.pdbfile[0] == 0 && info.dbgfile[0] == 0 && info.age == 0 && info.sig == 0);
-    static const GUID zero;
-    CHECK(memcmp(&info.guid, &zero, sizeof zero) == 0);
+    SetLastError(0);
+    CHECK(!index_info(self, &info, 0) && GetLastError() == ERROR_BAD_EXE_FORMAT);
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    IMAGE_NT_HEADERS *knt = image_nt_header(k32);
+    WCHAR k32_path[MAX_PATH];
+    CHECK(knt != NULL && GetModuleFileNameW(k32, k32_path, MAX_PATH) > 0);
+    memset(&info, 0xcc, sizeof info);
+    info.sizeofstruct = 1607;
+    SetLastError(0);
+    CHECK(!index_info(k32_path, &info, 0) && GetLastError() == ERROR_INVALID_PARAMETER);
+    info.sizeofstruct = sizeof info;
+    CHECK(index_info(k32_path, &info, 0));
+    CHECK(_wcsicmp(info.file, L"kernel32.dll") == 0);
+    CHECK(info.timestamp == knt->FileHeader.TimeDateStamp);
+    CHECK(info.size == knt->OptionalHeader.SizeOfImage);
+    CHECK(info.stripped == ((knt->FileHeader.Characteristics & IMAGE_FILE_DEBUG_STRIPPED) != 0));
     /* A file that is not there. */
     SetLastError(0);
     CHECK(!index_info(L"C:\\no-such-file.dll", &info, 0) && GetLastError() == ERROR_FILE_NOT_FOUND);

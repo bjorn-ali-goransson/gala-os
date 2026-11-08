@@ -110,10 +110,11 @@ pub extern "system" fn SafeArrayAllocDescriptorEx(
         return hr;
     }
     // SAFETY: the new descriptor; its prefix holds the VARTYPE at -4.
+    // cbElements stays 0 (Windows 11 25H2, VT_I4: still 0 after
+    // SafeArrayAllocData); SafeArrayCreate's sets it.
     unsafe {
         let sa = *out;
         (*sa).features = FADF_HAVEVARTYPE | features_of(vt);
-        (*sa).element_size = element_size(vt) as u32;
         *(sa.cast::<u8>().sub(4) as *mut u32) = vt.into();
     }
     S_OK
@@ -158,6 +159,9 @@ fn create(vt: u16, dims: u32, given: &[Bound], extra: *mut c_void) -> *mut SafeA
         com_call!(extra, 8, fn(*mut u32) -> HResult, &mut size);
         // SAFETY: the new descriptor.
         unsafe { (*sa).element_size = size };
+    } else {
+        // SAFETY: the new descriptor.
+        unsafe { (*sa).element_size = element_size(vt) as u32 };
     }
     if SafeArrayAllocData(sa) < 0 {
         SafeArrayDestroyDescriptor(sa);

@@ -506,7 +506,9 @@ fn run() -> Result<(), u32> {
         let cert = CertCreateCertificateContext(encoding, CERT.as_ptr(), CERT.len() as u32);
         c.ok(!cert.is_null(), GetLastError().into())?;
         let ctx = &*cert;
-        c.eq(ctx.encoding.into(), encoding.into())?;
+        // Only the certificate encoding (the low word) is kept (Windows 11
+        // 25H2: 1 for X509_ASN_ENCODING | PKCS_7_ASN_ENCODING).
+        c.eq(ctx.encoding.into(), X509_ASN_ENCODING.into())?;
         c.ok(
             ctx.encoded_len as usize == CERT.len() && ctx.encoded.cast_const() != CERT.as_ptr(),
             ctx.encoded_len.into(),

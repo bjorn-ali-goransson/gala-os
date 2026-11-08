@@ -27,7 +27,8 @@
  *   proxy (no IClientSecurity): E_NOINTERFACE.
  * - CoCreateInstanceEx: each MULTI_QI's hr and pItf; S_OK when all were
  *   found, CO_S_NOTALLINTERFACES when some, the activation's error (each
- *   hr too) for an unregistered class, E_INVALIDARG for none asked.
+ *   hr too) for an unregistered class, E_INVALIDARG for none asked or a
+ *   pItf that is not NULL on input (the array untouched).
  * - CreateBindCtx: a bind context whose default BIND_OPTS are grfMode
  *   STGM_READWRITE and the rest 0; options round-trip; bound objects
  *   are held (AddRef) until revoked (MK_E_NOTBOUND after) or
@@ -443,7 +444,12 @@ int main(void) {
     static const CLSID clsid_uia = {0xff48dba4, 0x60ef, 0x4201, {0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e}};
     static const IID iid_uia = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee}};
     static const IID iid_none = {0x1234abcd, 0x1, 0x2, {3, 4, 5, 6, 7, 8, 9, 10}};
-    MULTI_QI mqi[3] = {{&IID_IUnknown, (IUnknown *)1, 7}, {&iid_uia, (IUnknown *)1, 7}, {&iid_none, (IUnknown *)1, 7}};
+    /* Every pItf must be NULL on input: else E_INVALIDARG, the array
+       untouched (Windows 11 25H2). */
+    MULTI_QI bad[2] = {{&IID_IUnknown, NULL, 7}, {&iid_uia, (IUnknown *)1, 7}};
+    CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 2, bad) == E_INVALIDARG);
+    CHECK(bad[0].hr == 7 && bad[0].pItf == NULL && bad[1].hr == 7 && bad[1].pItf == (IUnknown *)1);
+    MULTI_QI mqi[3] = {{&IID_IUnknown, NULL, 7}, {&iid_uia, NULL, 7}, {&iid_none, NULL, 7}};
     CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 3, mqi) == CO_S_NOTALLINTERFACES);
     CHECK(mqi[0].hr == S_OK && mqi[0].pItf != NULL && mqi[1].hr == S_OK && mqi[1].pItf != NULL);
     CHECK(mqi[2].hr == E_NOINTERFACE && mqi[2].pItf == NULL);
@@ -452,7 +458,8 @@ int main(void) {
     MULTI_QI one = {&iid_uia, NULL, 7};
     CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 1, &one) == S_OK && one.pItf);
     IUnknown_Release(one.pItf);
-    one.pItf = (IUnknown *)1;
+    one.pItf = NULL;
+    one.hr = 7;
     CHECK(CoCreateInstanceEx(&iid_none, NULL, CLSCTX_INPROC_SERVER, NULL, 1, &one) == REGDB_E_CLASSNOTREG);
     CHECK(one.hr == REGDB_E_CLASSNOTREG && one.pItf == NULL);
     CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 0, &one) == E_INVALIDARG);

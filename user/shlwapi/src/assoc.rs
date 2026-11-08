@@ -42,6 +42,7 @@ unsafe extern "system" {
     fn GetFileTime(h: usize, created: *mut u64, accessed: *mut u64, written: *mut u64) -> i32;
     fn FlushFileBuffers(h: usize) -> i32;
     fn CloseHandle(h: usize) -> i32;
+    fn GetFileAttributesW(path: *const u16) -> u32;
     fn GetLastError() -> u32;
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -59,6 +60,7 @@ const STG_E_ACCESSDENIED: i32 = 0x8003_0005u32 as i32;
 const STG_E_INVALIDFUNCTION: i32 = 0x8003_0001u32 as i32;
 /// HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION).
 const NO_ASSOCIATION: i32 = 0x8007_0483u32 as i32;
+const CO_E_APPNOTFOUND: i32 = 0x8004_01f5u32 as i32;
 
 fn hresult_from_win32(e: u32) -> i32 {
     if e == 0 { E_INVALIDARG } else { (0x8007_0000 | (e & 0xffff)) as i32 }
@@ -165,7 +167,8 @@ const ASSOCSTR_DEFAULTICON: u32 = 15;
 /// AssocQueryStringW: what the registry's classes say about an
 /// extension (`.txt`) or ProgID: ASSOCSTR_COMMAND (the verb's command,
 /// `pszExtra` or the shell key's default verb or "open"),
-/// ASSOCSTR_EXECUTABLE (that command's program), ASSOCSTR_FRIENDLYDOCNAME
+/// ASSOCSTR_EXECUTABLE (that command's program; CO_E_APPNOTFOUND when
+/// the file is not there), ASSOCSTR_FRIENDLYDOCNAME
 /// (the ProgID's name), ASSOCSTR_CONTENTTYPE, ASSOCSTR_DEFAULTICON.
 /// S_FALSE and the size with no buffer, E_POINTER and the size when it is
 /// short, HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION) when nothing is
@@ -245,6 +248,16 @@ pub extern "system" fn AssocQueryStringW(
                     &c[..end]
                 };
                 v.extend(program);
+                // The program must exist: CO_E_APPNOTFOUND otherwise
+                // (Windows 11 25H2, a registered class whose command names
+                // a missing executable).
+                let mut path = Buf::new();
+                path.extend(program);
+                path.push(0);
+                // SAFETY: a NUL-terminated path of ours.
+                if unsafe { GetFileAttributesW(path.text().as_ptr()) } == u32::MAX {
+                    return CO_E_APPNOTFOUND;
+                }
             } else {
                 v.extend(command.text());
             }

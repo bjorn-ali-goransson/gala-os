@@ -48,7 +48,8 @@
  * - Flat scroll bars (Delphi's VCL initializes them on every scrolling
  *   control): FlatSB_GetScrollProp(WSB_PROP_HSTYLE) is FALSE before
  *   InitializeFlatSB and TRUE after; properties set are read back;
- *   WSB_PROP_WINSTYLE is the window's WS_HSCROLL/WS_VSCROLL bits; the
+ *   WSB_PROP_WINSTYLE is the window's WS_HSCROLL/WS_VSCROLL bits with
+ *   0x2 for a vertical and 0x4 for a horizontal scroll bar; the
  *   FlatSB_ scroll functions keep the range, page and position;
  *   UninitializeFlatSB is S_OK, then S_FALSE.
  *
@@ -578,7 +579,9 @@ static void flat_scroll_bars(HWND parent) {
     CHECK(FlatSB_GetScrollProp(w, WSB_PROP_CXVSCROLL, &v) && v == 21);
     CHECK(FlatSB_SetScrollProp(w, WSB_PROP_VBKGCOLOR, RGB(1, 2, 3), FALSE));
     CHECK(FlatSB_GetScrollProp(w, WSB_PROP_VBKGCOLOR, &v) && v == RGB(1, 2, 3));
-    CHECK(FlatSB_GetScrollProp(w, WSB_PROP_WINSTYLE, &v) && v == WS_VSCROLL);
+    /* The window's WS_*SCROLL bits and a low bit per scroll bar: 0x2
+       vertical, 0x4 horizontal (Windows 11 25H2, comctl32 5). */
+    CHECK(FlatSB_GetScrollProp(w, WSB_PROP_WINSTYLE, &v) && v == (WS_VSCROLL | 0x2));
     SCROLLINFO si = {sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, 100, 10, 30};
     FlatSB_SetScrollInfo(w, SB_VERT, &si, TRUE);
     SCROLLINFO got = {sizeof got, SIF_RANGE | SIF_PAGE | SIF_POS};

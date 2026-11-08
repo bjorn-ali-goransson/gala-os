@@ -489,7 +489,15 @@ int main(int argc, char **argv) {
 
     /* Notifications nothing listens to. */
     SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, L"C:\\", NULL);
-    CHECK(SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0) == -1);
+    /* An overlay index for any path, even a missing one: the same for
+       the same path, another for another (Windows 11 25H2: 5, 5, 5, then
+       6). */
+    int overlay = SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0);
+    CHECK(overlay != -1);
+    CHECK(SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0) == overlay);
+    int other = SHGetIconOverlayIndexW(L"C:\\nothing2.ico", 0);
+    CHECK(other != -1 && other != overlay);
+    CHECK(SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0) == overlay);
 
     /* Icons: this program has two icon groups (build.sh: one with 16 and
      * 32 pixel images, one with 32 only). */

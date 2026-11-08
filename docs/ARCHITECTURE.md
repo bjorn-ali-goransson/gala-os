@@ -806,7 +806,9 @@ current process, -2 = current thread.
   BasePriority), which are reported and validated but not scheduled on.
   No processor time is accounted (TODO, in the scheduler): thread times
   are zero and kernel32's GetSystemTimes reports every processor idle
-  since boot.
+  since boot. ThreadBasicInformation's TebBaseAddress is NULL once the
+  thread has ended (Windows frees the TEB then; gala's stays mapped
+  until the process ends).
 - **NtCreateThread** takes DeallocationStack from
   INITIAL_TEB.StackAllocationBase and applies the CONTEXT's MxCsr only
   (TODO: the rest of FltSave and the XSTATE area). kernel32's CreateThread
@@ -944,6 +946,9 @@ Microsoft's "x64 exception handling" documentation; `seh_test`,
   object) in a frame whose unwind data, like KiUserExceptionDispatcher's,
   restores the target CONTEXT from a block on the stack; the target then
   resumes at the address the callback returned.
+- kernel32's RaiseException sets EXCEPTION_SOFTWARE_ORIGINATE (0x80) in
+  the record's flags, as Windows does (whether RtlRaiseException itself
+  does is not measured: testntdll's does not).
 - RtlCaptureContext, RtlRaiseException, RtlUnwindEx and
   KiUserExceptionDispatcher are assembly with their own unwind data, so
   walks pass through them like any frame; they are exported through
@@ -1004,7 +1009,9 @@ unless the runs grow, then only the shift of the runs after it (bench
   protect never has a large page to split (`vmcycle_test`: across 2 MiB
   boundaries, page by page, beside pages another processor writes).
 - **MEM_DECOMMIT** unmaps the pages and frees their frames (after the TLB
-  shootdown), so a later MEM_COMMIT faults in fresh zeroed frames.
+  shootdown), so a later MEM_COMMIT faults in fresh zeroed frames. Size 0
+  means the whole allocation and is refused away from its base
+  (STATUS_FREE_VM_NOT_AT_BASE).
   **MEM_RESET** keeps the contents (Windows may discard them; keeping
   them is allowed) and MEM_RESET_UNDO, alone in the allocation type, then
   succeeds.
@@ -1302,7 +1309,11 @@ address-space teardown never free.
   Only when that range is taken in a process is the view placed
   anywhere, with private pages relocated a page at a time (never a
   whole-image copy). A view not at the preferred base returns
-  STATUS_IMAGE_NOT_AT_BASE.
+  STATUS_IMAGE_NOT_AT_BASE, and a PE32 view's header page names its
+  load address (OptionalHeader.ImageBase moved by the delta, as Windows
+  does; PE32+ headers keep their preferred base until measured); a PE32
+  image in a 64-bit process returns STATUS_IMAGE_MACHINE_TYPE_MISMATCH
+  (informational, before NOT_AT_BASE: the view is mapped).
 - **Large images** (chrome.dll is 340 MB): a layout keeps, per page, the
   offset of its relocation block (`ImageLayout::reloc_index`, built once
   with `pe::relocation_blocks`), so relocating a page reads two blocks,
@@ -1714,7 +1725,10 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
     its answer.
   - FSCTL_PIPE_PEEK (NtFsControlFile, 0x7f04) reports the state, the
     bytes available, the message count and the first message's length,
-    and a copy (STATUS_BUFFER_OVERFLOW if it does not all fit).
+    and a copy (STATUS_BUFFER_OVERFLOW if it does not all fit);
+    PeekNamedPipe's lpBytesLeftThisMessage is that length less what was
+    copied whatever the mode, so a byte pipe's goes below 0 (Windows does
+    the same, its docs say 0).
 - **Asynchronous ends** (opened without FILE_SYNCHRONOUS_IO_*): a listen
   or read that would wait pends (STATUS_PENDING) and completes through a
   `notify::Request` (status block, event, the end's signal, its
@@ -1783,7 +1797,9 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
 - **System time** comes from Limine's boot timestamp plus the TSC clock
   (or from `clock=`/`replay=`); the time zone is UTC. The performance
   counter runs at 10 MHz; SystemQueryPerformanceCounterInformation (124)
-  says KernelQpc (QueryPerformanceCounter is a system call).
+  says KernelQpc (QueryPerformanceCounter is a system call); the caller
+  fills in Version 1 (else STATUS_NOT_SUPPORTED) and any buffer of 12
+  bytes or more gets 12.
 - GetSystemTimeAsFileTime is KUSER_SHARED_DATA's SystemTime, as of the
   last tick, as on Windows; the precise time (NtQuerySystemTime) is
   GetSystemTimePreciseAsFileTime's. The coarse clock must step: a program
@@ -2040,8 +2056,9 @@ SECURITY.md phase S1 holds the model; the kernel side is
   - NtFilterToken: deny-only SIDs, deleted privileges,
     DISABLE_MAX_PRIVILEGE, restricting SIDs intersected with existing
     ones; the new handle has the old one's access;
-  - NtPrivilegeCheck: impersonation tokens only; marks
-    SE_PRIVILEGE_USED_FOR_ACCESS;
+  - NtPrivilegeCheck: a primary token or an impersonation token at
+    identification level or above (Windows' PrivilegeCheck takes a
+    primary one too); marks SE_PRIVILEGE_USED_FOR_ACCESS;
   - NtSetInformationToken (0x7f23): TokenOwner (the user or an
     SE_GROUP_OWNER group), TokenPrimaryGroup (the user or one of its
     groups), TokenDefaultDacl, TokenIntegrityLevel (lowering; raising
@@ -2160,7 +2177,8 @@ SECURITY.md phase S3; `security::access_check` (`access_test`,
   LogonUserExExW with LOGON32_PROVIDER_VIRTUAL) it is a virtual-account
   logon (`accounts::virtual_logon`, below).
 - **LSA** (secur32 `lsa.rs`, over GalaLogonUser): LsaConnectUntrusted,
-  LsaRegisterLogonProcess (SeTcbPrivilege), LsaLookupAuthenticationPackage
+  LsaRegisterLogonProcess (SeTcbPrivilege; without it
+  STATUS_PORT_CONNECTION_REFUSED), LsaLookupAuthenticationPackage
   (Negotiate 0, MSV1_0 1, Kerberos 2; STATUS_NO_SUCH_PACKAGE),
   LsaLogonUser with MSV1_0 (or Negotiate) MSV1_0_S4U_LOGON and
   MSV1_0_INTERACTIVE_LOGON (string buffers as addresses or offsets into
@@ -2867,7 +2885,8 @@ definition for both layouts, "Plan: WOW64").
   reader: definite lengths, v1-v3, UTCTime/GeneralizedTime, unique ids,
   extensions) into CERT_CONTEXT and CERT_INFO in one heap block with a
   copy of the encoding (blobs point into it), the extensions and the
-  dotted OID strings; bad encodings fail with CRYPT_E_ASN1_*. Contexts
+  dotted OID strings (dwCertEncodingType keeps only the certificate
+  encoding, the low word); bad encodings fail with CRYPT_E_ASN1_*. Contexts
   are reference-counted and keep a property list (data blobs, handles,
   CERT_KEY_CONTEXT, CRYPT_KEY_PROV_INFO flattened with its strings); the
   SHA-1/MD5/SHA-256 hash and key identifier properties are computed
@@ -3059,8 +3078,8 @@ definition for both layouts, "Plan: WOW64").
   exchange in one process; interoperability with Windows' NTLM is not
   proven yet.
 - **Kerberos** as on a machine in a workgroup: the package and its
-  credentials exist, a context never starts
-  (SEC_E_NO_AUTHENTICATING_AUTHORITY: no domain controller).
+  credentials exist, a context never starts (SEC_E_NO_CREDENTIALS, what
+  Windows off a domain gives).
 - **Negotiate**: NTLM underneath, with NTLM's own tokens (Windows'
   Negotiate accepts those); SPNEGO-wrapped tokens are not understood yet
   (recorded). Its contexts report NTLM as the negotiated package
@@ -3161,7 +3180,9 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   AM", the date alone at midnight, the time alone on day 0), VarBstrCmp
   (#314: CompareStringW in the locale given, a NULL BSTR empty);
   SAFEARRAYs (descriptors with the VARTYPE/IRecordInfo/IID prefix, bounds
-  stored rightmost first, BSTR/interface/VARIANT elements owned);
+  stored rightmost first, BSTR/interface/VARIANT elements owned;
+  SafeArrayAllocDescriptorEx leaves cbElements 0, as Windows does, and
+  SafeArrayCreate sets it);
   GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
   Locales other than English and the defaults are read as en-US and
   recorded. Type libraries are not registered. Its exports have
@@ -3208,7 +3229,9 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   show Windows following, per scheme family: http-like schemes read
   backslashes as slashes, opaque ones escape `/`, `?` and `#`; `#` is a
   fragment in a file URL only after a .htm/.html name), AssocQueryStringW
-  (the user's classes, then HKCR; shell\<verb>\command) and
+  (the user's classes, then HKCR; shell\<verb>\command;
+  ASSOCSTR_EXECUTABLE is CO_E_APPNOTFOUND when the program is not
+  there) and
   SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
   transactions, CopyTo, Clone or region locks: recorded) with
   SHCreateStreamOnFileW over it (STGM_CONVERT, _DELETEONRELEASE and
@@ -3267,7 +3290,8 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   call reports `dll!function` ("not implemented") and ends the process
   with STATUS_NOT_IMPLEMENTED (`unimplemented_test`). The stubs live in a
   `.gstub` section: LdrGetProcedureAddress (GetProcAddress) treats an
-  export resolving there as absent, so programs probing for optional
+  export resolving there as absent (by name STATUS_ENTRYPOINT_NOT_FOUND,
+  by ordinal STATUS_ORDINAL_NOT_FOUND, as a missing export), so programs probing for optional
   functions keep their fallbacks; only static imports bind to them. The
   lists were generated from the import closures of SQL Server LocalDB and
   FileZilla (W3: FileZilla 3.69.3's imports across user32, gdi32, msvcrt,
@@ -4330,7 +4354,8 @@ SOCKET values are the endpoint handles.
   a connected socket`). The integer ones (SO_REUSEADDR, SO_KEEPALIVE,
   SO_SNDBUF/RCVBUF, SO_EXCLUSIVEADDRUSE, TCP_NODELAY, the TCP
   keep-alive idle/count/interval, SO_BROADCAST, SO_TYPE,
-  SO_RANDOMIZE_PORT, IP_DONTFRAGMENT and IP_RECVECN, the last three set
+  SO_RANDOMIZE_PORT (unbound sockets only: WSAEINVAL once bound),
+  IP_DONTFRAGMENT and IP_RECVECN, the last three set
   by Chromium's UDP sockets and kept only: ports and datagrams as
   without them, receives with no ECN control data) are kept per
   socket so getsockopt reports what was set, or Windows' defaults
@@ -5370,7 +5395,8 @@ allocator (`gala_heap`).
   EN_KILLFOCUS. Not yet: the clipboard, undo, multi-line selection and
   scrolling, radio groups (every auto radio button of a parent is one
   group).
-- **COMBOBOX**: strings with data, the selection, an EDIT child for
+- **COMBOBOX**: strings with data, the selection (CB_SETCURSEL past the
+  end is CB_ERR and keeps it), an EDIT child for
   CBS_DROPDOWN/CBS_SIMPLE whose text is the combo box's. Its list is one
   ComboLBox window per combo box (GetComboBoxInfo's hwndList), a desktop
   popup placed under the box's window rectangle (above when the work
@@ -5487,7 +5513,8 @@ but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
   user32's); InitializeFlatSB gives the window a record of the
   properties (the system metrics' sizes, FSB_FLAT_MODE), which
   FlatSB_Set/GetScrollProp change and read (WSB_PROP_HSTYLE: whether it
-  was initialized; WSB_PROP_WINSTYLE: the window's scroll styles);
+  was initialized; WSB_PROP_WINSTYLE: the window's scroll styles with
+  0x2 for a vertical and 0x4 for a horizontal bar, as comctl32 5 gives);
   UninitializeFlatSB drops it (S_FALSE when there was none). Records of
   windows that are gone are dropped at the next InitializeFlatSB (no
   subclass: the window procedure stays the program's).
@@ -5636,7 +5663,8 @@ then riched20.dll).
   while accumulation is on (DCB_ENABLE; a pointer into a per-slot table
   the DC's surface copies carry, kept across SelectObject); GetBoundsRect
   gives them in logical coordinates (the origins only: window DCs have
-  no other mapping). user32 presents a foreign DC's bounds (above).
+  no other mapping) and returns DCB_SET or DCB_RESET only, SetBoundsRect
+  the previous state with DCB_ENABLE or DCB_DISABLE. user32 presents a foreign DC's bounds (above).
 - **Bitmaps** (`surface.rs`): 32-bit device-dependent ones (stored
   top-down; a monochrome one turns what is written into black or white;
   CreateCompatibleBitmap on a memory DC with the default bitmap is
@@ -5777,7 +5805,9 @@ windows can use them too.
   auto-hidden; with no screen there is none and ABM_GETTASKBARPOS fails;
   app bars of one's own are recorded), ShellExecuteA,
   SHChangeNotifyRegister (an ID, never notified: gala's shell sends no
-  change notifications). The shell namespace's objects (desktop folder,
+  change notifications), SHGetIconOverlayIndexW (an index from 5 per
+  distinct path and icon index, missing files included, as Windows hands
+  them out; 32 paths, then -1, recorded). The shell namespace's objects (desktop folder,
   parsing names, property stores, association registration, stock
   icons, the Open With dialog) are E_NOTIMPL, recorded. shell32 and
   shlwapi load advapi32, ole32 and user32 on first use, never as static
@@ -5854,7 +5884,8 @@ windows can use them too.
     answers on Windows).
   - `bindctx.rs`: CoCreateInstanceEx creates through
     CoCreateInstance(IID_IUnknown) and fills each MULTI_QI by
-    QueryInterface; CreateBindCtx's object keeps up to 32 bound objects
+    QueryInterface (a pItf that is not NULL on input is E_INVALIDARG,
+    the array untouched); CreateBindCtx's object keeps up to 32 bound objects
     and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
     CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
     serves no COM calls across processes).
@@ -5862,7 +5893,9 @@ windows can use them too.
   `dbghelp_test`): ImageNtHeader checks "MZ" and "PE\0\0";
   SymSrvGetFileIndexInfoW reads an image file's headers (no mapping):
   TimeDateStamp, SizeOfImage, IMAGE_FILE_DEBUG_STRIPPED, and the debug
-  directory's CodeView RSDS record (PDB base name, GUID, age); NB10
+  directory's CodeView RSDS record (PDB base name, GUID, age); an image
+  without a debug directory is ERROR_BAD_EXE_FORMAT, a sizeofstruct
+  other than 1608 ERROR_INVALID_PARAMETER; NB10
   records and PDB/DBG files are recorded. SymLoadModuleExW keeps (base,
   size) of up to 64 modules of this process (the size from the mapped
   image's SizeOfImage when not given); SymFromAddr checks the image is
@@ -6309,7 +6342,8 @@ as winget runs them:
   GetCursor, IsWindowUnicode (every gala window), CountClipboardFormats,
   AdjustWindowRectExForDpi and PhysicalToLogicalPoint (96 DPI, no
   scaling), SetGestureConfig, GetGestureInfo and CloseGestureInfoHandle
-  (no touch input: no gesture handle is valid),
+  (no touch input: no gesture handle is valid; GetGestureInfo's NULL
+  GESTUREINFO is ERROR_INVALID_PARAMETER first),
   SPI_GETMOUSEWHEELROUTING (hybrid); gdi32's GetCurrentPositionEx;
   ole32's IsEqualGUID; uxtheme's buffered painting (BufferedPaintInit
   and UnInit succeed; BeginBufferedPaint and BeginBufferedAnimation give

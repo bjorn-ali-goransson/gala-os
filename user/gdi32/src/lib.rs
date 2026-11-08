@@ -1275,12 +1275,14 @@ pub extern "system" fn SetBoundsRect(hdc: Handle, rect: *const [i32; 4], flags: 
 
 /// GetBoundsRect(hdc, lprcBounds, flags): the accumulated bounds in
 /// logical coordinates (DCB_SET) or none (DCB_RESET, the rectangle
-/// zeroed), with the accumulation state; DCB_RESET in flags clears them
+/// zeroed), without the accumulation state (Windows 11 25H2 measured
+/// DCB_RESET alone with accumulation on; SetBoundsRect reports the
+/// state); DCB_RESET in flags clears them
 /// afterwards. Device coordinates are the DC's surface's (gala's window
 /// DCs have no other mapping than the origins).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetBoundsRect(hdc: Handle, rect: *mut [i32; 4], flags: u32) -> u32 {
-    let Some((state, bounds)) = bounds_of(hdc) else { return 0 };
+    let Some((_, bounds)) = bounds_of(hdc) else { return 0 };
     let got = bounds.get();
     if !rect.is_null() {
         let (dx, dy) = with_dc(hdc, |dc, _| {
@@ -1298,5 +1300,5 @@ pub extern "system" fn GetBoundsRect(hdc: Handle, rect: *mut [i32; 4], flags: u3
     if flags & DCB_RESET != 0 {
         bounds.reset();
     }
-    state | if got.is_some() { DCB_SET } else { DCB_RESET }
+    if got.is_some() { DCB_SET } else { DCB_RESET }
 }

@@ -1197,8 +1197,10 @@ fn vcl(c: &mut Checks) -> Result<(), u32> {
         c.ok(AdjustWindowRectEx(&mut a, 0x00cf_0000, 0, 0) != 0, 0)?;
         c.ok(AdjustWindowRectExForDpi(&mut b, 0x00cf_0000, 0, 0, 96) != 0, 0)?;
         c.ok(a == b, 0)?;
+        // A NULL GESTUREINFO is refused before the handle is looked at:
+        // ERROR_INVALID_PARAMETER (Windows 11 25H2).
         c.ok(GetGestureInfo(0x1234, core::ptr::null_mut()) == 0, 0)?;
-        c.eq(GetLastError().into(), 6)?;
+        c.eq(GetLastError().into(), 87)?;
         c.ok(SetGestureConfig(core::ptr::null_mut(), 0, 0, core::ptr::null(), 0) == 0, 0)?;
         c.eq(GetLastError().into(), 1400)?;
         c.eq(CountClipboardFormats() as u64, 0)?;

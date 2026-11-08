@@ -505,9 +505,21 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(setsockopt(b, SOL_SOCKET, SO_RCVBUF, (&raw const size).cast(), 4) as u64, 0)?;
         c.eq(get_int(b, SO_RCVBUF).1 as u64, 32768)?;
         // SO_RANDOMIZE_PORT and IP_DONTFRAGMENT (Chromium's UDP sockets
-        // set both): accepted, read back.
-        c.eq(setsockopt(b, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4) as u64, 0)?;
-        c.eq(get_int(b, SO_RANDOMIZE_PORT).1 as u64, 1)?;
+        // set both): SO_RANDOMIZE_PORT is for an unbound socket (Windows
+        // 11 25H2: WSAEINVAL once bound), read back; IP_DONTFRAGMENT on
+        // the bound one, read back.
+        let fresh = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        c.ok(fresh != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        c.eq(
+            setsockopt(fresh, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4) as u64,
+            0,
+        )?;
+        c.eq(get_int(fresh, SO_RANDOMIZE_PORT).1 as u64, 1)?;
+        closesocket(fresh);
+        c.error(
+            setsockopt(b, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4),
+            WSAEINVAL,
+        )?;
         c.eq(setsockopt(b, IPPROTO_IP, IP_DONTFRAGMENT, (&raw const one).cast(), 4) as u64, 0)?;
         let (mut df, mut df_len) = (-1i32, 4i32);
         c.eq(

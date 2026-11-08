@@ -156,6 +156,7 @@ unsafe extern "system" {
     fn GetTokenInformation(token: Handle, class: u32, out: *mut u8, len: u32, ret: *mut u32)
     -> i32;
     fn EqualSid(a: *const u8, b: *const u8) -> i32;
+    fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
 }
 
 #[allow(dead_code)]
@@ -485,6 +486,31 @@ fn virtual_accounts(c: &Checks) -> Result<(), u32> {
     Ok(())
 }
 
+const STATUS_PORT_CONNECTION_REFUSED: u32 = 0xc000_0041;
+/// run's result when the token cannot do the rest (not a failure).
+const SKIPPED: u32 = u32::MAX;
+
+/// Whether the process token holds SeTcbPrivilege (LUID 7), enabled or
+/// not.
+fn holds_tcb() -> bool {
+    let mut b = Buf([0; 1024]);
+    let (mut token, mut n) = (core::ptr::null_mut(), 0);
+    // SAFETY: our buffer and handle (TOKEN_QUERY; TokenPrivileges).
+    unsafe {
+        if OpenProcessToken(-1isize as Handle, 8, &mut token) == 0 {
+            return false;
+        }
+        let ok = GetTokenInformation(token, 3, b.0.as_mut_ptr(), 1024, &mut n);
+        CloseHandle(token);
+        if ok == 0 {
+            return false;
+        }
+    }
+    let word = |i: usize| u32::from_le_bytes(b.0[4 * i..4 * i + 4].try_into().unwrap_or([0; 4]));
+    // TOKEN_PRIVILEGES: count, then (LUID low, high, attributes).
+    (0..word(0) as usize).any(|i| word(1 + 3 * i) == 7 && word(2 + 3 * i) == 0)
+}
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -504,9 +530,18 @@ fn run() -> Result<(), u32> {
         )?;
         c.eq(LsaDeregisterLogonProcess(untrusted).into(), 0)?;
 
-        // A registered logon process (SeTcbPrivilege).
+        // A registered logon process (SeTcbPrivilege). Without the
+        // privilege (an ordinary user): STATUS_PORT_CONNECTION_REFUSED
+        // (Windows 11 25H2), and the rest needs SYSTEM.
         let name = lsa(b"lsa_test");
         let (mut lsa_handle, mut mode) = (null, 0u32);
+        if !holds_tcb() {
+            c.eq(
+                LsaRegisterLogonProcess(&name, &mut lsa_handle, &mut mode).into(),
+                STATUS_PORT_CONNECTION_REFUSED.into(),
+            )?;
+            return Err(SKIPPED);
+        }
         c.eq(LsaRegisterLogonProcess(&name, &mut lsa_handle, &mut mode).into(), 0)?;
         let mut msv_package = 0;
         c.eq(LsaLookupAuthenticationPackage(lsa_handle, &msv, &mut msv_package).into(), 0)?;
@@ -559,6 +594,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let code = match run() {
         Ok(()) => {
             out(b"lsa_test: ok\r\n");
+            0
+        }
+        Err(SKIPPED) => {
+            out(b"lsa_test: skipped: needs SYSTEM (SeTcbPrivilege)\r\n");
             0
         }
         Err(id) => id,

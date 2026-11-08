@@ -1524,6 +1524,14 @@ pub extern "system" fn setsockopt(
     if !started() {
         return fail(WSANOTINITIALISED);
     }
+    // SO_RANDOMIZE_PORT picks the port bind will take: refused once the
+    // socket is bound (WSAEINVAL; Windows 11 25H2, a UDP socket).
+    if (level, name) == (SOL_SOCKET, 0x3005) {
+        let mut local = [0u8; 28];
+        if afd(s, IOCTL_AFD_GETSOCKNAME, &[], &mut local).is_ok() {
+            return fail(WSAEINVAL);
+        }
+    }
     let accepted = match (level, name) {
         // SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST, SO_LINGER, SO_SNDBUF,
         // SO_RCVBUF, SO_EXCLUSIVEADDRUSE, SO_UPDATE_ACCEPT_CONTEXT,

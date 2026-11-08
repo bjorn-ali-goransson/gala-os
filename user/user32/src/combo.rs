@@ -269,7 +269,12 @@ fn find(hwnd: Hwnd, start: isize, want: &[u16], exact: bool) -> isize {
 /// Selects item `i` (-1: none); the edit shows its text.
 fn select(hwnd: Hwnd, i: isize) -> isize {
     let (ok, edit, text) = with(hwnd, |c| {
-        if i < -1 || i >= c.items.len() as isize {
+        // Past the end: CB_ERR with the selection kept (Windows 11 25H2,
+        // three items, item 1 selected, CB_SETCURSEL 7).
+        if i >= c.items.len() as isize {
+            return (false, c.edit, Vec::new());
+        }
+        if i < -1 {
             c.current = -1;
             return (false, c.edit, Vec::new());
         }

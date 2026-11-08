@@ -19,9 +19,10 @@
  *   an offset: drawing appears in another view of the mapping, at the
  *   offset; DeleteObject unmaps the bitmap's view only.
  *   Bounds accumulation: SetBoundsRect(DCB_ENABLE | DCB_RESET), then a
- *   PatBlt and a SetPixel: GetBoundsRect gives DCB_SET | DCB_ENABLE and
+ *   PatBlt and a SetPixel: GetBoundsRect gives DCB_SET and
  *   the rectangle around both; with DCB_RESET it is empty afterwards
- *   (DCB_RESET | DCB_ENABLE); DCB_DISABLE stops it.
+ *   (DCB_RESET); DCB_DISABLE stops it. SetBoundsRect returns the previous
+ *   state with its DCB_ENABLE or DCB_DISABLE bit.
  *   BitBlt SRCCOPY copies between memory DCs; SRCINVERT xors;
  *   StretchBlt doubles.
  * - Fonts: CreateFontIndirectW keeps the LOGFONTW (GetObjectW returns it,
@@ -189,16 +190,20 @@ static void bitmaps(void) {
     /* Bounds accumulation on a DC. */
     {
         RECT b;
-        CHECK(SetBoundsRect(dmem, NULL, DCB_ENABLE | DCB_RESET) != 0);
-        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_ENABLE));
+        /* SetBoundsRect returns the previous state, accumulation bits
+           included (a new DC: DCB_RESET | DCB_DISABLE, 0x9); GetBoundsRect
+           only DCB_SET or DCB_RESET (Windows 11 25H2: DCB_RESET alone
+           after enabling; the docs say the same). */
+        CHECK(SetBoundsRect(dmem, NULL, DCB_ENABLE | DCB_RESET) == (DCB_RESET | DCB_DISABLE));
+        CHECK(GetBoundsRect(dmem, &b, 0) == DCB_RESET);
         CHECK(PatBlt(dmem, 2, 1, 3, 2, BLACKNESS));
         CHECK(SetPixel(dmem, 6, 3, RGB(1, 1, 1)) == RGB(1, 1, 1));
-        CHECK(GetBoundsRect(dmem, &b, DCB_RESET) == (DCB_SET | DCB_ENABLE));
+        CHECK(GetBoundsRect(dmem, &b, DCB_RESET) == DCB_SET);
         CHECK(b.left == 2 && b.top == 1 && b.right == 7 && b.bottom == 4);
-        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_ENABLE));
-        CHECK(SetBoundsRect(dmem, NULL, DCB_DISABLE) != 0);
+        CHECK(GetBoundsRect(dmem, &b, 0) == DCB_RESET);
+        CHECK(SetBoundsRect(dmem, NULL, DCB_DISABLE) == (DCB_RESET | DCB_ENABLE));
         CHECK(SetPixel(dmem, 0, 0, RGB(2, 2, 2)) == RGB(2, 2, 2));
-        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_DISABLE));
+        CHECK(GetBoundsRect(dmem, &b, 0) == DCB_RESET);
     }
 
     /* BitBlt between memory DCs; SRCINVERT; StretchBlt. */

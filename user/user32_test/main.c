@@ -216,6 +216,12 @@ static HWND cbt_created, cbt_destroyed;
 static int title_seen;
 
 static LRESULT CALLBACK cbt(int code, WPARAM wparam, LPARAM lparam) {
+    WCHAR cls[8];
+    /* A thread's first window brings its default IME window (class "IME",
+       "Default IME") on Windows, which the hook sees too; gala makes none.
+       Only the test's own windows are counted (created and destroyed). */
+    if ((code == HCBT_CREATEWND || code == HCBT_DESTROYWND) && GetClassNameW((HWND)wparam, cls, 8) == 3 && wcscmp(cls, L"IME") == 0)
+        return CallNextHookEx(cbt_hook, code, wparam, lparam);
     if (code == HCBT_CREATEWND) {
         cbt_creates++;
         cbt_created = (HWND)wparam;

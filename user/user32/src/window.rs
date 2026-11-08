@@ -3466,11 +3466,12 @@ pub extern "system" fn SetGestureConfig(
     1
 }
 
-/// GetGestureInfo: no WM_GESTURE is ever sent, so no gesture handle is
-/// valid (ERROR_INVALID_HANDLE).
+/// GetGestureInfo: a NULL GESTUREINFO is ERROR_INVALID_PARAMETER before
+/// the handle is looked at (Windows 11 25H2); otherwise no WM_GESTURE is
+/// ever sent, so no gesture handle is valid (ERROR_INVALID_HANDLE).
 #[unsafe(no_mangle)]
-pub extern "system" fn GetGestureInfo(_gesture: usize, _info: *mut u8) -> i32 {
-    set_last_error(6);
+pub extern "system" fn GetGestureInfo(_gesture: usize, info: *mut u8) -> i32 {
+    set_last_error(if info.is_null() { 87 } else { 6 });
     0
 }
 
