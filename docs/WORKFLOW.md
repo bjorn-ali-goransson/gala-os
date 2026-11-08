@@ -439,14 +439,27 @@ the modes, resets and errors.
 Software 3D (GPU G2) needs no device: its scenarios run Mesa (PREBUILT
 `mesa`) on the CPU and check a headless desktop's frame
 (`presenter=test`, BIOS). `gl_test` (user/gl_test, C, `build.sh`) is
-OpenGL on llvmpipe, about 10 s under TCG. When one fails, read the
-ledger first (Mesa's imports and probes: `missing export` stops the
-load, `missing dll` for d3d12/vulkan-1 is Mesa looking for drivers),
-then Mesa's own `MESA:` lines in the serial log; `env=MESA_DEBUG=1`,
-`env=LP_DEBUG=...` or `env=GALLIUM_DRIVER=softpipe` (no LLVM JIT) on the
-command line narrow it down. A frame that renders (glReadPixels is
-right) but is not on the screen is user32's presentation of a kept DC
-(ARCHITECTURE "Software 3D (G2)").
+OpenGL on llvmpipe, `vk_test` (user/vk_test, C; its `build.sh` needs
+`glslangValidator`, apt `glslang-tools`, and clones the pinned
+Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
+`vulkan-runtime`), about 10 s each under TCG. When one fails:
+
+- Read the ledger first: `missing export` stops a load; `missing dll`
+  for d3d12/vulkan-1 is Mesa looking for drivers, D3DKMT* and
+  IDXGIFactory6 the Vulkan loader probing (not failures).
+- A crash report inside `vulkan-1.dll`: `llvm-symbolizer
+  --obj=target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll
+  0x180000000+<offset>` names the loader's source line (its PDB is
+  unpacked beside it; the loader's source is
+  github.com/KhronosGroup/Vulkan-Loader at the same version).
+- vk_test printing `skipped (no Vulkan driver)` means the loader found
+  no driver: the Drivers key (the scenario's `registry` module), the
+  manifest and `vulkan_lvp.dll` in System32, and `dxgi.dll` (the loader
+  takes no driver from the key without a DXGI factory).
+- Mesa's own `MESA:` lines are in the serial log.
+- A frame that renders (the read-back pixels are right) but is not on
+  the screen is user32's presentation of a kept DC (ARCHITECTURE
+  "Software 3D (G2)").
 
 ### Test speed and environments
 

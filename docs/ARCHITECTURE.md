@@ -2408,9 +2408,14 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   loading, unloading and thread notifications.
 - **Search** (`map_dll`): the executable's directory, SetDllDirectoryW's
   directory (LdrSetDllDirectory, kept under the loader lock), then
-  `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A name with an
-  absolute directory (`C:\jdk\bin\server\jvm.dll`) is loaded from that
-  directory only; its imports are searched as usual, or, with
+  `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A bare name is
+  the loaded module of that name if there is one. A name with an
+  absolute directory (`C:\jdk\bin\server\jvm.dll`; `.` and `..`
+  resolved as RtlDosPathNameToNtPathName does) is loaded from that
+  directory only, and is the loaded module only if that one came from
+  the same file: a DLL of the same name from another directory is a
+  second module (DXVK's `dxgi.dll` beside a program, and the Vulkan
+  loader's `System32\dxgi.dll`; `loader_test`). Its imports are searched as usual, or, with
   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (LdrLoadDll's DllPath with its low bit
   set, from LoadLibraryExW), first in that directory, for every
   dependency of that load (CPython loads `DLLs\_ctypes.pyd` and its
@@ -8951,9 +8956,9 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 
 | Stage | Content | Tests | Status |
 |---|---|---|---|
-| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
+| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
 | G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
-| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL built (`gl_test`); the rest in progress |
+| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL and Vulkan built (`gl_test`, `vk_test`); D3D in progress |
 | G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) | parked |
 | G4 (GPU presentation) | DXGI flip-model swap chains presented as resources (no readback through GDI), shasha composing resources, then BR stage 5 (Chromium `--use-angle=vulkan` on Venus) | planned |
 
@@ -9107,8 +9112,8 @@ GPU or a screen (`presenter=test`).
   application's directory comes before System32; opengl32 is not a
   KnownDLL). Mesa picks its driver in order d3d12 (GLonD3D12: gala's
   G0 `d3d12.dll` fails, or there is none), zink (needs `vulkan-1.dll`
-  and a non-CPU Vulkan device), llvmpipe; `env=GALLIUM_DRIVER=llvmpipe`
-  (or `softpipe`) forces one. `GL_RENDERER` is then `llvmpipe (LLVM
+  and a non-CPU Vulkan device), llvmpipe; the environment variable
+  `GALLIUM_DRIVER=llvmpipe` (or `softpipe`) forces one. `GL_RENDERER` is then `llvmpipe (LLVM
   23.1.4, 256 bits)`; LLVM JIT-compiles the shaders (VirtualAlloc and
   VirtualProtect to executable). Mesa's binaries need AVX: TCG's
   `-cpu max` has it.
@@ -9135,22 +9140,65 @@ GPU or a screen (`presenter=test`).
   the bounds. The same table answers WindowFromDC, which Mesa needs to
   find a DC's window (its framebuffers are per window, sized by
   GetClientRect).
-- **What Mesa imports** beyond what gala had: RegisterClassA,
-  EnumDisplaySettingsA, K32EnumProcessModulesEx, GetGlyphOutlineA (for
-  wglUseFontOutlines; not implemented: GDI_ERROR and the ledger). It
-  probes `d3d12.dll`, `vulkan-1.dll` and
-  `api-ms-win-appmodel-runtime-l1-1-2.dll` with LoadLibrary (the
-  ledger's `missing dll` lines; not failures).
+- **Vulkan: the Khronos loader and lavapipe, installed as a driver
+  is.** `vulkan-1.dll` (LunarG's Vulkan Runtime build of the Khronos
+  loader) is in System32, where Windows' GPU drivers put it; lavapipe
+  (`vulkan_lvp.dll`) and its manifest `lvp_icd.x86_64.json` (whose
+  `library_path` is `.\\vulkan_lvp.dll`, beside it) too, registered as
+  a value named by the manifest's path (DWORD 0) under
+  `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (`user/mesa/lavapipe.regseed`,
+  a scenario's `registry` module: what an installer writes). The loader
+  finds drivers two ways on Windows: through the display adapters'
+  devnodes (cfgmgr32) and through that key. gala has no Plug and Play
+  device tree, so gala's `cfgmgr32.dll` has only the root devnode and
+  empty device lists (`cfgmgr32_test`; each list asked for is in the
+  ledger), and the key is what finds lavapipe. Presenting
+  (VK_KHR_win32_surface) is lavapipe's software swapchain: GetDC of the
+  window kept for the swapchain's life, StretchBlt from a DIB section
+  per present, which user32 shows as a kept DC's drawing (above).
+- **The loader needs a DXGI factory.** Before it reads the Drivers key
+  it calls System32's `dxgi.dll` CreateDXGIFactory1 to check vendor
+  drivers against the adapters (it calls through a NULL pointer when
+  there is no dxgi.dll, and takes no driver from the key when the
+  factory fails). gala's dxgi.dll (G0's stub) therefore gives a real
+  IDXGIFactory1 with no adapters (EnumAdapters/EnumAdapters1:
+  DXGI_ERROR_NOT_FOUND; IDXGIFactory2 and later, swap chains and
+  software adapters fail and are in the ledger). That is G0's contract
+  still: no Direct3D device (d3d11 and d3d12 fail as before), and
+  Chromium's GPU process, which lists adapters through the factory,
+  finds none (`gpu_stub_test`, the Chromium scenarios). On Windows every
+  machine has at least the Basic Render Driver's adapter; WARP is not
+  redistributable, so gala lists none.
+- **DLL paths are resolved**: the loader loads a driver as `<manifest's
+  directory>\.\vulkan_lvp.dll`; ntdll's loader resolves `.` and `..` in
+  a DLL's directory as RtlDosPathNameToNtPathName does (`loader_test`).
+- **What Mesa and the loader import** beyond what gala had:
+  RegisterClassA, EnumDisplaySettingsA, K32EnumProcessModulesEx,
+  GetObjectA, cfgmgr32's device-tree functions, GetGlyphOutlineA (for
+  wglUseFontOutlines; not implemented: GDI_ERROR and the ledger). Probes
+  that are not failures show in the ledger too: Mesa's LoadLibrary of
+  `d3d12.dll`, `vulkan-1.dll` and
+  `api-ms-win-appmodel-runtime-l1-1-2.dll` (`missing dll`), the loader's
+  GetProcAddress of gdi32's `D3DKMTEnumAdapters2` and
+  `D3DKMTQueryAdapterInfo` and its IDXGIFactory6 (`CreateDXGIFactory1
+  (interface)`, IID c1b6694f-...), and LLVM's search of every module for
+  `__register_frame` (`missing export`).
 - **Observability**: Mesa's own messages go to standard error, which is
-  the serial log (`MESA: error: ...`); `env=` sets its variables
-  (`MESA_DEBUG=1`, `LP_DEBUG=...`, `GALLIUM_DRIVER`). Unsupported paths
-  are in the ledger as above.
+  the serial log (`MESA: error: ...`); unsupported paths and probes are
+  in the ledger as above; a crash in the Vulkan loader symbolizes with
+  its PDB, which PREBUILT keeps on the host (WORKFLOW "GPU tests").
 - **Tests**: `gl_test` (user/gl_test, C): a window, a pixel format
   (Windows' set-once rule), a WGL context, glClear and a flat triangle
   read back with glReadPixels, SwapBuffers, the frame checked on a
-  headless desktop's screen, a click to end; about 10 s under TCG.
-- **TODO** (ROADMAP GPU): Vulkan (`vulkan-1.dll`, lavapipe registered
-  under `HKLM\SOFTWARE\Khronos\Vulkan\Drivers`), DXVK, vkd3d-proton.
+  headless desktop's screen, a click to end. `vk_test` (user/vk_test, C,
+  SPIR-V from GLSL): the loader loaded at run time, an instance with
+  the surface extensions, lavapipe as the physical device, a render
+  pass clearing an image and drawing a triangle, read back; then a
+  win32 surface, a FIFO swapchain of the client's size, the same frame
+  read back from the swapchain image and presented, checked on the
+  screen. About 10 s each under TCG; on a Windows machine without a
+  Vulkan driver vk_test says `skipped`.
+- **TODO** (ROADMAP GPU): DXVK, vkd3d-proton.
 
 ## UI Automation
 

@@ -447,6 +447,24 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // The Vulkan Runtime 1.4.341.0 for x64 (LunarG's components zip of
+    // the Khronos loader, Apache-2.0 and MIT; the SHA-256 is the one we
+    // measured: LunarG publishes none for it): `vulkan-1.dll`, which
+    // Windows' GPU drivers install in System32, its PDB (not shipped:
+    // `llvm-symbolizer --obj=<dll> <address>` names the loader's source
+    // line in a crash report), and `vulkaninfo.exe`.
+    Prebuilt {
+        name: "vulkan-runtime",
+        url: "https://sdk.lunarg.com/sdk/download/1.4.341.0/windows/VulkanRT-X64-1.4.341.0-Components.zip",
+        checksum: "20571dcc8292b80a47d68bbbfa4094d87044041f50f4e2e1f326a01e3732b226",
+        members: &[
+            "VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+            "VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.pdb",
+            "VulkanRT-X64-1.4.341.0-Components/x64/vulkaninfo.exe",
+            "VulkanRT-X64-1.4.341.0-Components/VulkanRT-License.txt",
+        ],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -537,6 +555,9 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "shcore", file: "shcore.dll", exported_as: "testshcore.dll" },
     // dwmapi, wtsapi32, imm32: what chrome.dll asks of them (BR).
     Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi.dll" },
+    // cfgmgr32: the device-tree queries of the Khronos Vulkan loader (GPU
+    // G2).
+    Dll { package: "cfgmgr32", file: "cfgmgr32.dll", exported_as: "testcfgmgr32.dll" },
     Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
     Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
     // msctf.dll: the input scope functions (Delphi's VCL; Inno Setup).
@@ -1020,6 +1041,38 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gl_test", "target/prebuilt/mesa/x64/opengl32.dll", "Windows/System32"),
     ("gl_test", "target/prebuilt/mesa/x64/libgallium_wgl.dll", "Windows/System32"),
     ("gl_test", "user/bin/gl_test.exe", "gala"),
+    // cfgmgr32_test: the device-tree queries the Vulkan loader makes.
+    ("cfgmgr32_test", "ntdll.dll", "Windows/System32"),
+    ("cfgmgr32_test", "kernel32.dll", "Windows/System32"),
+    ("cfgmgr32_test", "msvcrt.dll", "Windows/System32"),
+    ("cfgmgr32_test", "cfgmgr32.dll", "Windows/System32"),
+    ("cfgmgr32_test", "user/bin/cfgmgr32_test.exe", "gala"),
+    // vk_test (GPU G2): Vulkan through the Khronos loader (PREBUILT
+    // vulkan-runtime) and Mesa's lavapipe (PREBUILT mesa), registered
+    // under HKLM\SOFTWARE\Khronos\Vulkan\Drivers (user/mesa), all in
+    // System32 as a driver installs them.
+    ("vk_test", "ntdll.dll", "Windows/System32"),
+    ("vk_test", "kernel32.dll", "Windows/System32"),
+    ("vk_test", "msvcrt.dll", "Windows/System32"),
+    ("vk_test", "user32.dll", "Windows/System32"),
+    ("vk_test", "gdi32.dll", "Windows/System32"),
+    ("vk_test", "advapi32.dll", "Windows/System32"),
+    ("vk_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("vk_test", "cfgmgr32.dll", "Windows/System32"),
+    // The loader verifies registered drivers through a DXGI factory.
+    ("vk_test", "dxgi.dll", "Windows/System32"),
+    ("vk_test", "shell32.dll", "Windows/System32"),
+    ("vk_test", "shlwapi.dll", "Windows/System32"),
+    ("vk_test", "ole32.dll", "Windows/System32"),
+    (
+        "vk_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("vk_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("vk_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("vk_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("vk_test", "user/bin/vk_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -4865,6 +4918,30 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=gpu_stub_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["gpu_stub_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The PnP configuration manager's queries (cfgmgr32): gala has no
+        // device tree, only its root.
+        name: "cfgmgr32_test",
+        cmdline: "qemu_exit run=cfgmgr32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["cfgmgr32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // GPU G2: Vulkan on Mesa's lavapipe through the Khronos loader (a
+        // triangle read back, then presented with VK_KHR_win32_surface),
+        // on a headless desktop whose frame the screen check reads.
+        name: "vk_test",
+        cmdline: "qemu_exit presenter=test run=vk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "vk_test: device llvmpipe",
+            "vk_test: read back 0x336699 0xffcc00",
+            "vk_test: presented",
+            "xtask: screen ok",
+            "vk_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // GPU G2: OpenGL on Mesa's llvmpipe (WGL: a pixel format, a
@@ -10246,6 +10323,38 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     // no screen): the pixels are the Test presenter's frame in the
     // guest's memory (`dump_frame`), not a screendump.
     ("gui_test_headless", GUI_TEST_SCREEN),
+    (
+        // GPU G2: vk_test's frame (lavapipe), presented through
+        // VK_KHR_win32_surface (Mesa's software swapchain blits it into
+        // the window's DC) into its 400 x 300 window at (100, 100), client
+        // 398 x 266 from (101, 133): the clear colour in the corner, the
+        // triangle's inside; then a click there ends the program.
+        "vk_test",
+        ScreenCheck {
+            marker: "vk_test: presented",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(101 + 4, 133 + 4, 0x336699),
+                        PixelCheck::At(101 + 199, 133 + 173, 0xffcc00),
+                        PixelCheck::At(101 + 30, 133 + 240, 0x336699),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
     (
         // GPU G2: gl_test's frame (llvmpipe through Mesa's WGL), presented
         // by SwapBuffers into its 400 x 300 window at (100, 100), client
