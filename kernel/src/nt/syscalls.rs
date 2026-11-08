@@ -3226,7 +3226,7 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     if call.process.read(ctx_ptr, &mut ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let (regs, win32_start, mxcsr) = super::abi::thread_start(&ctx);
+    let (regs, win32_start) = super::abi::thread_start(&ctx);
     // INITIAL_TEB { OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase }
     let stack_base = tri!(call.read_u64(teb_ptr + 16));
     let stack_limit = tri!(call.read_u64(teb_ptr + 24));
@@ -3238,7 +3238,6 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
             &call.process,
             regs,
             win32_start,
-            mxcsr,
             (stack_base, stack_limit, stack_bottom),
             suspended
         ))

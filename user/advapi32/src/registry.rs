@@ -991,10 +991,53 @@ fn get_value_w(
             || (flags & RRF_RT_REG_QWORD != 0 && raw.len() == 8));
     if flags & filter == 0 && !binary_as {
         put(kind, 0);
+        if data.is_null() {
+            // The size query still reports the size the value would need
+            // (Windows 11: a 30-byte REG_EXPAND_SZ asked for as REG_SZ with
+            // RRF_NOEXPAND fails with 32 in pcbData).
+            put(size, query_size(k, raw.len()));
+        }
         return zero(ERROR_UNSUPPORTED_TYPE);
     }
     if (k == REG_DWORD && raw.len() != 4) || (k == REG_QWORD && raw.len() != 8) {
         return zero(ERROR_DATATYPE_MISMATCH);
+    }
+    // An expanded string is read the way Windows reads it: the stored value
+    // lands in the buffer and the expansion is written over its start, so
+    // the old tail stays after the expansion's NUL, and pcbData is the
+    // larger of the two sizes (the stored size when the expansion is
+    // shorter, as measured on Windows 11), an upper bound on the string.
+    if expanding && !ansi {
+        let expanded = match expand(raw) {
+            Ok(e) => e,
+            Err(e) => return e,
+        };
+        let text = &expanded.0.bytes()[..expanded.1];
+        let need = raw.len().max(text.len());
+        put(kind, REG_SZ);
+        let cap = get(size) as usize;
+        put(size, need as u32);
+        if data.is_null() {
+            return ERROR_SUCCESS;
+        }
+        if cap < need {
+            return zero(ERROR_MORE_DATA);
+        }
+        // SAFETY: the caller's buffer of `cap` >= need bytes, which holds
+        // both the stored value and its expansion.
+        unsafe {
+            core::ptr::copy_nonoverlapping(raw.as_ptr(), data, raw.len());
+            core::ptr::copy_nonoverlapping(text.as_ptr(), data, text.len());
+        }
+        return ERROR_SUCCESS;
+    }
+    // A size query for a string leaves room for a terminator, whether or
+    // not the stored data has one (Windows 11: stored + 2); the fetch
+    // reports what it wrote.
+    if data.is_null() && !ansi && is_string(k) {
+        put(kind, k);
+        put(size, query_size(k, raw.len()));
+        return ERROR_SUCCESS;
     }
     // Strings: expanded, and terminated if they were not.
     let expanded;
@@ -1021,6 +1064,12 @@ fn get_value_w(
     put(kind, k);
     let r = if ansi { give_a(k, bytes, data, size) } else { give(bytes, data, size) };
     zero(r)
+}
+
+/// What a RegGetValueW size query reports for `len` stored bytes of `kind`:
+/// strings get room for a terminator.
+fn query_size(kind: u32, len: usize) -> u32 {
+    if is_string(kind) { ((len & !1) + 2) as u32 } else { len as u32 }
 }
 
 /// RegGetValueA: names and string data in the ANSI code page.

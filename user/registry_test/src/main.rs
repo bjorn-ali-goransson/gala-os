@@ -810,7 +810,50 @@ fn written(c: &mut Checks) -> Result<(), u32> {
         ))?;
         c.eq(kind.into(), REG_SZ.into())?;
         c.ok(same(&buf[..10], "C:\\gala\\x\0"), buf[0].into())?;
-        c.eq(size.into(), 20)?;
+        // pcbData is the stored size, not the expansion's, and the stored
+        // value's tail stays after the expansion's NUL (Windows 11).
+        c.eq(size.into(), 36)?;
+        c.ok(same(&buf[10..18], "TEST%\\x\0"), buf[10].into())?;
+        // The size query says the same.
+        size = 0;
+        c.ok0(RegGetValueW(
+            test,
+            core::ptr::null(),
+            w("exp").as_ptr(),
+            RRF_RT_REG_SZ,
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        ))?;
+        c.eq(size.into(), 36)?;
+        // With RRF_NOEXPAND the type stays REG_EXPAND_SZ, which REG_SZ
+        // does not accept; the size query still reports stored + 2.
+        size = 0;
+        let r = RegGetValueW(
+            test,
+            core::ptr::null(),
+            w("exp").as_ptr(),
+            RRF_RT_REG_SZ | RRF_NOEXPAND,
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        );
+        c.eq(r as u64, ERROR_UNSUPPORTED_TYPE)?;
+        c.eq(size.into(), 38)?;
+        // A size query with RRF_NOEXPAND leaves room for a NUL (stored + 2);
+        // the fetch reports the stored size.
+        size = 0;
+        c.ok0(RegGetValueW(
+            test,
+            core::ptr::null(),
+            w("exp").as_ptr(),
+            RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        ))?;
+        c.eq(kind.into(), REG_EXPAND_SZ.into())?;
+        c.eq(size.into(), 38)?;
         size = 96;
         c.ok0(RegGetValueW(
             test,

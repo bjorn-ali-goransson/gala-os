@@ -415,7 +415,6 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
         &process,
         regs,
         p.entry(),
-        None,
         (STACK_END, stack_bottom, stack_bottom),
         true,
     ) {

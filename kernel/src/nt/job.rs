@@ -50,6 +50,22 @@ pub const EXTENDED_LIMIT_SIZE: usize = 144;
 /// ActiveProcessLimit at 40.
 const LIMIT_FLAGS: usize = 16;
 const ACTIVE_PROCESS_LIMIT: usize = 40;
+/// PriorityClass and SchedulingClass, which a new job reports as
+/// NORMAL_PRIORITY_CLASS (32) and 5 although LimitFlags enables neither
+/// (Windows 11).
+const PRIORITY_CLASS: usize = 56;
+const SCHEDULING_CLASS: usize = 60;
+const NORMAL_PRIORITY_CLASS: u32 = 32;
+const DEFAULT_SCHEDULING_CLASS: u32 = 5;
+
+/// The limits of a new job: none in effect, the two classes at their
+/// defaults.
+const fn fresh_limits() -> [u8; EXTENDED_LIMIT_SIZE] {
+    let mut l = [0; EXTENDED_LIMIT_SIZE];
+    l[PRIORITY_CLASS] = NORMAL_PRIORITY_CLASS as u8;
+    l[SCHEDULING_CLASS] = DEFAULT_SCHEDULING_CLASS as u8;
+    l
+}
 pub const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: u32 = 0x8;
 /// JOBOBJECT_EXTENDED_LIMIT_INFORMATION after the basic part and the I/O
 /// counters: ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed,
@@ -84,7 +100,7 @@ impl Job {
             state: IrqMutex::named(
                 "job",
                 JobState {
-                    limits: [0; EXTENDED_LIMIT_SIZE],
+                    limits: fresh_limits(),
                     total_processes: 0,
                     committed: 0,
                     peak_process: 0,
@@ -190,6 +206,11 @@ mod tests {
         let job = Job::new();
         let mut s = job.state.lock();
         assert_eq!(s.active_limit(), None);
+        // A new job: no limits, PriorityClass 32 and SchedulingClass 5.
+        let mut fresh = [0u8; EXTENDED_LIMIT_SIZE];
+        assert_eq!(s.query(BASIC_LIMIT, 0, &mut fresh), Some(64));
+        assert_eq!((u32_at(&fresh, 56), u32_at(&fresh, 60)), (32, 5));
+        assert!(fresh[..56].iter().all(|&b| b == 0));
         let mut basic = [0u8; BASIC_LIMIT_SIZE];
         basic[16..20].copy_from_slice(&JOB_OBJECT_LIMIT_ACTIVE_PROCESS.to_le_bytes());
         basic[40..44].copy_from_slice(&1u32.to_le_bytes());

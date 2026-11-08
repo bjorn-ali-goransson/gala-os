@@ -847,8 +847,11 @@ current process, -2 = current thread.
   thread has ended (Windows frees the TEB then; gala's stays mapped
   until the process ends).
 - **NtCreateThread** takes DeallocationStack from
-  INITIAL_TEB.StackAllocationBase and applies the CONTEXT's MxCsr only
-  (TODO: the rest of FltSave and the XSTATE area). kernel32's CreateThread
+  INITIAL_TEB.StackAllocationBase and the CONTEXT's integer and control
+  registers; its floating-point part (MxCsr, FltSave, the XSTATE area) is
+  ignored whatever ContextFlags say: a new thread starts with a fresh
+  x87/SSE state, MXCSR 0x1f80 and XMM 0, as on Windows 11 (`fpu_test`).
+  NtContinue on an existing thread does load it. kernel32's CreateThread
   builds the stack and start CONTEXT itself ("kernel32").
 - **Suspension and context**: a thread with a suspend count parks in the
   user-return hook, publishing its registers and XSAVE state;
@@ -1564,6 +1567,10 @@ through the namespace like events), NtAssignProcessToJobObject,
 NtSet/NtQueryInformationJobObject (basic accounting, basic and extended
 limits) and NtIsProcessInJob (0x7f0a-0x7f0e).
 
+- A new job has no limits in effect (LimitFlags 0) but reports
+  PriorityClass NORMAL_PRIORITY_CLASS (32) and SchedulingClass 5 in its
+  basic limits, as Windows 11 does; what NtSetInformationJobObject sets
+  is reported back as given.
 - A process is in at most one job (`Process::job`); a process created by
   one in a job joins it. Nested jobs (Windows 8+) are not done: assigning
   a process that is in another job is STATUS_ACCESS_DENIED.
@@ -2365,7 +2372,13 @@ shutdown.
   is the NT key handle itself. The functions return Win32 errors from
   RtlNtStatusToDosError. RegGetValue filters by type (RRF_RT_*,
   REG_BINARY of 4/8 bytes for DWORD/QWORD; its flags are checked first),
-  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. The A
+  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. As
+  Windows 11 does, an expanded string is read over the stored one: the
+  stored value's tail stays after the expansion's NUL and pcbData is the
+  larger of the two sizes (the stored size when the expansion is
+  shorter), an upper bound rather than the string's length; a size query
+  for an unexpanded string reports stored + 2 (room for a NUL), and one
+  that fails with ERROR_UNSUPPORTED_TYPE still reports it. The A
   functions convert names and string data (REG_SZ, REG_EXPAND_SZ,
   REG_MULTI_SZ) through the ANSI code page (UTF-8 on gala).
 
@@ -2541,7 +2554,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 - **Static TLS** (`tls.rs`): each image with a TLS directory gets an
   index at load; each thread has an array at
   TEB.ThreadLocalStoragePointer with a block per image (the template,
-  then zero fill); a DLL loaded later gets blocks in every existing
+  then zero fill, which gala zeroes; Windows leaves the zero fill as its
+  heap had it, freed loader strings or zeros by chance, so a program
+  relying on it relies on luck and `tls_test` reads it without checking
+  it); a DLL loaded later gets blocks in every existing
   thread. Threads started by kernel32 call `GalaInitializeThread` first
   (their blocks, then DLL_THREAD_ATTACH to TLS callbacks and DllMains in
   load order; Windows does this in LdrInitializeThunk) and ExitThread
@@ -3359,7 +3375,12 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   GetProcAddress): GetNodeClusterState reports ClusterStateNotInstalled;
   functions returning handles give NULL with RPC_S_SERVER_UNAVAILABLE (no
   cluster service), state queries the Unknown state, the rest that error;
-  resutils parses CLUSPROP property lists (`clusapi_test`).
+  resutils parses CLUSPROP property lists (`clusapi_test`). A deliberate
+  difference: gala's ResUtilFind*Property find a property anywhere in the
+  list, within its size; Windows' examine only the first property and
+  ignore the size, so a later property is not found or the walk runs off
+  the list (Windows 11). The test uses one property per list, the shape
+  both answer alike.
 - **cmd.exe** (`user/cmd`, built as a program and placed in System32;
   `cmd_test`) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -7817,8 +7838,12 @@ same program as SYSTEM).
   STATUS_HANDLE_NOT_CLOSABLE (ERROR_INVALID_HANDLE), CloseDesktop
   STATUS_DEVICE_BUSY (ERROR_BUSY), CloseWindowStation of the process's
   station too. A thread's own desktop handle is freed when it ends.
-- **Other calls**: OpenWindowStation (an unknown or empty name is
-  STATUS_OBJECT_NAME_NOT_FOUND, a backslash STATUS_OBJECT_PATH_NOT_FOUND),
+- **Other calls**: OpenWindowStation (an unknown name is
+  STATUS_OBJECT_NAME_NOT_FOUND, a backslash inside the name
+  STATUS_OBJECT_PATH_NOT_FOUND, a leading one STATUS_OBJECT_PATH_SYNTAX_BAD;
+  the empty name opens the caller's logon session's own station,
+  `Service-0x<high>-<low>$`, made if need be and not visible, even for an
+  interactive process connected to WinSta0, as on Windows 11),
   OpenDesktop (empty: STATUS_OBJECT_TYPE_MISMATCH, a backslash
   STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
   OpenInputDesktop (the process's station's Default, a new handle each
