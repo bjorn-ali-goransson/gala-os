@@ -2,6 +2,15 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Binaries with source lines: ready for a sweep
+
+`user/bin` is re-exported with every test printing its failing check's
+line: `kuser_test: check 00000007 got 0000000a (line 83)` (decimal,
+the line in `user/<test>/src/main.rs`). Main is at 3780c10 (all 312
+scenarios passed), and this branch adds only the line printing on top.
+A sweep now gives Round 3 with no counted mappings, plus the `ms`
+timings. Your 25a227a (stderr) is merged.
+
 ## On df95e84 (triage.py's line numbers)
 
 Merged. The `(line L)` the tests will print is always decimal and never
