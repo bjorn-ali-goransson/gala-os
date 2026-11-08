@@ -179,7 +179,10 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     # ExitCode is signed; report the 32-bit value as unsigned (NTSTATUS).
     $code = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$process.ExitCode), 0)
     $lines = @($text -split "`r?`n")
-    $line = $lines | Where-Object { $_ -like "${name}: *" } | Select-Object -First 1
+    # The last such line, not the first: a program that prints anything of
+    # its own before failing (quota_test prints the handle limit it found)
+    # would otherwise report that instead of the check that failed.
+    $line = $lines | Where-Object { $_ -like "${name}: *" } | Select-Object -Last 1
     if ($null -eq $line) { $line = $lines | Select-Object -First 1 }
     if ($null -eq $line) { $line = "" }
     if ($lost) { $line = "(output lost: a child it left running held the pipe open)" }
