@@ -953,10 +953,10 @@ fn get_value_w(
     size: *mut u32,
     ansi: bool,
 ) -> i32 {
-    if flags & RRF_RT_ANY == 0
-        || (!data.is_null() && size.is_null())
-        || (flags & RRF_RT_REG_EXPAND_SZ != 0 && flags & RRF_NOEXPAND == 0)
-    {
+    // RRF_RT_REG_EXPAND_SZ without RRF_NOEXPAND is no parameter error: the
+    // expanded value is a REG_SZ, which that filter refuses below
+    // (ERROR_UNSUPPORTED_TYPE, Windows Server 2025).
+    if flags & RRF_RT_ANY == 0 || (!data.is_null() && size.is_null()) {
         return ERROR_INVALID_PARAMETER;
     }
     let cap = get(size) as usize;

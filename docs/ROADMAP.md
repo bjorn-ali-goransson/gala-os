@@ -2393,7 +2393,10 @@ wow64.dll converts 32-bit system calls in user mode).
    never set up on Windows: no TLS callback, `_tls_index` never written,
    by static import and by LoadLibrary alike, although its TLS
    directory and relocations are well formed, so `wow64_import_test`
-   check 12 fails there. Still to explain before gala changes:
+   check 12 fails there. The 64-bit tlsdll.dll is the same on a Windows
+   Server 2025 runner: its TLS callback runs, yet its first TLS value
+   reads 0 where the template says 0x5050 (tls_test check 13). Still to
+   explain before gala changes:
    testdll.dll (x64) has no TLS directory at all, so the 64-bit build is
    not even linking `_tls_used`; the question is whether the DLLs'
    build (lld, `_tls_used`) or the loader is what differs.

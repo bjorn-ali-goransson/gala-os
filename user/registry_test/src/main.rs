@@ -10,8 +10,8 @@
 //! - RegQueryValueExW: the type and size alone (NULL data), ERROR_MORE_DATA
 //!   with the needed size, ERROR_FILE_NOT_FOUND for a missing value.
 //! - RegGetValueW: type restrictions (ERROR_UNSUPPORTED_TYPE), REG_EXPAND_SZ
-//!   expanded and reported as REG_SZ, RRF_RT_REG_EXPAND_SZ needs
-//!   RRF_NOEXPAND.
+//!   expanded and reported as REG_SZ, so RRF_RT_REG_EXPAND_SZ without
+//!   RRF_NOEXPAND finds no such type (ERROR_UNSUPPORTED_TYPE).
 //! - RegCreateKeyExW creates missing intermediate keys; dispositions
 //!   (REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY); a volatile key's
 //!   children must be volatile (ERROR_CHILD_MUST_BE_VOLATILE).
@@ -876,7 +876,7 @@ fn written(c: &mut Checks) -> Result<(), u32> {
             buf.as_mut_ptr().cast(),
             &mut size,
         );
-        c.eq(r as u64, ERROR_INVALID_PARAMETER)?;
+        c.eq(r as u64, ERROR_UNSUPPORTED_TYPE)?;
 
         // The A functions.
         let mut abuf = [0u8; 32];

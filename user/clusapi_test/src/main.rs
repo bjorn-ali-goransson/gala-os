@@ -4,9 +4,8 @@
 //! cluster (NULL and an error); every function a program resolves at run
 //! time exists (GetProcAddress), as SQL Server needs. resutils: the
 //! property-list helpers (ResUtilFind*Property over a CLUSPROP list of
-//! one property, the only shape Windows answers for: names matched
-//! case-insensitively, ERROR_FILE_NOT_FOUND when absent,
-//! strings returned in LocalAlloc'ed memory) and ResUtilResourceTypesEqual.
+//! one property, the only shape Windows answers for: its name asked in
+//! another case, strings returned in LocalAlloc'ed memory) and ResUtilResourceTypesEqual.
 //!
 //! Prints `clusapi_test: ok` or exits with the number of the failing check.
 
@@ -202,8 +201,9 @@ fn run() -> Result<(), u32> {
         c.eq(r.into(), ERROR_SUCCESS)?;
         c.ok(!path.is_null() && *path == 0x43 && *path.add(3) == 0x78 && *path.add(4) == 0, 0)?;
         LocalFree(path);
-        let r = ResUtilFindDwordProperty(list.as_ptr(), size as u32, w("Nope").as_ptr(), &mut port);
-        c.eq(r.into(), 2)?; // ERROR_FILE_NOT_FOUND
+        // A name the list does not have is not asked: Windows (Server 2025)
+        // answers it from the first property all the same, gala with
+        // ERROR_FILE_NOT_FOUND (ARCHITECTURE: a deliberate difference).
         c.ok(
             ResUtilResourceTypesEqual(w("SQL Server").as_ptr(), w("sql server").as_ptr()) != 0,
             0,

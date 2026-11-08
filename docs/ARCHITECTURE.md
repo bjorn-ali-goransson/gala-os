@@ -2380,7 +2380,9 @@ shutdown.
   larger of the two sizes (the stored size when the expansion is
   shorter), an upper bound rather than the string's length; a size query
   for an unexpanded string reports stored + 2 (room for a NUL), and one
-  that fails with ERROR_UNSUPPORTED_TYPE still reports it. The A
+  that fails with ERROR_UNSUPPORTED_TYPE still reports it.
+  RRF_RT_REG_EXPAND_SZ without RRF_NOEXPAND is that error too (the
+  expanded value is a REG_SZ). The A
   functions convert names and string data (REG_SZ, REG_EXPAND_SZ,
   REG_MULTI_SZ) through the ANSI code page (UTF-8 on gala).
 
@@ -3379,9 +3381,10 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   cluster service), state queries the Unknown state, the rest that error;
   resutils parses CLUSPROP property lists (`clusapi_test`). A deliberate
   difference: gala's ResUtilFind*Property find a property anywhere in the
-  list, within its size; Windows' examine only the first property and
-  ignore the size, so a later property is not found or the walk runs off
-  the list (Windows 11). The test uses one property per list, the shape
+  list, within its size, by name; Windows' examine only the first
+  property and ignore the size, so a later property is not found or the
+  walk runs off the list (Windows 11), and a name the first property does
+  not have is answered from it all the same (Windows Server 2025). The test uses one property per list, the shape
   both answer alike.
 - **cmd.exe** (`user/cmd`, built as a program and placed in System32;
   `cmd_test`) implements `/c` (and switches before it): cmd's documented
@@ -7860,8 +7863,11 @@ same program as SYSTEM).
   STATUS_OBJECT_NAME_NOT_FOUND, a backslash inside the name
   STATUS_OBJECT_PATH_NOT_FOUND, a leading one STATUS_OBJECT_PATH_SYNTAX_BAD;
   the empty name opens the caller's logon session's own station,
-  `Service-0x<high>-<low>$`, made if need be and not visible, even for an
-  interactive process connected to WinSta0, as on Windows 11),
+  `Service-0x<high>-<low>$` (not visible), if the logon has one, even for
+  an interactive process connected to WinSta0, and is
+  STATUS_OBJECT_NAME_NOT_FOUND if it has none: OpenWindowStation never
+  makes it; a Windows 11 desktop's logon had one, a Windows Server 2025
+  runner's had none),
   OpenDesktop (empty: STATUS_OBJECT_TYPE_MISMATCH, a backslash
   STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
   OpenInputDesktop (the process's station's Default, a new handle each
