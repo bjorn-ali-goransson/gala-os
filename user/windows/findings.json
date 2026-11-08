@@ -27,7 +27,8 @@
     "Round 3 probes, second batch: com_test and dbghelp_test above, making seven of the nineteen answered (with gdi32_test, shell32_test, shlwapi_test, sysinfo_test and udp_test). The remaining twelve need a window and a message loop (user32_test, controls_test, comctl32_test), a COM server (ole32_test, uia_test), overlapped sockets (winsock_async_test), a 32-bit process (wow64_thread_test), or the program's own instrumentation (quota_test, conpty_test, browser_api_test, wow64_k32_test, clusapi_test), for which windows-output.txt now carries what they print.",
     "Round 3 probes, third batch: controls_test and comctl32_test above, nine of the nineteen answered. The comctl32 one needed care: a probe from Python loads comctl32 version 6 through its manifest, where the FlatSB family returns FALSE for everything, so the first attempt disagreed with the test for a reason that had nothing to do with the question. Loading System32's comctl32 by full path gives version 5 and reproduces the test's own results exactly.",
     "Round 3 probes, fourth batch: user32_test above, ten of the nineteen answered. It took two attempts worth noting: the hook callback first declared lParam signed, so CallNextHookEx raised on every notification and the hook chain was never continued. The counts happened to be right anyway, but the run was not trustworthy until the signature was fixed and it was repeated.",
-    "Round 3 probes, fifth batch: ole32_test above, eleven of the nineteen answered. It is worth recording how it was found: the first probe copied the test exactly and got E_INVALIDARG, which said nothing; the single-interface call in the same run happened to pass pItf=NULL and succeeded, and running the three-interface call both ways isolated pItf as the whole difference."
+    "Round 3 probes, fifth batch: ole32_test above, eleven of the nineteen answered. It is worth recording how it was found: the first probe copied the test exactly and got E_INVALIDARG, which said nothing; the single-interface call in the same run happened to pass pItf=NULL and succeeded, and running the three-interface call both ways isolated pItf as the whole difference.",
+    "Round 4 (binaries from f0102817, runner from c650ada0): 93 programs exit 0, up from 73, and nothing that passed now fails. Twenty newly pass, com_test and sysinfo_test among them, both from probes here. oleaut32_test no longer crashes and reaches check 108. Twenty-seven moved to a later check, several a long way: wow64_test 71 -> 1478, user32_test 42 -> 134, kernel32_clr_test 10 -> 132. bench ran this time rather than being quarantined. The five tcc-dependent scripts still fail, still Defender. The sweep ran before the Linux gate had declared the export green, so it may need repeating."
   ],
   "peb_test": {
     "windows": "Passes now (exit 0), the build pin having been relaxed.",
@@ -96,10 +97,10 @@
     "note": "NOT a divergence. Its own doc: \"As on Windows, the process must not start: it ends with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before its entry point runs.\" The non-zero status is the expected result; the program cannot report it itself because it never runs."
   },
   "browser_api_test": {
-    "windows": "Loads now: importing CompareObjectHandles through api-ms-win-core-handle-l1-1-0 works, and it runs as far as check 23.",
+    "windows": null,
     "class": "expectation",
-    "evidence": "exit 0xc0000139 -> 0x17 against 746404e7's binaries.",
-    "note": "Which assertion failed cannot be told from the number: this test passes its check number explicitly and seven call sites share 23 (lines 614, 628, 629, 632, 633, 634, 635, all in the security-descriptor block). It would need distinct numbers to be diagnosable from a report."
+    "evidence": "its whole output is one line, \"check 23 failed\", with no source line: this test numbers its checks by hand and seven call sites share 23.",
+    "note": "Still not diagnosable, and the full output does not help: it needs the distinct numbers the analysis proposed (23a..g). The loader side is fixed, since it now runs as far as check 23."
   },
   "kernel32_thread_test": {
     "windows": "SetPriorityClass does not validate the value as a whole: it takes the recognised class bits out of it and the lowest class wins, IDLE first. A value carrying at least one recognised bit succeeds; a nonzero value carrying none is refused like 0, with FALSE and ERROR_INVALID_PARAMETER (87). REALTIME (0x100) returns TRUE but leaves the class at HIGH (0x80) without SeIncreaseBasePriorityPrivilege. The precedence among the recognised bits is a strict order, and it is the inverse of scheduling priority: the lowest class always wins. Over all fifteen pairs, IDLE beats all five others, BELOW_NORMAL four, NORMAL three, ABOVE_NORMAL two, HIGH one, and REALTIME none.",
@@ -132,10 +133,10 @@
     "note": "The fault is in the system DLL, not the test, so the test passes OLEAUT32 something this build will not take (a NULL out-parameter is the usual cause). user/oleaut32_test is C (main.c) and prints no line before dying."
   },
   "clusapi_test": {
-    "windows": "Faults inside Windows' own resutils.dll: STATUS_ACCESS_VIOLATION at resutils.dll+0x2a724, reading address 0x753399fb14.",
+    "windows": "Crashes with STATUS_ACCESS_VIOLATION inside resutils.dll+0x2a724, reading 0x753399fb14, after printing nothing at all.",
     "class": "crash",
-    "evidence": "fault.py.",
-    "note": "Also inside a system DLL. This machine has no Failover Clustering feature installed, which is the first thing to check."
+    "evidence": "fault.py for the fault; windows-output.txt now confirms the output is empty, so it dies before its first write (25 ms).",
+    "note": "The empty output rules out reading how far it got, so the line-before-each-call the analysis suggested is the only way. This machine has no Failover Clustering feature installed, which is still the first thing to check."
   },
   "crash": {
     "windows": "STATUS_ACCESS_VIOLATION at crash.exe+0x1097, writing to address 0.",
@@ -144,10 +145,10 @@
     "note": "NOT a divergence: crash.exe crashes on purpose, and this is the expected result. It served as the check that fault.py is right."
   },
   "quota_test": {
-    "windows": "The handle limit reads 16711680 (0xff0000). The program prints three lines of its own: the limit it found, \"check 10 failed\", and \"got 16711680\".",
+    "windows": "The handle limit reads 16711680 (0xff0000). check 10 is at line 620 and got 16711680.",
     "class": "expectation",
     "evidence": "the program's own line, \"quota_test: handle limit at 16711680 handles\", exit 10.",
-    "note": "Round 2: still exit 10 against the new binary, and it is the slowest program measured here at 11682 ms. With run-all.ps1 now keeping the last line a program prints, the report carries \"got 16711680\" rather than the informational limit line; \"check 10 failed\" is still dropped, but the check number is the exit status anyway. The earlier mapping of check 10 to WSAStartup was a guess and should be ignored."
+    "note": "Round 4: the program now prints its own line, \"check 10 failed, got 16711680 (line 620)\", so the check and line are exact. It still does not print base, n or at_limit, which the analysis asked for, so what the arithmetic at line 620 expected cannot be told from here. It is also the slowest program measured, 11543 ms."
   },
   "bench": {
     "windows": "Quarantined again: Defender blocked it at 07:14, and run-all.ps1 recorded \"antivirus blocked it (ERROR_VIRUS_INFECTED)\".",
@@ -352,5 +353,17 @@
     "class": "expectation",
     "evidence": "probed here with the test's own CLSID_CUIAutomation and its three IIDs, run twice: pItf=1 -> 0x80070057 and hr still the 7 sentinel in all three entries; pItf=NULL -> 0x00080012 with hr 0, 0, 0x80004002. The single-interface call succeeds either way when pItf is NULL, and count=0 gives E_INVALIDARG as the test expects.",
     "note": "A test bug of one line, and the rest of what check 31's block asserts is right. The sentinel in hr is harmless; it is pItf that has to start NULL. Since gala accepts the non-NULL pItf, gala is wrong here too and should reject it."
+  },
+  "conpty_test": {
+    "windows": "The child starts but its standard handles are not console handles: it prints \"child: not a console, error 6\" (ERROR_INVALID_HANDLE). The pseudo console's output pipe carries only two escape sequences, \u001b[?9001h and \u001b[?1004h (win32 input mode and focus events), and never the child's \"ready\".",
+    "class": "expectation",
+    "evidence": "the program's whole output, now kept in windows-output.txt: \"child started\", then \"child: not a console, error 6\", then \"output was: \u001b[?9001h\u001b[?1004h\", then check 4 failing after the full 20 s wait (20063 ms).",
+    "note": "Answers the probe without changing the test. The child is attached to the pseudo console but its handles do not answer as a console here, so the 20 s wait was never going to end. The two sequences are what conhost emits on attach, so the console side came up; it is the child's handles that differ."
+  },
+  "wow64_k32_test": {
+    "windows": "check 28 fails at line 207 (0xcf) with 0x73, that is 115.",
+    "class": "expectation",
+    "evidence": "the program's own line, now kept in windows-output.txt: \"(line 0x000000cf) wow64_k32_test: check 0000001c failed, got 00000073\". It also prints \"hello\" first, which is why the report used to show that instead.",
+    "note": "The counted mapping in the analysis was right: line 207 is the GetSystemDirectoryW check. The value 115 is what the call returned where the test wants the length of C:\\Windows\\SysWOW64. Whether 115 is a length or a status is for whoever reads line 207; nothing more can be told from outside."
   }
 }
