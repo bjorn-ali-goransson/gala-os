@@ -905,27 +905,9 @@ server, an interactive shell, file transfer, forwarding, a client.
 6. Observability: sshd's and sshd-session's logs in failed logs,
    connection and auth events in the event stream, the ledger's
    ssh-related gaps in the report.
-7. `sshd_shell`'s Ctrl+C race (an intermittent CI failure: the line
-   typed after Ctrl+C loses its first key and the shell prints
-   `^C^C`). The mechanism, from a failed run's conpty trace and
-   busybox-w32's open source: one Ctrl+C reaches both the shell and
-   `sleep` (each process's handler thread takes it within 4 ms). When
-   `sleep` has ended before the shell's handler has run, the shell
-   (polling the child every 1 ms) sees it end, prints the prompt and
-   starts reading a line; its handler then sets `bb_got_signal` and
-   `pending_int`, and the line editor acts on them at the next key,
-   abandoning the line. Windows 11, measured (#33): every attached
-   process's handler starts at once, none waits for another to return,
-   and their order is a race (no attach order); but a child without a
-   handler, ended by the default handler, is seen to end about 12 ms
-   after the parent's handler has started (6 of 6 runs). So the
-   requirement is an ordering, not a delay: a process that ends with
-   STATUS_CONTROL_C_EXIT for Ctrl+C k becomes visible as ended only
-   once every other process of the session with a handler thread has
-   taken Ctrl+C k (`note_ctrl_taken` already sees each take); a backstop
-   for a handler thread busy with an earlier event, logged. Also from
-   #33: "ignore Ctrl+C" (SetConsoleCtrlHandler(NULL, TRUE)) is
-   inherited by child processes.
+7. "Ignore Ctrl+C" (SetConsoleCtrlHandler(NULL, TRUE)) is inherited by
+   child processes on Windows (#33); gala's kernel32 keeps it per
+   process.
 
 **Done when**: each step's scenario passes; host keys persist across
 boots (`persist`) and sessions survive a kernel handover (R9 (e)

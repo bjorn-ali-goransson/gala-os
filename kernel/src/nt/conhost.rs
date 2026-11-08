@@ -59,6 +59,9 @@ pub struct Session {
     /// When the last Ctrl+C came (raw monotonic ns): how late each
     /// process's handler thread takes it is logged.
     pub ctrl_raised_ns: core::sync::atomic::AtomicU64,
+    /// Set whenever a process's handler thread takes a Ctrl+C: a process
+    /// ending because of one waits on it (`others_took`).
+    pub ctrl_taken: ObjectRef,
 }
 
 /// The console's input modes (SetConsoleMode) the session acts on.
@@ -94,6 +97,9 @@ struct Inner {
     mode: u32,
     /// How many Ctrl+C events there have been.
     ctrl_count: u32,
+    /// The processes whose control-handler thread waits for Ctrl+C
+    /// (GalaConsoleCtrl), with the last one each has taken.
+    takers: Vec<(u64, u32)>,
     /// The output mode (ENABLE_PROCESSED_OUTPUT, DISABLE_NEWLINE_AUTO_RETURN).
     output_mode: u32,
     /// The last byte written was CR (a following LF is not translated).
@@ -161,6 +167,11 @@ impl Session {
             dispatcher: Dispatcher::new(0),
         }))
         .map_err(|_| NtStatus::NO_MEMORY)?;
+        let ctrl_taken = KObject::new(ObjectBody::Event(Event {
+            kind: EventType::Notification,
+            dispatcher: Dispatcher::new(0),
+        }))
+        .map_err(|_| NtStatus::NO_MEMORY)?;
         let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         KArc::try_new(Session {
             id,
@@ -177,6 +188,7 @@ impl Session {
                 ready,
                 mode: ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT,
                 ctrl_count: 0,
+                takers: Vec::new(),
                 // ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT.
                 output_mode: ENABLE_PROCESSED_OUTPUT | 0x2,
                 after_cr: false,
@@ -186,6 +198,7 @@ impl Session {
             input_ready,
             ctrl_event,
             ctrl_raised_ns: core::sync::atomic::AtomicU64::new(0),
+            ctrl_taken,
         })
         .map_err(|_| NtStatus::NO_MEMORY)
     }
@@ -313,6 +326,37 @@ impl Session {
     /// How many Ctrl+C events there have been.
     pub fn ctrl_count(&self) -> u32 {
         self.inner.lock().ctrl_count
+    }
+
+    /// Process `pid`'s handler thread has taken the Ctrl+C events up to
+    /// `count` (its first call registers it with the count so far).
+    pub fn took(&self, pid: u64, count: u32) -> Result<(), NtStatus> {
+        let mut s = self.inner.lock();
+        if let Some(t) = s.takers.iter_mut().find(|t| t.0 == pid) {
+            t.1 = count;
+            return Ok(());
+        }
+        s.takers.try_push((pid, count)).map_err(|_| NtStatus::NO_MEMORY)
+    }
+
+    /// Process `pid` has left the session (it ended): it takes nothing
+    /// more.
+    pub fn forget_taker(&self, pid: u64) {
+        self.inner.lock().takers.retain(|t| t.0 != pid);
+    }
+
+    /// The processes other than `pid` whose handler threads have not yet
+    /// taken Ctrl+C `count`.
+    pub fn not_yet_taken(&self, pid: u64, count: u32, out: &mut [u64]) -> usize {
+        let s = self.inner.lock();
+        let mut n = 0;
+        for t in s.takers.iter().filter(|t| t.0 != pid && (t.1.wrapping_sub(count) as i32) < 0) {
+            if n < out.len() {
+                out[n] = t.0;
+            }
+            n += 1;
+        }
+        n
     }
 
     /// A cooked read's editing, as the console's default input mode does
@@ -521,6 +565,29 @@ pub fn find(id: u32) -> Option<KArc<Session>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn who_has_not_yet_taken_a_ctrl_c() {
+        let s = Session::new().unwrap();
+        // The shell (pid 4) and its child (8) register at count 0.
+        s.took(4, 0).unwrap();
+        s.took(8, 0).unwrap();
+        let mut late = [0u64; 4];
+        assert_eq!(s.not_yet_taken(8, 0, &mut late), 0);
+        // Ctrl+C 1: the child, ending with it, waits for the shell.
+        assert_eq!(s.not_yet_taken(8, 1, &mut late), 1);
+        assert_eq!(late[0], 4);
+        s.took(4, 1).unwrap();
+        assert_eq!(s.not_yet_taken(8, 1, &mut late), 0);
+        // A process that ended takes nothing more and is not waited for.
+        s.took(12, 0).unwrap();
+        assert_eq!(s.not_yet_taken(8, 1, &mut late), 1);
+        s.forget_taker(12);
+        assert_eq!(s.not_yet_taken(8, 1, &mut late), 0);
+        // Counts wrap.
+        s.took(4, u32::MAX).unwrap();
+        assert_eq!(s.not_yet_taken(8, 0, &mut late), 1);
+    }
 
     #[test]
     fn output_is_kept_in_order_and_the_oldest_goes_when_full() {

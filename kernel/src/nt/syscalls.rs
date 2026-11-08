@@ -1113,6 +1113,11 @@ fn nt_resume_process(call: &mut Call<'_>) -> NtStatus {
 fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
     let handle = Handle(arg!(call, 0));
     let status = NtStatus(arg!(call, 1) as u32);
+    if status.0 == STATUS_CONTROL_C_EXIT
+        && (handle == Handle(0) || handle == Handle::CURRENT_PROCESS)
+    {
+        ctrl_exit_ordered(call);
+    }
     if handle == Handle(0) {
         // NULL: terminate every other thread of the current process.
         process::terminate(&call.process, status, false);
@@ -1863,8 +1868,11 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
     }
     let seen = u32::from_le_bytes(seen);
     if seen == u32::MAX {
-        // The count so far, at once.
-        tri!(call.write_u32(seen_ptr, session.ctrl_count()));
+        // The count so far, at once; the process's handler thread is a
+        // taker from now on (`ctrl_exit_ordered`).
+        let count = session.ctrl_count();
+        tri!(session.took(call.process.id, count));
+        tri!(call.write_u32(seen_ptr, count));
         return NtStatus::SUCCESS;
     }
     loop {
@@ -1877,6 +1885,8 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
         let count = session.ctrl_count();
         if count != seen {
             tri!(call.write_u32(seen_ptr, count));
+            tri!(session.took(call.process.id, count));
+            wait::set_signal(&session.ctrl_taken, 1);
             note_ctrl_taken(call, &session, count);
             return NtStatus::SUCCESS;
         }
@@ -1884,6 +1894,51 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
         let waited = wait::wait_for(event, false, wait::Timeout::from_nt(Some(-10_000_000)));
         if waited == NtStatus::THREAD_IS_TERMINATING {
             return waited;
+        }
+    }
+}
+
+/// STATUS_CONTROL_C_EXIT: how a process ended by Ctrl+C ends (Windows'
+/// default handler).
+const STATUS_CONTROL_C_EXIT: u32 = 0xc000_013a;
+/// How long a process ending because of Ctrl+C waits for the session's
+/// other handler threads to take it: a backstop for one busy with an
+/// earlier event, logged when reached.
+const CTRL_EXIT_BACKSTOP_MS: i64 = 1000;
+
+/// A process ending with STATUS_CONTROL_C_EXIT (its default handler, for
+/// Ctrl+C k) is seen to end only once every other process of its console
+/// session with a handler thread has taken Ctrl+C k: on Windows the
+/// parent's handler starts about 12 ms before a handler-less child's end
+/// is visible (6 of 6 runs, #33), so a shell's handler has run before the
+/// shell sees its child end and prompts (sshd_shell; ROADMAP SSH item 7).
+fn ctrl_exit_ordered(call: &Call<'_>) {
+    let Some(session) = call.process.console.clone() else { return };
+    let count = session.ctrl_count();
+    let me = call.process.id;
+    let start = platform::monotonic_ns();
+    let mut late = [0u64; 4];
+    loop {
+        // Reset first, then look (as GalaConsoleCtrl does).
+        wait::set_signal(&session.ctrl_taken, 0);
+        let n = session.not_yet_taken(me, count, &mut late);
+        if n == 0 {
+            return;
+        }
+        let waited_ms = ((platform::monotonic_ns() - start) / 1_000_000) as i64;
+        if waited_ms >= CTRL_EXIT_BACKSTOP_MS {
+            warn!(
+                "console {}: pid {me} ({}) ends with Ctrl+C {count} before {n} other process(es) took it (first pid {}): {waited_ms} ms backstop",
+                session.id, call.process.name, late[0]
+            );
+            return;
+        }
+        let left = CTRL_EXIT_BACKSTOP_MS - waited_ms;
+        let event = core::slice::from_ref(&session.ctrl_taken);
+        if wait::wait_for(event, false, wait::Timeout::from_nt(Some(-left * 10_000)))
+            == NtStatus::THREAD_IS_TERMINATING
+        {
+            return;
         }
     }
 }

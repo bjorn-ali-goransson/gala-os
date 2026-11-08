@@ -1972,6 +1972,16 @@ xtask types: "hi" with ReadFile, echoed, the program getting "hi\r\n";
   ctrl`) and so is each process's handler thread taking it (`... takes
   Ctrl+C k after m ms`, a warning from 250 ms: late is a lost wake-up;
   event `console ctrl taken`). GalaConsoleCtrl has a 1 s backstop.
+  The session keeps each process's handler thread as a taker with the
+  last Ctrl+C it took. A process ending with STATUS_CONTROL_C_EXIT
+  (NtTerminateProcess on itself, as the default handler does) waits
+  until every other taker has taken that Ctrl+C before it ends, so a
+  shell's handler has run before the shell can see its child end (on
+  Windows the parent's handler starts about 12 ms before a
+  handler-less child's end is visible; handlers otherwise start
+  together and none waits for another; #33). A taker still busy with
+  an earlier event is waited for 1 s at most (`... ends with Ctrl+C k
+  before N other process(es) took it`, a warning).
 - **The host** (`user/conhost`): the kernel starts `conhost.exe` (a boot
   module) with the session's id and the program's file name before the
   program. Its system calls: GalaConsoleHost(id, event) 0x7f3a (become
