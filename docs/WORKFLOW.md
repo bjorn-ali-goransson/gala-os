@@ -456,7 +456,11 @@ the modes, resets and errors.
   scenarios: drawing text roughly doubles kernel time under emulation.
 - **KVM**: QEMU uses KVM when `/dev/kvm` is available (near-native
   speed); otherwise TCG with one host thread per processor (multi-threaded
-  TCG), except `SINGLE_THREAD_TCG` scenarios.
+  TCG), except `SINGLE_THREAD_TCG` scenarios. TCG executes the
+  instructions the Intel way whatever vendor the guest's CPUID names, so
+  behaviour that differs between Intel and AMD only shows under KVM on
+  that vendor's host (CI's runners are AMD: an AMD-only bug is CI-only
+  here). The boot log's `cpu:` line names the vendor.
 - **Docker**: `cargo xtask docker-test [xtask args]` builds
   `docker/test.Dockerfile` (Ubuntu 24.04, QEMU, OVMF, xorriso, the
   pinned toolchain) and runs `cargo xtask test` (or the given arguments)

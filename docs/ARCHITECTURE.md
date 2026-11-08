@@ -174,7 +174,12 @@ observe them: kernel CS/SS `0x10`/`0x18`, user CS `0x33`, user SS `0x2b`,
 32-bit compat CS `0x23`, TSS `0x40`, and `0x53`, the running WOW64
 thread's TEB32 as FS for 32-bit code (written per CPU at each switch to
 such a thread: "Plan: WOW64"). This ordering is also exactly what
-SYSCALL/SYSRET require. The TSS provides IST stacks for #DF (IST1), NMI
+SYSCALL/SYSRET require. STAR's SYSRET base is `0x23` with its RPL:
+Intel's SYSRET forces RPL 3 into the SS it loads, AMD's loads base + 8
+as it is, so a base of `0x20` gives user mode SS `0x28` on AMD and the
+next IRETQ from an interrupt there raises #GP(0x28) (`gdt.rs`'s tests
+check both vendors' rules; the boot log's `cpu:` line names the
+vendor). The TSS provides IST stacks for #DF (IST1), NMI
 (IST2) and #MC.
 
 All 256 IDT vectors point at 16-byte stubs generated in `interrupts.rs`;
