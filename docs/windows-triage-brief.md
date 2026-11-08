@@ -16,8 +16,8 @@ under KVM, docs/windows-kvm-brief.md). Answer each on its issue (a
 comment with the result and any commit), tick off its checklist, and
 close it when it is done (a `kvm` issue once the Linux side has merged
 and gated the branch). A finding of your own that needs the Linux side,
-a regression for instance, is a new issue labelled `from-windows`. The
-notes files under user/windows/ are the history before this.
+a regression for instance, is a new issue labelled `from-windows`.
+Nothing of this goes into the repository as notes or message files.
 
 ## Why
 
@@ -70,22 +70,11 @@ The last group is what matters: find what Windows really does.
 
 ## Output
 
-`user/windows/triage.json`: one entry per non-zero program,
-`{ "program", "exit", "check", "source_line", "asserts", "windows",
-"class", "evidence", "note" }`, plus a short `triage.md` summary by
-class. Commit both with the `windows.json` they came from.
-
-## Notes from the Linux side
-
-`user/windows/notes-from-linux.md` answers each push of yours (newest
-first): read it after every pull.
-
-## Round 2
-
-The first round's fixes are in (ROADMAP WD lists them). Pull, run
-`run-all.ps1` again, and triage what still fails the same way; programs
-fixed for one check may now fail a later one. Also probe the open
-questions listed in ROADMAP WD "Next" item 1 (SetPriorityClass with
-other mixed values, WriteConsoleA, NtCreateTimer's unknown type, the
-user-callback faults, oleaut32_test and clusapi_test's last call), and
-record each in `user/windows/findings.json` as before.
+A sweep's data stays in version control, as the data `cargo xtask
+compare` reads: `user/windows/windows.json` and `windows-output.txt`
+from `run-all.ps1`, committed on your branch. Everything said about it
+goes on GitHub: the triage of a sweep as comments on its `sweep` issue
+(one per program, or one table: program, exit, check, source line,
+what it asserts, what Windows does, class, evidence), a probe's result
+on its `probe` issue, a finding of your own as a new issue labelled
+`from-windows`. No notes or findings files in the repository.

@@ -17,8 +17,8 @@ under KVM, docs/windows-kvm-brief.md). Answer each on its issue (a
 comment with the result and any commit), tick off its checklist, and
 close it when it is done (a `kvm` issue once the Linux side has merged
 and gated the branch). A finding of your own that needs the Linux side,
-a regression for instance, is a new issue labelled `from-windows`. The
-notes files under user/windows/ are the history before this.
+a regression for instance, is a new issue labelled `from-windows`.
+Nothing of this goes into the repository as notes or message files.
 
 ## Setting up
 
@@ -80,10 +80,9 @@ source is open and may be read).
 ## Handing back
 
 Commit fixes on `windows-kvm` with their tests and docs (ROADMAP item in
-place, ARCHITECTURE for design changes, PERF.md for numbers), and write
-what you found in `user/windows/kvm-notes.md`, newest first, as the
-triage notes do. The Linux side reads it, merges the branch, runs its
-full gate (`cargo xtask test`, every scenario) and answers in
-`user/windows/notes-from-linux.md`. Run `cargo xtask lint` before each
+place, ARCHITECTURE for design changes, PERF.md for numbers), and say
+what you found on the part's issue (#2 to #5, under #1). The Linux side
+merges the branch, runs its full gate (`cargo xtask test`, every
+scenario) and answers there. Run `cargo xtask lint` before each
 commit (the pre-commit hook does) and `cargo xtask lint --full` before
 each push (the pre-push hook does).

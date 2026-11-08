@@ -109,7 +109,7 @@ In order:
     conformance blockers (item 0) and BR stage 1's hotspots: gala boots
     there under KVM in WSL2, real Windows next door
     (`docs/windows-kvm-brief.md`; its findings in
-    `user/windows/kvm-notes.md`, fixes on branch `windows-kvm`, merged
+    GitHub issue #1 and its parts #2-#5, fixes on branch `windows-kvm`, merged
     and gated here). The same workloads (`bench`, the scenarios'
     programs with run-all's `ms` and `cargo xtask compare`, Chromium's
     page loads, Python) profiled on both, compared operation by
@@ -1758,12 +1758,9 @@ Next:
      AclRevision, AclSize, AceCount), before browser_api_test and gala
      follow (25H2 said SE_SACL_PRESENT); shell32_test's CoInitialize
      result now (did a shell call change the apartment?).
-     Round 5's open probes are user/windows/round5-analysis.md section
-     3 (kernel32_thread_test, controls_test, ole32_test, shlwapi_test,
-     user32_test, security_test, conpty_test, kernel32_misc_test and the
-     older ones it lists); its section 4 (winhttp/wininet, schannel,
-     console_window, tds, uia_chromium) and hostnet_test still need a
-     runner skip or a skip in the test.
+     The open probes are GitHub issues labelled `windows` and `probe`
+     (#6 Round 5's, #8 the older ones); the runner's skips and expected
+     exits are #7.
 2. The tests that need a setting run-all.ps1 cannot give say "skipped"
    without it (system_test, session_test: SYSTEM; restricted_test,
    disk_test, wow64_adv_test's view: an administrator; access, logon,
