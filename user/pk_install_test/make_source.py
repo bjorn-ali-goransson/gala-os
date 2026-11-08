@@ -57,13 +57,22 @@ def installer(name, data):
 def nsis_installer(version):
     """pknsis-<version>.exe from nsis/pknsis.nsi with makensis (NSIS 3,
     `apt install nsis`; the build is reproducible). Without makensis the
-    checked-in installer is kept."""
+    checked-in installer is written back unchanged, so the output is the
+    same either way."""
     name = f"pknsis-{version}.exe"
     path = os.path.join(OUT, "installers", name)
     makensis = shutil.which("makensis")
     if makensis is None:
+        if name not in KEPT:
+            sys.exit(
+                f"{name} is missing and makensis is not installed to rebuild it "
+                f"(apt install nsis); restore it with "
+                f"`git checkout -- user/pk_install_test/`"
+            )
         print(f"makensis not found: keeping {name}", file=sys.stderr)
-        return hashlib.sha256(KEPT[name]).hexdigest().upper()
+        # The bytes, not just the hash: the clean-up in main() has already
+        # removed the file they were read from.
+        return installer(name, KEPT[name])
     os.makedirs(os.path.dirname(path), exist_ok=True)
     subprocess.run(
         [

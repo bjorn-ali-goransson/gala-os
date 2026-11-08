@@ -1978,7 +1978,11 @@ about a minute under TCG. Read, in order:
   has the `amd64-unicode` stubs, so `Target amd64-unicode` gives an x64
   installer, which gala can run: there is no WOW64 for 32-bit ones; it
   has no amd64 plug-ins, so the script uses none). The build is
-  reproducible; without makensis the checked-in installers are kept.
+  reproducible; without makensis the checked-in installers are written
+  back from the working tree unchanged, so `export-tests` leaves the same
+  bytes either way (make_source.py removes and remakes `source/installers`
+  on every run, so keeping them means writing them back, not skipping
+  them; it stops with a message if one is missing and it cannot build it).
   Third-party installers are test subjects: they run inside QEMU (see
   "Third-party code on the host"). The
   boot test is `cargo xtask boot-test pk_install_nsis`; a missing import

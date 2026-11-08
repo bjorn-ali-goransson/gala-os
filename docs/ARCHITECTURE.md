@@ -270,6 +270,19 @@ address.
   aligned runs (DMA, large pages) use a linear scan. Double frees are
   rejected.
 - The first 1 MiB is never handed out (SMP trampolines and similar).
+- **The span and the memory are different numbers.** The bitmap spans
+  every frame up to the top of memory, holes included, and `frame_count`
+  is that span: a bound for the bitmap, not a quantity of memory. Above
+  about 2 GiB a PC's RAM is split below 2 GiB and above 4 GiB with the
+  PCI hole between, so the span is far larger than the memory (on a
+  3 GiB machine, 5 GiB of span against 2.57 GiB usable). `total_frames`,
+  and so `mm::frame_stats().1`, is the frames the allocator *manages*:
+  the usable ones, free or in use, counted in `from_memory_map` once the
+  usable regions are free and before the reserved ranges are claimed
+  (a reserved frame is in use, not unmanaged). Memory figures must use
+  that one, since the commit limit and both pool quotas are derived from
+  it (`nt::charge::limit`, `nt::quota::memory`); the span would make them
+  about twice the machine.
 - **Frames with more than one owner** (a Linux fork's copy-on-write
   pages): a `u16` per frame counts the owners beyond the first
   (`share`), from a table on the heap given to the allocator once the

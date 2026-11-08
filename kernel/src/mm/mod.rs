@@ -193,7 +193,10 @@ pub fn double_frees() -> u64 {
     DOUBLE_FREES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// `(free, total)` frames tracked by the allocator.
+/// `(free, managed)` frames: the second is the machine's memory, not the
+/// span the bitmap covers (ARCHITECTURE "Physical memory"). The commit
+/// limit, both pool quotas and KUSER_SHARED_DATA's NumberOfPhysicalPages
+/// are this figure.
 pub fn frame_stats() -> (u64, u64) {
     with_frames(|a| (a.free_frames(), a.total_frames())).unwrap_or((0, 0))
 }
@@ -203,7 +206,7 @@ pub fn frame_low_water() -> u64 {
     with_frames(|a| a.low_free_frames()).unwrap_or(0)
 }
 
-/// `(free, total, low-water)` if the allocator's lock is free (a state
+/// `(free, managed, low-water)` if the allocator's lock is free (a state
 /// dump from an NMI or a panic, which must not wait).
 pub fn try_frame_stats() -> Option<(u64, u64, u64)> {
     let guard = FRAMES.try_lock_untracked()?;
