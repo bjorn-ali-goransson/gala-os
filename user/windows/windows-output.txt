@@ -1,0 +1,449 @@
+﻿== abi_test  exit 0x00000000  18 ms
+abi_test: write ok
+abi_test: ok
+== access_test  exit 0x00000001  22 ms
+access_test: check 00000001 got 0000052e (line 389)
+== advapi32_test  exit 0x00000041  26 ms
+advapi32_test: check 00000041 got 00000005 (line 1430)
+== afd_poll_test  exit 0x00000000  124 ms
+afd_poll_test: ok
+== apc_test  exit 0x00000000  72 ms
+apc_test: ok
+== args_test  exit 0x00000000  19 ms
+args_test: ok
+== async_test  exit 0x00000000  46 ms
+async_test: ok
+== bcrypt_test  exit 0x00000000  32 ms
+bcrypt_test: ok
+== bench  exit 0x00000000  307 ms
+bench: cpu_loop ns_per_op 2
+bench: null_syscall ns_per_op 482
+bench: handle_create_close ns_per_op 1378
+bench: virtual_alloc_free_64k ns_per_op 2706
+bench: commit_decommit_page ns_per_op 4158
+bench: commit_decommit_page_4096_runs ns_per_op 1773
+bench: demand_zero_fault ns_per_op 560
+bench: section_map_unmap_64k ns_per_op 2747
+bench: image_load ns_per_op 173762
+bench: image_load_32m_untouched ns_per_op 307960
+bench: thread_create_exit ns_per_op 115037
+bench: null_syscall_200_threads ns_per_op 516
+bench: event_pingpong_same_cpu ns_per_op 3624
+bench: event_pingpong_cross_cpu ns_per_op 27582
+bench: done
+== browser_api_test  exit 0x00000017  265 ms
+browser_api_test: check 23 failed
+== busybox  exit 0x00000003  130 ms
+hello
+pipe=0
+aXc
+count=2
+== cert_test  exit 0x00000030  57 ms
+cert_test: check 00000030 got 00000001 (line 654)
+== clock_test  exit 0xc000041d  114 ms
+== clockcal_test  exit 0x00000000  5043 ms
+clockcal_test: mark 1 uptime_ms=2189320692
+clockcal_test: mark 2 uptime_ms=2189325713
+clockcal_test: slept 5021 ms
+clockcal_test: ok
+== clusapi_test  exit 0xc0000005  25 ms
+== cmd  exit 0xc0000139  22 ms
+== cmd_test  exit 0x00000004  267 ms
+cmd_test: check 00000004 got 00000004 (line 313)
+== com_test  exit 0x00000000  32 ms
+com_test: ok
+== comctl32_test  exit 0x00000038  95 ms
+comctl32_test: check 56 (line 319) failed
+== comdlg32_test  exit 0x00000000  290 ms
+comdlg32_test: ok
+== commit_test  exit 0x00000000  35 ms
+commit_test: ok
+== conhost  exit 0xc0000139  18 ms
+== conpty_test  exit 0x00000004  20063 ms
+conpty_test: child started
+child: not a console, error 6
+conpty_test: output was: \x1b[?9001h\x1b[?1004h
+conpty_test: failed check 4
+== console_test  exit 0x00000000  19 ms
+console_test: split-line
+console_test: ok
+== console_window_test  exit 0x00000001  19 ms
+Hello from a console window on gala
+[32mgreen text[0m and [1;31mbright red[0m
+UTF-8: ├ح├ج├╢ ├ر├▒
+console_window_test: printed
+console_window_test: no line
+== context_test  exit 0x00000000  170 ms
+context_test: ok
+== controls_test  exit 0x00000031  1047 ms
+controls_test: check 49 (line 225) failed
+== cow_test  exit 0x00000000  49 ms
+cow_test: ok
+== crash  exit 0xc0000005  20 ms
+crash: writing to address 0
+== cxx_eh_test  exit 0x00000000  20 ms
+cxx_eh_test: ok
+== dbghelp_test  exit 0x00000017  34 ms
+dbghelp_test: check 23 (line 197) failed
+== dir_test  exit 0x00000000  27 ms
+dir_test: ok
+== dirchange_test  exit 0x00000000  388 ms
+dirchange_test: ok
+== disk_test  exit 0x00000001  20 ms
+disk_test: check 00000001 got 00000005 (line 395)
+== dpapi_test  exit 0x00000000  23 ms
+dpapi_test: ok
+== dwrite_test  exit 0x00000000  26 ms
+dwrite_test: ok
+== exception_test  exit 0x00000000  21 ms
+exception_test: ok
+== file_test  exit 0x00000000  48 ms
+file_test: ok
+== filemap_test  exit 0x00000000  45 ms
+filemap_test: ok
+== fpu_test  exit 0x00000015  130 ms
+fpu_test: check 00000015 got 00001f80 (line 250)
+== gala  exit 0xc0000139  18 ms
+== gala_cli_test  exit 0x00000001  26 ms
+gala_cli_test: gala help -> fffe0003:
+gala_cli_test: check 00000001 got fffe0003 (line 936)
+== gdi32_test  exit 0x00000046  35 ms
+gdi32_test: check 70 (line 250) failed
+== go_exec  exit 0x00000000  66 ms
+go_exec: ok
+== go_exit  exit 0x00000003  22 ms
+go_exit: exiting with 3
+== go_gc  exit 0x00000000  44 ms
+go_gc: ok 68 collections
+== go_goroutines  exit 0x00000000  66 ms
+go_goroutines: ok 12 CPUs
+== go_hello  exit 0x00000000  20 ms
+Hello from Go on gala!
+== go_http  exit 0x00000000  27 ms
+go_http: loopback GET ok
+go_http: ok
+== go_os  exit 0x00000000  25 ms
+go_os: ok C:\Users\a\AppData\Local\Temp\claude\df47a826fe99350f\eada98e9-6bba-437a-a000-665d3c91bbc5\scratchpad\galaclone\gala-os\user\bin
+== go_time  exit 0x00000000  158 ms
+go_time: ok
+== gpu_stub_test  exit 0x00000002  889 ms
+gpu_stub_test: check 02 failed
+== guard_test  exit 0x00000000  45 ms
+guard_test: ok
+== gui_test  exit 0x00000017  53 ms
+gui_test: check 00000007 line 000002ad got 00000000
+gui_test: check 00000017 line 0000032f got 00000000
+== handover_k32_test  exit 0xc000041d  114 ms
+== handover_net_test  exit 0xc000041d  318 ms
+handover_net_test: listening on port 7
+== handover_test  exit 0x00000007  18 ms
+handover_test: failed check 00000007
+== hello  exit 0x00000000  17 ms
+Hello from user mode!
+== hostnet_test  exit 0x00000008  108 ms
+hostnet_test: failed at step 8
+== image_test  exit 0x00000000  33 ms
+image_test: ok
+== import_test  exit 0x00000000  18 ms
+import_test: ok
+== ioapc_test  exit 0x00000016  21 ms
+ioapc_test: check 00000016 got 00000000 (line 130)
+== iocp_test  exit 0x00000000  98 ms
+iocp_test: ok
+== iphlpapi_test  exit 0x00000000  21 ms
+iphlpapi_test: ok
+== ipv6_test  exit 0x00000000  2079 ms
+ipv6_test: ok
+== kernel32_clr_test  exit 0x00000084  32 ms
+kernel32_clr_test: check 00000084 got 00000000 (line 570)
+== kernel32_env_test  exit 0x00000000  19 ms
+kernel32_env_test: ok
+== kernel32_file_test  exit 0x00000029  33 ms
+kernel32_file_test: check 00000029 got 00000000 (line 418)
+== kernel32_locale_test  exit 0x00000055  19 ms
+kernel32_locale_test: check 00000055 got 00000061 (line 551)
+== kernel32_misc_test  exit 0x00000022  369 ms
+kernel32_misc_test: check 00000022 got 3c860000 (line 547)
+== kernel32_pool_test  exit 0x00000000  598 ms
+kernel32_pool_test: ok
+== kernel32_py_test  exit 0x00000000  47 ms
+kernel32_py_test: ok
+== kernel32_sync_test  exit 0x00000000  2110 ms
+kernel32_sync_test: ok
+== kernel32_sys_test  exit 0x00000000  21 ms
+kernel32_sys_test: ok
+== kernel32_system_test  exit 0x0000005a  29 ms
+kernel32_system_test: check 0000005a got 00000018 (line 631)
+== kernel32_test  exit 0x00000000  107 ms
+kernel32_test: hello from kernel32
+kernel32_test: ok
+== kernel32_thread_test  exit 0x00000036  28 ms
+kernel32_thread_test: check 00000036 got 10000000 (line 359)
+== keyed_event_test  exit 0x00000000  651 ms
+keyed_event_test: ok
+== kuser_test  exit 0x00000000  56 ms
+kuser_test: ok
+== ledger_test  exit 0x00000000  19 ms
+ledger_test: ok
+== loader_test  exit 0x0000001f  28 ms
+loader_test: check 0000001f got 00000012 (line 189)
+== lock_test  exit 0x00000000  240 ms
+lock_test: ok
+== logon_test  exit 0x00000001  23 ms
+logon_test: check 00000001 got 0000052e (line 320)
+== lsa_test  exit 0x00000000  31 ms
+lsa_test: skipped: needs SYSTEM (SeTcbPrivilege)
+== manifest_test  exit 0x00000000  22 ms
+manifest_test: ok
+== missing_import_test  exit 0xc0000139  18 ms
+== msvcrt_test  exit 0x00000000  58 ms
+msvcrt_test: _putws
+msvcrt_test: ok
+== netapi32_test  exit 0x00000000  27 ms
+netapi32_test: ok
+== nginx  exit 0x00000000  24 ms
+== object_test  exit 0x00000000  28 ms
+object_test: ok
+== ole32_test  exit 0x00000020  36 ms
+ole32_test: check 32 (line 451) failed
+== oleaut32_test  exit 0x0000006c  26 ms
+oleaut32_test: check 108 (line 403) failed
+== pdh_test  exit 0x00000000  505 ms
+pdh_test: ok
+== peb_test  exit 0x00000000  18 ms
+peb_test: ok
+== persist_test  exit 0x0000000e  20 ms
+persist_test: check 0000000e got b359ad23 (line 489)
+== pipe_test  exit 0x00000000  39 ms
+pipe_test: ok
+== pk_install_test  exit 0x00000001  23 ms
+pk_install_test: gala search hello --source C:\pk_source -> 0xfffe0003:
+pk_install_test: check 0x00000001 (search hello --source C:\pk_source) got 0xfffe0003 (line 507)
+pk_install_test: no install log
+== presenter_test  exit 0x00000000  23 ms
+presenter_test: skipped (GalaSession is gala's own)
+== prng_test  exit 0x00000000  24 ms
+prng_test: ok
+== process_test  exit 0x0000004a  287 ms
+process_test: child says hello through the inherited console
+process_test: child says hello through the inherited console
+process_test: check 0000004a got 00000000 (line 683)
+== profile_test  exit 0x00000001  22 ms
+profile_test: check 00000001 got 0000052e (line 210)
+== quota_test  exit 0x0000000a  11543 ms
+quota_test: handle limit at 16711680 handles
+quota_test: check 10 failed, got 16711680 (line 620)
+== registry_test  exit 0x00000064  20 ms
+registry_test: check 00000064 got 00000024 (line 813)
+== replay_test  exit 0x00000000  25 ms
+replay_test: random 38a728b52b32e7ce04027c8aca8b9c82
+replay_test: random 2b9c3a2a1d
+replay_test: counter 000013ea3a7f6371
+replay_test: counter 000013ea3a803cb9
+replay_test: time 01dd6f4520a8471f
+replay_test: ok
+== restricted_test  exit 0x00000002  19 ms
+restricted_test: check 00000002 got 000003e6 (line 367)
+== richedit_test  exit 0x0000000c  97 ms
+richedit_test: check 12 (line 151) failed
+== rpcrt4_test  exit 0x00000000  19 ms
+rpcrt4_test: ok
+== rtl_test  exit 0x00000000  33 ms
+rtl_test: ok
+== safepoint_test  exit 0x00000000  6317 ms
+safepoint_test: ok 00000258 safepoints, noise 0001f0ec
+== section_test  exit 0x00000000  28 ms
+section_test: ok
+== security_test  exit 0x00000021  21 ms
+security_test: check 00000021 got 00000000 (line 344)
+== seh_test  exit 0x00000033  18 ms
+seh_test: check 00000033 got 0000000000000080 (line 693)
+== session_test  exit 0x00000001  25 ms
+session_test: check 00000001 got 00000001 (line 436)
+== setupapi_test  exit 0x00000000  23 ms
+setupapi_test: ok
+== shell32_test  exit 0x00000038  1784 ms
+shell32_test: check 56 (line 520) failed
+== shlwapi_test  exit 0x000000ea  47 ms
+shlwapi_test: check 234 (line 242) failed
+== shootdown_test  exit 0x00000000  631 ms
+shootdown_test: ok 00000fa0
+== smp_test  exit 0x00000000  18 ms
+smp_test: 0000000c processors
+smp_test: ok
+== smpcow_test  exit 0x00000000  55 ms
+smpcow_test: ok
+== smpmem_test  exit 0x00000000  862 ms
+smpmem_test: ok
+== smprace_test  exit 0x00000000  2299 ms
+smprace_test: ok
+== smpsched_test  exit 0x00000000  50 ms
+smpsched_test: exchange context switches 00000000
+smpsched_test: ok
+== smpsem_test  exit 0x00000000  83 ms
+smpsem_test: ok
+== sshfwd_test  exit 0x00000000  44 ms
+sshfwd_test: ok
+== sspi_test  exit 0x00000047  40 ms
+sspi_test: check 00000047 got 00000001 (line 648)
+== startup_test  exit 0x00000000  19 ms
+startup_test: ok
+== straddle_test  exit 0x00000000  21 ms
+straddle_test: ok
+== symlink_test  exit 0x00000000  20 ms
+symlink_test: ok
+== sync_test  exit 0x00000000  22 ms
+sync_test: ok
+== sysinfo_test  exit 0x00000000  28 ms
+sysinfo_test: ok
+== system_test  exit 0x00000003  19 ms
+system_test: check 00000003 got 00000000 (line 287)
+== tds_test  exit 0x00000001  20 ms
+tds_test: first start of the instance
+tds_test: step 00000001 (CreateProcessW) got 0000010b
+== thread_test  exit 0x00000000  73 ms
+thread_test: ok
+== threadinfo_test  exit 0x00000017  19 ms
+threadinfo_test: check 00000017 got 00000001 (line 167)
+== timer_test  exit 0x00000000  377 ms
+timer_test: ok
+== tls_test  exit 0x00000006  21 ms
+tls_test: check 00000006 got b4d43c73 (line 298)
+== token_test  exit 0x00000085  29 ms
+token_test: check 00000085 got 000003e6 (line 563)
+== udp_test  exit 0x00000056  324 ms
+udp_test: check 00000056 got ffffff01 (line 517)
+== uia_chromium_test  exit 0x00000074  36 ms
+uia_chromium_test: check failed (line 116) at 15 ms: CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)
+== uia_test  exit 0x0000004c  12192 ms
+uia_test: check 76 (line 1665) failed
+== uipi_test  exit 0x00000001  76 ms
+uipi_test: check 38 (line 345) failed (last error 87)
+uipi_test child: check 30 (line 200) failed (last error 5)
+== unimplemented_test  exit 0x00000003  20 ms
+== user32_test  exit 0x00000086  254 ms
+user32_test: check 134 (line 890) failed
+== vm_test  exit 0x00000000  18 ms
+vm_test: ok
+== vmcycle_test  exit 0x00000000  42 ms
+vmcycle_test: ok
+== wait_test  exit 0x00000000  335 ms
+wait_test: ok
+== win32_misc_test  exit 0x00000049  89 ms
+win32_misc_test: check 00000049 got 00000007 (line 1206)
+== windows_across_test  exit 0x00000000  1013 ms
+windows_across_test: ok
+== winevent_test  exit 0x00000000  1356 ms
+winevent_test: own name change: 1 events
+winevent_test: own events ok
+winevent_test: child 0000000000ef0542: 34 events; create 1 show 2 name 18 hide 19 destroy 21 button 8
+winevent_test: ok
+== winsock_async_test  exit 0x0000001a  23 ms
+winsock_async_test: check 0000001a got 00000000 (line 483)
+== winsock_test  exit 0x00000000  6150 ms
+winsock_test: ok
+== winsta_test  exit 0x0000003a  21 ms
+winsta_test: check 0000003a got 000000d0 (line 470)
+== wow64_adv_test  exit 0x00000091  39 ms
+(line 0x000001f9) wow64_adv_test: check 00000091 failed, got 00000005
+== wow64_c_test  exit 0x00000000  55 ms
+wow64_c_test: hello
+wow64_c_test: ok
+== wow64_crt_test  exit 0x00000000  28 ms
+wow64_crt_test: hello 32 bit 1.50
+wow64_crt_test: ok
+wow64_crt_test: atexit ran
+== wow64_fs_test  exit 0x00000000  21 ms
+wow64_fs_test: ok
+== wow64_gui_test  exit 0x00000000  87 ms
+wow64_gui_test: ok
+== wow64_import_test  exit 0x0000000c  31 ms
+(line 0x00000119) wow64_import_test: check 0000000c failed, got 00000000
+== wow64_k32_test  exit 0x0000001c  28 ms
+wow64_k32_test: hello
+(line 0x000000cf) wow64_k32_test: check 0000001c failed, got 00000073
+== wow64_seh_test  exit 0x00000000  39 ms
+wow64_seh_test: ok
+== wow64_sock_test  exit 0x00000000  35 ms
+wow64_sock_test: ok
+== wow64_test  exit 0x000005c6  78 ms
+(line 0x000003a4) wow64_test: check 000005c6 failed, got 00000000 c0000004
+== wow64_thread_test  exit 0x00000001  30 ms
+(line 0x00000105) wow64_thread_test: check 00000001 failed, got 00000000 c0000022
+== xmodify_test  exit 0x00000000  210 ms
+xmodify_test: ok
+== xstate_test  exit 0x00000000  772 ms
+xstate_test: ok
+== busybox_files  exit 0x00000000  557 ms
+ls: 1.txt b 
+ls -l: 1 file
+find: a a/1.txt a/b a/b/2.txt a/b/3.txt 
+find -type f: 3
+grep -r: a/b/3.txt:four
+wc -l: 2
+cp -r: c/1.txt c/b/2.txt c/b/3.txt 
+cmp: same
+md5sum: 5bbf5a52328e7439ae6e719dfe712200  a/1.txt
+tar tf: a/ a/1.txt a/b/ a/b/2.txt a/b/3.txt 
+tar xf: three four 
+rm -r: []
+files: ok
+== busybox_script  exit 0x00000004  232 ms
+hello, gala
+status: 3
+for: 15
+while: 4
+case: text number other
+heredoc: 2 lines, line 2
+subst: c,b,a,
+args: 3 y
+if: elif
+subshell: 5
+script: ok
+== tcc  exit 0x0000007e  1066 ms
+unpacked=include/stdio.h
+busybox.exe : C:/Users/a/AppData/Local/Temp/claude/df47a826fe99350f/eada98e9-6bba-437a-a000-665d3c91bbc5/scratchpad/gal
+aclone/gala-os/user/bin/../tcc/tcc.sh: line 13: ./tcc.exe: Invalid argument
+At C:\Users\a\AppData\Local\Temp\claude\df47a826fe99350f\eada98e9-6bba-437a-a000-665d3c91bbc5\scratchpad\galaclone\gala
+-os\user\bin\run-all.ps1:301 char:13
++     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>& ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:/Users/a/AppD...nvalid argument:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+== tcc_make  exit 0x0000007e  976 ms
+busybox.exe : C:/Users/a/AppData/Local/Temp/claude/df47a826fe99350f/eada98e9-6bba-437a-a000-665d3c91bbc5/scratchpad/gal
+aclone/gala-os/user/bin/../tcc/make.sh: line 16: ./tcc.exe: Invalid argument
+At C:\Users\a\AppData\Local\Temp\claude\df47a826fe99350f\eada98e9-6bba-437a-a000-665d3c91bbc5\scratchpad\galaclone\gala
+-os\user\bin\run-all.ps1:301 char:13
++     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>& ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:/Users/a/AppD...nvalid argument:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+== lua  exit 0x0000007e  1364 ms
+busybox.exe : C:/Users/a/AppData/Local/Temp/claude/df47a826fe99350f/eada98e9-6bba-437a-a000-665d3c91bbc5/scratchpad/gal
+aclone/gala-os/user/bin/../lua/lua.sh: line 17: ./tcc.exe: Invalid argument
+At C:\Users\a\AppData\Local\Temp\claude\df47a826fe99350f\eada98e9-6bba-437a-a000-665d3c91bbc5\scratchpad\galaclone\gala
+-os\user\bin\run-all.ps1:301 char:13
++     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>& ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:/Users/a/AppD...nvalid argument:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+== sqlite  exit 0x0000007e  1028 ms
+busybox.exe : C:/Users/a/AppData/Local/Temp/claude/df47a826fe99350f/eada98e9-6bba-437a-a000-665d3c91bbc5/scratchpad/gal
+aclone/gala-os/user/bin/../sqlite/sqlite.sh: line 19: ./tcc.exe: Invalid argument
+At C:\Users\a\AppData\Local\Temp\claude\df47a826fe99350f\eada98e9-6bba-437a-a000-665d3c91bbc5\scratchpad\galaclone\gala
+-os\user\bin\run-all.ps1:301 char:13
++     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>& ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:/Users/a/AppD...nvalid argument:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+== tcc_self  exit 0x0000007e  973 ms
+unpacked=include/stdio.h
+busybox.exe : C:/Users/a/AppData/Local/Temp/claude/df47a826fe99350f/eada98e9-6bba-437a-a000-665d3c91bbc5/scratchpad/gal
+aclone/gala-os/user/bin/../tcc/tcc.sh: line 13: ./tcc.exe: Invalid argument
+At C:\Users\a\AppData\Local\Temp\claude\df47a826fe99350f\eada98e9-6bba-437a-a000-665d3c91bbc5\scratchpad\galaclone\gala
+-os\user\bin\run-all.ps1:301 char:13
++     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>& ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:/Users/a/AppD...nvalid argument:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
