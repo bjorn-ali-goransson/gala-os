@@ -84,6 +84,32 @@ pub fn init() {
 /// page table maps them: the address space itself may outlive the
 /// process, held by a reap or `run`), then its Linux state (`state::ended`).
 pub fn process_ended(process: &crate::nt::process::Process, status: crate::nt::status::NtStatus) {
+    // The robust futex lists of the threads that did not leave by exit(2)
+    // (exit_group, a signal), as each of Linux's exiting threads releases
+    // its own, before the memory goes.
+    if let Some(lx) = state::get(process.id) {
+        let mut lists: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+        let threads = lx.threads.lock();
+        let wanted = threads.iter().filter(|t| t.robust_list != 0).count();
+        if lists.try_reserve_exact(wanted).is_ok() {
+            for t in threads.iter().filter(|t| t.robust_list != 0) {
+                // Room reserved above.
+                let _ = crate::mm::heap::TryVec::try_push(
+                    &mut lists,
+                    (lx.linux_tid(t.tid), t.robust_list),
+                );
+            }
+        } else {
+            crate::warn!(
+                "lx: pid {} ended: no memory to release its threads' robust futex lists",
+                process.id
+            );
+        }
+        drop(threads);
+        for (tid, head) in lists {
+            release_robust_list(process, tid, head);
+        }
+    }
     if let Err(e) = mm::clear(process) {
         crate::warn!(
             "lx: pid {} ended: its memory not released (status {:#010x}); it goes with the process",
@@ -92,6 +118,23 @@ pub fn process_ended(process: &crate::nt::process::Process, status: crate::nt::s
         );
     }
     state::ended(process.id, status);
+}
+
+/// Releases thread `tid`'s robust futex list (`futex::release_robust`),
+/// logging what it held: a lock left owned by a dead thread is what
+/// explains a peer's hang, and a broken list what explains one not
+/// released.
+pub fn release_robust_list(process: &crate::nt::process::Process, tid: u64, head: u64) {
+    let r = futex::release_robust(process, tid, head);
+    if r.released != 0 || r.broken {
+        crate::info!(
+            "lx: pid {} thread {tid} ended holding {} robust locks ({} with waiters woken){}",
+            process.id,
+            r.released,
+            r.woken,
+            if r.broken { "; its list is broken (unreadable or too long)" } else { "" }
+        );
+    }
 }
 
 /// The state dump's Linux part: each process's threads (Linux and core

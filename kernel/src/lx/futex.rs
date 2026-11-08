@@ -33,6 +33,7 @@ use super::wait;
 use crate::mm::heap::{AllocError, TryVec};
 use crate::nt::ledger;
 use crate::nt::platform::{self, ThreadId};
+use crate::nt::process::Process;
 use crate::sync::IrqMutex;
 
 const WAIT: u64 = 0;
@@ -197,13 +198,106 @@ fn read_word(call: &Call<'_>, addr: u64) -> core::result::Result<u32, u16> {
 /// in memory processes share, its physical address (`SHARED`); else the
 /// process and the address, as Linux keys a private mapping's.
 fn key(call: &Call<'_>, addr: u64, private: bool) -> core::result::Result<Key, u16> {
+    key_of(&call.process, addr, private)
+}
+
+fn key_of(process: &Process, addr: u64, private: bool) -> core::result::Result<Key, u16> {
     if !addr.is_multiple_of(4) {
         return Err(EINVAL);
     }
-    if !private && let Some(frame) = crate::nt::section::shared_frame_at(&call.process, addr) {
+    if !private && let Some(frame) = crate::nt::section::shared_frame_at(process, addr) {
         return Ok(Key { pid: SHARED, addr: frame.start() + addr % crate::mm::PAGE_SIZE });
     }
-    Ok(Key { pid: call.process.id, addr })
+    Ok(Key { pid: process.id, addr })
+}
+
+/// A robust futex word's bits (futex(2) "Robust futexes").
+const FUTEX_WAITERS: u32 = 0x8000_0000;
+const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+/// The most entries of a robust list walked (a cycle in a corrupt list
+/// ends there), as Linux's ROBUST_LIST_LIMIT.
+const ROBUST_LIST_LIMIT: usize = 2048;
+
+/// What a thread's robust list held at its end (`release_robust`).
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Released {
+    /// Locks the thread held: marked FUTEX_OWNER_DIED.
+    pub released: u32,
+    /// Of those, ones with waiters: one woken each.
+    pub woken: u32,
+    /// The walk stopped at an unreadable entry or the limit.
+    pub broken: bool,
+}
+
+/// A Linux thread `tid` ends (exit, or its process's end): every lock on
+/// its robust list (set_robust_list(2): the head `head` holds the first
+/// entry, the futex word's offset from each entry, and the entry being
+/// taken or released, list_op_pending) whose word has its tid gets
+/// FUTEX_OWNER_DIED (FUTEX_WAITERS kept), and one waiter wakes if it had
+/// waiters, as a non-private wake (a robust lock may be in memory other
+/// processes share). A word written meanwhile by a waiter in another
+/// process may be lost (the update is a read and a write, not Linux's
+/// compare-and-exchange).
+pub fn release_robust(process: &Process, tid: u64, head: u64) -> Released {
+    let mut out = Released::default();
+    let read = |addr: u64| -> Option<u64> {
+        let mut b = [0u8; 8];
+        process.read(addr, &mut b).ok().map(|()| u64::from_le_bytes(b))
+    };
+    let Some(((first, offset), pending)) = read(head).zip(read(head + 8)).zip(read(head + 16))
+    else {
+        out.broken = true;
+        return out;
+    };
+    let mut entry = first;
+    let mut walked = 0;
+    while entry != head {
+        if walked == ROBUST_LIST_LIMIT {
+            out.broken = true;
+            break;
+        }
+        // The low bit marks a priority-inheritance lock (not kept apart).
+        let at = entry & !1;
+        // The next entry is read before the lock is released (a waiter may
+        // take and relink it at once).
+        let Some(next) = read(at) else {
+            out.broken = true;
+            break;
+        };
+        if at != pending & !1 {
+            release_one(process, tid, at.wrapping_add(offset), &mut out);
+        }
+        entry = next;
+        walked += 1;
+    }
+    if pending != 0 {
+        release_one(process, tid, (pending & !1).wrapping_add(offset), &mut out);
+    }
+    out
+}
+
+/// One robust lock's word at `addr`: released if `tid` holds it.
+fn release_one(process: &Process, tid: u64, addr: u64, out: &mut Released) {
+    let mut b = [0u8; 4];
+    if process.read(addr, &mut b).is_err() {
+        return;
+    }
+    let word = u32::from_le_bytes(b);
+    if u64::from(word & FUTEX_TID_MASK) != tid {
+        return;
+    }
+    let new = (word & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
+    if process.write(addr, &new.to_le_bytes()).is_err() {
+        return;
+    }
+    out.released += 1;
+    if word & FUTEX_WAITERS != 0
+        && let Ok(k) = key_of(process, addr, false)
+    {
+        out.woken += 1;
+        TABLE.lock().wake(k, 1, ALL, platform::wake);
+    }
 }
 
 /// futex(uaddr, op, val, timeout or val2, uaddr2, val3).

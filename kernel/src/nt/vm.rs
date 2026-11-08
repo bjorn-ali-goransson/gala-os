@@ -154,8 +154,15 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
             // An image page always has a frame (its view maps the private
             // ones at once): no memory to make it.
             None if looked_up && image => return Fault::OutOfMemory,
-            // No page there (past the section's end).
-            None if looked_up => return Fault::Denied,
+            // Past the section's end (a Linux file mapping's page beyond
+            // the file's last: SIGBUS), or no memory for the page.
+            None if looked_up => {
+                return match super::section::beyond_end(&views, addr) {
+                    Some(true) => Fault::Raise(NtStatus::IN_PAGE_ERROR),
+                    Some(false) => Fault::OutOfMemory,
+                    None => Fault::Denied,
+                };
+            }
             // The page or view changed since the lookup: look again (the
             // retry of a fault that found no memory).
             _ => return Fault::OutOfMemory,

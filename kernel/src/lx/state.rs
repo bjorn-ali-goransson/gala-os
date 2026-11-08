@@ -246,8 +246,8 @@ pub struct LxThread {
     /// set_tid_address / CLONE_CHILD_CLEARTID: at the thread's exit a 0
     /// is stored there and one futex waiter woken (pthread_join).
     pub clear_tid: u64,
-    /// set_robust_list's head (get_robust_list reads it back; a thread
-    /// that exits with entries on it is ledgered: they are not released).
+    /// set_robust_list's head (get_robust_list reads it back; the locks
+    /// on it are released when the thread ends: `futex::release_robust`).
     pub robust_list: u64,
 }
 

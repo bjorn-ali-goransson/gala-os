@@ -938,6 +938,15 @@ pub fn shared_frame_at(process: &Process, addr: u64) -> Option<Frame> {
     section_of(&section).writes_through().then_some(frame)
 }
 
+/// For `addr` in one of `views` (the process's, locked by the caller):
+/// whether its page is past the end of the view's section (no page
+/// there to map); None if it is in no view.
+pub fn beyond_end(views: &[View], addr: u64) -> Option<bool> {
+    let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
+    let offset = addr - v.base + v.offset;
+    Some(offset / PAGE_SIZE >= v.section().size.div_ceil(PAGE_SIZE))
+}
+
 /// Whether `addr` is in one of `views` (the process's, locked by the
 /// caller) of `section`.
 pub fn in_view_of(views: &[View], addr: u64, section: &ObjectRef) -> bool {

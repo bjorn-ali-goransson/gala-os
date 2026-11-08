@@ -8399,7 +8399,10 @@ The running parts (milestone 1; `lxrun=`):
     copy: `vm::copy_on_write`; a page never written shows later writes
     to the file, as Linux's page cache does); MAP_SHARED pages on a file
     open for writing write the file; pages past the file's last page
-    fault (Linux: SIGBUS; here the access violation's SIGSEGV).
+    fault with STATUS_IN_PAGE_ERROR (`vm::resolve_once`, from
+    `section::beyond_end`), which ends a Linux process with SIGBUS as
+    Linux's do (mmap_test; a system call reading or writing there
+    gets EFAULT).
     Errors as mmap(2) lists them: EBADF (no fd, O_PATH), ENODEV (a
     directory, pipe, socket or device; /dev/zero maps anonymous memory),
     EACCES (not open for reading; MAP_SHARED with PROT_WRITE without
@@ -8640,9 +8643,18 @@ The running parts (milestone 1; `lxrun=`):
   are ENOSYS, ledgered `linux clone flags missing`. set_robust_list
   keeps each thread's list head (EINVAL for a length other than 24);
   get_robust_list reads it back (0: the caller; another thread of the
-  process by its tid; ESRCH otherwise). The list is not walked at a
-  thread's exit (its futexes are not marked FUTEX_OWNER_DIED): an exit
-  with entries on it is ledgered `linux option missing`. rseq is not
+  process by its tid; ESRCH otherwise). The list is walked when the
+  thread ends (`futex::release_robust`; thread_test): at exit(2), and
+  for the threads still there when the process ends (exit_group, a
+  signal) before its memory goes. Each lock whose word holds the
+  thread's tid, list_op_pending's too, gets FUTEX_OWNER_DIED with
+  FUTEX_WAITERS kept, and one waiter wakes if it had waiters (a
+  non-private wake, so a waiter in another process sharing the memory
+  wakes); at most 2048 entries, an unreadable one ends the walk. The
+  word is read and written, not compared and exchanged as Linux does,
+  so a waiter's change from another process at that moment can be lost.
+  Logged: `lx: pid <p> thread <t> ended holding <n> robust locks (<w>
+  with waiters woken)` (and `its list is broken`). rseq is not
   implemented (ENOSYS, logged and ledgered): registering one means
   keeping its cpu_id current and aborting its critical sections on
   preemption, migration and signals; glibc then goes without (its
@@ -8815,8 +8827,8 @@ The running parts (milestone 1; `lxrun=`):
   timers, a script as interpreter, futex ops not supported, an execve
   with other threads running, an mmap of what is not a regular file,
   mremap's MREMAP_DONTUNMAP and old length 0, madvise advice not taken,
-  a resource limit set but not enforced, another process's limits, a
-  thread exiting with robust futexes, the shrinking of a mapped file,
+  a resource limit set but not enforced, another process's limits, the
+  shrinking of a mapped file,
   /proc paths other than /proc/self/exe, no random generator), `linux
   syscall stub` (ioctl, wait4's rusage); a page mremap could not move
   logs why (and `out of memory`).
@@ -8840,9 +8852,8 @@ The running parts (milestone 1; `lxrun=`):
   asked.
 - **TODO** (ROADMAP LX, LD): randomization (the stack gap, AT_RANDOM's
   source, the bases); the program and its interpreter mapped as file
-  views (shared text, as libraries are) instead of copied; rseq; robust
-  futex lists released at a thread's exit; SIGBUS for a file page past
-  the end and the shrinking of a mapped file (ramfs refuses it while
+  views (shared text, as libraries are) instead of copied; rseq; the
+  shrinking of a mapped file (ramfs refuses it while
   mapped, as NT's truncation is: EBUSY); `/proc/self/exe` is a node id
   (`LxProcess::exe`), not a held file, so a program deleted while it
   runs does not read as Linux's `<path> (deleted)`; the signal calls

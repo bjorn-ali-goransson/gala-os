@@ -2050,7 +2050,9 @@ the next breakthroughs).
   (exec_test); copy-on-write fork (forkmem_test, `lx_forkmem`: private
   pages shared read-only until written, `0 copied` in the fork line;
   MAP_SHARED anonymous memory and its shared futexes one for parent
-  and child).
+  and child); robust futex lists released when a thread ends, at exit
+  or its process's end (thread_test); SIGBUS for a file mapping's page
+  past the file's end (mmap_test).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2058,10 +2060,8 @@ the next breakthroughs).
      across processes, as the libraries already are) instead of copied
      at exec;
    - rseq (glibc registers one; ENOSYS, ledgered, until the scheduler
-     keeps its cpu_id and aborts its critical sections), robust futex
-     lists released at a thread's exit, SIGBUS for a file page past the
-     end, shrinking a mapped file (ramfs refuses it while mapped: EBUSY,
-     ledgered);
+     keeps its cpu_id and aborts its critical sections), shrinking a
+     mapped file (ramfs refuses it while mapped: EBUSY, ledgered);
    - a root file system image of a distribution's libraries (more than
      glibc), as the GTK step needs; what its programs reach, from the
      ledger (`linux syscall missing`).
