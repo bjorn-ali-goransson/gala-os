@@ -131,7 +131,7 @@ has a section under "Open items".
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
-| PT | Portability seams for a second architecture | planned | x86 specifics outside `kernel/src/arch` in 38 files (Linux personality 13, NT layer 7, handover 4, others); the ARM64 port itself is in "Later" |
+| PT | Portability seams for a second architecture | in progress | the audit done (by seam: the register model, the clock and timer, boot, x86-only by nature, user mode); the ARM64 port itself is in "Later" |
 | HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
 
 ### NT core services (done, by test)
@@ -331,13 +331,38 @@ clean seam and new code cannot add x86 coupling unnoticed. Not the port
 itself (the owner: later).
 
 **Next**:
-1. An audit, written down: each x86 assumption outside
-   `kernel/src/arch` (38 files: the Linux personality's x86-64 system
-   call ABI and arch_prctl, the NT layer's CONTEXT and system call
-   frames, the handover's saved registers, the TSC in time and
-   simulation, the state dump's registers), and in user mode (ntdll's
-   system call stubs, CONTEXT, unwinding, the x64 and x86 thunks), each
-   with where it belongs.
+1. The audit (done): the x86 assumptions outside `kernel/src/arch`, by
+   seam, with where each belongs:
+   - The register model: `UserRegs` (rip, rsp, 16 general registers,
+     rflags) used as such by the NT layer (`nt/process.rs`: a first
+     thread's start state, rcx = PEB and the shadow area;
+     `nt/syscalls.rs`: arguments 5 on from the user stack at
+     rsp + 0x28, NtGetContextThread/NtSetContextThread;
+     `nt/context.rs`: CONTEXT's AMD64 layout; `nt/thread.rs` and
+     `crashreport.rs`: the dump's and crash report's registers), the
+     Linux personality (`lx/signal.rs`, `sigcalls.rs`, `stack.rs`: the
+     x86-64 signal frame and ucontext; `lx/syscalls.rs`, `dispatch.rs`,
+     `errno.rs`: the x86-64 system call table and argument registers),
+     the handover (`handover/carry.rs`, `record.rs`, `mod.rs`: saved
+     registers in the state format) and the simulator (`sim.rs`:
+     SpinCapture's registers). Belongs in `arch`: a register frame type
+     with named accessors (instruction pointer, stack pointer, the
+     system call number and its arguments, the return value), CONTEXT
+     and the Linux signal frame per architecture.
+   - The clock and timer: `time.rs` (the local APIC's periodic timer,
+     the TSC), `clockcal.rs`, `flight.rs` (rdtsc stamps),
+     `platform.rs`. Belongs in `arch`: a cycle counter and a tick source.
+   - Boot: `lib.rs` (the xsave and APIC boot phases, local APIC ids),
+     `boot/limine.rs` and `boot/mod.rs` (UEFI x86_64), `statedump.rs`
+     (each CPU's rip and rsp at the NMI). Belongs in `arch`: the boot
+     phases' names and the per-CPU snapshot.
+   - By nature x86 only, kept so behind `cfg`: WOW64 (`nt/wow64.rs`,
+     `user/wow64`, the 32-bit DLLs); gala-um's host side
+     (`kernel/src/hosted`: a Linux x86_64 process's ucontext).
+   - User mode: ntdll's (`user/testntdll`) and ntrt's x64/x86 modules
+     (system call stubs, context, unwinding), kernel32's `x64.rs` and
+     `x86.rs` (a new thread's context); every other DLL is
+     architecture-neutral Rust.
 2. Kernel: those parts behind `arch` traits or modules (the register
    frame of a system call and an exception, a thread's saved context,
    the cycle counter, the personality's system call numbers and
