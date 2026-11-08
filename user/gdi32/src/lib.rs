@@ -971,13 +971,11 @@ pub extern "system" fn SetBkColor(hdc: Handle, color: u32) -> u32 {
         .unwrap_or(0xffff_ffff)
 }
 
-/// SetStretchBltMode: BLACKONWHITE (1) .. HALFTONE (4); the previous
-/// mode, 0 for an invalid one.
+/// SetStretchBltMode: the previous mode. Any value is kept, as on Windows
+/// (25H2 keeps 0, 5 and -1 and returns them, the last error untouched);
+/// StretchBlt samples the nearest pixel whatever it is.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetStretchBltMode(hdc: Handle, mode: i32) -> i32 {
-    if !(1..=4).contains(&mode) {
-        return 0;
-    }
     with_dc(hdc, |dc, _| core::mem::replace(&mut dc.stretch, mode)).unwrap_or(0)
 }
 

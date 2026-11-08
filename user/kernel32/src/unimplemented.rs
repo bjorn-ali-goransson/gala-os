@@ -40,10 +40,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     MapViewOfFileExNuma
     OpenJobObjectW
     OpenSemaphoreW
-    PathCchAppend
-    PathCchCombine
-    PathCchRemoveBackslash
-    PathCchRemoveExtension
     PrepareTape
     QueueUserWorkItem
     ReadConsoleOutputA

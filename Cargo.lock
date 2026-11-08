@@ -1093,6 +1093,7 @@ name = "kernelbase"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]

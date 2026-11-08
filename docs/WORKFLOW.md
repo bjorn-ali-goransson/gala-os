@@ -853,9 +853,12 @@ kernel32 through `raw-dylib`), run under gala and under Windows
 5. Run the program you are bringing up and read the `ledger:` lines:
    they list every missing import by name.
 6. Which DLL: what Windows' kernel32 exports goes in kernel32; what only
-   kernelbase has (its documentation says "DLL: Kernelbase.dll", or
-   Wine's kernel32.spec lacks it) goes in `user/kernelbase/src/lib.rs`,
-   named in its build.rs's `OWN`. Programs reach either through the core
+   kernelbase has (its documentation says "DLL: Kernelbase.dll", Wine's
+   kernel32.spec lacks it, or GetProcAddress on Windows says so: add it
+   to `export_split.rs`) goes in `user/kernelbase/src/` (`lib.rs`,
+   `path.rs`, `address_wait.rs`), named in its build.rs's `OWN`. A name
+   Windows' kernelbase has that Wine's spec lacks goes in
+   `tools/kernelbase_exports.py`'s MEASURED. Programs reach either through the core
    API sets: kernelbase forwards every name of Windows' list
    (`user/kernelbase/exports.txt`) to the DLL that has it, so a new
    kernel32 function is reachable through its set with nothing more.
@@ -3033,6 +3036,22 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### gala's DLLs
 
+- **A stub is invisible to GetProcAddress**: gala_stubs' exports live in
+  `.gstub`, which ntdll's GetProcAddress skips (a probing program takes
+  its fallback), while they are in the export directory. A test of which
+  names a DLL exports reads the export directory for presence
+  (`kernel32_test`'s `export_split.rs`) and GetProcAddress only for
+  absence and addresses.
+- **kernel32 builds kernelbase's `address_wait.rs` for itself**: its
+  locks wait on their words through a private copy with its own waiter
+  list. Keep it unexported in kernel32 and keep its users there to
+  kernel32's own words; a WakeByAddress* from one DLL never wakes a
+  waiter of the other.
+- **Which DLL exports a name is measured, not guessed**: Wine's specs
+  are the list's starting point, but Windows' kernel32 and kernelbase
+  split differently in places (`tools/kernelbase_exports.py`'s
+  MEASURED); a name moved between them goes in `export_split.rs` with
+  the measurement.
 - **Objects told apart by a leading magic must be `#[repr(C)]`**:
   Rust reorders a plain struct's fields, so "every key object starts
   with its magic" is false without it. bcrypt's RSA and ECDSA key

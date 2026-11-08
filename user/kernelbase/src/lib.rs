@@ -1,16 +1,42 @@
 //! gala's kernelbase.dll, the host of the core API sets (api-ms-win-core-*,
 //! ARCHITECTURE "API sets"): it exports what Windows' kernelbase exports,
 //! as forwarders to the gala DLL that implements each function (build.rs,
-//! exports.txt), and implements what only kernelbase has: CompareObjectHandles
-//! and the interrupt-time queries (Cygwin's runtime autoloads those).
-//! VirtualAlloc2 is not implemented.
+//! exports.txt), and implements what only kernelbase has (Windows' kernel32
+//! exports none of it): CompareObjectHandles, the interrupt-time queries
+//! (Cygwin's runtime autoloads those), WaitOnAddress and WakeByAddress*
+//! (`address_wait`, whose source kernel32 also builds for its own locks)
+//! and the PathCch functions (`path`). VirtualAlloc2 and four PathCch
+//! functions are not implemented.
 
 #![no_std]
 
+mod address_wait;
+mod path;
+
 /// MSVC-target codegen references this marker symbol directly, so it cannot
-/// come from an import.
+/// come from an import. On x86, ntrt's.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
+
+// The C runtime helpers the compiler calls (`path`'s buffers are copied,
+// zeroed and probed), ntdll's exports as kernel32 takes them. On x86 they
+// come from ntrt's x86 runtime.
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "C" {
+    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    // MSVC-target unwind tables reference it (gala's ntdll provides it).
+    fn __CxxFrameHandler3();
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
+}
+#[cfg(target_arch = "x86")]
+use ntrt as _;
 
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
@@ -73,7 +99,11 @@ unsafe extern "system" {
 /// TEB.LastErrorValue := RtlNtStatusToDosError(status).
 fn set_last_error(status: u32) {
     // SAFETY: a plain function call.
-    let error = unsafe { RtlNtStatusToDosError(status) };
+    set_last_error_code(unsafe { RtlNtStatusToDosError(status) });
+}
+
+/// TEB.LastErrorValue := error.
+fn set_last_error_code(error: u32) {
     // SAFETY: the running thread's TEB (LastErrorValue at 0x68, 0x34 in
     // the 32-bit TEB).
     unsafe {
@@ -100,8 +130,44 @@ pub extern "system" fn CompareObjectHandles(first: usize, second: usize) -> i32 
     1
 }
 
+/// WaitOnAddress(Address, CompareAddress, AddressSize, dwMilliseconds):
+/// waits while the value at Address equals the one at CompareAddress, until
+/// a WakeByAddress* call for Address (or a spurious wake) or the timeout
+/// (FALSE, ERROR_TIMEOUT). Sizes 1, 2, 4 and 8.
+#[unsafe(no_mangle)]
+pub extern "system" fn WaitOnAddress(
+    address: *const core::ffi::c_void,
+    compare: *const core::ffi::c_void,
+    size: usize,
+    ms: u32,
+) -> i32 {
+    match address_wait::wait(address, compare, size, ms) {
+        Ok(()) => 1,
+        Err(error) => {
+            set_last_error_code(error);
+            0
+        }
+    }
+}
+
+/// WakeByAddressSingle(Address): wakes one thread waiting on Address.
+#[unsafe(no_mangle)]
+pub extern "system" fn WakeByAddressSingle(address: *const core::ffi::c_void) {
+    address_wait::wake(address, false);
+}
+
+/// WakeByAddressAll(Address): wakes every thread waiting on Address.
+#[unsafe(no_mangle)]
+pub extern "system" fn WakeByAddressAll(address: *const core::ffi::c_void) {
+    address_wait::wake(address, true);
+}
+
 gala_stubs::unimplemented_exports!("kernelbase.dll":
     VirtualAlloc2
+    PathCchAppend
+    PathCchCombine
+    PathCchRemoveBackslash
+    PathCchRemoveExtension
 );
 
 #[panic_handler]

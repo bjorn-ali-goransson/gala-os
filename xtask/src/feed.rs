@@ -21,9 +21,11 @@ use tuf::{Client, MetaFile, Release, RoleKeys, Target};
 const DAY: i64 = 86400;
 /// How long each role's metadata stays valid. Timestamp and snapshot are
 /// signed with online keys and re-signed by `refresh`; targets at every
-/// release; root at a key ceremony.
-const ROOT_DAYS: i64 = 730;
-const TARGETS_DAYS: i64 = 365;
+/// release. Root is short-lived too (ROADMAP R8: every key is in CI for
+/// now, and a short root lets a later move of root offline reach every
+/// client within weeks); CI re-signs it monthly.
+const ROOT_DAYS: i64 = 90;
+const TARGETS_DAYS: i64 = 30;
 const SNAPSHOT_DAYS: i64 = 7;
 const TIMESTAMP_DAYS: i64 = 1;
 /// Root keys and how many must sign root.

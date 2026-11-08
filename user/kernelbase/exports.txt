@@ -1,5 +1,6 @@
 # Windows' kernelbase.dll exports (Wine 78e52205d9b9ac1c7e6f55fc613b882f1ad093d9, dlls/kernelbase/kernelbase.spec)
-# and the gala DLL each is forwarded to; written by tools/kernelbase_exports.py.
+# with those 25H2 adds (the tool's MEASURED), and the gala DLL each is forwarded to;
+# written by tools/kernelbase_exports.py.
 # name target arch
 AccessCheck advapi32 all
 AccessCheckAndAuditAlarmW advapi32 all
@@ -90,6 +91,7 @@ CharUpperW user32 all
 CheckGroupPolicyEnabled kernel32 all
 CheckRemoteDebuggerPresent kernel32 all
 CheckTokenMembership advapi32 all
+CheckTokenMembershipEx kernel32 all
 ChrCmpIA shlwapi all
 ChrCmpIW shlwapi all
 ClearCommBreak kernel32 all
@@ -304,6 +306,7 @@ FindVolumeClose kernel32 all
 FlsAlloc kernel32 all
 FlsFree kernel32 all
 FlsGetValue kernel32 all
+FlsGetValue2 kernel32 all
 FlsSetValue kernel32 all
 FlushConsoleInputBuffer kernel32 all
 FlushFileBuffers kernel32 all
@@ -1163,6 +1166,7 @@ SetFileApisToOEM kernel32 all
 SetFileAttributesA kernel32 all
 SetFileAttributesW kernel32 all
 SetFileInformationByHandle kernel32 all
+SetFileIoOverlappedRange kernel32 all
 SetFilePointer kernel32 all
 SetFilePointerEx kernel32 all
 SetFileSecurityW advapi32 all
@@ -1308,6 +1312,7 @@ TerminateThread kernel32 all
 TlsAlloc kernel32 all
 TlsFree kernel32 all
 TlsGetValue kernel32 all
+TlsGetValue2 kernel32 all
 TlsSetValue kernel32 all
 TraceEvent advapi32 all
 TraceMessage advapi32 all

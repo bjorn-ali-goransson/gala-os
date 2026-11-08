@@ -2367,7 +2367,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 
 | Role | DLLs |
 |---|---|
-| core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles and QueryInterruptTime and friends; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
+| core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles, PathCch, WaitOnAddress and interrupt-time functions, which Windows' kernel32 lacks; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
 | C runtime | msvcrt (mingw-w64 programs' C runtime) |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
@@ -2443,10 +2443,29 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   `tools/kernelbase_exports.py`), each name a forwarder to the gala DLL
   that implements it: the DLL Wine's specs list it in (advapi32,
   version, shlwapi, user32), else kernel32, which implements the kernel32
-  family and, until each is moved, what only kernelbase has. kernelbase
-  implements itself what is kernelbase's alone and documented so
-  (CompareObjectHandles, "DLL: Kernelbase.dll"; kernel32 no longer
-  exports it) and the interrupt-time queries (build.rs's OWN). A
+  family, plus the names Windows 11 25H2's kernelbase has that the spec
+  lacks (the tool's MEASURED: FlsGetValue2 and TlsGetValue2, one
+  function behind both DLLs as on Windows; CheckTokenMembershipEx,
+  SetFileIoOverlappedRange). kernelbase implements itself (build.rs's
+  OWN) what is kernelbase's alone, which kernel32 does not export:
+  CompareObjectHandles (documented "DLL: Kernelbase.dll") and, as
+  measured on 25H2, the PathCch functions (`path.rs`; PathCchAppend,
+  PathCchCombine, PathCchRemoveBackslash and PathCchRemoveExtension are
+  stubs), WaitOnAddress and WakeByAddressSingle/All, and the
+  interrupt-time queries. MapUserPhysicalPagesScatter is kernel32's
+  alone (absent from the spec too). Test: `kernel32_test` and
+  `wow64_k32_test` (`export_split.rs`: presence read from each DLL's
+  export directory, absence as GetProcAddress NULL too). The address
+  waits are one source, `kernelbase/src/address_wait.rs`, built by two
+  DLLs: kernelbase exports it; kernel32 builds its own copy (`#[path]`,
+  not exported) for its SRW locks, condition variables and InitOnce.
+  Each copy has its own waiter list and keyed event, which is correct
+  because an address is always waited on and woken through the same
+  DLL (a kernel32 lock word only by kernel32's own code, a program's
+  address only through kernelbase's exports); that is the invariant
+  that keeps the two apart (neither DLL may export or forward the other's
+  copy). Calling kernelbase from kernel32 instead would make kernel32
+  import kernelbase, which it does not (below). A
   forwarder to a function gala lacks resolves to nothing: GetProcAddress
   is NULL and an import of it is a missing export in the ledger (under
   the API set's name), as an absent export would be; it works once the
@@ -5174,7 +5193,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   borders outside it are like Windows 11's invisible resize borders);
   the desktop window is made again when the frame changes. Test:
   `user32_test` (custom_frame). Limits: uneven borders take the left one
-  (ledger). A left-button press in such a window goes first to its
+  (ledger); gala's own frame has 1-pixel sides, Windows 11's
+  WS_OVERLAPPEDWINDOW 8 (a 320-wide window's client is 318 here, 304
+  there; user32_test asserts only that WM_SIZE and GetClientRect agree). A left-button press in such a window goes first to its
   WM_NCHITTEST (on its thread, posted GALA_WM_NCDOWN): HTCAPTION makes the
   desktop drag it (GalaWindowDrag, 0x7f54: while the button stays down;
   logged), a border (HTLEFT..HTBOTTOMRIGHT) a resize (GalaWindowResize,
@@ -5203,11 +5224,15 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (TRUE) and WM_ACTIVATE (WA_ACTIVE or WA_CLICKACTIVE, lParam the old
   one); DefWindowProc's WM_ACTIVATE gives a window that is not minimized
   the focus. ShowWindow activates except with SW_SHOWNOACTIVATE,
-  SW_SHOWMINNOACTIVE and SW_SHOWNA; a click activates its window on the
+  SW_SHOWMINNOACTIVE and SW_SHOWNA; SetWindowPos without SWP_NOACTIVATE
+  (or SWP_HIDEWINDOW) activates a top-level window that is not active,
+  shown or not, as Windows 11 does a never-shown window's first one: a
+  second WM_WINDOWPOSCHANGING (SWP_NOMOVE | SWP_NOSIZE, for the raise to
+  the top), then the activation, before WM_WINDOWPOSCHANGED; a click activates its window on the
   window's thread before the click is dispatched (posted
   GALA_WM_ACTIVATE); popups (menus, drop-down lists) are never
   activated. Chromium's views take keys only once their window is
-  activated. Test: `user32_test` (activation). TODO: another process's
+  activated. Test: `user32_test` (activation, positions). TODO: another process's
   window becoming active does not deactivate ours (the desktop does not
   say so yet); no WM_ACTIVATEAPP.
 - **The display** (`monitor.rs`): one monitor (a constant HMONITOR), the
@@ -5269,7 +5294,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   EndDeferWindowPos applies them in order with SetWindowPos.
 - Not yet: WS_CLIPCHILDREN/CLIPSIBLINGS (overlapping siblings paint in
   Z order only when invalidated together), WM_PARENTNOTIFY,
-  WM_NCCALCSIZE and child borders, owned windows.
+  WM_NCCALCSIZE and child borders, owned windows; SetWindowPos's
+  WM_GETMINMAXINFO and WM_NCCALCSIZE on a resize (Windows sends both
+  after the first WM_WINDOWPOSCHANGING).
 
 #### Window icons, icons and cursors
 
@@ -5700,9 +5727,10 @@ then riched20.dll).
   StretchDIBits read 1/4/8 bits with palettes, 16 bits as 5-5-5, 24 and
   32, either row order.
 - **Blits**: PatBlt, BitBlt and StretchBlt (nearest pixel, mirroring;
-  SetStretchBltMode is kept) evaluate any ternary raster operation from
-  its truth table; overlapping copies run in the safe direction. MaskBlt
-  picks the foreground or background ROP3 by the monochrome mask.
+  SetStretchBltMode keeps any value, unchecked, as Windows does)
+  evaluate any ternary raster operation from its truth table;
+  overlapping copies run in the safe direction. MaskBlt picks the
+  foreground or background ROP3 by the monochrome mask.
   GdiAlphaBlend by the BLENDFUNCTION formulas (premultiplied per-pixel
   alpha with AC_SRC_ALPHA, the constant alpha otherwise; FALSE when the
   source rectangle leaves the source surface), GdiTransparentBlt (a
@@ -11011,12 +11039,12 @@ update client will check them with the same `Client`.
   releases). Uploads go blobs, targets, snapshot, then timestamp, the
   one file a client reads first.
 - **Roles and keys** (Ed25519, key id = SHA-256 of the key object's
-  canonical JSON): root (3 keys, threshold 2, offline; root N+1 must
+  canonical JSON): root (3 keys, threshold 2; in CI's secrets for now, ROADMAP R8; root N+1 must
   carry a threshold of root N's root keys and of its own), targets (the
   release key: each file's length and SHA-256, the release number and
   rollback floor in `custom`), snapshot (the targets metadata's version,
-  length and hash), timestamp (the snapshot's). Expiry: root 730 days,
-  targets 365, snapshot 7, timestamp 1; `feed refresh` re-signs snapshot
+  length and hash), timestamp (the snapshot's). Expiry: root 90 days,
+  targets 30, snapshot 7, timestamp 1; `feed refresh` re-signs snapshot
   and timestamp on a schedule (online keys), so a client can tell a
   frozen feed (expired timestamp) from a quiet one (a new timestamp,
   same snapshot).
