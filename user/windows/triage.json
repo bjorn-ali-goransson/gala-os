@@ -361,10 +361,10 @@
       "asserts": "c.ok(!(*sa).data.is_null() && (*sa).element_size == 4, 0)?;",
       "certainty": "exact (user\\com_test\\src\\main.rs:736, the line the report names)",
       "report_line": "com_test: check 0000006e got 00000000 (line 736)",
-      "windows": null,
+      "windows": "SafeArrayAllocDescriptorEx(VT_I4, 1) succeeds and sets fFeatures to 0x0080 (FADF_HAVEVARTYPE) with the VARTYPE 3 in the four bytes before the descriptor, but leaves cbElements at 0. SafeArrayAllocData then succeeds and gives a non-NULL pvData, and cbElements is still 0. SafeArrayGetVartype reads VT_I4 back correctly.",
       "class": "expectation",
-      "evidence": "needs a probe: what does this machine do here?",
-      "note": null
+      "evidence": "probed here, recording cbElements, fFeatures, the VARTYPE at -4 and pvData after each call, as the analysis asked.",
+      "note": "A real divergence, and a narrow one: of the two things check 110 asserts, pvData != NULL holds and cbElements == 4 does not. This build does not derive the element size from the VARTYPE, so SafeArrayAllocData allocated three elements of zero bytes. gala filling cbElements in is the wrong half to keep."
     },
     {
       "program": "comctl32_test",
@@ -426,10 +426,10 @@
       "asserts": "CHECK(index_info(self, &info, 0));",
       "certainty": "exact (user\\dbghelp_test\\main.c:137, the line the report names)",
       "report_line": "dbghelp_test: check 7 (line 137) failed",
-      "windows": null,
+      "windows": "SymSrvGetFileIndexInfoW fails with ERROR_BAD_EXE_FORMAT (193) on an image that has no debug directory, and succeeds on one that has any entry at all. It also requires sizeofstruct to be exactly 1608; 1604, 1607, 1609, 0 and 4096 all give ERROR_INVALID_PARAMETER.",
       "class": "expectation",
-      "evidence": "needs a probe: what does this machine do here?",
-      "note": null
+      "evidence": "probed here. dbghelp_test.exe and user32_test.exe, both C tests, have an empty debug directory (rva 0, size 0) and fail with 193. commit_test.exe has one 28-byte entry, the single IMAGE_DEBUG_DIRECTORY that /Brepro writes, and succeeds; so do kernel32.dll (112 bytes of entries) and an ordinary python.exe. The test's own struct is the documented one and does come to 1608, so sizeofstruct is not the problem here.",
+      "note": "The test calls it on its own file, which is the one case that cannot work: the C tests are built by user/<test>/build.sh without /Brepro, so they carry no debug directory, while the Rust tests get one from the linker flags in .cargo/config.toml. Either give the C builds a debug directory or have the test ask about a file that has one. Not a divergence in the API."
     },
     {
       "program": "disk_test",

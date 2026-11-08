@@ -23,7 +23,8 @@
     "A correction worth keeping in view: the registry_test finding above was wrong when first reported, because the probe passed a zero-extended predefined key rather than the sign-extended one the x64 SDK defines, and the two behave differently. A probe of a handle-like constant has to use the exact encoding the header produces, and \"with a control\" did not catch it, since the control was an ordinary opened key rather than the other encoding of the same key.",
     "Round 3 (binaries from 73e727e8, every test printing its failing check's line): kernel32_sync_test, kernel32_sys_test and smpsched_test pass. registry_test moved from check 39 to 100, kernel32_thread_test from 36 to 50, threadinfo_test from 23 back to 14. 68 of 103 entries are mapped from the report's own (line L) and none are counted guesses any more. exit 0 went 76 -> 73, which is the three fixes less bench and the five tcc scripts, all six lost to Defender rather than to code.",
     "A correction: I reported after the first Round 3 attempt that the fixes had had no effect and that the export looked stale. Both were wrong, and from the same cause: that run died on a stderr line before writing windows.json, so I compared the Round 2 report against itself. The three fixes above work. The lesson is to check a report's own timestamp before comparing it, which costs one line.",
-    "Round 3 probes (user/windows/round3-analysis.md asked for 19): the five answered so far are gdi32_test, shell32_test, shlwapi_test, sysinfo_test and udp_test, above. run-all.ps1 now also writes every program's whole output to windows-output.txt beside the report, which is what the conpty_test, wow64_k32_test, quota_test and clusapi_test sections asked for ('capture the full stdout') without needing a change to those tests."
+    "Round 3 probes (user/windows/round3-analysis.md asked for 19): the five answered so far are gdi32_test, shell32_test, shlwapi_test, sysinfo_test and udp_test, above. run-all.ps1 now also writes every program's whole output to windows-output.txt beside the report, which is what the conpty_test, wow64_k32_test, quota_test and clusapi_test sections asked for ('capture the full stdout') without needing a change to those tests.",
+    "Round 3 probes, second batch: com_test and dbghelp_test above, making seven of the nineteen answered (with gdi32_test, shell32_test, shlwapi_test, sysinfo_test and udp_test). The remaining twelve need a window and a message loop (user32_test, controls_test, comctl32_test), a COM server (ole32_test, uia_test), overlapped sockets (winsock_async_test), a 32-bit process (wow64_thread_test), or the program's own instrumentation (quota_test, conpty_test, browser_api_test, wow64_k32_test, clusapi_test), for which windows-output.txt now carries what they print."
   ],
   "peb_test": {
     "windows": "Passes now (exit 0), the build pin having been relaxed.",
@@ -312,5 +313,17 @@
     "class": "expectation",
     "evidence": "probed here on two UDP sockets, one bound to 0.0.0.0:0 and one untouched.",
     "note": "A real divergence in ordering rather than in the option: the test sets it on an already-bound socket. The 0xffffffff it reported is setsockopt's -1."
+  },
+  "com_test": {
+    "windows": "SafeArrayAllocDescriptorEx(VT_I4, 1) succeeds and sets fFeatures to 0x0080 (FADF_HAVEVARTYPE) with the VARTYPE 3 in the four bytes before the descriptor, but leaves cbElements at 0. SafeArrayAllocData then succeeds and gives a non-NULL pvData, and cbElements is still 0. SafeArrayGetVartype reads VT_I4 back correctly.",
+    "class": "expectation",
+    "evidence": "probed here, recording cbElements, fFeatures, the VARTYPE at -4 and pvData after each call, as the analysis asked.",
+    "note": "A real divergence, and a narrow one: of the two things check 110 asserts, pvData != NULL holds and cbElements == 4 does not. This build does not derive the element size from the VARTYPE, so SafeArrayAllocData allocated three elements of zero bytes. gala filling cbElements in is the wrong half to keep."
+  },
+  "dbghelp_test": {
+    "windows": "SymSrvGetFileIndexInfoW fails with ERROR_BAD_EXE_FORMAT (193) on an image that has no debug directory, and succeeds on one that has any entry at all. It also requires sizeofstruct to be exactly 1608; 1604, 1607, 1609, 0 and 4096 all give ERROR_INVALID_PARAMETER.",
+    "class": "expectation",
+    "evidence": "probed here. dbghelp_test.exe and user32_test.exe, both C tests, have an empty debug directory (rva 0, size 0) and fail with 193. commit_test.exe has one 28-byte entry, the single IMAGE_DEBUG_DIRECTORY that /Brepro writes, and succeeds; so do kernel32.dll (112 bytes of entries) and an ordinary python.exe. The test's own struct is the documented one and does come to 1608, so sizeofstruct is not the problem here.",
+    "note": "The test calls it on its own file, which is the one case that cannot work: the C tests are built by user/<test>/build.sh without /Brepro, so they carry no debug directory, while the Rust tests get one from the linker flags in .cargo/config.toml. Either give the C builds a debug directory or have the test ask about a file that has one. Not a divergence in the API."
   }
 }
