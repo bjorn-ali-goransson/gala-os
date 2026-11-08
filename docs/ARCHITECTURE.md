@@ -8926,6 +8926,119 @@ tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
 never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
 AT_MINSIGSTKSZ).
 
+## Plan: Linux applications on the desktop (Wayland)
+
+ROADMAP LD steps 2-4: graphical Linux programs on shasha beside Windows
+programs. Linux desktop programs draw through a display server: GTK 4
+and Qt 6 speak Wayland natively, and X11-only programs reach Wayland
+through Xwayland. gala implements a Wayland server, not an X server.
+Sources: the Wayland protocol's XML and documentation, and wayland-protocols'
+XML (MIT), read as specifications; libwayland, weston and GTK as
+open-source references (CLEAN_ROOM "Linux"). Nothing of them is copied
+into the kernel.
+
+### Where the server runs
+
+**In the kernel, beside the compositor, for now.** shasha's compositor and
+window state are in the kernel (`nt::winstate`, `nt::desktop`), so a
+Wayland surface becomes a `winstate` window directly. Its pixels are
+copied from the client's shared-memory buffer, which is already a kernel
+section, and the input it gets is the desktop's own. A user-mode server
+would need a window system call surface for Linux processes, and a second
+copy of every frame. When ROADMAP SH moves the compositor to user mode,
+the Wayland server moves with it, as one more client of the same
+window-state interface.
+
+The cost is a protocol parser in the kernel that reads untrusted client
+messages. It is bounded and isolated like the other ABI parsers:
+- **The wire format** (message header, argument encoding, the interfaces'
+  request and event tables, generated from the protocol XML at build
+  time) is a `no_std` crate of its own, `kernel/wl_abi`, as `lx_abi` and
+  `afd_abi` are. It is host-tested, and is the first target of the fuzzing
+  that OBSERVABILITY plans.
+- **Limits**, each one charged to the client process's quota
+  ("Resource limits"): a message is at most 4096 bytes (libwayland's own
+  limit), a message carries at most 28 file descriptors, there are at most
+  4096 objects per client, and shm pools are limited in size.
+- **Any malformed message** is a protocol error: `wl_display.error`, then
+  the client is disconnected, as Wayland specifies. It is logged and goes
+  in the ledger. The kernel never panics on client input.
+
+### Prerequisites in the LX layer
+
+- **`AF_UNIX` stream sockets**: socket, bind to a path, listen, accept,
+  connect, socketpair. They carry ancillary data: `SCM_RIGHTS` (file
+  descriptors move between processes as references to the same open
+  file) and `SO_PEERCRED`. Wayland's socket is
+  `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` (`/run/user/<uid>/wayland-0`). The
+  socket's file-system node is a core object, so seam 5 (shared core
+  objects) is the place for it. D-Bus, which GTK also opens, needs the same
+  sockets.
+- **`memfd_create`** with `ftruncate`, `mmap(MAP_SHARED)`, and `F_ADD_SEALS`
+  as far as clients use it: an anonymous file whose pages are one section,
+  shared by every process that maps it. LD step 1's file views provide the
+  mapping. The server reads a `wl_shm_pool` through the same section, with
+  no copy until composition.
+- Each prerequisite is test first, in the corpus: a `unix_test` and a
+  `memfd_test` against real Linux transcripts.
+
+### Objects and how they map
+
+| Wayland | gala |
+|---|---|
+| a client connection | a `wl::Client` owned by the server: the socket, the client's process, its object table, its quota |
+| `wl_compositor`, `wl_surface` | a surface holds its committed state (buffer, damage, frame callbacks, input region); it is a window only once a role gives it one |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process: title (`set_title`), app id, minimum and maximum size, configure/ack, close (the desktop's close button sends `xdg_toplevel.close`) |
+| `xdg_popup` | a frameless owned window, as user32's popups are (menus) |
+| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a view of the pool's memfd section. ARGB8888 and XRGB8888, which are shasha's 0x00RRGGBB with alpha ignored for opaque windows |
+| `wl_surface.commit` | the damaged rows are copied from the buffer into the window's client pixels. `wl_buffer.release` goes out after the copy (the client may reuse the buffer at once), and `frame` callbacks are answered after the next composition |
+| `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for that window: enter and leave from focus and the pointer, motion, buttons as evdev codes, axis from the wheel. Keys go out as evdev key codes, mapped from the desktop's scan codes, with an XKB keymap (a fixed US keymap in text form, sent as a memfd) |
+| `wl_output` | each presenter's screen: size, scale 1 |
+| `zxdg_decoration_manager_v1` | offered with server-side decoration preferred, so a Linux window wears shasha's frame like a Windows window does; a client that insists on client-side decorations gets a frameless window |
+
+Later: `wl_data_device` (the clipboard, bridged to the Windows clipboard
+so copy and paste works across personalities), `wp_viewporter`,
+fractional scale, `xdg_activation`, and `linux-dmabuf` once GPU G2's
+lavapipe/llvmpipe serve Linux clients through EGL.
+
+### Sessions
+
+Each session's desktop has its own Wayland socket, under its user's
+`/run/user/<uid>`. A Linux program started in a session gets
+`WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` for it, and its windows appear on
+that session's desktop and are shown by whatever presents it ("Plan:
+sessions and remote shasha"). Server and bare desktops ("Server and
+desktop workloads") keep Wayland windows as they keep Windows ones: the
+pixels are kept and nothing draws them.
+
+### Observability
+
+- `events=wayland`: one event per client connection and disconnection,
+  per surface given a role, per commit (surface, damage rows, buffer
+  size), and per protocol error. The client's pid and the object are in
+  each.
+- `wayland=trace`: every request and event decoded, as libwayland's
+  `WAYLAND_DEBUG=1` prints them, so a transcript from real Linux can be
+  compared with gala's.
+- The ledger: an interface or request gala doesn't implement is answered
+  with a protocol error, and the ledger records `wayland: <interface>.<request>`.
+- The state dump lists each client's objects and surfaces.
+
+### Tests
+
+- **Test first:** `wl_test`, a small client of our own in C over raw
+  sockets (no libwayland, so the test checks the wire format itself).
+  It binds the globals, creates a pool and a buffer, draws known pixels,
+  creates an `xdg_toplevel`, commits, waits for configure and the frame
+  callback, then quits on `xdg_toplevel.close`. Its transcript is
+  recorded on real Linux against weston's headless backend: lx-expect
+  starts `weston --backend=headless` for it, and CI installs weston. On
+  gala the same transcript must match, and a screen check finds the
+  pixels inside shasha's frame.
+- The wire format and the object table: host tests in `wl_abi`.
+- Then a real client: `weston-simple-shm` from weston's demos; then
+  GTK (LD step 3).
+
 ## Plan: Linux containers through a WSL facade
 
 Docker Desktop and Podman for Windows run their Linux side (dockerd,
