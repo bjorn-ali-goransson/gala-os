@@ -356,7 +356,7 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         let text = core::slice::from_raw_parts(info[1] as *const u16, length / 2);
         c.ok(text == &name[..10], u64::from(text.first().copied().unwrap_or(0)))?;
         let mut back: *mut u16 = core::ptr::null_mut();
-        c.eq(GetThreadDescription(t, &mut back) as u64, 0)?;
+        c.eq(GetThreadDescription(t, &mut back) as u64, 0x1000_0000)?; // as SetThreadDescription
         c.ok(!back.is_null() && core::slice::from_raw_parts(back, 11) == &name[..], 0)?;
         LocalFree(back.cast());
         c.ok(ResumeThread(other) == 1, 0)?;

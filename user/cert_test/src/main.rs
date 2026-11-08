@@ -651,7 +651,10 @@ fn run() -> Result<(), u32> {
             narrow.as_mut_ptr(),
             5,
         );
-        c.ok(got == 5 && &narrow[..5] == b"gala\0", got.into())?;
+        // The A form does not truncate: a buffer too small gives 1, the
+        // count of an empty string (Windows 11 25H2; what the buffer then
+        // holds is not measured).
+        c.eq(got.into(), 1)?;
 
         // The public key verifies the certificate's own signature.
         let mut key = null;

@@ -147,6 +147,18 @@ pub fn base_priority(increment: i32) -> Option<i32> {
     }
 }
 
+/// The ThreadBasePriority increment a base priority was set from (its
+/// inverse): what THREAD_BASIC_INFORMATION.BasePriority reports. The
+/// saturated bases (15, 1) give the increments that set them (15, -15);
+/// what Windows reports for those is not measured.
+pub fn base_increment(base: i32) -> i32 {
+    match base {
+        15 => 15,
+        1 => -15,
+        base => base - PROCESS_BASE_PRIORITY,
+    }
+}
+
 impl NtThread {
     pub fn affinity(&self) -> u64 {
         self.affinity.load(core::sync::atomic::Ordering::Relaxed)
@@ -1387,5 +1399,8 @@ mod tests {
         assert_eq!(base_priority(15), Some(15));
         assert_eq!(base_priority(-15), Some(1));
         assert_eq!(base_priority(3), None);
+        for increment in [-15, -2, -1, 0, 1, 2, 15] {
+            assert_eq!(base_priority(increment).map(base_increment), Some(increment));
+        }
     }
 }

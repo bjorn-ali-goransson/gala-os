@@ -3385,7 +3385,10 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
     b[24..32].copy_from_slice(&t.id.to_le_bytes());
     b[32..40].copy_from_slice(&t.affinity().to_le_bytes());
     b[40..44].copy_from_slice(&priority.to_le_bytes());
-    b[44..48].copy_from_slice(&base.to_le_bytes());
+    // BasePriority is the increment over the process's base (Windows 11
+    // 25H2: 1 after ThreadBasePriority 1), the saturated ones as set.
+    let increment = super::thread::base_increment(base);
+    b[44..48].copy_from_slice(&increment.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
 }
 

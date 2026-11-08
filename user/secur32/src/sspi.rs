@@ -1162,6 +1162,8 @@ pub extern "system" fn InitSecurityInterfaceA() -> *const SecurityFunctionTable 
     for (slot, f) in TABLE_A.functions.iter().zip(functions) {
         slot.store(f, Ordering::Relaxed);
     }
-    TABLE_A.version.store(4, Ordering::Release);
+    // Version 1 (SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION), with every
+    // slot filled all the same (Windows 11 25H2: sspi_test).
+    TABLE_A.version.store(1, Ordering::Release);
     &TABLE_A
 }

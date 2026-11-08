@@ -183,11 +183,21 @@ fn ldr_list(
         let base = usize_at(entry + 0x30);
         let pe = base + u32_at(base + 0x3c) as usize;
         c.eq(u32_at(entry + 0x40).into(), u32_at(pe + 24 + 56).into())?; // SizeOfImage
-        // BaseDllName is the end of FullDllName.
+        // BaseDllName reads as the end of FullDllName. Its buffer may be
+        // its own (Windows 11 25H2: ntdll's is not inside FullDllName's;
+        // gala's point into it), so the text is compared, without case.
         let (full_len, full) = (usize::from(u32_at(entry + 0x48) as u16), usize_at(entry + 0x50));
         let (name_len, name) = (usize::from(u32_at(entry + 0x58) as u16), usize_at(entry + 0x60));
+        let lower = |at: usize| {
+            // SAFETY: a character of the loader's UNICODE_STRING.
+            let ch = unsafe { (at as *const u16).read() };
+            if (u16::from(b'A')..=u16::from(b'Z')).contains(&ch) { ch + 32 } else { ch }
+        };
+        let tail = full + full_len.saturating_sub(name_len);
         c.ok(
-            name_len > 0 && name_len <= full_len && name == full + full_len - name_len,
+            name_len > 0
+                && name_len <= full_len
+                && (0..name_len / 2).all(|i| lower(name + 2 * i) == lower(tail + 2 * i)),
             name_len as u64,
         )?;
         out[n] = base;

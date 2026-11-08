@@ -1982,7 +1982,10 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
 /// NtFlushBuffersFileEx(FileHandle, Flags, Parameters, ParametersSize,
 /// *IoStatusBlock): NtFlushBuffersFile (gala's volume is in memory, so the
 /// FLUSH_FLAGS_FILE_DATA_ONLY / NO_SYNC / FILE_DATA_SYNC_ONLY variants are
-/// all the same); other flags or parameters are STATUS_INVALID_PARAMETER.
+/// all the same). Flags beyond those are not refused: Windows 11 25H2
+/// flushed with 0x100 on NTFS (kernel32_file_test); which, if any, it
+/// refuses is not measured, so they are recorded in the ledger and
+/// ignored. Parameters are STATUS_INVALID_PARAMETER (none is documented).
 #[unsafe(no_mangle)]
 pub extern "system" fn NtFlushBuffersFileEx(
     h: usize,
@@ -1991,8 +1994,12 @@ pub extern "system" fn NtFlushBuffersFileEx(
     size: u32,
     iosb: *mut [usize; 2],
 ) -> u32 {
-    if flags & !7 != 0 || !parameters.is_null() || size != 0 {
+    if !parameters.is_null() || size != 0 {
         return 0xc000_000d;
+    }
+    if flags & !7 != 0 {
+        let what = b"ntdll.dll!NtFlushBuffersFileEx(unknown flags)";
+        GalaRecordMissing(what.as_ptr(), what.len(), 2, flags.into());
     }
     NtFlushBuffersFile(h, iosb)
 }

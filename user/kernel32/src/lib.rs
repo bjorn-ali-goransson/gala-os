@@ -3294,9 +3294,9 @@ pub extern "system" fn SetThreadPriority(h: Handle, priority: i32) -> Bool {
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
-/// GetThreadPriority: THREAD_BASIC_INFORMATION.BasePriority (the
-/// process's base, 8 for the normal class, plus the increment) as an
-/// increment; 15 and 1 are the saturated TIME_CRITICAL and IDLE.
+/// GetThreadPriority: THREAD_BASIC_INFORMATION.BasePriority, which is the
+/// increment over the process's base (Windows 11 25H2), -15 and 15 the
+/// saturated IDLE and TIME_CRITICAL.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetThreadPriority(h: Handle) -> i32 {
     const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7fff_ffff;
@@ -3304,11 +3304,7 @@ pub extern "system" fn GetThreadPriority(h: Handle) -> i32 {
         Ok(b) => b,
         Err(status) => return fail(status, THREAD_PRIORITY_ERROR_RETURN),
     };
-    match basic.base_priority {
-        15.. => 15,
-        ..=1 => -15,
-        base => base - 8,
-    }
+    basic.base_priority
 }
 
 /// CreateWaitableTimerW / A: CreateWaitableTimerExW with

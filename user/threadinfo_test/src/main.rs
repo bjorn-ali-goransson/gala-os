@@ -159,12 +159,17 @@ fn run() -> Result<(), u32> {
     c.eq(s.into(), ok)?;
     c.eq(u64_at(b, 0), entry as u64)?;
 
-    // Priorities: BasePriority = process base (8) + increment.
+    // Priorities: THREAD_BASIC_INFORMATION.BasePriority is the increment
+    // over the process's base, not the absolute priority (Windows 11
+    // 25H2: 1 after ThreadBasePriority 1).
     c.eq(set_thread(t, THREAD_BASE_PRIORITY, &Al(1i32.to_le_bytes()).0).into(), ok)?;
     let mut basic = Al([0u8; 48]);
     let basic = &mut basic.0;
     c.eq(query_thread(t, 0, basic).0.into(), ok)?;
-    c.eq(u32_at(basic, 44), 9)?; // BasePriority
+    c.eq(u32_at(basic, 44), 1)?; // BasePriority
+    c.eq(set_thread(t, THREAD_BASE_PRIORITY, &Al((-2i32).to_le_bytes()).0).into(), ok)?;
+    c.eq(query_thread(t, 0, basic).0.into(), ok)?;
+    c.eq(u32_at(basic, 44), u64::from(-2i32 as u32))?;
     c.eq(set_thread(t, THREAD_PRIORITY, &Al(12i32.to_le_bytes()).0).into(), ok)?;
     c.eq(query_thread(t, 0, basic).0.into(), ok)?;
     c.eq(u32_at(basic, 40), 12)?; // Priority

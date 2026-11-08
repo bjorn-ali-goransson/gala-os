@@ -408,14 +408,14 @@ fn run() -> Result<(), u32> {
         c.eq(u64::from(info[3]) | u64::from(info[4]) << 32, JAN_2018)?; // ftLastAccessTime
         c.ok(FlushFileBuffers(h) != 0, 0)?;
         // ntdll's NtFlushBuffersFileEx (PostgreSQL's fdatasync): the data
-        // only (FLUSH_FLAGS_FILE_DATA_SYNC_ONLY); unknown flags are
-        // STATUS_INVALID_PARAMETER.
+        // only (FLUSH_FLAGS_FILE_DATA_SYNC_ONLY); a flag with no documented
+        // meaning (0x100) is not refused (Windows 11 25H2, NTFS).
         let mut iosb = [usize::MAX; 2];
         c.eq(NtFlushBuffersFileEx(h, 4, core::ptr::null(), 0, &mut iosb).into(), 0)?;
         // IO_STATUS_BLOCK.Status is a 32-bit NTSTATUS: Windows writes only
         // the low half of the pointer-sized union.
         c.eq(u64::from(iosb[0] as u32), 0)?;
-        c.eq(NtFlushBuffersFileEx(h, 0x100, core::ptr::null(), 0, &mut iosb).into(), 0xc000_000d)?;
+        c.eq(NtFlushBuffersFileEx(h, 0x100, core::ptr::null(), 0, &mut iosb).into(), 0)?;
         c.ok(CloseHandle(h) != 0, 0)?;
 
         // Attributes by path.

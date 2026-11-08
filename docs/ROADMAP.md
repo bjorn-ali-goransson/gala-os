@@ -1624,6 +1624,22 @@ foreground lock); oleaut32_test's GetActiveObject runs in an apartment;
 kernel32_locale_test compares the system's preferred UI languages with
 its default UI language.
 
+Done (Round 4, Windows' behaviour, each from a measurement on 25H2):
+cmd passes a program its command line as written, the space before a
+removed redirection included (cmd_test's `tail` mode); NtFlushBuffersFileEx
+does not refuse flag 0x100 (kernel32_file_test; other unknown flags are
+recorded and ignored); GetThreadDescription returns 0x10000000
+(kernel32_thread_test, kernel32_clr_test); THREAD_BASIC_INFORMATION's
+BasePriority is the increment over the process's base (threadinfo_test;
+GetThreadPriority returns it); InitSecurityInterfaceA's table is version
+1 (sspi_test); SO_RANDOMIZE_PORT reads back as one byte (udp_test);
+CertGetNameStringA with a buffer too small returns 1 (cert_test);
+inherited ACEs carry INHERITED_ACE, and the child's DACL
+SE_DACL_AUTO_INHERITED, only under an auto-inherited parent DACL
+(security_test, which also checks a "D:PAI" parent); ntdll's
+BaseDllName is not inside its FullDllName, so loader_test compares the
+text.
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
@@ -1655,6 +1671,19 @@ Next:
      pseudo console without STARTF_USESTDHANDLES from a parent whose
      standard handles are a mix of console and pipe handles (which ones
      it takes; gala gives it the console's three);
+     from Round 4's fixes: NtFlushBuffersFileEx with flags 0x8, 0x10,
+     0x8000_0000, 0xffff_ffff and with Parameters of size 0 and 4 (which
+     are refused); ThreadBasePriority 15 and -15 read back from
+     THREAD_BASIC_INFORMATION (gala: 15 and -15); InitSecurityInterfaceW's
+     version (gala: 4); getsockopt(SO_RANDOMIZE_PORT)'s returned length
+     (gala: 1); what CertGetNameStringA leaves in a buffer too small
+     (gala: a NUL) and CertGetNameStringW with cchString 5; a subkey's ACE
+     under a key made from "D:P(A;CI;KA;;;WD)" (gala: 0x02, the files'
+     rule) and security_test's "D:PAI" case; kernel32_misc_test's raise
+     address: GetModuleFileNameW of RtlPcToFileHeader(ExceptionAddress)
+     after RaiseException (very likely KernelBase; the test is unchanged
+     until it is named, since kernel32's RaiseException may be a stub
+     of its own);
      persist_test needs run-all.ps1 to remove C:\persist and
      HKCU\Software\GalaPersist and run it twice, judging the second run.
 2. The tests that need a setting run-all.ps1 cannot give: system_test
@@ -1672,7 +1701,18 @@ Next:
    Needs kernelbase in every scenario that imports a core set (the JDK's
    ucrtbase, pwsh, sqllocaldb, Chromium) and forwarders for the rest of
    each set.
-5. **The default IME window**: on Windows a thread's first window brings
+5. **WOW64 file-system redirection**: a 32-bit process's
+   GetSystemDirectoryW is `C:\Windows\System32` on Windows (25H2:
+   wow64_k32_test reads "C:\WINDOWS\system32"), and the file system
+   redirector maps System32 to SysWOW64 for it (only
+   GetSystemWow64DirectoryW names SysWOW64). gala's 32-bit kernel32 says
+   SysWOW64 (user/kernel32/src/x86.rs SYSTEM_DIRECTORY) because gala has
+   no redirector. Needs: the redirection in the kernel's open path for
+   WOW64 processes (System32 to SysWOW64, with Windows' exceptions such
+   as catroot, drivers\etc, spool; Wow64DisableWow64FsRedirection per
+   thread), then GetSystemDirectoryW to System32 and wow64_k32_test's
+   expectation to match.
+6. **The default IME window**: on Windows a thread's first window brings
    the thread's IME window (class "IME", title "Default IME"; a CBT hook
    sees its HCBT_CREATEWND too). gala makes none (user32_test counts
    past it); programs that enumerate a thread's windows or look for it

@@ -636,7 +636,9 @@ pub extern "system" fn GetThreadDescription(thread: Handle, out: *mut *mut u16) 
         *p.add(chars) = 0;
         *out = p;
     }
-    0
+    // HRESULT_FROM_NT(STATUS_SUCCESS), 0x10000000, as SetThreadDescription
+    // (Windows 11 25H2).
+    nt_hresult(STATUS_SUCCESS)
 }
 
 #[cfg_attr(

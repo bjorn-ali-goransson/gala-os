@@ -803,7 +803,10 @@ current process, -2 = current thread.
 - **Thread information**: each NtThread records its create/exit times,
   its Win32 start address (the image entry point for main threads;
   CONTEXT.Rax for NtCreateThread, as ReactOS does) and (Priority,
-  BasePriority), which are reported and validated but not scheduled on.
+  BasePriority), which are reported and validated but not scheduled on;
+  THREAD_BASIC_INFORMATION's BasePriority is the increment over the
+  process's base (as on Windows; GetThreadPriority returns it), the
+  absolute one stays in SYSTEM_THREAD_INFORMATION.
   No processor time is accounted (TODO, in the scheduler): thread times
   are zero and kernel32's GetSystemTimes reports every processor idle
   since boot. ThreadBasicInformation's TebBaseAddress is NULL once the
@@ -2083,9 +2086,12 @@ SECURITY.md phase S2; rules in `kernel/src/nt/security.rs`, services in
     enabled; else STATUS_INVALID_OWNER);
   - DACL given (files and keys: automatic inheritance, so an unprotected
     given DACL gets the parent's inheritable ACEs after its own and
+    SE_DACL_AUTO_INHERITED; a given DACL keeps its own
     SE_DACL_AUTO_INHERITED), else the parent's inheritable ACEs (the
-    documented OI/CI/NP/IO rules; effective ACEs get INHERITED_ACE,
-    generic rights mapped through the type's mapping and CREATOR
+    documented OI/CI/NP/IO rules; for files and keys the ACEs get
+    INHERITED_ACE, and the DACL SE_DACL_AUTO_INHERITED, only when the
+    parent's DACL is auto-inherited, as on Windows 11 25H2; other types
+    always mark them; generic rights mapped through the type's mapping and CREATOR
     OWNER/GROUP replaced, with an inherit-only copy when they also
     propagate), else the token's default DACL (mapped);
   - named objects take the descriptor from OBJECT_ATTRIBUTES
@@ -3272,7 +3278,9 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
   the internal commands `echo`, `exit`, `rem`, and programs found with
   .COM/.EXE in the current directory and the PATH (9009 and cmd's message
-  when not found); pipelines, command lists, batch files, `set`/`if`/
+  when not found). A redirection is removed from the command and the rest
+  stays as written: the spaces before it end the program's command line
+  and `echo x > f` writes "x " (as Windows' cmd does). Pipelines, command lists, batch files, `set`/`if`/
   `for` and the prompt are recorded and end it.
 
 ### Gaps are never silent

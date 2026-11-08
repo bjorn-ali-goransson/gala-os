@@ -15,7 +15,7 @@
 //! PACKAGE_INFO)
 //! (RPC id 9) authenticates with NTLM. Schannel's package information
 //! (RPC id 14). The ANSI dispatch table (InitSecurityInterfaceA,
-//! version 4, as programs built without UNICODE use it: curl for
+//! version 1 on Windows 11 25H2, as programs built without UNICODE use it: curl for
 //! Windows): its QuerySecurityPackageInfoA and EnumerateSecurityPackagesA
 //! give SecPkgInfoA with ANSI names; an unknown package is
 //! SEC_E_SECPKG_NOT_FOUND. security.dll (the older name) forwards to the
@@ -645,7 +645,9 @@ fn run() -> Result<(), u32> {
         // The ANSI table and package information.
         let table = InitSecurityInterfaceA();
         c.ok(!table.is_null(), 0)?;
-        c.eq((*table).version.into(), 4)?;
+        // SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION (1) (Windows 11
+        // 25H2; the Unicode table's version is not measured).
+        c.eq((*table).version.into(), 1)?;
         c.ok((*table).functions[16] != 0, 0)?;
         let query_a: QueryPackageA = core::mem::transmute((*table).functions[16]);
         let mut info_a: *mut SecPkgInfoA = core::ptr::null_mut();

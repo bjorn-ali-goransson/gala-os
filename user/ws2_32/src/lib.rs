@@ -1641,6 +1641,14 @@ pub extern "system" fn getsockopt(
         if value.is_null() || len.is_null() || *len < 4 {
             return fail(WSAEFAULT);
         }
+        // SO_RANDOMIZE_PORT is a 1-byte BOOLEAN: only its byte is written
+        // (Windows 11 25H2: an int set to -1 reads 0xffffff01). The length
+        // it reports is not measured; 1, the option's size, is given.
+        if (level, name) == (SOL_SOCKET, 0x3005) {
+            *value = u8::from(v != 0);
+            *len = 1;
+            return 0;
+        }
         core::ptr::write_unaligned(value.cast::<i32>(), v);
         *len = 4;
     }

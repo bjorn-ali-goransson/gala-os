@@ -427,10 +427,9 @@ fn parse(command: &[u16], names: &mut Text) -> Command {
         c.redirects[handle] = (handle, Some(Target::File(start, end, append)));
         i = j;
     }
-    // Trailing whitespace (before a removed redirection) goes.
-    while c.text.n > 0 && is_space(c.text.b[c.text.n - 1]) {
-        c.text.n -= 1;
-    }
+    // The text stays as written, the spaces before a removed redirection
+    // included: a program's command line ends with them and `echo x > f`
+    // writes "x " (Windows 11 25H2: cmd_test's `"prog" tail > f`).
     c
 }
 

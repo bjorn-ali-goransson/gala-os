@@ -514,7 +514,9 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
             setsockopt(fresh, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4) as u64,
             0,
         )?;
-        c.eq(get_int(fresh, SO_RANDOMIZE_PORT).1 as u64, 1)?;
+        // A 1-byte BOOLEAN: only the first byte of the int is written
+        // (Windows 11 25H2: 0xffffff01 into an int set to -1).
+        c.eq(get_int(fresh, SO_RANDOMIZE_PORT).1 as u32 as u64, 0xffff_ff01)?;
         closesocket(fresh);
         c.error(
             setsockopt(b, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4),
