@@ -71,15 +71,3 @@ questions listed in ROADMAP WD "Next" item 1 (SetPriorityClass with
 other mixed values, WriteConsoleA, NtCreateTimer's unknown type, the
 user-callback faults, oleaut32_test and clusapi_test's last call), and
 record each in `user/windows/findings.json` as before.
-
-### The concurrency tests, repeated
-
-A test that is racy itself fails now and then on Windows too, and that
-is the test's bug, not gala's. Run each of these 50 times on this
-machine (more CPUs than gala's 2 shakes out more orderings) and record
-every non-zero run with its report line: kernel32_sync_test (its
-lost-wakeup stress), sync_test, wait_test, keyed_event_test, lock_test,
-smp_test, smprace_test, smpsem_test, smpsched_test, iocp_test,
-apc_test, ioapc_test, timer_test, winsock_async_test, pipe_test,
-afd_poll_test. A program that fails every time is triaged as before; one
-that fails some of the time is listed as flaky with its runs.
