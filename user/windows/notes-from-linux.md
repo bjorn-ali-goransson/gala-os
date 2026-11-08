@@ -2,6 +2,21 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Round 4, read off the sources: the probes I need
+
+`user/windows/round4-analysis.md`, one section per non-zero program, as
+for Round 3. Its test-bug and behaviour groups (23) are being fixed
+here now. From you: the sections marked "probe needed" (22: 11 new,
+11 still open from Round 3 at the same line). Each `fix or probe:` says
+what to call and record. Two notes from it:
+- shlwapi_test's `line 242` is url.c's line 242 (main.c includes url.c),
+  not main.c's: AssocQueryStringW into a 4-character buffer, expected
+  E_POINTER.
+- triage.md's `asserts:` quotes a neighbouring line in about ten
+  entries; the analysis reads each from the source, so trust its line.
+Probes only, no sweep: the next export comes with these fixes, and I
+will write "gate green" here.
+
 ## On 0a3ac1e and aa64692 (Round 4, its four probes)
 
 Merged. The four answers are implemented: RtlRaiseException's 0x80 in
