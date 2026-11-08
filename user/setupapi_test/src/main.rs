@@ -159,9 +159,18 @@ fn run() -> Result<(), u32> {
             flags: 0,
             reserved: 0,
         };
+        // The machine's batteries (none in gala's VMs; a laptop has one or
+        // more), then ERROR_NO_MORE_ITEMS at the index after the last.
+        let mut n = 0;
+        while n < 64
+            && SetupDiEnumDeviceInterfaces(set, core::ptr::null_mut(), &BATTERY, n, &mut data) != 0
+        {
+            c.ok(data.class.0 == BATTERY.0 && data.class.3 == BATTERY.3, data.class.0.into())?;
+            n += 1;
+        }
         SetLastError(0);
         c.eq(
-            SetupDiEnumDeviceInterfaces(set, core::ptr::null_mut(), &BATTERY, 0, &mut data) as u64,
+            SetupDiEnumDeviceInterfaces(set, core::ptr::null_mut(), &BATTERY, n, &mut data) as u64,
             0,
         )?;
         c.eq(GetLastError().into(), ERROR_NO_MORE_ITEMS)?;
@@ -171,7 +180,13 @@ fn run() -> Result<(), u32> {
             devinst: 0,
             reserved: 0,
         };
-        c.eq(SetupDiEnumDeviceInfo(set, 0, &mut info) as u64, 0)?;
+        // One device per battery interface found (at most).
+        let mut devices = 0;
+        while devices < 64 && SetupDiEnumDeviceInfo(set, devices, &mut info) != 0 {
+            devices += 1;
+        }
+        c.ok(devices <= n && (devices == 0) == (n == 0), devices.into())?;
+        c.eq(SetupDiEnumDeviceInfo(set, devices, &mut info) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_NO_MORE_ITEMS)?;
         c.ok(SetupDiDestroyDeviceInfoList(set) != 0, GetLastError().into())?;
         SetLastError(0);

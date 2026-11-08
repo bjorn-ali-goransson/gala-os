@@ -724,3 +724,226 @@ global_asm!(
     "add esp, 16",
     "ret 16",
 );
+
+/// Calls the stdcall function at `f` with `args` (up to 12).
+///
+/// # Safety
+/// `f` must take exactly these arguments.
+unsafe fn stdcall(f: usize, args: &[usize]) -> NtStatus {
+    type U = usize;
+    let a = |i: usize| args.get(i).copied().unwrap_or(0);
+    // SAFETY: the caller's promise; each arm declares the arguments the
+    // function takes, so it pops what was pushed.
+    unsafe {
+        match args.len() {
+            0 => core::mem::transmute::<U, extern "system" fn() -> NtStatus>(f)(),
+            1 => core::mem::transmute::<U, extern "system" fn(U) -> NtStatus>(f)(a(0)),
+            2 => core::mem::transmute::<U, extern "system" fn(U, U) -> NtStatus>(f)(a(0), a(1)),
+            3 => core::mem::transmute::<U, extern "system" fn(U, U, U) -> NtStatus>(f)(
+                a(0),
+                a(1),
+                a(2),
+            ),
+            4 => core::mem::transmute::<U, extern "system" fn(U, U, U, U) -> NtStatus>(f)(
+                a(0),
+                a(1),
+                a(2),
+                a(3),
+            ),
+            5 => core::mem::transmute::<U, extern "system" fn(U, U, U, U, U) -> NtStatus>(f)(
+                a(0),
+                a(1),
+                a(2),
+                a(3),
+                a(4),
+            ),
+            6 => core::mem::transmute::<U, extern "system" fn(U, U, U, U, U, U) -> NtStatus>(f)(
+                a(0),
+                a(1),
+                a(2),
+                a(3),
+                a(4),
+                a(5),
+            ),
+            7 => core::mem::transmute::<U, extern "system" fn(U, U, U, U, U, U, U) -> NtStatus>(f)(
+                a(0),
+                a(1),
+                a(2),
+                a(3),
+                a(4),
+                a(5),
+                a(6),
+            ),
+            8 => core::mem::transmute::<U, extern "system" fn(U, U, U, U, U, U, U, U) -> NtStatus>(
+                f,
+            )(a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7)),
+            9 => {
+                core::mem::transmute::<U, extern "system" fn(U, U, U, U, U, U, U, U, U) -> NtStatus>(
+                    f,
+                )(a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8))
+            }
+            10 => core::mem::transmute::<
+                U,
+                extern "system" fn(U, U, U, U, U, U, U, U, U, U) -> NtStatus,
+            >(f)(a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9)),
+            11 => core::mem::transmute::<
+                U,
+                extern "system" fn(U, U, U, U, U, U, U, U, U, U, U) -> NtStatus,
+            >(f)(
+                a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10)
+            ),
+            _ => core::mem::transmute::<
+                U,
+                extern "system" fn(U, U, U, U, U, U, U, U, U, U, U, U) -> NtStatus,
+            >(f)(
+                a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11)
+            ),
+        }
+    }
+}
+
+fn image_u32(addr: usize) -> u32 {
+    // SAFETY: callers read inside a mapped image's headers/export directory.
+    unsafe { (addr as *const u32).read_unaligned() }
+}
+
+/// A NUL-terminated string in a mapped image.
+fn image_str(addr: usize) -> &'static [u8] {
+    let mut n = 0;
+    // SAFETY: export names are NUL-terminated strings in the image.
+    unsafe {
+        while *((addr + n) as *const u8) != 0 {
+            n += 1;
+        }
+        core::slice::from_raw_parts(addr as *const u8, n)
+    }
+}
+
+/// The address of export `name` of the PE32 image mapped at `base`.
+pub fn find_export(base: usize, name: &[u8]) -> Option<usize> {
+    let pe = base + image_u32(base + 0x3c) as usize;
+    let rva = image_u32(pe + 24 + 96) as usize; // PE32 DataDirectory[0]
+    if rva == 0 {
+        return None;
+    }
+    let dir = base + rva;
+    let count = image_u32(dir + 24) as usize; // NumberOfNames
+    let functions = base + image_u32(dir + 28) as usize;
+    let names = base + image_u32(dir + 32) as usize;
+    let ordinals = base + image_u32(dir + 36) as usize;
+    (0..count).find(|&i| image_str(base + image_u32(names + 4 * i) as usize) == name).map(|i| {
+        // SAFETY: inside the export directory.
+        let ordinal = unsafe { ((ordinals + 2 * i) as *const u16).read_unaligned() } as usize;
+        base + image_u32(functions + 4 * ordinal) as usize
+    })
+}
+
+/// The base of the 32-bit ntdll (`...\SysWOW64\ntdll.dll`), found by
+/// walking the address space; None when none is mapped (gala scenarios
+/// that ship none).
+pub fn find_ntdll() -> Option<usize> {
+    let mut addr = 0usize;
+    let mut buf = [0u8; 600];
+    loop {
+        let (s, mbi, _) = query(addr);
+        if s != STATUS_SUCCESS || mbi.region_size == 0 {
+            return None;
+        }
+        if mbi.kind == MEM_IMAGE && mbi.base_address == mbi.allocation_base {
+            let mut returned = 0usize;
+            // SAFETY: MemoryMappedFilenameInformation (2) into our buffer.
+            let s = unsafe {
+                syscall(
+                    nr::NT_QUERY_VIRTUAL_MEMORY,
+                    &[
+                        CURRENT_PROCESS.0,
+                        addr,
+                        2,
+                        buf.as_mut_ptr() as usize,
+                        buf.len(),
+                        &raw mut returned as usize,
+                    ],
+                )
+            };
+            if s == STATUS_SUCCESS {
+                let len = usize::from(u16::from_le_bytes([buf[0], buf[1]])) / 2;
+                let p = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+                // SAFETY: the name buffer is inside `buf`, `len` characters.
+                let name = unsafe { core::slice::from_raw_parts(p as *const u16, len) };
+                let want = "\\syswow64\\ntdll.dll";
+                if name.len() >= want.len()
+                    && name[name.len() - want.len()..].iter().zip(want.bytes()).all(|(&a, b)| {
+                        let a = if (0x41..=0x5a).contains(&a) { a | 0x20 } else { a };
+                        a == u16::from(b)
+                    })
+                {
+                    return Some(addr);
+                }
+            }
+        }
+        match (mbi.base_address).checked_add(mbi.region_size) {
+            Some(next) => addr = next,
+            None => return None,
+        }
+    }
+}
+
+/// The 32-bit ntdll's base, once looked up: 0 not yet, 1 none mapped.
+static NTDLL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The address of the 32-bit ntdll's export `name` (None without one).
+pub fn ntdll_export(name: &[u8]) -> Option<usize> {
+    use core::sync::atomic::Ordering;
+    let mut base = NTDLL.load(Ordering::Relaxed);
+    if base == 0 {
+        base = find_ntdll().unwrap_or(1);
+        NTDLL.store(base, Ordering::Relaxed);
+    }
+    if base == 1 { None } else { find_export(base, name) }
+}
+
+/// The ntdll export of the services in `nr` whose numbers are gala's own
+/// (they change between builds, or are not yet verified on the pinned
+/// one).
+fn build_dependent(number: u32) -> Option<&'static [u8]> {
+    use nr::*;
+    Some(match number {
+        NT_CREATE_MUTANT => b"NtCreateMutant",
+        NT_CREATE_SEMAPHORE => b"NtCreateSemaphore",
+        NT_CREATE_TIMER => b"NtCreateTimer",
+        NT_GET_CONTEXT_THREAD => b"NtGetContextThread",
+        NT_QUERY_MUTANT => b"NtQueryMutant",
+        NT_QUERY_SEMAPHORE => b"NtQuerySemaphore",
+        NT_QUERY_TIMER => b"NtQueryTimer",
+        NT_OPEN_SYMBOLIC_LINK_OBJECT => b"NtOpenSymbolicLinkObject",
+        NT_QUERY_DIRECTORY_OBJECT => b"NtQueryDirectoryObject",
+        NT_QUERY_SYMBOLIC_LINK_OBJECT => b"NtQuerySymbolicLinkObject",
+        NT_SET_CONTEXT_THREAD => b"NtSetContextThread",
+        NT_SET_TIMER => b"NtSetTimer",
+        NT_SET_VALUE_KEY => b"NtSetValueKey",
+        NT_SUSPEND_THREAD => b"NtSuspendThread",
+        NT_DELETE_KEY => b"NtDeleteKey",
+        NT_DELETE_VALUE_KEY => b"NtDeleteValueKey",
+        NT_CREATE_KEYED_EVENT => b"NtCreateKeyedEvent",
+        NT_RELEASE_KEYED_EVENT => b"NtReleaseKeyedEvent",
+        NT_NOTIFY_CHANGE_DIRECTORY_FILE => b"NtNotifyChangeDirectoryFile",
+        NT_OPEN_PROCESS_TOKEN => b"NtOpenProcessToken",
+        NT_QUERY_INFORMATION_TOKEN => b"NtQueryInformationToken",
+        _ => return None,
+    })
+}
+
+/// The service `number` (`nr`) with `args`: through the 32-bit ntdll's
+/// export when its number is build-dependent and an ntdll is mapped (as on
+/// Windows), else the system call with that number (gala's).
+///
+/// # Safety
+/// As `syscall`: `args` must be what the service expects.
+pub unsafe fn nt_call(number: u32, args: &[usize]) -> NtStatus {
+    match build_dependent(number).and_then(ntdll_export) {
+        // SAFETY: the export takes these arguments (the caller's promise).
+        Some(f) => unsafe { stdcall(f, args) },
+        // SAFETY: as above.
+        None => unsafe { syscall(number, args) },
+    }
+}

@@ -1,8 +1,8 @@
 //! Symbolic links and directory listing in the object namespace, with
 //! results expected to match real Windows (services with build-dependent
 //! numbers are called through ntdll's exports): `\??\C:` is a link to the
-//! volume device; links can be created in `\BaseNamedObjects` and are
-//! followed in the middle and at the end of a path; the session's
+//! volume device; links can be created in the session's BaseNamedObjects
+//! and are followed in the middle and at the end of a path; the session's
 //! BaseNamedObjects has a `Global` link; NtQueryDirectoryObject lists
 //! (name, type) entries. Prints `symlink_test: ok` or exits with the
 //! number of the failing check.
@@ -64,6 +64,36 @@ fn ustr(p: *const u8) -> &'static [u16] {
     }
 }
 
+/// The caller's session's BaseNamedObjects followed by `rest`:
+/// `\BaseNamedObjects` in session 0, `\Sessions\<n>\BaseNamedObjects`
+/// in session n. Outside session 0 an ordinary user may not create links
+/// in the global directory (STATUS_ACCESS_DENIED on Windows).
+fn session_bno(rest: &str) -> ([u16; 160], usize) {
+    // SAFETY: SessionId in the PEB.
+    let session = unsafe { *(peb().add(PEB_SESSION_ID) as *const u32) };
+    let mut digits = [0u8; 10];
+    let (mut v, mut k) = (session, 10);
+    loop {
+        k -= 1;
+        digits[k] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    let prefix: [&[u8]; 3] =
+        if session == 0 { [b"", b"", b""] } else { [b"\\Sessions\\", &digits[k..], b""] };
+    let mut path = [0u16; 160];
+    let mut n = 0;
+    for part in prefix.into_iter().chain([&b"\\BaseNamedObjects"[..], rest.as_bytes()]) {
+        for &b in part {
+            path[n] = u16::from(b);
+            n += 1;
+        }
+    }
+    (path, n)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let ok = STATUS_SUCCESS;
@@ -107,29 +137,30 @@ fn run() -> Result<(), u32> {
     c.ok(needed >= u32::from(target.length), needed.into())?;
     close(link);
 
-    // A named event, and links to its directory and to the event itself.
-    let event_name = wide!("\\BaseNamedObjects\\gala_symlink_test_event");
-    let event_name = UnicodeString::new(&event_name);
+    // A named event, and links to its directory and to the event itself,
+    // in the session's BaseNamedObjects.
+    let (event_name, n) = session_bno("\\gala_symlink_test_event");
+    let event_name = UnicodeString::new(&event_name[..n]);
     let event_attrs = ObjectAttributes::new(&event_name, Handle(0), OBJ_CASE_INSENSITIVE);
     let (s, event) =
         create_event_with(EVENT_ALL_ACCESS, Some(&event_attrs), NOTIFICATION_EVENT, false);
     c.st(s, ok)?;
-    let dir_link = wide!("\\BaseNamedObjects\\gala_symlink_test_link");
-    let dir_link = UnicodeString::new(&dir_link);
-    let dir_target = wide!("\\BaseNamedObjects");
-    let dir_target = UnicodeString::new(&dir_target);
+    let (dir_link, n) = session_bno("\\gala_symlink_test_link");
+    let dir_link = UnicodeString::new(&dir_link[..n]);
+    let (dir_target, n) = session_bno("");
+    let dir_target = UnicodeString::new(&dir_target[..n]);
     let mut l1 = Handle(0);
     let l1_attrs = ObjectAttributes::new(&dir_link, Handle(0), OBJ_CASE_INSENSITIVE);
     c.st(create_link(&mut l1, SYMBOLIC_LINK_ALL_ACCESS, &l1_attrs, &dir_target), ok)?;
-    let ev_link = wide!("\\BaseNamedObjects\\gala_symlink_test_evlink");
-    let ev_link = UnicodeString::new(&ev_link);
+    let (ev_link, n) = session_bno("\\gala_symlink_test_evlink");
+    let ev_link = UnicodeString::new(&ev_link[..n]);
     let mut l2 = Handle(0);
     let l2_attrs = ObjectAttributes::new(&ev_link, Handle(0), OBJ_CASE_INSENSITIVE);
     c.st(create_link(&mut l2, SYMBOLIC_LINK_ALL_ACCESS, &l2_attrs, &event_name), ok)?;
 
     // Links are followed in the middle and at the end of a path.
-    let via_dir = wide!("\\BaseNamedObjects\\gala_symlink_test_link\\gala_symlink_test_event");
-    let via_dir = UnicodeString::new(&via_dir);
+    let (via_dir, n) = session_bno("\\gala_symlink_test_link\\gala_symlink_test_event");
+    let via_dir = UnicodeString::new(&via_dir[..n]);
     let (s, h) = open_event(
         EVENT_ALL_ACCESS,
         &ObjectAttributes::new(&via_dir, Handle(0), OBJ_CASE_INSENSITIVE),
@@ -140,45 +171,30 @@ fn run() -> Result<(), u32> {
     c.st(s, ok)?;
     close(h);
 
-    // The session's Global link reaches \BaseNamedObjects.
-    // SAFETY: SessionId in the PEB.
-    let session = unsafe { *(peb().add(PEB_SESSION_ID) as *const u32) };
-    let mut path = [0u16; 96];
-    let mut n = 0;
-    for part in ["\\Sessions\\", "", "\\BaseNamedObjects\\Global\\gala_symlink_test_event"] {
-        if part.is_empty() {
-            let mut digits = [0u16; 10];
-            let mut v = session;
-            let mut k = 0;
-            loop {
-                digits[k] = u16::from(b'0') + (v % 10) as u16;
-                k += 1;
-                v /= 10;
-                if v == 0 {
-                    break;
-                }
-            }
-            for d in digits[..k].iter().rev() {
-                path[n] = *d;
-                n += 1;
-            }
-        }
-        for b in part.bytes() {
-            path[n] = u16::from(b);
-            n += 1;
-        }
-    }
-    let global = UnicodeString::new(&path[..n]);
+    // The session's Global link reaches \BaseNamedObjects (where an
+    // ordinary user may create events).
+    let global_event = wide!("\\BaseNamedObjects\\gala_symlink_test_global");
+    let global_event = UnicodeString::new(&global_event);
+    let (s, global) = create_event_with(
+        EVENT_ALL_ACCESS,
+        Some(&ObjectAttributes::new(&global_event, Handle(0), OBJ_CASE_INSENSITIVE)),
+        NOTIFICATION_EVENT,
+        false,
+    );
+    c.st(s, ok)?;
+    let (path, n) = session_bno("\\Global\\gala_symlink_test_global");
+    let via_global = UnicodeString::new(&path[..n]);
     let (s, h) = open_event(
         EVENT_ALL_ACCESS,
-        &ObjectAttributes::new(&global, Handle(0), OBJ_CASE_INSENSITIVE),
+        &ObjectAttributes::new(&via_global, Handle(0), OBJ_CASE_INSENSITIVE),
     );
     c.st(s, ok)?;
     close(h);
+    close(global);
 
     // NtQueryDirectoryObject: one (name, type) entry at a time.
-    let bno = wide!("\\BaseNamedObjects");
-    let bno = UnicodeString::new(&bno);
+    let (bno, n) = session_bno("");
+    let bno = UnicodeString::new(&bno[..n]);
     let (s, dir) = open_directory(
         DIRECTORY_QUERY,
         &ObjectAttributes::new(&bno, Handle(0), OBJ_CASE_INSENSITIVE),

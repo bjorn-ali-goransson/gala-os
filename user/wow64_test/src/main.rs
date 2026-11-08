@@ -305,11 +305,13 @@ const BAD: usize = 0x10;
 /// A word after each IO_STATUS_BLOCK that must stay as it is.
 const SENTINEL: usize = 0x5a5a_5a5a;
 
-/// The system call `n` with `args` (ntrt's generic 32-bit stub).
+/// The service `n` with `args`: the 32-bit system call for numbers that
+/// are long-stable, the 32-bit ntdll's export for those gala chose itself
+/// (ntrt's `nt_call`; on gala, without a 32-bit ntdll, the system call).
 fn sys(n: u32, args: &[usize]) -> u32 {
     // SAFETY: the callers pass what each service expects, or deliberately
     // invalid pointers the service must reject.
-    unsafe { syscall(n, args) }
+    unsafe { nt_call(n, args) }
 }
 
 fn ptr<T>(v: &T) -> usize {

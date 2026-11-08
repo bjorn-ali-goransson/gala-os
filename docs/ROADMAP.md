@@ -1549,6 +1549,25 @@ kernel32_file_test removes an earlier run's directory first; sspi_test
 compares the client's name with the process's own account;
 browser_api_test imports CompareObjectHandles through its API set.
 
+Done (Round 3, the tests' own bugs): the tests that wrote to C:\ or
+C:\gala use `%TEMP%` and remove an earlier run's leftovers
+(kernel32_pool_test, kernel32_system_test, security_test, cmd_test;
+kernel32_test copies testdll2.dll there under a name found nowhere else
+for SetDllDirectoryW); kernel32_clr_test follows
+GetActiveProcessorCount and setupapi_test the batteries the machine has;
+kuser_test compares NtSystemRoot without case; kernel32_file_test reads
+the IO_STATUS_BLOCK's 32-bit Status; kernel32_py_test clears
+NoDefaultCurrentDirectoryInExePath first; seh_test registers its dynamic
+function table for memory outside any image; threadinfo_test's buffers
+are aligned; object_test asks TRAVERSE | CREATE_OBJECT of the global
+BaseNamedObjects, section_test and symlink_test name their objects in
+the session's; smpsem_test, safepoint_test and smprace_test (ntrt's
+timers) reach NtCreateSemaphore, NtQuerySemaphore, NtCreateTimer and
+NtSetTimer through ntdll's exports, wow64_test the 32-bit ntdll's for
+gala's own numbers; oleaut32_test no longer passes VarBstrFromCy a NULL
+output; disk_test writes nothing unless the disk is 16 MiB long with
+xtask's marker in sector 1 (exit 0xd15c otherwise).
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
@@ -1561,9 +1580,13 @@ Next:
    - clock_test and handover_k32_test's STATUS_FATAL_USER_CALLBACK_EXCEPTION
      (both fault at the same ntdll address in a user callback): which
      call of theirs makes Windows call back into the process;
-   - oleaut32_test (OLEAUT32.dll writes through NULL) and clusapi_test
-     (resutils.dll faults, no cluster installed): the call each makes
-     last (they print nothing first: a line per step would tell).
+   - clusapi_test (resutils.dll faults, no cluster installed): the call
+     it makes last (it prints nothing first: a line per step would
+     tell);
+   - kernel32_locale_test's GetSystemPreferredUILanguages (the whole
+     list, against GetSystemDefaultUILanguage), before its expectation
+     changes; persist_test needs run-all.ps1 to remove C:\persist and
+     HKCU\Software\GalaPersist and run it twice, judging the second run.
 2. The tests that need a setting run-all.ps1 cannot give: system_test
    (LocalSystem), session_test, restricted_test (an administrator), the
    galatest account's tests (access, logon, profile, disk, lsa): run-all

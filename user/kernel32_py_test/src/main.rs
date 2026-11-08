@@ -273,6 +273,9 @@ fn paths(c: &mut Checks) -> Result<(), u32> {
             c.ok(is(p.as_ptr(), want), 0)?;
         }
 
+        // The variable's presence decides, whatever its value: start
+        // without it (a parent may set it, as some shells and agents do).
+        SetEnvironmentVariableW(w!("NoDefaultCurrentDirectoryInExePath"), core::ptr::null());
         c.ok(NeedCurrentDirectoryForExePathW(w!("python.exe")) != 0, 0)?;
         c.ok(NeedCurrentDirectoryForExePathW(w!("x\\python.exe")) != 0, 0)?;
         c.ok(SetEnvironmentVariableW(w!("NoDefaultCurrentDirectoryInExePath"), w!("1")) != 0, 0)?;

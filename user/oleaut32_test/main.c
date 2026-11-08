@@ -283,9 +283,9 @@ int main(void) {
     CHECK(cy_text(0x100000000LL, L"429496.7296"));
     CHECK(cy_text(0x7fffffffffffffffLL, L"922337203685477.5807"));
     CHECK(cy_text(9, L"0.0009"));
-    BSTR b = (BSTR)1;
-    CY cy0 = {0};
-    CHECK(VarBstrFromCy(cy0, EN_US, 0, NULL) == E_INVALIDARG);
+    /* No NULL-output case: the docs promise nothing for it, and Windows'
+       VarBstrFromCy stores through the pointer (an access violation). */
+    BSTR b;
 
     /* VarCyFromR8 (test_VarCyFromR8). */
     LONGLONG c;

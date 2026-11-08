@@ -93,6 +93,7 @@ unsafe extern "system" {
     fn QueueUserAPC(f: extern "system" fn(usize), thread: Handle, data: usize) -> u32;
     fn SleepEx(ms: u32, alertable: Bool) -> u32;
     fn GetActiveProcessorGroupCount() -> u16;
+    fn GetActiveProcessorCount(group: u16) -> u32;
     fn GetCurrentProcessorNumberEx(n: *mut ProcessorNumber);
     fn GetProcessGroupAffinity(process: Handle, count: *mut u16, groups: *mut u16) -> Bool;
     fn GetThreadGroupAffinity(thread: Handle, affinity: *mut GroupAffinity) -> Bool;
@@ -287,9 +288,14 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         let me = GetCurrentThread();
         c.eq(GetActiveProcessorGroupCount().into(), 1)?;
+        // The machine's processors (2 in gala's scenarios; a real machine
+        // has its own count): the checks below follow it.
+        let cpus = GetActiveProcessorCount(0);
+        c.ok((1..=64).contains(&cpus), cpus.into())?;
+        let all = if cpus == 64 { u64::MAX } else { (1u64 << cpus) - 1 };
         let mut n = ProcessorNumber { group: 9, number: 9, reserved: 9 };
         GetCurrentProcessorNumberEx(&mut n);
-        c.ok(n.group == 0 && n.number < 2, n.number.into())?;
+        c.ok(n.group == 0 && u32::from(n.number) < cpus, n.number.into())?;
         let mut groups = [7u16; 4];
         let mut count = 4u16;
         c.ok(
@@ -299,18 +305,20 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
         c.ok(count == 1 && groups[0] == 0, count.into())?;
         let mut ga = GroupAffinity::default();
         c.ok(GetThreadGroupAffinity(me, &mut ga) != 0, GetLastError().into())?;
-        c.ok(ga.mask == 3 && ga.group == 0, ga.mask as u64)?;
+        c.ok(ga.mask as u64 == all && ga.group == 0, ga.mask as u64)?;
         let one = GroupAffinity { mask: 1, ..GroupAffinity::default() };
         let mut previous = GroupAffinity::default();
         c.ok(SetThreadGroupAffinity(me, &one, &mut previous) != 0, GetLastError().into())?;
-        c.eq(previous.mask as u64, 3)?;
-        c.eq(SetThreadAffinityMask(me, 3) as u64, 1)?;
+        c.eq(previous.mask as u64, all)?;
+        c.eq(SetThreadAffinityMask(me, all as usize) as u64, 1)?;
         // Not a subset of the process's processors.
-        c.eq(SetThreadAffinityMask(me, 4) as u64, 0)?;
-        c.eq(GetLastError().into(), 87)?; // ERROR_INVALID_PARAMETER
+        if cpus < 64 {
+            c.eq(SetThreadAffinityMask(me, 1 << cpus) as u64, 0)?;
+            c.eq(GetLastError().into(), 87)?; // ERROR_INVALID_PARAMETER
+        }
         let mut ideal = ProcessorNumber::default();
         c.ok(GetThreadIdealProcessorEx(me, &mut ideal) != 0, 0)?;
-        c.ok(ideal.group == 0 && ideal.number < 2, ideal.number.into())?;
+        c.ok(ideal.group == 0 && u32::from(ideal.number) < cpus, ideal.number.into())?;
         let zero = ProcessorNumber::default();
         c.ok(SetThreadIdealProcessorEx(me, &zero, &mut ideal) != 0, GetLastError().into())?;
         let mut node = 9u16;
@@ -330,14 +338,16 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
                 mask |= e[0];
             }
         }
-        c.ok(cores == 2 && mask == 3, cores)?;
+        // One entry per core: one per processor without SMT (gala), fewer
+        // with it.
+        c.ok(cores >= 1 && cores <= u64::from(cpus) && mask == all, cores)?;
 
         // The Ex form: variable-sized entries, RelationProcessorCore (0)
         // ones are 48 bytes with one GROUP_AFFINITY.
         let mut len = 0u32;
         c.eq(GetLogicalProcessorInformationEx(0, core::ptr::null_mut(), &mut len) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INSUFFICIENT_BUFFER)?;
-        c.eq(len.into(), 2 * 48)?;
+        c.eq(len.into(), cores * 48)?;
         let p = buf.as_mut_ptr().cast::<u8>();
         c.ok(GetLogicalProcessorInformationEx(0, p, &mut len) != 0, 0)?;
         let mut mask = 0u64;
@@ -350,20 +360,20 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
             mask |= *(p.add(at + 32) as *const u64);
             at += size as usize;
         }
-        c.eq(mask, 3)?;
+        c.eq(mask, all)?;
         // RelationAll (0xffff): the entries' sizes add up.
         let mut len = 4096u32;
         c.ok(GetLogicalProcessorInformationEx(0xffff, p, &mut len) != 0, 0)?;
-        let (mut at, mut cores) = (0, 0);
+        let (mut at, mut all_cores) = (0, 0);
         while at < len as usize {
             if *(p.add(at) as *const u32) == 0 {
-                cores += 1;
+                all_cores += 1;
             }
             let size = *(p.add(at + 4) as *const u32) as usize;
             c.ok(size >= 8, size as u64)?;
             at += size;
         }
-        c.ok(at == len as usize && cores == 2, cores)?;
+        c.ok(at == len as usize && all_cores == cores, all_cores)?;
     }
     Ok(())
 }

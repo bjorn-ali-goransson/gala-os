@@ -41,7 +41,6 @@ use ntrt::*;
 const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-const SEMAPHORE_ALL_ACCESS: u32 = 0x1f_0003;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const MUTATORS: usize = 3;
 /// "Loopers": threads running compiled code (LOOP_CODE) whose embedded
@@ -193,13 +192,6 @@ global_asm!(
     "pop rbp",
     "pop rbx",
     "ret",
-    // The semaphore services of the pinned build (as smpsem_test).
-    ".globl sp_create_semaphore",
-    "sp_create_semaphore:",
-    "mov r10, rcx",
-    "mov eax, 0xcf",
-    "syscall",
-    "ret",
     // The safepoint stub (as HotSpot's safepoint blob), entered through
     // NtContinue: makes room for the resume address (sp_block fills it
     // in), saves every register on the stack, blocks in sp_block(save
@@ -252,6 +244,8 @@ global_asm!(
     "pop rbx",
     "pop rax",
     "ret",
+    // NtReleaseSemaphore: its x64 number (0x0a) is long-stable
+    // (NtCreateSemaphore's is not: ntrt's create_semaphore).
     ".globl sp_release_semaphore",
     "sp_release_semaphore:",
     "mov r10, rcx",
@@ -263,13 +257,6 @@ global_asm!(
 
 unsafe extern "C" {
     fn sp_mutate(values: *const [u64; VALUES], out: *mut [u64; VALUES], polls: u64);
-    fn sp_create_semaphore(
-        handle: *mut Handle,
-        access: u32,
-        attributes: *const ObjectAttributes,
-        initial: i32,
-        maximum: i32,
-    ) -> NtStatus;
     fn sp_release_semaphore(handle: Handle, count: i32, previous: *mut i32) -> NtStatus;
     fn sp_stub();
 }
@@ -672,10 +659,7 @@ fn run() -> Result<u32, u32> {
         ok(2, s == STATUS_SUCCESS)?;
         heap.store(base, Ordering::SeqCst);
     }
-    let mut h = Handle(0);
-    // SAFETY: a valid output pointer and no attributes.
-    let s =
-        unsafe { sp_create_semaphore(&mut h, SEMAPHORE_ALL_ACCESS, core::ptr::null(), 0, 1000) };
+    let (s, h) = create_semaphore(0, 1000);
     ok(3, s == STATUS_SUCCESS)?;
     SEMAPHORE.store(h.0, Ordering::SeqCst);
     let add =

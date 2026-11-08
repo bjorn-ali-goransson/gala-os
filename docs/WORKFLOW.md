@@ -663,6 +663,27 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   services through ntdll exports (`find_ntdll()` + `find_export()` in
   ntrt), and `user/testntdll` provides stubs with gala's numbers
   (`syscall_stubs!`). On Windows the same test then uses the real ntdll.
+  ntrt does so itself where it wraps such a service (`create_timer`,
+  `set_timer`, `create_semaphore`, `query_semaphore` on x64, through
+  `ntdll_export`; on x86 `nt_call` takes the 32-bit ntdll's export for
+  the numbers that are gala's own), falling back to gala's number only
+  when no ntdll is mapped (gala scenarios that ship none). A raw
+  `mov eax, N` in a test is for long-stable numbers only.
+- **A test must hold on an ordinary user's machine too** (run-all.ps1
+  runs as a non-admin user in session 1, with many CPUs, a battery, its
+  own UI language): files and directories go in `%TEMP%` (GetTempPathW),
+  not C:\ (a user may not create files there) or C:\gala, and an
+  earlier run's leftovers are removed first; values that depend on the
+  machine (the processor count, devices) are read from another API, not
+  typed in; named sections and symbolic links go in the session's
+  `\Sessions\<n>\BaseNamedObjects` (`\BaseNamedObjects` in session 0):
+  creating them in the global one needs SeCreateGlobalPrivilege outside
+  session 0, and DIRECTORY_ALL_ACCESS on it is not granted (ask
+  TRAVERSE | CREATE_OBJECT); information buffers are aligned for their
+  class (NtSetInformationThread checks alignment before length:
+  STATUS_DATATYPE_MISALIGNMENT for a `[u8; 4]` at an odd address); and
+  `cmd /c` with more than two quotes strips the first and the last, so
+  such a line is wrapped in one more pair.
 - **testntdll is gala's stand-in ntdll**, shipped only in scenarios that
   list it in `EXTRA_MODULES`: a small loader (LdrLoadDll and friends),
   the exception/APC dispatchers and the stubs. Adding an export there

@@ -38,6 +38,7 @@ struct SecurityAttributes {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
     fn GetLastError() -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
@@ -194,6 +195,14 @@ fn exe() -> ([u16; 260], usize) {
     (b, n)
 }
 
+/// The user's temporary directory, with its trailing backslash.
+fn temp() -> ([u16; 260], usize) {
+    let mut b = [0u16; 260];
+    // SAFETY: our buffer.
+    let n = unsafe { GetTempPathW(260, b.as_mut_ptr()) } as usize;
+    (b, n)
+}
+
 /// Runs `line` (cmd's command line) with the given standard handles (null:
 /// the inherited ones); its exit code.
 fn run(line: &mut W, stdout: Handle, stderr: Handle) -> Option<u32> {
@@ -292,31 +301,43 @@ fn run_tests() -> Result<(), u32> {
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 5)?;
 
     // Redirections.
-    let out_file = || W::new().s("C:\\gala\\cmd_test_out.txt");
-    let in_file = || W::new().s("C:\\gala\\cmd_test_in.txt");
-    let mut line = W::new().s("cmd.exe /c \"").w(me).s("\" print > C:\\gala\\cmd_test_out.txt");
+    // In %TEMP% (C:\gala is gala's layout), quoted in the command lines
+    // since the user's profile path may hold spaces; a line with more than
+    // two quotes is wrapped in one more pair, which cmd strips.
+    let (tmp, tn) = temp();
+    let tmp = &tmp[..tn];
+    let out_file = || W::new().w(tmp).s("cmd_test_out.txt");
+    let in_file = || W::new().w(tmp).s("cmd_test_in.txt");
+    let mut line =
+        W::new().s("cmd.exe /c \"\"").w(me).s("\" print > \"").w(tmp).s("cmd_test_out.txt\"\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"hello", got as u64)?;
-    let mut line = W::new().s("cmd.exe /c \"").w(me).s("\" print >> C:\\gala\\cmd_test_out.txt");
+    let mut line =
+        W::new().s("cmd.exe /c \"\"").w(me).s("\" print >> \"").w(tmp).s("cmd_test_out.txt\"\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"hellohello", got as u64)?;
     write_file(&mut in_file(), b"from a file");
     let mut line = W::new()
-        .s("cmd.exe /c \"")
+        .s("cmd.exe /c \"\"")
         .w(me)
-        .s("\" cat < C:\\gala\\cmd_test_in.txt > C:\\gala\\cmd_test_out.txt");
+        .s("\" cat < \"")
+        .w(tmp)
+        .s("cmd_test_in.txt\" > \"")
+        .w(tmp)
+        .s("cmd_test_out.txt\"\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"from a file", got as u64)?;
-    let mut line = W::new().s("cmd.exe /c \"").w(me).s("\" both > C:\\gala\\cmd_test_out.txt 2>&1");
+    let mut line =
+        W::new().s("cmd.exe /c \"\"").w(me).s("\" both > \"").w(tmp).s("cmd_test_out.txt\" 2>&1\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"outerr", got as u64)?;
 
     // echo.
-    let mut line = W::new().s("cmd.exe /c echo hello world> C:\\gala\\cmd_test_out.txt");
+    let mut line = W::new().s("cmd.exe /c echo hello world> \"").w(tmp).s("cmd_test_out.txt\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"hello world\r\n", got as u64)?;
@@ -343,7 +364,7 @@ fn run_tests() -> Result<(), u32> {
     }
 
     // An unknown command: 9009 and the message on stderr.
-    let mut line = W::new().s("cmd.exe /c nosuchprogram 2> C:\\gala\\cmd_test_out.txt");
+    let mut line = W::new().s("cmd.exe /c nosuchprogram 2> \"").w(tmp).s("cmd_test_out.txt\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 9009)?;
     let got = read_file(&mut out_file(), &mut buf);
     let want: &[u8] = b"'nosuchprogram' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";

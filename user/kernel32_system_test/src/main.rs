@@ -104,6 +104,8 @@ unsafe extern "system" {
     ) -> Handle;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn SetFileAttributesW(path: *const u16, attributes: u32) -> Bool;
+    fn DeleteFileW(path: *const u16) -> Bool;
+    fn RemoveDirectoryW(path: *const u16) -> Bool;
     fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> Bool;
     fn SetFileInformationByHandle(h: Handle, class: u32, info: *const c_void, size: u32) -> Bool;
     fn GetFileSizeEx(h: Handle, size: *mut i64) -> Bool;
@@ -285,6 +287,19 @@ fn w(s: &str) -> [u16; 64] {
     b
 }
 
+/// `%TEMP%\gala-system-test<rest>`, NUL-terminated, as bytes and as
+/// UTF-16: a directory of the user's (C:\ keeps what earlier runs left
+/// and an ordinary user may not create files there).
+fn scratch(rest: &str) -> ([u8; 160], [u16; 160]) {
+    let mut a = [0u8; 160];
+    // SAFETY: the buffer holds 128 characters (what is left for the name).
+    let n = unsafe { GetTempPathA(128, a.as_mut_ptr()) } as usize;
+    for (d, c) in a[n..].iter_mut().zip("gala-system-test".bytes().chain(rest.bytes())) {
+        *d = c;
+    }
+    (a, core::array::from_fn(|i| a[i].into()))
+}
+
 fn memory(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain kernel32 calls with structures of ours.
     unsafe {
@@ -445,18 +460,20 @@ fn process(c: &mut Checks) -> Result<(), u32> {
 fn files(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain kernel32 calls with buffers and handles of ours.
     unsafe {
-        c.ok(
-            CreateDirectoryA(c"C:\\gala-system-test".as_ptr().cast(), core::ptr::null_mut()) != 0,
-            GetLastError().into(),
-        )?;
-        c.eq(
-            CreateDirectoryA(c"C:\\gala-system-test".as_ptr().cast(), core::ptr::null_mut()) as u64,
-            0,
-        )?;
+        let (dir, dir_w) = scratch("");
+        let (_, a) = scratch("\\a.txt");
+        let (_, b) = scratch("\\b.txt");
+        let (_, s_path) = scratch("\\streams.txt");
+        // What an earlier run on the same machine left.
+        SetFileAttributesW(a.as_ptr(), FILE_ATTRIBUTE_NORMAL);
+        for f in [&a, &b, &s_path] {
+            DeleteFileW(f.as_ptr());
+        }
+        RemoveDirectoryW(dir_w.as_ptr());
+        c.ok(CreateDirectoryA(dir.as_ptr(), core::ptr::null_mut()) != 0, GetLastError().into())?;
+        c.eq(CreateDirectoryA(dir.as_ptr(), core::ptr::null_mut()) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_ALREADY_EXISTS.into())?;
 
-        let a = w("C:\\gala-system-test\\a.txt");
-        let b = w("C:\\gala-system-test\\b.txt");
         for name in [&a, &b] {
             let h = CreateFileW(
                 name.as_ptr(),
@@ -510,7 +527,6 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetFileAttributesW(b.as_ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
 
         // Streams: a file's unnamed data stream ("::$DATA") and its size.
-        let s_path = w("C:\\gala-system-test\\streams.txt");
         let h = CreateFileW(
             s_path.as_ptr(),
             GENERIC_READ_WRITE,
@@ -554,18 +570,14 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         CloseHandle(h);
 
         let mut data = [0u16; 320];
-        let pattern = w("C:\\gala-system-test\\*");
+        let (_, pattern) = scratch("\\*");
         let find =
             FindFirstFileExW(pattern.as_ptr(), 1, data.as_mut_ptr(), 0, core::ptr::null_mut(), 0);
         c.ok(find != INVALID_HANDLE_VALUE, GetLastError().into())?;
         FindClose(find);
 
         let mut volume = [0u16; 16];
-        let path = w("C:\\gala-system-test\\b.txt");
-        c.ok(
-            GetVolumePathNameW(path.as_ptr(), volume.as_mut_ptr(), 16) != 0,
-            GetLastError().into(),
-        )?;
+        c.ok(GetVolumePathNameW(b.as_ptr(), volume.as_mut_ptr(), 16) != 0, GetLastError().into())?;
         c.ok(
             volume[..4] == [u16::from(b'C'), u16::from(b':'), u16::from(b'\\'), 0],
             volume[0].into(),
@@ -593,6 +605,9 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         UnmapViewOfFile(view);
         CloseHandle(other);
         CloseHandle(map);
+
+        c.ok(DeleteFileW(s_path.as_ptr()) != 0, GetLastError().into())?;
+        c.ok(RemoveDirectoryW(dir_w.as_ptr()) != 0, GetLastError().into())?;
     }
     Ok(())
 }

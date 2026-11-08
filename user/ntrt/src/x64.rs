@@ -72,8 +72,9 @@ stubs! {
     ntrt_gala_request_handover = 0x7f5a;
     ntrt_gala_handover_pause = 0x7f5b;
     ntrt_gala_session = 0x7fb0;
-    // Waitable timers: gala's numbers, UNVERIFIED for the pinned build
-    // (programs on Windows reach them through ntdll's exports).
+    // Waitable timers: gala's numbers, UNVERIFIED for the pinned build:
+    // create_timer/set_timer call ntdll's exports, these stubs only when
+    // no ntdll is mapped (gala scenarios that ship none).
     ntrt_nt_create_timer = 0x00d9;
     ntrt_nt_set_timer = 0x019e;
     ntrt_nt_query_information_file = 0x0011;
@@ -474,21 +475,86 @@ pub fn session_frame(
 
 pub const TIMER_ALL_ACCESS: u32 = 0x1f_0003;
 
-/// NtCreateTimer (NotificationTimer 0, SynchronizationTimer 1).
+/// NtCreateTimer (NotificationTimer 0, SynchronizationTimer 1), through
+/// ntdll's export (its number changes between builds).
 pub fn create_timer(kind: u32) -> (NtStatus, Handle) {
+    type F = unsafe extern "system" fn(*mut Handle, u32, *const ObjectAttributes, u32) -> NtStatus;
     let mut h = Handle(0);
-    // SAFETY: valid output pointer, no attributes.
-    let st = unsafe { ntrt_nt_create_timer(&mut h, TIMER_ALL_ACCESS, core::ptr::null(), kind) };
+    let null = core::ptr::null();
+    // SAFETY: valid output pointer, no attributes; the export has
+    // NtCreateTimer's documented signature.
+    let st = unsafe {
+        match ntdll_export(b"NtCreateTimer") {
+            Some(f) => core::mem::transmute::<usize, F>(f)(&mut h, TIMER_ALL_ACCESS, null, kind),
+            None => ntrt_nt_create_timer(&mut h, TIMER_ALL_ACCESS, null, kind),
+        }
+    };
     (st, h)
 }
 
 /// NtSetTimer with no APC: due at `due` (NT time: negative = relative),
-/// every `period` ms after (0: once).
+/// every `period` ms after (0: once). Through ntdll's export.
 pub fn set_timer(h: Handle, due: i64, period: i32) -> NtStatus {
+    type F = unsafe extern "system" fn(
+        Handle,
+        *const i64,
+        *mut c_void,
+        *mut c_void,
+        u8,
+        i32,
+        *mut u8,
+    ) -> NtStatus;
     let mut previous = 0u8;
     let null = core::ptr::null_mut();
-    // SAFETY: valid due time and output pointers.
-    unsafe { ntrt_nt_set_timer(h, &due, null, null, 0, period, &mut previous) }
+    // SAFETY: valid due time and output pointers; the export has
+    // NtSetTimer's documented signature.
+    unsafe {
+        match ntdll_export(b"NtSetTimer") {
+            Some(f) => {
+                core::mem::transmute::<usize, F>(f)(h, &due, null, null, 0, period, &mut previous)
+            }
+            None => ntrt_nt_set_timer(h, &due, null, null, 0, period, &mut previous),
+        }
+    }
+}
+
+pub const SEMAPHORE_ALL_ACCESS: u32 = 0x1f_0003;
+
+/// NtCreateSemaphore (unnamed), through ntdll's export: its number changes
+/// between builds. STATUS_INVALID_SYSTEM_SERVICE without an ntdll.
+pub fn create_semaphore(initial: i32, maximum: i32) -> (NtStatus, Handle) {
+    type F =
+        unsafe extern "system" fn(*mut Handle, u32, *const ObjectAttributes, i32, i32) -> NtStatus;
+    let mut h = Handle(0);
+    let Some(f) = ntdll_export(b"NtCreateSemaphore") else {
+        return (STATUS_INVALID_SYSTEM_SERVICE, h);
+    };
+    // SAFETY: valid output pointer, no attributes; the documented signature.
+    let st = unsafe {
+        core::mem::transmute::<usize, F>(f)(
+            &mut h,
+            SEMAPHORE_ALL_ACCESS,
+            core::ptr::null(),
+            initial,
+            maximum,
+        )
+    };
+    (st, h)
+}
+
+/// NtQuerySemaphore's SemaphoreBasicInformation (CurrentCount,
+/// MaximumCount), through ntdll's export.
+pub fn query_semaphore(h: Handle) -> (NtStatus, [i32; 2]) {
+    type F = unsafe extern "system" fn(Handle, u32, *mut [i32; 2], u32, *mut u32) -> NtStatus;
+    let mut info = [-1; 2];
+    let Some(f) = ntdll_export(b"NtQuerySemaphore") else {
+        return (STATUS_INVALID_SYSTEM_SERVICE, info);
+    };
+    let mut returned = 0;
+    // SAFETY: an 8-byte buffer and a valid output pointer; the documented
+    // signature.
+    let st = unsafe { core::mem::transmute::<usize, F>(f)(h, 0, &mut info, 8, &mut returned) };
+    (st, info)
 }
 
 pub const STATUS_ACCESS_DENIED: NtStatus = 0xc000_0022;
@@ -1601,6 +1667,22 @@ pub fn mapped_file_name(addr: usize, buf: &mut [u8; 600]) -> Result<&[u16], NtSt
     let ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap()) as *const u16;
     // SAFETY: the name buffer is inside `buf`, `len` bytes long.
     Ok(unsafe { core::slice::from_raw_parts(ptr, len / 2) })
+}
+
+/// ntdll's base, once looked up: 0 not yet, 1 none mapped.
+static NTDLL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The address of ntdll's export `name`: how tests reach services whose
+/// numbers change between builds (on gala, testntdll's stubs with gala's
+/// numbers). None when no ntdll is mapped. The base is looked up once.
+pub fn ntdll_export(name: &[u8]) -> Option<usize> {
+    use core::sync::atomic::Ordering;
+    let mut base = NTDLL.load(Ordering::Relaxed);
+    if base == 0 {
+        base = find_ntdll().unwrap_or(1);
+        NTDLL.store(base, Ordering::Relaxed);
+    }
+    if base == 1 { None } else { find_export(base, name) }
 }
 
 /// The base of the image mapped from `...\System32\ntdll.dll`, found by

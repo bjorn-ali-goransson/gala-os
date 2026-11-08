@@ -20,6 +20,10 @@
 //!   that is not, fail with ERROR_INVALID_PARAMETER; OVERLAPPED offsets
 //!   work on a synchronous handle; FlushFileBuffers succeeds.
 //!
+//! Before any of it, the disk must be that scratch disk (its length and
+//! sector 1's marker, read first): otherwise the program writes nothing
+//! and exits with 0xd15c (`disk_test: refused`).
+//!
 //! Prints `disk_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -341,6 +345,42 @@ fn transfers(c: &mut Checks, disk: Handle) -> Result<(), u32> {
     c.ok(unsafe { FlushFileBuffers(disk) } != 0, last_error())
 }
 
+/// Exit status when the disk is not xtask's scratch disk.
+const REFUSED: u32 = 0xd15c;
+
+/// Whether `disk` is xtask's scratch disk: 16 MiB long and sector 1
+/// starting with its marker, read before anything is written (this
+/// program writes sector 2: on a real machine PhysicalDrive0 holds the
+/// partition table). Leaves the file pointer at 0.
+fn scratch_disk(disk: Handle) -> bool {
+    let mut buf = [0u8; 8];
+    let mut n = 0;
+    // SAFETY: valid buffers for each call.
+    let length_ok = unsafe {
+        let null = core::ptr::null();
+        let p = buf.as_mut_ptr().cast();
+        DeviceIoControl(
+            disk,
+            IOCTL_DISK_GET_LENGTH_INFO,
+            null,
+            0,
+            p,
+            8,
+            &mut n,
+            core::ptr::null_mut(),
+        ) != 0
+            && n == 8
+    };
+    if !length_ok || u64::from_le_bytes(buf) != DISK_SIZE {
+        return false;
+    }
+    let mut sector = [0u8; SECTOR];
+    let marked = seek(disk, SECTOR as i64, FILE_BEGIN) == Some(SECTOR as i64)
+        && read(disk, &mut sector) == (true, SECTOR as u32)
+        && sector.starts_with(SECTOR1);
+    seek(disk, 0, FILE_BEGIN) == Some(0) && marked
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let name: [u16; 20] = wide("\\\\.\\PhysicalDrive0");
@@ -353,6 +393,11 @@ fn run() -> Result<(), u32> {
         let disk =
             CreateFileW(name.as_ptr(), access, share, core::ptr::null(), OPEN_EXISTING, 0, none);
         c.ok(disk as isize != -1, last_error())?;
+        if !scratch_disk(disk) {
+            out(b"disk_test: refused: PhysicalDrive0 is not xtask's 16 MiB scratch disk\r\n");
+            CloseHandle(disk);
+            return Err(REFUSED);
+        }
         c.eq(GetFileType(disk).into(), FILE_TYPE_DISK.into())?;
         ioctls(&mut c, disk)?;
         transfers(&mut c, disk)?;

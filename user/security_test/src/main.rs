@@ -56,6 +56,7 @@ unsafe extern "system" {
     fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn CreateDirectoryW(path: *const u16, sa: *const SecurityAttributes) -> Bool;
     fn RemoveDirectoryW(path: *const u16) -> Bool;
+    fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
     fn DeleteFileW(path: *const u16) -> Bool;
     fn CreateFileW(
         name: *const u16,
@@ -255,11 +256,25 @@ fn last_error() -> u64 {
 }
 
 /// A NUL-terminated UTF-16 string.
-struct W([u16; 96]);
+struct W([u16; 160]);
 
 fn w(s: &str) -> W {
-    let mut b = [0u16; 96];
+    let mut b = [0u16; 160];
     for (slot, c) in b.iter_mut().zip(s.encode_utf16()) {
+        *slot = c;
+    }
+    W(b)
+}
+
+/// `%TEMP%\security_test<rest>`: a directory of the user's (on Windows
+/// C:\ keeps what earlier runs left).
+fn scratch(rest: &str) -> W {
+    let mut b = [0u16; 160];
+    // SAFETY: the buffer holds 128 characters.
+    let n = unsafe { GetTempPathW(128, b.as_mut_ptr()) } as usize;
+    for (slot, c) in
+        b[n..].iter_mut().zip("security_test".encode_utf16().chain(rest.encode_utf16()))
+    {
         *slot = c;
     }
     W(b)
@@ -358,7 +373,16 @@ fn run() -> Result<(), u32> {
         let user_sid = user.0.as_ptr().cast::<*const u8>().read();
 
         // A directory with a protected DACL.
-        let dir = w("C:\\security_test");
+        let dir = scratch("");
+        let file = scratch("\\a.txt");
+        let sub = scratch("\\sub");
+        let own = scratch("\\b.txt");
+        // What an earlier run on the same machine left (the directory's
+        // Everyone:FA lets its files be deleted).
+        DeleteFileW(text_ptr(&file));
+        DeleteFileW(text_ptr(&own));
+        RemoveDirectoryW(text_ptr(&sub));
+        RemoveDirectoryW(text_ptr(&dir));
         let sa = SecurityAttributes {
             length: 24,
             descriptor: sddl(&c, "D:P(A;OICI;FA;;;WD)(A;;FR;;;SY)")?,
@@ -383,20 +407,17 @@ fn run() -> Result<(), u32> {
         c.ok(needed > 20, needed.into())?;
 
         // A file inherits the Everyone ACE; a subdirectory with OI|CI.
-        let file = w("C:\\security_test\\a.txt");
         let h = CreateFileW(text_ptr(&file), GENERIC_WRITE, 0, core::ptr::null(), 1, 0x80, null);
         c.ok(h as isize != -1, last_error())?;
         CloseHandle(h);
         let (_b, dacl, control) = file_dacl(&c, &file)?;
         c.eq((control & SE_DACL_PROTECTED).into(), 0)?;
         expect_aces(&c, dacl, &[(0x10, FILE_ALL_ACCESS, &EVERYONE)])?;
-        let sub = w("C:\\security_test\\sub");
         c.ok(CreateDirectoryW(text_ptr(&sub), core::ptr::null()) != 0, last_error())?;
         let (_b, dacl, _) = file_dacl(&c, &sub)?;
         expect_aces(&c, dacl, &[(0x13, FILE_ALL_ACCESS, &EVERYONE)])?;
 
         // A file with its own protected DACL keeps exactly that.
-        let own = w("C:\\security_test\\b.txt");
         let sa =
             SecurityAttributes { length: 24, descriptor: sddl(&c, "D:P(A;;FR;;;SY)")?, inherit: 0 };
         let h = CreateFileW(text_ptr(&own), GENERIC_WRITE, 0, &sa, 1, 0x80, null);

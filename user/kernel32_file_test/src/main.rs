@@ -412,7 +412,9 @@ fn run() -> Result<(), u32> {
         // STATUS_INVALID_PARAMETER.
         let mut iosb = [usize::MAX; 2];
         c.eq(NtFlushBuffersFileEx(h, 4, core::ptr::null(), 0, &mut iosb).into(), 0)?;
-        c.eq(iosb[0] as u64, 0)?;
+        // IO_STATUS_BLOCK.Status is a 32-bit NTSTATUS: Windows writes only
+        // the low half of the pointer-sized union.
+        c.eq(u64::from(iosb[0] as u32), 0)?;
         c.eq(NtFlushBuffersFileEx(h, 0x100, core::ptr::null(), 0, &mut iosb).into(), 0xc000_000d)?;
         c.ok(CloseHandle(h) != 0, 0)?;
 

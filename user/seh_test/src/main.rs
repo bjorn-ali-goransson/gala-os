@@ -570,8 +570,16 @@ fn run() -> Result<(), u32> {
             core::mem::transmute::<usize, extern "system" fn(*const [u32; 3]) -> u8>(delete),
         )
     };
-    let region = INDIRECT.as_ptr() as u64;
-    let table = INDIRECT[0x100 / 4..].as_ptr().cast::<[u32; 3]>();
+    // The region is memory of its own (as a JIT's code is), not inside
+    // this image: a PC in an image is looked up in its .pdata.
+    let (s, region, _) = allocate(0, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    c.ok(s == STATUS_SUCCESS && region != 0, s as u32 as u64)?;
+    // SAFETY: the page just committed holds INDIRECT.
+    unsafe {
+        core::ptr::copy_nonoverlapping(INDIRECT.as_ptr(), region as *mut u32, INDIRECT.len())
+    };
+    let region = region as u64;
+    let table = (region + 0x100) as *const [u32; 3];
     c.ok(add(table, 2, region) != 0, 0)?;
     let entry = (fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut());
     c.eq(entry as u64, region + 0x10c)?;
