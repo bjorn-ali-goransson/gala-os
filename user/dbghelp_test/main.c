@@ -22,7 +22,9 @@
  *   not there.
  * - SymInitializeW, SymLoadModuleExW (the base; a module already
  *   loaded is 0 with ERROR_SUCCESS), SymFromAddr (a symbol's name,
- *   address, module base and the displacement into it), SymUnloadModule64
+ *   address and the displacement into it; an export-table symbol is
+ *   SYMFLAG_EXPORT with ModBase 0; SizeOfStruct other than 88 is
+ *   ERROR_INVALID_PARAMETER), SymUnloadModule64
  *   (FALSE the second time; SymFromAddr fails after), SymCleanup.
  * - MiniDumpWriteDump is exported (not called: gala does not write dumps
  *   yet, and its stub ends the process).
@@ -185,6 +187,7 @@ int main(void) {
     CHECK(sym_load(proc, NULL, dll_path, NULL, dll_base, 0, NULL, 0) == dll_base);
     SetLastError(5);
     CHECK(sym_load(proc, NULL, dll_path, NULL, dll_base, 0, NULL, 0) == 0 && GetLastError() == ERROR_SUCCESS);
+    _Static_assert(sizeof(SYMBOL_INFO) == 88, "SYMBOL_INFO is 88 bytes");
     static union { SYMBOL_INFO info; char room[sizeof(SYMBOL_INFO) + 256]; } sym;
     memset(&sym, 0, sizeof sym);
     sym.info.SizeOfStruct = sizeof(SYMBOL_INFO);
@@ -194,8 +197,24 @@ int main(void) {
     CHECK(sym_from_addr(proc, at + 1, &disp, &sym.info));
     if (strcmp(sym.info.Name, "SymFromAddr") != 0)
         printf("dbghelp_test: SymFromAddr gave %s\n", sym.info.Name);
-    CHECK(strcmp(sym.info.Name, "SymFromAddr") == 0 && disp == 1 && sym.info.ModBase == dll_base);
+    CHECK(strcmp(sym.info.Name, "SymFromAddr") == 0 && disp == 1);
     CHECK(sym.info.Address == at && sym.info.NameLen == 11);
+    /* Without a PDB the symbol is the export table's: SYMFLAG_EXPORT and
+       no ModBase (Windows 11 25H2, which also gave Size 112: not checked,
+       gala does not know a function's size from its exports). */
+    if (sym.info.Flags & SYMFLAG_EXPORT)
+        CHECK(sym.info.ModBase == 0);
+    else
+        CHECK(sym.info.ModBase == dll_base);
+    CHECK(sym.info.Flags == SYMFLAG_EXPORT);
+    /* SizeOfStruct must be sizeof(SYMBOL_INFO), 88: else
+       ERROR_INVALID_PARAMETER and the structure untouched. */
+    sym.info.SizeOfStruct = sizeof(SYMBOL_INFO) - 1;
+    sym.info.NameLen = 77;
+    SetLastError(0);
+    CHECK(!sym_from_addr(proc, at + 1, &disp, &sym.info) && GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(sym.info.NameLen == 77);
+    sym.info.SizeOfStruct = sizeof(SYMBOL_INFO);
     CHECK(sym_unload(proc, dll_base));
     CHECK(!sym_unload(proc, dll_base));
     CHECK(!sym_from_addr(proc, at + 1, &disp, &sym.info));

@@ -3239,7 +3239,8 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   fragment in a file URL only after a .htm/.html name), AssocQueryStringW
   (the user's classes, then HKCR; shell\<verb>\command;
   ASSOCSTR_EXECUTABLE is CO_E_APPNOTFOUND when the program is not
-  there) and
+  there; a short buffer gets the string truncated, the size and
+  HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), as on Windows) and
   SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
   transactions, CopyTo, Clone or region locks: recorded) with
   SHCreateStreamOnFileW over it (STGM_CONVERT, _DELETEONRELEASE and
@@ -3395,8 +3396,8 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   AcquireCredentialsHandleW/A for UNISP_NAME / "Schannel". The package
   is listed under both names (EnumerateSecurityPackagesW/A,
   QuerySecurityPackageInfoW/A: RPC id 14, cbMaxToken 24576). Two
-  dispatch tables, InitSecurityInterfaceW and InitSecurityInterfaceA
-  (the ANSI functions where a slot takes or gives strings; programs
+  dispatch tables, InitSecurityInterfaceW (version 4) and
+  InitSecurityInterfaceA (version 1, as on Windows; the ANSI functions where a slot takes or gives strings; programs
   built without UNICODE, such as curl, call SSPI through it; the ANSI
   functions besides AcquireCredentialsHandleA, InitializeSecurityContextA,
   QueryContextAttributesA and the package queries are recorded and give
@@ -4364,7 +4365,8 @@ SOCKET values are the endpoint handles.
   a connected socket`). The integer ones (SO_REUSEADDR, SO_KEEPALIVE,
   SO_SNDBUF/RCVBUF, SO_EXCLUSIVEADDRUSE, TCP_NODELAY, the TCP
   keep-alive idle/count/interval, SO_BROADCAST, SO_TYPE,
-  SO_RANDOMIZE_PORT (unbound sockets only: WSAEINVAL once bound),
+  SO_RANDOMIZE_PORT (unbound sockets only: WSAEINVAL once bound; read
+  back as one byte, Windows' BOOLEAN),
   IP_DONTFRAGMENT and IP_RECVECN, the last three set
   by Chromium's UDP sockets and kept only: ports and datagrams as
   without them, receives with no ECN control data) are kept per
@@ -5716,8 +5718,10 @@ then riched20.dll).
     fontdue (`no_std` + `alloc` over `gala_heap`) and kept in a glyph
     cache (256 buckets of 16, its own spin lock; **lock order: taken
     inside the object table's, never the other way**). GDI's metrics:
-    ascent and descent are the Windows ascent/descent scaled and rounded
-    each (-12 gives 16 = 13 + 3), advances the hinted ones rounded to
+    from an em (lfHeight <= 0) the cell (winAscent + winDescent scaled)
+    and the ascent are truncated (-12 gives 15 = 12 + 3, as Windows 11
+    25H2 measures Segoe UI), from a cell height (lfHeight > 0) the scaled
+    ascent and descent are rounded each, advances the hinted ones rounded to
     pixels and added up, no kerning; tmAveCharWidth from OS/2
     xAvgCharWidth; pitch-and-family 0x27 (variable pitch, TrueType,
     FF_SWISS).
@@ -5875,7 +5879,8 @@ windows can use them too.
   the PE resource directory's RT_GROUP_ICON entries in directory order
   (named, then IDs; a negative index is an ID), pick the image nearest
   the size asked with the most bits per pixel, and make the icon with
-  user32's CreateIconFromResourceEx; .ico files too.
+  user32's CreateIconFromResourceEx; .ico files too. A file that is
+  neither is NULL with no error (as on Windows; the docs say 1).
 - **ole32** (`user/ole32`; `ole32_test`, `user32_test`):
   - Drop targets per window with a reference (RegisterDragDrop/
     RevokeDragDrop; IsWindow loaded from user32 on first use); nothing
@@ -5894,8 +5899,9 @@ windows can use them too.
     answers on Windows).
   - `bindctx.rs`: CoCreateInstanceEx creates through
     CoCreateInstance(IID_IUnknown) and fills each MULTI_QI by
-    QueryInterface (a pItf that is not NULL on input is E_INVALIDARG,
-    the array untouched); CreateBindCtx's object keeps up to 32 bound objects
+    QueryInterface (the entries in order are reset to (E_NOINTERFACE,
+    NULL); one whose pItf is not NULL on input stops there with
+    E_INVALIDARG, it and the rest untouched); CreateBindCtx's object keeps up to 32 bound objects
     and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
     CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
     serves no COM calls across processes).
@@ -5910,8 +5916,9 @@ windows can use them too.
   size) of up to 64 modules of this process (the size from the mapped
   image's SizeOfImage when not given); SymFromAddr checks the image is
   mapped (VirtualQuery), walks its export directory and names the
-  nearest export at or below the address (SYMFLAG_EXPORT,
-  SymTagPublicSymbol), forwarders skipped. gala's own DLLs link with
+  nearest export at or below the address (SYMFLAG_EXPORT, ModBase 0,
+  Size 0, SymTagPublicSymbol), forwarders skipped; SizeOfStruct other
+  than 88 is ERROR_INVALID_PARAMETER. gala's own DLLs link with
   /OPT:ICF, so identical functions share an address and SymFromAddr
   names the first export there. StackWalk64 walks x64 frames of this
   process (Chromium's exception filter prints a crash's stack with it):

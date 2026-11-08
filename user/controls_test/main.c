@@ -222,7 +222,9 @@ static void combos(HWND parent) {
     CHECK(SendMessageW(c, CB_SETCURSEL, 7, 0) == CB_ERR);
     CHECK(SendMessageW(c, CB_GETCURSEL, 0, 0) == 1);
     CHECK(SendMessageW(c, CB_DELETESTRING, 0, 0) == 2);
-    CHECK(SendMessageW(c, CB_RESETCONTENT, 0, 0) == CB_OKAY && SendMessageW(c, CB_GETCOUNT, 0, 0) == 0);
+    /* 1, not the documented CB_OKAY (Windows 11 25H2). */
+    CHECK(SendMessageW(c, CB_RESETCONTENT, 0, 0) == 1);
+    CHECK(SendMessageW(c, CB_GETCOUNT, 0, 0) == 0);
 
     HWND d = CreateWindowExW(0, L"COMBOBOX", NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN, 10, 240, 150, 200, parent,
                              (HMENU)41, GetModuleHandleW(NULL), NULL);

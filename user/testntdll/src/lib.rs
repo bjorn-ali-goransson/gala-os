@@ -2181,14 +2181,17 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
 }
 
 /// VerSetConditionMask: three condition bits for each VER_* type bit,
-/// at three times the bit's index (kernel32 forwards here, as on Windows).
+/// at three times the bit's index, and bit 63 set once a condition is
+/// (Windows 11 25H2: (0, VER_MAJORVERSION, VER_GREATER_EQUAL) is
+/// 0x8000000000000018; with no type bit the mask is returned as it is,
+/// which is not measured). kernel32 forwards here, as on Windows.
 #[unsafe(no_mangle)]
 pub extern "system" fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) -> u64 {
     let mut mask = mask;
     for bit in 0..8 {
         if kind & (1 << bit) != 0 {
             let shift = 3 * bit;
-            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift);
+            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift) | 1 << 63;
         }
     }
     mask

@@ -23,8 +23,8 @@
  * - DragAcceptFiles sets and clears WS_EX_ACCEPTFILES.
  * - ExtractIconW: with index -1 the number of icon groups; index n the
  *   n-th group's icon (SM_CXICON sized), a negative index the group with
- *   that resource ID; NULL past the last or for a missing file; 1 for a
- *   file that is not an image. ExtractIconExW: the count, or large
+ *   that resource ID; NULL past the last, for a missing file and for a
+ *   file that is not an image (with no error; the docs say 1). ExtractIconExW: the count, or large
  *   (32) and small (16) icons. SHDefExtractIconW: S_OK, S_FALSE when the
  *   icon is not there.
  * - SHFileOperationW: FO_COPY of a directory to a new name copies the
@@ -517,7 +517,10 @@ int main(int argc, char **argv) {
     DWORD wrote;
     WriteFile(text, "not an image", 12, &wrote, NULL);
     CloseHandle(text);
-    CHECK((UINT_PTR)ExtractIconW(NULL, L"sh_text.txt", 0) == 1);
+    /* NULL with no error, not the documented 1 (Windows 11 25H2, by a
+       relative or an absolute path). */
+    SetLastError(0);
+    CHECK(ExtractIconW(NULL, L"sh_text.txt", 0) == NULL && GetLastError() == 0);
     DeleteFileW(L"sh_text.txt");
     CHECK(ExtractIconExW(self, -1, NULL, NULL, 0) == 2);
     HICON large[2] = {0}, small[2] = {0};

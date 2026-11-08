@@ -238,9 +238,14 @@ static void assoc_checks(void) {
     len = 0;
     CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, NULL, &len) == S_FALSE);
     CHECK(len == wcslen(command) + 1);
+    /* A short buffer: HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), not
+       the documented E_POINTER, the size needed, and the string truncated
+       into the buffer (Windows 11 25H2). */
     len = 4;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len) == E_POINTER);
+    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len)
+          == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
     CHECK(len == wcslen(command) + 1);
+    CHECK(wcsncmp(out, command, 3) == 0 && out[3] == 0);
     len = MAX_PATH;
     CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galanone", NULL, out, &len)
           == HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION));

@@ -54,6 +54,8 @@ const S_FALSE: i32 = 1;
 const E_NOTIMPL: i32 = 0x8000_4001u32 as i32;
 const E_NOINTERFACE: i32 = 0x8000_4002u32 as i32;
 const E_POINTER: i32 = 0x8000_4003u32 as i32;
+/// HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER).
+const INSUFFICIENT_BUFFER: i32 = 0x8007_007au32 as i32;
 const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
 const E_OUTOFMEMORY: i32 = 0x8007_000eu32 as i32;
 const STG_E_ACCESSDENIED: i32 = 0x8003_0005u32 as i32;
@@ -170,8 +172,9 @@ const ASSOCSTR_DEFAULTICON: u32 = 15;
 /// ASSOCSTR_EXECUTABLE (that command's program; CO_E_APPNOTFOUND when
 /// the file is not there), ASSOCSTR_FRIENDLYDOCNAME
 /// (the ProgID's name), ASSOCSTR_CONTENTTYPE, ASSOCSTR_DEFAULTICON.
-/// S_FALSE and the size with no buffer, E_POINTER and the size when it is
-/// short, HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION) when nothing is
+/// S_FALSE and the size with no buffer; the string truncated, the size
+/// and HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) when it is short;
+/// HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION) when nothing is
 /// registered. Other kinds are recorded.
 #[unsafe(no_mangle)]
 pub extern "system" fn AssocQueryStringW(
@@ -278,6 +281,21 @@ fn hand(v: &Buf, out: *mut u16, count: *mut u32) -> i32 {
         // SAFETY: the caller's count.
         unsafe { *count = needed };
         return S_FALSE;
+    }
+    // A short buffer: the string truncated into it, the size needed and
+    // HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), not the documented
+    // E_POINTER (Windows 11 25H2).
+    // SAFETY: the caller's count.
+    let room = unsafe { *count } as usize;
+    if room > 0 && room < needed as usize {
+        let text = v.text();
+        // SAFETY: the caller's buffer of `room` characters.
+        unsafe {
+            core::ptr::copy_nonoverlapping(text.as_ptr(), out, room - 1);
+            out.add(room - 1).write(0);
+            *count = needed;
+        }
+        return INSUFFICIENT_BUFFER;
     }
     let hr = give(v, out, count, S_OK);
     if hr == E_POINTER {

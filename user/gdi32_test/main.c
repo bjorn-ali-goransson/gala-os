@@ -244,10 +244,14 @@ static void fonts(void) {
     CHECK(one.cx > 0 && two.cx > one.cx && one.cy == tm.tmHeight);
     WCHAR face[LF_FACESIZE];
     CHECK(GetTextFaceW(screen, LF_FACESIZE, face) > 0);
-    // Segoe UI at 96 DPI: a 12-pixel em gives a 16-pixel cell, 13 above
-    // the baseline and 3 below; a TrueType, variable-pitch Swiss face
-    // (TMPF_FIXED_PITCH set means variable pitch).
-    CHECK(tm.tmHeight == 16 && tm.tmAscent == 13 && tm.tmDescent == 3);
+    // Segoe UI at 96 DPI (the display DC of the machine measured, and
+    // gala's): a 12-pixel em gives a 15-pixel cell, 12 above the baseline
+    // and 3 below, 3 of internal leading and none external (Windows 11
+    // 25H2); a TrueType, variable-pitch Swiss face (TMPF_FIXED_PITCH set
+    // means variable pitch).
+    CHECK(GetDeviceCaps(screen, LOGPIXELSY) == 96);
+    CHECK(tm.tmHeight == 15 && tm.tmAscent == 12 && tm.tmDescent == 3);
+    CHECK(tm.tmInternalLeading == 3 && tm.tmExternalLeading == 0);
     CHECK((tm.tmPitchAndFamily & (TMPF_FIXED_PITCH | TMPF_TRUETYPE)) == (TMPF_FIXED_PITCH | TMPF_TRUETYPE));
     CHECK((tm.tmPitchAndFamily & 0xf0) == FF_SWISS && tm.tmMaxCharWidth > tm.tmAveCharWidth);
     SIZE narrow, wide;

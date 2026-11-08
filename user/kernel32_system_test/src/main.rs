@@ -266,6 +266,9 @@ impl Checks {
         out(b"kernel32_system_test: check ");
         out(&hex(self.0));
         out(b" got ");
+        if got >> 32 != 0 {
+            out(&hex((got >> 32) as u32));
+        }
         out(&hex(got as u32));
         check_line(core::panic::Location::caller().line());
         out(b"\r\n");
@@ -627,8 +630,10 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
     c.ok(frames[0] > image && frames[0] < image + 0x10_0000, frames[0] as u64)?;
     // SAFETY: plain kernel32 calls.
     unsafe {
+        // The condition at three times the type's bit index, and bit 63
+        // set as well (Windows 11 25H2: 0x8000000000000018).
         let mask = VerSetConditionMask(0, VER_MAJORVERSION, VER_GREATER_EQUAL);
-        c.eq(mask, 0x18)?;
+        c.eq(mask, 0x8000_0000_0000_0018)?;
         let mut v = OsVersionInfoExW {
             size: 284,
             major: 6,
@@ -649,6 +654,7 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         // RtlVerifyVersionInfo: 10.0 build 20348 or later, as curl asks.
         let ge = |m: u64, kind: u32| VerSetConditionMask(m, kind, VER_GREATER_EQUAL);
         let mask = ge(ge(ge(0, VER_MAJORVERSION), VER_MINORVERSION), VER_BUILDNUMBER);
+        c.eq(mask, 0x8000_0000_0000_00db)?;
         let all = VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER;
         v.major = 10;
         v.minor = 0;

@@ -659,7 +659,8 @@ pub extern "system" fn combo_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: i
                 c.current = -1;
             });
             crate::window::InvalidateRect(hwnd, core::ptr::null(), 1);
-            0 // CB_OKAY
+            // 1, not the documented CB_OKAY (0) (Windows 11 25H2).
+            1
         }
         CB_GETCOUNT => with(hwnd, |c| c.items.len() as isize).unwrap_or(0),
         CB_GETCURSEL => with(hwnd, |c| c.current).unwrap_or(CB_ERR),

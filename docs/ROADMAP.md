@@ -1638,7 +1638,18 @@ inherited ACEs carry INHERITED_ACE, and the child's DACL
 SE_DACL_AUTO_INHERITED, only under an auto-inherited parent DACL
 (security_test, which also checks a "D:PAI" parent); ntdll's
 BaseDllName is not inside its FullDllName, so loader_test compares the
-text.
+text. From the Windows agent's probes: VerSetConditionMask sets bit 63
+with a condition (kernel32_system_test, whose report prints a 64-bit
+value whole); AssocQueryStringW with a short buffer is
+HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), the size and the string
+truncated (shlwapi_test); CoCreateInstanceEx resets the MULTI_QI
+entries in order and stops at one whose pItf is set (ole32_test);
+CB_RESETCONTENT returns 1 (controls_test); Segoe UI's cell and ascent
+from an em are truncated, 15 = 12 + 3 at lfHeight -12 and 96 DPI
+(gdi32_test); ExtractIconW of a file that is no image is NULL with no
+error (shell32_test); SymFromAddr's export-table symbol has ModBase 0
+and SizeOfStruct must be 88 (dbghelp_test; Windows' Size, 112, is not
+asserted: gala cannot know it from the exports).
 
 Next:
 1. The next run on Windows (each fix may reveal a program's next
@@ -1679,7 +1690,10 @@ Next:
      (gala: 1); what CertGetNameStringA leaves in a buffer too small
      (gala: a NUL) and CertGetNameStringW with cchString 5; a subkey's ACE
      under a key made from "D:P(A;CI;KA;;;WD)" (gala: 0x02, the files'
-     rule) and security_test's "D:PAI" case; kernel32_misc_test's raise
+     rule) and security_test's "D:PAI" case; Segoe UI's metrics at
+     lfHeight -9, -16 and 20 (gala truncates from an em, rounds from a
+     cell height); VerSetConditionMask with type mask 0 (gala: the mask
+     unchanged); kernel32_misc_test's raise
      address: GetModuleFileNameW of RtlPcToFileHeader(ExceptionAddress)
      after RaiseException (very likely KernelBase; the test is unchanged
      until it is named, since kernel32's RaiseException may be a stub
