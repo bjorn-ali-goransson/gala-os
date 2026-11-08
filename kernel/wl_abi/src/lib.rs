@@ -1,4 +1,4 @@
-//! The Wayland wire format (ROADMAP LD step 2; ARCHITECTURE "Plan: Linux
+//! The Wayland wire format (ROADMAP LD step 2; ARCHITECTURE "Linux
 //! applications on the desktop (Wayland)"): what travels on a Wayland
 //! client's socket, as plain data the in-kernel server parses and builds.
 //!

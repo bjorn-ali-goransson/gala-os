@@ -1199,6 +1199,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_memfd_pie", "user/lx/bin/memfd_test-pie", "lx"),
     ("lx_unix", "user/lx/bin/unix_test", "lx"),
     ("lx_unix_pie", "user/lx/bin/unix_test-pie", "lx"),
+    ("lx_wl", "user/lx/bin/wl_test", "lx"),
+    ("lx_wl_pie", "user/lx/bin/wl_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
     ("lx_forkmem", "user/lx/bin/forkmem_test", "lx"),
     ("lx_forkmem_pie", "user/lx/bin/forkmem_test-pie", "lx"),
@@ -7994,6 +7996,40 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/unix_test-pie lxargs=./unix_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/unix_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/wl_test (LD step 2): a Wayland client over a raw AF_UNIX
+        // socket against the kernel's Wayland server (`wayland=on`, at
+        // /run/user/1000/wayland-0): the registry, wl_shm with a memfd
+        // pool, an xdg_toplevel's configure, a commit's frame callback and
+        // buffer release, delete_id, and a protocol error. Its transcript
+        // must be its expected.txt (recorded against weston's headless
+        // backend; `lx_expect::check_boot`); the toplevel is a window on
+        // the desktop.
+        name: "lx_wl",
+        cmdline: "qemu_exit wayland=on events=wayland lxrun=/lx/wl_test lxargs=./wl_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "wayland: listening on /run/user/1000/wayland-0",
+            "desktop: shown window 'wl_test'",
+            "run: end /lx/wl_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_test as a static-pie, with every request and event
+        // traced (`wayland=trace`, as WAYLAND_DEBUG=1 prints them).
+        name: "lx_wl_pie",
+        cmdline: "qemu_exit wayland=trace lxrun=/lx/wl_test-pie lxargs=./wl_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "wl_display#1.get_registry(new id wl_registry#2)",
+            " -> wl_display#1.error(wl_display#1, 1, ",
+            "run: end /lx/wl_test-pie",
+            BOOT_OK_MARKER,
+        ],
     },
     Scenario {
         // user/lx/thread_test (LX): clone of threads, futex, signals per

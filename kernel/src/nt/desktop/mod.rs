@@ -535,6 +535,11 @@ impl Desktop {
         Ok(r)
     }
 
+    /// `owner`'s window `id`'s outer rectangle (x, y, width, height).
+    pub fn outer(&self, id: u32, owner: u64) -> Option<(i32, i32, u32, u32)> {
+        self.s.owned(id, owner).map(|w| (w.x, w.y, w.w, w.h))
+    }
+
     /// A window's new title (the caption and the taskbar show it).
     pub fn set_title(&mut self, id: u32, owner: u64, title: &[u16]) -> Result<Rect, NtStatus> {
         let r = self.s.set_title(id, owner, title)?;

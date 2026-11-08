@@ -339,6 +339,11 @@ impl Session {
         s.takers.try_push((pid, count)).map_err(|_| NtStatus::NO_MEMORY)
     }
 
+    /// The last Ctrl+C process `pid`'s handler thread took, if it has one.
+    pub fn taken_by(&self, pid: u64) -> Option<u32> {
+        self.inner.lock().takers.iter().find(|t| t.0 == pid).map(|t| t.1)
+    }
+
     /// Process `pid` has left the session (it ended): it takes nothing
     /// more.
     pub fn forget_taker(&self, pid: u64) {
@@ -579,6 +584,7 @@ mod tests {
         assert_eq!(late[0], 4);
         s.took(4, 1).unwrap();
         assert_eq!(s.not_yet_taken(8, 1, &mut late), 0);
+        assert_eq!((s.taken_by(4), s.taken_by(99)), (Some(1), None));
         // A process that ended takes nothing more and is not waited for.
         s.took(12, 0).unwrap();
         assert_eq!(s.not_yet_taken(8, 1, &mut late), 1);

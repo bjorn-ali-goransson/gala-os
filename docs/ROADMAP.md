@@ -190,7 +190,7 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2's LX prerequisites: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`); next: the Wayland wire format and server (`wl_shm`), a GTK application, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`); next: wl_seat input, decorations, popups, a socket per session, then a GTK application, Xwayland |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -2100,6 +2100,22 @@ the next breakthroughs).
   SO_PEERCRED, poll and epoll on wait queues, SCM_RIGHTS passing open
   file descriptions (a memfd both processes map, a pipe end) with
   MSG_CTRUNC and MSG_CMSG_CLOEXEC.
+- Step 2's server, first part (`lx_wl`, `lx_wl_pie`: user/lx/wl_test,
+  recorded against weston's headless backend, matches exactly): the
+  wire format (`kernel/wl_abi`, tables generated from the protocol
+  XML) and a Wayland server in the kernel (`kernel/src/wayland`,
+  `wayland=on|trace`): one kernel thread serving every client on
+  `/run/user/<uid>/wayland-0` through the core's AF_UNIX sockets; per
+  client an object table with libwayland's limits (4096-byte messages,
+  28 descriptors, 4096 objects) and every malformed or unknown request
+  answered with `wl_display.error` and a disconnect; wl_compositor 6,
+  wl_shm 2 (ARGB8888, XRGB8888, pools on the client's memfd),
+  xdg_wm_base 6 and wl_output 4; an xdg_toplevel's configure and ack,
+  then each commit's damaged rows copied from the memfd into a shasha
+  window titled by `set_title`, the buffer released and frame
+  callbacks done at once; `delete_id` for every destroyed object;
+  `events=wayland`, the trace, the ledger and the state dump. Host
+  tests for the protocol state (`cargo test -p kernel --lib wayland`).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2112,19 +2128,27 @@ the next breakthroughs).
    - a root file system image of a distribution's libraries (more than
      glibc), as the GTK step needs; what its programs reach, from the
      ledger (`linux syscall missing`).
-2. A Wayland server in gala speaking the core protocol and `wl_shm`
-   (shared-memory buffers: software-rendered clients need no GPU) and
-   `xdg-shell` for top-level windows: each surface a shasha window,
-   pointer and keyboard input through `wl_seat`. First its
-   prerequisites (done: `lx_unix`, `lx_memfd`; still open, ledgered: a
-   datagram socket's connect and sendto by name, SCM_CREDENTIALS with
-   SO_PASSCRED, rights on a MSG_PEEK, collecting rights cycles in
-   flight); the wire format (done: `kernel/wl_abi`, host-tested, its
-   tables generated from the protocol XML); the test (done: wl_test,
-   recorded against weston's headless backend); then the server. Test first:
-   `wl_test`, a client of our own over raw sockets, its transcript
-   recorded against weston's headless backend, its pixels checked on
-   the screen.
+2. The Wayland server's rest (its first part is done, above; each
+   step test first, in wl_test or a client like it recorded against
+   weston):
+   - pointer and keyboard input through `wl_seat` (evdev codes, an XKB
+     keymap as a memfd), and `xdg_toplevel.close` from the frame's
+     close button (the desktop queues a WM_CLOSE nobody takes today);
+   - `zxdg_decoration_manager_v1` (shasha's frame for Linux windows),
+     configure from the desktop's resizes, maximize and Snap, popups
+     (`xdg_positioner`, `xdg_popup`; ledgered protocol errors today);
+   - frame callbacks paced by composition (done at commit today), the
+     server's allocations charged to the client's quota;
+   - a socket per session's desktop under its user's `/run/user/<uid>`,
+     with `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` given to the Linux
+     programs started there (today one socket for the boot user, the
+     environment passed by whoever starts them), and the server on
+     by default where a desktop is;
+   - a screen check finding wl_test's pixels inside shasha's frame;
+     then `weston-simple-shm` from weston's demos.
+   Still open in the prerequisites, ledgered: a datagram socket's
+   connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
+   on a MSG_PEEK, collecting rights cycles in flight.
 3. A first real application: a GTK 3 or 4 program (a calculator or text
    editor) from a distribution's packages, its window and input checked
    on the screen; then a Qt one.
@@ -2133,7 +2157,7 @@ the next breakthroughs).
 **Done when** (each step): its test and scenario pass, and the Linux
 programs' transcripts match real Linux's.
 
-**Design**: ARCHITECTURE "Plan: Linux applications on the desktop
+**Design**: ARCHITECTURE "Linux applications on the desktop
 (Wayland)": the server in the kernel beside the compositor for now
 (moving to user mode with SH), `wl_shm` pools as memfd sections,
 surfaces as `winstate` windows wearing shasha's frame through

@@ -61,6 +61,7 @@ pub mod sync;
 pub mod time;
 pub mod trust;
 pub mod unix;
+pub mod wayland;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -334,6 +335,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // console; `replay=<boot module>`: they read it from that recording
     // (kernel/src/replay.rs).
     start_record_replay(&info, &cmdline);
+    // `wayland=on` (or `trace`: every request and event logged): the
+    // Wayland server for Linux desktop programs, listening on
+    // /run/user/<uid>/wayland-0 before any program starts (ROADMAP LD).
+    if let Some(mode) = cmdline.value("wayland")
+        && let Err(e) = wayland::start(mode)
+    {
+        error!("wayland: cannot start the server: {e:?}");
+    }
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
     // end with the boot. `start_as=system`: they run as SYSTEM (services,
@@ -457,10 +466,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 
     nt::ledger::dump();
     if events::written() > 0 {
+        use core::sync::atomic::Ordering::Relaxed;
         info!(
-            "events: {} written to the debug console, {} profiler samples lost (interrupts off too long)",
+            "events: {} written to the debug console; profiler samples: {} asked of another CPU, {} in user mode, {} in the kernel, {} lost (interrupts off too long)",
             events::written(),
-            time::SAMPLES_LOST.load(core::sync::atomic::Ordering::Relaxed)
+            time::SAMPLES_ASKED.load(Relaxed),
+            time::SAMPLES_USER.load(Relaxed),
+            time::SAMPLES_KERNEL.load(Relaxed),
+            time::SAMPLES_LOST.load(Relaxed)
         );
     }
     net::log_stats();

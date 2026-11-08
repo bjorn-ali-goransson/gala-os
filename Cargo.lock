@@ -1037,6 +1037,7 @@ dependencies = [
  "noto-sans-mono-bitmap",
  "smoltcp",
  "spin 0.12.3",
+ "wl_abi",
 ]
 
 [[package]]
