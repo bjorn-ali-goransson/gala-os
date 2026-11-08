@@ -60,26 +60,6 @@ function Stop-Descendants([int]$parent, [datetime]$since) {
     }
 }
 
-# Runs a program once and throws away what it printed. persist_test's
-# first run creates the state (C:\persist, HKCU\Software\GalaPersist) that
-# its second run checks, so only the second run is a result.
-function Invoke-Priming([string]$path, [string]$dir, [int]$seconds) {
-    $p = New-Object System.Diagnostics.ProcessStartInfo
-    $p.FileName = $path
-    $p.WorkingDirectory = $dir
-    $p.UseShellExecute = $false
-    $p.RedirectStandardOutput = $true
-    $p.CreateNoWindow = $true
-    $proc = $null
-    try { $proc = [System.Diagnostics.Process]::Start($p) } catch { return }
-    if ($null -eq $proc) { return }
-    [void]$proc.StandardOutput.ReadToEndAsync()
-    if (-not $proc.WaitForExit($seconds * 1000)) {
-        $proc.Kill()
-        $proc.WaitForExit()
-    }
-}
-
 # Where a crashed program faulted: module, offset and exception code.
 # Windows Error Reporting's event 1000 is never written for these, because
 # the runner sets SEM_NOGPFAULTERRORBOX above and a process with that error
@@ -189,13 +169,13 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
         Write-Host ("{0,-18} skipped: {1}" -f $name, $schannelSkip)
         continue
     }
-    # persist_test checks on its second run what its first run wrote, so
-    # both a stale state from an earlier round and a missing one decide the
-    # result. Clear it, prime it, and judge the run after that.
+    # persist_test's second run checks what survives a reboot (its volatile
+    # key and temporary files are gone), which a second run in the same
+    # boot cannot show: clear any state from an earlier round so the run
+    # is always its first.
     if ($name -eq "persist_test") {
         Remove-Item -Recurse -Force "C:\persist" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "HKCU:\Software\GalaPersist" -ErrorAction SilentlyContinue
-        Invoke-Priming $exe.FullName $here $TimeoutSeconds
     }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe.FullName
