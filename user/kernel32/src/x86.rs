@@ -75,9 +75,10 @@ pub const CONTEXT_PARTS: &[(u32, &[(usize, usize)])] = &[
 pub const PROCESSOR_ARCHITECTURE: u16 = 0;
 pub const PROCESSOR_TYPE: u32 = 586;
 
-/// The system directory a 32-bit program is given: SysWOW64, as
-/// documented for GetSystemDirectory under WOW64.
-pub const SYSTEM_DIRECTORY: &[u8] = b"\\SysWOW64";
+/// The native (64-bit) system directory as a 32-bit program names it:
+/// Sysnative, which the file system redirector leaves as System32 (its
+/// System32 is SysWOW64).
+pub const NATIVE_SYSTEM_DIRECTORY: &[u8] = b"\\Sysnative";
 
 /// Reads the pointer-sized field of the current TEB32 at `offset`.
 pub fn teb_read(offset: usize) -> usize {

@@ -1698,7 +1698,14 @@ for IMAGE_FILE_MACHINE_I386, which the x64 dbghelp walks (dbghelp_test
 uses 0x1234; gala records I386 as unsupported); GetTextExtentExPointW
 fills lpnDx only for the characters that fit when lpnFit is given, as
 documented (gdi32_test; the A form too), and leaves the rest as they
-were (gdi32_test's -1s stay).
+were (gdi32_test's -1s stay). WOW64's file system redirector as
+documented, under a 32-bit kernel32 that names System32 as Windows'
+does (wow64_k32_test: GetSystemDirectoryW/A `C:\Windows\system32`,
+25H2's "C:\WINDOWS\system32"; GetSystemWow64DirectoryW SysWOW64;
+CreateFileW of System32's ntdll the 32-bit one, Sysnative's the 64-bit
+one, the drivers\etc exemption; Wow64Disable/Revert/EnableWow64FsRedirection
+per thread; CreateProcessW's image redirected, Sysnative's cmd 64-bit;
+wow64_fs_test: every documented exemption).
 
 Next:
 1. The next run on Windows (each fix may reveal a program's next
@@ -1775,18 +1782,7 @@ Next:
    Needs kernelbase in every scenario that imports a core set (the JDK's
    ucrtbase, pwsh, sqllocaldb, Chromium) and forwarders for the rest of
    each set.
-5. **WOW64 file-system redirection**: a 32-bit process's
-   GetSystemDirectoryW is `C:\Windows\System32` on Windows (25H2:
-   wow64_k32_test reads "C:\WINDOWS\system32"), and the file system
-   redirector maps System32 to SysWOW64 for it (only
-   GetSystemWow64DirectoryW names SysWOW64). gala's 32-bit kernel32 says
-   SysWOW64 (user/kernel32/src/x86.rs SYSTEM_DIRECTORY) because gala has
-   no redirector. Needs: the redirection in the kernel's open path for
-   WOW64 processes (System32 to SysWOW64, with Windows' exceptions such
-   as catroot, drivers\etc, spool; Wow64DisableWow64FsRedirection per
-   thread), then GetSystemDirectoryW to System32 and wow64_k32_test's
-   expectation to match.
-6. **The default IME window**: on Windows a thread's first window brings
+5. **The default IME window**: on Windows a thread's first window brings
    the thread's IME window (class "IME", title "Default IME"; a CBT hook
    sees its HCBT_CREATEWND too). gala makes none (user32_test counts
    past it); programs that enumerate a thread's windows or look for it
@@ -2042,7 +2038,8 @@ wow64.dll converts 32-bit system calls in user mode).
   routines of I/O and timers, NtContinue's TestAlert) run through its
   KiUserApcDispatcher. **File system redirection and the 32-bit
   environment** (`wow64_fs_test`): System32 to SysWOW64 in wow64.dll's
-  file thunks, Sysnative, the documented exemptions, per-thread
+  file thunks and GalaCreateProcess's image, Sysnative, the documented
+  exemptions, per-thread
   RtlWow64EnableFsRedirection(Ex); PROCESSOR_ARCHITECTURE=x86,
   PROCESSOR_ARCHITEW6432, ProgramFiles and CommonProgramFiles the (x86)
   directories, ProgramW6432, `C:\Program Files (x86)`. **The 32-bit
@@ -2058,8 +2055,11 @@ wow64.dll converts 32-bit system calls in user mode).
   STARTUPINFO, SECURITY_ATTRIBUTES, EXCEPTION_RECORD, toolhelp's
   entries, psapi's counters, the processor information); GetSystemInfo's
   32-bit answers (PROCESSOR_ARCHITECTURE_INTEL, the process's 2/4 GiB
-  range), GetNativeSystemInfo's AMD64, GetSystemDirectory's SysWOW64,
-  Wow64Disable/Revert/EnableWow64FsRedirection; wow64.dll converts
+  range), GetNativeSystemInfo's AMD64, GetSystemDirectory's System32
+  (redirected to SysWOW64 below kernel32, as on Windows),
+  GetSystemWow64Directory's SysWOW64,
+  Wow64Disable/Revert/EnableWow64FsRedirection (their effect on files and
+  on CreateProcessW's image); wow64.dll converts
   GalaConsoleMode and GalaConsoleCtrl (the console control thread).
   **The 32-bit msvcrt** (`wow64_crt_test`, a C program built by
   mingw-w64's i686 GCC with its own startup code): gala's msvcrt built
@@ -2149,9 +2149,12 @@ wow64.dll converts 32-bit system calls in user mode).
    them), `_except_handler3`/`_except_handler4` and `_local_unwind2`
    (MSVC's `__try` in C; a longjmp over a try level is in the ledger as
    `msvcrt.dll!longjmp(try level)`), msvcrt_test's C source built for
-   x86 too (it needs a 32-bit shell32 for CommandLineToArgvW). Also: the redirector for GalaCreateProcess's image
-   path and names relative to a RootDirectory handle (it rewrites full
-   NT paths only); nested exceptions and collided unwinds in the x86
+   x86 too (it needs a 32-bit shell32 for CommandLineToArgvW). Also: the
+   redirector for names relative to a RootDirectory handle (it rewrites
+   full NT paths and GalaCreateProcess's image only); 32-bit builds of
+   the System32 programs a 32-bit program may start by their System32
+   path (cmd.exe and the rest: redirected to SysWOW64, where gala has
+   none yet); nested exceptions and collided unwinds in the x86
    dispatcher; ThreadWow64Context for 64-bit debuggers. Stage 2's
    leftovers, each in the ledger: the job information classes,
    CONTEXT_FLOATING_POINT on NtSetContextThread.

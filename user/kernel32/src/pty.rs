@@ -129,8 +129,11 @@ pub extern "system" fn CreatePseudoConsole(
     // "<system>\conhost.exe" --headless --width W --height H --signal 0xS
     // --session N [--inheritcursor]
     let mut exe = [0u16; 300];
-    let n = super::files::GetSystemDirectoryW(exe.as_mut_ptr(), 260) as usize;
+    // The host is a native program: a 32-bit caller names it through
+    // Sysnative (its System32 is redirected to SysWOW64).
+    let n = super::files::GetWindowsDirectoryW(exe.as_mut_ptr(), 260) as usize;
     let mut at = n.min(260);
+    put(&mut exe, &mut at, super::arch::NATIVE_SYSTEM_DIRECTORY);
     put(&mut exe, &mut at, b"\\conhost.exe");
     exe[at] = 0;
     let mut line = [0u16; 512];

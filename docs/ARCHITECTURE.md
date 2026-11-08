@@ -7415,11 +7415,24 @@ under their own names: `testdll32.dll`).
   (WOW64_TLS_FILESYSREDIR); 32-bit code cannot reach the 64-bit TEB
   (above 4 GiB), so the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex)
   sets it through `GalaWow64FsRedirection` (0x7ffe), a service of
-  wow64.dll's own (no kernel service has the number). In user mode
-  because the switch is per thread and the rewrite is string work on the
-  name the caller passed; the kernel's namespace stays unaware. Not
-  redirected yet: GalaCreateProcess's image path, names relative to a
-  RootDirectory handle.
+  wow64.dll's own (no kernel service has the number). The image path of
+  GalaCreateProcess is redirected too (the image is a file the caller
+  opens: a 32-bit program starting `System32\x.exe` gets
+  `SysWOW64\x.exe`, `Sysnative\x.exe` the 64-bit one), pointed for the
+  call at wow64.dll's rewritten copy and put back after.
+  Where: below the Win32 layer, as Microsoft documents it (the
+  redirector is WOW64's, under every API that opens a file, not
+  kernel32's), and in wow64.dll rather than the kernel's path
+  resolution: the switch is per thread and set from user mode, the
+  rewrite is string work on the name the caller passed, and the
+  kernel's namespace and its 64-bit callers stay unaware of it (one
+  path resolution for everything; a 64-bit process's opens never pay
+  for it). So the 32-bit kernel32 above it names System32 as Windows'
+  does: GetSystemDirectory is `C:\Windows\system32` (Windows 11 25H2:
+  "C:\WINDOWS\system32"), and code that must reach a native program
+  names Sysnative (kernel32's pseudo console host, conhost.exe). Not
+  redirected yet: names relative to a RootDirectory handle (wow64.dll
+  would need the handle's full name).
 - **Registry**: the 32-bit view (`HKLM\Software\Wow6432Node` and the
   other redirected keys of "Registry Keys Affected by WOW64", shared keys
   left alone) in the kernel's registry, chosen per open by the caller (a
@@ -7434,7 +7447,8 @@ under their own names: `testdll32.dll`).
   environment ("A 32-bit process"). The 32-bit kernel32's:
   GetSystemInfo reports PROCESSOR_ARCHITECTURE_INTEL (PROCESSOR_INTEL_PENTIUM)
   and the 2/4 GiB application range, GetNativeSystemInfo AMD64 with the
-  same range, GetSystemDirectory SysWOW64; Wow64DisableWow64FsRedirection,
+  same range, GetSystemDirectory System32 (redirected below it),
+  GetSystemWow64Directory SysWOW64; Wow64DisableWow64FsRedirection,
   Wow64RevertWow64FsRedirection and Wow64EnableWow64FsRedirection call
   the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex).
 - **Exceptions** (`dispatch.rs`, `seh_x86.rs`): an exception in 32-bit

@@ -246,6 +246,15 @@ pub fn call(number: u32, kinds: &[K], args: &[u32]) -> NtStatus {
             return e;
         }
     }
+    // GalaCreateProcess's image is redirected as a file's name is.
+    let mut image = [0u16; crate::redirect::MAX_NAME];
+    let mut original = None;
+    if number == GALA_CREATE_PROCESS {
+        match crate::redirect::apply_image(u64::from(args[0]), &mut image) {
+            Ok(o) => original = o,
+            Err(e) => return e,
+        }
+    }
     // A 64-bit value's two words become one argument.
     let mut n = 0;
     for (i, &k) in kinds.iter().enumerate() {
@@ -257,6 +266,11 @@ pub fn call(number: u32, kinds: &[K], args: &[u32]) -> NtStatus {
         }
     }
     let status = syscall(number, &out[..n]);
+    if let Some(o) = original {
+        // Written a moment ago: it fails only if another thread freed the
+        // block, and the call's result (the new process's handles) stands.
+        let _ = crate::redirect::restore_image(u64::from(args[0]), o);
+    }
     match convert_out(kinds, args, &slots, status) {
         Ok(()) => status,
         Err(_) => STATUS_ACCESS_VIOLATION,
@@ -264,6 +278,9 @@ pub fn call(number: u32, kinds: &[K], args: &[u32]) -> NtStatus {
 }
 
 use K::*;
+
+/// GalaCreateProcess (its block's image path is redirected).
+const GALA_CREATE_PROCESS: u32 = 0x7f02;
 
 /// The services converted argument by argument: (number, the kind of each
 /// argument). The x64 numbers, as `kernel/src/nt/syscalls.rs`.
@@ -338,7 +355,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f01, &[H, U, U]),                            // NtCancelIoFileEx
     // GalaCreateProcess: its block has fixed 8-byte fields whatever the
     // caller's bitness (ARCHITECTURE "Processes started by programs").
-    (0x7f02, &[U]),
+    (GALA_CREATE_PROCESS, &[U]),
     (0x7f03, &[Oh, U, Oa, U, U, U, U, U, U, U, U, U, U, U]), // NtCreateNamedPipeFile
     (0x7f04, &[H, H, Apc, U, U, U, U, U, U, U]),             // NtFsControlFile
     (0x7f06, &[Oh, U, Oa, U]),                               // NtOpenKeyEx

@@ -2276,15 +2276,27 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_seh_crash", "wow64.dll", "Windows/System32"),
     ("wow64_seh_crash", "x86/ntdll.dll", "Windows/SysWOW64"),
     // The file system redirector: both ntdlls (told apart by their
-    // machine), a hosts file in an exempt directory.
+    // machine), a hosts file and markers in the exempt directories.
     ("wow64_fs_test", "wow64.dll", "Windows/System32"),
     ("wow64_fs_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_fs_test", "ntdll.dll", "Windows/System32"),
     ("wow64_fs_test", "user/wow64_fs_test/hosts", "Windows/System32/drivers/etc"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/catroot"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/catroot2"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/DriverStore"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/LogFiles"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/spool"),
     // A plain 32-bit program on the 32-bit kernel32.
     ("wow64_k32_test", "wow64.dll", "Windows/System32"),
     ("wow64_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_k32_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    // Its redirector checks: the 64-bit ntdll beside the 32-bit one, the
+    // exempt hosts file, the 64-bit cmd it starts through Sysnative.
+    ("wow64_k32_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_k32_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_k32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_k32_test", "user/bin/cmd.exe", "Windows/System32"),
+    ("wow64_k32_test", "user/wow64_fs_test/hosts", "Windows/System32/drivers/etc"),
     // A 32-bit C program (clang-built, checked-in binary) on it.
     ("wow64_c_test", "wow64.dll", "Windows/System32"),
     ("wow64_c_test", "x86/ntdll.dll", "Windows/SysWOW64"),

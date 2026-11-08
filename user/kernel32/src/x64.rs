@@ -69,8 +69,9 @@ pub const CONTEXT_PARTS: &[(u32, &[(usize, usize)])] = &[
 pub const PROCESSOR_ARCHITECTURE: u16 = 9;
 pub const PROCESSOR_TYPE: u32 = 8664;
 
-/// The system directory under the Windows directory.
-pub const SYSTEM_DIRECTORY: &[u8] = b"\\system32";
+/// The native system directory: System32 (a 32-bit build names it
+/// Sysnative).
+pub const NATIVE_SYSTEM_DIRECTORY: &[u8] = b"\\system32";
 
 /// Reads the pointer-sized field of the current TEB at `offset`.
 pub fn teb_read(offset: usize) -> usize {
