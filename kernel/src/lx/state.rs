@@ -140,6 +140,8 @@ pub enum Object {
     Socket(KArc<super::socket::Socket>),
     /// An epoll instance (`lx::epoll`).
     Epoll(KArc<super::epoll::Epoll>),
+    /// An AF_UNIX socket (`lx::unix` on `crate::unix`).
+    Unix(KArc<super::unix::UnixSocket>),
 }
 
 impl Drop for Fd {
@@ -167,6 +169,9 @@ impl Drop for Fd {
             }
             // An epoll closed: its set goes (what it watched is released).
             Object::Epoll(e) => e.close(),
+            // A unix socket's last description: its name is free, its
+            // connection's side closes.
+            Object::Unix(u) => u.release(),
             Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => {}
         }
     }
@@ -192,6 +197,7 @@ impl Fd {
             | Object::File(_)
             | Object::Device(_)
             | Object::Socket(_)
+            | Object::Unix(_)
             | Object::Epoll(_) => {}
         }
         Fd { object, nonblock: AtomicBool::new(nonblock), watchers: IrqMutex::new(Vec::new()) }

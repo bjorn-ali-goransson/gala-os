@@ -1103,6 +1103,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
     ("lx_memfd", "user/lx/bin/memfd_test", "lx"),
     ("lx_memfd_pie", "user/lx/bin/memfd_test-pie", "lx"),
+    ("lx_unix", "user/lx/bin/unix_test", "lx"),
+    ("lx_unix_pie", "user/lx/bin/unix_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
     ("lx_thread_pie", "user/lx/bin/thread_test-pie", "lx"),
     ("lx_poll", "user/lx/bin/poll_test", "lx"),
@@ -7810,6 +7812,22 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/memfd_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/unix_test (LD step 2): AF_UNIX sockets, names, SCM_RIGHTS
+        // from a forked child, socket pairs of every kind; its transcript
+        // must be its expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_unix",
+        cmdline: "qemu_exit lxrun=/lx/unix_test lxargs=./unix_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/unix_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/unix_test as a static-pie.
+        name: "lx_unix_pie",
+        cmdline: "qemu_exit lxrun=/lx/unix_test-pie lxargs=./unix_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/unix_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
         // user/lx/thread_test (LX): clone of threads, futex, signals per
         // thread, musl's pthreads; its transcript must be its expected.txt
         // (real Linux's; `lx_expect::check_boot`).
@@ -13850,6 +13868,22 @@ mod constants {
             "net/ names the NT layer; use crate::runtime:\n{}",
             found.join("\n")
         );
+    }
+
+    /// The AF_UNIX sockets are core objects (ARCHITECTURE "AF_UNIX
+    /// sockets", seam 5): no personality's types in them, so NT and Linux
+    /// views can share one socket.
+    #[test]
+    fn unix_sockets_do_not_depend_on_a_personality() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/unix.rs");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let found: Vec<String> = text
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains("crate::nt") || l.contains("crate::lx"))
+            .map(|(i, l)| format!("{}:{}: {}", path.display(), i + 1, l.trim()))
+            .collect();
+        assert!(found.is_empty(), "unix.rs names a personality:\n{}", found.join("\n"));
     }
 
     #[test]

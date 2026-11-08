@@ -46,6 +46,8 @@
 //! LD step 2's prerequisites:
 //! - [`memfd`]: memfd_create and file seals: anonymous files whose
 //!   pages every mapping shares.
+//! - [`unix`]: AF_UNIX sockets (the core's `crate::unix`), SCM_RIGHTS,
+//!   sendmsg/recvmsg.
 
 pub mod dispatch;
 pub mod elf;
@@ -75,6 +77,7 @@ pub mod syscalls;
 pub mod threads;
 pub mod time;
 pub mod timer;
+pub mod unix;
 pub mod wait;
 
 /// Registers the Linux personality's dispatcher (at start, after NT's).

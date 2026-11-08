@@ -47,6 +47,7 @@ pub fn full_dump() {
     // Linux threads (masks, pending signals, blocked or not), epoll sets
     // and futex waiters (ROADMAP LX).
     crate::lx::dump();
+    crate::unix::dump();
     // Each session's windows (RS step B2).
     crate::nt::session::dump();
     // gala-um: the host's allocator, no frame figures worth printing.

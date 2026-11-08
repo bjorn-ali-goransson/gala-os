@@ -123,9 +123,11 @@ fn sealable(f: &Fd, adding: bool) -> core::result::Result<ramfs::NodeId, u16> {
         Object::File(file) => (None, file.writable),
         Object::PipeRead(_) => (None, false),
         Object::Device(d) => (None, d.writable),
-        Object::PipeWrite(_) | Object::Console(_) | Object::Socket(_) | Object::Epoll(_) => {
-            (None, true)
-        }
+        Object::PipeWrite(_)
+        | Object::Console(_)
+        | Object::Socket(_)
+        | Object::Unix(_)
+        | Object::Epoll(_) => (None, true),
     };
     if adding && !writable {
         return Err(EPERM);

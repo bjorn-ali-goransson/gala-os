@@ -63,6 +63,7 @@ pub fn readiness(object: &Object) -> u16 {
         }
         Object::File(_) | Object::Device(_) => POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM,
         Object::Socket(s) => socket::readiness(s),
+        Object::Unix(u) => super::unix::readiness(u),
         Object::Epoll(e) => {
             if e.has_ready() {
                 POLLIN | POLLRDNORM
@@ -83,6 +84,7 @@ pub fn events_count(object: &Object) -> u64 {
         Object::PipeRead(p) => p.state.lock().read_events,
         Object::PipeWrite(p) => p.state.lock().write_events,
         Object::Socket(s) => socket::arrivals(s),
+        Object::Unix(u) => u.core.arrivals(),
         Object::Epoll(e) => u64::from(e.has_ready()),
         Object::Console(_) | Object::File(_) | Object::Device(_) => 0,
     }
@@ -95,6 +97,8 @@ pub fn events_count(object: &Object) -> u64 {
 pub struct Watch {
     me: ThreadId,
     pipes: Vec<KArc<state::Pipe>>,
+    /// The unix sockets' waiters it is on.
+    sockets: Vec<KArc<crate::unix::Waiters>>,
     pub polled: bool,
 }
 
@@ -106,7 +110,7 @@ impl Default for Watch {
 
 impl Watch {
     pub fn new() -> Watch {
-        Watch { me: platform::current(), pipes: Vec::new(), polled: false }
+        Watch { me: platform::current(), pipes: Vec::new(), sockets: Vec::new(), polled: false }
     }
 
     /// Waits for `object` too (out of memory it is polled instead).
@@ -122,6 +126,20 @@ impl Watch {
                 }
                 if p.state.lock().waiters.add(self.me).is_err() {
                     self.pipes.pop();
+                    self.polled = true;
+                }
+            }
+            Object::Unix(u) => {
+                let w = &u.core.waiters;
+                if self.sockets.iter().any(|q| KArc::ptr_eq(q, w)) {
+                    return;
+                }
+                if self.sockets.try_push(w.clone()).is_err() {
+                    self.polled = true;
+                    return;
+                }
+                if w.add(self.me).is_err() {
+                    self.sockets.pop();
                     self.polled = true;
                 }
             }
@@ -146,6 +164,9 @@ impl Drop for Watch {
     fn drop(&mut self) {
         for p in &self.pipes {
             p.state.lock().waiters.remove(self.me);
+        }
+        for w in &self.sockets {
+            w.remove(self.me);
         }
     }
 }

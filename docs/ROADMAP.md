@@ -188,9 +188,9 @@ has a section under "Open items".
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
-| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1) |
+| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); next: a Wayland server (`wl_shm`), a GTK application, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2's LX prerequisites: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`); next: the Wayland wire format and server (`wl_shm`), a GTK application, Xwayland |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -1941,7 +1941,11 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    file with more than one Linux user; a reboot scenario for Linux
    files (modes and links are host-tested only).
 5. Seam 5: shared core objects when pipes, sockets or files are
-   reworked.
+   reworked. Built: AF_UNIX sockets (`unix`, under `lx::unix`); next for
+   them: Windows' AF_UNIX through afd on the same core sockets (a test
+   first on real Windows: bind, connect, accept, the socket file as a
+   reparse point), then pipes and TCP sockets' state (with wait queues
+   instead of TCP's 1 ms look).
 6. Also open (ARCHITECTURE "The lx module"): address randomization, a
    vDSO, Linux in gala-um, the system-call numbers 462..=469.
 
@@ -2051,6 +2055,17 @@ the next breakthroughs).
   a file view follows the file's size (mremap after ftruncate); a Linux
   process's memory released when it ends, before its parent hears of
   it.
+- Step 2's second prerequisite, AF_UNIX sockets (`lx_unix`, unix_test
+  recorded on Linux), the first shared core object of seam 5: the core
+  `unix` module (sockets, names keyed by a file-system socket node or
+  abstract bytes, connections, queues, rights in flight, credentials;
+  no personality's types) under the Linux view `lx::unix`: socket and
+  socketpair (stream, seqpacket, datagram), bind to a path, abstract
+  names and autobind, listen, accept4, connect with a backlog,
+  read/write, sendmsg/recvmsg (also for TCP), shutdown, the names,
+  SO_PEERCRED, poll and epoll on wait queues, SCM_RIGHTS passing open
+  file descriptions (a memfd both processes map, a pipe end) with
+  MSG_CTRUNC and MSG_CMSG_CLOEXEC.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2076,9 +2091,10 @@ the next breakthroughs).
    (shared-memory buffers: software-rendered clients need no GPU) and
    `xdg-shell` for top-level windows: each surface a shasha window,
    pointer and keyboard input through `wl_seat`. First its
-   prerequisites, each test first against real Linux: `AF_UNIX` stream
-   sockets with `SCM_RIGHTS` (`unix_test`; memfd is done); then the
-   wire format as a crate of its own
+   prerequisites (done: `lx_unix`, `lx_memfd`; still open, ledgered: a
+   datagram socket's connect and sendto by name, SCM_CREDENTIALS with
+   SO_PASSCRED, rights on a MSG_PEEK, collecting rights cycles in
+   flight); then the wire format as a crate of its own
    (`kernel/wl_abi`, host-tested); then the server. Test first:
    `wl_test`, a client of our own over raw sockets, its transcript
    recorded against weston's headless backend, its pixels checked on

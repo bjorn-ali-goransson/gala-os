@@ -1298,7 +1298,14 @@ source).
   count its NUL: the system call's length includes it (exec_test's
   `/proc/self/exe` checks). Kernel code a host test calls must not log
   (`crate::info!` is the serial port: SIGSEGV on the host): exec's
-  `prepare` returns its plan and the caller logs it.
+  `prepare` returns its plan and the caller logs it. An address length
+  passed to accept, getsockname or recvfrom is value-result: reusing
+  the variable for a later bind or connect passes what the kernel
+  wrote (2 for an unnamed peer: an autobind, or EINVAL), so unix_test
+  keeps separate ones. A Linux process's memory goes when it ends,
+  before its parent's wait4 returns, so whatever the parent does next
+  (sealing a memfd against writing: EBUSY while a writable mapping is
+  left) must not see the child's mappings (`lx::process_ended`).
 
 ## Program recipes
 
