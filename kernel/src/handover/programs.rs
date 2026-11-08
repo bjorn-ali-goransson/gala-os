@@ -278,9 +278,10 @@ impl PageRec {
     }
 }
 
-/// The user registers a thread made its system call with, in the order
-/// of `UserRegs` (16 general-purpose registers, rip, rflags).
-pub type Regs = [u64; 18];
+/// The user registers a thread made its system call with, as
+/// `UserRegs::to_words` gives them (the architecture's part of the state
+/// format; x86-64: 16 general-purpose registers, rip, rflags).
+pub type Regs = [u64; crate::nt::platform::UserRegs::WORDS];
 
 /// How a carried thread stood (ThreadRec::state).
 pub mod thread_state {
@@ -393,7 +394,7 @@ impl<'a> ThreadRec<'a> {
         let (object, ordinal, priority, base_priority, number) =
             (r.u32(), r.u32(), r.u32() as i32, r.u32() as i32, r.u32());
         let _ = r.u32();
-        let mut regs = [0u64; 18];
+        let mut regs = [0u64; crate::nt::platform::UserRegs::WORDS];
         for v in regs.iter_mut() {
             *v = r.u64();
         }

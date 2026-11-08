@@ -251,12 +251,12 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     let e = &ring.entries[head as usize % RING];
     e.t.store(raw_monotonic_ns(), Ordering::Relaxed);
     e.by.store(crate::arch::percpu::client(), Ordering::Relaxed);
-    e.rip.store(frame.rip, Ordering::Relaxed);
+    e.rip.store(frame.ip(), Ordering::Relaxed);
     let user = frame.from_user_mode();
     e.user.store(user, Ordering::Relaxed);
     let mut len = 0;
     if !user {
-        crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+        crate::arch::backtrace::walk_trap(frame, |ret| {
             if len < SAMPLE_FRAMES {
                 e.frames[len].store(ret, Ordering::Relaxed);
                 len += 1;
@@ -305,14 +305,14 @@ fn sample_here(frame: &TrapFrame) {
     let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
     let user = frame.from_user_mode();
     if !user {
-        crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+        crate::arch::backtrace::walk_trap(frame, |ret| {
             if stack.len < SAMPLE_FRAMES {
                 stack.addrs[stack.len] = ret;
                 stack.len += 1;
             }
         });
     }
-    emit_sample(raw_monotonic_ns(), crate::arch::percpu::client(), user, frame.rip, &stack, 0);
+    emit_sample(raw_monotonic_ns(), crate::arch::percpu::client(), user, frame.ip(), &stack, 0);
 }
 
 /// The `sample` event: the thread (`by`), the mode, the address and in
@@ -417,7 +417,7 @@ fn on_tick(frame: &mut TrapFrame) {
         if frame.from_user_mode() {
             crate::flight::progress(id.as_usize());
         } else if !idle {
-            crate::flight::on_kernel_tick(id.as_usize(), frame.rip);
+            crate::flight::on_kernel_tick(id.as_usize(), frame.ip());
         }
         // The profiler (idle CPUs ask too: they sample their neighbor).
         if crate::events::enabled(crate::events::Category::Sample) {
@@ -440,7 +440,7 @@ fn on_tick(frame: &mut TrapFrame) {
         let cpu = crate::arch::percpu::cpu_index() as usize;
         if let Some((t, rip)) = USER_RIP.get(cpu) {
             t.store(crate::sched::current().as_usize() as u64 + 1, Ordering::Relaxed);
-            rip.store(frame.rip, Ordering::Relaxed);
+            rip.store(frame.ip(), Ordering::Relaxed);
         }
     }
     if crate::arch::percpu::cpu_index() != 0 {

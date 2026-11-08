@@ -189,7 +189,6 @@ fn prepare(
     let stack_exec = image.gnu_stack.is_none_or(|p| p.exec);
     let stack_protect = if stack_exec { vad::PAGE_EXECUTE_READWRITE } else { vad::PAGE_READWRITE };
     let execfn = argv.first().copied().unwrap_or(path.as_bytes());
-    let (_, _, _, edx) = platform::cpuid(1, 0);
     let mut random = [0u8; 16];
     if !platform::fill_entropy(&mut random) {
         // No generator: still not all zero (auxv_test checks that much).
@@ -214,7 +213,7 @@ fn prepare(
             gid: GID,
             egid: GID,
             secure: false,
-            hwcap: u64::from(edx),
+            hwcap: super::machine::hwcap(),
             clktck: stack::CLKTCK,
             hwcap2: None,
             sysinfo_ehdr: None,
@@ -226,13 +225,10 @@ fn prepare(
     Ok(Prepared { data, plan, stack_protect, initial })
 }
 
-/// The registers a program starts with: the ELF entry with rsp at argc
-/// and every other register zero (rdx 0: no function for atexit; SysV
-/// ABI, "Process initialization").
+/// The registers a program starts with: the ELF entry with the stack
+/// pointer at argc (`machine::start_regs`).
 fn start_regs(p: &Prepared) -> UserRegs {
-    let mut gpr = [0u64; 16];
-    gpr[4] = p.initial.sp;
-    UserRegs { gpr, rip: p.plan.entry, rflags: 0 }
+    super::machine::start_regs(p.plan.entry, p.initial.sp)
 }
 
 fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Process>, ExecError> {

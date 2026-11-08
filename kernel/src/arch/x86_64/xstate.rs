@@ -173,7 +173,7 @@ pub fn enable_here() {
 /// Only the first `size()` bytes are used.
 #[repr(C, align(64))]
 #[derive(Clone)]
-pub struct XState(pub [u8; MAX_SIZE]);
+pub struct XState([u8; MAX_SIZE]);
 
 impl core::fmt::Debug for XState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -207,6 +207,17 @@ impl XState {
         let mut s = Self::initial();
         s.set_legacy(legacy);
         s
+    }
+
+    /// The state as the processor saves it (the standard XSAVE image; the
+    /// first `size()` bytes are in use): what the Linux signal frame's
+    /// FPU state and gala-um's host context hold.
+    pub fn bytes(&self) -> &[u8; MAX_SIZE] {
+        &self.0
+    }
+
+    pub fn bytes_mut(&mut self) -> &mut [u8; MAX_SIZE] {
+        &mut self.0
     }
 
     /// The FXSAVE image (CONTEXT.FltSave).

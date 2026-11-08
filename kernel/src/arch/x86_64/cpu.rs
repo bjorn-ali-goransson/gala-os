@@ -157,3 +157,16 @@ pub fn enable_sse() {
     }
     super::xstate::enable_here();
 }
+
+/// The free-running cycle counter the clock, the flight recorder and spin
+/// deadlines read (the TSC; `crate::time` calibrates its rate).
+#[inline]
+pub fn cycles() -> u64 {
+    rdtsc()
+}
+
+/// One random word from the processor's generator, None without one
+/// (RDRAND, else RDSEED).
+pub fn hw_random() -> Option<u64> {
+    rdrand()
+}
