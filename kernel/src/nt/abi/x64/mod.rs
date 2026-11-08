@@ -8,19 +8,28 @@
 //! entry and the crash report's registers.
 
 pub mod context;
+mod kuser;
+
+pub use kuser::write_kuser_processor;
 
 use core::sync::atomic::Ordering;
 
 use super::ArgSlot;
+use crate::mm::heap::KArc;
 use crate::nt::crashreport::Note;
 use crate::nt::object::{ObjectBody, ObjectRef};
 use crate::nt::platform::{self, Gpr, Gpr::*, SyscallFrame, TrapFrame, UserRegs};
 use crate::nt::process::Process;
+use crate::nt::registry::Processor;
 use crate::nt::status::NtStatus;
-use crate::nt::syscalls::{
-    Call, THREAD_GET_CONTEXT, THREAD_SET_CONTEXT, caller_regs, is_current_thread, thread_object,
-};
+use crate::nt::syscalls::{Call, THREAD_SET_CONTEXT, caller_regs, thread_object};
 use crate::nt::thread;
+
+const THREAD_GET_CONTEXT: u32 = 0x0008;
+
+fn is_current_thread(object: &ObjectRef) -> bool {
+    thread::current().is_some_and(|me| KArc::ptr_eq(&me, object))
+}
 
 /// Evaluates a `Result<_, NtStatus>`, returning the error status.
 macro_rules! tri {
@@ -643,4 +652,37 @@ pub(in crate::nt) fn deliver_to_user(
         frame.set_segments(self::context::USER_CS.into(), self::context::USER_DS.into());
     }
     true
+}
+
+/// What the registry's CentralProcessor key says about this processor:
+/// CPUID's vendor (leaf 0), family, model and stepping (leaf 1), brand
+/// string (0x80000002-4) and base frequency (0x16).
+pub fn processor() -> Processor {
+    use crate::nt::platform::cpuid;
+    let (max, b, c, d) = cpuid(0, 0);
+    let mut vendor = [0u8; 12];
+    vendor[..4].copy_from_slice(&b.to_le_bytes());
+    vendor[4..8].copy_from_slice(&d.to_le_bytes());
+    vendor[8..].copy_from_slice(&c.to_le_bytes());
+    let (signature, ..) = cpuid(1, 0);
+    let base_family = (signature >> 8) & 0xf;
+    let mut family = base_family;
+    let mut model = (signature >> 4) & 0xf;
+    if base_family == 0xf {
+        family += (signature >> 20) & 0xff;
+    }
+    if base_family == 0x6 || base_family == 0xf {
+        model |= ((signature >> 16) & 0xf) << 4;
+    }
+    let mut name = [0u8; 48];
+    if cpuid(0x8000_0000, 0).0 >= 0x8000_0004 {
+        for (i, leaf) in (0x8000_0002u32..=0x8000_0004).enumerate() {
+            let (a, b, c, d) = cpuid(leaf, 0);
+            for (j, r) in [a, b, c, d].iter().enumerate() {
+                name[16 * i + 4 * j..16 * i + 4 * j + 4].copy_from_slice(&r.to_le_bytes());
+            }
+        }
+    }
+    let mhz = if max >= 0x16 { cpuid(0x16, 0).0 & 0xffff } else { 0 };
+    Processor { name, vendor, family, model, stepping: signature & 0xf, mhz }
 }

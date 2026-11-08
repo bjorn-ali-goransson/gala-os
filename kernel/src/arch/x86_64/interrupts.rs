@@ -45,7 +45,7 @@ pub struct TrapFrame {
     pub(in crate::arch) ss: u64,
 }
 
-pub use crate::arch::trap::{CpuMode, FaultAccess, TrapKind};
+pub use crate::arch::trap::{CpuMode, Fault, FaultAccess, TrapKind};
 
 impl TrapFrame {
     /// x86-64: the frame of a trap from 64- or 32-bit user code with the
@@ -539,28 +539,6 @@ impl fmt::Display for ExceptionReport<'_> {
             fr.r9, fr.r10, fr.r11, fr.r12
         )?;
         write!(f, "  r13={:#018x} r14={:#018x} r15={:#018x}", fr.r13, fr.r14, fr.r15)
-    }
-}
-
-/// Faults that can be provoked on purpose to test the exception path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fault {
-    InvalidOpcode,
-    PageFault,
-    /// Overflow a kernel stack into its guard page (handled as #DF on IST1).
-    StackOverflow,
-}
-
-impl Fault {
-    pub const ALL: [Fault; 3] = [Fault::InvalidOpcode, Fault::PageFault, Fault::StackOverflow];
-
-    pub fn from_name(name: &str) -> Option<Fault> {
-        match name {
-            "ud" => Some(Fault::InvalidOpcode),
-            "pagefault" => Some(Fault::PageFault),
-            "stackoverflow" => Some(Fault::StackOverflow),
-            _ => None,
-        }
     }
 }
 

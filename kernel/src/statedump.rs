@@ -128,12 +128,12 @@ mod nmi {
     /// Asks CPU `cpu` (by NMI, which reaches it with interrupts off) to
     /// print where it is: the hang watchdog's stuck CPU.
     pub fn trace_cpu(cpu: usize) {
-        let Some((_, apic_id)) = crate::arch::smp::online_cpus().find(|&(i, _)| i as usize == cpu)
+        let Some((_, hw_id)) = crate::arch::smp::online_cpus().find(|&(i, _)| i as usize == cpu)
         else {
             return;
         };
         TRACE_ONLY.fetch_or(1 << cpu, Ordering::AcqRel);
-        crate::arch::apic::send_nmi(apic_id);
+        crate::arch::smp::send_nmi(hw_id);
     }
 
     /// Installs the NMI handler (once the per-CPU data and the clock are

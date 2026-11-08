@@ -8,9 +8,12 @@
 //!
 //! The modules here are shared by the architectures: types in
 //! architecture-neutral terms (`trap`) and drivers that need `unsafe` but
-//! no particular processor (`virtio`).
+//! no particular processor (`pci` over the architecture's `pci_config`,
+//! `virtio`).
 
+pub mod pci;
 pub mod trap;
+pub mod virtio;
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64;

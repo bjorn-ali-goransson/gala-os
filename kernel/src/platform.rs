@@ -169,7 +169,7 @@ impl UserMemory for Kernel {
 /// Fills `buf` from the CPU's generator (RDRAND/RDSEED).
 pub fn fill_from_cpu(buf: &mut [u8]) -> bool {
     for chunk in buf.chunks_mut(8) {
-        let Some(word) = cpu::rdrand() else { return false };
+        let Some(word) = cpu::hw_random() else { return false };
         chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
     }
     true

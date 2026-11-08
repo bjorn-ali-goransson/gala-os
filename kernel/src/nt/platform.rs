@@ -319,7 +319,9 @@ pub fn context_switches(id: ThreadId) -> u32 {
 pub fn current_cpu() -> u32 {
     <P as Threads>::current_cpu()
 }
-/// CPUID leaf `leaf` (subleaf `sub`) of this processor: (eax, ebx, ecx, edx).
+/// x86-64 only (`nt::abi::x64`, `lx::machine`): CPUID leaf `leaf` (subleaf
+/// `sub`) of this processor: (eax, ebx, ecx, edx).
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
     let r = crate::arch::cpu::cpuid(leaf, sub);

@@ -204,6 +204,16 @@ pub fn percent(ppm: u64) -> (u64, u64) {
     (ppm / 10_000, ppm / 100 % 100)
 }
 
+/// A rate in MHz with a tenth ("2800.1 MHz").
+pub struct Mhz(pub u64);
+
+impl core::fmt::Display for Mhz {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        let (m, t) = mhz(self.0);
+        write!(f, "{m}.{t} MHz")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

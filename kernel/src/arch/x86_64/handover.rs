@@ -512,7 +512,7 @@ pub fn quiesce_and_jump(p: &Prepared, record_phys: u64, others: &[(u32, u32)]) -
         core::hint::spin_loop();
     }
     // No other CPU runs kernel code now; stop the devices' DMA.
-    super::virtio::reset_all();
+    crate::arch::virtio::reset_all();
     let kernel_root = paging::kernel_root();
     // SAFETY: interrupts are off, every other CPU is parked, and the
     // devices are reset: nothing uses this kernel's memory any more. The

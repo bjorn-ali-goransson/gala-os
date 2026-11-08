@@ -1,6 +1,7 @@
 //! What every architecture's traps are, in architecture-neutral terms:
 //! the kind of a trap from user mode, a page fault's access, the mode the
-//! interrupted code ran in. Each architecture's `interrupts` re-exports
+//! interrupted code ran in, the faults the kernel provokes in itself to
+//! test the exception path. Each architecture's `interrupts` re-exports
 //! them and its `TrapFrame` answers in them.
 
 /// What a trap from user mode was, as the personalities map it to their
@@ -56,6 +57,28 @@ impl CpuMode {
             CpuMode::Kernel => "kernel",
             CpuMode::User => "user",
             CpuMode::User32 => "user 32-bit",
+        }
+    }
+}
+
+/// Faults that can be provoked on purpose to test the exception path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    InvalidOpcode,
+    PageFault,
+    /// Overflow a kernel stack into its guard page (x86-64: handled as #DF on IST1).
+    StackOverflow,
+}
+
+impl Fault {
+    pub const ALL: [Fault; 3] = [Fault::InvalidOpcode, Fault::PageFault, Fault::StackOverflow];
+
+    pub fn from_name(name: &str) -> Option<Fault> {
+        match name {
+            "ud" => Some(Fault::InvalidOpcode),
+            "pagefault" => Some(Fault::PageFault),
+            "stackoverflow" => Some(Fault::StackOverflow),
+            _ => None,
         }
     }
 }

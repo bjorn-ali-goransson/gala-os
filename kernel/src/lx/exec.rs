@@ -517,9 +517,9 @@ pub fn execve(
     call.lx.release_vfork();
     call.lx.close_on_exec();
     call.lx.signals.lock().exec();
-    // A fresh thread's TLS bases and SSE control (the default MXCSR).
+    // A fresh thread's TLS bases and floating-point control.
     platform::set_user_bases(Some(0), Some(0));
-    platform::set_mxcsr(0x1f80);
+    super::machine::reset_fp_control();
     call.resume.set(Some(start_regs(&p)));
     Ok(0)
 }

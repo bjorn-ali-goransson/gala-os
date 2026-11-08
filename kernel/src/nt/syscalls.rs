@@ -3039,7 +3039,6 @@ fn nt_query_timer(call: &mut Call<'_>) -> NtStatus {
     call.return_info(&b, arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4))
 }
 
-pub(in crate::nt) const THREAD_GET_CONTEXT: u32 = 0x0008;
 pub(in crate::nt) const THREAD_SET_CONTEXT: u32 = 0x0010;
 
 /// A thread handle with `access`, for the thread services.
@@ -3056,10 +3055,6 @@ pub(in crate::nt) fn thread_object(
         ObjectBody::Thread(_) => Err(NtStatus::ACCESS_DENIED),
         _ => Err(NtStatus::OBJECT_TYPE_MISMATCH),
     }
-}
-
-pub(in crate::nt) fn is_current_thread(object: &ObjectRef) -> bool {
-    thread::current().is_some_and(|me| KArc::ptr_eq(&me, object))
 }
 
 /// The calling thread's user registers as they will be when this system

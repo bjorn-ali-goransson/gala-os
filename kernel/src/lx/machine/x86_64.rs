@@ -39,6 +39,11 @@ pub fn start_regs(entry: u64, sp: u64) -> UserRegs {
     regs
 }
 
+/// An exec'd program's floating-point control: SSE's default MXCSR.
+pub fn reset_fp_control() {
+    platform::set_mxcsr(0x1f80);
+}
+
 /// AT_PLATFORM's string on x86_64 (auxv_test).
 pub const PLATFORM: &[u8] = b"x86_64";
 
