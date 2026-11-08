@@ -74,8 +74,22 @@ def assertion(program, check, report_line):
     # and is all the C tests give: read that line whatever it holds.
     m = LINE.search(report_line or "")
     if m:
+        # The tests do not agree on a base: wow64_test prints "line
+        # 0x0000018a", the C tests print "line 447", and the track_caller
+        # convention prints "(line L)". Take an 0x prefix or a non-decimal
+        # digit as hex, zero-padded as hex (the existing convention), and
+        # anything else as decimal. Never let a line nobody can parse end
+        # the run.
         raw = m.group(1)
-        want = int(raw, 16) if (raw.startswith("0") and len(raw) > 3) else int(raw, 10)
+        try:
+            if "0x" in m.group(0).lower() or not raw.isdigit():
+                want = int(raw, 16)
+            elif raw.startswith("0") and len(raw) > 3:
+                want = int(raw, 16)
+            else:
+                want = int(raw, 10)
+        except ValueError:
+            return None, None, "cannot read a line number out of %r" % m.group(0)
         t = text_at(src, want)
         if t is not None:
             return want, t, "exact (%s:%d, the line the report names)" % (src, want)
