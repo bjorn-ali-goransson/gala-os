@@ -1,0 +1,38 @@
+-- private memory: each side's writes are its own
+anonymous mmap: child saw 1 and stored 2: exited 1
+  parent's value = 1
+anonymous mmap: parent stored 5, the child sees: exited 1
+.data: child saw 1 and stored 2: exited 1
+  parent's value = 1
+.data: parent stored 5, the child sees: exited 1
+stack: child saw 1 and stored 2: exited 1
+  parent's value = 1
+stack: parent stored 5, the child sees: exited 1
+brk grew a page = yes
+break: child saw 1 and stored 2: exited 1
+  parent's value = 1
+break: parent stored 5, the child sees: exited 1
+untouched private page: the child stored 7, saw a zero beside it: exited 1
+  parent's value = 0
+read(2) into a private page in the child, which then sees: exited 9
+  parent's value = 1
+mprotect(PROT_WRITE) after the fork, the child stores 3: exited 3
+  parent's value = 1
+MADV_DONTNEED in the child reads zero (1 = yes): exited 1
+  parent's value = 4
+grandchild saw * 10 + the child's value after it: exited 22
+  parent's value = 1
+-- shared memory: one memory for both
+MAP_SHARED|MAP_ANONYMOUS: the child saw: exited 1
+  parent's value after the child stored 2 = 2
+  parent's value in a page first touched by the child = 6
+  parent stored 8 after the fork, the child sees: exited 8
+/dev/zero MAP_SHARED reads = 0
+  parent's value after the child stored 4 = 4
+FUTEX_WAIT on a shared word, woken by the child = 0
+  the child's FUTEX_WAKE woke: exited 1
+-- a large private region
+16 MiB: the child saw every page, rewrote them, its child saw its copy (1 = yes): exited 1
+  pages the parent sees changed = 0
+forkmem_test: ok
+-- exit status 0

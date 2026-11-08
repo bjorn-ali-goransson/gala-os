@@ -3,7 +3,8 @@
  * file mappings as glibc's ld.so and programs make them (ROADMAP LD):
  * MAP_PRIVATE (copy-on-write) and MAP_SHARED views of a file at an
  * offset, MAP_FIXED over part of a mapping, mprotect and munmap of part
- * of one, the errors; mremap(2) and madvise(2).
+ * of one, a page past the file's end (SIGBUS, in a child), the errors;
+ * mremap(2) and madvise(2).
  *
  * Accessibility is probed without signals: write(2) from an address fails
  * with EFAULT when it is not readable, read(2) into it when it is not
@@ -11,6 +12,7 @@
  * a PROT_EXEC page may be unreadable, depending on the CPU). */
 #include "../common/lx.h"
 #include "../common/more.h"
+#include <sys/resource.h>
 
 #define PROT_NONE 0
 #define PROT_READ 1
@@ -148,6 +150,28 @@ static void file_mappings(void)
 	access_line("page 3 after munmap", c + 2 * PAGE);
 	say("page 4 stays", c[3 * PAGE]);
 	say("munmap(all)", sys2(NR_munmap, p, 4 * PAGE));
+
+	/* A page wholly past the file's end (3.5 pages) faults with SIGBUS
+	 * (mmap(2)), read or written; the last page's tail reads zero. */
+	i64 b = fmap(0, 6 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	say_bool("MAP_PRIVATE of 6 pages of a 3.5-page file", b > 0);
+	say("its last file page's tail", ((char *)b)[3 * PAGE + PAGE / 2 + 1]);
+	for (int write = 0; write < 2; write++) {
+		i64 pid = lx_fork();
+		if (pid == 0) {
+			struct rlimit none = { 0, 0 };
+			sys2(SYS_setrlimit, RLIMIT_CORE, &none);
+			volatile char *past = (char *)b + 4 * PAGE;
+			if (write)
+				*past = 1;
+			else
+				(void)*past;
+			lx_exit(1);
+		}
+		say_status(write ? "a write past the file's last page" : "a read past the file's last page",
+			   wait_for(pid, 0));
+	}
+	say("munmap(6 pages)", sys2(NR_munmap, b, 6 * PAGE));
 
 	/* MAP_SHARED: writes reach the file, pwrites the mapping. */
 	i64 s = fmap(0, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, PAGE);

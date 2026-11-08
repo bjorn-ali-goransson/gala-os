@@ -25,6 +25,8 @@
  *   state with its DCB_ENABLE or DCB_DISABLE bit.
  *   BitBlt SRCCOPY copies between memory DCs; SRCINVERT xors;
  *   StretchBlt doubles.
+ * - GetObjectA: a bitmap's BITMAP as GetObjectW's, a font's LOGFONTA (the
+ *   face name in ANSI).
  * - Fonts: CreateFontIndirectW keeps the LOGFONTW (GetObjectW returns it,
  *   92 bytes); selected into a DC, GetTextMetricsW gives a height of at
  *   least |lfHeight|, internal leading tmHeight - |lfHeight|, ascent +
@@ -133,6 +135,9 @@ static void bitmaps(void) {
     BITMAP info;
     CHECK(GetObjectW(bmp, sizeof info, &info) == sizeof info);
     CHECK(info.bmWidth == 20 && info.bmHeight == 10 && info.bmBitsPixel == 32 && info.bmPlanes == 1);
+    /* GetObjectA (Mesa's lavapipe calls it): a bitmap's BITMAP as W's. */
+    BITMAP info_a;
+    CHECK(GetObjectA(bmp, sizeof info_a, &info_a) == sizeof info_a && memcmp(&info, &info_a, sizeof info) == 0);
     HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
     CHECK(old != NULL && GetObjectW(old, sizeof info, &info) == sizeof info);
     CHECK(info.bmWidth == 1 && info.bmHeight == 1 && info.bmBitsPixel == 1);
@@ -235,6 +240,9 @@ static void fonts(void) {
     LOGFONTW back;
     CHECK(GetObjectW(font, sizeof back, &back) == sizeof back);
     CHECK(back.lfHeight == -12 && wcscmp(back.lfFaceName, L"Segoe UI") == 0);
+    LOGFONTA back_a;
+    CHECK(GetObjectA(font, sizeof back_a, &back_a) == sizeof back_a);
+    CHECK(back_a.lfHeight == -12 && back_a.lfWeight == FW_NORMAL && strcmp(back_a.lfFaceName, "Segoe UI") == 0);
     HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
     HGDIOBJ old = SelectObject(screen, font);
     CHECK(old != NULL && GetCurrentObject(screen, OBJ_FONT) == font);

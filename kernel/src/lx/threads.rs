@@ -150,19 +150,14 @@ pub fn gettid(call: &Call<'_>) -> u64 {
 }
 
 /// exit(2): the calling thread ends (the process with its last thread,
-/// whose status it is). Its clear-tid address, if any, gets a 0 and one
-/// futex waiter there wakes (pthread_join); what was pending for it
+/// whose status it is). The locks on its robust futex list are released
+/// (`futex::release_robust`); its clear-tid address, if any, gets a 0 and
+/// one futex waiter there wakes (pthread_join); what was pending for it
 /// alone goes.
 pub fn exit(call: &Call<'_>, status: u64) -> Result {
     let (clear, robust) = call.lx.remove_thread(call.tid);
     if robust != 0 {
-        // A robust list with entries (its head's next is not the head):
-        // Linux marks those futexes FUTEX_OWNER_DIED and wakes a waiter;
-        // not done here.
-        let mut next = [0u8; 8];
-        if call.process.read(robust, &mut next).is_ok() && u64::from_le_bytes(next) != robust {
-            ledger::record("exit", "linux option missing", robust);
-        }
+        super::release_robust_list(&call.process, call.lx.linux_tid(call.tid), robust);
     }
     if clear != 0 {
         // A bad address is ignored (as Linux does), and logged: a joiner

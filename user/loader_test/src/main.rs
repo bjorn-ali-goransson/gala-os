@@ -27,7 +27,10 @@
 //! (the program copies both DLLs to %TEMP%\gala_loader\sub, and removes
 //! them at the end), or with
 //! LOAD_LIBRARY_SEARCH_USER_DIRS from LdrAddDllDirectory's directories
-//! only (found nowhere once LdrRemoveDllDirectory took it out). Prints
+//! only (found nowhere once LdrRemoveDllDirectory took it out). A path
+//! with `.` and `..` components loads the DLL it resolves to. A
+//! path-qualified load of a DLL whose name another loaded DLL has (from
+//! another directory) maps the file named, a second module. Prints
 //! `loader_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -616,6 +619,63 @@ fn run() -> Result<(), u32> {
         c.eq((api.unload)(dll2).into(), STATUS_SUCCESS.into())?;
         let (s, _) = api.handle(&wide!("testdll.dll"));
         c.eq(s.into(), STATUS_DLL_NOT_FOUND.into())?;
+    }
+
+    // A path with "." and ".." components names the same file, as the
+    // Win32 path it is made from is resolved (the Khronos Vulkan loader
+    // loads a driver as `<manifest's directory>\.\<dll>`).
+    for tail in ["\\.\\testdll2.dll", "\\..\\sub\\.\\testdll2.dll"] {
+        let dotted = Path::new().units(sub.get()).s(tail);
+        let mut dll2 = 0;
+        let s = (api.load)(
+            core::ptr::null(),
+            core::ptr::null(),
+            &UnicodeString::new(dotted.get()),
+            &mut dll2,
+        );
+        c.eq(s.into(), STATUS_SUCCESS.into())?;
+        c.ok(dll2 != 0, 0)?;
+        c.eq((api.unload)(dll2).into(), STATUS_SUCCESS.into())?;
+    }
+
+    // Two DLLs of one name in different directories: a path-qualified load
+    // maps the file it names even while the other is loaded (a program's
+    // own dxgi.dll beside it, and the Vulkan loader's System32\dxgi.dll),
+    // and loading that path again takes another reference on it.
+    let mut first = 0;
+    let s = (api.load)(
+        core::ptr::null(),
+        core::ptr::null(),
+        &UnicodeString::new(&wide!("testdll.dll")),
+        &mut first,
+    );
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    let in_sub = Path::new().units(sub.get()).s("\\testdll.dll");
+    let (mut second, mut again) = (0, 0);
+    let s = (api.load)(
+        core::ptr::null(),
+        core::ptr::null(),
+        &UnicodeString::new(in_sub.get()),
+        &mut second,
+    );
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    c.ok(second != 0 && second != first, second as u64)?;
+    let mut buf = [0u8; 600];
+    c.ok(
+        mapped_file_name(second, &mut buf)
+            .is_ok_and(|name| ends_with_ci(name, "\\sub\\testdll.dll")),
+        0,
+    )?;
+    let s = (api.load)(
+        core::ptr::null(),
+        core::ptr::null(),
+        &UnicodeString::new(in_sub.get()),
+        &mut again,
+    );
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    c.eq(again as u64, second as u64)?;
+    for module in [again, second, first] {
+        c.eq((api.unload)(module).into(), STATUS_SUCCESS.into())?;
     }
 
     // LdrAddDllDirectory (kernel32's AddDllDirectory): with

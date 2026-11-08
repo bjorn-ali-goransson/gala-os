@@ -4,10 +4,11 @@
 //!
 //! The waiters are one table (`Table`, plain data, host-tested) of
 //! (key, bitset, thread, ticket) in arrival order. A key is the process
-//! and the address: private and shared futexes are the same here, since
-//! no memory is shared between processes yet (fork copies,
-//! MAP_SHARED anonymous memory is private: ARCHITECTURE "The lx
-//! module").
+//! and the address, except for a shared futex (no FUTEX_PRIVATE_FLAG) in
+//! memory processes share (a view of a section that writes through:
+//! MAP_SHARED anonymous memory, a file mapped MAP_SHARED): its key is the
+//! word's physical address, the same in every process mapping it, so a
+//! fork's child wakes its parent there (forkmem_test).
 //!
 //! FUTEX_WAIT queues the thread first and reads the word after, so a
 //! waker that changes the word and then wakes either finds it queued or
@@ -32,6 +33,7 @@ use super::wait;
 use crate::mm::heap::{AllocError, TryVec};
 use crate::nt::ledger;
 use crate::nt::platform::{self, ThreadId};
+use crate::nt::process::Process;
 use crate::sync::IrqMutex;
 
 const WAIT: u64 = 0;
@@ -46,12 +48,16 @@ const CLOCK_REALTIME: u64 = 256;
 const ALL: u32 = u32::MAX;
 const NS: u64 = 1_000_000_000;
 
-/// What a futex is: the process and the word's address.
+/// What a futex is: the process and the word's address; for a shared
+/// futex in shared memory, pid `SHARED` and the word's physical address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub pid: u64,
     pub addr: u64,
 }
+
+/// A shared futex's `Key::pid` (no process has id 0).
+pub const SHARED: u64 = 0;
 
 pub struct Waiter {
     pub key: Key,
@@ -188,11 +194,110 @@ fn read_word(call: &Call<'_>, addr: u64) -> core::result::Result<u32, u16> {
     Ok(u32::from_le_bytes(b))
 }
 
-fn key(call: &Call<'_>, addr: u64) -> core::result::Result<Key, u16> {
+/// The key of the word at `addr`: for a shared futex (`private` false)
+/// in memory processes share, its physical address (`SHARED`); else the
+/// process and the address, as Linux keys a private mapping's.
+fn key(call: &Call<'_>, addr: u64, private: bool) -> core::result::Result<Key, u16> {
+    key_of(&call.process, addr, private)
+}
+
+fn key_of(process: &Process, addr: u64, private: bool) -> core::result::Result<Key, u16> {
     if !addr.is_multiple_of(4) {
         return Err(EINVAL);
     }
-    Ok(Key { pid: call.process.id, addr })
+    if !private && let Some(frame) = crate::nt::section::shared_frame_at(process, addr) {
+        return Ok(Key { pid: SHARED, addr: frame.start() + addr % crate::mm::PAGE_SIZE });
+    }
+    Ok(Key { pid: process.id, addr })
+}
+
+/// A robust futex word's bits (futex(2) "Robust futexes").
+const FUTEX_WAITERS: u32 = 0x8000_0000;
+const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+/// The most entries of a robust list walked (a cycle in a corrupt list
+/// ends there), as Linux's ROBUST_LIST_LIMIT.
+const ROBUST_LIST_LIMIT: usize = 2048;
+
+/// What a thread's robust list held at its end (`release_robust`).
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Released {
+    /// Locks the thread held: marked FUTEX_OWNER_DIED.
+    pub released: u32,
+    /// Of those, ones with waiters: one woken each.
+    pub woken: u32,
+    /// The walk stopped at an unreadable entry or the limit.
+    pub broken: bool,
+}
+
+/// A Linux thread `tid` ends (exit, or its process's end): every lock on
+/// its robust list (set_robust_list(2): the head `head` holds the first
+/// entry, the futex word's offset from each entry, and the entry being
+/// taken or released, list_op_pending) whose word has its tid gets
+/// FUTEX_OWNER_DIED (FUTEX_WAITERS kept), and one waiter wakes if it had
+/// waiters, as a non-private wake (a robust lock may be in memory other
+/// processes share). A word written meanwhile by a waiter in another
+/// process may be lost (the update is a read and a write, not Linux's
+/// compare-and-exchange).
+pub fn release_robust(process: &Process, tid: u64, head: u64) -> Released {
+    let mut out = Released::default();
+    let read = |addr: u64| -> Option<u64> {
+        let mut b = [0u8; 8];
+        process.read(addr, &mut b).ok().map(|()| u64::from_le_bytes(b))
+    };
+    let Some(((first, offset), pending)) = read(head).zip(read(head + 8)).zip(read(head + 16))
+    else {
+        out.broken = true;
+        return out;
+    };
+    let mut entry = first;
+    let mut walked = 0;
+    while entry != head {
+        if walked == ROBUST_LIST_LIMIT {
+            out.broken = true;
+            break;
+        }
+        // The low bit marks a priority-inheritance lock (not kept apart).
+        let at = entry & !1;
+        // The next entry is read before the lock is released (a waiter may
+        // take and relink it at once).
+        let Some(next) = read(at) else {
+            out.broken = true;
+            break;
+        };
+        if at != pending & !1 {
+            release_one(process, tid, at.wrapping_add(offset), &mut out);
+        }
+        entry = next;
+        walked += 1;
+    }
+    if pending != 0 {
+        release_one(process, tid, (pending & !1).wrapping_add(offset), &mut out);
+    }
+    out
+}
+
+/// One robust lock's word at `addr`: released if `tid` holds it.
+fn release_one(process: &Process, tid: u64, addr: u64, out: &mut Released) {
+    let mut b = [0u8; 4];
+    if process.read(addr, &mut b).is_err() {
+        return;
+    }
+    let word = u32::from_le_bytes(b);
+    if u64::from(word & FUTEX_TID_MASK) != tid {
+        return;
+    }
+    let new = (word & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
+    if process.write(addr, &new.to_le_bytes()).is_err() {
+        return;
+    }
+    out.released += 1;
+    if word & FUTEX_WAITERS != 0
+        && let Ok(k) = key_of(process, addr, false)
+    {
+        out.woken += 1;
+        TABLE.lock().wake(k, 1, ALL, platform::wake);
+    }
 }
 
 /// futex(uaddr, op, val, timeout or val2, uaddr2, val3).
@@ -206,6 +311,7 @@ pub fn futex(
     val3: u64,
 ) -> Result {
     let cmd = op & !(PRIVATE | CLOCK_REALTIME);
+    let private = op & PRIVATE != 0;
     let realtime = op & CLOCK_REALTIME != 0;
     // FUTEX_CLOCK_REALTIME only with the waits that take an absolute
     // time (thread_test: WAIT and WAKE with it are ENOSYS).
@@ -221,7 +327,7 @@ pub fn futex(
             } else {
                 None
             };
-            wait_on(call, addr, val, deadline, ALL)
+            wait_on(call, addr, val, deadline, ALL, private)
         }
         WAIT_BITSET => {
             let bitset = val3 as u32;
@@ -234,14 +340,14 @@ pub fn futex(
             } else {
                 None
             };
-            wait_on(call, addr, val, deadline, bitset)
+            wait_on(call, addr, val, deadline, bitset, private)
         }
         WAKE | WAKE_BITSET => {
             let bitset = if cmd == WAKE { ALL } else { val3 as u32 };
             if bitset == 0 {
                 return Err(EINVAL);
             }
-            let k = key(call, addr)?;
+            let k = key(call, addr, private)?;
             let n = (val as i32).max(0) as usize;
             Ok(TABLE.lock().wake(k, n, bitset, platform::wake) as u64)
         }
@@ -250,8 +356,8 @@ pub fn futex(
             if n_wake < 0 || n_requeue < 0 {
                 return Err(EINVAL);
             }
-            let from = key(call, addr)?;
-            let to = key(call, addr2)?;
+            let from = key(call, addr, private)?;
+            let to = key(call, addr2, private)?;
             if cmd == CMP_REQUEUE {
                 // Read once outside the lock: a page not there yet is
                 // brought in here, not with the lock held.
@@ -285,8 +391,9 @@ fn wait_on(
     val: u32,
     deadline: Option<Deadline>,
     bitset: u32,
+    private: bool,
 ) -> Result {
-    let k = key(call, addr)?;
+    let k = key(call, addr, private)?;
     let me = platform::current();
     let ticket = TABLE.lock().enqueue(k, bitset, me, call.tid).map_err(|_| ENOMEM)?;
     // Taken out by us: the error; already gone: woken meanwhile.
@@ -329,7 +436,7 @@ pub fn dump() {
     let table = TABLE.lock();
     for w in table.iter() {
         crate::info!(
-            "lx: futex waiter: pid {} address {:#x} bitset {:#x} thread {}",
+            "lx: futex waiter: pid {} address {:#x} bitset {:#x} thread {} (pid 0: shared, a physical address)",
             w.key.pid,
             w.key.addr,
             w.bitset,

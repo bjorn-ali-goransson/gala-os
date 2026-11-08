@@ -11,12 +11,13 @@
 //!   queries FALSE or 0.
 //! - Printing (StartDocW .. CancelDC, SetAbortProc): no DC is a printer
 //!   DC: SP_ERROR (-1) for the documents and pages, FALSE for CancelDC.
-//! - Pixel formats (OpenGL): no ICD, so no formats: 0 / FALSE.
 //! - GetICMProfileW (no colour profiles), GetOutlineTextMetricsW (no
 //!   outline metrics yet): FALSE / 0. EnumFontFamiliesExA: 0 (no
 //!   callback; the W version enumerates).
 //! - ExtEscape: 0, "escape not implemented", as documented; GdiComment
 //!   (no metafile DC to record it in): FALSE.
+//! - GetGlyphOutlineA/W (no glyph outlines or bitmaps yet; Mesa's
+//!   opengl32 imports the A form for wglUseFontOutlines): GDI_ERROR.
 
 use super::unsupported;
 
@@ -59,9 +60,9 @@ absent_exports! {
         BeginPath EndPath CloseFigure AbortPath FillPath StrokePath StrokeAndFillPath
         SelectClipPath WidenPath FlattenPath PolyBezierTo SetMiterLimit SetArcDirection
         PlayEnhMetaFile EnumEnhMetaFile PlayEnhMetaFileRecord DeleteEnhMetaFile
-        CancelDC ChoosePixelFormat DescribePixelFormat GetPixelFormat SetPixelFormat
-        SwapBuffers GetICMProfileW GdiComment ExtEscape EnumFontFamiliesExA;
+        CancelDC GetICMProfileW GdiComment ExtEscape EnumFontFamiliesExA;
     u32 = 0 => GetEnhMetaFileHeader GetEnhMetaFileBits GetOutlineTextMetricsW;
+    u32 = 0xffff_ffff => GetGlyphOutlineA GetGlyphOutlineW;
     usize = 0 => CreateEnhMetaFileW CloseEnhMetaFile SetEnhMetaFileBits;
     i32 = -1 => StartDocW EndDoc StartPage EndPage SetAbortProc;
 }

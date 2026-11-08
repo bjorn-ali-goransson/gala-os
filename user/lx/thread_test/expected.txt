@@ -103,6 +103,12 @@ get_robust_list(own tid) = 0
 set_robust_list(head, 23) = -22 (EINVAL)
 get_robust_list(no such thread) = -3 (ESRCH)
 get_robust_list(bad pointer) = -14 (EFAULT)
+exited holder's lock = 0x40000000
+  one with FUTEX_WAITERS = 0xc0000000
+  list_op_pending's = 0x40000000
+  another thread's = 12345
+child ended by exit_group: exited 0
+  its thread's lock in shared memory = 0x40000000
 -- clone's errors and exits
 CLONE_THREAD without CLONE_SIGHAND = -22 (EINVAL)
 CLONE_SIGHAND without CLONE_VM = -22 (EINVAL)

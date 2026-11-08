@@ -4,19 +4,22 @@
 //!
 //! A fork's child is a new core process (`nt::process::create_bare`,
 //! parent_id set) with a copy of the parent's address space: its VAD
-//! cloned, its file mappings' views with the same sections (a file's
-//! pages mapped as the same frames: MAP_SHARED stays shared, MAP_PRIVATE
-//! pages stay copy-on-write) and every other page the parent has mapped
-//! copied into a frame of its own at once (no copy-on-write sharing of
-//! anonymous memory between the two yet; pages never touched stay
-//! demand-zero in both). Its Linux state is
+//! cloned, its views with the same sections (a file's pages and a
+//! MAP_SHARED anonymous mapping's mapped as the same frames: MAP_SHARED
+//! stays shared, MAP_PRIVATE file pages stay copy-on-write) and every
+//! other page the parent has mapped (anonymous memory, private copies)
+//! shared copy-on-write: one frame with two owners (`mm::share_frame`),
+//! read-only in both until a write gives the writer a copy
+//! (`UserSpace::make_writable` from the fault path); pages never touched
+//! stay demand-zero in both. Its Linux state is
 //! `lx::state::fork`'s (the same open file descriptions, signal actions
 //! and mask). Its one thread goes on from the parent's `syscall` with
 //! rax 0 and the parent's registers, x87/SSE/AVX state and FS/GS bases
 //! (`nt::thread::create_forked`).
 //!
-//! Observability: `lx: pid <p> fork: child pid <c> (<n> pages copied,
-//! <m> file pages shared)`
+//! Observability: `lx: pid <p> fork: child pid <c> (<n> pages shared
+//! copy-on-write, <k> copied, <m> section pages shared)` (<k>: pages
+//! that could not be shared: no owner counts, or a count at its limit)
 //! and the core's `process ... starting at ..` line and `process start`
 //! event (ppid set); a failed fork logs why. A clone with flags beyond
 //! the exit signal is `"what":"linux clone flags missing"` in the ledger
@@ -46,12 +49,17 @@ const WCLONE: u64 = 0x8000_0000;
 use super::threads::CLONE_VM;
 
 /// The parent's address space for a child: its VAD, its file mappings'
-/// views (the same sections: a MAP_SHARED page stays shared, a
-/// MAP_PRIVATE page the parent never wrote shows the file in both) and
-/// every mapped page: a file's page mapped as the same frame, any other
-/// copied (the parent is in this system call; with one thread nothing
-/// changes them meanwhile). Returns the pages copied and shared.
+/// views (the same sections: a MAP_SHARED page, a MAP_SHARED anonymous
+/// one's included, stays shared, a MAP_PRIVATE page the parent never
+/// wrote shows the file in both) and every mapped page: a section's
+/// frame mapped in both, any other (anonymous memory, a private copy of
+/// a file's page) shared copy-on-write (`UserSpace::share_into`: read-only
+/// in both until a write copies it), or copied if it cannot be shared.
+/// The parent's space stays locked for the whole walk, so its other
+/// processors are flushed once, at the end, and none writes a shared
+/// frame after it is in the child.
 fn copy_space(parent: &Process) -> core::result::Result<CopiedSpace, &'static str> {
+    use crate::mm::paging::{ForkedPage, USER_END};
     let mut space = UserSpace::new().map_err(|_| "no memory for page tables")?;
     // Lock order: the views, the VAD, then the space.
     let views_lock = parent.views.lock();
@@ -67,29 +75,46 @@ fn copy_space(parent: &Process) -> core::result::Result<CopiedSpace, &'static st
     }
     let vad_lock = parent.vad.lock();
     let vad = vad_lock.try_clone().map_err(|_| "no memory for the VAD")?;
-    let (mut copied, mut shared) = (0u64, 0u64);
+    let mut counts = PageCounts::default();
     let mut failed = false;
-    parent.space.lock().for_each_page(|virt, frame, flags| {
-        if failed {
-            return;
+    {
+        let mut parent_space = parent.space.lock();
+        let mut next = parent_space.next_mapped(0, USER_END);
+        while let Some(virt) = next {
+            match parent_space.share_into(&mut space, virt) {
+                Ok(ForkedPage::CopyOnWrite) => counts.copy_on_write += 1,
+                Ok(ForkedPage::Copied) => counts.copied += 1,
+                Ok(ForkedPage::Borrowed) => counts.borrowed += 1,
+                Ok(ForkedPage::Absent) => {}
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+            next = parent_space.next_mapped(virt + crate::mm::PAGE_SIZE, USER_END);
         }
-        // A borrowed frame is a file mapping's page (its section, which
-        // the child's views hold too); the parent's own pages are copied.
-        let done = if flags.borrowed {
-            shared += 1;
-            space.map_borrowed(virt, frame, flags)
-        } else {
-            copied += 1;
-            space.map_private_copy(virt, frame, flags)
-        };
-        failed = done.is_err();
-    });
+    }
     drop(vad_lock);
     drop(views_lock);
     if failed {
+        // The child's space goes: its shares of the parent's frames are
+        // given back (pages left read-only in the parent are made
+        // writable again at their next write).
         return Err("no memory for the pages");
     }
-    Ok(CopiedSpace { space, vad, views, copied, shared })
+    Ok(CopiedSpace { space, vad, views, counts })
+}
+
+/// What a fork did with the parent's mapped pages (its log line).
+#[derive(Default)]
+struct PageCounts {
+    /// Owned frames now shared copy-on-write.
+    copy_on_write: u64,
+    /// Owned frames that could not be shared, copied.
+    copied: u64,
+    /// Sections' frames (file mappings, MAP_SHARED anonymous memory)
+    /// mapped in both.
+    borrowed: u64,
 }
 
 /// A child's address space (`copy_space`).
@@ -97,8 +122,7 @@ struct CopiedSpace {
     space: UserSpace,
     vad: Vad,
     views: Vec<View>,
-    copied: u64,
-    shared: u64,
+    counts: PageCounts,
 }
 
 /// fork (and clone without flags; `stack`: clone's new stack pointer);
@@ -118,7 +142,7 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
         crate::warn!("lx: pid {} fork failed: {why}", parent.id);
         Err(errno)
     };
-    let CopiedSpace { space, vad, views, copied, shared } = match copy_space(parent) {
+    let CopiedSpace { space, vad, views, counts } = match copy_space(parent) {
         Ok(v) => v,
         Err(why) => return failed(why, ENOMEM),
     };
@@ -174,10 +198,13 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
     }
     thread::resume(&object);
     crate::info!(
-        "lx: pid {} {}: child pid {} ({copied} pages copied, {shared} file pages shared)",
+        "lx: pid {} {}: child pid {} ({} pages shared copy-on-write, {} copied, {} section pages shared)",
         parent.id,
         if vfork { "vfork" } else { "fork" },
-        child.id
+        child.id,
+        counts.copy_on_write,
+        counts.copied,
+        counts.borrowed
     );
     process::announce_start(&child, regs.ip(), child.path);
     if vfork {

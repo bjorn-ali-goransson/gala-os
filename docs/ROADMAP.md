@@ -210,7 +210,7 @@ has a section under "Open items".
 | SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b next |
-| GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
+| GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
 
@@ -1077,6 +1077,18 @@ the kernel.
   `Transport` trait host-tested against a fake device, `display=virtio`
   (default `fb`), `events=display`, `gputrace`, `gpureset=`; scenarios
   `virtio_gpu`, `virtio_gpu_reset`.
+- G2, OpenGL: Mesa 26.2.5's llvmpipe (PREBUILT `mesa`, mesa-dist-win's
+  MSVC build) as System32's `opengl32.dll`; gdi32's pixel formats and
+  SwapBuffers go to it; user32 shows what DCs a program keeps drew and
+  answers WindowFromDC; `gl_test` (a WGL context, a triangle read back
+  and checked on the screen).
+- G2, Vulkan: the Khronos loader (PREBUILT `vulkan-runtime`) and Mesa's
+  lavapipe in System32, lavapipe registered under
+  `HKLM\SOFTWARE\Khronos\Vulkan\Drivers`; gala's cfgmgr32 (no device
+  tree: `cfgmgr32_test`); dxgi's factory exists with no adapters (the
+  loader needs it; `gpu_stub_test`); ntdll resolves `.` and `..` in DLL
+  paths (`loader_test`); `vk_test` (a triangle read back, then presented
+  through VK_KHR_win32_surface and checked on the screen).
 
 **Next**:
 1. G1's rest: shasha's pointer on the hardware cursor,
@@ -1085,12 +1097,23 @@ the kernel.
    monitors, device interrupts instead of spinning, the boot splash on
    virtio-gpu (the screen is black from the driver's start until the
    desktop draws).
-2. G2, software 3D for every program: `vulkan-1.dll` (Khronos loader),
-   Mesa lavapipe (fallback SwiftShader), DXVK (d3d9/10/11, dxgi),
-   vkd3d-proton (d3d12), Mesa llvmpipe `opengl32.dll`; PREBUILT,
-   registered as on Windows; `vk_test`, `d3d11_test`, `gl_test` with
-   screen checks, then DXVK's and vkd3d-proton's own tests. WARP is
-   ruled out (not redistributable).
+2. G2's rest: DXVK (d3d9/10/11, dxgi) and vkd3d-proton (d3d12) over
+   lavapipe, PREBUILT, beside the programs that use them (System32's
+   dxgi stays gala's: the Vulkan loader calls it); `d3d11_test` with a
+   screen check, then DXVK's and vkd3d-proton's own tests. SwiftShader
+   stays the fallback should lavapipe fall short. WARP is ruled out (not
+   redistributable). gdi32's GetGlyphOutline (Mesa's
+   wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
+   (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
+   import tables: the UCRT (`api-ms-win-crt-*`; the JDK's, as for
+   CPython) and gdi32's D3DKMT* functions (19 of them: failing with
+   STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
+   resources); everything else it imports gala has. d3d11_test needs
+   DXBC shaders, and the host has no HLSL compiler (Ubuntu's
+   vkd3d-compiler 1.2 predates vkd3d's HLSL): build a current
+   vkd3d-shader compiler for `build.sh`, or assemble the two shaders
+   with their checksum. Then vkd3d-proton 3.1 (d3d12, d3d12core)
+   beside the program the same way.
 3. G4, GPU presentation: DXGI flip-model swap chains as resources shasha
    composes; then BR stage 5.
 4. G3, virtio-gpu 3D through Venus: **parked** (deferred by the owner
@@ -1864,8 +1887,8 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   rt_sigtimedwait, rt_sigreturn; SIGPIPE from a pipe with no reader;
   delivery on the way back from a system call (default actions, SIG_IGN,
   handlers on an rt_sigframe with SA_RESTORER, SA_RESTART for
-  read/write/wait4). fork (and clone with only SIGCHLD) with an eagerly
-  copied address space, wait4, SIGCHLD at the child's end. Scenario
+  read/write/wait4). fork (and clone with only SIGCHLD) with a
+  copy-on-write address space, wait4, SIGCHLD at the child's end. Scenario
   `lx_pipe` matches pipe_test's transcript exactly.
 - Milestone 2's static busybox runs: busybox.net's static musl build
   (a `PREBUILT`, run only in gala) runs a shell script of pipelines,
@@ -1915,16 +1938,20 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   `lx_mmap`); clone3, set_robust_list, get_robust_list (thread_test,
   `lx_thread`); prlimit64, getrlimit, setrlimit, getrandom,
   `/proc/self/exe` (exec_test, `lx_exec`).
+- Copy-on-write fork (LD step 1's rest; forkmem_test, `lx_forkmem`,
+  `lx_forkmem_pie`): a fork shares the parent's private pages with the
+  child (frames with owner counts in the frame allocator, read-only in
+  both until a write copies them: `UserSpace::share_into`,
+  `make_writable`), MAP_SHARED anonymous memory is a section both map,
+  and a shared futex on it is keyed by its physical address; the fork
+  line counts the pages shared and copied (`0 copied` required).
 
 **Next**:
 1. Milestone 2's rest: the rest of signal_test and fork_test
    (rt_sigqueueinfo, sigaltstack, faults as SIGSEGV/SIGBUS/SIGFPE
    through the exception path, delivery to a thread running user code,
    stop/continue, process groups and sessions, waitid, rusage), vfork
-   sharing memory and copy-on-write for fork of anonymous memory (LD
-   step 1's rest: shared frames, `vm::copy_on_write` for private pages;
-   MAP_SHARED anonymous memory shared with the child, then futexes keyed
-   by the shared page);
+   sharing memory;
    execve ending the other threads first; per-thread CPU time
    for clock_test's CPU clocks; wait queues on sockets instead of their
    1 ms look (seam 5: the stack's notify hook is AFD's alone);
@@ -2047,14 +2074,17 @@ the next breakthroughs).
   fork sharing them), mremap moving pages without copying, madvise
   (mmap_test); clone3 and set/get_robust_list (thread_test);
   prlimit64/getrlimit/setrlimit, getrandom and `/proc/self/exe`
-  (exec_test).
+  (exec_test); copy-on-write fork (forkmem_test, `lx_forkmem`: private
+  pages shared read-only until written, `0 copied` in the fork line;
+  MAP_SHARED anonymous memory and its shared futexes one for parent
+  and child); robust futex lists released when a thread ends, at exit
+  or its process's end (thread_test); SIGBUS for a file mapping's page
+  past the file's end (mmap_test).
 - Step 2's first prerequisite, memfd (`lx_memfd`, memfd_test recorded
   on Linux): memfd_create as an anonymous file of the shared file
   system, its mappings shared by every process, the seals (SHRINK,
   GROW, WRITE, FUTURE_WRITE, EXEC, SEAL) checked by the file system;
-  a file view follows the file's size (mremap after ftruncate); a Linux
-  process's memory released when it ends, before its parent hears of
-  it.
+  a file view follows the file's size (mremap after ftruncate).
 - Step 2's second prerequisite, AF_UNIX sockets (`lx_unix`, unix_test
   recorded on Linux), the first shared core object of seam 5: the core
   `unix` module (sockets, names keyed by a file-system socket node or
@@ -2069,21 +2099,12 @@ the next breakthroughs).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
-   - copy-on-write `fork` of anonymous memory (shared frames,
-     `vm::copy_on_write` for private pages; file pages already stay
-     shared): a fork copies every touched page today, which a large
-     program (a GTK application forking a helper) feels; with it
-     MAP_SHARED anonymous memory shared with the child. fork_test
-     records fork's semantics; a test measuring the pages copied
-     goes with it;
    - the program and its interpreter mapped as file views (shared text
      across processes, as the libraries already are) instead of copied
      at exec;
    - rseq (glibc registers one; ENOSYS, ledgered, until the scheduler
-     keeps its cpu_id and aborts its critical sections), robust futex
-     lists released at a thread's exit, SIGBUS for a file page past the
-     end, shrinking a mapped file (ramfs refuses it while mapped: EBUSY,
-     ledgered);
+     keeps its cpu_id and aborts its critical sections), shrinking a
+     mapped file (ramfs refuses it while mapped: EBUSY, ledgered);
    - a root file system image of a distribution's libraries (more than
      glibc), as the GTK step needs; what its programs reach, from the
      ledger (`linux syscall missing`).

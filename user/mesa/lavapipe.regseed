@@ -1,0 +1,9 @@
+; Mesa's lavapipe as the system's Vulkan driver: what a driver installer
+; (or mesa-dist-win's deployment of lavapipe) writes for the Khronos
+; loader, vulkan-1.dll, which reads each value's name as the path of an
+; ICD manifest (a DWORD 0: enabled). The manifest and vulkan_lvp.dll it
+; names are in System32 (PREBUILT mesa). Loaded after registry.seed
+; (module string `registry`); ARCHITECTURE "Software 3D (G2)".
+
+[\Registry\Machine\SOFTWARE\Khronos\Vulkan\Drivers]
+"C:\Windows\System32\lvp_icd.x86_64.json"=dword:0

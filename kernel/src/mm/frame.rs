@@ -1,4 +1,8 @@
-//! Physical frame allocator: one bit per 4 KiB frame (1 = in use).
+//! Physical frame allocator: one bit per 4 KiB frame (1 = in use), and
+//! for frames with more than one owner (a fork's copy-on-write pages,
+//! ROADMAP LD) a count of the others: `share` adds an owner, `free` by
+//! an owner while others remain only drops the count, so the frame goes
+//! with its last owner.
 
 use core::fmt;
 
@@ -40,15 +44,42 @@ pub enum FreeError {
     NotAllocated,
 }
 
+/// Why a frame could not be given another owner (the caller copies it
+/// instead).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareError {
+    /// Not an allocated frame.
+    NotAllocated,
+    /// No count for it: no table (`set_share_table`), or the frame is
+    /// past it.
+    NoTable,
+    /// Its count is at its limit (`u16::MAX` other owners).
+    Saturated,
+}
+
 pub struct FrameAllocator<'a> {
     bitmap: &'a mut [u64],
+    /// Frames the bitmap spans: every frame from 0 to the top of physical
+    /// memory, holes included. A bound for the bitmap, not a quantity of
+    /// memory -- above about 2 GiB the PCI hole makes it far larger than
+    /// the machine's memory, so `managed` is what memory figures use.
     frame_count: u64,
+    /// Frames the allocator manages: the usable ones, free or in use.
+    /// This is the machine's memory, and the commit limit and both pool
+    /// quotas are derived from it (`nt::charge::limit`,
+    /// `nt::quota::memory`).
+    managed: u64,
     free_count: u64,
     /// Word index where the next single-frame search starts.
     hint: usize,
     /// The fewest free frames there have been since the memory map was
     /// read (the low-water mark, for failed logs).
     low_free: u64,
+    /// Per frame, its owners beyond the first (0: one owner, or free);
+    /// empty until `set_share_table`.
+    shares: &'a mut [u16],
+    /// Frames with more than one owner.
+    shared_count: u64,
 }
 
 impl<'a> FrameAllocator<'a> {
@@ -57,11 +88,22 @@ impl<'a> FrameAllocator<'a> {
         end.div_ceil(PAGE_SIZE).div_ceil(64) as usize
     }
 
-    /// Creates an allocator tracking `bitmap.len() * 64` frames, all in use.
+    /// Creates an allocator spanning `bitmap.len() * 64` frames, all in
+    /// use and none managed yet: the caller says which frames it manages
+    /// by releasing them (`from_memory_map`).
     pub fn new(bitmap: &'a mut [u64]) -> Self {
         bitmap.fill(u64::MAX);
         let frame_count = bitmap.len() as u64 * 64;
-        Self { bitmap, frame_count, free_count: 0, hint: 0, low_free: 0 }
+        Self {
+            bitmap,
+            frame_count,
+            managed: 0,
+            free_count: 0,
+            hint: 0,
+            low_free: 0,
+            shares: &mut [],
+            shared_count: 0,
+        }
     }
 
     /// Creates an allocator whose free frames are the usable regions of `map`,
@@ -81,6 +123,10 @@ impl<'a> FrameAllocator<'a> {
             let end = region.end() / PAGE_SIZE;
             alloc.release_range(start, end);
         }
+        // Every usable frame is free now and none has been claimed, so
+        // this is what the allocator manages. The `reserved` frames below
+        // are in use, not unmanaged, so they stay in the count.
+        alloc.managed = alloc.free_count;
         for range in reserved {
             alloc.claim_range(range.start / PAGE_SIZE, range.end.div_ceil(PAGE_SIZE));
         }
@@ -98,8 +144,10 @@ impl<'a> FrameAllocator<'a> {
         self.free_count
     }
 
+    /// Frames the allocator manages (the machine's memory), not the span
+    /// the bitmap covers.
     pub fn total_frames(&self) -> u64 {
-        self.frame_count
+        self.managed
     }
 
     /// The fewest free frames since the memory map was read.
@@ -173,12 +221,57 @@ impl<'a> FrameAllocator<'a> {
         None
     }
 
+    /// Gives frames their owner counts from `table` (zeroed, one entry
+    /// per frame; frames past its end are never shared).
+    pub fn set_share_table(&mut self, table: &'a mut [u16]) {
+        table.fill(0);
+        self.shares = table;
+        self.shared_count = 0;
+    }
+
+    /// Adds an owner to an allocated frame: it is freed only when every
+    /// owner has freed it.
+    pub fn share(&mut self, frame: Frame) -> Result<(), ShareError> {
+        if frame.0 >= self.frame_count || !self.is_used(frame.0) {
+            return Err(ShareError::NotAllocated);
+        }
+        let count = self.shares.get_mut(frame.0 as usize).ok_or(ShareError::NoTable)?;
+        if *count == u16::MAX {
+            return Err(ShareError::Saturated);
+        }
+        if *count == 0 {
+            self.shared_count += 1;
+        }
+        *count += 1;
+        Ok(())
+    }
+
+    /// Whether `frame` has more than one owner.
+    pub fn is_shared(&self, frame: Frame) -> bool {
+        self.shares.get(frame.0 as usize).is_some_and(|&c| c != 0)
+    }
+
+    /// Frames with more than one owner.
+    pub fn shared_frames(&self) -> u64 {
+        self.shared_count
+    }
+
+    /// An owner gives `frame` up: freed if it was the last one.
     pub fn free(&mut self, frame: Frame) -> Result<(), FreeError> {
         if frame.0 >= self.frame_count {
             return Err(FreeError::OutOfRange);
         }
         if !self.is_used(frame.0) {
             return Err(FreeError::NotAllocated);
+        }
+        if let Some(count) = self.shares.get_mut(frame.0 as usize)
+            && *count != 0
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.shared_count -= 1;
+            }
+            return Ok(());
         }
         self.set_used(frame.0, false);
         Ok(())
@@ -203,7 +296,9 @@ mod tests {
         ];
         let alloc = FrameAllocator::from_memory_map(&mut bits, map, &[]);
         assert_eq!(alloc.free_frames(), 5);
-        assert_eq!(alloc.total_frames(), 128);
+        // The reserved region is not managed, so the total is the usable
+        // frames (5), not the 128 the bitmap spans.
+        assert_eq!(alloc.total_frames(), 5);
     }
 
     #[test]
@@ -270,6 +365,87 @@ mod tests {
         assert_eq!(alloc.free_frames(), 0);
         assert_eq!(alloc.allocate_contiguous(0, 1), None);
         assert_eq!(alloc.allocate_contiguous(1, 3), None);
+    }
+
+    #[test]
+    fn total_frames_counts_managed_frames_not_the_bitmap_span() {
+        // RAM split around a hole, as QEMU leaves it above about 2 GiB
+        // (below 2 GiB and above 4 GiB, the PCI hole between). The frames
+        // the allocator manages are the usable ones; the bitmap spans
+        // every frame up to the top of memory, hole included. The commit
+        // limit and both pool quotas are a share of this figure
+        // (`nt::charge::limit`, `nt::quota::memory`), so the span would
+        // make them larger than the machine.
+        let mut bits = [0; 1]; // 64 frames of span
+        let map = [region(0x1000, 0x4000), region(0x10_000, 0x2000)];
+        let alloc = FrameAllocator::from_memory_map(&mut bits, map, &[]);
+        assert_eq!(alloc.free_frames(), 6);
+        assert_eq!(alloc.total_frames(), 6);
+    }
+
+    #[test]
+    fn reserved_frames_are_managed_but_not_free() {
+        // A reserved range (the bitmap's own frames, a handover's pages)
+        // is in use, not outside the allocator: it counts in the total.
+        // The second range is outside the usable regions, so it was never
+        // managed and claiming it changes neither figure.
+        let mut bits = [0; 1];
+        let reserved = [0x2000..0x3000, 0x8000..0x9000];
+        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x1000, 0x4000)], &reserved);
+        assert_eq!((alloc.free_frames(), alloc.total_frames()), (3, 4));
+    }
+
+    #[test]
+    fn frames_beyond_the_bitmap_are_not_counted_as_managed() {
+        // A usable region the bitmap cannot address is clamped away, so it
+        // is not managed either.
+        let mut bits = [0; 1]; // 64 frames
+        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x3f000, 0x10000)], &[]);
+        assert_eq!((alloc.free_frames(), alloc.total_frames()), (1, 1));
+    }
+
+    #[test]
+    fn a_shared_frame_goes_with_its_last_owner() {
+        let mut bits = [0; 1];
+        let mut table = [7u16; 64];
+        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0, 0x4000)], &[]);
+        let a = alloc.allocate().unwrap();
+        // No table yet: nothing can be shared (a fork copies).
+        assert_eq!(alloc.share(a), Err(ShareError::NoTable));
+        alloc.set_share_table(&mut table);
+        assert_eq!(alloc.share(Frame::from_number(3)), Err(ShareError::NotAllocated));
+        assert!(!alloc.is_shared(a));
+        // Three owners: two frees leave it allocated, the third frees it.
+        alloc.share(a).unwrap();
+        alloc.share(a).unwrap();
+        assert!(alloc.is_shared(a));
+        assert_eq!((alloc.shared_frames(), alloc.free_frames()), (1, 3));
+        alloc.free(a).unwrap();
+        alloc.free(a).unwrap();
+        assert!(!alloc.is_shared(a));
+        assert_eq!((alloc.shared_frames(), alloc.free_frames()), (0, 3));
+        alloc.free(a).unwrap();
+        assert_eq!(alloc.free_frames(), 4);
+        assert_eq!(alloc.free(a), Err(FreeError::NotAllocated));
+        // Reallocated, it starts with one owner again.
+        assert_eq!(alloc.allocate(), Some(a));
+        assert!(!alloc.is_shared(a));
+    }
+
+    #[test]
+    fn a_saturated_count_refuses_another_owner() {
+        let mut bits = [0; 1];
+        let mut table = [0u16; 2];
+        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0, 0x4000)], &[]);
+        alloc.set_share_table(&mut table);
+        let a = alloc.allocate().unwrap();
+        for _ in 0..u16::MAX {
+            alloc.share(a).unwrap();
+        }
+        assert_eq!(alloc.share(a), Err(ShareError::Saturated));
+        // A frame past the table is never shared.
+        let (_, _, c) = (alloc.allocate(), alloc.allocate(), alloc.allocate().unwrap());
+        assert_eq!(alloc.share(c), Err(ShareError::NoTable));
     }
 
     #[test]
