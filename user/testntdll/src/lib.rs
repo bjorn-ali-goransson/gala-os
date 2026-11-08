@@ -1391,26 +1391,71 @@ pub extern "system" fn RtlSetProcessPlaceholderCompatibilityMode(mode: i8) -> i8
     PLACEHOLDER_MODE.swap(mode, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The core API sets Windows' schema does not give kernelbase (as Wine's
+/// apisetschema.spec lists them), by contract name up to its level, and
+/// their hosts; gala's ole32 stands in for combase, coml2 and wintypes.
+const CORE_HOSTS: &[(&[u8], &[u8])] = &[
+    (b"core-apiquery-l1-", b"ntdll.dll"),
+    (b"core-rtlsupport-l1-", b"ntdll.dll"),
+    (b"core-xstate-l1-", b"ntdll.dll"),
+    (b"core-appinit-l1-", b"kernel32.dll"),
+    (b"core-atoms-l1-", b"kernel32.dll"),
+    (b"core-calendar-l1-", b"kernel32.dll"),
+    (b"core-console-ansi-l2-", b"kernel32.dll"),
+    (b"core-file-ansi-l1-", b"kernel32.dll"),
+    (b"core-file-ansi-l2-", b"kernel32.dll"),
+    (b"core-firmware-l1-", b"kernel32.dll"),
+    (b"core-heap-obsolete-l1-", b"kernel32.dll"),
+    (b"core-io-l1-", b"kernel32.dll"),
+    (b"core-job-l2-", b"kernel32.dll"),
+    (b"core-kernel32-legacy-ansi-l1-", b"kernel32.dll"),
+    (b"core-kernel32-legacy-l1-", b"kernel32.dll"),
+    (b"core-kernel32-private-l1-", b"kernel32.dll"),
+    (b"core-localization-ansi-l1-", b"kernel32.dll"),
+    (b"core-namedpipe-ansi-l1-", b"kernel32.dll"),
+    (b"core-namespace-ansi-l1-", b"kernel32.dll"),
+    (b"core-privateprofile-l1-", b"kernel32.dll"),
+    (b"core-processenvironment-ansi-l1-", b"kernel32.dll"),
+    (b"core-processsecurity-l1-", b"kernel32.dll"),
+    (b"core-processthreads-l1-", b"kernel32.dll"),
+    (b"core-processtopology-obsolete-l1-", b"kernel32.dll"),
+    (b"core-sidebyside-ansi-l1-", b"kernel32.dll"),
+    (b"core-string-obsolete-l1-", b"kernel32.dll"),
+    (b"core-synch-ansi-l1-", b"kernel32.dll"),
+    (b"core-toolhelp-l1-", b"kernel32.dll"),
+    (b"core-ums-l1-", b"kernel32.dll"),
+    (b"core-util-l1-", b"kernel32.dll"),
+    (b"core-registry-l2-", b"advapi32.dll"),
+    (b"core-registry-private-l1-", b"advapi32.dll"),
+    (b"core-shutdown-ansi-l1-", b"advapi32.dll"),
+    (b"core-shutdown-l1-", b"advapi32.dll"),
+    (b"core-sysinfo-l2-", b"advapi32.dll"),
+    (b"core-com-", b"ole32.dll"),
+    (b"core-marshal-l1-", b"ole32.dll"),
+    (b"core-winrt-", b"ole32.dll"),
+    (b"core-crt-", b"msvcrt.dll"),
+    (b"core-multipleproviderrouter-l1-", b"mpr.dll"),
+    (b"core-featurestaging-l1-", b"shcore.dll"),
+    (b"core-slapi-l1-", b"slc.dll"),
+    (b"core-biplmapi-", b"twinapi.appcore.dll"),
+    (b"core-biptcltapi-", b"twinapi.appcore.dll"),
+    (b"core-psm-", b"twinapi.appcore.dll"),
+];
+
 /// The DLL implementing API set `name` (`api-ms-win-...`, normalized), as
 /// Windows' API set schema maps these contract names to the DLLs that
-/// implement them (whatever files of those names exist). gala keeps the
-/// mapping coarse: the C runtime sets are ucrtbase, COM and WinRT are
-/// ole32 (gala has no combase), security, eventing, registry and services
-/// are advapi32, the other core sets are kernel32 (gala has no
-/// kernelbase); other names are looked up as files.
+/// implement them (whatever files of those names exist): the core sets to
+/// kernelbase but those of CORE_HOSTS, the C runtime sets to ucrtbase;
+/// gala keeps the rest coarse: security, eventing and services are
+/// advapi32; other names are looked up as files.
 fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
     let set = name.strip_prefix(b"api-ms-win-")?;
     let host: &[u8] = if set.starts_with(b"crt-") {
         b"ucrtbase.dll"
-    } else if set.starts_with(b"core-com-") || set.starts_with(b"core-winrt-") {
-        b"ole32.dll"
-    } else if ["security-", "eventing-", "core-registry-", "service-"]
-        .iter()
-        .any(|p| set.starts_with(p.as_bytes()))
-    {
-        b"advapi32.dll"
     } else if set.starts_with(b"core-") {
-        b"kernel32.dll"
+        CORE_HOSTS.iter().find(|(p, _)| set.starts_with(p)).map_or(b"kernelbase.dll", |&(_, h)| h)
+    } else if ["security-", "eventing-", "service-"].iter().any(|p| set.starts_with(p.as_bytes())) {
+        b"advapi32.dll"
     } else if set.starts_with(b"shcore-") {
         b"shcore.dll"
     } else if set.starts_with(b"power-") {

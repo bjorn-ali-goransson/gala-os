@@ -820,6 +820,17 @@ kernel32 through `raw-dylib`), run under gala and under Windows
    `STATUS_TO_ERROR` (unmapped ones give 317 and are reported).
 5. Run the program you are bringing up and read the `ledger:` lines:
    they list every missing import by name.
+6. Which DLL: what Windows' kernel32 exports goes in kernel32; what only
+   kernelbase has (its documentation says "DLL: Kernelbase.dll", or
+   Wine's kernel32.spec lacks it) goes in `user/kernelbase/src/lib.rs`,
+   named in its build.rs's `OWN`. Programs reach either through the core
+   API sets: kernelbase forwards every name of Windows' list
+   (`user/kernelbase/exports.txt`) to the DLL that has it, so a new
+   kernel32 function is reachable through its set with nothing more.
+   kernelbase ships wherever kernel32 does (xtask's `extra_modules`):
+   scenarios need not list it. `exports.txt` is regenerated with
+   `python3 -I tools/kernelbase_exports.py <dir of Wine's .spec files>
+   <commit>` (record the commit in THIRD_PARTY.md).
 
 ### Programs that import functions gala lacks
 

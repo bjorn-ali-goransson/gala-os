@@ -74,9 +74,6 @@ In order:
    ChromeDriver not exiting, the full WPT run) go with item 12 to the
    Windows machine, where gala runs under KVM (the owner;
    `docs/windows-kvm-brief.md`).
-0b. **WOW64 file-system redirection, then KB** (kernelbase as the core
-   API sets' host): WD's items 4 and 5, structural, found by the
-   Windows triage.
 1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
@@ -88,7 +85,7 @@ In order:
 3. **RS**: step B3a's rest (`presenter=` in gala-um, xtask's headless
    screen checks through SESSION_INPUT); then B3b's remote presenter.
 4. **WOW** follow-ups (done otherwise): the x86 Inno runs' other ledger
-   gaps; kernelbase; kernel32_test built for x86.
+   gaps; kernel32_test built for x86.
 5. **R**: R7's next part (network frames, disk reads and input in
    record/replay), R6's rest (quota_test on Windows), R8's Secure
    Boot.
@@ -586,7 +583,7 @@ boot-test <name>`, see "Pending scenarios" below):
 6. Python's leftovers: the interactive prompt (console input, as
    PowerShell's in item 1); WSAID_TRANSMITPACKETS (asked for by asyncio's
    _overlapped, unused so far). Its ledger (optional probes):
-   propsys.dll (from shell32), kernelbase.dll and
+   propsys.dll (from shell32) and
    api-ms-win-appmodel-runtime-l1-1-2 (absent), NtAllocateVirtualMemoryEx,
    GetNumaNodeProcessorMaskEx, GetFileInformationByName,
    GetFileInformationByHandleEx class 18. Not yet seen loading: ws2_32's
@@ -1698,7 +1695,12 @@ for IMAGE_FILE_MACHINE_I386, which the x64 dbghelp walks (dbghelp_test
 uses 0x1234; gala records I386 as unsupported); GetTextExtentExPointW
 fills lpnDx only for the characters that fit when lpnFit is given, as
 documented (gdi32_test; the A form too), and leaves the rest as they
-were (gdi32_test's -1s stay). WOW64's file system redirector as
+were (gdi32_test's -1s stay). KB: kernelbase hosts the core API sets as
+on Windows (the schema's hosts from Wine's apisetschema.spec; kernelbase
+exports Windows' kernelbase list as forwarders to gala's DLLs, ships
+beside every kernel32, x64 and x86), and CompareObjectHandles is
+kernelbase's only (browser_api_test: its API-set import is
+GetProcAddress(kernelbase)'s address, kernel32's GetProcAddress NULL). WOW64's file system redirector as
 documented, under a 32-bit kernel32 that names System32 as Windows'
 does (wow64_k32_test: GetSystemDirectoryW/A `C:\Windows\system32`,
 25H2's "C:\WINDOWS\system32"; GetSystemWow64DirectoryW SysWOW64;
@@ -1776,12 +1778,23 @@ Next:
    event 1000, which SEM_NOGPFAULTERRORBOX (set by the runner) prevents;
    `user/windows/fault.py`, which debugs the program, gives the same
    facts. run-all uses that way instead.
-4. **KB**: kernelbase as the host of the core API sets, as on Windows
-   (`api_set_host` maps them to kernel32 today), and kernel32 exporting
-   only what Windows' does (CompareObjectHandles is kernelbase's only).
-   Needs kernelbase in every scenario that imports a core set (the JDK's
-   ucrtbase, pwsh, sqllocaldb, Chromium) and forwarders for the rest of
-   each set.
+4. **KB**'s rest: kernel32 exports gala implements that Windows' kernel32
+   may not (absent from Wine's kernel32.spec, present in its
+   kernelbase.spec): PathCchAppend, PathCchCombine, PathCchCombineEx,
+   PathCchRemoveBackslash, PathCchRemoveExtension, PathCchRemoveFileSpec,
+   PathCchSkipRoot, WaitOnAddress, WakeByAddressAll, WakeByAddressSingle,
+   QueryInterruptTime, QueryInterruptTimePrecise,
+   QueryUnbiasedInterruptTimePrecise, FlsGetValue2, TlsGetValue2,
+   CheckTokenMembershipEx, GetEnabledXStateFeatures,
+   GetXStateFeaturesMask, LocateXStateFeature, SetXStateFeaturesMask,
+   MapUserPhysicalPagesScatter, SetFileIoOverlappedRange: to measure on
+   Windows (GetProcAddress(GetModuleHandleW(L"kernel32.dll"), name) for
+   each, NULL or not) and move those Windows' kernel32 lacks into
+   kernelbase, test first, as CompareObjectHandles was. Also kernel32's
+   exports of ntrt's runtime symbols (`__C_specific_handler`, `_fltused`,
+   `mainCRTStartup`), which Windows' has not. gala's kernel32 does not
+   import kernelbase (Windows' does, so there kernelbase is in every
+   process).
 5. **The default IME window**: on Windows a thread's first window brings
    the thread's IME window (class "IME", title "Default IME"; a CBT hook
    sees its HCBT_CREATEWND too). gala makes none (user32_test counts
@@ -2046,7 +2059,8 @@ wow64.dll converts 32-bit system calls in user mode).
   kernel32** (`wow64_k32_test`, a Rust program; `wow64_c_test`, a C
   program built by clang with stdcall imports through an import library,
   not large-address-aware): gala's kernel32 built for i686, shipped as
-  `C:\Windows\SysWOW64\kernel32.dll` (`testkernel32_32.dll`), what
+  `C:\Windows\SysWOW64\kernel32.dll` (`testkernel32_32.dll`; kernelbase
+  beside it, `testkernelbase32.dll`, the core API sets' host), what
   differs by architecture in its `x64.rs`/`x86.rs` (TEB access, the TEB,
   PEB, process parameter, CONTEXT and optional header offsets,
   SLIST_HEADER, the new thread's CONTEXT) and the structures with
@@ -2133,7 +2147,7 @@ wow64.dll converts 32-bit system calls in user mode).
   follow-ups.
 
 **Next**:
-1. Stage 3's rest, the 32-bit system DLLs: kernelbase; kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
+1. Stage 3's rest, the 32-bit system DLLs: kernel32_test built for x86 as a second scenario (xtask builds a package for one target per
    name: an x86 twin needs its own export name, and testdll/testdll2 for
    x86). The 32-bit kernel32's own gaps: GetProcessInformation's
    ProcessMachineTypeInfo answers AMD64; the Wow64*FsRedirection

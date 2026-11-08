@@ -2360,7 +2360,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 
 | Role | DLLs |
 |---|---|
-| core | ntdll, kernel32, kernelbase (what programs look up only there: QueryInterruptTime and friends, SetThreadDescription), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
+| core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles and QueryInterruptTime and friends; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
 | C runtime | msvcrt (mingw-w64 programs' C runtime) |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
@@ -2419,12 +2419,36 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   then (numpy finds the OpenBLAS in `numpy.libs` through
   os.add_dll_directory so).
 - **API sets** (`api-ms-win-*`) are resolved in name normalization, as
-  the schema does on Windows whatever files exist: `crt-` sets to
-  ucrtbase, `core-com-`/`core-winrt-` to ole32 (no combase),
-  security/eventing/registry/service sets to advapi32, other `core-` sets
-  to kernel32 (no kernelbase), `downlevel-<dll>-*` to that DLL,
-  `shcore-*` to shcore, `power-*` to powrprof; unknown contracts are
-  looked up as files (and so not found).
+  the schema does on Windows whatever files exist: the `core-` sets to
+  kernelbase, as on Windows, except those the schema gives another host
+  (`CORE_HOSTS` in user/testntdll, by contract name up to its level, from
+  Wine's `dlls/apisetschema/apisetschema.spec`: rtlsupport, apiquery-l1
+  and xstate-l1 to ntdll; processthreads, kernel32-legacy, util,
+  toolhelp, the `-ansi` sets and the other kernel32 ones to kernel32;
+  registry-l2, shutdown and sysinfo-l2 to advapi32; com, marshal and
+  winrt to ole32, standing in for combase, coml2 and wintypes;
+  crt to msvcrt); `crt-` sets to ucrtbase, security/eventing/service
+  sets to advapi32, `downlevel-<dll>-*` to that DLL, `shcore-*` to
+  shcore, `power-*` to powrprof; unknown contracts are looked up as files
+  (and so not found). The same map is in `tools/import_survey.py`.
+- **kernelbase** (`user/kernelbase`) exports Windows' kernelbase list
+  (`exports.txt`, made from Wine's kernelbase.spec by
+  `tools/kernelbase_exports.py`), each name a forwarder to the gala DLL
+  that implements it: the DLL Wine's specs list it in (advapi32,
+  version, shlwapi, user32), else kernel32, which implements the kernel32
+  family and, until each is moved, what only kernelbase has. kernelbase
+  implements itself what is kernelbase's alone and documented so
+  (CompareObjectHandles, "DLL: Kernelbase.dll"; kernel32 no longer
+  exports it) and the interrupt-time queries (build.rs's OWN). A
+  forwarder to a function gala lacks resolves to nothing: GetProcAddress
+  is NULL and an import of it is a missing export in the ledger (under
+  the API set's name), as an absent export would be; it works once the
+  target has the function. Built for x64 and x86. Invariant: kernelbase
+  is part of the system wherever kernel32 is: xtask ships it beside
+  every scenario's kernel32 (System32 and SysWOW64; `extra_modules`), so
+  a program importing a core set always finds its host. gala's kernel32
+  does not import kernelbase (Windows' does), so kernelbase is loaded
+  only once something imports a core set or loads it.
 - **PEB.Ldr** (+0x18): a PEB_LDR_DATA and one LDR_DATA_TABLE_ENTRY per
   module slot, in ntdll's own data (so in the process's memory, where
   another process reads them: Crashpad's handler walks a crashed

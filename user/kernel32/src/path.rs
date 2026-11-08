@@ -1,6 +1,7 @@
 //! Path helpers programs import from the `api-ms-win-core-path` API set
 //! (PathCchSkipRoot, PathCchCombineEx; pathcch.h's documented contracts)
-//! and NeedCurrentDirectoryForExePathW.
+//! and NeedCurrentDirectoryForExePathW; kernelbase, the set's host,
+//! forwards them here.
 
 use super::*;
 

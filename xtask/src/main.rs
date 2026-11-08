@@ -565,8 +565,10 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll32.dll" },
     // A 32-bit test DLL (wow64_import_test).
     Dll { package: "testdll32", file: "testdll32.dll", exported_as: "testdll32.dll" },
-    // The 32-bit kernel32: gala's kernel32 built for i686.
+    // The 32-bit kernel32: gala's kernel32 built for i686, and the
+    // kernelbase beside it (the core API sets' host).
     Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32_32.dll" },
+    Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase32.dll" },
     // The 32-bit msvcrt: gala's msvcrt built for i686.
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
     // The 32-bit user32 and gdi32 (WOW64 stage 4; user32 loads gdi32).
@@ -763,7 +765,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("console_window", "gdi32.dll", "Windows/System32"),
     ("rtl_test", "ntdll.dll", "Windows/System32"),
     ("rtl_test", "kernel32.dll", "Windows/System32"),
-    ("rtl_test", "kernelbase.dll", "Windows/System32"),
     ("disk_test", "ntdll.dll", "Windows/System32"),
     ("disk_test", "kernel32.dll", "Windows/System32"),
     ("disk_test", "advapi32.dll", "Windows/System32"),
@@ -1552,7 +1553,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gitbash", "ws2_32.dll", "Windows/System32"),
     ("gitbash", "userenv.dll", "Windows/System32"),
     ("gitbash", "netapi32.dll", "Windows/System32"),
-    ("gitbash", "kernelbase.dll", "Windows/System32"),
     ("gitbash", "target/prebuilt/portablegit/bin/", "git/bin"),
     ("gitbash", "target/prebuilt/portablegit/etc/", "git/etc"),
     ("gitbash", "target/prebuilt/portablegit/usr/bin/", "git/usr/bin"),
@@ -1562,7 +1562,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("filezilla", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("filezilla", "ntdll.dll", "Windows/System32"),
     ("filezilla", "kernel32.dll", "Windows/System32"),
-    ("filezilla", "kernelbase.dll", "Windows/System32"),
     ("filezilla", "advapi32.dll", "Windows/System32"),
     ("filezilla", "bcrypt.dll", "Windows/System32"),
     ("filezilla", "bcryptprimitives.dll", "Windows/System32"),
@@ -1873,7 +1872,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ),
     ("chromium", "ntdll.dll", "Windows/System32"),
     ("chromium", "kernel32.dll", "Windows/System32"),
-    ("chromium", "kernelbase.dll", "Windows/System32"),
     ("chromium", "advapi32.dll", "Windows/System32"),
     ("chromium", "bcrypt.dll", "Windows/System32"),
     ("chromium", "bcryptprimitives.dll", "Windows/System32"),
@@ -7997,6 +7995,16 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     }
     let mut modules: Vec<_> =
         EXTRA_MODULES.iter().filter(|m| sets.contains(&m.0)).map(|m| (m.1, m.2)).collect();
+    // kernelbase is part of the system wherever kernel32 is, as on
+    // Windows: it hosts the core API sets (ARCHITECTURE "API sets").
+    for (kernel32, kernelbase, dir) in [
+        ("kernel32.dll", "kernelbase.dll", "Windows/System32"),
+        ("x86/kernel32.dll", "x86/kernelbase.dll", "Windows/SysWOW64"),
+    ] {
+        if modules.contains(&(kernel32, dir)) {
+            modules.push((kernelbase, dir));
+        }
+    }
     modules.sort_unstable();
     modules.dedup();
     modules

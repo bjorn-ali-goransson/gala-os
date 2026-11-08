@@ -25,8 +25,9 @@
 //!    WakeByAddressSingle and (two threads) WakeByAddressAll;
 //! 17. CompareObjectHandles: a duplicate is the same object, another handle
 //!    is not (ERROR_NOT_SAME_OBJECT); imported through its API set
-//!    (api-ms-win-core-handle-l1-1-0) as Chromium does: Windows' kernel32
-//!    does not export it (kernelbase does);
+//!    (api-ms-win-core-handle-l1-1-0) as Chromium does, it is kernelbase's
+//!    (GetProcAddress(kernelbase) gives the imported address; kernelbase
+//!    is loaded); Windows' kernel32 does not export it (NULL);
 //! 18. FlsGetValue2/TlsGetValue2 read the slot without touching the last
 //!    error;
 //! 19. RtlFormatCurrentUserKeyPath is `\REGISTRY\USER\S-1-5-...`;
@@ -140,6 +141,7 @@ unsafe extern "system" {
     ) -> i32;
     fn GetFileSizeEx(h: Handle, size: *mut i64) -> i32;
     fn GetModuleHandleW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn CreateFileMappingW(
         file: Handle,
         sa: *const c_void,
@@ -562,6 +564,17 @@ fn tests() {
         CloseHandle(copy);
         CloseHandle(other);
         CloseHandle(e);
+        // The API set's host is kernelbase (loaded with the process): the
+        // import is kernelbase's export; kernel32 has none.
+        let mut base_name = [0u16; 64];
+        let kernelbase = GetModuleHandleW(w("kernelbase.dll", &mut base_name));
+        check(!kernelbase.is_null(), 17);
+        let imported = CompareObjectHandles as unsafe extern "system" fn(Handle, Handle) -> i32;
+        let exported = GetProcAddress(kernelbase, c"CompareObjectHandles".as_ptr().cast());
+        check(exported as usize == imported as usize, 17);
+        let mut k32_name = [0u16; 64];
+        let k32 = GetModuleHandleW(w("kernel32.dll", &mut k32_name));
+        check(GetProcAddress(k32, c"CompareObjectHandles".as_ptr().cast()).is_null(), 17);
 
         // 18. FlsGetValue2/TlsGetValue2.
         let fls = FlsAlloc(0);
