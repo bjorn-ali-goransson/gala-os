@@ -134,7 +134,7 @@ has a section under "Open items".
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
-| LN | Lints before every commit | planned | `cargo xtask lint` from a committed pre-commit hook: architecture code, check-then-sleep, split atomic operations, hard-coded answers |
+| LN | Lints before every commit | in progress | `cargo xtask lint` from a committed pre-commit hook: architecture code, check-then-sleep, split atomic operations, hard-coded answers |
 | PT | Portability seams for a second architecture | in progress | the audit done (by seam: the register model, the clock and timer, boot, x86-only by nature, user mode); the ARM64 port itself is in "Later" |
 | HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
 
@@ -342,22 +342,24 @@ first.
 
 **Next** (each lint with a test of its own: a fixture that must be
 flagged and one that must not):
-1. The entry point and the hook: fmt, the clippy lines ci.yml lists,
-   the `SAFETY:` and fallible-allocation checks there are today.
+1. Done: `cargo xtask lint` (also first in `cargo xtask test`) and the
+   committed pre-commit hook, which any xtask run enables; the
+   analyzers and `cargo fmt --check`. Next: the clippy lines ci.yml
+   lists (minutes, not seconds: a `--full` mode, or the hook runs only
+   the crates a commit touches).
 2. Architecture code only in `kernel/src/arch`: the kernel's clippy
    for `aarch64-unknown-none` (item PT).
-3. No check-then-sleep: every kernel wait through one primitive that
-   registers the waiter before it tests its condition; the raw waits
-   banned elsewhere (`disallowed_methods` in `kernel/clippy.toml`, as
-   infallible allocation is). A debug-build watchdog alongside: a
+3. No check-then-sleep: `wait-site` (done) allows the kernel's raw
+   `prepare_wait` only at the reviewed sites (each registers and tests
+   its condition under the lock its waker takes); a new one needs a
+   review. Next: those sites through one primitive. A debug-build watchdog alongside: a
    pending request (an AFD poll or select, a pipe read or listen, a
    keyed-event wait) whose condition already holds is reported as a
    lost wake-up.
-4. No documented-atomic operation split across calls: in gala's DLLs a
-   call to `NtClearEvent`, `NtResetEvent` or `NtSetEvent` right after a
-   kernel request doing the same job is flagged (WSAEnumNetworkEvents
-   reset its event after the kernel's copy and lost connects); a site
-   that needs it says why.
+4. No documented-atomic operation split across calls: `event-reset`
+   (done) flags an event reset in gala's DLLs outside the reset APIs
+   themselves (WSAEnumNetworkEvents reset its event after the kernel's
+   copy and lost connects); a site that needs one says why.
 5. No hard-coded answers: `stub_audit` flags functions and match arms
    that return a constant without reading anything (`SO_ERROR => 0`
    hid refused connects), unless a comment names the documented

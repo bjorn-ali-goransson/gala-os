@@ -78,6 +78,13 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
 
 ### Rules for every change
 
+- `cargo xtask lint` passes (the pre-commit hook in `hooks/` runs it;
+  any xtask run enables the hook with `core.hooksPath`): the analyzers
+  of `xtask/src/lint.rs` and `cargo fmt --check`. A finding names its
+  file, line and analyzer; fix the code, or for `event-reset` justify
+  the site with `// lint(event-reset): <reason>`, or for `wait-site`
+  add the reviewed site to `WAIT_SITES` with the review's reason.
+
 - **Observability is part of every change** (OBSERVABILITY.md): a new
   subsystem, driver, boot stage, format or test comes with its
   logs/events and what a failure leaves behind; when a failure's cause

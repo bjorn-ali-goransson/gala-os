@@ -190,7 +190,8 @@ pub fn analyze(root: &Path) -> Result<Vec<Finding>> {
         let mut files = Vec::new();
         rust_files(&dir.join("src"), &mut files)?;
         for f in files {
-            let source = fs::read_to_string(&f).map_err(|e| format!("reading {}: {e}", f.display()))?;
+            let source =
+                fs::read_to_string(&f).map_err(|e| format!("reading {}: {e}", f.display()))?;
             let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
             findings.extend(event_reset(&rel, &source)?);
         }
@@ -208,6 +209,24 @@ pub fn analyze(root: &Path) -> Result<Vec<Finding>> {
     }
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     Ok(findings)
+}
+
+/// Points git at the committed hooks (`hooks/pre-commit` runs `cargo xtask
+/// lint`), once: any xtask run in a checkout enables it, so every commit,
+/// a session's or a sub-agent's, is checked. A checkout without git, or
+/// one whose hooks path was set to something else, is left alone.
+pub fn enable_hook(root: &Path) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(root).output().ok()
+    };
+    let Some(current) = git(&["config", "--get", "core.hooksPath"]) else { return };
+    let current = String::from_utf8_lossy(&current.stdout).trim().to_string();
+    if current.is_empty()
+        && root.join("hooks/pre-commit").is_file()
+        && git(&["config", "core.hooksPath", "hooks"]).is_some_and(|o| o.status.success())
+    {
+        eprintln!("xtask: lint: git's pre-commit hook enabled (core.hooksPath = hooks)");
+    }
 }
 
 /// `cargo xtask lint`: the analyzers, then `cargo fmt --check`; a non-zero
