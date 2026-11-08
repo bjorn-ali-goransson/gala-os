@@ -4,10 +4,11 @@
 //!
 //! The waiters are one table (`Table`, plain data, host-tested) of
 //! (key, bitset, thread, ticket) in arrival order. A key is the process
-//! and the address: private and shared futexes are the same here, since
-//! no memory is shared between processes yet (fork copies,
-//! MAP_SHARED anonymous memory is private: ARCHITECTURE "The lx
-//! module").
+//! and the address, except for a shared futex (no FUTEX_PRIVATE_FLAG) in
+//! memory processes share (a view of a section that writes through:
+//! MAP_SHARED anonymous memory, a file mapped MAP_SHARED): its key is the
+//! word's physical address, the same in every process mapping it, so a
+//! fork's child wakes its parent there (forkmem_test).
 //!
 //! FUTEX_WAIT queues the thread first and reads the word after, so a
 //! waker that changes the word and then wakes either finds it queued or
@@ -46,12 +47,16 @@ const CLOCK_REALTIME: u64 = 256;
 const ALL: u32 = u32::MAX;
 const NS: u64 = 1_000_000_000;
 
-/// What a futex is: the process and the word's address.
+/// What a futex is: the process and the word's address; for a shared
+/// futex in shared memory, pid `SHARED` and the word's physical address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub pid: u64,
     pub addr: u64,
 }
+
+/// A shared futex's `Key::pid` (no process has id 0).
+pub const SHARED: u64 = 0;
 
 pub struct Waiter {
     pub key: Key,
@@ -188,9 +193,15 @@ fn read_word(call: &Call<'_>, addr: u64) -> core::result::Result<u32, u16> {
     Ok(u32::from_le_bytes(b))
 }
 
-fn key(call: &Call<'_>, addr: u64) -> core::result::Result<Key, u16> {
+/// The key of the word at `addr`: for a shared futex (`private` false)
+/// in memory processes share, its physical address (`SHARED`); else the
+/// process and the address, as Linux keys a private mapping's.
+fn key(call: &Call<'_>, addr: u64, private: bool) -> core::result::Result<Key, u16> {
     if !addr.is_multiple_of(4) {
         return Err(EINVAL);
+    }
+    if !private && let Some(frame) = crate::nt::section::shared_frame_at(&call.process, addr) {
+        return Ok(Key { pid: SHARED, addr: frame.start() + addr % crate::mm::PAGE_SIZE });
     }
     Ok(Key { pid: call.process.id, addr })
 }
@@ -206,6 +217,7 @@ pub fn futex(
     val3: u64,
 ) -> Result {
     let cmd = op & !(PRIVATE | CLOCK_REALTIME);
+    let private = op & PRIVATE != 0;
     let realtime = op & CLOCK_REALTIME != 0;
     // FUTEX_CLOCK_REALTIME only with the waits that take an absolute
     // time (thread_test: WAIT and WAKE with it are ENOSYS).
@@ -221,7 +233,7 @@ pub fn futex(
             } else {
                 None
             };
-            wait_on(call, addr, val, deadline, ALL)
+            wait_on(call, addr, val, deadline, ALL, private)
         }
         WAIT_BITSET => {
             let bitset = val3 as u32;
@@ -234,14 +246,14 @@ pub fn futex(
             } else {
                 None
             };
-            wait_on(call, addr, val, deadline, bitset)
+            wait_on(call, addr, val, deadline, bitset, private)
         }
         WAKE | WAKE_BITSET => {
             let bitset = if cmd == WAKE { ALL } else { val3 as u32 };
             if bitset == 0 {
                 return Err(EINVAL);
             }
-            let k = key(call, addr)?;
+            let k = key(call, addr, private)?;
             let n = (val as i32).max(0) as usize;
             Ok(TABLE.lock().wake(k, n, bitset, platform::wake) as u64)
         }
@@ -250,8 +262,8 @@ pub fn futex(
             if n_wake < 0 || n_requeue < 0 {
                 return Err(EINVAL);
             }
-            let from = key(call, addr)?;
-            let to = key(call, addr2)?;
+            let from = key(call, addr, private)?;
+            let to = key(call, addr2, private)?;
             if cmd == CMP_REQUEUE {
                 // Read once outside the lock: a page not there yet is
                 // brought in here, not with the lock held.
@@ -285,8 +297,9 @@ fn wait_on(
     val: u32,
     deadline: Option<Deadline>,
     bitset: u32,
+    private: bool,
 ) -> Result {
-    let k = key(call, addr)?;
+    let k = key(call, addr, private)?;
     let me = platform::current();
     let ticket = TABLE.lock().enqueue(k, bitset, me, call.tid).map_err(|_| ENOMEM)?;
     // Taken out by us: the error; already gone: woken meanwhile.
@@ -329,7 +342,7 @@ pub fn dump() {
     let table = TABLE.lock();
     for w in table.iter() {
         crate::info!(
-            "lx: futex waiter: pid {} address {:#x} bitset {:#x} thread {}",
+            "lx: futex waiter: pid {} address {:#x} bitset {:#x} thread {} (pid 0: shared, a physical address)",
             w.key.pid,
             w.key.addr,
             w.bitset,

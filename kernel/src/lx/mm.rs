@@ -23,6 +23,12 @@
 //! MAP_FIXED or mprotect over part of a view leaves views for the parts
 //! that stay, each with its offset in the file (`cut`).
 //!
+//! MAP_SHARED anonymous memory (and a MAP_SHARED mapping of /dev/zero)
+//! is a view of a pagefile-backed section of its own (`Section::new`,
+//! zeroed pages made at the first touch), so a fork's child, whose views
+//! hold the same sections, shares it, pages first touched after the
+//! fork included.
+//!
 //! Lock order as everywhere: the views, the VAD, then the space (inside
 //! `sync_range`). No user memory is touched with these locks held, and a
 //! view (whose section may close a file when it goes) is dropped after
@@ -185,9 +191,11 @@ fn unmap_locked(
 
 /// What an mmap maps.
 enum Source {
+    /// Private anonymous memory.
     Anonymous,
-    /// A file's pages: its section (a new one for each mmap; the frames
-    /// are the file's, shared) and the view's offset in it.
+    /// A section's pages: a file's (a new section for each mmap; the
+    /// frames are the file's, shared), or MAP_SHARED anonymous memory's
+    /// (its own pagefile-backed section), and the view's offset in it.
     File(Section, u64),
 }
 
@@ -258,7 +266,7 @@ pub fn mmap(
     if fixed && !addr.is_multiple_of(PAGE) {
         return Err(EINVAL);
     }
-    let source = if flags & MAP_ANONYMOUS != 0 {
+    let mut source = if flags & MAP_ANONYMOUS != 0 {
         Source::Anonymous
     } else {
         if offset.checked_add(len).is_none() {
@@ -266,6 +274,15 @@ pub fn mmap(
         }
         file_source(call, fd, offset, flags, prot)?
     };
+    if matches!(source, Source::Anonymous) && flags & MAP_TYPE != MAP_PRIVATE {
+        // MAP_SHARED anonymous memory (or /dev/zero's): one memory for
+        // every process mapping it (a fork's child), pages first touched
+        // after the fork included: a pagefile-backed section of its own.
+        let section =
+            Section::new(len, vad::PAGE_EXECUTE_READWRITE, crate::nt::section::SEC_COMMIT)
+                .map_err(|_| ENOMEM)?;
+        source = Source::File(section, 0);
+    }
     // The section's object before the locks (its making allocates).
     let (protect, kind, view) = match source {
         Source::Anonymous => (protect_of(prot), vad::MEM_PRIVATE, None),

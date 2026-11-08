@@ -77,9 +77,21 @@ pub fn init() {
     dispatch::init();
 }
 
-/// A process of the Linux personality has ended (`nt::process::finish`).
-pub fn process_ended(pid: u64, status: crate::nt::status::NtStatus) {
-    state::ended(pid, status);
+/// A process of the Linux personality has ended (`nt::process::finish`,
+/// its threads gone): its memory goes first, as Linux's exit releases it
+/// before the parent is told (frames it shared copy-on-write are the
+/// parent's alone again, and a section's frames are freed only after no
+/// page table maps them: the address space itself may outlive the
+/// process, held by a reap or `run`), then its Linux state (`state::ended`).
+pub fn process_ended(process: &crate::nt::process::Process, status: crate::nt::status::NtStatus) {
+    if let Err(e) = mm::clear(process) {
+        crate::warn!(
+            "lx: pid {} ended: its memory not released (status {:#010x}); it goes with the process",
+            process.id,
+            e.0
+        );
+    }
+    state::ended(process.id, status);
 }
 
 /// The state dump's Linux part: each process's threads (Linux and core

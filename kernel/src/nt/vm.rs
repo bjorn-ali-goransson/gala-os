@@ -172,9 +172,15 @@ fn resolve_once(process: &Process, addr: u64, kind: AccessKind) -> Fault {
     }
     let mut space = process.space.lock();
     let done = if space.is_mapped(addr) {
-        // Present and allowed by the VAD: the PTE is stale (another
-        // processor's fault on the page mapped it first). Re-sync it.
-        space.set_flags(addr, flags_for(protect)).is_ok()
+        // Present and allowed by the VAD: a write to a page whose frame
+        // a fork shares (copy-on-write: copied now, or made writable if
+        // the other owners are gone), or a stale PTE (another processor's
+        // fault on the page mapped it first): re-synced.
+        if kind == AccessKind::Write {
+            space.make_writable(addr, flags_for(protect)).is_ok()
+        } else {
+            space.set_flags(addr, flags_for(protect)).is_ok()
+        }
     } else {
         match section_frame {
             Some(frame) => space.map_borrowed(addr, frame, flags_for(protect)).is_ok(),
@@ -219,7 +225,8 @@ fn copy_on_write(
     let mut space = process.space.lock();
     let done = match space.mapping(page) {
         Some((frame, true)) => space.map_private_copy(page, frame, flags).is_ok(),
-        Some((_, false)) => space.set_flags(page, flags).is_ok(),
+        // Its own copy already, or one a fork shares (copied now).
+        Some((_, false)) => space.make_writable(page, flags).is_ok(),
         None => match section_frame {
             Some(frame) => space.map_private_copy(page, frame, flags).is_ok(),
             None => space.map_zero_page(page, flags).is_ok(),
