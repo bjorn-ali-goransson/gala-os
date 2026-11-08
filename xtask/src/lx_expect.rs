@@ -56,6 +56,15 @@ pub const ENV: &[(&str, &str)] = &[("A", "1"), ("EMPTY", ""), ("LONGER_NAME", "s
 const WAYLAND_TESTS: &[&str] = &["wl_test"];
 const WAYLAND_DISPLAY: &str = "wayland-gala";
 
+/// The programs real Linux cannot record, with why: built and checked
+/// like the others, not run here. Their expected.txt is written from the
+/// specification (each says so in its header) and checked by their gala
+/// scenarios only.
+const INPUT_TESTS: &[(&str, &str)] = &[(
+    "wl_input_test",
+    "needs a compositor with input devices; weston's headless backend has none (lx_wl_input)",
+)];
+
 /// How long one program may run.
 const TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -76,7 +85,13 @@ pub fn lx_expect(args: &[String]) -> Result {
         return Err(format!("no tests in {}", lx.display()));
     }
     let mut failed = Vec::new();
+    let mut skipped = 0;
     for test in &tests {
+        if let Some((_, why)) = INPUT_TESTS.iter().find(|(t, _)| t == test) {
+            eprintln!("lx-expect: {test}: not run on Linux: {why}");
+            skipped += 1;
+            continue;
+        }
         let expected_path = lx.join(test).join("expected.txt");
         let mut expected = fs::read_to_string(&expected_path).ok();
         for binary in [test.clone(), format!("{test}-pie")] {
@@ -138,7 +153,11 @@ pub fn lx_expect(args: &[String]) -> Result {
         }
     }
     if failed.is_empty() {
-        eprintln!("lx-expect: {} programs, {} binaries: all match", tests.len(), tests.len() * 2);
+        let run = tests.len() - skipped;
+        eprintln!(
+            "lx-expect: {run} programs, {} binaries: all match ({skipped} not run on Linux)",
+            run * 2
+        );
         Ok(())
     } else {
         Err(format!("lx-expect: {} failed:\n  {}", failed.len(), failed.join("\n  ")))

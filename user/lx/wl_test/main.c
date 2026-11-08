@@ -105,7 +105,7 @@ static u64 in_len;
 /* State the events fill in. */
 static u32 globals_name[8], globals_version[8];
 /* wl_seat is left out: weston's headless backend has no input devices,
- * so it offers none (gala's desktop does; input is checked later). */
+ * so it offers none (gala's server does: user/lx/wl_input_test checks it). */
 static const char *const wanted[] = { "wl_compositor", "wl_shm", "xdg_wm_base", "wl_output" };
 #define WANTED 4
 static int formats_argb, formats_xrgb;

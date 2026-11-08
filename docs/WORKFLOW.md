@@ -1325,7 +1325,26 @@ source).
   with `wayland=on` and pass `XDG_RUNTIME_DIR=/run/user/1000
   WAYLAND_DISPLAY=wayland-0` with `lxenv=`; `wayland=trace` logs both
   directions as `WAYLAND_DEBUG=1` prints them, to compare with the same
-  client run against weston under `WAYLAND_DEBUG=1`. `--runs 5` runs each binary 5 times and fails if a transcript
+  client run against weston under `WAYLAND_DEBUG=1`. A test real Linux
+  cannot record (`INPUT_TESTS` in lx_expect.rs, with the reason:
+  wl_input_test, as weston's headless backend has no input devices)
+  is built and checked in like the others but not run by lx-expect; its
+  expected.txt is written from the specification and its header says
+  so, and its gala scenarios drive it: `lx_wl_input` runs on a headless
+  desktop (`presenter=test`) with a screen check (`WL_INPUT_SCREEN`)
+  whose steps each wait for the line the program printed for the step
+  before (`after:`), then send PS/2 input with QEMU's monitor and check
+  pixels; a step's moves avoid crossing a window's client area on the
+  way (an enter or leave on the path would add lines), and only where a
+  button lands is printed (how many motion events come depends on how
+  the host's packets arrive). The server's keymap,
+  `kernel/src/wayland/keymap.xkb`, is checked after a change with the
+  host's `xkbcomp -w 10 -xkb keymap.xkb out.xkb` (x11-xkb-utils) and by
+  compiling it with libxkbcommon (`xkb_keymap_new_from_string` from a
+  scratch C program linked against `libxkbcommon.so.0`; no headers
+  needed); the host test `every_key_the_scan_codes_give_is_in_the_keymap`
+  checks that each key the scan codes give has a keycode there.
+  `--runs 5` runs each binary 5 times and fails if a transcript
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
   skips the rebuild. Transcripts avoid version-dependent values because

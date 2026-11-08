@@ -22,7 +22,26 @@
 //!   client (`End`). Nothing here panics on a client's bytes; running out
 //!   of memory is a `no_memory` error.
 //! - **Globals**: wl_compositor 6, wl_shm 2 (ARGB8888 and XRGB8888),
-//!   xdg_wm_base 6, wl_output 4. No wl_seat yet (input is next).
+//!   xdg_wm_base 6, wl_output 4, wl_seat 7 (pointer and keyboard) and
+//!   zxdg_decoration_manager_v1 1.
+//! - **Input** (`input`): the desktop's input for the client's windows
+//!   (`input::Input`, from the window messages the desktop queues) becomes
+//!   wl_pointer and wl_keyboard events on every pointer and keyboard the
+//!   client made, and xdg_toplevel.close. The seat's state (`Seat`) is the
+//!   client's: the surface with the pointer and where, the buttons held
+//!   (the pointer stays with its surface while one is: an implicit grab),
+//!   the surface with the keyboard focus (the desktop's active window),
+//!   the keys down and the modifiers they hold or toggled. A key already
+//!   down is not sent again (the client repeats keys itself:
+//!   repeat_info). A point outside the surface (a client area larger than
+//!   the buffer) is outside: the pointer leaves. A surface unmapped with a
+//!   focus gets its leave; one destroyed loses it without one.
+//! - **Decorations**: a toplevel without a decoration object, or whose
+//!   object asks for nothing or for server-side, wears shasha's frame
+//!   (mode server_side); one that asks for client-side gets it, and a
+//!   frameless window. The mode is fixed when the window is made: asked
+//!   for again while mapped, the configure says the window's mode; the
+//!   next mapping (after a null buffer) follows the new one.
 //! - **Surfaces**: `attach`, `damage`/`damage_buffer` and `frame` are
 //!   pending until `commit`. An xdg_toplevel's first commit (without a
 //!   buffer) is answered with its configure (configure_bounds and
@@ -38,7 +57,10 @@
 //! - **Accepted and not acted on** (`Note::Ignored`, ledgered by the
 //!   server): regions, buffer scale and transform other than 1 and
 //!   normal, surface offsets, window geometry, and the toplevel's
-//!   requests for move, resize, menus, sizes and states.
+//!   requests for move, resize, menus, sizes and states; a cursor surface
+//!   (wl_pointer.set_cursor: the desktop draws its own pointer). The
+//!   desktop's maximize, restore and Snap for a window are noted too
+//!   (`Note::Unhandled`).
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -46,6 +68,7 @@ use core::fmt::{self, Write as _};
 
 use wl_abi::{Arg, Header, Interface, MAX_ARGS, MAX_FDS, MAX_MESSAGE, Message};
 
+use super::input::{self, Input, Modifier};
 use crate::mm::heap::TryVec;
 
 /// The most objects a client has (and the highest id it may use).
@@ -108,11 +131,24 @@ pub static WL_OUTPUT: &Interface = find("wl_output");
 pub static XDG_WM_BASE: &Interface = find("xdg_wm_base");
 pub static XDG_SURFACE: &Interface = find("xdg_surface");
 pub static XDG_TOPLEVEL: &Interface = find("xdg_toplevel");
+pub static WL_SEAT: &Interface = find("wl_seat");
+pub static WL_POINTER: &Interface = find("wl_pointer");
+pub static WL_KEYBOARD: &Interface = find("wl_keyboard");
+pub static DECORATION_MANAGER: &Interface = find("zxdg_decoration_manager_v1");
+pub static TOPLEVEL_DECORATION: &Interface = find("zxdg_toplevel_decoration_v1");
 
 /// The globals offered, in registry order (name = index + 1), with the
 /// version offered.
-pub fn globals() -> [(&'static Interface, u32); 4] {
-    [(WL_COMPOSITOR, 6), (WL_SHM, 2), (XDG_WM_BASE, 6), (WL_OUTPUT, 4)]
+pub fn globals() -> [(&'static Interface, u32); 6] {
+    [
+        (WL_COMPOSITOR, 6),
+        (WL_SHM, 2),
+        (XDG_WM_BASE, 6),
+        (WL_OUTPUT, 4),
+        // As weston offers it: axis_discrete, not axis_value120.
+        (WL_SEAT, 7),
+        (DECORATION_MANAGER, 1),
+    ]
 }
 
 // Error codes (the XML's enums).
@@ -134,6 +170,22 @@ const XDG_SURFACE_UNCONFIGURED_BUFFER: u32 = 3;
 const XDG_SURFACE_INVALID_SERIAL: u32 = 4;
 const XDG_SURFACE_INVALID_SIZE: u32 = 5;
 const XDG_SURFACE_DEFUNCT_ROLE_OBJECT: u32 = 6;
+const SEAT_MISSING_CAPABILITY: u32 = 0;
+const POINTER_ROLE: u32 = 0;
+const DECORATION_UNCONFIGURED_BUFFER: u32 = 0;
+const DECORATION_ALREADY_CONSTRUCTED: u32 = 1;
+const DECORATION_ORPHANED: u32 = 2;
+const DECORATION_INVALID_MODE: u32 = 3;
+
+/// zxdg_toplevel_decoration_v1's modes.
+pub const MODE_CLIENT_SIDE: u32 = 1;
+pub const MODE_SERVER_SIDE: u32 = 2;
+/// wl_seat's capabilities: pointer and keyboard.
+const CAPABILITIES: u32 = 3;
+/// The keys down kept per client (more held at once are not sent).
+const MAX_KEYS: usize = 32;
+/// Descriptors the events hold until written (wl_keyboard.keymap's).
+const MAX_OUT_FDS: usize = 2 * MAX_FDS;
 
 // wl_shm formats.
 pub const ARGB8888: u32 = 0;
@@ -155,8 +207,19 @@ pub trait Host {
     fn now_ms(&mut self) -> u32;
     /// A new window showing a `width` x `height` surface, titled `title`
     /// (UTF-8 as the client gave it): its id, None if it cannot be made.
-    fn window_create(&mut self, title: &[u8], width: u32, height: u32) -> Option<u32>;
-    fn window_resize(&mut self, id: u32, width: u32, height: u32);
+    /// The keymap (XKB text with its NUL) as a description of a sealed
+    /// read-only file, and its size; None without memory.
+    fn keymap(&mut self) -> Option<(Self::Fd, u32)>;
+    /// `decorated`: with shasha's frame (else frameless: the client draws
+    /// its own).
+    fn window_create(
+        &mut self,
+        title: &[u8],
+        width: u32,
+        height: u32,
+        decorated: bool,
+    ) -> Option<u32>;
+    fn window_resize(&mut self, id: u32, width: u32, height: u32, decorated: bool);
     /// Rows `y..y + rows` of the window's pixels (0x00RRGGBB, `width` per
     /// row).
     fn window_present(&mut self, id: u32, y: u32, width: u32, rows: u32, pixels: &[u32]);
@@ -191,6 +254,16 @@ pub enum Note<'a> {
     Missing { interface: &'static str, request: &'static str },
     /// A request accepted but not acted on.
     Ignored { interface: &'static str, request: &'static str },
+    /// Input delivered (`what`: "enter", "leave", "button", "axis", "key",
+    /// "focus", "unfocus", "close") to `surface` (window `window`):
+    /// `code` the button or key, `state` pressed (1) or released (0).
+    Input { what: &'static str, surface: u32, window: u32, code: u32, state: u32 },
+    /// Input for a window the client has no surface showing (gone since,
+    /// or never its own): dropped.
+    InputDropped { window: u32 },
+    /// A window action Wayland windows do not follow yet (maximize,
+    /// restore, Snap's placing): ledgered.
+    Unhandled { what: &'static str, window: u32 },
 }
 
 /// Why a client ends.
@@ -280,6 +353,8 @@ struct Pending {
 #[derive(Default)]
 struct Surface {
     pending: Pending,
+    /// The window wears shasha's frame (server-side decoration).
+    decorated: bool,
     /// Its xdg_surface.
     xdg: Option<u32>,
     /// The window showing it, while mapped.
@@ -301,6 +376,8 @@ struct XdgSurface {
 
 struct Toplevel {
     xdg: u32,
+    /// Its zxdg_toplevel_decoration_v1.
+    decoration: Option<u32>,
     title: Vec<u8>,
     app_id: Vec<u8>,
 }
@@ -319,6 +396,35 @@ enum Kind<F> {
     WmBase,
     XdgSurface(XdgSurface),
     Toplevel(Toplevel),
+    Seat,
+    Pointer,
+    Keyboard,
+    DecorationManager,
+    Decoration(Decoration),
+}
+
+struct Decoration {
+    toplevel: u32,
+    /// The mode the client asked for (None: no preference).
+    wanted: Option<u32>,
+}
+
+/// The client's seat: where its pointer and keyboard focus are.
+#[derive(Default)]
+struct Seat {
+    /// The surface the pointer is on, and where (surface coordinates).
+    pointer: Option<u32>,
+    at: (i32, i32),
+    /// Buttons held (1 left, 2 right): the pointer stays with its surface.
+    buttons: u32,
+    /// The surface with the keyboard focus.
+    keyboard: Option<u32>,
+    /// The keys down (evdev codes), at most MAX_KEYS.
+    keys: Vec<u32>,
+    /// The modifiers held by those keys, and those toggled (Caps Lock, Num
+    /// Lock): wl_keyboard.modifiers' depressed and locked masks.
+    depressed: u32,
+    locked: u32,
 }
 
 struct Object<F> {
@@ -334,6 +440,10 @@ pub struct Client<F> {
     filled: usize,
     fds: VecDeque<F>,
     output: Vec<u8>,
+    /// Descriptors going with the events (wl_keyboard.keymap's), each with
+    /// where its event starts in `output`.
+    out_fds: VecDeque<(usize, F)>,
+    seat: Seat,
     serial: u32,
     /// Requests handled (the state dump).
     pub requests: u64,
@@ -403,6 +513,8 @@ impl<F> Client<F> {
             filled: 0,
             fds: VecDeque::new(),
             output: Vec::new(),
+            out_fds: VecDeque::new(),
+            seat: Seat::default(),
             serial: 0,
             requests: 0,
         })
@@ -429,6 +541,20 @@ impl<F> Client<F> {
         let n = n.min(self.output.len());
         self.output.copy_within(n.., 0);
         self.output.truncate(self.output.len() - n);
+        for (at, _) in self.out_fds.iter_mut() {
+            *at = at.saturating_sub(n);
+        }
+    }
+
+    /// The next descriptor whose event starts in the first `upto` bytes of
+    /// the output: it goes with a write of them (rights that come with
+    /// bytes before their message are kept by the client until the
+    /// message that takes them; never after it).
+    pub fn take_fd(&mut self, upto: usize) -> Option<F> {
+        if self.out_fds.front().is_some_and(|(at, _)| *at < upto) {
+            return self.out_fds.pop_front().map(|(_, f)| f);
+        }
+        None
     }
 
     /// How many objects it has.
@@ -464,6 +590,7 @@ impl<F> Client<F> {
         }
         self.objects.clear();
         self.fds.clear();
+        self.out_fds.clear();
     }
 
     /// Its objects for the state dump, one per line.
@@ -490,13 +617,23 @@ impl<F> Client<F> {
                     x.surface, x.toplevel, x.sent, x.acked
                 )),
                 Kind::Toplevel(t) => out(format_args!(
-                    "{name}#{id} v{v}: \"{}\" (app id \"{}\")",
+                    "{name}#{id} v{v}: \"{}\" (app id \"{}\"), decoration {:?}",
                     Bytes(&t.title),
-                    Bytes(&t.app_id)
+                    Bytes(&t.app_id),
+                    t.decoration
+                )),
+                Kind::Decoration(d) => out(format_args!(
+                    "{name}#{id} v{v}: toplevel {}, mode asked {:?}",
+                    d.toplevel, d.wanted
                 )),
                 _ => out(format_args!("{name}#{id} v{v}")),
             }
         }
+        let st = &self.seat;
+        out(format_args!(
+            "seat: pointer on {:?} at {:?}, buttons {:#x}; keyboard on {:?}, keys {:?}, modifiers depressed {:#x} locked {:#x}",
+            st.pointer, st.at, st.buttons, st.keyboard, st.keys, st.depressed, st.locked
+        ));
     }
 
     fn next_serial(&mut self) -> u32 {
@@ -585,6 +722,51 @@ impl<F> Client<F> {
         if host.tracing() {
             let shown = ShowArgs { objects: &self.objects, sig, args };
             host.trace(format_args!(" -> {}#{object}.{}({shown})", iface.name, sig.name));
+        }
+        Ok(())
+    }
+
+    /// Appends an event carrying descriptor `fd` (its only fd argument):
+    /// the descriptor waits in `out_fds` for the write of its bytes.
+    fn event_fd<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        object: u32,
+        iface: &'static Interface,
+        opcode: u16,
+        args: &[Arg<'_>],
+        fd: F,
+    ) -> Result {
+        if self.out_fds.len() >= MAX_OUT_FDS {
+            return Err(End::OutputFull);
+        }
+        if self.out_fds.try_reserve(1).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        let at = self.output.len();
+        self.event(host, object, iface, opcode, args)?;
+        self.out_fds.push_back((at, fd));
+        Ok(())
+    }
+
+    /// Sends event `opcode` of `iface` to each of the client's objects of
+    /// that interface whose version is in `since..until`.
+    fn send_all<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        iface: &'static Interface,
+        opcode: u16,
+        (since, until): (u32, u32),
+        args: &[Arg<'_>],
+    ) -> Result {
+        for i in 1..self.objects.len() {
+            let v = match &self.objects[i] {
+                Some(o) if core::ptr::eq(o.iface, iface) => o.version,
+                _ => continue,
+            };
+            if v >= since && v < until {
+                self.event(host, i as u32, iface, opcode, args)?;
+            }
         }
         Ok(())
     }
@@ -770,6 +952,11 @@ impl<F> Client<F> {
             Some(Kind::WmBase) => Tag::WmBase,
             Some(Kind::XdgSurface(_)) => Tag::XdgSurface,
             Some(Kind::Toplevel(_)) => Tag::Toplevel,
+            Some(Kind::Seat) => Tag::Seat,
+            Some(Kind::Pointer) => Tag::Pointer,
+            Some(Kind::Keyboard) => Tag::Keyboard,
+            Some(Kind::DecorationManager) => Tag::DecorationManager,
+            Some(Kind::Decoration(_)) => Tag::Decoration,
             None => return Ok(()),
         };
         let r = Req { id, version, iface, sig, op, args, fd };
@@ -796,6 +983,14 @@ impl<F> Client<F> {
             Tag::WmBase => self.wm_base(host, r),
             Tag::XdgSurface => self.xdg_surface(host, r),
             Tag::Toplevel => self.toplevel_request(host, r),
+            Tag::Seat => self.seat_request(host, r),
+            Tag::Pointer => self.pointer_request(host, r),
+            Tag::Keyboard => {
+                // release (version 3) is its only request.
+                self.delete(host, r.id)
+            }
+            Tag::DecorationManager => self.decoration_manager(host, r),
+            Tag::Decoration => self.decoration_request(host, r),
         }
     }
 
@@ -866,12 +1061,23 @@ impl<F> Client<F> {
             Kind::Shm
         } else if core::ptr::eq(g, XDG_WM_BASE) {
             Kind::WmBase
+        } else if core::ptr::eq(g, WL_SEAT) {
+            Kind::Seat
+        } else if core::ptr::eq(g, DECORATION_MANAGER) {
+            Kind::DecorationManager
         } else {
             Kind::Output
         };
         let output = matches!(kind, Kind::Output);
         let shm = matches!(kind, Kind::Shm);
+        let seat = matches!(kind, Kind::Seat);
         self.insert(host, id, g, version, kind)?;
+        if seat {
+            self.event(host, id, WL_SEAT, 0, &[Arg::Uint(CAPABILITIES)])?;
+            if version >= 2 {
+                self.event(host, id, WL_SEAT, 1, &[Arg::String(Some(b"seat0"))])?;
+            }
+        }
         if shm {
             for format in [ARGB8888, XRGB8888] {
                 self.event(host, id, WL_SHM, 0, &[Arg::Uint(format)])?;
@@ -1074,6 +1280,16 @@ impl<F> Client<F> {
                 if let Some(w) = window {
                     host.window_destroy(w);
                 }
+                // Its focus goes with it (a leave could not name it).
+                if self.seat.pointer == Some(sid) {
+                    self.seat.pointer = None;
+                    self.seat.buttons = 0;
+                }
+                if self.seat.keyboard == Some(sid) {
+                    self.seat.keyboard = None;
+                    self.seat.keys.clear();
+                    self.seat.depressed = 0;
+                }
                 if let Some(x) = xdg.and_then(|x| self.xdg(x)) {
                     x.surface = 0;
                 }
@@ -1207,7 +1423,7 @@ impl<F> Client<F> {
                             shown = self.show(host, sid, t, b, damage)?;
                             self.release(host, b)?;
                         }
-                        Some(None) => self.unmap(host, sid, x),
+                        Some(None) => self.unmap(host, sid, x)?,
                         None => {}
                     }
                 }
@@ -1266,12 +1482,41 @@ impl<F> Client<F> {
             self.event(host, t, XDG_TOPLEVEL, 3, &[Arg::Array(&[])])?;
         }
         self.event(host, t, XDG_TOPLEVEL, 0, &[Arg::Int(0), Arg::Int(0), Arg::Array(&[])])?;
+        if let Some(d) = self.toplevel(t).and_then(|top| top.decoration) {
+            let mode = self.mode(t);
+            self.event(host, d, TOPLEVEL_DECORATION, 0, &[Arg::Uint(mode)])?;
+        }
         let serial = self.next_serial();
         self.event(host, x, XDG_SURFACE, 0, &[Arg::Uint(serial)])?;
         if let Some(xs) = self.xdg(x) {
             xs.sent = Some(serial);
         }
         Ok(())
+    }
+
+    /// The decoration mode of toplevel `t`: its window's while mapped,
+    /// else what its decoration object asked for (server-side when it
+    /// asked nothing, or has none).
+    fn mode(&mut self, t: u32) -> u32 {
+        let Some(top) = self.toplevel(t) else { return MODE_SERVER_SIDE };
+        let (x, decoration) = (top.xdg, top.decoration);
+        let surface = match self.object(x) {
+            Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.surface,
+            _ => 0,
+        };
+        if let Some(s) = self.surface(surface)
+            && s.window.is_some()
+        {
+            return if s.decorated { MODE_SERVER_SIDE } else { MODE_CLIENT_SIDE };
+        }
+        match decoration.and_then(|d| self.object(d)) {
+            Some(Object { kind: Kind::Decoration(d), .. })
+                if d.wanted == Some(MODE_CLIENT_SIDE) =>
+            {
+                MODE_CLIENT_SIDE
+            }
+            _ => MODE_SERVER_SIDE,
+        }
     }
 
     /// Shows buffer `b` on surface `sid` (toplevel `t`): maps its window
@@ -1297,18 +1542,20 @@ impl<F> Client<F> {
             }
             None => 0,
         };
+        let decorated = self.mode(t) == MODE_SERVER_SIDE;
         let Some(s) = self.surface(sid) else { return Ok(None) };
         let (had, resized) = (s.window, s.size != (width, height));
         s.size = (width, height);
         let window = match had {
             Some(w) => {
                 if resized {
-                    host.window_resize(w, width, height);
+                    host.window_resize(w, width, height, s.decorated);
                 }
                 Some(w)
             }
             None => {
-                let w = host.window_create(&title[..n], width, height);
+                s.decorated = decorated;
+                let w = host.window_create(&title[..n], width, height, decorated);
                 host.note(Note::Mapped { surface: sid, window: w });
                 w
             }
@@ -1384,7 +1631,15 @@ impl<F> Client<F> {
 
     /// A null buffer committed: the window goes and the surface waits for
     /// a new initial commit (and configure).
-    fn unmap<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32, x: u32) {
+    fn unmap<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32, x: u32) -> Result {
+        // An unmapped surface has neither focus.
+        if self.seat.pointer == Some(sid) {
+            self.seat.buttons = 0;
+            self.pointer_leave(host)?;
+        }
+        if self.seat.keyboard == Some(sid) {
+            self.keyboard_leave(host)?;
+        }
         if let Some(s) = self.surface(sid) {
             s.size = (0, 0);
             if let Some(w) = s.window.take() {
@@ -1395,6 +1650,7 @@ impl<F> Client<F> {
             xs.sent = None;
             xs.acked = false;
         }
+        Ok(())
     }
 
     fn wm_base<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
@@ -1464,7 +1720,8 @@ impl<F> Client<F> {
                         format_args!("xdg_surface@{x} already has a role"),
                     ));
                 }
-                let t = Toplevel { xdg: x, title: Vec::new(), app_id: Vec::new() };
+                let t =
+                    Toplevel { xdg: x, decoration: None, title: Vec::new(), app_id: Vec::new() };
                 self.insert(host, *id, XDG_TOPLEVEL, r.version, Kind::Toplevel(t))?;
                 if let Some(xs) = self.xdg(x) {
                     xs.toplevel = Some(*id);
@@ -1518,8 +1775,17 @@ impl<F> Client<F> {
         let Some(top) = self.toplevel(t) else { return Ok(()) };
         let x = top.xdg;
         match (r.op, r.args) {
-            // destroy: unmapped, the xdg_surface without a role again.
+            // destroy: unmapped, the xdg_surface without a role again. Its
+            // decoration object must be gone first.
             (0, []) => {
+                if let Some(d) = self.toplevel(t).and_then(|top| top.decoration) {
+                    return Err(self.fail(
+                        host,
+                        d,
+                        DECORATION_ORPHANED,
+                        format_args!("xdg_toplevel@{t} destroyed before its decoration"),
+                    ));
+                }
                 let surface = match self.xdg(x) {
                     Some(xs) => {
                         xs.toplevel = None;
@@ -1527,7 +1793,7 @@ impl<F> Client<F> {
                     }
                     None => 0,
                 };
-                self.unmap(host, surface, x);
+                self.unmap(host, surface, x)?;
                 self.delete(host, t)
             }
             // set_title(title), set_app_id(app_id)
@@ -1571,6 +1837,506 @@ impl<F> Client<F> {
             }
         }
     }
+
+    fn seat_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            // get_pointer(id): told where the pointer is if on a surface.
+            (0, [Arg::NewId(id)]) => {
+                self.insert(host, *id, WL_POINTER, r.version, Kind::Pointer)?;
+                if let Some(sid) = self.seat.pointer {
+                    let (x, y) = self.seat.at;
+                    self.pointer_enter_one(host, *id, r.version, sid, x, y)?;
+                }
+                Ok(())
+            }
+            // get_keyboard(id): the keymap and repeat rate, then the focus
+            // if the client has it.
+            (1, [Arg::NewId(id)]) => {
+                let id = *id;
+                self.insert(host, id, WL_KEYBOARD, r.version, Kind::Keyboard)?;
+                let Some((fd, size)) = host.keymap() else { return Err(self.out_of_memory(host)) };
+                let args = [Arg::Uint(input::KEYMAP_XKB_V1), Arg::Fd, Arg::Uint(size)];
+                self.event_fd(host, id, WL_KEYBOARD, 0, &args, fd)?;
+                if r.version >= 4 {
+                    let rate = [Arg::Int(input::REPEAT_RATE), Arg::Int(input::REPEAT_DELAY)];
+                    self.event(host, id, WL_KEYBOARD, 5, &rate)?;
+                }
+                if let Some(sid) = self.seat.keyboard {
+                    self.keyboard_enter_one(host, id, sid)?;
+                }
+                Ok(())
+            }
+            // get_touch: the seat has never had touch.
+            (2, _) => Err(self.fail(
+                host,
+                r.id,
+                SEAT_MISSING_CAPABILITY,
+                format_args!("wl_seat@{} has no touch capability", r.id),
+            )),
+            // release (version 5)
+            (3, []) => self.delete(host, r.id),
+            _ => Ok(()),
+        }
+    }
+
+    fn pointer_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            // set_cursor(serial, surface, x, y): the desktop draws its own
+            // pointer; a surface with another role is an error.
+            (0, [_, Arg::Object(surface), _, _]) => {
+                if let Some(sid) = *surface
+                    && self.surface(sid).is_some_and(|s| s.xdg.is_some() || s.window.is_some())
+                {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        POINTER_ROLE,
+                        format_args!("wl_surface@{sid} has another role than cursor"),
+                    ));
+                }
+                if surface.is_some() {
+                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                }
+                Ok(())
+            }
+            // release (version 3)
+            (1, []) => self.delete(host, r.id),
+            _ => Ok(()),
+        }
+    }
+
+    fn decoration_manager<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            (0, []) => self.delete(host, r.id),
+            // get_toplevel_decoration(id, toplevel)
+            (1, [Arg::NewId(id), Arg::Object(Some(t))]) => {
+                let (id, t) = (*id, *t);
+                let Some(top) = self.toplevel(t) else { return Ok(()) };
+                let (x, had) = (top.xdg, top.decoration);
+                if had.is_some() {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        DECORATION_ALREADY_CONSTRUCTED,
+                        format_args!("xdg_toplevel@{t} already has a decoration object"),
+                    ));
+                }
+                let surface = match self.object(x) {
+                    Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.surface,
+                    _ => 0,
+                };
+                if self.surface(surface).is_some_and(|s| {
+                    s.window.is_some() || matches!(s.pending.buffer, Some(Some(_)))
+                }) {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        DECORATION_UNCONFIGURED_BUFFER,
+                        format_args!("xdg_toplevel@{t} has a buffer attached or committed"),
+                    ));
+                }
+                let d = Decoration { toplevel: t, wanted: None };
+                self.insert(host, id, TOPLEVEL_DECORATION, r.version, Kind::Decoration(d))?;
+                if let Some(top) = self.toplevel(t) {
+                    top.decoration = Some(id);
+                }
+                // Made after the first configure: a configure tells it the
+                // mode (before it, the first one does).
+                if self.xdg(x).is_some_and(|xs| xs.sent.is_some()) {
+                    self.configure(host, x, t)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn decoration_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let d = r.id;
+        let t = match self.object(d) {
+            Some(Object { kind: Kind::Decoration(dec), .. }) => dec.toplevel,
+            _ => return Ok(()),
+        };
+        let wanted = match (r.op, r.args) {
+            // destroy: back to no server-side decoration at the next
+            // mapping (a mapped window keeps its frame).
+            (0, []) => {
+                if let Some(top) = self.toplevel(t) {
+                    top.decoration = None;
+                }
+                return self.delete(host, d);
+            }
+            // set_mode(mode)
+            (1, [Arg::Uint(mode)]) => {
+                if *mode != MODE_CLIENT_SIDE && *mode != MODE_SERVER_SIDE {
+                    return Err(self.fail(
+                        host,
+                        d,
+                        DECORATION_INVALID_MODE,
+                        format_args!("invalid decoration mode {mode}"),
+                    ));
+                }
+                Some(*mode)
+            }
+            // unset_mode
+            (2, []) => None,
+            _ => return Ok(()),
+        };
+        if let Some(Object { kind: Kind::Decoration(dec), .. }) = self.object_mut(d) {
+            dec.wanted = wanted;
+        }
+        // Answered by a configure, once the first one has gone (until then
+        // the first one carries it).
+        let x = self.toplevel(t).map_or(0, |top| top.xdg);
+        if self.xdg(x).is_some_and(|xs| xs.sent.is_some()) {
+            self.configure(host, x, t)?;
+        }
+        Ok(())
+    }
+
+    // ---- Input ------------------------------------------------------------
+
+    /// The client's surface that window `window` shows.
+    fn surface_of(&self, window: u32) -> Option<u32> {
+        self.objects.iter().enumerate().find_map(|(i, o)| match o {
+            Some(Object { kind: Kind::Surface(s), .. }) if s.window == Some(window) => {
+                Some(i as u32)
+            }
+            _ => None,
+        })
+    }
+
+    /// The window showing surface `sid` (0: none), for the notes.
+    fn window_of(&self, sid: u32) -> u32 {
+        match self.object(sid) {
+            Some(Object { kind: Kind::Surface(s), .. }) => s.window.unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// The desktop's input for one of the client's windows (see the
+    /// module's doc).
+    pub fn input<H: Host<Fd = F>>(&mut self, host: &mut H, input: Input) -> Result {
+        let window = match input {
+            Input::Focus { window, .. }
+            | Input::Motion { window, .. }
+            | Input::Button { window, .. }
+            | Input::Wheel { window, .. }
+            | Input::Key { window, .. }
+            | Input::Left { window }
+            | Input::Close { window }
+            | Input::Unhandled { window, .. } => window,
+        };
+        let Some(sid) = self.surface_of(window) else {
+            host.note(Note::InputDropped { window });
+            return Ok(());
+        };
+        let note = |what, code, state| Note::Input { what, surface: sid, window, code, state };
+        match input {
+            Input::Focus { active: true, .. } => {
+                if self.seat.keyboard != Some(sid) {
+                    self.keyboard_enter(host, sid)?;
+                }
+            }
+            Input::Focus { active: false, .. } => {
+                if self.seat.keyboard == Some(sid) {
+                    self.keyboard_leave(host)?;
+                }
+            }
+            Input::Motion { x, y, .. } => {
+                self.pointer_at(host, sid, x, y)?;
+            }
+            Input::Button { x, y, button, pressed, .. } => {
+                let bit = if button == input::BTN_LEFT { 1 } else { 2 };
+                if !pressed && self.seat.buttons & bit == 0 {
+                    // Pressed elsewhere: not this client's.
+                    return Ok(());
+                }
+                if !self.pointer_at(host, sid, x, y)? {
+                    return Ok(());
+                }
+                if pressed {
+                    self.seat.buttons |= bit;
+                } else {
+                    self.seat.buttons &= !bit;
+                }
+                let (serial, time) = (self.next_serial(), host.now_ms());
+                let args = [
+                    Arg::Uint(serial),
+                    Arg::Uint(time),
+                    Arg::Uint(button),
+                    Arg::Uint(pressed.into()),
+                ];
+                self.send_all(host, WL_POINTER, 3, (1, u32::MAX), &args)?;
+                self.send_all(host, WL_POINTER, 5, (5, u32::MAX), &[])?;
+                host.note(note("button", button, pressed.into()));
+            }
+            Input::Wheel { x, y, delta, .. } => {
+                if delta == 0 || !self.pointer_at(host, sid, x, y)? {
+                    return Ok(());
+                }
+                let time = host.now_ms();
+                // Away from the user scrolls up: negative on the vertical
+                // axis (0).
+                let value = -delta * input::AXIS_STEP * 256 / 120;
+                // axis_source wheel, then axis_discrete (5 to 7) or
+                // axis_value120 (8 on), then axis, in one frame.
+                self.send_all(host, WL_POINTER, 6, (5, u32::MAX), &[Arg::Uint(0)])?;
+                let steps = [Arg::Uint(0), Arg::Int(-delta / 120)];
+                if delta % 120 == 0 {
+                    self.send_all(host, WL_POINTER, 8, (5, 8), &steps)?;
+                }
+                self.send_all(
+                    host,
+                    WL_POINTER,
+                    9,
+                    (8, u32::MAX),
+                    &[Arg::Uint(0), Arg::Int(-delta)],
+                )?;
+                let axis = [Arg::Uint(time), Arg::Uint(0), Arg::Fixed(value)];
+                self.send_all(host, WL_POINTER, 4, (1, u32::MAX), &axis)?;
+                self.send_all(host, WL_POINTER, 5, (5, u32::MAX), &[])?;
+                host.note(note("axis", 0, delta as u32));
+            }
+            Input::Key { key, pressed, .. } => self.key(host, sid, key, pressed)?,
+            Input::Left { .. } => {
+                if self.seat.pointer == Some(sid) && self.seat.buttons == 0 {
+                    self.pointer_leave(host)?;
+                }
+            }
+            Input::Close { .. } => {
+                let toplevel =
+                    self.surface(sid).and_then(|s| s.xdg).and_then(|x| match self.object(x) {
+                        Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.toplevel,
+                        _ => None,
+                    });
+                if let Some(t) = toplevel {
+                    self.event(host, t, XDG_TOPLEVEL, 1, &[])?;
+                    host.note(note("close", 0, 0));
+                }
+            }
+            Input::Unhandled { what, .. } => host.note(Note::Unhandled { what, window }),
+        }
+        Ok(())
+    }
+
+    /// The pointer at (x, y) on surface `sid` (from the desktop's window):
+    /// enter (leaving another surface), or motion if it moved. Outside the
+    /// surface it leaves, unless a button holds it there. Whether the
+    /// pointer is on `sid` now.
+    fn pointer_at<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        sid: u32,
+        x: i32,
+        y: i32,
+    ) -> Result<bool> {
+        let (w, h) = self.surface(sid).map_or((0, 0), |s| s.size);
+        let inside = x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h;
+        let held = self.seat.buttons != 0 && self.seat.pointer == Some(sid);
+        if !inside && !held {
+            if self.seat.pointer == Some(sid) {
+                self.pointer_leave(host)?;
+            }
+            return Ok(false);
+        }
+        if self.seat.pointer != Some(sid) {
+            if self.seat.pointer.is_some() {
+                self.pointer_leave(host)?;
+            }
+            self.seat.pointer = Some(sid);
+            self.seat.at = (x, y);
+            for i in 1..self.objects.len() {
+                let v = match &self.objects[i] {
+                    Some(o) if matches!(o.kind, Kind::Pointer) => o.version,
+                    _ => continue,
+                };
+                self.pointer_enter_one(host, i as u32, v, sid, x, y)?;
+            }
+            host.note(Note::Input {
+                what: "enter",
+                surface: sid,
+                window: self.window_of(sid),
+                code: 0,
+                state: 0,
+            });
+        } else if self.seat.at != (x, y) {
+            self.seat.at = (x, y);
+            let time = host.now_ms();
+            let args = [
+                Arg::Uint(time),
+                Arg::Fixed(wl_abi::fixed_from_int(x)),
+                Arg::Fixed(wl_abi::fixed_from_int(y)),
+            ];
+            self.send_all(host, WL_POINTER, 2, (1, u32::MAX), &args)?;
+            self.send_all(host, WL_POINTER, 5, (5, u32::MAX), &[])?;
+        }
+        Ok(true)
+    }
+
+    /// wl_pointer.enter (and its frame) on pointer `p`.
+    fn pointer_enter_one<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        p: u32,
+        version: u32,
+        sid: u32,
+        x: i32,
+        y: i32,
+    ) -> Result {
+        let serial = self.next_serial();
+        let args = [
+            Arg::Uint(serial),
+            Arg::Object(Some(sid)),
+            Arg::Fixed(wl_abi::fixed_from_int(x)),
+            Arg::Fixed(wl_abi::fixed_from_int(y)),
+        ];
+        self.event(host, p, WL_POINTER, 0, &args)?;
+        if version >= 5 {
+            self.event(host, p, WL_POINTER, 5, &[])?;
+        }
+        Ok(())
+    }
+
+    /// The pointer leaves its surface.
+    fn pointer_leave<H: Host<Fd = F>>(&mut self, host: &mut H) -> Result {
+        let Some(sid) = self.seat.pointer.take() else { return Ok(()) };
+        let serial = self.next_serial();
+        self.send_all(
+            host,
+            WL_POINTER,
+            1,
+            (1, u32::MAX),
+            &[Arg::Uint(serial), Arg::Object(Some(sid))],
+        )?;
+        self.send_all(host, WL_POINTER, 5, (5, u32::MAX), &[])?;
+        host.note(Note::Input {
+            what: "leave",
+            surface: sid,
+            window: self.window_of(sid),
+            code: 0,
+            state: 0,
+        });
+        Ok(())
+    }
+
+    /// The keyboard focus moves to `sid` (leaving another surface): enter
+    /// with no keys down, then the modifiers.
+    fn keyboard_enter<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32) -> Result {
+        if self.seat.keyboard.is_some() {
+            self.keyboard_leave(host)?;
+        }
+        self.seat.keyboard = Some(sid);
+        self.seat.keys.clear();
+        self.seat.depressed = 0;
+        for i in 1..self.objects.len() {
+            if matches!(&self.objects[i], Some(o) if matches!(o.kind, Kind::Keyboard)) {
+                self.keyboard_enter_one(host, i as u32, sid)?;
+            }
+        }
+        host.note(Note::Input {
+            what: "focus",
+            surface: sid,
+            window: self.window_of(sid),
+            code: 0,
+            state: 1,
+        });
+        Ok(())
+    }
+
+    /// wl_keyboard.enter and modifiers on keyboard `k`.
+    fn keyboard_enter_one<H: Host<Fd = F>>(&mut self, host: &mut H, k: u32, sid: u32) -> Result {
+        let serial = self.next_serial();
+        let args = [Arg::Uint(serial), Arg::Object(Some(sid)), Arg::Array(&[])];
+        self.event(host, k, WL_KEYBOARD, 1, &args)?;
+        let serial = self.next_serial();
+        let mods = [
+            Arg::Uint(serial),
+            Arg::Uint(self.seat.depressed),
+            Arg::Uint(0),
+            Arg::Uint(self.seat.locked),
+            Arg::Uint(0),
+        ];
+        self.event(host, k, WL_KEYBOARD, 4, &mods)
+    }
+
+    /// The keyboard focus leaves its surface (the keys down are forgotten:
+    /// their releases go to the next focus).
+    fn keyboard_leave<H: Host<Fd = F>>(&mut self, host: &mut H) -> Result {
+        let Some(sid) = self.seat.keyboard.take() else { return Ok(()) };
+        self.seat.keys.clear();
+        self.seat.depressed = 0;
+        let serial = self.next_serial();
+        self.send_all(
+            host,
+            WL_KEYBOARD,
+            2,
+            (1, u32::MAX),
+            &[Arg::Uint(serial), Arg::Object(Some(sid))],
+        )?;
+        host.note(Note::Input {
+            what: "unfocus",
+            surface: sid,
+            window: self.window_of(sid),
+            code: 0,
+            state: 0,
+        });
+        Ok(())
+    }
+
+    /// A key on surface `sid`: wl_keyboard.key, then the modifiers if it
+    /// changed them. A key already down (the device's repeat) or released
+    /// without having been pressed here is not sent.
+    fn key<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32, key: u32, pressed: bool) -> Result {
+        if self.seat.keyboard != Some(sid) {
+            self.keyboard_enter(host, sid)?;
+        }
+        let down = self.seat.keys.iter().position(|&k| k == key);
+        match (pressed, down) {
+            (true, Some(_)) | (false, None) => return Ok(()),
+            (true, None) => {
+                if self.seat.keys.len() >= MAX_KEYS || self.seat.keys.try_push(key).is_err() {
+                    return Ok(());
+                }
+            }
+            (false, Some(i)) => {
+                self.seat.keys.swap_remove(i);
+            }
+        }
+        let (serial, time) = (self.next_serial(), host.now_ms());
+        let args = [Arg::Uint(serial), Arg::Uint(time), Arg::Uint(key), Arg::Uint(pressed.into())];
+        self.send_all(host, WL_KEYBOARD, 3, (1, u32::MAX), &args)?;
+        host.note(Note::Input {
+            what: "key",
+            surface: sid,
+            window: self.window_of(sid),
+            code: key,
+            state: pressed.into(),
+        });
+        let mut depressed = 0;
+        for &k in &self.seat.keys {
+            if let Some(Modifier::Held(m)) = input::modifier(k) {
+                depressed |= m;
+            }
+        }
+        let mut locked = self.seat.locked;
+        if pressed && let Some(Modifier::Toggled(m)) = input::modifier(key) {
+            locked ^= m;
+        }
+        if (depressed, locked) != (self.seat.depressed, self.seat.locked) {
+            (self.seat.depressed, self.seat.locked) = (depressed, locked);
+            let serial = self.next_serial();
+            let mods = [
+                Arg::Uint(serial),
+                Arg::Uint(depressed),
+                Arg::Uint(0),
+                Arg::Uint(locked),
+                Arg::Uint(0),
+            ];
+            self.send_all(host, WL_KEYBOARD, 4, (1, u32::MAX), &mods)?;
+        }
+        Ok(())
+    }
 }
 
 /// What a commit showed: the buffer's size and the rows copied.
@@ -1592,6 +2358,11 @@ enum Tag {
     WmBase,
     XdgSurface,
     Toplevel,
+    Seat,
+    Pointer,
+    Keyboard,
+    DecorationManager,
+    Decoration,
 }
 
 /// A decoded request.

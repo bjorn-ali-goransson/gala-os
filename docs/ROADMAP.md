@@ -2116,6 +2116,25 @@ the next breakthroughs).
   callbacks done at once; `delete_id` for every destroyed object;
   `events=wayland`, the trace, the ledger and the state dump. Host
   tests for the protocol state (`cargo test -p kernel --lib wayland`).
+- Step 2's server, second part: input and window control (`lx_wl_input`,
+  `lx_wl_input_pie`: user/lx/wl_input_test, its transcript written from
+  the protocol's specification since weston's headless backend has no
+  input devices; driven by QEMU's PS/2 mouse and keyboard from a screen
+  check on a headless desktop, which also finds the windows' pixels
+  inside shasha's frame and frameless): wl_seat 7 with wl_pointer
+  (enter, leave, motion, BTN_LEFT/BTN_RIGHT, the wheel as axis_source,
+  axis_discrete and axis, frames) and wl_keyboard (gala's US keymap in
+  XKB text as a sealed read-only file passed with SCM_RIGHTS,
+  repeat_info, enter/leave following the desktop's active window, evdev
+  key codes from the scan codes, modifiers), the desktop's input taken
+  by the server as a kernel listener of the client's process
+  (`winstate::Listener::Server`, with gala's GALA_WM_ACTIVE and
+  GALA_WM_POINTER_LEFT notices); `xdg_toplevel.close` from the frame's
+  close button; zxdg_decoration_manager_v1 (server-side and framed
+  unless the client asks for client-side: frameless). Pings are not sent
+  (no window is marked not responding yet). `events=wayland`'s
+  `wayland input`, the trace's `input:` lines, the ledger's `wayland
+  window action missing`, the seat in the state dump.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2131,12 +2150,15 @@ the next breakthroughs).
 2. The Wayland server's rest (its first part is done, above; each
    step test first, in wl_test or a client like it recorded against
    weston):
-   - pointer and keyboard input through `wl_seat` (evdev codes, an XKB
-     keymap as a memfd), and `xdg_toplevel.close` from the frame's
-     close button (the desktop queues a WM_CLOSE nobody takes today);
-   - `zxdg_decoration_manager_v1` (shasha's frame for Linux windows),
-     configure from the desktop's resizes, maximize and Snap, popups
-     (`xdg_positioner`, `xdg_popup`; ledgered protocol errors today);
+   - configure from the desktop's resizes, maximize and Snap (they
+     reach the server as input and are ledgered: `wayland window action
+     missing`), a decoration mode change on a mapped window (the frame
+     put on or taken off in place; today the mode is fixed at mapping),
+     popups (`xdg_positioner`, `xdg_popup`; ledgered protocol errors
+     today), the middle button and horizontal wheel once the desktop
+     has them;
+   - `xdg_wm_base.ping` on a timer once the desktop marks windows that
+     do not answer (none, Windows' or Linux's, are marked today);
    - frame callbacks paced by composition (done at commit today), the
      server's allocations charged to the client's quota;
    - a socket per session's desktop under its user's `/run/user/<uid>`,
@@ -2144,8 +2166,9 @@ the next breakthroughs).
      programs started there (today one socket for the boot user, the
      environment passed by whoever starts them), and the server on
      by default where a desktop is;
-   - a screen check finding wl_test's pixels inside shasha's frame;
-     then `weston-simple-shm` from weston's demos.
+   - `weston-simple-shm` from weston's demos (wl_input_test's screen
+     check already finds a Wayland window's pixels inside shasha's
+     frame).
    Still open in the prerequisites, ledgered: a datagram socket's
    connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
    on a MSG_PEEK, collecting rights cycles in flight.
