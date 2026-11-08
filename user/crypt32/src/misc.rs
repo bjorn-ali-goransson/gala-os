@@ -198,8 +198,9 @@ fn element(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
 }
 
 /// PFXIsPFXBlob: whether the blob's outer layer decodes as a PFX: a
-/// SEQUENCE of INTEGER 3 (the version) and a ContentInfo (a SEQUENCE
-/// starting with an OBJECT IDENTIFIER).
+/// SEQUENCE of an INTEGER (the version, not looked at: Windows 11 25H2
+/// said TRUE for version 1) and a ContentInfo (a SEQUENCE starting with an
+/// OBJECT IDENTIFIER).
 #[unsafe(no_mangle)]
 pub extern "system" fn PFXIsPFXBlob(pfx: *const DataBlob) -> i32 {
     if pfx.is_null() {
@@ -218,8 +219,8 @@ pub extern "system" fn PFXIsPFXBlob(pfx: *const DataBlob) -> i32 {
             return Some(false);
         }
         let outer = &b[..end];
-        let (tag, vs, ve) = element(outer, start)?;
-        if tag != 0x02 || outer[vs..ve] != [3] {
+        let (tag, _, ve) = element(outer, start)?;
+        if tag != 0x02 {
             return Some(false);
         }
         let (tag, cs, _) = element(outer, ve)?;

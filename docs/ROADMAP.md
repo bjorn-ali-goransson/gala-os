@@ -1678,6 +1678,16 @@ off gala (a reader such as Defender moves it); win32_misc_test skips its
 clipboard part off gala when another process holds the clipboard,
 naming that process.
 
+Done (Round 5, Windows' behaviour, each from a measurement on 25H2):
+the unwind's handlers do not see the record's EXCEPTION_SOFTWARE_ORIGINATE
+(seh_test: 0x02 and 0x22; Round 4's probe); PFXIsPFXBlob does not look
+at the version (cert_test); cmd's unknown command exits 1 when the line
+redirects, 9009 otherwise (cmd_test); StackWalk64 is not asked to fail
+for IMAGE_FILE_MACHINE_I386, which the x64 dbghelp walks (dbghelp_test
+uses 0x1234; gala records I386 as unsupported); GetTextExtentExPointW
+fills lpnDx only for the characters that fit when lpnFit is given, as
+documented (gdi32_test; the A form too).
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
@@ -1724,6 +1734,25 @@ Next:
      of its own);
      persist_test needs run-all.ps1 to remove C:\persist and
      HKCU\Software\GalaPersist and run it twice, judging the second run.
+     From Round 5's fixes: RaiseException(code, EXCEPTION_NONCONTINUABLE)
+     unwound (seh_test's shape): does the unwind see 0x03 or 0x02 (gala:
+     0x03, only 0x80 dropped); cmd `nosuchprogram > f` and `< f` (gala:
+     1, as `2>`); after StackWalk64(IMAGE_FILE_MACHINE_I386) with an x64
+     context, frame.AddrPC/AddrFrame/AddrStack and a second call's result,
+     and StackWalk64(0x1234) (dbghelp_test asserts FALSE);
+     GetTextExtentExPointW("iiiiWWWW", 8, narrow + 1, &fit, dx) with dx
+     pre-filled with -1: dx[4..8] untouched? (gala: untouched);
+     BuildSecurityDescriptorW(NULL, NULL, 1 entry, 0, NULL, NULL):
+     GetSecurityDescriptorControl, the SACL pointer (NULL or an ACL: its
+     AclRevision, AclSize, AceCount), before browser_api_test and gala
+     follow (25H2 said SE_SACL_PRESENT); shell32_test's CoInitialize
+     result now (did a shell call change the apartment?).
+     Round 5's open probes are user/windows/round5-analysis.md section
+     3 (kernel32_thread_test, controls_test, ole32_test, shlwapi_test,
+     user32_test, security_test, conpty_test, kernel32_misc_test and the
+     older ones it lists); its section 4 (winhttp/wininet, schannel,
+     console_window, tds, uia_chromium) and hostnet_test still need a
+     runner skip or a skip in the test.
 2. The tests that need a setting run-all.ps1 cannot give say "skipped"
    without it (system_test, session_test: SYSTEM; restricted_test,
    disk_test, wow64_adv_test's view: an administrator; access, logon,

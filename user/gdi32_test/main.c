@@ -33,8 +33,8 @@
  *   a bigger font measures bigger. GetTextFaceW gives the face name.
  *   Segoe UI -12 has Windows' 16/13/3 cell and is proportional ("iiii"
  *   much narrower than "WWWW", TMPF_FIXED_PITCH | TMPF_TRUETYPE,
- *   FF_SWISS); extents add up; GetTextExtentExPointW gives partial
- *   widths and the fit; TextOutW draws only inside its extent;
+ *   FF_SWISS); extents add up; GetTextExtentExPointW gives the fit and
+ *   the partial widths of what fits (all of them without lpnFit); TextOutW draws only inside its extent;
  *   ExtTextOutW ETO_OPAQUE fills its rectangle; Courier New is fixed
  *   pitch (TMPF_FIXED_PITCH clear, equal advances). The ANSI forms
  *   (GetTextExtentPoint32A, GetTextExtentExPointA, GetTextMetricsA,
@@ -260,18 +260,27 @@ static void fonts(void) {
     // Extents add up: "iiiiWWWW" is the two together.
     SIZE both;
     CHECK(GetTextExtentPoint32W(screen, L"iiiiWWWW", 8, &both) && both.cx == narrow.cx + wide.cx);
-    // GetTextExtentExPointW: the partial widths and how many fit.
+    // GetTextExtentExPointW: the partial widths and how many fit. With
+    // lpnFit, only the first lpnFit widths are filled in (documented;
+    // Windows 11 25H2's dx[7] was not the whole extent); the size is the
+    // whole string's.
     INT fit = 0, dx[8];
     SIZE ex;
     CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, narrow.cx + 1, &fit, dx, &ex));
-    CHECK(fit == 4 && dx[3] == narrow.cx && dx[7] == both.cx && ex.cx == both.cx && ex.cy == tm.tmHeight);
+    CHECK(fit == 4 && dx[0] > 0 && dx[0] <= dx[1] && dx[1] <= dx[2] && dx[2] <= dx[3]);
+    CHECK(dx[3] == narrow.cx && ex.cx == both.cx && ex.cy == tm.tmHeight);
+    // Without lpnFit (nMaxExtent ignored) every width is.
+    CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, 0, NULL, dx, &ex));
+    CHECK(dx[3] == narrow.cx && dx[7] == both.cx && ex.cx == both.cx);
     // The ANSI forms (what Scintilla, in Inno Setup's IDE, imports) measure
     // the same text the same way.
     SIZE a_both, a_ex;
     INT a_fit = 0, a_dx[8];
     CHECK(GetTextExtentPoint32A(screen, "iiiiWWWW", 8, &a_both) && a_both.cx == both.cx && a_both.cy == both.cy);
     CHECK(GetTextExtentExPointA(screen, "iiiiWWWW", 8, narrow.cx + 1, &a_fit, a_dx, &a_ex));
-    CHECK(a_fit == 4 && a_dx[3] == narrow.cx && a_dx[7] == both.cx && a_ex.cx == both.cx);
+    CHECK(a_fit == 4 && a_dx[3] == narrow.cx && a_ex.cx == both.cx);
+    CHECK(GetTextExtentExPointA(screen, "iiiiWWWW", 8, 0, NULL, a_dx, &a_ex));
+    CHECK(a_dx[3] == narrow.cx && a_dx[7] == both.cx);
     TEXTMETRICA tma;
     CHECK(GetTextMetricsA(screen, &tma) && tma.tmHeight == tm.tmHeight && tma.tmAscent == tm.tmAscent);
     CHECK(tma.tmAveCharWidth == tm.tmAveCharWidth && tma.tmPitchAndFamily == tm.tmPitchAndFamily);

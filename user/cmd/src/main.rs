@@ -116,7 +116,8 @@ const STARTF_USESTDHANDLES: u32 = 0x100;
 const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const DUPLICATE_SAME_ACCESS: u32 = 2;
-/// The exit code of a command cmd cannot find.
+/// The exit code of a command cmd cannot find (1 when its line has a
+/// redirection).
 const NOT_FOUND: u32 = 9009;
 /// The longest command line handled (as Windows' cmd: 8191 characters).
 const MAX: usize = 8192;
@@ -638,7 +639,10 @@ fn execute(c: &mut Command, names: &Text) -> u32 {
         write_ascii(std[2], b"'");
         write_text(std[2], word);
         write_ascii(std[2], b"' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n");
-        return NOT_FOUND;
+        // With a redirection on the line the code is 1 (Windows 11 25H2
+        // measured 1 for `2> file`; other redirections are taken to do the
+        // same, unmeasured).
+        return if c.redirects.iter().any(|(_, target)| target.is_some()) { 1 } else { NOT_FOUND };
     };
     let ext_at = program.as_slice().iter().rposition(|&ch| ch == u16::from(b'.')).unwrap_or(0);
     if same_ascii(&program.as_slice()[ext_at..], ".bat")

@@ -32,7 +32,7 @@
 //!   the data changed and restored, for each scope;
 //!   ERROR_INVALID_PARAMETER for a size that is not a multiple of
 //!   CRYPTPROTECTMEMORY_BLOCK_SIZE, 16); PFXIsPFXBlob (a PFX's outer
-//!   SEQUENCE { INTEGER 3, ContentInfo }, not another version or a
+//!   SEQUENCE { INTEGER, ContentInfo }, whatever the version, not a
 //!   certificate).
 //! - Certificate stores (documented behaviour, no Windows run yet):
 //!   CertOpenStore(CERT_STORE_PROV_MEMORY) and the "ROOT" system store
@@ -806,10 +806,11 @@ fn run() -> Result<(), u32> {
         ];
         let b = Blob { size: pfx.len() as u32, data: pfx.as_ptr().cast_mut() };
         c.eq(PFXIsPFXBlob(&b) as u64, 1)?;
+        // The version is not looked at (Windows 11 25H2: TRUE for 1).
         let mut v1 = pfx;
         v1[4] = 1;
         let b = Blob { size: v1.len() as u32, data: v1.as_mut_ptr() };
-        c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
+        c.eq(PFXIsPFXBlob(&b) as u64, 1)?;
         let b = Blob { size: CERT.len() as u32, data: CERT.as_ptr().cast_mut() };
         c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
 

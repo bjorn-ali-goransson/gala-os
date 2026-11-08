@@ -1021,7 +1021,11 @@ extern "system" fn unwind_to(
     };
     // SAFETY: as above.
     let flags = unsafe { (record.add(ER_FLAGS) as *const u32).read_unaligned() };
-    let mut flags = flags | EXCEPTION_UNWINDING;
+    // The unwind's handlers do not see the record's
+    // EXCEPTION_SOFTWARE_ORIGINATE (Windows 11 25H2 measured 0x02 where
+    // the dispatch had seen 0x80; seh_test). Whether other record flags
+    // (EXCEPTION_NONCONTINUABLE) go too is not measured: they are kept.
+    let mut flags = (flags & !EXCEPTION_SOFTWARE_ORIGINATE) | EXCEPTION_UNWINDING;
     if target_frame == 0 {
         flags |= EXCEPTION_EXIT_UNWIND;
     }

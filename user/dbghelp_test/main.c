@@ -33,7 +33,7 @@
  *   the first call gives the frame the context describes (AddrPC its
  *   Rip), each later one the caller's, AddrPC its return address; the
  *   stack only grows towards the caller, and the walk ends (FALSE) at
- *   the thread's first frame. Another machine type is FALSE.
+ *   the thread's first frame. A machine type it does not walk is FALSE.
  *   SymFunctionTableAccess64 is the RUNTIME_FUNCTION covering an address
  *   (NULL outside images), SymGetModuleBase64 the base of the image
  *   holding it (0 outside images).
@@ -239,13 +239,15 @@ int main(void) {
     CHECK(r != -1);
     CHECK(walk_ended && walked_n >= 3);
     CHECK(walked[0] == first_pc && walked[1] == into_level1 && walked[2] == into_walker);
-    /* Another machine type. */
+    /* A machine type dbghelp does not walk. (Not I386: the x64 dbghelp
+       walks x86 stacks too, WOW64's and dumps', and Windows 11 25H2
+       returned TRUE for it here.) */
     {
         static STACKFRAME64 frame;
         static CONTEXT ctx;
         memset(&frame, 0, sizeof frame);
         RtlCaptureContext(&ctx);
-        CHECK(!stack_walk(IMAGE_FILE_MACHINE_I386, proc, GetCurrentThread(), &frame, &ctx, NULL,
+        CHECK(!stack_walk(0x1234, proc, GetCurrentThread(), &frame, &ctx, NULL,
             table_access, module_base, NULL));
     }
     CHECK(sym_cleanup(proc));

@@ -942,7 +942,10 @@ Microsoft's "x64 exception handling" documentation; `seh_test`,
 - RtlUnwindEx walks from its caller to the target frame calling
   UNW_FLAG_UHANDLER handlers with EXCEPTION_UNWINDING (plus
   EXCEPTION_TARGET_UNWIND for the target), then resumes the target
-  frame's context at TargetIp with rax = ReturnValue (NtContinue).
+  frame's context at TargetIp with rax = ReturnValue (NtContinue). The
+  record's EXCEPTION_SOFTWARE_ORIGINATE is dropped from the flags the
+  unwind's handlers see (Windows 11 25H2: 0x02 where the dispatch saw
+  0x80); its other flags are kept (not measured).
 - Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, how MSVC runs C++
   catch blocks, from RtlUnwindEx or RtlRestoreContext): the callback runs
   on the current stack (the removed frames still hold the exception
@@ -3045,7 +3048,8 @@ definition for both layouts, "Plan: WOW64").
   per user) with a fixed label, SAME_PROCESS also with 32 random bytes
   made once per process.
 - **crypt32 misc** (`misc.rs`): CryptMemAlloc/Realloc/Free (the process
-  heap), PFXIsPFXBlob (the outer SEQUENCE { INTEGER 3, ContentInfo }).
+  heap), PFXIsPFXBlob (the outer SEQUENCE { INTEGER, ContentInfo }; the
+  version is not looked at, as on Windows 11 25H2).
 - **PKCS #12** (`pfx.rs`; `cert_test` pfx.rs): PFXImportCertStore reads a
   PFX whose authSafe is `data` (public-key integrity is recorded and
   fails), checks its MAC (HMAC-SHA1/SHA-2, key from the PKCS #12 KDF;
@@ -3278,8 +3282,9 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   `cmd_test`) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
   the internal commands `echo`, `exit`, `rem`, and programs found with
-  .COM/.EXE in the current directory and the PATH (9009 and cmd's message
-  when not found). A redirection is removed from the command and the rest
+  .COM/.EXE in the current directory and the PATH (cmd's message when
+  not found, and 9009, or 1 when the line has a redirection: Windows 11
+  25H2 with `2>`). A redirection is removed from the command and the rest
   stays as written: the spaces before it end the program's command line
   and `echo x > f` writes "x " (as Windows' cmd does). Pipelines, command lists, batch files, `set`/`if`/
   `for` and the prompt are recorded and end it.
@@ -5733,7 +5738,8 @@ then riched20.dll).
     (TA_RIGHT/CENTER, TA_BOTTOM/BASELINE) and OPAQUE backgrounds;
     ExtTextOutW (ETO_OPAQUE, ETO_CLIPPED, lpDx); GetTextMetricsW,
     GetTextExtentPoint32W, GetTextExtentExPointW (fit and partial
-    widths) and GetTextFaceW from the same metrics. The ANSI forms
+    widths, with lpnFit only those of what fits, as documented) and
+    GetTextFaceW from the same metrics. The ANSI forms
     (TextOutA, ExtTextOutA, GetTextExtentPoint32A, GetTextExtentExPointA,
     GetTextMetricsA) take UTF-8 (the ANSI code page) and call the wide
     ones; their per-character arrays (lpDx, the partial widths, the fit)
@@ -5928,7 +5934,8 @@ windows can use them too.
   data is a leaf: its return address at Rsp), and the walk ends at a
   return address of 0, an unreadable stack or a frame that does not
   move up; another process or a ReadMemoryRoutine is recorded and
-  FALSE. SymFunctionTableAccess64 is RtlLookupFunctionEntry,
+  FALSE, and so is IMAGE_FILE_MACHINE_I386 (Windows' x64 dbghelp walks
+  x86 stacks too: TRUE on 25H2); other machines are FALSE. SymFunctionTableAccess64 is RtlLookupFunctionEntry,
   SymGetModuleBase64 the allocation base of a MEM_IMAGE region.
   MiniDumpWriteDump stays a stub (exported, so SqlDumper loads).
 - **normaliz** (`user/normaliz`): forwards IdnToAscii to kernel32 and

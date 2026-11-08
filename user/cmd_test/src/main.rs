@@ -11,9 +11,9 @@
 //! - `echo text> file`: the text and CRLF.
 //! - Through a pipe (`_popen`'s way): the command's output arrives at the
 //!   pipe's read end, then end of file.
-//! - An unknown command: exit code 9009, and on stderr "'name' is not
-//!   recognized as an internal or external command," then "operable
-//!   program or batch file.".
+//! - An unknown command: exit code 9009 (1 when the line redirects), and
+//!   on stderr "'name' is not recognized as an internal or external
+//!   command," then "operable program or batch file.".
 //!
 //! - The program's command line is passed as written: the space before a
 //!   removed redirection stays (`"prog" tail > f` ends with one space).
@@ -372,11 +372,24 @@ fn run_tests() -> Result<(), u32> {
         CloseHandle(r);
     }
 
-    // An unknown command: 9009 and the message on stderr.
-    let mut line = W::new().s("cmd.exe /c nosuchprogram 2> \"").w(tmp).s("cmd_test_out.txt\"");
-    c.eq(run(&mut line, null, null).unwrap_or(99).into(), 9009)?;
-    let got = read_file(&mut out_file(), &mut buf);
+    // An unknown command: the message on stderr, and 9009; but 1 when
+    // the line redirects (Windows 11 25H2 measured 1 with `2>`).
     let want: &[u8] = b"'nosuchprogram' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";
+    let mut line = W::new().s("cmd.exe /c nosuchprogram 2> \"").w(tmp).s("cmd_test_out.txt\"");
+    c.eq(run(&mut line, null, null).unwrap_or(99).into(), 1)?;
+    let got = read_file(&mut out_file(), &mut buf);
+    c.ok(&buf[..got] == want, got as u64)?;
+    // The same with stderr handed to cmd (no redirection on the line).
+    let sa = SecurityAttributes { length: 24, descriptor: null, inherit: 1 };
+    // SAFETY: our path and attributes.
+    let err =
+        unsafe { CreateFileW(out_file().ptr(), GENERIC_WRITE, 7, &sa, CREATE_ALWAYS, 0, null) };
+    c.ok(err as isize != -1, 0)?;
+    let mut line = W::new().s("cmd.exe /c nosuchprogram");
+    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 9009)?;
+    // SAFETY: our handle.
+    unsafe { CloseHandle(err) };
+    let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == want, got as u64)?;
 
     // SAFETY: our paths.
