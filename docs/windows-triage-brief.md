@@ -71,3 +71,34 @@ questions listed in ROADMAP WD "Next" item 1 (SetPriorityClass with
 other mixed values, WriteConsoleA, NtCreateTimer's unknown type, the
 user-callback faults, oleaut32_test and clusapi_test's last call), and
 record each in `user/windows/findings.json` as before.
+
+### The Chromium conformance baseline
+
+gala runs web-platform-tests through ChromeDriver (`chromium_wpt`,
+`xtask/src/wpt.rs`). A failure there is gala's only if the same test
+passes with the same Chromium on Windows, so record that baseline:
+
+- Chromium and ChromeDriver snapshot 1733063 (the `chromium` and
+  `chromedriver` PREBUILT URLs in `xtask/src/main.rs`), WPT at
+  `WPT_COMMIT` (`xtask/src/wpt.rs`), directory `dom/nodes`, then the
+  whole tree as far as time allows.
+- `wpt make-hosts-file` into the hosts file (elevated), then `wpt run
+  chrome --binary <chrome.exe> --webdriver-binary <chromedriver.exe>
+  --log-wptreport user/windows/wpt/<dir>.json <dir>` with the flags
+  chromium_wpt gives Chromium (`--no-sandbox --disable-gpu`), run
+  twice: a test whose result differs between the two runs is flaky on
+  Windows too, and says so.
+- Commit the wptreport files under `user/windows/wpt/` with a short
+  summary (counts by status, the tests that time out).
+
+### The concurrency tests, repeated
+
+A test that is racy itself fails now and then on Windows too, and that
+is the test's bug, not gala's. Run each of these 50 times on this
+machine (more CPUs than gala's 2 shakes out more orderings) and record
+every non-zero run with its report line: kernel32_sync_test (its
+lost-wakeup stress), sync_test, wait_test, keyed_event_test, lock_test,
+smp_test, smprace_test, smpsem_test, smpsched_test, iocp_test,
+apc_test, ioapc_test, timer_test, winsock_async_test, pipe_test,
+afd_poll_test. A program that fails every time is triaged as before; one
+that fails some of the time is listed as flaky with its runs.
