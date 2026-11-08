@@ -180,6 +180,14 @@ build's PDB of that module. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
 
+Run it from an ordinary directory, never one under `%TEMP%`: Windows
+treats a temporary path differently, so a test that works from its
+current directory reads that instead of Windows. shell32_test's check
+174 is what caught it: `SHAddToRecentDocs(SHARD_PATHW, <a file in the
+current directory>)` creates the Recent `.lnk` within about 200 ms for
+an ordinary path and never for one under `%TEMP%`, so the check also
+spent its full ten-second wait.
+
 Antivirus is what goes wrong there: the test binaries are unsigned and
 freshly built, which Microsoft Defender's machine-learning heuristic
 takes for malware (`bench.exe` as `Trojan:Win32/Bearfoos.A!ml`). A
