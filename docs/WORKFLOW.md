@@ -69,7 +69,9 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
   repository is public) runs on every pull request and on main after a
   merge (a branch without a pull request gets no run; a newer push to a
   pull request cancels the older run). Work reaches main through a pull
-  request whose checks are green (main's ruleset). Its jobs:
+  request once its checks are green, or by a direct push after the local
+  gate (`cargo xtask test`) passed; main's ruleset allows both for now.
+  Its jobs:
   - `linux` (Ubuntu 24.04): the format and clippy lines, `cargo xtask
     lx-expect && git diff --exit-code user/lx`, `cargo xtask test
     --no-boot` (everything but the boots) and `cargo xtask export-tests &&
