@@ -309,7 +309,10 @@ static volatile LONG clicked;
 
 static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+        /* The click counts once the button is up: the program ends on it,
+         * so it must not end before the release xtask sends with it (QEMU
+         * gone before that write: "screen: Broken pipe" under KVM). */
         clicked = 1;
         PostQuitMessage(0);
         return 0;
