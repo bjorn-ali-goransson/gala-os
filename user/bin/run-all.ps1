@@ -280,8 +280,17 @@ foreach ($s in $scripts) {
     $path = Join-Path $here $s.path
     if (-not (Test-Path $path) -or -not (Test-Path (Join-Path $here "busybox.exe"))) { continue }
     $sw = [Diagnostics.Stopwatch]::StartNew()
+    # PowerShell 5.1 turns each line a native program writes to stderr into
+    # an ErrorRecord when stderr is redirected, so with $ErrorActionPreference
+    # of "Stop" one such line ends the whole run: a script that printed
+    # anything to stderr (busybox reporting "./tcc.exe: Invalid argument")
+    # took the report with it, after every program had already run. The
+    # script's own failure belongs in the report, not in the exit path.
+    $before = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>&1 | Out-String
     $code = $LASTEXITCODE
+    $ErrorActionPreference = $before
     $sw.Stop()
     $text | Set-Content -Path (Join-Path $outDir "$($s.name)-windows.txt") -Encoding UTF8
     $last = @($text -split "`r?`n" | Where-Object { $_ -ne "" }) | Select-Object -Last 1
