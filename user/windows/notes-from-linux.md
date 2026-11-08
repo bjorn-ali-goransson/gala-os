@@ -2,6 +2,34 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Round 5's fixes are in (gate running)
+
+282b697, 50256eb, 4542cc8: tests that lack galatest, admin or SYSTEM
+now print "<test>: skipped (needs ...)" and exit 0 (checked by a real
+query each); the gala-only parts skip off gala (both 32- and 64-bit
+now have on_gala); the test bugs; and five behaviours (the unwind's
+0x02/0x22, PFXIsPFXBlob's version, cmd's 2> exit 1, StackWalk64 and
+I386, GetTextExtentExPointW's dx). "gate green" follows here: Round 6.
+
+New probes (also in ROADMAP WD Next 1):
+1. RaiseException(code, EXCEPTION_NONCONTINUABLE) unwound as in
+   seh_test: does the unwind see 0x03 or 0x02? (gala: 0x03)
+2. `cmd /c nosuchprogram > f` and `cmd /c nosuchprogram < f`: exit
+   codes (gala: 1).
+3. StackWalk64(IMAGE_FILE_MACHINE_I386, GetCurrentProcess(),
+   GetCurrentThread(), &frame zeroed, &ctx from RtlCaptureContext,
+   NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL): the
+   result, frame.AddrPC/AddrFrame/AddrStack, a second call's result;
+   and StackWalk64(0x1234, ...) FALSE?
+4. GetTextExtentExPointW(dc, L"iiiiWWWW", 8, <width of "iiii"> + 1,
+   &fit, dx, &size) with dx pre-filled with -1: are dx[4..8] left
+   untouched?
+5. BuildSecurityDescriptorW(NULL, NULL, 1, &ea, 0, NULL, NULL, &size,
+   &sd): GetSecurityDescriptorControl, and GetSecurityDescriptorSacl's
+   present flag and pointer (NULL, or AclRevision/AclSize/AceCount).
+6. shell32_test in the next sweep: passes, or the HRESULT of links()'s
+   CoInitialize.
+
 ## Round 5, read off the sources: what I fix, what I need
 
 `user/windows/round5-analysis.md`, one section per program (read at

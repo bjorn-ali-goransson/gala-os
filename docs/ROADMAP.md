@@ -67,9 +67,14 @@ The ordering rules in force (set by the owner):
 In order:
 
 0. **BR stage 2** first (the owner: Chromium working, then the rest of
-   this list): its window, input and accessibility tree are done
-   (`chromium_window`, `chromium_uia`), ChromeDriver too
-   (`chromium_driver`); now the conformance report.
+   this list; heavier, meatier work before polish): its window, input
+   and accessibility tree are done (`chromium_window`, `chromium_uia`),
+   ChromeDriver too (`chromium_driver`); now the conformance report:
+   the WPT run's out-of-memory crashes (0xE0000008) and ChromeDriver not
+   exiting first (item BR's next steps).
+0b. **WOW64 file-system redirection, then KB** (kernelbase as the core
+   API sets' host): WD's items 4 and 5, structural, found by the
+   Windows triage.
 1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
@@ -87,7 +92,8 @@ In order:
    Boot.
 6. **PK**: winget's source index (step 2's rest); step 1's rest (an
    upgrade's dependencies, UpgradeBehavior, winget's settings).
-7. **BR** stage 1's rest (the profile's hotspots).
+7. **BR** stage 1's rest beyond the profile (its hotspots wait with
+   item 12).
 8. **AG**: the remaining stubs (filler).
 9. **SSH**: the client against the host's sshd, agent forwarding;
    **H11**: busybox-w32's httpd and wget over loopback (the Linux
@@ -96,14 +102,16 @@ In order:
     before committing, not found later).
 11. **PT**: the portability seams for a second architecture (the owner:
     the ARM64 port itself later): the kernel's done, user mode's next.
-12. **Last, once everything above is done** (the owner): a performance
-    profile on a real Windows machine, then optimization. The same
-    workloads (the scenarios' programs, `bench`, Chromium's page loads,
-    Python) are profiled on Windows (Windows Performance Recorder/WPA,
-    the owner's laptop) and on gala on hardware or KVM (not TCG:
-    `cargo xtask profile`), and compared operation by operation;
-    gala's hot spots are fixed in order of the gap, each with a
-    benchmark kept in `bench` and its numbers in PERF.md.
+12. **Parked** (the owner): the performance profile and the
+    optimization after it (BR stage 1's hotspots with it). It is big
+    and needs a real VM (hardware or KVM: TCG's numbers say nothing
+    about gala's), so it waits for one; the heavier functional items
+    above come first. When it starts: the same workloads (the
+    scenarios' programs, `bench`, Chromium's page loads, Python)
+    profiled on Windows (Windows Performance Recorder/WPA) and on gala
+    under KVM (`cargo xtask profile`), compared operation by operation,
+    gala's hot spots fixed in order of the gap, each with a benchmark in
+    `bench` and its numbers in PERF.md.
 
 ## Status at a glance
 
