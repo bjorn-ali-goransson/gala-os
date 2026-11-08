@@ -1207,7 +1207,10 @@ source).
   CPU: GitHub's runners are a mix of AMD and Intel, some with 5-level
   paging (user space up to 2^56), so a test finds such a boundary on its
   host (arch_prctl_test probes a mapping above 2^47) instead of assuming
-  it. lx-expect
+  it. Nor may a transcript assert what Linux leaves to timing: a chain of
+  exactly 40 symbolic links reads or fails with ELOOP, depending on
+  whether the lookup's lockless walk fell back (fs_test asserts 20 and
+  41, and "opens or ELOOP" for 40). lx-expect
   closes the descriptors it inherited first (it says how many): fork
   sizes a program's descriptor table by the parent's highest open
   descriptor, and answers such as select's on a descriptor beyond the
