@@ -1707,7 +1707,7 @@ one, the drivers\etc exemption; Wow64Disable/Revert/EnableWow64FsRedirection
 per thread; CreateProcessW's image redirected, Sysnative's cmd 64-bit;
 wow64_fs_test: every documented exemption).
 
-Done (issue #15, Windows' behaviour from measurements on 25H2):
+Done (issues #12 and #15, Windows' behaviour from measurements on 25H2):
 kernel32 does not export the PathCch functions, WaitOnAddress,
 WakeByAddressSingle/All or the interrupt-time queries, which kernelbase
 implements itself (the address waits from a source kernel32 also builds
@@ -1715,7 +1715,9 @@ privately for its locks: ARCHITECTURE "API sets");
 MapUserPhysicalPagesScatter is kernel32's alone; FlsGetValue2 and
 TlsGetValue2 are one function behind both, CheckTokenMembershipEx,
 SetFileIoOverlappedRange and the XState functions in both
-(kernel32_test, wow64_k32_test: `export_split.rs`).
+(kernel32_test, wow64_k32_test: `export_split.rs`). SetStretchBltMode
+keeps any mode, 0, 5 and -1 included, and returns the previous one
+(gdi32_test, a DISPLAY DC and a memory DC).
 
 Next:
 1. The next run on Windows (each fix may reveal a program's next

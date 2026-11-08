@@ -5719,9 +5719,10 @@ then riched20.dll).
   StretchDIBits read 1/4/8 bits with palettes, 16 bits as 5-5-5, 24 and
   32, either row order.
 - **Blits**: PatBlt, BitBlt and StretchBlt (nearest pixel, mirroring;
-  SetStretchBltMode is kept) evaluate any ternary raster operation from
-  its truth table; overlapping copies run in the safe direction. MaskBlt
-  picks the foreground or background ROP3 by the monochrome mask.
+  SetStretchBltMode keeps any value, unchecked, as Windows does)
+  evaluate any ternary raster operation from its truth table;
+  overlapping copies run in the safe direction. MaskBlt picks the
+  foreground or background ROP3 by the monochrome mask.
   GdiAlphaBlend by the BLENDFUNCTION formulas (premultiplied per-pixel
   alpha with AC_SRC_ALPHA, the constant alpha otherwise; FALSE when the
   source rectangle leaves the source surface), GdiTransparentBlt (a
