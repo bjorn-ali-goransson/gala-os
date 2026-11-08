@@ -905,6 +905,23 @@ server, an interactive shell, file transfer, forwarding, a client.
 6. Observability: sshd's and sshd-session's logs in failed logs,
    connection and auth events in the event stream, the ledger's
    ssh-related gaps in the report.
+7. `sshd_shell`'s Ctrl+C race (an intermittent CI failure: the line
+   typed after Ctrl+C loses its first key and the shell prints
+   `^C^C`). The mechanism, from a failed run's conpty trace and
+   busybox-w32's open source: one Ctrl+C reaches both the shell and
+   `sleep` (each process's handler thread takes it within 4 ms), and
+   which one runs first decides the outcome. When `sleep` exits before
+   the shell's handler has run, the shell (polling the child every
+   1 ms) sees it end, prints the prompt and starts reading a line; its
+   handler then sets `bb_got_signal` and `pending_int`, and the line
+   editor acts on them at the next key, abandoning the line. When the
+   shell's handler runs first, the shell consumes the interrupt before
+   prompting. On Windows the shell's handler evidently wins; what
+   ordering or timing makes it win (the order conhost delivers control
+   events to a console's processes, oldest-attached first or not, and
+   whether it waits for each) is the open question; gala should deliver
+   in that order, which the console session's process list can give.
+   Not a lost wake-up: the log shows both taken on time.
 
 **Done when**: each step's scenario passes; host keys persist across
 boots (`persist`) and sessions survive a kernel handover (R9 (e)
