@@ -2564,8 +2564,28 @@ floor in the superblock's sector. Next:
    release fetching only what changed, a new root; a tampered blob, a
    frozen feed, a rollback and a missing file each refused with nothing
    kept), `cargo xtask feed publish|refresh|check` (check runs that
-   flow), checked against python-tuf 6.0.0 (ARCHITECTURE "The update
-   feed"; WORKFLOW "The update feed"). Next:
+   flow), checked against python-tuf 6.0.0; CI publishing
+   (`.github/workflows/release.yml`): every commit on main whose CI
+   passes is published to the R2 bucket as the next release (the
+   release tree, `cargo xtask release-tree`: kernel, system DLLs,
+   Limine, sealed config, manifest), refreshed every 6 hours (targets
+   too when near its expiry), root renewed monthly (`feed renew-root`);
+   every key, root included, from the `GALA_FEED_KEYS` secret (`feed
+   keygen`); `feed pull` / `feed push` move only what changed, timestamp
+   last, never overwriting a published version; each run checks the
+   result as the client does before and after the upload. Host tests
+   for each piece and for the workflows' steps against a directory
+   standing in for the bucket (ARCHITECTURE "The update feed"; WORKFLOW
+   "The update feed"). Every key lives in CI's secrets (the owner's
+   decision, for now): CI can rotate keys and re-sign root, at the
+   price that whoever controls CI controls the trust chain; root's
+   validity is short (90 days, re-signed monthly; targets 30 days,
+   snapshot 7, timestamp 1), so a later move of root offline is one
+   rotation that every client takes within weeks. Next:
+   - The first real run: the owner's one-time setup (WORKFLOW "The
+     update feed"), then a publish that proves what the local tests
+     cannot (R2's 404 for an absent file at the public URL, `aws`
+     against R2's endpoint, the head-object guard, the job summary).
    - The updater in gala (test first): a scenario where xtask serves a
      feed from a local directory (a fake bucket) and gala's updater
      (`tuf::update` over winhttp and C:, the trusted root in the image)
@@ -2574,24 +2594,21 @@ floor in the superblock's sector. Next:
      for an expired timestamp, a rolled-back targets version, a
      tampered blob and a key not in root. Every step and refusal as
      events.
-   - The GALAMANI manifest derived from targets (or replaced by it):
-     one signed list of a release's files, not two.
-   - CI: publish every release that passes the gate on main (upload the
-     blobs, then targets, snapshot, timestamp) and run `feed refresh`
-     on a schedule. Every key, root included, lives in CI's secrets
-     (the owner's decision, for now): CI can then also rotate keys and
-     re-sign root, at the price that whoever controls CI controls the
-     trust chain. Root's validity is short (90 days, re-signed monthly;
-     targets 30 days, snapshot 7, timestamp 1), so a later move of root
-     offline is one rotation that every client takes within weeks.
-     Until the publish job exists, the feed is signed with test keys
-     from `target/trust/feed-*`.
+   - The release tree's GALAMANI manifest signed with a release key
+     and numbered as the feed's release (today the runner's throwaway
+     test key and release 1, so the kernels of two releases do not
+     trust each other's manifests; item 3), or derived from targets /
+     replaced by it: one signed list of a release's files, not two.
+   - Root keys offline and a key rotation (`feed` can only renew root
+     with the same keys today).
    - A staged rollout field in targets (a share of machines by
      machine-id hash).
    - Out of it: distributions inside LX update themselves (their own
      package managers); programs from `gala install` keep winget's
      vendor-pinned installers (PK).
-   - Open: which object store and CDN; where the release key lives.
+   - Open: a custom domain or CDN in front of the R2 bucket (the public
+     URL is R2's development URL, rate-limited; `FEED_URL` in
+     release.yml); where the release key lives.
 
 WORKFLOW "Signed images".
 

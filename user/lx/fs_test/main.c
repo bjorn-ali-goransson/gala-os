@@ -6,7 +6,8 @@
  * Works in a directory it makes (`w`, in lx-expect's fresh run directory;
  * in gala a directory a Linux program makes is case-sensitive, the boot's
  * /lx is not). Also: symbolic links followed in path walks (relative to
- * the link's directory, `..` in a target, chains up to 40 links, ELOOP
+ * the link's directory, `..` in a target, chains of links (20 always
+ * resolve, 40 resolve unless a lockless walk fell back, 41 never), ELOOP
  * past them), hard links (link, linkat, AT_SYMLINK_FOLLOW, nlink, a link
  * to a symlink), the name of an unlinked open file free at once, and two
  * names differing only in case in one directory. Prints
@@ -469,7 +470,19 @@ int main(void)
 		next[1] = '0' + (i + 1) / 10, next[2] = '0' + (i + 1) % 10;
 		sys2(SYS_symlink, i == 40 ? "p/pf" : next, name);
 	}
-	say_content("read(c01) (40 links)", "c01");
+	/* Linux counts the links of one lookup once: when its lockless walk
+	 * falls back to the locked one (-ECHILD), the retry keeps the links
+	 * the first pass followed (fs/namei.c: the count is set once per
+	 * lookup). So 40 links read, or fail with ELOOP when a fallback came
+	 * after some of them (CI's runner did); 20 always read (a fallback has
+	 * followed at most 20), 41 never do. */
+	say_content("read(c21) (20 links)", "c21");
+	{
+		i64 fd = open_("c01", O_RDONLY, 0);
+		if (fd >= 0)
+			sys1(SYS_close, fd);
+		say_bool("open(c01) (40 links) opens or is ELOOP", fd >= 0 || fd == -40);
+	}
 	say_ret("open(c00) (41 links)", open_("c00", O_RDONLY, 0));
 	say_ret("stat(c00/x)", sys2(SYS_stat, "c00/x", &st));
 	for (int i = 0; i <= 40; i++) {

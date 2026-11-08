@@ -11036,10 +11036,10 @@ update client will check them with the same `Client`.
   `<N>.root.json`, `<N>.targets.json`, `<N>.snapshot.json`,
   `timestamp.json`, and the release's files under
   `blobs/sha256/<hex digest>` (unchanged files are shared between
-  releases). Uploads go blobs, targets, snapshot, then timestamp, the
-  one file a client reads first.
+  releases). Every file but `timestamp.json` is immutable once
+  published.
 - **Roles and keys** (Ed25519, key id = SHA-256 of the key object's
-  canonical JSON): root (3 keys, threshold 2; in CI's secrets for now, ROADMAP R8; root N+1 must
+  canonical JSON): root (3 keys, threshold 2; root N+1 must
   carry a threshold of root N's root keys and of its own), targets (the
   release key: each file's length and SHA-256, the release number and
   rollback floor in `custom`), snapshot (the targets metadata's version,
@@ -11047,7 +11047,25 @@ update client will check them with the same `Client`.
   targets 30, snapshot 7, timestamp 1; `feed refresh` re-signs snapshot
   and timestamp on a schedule (online keys), so a client can tell a
   frozen feed (expired timestamp) from a quiet one (a new timestamp,
-  same snapshot).
+  same snapshot), and targets too (a new version of the same release)
+  when it expires within 15 days, so a quiet main never freezes the
+  feed; `feed renew-root` writes root N+1 with the same keys and a
+  fresh 90 days, signed by all three root keys, and takes it as a
+  client at root N would before keeping it.
+- **Keys from the environment**: every role's Ed25519 seed, root's
+  included (ROADMAP R8: all keys in CI's secrets for now), in one
+  variable, `GALA_FEED_KEYS`: a `<role> <64 hex digits>` line for
+  `root-1`, `root-2`, `root-3`, `targets`, `snapshot`, `timestamp`
+  (`#` comments allowed). When it is set the feed commands use it and
+  never make or read test keys; set but empty (a secret the job cannot
+  see) is an error, as is a missing, repeated, malformed or shared
+  role's key, named by role or line, never showing the value. Without
+  it, test keys in `target/trust/feed-*.seed`. Every command that signs
+  first compares each role's key ids with the feed's latest root and
+  refuses other keys (`root 2 lists other root keys (...) than
+  GALA_FEED_KEYS (...)`): what they signed every client would refuse.
+  The key ids in use are logged (never the seeds); `feed keygen` makes
+  a value from `/dev/urandom`.
 - **Signatures** cover the canonical JSON (OLPC canonical JSON as
   python-tuf and go-tuf sign it: no whitespace, keys sorted by bytes,
   integers only, only `"` and `\` escaped) of the `signed` value; the
@@ -11084,15 +11102,61 @@ update client will check them with the same `Client`.
   the store dropped: ...`). `cargo xtask feed check` runs the same flow
   over the feed's directory with an empty store; gala's updater gives
   it HTTPS and its disk.
+- **The release** is the image's file tree as `make_iso` stages it,
+  without the test programs, test DLLs and scenario modules (`cargo
+  xtask release-tree <dir>`, `release_tree` and `system_modules` in
+  xtask): `boot/kernel` (stripped), every DLL of USER_DLLS but the test
+  DLLs (`boot/<dll>`, module string `Windows/System32`), the root store
+  (`public-roots.pem`), Limine (`EFI/BOOT/BOOTX64.EFI`,
+  `boot/limine/*`), the sealed `boot/limine/limine.conf` (empty kernel
+  command line, as `cargo xtask build`'s) and `boot/gala.manifest`;
+  about 76 files, 14 MB. Chosen because it is what a machine boots
+  (steps 2-5 of "Chain of trust" cover exactly these files) and the
+  system `cargo xtask iso` ships, minus what only tests use; the
+  32-bit DLLs (SysWOW64) are not in it yet, as they are in no full
+  image. The manifest is signed with the building machine's test key
+  and says release 1 (ROADMAP R8 step 4's next items).
+- **Publishing** (`.github/workflows/release.yml`, jobs in the
+  environment `release`, one run at a time: `concurrency: feed`). Each
+  job starts from an empty directory: `feed pull <public URL>` fetches
+  the metadata a client follows (every root, the timestamp, its
+  snapshot, its targets), verified as the client does but for expiry,
+  and records each file's SHA-256 in `.pulled`; no blobs (`publish`
+  writes the release's blobs it lacks locally; content-addressed, the
+  bucket's are the same bytes). The job signs (`publish`, `refresh`,
+  `renew-root`), checks with `feed check <dir> --over <public URL>`
+  (the directory over the bucket: the feed as it will be once
+  uploaded, blobs read from the bucket), `feed push`es, and checks the
+  public URL again. A missing `1.root.json` at the public URL (HTTP
+  404, nothing else) is an empty feed: the first publish makes root 1.
+  Publish runs after CI passes on a push to main, for main's head only
+  (an older commit's run is skipped); refresh every 6 hours (the
+  timestamp lasts a day and scheduled runs can be late); renew-root on
+  the 3rd of each month. Every step is logged and the feed's state
+  (release, files, new blobs, each role's version and expiry; a
+  warning when root expires within 45 days) goes to the job summary.
+- **Upload order** (`feed push`): the blobs the bucket lacks (`aws s3
+  sync --size-only`), then new roots, targets, snapshots (each by
+  version), `timestamp.json` last. Each file is in the bucket before
+  any file that names it (timestamp names snapshot names targets names
+  blobs), and a new root before metadata its keys may sign, so a client
+  reading mid-upload only meets files whose references resolve. Push
+  uploads only what changed since the pull; a published version (any
+  file but `timestamp.json`) is never rewritten: one the bucket has
+  already (`head-object`) stops the push, which is what a feed pulled
+  from somewhere else than it is pushed to (a wrong URL that looks
+  empty) would do to root 1. Immutable files carry `Cache-Control:
+  public, max-age=31536000, immutable`, `timestamp.json` `no-cache`.
 - **Checked against python-tuf**: a feed `cargo xtask feed publish`
   writes is read and verified by python-tuf 6.0.0 (`Metadata`,
   `verify_delegate`, `verify_length_and_hashes` over every role and
   blob), and its canonical bytes equal securesystemslib's
   `encode_canonical` (WORKFLOW "The update feed").
-- **Limits**: the keys are test keys in `target/trust/feed-*.seed`
-  (ROADMAP R8: root keys offline, the targets key in a KMS or HSM);
-  no delegations, no staged rollout field yet; files are hashed whole
-  in memory.
+- **Limits**: every key is in CI's secrets (ROADMAP R8: root keys
+  offline, the targets key in a KMS or HSM later); no key rotation
+  command (renew-root keeps the keys); no delegations, no staged
+  rollout field yet; files are hashed whole in memory; the bucket's
+  old versions and blobs are never deleted.
 
 ## Known limits
 

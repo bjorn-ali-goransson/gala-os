@@ -2646,7 +2646,12 @@ commands:
   feed         the update feed (TUF metadata over content-addressed files; R8):
                feed publish <files dir> <feed dir> [--release N] [--floor F] |
                feed refresh <feed dir> (re-sign snapshot and timestamp) |
-               feed check <feed dir> [--root <trusted root.json>]
+               feed renew-root <feed dir> (root N+1, same keys, fresh expiry) |
+               feed check <feed> [--over <source>] [--root <trusted root.json>] |
+               feed pull <source> <empty dir> | feed push <feed dir> <s3://bucket | dir> |
+               feed keygen (a new GALA_FEED_KEYS value on stdout; keys from it when set)
+  release-tree the files of a release, as the feed publishes them (kernel, system DLLs,
+               Limine, sealed config, manifest; no test programs): release-tree <dir>
   symbolize    resolve the kernel backtraces in a serial log to functions
                and source lines: symbolize <log> [--release]
   triage       what a (failed) boot's log says, in one block: verdict, guest CPUs and
@@ -2778,6 +2783,10 @@ fn main() -> ExitCode {
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
             Some("feed") => feed::cli(&args[1..]),
+            Some("release-tree") => match args.get(1).filter(|a| !a.starts_with("--")) {
+                Some(dir) => release_tree(release, Path::new(dir)),
+                None => Err("usage: cargo xtask release-tree <dir> [--release]".into()),
+            },
             Some("otel") => otel_cli(&args[1..]),
             Some("profile") => profile_cli(&args[1..]),
             Some("perfetto") => perfetto_cli(&args[1..]),
@@ -3060,7 +3069,7 @@ fn make_signed_iso(
     // The disk is shared with other worktrees and fills up: say so plainly
     // instead of a copy or xorriso failing half-way.
     check_disk_space(name, MIN_FREE_MIB)?;
-    make_iso_unchecked(release, name, cmdline, extra, signing).map_err(|e| {
+    make_iso_unchecked(release, name, cmdline, extra, signing, None).map_err(|e| {
         if e.contains("No space left") || e.contains("os error 28") {
             format!("{e}\n{}", disk_hint(name, None))
         } else {
@@ -3107,12 +3116,17 @@ fn tree_size(dir: &Path) -> u64 {
         .sum()
 }
 
+/// Stages the image's tree (kernel, test programs, `extra`, Limine, the
+/// sealed config and manifest) and makes the ISO from it; with `tree`,
+/// stages into that directory without the test programs and stops there
+/// (`release-tree`: what a release publishes).
 fn make_iso_unchecked(
     release: bool,
     name: &str,
     cmdline: &str,
     extra: &[(&str, &str)],
     signing: &trust::Signing,
+    tree: Option<&Path>,
 ) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let mut kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
@@ -3131,7 +3145,7 @@ fn make_iso_unchecked(
     }
     let limine = fetch_limine()?;
     let out = target_dir().join(profile);
-    let iso_root = out.join(format!("{name}-iso-root"));
+    let iso_root = tree.map_or_else(|| out.join(format!("{name}-iso-root")), Path::to_path_buf);
     if iso_root.exists() {
         fs::remove_dir_all(&iso_root).map_err(|e| format!("cleaning {iso_root:?}: {e}"))?;
     }
@@ -3146,7 +3160,10 @@ fn make_iso_unchecked(
         copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
     }
-    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS).chain(USER_PROGRAMS_X86) {
+    let programs = if tree.is_some() { &[][..] } else { USER_PROGRAMS };
+    let others = if tree.is_some() { &[][..] } else { GO_PROGRAMS };
+    let x86 = if tree.is_some() { &[][..] } else { USER_PROGRAMS_X86 };
+    for program in programs.iter().chain(others).chain(x86) {
         copy(&built_program(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
@@ -3200,6 +3217,9 @@ fn make_iso_unchecked(
     );
     // R8: the manifest, the config's hashes, the enrolled executables.
     trust::seal(&iso_root, &config, signing)?;
+    if tree.is_some() {
+        return Ok(iso_root);
+    }
 
     let iso = out.join(format!("{name}.iso"));
     // The ISO is as large as its tree.
@@ -13216,21 +13236,9 @@ fn image_modules(
 ) -> Result<Vec<(&'static str, &'static str)>> {
     let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
-        .map(|d| {
-            (
-                d.file,
-                if d.file.starts_with("testdll") || d.file == "tlsdll.dll" {
-                    "gala"
-                } else {
-                    "Windows/System32"
-                },
-            )
-        })
+        .map(|d| (d.file, if is_test_dll(d.file) { "gala" } else { "Windows/System32" }))
         .collect();
-    // The machine root store's public CAs (THIRD_PARTY.md: Mozilla's, as
-    // curl.se publishes them), which Schannel and crypt32's ROOT store
-    // read: a full image trusts the public web, as Windows does.
-    modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules.extend(system_modules().into_iter().filter(|(file, _)| file.contains('/')));
     if cmdline.iter().any(|w| w.contains("nginx.exe")) {
         let nginx = if cmdline.iter().any(|w| w.contains("nginx-master")) {
             "nginx_master"
@@ -13249,6 +13257,89 @@ fn image_modules(
         modules.extend(files.into_iter().filter(|(file, _)| file.contains('/')));
     }
     Ok(modules)
+}
+
+/// The test DLLs among USER_DLLS (shipped to C:\gala, not System32).
+fn is_test_dll(file: &str) -> bool {
+    file.starts_with("testdll") || file == "tlsdll.dll"
+}
+
+/// The system a full image ships besides the kernel (`cargo xtask iso`'s,
+/// and a release's: `release-tree`): every DLL of USER_DLLS but the test
+/// DLLs in C:\Windows\System32, and the machine root store's public CAs
+/// (THIRD_PARTY.md: Mozilla's, as curl.se publishes them), which Schannel
+/// and crypt32's ROOT store read: a full image trusts the public web, as
+/// Windows does.
+fn system_modules() -> Vec<(&'static str, &'static str)> {
+    let mut modules: Vec<(&str, &str)> = USER_DLLS
+        .iter()
+        .filter(|d| !is_test_dll(d.file))
+        .map(|d| (d.file, "Windows/System32"))
+        .collect();
+    modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules
+}
+
+/// `cargo xtask release-tree <dir> [--release]`: the files of a release
+/// (what the update feed publishes, ARCHITECTURE "The update feed"): the
+/// image tree `make_iso` stages, with the kernel, system_modules, Limine,
+/// the sealed config and the signed manifest, and no test programs, test
+/// DLLs or scenario modules. The kernel command line is empty, as
+/// `cargo xtask build`'s. `dir` must not exist or be empty.
+fn release_tree(release: bool, dir: &Path) -> Result {
+    if fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some()) {
+        return Err(format!("{}: not empty (release-tree writes a new tree)", dir.display()));
+    }
+    // The kernel and the DLLs; no test programs.
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET]);
+    trust::kernel_env(&mut cmd)?;
+    if release {
+        cmd.arg("--release");
+    }
+    run_cmd(&mut cmd)?;
+    let mut cmd = user_build();
+    for dll in USER_DLLS {
+        cmd.args(["--package", dll.package]);
+    }
+    run_cmd(&mut cmd)?;
+    let modules = system_modules();
+    make_iso_unchecked(release, "release", "", &modules, &trust::DEFAULT, Some(dir))?;
+    let files = tree_size(dir);
+    let mut count = Vec::new();
+    tree_files(dir, Path::new(""), &mut count)?;
+    let count = count.iter().filter(|p| dir.join(p).is_file()).count();
+    eprintln!(
+        "xtask: release tree {}: {count} files, {files} bytes (kernel, {} system modules, \
+         Limine, limine.conf, gala.manifest)",
+        dir.display(),
+        modules.len()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod release_tree_tests {
+    use super::*;
+
+    /// A release is the system: gala's DLLs in System32 and the root
+    /// store, no test DLL or program.
+    #[test]
+    fn release_modules_are_the_system() {
+        let m = system_modules();
+        for dll in ["ntdll.dll", "kernel32.dll", "kernelbase.dll", "user32.dll", "ws2_32.dll"] {
+            assert!(m.contains(&(dll, "Windows/System32")), "{dll}");
+        }
+        assert!(m.contains(&("user/roots/public-roots.pem", "Windows/System32/gala/roots")));
+        for (file, _) in &m {
+            assert!(!is_test_dll(file) && !file.ends_with(".exe"), "{file}");
+            assert!(!USER_PROGRAMS.iter().any(|p| file.starts_with(p)), "{file}");
+        }
+        // `cargo xtask iso` ships the same system, and the test DLLs apart.
+        let iso = image_modules(&[], None).unwrap();
+        assert!(m.iter().all(|f| iso.contains(f)));
+        assert!(iso.contains(&("testdll.dll", "gala")));
+    }
 }
 
 /// What `cargo xtask iso` runs without a command line: a few programs that
