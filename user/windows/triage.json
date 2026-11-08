@@ -400,10 +400,10 @@
       "asserts": "CHECK(strcmp(sym.info.Name, \"SymFromAddr\") == 0 && disp == 1 && sym.info.ModBase == dll_base);",
       "certainty": "exact (C:\\Users\\a\\AppData\\Local\\Temp\\claude\\df47a826fe99350f\\eada98e9-6bba-437a-a000-665d3c91bbc5\\scratchpad\\galaclone\\gala-os\\user\\dbghelp_test\\main.c:197, the line the report names)",
       "report_line": "dbghelp_test: check 23 (line 197) failed",
-      "windows": "SymSrvGetFileIndexInfoW fails with ERROR_BAD_EXE_FORMAT (193) on an image that has no debug directory, and succeeds on one that has any entry at all. It also requires sizeofstruct to be exactly 1608; 1604, 1607, 1609, 0 and 4096 all give ERROR_INVALID_PARAMETER.",
+      "windows": "SymFromAddr on &SymFromAddr + 1 gives Name \"SymFromAddr\" and disp 1, both as the test asserts, but ModBase 0 rather than dbghelp's base. Address is the function's own, NameLen 11, Size 112, and Flags 0x200, SYMFLAG_EXPORT: the symbol came from the export table, there being no PDB for dbghelp here, and an export-table symbol carries no ModBase.",
       "class": "expectation",
-      "evidence": "probed here. dbghelp_test.exe and user32_test.exe, both C tests, have an empty debug directory (rva 0, size 0) and fail with 193. commit_test.exe has one 28-byte entry, the single IMAGE_DEBUG_DIRECTORY that /Brepro writes, and succeeds; so do kernel32.dll (112 bytes of entries) and an ordinary python.exe. The test's own struct is the documented one and does come to 1608, so sizeofstruct is not the problem here.",
-      "note": "The test calls it on its own file, which is the one case that cannot work: the C tests are built by user/<test>/build.sh without /Brepro, so they carry no debug directory, while the Rust tests get one from the linker flags in .cargo/config.toml. Either give the C builds a debug directory or have the test ask about a file that has one. Not a divergence in the API."
+      "evidence": "probed here with SizeOfStruct 88, the real sizeof(SYMBOL_INFO) on x64. Anything else is refused with ERROR_INVALID_PARAMETER, which is how the first attempt failed with every field empty.",
+      "note": "Two of the three things check 23 asserts hold; ModBase is the one that does not, and it may well hold on a machine that has symbols for dbghelp, where the symbol would come from the PDB instead. So the test should either not assert ModBase or assert it only when Flags says the symbol is not an export. This is the second dbghelp check whose answer turned on a struct size: the earlier one wanted exactly 1608."
     },
     {
       "program": "disk_test",
@@ -608,10 +608,10 @@
       "asserts": "c.ok(",
       "certainty": "exact (C:\\Users\\a\\AppData\\Local\\Temp\\claude\\df47a826fe99350f\\eada98e9-6bba-437a-a000-665d3c91bbc5\\scratchpad\\galaclone\\gala-os\\user\\loader_test\\src\\main.rs:189, the line the report names)",
       "report_line": "loader_test: check 0000001f got 00000012 (line 189)",
-      "windows": null,
+      "windows": "BaseDllName.Buffer points into FullDllName.Buffer at the tail for every loaded module but one: ntdll.dll, whose BaseDllName is a separate string altogether. Its contents are still the tail of FullDllName, as they are for every module.",
       "class": "expectation",
-      "evidence": "needs a probe: what does this machine do here?",
-      "note": null
+      "evidence": "probed here by walking the PEB's InLoadOrderModuleList: 28 modules, and the pointer relation BaseDllName.Buffer == FullDllName.Buffer + Full.Length - Base.Length holds for 27. The offset is 40 or 102 bytes for the ordinary ones and unrelated for ntdll. The contents matched in all 28.",
+      "note": "So the check is right in substance and wrong in form, which is what the analysis suspected: comparing the text is the portable test, and comparing the pointers fails on ntdll alone. ntdll being the exception makes sense, since it is mapped before the loader's own structures are built the usual way."
     },
     {
       "program": "ole32_test",
