@@ -1,0 +1,13 @@
+[package]
+name = "wl_abi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The Wayland wire format (ROADMAP LD step 2; ARCHITECTURE "Plan: Linux
+# applications on the desktop (Wayland)"): safe, no_std, no allocation,
+# no dependencies, host-tested. The interfaces' request and event tables
+# are generated at build time from the protocol XML in protocol/ (MIT).
+[lib]
+bench = false

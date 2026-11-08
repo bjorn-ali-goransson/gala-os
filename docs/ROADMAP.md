@@ -2133,8 +2133,8 @@ the next breakthroughs).
    prerequisites (done: `lx_unix`, `lx_memfd`; still open, ledgered: a
    datagram socket's connect and sendto by name, SCM_CREDENTIALS with
    SO_PASSCRED, rights on a MSG_PEEK, collecting rights cycles in
-   flight); then the wire format as a crate of its own
-   (`kernel/wl_abi`, host-tested); then the server. Test first:
+   flight); the wire format (done: `kernel/wl_abi`, host-tested, its
+   tables generated from the protocol XML); then the server. Test first:
    `wl_test`, a client of our own over raw sockets, its transcript
    recorded against weston's headless backend, its pixels checked on
    the screen.
