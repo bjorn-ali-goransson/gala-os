@@ -89,7 +89,7 @@ unsafe fn unwind(frame: usize, record: usize) {
             "pop ebx",
             in("eax") frame,
             in("ecx") record,
-            in("edx") RtlUnwind as usize,
+            in("edx") RtlUnwind as unsafe extern "system" fn(usize, usize, *mut u8, usize) as usize,
             clobber_abi("system"),
         )
     };
