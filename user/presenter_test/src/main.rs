@@ -32,8 +32,8 @@
 //!   last pixels while nothing showed it.
 //! - Input a Test presenter brings (GalaSession's SESSION_INPUT, as
 //!   screen checks without the PS/2 devices do): a left click at client
-//!   (200, 100) reaches the child (WM_LBUTTONDOWN; it marks the point in
-//!   magenta), which the frame shows; a desktop shown by nothing takes no
+//!   (200, 100) reaches the child (WM_LBUTTONDOWN marks the point in
+//!   magenta, WM_LBUTTONUP counts the click), which the frame shows; a desktop shown by nothing takes no
 //!   input (STATUS_INVALID_DEVICE_STATE).
 //! - Bad requests: an area outside the frame, an unknown presenter and an
 //!   unknown input kind are STATUS_INVALID_PARAMETER; the console on
@@ -250,6 +250,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const WM_PAINT: u32 = 0x000f;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
 const QS_ALLINPUT: u32 = 0x04ff;
 const SW_SHOW: i32 = 5;
 const PM_REMOVE: u32 = 1;
@@ -404,6 +405,13 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             // SAFETY: our window and rectangle.
             unsafe { InvalidateRect(hwnd, &mark_rect(lparam as u32), 0) };
         }
+        return 0;
+    }
+    // The click counts once the button is up: the program may end on the
+    // last one, and so it ends only after the release xtask sends with it
+    // (it ended between press and release under KVM, and xtask's write of
+    // the release found QEMU gone).
+    if msg == WM_LBUTTONUP {
         CLICKED.store(1, Ordering::Relaxed);
         return 0;
     }

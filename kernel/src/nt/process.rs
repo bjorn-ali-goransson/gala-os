@@ -1175,7 +1175,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     let status = *process.exit_status.lock().get_or_insert(last_status);
     *process.exit_time.lock() = platform::system_time();
     // A line the program left open ends here, before the exit lines.
-    crate::console::end_program_line();
+    crate::console::end_program_line(process.id);
     // A Linux process's last output lines and how it ended, before the
     // core's line (ROADMAP LX).
     if process.personality == Personality::Linux {
