@@ -244,6 +244,19 @@ side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
 
+Windows' firewall prompts for two programs, `ipv6_test` and
+`handover_net_test`, the first time each one listens: the dialog creates
+a `TCP Query User{<guid>}<path>` and a `UDP Query User{...}` rule **keyed
+on the absolute path**, so a sweep from a new directory asks again (an
+old clone's rules do not carry over). Answer Allow. Answering No writes
+a *Block* rule instead, which is permanent and would fail those two
+silently in every later round -- check with `Get-NetFirewallRule -Action
+Block | Get-NetFirewallApplicationFilter` if either starts failing. The
+permission is not actually needed: both are in CI's passing baseline
+(`user/windows/ci-passing.txt`), and CI's runner is headless with nobody
+to answer the prompt, so they talk over loopback, which the firewall
+does not filter. The prompt only costs the time it sits unanswered.
+
 **Probing a divergence from a script, rather than from the test
 program, has two traps that silently answer a different question.** A
 probe host brings its own environment:
