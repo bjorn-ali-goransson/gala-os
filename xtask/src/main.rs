@@ -1101,6 +1101,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_exec_pie", "user/lx/bin/exec_test-pie", "lx"),
     ("lx_socket", "user/lx/bin/socket_test", "lx"),
     ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
+    ("lx_memfd", "user/lx/bin/memfd_test", "lx"),
+    ("lx_memfd_pie", "user/lx/bin/memfd_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
     ("lx_thread_pie", "user/lx/bin/thread_test-pie", "lx"),
     ("lx_poll", "user/lx/bin/poll_test", "lx"),
@@ -7790,6 +7792,22 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/socket_test-pie lxargs=./socket_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/socket_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/memfd_test (LD step 2): memfd_create, mappings every
+        // process shares, the seals; its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_memfd",
+        cmdline: "qemu_exit lxrun=/lx/memfd_test lxargs=./memfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/memfd_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/memfd_test as a static-pie.
+        name: "lx_memfd_pie",
+        cmdline: "qemu_exit lxrun=/lx/memfd_test-pie lxargs=./memfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/memfd_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         // user/lx/thread_test (LX): clone of threads, futex, signals per

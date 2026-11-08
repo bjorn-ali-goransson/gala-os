@@ -2044,6 +2044,13 @@ the next breakthroughs).
   (mmap_test); clone3 and set/get_robust_list (thread_test);
   prlimit64/getrlimit/setrlimit, getrandom and `/proc/self/exe`
   (exec_test).
+- Step 2's first prerequisite, memfd (`lx_memfd`, memfd_test recorded
+  on Linux): memfd_create as an anonymous file of the shared file
+  system, its mappings shared by every process, the seals (SHRINK,
+  GROW, WRITE, FUTURE_WRITE, EXEC, SEAL) checked by the file system;
+  a file view follows the file's size (mremap after ftruncate); a Linux
+  process's memory released when it ends, before its parent hears of
+  it.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2070,8 +2077,8 @@ the next breakthroughs).
    `xdg-shell` for top-level windows: each surface a shasha window,
    pointer and keyboard input through `wl_seat`. First its
    prerequisites, each test first against real Linux: `AF_UNIX` stream
-   sockets with `SCM_RIGHTS` (`unix_test`) and `memfd_create`
-   (`memfd_test`); then the wire format as a crate of its own
+   sockets with `SCM_RIGHTS` (`unix_test`; memfd is done); then the
+   wire format as a crate of its own
    (`kernel/wl_abi`, host-tested); then the server. Test first:
    `wl_test`, a client of our own over raw sockets, its transcript
    recorded against weston's headless backend, its pixels checked on

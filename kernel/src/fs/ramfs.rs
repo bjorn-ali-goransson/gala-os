@@ -19,6 +19,18 @@
 //! - **Unlink of an open node** (`unlink`, Linux's rule): the name goes at
 //!   once and the node lives on, *detached*, until its last close; NT's
 //!   delete (`set_delete_pending`) keeps the name until the last close.
+//! - **Anonymous files** (`create_anonymous`: Linux's memfd_create): a
+//!   file made detached, in no directory, freed at its last close. Its
+//!   seals (`Node::seals`, Linux's F_SEAL_* bits; None for every other
+//!   file, which cannot be sealed) are checked here, under the file
+//!   system's lock, by `write`, `set_size`, `map` and `set_mode`, so no
+//!   writer slips past a seal being added (`add_seals`).
+//! - **Socket nodes** (`create_socket`: a bound AF_UNIX socket's name):
+//!   no contents; what is bound to one is the socket layer's (`unix`),
+//!   keyed by the node, which the bound socket keeps open so its id is
+//!   not reused. NT sees a reparse point, as Windows shows an AF_UNIX
+//!   socket's file. They are not kept across reboots (the change log has
+//!   no record for them: what was bound to one is gone then anyway).
 //!
 //! Pure data structure (host-tested); the NT layer maps it to file objects.
 
@@ -56,7 +68,29 @@ pub enum FsError {
     NoMemory,
     /// A symbolic link where a file's or directory's contents were wanted.
     Symlink,
+    /// A socket where a file's contents were wanted.
+    Socket,
+    /// A seal forbids the change (`Node::seals`).
+    Sealed,
+    /// A seal against writing cannot be added while a section maps the
+    /// file writable.
+    WriteMapped,
+    /// The file cannot be sealed (only anonymous files can).
+    NotSealable,
 }
+
+/// The seals of an anonymous file, as Linux numbers them (fcntl(2)
+/// F_ADD_SEALS): no more seals; no shrinking; no growing; no writing (nor
+/// writable shared mappings); no change of the execute bits.
+pub const SEAL_SEAL: u32 = 0x1;
+pub const SEAL_SHRINK: u32 = 0x2;
+pub const SEAL_GROW: u32 = 0x4;
+pub const SEAL_WRITE: u32 = 0x8;
+pub const SEAL_FUTURE_WRITE: u32 = 0x10;
+pub const SEAL_EXEC: u32 = 0x20;
+/// Every seal `add_seals` knows.
+pub const SEALS: u32 =
+    SEAL_SEAL | SEAL_SHRINK | SEAL_GROW | SEAL_WRITE | SEAL_FUTURE_WRITE | SEAL_EXEC;
 
 /// Size of a file page.
 pub const PAGE: usize = 4096;
@@ -220,6 +254,8 @@ enum Kind {
     File(Data),
     /// A symbolic link and its target, as given (bytes of a Linux path).
     Symlink(Vec<u8>),
+    /// A socket's name (`create_socket`).
+    Socket,
 }
 
 /// A hard link beyond a node's first: the entry `name` of directory
@@ -307,6 +343,8 @@ pub struct Node {
     pub mode: Option<u16>,
     /// A directory whose names compare exactly (see the module's doc).
     pub case_sensitive: bool,
+    /// An anonymous file's seals (`SEAL_*`); None: it cannot be sealed.
+    seals: Option<u32>,
     /// Its names beyond the first (entries of `RamFs::links`).
     extra_links: u32,
     /// Unlinked while open (`unlink`): in no directory, freed at its last
@@ -343,6 +381,22 @@ impl Node {
         matches!(self.kind, Kind::Symlink(_))
     }
 
+    /// A socket's name (`create_socket`).
+    pub fn is_socket(&self) -> bool {
+        matches!(self.kind, Kind::Socket)
+    }
+
+    /// An anonymous file's seals; None for a file that cannot be sealed.
+    pub fn seals(&self) -> Option<u32> {
+        self.seals
+    }
+
+    /// How many sections map it writable (a seal against writing waits
+    /// for none).
+    pub fn write_maps(&self) -> u32 {
+        self.write_maps
+    }
+
     /// A symbolic link's target.
     pub fn symlink_target(&self) -> Option<&[u8]> {
         match &self.kind {
@@ -373,7 +427,7 @@ impl Node {
         match &self.kind {
             Kind::File(d) => d.len() as u64,
             Kind::Symlink(t) => t.len() as u64,
-            Kind::Directory(_) => 0,
+            Kind::Directory(_) | Kind::Socket => 0,
         }
     }
 }
@@ -544,6 +598,7 @@ impl RamFs {
             security: None,
             mode: None,
             case_sensitive: false,
+            seals: None,
             extra_links: 0,
             detached: false,
             boot: true,
@@ -639,7 +694,7 @@ impl RamFs {
     fn children(&self, dir: NodeId) -> Result<&[NodeId], FsError> {
         match &self.node(dir).ok_or(FsError::NotFound)?.kind {
             Kind::Directory(c) => Ok(c),
-            Kind::File(_) | Kind::Symlink(_) => Err(FsError::NotADirectory),
+            Kind::File(_) | Kind::Symlink(_) | Kind::Socket => Err(FsError::NotADirectory),
         }
     }
 
@@ -742,29 +797,67 @@ impl RamFs {
         self.make(parent, name, Kind::Symlink(target), None, false, now)
     }
 
-    fn make(
+    /// Creates `name` in `parent` as a socket's name, with POSIX
+    /// permission bits `mode` (not recorded in the change log: see the
+    /// module's doc).
+    pub fn create_socket(
         &mut self,
         parent: NodeId,
         name: &[u16],
+        mode: u16,
+        now: u64,
+    ) -> Result<NodeId, FsError> {
+        self.make(parent, name, Kind::Socket, Some(mode & 0o7777), false, now)
+    }
+
+    /// Creates an anonymous file (memfd_create): an empty file in no
+    /// directory, named `name` only for logs and paths of its mappings,
+    /// with POSIX bits `mode` and the seals `seals` (None: it cannot be
+    /// sealed), opened once with `access` and `share`: it goes at its
+    /// last close (`close`). Never recorded in the change log.
+    pub fn create_anonymous(
+        &mut self,
+        name: &[u16],
+        mode: u16,
+        seals: Option<u32>,
+        access: Access,
+        share: Share,
+        now: u64,
+    ) -> Result<NodeId, FsError> {
+        let mut owned_name = Vec::new();
+        owned_name.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+        let mut node =
+            self.fresh_node(ROOT, owned_name, Kind::File(Data::EMPTY), Some(mode), false, now);
+        node.seals = seals;
+        node.detached = true;
+        node.boot = false;
+        node.dirty = false;
+        let id = self.slot(node)?;
+        if let Err(e) = self.open(id, access, share) {
+            self.nodes[id] = None;
+            return Err(e);
+        }
+        Ok(id)
+    }
+
+    /// A node of `kind` named `name` in `parent` (not yet in the table).
+    fn fresh_node(
+        &self,
+        parent: NodeId,
+        name: Vec<u16>,
         kind: Kind,
         mode: Option<u16>,
         case_sensitive: bool,
         now: u64,
-    ) -> Result<NodeId, FsError> {
-        if self.find(parent, name)?.is_some() {
-            return Err(FsError::Exists);
-        }
-        let mut owned_name = Vec::new();
-        owned_name.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+    ) -> Node {
         let attributes = match kind {
             Kind::Directory(_) => ATTRIBUTE_DIRECTORY,
             Kind::File(_) => ATTRIBUTE_ARCHIVE,
-            Kind::Symlink(_) => ATTRIBUTE_ARCHIVE | ATTRIBUTE_REPARSE_POINT,
+            Kind::Symlink(_) | Kind::Socket => ATTRIBUTE_ARCHIVE | ATTRIBUTE_REPARSE_POINT,
         };
-        let directory = matches!(kind, Kind::Directory(_));
-        let node = Node {
+        Node {
             parent,
-            name: owned_name,
+            name,
             kind,
             attributes,
             created: now,
@@ -779,12 +872,17 @@ impl RamFs {
             security: None,
             mode,
             case_sensitive,
+            seals: None,
             extra_links: 0,
             detached: false,
             boot: !self.recording && !self.replaying,
             dirty: self.recording || self.replaying,
-        };
-        let id = match self.nodes.iter().position(Option::is_none) {
+        }
+    }
+
+    /// Puts `node` in a free slot of the table; its id.
+    fn slot(&mut self, node: Node) -> Result<NodeId, FsError> {
+        Ok(match self.nodes.iter().position(Option::is_none) {
             Some(free) => {
                 self.nodes[free] = Some(node);
                 free
@@ -793,7 +891,26 @@ impl RamFs {
                 self.nodes.try_push(Some(node)).map_err(|_| FsError::NoMemory)?;
                 self.nodes.len() - 1
             }
-        };
+        })
+    }
+
+    fn make(
+        &mut self,
+        parent: NodeId,
+        name: &[u16],
+        kind: Kind,
+        mode: Option<u16>,
+        case_sensitive: bool,
+        now: u64,
+    ) -> Result<NodeId, FsError> {
+        if self.find(parent, name)?.is_some() {
+            return Err(FsError::Exists);
+        }
+        let mut owned_name = Vec::new();
+        owned_name.try_extend_from_slice(name).map_err(|_| FsError::NoMemory)?;
+        let directory = matches!(kind, Kind::Directory(_));
+        let node = self.fresh_node(parent, owned_name, kind, mode, case_sensitive, now);
+        let id = self.slot(node)?;
         if let Kind::Directory(children) = &mut self.node_mut(parent)?.kind
             && children.try_push(id).is_err()
         {
@@ -1029,7 +1146,9 @@ impl RamFs {
         if old_parent != parent {
             match &mut self.node_mut(parent)?.kind {
                 Kind::Directory(c) => c.try_reserve(1).map_err(|_| FsError::NoMemory)?,
-                Kind::File(_) | Kind::Symlink(_) => return Err(FsError::NotADirectory),
+                Kind::File(_) | Kind::Symlink(_) | Kind::Socket => {
+                    return Err(FsError::NotADirectory);
+                }
             }
         }
         let from = if self.recording { self.path_of(id).ok() } else { None };
@@ -1265,8 +1384,32 @@ impl RamFs {
 
     /// Sets the POSIX permission bits of `id` (`Node::mode`).
     pub fn set_mode(&mut self, id: NodeId, mode: u16) -> Result<(), FsError> {
-        self.node_mut(id)?.mode = Some(mode & 0o7777);
+        let node = self.node_mut(id)?;
+        // SEAL_EXEC keeps the execute bits as they are.
+        let exec = 0o111;
+        if node.seals.unwrap_or(0) & SEAL_EXEC != 0 && node.mode.unwrap_or(0) & exec != mode & exec
+        {
+            return Err(FsError::Sealed);
+        }
+        node.mode = Some(mode & 0o7777);
         self.record_node(id, |path, n| Some(Op::SetMode { path, mode: n.mode.unwrap_or(0) }));
+        Ok(())
+    }
+
+    /// Adds `seals` (`SEAL_*`) to anonymous file `id`: NotSealable for
+    /// another file, Sealed once SEAL_SEAL is on, WriteMapped for
+    /// SEAL_WRITE while a section maps it writable (fcntl(2)'s EINVAL,
+    /// EPERM, EBUSY). Unknown bits are the caller's to refuse.
+    pub fn add_seals(&mut self, id: NodeId, seals: u32) -> Result<(), FsError> {
+        let node = self.node_mut(id)?;
+        let have = node.seals.ok_or(FsError::NotSealable)?;
+        if have & SEAL_SEAL != 0 {
+            return Err(FsError::Sealed);
+        }
+        if seals & SEAL_WRITE != 0 && have & SEAL_WRITE == 0 && node.write_maps > 0 {
+            return Err(FsError::WriteMapped);
+        }
+        node.seals = Some(have | seals);
         Ok(())
     }
 
@@ -1280,6 +1423,7 @@ impl RamFs {
         let data = match &node.kind {
             Kind::File(data) => data,
             Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Socket => return Err(FsError::Socket),
             Kind::Directory(_) => return Err(FsError::IsADirectory),
         };
         let Ok(start) = usize::try_from(offset) else { return Ok(0) };
@@ -1295,12 +1439,20 @@ impl RamFs {
         now: u64,
     ) -> Result<usize, FsError> {
         let node = self.node_mut(id)?;
+        let seals = node.seals.unwrap_or(0);
         let contents = match &mut node.kind {
             Kind::File(contents) => contents,
             Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Socket => return Err(FsError::Socket),
             Kind::Directory(_) => return Err(FsError::IsADirectory),
         };
         let start = usize::try_from(offset).map_err(|_| FsError::NoMemory)?;
+        let end = start.checked_add(data.len()).ok_or(FsError::NoMemory)?;
+        if seals & (SEAL_WRITE | SEAL_FUTURE_WRITE) != 0
+            || (seals & SEAL_GROW != 0 && end > contents.len())
+        {
+            return Err(FsError::Sealed);
+        }
         contents.write_at(start, data)?;
         node.written = now;
         node.accessed = now;
@@ -1364,14 +1516,21 @@ impl RamFs {
     /// Truncates or extends (with zeros) to `size`.
     pub fn set_size(&mut self, id: NodeId, size: u64, now: u64) -> Result<(), FsError> {
         let node = self.node_mut(id)?;
-        if node.map_count > 0 && size < node.mapped_size {
-            return Err(FsError::UserMapped);
-        }
+        let seals = node.seals.unwrap_or(0);
+        let (mapped, mapped_size) = (node.map_count > 0, node.mapped_size);
         let contents = match &mut node.kind {
             Kind::File(contents) => contents,
             Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Socket => return Err(FsError::Socket),
             Kind::Directory(_) => return Err(FsError::IsADirectory),
         };
+        let len = contents.len() as u64;
+        if (seals & SEAL_SHRINK != 0 && size < len) || (seals & SEAL_GROW != 0 && size > len) {
+            return Err(FsError::Sealed);
+        }
+        if mapped && size < mapped_size {
+            return Err(FsError::UserMapped);
+        }
         let size = usize::try_from(size).map_err(|_| FsError::NoMemory)?;
         contents.set_len(size)?;
         node.written = now;
@@ -1395,9 +1554,13 @@ impl RamFs {
     /// version until it ends (`Node::version`).
     pub fn map(&mut self, id: NodeId, size: u64, writable: bool) -> Result<(), FsError> {
         let node = self.node_mut(id)?;
+        if writable && node.seals.unwrap_or(0) & (SEAL_WRITE | SEAL_FUTURE_WRITE) != 0 {
+            return Err(FsError::Sealed);
+        }
         let contents = match &mut node.kind {
             Kind::File(contents) => contents,
             Kind::Symlink(_) => return Err(FsError::Symlink),
+            Kind::Socket => return Err(FsError::Socket),
             Kind::Directory(_) => return Err(FsError::IsADirectory),
         };
         if size > contents.len() as u64 {
@@ -1433,7 +1596,7 @@ impl RamFs {
     pub fn page_address(&mut self, id: NodeId, index: usize) -> Option<usize> {
         match &mut self.node_mut(id).ok()?.kind {
             Kind::File(data) => data.page_address(index),
-            Kind::Directory(_) | Kind::Symlink(_) => None,
+            Kind::Directory(_) | Kind::Symlink(_) | Kind::Socket => None,
         }
     }
 
@@ -1475,6 +1638,10 @@ impl RamFs {
     fn record_node(&mut self, id: NodeId, make: impl FnOnce(Vec<u16>, &Node) -> Option<Op>) {
         if self.node(id).is_some_and(|n| n.detached) {
             // Unlinked: its path names something else now, or nothing.
+            return;
+        }
+        if self.node(id).is_some_and(Node::is_socket) {
+            // Not kept across reboots (the module's doc).
             return;
         }
         self.mark_dirty(id);
@@ -1701,7 +1868,7 @@ impl RamFs {
         stack.try_push(ROOT).map_err(|_| FsError::NoMemory)?;
         while let Some(id) = stack.pop() {
             let n = self.node(id).ok_or(FsError::NotFound)?;
-            if n.dirty && id != ROOT {
+            if n.dirty && id != ROOT && !n.is_socket() {
                 let path = self.path_of(id)?;
                 let p = || copy(&path).ok_or(FsError::NoMemory);
                 if let Kind::Symlink(target) = &n.kind {
@@ -2458,5 +2625,88 @@ mod tests {
         }
         check_posix(&h);
         assert_eq!(h.snapshot().unwrap(), snap);
+    }
+
+    #[test]
+    fn an_anonymous_file_lives_while_open_and_is_never_recorded() {
+        let mut f = booted();
+        let id = f.create_anonymous(&w("memfd:x"), 0o777, Some(0), RW, NONE, 5).unwrap();
+        let n = f.node(id).unwrap();
+        assert!(n.detached() && n.nlink() == 0 && n.mode == Some(0o777));
+        assert!(f.find(ROOT, &w("memfd:x")).unwrap().is_none());
+        f.write(id, 0, b"pool", 6).unwrap();
+        f.set_size(id, 8192, 6).unwrap();
+        assert_eq!(f.node(id).unwrap().size(), 8192);
+        let (ops, _) = f.take_ops();
+        assert!(ops.is_empty(), "{ops:?}");
+        assert!(f.snapshot().unwrap().iter().all(|op| !matches!(op, Op::Write { .. })));
+        f.close(id, RW, NONE);
+        assert!(f.node(id).is_none());
+    }
+
+    #[test]
+    fn seals_refuse_what_they_seal() {
+        let mut f = fs();
+        let id = f.create_anonymous(&w("m"), 0o777, Some(0), RW, NONE, 1).unwrap();
+        f.set_size(id, 4096, 1).unwrap();
+        f.add_seals(id, SEAL_SHRINK).unwrap();
+        assert_eq!(f.set_size(id, 100, 1), Err(FsError::Sealed));
+        f.set_size(id, 8192, 1).unwrap();
+        f.add_seals(id, SEAL_GROW).unwrap();
+        assert_eq!(f.set_size(id, 12288, 1), Err(FsError::Sealed));
+        assert_eq!(f.write(id, 8190, b"abc", 1), Err(FsError::Sealed));
+        assert_eq!(f.write(id, 8189, b"abc", 1), Ok(3));
+        // SEAL_WRITE waits for no writable mapping.
+        f.map(id, 8192, true).unwrap();
+        assert_eq!(f.add_seals(id, SEAL_WRITE), Err(FsError::WriteMapped));
+        f.unmap(id, true);
+        f.add_seals(id, SEAL_WRITE).unwrap();
+        assert_eq!(f.write(id, 0, b"x", 1), Err(FsError::Sealed));
+        assert_eq!(f.map(id, 8192, true), Err(FsError::Sealed));
+        f.map(id, 8192, false).unwrap();
+        f.unmap(id, false);
+        assert_eq!(f.node(id).unwrap().seals(), Some(SEAL_SHRINK | SEAL_GROW | SEAL_WRITE));
+        f.add_seals(id, SEAL_SEAL).unwrap();
+        assert_eq!(f.add_seals(id, 0), Err(FsError::Sealed));
+        // SEAL_EXEC keeps the execute bits.
+        let x = f.create_anonymous(&w("x"), 0o666, Some(SEAL_EXEC), RW, NONE, 1).unwrap();
+        assert_eq!(f.set_mode(x, 0o755), Err(FsError::Sealed));
+        f.set_mode(x, 0o644).unwrap();
+        // Other files cannot be sealed.
+        let plain = f.create(ROOT, &w("plain"), false, 1).unwrap();
+        assert_eq!(f.add_seals(plain, SEAL_SHRINK), Err(FsError::NotSealable));
+        assert_eq!(f.node(plain).unwrap().seals(), None);
+    }
+
+    #[test]
+    fn a_socket_node_has_a_name_but_no_contents_and_no_record() {
+        let mut f = booted();
+        let d = f.create_posix(ROOT, &w("run"), true, 0o755, 2).unwrap();
+        let s = f.create_socket(d, &w("wayland-0"), 0o755, 3).unwrap();
+        let n = f.node(s).unwrap();
+        assert!(n.is_socket() && !n.is_dir() && n.size() == 0 && n.mode == Some(0o755));
+        assert_ne!(n.attributes & ATTRIBUTE_REPARSE_POINT, 0);
+        assert_eq!(f.create_socket(d, &w("wayland-0"), 0o755, 3), Err(FsError::Exists));
+        assert_eq!(f.read(s, 0, &mut [0; 4]), Err(FsError::Socket));
+        assert_eq!(f.write(s, 0, b"x", 4), Err(FsError::Socket));
+        let (ops, _) = f.take_ops();
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, Op::Create { path, .. } if path.ends_with(&w("wayland-0"))))
+        );
+        assert!(
+            !f.snapshot()
+                .unwrap()
+                .iter()
+                .any(|op| matches!(op, Op::Create { path, .. } if path.ends_with(&w("wayland-0"))))
+        );
+        // Held open by its socket, its id is not reused after an unlink.
+        f.open(s, Access::default(), Share::default()).unwrap();
+        f.unlink(d, &w("wayland-0")).unwrap();
+        assert!(f.node(s).is_some_and(Node::detached));
+        let again = f.create_socket(d, &w("wayland-0"), 0o755, 4).unwrap();
+        assert_ne!(again, s);
+        f.close(s, Access::default(), Share::default());
+        assert!(f.node(s).is_none());
     }
 }

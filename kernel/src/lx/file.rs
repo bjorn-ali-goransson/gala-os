@@ -126,7 +126,7 @@ const BLKSIZE: i64 = 4096;
 const CHUNK: usize = 64 * 1024;
 
 /// What a Linux open shares with other opens: everything.
-const SHARE_ALL: Share = Share { read: true, write: true, delete: true };
+pub const SHARE_ALL: Share = Share { read: true, write: true, delete: true };
 
 /// An open regular file or directory (one open file description: dup'ed
 /// fds share it, and with it the offset).
@@ -155,6 +155,28 @@ pub struct Cursor {
     pub index: u64,
     pub last: Option<Vec<u16>>,
 }
+
+impl OpenFile {
+    /// The description of a file just opened for reading and writing with
+    /// `fs.open` (or made opened: `RamFs::create_anonymous`), sharing
+    /// everything as Linux opens do; its drop closes it.
+    pub fn read_write(node: NodeId) -> OpenFile {
+        OpenFile {
+            node,
+            dir: false,
+            readable: true,
+            writable: true,
+            path_only: false,
+            append: AtomicBool::new(false),
+            position: IrqMutex::new(0),
+            cursor: IrqMutex::new(Cursor::default()),
+            access: READ_WRITE,
+        }
+    }
+}
+
+/// What a read-write open asks of the file system.
+pub const READ_WRITE: Access = Access { read: true, write: true, delete: false };
 
 impl Drop for OpenFile {
     fn drop(&mut self) {
@@ -275,6 +297,12 @@ fn errno_of(e: FsError) -> u16 {
         FsError::AccessDenied => EACCES,
         FsError::NoMemory => ENOMEM,
         FsError::Symlink => ELOOP,
+        // A socket's contents (open(2): ENXIO).
+        FsError::Socket => super::errno::ENXIO,
+        // A seal forbids it, or no more seals (fcntl(2)).
+        FsError::Sealed => super::errno::EPERM,
+        FsError::WriteMapped => EBUSY,
+        FsError::NotSealable => EINVAL,
     }
 }
 

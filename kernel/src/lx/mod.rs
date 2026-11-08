@@ -42,6 +42,10 @@
 //!   [`futex`]: futex(2); [`wait`]: wait queues and the one way a Linux
 //!   thread blocks (a signal for it, the process's end or a timer
 //!   interrupts it).
+//!
+//! LD step 2's prerequisites:
+//! - [`memfd`]: memfd_create and file seals: anonymous files whose
+//!   pages every mapping shares.
 
 pub mod dispatch;
 pub mod elf;
@@ -52,6 +56,7 @@ pub mod file;
 pub mod fork;
 pub mod futex;
 pub mod machine;
+pub mod memfd;
 pub mod mm;
 pub mod poll;
 pub mod resource;
@@ -77,9 +82,18 @@ pub fn init() {
     dispatch::init();
 }
 
-/// A process of the Linux personality has ended (`nt::process::finish`).
-pub fn process_ended(pid: u64, status: crate::nt::status::NtStatus) {
-    state::ended(pid, status);
+/// A process of the Linux personality has ended (`nt::process::finish`):
+/// its memory goes first (its mappings release their files: a memfd
+/// mapped only by it can be sealed against writing once its parent hears
+/// of the end, memfd_test; Linux releases a process's memory before it
+/// tells the parent), then its Linux state (`state::ended`: the fds, then
+/// the parent).
+pub fn process_ended(process: &crate::nt::process::Process, status: crate::nt::status::NtStatus) {
+    if let Err(e) = mm::clear(process) {
+        // Out of memory to cut the VAD: the mappings go with the process.
+        crate::warn!("lx: pid {}: its memory not released at its end: {e:?}", process.id);
+    }
+    state::ended(process.id, status);
 }
 
 /// The state dump's Linux part: each process's threads (Linux and core

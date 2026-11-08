@@ -67,6 +67,8 @@ const F_DUPFD: u64 = 0;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const F_SETPIPE_SZ: u64 = 1031;
 const F_GETPIPE_SZ: u64 = 1032;
+const F_ADD_SEALS: u64 = 1033;
+const F_GET_SEALS: u64 = 1034;
 const FD_CLOEXEC: u64 = 1;
 /// Writes up to this size to a pipe are atomic (PIPE_BUF).
 const PIPE_BUF: usize = 4096;
@@ -253,6 +255,7 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::SYMLINK => file::symlinkat(call, a(0), file::AT_FDCWD, a(1)),
         nr::SYMLINKAT => file::symlinkat(call, a(0), a(1), a(2)),
         nr::FTRUNCATE => file::ftruncate(call, a(0), a(1)),
+        nr::MEMFD_CREATE => super::memfd::memfd_create(call, a(0), a(1)),
         nr::TRUNCATE => file::truncate(call, a(0), a(1)),
         nr::FSYNC | nr::FDATASYNC => file::fsync(call, a(0)),
         nr::CHMOD => file::chmod(call, file::ChmodTarget::Path(file::AT_FDCWD, a(0)), a(1)),
@@ -418,6 +421,8 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
             Ok(0)
         }
         F_GETPIPE_SZ => Ok(pipe.ok_or(EBADF)?.state.lock().capacity as u64),
+        F_ADD_SEALS => super::memfd::add_seals(call, &f, fd, arg),
+        F_GET_SEALS => super::memfd::get_seals(&f),
         F_SETPIPE_SZ => {
             let pipe = pipe.ok_or(EBADF)?;
             // Whole pages, a power of two of them, at least one.

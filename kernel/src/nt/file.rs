@@ -263,7 +263,12 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::AccessDenied => NtStatus::ACCESS_DENIED,
         FsError::UserMapped => NtStatus::USER_MAPPED_FILE,
         FsError::NoMemory => NtStatus::NO_MEMORY,
-        FsError::Symlink => NtStatus::IO_REPARSE_TAG_NOT_HANDLED,
+        // A Linux symbolic link or socket: a reparse point NT does not
+        // follow.
+        FsError::Symlink | FsError::Socket => NtStatus::IO_REPARSE_TAG_NOT_HANDLED,
+        FsError::Sealed => NtStatus::ACCESS_DENIED,
+        FsError::WriteMapped => NtStatus::USER_MAPPED_FILE,
+        FsError::NotSealable => NtStatus::INVALID_PARAMETER,
     }
 }
 
@@ -440,9 +445,10 @@ pub fn create(
                 if disposition == FILE_CREATE {
                     return Err(NtStatus::OBJECT_NAME_COLLISION);
                 }
-                // A Linux symbolic link is a reparse point nothing here
-                // follows (ARCHITECTURE "Files"): opened only as itself.
-                if n.is_symlink() && options & FILE_OPEN_REPARSE_POINT == 0 {
+                // A Linux symbolic link or socket is a reparse point
+                // nothing here follows (ARCHITECTURE "Files"): opened only
+                // as itself.
+                if (n.is_symlink() || n.is_socket()) && options & FILE_OPEN_REPARSE_POINT == 0 {
                     return Err(NtStatus::IO_REPARSE_TAG_NOT_HANDLED);
                 }
                 if want_dir && !n.is_dir() {

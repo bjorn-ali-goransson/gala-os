@@ -1590,6 +1590,24 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   lives on *detached*, nlink 0, freed at its last close, never recorded
   again). `exchange` swaps two names (renameat2's RENAME_EXCHANGE) by
   three renames under the file system's lock.
+- **Anonymous files** (`create_anonymous`, Linux's memfd_create:
+  `lx::memfd`): made detached (in no directory, nlink 0), opened once,
+  freed at their last close, never recorded. Their seals
+  (`Node::seals`, Linux's F_SEAL_* bits; None for every other file,
+  which cannot be sealed) are checked by `write`, `set_size`, `map` and
+  `set_mode` under the file system's lock, and `add_seals` refuses
+  SEAL_WRITE while a section maps the file writable (`write_maps`), so a
+  seal and a writer never race.
+- **Socket nodes** (`create_socket`: a bound AF_UNIX socket's name,
+  `unix`): no contents (`FsError::Socket`: Linux's open is ENXIO);
+  what is bound to one is the socket layer's, keyed by the node, which
+  the bound socket keeps open so its id is not reused while bound. NT
+  sees a reparse point (FILE_ATTRIBUTE_REPARSE_POINT, an open without
+  FILE_OPEN_REPARSE_POINT STATUS_IO_REPARSE_TAG_NOT_HANDLED), as Windows
+  shows an AF_UNIX socket's file. Not kept across reboots (the change
+  log has no record for them; a later change of the name replays as a
+  change of a missing path, skipped): what was bound to one is gone
+  then anyway.
 
 - **Contents from boot modules**: modules appear read-only in `C:\gala`
   (or the directory their module string names), copied to the heap on
@@ -8212,7 +8230,8 @@ mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
 exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
-`lx_epoll`, `lx_fs`, each also `_pie`), dyn_test (glibc, dynamic:
+`lx_epoll`, `lx_fs`, each also `_pie`), memfd_test (`lx_memfd`, also
+`_pie`; ROADMAP LD step 2), dyn_test (glibc, dynamic:
 `lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
@@ -8391,7 +8410,10 @@ The running parts (milestone 1; `lxrun=`):
     file's view); else with MREMAP_MAYMOVE moves the mapping whole (to a
     free range, or MREMAP_FIXED's address, replacing what is there):
     its VAD runs, its views and its pages move, frames and all
-    (`UserSpace::move_page`: no copy). The range must be mapped
+    (`UserSpace::move_page`: no copy). A file view reaches as far as
+    the file is when a page is touched (`Section::frame` asks the file
+    system), so a mapping grown after the file grew shows the new pages
+    (memfd_test). The range must be mapped
     (EFAULT); without MREMAP_MAYMOVE and no room ENOMEM;
     MREMAP_DONTUNMAP and old length 0 are EINVAL, ledgered.
   - **madvise**: MADV_DONTNEED drops the range's frames (anonymous pages
@@ -8403,6 +8425,28 @@ The running parts (milestone 1; `lxrun=`):
   - execve unmaps everything, views too (`mm::clear`). The program and
     its interpreter are still mapped by copying their bytes into private
     pages (not as file views: ROADMAP LD).
+- **memfd** (`lx::memfd`; memfd_test, `lx_memfd`): memfd_create
+  (MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL: mode 0666 and
+  F_SEAL_EXEC; MFD_HUGETLB and unknown flags EINVAL, ledgered; a name of
+  more than 249 bytes EINVAL) makes an anonymous file of the shared file
+  system ("Files": `RamFs::create_anonymous`), S_IFREG mode 0777 (no
+  umask), nlink 0, open read-write as one description, so read, write,
+  pread/pwrite, lseek, ftruncate, fstat and fchmod are the file calls'.
+  Its pages are the file's whole pages, so every mapping of it shares
+  them: in one process, through a fork, or a descriptor passed with
+  SCM_RIGHTS (the same description). fcntl F_ADD_SEALS/F_GET_SEALS:
+  the seals live on the node (`ramfs::Node::seals`); SHRINK and GROW
+  refuse a ftruncate that shrinks or grows it and a write past its end,
+  WRITE (and FUTURE_WRITE) writes and writable shared mappings (EPERM),
+  EXEC a change of the execute bits, SEAL further seals (EPERM); WRITE
+  cannot be added while a shared mapping of it open for writing exists,
+  even a read-only one (EBUSY, as Linux 6.18 shows); a read-only shared
+  mapping of a write-sealed file gets a read-only section (mprotect to
+  PROT_WRITE: EACCES). F_ADD_SEALS on an fd not open for writing is
+  EPERM, on what is not a memfd EINVAL. A process's memory is released
+  when it ends (`lx::process_ended`: `mm::clear`, before the parent
+  hears of it, as Linux does), so its mappings no longer count then.
+  Events: `lx memfd` and `lx memfd seal` (`events=ipc`).
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
   munmap, mremap, madvise, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
@@ -8974,11 +9018,11 @@ messages. It is bounded and isolated like the other ABI parsers:
   socket's file-system node is a core object, so seam 5 (shared core
   objects) is the place for it. D-Bus, which GTK also opens, needs the same
   sockets.
-- **`memfd_create`** with `ftruncate`, `mmap(MAP_SHARED)`, and `F_ADD_SEALS`
-  as far as clients use it: an anonymous file whose pages are one section,
-  shared by every process that maps it. LD step 1's file views provide the
-  mapping. The server reads a `wl_shm_pool` through the same section, with
-  no copy until composition.
+- **`memfd_create`** (built: `lx::memfd`, `lx_memfd`) with `ftruncate`,
+  `mmap(MAP_SHARED)`, and the seals: an anonymous file of the shared file
+  system whose pages every mapping shares (LD step 1's file views). The
+  server reads a `wl_shm_pool` through a view of the same pages, with no
+  copy until composition.
 - Each prerequisite is test first, in the corpus: a `unix_test` and a
   `memfd_test` against real Linux transcripts.
 
