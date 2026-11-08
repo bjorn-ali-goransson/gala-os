@@ -228,6 +228,7 @@ has a section under "Open items".
 | R8 | Chain of trust for updates | in progress | steps 2-6 built; Secure Boot next |
 | R9 | Live update, kernel included | in progress | handover milestones (a)-(e) done |
 | OT | OpenTelemetry as the telemetry model | in progress | OT1 done; OT2: threads on every event, the process tree |
+| SU | Security updates: where fixes come from and how they reach machines | planned | gala's dependencies, its own code, Windows' advisories, installed applications; delivery through R8 |
 | PK | `gala install` over winget manifests | in progress | zip/portable installs per user and machine-wide, NSIS installs and a real Inno Setup install (Inno Setup 7.1.1: installed with its Start menu shortcuts and `.iss` association, run, uninstalled), on the winget resolver (selection, dependencies, ARP matching); MSI and MSIX readers |
 | DR | Windows drivers, staged and isolated | later | |
 
@@ -2739,6 +2740,100 @@ among the slowest hand-offs.
 
 **Design**: OBSERVABILITY "OpenTelemetry export"; WORKFLOW
 "OpenTelemetry".
+
+### SU. Security updates
+
+**Goal**: every vulnerability that can reach a gala machine has a named
+source that finds it, an owner who fixes it and a path that delivers the
+fix. R8 is the delivery path for gala itself (every commit on main whose
+CI passes is a release on the feed); this item covers where the fixes
+come from, and how applications installed on gala get theirs.
+
+The boundary follows Windows: Microsoft Update services Windows and
+Microsoft's runtimes, not other vendors' applications, which update
+themselves or through winget. What gala replaces of Windows (kernel,
+system DLLs, Schannel, crypt32, the CA bundle) is gala's to patch;
+what is installed as a package (the .NET runtime, the VC++
+redistributables, WebView2, any application) is updated as a package.
+Not gala's: the test corpus (Chromium, Nginx, the JDK and the rest run
+only inside QEMU and never ship), and distributions inside LX, which
+update themselves (R8).
+
+**Sources of fixes**:
+1. Dependencies shipped in gala: the Rust crates in the system DLLs and
+   `gala.exe` (rustls, the RustCrypto and dalek crates, miniz_oxide,
+   fontdue and ttf-parser, the vendored getrandom), Limine, Mozilla's
+   CA bundle (additions and distrusts), the mingw runtime pieces
+   (THIRD_PARTY.md lists them all).
+2. gala's own code, the largest source for an OS: every system call
+   from user mode (NT and LX), the network stack, the security model
+   (SECURITY "Status" lists its known gaps, e.g. NtOpenProcess granting
+   what is asked), and every parser of untrusted bytes (PE images, the
+   registry log, zip and cabinets, TUF metadata, X.509, fonts, TLS).
+3. Microsoft's advisories (MSRC, Patch Tuesday): gala reimplements
+   Windows' behaviour, so a flaw Microsoft fixes in an API's semantics
+   may be gala's too. Advisories are public documentation (CLEAN_ROOM
+   allows them); Wine's and ReactOS's security fixes are the same kind
+   of signal.
+4. Installed applications: their vendors' fixes, through the
+   applications' own updaters or through `gala upgrade`.
+
+**Next**:
+1. Advisories for dependencies in CI: `cargo deny check advisories`
+   (RustSec) on every pull request and on a daily schedule (advisories
+   appear without commits), Dependabot or Renovate for `Cargo.lock`, a
+   watch on what Cargo does not see (the vendored getrandom, Limine
+   releases, the CA bundle). Its first finding is known: `rsa` 0.9 has
+   RUSTSEC-2023-0071 (Marvin, a timing side channel in RSA decryption,
+   no fixed version), used by `user/bcrypt/src/rsa.rs` for private-key
+   operations any program can call; decide between another
+   implementation and a documented exception.
+2. A private path for fixes: CI publishes every commit on main, so a
+   fix committed there discloses its hole. A disclosure policy in
+   `.github/SECURITY.md` (docs/SECURITY.md is the security model),
+   GitHub's private vulnerability reporting, and a private fork where an
+   embargoed fix is built and tested before it lands and ships.
+3. Fuzzing of gala's own code, run continuously and not only per pull
+   request (OBSERVABILITY "Fuzzing"): a system-call fuzzer in QEMU (the
+   kernel never panics on user input), `cargo fuzz` on the host for the
+   parsers above (OSS-Fuzz takes open-source projects). Every finding
+   becomes a test program, as any bug does.
+4. Adversarial review of changes that cross a trust boundary (system
+   calls, access checks, parsers, the updater), and audits area by area
+   on a schedule; the `unsafe` files audited and the host tests run
+   under Miri.
+5. Microsoft's monthly advisories triaged: each one about an API's
+   behaviour that gala implements becomes a test program checked on
+   real Windows (as WD's are).
+6. Applications' own updaters work: the services, scheduled tasks and
+   logon entries they run from (Task Scheduler: `ITaskService`,
+   `schtasks`, the task store, has no item yet), elevation services,
+   files replaced while in use (MoveFileEx's delay-until-reboot, the
+   Restart Manager), MSI patches (`.msp`) and minor upgrades (PK stage
+   5). BR stage 4's "updater and elevation service may stay off" is a
+   security gap until Edge's updater runs. Test first: an application
+   whose updater replaces it with a newer version.
+7. `gala upgrade` without being asked: a scheduled check that upgrades
+   (or reports, by the user's choice) every package with a newer
+   version, honouring UpgradeBehavior and RequireExplicitUpgrade (PK
+   next step 1), with applications that are running; it uses winget's
+   source index (PK next step 2). Programs installed outside `gala
+   install` are matched through their ARP entries, as winget does.
+   Every check, upgrade and refusal as events.
+8. Later: installed versions matched against known vulnerabilities
+   (winget carries no vulnerability data; matching against NVD's
+   product identifiers is noisy), so an upgrade that fixes one is
+   applied first.
+
+The sandbox limits what an exploited application can do before its fix
+arrives: integrity levels and restricted tokens (SEC), job objects and
+the browser's sandbox (BR stage 3).
+
+**Done when**: advisories for gala's dependencies fail CI; a fuzzer runs
+against the system calls and the parsers without a finding left open;
+an application updates itself on gala; `gala upgrade` runs on a
+schedule; a security fix can be prepared in private and shipped through
+the feed.
 
 ## Known issues and stopgaps
 
