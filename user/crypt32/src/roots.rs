@@ -1,9 +1,12 @@
-//! gala's machine root store in crypt32: the certificates (DER, or PEM
-//! with any number of certificates) in %SystemRoot%\System32\gala\roots,
-//! the trust anchors schannel.dll validates against too. The "ROOT" system
-//! store is opened with them, so programs that build their trust from
-//! crypt32's stores (Chromium's TrustStoreWin, curl) trust what Schannel
-//! trusts. See user/cert_test.
+//! gala's machine certificate directories in crypt32: the certificates
+//! and CRLs (DER, or PEM with any number of CERTIFICATE and X509 CRL
+//! blocks) in %SystemRoot%\System32\gala\roots, the trust anchors
+//! schannel.dll validates against too, and in ...\gala\ca, the
+//! intermediate certificates and the CRLs revocation is checked with
+//! (offline: crl.rs). The "ROOT" and "CA" system stores are opened with
+//! them, so programs that build their trust from crypt32's stores
+//! (Chromium's TrustStoreWin, curl) trust what Schannel trusts. See
+//! user/cert_test.
 
 use core::ffi::c_void;
 
@@ -28,6 +31,7 @@ unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
+    fn GetLastError() -> u32;
 }
 
 /// WIN32_FIND_DATAW.
@@ -45,18 +49,30 @@ struct FindData {
 
 const X509_ASN_ENCODING: u32 = 1;
 const CERT_STORE_ADD_USE_EXISTING: u32 = 2;
+const CRYPT_E_EXISTS: u32 = 0x8009_2005;
 /// Files larger than this are not certificates.
 const MAX_FILE: i64 = 1 << 20;
 
-/// Adds the machine's root certificates to `store`; returns how many.
-pub fn load(store: *mut c_void) -> u32 {
+/// Which of gala's directories.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Directory {
+    /// System32\gala\roots: the ROOT store.
+    Roots,
+    /// System32\gala\ca: the CA store (its absence is normal: no
+    /// intermediates or CRLs kept).
+    Ca,
+}
+
+/// Adds the certificates and CRLs of one of the machine's directories to
+/// `store`; returns how many.
+pub fn load(store: *mut c_void, dir: Directory) -> u32 {
     let mut path = [0u16; 400];
     // SAFETY: our buffer.
     let n = unsafe { GetSystemDirectoryW(path.as_mut_ptr(), 260) } as usize;
     if n == 0 || n > 260 {
         return 0;
     }
-    let suffix = "\\gala\\roots\\";
+    let suffix = if dir == Directory::Roots { "\\gala\\roots\\" } else { "\\gala\\ca\\" };
     let mut len = n;
     for c in suffix.encode_utf16() {
         path[len] = c;
@@ -70,7 +86,9 @@ pub fn load(store: *mut c_void) -> u32 {
     // SAFETY: a NUL-terminated pattern; our output.
     let find = unsafe { FindFirstFileW(path.as_ptr(), &mut data) };
     if find == usize::MAX {
-        super::store::unsupported(b"crypt32.dll!ROOT store (no gala/roots directory)", 0);
+        if dir == Directory::Roots {
+            super::store::unsupported(b"crypt32.dll!ROOT store (no gala/roots directory)", 0);
+        }
         return 0;
     }
     let mut added = 0;
@@ -113,6 +131,7 @@ impl Drop for Buffer {
     }
 }
 
+/// Adds one DER certificate or CRL (a certificate first, then a CRL).
 fn add(store: *mut c_void, der: &[u8]) -> u32 {
     let ok = super::store::CertAddEncodedCertificateToStore(
         store,
@@ -121,15 +140,33 @@ fn add(store: *mut c_void, der: &[u8]) -> u32 {
         der.len() as u32,
         CERT_STORE_ADD_USE_EXISTING,
         core::ptr::null_mut(),
-    );
-    if ok == 0 {
-        // Not a trust anchor then: say so (the length as detail).
+    ) != 0
+        || add_crl(store, der) != 0;
+    if !ok {
+        // Not a trust anchor (or CRL) then: say so (the length as detail).
         super::store::unsupported(
-            b"crypt32.dll!ROOT store (a certificate that does not decode)",
+            b"crypt32.dll!machine store (a certificate or CRL that does not decode)",
             der.len() as u64,
         );
     }
-    u32::from(ok != 0)
+    u32::from(ok)
+}
+
+/// Adds one DER CRL (CERT_STORE_ADD_NEWER: of one issuer's CRLs the latest
+/// is kept).
+fn add_crl(store: *mut c_void, der: &[u8]) -> i32 {
+    const CERT_STORE_ADD_NEWER: u32 = 6;
+    let ok = super::store::CertAddEncodedCRLToStore(
+        store,
+        X509_ASN_ENCODING,
+        der.as_ptr(),
+        der.len() as u32,
+        CERT_STORE_ADD_NEWER,
+        core::ptr::null_mut(),
+    );
+    // An older CRL of an issuer already there is not an error.
+    // SAFETY: plain call.
+    i32::from(ok != 0 || unsafe { GetLastError() } == CRYPT_E_EXISTS)
 }
 
 /// The certificates of one file (NUL-terminated `path`).
@@ -166,21 +203,31 @@ fn load_file(store: *mut c_void, path: &[u16]) -> u32 {
     if bytes.first() == Some(&0x30) {
         return add(store, bytes);
     }
-    // PEM: every CERTIFICATE block.
-    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
-    const END: &[u8] = b"-----END CERTIFICATE-----";
+    // PEM: every CERTIFICATE and X509 CRL block.
+    let mut added = 0;
+    for (begin, end) in [
+        (&b"-----BEGIN CERTIFICATE-----"[..], &b"-----END CERTIFICATE-----"[..]),
+        (b"-----BEGIN X509 CRL-----", b"-----END X509 CRL-----"),
+    ] {
+        added += pem_blocks(store, bytes, begin, end);
+    }
+    added
+}
+
+/// The `begin`..`end` blocks of PEM text `bytes`, decoded and added.
+fn pem_blocks(store: *mut c_void, bytes: &[u8], begin: &[u8], end_line: &[u8]) -> u32 {
     let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
     let mut added = 0;
     let mut rest = bytes;
-    while let Some(start) = find(rest, BEGIN) {
-        let body = &rest[start + BEGIN.len()..];
-        let Some(end) = find(body, END) else { break };
+    while let Some(start) = find(rest, begin) {
+        let body = &rest[start + begin.len()..];
+        let Some(end) = find(body, end_line) else { break };
         if let Some(der) = Buffer::new(end * 3 / 4 + 3)
             && let Some(n) = base64(&body[..end], &der)
         {
             added += add(store, &der.bytes()[..n]);
         }
-        rest = &body[end + END.len()..];
+        rest = &body[end + end_line.len()..];
     }
     added
 }

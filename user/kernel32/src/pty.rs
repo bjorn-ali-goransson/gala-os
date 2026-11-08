@@ -17,7 +17,11 @@
 
 use super::*;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaConsoleCreate(flags: u32, size: u32, info: *mut [u32; 2]) -> u32;
     fn GalaConsoleSize(id: u32, size: *mut u32, set: u32) -> u32;
@@ -125,8 +129,11 @@ pub extern "system" fn CreatePseudoConsole(
     // "<system>\conhost.exe" --headless --width W --height H --signal 0xS
     // --session N [--inheritcursor]
     let mut exe = [0u16; 300];
-    let n = super::files::GetSystemDirectoryW(exe.as_mut_ptr(), 260) as usize;
+    // The host is a native program: a 32-bit caller names it through
+    // Sysnative (its System32 is redirected to SysWOW64).
+    let n = super::files::GetWindowsDirectoryW(exe.as_mut_ptr(), 260) as usize;
     let mut at = n.min(260);
+    put(&mut exe, &mut at, super::arch::NATIVE_SYSTEM_DIRECTORY);
     put(&mut exe, &mut at, b"\\conhost.exe");
     exe[at] = 0;
     let mut line = [0u16; 512];
@@ -158,7 +165,7 @@ pub extern "system" fn CreatePseudoConsole(
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             inherited.as_ptr() as usize,
-            8,
+            size_of_val(&inherited),
             core::ptr::null_mut(),
             core::ptr::null_mut(),
         ) == FALSE
@@ -167,15 +174,13 @@ pub extern "system" fn CreatePseudoConsole(
         CloseHandle(signal_write);
         return closed(E_INVALIDARG);
     }
-    // STARTUPINFOEXW: dwFlags at 60, the handles at 80, 88, 96, the list
-    // at 104.
-    let mut startup = [0u8; 112];
-    startup[0..4].copy_from_slice(&112u32.to_le_bytes());
-    startup[60..64].copy_from_slice(&STARTF_USESTDHANDLES.to_le_bytes());
-    startup[80..88].copy_from_slice(&(input as u64).to_le_bytes());
-    startup[88..96].copy_from_slice(&(output as u64).to_le_bytes());
-    startup[96..104].copy_from_slice(&(output as u64).to_le_bytes());
-    startup[104..112].copy_from_slice(&(list as u64).to_le_bytes());
+    // STARTUPINFOEXW: the standard handles and the attribute list.
+    // SAFETY: an all-zero STARTUPINFOEXW is a valid bit pattern.
+    let mut startup: super::process::StartupInfoEx = unsafe { core::mem::zeroed() };
+    startup.cb = size_of_val(&startup) as u32;
+    startup.flags = STARTF_USESTDHANDLES;
+    startup.std = [input as usize, output as usize, output as usize];
+    startup.attribute_list = list as usize;
     let mut process = [0usize; 3];
     let ok = super::process::CreateProcessW(
         exe.as_ptr(),
@@ -186,7 +191,7 @@ pub extern "system" fn CreatePseudoConsole(
         EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
         core::ptr::null_mut(),
         core::ptr::null(),
-        startup.as_ptr(),
+        (&raw const startup).cast(),
         process.as_mut_ptr(),
     );
     CloseHandle(signal_read);

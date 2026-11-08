@@ -10,6 +10,15 @@
 
 mod image;
 mod stack;
+
+// ChromeDriver links these (crash stacks' lines and module names); none
+// is called in a normal run.
+gala_stubs::unimplemented_exports!("dbghelp.dll":
+    SymGetLineFromAddr64
+    SymGetModuleInfo64
+    SymGetSearchPathW
+    SymSetSearchPathW
+);
 mod symbols;
 
 #[allow(dead_code)]

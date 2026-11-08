@@ -18,7 +18,11 @@ use crate::window::{Handle, Hwnd};
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaWindowSurface(hwnd: u64, section: Handle, offset: u64, width: u32, height: u32) -> u32;
     fn GalaWindowSurfaceOpen(hwnd: u64, section: *mut Handle, info: *mut [u8; 24]) -> u32;
@@ -34,7 +38,11 @@ unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CreateFileMappingW(
         file: Handle,

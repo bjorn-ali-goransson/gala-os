@@ -8,6 +8,8 @@
 //! missing program fails with ERROR_FILE_NOT_FOUND. OpenProcess by id
 //! opens an exited child (while a handle keeps it), a suspended one and
 //! the caller; id 0 or an unused id fail with ERROR_INVALID_PARAMETER.
+//! The child's ProcessBasicInformation names us as its parent
+//! (InheritedFromUniqueProcessId).
 //! A Toolhelp snapshot lists the suspended child (parent, threads, name)
 //! and its thread. VirtualAllocEx/VirtualQueryEx/VirtualFreeEx reach the
 //! suspended child's address space (PROCESS_VM_OPERATION needed).
@@ -120,6 +122,17 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
 }
 
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueryInformationProcess(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> i32;
+}
+
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -183,6 +196,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -192,10 +206,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -541,6 +557,20 @@ fn run() -> Result<(), u32> {
         let opened = OpenProcess(SYNCHRONIZE, 0, info.process_id);
         c.ok(!opened.is_null(), GetLastError().into())?;
         c.eq(WaitForSingleObject(opened, 0).into(), WAIT_TIMEOUT.into())?;
+        // PROCESS_BASIC_INFORMATION (x64): UniqueProcessId at 32,
+        // InheritedFromUniqueProcessId (the creator) at 40.
+        let mut basic = [0u8; 48];
+        let st = NtQueryInformationProcess(
+            info.process,
+            0,
+            basic.as_mut_ptr(),
+            48,
+            core::ptr::null_mut(),
+        );
+        c.eq(st as u32 as u64, 0)?;
+        let field = |at: usize| u64::from_le_bytes(basic[at..at + 8].try_into().unwrap_or([0; 8]));
+        c.eq(field(32), info.process_id.into())?;
+        c.eq(field(40), GetCurrentProcessId().into())?;
         toolhelp(&mut c, &info)?;
         // Its address space through the process handle (PostgreSQL
         // reserves its shared memory in a suspended child so): a region
@@ -737,4 +767,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

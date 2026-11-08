@@ -344,7 +344,8 @@ extern "C" fn ap_main(start: &'static ApStart) -> ! {
     main(start.index)
 }
 
-/// (CPU index, local APIC id) of every online CPU.
+/// (CPU index, hardware id) of every online CPU (x86-64: the local APIC
+/// id).
 pub fn online_cpus() -> impl Iterator<Item = (u32, u32)> {
     let mask = online_mask();
     (0..MAX_CPUS as u32)
@@ -358,6 +359,13 @@ pub fn send_reschedule(index: u32) {
     if index < MAX_CPUS as u32 && online_mask() & (1 << index) != 0 {
         apic::send_ipi(APIC_IDS[index as usize].load(Ordering::Relaxed), RESCHEDULE_VECTOR);
     }
+}
+
+/// Sends a non-maskable interrupt to the CPU with hardware id `hw_id`
+/// (`online_cpus`' second value: x86-64's local APIC id), which reaches it
+/// with interrupts off (the profiler's samples, state dumps).
+pub fn send_nmi(hw_id: u32) {
+    apic::send_nmi(hw_id);
 }
 
 fn has_rdtscp() -> bool {

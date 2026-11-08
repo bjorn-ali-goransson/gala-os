@@ -6,12 +6,20 @@
 //! loopback address, getsockname (an ephemeral port after binding port 0;
 //! accept reports the client's address), send/recv round trips in both
 //! directions (with MSG_PEEK), a 16 KiB transfer, a graceful close (recv
-//! returns 0), WSAECONNREFUSED for a port nobody listens on, WSAENOTSOCK
+//! returns 0), WSAECONNREFUSED for a port nobody listens on (a
+//! non-blocking connect's in select's except set and SO_ERROR), WSAENOTSOCK
 //! for a closed socket, WSADuplicateSocketW and WSASocketW from its
 //! protocol information (a second socket for the connection; also
 //! WSADuplicateSocketA with WSASocketA), WSAConnect
 //! and WSAAccept, and non-blocking sockets (WSAEWOULDBLOCK from
-//! accept and recv; an accepted socket inherits the listener's mode).
+//! accept and recv; an accepted socket inherits the listener's mode),
+//! many listeners at once (twelve at SOMAXCONN, each accepting a
+//! connection: a listener holds no fixed share of the stack's sockets),
+//! the extension functions asyncio's _overlapped asks for (DisconnectEx:
+//! a graceful disconnect, overlapped; TransmitFile's pointer),
+//! WSAStringToAddressA/W (IPv4 and IPv6, ports, scopes, refusals)
+//! and a full backlog (listen's documented WSAECONNREFUSED once `backlog`
+//! connections wait unaccepted; room again after an accept).
 //! Prints `winsock_test: ok` or exits with the number of the failing check.
 //!
 //! With the argument `serve` it then listens on port 7 of every address,
@@ -37,6 +45,10 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn Sleep(ms: u32);
     fn GetCurrentProcessId() -> u32;
+    fn CreateEventW(attrs: *const c_void, manual: Bool, initial: Bool, name: *const u16) -> Handle;
+    fn GetOverlappedResult(h: Handle, ov: *mut Overlapped, done: *mut u32, wait: Bool) -> Bool;
+    fn CloseHandle(h: Handle) -> Bool;
+    fn GetLastError() -> u32;
 }
 
 #[link(name = "ws2_32", kind = "raw-dylib")]
@@ -117,6 +129,28 @@ unsafe extern "system" {
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
     fn getsockopt(s: Socket, level: i32, name: i32, value: *mut u8, len: *mut i32) -> i32;
     fn ioctlsocket(s: Socket, cmd: i32, arg: *mut u32) -> i32;
+    fn select(
+        n: i32,
+        read: *mut FdSet,
+        write: *mut FdSet,
+        except: *mut FdSet,
+        timeout: *const [i32; 2],
+    ) -> i32;
+    fn getpeername(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
+    fn WSAStringToAddressA(
+        text: *const u8,
+        af: i32,
+        info: *const u8,
+        addr: *mut u8,
+        len: *mut i32,
+    ) -> i32;
+    fn WSAStringToAddressW(
+        text: *const u16,
+        af: i32,
+        info: *const u8,
+        addr: *mut u8,
+        len: *mut i32,
+    ) -> i32;
 }
 
 #[allow(dead_code)]
@@ -153,6 +187,21 @@ struct WsaData {
 /// SOCKADDR_IN: family, port and address in network byte order.
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// fd_set (winsock2.h): a count and up to FD_SETSIZE (64) sockets.
+#[repr(C)]
+struct FdSet {
+    count: u32,
+    sockets: [Socket; 64],
+}
+
+impl FdSet {
+    fn one(s: Socket) -> FdSet {
+        let mut f = FdSet { count: 1, sockets: [0; 64] };
+        f.sockets[0] = s;
+        f
+    }
+}
+
 /// WSAPOLLFD.
 #[repr(C)]
 struct PollFd {
@@ -179,6 +228,32 @@ impl SockaddrIn {
     }
 }
 
+/// OVERLAPPED.
+#[repr(C)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u64,
+    event: Handle,
+}
+
+/// DisconnectEx(s, lpOverlapped, dwFlags, dwReserved) (mswsock.h).
+type DisconnectEx = unsafe extern "system" fn(Socket, *mut Overlapped, u32, u32) -> Bool;
+
+const SIO_GET_EXTENSION_FUNCTION_POINTER: u32 = 0xc800_0006;
+/// WSAID_DISCONNECTEX and WSAID_TRANSMITFILE (mswsock.h) as GUID bytes.
+const WSAID_DISCONNECTEX: [u8; 16] =
+    guid(0x7fda_2e11, 0x8630, 0x436f, [0xa0, 0x31, 0xf5, 0x36, 0xa6, 0xee, 0xc1, 0x57]);
+const WSAID_TRANSMITFILE: [u8; 16] =
+    guid(0xb536_7df0, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
+const WSA_IO_PENDING: u32 = 997;
+const WSAEINVAL: i32 = 10022;
+
+const fn guid(a: u32, b: u16, c: u16, d: [u8; 8]) -> [u8; 16] {
+    let (a, b, c) = (a.to_le_bytes(), b.to_le_bytes(), c.to_le_bytes());
+    [a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]
+}
+
 const AF_INET: i32 = 2;
 const SOCK_STREAM: i32 = 1;
 const IPPROTO_TCP: i32 = 6;
@@ -190,6 +265,7 @@ const WSAEWOULDBLOCK: i32 = 10035;
 const FIONBIO: i32 = 0x8004_667eu32 as i32;
 const WSAECONNREFUSED: i32 = 10061;
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+const SOMAXCONN: i32 = 0x7fff_ffff;
 const ADDR_LEN: i32 = size_of::<SockaddrIn>() as i32;
 
 fn out(text: &[u8]) {
@@ -230,6 +306,7 @@ fn decimal(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -239,10 +316,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -531,9 +610,282 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(WSAGetLastError() as u64, WSAECONNREFUSED as u64)?;
         c.eq(closesocket(refused) as u64, 0)?;
 
+        // The same refusal on a non-blocking connect (Python's
+        // create_connection with a timeout): select reports it in the
+        // except set, not the write set; SO_ERROR holds WSAECONNREFUSED;
+        // the socket has no peer (WSAENOTCONN).
+        const SOL_SOCKET: i32 = 0xffff;
+        const SO_ERROR: i32 = 0x1007;
+        const WSAENOTCONN: i32 = 10057;
+        let nb = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        let mut on = 1u32;
+        c.eq(ioctlsocket(nb, FIONBIO, &mut on) as u64, 0)?;
+        c.eq(connect(nb, &target, ADDR_LEN) as u64, SOCKET_ERROR as u64)?;
+        c.eq(WSAGetLastError() as u64, WSAEWOULDBLOCK as u64)?;
+        let (mut w, mut e) = (FdSet::one(nb), FdSet::one(nb));
+        c.eq(select(0, null_mut(), &mut w, &mut e, &[10, 0]) as u64, 1)?;
+        c.eq(w.count.into(), 0)?;
+        c.eq(e.count.into(), 1)?;
+        let (mut error, mut elen) = (0i32, 4i32);
+        c.eq(getsockopt(nb, SOL_SOCKET, SO_ERROR, (&raw mut error).cast(), &mut elen) as u64, 0)?;
+        c.eq(error as u64, WSAECONNREFUSED as u64)?;
+        let mut peer = SockaddrIn::new([0; 4], 0);
+        len = ADDR_LEN;
+        c.eq(getpeername(nb, &mut peer, &mut len) as u64, SOCKET_ERROR as u64)?;
+        c.eq(WSAGetLastError() as u64, WSAENOTCONN as u64)?;
+        c.eq(closesocket(nb) as u64, 0)?;
+
         // A closed socket is no socket.
         c.eq(send(refused, b"x".as_ptr(), 1, 0) as u64, SOCKET_ERROR as u64)?;
         c.eq(WSAGetLastError() as u64, WSAENOTSOCK as u64)?;
+    }
+    Ok(())
+}
+
+/// A listener on an ephemeral loopback port with `backlog`; its port.
+fn listener_on_loopback(c: &mut Checks, backlog: i32) -> Result<(Socket, u16), u32> {
+    // SAFETY: documented Winsock calls with valid arguments.
+    unsafe {
+        let s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.ok(s != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        c.eq(bind(s, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.ok(listen(s, backlog) == 0, WSAGetLastError() as u64)?;
+        let mut bound = SockaddrIn::new([0; 4], 0);
+        let mut len = ADDR_LEN;
+        c.eq(getsockname(s, &mut bound, &mut len) as u64, 0)?;
+        Ok((s, u16::from_be(bound.port)))
+    }
+}
+
+/// Many listeners at once, and a full backlog.
+fn listeners(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: documented Winsock calls with valid arguments.
+    unsafe {
+        // Twelve listeners at SOMAXCONN (Nginx listens at 511 on each of
+        // its ports), all open together; each takes a connection and the
+        // bytes go both ways.
+        const MANY: usize = 12;
+        let mut many = [(INVALID_SOCKET, 0u16); MANY];
+        for l in many.iter_mut() {
+            *l = listener_on_loopback(c, SOMAXCONN)?;
+        }
+        for (i, &(l, port)) in many.iter().enumerate() {
+            let client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            c.ok(client != INVALID_SOCKET, WSAGetLastError() as u64)?;
+            c.ok(
+                connect(client, &SockaddrIn::new(LOOPBACK, port), ADDR_LEN) == 0,
+                WSAGetLastError() as u64,
+            )?;
+            let server = accept(l, null_mut(), null_mut());
+            c.ok(server != INVALID_SOCKET, WSAGetLastError() as u64)?;
+            let byte = [i as u8];
+            let mut got = [0xffu8; 1];
+            c.eq(send(client, byte.as_ptr(), 1, 0) as u64, 1)?;
+            c.eq(recv(server, got.as_mut_ptr(), 1, 0) as u64, 1)?;
+            c.eq(got[0].into(), i as u64)?;
+            c.eq(send(server, byte.as_ptr(), 1, 0) as u64, 1)?;
+            c.eq(recv(client, got.as_mut_ptr(), 1, 0) as u64, 1)?;
+            c.eq(got[0].into(), i as u64)?;
+            c.eq(closesocket(server) as u64, 0)?;
+            c.eq(closesocket(client) as u64, 0)?;
+        }
+        for &(l, _) in &many {
+            c.eq(closesocket(l) as u64, 0)?;
+        }
+
+        // A full backlog (listen on Microsoft Learn: "If a connection
+        // request arrives and the queue is full, the client will receive
+        // an error with an indication of WSAECONNREFUSED"): two
+        // connections wait unaccepted at backlog 2, the third is refused;
+        // once one is accepted there is room for another.
+        let (l, port) = listener_on_loopback(c, 2)?;
+        let to = SockaddrIn::new(LOOPBACK, port);
+        let mut waiting = [INVALID_SOCKET; 2];
+        for w in waiting.iter_mut() {
+            *w = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            c.ok(connect(*w, &to, ADDR_LEN) == 0, WSAGetLastError() as u64)?;
+        }
+        let refused = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.eq(connect(refused, &to, ADDR_LEN) as u64, SOCKET_ERROR as u64)?;
+        c.eq(WSAGetLastError() as u64, WSAECONNREFUSED as u64)?;
+        c.eq(closesocket(refused) as u64, 0)?;
+        let first = accept(l, null_mut(), null_mut());
+        c.ok(first != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        let late = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.ok(connect(late, &to, ADDR_LEN) == 0, WSAGetLastError() as u64)?;
+        // The rest wait in order: the second client, then the late one.
+        let mut accepted = [first, INVALID_SOCKET, INVALID_SOCKET];
+        for a in accepted[1..].iter_mut() {
+            *a = accept(l, null_mut(), null_mut());
+            c.ok(*a != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        }
+        let mut got = [0u8; 1];
+        for (i, &client) in [waiting[0], waiting[1], late].iter().enumerate() {
+            c.eq(send(client, [b'a' + i as u8].as_ptr(), 1, 0) as u64, 1)?;
+            c.eq(recv(accepted[i], got.as_mut_ptr(), 1, 0) as u64, 1)?;
+            c.eq(got[0].into(), (b'a' + i as u8).into())?;
+        }
+        for s in accepted.into_iter().chain(waiting).chain([late, l]) {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
+    }
+    Ok(())
+}
+
+/// An extension function's pointer from WSAIoctl.
+fn extension(c: &mut Checks, s: Socket, id: &[u8; 16]) -> Result<usize, u32> {
+    let mut function = 0usize;
+    let mut returned = 0u32;
+    // SAFETY: a 16-byte GUID in, an 8-byte pointer out.
+    let r = unsafe {
+        WSAIoctl(
+            s,
+            SIO_GET_EXTENSION_FUNCTION_POINTER,
+            id.as_ptr(),
+            16,
+            (&raw mut function).cast(),
+            8,
+            &mut returned,
+            null_mut(),
+            0,
+        )
+    };
+    c.ok(r == 0, unsafe { WSAGetLastError() } as u64)?;
+    c.eq(returned.into(), 8)?;
+    c.ok(function != 0, 0)?;
+    Ok(function)
+}
+
+/// The extension functions asyncio's _overlapped asks for at import
+/// (AcceptEx, ConnectEx, DisconnectEx, TransmitFile), and DisconnectEx:
+/// a graceful disconnect, overlapped, after which the peer reads the end
+/// of the stream; a nonzero dwReserved is WSAEINVAL.
+fn disconnect_ex(c: &mut Checks) -> Result<(), u32> {
+    let (l, port) = listener_on_loopback(c, 1)?;
+    // SAFETY: documented Winsock and kernel32 calls with valid arguments;
+    // the function pointer is DisconnectEx's, as WSAIoctl handed it out.
+    unsafe {
+        let client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        c.ok(
+            connect(client, &SockaddrIn::new(LOOPBACK, port), ADDR_LEN) == 0,
+            WSAGetLastError() as u64,
+        )?;
+        let server = accept(l, null_mut(), null_mut());
+        c.ok(server != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        extension(c, client, &WSAID_TRANSMITFILE)?;
+        let disconnect: DisconnectEx =
+            core::mem::transmute(extension(c, client, &WSAID_DISCONNECTEX)?);
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, event: null_mut() };
+        c.eq(disconnect(client, &mut ov, 0, 1) as u64, 0)?;
+        c.eq(WSAGetLastError() as u64, WSAEINVAL as u64)?;
+        c.eq(send(client, b"last".as_ptr(), 4, 0) as u64, 4)?;
+        ov.event = CreateEventW(null(), 1, 0, null());
+        c.ok(!ov.event.is_null(), GetLastError().into())?;
+        if disconnect(client, &mut ov, 0, 0) == 0 {
+            c.eq(WSAGetLastError() as u64, WSA_IO_PENDING.into())?;
+        }
+        let mut done = 0u32;
+        c.ok(
+            GetOverlappedResult(client as Handle, &mut ov, &mut done, 1) != 0,
+            GetLastError().into(),
+        )?;
+        // The peer reads what was sent, then the end of the stream.
+        let mut buf = [0u8; 8];
+        c.eq(recv_all(server, &mut buf) as u64, 4)?;
+        c.ok(&buf[..4] == b"last", buf[0].into())?;
+        c.eq(CloseHandle(ov.event) as u64, 1)?;
+        for s in [client, server, l] {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
+    }
+    Ok(())
+}
+
+/// WSAStringToAddressA/W (asyncio's _overlapped parses addresses with
+/// it): IPv4 with and without a port, IPv6 bracketed with a port and with
+/// a scope; WSAEINVAL for text that is no address of the family,
+/// WSAEFAULT for a buffer smaller than the family's SOCKADDR.
+fn string_to_address(c: &mut Checks) -> Result<(), u32> {
+    const AF_INET6: i32 = 23;
+    const WSAEFAULT: i32 = 10014;
+    // SAFETY: NUL-terminated strings and buffers of the given lengths.
+    unsafe {
+        let mut sa = [0xffu8; 28];
+        let mut len = 28i32;
+        c.eq(
+            WSAStringToAddressA(
+                c"127.0.0.1:8080".as_ptr().cast(),
+                AF_INET,
+                null(),
+                sa.as_mut_ptr(),
+                &mut len,
+            ) as u64,
+            0,
+        )?;
+        c.eq(len as u64, 16)?;
+        c.ok(sa[..8] == [2, 0, 0x1f, 0x90, 127, 0, 0, 1], sa[2].into())?;
+        len = 16;
+        c.eq(
+            WSAStringToAddressA(
+                c"10.1.2.3".as_ptr().cast(),
+                AF_INET,
+                null(),
+                sa.as_mut_ptr(),
+                &mut len,
+            ) as u64,
+            0,
+        )?;
+        c.ok(sa[..8] == [2, 0, 0, 0, 10, 1, 2, 3], sa[2].into())?;
+        let text = b"[::1]:443\0".map(u16::from);
+        len = 28;
+        c.eq(
+            WSAStringToAddressW(text.as_ptr(), AF_INET6, null(), sa.as_mut_ptr(), &mut len) as u64,
+            0,
+        )?;
+        c.eq(len as u64, 28)?;
+        // SOCKADDR_IN6: family, port, flow info, address, scope id.
+        c.ok(sa[..8] == [23, 0, 1, 0xbb, 0, 0, 0, 0], sa[2].into())?;
+        c.ok(sa[8..24] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], sa[23].into())?;
+        c.eq(u32::from_le_bytes([sa[24], sa[25], sa[26], sa[27]]).into(), 0)?;
+        len = 28;
+        c.eq(
+            WSAStringToAddressA(
+                c"fe80::1%3".as_ptr().cast(),
+                AF_INET6,
+                null(),
+                sa.as_mut_ptr(),
+                &mut len,
+            ) as u64,
+            0,
+        )?;
+        c.ok(sa[2..4] == [0, 0] && sa[8..10] == [0xfe, 0x80] && sa[23] == 1, sa[8].into())?;
+        c.eq(u32::from_le_bytes([sa[24], sa[25], sa[26], sa[27]]).into(), 3)?;
+        for (text, af) in [
+            (c"bogus", AF_INET),
+            (c"1.2.3.4", AF_INET6),
+            (c"::1", AF_INET),
+            (c"1.2.3.4:99999", AF_INET),
+        ] {
+            len = 28;
+            c.eq(
+                WSAStringToAddressA(text.as_ptr().cast(), af, null(), sa.as_mut_ptr(), &mut len)
+                    as u64,
+                SOCKET_ERROR as u64,
+            )?;
+            c.eq(WSAGetLastError() as u64, WSAEINVAL as u64)?;
+        }
+        len = 8;
+        c.eq(
+            WSAStringToAddressA(
+                c"127.0.0.1".as_ptr().cast(),
+                AF_INET,
+                null(),
+                sa.as_mut_ptr(),
+                &mut len,
+            ) as u64,
+            SOCKET_ERROR as u64,
+        )?;
+        c.eq(WSAGetLastError() as u64, WSAEFAULT as u64)?;
     }
     Ok(())
 }
@@ -589,6 +941,9 @@ fn wants_serve() -> bool {
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     loopback(&mut c)?;
+    listeners(&mut c)?;
+    disconnect_ex(&mut c)?;
+    string_to_address(&mut c)?;
     if wants_serve() {
         serve(&mut c)?;
     }
@@ -614,4 +969,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

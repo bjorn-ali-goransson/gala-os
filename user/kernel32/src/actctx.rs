@@ -58,7 +58,8 @@ pub extern "system" fn CreateActCtxW(ctx: *const ActCtx) -> Handle {
     }
     // SAFETY: the caller's ACTCTXW (cbSize checked first).
     let c = unsafe { &*ctx };
-    if (c.size as usize) < 16 {
+    // At least cbSize, dwFlags and lpSource.
+    if (c.size as usize) < core::mem::offset_of!(ActCtx, architecture) {
         return fail_with(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
     }
     let name = if c.flags & ACTCTX_FLAG_RESOURCE_NAME_VALID != 0 {

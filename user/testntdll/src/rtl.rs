@@ -7,6 +7,7 @@
 //! (TODO: the Unicode upcase table).
 
 use crate::heap::{RtlAllocateHeap, RtlFreeHeap, process_heap};
+use crate::{PARAMS_CURRENT_DIRECTORY, PTR};
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 const STATUS_SUCCESS: u32 = 0;
@@ -666,8 +667,12 @@ pub extern "system" fn RtlFirstFreeAce(acl: *const u8, ace: *mut *mut u8) -> u8 
 }
 
 // ---- Security descriptors: Revision, Sbz1, Control, then Owner, Group,
-// Sacl, Dacl: pointers (absolute, 40 bytes) or offsets (self-relative,
-// 20 bytes) ----
+// Sacl, Dacl: pointers (absolute: 40 bytes on x64, 20 on x86) or offsets
+// (self-relative, 20 bytes) ----
+
+/// The absolute form's size: the header, padded to a pointer, and four
+/// pointers.
+const ABSOLUTE_SIZE: usize = 5 * size_of::<usize>();
 
 const SE_OWNER_DEFAULTED: u16 = 0x1;
 const SE_GROUP_DEFAULTED: u16 = 0x2;
@@ -703,7 +708,7 @@ unsafe fn field(sd: *const u8, index: usize) -> *mut u8 {
             let off = sd.add(4 + 4 * index).cast::<u32>().read_unaligned() as usize;
             if off == 0 { core::ptr::null_mut() } else { sd.add(off).cast_mut() }
         } else {
-            sd.add(8 + 8 * index).cast::<*mut u8>().read_unaligned()
+            sd.add(size_of::<usize>() * (1 + index)).cast::<*mut u8>().read_unaligned()
         }
     }
 }
@@ -713,9 +718,9 @@ pub extern "system" fn RtlCreateSecurityDescriptor(sd: *mut u8, revision: u32) -
     if revision != 1 {
         return STATUS_UNKNOWN_REVISION;
     }
-    // SAFETY: the caller's 40-byte buffer.
+    // SAFETY: the caller's SECURITY_DESCRIPTOR.
     unsafe {
-        core::ptr::write_bytes(sd, 0, 40);
+        core::ptr::write_bytes(sd, 0, ABSOLUTE_SIZE);
         *sd = 1;
     }
     STATUS_SUCCESS
@@ -728,7 +733,7 @@ fn set_field(sd: *mut u8, index: usize, value: *mut u8, bits: u16, on: u16) -> u
         if control(sd) & SE_SELF_RELATIVE != 0 {
             return STATUS_BAD_DESCRIPTOR_FORMAT;
         }
-        sd.add(8 + 8 * index).cast::<*mut u8>().write_unaligned(value);
+        sd.add(size_of::<usize>() * (1 + index)).cast::<*mut u8>().write_unaligned(value);
         set_control(sd, control(sd) & !bits | on);
     }
     STATUS_SUCCESS
@@ -898,8 +903,15 @@ pub extern "system" fn RtlAbsoluteToSelfRelativeSD(
 }
 
 // ---- Critical sections (RTL_CRITICAL_SECTION, x64): DebugInfo,
-// LockCount (-1 free), RecursionCount, OwningThread, LockSemaphore,
-// SpinCount. gala's spin and yield while taken (no kernel wait) ----
+// LockCount, RecursionCount, OwningThread, LockSemaphore, SpinCount.
+//
+// LockCount is -1 when free and, while taken, the number of threads
+// waiting for it (0: none). An entering thread spins a little for it to
+// come free, then counts itself in and sleeps on a process-wide keyed
+// event keyed by the section's address. A leaving owner with waiters
+// does not free the section: it hands it to one of them (releasing the
+// key, which waits until that waiter is there), so no wake is lost and
+// no waiter polls. ----
 
 #[repr(C)]
 pub struct CriticalSection {
@@ -912,10 +924,7 @@ pub struct CriticalSection {
 }
 
 fn thread_id() -> usize {
-    let me: usize;
-    // SAFETY: gs:[0x48] is TEB.ClientId.UniqueThread.
-    unsafe { core::arch::asm!("mov {}, gs:[0x48]", out(reg) me, options(nostack, readonly)) };
-    me
+    crate::thread_id()
 }
 
 #[unsafe(no_mangle)]
@@ -957,13 +966,35 @@ pub extern "system" fn RtlEnterCriticalSection(cs: *mut CriticalSection) -> u32 
         return STATUS_SUCCESS;
     }
     let mut spins = 0u32;
-    while cs.lock_count.compare_exchange(-1, 0, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        spins += 1;
-        if spins < 100 {
-            core::hint::spin_loop();
-        } else {
-            crate::NtYieldExecution();
+    loop {
+        if cs.lock_count.compare_exchange(-1, 0, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            break;
         }
+        spins += 1;
+        if spins < CS_SPINS {
+            core::hint::spin_loop();
+            continue;
+        }
+        // Count in as a waiter; -1 before means it came free meanwhile.
+        if cs.lock_count.fetch_add(1, Ordering::Acquire) == -1 {
+            break;
+        }
+        let e = cs_event();
+        if e == NO_EVENT {
+            // No keyed event (no memory): the leaving owner hands the
+            // section over through the owner field instead.
+            while cs
+                .owner
+                .compare_exchange(HANDED, me, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                crate::NtYieldExecution();
+            }
+        } else {
+            crate::NtWaitForKeyedEvent(e, key_of(cs), 0, core::ptr::null());
+        }
+        // Handed over by the leaving owner.
+        break;
     }
     cs.owner.store(me, Ordering::Release);
     cs.recursion = 1;
@@ -994,9 +1025,53 @@ pub extern "system" fn RtlLeaveCriticalSection(cs: *mut CriticalSection) -> u32 
     cs.recursion -= 1;
     if cs.recursion == 0 {
         cs.owner.store(0, Ordering::Release);
-        cs.lock_count.store(-1, Ordering::Release);
+        // 0 → -1: nobody waits, free. n > 0 → n - 1: hand it to a waiter.
+        if cs.lock_count.fetch_sub(1, Ordering::Release) > 0 {
+            let e = cs_event();
+            if e == 0
+                || crate::NtReleaseKeyedEvent(e, key_of(cs), 0, core::ptr::null()) != STATUS_SUCCESS
+            {
+                cs.owner.store(HANDED, Ordering::Release);
+            }
+        }
     }
     STATUS_SUCCESS
+}
+
+/// How many rounds an entering thread spins before it sleeps.
+const CS_SPINS: u32 = 100;
+/// OwningThread while a section is being handed over without the keyed
+/// event (an impossible thread id).
+const HANDED: usize = usize::MAX;
+/// The keyed event critical sections sleep on (created on first use; or
+/// NO_EVENT for good once creating it failed, so that waiters and owners
+/// always agree on how a handover goes).
+static CS_EVENT: AtomicUsize = AtomicUsize::new(0);
+const NO_EVENT: usize = usize::MAX;
+
+fn key_of(cs: &CriticalSection) -> usize {
+    core::ptr::from_ref(cs) as usize
+}
+
+/// The process's critical-section keyed event, or NO_EVENT.
+fn cs_event() -> usize {
+    let e = CS_EVENT.load(Ordering::Acquire);
+    if e != 0 {
+        return e;
+    }
+    let mut h = 0usize;
+    if crate::NtCreateKeyedEvent(&mut h, 0xf_0003, core::ptr::null(), 0) != STATUS_SUCCESS {
+        h = NO_EVENT;
+    }
+    match CS_EVENT.compare_exchange(0, h, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => h,
+        Err(other) => {
+            if h != NO_EVENT {
+                crate::NtClose(h);
+            }
+            other
+        }
+    }
 }
 
 // ---- Misc ----
@@ -1020,12 +1095,7 @@ pub extern "system" fn NtQueryTimerResolution(
 
 /// The process parameters (PEB.ProcessParameters).
 fn process_parameters() -> usize {
-    let peb: usize;
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters at +0x20.
-    unsafe {
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        *((peb + 0x20) as *const usize)
-    }
+    crate::rdp(crate::peb() + crate::PEB_PROCESS_PARAMETERS)
 }
 
 /// RtlSetCurrentDirectory_U(path): a full DOS path (`C:\dir`, also as
@@ -1039,8 +1109,13 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
     let params = process_parameters();
     let mut dos = [0u16; 520];
     let mut n = 0;
-    // SAFETY: the caller's string; CurrentDirectory: DosPath at +0x38
-    // (Length, MaximumLength, Buffer at +0x40), Handle at +0x48.
+    // CurrentDirectory: DosPath (Length, MaximumLength, Buffer), then
+    // Handle.
+    let (length, maximum) =
+        (params + PARAMS_CURRENT_DIRECTORY, params + PARAMS_CURRENT_DIRECTORY + 2);
+    let (buffer, handle) =
+        (params + PARAMS_CURRENT_DIRECTORY + PTR, params + PARAMS_CURRENT_DIRECTORY + 2 * PTR);
+    // SAFETY: the caller's string; the parameters' CurrentDirectory.
     unsafe {
         let mut p = chars(path);
         let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
@@ -1049,8 +1124,8 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
         }
         let absolute = p.get(1) == Some(&u16::from(b':')) || p.first() == Some(&BACKSLASH);
         if !absolute {
-            let len = usize::from(*((params + 0x38) as *const u16)) / 2;
-            let cur = core::slice::from_raw_parts(*((params + 0x40) as *const *const u16), len);
+            let len = usize::from(*(length as *const u16)) / 2;
+            let cur = core::slice::from_raw_parts(*(buffer as *const *const u16), len);
             if cur.len() >= dos.len() {
                 return STATUS_INVALID_PARAMETER;
             }
@@ -1078,7 +1153,7 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
             buffer: nt.as_ptr(),
         };
         let attributes = crate::ObjectAttributes {
-            length: 48,
+            length: core::mem::size_of::<crate::ObjectAttributes>() as u32,
             root_directory: 0,
             object_name: &name,
             attributes: 0x40, // OBJ_CASE_INSENSITIVE
@@ -1092,16 +1167,16 @@ pub extern "system" fn RtlSetCurrentDirectory_U(path: *const UnicodeString) -> u
         if status != STATUS_SUCCESS {
             return status;
         }
-        let max = usize::from(*((params + 0x3a) as *const u16)) / 2;
+        let max = usize::from(*(maximum as *const u16)) / 2;
         if n + 1 > max {
             crate::NtClose(h);
             return STATUS_INVALID_PARAMETER;
         }
-        let buf = *((params + 0x40) as *const *mut u16);
+        let buf = *(buffer as *const *mut u16);
         core::ptr::copy_nonoverlapping(dos.as_ptr(), buf, n);
         *buf.add(n) = 0;
-        *((params + 0x38) as *mut u16) = (2 * n) as u16;
-        let old = core::mem::replace(&mut *((params + 0x48) as *mut usize), h);
+        *(length as *mut u16) = (2 * n) as u16;
+        let old = core::mem::replace(&mut *(handle as *mut usize), h);
         if old != 0 {
             crate::NtClose(old);
         }

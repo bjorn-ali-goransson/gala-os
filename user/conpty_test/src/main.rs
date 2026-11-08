@@ -439,6 +439,11 @@ fn parent() -> ! {
         }
         let mut startup = [0u8; 112];
         startup[0..4].copy_from_slice(&112u32.to_le_bytes());
+        // STARTF_USESTDHANDLES with no handles (Microsoft's ConPTY
+        // samples): without it a console child takes the parent's standard
+        // handles when those are no console (a pipe under run-all.ps1, the
+        // child then says "not a console"), not the pseudo console's.
+        startup[60..64].copy_from_slice(&0x100u32.to_le_bytes());
         startup[104..112].copy_from_slice(&(list as u64).to_le_bytes());
         let mut exe = [0u16; 300];
         let n = GetModuleFileNameW(core::ptr::null_mut(), exe.as_mut_ptr(), 260) as usize;

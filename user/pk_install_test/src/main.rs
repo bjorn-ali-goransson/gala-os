@@ -31,6 +31,14 @@
 //! old files gone); uninstall removes files, command and record; the
 //! command is gone from PATH.
 //!
+//! With the argument `machine` (scenario pk_install_machine, run as
+//! SYSTEM: an administrator) it checks a machine-scope portable install
+//! (`machine_test`); the zip run checks that the boot user, no
+//! administrator, is refused one (exit 6).
+//!
+//! With the argument `inno` (scenario pk_install_inno) it installs,
+//! runs and uninstalls a real Inno Setup installer (`inno_test`).
+//!
 //! With the argument `nsis` (scenario pk_install_nsis) it checks an NSIS
 //! installer instead (`nsis_test`); the zip run also checks an Inno Setup
 //! stand-in that registers nothing (exit 4) and an MSIX (exit 3). With
@@ -57,6 +65,7 @@ struct SecurityAttributes {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetModuleHandleA(name: *const u8) -> Handle;
     fn GetLastError() -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
@@ -137,6 +146,7 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
 
 const STARTF_USESTDHANDLES: u32 = 0x100;
 const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+const HKEY_LOCAL_MACHINE: isize = 0x8000_0002u32 as i32 as isize;
 const RRF_RT_REG_SZ: u32 = 0x2;
 const RRF_RT_REG_EXPAND_SZ_NOEXPAND: u32 = 0x1000_0004;
 const INVALID_ATTRIBUTES: u32 = u32::MAX;
@@ -299,6 +309,17 @@ fn local(rest: &str) -> W {
     w
 }
 
+/// A path under %APPDATA%.
+fn roaming(rest: &str) -> W {
+    let mut buf = [0u16; 512];
+    let name = W::new("APPDATA");
+    // SAFETY: our buffers.
+    let n = unsafe { GetEnvironmentVariableW(name.b.as_ptr(), buf.as_mut_ptr(), 512) } as usize;
+    let mut w = W::new("");
+    w.add_w(&buf[..n.min(512)]).add(rest.as_bytes());
+    w
+}
+
 fn exists(mut path: W) -> bool {
     // SAFETY: a NUL-terminated path.
     unsafe { GetFileAttributesW(path.ptr()) != INVALID_ATTRIBUTES }
@@ -307,6 +328,15 @@ fn exists(mut path: W) -> bool {
 /// A REG_SZ (or REG_EXPAND_SZ, unexpanded) value of HKCU as ASCII
 /// (None if absent).
 fn hkcu(subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> {
+    reg_text(HKEY_CURRENT_USER, subkey, value, expand)
+}
+
+/// The same of HKLM.
+fn hklm(subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> {
+    reg_text(HKEY_LOCAL_MACHINE, subkey, value, expand)
+}
+
+fn reg_text(root: isize, subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> {
     let mut key = W::new(subkey);
     let mut name = W::new(value);
     let mut data = [0u16; 2048];
@@ -316,7 +346,7 @@ fn hkcu(subkey: &str, value: &str, expand: bool) -> Option<([u8; 2048], usize)> 
     // SAFETY: our buffers with their lengths.
     let e = unsafe {
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            root,
             key.ptr(),
             name.ptr(),
             flags,
@@ -408,6 +438,7 @@ fn dump_log() {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u32, what: &str) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -419,11 +450,13 @@ impl Checks {
         out(what.as_bytes());
         out(b") got ");
         out(&hex(got));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
     /// `gala <args>` exits with `code` and its output has every `has`.
+    #[track_caller]
     fn gala(&mut self, args: &str, code: u32, has: &[&[u8]]) -> Result<Output, u32> {
         let mut line = [0u8; 512];
         let n = args.len().min(500);
@@ -445,12 +478,14 @@ impl Checks {
     }
 
     /// `pkhello <args>` found on PATH: hello.exe's line, exit 0.
+    #[track_caller]
     fn pkhello_runs(&mut self) -> Result<(), u32> {
         self.command_runs("pkhello --some \"args here\"")
     }
 
     /// A command line whose program is an installed command found on
     /// PATH (all are hello.exe): its line, exit 0.
+    #[track_caller]
     fn command_runs(&mut self, line: &str) -> Result<(), u32> {
         let (got, o) = run(None, line);
         if got != 0 || !o.has(HELLO) {
@@ -619,9 +654,13 @@ fn dependencies_and_scope(c: &mut Checks) -> Result<(), u32> {
     )?;
 
     // Scope: --scope machine (Program Files and HKLM for a portable
-    // package) is not built: refused, nothing changed.
+    // package) needs administrator rights, which the boot user lacks:
+    // refused before any change (winget's
+    // APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN; gala's exit 6).
     let args = join(&mut a, &["install GalaTest.PkScoped --scope machine ", src]);
-    c.gala(args, 3, &[b"machine scope"])?;
+    c.gala(args, 6, &[b"administrator"])?;
+    c.ok(log_has(b"error requires-admin administrator=no"), 0, "the elevation check logged")?;
+    c.ok(!exists(W::new(MACHINE_LINKS)), 0, "nothing in Program Files")?;
     let args = join(&mut a, &["install GalaTest.PkScoped --scope user --version 1.0.0 ", src]);
     c.gala(args, 0, &[b"Successfully installed"])?;
     c.ok(
@@ -637,6 +676,84 @@ fn dependencies_and_scope(c: &mut Checks) -> Result<(), u32> {
     refresh_path();
     c.command_runs("pkscoped")?;
     c.gala("uninstall GalaTest.PkScoped", 0, &[b"Successfully uninstalled"])?;
+    Ok(())
+}
+
+// ---- Machine scope (scenario pk_install_machine, as SYSTEM) -----------
+
+const MACHINE_LINKS: &str = "C:\\Program Files\\WinGet\\Links";
+const MACHINE_ENV: &str = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
+const SCOPED_ARP: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GalaTest.PkScoped_Microsoft.Winget.Source_8wekyb3d8bbwe";
+
+/// PATH as a new logon would make it from the machine's
+/// `Session Manager\Environment\Path` (`%SystemRoot%` expanded).
+fn machine_path() {
+    let mut path = W::new("");
+    if let Some((m, len)) = hklm(MACHINE_ENV, "Path", true) {
+        let var = b"%SystemRoot%";
+        let mut i = 0;
+        while i < len {
+            if m[i..len].starts_with(var) {
+                path.add(b"C:\\Windows");
+                i += var.len();
+            } else {
+                path.add(&m[i..i + 1]);
+                i += 1;
+            }
+        }
+    }
+    let mut name = W::new("Path");
+    // SAFETY: NUL-terminated strings.
+    unsafe { SetEnvironmentVariableW(name.ptr(), path.ptr()) };
+}
+
+/// winget's machine-scope portable install (its documented layout:
+/// `%ProgramFiles%\WinGet\Packages` and `Links`, as `winget --info`
+/// lists them; the ARP entry under HKLM; the Links directory on the
+/// machine's PATH), run with administrator rights (the boot option
+/// `as=system`: SYSTEM's token has BUILTIN\Administrators): installed,
+/// run from the machine's PATH, listed, upgraded keeping machine scope,
+/// uninstalled.
+fn machine_test() -> Result<(), u32> {
+    let mut c = Checks(0);
+    let src = "--source C:\\pk_source";
+    let mut a = [0u8; 300];
+    let args = join(&mut a, &["install GalaTest.PkScoped --scope machine --version 1.0.0 ", src]);
+    c.gala(args, 0, &[b"Successfully installed", b"Program Files\\WinGet\\Packages"])?;
+    c.ok(log_has(b"elevation administrator=yes"), 0, "the elevation check logged")?;
+    c.ok(log_has(b"url=https://packages.gala.invalid/pkscoped-1.0.0-machine.zip"), 0, "machine's")?;
+    c.ok(
+        exists(W::new("C:\\Program Files\\WinGet\\Packages\\GalaTest.PkScoped_Microsoft.Winget.Source_8wekyb3d8bbwe\\pkscoped-1.0.0\\pkscoped.exe")),
+        0,
+        "the program in Program Files",
+    )?;
+    c.ok(exists(W::new("C:\\Program Files\\WinGet\\Links\\pkscoped.exe")), 0, "the command")?;
+    let p = hklm(MACHINE_ENV, "Path", true);
+    c.ok(
+        p.is_some_and(|(s, n)| contains(&s[..n], MACHINE_LINKS.as_bytes())),
+        0,
+        "Links on the machine's PATH",
+    )?;
+    let v = hklm(SCOPED_ARP, "WinGetPackageIdentifier", false);
+    c.ok(v.is_some_and(|(s, n)| &s[..n] == b"GalaTest.PkScoped"), 0, "the HKLM entry")?;
+    c.ok(hkcu(SCOPED_ARP, "DisplayName", false).is_none(), 0, "no HKCU entry")?;
+    machine_path();
+    c.command_runs("pkscoped")?;
+    c.gala("list", 0, &[b"GalaTest.PkScoped", b"1.0.0"])?;
+    c.gala("upgrade GalaTest.PkScoped", 0, &[b"Successfully upgraded", b"1.1.0"])?;
+    c.ok(log_has(b"installed scope=machine type=portable"), 0, "the installed scope read")?;
+    c.ok(log_has(b"url=https://packages.gala.invalid/pkscoped-1.1.0-machine.zip"), 0, "kept")?;
+    machine_path();
+    c.command_runs("pkscoped")?;
+    c.gala("uninstall GalaTest.PkScoped", 0, &[b"Successfully uninstalled"])?;
+    c.ok(hklm(SCOPED_ARP, "DisplayName", false).is_none(), 0, "the HKLM entry removed")?;
+    c.ok(
+        !exists(W::new("C:\\Program Files\\WinGet\\Links\\pkscoped.exe")),
+        0,
+        "the command removed",
+    )?;
+    let (got, _) = run(None, "pkscoped");
+    c.ok(got == 0xfffe_0000 | ERROR_FILE_NOT_FOUND, got, "pkscoped after the uninstall")?;
     Ok(())
 }
 
@@ -891,6 +1008,222 @@ fn nsis_test() -> Result<(), u32> {
     Ok(())
 }
 
+// ---- Real Inno Setup installers (scenarios pk_install_inno, pk_install_inno32)
+
+/// What tells the two Inno Setup packages apart.
+struct Inno {
+    /// The winget package and version.
+    id: &'static str,
+    version: &'static str,
+    /// Its installer's file name.
+    installer: &'static str,
+    /// The uninstall entry under HKCU (`<AppId>_is1`).
+    arp: &'static str,
+    /// Where it installs under %LOCALAPPDATA%.
+    dir: &'static str,
+    /// The Start menu group Inno Setup's [Icons] go to (per user: {group}
+    /// is under %APPDATA%\Microsoft\Windows\Start Menu\Programs).
+    group: &'static str,
+    /// The IDE, which its [Run] entry runs to associate .iss files.
+    ide: &'static str,
+    /// The command-line compiler's banner.
+    banner: &'static [u8],
+}
+
+/// Inno Setup 7.1.1 (x64: Inno Setup 7 builds x64 Setups), winget-pkgs'
+/// JRSoftware.InnoSetup.7.
+const INNO7: Inno = Inno {
+    id: "JRSoftware.InnoSetup.7",
+    version: "7.1.1",
+    installer: "innosetup-7.1.1-x64.exe",
+    arp: "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 7_is1",
+    dir: "\\Programs\\Inno Setup 7",
+    group: "\\Microsoft\\Windows\\Start Menu\\Programs\\Inno Setup 7\\",
+    ide: "ISIDE.exe",
+    banner: b"Inno Setup 7 Command-Line Compiler",
+};
+
+/// Inno Setup 6.5.4 (x86: a 32-bit Setup, uninstaller, IDE and compiler
+/// under WOW64), winget-pkgs' JRSoftware.InnoSetup.
+const INNO6: Inno = Inno {
+    id: "JRSoftware.InnoSetup",
+    version: "6.5.4",
+    installer: "innosetup-6.5.4.exe",
+    arp: "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Inno Setup 6_is1",
+    dir: "\\Programs\\Inno Setup 6",
+    group: "\\Microsoft\\Windows\\Start Menu\\Programs\\Inno Setup 6\\",
+    ide: "Compil32.exe",
+    banner: b"Inno Setup 6 Command-Line Compiler",
+};
+
+/// Its six shortcuts (setup.iss [Icons]; the desktop one is a task the
+/// silent install leaves off).
+const INNO_ICONS: [&str; 6] = [
+    "Inno Setup Compiler.lnk",
+    "Inno Setup Documentation.lnk",
+    "Inno Setup Documentation (Dark).lnk",
+    "Inno Setup Example Scripts.lnk",
+    "Inno Setup FAQ.lnk",
+    "Inno Setup Revision History.lnk",
+];
+/// The .iss association ISIDE.exe /assoc writes for a user who is not an
+/// administrator (IDE.FileAssocFunc: HKCU\Software\Classes).
+const ISS_PROGID: &str = "Software\\Classes\\InnoSetupScriptFile";
+
+/// `exe` (a path under %LOCALAPPDATA%) as ASCII text in `buf`.
+fn local_text<'a>(buf: &'a mut [u8], rest: &str) -> &'a str {
+    let w = local(rest);
+    let mut n = 0;
+    for &u in w.text() {
+        if n < buf.len() {
+            buf[n] = if u < 0x80 { u as u8 } else { b'?' };
+            n += 1;
+        }
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("")
+}
+
+/// `gala install` of a real Inno Setup installer, Inno Setup's own: 7.1.1
+/// (x64, winget-pkgs' JRSoftware.InnoSetup.7) or 6.5.4 (x86 under WOW64,
+/// JRSoftware.InnoSetup), each manifest with a machine installer
+/// (`/ALLUSERS`) and a user one (`/CURRENTUSER`). Run as winget runs Inno installers
+/// (`--silent`: `/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, `/LOG=`,
+/// the manifest's Custom switch), found through the manifest's
+/// ProductCode `Inno Setup <n>_is1`, its command-line compiler run,
+/// listed, uninstalled through the QuietUninstallString Inno writes.
+/// What Inno Setup leaves is what its documentation says for a per-user
+/// install: the files in `{autopf}\Inno Setup <n>` (per user
+/// `%LOCALAPPDATA%\Programs`), `unins000.exe` and `.dat` beside them, the
+/// entry `<AppId>_is1` under HKCU, the six `[Icons]` shortcuts in the
+/// per-user Start menu group, and the `.iss` association its `[Run]` entry
+/// (`ISIDE.exe /assoc`, Inno 6's `Compil32.exe /ASSOC`) registers under
+/// `HKCU\Software\Classes` (the IDE's
+/// IDE.FileAssocFunc, for a user who is not an administrator); the
+/// uninstaller removes the shortcuts and its `/unassoc` the ProgID.
+fn inno_test(i: &Inno) -> Result<(), u32> {
+    let mut c = Checks(0);
+    let src = "--source C:\\pk_source";
+    let mut a = [0u8; 300];
+    let mut p = [0u8; 300];
+    let (id, version) = (i.id.as_bytes(), i.version.as_bytes());
+    c.gala("search inno --source C:\\pk_source", 0, &[id, version])?;
+    let args = join(&mut a, &["install ", i.id, " --exact --scope user --silent ", src]);
+    c.gala(args, 0, &[b"Successfully installed", b"Inno Setup"])?;
+    let switches =
+        join(&mut a, &[i.installer, "\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="]);
+    c.ok(log_has(switches.as_bytes()), 0, "run with winget's Inno switches")?;
+    c.ok(log_has(b".setup.log\" /CURRENTUSER"), 0, "the user installer's Custom switch")?;
+    c.ok(log_has(b"exit code=0 (0x0)"), 0, "Setup's exit code logged")?;
+    let entry = join(&mut a, &[i.arp.rsplit('\\').next().unwrap_or(""), " found-by=ProductCode"]);
+    c.ok(log_has(entry.as_bytes()), 0, "the entry")?;
+    c.ok(exists(local(join(&mut p, &[i.dir, "\\ISCC.exe"]))), 0, "Setup wrote ISCC.exe")?;
+    c.ok(exists(local(join(&mut p, &[i.dir, "\\unins000.exe"]))), 0, "its uninstaller")?;
+    c.ok(exists(local(join(&mut p, &[i.dir, "\\unins000.dat"]))), 0, "its uninstall log")?;
+    let log_name = join(&mut a, &["\\gala\\logs\\", i.id, "-", i.version, ".setup.log"]);
+    let setup_log = read_file(local(log_name));
+    show_file("the setup log", &setup_log);
+    c.ok(setup_log.is_some_and(|o| o.has(b"Setup version: Inno Setup")), 0, "Inno's /LOG")?;
+    let inno = |v: &str| hkcu(i.arp, v, false);
+    c.ok(inno("DisplayVersion").is_some_and(|(s, n)| &s[..n] == version), 0, "DisplayVersion")?;
+    let dir = i.dir.trim_start_matches('\\').as_bytes();
+    c.ok(
+        inno("InstallLocation").is_some_and(|(s, n)| contains(&s[..n], dir)),
+        0,
+        "InstallLocation",
+    )?;
+    c.ok(inno("QuietUninstallString").is_some(), 0, "QuietUninstallString")?;
+    // Its [Icons]: shell links in the Start menu group, as [MS-SHLLINK]
+    // lays them out, the IDE's pointing at it.
+    for icon in INNO_ICONS {
+        c.ok(exists(roaming(join(&mut p, &[i.group, icon]))), 0, icon)?;
+    }
+    let ide = read_file(roaming(join(&mut p, &[i.group, INNO_ICONS[0]])));
+    c.ok(
+        ide.as_ref().is_some_and(|o| {
+            o.text().starts_with(b"L\0\0\0\x01\x14\x02\0\0\0\0\0\xc0\0\0\0\0\0\0F")
+        }),
+        0,
+        "the IDE's shortcut's header",
+    )?;
+    c.ok(ide.as_ref().is_some_and(|o| o.has(i.ide.as_bytes())), 0, "the IDE's shortcut's target")?;
+    // Its [Run] entry (the IDE's /assoc): the .iss association in HKCU.
+    let classes = |k: &str, v: &str| hkcu(k, v, false);
+    if classes(ISS_PROGID, "").is_none() {
+        // Setup logs only the exit code: run it again here, where what it
+        // writes (a message box's text, on gala) is captured.
+        let mut e = [0u8; 300];
+        let ide = local_text(&mut e, join(&mut p, &[i.dir, "\\", i.ide]));
+        let (got, o) = run(Some(ide), join(&mut a, &[i.ide, " /assoc"]));
+        out(b"pk_install_test: ");
+        out(i.ide.as_bytes());
+        out(b" /assoc -> ");
+        out(&hex(got));
+        out(b":\r\n");
+        out(o.text());
+    }
+    c.ok(
+        classes("Software\\Classes\\.iss", "")
+            .is_some_and(|(s, n)| &s[..n] == b"InnoSetupScriptFile"),
+        0,
+        ".iss's ProgID",
+    )?;
+    c.ok(
+        classes("Software\\Classes\\.iss\\OpenWithProgids", "InnoSetupScriptFile").is_some(),
+        0,
+        ".iss's OpenWithProgids",
+    )?;
+    c.ok(
+        classes(join(&mut a, &[ISS_PROGID, "\\shell\\open\\command"]), "").is_some_and(|(s, n)| {
+            contains(&s[..n], join(&mut p, &[i.ide, "\" \"%1\""]).as_bytes())
+        }),
+        0,
+        "the open command",
+    )?;
+    c.ok(
+        classes(join(&mut a, &[ISS_PROGID, "\\shell\\Compile\\command"]), "").is_some_and(
+            |(s, n)| contains(&s[..n], join(&mut p, &[i.ide, "\" /cc \"%1\""]).as_bytes()),
+        ),
+        0,
+        "the Compile command",
+    )?;
+    c.ok(inno("WinGetPackageIdentifier").is_some_and(|(s, n)| &s[..n] == id), 0, "gala's tag")?;
+    // The installed compiler runs (its usage text).
+    let mut e = [0u8; 300];
+    let iscc = local_text(&mut e, join(&mut p, &[i.dir, "\\ISCC.exe"]));
+    let (got, o) = run(Some(iscc), "ISCC.exe /?");
+    if !o.has(i.banner) {
+        out(b"pk_install_test: ISCC.exe /? -> ");
+        out(&hex(got));
+        out(b":\r\n");
+        out(o.text());
+    }
+    c.ok(o.has(i.banner), got, "ISCC.exe runs")?;
+    c.gala("list", 0, &[id, version])?;
+    let args = join(&mut a, &["install ", i.id, " --exact --scope user ", src]);
+    c.gala(args, 0, &[b"already installed"])?;
+    // Uninstall: Inno's QuietUninstallString (unins000.exe /SILENT), which
+    // runs a copy of itself from %TEMP%; gala waits for the entry to go.
+    let args = join(&mut a, &["uninstall ", i.id, " --exact"]);
+    c.gala(args, 0, &[b"Successfully uninstalled"])?;
+    c.ok(log_has(b"from=QuietUninstallString"), 0, "the quiet uninstall string used")?;
+    c.ok(inno("DisplayName").is_none(), 0, "the entry removed")?;
+    c.ok(!exists(local(join(&mut p, &[i.dir, "\\ISCC.exe"]))), 0, "ISCC.exe removed")?;
+    for icon in INNO_ICONS {
+        c.ok(!exists(roaming(join(&mut p, &[i.group, icon]))), 0, "a shortcut removed")?;
+    }
+    // [UninstallRun] (the IDE's /unassoc): the ProgID and its .iss value go.
+    c.ok(hkcu(ISS_PROGID, "", false).is_none(), 0, "the ProgID removed")?;
+    c.ok(
+        hkcu("Software\\Classes\\.iss\\OpenWithProgids", "InnoSetupScriptFile", false).is_none(),
+        0,
+        "the OpenWithProgids value removed",
+    )?;
+    let o = c.gala("list", 0, &[])?;
+    let listed = join(&mut a, &[i.id, " "]);
+    c.ok(!o.has(listed.as_bytes()), 0, "not listed after the uninstall")?;
+    Ok(())
+}
+
 // ---- Downloads over HTTPS (scenario pk_install_https) -----------------
 
 /// Whether crypt32's "ROOT" system store has a certificate whose subject
@@ -1062,12 +1395,35 @@ fn has_arg(word: &str) -> bool {
     }
 }
 
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+/// Elsewhere gala's own services are not called: their numbers would reach
+/// Windows' win32k table and the first call faults.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
+    if !on_gala() {
+        out(b"pk_install_test: skipped (gala install is gala's own)\r\n");
+        // SAFETY: ends the process.
+        unsafe { ExitProcess(0) }
+    }
     let result = if has_arg("nsis") {
         nsis_test()
     } else if has_arg("https") {
         https_test()
+    } else if has_arg("machine") {
+        machine_test()
+    } else if has_arg("inno32") {
+        inno_test(&INNO6)
+    } else if has_arg("inno") {
+        inno_test(&INNO7)
     } else {
         test()
     };
@@ -1089,4 +1445,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

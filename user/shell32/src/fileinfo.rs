@@ -10,7 +10,11 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> *const c_void;
@@ -256,7 +260,11 @@ pub extern "system" fn SHGetFileInfoW(
 // terminating zero cb. The desktop, the namespace's root, is the empty
 // list. Lists come from the process heap, as CoTaskMemAlloc's do.
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;

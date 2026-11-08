@@ -6,15 +6,19 @@
 //! a handle, a byte buffer or a wide buffer.
 //!
 //! fprintf, printf and sprintf are C-variadic, which stable Rust cannot
-//! define: the assembly at the end stores the register arguments in the
-//! caller's home area (which, with the stack arguments after it, is the
-//! Win64 `va_list`) and calls the `v` variant.
+//! define: the architecture's entry points (`x64.rs`, `x86.rs`) make a
+//! `va_list` of their arguments and call the `v` variant.
 
 use crate::heap::{free, malloc};
+use crate::va::VaList;
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> *mut c_void;
     fn WriteFile(
@@ -41,7 +45,7 @@ unsafe extern "system" {
     fn GetFileType(h: *mut c_void) -> u32;
     fn SetStdHandle(which: u32, h: *mut c_void) -> i32;
     fn GetHandleInformation(h: *mut c_void, flags: *mut u32) -> i32;
-    fn GetStartupInfoA(info: *mut u8);
+    fn GetStartupInfoA(info: *mut crate::StartupInfoA);
     fn GetCurrentProcess() -> *mut c_void;
     fn DuplicateHandle(
         source_process: *mut c_void,
@@ -99,11 +103,44 @@ fn errno_of_last_error() -> i32 {
 
 // ---- FILE objects ------------------------------------------------------------
 
-/// msvcrt's FILE is 48 bytes on x64: programs index `__iob_func()` with
-/// that size, so the console streams are 48-byte slots; their state lives
-/// in STD.
-pub(crate) const FILE_SIZE: usize = 48;
-static mut IOB: [[u8; FILE_SIZE]; 3] = [[0; FILE_SIZE]; 3];
+/// msvcrt's FILE (`struct _iobuf`, stdio.h): 48 bytes on x64, 32 on x86.
+/// Programs index `_iob` (`__iob_func()`) with its size, so the console
+/// streams are FILE-sized slots there; their state lives in STD.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct File {
+    ptr: usize,
+    cnt: i32,
+    base: usize,
+    flag: i32,
+    file: i32,
+    charbuf: i32,
+    bufsiz: i32,
+    tmpfname: usize,
+}
+
+const _: () = assert!(size_of::<File>() == if cfg!(target_arch = "x86") { 32 } else { 48 });
+
+impl File {
+    /// A FILE whose `_file` is descriptor `fd`, `_cnt` 0.
+    const fn on(fd: i32) -> Self {
+        Self { ptr: 0, cnt: 0, base: 0, flag: 0, file: fd, charbuf: 0, bufsiz: 0, tmpfname: 0 }
+    }
+}
+
+pub(crate) const FILE_SIZE: usize = size_of::<File>();
+
+/// _iob: msvcrt's FILE array (_IOB_ENTRIES, 20), stdin, stdout and stderr
+/// first: 32-bit programs reach the console streams through this data
+/// export, 64-bit ones through `__iob_func`.
+#[unsafe(no_mangle)]
+pub static mut _iob: [File; 20] = {
+    let mut iob = [File::on(-1); 20];
+    iob[0] = File::on(0);
+    iob[1] = File::on(1);
+    iob[2] = File::on(2);
+    iob
+};
 
 const MAGIC: u64 = 0x656c_6966_616c_6167; // "galafile"
 const READ_BUF: usize = 4096;
@@ -119,7 +156,7 @@ const READ_BUF: usize = 4096;
 /// directly (for the console slots it calls `_lock` instead).
 #[repr(C)]
 struct Stream {
-    iob: [u8; FILE_SIZE],
+    iob: File,
     lock: CriticalSection,
     magic: u64,
     handle: *mut c_void,
@@ -134,14 +171,8 @@ struct Stream {
 
 impl Stream {
     const fn new(handle: *mut c_void, fd: i32) -> Self {
-        let mut iob = [0u8; FILE_SIZE];
-        let f = fd.to_le_bytes();
-        iob[24] = f[0];
-        iob[25] = f[1];
-        iob[26] = f[2];
-        iob[27] = f[3];
         Self {
-            iob,
+            iob: File::on(fd),
             lock: CriticalSection::FREE,
             magic: MAGIC,
             handle,
@@ -177,25 +208,23 @@ impl CriticalSection {
 static mut STD: [Stream; 3] =
     [Stream::new(null_mut(), 0), Stream::new(null_mut(), 1), Stream::new(null_mut(), 2)];
 
-/// __iob_func(): the stdin, stdout and stderr FILE objects.
+/// __iob_func(): `_iob`, whose first three are stdin, stdout and stderr.
 #[unsafe(no_mangle)]
 pub extern "C" fn __iob_func() -> *mut u8 {
-    // SAFETY: the console slots; `_file` (offset 24) is their descriptor.
-    unsafe {
-        for (i, slot) in (*(&raw mut IOB)).iter_mut().enumerate() {
-            slot[24..28].copy_from_slice(&(i as i32).to_le_bytes());
-        }
-    }
-    (&raw mut IOB).cast()
+    (&raw mut _iob).cast()
 }
 
 /// The stream behind a FILE pointer (a console slot or one of ours).
 fn stream<'a>(file: *mut u8) -> Option<&'a mut Stream> {
-    let base = (&raw mut IOB) as usize;
+    let base = (&raw mut _iob) as usize;
     if let Some(at) = (file as usize).checked_sub(base)
-        && at < 3 * FILE_SIZE
+        && at < size_of::<[File; 20]>()
     {
         let i = at / FILE_SIZE;
+        if i >= 3 {
+            // The rest of _iob: not streams of ours.
+            return None;
+        }
         // SAFETY: the console streams' state; the handle is looked up now
         // (SetStdHandle may change it).
         unsafe {
@@ -633,13 +662,17 @@ fn new_fd(h: *mut c_void) -> i32 {
 
 /// The C runtime's descriptor inheritance (STARTUPINFO cbReserved2 /
 /// lpReserved2, the layout Wine's msvcrt documents): a u32 count, a flags
-/// byte per descriptor (FOPEN 0x01), then a HANDLE per descriptor, packed.
+/// byte per descriptor (FOPEN 0x01), then a HANDLE (pointer-sized: 4
+/// bytes on x86, 8 on x64) per descriptor, packed.
 const FOPEN: u8 = 0x01;
+const HANDLE_SIZE: usize = size_of::<usize>();
+/// The largest block: every descriptor.
+pub const INHERITANCE_BLOCK: usize = 4 + (1 + HANDLE_SIZE) * MAX_FDS;
 
 /// The block for a child: our open descriptors whose handles it inherits
 /// (descriptors 0-2 are its standard handles anyway). Written to `out`;
 /// its length, or 0 if there is nothing to pass.
-pub fn inheritance_block(out: &mut [u8; 4 + 9 * MAX_FDS]) -> usize {
+pub fn inheritance_block(out: &mut [u8; INHERITANCE_BLOCK]) -> usize {
     let mut count = 0;
     for fd in 3..MAX_FDS {
         if handle_of_fd(fd as i32).is_some() {
@@ -657,37 +690,38 @@ pub fn inheritance_block(out: &mut [u8; 4 + 9 * MAX_FDS]) -> usize {
         let inheritable = h
             .is_some_and(|h| unsafe { GetHandleInformation(h, &mut flags) } != 0 && flags & 1 != 0);
         let (flag, value) = match h {
-            Some(h) if inheritable => (FOPEN, h as u64),
-            _ => (0, u64::MAX),
+            Some(h) if inheritable => (FOPEN, h as usize),
+            _ => (0, usize::MAX), // INVALID_HANDLE_VALUE
         };
         out[4 + fd] = flag;
-        let at = 4 + count + 8 * fd;
-        out[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        let at = 4 + count + HANDLE_SIZE * fd;
+        out[at..at + HANDLE_SIZE].copy_from_slice(&value.to_le_bytes());
     }
-    4 + 9 * count
+    4 + (1 + HANDLE_SIZE) * count
 }
 
 /// At startup: takes the descriptors (3 and up) a parent's CRT passed.
 pub fn inherit_descriptors() {
-    let mut info = [0u8; 104];
-    // SAFETY: a STARTUPINFOA-sized buffer; the block it names stays in our
+    // SAFETY: zeroed is a valid STARTUPINFOA (integers and pointers).
+    let mut info: crate::StartupInfoA = unsafe { core::mem::zeroed() };
+    // SAFETY: a STARTUPINFOA to fill; the block it names stays in our
     // process parameters.
     unsafe {
-        GetStartupInfoA(info.as_mut_ptr());
-        let len = usize::from(u16::from_le_bytes([info[66], info[67]]));
-        let block = u64::from_le_bytes(info[72..80].try_into().unwrap_or([0; 8])) as *const u8;
+        GetStartupInfoA(&mut info);
+        let len = usize::from(info.cb_reserved2);
+        let block = info.reserved2.cast_const();
         if block.is_null() || len < 4 {
             return;
         }
         let count = (block.cast::<u32>().read_unaligned() as usize).min(MAX_FDS);
-        if 4 + 9 * count > len {
+        if 4 + (1 + HANDLE_SIZE) * count > len {
             return;
         }
         let fds = &mut *(&raw mut FDS);
         for fd in 3..count {
-            let h = block.add(4 + count + 8 * fd).cast::<u64>().read_unaligned();
-            if *block.add(4 + fd) & FOPEN != 0 && h != 0 && h != u64::MAX {
-                fds[fd] = h as usize;
+            let h = block.add(4 + count + HANDLE_SIZE * fd).cast::<usize>().read_unaligned();
+            if *block.add(4 + fd) & FOPEN != 0 && h != 0 && h != usize::MAX {
+                fds[fd] = h;
             }
         }
     }
@@ -905,8 +939,8 @@ pub extern "C" fn _stat64(path: *const u8, buf: *mut u8) -> i32 {
 pub extern "C" fn _filbuf(file: *mut u8) -> i32 {
     let c = fgetc(file);
     if !file.is_null() {
-        // SAFETY: a FILE (console slot or ours): `_cnt` at offset 8.
-        unsafe { file.add(8).cast::<i32>().write_unaligned(0) };
+        // SAFETY: a FILE (console slot or ours).
+        unsafe { (*file.cast::<File>()).cnt = 0 };
     }
     c
 }
@@ -955,10 +989,10 @@ pub extern "C" fn clearerr(file: *mut u8) {
 
 /// _vscprintf(fmt, args): the length the formatted text would have.
 #[unsafe(no_mangle)]
-pub extern "C" fn _vscprintf(fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn _vscprintf(fmt: *const u8, args: VaList) -> i32 {
     let mut out = Out { sink: Sink::Bytes { ptr: null_mut(), cap: 0 }, total: 0 };
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, Args(args), false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
     out.total as i32
 }
 
@@ -1027,11 +1061,10 @@ pub extern "C" fn _open(path: *const u8, flags: i32, _mode: i32) -> i32 {
         (false, _, false) => 3,
     };
     let inherit = flags & O_NOINHERIT == 0;
-    // SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor, bInheritHandle }.
-    let mut sa = [24u64, 0, u64::from(inherit)];
+    let mut sa = crate::SecurityAttributes::inheritable(inherit);
     // SAFETY: a NUL-terminated path; a valid SECURITY_ATTRIBUTES.
     let h = unsafe {
-        CreateFileW(wide.as_ptr(), access, 3, sa.as_mut_ptr().cast(), disposition, 0x80, null_mut())
+        CreateFileW(wide.as_ptr(), access, 3, (&raw mut sa).cast(), disposition, 0x80, null_mut())
     };
     if h == INVALID_HANDLE {
         set_errno(errno_of_last_error());
@@ -1055,9 +1088,9 @@ pub extern "C" fn _open(path: *const u8, flags: i32, _mode: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn _pipe(fds: *mut i32, size: u32, mode: i32) -> i32 {
     let (mut r, mut w) = (null_mut(), null_mut());
-    let mut sa = [24u64, 0, u64::from(mode & O_NOINHERIT == 0)];
+    let mut sa = crate::SecurityAttributes::inheritable(mode & O_NOINHERIT == 0);
     // SAFETY: valid output pointers and SECURITY_ATTRIBUTES.
-    if unsafe { CreatePipe(&mut r, &mut w, sa.as_mut_ptr().cast(), size) } == 0 {
+    if unsafe { CreatePipe(&mut r, &mut w, (&raw mut sa).cast(), size) } == 0 {
         set_errno(errno_of_last_error());
         return -1;
     }
@@ -1187,18 +1220,15 @@ impl Out {
     }
 }
 
-/// The variadic arguments: 8-byte slots (Win64 `va_list`).
-struct Args(*const u64);
-
-impl Args {
-    fn next(&mut self) -> u64 {
-        // SAFETY: the caller passed an argument for each conversion.
-        unsafe {
-            let v = *self.0;
-            self.0 = self.0.add(1);
-            v
-        }
-    }
+/// An integer argument's size, from the conversion's length modifier.
+#[derive(Clone, Copy, PartialEq)]
+enum IntSize {
+    /// int (and the promoted char and short; `l` and `I32`).
+    Int,
+    /// Pointer-sized: `I`, `z`, `t` (32 bits on x86, 64 on x64).
+    Pointer,
+    /// 64 bits: `I64`, `ll`, `j`.
+    Int64,
 }
 
 /// Formats `fmt` with the C printf rules (flags `-+ #0`, width and
@@ -1206,7 +1236,7 @@ impl Args {
 /// d i u o x X c s p %, and f e g (float.rs)). With `wide`, `%s` and
 /// `%c` take UTF-16 (and `%hs` narrow), as in the wprintf functions; the
 /// output is UTF-8 either way.
-fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
+fn format(out: &mut Out, fmt: &[u8], mut args: VaList, wide: bool) {
     let mut i = 0;
     while i < fmt.len() {
         if fmt[i] != b'%' {
@@ -1233,7 +1263,7 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
         }
         let mut width = 0usize;
         if i < fmt.len() && fmt[i] == b'*' {
-            let w = args.next() as i32;
+            let w = args.int() as i32;
             if w < 0 {
                 left = true;
             }
@@ -1249,7 +1279,7 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
             i += 1;
             let mut p = 0usize;
             if i < fmt.len() && fmt[i] == b'*' {
-                let v = args.next() as i32;
+                let v = args.int() as i32;
                 p = if v < 0 { 0 } else { v as usize };
                 i += 1;
             }
@@ -1259,21 +1289,27 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
             }
             precision = Some(p);
         }
-        // Length: 64-bit or not (`l` is 32-bit on Windows); `h`/`l`/`w`
-        // choose narrow or wide strings.
-        let (mut wide64, mut narrow, mut wide_str) = (false, false, false);
+        // Length: the integer's size (`l` is 32-bit on Windows, `I` the
+        // pointer's); `h`/`l`/`w` choose narrow or wide strings.
+        let (mut size, mut narrow, mut wide_str) = (IntSize::Int, false, false);
         loop {
             let rest = &fmt[i..];
             if rest.starts_with(b"I64") {
-                wide64 = true;
+                size = IntSize::Int64;
                 i += 3;
             } else if rest.starts_with(b"I32") {
+                size = IntSize::Int;
                 i += 3;
             } else if rest.starts_with(b"ll") || rest.starts_with(b"hh") {
-                wide64 |= rest[0] == b'l';
+                if rest[0] == b'l' {
+                    size = IntSize::Int64;
+                }
                 i += 2;
-            } else if matches!(rest.first(), Some(b'I' | b'z' | b'j' | b't')) {
-                wide64 = true;
+            } else if matches!(rest.first(), Some(b'I' | b'z' | b't')) {
+                size = IntSize::Pointer;
+                i += 1;
+            } else if matches!(rest.first(), Some(b'j')) {
+                size = IntSize::Int64;
                 i += 1;
             } else if matches!(rest.first(), Some(b'h')) {
                 narrow = true;
@@ -1301,8 +1337,11 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
         let mut utf8 = [0u8; 4];
         let (body, prefix): (&[u8], &[u8]) = match conv {
             b'd' | b'i' => {
-                let raw = args.next();
-                let v = if wide64 { raw as i64 } else { i64::from(raw as i32) };
+                let v = match size {
+                    IntSize::Int => i64::from(args.int() as i32),
+                    IntSize::Pointer => args.pointer() as isize as i64,
+                    IntSize::Int64 => args.int64() as i64,
+                };
                 let s = number(&mut digits, v.unsigned_abs(), 10, false, precision);
                 let sign: &[u8] = if v < 0 {
                     b"-"
@@ -1316,8 +1355,11 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
                 (s, sign)
             }
             b'u' | b'o' | b'x' | b'X' => {
-                let raw = args.next();
-                let v = if wide64 { raw } else { u64::from(raw as u32) };
+                let v = match size {
+                    IntSize::Int => u64::from(args.int()),
+                    IntSize::Pointer => args.pointer() as u64,
+                    IntSize::Int64 => args.int64(),
+                };
                 let base = match conv {
                     b'o' => 8,
                     b'u' => 10,
@@ -1332,28 +1374,32 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
                 };
                 (s, p)
             }
-            b'p' => (number(&mut digits, args.next(), 16, true, Some(16)), b""),
+            // All the pointer's hex digits (8 on x86, 16 on x64).
+            b'p' => {
+                let digits_of_pointer = Some(2 * size_of::<usize>());
+                (number(&mut digits, args.pointer() as u64, 16, true, digits_of_pointer), b"")
+            }
             b'c' | b'C' if utf16 => {
-                let c = char::from_u32(args.next() as u32 & 0xffff).unwrap_or('?');
+                let c = char::from_u32(args.int() & 0xffff).unwrap_or('?');
                 (c.encode_utf8(&mut utf8).as_bytes(), b"")
             }
             b'c' | b'C' => {
-                digits[0] = args.next() as u8;
+                digits[0] = args.int() as u8;
                 (&digits[..1], b"")
             }
             b's' | b'S' if utf16 => {
-                let p = args.next() as *const u16;
+                let p = args.ptr::<u16>().cast_const();
                 put_wide_str(out, p, precision, width, left);
                 continue;
             }
             b's' | b'S' => {
-                let p = args.next() as *const u8;
+                let p = args.ptr::<u8>().cast_const();
                 // SAFETY: the caller's NUL-terminated string (or NULL).
                 let s: &[u8] = if p.is_null() { b"(null)" } else { unsafe { crate::c_str(p) } };
                 (&s[..precision.map_or(s.len(), |n| n.min(s.len()))], b"")
             }
             b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
-                let v = f64::from_bits(args.next());
+                let v = args.double();
                 let (n, negative) = crate::float::format(v, conv, precision, alt, &mut float_buf);
                 let sign: &[u8] = if negative {
                     b"-"
@@ -1369,7 +1415,7 @@ fn format(out: &mut Out, fmt: &[u8], mut args: Args, wide: bool) {
             b'%' => (b"%".as_slice(), b""),
             b'n' => {
                 // %n writes memory: not supported (as in the secure CRT).
-                args.next();
+                args.pointer();
                 crate::missing(b"msvcrt.dll!printf(%n)", 0);
                 continue;
             }
@@ -1459,30 +1505,30 @@ fn number(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn vfprintf(file: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn vfprintf(file: *mut u8, fmt: *const u8, args: VaList) -> i32 {
     let Some(s) = stream(file) else {
         crate::missing(b"msvcrt.dll!vfprintf(file)", 0);
         return -1;
     };
     let mut out = Out { sink: Sink::Handle { handle: s.handle, buf: [0; 256], len: 0 }, total: 0 };
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, Args(args), false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
     out.flush();
     out.total as i32
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn vprintf(fmt: *const u8, args: *const u64) -> i32 {
-    // SAFETY: inside IOB.
+pub extern "C" fn vprintf(fmt: *const u8, args: VaList) -> i32 {
+    // SAFETY: inside _iob.
     vfprintf(unsafe { __iob_func().add(FILE_SIZE) }, fmt, args)
 }
 
 /// vsprintf: no size limit (as documented; the caller's buffer must fit).
 #[unsafe(no_mangle)]
-pub extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, args: VaList) -> i32 {
     let mut out = Out { sink: Sink::Bytes { ptr: buf, cap: usize::MAX }, total: 0 };
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, Args(args), false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
     out.put(&[0]);
     out.total as i32 - 1
 }
@@ -1490,10 +1536,10 @@ pub extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, args: *const u64) -> i3
 /// _vsnprintf(buf, count, fmt, args): at most `count` bytes; the length,
 /// or -1 if it did not fit (then without a terminator), as documented.
 #[unsafe(no_mangle)]
-pub extern "C" fn _vsnprintf(buf: *mut u8, count: usize, fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn _vsnprintf(buf: *mut u8, count: usize, fmt: *const u8, args: VaList) -> i32 {
     let mut out = Out { sink: Sink::Bytes { ptr: buf, cap: count }, total: 0 };
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, Args(args), false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
     let n = out.total;
     if buf.is_null() && count == 0 {
         // The documented way to measure: the length the output needs.
@@ -1512,12 +1558,7 @@ pub extern "C" fn _vsnprintf(buf: *mut u8, count: usize, fmt: *const u8, args: *
 /// _vsnwprintf(buf, count, fmt, args): the wide version (counts in
 /// characters).
 #[unsafe(no_mangle)]
-pub extern "C" fn _vsnwprintf(
-    buf: *mut u16,
-    count: usize,
-    fmt: *const u16,
-    args: *const u64,
-) -> i32 {
+pub extern "C" fn _vsnwprintf(buf: *mut u16, count: usize, fmt: *const u16, args: VaList) -> i32 {
     // The format as UTF-8 (formats are ASCII in practice).
     let mut narrow_fmt = [0u8; 1024];
     let mut n = 0;
@@ -1530,7 +1571,7 @@ pub extern "C" fn _vsnwprintf(
     }
     let mut text = [0u8; 2048];
     let mut out = Out { sink: Sink::Bytes { ptr: text.as_mut_ptr(), cap: text.len() }, total: 0 };
-    format(&mut out, &narrow_fmt[..n], Args(args), true);
+    format(&mut out, &narrow_fmt[..n], args, true);
     let produced = out.total.min(text.len());
     let s = core::str::from_utf8(&text[..produced]).unwrap_or("");
     let mut w = 0;
@@ -1556,7 +1597,7 @@ pub extern "C" fn _vsnwprintf(
 /// narrow stream in the ANSI code page (UTF-8 on gala), as msvcrt does
 /// for a stream not in a Unicode mode; the count of wide characters.
 #[unsafe(no_mangle)]
-pub extern "C" fn vfwprintf(file: *mut u8, fmt: *const u16, args: *const u64) -> i32 {
+pub extern "C" fn vfwprintf(file: *mut u8, fmt: *const u16, args: VaList) -> i32 {
     let mut narrow_fmt = [0u8; 1024];
     let mut n = 0;
     // SAFETY: the caller's NUL-terminated wide format.
@@ -1568,7 +1609,7 @@ pub extern "C" fn vfwprintf(file: *mut u8, fmt: *const u16, args: *const u64) ->
     }
     let mut text = [0u8; 2048];
     let mut out = Out { sink: Sink::Bytes { ptr: text.as_mut_ptr(), cap: text.len() }, total: 0 };
-    format(&mut out, &narrow_fmt[..n], Args(args), true);
+    format(&mut out, &narrow_fmt[..n], args, true);
     let produced = out.total.min(text.len());
     if fwrite(text.as_ptr(), 1, produced, file) != produced {
         return -1;
@@ -1585,67 +1626,3 @@ pub extern "C" fn fputwc(c: u16, file: *mut u8) -> u16 {
     let bytes = ch.encode_utf8(&mut b).as_bytes();
     if fwrite(bytes.as_ptr(), 1, bytes.len(), file) == bytes.len() { c } else { 0xffff }
 }
-
-// fprintf(file, fmt, ...): rcx = file, rdx = fmt, r8/r9 and the stack =
-// the variadic arguments. Spill rdx, r8, r9 to the caller's home area, so
-// [rsp+24] (r8's slot) starts the va_list, then vfprintf(file, fmt, list).
-// sprintf(buf, fmt, ...) is the same shape (vsprintf). printf(fmt, ...):
-// the list starts at [rsp+16].
-core::arch::global_asm!(
-    ".globl fprintf",
-    "fprintf:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea r8, [rsp+24]",
-    "sub rsp, 40",
-    "call {vfprintf}",
-    "add rsp, 40",
-    "ret",
-    ".globl sprintf",
-    "sprintf:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea r8, [rsp+24]",
-    "sub rsp, 40",
-    "call {vsprintf}",
-    "add rsp, 40",
-    "ret",
-    // _snprintf(buf, count, fmt, ...): the list starts at r9's slot.
-    ".globl _snprintf",
-    "_snprintf:",
-    "mov [rsp+32], r9",
-    "lea r9, [rsp+32]",
-    "sub rsp, 40",
-    "call {_vsnprintf}",
-    "add rsp, 40",
-    "ret",
-    // fwprintf(file, fmt, ...): fprintf's shape.
-    ".globl fwprintf",
-    "fwprintf:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea r8, [rsp+24]",
-    "sub rsp, 40",
-    "call {vfwprintf}",
-    "add rsp, 40",
-    "ret",
-    ".globl printf",
-    "printf:",
-    "mov [rsp+8], rcx",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea rdx, [rsp+16]",
-    "sub rsp, 40",
-    "call {vprintf}",
-    "add rsp, 40",
-    "ret",
-    vfprintf = sym vfprintf,
-    vfwprintf = sym vfwprintf,
-    vsprintf = sym vsprintf,
-    vprintf = sym vprintf,
-    _vsnprintf = sym _vsnprintf,
-);

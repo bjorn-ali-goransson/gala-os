@@ -344,10 +344,7 @@ pub fn complete_count(r: Request, status: NtStatus, count: u64) {
     // report the bytes.
     let information = if status.0 < 0xc000_0000 { count } else { 0 };
     if r.iosb != 0 {
-        let mut b = [0u8; 16];
-        b[0..4].copy_from_slice(&status.0.to_le_bytes());
-        b[8..16].copy_from_slice(&information.to_le_bytes());
-        let _ = r.process.write(r.iosb, &b);
+        let _ = r.process.write_iosb(r.iosb, status, information);
     }
     if let Some(e) = &r.event {
         wait::set_signal(e, 1);

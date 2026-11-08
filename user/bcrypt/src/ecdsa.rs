@@ -10,8 +10,10 @@
 //! then s, each cbKey bytes), which gives STATUS_INVALID_SIGNATURE when it
 //! does not verify; BCryptSignHash of a hash with a private key (r || s;
 //! the nonce is RFC 6979's, derived from the key and the hash, where
-//! Windows draws a random one: either is a valid signature). Generation,
-//! export and P-521 are not there (recorded). The curve arithmetic is
+//! Windows draws a random one: either is a valid signature);
+//! BCryptExportKey of both blobs (Inno Setup's IDE and compiler export
+//! the trusted keys they import). Generation and P-521 are not there
+//! (recorded). The curve arithmetic is
 //! RustCrypto's `p256`/`p384` crates (THIRD_PARTY.md).
 
 use p256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
@@ -41,6 +43,8 @@ enum Signer {
 
 /// An ECDSA key object (the handle points at it): the public key, and
 /// the private one for a private blob.
+/// `repr(C)`: the magic first, where `key` looks for it in any handle.
+#[repr(C)]
 pub struct EcKey {
     magic: u32,
     key: Verifier,
@@ -134,6 +138,74 @@ pub fn import(
     }
     // SAFETY: the caller's output.
     unsafe { *out = p as usize };
+    STATUS_SUCCESS
+}
+
+/// BCryptExportKey of an ECDSA key: BCRYPT_ECCPUBLIC_BLOB (magic, cbKey,
+/// X, Y) or, for a key with its private part, BCRYPT_ECCPRIVATE_BLOB (d
+/// after them); without a buffer the size alone, a short one
+/// STATUS_BUFFER_TOO_SMALL. A public key has no private blob
+/// (STATUS_INVALID_PARAMETER).
+pub fn export(
+    k: &EcKey,
+    blob_type: *const u16,
+    out: *mut u8,
+    len: u32,
+    result: *mut u32,
+) -> Status {
+    let private = if wide_is(blob_type, "ECCPUBLICBLOB") {
+        false
+    } else if wide_is(blob_type, "ECCPRIVATEBLOB") {
+        true
+    } else {
+        missing(b"bcrypt.dll!BCryptExportKey(ECDSA blob type)", 0);
+        return STATUS_NOT_SUPPORTED;
+    };
+    if private && k.private.is_none() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let mut b = [0u8; 8 + 3 * 48];
+    let (size, magic) = match (&k.key, private) {
+        (Verifier::P256(_), false) => (32, MAGIC_PUBLIC_P256),
+        (Verifier::P256(_), true) => (32, MAGIC_PRIVATE_P256),
+        (Verifier::P384(_), false) => (48, MAGIC_PUBLIC_P384),
+        (Verifier::P384(_), true) => (48, MAGIC_PRIVATE_P384),
+    };
+    b[..4].copy_from_slice(&magic.to_le_bytes());
+    b[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+    // SEC 1's uncompressed point: 04 || X || Y.
+    match &k.key {
+        Verifier::P256(v) => {
+            b[8..8 + 2 * size].copy_from_slice(&v.to_encoded_point(false).as_bytes()[1..])
+        }
+        Verifier::P384(v) => {
+            b[8..8 + 2 * size].copy_from_slice(&v.to_encoded_point(false).as_bytes()[1..])
+        }
+    }
+    match &k.private {
+        Some(Signer::P256(s)) if private => {
+            b[8 + 2 * size..8 + 3 * size].copy_from_slice(&s.to_bytes())
+        }
+        Some(Signer::P384(s)) if private => {
+            b[8 + 2 * size..8 + 3 * size].copy_from_slice(&s.to_bytes())
+        }
+        _ => {}
+    }
+    let n = 8 + if private { 3 } else { 2 } * size;
+    if result.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's outputs.
+    unsafe {
+        *result = n as u32;
+        if out.is_null() {
+            return STATUS_SUCCESS;
+        }
+        if (len as usize) < n {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+        core::ptr::copy_nonoverlapping(b.as_ptr(), out, n);
+    }
     STATUS_SUCCESS
 }
 

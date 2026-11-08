@@ -8,10 +8,14 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use super::sspi::SecHandle;
 
 /// schannel.dll's handle tags ("galaSCHC", "galaSCHX").
-const CREDENTIAL_TAG: usize = 0x6761_6c61_5343_4843;
-const CONTEXT_TAG: usize = 0x6761_6c61_5343_4858;
+const CREDENTIAL_TAG: usize = 0x6761_6c61_5343_4843_u64 as usize; // its low half on x86
+const CONTEXT_TAG: usize = 0x6761_6c61_5343_4858_u64 as usize; // its low half on x86
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;

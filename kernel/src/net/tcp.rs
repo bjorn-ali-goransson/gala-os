@@ -3,15 +3,28 @@
 //! "Networking".
 //!
 //! Two interfaces, each with its own socket set: `lo` (127.0.0.1/8, always)
-//! and `eth` (the card, when there is one). Our own table of entries maps
-//! `SocketId`s to smoltcp sockets: a bound address, a listener (with its
-//! listening and established-but-not-accepted sockets) or a connection.
+//! and `eth` (the card, when there is one). The sets grow fallibly while
+//! the sockets' buffers stay within the stack's budget (a share of
+//! memory, `buffer_budget`). Our own table of entries maps `SocketId`s to
+//! smoltcp sockets: a bound address, a listener (one listening socket per
+//! interface, its connections being opened and those waiting to be
+//! accepted) or a connection.
+//!
+//! Every socket's buffers are charged to its owner's quota (`Owner`: the
+//! process that made the endpoint, ARCHITECTURE "Pool and handle quotas")
+//! while the owner holds it (`Bill`): a listener's sockets to the
+//! listener's owner, an accepted connection then to the acceptor's; a
+//! socket its owner closed and that still finishes (FIN, TIME-WAIT) is the
+//! stack's alone. A socket over its owner's quota is refused
+//! (`NetError::OverQuota`). An owner may ask for larger buffers than the
+//! default (SO_RCVBUF, SO_SNDBUF), up to MAX_BUFFER each way.
 //! The `net` thread polls; after each poll every entry whose readiness
 //! changed is reported to the notify hook with the entry's token.
 
 use super::loopback::Loopback;
 use super::virtio_net::VirtioNet;
-use crate::mm::heap::TryVec;
+use crate::mm::heap::{KArc, TryVec};
+use crate::quota::{Block, Held, Pool};
 use crate::sync::IrqMutex;
 // Threads and time through the core's runtime (not `nt::platform`: `net`
 // is core, below every personality), so the stack also runs in gala-um
@@ -20,18 +33,37 @@ use crate::runtime as sched;
 use crate::runtime as time;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
+use smoltcp::iface::{
+    Config, Interface, PollIngressSingleResult, PollResult, SocketHandle, SocketSet, SocketStorage,
+};
 use smoltcp::phy::Device;
 use smoltcp::socket::tcp::{self, State};
 use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address,
 };
 
-/// Sockets per interface (smoltcp sockets, including listening ones).
-const MAX_SOCKETS: usize = 64;
-/// Bytes buffered per direction per connection.
-const BUFFER: usize = 64 * 1024;
-const MAX_BACKLOG: usize = 8;
+/// Bytes buffered per direction per connection unless its owner asks for
+/// more (Windows' default SO_RCVBUF and SO_SNDBUF are 64 KiB too).
+pub const BUFFER: usize = 64 * 1024;
+/// The most a socket buffers each way: larger SO_RCVBUF/SO_SNDBUF values
+/// give this much (gala's buffers are allocated whole when the socket is
+/// made, not as data comes).
+pub const MAX_BUFFER: usize = 4 << 20;
+/// What a default socket's buffers take (both directions).
+const SOCKET_COST: u64 = 2 * BUFFER as u64;
+/// The share of memory the stack's sockets' buffers may take: a quarter
+/// (`buffer_budget`).
+const MEMORY_SHARE: u64 = 4;
+/// The fewest default sockets the budget allows, however little memory
+/// (and in host tests, which have no frame allocator).
+const MIN_SOCKETS: usize = 64;
+/// Slots a socket set starts with; it doubles as it fills.
+const INITIAL_SLOTS: usize = 16;
+/// The most connections a listener lets wait (opened or established, not
+/// accepted): a bound on what callers ask, not storage (each connection
+/// is a socket of its own when it comes). 65535 is the top of Windows'
+/// SOMAXCONN_HINT range.
+pub const MAX_BACKLOG: usize = 65535;
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 
 use super::{Ip, Scope};
@@ -50,6 +82,9 @@ pub enum NetError {
     NotConnected,
     Unreachable,
     NoMemory,
+    /// Over its owner's pool quota (the owner's `quota: ... over its
+    /// nonpaged pool` line and event say by how much).
+    OverQuota,
     /// The id names no live socket.
     NoSocket,
     /// A datagram larger than the interface carries.
@@ -101,28 +136,168 @@ fn net_event(what: &str, id: SocketId, local: Addr, remote: Option<Addr>) {
     );
 }
 
+/// The end of a connection's sending side or of the connection
+/// (`events=net`: "tcp shutdown", "tcp close"), with its byte counts: what
+/// its owner queued and took, what was still unsent (queued, not yet
+/// acknowledged) and unread (received, never taken). A stream that came
+/// up short is found by comparing one end's `sent` with the other's
+/// `received`.
+fn bytes_event(what: &str, id: SocketId, local: Addr, remote: Option<Addr>, b: Bytes) {
+    crate::events::emit(
+        crate::events::Category::Net,
+        what,
+        format_args!(
+            r#""socket":{},"local":{local},"remote":{},"sent":{},"received":{},"unsent":{},"unread":{}"#,
+            id.index,
+            remote.map_or(Addr::default(), |r| r),
+            b.sent,
+            b.received,
+            b.unsent,
+            b.unread
+        ),
+    );
+}
+
+/// A connection's byte counts (`bytes_event`): `sent` and `received` by
+/// its owner since the socket was made (or adopted after a handover);
+/// `unsent` and `unread` are the queues' lengths when reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Bytes {
+    sent: u64,
+    received: u64,
+    unsent: usize,
+    unread: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SocketId {
     pub(super) index: u32,
     generation: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+impl SocketId {
+    /// The number events name it by (`"socket"`).
+    pub fn number(self) -> u32 {
+        self.index
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(super) enum Side {
     Lo,
     Eth,
 }
 
+impl Side {
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Side::Lo => "loopback",
+            Side::Eth => "card",
+        }
+    }
+}
+
 pub(super) type Sock = (Side, SocketHandle);
+
+/// Who a socket is for: the token the notify hook gets, the quota its
+/// buffers are charged to (none: the system's, uncharged) and the sizes
+/// its owner asked for (0: the default; clamped to BUFFER..=MAX_BUFFER).
+#[derive(Clone, Default)]
+pub struct Owner {
+    pub token: u64,
+    pub purse: Option<KArc<Block>>,
+    pub rx: usize,
+    pub tx: usize,
+    /// Charged whatever the limit (a socket a kernel handover carried:
+    /// its process held it already).
+    pub unchecked: bool,
+}
+
+impl From<u64> for Owner {
+    /// An owner with no quota and the default buffers (the kernel's own
+    /// sockets, host tests).
+    fn from(token: u64) -> Owner {
+        Owner { token, ..Owner::default() }
+    }
+}
+
+impl Owner {
+    /// The receive and send buffers' sizes its sockets get.
+    pub fn buffers(&self) -> (usize, usize) {
+        (self.rx.clamp(BUFFER, MAX_BUFFER), self.tx.clamp(BUFFER, MAX_BUFFER))
+    }
+
+    /// Its TCP socket's cost: both buffers.
+    fn tcp_cost(&self) -> u64 {
+        let (rx, tx) = self.buffers();
+        (rx + tx) as u64
+    }
+}
+
+/// What one socket in a set costs: its bytes against the stack's budget,
+/// and their charge to its owner's quota while the owner holds it.
+pub(super) struct Bill {
+    bytes: u64,
+    charge: Option<Held>,
+}
+
+/// What a listener does with a connection request (a SYN) that finds its
+/// backlog full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WhenFull {
+    /// Refuse it (the stack answers with RST: the client's connect fails
+    /// with connection refused), as Windows documents for listen.
+    #[default]
+    Refuse,
+    /// Ignore it (no answer: the client sends its SYN again later and gets
+    /// in once an accept made room), as Linux does (tcp(7)'s
+    /// tcp_abort_on_overflow off).
+    Ignore,
+}
+
+/// A listener: one socket in LISTEN per interface (the one smoltcp hands
+/// the next SYN to; smoltcp has no accept queue, a listening socket
+/// *becomes* the connection), and the connections it took. After every
+/// packet the stack moves a socket that took a SYN to `opening` and puts
+/// a fresh one in its place while the backlog has room (`Stack::tend`),
+/// so a listener holds two sockets at most besides its connections.
+#[derive(Default)]
+pub(super) struct Listener {
+    /// The most connections waiting (`opening` and `ready` together).
+    backlog: usize,
+    when_full: WhenFull,
+    /// The socket in LISTEN on each interface (`Side::index`): None while
+    /// the backlog is full (WhenFull::Refuse: the stack's own RST answers
+    /// the SYN) or when no socket could be had (the budget, memory, the owner's quota).
+    catchers: [Option<Sock>; 2],
+    /// Connections being opened (SYN received, the handshake not done).
+    opening: Vec<Sock>,
+    /// Established connections waiting to be accepted, with their
+    /// sequence numbers (AFD's WAIT_FOR_LISTEN / ACCEPT name them).
+    ready: Vec<(u32, Sock)>,
+    next_sequence: u32,
+    /// The backlog was full at the last look (`events=net` "tcp backlog
+    /// full" once each time it fills).
+    full: bool,
+    /// A listening socket was refused by the owner's quota: until one
+    /// fits again, `tend` asks quietly (the quota logs and reports one
+    /// refusal per stretch, not one per poll).
+    over_quota: bool,
+}
+
+impl Listener {
+    fn waiting(&self) -> usize {
+        self.opening.len() + self.ready.len()
+    }
+}
 
 pub(super) enum Kind {
     Bound,
-    Listener {
-        backlog: usize,
-        listening: Vec<Sock>,
-        ready: Vec<(u32, Sock)>,
-        next_sequence: u32,
-    },
+    Listener(Listener),
     Conn {
         sock: Sock,
         connected: bool,
@@ -139,7 +314,9 @@ impl Kind {
 
 pub(super) struct Entry {
     generation: u32,
-    token: u64,
+    /// Its token, quota and buffer sizes (a listener's connections get
+    /// the sizes too).
+    pub(super) owner: Owner,
     pub(super) local: Addr,
     /// The families it takes (ports and listening addresses follow it).
     pub(super) scope: Scope,
@@ -148,6 +325,8 @@ pub(super) struct Entry {
     /// owner sent, received or accepted (the next poll reports it: a queue
     /// emptied and refilled to the same length looks unchanged).
     pub(super) last: u64,
+    /// What its owner sent and received (a connection; `bytes_event`).
+    pub(super) bytes: Bytes,
 }
 
 /// No signature: the next poll reports the entry.
@@ -157,6 +336,7 @@ pub(super) struct Iface<D: Device> {
     pub(super) dev: D,
     iface: Interface,
     pub(super) sockets: SocketSet<'static>,
+    /// Sockets in the set.
     count: usize,
 }
 
@@ -168,17 +348,34 @@ impl<D: Device> Iface<D> {
         iface.update_ip_addrs(|addrs| {
             let _ = addrs.push(cidr);
         });
-        let mut storage = Vec::new();
-        storage.try_reserve_exact(MAX_SOCKETS).ok()?;
-        for _ in 0..MAX_SOCKETS {
-            storage.try_push(SocketStorage::EMPTY).ok()?;
-        }
+        // Empty slots reserved, not made: `Stack::add` grows the set
+        // (fallibly) before smoltcp would push.
+        let mut storage: Vec<SocketStorage<'static>> = Vec::new();
+        storage.try_reserve_exact(INITIAL_SLOTS).ok()?;
         Some(Self { dev, iface, sockets: SocketSet::new(storage), count: 0 })
     }
 
-    fn poll(&mut self) -> bool {
-        self.iface.poll(now(), &mut self.dev, &mut self.sockets) != smoltcp::iface::PollResult::None
+    /// Takes one received packet; false when there was none.
+    fn ingress_one(&mut self, now: smoltcp::time::Instant) -> bool {
+        self.iface.poll_ingress_single(now, &mut self.dev, &mut self.sockets)
+            != PollIngressSingleResult::None
     }
+
+    /// Sends what the sockets queued; whether a socket may have changed.
+    fn egress(&mut self, now: smoltcp::time::Instant) -> bool {
+        self.iface.poll_egress(now, &mut self.dev, &mut self.sockets) != PollResult::None
+    }
+}
+
+/// The most bytes the stack's sockets' buffers take, every interface's
+/// together: a quarter of the machine's memory, at least MIN_SOCKETS
+/// default sockets' worth. Every listener holds a socket per interface
+/// and every connection one, so this bounds listeners and connections
+/// alike, whoever owns them; each owner's own share is its pool quota
+/// (`Stack::admit`).
+fn buffer_budget() -> u64 {
+    let (_, frames) = crate::mm::frame_stats();
+    (frames.saturating_mul(4096) / MEMORY_SHARE).max(MIN_SOCKETS as u64 * SOCKET_COST)
 }
 
 pub(super) struct Stack {
@@ -192,6 +389,14 @@ pub(super) struct Stack {
     lingering: Vec<Sock>,
     next_port: u16,
     next_generation: u32,
+    /// `buffer_budget` when the stack started, and the bytes the sockets
+    /// in the sets take now.
+    budget: u64,
+    bytes: u64,
+    /// Each socket in a set and its `Bill`, by socket (binary search).
+    bills: Vec<(Sock, Bill)>,
+    /// A socket was refused and it was logged (once until a socket goes).
+    refused_logged: bool,
 }
 
 static STACK: IrqMutex<Option<Stack>> = IrqMutex::new(None);
@@ -209,12 +414,13 @@ fn now() -> smoltcp::time::Instant {
     smoltcp::time::Instant::from_micros((time::monotonic_ns() / 1000) as i64)
 }
 
-fn new_socket() -> Option<tcp::Socket<'static>> {
+/// A TCP socket with buffers of `rx` and `tx` bytes.
+fn new_socket((rx_len, tx_len): (usize, usize)) -> Option<tcp::Socket<'static>> {
     let (mut rx, mut tx) = (Vec::new(), Vec::new());
-    rx.try_reserve_exact(BUFFER).ok()?;
-    tx.try_reserve_exact(BUFFER).ok()?;
-    rx.resize(BUFFER, 0);
-    tx.resize(BUFFER, 0);
+    rx.try_reserve_exact(rx_len).ok()?;
+    tx.try_reserve_exact(tx_len).ok()?;
+    rx.resize(rx_len, 0);
+    tx.resize(tx_len, 0);
     let mut socket = tcp::Socket::new(tcp::SocketBuffer::new(rx), tcp::SocketBuffer::new(tx));
     // Small writes go out at once, as with TCP_NODELAY (request/response
     // round trips over loopback would otherwise wait for delayed ACKs).
@@ -235,24 +441,166 @@ impl Stack {
         Some(self.sockets(side)?.get_mut::<tcp::Socket>(handle))
     }
 
+    /// Sockets in every set.
+    fn in_use(&self) -> usize {
+        self.lo.count + self.eth.as_ref().map_or(0, |e| e.count)
+    }
+
+    /// Logs why a socket is refused, once until a socket goes. (A refusal
+    /// by its owner's quota is logged by the quota, per process.)
+    fn refused(&mut self, side: Side, why: core::fmt::Arguments<'_>) {
+        if !self.refused_logged {
+            self.refused_logged = true;
+            let (free, total) = crate::mm::frame_stats();
+            crate::warn!(
+                "net: a {} socket is refused: {why} ({} sockets in use: loopback {}, card {}; \
+                 their buffers {} KiB of the stack's {} KiB, a quarter of memory; \
+                 frames free {free} of {total})",
+                side.name(),
+                self.in_use(),
+                self.lo.count,
+                self.eth.as_ref().map_or(0, |e| e.count),
+                self.bytes / 1024,
+                self.budget / 1024,
+            );
+        }
+    }
+
+    /// Whether one more socket of `bytes` may go into `side`'s set for
+    /// `owner`: within the stack's budget, room in the set and in the
+    /// bills (grown fallibly here, so smoltcp's `add` never allocates),
+    /// and within the owner's quota. Callers ask before allocating a
+    /// socket's buffers; the bill goes to `add` with the socket (dropped
+    /// instead, it gives the charge back).
+    pub(super) fn admit(
+        &mut self,
+        side: Side,
+        owner: &Owner,
+        bytes: u64,
+    ) -> Result<Bill, NetError> {
+        if self.bytes.saturating_add(bytes) > self.budget {
+            self.refused(
+                side,
+                format_args!("its {} KiB of buffers are over the budget", bytes / 1024),
+            );
+            return Err(NetError::NoMemory);
+        }
+        let set = self.sockets(side).ok_or(NetError::Unreachable)?;
+        if !set.has_room() {
+            let grow = set.slots().max(INITIAL_SLOTS);
+            if set.try_reserve(grow).is_err() {
+                self.refused(side, format_args!("out of memory growing the socket set"));
+                return Err(NetError::NoMemory);
+            }
+        }
+        if self.bills.try_reserve(1).is_err() {
+            self.refused(side, format_args!("out of memory for its bill"));
+            return Err(NetError::NoMemory);
+        }
+        let charge = match &owner.purse {
+            None => None,
+            Some(purse) if owner.unchecked => Some(Held::new(purse, Pool::NonPaged, bytes)),
+            Some(purse) => {
+                Some(Held::try_new(purse, Pool::NonPaged, bytes).map_err(|_| NetError::OverQuota)?)
+            }
+        };
+        Ok(Bill { bytes, charge })
+    }
+
+    /// A TCP socket for `side` with `owner`'s buffers, and its bill
+    /// (`admit`).
+    fn new_tcp(
+        &mut self,
+        side: Side,
+        owner: &Owner,
+    ) -> Result<(tcp::Socket<'static>, Bill), NetError> {
+        let bill = self.admit(side, owner, owner.tcp_cost())?;
+        let socket = new_socket(owner.buffers()).ok_or_else(|| {
+            self.refused(side, format_args!("out of memory for its buffers"));
+            NetError::NoMemory
+        })?;
+        Ok((socket, bill))
+    }
+
+    /// The bill of a socket in a set.
+    fn bill(&mut self, sock: Sock) -> Option<&mut Bill> {
+        let i = self.bills.binary_search_by(|(s, _)| s.cmp(&sock)).ok()?;
+        Some(&mut self.bills[i].1)
+    }
+
+    /// The socket's owner gave it up (closed, still finishing): its
+    /// buffers are the stack's alone from now on.
+    fn unbill(&mut self, sock: Sock) {
+        if let Some(bill) = self.bill(sock) {
+            bill.charge = None;
+        }
+    }
+
+    /// Charges the socket's buffers to `owner` instead (an accepted
+    /// connection: from the listener's owner to the acceptor's). Fails
+    /// with OverQuota, the charge left where it was, over the new
+    /// owner's quota.
+    fn rebill(&mut self, sock: Sock, owner: &Owner) -> Result<(), NetError> {
+        let Some(bill) = self.bill(sock) else { return Ok(()) };
+        let same = match (&bill.charge, &owner.purse) {
+            (Some(c), Some(p)) => KArc::ptr_eq(c.block(), p),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return Ok(());
+        }
+        let charge = match &owner.purse {
+            None => None,
+            Some(purse) => Some(
+                Held::try_new(purse, Pool::NonPaged, bill.bytes)
+                    .map_err(|_| NetError::OverQuota)?,
+            ),
+        };
+        bill.charge = charge;
+        Ok(())
+    }
+
+    /// Puts `socket` in `side`'s set with its bill (`admit` made room).
     pub(super) fn add<S: smoltcp::socket::AnySocket<'static>>(
         &mut self,
         side: Side,
         socket: S,
+        bill: Bill,
     ) -> Result<Sock, NetError> {
-        let count = match side {
-            Side::Lo => &mut self.lo.count,
-            Side::Eth => &mut self.eth.as_mut().ok_or(NetError::Unreachable)?.count,
-        };
-        if *count == MAX_SOCKETS {
+        if self.bills.try_reserve(1).is_err() {
             return Err(NetError::NoMemory);
         }
-        *count += 1;
-        let handle = self.sockets(side).ok_or(NetError::Unreachable)?.add(socket);
+        let set = self.sockets(side).ok_or(NetError::Unreachable)?;
+        if !set.has_room() {
+            return Err(NetError::NoMemory);
+        }
+        let handle = set.add(socket);
+        let sock = (side, handle);
+        let at = self.bills.binary_search_by(|(s, _)| s.cmp(&sock)).unwrap_or_else(|i| i);
+        self.bytes += bill.bytes;
+        // Room was reserved: this cannot fail. (Pushed, then moved to its
+        // place: no insert, which may allocate.)
+        if self.bills.try_push((sock, bill)).is_ok() {
+            self.bills[at..].rotate_right(1);
+        }
+        match side {
+            Side::Lo => self.lo.count += 1,
+            Side::Eth => {
+                if let Some(e) = self.eth.as_mut() {
+                    e.count += 1;
+                }
+            }
+        }
         Ok((side, handle))
     }
 
     pub(super) fn remove(&mut self, (side, handle): Sock) {
+        if let Ok(i) = self.bills.binary_search_by(|(s, _)| s.cmp(&(side, handle))) {
+            // Its charge goes back with the bill.
+            let (_, bill) = self.bills.remove(i);
+            self.bytes = self.bytes.saturating_sub(bill.bytes);
+        }
         if let Some(set) = self.sockets(side) {
             set.remove(handle);
             match side {
@@ -263,6 +611,7 @@ impl Stack {
                     }
                 }
             }
+            self.refused_logged = false;
         }
     }
 
@@ -295,14 +644,15 @@ impl Stack {
 
     pub(super) fn insert(
         &mut self,
-        token: u64,
+        owner: Owner,
         local: Addr,
         scope: Scope,
         kind: Kind,
     ) -> Result<SocketId, NetError> {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
-        let entry = Entry { generation, token, local, scope, kind, last: 0 };
+        let entry =
+            Entry { generation, owner, local, scope, kind, last: 0, bytes: Bytes::default() };
         let index = match self.entries.iter().position(Option::is_none) {
             Some(i) => {
                 self.entries[i] = Some(entry);
@@ -368,61 +718,120 @@ impl Stack {
         side: Side,
         local: Addr,
         scope: Scope,
+        owner: &Owner,
     ) -> Result<Sock, NetError> {
-        let mut socket = new_socket().ok_or(NetError::NoMemory)?;
         let addr = self.side_address(side, local.ip, scope).ok_or(NetError::AddressNotAvailable)?;
+        let (mut socket, bill) = self.new_tcp(side, owner)?;
         let endpoint = IpListenEndpoint { addr, port: local.port };
         socket.listen(endpoint).map_err(|_| NetError::InvalidState)?;
-        self.add(side, socket)
+        self.add(side, socket, bill)
     }
 
-    /// Moves established connections of every listener to its ready
-    /// queue, replacing them with fresh listening sockets.
-    fn promote(&mut self) {
+    /// Puts every listener's sockets in order (`tend`).
+    fn tend_all(&mut self) {
         for i in 0..self.entries.len() {
-            let mut n = 0;
-            // The n-th listening socket of entry i, if any.
-            let nth = |entries: &[Option<Entry>], n: usize| match &entries[i] {
-                Some(Entry { kind: Kind::Listener { listening, .. }, local, scope, .. }) => {
-                    listening.get(n).map(|&sock| (sock, *local, *scope))
-                }
-                _ => None,
-            };
-            while let Some((sock, local, scope)) = nth(&self.entries, n) {
-                let state = self.tcp(sock).map(|t| t.state());
-                if !matches!(state, Some(State::Established | State::CloseWait)) {
-                    n += 1;
-                    continue;
-                }
-                let fresh = self.listening_socket(sock.0, local, scope);
-                let Some(Some(Entry {
-                    kind: Kind::Listener { listening, ready, next_sequence, backlog },
-                    ..
-                })) = self.entries.get_mut(i)
-                else {
-                    break;
-                };
-                // A full backlog keeps the connection where it is until
-                // the owner accepts (it is established; data waits in it).
-                if ready.len() >= *backlog || ready.try_push((*next_sequence, sock)).is_err() {
-                    // No room to queue it: leave it listening-side for now.
-                    if let Ok(f) = fresh {
-                        self.remove(f);
-                    }
-                    n += 1;
-                    continue;
-                }
-                *next_sequence = next_sequence.wrapping_add(1);
-                match fresh {
-                    Ok(f) => {
-                        listening[n] = f;
+            if matches!(self.entries[i], Some(Entry { kind: Kind::Listener(_), .. })) {
+                self.tend(i);
+            }
+        }
+    }
+
+    /// Puts listener `i`'s sockets in order after smoltcp moved some: a
+    /// listening socket that took a SYN joins the connections being opened
+    /// (or, with the backlog full and WhenFull::Ignore, is dropped before
+    /// it answered: the SYN goes unanswered); an opened connection joins
+    /// the ready queue; one that went back to LISTEN (reset during the
+    /// handshake) or closed goes; then each interface gets a fresh
+    /// listening socket where it has none, while the backlog has room
+    /// (always with WhenFull::Ignore). With WhenFull::Refuse and the
+    /// backlog full, the listening sockets go: a SYN then finds none and
+    /// the stack answers it with RST. Runs after every received packet,
+    /// so the next SYN always meets a listener in order.
+    fn tend(&mut self, i: usize) {
+        let Some(Some(entry)) = self.entries.get_mut(i) else { return };
+        let Kind::Listener(listener) = &mut entry.kind else { return };
+        let mut l = core::mem::take(listener);
+        let (local, scope) = (entry.local, entry.scope);
+        // (A reference count, not an allocation.)
+        let owner = entry.owner.clone();
+        let id = SocketId { index: i as u32, generation: entry.generation };
+        // Listening sockets that took a SYN.
+        for slot in 0..l.catchers.len() {
+            let Some(sock) = l.catchers[slot] else { continue };
+            let state = self.tcp(sock).map(|t| t.state());
+            if state == Some(State::Listen) {
+                continue;
+            }
+            l.catchers[slot] = None;
+            if state.is_some() && l.waiting() < l.backlog && l.opening.try_push(sock).is_ok() {
+                continue;
+            }
+            // Over the backlog (WhenFull::Ignore, or both interfaces'
+            // sockets took one at once): forgotten before smoltcp sent
+            // its SYN-ACK, as if the SYN never came.
+            let remote = self.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
+            self.remove(sock);
+            net_event("tcp syn ignored", id, local, remote);
+        }
+        // Connections being opened.
+        let mut n = 0;
+        while n < l.opening.len() {
+            let sock = l.opening[n];
+            match self.tcp(sock).map(|t| t.state()) {
+                Some(State::SynReceived) => n += 1,
+                Some(State::Established | State::CloseWait) => {
+                    if l.ready.try_push((l.next_sequence, sock)).is_err() {
+                        // No memory to queue it: it stays here, counted
+                        // in the backlog, until the next look.
                         n += 1;
+                        continue;
                     }
-                    Err(_) => {
-                        listening.swap_remove(n);
-                    }
+                    l.next_sequence = l.next_sequence.wrapping_add(1);
+                    l.opening.remove(n);
+                }
+                // Back to LISTEN (a reset during the handshake), closed,
+                // or gone: no connection came of it.
+                _ => {
+                    l.opening.remove(n);
+                    self.remove(sock);
                 }
             }
+        }
+        // Listening sockets where there is room.
+        let room = l.waiting() < l.backlog || l.when_full == WhenFull::Ignore;
+        for &side in self.sides_for(local.ip) {
+            let slot = side.index();
+            match l.catchers[slot] {
+                None if room && self.side_address(side, local.ip, scope).is_some() => {
+                    let fits = |p: &KArc<Block>| p.fits(Pool::NonPaged, owner.tcp_cost());
+                    if l.over_quota && !owner.purse.as_ref().is_none_or(fits) {
+                        continue;
+                    }
+                    // On failure (the budget, memory: logged; the owner's
+                    // quota: logged by it) the interface refuses
+                    // connections until a later look finds room.
+                    match self.listening_socket(side, local, scope, &owner) {
+                        Ok(sock) => {
+                            l.catchers[slot] = Some(sock);
+                            l.over_quota = false;
+                        }
+                        Err(e) => l.over_quota |= e == NetError::OverQuota,
+                    }
+                }
+                Some(sock) if !room => {
+                    self.remove(sock);
+                    l.catchers[slot] = None;
+                }
+                _ => {}
+            }
+        }
+        let full = l.waiting() >= l.backlog;
+        if full && !l.full {
+            net_event("tcp backlog full", id, local, None);
+        }
+        l.full = full;
+        if let Some(Some(Entry { kind: Kind::Listener(listener), .. })) = self.entries.get_mut(i) {
+            *listener = l;
         }
     }
 
@@ -447,7 +856,7 @@ impl Stack {
         let Some(entry) = self.entries[index].as_ref() else { return 0 };
         match entry.kind {
             Kind::Bound => 1,
-            Kind::Listener { ref ready, .. } => 2 | (ready.len() as u64) << 8,
+            Kind::Listener(ref l) => 2 | (l.ready.len() as u64) << 8,
             Kind::Conn { sock, .. } => match self.tcp(sock) {
                 Some(s) => {
                     3 | (s.state() as u64) << 4
@@ -460,29 +869,60 @@ impl Stack {
         }
     }
 
+    /// One interface's turn: every received packet, each followed by the
+    /// listeners' `tend` (so a SYN that a listening socket took is
+    /// replaced before the next packet), then what the sockets send.
+    /// Whether anything happened.
+    fn poll_side(&mut self, side: Side) -> bool {
+        let now = now();
+        let mut busy = false;
+        loop {
+            let took = match side {
+                Side::Lo => self.lo.ingress_one(now),
+                Side::Eth => self.eth.as_mut().is_some_and(|e| e.ingress_one(now)),
+            };
+            if !took {
+                break;
+            }
+            busy = true;
+            self.tend_all();
+        }
+        busy |= match side {
+            Side::Lo => self.lo.egress(now),
+            Side::Eth => self.eth.as_mut().is_some_and(|e| e.egress(now)),
+        };
+        busy
+    }
+
     /// Polls both interfaces; returns the tokens of changed entries.
     fn poll(&mut self, changed: &mut Vec<u64>) {
         POLLS.fetch_add(1, Ordering::Relaxed);
         // Loopback traffic answers itself: poll until quiet (bounded).
         for _ in 0..64 {
-            let mut busy = self.lo.poll();
-            if let Some(eth) = self.eth.as_mut() {
-                busy |= eth.poll();
+            let mut busy = self.poll_side(Side::Lo);
+            if self.eth.is_some() {
+                busy |= self.poll_side(Side::Eth);
             }
             if !busy {
                 break;
             }
         }
-        self.promote();
+        // What timers did (a handshake given up, a socket closed).
+        self.tend_all();
         self.reap();
         super::udp::drain(self);
+        // Room for every entry's report (the table grows with the sockets).
+        let _ = changed.try_reserve(self.entries.len());
         for i in 0..self.entries.len() {
             let signature = self.signature(i);
             if let Some(entry) = self.entries[i].as_mut()
                 && entry.last != signature
             {
-                entry.last = signature;
-                let _ = changed.try_push(entry.token);
+                // Recorded only once reported: without memory for the
+                // report, the next poll reports it.
+                if changed.try_push(entry.owner.token).is_ok() {
+                    entry.last = signature;
+                }
             }
         }
     }
@@ -572,6 +1012,10 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
         lingering: Vec::new(),
         next_port: *EPHEMERAL.start(),
         next_generation: 1,
+        budget: buffer_budget(),
+        bytes: 0,
+        bills: Vec::new(),
+        refused_logged: false,
     });
     let id = sched::spawn("net", net_thread, 0).map_err(|_| NetError::NoMemory)?;
     NET_THREAD.store(id.as_usize() as u64, Ordering::Release);
@@ -580,7 +1024,7 @@ pub fn start(card: Option<VirtioNet>) -> Result<(), NetError> {
 
 fn net_thread(_: usize) {
     let mut changed: Vec<u64> = Vec::new();
-    if changed.try_reserve(MAX_SOCKETS * 2).is_err() {
+    if changed.try_reserve(MIN_SOCKETS * 2).is_err() {
         crate::warn!("net: out of memory; the network thread stops");
         return;
     }
@@ -617,15 +1061,20 @@ fn net_thread(_: usize) {
     }
 }
 
-/// Binds a socket to `local` (port 0: an ephemeral port). `token` is
-/// passed to the notify hook.
-pub fn bind(local: Addr, token: u64) -> Result<SocketId, NetError> {
-    bind_scoped(local, Scope::of(local.ip), token)
+/// Binds a socket to `local` (port 0: an ephemeral port) for `owner`
+/// (its token is passed to the notify hook).
+pub fn bind(local: Addr, owner: impl Into<Owner>) -> Result<SocketId, NetError> {
+    bind_scoped(local, Scope::of(local.ip), owner)
 }
 
 /// The same for a socket of `scope` (an IPv6 one with or without
 /// IPV6_V6ONLY: `nt::afd`).
-pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, NetError> {
+pub fn bind_scoped(
+    local: Addr,
+    scope: Scope,
+    owner: impl Into<Owner>,
+) -> Result<SocketId, NetError> {
+    let owner = owner.into();
     with_stack(|s| {
         if !s.may_bind(local.ip) {
             return Err(NetError::AddressNotAvailable);
@@ -635,50 +1084,62 @@ pub fn bind_scoped(local: Addr, scope: Scope, token: u64) -> Result<SocketId, Ne
             p if s.port_in_use(p, false, scope) => return Err(NetError::AddressInUse),
             p => p,
         };
-        s.insert(token, Addr { ip: local.ip, port }, scope, Kind::Bound)
+        s.insert(owner, Addr { ip: local.ip, port }, scope, Kind::Bound)
     })
 }
 
-/// Turns a bound socket into a listener.
-pub fn listen(id: SocketId, backlog: usize) -> Result<(), NetError> {
+/// Changes the owner of bound or listening socket `id` (its buffers'
+/// sizes: SO_RCVBUF and SO_SNDBUF set after bind) for the sockets it
+/// makes from now on: a listener's next listening sockets and
+/// connections, a bound socket's connection; sockets it holds already
+/// keep their buffers and charge. InvalidState for a connection or a
+/// datagram socket: their buffers were made whole at the start.
+pub fn set_owner(id: SocketId, owner: impl Into<Owner>) -> Result<(), NetError> {
+    let owner = owner.into();
+    with_stack_quiet(|s| {
+        let entry = s.entry(id)?;
+        match entry.kind {
+            Kind::Bound | Kind::Listener(_) => {
+                entry.owner = owner;
+                Ok(())
+            }
+            Kind::Conn { .. } | Kind::Udp(_) => Err(NetError::InvalidState),
+        }
+    })
+}
+
+/// Turns a bound socket into a listener that lets up to `backlog`
+/// connections wait (1 to MAX_BACKLOG; the personality maps what its
+/// programs ask: `nt::afd`, `lx::socket`), and does `when_full` with a
+/// request beyond them. A listener already listening is left as it is
+/// (Windows keeps the first backlog).
+pub fn listen(id: SocketId, backlog: usize, when_full: WhenFull) -> Result<(), NetError> {
     with_stack(|s| {
         let entry = s.entry(id)?;
         match entry.kind {
             Kind::Bound => {}
-            Kind::Listener { .. } => return Ok(()),
+            Kind::Listener(_) => return Ok(()),
             Kind::Conn { .. } | Kind::Udp(_) => return Err(NetError::InvalidState),
         }
-        let (local, scope) = (entry.local, entry.scope);
         let backlog = backlog.clamp(1, MAX_BACKLOG);
-        let mut listening = Vec::new();
-        listening.try_reserve(backlog * 2).map_err(|_| NetError::NoMemory)?;
-        let mut ready = Vec::new();
-        ready.try_reserve(backlog * 2).map_err(|_| NetError::NoMemory)?;
-        for &side in s.sides_for(local.ip) {
-            if s.side_address(side, local.ip, scope).is_none() {
-                continue;
-            }
-            for _ in 0..backlog {
-                match s.listening_socket(side, local, scope) {
-                    Ok(sock) => listening.try_push(sock).map_err(|_| NetError::NoMemory)?,
-                    Err(e) => {
-                        let (free, total) = crate::mm::frame_stats();
-                        warn!(
-                            "net: listen on port {}: {e:?} (sockets: loopback {}, card {}; \
-                             frames free {free} of {total})",
-                            local.port,
-                            s.lo.count,
-                            s.eth.as_ref().map_or(0, |e| e.count)
-                        );
-                        for &sock in &listening {
-                            s.remove(sock);
-                        }
-                        return Err(e);
-                    }
-                }
-            }
+        entry.kind = Kind::Listener(Listener {
+            backlog,
+            when_full,
+            next_sequence: 1,
+            ..Listener::default()
+        });
+        let quota_refusals = s.entry(id)?.owner.purse.as_ref().map_or(0, |p| p.refused());
+        s.tend(id.index as usize);
+        let entry = s.entry(id)?;
+        let over_quota = entry.owner.purse.as_ref().is_some_and(|p| p.refused() > quota_refusals);
+        let Kind::Listener(l) = &mut entry.kind else { return Err(NetError::NoSocket) };
+        if l.catchers.iter().all(Option::is_none) {
+            // Not one listening socket (the budget or memory, logged by
+            // `Stack::refused`; the owner's quota, logged by it): the
+            // listen fails, the socket stays bound.
+            entry.kind = Kind::Bound;
+            return Err(if over_quota { NetError::OverQuota } else { NetError::NoMemory });
         }
-        s.entry(id)?.kind = Kind::Listener { backlog, listening, ready, next_sequence: 1 };
         Ok(())
     })
 }
@@ -687,28 +1148,40 @@ pub fn listen(id: SocketId, backlog: usize) -> Result<(), NetError> {
 /// number and remote address.
 pub fn pending(id: SocketId) -> Result<(u32, Addr), NetError> {
     with_stack(|s| {
-        let Kind::Listener { ready, .. } = &s.entry(id)?.kind else {
+        let Kind::Listener(l) = &s.entry(id)?.kind else {
             return Err(NetError::InvalidState);
         };
-        let &(sequence, sock) = ready.first().ok_or(NetError::WouldBlock)?;
+        let &(sequence, sock) = l.ready.first().ok_or(NetError::WouldBlock)?;
         let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).ok_or(NetError::Reset)?;
         Ok((sequence, Addr::from_endpoint(remote)))
     })
 }
 
-/// Takes the pending connection `sequence` off a listener as a new socket.
-pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetError> {
+/// Takes the pending connection `sequence` off a listener as a new socket
+/// for `owner` (its buffers are charged to it from now on; over its
+/// quota, OverQuota and the connection stays pending).
+pub fn accept(id: SocketId, sequence: u32, owner: impl Into<Owner>) -> Result<SocketId, NetError> {
+    let owner = owner.into();
     with_stack(|s| {
-        let Kind::Listener { ready, .. } = &mut s.entry(id)?.kind else {
+        s.entries.try_reserve(1).map_err(|_| NetError::NoMemory)?;
+        let Kind::Listener(l) = &mut s.entry(id)?.kind else {
             return Err(NetError::InvalidState);
         };
-        let pos = ready.iter().position(|&(q, _)| q == sequence).ok_or(NetError::InvalidState)?;
-        let (_, sock) = ready.remove(pos);
+        let pos = l.ready.iter().position(|&(q, _)| q == sequence).ok_or(NetError::InvalidState)?;
+        let sock = l.ready[pos].1;
+        s.rebill(sock, &owner)?;
+        let Kind::Listener(l) = &mut s.entry(id)?.kind else {
+            return Err(NetError::InvalidState);
+        };
+        let (_, sock) = l.ready.remove(pos);
         s.entry(id)?.last = STALE;
+        // Room in the backlog: a listening socket again before the next
+        // SYN comes (WhenFull::Refuse took them away while it was full).
+        s.tend(id.index as usize);
         let local = s.tcp(sock).and_then(|t| t.local_endpoint()).map(Addr::from_endpoint);
         let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
         let local = local.unwrap_or_default();
-        match s.insert(token, local, Scope::of(local.ip), Kind::Conn { sock, connected: true }) {
+        match s.insert(owner, local, Scope::of(local.ip), Kind::Conn { sock, connected: true }) {
             Ok(new) => {
                 net_event("tcp accept", new, local, remote);
                 Ok(new)
@@ -721,16 +1194,22 @@ pub fn accept(id: SocketId, sequence: u32, token: u64) -> Result<SocketId, NetEr
     })
 }
 
-/// Starts connecting to `remote` (binding first if needed). Completion:
-/// `connected`.
-pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketId, NetError> {
+/// Starts connecting to `remote` for `owner` (its buffers' sizes now;
+/// binding first if needed). Completion: `connected`.
+pub fn connect(
+    id: Option<SocketId>,
+    remote: Addr,
+    owner: impl Into<Owner>,
+) -> Result<SocketId, NetError> {
+    let owner = owner.into();
     let id = match id {
         Some(id) => id,
         // The unspecified address of the remote's family.
-        None => bind(Addr { ip: remote.ip.unspecified_like(), port: 0 }, token)?,
+        None => bind(Addr { ip: remote.ip.unspecified_like(), port: 0 }, owner.clone())?,
     };
     with_stack(|s| {
         let side = s.side_to(remote.ip)?;
+        let eth_ip = s.eth_ip;
         let entry = s.entry(id)?;
         if !matches!(entry.kind, Kind::Bound) {
             return Err(NetError::InvalidState);
@@ -739,10 +1218,10 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
         if local.ip.is_unspecified() {
             local.ip = match side {
                 Side::Lo => remote.ip.loopback_like(),
-                Side::Eth => Ip::V4(s.eth_ip.ok_or(NetError::Unreachable)?),
+                Side::Eth => Ip::V4(eth_ip.ok_or(NetError::Unreachable)?),
             };
         }
-        let mut socket = new_socket().ok_or(NetError::NoMemory)?;
+        let (mut socket, bill) = s.new_tcp(side, &owner)?;
         let context = match side {
             Side::Lo => s.lo.iface.context(),
             Side::Eth => s.eth.as_mut().ok_or(NetError::Unreachable)?.iface.context(),
@@ -750,8 +1229,9 @@ pub fn connect(id: Option<SocketId>, remote: Addr, token: u64) -> Result<SocketI
         socket
             .connect(context, remote.endpoint(), local.endpoint())
             .map_err(|_| NetError::InvalidState)?;
-        let sock = s.add(side, socket)?;
+        let sock = s.add(side, socket, bill)?;
         let entry = s.entry(id)?;
+        entry.owner = owner;
         entry.local = local;
         entry.kind = Kind::Conn { sock, connected: false };
         net_event("tcp connect", id, local, Some(remote));
@@ -783,28 +1263,33 @@ pub fn connected(id: SocketId) -> Result<(), NetError> {
     })
 }
 
+/// Runs `f` on a connection's socket and its byte counts.
 fn conn<R>(
     id: SocketId,
-    f: impl FnOnce(&mut tcp::Socket<'static>) -> Result<R, NetError>,
+    f: impl FnOnce(&mut tcp::Socket<'static>, &mut Bytes) -> Result<R, NetError>,
 ) -> Result<R, NetError> {
     with_stack(|s| {
-        let Kind::Conn { sock, connected } = s.entry(id)?.kind else {
+        let entry = s.entry(id)?;
+        let Kind::Conn { sock, connected } = entry.kind else {
             return Err(NetError::NotConnected);
         };
         // What the owner does to the socket is not seen by the net thread:
         // the next poll must report the socket whatever it finds.
-        s.entry(id)?.last = STALE;
+        entry.last = STALE;
+        let mut bytes = entry.bytes;
         let socket = s.tcp(sock).ok_or(NetError::NoSocket)?;
         if !connected && matches!(socket.state(), State::SynSent | State::SynReceived) {
             return Err(NetError::NotConnected);
         }
-        f(socket)
+        let r = f(socket, &mut bytes);
+        s.entry(id)?.bytes = bytes;
+        r
     })
 }
 
 /// Queues bytes for sending; returns how many fit (WouldBlock if none).
 pub fn send(id: SocketId, data: &[u8]) -> Result<usize, NetError> {
-    conn(id, |t| {
+    conn(id, |t, bytes| {
         if !t.may_send() {
             return Err(if t.state() == State::Closed {
                 NetError::Reset
@@ -814,7 +1299,10 @@ pub fn send(id: SocketId, data: &[u8]) -> Result<usize, NetError> {
         }
         match t.send_slice(data) {
             Ok(0) if !data.is_empty() => Err(NetError::WouldBlock),
-            Ok(n) => Ok(n),
+            Ok(n) => {
+                bytes.sent += n as u64;
+                Ok(n)
+            }
             Err(_) => Err(NetError::InvalidState),
         }
     })
@@ -822,9 +1310,11 @@ pub fn send(id: SocketId, data: &[u8]) -> Result<usize, NetError> {
 
 /// Takes received bytes; Ok(0) at end of stream, WouldBlock if none yet.
 pub fn recv(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
-    conn(id, |t| {
+    conn(id, |t, bytes| {
         if t.can_recv() {
-            return t.recv_slice(out).map_err(|_| NetError::Reset);
+            let n = t.recv_slice(out).map_err(|_| NetError::Reset)?;
+            bytes.received += n as u64;
+            return Ok(n);
         }
         if t.may_recv() {
             return Err(NetError::WouldBlock);
@@ -838,7 +1328,7 @@ pub fn recv(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
 
 /// `recv` that leaves the bytes in the socket (MSG_PEEK).
 pub fn peek(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
-    conn(id, |t| {
+    conn(id, |t, _| {
         if t.can_recv() {
             return t.peek_slice(out).map_err(|_| NetError::Reset);
         }
@@ -846,12 +1336,18 @@ pub fn peek(id: SocketId, out: &mut [u8]) -> Result<usize, NetError> {
     })
 }
 
-/// Stops sending (FIN after the queued bytes).
+/// Stops sending (FIN after the queued bytes); `events=net` "tcp
+/// shutdown" with the byte counts (`bytes_event`).
 pub fn shutdown_send(id: SocketId) -> Result<(), NetError> {
-    conn(id, |t| {
+    let (local, remote, bytes) = conn(id, |t, bytes| {
         t.close();
-        Ok(())
-    })
+        let local = t.local_endpoint().map(Addr::from_endpoint).unwrap_or_default();
+        let remote = t.remote_endpoint().map(Addr::from_endpoint);
+        let b = Bytes { unsent: t.send_queue(), unread: t.recv_queue(), ..*bytes };
+        Ok((local, remote, b))
+    })?;
+    bytes_event("tcp shutdown", id, local, remote, bytes);
+    Ok(())
 }
 
 pub fn local(id: SocketId) -> Result<Addr, NetError> {
@@ -879,24 +1375,35 @@ pub fn close(id: SocketId, abort: bool) {
             return Ok(());
         };
         if let Kind::Conn { sock, .. } = entry.kind {
-            let remote = s.tcp(sock).and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
-            net_event(if abort { "tcp reset" } else { "tcp close" }, id, entry.local, remote);
+            let t = s.tcp(sock);
+            let remote = t.as_ref().and_then(|t| t.remote_endpoint()).map(Addr::from_endpoint);
+            let bytes = Bytes {
+                unsent: t.as_ref().map_or(0, |t| t.send_queue()),
+                unread: t.as_ref().map_or(0, |t| t.recv_queue()),
+                ..entry.bytes
+            };
+            let what = if abort { "tcp reset" } else { "tcp close" };
+            bytes_event(what, id, entry.local, remote, bytes);
         }
+        // Lingering, its buffers are the stack's: the owner is done.
         let finish = |s: &mut Stack, sock: Sock, abort: bool| {
             if let Some(t) = s.tcp(sock) {
                 if abort { t.abort() } else { t.close() }
             }
             if s.lingering.try_push(sock).is_err() {
                 s.remove(sock);
+            } else {
+                s.unbill(sock);
             }
         };
         match entry.kind {
             Kind::Bound => {}
-            Kind::Listener { listening, ready, .. } => {
-                for sock in listening {
+            Kind::Listener(l) => {
+                for sock in l.catchers.into_iter().flatten() {
                     s.remove(sock);
                 }
-                for (_, sock) in ready {
+                // Connections not accepted are reset (half-open ones too).
+                for sock in l.opening.into_iter().chain(l.ready.into_iter().map(|(_, sock)| sock)) {
                     finish(s, sock, true);
                 }
             }
@@ -937,9 +1444,9 @@ pub fn readiness(id: SocketId) -> Result<Readiness, NetError> {
         let entry = s.entry(id)?;
         Ok(match entry.kind {
             Kind::Bound => Readiness::default(),
-            Kind::Listener { ref ready, .. } => Readiness {
-                acceptable: !ready.is_empty(),
-                queued: ready.len(),
+            Kind::Listener(ref l) => Readiness {
+                acceptable: !l.ready.is_empty(),
+                queued: l.ready.len(),
                 ..Readiness::default()
             },
             Kind::Conn { sock, connected } => {
@@ -1300,14 +1807,23 @@ impl Stack {
         })
     }
 
-    /// A connection rebuilt from its carried state (added to its set).
-    fn adopt_conn(&mut self, c: &CarriedConn) -> Result<Sock, NetError> {
+    /// A connection rebuilt from its carried state (added to its set),
+    /// its buffers as large as they were, charged to `owner` (whatever
+    /// its limit: the process held it already).
+    fn adopt_conn(&mut self, c: &CarriedConn, owner: &Owner) -> Result<Sock, NetError> {
         let s = &c.state;
-        if s.recv_capacity as usize > BUFFER || s.send_capacity as usize > BUFFER {
-            // A smaller buffer than the window advertised from it.
-            return Err(NetError::NoMemory);
+        let (rx, tx) = (s.recv_capacity as usize, s.send_capacity as usize);
+        if rx > MAX_BUFFER || tx > MAX_BUFFER {
+            // Larger than any socket gets: not one this stack made.
+            return Err(NetError::InvalidState);
         }
-        let mut socket = new_socket().ok_or(NetError::NoMemory)?;
+        // At least the default (a smaller buffer than the window advertised
+        // from it would not do).
+        let sizes = (rx.max(BUFFER), tx.max(BUFFER));
+        let side = if s.on_card { Side::Eth } else { Side::Lo };
+        let owner = Owner { unchecked: true, ..owner.clone() };
+        let bill = self.admit(side, &owner, (sizes.0 + sizes.1) as u64)?;
+        let mut socket = new_socket(sizes).ok_or(NetError::NoMemory)?;
         socket.set_nagle_enabled(s.nagle);
         socket.set_ack_delay(duration_of(s.ack_delay_ms));
         socket.set_keep_alive(duration_of(s.keep_alive_ms));
@@ -1316,7 +1832,7 @@ impl Stack {
         socket
             .restore(&smoltcp_state(s)?, &c.received, &c.unsent)
             .map_err(|_| NetError::InvalidState)?;
-        self.add(if s.on_card { Side::Eth } else { Side::Lo }, socket)
+        self.add(side, socket, bill)
     }
 }
 
@@ -1361,26 +1877,21 @@ pub fn carry_entry(id: SocketId) -> Result<CarriedEntry, NetError> {
                 CarriedKind::Conn { conn: s.carry_conn(sock)?, connected }
             }
             Kind::Udp(_) => super::udp::carry(s, id)?,
-            Kind::Listener { backlog, listening, ready, next_sequence } => {
-                let (backlog, next_sequence) = (*backlog as u32, *next_sequence);
-                let mut socks: Vec<(Option<u32>, Sock)> = Vec::new();
-                socks.try_reserve(listening.len() + ready.len()).map_err(|_| NetError::NoMemory)?;
-                for &(q, sock) in ready {
-                    socks.try_push((Some(q), sock)).map_err(|_| NetError::NoMemory)?;
-                }
-                for &sock in listening {
-                    socks.try_push((None, sock)).map_err(|_| NetError::NoMemory)?;
-                }
+            Kind::Listener(l) => {
+                let (backlog, next_sequence) = (l.backlog as u32, l.next_sequence);
+                // The listening sockets are not carried: the next kernel
+                // makes its own (`tend`).
+                let (mut ready_socks, mut opening_socks) = (Vec::new(), Vec::new());
+                ready_socks.try_reserve(l.ready.len()).map_err(|_| NetError::NoMemory)?;
+                opening_socks.try_reserve(l.opening.len()).map_err(|_| NetError::NoMemory)?;
+                ready_socks.extend(l.ready.iter().copied());
+                opening_socks.extend(l.opening.iter().copied());
                 let (mut ready, mut opening) = (Vec::new(), Vec::new());
-                for (q, sock) in socks {
-                    match q {
-                        Some(q) => ready.try_push((q, s.carry_conn(sock)?)),
-                        None if s.tcp(sock).is_some_and(|t| t.state() == State::Listen) => {
-                            continue;
-                        }
-                        None => opening.try_push(s.carry_conn(sock)?),
-                    }
-                    .map_err(|_| NetError::NoMemory)?;
+                for (q, sock) in ready_socks {
+                    ready.try_push((q, s.carry_conn(sock)?)).map_err(|_| NetError::NoMemory)?;
+                }
+                for sock in opening_socks {
+                    opening.try_push(s.carry_conn(sock)?).map_err(|_| NetError::NoMemory)?;
                 }
                 CarriedKind::Listener { backlog, next_sequence, ready, opening }
             }
@@ -1439,7 +1950,8 @@ pub fn adopt_stack(c: &CarriedStack) -> Result<(), NetError> {
             }
         }
         for conn in &c.lingering {
-            let sock = s.adopt_conn(conn)?;
+            // The stack's own (its owner closed it).
+            let sock = s.adopt_conn(conn, &Owner::default())?;
             if s.lingering.try_push(sock).is_err() {
                 s.remove(sock);
                 return Err(NetError::NoMemory);
@@ -1449,56 +1961,59 @@ pub fn adopt_stack(c: &CarriedStack) -> Result<(), NetError> {
     })
 }
 
-/// In the next kernel: socket `c` again, reported to the notify hook with
-/// `token`.
-pub fn adopt_entry(c: &CarriedEntry, token: u64) -> Result<SocketId, NetError> {
+/// In the next kernel: socket `c` again, for `owner` (reported to the
+/// notify hook with its token; charged whatever its limit).
+pub fn adopt_entry(c: &CarriedEntry, owner: impl Into<Owner>) -> Result<SocketId, NetError> {
+    let owner = Owner { unchecked: true, ..owner.into() };
     with_stack(|s| {
         s.entries.try_reserve(1).map_err(|_| NetError::NoMemory)?;
         let kind = match &c.kind {
             CarriedKind::Bound => Kind::Bound,
             CarriedKind::Udp { peer, datagrams } => {
-                Kind::Udp(super::udp::adopt(s, c.local, *peer, datagrams)?)
+                Kind::Udp(super::udp::adopt(s, c.local, *peer, datagrams, &owner)?)
             }
             CarriedKind::Conn { conn, connected } => {
-                Kind::Conn { sock: s.adopt_conn(conn)?, connected: *connected }
+                Kind::Conn { sock: s.adopt_conn(conn, &owner)?, connected: *connected }
             }
             CarriedKind::Listener { backlog, next_sequence, ready, opening } => {
-                let backlog = (*backlog as usize).clamp(1, MAX_BACKLOG);
-                let mut listening = Vec::new();
-                listening
-                    .try_reserve(backlog * 2 + opening.len())
-                    .map_err(|_| NetError::NoMemory)?;
-                let mut queue = Vec::new();
-                queue.try_reserve(backlog * 2 + ready.len()).map_err(|_| NetError::NoMemory)?;
+                let mut l = Listener {
+                    backlog: (*backlog as usize).clamp(1, MAX_BACKLOG),
+                    // Only AFD's endpoints are carried (Windows' rule).
+                    when_full: WhenFull::Refuse,
+                    next_sequence: *next_sequence,
+                    ..Listener::default()
+                };
                 let built = (|| {
+                    l.ready.try_reserve(ready.len()).map_err(|_| NetError::NoMemory)?;
+                    l.opening.try_reserve(opening.len()).map_err(|_| NetError::NoMemory)?;
                     for (q, conn) in ready {
-                        queue
-                            .try_push((*q, s.adopt_conn(conn)?))
+                        l.ready
+                            .try_push((*q, s.adopt_conn(conn, &owner)?))
                             .map_err(|_| NetError::NoMemory)?;
                     }
                     for conn in opening {
-                        listening.try_push(s.adopt_conn(conn)?).map_err(|_| NetError::NoMemory)?;
-                    }
-                    for &side in s.sides_for(c.local.ip) {
-                        let busy = listening.iter().filter(|l| l.0 == side).count();
-                        for _ in busy..backlog {
-                            let sock = s.listening_socket(side, c.local, Scope::of(c.local.ip))?;
-                            listening.try_push(sock).map_err(|_| NetError::NoMemory)?;
-                        }
+                        l.opening
+                            .try_push(s.adopt_conn(conn, &owner)?)
+                            .map_err(|_| NetError::NoMemory)?;
                     }
                     Ok(())
                 })();
                 if let Err(e) = built {
-                    for &sock in listening.iter().chain(queue.iter().map(|(_, sock)| sock)) {
+                    for &sock in l.opening.iter().chain(l.ready.iter().map(|(_, sock)| sock)) {
                         s.remove(sock);
                     }
                     return Err(e);
                 }
-                Kind::Listener { backlog, listening, ready: queue, next_sequence: *next_sequence }
+                Kind::Listener(l)
             }
         };
         // Room was reserved: this cannot fail.
-        s.insert(token, c.local, Scope::of(c.local.ip), kind)
+        // From here on new sockets (a listener's) are checked again.
+        let owner = Owner { unchecked: false, ..owner };
+        let id = s.insert(owner, c.local, Scope::of(c.local.ip), kind)?;
+        // A listener's listening sockets, where its backlog has room.
+        s.tend(id.index as usize);
+        Ok(id)
     })
 }
 
@@ -1531,6 +2046,10 @@ pub(super) mod testing {
             lingering: Vec::new(),
             next_port: *EPHEMERAL.start(),
             next_generation: 1,
+            budget: buffer_budget(),
+            bytes: 0,
+            bills: Vec::new(),
+            refused_logged: false,
         });
     }
 
@@ -1562,7 +2081,7 @@ mod tests {
         loopback_stack();
         let addr = Addr::v4([127, 0, 0, 1], 4000);
         let listener = bind(addr, 1).unwrap();
-        listen(listener, 4).unwrap();
+        listen(listener, 4, WhenFull::Refuse).unwrap();
         let client = connect(None, addr, 2).unwrap();
         for _ in 0..4 {
             poll();
@@ -1591,7 +2110,7 @@ mod tests {
         loopback_stack();
         let addr = Addr { ip: Ip::V6(Ip::LOOPBACK6), port: 4200 };
         let listener = bind(addr, 1).unwrap();
-        listen(listener, 4).unwrap();
+        listen(listener, 4, WhenFull::Refuse).unwrap();
         let client = connect(None, addr, 2).unwrap();
         polls(4);
         let (sequence, remote) = pending(listener).unwrap();
@@ -1607,6 +2126,155 @@ mod tests {
         let far =
             Addr { ip: Ip::V6([0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), port: 80 };
         assert_eq!(connect(None, far, 4), Err(NetError::Unreachable));
+        *STACK.lock() = None;
+    }
+
+    /// More listeners than a fixed share of the stack's sockets allowed
+    /// (Nginx's ports at backlog 511): each takes its connection.
+    #[test]
+    fn many_listeners_each_take_a_connection() {
+        let _turn = turn();
+        loopback_stack();
+        let mut listeners = Vec::new();
+        for i in 0..20u16 {
+            let addr = Addr::v4([127, 0, 0, 1], 4300 + i);
+            let l = bind(addr, 100 + u64::from(i)).unwrap();
+            listen(l, 511, WhenFull::Refuse).unwrap();
+            listeners.push((l, addr));
+        }
+        for (i, &(l, addr)) in listeners.iter().enumerate() {
+            let client = connect(None, addr, 200 + i as u64).unwrap();
+            polls(4);
+            assert_eq!(connected(client), Ok(()), "listener {i}");
+            let (sequence, _) = pending(l).unwrap();
+            let server = accept(l, sequence, 300 + i as u64).unwrap();
+            assert_eq!(send(client, b"hi").unwrap(), 2);
+            assert_eq!(recv_all(server, 2), b"hi");
+        }
+        *STACK.lock() = None;
+    }
+
+    /// Windows' listen: once `backlog` connections wait unaccepted, the
+    /// next is refused (WSAECONNREFUSED); an accept makes room again.
+    #[test]
+    fn a_full_backlog_refuses_until_an_accept() {
+        let _turn = turn();
+        loopback_stack();
+        let addr = Addr::v4([127, 0, 0, 1], 4400);
+        let listener = bind(addr, 1).unwrap();
+        listen(listener, 2, WhenFull::Refuse).unwrap();
+        let a = connect(None, addr, 2).unwrap();
+        let b = connect(None, addr, 3).unwrap();
+        polls(4);
+        assert_eq!((connected(a), connected(b)), (Ok(()), Ok(())));
+        let c = connect(None, addr, 4).unwrap();
+        polls(4);
+        assert_eq!(connected(c), Err(NetError::Refused));
+        let (first, _) = pending(listener).unwrap();
+        accept(listener, first, 5).unwrap();
+        let d = connect(None, addr, 6).unwrap();
+        polls(4);
+        assert_eq!(connected(d), Ok(()));
+        *STACK.lock() = None;
+    }
+
+    /// Sockets' buffers are charged to their owner's quota while it holds
+    /// them: a listener's to its owner, an accepted connection's then to
+    /// the acceptor's; over the quota a socket is refused; closing gives
+    /// the charge back (a lingering socket is the stack's).
+    #[test]
+    fn buffers_are_charged_to_their_owner() {
+        use crate::quota::{Block, Pool};
+        let _turn = turn();
+        loopback_stack();
+        let big = 256 * 1024;
+        let cost = 2 * big as u64;
+        let server = Block::with_limits(1, "server.exe", 0, 3 * cost, 0).unwrap();
+        let client = Block::with_limits(2, "client.exe", 0, cost, 0).unwrap();
+        let owner = |token, purse: &KArc<Block>| Owner {
+            token,
+            purse: Some(purse.clone()),
+            rx: big,
+            tx: big,
+            unchecked: false,
+        };
+        let used = |b: &KArc<Block>| b.pool(Pool::NonPaged).0;
+        let addr = Addr::v4([127, 0, 0, 1], 4700);
+        let listener = bind(addr, owner(1, &server)).unwrap();
+        assert_eq!(used(&server), 0, "a bound address holds no buffers");
+        listen(listener, 4, WhenFull::Refuse).unwrap();
+        assert_eq!(used(&server), cost, "its listening socket");
+        // The client's first connection fits its quota, the second not.
+        let a = connect(None, addr, owner(2, &client)).unwrap();
+        assert_eq!(used(&client), cost);
+        assert_eq!(connect(None, addr, owner(3, &client)), Err(NetError::OverQuota));
+        assert_eq!(used(&client), cost);
+        polls(4);
+        assert_eq!(connected(a), Ok(()));
+        // The listener took the SYN and has a new listening socket.
+        assert_eq!(used(&server), 2 * cost);
+        // Accepted by another owner: the charge moves to it, if it fits.
+        let (q, _) = pending(listener).unwrap();
+        assert_eq!(accept(listener, q, owner(4, &client)), Err(NetError::OverQuota));
+        assert_eq!(used(&server), 2 * cost, "still pending, still the listener's");
+        let other = Block::with_limits(3, "worker.exe", 0, cost, 0).unwrap();
+        let conn = accept(listener, q, owner(5, &other)).unwrap();
+        assert_eq!((used(&server), used(&other)), (cost, cost));
+        // Closing gives it back (the sockets linger: the stack's).
+        close(conn, false);
+        close(a, false);
+        assert_eq!((used(&other), used(&client)), (0, 0));
+        close(listener, false);
+        assert_eq!(used(&server), 0);
+        assert!(server.refused() == 0 && client.refused() == 2);
+        *STACK.lock() = None;
+    }
+
+    /// Linux's way (`lx::socket`): a SYN beyond the backlog goes
+    /// unanswered (no refusal); once an accept made room, a SYN gets in.
+    #[test]
+    fn a_full_backlog_ignores_until_an_accept() {
+        let _turn = turn();
+        loopback_stack();
+        let addr = Addr::v4([127, 0, 0, 1], 4500);
+        let listener = bind(addr, 1).unwrap();
+        listen(listener, 1, WhenFull::Ignore).unwrap();
+        let a = connect(None, addr, 2).unwrap();
+        polls(4);
+        assert_eq!(connected(a), Ok(()));
+        let b = connect(None, addr, 3).unwrap();
+        polls(4);
+        // Not refused, not connected: its SYN went unanswered.
+        assert_eq!(connected(b), Err(NetError::WouldBlock));
+        let (first, _) = pending(listener).unwrap();
+        accept(listener, first, 4).unwrap();
+        // Room again: the next SYN gets in (b's own retransmission needs
+        // the clock, which host tests lack; lx_socket boots it).
+        let c = connect(None, addr, 5).unwrap();
+        polls(4);
+        assert_eq!(connected(c), Ok(()));
+        assert!(pending(listener).is_ok());
+        *STACK.lock() = None;
+    }
+
+    /// The socket sets grow past their first slots, and a closed listener
+    /// leaves nothing behind.
+    #[test]
+    fn listeners_hold_one_socket_each_and_free_it() {
+        let _turn = turn();
+        loopback_stack();
+        let before = stats().3;
+        let mut ids = Vec::new();
+        for i in 0..(INITIAL_SLOTS as u16 + 8) {
+            let l = bind(Addr::v4([127, 0, 0, 1], 4600 + i), 1).unwrap();
+            listen(l, 511, WhenFull::Refuse).unwrap();
+            ids.push(l);
+        }
+        assert_eq!(stats().3 - before, INITIAL_SLOTS + 8);
+        for l in ids {
+            close(l, false);
+        }
+        assert_eq!(stats().3, before);
         *STACK.lock() = None;
     }
 
@@ -1642,7 +2310,7 @@ mod tests {
         loopback_stack();
         let addr = Addr::v4([127, 0, 0, 1], 4100);
         let listener = bind(addr, 1).unwrap();
-        listen(listener, 2).unwrap();
+        listen(listener, 2, WhenFull::Refuse).unwrap();
         let client = connect(None, addr, 2).unwrap();
         polls(4);
         let (sequence, _) = pending(listener).unwrap();

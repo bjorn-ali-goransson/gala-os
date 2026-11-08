@@ -44,6 +44,7 @@ struct MemoryInfo {
 }
 
 const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
+const IMAGE_FILE_MACHINE_I386: u32 = 0x14c;
 const ADDR_MODE_FLAT: u32 = 3;
 const MEM_IMAGE: u32 = 0x100_0000;
 
@@ -200,6 +201,13 @@ pub extern "system" fn StackWalk64(
     _translate: usize,
 ) -> i32 {
     if frame.is_null() || context.is_null() || machine != IMAGE_FILE_MACHINE_AMD64 {
+        // Windows' x64 dbghelp walks x86 stacks too (Windows 11 25H2
+        // returned TRUE for IMAGE_FILE_MACHINE_I386 with a captured x64
+        // context; what it put in the frame is not measured): gala does
+        // not, and says so.
+        if machine == IMAGE_FILE_MACHINE_I386 {
+            crate::image::unsupported(b"dbghelp.dll!StackWalk64 (IMAGE_FILE_MACHINE_I386)", 0);
+        }
         return 0;
     }
     if !crate::symbols::own(process) || read_memory != 0 {

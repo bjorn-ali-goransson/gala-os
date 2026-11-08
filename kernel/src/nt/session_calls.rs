@@ -57,8 +57,10 @@ const MAX_PIXELS: u64 = 4096 * 4096;
 ///   for another kind.
 ///
 /// STATUS_PRIVILEGE_NOT_HELD without SeTcbPrivilege, STATUS_NOT_FOUND for
-/// a session that does not exist, STATUS_NOT_SUPPORTED where there are no
-/// desktops (the server profile, no screen and no `presenter=`).
+/// a session that does not exist. Where nothing shows desktops (the server
+/// kernel, the server profile, no screen and no `presenter=`) a desktop is
+/// shown by none and stays so: SESSION_PRESENT takes none alone
+/// (STATUS_NOT_SUPPORTED for Test and Console).
 pub(super) fn gala_session(call: &mut Call<'_>) -> NtStatus {
     let (op, id, arg, buffer, length) =
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3), arg!(call, 4));

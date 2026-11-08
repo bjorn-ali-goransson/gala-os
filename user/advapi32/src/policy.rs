@@ -25,13 +25,21 @@ use super::registry::{
     RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenThreadToken(thread: usize, access: u32, as_self: u8, token: *mut usize) -> u32;
     fn NtOpenProcessToken(process: usize, access: u32, token: *mut usize) -> u32;
@@ -61,6 +69,21 @@ impl UnicodeString {
         // SAFETY: the caller's string of `length` bytes.
         unsafe { core::slice::from_raw_parts(self.buffer, usize::from(self.length / 2)) }
     }
+}
+
+/// LSA_SID_NAME_MAPPING_OPERATION_REMOVE_INPUT, the start of the ADD one.
+#[repr(C)]
+struct MappingInput {
+    domain: UnicodeString,
+    account: UnicodeString,
+}
+
+/// LSA_SID_NAME_MAPPING_OPERATION_ADD_INPUT.
+#[repr(C)]
+struct MappingAddInput {
+    names: MappingInput,
+    sid: *const u8,
+    flags: u32,
 }
 
 const STATUS_SUCCESS: u32 = 0;
@@ -297,10 +320,8 @@ pub extern "system" fn LsaManageSidNameMapping(
     // {DomainName, AccountName}.
     // SAFETY: the caller's input structure.
     let (domain, account) = unsafe {
-        (
-            input.cast::<UnicodeString>().read_unaligned(),
-            input.add(16).cast::<UnicodeString>().read_unaligned(),
-        )
+        let names = input.cast::<MappingInput>();
+        ((*names).domain, (*names).account)
     };
     let (domain, account) = (domain.chars(), account.chars());
     let Some(dpath) = Path::new(MAPPINGS).push(domain) else {
@@ -314,8 +335,8 @@ pub extern "system" fn LsaManageSidNameMapping(
     let Some(target) = target else { return STATUS_INVALID_PARAMETER };
     match operation {
         OP_ADD => {
-            // SAFETY: as above.
-            let sid = unsafe { input.add(32).cast::<*const u8>().read_unaligned() };
+            // SAFETY: as above (an ADD_INPUT).
+            let sid = unsafe { input.cast::<MappingAddInput>().read_unaligned().sid };
             let Some(sid) = sid_bytes(sid) else { return STATUS_INVALID_SID };
             let mut existing = [0u8; 68];
             if stored_sid(&target, &mut existing).is_some() {
@@ -677,7 +698,7 @@ pub extern "system" fn LsaEnumerateAccountRights(
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
     let text: usize = lens[..n].iter().map(|l| 2 * (l + 1)).sum();
-    let head = 16 * n;
+    let head = size_of::<UnicodeString>() * n;
     // SAFETY: a plain allocation of head + text bytes, filled in order.
     unsafe {
         let block = LocalAlloc(0x40, head + text);
@@ -688,7 +709,7 @@ pub extern "system" fn LsaEnumerateAccountRights(
         for i in 0..n {
             let chars = block.add(at).cast::<u16>();
             core::ptr::copy_nonoverlapping(names[i].as_ptr(), chars, lens[i]);
-            block.add(16 * i).cast::<UnicodeString>().write(UnicodeString {
+            block.cast::<UnicodeString>().add(i).write(UnicodeString {
                 length: (2 * lens[i]) as u16,
                 maximum: (2 * lens[i] + 2) as u16,
                 buffer: chars,

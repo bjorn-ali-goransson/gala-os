@@ -14,7 +14,11 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub type Hwnd = usize;
 pub type WndProc = extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 
-#[link(name = "user32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "user32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "user32", kind = "raw-dylib"))]
 unsafe extern "system" {
     pub fn RegisterClassExW(wc: *const WndClassExW) -> u16;
     pub fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
@@ -257,6 +261,12 @@ impl<T> Store<T> {
     /// The lock is held: `f` must not send messages.
     pub fn find<R>(&self, hwnd: Hwnd, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         self.locked(|items| items.iter_mut().find(|e| e.0 == hwnd).map(|e| f(&mut e.1)))
+    }
+
+    /// Keeps the states whose window `keep` accepts (the lock is held:
+    /// `keep` must not send messages).
+    pub fn retain(&self, mut keep: impl FnMut(Hwnd) -> bool) {
+        self.locked(|items| items.retain(|e| keep(e.0)));
     }
 
     pub fn remove(&self, hwnd: Hwnd) -> Option<T> {

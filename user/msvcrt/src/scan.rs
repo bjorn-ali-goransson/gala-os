@@ -4,28 +4,19 @@
 //! characters match themselves. Returns the number of assignments, or -1
 //! if the input ends before the first conversion.
 //!
-//! sscanf is C-variadic: the assembly at the end passes its arguments as a
-//! Win64 `va_list` to vsscanf, as stdio.rs does for printf.
+//! sscanf is C-variadic: the architecture's entry point (`x64.rs`,
+//! `x86.rs`) passes its arguments as a `va_list` to vsscanf, as for
+//! printf. The arguments are pointers, one per assigning conversion.
 
-/// The argument pointers, one per assigning conversion.
-struct Ptrs(*const u64);
-
-impl Ptrs {
-    fn next<T>(&mut self) -> *mut T {
-        // SAFETY: the caller passed a pointer for each conversion.
-        unsafe {
-            let p = *self.0 as *mut T;
-            self.0 = self.0.add(1);
-            p
-        }
-    }
-}
+use crate::va::VaList;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Size {
     Char,
     Short,
     Int,
+    /// Pointer-sized: `z` and `%p` (32 bits on x86, 64 on x64).
+    Pointer,
     Long64,
 }
 
@@ -109,10 +100,10 @@ pub fn float(s: &[u8], width: usize) -> Option<(f64, usize)> {
 
 /// vsscanf(input, format, args).
 #[unsafe(no_mangle)]
-pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: VaList) -> i32 {
     // SAFETY: the caller's NUL-terminated strings.
     let (s, f) = unsafe { (crate::c_str(input), crate::c_str(format)) };
-    let mut ptrs = Ptrs(args);
+    let mut ptrs = args;
     let (mut i, mut k) = (0usize, 0usize);
     let mut assigned = 0;
     let mut converted_any = false;
@@ -169,7 +160,8 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
                     }
                     long_float = true;
                 }
-                Some(b'L' | b'z' | b'j') => size = Size::Long64,
+                Some(b'L' | b'j') => size = Size::Long64,
+                Some(b'z') => size = Size::Pointer,
                 Some(b'I') if f.get(k + 1..k + 3) == Some(b"64") => {
                     size = Size::Long64;
                     k += 2;
@@ -194,8 +186,8 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
         match conv {
             b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'p' => {
                 if conv == b'p' {
-                    // A pointer: 64-bit hex (what printf's %p writes).
-                    size = Size::Long64;
+                    // A pointer, in hex (what printf's %p writes).
+                    size = Size::Pointer;
                 }
                 let base = match conv {
                     b'd' | b'u' => 10,
@@ -209,10 +201,11 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
                     // SAFETY: the caller's pointer of the given size.
                     unsafe {
                         match size {
-                            Size::Char => *ptrs.next::<u8>() = v as u8,
-                            Size::Short => *ptrs.next::<u16>() = v as u16,
-                            Size::Int => *ptrs.next::<u32>() = v as u32,
-                            Size::Long64 => *ptrs.next::<u64>() = v as u64,
+                            Size::Char => *ptrs.ptr::<u8>() = v as u8,
+                            Size::Short => *ptrs.ptr::<u16>() = v as u16,
+                            Size::Int => *ptrs.ptr::<u32>() = v as u32,
+                            Size::Pointer => *ptrs.ptr::<usize>() = v as usize,
+                            Size::Long64 => *ptrs.ptr::<u64>() = v as u64,
                         }
                     }
                     assigned += 1;
@@ -225,9 +218,9 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
                     // SAFETY: a float or (l, L) double pointer.
                     unsafe {
                         if long_float || size == Size::Long64 {
-                            *ptrs.next::<f64>() = v;
+                            *ptrs.ptr::<f64>() = v;
                         } else {
-                            *ptrs.next::<f32>() = v as f32;
+                            *ptrs.ptr::<f32>() = v as f32;
                         }
                     }
                     assigned += 1;
@@ -239,7 +232,7 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
                     break;
                 }
                 if !suppress {
-                    let p = ptrs.next::<u8>();
+                    let p = ptrs.ptr::<u8>();
                     // SAFETY: the caller's buffer of at least `n` bytes.
                     unsafe { core::ptr::copy_nonoverlapping(s[i..].as_ptr(), p, n) };
                     assigned += 1;
@@ -290,7 +283,7 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
                     break;
                 }
                 if !suppress {
-                    let p = ptrs.next::<u8>();
+                    let p = ptrs.ptr::<u8>();
                     // SAFETY: the caller's buffer, big enough by contract.
                     unsafe {
                         core::ptr::copy_nonoverlapping(s[start..].as_ptr(), p, i - start);
@@ -302,7 +295,7 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
             b'n' => {
                 if !suppress {
                     // SAFETY: the caller's int pointer.
-                    unsafe { *ptrs.next::<i32>() = i as i32 };
+                    unsafe { *ptrs.ptr::<i32>() = i as i32 };
                 }
             }
             _ => break,
@@ -311,17 +304,3 @@ pub extern "C" fn vsscanf(input: *const u8, format: *const u8, args: *const u64)
     }
     assigned
 }
-
-core::arch::global_asm!(
-    ".globl sscanf",
-    "sscanf:",
-    "mov [rsp+16], rdx",
-    "mov [rsp+24], r8",
-    "mov [rsp+32], r9",
-    "lea r8, [rsp+24]",
-    "sub rsp, 40",
-    "call {vsscanf}",
-    "add rsp, 40",
-    "ret",
-    vsscanf = sym vsscanf,
-);

@@ -10,7 +10,6 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const SB_HORZ: i32 = 0;
-const SB_VERT: i32 = 1;
 const SB_CTL: i32 = 2;
 const SIF_RANGE: u32 = 0x1;
 const SIF_PAGE: u32 = 0x2;

@@ -7,7 +7,9 @@
 //!   connection (`ssh -L`: sshd's direct-tcpip channel connecting out over
 //!   loopback), echoes it until the peer shuts down its sending side,
 //!   closes it and prints `sshfwd_test: served <n> bytes to 127.0.0.1`
-//!   (the peer's address: sshd connected from the loopback address).
+//!   (the peer's address: sshd connected from the loopback address). The
+//!   bytes must be the pattern `connect` and xtask send: the first that is
+//!   not fails a check with its stream offset (where the stream diverged).
 //! - `sshfwd_test connect <port> <bytes>`: connects to 127.0.0.1:<port>
 //!   (`ssh -R`: sshd's tcpip-forward listener), sends <bytes> bytes of a
 //!   pattern, shuts down its sending side, reads until end of stream (the
@@ -144,6 +146,7 @@ fn out_number(v: u64) {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -153,10 +156,12 @@ impl Checks {
         out_number(self.0.into());
         out(b" got ");
         out_number(got);
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -205,6 +210,7 @@ fn serve(c: &mut Checks, port: u16) -> Result<(), u32> {
             if n == 0 {
                 break;
             }
+            c.eq(mismatch(&buf[..n as usize], total as usize), u64::MAX)?;
             let mut sent = 0;
             while sent < n {
                 let m = send(conn, buf[sent as usize..].as_ptr(), n - sent, 0);
@@ -401,4 +407,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

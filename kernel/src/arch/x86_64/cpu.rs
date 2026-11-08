@@ -51,6 +51,17 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> CpuidResult {
     CpuidResult { eax: r.eax, ebx: r.ebx, ecx: r.ecx, edx: r.edx }
 }
 
+/// CPUID's vendor string ("GenuineIntel", "AuthenticAMD", ...): where the
+/// vendors' architectures differ (SYSRET's SS), the boot log says which.
+pub fn vendor() -> [u8; 12] {
+    let r = cpuid(0, 0);
+    let mut v = [0u8; 12];
+    v[..4].copy_from_slice(&r.ebx.to_le_bytes());
+    v[4..8].copy_from_slice(&r.edx.to_le_bytes());
+    v[8..].copy_from_slice(&r.ecx.to_le_bytes());
+    v
+}
+
 /// One random word from the CPU's generator: RDRAND (10 tries, as
 /// Intel recommends), else RDSEED; None without either.
 pub fn rdrand() -> Option<u64> {
@@ -156,4 +167,17 @@ pub fn enable_sse() {
         asm!("fninit", options(nomem, nostack));
     }
     super::xstate::enable_here();
+}
+
+/// The free-running cycle counter the clock, the flight recorder and spin
+/// deadlines read (the TSC; `crate::time` calibrates its rate).
+#[inline]
+pub fn cycles() -> u64 {
+    rdtsc()
+}
+
+/// One random word from the processor's generator, None without one
+/// (RDRAND, else RDSEED).
+pub fn hw_random() -> Option<u64> {
+    rdrand()
 }

@@ -14,3 +14,6 @@ bench = false
 gala_heap = { path = "../gala_heap" }
 gala_stubs = { path = "../gala_stubs" }
 http_client = { path = "../http_client" }
+
+[target.'cfg(target_arch = "x86")'.dependencies]
+ntrt = { path = "../ntrt" }

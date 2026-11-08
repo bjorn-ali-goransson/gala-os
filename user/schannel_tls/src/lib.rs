@@ -94,6 +94,8 @@ pub mod sec {
     pub const E_ALGORITHM_MISMATCH: u32 = 0x8009_0331;
     pub const E_NO_CREDENTIALS: u32 = 0x8009_030e;
     pub const CRYPT_E_REVOKED: u32 = 0x8009_2010;
+    pub const CRYPT_E_NO_REVOCATION_CHECK: u32 = 0x8009_2012;
+    pub const CRYPT_E_REVOCATION_OFFLINE: u32 = 0x8009_2013;
 }
 
 /// The largest plaintext of one record (cbMaximumMessage).
@@ -209,7 +211,17 @@ pub fn code(e: &Error) -> u32 {
                 | CertificateError::ExpiredContext { .. }
                 | CertificateError::NotValidYet
                 | CertificateError::NotValidYetContext { .. } => sec::E_CERT_EXPIRED,
+                // Revocation as Schannel reports it: the CRYPT_E_* status
+                // itself. A `Trust` says "could not be checked" with
+                // UnknownRevocationStatus and "the revocation server was
+                // offline" with ExpiredRevocationList (rustls has no
+                // offline kind; an out-of-date CRL is one way to be it).
                 CertificateError::Revoked => sec::CRYPT_E_REVOKED,
+                CertificateError::UnknownRevocationStatus => sec::CRYPT_E_NO_REVOCATION_CHECK,
+                CertificateError::ExpiredRevocationList
+                | CertificateError::ExpiredRevocationListContext { .. } => {
+                    sec::CRYPT_E_REVOCATION_OFFLINE
+                }
                 CertificateError::InvalidPurpose
                 | CertificateError::InvalidPurposeContext { .. } => sec::E_CERT_WRONG_USAGE,
                 _ => sec::E_CERT_UNKNOWN,

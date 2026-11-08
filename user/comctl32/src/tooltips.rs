@@ -32,6 +32,7 @@
 //! window or the desktop (the autopop delay hides the tip then).
 
 use crate::common::*;
+use crate::layout::{Msg, ToolInfoW, get, set};
 use crate::subclass::{RemoveWindowSubclass, SetWindowSubclass};
 use alloc::vec::Vec;
 
@@ -187,28 +188,26 @@ fn delay(hwnd: Hwnd, which: usize) -> u32 {
     }
 }
 
-/// TOOLINFO's members: cbSize and uFlags (u32 at 0 and 4), hwnd (8), uId
-/// (16), rect (24), hinst (40), lpszText (48), lParam (56, when cbSize
-/// covers it). An ANSI text is widened (Latin-1); a resource id (with
+/// TOOLINFO's members: cbSize, uFlags, hwnd, uId, rect, hinst, lpszText,
+/// lParam (when cbSize covers it). An ANSI text is widened (Latin-1); a resource id (with
 /// hinst) is loaded.
 fn tool_of(info: isize, ansi: bool) -> Option<Tool> {
     if info == 0 {
         return None;
     }
-    let p = info as *const u8;
-    // SAFETY: the caller's TOOLINFO (at least its first 56 bytes; lParam
-    // when cbSize says it is there).
-    let (_, flags, hwnd, id, rect, hinst, text, lparam) = unsafe {
-        let size = p.cast::<u32>().read_unaligned();
+    let p = info as *const ToolInfoW;
+    // SAFETY: the caller's TOOLINFO (up to lpszText; lParam when cbSize
+    // says it is there).
+    let (flags, hwnd, id, rect, hinst, text, lparam) = unsafe {
+        let size = get!(p, size);
         (
-            size,
-            p.add(4).cast::<u32>().read_unaligned(),
-            p.add(8).cast::<usize>().read_unaligned(),
-            p.add(16).cast::<usize>().read_unaligned(),
-            p.add(24).cast::<[i32; 4]>().read_unaligned(),
-            p.add(40).cast::<usize>().read_unaligned(),
-            p.add(48).cast::<usize>().read_unaligned(),
-            if size >= 64 { p.add(56).cast::<isize>().read_unaligned() } else { 0 },
+            get!(p, flags),
+            get!(p, hwnd),
+            get!(p, id),
+            get!(p, rect),
+            get!(p, instance),
+            get!(p, text),
+            if ToolInfoW::has_param(size) { get!(p, param) } else { 0 },
         )
     };
     let callback = text == TEXT_CALLBACK;
@@ -256,21 +255,21 @@ fn fill_info(info: isize, tool: &Tool) {
     if info == 0 {
         return;
     }
-    let p = info as *mut u8;
+    let p = info as *mut ToolInfoW;
     // SAFETY: the caller's TOOLINFOW; the text buffer is the caller's (large
     // enough, as the messages require).
     unsafe {
-        let size = p.cast::<u32>().read_unaligned();
-        p.add(4).cast::<u32>().write_unaligned(tool.flags);
-        p.add(8).cast::<usize>().write_unaligned(tool.hwnd);
-        p.add(16).cast::<usize>().write_unaligned(tool.id);
-        p.add(24).cast::<[i32; 4]>().write_unaligned(tool.rect);
-        if size >= 64 {
-            p.add(56).cast::<isize>().write_unaligned(tool.lparam);
+        let size = get!(p, size);
+        set!(p, flags, tool.flags);
+        set!(p, hwnd, tool.hwnd);
+        set!(p, id, tool.id);
+        set!(p, rect, tool.rect);
+        if ToolInfoW::has_param(size) {
+            set!(p, param, tool.lparam);
         }
-        let out = p.add(48).cast::<usize>().read_unaligned();
+        let out = get!(p, text);
         if tool.callback {
-            p.add(48).cast::<usize>().write_unaligned(TEXT_CALLBACK);
+            set!(p, text, TEXT_CALLBACK);
         } else if out != 0 && out != TEXT_CALLBACK {
             copy_text(&tool.text, out as *mut u16, usize::MAX);
         }
@@ -301,20 +300,20 @@ pub fn relay(tt: Hwnd, hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) {
     if tt == 0 || !(WM_MOUSEMOVE..=WM_MBUTTONDBLCLK).contains(&msg) || msg == WM_MOUSEWHEEL {
         return;
     }
-    // MSG: hwnd, message, wParam, lParam, time, pt, lPrivate.
-    let mut m = [0u8; 48];
     let mut pt = [0i32; 2];
-    // SAFETY: plain calls; our buffers.
+    // SAFETY: plain calls; our MSG.
     unsafe {
         GetCursorPos(&mut pt);
-        let q = m.as_mut_ptr();
-        q.cast::<usize>().write_unaligned(hwnd);
-        q.add(8).cast::<u32>().write_unaligned(msg);
-        q.add(16).cast::<usize>().write_unaligned(wparam);
-        q.add(24).cast::<isize>().write_unaligned(lparam);
-        q.add(32).cast::<i32>().write_unaligned(GetMessageTime());
-        q.add(36).cast::<[i32; 2]>().write_unaligned(pt);
-        SendMessageW(tt, TTM_RELAYEVENT, 0, m.as_ptr() as isize);
+        let m = Msg {
+            hwnd,
+            message: msg,
+            wparam,
+            lparam,
+            time: GetMessageTime() as u32,
+            pt,
+            private: 0,
+        };
+        SendMessageW(tt, TTM_RELAYEVENT, 0, &m as *const Msg as isize);
     }
 }
 
@@ -604,15 +603,9 @@ fn relayed(tt: Hwnd, msg: isize) {
     if msg == 0 {
         return;
     }
-    let p = msg as *const u8;
-    // SAFETY: the caller's MSG: hwnd (0), message (8), lParam (24).
-    let (hwnd, message, lparam) = unsafe {
-        (
-            p.cast::<usize>().read_unaligned(),
-            p.add(8).cast::<u32>().read_unaligned(),
-            p.add(24).cast::<isize>().read_unaligned(),
-        )
-    };
+    let p = msg as *const Msg;
+    // SAFETY: the caller's MSG.
+    let (hwnd, message, lparam) = unsafe { (get!(p, hwnd), get!(p, message), get!(p, lparam)) };
     if message == WM_MOUSEMOVE {
         moved(tt, hwnd, lparam);
     } else if (WM_LBUTTONDOWN..=WM_MBUTTONDBLCLK).contains(&message) && message != WM_MOUSEWHEEL {
@@ -850,8 +843,8 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             if msg == TTM_GETTOOLINFOW {
                 fill_info(lparam, &tool);
             } else {
-                // SAFETY: the caller's TOOLINFOW: lpszText at 48.
-                let out = unsafe { (lparam as *const u8).add(48).cast::<usize>().read_unaligned() };
+                // SAFETY: the caller's TOOLINFOW.
+                let out = unsafe { get!(lparam as *const ToolInfoW, text) };
                 if out != 0 && out != TEXT_CALLBACK {
                     let room = if wparam > 0 { wparam } else { usize::MAX };
                     copy_text(&tool.text, out as *mut u16, room);

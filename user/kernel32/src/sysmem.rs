@@ -18,36 +18,46 @@ fn kuser_version() -> (u32, u32, u32) {
 }
 
 /// The x64 user address space: 0x10000 up to 0x7fff_fffe_ffff.
-const USER_SPACE: u64 = 0x7fff_fffe_0000;
+#[cfg(target_arch = "x86_64")]
+fn user_space() -> u64 {
+    0x7fff_fffe_0000
+}
+
+/// A 32-bit process's: 0x10000 up to its highest address (below 2 GiB, or
+/// 4 GiB for a large-address-aware executable, as WOW64 gives it).
+#[cfg(target_arch = "x86")]
+fn user_space() -> u64 {
+    (basic_information().maximum_address as u64 + 1).saturating_sub(0x1_0000)
+}
 
 /// MEMORY_BASIC_INFORMATION's fields this file reads.
 struct Region {
     base: usize,
     allocation_base: usize,
     size: usize,
-    state: u32,
     kind: u32,
 }
 
-const MEM_COMMIT: u32 = 0x1000;
-const MEM_FREE: u32 = 0x1_0000;
-const MEM_PRIVATE: u32 = 0x2_0000;
 const MEM_IMAGE: u32 = 0x100_0000;
 
-/// The regions of this process's address space, in address order.
+/// The regions of this process's address space, in address order (a
+/// system call per region: module enumeration only; sizes come from the
+/// kernel's counters, `vm_counters`).
 fn regions(mut f: impl FnMut(&Region) -> bool) {
     let mut address = 0x1_0000usize;
-    while (address as u64) < USER_SPACE {
-        let mut mbi = [0u64; 6];
-        if VirtualQuery(address as *const c_void, mbi.as_mut_ptr().cast(), 48) == 0 {
+    let end = user_space();
+    while (address as u64) < end {
+        let mut mbi = MemoryBasic::default();
+        if VirtualQuery(address as *const c_void, (&raw mut mbi).cast(), size_of::<MemoryBasic>())
+            == 0
+        {
             return;
         }
         let r = Region {
-            base: mbi[0] as usize,
-            allocation_base: mbi[1] as usize,
-            size: mbi[3] as usize,
-            state: mbi[4] as u32,
-            kind: mbi[5] as u32,
+            base: mbi.base,
+            allocation_base: mbi.allocation_base,
+            size: mbi.region_size,
+            kind: mbi.kind,
         };
         if r.size == 0 || !f(&r) {
             return;
@@ -56,19 +66,23 @@ fn regions(mut f: impl FnMut(&Region) -> bool) {
     }
 }
 
-/// Committed bytes: (all, private).
-fn committed() -> (u64, u64) {
-    let (mut all, mut private) = (0u64, 0u64);
-    regions(|r| {
-        if r.state == MEM_COMMIT {
-            all += r.size as u64;
-            if r.kind == MEM_PRIVATE {
-                private += r.size as u64;
-            }
-        }
-        true
-    });
-    (all, private)
+/// VM_COUNTERS (ProcessVmCounters), as SIZE_Ts: PeakVirtualSize (0),
+/// VirtualSize (1), PageFaultCount (2: a ULONG, padded on 64-bit),
+/// PeakWorkingSetSize (3), WorkingSetSize (4), the four pool quota
+/// figures (5-8), PagefileUsage (9), PeakPagefileUsage (10).
+fn vm_counters(process: Handle) -> Result<[usize; 11], u32> {
+    let mut vm = [0usize; 11];
+    // SAFETY: a VM_COUNTERS_EX buffer.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            3,
+            vm.as_mut_ptr().cast(),
+            size_of_val(&vm) as u32,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS { Err(status) } else { Ok(vm) }
 }
 
 /// MEMORYSTATUSEX (dwLength must be 64).
@@ -90,17 +104,14 @@ pub struct MemoryStatusEx {
 /// Physical pages (total, available) and the commit charge (committed,
 /// limit), from SYSTEM_BASIC_INFORMATION and SYSTEM_PERFORMANCE_INFORMATION.
 fn memory_pages() -> (u64, u64, u64, u64) {
-    let mut basic = [0u8; 64];
+    let physical = u64::from(basic_information().physical_pages);
     let mut perf = [0u8; 0x158];
     let mut ret = 0;
-    // SAFETY: buffers of the classes' sizes.
-    unsafe {
-        NtQuerySystemInformation(0, basic.as_mut_ptr(), 64, &mut ret);
-        NtQuerySystemInformation(2, perf.as_mut_ptr(), 0x158, &mut ret);
-    }
+    // SAFETY: a buffer of the class's size.
+    unsafe { NtQuerySystemInformation(2, perf.as_mut_ptr(), 0x158, &mut ret) };
     let at =
         |b: &[u8], o: usize| u64::from(u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]));
-    (at(&basic, 12), at(&perf, 0x2c), at(&perf, 0x30), at(&perf, 0x34))
+    (physical, at(&perf, 0x2c), at(&perf, 0x30), at(&perf, 0x34))
 }
 
 /// GlobalMemoryStatusEx: physical memory from the kernel; the "page file"
@@ -115,20 +126,17 @@ pub extern "system" fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> Bool
     }
     let (total, avail, committed, limit) = memory_pages();
     let (total, avail) = (total * 4096, (avail * 4096).min(total * 4096));
-    let mut reserved = 0u64;
-    regions(|r| {
-        if r.state != MEM_FREE {
-            reserved += r.size as u64;
-        }
-        true
-    });
+    // VirtualSize: what the process has reserved (one query; walking the
+    // address space cost a system call per region, and programs call this
+    // often: Chromium's memory checks on every main thread).
+    let reserved = vm_counters(GetCurrentProcess()).map_or(0, |vm| vm[1] as u64);
     s.load = (avail * 100).checked_div(total).map_or(0, |free| (100 - free) as u32);
     s.total_phys = total;
     s.avail_phys = avail;
     s.total_page_file = limit * 4096;
     s.avail_page_file = limit.saturating_sub(committed) * 4096;
-    s.total_virtual = USER_SPACE;
-    s.avail_virtual = USER_SPACE.saturating_sub(reserved);
+    s.total_virtual = user_space();
+    s.avail_virtual = s.total_virtual.saturating_sub(reserved);
     s.avail_extended_virtual = 0;
     TRUE
 }
@@ -271,7 +279,7 @@ pub extern "system" fn K32EnumProcessModules(
         return fail_with(ERROR_ACCESS_DENIED, FALSE);
     }
     let mut n = 0usize;
-    let room = size as usize / 8;
+    let room = size as usize / size_of::<Handle>();
     modules(|base| {
         if n < room {
             // SAFETY: inside the caller's array of `room` handles.
@@ -280,7 +288,7 @@ pub extern "system" fn K32EnumProcessModules(
         n += 1;
     });
     // SAFETY: the caller's output.
-    unsafe { *needed = (n * 8) as u32 };
+    unsafe { *needed = (n * size_of::<Handle>()) as u32 };
     TRUE
 }
 
@@ -295,7 +303,9 @@ pub extern "system" fn K32GetModuleInformation(
     if !is_current(process) {
         return fail_with(ERROR_ACCESS_DENIED, FALSE);
     }
-    if size < 24 {
+    // MODULEINFO: lpBaseOfDll, SizeOfImage (a DWORD, pointer-aligned),
+    // EntryPoint.
+    if (size as usize) < 3 * size_of::<usize>() {
         return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
     }
     let base =
@@ -409,37 +419,33 @@ pub extern "system" fn K32GetModuleFileNameExA(
 #[unsafe(no_mangle)]
 pub extern "system" fn K32GetProcessMemoryInfo(
     process: Handle,
-    counters: *mut u64,
+    counters: *mut u8,
     size: u32,
 ) -> Bool {
+    // PROCESS_MEMORY_COUNTERS(_EX): cb and PageFaultCount (DWORDs), then
+    // eight SIZE_Ts (nine with PrivateUsage).
+    const P: usize = size_of::<usize>();
     if !is_current(process) {
         return fail_with(ERROR_ACCESS_DENIED, FALSE);
     }
-    if size < 72 {
+    if (size as usize) < 8 + 8 * P {
         return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
     }
-    let (all, private) = committed();
-    // VM_COUNTERS: QuotaPeakPagedPoolUsage at 40 ... QuotaNonPagedPoolUsage at 64.
-    let mut vm = [0u64; 11];
-    // SAFETY: an 88-byte buffer (VM_COUNTERS).
-    let status = unsafe {
-        NtQueryInformationProcess(
-            process as isize,
-            3,
-            vm.as_mut_ptr().cast(),
-            88,
-            core::ptr::null_mut(),
-        )
+    // The working set and the commit charge as the kernel keeps them (one
+    // query, not a walk of the address space).
+    let vm = match vm_counters(process) {
+        Ok(vm) => vm,
+        Err(status) => return fail(status, FALSE),
     };
-    if status != STATUS_SUCCESS {
-        return fail(status, FALSE);
-    }
-    let n = if size >= 80 { 10 } else { 9 };
-    let values =
-        [u64::from(n as u32 * 8), all, all, vm[5], vm[6], vm[7], vm[8], private, private, private];
-    for (i, &v) in values.iter().enumerate().take(n) {
-        // SAFETY: the caller's structure of `size` >= 8 * n bytes.
-        unsafe { *counters.add(i) = v };
+    let n = if size as usize >= 8 + 9 * P { 9 } else { 8 };
+    let values = [vm[3], vm[4], vm[5], vm[6], vm[7], vm[8], vm[9], vm[10], vm[9]];
+    // SAFETY: the caller's structure of `size` >= 8 + n * P bytes.
+    unsafe {
+        counters.cast::<u32>().write_unaligned((8 + n * P) as u32);
+        counters.add(4).cast::<u32>().write_unaligned(0);
+        for (i, &v) in values.iter().enumerate().take(n) {
+            counters.add(8 + i * P).cast::<usize>().write_unaligned(v);
+        }
     }
     TRUE
 }
@@ -534,11 +540,11 @@ pub extern "system" fn SetFileInformationByHandle(
 ) -> Bool {
     // (Win32 class, NT class, minimum size)
     let (nt, min) = match class {
-        0 => (4, 40),  // FileBasicInfo -> FileBasicInformation
-        3 => (10, 20), // FileRenameInfo -> FileRenameInformation
-        4 => (13, 1),  // FileDispositionInfo -> FileDispositionInformation
-        5 => (19, 8),  // FileAllocationInfo -> FileAllocationInformation
-        6 => (20, 8),  // FileEndOfFileInfo -> FileEndOfFileInformation
+        0 => (4, 40), // FileBasicInfo -> FileBasicInformation
+        3 => (10, super::mapping::RENAME_HEADER as u32), // FileRenameInfo -> FileRenameInformation
+        4 => (13, 1), // FileDispositionInfo -> FileDispositionInformation
+        5 => (19, 8), // FileAllocationInfo -> FileAllocationInformation
+        6 => (20, 8), // FileEndOfFileInfo -> FileEndOfFileInformation
         _ => {
             unsupported(b"kernel32.dll!SetFileInformationByHandle(class)", class.into());
             return fail_with(ERROR_INVALID_PARAMETER, FALSE);
@@ -682,6 +688,28 @@ fn version_fields(info: *const u32) -> [(u32, u64, u64); 6] {
     ]
 }
 
+/// VerifyVersionInfoA: VerifyVersionInfoW on the same fields;
+/// OSVERSIONINFOEXA (156 bytes) has an ANSI szCSDVersion[128], so its
+/// service pack WORDs are at +148/+150 (the W form's at +276/+278).
+#[unsafe(no_mangle)]
+pub extern "system" fn VerifyVersionInfoA(info: *mut u8, kind: u32, mask: u64) -> Bool {
+    if info.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let mut wide = [0u32; 71]; // OSVERSIONINFOEXW, 284 bytes
+    // SAFETY: the caller's OSVERSIONINFOEXA: the five DWORDs, then the
+    // service pack WORDs after szCSDVersion.
+    unsafe {
+        for (i, w) in wide.iter_mut().enumerate().take(5) {
+            *w = info.cast::<u32>().add(i).read_unaligned();
+        }
+        let sp = info.add(148).cast::<u32>().read_unaligned();
+        wide.as_mut_ptr().cast::<u8>().add(276).cast::<u32>().write_unaligned(sp);
+    }
+    wide[0] = 284;
+    VerifyVersionInfoW(wide.as_mut_ptr(), kind, mask)
+}
+
 /// VerifyVersionInfoW: compares the requested fields with the version
 /// reported to this program (its manifest decides, as for GetVersionEx;
 /// no service pack); ERROR_OLD_WIN_VERSION when they
@@ -730,30 +758,31 @@ pub extern "system" fn VerifyVersionInfoW(info: *mut u32, kind: u32, mask: u64) 
 }
 
 /// K32GetPerformanceInfo(pPerformanceInformation, cb): PERFORMANCE_INFORMATION
-/// (104 bytes) in pages: the commit total, limit and peak and physical
+/// (cb, ten SIZE_Ts, three DWORDs: 104 bytes on x64, 56 on x86) in pages: the commit total, limit and peak and physical
 /// memory from the kernel's counters; the system cache and kernel pools
 /// are not counted (0); handle, process and thread counts from the
 /// process list.
 #[unsafe(no_mangle)]
 pub extern "system" fn K32GetPerformanceInfo(info: *mut u8, size: u32) -> Bool {
-    if info.is_null() || size < 104 {
+    const P: usize = size_of::<usize>();
+    // The SIZE_Ts start pointer-aligned after cb; the DWORDs follow them.
+    const DWORDS: usize = P + 10 * P;
+    const SIZE: usize = (DWORDS + 12).next_multiple_of(P);
+    if info.is_null() || (size as usize) < SIZE {
         return fail_with(ERROR_BAD_LENGTH, FALSE);
     }
-    let mut basic = [0u8; 64];
+    let physical = basic_information().physical_pages as usize;
     let mut perf = [0u8; 0x158];
     let mut ret = 0;
-    // SAFETY: buffers of the classes' sizes.
-    unsafe {
-        NtQuerySystemInformation(0, basic.as_mut_ptr(), 64, &mut ret);
-        NtQuerySystemInformation(2, perf.as_mut_ptr(), 0x158, &mut ret);
-    }
+    // SAFETY: a buffer of the class's size.
+    unsafe { NtQuerySystemInformation(2, perf.as_mut_ptr(), 0x158, &mut ret) };
     let at = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
     let (processes, threads, handles) = super::toolhelp::system_counts();
     let fields: [usize; 13] = [
         at(&perf, 0x30),  // CommitTotal
         at(&perf, 0x34),  // CommitLimit
         at(&perf, 0x38),  // CommitPeak
-        at(&basic, 12),   // PhysicalTotal
+        physical,         // PhysicalTotal
         at(&perf, 0x2c),  // PhysicalAvailable
         0,                // SystemCache
         0,                // KernelTotal
@@ -764,14 +793,14 @@ pub extern "system" fn K32GetPerformanceInfo(info: *mut u8, size: u32) -> Bool {
         processes as usize,
         threads as usize,
     ];
-    // SAFETY: the caller's buffer of at least 104 bytes.
+    // SAFETY: the caller's buffer of at least SIZE bytes.
     unsafe {
-        info.cast::<u32>().write_unaligned(104);
+        info.cast::<u32>().write_unaligned(SIZE as u32);
         for (i, v) in fields[..10].iter().enumerate() {
-            info.add(8 + 8 * i).cast::<usize>().write_unaligned(*v);
+            info.add(P + P * i).cast::<usize>().write_unaligned(*v);
         }
         for (i, v) in fields[10..].iter().enumerate() {
-            info.add(88 + 4 * i).cast::<u32>().write_unaligned(*v as u32);
+            info.add(DWORDS + 4 * i).cast::<u32>().write_unaligned(*v as u32);
         }
     }
     TRUE

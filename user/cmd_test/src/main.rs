@@ -11,13 +11,17 @@
 //! - `echo text> file`: the text and CRLF.
 //! - Through a pipe (`_popen`'s way): the command's output arrives at the
 //!   pipe's read end, then end of file.
-//! - An unknown command: exit code 9009, and on stderr "'name' is not
-//!   recognized as an internal or external command," then "operable
-//!   program or batch file.".
+//! - An unknown command: exit code 1 (with `2> f`, `> f`, `< f` or no
+//!   redirection: Windows 11 25H2), and on stderr "'name' is not recognized as an internal or external
+//!   command," then "operable program or batch file.".
+//!
+//! - The program's command line is passed as written: the space before a
+//!   removed redirection stays (`"prog" tail > f` ends with one space).
 //!
 //! The child modes of this program: `child N` (exit N), `print` ("hello"
 //! on stdout), `cat` (stdin to stdout), `both` ("out" on stdout, "err" on
-//! stderr).
+//! stderr), `tail` (exit with the number of spaces its command line ends
+//! with); other arguments exit 99.
 //!
 //! Prints `cmd_test: ok` or exits with the number of the failing check.
 
@@ -38,6 +42,7 @@ struct SecurityAttributes {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
     fn GetLastError() -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
@@ -134,6 +139,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(core::cell::Cell<u32>);
 
 impl Checks {
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.0.set(self.0.get() + 1);
         if cond {
@@ -143,10 +149,12 @@ impl Checks {
         out(&hex(self.0.get()));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -188,6 +196,14 @@ fn exe() -> ([u16; 260], usize) {
     let mut b = [0u16; 260];
     // SAFETY: our buffer.
     let n = unsafe { GetModuleFileNameW(core::ptr::null_mut(), b.as_mut_ptr(), 260) } as usize;
+    (b, n)
+}
+
+/// The user's temporary directory, with its trailing backslash.
+fn temp() -> ([u16; 260], usize) {
+    let mut b = [0u16; 260];
+    // SAFETY: our buffer.
+    let n = unsafe { GetTempPathW(260, b.as_mut_ptr()) } as usize;
     (b, n)
 }
 
@@ -289,31 +305,48 @@ fn run_tests() -> Result<(), u32> {
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 5)?;
 
     // Redirections.
-    let out_file = || W::new().s("C:\\gala\\cmd_test_out.txt");
-    let in_file = || W::new().s("C:\\gala\\cmd_test_in.txt");
-    let mut line = W::new().s("cmd.exe /c \"").w(me).s("\" print > C:\\gala\\cmd_test_out.txt");
+    // In %TEMP% (C:\gala is gala's layout), quoted in the command lines
+    // since the user's profile path may hold spaces; a line with more than
+    // two quotes is wrapped in one more pair, which cmd strips.
+    let (tmp, tn) = temp();
+    let tmp = &tmp[..tn];
+    let out_file = || W::new().w(tmp).s("cmd_test_out.txt");
+    let in_file = || W::new().w(tmp).s("cmd_test_in.txt");
+    // The space before a redirection stays on the program's command line
+    // (Windows 11 25H2).
+    let mut line =
+        W::new().s("cmd.exe /c \"\"").w(me).s("\" tail > \"").w(tmp).s("cmd_test_out.txt\"\"");
+    c.eq(run(&mut line, null, null).unwrap_or(99).into(), 1)?;
+    let mut line =
+        W::new().s("cmd.exe /c \"\"").w(me).s("\" print > \"").w(tmp).s("cmd_test_out.txt\"\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"hello", got as u64)?;
-    let mut line = W::new().s("cmd.exe /c \"").w(me).s("\" print >> C:\\gala\\cmd_test_out.txt");
+    let mut line =
+        W::new().s("cmd.exe /c \"\"").w(me).s("\" print >> \"").w(tmp).s("cmd_test_out.txt\"\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"hellohello", got as u64)?;
     write_file(&mut in_file(), b"from a file");
     let mut line = W::new()
-        .s("cmd.exe /c \"")
+        .s("cmd.exe /c \"\"")
         .w(me)
-        .s("\" cat < C:\\gala\\cmd_test_in.txt > C:\\gala\\cmd_test_out.txt");
+        .s("\" cat < \"")
+        .w(tmp)
+        .s("cmd_test_in.txt\" > \"")
+        .w(tmp)
+        .s("cmd_test_out.txt\"\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"from a file", got as u64)?;
-    let mut line = W::new().s("cmd.exe /c \"").w(me).s("\" both > C:\\gala\\cmd_test_out.txt 2>&1");
+    let mut line =
+        W::new().s("cmd.exe /c \"\"").w(me).s("\" both > \"").w(tmp).s("cmd_test_out.txt\" 2>&1\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"outerr", got as u64)?;
 
     // echo.
-    let mut line = W::new().s("cmd.exe /c echo hello world> C:\\gala\\cmd_test_out.txt");
+    let mut line = W::new().s("cmd.exe /c echo hello world> \"").w(tmp).s("cmd_test_out.txt\"");
     c.eq(run(&mut line, null, null).unwrap_or(99).into(), 0)?;
     let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == b"hello world\r\n", got as u64)?;
@@ -339,17 +372,47 @@ fn run_tests() -> Result<(), u32> {
         CloseHandle(r);
     }
 
-    // An unknown command: 9009 and the message on stderr.
-    let mut line = W::new().s("cmd.exe /c nosuchprogram 2> C:\\gala\\cmd_test_out.txt");
-    c.eq(run(&mut line, null, null).unwrap_or(99).into(), 9009)?;
-    let got = read_file(&mut out_file(), &mut buf);
+    // An unknown command: the message on stderr, and exit code 1 whatever
+    // the line redirects (Windows 11 25H2 measured 1 with `2>`, `>`, `<`
+    // and none).
     let want: &[u8] = b"'nosuchprogram' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";
+    let mut line = W::new().s("cmd.exe /c nosuchprogram 2> \"").w(tmp).s("cmd_test_out.txt\"");
+    c.eq(run(&mut line, null, null).unwrap_or(99).into(), 1)?;
+    let got = read_file(&mut out_file(), &mut buf);
+    c.ok(&buf[..got] == want, got as u64)?;
+    // `< f` (the input file written above) and `> f`, stderr to the file
+    // given as cmd's.
+    let sa = SecurityAttributes { length: 24, descriptor: null, inherit: 1 };
+    let err_file = || W::new().w(tmp).s("cmd_test_err.txt");
+    // SAFETY: our path and attributes.
+    let err =
+        unsafe { CreateFileW(err_file().ptr(), GENERIC_WRITE, 7, &sa, CREATE_ALWAYS, 0, null) };
+    c.ok(err as isize != -1, 0)?;
+    let mut line = W::new().s("cmd.exe /c nosuchprogram < \"").w(tmp).s("cmd_test_in.txt\"");
+    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 1)?;
+    let mut line = W::new().s("cmd.exe /c nosuchprogram > \"").w(tmp).s("cmd_test_out.txt\"");
+    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 1)?;
+    // SAFETY: our handle.
+    unsafe { CloseHandle(err) };
+    let got = read_file(&mut err_file(), &mut buf);
+    c.ok(got == 2 * want.len() && buf[..want.len()] == *want, got as u64)?;
+    // The same with stderr handed to cmd (no redirection on the line).
+    // SAFETY: our path and attributes.
+    let err =
+        unsafe { CreateFileW(out_file().ptr(), GENERIC_WRITE, 7, &sa, CREATE_ALWAYS, 0, null) };
+    c.ok(err as isize != -1, 0)?;
+    let mut line = W::new().s("cmd.exe /c nosuchprogram");
+    c.eq(run(&mut line, null, err).unwrap_or(99).into(), 1)?;
+    // SAFETY: our handle.
+    unsafe { CloseHandle(err) };
+    let got = read_file(&mut out_file(), &mut buf);
     c.ok(&buf[..got] == want, got as u64)?;
 
     // SAFETY: our paths.
     unsafe {
         DeleteFileW(out_file().ptr());
         DeleteFileW(in_file().ptr());
+        DeleteFileW(err_file().ptr());
     }
     Ok(())
 }
@@ -364,7 +427,12 @@ fn child() -> Option<u32> {
         n += 1;
     }
     // SAFETY: `n` units.
-    let s = unsafe { core::slice::from_raw_parts(line, n) };
+    let whole = unsafe { core::slice::from_raw_parts(line, n) };
+    // cmd passes a command line as written, the spaces before a removed
+    // redirection included (`"prog" print > f` gives `"prog" print `, as
+    // `echo x > f` writes "x "): the modes are matched without them.
+    let s = &whole[..whole.iter().rposition(|&c| c != u16::from(b' ')).map_or(0, |l| l + 1)];
+    let trailing = (whole.len() - s.len()) as u32;
     let ends = |t: &str| {
         let t: [u16; 16] = core::array::from_fn(|i| t.encode_utf16().nth(i).unwrap_or(0));
         let len = t.iter().position(|&c| c == 0).unwrap_or(16);
@@ -373,6 +441,10 @@ fn child() -> Option<u32> {
     if ends(" print") {
         out(b"hello");
         return Some(0);
+    }
+    // "tail": exits with the number of spaces its command line ends with.
+    if ends(" tail") {
+        return Some(trailing);
     }
     if ends(" both") {
         out(b"out");
@@ -412,6 +484,16 @@ fn child() -> Option<u32> {
     {
         return Some(u32::from(s[len - 1]).wrapping_sub(u32::from(b'0')));
     }
+    // Arguments that name no mode: 99, never a second run of the tests
+    // (whose output would go where the caller redirected the child's).
+    let program_end = if s.first() == Some(&u16::from(b'"')) {
+        s[1..].iter().position(|&c| c == u16::from(b'"')).map_or(s.len(), |p| p + 2)
+    } else {
+        s.iter().position(|&c| c == u16::from(b' ')).unwrap_or(s.len())
+    };
+    if s[program_end.min(s.len())..].iter().any(|&c| c != u16::from(b' ')) {
+        return Some(99);
+    }
     None
 }
 
@@ -436,4 +518,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

@@ -51,3 +51,9 @@ it.
 `ntdll.dll`): scenarios that need an ntdll install it as
 `C:\Windows\System32\ntdll.dll`. It is not meant to be used on Windows,
 and `run-all.ps1` ignores it.
+
+The 32-bit (x86) programs (`wow64_*.exe`) run through WOW64 on both.
+`testdll32.dll` is a 32-bit DLL that `wow64_import_test.exe` imports from
+this directory. `testntdll32.dll` is gala's ntdll built for x86 (scenarios
+install it as `C:\Windows\SysWOW64\ntdll.dll`); like `testntdll.dll` it is
+not meant to be used on Windows.

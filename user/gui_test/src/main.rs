@@ -6,7 +6,10 @@
 //!   lpCreateParams given; the client rectangle starts at (0, 0) and is
 //!   smaller than the window; the window starts hidden (IsWindowVisible).
 //! - The class's icon (CreateIconIndirect: an orange square) is the
-//!   window's: its taskbar button shows it.
+//!   window's: its taskbar button shows it. SetClassLongPtrW changes the
+//!   class's small icon (the old value returned); IsWindowUnicode,
+//!   SetGestureConfig and PhysicalToLogicalPoint (no scaling) as Delphi's
+//!   VCL calls them.
 //! - ShowWindow(SW_SHOW) returns 0 (it was hidden); UpdateWindow sends
 //!   WM_PAINT; BeginPaint gives a DC and rcPaint covering the client
 //!   area; FillRect paints a red rectangle at (20, 20)-(200, 120) and
@@ -17,6 +20,12 @@
 //!   green square there (GetDC/FillRect/ReleaseDC). Typing "hi" gives
 //!   WM_KEYDOWN/WM_KEYUP and, through TranslateMessage, WM_CHAR 'h' and
 //!   'i'; the program draws what was typed in black at (20, 200).
+//! - Keys typed while the thread is busy: a `q` keeps the window
+//!   procedure in Sleep for 3 s while `x` and `y` are typed; then the
+//!   messages come in Windows' order: q's WM_CHAR (posted by
+//!   TranslateMessage before the busy dispatch), its key-up, then for x
+//!   and y key-down, WM_CHAR, key-up (input waits in its own queue, so
+//!   the WM_CHAR TranslateMessage posts comes before the next key).
 //! - A right click is WM_RBUTTONUP; the program shows a popup menu there
 //!   (CreatePopupMenu, AppendMenuW "One" 201 and "Two" 202,
 //!   TrackPopupMenu with TPM_RETURNCMD at the screen point ClientToScreen
@@ -143,6 +152,12 @@ unsafe extern "system" {
     fn IsWindowVisible(hwnd: Hwnd) -> i32;
     fn IsWindow(hwnd: Hwnd) -> i32;
     fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+    fn GetClassLongPtrW(hwnd: Hwnd, index: i32) -> usize;
+    fn SetClassLongPtrW(hwnd: Hwnd, index: i32, value: usize) -> usize;
+    fn IsWindowUnicode(hwnd: Hwnd) -> i32;
+    fn SetGestureConfig(hwnd: Hwnd, reserved: u32, count: u32, config: *const u8, size: u32)
+    -> i32;
+    fn PhysicalToLogicalPoint(hwnd: Hwnd, point: *mut [i32; 2]) -> i32;
     fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> Handle;
     fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32;
     fn FillRect(hdc: Handle, rect: *const Rect, brush: Handle) -> i32;
@@ -296,6 +311,46 @@ fn out(text: &[u8]) {
     };
 }
 
+const VK_Q: usize = 0x51;
+const WM_KEYUP: u32 = 0x0101;
+
+/// Notes a keyboard message once the busy `q` is over; with all eight
+/// (q's character and key-up, then x and y: down, character, up), says
+/// whether they came in Windows' order (a posted WM_CHAR before the next
+/// key, as the input waits in its own queue).
+fn busy_note(message: u32, wparam: usize) {
+    if BUSY.load(Ordering::SeqCst) != 2 {
+        return;
+    }
+    let n = BUSY_LEN.fetch_add(1, Ordering::SeqCst);
+    if n >= 8 {
+        return;
+    }
+    BUSY_ORDER[n].store(message << 16 | wparam as u32 & 0xffff, Ordering::SeqCst);
+    if n == 7 {
+        const WANT: [u32; 8] = [
+            WM_CHAR << 16 | b'q' as u32,
+            WM_KEYUP << 16 | 0x51,
+            WM_KEYDOWN << 16 | 0x58,
+            WM_CHAR << 16 | b'x' as u32,
+            WM_KEYUP << 16 | 0x58,
+            WM_KEYDOWN << 16 | 0x59,
+            WM_CHAR << 16 | b'y' as u32,
+            WM_KEYUP << 16 | 0x59,
+        ];
+        if (0..8).all(|i| BUSY_ORDER[i].load(Ordering::SeqCst) == WANT[i]) {
+            out(b"gui_test: keys typed while busy came in order\r\n");
+        } else {
+            out(b"gui_test: keys typed while busy came out of order:");
+            for slot in &BUSY_ORDER {
+                out(b" ");
+                out(&hex(slot.load(Ordering::SeqCst)));
+            }
+            out(b"\r\n");
+        }
+    }
+}
+
 fn hex(v: u32) -> [u8; 8] {
     let mut s = [0u8; 8];
     for (i, c) in s.iter_mut().enumerate() {
@@ -315,6 +370,12 @@ static WINDOW: AtomicUsize = AtomicUsize::new(0);
 static DOWNS: AtomicU32 = AtomicU32::new(0);
 static UPS: AtomicU32 = AtomicU32::new(0);
 static KEYDOWN_H: AtomicU32 = AtomicU32::new(0);
+/// Keys typed while the thread was busy (a `q` holds it for 3 s while
+/// `x` and `y` come): the keyboard messages after it, as message << 16 |
+/// key or character.
+static BUSY_ORDER: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+static BUSY_LEN: AtomicUsize = AtomicUsize::new(0);
+static BUSY: AtomicU32 = AtomicU32::new(0);
 static TIMED_OUT: AtomicU32 = AtomicU32::new(0);
 /// What was typed (WM_CHAR), as ASCII.
 static TYPED: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
@@ -512,9 +573,27 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             0
         }
         WM_KEYDOWN => {
+            busy_note(WM_KEYDOWN, wparam);
             if wparam == VK_H {
                 KEYDOWN_H.fetch_add(1, Ordering::SeqCst);
             }
+            if wparam == VK_Q && BUSY.swap(1, Ordering::SeqCst) == 0 {
+                // A busy UI thread: what is typed meanwhile waits.
+                // SAFETY: a plain call.
+                unsafe { Sleep(3000) };
+                BUSY.store(2, Ordering::SeqCst);
+            }
+            0
+        }
+        WM_KEYUP => {
+            busy_note(WM_KEYUP, wparam);
+            0
+        }
+        WM_CHAR
+            if (u32::from(b'q')..=u32::from(b'y')).contains(&(wparam as u32))
+                && wparam != usize::from(b'r') =>
+        {
+            busy_note(WM_CHAR, wparam);
             0
         }
         WM_CHAR => {
@@ -722,6 +801,20 @@ fn run() -> Result<(), u32> {
             client.right > 0 && client.right < 400 && client.bottom > 0 && client.bottom < 300,
             client.right as u64,
         )?;
+        // The class as SetClassLongPtrW changes it (GCLP_HICONSM: the old
+        // value back, then the new one read), and what Delphi's VCL asks
+        // of a window: a Unicode window, gestures configurable, points
+        // unscaled.
+        const GCLP_HICON: i32 = -14;
+        const GCLP_HICONSM: i32 = -34;
+        check(GetClassLongPtrW(hwnd, GCLP_HICON) == icon as usize, 0)?;
+        check(SetClassLongPtrW(hwnd, GCLP_HICONSM, icon as usize) == 0, 0)?;
+        check(GetClassLongPtrW(hwnd, GCLP_HICONSM) == icon as usize, 0)?;
+        check(SetClassLongPtrW(hwnd, GCLP_HICONSM, 0) == icon as usize, 0)?;
+        check(IsWindowUnicode(hwnd) != 0, 0)?;
+        check(SetGestureConfig(hwnd, 0, 0, core::ptr::null(), 0) != 0, 0)?;
+        let mut point = [10, 20];
+        check(PhysicalToLogicalPoint(hwnd, &mut point) != 0 && point == [10, 20], 0)?;
         check(IsWindowVisible(hwnd) == 0, 0)?;
         check(ShowWindow(hwnd, SW_SHOW) == 0, 0)?; // was hidden
         check(IsWindowVisible(hwnd) != 0, 0)?;

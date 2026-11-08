@@ -21,26 +21,102 @@ const USER_RFLAGS: u64 = 0x202; // IF | reserved bit 1
 /// User registers at SYSCALL time, in stack order. The Windows x64 syscall
 /// convention passes the number in rax and arguments in r10, rdx, r8, r9,
 /// then on the user stack above a 0x28-byte area (return address + shadow).
+///
+/// Outside `arch` the frame is read and changed through its accessors: the
+/// architecture-neutral ones (`number`, `result`, `ip`, `sp`, ...) and,
+/// for the x86-64 ABIs only (`nt::abi`, `lx::abi`, gala-um), `gpr`.
 #[repr(C)]
 #[derive(Debug)]
 pub struct SyscallFrame {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub rbp: u64,
-    pub rbx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rdx: u64,
-    pub r10: u64,
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    rbp: u64,
+    rbx: u64,
+    rsi: u64,
+    rdi: u64,
+    r9: u64,
+    r8: u64,
+    rdx: u64,
+    r10: u64,
     /// Syscall number on entry, return value (NTSTATUS) on exit.
-    pub rax: u64,
-    pub rip: u64,
-    pub rflags: u64,
-    pub rsp: u64,
+    rax: u64,
+    /// rcx: the return address.
+    rip: u64,
+    /// r11: the flags.
+    rflags: u64,
+    rsp: u64,
+}
+
+impl SyscallFrame {
+    /// The frame of system call `number` made with the registers `regs`
+    /// (rcx and r11 are taken to hold the return address and the flags,
+    /// as SYSCALL leaves them): a call made again (a kernel handover's
+    /// carried thread) or trapped elsewhere (gala-um).
+    pub fn from_regs(regs: &UserRegs, number: u64) -> SyscallFrame {
+        let g = &regs.gpr;
+        SyscallFrame {
+            r15: g[15],
+            r14: g[14],
+            r13: g[13],
+            r12: g[12],
+            rbp: g[5],
+            rbx: g[3],
+            rsi: g[6],
+            rdi: g[7],
+            r9: g[9],
+            r8: g[8],
+            rdx: g[2],
+            r10: g[10],
+            rax: number,
+            rip: regs.rip,
+            rflags: regs.rflags,
+            rsp: g[4],
+        }
+    }
+
+    /// The system call's number.
+    pub fn number(&self) -> u64 {
+        self.rax
+    }
+
+    /// The value the call returns (its number until it is set).
+    pub fn result(&self) -> u64 {
+        self.rax
+    }
+
+    pub fn set_result(&mut self, value: u64) {
+        self.rax = value;
+    }
+
+    /// Where the call returns to.
+    pub fn ip(&self) -> u64 {
+        self.rip
+    }
+
+    /// The user stack pointer at the call.
+    pub fn sp(&self) -> u64 {
+        self.rsp
+    }
+
+    /// The user flags at the call.
+    pub fn flags(&self) -> u64 {
+        self.rflags
+    }
+
+    /// The registers user mode returns with: the frame's, the result in
+    /// the return-value register (SYSRET leaves the return address in rcx
+    /// and the flags in r11).
+    pub fn return_regs(&self) -> UserRegs {
+        syscall_regs(self)
+    }
+
+    /// x86-64: general-purpose register `r` at the call (rcx holds the
+    /// return address and r11 the flags, as SYSCALL left them).
+    pub fn gpr(&self, r: Gpr) -> u64 {
+        syscall_regs(self).gpr[r as usize]
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<SyscallFrame>() == 16 * 8);
@@ -122,8 +198,15 @@ pub fn set_handler(personality: Personality, name: &'static str, handler: Handle
 
 /// Enables SYSCALL on this CPU. Each CPU calls it during its own setup
 /// (MSRs are per CPU), before any thread can move between CPUs.
+/// IA32_STAR: SYSCALL's kernel CS (SS is CS + 8), and 64-bit SYSRET's
+/// base selector (CS = base + 16, SS = base + 8). The base carries RPL 3:
+/// AMD's SYSRET loads SS as base + 8 without forcing the RPL (Intel's
+/// does), and user mode with SS 0x28 faults at the next IRETQ back to it
+/// (gdt.rs's tests check both vendors' rules).
+pub(super) const STAR: u64 = (USER32_CS as u64) << 48 | (KERNEL_CS as u64) << 32;
+
 pub fn init_cpu() {
-    let star = u64::from(USER32_CS & !3) << 48 | u64::from(KERNEL_CS) << 32;
+    let star = STAR;
     // SAFETY: architected MSRs. The entry point switches to the kernel
     // stack set by `percpu::set_kernel_stack` before touching memory, and
     // FMASK keeps interrupts off until it has.
@@ -153,7 +236,8 @@ extern "C" fn dispatch(frame: &mut SyscallFrame) {
     let pending = crate::sched::take_pending_continue();
     // The return hook sees (and may change) the registers user mode gets.
     let mut regs = pending.unwrap_or_else(|| syscall_regs(frame));
-    let changed = run_user_return_hook(&mut regs);
+    // A system call always returns to 64-bit code.
+    let changed = run_user_return_hook(&mut regs, false);
     if pending.is_some() || changed {
         // Nothing on this stack needs dropping: the handler has returned.
         enter_user_regs(&regs);
@@ -220,25 +304,134 @@ pub fn enter_user(entry: u64, stack: u64, arg: u64) -> ! {
     }
 }
 
-/// User register state for entering a new thread (CONTEXT order:
-/// rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15).
+/// x86-64's general-purpose registers, in CONTEXT order (the order of
+/// `UserRegs`' register file and of the handover's saved registers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gpr {
+    Rax = 0,
+    Rcx,
+    Rdx,
+    Rbx,
+    Rsp,
+    Rbp,
+    Rsi,
+    Rdi,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
+}
+
+/// A thread's user registers: what user mode runs with (a new thread's
+/// first entry, a return through NtContinue, the state a suspended or
+/// carried-over thread resumes with).
+///
+/// Outside `arch` they are read and changed through accessors: the
+/// architecture-neutral ones (`ip`, `sp`, `flags`, the system call's
+/// result, the handover state's words) and, for the x86-64 ABIs only
+/// (`nt::abi`, `lx::abi`, gala-um), `new`, `gpr` and `gprs`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UserRegs {
-    pub gpr: [u64; 16],
-    pub rip: u64,
-    pub rflags: u64,
+    /// rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15 (`Gpr` order).
+    gpr: [u64; 16],
+    rip: u64,
+    rflags: u64,
 }
 
 /// RFLAGS bits user mode may choose: CF, PF, AF, ZF, SF, DF, OF.
 const USER_SETTABLE_FLAGS: u64 = 0xcd5;
-const RSP_INDEX: usize = 4;
+const RSP_INDEX: usize = Gpr::Rsp as usize;
 
 impl UserRegs {
+    /// The words of the handover state format's saved registers
+    /// (`to_words`).
+    pub const WORDS: usize = 18;
+
+    /// x86-64: the registers from their values (`gpr` in `Gpr` order).
+    pub const fn new(gpr: [u64; 16], rip: u64, rflags: u64) -> UserRegs {
+        UserRegs { gpr, rip, rflags }
+    }
+
     /// Whether rip and rsp are user addresses (iretq to a non-canonical
     /// rip would fault in the kernel).
     pub fn is_valid(&self) -> bool {
         self.rip < USER_END && self.gpr[RSP_INDEX] < USER_END
+    }
+
+    /// The instruction pointer.
+    pub fn ip(&self) -> u64 {
+        self.rip
+    }
+
+    pub fn set_ip(&mut self, ip: u64) {
+        self.rip = ip;
+    }
+
+    /// The stack pointer.
+    pub fn sp(&self) -> u64 {
+        self.gpr[RSP_INDEX]
+    }
+
+    pub fn set_sp(&mut self, sp: u64) {
+        self.gpr[RSP_INDEX] = sp;
+    }
+
+    /// The flags (RFLAGS).
+    pub fn flags(&self) -> u64 {
+        self.rflags
+    }
+
+    pub fn set_flags(&mut self, flags: u64) {
+        self.rflags = flags;
+    }
+
+    /// The register a system call returns its value in (rax).
+    pub fn syscall_result(&self) -> u64 {
+        self.gpr[Gpr::Rax as usize]
+    }
+
+    pub fn set_syscall_result(&mut self, value: u64) {
+        self.gpr[Gpr::Rax as usize] = value;
+    }
+
+    /// x86-64: register `r`.
+    pub fn gpr(&self, r: Gpr) -> u64 {
+        self.gpr[r as usize]
+    }
+
+    pub fn set_gpr(&mut self, r: Gpr, value: u64) {
+        self.gpr[r as usize] = value;
+    }
+
+    /// x86-64: the general-purpose registers (`Gpr` order).
+    pub fn gprs(&self) -> &[u64; 16] {
+        &self.gpr
+    }
+
+    pub fn gprs_mut(&mut self) -> &mut [u64; 16] {
+        &mut self.gpr
+    }
+
+    /// The registers as the handover state format saves them (the 16
+    /// general-purpose registers in `Gpr` order, rip, rflags).
+    pub fn to_words(&self) -> [u64; Self::WORDS] {
+        let mut w = [0u64; Self::WORDS];
+        w[..16].copy_from_slice(&self.gpr);
+        w[16] = self.rip;
+        w[17] = self.rflags;
+        w
+    }
+
+    /// The registers `to_words` saved.
+    pub fn from_words(w: &[u64; Self::WORDS]) -> UserRegs {
+        let mut gpr = [0u64; 16];
+        gpr.copy_from_slice(&w[..16]);
+        UserRegs { gpr, rip: w[16], rflags: w[17] }
     }
 }
 
@@ -329,9 +522,10 @@ pub(super) fn set_trap_regs(f: &mut super::interrupts::TrapFrame, r: &UserRegs) 
 
 static USER_RETURN_HOOK: AtomicUsize = AtomicUsize::new(0);
 
-/// What the user-return hook gets: the registers user mode resumes with;
-/// it returns true if it changed them.
-pub type UserReturnHook = fn(&mut UserRegs) -> bool;
+/// What the user-return hook gets: the registers user mode resumes with
+/// and whether that is 32-bit code (an interrupt in compatibility mode,
+/// CS 0x23: a WOW64 thread); it returns true if it changed them.
+pub type UserReturnHook = fn(&mut UserRegs, bool) -> bool;
 
 /// Registers a function run on every return to user mode from a system
 /// call or interrupt, in kernel context (e.g. to act on a pending thread
@@ -340,7 +534,7 @@ pub fn set_user_return_hook(hook: UserReturnHook) {
     USER_RETURN_HOOK.store(hook as usize, Ordering::Release);
 }
 
-pub(super) fn run_user_return_hook(regs: &mut UserRegs) -> bool {
+pub(super) fn run_user_return_hook(regs: &mut UserRegs, compat: bool) -> bool {
     let raw = USER_RETURN_HOOK.load(Ordering::Acquire);
     if raw == 0 {
         return false;
@@ -348,7 +542,7 @@ pub(super) fn run_user_return_hook(regs: &mut UserRegs) -> bool {
     // SAFETY: only `set_user_return_hook` stores non-zero values, and it
     // stores `UserReturnHook`s.
     let hook = unsafe { core::mem::transmute::<usize, UserReturnHook>(raw) };
-    let changed = hook(regs);
+    let changed = hook(regs, compat);
     if crate::sched::CHECK_USER_RETURN.load(Ordering::Relaxed) {
         crate::sched::check_user_return();
     }

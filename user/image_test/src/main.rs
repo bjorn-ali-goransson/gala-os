@@ -20,6 +20,7 @@ static IL_DLL: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../bin/dotnet_hello.dll"));
 
 const STATUS_IMAGE_NOT_AT_BASE: NtStatus = 0x4000_0003;
+const STATUS_IMAGE_MACHINE_TYPE_MISMATCH: NtStatus = 0x4000_000e;
 const STATUS_INVALID_IMAGE_NOT_MZ: NtStatus = 0xc000_012f;
 const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_WRITECOPY: u32 = 0x08;
@@ -28,10 +29,12 @@ const INITIAL_VALUE: u64 = 0x1234_5678_9abc;
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -41,6 +44,7 @@ impl Checks {
         write_file(stdout(), &hex32(self.0));
         print(" got ");
         write_file(stdout(), &hex32(got as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -178,7 +182,9 @@ fn run() -> Result<(), u32> {
     let (s, sec) = create_image_section(f);
     c.eq(st(s), ok)?;
     let (s, a, size) = map_view(sec, 0, 0, PAGE_READONLY);
-    c.ok(s == STATUS_SUCCESS || s == STATUS_IMAGE_NOT_AT_BASE, st(s))?;
+    // Mapped, but for another machine: the informational
+    // STATUS_IMAGE_MACHINE_TYPE_MISMATCH (Windows 11 25H2).
+    c.eq(st(s), STATUS_IMAGE_MACHINE_TYPE_MISMATCH.into())?;
     let pe = a + read_u32(a + 0x3c) as usize;
     c.eq(read_u32(pe + 24) as u64 & 0xffff, 0x10b)?; // PE32
     c.eq(read_u32(pe + 24 + 56).into(), size as u64)?; // SizeOfImage
@@ -203,3 +209,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

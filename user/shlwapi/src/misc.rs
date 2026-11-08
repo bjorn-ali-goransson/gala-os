@@ -23,29 +23,35 @@ const IID_IUNKNOWN: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 
 /// QITAB { const IID* piid; DWORD dwOffset } ending with a null piid: the
 /// interface at `that + dwOffset` of the matching entry (the first entry's
 /// for IID_IUnknown), AddRef'd; E_NOINTERFACE otherwise.
+#[repr(C)]
+pub struct QiTab {
+    iid: *const [u8; 16],
+    offset: u32,
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn QISearch(
     that: *mut u8,
-    table: *const u8,
+    table: *const QiTab,
     riid: *const [u8; 16],
     ppv: *mut *mut u8,
 ) -> i32 {
     if ppv.is_null() || riid.is_null() {
         return E_POINTER;
     }
-    // SAFETY: the caller's IID, table (16-byte entries) and object.
+    // SAFETY: the caller's IID, table and object.
     unsafe {
         *ppv = core::ptr::null_mut();
         let want = *riid;
         let mut entry = table;
         let mut first = true;
         loop {
-            let piid = entry.cast::<*const [u8; 16]>().read_unaligned();
+            let piid = core::ptr::addr_of!((*entry).iid).read_unaligned();
             if piid.is_null() {
                 return E_NOINTERFACE;
             }
             if *piid == want || (first && want == IID_IUNKNOWN) {
-                let offset = entry.add(8).cast::<u32>().read_unaligned() as usize;
+                let offset = core::ptr::addr_of!((*entry).offset).read_unaligned() as usize;
                 let object = that.add(offset);
                 // IUnknown::AddRef is the second vtable slot.
                 let vtable = object.cast::<*const usize>().read();
@@ -56,12 +62,16 @@ pub extern "system" fn QISearch(
                 return 0;
             }
             first = false;
-            entry = entry.add(16);
+            entry = entry.add(1);
         }
     }
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;

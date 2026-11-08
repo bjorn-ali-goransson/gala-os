@@ -9,6 +9,9 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use ntrt::*;
 
+/// What Windows' NtCreateEvent returns for an unknown EventType.
+const STATUS_INVALID_PARAMETER: NtStatus = 0xc000_000d;
+
 /// The event the `released` workers wait on, and their wait statuses.
 static SHARED_EVENT: AtomicUsize = AtomicUsize::new(0);
 static RELEASED: [AtomicU32; 2] = [const { AtomicU32::new(u32::MAX) }; 2];
@@ -23,6 +26,7 @@ extern "C" fn released(slot: usize) -> ! {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq<T: PartialEq + Copy + Into<i64>>(&mut self, got: T, want: T) -> Result<(), u32> {
         self.0 += 1;
         if got == want {
@@ -32,20 +36,24 @@ impl Checks {
     }
 
     /// Equality for values that cannot be printed (tuples).
+    #[track_caller]
     fn same<T: PartialEq>(&mut self, got: T, want: T) -> Result<(), u32> {
         self.ok(got == want, -1)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, value: i64) -> Result<(), u32> {
         self.0 += 1;
         if cond { Ok(()) } else { self.fail(value) }
     }
 
+    #[track_caller]
     fn fail(&self, got: i64) -> Result<(), u32> {
         print("wait_test: check ");
         write_file(stdout(), &hex32(self.0));
         print(" got ");
         write_file(stdout(), &hex32(got as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -78,7 +86,7 @@ fn run() -> Result<(), u32> {
     c.same(query_event(auto), (STATUS_SUCCESS, SYNCHRONIZATION_EVENT, 0))?;
 
     // Bad event type.
-    c.eq(create_event(EVENT_ALL_ACCESS, 2, false).0, STATUS_INVALID_PARAMETER_4)?;
+    c.eq(create_event(EVENT_ALL_ACCESS, 2, false).0, STATUS_INVALID_PARAMETER)?; // not _4
 
     // Access is checked per handle.
     let (st, sync_only) = create_event(SYNCHRONIZE, NOTIFICATION_EVENT, false);
@@ -86,15 +94,22 @@ fn run() -> Result<(), u32> {
     c.eq(set_event(sync_only).0, STATUS_ACCESS_DENIED)?;
     c.eq(wait(sync_only, poll), STATUS_TIMEOUT)?;
 
-    // A relative timeout really waits.
+    // A relative timeout really waits: 20 ms, less at most one tick of
+    // the system timer (a timed wait expires on a tick, from a base up to
+    // one tick old; Sleep's documentation allows the same), so `waited`
+    // plus the current timer resolution is at least 20 ms. (Windows 25H2,
+    // resolution 15.625 ms: a 20 ms wait once returned after 12.)
+    // No ntdll mapped: gala's bare kernel, whose timer ticks every ms.
+    let tick_ms = timer_resolution().map_or(1, |r| (i64::from(r) + 9_999) / 10_000);
+    c.ok((1..=16).contains(&tick_ms), tick_ms)?;
     let t0 = now_ms();
     c.eq(wait(ev, Some(relative_ms(20))), STATUS_TIMEOUT)?;
     let waited = now_ms() - t0;
-    c.ok(waited >= 15, waited)?;
+    c.ok(waited + tick_ms >= 20, waited)?;
     let t0 = now_ms();
     c.eq(delay(relative_ms(20)), STATUS_SUCCESS)?;
     let delayed = now_ms() - t0;
-    c.ok(delayed >= 15, delayed)?;
+    c.ok(delayed + tick_ms >= 20, delayed)?;
 
     // Wait for several objects.
     let (_, set) = create_event(EVENT_ALL_ACCESS, NOTIFICATION_EVENT, true);
@@ -167,3 +182,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

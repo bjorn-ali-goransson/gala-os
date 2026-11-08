@@ -10,12 +10,12 @@
 //! (EncryptMessage/DecryptMessage), and a wrong password
 //! (SEC_E_LOGON_DENIED). Kerberos on a machine in a workgroup: the
 //! package (RPC id 16) and credentials exist, but a context cannot start
-//! (SEC_E_NO_AUTHENTICATING_AUTHORITY: no domain controller). Negotiate
+//! (SEC_E_NO_CREDENTIALS, as on Windows off a domain). Negotiate
 //! (its context reports NTLM as the negotiated package: NEGOTIATION_INFO,
 //! PACKAGE_INFO)
 //! (RPC id 9) authenticates with NTLM. Schannel's package information
 //! (RPC id 14). The ANSI dispatch table (InitSecurityInterfaceA,
-//! version 4, as programs built without UNICODE use it: curl for
+//! version 1 on Windows 11 25H2, as programs built without UNICODE use it: curl for
 //! Windows): its QuerySecurityPackageInfoA and EnumerateSecurityPackagesA
 //! give SecPkgInfoA with ANSI names; an unknown package is
 //! SEC_E_SECPKG_NOT_FOUND. security.dll (the older name) forwards to the
@@ -107,6 +107,7 @@ unsafe extern "system" {
 
 #[link(name = "secur32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetUserNameExW(format: u32, buf: *mut u16, size: *mut u32) -> u8;
     fn QuerySecurityPackageInfoW(name: *const u16, info: *mut *mut SecPkgInfo) -> i32;
     fn EnumerateSecurityPackagesW(count: *mut u32, info: *mut *mut SecPkgInfo) -> i32;
     fn EnumerateSecurityPackagesA(count: *mut u32, info: *mut *mut SecPkgInfoA) -> i32;
@@ -223,6 +224,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -232,10 +234,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -270,6 +274,15 @@ fn same_a(p: *const u8, want: &[u8]) -> bool {
     !p.is_null()
         && unsafe {
             want.iter().enumerate().all(|(i, &b)| *p.add(i) == b) && *p.add(want.len()) == 0
+        }
+}
+
+/// The NUL-terminated string at `p` equals `want` (UTF-16, no NUL).
+fn same_w(p: *const u16, want: &[u16]) -> bool {
+    // SAFETY: callers pass a NUL-terminated string.
+    !p.is_null()
+        && unsafe {
+            want.iter().enumerate().all(|(i, &u)| *p.add(i) == u) && *p.add(want.len()) == 0
         }
 }
 
@@ -453,7 +466,12 @@ fn run() -> Result<(), u32> {
         // The client's name, as the server sees it.
         let mut name: *mut u16 = null.cast();
         c.eq(QueryContextAttributesW(&mut ctx_s, 1, (&raw mut name).cast()) as u64, SEC_E_OK)?;
-        c.ok(same(name, "GALA\\gala"), 0)?;
+        // This process's own account (NameSamCompatible: GALA\gala on
+        // gala, MACHINE\user on a real machine).
+        let mut own = [0u16; 256];
+        let mut size = 256u32;
+        c.ok(GetUserNameExW(2, own.as_mut_ptr(), &mut size) != 0, 0)?;
+        c.ok(same_w(name, &own[..size as usize]), 0)?;
         FreeContextBuffer(name.cast());
         // SecPkgContext_Sizes: cbMaxToken, cbMaxSignature, cbBlockSize,
         // cbSecurityTrailer.
@@ -561,7 +579,9 @@ fn run() -> Result<(), u32> {
             &mut attrs,
             &mut expiry,
         );
-        c.eq(r as u32 as u64, 0x8009_0311)?; // SEC_E_NO_AUTHENTICATING_AUTHORITY
+        // On a workgroup machine (gala's model): SEC_E_NO_CREDENTIALS
+        // (Windows 11 25H2, not joined to a domain).
+        c.eq(r as u32 as u64, 0x8009_030e)?;
         c.eq(FreeCredentialsHandle(&mut krb) as u64, SEC_E_OK)?;
 
         let negotiate = w("Negotiate");
@@ -625,7 +645,9 @@ fn run() -> Result<(), u32> {
         // The ANSI table and package information.
         let table = InitSecurityInterfaceA();
         c.ok(!table.is_null(), 0)?;
-        c.eq((*table).version.into(), 4)?;
+        // SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION (1) (Windows 11
+        // 25H2; the Unicode table's version is not measured).
+        c.eq((*table).version.into(), 1)?;
         c.ok((*table).functions[16] != 0, 0)?;
         let query_a: QueryPackageA = core::mem::transmute((*table).functions[16]);
         let mut info_a: *mut SecPkgInfoA = core::ptr::null_mut();
@@ -673,4 +695,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

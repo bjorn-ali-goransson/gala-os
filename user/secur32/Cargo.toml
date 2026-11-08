@@ -16,3 +16,6 @@ gala_heap = { path = "../gala_heap" }
 md4 = { version = "0.10", default-features = false }
 md-5 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
+
+[target.'cfg(target_arch = "x86")'.dependencies]
+ntrt = { path = "../ntrt" }

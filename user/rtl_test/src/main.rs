@@ -234,6 +234,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -243,10 +244,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -564,7 +567,8 @@ fn calls(c: &mut Checks) -> Result<(), u32> {
         c.ok(!describe.is_null(), 0)?;
         let describe: extern "system" fn(Handle, *const u16) -> i32 =
             core::mem::transmute(describe);
-        c.eq(describe(GetCurrentThread(), w::<4>("sig").as_ptr()) as u64, 0)?; // S_OK
+        // HRESULT_FROM_NT(STATUS_SUCCESS), not S_OK (Windows 11 25H2).
+        c.eq(describe(GetCurrentThread(), w::<4>("sig").as_ptr()) as u64, 0x1000_0000)?;
     }
     Ok(())
 }
@@ -595,4 +599,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

@@ -15,42 +15,36 @@
 #![no_std]
 #![allow(non_snake_case, non_upper_case_globals)]
 
+// The architecture's parts: x64 (System32's ntdll) or x86 (the 32-bit
+// ntdll in SysWOW64, ARCHITECTURE "Plan: WOW64"). First: they define the
+// system call stub macro.
+#[cfg(target_arch = "x86_64")]
+#[macro_use]
+#[path = "x64.rs"]
+mod arch;
+#[cfg(target_arch = "x86")]
+#[macro_use]
+#[path = "x86.rs"]
+mod arch;
+
 mod heap;
 mod rtl;
+#[cfg(target_arch = "x86_64")]
+mod seh;
+#[cfg(target_arch = "x86")]
+#[path = "seh_x86.rs"]
 mod seh;
 mod tls;
 mod unimplemented;
 
+pub use arch::*;
+
 /// "galantdl": marks the state as written by this DLL.
 const MAGIC: u64 = 0x6761_6c61_6e74_646c;
-/// CONTEXT.Rip (public x64 layout).
-const CONTEXT_RIP: usize = 0xf8;
-/// NtContinue on the pinned build (to be verified, like all numbers).
-const NT_CONTINUE: u32 = 0x43;
 
 /// [magic, NtdllBase argument, Context->Rip, number of thunk calls]
 #[unsafe(no_mangle)]
 pub static mut GalaTestNtdllState: [u64; 4] = [0; 4];
-
-/// NtContinue(Context, TestAlert): resumes `Context`; does not return on
-/// success.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn NtContinue(_context: *const u8, _test_alert: u8) -> i32 {
-    core::arch::naked_asm!("mov r10, rcx", "mov eax, {n}", "syscall", "ret", n = const NT_CONTINUE)
-}
-
-/// System call stubs shaped like ntdll's: `mov r10, rcx; mov eax, n;
-/// syscall; ret` (stack arguments stay where the kernel expects them).
-macro_rules! syscall_stubs {
-    ($($name:ident = $n:expr, fn($($arg:ident: $ty:ty),*);)*) => {$(
-        #[unsafe(naked)]
-        #[unsafe(no_mangle)]
-        pub extern "system" fn $name($(_: $ty),*) -> u32 {
-            core::arch::naked_asm!("mov r10, rcx", "mov eax, {n}", "syscall", "ret", n = const $n)
-        }
-    )*};
-}
 
 // Numbers of the pinned build (to be verified), as in ntrt.
 syscall_stubs! {
@@ -313,8 +307,8 @@ syscall_stubs! {
     GalaWindowReply = 0x7f4b, fn(id: u64, result: i64, out: *const u8, len: u32);
     GalaWindowPostThread = 0x7f50, fn(tid: u32, message: u32, wparam: u64, lparam: u64);
     GalaWindowSendAbandon = 0x7f51, fn(id: u64);
-    GalaWindowSurface = 0x7f52, fn(hwnd: u64, section: u64, offset: u64, width: u32, height: u32);
-    GalaWindowSurfaceOpen = 0x7f53, fn(hwnd: u64, section: *mut u64, info: *mut u8);
+    GalaWindowSurface = 0x7f52, fn(hwnd: u64, section: usize, offset: u64, width: u32, height: u32);
+    GalaWindowSurfaceOpen = 0x7f53, fn(hwnd: u64, section: *mut usize, info: *mut u8);
     GalaWindowDrag = 0x7f54, fn(id: u32);
     GalaWindowResize = 0x7f55, fn(id: u32, edges: u32);
     // UIPI's message filters (ChangeWindowMessageFilter(Ex)).
@@ -440,6 +434,8 @@ pub struct ObjectAttributes {
 
 const STATUS_SUCCESS: u32 = 0;
 const STATUS_IMAGE_NOT_AT_BASE: u32 = 0x4000_0003;
+/// A view of an image for another machine (informational: mapped).
+const STATUS_IMAGE_MACHINE_TYPE_MISMATCH: u32 = 0x4000_000e;
 const STATUS_DLL_NOT_FOUND: u32 = 0xc000_0135;
 const STATUS_ENTRYPOINT_NOT_FOUND: u32 = 0xc000_0139;
 const STATUS_INVALID_IMAGE_FORMAT: u32 = 0xc000_007b;
@@ -452,6 +448,34 @@ fn rd32(addr: usize) -> u32 {
 fn rd64(addr: usize) -> u64 {
     // SAFETY: as above.
     unsafe { (addr as *const u64).read_unaligned() }
+}
+
+/// The size of a pointer (and of an IAT slot, a TLS array slot).
+const PTR: usize = core::mem::size_of::<usize>();
+
+/// A pointer-sized value (an address in this build's images and system
+/// structures).
+fn rdp(addr: usize) -> usize {
+    // SAFETY: as above.
+    unsafe { (addr as *const usize).read_unaligned() }
+}
+
+/// The UNICODE_STRING at `addr` (Length, then the buffer a pointer
+/// further).
+fn unicode_at(addr: usize) -> &'static [u16] {
+    let len = usize::from(rd32(addr) as u16) / 2;
+    // SAFETY: a UNICODE_STRING the kernel or the loader filled in.
+    unsafe { core::slice::from_raw_parts(rdp(addr + PTR) as *const u16, len) }
+}
+
+/// ProcessParameters->ImagePathName.
+fn image_path() -> &'static [u16] {
+    unicode_at(rdp(peb() + PEB_PROCESS_PARAMETERS) + PARAMS_IMAGE_PATH)
+}
+
+/// PEB.ImageBaseAddress: the executable.
+fn image_base() -> usize {
+    rdp(peb() + PEB_IMAGE_BASE)
 }
 
 /// A NUL-terminated string inside a mapped image.
@@ -468,8 +492,8 @@ fn c_str(addr: usize) -> &'static [u8] {
 
 /// The IMAGE_DATA_DIRECTORY `index` of the image at `base`: (rva, size).
 fn directory(base: usize, index: usize) -> (usize, usize) {
-    let opt = base + rd32(base + 0x3c) as usize + 24;
-    (rd32(opt + 112 + 8 * index) as usize, rd32(opt + 116 + 8 * index) as usize)
+    let opt = base + rd32(base + 0x3c) as usize + 24 + DATA_DIRECTORIES;
+    (rd32(opt + 8 * index) as usize, rd32(opt + 4 + 8 * index) as usize)
 }
 
 /// Whether `address` is code in a loaded DLL's `.gstub` section: the
@@ -559,10 +583,9 @@ fn export_at_depth(base: usize, name: &[u8], ordinal: u32, depth: u32) -> Option
 /// Where a DLL is looked for.
 #[derive(Clone, Copy)]
 enum Search<'a> {
-    /// Next to the executable, then System32.
+    /// As the load's LOAD_LIBRARY_SEARCH_* flags say (`LOAD_FLAGS`; none:
+    /// next to the executable, SetDllDirectory's directory, System32).
     Default,
-    /// System32 only (LOAD_LIBRARY_SEARCH_SYSTEM32).
-    System32,
     /// This directory only (a path with a directory was given; ends with
     /// a backslash).
     Dir(&'a [u16]),
@@ -572,16 +595,24 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
     if let Search::Dir(dir) = search {
         return open_dll(dir, dll);
     }
-    let system32_only = matches!(search, Search::System32);
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters and ImagePathName are
-    // filled in by the kernel.
-    let image_path = unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        let params = rd64(peb + 0x20) as usize;
-        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-        core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
+    // Tries `dir`; Ok(None) when the DLL is not there.
+    let try_dir = |dir: &[u16]| match open_dll(dir, dll) {
+        Err(STATUS_DLL_NOT_FOUND) => Ok(None),
+        Err(e) => Err(e),
+        Ok(base) => Ok(Some(base)),
     };
+    // SAFETY: under the loader lock (as `map_dll` is).
+    let (load_dir, load_len) = unsafe { *LOAD_DIR.0.get() };
+    // SAFETY: as above.
+    let flags = unsafe { *LOAD_FLAGS.0.get() };
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: the directory of the DLL being
+    // loaded, first, for every dependency of this load.
+    if load_len != 0
+        && let Some(base) = try_dir(&load_dir[..load_len])?
+    {
+        return Ok(base);
+    }
+    let image_path = image_path();
     let dir_len = image_path.iter().rposition(|&c| c == u16::from(b'\\')).map_or(0, |i| i + 1);
     let mut system32 = [0u16; 280];
     let mut n = 0;
@@ -593,29 +624,87 @@ fn map_dll(dll: &[u8], search: Search) -> Result<usize, u32> {
             n += 1;
         }
     }
-    for &b in b"\\System32\\" {
+    for &b in SYSTEM_DIR {
         system32[n] = u16::from(b);
         n += 1;
     }
-    if system32_only {
+    let where_flags =
+        SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32 | SEARCH_DEFAULT_DIRS;
+    if flags & where_flags == 0 {
+        // The standard order: the executable's directory, then
+        // SetDllDirectory's (as documented), then System32.
+        if let Some(base) = try_dir(&image_path[..dir_len])? {
+            return Ok(base);
+        }
+        // SAFETY: under the loader lock (as `map_dll` is).
+        let (dir, len) = unsafe { *DLL_DIRECTORY.0.get() };
+        if len != 0
+            && let Some(base) = try_dir(&dir[..len])?
+        {
+            return Ok(base);
+        }
         return open_dll(&system32[..n], dll);
     }
-    // The executable's directory, then SetDllDirectory's (as documented
-    // for the standard search order), then System32.
-    match open_dll(&image_path[..dir_len], dll) {
-        Err(STATUS_DLL_NOT_FOUND) => {}
-        other => return other,
+    // LOAD_LIBRARY_SEARCH_*: the application's directory, the
+    // AddDllDirectory directories, System32, each when asked for
+    // (DEFAULT_DIRS: all three, in that order).
+    let default = flags & SEARCH_DEFAULT_DIRS != 0;
+    if (default || flags & SEARCH_APPLICATION_DIR != 0)
+        && let Some(base) = try_dir(&image_path[..dir_len])?
+    {
+        return Ok(base);
     }
-    // SAFETY: under the loader lock (as `map_dll` is).
-    let (dir, len) = unsafe { *DLL_DIRECTORY.0.get() };
-    if len != 0 {
-        match open_dll(&dir[..len], dll) {
-            Err(STATUS_DLL_NOT_FOUND) => {}
-            other => return other,
+    if default || flags & SEARCH_USER_DIRS != 0 {
+        for slot in 0..USER_DIRS {
+            // SAFETY: under the loader lock.
+            let (dir, len) = unsafe { (*USER_DIR_LIST.0.get())[slot] };
+            if len != 0
+                && let Some(base) = try_dir(&dir[..len])?
+            {
+                return Ok(base);
+            }
         }
     }
-    open_dll(&system32[..n], dll)
+    if default || flags & SEARCH_SYSTEM32 != 0 {
+        return open_dll(&system32[..n], dll);
+    }
+    Err(STATUS_DLL_NOT_FOUND)
 }
+
+/// LoadLibraryExW's LOAD_LIBRARY_SEARCH_* flags (passed in LdrLoadDll's
+/// DllPath with its low bit set).
+const SEARCH_DLL_LOAD_DIR: usize = 0x100;
+const SEARCH_APPLICATION_DIR: usize = 0x200;
+const SEARCH_USER_DIRS: usize = 0x400;
+const SEARCH_SYSTEM32: usize = 0x800;
+const SEARCH_DEFAULT_DIRS: usize = 0x1000;
+
+/// The search flags of the LdrLoadDll in progress (its dependencies are
+/// searched the same way), under the loader lock.
+struct LoadFlags(core::cell::UnsafeCell<usize>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for LoadFlags {}
+
+static LOAD_FLAGS: LoadFlags = LoadFlags(core::cell::UnsafeCell::new(0));
+
+/// LdrAddDllDirectory's directories (each ends with a backslash; length 0:
+/// a free slot; a cookie is its slot + 1), under the loader lock.
+const USER_DIRS: usize = 16;
+
+struct UserDirs(core::cell::UnsafeCell<[([u16; MAX_PATH], usize); USER_DIRS]>);
+
+// SAFETY: used under the loader lock.
+unsafe impl Sync for UserDirs {}
+
+static USER_DIR_LIST: UserDirs =
+    UserDirs(core::cell::UnsafeCell::new([([0; MAX_PATH], 0); USER_DIRS]));
+
+/// The directory LdrLoadDll's LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR adds in
+/// front of the search for the dependencies of the DLL it loads (ends
+/// with a backslash; empty: none), set for that call, under the loader
+/// lock.
+static LOAD_DIR: DllDirectory = DllDirectory(core::cell::UnsafeCell::new(([0; MAX_PATH], 0)));
 
 /// SetDllDirectory's directory (ends with a backslash; empty: none), used
 /// under the loader lock.
@@ -713,31 +802,33 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
         NtMapViewOfSection(section, -1, &mut base, 0, 0, core::ptr::null_mut(), &mut size, 1, 0, 4);
     NtClose(section);
     match st {
-        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => {}
+        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE | STATUS_IMAGE_MACHINE_TYPE_MISMATCH => {}
         _ => return Err(st),
     }
-    // Image sections take 32-bit images too; a 64-bit process loads one
-    // as a module only if it is an IL-only .NET assembly (no code runs).
-    if is_pe32(base) && !is_il_only(base) {
+    // Image sections take both kinds; an image of the other kind loads as
+    // a module only if it is an IL-only .NET assembly (no code runs).
+    if is_foreign(base) && !is_il_only(base) {
         NtUnmapViewOfSection(-1, base);
         return Err(STATUS_INVALID_IMAGE_FORMAT);
     }
     Ok(base)
 }
 
-/// Whether the image at `base` is 32-bit (PE32).
-fn is_pe32(base: usize) -> bool {
-    rd32(base + rd32(base + 0x3c) as usize + 24) & 0xffff == 0x10b
+/// Whether the image at `base` is not of this build's kind (PE32 for the
+/// 64-bit ntdll, PE32+ for the 32-bit one).
+fn is_foreign(base: usize) -> bool {
+    rd32(base + rd32(base + 0x3c) as usize + 24) & 0xffff != NATIVE_MAGIC
 }
 
-/// Whether the PE32 image at `base` is an IL-only .NET assembly: its CLI
-/// header (data directory 14, at +96 + 14 * 8 in a PE32 optional header)
-/// has COMIMAGE_FLAGS_ILONLY (bit 0 of Flags, at +16). Windows loads
-/// these into 64-bit processes; nothing in them runs (no imports are
-/// bound, no entry point is called).
+/// Whether the image at `base` (of the other kind) is an IL-only .NET
+/// assembly: its CLI header (data directory 14, at +96 + 14 * 8 in a PE32
+/// optional header, +112 in a PE32+ one) has COMIMAGE_FLAGS_ILONLY (bit 0
+/// of Flags, at +16). Windows loads these into processes of either kind;
+/// nothing in them runs (no imports are bound, no entry point is called).
 fn is_il_only(base: usize) -> bool {
     let optional = base + rd32(base + 0x3c) as usize + 24;
-    let cli = rd32(optional + 96 + 14 * 8) as usize;
+    let directories = if rd32(optional) & 0xffff == 0x10b { 96 } else { 112 };
+    let cli = rd32(optional + directories + 14 * 8) as usize;
     cli != 0 && rd32(base + cli + 16) & 1 != 0
 }
 
@@ -804,7 +895,7 @@ struct LoaderLock {
     debug_info: usize,
     lock_count: i32,
     depth: core::sync::atomic::AtomicU32,
-    owner: core::sync::atomic::AtomicU64,
+    owner: core::sync::atomic::AtomicUsize,
     semaphore: usize,
     spin_count: usize,
 }
@@ -813,11 +904,11 @@ static LOADER_LOCK: LoaderLock = LoaderLock {
     debug_info: 0,
     lock_count: -1,
     depth: core::sync::atomic::AtomicU32::new(0),
-    owner: core::sync::atomic::AtomicU64::new(0),
+    owner: core::sync::atomic::AtomicUsize::new(0),
     semaphore: 0,
     spin_count: 0,
 };
-static LOADER_OWNER: &core::sync::atomic::AtomicU64 = &LOADER_LOCK.owner;
+static LOADER_OWNER: &core::sync::atomic::AtomicUsize = &LOADER_LOCK.owner;
 static LOADER_DEPTH: &core::sync::atomic::AtomicU32 = &LOADER_LOCK.depth;
 
 /// Set while the executable's imports are bound at startup.
@@ -826,9 +917,7 @@ static STARTUP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool:
 /// Runs `f` holding the loader lock.
 pub(crate) fn with_loader_lock<R>(f: impl FnOnce() -> R) -> R {
     use core::sync::atomic::Ordering;
-    let me: u64;
-    // SAFETY: gs:[0x48] is TEB.ClientId.UniqueThread.
-    unsafe { core::arch::asm!("mov {}, gs:[0x48]", out(reg) me, options(nostack, readonly)) };
+    let me = thread_id();
     if LOADER_OWNER.load(Ordering::Acquire) == me {
         LOADER_DEPTH.fetch_add(1, Ordering::Relaxed);
         let r = f();
@@ -859,17 +948,21 @@ struct ListEntry {
     blink: usize,
 }
 
-/// UNICODE_STRING (x64: lengths in bytes, padding, the buffer).
+/// Padding words of the x64 layouts (UNICODE_STRING's after the lengths,
+/// LDR_DATA_TABLE_ENTRY's after SizeOfImage); none in the x86 ones.
+const PAD: usize = if PTR == 8 { 1 } else { 0 };
+
+/// UNICODE_STRING (lengths in bytes, padding on x64, the buffer).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UnicodeStr {
     length: u16,
     maximum: u16,
-    pad: u32,
+    pad: [u32; PAD],
     buffer: usize,
 }
 
-/// PEB_LDR_DATA (x64, 0x58 bytes), what PEB.Ldr (+0x18) points at.
+/// PEB_LDR_DATA (x64: 0x58 bytes; x86: 0x30), what PEB.Ldr points at.
 #[repr(C)]
 struct LdrData {
     length: u32,
@@ -883,7 +976,8 @@ struct LdrData {
     shutdown_thread: usize,
 }
 
-/// LDR_DATA_TABLE_ENTRY (x64), the fields up to TimeDateStamp (+0x80).
+/// LDR_DATA_TABLE_ENTRY, the fields up to TimeDateStamp (x64: +0x80;
+/// x86: +0x44).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LdrEntry {
@@ -893,7 +987,7 @@ struct LdrEntry {
     dll_base: usize,
     entry_point: usize,
     size_of_image: u32,
-    pad: u32,
+    pad: [u32; PAD],
     full_name: UnicodeStr,
     base_name: UnicodeStr,
     flags: u32,
@@ -904,12 +998,21 @@ struct LdrEntry {
     pad2: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<LdrData>() == 0x58);
-const _: () = assert!(core::mem::offset_of!(LdrEntry, full_name) == 0x48);
-const _: () = assert!(core::mem::offset_of!(LdrEntry, time_date_stamp) == 0x80);
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    assert!(core::mem::size_of::<LdrData>() == 0x58);
+    assert!(core::mem::offset_of!(LdrEntry, full_name) == 0x48);
+    assert!(core::mem::offset_of!(LdrEntry, time_date_stamp) == 0x80);
+};
+#[cfg(target_arch = "x86")]
+const _: () = {
+    assert!(core::mem::size_of::<LdrData>() == 0x30);
+    assert!(core::mem::offset_of!(LdrEntry, full_name) == 0x24);
+    assert!(core::mem::offset_of!(LdrEntry, time_date_stamp) == 0x44);
+};
 
 const NO_LIST: ListEntry = ListEntry { flink: 0, blink: 0 };
-const NO_STRING: UnicodeStr = UnicodeStr { length: 0, maximum: 0, pad: 0, buffer: 0 };
+const NO_STRING: UnicodeStr = UnicodeStr { length: 0, maximum: 0, pad: [0; PAD], buffer: 0 };
 const NO_ENTRY: LdrEntry = LdrEntry {
     load_order: NO_LIST,
     memory_order: NO_LIST,
@@ -917,7 +1020,7 @@ const NO_ENTRY: LdrEntry = LdrEntry {
     dll_base: 0,
     entry_point: 0,
     size_of_image: 0,
-    pad: 0,
+    pad: [0; PAD],
     full_name: NO_STRING,
     base_name: NO_STRING,
     flags: 0,
@@ -943,7 +1046,7 @@ unsafe impl Sync for Ldr {}
 
 static LDR: Ldr = Ldr(core::cell::UnsafeCell::new((
     LdrData {
-        length: 0x58,
+        length: core::mem::size_of::<LdrData>() as u32,
         initialized: 0,
         ss_handle: 0,
         load_order: NO_LIST,
@@ -970,12 +1073,8 @@ fn ldr_init() {
         let me = head as *mut ListEntry as usize;
         *head = ListEntry { flink: me, blink: me };
     }
-    // SAFETY: gs:[0x60] is the PEB; Ldr is at +0x18.
-    unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        ((peb + 0x18) as *mut usize).write(data as *mut LdrData as usize);
-    }
+    // SAFETY: PEB.Ldr, written by this loader only.
+    unsafe { ((peb() + PEB_LDR) as *mut usize).write(data as *mut LdrData as usize) };
 }
 
 /// Puts `entry` last in the list at `head`.
@@ -1027,13 +1126,13 @@ fn ldr_link(slot: usize) {
         full_name: UnicodeStr {
             length: (2 * len) as u16,
             maximum: (2 * len) as u16,
-            pad: 0,
+            pad: [0; PAD],
             buffer: path,
         },
         base_name: UnicodeStr {
             length: (2 * (len - file)) as u16,
             maximum: (2 * (len - file)) as u16,
-            pad: 0,
+            pad: [0; PAD],
             buffer: path + 2 * file,
         },
         load_count: if refs == PINNED { u16::MAX } else { refs.min(0xfffe) as u16 },
@@ -1063,7 +1162,7 @@ fn ldr_unlink(slot: usize) {
     *e = NO_ENTRY;
 }
 
-/// RTL_UNLOAD_EVENT_TRACE (x64, 104 bytes): one unloaded module.
+/// RTL_UNLOAD_EVENT_TRACE (x64: 104 bytes; x86: 92): one unloaded module.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UnloadEvent {
@@ -1076,7 +1175,7 @@ struct UnloadEvent {
     version: [u32; 2],
 }
 
-const _: () = assert!(core::mem::size_of::<UnloadEvent>() == 104);
+const _: () = assert!(core::mem::size_of::<UnloadEvent>() == if PTR == 8 { 104 } else { 92 });
 
 /// How many unloads the trace keeps (the newest replace the oldest).
 const UNLOAD_EVENTS: usize = 64;
@@ -1186,6 +1285,35 @@ fn with_modules<R>(f: impl FnOnce(&mut [Module; MAX_MODULES]) -> R) -> R {
     f(unsafe { &mut *MODULES.0.get() })
 }
 
+/// The base of the loaded image containing `pc`, if any.
+pub(crate) fn image_of(pc: usize) -> Option<usize> {
+    with_modules(|m| {
+        m.iter().find_map(|module| {
+            let base = module.base;
+            if base == 0 || pc < base {
+                return None;
+            }
+            let size = rd32(base + rd32(base + 0x3c) as usize + 24 + 56) as usize; // SizeOfImage (PE32 and PE32+)
+            (pc < base + size).then_some(base)
+        })
+    })
+}
+
+/// RtlPcToFileHeader(PcValue, *BaseOfImage): the base of the image
+/// containing `pc` (also stored), or null.
+///
+/// # Safety
+/// `base` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn RtlPcToFileHeader(pc: usize, base: *mut usize) -> usize {
+    let found = image_of(pc).unwrap_or(0);
+    if !base.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *base = found };
+    }
+    found
+}
+
 /// The slot of the module named `name` (already normalized).
 fn find_module(name: &[u8]) -> Option<usize> {
     with_modules(|m| m.iter().position(|m| m.base != 0 && &m.name[..m.name_len] == name))
@@ -1263,26 +1391,71 @@ pub extern "system" fn RtlSetProcessPlaceholderCompatibilityMode(mode: i8) -> i8
     PLACEHOLDER_MODE.swap(mode, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The core API sets Windows' schema does not give kernelbase (as Wine's
+/// apisetschema.spec lists them), by contract name up to its level, and
+/// their hosts; gala's ole32 stands in for combase, coml2 and wintypes.
+const CORE_HOSTS: &[(&[u8], &[u8])] = &[
+    (b"core-apiquery-l1-", b"ntdll.dll"),
+    (b"core-rtlsupport-l1-", b"ntdll.dll"),
+    (b"core-xstate-l1-", b"ntdll.dll"),
+    (b"core-appinit-l1-", b"kernel32.dll"),
+    (b"core-atoms-l1-", b"kernel32.dll"),
+    (b"core-calendar-l1-", b"kernel32.dll"),
+    (b"core-console-ansi-l2-", b"kernel32.dll"),
+    (b"core-file-ansi-l1-", b"kernel32.dll"),
+    (b"core-file-ansi-l2-", b"kernel32.dll"),
+    (b"core-firmware-l1-", b"kernel32.dll"),
+    (b"core-heap-obsolete-l1-", b"kernel32.dll"),
+    (b"core-io-l1-", b"kernel32.dll"),
+    (b"core-job-l2-", b"kernel32.dll"),
+    (b"core-kernel32-legacy-ansi-l1-", b"kernel32.dll"),
+    (b"core-kernel32-legacy-l1-", b"kernel32.dll"),
+    (b"core-kernel32-private-l1-", b"kernel32.dll"),
+    (b"core-localization-ansi-l1-", b"kernel32.dll"),
+    (b"core-namedpipe-ansi-l1-", b"kernel32.dll"),
+    (b"core-namespace-ansi-l1-", b"kernel32.dll"),
+    (b"core-privateprofile-l1-", b"kernel32.dll"),
+    (b"core-processenvironment-ansi-l1-", b"kernel32.dll"),
+    (b"core-processsecurity-l1-", b"kernel32.dll"),
+    (b"core-processthreads-l1-", b"kernel32.dll"),
+    (b"core-processtopology-obsolete-l1-", b"kernel32.dll"),
+    (b"core-sidebyside-ansi-l1-", b"kernel32.dll"),
+    (b"core-string-obsolete-l1-", b"kernel32.dll"),
+    (b"core-synch-ansi-l1-", b"kernel32.dll"),
+    (b"core-toolhelp-l1-", b"kernel32.dll"),
+    (b"core-ums-l1-", b"kernel32.dll"),
+    (b"core-util-l1-", b"kernel32.dll"),
+    (b"core-registry-l2-", b"advapi32.dll"),
+    (b"core-registry-private-l1-", b"advapi32.dll"),
+    (b"core-shutdown-ansi-l1-", b"advapi32.dll"),
+    (b"core-shutdown-l1-", b"advapi32.dll"),
+    (b"core-sysinfo-l2-", b"advapi32.dll"),
+    (b"core-com-", b"ole32.dll"),
+    (b"core-marshal-l1-", b"ole32.dll"),
+    (b"core-winrt-", b"ole32.dll"),
+    (b"core-crt-", b"msvcrt.dll"),
+    (b"core-multipleproviderrouter-l1-", b"mpr.dll"),
+    (b"core-featurestaging-l1-", b"shcore.dll"),
+    (b"core-slapi-l1-", b"slc.dll"),
+    (b"core-biplmapi-", b"twinapi.appcore.dll"),
+    (b"core-biptcltapi-", b"twinapi.appcore.dll"),
+    (b"core-psm-", b"twinapi.appcore.dll"),
+];
+
 /// The DLL implementing API set `name` (`api-ms-win-...`, normalized), as
 /// Windows' API set schema maps these contract names to the DLLs that
-/// implement them (whatever files of those names exist). gala keeps the
-/// mapping coarse: the C runtime sets are ucrtbase, COM and WinRT are
-/// ole32 (gala has no combase), security, eventing, registry and services
-/// are advapi32, the other core sets are kernel32 (gala has no
-/// kernelbase); other names are looked up as files.
+/// implement them (whatever files of those names exist): the core sets to
+/// kernelbase but those of CORE_HOSTS, the C runtime sets to ucrtbase;
+/// gala keeps the rest coarse: security, eventing and services are
+/// advapi32; other names are looked up as files.
 fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
     let set = name.strip_prefix(b"api-ms-win-")?;
     let host: &[u8] = if set.starts_with(b"crt-") {
         b"ucrtbase.dll"
-    } else if set.starts_with(b"core-com-") || set.starts_with(b"core-winrt-") {
-        b"ole32.dll"
-    } else if ["security-", "eventing-", "core-registry-", "service-"]
-        .iter()
-        .any(|p| set.starts_with(p.as_bytes()))
-    {
-        b"advapi32.dll"
     } else if set.starts_with(b"core-") {
-        b"kernel32.dll"
+        CORE_HOSTS.iter().find(|(p, _)| set.starts_with(p)).map_or(b"kernelbase.dll", |&(_, h)| h)
+    } else if ["security-", "eventing-", "service-"].iter().any(|p| set.starts_with(p.as_bytes())) {
+        b"advapi32.dll"
     } else if set.starts_with(b"shcore-") {
         b"shcore.dll"
     } else if set.starts_with(b"power-") {
@@ -1365,7 +1538,7 @@ fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
     let (path, n) = unsafe { *LAST_PATH.0.get() };
     set_module_path(slot, &path[..n]);
     let attach = || {
-        if is_pe32(base) {
+        if is_foreign(base) {
             return Ok(()); // an IL-only assembly: mapped, nothing to run
         }
         bind_imports(base, Some(slot))?;
@@ -1460,25 +1633,24 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
         let lookup = base + rd32(if rd32(desc) != 0 { desc } else { desc + 16 }) as usize;
         let iat = base + rd32(desc + 16) as usize;
         let mut count = 0;
-        while rd64(lookup + 8 * count) != 0 {
+        while rdp(lookup + PTR * count) != 0 {
             count += 1;
         }
-        let (mut at, mut size, mut old) = (iat, count * 8, 0u32);
+        let (mut at, mut size, mut old) = (iat, count * PTR, 0u32);
         if NtProtectVirtualMemory(-1, &mut at, &mut size, 0x04, &mut old) != STATUS_SUCCESS {
             return Err(STATUS_ENTRYPOINT_NOT_FOUND);
         }
         for i in 0..count {
-            let entry = rd64(lookup + 8 * i);
-            let (name, ordinal) = if entry >> 63 != 0 {
+            let entry = rdp(lookup + PTR * i);
+            // IMAGE_ORDINAL_FLAG: the top bit.
+            let (name, ordinal) = if entry >> (8 * PTR - 1) != 0 {
                 (&[][..], (entry & 0xffff) as u32)
             } else {
-                (c_str(base + (entry as usize & 0x7fff_ffff) + 2), 0)
+                (c_str(base + (entry & 0x7fff_ffff) + 2), 0)
             };
             match export(dll, name, ordinal) {
                 // SAFETY: the IAT slot, made writable above.
-                Some(target) => unsafe {
-                    ((iat + 8 * i) as *mut u64).write_unaligned(target as u64)
-                },
+                Some(target) => unsafe { ((iat + PTR * i) as *mut usize).write_unaligned(target) },
                 None => {
                     // As on Windows the image will not load, but every
                     // missing import is reported first (not just the first).
@@ -1487,7 +1659,7 @@ fn bind_imports(base: usize, slot: Option<usize>) -> Result<(), u32> {
                 }
             }
         }
-        let (mut at, mut size, mut ignored) = (iat, count * 8, 0u32);
+        let (mut at, mut size, mut ignored) = (iat, count * PTR, 0u32);
         NtProtectVirtualMemory(-1, &mut at, &mut size, old, &mut ignored);
         desc += 20;
     }
@@ -1542,7 +1714,9 @@ fn unicode_name(name: *const UnicodeString, out: &mut [u8; MAX_NAME]) -> Result<
 }
 
 /// LdrLoadDll(DllPath, DllCharacteristics, DllName, DllHandle): loads a DLL
-/// from the executable's directory (the search path is ignored).
+/// (a path's from its directory; a name from the executable's, then
+/// System32), its dependencies first from the DLL's own directory with
+/// LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.
 ///
 /// # Safety
 /// `name` must be a valid UNICODE_STRING and `handle` writable.
@@ -1555,16 +1729,33 @@ unsafe extern "system" fn ldr_load_dll(
     // As on newer Windows, LoadLibraryExW's LOAD_LIBRARY_SEARCH_* flags come
     // in `path` with its low bit set (a real path is 2-byte aligned).
     let flags = if path as usize & 1 != 0 { path as usize & !1 } else { 0 };
-    const LOAD_LIBRARY_SEARCH_SYSTEM32: usize = 0x800;
     // A name with an absolute directory loads from that directory only.
     let dir = explicit_dir(name);
     let search = match dir {
         Some(d) => Search::Dir(d),
-        None if flags & LOAD_LIBRARY_SEARCH_SYSTEM32 != 0 => Search::System32,
         None => Search::Default,
     };
+    // SAFETY: under the loader lock (LdrLoadDll holds it); the outer
+    // load's directory and flags are kept for a DllMain that loads
+    // another DLL.
+    let (saved, saved_flags) = unsafe { (*LOAD_DIR.0.get(), *LOAD_FLAGS.0.get()) };
+    // SAFETY: as above.
+    unsafe { *LOAD_FLAGS.0.get() = flags };
+    if let Some(d) = dir.filter(|d| flags & SEARCH_DLL_LOAD_DIR != 0 && d.len() <= MAX_PATH) {
+        // SAFETY: as above.
+        unsafe {
+            let slot = &mut *LOAD_DIR.0.get();
+            slot.0[..d.len()].copy_from_slice(d);
+            slot.1 = d.len();
+        }
+    }
     let mut buf = [0u8; MAX_NAME];
     let loaded = unicode_name(name, &mut buf).and_then(|n| load_module(&buf[..n], search));
+    // SAFETY: as above.
+    unsafe {
+        *LOAD_DIR.0.get() = saved;
+        *LOAD_FLAGS.0.get() = saved_flags;
+    }
     match loaded {
         Ok(slot) => {
             // SAFETY: the caller passes a writable handle.
@@ -1642,16 +1833,7 @@ unsafe extern "system" fn ldr_get_procedure_address(
 ) -> u32 {
     // A null module means the executable (as on Windows, where
     // GetProcAddress(NULL, ...) searches it).
-    let module = if module == 0 {
-        // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
-        unsafe {
-            let peb: usize;
-            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-            rd64(peb + 0x10) as usize
-        }
-    } else {
-        module
-    };
+    let module = if module == 0 { image_base() } else { module };
     let found = if name.is_null() {
         export(module, &[], ordinal).ok_or(STATUS_ORDINAL_NOT_FOUND)
     } else {
@@ -1662,12 +1844,14 @@ unsafe extern "system" fn ldr_get_procedure_address(
         };
         match name {
             [] => Err(STATUS_PROCEDURE_NOT_FOUND),
-            _ => export(module, name, 0).ok_or(STATUS_PROCEDURE_NOT_FOUND),
+            // A missing name is STATUS_ENTRYPOINT_NOT_FOUND (Windows 11
+            // 25H2); both are ERROR_PROC_NOT_FOUND to GetProcAddress.
+            _ => export(module, name, 0).ok_or(STATUS_ENTRYPOINT_NOT_FOUND),
         }
     };
     let found = found.and_then(|target| {
         let missing =
-            if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_PROCEDURE_NOT_FOUND };
+            if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_ENTRYPOINT_NOT_FOUND };
         if is_unimplemented_stub(target) { Err(missing) } else { Ok(target) }
     });
     // Programs probe for optional functions this way: every miss goes to
@@ -1713,15 +1897,7 @@ extern "system" fn ldr_unload_dll(module: usize) -> u32 {
 /// order of PEB.Ldr's load order list on Windows).
 fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
     ldr_init();
-    // SAFETY: gs:[0x60] is the PEB; ProcessParameters->ImagePathName is
-    // filled in by the kernel.
-    let image_path = unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        let params = rd64(peb + 0x20) as usize;
-        let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-        core::slice::from_raw_parts(rd64(params + 0x68) as *const u16, len)
-    };
+    let image_path = image_path();
     let mut name = [0u8; MAX_NAME];
     // An executable whose name is not a plain ASCII one is just not listed.
     if let Ok(n) = normalize(image_path.iter().copied(), &mut name) {
@@ -1729,7 +1905,8 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
         set_module_path(slot, image_path);
     }
     let ntdll_slot = add_module(b"ntdll.dll", ntdll, PINNED)?;
-    // ntdll's file: <NtSystemRoot>\System32\ntdll.dll.
+    // ntdll's file: <NtSystemRoot>\System32\ntdll.dll (SysWOW64 for the
+    // 32-bit one).
     let mut path = [0u16; MAX_PATH];
     let mut n = 0;
     // SAFETY: KUSER_SHARED_DATA.NtSystemRoot (+0x30), NUL-terminated.
@@ -1739,7 +1916,7 @@ fn register_startup_modules(ntdll: usize, image: usize) -> Result<(), u32> {
             n += 1;
         }
     }
-    for &b in b"\\System32\\ntdll.dll" {
+    for &b in SYSTEM_DIR.iter().chain(b"ntdll.dll") {
         path[n] = u16::from(b);
         n += 1;
     }
@@ -1819,6 +1996,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_003b, 161),  // OBJECT_PATH_SYNTAX_BAD -> ERROR_BAD_PATHNAME
     (0x8000_0011, 170),  // DEVICE_BUSY -> ERROR_BUSY
     (0xc000_0235, 6),    // HANDLE_NOT_CLOSABLE -> ERROR_INVALID_HANDLE
+    (0xc000_0041, 5),    // PORT_CONNECTION_REFUSED -> ERROR_ACCESS_DENIED
     (0xc000_0043, 32),   // SHARING_VIOLATION
     (0xc000_0045, 87),   // INVALID_PAGE_PROTECTION -> ERROR_INVALID_PARAMETER
     (0xc000_0046, 288),  // MUTANT_NOT_OWNED -> ERROR_NOT_OWNER
@@ -1846,14 +2024,13 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_0225, 1168), // NOT_FOUND -> ERROR_NOT_FOUND
 ];
 
-/// TEB.LastStatusValue (x64 offset 0x1250): the NTSTATUS behind the
-/// thread's last error.
-const TEB_LAST_STATUS: usize = 0x1250;
-
 /// NtFlushBuffersFileEx(FileHandle, Flags, Parameters, ParametersSize,
 /// *IoStatusBlock): NtFlushBuffersFile (gala's volume is in memory, so the
 /// FLUSH_FLAGS_FILE_DATA_ONLY / NO_SYNC / FILE_DATA_SYNC_ONLY variants are
-/// all the same); other flags or parameters are STATUS_INVALID_PARAMETER.
+/// all the same). Flags beyond those are not refused: Windows 11 25H2
+/// flushed with 0x100 on NTFS (kernel32_file_test); which, if any, it
+/// refuses is not measured, so they are recorded in the ledger and
+/// ignored. Parameters are STATUS_INVALID_PARAMETER (none is documented).
 #[unsafe(no_mangle)]
 pub extern "system" fn NtFlushBuffersFileEx(
     h: usize,
@@ -1862,8 +2039,12 @@ pub extern "system" fn NtFlushBuffersFileEx(
     size: u32,
     iosb: *mut [usize; 2],
 ) -> u32 {
-    if flags & !7 != 0 || !parameters.is_null() || size != 0 {
+    if !parameters.is_null() || size != 0 {
         return 0xc000_000d;
+    }
+    if flags & !7 != 0 {
+        let what = b"ntdll.dll!NtFlushBuffersFileEx(unknown flags)";
+        GalaRecordMissing(what.as_ptr(), what.len(), 2, flags.into());
     }
     NtFlushBuffersFile(h, iosb)
 }
@@ -1871,12 +2052,7 @@ pub extern "system" fn NtFlushBuffersFileEx(
 /// RtlGetLastNtStatus(): TEB.LastStatusValue.
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlGetLastNtStatus() -> u32 {
-    let v: u32;
-    // SAFETY: the current thread's TEB (gs), a 4-byte field.
-    unsafe {
-        core::arch::asm!("mov {:e}, gs:[{}]", out(reg) v, const TEB_LAST_STATUS, options(nostack, readonly))
-    };
-    v
+    last_status()
 }
 
 /// RtlNtStatusToDosError(Status): the Win32 error for an NTSTATUS
@@ -1884,10 +2060,7 @@ pub extern "system" fn RtlGetLastNtStatus() -> u32 {
 /// does, it keeps `status` in TEB.LastStatusValue (RtlGetLastNtStatus).
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlNtStatusToDosError(status: u32) -> u32 {
-    // SAFETY: the current thread's TEB (gs), a 4-byte field.
-    unsafe {
-        core::arch::asm!("mov gs:[{}], {:e}", const TEB_LAST_STATUS, in(reg) status, options(nostack))
-    };
+    set_last_status(status);
     if (0xc000_00ef..=0xc000_00fa).contains(&status) {
         return 87; // STATUS_INVALID_PARAMETER_1..12
     }
@@ -1908,10 +2081,7 @@ pub extern "system" fn RtlNtStatusToDosError(status: u32) -> u32 {
 /// RtlGetCurrentPeb(): this process's PEB.
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlGetCurrentPeb() -> usize {
-    let peb: usize;
-    // SAFETY: gs:[0x60] is TEB.ProcessEnvironmentBlock.
-    unsafe { core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly)) };
-    peb
+    peb()
 }
 
 /// RtlGetVersion(*OSVERSIONINFO[EX]W): the version KUSER_SHARED_DATA
@@ -2015,33 +2185,24 @@ static INITIAL_CONTEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::At
 /// # Safety
 /// Called by the kernel with a valid CONTEXT.
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base: u64) -> ! {
+pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base: usize) -> ! {
     // SAFETY: the kernel passes a readable CONTEXT; the state is only
     // written here, before any other thread exists.
     unsafe {
-        let rip = (context.add(CONTEXT_RIP) as *const u64).read_unaligned();
+        let pc = (context.add(CONTEXT_PC) as *const usize).read_unaligned();
         let state = &raw mut GalaTestNtdllState;
         let calls = (*state)[3];
-        state.write_volatile([MAGIC, ntdll_base, rip, calls + 1]);
+        state.write_volatile([MAGIC, ntdll_base as u64, pc as u64, calls + 1]);
     }
-    // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
-    let image = unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        rd64(peb + 0x10) as usize
-    };
+    let image = image_base();
     // PEB.LoaderLock: where programs find the loader lock's owner.
-    // SAFETY: gs:[0x60] is the PEB, writable by the process.
-    unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        ((peb + 0x110) as *mut usize).write(&raw const LOADER_LOCK as usize);
-    }
+    // SAFETY: the PEB, writable by the process.
+    unsafe { ((peb() + PEB_LOADER_LOCK) as *mut usize).write(&raw const LOADER_LOCK as usize) };
     // The process heap, before any DLL's code runs.
     heap::create_process_heap();
     INITIAL_CONTEXT.store(context as usize, core::sync::atomic::Ordering::Relaxed);
     let started = with_loader_lock(|| {
-        register_startup_modules(ntdll_base as usize, image)?;
+        register_startup_modules(ntdll_base, image)?;
         // The executable's TLS (and this thread's blocks) before its
         // imports load; its TLS callbacks after their DllMains.
         tls::process_init(image);
@@ -2065,14 +2226,17 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
 }
 
 /// VerSetConditionMask: three condition bits for each VER_* type bit,
-/// at three times the bit's index (kernel32 forwards here, as on Windows).
+/// at three times the bit's index, and bit 63 set once a condition is
+/// (Windows 11 25H2: (0, VER_MAJORVERSION, VER_GREATER_EQUAL) is
+/// 0x8000000000000018; with no type bit the mask is returned as it is,
+/// which is not measured). kernel32 forwards here, as on Windows.
 #[unsafe(no_mangle)]
 pub extern "system" fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) -> u64 {
     let mut mask = mask;
     for bit in 0..8 {
         if kind & (1 << bit) != 0 {
             let shift = 3 * bit;
-            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift);
+            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift) | 1 << 63;
         }
     }
     mask
@@ -2152,22 +2316,6 @@ pub unsafe extern "system" fn RtlVerifyVersionInfo(info: *const u32, kind: u32, 
         }
     }
     STATUS_SUCCESS
-}
-
-/// NtTerminateProcess on the pinned build (to be verified).
-const NT_TERMINATE_PROCESS: u32 = 0x2c;
-
-/// NtTerminateProcess(ProcessHandle, ExitStatus).
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn NtTerminateProcess(_process: isize, _status: u32) -> i32 {
-    core::arch::naked_asm!(
-        "mov r10, rcx",
-        "mov eax, {n}",
-        "syscall",
-        "ret",
-        n = const NT_TERMINATE_PROCESS
-    )
 }
 
 /// PVECTORED_EXCEPTION_HANDLER: LONG (PEXCEPTION_POINTERS).
@@ -2286,28 +2434,6 @@ pub extern "system" fn RtlRemoveVectoredContinueHandler(cookie: *mut core::ffi::
     remove_handler(true, cookie)
 }
 
-/// The kernel resumes a thread here to run a user APC: rsp points at the
-/// CONTEXT to return to, whose P1Home..P4Home hold NormalContext,
-/// SystemArgument1, SystemArgument2 and NormalRoutine. The routine runs
-/// with the CONTEXT's home area as its shadow space; NtContinue with
-/// TestAlert then delivers the next APC or resumes the CONTEXT.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "system" fn KiUserApcDispatcher() -> ! {
-    core::arch::naked_asm!(
-        "mov rcx, [rsp]",
-        "mov rdx, [rsp + 8]",
-        "mov r8, [rsp + 0x10]",
-        "mov rax, [rsp + 0x18]",
-        "call rax",
-        "mov rcx, rsp",
-        "mov edx, 1",
-        "call {continue}",
-        "int3",
-        continue = sym NtContinue,
-    )
-}
-
 /// Calls the handlers of one table in order; whether one of them returned
 /// EXCEPTION_CONTINUE_EXECUTION.
 fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> bool {
@@ -2322,102 +2448,6 @@ fn call_handlers(table: &[(usize, usize)], pointers: &mut ExceptionPointers) -> 
         }
     }
     false
-}
-
-// Memory routines (ntdll exports them; the compiler also calls them).
-// `rep` string instructions, so they cannot compile back into calls.
-
-/// memcpy(dst, src, n) -> dst
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn memcpy(_dst: *mut u8, _src: *const u8, _n: usize) -> *mut u8 {
-    core::arch::naked_asm!(
-        "mov rax, rcx",
-        "mov r9, rdi",
-        "mov r10, rsi",
-        "mov rdi, rcx",
-        "mov rsi, rdx",
-        "mov rcx, r8",
-        "rep movsb",
-        "mov rdi, r9",
-        "mov rsi, r10",
-        "ret",
-    )
-}
-
-/// memmove(dst, src, n) -> dst (overlap-safe)
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn memmove(_dst: *mut u8, _src: *const u8, _n: usize) -> *mut u8 {
-    core::arch::naked_asm!(
-        "mov rax, rcx",
-        "mov r9, rdi",
-        "mov r10, rsi",
-        "mov rdi, rcx",
-        "mov rsi, rdx",
-        "mov rcx, r8",
-        "cmp rdi, rsi",
-        "jbe 2f",
-        // Destination above source: copy backwards.
-        "lea rsi, [rsi + rcx - 1]",
-        "lea rdi, [rdi + rcx - 1]",
-        "std",
-        "rep movsb",
-        "cld",
-        "jmp 3f",
-        "2:",
-        "rep movsb",
-        "3:",
-        "mov rdi, r9",
-        "mov rsi, r10",
-        "ret",
-    )
-}
-
-/// memset(dst, value, n) -> dst
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn memset(_dst: *mut u8, _value: i32, _n: usize) -> *mut u8 {
-    core::arch::naked_asm!(
-        "mov r9, rdi",
-        "mov r10, rcx",
-        "mov rdi, rcx",
-        "mov eax, edx",
-        "mov rcx, r8",
-        "rep stosb",
-        "mov rdi, r9",
-        "mov rax, r10",
-        "ret",
-    )
-}
-
-/// __chkstk: the stack probe compilers call before allocating more than a
-/// page of stack (rax = bytes). Touches each page from the caller's stack
-/// pointer down, so guard pages grow the stack in order; changes no
-/// register (the caller then subtracts rax from rsp). Exported by ntdll,
-/// as on Windows.
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-pub extern "C" fn __chkstk() {
-    core::arch::naked_asm!(
-        "push rcx",
-        "push rax",
-        "lea rcx, [rsp + 24]", // the caller's rsp (after our return)
-        "cmp rax, 0x1000",
-        "jb 2f",
-        "1:",
-        "sub rcx, 0x1000",
-        "test byte ptr [rcx], 0",
-        "sub rax, 0x1000",
-        "cmp rax, 0x1000",
-        "ja 1b",
-        "2:",
-        "sub rcx, rax",
-        "test byte ptr [rcx], 0",
-        "pop rax",
-        "pop rcx",
-        "ret",
-    )
 }
 
 /// strlen (exported by ntdll, as on Windows; gala's DLLs import it).
@@ -2536,6 +2566,71 @@ pub extern "system" fn LdrUnloadDll(module: usize) -> u32 {
     with_loader_lock(|| ldr_unload_dll(module))
 }
 
+/// LdrAddDllDirectory(*Directory, *Cookie) (kernel32's AddDllDirectory):
+/// a directory searched with LOAD_LIBRARY_SEARCH_USER_DIRS or
+/// _DEFAULT_DIRS, for the DLL and its dependencies. A full path (a drive
+/// and a separator) only; STATUS_INVALID_PARAMETER otherwise,
+/// STATUS_NO_MEMORY when all slots are taken.
+///
+/// # Safety
+/// `dir` must point at a valid UNICODE_STRING and `cookie` be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn LdrAddDllDirectory(
+    dir: *const UnicodeString,
+    cookie: *mut usize,
+) -> u32 {
+    const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
+    if dir.is_null() || cookie.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's UNICODE_STRING.
+    let text = unsafe {
+        let us = &*dir;
+        if us.buffer.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        core::slice::from_raw_parts(us.buffer, usize::from(us.length) / 2)
+    };
+    let sep = |c: u16| c == u16::from(b'\\') || c == u16::from(b'/');
+    if text.len() < 3 || text[1] != u16::from(b':') || !sep(text[2]) || text.len() + 1 > MAX_PATH {
+        return STATUS_INVALID_PARAMETER;
+    }
+    with_loader_lock(|| {
+        // SAFETY: under the loader lock.
+        let list = unsafe { &mut *USER_DIR_LIST.0.get() };
+        let Some(slot) = list.iter().position(|(_, len)| *len == 0) else {
+            return STATUS_NO_MEMORY;
+        };
+        let (buf, len) = &mut list[slot];
+        buf[..text.len()].copy_from_slice(text);
+        *len = text.len();
+        if !sep(buf[*len - 1]) {
+            buf[*len] = u16::from(b'\\');
+            *len += 1;
+        }
+        // SAFETY: the caller's cookie.
+        unsafe { cookie.write(slot + 1) };
+        STATUS_SUCCESS
+    })
+}
+
+/// LdrRemoveDllDirectory(Cookie) (RemoveDllDirectory): takes the directory
+/// out of the search; STATUS_INVALID_PARAMETER for an unknown cookie.
+#[unsafe(no_mangle)]
+pub extern "system" fn LdrRemoveDllDirectory(cookie: usize) -> u32 {
+    with_loader_lock(|| {
+        // SAFETY: under the loader lock.
+        let list = unsafe { &mut *USER_DIR_LIST.0.get() };
+        match cookie.checked_sub(1).and_then(|i| list.get_mut(i)) {
+            Some((_, len)) if *len != 0 => {
+                *len = 0;
+                STATUS_SUCCESS
+            }
+            _ => 0xc000_000d,
+        }
+    })
+}
+
 /// LdrSetDllDirectory(*Directory): the directory searched for DLLs after
 /// the executable's (kernel32's SetDllDirectoryW); null or empty: none.
 ///
@@ -2620,16 +2715,7 @@ pub unsafe extern "system" fn LdrGetDllDirectory(dir: *mut UnicodeString) -> u32
 /// MaximumLength bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn LdrGetDllFullName(module: usize, name: *mut UnicodeString) -> u32 {
-    let base = if module == 0 {
-        // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress is at +0x10.
-        unsafe {
-            let peb: usize;
-            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-            rd64(peb + 0x10) as usize
-        }
-    } else {
-        module
-    };
+    let base = if module == 0 { image_base() } else { module };
     with_loader_lock(|| {
         let found = with_modules(|m| {
             m.iter().find(|m| m.base == base && base != 0).map(|m| (m.path, m.path_len))

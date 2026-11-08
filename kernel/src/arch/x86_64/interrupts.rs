@@ -19,35 +19,171 @@ pub const FIRST_EXTERNAL_VECTOR: u8 = 32;
 #[repr(C)]
 #[derive(Debug)]
 pub struct TrapFrame {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rbp: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rdx: u64,
-    pub rcx: u64,
-    pub rbx: u64,
-    pub rax: u64,
-    pub vector: u64,
+    pub(in crate::arch) r15: u64,
+    pub(in crate::arch) r14: u64,
+    pub(in crate::arch) r13: u64,
+    pub(in crate::arch) r12: u64,
+    pub(in crate::arch) r11: u64,
+    pub(in crate::arch) r10: u64,
+    pub(in crate::arch) r9: u64,
+    pub(in crate::arch) r8: u64,
+    pub(in crate::arch) rbp: u64,
+    pub(in crate::arch) rdi: u64,
+    pub(in crate::arch) rsi: u64,
+    pub(in crate::arch) rdx: u64,
+    pub(in crate::arch) rcx: u64,
+    pub(in crate::arch) rbx: u64,
+    pub(in crate::arch) rax: u64,
+    pub(in crate::arch) vector: u64,
     /// CPU-pushed error code, or 0 for vectors without one.
-    pub error_code: u64,
+    pub(in crate::arch) error_code: u64,
     // Hardware interrupt frame.
-    pub rip: u64,
-    pub cs: u64,
-    pub rflags: u64,
-    pub rsp: u64,
-    pub ss: u64,
+    pub(in crate::arch) rip: u64,
+    pub(in crate::arch) cs: u64,
+    pub(in crate::arch) rflags: u64,
+    pub(in crate::arch) rsp: u64,
+    pub(in crate::arch) ss: u64,
 }
 
+pub use crate::arch::trap::{CpuMode, Fault, FaultAccess, TrapKind};
+
 impl TrapFrame {
+    /// x86-64: the frame of a trap from 64- or 32-bit user code with the
+    /// registers `regs` (gala-um's faults).
+    pub fn from_user(
+        regs: &super::syscall::UserRegs,
+        vector: u64,
+        error_code: u64,
+        cs: u64,
+        ss: u64,
+    ) -> TrapFrame {
+        use super::syscall::Gpr::*;
+        let g = |r| regs.gpr(r);
+        TrapFrame {
+            r15: g(R15),
+            r14: g(R14),
+            r13: g(R13),
+            r12: g(R12),
+            r11: g(R11),
+            r10: g(R10),
+            r9: g(R9),
+            r8: g(R8),
+            rbp: g(Rbp),
+            rdi: g(Rdi),
+            rsi: g(Rsi),
+            rdx: g(Rdx),
+            rcx: g(Rcx),
+            rbx: g(Rbx),
+            rax: g(Rax),
+            vector,
+            error_code,
+            rip: regs.ip(),
+            cs,
+            rflags: regs.flags(),
+            rsp: regs.sp(),
+            ss,
+        }
+    }
+
     pub fn from_user_mode(&self) -> bool {
         self.cs & 3 != 0
+    }
+
+    /// The interrupted code's mode.
+    pub fn mode(&self) -> CpuMode {
+        if !self.from_user_mode() {
+            CpuMode::Kernel
+        } else if self.cs == u64::from(gdt::USER32_CS) {
+            CpuMode::User32
+        } else {
+            CpuMode::User
+        }
+    }
+
+    /// The interrupted instruction pointer (for a trap, the instruction
+    /// after the trapping one; for a fault, the faulting one).
+    pub fn ip(&self) -> u64 {
+        self.rip
+    }
+
+    pub fn set_ip(&mut self, ip: u64) {
+        self.rip = ip;
+    }
+
+    /// The interrupted stack pointer.
+    pub fn sp(&self) -> u64 {
+        self.rsp
+    }
+
+    pub fn set_sp(&mut self, sp: u64) {
+        self.rsp = sp;
+    }
+
+    /// The interrupted flags.
+    pub fn flags(&self) -> u64 {
+        self.rflags
+    }
+
+    /// The interrupted code's registers.
+    pub fn user_regs(&self) -> super::syscall::UserRegs {
+        super::syscall::trap_regs(self)
+    }
+
+    /// The trap's number (the vector) and its error code (0 when it has
+    /// none), as fault events and logs show them.
+    pub fn vector(&self) -> u8 {
+        self.vector as u8
+    }
+
+    pub fn error_code(&self) -> u64 {
+        self.error_code
+    }
+
+    /// What the trap was.
+    pub fn kind(&self) -> TrapKind {
+        match self.vector as u8 {
+            0 => TrapKind::DivideError,
+            VECTOR_BREAKPOINT => TrapKind::Breakpoint,
+            6 => TrapKind::InvalidOpcode,
+            13 => TrapKind::Protection,
+            VECTOR_PAGE_FAULT => TrapKind::PageFault,
+            _ => TrapKind::Other,
+        }
+    }
+
+    /// The address of the breakpoint instruction of a breakpoint trap
+    /// (int3 leaves rip after its one byte).
+    pub fn breakpoint_address(&self) -> u64 {
+        self.rip.wrapping_sub(1)
+    }
+
+    /// A page fault's access (the error code's bits: 1 write, 4
+    /// instruction fetch); None for other traps.
+    pub fn page_fault_access(&self) -> Option<FaultAccess> {
+        (self.vector as u8 == VECTOR_PAGE_FAULT).then(|| self.access())
+    }
+
+    /// The access the error code describes, read as a page fault's.
+    pub fn access(&self) -> FaultAccess {
+        match self.error_code {
+            e if e & (1 << 4) != 0 => FaultAccess::Execute,
+            e if e & (1 << 1) != 0 => FaultAccess::Write,
+            _ => FaultAccess::Read,
+        }
+    }
+
+    /// x86-64: the code and stack segment selectors.
+    pub fn segments(&self) -> (u64, u64) {
+        (self.cs, self.ss)
+    }
+
+    pub fn set_segments(&mut self, cs: u64, ss: u64) {
+        (self.cs, self.ss) = (cs, ss);
+    }
+
+    /// The frame pointer and stack pointer a kernel backtrace starts from.
+    pub(in crate::arch) fn frame_pointers(&self) -> (u64, u64) {
+        (self.rbp, self.rsp)
     }
 }
 
@@ -324,7 +460,8 @@ fn nmi(frame: &TrapFrame) {
 /// Runs the user-return hook on an interrupt frame from user mode.
 fn user_return(frame: &mut TrapFrame) {
     let mut regs = super::syscall::trap_regs(frame);
-    if super::syscall::run_user_return_hook(&mut regs) {
+    let compat = frame.cs == u64::from(super::gdt::USER32_CS);
+    if super::syscall::run_user_return_hook(&mut regs, compat) {
         super::syscall::set_trap_regs(frame, &regs);
     }
 }
@@ -402,28 +539,6 @@ impl fmt::Display for ExceptionReport<'_> {
             fr.r9, fr.r10, fr.r11, fr.r12
         )?;
         write!(f, "  r13={:#018x} r14={:#018x} r15={:#018x}", fr.r13, fr.r14, fr.r15)
-    }
-}
-
-/// Faults that can be provoked on purpose to test the exception path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fault {
-    InvalidOpcode,
-    PageFault,
-    /// Overflow a kernel stack into its guard page (handled as #DF on IST1).
-    StackOverflow,
-}
-
-impl Fault {
-    pub const ALL: [Fault; 3] = [Fault::InvalidOpcode, Fault::PageFault, Fault::StackOverflow];
-
-    pub fn from_name(name: &str) -> Option<Fault> {
-        match name {
-            "ud" => Some(Fault::InvalidOpcode),
-            "pagefault" => Some(Fault::PageFault),
-            "stackoverflow" => Some(Fault::StackOverflow),
-            _ => None,
-        }
     }
 }
 

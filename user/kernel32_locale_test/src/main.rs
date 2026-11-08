@@ -2,8 +2,10 @@
 //! them, with the results real Windows gives for the en-US locale in the
 //! UTC time zone (documented contracts and the en-US locale data):
 //!
-//! - GetUserDefaultLCID/GetUserDefaultUILanguage/GetSystemDefaultLCID:
-//!   0x409; IsValidLocale; EnumSystemLocalesW lists "00000409".
+//! - GetUserDefaultLCID/GetUserDefaultUILanguage: 0x409;
+//!   GetSystemDefaultLCID: the machine's, installed and the LCID of
+//!   GetSystemDefaultLocaleName (gala: 0x409); IsValidLocale;
+//!   EnumSystemLocalesW lists "00000409".
 //! - GetLocaleInfoW/A: decimal and thousands separators, ISO language and
 //!   country names, the OEM code page; counts include the NUL; a size
 //!   query; ERROR_INSUFFICIENT_BUFFER; LOCALE_RETURN_NUMBER.
@@ -19,7 +21,8 @@
 //! - Get{User,System}PreferredUILanguages: en-US, by name or id.
 //! - GetCPInfoExW of CP_ACP (the ANSI code page and its name).
 //! - The en-US Gregorian calendar: GetCalendarInfoEx (names, formats, the
-//!   two-digit year window 2049, the era), EnumCalendarInfoExEx;
+//!   two-digit year window 2049, the era), EnumCalendarInfoExEx and
+//!   EnumCalendarInfoW (by LCID: the era, as Delphi reads it);
 //!   EnumTimeFormatsEx (with and without seconds), EnumDateFormatsExEx.
 //! - FindNLSStringEx: starts with, ends with, first and last occurrence.
 //! - GetNLSVersionEx: a version for COMPARE_STRING; ERROR_INSUFFICIENT_BUFFER
@@ -42,6 +45,9 @@ type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
+    fn GetSystemDefaultLocaleName(buf: *mut u16, size: i32) -> i32;
     fn IdnToAscii(flags: u32, unicode: *const u16, n: i32, ascii: *mut u16, size: i32) -> i32;
     fn GetNLSVersionEx(function: u32, locale: *const u16, info: *mut u32) -> i32;
     fn GetUserPreferredUILanguages(
@@ -65,6 +71,12 @@ unsafe extern "system" {
         len: i32,
         value: *mut u32,
     ) -> i32;
+    fn EnumCalendarInfoW(
+        callback: extern "system" fn(*const u16) -> Bool,
+        lcid: u32,
+        calendar: u32,
+        kind: u32,
+    ) -> Bool;
     fn EnumCalendarInfoExEx(
         callback: extern "system" fn(*const u16, u32, *const u16, isize) -> Bool,
         locale: *const u16,
@@ -156,6 +168,7 @@ unsafe extern "system" {
     ) -> Bool;
     fn GetUserGeoID(class: u32) -> i32;
     fn LCIDToLocaleName(lcid: u32, buf: *mut u16, n: i32, flags: u32) -> i32;
+    fn GetSystemDefaultUILanguage() -> u16;
     fn LocaleNameToLCID(name: *const u16, flags: u32) -> u32;
     fn IsValidLocaleName(name: *const u16) -> Bool;
     fn EnumSystemLocalesEx(
@@ -197,6 +210,7 @@ const LOCALE_SISO639LANGNAME: u32 = 0x59;
 const LOCALE_SISO3166CTRYNAME: u32 = 0x5a;
 const LOCALE_RETURN_NUMBER: u32 = 0x2000_0000;
 const LOCALE_USER_DEFAULT: u32 = 0x400;
+const LCID_INSTALLED: u32 = 1;
 const LCID_SUPPORTED: u32 = 2;
 const LCMAP_LOWERCASE: u32 = 0x100;
 const LCMAP_UPPERCASE: u32 = 0x200;
@@ -236,6 +250,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -245,15 +260,18 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
     /// `got` holds `want` followed by a NUL.
+    #[track_caller]
     fn text(&mut self, got: &[u16], want: &str) -> Result<(), u32> {
         let n = want.len();
         let same = got.len() > n
@@ -295,11 +313,31 @@ extern "system" fn on_locale(name: *const u16) -> Bool {
     1
 }
 
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
+}
+
 fn locales(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain kernel32 calls with buffers of ours.
     unsafe {
         c.eq(GetUserDefaultLCID().into(), 0x409)?;
-        c.eq(GetSystemDefaultLCID().into(), 0x409)?;
+        // The system locale ("language for non-Unicode programs") is the
+        // machine's (25H2 measured 0x401, ar-SA, with an en-US user):
+        // installed, and the same as its name's; gala's is en-US.
+        let system = GetSystemDefaultLCID();
+        c.ok(IsValidLocale(system, LCID_INSTALLED) != 0, system.into())?;
+        let mut name = [0u16; 85];
+        c.ok(GetSystemDefaultLocaleName(name.as_mut_ptr(), 85) > 1, GetLastError().into())?;
+        c.eq(LocaleNameToLCID(name.as_ptr(), 0).into(), system.into())?;
+        if on_gala() {
+            c.eq(system.into(), 0x409)?;
+        }
         c.eq(GetUserDefaultUILanguage().into(), 0x409)?;
         c.ok(IsValidLocale(0x409, LCID_SUPPORTED) != 0, 0)?;
         c.eq(IsValidLocale(0x0012_3456, LCID_SUPPORTED) as u64, 0)?;
@@ -336,6 +374,25 @@ fn locales(c: &mut Checks) -> Result<(), u32> {
         c.text(&buf, "US")?;
         c.eq(GetLocaleInfoW(0x409, LOCALE_IDEFAULTCODEPAGE, buf.as_mut_ptr(), 16) as u64, 4)?;
         c.text(&buf, "437")?;
+        // What Delphi's run-time library reads as it starts (the LCTYPE
+        // values are winnls.h's): the short time, the AM/PM position, the
+        // calendar, the first day of the week and of the year.
+        for (kind, text) in [
+            (0x79, "h:mm tt"),     // LOCALE_SSHORTTIME
+            (0x1005, "0"),         // LOCALE_ITIMEMARKPOSN
+            (0x1006, "MMMM yyyy"), // LOCALE_SYEARMONTH
+            (0x1009, "1"),         // LOCALE_ICALENDARTYPE
+            (0x100c, "6"),         // LOCALE_IFIRSTDAYOFWEEK
+            (0x100d, "0"),         // LOCALE_IFIRSTWEEKOFYEAR
+            (0x1012, "037"),       // LOCALE_IDEFAULTEBCDICCODEPAGE
+        ] {
+            buf = [0xffff; 16];
+            let n = GetLocaleInfoW(0x409, kind, buf.as_mut_ptr(), 16) as usize;
+            let same = n == text.len() + 1
+                && buf[..text.len()].iter().zip(text.bytes()).all(|(&a, b)| a == u16::from(b))
+                && buf[text.len()] == 0;
+            c.ok(same, kind.into())?; // the failing LCTYPE
+        }
         // A size query, then a buffer too small.
         c.eq(GetLocaleInfoW(0x409, LOCALE_SISO639LANGNAME, core::ptr::null_mut(), 0) as u64, 3)?;
         SetLastError(0);
@@ -496,7 +553,8 @@ fn times(c: &mut Checks) -> Result<(), u32> {
 }
 
 /// The preferred UI languages: one, en-US, as a double-NUL-terminated
-/// list of names (MUI_LANGUAGE_NAME) or hexadecimal ids (MUI_LANGUAGE_ID).
+/// list of names (MUI_LANGUAGE_NAME) or hexadecimal ids (MUI_LANGUAGE_ID);
+/// the system's list starts with its default UI language.
 fn ui_languages(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain calls with buffers of ours.
     unsafe {
@@ -518,7 +576,14 @@ fn ui_languages(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetLastError().into(), 122)?; // ERROR_INSUFFICIENT_BUFFER
         let mut len = 16u32;
         c.ok(GetSystemPreferredUILanguages(0x8, &mut count, buf.as_mut_ptr(), &mut len) != 0, 0)?;
-        c.text(&buf, "en-US")?;
+        // The system's first preferred UI language is its default UI
+        // language (machine-dependent: not en-US on every Windows; en-US
+        // under gala).
+        let mut system = [0u16; 86];
+        let n = LCIDToLocaleName(GetSystemDefaultUILanguage().into(), system.as_mut_ptr(), 86, 0);
+        c.ok(n > 1, n as u64)?;
+        let n = n as usize; // with its NUL
+        c.ok(buf.len() >= n && buf[..n] == system[..n], buf[0].into())?;
     }
     Ok(())
 }
@@ -571,6 +636,10 @@ extern "system" fn on_calendar_info(
     }
     CAL_ID.store(calendar, Ordering::SeqCst);
     1
+}
+
+extern "system" fn on_calendar_text(text: *const u16) -> Bool {
+    on_calendar_info(text, 1, core::ptr::null(), 0)
 }
 
 /// The Gregorian calendar of en-US (calendar 1): its name, two-digit year
@@ -677,6 +746,14 @@ fn calendars(c: &mut Checks) -> Result<(), u32> {
         c.ok(CAL_SEEN.load(Ordering::SeqCst) >= 2, CAL_SEEN.load(Ordering::SeqCst).into())?;
         c.eq(CAL_FIRST.load(Ordering::SeqCst).into(), u64::from(b'M'))?; // "M/d/yyyy" first
         c.eq(CAL_ID.load(Ordering::SeqCst).into(), 1)?;
+        // By LCID: en-US's era (CAL_SERASTRING, "A.D."), as Delphi's
+        // run-time library reads it; an unknown LCID is refused.
+        CAL_SEEN.store(0, Ordering::SeqCst);
+        c.ok(EnumCalendarInfoW(on_calendar_text, 0x409, 1, 0x4) != 0, 0)?;
+        c.eq(CAL_SEEN.load(Ordering::SeqCst).into(), 1)?;
+        c.eq(CAL_FIRST.load(Ordering::SeqCst).into(), u64::from(b'A'))?;
+        c.ok(EnumCalendarInfoW(on_calendar_text, 0x12345, 1, 0x4) == 0, 0)?;
+        c.eq(GetLastError().into(), 87)?;
 
         // Time formats ("h:mm:ss tt" first), without seconds ("h:mm tt").
         FORMATS.store(0, Ordering::SeqCst);
@@ -846,4 +923,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

@@ -13,9 +13,13 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod feed;
+mod lint;
 mod lx_expect;
+mod stub_audit;
 mod telemetry;
 mod vmtime;
+mod wpt;
 // The manifest's format and SHA-256 are the kernel's own code (one
 // definition for the writer and the reader).
 #[path = "../../kernel/src/trust/manifest.rs"]
@@ -96,6 +100,39 @@ const PREBUILT: &[Prebuilt] = &[
     },
     // PowerShell 7.4 (a self-contained .NET 8 application); the SHA-256 is
     // the one in the release's hashes.sha256.
+    // CPython 3.13.1's embeddable package for x64 (python.org; the
+    // SHA-256 is python.org's published one): python.exe, python313.dll,
+    // the standard library as python313.zip and its extension modules.
+    // The UCRT it needs is the JDK's (gala has none of its own).
+    Prebuilt {
+        name: "python",
+        url: "https://www.python.org/ftp/python/3.13.1/python-3.13.1-embed-amd64.zip",
+        checksum: "7b7923ff0183a8b8fca90f6047184b419b108cb437f75fc1c002f9d2f8bcec16",
+        members: &[],
+        excludes: &[],
+    },
+    // CPython 3.13.1's full layout for x64: NuGet's `python` package
+    // (the one python.org publishes for build machines; SHA-256 measured,
+    // nuget.org verifies its packages by signature): the standard library
+    // as files with pip 24.3.1 in site-packages, distlib's script
+    // launchers and venv's launcher, which the embeddable one lacks.
+    Prebuilt {
+        name: "python-full",
+        url: "https://api.nuget.org/v3-flatcontainer/python/3.13.1/python.3.13.1.nupkg",
+        checksum: "eba9c88a4b0bed9a1b48a18910f10db066eebf27b58443f329775d15984ac2df",
+        members: &["tools/*"],
+        excludes: &[],
+    },
+    // numpy 2.2.1's wheel for CPython 3.13 on x64 (PyPI; the SHA-256 is
+    // PyPI's published digest): extension modules with OpenBLAS and
+    // msvcp140 bundled in numpy.libs. pip installs it in the guest.
+    Prebuilt {
+        name: "numpy",
+        url: "https://files.pythonhosted.org/packages/44/be/0e5cd009d2162e4138d79a5afb3b5d2341f0fe4777ab6e675aa3d4a42e21/numpy-2.2.1-cp313-cp313-win_amd64.whl",
+        checksum: "164a829b6aacf79ca47ba4814b130c4020b202522a93d7bff2202bfb33b61c60",
+        members: &["numpy-2.2.1-cp313-cp313-win_amd64.whl"],
+        excludes: &[],
+    },
     Prebuilt {
         name: "pwsh",
         url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.zip",
@@ -206,16 +243,17 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["bin", "cmd", "etc", "usr/bin", "mingw64/bin", "mingw64/libexec/git-core"],
         excludes: &[],
     },
-    // FileZilla Client 3.69.3 for 64-bit Windows: the official build, from
-    // the project's SourceForge files (its own site serves downloads only
-    // through JavaScript). An NSIS installer: 7-Zip reads it without running
-    // it. SHA-256 measured (SourceForge publishes the MD5
-    // e334f2446615c7ee295c27039d372165, which matches). The programs, their
-    // DLLs and resources; not the NSIS plugins, translations or docs.
+    // FileZilla Client 3.71.0 for 64-bit Windows: the official installer,
+    // as Chocolatey's package carries it (the project's site hands out
+    // download links only to browsers, and SourceForge drops old releases).
+    // The package's SHA-256 is measured; it carries the 32-bit and the
+    // 64-bit installer, and the unpack takes the 64-bit one. An NSIS
+    // installer, read by 7-Zip: the program, its DLLs and resources; not
+    // the NSIS plugins, translations or docs.
     Prebuilt {
         name: "filezilla",
-        url: "https://downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe",
-        checksum: "e87b878746e62c7d16ff04723199ec0ecbbea6680a814c4508b18b8b41ddcdad",
+        url: "https://packages.chocolatey.org/filezilla.3.71.0.nupkg",
+        checksum: "fa234cea2f88d73062de1b5b0cac509a295ea63ee13f5a8618839a5552a51780",
         members: &["*.exe", "*.dll", "resources"],
         excludes: &["$PLUGINSDIR", "uninstall.exe"],
     },
@@ -343,6 +381,15 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // BR's conformance report: ChromeDriver from the same snapshot (the
+    // Win_x64 build's chromedriver_win32.zip holds the x64 driver).
+    Prebuilt {
+        name: "chromedriver",
+        url: "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/1733063/chromedriver_win32.zip",
+        checksum: "34e5c461af9fadaabf5582b5f3c227b354e64667fdc7c1b03787114a24f015e2",
+        members: &["chromedriver_win32/chromedriver.exe"],
+        excludes: &[],
+    },
     // busybox 1.35.0 for Linux, static (musl), as busybox.net publishes
     // it (a single ELF file, not an archive: the file is the download;
     // no published checksum, the SHA-256 pinned at the first fetch). The
@@ -355,11 +402,39 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["busybox"],
         excludes: &[],
     },
+    // Inno Setup 7.1.1's own installer, x64 edition (jrsoftware.org's
+    // GitHub release; the SHA-256 is winget-pkgs' JRSoftware.InnoSetup.7
+    // 7.1.1 manifest's): an Inno Setup installer built with
+    // SetupArchitecture=x64 (Inno Setup 7), so x64 Setup and uninstaller
+    // gala can run without WOW64. Not unpacked: `gala install` runs it
+    // (ROADMAP PK stage 3, scenario pk_install_inno); inside gala only.
+    Prebuilt {
+        name: "innosetup",
+        url: "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe",
+        checksum: "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0",
+        members: &["innosetup-7.1.1-x64.exe"],
+        excludes: &[],
+    },
+    // Inno Setup 6.5.4's own installer, an x86 Inno Setup installer
+    // (jrsoftware.org's GitHub release; the SHA-256 is winget-pkgs'
+    // JRSoftware.InnoSetup 6.5.4 manifest's, whose only installer is x86):
+    // a 32-bit Setup and uninstaller under WOW64 (ROADMAP WOW stage 4,
+    // scenario wow64_inno). Not unpacked; inside gala only.
+    Prebuilt {
+        name: "innosetup6",
+        url: "https://github.com/jrsoftware/issrc/releases/download/is-6_5_4/innosetup-6.5.4.exe",
+        checksum: "fa73bf47a4da250d185d07561c2bfda387e5e20db77e4570004cf6a133cc10b1",
+        members: &["innosetup-6.5.4.exe"],
+        excludes: &[],
+    },
 ];
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
+/// 32-bit (x86) test programs, run through WOW64 (ARCHITECTURE "Plan:
+/// WOW64"): USER_PROGRAMS_X86.
+const USER_TARGET_X86: &str = "i686-pc-windows-msvc";
 /// A test DLL: its package, the file it builds, and its name in user/bin.
 struct Dll {
     package: &'static str,
@@ -433,6 +508,9 @@ const USER_DLLS: &[Dll] = &[
     },
     Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr.dll" },
     Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg32.dll" },
+    // winspool.drv: no print spooler, no printers (Delphi's VCL imports it:
+    // Inno Setup's Setup, PK).
+    Dll { package: "winspool", file: "winspool.drv", exported_as: "testwinspool.drv" },
     // DWrite.dll: chrome.dll imports it (BR).
     Dll { package: "dwrite", file: "dwrite.dll", exported_as: "testdwrite.dll" },
     // shcore.dll: the DPI scaling API set (BR).
@@ -441,6 +519,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi.dll" },
     Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
     Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
+    // msctf.dll: the input scope functions (Delphi's VCL; Inno Setup).
+    Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf.dll" },
     // The GPU stubs (ROADMAP GPU G0): no Direct3D adapter yet.
     Dll { package: "dxgi", file: "dxgi.dll", exported_as: "testdxgi.dll" },
     Dll { package: "d3d11", file: "d3d11.dll", exported_as: "testd3d11.dll" },
@@ -468,10 +548,91 @@ const USER_DLLS: &[Dll] = &[
     // security.dll: forwarders to secur32 (SSPI's older name).
     Dll { package: "security", file: "security.dll", exported_as: "testsecurity.dll" },
     Dll { package: "resutils", file: "resutils.dll", exported_as: "testresutils.dll" },
+    // gala's wow64.dll: the 64-bit side of every 32-bit process (WOW64's
+    // system call thunks, its thread start; ARCHITECTURE "Plan: WOW64").
+    Dll { package: "wow64", file: "wow64.dll", exported_as: "testwow64.dll" },
     // Built as ntdll.dll (its export directory says so); exported under
     // another name so user/bin never holds a file called ntdll.dll.
     Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll.dll" },
 ];
+
+/// gala's 32-bit (x86) DLLs, built for USER_TARGET_X86 and shipped with
+/// an `x86/` prefix in EXTRA_MODULES (`("<scenario>", "x86/ntdll.dll",
+/// "Windows/SysWOW64")`): the 32-bit ntdll goes in SysWOW64, as on 64-bit
+/// Windows (ARCHITECTURE "Plan: WOW64"). Exported to user/bin under their
+/// own names (`testntdll32.dll`).
+const USER_DLLS_X86: &[Dll] = &[
+    // The 32-bit ntdll: testntdll built for i686.
+    Dll { package: "testntdll", file: "ntdll.dll", exported_as: "testntdll32.dll" },
+    // A 32-bit test DLL (wow64_import_test).
+    Dll { package: "testdll32", file: "testdll32.dll", exported_as: "testdll32.dll" },
+    // The 32-bit kernel32: gala's kernel32 built for i686, and the
+    // kernelbase beside it (the core API sets' host).
+    Dll { package: "kernel32", file: "kernel32.dll", exported_as: "testkernel32_32.dll" },
+    Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase32.dll" },
+    // The 32-bit msvcrt: gala's msvcrt built for i686.
+    Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
+    // The 32-bit user32 and gdi32 (WOW64 stage 4; user32 loads gdi32).
+    Dll { package: "user32", file: "user32.dll", exported_as: "testuser32_32.dll" },
+    Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32_32.dll" },
+    // The 32-bit advapi32 and the bcryptprimitives it imports.
+    Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32_32.dll" },
+    Dll {
+        package: "bcryptprimitives",
+        file: "bcryptprimitives.dll",
+        exported_as: "testbcryptprimitives32.dll",
+    },
+    // What an x86 Inno Setup installer (Delphi's VCL) loads (WOW64 stage 4).
+    Dll { package: "comctl32", file: "comctl32.dll", exported_as: "testcomctl3232.dll" },
+    Dll { package: "oleaut32", file: "oleaut32.dll", exported_as: "testoleaut3232.dll" },
+    Dll { package: "ole32", file: "ole32.dll", exported_as: "testole3232.dll" },
+    Dll { package: "shell32", file: "shell32.dll", exported_as: "testshell3232.dll" },
+    Dll { package: "shlwapi", file: "shlwapi.dll", exported_as: "testshlwapi32.dll" },
+    Dll { package: "version", file: "version.dll", exported_as: "testversion32.dll" },
+    Dll { package: "mpr", file: "mpr.dll", exported_as: "testmpr32.dll" },
+    Dll { package: "comdlg32", file: "comdlg32.dll", exported_as: "testcomdlg3232.dll" },
+    Dll { package: "uxtheme", file: "uxtheme.dll", exported_as: "testuxtheme32.dll" },
+    Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm3232.dll" },
+    Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi32.dll" },
+    Dll { package: "msimg32", file: "msimg32.dll", exported_as: "testmsimg3232.dll" },
+    Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf32.dll" },
+    Dll { package: "winspool", file: "winspool.drv", exported_as: "testwinspool32.drv" },
+    Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi3232.dll" },
+    // winhttp (Inno Setup's downloads) and what it loads.
+    Dll { package: "winhttp", file: "winhttp.dll", exported_as: "testwinhttp32.dll" },
+    Dll { package: "ws2_32", file: "ws2_32.dll", exported_as: "testws2_32_32.dll" },
+    Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur3232.dll" },
+    Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder32.dll" },
+    Dll { package: "bcrypt", file: "bcrypt.dll", exported_as: "testbcrypt32.dll" },
+];
+
+/// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
+/// (its file name), else None.
+fn x86_dll(file: &str) -> Option<&'static Dll> {
+    let name = file.strip_prefix("x86/")?;
+    USER_DLLS_X86.iter().find(|d| d.file == name)
+}
+
+/// Where the build puts the USER_DLLS_X86 file `file`.
+fn built_dll_x86(file: &str) -> PathBuf {
+    let release = target_dir().join(USER_TARGET_X86).join("release");
+    match USER_DLLS_X86.iter().find(|d| d.file == file) {
+        // As built_dll: cargo names it `<package>.dll`.
+        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        _ => release.join(file),
+    }
+}
+
+/// Where the build puts the USER_DLLS file `file`: cargo names a cdylib
+/// `<package>.dll`, so a DLL Windows calls otherwise (winspool.drv) is
+/// built under its package's name and shipped under its own.
+fn built_dll(file: &str) -> PathBuf {
+    let release = target_dir().join(USER_TARGET).join("release");
+    match USER_DLLS.iter().find(|d| d.file == file) {
+        Some(d) if !d.file.ends_with(".dll") => release.join(format!("{}.dll", d.package)),
+        _ => release.join(file),
+    }
+}
 
 /// Directory trees shipped writable (`tarw:`): data a program changes, as
 /// an installer leaves it (SQL Server's databases).
@@ -572,6 +733,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("handover_k32_test", "ntdll.dll", "Windows/System32"),
     ("handover_k32_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "ntdll.dll", "Windows/System32"),
+    ("kernel32_py_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_locale_test", "ntdll.dll", "Windows/System32"),
     ("gui_test", "kernel/assets/wallpapers/dunes.qoi", "Windows/Web/Wallpaper"),
     ("gui_test", "kernel/assets/wallpapers/ribbons.qoi", "Windows/Web/Wallpaper"),
@@ -604,7 +766,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("console_window", "gdi32.dll", "Windows/System32"),
     ("rtl_test", "ntdll.dll", "Windows/System32"),
     ("rtl_test", "kernel32.dll", "Windows/System32"),
-    ("rtl_test", "kernelbase.dll", "Windows/System32"),
     ("disk_test", "ntdll.dll", "Windows/System32"),
     ("disk_test", "kernel32.dll", "Windows/System32"),
     ("disk_test", "advapi32.dll", "Windows/System32"),
@@ -649,9 +810,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("win32_misc_test", "secur32.dll", "Windows/System32"),
     ("win32_misc_test", "shell32.dll", "Windows/System32"),
     ("win32_misc_test", "shfolder.dll", "Windows/System32"),
+    ("win32_misc_test", "winspool.drv", "Windows/System32"),
+    ("win32_misc_test", "ole32.dll", "Windows/System32"),
+    ("win32_misc_test", "uxtheme.dll", "Windows/System32"),
     ("win32_misc_test", "version.dll", "Windows/System32"),
     ("win32_misc_test", "iphlpapi.dll", "Windows/System32"),
     ("win32_misc_test", "bcryptprimitives.dll", "Windows/System32"),
+    // Its 32-bit child (IsWow64Process2), created suspended.
+    ("win32_misc_test", "wow64.dll", "Windows/System32"),
     ("kernel32_pool_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_pool_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_pool_test", "winmm.dll", "Windows/System32"),
@@ -764,6 +930,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_system_test", "psapi.dll", "Windows/System32"),
     ("kernel32_locale_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_sync_test", "kernel32.dll", "Windows/System32"),
+    ("kernel32_py_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_thread_test", "kernel32.dll", "Windows/System32"),
     ("xstate_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_misc_test", "ntdll.dll", "Windows/System32"),
@@ -808,6 +975,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("commit_test", "kernel32.dll", "Windows/System32"),
     ("quota_test", "ntdll.dll", "Windows/System32"),
     ("quota_test", "kernel32.dll", "Windows/System32"),
+    ("quota_test", "ws2_32.dll", "Windows/System32"),
     ("gpu_stub_test", "ntdll.dll", "Windows/System32"),
     ("gpu_stub_test", "kernel32.dll", "Windows/System32"),
     ("gpu_stub_test", "dxgi.dll", "Windows/System32"),
@@ -920,6 +1088,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_poll_pie", "user/lx/bin/poll_test-pie", "lx"),
     ("lx_epoll", "user/lx/bin/epoll_test", "lx"),
     ("lx_epoll_pie", "user/lx/bin/epoll_test-pie", "lx"),
+    ("lx_fs", "user/lx/bin/fs_test", "lx"),
+    ("lx_fs_pie", "user/lx/bin/fs_test-pie", "lx"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -987,6 +1157,19 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shell32_test", "advapi32.dll", "Windows/System32"),
     ("shell32_test", "bcryptprimitives.dll", "Windows/System32"),
     ("shell32_test", "user/bin/shell32_test.exe", "gala"),
+    // comdlg32_test: what Inno Setup's IDE imports from comdlg32
+    // (user/comdlg32_test/main.c, mingw); PrintDlgW asks winspool for the
+    // default printer.
+    ("comdlg32_test", "ntdll.dll", "Windows/System32"),
+    ("comdlg32_test", "kernel32.dll", "Windows/System32"),
+    ("comdlg32_test", "msvcrt.dll", "Windows/System32"),
+    ("comdlg32_test", "comdlg32.dll", "Windows/System32"),
+    ("comdlg32_test", "user32.dll", "Windows/System32"),
+    ("comdlg32_test", "gdi32.dll", "Windows/System32"),
+    ("comdlg32_test", "winspool.drv", "Windows/System32"),
+    ("comdlg32_test", "advapi32.dll", "Windows/System32"),
+    ("comdlg32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("comdlg32_test", "user/bin/comdlg32_test.exe", "gala"),
     ("dbghelp_test", "ntdll.dll", "Windows/System32"),
     ("dbghelp_test", "kernel32.dll", "Windows/System32"),
     ("dbghelp_test", "msvcrt.dll", "Windows/System32"),
@@ -1004,6 +1187,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "ntdll.dll", "Windows/System32"),
     ("user32_test", "kernel32.dll", "Windows/System32"),
     ("user32_test", "msvcrt.dll", "Windows/System32"),
+    ("user32_test", "msctf.dll", "Windows/System32"),
     ("user32_test", "user32.dll", "Windows/System32"),
     ("user32_test", "gdi32.dll", "Windows/System32"),
     ("user32_test", "ole32.dll", "Windows/System32"),
@@ -1014,6 +1198,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("user32_test", "oleaut32.dll", "Windows/System32"),
     ("user32_test", "advapi32.dll", "Windows/System32"),
     ("user32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("user32_test", "imm32.dll", "Windows/System32"),
     ("user32_test", "user/bin/user32_test.exe", "gala"),
     ("windows_across_test", "ntdll.dll", "Windows/System32"),
     ("windows_across_test", "kernel32.dll", "Windows/System32"),
@@ -1038,6 +1223,41 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_nsis", "ole32.dll", "Windows/System32"),
     ("pk_install_nsis", "shell32.dll", "Windows/System32"),
     ("pk_install_nsis", "shfolder.dll", "Windows/System32"),
+    // pk_install_inno: a real Inno Setup installer (PREBUILT innosetup,
+    // in the snapshot's installers mirror under its URL's file name) and
+    // what its Setup and uninstaller load.
+    (
+        "pk_install_inno",
+        "target/prebuilt/innosetup/innosetup-7.1.1-x64.exe",
+        "pk_source/installers",
+    ),
+    ("pk_install_inno", "user32.dll", "Windows/System32"),
+    ("pk_install_inno", "gdi32.dll", "Windows/System32"),
+    ("pk_install_inno", "comctl32.dll", "Windows/System32"),
+    ("pk_install_inno", "ole32.dll", "Windows/System32"),
+    ("pk_install_inno", "oleaut32.dll", "Windows/System32"),
+    ("pk_install_inno", "shell32.dll", "Windows/System32"),
+    ("pk_install_inno", "bcrypt.dll", "Windows/System32"),
+    // What Setup (the program the installer unpacks to %TEMP% and runs)
+    // links: Delphi's VCL and Inno's own imports.
+    ("pk_install_inno", "mpr.dll", "Windows/System32"),
+    ("pk_install_inno", "shlwapi.dll", "Windows/System32"),
+    ("pk_install_inno", "winspool.drv", "Windows/System32"),
+    ("pk_install_inno", "comdlg32.dll", "Windows/System32"),
+    ("pk_install_inno", "version.dll", "Windows/System32"),
+    ("pk_install_inno", "wtsapi32.dll", "Windows/System32"),
+    ("pk_install_inno", "winhttp.dll", "Windows/System32"),
+    ("pk_install_inno", "secur32.dll", "Windows/System32"),
+    ("pk_install_inno", "ws2_32.dll", "Windows/System32"),
+    ("pk_install_inno", "uxtheme.dll", "Windows/System32"),
+    ("pk_install_inno", "imm32.dll", "Windows/System32"),
+    ("pk_install_inno", "dwmapi.dll", "Windows/System32"),
+    ("pk_install_inno", "crypt32.dll", "Windows/System32"),
+    ("pk_install_inno", "msimg32.dll", "Windows/System32"),
+    ("pk_install_inno", "msctf.dll", "Windows/System32"),
+    // The UCRT (ucrtbase.dll ships with Windows; gala has none of its own:
+    // Microsoft's redistributable copy from the JDK, as other scenarios).
+    ("pk_install_inno", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
     // pk_install_https: `gala install` downloads over winhttp from
     // schannel_test's Nginx (MODULE_SETS), which serves the package; the
     // machine root store holds the public CA bundle beside the test CA.
@@ -1334,7 +1554,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gitbash", "ws2_32.dll", "Windows/System32"),
     ("gitbash", "userenv.dll", "Windows/System32"),
     ("gitbash", "netapi32.dll", "Windows/System32"),
-    ("gitbash", "kernelbase.dll", "Windows/System32"),
     ("gitbash", "target/prebuilt/portablegit/bin/", "git/bin"),
     ("gitbash", "target/prebuilt/portablegit/etc/", "git/etc"),
     ("gitbash", "target/prebuilt/portablegit/usr/bin/", "git/usr/bin"),
@@ -1344,7 +1563,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("filezilla", "kernel/assets/wallpapers/night.qoi", "Windows/Web/Wallpaper"),
     ("filezilla", "ntdll.dll", "Windows/System32"),
     ("filezilla", "kernel32.dll", "Windows/System32"),
-    ("filezilla", "kernelbase.dll", "Windows/System32"),
     ("filezilla", "advapi32.dll", "Windows/System32"),
     ("filezilla", "bcrypt.dll", "Windows/System32"),
     ("filezilla", "bcryptprimitives.dll", "Windows/System32"),
@@ -1499,6 +1717,53 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "shell32.dll", "Windows/System32"),
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
+    // P1 step 6: the embeddable CPython (PREBUILT `python`) in C:\python,
+    // gala's DLLs it imports, the JDK's UCRT beside it.
+    ("python_hello", "target/prebuilt/python/", "python"),
+    ("python_hello", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_hello", "ntdll.dll", "Windows/System32"),
+    ("python_hello", "kernel32.dll", "Windows/System32"),
+    ("python_hello", "advapi32.dll", "Windows/System32"),
+    ("python_hello", "version.dll", "Windows/System32"),
+    ("python_hello", "ws2_32.dll", "Windows/System32"),
+    ("python_hello", "mswsock.dll", "Windows/System32"),
+    ("python_hello", "bcrypt.dll", "Windows/System32"),
+    ("python_hello", "bcryptprimitives.dll", "Windows/System32"),
+    ("python_hello", "iphlpapi.dll", "Windows/System32"),
+    ("python_hello", "rpcrt4.dll", "Windows/System32"),
+    ("python_hello", "user32.dll", "Windows/System32"),
+    ("python_hello", "msvcrt.dll", "Windows/System32"),
+    ("python_hello", "ole32.dll", "Windows/System32"),
+    ("python_hello", "oleaut32.dll", "Windows/System32"),
+    ("python_hello", "crypt32.dll", "Windows/System32"),
+    ("python_script", "user/python/python_test.py", "gala"),
+    ("python_async", "user/python/python_async.py", "gala"),
+    ("python_mp", "user/python/python_mp.py", "gala"),
+    // P1 step 6: pip and venv on the full CPython layout (PREBUILT
+    // `python-full`) in C:\python, as python_hello's.
+    ("python_pip", "target/prebuilt/python-full/tools/", "python"),
+    ("python_pip", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_pip", "ntdll.dll", "Windows/System32"),
+    ("python_pip", "kernel32.dll", "Windows/System32"),
+    ("python_pip", "advapi32.dll", "Windows/System32"),
+    ("python_pip", "version.dll", "Windows/System32"),
+    ("python_pip", "ws2_32.dll", "Windows/System32"),
+    ("python_pip", "mswsock.dll", "Windows/System32"),
+    ("python_pip", "bcrypt.dll", "Windows/System32"),
+    ("python_pip", "bcryptprimitives.dll", "Windows/System32"),
+    ("python_pip", "iphlpapi.dll", "Windows/System32"),
+    ("python_pip", "rpcrt4.dll", "Windows/System32"),
+    ("python_pip", "user32.dll", "Windows/System32"),
+    ("python_pip", "msvcrt.dll", "Windows/System32"),
+    ("python_pip", "ole32.dll", "Windows/System32"),
+    ("python_pip", "oleaut32.dll", "Windows/System32"),
+    ("python_pip", "crypt32.dll", "Windows/System32"),
+    ("python_pip", "shell32.dll", "Windows/System32"),
+    ("python_pip", "shlwapi.dll", "Windows/System32"),
+    ("python_pip", "user/python/python_pip.py", "gala"),
+    // P1 step 6: numpy (C extensions, OpenBLAS) on the full layout.
+    ("python_numpy", "user/python/python_numpy.py", "gala"),
+    ("python_numpy", "target/prebuilt/numpy/numpy-2.2.1-cp313-cp313-win_amd64.whl", "gala"),
     ("pwsh", "target/prebuilt/pwsh/", "pwsh"),
     ("pwsh", "ntdll.dll", "Windows/System32"),
     ("pwsh", "kernel32.dll", "Windows/System32"),
@@ -1599,9 +1864,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("chromium", "target/prebuilt/chromium/chrome-win/", "chromium"),
     ("chromium", "user/chromium/page.html", "gala"),
     ("chromium", "user/chromium/window.html", "gala"),
+    ("chromium", "user/chromium/window2.html", "gala"),
+    ("chromium_uia", "user/bin/uia_chromium_test.exe", "gala"),
+    (
+        "chromium_driver",
+        "target/prebuilt/chromedriver/chromedriver_win32/chromedriver.exe",
+        "chromium",
+    ),
     ("chromium", "ntdll.dll", "Windows/System32"),
     ("chromium", "kernel32.dll", "Windows/System32"),
-    ("chromium", "kernelbase.dll", "Windows/System32"),
     ("chromium", "advapi32.dll", "Windows/System32"),
     ("chromium", "bcrypt.dll", "Windows/System32"),
     ("chromium", "bcryptprimitives.dll", "Windows/System32"),
@@ -1952,6 +2223,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // The CA Nginx checks client certificates against (port 8447).
     ("schannel_test", "user/schannel_test/certs/ca.crt", "nginx/conf"),
     ("schannel_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    // Revocation: certificates naming the test CA's CRL (8448 revoked,
+    // 8449 not), the CRL in gala's CA store (crypt32 checks offline) and
+    // at its distribution point.
+    ("schannel_test", "user/schannel_test/certs/revoked.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/revoked.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/notrevoked.crt", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/notrevoked.key", "nginx/conf"),
+    ("schannel_test", "user/schannel_test/certs/ca.crl", "Windows/System32/gala/ca"),
+    ("schannel_test", "user/schannel_test/certs/ca.crl", "nginx/html"),
     ("schannel_test", "user/nginx/html/index.html", "nginx/html"),
     ("schannel_test", "user/nginx/logs/keep-logs.txt", "nginx/logs"),
     ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
@@ -1981,6 +2261,107 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("go_exit", "ntdll.dll", "Windows/System32"),
     ("go_exit", "kernel32.dll", "Windows/System32"),
     ("go_exit", "bcryptprimitives.dll", "Windows/System32"),
+    // WOW64: gala's 64-bit side of 32-bit processes.
+    ("wow64_test", "wow64.dll", "Windows/System32"),
+    ("wow64_crash", "wow64.dll", "Windows/System32"),
+    ("wow64_thread_test", "wow64.dll", "Windows/System32"),
+    // A 32-bit program with imports: the 32-bit ntdll's loader.
+    ("wow64_import_test", "wow64.dll", "Windows/System32"),
+    ("wow64_import_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_import_test", "x86/testdll32.dll", "gala"),
+    // Exceptions and APCs in 32-bit code: the 32-bit ntdll's dispatchers.
+    ("wow64_seh_test", "wow64.dll", "Windows/System32"),
+    ("wow64_seh_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_seh_crash", "wow64.dll", "Windows/System32"),
+    ("wow64_seh_crash", "x86/ntdll.dll", "Windows/SysWOW64"),
+    // The file system redirector: both ntdlls (told apart by their
+    // machine), a hosts file and markers in the exempt directories.
+    ("wow64_fs_test", "wow64.dll", "Windows/System32"),
+    ("wow64_fs_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_fs_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_fs_test", "user/wow64_fs_test/hosts", "Windows/System32/drivers/etc"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/catroot"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/catroot2"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/DriverStore"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/LogFiles"),
+    ("wow64_fs_test", "user/wow64_fs_test/exempt.txt", "Windows/System32/spool"),
+    // A plain 32-bit program on the 32-bit kernel32.
+    ("wow64_k32_test", "wow64.dll", "Windows/System32"),
+    ("wow64_k32_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_k32_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    // Its redirector checks: the 64-bit ntdll beside the 32-bit one, the
+    // exempt hosts file, the 64-bit cmd it starts through Sysnative.
+    ("wow64_k32_test", "ntdll.dll", "Windows/System32"),
+    ("wow64_k32_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_k32_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_k32_test", "user/bin/cmd.exe", "Windows/System32"),
+    ("wow64_k32_test", "user/wow64_fs_test/hosts", "Windows/System32/drivers/etc"),
+    // A 32-bit C program (clang-built, checked-in binary) on it.
+    ("wow64_c_test", "wow64.dll", "Windows/System32"),
+    ("wow64_c_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_c_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_c_test", "user/bin/wow64_c_test.exe", "gala"),
+    // A 32-bit C program on the 32-bit msvcrt (mingw-built, checked-in).
+    ("wow64_crt_test", "wow64.dll", "Windows/System32"),
+    ("wow64_crt_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_crt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_crt_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_crt_test", "user/bin/wow64_crt_test.exe", "gala"),
+    ("wow64_gui_test", "wow64.dll", "Windows/System32"),
+    ("wow64_gui_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_gui_test", "user/bin/wow64_gui_test.exe", "gala"),
+    // wow64_sock_test: a 32-bit Winsock program and the 32-bit ws2_32.
+    ("wow64_sock_test", "wow64.dll", "Windows/System32"),
+    ("wow64_sock_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_sock_test", "user/bin/wow64_sock_test.exe", "gala"),
+    // pk_install_inno32: the x86 Inno Setup installer in the snapshot's
+    // mirror (with pk_install_test's set and wow64_inno's 32-bit DLLs:
+    // MODULE_SETS).
+    ("pk_install_inno32", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "pk_source/installers"),
+    // wow64_inno: an x86 Inno Setup installer (PREBUILT innosetup6) and the
+    // 32-bit DLLs its Setup loads.
+    ("wow64_inno", "wow64.dll", "Windows/System32"),
+    ("wow64_inno", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/user32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/comctl32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/version.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/mpr.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/comdlg32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/uxtheme.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/dwmapi.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/msimg32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/msctf.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/winspool.drv", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/shfolder.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_inno", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "gala"),
+    // A 32-bit program on the 32-bit advapi32.
+    ("wow64_adv_test", "wow64.dll", "Windows/System32"),
+    ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_adv_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_adv_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_adv_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2059,6 +2440,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_sys_test",
     "kernel32_thread_test",
     "kernel32_sync_test",
+    "kernel32_py_test",
     "kernel32_locale_test",
     "disk_test",
     "rtl_test",
@@ -2118,6 +2500,24 @@ const USER_PROGRAMS: &[&str] = &[
     "pipe_test",
     "lock_test",
 ];
+
+/// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
+/// x86 runtime), shipped and exported like USER_PROGRAMS.
+const USER_PROGRAMS_X86: &[&str] = &[
+    "wow64_test",
+    "wow64_thread_test",
+    "wow64_import_test",
+    "wow64_seh_test",
+    "wow64_fs_test",
+    "wow64_k32_test",
+    "wow64_adv_test",
+];
+
+/// Where the build puts test program `program` (x64 or x86).
+fn built_program(program: &str) -> PathBuf {
+    let target = if USER_PROGRAMS_X86.contains(&program) { USER_TARGET_X86 } else { USER_TARGET };
+    target_dir().join(target).join("release").join(format!("{program}.exe"))
+}
 /// Must match `BOOT_OK_MARKER` in `kernel/src/lib.rs`.
 const BOOT_OK_MARKER: &str = "gala: boot ok";
 /// QEMU exit statuses for `QemuExitCode::{Success, Failure}` (`(code << 1) | 1`).
@@ -2127,11 +2527,13 @@ const QEMU_EXIT_FAILURE: i32 = 35;
 const LEAK_MARKER: &str = "address space still referenced";
 const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Scenarios that run whole language runtimes (a JVM, CoreCLR) or a whole
-/// database (PostgreSQL: initdb, then the server's ~20 processes) under
-/// TCG: tens of seconds locally, over twice that on a slow CI runner or
-/// under the full suite (postgres took ~45 s alone and hit 120 s there).
-/// They get this much instead of BOOT_TEST_TIMEOUT.
+/// Scenarios that run whole language runtimes (a JVM, CoreCLR, CPython
+/// running pip: python_pip's venv installs pip itself with ensurepip,
+/// ~180 s of run time under TCG) or a whole database (PostgreSQL: initdb,
+/// then the server's ~20 processes) under TCG: tens of seconds locally,
+/// over twice that on a slow CI runner or under the full suite (postgres
+/// took ~45 s alone and hit 120 s there). They get this much instead of
+/// BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &[
     "java_version",
     "java_hello",
@@ -2140,14 +2542,21 @@ const SLOW_SCENARIOS: &[&str] = &[
     "dotnet_hello",
     "flaui_test",
     "filezilla_flaui",
+    "filezilla_sftp",
     "pwsh_hello",
     "postgres",
     "filezilla",
+    "python_pip",
+    "python_pip_https",
+    "python_numpy",
 ];
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
 const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
+/// `chromium_wpt`: a directory of web-platform-tests, each a page load
+/// and a harness run under TCG (a report run, PENDING: not in the gate).
+const WPT_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Scenarios run under an artificial host load (clockcheck::HostLoad:
@@ -2165,6 +2574,8 @@ fn scenario_timeout(name: &str) -> Duration {
     }
     let limit = if SCENARIOS.iter().any(|s| s.name == name && s.exit_status == XTASK_DUMPS) {
         DUMP_SCENARIO_TIMEOUT
+    } else if name == "chromium_wpt" {
+        WPT_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
         || name.starts_with("sqllocaldb")
@@ -2197,8 +2608,9 @@ commands:
   build        build the kernel and a bootable UEFI ISO (target/<profile>/gala-os.iso)
   run          build, then boot in QEMU with serial on stdio [--headless]
   test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
-               boot tests
+               boot tests [--no-boot: all but the boot tests]
   boot-test    only the QEMU boot tests [scenario name filter, or exact names a,b,c]
+               (XTASK_SHARD=i/n: the i-th of n shares of the VMs)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -2228,6 +2640,18 @@ commands:
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
+  lint         the analyzers (event resets, wait sites) and cargo fmt --check; the
+               pre-commit hook (hooks/, enabled by any xtask run) runs it;
+               --full also runs CI's Clippy commands (the pre-push hook)
+  feed         the update feed (TUF metadata over content-addressed files; R8):
+               feed publish <files dir> <feed dir> [--release N] [--floor F] |
+               feed refresh <feed dir> (re-sign snapshot and timestamp) |
+               feed renew-root <feed dir> (root N+1, same keys, fresh expiry) |
+               feed check <feed> [--over <source>] [--root <trusted root.json>] |
+               feed pull <source> <empty dir> | feed push <feed dir> <s3://bucket | dir> |
+               feed keygen (a new GALA_FEED_KEYS value on stdout; keys from it when set)
+  release-tree the files of a release, as the feed publishes them (kernel, system DLLs,
+               Limine, sealed config, manifest; no test programs): release-tree <dir>
   symbolize    resolve the kernel backtraces in a serial log to functions
                and source lines: symbolize <log> [--release]
   triage       what a (failed) boot's log says, in one block: verdict, guest CPUs and
@@ -2240,6 +2664,10 @@ commands:
                events <events.jsonl>
   serve-page   answer one HTTP request on standard input/output with the
                host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
+  relay <port> one connection on standard input/output to 127.0.0.1:<port>
+               (QEMU runs it per connection: chromium_wpt's wptserve)
+  wpt-compare  chromium_wpt's report against wpt.fyi's Edge on Windows and
+               Chrome on Linux (target/wpt/compare.txt)
   perfetto     a boot's event stream as a Perfetto trace (tracks per thread,
                system calls, IPC flows, samples): <events.jsonl | scenario>
                [--out FILE]; open it in ui.perfetto.dev
@@ -2247,7 +2675,8 @@ commands:
                [--tid N] [--from S --to S] [--top N] [--symbols DIR] (boot
                with events=sample,image,thread,process; sample_hz=, default 100)
   otel         convert a boot's event stream and serial log to OpenTelemetry
-               (OTLP/JSON traces, logs, metrics; view in Jaeger or an OTel
+               (OTLP/JSON files of traces, logs, metrics, posted as batched
+               protobuf, OTEL_EXPORTER_OTLP_PROTOCOL; view in Jaeger or an OTel
                collector, docs/WORKFLOW.md, OpenTelemetry): otel <serial log |
                events.jsonl | scenario> [<events.jsonl>] [--out <prefix>]
                [--endpoint http://host:4318 (or OTEL_EXPORTER_OTLP_ENDPOINT)];
@@ -2261,6 +2690,7 @@ commands:
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
+    lint::enable_hook(&root());
     let release = args.iter().any(|a| a == "--release");
     let headless = args.iter().any(|a| a == "--headless");
     let result =
@@ -2268,11 +2698,22 @@ fn main() -> ExitCode {
             Some("build") => build(release, "gala-os", "").map(drop),
             Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
             // gala-um first: it fails in seconds, before minutes of boots.
-            Some("test") => unit_tests()
+            Some("lint") => lint::cli(&root(), args.iter().any(|a| a == "--full")),
+            Some("test") => lint::cli(&root(), false)
+                .and_then(|()| stub_audit::stub_audit(&root()))
+                .and_then(|()| unit_tests())
                 .and_then(|()| alloc_audit(release, None, false))
                 .and_then(|()| um_test(release))
                 .and_then(|()| replay_test(release))
-                .and_then(|()| boot_tests(release, None)),
+                // `--no-boot`: everything but the boot scenarios (CI boots
+                // them in parallel jobs with XTASK_SHARD).
+                .and_then(|()| {
+                    if args.iter().any(|a| a == "--no-boot") {
+                        Ok(())
+                    } else {
+                        boot_tests(release, None)
+                    }
+                }),
             Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
             Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
             Some("report") => gala_report(release),
@@ -2319,6 +2760,7 @@ fn main() -> ExitCode {
             }
             Some("lx-expect") => lx_expect::lx_expect(&args[1..]),
             Some("qemu") => build_qemu(),
+            Some("stub-audit") => stub_audit::stub_audit(&root()),
             Some("alloc-audit") => alloc_audit(
                 release,
                 args.get(1).filter(|a| !a.starts_with("--")).map(Path::new),
@@ -2340,10 +2782,19 @@ fn main() -> ExitCode {
                     .map(|text| print!("{}", triage::events_summary(&text))),
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
+            Some("feed") => feed::cli(&args[1..]),
+            Some("release-tree") => match args.get(1).filter(|a| !a.starts_with("--")) {
+                Some(dir) => release_tree(release, Path::new(dir)),
+                None => Err("usage: cargo xtask release-tree <dir> [--release]".into()),
+            },
             Some("otel") => otel_cli(&args[1..]),
             Some("profile") => profile_cli(&args[1..]),
             Some("perfetto") => perfetto_cli(&args[1..]),
             Some("serve-page") => serve_page(),
+            Some("wpt-compare") => wpt::compare(),
+            Some("relay") => {
+                wpt::relay(args.get(1).map_or("", String::as_str), args.get(2).map(String::as_str))
+            }
             Some("compare") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(windows) => compare_reports(Path::new(windows), args.get(2).map(Path::new)),
                 None => Err("usage: cargo xtask compare <windows.json> [<gala.json>]".into()),
@@ -2382,8 +2833,13 @@ fn cargo() -> Command {
 /// remapped to `/cargo` so that the checked-in binaries are the same
 /// wherever they are built (CI compares them).
 fn user_build() -> Command {
+    user_build_for(USER_TARGET)
+}
+
+/// `user_build` for `target` (USER_TARGET or USER_TARGET_X86).
+fn user_build_for(target: &str) -> Command {
     let mut cmd = cargo();
-    cmd.args(["build", "--release", "--target", USER_TARGET]);
+    cmd.args(["build", "--release", "--target", target]);
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
@@ -2391,7 +2847,7 @@ fn user_build() -> Command {
         // Cargo merges this array with the target's rustflags in
         // .cargo/config.toml.
         let flag = format!("--remap-path-prefix={}=/cargo", home.display());
-        cmd.arg("--config").arg(format!("target.{USER_TARGET}.rustflags=[{flag:?}]"));
+        cmd.arg("--config").arg(format!("target.{target}.rustflags=[{flag:?}]"));
     }
     cmd
 }
@@ -2424,11 +2880,15 @@ fn unit_tests() -> Result {
     // The Linux personality's ABI data, checked against the user/lx
     // transcripts recorded on Linux (ROADMAP LX).
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
+    // AFD's request layouts for both pointer sizes (kernel/afd_abi).
+    run_cmd(cargo().args(["test", "--package", "afd_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
-    run_cmd(cargo().args(["test", "--package", "schannel_tls"]))
+    run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
+    // The update feed's TUF metadata and the client's refusals (R8).
+    run_cmd(cargo().args(["test", "--package", "tuf"]))
 }
 
 /// `cargo xtask alloc-audit`: disassembles the kernel (the debug build
@@ -2507,17 +2967,6 @@ fn build_kernel(release: bool) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
-    // The server kernel (no `shasha` feature: ROADMAP SD), in its own
-    // target directory so the two builds don't replace each other.
-    let mut cmd = cargo();
-    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
-        .args(["--no-default-features", "--target-dir"])
-        .arg(server_target_dir());
-    trust::kernel_env(&mut cmd)?;
-    if release {
-        cmd.arg("--release");
-    }
-    run_cmd(&mut cmd)?;
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
@@ -2528,6 +2977,16 @@ fn build_kernel(release: bool) -> Result {
     run_cmd(&mut cmd)?;
     let mut cmd = user_build();
     for program in USER_PROGRAMS {
+        cmd.args(["--package", program]);
+    }
+    run_cmd(&mut cmd)?;
+    let mut cmd = user_build_for(USER_TARGET_X86);
+    for dll in USER_DLLS_X86 {
+        cmd.args(["--package", dll.package]);
+    }
+    run_cmd(&mut cmd)?;
+    let mut cmd = user_build_for(USER_TARGET_X86);
+    for program in USER_PROGRAMS_X86 {
         cmd.args(["--package", program]);
     }
     run_cmd(&mut cmd)?;
@@ -2563,13 +3022,6 @@ fn build_go_programs() -> Result {
 }
 
 /// Where the server kernel (built without the desktop) goes.
-fn server_target_dir() -> PathBuf {
-    target_dir().join("server")
-}
-
-/// Scenarios booted with the server kernel (no `shasha` feature).
-const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel", "server_windows"];
-
 /// R9 (d): scenarios that hand over between the default kernel and the
 /// `handover_next` build (a stand-in for the next release, with a changed
 /// state format), with whether they boot the next build; the other kernel
@@ -2617,7 +3069,7 @@ fn make_signed_iso(
     // The disk is shared with other worktrees and fills up: say so plainly
     // instead of a copy or xorriso failing half-way.
     check_disk_space(name, MIN_FREE_MIB)?;
-    make_iso_unchecked(release, name, cmdline, extra, signing).map_err(|e| {
+    make_iso_unchecked(release, name, cmdline, extra, signing, None).map_err(|e| {
         if e.contains("No space left") || e.contains("os error 28") {
             format!("{e}\n{}", disk_hint(name, None))
         } else {
@@ -2664,17 +3116,20 @@ fn tree_size(dir: &Path) -> u64 {
         .sum()
 }
 
+/// Stages the image's tree (kernel, test programs, `extra`, Limine, the
+/// sealed config and manifest) and makes the ISO from it; with `tree`,
+/// stages into that directory without the test programs and stops there
+/// (`release-tree`: what a release publishes).
 fn make_iso_unchecked(
     release: bool,
     name: &str,
     cmdline: &str,
     extra: &[(&str, &str)],
     signing: &trust::Signing,
+    tree: Option<&Path>,
 ) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
-    let server = name.strip_prefix("test-").is_some_and(|n| SERVER_KERNEL_SCENARIOS.contains(&n));
-    let kernel_dir = if server { server_target_dir() } else { target_dir() };
-    let mut kernel = kernel_dir.join(KERNEL_TARGET).join(profile).join("kernel");
+    let mut kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
     // R9 (d): the other build as a boot module, to hand over to.
     let builds = name
         .strip_prefix("test-")
@@ -2690,7 +3145,7 @@ fn make_iso_unchecked(
     }
     let limine = fetch_limine()?;
     let out = target_dir().join(profile);
-    let iso_root = out.join(format!("{name}-iso-root"));
+    let iso_root = tree.map_or_else(|| out.join(format!("{name}-iso-root")), Path::to_path_buf);
     if iso_root.exists() {
         fs::remove_dir_all(&iso_root).map_err(|e| format!("cleaning {iso_root:?}: {e}"))?;
     }
@@ -2705,9 +3160,11 @@ fn make_iso_unchecked(
         copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
     }
-    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
-        let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
-        copy(&exe, &boot.join(format!("{program}.exe")))?;
+    let programs = if tree.is_some() { &[][..] } else { USER_PROGRAMS };
+    let others = if tree.is_some() { &[][..] } else { GO_PROGRAMS };
+    let x86 = if tree.is_some() { &[][..] } else { USER_PROGRAMS_X86 };
+    for program in programs.iter().chain(others).chain(x86) {
+        copy(&built_program(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
     for (file, dir) in extra {
@@ -2732,9 +3189,21 @@ fn make_iso_unchecked(
             );
             continue;
         }
+        // A 32-bit DLL: under boot/x86 (its name is often a 64-bit one's;
+        // the kernel names the file after the path's last part).
+        if let Some(dll) = x86_dll(file) {
+            let x86 = boot.join("x86");
+            fs::create_dir_all(&x86).map_err(|e| format!("creating {x86:?}: {e}"))?;
+            copy(&built_dll_x86(dll.file), &x86.join(dll.file))?;
+            modules += &format!(
+                "    module_path: boot():/boot/x86/{}\n    module_string: {dir}\n",
+                dll.file
+            );
+            continue;
+        }
         let (source, name) = match file.rsplit_once('/') {
             Some((_, name)) => (root().join(file), name),
-            None => (target_dir().join(USER_TARGET).join("release").join(file), *file),
+            None => (built_dll(file), *file),
         };
         copy(&source, &boot.join(name))?;
         modules += &format!("    module_path: boot():/boot/{name}\n    module_string: {dir}\n");
@@ -2748,6 +3217,9 @@ fn make_iso_unchecked(
     );
     // R8: the manifest, the config's hashes, the enrolled executables.
     trust::seal(&iso_root, &config, signing)?;
+    if tree.is_some() {
+        return Ok(iso_root);
+    }
 
     let iso = out.join(format!("{name}.iso"));
     // The ISO is as large as its tree.
@@ -2870,6 +3342,13 @@ fn fetch_prebuilt(path: &str) -> Result {
     if full.exists() && done.exists() {
         return Ok(());
     }
+    // Another release (a re-pinned version) or a partial unpack: start
+    // from nothing, or the old release's files stay beside the new ones
+    // (and ship with a directory module).
+    if dir.exists() {
+        eprintln!("xtask: {}: no unpack of the pinned release; clearing {dir:?}", p.name);
+        fs::remove_dir_all(&dir).map_err(|e| format!("clearing {dir:?}: {e}"))?;
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
     eprintln!("xtask: fetching {} ({})", p.name, p.url);
@@ -2898,12 +3377,26 @@ fn fetch_prebuilt(path: &str) -> Result {
                 .arg(&inner),
         )?;
         let _ = fs::remove_file(&zip);
+        // A package may carry a 32-bit and a 64-bit installer (FileZilla's
+        // does): the 64-bit one, by name, whatever order the directory
+        // lists them in; otherwise the first by name.
         let tools = inner.join("tools");
-        let exe = fs::read_dir(&tools)
+        let mut exes: Vec<PathBuf> = fs::read_dir(&tools)
             .map_err(|e| format!("reading {tools:?}: {e}"))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|p| p.extension().is_some_and(|x| x == "exe"))
-            .ok_or(format!("{}: no installer in tools/", p.url))?;
+            .filter(|p| p.extension().is_some_and(|x| x == "exe"))
+            .collect();
+        let is_64 = |p: &PathBuf| {
+            let n = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            n.contains("win64") || n.contains("x64")
+        };
+        exes.sort_by_key(|p| (!is_64(p), p.clone()));
+        eprintln!(
+            "xtask: {}: installers in tools/: {:?}, using the first",
+            p.name,
+            exes.iter().filter_map(|p| p.file_name()).collect::<Vec<_>>()
+        );
+        let exe = exes.into_iter().next().ok_or(format!("{}: no installer in tools/", p.url))?;
         let moved = dir.join("download.exe");
         fs::rename(&exe, &moved).map_err(|e| format!("moving {exe:?}: {e}"))?;
         let _ = fs::remove_dir_all(&inner);
@@ -3103,11 +3596,19 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        // RS step B3a on the server kernel: session 2's window state is
-        // kept with nothing to compose it.
-        "server_windows",
+        // SD: the kernel without a screen or `presenter=` keeps session 2's
+        // windows with nothing showing them.
+        "noscreen_windows",
         &[
-            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800"#,
+            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800,"bare":"no screen and no presenter=""#,
+            r#""ev":"window","op":"create""#,
+        ],
+    ),
+    (
+        // SD: so does the server profile, with a screen.
+        "server_profile_windows",
+        &[
+            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800,"bare":"server profile""#,
             r#""ev":"window","op":"create""#,
         ],
     ),
@@ -3208,10 +3709,13 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
 /// Scenarios still being brought up: `cargo xtask boot-test <name>` runs
 /// them, `cargo xtask test` (and CI) does not, until they pass.
 const PENDING: &[&str] = &[
+    // BR's conformance report: a report run of hours, not a gate check.
+    "chromium_wpt",
     "java_stress",
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
+    "filezilla_sftp",
     "gitbash",
     "mingit",
     "sqllocaldb",
@@ -3230,6 +3734,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "handover_k32_uefi",
     "handover_net_uefi",
     "server_profile",
+    "server_profile_windows",
     "gala_cli",
     "hello",
     "selftest",
@@ -3287,6 +3792,11 @@ enum NetClient {
     /// Logs on to an FTP server as `gala` and asks for the directory
     /// (`ftp_client`: the control connection only).
     Ftp,
+    /// A WebDriver session with ChromeDriver (`webdriver_client`):
+    /// headless Chromium loads page.html, a script reads it.
+    WebDriver,
+    /// web-platform-tests through ChromeDriver (`wpt_client`).
+    Wpt,
     /// handover_net_test's line protocol across a kernel handover
     /// (`handover_net_client`).
     HandoverNet,
@@ -3322,6 +3832,8 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("sshd_client", "Server listening on", NetClient::SshInner),
     ("postgres", "database system is ready to accept connections", NetClient::Psql),
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
+    ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
+    ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -3805,6 +4317,10 @@ const SCENARIOS: &[Scenario] = &[
             "NtWaitForSingleObject from rip",
             "Event signal 0",
             "in user mode at rip",
+            // The keyed-event waiter: its caller and its key.
+            "NtWaitForKeyedEvent from rip",
+            "(statedump_test.exe+0x",
+            "(value there 0x6a1a); queued for it: (waiters, releasers, all entries) Some((1, 0, 1))",
             "statedump: end",
             "the guest's state dump (NMI) took",
         ],
@@ -4110,7 +4626,8 @@ const SCENARIOS: &[Scenario] = &[
             "session: 1 made, named objects in \\Sessions\\1\\BaseNamedObjects",
             "session 0): starting at",
             "session 1): starting at",
-            "desktop: no screen and no presenter= (windows live in the registry only)",
+            "desktop: session 0 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
+            "desktop: session 1 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
             "in session 0: not visible across sessions",
             "in session 1: not visible across sessions",
             "session_test: ok",
@@ -4355,6 +4872,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: painted",
             "gui_test: click",
             "gui_test: typed hi",
+            "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
             "xtask: screen ok",
@@ -4377,6 +4895,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: painted",
             "gui_test: click",
             "gui_test: typed hi",
+            "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
             "xtask: screen ok",
@@ -4398,6 +4917,7 @@ const SCENARIOS: &[Scenario] = &[
             "gui_test: painted",
             "gui_test: click",
             "gui_test: typed hi",
+            "gui_test: keys typed while busy came in order",
             "gui_test: menu 202",
             "gui_test: combo picked Blue",
             "xtask: screen ok",
@@ -4470,6 +4990,63 @@ const SCENARIOS: &[Scenario] = &[
             "plan install GalaTest.PkLib 1.0.0 installer 1 (for GalaTest.PkDep)",
             "installed id=GalaTest.PkLib version=1.0.0",
             "upgraded id=GalaTest.PkScoped from=1.0.0 to=1.1.0",
+            "error requires-admin administrator=no",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP PK: a machine-scope portable install (winget's
+        // %ProgramFiles%\WinGet layout, the HKLM entry, the machine's
+        // PATH) with administrator rights (`as=system`): installed, run,
+        // listed, upgraded keeping machine scope, uninstalled. The zip
+        // run checks the boot user is refused one (exit 6).
+        name: "pk_install_machine",
+        cmdline: "qemu_exit as=system logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=machine",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "elevation administrator=yes",
+            "registered key=HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GalaTest.PkScoped_Microsoft.Winget.Source_8wekyb3d8bbwe scope=machine",
+            "upgraded id=GalaTest.PkScoped from=1.0.0 to=1.1.0",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP PK stage 3: `gala install` of a real Inno Setup
+        // installer (Inno Setup 7.1.1's own, x64; winget-pkgs' manifest
+        // JRSoftware.InnoSetup.7) from the snapshot's mirror: run with
+        // winget's Inno switches (--silent: /VERYSILENT, the manifest's
+        // /CURRENTUSER for --scope user), found through its ProductCode's
+        // uninstall entry, its compiler run, listed, uninstalled through
+        // its QuietUninstallString.
+        name: "pk_install_inno",
+        cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=inno",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "innosetup-7.1.1-x64.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+            "found-by=ProductCode",
+            "installed id=JRSoftware.InnoSetup.7 version=7.1.1",
+            "arp-entry-gone key=HKCU",
+            "pk_install_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64 stage 4 under ROADMAP PK: `gala install` of an x86 Inno
+        // Setup installer (Inno Setup 6.5.4's own; winget-pkgs' manifest
+        // JRSoftware.InnoSetup, whose installers are all x86, chosen on
+        // x64 as winget does) from the snapshot's mirror: its 32-bit Setup,
+        // compiler, IDE (/ASSOC) and uninstaller under WOW64, otherwise as
+        // pk_install_inno.
+        name: "pk_install_inno32",
+        cmdline: "qemu_exit logtee=C:/Users/gala/AppData/Local/gala/logs run=pk_install_test.exe args=inno32",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "innosetup-6.5.4.exe\" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+            "found-by=ProductCode",
+            "installed id=JRSoftware.InnoSetup version=6.5.4",
+            "arp-entry-gone key=HKCU",
             "pk_install_test: ok",
             "exited with status 0x00000000",
         ],
@@ -4585,6 +5162,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_sync_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_sync_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: what CPython imports from kernel32 (PathCch, Pss
+        // snapshots, CopyFile2, SetWaitableTimerEx, pipe state, ...).
+        name: "kernel32_py_test",
+        cmdline: "qemu_exit run=kernel32_py_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["kernel32_py_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "xstate_test",
@@ -4720,6 +5305,22 @@ const SCENARIOS: &[Scenario] = &[
             "quota_test: handle limit at 3000 handles",
             "over its handle limit: 3000 in use + 1 > limit 3000",
             "over its nonpaged pool:",
+            "quota_test: port quota at ",
+            "quota_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // R6: sockets' buffers are charged to their process: connections
+        // with 1 MiB buffers until one is refused (WSAENOBUFS) while a
+        // child connects its own; closing gives the charge back;
+        // ProcessQuotaLimits' pool limits need SeIncreaseQuotaPrivilege.
+        name: "quota_sockets",
+        cmdline: "qemu_exit quota=nonpaged:13M run=quota_test.exe args=sockets%2013631488",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "quota_test: socket quota at 3 connections",
+            "over its nonpaged pool:",
             "quota_test: ok",
             "exited with status 0x00000000",
         ],
@@ -4759,8 +5360,12 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         // N1c: overlapped Winsock with a completion port (what Go uses).
+        // events=net,sample: the sampling interrupts and the net events
+        // written under the stack's lock preempt connect's thread often
+        // enough that the FD_CONNECT rounds hit the moment the endpoint
+        // once lost its handshake's report (every run without the fix).
         name: "winsock_async_test",
-        cmdline: "qemu_exit run=winsock_async_test.exe",
+        cmdline: "qemu_exit events=net,sample run=winsock_async_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["winsock_async_test: ok", "exited with status 0x00000000"],
     },
@@ -4879,11 +5484,21 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // AG: shell32's ShellExecuteExW, dropped files, DragAcceptFiles
         // and SHFileOperationW against documented behaviour, for what
-        // wxWidgets imports (user/shell32_test/main.c, mingw).
+        // wxWidgets imports, and shell links ([MS-SHLLINK] files) for
+        // Inno Setup's shortcuts (user/shell32_test/main.c, mingw).
         name: "shell32_test",
         cmdline: "qemu_exit run=shell32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["shell32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // PK stage 3: what Inno Setup's IDE (ISIDE.exe /assoc) imports from
+        // comdlg32: GetFileTitleW and the dialogs' parameter checks against
+        // documented behaviour (user/comdlg32_test/main.c, mingw).
+        name: "comdlg32_test",
+        cmdline: "qemu_exit run=comdlg32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["comdlg32_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: dbghelp's ImageNtHeader and SymSrvGetFileIndexInfoW (what
@@ -4908,45 +5523,49 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // W3: gala's user32 against documented behaviour, for what
         // wxWidgets (FileZilla) uses (user/user32_test/main.c, mingw).
+        // Without a screen (BIOS, gala-um) its windows are kept on a
+        // desktop shown by none, as by the server kernel (ROADMAP SD).
         name: "user32_test",
         cmdline: "qemu_exit run=user32_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
-        expect: &["user32_test: ok", "exited with status 0x00000000"],
-    },
-    Scenario {
-        // ROADMAP SD: the server kernel, built without shasha (no
-        // compositor in the binary): windows are kept as on a desktop
-        // nobody shows (server_windows), nothing is drawn, a console
-        // program runs.
-        name: "server_kernel",
-        // gala_cli_test server: `gala`'s window commands are not
-        // supported (exit code 3), start, ps and kill work.
-        cmdline: "qemu_exit run=hello.exe,user32_test.exe,gala_cli_test.exe args=,,server",
-        exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)",
-            "Hello from user mode!",
+            "desktop: session 1 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
             "user32_test: ok",
-            "gala_cli_test: ok",
             "exited with status 0x00000000",
         ],
     },
     Scenario {
-        // ROADMAP RS B3a / SD: the server kernel keeps a session's window
-        // state with nothing to compose it (user/presenter_test `server`):
-        // session 2's window is made, shown and painted, GalaSession's
-        // query reports it on a desktop shown by none, frames, injected
-        // input and Test/Console presenters are refused, and the window
-        // is closed.
-        name: "server_windows",
+        // ROADMAP SD: on a machine with no screen and no `presenter=` (a
+        // BIOS boot) the kernel keeps windows with nothing showing them
+        // (server_profile_windows: the same with a screen). Nothing can
+        // show the desktop here, so frames, injected input and the Test
+        // and Console presenters are refused.
+        name: "noscreen_windows",
         cmdline: "qemu_exit as=system events=window run=presenter_test.exe args=server",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
-            "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)",
             "session: 2 made, named objects in \\Sessions\\2\\BaseNamedObjects",
-            "desktop: session 2 keeps its windows (1280x800), shown by none (no compositor in this kernel)",
+            "desktop: session 2 keeps its windows (1280x800), shown by none (no screen and no presenter=)",
             "presenter_test: child painted",
-            "desktop: session 2 cannot be shown by test: no compositor in this kernel",
+            "desktop: session 2 cannot be shown by test: no screen and no presenter=",
+            "presenter_test: the window is kept with nothing showing it",
+            "presenter_test: the window was closed",
+            "presenter_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP SD: the server profile with a screen (UEFI) keeps
+        // windows as the server kernel does and never draws them: the
+        // Test and Console presenters are refused.
+        name: "server_profile_windows",
+        cmdline: "qemu_exit profile=server as=system events=window run=presenter_test.exe args=server",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "profile: server",
+            "desktop: session 2 keeps its windows (1280x800), shown by none (server profile)",
+            "presenter_test: child painted",
+            "desktop: session 2 cannot be shown by test: server profile",
             "presenter_test: the window is kept with nothing showing it",
             "presenter_test: the window was closed",
             "presenter_test: ok",
@@ -4956,8 +5575,8 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // ROADMAP SD: the server profile never brings up the graphical
         // interface, even with a screen (UEFI: a framebuffer): windows
-        // still work (the registry, messages), nothing is drawn, and
-        // `console=` starts no console window.
+        // are kept as by the server kernel (shown by none), nothing is
+        // drawn, and `console=` starts no console window.
         name: "server_profile",
         cmdline: "qemu_exit profile=server console=user32_test.exe \
                   run=user32_test.exe,gala_cli_test.exe args=,server",
@@ -4965,7 +5584,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "profile: server",
             "console: no console window for user32_test.exe (server profile)",
-            "desktop: not drawn (server profile)",
+            "desktop: session 1 keeps its windows (1280x800), shown by none (server profile)",
             "user32_test: ok",
             "gala_cli_test: ok",
             "exited with status 0x00000000",
@@ -5082,7 +5701,9 @@ const SCENARIOS: &[Scenario] = &[
         expect: &[
             "handover: carrying 1 process(es), 4 thread(s)",
             "handover: generation 1 (from generation 0)",
-            "handover_test: slept 4",
+            // Bounded by the measured pause in the test itself, not by
+            // a fixed window here.
+            "handover_test: slept",
             "handover: carrying 1 process(es), 1 thread(s)",
             "handover: generation 2 (from generation 1)",
             "handover: resumed process handover_test.exe",
@@ -5644,21 +6265,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: ftp ok"],
     },
     Scenario {
-        // W3: FileZilla 3.69.3's SFTP engine (PuTTY's psftp adapted),
-        // unmodified and headless: its version report, as psftp -V prints
-        // it.
-        name: "fzsftp",
-        cmdline: "qemu_exit run=filezilla/fzsftp.exe args=-V",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "fzSftp started, protocol_version=11",
-            "psftp: 3.69.3",
-            "Build platform: 64-bit x86 Windows",
-            "exited with status 0x00000000",
-        ],
-    },
-    Scenario {
-        // W3: FileZilla 3.69.3 itself (wxWidgets 3.2): its main window and
+        // W3: FileZilla 3.71.0 itself (wxWidgets 3.2): its main window and
         // Welcome dialog on the desktop, clicked closed (SCREEN_SCENARIOS).
         name: "filezilla",
         cmdline: "qemu_exit wallpaper=dunes \
@@ -5668,7 +6275,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: screen ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // W3 and UI Automation: FileZilla 3.69.3 driven by FlaUI 5.0.0 on
+        // W3 and UI Automation: FileZilla 3.71.0 driven by FlaUI 5.0.0 on
         // .NET 8 (user/flaui_test/FileZillaFlaUI.cs) through gala's
         // UIAutomationCore, with FileZilla Server started first: the
         // Welcome dialog, Quickconnect, the connection's dialogs, the
@@ -5690,6 +6297,40 @@ const SCENARIOS: &[Scenario] = &[
             "grid=Filename,Filesize,Filetype,Last modified,Permissions,Owner/Group rows=2",
             "row=hello.txt ",
             "events=title opened=Remember passwords?,Unknown certificate",
+            "selected=hello.txt True",
+            "menu=File Exit",
+            "exited=True",
+            "filezilla_flaui: ok",
+            "dotnet.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // W3: FileZilla 3.71.0's SFTP engine (its own libfzssh) against
+        // Win32-OpenSSH's sshd: ssh-keygen -A makes the host keys, then
+        // sshd serves as a service (`start_as=system`: SYSTEM, session 0)
+        // while the boot user's FlaUI test (filezilla_flaui.dll `sftp`)
+        // Quickconnects as galatest with its password, accepts the
+        // unknown host key and lists C:\ftp over SFTP (sftp-server.exe as
+        // galatest), then File > Exit.
+        name: "filezilla_sftp",
+        cmdline: "qemu_exit logtee=C:/ProgramData/ssh/logs events=net,logon \
+                  start_as=system start=ssh-keygen.exe,sshd.exe start_args=-A, \
+                  start_wait=ssh-keygen.exe run=dotnet.exe args=C:/gala/filezilla_flaui.dll%20sftp",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "start: ssh-keygen.exe (pid ",
+            ") finished with status 0x00000000",
+            "start: sshd.exe (pid ",
+            "welcome=Welcome to FileZilla OK",
+            "quickconnect=sftp://127.0.0.1/C:/ftp galatest 22",
+            "dialog=Remember passwords? OK",
+            "dialog=Unknown host key OK",
+            "logtee: sshd.log: ",
+            "Accepted password for galatest",
+            "remote=..,hello.txt",
+            "grid=Filename,Filesize,Filetype,Last modified,Permissions,Owner/Group rows=2",
+            "row=hello.txt ",
+            "events=title opened=Remember passwords?,Unknown host key",
             "selected=hello.txt True",
             "menu=File Exit",
             "exited=True",
@@ -5972,9 +6613,128 @@ const SCENARIOS: &[Scenario] = &[
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &[
             "gala window painted",
+            "gala text focused",
+            "gala typed gala",
+            "gala link followed",
             "xtask: screen ok",
             "chrome.exe finished with status 0x00000000",
         ],
+    },
+    Scenario {
+        // BR stage 2 and UIA: a UI Automation client
+        // (user/uia_chromium_test, mingw) starts Chromium on window.html
+        // (chromium_window's flags), finds the page's link in Chromium's
+        // accessibility tree (its UIA provider, through gala's
+        // UIAutomationCore) by ControlType and Name, invokes it
+        // (window2.html's title) and closes Chromium with WM_CLOSE.
+        name: "chromium_uia",
+        cmdline: "qemu_exit run=uia_chromium_test.exe dump=C:/chromium/debug.log,C:/tmp/chr/chrome_debug.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "uia_chromium_test: link found",
+            "uia_chromium_test: link followed",
+            "uia_chromium_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // BR's conformance report, step 1: ChromeDriver (PREBUILT, the
+        // snapshot's) serves WebDriver on port 7; xtask (the host) opens a
+        // session on headless Chromium, loads page.html, reads its title
+        // and text through a script and ends the session
+        // (`webdriver_client`), then asks ChromeDriver to shut down, so
+        // the run ends and `dump=` copies ChromeDriver's log and
+        // Chromium's (ChromeDriver does not pass Chromium its stderr).
+        name: "chromium_driver",
+        cmdline: "qemu_exit run=chromedriver.exe args=--port=7%20--allowed-ips=%20--verbose%20--log-path=C:\\chromium\\chromedriver.log \
+                  dump=C:/chromium/chromedriver.log,C:/chromium/chrome_driven.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["xtask: net client: webdriver ok"],
+    },
+    Scenario {
+        // BR's conformance report, step 2: web-platform-tests (WPT_DIRS
+        // at WPT_COMMIT, fetched by xtask) served by WPT's own server on
+        // the host (wpt.rs), run one page at a time in headless Chromium
+        // through ChromeDriver (`wpt::client`); each test's line goes into
+        // the serial log (`xtask: wpt: ...`), the results to target/wpt/.
+        // Each session's Chrome logs to its own file (a FATAL in one
+        // stays when the next session starts), the first eight dumped.
+        name: "chromium_wpt",
+        cmdline: "qemu_exit run=chromedriver.exe args=--port=7%20--allowed-ips=%20--log-path=C:\\chromium\\chromedriver.log \
+                  dump=C:/chromium/chromedriver.log,C:/chromium/chrome_wpt-0.log,C:/chromium/chrome_wpt-1.log,\
+                  C:/chromium/chrome_wpt-2.log,C:/chromium/chrome_wpt-3.log,C:/chromium/chrome_wpt-4.log,\
+                  C:/chromium/chrome_wpt-5.log,C:/chromium/chrome_wpt-6.log,C:/chromium/chrome_wpt-7.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["xtask: wpt: summary", "xtask: net client: wpt ok"],
+    },
+    Scenario {
+        // P1 step 6: the embeddable CPython 3.13.1 (PREBUILT `python`)
+        // evaluating one expression; expected as on Windows.
+        name: "python_hello",
+        cmdline: "qemu_exit run=python.exe args=-c%20print(6*7)",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["\n42\r", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: CPython running user/python/python_test.py: threads,
+        // sockets, select, a subprocess, hashlib/zlib/json/sqlite3/ctypes;
+        // each check as on Windows.
+        name: "python_script",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_test.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_test: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: asyncio's proactor loop (I/O completion ports through
+        // _overlapped): TCP and UDP over loopback, a subprocess's pipes,
+        // the executor, tasks; user/python/python_async.py, as on Windows.
+        name: "python_async",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_async.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_async: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: pip and venv (the full CPython layout): pip installs a
+        // wheel the script builds, its console-script launcher runs,
+        // `python -m venv` and the venv's launcher;
+        // user/python/python_pip.py, as on Windows.
+        name: "python_pip",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_pip.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_pip: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: pip from a package index over https: Nginx (from
+        // schannel_test, MODULE_SETS) serves the index python_pip.py
+        // writes; the test CA is in the machine's root store.
+        name: "python_pip_https",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=python.exe args=C:\\gala\\python_pip.py%20https",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "python_pip: pip install over https ok",
+            "python_pip: ok",
+            "python.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // P1 step 6: a package with C extensions: pip installs numpy's
+        // wheel from the file; arithmetic, random, LAPACK through its
+        // OpenBLAS, a threaded matrix product, FFT;
+        // user/python/python_numpy.py, as on Windows.
+        name: "python_numpy",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_numpy.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_numpy: ok", "python.exe finished with status 0x00000000"],
+    },
+    Scenario {
+        // P1 step 6: multiprocessing (spawned children over inherited
+        // pipes): Process, Queue, Pool, a shared Value and Lock, Pipe,
+        // shared_memory; user/python/python_mp.py, as on Windows.
+        name: "python_mp",
+        cmdline: "qemu_exit run=python.exe args=C:\\gala\\python_mp.py",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["python_mp: ok", "python.exe finished with status 0x00000000"],
     },
     Scenario {
         // P1: PowerShell 7.4 (fetched by xtask, PREBUILT), a self-contained
@@ -6275,6 +7035,10 @@ const SCENARIOS: &[Scenario] = &[
             "cacert untrusted: exit 60",
             "cacert other: exit 60",
             "cacert expired: exit 60",
+            // LibreSSL's curl does not check revocation.
+            "revocation: exit 0 <title>Welcome to nginx!</title>",
+            "revoked: exit 0",
+            "revoked no-revoke: exit 0",
             "curl.sh: done",
             "exited with status 0x00000000",
         ],
@@ -6301,6 +7065,12 @@ const SCENARIOS: &[Scenario] = &[
             "cacert untrusted: exit 60",
             "cacert other: exit 60",
             "cacert expired: exit 60",
+            // Revocation (SCH_CRED_REVOCATION_CHECK_CHAIN without
+            // --ssl-no-revoke), from the CRL in gala's CA store.
+            "revocation: exit 0 <title>Welcome to nginx!</title>",
+            "CRYPT_E_REVOKED (0x80092010) - The certificate is revoked.",
+            "revoked: exit 35",
+            "revoked no-revoke: exit 0",
             "resumption: exit 0 . r",
             "resumption tls1.2: exit 0 . r",
             "curl.sh: done",
@@ -6507,6 +7277,179 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=peb_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["peb_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 (ARCHITECTURE "Plan: WOW64"): a 32-bit program in
+        // compatibility mode, its TEB32, PEB32 and parameters, NT services
+        // through gala's wow64.dll.
+        name: "wow64_test",
+        cmdline: "qemu_exit run=wow64_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality nt, 32-bit x86 (WOW64)",
+            "wow64_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64: 32-bit threads (NtCreateThread with the x86 CONTEXT, their
+        // TEB32s, exit), their contexts (CS 0x23) when suspended in 32-bit
+        // code or in a system call, NtSetContextThread.
+        name: "wow64_thread_test",
+        cmdline: "qemu_exit run=wow64_thread_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_thread_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: a 32-bit program with imports, bound by the
+        // 32-bit ntdll (SysWOW64) before its entry point: a relocated DLL,
+        // TLS and its callbacks, DllMain, the loader's services.
+        name: "wow64_import_test",
+        cmdline: "qemu_exit run=wow64_import_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality nt, 32-bit x86 (WOW64)",
+            "wow64_import_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64 stage 3: exceptions in 32-bit code through the 32-bit
+        // ntdll's dispatcher (x86 SEH frames, RtlUnwind, RtlRaiseException,
+        // vectored handlers) and user APCs with 32-bit routines.
+        name: "wow64_seh_test",
+        cmdline: "qemu_exit run=wow64_seh_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_seh_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: the file system redirector (System32, Sysnative,
+        // an exemption, turned off per thread) and the 32-bit environment.
+        name: "wow64_fs_test",
+        cmdline: "qemu_exit run=wow64_fs_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_fs_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: a plain 32-bit program on gala's 32-bit kernel32
+        // (SysWOW64): files, threads, what a 32-bit process is told.
+        name: "wow64_k32_test",
+        cmdline: "qemu_exit run=wow64_k32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_k32_test: hello", "wow64_k32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: a plain 32-bit C program (user/wow64_c_test:
+        // clang-built, checked-in binary; stdcall imports through an
+        // import library, not large-address-aware) on the 32-bit kernel32.
+        name: "wow64_c_test",
+        cmdline: "qemu_exit run=wow64_c_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_c_test: hello", "wow64_c_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 4: a 32-bit GUI program (user/wow64_gui_test, mingw's
+        // i686 compiler, checked-in binary) on the 32-bit user32 and gdi32:
+        // a window, its messages with 32-bit WPARAM/LPARAM, painting read
+        // back, destruction (ARCHITECTURE "Plan: WOW64").
+        name: "wow64_gui_test",
+        cmdline: "qemu_exit run=wow64_gui_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_gui_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64: Winsock from a 32-bit program (user/wow64_sock_test,
+        // mingw's i686 compiler, checked-in binary): the x86 WSADATA,
+        // ADDRINFOA, WSABUF and fd_set, TCP and UDP on the loopback
+        // address through AFD (whose structures the kernel reads in the
+        // caller's layout).
+        name: "wow64_sock_test",
+        cmdline: "qemu_exit run=wow64_sock_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_sock_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 4: an x86 Inno Setup installer (Inno Setup 6.5.4's
+        // own, PREBUILT innosetup6) installs silently for the current user:
+        // its 32-bit setup loader, the Setup it extracts and runs on gala's
+        // 32-bit DLLs (the files, the Start menu's shortcuts through the
+        // 32-bit shell32's ShellLink, the uninstall entry), then the
+        // installed 32-bit Compil32.exe /ASSOC; Inno's own log is dumped.
+        name: "wow64_inno",
+        cmdline: "qemu_exit run=innosetup-6.5.4.exe args=/SP-%20/VERYSILENT%20/SUPPRESSMSGBOXES%20/NORESTART%20/CURRENTUSER%20/LOG=C:\\inno.log dump=C:/inno.log",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "64-bit install mode: No",
+            "Programs\\Inno Setup 6\\Compil32.exe",
+            "Successfully created the icon.",
+            "Creating new uninstall key: HKEY_CURRENT_USER",
+            "Installation process succeeded.",
+            "Process exit code: 0",
+            "innosetup-6.5.4.exe (pid 4) exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
+        // (user/wow64_crt_test: mingw's i686 startup code, checked-in
+        // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
+        // x86 jump buffer, FILE and lconv layouts, the x87 control word,
+        // the 32-bit time_t, atexit.
+        name: "wow64_crt_test",
+        cmdline: "qemu_exit run=wow64_crt_test.exe args=one%20%22two%20three%22",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_crt_test: hello 32 bit 1.50",
+            "wow64_crt_test: ok",
+            "wow64_crt_test: atexit ran",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // WOW64 stage 3: a 32-bit program on the 32-bit advapi32
+        // (user/wow64_adv_test): the registry and its 32-bit view, tokens,
+        // SIDs, security descriptors and ACLs in their x86 layouts,
+        // CryptGenRandom.
+        name: "wow64_adv_test",
+        cmdline: "qemu_exit run=wow64_adv_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_adv_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WOW64 stage 3: an exception no 32-bit handler takes, through the
+        // 32-bit ntdll: the crash report's 32-bit registers.
+        name: "wow64_seh_crash",
+        cmdline: "qemu_exit run=wow64_seh_test.exe args=crash",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_seh_test: writing to address 0",
+            "crash report: wow64_seh_test.exe (pid 4) ended by an unhandled exception \
+             0xc0000005 (access violation) in thread",
+            "writing address 0x0",
+            "crash report:   personality nt, 32-bit x86 (WOW64), session ",
+            "ebx=0x12345678",
+            "process wow64_seh_test.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // WOW64: a 32-bit program's unhandled exception, its crash report
+        // with the 32-bit registers.
+        name: "wow64_crash",
+        cmdline: "qemu_exit run=wow64_test.exe args=crash",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_test: writing to address 0",
+            "crash report: wow64_test.exe (pid 4) ended by an unhandled exception 0xc0000005 \
+             (access violation) in thread",
+            "(wow64_test.exe+0x",
+            "writing address 0x0",
+            "crash report:   personality nt, 32-bit x86 (WOW64), session ",
+            "crash report:   eax=",
+            "crash report:   eip=",
+            "crash report:   [esp+0x00]",
+            "process wow64_test.exe (pid 4) exited with status 0xc0000005",
+            BOOT_OK_MARKER,
+        ],
     },
     Scenario {
         name: "dir_test",
@@ -6826,6 +7769,23 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/epoll_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/fs_test (LX seam 4): symbolic and hard links, unlink of
+        // an open file, names differing only in case, the stat family and
+        // statx, renameat2; its transcript must be its expected.txt (real
+        // Linux's; `lx_expect::check_boot`).
+        name: "lx_fs",
+        cmdline: "qemu_exit lxrun=/lx/fs_test lxargs=./fs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/fs_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/fs_test as a static-pie.
+        name: "lx_fs_pie",
+        cmdline: "qemu_exit lxrun=/lx/fs_test-pie lxargs=./fs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/fs_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
         // A static Linux busybox (ROADMAP LX milestone 2): its shell runs
         // user/lx/busybox/shell.sh (pipes, redirections, the coreutils-style
         // applets through execve); the transcript must be
@@ -6918,7 +7878,14 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("events_ipc", "pipe_test"),
     ("events_pid", "process_test"),
     ("events_match", "process_test"),
+    ("quota_sockets", "quota_test"),
     ("pk_install_zip", "pk_install_test"),
+    ("pk_install_machine", "pk_install_test"),
+    ("pk_install_inno", "pk_install_test"),
+    ("pk_install_inno", "pk_install_inno"),
+    ("pk_install_inno32", "pk_install_test"),
+    ("pk_install_inno32", "wow64_inno"),
+    ("pk_install_inno32", "pk_install_inno32"),
     ("pk_install_nsis", "pk_install_test"),
     ("pk_install_nsis", "pk_install_nsis"),
     ("pk_install_https", "pk_install_test"),
@@ -6928,8 +7895,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("kernel_watchdog", "hello"),
     ("service_restart", "hello"),
     ("server_profile", "user32_test"),
-    ("server_kernel", "user32_test"),
-    ("server_windows", "presenter_test"),
+    ("noscreen_windows", "presenter_test"),
+    ("server_profile_windows", "presenter_test"),
     ("gala_cli", "gui_test"),
     ("virtio_gpu", "gui_test"),
     ("gui_test_headless", "gui_test"),
@@ -6956,7 +7923,6 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("failpoint_disk", "persist_test"),
     ("failpoint_disk_delay", "persist_test"),
     ("dotnet_info", "dotnet"),
-    ("fzsftp", "filezilla"),
     ("filezilla_server", "filezilla"),
     ("sshd_server", "sshd_login"),
     ("sshd_server", "sshd_server"),
@@ -6979,12 +7945,33 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("flaui_test", "dotnet"),
     ("filezilla_flaui", "dotnet"),
     ("filezilla_flaui", "filezilla"),
+    ("filezilla_sftp", "dotnet"),
+    ("filezilla_sftp", "filezilla"),
+    ("filezilla_sftp", "sshd_login"),
+    ("filezilla_sftp", "sshd_server"),
+    ("filezilla_sftp", "sshd_sftp"),
     ("pwsh_hello", "pwsh"),
+    ("python_pip_https", "python_pip"),
+    ("python_numpy", "python_pip"),
+    ("python_numpy", "python_numpy"),
+    ("python_pip_https", "schannel_test"),
+    ("python_script", "python_hello"),
+    ("python_script", "python_script"),
+    ("python_async", "python_hello"),
+    ("python_async", "python_async"),
+    ("python_mp", "python_hello"),
+    ("python_mp", "python_mp"),
     ("chromium_version", "chromium"),
     ("chromium_dump", "chromium"),
     ("chromium_https", "chromium"),
     ("chromium_host", "chromium"),
     ("chromium_window", "chromium"),
+    ("chromium_uia", "chromium"),
+    ("chromium_uia", "chromium_uia"),
+    ("chromium_driver", "chromium"),
+    ("chromium_driver", "chromium_driver"),
+    ("chromium_wpt", "chromium"),
+    ("chromium_wpt", "chromium_driver"),
     ("chromium_host", "chromium_host"),
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
@@ -7013,6 +8000,16 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
     }
     let mut modules: Vec<_> =
         EXTRA_MODULES.iter().filter(|m| sets.contains(&m.0)).map(|m| (m.1, m.2)).collect();
+    // kernelbase is part of the system wherever kernel32 is, as on
+    // Windows: it hosts the core API sets (ARCHITECTURE "API sets").
+    for (kernel32, kernelbase, dir) in [
+        ("kernel32.dll", "kernelbase.dll", "Windows/System32"),
+        ("x86/kernel32.dll", "x86/kernelbase.dll", "Windows/SysWOW64"),
+    ] {
+        if modules.contains(&(kernel32, dir)) {
+            modules.push((kernelbase, dir));
+        }
+    }
     modules.sort_unstable();
     modules.dedup();
     modules
@@ -7020,11 +8017,12 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
 
 /// `(program file, args)` if the scenario can share a VM: it only runs one
 /// program (no other kernel flags), expects success, boots by BIOS, and
-/// expects nothing that depends on running first (process ids).
+/// expects nothing that depends on running first (process ids, a
+/// session's desktop going live: logged once per boot).
 fn batchable(s: &Scenario) -> Option<(&'static str, &'static str)> {
     if s.exit_status != QEMU_EXIT_SUCCESS
         || scenario_boot(s.name) != Boot::Bios
-        || s.expect.iter().any(|e| e.contains("pid "))
+        || s.expect.iter().any(|e| e.contains("pid ") || e.starts_with("desktop: session "))
         || net_marker(s.name).is_some()
         || HOST_PAGE_SCENARIOS.contains(&s.name)
         || disk_scenario(s.name).is_some()
@@ -7074,6 +8072,34 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     vms
 }
 
+/// `XTASK_SHARD=i/n` (1-based): only every n-th VM, starting at the i-th,
+/// so n machines boot the whole set between them (CI's boot jobs). The VMs
+/// are dealt out after `plan_vms`, so a batch stays in one shard; the
+/// shard says what it took.
+fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
+    let Ok(spec) = env::var("XTASK_SHARD") else {
+        return Ok(vms);
+    };
+    let parsed = spec
+        .split_once('/')
+        .and_then(|(i, n)| Some((i.parse::<usize>().ok()?, n.parse::<usize>().ok()?)));
+    let Some((i, n)) = parsed.filter(|&(i, n)| i >= 1 && i <= n) else {
+        return Err(format!("XTASK_SHARD={spec:?}: expected i/n with 1 <= i <= n"));
+    };
+    let total = vms.len();
+    let mine: Vec<Vm<'_>> =
+        vms.into_iter().enumerate().filter(|(k, _)| k % n == i - 1).map(|(_, vm)| vm).collect();
+    let scenarios: usize = mine
+        .iter()
+        .map(|vm| match vm {
+            Vm::Single(_) => 1,
+            Vm::Batch(group) => group.len(),
+        })
+        .sum();
+    eprintln!("xtask: shard {i} of {n}: {} of {total} VMs ({scenarios} scenarios)", mine.len());
+    Ok(mine)
+}
+
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     RELEASE.store(release, std::sync::atomic::Ordering::Relaxed);
     let t0 = Instant::now();
@@ -7104,7 +8130,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
-    let vms = plan_vms(&selected);
+    let vms = shard(plan_vms(&selected))?;
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
     let screen = |s: &Scenario| {
@@ -7491,6 +8517,20 @@ fn run_parallel_on<J: Sync, T: Send>(
 
 /// Program scenarios gala-um does not run, and why (docs/GALA_UM.md).
 const NOT_IN_UM: &[(&str, &str)] = &[
+    ("wow64_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_thread_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_import_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_seh_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_inno", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_sock_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
     ("quota_test", "child processes (one NT process per Linux process)"),
@@ -7701,6 +8741,9 @@ fn um_command(um: &Path, s: &Scenario, options: &[String], timeout_secs: u32) ->
             fetch_prebuilt(file.trim_end_matches('/'))?;
         }
         let (host, file_name) = match file.rsplit_once('/') {
+            Some(_) if let Some(dll) = x86_dll(file) => {
+                (root().join("user/bin").join(dll.exported_as), dll.file)
+            }
             Some((_, n)) => (root().join(file), n),
             None => {
                 let dll = USER_DLLS
@@ -8306,8 +9349,13 @@ fn compare_reports(windows: &Path, gala: Option<&Path>) -> Result {
         Some(report::Outcome { skipped: Some(s), .. }) => format!("skipped ({s})"),
         _ => "-".to_string(),
     };
-    println!("| program | windows | gala | |\n|---|---|---|---|");
+    // How long each ran (ms), and how many times Windows' time gala took.
+    let ms = |o: &Option<report::Outcome>| o.as_ref().and_then(|o| o.ms);
+    let time = |t: Option<u64>| t.map_or_else(|| "-".to_string(), |t| t.to_string());
+    println!("| program | windows | gala | | windows ms | gala ms | gala/windows |");
+    println!("|---|---|---|---|---|---|---|");
     let mut different = 0;
+    let (mut win_total, mut gala_total) = (0u64, 0u64);
     for (name, win, gal, verdict) in report::compare(&w, &g) {
         let mark = match verdict {
             report::Verdict::Same => "same",
@@ -8317,7 +9365,28 @@ fn compare_reports(windows: &Path, gala: Option<&Path>) -> Result {
             }
             report::Verdict::Missing => "missing",
         };
-        println!("| {name} | {} | {} | {mark} |", show(&win), show(&gal));
+        let ratio = match (ms(&win), ms(&gal)) {
+            (Some(a), Some(b)) => {
+                win_total += a;
+                gala_total += b;
+                format!("{:.1}", b as f64 / a.max(1) as f64)
+            }
+            _ => "-".to_string(),
+        };
+        println!(
+            "| {name} | {} | {} | {mark} | {} | {} | {ratio} |",
+            show(&win),
+            show(&gal),
+            time(ms(&win)),
+            time(ms(&gal))
+        );
+    }
+    if win_total > 0 {
+        println!(
+            "\ntimes of the programs timed on both: windows {win_total} ms, gala {gala_total} ms \
+             ({:.1}x)",
+            gala_total as f64 / win_total as f64
+        );
     }
     if different == 0 { Ok(()) } else { Err(format!("{different} programs differ")) }
 }
@@ -8440,7 +9509,14 @@ fn run_vm_once(
     let port = lease.as_ref().map(|l| l.0);
     let (marker, kind) = net.unwrap_or(("", NetClient::Echo));
     if let Some(port) = port {
-        add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
+        if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
+            // Both: the forwarded port and the host's pages (chromium_wpt).
+            let _ = fs::remove_file(iso.with_extension("serve.log"));
+            let guestfwd = host_page_fwd(&mut cmd, &iso.with_extension("serve.log"))?;
+            add_net_with(&mut cmd, port, guest_port(iso_scenario(iso)), &guestfwd);
+        } else {
+            add_net_to(&mut cmd, port, guest_port(iso_scenario(iso)));
+        }
     } else if HOST_PAGE_SCENARIOS.contains(&iso_scenario(iso)) {
         let _ = fs::remove_file(iso.with_extension("serve.log"));
         add_host_page_net(&mut cmd, &iso.with_extension("serve.log"))?;
@@ -8475,14 +9551,27 @@ fn run_vm_once(
             && fs::read(&log)
                 .is_ok_and(|b| b.windows(check.marker.len()).any(|w| w == check.marker.as_bytes()))
         {
-            screen_verdict = Some(match check_screen(&socket, iso, check) {
-                Ok(()) => "xtask: screen ok\n".into(),
-                Err(e) => format!("xtask: screen: {e}\n"),
+            let failed = check_screen(&socket, iso, check).err();
+            screen_verdict = Some(match &failed {
+                None => "xtask: screen ok\n".into(),
+                Some(e) => format!("xtask: screen: {e}\n"),
             });
+            // A failed screen check ends the run (it cannot pass any more):
+            // the guest's state dump first, as at a timeout.
+            if let Some(e) = failed {
+                let why = format!("stopped: the screen check failed ({e})");
+                dump_note =
+                    Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
         }
         if let Some(port) = port.filter(|_| client.is_none())
             && fs::read(&log).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
         {
+            let serve_log = iso.with_extension("serve.log");
+            let monitor = socket.clone();
             client = Some(thread::spawn(move || match kind {
                 NetClient::Echo => net_client(port),
                 NetClient::Http(page) => http_client(port, page),
@@ -8499,6 +9588,8 @@ fn run_vm_once(
                 NetClient::SshInner => ssh_inner_client(port),
                 NetClient::Psql => psql_client(port),
                 NetClient::Ftp => ftp_client(port),
+                NetClient::WebDriver => webdriver_client(port),
+                NetClient::Wpt => wpt::client(port, &serve_log, &monitor),
                 NetClient::HandoverNet => handover_net_client(port),
                 NetClient::Udp => udp_client(port),
             }));
@@ -8551,8 +9642,8 @@ fn run_vm_once(
                     timeout.as_secs()
                 ),
             };
-            let what = format!("{what}; {}", now.describe());
-            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &what));
+            let why = format!("timed out after {what}; {}", now.describe());
+            dump_note = Some(ask_for_state_dump(&socket, &log, &mut child, &mut vm_clock, &why));
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -8631,6 +9722,8 @@ fn run_vm_once(
                     NetClient::Ftp => "ftp",
                     NetClient::HandoverNet => "handover",
                     NetClient::Udp => "udp",
+                    NetClient::WebDriver => "webdriver",
+                    NetClient::Wpt => "wpt",
                     _ => "http",
                 }
             ),
@@ -8722,7 +9815,7 @@ fn ask_for_state_dump(
     log: &Path,
     child: &mut std::process::Child,
     vm_clock: &mut vmtime::VmClock,
-    what: &str,
+    why: &str,
 ) -> String {
     use std::io::Write as _;
     let seen = |mark: &str| {
@@ -8754,20 +9847,20 @@ fn ask_for_state_dump(
     }
     let wait = STATEDUMP_WAIT.as_secs();
     match sent {
-        Err(e) => format!("\nxtask: timed out after {what}; no state dump (monitor: {e})\n"),
+        Err(e) => format!("\nxtask: {why}; no state dump (monitor: {e})\n"),
         Ok(()) if seen(STATEDUMP_END) => format!(
-            "\nxtask: timed out after {what}; the guest's state dump (NMI) took {:.1}s\n",
+            "\nxtask: {why}; the guest's state dump (NMI) took {:.1}s\n",
             asked.elapsed().as_secs_f64()
         ),
         Ok(()) if seen(STATEDUMP_NMI_DONE) => format!(
-            "\nxtask: timed out after {what}; the state dump's NMI part came, its threads part \
+            "\nxtask: {why}; the state dump's NMI part came, its threads part \
              did not within {wait}s of run time (the boot thread could not run: the scheduler or a lock stuck?)\n"
         ),
         Ok(()) if seen(STATEDUMP_BEGIN) => format!(
-            "\nxtask: timed out after {what}; the state dump began but did not end within {wait}s of run time\n"
+            "\nxtask: {why}; the state dump began but did not end within {wait}s of run time\n"
         ),
         Ok(()) => format!(
-            "\nxtask: timed out after {what}; the guest did not answer the NMI within {wait}s of run time \
+            "\nxtask: {why}; the guest did not answer the NMI within {wait}s of run time \
              (no NMI handler yet: early boot, or the machine is wedged)\n"
         ),
     }
@@ -8891,6 +9984,14 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
         },
         ScreenStep {
             after: "",
+            // Keys typed while the program is busy: `q` keeps its window
+            // procedure in Sleep (3 s) while x and y come; it says
+            // whether their messages came in Windows' order.
+            input: &["sendkey q", "sendkey x", "sendkey y"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "gui_test: keys typed while busy",
             // A right click at client (250, 50): the popup menu
             // (One, Two) at (351, 183), over the window.
             input: &["mouse_button 2", "mouse_button 0"],
@@ -8997,9 +10098,11 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
 const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     (
         // Chromium's window at (0, 0), 800 x 600, its page (window.html)
-        // below Chromium's own tab strip and toolbar: the green body and
-        // the magenta box at page (100, 100) - (300, 200). Then dragged by
-        // its own tab strip, and Alt+F4.
+        // below Chromium's own tab strip and toolbar: the green body, the
+        // magenta box at page (100, 100) - (300, 200) and the gold link
+        // block at page (400, 100) - (600, 200). Then dragged by its own
+        // tab strip, "gala" typed into the text field (page (100, 250)),
+        // the link clicked (window2.html: a blue body), and Alt+F4.
         "chromium_window",
         ScreenCheck {
             marker: "gala window painted",
@@ -9029,8 +10132,40 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     input: &["mouse_move 100 100", "mouse_button 0"],
                     pixels: &[
                         PixelCheck::AnyIn(220, 300, 160, 160, 0xff00ff),
+                        PixelCheck::AnyIn(520, 300, 160, 160, 0xffd700),
                         PixelCheck::At(880, 600, 0x2e8b57),
                     ],
+                },
+                ScreenStep {
+                    after: "",
+                    // A click in the text field (page (100, 250) -
+                    // (300, 290): 200..400 x 493..533 on the screen after
+                    // the drag; the pointer is at (600, 120)): it takes
+                    // the focus.
+                    input: &["mouse_move -300 393", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "gala text focused",
+                    // Typing with no IME (imm32 has no input contexts):
+                    // the keys' WM_KEYDOWN and WM_CHAR reach the page.
+                    input: &["sendkey g", "sendkey a", "sendkey l", "sendkey a"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "gala typed gala",
+                    // A click on the link block's middle (the pointer is at
+                    // (300, 513); the block spans 500..700 x 343..443 now,
+                    // below the toolbar and the --no-sandbox infobar):
+                    // Chromium follows it.
+                    input: &["mouse_move 300 -123", "mouse_button 1", "mouse_button 0"],
+                    pixels: &[],
+                },
+                ScreenStep {
+                    after: "gala link followed",
+                    // window2.html's blue where window.html's box was.
+                    input: &[],
+                    pixels: &[PixelCheck::AnyIn(220, 300, 160, 160, 0x1e90ff)],
                 },
                 ScreenStep {
                     after: "",
@@ -9353,15 +10488,15 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                     // Then, after the TLS handshake, the server's
                     // self-signed certificate: the "Unknown certificate"
-                    // dialog's OK.
-                    pixels: &[PixelCheck::AnyIn(800, 646, 60, 18, 0x005fb8)],
+                    // dialog's OK (y 632-652).
+                    pixels: &[PixelCheck::AnyIn(800, 636, 60, 12, 0x005fb8)],
                 },
                 ScreenStep {
                     after: "",
-                    // OK (833, 655): FileZilla trusts it, logs on and lists
+                    // OK (833, 642): FileZilla trusts it, logs on and lists
                     // the remote directory (C:\ftp): "hello.txt" at the left
                     // of the remote list.
-                    input: &["mouse_move 70 154", "mouse_button 1", "mouse_button 0"],
+                    input: &["mouse_move 70 141", "mouse_button 1", "mouse_button 0"],
                     pixels: &[PixelCheck::AnyIn(650, 405, 150, 40, 0x1b1b1b)],
                 },
                 ScreenStep {
@@ -9386,7 +10521,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 },
                 ScreenStep {
                     after: "",
-                    // A click in the console (300, 400) activates it, and
+                    // A click in the console (300, 387) activates it, and
                     // Win+Left snaps it to the left half: the server's log
                     // next to FileZilla.
                     input: &[
@@ -9690,9 +10825,14 @@ fn add_net(cmd: &mut Command, port: u16) {
 
 /// The same with the guest's port `guest` (sshd's 22).
 fn add_net_to(cmd: &mut Command, port: u16, guest: u16) {
+    add_net_with(cmd, port, guest, "");
+}
+
+/// add_net_to with more `-netdev user` options (`extra`: ",guestfwd=...").
+fn add_net_with(cmd: &mut Command, port: u16, guest: u16, extra: &str) {
     cmd.arg("-netdev")
         .arg(format!(
-            "user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:{guest},hostfwd=udp:127.0.0.1:{port}-:{guest}"
+            "user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:{guest},hostfwd=udp:127.0.0.1:{port}-:{guest}{extra}"
         ))
         // The legacy (0.9.5) interface: one I/O BAR (see docs/ARCHITECTURE.md).
         .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
@@ -9700,7 +10840,7 @@ fn add_net_to(cmd: &mut Command, port: u16, guest: u16) {
 
 /// Scenarios whose guest fetches `http://10.0.2.100/` from the host
 /// (`add_host_page_net`).
-const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host"];
+const HOST_PAGE_SCENARIOS: &[&str] = &["hostnet", "chromium_host", "chromium_wpt"];
 
 /// The page `serve-page` serves (user/hostnet_test checks it byte for
 /// byte).
@@ -9712,6 +10852,18 @@ const HOST_PAGE: &str = "<html><body><h1>hello from the host</h1></body></html>\
 /// input and output the connection): a page from the host network with
 /// no host port to lease or to tell the guest.
 fn add_host_page_net(cmd: &mut Command, log: &Path) -> Result {
+    let guestfwd = host_page_fwd(cmd, log)?;
+    cmd.arg("-netdev")
+        .arg(format!("user,id=n0{guestfwd}"))
+        .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
+    Ok(())
+}
+
+/// The `-netdev user` option that sends 10.0.2.100:80 to `xtask
+/// serve-page` (",guestfwd=..."), its log set in QEMU's environment
+/// (serve-page inherits it); for chromium_wpt, wptserve's ports instead
+/// (`wpt::guestfwd`), the log still the client's.
+fn host_page_fwd(cmd: &mut Command, log: &Path) -> Result<String> {
     let exe = env::current_exe().map_err(|e| format!("xtask's own path: {e}"))?;
     let exe = exe.display().to_string();
     if exe.contains(',') || exe.contains(' ') {
@@ -9719,11 +10871,11 @@ fn add_host_page_net(cmd: &mut Command, log: &Path) -> Result {
     }
     // serve-page's standard error is the connection too: it logs each
     // request to `log`, which the run adds to the serial log.
-    cmd.env("XTASK_SERVE_PAGE_LOG", log)
-        .arg("-netdev")
-        .arg(format!("user,id=n0,guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
-        .args(["-device", "virtio-net-pci,netdev=n0,disable-legacy=off"]);
-    Ok(())
+    cmd.env("XTASK_SERVE_PAGE_LOG", log);
+    if log.to_string_lossy().contains("chromium_wpt") {
+        return wpt::guestfwd();
+    }
+    Ok(format!(",guestfwd=tcp:10.0.2.100:80-cmd:{exe} serve-page"))
 }
 
 /// `cargo xtask serve-page` (QEMU runs it for each connection to
@@ -10309,6 +11461,139 @@ fn psql_client(port: u16) -> Result {
     ))
 }
 
+/// One WebDriver command (W3C WebDriver over HTTP/1.1): its status code
+/// and body. ChromeDriver checks the Host header (localhost or an IP
+/// literal); `timeout` covers commands that start Chromium under TCG.
+fn webdriver(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: &str,
+    timeout: u64,
+) -> Result<(u32, String)> {
+    use std::io::Write;
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(timeout))).map_err(|e| e.to_string())?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).map_err(|e| format!("send: {e}"))?;
+    // ChromeDriver keeps the connection open whatever the request says:
+    // read until the body is complete (its Content-Length, or a chunked
+    // body's last chunk), not until the connection closes.
+    let mut response = Vec::new();
+    let mut buf = [0u8; 16384];
+    let (head, mut raw) = loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => 0,
+            Ok(n) => n,
+            Err(e) if response.is_empty() => {
+                return Err(format!("{method} {path}: no response: {e}"));
+            }
+            Err(e) => return Err(format!("{method} {path}: response cut: {e}")),
+        };
+        response.extend_from_slice(&buf[..n]);
+        if let Some(split) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&response[..split]).into_owned();
+            let body = &response[split + 4..];
+            let length = head.lines().find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.trim()
+                    .eq_ignore_ascii_case("Content-Length")
+                    .then(|| v.trim().parse::<usize>().ok())?
+            });
+            let chunked =
+                head.lines().any(|l| l.eq_ignore_ascii_case("Transfer-Encoding: chunked"));
+            let complete = match length {
+                Some(len) => body.len() >= len,
+                None if chunked => body.ends_with(b"0\r\n\r\n"),
+                None => n == 0,
+            };
+            if complete || n == 0 {
+                let mut raw = body.to_vec();
+                if let Some(len) = length {
+                    raw.truncate(len);
+                }
+                break (head, raw);
+            }
+        } else if n == 0 {
+            return Err(format!("{method} {path}: no end of headers"));
+        }
+    };
+    if head.lines().any(|l| l.eq_ignore_ascii_case("Transfer-Encoding: chunked")) {
+        raw = dechunk(&raw).ok_or("bad chunked body")?;
+    }
+    let status = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    Ok((status, String::from_utf8_lossy(&raw).into_owned()))
+}
+
+/// The JSON string value of `"key":"..."` in `body` (no escapes: the
+/// values read here have none).
+fn json_string<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    let at = body.find(&format!("\"{key}\""))?;
+    let rest = body[at + key.len() + 2..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    Some(&rest[..rest.find('"')?])
+}
+
+/// The host side of `chromium_driver`: ChromeDriver's /status, then a
+/// session on headless Chromium (software rendering, no sandbox, its
+/// own profile), page.html loaded from C:, a script returning its title
+/// and its script-written paragraph, and the session ended (Chromium
+/// exits). Each step's failure names the step and the driver's answer.
+fn webdriver_client(port: u16) -> Result {
+    let verdict = webdriver_session(port);
+    // ChromeDriver ends (its /shutdown), and with it the run: `dump=`
+    // then copies the logs, whatever the verdict.
+    let _ = webdriver(port, "GET", "/shutdown", "", 60);
+    verdict
+}
+
+fn webdriver_session(port: u16) -> Result {
+    let mut ready = Err("no answer".to_string());
+    for _ in 0..60 {
+        ready = webdriver(port, "GET", "/status", "", 60);
+        if matches!(ready, Ok((200, ref b)) if b.contains("\"ready\":true")) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    match ready {
+        Ok((200, ref b)) if b.contains("\"ready\":true") => {}
+        other => return Err(format!("GET /status: {other:?}")),
+    }
+    // Stopgap (ROADMAP BR, "Chrome's start-up"): browserStartupTimeout
+    // 180 s instead of ChromeDriver's 60 s. Measured: the browser's UI
+    // thread answers DevTools' /json/version only after its start-up work
+    // (a CPU-bound UI thread: image page faults and relocation, lockdep in
+    // the test kernel, Chrome's own code), 40-70 s after launch under TCG
+    // with the gate's load. Removed once Chrome starts within 60 s there.
+    let capabilities = r#"{"capabilities":{"alwaysMatch":{"goog:chromeOptions":{"browserStartupTimeout":180000,"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrd","--enable-logging","--log-file=C:\\chromium\\chrome_driven.log","--ipc-connection-timeout=120"]}}}}"#;
+    let (status, body) = webdriver(port, "POST", "/session", capabilities, 600)?;
+    let Some(id) = json_string(&body, "sessionId").filter(|_| status == 200) else {
+        return Err(format!("POST /session: {status} {body}"));
+    };
+    let id = id.to_string();
+    let step = |method: &str, path: &str, body: &str| -> Result<String> {
+        let (status, answer) = webdriver(port, method, &format!("/session/{id}{path}"), body, 300)?;
+        if status != 200 {
+            return Err(format!("{method} /session/{{id}}{path}: {status} {answer}"));
+        }
+        Ok(answer)
+    };
+    step("POST", "/url", r#"{"url":"file:///C:/gala/page.html"}"#)?;
+    let script = r#"{"script":"return document.title + '|' + document.getElementById('dynamic').textContent","args":[]}"#;
+    let answer = step("POST", "/execute/sync", script)?;
+    if json_string(&answer, "value") != Some("gala page|V8 ran: 42") {
+        return Err(format!("the script's value: {answer}"));
+    }
+    step("DELETE", "", "")?;
+    Ok(())
+}
+
 /// The host side of `filezilla_server`: the FTP control connection (RFC
 /// 959): the greeting (220), USER gala (230 at once: no password, or 331
 /// then PASS), PWD (257 "/"), QUIT (221).
@@ -10739,6 +12024,25 @@ const FORWARD_REMOTE_PORT: u16 = 7001;
 /// The bytes each direction of `ssh_forward_client` carries.
 const FORWARD_BYTES: usize = 200 * 1024;
 
+/// Which leg of `ssh -L` lost bytes, from what sshfwd_test said it
+/// served: on the way in (the host's ssh, sshd-session's channel or gala's
+/// loopback connection to sshfwd_test; the scenario's `events=net` has
+/// each connection's byte counts at its shutdown and close) or on the way
+/// back.
+fn forward_leg(said: &[String]) -> String {
+    let served = said.iter().find_map(|l| {
+        l.split("sshfwd_test: served ").nth(1)?.split(' ').next()?.parse::<usize>().ok()
+    });
+    match served {
+        Some(n) if n < FORWARD_BYTES => format!(
+            " (sshfwd_test received {n} of {FORWARD_BYTES}: lost on the way in, before \
+             sshfwd_test; the tcp shutdown/close events count each connection's bytes)"
+        ),
+        Some(n) => format!(" (sshfwd_test received and echoed {n}: lost on the way back)"),
+        None => String::new(),
+    }
+}
+
 /// The host side of `sshd_forward`. `ssh -L <socket>:127.0.0.1:7000`
 /// whose command starts `sshfwd_test serve 7000` in gala: once it says it
 /// listens, the host writes FORWARD_BYTES to the local socket, shuts its
@@ -10845,7 +12149,11 @@ fn ssh_forward_client(port: u16) -> Result {
     });
     local.map_err(|e| {
         let trace = fs::read(&trace).unwrap_or_default();
-        format!("ssh -L: {e}; sshfwd_test said {said:?}\nssh -v:\n{}", trace_tail(&trace, 20))
+        format!(
+            "ssh -L: {e}{}; sshfwd_test said {said:?}\nssh -v:\n{}",
+            forward_leg(&said),
+            trace_tail(&trace, 20)
+        )
     })?;
 
     // -R: an echo server on the host for sshd's forwarded-tcpip channel.
@@ -11569,6 +12877,10 @@ fn judge_log_inner(
     {
         return Ok(());
     }
+    // A failed screen check stopped the VM (run_vm): that, not a timeout.
+    if let Some(line) = serial.lines().find(|l| l.starts_with("xtask: screen: ")) {
+        return Err(line.trim_start_matches("xtask: ").to_string());
+    }
     match status {
         _ if timed_out => Err(format!(
             "timed out after {}s of run time (vmtime.rs)",
@@ -11924,21 +13236,9 @@ fn image_modules(
 ) -> Result<Vec<(&'static str, &'static str)>> {
     let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
-        .map(|d| {
-            (
-                d.file,
-                if d.file.starts_with("testdll") || d.file == "tlsdll.dll" {
-                    "gala"
-                } else {
-                    "Windows/System32"
-                },
-            )
-        })
+        .map(|d| (d.file, if is_test_dll(d.file) { "gala" } else { "Windows/System32" }))
         .collect();
-    // The machine root store's public CAs (THIRD_PARTY.md: Mozilla's, as
-    // curl.se publishes them), which Schannel and crypt32's ROOT store
-    // read: a full image trusts the public web, as Windows does.
-    modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules.extend(system_modules().into_iter().filter(|(file, _)| file.contains('/')));
     if cmdline.iter().any(|w| w.contains("nginx.exe")) {
         let nginx = if cmdline.iter().any(|w| w.contains("nginx-master")) {
             "nginx_master"
@@ -11957,6 +13257,89 @@ fn image_modules(
         modules.extend(files.into_iter().filter(|(file, _)| file.contains('/')));
     }
     Ok(modules)
+}
+
+/// The test DLLs among USER_DLLS (shipped to C:\gala, not System32).
+fn is_test_dll(file: &str) -> bool {
+    file.starts_with("testdll") || file == "tlsdll.dll"
+}
+
+/// The system a full image ships besides the kernel (`cargo xtask iso`'s,
+/// and a release's: `release-tree`): every DLL of USER_DLLS but the test
+/// DLLs in C:\Windows\System32, and the machine root store's public CAs
+/// (THIRD_PARTY.md: Mozilla's, as curl.se publishes them), which Schannel
+/// and crypt32's ROOT store read: a full image trusts the public web, as
+/// Windows does.
+fn system_modules() -> Vec<(&'static str, &'static str)> {
+    let mut modules: Vec<(&str, &str)> = USER_DLLS
+        .iter()
+        .filter(|d| !is_test_dll(d.file))
+        .map(|d| (d.file, "Windows/System32"))
+        .collect();
+    modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules
+}
+
+/// `cargo xtask release-tree <dir> [--release]`: the files of a release
+/// (what the update feed publishes, ARCHITECTURE "The update feed"): the
+/// image tree `make_iso` stages, with the kernel, system_modules, Limine,
+/// the sealed config and the signed manifest, and no test programs, test
+/// DLLs or scenario modules. The kernel command line is empty, as
+/// `cargo xtask build`'s. `dir` must not exist or be empty.
+fn release_tree(release: bool, dir: &Path) -> Result {
+    if fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some()) {
+        return Err(format!("{}: not empty (release-tree writes a new tree)", dir.display()));
+    }
+    // The kernel and the DLLs; no test programs.
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET]);
+    trust::kernel_env(&mut cmd)?;
+    if release {
+        cmd.arg("--release");
+    }
+    run_cmd(&mut cmd)?;
+    let mut cmd = user_build();
+    for dll in USER_DLLS {
+        cmd.args(["--package", dll.package]);
+    }
+    run_cmd(&mut cmd)?;
+    let modules = system_modules();
+    make_iso_unchecked(release, "release", "", &modules, &trust::DEFAULT, Some(dir))?;
+    let files = tree_size(dir);
+    let mut count = Vec::new();
+    tree_files(dir, Path::new(""), &mut count)?;
+    let count = count.iter().filter(|p| dir.join(p).is_file()).count();
+    eprintln!(
+        "xtask: release tree {}: {count} files, {files} bytes (kernel, {} system modules, \
+         Limine, limine.conf, gala.manifest)",
+        dir.display(),
+        modules.len()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod release_tree_tests {
+    use super::*;
+
+    /// A release is the system: gala's DLLs in System32 and the root
+    /// store, no test DLL or program.
+    #[test]
+    fn release_modules_are_the_system() {
+        let m = system_modules();
+        for dll in ["ntdll.dll", "kernel32.dll", "kernelbase.dll", "user32.dll", "ws2_32.dll"] {
+            assert!(m.contains(&(dll, "Windows/System32")), "{dll}");
+        }
+        assert!(m.contains(&("user/roots/public-roots.pem", "Windows/System32/gala/roots")));
+        for (file, _) in &m {
+            assert!(!is_test_dll(file) && !file.ends_with(".exe"), "{file}");
+            assert!(!USER_PROGRAMS.iter().any(|p| file.starts_with(p)), "{file}");
+        }
+        // `cargo xtask iso` ships the same system, and the test DLLs apart.
+        let iso = image_modules(&[], None).unwrap();
+        assert!(m.iter().all(|f| iso.contains(f)));
+        assert!(iso.contains(&("testdll.dll", "gala")));
+    }
 }
 
 /// What `cargo xtask iso` runs without a command line: a few programs that
@@ -12251,18 +13634,28 @@ fn docker_test(args: &[String]) -> Result {
     run_cmd(&mut cmd)
 }
 
+/// Checked-in files a test program opens beside itself, exported to
+/// user/bin so that it finds them there on Windows as in C:\gala.
+const EXPORTED_TEST_DATA: &[(&str, &str)] =
+    &[("user/kernel32_clr_test/x86_native.dll", "x86_native.dll")];
+
 /// Copies the test programs to `user/bin/`, where they are checked in so
 /// they can be run on real Windows without a Rust toolchain.
 fn export_tests() -> Result {
     let dir = root().join("user/bin");
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
-    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS) {
-        let exe = target_dir().join(USER_TARGET).join("release").join(format!("{program}.exe"));
-        copy(&exe, &dir.join(format!("{program}.exe")))?;
+    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS).chain(USER_PROGRAMS_X86) {
+        copy(&built_program(program), &dir.join(format!("{program}.exe")))?;
     }
     for dll in USER_DLLS {
-        let file = target_dir().join(USER_TARGET).join("release").join(dll.file);
+        let file = built_dll(dll.file);
         copy(&file, &dir.join(dll.exported_as))?;
+    }
+    for dll in USER_DLLS_X86 {
+        copy(&built_dll_x86(dll.file), &dir.join(dll.exported_as))?;
+    }
+    for (file, exported_as) in EXPORTED_TEST_DATA {
+        copy(&root().join(file), &dir.join(exported_as))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
     // pk_install_test's package source zips user/bin/hello.exe, so it is

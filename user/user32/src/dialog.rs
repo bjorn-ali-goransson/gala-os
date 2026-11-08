@@ -8,8 +8,8 @@
 //! procedure and answers DWLP_MSGRESULT (or the procedure's result for
 //! the messages that return one) when it handles it, else does the
 //! default: WM_CLOSE is IDCANCEL, DM_GETDEFID/DM_SETDEFID, the face
-//! colour behind. gala has no window extra bytes yet: DWLP_MSGRESULT,
-//! DWLP_DLGPROC and DWLP_USER live in this module's table.
+//! colour behind. DWLP_MSGRESULT, DWLP_DLGPROC and DWLP_USER live in
+//! this module's table (a dialog class's other extra bytes in extra.rs).
 
 use crate::window::{DefWindowProcW, Handle, Hwnd, SendMessageW};
 use core::cell::UnsafeCell;
@@ -113,14 +113,20 @@ pub fn is_dialog(hwnd: Hwnd) -> bool {
     with(|d, _| d.iter().any(|e| e.hwnd == hwnd))
 }
 
-/// GetWindowLongPtrW's DWLP_MSGRESULT (0), DWLP_DLGPROC (8), DWLP_USER
-/// (16) of a dialog.
+/// A dialog's DWLP_* offsets: DWLP_MSGRESULT 0, DWLP_DLGPROC and
+/// DWLP_USER one and two pointers on (8 and 16 for x64, 4 and 8 for x86).
+const P: i32 = core::mem::size_of::<isize>() as i32;
+const DWLP_DLGPROC: i32 = P;
+const DWLP_USER: i32 = 2 * P;
+
+/// GetWindowLongPtrW's DWLP_MSGRESULT, DWLP_DLGPROC, DWLP_USER of a
+/// dialog.
 pub fn get_long(hwnd: Hwnd, index: i32) -> Option<isize> {
     let e = with(|d, _| d.iter().find(|e| e.hwnd == hwnd).copied())?;
     match index {
         0 => Some(e.msg_result),
-        8 => Some(e.proc_.map_or(0, |p| p as usize as isize)),
-        16 => Some(e.user),
+        DWLP_DLGPROC => Some(e.proc_.map_or(0, |p| p as usize as isize)),
+        DWLP_USER => Some(e.user),
         _ => None,
     }
 }
@@ -131,14 +137,14 @@ pub fn set_long(hwnd: Hwnd, index: i32, value: isize) -> Option<isize> {
         let e = d.iter_mut().find(|e| e.hwnd == hwnd)?;
         Some(match index {
             0 => core::mem::replace(&mut e.msg_result, value),
-            8 => {
+            DWLP_DLGPROC => {
                 let old = e.proc_.map_or(0, |p| p as usize as isize);
                 // SAFETY: the caller's dialog procedure.
                 e.proc_ =
                     (value != 0).then(|| unsafe { core::mem::transmute::<isize, DlgProc>(value) });
                 old
             }
-            16 => core::mem::replace(&mut e.user, value),
+            DWLP_USER => core::mem::replace(&mut e.user, value),
             _ => return None,
         })
     })
@@ -583,7 +589,11 @@ pub extern "system" fn CreateDialogParamW(
     proc_: Option<DlgProc>,
     param: isize,
 ) -> Hwnd {
-    #[link(name = "kernel32", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn FindResourceW(module: usize, name: usize, kind: usize) -> usize;
         fn LoadResource(module: usize, res: usize) -> *const u16;

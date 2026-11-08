@@ -10,7 +10,9 @@
 //! WSASend with lpCompletionRoutine: queued to the thread, run in SleepEx's
 //! alertable wait, also for a receive that completed at once);
 //! WSAEventSelect/WSAEnumNetworkEvents (FD_ACCEPT, FD_READ, FD_CLOSE; the
-//! event reset). Prints `winsock_async_test: ok`
+//! event reset; FD_CONNECT of a non-blocking connect, Chromium's way); a shutdown(SD_SEND) while an overlapped send is still
+//! pending (the FIN follows that send's bytes; a later send fails with
+//! WSAESHUTDOWN). Prints `winsock_async_test: ok`
 //! or exits with the number of the failing check.
 
 #![no_std]
@@ -105,6 +107,14 @@ unsafe extern "system" {
         name: *const u16,
     ) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn CreateThread(
+        attrs: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -172,6 +182,7 @@ unsafe extern "system" {
     fn accept(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> Socket;
     fn getsockname(s: Socket, addr: *mut SockaddrIn, len: *mut i32) -> i32;
     fn setsockopt(s: Socket, level: i32, name: i32, value: *const u8, len: i32) -> i32;
+    fn shutdown(s: Socket, how: i32) -> i32;
     fn closesocket(s: Socket) -> i32;
 }
 
@@ -195,6 +206,8 @@ unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    // Stack probe for the 4 KiB buffer (ntdll exports it, as on Windows).
+    fn __chkstk();
 }
 
 #[unsafe(no_mangle)]
@@ -256,6 +269,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -265,10 +279,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -318,6 +334,28 @@ static mut DONE_ERROR: u32 = 0;
 static mut DONE_BYTES: u32 = 0;
 static mut DONE_OV: *mut Overlapped = core::ptr::null_mut();
 const WAIT_IO_COMPLETION: u32 = 0xc0;
+const SD_SEND: i32 = 1;
+const WSAESHUTDOWN: i32 = 10058;
+const WSAEWOULDBLOCK: i32 = 10035;
+/// Rounds of the FD_CONNECT check, and the busy threads during them.
+const CONNECT_ROUNDS: u64 = 1000;
+const SPINNERS: usize = 4;
+static STOP_SPINNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+extern "system" fn spin(_: *mut c_void) -> u32 {
+    while !STOP_SPINNING.load(core::sync::atomic::Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    0
+}
+/// More than a loopback connection's send and receive buffers together,
+/// so an overlapped send of it pends.
+const BIG_LEN: usize = 256 * 1024;
+static mut BIG: [u8; BIG_LEN] = [0; BIG_LEN];
+
+fn pattern(i: usize) -> u8 {
+    (i * 31 + i / 7) as u8
+}
 
 /// The completion routine: (dwError, cbTransferred, lpOverlapped, dwFlags).
 extern "system" fn done(error: u32, bytes: u32, ov: *mut Overlapped, _flags: u32) {
@@ -637,6 +675,126 @@ fn run() -> Result<(), u32> {
             c.eq(closesocket(s) as u64, 0)?;
         }
         CloseHandle(ev);
+
+        // WSAEventSelect(FD_CONNECT) before a non-blocking connect
+        // (Chromium's tcp_socket_win.cc): connect fails with WSAEWOULDBLOCK,
+        // then the event is set and WSAEnumNetworkEvents reports FD_CONNECT
+        // without error, however soon the handshake finishes (over loopback
+        // it can finish on another CPU before connect returns). Many
+        // rounds: the moment that lost it in gala was narrow (the stack
+        // reported the connection before the endpoint knew its socket, and
+        // Chromium waited for its 240 s connect timeout).
+        const FD_CONNECT: i32 = 16;
+        const FD_CONNECT_BIT: usize = 4;
+        let l5 = overlapped_socket();
+        c.eq(bind(l5, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.eq(listen(l5, 5) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(l5, &mut name, &mut len) as u64, 0)?;
+        let ev5 = CreateEventW(core::ptr::null_mut(), 1, 0, core::ptr::null());
+        // Threads that keep every CPU busy, so that connect's thread is
+        // often preempted (where the stack had already reported).
+        let spinners = [0; SPINNERS].map(|_| {
+            CreateThread(
+                core::ptr::null_mut(),
+                0,
+                spin,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+            )
+        });
+        c.ok(spinners.iter().all(|h| !h.is_null()), GetLastError().into())?;
+        // Every round has the same check numbers.
+        let base = c.0;
+        for round in 0..CONNECT_ROUNDS {
+            c.0 = base;
+            let c5 = overlapped_socket();
+            c.eq(WSAEventSelect(c5, ev5, FD_CONNECT) as u64, 0)?;
+            let r = connect(c5, &name, ADDR_LEN);
+            c.ok(r != 0 && WSAGetLastError() == WSAEWOULDBLOCK, WSAGetLastError() as u64)?;
+            // At once, racing the handshake: WSAEnumNetworkEvents copies
+            // the record, clears it and resets the event atomically (as
+            // documented), so if this call does not report FD_CONNECT the
+            // event is still to be set and the next call reports it. (gala
+            // reset the event after the kernel's copy: a connection
+            // recorded in between lost its signal, and Chromium waited.)
+            ne = [0; 11];
+            c.eq(WSAEnumNetworkEvents(c5, ev5, ne.as_mut_ptr()) as u64, 0)?;
+            if ne[0] & FD_CONNECT == 0 {
+                // The round that lost it, as the failing check's value.
+                c.ok(WaitForSingleObject(ev5, 5000) == 0, round)?;
+                c.eq(WSAEnumNetworkEvents(c5, ev5, ne.as_mut_ptr()) as u64, 0)?;
+            }
+            c.ok(ne[0] & FD_CONNECT != 0 && ne[1 + FD_CONNECT_BIT] == 0, ne[0] as u64)?;
+            let a5 = accept(l5, core::ptr::null_mut(), core::ptr::null_mut());
+            c.ok(a5 != INVALID_SOCKET, WSAGetLastError() as u64)?;
+            for s in [a5, c5] {
+                c.eq(closesocket(s) as u64, 0)?;
+            }
+        }
+        STOP_SPINNING.store(true, core::sync::atomic::Ordering::Release);
+        for h in spinners {
+            c.eq(WaitForSingleObject(h, 5000).into(), 0)?;
+            CloseHandle(h);
+        }
+        c.eq(closesocket(l5) as u64, 0)?;
+        CloseHandle(ev5);
+
+        // A graceful shutdown comes after the sends issued before it
+        // (Win32-OpenSSH's channels, `sshd_forward`: one overlapped WSASend
+        // with a routine, larger than the socket's buffers, still pending
+        // when its channel calls shutdown(SD_SEND)). shutdown does not
+        // wait; the peer reads every byte, then end of stream; the send
+        // completes in full; a send after the shutdown fails with
+        // WSAESHUTDOWN.
+        let l4 = overlapped_socket();
+        c.eq(bind(l4, &SockaddrIn::new(LOOPBACK, 0), ADDR_LEN) as u64, 0)?;
+        c.eq(listen(l4, 1) as u64, 0)?;
+        len = ADDR_LEN;
+        c.eq(getsockname(l4, &mut name, &mut len) as u64, 0)?;
+        let c4 = overlapped_socket();
+        c.eq(connect(c4, &name, ADDR_LEN) as u64, 0)?;
+        let a4 = accept(l4, core::ptr::null_mut(), core::ptr::null_mut());
+        c.ok(a4 != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        let big = core::slice::from_raw_parts_mut((&raw mut BIG).cast::<u8>(), BIG_LEN);
+        for (i, b) in big.iter_mut().enumerate() {
+            *b = pattern(i);
+        }
+        let mut sb = WsaBuf { len: BIG_LEN as u32, buf: big.as_mut_ptr() };
+        let mut ov_d = Overlapped::new();
+        let r = WSASend(c4, &mut sb, 1, &mut bytes, 0, &mut ov_d, done as *const () as usize);
+        c.ok(r == 0 || WSAGetLastError() as u32 == ERROR_IO_PENDING, WSAGetLastError() as u64)?;
+        c.eq(shutdown(c4, SD_SEND) as u64, 0)?;
+        let mut late = WsaBuf { len: 1, buf: one.as_mut_ptr() };
+        let r = WSASend(c4, &mut late, 1, &mut bytes, 0, core::ptr::null_mut(), 0);
+        c.ok(r != 0 && WSAGetLastError() == WSAESHUTDOWN, WSAGetLastError() as u64)?;
+        let mut chunk = [0u8; 4096];
+        let mut rc = WsaBuf { len: chunk.len() as u32, buf: chunk.as_mut_ptr() };
+        let mut got = 0usize;
+        loop {
+            flags = 0;
+            let r = WSARecv(a4, &mut rc, 1, &mut received, &mut flags, core::ptr::null_mut(), 0);
+            c.ok(r == 0, WSAGetLastError() as u64)?;
+            if received == 0 {
+                break;
+            }
+            let n = received as usize;
+            let bad = chunk[..n].iter().enumerate().position(|(i, &b)| b != pattern(got + i));
+            c.ok(bad.is_none(), (got + bad.unwrap_or(0)) as u64)?;
+            got += n;
+        }
+        // All of it, then end of stream (gala sent the FIN at the
+        // shutdown and the send's rest was lost: 131072 bytes came).
+        c.eq(got as u64, BIG_LEN as u64)?;
+        // The routine ran (in one of the waits above, or now).
+        SleepEx(0, 1);
+        c.ok(DONE_COUNT == 4 && DONE_ERROR == 0, DONE_ERROR.into())?;
+        c.eq(DONE_BYTES.into(), BIG_LEN as u64)?;
+        c.ok(core::ptr::eq(DONE_OV, &raw mut ov_d), 0)?;
+        for s in [a4, c4, l4] {
+            c.eq(closesocket(s) as u64, 0)?;
+        }
         c.eq(WSACleanup() as u64, 0)?;
     }
     Ok(())
@@ -659,4 +817,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

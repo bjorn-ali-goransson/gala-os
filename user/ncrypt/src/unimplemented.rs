@@ -5,6 +5,7 @@
 gala_stubs::unimplemented_exports!("ncrypt.dll":
     GetSChannelInterface
     NCryptCloseProtectionDescriptor
+    NCryptCreateClaim
     NCryptCreateProtectionDescriptor
     NCryptDecrypt
     NCryptDeriveKey

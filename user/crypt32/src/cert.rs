@@ -183,7 +183,7 @@ fn days_from_1601(y: u64, m: u64, d: u64) -> u64 {
 }
 
 /// A UTCTime or GeneralizedTime (Z form) as a FILETIME.
-fn time(t: Tlv<'_>) -> Result<u64, u32> {
+pub(crate) fn time(t: Tlv<'_>) -> Result<u64, u32> {
     let s = t.content;
     let digits = |r: core::ops::Range<usize>| -> Result<u64, u32> {
         let part = s.get(r).ok_or(CRYPT_E_ASN1_CORRUPT)?;
@@ -329,7 +329,7 @@ fn block<'a>(p: *const CertContext) -> Option<&'a mut Block> {
 }
 
 /// An algorithm identifier: (OID contents, the encoded parameters).
-fn algorithm_id<'a>(t: Tlv<'a>) -> Result<(&'a [u8], &'a [u8]), u32> {
+pub(crate) fn algorithm_id<'a>(t: Tlv<'a>) -> Result<(&'a [u8], &'a [u8]), u32> {
     if t.tag != SEQUENCE {
         return Err(CRYPT_E_ASN1_BADTAG);
     }
@@ -541,7 +541,9 @@ pub extern "system" fn CertCreateCertificateContext(
             props: core::ptr::null_mut(),
             owned_key: 0,
             context: CertContext {
-                encoding,
+                // Only the certificate encoding type, the low word
+                // (Windows 11 25H2 keeps 1 of X509_ASN | PKCS_7_ASN).
+                encoding: encoding & 0xffff,
                 encoded,
                 encoded_len: used as u32,
                 info: core::ptr::null_mut(),
@@ -1483,14 +1485,16 @@ pub extern "system" fn CertGetIntendedKeyUsage(
     1
 }
 
+const CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG: u32 = 2;
 const CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG: u32 = 4;
 
 /// CertGetEnhancedKeyUsage(cert, flags, usage, size): the extended key
 /// usage extension's OIDs as CERT_ENHKEY_USAGE (count, pointer array,
 /// then the strings; the size with a NULL buffer, ERROR_MORE_DATA when
 /// short). No extension: an empty list and CRYPT_E_NOT_FOUND (good for
-/// every usage). The CERT_ENHKEY_USAGE_PROP_ID property is not kept, so
-/// CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG finds nothing.
+/// every usage), or, asked for the extension alone
+/// (CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG), FALSE with CRYPT_E_NOT_FOUND. The CERT_ENHKEY_USAGE_PROP_ID property is not kept, so
+/// CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG fails with CRYPT_E_NOT_FOUND.
 #[unsafe(no_mangle)]
 pub extern "system" fn CertGetEnhancedKeyUsage(
     cert: *const CertContext,
@@ -1504,7 +1508,10 @@ pub extern "system" fn CertGetEnhancedKeyUsage(
     // SAFETY: the caller's context and its CERT_INFO.
     let info = unsafe { &*(*cert).info };
     let value = if flags & CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG != 0 {
-        None
+        // No usage property is kept: asked for the property alone, there
+        // is none (FALSE, CRYPT_E_NOT_FOUND; Python's enum_certificates
+        // reads it as trusted for every purpose).
+        return error(CRYPT_E_NOT_FOUND, 0);
     } else {
         extension_value(info, c"2.5.29.37")
     };
@@ -1558,7 +1565,10 @@ pub extern "system" fn CertGetEnhancedKeyUsage(
         }
     }
     if value.is_none() {
-        return error(CRYPT_E_NOT_FOUND, 1);
+        // Asked for the extension alone: none is a failure; asked for both,
+        // an empty list (good for every usage), as documented.
+        let ext_only = flags & CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG != 0;
+        return error(CRYPT_E_NOT_FOUND, if ext_only { 0 } else { 1 });
     }
     1
 }
@@ -1689,8 +1699,9 @@ fn ecdsa_signature(der: &[u8], size: usize, out: &mut [u8; 2 * 66]) -> Option<us
 }
 
 /// CryptVerifyCertificateSignatureEx(prov, encoding, subjectType, subject,
-/// issuerType, issuer, flags, extra): whether the subject certificate
-/// (CRYPT_VERIFY_CERT_SIGN_SUBJECT_BLOB 1 or _CERT 2) is signed by the
+/// issuerType, issuer, flags, extra): whether the subject certificate or
+/// CRL (CRYPT_VERIFY_CERT_SIGN_SUBJECT_BLOB 1, _CERT 2, _CRL 3: the same
+/// signed SEQUENCE { tbs, algorithm, signature }) is signed by the
 /// issuer's key (CRYPT_VERIFY_CERT_SIGN_ISSUER_PUBKEY 1 or _CERT 2): RSA
 /// PKCS #1 v1.5 and ECDSA (P-256, P-384) with SHA-1/256/384/512, through
 /// bcrypt. A wrong signature is NTE_BAD_SIGNATURE; other algorithms
@@ -1719,6 +1730,10 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
             }
             2 => {
                 let c = &*subject.cast::<CertContext>();
+                core::slice::from_raw_parts(c.encoded, c.encoded_len as usize)
+            }
+            3 => {
+                let c = &*subject.cast::<crate::crl::CrlContext>();
                 core::slice::from_raw_parts(c.encoded, c.encoded_len as usize)
             }
             _ => return error(E_INVALIDARG, 0),

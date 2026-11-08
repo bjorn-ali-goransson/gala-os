@@ -1,6 +1,6 @@
 //! A program with a compatibility manifest declaring Windows 10 (and 11)
 //! support, {8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}: Windows reports its
-//! real version to it - GetVersionExW/A 10.0 and the build (26100 on the
+//! real version to it - GetVersionExW/A 10.0 and the build (KUSER_SHARED_DATA's: 26100 on the
 //! pinned build), GetVersion the same packed, VerifyVersionInfoW true for
 //! major version 10. (Programs without the manifest get 6.2, build 9200:
 //! kernel32_test.) An activation context made from the manifest activates
@@ -66,6 +66,14 @@ pub extern "C" fn __CxxFrameHandler3() -> ! {
     unsafe { ExitProcess(0xdeac) }
 }
 
+/// The running build: KUSER_SHARED_DATA's NtBuildNumber (+0x260, the page
+/// at 0x7ffe0000 in every process). gala's is its pinned 26100; a real
+/// machine may run a newer build, which the checks follow.
+fn os_build() -> u32 {
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process.
+    unsafe { core::ptr::read_volatile(0x7ffe_0260 as *const u32) }
+}
+
 fn out(text: &[u8]) {
     let mut written = 0;
     // SAFETY: valid buffer and output pointer.
@@ -92,6 +100,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.0 += 1;
         if got == want {
@@ -101,6 +110,7 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
@@ -116,15 +126,16 @@ fn run() -> Result<(), u32> {
         c.eq(GetVersionExW(w.as_mut_ptr()) as u64, 1)?;
         c.eq(w[1].into(), 10)?; // major
         c.eq(w[2].into(), 0)?; // minor
-        c.eq(w[3].into(), 26100)?; // build
+        let build = os_build();
+        c.eq(w[3].into(), build.into())?; // build
         c.eq(w[4].into(), 2)?; // VER_PLATFORM_WIN32_NT
         let mut a = [0u32; 37];
         a[0] = 148;
         c.eq(GetVersionExA(a.as_mut_ptr()) as u64, 1)?;
         c.eq(u64::from(a[1]) << 32 | u64::from(a[2]), 10 << 32)?;
-        c.eq(a[3].into(), 26100)?;
+        c.eq(a[3].into(), build.into())?;
         // GetVersion: build << 16 | minor << 8 | major.
-        c.eq(GetVersion().into(), (26100 << 16) | 10)?;
+        c.eq(GetVersion().into(), (build << 16 | 10).into())?;
         let mut v = [0u32; 71];
         v[0] = 284;
         v[1] = 10;
@@ -181,4 +192,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

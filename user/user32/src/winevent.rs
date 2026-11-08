@@ -18,7 +18,11 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::window::Hwnd;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaWinEventHook(min: u32, max: u32, pid: u32, tid: u32, flags: u32, id: *mut u32) -> u32;
     fn GalaWinEventUnhook(id: u32) -> u32;
@@ -160,7 +164,7 @@ pub extern "system" fn SetWinEventHook(
 pub extern "system" fn UnhookWinEvent(hook: usize) -> i32 {
     let id = hook as u32;
     let found = hook != 0
-        && hook >> 32 == 0
+        && (hook as u64) >> 32 == 0
         && with(|hooks, pending| {
             let Some(h) = hooks.iter_mut().find(|h| h.id == id) else { return false };
             h.id = 0;

@@ -37,7 +37,10 @@ pub struct HString {
 }
 
 const REFERENCE: u32 = 1;
-const _: () = assert!(core::mem::size_of::<HString>() == 24);
+/// HSTRING_HEADER's size (24 bytes on x64, 20 on x86): the header of a
+/// reference string lives in the caller's.
+const HEADER_SIZE: usize = if core::mem::size_of::<usize>() == 8 { 24 } else { 20 };
+const _: () = assert!(core::mem::size_of::<HString>() <= HEADER_SIZE);
 
 fn header<'a>(s: *mut HString) -> &'a HString {
     // SAFETY: a live HSTRING (callers check NULL).

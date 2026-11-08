@@ -244,9 +244,11 @@ ManifestVersion: 1.6.0
     )
     # A stand-in for an Inno Setup installer: hello.exe, which ignores the
     # switches and registers nothing, so the install fails with "no
-    # uninstall entry" (exit 4). Real Inno Setup installers are 32-bit
-    # programs (gala has no WOW64 yet) and the Inno Setup compiler runs
-    # only on Windows; the host tests run Inno's switches against a fake.
+    # uninstall entry" (exit 4). A real Inno Setup installer is the
+    # pk_install_inno scenario's (Inno Setup's own, a PREBUILT download,
+    # with winget-pkgs' manifest in manifests/j, which this script leaves
+    # alone); it needs WOW64 (every Inno Setup checks for x86 support).
+    # The host tests run Inno's switches against a fake.
     hi = installer("innosetup-2.0.exe", HELLO)
     write(
         "g/GalaTest/InnoSetup/2.0/GalaTest.InnoSetup.yaml",

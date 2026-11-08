@@ -102,6 +102,26 @@ statx(d) = 0
   S_ISDIR(stx_mode) = yes
 statx(missing) = -2 (ENOENT)
 statx(reserved mask bit) = -22 (EINVAL)
+-- hard links
+link(h1, h2) = 0
+linkat(AT_FDCWD, h1, d, h3, 0) = 0
+stat(h1) with three links = regular, mode 0644, nlink 3, size 3
+read(d/h3) after a write through h2 = 7 "one+two"
+unlink(h1) = 0
+stat(h2) after unlink(h1) = regular, mode 0644, nlink 2, size 7
+link(missing, h4) = -2 (ENOENT)
+link(h2, missing/h4) = -2 (ENOENT)
+link(h2, d/h3) (exists) = -17 (EEXIST)
+linkat(bad flags) = -22 (EINVAL)
+linkat(hs, hsl, 0) (links the symlink) = 0
+lstat(hsl) = symlink, mode 0777, nlink 2, size 2
+linkat(hs, hfl, AT_SYMLINK_FOLLOW) (links the target) = 0
+lstat(hfl) = regular, mode 0644, nlink 3, size 7
+rename(h2, d/h3) (same file: no-op) = 0
+stat(h2) = regular, mode 0644, nlink 3, size 7
+rename(hfl, h5) (one link of three) = 0
+stat(h5) = regular, mode 0644, nlink 3, size 7
+stat(hfl) = -2 (ENOENT)
 -- symlinks
 readlink(lnk) = 1 "f"
 readlinkat(d, ln) = 4 "../f"
@@ -117,6 +137,39 @@ open(loop1) = -40 (ELOOP)
 open(dangling, O_CREAT) creates the target = ok
 stat(missing) now = regular, mode 0644, nlink 1, size 0
 open(lnk, O_CREAT|O_EXCL) = -17 (EEXIST)
+-- symlinks in paths
+symlink(p, pl) = 0
+read(pl/pf) = 4 "in p"
+stat(pl) = directory, mode 0755
+lstat(pl/) (a trailing slash follows) = directory, mode 0755
+symlink(.., p/up) = 0
+read(pl/up/pl/pf) (relative to the link's directory) = 4 "in p"
+symlink(../p/pf, p/sib) = 0
+read(p/sib) = 4 "in p"
+open(lnk/x) (a file in the middle) = -20 (ENOTDIR)
+open(dangling/x) = -20 (ENOTDIR)
+open(loop1/x) = -40 (ELOOP)
+mkdir(dangling) = -17 (EEXIST)
+mkdir(pl) = -17 (EEXIST)
+rmdir(pl) = -20 (ENOTDIR)
+open(pl, O_DIRECTORY|O_NOFOLLOW) = -20 (ENOTDIR)
+chdir(pl) = 0
+getcwd ends with /p (the link resolved) = yes
+read(c21) (20 links) = 4 "in p"
+open(c01) (40 links) opens or is ELOOP = yes
+open(c00) (41 links) = -40 (ELOOP)
+stat(c00/x) = -40 (ELOOP)
+unlink(pl) (dangling now) = 0
+-- names differing in case
+read(Case) = 5 "upper"
+read(case) = 5 "lower"
+stat syscall(CASE) = -2 (ENOENT)
+mkdir(Dir) = 0
+mkdir(dir) = 0
+rename(case, CASE) = 0
+getdents64(.) of the case pair: [. dir] [.. dir] [CASE reg] [Case reg] [Dir dir] [cd dir] [d dir] [dangling lnk] [dir dir] [f reg] [f2 reg] [lnk lnk] [long lnk] [loop1 lnk] [loop2 lnk] [missing reg]
+  every d_reclen 8-aligned = yes
+  every d_reclen = align8(19 + name + NUL) = yes
 -- rename
 rename(a, c) = 0
 stat(a) = -2 (ENOENT)
@@ -148,6 +201,10 @@ read(fd of unlinked u) = 10 "still here"
   fstat nlink = 0
   fstat size = 10
   write after unlink = 1
+open(u, O_CREAT|O_EXCL) (the name is free) = ok
+read(fd of unlinked u) again = 11 "still here!"
+read(u) = 3 "new"
+stat(u) now = regular, mode 0600, nlink 1, size 3
 unlink(u) again = -2 (ENOENT)
 unlink(d) = -21 (EISDIR)
 unlink(lnk) (the link, not f) = 0
@@ -167,7 +224,7 @@ unlinkat(bad flags) = -22 (EINVAL)
 getdents64(d) now: [. dir] [.. dir]
   every d_reclen 8-aligned = yes
   every d_reclen = align8(19 + name + NUL) = yes
-getdents64(.): [. dir] [.. dir] [b reg] [cd dir] [d dir] [dangling lnk] [f reg] [f2 reg] [fs_test reg] [long lnk] [loop1 lnk] [loop2 lnk] [missing reg] [moved reg] [new reg]
+getdents64(.): [. dir] [.. dir] [b reg] [cd dir] [d dir] [dangling lnk] [f reg] [f2 reg] [long lnk] [loop1 lnk] [loop2 lnk] [missing reg] [moved reg] [new reg]
   every d_reclen 8-aligned = yes
   every d_reclen = align8(19 + name + NUL) = yes
 -- layouts

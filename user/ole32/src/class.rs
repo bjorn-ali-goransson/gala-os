@@ -7,6 +7,10 @@
 //! cross-apartment calls, so every object is used directly. Local and
 //! remote servers (CLSCTX_LOCAL_SERVER, ..._REMOTE_SERVER) are not
 //! supported (recorded); an unregistered class gives REGDB_E_CLASSNOTREG.
+//! A server process's reference count and suspension
+//! (CoAddRefServerProcess, CoReleaseServerProcess, CoSuspendClassObjects,
+//! CoResumeClassObjects) are kept as documented; with no local servers
+//! nothing is refused while suspended.
 
 use core::ffi::c_void;
 
@@ -32,7 +36,11 @@ struct ObjectAttributes {
     qos: usize,
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenKey(out: *mut usize, access: u32, attributes: *const ObjectAttributes) -> u32;
     fn NtQueryValueKey(
@@ -46,7 +54,11 @@ unsafe extern "system" {
     fn NtClose(handle: usize) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32;
 }
@@ -63,23 +75,19 @@ const REG_SZ: u32 = 1;
 const REG_EXPAND_SZ: u32 = 2;
 const MAX_PATH: usize = 260;
 
-/// The registered in-process server of `clsid` (a NUL-terminated path
-/// with environment variables expanded), if any.
-fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
+/// The default value of `HKCR\CLSID\{clsid}\<subkey>` (REG_SZ or
+/// REG_EXPAND_SZ, unexpanded, NUL-terminated), if any.
+fn class_value(clsid: &Guid, subkey: &str) -> Option<[u16; MAX_PATH]> {
     let prefix = "\\Registry\\Machine\\SOFTWARE\\Classes\\CLSID\\";
-    let suffix = "\\InprocServer32";
     let mut name = [0u16; 128];
     let mut n = 0;
-    for c in prefix.encode_utf16() {
-        name[n] = c;
-        n += 1;
-    }
-    for c in guid_text(clsid) {
-        name[n] = c;
-        n += 1;
-    }
-    for c in suffix.encode_utf16() {
-        name[n] = c;
+    for c in prefix
+        .encode_utf16()
+        .chain(guid_text(clsid))
+        .chain("\\".encode_utf16())
+        .chain(subkey.encode_utf16())
+    {
+        *name.get_mut(n)? = c;
         n += 1;
     }
     let us =
@@ -124,10 +132,49 @@ fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
         core::slice::from_raw_parts(buf.as_ptr().add(3).cast::<u16>(), len.min(MAX_PATH - 1))
     };
     raw[..data.len()].copy_from_slice(data);
+    // Without a terminating NUL in the data: it ends at the data's end.
+    if let Some(end) = raw.iter().position(|&c| c == 0) {
+        raw[end..].fill(0);
+    }
+    Some(raw)
+}
+
+/// The registered in-process server of `clsid` (a NUL-terminated path
+/// with environment variables expanded), if any.
+fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
+    let raw = class_value(clsid, "InprocServer32")?;
     let mut path = [0u16; MAX_PATH];
     // SAFETY: a NUL-terminated source and a buffer of MAX_PATH characters.
     let n = unsafe { ExpandEnvironmentStringsW(raw.as_ptr(), path.as_mut_ptr(), MAX_PATH as u32) };
     (n != 0 && n as usize <= MAX_PATH).then_some(path)
+}
+
+/// ProgIDFromCLSID(clsid, *lplpszProgID): the class's ProgID (the
+/// default value of its `ProgID` subkey) in task memory;
+/// REGDB_E_CLASSNOTREG (and a null output) when it has none.
+#[unsafe(no_mangle)]
+pub extern "system" fn ProgIDFromCLSID(clsid: *const Guid, progid: *mut *mut u16) -> HResult {
+    if clsid.is_null() || progid.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's output.
+    unsafe { *progid = core::ptr::null_mut() };
+    // SAFETY: the caller's CLSID.
+    let Some(text) = class_value(unsafe { &*clsid }, "ProgID") else {
+        return REGDB_E_CLASSNOTREG;
+    };
+    let n = text.iter().position(|&c| c == 0).unwrap_or(MAX_PATH - 1);
+    let p = super::CoTaskMemAlloc((n + 1) * 2).cast::<u16>();
+    if p.is_null() {
+        return super::E_OUTOFMEMORY;
+    }
+    // SAFETY: a fresh block of n + 1 characters; the caller's output.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), p, n);
+        *p.add(n) = 0;
+        *progid = p;
+    }
+    super::S_OK
 }
 
 type GetClassObject = extern "system" fn(*const Guid, *const Guid, *mut *mut c_void) -> HResult;
@@ -212,4 +259,51 @@ pub extern "system" fn CoCreateInstance(
     );
     release(factory);
     hr
+}
+
+// ---- The server process's lifetime ----
+
+/// The process's server reference count (CoAddRefServerProcess).
+static SERVER_REFS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Whether the class objects are suspended (CoSuspendClassObjects, or
+/// CoReleaseServerProcess reaching 0) until CoResumeClassObjects.
+static SUSPENDED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// CoAddRefServerProcess: the process's server reference count, plus one
+/// (the new count).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoAddRefServerProcess() -> u32 {
+    SERVER_REFS.fetch_add(1, core::sync::atomic::Ordering::AcqRel).wrapping_add(1)
+}
+
+/// CoReleaseServerProcess: the count minus one (the new count, never
+/// below 0); at 0 the class objects are suspended, as documented, so no
+/// new activation reaches a server that is shutting down.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoReleaseServerProcess() -> u32 {
+    use core::sync::atomic::Ordering;
+    let old = SERVER_REFS
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| Some(n.saturating_sub(1)))
+        .unwrap_or(0);
+    let now = old.saturating_sub(1);
+    if now == 0 {
+        SUSPENDED.store(true, Ordering::Release);
+    }
+    now
+}
+
+/// CoSuspendClassObjects: the process's class objects take no new
+/// activations (gala's activations are in-process, through
+/// DllGetClassObject: nothing to refuse yet); S_OK.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoSuspendClassObjects() -> HResult {
+    SUSPENDED.store(true, core::sync::atomic::Ordering::Release);
+    super::S_OK
+}
+
+/// CoResumeClassObjects: activations are taken again; S_OK.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoResumeClassObjects() -> HResult {
+    SUSPENDED.store(false, core::sync::atomic::Ordering::Release);
+    super::S_OK
 }

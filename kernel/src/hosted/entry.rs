@@ -58,7 +58,7 @@ static SELECTOR: AtomicU8 = AtomicU8::new(SYSCALL_DISPATCH_FILTER_BLOCK);
 /// ROADMAP LX seam 2): a call goes to the one of the calling thread's
 /// personality (`PERSONALITY`).
 static SYSCALL_HANDLER: Dispatchers = Dispatchers::new();
-static RETURN_HOOK: OnceLock<fn(&mut UserRegs) -> bool> = OnceLock::new();
+static RETURN_HOOK: OnceLock<fn(&mut UserRegs, bool) -> bool> = OnceLock::new();
 static EXCEPTION_HANDLER: OnceLock<fn(&mut TrapFrame, Option<u64>)> = OnceLock::new();
 
 std::thread_local! {
@@ -107,11 +107,8 @@ fn interrupted_regs(gr: &Gregs) -> UserRegs {
         REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI, REG_R8, REG_R9,
         REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15,
     ];
-    let mut regs = UserRegs { rip: g(gr, REG_RIP), rflags: g(gr, REG_EFL), ..UserRegs::default() };
-    for (i, reg) in order.into_iter().enumerate() {
-        regs.gpr[i] = g(gr, reg);
-    }
-    regs
+    let gpr = order.map(|reg| g(gr, reg));
+    UserRegs::new(gpr, g(gr, REG_RIP), g(gr, REG_EFL))
 }
 
 /// Simulation: the watchdog interrupted this thread spinning in program
@@ -219,7 +216,7 @@ pub fn set_syscall_handler(
     }
 }
 
-pub fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
+pub fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool) {
     let _ = RETURN_HOOK.set(hook);
 }
 
@@ -254,16 +251,17 @@ fn set_regs(gregs: &mut Gregs, r: &UserRegs) {
         REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15,
     ];
     for (i, reg) in order.into_iter().enumerate() {
-        set(gregs, reg, r.gpr[i]);
+        set(gregs, reg, r.gprs()[i]);
     }
-    set(gregs, REG_RIP, r.rip);
-    let flags = (g(gregs, REG_EFL) & !USER_SETTABLE_FLAGS) | (r.rflags & USER_SETTABLE_FLAGS);
+    set(gregs, REG_RIP, r.ip());
+    let flags = (g(gregs, REG_EFL) & !USER_SETTABLE_FLAGS) | (r.flags() & USER_SETTABLE_FLAGS);
     set(gregs, REG_EFL, flags);
 }
 
 fn return_to_user(gregs: &mut Gregs, mut regs: UserRegs) {
     if let Some(hook) = RETURN_HOOK.get() {
-        hook(&mut regs);
+        // gala-um runs no 32-bit code.
+        hook(&mut regs, false);
     }
     set_regs(gregs, &regs);
 }
@@ -286,53 +284,28 @@ extern "C" fn on_sigsys(_sig: i32, _info: *mut libc::siginfo_t, context: *mut li
         if super::sim::on() {
             end_capture(gr);
         }
-        let mut frame = SyscallFrame {
-            r15: g(gr, REG_R15),
-            r14: g(gr, REG_R14),
-            r13: g(gr, REG_R13),
-            r12: g(gr, REG_R12),
-            rbp: g(gr, REG_RBP),
-            rbx: g(gr, REG_RBX),
-            rsi: g(gr, REG_RSI),
-            rdi: g(gr, REG_RDI),
-            r9: g(gr, REG_R9),
-            r8: g(gr, REG_R8),
-            rdx: g(gr, REG_RDX),
-            r10: g(gr, REG_R10),
-            rax: g(gr, REG_RAX),
-            rip: g(gr, REG_RIP),
-            rflags: g(gr, REG_EFL),
-            rsp: g(gr, REG_RSP),
-        };
+        let mut frame = SyscallFrame::from_regs(&interrupted_regs(gr), g(gr, REG_RAX));
         // Simulation: scheduling points before and after the service,
         // the system call's number and result in the trace.
         if super::sim::on() {
-            super::sim::point(&[0, frame.rax]);
+            super::sim::point(&[0, frame.number()]);
         }
         let personality = PERSONALITY.with(Cell::get);
         if let Err(NoDispatcher(p)) = SYSCALL_HANDLER.dispatch(personality, &mut frame) {
             crate::warn!(
                 "syscall: no dispatcher for personality {p}: system call {:#x} from rip {:#x} \
                  (thread {}) fails with {NO_DISPATCHER_RESULT:#x}",
-                frame.rax,
-                frame.rip,
+                frame.number(),
+                frame.ip(),
                 super::threads::current()
             );
-            frame.rax = NO_DISPATCHER_RESULT;
+            frame.set_result(NO_DISPATCHER_RESULT);
         }
         if super::sim::on() {
-            super::sim::point(&[1, frame.rax]);
+            super::sim::point(&[1, frame.result()]);
         }
         // As the kernel's SYSRET: rcx = rip, r11 = rflags.
-        let f = &frame;
-        let regs = PENDING.with(Cell::take).unwrap_or(UserRegs {
-            gpr: [
-                f.rax, f.rip, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10,
-                f.rflags, f.r12, f.r13, f.r14, f.r15,
-            ],
-            rip: f.rip,
-            rflags: f.rflags,
-        });
+        let regs = PENDING.with(Cell::take).unwrap_or_else(|| frame.return_regs());
         return_to_user(gr, regs);
     });
 }
@@ -422,43 +395,14 @@ extern "C" fn on_fault(sig: i32, info: *mut libc::siginfo_t, context: *mut libc:
             std::process::abort();
         }
         let vector = g(gr, REG_TRAPNO);
-        let mut tf = TrapFrame {
-            r15: g(gr, REG_R15),
-            r14: g(gr, REG_R14),
-            r13: g(gr, REG_R13),
-            r12: g(gr, REG_R12),
-            r11: g(gr, REG_R11),
-            r10: g(gr, REG_R10),
-            r9: g(gr, REG_R9),
-            r8: g(gr, REG_R8),
-            rbp: g(gr, REG_RBP),
-            rdi: g(gr, REG_RDI),
-            rsi: g(gr, REG_RSI),
-            rdx: g(gr, REG_RDX),
-            rcx: g(gr, REG_RCX),
-            rbx: g(gr, REG_RBX),
-            rax: g(gr, REG_RAX),
-            vector,
-            error_code: g(gr, REG_ERR),
-            rip,
-            cs: 0x33,
-            rflags: g(gr, REG_EFL),
-            rsp: g(gr, REG_RSP),
-            ss: 0x2b,
-        };
+        // 64-bit user code's selectors.
+        let mut tf =
+            TrapFrame::from_user(&interrupted_regs(gr), vector, g(gr, REG_ERR), 0x33, 0x2b);
         let cr2 = (vector == 14).then_some(addr);
         if let Some(handler) = EXCEPTION_HANDLER.get() {
             handler(&mut tf, cr2);
         }
-        let regs = UserRegs {
-            gpr: [
-                tf.rax, tf.rcx, tf.rdx, tf.rbx, tf.rsp, tf.rbp, tf.rsi, tf.rdi, tf.r8, tf.r9,
-                tf.r10, tf.r11, tf.r12, tf.r13, tf.r14, tf.r15,
-            ],
-            rip: tf.rip,
-            rflags: tf.rflags,
-        };
-        return_to_user(gr, regs);
+        return_to_user(gr, tf.user_regs());
     });
 }
 
@@ -701,14 +645,16 @@ pub fn xsave() -> XState {
     let enabled = xstate_enabled();
     if let Some(fp) = fpstate() {
         // SAFETY: the 512-byte legacy FXSAVE area of the signal frame.
-        unsafe { core::ptr::copy_nonoverlapping(fp, state.0.as_mut_ptr(), xstate::LEGACY_SIZE) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(fp, state.bytes_mut().as_mut_ptr(), xstate::LEGACY_SIZE)
+        };
         let size = frame_xstate_size(fp).min(xstate::size_of(enabled));
         if size > xstate::LEGACY_SIZE {
             // SAFETY: Linux's frame has `xstate_size` bytes of XSAVE area.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     fp.add(xstate::LEGACY_SIZE),
-                    state.0.as_mut_ptr().add(xstate::LEGACY_SIZE),
+                    state.bytes_mut().as_mut_ptr().add(xstate::LEGACY_SIZE),
                     size - xstate::LEGACY_SIZE,
                 )
             };
@@ -716,7 +662,7 @@ pub fn xsave() -> XState {
         } else {
             state.set_bv(xstate::LEGACY);
         }
-        state.0[SW_BYTES..xstate::LEGACY_SIZE].fill(0);
+        state.bytes_mut()[SW_BYTES..xstate::LEGACY_SIZE].fill(0);
     }
     state.normalize(enabled);
     state
@@ -732,7 +678,7 @@ pub fn xrstor(state: &XState) {
     s.normalize(enabled);
     // SAFETY: the legacy area of the signal frame, up to Linux's bytes;
     // MXCSR reserved bits are masked by the kernel's NtContinue path.
-    unsafe { core::ptr::copy_nonoverlapping(s.0.as_ptr(), fp, SW_BYTES) };
+    unsafe { core::ptr::copy_nonoverlapping(s.bytes().as_ptr(), fp, SW_BYTES) };
     let size = frame_xstate_size(fp);
     if size < xstate::size_of(enabled) {
         return;
@@ -746,7 +692,7 @@ pub fn xrstor(state: &XState) {
         bv.write_unaligned((old & !ext) | (s.bv() & ext) | xstate::LEGACY);
         for (i, &(offset, len)) in xstate::COMPONENTS.iter().enumerate().skip(2) {
             if ext & (1 << i) != 0 {
-                core::ptr::copy_nonoverlapping(s.0.as_ptr().add(offset), fp.add(offset), len);
+                core::ptr::copy_nonoverlapping(s.bytes().as_ptr().add(offset), fp.add(offset), len);
             }
         }
     }

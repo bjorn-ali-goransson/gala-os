@@ -9,7 +9,11 @@
 use crate::window::Hwnd;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn VirtualAlloc(
         at: *mut core::ffi::c_void,

@@ -23,7 +23,8 @@
 //! RegOpenKeyExW/A of a key that does not exist, RegCloseKey of a
 //! predefined key; GetComputerNameW/ExW; ncrypt's NCryptFreeObject of a
 //! null handle, the software key storage provider (opened, no such key,
-//! freed). Prints
+//! freed); initialization files (`profile.rs`); what Inno Setup's IDE
+//! imports: FileTimeToDosDateTime and FindStringOrdinal (`ide.rs`). Prints
 //! `kernel32_misc_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -33,6 +34,8 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 mod global;
+mod ide;
+mod profile;
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -242,6 +245,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -251,10 +255,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -424,7 +430,9 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
         c.eq(NCryptFreeObject(provider) as u64, 0)?;
 
         // The registry: a key that does not exist, closing a predefined key.
-        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        // As the SDK's HKEY on x64: sign-extended (RegCloseKey takes only
+        // that form as the predefined key).
+        const HKEY_LOCAL_MACHINE: usize = 0xffff_ffff_8000_0002;
         const KEY_READ: u32 = 0x2_0019;
         let name: [u16; 28] = (*b"SOFTWARE\\gala-os-no-such-ke\0").map(u16::from);
         let mut key = 0usize;
@@ -524,7 +532,9 @@ fn run() -> Result<(), u32> {
         let args: [usize; 17] = core::array::from_fn(|i| 100 + i);
         RaiseException(CODE_RAISED, 0, 17, args.as_ptr());
         let raised = |i: usize| RAISED[i].load(Ordering::SeqCst);
-        c.eq(raised(0), 0)?; // flags
+        // ExceptionFlags: EXCEPTION_SOFTWARE_ORIGINATE (0x80), which
+        // Windows 11 25H2 sets on a raised exception.
+        c.eq(raised(0), 0x80)?;
         c.eq(raised(2), 15)?;
         c.eq(raised(3), 100)?;
         c.eq(raised(4), 114)?;
@@ -663,6 +673,8 @@ fn run() -> Result<(), u32> {
     }
     heaps(&mut c)?;
     global::global_memory(&mut c)?;
+    profile::profiles(&mut c)?;
+    ide::ide(&mut c)?;
     modules(&mut c)?;
     Ok(())
 }
@@ -788,4 +800,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

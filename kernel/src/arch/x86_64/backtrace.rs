@@ -50,3 +50,10 @@ fn walk_stack(mut rbp: u64, rsp: u64, mut f: impl FnMut(u64)) {
         rbp = next;
     }
 }
+
+/// `walk_from` for the kernel code a trap interrupted (an NMI's sample or
+/// state dump): from its frame and stack pointers.
+pub fn walk_trap(frame: &super::interrupts::TrapFrame, f: impl FnMut(u64)) {
+    let (rbp, rsp) = frame.frame_pointers();
+    walk_from(rbp, rsp, f);
+}

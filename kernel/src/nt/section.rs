@@ -103,6 +103,10 @@ pub struct ImageInfo {
     /// SizeOfStackReserve / SizeOfStackCommit (the main thread's stack).
     pub stack_reserve: u64,
     pub stack_commit: u64,
+    /// A 32-bit (x86) image: an executable runs through WOW64.
+    pub x86: bool,
+    /// IMAGE_FILE_LARGE_ADDRESS_AWARE (a 32-bit process's 4 GiB limit).
+    pub large_address_aware: bool,
 }
 
 impl Drop for ImageLayout {
@@ -183,6 +187,8 @@ impl ImageLayout {
             has_imports: image.has_imports(),
             stack_reserve: image.stack_reserve,
             stack_commit: image.stack_commit,
+            x86: image.pe32,
+            large_address_aware: image.large_address_aware,
         };
         Ok(ImageLayout {
             base: image.image_base,
@@ -600,6 +606,9 @@ pub struct Mapped {
     pub size: u64,
     /// An image view not at its preferred base (STATUS_IMAGE_NOT_AT_BASE).
     pub relocated: bool,
+    /// An image view for another machine: a PE32 image in a 64-bit
+    /// process (STATUS_IMAGE_MACHINE_TYPE_MISMATCH, informational).
+    pub foreign: bool,
 }
 
 /// Maps a view of `object` (a section) into `process`.
@@ -649,7 +658,7 @@ pub fn map_view(
         vad.commit(base, size, protect)?;
     }
     let _ = views.try_push(View { base, size, offset, section: object.clone() });
-    Ok(Mapped { base, size, relocated: false })
+    Ok(Mapped { base, size, relocated: false, foreign: false })
 }
 
 /// Maps an image view: at the preferred base or the image's alternative
@@ -665,6 +674,9 @@ fn map_image_view(
     if offset != 0 {
         return Err(NtStatus::INVALID_PARAMETER);
     }
+    // Measured on Windows 11 25H2: a PE32 (IL-only) DLL mapped in a 64-bit
+    // process. A 64-bit image in a WOW64 process is not measured.
+    let foreign = image.info.x86 && process.wow64.is_none();
     let size = image.size();
     let wanted = if base != 0 { base } else { image.base };
     let mut views = process.views.lock();
@@ -675,12 +687,22 @@ fn map_image_view(
     let reserve = |vad: &mut vad::Vad, at: Option<u64>| {
         vad.reserve(at, size, vad::PAGE_EXECUTE_WRITECOPY, vad::MEM_IMAGE, false)
     };
-    let reserved = match reserve(&mut vad, Some(wanted)) {
+    // Without a given address, an image goes below the process's limit
+    // (a WOW64 process's 2 or 4 GiB: its 32-bit code must reach it), so a
+    // preferred or alternative base above it counts as taken.
+    let limit = vad.limit();
+    let fits = |b: u64| b.checked_add(size).is_some_and(|end| end <= limit);
+    let first = if base == 0 && image.relocatable && !fits(wanted) {
+        Err(NtStatus::CONFLICTING_ADDRESSES)
+    } else {
+        reserve(&mut vad, Some(wanted))
+    };
+    let reserved = match first {
         Ok(r) => r,
         Err(NtStatus::CONFLICTING_ADDRESSES | NtStatus::INVALID_PARAMETER)
             if base == 0 && image.relocatable =>
         {
-            match image.dynamic_base().map(|b| reserve(&mut vad, Some(b))) {
+            match image.dynamic_base().filter(|&b| fits(b)).map(|b| reserve(&mut vad, Some(b))) {
                 Some(Ok(r)) => r,
                 _ => reserve(&mut vad, None)?,
             }
@@ -713,7 +735,7 @@ fn map_image_view(
             i += run;
         }
         let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
-        return Ok(Mapped { base: view_base, size, relocated: delta != 0 });
+        return Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign });
     }
     // Elsewhere private pages, relocated a page at a time (a large image
     // is never copied whole).
@@ -768,7 +790,7 @@ fn map_image_view(
         }
     }
     let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
-    Ok(Mapped { base: view_base, size, relocated: delta != 0 })
+    Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign })
 }
 
 /// Unmaps the view containing `addr`.

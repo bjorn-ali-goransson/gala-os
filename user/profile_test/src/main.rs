@@ -40,6 +40,15 @@ unsafe extern "system" {
 
 #[link(name = "advapi32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn LookupAccountNameW(
+        system: *const u16,
+        name: *const u16,
+        sid: *mut u8,
+        sid_size: *mut u32,
+        domain: *mut u16,
+        domain_size: *mut u32,
+        kind: *mut u32,
+    ) -> Bool;
     fn LogonUserW(
         user: *const u16,
         domain: *const u16,
@@ -163,6 +172,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(core::cell::Cell<u32>);
 
 impl Checks {
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.0.set(self.0.get() + 1);
         if cond {
@@ -172,10 +182,12 @@ impl Checks {
         out(&hex(self.0.get()));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -197,6 +209,31 @@ fn w<const N: usize>(s: &str) -> [u16; N] {
 #[repr(C, align(8))]
 struct Buf([u8; 1024]);
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
+/// Whether the second local account `galatest` is absent
+/// (LookupAccountNameW fails with ERROR_NONE_MAPPED): a machine not set up
+/// for this test, where it says "skipped" (gala's scenarios have it).
+fn galatest_missing() -> bool {
+    let (mut sid, mut domain) = ([0u8; 68], [0u16; 64]);
+    let (mut sid_size, mut domain_size, mut kind) = (68u32, 64u32, 0u32);
+    let name = w::<16>("galatest");
+    // SAFETY: our buffers and their sizes.
+    unsafe {
+        LookupAccountNameW(
+            core::ptr::null(),
+            name.as_ptr(),
+            sid.as_mut_ptr(),
+            &mut sid_size,
+            domain.as_mut_ptr(),
+            &mut domain_size,
+            &mut kind,
+        ) == 0
+            && GetLastError() == 1332
+    }
+}
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -204,10 +241,13 @@ fn run() -> Result<(), u32> {
     unsafe {
         let mut token = null;
         let (user, dot, password) = (w::<16>("galatest"), w::<4>("."), w::<16>("Gala-Test-1"));
-        c.ok(
-            LogonUserW(user.as_ptr(), dot.as_ptr(), password.as_ptr(), 2, 0, &mut token) != 0,
-            last_error(),
-        )?;
+        let logged_on =
+            LogonUserW(user.as_ptr(), dot.as_ptr(), password.as_ptr(), 2, 0, &mut token) != 0;
+        let error = last_error();
+        if !logged_on && galatest_missing() {
+            return Err(SKIPPED);
+        }
+        c.ok(logged_on, error)?;
         let mut tu = Buf([0; 1024]);
         let mut n = 0;
         c.ok(GetTokenInformation(token, 1, tu.0.as_mut_ptr(), 1024, &mut n) != 0, 0)?;
@@ -364,6 +404,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
             out(b"profile_test: ok\r\n");
             0
         }
+        Err(SKIPPED) => {
+            out(b"profile_test: skipped (needs the galatest account)\r\n");
+            0
+        }
         Err(id) => id,
     };
     // SAFETY: ends the process.
@@ -374,4 +418,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

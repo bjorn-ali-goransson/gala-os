@@ -4,10 +4,10 @@
 //!
 //! Fixed memory (GMEM_FIXED / LMEM_FIXED) is a process-heap block and its
 //! pointer is the handle. Moveable memory is a handle to an entry of a
-//! handle table, `{flags, pointer}` (16 bytes); the handle is the address
-//! of the pointer, so `handle % 16 == 8` tells it from a heap pointer
-//! (16-aligned), and `*(void **)handle` is the data, as old programs
-//! assume. The entry's flags are Windows': 1 in use, 2 moveable, 4
+//! handle table, `{flags, pointer}` (16 bytes on x64, 8 on x86); the
+//! handle is the address of the pointer, so `handle % 16 == 8` (x86:
+//! `% 8 == 4`) tells it from a heap pointer (aligned to the entry's
+//! size), and `*(void **)handle` is the data, as old programs assume. The entry's flags are Windows': 1 in use, 2 moveable, 4
 //! discardable, 8 discarded (no memory: size 0 or discarded), 0x8000
 //! GMEM_DDESHARE, the lock count in bits 16-23 (saturating at 255). A
 //! freed entry holds the next free entry's address instead (bit 0 clear),
@@ -46,7 +46,7 @@ const ERROR_NOACCESS: u32 = 998;
 const ERROR_DISCARDED: u32 = 157;
 const ERROR_NOT_LOCKED: u32 = 158;
 
-/// Entry flags (Windows' values, visible at `handle - 8`).
+/// Entry flags (Windows' values, visible at the word before the handle).
 const IN_USE: usize = 0x1;
 const MOVEABLE: usize = 0x2;
 const DISCARDABLE: usize = 0x4;
@@ -56,7 +56,9 @@ const LOCK_SHIFT: u32 = 16;
 const LOCK_MAX: usize = 0xff;
 
 const ENTRIES: usize = 0x10000;
-const ENTRY: usize = 16;
+const ENTRY: usize = size_of::<Entry>();
+/// Where an entry's pointer (the handle) is.
+const POINTER_AT: usize = core::mem::offset_of!(Entry, ptr);
 const TABLE_BYTES: usize = ENTRIES * ENTRY;
 const PAGE: usize = 4096;
 
@@ -74,8 +76,8 @@ static COMMITTED: AtomicUsize = AtomicUsize::new(0);
 /// The first free entry, or 0; a free entry's flags hold the next one,
 /// or END_OF_LIST.
 static FREE: AtomicUsize = AtomicUsize::new(0);
-/// A free entry's link at the end of the list: non-zero and 16-aligned,
-/// like every link.
+/// A free entry's link at the end of the list: non-zero and aligned to
+/// the entry's size, like every link.
 const END_OF_LIST: usize = 0x10;
 
 /// Runs `f` under the table's lock.
@@ -96,7 +98,7 @@ fn locked<R>(f: impl FnOnce() -> R) -> R {
 
 /// Whether `h` has the shape of a moveable handle.
 fn entry_shaped(h: *const c_void) -> bool {
-    h as usize & (ENTRY - 1) == 8
+    h as usize & (ENTRY - 1) == POINTER_AT
 }
 
 /// The live entry behind `h` (under the lock).
@@ -110,9 +112,9 @@ fn find(h: *const c_void) -> Option<&'static mut Entry> {
     {
         return None;
     }
-    // SAFETY: inside the committed table; entries are 16-aligned and the
-    // handle is the address of the second word.
-    let entry = unsafe { &mut *((h - 8) as *mut Entry) };
+    // SAFETY: inside the committed table; entries are aligned to their
+    // size and the handle is the address of the second word.
+    let entry = unsafe { &mut *((h - POINTER_AT) as *mut Entry) };
     (entry.flags & (IN_USE | MOVEABLE) == IN_USE | MOVEABLE).then_some(entry)
 }
 
@@ -179,24 +181,25 @@ fn readable(p: *const c_void) -> bool {
         return false;
     }
     let mapped = |address: usize| {
-        let mut info = [0u64; 6]; // MEMORY_BASIC_INFORMATION
+        let mut info = MemoryBasic::default();
         let mut ret = 0;
-        // SAFETY: a 48-byte buffer.
+        // SAFETY: a MEMORY_BASIC_INFORMATION buffer.
         let status = unsafe {
             NtQueryVirtualMemory(
                 CURRENT_PROCESS,
                 address,
                 0,
-                info.as_mut_ptr().cast(),
-                48,
+                (&raw mut info).cast(),
+                size_of::<MemoryBasic>(),
                 &mut ret,
             )
         };
-        let (state, protect) = (info[4] as u32, (info[4] >> 32) as u32);
+        let (state, protect) = (info.state, info.protect);
         // MEM_COMMIT; not PAGE_NOACCESS or PAGE_GUARD.
         status == STATUS_SUCCESS && state == 0x1000 && protect != 0 && protect & 0x101 == 0
     };
-    let header = p - 16;
+    // The heap block's header: two pointers before it.
+    let header = p - ENTRY;
     mapped(p) && (header / PAGE == p / PAGE || mapped(header))
 }
 

@@ -5,7 +5,11 @@
 
 use super::*;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtQuerySystemTime(time: *mut i64) -> u32;
 }
@@ -200,6 +204,43 @@ pub extern "system" fn FileTimeToSystemTime(ft: *const u64, st: *mut u16) -> Boo
     TRUE
 }
 
+/// FileTimeToDosDateTime: the MS-DOS date (bits 9-15 the year since
+/// 1980, 5-8 the month, 0-4 the day) and time (11-15 the hour, 5-10 the
+/// minute, 0-4 the second / 2) of a FILETIME, rounded up to the next
+/// two-second step as Windows does. Outside 1980-2107 (or a NULL output):
+/// ERROR_INVALID_PARAMETER.
+#[unsafe(no_mangle)]
+pub extern "system" fn FileTimeToDosDateTime(
+    ft: *const u64,
+    date: *mut u16,
+    time: *mut u16,
+) -> Bool {
+    if ft.is_null() || date.is_null() || time.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's FILETIME (maybe unaligned).
+    let t = unsafe { ft.read_unaligned() };
+    const STEP: u64 = 20_000_000; // two seconds in 100 ns units
+    let Some(up) = t.checked_add(STEP - 1).map(|v| v / STEP * STEP) else {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    };
+    let mut st = [0u16; 8];
+    if up >= 0x8000_0000_0000_0000 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    write_system_time(up as i64, st.as_mut_ptr());
+    let [year, month, _, day, hour, minute, second, _] = st;
+    if !(1980..=2107).contains(&year) {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's two WORDs.
+    unsafe {
+        *date = ((year - 1980) << 9) | (month << 5) | day;
+        *time = (hour << 11) | (minute << 5) | (second / 2);
+    }
+    TRUE
+}
+
 /// SYSTEMTIME fields of `t` (100 ns since 1601) into the caller's `st`.
 fn write_system_time(t: i64, st: *mut u16) {
     let since_epoch = t - UNIX_EPOCH_FILETIME;
@@ -304,7 +345,11 @@ pub extern "system" fn GetModuleHandleExW(
 const PIN: u32 = 1;
 const UNCHANGED_REFCOUNT: u32 = 2;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LdrAddRefDll(flags: u32, module: Handle) -> u32;
     fn RtlPcToFileHeader(pc: usize, base: *mut Handle) -> Handle;

@@ -12,9 +12,9 @@ use super::platform::PAGE_SIZE;
 use super::platform::PageFlags;
 use super::platform::Personality;
 use super::platform::SpawnError;
-use super::platform::TrapFrame;
 use super::platform::UserRegs;
 use super::platform::{PagingError, SharedUserSpace, UserFault, UserSpace};
+use super::platform::{TrapFrame, TrapKind};
 use super::status::NtStatus;
 use super::thread;
 use super::vad::{self, Vad};
@@ -90,9 +90,10 @@ pub struct Process {
     /// for as long as they are mapped). None for a process of another
     /// personality (a Linux program's ELF image is copied in, `lx::exec`).
     _layout: Option<KArc<super::section::ImageLayout>>,
-    /// ntdll!KiUserExceptionDispatcher in this process, or 0: then user
-    /// exceptions end the process.
-    exception_dispatcher: core::sync::atomic::AtomicU64,
+    /// ntdll!KiUserExceptionDispatcher in this process (in a WOW64
+    /// process wow64.dll's GalaWow64Exception, for its 64-bit code), or 0:
+    /// then user exceptions end the process.
+    pub(super) exception_dispatcher: core::sync::atomic::AtomicU64,
     /// ntdll!KiUserApcDispatcher in this process, or 0 (no user APCs run).
     pub apc_dispatcher: core::sync::atomic::AtomicU64,
     /// The job object the process is in (nt::job).
@@ -119,6 +120,9 @@ pub struct Process {
     /// is NT): its threads' system calls go to that personality's
     /// dispatcher (`crate::personality`, ROADMAP LX seam 2).
     pub personality: Personality,
+    /// A 32-bit (x86) process's WOW64 state (`nt::wow64`); None for a
+    /// 64-bit one.
+    pub wow64: Option<super::wow64::Wow64Process>,
 }
 
 impl core::ops::Deref for Process {
@@ -264,6 +268,29 @@ impl Process {
     pub fn write_u64(&self, addr: u64, value: u64) -> Result<(), UserFault> {
         self.write(addr, &value.to_le_bytes())
     }
+
+    /// Writes an IO_STATUS_BLOCK at `addr`, in the layout this process's
+    /// code reads: x64's (Status in a pointer-sized union, then
+    /// Information: 16 bytes), or in a WOW64 process the x86 one (8
+    /// bytes). Every call a WOW64 process makes comes from wow64.dll on
+    /// behalf of 32-bit code, which passes its caller's block through, so
+    /// I/O that completes later reports where and as the caller looks
+    /// (ARCHITECTURE "Plan: WOW64").
+    pub fn write_iosb(
+        &self,
+        addr: u64,
+        status: NtStatus,
+        information: u64,
+    ) -> Result<(), UserFault> {
+        let mut b = [0u8; 16];
+        b[0..4].copy_from_slice(&status.0.to_le_bytes());
+        if self.wow64.is_some() {
+            b[4..8].copy_from_slice(&(information as u32).to_le_bytes());
+            return self.write(addr, &b[..8]);
+        }
+        b[8..16].copy_from_slice(&information.to_le_bytes());
+        self.write(addr, &b)
+    }
 }
 
 /// Every process object: running ones, and exited ones while something
@@ -329,7 +356,7 @@ pub fn running() -> Result<Vec<KArc<Process>>, AllocError> {
 }
 
 /// The state dump's process lines: each running process's commit charge
-/// and its pool and handle quotas (`process: pid P (x.exe) commit N KiB;
+/// and its pool and handle quotas (`process: pid P (x.exe) commit N KiB, R reservations, G regions;
 /// paged U/L (peak P) ...`).
 pub fn dump() {
     let Ok(list) = running() else {
@@ -337,8 +364,11 @@ pub fn dump() {
         return;
     };
     for p in list.iter() {
+        // One lock at a time (format arguments' guards live to the end of
+        // the statement).
+        let (reservations, regions) = p.vad.lock().shape();
         info!(
-            "process: pid {} ({}) commit {} KiB; {}",
+            "process: pid {} ({}) commit {} KiB, {reservations} reservations, {regions} regions; {}",
             p.id,
             p.name,
             p.commit.load(core::sync::atomic::Ordering::Relaxed) * 4,
@@ -372,6 +402,8 @@ pub fn current() -> Option<KArc<Process>> {
 pub enum LoadError {
     Pe(PeError),
     ImportsNotSupported,
+    /// A 32-bit program, and no wow64.dll to run it (nt::wow64).
+    NoWow64,
     BadImageBase,
     OutOfMemory,
     Paging(PagingError),
@@ -417,6 +449,12 @@ impl From<UserFault> for LoadError {
 /// Page flags for an image section: writable sections are copy-on-write,
 /// mapped read-only until written.
 const USER_RW: PageFlags = PageFlags { user: true, global: false, ..PageFlags::KERNEL_RW };
+
+/// The page flags of a process's private read/write structures (PEB,
+/// parameters, TEBs).
+pub fn user_rw_flags() -> PageFlags {
+    USER_RW
+}
 
 fn put_u64(space: &mut UserSpace, addr: u64, value: u64) -> Result<(), UserFault> {
     space.write_initial(addr, &value.to_le_bytes())
@@ -483,10 +521,14 @@ fn number_variable<'a>(buf: &'a mut [u8; 24], name: &'a str, value: u32) -> &'a 
 
 /// The initial environment: the system's variables and the profile of
 /// the user `gala` (directories made by `file::init`), as a Windows logon
-/// sets them.
+/// sets them (a 64-bit process's; a 32-bit one's is adjusted:
+/// `wow64::environment`).
 const ENVIRONMENT: &[&str] = &[
     "ALLUSERSPROFILE=C:\\ProgramData",
     "APPDATA=C:\\Users\\gala\\AppData\\Roaming",
+    "CommonProgramFiles=C:\\Program Files\\Common Files",
+    "CommonProgramFiles(x86)=C:\\Program Files (x86)\\Common Files",
+    "CommonProgramW6432=C:\\Program Files\\Common Files",
     "ComSpec=C:\\Windows\\System32\\cmd.exe",
     "COMPUTERNAME=GALA",
     "HOMEDRIVE=C:",
@@ -498,6 +540,8 @@ const ENVIRONMENT: &[&str] = &[
     "PROCESSOR_ARCHITECTURE=AMD64",
     "ProgramData=C:\\ProgramData",
     "ProgramFiles=C:\\Program Files",
+    "ProgramFiles(x86)=C:\\Program Files (x86)",
+    "ProgramW6432=C:\\Program Files",
     "PUBLIC=C:\\Users\\Public",
     "SystemDrive=C:",
     "SystemRoot=C:\\Windows",
@@ -676,11 +720,20 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         return Err(LoadError::Pe(PeError::NotExecutable));
     }
     // Binding imports is the user-mode loader's job (ntdll), as on Windows.
-    if info.has_imports && super::ntdll::get().is_none() {
+    if info.has_imports && !info.x86 && super::ntdll::get().is_none() {
+        return Err(LoadError::ImportsNotSupported);
+    }
+    // A 32-bit program runs through WOW64 (nt::wow64); its imports are
+    // bound by the 32-bit ntdll.
+    if info.x86 && info.has_imports && super::ntdll::get32().is_none() {
+        warn!("wow64: {name} imports DLLs, and there is no {} to bind them", super::ntdll::PATH32);
         return Err(LoadError::ImportsNotSupported);
     }
     let mut space = UserSpace::new()?;
     let mut vad = Vad::default();
+    if info.x86 {
+        vad.set_limit(super::wow64::limit(info.large_address_aware));
+    }
     let base = map_image(&mut space, &mut vad, &image)?;
     let id = thread::next_id();
     crate::events::emit(
@@ -714,6 +767,9 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     let stack_limit = stack_top - commit;
     vad.commit(stack_limit, commit, vad::PAGE_READWRITE)?;
     vad.commit(stack_limit - PAGE_SIZE, PAGE_SIZE, vad::PAGE_READWRITE | vad::PAGE_GUARD)?;
+    // A WOW64 process's main thread also has a 64-bit stack, for its
+    // wow64.dll code (system call thunks), laid out the same way.
+    let stack64 = if info.x86 { Some(super::wow64::reserve_stack64(&mut vad)?) } else { None };
 
     super::kuser::map_into(&mut space, &mut vad)?;
 
@@ -731,7 +787,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     };
     // Its quotas: what it holds from here on is charged (the handles it
     // starts with too, without a limit).
-    let quota = super::quota::Block::new(id, name)?;
+    let quota = super::quota::new_block(id, name)?;
     handles.attach_quota(quota.clone());
 
     // The current directory, as a handle.
@@ -753,6 +809,10 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     for (slot, var) in environment_default.iter_mut().zip(ENVIRONMENT) {
         *slot = if *var == "NUMBER_OF_PROCESSORS=" { cpus_var } else { var };
     }
+    // As WOW64 sets it for the process's bitness (nt::wow64).
+    let adjusted = super::wow64::environment(environment.unwrap_or(&environment_default), info.x86)
+        .map_err(|_| LoadError::OutOfMemory)?;
+    let environment = adjusted.vars().map_err(|_| LoadError::OutOfMemory)?;
     let p = layout::PARAMS_ADDRESS;
     let block = super::params::build(
         &super::params::ProcessParameters {
@@ -762,7 +822,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             current_directory_handle: cwd_handle,
             dll_path: "",
             std_handles,
-            environment: environment.unwrap_or(&environment_default),
+            environment: &environment,
             runtime_data,
         },
         p,
@@ -806,6 +866,36 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
     let session = super::token::session_of(&token);
     let desk = super::session::ensure(session)?;
     put_u32(&mut space, peb_addr + peb::SESSION_ID, session)?;
+    // A WOW64 process: the PEB32 and the 32-bit parameters (the same
+    // values), below its 32-bit limit.
+    let wow64 = if info.x86 {
+        let params = super::params::ProcessParameters {
+            image_path: path,
+            command_line,
+            current_directory,
+            current_directory_handle: cwd_handle,
+            dll_path: "",
+            std_handles,
+            environment: &environment,
+            runtime_data,
+        };
+        // The block's size first (it does not depend on where it goes).
+        let size = super::params::build32(&params, 0).map_err(|_| LoadError::OutOfMemory)?.len();
+        let at = (layout::wow64::PEB32_ADDRESS - size as u64) & !(vad::ALLOCATION_GRANULARITY - 1);
+        let block = super::params::build32(&params, at).map_err(|_| LoadError::OutOfMemory)?;
+        let peb32 = super::wow64::Peb32 {
+            image_base: base as u32,
+            params: at as u32,
+            cpus,
+            subsystem: info.subsystem,
+            subsystem_version: info.subsystem_version,
+            session,
+        };
+        super::wow64::set_up_space(&mut space, &mut vad, at, &block, &peb32)?;
+        Some(super::wow64::Wow64Process::new(layout::wow64::PEB32_ADDRESS))
+    } else {
+        None
+    };
     let space = KArc::try_new(platform::SpaceLock::new(space))?;
     let process = KArc::try_new(Process {
         core: Core {
@@ -844,22 +934,58 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
         ui: super::winsta::Connection::new(),
         // A PE image: the NT personality (an ELF loader would choose Linux).
         personality: Personality::Nt,
+        wow64,
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;
 
-    // Main thread: starts at the entry point with rcx = PEB, and rsp as if
-    // called (rsp % 16 == 8, 32-byte shadow area above the null return);
-    // with an ntdll, at its LdrInitializeThunk with that as the context.
-    let mut gpr = [0u64; 16];
-    gpr[1] = peb_addr;
-    gpr[4] = stack_top - 0x28;
-    let start = UserRegs { gpr, rip: base + u64::from(info.entry_rva), rflags: 0 };
+    // A WOW64 process: gala's wow64.dll, then the main thread, which starts
+    // there and enters 32-bit code at the entry point (stdcall, the PEB32
+    // as its argument above a null return address), through the 32-bit
+    // ntdll's LdrInitializeThunk when there is one.
+    if let (Some(state), Some(stack64)) = (process.wow64.as_ref(), stack64) {
+        let entry = (base + u64::from(info.entry_rva)) as u32;
+        let peb32 = state.peb32 as u32;
+        let esp = (stack_top - 8) as u32;
+        let mut frame = [0u8; 8];
+        frame[4..].copy_from_slice(&peb32.to_le_bytes());
+        let started = super::wow64::map_dll(&process)
+            .and_then(|()| process.write(u64::from(esp), &frame).map_err(|_| NtStatus::NO_MEMORY))
+            .and_then(|()| {
+                let start = super::wow64::Start32 {
+                    eip: entry,
+                    esp,
+                    gpr: [entry, 0, 0, peb32, 0, 0, 0],
+                    stack: (stack_top as u32, stack_limit as u32, stack_bottom as u32),
+                    stack64: stack64.0,
+                };
+                let start = super::wow64::through_ntdll32(&process, &start)?.unwrap_or(start);
+                thread::create_wow64(&process, start, stack64, suspended).map(|t| (t, start.eip))
+            });
+        let (main, eip) = match started {
+            Ok(t) => t,
+            Err(status) => {
+                PROCESSES.lock().retain(|p| !KArc::ptr_eq(p, &process));
+                return Err(if status == NtStatus::INVALID_IMAGE_FORMAT {
+                    LoadError::NoWow64
+                } else {
+                    LoadError::from(status)
+                });
+            }
+        };
+        announce_start(&process, u64::from(eip), command_line);
+        return Ok((process, main));
+    }
+
+    // Main thread: starts at the entry point with the PEB as its argument,
+    // as if called (`abi::call_regs`); with an ntdll, at its
+    // LdrInitializeThunk with that as the context.
+    let start = super::abi::call_regs(base + u64::from(info.entry_rva), peb_addr, stack_top);
     let started = through_ntdll(&process, &start, stack_top).and_then(|regs| {
         thread::create(
             &process,
             regs,
-            start.rip,
+            start.ip(),
             None,
             (stack_top, stack_limit, stack_bottom),
             suspended,
@@ -873,7 +999,7 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             return Err(LoadError::OutOfMemory);
         }
     };
-    announce_start(&process, regs.rip, command_line);
+    announce_start(&process, regs.ip(), command_line);
     Ok((process, main))
 }
 
@@ -888,15 +1014,18 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
         p => (p, crate::events::current_client()),
     };
     crate::events::note_process(id, command_line);
+    let (machine, wow64) =
+        if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { ("x64", "") };
     info!(
-        "process {} (pid {id}, session {session}): starting at {rip:#x}, personality {personality}",
+        "process {} (pid {id}, session {session}): starting at {rip:#x}, personality \
+         {personality}{wow64}",
         process.name
     );
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
             crate::events::Str(process.name),
             process.image.0,
             crate::events::Str(command_line)
@@ -928,7 +1057,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
     let session = super::token::session_of(&token);
     let desk = super::session::ensure(session)?;
     let space = KArc::try_new(platform::SpaceLock::new(bare.space))?;
-    let quota = super::quota::Block::new(id, bare.name)?;
+    let quota = super::quota::new_block(id, bare.name)?;
     let mut handles = HandleTable::default();
     handles.attach_quota(quota.clone());
     let process = KArc::try_new(Process {
@@ -967,6 +1096,7 @@ pub fn create_bare(bare: Bare) -> Result<KArc<Process>, LoadError> {
         unhandled_exception: IrqMutex::new(None),
         ui: super::winsta::Connection::new(),
         personality: bare.personality,
+        wow64: None,
     })?;
     prune();
     PROCESSES.lock().try_push(process.clone())?;
@@ -980,8 +1110,9 @@ pub fn forget_bare(process: &KArc<Process>) {
 }
 
 /// The initial registers: `start` itself, or, if there is a system ntdll,
-/// its LdrInitializeThunk(rcx = &CONTEXT of `start`, rdx = ntdll base) with
-/// the CONTEXT at the top of the stack. The ntdll view is mapped here.
+/// its LdrInitializeThunk(&CONTEXT of `start`, ntdll base) with the
+/// CONTEXT at the top of the stack (`abi::ldr_thunk_regs`). The ntdll view
+/// is mapped here.
 fn through_ntdll(
     process: &Process,
     start: &UserRegs,
@@ -1007,17 +1138,8 @@ fn through_ntdll(
             .apc_dispatcher
             .store(view.base + u64::from(rva), core::sync::atomic::Ordering::Relaxed);
     }
-    let mut entry = *start;
-    let context_addr = (stack_top - super::context::SIZE as u64) & !0xf;
-    entry.gpr[4] = context_addr - 0x28;
-    process
-        .write(context_addr, &super::context::to_bytes(&entry, None))
-        .map_err(|_| NtStatus::NO_MEMORY)?;
-    let mut gpr = [0u64; 16];
-    gpr[1] = context_addr;
-    gpr[2] = view.base;
-    gpr[4] = entry.gpr[4] - 0x30; // call-like alignment, shadow space
-    Ok(UserRegs { gpr, rip: view.base + u64::from(ntdll.thunk_rva), rflags: 0 })
+    let thunk = view.base + u64::from(ntdll.thunk_rva);
+    super::abi::ldr_thunk_regs(process, start, stack_top, thunk, view.base)
 }
 
 /// Ends `process` with `status`: other threads are asked to terminate, and
@@ -1053,7 +1175,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     let status = *process.exit_status.lock().get_or_insert(last_status);
     *process.exit_time.lock() = platform::system_time();
     // A line the program left open ends here, before the exit lines.
-    crate::console::end_program_line();
+    crate::console::end_program_line(process.id);
     // A Linux process's last output lines and how it ended, before the
     // core's line (ROADMAP LX).
     if process.personality == Personality::Linux {
@@ -1065,7 +1187,14 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     if let Some(note) = note.filter(|n| n.status == status).or(unhandled) {
         super::crashreport::report(process, &note, status);
     }
-    info!("process {} (pid {}) exited with status {:#010x}", process.name, process.id, status.0);
+    // How long it lived (creation to exit, 100 ns units): what run-all.ps1
+    // times a program by on Windows (`cargo xtask compare` sets them side
+    // by side).
+    let lived_ms = process.exit_time.lock().saturating_sub(process.create_time) / 10_000;
+    info!(
+        "process {} (pid {}) exited with status {:#010x} after {} ms",
+        process.name, process.id, status.0, lived_ms
+    );
     crate::events::emit(
         crate::events::Category::Process,
         "process exit",
@@ -1102,33 +1231,32 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
 /// User-mode CPU exceptions: resolved (demand paging, guard pages, COW),
 /// delivered to the process's exception dispatcher, or fatal.
 fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
-    let vector = frame.vector as u8;
+    let vector = frame.vector();
     crate::events::emit(
         crate::events::Category::Fault,
         "fault",
         format_args!(
             r#""pid":{},"vector":{vector},"rip":{},"cr2":{},"error":{}"#,
             current().map_or(0, |p| p.id),
-            frame.rip,
+            frame.ip(),
             cr2.unwrap_or(0),
-            frame.error_code
+            frame.error_code()
         ),
     );
     if super::syscalls::tracing() {
         info!(
             "trace: pid {} fault: vector {vector} at rip {:#x} (cr2 {:#x}, error {:#x})",
             current().map_or(0, |p| p.id),
-            frame.rip,
+            frame.ip(),
             cr2.unwrap_or(0),
-            frame.error_code
+            frame.error_code()
         );
     }
-    if let (14, Some(addr), Some(process)) = (vector, cr2, current()) {
-        // Page-fault error code: bit 1 = write, bit 4 = instruction fetch.
-        let kind = match frame.error_code {
-            e if e & (1 << 4) != 0 => AccessKind::Execute,
-            e if e & (1 << 1) != 0 => AccessKind::Write,
-            _ => AccessKind::Read,
+    if let (Some(access), Some(addr), Some(process)) = (frame.page_fault_access(), cr2, current()) {
+        let kind = match access {
+            platform::FaultAccess::Execute => AccessKind::Execute,
+            platform::FaultAccess::Write => AccessKind::Write,
+            platform::FaultAccess::Read => AccessKind::Read,
         };
         let started = platform::monotonic_ns();
         let resolved = vm::resolve_fault(&process, addr, kind);
@@ -1136,11 +1264,12 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
         match resolved {
             vm::Fault::Resolved => return, // retry the instruction
             vm::Fault::Raise(status) => {
-                if !deliver_to_user(&process, frame, status, cr2) {
-                    keep_note(&process, frame, status, frame.rip, cr2);
+                if !super::abi::deliver_to_user(&process, frame, status, cr2) {
+                    super::abi::keep_note(&process, frame, status, frame.ip(), cr2);
                     warn!(
                         "user exception: {:#x} at rip {:#x} (cr2 {addr:#x})",
-                        status.0, frame.rip
+                        status.0,
+                        frame.ip()
                     );
                     terminate_current(status);
                 }
@@ -1149,172 +1278,30 @@ fn on_user_exception(frame: &mut TrapFrame, cr2: Option<u64>) {
             vm::Fault::Denied | vm::Fault::OutOfMemory => {}
         }
     }
-    let status = match vector {
-        0 => NtStatus::INTEGER_DIVIDE_BY_ZERO,
-        3 => NtStatus::BREAKPOINT,
-        6 => NtStatus::ILLEGAL_INSTRUCTION,
-        13 => NtStatus::PRIVILEGED_INSTRUCTION,
-        14 => NtStatus::ACCESS_VIOLATION,
-        _ => NtStatus::ACCESS_VIOLATION,
+    let status = match frame.kind() {
+        TrapKind::DivideError => NtStatus::INTEGER_DIVIDE_BY_ZERO,
+        TrapKind::Breakpoint => NtStatus::BREAKPOINT,
+        TrapKind::InvalidOpcode => NtStatus::ILLEGAL_INSTRUCTION,
+        TrapKind::Protection => NtStatus::PRIVILEGED_INSTRUCTION,
+        TrapKind::PageFault | TrapKind::Other => NtStatus::ACCESS_VIOLATION,
     };
     if let Some(process) = current()
-        && deliver_to_user(&process, frame, status, cr2)
+        && super::abi::deliver_to_user(&process, frame, status, cr2)
     {
         return;
     }
     if let Some(process) = current() {
-        keep_note(&process, frame, status, frame.rip, cr2);
+        super::abi::keep_note(&process, frame, status, frame.ip(), cr2);
     }
     warn!(
         "user exception: {} at rip {:#x} (cr2 {:#x}, error {:#x})",
         platform::exception_name(vector),
-        frame.rip,
+        frame.ip(),
         cr2.unwrap_or(0),
-        frame.error_code
+        frame.error_code()
     );
     // Takes effect on the way back to user mode (the user-return hook).
     terminate_current(status)
-}
-
-/// Keeps the exception for a crash report (printed if it ends the
-/// process).
-fn keep_note(process: &Process, frame: &TrapFrame, status: NtStatus, rip: u64, cr2: Option<u64>) {
-    let access = matches!(
-        status,
-        NtStatus::ACCESS_VIOLATION | NtStatus::GUARD_PAGE_VIOLATION | NtStatus::STACK_OVERFLOW
-    )
-    .then(|| {
-        let kind = match frame.error_code {
-            e if e & (1 << 4) != 0 => 8,
-            e if e & (1 << 1) != 0 => 1,
-            _ => 0,
-        };
-        (cr2.unwrap_or(u64::MAX), kind)
-    });
-    let regs = [
-        frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi, frame.rdi,
-        frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
-    ];
-    let note = super::crashreport::Note::new(process, status, rip, access, regs);
-    *process.last_exception.lock() = Some(note);
-}
-
-/// The dispatcher frame on the user stack: the CONTEXT at the new rsp,
-/// the EXCEPTION_RECORD at `RECORD_OFFSET`, then room for a machine frame.
-/// The layout follows the documented KiUserExceptionDispatcher contract as
-/// far as it is public (rsp -> CONTEXT, record above it).
-// TODO: check the offsets against the pinned build's ntdll.
-const RECORD_OFFSET: u64 = 0x4f0;
-const RECORD_SIZE: u64 = 0x98;
-/// The machine frame (rip, cs, rflags, rsp, ss of the fault) above the
-/// record: ntdll's dispatcher describes it in its unwind data
-/// (UWOP_PUSH_MACHFRAME), so unwinding continues into the faulting frame.
-const MACHINE_FRAME_OFFSET: u64 = 0x590;
-const DISPATCH_FRAME_SIZE: u64 = MACHINE_FRAME_OFFSET + 0x30;
-/// With extended features (AVX): the CONTEXT has CONTEXT_XSTATE, its
-/// CONTEXT_EX follows it (at 0x4d0, before the record) and the XSTATE
-/// area starts here, 64-byte aligned (the frame is).
-const XSTATE_OFFSET: u64 = DISPATCH_FRAME_SIZE;
-
-/// EXCEPTION_RECORD (x64) for `status` raised at `address`.
-fn exception_record(status: NtStatus, address: u64, info: &[u64]) -> [u8; RECORD_SIZE as usize] {
-    let mut r = [0u8; RECORD_SIZE as usize];
-    r[0..4].copy_from_slice(&status.0.to_le_bytes());
-    r[0x10..0x18].copy_from_slice(&address.to_le_bytes());
-    r[0x18..0x1c].copy_from_slice(&(info.len() as u32).to_le_bytes());
-    for (i, v) in info.iter().enumerate() {
-        r[0x20 + 8 * i..0x28 + 8 * i].copy_from_slice(&v.to_le_bytes());
-    }
-    r
-}
-
-/// MACHINE_FRAME: rip, cs, rflags, rsp, ss of the interrupted code.
-fn machine_frame(rip: u64, frame: &TrapFrame) -> [u8; 40] {
-    let mut m = [0u8; 40];
-    let (cs, ss) = (super::context::USER_CS.into(), super::context::USER_DS.into());
-    let values = [rip, cs, frame.rflags, frame.rsp, ss];
-    for (chunk, v) in m.chunks_exact_mut(8).zip(values) {
-        chunk.copy_from_slice(&v.to_le_bytes());
-    }
-    m
-}
-
-/// Hands a user-mode exception to ntdll!KiUserExceptionDispatcher, if the
-/// process has one: CONTEXT and EXCEPTION_RECORD go on the user stack and
-/// the thread resumes in the dispatcher. False if it cannot be delivered.
-fn deliver_to_user(
-    process: &Process,
-    frame: &mut TrapFrame,
-    status: NtStatus,
-    cr2: Option<u64>,
-) -> bool {
-    let dispatcher = process.exception_dispatcher.load(core::sync::atomic::Ordering::Relaxed);
-    if dispatcher == 0 {
-        return false;
-    }
-    // Breakpoints report the int3 itself (the trap left rip after it).
-    let rip = if status == NtStatus::BREAKPOINT { frame.rip.wrapping_sub(1) } else { frame.rip };
-    let info: &[u64] = match status {
-        NtStatus::BREAKPOINT => &[0],
-        NtStatus::ACCESS_VIOLATION | NtStatus::GUARD_PAGE_VIOLATION | NtStatus::STACK_OVERFLOW => {
-            // 0 = read, 1 = write, 8 = execute (DEP).
-            let kind = match frame.error_code {
-                e if e & (1 << 4) != 0 => 8,
-                e if e & (1 << 1) != 0 => 1,
-                _ => 0,
-            };
-            &[kind, cr2.unwrap_or(u64::MAX)]
-        }
-        _ => &[],
-    };
-    keep_note(process, frame, status, rip, cr2);
-    let record = exception_record(status, rip, info);
-    let regs = UserRegs {
-        gpr: [
-            frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi, frame.rdi,
-            frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
-        ],
-        rip,
-        rflags: frame.rflags,
-    };
-    use super::context as c;
-    let state = platform::xsave();
-    let context = c::to_bytes(&regs, Some(&state));
-    let machine = machine_frame(rip, frame);
-    // The frame without the XSTATE area if there is no room for it (a
-    // stack overflow's last page: an AVX-512 area makes the frame 3.6 KiB).
-    let push = |xlen: usize| -> Option<u64> {
-        let mut context = context;
-        let size = if xlen == 0 { DISPATCH_FRAME_SIZE } else { XSTATE_OFFSET + xlen as u64 };
-        if xlen != 0 {
-            let flags = c::flags(&context) | c::CONTEXT_XSTATE;
-            c::set_flags(&mut context, flags);
-        }
-        let at = (frame.rsp.wrapping_sub(size)) & !0x3f;
-        if at >= frame.rsp {
-            return None;
-        }
-        if xlen != 0 {
-            let area = c::xstate_bytes(&state, u64::MAX, xlen);
-            process.write(at + XSTATE_OFFSET, &area[..xlen]).ok()?;
-            process
-                .write(at + c::SIZE as u64, &c::context_ex(XSTATE_OFFSET as usize, xlen))
-                .ok()?;
-        }
-        process.write(at, &context).ok()?;
-        process.write(at + RECORD_OFFSET, &record).ok()?;
-        process.write(at + MACHINE_FRAME_OFFSET, &machine).ok()?;
-        Some(at)
-    };
-    let xlen = c::xstate_len();
-    let pushed = push(xlen).or_else(|| if xlen == 0 { None } else { push(0) });
-    let Some(new_rsp) = pushed else {
-        warn!("user exception: cannot push the dispatcher frame (rsp {:#x})", frame.rsp);
-        return false;
-    };
-    frame.rip = dispatcher;
-    frame.rsp = new_rsp;
-    true
 }
 
 pub fn init() {
@@ -1379,7 +1366,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
     let space =
         KArc::try_new(platform::SpaceLock::new(a.space)).map_err(|_| NtStatus::NO_MEMORY)?;
     let commit = a.vad.private_commit();
-    let quota = super::quota::Block::new(a.id, a.name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let quota = super::quota::new_block(a.id, a.name).map_err(|_| NtStatus::NO_MEMORY)?;
     let mut handles = HandleTable::default();
     handles.attach_quota(quota.clone());
     let process = KArc::try_new(Process {
@@ -1420,6 +1407,7 @@ pub fn adopt(a: Adopted) -> Result<KArc<Process>, NtStatus> {
         // The handover's PROCESSES record has no personality yet: NT is
         // the only one with processes (a second needs a record version).
         personality: Personality::Nt,
+        wow64: None,
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     {

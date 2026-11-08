@@ -248,3 +248,40 @@ pub(crate) fn message(module: Handle, id: u32, lang: u16) -> Option<(&'static [u
     }
     None
 }
+
+/// EnumResourceLanguagesW(module, type, name, callback, param): calls
+/// `callback(module, type, name, language, param)` for each language of
+/// the resource, in directory order, until it returns FALSE. No such type
+/// or name: FALSE with ERROR_RESOURCE_TYPE_NOT_FOUND or
+/// ERROR_RESOURCE_NAME_NOT_FOUND (an image without resources:
+/// ERROR_RESOURCE_DATA_NOT_FOUND).
+#[unsafe(no_mangle)]
+pub extern "system" fn EnumResourceLanguagesW(
+    module: Handle,
+    kind: *const u16,
+    name: *const u16,
+    callback: Option<extern "system" fn(Handle, *const u16, *const u16, u16, isize) -> Bool>,
+    param: isize,
+) -> Bool {
+    let Some(callback) = callback else { return fail_with(87, 0) }; // ERROR_INVALID_PARAMETER
+    let base = module_base(module);
+    let Some(root) = resource_root(base) else {
+        return fail_with(ERROR_RESOURCE_DATA_NOT_FOUND, 0);
+    };
+    let sub = |offset: u32| root + (offset & 0x7fff_ffff) as usize;
+    let Some(types) = find(root, root, Key::from_wide(kind)) else {
+        return fail_with(ERROR_RESOURCE_TYPE_NOT_FOUND, 0);
+    };
+    let Some(names) = find(root, sub(types), Key::from_wide(name)) else {
+        return fail_with(ERROR_RESOURCE_NAME_NOT_FOUND, 0);
+    };
+    let langs = sub(names);
+    let n = usize::from(rd16(langs + 12)) + usize::from(rd16(langs + 14));
+    for i in 0..n {
+        let lang = rd32(langs + 16 + 8 * i) as u16;
+        if callback(module, kind, name, lang, param) == 0 {
+            break;
+        }
+    }
+    1
+}

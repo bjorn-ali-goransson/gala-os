@@ -3,7 +3,14 @@
  * rename/renameat2, unlink of an open file, mkdir/rmdir, symlinks, and
  * the errors (ENOENT, EEXIST, ENOTDIR, EISDIR, ENOTEMPTY, EBADF, ELOOP).
  *
- * Runs in its own fresh directory (lx-expect's run directory). Prints
+ * Works in a directory it makes (`w`, in lx-expect's fresh run directory;
+ * in gala a directory a Linux program makes is case-sensitive, the boot's
+ * /lx is not). Also: symbolic links followed in path walks (relative to
+ * the link's directory, `..` in a target, chains of links (20 always
+ * resolve, 40 resolve unless a lockless walk fell back, 41 never), ELOOP
+ * past them), hard links (link, linkat, AT_SYMLINK_FOLLOW, nlink, a link
+ * to a symlink), the name of an unlinked open file free at once, and two
+ * names differing only in case in one directory. Prints
  * only what is the same on every Linux file system that keeps POSIX
  * metadata (ext4, tmpfs, ...): modes, link counts of files, sizes of
  * files and symlinks, types, directory entries sorted by name (their
@@ -234,6 +241,8 @@ int main(void)
 	char buf[64];
 	struct stat st;
 	lx_init();
+	sys2(SYS_mkdir, "w", 0777);
+	sys1(SYS_chdir, "w");
 
 	say_text("-- open and openat");
 	i64 fd = open_("f", O_WRONLY | O_CREAT | O_EXCL, 0666);
@@ -375,6 +384,34 @@ int main(void)
 	say_ret("statx(missing)", sys5(SYS_statx, AT_FDCWD, "missing", 0, STATX_BASIC_STATS, &sx));
 	say_ret("statx(reserved mask bit)", sys5(SYS_statx, AT_FDCWD, "f", 0, 0x80000000U, &sx));
 
+	say_text("-- hard links");
+	make_file("h1", "one");
+	say_ret("link(h1, h2)", sys2(SYS_link, "h1", "h2"));
+	say_ret("linkat(AT_FDCWD, h1, d, h3, 0)", sys5(SYS_linkat, AT_FDCWD, "h1", dfd, "h3", 0));
+	stat_path("stat(h1) with three links", "h1");
+	fd = open_("h2", O_WRONLY | O_APPEND, 0);
+	write_str(fd, "+two");
+	sys1(SYS_close, fd);
+	say_content("read(d/h3) after a write through h2", "d/h3");
+	say_ret("unlink(h1)", sys1(SYS_unlink, "h1"));
+	stat_path("stat(h2) after unlink(h1)", "h2");
+	say_ret("link(missing, h4)", sys2(SYS_link, "missing", "h4"));
+	say_ret("link(h2, missing/h4)", sys2(SYS_link, "h2", "missing/h4"));
+	say_ret("link(h2, d/h3) (exists)", sys2(SYS_link, "h2", "d/h3"));
+	say_ret("linkat(bad flags)", sys5(SYS_linkat, AT_FDCWD, "h2", AT_FDCWD, "h4", 0x1));
+	sys2(SYS_symlink, "h2", "hs");
+	say_ret("linkat(hs, hsl, 0) (links the symlink)", sys5(SYS_linkat, AT_FDCWD, "hs", AT_FDCWD, "hsl", 0));
+	lstat_path("lstat(hsl)", "hsl");
+	say_ret("linkat(hs, hfl, AT_SYMLINK_FOLLOW) (links the target)", sys5(SYS_linkat, AT_FDCWD, "hs", AT_FDCWD, "hfl", 0x400));
+	lstat_path("lstat(hfl)", "hfl");
+	say_ret("rename(h2, d/h3) (same file: no-op)", sys2(SYS_rename, "h2", "d/h3"));
+	stat_path("stat(h2)", "h2");
+	say_ret("rename(hfl, h5) (one link of three)", sys2(SYS_rename, "hfl", "h5"));
+	stat_path("stat(h5)", "h5");
+	stat_path("stat(hfl)", "hfl");
+	for (const char *const *p = (const char *const[]){"h2", "d/h3", "hs", "hsl", "h5", 0}; *p; p++)
+		sys1(SYS_unlink, *p);
+
 	say_text("-- symlinks");
 	n = sys3(SYS_readlink, "lnk", buf, sizeof buf);
 	say_read("readlink(lnk)", n, buf);
@@ -403,6 +440,76 @@ int main(void)
 	sys1(SYS_close, fd);
 	stat_path("stat(missing) now", "missing");
 	say_ret("open(lnk, O_CREAT|O_EXCL)", open_("lnk", O_WRONLY | O_CREAT | O_EXCL, 0666));
+
+	say_text("-- symlinks in paths");
+	sys2(SYS_mkdir, "p", 0777);
+	make_file("p/pf", "in p");
+	say_ret("symlink(p, pl)", sys2(SYS_symlink, "p", "pl"));
+	say_content("read(pl/pf)", "pl/pf");
+	stat_path("stat(pl)", "pl");
+	lstat_path("lstat(pl/) (a trailing slash follows)", "pl/");
+	say_ret("symlink(.., p/up)", sys2(SYS_symlink, "..", "p/up"));
+	say_content("read(pl/up/pl/pf) (relative to the link's directory)", "pl/up/pl/pf");
+	say_ret("symlink(../p/pf, p/sib)", sys2(SYS_symlink, "../p/pf", "p/sib"));
+	say_content("read(p/sib)", "p/sib");
+	say_ret("open(lnk/x) (a file in the middle)", open_("lnk/x", O_RDONLY, 0));
+	say_ret("open(dangling/x)", open_("dangling/x", O_RDONLY, 0));
+	say_ret("open(loop1/x)", open_("loop1/x", O_RDONLY, 0));
+	say_ret("mkdir(dangling)", sys2(SYS_mkdir, "dangling", 0777));
+	say_ret("mkdir(pl)", sys2(SYS_mkdir, "pl", 0777));
+	say_ret("rmdir(pl)", sys1(SYS_rmdir, "pl"));
+	say_ret("open(pl, O_DIRECTORY|O_NOFOLLOW)", open_("pl", O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0));
+	say_ret("chdir(pl)", sys1(SYS_chdir, "pl"));
+	n = sys2(SYS_getcwd, cwd, sizeof cwd);
+	say_bool("getcwd ends with /p (the link resolved)", n >= 3 && lx_memeq(cwd + n - 3, "/p", 3));
+	sys1(SYS_chdir, "..");
+	/* A chain: c0 -> c1 -> ... -> c40 -> p/pf. */
+	for (int i = 0; i <= 40; i++) {
+		char name[8] = {'c', 0, 0, 0}, next[8] = {'c', 0, 0, 0};
+		name[1] = '0' + i / 10, name[2] = '0' + i % 10;
+		next[1] = '0' + (i + 1) / 10, next[2] = '0' + (i + 1) % 10;
+		sys2(SYS_symlink, i == 40 ? "p/pf" : next, name);
+	}
+	/* Linux counts the links of one lookup once: when its lockless walk
+	 * falls back to the locked one (-ECHILD), the retry keeps the links
+	 * the first pass followed (fs/namei.c: the count is set once per
+	 * lookup). So 40 links read, or fail with ELOOP when a fallback came
+	 * after some of them (CI's runner did); 20 always read (a fallback has
+	 * followed at most 20), 41 never do. */
+	say_content("read(c21) (20 links)", "c21");
+	{
+		i64 fd = open_("c01", O_RDONLY, 0);
+		if (fd >= 0)
+			sys1(SYS_close, fd);
+		say_bool("open(c01) (40 links) opens or is ELOOP", fd >= 0 || fd == -40);
+	}
+	say_ret("open(c00) (41 links)", open_("c00", O_RDONLY, 0));
+	say_ret("stat(c00/x)", sys2(SYS_stat, "c00/x", &st));
+	for (int i = 0; i <= 40; i++) {
+		char name[8] = {'c', 0, 0, 0};
+		name[1] = '0' + i / 10, name[2] = '0' + i % 10;
+		sys1(SYS_unlink, name);
+	}
+	sys1(SYS_unlink, "p/up");
+	sys1(SYS_unlink, "p/sib");
+	sys1(SYS_unlink, "p/pf");
+	sys1(SYS_rmdir, "p");
+	say_ret("unlink(pl) (dangling now)", sys1(SYS_unlink, "pl"));
+
+	say_text("-- names differing in case");
+	make_file("Case", "upper");
+	make_file("case", "lower");
+	say_content("read(Case)", "Case");
+	say_content("read(case)", "case");
+	say_ret("stat syscall(CASE)", sys2(SYS_stat, "CASE", &st));
+	say_ret("mkdir(Dir)", sys2(SYS_mkdir, "Dir", 0777));
+	say_ret("mkdir(dir)", sys2(SYS_mkdir, "dir", 0777));
+	say_ret("rename(case, CASE)", sys2(SYS_rename, "case", "CASE"));
+	list_dir("getdents64(.) of the case pair", ".");
+	sys1(SYS_unlink, "Case");
+	sys1(SYS_unlink, "CASE");
+	sys1(SYS_rmdir, "Dir");
+	sys1(SYS_rmdir, "dir");
 
 	say_text("-- rename");
 	make_file("a", "A");
@@ -446,7 +553,16 @@ int main(void)
 	say("  fstat nlink", st.st_nlink);
 	say("  fstat size", st.st_size);
 	say_ret("  write after unlink", write_str(fd, "!"));
+	i64 fd2 = open_("u", O_RDWR | O_CREAT | O_EXCL, 0600);
+	say_ok("open(u, O_CREAT|O_EXCL) (the name is free)", fd2);
+	write_str(fd2, "new");
+	sys1(SYS_close, fd2);
+	sys3(SYS_lseek, fd, 0, 0);
+	say_read("read(fd of unlinked u) again", sys3(SYS_read, fd, buf, sizeof buf), buf);
+	say_content("read(u)", "u");
+	stat_path("stat(u) now", "u");
 	sys1(SYS_close, fd);
+	sys1(SYS_unlink, "u");
 	say_ret("unlink(u) again", sys1(SYS_unlink, "u"));
 	say_ret("unlink(d)", sys1(SYS_unlink, "d"));
 	say_ret("unlink(lnk) (the link, not f)", sys1(SYS_unlink, "lnk"));

@@ -8,7 +8,9 @@
 //!   (shared mode): a waiter woken by another thread; a timeout returns
 //!   FALSE with ERROR_TIMEOUT.
 //! - InitOnceExecuteOnce: the callback runs once, its context is kept; a
-//!   callback that fails leaves the once uninitialized.
+//!   callback that fails leaves the once uninitialized; the callback gets
+//!   the caller's Context pointer as it is, NULL when there is none (on
+//!   Windows a callback writing through it faults).
 //! - Fiber local storage: FlsAlloc/Set/GetValue, a new thread starts with
 //!   null, the callback runs at thread exit and at FlsFree for non-null
 //!   values.
@@ -17,6 +19,18 @@
 //! - Semaphores: CreateSemaphoreW/A, waits, ReleaseSemaphore's previous
 //!   count, ERROR_TOO_MANY_POSTS past the maximum.
 //! - InitializeCriticalSectionEx.
+//! - A thread blocked on a condition variable, an SRW lock (exclusive or
+//!   shared), a critical section or another thread's InitOnce sleeps: over
+//!   300 ms its ContextSwitches (SystemProcessInformation) grow by at
+//!   most a few (a waiter that polls would switch hundreds of times).
+//!   Counted switches, not elapsed time (a loaded host only delays).
+//! - No lost wake-ups: two threads hand a turn back and forth 3000 times
+//!   through a condition variable with an SRW lock, with a critical
+//!   section, and through WaitOnAddress; four threads (more than the
+//!   CPUs, so they sleep) pass a turn round-robin through a condition
+//!   variable and through WaitOnAddress, waking all; four threads enter one
+//!   critical section 3000 times each (an exact count). A lost wake hangs
+//!   it.
 //!
 //! Prints `kernel32_sync_test: ok` or exits with the number of the failing
 //! check.
@@ -89,12 +103,26 @@ unsafe extern "system" {
     fn ReleaseSemaphore(h: Handle, count: i32, previous: *mut i32) -> Bool;
 }
 
+#[link(name = "api-ms-win-core-synch-l1-2-0", kind = "raw-dylib")]
+unsafe extern "system" {
+    // WaitOnAddress and WakeByAddressSingle: through their API set
+    // (KernelBase, on Windows and gala).
+    fn WaitOnAddress(address: *mut c_void, compare: *const c_void, size: usize, ms: u32) -> Bool;
+    fn WakeByAddressSingle(address: *mut c_void);
+    fn WakeByAddressAll(address: *mut c_void);
+}
+
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
     fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+}
+
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> i32;
 }
 
 #[unsafe(no_mangle)]
@@ -154,6 +182,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -163,10 +192,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -237,10 +268,18 @@ extern "system" fn signal_srw(_: *mut c_void) -> u32 {
 
 static ONCE_CALLS: AtomicU32 = AtomicU32::new(0);
 
+/// The Context pointer the last once_ok call was given.
+static ONCE_CONTEXT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
 extern "system" fn once_ok(_: *mut usize, param: *mut c_void, context: *mut *mut c_void) -> Bool {
     ONCE_CALLS.fetch_add(1, Ordering::SeqCst);
-    // SAFETY: the context output InitOnceExecuteOnce passes.
-    unsafe { *context = param };
+    ONCE_CONTEXT.store(context as usize, Ordering::SeqCst);
+    // Windows passes the caller's Context as it is: NULL when the caller
+    // gave none (a write through it would fault there).
+    if !context.is_null() {
+        // SAFETY: the caller's context output, passed through.
+        unsafe { *context = param };
+    }
     1
 }
 
@@ -386,6 +425,8 @@ fn init_once(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         c.ok(InitOnceExecuteOnce(&mut once, once_ok, 0x1230 as *mut c_void, &mut context) != 0, 0)?;
         c.eq(context as u64, 0x1230)?;
+        // The callback was given the caller's own Context pointer.
+        c.eq(ONCE_CONTEXT.load(Ordering::SeqCst) as u64, (&raw mut context) as u64)?;
         context = core::ptr::null_mut();
         c.ok(InitOnceExecuteOnce(&mut once, once_ok, 0x4560 as *mut c_void, &mut context) != 0, 0)?;
         c.eq(context as u64, 0x1230)?; // the first context
@@ -406,6 +447,8 @@ fn init_once(c: &mut Checks) -> Result<(), u32> {
                 != 0,
             0,
         )?;
+        // No Context: the callback gets NULL, not a pointer of kernel32's.
+        c.eq(ONCE_CONTEXT.load(Ordering::SeqCst) as u64, 0)?;
         c.eq(ONCE_CALLS.load(Ordering::SeqCst).into(), 3)?;
     }
     Ok(())
@@ -503,6 +546,400 @@ fn semaphores(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+// --- Waiters sleep ---------------------------------------------------------
+
+const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+/// SYSTEM_PROCESS_INFORMATION's size on x64 (its threads follow it), and
+/// SYSTEM_THREAD_INFORMATION's.
+const PROCESS_ENTRY: usize = 0x100;
+const THREAD_ENTRY: usize = 0x50;
+/// How many times a thread blocked for SLEEP_MS may be switched to: a few
+/// (Windows: none or one); a polling waiter is switched to every
+/// millisecond or more often.
+const MOST_SWITCHES: u64 = 10;
+const SLEEP_MS: u32 = 300;
+
+/// Room for SystemProcessInformation on a real machine (hundreds of
+/// processes and thousands of threads; 64 KiB overflowed on Windows):
+/// zero pages until the query writes them.
+static SNAPSHOT: Shared<[u8; 1 << 23]> = Shared(core::cell::UnsafeCell::new([0; 1 << 23]));
+
+/// Thread `tid`'s ContextSwitches (SystemProcessInformation), or None.
+fn switches(tid: u32) -> Option<u64> {
+    // SAFETY: only the main thread uses the buffer.
+    let buf = unsafe { &mut *SNAPSHOT.get() };
+    let mut ret = 0u32;
+    // SAFETY: a buffer of ours.
+    let st = unsafe {
+        NtQuerySystemInformation(
+            SYSTEM_PROCESS_INFORMATION,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut ret,
+        )
+    };
+    if st != 0 {
+        return None;
+    }
+    let read = |at: usize, n: usize| -> Option<u64> {
+        let b = buf.get(at..at + n)?;
+        let mut v = [0u8; 8];
+        v[..n].copy_from_slice(b);
+        Some(u64::from_le_bytes(v))
+    };
+    let mut at = 0;
+    loop {
+        let threads = read(at + 4, 4)? as usize;
+        for i in 0..threads {
+            let t = at + PROCESS_ENTRY + THREAD_ENTRY * i;
+            if read(t + 0x30, 8)? == u64::from(tid) {
+                return read(t + 0x40, 4);
+            }
+        }
+        match read(at, 4)? {
+            0 => return None,
+            next => at += next as usize,
+        }
+    }
+}
+
+static SLEEP_LOCK: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static SLEEP_CV: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static SLEEP_CS: Shared<CriticalSection> =
+    Shared(core::cell::UnsafeCell::new(CriticalSection([0; 5])));
+static SLEEP_ONCE: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+/// Set to let the condition-variable and InitOnce waits end.
+static RELEASED: AtomicU32 = AtomicU32::new(0);
+/// Set by a sleeper thread just before it blocks.
+static BLOCKING: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn cv_sleeper(_: *mut c_void) -> u32 {
+    // SAFETY: the test's lock and variable.
+    unsafe {
+        AcquireSRWLockExclusive(SLEEP_LOCK.get());
+        BLOCKING.store(1, Ordering::SeqCst);
+        while RELEASED.load(Ordering::SeqCst) == 0 {
+            SleepConditionVariableSRW(SLEEP_CV.get(), SLEEP_LOCK.get(), INFINITE, 0);
+        }
+        ReleaseSRWLockExclusive(SLEEP_LOCK.get());
+    }
+    0
+}
+
+extern "system" fn srw_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: the test's lock, held exclusively by the main thread.
+    unsafe {
+        AcquireSRWLockExclusive(SLEEP_LOCK.get());
+        ReleaseSRWLockExclusive(SLEEP_LOCK.get());
+    }
+    0
+}
+
+extern "system" fn shared_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: as above.
+    unsafe {
+        AcquireSRWLockShared(SLEEP_LOCK.get());
+        ReleaseSRWLockShared(SLEEP_LOCK.get());
+    }
+    0
+}
+
+extern "system" fn cs_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: the test's critical section, held by the main thread.
+    unsafe {
+        EnterCriticalSection(SLEEP_CS.get());
+        LeaveCriticalSection(SLEEP_CS.get());
+    }
+    0
+}
+
+/// An InitOnce callback that runs until RELEASED.
+extern "system" fn once_slow(_: *mut usize, _: *mut c_void, _: *mut *mut c_void) -> Bool {
+    BLOCKING.store(1, Ordering::SeqCst);
+    while RELEASED.load(Ordering::SeqCst) == 0 {
+        // SAFETY: a plain sleep.
+        unsafe { Sleep(10) };
+    }
+    1
+}
+
+extern "system" fn once_runner(_: *mut c_void) -> u32 {
+    // SAFETY: the test's INIT_ONCE.
+    unsafe {
+        InitOnceExecuteOnce(
+            SLEEP_ONCE.get(),
+            once_slow,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        )
+    };
+    0
+}
+
+extern "system" fn once_sleeper(_: *mut c_void) -> u32 {
+    BLOCKING.store(1, Ordering::SeqCst);
+    // SAFETY: as above; the runner is in the callback.
+    unsafe {
+        InitOnceExecuteOnce(SLEEP_ONCE.get(), once_ok, core::ptr::null_mut(), core::ptr::null_mut())
+    };
+    0
+}
+
+/// Starts `f`, waits until it is about to block (and a little more, for
+/// it to get there), counts its switches over SLEEP_MS, runs `release`,
+/// joins it; checks the count.
+fn sleeps(c: &mut Checks, f: StartRoutine, release: impl FnOnce()) -> Result<(), u32> {
+    BLOCKING.store(0, Ordering::SeqCst);
+    let mut tid = 0u32;
+    // SAFETY: a thread running `f`.
+    let h =
+        unsafe { CreateThread(core::ptr::null_mut(), 0, f, core::ptr::null_mut(), 0, &mut tid) };
+    c.ok(!h.is_null(), 0)?;
+    while BLOCKING.load(Ordering::SeqCst) == 0 {
+        // SAFETY: a plain sleep.
+        unsafe { Sleep(1) };
+    }
+    // SAFETY: a plain sleep.
+    unsafe { Sleep(50) };
+    let before = switches(tid);
+    c.ok(before.is_some(), 0)?;
+    // SAFETY: a plain sleep.
+    unsafe { Sleep(SLEEP_MS) };
+    let after = switches(tid);
+    c.ok(after.is_some(), 0)?;
+    let grew = after.unwrap_or(0).wrapping_sub(before.unwrap_or(0));
+    release();
+    c.ok(join(h), 0)?;
+    c.ok(grew <= MOST_SWITCHES, grew)
+}
+
+fn waiters_sleep(c: &mut Checks) -> Result<(), u32> {
+    let lock = SLEEP_LOCK.get();
+    // SAFETY: the test's own objects.
+    unsafe {
+        InitializeSRWLock(lock);
+        InitializeConditionVariable(SLEEP_CV.get());
+        InitializeCriticalSection(SLEEP_CS.get());
+    }
+    // A condition variable.
+    sleeps(c, cv_sleeper, || {
+        // SAFETY: as above.
+        unsafe {
+            AcquireSRWLockExclusive(lock);
+            RELEASED.store(1, Ordering::SeqCst);
+            ReleaseSRWLockExclusive(lock);
+            WakeConditionVariable(SLEEP_CV.get());
+        }
+    })?;
+    // An SRW lock held exclusively: an exclusive and a shared waiter.
+    // SAFETY: as above.
+    unsafe { AcquireSRWLockExclusive(lock) };
+    sleeps(c, srw_sleeper, || unsafe { ReleaseSRWLockExclusive(lock) })?;
+    // SAFETY: as above.
+    unsafe { AcquireSRWLockExclusive(lock) };
+    sleeps(c, shared_sleeper, || unsafe { ReleaseSRWLockExclusive(lock) })?;
+    // A critical section.
+    // SAFETY: as above.
+    unsafe { EnterCriticalSection(SLEEP_CS.get()) };
+    sleeps(c, cs_sleeper, || unsafe { LeaveCriticalSection(SLEEP_CS.get()) })?;
+    // SAFETY: as above.
+    unsafe { DeleteCriticalSection(SLEEP_CS.get()) };
+    // Another thread's InitOnce callback running.
+    RELEASED.store(0, Ordering::SeqCst);
+    BLOCKING.store(0, Ordering::SeqCst);
+    let runner = start(once_runner);
+    while BLOCKING.load(Ordering::SeqCst) == 0 {
+        // SAFETY: a plain sleep.
+        unsafe { Sleep(1) };
+    }
+    sleeps(c, once_sleeper, || RELEASED.store(1, Ordering::SeqCst))?;
+    c.ok(join(runner), 0)
+}
+
+// ---- Lost-wakeup stress: hand-offs that hang if a wake is ever lost ----
+
+/// Hand-offs per pair of threads (under TCG a few seconds in all).
+const HANDOFFS: u32 = 3000;
+
+static PP_LOCK: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static PP_CV: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+static PP_CS: Shared<CriticalSection> =
+    Shared(core::cell::UnsafeCell::new(CriticalSection([0; 5])));
+static PP_CS_CV: Shared<usize> = Shared(core::cell::UnsafeCell::new(0));
+/// Whose turn it is (0 or 1) and how many hand-offs were made.
+static TURN: AtomicU32 = AtomicU32::new(0);
+static DONE: AtomicU32 = AtomicU32::new(0);
+
+/// Takes `me`'s turns: waits on the condition variable (SRW lock) until
+/// TURN is `me`, passes the turn and wakes the other side.
+fn srw_ping_pong(me: u32) {
+    for _ in 0..HANDOFFS {
+        // SAFETY: the test's lock and condition variable.
+        unsafe {
+            AcquireSRWLockExclusive(PP_LOCK.get());
+            while TURN.load(Ordering::Relaxed) != me {
+                SleepConditionVariableSRW(PP_CV.get(), PP_LOCK.get(), INFINITE, 0);
+            }
+            TURN.store(1 - me, Ordering::Relaxed);
+            DONE.fetch_add(1, Ordering::Relaxed);
+            ReleaseSRWLockExclusive(PP_LOCK.get());
+            WakeConditionVariable(PP_CV.get());
+        }
+    }
+}
+
+extern "system" fn srw_pong(_: *mut c_void) -> u32 {
+    srw_ping_pong(1);
+    0
+}
+
+/// The same with a critical section, the wake given while holding it.
+fn cs_ping_pong(me: u32) {
+    for _ in 0..HANDOFFS {
+        // SAFETY: the test's critical section and condition variable.
+        unsafe {
+            EnterCriticalSection(PP_CS.get());
+            while TURN.load(Ordering::Relaxed) != me {
+                SleepConditionVariableCS(PP_CS_CV.get(), PP_CS.get(), INFINITE);
+            }
+            TURN.store(1 - me, Ordering::Relaxed);
+            DONE.fetch_add(1, Ordering::Relaxed);
+            WakeAllConditionVariable(PP_CS_CV.get());
+            LeaveCriticalSection(PP_CS.get());
+        }
+    }
+}
+
+extern "system" fn cs_pong(_: *mut c_void) -> u32 {
+    cs_ping_pong(1);
+    0
+}
+
+/// WaitOnAddress hand-offs on TURN itself.
+fn address_ping_pong(me: u32) {
+    for _ in 0..HANDOFFS {
+        loop {
+            let seen = TURN.load(Ordering::SeqCst);
+            if seen == me {
+                break;
+            }
+            // SAFETY: TURN is a 4-byte value; `seen` is what we compare.
+            unsafe { WaitOnAddress(TURN.as_ptr().cast(), (&raw const seen).cast(), 4, INFINITE) };
+        }
+        DONE.fetch_add(1, Ordering::Relaxed);
+        TURN.store(1 - me, Ordering::SeqCst);
+        // SAFETY: TURN's address.
+        unsafe { WakeByAddressSingle(TURN.as_ptr().cast()) };
+    }
+}
+
+extern "system" fn address_pong(_: *mut c_void) -> u32 {
+    address_ping_pong(1);
+    0
+}
+
+/// Round-robin among RING threads (more than the CPUs, so waiters really
+/// sleep): thread `me` waits until TURN is `me`, passes it to the next
+/// and wakes everyone. RING_ID hands each thread its number.
+const RING: u32 = 4;
+static RING_ID: AtomicU32 = AtomicU32::new(0);
+
+extern "system" fn srw_ring(_: *mut c_void) -> u32 {
+    let me = RING_ID.fetch_add(1, Ordering::SeqCst);
+    for _ in 0..HANDOFFS / 4 {
+        // SAFETY: the test's lock and condition variable.
+        unsafe {
+            AcquireSRWLockExclusive(PP_LOCK.get());
+            while TURN.load(Ordering::Relaxed) != me {
+                SleepConditionVariableSRW(PP_CV.get(), PP_LOCK.get(), INFINITE, 0);
+            }
+            TURN.store((me + 1) % RING, Ordering::Relaxed);
+            DONE.fetch_add(1, Ordering::Relaxed);
+            ReleaseSRWLockExclusive(PP_LOCK.get());
+            WakeAllConditionVariable(PP_CV.get());
+        }
+    }
+    0
+}
+
+extern "system" fn address_ring(_: *mut c_void) -> u32 {
+    let me = RING_ID.fetch_add(1, Ordering::SeqCst);
+    for _ in 0..HANDOFFS / 4 {
+        loop {
+            let seen = TURN.load(Ordering::SeqCst);
+            if seen == me {
+                break;
+            }
+            // SAFETY: TURN is a 4-byte value; `seen` is what we compare.
+            unsafe { WaitOnAddress(TURN.as_ptr().cast(), (&raw const seen).cast(), 4, INFINITE) };
+        }
+        DONE.fetch_add(1, Ordering::Relaxed);
+        TURN.store((me + 1) % RING, Ordering::SeqCst);
+        // SAFETY: TURN's address.
+        unsafe { WakeByAddressAll(TURN.as_ptr().cast()) };
+    }
+    0
+}
+
+/// Four threads entering one critical section, each many times: the
+/// count is exact and nobody is left asleep.
+static CONTENDED: Shared<CriticalSection> =
+    Shared(core::cell::UnsafeCell::new(CriticalSection([0; 5])));
+static CONTENDED_COUNT: Shared<u64> = Shared(core::cell::UnsafeCell::new(0));
+
+extern "system" fn contend(_: *mut c_void) -> u32 {
+    for _ in 0..HANDOFFS {
+        // SAFETY: the test's critical section guards the count.
+        unsafe {
+            EnterCriticalSection(CONTENDED.get());
+            *CONTENDED_COUNT.get() += 1;
+            LeaveCriticalSection(CONTENDED.get());
+        }
+    }
+    0
+}
+
+/// Lost-wakeup stress: each hand-off needs the other thread woken, so a
+/// single lost wake hangs the scenario (its timeout's state dump then
+/// names the keyed-event wait, its caller and key).
+fn lost_wakeups(c: &mut Checks) -> Result<(), u32> {
+    let pairs: [(fn(u32), StartRoutine); 3] =
+        [(srw_ping_pong, srw_pong), (cs_ping_pong, cs_pong), (address_ping_pong, address_pong)];
+    // SAFETY: the test's critical sections.
+    unsafe {
+        InitializeCriticalSection(PP_CS.get());
+        InitializeCriticalSection(CONTENDED.get());
+    }
+    for (ping, pong) in pairs {
+        TURN.store(0, Ordering::SeqCst);
+        DONE.store(0, Ordering::SeqCst);
+        let other = start(pong);
+        ping(0);
+        c.ok(join(other), 0)?;
+        c.eq(DONE.load(Ordering::SeqCst).into(), u64::from(2 * HANDOFFS))?;
+    }
+    for ring in [srw_ring as StartRoutine, address_ring] {
+        TURN.store(0, Ordering::SeqCst);
+        DONE.store(0, Ordering::SeqCst);
+        RING_ID.store(0, Ordering::SeqCst);
+        let threads = [start(ring), start(ring), start(ring), start(ring)];
+        for t in threads {
+            c.ok(join(t), 0)?;
+        }
+        c.eq(DONE.load(Ordering::SeqCst).into(), u64::from(HANDOFFS))?;
+    }
+    let threads = [start(contend), start(contend), start(contend), start(contend)];
+    for t in threads {
+        c.ok(join(t), 0)?;
+    }
+    // SAFETY: every thread has finished.
+    c.eq(unsafe { *CONTENDED_COUNT.get() }, 4 * u64::from(HANDOFFS))?;
+    Ok(())
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     srw(&mut c)?;
@@ -510,7 +947,9 @@ fn run() -> Result<(), u32> {
     init_once(&mut c)?;
     fls(&mut c)?;
     slist(&mut c)?;
-    semaphores(&mut c)
+    semaphores(&mut c)?;
+    waiters_sleep(&mut c)?;
+    lost_wakeups(&mut c)
 }
 
 #[unsafe(no_mangle)]
@@ -530,4 +969,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

@@ -90,6 +90,42 @@ impl<'a> SocketSet<'a> {
         }
     }
 
+    // gala: begin (see gala's THIRD_PARTY.md). A set that grows without
+    // ever allocating infallibly: `add` pushes onto an owned storage only
+    // when no slot is free, and a push within the reserved capacity does
+    // not allocate, so a caller that makes room first never has `add`
+    // allocate (gala's kernel must not panic when memory runs out).
+
+    /// gala: whether `add` would find room without allocating (a free
+    /// slot, or capacity reserved beyond the slots of an owned storage).
+    pub fn has_room(&self) -> bool {
+        if self.sockets.iter().any(|slot| slot.inner.is_none()) {
+            return true;
+        }
+        match &self.sockets {
+            ManagedSlice::Borrowed(_) => false,
+            #[cfg(feature = "alloc")]
+            ManagedSlice::Owned(sockets) => sockets.len() < sockets.capacity(),
+        }
+    }
+
+    /// gala: reserves capacity for at least `additional` more slots in an
+    /// owned storage (a fixed one cannot grow: Err), failing instead of
+    /// aborting when memory runs out.
+    #[cfg(feature = "alloc")]
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), ()> {
+        match &mut self.sockets {
+            ManagedSlice::Borrowed(_) => Err(()),
+            ManagedSlice::Owned(sockets) => sockets.try_reserve(additional).map_err(|_| ()),
+        }
+    }
+
+    /// gala: the number of slots (free or in use).
+    pub fn slots(&self) -> usize {
+        self.sockets.len()
+    }
+    // gala: end
+
     /// Get a socket from the set by its handle, as mutable.
     ///
     /// # Panics

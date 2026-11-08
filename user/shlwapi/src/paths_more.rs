@@ -15,7 +15,11 @@ const COLON: u16 = b':' as u16;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(error: u32);
     fn GetFullPathNameW(path: *const u16, size: u32, buf: *mut u16, file: *mut *mut u16) -> u32;

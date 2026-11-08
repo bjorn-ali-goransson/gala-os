@@ -14,11 +14,11 @@
 //! become trait-associated or NT-owned types when `nt/` leaves the kernel
 //! crate (see "Remaining" in docs/GALA_UM.md).
 
-pub use crate::arch::interrupts::TrapFrame;
+pub use crate::arch::interrupts::{FaultAccess, TrapFrame, TrapKind};
 pub use crate::arch::paging::{PagingError, UserFault};
 #[cfg(not(feature = "hosted"))]
 pub use crate::arch::paging::{SharedPage, SharedUserSpace, SpaceLock, UserSpace};
-pub use crate::arch::syscall::{SyscallFrame, UserRegs};
+pub use crate::arch::syscall::{Gpr, SyscallFrame, UserRegs};
 /// The XSAVE layout (components, sizes) and the state as a value.
 pub use crate::arch::xstate::{self, XState};
 pub use crate::disk::{DiskError, SECTOR as DISK_SECTOR};
@@ -88,6 +88,7 @@ pub trait Threads {
     fn yield_now();
     fn sleep_ms(ms: u64);
     /// The next `wait` ends at `deadline` (in ticks) if not woken first.
+    #[track_caller]
     fn prepare_wait(deadline: Option<u64>);
     fn wait() -> WakeReason;
     fn wake(id: ThreadId);
@@ -116,9 +117,11 @@ pub trait UserEntry {
         name: &'static str,
         handler: fn(&mut SyscallFrame),
     );
-    /// `hook` runs before each return to user mode; it may change the
-    /// registers (APCs, suspension) and returns whether it did.
-    fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool);
+    /// `hook` runs before each return to user mode (told whether that is
+    /// to 32-bit code, a WOW64 thread interrupted in compatibility mode);
+    /// it may change the registers (APCs, suspension) and returns whether
+    /// it did.
+    fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool);
     /// CPU exceptions raised in user mode go to `handler` (with the
     /// faulting address of a page fault).
     fn set_user_exception_handler(handler: fn(&mut TrapFrame, Option<u64>));
@@ -154,6 +157,13 @@ pub trait UserEntry {
     /// (gala-um, whose host libc owns FS).
     fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
         let _ = (fs, gs);
+        false
+    }
+    /// Makes the calling thread one that runs 32-bit code (WOW64), its
+    /// 32-bit TEB at `teb32` as FS from now on; false where the platform
+    /// cannot (gala-um: its segments are the host's).
+    fn set_teb32(teb32: u64) -> bool {
+        let _ = teb32;
         false
     }
 }
@@ -281,6 +291,7 @@ pub fn sleep_ms(ms: u64) {
     <P as Threads>::sleep_ms(ms)
 }
 #[inline]
+#[track_caller]
 pub fn prepare_wait(deadline: Option<u64>) {
     <P as Threads>::prepare_wait(deadline)
 }
@@ -308,7 +319,9 @@ pub fn context_switches(id: ThreadId) -> u32 {
 pub fn current_cpu() -> u32 {
     <P as Threads>::current_cpu()
 }
-/// CPUID leaf `leaf` (subleaf `sub`) of this processor: (eax, ebx, ecx, edx).
+/// x86-64 only (`nt::abi::x64`, `lx::machine`): CPUID leaf `leaf` (subleaf
+/// `sub`) of this processor: (eax, ebx, ecx, edx).
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
     let r = crate::arch::cpu::cpuid(leaf, sub);
@@ -332,7 +345,7 @@ pub fn set_syscall_handler(
     <P as UserEntry>::set_syscall_handler(personality, name, handler)
 }
 #[inline]
-pub fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
+pub fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool) {
     <P as UserEntry>::set_user_return_hook(hook)
 }
 #[inline]
@@ -378,6 +391,10 @@ pub fn user_bases() -> (u64, u64) {
 #[inline]
 pub fn set_user_bases(fs: Option<u64>, gs: Option<u64>) -> bool {
     <P as UserEntry>::set_user_bases(fs, gs)
+}
+#[inline]
+pub fn set_teb32(teb32: u64) -> bool {
+    <P as UserEntry>::set_teb32(teb32)
 }
 
 #[inline]

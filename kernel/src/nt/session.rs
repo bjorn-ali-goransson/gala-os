@@ -376,10 +376,10 @@ pub fn dump() {
     for d in desks.iter().flatten() {
         let c = d.windows.counts();
         let (hooks, events) = d.hooks.counts();
-        let (on_desktop, live, presenter) = d.shell.counts();
+        let (on_desktop, live, presenter, bare) = d.shell.counts();
         log!(
             info,
-            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), desktop: {} ({} windows, presenter {})",
+            "statedump: session {}: {} windows ({} top-level), {} queues, {} posted, {} sent, {} filters, {} hooks ({} events waiting), desktop: {} ({} windows, presenter {}{}{})",
             d.session,
             c.windows,
             c.top_level,
@@ -392,8 +392,33 @@ pub fn dump() {
             if live { "live" } else { "not live" },
             on_desktop,
             presenter.name(),
+            // Nothing can show it: why (the server kernel, the server
+            // profile, no screen and no `presenter=`).
+            if bare.is_some() { "; never shown: " } else { "" },
+            bare.unwrap_or(""),
         );
         dump_stations(d.session);
+        let (recent, dropped, waiting) = d.shell.recent_input();
+        log!(
+            info,
+            "statedump: session {} input queue: {} waiting, {} dropped (full)",
+            d.session,
+            waiting,
+            dropped
+        );
+        let now = crate::nt::platform::monotonic_ns();
+        for b in recent.iter().flatten() {
+            log!(
+                info,
+                "statedump: session {} {} to window {}{} ({} ms ago), {}",
+                d.session,
+                InputWhat(b),
+                b.window,
+                if b.captured { " (its capture)" } else { "" },
+                now.saturating_sub(b.t) / 1_000_000,
+                InputFate(b),
+            );
+        }
         let mut top = [super::window::Info::default(); 16];
         let n = d.windows.top_level(&mut top);
         for w in &top[..n] {
@@ -455,6 +480,40 @@ pub fn init() -> Result<(), NtStatus> {
     SESSIONS.lock().clear();
     ensure(SERVICES)?;
     ensure(CONSOLE).map(drop)
+}
+
+/// A noted input as the state dump names it: a button with its screen
+/// point, a key with its virtual key.
+#[cfg_attr(test, allow(dead_code))] // test builds' log! drops its arguments
+struct InputWhat<'a>(&'a crate::nt::winstate::InputNote);
+
+impl core::fmt::Display for InputWhat<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let b = self.0;
+        if (0x100..=0x105).contains(&b.message) {
+            write!(f, "key {:#x} vk {:#x}", b.message, b.x)
+        } else {
+            write!(f, "button {:#x} at ({}, {})", b.message, b.x, b.y)
+        }
+    }
+}
+
+/// What became of a noted input: taken by its program (after how long),
+/// dropped by the full queue, or still waiting.
+#[cfg_attr(test, allow(dead_code))]
+struct InputFate<'a>(&'a crate::nt::winstate::InputNote);
+
+impl core::fmt::Display for InputFate<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let b = self.0;
+        if b.dropped {
+            f.write_str("dropped (queue full)")
+        } else if b.taken == 0 {
+            f.write_str("not taken by its program")
+        } else {
+            write!(f, "taken after {} ms", b.taken.saturating_sub(b.t) / 1_000_000)
+        }
+    }
 }
 
 #[cfg(test)]

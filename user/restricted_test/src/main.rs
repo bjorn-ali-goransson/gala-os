@@ -217,6 +217,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(core::cell::Cell<u32>);
 
 impl Checks {
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.0.set(self.0.get() + 1);
         if cond {
@@ -226,10 +227,12 @@ impl Checks {
         out(&hex(self.0.get()));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -354,6 +357,9 @@ fn is_child() -> bool {
     s.ends_with(&w::<5>("child"))
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -361,7 +367,13 @@ fn run() -> Result<(), u32> {
     unsafe {
         let mut mine = null;
         c.ok(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut mine) != 0, 0)?;
-        c.ok(member(null, &ADMINS) == Some(true), last_error())?;
+        // An ordinary user's run says "skipped" (gala's scenario starts it
+        // as SYSTEM, an administrator: `as=system`).
+        let admin = member(null, &ADMINS);
+        if admin == Some(false) {
+            return Err(SKIPPED);
+        }
+        c.ok(admin == Some(true), last_error())?;
         // A primary token is not an impersonation token.
         let mut is = 0;
         c.eq(CheckTokenMembership(mine, ADMINS.as_ptr(), &mut is) as u64, 0)?;
@@ -574,6 +586,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
             out(b"restricted_test: ok\r\n");
             0
         }
+        Err(SKIPPED) => {
+            out(b"restricted_test: skipped (needs an elevated administrator)\r\n");
+            0
+        }
         Err(id) => id,
     };
     // SAFETY: ends the process.
@@ -584,4 +600,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

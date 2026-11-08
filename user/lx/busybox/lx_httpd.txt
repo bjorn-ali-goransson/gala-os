@@ -7,6 +7,4 @@ wget -O - to a pipe: HELLO FROM HTTPD
 wget missing.html: status 1
 server ended by SIGTERM: status 143
 httpd.sh: ok
--- stderr:
-Terminated
 -- exit status 0

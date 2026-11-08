@@ -330,6 +330,9 @@ impl core::fmt::Debug for FailedStatus {
             sec::E_ALGORITHM_MISMATCH => "SEC_E_ALGORITHM_MISMATCH",
             sec::E_DECRYPT_FAILURE => "SEC_E_DECRYPT_FAILURE",
             sec::E_INTERNAL_ERROR => "SEC_E_INTERNAL_ERROR",
+            sec::CRYPT_E_REVOKED => "CRYPT_E_REVOKED",
+            sec::CRYPT_E_NO_REVOCATION_CHECK => "CRYPT_E_NO_REVOCATION_CHECK",
+            sec::CRYPT_E_REVOCATION_OFFLINE => "CRYPT_E_REVOCATION_OFFLINE",
             _ => "failed",
         };
         f.write_str(name)
@@ -430,7 +433,8 @@ fn validation(cred: &creds::Credential, flags: u32) -> Validation {
     if cred.manual || flags & ISC_REQ_MANUAL_CRED_VALIDATION != 0 {
         Validation::Manual
     } else {
-        Validation::Auto { trust: Arc::new(trust::Crypt32), check_name: cred.check_name }
+        let trust = trust::Crypt32 { revocation: cred.revocation };
+        Validation::Auto { trust: Arc::new(trust), check_name: cred.check_name }
     }
 }
 

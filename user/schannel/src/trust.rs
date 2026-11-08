@@ -10,9 +10,24 @@
 //! CERT_E_UNTRUSTEDROOT (and a chain that reaches no root) is
 //! SEC_E_UNTRUSTED_ROOT, CERT_E_EXPIRED SEC_E_CERT_EXPIRED,
 //! CERT_E_CN_NO_MATCH SEC_E_WRONG_PRINCIPAL, CERT_E_WRONG_USAGE
-//! SEC_E_CERT_WRONG_USAGE, the others SEC_E_CERT_UNKNOWN. crypt32 records
-//! the policy failure (`crypt32.dll!SSL: CERT_E_...`, the chain's error
-//! bits), schannel.dll the handshake's (`schannel.dll!ISC: ...`).
+//! SEC_E_CERT_WRONG_USAGE, revocation's CRYPT_E_REVOKED,
+//! CRYPT_E_NO_REVOCATION_CHECK and CRYPT_E_REVOCATION_OFFLINE themselves
+//! (as Schannel returns them), the others SEC_E_CERT_UNKNOWN. crypt32
+//! records the policy failure (`crypt32.dll!SSL: CERT_E_...`, the chain's
+//! error bits), schannel.dll the handshake's (`schannel.dll!ISC: ...`).
+//!
+//! Revocation is checked as the credential's flags ask:
+//! SCH_CRED_REVOCATION_CHECK_END_CERT, _CHAIN, _CHAIN_EXCLUDE_ROOT and
+//! SCH_CRED_REVOCATION_CHECK_CACHE_ONLY become CertGetCertificateChain's
+//! CERT_CHAIN_REVOCATION_CHECK_* flags (none: not checked, as on Windows);
+//! SCH_CRED_IGNORE_NO_REVOCATION_CHECK and
+//! SCH_CRED_IGNORE_REVOCATION_OFFLINE excuse the elements whose
+//! revocation is unknown (CERT_TRUST_REVOCATION_STATUS_UNKNOWN), without
+//! and with CERT_TRUST_IS_OFFLINE_REVOCATION: when every such element is
+//! excused the policy is asked again with
+//! CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS. A revoked certificate
+//! is never excused. rustls has no kind for "offline": it travels as
+//! CertificateError::ExpiredRevocationList (schannel_tls `code`).
 
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -75,6 +90,101 @@ const CERT_E_CN_NO_MATCH: u32 = 0x800b_010f;
 const CERT_E_WRONG_USAGE: u32 = 0x800b_0110;
 const TRUST_E_CERT_SIGNATURE: u32 = 0x8009_6004;
 const CRYPT_E_REVOKED: u32 = 0x8009_2010;
+const CRYPT_E_NO_REVOCATION_CHECK: u32 = 0x8009_2012;
+const CRYPT_E_REVOCATION_OFFLINE: u32 = 0x8009_2013;
+
+// SCHANNEL_CRED dwFlags (revocation).
+const SCH_CRED_REVOCATION_CHECK_END_CERT: u32 = 0x100;
+const SCH_CRED_REVOCATION_CHECK_CHAIN: u32 = 0x200;
+const SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT: u32 = 0x400;
+const SCH_CRED_IGNORE_NO_REVOCATION_CHECK: u32 = 0x800;
+const SCH_CRED_IGNORE_REVOCATION_OFFLINE: u32 = 0x1000;
+const SCH_CRED_REVOCATION_CHECK_CACHE_ONLY: u32 = 0x4000;
+
+// CertGetCertificateChain dwFlags.
+const CERT_CHAIN_REVOCATION_CHECK_END_CERT: u32 = 0x1000_0000;
+const CERT_CHAIN_REVOCATION_CHECK_CHAIN: u32 = 0x2000_0000;
+const CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT: u32 = 0x4000_0000;
+const CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY: u32 = 0x8000_0000;
+const CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS: u32 = 0xf00;
+const CERT_TRUST_REVOCATION_STATUS_UNKNOWN: u32 = 0x40;
+const CERT_TRUST_IS_OFFLINE_REVOCATION: u32 = 0x100_0000;
+
+/// CERT_TRUST_STATUS.
+#[repr(C)]
+struct TrustStatus {
+    error: u32,
+    info: u32,
+}
+
+/// CERT_CHAIN_ELEMENT (its start).
+#[repr(C)]
+struct Element {
+    size: u32,
+    cert: *const c_void,
+    status: TrustStatus,
+}
+
+/// CERT_SIMPLE_CHAIN (its start).
+#[repr(C)]
+struct SimpleChain {
+    size: u32,
+    status: TrustStatus,
+    count: u32,
+    elements: *const *const Element,
+}
+
+/// CERT_CHAIN_CONTEXT (its start).
+#[repr(C)]
+struct ChainContext {
+    size: u32,
+    status: TrustStatus,
+    count: u32,
+    chains: *const *const SimpleChain,
+}
+
+/// The chain flags the credential's revocation flags ask for.
+fn chain_flags(revocation: u32) -> u32 {
+    let mut flags = 0;
+    if revocation & SCH_CRED_REVOCATION_CHECK_END_CERT != 0 {
+        flags |= CERT_CHAIN_REVOCATION_CHECK_END_CERT;
+    }
+    if revocation & SCH_CRED_REVOCATION_CHECK_CHAIN != 0 {
+        flags |= CERT_CHAIN_REVOCATION_CHECK_CHAIN;
+    }
+    if revocation & SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT != 0 {
+        flags |= CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
+    }
+    if flags != 0 && revocation & SCH_CRED_REVOCATION_CHECK_CACHE_ONLY != 0 {
+        flags |= CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY;
+    }
+    flags
+}
+
+/// Whether the credential excuses every element of `chain` whose
+/// revocation is unknown (SCH_CRED_IGNORE_NO_REVOCATION_CHECK for those
+/// that could not be checked, SCH_CRED_IGNORE_REVOCATION_OFFLINE for those
+/// whose CRL was out of reach).
+fn excused(chain: *const c_void, revocation: u32) -> bool {
+    // SAFETY: a chain crypt32 gave (one simple chain of `count` elements).
+    unsafe {
+        let chain = &*chain.cast::<ChainContext>();
+        if chain.count == 0 {
+            return false;
+        }
+        let simple = &**chain.chains;
+        (0..simple.count as usize).all(|i| {
+            let error = (**simple.elements.add(i)).status.error;
+            if error & CERT_TRUST_REVOCATION_STATUS_UNKNOWN == 0 {
+                true
+            } else if error & CERT_TRUST_IS_OFFLINE_REVOCATION != 0 {
+                revocation & SCH_CRED_IGNORE_REVOCATION_OFFLINE != 0
+            } else {
+                revocation & SCH_CRED_IGNORE_NO_REVOCATION_CHECK != 0
+            }
+        })
+    }
+}
 
 /// CERT_CHAIN_PARA without its later fields (no requested usage: the SSL
 /// policy checks the server usage).
@@ -111,9 +221,12 @@ struct PolicyStatus {
     extra: *mut c_void,
 }
 
-/// The machine's trust, as crypt32 decides it.
+/// The machine's trust, as crypt32 decides it, with the credential's
+/// revocation flags (SCH_CRED_REVOCATION_CHECK_*, SCH_CRED_IGNORE_*).
 #[derive(Debug)]
-pub struct Crypt32;
+pub struct Crypt32 {
+    pub revocation: u32,
+}
 
 impl Trust for Crypt32 {
     fn check(
@@ -156,7 +269,7 @@ impl Trust for Crypt32 {
                 &time,
                 store,
                 &para,
-                0,
+                chain_flags(self.revocation),
                 core::ptr::null_mut(),
                 &mut chain,
             ) != 0;
@@ -168,7 +281,7 @@ impl Trust for Crypt32 {
                 checks: if name.is_some() { 0 } else { SECURITY_FLAG_IGNORE_CERT_CN_INVALID },
                 server_name: if name.is_some() { wide.as_ptr() } else { core::ptr::null() },
             };
-            let policy = PolicyPara {
+            let mut policy = PolicyPara {
                 size: core::mem::size_of::<PolicyPara>() as u32,
                 flags: 0,
                 extra: &ssl,
@@ -187,6 +300,19 @@ impl Trust for Crypt32 {
                     &policy,
                     &mut status,
                 );
+                // Unknown revocation the credential excuses: the rest of
+                // the policy decides.
+                if matches!(status.error, CRYPT_E_NO_REVOCATION_CHECK | CRYPT_E_REVOCATION_OFFLINE)
+                    && excused(chain, self.revocation)
+                {
+                    policy.flags = CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS;
+                    CertVerifyCertificateChainPolicy(
+                        CERT_CHAIN_POLICY_SSL,
+                        chain,
+                        &policy,
+                        &mut status,
+                    );
+                }
                 CertFreeCertificateChain(chain);
             }
             CertFreeCertificateContext(leaf);
@@ -199,6 +325,8 @@ impl Trust for Crypt32 {
                 CERT_E_WRONG_USAGE => Err(CertificateError::InvalidPurpose),
                 TRUST_E_CERT_SIGNATURE => Err(CertificateError::BadSignature),
                 CRYPT_E_REVOKED => Err(CertificateError::Revoked),
+                CRYPT_E_NO_REVOCATION_CHECK => Err(CertificateError::UnknownRevocationStatus),
+                CRYPT_E_REVOCATION_OFFLINE => Err(CertificateError::ExpiredRevocationList),
                 CERT_E_CRITICAL => Err(CertificateError::UnhandledCriticalExtension),
                 _ => Err(CertificateError::ApplicationVerificationFailure),
             }

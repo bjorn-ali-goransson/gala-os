@@ -32,10 +32,12 @@ const ROUNDS: u32 = 1000;
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -45,6 +47,7 @@ impl Checks {
         write_file(stdout(), &hex32(self.0));
         print(" got ");
         write_file(stdout(), &hex32(got as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -240,7 +243,10 @@ fn run() -> Result<(), u32> {
     // the machine can put them on one processor for a while): the
     // exchange is tried up to five times and must once be seen on two
     // processors with few context switches. Each attempt must complete.
-    let (st, list, size) = allocate(0, 0x40000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    // Room for SystemProcessInformation on a real machine (hundreds of
+    // processes; 256 KiB overflowed on Windows with
+    // STATUS_INFO_LENGTH_MISMATCH).
+    let (st, list, size) = allocate(0, 1 << 23, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     c.eq(st.into(), ok)?;
     // SAFETY: just committed, read-write, ours alone.
     let list = unsafe { core::slice::from_raw_parts_mut(list as *mut u8, size) };
@@ -324,3 +330,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

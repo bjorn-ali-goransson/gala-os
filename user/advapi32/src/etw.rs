@@ -100,6 +100,7 @@ pub extern "system" fn EventSetInformation(
 }
 
 /// TEB.ActivityId (x64 offset 0x1710): the thread's ETW activity id.
+#[cfg(target_arch = "x86_64")]
 fn activity_id() -> *mut [u8; 16] {
     let teb: usize;
     // SAFETY: gs:[0x30] is the TEB's self pointer.
@@ -107,7 +108,20 @@ fn activity_id() -> *mut [u8; 16] {
     (teb + 0x1710) as *mut [u8; 16]
 }
 
-#[link(name = "bcryptprimitives", kind = "raw-dylib")]
+/// TEB.ActivityId (x86 offset 0xf50): the thread's ETW activity id.
+#[cfg(target_arch = "x86")]
+fn activity_id() -> *mut [u8; 16] {
+    let teb: usize;
+    // SAFETY: fs:[0x18] is the TEB32's self pointer.
+    unsafe { core::arch::asm!("mov {}, fs:[0x18]", out(reg) teb, options(nostack, readonly)) };
+    (teb + 0xf50) as *mut [u8; 16]
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "bcryptprimitives", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "bcryptprimitives", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn ProcessPrng(data: *mut u8, length: usize) -> i32;
 }
@@ -154,7 +168,11 @@ pub extern "system" fn EventActivityIdControl(code: u32, id: *mut [u8; 16]) -> u
 
 const ERROR_INVALID_HANDLE: u32 = 6;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(code: u32);
 }

@@ -34,8 +34,8 @@
  * - VarCmp: VARCMP_LT/EQ/GT/NULL; numbers by value, strings as
  *   strings, a string is greater than any number, an empty string
  *   equals VT_EMPTY.
- * - GetActiveObject: MK_E_UNAVAILABLE for a class nothing registered as
- *   running.
+ * - GetActiveObject (in a single-threaded apartment): MK_E_UNAVAILABLE
+ *   for a class nothing registered as running.
  * - VarBstrCmp (#314, imported by ordinal by Chromium): VARCMP_LT, _EQ,
  *   _GT by the locale's order; NORM_IGNORECASE makes case equal; a NULL
  *   BSTR is the empty string.
@@ -47,6 +47,24 @@
  *   VarCyFromR8; VarBoolFromDate (#123) and VarBoolFromCy (#124):
  *   VARIANT_TRUE unless 0; VarBstrFromR8 (#112): 15 significant digits,
  *   fixed from 1E-11 to below 1E+15, else "5.6789E-12".
+ * - Variant arithmetic and logic Delphi's Variants unit looks up (Inno
+ *   Setup), at their ordinals (vartest.c's result types): VarAdd of two
+ *   VT_I2 is VT_I2, moving up to VT_I4 when it overflows; VT_UI1 + VT_UI1
+ *   is VT_UI1 (VT_I2 past 255); VT_I4 + VT_R8 is VT_R8; two BSTRs
+ *   concatenate; a numeric BSTR plus a number is VT_R8; NULL gives NULL;
+ *   two VT_EMPTYs give VT_I2 0; VT_CY + VT_I4 is VT_CY; VT_BOOL + VT_BOOL
+ *   is VT_I2. VarSub and VarMul alike. VarDiv: VT_R8 (VT_R4 for two
+ *   VT_R4s), DISP_E_DIVBYZERO for a zero divisor. VarIdiv/VarMod: the
+ *   operands rounded to integers, truncating division, the remainder
+ *   with the dividend's sign, VT_I4 (VT_I2 for VT_I2s),
+ *   DISP_E_DIVBYZERO. VarAnd/VarOr/VarXor: bitwise on integers, VT_BOOL
+ *   for two VT_BOOLs; FALSE And NULL is FALSE, TRUE And NULL is NULL,
+ *   TRUE Or NULL is TRUE. VarNeg: the negated value in its type (BSTR:
+ *   VT_R8); VarNot: VT_BOOL inverted, VT_I4 complemented, NULL NULL.
+ *   VarR4FromStr: the text as a float, DISP_E_TYPEMISMATCH for no
+ *   number. VarBstrFromDate: "12:00:00 AM" for 0.0, "1/2/1900 6:00:00
+ *   AM" for 3.25, "12/31/1903 12:00:00 PM" for 1461.5, the date alone
+ *   for midnight; VAR_DATEVALUEONLY drops the time.
  *
  * Prints "oleaut32_test: ok" or exits with the number of the failing
  * check. */
@@ -122,6 +140,101 @@ static int close_to(double a, double b) { return fabs(a - b) < 1e-9; }
 
 static HRESULT cmp(VARIANT *a, VARIANT *b) { return VarCmp(a, b, EN_US, 0); }
 
+static VARIANT vi2(short v) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_I2; V_I2(&x) = v; return x; }
+static VARIANT vi4(LONG v) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_I4; V_I4(&x) = v; return x; }
+static VARIANT vui1(BYTE v) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_UI1; V_UI1(&x) = v; return x; }
+static VARIANT vr8(double v) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_R8; V_R8(&x) = v; return x; }
+static VARIANT vr4(float v) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_R4; V_R4(&x) = v; return x; }
+static VARIANT vbool(VARIANT_BOOL v) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_BOOL; V_BOOL(&x) = v; return x; }
+static VARIANT vnull(void) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_NULL; return x; }
+static VARIANT vempty(void) { VARIANT x; VariantInit(&x); return x; }
+static VARIANT vstr(const wchar_t *s) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_BSTR; V_BSTR(&x) = SysAllocString(s); return x; }
+static VARIANT vcy(LONGLONG units) { VARIANT x; VariantInit(&x); V_VT(&x) = VT_CY; V_CY(&x).int64 = units; return x; }
+
+static void arithmetic(void) {
+    VARIANT a, b, r;
+    a = vi2(2); b = vi2(3);
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_I2 && V_I2(&r) == 5);
+    a = vi2(32767); b = vi2(1);
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 32768);
+    a = vui1(200); b = vui1(50);
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_UI1 && V_UI1(&r) == 250);
+    b = vui1(100);
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_I2 && V_I2(&r) == 300);
+    a = vi4(1); b = vr8(0.5);
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_R8 && V_R8(&r) == 1.5);
+    a = vstr(L"ab"); b = vstr(L"cd");
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_BSTR && bstr_is(V_BSTR(&r), L"abcd"));
+    VariantClear(&r);
+    VariantClear(&b);
+    b = vi2(2);
+    VariantClear(&a);
+    a = vstr(L"1.5");
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_R8 && V_R8(&r) == 3.5);
+    VariantClear(&a);
+    a = vnull();
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_NULL);
+    a = vempty(); b = vempty();
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_I2 && V_I2(&r) == 0);
+    a = vcy(15000); b = vi4(2);
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_CY && V_CY(&r).int64 == 35000);
+    a = vbool(VARIANT_TRUE); b = vbool(VARIANT_TRUE);
+    CHECK(VarAdd(&a, &b, &r) == S_OK && V_VT(&r) == VT_I2 && V_I2(&r) == -2);
+    a = vi4(10); b = vi4(4);
+    CHECK(VarSub(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 6);
+    CHECK(VarMul(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 40);
+    a = vi4(7); b = vi4(2);
+    CHECK(VarDiv(&a, &b, &r) == S_OK && V_VT(&r) == VT_R8 && V_R8(&r) == 3.5);
+    a = vr4(3.0f); b = vr4(2.0f);
+    CHECK(VarDiv(&a, &b, &r) == S_OK && V_VT(&r) == VT_R4 && V_R4(&r) == 1.5f);
+    a = vi4(1); b = vi4(0);
+    CHECK(VarDiv(&a, &b, &r) == DISP_E_DIVBYZERO);
+    a = vi4(7); b = vi4(2);
+    CHECK(VarIdiv(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 3);
+    a = vr8(7.5); b = vi2(2);
+    CHECK(VarIdiv(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 4);
+    a = vi2(-7); b = vi2(2);
+    CHECK(VarMod(&a, &b, &r) == S_OK && V_VT(&r) == VT_I2 && V_I2(&r) == -1);
+    b = vi2(0);
+    CHECK(VarIdiv(&a, &b, &r) == DISP_E_DIVBYZERO && VarMod(&a, &b, &r) == DISP_E_DIVBYZERO);
+    a = vi4(12); b = vi4(10);
+    CHECK(VarAnd(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 8);
+    CHECK(VarOr(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 14);
+    CHECK(VarXor(&a, &b, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == 6);
+    a = vbool(VARIANT_TRUE); b = vbool(VARIANT_FALSE);
+    CHECK(VarAnd(&a, &b, &r) == S_OK && V_VT(&r) == VT_BOOL && V_BOOL(&r) == VARIANT_FALSE);
+    CHECK(VarOr(&a, &b, &r) == S_OK && V_VT(&r) == VT_BOOL && V_BOOL(&r) == VARIANT_TRUE);
+    VARIANT n = vnull();
+    CHECK(VarAnd(&n, &b, &r) == S_OK && V_VT(&r) == VT_BOOL && V_BOOL(&r) == VARIANT_FALSE);
+    CHECK(VarAnd(&n, &a, &r) == S_OK && V_VT(&r) == VT_NULL);
+    CHECK(VarOr(&a, &n, &r) == S_OK && V_VT(&r) == VT_BOOL && V_BOOL(&r) == VARIANT_TRUE);
+    a = vi4(5);
+    CHECK(VarNeg(&a, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == -5);
+    a = vstr(L"2");
+    CHECK(VarNeg(&a, &r) == S_OK && V_VT(&r) == VT_R8 && V_R8(&r) == -2.0);
+    VariantClear(&a);
+    CHECK(VarNeg(&n, &r) == S_OK && V_VT(&r) == VT_NULL);
+    a = vbool(VARIANT_TRUE);
+    CHECK(VarNot(&a, &r) == S_OK && V_VT(&r) == VT_BOOL && V_BOOL(&r) == VARIANT_FALSE);
+    a = vi4(0);
+    CHECK(VarNot(&a, &r) == S_OK && V_VT(&r) == VT_I4 && V_I4(&r) == -1);
+    CHECK(VarNot(&n, &r) == S_OK && V_VT(&r) == VT_NULL);
+    float f = 0;
+    CHECK(VarR4FromStr(L"2.5", EN_US, 0, &f) == S_OK && f == 2.5f);
+    CHECK(VarR4FromStr(L"x", EN_US, 0, &f) == DISP_E_TYPEMISMATCH);
+    BSTR text = NULL;
+    CHECK(VarBstrFromDate(0.0, EN_US, 0, &text) == S_OK && bstr_is(text, L"12:00:00 AM"));
+    SysFreeString(text);
+    CHECK(VarBstrFromDate(3.25, EN_US, 0, &text) == S_OK && bstr_is(text, L"1/2/1900 6:00:00 AM"));
+    SysFreeString(text);
+    CHECK(VarBstrFromDate(1461.5, EN_US, 0, &text) == S_OK && bstr_is(text, L"12/31/1903 12:00:00 PM"));
+    SysFreeString(text);
+    CHECK(VarBstrFromDate(3.0, EN_US, 0, &text) == S_OK && bstr_is(text, L"1/2/1900"));
+    SysFreeString(text);
+    CHECK(VarBstrFromDate(3.25, EN_US, VAR_DATEVALUEONLY, &text) == S_OK && bstr_is(text, L"1/2/1900"));
+    SysFreeString(text);
+}
+
 int main(void) {
     double dt;
 
@@ -170,9 +283,9 @@ int main(void) {
     CHECK(cy_text(0x100000000LL, L"429496.7296"));
     CHECK(cy_text(0x7fffffffffffffffLL, L"922337203685477.5807"));
     CHECK(cy_text(9, L"0.0009"));
-    BSTR b = (BSTR)1;
-    CY cy0 = {0};
-    CHECK(VarBstrFromCy(cy0, EN_US, 0, NULL) == E_INVALIDARG);
+    /* No NULL-output case: the docs promise nothing for it, and Windows'
+       VarBstrFromCy stores through the pointer (an access violation). */
+    BSTR b;
 
     /* VarCyFromR8 (test_VarCyFromR8). */
     LONGLONG c;
@@ -287,7 +400,11 @@ int main(void) {
     /* GetActiveObject: nothing is running. */
     static const CLSID nothing = {0x6a0c8d1e, 0x3f2b, 0x4c55, {0x9e, 0x10, 0x5a, 0x77, 0x12, 0x34, 0x56, 0x78}};
     IUnknown *unk = (IUnknown *)1;
+    /* The running object table is COM's: the thread joins an apartment
+     * first (without one Windows' answer is likely CO_E_NOTINITIALIZED). */
+    CHECK(SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)));
     CHECK(GetActiveObject(&nothing, NULL, &unk) == MK_E_UNAVAILABLE && unk == NULL);
+    CoUninitialize();
 
     BSTR apple = SysAllocString(L"apple"), apple2 = SysAllocString(L"APPLE"), pear = SysAllocString(L"pear");
     BSTR blank = SysAllocString(L"");
@@ -355,6 +472,7 @@ int main(void) {
         }
     }
 
+    arithmetic();
     printf("oleaut32_test: ok\n");
     return 0;
 }

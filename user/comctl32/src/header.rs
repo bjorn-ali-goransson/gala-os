@@ -7,6 +7,7 @@
 //! line under it and between columns, a small chevron for the sort order.
 
 use crate::common::*;
+use crate::layout::{HdItemW, HdLayout, WindowPos, get, set};
 use alloc::vec::Vec;
 
 pub const HDM_GETITEMCOUNT: u32 = 0x1200;
@@ -113,39 +114,39 @@ pub fn order(hwnd: Hwnd) -> Vec<usize> {
     with(hwnd, |h| h.order.clone()).unwrap_or_default()
 }
 
-fn read_item(p: *const u8, item: &mut Item) {
-    // SAFETY: the caller's HDITEMW.
+fn read_item(p: *const HdItemW, item: &mut Item) {
+    // SAFETY: the caller's HDITEMW (the fields its mask names).
     unsafe {
-        let mask = p.cast::<u32>().read_unaligned();
+        let mask = get!(p, mask);
         if mask & HDI_WIDTH != 0 {
-            item.width = p.add(4).cast::<i32>().read_unaligned();
+            item.width = get!(p, cxy);
         }
         if mask & HDI_TEXT != 0 {
-            let t = p.add(8).cast::<*const u16>().read_unaligned();
+            let t = get!(p, text);
             item.text = if t as isize == -1 { Vec::new() } else { owned(wide(t, 260)) };
         }
         if mask & HDI_FORMAT != 0 {
-            item.format = p.add(28).cast::<i32>().read_unaligned();
+            item.format = get!(p, fmt);
         }
         if mask & HDI_LPARAM != 0 {
-            item.param = p.add(32).cast::<isize>().read_unaligned();
+            item.param = get!(p, param);
         }
         if mask & HDI_IMAGE != 0 {
-            item.image = p.add(40).cast::<i32>().read_unaligned();
+            item.image = get!(p, image);
         }
     }
 }
 
-fn write_item(p: *mut u8, item: &Item, position: usize) {
-    // SAFETY: the caller's HDITEMW.
+fn write_item(p: *mut HdItemW, item: &Item, position: usize) {
+    // SAFETY: the caller's HDITEMW (the fields its mask names).
     unsafe {
-        let mask = p.cast::<u32>().read_unaligned();
+        let mask = get!(p, mask);
         if mask & HDI_WIDTH != 0 {
-            p.add(4).cast::<i32>().write_unaligned(item.width);
+            set!(p, cxy, item.width);
         }
         if mask & HDI_TEXT != 0 {
-            let out = p.add(8).cast::<*mut u16>().read_unaligned();
-            let room = p.add(24).cast::<i32>().read_unaligned().max(0) as usize;
+            let out = get!(p, text);
+            let room = get!(p, text_max).max(0) as usize;
             if !out.is_null() && room > 0 {
                 let n = item.text.len().min(room - 1);
                 core::ptr::copy_nonoverlapping(item.text.as_ptr(), out, n);
@@ -153,37 +154,37 @@ fn write_item(p: *mut u8, item: &Item, position: usize) {
             }
         }
         if mask & HDI_FORMAT != 0 {
-            p.add(28).cast::<i32>().write_unaligned(item.format);
+            set!(p, fmt, item.format);
         }
         if mask & HDI_LPARAM != 0 {
-            p.add(32).cast::<isize>().write_unaligned(item.param);
+            set!(p, param, item.param);
         }
         if mask & HDI_IMAGE != 0 {
-            p.add(40).cast::<i32>().write_unaligned(item.image);
+            set!(p, image, item.image);
         }
         if mask & HDI_ORDER != 0 {
-            p.add(44).cast::<i32>().write_unaligned(position as i32);
+            set!(p, order, position as i32);
         }
     }
 }
 
-/// NMHEADERW: NMHDR, iItem (24), iButton (28), pitem (32).
+/// NMHEADERW: NMHDR, iItem, iButton, pitem.
 #[repr(C)]
-struct NmHeader {
-    hdr: NmHdr,
-    item: i32,
+pub(crate) struct NmHeader {
+    pub(crate) hdr: NmHdr,
+    pub(crate) item: i32,
     button: i32,
-    pitem: *mut u8,
+    pitem: *mut HdItemW,
 }
 
-fn send(hwnd: Hwnd, code: i32, item: usize, hd: Option<&mut [u8; 72]>) -> isize {
+fn send(hwnd: Hwnd, code: i32, item: usize, hd: Option<&mut HdItemW>) -> isize {
     // SAFETY: plain call.
     let parent = unsafe { GetParent(hwnd) };
     let mut n = NmHeader {
         hdr: NmHdr { from: hwnd, id: id_of(hwnd), code: code as u32 },
         item: item as i32,
         button: 0,
-        pitem: hd.map_or(core::ptr::null_mut(), |b| b.as_mut_ptr()),
+        pitem: hd.map_or(core::ptr::null_mut(), |b| b as *mut HdItemW),
     };
     notify(parent, &mut n)
 }
@@ -215,7 +216,7 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
                 return -1;
             }
             let mut item = Item::default();
-            read_item(lparam as *const u8, &mut item);
+            read_item(lparam as *const HdItemW, &mut item);
             let r = with(hwnd, |h| {
                 if h.items.try_reserve(1).is_err() || h.order.try_reserve(1).is_err() {
                     return -1;
@@ -263,7 +264,7 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
                 return 0;
             };
             if lparam != 0 {
-                write_item(lparam as *mut u8, &item, position);
+                write_item(lparam as *mut HdItemW, &item, position);
             }
             1
         }
@@ -273,7 +274,7 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             }
             let ok = with(hwnd, |h| match h.items.get_mut(wparam) {
                 Some(it) => {
-                    read_item(lparam as *const u8, it);
+                    read_item(lparam as *const HdItemW, it);
                     true
                 }
                 None => false,
@@ -304,14 +305,10 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             let h = if hidden { 0 } else { height(font) };
             // SAFETY: the caller's HDLAYOUT.
             unsafe {
-                let [rect, pos] = *(lparam as *const [*mut i32; 2]);
-                let [l, t, r, _] = *(rect as *const [i32; 4]);
-                *rect.add(1) = t + h;
-                let p = pos.cast::<u8>();
-                p.cast::<usize>().write_unaligned(hwnd);
-                p.add(8).cast::<usize>().write_unaligned(0);
-                p.add(16).cast::<[i32; 4]>().write_unaligned([l, t, r - l, h]);
-                p.add(32).cast::<u32>().write_unaligned(0);
+                let HdLayout { rect, pos } = (lparam as *const HdLayout).read();
+                let [l, t, r, b] = *rect;
+                *rect = [l, t + h, r, b];
+                pos.write(WindowPos { hwnd, after: 0, x: l, y: t, cx: r - l, cy: h, flags: 0 });
             }
             1
         }
@@ -404,9 +401,7 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             let (x, _) = at(lparam);
             if let Some(Some((i, x0, w0))) = with(hwnd, |h| h.tracking) {
                 let w = (w0 + x - x0).max(0);
-                let mut hd = [0u8; 72];
-                hd[..4].copy_from_slice(&HDI_WIDTH.to_le_bytes());
-                hd[4..8].copy_from_slice(&w.to_le_bytes());
+                let mut hd = HdItemW { mask: HDI_WIDTH, cxy: w, ..HdItemW::ZERO };
                 if send(hwnd, HDN_ITEMCHANGINGW, i, Some(&mut hd)) == 0 {
                     with(hwnd, |h| {
                         if let Some(it) = h.items.get_mut(i) {

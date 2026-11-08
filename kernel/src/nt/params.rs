@@ -1,6 +1,8 @@
 //! RTL_USER_PROCESS_PARAMETERS for a new process, built as bytes to copy
 //! into its address space (normalized: string buffers hold absolute
-//! addresses). Layout from the public x64 definition (see `layout::params`).
+//! addresses). Layout from the public x64 definition (see `layout::params`);
+//! a WOW64 process also gets the x86 one (`build32`, the same fields with
+//! 4-byte pointers and handles: ARCHITECTURE "Plan: WOW64").
 
 use super::platform;
 use alloc::vec::Vec;
@@ -28,6 +30,66 @@ fn put(b: &mut [u8], off: u64, v: &[u8]) {
     b[off..off + v.len()].copy_from_slice(v);
 }
 
+/// Where the fields are: the x64 or the x86 structure.
+struct Shape {
+    /// Pointer (and handle, SIZE_T) size: 8 or 4.
+    ptr: u64,
+    struct_size: u64,
+    standard_input: u64,
+    current_directory: u64,
+    current_directory_handle: u64,
+    dll_path: u64,
+    image_path_name: u64,
+    command_line: u64,
+    environment: u64,
+    window_title: u64,
+    runtime_data: u64,
+    environment_size: u64,
+}
+
+const X64: Shape = Shape {
+    ptr: 8,
+    struct_size: params::STRUCT_SIZE,
+    standard_input: params::STANDARD_INPUT,
+    current_directory: params::CURRENT_DIRECTORY,
+    current_directory_handle: params::CURRENT_DIRECTORY_HANDLE,
+    dll_path: params::DLL_PATH,
+    image_path_name: params::IMAGE_PATH_NAME,
+    command_line: params::COMMAND_LINE,
+    environment: params::ENVIRONMENT,
+    window_title: params::WINDOW_TITLE,
+    runtime_data: params::RUNTIME_DATA,
+    environment_size: params::ENVIRONMENT_SIZE,
+};
+
+/// The x86 RTL_USER_PROCESS_PARAMETERS: the x64 fields with 4-byte
+/// pointers (UNICODE_STRING32 is 8 bytes, RTL_DRIVE_LETTER_CURDIR 16).
+const X86: Shape = Shape {
+    ptr: 4,
+    struct_size: 0x2c0,
+    standard_input: 0x18,
+    current_directory: 0x24,
+    current_directory_handle: 0x2c,
+    dll_path: 0x30,
+    image_path_name: 0x38,
+    command_line: 0x40,
+    environment: 0x48,
+    window_title: 0x70,
+    runtime_data: 0x88,
+    environment_size: 0x290,
+};
+
+impl Shape {
+    /// A pointer-sized value (a pointer, handle or SIZE_T) at `off`.
+    fn put_ptr(&self, b: &mut [u8], off: u64, v: u64) {
+        if self.ptr == 8 {
+            put(b, off, &v.to_le_bytes());
+        } else {
+            put(b, off, &(v as u32).to_le_bytes());
+        }
+    }
+}
+
 /// Characters CurrentDirectory's buffer holds (MAX_PATH, as Windows
 /// reserves it): SetCurrentDirectory writes the new path in place.
 const CURRENT_DIRECTORY_CHARS: u64 = 260;
@@ -36,6 +98,7 @@ const CURRENT_DIRECTORY_CHARS: u64 = 260;
 /// buffer of at least `capacity` characters with the NUL) and stores its
 /// UNICODE_STRING at `field`.
 fn put_string(
+    shape: &Shape,
     b: &mut Vec<u8>,
     base: u64,
     field: u64,
@@ -55,7 +118,7 @@ fn put_string(
     }
     put(b, field, &((units * 2) as u16).to_le_bytes()); // Length
     put(b, field + 2, &((room * 2) as u16).to_le_bytes()); // MaximumLength
-    put(b, field + 8, &(base + *cursor).to_le_bytes());
+    shape.put_ptr(b, field + shape.ptr, base + *cursor);
     *cursor = end.next_multiple_of(8);
     Some(())
 }
@@ -93,18 +156,35 @@ fn grow(b: &mut Vec<u8>, len: u64) -> Result<(), ParamsError> {
 /// as they need (each string within a UNICODE_STRING's 32767 characters,
 /// as on Windows, where a command line may be that long).
 pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsError> {
+    build_shaped(&X64, p, base)
+}
+
+/// The x86 block of a WOW64 process (`base` below 4 GiB), as `build`.
+pub fn build32(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsError> {
+    if base > u64::from(u32::MAX) {
+        return Err(ParamsError::TooLarge);
+    }
+    build_shaped(&X86, p, base)
+}
+
+fn build_shaped(
+    shape: &Shape,
+    p: &ProcessParameters<'_>,
+    base: u64,
+) -> Result<Vec<u8>, ParamsError> {
     let mut b = Vec::new();
-    grow(&mut b, params::STRUCT_SIZE)?;
-    let mut cursor = params::STRUCT_SIZE;
+    grow(&mut b, shape.struct_size)?;
+    let mut cursor = shape.struct_size;
     let strings = [
-        (params::CURRENT_DIRECTORY, p.current_directory, CURRENT_DIRECTORY_CHARS),
-        (params::DLL_PATH, p.dll_path, 0),
-        (params::IMAGE_PATH_NAME, p.image_path, 0),
-        (params::COMMAND_LINE, p.command_line, 0),
-        (params::WINDOW_TITLE, p.image_path, 0),
+        (shape.current_directory, p.current_directory, CURRENT_DIRECTORY_CHARS),
+        (shape.dll_path, p.dll_path, 0),
+        (shape.image_path_name, p.image_path, 0),
+        (shape.command_line, p.command_line, 0),
+        (shape.window_title, p.image_path, 0),
     ];
     for (field, s, capacity) in strings {
-        put_string(&mut b, base, field, &mut cursor, s, capacity).ok_or(ParamsError::TooLarge)?;
+        put_string(shape, &mut b, base, field, &mut cursor, s, capacity)
+            .ok_or(ParamsError::TooLarge)?;
     }
     if !p.runtime_data.is_empty() {
         let n = p.runtime_data.len() as u64;
@@ -113,18 +193,18 @@ pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsErro
         }
         grow(&mut b, cursor + n)?;
         put(&mut b, cursor, p.runtime_data);
-        put(&mut b, params::RUNTIME_DATA, &(n as u16).to_le_bytes());
-        put(&mut b, params::RUNTIME_DATA + 2, &(n as u16).to_le_bytes());
-        put(&mut b, params::RUNTIME_DATA + 8, &(base + cursor).to_le_bytes());
+        put(&mut b, shape.runtime_data, &(n as u16).to_le_bytes());
+        put(&mut b, shape.runtime_data + 2, &(n as u16).to_le_bytes());
+        shape.put_ptr(&mut b, shape.runtime_data + shape.ptr, base + cursor);
         cursor = (cursor + n).next_multiple_of(8);
     }
     put(&mut b, params::MAXIMUM_LENGTH, &(cursor as u32).to_le_bytes());
     put(&mut b, params::LENGTH, &(cursor as u32).to_le_bytes());
     put(&mut b, params::FLAGS, &params::FLAG_NORMALIZED.to_le_bytes());
-    for (i, h) in p.std_handles.iter().enumerate() {
-        put(&mut b, params::STANDARD_INPUT + 8 * i as u64, &h.to_le_bytes());
+    for (i, &h) in p.std_handles.iter().enumerate() {
+        shape.put_ptr(&mut b, shape.standard_input + shape.ptr * i as u64, h);
     }
-    put(&mut b, params::CURRENT_DIRECTORY_HANDLE, &p.current_directory_handle.to_le_bytes());
+    shape.put_ptr(&mut b, shape.current_directory_handle, p.current_directory_handle);
 
     // Environment, after the strings: each string null-terminated, then
     // an empty string.
@@ -140,8 +220,8 @@ pub fn build(p: &ProcessParameters<'_>, base: u64) -> Result<Vec<u8>, ParamsErro
     }
     grow(&mut b, at + 2)?;
     let env_size = at + 2 - start;
-    put(&mut b, params::ENVIRONMENT, &(base + start).to_le_bytes());
-    put(&mut b, params::ENVIRONMENT_SIZE, &env_size.to_le_bytes());
+    shape.put_ptr(&mut b, shape.environment, base + start);
+    shape.put_ptr(&mut b, shape.environment_size, env_size);
     // Whole pages: the block is mapped as it is.
     let whole = (b.len() as u64).next_multiple_of(platform::PAGE_SIZE);
     grow(&mut b, whole)?;
@@ -203,6 +283,40 @@ mod tests {
         let text: String =
             units.iter().map(|&c| if c == 0 { '|' } else { c as u8 as char }).collect();
         assert_eq!(text, "A=1|SystemRoot=C:\\Windows||");
+    }
+
+    #[test]
+    fn the_x86_block_has_4_byte_pointers() {
+        let base = 0x7ff8_0000;
+        let p = ProcessParameters {
+            image_path: "C:\\gala\\x.exe",
+            command_line: "C:\\gala\\x.exe arg",
+            current_directory: "C:\\gala\\",
+            current_directory_handle: 0x20,
+            dll_path: "",
+            std_handles: [4, 8, 0xc],
+            environment: &["A=1"],
+            runtime_data: &[],
+        };
+        let b = build32(&p, base).unwrap();
+        let u32_at =
+            |off: u64| u64::from(u32::from_le_bytes(b[off as usize..][..4].try_into().unwrap()));
+        let string32 = |field: u64| -> String {
+            let len = u64::from(u16_at(&b, field));
+            let ptr = u32_at(field + 4) - base;
+            (0..len / 2).map(|i| u16_at(&b, ptr + 2 * i) as u8 as char).collect()
+        };
+        assert_eq!(string32(0x38), "C:\\gala\\x.exe");
+        assert_eq!(string32(0x40), "C:\\gala\\x.exe arg");
+        assert_eq!(string32(0x24), "C:\\gala\\");
+        assert_eq!(u32_at(0x2c), 0x20);
+        assert_eq!((u32_at(0x18), u32_at(0x1c), u32_at(0x20)), (4, 8, 0xc));
+        assert_eq!(u32_at(0x08), u64::from(params::FLAG_NORMALIZED));
+        let env = u32_at(0x48) - base;
+        assert!(env >= 0x2c0);
+        assert_eq!(u16_at(&b, env), u16::from(b'A'));
+        assert_eq!(u32_at(0x290), 10);
+        assert_eq!(build32(&p, 0x1_0000_0000).unwrap_err(), ParamsError::TooLarge);
     }
 
     #[test]

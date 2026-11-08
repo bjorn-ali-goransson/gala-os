@@ -28,8 +28,8 @@
 //!   that token (the same object); RevertToSelf and SetThreadToken(NULL)
 //!   end it; ImpersonateSelf impersonates at the level asked; another
 //!   thread has no token.
-//! - PrivilegeCheck needs an impersonation token
-//!   (ERROR_NO_IMPERSONATION_TOKEN); enabled privileges pass and are
+//! - PrivilegeCheck takes a primary token too (as Windows 11 25H2 does,
+//!   although the docs speak of a client's); enabled privileges pass and are
 //!   marked SE_PRIVILEGE_USED_FOR_ACCESS; all-necessary and any-of sets.
 //! - CreateRestrictedToken: DISABLE_MAX_PRIVILEGE keeps only
 //!   SeChangeNotifyPrivilege; disabled SIDs become deny-only, deleted
@@ -176,12 +176,17 @@ const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_NO_TOKEN: u32 = 1008;
 const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
-const ERROR_NO_IMPERSONATION_TOKEN: u32 = 1309;
 const ERROR_BAD_TOKEN_TYPE: u32 = 1349;
 
+/// A SID in memory aligned as one (its subauthorities are ULONGs): a
+/// byte array may sit at an odd address, which Windows' token calls can
+/// refuse (ERROR_NOACCESS from CreateRestrictedToken).
+#[repr(C, align(4))]
+struct Sid<const N: usize>([u8; N]);
+
 /// S-1-1-0 (Everyone) and S-1-5-32-544 (BUILTIN\Administrators).
-const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
-const ADMINISTRATORS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0];
+static EVERYONE: Sid<12> = Sid([1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+static ADMINISTRATORS: Sid<16> = Sid([1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0]);
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -209,6 +214,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(core::cell::Cell<u32>);
 
 impl Checks {
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.0.set(self.0.get() + 1);
         if cond {
@@ -218,15 +224,18 @@ impl Checks {
         out(&hex(self.0.get()));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
     /// A call that must fail with `error`.
+    #[track_caller]
     fn fails(&self, result: Bool, error: u32) -> Result<(), u32> {
         self.ok(result == 0, 1)?;
         // SAFETY: a plain call.
@@ -511,8 +520,11 @@ fn run() -> Result<(), u32> {
         c.fails(OpenThreadToken(thread, TOKEN_QUERY, 1, &mut t), ERROR_NO_TOKEN)?;
 
         // PrivilegeCheck.
-        let (r, _, _) = check_privileges(query_only, 0, &[SE_CHANGE_NOTIFY]);
-        c.fails(r, ERROR_NO_IMPERSONATION_TOKEN)?;
+        // A primary token is accepted too (Windows 11 25H2; the docs speak
+        // of a client's impersonation token): SeChangeNotify is enabled.
+        let (r, held, _) = check_privileges(query_only, 0, &[SE_CHANGE_NOTIFY]);
+        c.ok(r != 0, last_error())?;
+        c.eq(held as u64, 1)?;
         let (r, held, attrs) = check_privileges(imp, PRIVILEGE_SET_ALL_NECESSARY, &[SE_SHUTDOWN]);
         c.ok(r != 0, last_error())?;
         c.eq(held as u64, 1)?;
@@ -549,22 +561,22 @@ fn run() -> Result<(), u32> {
         c.eq(IsTokenRestricted(restricted) as u64, 0)?;
         c.ok(statistics(&c, restricted)?.0 != id, 0)?;
         // Everyone deny-only, SeShutdown deleted, Everyone restricting.
-        let everyone = [EVERYONE.as_ptr() as usize, 0];
+        let everyone = [EVERYONE.0.as_ptr() as usize, 0];
         let delete = [SE_SHUTDOWN, 0, 0];
         let mut filtered = null;
         let r =
             CreateRestrictedToken(full, 0, 1, &everyone, 1, &delete, 1, &everyone, &mut filtered);
         c.ok(r != 0, last_error())?;
-        let attrs = group(&c, filtered, TOKEN_GROUPS, &EVERYONE)?.unwrap_or(0);
+        let attrs = group(&c, filtered, TOKEN_GROUPS, &EVERYONE.0)?.unwrap_or(0);
         c.ok(attrs & SE_GROUP_USE_FOR_DENY_ONLY != 0, attrs.into())?;
         c.eq((attrs & SE_GROUP_ENABLED).into(), 0)?;
         c.eq(privilege(&c, filtered, SE_SHUTDOWN)?.map_or(9, u64::from), 9)?;
         c.ok(privilege(&c, filtered, SE_CHANGE_NOTIFY)?.is_some(), 0)?;
         c.eq(dword(&c, filtered, TOKEN_RESTRICTED_SIDS)?.into(), 1)?;
-        c.ok(group(&c, filtered, TOKEN_RESTRICTED_SIDS, &EVERYONE)?.is_some(), 0)?;
+        c.ok(group(&c, filtered, TOKEN_RESTRICTED_SIDS, &EVERYONE.0)?.is_some(), 0)?;
         c.eq(IsTokenRestricted(filtered) as u64, 1)?;
         // The original is unchanged.
-        let attrs = group(&c, query_only, TOKEN_GROUPS, &EVERYONE)?.unwrap_or(0);
+        let attrs = group(&c, query_only, TOKEN_GROUPS, &EVERYONE.0)?.unwrap_or(0);
         c.ok(attrs & SE_GROUP_ENABLED != 0, attrs.into())?;
         c.eq(dword(&c, query_only, TOKEN_RESTRICTED_SIDS)?.into(), 0)?;
         // Without TOKEN_DUPLICATE.
@@ -586,14 +598,14 @@ fn run() -> Result<(), u32> {
         // CheckTokenMembership (an impersonation token): Everyone yes,
         // Administrators no (a standard user), a deny-only group no.
         let mut member = 7;
-        c.ok(CheckTokenMembership(imp, EVERYONE.as_ptr(), &mut member) != 0, last_error())?;
+        c.ok(CheckTokenMembership(imp, EVERYONE.0.as_ptr(), &mut member) != 0, last_error())?;
         c.eq(member as u64, 1)?;
-        c.ok(CheckTokenMembership(imp, ADMINISTRATORS.as_ptr(), &mut member) != 0, 0)?;
+        c.ok(CheckTokenMembership(imp, ADMINISTRATORS.0.as_ptr(), &mut member) != 0, 0)?;
         c.eq(member as u64, 0)?;
         let mut filtered_imp = null;
         let r = DuplicateTokenEx(filtered, TOKEN_ALL_ACCESS, null, 2, 2, &mut filtered_imp);
         c.ok(r != 0, last_error())?;
-        c.ok(CheckTokenMembership(filtered_imp, EVERYONE.as_ptr(), &mut member) != 0, 0)?;
+        c.ok(CheckTokenMembership(filtered_imp, EVERYONE.0.as_ptr(), &mut member) != 0, 0)?;
         c.eq(member as u64, 0)?;
 
         for h in [
@@ -632,4 +644,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

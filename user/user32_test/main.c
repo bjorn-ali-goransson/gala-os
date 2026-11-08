@@ -18,7 +18,11 @@
  *   what the window gets (not asked with SWP_NOSENDCHANGING);
  *   GetWindowRect/GetClientRect are the new ones
  *   in WM_WINDOWPOSCHANGED and WM_SIZE; WM_SIZE's wParam is
- *   SIZE_MAXIMIZED after SC_MAXIMIZE and SIZE_RESTORED otherwise.
+ *   SIZE_MAXIMIZED after SC_MAXIMIZE and SIZE_RESTORED otherwise. The
+ *   first SetWindowPos (without SWP_NOACTIVATE) of a never-shown window
+ *   also activates it when the process may set the foreground: a second
+ *   WM_WINDOWPOSCHANGING, then WM_ACTIVATE, before WM_WINDOWPOSCHANGED;
+ *   the next one of the active window does not.
  * - WM_NCCALCSIZE (a custom frame, as Chromium's browser window draws
  *   its own): CreateWindowEx sends it (wParam FALSE, the window's
  *   rectangle); returning it unchanged makes the whole window the client
@@ -49,6 +53,9 @@
  *   SHGetPathFromIDListW (none for CSIDL_DRIVES), SHGetMalloc.
  * - mpr's WNetGetConnectionW: ERROR_NOT_CONNECTED for C:, ERROR_BAD_DEVICE
  *   for a name that is no device.
+ * - The posted-message queue is first in, first out: three posted, one
+ *   taken, one more posted; the rest come out in posting order (a freed
+ *   place in the queue does not put the newest first).
  * - Hooks: SetWindowsHookExW for the calling thread returns a handle;
  *   the newest hook is called first and CallNextHookEx passes on to the
  *   older one (0 after the last). WH_CBT: HCBT_CREATEWND before the
@@ -71,6 +78,21 @@
  *   DestroyMenu destroy it; SetMenu/GetMenu/DrawMenuBar; GetSystemMenu
  *   (the same menu each time, with SC_CLOSE); SetMenuInfo/GetMenuInfo
  *   keep the style and menu data (MIM_APPLYTOSUBMENUS reaches submenus).
+ * - What Inno Setup's IDE imports (Wine's menu.c test_getmenubarinfo and
+ *   dialog.c record Windows' answers): GetMenuBarInfo(OBJID_MENU) of a
+ *   window without a menu, an item past the last (-1, 200) or an unknown
+ *   object id fails with the last error untouched; a NULL window is
+ *   ERROR_INVALID_WINDOW_HANDLE, OBJID_CLIENT of a window that is no menu
+ *   ERROR_INVALID_MENU_HANDLE, a wrong cbSize ERROR_INVALID_PARAMETER;
+ *   item 0 of an empty bar is an empty rectangle with the menu; item n is
+ *   GetMenuItemRect's rectangle of item n - 1, and the whole bar holds
+ *   the items' rows. SendDlgItemMessageW sends to GetDlgItem's control
+ *   (0 when there is none).
+ * - What Scintilla (Inno Setup's IDE) imports: RegisterClassExA registers
+ *   a class CreateWindowExW finds by its name (again:
+ *   ERROR_CLASS_ALREADY_EXISTS); ImmNotifyIME of no input context fails,
+ *   leaving ERROR_SUCCESS for NULL and ERROR_INVALID_HANDLE for a handle
+ *   that is no context (Wine's imm32.c records Windows' answers).
  * - RegisterWindowMessageW: a message in 0xC000-0xFFFF, the same for the
  *   same name in any case, another for another name.
  * - Child windows (WS_CHILD): GetParent, GetDlgCtrlID/GetDlgItem (the id
@@ -102,7 +124,11 @@
  *   SetWindowTheme S_OK.
  * - The keyboard layout (US): VkKeyScanW gives the virtual key and the
  *   shift state ('a' -> 'A', 'A' -> Shift+'A', '!' -> Shift+'1', none:
- *   -1); MapVirtualKeyW between virtual keys, scan codes and characters.
+ *   -1); MapVirtualKeyW between virtual keys, scan codes and characters;
+ *   LoadKeyboardLayoutW("00000409") is the thread's layout; ToUnicode
+ *   and ToUnicodeEx translate keys with a key state (Shift: capitals and
+ *   the shifted row, Ctrl+letter: its control character, Enter '\r',
+ *   arrows nothing).
  * - Accelerators: CreateAcceleratorTableW; CopyAcceleratorTableW (the
  *   count with no buffer, the entries back); TranslateAcceleratorW turns a
  *   matching WM_KEYDOWN into WM_COMMAND (high word 1) and returns TRUE, a
@@ -142,10 +168,39 @@
  *   DRAGDROP_E_ALREADYREGISTERED, _NOTREGISTERED, _INVALIDHWND).
  * - ole32's OleInitialize (wx initializes OLE first): S_OK, then S_FALSE
  *   on the same thread; OleUninitialize once per call.
+ * - Classes (Delphi's VCL registers one per control type and looks it
+ *   up first): GetClassInfoW of a registered class gives its style,
+ *   window procedure and extra bytes where WNDCLASSW has them (the
+ *   procedure at offset 8, after the style's padding); GetClassInfoW of a
+ *   system class (LISTBOX) gives a procedure a superclass can call;
+ *   UnregisterClassW of a class with a window fails with
+ *   ERROR_CLASS_HAS_WINDOWS, after which RegisterClassW of the same name
+ *   fails with ERROR_CLASS_ALREADY_EXISTS; once the window is gone both
+ *   succeed. A window's extra bytes (cbWndExtra 8) start zeroed and hold
+ *   a LONG_PTR at 0 or LONGs at 0 and 4 (little-endian, overlapping);
+ *   an offset past them fails with ERROR_INVALID_INDEX.
+ * - Layered windows: GetLayeredWindowAttributes fails before
+ *   SetLayeredWindowAttributes, then gives its colour key, alpha and
+ *   flags; SetLayeredWindowAttributes fails on a window without
+ *   WS_EX_LAYERED.
+ * - AnimateWindow: shows a hidden window (visible after; activated with
+ *   AW_ACTIVATE) and hides a shown one (AW_HIDE); it fails for a window
+ *   already in that state and for a slide with no direction.
+ * - DisableProcessWindowsGhosting (no result);
+ *   ShutdownBlockReasonCreate/Query/Destroy: the reason given, its length
+ *   with the NUL when asked without a buffer; none after Destroy.
+ * - GetLastActivePopup: the window itself while none of its popups (a
+ *   captioned one, as a dialog) was
+ *   activated, then the popup activated last (a popup's own is itself);
+ *   the owner again once the popup is gone. ShowOwnedPopups(FALSE) hides
+ *   the owner's shown popups, TRUE shows them again.
+ * - msctf.dll (loaded as Delphi's VCL loads it): SetInputScope and
+ *   SetInputScopes on a window return S_OK.
  *
  * Prints "user32_test: ok" or exits with the number of the failing
  * check. */
 #include <windows.h>
+#include <imm.h>
 #include <shellapi.h>
 #include <winnetwk.h>
 #include <shlobj.h>
@@ -165,6 +220,12 @@ static HWND cbt_created, cbt_destroyed;
 static int title_seen;
 
 static LRESULT CALLBACK cbt(int code, WPARAM wparam, LPARAM lparam) {
+    WCHAR cls[8];
+    /* A thread's first window brings its default IME window (class "IME",
+       "Default IME") on Windows, which the hook sees too; gala makes none.
+       Only the test's own windows are counted (created and destroyed). */
+    if ((code == HCBT_CREATEWND || code == HCBT_DESTROYWND) && GetClassNameW((HWND)wparam, cls, 8) == 3 && wcscmp(cls, L"IME") == 0)
+        return CallNextHookEx(cbt_hook, code, wparam, lparam);
     if (code == HCBT_CREATEWND) {
         cbt_creates++;
         cbt_created = (HWND)wparam;
@@ -483,6 +544,82 @@ static void menu_bar(void) {
     CHECK(!IsMenu(bar_menu) && !IsMenu(file));
 }
 
+/* GetMenuBarInfo and SendDlgItemMessageW (what Inno Setup's IDE imports). */
+static void menu_bar_info(void) {
+    MENUBARINFO mbi;
+    mbi.cbSize = sizeof mbi;
+    HWND w = CreateWindowExW(0, L"User32TestHooks", L"bar info", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 20, 20, 200,
+                             150, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    CHECK(w != NULL);
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, 0, &mbi) && GetLastError() == 0xdeadbeef);
+    HMENU bar = CreateMenu();
+    CHECK(bar != NULL && SetMenu(w, bar));
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(NULL, OBJID_CLIENT, 0, &mbi) && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_CLIENT, 0, &mbi) && GetLastError() == ERROR_INVALID_MENU_HANDLE);
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, -1, &mbi) && GetLastError() == 0xdeadbeef);
+    mbi.cbSize = 1000;
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, 0, &mbi) && GetLastError() == ERROR_INVALID_PARAMETER);
+    mbi.cbSize = sizeof mbi;
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, 123, 0, &mbi) && GetLastError() == 0xdeadbeef);
+    CHECK(GetMenuBarInfo(w, OBJID_MENU, 0, &mbi));
+    CHECK(mbi.rcBar.left == 0 && mbi.rcBar.top == 0 && mbi.rcBar.right == 0 && mbi.rcBar.bottom == 0);
+    CHECK(mbi.hMenu == bar && !mbi.fBarFocused && !mbi.fFocused);
+    CHECK(AppendMenuW(bar, MF_STRING, 100, L"item 1") && AppendMenuW(bar, MF_STRING, 101, L"item 2"));
+    CHECK(SetMenu(w, bar));
+    SetLastError(0xdeadbeef);
+    CHECK(!GetMenuBarInfo(w, OBJID_MENU, 200, &mbi) && GetLastError() == 0xdeadbeef);
+    RECT first, second;
+    CHECK(GetMenuItemRect(w, bar, 0, &first) && GetMenuItemRect(w, bar, 1, &second));
+    CHECK(first.right <= second.left && first.top == second.top && first.bottom > first.top);
+    CHECK(GetMenuBarInfo(w, OBJID_MENU, 0, &mbi) && mbi.hMenu == bar);
+    CHECK(mbi.rcBar.top == first.top && mbi.rcBar.bottom == first.bottom);
+    CHECK(mbi.rcBar.left <= first.left && mbi.rcBar.right >= second.right);
+    CHECK(GetMenuBarInfo(w, OBJID_MENU, 2, &mbi) && EqualRect(&mbi.rcBar, &second) && mbi.hMenu == bar);
+    CHECK(!mbi.fBarFocused && !mbi.fFocused);
+
+    HWND edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE, 0, 0, 80, 20, w, (HMENU)5,
+                                GetModuleHandleW(NULL), NULL);
+    CHECK(edit != NULL);
+    CHECK(SendDlgItemMessageW(w, 5, WM_SETTEXT, 0, (LPARAM)L"sent") == TRUE);
+    wchar_t text[16];
+    CHECK(GetWindowTextW(edit, text, 16) == 4 && wcscmp(text, L"sent") == 0);
+    CHECK(SendDlgItemMessageW(w, 5, WM_GETTEXTLENGTH, 0, 0) == 4);
+    CHECK(SendDlgItemMessageW(w, 99, WM_GETTEXTLENGTH, 0, 0) == 0);
+    CHECK(DestroyWindow(w));
+}
+
+/* What Scintilla (in Inno Setup's IDE) imports besides: RegisterClassExA
+ * and imm32's input-context functions. */
+static void scintilla_imports(void) {
+    WNDCLASSEXA wca;
+    memset(&wca, 0, sizeof wca);
+    wca.cbSize = sizeof wca;
+    wca.lpfnWndProc = DefWindowProcA;
+    wca.hInstance = GetModuleHandleW(NULL);
+    wca.lpszClassName = "User32TestAnsiClass";
+    ATOM atom = RegisterClassExA(&wca);
+    CHECK(atom >= 0xC000);
+    SetLastError(0);
+    CHECK(!RegisterClassExA(&wca) && GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+    HWND w = CreateWindowExW(0, L"User32TestAnsiClass", L"ansi", WS_POPUP, 0, 0, 10, 10, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    wchar_t cls[32];
+    CHECK(w != NULL && GetClassNameW(w, cls, 32) == 19 && wcscmp(cls, L"User32TestAnsiClass") == 0);
+    CHECK(DestroyWindow(w));
+    /* No input context: ImmNotifyIME fails, a NULL one leaving no error,
+     * one that is not a context ERROR_INVALID_HANDLE. */
+    SetLastError(0xdeadbeef);
+    CHECK(!ImmNotifyIME(NULL, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_SUCCESS);
+    SetLastError(0xdeadbeef);
+    CHECK(!ImmNotifyIME((HIMC)0xdeadcafe, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_INVALID_HANDLE);
+}
+
 static int monitors_seen;
 static HMONITOR monitor_seen;
 static RECT monitor_rect;
@@ -744,6 +881,11 @@ static void bitmaps(void) {
 // takes the invalidation back.
 /* GetDialogBaseUnits: the system font's average width (low word) and
  * height (high word), both positive. */
+/* Whether this process may set the foreground (dialog_units'
+ * SetForegroundWindow succeeded): what decides whether a SetWindowPos
+ * activates (positions). */
+static int foreground_rights;
+
 static void dialog_units(void) {
     LONG u = GetDialogBaseUnits();
     CHECK(LOWORD(u) > 0 && HIWORD(u) > LOWORD(u));
@@ -754,8 +896,127 @@ static void dialog_units(void) {
      * active window; BringWindowToTop succeeds. */
     HWND w = CreateWindowExW(0, L"User32TestHooks", L"active", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, NULL,
                              NULL, GetModuleHandleW(NULL), NULL);
-    CHECK(SetForegroundWindow(w) && GetForegroundWindow() == w && GetActiveWindow() == w);
-    CHECK(SetActiveWindow(w) == w && BringWindowToTop(w));
+    if (!SetForegroundWindow(w)) {
+        /* The documented foreground lock: a process that is not the
+         * foreground one and had no recent input (started from a
+         * background shell) may not take the foreground. */
+        CHECK(GetForegroundWindow() != w);
+        printf("user32_test: activation skipped (no foreground rights)\n");
+        fflush(stdout);
+    } else {
+        foreground_rights = 1;
+        CHECK(GetForegroundWindow() == w && GetActiveWindow() == w);
+        CHECK(SetActiveWindow(w) == w && BringWindowToTop(w));
+    }
+    DestroyWindow(w);
+}
+
+static WNDPROC listbox_proc;
+static LRESULT CALLBACK sub_listbox(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    return CallWindowProcW(listbox_proc, hwnd, msg, wparam, lparam);
+}
+
+static void classes(void) {
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    WNDCLASSW wc = {0};
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = wndproc;
+    wc.cbWndExtra = 8;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"User32TestClassInfo";
+    CHECK(RegisterClassW(&wc) != 0);
+    WNDCLASSW got;
+    memset(&got, 0xcc, sizeof got);
+    CHECK(GetClassInfoW(inst, L"User32TestClassInfo", &got));
+    CHECK(got.lpfnWndProc == wndproc && got.style == (CS_HREDRAW | CS_VREDRAW));
+    /* A superclass of a system class, as Delphi's controls are. */
+    WNDCLASSW lb;
+    CHECK(GetClassInfoW(NULL, L"LISTBOX", &lb) && lb.lpfnWndProc != NULL);
+    listbox_proc = lb.lpfnWndProc;
+    lb.lpfnWndProc = sub_listbox;
+    lb.hInstance = inst;
+    lb.lpszClassName = L"User32TestListBox";
+    CHECK(RegisterClassW(&lb) != 0);
+    HWND parent = CreateWindowExW(0, L"User32TestClassInfo", L"classes", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL,
+                                  NULL, inst, NULL);
+    HWND list = CreateWindowExW(0, L"User32TestListBox", L"", WS_CHILD | LBS_NOTIFY, 0, 0, 100, 50, parent, NULL,
+                                inst, NULL);
+    CHECK(parent != NULL && list != NULL);
+    /* The class's 8 extra bytes: zeroed, a pointer-sized long at 0, 4-byte
+     * longs at 0 and 4; nothing past them (ERROR_INVALID_INDEX). */
+    CHECK(got.cbWndExtra == 8);
+    CHECK(GetWindowLongPtrW(parent, 0) == 0);
+    CHECK(SetWindowLongPtrW(parent, 0, (LONG_PTR)0x1122334455667788ll) == 0);
+    CHECK(GetWindowLongPtrW(parent, 0) == (LONG_PTR)0x1122334455667788ll);
+    CHECK(GetWindowLongW(parent, 4) == 0x11223344 && GetWindowLongW(parent, 0) == 0x55667788);
+    CHECK(SetWindowLongW(parent, 4, -2) == 0x11223344 && GetWindowLongPtrW(parent, 0) == (LONG_PTR)0xfffffffe55667788ll);
+    SetLastError(0);
+    CHECK(GetWindowLongPtrW(parent, 4) == 0 && GetLastError() == ERROR_INVALID_INDEX);
+    SetLastError(0);
+    CHECK(SetWindowLongW(parent, 8, 1) == 0 && GetLastError() == ERROR_INVALID_INDEX);
+    CHECK(SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)L"one") == 0 && SendMessageW(list, LB_GETCOUNT, 0, 0) == 1);
+    SetLastError(0);
+    CHECK(!UnregisterClassW(L"User32TestClassInfo", inst) && GetLastError() == ERROR_CLASS_HAS_WINDOWS);
+    SetLastError(0);
+    CHECK(RegisterClassW(&wc) == 0 && GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+    DestroyWindow(parent);
+    CHECK(UnregisterClassW(L"User32TestClassInfo", inst) && RegisterClassW(&wc) != 0);
+    CHECK(UnregisterClassW(L"User32TestListBox", inst));
+}
+
+static void effects(void) {
+    HINSTANCE inst = GetModuleHandleW(NULL);
+    HWND w = CreateWindowExW(WS_EX_LAYERED, L"User32TestHooks", L"layered", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100,
+                             NULL, NULL, inst, NULL);
+    COLORREF key = 1;
+    BYTE alpha = 1;
+    DWORD flags = 1;
+    CHECK(w != NULL && !GetLayeredWindowAttributes(w, &key, &alpha, &flags));
+    CHECK(SetLayeredWindowAttributes(w, RGB(1, 2, 3), 200, LWA_ALPHA | LWA_COLORKEY));
+    CHECK(GetLayeredWindowAttributes(w, &key, &alpha, &flags));
+    CHECK(key == RGB(1, 2, 3) && alpha == 200 && flags == (LWA_ALPHA | LWA_COLORKEY));
+    CHECK(SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA) && GetLayeredWindowAttributes(w, NULL, &alpha, &flags));
+    CHECK(alpha == 255 && flags == LWA_ALPHA);
+    DestroyWindow(w);
+    w = CreateWindowExW(0, L"User32TestHooks", L"plain", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL, NULL, inst,
+                        NULL);
+    CHECK(!SetLayeredWindowAttributes(w, 0, 128, LWA_ALPHA));
+    /* AnimateWindow. */
+    CHECK(!IsWindowVisible(w) && !AnimateWindow(w, 10, AW_HIDE | AW_BLEND));
+    CHECK(!AnimateWindow(w, 10, AW_SLIDE) && !IsWindowVisible(w));
+    CHECK(AnimateWindow(w, 10, AW_BLEND | AW_ACTIVATE) && IsWindowVisible(w) && GetActiveWindow() == w);
+    CHECK(!AnimateWindow(w, 10, AW_BLEND));
+    CHECK(AnimateWindow(w, 10, AW_HIDE | AW_SLIDE | AW_VER_POSITIVE) && !IsWindowVisible(w));
+    CHECK(AnimateWindow(w, 10, AW_CENTER) && IsWindowVisible(w));
+    /* Ghosting and shutdown reasons. */
+    DisableProcessWindowsGhosting();
+    WCHAR reason[32];
+    DWORD n = 0;
+    CHECK(ShutdownBlockReasonCreate(w, L"Installing"));
+    CHECK(ShutdownBlockReasonQuery(w, NULL, &n) && n == 11);
+    n = 32;
+    CHECK(ShutdownBlockReasonQuery(w, reason, &n) && wcscmp(reason, L"Installing") == 0);
+    CHECK(ShutdownBlockReasonDestroy(w));
+    n = 32;
+    CHECK(!ShutdownBlockReasonQuery(w, reason, &n));
+    /* Owned popups. */
+    HWND p = CreateWindowExW(0, L"User32TestHooks", L"popup", WS_POPUP | WS_CAPTION, 0, 0, 50, 50, w, NULL, inst, NULL);
+    CHECK(p != NULL && GetLastActivePopup(w) == w);
+    ShowWindow(p, SW_SHOW);
+    CHECK(GetActiveWindow() == p && GetLastActivePopup(w) == p && GetLastActivePopup(p) == p);
+    CHECK(ShowOwnedPopups(w, FALSE) && !IsWindowVisible(p));
+    CHECK(ShowOwnedPopups(w, TRUE) && IsWindowVisible(p));
+    DestroyWindow(p);
+    CHECK(GetLastActivePopup(w) == w);
+    /* Input scopes (msctf.dll). */
+    HMODULE tsf = LoadLibraryW(L"msctf.dll");
+    CHECK(tsf != NULL);
+    HRESULT (WINAPI *set_scope)(HWND, int) = (void *)GetProcAddress(tsf, "SetInputScope");
+    HRESULT (WINAPI *set_scopes)(HWND, const int *, UINT, WCHAR **, UINT, WCHAR *, WCHAR *) =
+        (void *)GetProcAddress(tsf, "SetInputScopes");
+    int scopes[2] = {1 /* IS_URL */, 5 /* IS_EMAIL_SMTPEMAILADDRESS */};
+    CHECK(set_scope != NULL && set_scope(w, 1) == S_OK);
+    CHECK(set_scopes != NULL && set_scopes(w, scopes, 2, NULL, 0, NULL, NULL) == S_OK);
     DestroyWindow(w);
 }
 
@@ -809,8 +1070,16 @@ static void clipboard_formats(void) {
 // resized, e.g. snapped): WM_WINDOWPOSCHANGING may change the WINDOWPOS
 // and the window gets what it says; WM_WINDOWPOSCHANGED and then WM_SIZE
 // (DefWindowProc) see the new rectangle; WM_SIZE's wParam is
-// SIZE_MAXIMIZED after SC_MAXIMIZE, else SIZE_RESTORED.
+// SIZE_MAXIMIZED after SC_MAXIMIZE, else SIZE_RESTORED. The first
+// SetWindowPos without SWP_NOACTIVATE of a window that is not active
+// activates it, when the process may set the foreground (Windows 11 25H2,
+// a never-shown window: WM_WINDOWPOSCHANGING, WM_GETMINMAXINFO,
+// WM_NCCALCSIZE, WM_WINDOWPOSCHANGING again, then WM_ACTIVATEAPP,
+// WM_NCACTIVATE and WM_ACTIVATE, WM_SETFOCUS, then WM_WINDOWPOSCHANGED and
+// WM_SIZE); the next SetWindowPos of the active window does not.
 static int pos_force_cx, pos_seq[8], pos_n, pos_changed_w, pos_size_client_w;
+/* pos_n when WM_ACTIVATE(WA_ACTIVE) came (-1: not yet). */
+static int pos_activate_at;
 static WPARAM pos_size_wparam;
 static LRESULT CALLBACK pos_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     RECT r;
@@ -825,6 +1094,8 @@ static LRESULT CALLBACK pos_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             pos_seq[pos_n++] = 2;
         GetWindowRect(hwnd, &r);
         pos_changed_w = r.right - r.left;
+    } else if (msg == WM_ACTIVATE && LOWORD(wparam) == WA_ACTIVE) {
+        pos_activate_at = pos_n;
     } else if (msg == WM_SIZE) {
         if (pos_n < 8)
             pos_seq[pos_n++] = 3;
@@ -845,15 +1116,38 @@ static void positions(void) {
                              GetModuleHandleW(NULL), NULL);
     CHECK(w != NULL);
     RECT r, c;
+    CHECK(GetActiveWindow() != w);
     pos_n = 0;
+    pos_activate_at = -1;
     pos_size_wparam = 99;
     CHECK(SetWindowPos(w, NULL, 0, 0, 320, 220, SWP_NOMOVE | SWP_NOZORDER));
-    CHECK(pos_n == 3 && pos_seq[0] == 1 && pos_seq[1] == 2 && pos_seq[2] == 3);
+    int activated = GetActiveWindow() == w;
+    /* Activation: a second WM_WINDOWPOSCHANGING, WM_ACTIVATE after it. */
+    int first_ok = activated ? pos_n == 4 && pos_seq[0] == 1 && pos_seq[1] == 1 && pos_seq[2] == 2 && pos_seq[3] == 3
+                                   && pos_activate_at == 2
+                             : pos_n == 3 && pos_seq[0] == 1 && pos_seq[1] == 2 && pos_seq[2] == 3;
+    if (!first_ok || activated != foreground_rights) {
+        printf("user32_test: first SetWindowPos: foreground rights %d, activated %d, WM_ACTIVATE at %d, pos_n %d, "
+               "pos_seq",
+               foreground_rights, activated, pos_activate_at, pos_n);
+        for (int i = 0; i < pos_n && i < 8; i++)
+            printf(" %d", pos_seq[i]);
+        printf("\n");
+        fflush(stdout);
+    }
+    CHECK(first_ok);
+    CHECK(activated == foreground_rights);
     CHECK(pos_changed_w == 320 && pos_size_wparam == SIZE_RESTORED);
+    /* WM_SIZE saw the client rectangle GetClientRect gives (Windows 11:
+       304 of 320, its 8-pixel sides; gala's frame is its own). */
     CHECK(GetClientRect(w, &c) && pos_size_client_w == c.right);
-    /* The window procedure narrows it in WM_WINDOWPOSCHANGING. */
+    /* The window procedure narrows it in WM_WINDOWPOSCHANGING. Now
+       active (or not to be), the window is not activated again. */
     pos_force_cx = 260;
+    pos_n = 0;
+    pos_activate_at = -1;
     CHECK(SetWindowPos(w, NULL, 0, 0, 400, 220, SWP_NOMOVE | SWP_NOZORDER));
+    CHECK(pos_n == 3 && pos_seq[0] == 1 && pos_seq[1] == 2 && pos_seq[2] == 3 && pos_activate_at == -1);
     CHECK(GetWindowRect(w, &r) && r.right - r.left == 260 && r.left == 30 && pos_changed_w == 260);
     CHECK(GetClientRect(w, &c) && pos_size_client_w == c.right && c.right < 260);
     /* SWP_NOSENDCHANGING: no WM_WINDOWPOSCHANGING, so no say in it. */
@@ -1116,6 +1410,18 @@ static void wnet(void) {
     CHECK(WNetCancelConnection2W(L"Z:", 0, FALSE) == ERROR_NOT_CONNECTED);
 }
 
+/* Posted messages come out in the order they were posted. */
+static void posted_order(void) {
+    MSG m;
+    for (int i = 1; i <= 3; i++)
+        CHECK(PostMessageW(NULL, WM_APP + 7, i, 0));
+    CHECK(PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE) && m.wParam == 1);
+    CHECK(PostMessageW(NULL, WM_APP + 7, 4, 0));
+    for (int i = 2; i <= 4; i++)
+        CHECK(PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE) && m.wParam == (WPARAM)i);
+    CHECK(!PeekMessageW(&m, NULL, WM_APP + 7, WM_APP + 7, PM_REMOVE));
+}
+
 int main(void) {
     bitmaps();
     wnet();
@@ -1123,8 +1429,11 @@ int main(void) {
     file_info();
     clipboard_formats();
     hooks();
+    posted_order();
     redraw();
     unknown_class();
+    classes();
+    effects();
     dialog_units();
     deferred();
     positions();
@@ -1132,6 +1441,8 @@ int main(void) {
     activation();
     timers();
     menu_bar();
+    menu_bar_info();
+    scintilla_imports();
     monitors();
     menus();
     children();
@@ -1180,6 +1491,23 @@ int main(void) {
     CHECK(VkKeyScanW(L' ') == 0x20 && VkKeyScanW(L';') == 0xba && VkKeyScanW(0x263a) == -1);
     CHECK(MapVirtualKeyW('A', MAPVK_VK_TO_VSC) == 0x1e && MapVirtualKeyW(0x1e, MAPVK_VSC_TO_VK) == 'A');
     CHECK(MapVirtualKeyW('A', MAPVK_VK_TO_CHAR) == 'A' && MapVirtualKeyW(VK_OEM_1, MAPVK_VK_TO_CHAR) == ';');
+    /* The US layout, loaded by its KLID, is the thread's; ToUnicode
+     * translates with the given key state. */
+    HKL us = LoadKeyboardLayoutW(L"00000409", 0);
+    CHECK(us != NULL && us == GetKeyboardLayout(0));
+    BYTE kbstate[256] = { 0 };
+    WCHAR typed[4] = { 0 };
+    CHECK(ToUnicode('A', 0x1e, kbstate, typed, 4, 0) == 1 && typed[0] == L'a');
+    CHECK(ToUnicode(VK_SPACE, 0x39, kbstate, typed, 4, 0) == 1 && typed[0] == L' ');
+    CHECK(ToUnicode(VK_RETURN, 0x1c, kbstate, typed, 4, 0) == 1 && typed[0] == L'\r');
+    CHECK(ToUnicode(VK_LEFT, 0x4b, kbstate, typed, 4, 0) == 0);
+    kbstate[VK_SHIFT] = 0x80;
+    CHECK(ToUnicode('A', 0x1e, kbstate, typed, 4, 0) == 1 && typed[0] == L'A');
+    CHECK(ToUnicode('1', 0x02, kbstate, typed, 4, 0) == 1 && typed[0] == L'!');
+    CHECK(ToUnicodeEx(VK_OEM_1, 0x27, kbstate, typed, 4, 0, us) == 1 && typed[0] == L':');
+    kbstate[VK_SHIFT] = 0;
+    kbstate[VK_CONTROL] = 0x80;
+    CHECK(ToUnicode('C', 0x2e, kbstate, typed, 4, 0) == 1 && typed[0] == 3);
     CHECK(!IsAppThemed() && !IsThemeActive());
     HWND tw = CreateWindowExW(0, L"User32TestHooks", L"themes", WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, NULL, NULL,
                               GetModuleHandleW(NULL), NULL);

@@ -1,11 +1,21 @@
-// filezilla_flaui: FileZilla 3.69.3 (wxWidgets 3.2) driven through UI
+// filezilla_flaui: FileZilla 3.71.0 (wxWidgets 3.2) driven through UI
 // Automation with FlaUI (FlaUI.Core and FlaUI.UIA3 5.0.0, MIT), as a
-// tester drives it on Windows: no pixels, no coordinates. FileZilla
-// Server 1.12.6 already runs (the scenario starts it: FTP on port 7, user
-// `gala`, its home C:\ftp holding hello.txt). The test
+// tester drives it on Windows: no pixels, no coordinates. Two servers,
+// by the first argument:
+//
+// - none (or a path): FTP over TLS. FileZilla Server 1.12.6 already runs
+//   (the scenario starts it: FTP on port 7, user `gala`, its home C:\ftp
+//   holding hello.txt);
+// - `sftp`: SFTP through FileZilla's own SSH engine (libfzssh). Win32-
+//   OpenSSH's sshd already runs as a service (port 22, password logons,
+//   the sftp subsystem); FileZilla logs on as `galatest` (password
+//   Gala-Test-1) and opens C:\ftp (sftp://127.0.0.1/C:/ftp; it holds
+//   hello.txt).
+//
+// The test
 //
 // 1. starts FileZilla (C:\filezilla\filezilla.exe, or the path given as
-//    the first argument) with Application.Launch and finds its main
+//    the last argument) with Application.Launch and finds its main
 //    window (GetMainWindow: the process's unowned visible window);
 // 2. closes the Welcome dialog: a Window owned by the main window (UIA
 //    puts owned windows under their owner), its "OK" button invoked;
@@ -14,8 +24,8 @@
 //    "Host:", "Username:", "Password:", "Port:"; matched as substrings),
 //    through the Value pattern, and invokes the Quickconnect button;
 // 4. answers the dialogs the first connection brings (whether to
-//    remember passwords; the server's unknown, self-signed certificate)
-//    with their OK buttons, as they come, until the remote file list (a
+//    remember passwords; the server's unknown, self-signed certificate,
+//    or over SFTP its unknown host key) with their OK buttons, as they come, until the remote file list (a
 //    virtual list view: wx answers LVN_GETDISPINFO) has an item
 //    "hello.txt";
 // 5. reads the local file list (the list view left of the remote one);
@@ -32,7 +42,9 @@
 // event), and the dialogs opening (Window_WindowOpened under the main
 // window, which owns them).
 //
-// Expected output (Windows 11 24H2 and gala; FileZilla's own texts):
+// Expected output (Windows 11 24H2 and gala; FileZilla's own texts),
+// over FTP (over SFTP: quickconnect=sftp://127.0.0.1/C:/ftp galatest 22,
+// dialog=Unknown host key OK and opened=...,Unknown host key):
 //
 //   window=FileZilla
 //   welcome=Welcome to FileZilla OK
@@ -81,7 +93,9 @@ static class FileZillaFlaUI
     {
         try
         {
-            return Run(args.Length > 0 ? args[0] : @"C:\filezilla\filezilla.exe");
+            var sftp = args.Length > 0 && args[0] == "sftp";
+            var rest = args.Skip(sftp ? 1 : 0).ToArray();
+            return Run(rest.Length > 0 ? rest[0] : @"C:\filezilla\filezilla.exe", sftp);
         }
         catch (Exception e)
         {
@@ -167,8 +181,10 @@ static class FileZillaFlaUI
         return string.Join(",", list.Items.Take(max).Select(i => i.Text));
     }
 
-    static int Run(string path)
+    static int Run(string path, bool sftp)
     {
+        // The second dialog of a first connection: the server's identity.
+        var identity = sftp ? "Unknown host key" : "Unknown certificate";
         var app = Application.Launch(path);
         try
         {
@@ -208,10 +224,10 @@ static class FileZillaFlaUI
                 }
                 if (!password.Properties.IsPassword.Value)
                     return Fail(6, "password field not a password");
-                host.Text = "127.0.0.1";
-                user.Text = "gala";
-                password.Text = "gala";
-                port.Text = "7";
+                host.Text = sftp ? "sftp://127.0.0.1/C:/ftp" : "127.0.0.1";
+                user.Text = sftp ? "galatest" : "gala";
+                password.Text = sftp ? "Gala-Test-1" : "gala";
+                port.Text = sftp ? "22" : "7";
                 Console.WriteLine("quickconnect=" + host.Text + " " + user.Text + " " + port.Text);
                 var connect = window.FindFirstDescendant(cf =>
                     cf.ByControlType(ControlType.Button).And(cf.ByName("Quickconnect")));
@@ -317,7 +333,7 @@ static class FileZillaFlaUI
                 var titled = seen.Any(e => e.StartsWith("title=") && e.Contains("127.0.0.1"));
                 var dialogsOpened = string.Join(",", seen.Where(e => e.StartsWith("opened=")).Select(e => e.Substring(7)));
                 Console.WriteLine("events=" + (titled ? "title" : "-") + " opened=" + dialogsOpened);
-                if (!titled || !dialogsOpened.Contains("Remember passwords?") || !dialogsOpened.Contains("Unknown certificate"))
+                if (!titled || !dialogsOpened.Contains("Remember passwords?") || !dialogsOpened.Contains(identity))
                     return Fail(20, "events: " + string.Join(";", seen));
                 titles.Dispose();
                 opened.Dispose();

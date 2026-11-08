@@ -7,7 +7,11 @@
 use super::*;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenEvent(handle: *mut Handle, access: u32, attributes: *const ObjectAttributes) -> u32;
     fn NtClearEvent(h: Handle) -> u32;
@@ -42,8 +46,8 @@ pub(crate) fn ansi_to_wide(s: *const u8, out: &mut [u16]) -> Option<usize> {
 
 /// PEB.SessionId: the caller's session.
 pub(crate) fn session_id() -> u32 {
-    // SAFETY: gs:[0x60] is the PEB; SessionId is at +0x2c0.
-    unsafe { *((teb_u64(0x60) as usize + 0x2c0) as *const u32) }
+    // SAFETY: the TEB's PEB; its SessionId.
+    unsafe { *((teb_read(TEB_PEB) + PEB_SESSION_ID) as *const u32) }
 }
 
 /// Writes `<the session's BaseNamedObjects>\<name>` (UTF-16, `name`
@@ -87,7 +91,7 @@ pub(crate) fn session_path(name: *const u16, path: &mut [u16]) -> Option<usize> 
 /// bInheritHandle) ask for an inheritable handle.
 pub(crate) fn inheritable(attributes: *mut c_void) -> bool {
     // SAFETY: the caller's SECURITY_ATTRIBUTES (or NULL).
-    !attributes.is_null() && unsafe { *attributes.cast::<u8>().add(16).cast::<i32>() } != 0
+    !attributes.is_null() && unsafe { (*attributes.cast::<SecurityAttributes>()).inherit } != 0
 }
 
 const OBJ_INHERIT: u32 = 0x2;
@@ -297,14 +301,19 @@ pub extern "system" fn ReleaseMutex(h: Handle) -> Bool {
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
-/// RTL_CRITICAL_SECTION (x64, 40 bytes): ntdll's (RtlEnterCriticalSection
+/// RTL_CRITICAL_SECTION (40 bytes on x64; on x86 24, smaller than this:
+/// only a pointer to it is passed): ntdll's (RtlEnterCriticalSection
 /// and friends), so sections work whichever DLL a program calls.
 #[repr(C)]
 pub struct CriticalSection {
     words: [usize; 5],
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn RtlInitializeCriticalSection(cs: *mut CriticalSection) -> u32;
     fn RtlDeleteCriticalSection(cs: *mut CriticalSection) -> u32;
@@ -354,7 +363,11 @@ pub extern "system" fn LeaveCriticalSection(cs: *mut CriticalSection) {
 
 // --- Semaphores ----------------------------------------------------------
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtCreateSemaphore(
         handle: *mut Handle,
@@ -441,20 +454,37 @@ pub extern "system" fn InitializeCriticalSectionEx(
 
 // --- Waiting without a kernel object -------------------------------------
 //
-// SRW locks, condition variables and InitOnce have no kernel object: gala
-// waits by spinning, then yielding, then sleeping a millisecond at a time.
-// TODO: a kernel address wait (as WaitOnAddress) so that long waits sleep.
+// SRW locks, condition variables and InitOnce are one pointer-sized word
+// with no kernel object. A waiter spins briefly, then sleeps on the word
+// on its address (`address_wait`, kernel32's own copy of kernelbase's
+// WaitOnAddress: a keyed event) until it changes; whoever changes it in a
+// way a waiter waits for wakes them (a wake costs no system call when
+// nobody waits).
 
-/// One step of a wait; `spins` counts the steps so far.
-fn backoff(spins: &mut u32) {
-    *spins = spins.saturating_add(1);
-    if *spins < 64 {
+/// Spins a few rounds while the word may change soon.
+const SPINS: u32 = 64;
+
+/// One step of waiting while `*word == seen`: a spin for the first SPINS
+/// steps, then a sleep until the word is woken (or `ms` milliseconds);
+/// false if that sleep timed out.
+fn wait_step(word: *mut usize, seen: usize, spins: &mut u32, ms: u32) -> bool {
+    if *spins < SPINS {
+        *spins += 1;
         core::hint::spin_loop();
-    } else if *spins < 256 {
-        SwitchToThread();
-    } else {
-        Sleep(1);
+        return true;
     }
+    let compare = seen;
+    super::address_wait::wait(
+        word.cast_const().cast(),
+        (&raw const compare).cast(),
+        core::mem::size_of::<usize>(),
+        ms,
+    )
+    .is_ok()
+}
+
+fn wake_all(word: *mut usize) {
+    super::address_wait::wake(word.cast_const().cast(), true);
 }
 
 // --- Slim reader/writer locks --------------------------------------------
@@ -462,7 +492,7 @@ fn backoff(spins: &mut u32) {
 // SRWLOCK is one pointer: 0 when free, EXCLUSIVE when held exclusively,
 // otherwise the number of shared holders.
 
-const EXCLUSIVE: usize = 1 << 63;
+const EXCLUSIVE: usize = 1 << (usize::BITS - 1);
 
 fn srw(lock: *mut usize) -> &'static AtomicUsize {
     // SAFETY: the caller's pointer-sized, aligned SRWLOCK.
@@ -483,13 +513,17 @@ pub extern "system" fn TryAcquireSRWLockExclusive(lock: *mut usize) -> u8 {
 pub extern "system" fn AcquireSRWLockExclusive(lock: *mut usize) {
     let mut spins = 0;
     while TryAcquireSRWLockExclusive(lock) == 0 {
-        backoff(&mut spins);
+        let held = srw(lock).load(Ordering::Relaxed);
+        if held != 0 {
+            wait_step(lock, held, &mut spins, INFINITE);
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn ReleaseSRWLockExclusive(lock: *mut usize) {
     srw(lock).store(0, Ordering::Release);
+    wake_all(lock);
 }
 
 #[unsafe(no_mangle)]
@@ -511,20 +545,27 @@ pub extern "system" fn TryAcquireSRWLockShared(lock: *mut usize) -> u8 {
 pub extern "system" fn AcquireSRWLockShared(lock: *mut usize) {
     let mut spins = 0;
     while TryAcquireSRWLockShared(lock) == 0 {
-        backoff(&mut spins);
+        let held = srw(lock).load(Ordering::Relaxed);
+        if held & EXCLUSIVE != 0 {
+            wait_step(lock, held, &mut spins, INFINITE);
+        }
     }
 }
 
+/// The last shared holder wakes the waiters (exclusive ones wait for 0).
 #[unsafe(no_mangle)]
 pub extern "system" fn ReleaseSRWLockShared(lock: *mut usize) {
-    srw(lock).fetch_sub(1, Ordering::Release);
+    if srw(lock).fetch_sub(1, Ordering::Release) == 1 {
+        wake_all(lock);
+    }
 }
 
 // --- Condition variables -------------------------------------------------
 //
 // CONDITION_VARIABLE is one pointer, here a wake counter: a sleeper waits
-// for it to change. Every wake ends every current wait, which the API
-// allows (waits may end spuriously; callers re-check their condition).
+// for it to change. WakeConditionVariable wakes one sleeping waiter; one
+// that has not gone to sleep yet sees the counter moved and returns too
+// (waits may end spuriously; callers re-check their condition).
 
 const ERROR_TIMEOUT: u32 = 1460;
 const CONDITION_VARIABLE_LOCKMODE_SHARED: u32 = 1;
@@ -537,11 +578,13 @@ pub extern "system" fn InitializeConditionVariable(cv: *mut usize) {
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeConditionVariable(cv: *mut usize) {
     srw(cv).fetch_add(1, Ordering::AcqRel);
+    super::address_wait::wake(cv.cast_const().cast(), false);
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeAllConditionVariable(cv: *mut usize) {
     srw(cv).fetch_add(1, Ordering::AcqRel);
+    wake_all(cv);
 }
 
 /// Waits until `cv` moves past `seen` or `ms` pass; whether it was woken.
@@ -552,10 +595,17 @@ fn wait_wake(cv: *mut usize, seen: usize, ms: u32) -> bool {
         if srw(cv).load(Ordering::Acquire) != seen {
             return true;
         }
-        if ms != INFINITE && GetTickCount64() - start >= u64::from(ms) {
+        let left = if ms == INFINITE {
+            INFINITE
+        } else {
+            match u64::from(ms).checked_sub(GetTickCount64() - start) {
+                Some(left) if left > 0 => left as u32,
+                _ => return false,
+            }
+        };
+        if !wait_step(cv, seen, &mut spins, left) {
             return false;
         }
-        backoff(&mut spins);
     }
 }
 
@@ -646,82 +696,55 @@ pub extern "system" fn InitOnceExecuteOnce(
         if v == 0
             && state.compare_exchange(0, ONCE_RUNNING, Ordering::Acquire, Ordering::Relaxed).is_ok()
         {
-            let mut ctx: *mut c_void = core::ptr::null_mut();
-            if f(once, param, &mut ctx) == 0 {
+            // The callback gets the caller's Context as it is, NULL
+            // included (as on Windows, where a callback that writes
+            // through a NULL Context faults); what it left there is the
+            // data kept with the once.
+            if f(once, param, context) == 0 {
                 state.store(0, Ordering::Release);
+                wake_all(once);
                 return FALSE;
             }
-            state.store((ctx as usize & !3) | ONCE_DONE, Ordering::Release);
+            let ctx = if context.is_null() {
+                0
+            } else {
+                // SAFETY: the caller's output pointer, set by the callback.
+                unsafe { *context as usize & !3 }
+            };
+            state.store(ctx | ONCE_DONE, Ordering::Release);
+            wake_all(once);
             if !context.is_null() {
                 // SAFETY: as above.
-                unsafe { *context = (ctx as usize & !3) as *mut c_void };
+                unsafe { *context = ctx as *mut c_void };
             }
             return TRUE;
         }
-        backoff(&mut spins);
+        if v == ONCE_RUNNING {
+            wait_step(once, v, &mut spins, INFINITE);
+        }
     }
 }
 
 // --- Interlocked singly linked lists -------------------------------------
 //
-// SLIST_HEADER (x64, 16 bytes): the first entry in the high quadword (bits
-// 4..63, bit 0 = HeaderType 1), depth (16 bits) and a sequence number (48
-// bits) in the low one; both change together with cmpxchg16b, so a pop
-// cannot be fooled by an entry popped and pushed again meanwhile.
+// SLIST_HEADER is the architecture's (`x64.rs`, `x86.rs`): the first
+// entry, the depth and a sequence number, changed together by one
+// compare-exchange so a pop cannot be fooled by an entry popped and pushed
+// again meanwhile.
 
-#[repr(C, align(16))]
-pub struct SListHeader {
-    low: u64,
-    high: u64,
-}
-
-#[repr(C)]
-pub struct SListEntry {
-    next: *mut SListEntry,
-}
-
-/// Compares the header with `old` and, if equal, stores `new`; returns
-/// the value seen.
-fn cas16(head: *mut SListHeader, old: (u64, u64), new: (u64, u64)) -> (u64, u64) {
-    let (mut low, mut high) = old;
-    // SAFETY: a 16-byte aligned SLIST_HEADER; cmpxchg16b compares rdx:rax
-    // with it and stores rcx:rbx if equal, else loads it into rdx:rax.
-    // rbx is reserved by LLVM, so it is swapped in and out around the
-    // instruction.
-    unsafe {
-        core::arch::asm!(
-            "xchg rbx, {new_low}",
-            "lock cmpxchg16b [{head}]",
-            "mov rbx, {new_low}",
-            head = in(reg) head,
-            new_low = inout(reg) new.0 => _,
-            in("rcx") new.1,
-            inout("rax") low,
-            inout("rdx") high,
-        );
-    }
-    (low, high)
-}
-
-fn read_header(head: *mut SListHeader) -> (u64, u64) {
-    // A cmpxchg16b that fails (or rewrites the same value) reads the
-    // header atomically.
-    cas16(head, (0, 0), (0, 0))
-}
-
-fn first(high: u64) -> *mut SListEntry {
-    (high & !0xf) as *mut SListEntry
-}
+use super::arch::{
+    SListEntry, SListHeader, slist_cas, slist_depth, slist_first, slist_init, slist_read,
+    slist_value,
+};
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InitializeSListHead(head: *mut SListHeader) {
-    // SAFETY: the caller's aligned header.
-    unsafe { head.write(SListHeader { low: 0, high: 1 }) };
+    slist_init(head);
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn QueryDepthSList(head: *mut SListHeader) -> u16 {
-    read_header(head).0 as u16
+    slist_depth(slist_read(head))
 }
 
 #[unsafe(no_mangle)]
@@ -729,16 +752,14 @@ pub extern "system" fn InterlockedPushEntrySList(
     head: *mut SListHeader,
     entry: *mut SListEntry,
 ) -> *mut SListEntry {
-    let mut old = read_header(head);
+    let mut old = slist_read(head);
     loop {
         // SAFETY: the caller's aligned entry, not on any list.
-        unsafe { (*entry).next = first(old.1) };
-        let depth = (old.0 as u16).wrapping_add(1);
-        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
-        let new = (u64::from(depth) | sequence << 16, entry as u64 | 1);
-        let seen = cas16(head, old, new);
+        unsafe { (*entry).next = slist_first(old) };
+        let new = slist_value(old, entry, slist_depth(old).wrapping_add(1));
+        let seen = slist_cas(head, old, new);
         if seen == old {
-            return first(old.1);
+            return slist_first(old);
         }
         old = seen;
     }
@@ -746,19 +767,17 @@ pub extern "system" fn InterlockedPushEntrySList(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InterlockedPopEntrySList(head: *mut SListHeader) -> *mut SListEntry {
-    let mut old = read_header(head);
+    let mut old = slist_read(head);
     loop {
-        let top = first(old.1);
+        let top = slist_first(old);
         if top.is_null() {
             return top;
         }
         // SAFETY: entries stay valid while on the list (the caller's
         // contract); a stale read is caught by the sequence number.
         let next = unsafe { (*top).next };
-        let depth = (old.0 as u16).wrapping_sub(1);
-        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
-        let new = (u64::from(depth) | sequence << 16, next as u64 | 1);
-        let seen = cas16(head, old, new);
+        let new = slist_value(old, next, slist_depth(old).wrapping_sub(1));
+        let seen = slist_cas(head, old, new);
         if seen == old {
             return top;
         }
@@ -768,15 +787,14 @@ pub extern "system" fn InterlockedPopEntrySList(head: *mut SListHeader) -> *mut 
 
 #[unsafe(no_mangle)]
 pub extern "system" fn InterlockedFlushSList(head: *mut SListHeader) -> *mut SListEntry {
-    let mut old = read_header(head);
+    let mut old = slist_read(head);
     loop {
-        if first(old.1).is_null() {
+        if slist_first(old).is_null() {
             return core::ptr::null_mut();
         }
-        let sequence = (old.0 >> 16).wrapping_add(1) & 0xffff_ffff_ffff;
-        let seen = cas16(head, old, (sequence << 16, 1));
+        let seen = slist_cas(head, old, slist_value(old, core::ptr::null_mut(), 0));
         if seen == old {
-            return first(old.1);
+            return slist_first(old);
         }
         old = seen;
     }
@@ -827,7 +845,9 @@ pub extern "system" fn InitOnceBeginInitialize(
             unsafe { *pending = TRUE };
             return TRUE;
         }
-        backoff(&mut spins);
+        if v == ONCE_RUNNING {
+            wait_step(once, v, &mut spins, INFINITE);
+        }
     }
 }
 
@@ -854,5 +874,6 @@ pub extern "system" fn InitOnceComplete(
     } else {
         state.store(context as usize | ONCE_DONE, Ordering::Release);
     }
+    wake_all(once);
     TRUE
 }

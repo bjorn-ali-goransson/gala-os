@@ -5,8 +5,8 @@
 //! caches come from CPUID leaf 4 (deterministic cache parameters).
 
 use super::{
-    Bool, FALSE, Handle, NtQueryInformationThread, NtSetInformationThread, STATUS_SUCCESS, TRUE,
-    basic_information, fail, fail_with, u64_at,
+    Bool, FALSE, Handle, NtSetInformationThread, STATUS_SUCCESS, TRUE, basic_information, fail,
+    fail_with, thread_basic,
 };
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -14,7 +14,7 @@ const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 /// The processors (active processor mask).
 fn processor_mask() -> u64 {
-    u64_at(&basic_information(), 48)
+    basic_information().processor_mask as u64
 }
 
 #[repr(C)]
@@ -74,21 +74,15 @@ pub extern "system" fn GetProcessGroupAffinity(
 
 /// The thread's affinity mask (THREAD_BASIC_INFORMATION.AffinityMask).
 fn thread_affinity(thread: Handle) -> Result<u64, u32> {
-    let mut basic = [0u8; 48];
-    let mut ret = 0;
-    // SAFETY: a 48-byte buffer.
-    let status = unsafe { NtQueryInformationThread(thread, 0, basic.as_mut_ptr(), 48, &mut ret) };
-    if status != STATUS_SUCCESS {
-        return Err(status);
-    }
-    Ok(u64_at(&basic, 32))
+    Ok(thread_basic(thread)?.affinity as u64)
 }
 
-/// ThreadAffinityMask (4); the kernel checks it against the process's.
+/// ThreadAffinityMask (4, a KAFFINITY); the kernel checks it against the
+/// process's.
 fn set_thread_affinity(thread: Handle, mask: u64) -> u32 {
-    let v = mask.to_le_bytes();
-    // SAFETY: an 8-byte buffer.
-    unsafe { NtSetInformationThread(thread, 4, v.as_ptr(), 8) }
+    let v = mask as usize;
+    // SAFETY: a KAFFINITY buffer.
+    unsafe { NtSetInformationThread(thread, 4, (&raw const v).cast(), size_of::<usize>() as u32) }
 }
 
 #[unsafe(no_mangle)]
@@ -208,13 +202,13 @@ struct Cache {
 
 /// The caches CPUID leaf 4 describes (up to 8).
 fn caches(out: &mut [Cache; 8], processors: u32) -> usize {
-    let max = core::arch::x86_64::__cpuid(0).eax;
+    let max = super::arch::cpuid(0).eax;
     if max < 4 {
         return 0;
     }
     let mut n = 0;
     for sub in 0..8 {
-        let r = core::arch::x86_64::__cpuid_count(4, sub); // leaf 4 exists (checked)
+        let r = super::arch::cpuid_count(4, sub); // leaf 4 exists (checked)
         let kind = match r.eax & 0x1f {
             0 => break,
             1 => 2, // data
@@ -248,21 +242,24 @@ fn put(out: &mut [u8], at: usize, bytes: &[u8]) -> usize {
 }
 
 /// GetLogicalProcessorInformation: SYSTEM_LOGICAL_PROCESSOR_INFORMATION
-/// entries (32 bytes: ProcessorMask, Relationship, a 16-byte union): a
-/// core per processor, the NUMA node, the caches and the package.
+/// entries (ProcessorMask, a KAFFINITY; Relationship; a 16-byte union,
+/// 8-aligned: 32 bytes on x64, 24 on x86): a core per processor, the NUMA
+/// node, the caches and the package.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u32) -> Bool {
     let all = processor_mask();
     let count = all.count_ones();
     let mut list = [Cache { level: 0, ways: 0, line: 0, size: 0, kind: 0, shared: false }; 8];
     let ncaches = caches(&mut list, count);
-    let mut entries = [[0u8; 32]; 64 + 2 + 8 * 64];
+    const P: usize = size_of::<usize>();
+    const ENTRY: usize = 2 * P + 16;
+    let mut entries = [[0u8; ENTRY]; 64 + 2 + 8 * 64];
     let mut n = 0;
     let mut entry = |mask: u64, relation: u32, data: &[u8]| {
         let e = &mut entries[n];
-        e[..8].copy_from_slice(&mask.to_le_bytes());
-        e[8..12].copy_from_slice(&relation.to_le_bytes());
-        e[16..16 + data.len()].copy_from_slice(data);
+        e[..P].copy_from_slice(&(mask as usize).to_le_bytes());
+        e[P..P + 4].copy_from_slice(&relation.to_le_bytes());
+        e[2 * P..2 * P + data.len()].copy_from_slice(data);
         n += 1;
     };
     for cpu in (0..64).filter(|c| all & (1 << c) != 0) {
@@ -286,7 +283,7 @@ pub extern "system" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u3
         }
     }
     entry(all, 3, &[0]); // RelationProcessorPackage
-    let need = (n * 32) as u32;
+    let need = (n * ENTRY) as u32;
     // SAFETY: the caller's length and buffer of that many bytes.
     unsafe {
         if len.is_null() {
@@ -299,7 +296,7 @@ pub extern "system" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u3
         *len = need;
         let out = core::slice::from_raw_parts_mut(buf, need as usize);
         for (i, e) in entries[..n].iter().enumerate() {
-            out[32 * i..32 * i + 32].copy_from_slice(e);
+            out[ENTRY * i..ENTRY * i + ENTRY].copy_from_slice(e);
         }
     }
     TRUE
@@ -309,12 +306,14 @@ pub extern "system" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u3
 /// the relation-specific `head` and a GROUP_AFFINITY of `mask` at the end
 /// (or, for groups, `head` alone).
 fn put_ex(out: &mut [u8], at: usize, relation: u32, head: &[u8], mask: Option<u64>) -> usize {
-    let size = 8 + head.len() + if mask.is_some() { 16 } else { 0 };
+    // GROUP_AFFINITY: Mask (a KAFFINITY), Group, Reserved[3].
+    const GROUP_AFFINITY: usize = size_of::<GroupAffinity>();
+    let size = 8 + head.len() + if mask.is_some() { GROUP_AFFINITY } else { 0 };
     let mut at2 = put(out, at, &relation.to_le_bytes());
     at2 = put(out, at2, &(size as u32).to_le_bytes());
     at2 = put(out, at2, head);
     if let Some(mask) = mask {
-        at2 = put(out, at2, &mask.to_le_bytes());
+        at2 = put(out, at2, &(mask as usize).to_le_bytes());
         at2 = put(out, at2, &[0; 8]); // Group 0, Reserved
     }
     at2
@@ -388,13 +387,14 @@ pub extern "system" fn GetLogicalProcessorInformationEx(
     if wants(4) {
         // GROUP_RELATIONSHIP: MaximumGroupCount, ActiveGroupCount,
         // Reserved[20], then PROCESSOR_GROUP_INFO (MaximumProcessorCount,
-        // ActiveProcessorCount, Reserved[38], ActiveProcessorMask).
-        let mut g = [0u8; 72];
+        // ActiveProcessorCount, Reserved[38], ActiveProcessorMask, a
+        // KAFFINITY).
+        let mut g = [0u8; 64 + size_of::<usize>()];
         g[0] = 1;
         g[2] = 1;
         g[24] = count as u8;
         g[25] = count as u8;
-        g[64..72].copy_from_slice(&all.to_le_bytes());
+        g[64..].copy_from_slice(&(all as usize).to_le_bytes());
         at = put_ex(out, at, 4, &g, None);
     }
     // SAFETY: the caller's length.

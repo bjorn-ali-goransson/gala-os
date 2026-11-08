@@ -51,6 +51,7 @@ pub mod exec;
 pub mod file;
 pub mod fork;
 pub mod futex;
+pub mod machine;
 pub mod mm;
 pub mod poll;
 pub mod sigcalls;
@@ -58,6 +59,12 @@ pub mod signal;
 pub mod socket;
 pub mod stack;
 pub mod state;
+/// The system call table (x86_64's; aarch64 has a stub with the same
+/// names, none of which any call has).
+#[cfg(target_arch = "x86_64")]
+pub mod syscalls;
+#[cfg(target_arch = "aarch64")]
+#[path = "syscalls_aarch64.rs"]
 pub mod syscalls;
 pub mod threads;
 pub mod time;

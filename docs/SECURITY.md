@@ -60,7 +60,8 @@ A `Token` kernel object type, as documented in "Access Tokens": user
 SID; groups (SID and attributes: mandatory, enabled, owner, logon id,
 deny-only, integrity); privileges (LUID and attributes); owner and
 primary group; default DACL; integrity level (the mandatory label
-group); logon session (AuthenticationId LUID); type (primary,
+group, which TokenIntegrityLevel reports with SE_GROUP_INTEGRITY |
+SE_GROUP_INTEGRITY_ENABLED); logon session (AuthenticationId LUID); type (primary,
 impersonation) and impersonation level; token and modified ids;
 restricting SIDs (CreateRestrictedToken); source; elevation type.
 
@@ -113,7 +114,8 @@ and on disk with `persist`), registry keys, processes, threads, tokens.
 - At creation the descriptor is the caller's (SECURITY_ATTRIBUTES),
   completed by the documented inheritance rules: the parent's
   inheritable ACEs (OI/CI/NP/IO, CREATOR OWNER/GROUP replaced, the
-  auto-inheritance flags), else the creator token's default DACL; owner
+  auto-inheritance flags: INHERITED_ACE only under an auto-inherited
+  parent DACL), else the creator token's default DACL; owner
   and group from the token.
 - NtQuerySecurityObject and NtSetSecurityObject (0x7f1f, 0x7f20) read
   and change them (READ_CONTROL, WRITE_DAC, WRITE_OWNER,

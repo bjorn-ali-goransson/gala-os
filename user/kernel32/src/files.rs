@@ -19,7 +19,11 @@ pub extern "system" fn GetFileSize(h: Handle, high: *mut u32) -> u32 {
     size as u32
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtDeviceIoControlFile(
         h: Handle,
@@ -80,13 +84,10 @@ unsafe extern "system" {
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 1;
 const LOCKFILE_EXCLUSIVE_LOCK: u32 = 2;
 
-/// The byte offset in an OVERLAPPED (Offset at 16, OffsetHigh at 20).
+/// The byte offset in an OVERLAPPED.
 fn overlapped_offset(overlapped: *const c_void) -> u64 {
     // SAFETY: the caller's OVERLAPPED.
-    unsafe {
-        let p = overlapped.cast::<u32>();
-        u64::from(*p.add(4)) | u64::from(*p.add(5)) << 32
-    }
+    unsafe { (*overlapped.cast::<Overlapped>()).position() }
 }
 
 /// LockFileEx: a byte-range lock at the OVERLAPPED's offset, shared or
@@ -105,10 +106,10 @@ pub extern "system" fn LockFileEx(
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
     let (offset, length) = (overlapped_offset(overlapped), u64::from(low) | u64::from(high) << 32);
-    // SAFETY: hEvent at 24 in the caller's OVERLAPPED, which is also the
+    // SAFETY: the caller's OVERLAPPED (its hEvent), which is also the
     // IO_STATUS_BLOCK.
     let status = unsafe {
-        let event = *overlapped.cast::<u8>().add(24).cast::<Handle>();
+        let event = (*overlapped.cast::<Overlapped>()).event as Handle;
         NtLockFile(
             h,
             event,
@@ -300,12 +301,12 @@ pub extern "system" fn ReadDirectoryChangesW(
         }
         return TRUE;
     }
-    let ov = overlapped.cast::<usize>();
+    let ov = overlapped.cast::<Overlapped>();
     // SAFETY: the caller's OVERLAPPED, valid until the request completes.
     let event = unsafe {
-        *ov = STATUS_PENDING as usize;
-        *ov.add(1) = 0;
-        *ov.add(3)
+        (*ov).internal = STATUS_PENDING as usize;
+        (*ov).internal_high = 0;
+        (*ov).event
     };
     let (apc, context) = if routine != 0 {
         (io_completion_trampoline as *const () as usize, routine)
@@ -559,16 +560,25 @@ pub extern "system" fn SearchPathW(
         wide_slice(path)
     } else {
         // The default order: the program's directory, the system
-        // directories, the current directory, then PATH.
+        // directories, the current directory, then PATH (safe search
+        // mode, Windows' default); without safe search mode
+        // (SetSearchPathMode) the current directory comes before the
+        // system directories.
         let mut n =
             super::process::GetModuleFileNameW(core::ptr::null_mut(), list.as_mut_ptr(), 520)
                 as usize;
         n = list[..n.min(520)].iter().rposition(|&c| is_sep(c)).unwrap_or(0);
-        for s in [
+        let (system, windows, current) = (
             &ascii16::<19>(b"C:\\Windows\\System32")[..],
-            &ascii16::<10>(b"C:\\Windows"),
-            &[u16::from(b'.')],
-        ] {
+            &ascii16::<10>(b"C:\\Windows")[..],
+            &[u16::from(b'.')][..],
+        );
+        let order = if safe_search_mode() {
+            [system, windows, current]
+        } else {
+            [current, system, windows]
+        };
+        for s in order {
             list[n] = u16::from(b';');
             list[n + 1..n + 1 + s.len()].copy_from_slice(s);
             n += 1 + s.len();
@@ -589,6 +599,43 @@ pub extern "system" fn SearchPathW(
         }
     }
     fail_with(ERROR_FILE_NOT_FOUND_, 0)
+}
+
+/// SetSearchPathMode's state: 0 not set (Windows' default, safe search
+/// mode), else SEARCH_SAFE or SEARCH_UNSAFE, with SEARCH_PERMANENT.
+static SEARCH_MODE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+const SEARCH_SAFE: u32 = 1;
+const SEARCH_UNSAFE: u32 = 2;
+const SEARCH_PERMANENT: u32 = 4;
+const ERROR_ACCESS_DENIED: u32 = 5;
+
+fn safe_search_mode() -> bool {
+    SEARCH_MODE.load(core::sync::atomic::Ordering::Acquire) & SEARCH_UNSAFE == 0
+}
+
+/// SetSearchPathMode: the process's search mode for SearchPath
+/// (BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE 1, DISABLE 0x10000, PERMANENT
+/// 0x8000 with ENABLE only): exactly one of enable and disable, else
+/// ERROR_INVALID_PARAMETER; once made permanent, a change is
+/// ERROR_ACCESS_DENIED.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetSearchPathMode(flags: u32) -> Bool {
+    use core::sync::atomic::Ordering;
+    const ENABLE: u32 = 0x1;
+    const DISABLE: u32 = 0x1_0000;
+    const PERMANENT: u32 = 0x8000;
+    let valid = matches!(flags, ENABLE | DISABLE) || flags == ENABLE | PERMANENT;
+    if !valid {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let want = if flags & ENABLE != 0 { SEARCH_SAFE } else { SEARCH_UNSAFE };
+    let permanent = if flags & PERMANENT != 0 { SEARCH_PERMANENT } else { 0 };
+    let old = SEARCH_MODE.load(Ordering::Acquire);
+    if old & SEARCH_PERMANENT != 0 && want != SEARCH_SAFE {
+        return fail_with(ERROR_ACCESS_DENIED, FALSE);
+    }
+    SEARCH_MODE.store(want | permanent | (old & SEARCH_PERMANENT), Ordering::Release);
+    TRUE
 }
 
 /// ASCII `s` as UTF-16.
@@ -642,26 +689,39 @@ pub extern "system" fn GetOverlappedResult(
 ) -> Bool {
     const ERROR_IO_INCOMPLETE: u32 = 996;
     // SAFETY: the caller's OVERLAPPED (Internal, InternalHigh, offsets,
-    // hEvent at index 3).
+    // hEvent).
     unsafe {
         let status = || core::ptr::read_volatile(overlapped) as u32;
         if status() == STATUS_PENDING {
             if wait == FALSE {
                 return fail_with(ERROR_IO_INCOMPLETE, FALSE);
             }
-            let event = *overlapped.add(3) as Handle;
-            let on = if event.is_null() { file } else { event };
-            while status() == STATUS_PENDING {
-                if NtWaitForSingleObject(on, 0, core::ptr::null()) != 0 {
-                    break;
+            let event = (*overlapped.cast::<Overlapped>()).event as Handle;
+            if event.is_null() {
+                // The file handle is signaled by any of its I/Os ending:
+                // wait until this one has.
+                while status() == STATUS_PENDING {
+                    if NtWaitForSingleObject(file, 0, core::ptr::null()) != 0 {
+                        break;
+                    }
                 }
+            } else {
+                // The caller's event: one wait. A caller may set it
+                // itself, for a request that failed in its call and so
+                // never wrote the OVERLAPPED (asyncio after
+                // ConnectNamedPipe's ERROR_PIPE_CONNECTED); the status
+                // still reads pending then, which is not an error.
+                NtWaitForSingleObject(event, 0, core::ptr::null());
             }
         }
         if !bytes.is_null() {
             *bytes = *overlapped.add(1) as u32;
         }
+        // NT_SUCCESS: success, and a pending status the caller's own event
+        // ended the wait for; warnings (STATUS_BUFFER_OVERFLOW: part of a
+        // message, ERROR_MORE_DATA) and errors fail.
         match status() {
-            STATUS_SUCCESS => TRUE,
+            s if s < 0x8000_0000 => TRUE,
             s => fail(s, FALSE),
         }
     }
@@ -688,9 +748,9 @@ pub extern "system" fn AreFileApisANSI() -> Bool {
 }
 
 /// The Windows directory, KUSER_SHARED_DATA.NtSystemRoot (`C:\\Windows`),
-/// as bytes in `out`, with `\\system32` after it for the system directory
-/// (as Windows spells it); the length.
-fn system_root(out: &mut [u8; 280], system32: bool) -> usize {
+/// as bytes in `out`, then `sub` (`\\system32`, as Windows spells it, or
+/// `\\SysWOW64`); the length.
+fn system_root(out: &mut [u8; 280], sub: &[u8]) -> usize {
     let mut n = 0;
     // SAFETY: KUSER_SHARED_DATA.NtSystemRoot, a NUL-terminated WCHAR[260].
     unsafe {
@@ -703,21 +763,26 @@ fn system_root(out: &mut [u8; 280], system32: bool) -> usize {
             n += 1;
         }
     }
-    if system32 {
-        for &b in b"\\system32" {
-            out[n] = b;
-            n += 1;
-        }
+    for &b in sub {
+        out[n] = b;
+        n += 1;
     }
     n
 }
 
+/// The Windows directory's subdirectories these functions return. The
+/// system directory is System32 for 32-bit programs too (Windows 11 25H2:
+/// "C:\WINDOWS\system32"): the file system redirector, below this layer
+/// (wow64.dll), makes their opens of it reach SysWOW64.
+const SYSTEM32: &[u8] = b"\\system32";
+const SYSWOW64: &[u8] = b"\\SysWOW64";
+
 /// GetWindowsDirectoryW / A, GetSystemWindowsDirectoryW, GetSystemDirectoryW
 /// / A: the length without the NUL, or the size needed with it if `buf` is
 /// too small.
-fn put_directory<T: From<u8> + Copy>(system32: bool, buf: *mut T, size: u32) -> u32 {
+fn put_directory<T: From<u8> + Copy>(sub: &[u8], buf: *mut T, size: u32) -> u32 {
     let mut path = [0u8; 280];
-    let n = system_root(&mut path, system32);
+    let n = system_root(&mut path, sub);
     if buf.is_null() || (size as usize) <= n {
         return n as u32 + 1;
     }
@@ -733,117 +798,131 @@ fn put_directory<T: From<u8> + Copy>(system32: bool, buf: *mut T, size: u32) -> 
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(false, buf, size)
+    put_directory(b"", buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetWindowsDirectoryA(buf: *mut u8, size: u32) -> u32 {
-    put_directory(false, buf, size)
+    put_directory(b"", buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(false, buf, size)
+    put_directory(b"", buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(true, buf, size)
+    put_directory(SYSTEM32, buf, size)
+}
+
+/// GetSystemWow64DirectoryW / A: where the 32-bit system DLLs are
+/// (`<Windows>\SysWOW64`; gala runs x86 programs through WOW64,
+/// ARCHITECTURE "Plan: WOW64").
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemWow64DirectoryW(buf: *mut u16, size: u32) -> u32 {
+    put_directory(SYSWOW64, buf, size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn GetSystemWow64DirectoryA(buf: *mut u8, size: u32) -> u32 {
+    put_directory(SYSWOW64, buf, size)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryA(buf: *mut u8, size: u32) -> u32 {
-    put_directory(true, buf, size)
+    put_directory(SYSTEM32, buf, size)
 }
 
-/// The AddDllDirectory directories (full paths, NUL-terminated), at most
-/// DLL_DIRECTORIES; a cookie is its slot + 1.
-const DLL_DIRECTORIES: usize = 8;
-static mut DLL_DIRS: [[u16; 260]; DLL_DIRECTORIES] = [[0; 260]; DLL_DIRECTORIES];
-static DLL_DIRS_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+// ---- WOW64 file system redirection (the 32-bit kernel32's) ----
+//
+// Per thread, in wow64.dll's file thunks (ARCHITECTURE "Plan: WOW64"): the
+// 32-bit ntdll's RtlWow64EnableFsRedirection(Ex) turn it off and on.
 
-fn with_dll_dirs<R>(f: impl FnOnce(&mut [[u16; 260]; DLL_DIRECTORIES]) -> R) -> R {
-    use core::sync::atomic::Ordering;
-    while DLL_DIRS_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
+#[cfg(target_arch = "x86")]
+#[link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")]
+unsafe extern "system" {
+    fn RtlWow64EnableFsRedirectionEx(disable: usize, old: *mut usize) -> u32;
+    fn RtlWow64EnableFsRedirection(enable: u8) -> u32;
+}
+
+/// Wow64DisableWow64FsRedirection(*OldValue): turns redirection off for
+/// this thread; *OldValue gets what Wow64RevertWow64FsRedirection restores.
+#[cfg(target_arch = "x86")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64DisableWow64FsRedirection(old: *mut usize) -> Bool {
+    let mut previous = 0;
+    // SAFETY: our output; ntdll sets this thread's state.
+    let status = unsafe { RtlWow64EnableFsRedirectionEx(1, &mut previous) };
+    if status != 0 {
+        return fail(status, FALSE);
     }
-    let dirs = &raw mut DLL_DIRS;
-    // SAFETY: the table, under its lock.
-    let r = f(unsafe { &mut *dirs });
-    DLL_DIRS_LOCK.store(false, Ordering::Release);
-    r
+    if !old.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *old = previous };
+    }
+    TRUE
+}
+
+/// Wow64RevertWow64FsRedirection(OldValue): back to the state
+/// Wow64DisableWow64FsRedirection saved.
+#[cfg(target_arch = "x86")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64RevertWow64FsRedirection(old: usize) -> Bool {
+    let mut previous = 0;
+    // SAFETY: our output; ntdll sets this thread's state.
+    let status = unsafe { RtlWow64EnableFsRedirectionEx(old, &mut previous) };
+    if status != 0 { fail(status, FALSE) } else { TRUE }
+}
+
+/// Wow64EnableWow64FsRedirection(Enable): redirection on or off for this
+/// thread (a BOOLEAN result).
+#[cfg(target_arch = "x86")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Wow64EnableWow64FsRedirection(enable: u8) -> u8 {
+    // SAFETY: ntdll sets this thread's state.
+    let status = unsafe { RtlWow64EnableFsRedirection(enable) };
+    if status != 0 { fail(status, 0) } else { 1 }
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn LdrAddDllDirectory(dir: *const UnicodeString, cookie: *mut usize) -> u32;
+    safe fn LdrRemoveDllDirectory(cookie: usize) -> u32;
 }
 
 /// AddDllDirectory(path): a full path searched by LoadLibraryEx with
-/// LOAD_LIBRARY_SEARCH_USER_DIRS; a cookie for RemoveDllDirectory.
+/// LOAD_LIBRARY_SEARCH_USER_DIRS or _DEFAULT_DIRS (for the DLL and its
+/// dependencies), kept by the loader (LdrAddDllDirectory); a cookie for
+/// RemoveDllDirectory. ERROR_INVALID_PARAMETER for anything but a full
+/// path.
 #[unsafe(no_mangle)]
 pub extern "system" fn AddDllDirectory(path: *const u16) -> *mut c_void {
     if path.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
     }
     let p = wide_slice(path);
-    // A full path: a drive and a separator.
-    if p.len() < 3 || p.len() >= 259 || p[1] != u16::from(b':') || !is_sep(p[2]) {
-        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
-    }
-    let slot = with_dll_dirs(|dirs| {
-        let i = dirs.iter().position(|d| d[0] == 0)?;
-        dirs[i][..p.len()].copy_from_slice(p);
-        dirs[i][p.len()] = 0;
-        Some(i)
-    });
-    match slot {
-        Some(i) => (i + 1) as *mut c_void,
-        None => fail_with(ERROR_NOT_ENOUGH_MEMORY, core::ptr::null_mut()),
+    let us = UnicodeString {
+        length: (p.len() * 2) as u16,
+        maximum_length: (p.len() * 2) as u16,
+        buffer: p.as_ptr(),
+    };
+    let mut cookie = 0usize;
+    // SAFETY: a valid UNICODE_STRING and cookie.
+    match unsafe { LdrAddDllDirectory(&us, &mut cookie) } {
+        0 => cookie as *mut c_void,
+        status => fail(status, core::ptr::null_mut()),
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn RemoveDllDirectory(cookie: *mut c_void) -> Bool {
-    let i = (cookie as usize).wrapping_sub(1);
-    let removed = with_dll_dirs(|dirs| match dirs.get_mut(i) {
-        Some(d) if d[0] != 0 => {
-            d[0] = 0;
-            true
-        }
-        _ => false,
-    });
-    if removed { TRUE } else { fail_with(ERROR_INVALID_PARAMETER, FALSE) }
-}
-
-/// LoadLibrary of a bare `name` from the AddDllDirectory directories.
-pub(crate) fn load_from_dll_directories(name: *const u16) -> Option<Handle> {
-    let n = wide_slice(name);
-    if n.iter().any(|&c| is_sep(c) || c == u16::from(b':')) {
-        return None;
+    match LdrRemoveDllDirectory(cookie as usize) {
+        0 => TRUE,
+        status => fail(status, FALSE),
     }
-    for i in 0..DLL_DIRECTORIES {
-        let mut full = [0u16; 520];
-        let len = with_dll_dirs(|dirs| {
-            let d = &dirs[i];
-            let dl = d.iter().position(|&c| c == 0).unwrap_or(0);
-            if dl == 0 {
-                return 0;
-            }
-            full[..dl].copy_from_slice(&d[..dl]);
-            let mut at = dl;
-            if !is_sep(d[dl - 1]) {
-                full[at] = BACKSLASH;
-                at += 1;
-            }
-            if at + n.len() >= full.len() {
-                return 0;
-            }
-            full[at..at + n.len()].copy_from_slice(n);
-            at + n.len()
-        });
-        if len == 0 || GetFileAttributesW(full.as_ptr()) == u32::MAX {
-            continue;
-        }
-        return Some(LoadLibraryW(full.as_ptr()));
-    }
-    None
 }

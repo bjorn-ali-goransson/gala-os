@@ -200,15 +200,17 @@ fn push_copy(out: &mut Vec<u8>, ace: &[u8], flags: u8) -> Result<(), NtStatus> {
 }
 
 /// The ACEs `parent_acl` passes to a new child (a container or not),
-/// as ACE bytes and their count.
+/// as ACE bytes and their count; `mark`: each is flagged INHERITED_ACE.
 pub fn inherited_aces(
     parent_acl: &[u8],
     container: bool,
     owner: &Sid,
     group: &Sid,
     mapping: &GenericMapping,
+    mark: bool,
 ) -> Result<(Vec<u8>, usize), NtStatus> {
     let (mut out, mut count) = (Vec::new(), 0);
+    let marked = if mark { INHERITED_ACE } else { 0 };
     for (kind, flags, ace) in aces(parent_acl) {
         let oi = flags & OBJECT_INHERIT_ACE != 0;
         let ci = flags & CONTAINER_INHERIT_ACE != 0;
@@ -235,21 +237,21 @@ pub fn inherited_aces(
         if effective {
             match sid {
                 Some(sid) if changed => {
-                    push_ace(&mut out, kind, INHERITED_ACE, mask, &sid)?;
+                    push_ace(&mut out, kind, marked, mask, &sid)?;
                     count += 1;
                     if propagate {
-                        push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | INHERITED_ACE)?;
+                        push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | marked)?;
                         count += 1;
                     }
                 }
                 _ => {
                     let keep = if propagate { inheritable } else { 0 };
-                    push_copy(&mut out, ace, keep | INHERITED_ACE)?;
+                    push_copy(&mut out, ace, keep | marked)?;
                     count += 1;
                 }
             }
         } else {
-            push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | INHERITED_ACE)?;
+            push_copy(&mut out, ace, inheritable | INHERIT_ONLY_ACE | marked)?;
             count += 1;
         }
     }
@@ -324,14 +326,26 @@ pub fn assign(
         Some(g) => (g, given.control & SE_GROUP_DEFAULTED),
         None => (token.primary_group, SE_GROUP_DEFAULTED),
     };
+    // Inherited ACEs are marked INHERITED_ACE, and the child's DACL
+    // auto-inherited, only when the parent's DACL is auto-inherited
+    // (Windows 11 25H2: a file in a directory made from
+    // "D:P(A;OICI;FA;;;WD)" gets the ACE with flags 0). A given DACL that
+    // is merged with them keeps the marks (not measured), as do the
+    // object types without auto-inheritance.
+    let parent_auto = parent.is_some_and(|p| p.control & SE_DACL_AUTO_INHERITED != 0);
+    let merged = given.control & SE_DACL_PRESENT != 0;
+    let mark = merged || !auto_inherit || parent_auto;
     let inherited = match parent.and_then(|p| p.dacl.as_deref()) {
-        Some(acl) => inherited_aces(acl, container, &owner, &group, mapping)?,
+        Some(acl) => inherited_aces(acl, container, &owner, &group, mapping, mark)?,
         None => (Vec::new(), 0),
     };
     let mut control = owner_defaulted | group_defaulted;
     let dacl = if given.control & SE_DACL_PRESENT != 0 {
         let protected = given.control & SE_DACL_PROTECTED != 0;
-        control |= SE_DACL_PRESENT | (given.control & (SE_DACL_PROTECTED | SE_DACL_DEFAULTED));
+        // A given DACL's auto-inherited mark is kept: it decides whether
+        // the object's own children get marked ACEs.
+        let kept = SE_DACL_PROTECTED | SE_DACL_DEFAULTED | SE_DACL_AUTO_INHERITED;
+        control |= SE_DACL_PRESENT | (given.control & kept);
         match given.dacl {
             Some(acl) if auto_inherit && !protected => {
                 // The given (non-inherited) ACEs, then the inherited ones.
@@ -351,7 +365,7 @@ pub fn assign(
         }
     } else if inherited.1 > 0 {
         control |= SE_DACL_PRESENT;
-        if auto_inherit {
+        if auto_inherit && parent_auto {
             control |= SE_DACL_AUTO_INHERITED;
         }
         Some(build_acl(ACL_REVISION, &inherited.0, inherited.1)?)
@@ -768,12 +782,24 @@ mod tests {
 
     fn parent(list: &[(u32, Sid, u8)]) -> Descriptor {
         Descriptor {
-            control: SE_DACL_PRESENT | SE_DACL_PROTECTED,
+            control: SE_DACL_PRESENT | SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED,
             owner: Some(USER),
             group: Some(USER),
             dacl: Some(allow_acl(list).unwrap()),
             sacl: None,
         }
+    }
+
+    #[test]
+    fn inheritance_from_a_dacl_not_auto_inherited() {
+        let token = TokenData::boot_user().unwrap();
+        let mut p = parent(&[(0x1f01ff, EVERYONE, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)]);
+        p.control &= !SE_DACL_AUTO_INHERITED;
+        let file = assign(Some(&p), None, false, &token, &FILE_MAPPING, true).unwrap();
+        assert_eq!(file.control & SE_DACL_AUTO_INHERITED, 0);
+        assert_eq!(ace_list(file.dacl.as_ref().unwrap()), [(0, 0, 0x1f01ff, EVERYONE)]);
+        let dir = assign(Some(&p), None, true, &token, &FILE_MAPPING, true).unwrap();
+        assert_eq!(ace_list(dir.dacl.as_ref().unwrap()), [(0, 3, 0x1f01ff, EVERYONE)]);
     }
 
     #[test]

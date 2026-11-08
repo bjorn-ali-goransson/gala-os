@@ -13,8 +13,9 @@
 //! across boots (D3, nt::reglog), volatile keys excepted, and a volatile
 //! key's children must be volatile. There are no security descriptors yet (every caller may do
 //! everything its handle's access allows), no symbolic link keys (the seed
-//! has `CurrentControlSet` itself), no change notifications and no
-//! WOW64 views. See docs/ARCHITECTURE.md, "Registry".
+//! has `CurrentControlSet` itself) and no change notifications. The
+//! 32-bit view (WOW64) is a choice of name, made per open or create
+//! (nt::regview). See docs/ARCHITECTURE.md, "Registry".
 
 use alloc::vec::Vec;
 
@@ -30,7 +31,7 @@ pub const KEY_CREATE_SUB_KEY: u32 = 0x0004;
 pub const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
 pub const KEY_NOTIFY: u32 = 0x0010;
 pub const KEY_CREATE_LINK: u32 = 0x0020;
-/// KEY_WOW64_64KEY | KEY_WOW64_32KEY: views, not rights (there is one view).
+/// KEY_WOW64_64KEY | KEY_WOW64_32KEY: views (nt::regview), not rights.
 pub const KEY_WOW64_RES: u32 = 0x0300;
 pub const KEY_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | 0x3f;
 
@@ -955,7 +956,7 @@ pub fn init(now: u64) -> Result<(), NtStatus> {
 }
 
 /// What `HARDWARE\DESCRIPTION\System\CentralProcessor\<n>` says about
-/// a processor, from CPUID.
+/// a processor (x64: from CPUID).
 pub struct Processor {
     /// The brand string (leaves 0x80000002-4).
     pub name: [u8; 48],
@@ -969,34 +970,9 @@ pub struct Processor {
 }
 
 impl Processor {
+    /// This processor's (`abi::processor`; x64: from CPUID).
     fn this() -> Processor {
-        use super::platform::cpuid;
-        let (max, b, c, d) = cpuid(0, 0);
-        let mut vendor = [0u8; 12];
-        vendor[..4].copy_from_slice(&b.to_le_bytes());
-        vendor[4..8].copy_from_slice(&d.to_le_bytes());
-        vendor[8..].copy_from_slice(&c.to_le_bytes());
-        let (signature, ..) = cpuid(1, 0);
-        let base_family = (signature >> 8) & 0xf;
-        let mut family = base_family;
-        let mut model = (signature >> 4) & 0xf;
-        if base_family == 0xf {
-            family += (signature >> 20) & 0xff;
-        }
-        if base_family == 0x6 || base_family == 0xf {
-            model |= ((signature >> 16) & 0xf) << 4;
-        }
-        let mut name = [0u8; 48];
-        if cpuid(0x8000_0000, 0).0 >= 0x8000_0004 {
-            for (i, leaf) in (0x8000_0002u32..=0x8000_0004).enumerate() {
-                let (a, b, c, d) = cpuid(leaf, 0);
-                for (j, r) in [a, b, c, d].iter().enumerate() {
-                    name[16 * i + 4 * j..16 * i + 4 * j + 4].copy_from_slice(&r.to_le_bytes());
-                }
-            }
-        }
-        let mhz = if max >= 0x16 { cpuid(0x16, 0).0 & 0xffff } else { 0 };
-        Processor { name, vendor, family, model, stepping: signature & 0xf, mhz }
+        super::abi::processor()
     }
 }
 

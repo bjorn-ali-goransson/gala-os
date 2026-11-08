@@ -226,8 +226,10 @@ static void assoc_checks(void) {
     CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len) == S_OK);
     CHECK(wcscmp(out, command) == 0 && len == wcslen(command) + 1);
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len) == S_OK);
-    CHECK(wcscmp(out, L"C:\\Gala Tools\\viewer.exe") == 0);
+    /* The command's program does not exist: CO_E_APPNOTFOUND (Windows 11
+       25H2); an existing one (this program, below) is S_OK. */
+    CHECK(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len)
+          == CO_E_APPNOTFOUND);
     len = MAX_PATH;
     CHECK(AssocQueryStringW(0, ASSOCSTR_FRIENDLYDOCNAME, L".galatest", NULL, out, &len) == S_OK);
     CHECK(wcscmp(out, friendly) == 0);
@@ -236,12 +238,30 @@ static void assoc_checks(void) {
     len = 0;
     CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, NULL, &len) == S_FALSE);
     CHECK(len == wcslen(command) + 1);
+    /* A short buffer: HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), not
+       the documented E_POINTER, the size needed, and the string truncated
+       into the buffer (Windows 11 25H2). */
     len = 4;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len) == E_POINTER);
+    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len)
+          == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
     CHECK(len == wcslen(command) + 1);
+    CHECK(wcsncmp(out, command, 3) == 0 && out[3] == 0);
     len = MAX_PATH;
     CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galanone", NULL, out, &len)
           == HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION));
+    wchar_t me[MAX_PATH], existing[MAX_PATH + 8];
+    CHECK(GetModuleFileNameW(NULL, me, MAX_PATH) > 0);
+    wcscpy(existing, L"\"");
+    wcscat(existing, me);
+    wcscat(existing, L"\" \"%1\"");
+    CHECK(RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\GalaTest.File\\shell\\open\\command", 0,
+                          NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL) == ERROR_SUCCESS);
+    CHECK(RegSetValueExW(key, NULL, 0, REG_SZ, (const BYTE *)existing, (DWORD)((wcslen(existing) + 1) * 2))
+          == ERROR_SUCCESS);
+    RegCloseKey(key);
+    len = MAX_PATH;
+    CHECK(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len) == S_OK);
+    CHECK(wcscmp(out, me) == 0);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\.galatest") == ERROR_SUCCESS);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\GalaTest.File") == ERROR_SUCCESS);
 }

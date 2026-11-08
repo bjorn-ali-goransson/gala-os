@@ -326,7 +326,7 @@ impl UserEntry for Um {
     ) {
         entry::set_syscall_handler(personality, name, handler)
     }
-    fn set_user_return_hook(hook: fn(&mut UserRegs) -> bool) {
+    fn set_user_return_hook(hook: fn(&mut UserRegs, bool) -> bool) {
         entry::set_user_return_hook(hook)
     }
     fn set_user_exception_handler(handler: fn(&mut TrapFrame, Option<u64>)) {

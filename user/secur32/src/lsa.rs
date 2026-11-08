@@ -9,7 +9,11 @@
 
 use core::ffi::c_void;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaLogonUser(
         user: *const UnicodeString,
@@ -29,7 +33,11 @@ unsafe extern "system" {
     fn NtClose(h: usize) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
@@ -55,7 +63,7 @@ const STATUS_SUCCESS: u32 = 0;
 const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
 const STATUS_NO_MEMORY: u32 = 0xc000_0017;
 const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
-const STATUS_PRIVILEGE_NOT_HELD: u32 = 0xc000_0061;
+const STATUS_PORT_CONNECTION_REFUSED: u32 = 0xc000_0041;
 const STATUS_NO_SUCH_PACKAGE: u32 = 0xc000_00fe;
 
 /// The handles: an untrusted connection, a registered logon process.
@@ -109,8 +117,9 @@ fn has_tcb() -> bool {
 }
 
 /// LsaRegisterLogonProcess(LogonProcessName, *LsaHandle, *SecurityMode):
-/// a trusted connection, for callers with SeTcbPrivilege
-/// (STATUS_PRIVILEGE_NOT_HELD).
+/// a trusted connection, for callers with SeTcbPrivilege (without it
+/// STATUS_PORT_CONNECTION_REFUSED, as Windows 11 25H2 gives an ordinary
+/// user: LSA refuses the connection).
 #[unsafe(no_mangle)]
 pub extern "system" fn LsaRegisterLogonProcess(
     name: *const LsaString,
@@ -121,7 +130,7 @@ pub extern "system" fn LsaRegisterLogonProcess(
         return STATUS_INVALID_PARAMETER;
     }
     if !has_tcb() {
-        return STATUS_PRIVILEGE_NOT_HELD;
+        return STATUS_PORT_CONNECTION_REFUSED;
     }
     // SAFETY: the caller's outputs.
     unsafe {

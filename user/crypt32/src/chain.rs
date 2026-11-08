@@ -31,13 +31,19 @@
 //!   certificate's extended key usage (AND/OR). Name constraints are not
 //!   evaluated: a CA that has them gets CERT_TRUST_INVALID_NAME_CONSTRAINTS
 //!   | CERT_TRUST_HAS_NOT_SUPPORTED_NAME_CONSTRAINT (fails closed,
-//!   recorded; ROADMAP TLS). Revocation is not checked: with a
-//!   CERT_CHAIN_REVOCATION_CHECK_* flag the checked elements get
-//!   CERT_TRUST_REVOCATION_STATUS_UNKNOWN, with
-//!   CERT_TRUST_IS_OFFLINE_REVOCATION when the certificate names a CRL or
-//!   OCSP responder (recorded), as Windows reports a certificate it
-//!   cannot check; the policies then give CRYPT_E_REVOCATION_OFFLINE or,
-//!   for a certificate that names none, CRYPT_E_NO_REVOCATION_CHECK.
+//!   recorded; ROADMAP TLS). Revocation, with a
+//!   CERT_CHAIN_REVOCATION_CHECK_* flag (END_CERT, CHAIN,
+//!   CHAIN_EXCLUDE_ROOT; never a self-signed root), is checked offline
+//!   from the issuer's CRLs in hAdditionalStore and the engine's stores
+//!   (crl.rs `check`; CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY changes
+//!   nothing, nothing is fetched): CERT_TRUST_IS_REVOKED when a current
+//!   one lists the certificate, CERT_TRUST_REVOCATION_STATUS_UNKNOWN |
+//!   CERT_TRUST_IS_OFFLINE_REVOCATION when they are out of date or the
+//!   CRL or OCSP responder the certificate names is not there,
+//!   REVOCATION_STATUS_UNKNOWN alone when there is nothing to check it
+//!   by; the policies then give CRYPT_E_REVOKED,
+//!   CRYPT_E_REVOCATION_OFFLINE or CRYPT_E_NO_REVOCATION_CHECK.
+//!   pRevocationInfo stays NULL.
 //! - **Policies**: BASE, SSL (with SSL_EXTRA_CERT_CHAIN_POLICY_PARA: the
 //!   server name against the DNS and IP subject alternative names, else
 //!   the subject's CN; one-label wildcards), BASIC_CONSTRAINTS; the others
@@ -63,7 +69,7 @@ use super::store::{
     CertAddStoreToCollection, CertCloseStore, CertDuplicateStore, CertFindCertificateInStore,
     CertOpenStore, CertOpenSystemStoreA, unsupported,
 };
-use super::{SetLastError, missing_detail};
+use super::{SetLastError, crl};
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -791,8 +797,9 @@ pub extern "system" fn CertGetCertificateChain(
     if count > 0 && !usage_ok(b.certs[0], &ids[..count], and) {
         b.status[0].error |= IS_NOT_VALID_FOR_USAGE;
     }
-    // Revocation: not checked, so unknown where it was asked for (never
-    // for a self-signed root).
+    // Revocation, where it was asked for (never for a self-signed root):
+    // offline, from the CRLs in hAdditionalStore and the engine's stores
+    // (crl.rs), at the current time (pTime does not apply to revocation).
     let checked = if flags & REVOCATION_CHECK_END_CERT != 0 {
         1
     } else if flags & REVOCATION_CHECK_CHAIN != 0 {
@@ -802,24 +809,19 @@ pub extern "system" fn CertGetCertificateChain(
     } else {
         0
     };
-    if checked > 0 {
-        missing_detail(
-            b"crypt32.dll!CertGetCertificateChain(revocation not checked)",
-            flags.into(),
-        );
-    }
+    let current = if checked > 0 { crl::now() } else { 0 };
     for i in 0..checked.min(b.n) {
         if i == b.n - 1 && self_signed(b.certs[i]).is_some() {
             continue;
         }
-        // Where the certificate names a CRL or an OCSP responder, the
-        // check could not reach it (offline); else there is nothing to
-        // check with (CRYPT_E_NO_REVOCATION_CHECK).
-        let c = info(b.certs[i]);
-        let named = extension_value(c, c"2.5.29.31").is_some()
-            || extension_value(c, c"1.3.6.1.5.5.7.1.1").is_some();
-        b.status[i].error |=
-            REVOCATION_STATUS_UNKNOWN | if named { IS_OFFLINE_REVOCATION } else { 0 };
+        let issuer = if i + 1 < b.n { b.certs[i + 1] } else { core::ptr::null() };
+        let status = crl::check(b.certs[i], issuer, &[additional, e.world], current);
+        b.status[i].error |= match status {
+            crl::Status::Good(_) => 0,
+            crl::Status::Revoked(..) => IS_REVOKED,
+            crl::Status::Offline => REVOCATION_STATUS_UNKNOWN | IS_OFFLINE_REVOCATION,
+            crl::Status::NoCheck => REVOCATION_STATUS_UNKNOWN,
+        };
     }
     // The block.
     // SAFETY: plain allocation, zeroed (HEAP_ZERO_MEMORY).

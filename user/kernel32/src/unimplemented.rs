@@ -4,6 +4,12 @@
 
 gala_stubs::unimplemented_exports!("kernel32.dll":
     AllocateUserPhysicalPagesNuma
+    // Inno Setup's compiler (ISCmplr.dll, which its IDE loads) writes the
+    // icons and version of the Setup it makes with these: rewriting a
+    // PE's resource section is not there yet.
+    BeginUpdateResourceW
+    EndUpdateResourceW
+    UpdateResourceW
     CancelSynchronousIo
     CheckTokenMembershipEx
     CompareStringA
@@ -22,7 +28,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     GetNumaNodeProcessorMaskEx
     GetNumberFormatEx
     GetNumberFormatW
-    GetPrivateProfileStringW
     GetShortPathNameA
     GetSystemTimeAdjustment
     GetTapeParameters
@@ -35,11 +40,6 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     MapViewOfFileExNuma
     OpenJobObjectW
     OpenSemaphoreW
-    PathCchAppend
-    PathCchCombine
-    PathCchRemoveBackslash
-    PathCchRemoveExtension
-    PathCchRemoveFileSpec
     PrepareTape
     QueueUserWorkItem
     ReadConsoleOutputA
@@ -91,8 +91,7 @@ gala_stubs::unimplemented_exports!("kernel32.dll":
     WriteConsoleOutputW
     EnumResourceNamesW
     GetDiskFreeSpaceA
-    GetProfileStringW
     IsBadReadPtr
     ReadConsoleOutputCharacterA
-    WritePrivateProfileStringW
+    // Inno Setup's Setup (Delphi's VCL) imports these.
 );

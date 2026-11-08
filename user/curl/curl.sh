@@ -12,9 +12,19 @@
 # (CURLE_PEER_FAILED_VERIFICATION) for an untrusted root, and for an
 # expired certificate 60 on LibreSSL, 35 (CURLE_SSL_CONNECT_ERROR) on
 # Schannel, whose SEC_E_CERT_EXPIRED curl does not count as a
-# verification failure. --ssl-no-revoke (Schannel's revocation check):
-# the test certificates name no CRL distribution point, so there is
-# nothing to ask.
+# verification failure. --ssl-no-revoke (no revocation check by
+# Schannel) in those steps: their certificates name no CRL distribution
+# point, so Windows has nothing to check them by (Schannel would refuse
+# them with CRYPT_E_NO_REVOCATION_CHECK).
+#
+# Revocation: 8448 and 8449 serve certificates naming the test CA's CRL
+# (http://127.0.0.1:8080/ca.crl), which lists 8448's. Without
+# --ssl-no-revoke Schannel's curl asks for the chain's revocation
+# (SCH_CRED_REVOCATION_CHECK_CHAIN): 8449 passes, 8448 fails with 35
+# (CRYPT_E_REVOKED, which curl does not count as a verification
+# failure); with it 8448 passes. gala checks offline, with the CRL in
+# its CA store (System32\gala\ca); Windows fetches it from Nginx.
+# LibreSSL's curl does not check revocation here: 0 for all three.
 #
 # Then with --cacert (C:\gala\ca.crt, the test CA in PEM; the CA file is
 # the only trust, as documented for both backends): Schannel's curl
@@ -65,6 +75,15 @@ echo "cacert other: exit $?"
 
 $curl -sS --ssl-no-revoke --cacert C:/gala/ca.crt https://localhost:8445/ >/dev/null
 echo "cacert expired: exit $?"
+
+out=$($curl -sS https://localhost:8449/)
+echo "revocation: exit $? $(echo "$out" | grep -o '<title>[^<]*</title>')"
+
+$curl -sS https://localhost:8448/ >/dev/null
+echo "revoked: exit $?"
+
+$curl -sS --ssl-no-revoke https://localhost:8448/ >/dev/null
+echo "revoked no-revoke: exit $?"
 
 out=$($curl -sS --ssl-no-revoke -H 'Connection: close' https://localhost:8443/session https://localhost:8443/session)
 echo "resumption: exit $? $(echo $out)"

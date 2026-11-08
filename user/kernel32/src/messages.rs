@@ -96,6 +96,13 @@ const MESSAGES: &[(u32, &str)] = &[
         0x8009_0331,
         "The client and server cannot communicate, because they do not possess a common algorithm.",
     ),
+    // Revocation (winerror.h's texts), which Schannel returns as such.
+    (0x8009_2010, "The certificate is revoked."),
+    (0x8009_2012, "The revocation function was unable to check revocation for the certificate."),
+    (
+        0x8009_2013,
+        "The revocation function was unable to check revocation because the revocation server was offline.",
+    ),
 ];
 
 const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x200;
@@ -210,7 +217,7 @@ fn source_units(src: &Source, out: &mut [u16; MAX_MESSAGE]) -> usize {
 }
 
 /// Argument `i` (from 1): from the array, or the va_list (an array of
-/// 8-byte slots behind a pointer).
+/// pointer-sized slots behind a pointer: 8 bytes on x64, 4 on x86).
 fn argument(flags: u32, args: *const c_void, i: usize) -> Result<usize, u32> {
     if args.is_null() {
         return Err(ERROR_INVALID_PARAMETER);

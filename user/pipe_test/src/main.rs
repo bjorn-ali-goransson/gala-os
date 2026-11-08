@@ -32,7 +32,12 @@
 //!   (ERROR_IO_PENDING) and complete when a client connects and writes,
 //!   through the event and the completion port;
 //!   SetFileCompletionNotificationModes(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)
-//!   leaves the port alone for a read that completes at once.
+//!   leaves the port alone for a read that completes at once; a client
+//!   before an overlapped ConnectNamedPipe: ERROR_PIPE_CONNECTED with no
+//!   status written, event set or packet posted (a request that fails in
+//!   its call), and GetOverlappedResult succeeds once the caller sets the
+//!   event (asyncio's pipes); a pending zero-byte read of a message pipe
+//!   ends with ERROR_MORE_DATA, the message kept (multiprocessing's wait).
 //! - the ANSI CreateNamedPipeA and CreateFileA, as Win32-OpenSSH's pipe()
 //!   uses them: an overlapped duplex pipe whose ends are pipes (GetFileType)
 //!   and inheritable; a read pending on its server end fails with
@@ -109,6 +114,8 @@ unsafe extern "system" {
         id: *mut u32,
     ) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+    fn SetEvent(h: Handle) -> Bool;
+    fn ResetEvent(h: Handle) -> Bool;
     fn GetExitCodeThread(h: Handle, code: *mut u32) -> Bool;
     fn GetLastError() -> u32;
     fn CloseHandle(h: Handle) -> Bool;
@@ -307,6 +314,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -316,10 +324,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -563,6 +573,57 @@ fn named(c: &mut Checks) -> Result<(), u32> {
         let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 0);
         c.eq(dequeued as u64, 0)?;
         c.eq(GetLastError().into(), 258)?; // WAIT_TIMEOUT
+
+        // A client before an overlapped ConnectNamedPipe (asyncio's
+        // pipes): ERROR_PIPE_CONNECTED at once, and as for any request
+        // that fails in its call, no status in the OVERLAPPED, no event
+        // set, no completion packet; the caller sets the event and
+        // GetOverlappedResult then succeeds.
+        let name = wide("\\\\.\\pipe\\gala_test\\early");
+        let early = CreateNamedPipeW(name.as_ptr(), open, 0, 1, 4096, 4096, 0, core::ptr::null());
+        c.ok(early != INVALID_HANDLE, GetLastError().into())?;
+        c.ok(!CreateIoCompletionPort(early, port, 78, 0).is_null(), GetLastError().into())?;
+        let cl3 = client(&name, FILE_FLAG_OVERLAPPED);
+        c.ok(cl3 != INVALID_HANDLE, GetLastError().into())?;
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        c.ok(ResetEvent(event) != 0, GetLastError().into())?;
+        c.eq(ConnectNamedPipe(early, &mut ov) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_PIPE_CONNECTED.into())?;
+        c.eq(WaitForSingleObject(event, 0).into(), 0x102)?; // WAIT_TIMEOUT
+        let dequeued = GetQueuedCompletionStatus(port, &mut got, &mut key, &mut done, 0);
+        c.eq(dequeued as u64, 0)?;
+        c.ok(SetEvent(event) != 0, GetLastError().into())?;
+        c.ok(GetOverlappedResult(early, &mut ov, &mut got, 1) != 0, GetLastError().into())?;
+        CloseHandle(cl3);
+        CloseHandle(early);
+
+        // multiprocessing's wait(): a zero-byte overlapped read pending on
+        // a message pipe ends, when a message arrives, with ERROR_MORE_DATA
+        // and no bytes, the message left for the next read.
+        let name = wide("\\\\.\\pipe\\gala_test\\zero");
+        let message = PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE;
+        let zero =
+            CreateNamedPipeW(name.as_ptr(), open, message, 1, 4096, 4096, 0, core::ptr::null());
+        c.ok(zero != INVALID_HANDLE, GetLastError().into())?;
+        let cl4 = client(&name, 0);
+        c.ok(cl4 != INVALID_HANDLE, GetLastError().into())?;
+        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event };
+        let ok = ReadFile(zero, buf.as_mut_ptr(), 0, &mut got, (&mut ov as *mut Overlapped).cast());
+        c.eq(ok as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_IO_PENDING.into())?;
+        c.ok(write(cl4, b"abc"), GetLastError().into())?;
+        got = 99;
+        c.eq(GetOverlappedResult(zero, &mut ov, &mut got, 1) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_MORE_DATA.into())?;
+        c.eq(got.into(), 0)?;
+        c.ok(
+            ReadFile(zero, buf.as_mut_ptr(), 64, &mut got, (&mut ov as *mut Overlapped).cast())
+                != 0,
+            GetLastError().into(),
+        )?;
+        c.ok(got == 3 && &buf[..3] == b"abc", got.into())?;
+        CloseHandle(cl4);
+        CloseHandle(zero);
         CloseHandle(cl);
         CloseHandle(server);
         CloseHandle(port);
@@ -592,7 +653,9 @@ fn run() -> Result<(), u32> {
         c.ok(peeked != 0, GetLastError().into())?;
         c.eq(got.into(), 3)?;
         c.eq(avail.into(), 5)?;
-        c.eq(left.into(), 0)?; // byte mode: no message boundaries
+        // lpBytesLeftThisMessage: the message length (0 in byte mode)
+        // less what was read, -3 here (Windows 11 25H2; the docs say 0).
+        c.eq(left.into(), 0u32.wrapping_sub(3).into())?;
         c.ok(&buf[..3] == b"hel", buf[0].into())?;
         let peeked = PeekNamedPipe(
             r,
@@ -1159,4 +1222,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

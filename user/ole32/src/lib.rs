@@ -36,6 +36,13 @@ mod stream;
 mod unimplemented;
 mod winrt;
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -51,15 +58,24 @@ unsafe extern "C" {
 }
 
 /// MSVC-target codegen references this marker symbol directly.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -79,7 +95,11 @@ unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
 
-#[link(name = "bcryptprimitives", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "bcryptprimitives", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "bcryptprimitives", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn ProcessPrng(data: *mut u8, length: usize) -> i32;
 }
@@ -425,7 +445,17 @@ unsafe impl<const N: usize> Sync for VTable<N> {}
 
 const MAX_SPIES: usize = 8;
 
+/// The thread's OLE data behind TEB.ReservedForOle. Its head is laid out
+/// as programs read it (Chromium's base::win::GetComApartmentTypeForThread;
+/// Wine's struct oletls agrees): two pointers, the apartment id, then the
+/// apartment flags, 0x80 in an STA and 0x140 in the MTA (APARTMENT_STA,
+/// APARTMENT_MTA below), 0 outside.
+#[repr(C)]
 pub(crate) struct ThreadState {
+    thread_base: usize,
+    allocator: usize,
+    apartment_id: u32,
+    apartment_flags: u32,
     /// 0: none, 1: MTA, 2: STA.
     pub(crate) kind: u32,
     refs: u32,
@@ -442,12 +472,40 @@ pub(crate) struct ThreadState {
     number: u32,
 }
 
+const APARTMENT_STA: u32 = 0x80;
+const APARTMENT_MTA: u32 = 0x140;
+
+impl ThreadState {
+    /// Enters (`kind` 1 MTA, 2 STA) or leaves (0) an apartment: the kind
+    /// and the flags programs read.
+    fn set_kind(&mut self, kind: u32) {
+        self.kind = kind;
+        self.apartment_flags = match kind {
+            1 => APARTMENT_MTA,
+            2 => APARTMENT_STA,
+            _ => 0,
+        };
+    }
+}
+
+/// TEB.ReservedForOle (x64 0x1758, x86 0xf80).
+#[cfg(target_arch = "x86_64")]
 const TEB_RESERVED_FOR_OLE: usize = 0x1758;
+#[cfg(target_arch = "x86")]
+const TEB_RESERVED_FOR_OLE: usize = 0xf80;
 
 fn teb() -> usize {
     let teb: usize;
     // SAFETY: gs:[0x30] is the TEB's self pointer.
-    unsafe { core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly)) };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly))
+    };
+    // SAFETY: fs:[0x18] is the (32-bit) TEB's self pointer.
+    #[cfg(target_arch = "x86")]
+    unsafe {
+        core::arch::asm!("mov {}, fs:[0x18]", out(reg) teb, options(nostack, readonly))
+    };
     teb
 }
 
@@ -462,6 +520,10 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
                 return None;
             }
             p.write(ThreadState {
+                thread_base: 0,
+                allocator: 0,
+                apartment_id: 0,
+                apartment_flags: 0,
                 kind: 0,
                 refs: 0,
                 spies: [0; MAX_SPIES],
@@ -481,8 +543,8 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
     }
 }
 
-/// Threads in the MTA (any thread of the process may then use COM as an
-/// implicit MTA member; not modelled yet).
+/// Threads in the MTA (while there are any, a thread that never
+/// initialized COM is an implicit MTA member: CoGetApartmentType).
 static MTA_THREADS: AtomicU32 = AtomicU32::new(0);
 
 // ---- Apartments ----
@@ -523,7 +585,7 @@ pub extern "system" fn CoInitializeEx(_reserved: *mut c_void, flags: u32) -> HRe
         com_call!(spy, 3, fn(u32, u32) -> HResult, flags, state.refs);
     }
     let mut hr = if state.refs == 0 {
-        state.kind = kind;
+        state.set_kind(kind);
         state.refs = 1;
         if kind == 1 {
             MTA_THREADS.fetch_add(1, Ordering::Relaxed);
@@ -572,7 +634,7 @@ pub extern "system" fn CoUninitialize() {
             if state.kind == 1 {
                 MTA_THREADS.fetch_sub(1, Ordering::Relaxed);
             }
-            state.kind = 0;
+            state.set_kind(0);
         }
     }
     for &spy in spies.iter().filter(|&&s| s != 0) {
@@ -642,7 +704,9 @@ fn apartment() -> Option<u32> {
     thread_state().filter(|s| s.refs > 0).map(|s| s.kind)
 }
 
-/// APTTYPE: STA 0, MTA 1.
+/// APTTYPE: STA 0, MTA 1. A thread that never initialized COM while
+/// some thread holds the MTA is an implicit MTA member: APTTYPE_MTA with
+/// APTTYPEQUALIFIER_IMPLICIT_MTA (1); with no MTA, CO_E_NOTINITIALIZED.
 #[unsafe(no_mangle)]
 pub extern "system" fn CoGetApartmentType(kind: *mut i32, qualifier: *mut i32) -> HResult {
     if kind.is_null() || qualifier.is_null() {
@@ -652,6 +716,11 @@ pub extern "system" fn CoGetApartmentType(kind: *mut i32, qualifier: *mut i32) -
         Some(k) => {
             put(kind, if k == 2 { 0 } else { 1 });
             put(qualifier, 0);
+            S_OK
+        }
+        None if MTA_THREADS.load(Ordering::Relaxed) > 0 => {
+            put(kind, 1);
+            put(qualifier, 1);
             S_OK
         }
         None => {
@@ -791,6 +860,18 @@ pub extern "system" fn CoGetObjectContext(iid: *const Guid, out: *mut *mut c_voi
 }
 
 // ---- GUIDs and classes ----
+
+/// IsEqualGUID: whether the two GUIDs are the same 16 bytes (ole32
+/// exports the function as well as objbase.h's macro).
+#[unsafe(no_mangle)]
+pub extern "system" fn IsEqualGUID(a: *const Guid, b: *const Guid) -> i32 {
+    if a.is_null() || b.is_null() {
+        return i32::from(a == b);
+    }
+    // SAFETY: the caller's two GUIDs (16 bytes each).
+    let (x, y) = unsafe { (core::ptr::read_unaligned(a), core::ptr::read_unaligned(b)) };
+    i32::from(x == y)
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn CoCreateGuid(guid: *mut Guid) -> HResult {

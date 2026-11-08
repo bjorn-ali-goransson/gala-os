@@ -59,7 +59,21 @@ port. Lines that tools and agents rely on:
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`
-  and the exit line; the unknown-service line names its dispatcher
+  (with `, 32-bit x86 (WOW64)` for a 32-bit program; `wow64:` lines say
+  which wow64.dll is used, or why a 32-bit program cannot start, e.g.
+  `wow64: x.exe imports DLLs, and there is no \Windows\SysWOW64\ntdll.dll
+  to bind them`; `ntdll: using \Windows\SysWOW64\ntdll.dll` names the
+  32-bit ntdll) and the exit line; a service or information class gala's
+  wow64.dll cannot convert yet is in the ledger as `wow64.dll!service
+  0x....` (with the case: `wow64.dll!service 0x0007 (AFD IOCTL)`) or
+  `wow64.dll!<service>(class)`, an exception or APC it cannot hand to
+  32-bit code as `wow64.dll!exception (32-bit stack full)` or
+  `wow64.dll!APC (no 32-bit ntdll|32-bit stack full|64-bit routine)`,
+  and the 32-bit msvcrt's longjmp over a `__try` level it cannot unwind
+  as `msvcrt.dll!longjmp(try level)` (a missing msvcrt export stops the
+  load as `missing export`);
+  `wow64: ... cannot free an exited
+  thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,
   personality nt)`); a thread whose personality has no dispatcher logs
   `syscall: no dispatcher for personality ..`.
@@ -74,19 +88,19 @@ port. Lines that tools and agents rely on:
 - `desktop: session S is live (WxH), shown by none|console|test`, `desktop:
   session S is now shown by test (WxH; was none)`, `presenter: test frame
   for session S: WxH at 0x... (...)` (where xtask's headless screen checks
-  read it), `desktop: no screen and no presenter= (...)`; the server
-  kernel's `desktop: no compositor in this kernel (server build: windows
-  are kept, nothing draws them)` at boot, `desktop: session S keeps its
-  windows (WxH), shown by none (no compositor in this kernel)` and the
-  warning `desktop: session S cannot be shown by test: no compositor in
-  this kernel`; `desktop: the
+  read it), a bare desktop (nothing can show it) going live: `desktop:
+  session S keeps its windows (WxH), shown by none (no screen and no
+  presenter=)` or `(server profile)`, a presenter refused there
+  `desktop: session S cannot be shown by test: server profile`; `desktop: the
   console now shows session S (WxH; was session T, which keeps its N
   windows shown by none)` (a console switch; a warning `the console
   could not move ...; it stays` when it fails), `desktop: pid P's input
   for session S refused: 0x... (...)` (GalaSession input to a desktop no
   Test frame shows; the first 8), `desktop: session S's start menu
   asked for ...: not started` (ARCHITECTURE "Presenters (B3a)"). The
-  state dump's sessions line says which session the console shows.
+  state dump's sessions line says which session the console shows, and
+  each session's line what shows its desktop (a bare one `presenter none;
+  never shown: <why>`).
 - `console N: Ctrl+C k` and `console N: pid P tid T (name) takes Ctrl+C
   k after m ms`, with a warning `took Ctrl+C k late` from 250 ms: when
   each process's control handler took the event.
@@ -103,7 +117,14 @@ port. Lines that tools and agents rely on:
   leave); during the run `quota: new most per process: nonpaged pool N
   KiB (x.exe pid P)` each time that largest peak reaches a new power of
   two (from 256 KiB, or 1024 handles), so a server xtask stops before
-  the end still shows how far it went.
+  the end still shows how far it went; `quota: pid P (x.exe) NonPaged
+  pool limit set to N (in use U)` when NtSetInformationProcess
+  (ProcessQuotaLimits) changes one. A socket refused for its buffers
+  shows as the owner's `over its nonpaged pool` line (a listener refused
+  a listening socket logs it once per stretch); one refused by the
+  network stack's own budget or for memory as `net: a loopback socket is
+  refused: its N KiB of buffers are over the budget (... their buffers
+  .. KiB of the stack's .. KiB ...)`, once until a socket goes.
 - Kernel command-line options that add lines: `trace` (every system
   call; `um --trace` in gala-um), `gputrace` (every virtio-gpu command
   and its result), `logtee=C:/dir` (what programs write below a
@@ -142,19 +163,19 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 |---|---|
 | `syscall` | each call (pid, tid, nr, name, args, status, ns); `wait` on entry to a wait, so a thread blocked for good shows, naming the object waited on (`obj`: its type, `oid`: its identity, the same in every process; the first of several). `events_pid=a,b,..` limits system calls and waits to those processes (scenario `events_pid`; `XTASK_CMDLINE=events_pid=4` for a boot test), and `events_match=<text>` adds every process whose command line contains the text when it starts (a program's processes chosen by what they are: `events_match=network.mojom.NetworkService` for Chromium's network service; scenario `events_match`); 64 processes at most |
 | `image` | the exe and every image view (pid, NT path, base, size) |
-| `thread` | create (start address, TEB), exit (status) |
-| `process` | start (command line, `"session"`, `"personality":"nt"`, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line) |
+| `thread` | create (start address: the Win32 start routine, TEB, `teb32`: a WOW64 thread's 32-bit TEB, else 0), name (`thread name`: SetThreadDescription's, as NtSetInformationThread ThreadNameInformation sets it), exit (status) |
+| `process` | start (command line, `"session"`, `"personality":"nt"`, `"machine"`: `"x86"` for a 32-bit process running through WOW64, `"x64"` otherwise, `"ppid"` and `"ptid"`: the parent process and the thread that created it, 0 for processes the kernel starts; scenario `events_process`), exit (with the process's pool and handle peaks: `paged_peak`, `nonpaged_peak` in bytes, `handles_peak`); `session` (a session made after boot: id, its BaseNamedObjects); `quota exceeded` (pid, `kind`: `paged pool`, `nonpaged pool` or `handle limit`, `usage`, `want`, `limit`, `count`: the process's refusals so far; every refusal, unlike the log line) |
 | `fault` | every user-mode CPU exception, before it is resolved or delivered (pid, vector, rip, cr2, error) |
-| `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too; the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts samples lost to a full ring, interrupts off for over 8 sample periods, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads, modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
+| `sample` | the sampling profiler: every `sample_hz=` (default 100) each busy CPU is sampled by an NMI that the next CPU's timer tick sends it (round robin), so samples land inside code that runs with interrupts off (every `IrqMutex` section) too; the NMI records the interrupted thread (`by`), `mode` (`user`/`kernel`) and `rip` into a per-CPU ring of 8 that the CPU's own tick writes out (the `events:` line at exit counts samples lost to a full ring, interrupts off for over 8 sample periods, and the last sample before a loss carries `lost` with their number: `cargo xtask profile` lists those stretches by call path; scenario `events_sample` with `sampleprobe` checks that samples land inside a half second with interrupts off); a kernel sample also its `stack` (the return addresses of the interrupted code's frames, innermost first, at most 24: frame pointers, the chain ending at the first user-mode frame pointer). `cargo xtask profile <events.jsonl \| scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` attributes them to processes (Chromium's `--type` and utility sub-type shown), threads (each with where it starts, `starts at module+offset`, from its `thread create` event's Win32 start address), modules (the `image` events; record `image,thread,process` with it) and functions: kernel addresses from the kernel ELF, a module's from `DIR/<module>` and its symbols (llvm-symbolizer at its preferred base; `target/prebuilt/chromium-syms` for Chromium), else 256-byte blocks; from the kernel stacks, each kernel function's share including what it calls and the heaviest call paths (`leaf <- caller <- ...`), which name who calls a hot function. With one CPU the tick samples itself, and a tick held back while interrupts are off is taken where they come back on: there a lock guard's drop (`IrqGuard`, `SpaceGuard`) as a leaf stands for the whole section the lock was held. Scenario `events_sample` |
 | `ipc` | pipes: `pipe create` (pipe number, name, message type, instance), `pipe connect`, `pipe write` (`end`, `to`, `off`: the offset of its first byte in the stream to that end, `bytes`, `queued`), `pipe read` (`end`, `off`, `bytes`, `left`; `by` may be the writer completing a waiting read), `pipe disconnect` (`unread`: bytes discarded), `pipe close`; I/O completion ports: `iocp post` (port number, key, ctx, status, bytes, depth) and `iocp dequeue` (the same with `queued_t` and `queued_by`: when and by which thread the packet was queued). Scenario `events_ipc` |
 | `mock` | live mocking's changes (clock control, record/replay) |
-| `net` | TCP accept, connect, close, reset, with local and remote addresses |
+| `net` | TCP accept, connect, close, reset, with local and remote addresses; shutdown (`tcp shutdown`), close and reset with the connection's byte counts (`sent`, `received` by its owner, `unsent`, `unread` then); a listener's backlog filling (`tcp backlog full`: further connections refused, or ignored on Linux sockets) and each SYN ignored over it (`tcp syn ignored`, the client's address); AFD's `afd shutdown after sends`, `afd send failed`, `afd shutdown failed` |
 | `logon` | LogonUser and LSA logons: pid, user, domain, type, how, status (never the password) |
 | `console` | console sessions and pseudo consoles created, resized, closed (with how many programs it ended); `console ctrl`, `console ctrl taken` |
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
 | `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names) |
-| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none) |
+| `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `button` and `key` (the desktop's delivery: message, window, owner; the screen point or virtual key), `input taken` (a button or key its program took from the queue: message, window, owner; `by` the taking thread), `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h; a bare one, which nothing can show, `bare`: why), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none, `bare`), `noscreen_windows` and `server_profile_windows` (the desktop kernel's bare `live` without a screen and in the server profile) |
 
 A `record` boot's recording also goes to this port (`"ev":"rec"`,
 whatever the mask; extracted to `<iso>.rec`).
@@ -167,14 +188,56 @@ copied next to a failed log as `<scenario>.events.jsonl`.
 ### OpenTelemetry export
 
 `xtask/src/otel.rs` turns one boot's event stream and serial log into
-OTLP/JSON (stage OT1 of ROADMAP OT): `cargo xtask otel <serial log |
+OpenTelemetry (stage OT1 of ROADMAP OT): `cargo xtask otel <serial log |
 events.jsonl | scenario> [<events.jsonl>] [--out <prefix>] [--endpoint
 http://host:4318]` (or `OTEL_EXPORTER_OTLP_ENDPOINT`), and `XTASK_OTEL=1`
 makes boot-test write it for every boot. How to view it: WORKFLOW
 "OpenTelemetry". The kernel is unchanged: this maps what the stream has
-today. A hand-written encoder (no OTel crate) follows the OTLP/JSON
-mapping of opentelemetry-proto: ids in hex, 64-bit integers as decimal
-strings, enums as numbers.
+today. The conversion builds one model of the export (`otel/wire.rs`
+`Data`: spans, log records, data points, in absolute times) that two
+hand-written encoders (no protoc, no OTel crate) write from
+opentelemetry-proto's definitions:
+
+- **Files are OTLP/JSON** (for reading and diffing): ids in hex, 64-bit
+  integers as decimal strings, enums as numbers; one request a line, at
+  most 5000 spans or records a request.
+- **What is sent is OTLP/HTTP binary protobuf** (`application/x-protobuf`)
+  by the field numbers of common/v1, resource/v1, trace/v1, logs/v1,
+  metrics/v1 and the collector's `Export*ServiceRequest`: ids as raw
+  bytes (16 and 8), times fixed64, enums varints, `as_int` sfixed64,
+  proto3 defaults left out except inside a oneof (an `AnyValue` of 0,
+  false or "" is written). `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` sends
+  the same batches as OTLP/JSON instead; any other value (`grpc`) is
+  refused. The unit tests decode the protobuf back, by the field
+  numbers, and compare it with the JSON form.
+- **Profiles stay OTLP/JSON** on the wire too (POSTed as
+  `application/json`, which OTLP/HTTP receivers take beside protobuf):
+  their dictionary is built as JSON tables, and profiles/v1development's
+  field numbers still change between releases.
+- **Compression**: gzip (`Content-Encoding: gzip`, flate2 over
+  miniz_oxide) unless `OTEL_EXPORTER_OTLP_COMPRESSION=none`.
+- **Batching** (`otel/send.rs`, built for the in-guest exporter of OT5
+  as much as for the export after a boot): each signal has a `Batcher`,
+  a bounded queue (4096 items) that gives a batch of at most 512 items
+  (spans, log records or data points; a request groups consecutive
+  points of one metric) when one is full or a second after the last
+  batch was done. A push to a full queue is refused and counted. The
+  export after a boot queues items as a live exporter would and sends
+  what is due (`tick`), so a full batch leaves before the next item is
+  queued, then flushes the rest.
+- **Retries**: a request that fails to connect, or gets 429, 502, 503 or
+  504, is retried up to 5 attempts in all, waiting 1 s and doubling up
+  to 16 s; a `Retry-After` of seconds on 429 or 503 replaces the wait
+  (at most 60 s; an HTTP-date is not read, the backoff applies). Other
+  statuses are not retried. A batch that fails for good stops the
+  export: its items count as FAILED and those never sent as NOT SENT. An
+  accepted request's partial success (`rejected_*`, `error_message`) is
+  read in either encoding and counted as REJECTED.
+- **Its report**: `otel: sent to <endpoint>: http/protobuf, gzip; traces
+  N requests, N spans, N KiB (N KiB before gzip); logs ...; metrics ...;
+  profiles ... (JSON); N retries (last: why, which path, how long); N
+  dropped`, with DROPPED, FAILED, NOT SENT and REJECTED per signal when
+  not zero; a failure prints the error followed by the same line.
 
 | Source | OTel | Names (semantic conventions first, else `gala.`) |
 |---|---|---|
@@ -185,6 +248,7 @@ strings, enums as numbers.
 | `wait` (a wait's entry) | merged into its `syscall` span; one that never returns: span event `<service> (entered, no return)` on its thread | as the stream has them |
 | `fault` | span event `fault #PF page fault` (by vector) on the thread, else the process |
 | `pipe write` / `pipe read` | a zero-length span on the thread that did it; a read links each write whose bytes it took (`data from`) | `gala.pipe.id`, `.name`, `.offset`, `.end`/`.to_end`, `.waited_ns` (from the first such write), `messaging.message.body.size` |
+| `button` / `key` / `input taken` | a zero-length span on the thread that did it (a delivery: the boot, the desktop being the kernel's); a taking links its delivery (`input from`, FIFO per window and message: a window gets its input in order) and `otel: slow input` names the five longest waits | `gala.input.window`, `.message`, `.owner`, `.x`/`.y` or `.vk`, `.queued_ns` |
 | `iocp post` / `iocp dequeue` | a zero-length span on the thread that did it; a dequeue links its post (`completion of`, FIFO per port and context) | `gala.iocp.port`, `.key`, `.context`, `.bytes`, `.status`, `.queued_ns`, `.queued_by` | `gala.fault.vector`, `.rip`, `.address` (cr2), `.error` |
 | `image` | span event `image load <file>` on the process | `gala.image.name`, `.base`, `.size` |
 | every other kind (`console *`, `clock_*`, `tcp *`, `logon`, `session`, `display *`, ...) | span event of that name on its thread (`tid`, else the emitting thread `by`), process, or the boot | `gala.<field>`; `pid`/`tid` as `process.pid`/`thread.id` |
@@ -241,8 +305,8 @@ hit (scenario `ledger_test`).
   missing` (a call it lacks, by number), `linux syscall stub` (accepted
   without its effect: ioctl, wait4's rusage), `linux
   option missing` (a flag, family, option or case not supported: open
-  flags, socket families and options, CPU-time clocks, unlink of an open
-  file, process groups...), `linux clone flags missing` (clone flags;
+  flags, socket families and options, CPU-time clocks, an unlink or
+  rename an NT program's open refuses, process groups...), `linux clone flags missing` (clone flags;
   vfork's CLONE_VM, its memory being a copy). ARCHITECTURE "The lx
   module", "Observability", lists them with the `lx:` log lines (`lx:
   pid <p> execve <path>`, `lx: pid <p> vfork: child pid <c> ...`).
@@ -335,23 +399,50 @@ boot test times out, xtask injects an NMI (QEMU monitor `nmi`, every
 CPU) before killing the VM and waits up to 20 s for the dump:
 
 1. From the NMI (only atomics and `try_lock`): each CPU's rip and kernel
-   backtrace (`statedump: cpu N ...`, symbolized in the failed log), the
+   backtrace (`statedump: cpu N ...`, symbolized in the failed log;
+   `user 32-bit` for a CPU interrupted in a WOW64 thread's 32-bit code), the
    thread each CPU runs, whether the scheduler, heap, frame and console
    locks are free (a lock held for the whole dump is the deadlock), heap
    and frame figures, the flight recorder.
-2. From the boot thread (may take locks): every NT thread's system call
-   and wait object (with `session N personality nt (name)`), every
+2. From the boot thread (may take locks): every NT thread's start
+   routine (`start 0x...`, its Win32 start address: which thread it is,
+   a pool worker or the program's own; also in triage's thread lines)
+   and its name if the program gave it one (` name "CrBrowserMain"`,
+   SetThreadDescription; also in triage and, from the `thread name`
+   event, in `cargo xtask profile`'s threads),
+   system call and wait object (with `session N personality nt (name)`; for a WOW64
+   thread also the 32-bit code that made the call, from its CPU area:
+   `called from 32-bit code: eip=... esp=...`; for a 64-bit one the
+   caller of the system call stub, the return address on top of its user
+   stack: `called from 0x... (kernel32.dll+0x...)`, which names the lock
+   or wait a hang sits in; for a keyed-event wait, what critical sections,
+   SRW locks, condition variables and WaitOnAddress sleep on, the key, the
+   value there and who is queued for it: `key 0x... (value there 0x...);
+   queued for it: (waiters, releasers, all entries) Some((1, 0, 1))`, so a
+   release waiting with no waiter, or a waiter whose value changed, shows),
+   every
    running process's commit charge and pool and handle quotas
-   (`process: pid P (x.exe) commit N KiB; paged U/L (peak P) nonpaged
+   (`process: pid P (x.exe) commit N KiB, R reservations, G regions; paged U/L (peak P) nonpaged
    U/L (peak P) handles N/L (peak P) refused R`, bytes), every
-   scheduler thread, the ledger, each Linux thread (`lx: pid P thread
+   scheduler thread (a waiting one with where its wait began:
+   `sched: thread N (x) Waiting { until_tick: None } at
+   kernel/src/lx/futex.rs:304`, the caller of `prepare_wait` through
+   `#[track_caller]` wrappers; the only clue for a Linux thread, which
+   has no NT system-call record), the ledger, each Linux thread (`lx: pid P thread
    T (core C): mask .. pending .. process pending .. blocked|running`),
    each epoll set's entries (`lx: pid P epoll fd N: fd ..`) and every
    futex waiter (`lx: futex waiter: pid P address A bitset B thread
    T`), the statistics, each session's
    windows (`statedump: session N: ... windows ...`) and window stations
-   (`statedump: session N window stations: WinSta0 ...`), then
-   `statedump: end`. A machine too stuck for this still has part 1.
+   (`statedump: session N window stations: WinSta0 ...`), its input
+   queue (`statedump: session N input queue: K waiting, D dropped
+   (full)`) and the last 16 mouse buttons and keys its desktop
+   delivered, each with what became of it (`statedump: session N button
+   0x201 at (x, y) to window W ... ms ago, taken after M ms`, `key
+   0x100 vk 0x47 ...`, `not taken by its program`, `dropped (queue
+   full)`: kept whether or not `events=window` is on, so input a
+   program ignored shows where it went and whether the program took it,
+   in a run whose timing a trace would change), then `statedump: end`. A machine too stuck for this still has part 1.
 
 xtask's line says how far the dump got (`did not answer the NMI`: the
 machine is wedged or the handler is not installed yet).
@@ -373,7 +464,18 @@ filter that ends the process with its own status (Chromium's Crashpad:
 0xffff7002 when its handler fails) still leaves the report, headed
 "ended with status S after an unhandled exception C"; a filter that
 continues execution withdraws it. Scenarios `crash`, `crash_dispatched`
-and `crash_filtered`.
+and `crash_filtered`. An exception in 32-bit code (a WOW64 process, CS
+0x23) says `32-bit x86 (WOW64)` after the personality and shows eax..esp,
+eip and the stack's 4-byte words (`[esp+0x..]`); scenario `wow64_crash`
+(no 32-bit ntdll: the kernel ends the process) and `wow64_seh_crash`
+(the 32-bit ntdll's dispatcher found no handler: wow64.dll passes its
+record and the 32-bit registers on through GalaUnhandledException, and
+the ledger has `ntdll.dll!unhandled exception` as for 64-bit code).
+An exception in wow64.dll's own 64-bit code other than a fault on a
+caller's invalid 32-bit pointer (which fails that call with
+STATUS_ACCESS_VIOLATION) is a bug there: its dispatcher reports it
+through GalaUnhandledException, so the report shows the 64-bit registers
+at `wow64.dll+0x...`.
 
 ### Crash record across reboots
 

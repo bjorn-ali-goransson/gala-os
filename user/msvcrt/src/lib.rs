@@ -7,6 +7,12 @@
 //! handling), the heap (`heap.rs`), stdio to the console handles
 //! (`stdio.rs`, with a printf engine), time conversion (`time.rs`),
 //! strings, `qsort`, `rand`.
+//!
+//! Built for x64 (System32) and for x86 (SysWOW64's, ARCHITECTURE "Plan:
+//! WOW64"): what differs by architecture is in `x64.rs` and `x86.rs` (the
+//! variadic entry points, setjmp/longjmp, the floating-point control);
+//! the `va_list` walker (`va.rs`) and the structures with pointer-sized
+//! fields (FILE, lconv, STARTUPINFO, ...) take the architecture's sizes.
 
 #![no_std]
 #![allow(non_snake_case, non_upper_case_globals)]
@@ -24,17 +30,31 @@
     clippy::needless_range_loop
 )]
 
+// The architecture's parts: x64 (System32's msvcrt) or x86 (SysWOW64's).
+#[cfg(target_arch = "x86_64")]
+#[path = "x64.rs"]
+mod arch;
+#[cfg(target_arch = "x86")]
+#[path = "x86.rs"]
+mod arch;
+
 mod float;
 mod heap;
 mod math;
 mod misc;
 mod posix;
 mod scan;
-mod setjmp;
 mod stdio;
 mod time;
+mod va;
 mod wide;
 mod wide_more;
+
+// The 32-bit build: the memory routines, 64-bit division helpers and
+// stack probe the compiler calls on x86 (and memcmp/strlen, exported as
+// msvcrt's own) come from ntrt's x86 runtime.
+#[cfg(target_arch = "x86")]
+use ntrt as _;
 
 use core::ffi::c_void;
 use core::ptr::null_mut;
@@ -42,7 +62,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use heap::{calloc, free, malloc, realloc};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetCommandLineW() -> *const u16;
     fn GetEnvironmentStringsW() -> *mut u16;
@@ -50,11 +74,16 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -67,9 +96,62 @@ unsafe extern "C" {
     fn __CxxFrameHandler3();
 }
 
+// x86: ntrt's (above): strlen is a Rust function there, the memory
+// routines are its assembly.
+#[cfg(target_arch = "x86")]
+use ntrt::strlen;
+#[cfg(target_arch = "x86")]
+unsafe extern "C" {
+    fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+}
+
 /// Referenced by code that uses floating point (MSVC target convention).
+/// On x86, ntrt's.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
+
+/// STARTUPINFOA (winbase.h), its pointers and handles pointer-sized.
+#[repr(C)]
+pub(crate) struct StartupInfoA {
+    pub cb: u32,
+    pub reserved: usize,
+    pub desktop: usize,
+    pub title: usize,
+    pub x: u32,
+    pub y: u32,
+    pub x_size: u32,
+    pub y_size: u32,
+    pub x_count_chars: u32,
+    pub y_count_chars: u32,
+    pub fill_attribute: u32,
+    pub flags: u32,
+    pub show_window: u16,
+    pub cb_reserved2: u16,
+    pub reserved2: *mut u8,
+    pub std_input: usize,
+    pub std_output: usize,
+    pub std_error: usize,
+}
+
+const _: () =
+    assert!(size_of::<StartupInfoA>() == if cfg!(target_arch = "x86") { 68 } else { 104 });
+
+/// SECURITY_ATTRIBUTES (minwinbase.h).
+#[repr(C)]
+pub(crate) struct SecurityAttributes {
+    length: u32,
+    descriptor: usize,
+    inherit: i32,
+}
+
+impl SecurityAttributes {
+    /// No descriptor; the handle inheritable or not.
+    pub(crate) fn inheritable(inherit: bool) -> Self {
+        Self { length: size_of::<Self>() as u32, descriptor: 0, inherit: i32::from(inherit) }
+    }
+}
 
 /// Reports a gap to the kernel's missing-features ledger.
 fn missing(function: &[u8], detail: u64) {
@@ -110,6 +192,18 @@ pub static mut __initenv: *mut *mut u8 = null_mut();
 pub static mut _commode: i32 = 0;
 #[unsafe(no_mangle)]
 pub static mut _fmode: i32 = 0;
+
+/// __p__fmode/__p__commode: the addresses of `_fmode` and `_commode`
+/// (mingw-w64's startup code sets them through these).
+#[unsafe(no_mangle)]
+pub extern "C" fn __p__fmode() -> *mut i32 {
+    &raw mut _fmode
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __p__commode() -> *mut i32 {
+    &raw mut _commode
+}
 
 /// _acmdln: the command line, narrowed (set when the DLL loads; MinGW's
 /// startup code for GUI programs reads it).
@@ -239,7 +333,7 @@ fn build_args() {
     };
     let mut count = 0usize;
     split_args(line, |_| count += 1);
-    let argv = malloc((count + 1) * 8).cast::<*mut u8>();
+    let argv = malloc((count + 1) * size_of::<usize>()).cast::<*mut u8>();
     if argv.is_null() {
         return;
     }
@@ -273,7 +367,7 @@ fn build_environment() {
             entries += 1;
             p = p.add(1);
         }
-        let env = malloc((entries + 1) * 8).cast::<*mut u8>();
+        let env = malloc((entries + 1) * size_of::<usize>()).cast::<*mut u8>();
         if env.is_null() {
             FreeEnvironmentStringsW(block);
             return;
@@ -422,42 +516,23 @@ pub extern "C" fn abort() -> ! {
     unsafe { ExitProcess(3) }
 }
 
-/// _controlfp(new, mask): the floating-point control word in msvcrt's
-/// abstract form, its `mask` bits set from `new`; the new word. On x64 it
-/// is MXCSR: exception masks (_MCW_EM), rounding (_MCW_RC) and
-/// denormal flushing (_MCW_DN); precision (_MCW_PC) does not apply.
+/// _fpreset(): the floating-point state programs start with (as Wine
+/// documents msvcrt's): the x87 initialized with control word 0x27f (all
+/// exceptions masked, 53-bit precision, round to nearest), MXCSR 0x1f80.
 #[unsafe(no_mangle)]
-pub extern "C" fn _controlfp(new: u32, mask: u32) -> u32 {
-    // (abstract bit, MXCSR bit): the exception masks, then FTZ.
-    const BITS: [(u32, u32); 7] = [
-        (0x10, 0x80),          // _EM_INVALID
-        (0x8_0000, 0x100),     // _EM_DENORMAL
-        (0x8, 0x200),          // _EM_ZERODIVIDE
-        (0x4, 0x400),          // _EM_OVERFLOW
-        (0x2, 0x800),          // _EM_UNDERFLOW
-        (0x1, 0x1000),         // _EM_INEXACT
-        (0x0100_0000, 0x8000), // _DN_FLUSH
-    ];
-    // _RC_NEAR 0, _RC_DOWN 0x100, _RC_UP 0x200, _RC_CHOP 0x300; MXCSR's
-    // RC field (bits 13-14) is 0 nearest, 1 down, 2 up, 3 toward zero.
-    const MCW_RC: u32 = 0x300;
-    let mut mxcsr = 0u32;
-    // SAFETY: reads MXCSR into a local.
-    unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &raw mut mxcsr, options(nostack)) };
-    let mut word = BITS.iter().filter(|(_, m)| mxcsr & m != 0).fold(0, |w, (a, _)| w | a);
-    word |= ((mxcsr >> 13) & 3) << 8;
-    let mask = mask & !0x3_0000; // _MCW_PC
-    word = (word & !mask) | (new & mask);
-    let mut out = mxcsr & !(0x1f80 | 0x8000 | 0x6000);
-    for (a, m) in BITS {
-        if word & a != 0 {
-            out |= m;
-        }
+pub extern "C" fn _fpreset() {
+    let (cw, mx) = (0x27fu16, 0x1f80u32);
+    // SAFETY: resets the x87 and loads the two documented control words.
+    unsafe {
+        core::arch::asm!(
+            "fninit",
+            "fldcw [{cw}]",
+            "ldmxcsr [{mx}]",
+            cw = in(reg) &raw const cw,
+            mx = in(reg) &raw const mx,
+            options(nostack),
+        );
     }
-    out |= ((word & MCW_RC) >> 8) << 13;
-    // SAFETY: loads the updated MXCSR (only control bits changed).
-    unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &raw const out, options(nostack)) };
-    word
 }
 
 /// _XcptFilter(code, pointers): the C runtime's exception filter, which

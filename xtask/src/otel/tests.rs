@@ -675,48 +675,539 @@ fn the_schema_check_rejects_an_unknown_field() {
     check_message(&parse_json(&bad).unwrap(), "ExportTraceServiceRequest", "traces");
 }
 
-#[test]
-fn the_export_is_posted_over_otlp_http() {
+/// A local OTLP/HTTP endpoint for the sending tests: answers each request
+/// with `answer(index, path)` (status line and headers), records (path,
+/// head, body, when), and stops at a request to `/stop`.
+/// A request the endpoint took: (path, head, body, when).
+type Request = (String, String, Vec<u8>, std::time::Instant);
+
+fn endpoint(
+    answer: impl Fn(usize, &str) -> String + Send + 'static,
+) -> (u16, std::thread::JoinHandle<Vec<Request>>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let mut seen = Vec::new();
-        for _ in 0..3 {
+        loop {
             let (mut c, _) = listener.accept().unwrap();
             let mut req = Vec::new();
             let mut buf = [0; 65536];
             // The head, then the body by its length.
-            loop {
+            let (head, body) = loop {
                 let n = c.read(&mut buf).unwrap();
                 req.extend_from_slice(&buf[..n]);
-                let text = String::from_utf8_lossy(&req).into_owned();
-                if let Some((head, body)) = text.split_once("\r\n\r\n") {
-                    let len: usize = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("Content-Length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
-                    if body.len() >= len {
-                        assert!(head.contains("Content-Type: application/json"));
-                        parse_json(body).expect("a JSON body");
-                        seen.push(head.lines().next().unwrap().to_string());
-                        break;
+                let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                let head = String::from_utf8_lossy(&req[..end]).into_owned();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .map_or(0, |l| l.parse().unwrap());
+                if req.len() >= end + 4 + len {
+                    break (head, req[end + 4..end + 4 + len].to_vec());
+                }
+            };
+            let path = head.split_whitespace().nth(1).unwrap().to_string();
+            if path == "/stop" {
+                return seen;
+            }
+            let status = answer(seen.len(), &path);
+            c.write_all(format!("{status}\r\nContent-Length: 0\r\n\r\n").as_bytes()).unwrap();
+            seen.push((path, head, body, std::time::Instant::now()));
+        }
+    });
+    (port, server)
+}
+
+fn stop(port: u16) {
+    use std::io::Write;
+    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.write_all(b"POST /stop HTTP/1.1\r\nContent-Length: 0\r\n\r\n").unwrap();
+}
+
+#[test]
+fn the_export_is_posted_as_json_when_asked() {
+    let (port, server) = endpoint(|_, _| "HTTP/1.1 200 OK".into());
+    let e = export();
+    let mut x = send::Exporter::new(
+        &format!("http://127.0.0.1:{port}"),
+        send::Protocol::Json,
+        false,
+        &e.data.resource,
+    )
+    .unwrap();
+    let sent = send::post_with(&mut x, &e).unwrap();
+    stop(port);
+    assert!(sent.starts_with("http/json; traces 1 request"), "{sent}");
+    let seen = server.join().unwrap();
+    let paths: Vec<&str> = seen.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(paths, ["/v1/traces", "/v1/logs", "/v1/metrics"]);
+    for (_, head, body, _) in &seen {
+        assert!(head.contains("Content-Type: application/json"), "{head}");
+        assert!(!head.contains("Content-Encoding"), "{head}");
+        parse_json(std::str::from_utf8(body).unwrap()).expect("a JSON body");
+    }
+    // The JSON sent is the JSON written.
+    assert_eq!(seen[0].2, e.traces[0].as_bytes());
+    assert!(post("https://example.com", &e).is_err(), "plain http only");
+}
+
+/// A boot with `n` system call spans (and its threads, process, boot).
+fn many_spans(n: u64) -> Export {
+    let mut events = String::new();
+    for i in 0..n {
+        events += &format!(
+            "{{\"t\":{},\"cpu\":0,\"ev\":\"syscall\",\"pid\":4,\"tid\":8,\"nr\":15,\"name\":\"NtClose\",\"args\":[4],\"status\":0,\"ns\":5}}\n",
+            100 + i * 10
+        );
+    }
+    convert(&Boot {
+        serial: SERIAL,
+        events: &events,
+        scenario: "x",
+        build: "",
+        start_unix_ns: BASE,
+        symbols: None,
+    })
+}
+
+fn gunzip(body: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(body).read_to_end(&mut out).expect("a gzip body");
+    out
+}
+
+#[test]
+fn the_export_is_posted_as_gzipped_protobuf_in_batches_and_a_503_is_retried() {
+    // The first traces request is refused for a second.
+    let (port, server) = endpoint(|i, _| {
+        if i == 0 {
+            "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1".into()
+        } else {
+            "HTTP/1.1 200 OK".into()
+        }
+    });
+    let e = many_spans(1200);
+    let mut x = send::Exporter::new(
+        &format!("http://127.0.0.1:{port}"),
+        send::Protocol::Protobuf,
+        true,
+        &e.data.resource,
+    )
+    .unwrap();
+    let sent = send::post_with(&mut x, &e).unwrap();
+    stop(port);
+    let seen = server.join().unwrap();
+    let mut spans = 0;
+    let mut traces = 0;
+    for (path, head, body, _) in &seen {
+        assert!(head.contains("Content-Type: application/x-protobuf"), "{head}");
+        assert!(head.contains("Content-Encoding: gzip"), "{head}");
+        let body = gunzip(body);
+        let (message, items) = match path.as_str() {
+            "/v1/traces" => ("ExportTraceServiceRequest", "spans"),
+            "/v1/logs" => ("ExportLogsServiceRequest", "logRecords"),
+            "/v1/metrics" => ("ExportMetricsServiceRequest", "dataPoints"),
+            other => panic!("{other}"),
+        };
+        let n = count(&decode(&body, message), items);
+        assert!((1..=send::MAX_BATCH).contains(&n), "{path}: {n} items");
+        if path == "/v1/traces" {
+            traces += 1;
+            spans += n;
+        }
+    }
+    let total = e.data.spans.len();
+    assert!(total > 2 * send::MAX_BATCH, "{total}");
+    // Every batch once, the refused one twice.
+    assert_eq!(traces, total.div_ceil(send::MAX_BATCH) + 1);
+    assert_eq!(spans - send::MAX_BATCH, total);
+    assert_eq!(seen[0].2, seen[1].2, "the refused batch is sent again");
+    let waited = seen[1].3 - seen[0].3;
+    assert!(waited >= std::time::Duration::from_millis(900), "Retry-After honoured: {waited:?}");
+    assert!(sent.starts_with("http/protobuf, gzip; traces 3 requests"), "{sent}");
+    assert!(sent.contains("1 retry (last: HTTP 503"), "{sent}");
+    assert!(sent.contains("Retry-After 1 s, on /v1/traces"), "{sent}");
+    assert!(sent.ends_with("0 dropped"), "{sent}");
+}
+
+#[test]
+fn a_request_refused_for_good_stops_the_export_and_says_what_was_not_sent() {
+    let (port, server) = endpoint(|_, _| "HTTP/1.1 400 Bad Request".into());
+    let e = many_spans(600);
+    let mut x = send::Exporter::new(
+        &format!("http://127.0.0.1:{port}"),
+        send::Protocol::Protobuf,
+        false,
+        &e.data.resource,
+    )
+    .unwrap();
+    let err = send::post_with(&mut x, &e).unwrap_err();
+    stop(port);
+    assert_eq!(server.join().unwrap().len(), 1, "400 is not retried");
+    let rest = e.data.spans.len() - send::MAX_BATCH;
+    assert!(err.starts_with("POST /v1/traces to 127.0.0.1:"), "{err}");
+    assert!(err.contains(&format!("512 FAILED, {rest} NOT SENT")), "{err}");
+    assert!(err.contains("log records") && err.contains("NOT SENT"), "{err}");
+}
+
+#[test]
+fn connection_failures_are_retried_with_backoff_then_given_up() {
+    // A port nothing listens on.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let e = export();
+    let mut x = send::Exporter::new(
+        &format!("http://127.0.0.1:{port}"),
+        send::Protocol::Protobuf,
+        true,
+        &e.data.resource,
+    )
+    .unwrap();
+    x.retry = send::Retry {
+        attempts: 3,
+        first: std::time::Duration::from_millis(10),
+        max: std::time::Duration::from_millis(15),
+        retry_after_max: std::time::Duration::from_secs(1),
+    };
+    let err = send::post_with(&mut x, &e).unwrap_err();
+    assert!(err.contains("gave up after 3 attempts"), "{err}");
+    assert!(err.contains("2 retries"), "{err}");
+    assert!(err.contains("waited 15 ms"), "backoff doubles up to its max: {err}");
+}
+
+#[test]
+fn a_full_queue_drops_and_counts() {
+    let t0 = std::time::Instant::now();
+    let second = std::time::Duration::from_secs(1);
+    let mut b = send::Batcher::new(3, 2, second, t0);
+    for i in 0..4 {
+        assert_eq!(b.push(i), i < 3);
+    }
+    assert_eq!(b.dropped, 1);
+    assert!(b.due(t0), "a full batch is due at once");
+    assert_eq!(b.take(t0), [0, 1]);
+    assert!(!b.due(t0), "one item waits for the interval");
+    assert!(b.due(t0 + second));
+    assert_eq!(b.take(t0 + second), [2]);
+    assert!(!b.due(t0 + 5 * second), "nothing queued, nothing due");
+
+    // The exporter reports its queues' drops.
+    let e = export();
+    let mut x =
+        send::Exporter::new("http://127.0.0.1:9", send::Protocol::Protobuf, true, &e.data.resource)
+            .unwrap();
+    for _ in 0..send::QUEUE + 5 {
+        x.push_span(e.data.spans[0].clone());
+    }
+    assert!(x.summary().contains("5 DROPPED (queue full)"), "{}", x.summary());
+    assert!(x.summary().ends_with("; 5 dropped"), "{}", x.summary());
+}
+
+#[test]
+fn the_protocol_and_compression_come_from_the_environment_names() {
+    use send::Protocol;
+    assert_eq!(Protocol::parse(None), Ok(Protocol::Protobuf));
+    assert_eq!(Protocol::parse(Some("http/protobuf")), Ok(Protocol::Protobuf));
+    assert_eq!(Protocol::parse(Some("http/json")), Ok(Protocol::Json));
+    assert!(Protocol::parse(Some("grpc")).is_err());
+    assert_eq!(send::parse_compression(None), Ok(true));
+    assert_eq!(send::parse_compression(Some("none")), Ok(false));
+    assert!(send::parse_compression(Some("zstd")).is_err());
+}
+
+#[test]
+fn a_partial_success_is_read_in_both_encodings() {
+    let pb = [0x0a, 6, 0x08, 3, 0x12, 2, b'n', b'o'];
+    assert_eq!(send::partial_success("application/x-protobuf", &pb), Some((3, "no".into())));
+    let json = br#"{"partialSuccess":{"rejectedSpans":"3","errorMessage":"no"}}"#;
+    assert_eq!(send::partial_success("application/json", json), Some((3, "no".into())));
+    assert_eq!(send::partial_success("application/json", b"{}"), None);
+    assert_eq!(send::partial_success("application/x-protobuf", &[]), None);
+}
+
+// ---- a protobuf decoder, by opentelemetry-proto's field numbers, into
+// the OTLP/JSON form ----
+
+#[derive(Clone, Copy)]
+enum Pb {
+    Msg(&'static str),
+    Str,
+    /// bytes: a trace or span id, as hex.
+    Id,
+    /// A varint enum (a JSON number).
+    Enum,
+    /// int64 varint, fixed64, sfixed64 (JSON strings).
+    Int64,
+    Fixed64,
+    SFixed64,
+    Bool,
+}
+
+/// (field number, JSON name, kind, repeated) of a message.
+fn proto(message: &str) -> &'static [(u64, &'static str, Pb, bool)] {
+    use Pb::*;
+    match message {
+        "ExportTraceServiceRequest" => &[(1, "resourceSpans", Msg("ResourceSpans"), true)],
+        "ResourceSpans" => {
+            &[(1, "resource", Msg("Resource"), false), (2, "scopeSpans", Msg("ScopeSpans"), true)]
+        }
+        "ScopeSpans" => {
+            &[(1, "scope", Msg("InstrumentationScope"), false), (2, "spans", Msg("Span"), true)]
+        }
+        "ExportLogsServiceRequest" => &[(1, "resourceLogs", Msg("ResourceLogs"), true)],
+        "ResourceLogs" => {
+            &[(1, "resource", Msg("Resource"), false), (2, "scopeLogs", Msg("ScopeLogs"), true)]
+        }
+        "ScopeLogs" => &[
+            (1, "scope", Msg("InstrumentationScope"), false),
+            (2, "logRecords", Msg("LogRecord"), true),
+        ],
+        "ExportMetricsServiceRequest" => &[(1, "resourceMetrics", Msg("ResourceMetrics"), true)],
+        "ResourceMetrics" => &[
+            (1, "resource", Msg("Resource"), false),
+            (2, "scopeMetrics", Msg("ScopeMetrics"), true),
+        ],
+        "ScopeMetrics" => {
+            &[(1, "scope", Msg("InstrumentationScope"), false), (2, "metrics", Msg("Metric"), true)]
+        }
+        "Resource" => &[(1, "attributes", Msg("KeyValue"), true)],
+        "InstrumentationScope" => &[(1, "name", Str, false), (2, "version", Str, false)],
+        "KeyValue" => &[(1, "key", Str, false), (2, "value", Msg("AnyValue"), false)],
+        "AnyValue" => &[
+            (1, "stringValue", Str, false),
+            (2, "boolValue", Bool, false),
+            (3, "intValue", Int64, false),
+            (5, "arrayValue", Msg("ArrayValue"), false),
+        ],
+        "ArrayValue" => &[(1, "values", Msg("AnyValue"), true)],
+        "Span" => &[
+            (1, "traceId", Id, false),
+            (2, "spanId", Id, false),
+            (4, "parentSpanId", Id, false),
+            (5, "name", Str, false),
+            (6, "kind", Enum, false),
+            (7, "startTimeUnixNano", Fixed64, false),
+            (8, "endTimeUnixNano", Fixed64, false),
+            (9, "attributes", Msg("KeyValue"), true),
+            (11, "events", Msg("Event"), true),
+            (13, "links", Msg("Link"), true),
+            (15, "status", Msg("Status"), false),
+        ],
+        "Event" => &[
+            (1, "timeUnixNano", Fixed64, false),
+            (2, "name", Str, false),
+            (3, "attributes", Msg("KeyValue"), true),
+        ],
+        "Link" => &[
+            (1, "traceId", Id, false),
+            (2, "spanId", Id, false),
+            (4, "attributes", Msg("KeyValue"), true),
+        ],
+        "Status" => &[(2, "message", Str, false), (3, "code", Enum, false)],
+        "LogRecord" => &[
+            (1, "timeUnixNano", Fixed64, false),
+            (2, "severityNumber", Enum, false),
+            (3, "severityText", Str, false),
+            (5, "body", Msg("AnyValue"), false),
+            (6, "attributes", Msg("KeyValue"), true),
+            (9, "traceId", Id, false),
+            (10, "spanId", Id, false),
+            (11, "observedTimeUnixNano", Fixed64, false),
+        ],
+        "Metric" => &[
+            (1, "name", Str, false),
+            (3, "unit", Str, false),
+            (5, "gauge", Msg("Gauge"), false),
+            (7, "sum", Msg("Sum"), false),
+        ],
+        "Gauge" => &[(1, "dataPoints", Msg("NumberDataPoint"), true)],
+        "Sum" => &[
+            (1, "dataPoints", Msg("NumberDataPoint"), true),
+            (2, "aggregationTemporality", Enum, false),
+            (3, "isMonotonic", Bool, false),
+        ],
+        "NumberDataPoint" => &[
+            (2, "startTimeUnixNano", Fixed64, false),
+            (3, "timeUnixNano", Fixed64, false),
+            (6, "asInt", SFixed64, false),
+            (7, "attributes", Msg("KeyValue"), true),
+        ],
+        other => panic!("no proto for {other}"),
+    }
+}
+
+fn read_varint(b: &[u8], i: &mut usize) -> u64 {
+    let mut v = 0;
+    for shift in (0..64).step_by(7) {
+        let byte = b[*i];
+        *i += 1;
+        v |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return v;
+        }
+    }
+    panic!("varint too long")
+}
+
+/// Decodes `b` as `message` into its OTLP/JSON form; panics on a field
+/// the message does not have, a wrong wire type, or trailing bytes.
+fn decode(b: &[u8], message: &str) -> Json {
+    let mut fields: Vec<(String, Json)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let k = read_varint(b, &mut i);
+        let (number, wire) = (k >> 3, k & 7);
+        let Some(&(_, name, kind, repeated)) = proto(message).iter().find(|f| f.0 == number) else {
+            panic!("{message}: field {number} is not one of its fields")
+        };
+        let expect = match kind {
+            Pb::Enum | Pb::Int64 | Pb::Bool => 0,
+            Pb::Fixed64 | Pb::SFixed64 => 1,
+            Pb::Msg(_) | Pb::Str | Pb::Id => 2,
+        };
+        assert_eq!(wire, expect, "{message}.{name}: wire type");
+        let value = match wire {
+            0 => {
+                let v = read_varint(b, &mut i);
+                match kind {
+                    Pb::Bool => Json::Bool(v == 1),
+                    Pb::Int64 => Json::Str((v as i64).to_string()),
+                    _ => Json::Num(v.to_string()),
+                }
+            }
+            1 => {
+                let v = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+                i += 8;
+                Json::Str(match kind {
+                    Pb::SFixed64 => (v as i64).to_string(),
+                    _ => v.to_string(),
+                })
+            }
+            _ => {
+                let len = read_varint(b, &mut i) as usize;
+                let d = &b[i..i + len];
+                i += len;
+                match kind {
+                    Pb::Msg(m) => decode(d, m),
+                    Pb::Str => Json::Str(String::from_utf8(d.to_vec()).unwrap()),
+                    _ => {
+                        assert!(d.len() == 16 || d.len() == 8, "{message}.{name}: an id");
+                        Json::Str(wire::hex_id(d))
                     }
                 }
             }
-            c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+        };
+        if repeated {
+            match fields.iter_mut().find(|f| f.0 == name) {
+                Some((_, Json::Arr(a))) => a.push(value),
+                _ => fields.push((name.to_string(), Json::Arr(vec![value]))),
+            }
+        } else {
+            assert!(fields.iter().all(|f| f.0 != name), "{message}.{name}: twice");
+            fields.push((name.to_string(), value));
         }
-        seen
-    });
-    let sent = post(&format!("http://127.0.0.1:{port}"), &export()).unwrap();
-    assert!(sent.starts_with("traces "), "{sent}");
-    assert_eq!(
-        server.join().unwrap(),
-        ["POST /v1/traces HTTP/1.1", "POST /v1/logs HTTP/1.1", "POST /v1/metrics HTTP/1.1"]
-    );
-    assert!(post("https://example.com", &export()).is_err(), "plain http only");
+    }
+    Json::Obj(fields)
+}
+
+/// The JSON form as protobuf carries it: fields sorted, proto3 defaults
+/// (an empty list, an enum 0) left out.
+fn normal(v: &Json) -> Json {
+    match v {
+        Json::Obj(m) => {
+            let mut m: Vec<(String, Json)> = m
+                .iter()
+                .filter(|(_, v)| !matches!(v, Json::Arr(a) if a.is_empty()))
+                .filter(|(_, v)| *v != Json::Num("0".into()))
+                .map(|(k, v)| (k.clone(), normal(v)))
+                .collect();
+            m.sort_by(|a, b| a.0.cmp(&b.0));
+            Json::Obj(m)
+        }
+        Json::Arr(a) => Json::Arr(a.iter().map(normal).collect()),
+        v => v.clone(),
+    }
+}
+
+/// How many `items` (a repeated field's name) `v` holds, at any depth.
+fn count(v: &Json, items: &str) -> usize {
+    match v {
+        Json::Obj(m) => m
+            .iter()
+            .map(|(k, v)| match v {
+                Json::Arr(a) if k == items => a.len(),
+                v => count(v, items),
+            })
+            .sum(),
+        Json::Arr(a) => a.iter().map(|v| count(v, items)).sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn the_protobuf_decodes_to_the_json_form() {
+    // Spans with events, links, attributes of every kind and statuses;
+    // logs with trace context; gauges and sums.
+    for e in [export(), tree(), profiled()] {
+        let res = wire::resource_pb(&e.data.resource);
+        assert_eq!(e.traces.len(), 1);
+        let pb = decode(&wire::traces_pb(&res, &e.data.spans), "ExportTraceServiceRequest");
+        assert_eq!(normal(&pb), normal(&parse_json(&e.traces[0]).unwrap()));
+        let pb = decode(&wire::logs_pb(&res, &e.data.logs), "ExportLogsServiceRequest");
+        assert_eq!(normal(&pb), normal(&parse_json(&e.logs[0]).unwrap()));
+        let pb = decode(&wire::metrics_pb(&res, &e.data.points), "ExportMetricsServiceRequest");
+        assert_eq!(normal(&pb), normal(&parse_json(&e.metrics).unwrap()));
+    }
+    // What the comparison covers.
+    let e = tree();
+    assert!(e.data.spans.iter().any(|s| !s.links.is_empty()));
+    assert!(e.data.spans.iter().any(|s| !s.events.is_empty()));
+    let e = export();
+    assert!(e.data.spans.iter().any(|s| s.status == 2 && !s.message.is_empty()));
+    assert!(e.data.logs.iter().any(|l| l.context.is_some()));
+    assert!(e.data.points.iter().any(|p| p.sum) && e.data.points.iter().any(|p| !p.sum));
+    let attrs = e
+        .data
+        .spans
+        .iter()
+        .flat_map(|s| s.attrs.iter().chain(s.events.iter().flat_map(|e| &e.attrs)))
+        .map(|a| &a.1);
+    let kinds: HashSet<&str> = attrs
+        .map(|v| match v {
+            Val::Str(_) => "str",
+            Val::Int(i) if *i < 0 => "negative",
+            Val::Int(_) => "int",
+            Val::Bool(_) => "bool",
+            Val::Arr(_) => "array",
+        })
+        .collect();
+    for k in ["str", "int", "bool", "array"] {
+        assert!(kinds.contains(k), "an attribute of kind {k}: {kinds:?}");
+    }
+}
+
+#[test]
+fn values_at_their_defaults_are_still_written_in_a_oneof() {
+    let mut e = export();
+    e.data.points.truncate(1);
+    e.data.points[0].value = 0;
+    e.data.spans.truncate(1);
+    e.data.spans[0].attrs = vec![
+        ("zero".into(), Val::Int(0)),
+        ("negative".into(), Val::Int(-5)),
+        ("no".into(), Val::Bool(false)),
+        ("empty".into(), Val::Str(String::new())),
+    ];
+    let res = wire::resource_pb(&e.data.resource);
+    let json = wire::resource_json(&e.data.resource);
+    let pb = decode(&wire::traces_pb(&res, &e.data.spans), "ExportTraceServiceRequest");
+    let js = parse_json(&wire::traces_json(&json, &e.data.spans)).unwrap();
+    assert_eq!(normal(&pb), normal(&js));
+    let pb = decode(&wire::metrics_pb(&res, &e.data.points), "ExportMetricsServiceRequest");
+    let js = parse_json(&wire::metrics_json(&json, &e.data.points)).unwrap();
+    assert_eq!(normal(&pb), normal(&js));
+    assert_eq!(count(&pb, "dataPoints"), 1);
 }
 
 const TREE: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"process start","pid":4,"session":1,"name":"parent.exe","personality":"nt","ppid":0,"ptid":0,"image_base":5368709120,"entry":1,"cmdline":"parent.exe"}
@@ -827,6 +1318,55 @@ fn reads_link_the_writes_they_took_and_dequeues_their_posts() {
         "{lines}"
     );
     assert!(lines.contains("otel: slow pipe data: 0.0 ms from write to read: pipe 3 \\mojo.1 end 0, 16 bytes at offset 0, written by thread 24"), "{lines}");
+}
+
+const INPUT: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"thread create","pid":4,"tid":8,"start":1,"teb":2}
+{"t":200,"cpu":0,"by":0,"ev":"button","message":513,"x":600,"y":390,"window":5,"owner":4,"captured":false}
+{"t":210,"cpu":0,"by":0,"ev":"button","message":514,"x":600,"y":390,"window":5,"owner":4,"captured":false}
+{"t":300,"cpu":0,"by":0,"ev":"key","vk":71,"down":true,"message":256,"window":5,"owner":4}
+{"t":5000,"cpu":1,"by":8,"ev":"input taken","message":513,"window":5,"owner":4}
+{"t":5000,"cpu":1,"by":8,"ev":"input taken","message":514,"window":5,"owner":4}
+{"t":9000,"cpu":0,"by":8,"ev":"thread exit","pid":4,"tid":8,"status":0}
+"#;
+
+#[test]
+fn takings_link_the_input_they_took() {
+    let e = convert(&Boot {
+        serial: "",
+        events: INPUT,
+        scenario: "input",
+        build: "debug 1",
+        start_unix_ns: BASE,
+        symbols: None,
+    });
+    let all = spans(&e);
+    let named = |n: &str| all.iter().filter(|s| s.name == n).collect::<Vec<_>>();
+    let thread8 = all.iter().find(|s| s.name == "thread 8").unwrap();
+    let presses = named("button");
+    assert_eq!(presses.len(), 2);
+    assert_eq!(named("key").len(), 1);
+    // Each taking, on the program's thread, links its own delivery.
+    let taken = named("input taken");
+    assert_eq!(taken.len(), 2);
+    assert!(taken.iter().all(|t| t.parent.as_deref() == Some(thread8.id.as_str())));
+    let down = presses.iter().find(|p| p.start == BASE + 200).unwrap();
+    let first = taken
+        .iter()
+        .find(|t| attr_str(&t.attrs, "gala.input.message").as_deref() == Some("0x201"))
+        .unwrap();
+    assert_eq!(first.links.len(), 1);
+    assert_eq!(first.links[0].0, down.id);
+    assert_eq!(attr_str(&first.links[0].1, "gala.link").as_deref(), Some("input from"));
+    assert_eq!(attr_str(&first.attrs, "gala.input.queued_ns").as_deref(), Some("4800"));
+    assert_eq!(attr_str(&down.attrs, "gala.input.x").as_deref(), Some("600"));
+    // The key was never taken: no link, no gap (only a taking without
+    // its delivery is one); the report names the slowest.
+    assert_eq!(e.report.gaps.get("input taken without its delivery"), None);
+    let lines = e.report.lines();
+    assert!(
+        lines.contains("otel: slow input: 0.0 ms delivered before taken: window 5 message 0x201, delivered at 200 ns, taken by thread 8 at 5000 ns"),
+        "{lines}"
+    );
 }
 
 const PROFILED: &str = r#"{"t":100,"cpu":0,"by":0,"ev":"process start","pid":4,"session":1,"name":"a.exe","personality":"nt","ppid":0,"ptid":0,"image_base":5368709120,"entry":1,"cmdline":"a.exe"}

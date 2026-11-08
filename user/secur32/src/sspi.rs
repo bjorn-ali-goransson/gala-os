@@ -30,7 +30,7 @@ const SEC_E_LOGON_DENIED: u32 = 0x8009_030c;
 const SEC_E_MESSAGE_ALTERED: u32 = 0x8009_030f;
 const SEC_E_BUFFER_TOO_SMALL: u32 = 0x8009_0321;
 const SEC_E_OUT_OF_SEQUENCE: u32 = 0x8009_0310;
-const SEC_E_NO_AUTHENTICATING_AUTHORITY: u32 = 0x8009_0311;
+const SEC_E_NO_CREDENTIALS: u32 = 0x8009_030e;
 
 const SECBUFFER_DATA: u32 = 1;
 const SECBUFFER_TOKEN: u32 = 2;
@@ -40,10 +40,14 @@ const SECBUFFER_ATTRMASK: u32 = 0xf000_0000;
 const ALLOCATE_MEMORY: u32 = 0x100;
 
 /// Tags in SecHandle.dwUpper.
-const CREDENTIAL_TAG: usize = 0x6761_6c61_4352_4544; // "galaCRED"
-const CONTEXT_TAG: usize = 0x6761_6c61_4354_5854; // "galaCTXT"
+const CREDENTIAL_TAG: usize = 0x6761_6c61_4352_4544_u64 as usize; // "galaCRED" (its low half on x86)
+const CONTEXT_TAG: usize = 0x6761_6c61_4354_5854_u64 as usize; // "galaCTXT" (its low half on x86)
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -613,8 +617,10 @@ pub extern "system" fn InitializeSecurityContextW(
                 return SEC_E_INVALID_HANDLE;
             };
             if credential.package == Package::Kerberos {
-                // No domain controller to ask for a ticket.
-                return SEC_E_NO_AUTHENTICATING_AUTHORITY;
+                // gala is a workgroup machine: the Kerberos package has no
+                // credentials (SEC_E_NO_CREDENTIALS, as Windows 11 25H2 off
+                // a domain gives; a domain member without a KDC may differ).
+                return SEC_E_NO_CREDENTIALS;
             }
             let (ctx, n) = match Context::negotiate(credential.ntlm, &mut token) {
                 Ok(r) => r,
@@ -1156,6 +1162,8 @@ pub extern "system" fn InitSecurityInterfaceA() -> *const SecurityFunctionTable 
     for (slot, f) in TABLE_A.functions.iter().zip(functions) {
         slot.store(f, Ordering::Relaxed);
     }
-    TABLE_A.version.store(4, Ordering::Release);
+    // Version 1 (SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION), with every
+    // slot filled all the same (Windows 11 25H2: sspi_test).
+    TABLE_A.version.store(1, Ordering::Release);
     &TABLE_A
 }

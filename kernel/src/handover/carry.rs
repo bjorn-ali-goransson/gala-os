@@ -290,7 +290,7 @@ fn carried_xstate(t: &ThreadRec<'_>) -> Result<XState, NtStatus> {
         return Ok(state);
     }
     let enabled = platform::xstate_enabled();
-    let len = crate::arch::xstate::size_of(enabled) - 512;
+    let len = platform::xstate::size_of(enabled) - 512;
     if t.xstate != enabled || t.extended.len() < len {
         warn!(
             "handover: thread {} carried under XCR0 {:#x} ({} bytes), this kernel enables {:#x}",
@@ -302,7 +302,7 @@ fn carried_xstate(t: &ThreadRec<'_>) -> Result<XState, NtStatus> {
         return Err(NtStatus::NOT_SUPPORTED);
     }
     let legacy_bv = state.bv();
-    state.0[512..512 + len].copy_from_slice(&t.extended[..len]);
+    state.bytes_mut()[512..512 + len].copy_from_slice(&t.extended[..len]);
     state.set_bv(state.bv() | legacy_bv);
     Ok(state)
 }
@@ -357,7 +357,7 @@ fn keyed_event_waits(threads: &mut [ThreadState]) -> Result<(), Option<Refusal>>
         let Resume::Syscall { number, regs, ref fx, .. } = threads[i].resume else { continue };
         let Some(release) = syscalls::keyed_event_kind(number) else { continue };
         let process = threads[i].snap.process.clone();
-        let (handle, key) = (regs.gpr[10], regs.gpr[2]);
+        let (handle, key) = (call_arg(&regs, 0), call_arg(&regs, 1));
         let object = if handle == 0 {
             keyed_event::system().map_err(|_| Some(Refusal::NoMemory))?
         } else {
@@ -373,7 +373,7 @@ fn keyed_event_waits(threads: &mut [ThreadState]) -> Result<(), Option<Refusal>>
             .filter(|t| {
                 KArc::ptr_eq(&t.snap.process, &process)
                     && matches!(t.resume, Resume::Syscall { number: n, regs: r, .. }
-                        if n == number && r.gpr[10] == handle && r.gpr[2] == key)
+                        if n == number && call_arg(&r, 0) == handle && call_arg(&r, 1) == key)
             })
             .count();
         let unpaired = keyed_event::unpaired(&object, key, release, process.id);
@@ -389,11 +389,9 @@ fn keyed_event_waits(threads: &mut [ThreadState]) -> Result<(), Option<Refusal>>
                 call: Some(syscalls::service_name(number)),
             }));
         }
-        // Finished: returns as SYSRET would (rcx = rip, r11 = rflags).
-        let mut done = regs;
-        done.gpr[0] = SUCCESS;
-        done.gpr[1] = regs.rip;
-        done.gpr[11] = regs.rflags;
+        // Finished: returns STATUS_SUCCESS as the call's return to user
+        // mode would (x86-64's SYSRET: rcx = rip, r11 = rflags).
+        let done = platform::SyscallFrame::from_regs(&regs, SUCCESS).return_regs();
         let fx = fx.clone();
         threads[i].resume = Resume::User { regs: done, fx };
     }
@@ -548,6 +546,7 @@ fn collect_sockets(p: &mut Programs, stopped_ns: u64) -> Result<(), Refusal> {
             signal: c.signal,
             entry,
             requests,
+            send_side: c.send_side,
         };
         p.sockets.try_push(rec)?;
     }
@@ -628,6 +627,11 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
     // personality yet; ROADMAP LX).
     if process.personality != crate::personality::Personality::Nt {
         return Err(refuse("a personality other than NT"));
+    }
+    // A WOW64 process's 32-bit side (its address limit, TEB32s, the
+    // segment its threads need) is not in the record yet (ROADMAP WOW).
+    if process.wow64.is_some() {
+        return Err(refuse("32-bit code (WOW64)"));
     }
     if process.console.is_some() {
         return Err(refuse("a console window"));
@@ -850,20 +854,24 @@ fn name_of(object: &ObjectRef) -> Result<Vec<u16>, AllocError> {
     namespace::full_name(object)
 }
 
-/// The user registers in a record's order (16 general-purpose, rip,
-/// rflags).
+/// The user registers in a record's order (the architecture's: x86-64's
+/// 16 general-purpose registers, rip, rflags).
 fn regs_of(r: &UserRegs) -> programs::Regs {
-    let mut regs = [0u64; 18];
-    regs[..16].copy_from_slice(&r.gpr);
-    regs[16] = r.rip;
-    regs[17] = r.rflags;
-    regs
+    r.to_words()
 }
 
 fn user_regs(r: &programs::Regs) -> UserRegs {
-    let mut gpr = [0u64; 16];
-    gpr.copy_from_slice(&r[..16]);
-    UserRegs { gpr, rip: r[16], rflags: r[17] }
+    UserRegs::from_words(r)
+}
+
+/// Argument `i` of the system call a carried thread is blocked in (its
+/// registers `regs`); one in a register (the keyed event calls' handle
+/// and key are).
+fn call_arg(regs: &UserRegs, i: usize) -> u64 {
+    match crate::nt::abi::saved_arg(regs, i) {
+        crate::nt::abi::ArgSlot::Value(v) => v,
+        crate::nt::abi::ArgSlot::Stack(_) => 0,
+    }
 }
 
 impl Programs {
@@ -926,7 +934,7 @@ impl Programs {
         // the blob, under this kernel's XCR0. With any blob filled, THREADS
         // needs a version-3 reader (`programs::threads_must_read`).
         let enabled = platform::xstate_enabled();
-        let size = crate::arch::xstate::size_of(enabled);
+        let size = platform::xstate::size_of(enabled);
         let extended = enabled & !programs::XSTATE_LEGACY != 0 && !self.threads.is_empty();
         w.section_needing(
             tag::THREADS,
@@ -946,7 +954,7 @@ impl Programs {
             };
             let fx = xs.map_or([0; 512], |s| *s.legacy());
             let (xstate, blob): (u64, &[u8]) = match xs {
-                Some(s) if extended => (enabled, &s.0[512..size]),
+                Some(s) if extended => (enabled, &s.bytes()[512..size]),
                 _ => (programs::XSTATE_LEGACY, &[]),
             };
             let mut apcs: Vec<ApcRec> = Vec::new();
@@ -1049,8 +1057,7 @@ impl Programs {
         // Milestone (e): only when a program holds a socket.
         if let Some(net) = &self.net {
             sockets::write_net(w, net)?;
-            let any_udp = self.sockets.iter().any(|s| s.transport == sockets::transport::UDP);
-            sockets::sockets_section(w, any_udp)?;
+            sockets::sockets_section(w, &self.sockets)?;
             for s in &self.sockets {
                 s.write(w)?;
             }
@@ -1911,6 +1918,7 @@ fn restore_sockets(
             select: get(s.select_event)?.map(|o| (o, s.select_mask)),
             recorded: s.recorded,
             signal: s.signal,
+            send_side: s.send_side,
             requests: Vec::new(),
         };
         let object = afd::adopt(&c, s.entry.as_ref())?;
@@ -2027,9 +2035,9 @@ mod tests {
 
     #[test]
     fn registers_round_trip() {
-        let r =
-            UserRegs { gpr: core::array::from_fn(|i| i as u64 * 7), rip: 0x40_1000, rflags: 0x202 };
-        let back = user_regs(&regs_of(&r));
-        assert_eq!((back.gpr, back.rip, back.rflags), (r.gpr, r.rip, r.rflags));
+        let words = core::array::from_fn(|i| i as u64 * 7 + 1);
+        let r = UserRegs::from_words(&words);
+        assert_eq!(regs_of(&r), words);
+        assert_eq!(regs_of(&user_regs(&regs_of(&r))), words);
     }
 }

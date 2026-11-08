@@ -297,6 +297,7 @@ fn decimal(mut v: u64, buf: &mut [u8; 20]) -> &[u8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -306,15 +307,18 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
     /// A call failed with SOCKET_ERROR and this WSA error.
+    #[track_caller]
     fn error(&mut self, result: i32, want: i32) -> Result<(), u32> {
         self.eq(result as u64, SOCKET_ERROR as u64)?;
         // SAFETY: plain Winsock call.
@@ -501,9 +505,23 @@ fn loopback(c: &mut Checks) -> Result<(), u32> {
         c.eq(setsockopt(b, SOL_SOCKET, SO_RCVBUF, (&raw const size).cast(), 4) as u64, 0)?;
         c.eq(get_int(b, SO_RCVBUF).1 as u64, 32768)?;
         // SO_RANDOMIZE_PORT and IP_DONTFRAGMENT (Chromium's UDP sockets
-        // set both): accepted, read back.
-        c.eq(setsockopt(b, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4) as u64, 0)?;
-        c.eq(get_int(b, SO_RANDOMIZE_PORT).1 as u64, 1)?;
+        // set both): SO_RANDOMIZE_PORT is for an unbound socket (Windows
+        // 11 25H2: WSAEINVAL once bound), read back; IP_DONTFRAGMENT on
+        // the bound one, read back.
+        let fresh = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        c.ok(fresh != INVALID_SOCKET, WSAGetLastError() as u64)?;
+        c.eq(
+            setsockopt(fresh, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4) as u64,
+            0,
+        )?;
+        // A 1-byte BOOLEAN: only the first byte of the int is written
+        // (Windows 11 25H2: 0xffffff01 into an int set to -1).
+        c.eq(get_int(fresh, SO_RANDOMIZE_PORT).1 as u32 as u64, 0xffff_ff01)?;
+        closesocket(fresh);
+        c.error(
+            setsockopt(b, SOL_SOCKET, SO_RANDOMIZE_PORT, (&raw const one).cast(), 4),
+            WSAEINVAL,
+        )?;
         c.eq(setsockopt(b, IPPROTO_IP, IP_DONTFRAGMENT, (&raw const one).cast(), 4) as u64, 0)?;
         let (mut df, mut df_len) = (-1i32, 4i32);
         c.eq(
@@ -698,4 +716,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

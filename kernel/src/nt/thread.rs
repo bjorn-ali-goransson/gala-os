@@ -26,6 +26,8 @@ pub struct NtThread {
     /// ClientId.UniqueThread.
     pub id: u64,
     pub teb: u64,
+    /// A WOW64 thread's 32-bit TEB (its FS in 32-bit code); 0 otherwise.
+    pub teb32: u64,
     pub process: KArc<Process>,
     /// Scheduler thread, once spawned.
     sched_id: IrqMutex<Option<ThreadId>>,
@@ -40,6 +42,9 @@ pub struct NtThread {
     start_mxcsr: Option<u32>,
     /// ThreadQuerySetWin32StartAddress.
     pub win32_start: u64,
+    /// ThreadNameInformation (SetThreadDescription), UTF-16; empty if
+    /// none was set. Not carried across a kernel handover.
+    pub name: IrqMutex<Vec<u16>>,
     /// NT times (ThreadTimes); exit time 0 while running.
     pub create_time: u64,
     pub exit_time: IrqMutex<u64>,
@@ -112,6 +117,10 @@ pub struct Parked {
     pub fx: platform::XState,
     /// Set by NtSetContextThread: resume with `regs`/`fx`.
     pub changed: bool,
+    /// Stopped in 32-bit code (a WOW64 thread interrupted in compatibility
+    /// mode): `regs` are its 32-bit registers, zero-extended, and it goes on
+    /// at CS 0x23. Otherwise in 64-bit code (a WOW64 thread's is wow64.dll's).
+    pub compat: bool,
 }
 
 /// The most a thread can be suspended (MAXIMUM_SUSPEND_COUNT).
@@ -135,6 +144,18 @@ pub fn base_priority(increment: i32) -> Option<i32> {
         15 => Some(15),
         -15 => Some(1),
         _ => None,
+    }
+}
+
+/// The ThreadBasePriority increment a base priority was set from (its
+/// inverse): what THREAD_BASIC_INFORMATION.BasePriority reports. The
+/// saturated bases (15, 1) give the increments that set them (15, -15);
+/// what Windows reports for those is not measured.
+pub fn base_increment(base: i32) -> i32 {
+    match base {
+        15 => 15,
+        1 => -15,
+        base => base - PROCESS_BASE_PRIORITY,
     }
 }
 
@@ -269,6 +290,27 @@ pub fn current_stack(process: &Process) -> Option<(u64, u64, u64)> {
     (bottom != 0 && bottom < base).then_some((t.teb, bottom, base))
 }
 
+/// The current WOW64 thread's TEB32 and its 32-bit stack reservation
+/// `[bottom, base)` (the TEB32's DeallocationStack and StackBase), if it
+/// is a WOW64 thread of `process`: the stack its 32-bit code grows
+/// through its guard page.
+pub fn current_stack32(process: &Process) -> Option<(u64, u64, u64)> {
+    use layout::wow64::teb32;
+    let object = current()?;
+    let t = as_thread(&object);
+    if !core::ptr::eq(&*t.process, process) || t.teb32 == 0 {
+        return None;
+    }
+    let mut space = process.space.lock();
+    let mut word = |off: u64| {
+        let mut b = [0u8; 4];
+        space.read(t.teb32 + off, &mut b).ok().map(|()| u64::from(u32::from_le_bytes(b)))
+    };
+    let base = word(teb32::STACK_BASE)?;
+    let bottom = word(teb32::DEALLOCATION_STACK)?;
+    (bottom != 0 && bottom < base).then_some((t.teb32, bottom, base))
+}
+
 fn by_id(id: u64) -> Option<ObjectRef> {
     THREADS.lock().iter().find(|o| as_thread(o).id == id).cloned()
 }
@@ -300,7 +342,24 @@ pub fn create(
     stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
-    create_inner(process, regs, win32_start, mxcsr, stack, suspended, None)
+    create_inner(process, regs, win32_start, mxcsr, stack, suspended, Begin::Start)
+}
+
+/// Creates a thread of WOW64 process `process` that starts in 32-bit code
+/// as `start` says: in its wow64.dll's GalaWow64Start (rcx = its CPU
+/// area, on its 64-bit stack `stack`), which enters 32-bit code with the
+/// area's context; it gets a TEB32 beside its TEB.
+pub fn create_wow64(
+    process: &KArc<Process>,
+    start: super::wow64::Start32,
+    stack: (u64, u64, u64),
+    suspended: bool,
+) -> Result<ObjectRef, NtStatus> {
+    let regs = UserRegs::default();
+    // As for 64-bit threads (`nt_create_thread`): the return register,
+    // where kernel32's thunk takes the start routine; else the start eip.
+    let win32_start = u64::from(if start.gpr[0] != 0 { start.gpr[0] } else { start.eip });
+    create_inner(process, regs, win32_start, None, stack, suspended, Begin::Wow64(start))
 }
 
 /// Creates a thread of the Linux personality that goes on in user mode
@@ -315,14 +374,28 @@ pub fn create_forked(
     bases: (u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
-    let resume = Some((Resume::User { regs, fx }, bases));
-    create_inner(process, regs, regs.rip, None, (0, 0, 0), suspended, resume)
+    let begin = Begin::Resume((Resume::User { regs, fx }, bases));
+    create_inner(process, regs, regs.ip(), None, (0, 0, 0), suspended, begin)
 }
 
 /// A thread object's id (its NT ClientId thread; a Linux thread's core
 /// id).
 pub fn id_of(object: &ObjectRef) -> u64 {
     as_thread(object).id
+}
+
+/// How a new thread first enters user mode. Passed once, by value, to
+/// `create_inner` (as the resumed state always was): no box, which
+/// would be an allocation to fail.
+#[allow(clippy::large_enum_variant)]
+enum Begin {
+    /// At its start registers.
+    Start,
+    /// As a Linux fork's child or clone'd thread goes on: the state and
+    /// its FS and GS bases.
+    Resume((Resume, (u64, u64))),
+    /// A WOW64 thread: in wow64.dll, which enters 32-bit code.
+    Wow64(super::wow64::Start32),
 }
 
 fn create_inner(
@@ -332,9 +405,14 @@ fn create_inner(
     mxcsr: Option<u32>,
     stack: (u64, u64, u64),
     suspended: bool,
-    resume: Option<(Resume, (u64, u64))>,
+    begin: Begin,
 ) -> Result<ObjectRef, NtStatus> {
-    if !regs.is_valid() {
+    let (resume, wow64) = match begin {
+        Begin::Start => (None, None),
+        Begin::Resume(r) => (Some(r), None),
+        Begin::Wow64(start) => (None, Some(start)),
+    };
+    if wow64.is_none() && !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let id = next_id();
@@ -345,9 +423,26 @@ fn create_inner(
     } else {
         0
     };
+    // A WOW64 thread: its TEB32 and CPU area, and its start in wow64.dll.
+    let (regs, teb32) = match (wow64, process.wow64.as_ref()) {
+        (Some(start), Some(state)) => {
+            let teb32 = super::wow64::allocate_teb32(process, state, teb_addr, id, &start)?;
+            // As if called with its CPU area (rsp % 16 == 8, a shadow area
+            // above).
+            let area = teb_addr + layout::wow64::TEB64_CPU_AREA;
+            let entry = state.start.load(Ordering::Relaxed);
+            (super::abi::call_regs(entry, area, start.stack64 & !0xf), teb32)
+        }
+        (Some(_), None) => return Err(NtStatus::INVALID_PARAMETER),
+        (None, _) => (regs, 0),
+    };
+    if !regs.is_valid() {
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
     let thread = NtThread {
         id,
         teb: teb_addr,
+        teb32,
         process: process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(platform::online_mask()),
@@ -358,6 +453,7 @@ fn create_inner(
         start: regs,
         start_mxcsr: mxcsr,
         win32_start,
+        name: IrqMutex::named("thread.name", Vec::new()),
         create_time: platform::system_time(),
         exit_time: IrqMutex::named("thread.exit_time", 0),
         priority: IrqMutex::new((PROCESS_BASE_PRIORITY, PROCESS_BASE_PRIORITY)),
@@ -396,7 +492,7 @@ fn create_inner(
                 crate::events::Category::Thread,
                 "thread create",
                 format_args!(
-                    r#""pid":{},"tid":{id},"start":{},"teb":{teb_addr}"#,
+                    r#""pid":{},"tid":{id},"start":{},"teb":{teb_addr},"teb32":{teb32}"#,
                     process.id, win32_start
                 ),
             );
@@ -455,7 +551,19 @@ fn thread_entry(id: usize) {
     if let Some((fs, gs)) = t.start_bases {
         platform::set_user_bases(Some(fs), Some(gs));
     }
+    // A WOW64 thread: its TEB32 as FS (and the segments 32-bit code needs)
+    // from now on.
+    if t.teb32 != 0 && !platform::set_teb32(t.teb32) {
+        warn!(
+            "wow64: {} (pid {}) thread {}: this platform cannot run 32-bit code",
+            t.process.name, t.process.id, t.id
+        );
+        drop(object);
+        exit_current(NtStatus::NOT_SUPPORTED);
+    }
     let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
+    // Stopped in user mode by a handover: goes on with the parked state.
+    let resumed_user = matches!(resume, Some(Resume::User { .. }));
     match resume {
         Some(Resume::Syscall { number, regs, fx, deadline }) => {
             // Carried over by a kernel handover: the blocked call again,
@@ -466,32 +574,14 @@ fn thread_entry(id: usize) {
             t.entered.store(true, Ordering::SeqCst);
             drop(object);
             platform::xrstor(&fx);
-            let g = &regs.gpr;
-            let mut frame = platform::SyscallFrame {
-                r15: g[15],
-                r14: g[14],
-                r13: g[13],
-                r12: g[12],
-                rbp: g[5],
-                rbx: g[3],
-                rsi: g[6],
-                rdi: g[7],
-                r9: g[9],
-                r8: g[8],
-                rdx: g[2],
-                r10: g[10],
-                rax: u64::from(number),
-                rip: regs.rip,
-                rflags: regs.rflags,
-                rsp: g[4],
-            };
+            let mut frame = platform::SyscallFrame::from_regs(&regs, u64::from(number));
             platform::reissue_syscall(&mut frame);
         }
         Some(Resume::User { regs, fx }) => {
             // Stopped in user mode by a handover: parked as a suspended
             // thread is (NtGetContextThread sees it while it stays
             // suspended), then on with every register.
-            *t.parked.lock() = Some(Parked { regs, fx, changed: false });
+            *t.parked.lock() = Some(Parked { regs, fx, changed: false, compat: false });
         }
         Some(Resume::Start { regs: start, mxcsr: start_mxcsr }) => {
             (regs, mxcsr) = (start, start_mxcsr);
@@ -518,7 +608,10 @@ fn thread_entry(id: usize) {
     if let Some(status) = pending {
         exit_current(status);
     }
-    if let Some(p) = parked {
+    // The parked state of a handover's thread, or of one created
+    // suspended whose context was set before it first ran (its start
+    // otherwise, `parked_state`).
+    if let Some(p) = parked.filter(|p| resumed_user || p.changed) {
         platform::xrstor(&p.fx);
         platform::enter_user(&p.regs);
     }
@@ -681,7 +774,7 @@ pub fn wake_if_terminating() {
 }
 
 /// Runs on every return to user mode: acts on a pending termination.
-fn on_user_return(regs: &mut UserRegs) -> bool {
+fn on_user_return(regs: &mut UserRegs, compat: bool) -> bool {
     let Some(object) = current() else { return false };
     let t = as_thread(&object);
     let terminate = *t.terminate_request.lock();
@@ -690,7 +783,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
         exit_current(status);
     }
     if HOLD.load(Ordering::SeqCst) {
-        hold(t, regs);
+        hold(t, regs, compat);
         let terminate = *t.terminate_request.lock();
         if let Some(status) = terminate {
             drop(object);
@@ -702,7 +795,7 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
     }
     // Suspended: wait here, with the user state where other threads can
     // read and change it, until resumed (or terminated).
-    *t.parked.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false });
+    *t.parked.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false, compat });
     loop {
         let count = t.suspend_count.lock();
         if *count == 0 || t.terminate_request.lock().is_some() {
@@ -735,8 +828,8 @@ fn on_user_return(regs: &mut UserRegs) -> bool {
 /// programs, with its user state where the handover reads it
 /// (`snapshot`). Nothing is held here: the system call or interrupt is
 /// over, so the thread is at a safe point.
-fn hold(t: &NtThread, regs: &UserRegs) {
-    *t.held.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false });
+fn hold(t: &NtThread, regs: &UserRegs, compat: bool) {
+    *t.held.lock() = Some(Parked { regs: *regs, fx: platform::xsave(), changed: false, compat });
     loop {
         if !HOLD.load(Ordering::SeqCst) || t.terminate_request.lock().is_some() {
             break;
@@ -930,6 +1023,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
     let thread = NtThread {
         id: a.id,
         teb: a.teb,
+        teb32: 0,
         process: a.process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(affinity),
@@ -940,6 +1034,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         start: UserRegs::default(),
         start_mxcsr: None,
         win32_start: a.win32_start,
+        name: IrqMutex::named("thread.name", Vec::new()),
         create_time: a.create_time,
         exit_time: IrqMutex::named("thread.exit_time", a.exited.map_or(0, |e| e.1)),
         priority: IrqMutex::new(a.priority),
@@ -1009,6 +1104,7 @@ pub fn set_in_syscall(object: &ObjectRef, regs: Option<(u32, UserRegs)>) {
 }
 
 /// The user state of a suspended thread: parked on its way to user mode,
+/// its start registers if it was created suspended and has not run yet,
 /// or, while it is inside a system call (blocked in a wait, say), its
 /// registers at the `syscall` with the default floating-point state.
 /// Waits for one of the two, as Windows does (up to 30 s: a thread just
@@ -1022,17 +1118,43 @@ pub fn parked_state(object: &ObjectRef) -> Result<Parked, NtStatus> {
         if let Some(p) = t.parked.lock().clone() {
             return Ok(p);
         }
+        // Created suspended and not run yet: its start (as Windows reports
+        // a new thread's context), parked where NtSetContextThread changes
+        // it and the thread's first entry finds it.
+        if !t.entered.load(Ordering::SeqCst) && *t.suspend_count.lock() > 0 {
+            let mut parked = t.parked.lock();
+            let p = parked.get_or_insert_with(|| Parked {
+                regs: t.start,
+                fx: default_fx(),
+                changed: false,
+                compat: false,
+            });
+            return Ok(p.clone());
+        }
         if *t.suspend_count.lock() == 0 || t.has_exited() {
             break;
         }
         if let Some((_, regs)) = *t.in_syscall.lock() {
-            return Ok(Parked { regs, fx: default_fx(), changed: false });
+            // In a system call: the 64-bit code that made it.
+            return Ok(Parked { regs, fx: default_fx(), changed: false, compat: false });
         }
         platform::sleep_ms(1);
     }
     // TODO: the context of a thread that is not suspended (Windows
     // interrupts it with a kernel APC).
     Err(NtStatus::UNSUCCESSFUL)
+}
+
+/// ` name "..."` for a named thread (SetThreadDescription), else nothing.
+struct NameField<'a>(&'a [u16]);
+
+impl core::fmt::Display for NameField<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        write!(f, " name {}", crate::events::Utf16(self.0))
+    }
 }
 
 /// Logs every NT thread: its process, suspend count, and the system call
@@ -1052,12 +1174,15 @@ pub fn dump() {
         // the inverse of `resume`'s order).
         let sched = *t.sched_id.lock();
         let suspended = *t.suspend_count.lock();
+        let name = t.name.lock();
         info!(
-            "thread: pid {} tid {} (sched {:?}) suspend {} exited {} in a system call {} \
+            "thread: pid {} tid {} (sched {:?}) start {:#x}{} suspend {} exited {} in a system call {} \
              session {} personality {} ({})",
             t.process.id,
             t.id,
             sched,
+            t.win32_start,
+            NameField(&name),
             suspended,
             t.has_exited(),
             in_syscall.is_some(),
@@ -1073,9 +1198,34 @@ pub fn dump() {
             continue;
         };
         let name = super::syscalls::service_name(number);
-        info!("thread:   {name} from rip {:#x}", regs.rip);
-        // The first argument (r10), as a handle: what a wait is on.
-        let handle = super::object::Handle(regs.gpr[10]);
+        info!("thread:   {name} from rip {:#x}", regs.ip());
+        // Argument `i` of the call (0 if unreadable).
+        let arg = |i: usize| match super::abi::saved_arg(&regs, i) {
+            super::abi::ArgSlot::Value(v) => v,
+            super::abi::ArgSlot::Stack(at) => t.process.read_u64(at).unwrap_or(0),
+        };
+        // Who called the system call stub: its return address (the lock
+        // or wait in kernel32/ntdll a hang sits in), with its module.
+        if t.teb32 == 0
+            && let Some(ret) = super::abi::stub_return_address(&t.process, &regs)
+        {
+            info!("thread:   called from {}", super::crashreport::At::of(&t.process, ret));
+        }
+        // A WOW64 thread: the 32-bit code that made the call (its CPU
+        // area, where wow64.dll keeps the caller's registers).
+        if t.teb32 != 0 {
+            match super::wow64::saved_registers(&t.process, t.teb) {
+                Some(r) => info!(
+                    "thread:   called from 32-bit code: eip={:#010x} esp={:#010x} eax={:#010x} \
+                     ebx={:#010x} ecx={:#010x} edx={:#010x} esi={:#010x} edi={:#010x} \
+                     ebp={:#010x}",
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]
+                ),
+                None => info!("thread:   called from 32-bit code (its CPU area is unreadable)"),
+            }
+        }
+        // The first argument, as a handle: what a wait is on.
+        let handle = super::object::Handle(arg(0));
         if let Some(e) = t.process.handles.lock().get(handle) {
             if let ObjectBody::IoCompletion(c) = &e.object.body {
                 // A port is ready while it holds packets (its dispatcher
@@ -1096,6 +1246,24 @@ pub fn dump() {
                     e.object.type_name()
                 );
             }
+            // A keyed event (critical sections, SRW locks, condition
+            // variables, WaitOnAddress sleep on them): the key (the second
+            // argument), the pointer-sized value at it, and who else is
+            // queued for it in this process.
+            if let ObjectBody::KeyedEvent(_) = &e.object.body {
+                let key = arg(1);
+                let queued = super::keyed_event::pending_for(&e.object, key, t.process.id);
+                match t.process.read_u64(key) {
+                    Ok(v) => info!(
+                        "thread:   key {key:#x} (value there {v:#x}); queued for it: \
+                         (waiters, releasers, all entries) {queued:?}"
+                    ),
+                    Err(_) => info!(
+                        "thread:   key {key:#x} (not readable); queued for it: \
+                         (waiters, releasers, all entries) {queued:?}"
+                    ),
+                }
+            }
             if let ObjectBody::Timer(timer) = &e.object.body {
                 info!(
                     "thread:   timer due tick {:?} (now {})",
@@ -1104,9 +1272,10 @@ pub fn dump() {
                 );
             }
         }
-        // NtWaitForSingleObject's timeout (r8: *LARGE_INTEGER).
-        if name == "NtWaitForSingleObject" && regs.gpr[8] != 0 {
-            info!("thread:   timeout {:?}", t.process.read_u64(regs.gpr[8]).ok().map(|v| v as i64));
+        // NtWaitForSingleObject's timeout (the third argument:
+        // *LARGE_INTEGER).
+        if name == "NtWaitForSingleObject" && arg(2) != 0 {
+            info!("thread:   timeout {:?}", t.process.read_u64(arg(2)).ok().map(|v| v as i64));
         }
     }
 }
@@ -1188,7 +1357,13 @@ pub fn exit_current(status: NtStatus) -> ! {
             unbind_sched(id, &object);
         }
         let process = t.process.clone();
+        let (teb, teb32) = (t.teb, t.teb32);
         let last = process.remove_thread(&object);
+        // A WOW64 thread's 64-bit stack and TEB32 (the kernel's to free;
+        // a process's last thread leaves them to its address space's end).
+        if teb32 != 0 && !last && !process_is_exiting(t) {
+            super::wow64::release_thread(&process, teb, teb32);
+        }
         wait::set_signal(&object, 1);
         drop(object);
         // Exactly one of several threads exiting at once on different CPUs
@@ -1224,5 +1399,8 @@ mod tests {
         assert_eq!(base_priority(15), Some(15));
         assert_eq!(base_priority(-15), Some(1));
         assert_eq!(base_priority(3), None);
+        for increment in [-15, -2, -1, 0, 1, 2, 15] {
+            assert_eq!(base_priority(increment).map(base_increment), Some(increment));
+        }
     }
 }

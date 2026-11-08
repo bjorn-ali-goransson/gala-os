@@ -1,17 +1,12 @@
 //! NT personality: the Windows user-mode ABI on top of the kernel core.
 
+pub mod abi;
 pub mod accounts;
 pub mod action;
 pub mod afd;
 pub mod charge;
 pub mod conhost;
-pub mod context;
 pub mod crashreport;
-#[cfg(feature = "shasha")]
-pub mod desktop;
-/// A server kernel (no `shasha` feature): the same interface, no desktop.
-#[cfg(not(feature = "shasha"))]
-#[path = "desktop_off.rs"]
 pub mod desktop;
 pub mod disk;
 pub mod file;
@@ -35,6 +30,7 @@ pub mod process;
 pub mod quota;
 pub mod registry;
 pub mod reglog;
+pub mod regview;
 pub mod section;
 pub mod security;
 pub mod session;
@@ -52,6 +48,7 @@ pub mod window;
 pub mod winevent;
 pub mod winsta;
 pub mod winstate;
+pub mod wow64;
 
 /// Installs the syscall entry and user exception handling.
 pub fn init() {

@@ -9,7 +9,11 @@
 use crate::window::{Hwnd, MAX_WINDOWS, window, with};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaWindowRegister(info: *const u8, hwnd: *mut u64) -> u32;
     fn GalaWindowUpdate(info: *const u8) -> u32;
@@ -32,7 +36,11 @@ unsafe extern "system" {
 const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
 const ERROR_ACCESS_DENIED: u32 = 5;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn VirtualAlloc(
         at: *mut core::ffi::c_void,
@@ -434,6 +442,7 @@ pub(crate) fn carries_pointer(msg: u32) -> bool {
             | 0x0083 // WM_NCCALCSIZE
     ) || in_string(msg)
         || msg == crate::track::GALA_MENU
+        || msg == crate::uia::GALA_UIA
         || msg == crate::tree::GALA_SETWINDOWPOS
         || matches!(msg, LB_GETTEXT | LB_GETITEMRECT | LB_GETSELITEMS | CB_GETLBTEXT)
 }
@@ -575,7 +584,18 @@ const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 /// The most a sent message carries each way (the kernel's limit).
 const MAX_DATA: usize = 64 * 1024;
 /// COPYDATASTRUCT's size (dwData, cbData, lpData on x64).
+/// WM_COPYDATA's COPYDATASTRUCT on the wire between processes (of either
+/// bitness): dwData (u64), cbData (u32 at 8), lpData (u64 at 16, unused:
+/// the data follows), the x64 layout written field by field.
 const COPYDATA_SIZE: usize = 24;
+
+/// COPYDATASTRUCT as this process's programs see it.
+#[repr(C)]
+struct CopyData {
+    data: usize,
+    size: u32,
+    ptr: *const u8,
+}
 
 /// How the kernel delivers a sent message (nt::window::SEND_*).
 const SEND_NOTIFY: u32 = 1;
@@ -644,6 +664,12 @@ pub(crate) fn send_remote(
         crate::track::GALA_MENU if lparam != 0 => {
             (out_ptr, out_max) = (lparam as u64, crate::track::MENU_INFO_SIZE);
         }
+        crate::uia::GALA_UIA if lparam != 0 && wparam & crate::uia::GALA_UIA_INPUT != 0 => {
+            (in_ptr, in_len) = (lparam as u64, crate::uia::UIA_VALUE_SIZE);
+        }
+        crate::uia::GALA_UIA if lparam != 0 => {
+            (out_ptr, out_max) = (lparam as u64, crate::uia::UIA_VALUE_SIZE);
+        }
         crate::tree::GALA_SETWINDOWPOS if lparam != 0 => {
             (in_ptr, in_len) = (lparam as u64, crate::tree::SETWINDOWPOS_SIZE);
         }
@@ -672,11 +698,9 @@ pub(crate) fn send_remote(
 /// buffer it points to go in one block (the receiver points lpData at its
 /// copy of the buffer).
 fn send_copydata(hwnd: Hwnd, wparam: usize, lparam: isize, mode: Mode) -> Result<isize, u32> {
-    let cds = lparam as *const u8;
     // SAFETY: the caller's COPYDATASTRUCT.
-    let (size, data) = unsafe {
-        (cds.add(8).cast::<u32>().read_unaligned(), cds.add(16).cast::<usize>().read_unaligned())
-    };
+    let CopyData { data: tag, size, ptr } = unsafe { (lparam as *const CopyData).read_unaligned() };
+    let data = ptr as usize;
     let n = if data == 0 { 0 } else { (size as usize).min(MAX_DATA - COPYDATA_SIZE) };
     // SAFETY: a plain call.
     let block =
@@ -687,7 +711,7 @@ fn send_copydata(hwnd: Hwnd, wparam: usize, lparam: isize, mode: Mode) -> Result
     // SAFETY: our block of COPYDATA_SIZE + n bytes; the caller's structure
     // and its buffer of (at least) n bytes.
     unsafe {
-        core::ptr::copy_nonoverlapping(cds, block, COPYDATA_SIZE);
+        block.cast::<u64>().write_unaligned(tag as u64);
         block.add(8).cast::<u32>().write_unaligned(n as u32);
         core::ptr::copy_nonoverlapping(data as *const u8, block.add(COPYDATA_SIZE), n);
     }
@@ -877,12 +901,15 @@ pub(crate) fn take_sent() {
         // SAFETY: the second half of our allocation.
         let out = unsafe { buf.add(MAX_DATA) };
         if msg == WM_COPYDATA && in_len >= COPYDATA_SIZE {
-            // Our copy of the buffer follows our copy of the structure.
+            // The wire form becomes this process's COPYDATASTRUCT (no
+            // larger) in its place, pointing at the data after it.
             // SAFETY: our input buffer, at least COPYDATA_SIZE bytes.
             unsafe {
+                let tag = buf.cast::<u64>().read_unaligned();
                 let size = buf.add(8).cast::<u32>().read_unaligned();
-                let data = if size == 0 { 0 } else { buf.add(COPYDATA_SIZE) as usize };
-                buf.add(16).cast::<usize>().write_unaligned(data);
+                let ptr =
+                    if size == 0 { core::ptr::null() } else { buf.add(COPYDATA_SIZE).cast_const() };
+                buf.cast::<CopyData>().write_unaligned(CopyData { data: tag as usize, size, ptr });
             }
         }
         let lparam = if in_len > 0 {

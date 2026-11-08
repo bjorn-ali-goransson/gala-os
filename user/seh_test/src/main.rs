@@ -416,10 +416,12 @@ extern "system" fn fault_it(_: u64) -> u64 {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -430,6 +432,7 @@ impl Checks {
         print(" got ");
         write_file(stdout(), &hex32((got >> 32) as u32));
         write_file(stdout(), &hex32(got as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -567,8 +570,16 @@ fn run() -> Result<(), u32> {
             core::mem::transmute::<usize, extern "system" fn(*const [u32; 3]) -> u8>(delete),
         )
     };
-    let region = INDIRECT.as_ptr() as u64;
-    let table = INDIRECT[0x100 / 4..].as_ptr().cast::<[u32; 3]>();
+    // The region is memory of its own (as a JIT's code is), not inside
+    // this image: a PC in an image is looked up in its .pdata.
+    let (s, region, _) = allocate(0, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    c.ok(s == STATUS_SUCCESS && region != 0, s.into())?;
+    // SAFETY: the page just committed holds INDIRECT.
+    unsafe {
+        core::ptr::copy_nonoverlapping(INDIRECT.as_ptr(), region as *mut u32, INDIRECT.len())
+    };
+    let region = region as u64;
+    let table = (region + 0x100) as *const [u32; 3];
     c.ok(add(table, 2, region) != 0, 0)?;
     let entry = (fns.lookup)(region + 0x18, &mut base64, core::ptr::null_mut());
     c.eq(entry as u64, region + 0x10c)?;
@@ -679,7 +690,10 @@ fn run() -> Result<(), u32> {
     let r = unsafe { seh_outer(raise_it, CODE_CONTINUE.into()) };
     c.eq(r, 5)?;
     c.eq(inner(0), 1)?;
-    c.eq(inner(1), 0)?; // flags
+    // EXCEPTION_SOFTWARE_ORIGINATE (0x80): the 64-bit RtlRaiseException
+    // marks the record so itself (Windows 25H2; the 32-bit one does not,
+    // wow64_seh_test).
+    c.eq(inner(1), 0x80)?; // flags
     c.eq(inner(3), CODE_CONTINUE.into())?;
     c.eq(inner(4), seh_raise_ret as *const () as u64)?; // ExceptionAddress
     c.eq(inner(5), 2)?;
@@ -697,11 +711,13 @@ fn run() -> Result<(), u32> {
     let r = unsafe { seh_outer(raise_it, CODE_UNWIND.into()) };
     c.eq(r, 42)?;
     c.eq(inner(0), 2)?;
-    c.eq(inner(1), 0)?;
+    c.eq(inner(1), 0x80)?; // dispatch: EXCEPTION_SOFTWARE_ORIGINATE, as above
+    // The unwind does not keep the record's 0x80: the handlers see its
+    // own flags only (Windows 11 25H2 measured 0x02 here).
     c.eq(inner(2), EXCEPTION_UNWINDING.into())?;
     c.eq(inner(3), CODE_UNWIND.into())?;
     c.eq(outer(0), 2)?;
-    c.eq(outer(1), 0)?;
+    c.eq(outer(1), 0x80)?;
     c.eq(outer(2), (EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND).into())?;
     c.eq(outer(3), CODE_UNWIND.into())?;
     c.eq(outer(4), OUTER_RSP.load(Ordering::SeqCst))?; // establisher frame
@@ -769,3 +785,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

@@ -20,15 +20,22 @@
 //! RTL_UNLOAD_EVENT_TRACE's 100 bytes), the count, and the address of the
 //! pointer to the array; after testdll2 and testdll are unloaded the
 //! array holds both (base, image size, name), testdll's sequence after
-//! testdll2's. Prints `loader_test: ok` or exits with the number of the
-//! failing check.
+//! testdll2's.
+//!
+//! A DLL loaded by path takes its dependencies from the usual places, or
+//! with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR from its own directory first
+//! (the program copies both DLLs to %TEMP%\gala_loader\sub, and removes
+//! them at the end), or with
+//! LOAD_LIBRARY_SEARCH_USER_DIRS from LdrAddDllDirectory's directories
+//! only (found nowhere once LdrRemoveDllDirectory took it out). Prints
+//! `loader_test: ok` or exits with the number of the failing check.
 
 #![no_std]
 #![no_main]
 
 use ntrt::*;
 
-const STATUS_PROCEDURE_NOT_FOUND: NtStatus = 0xc000_007a;
+const STATUS_ENTRYPOINT_NOT_FOUND: NtStatus = 0xc000_0139;
 const STATUS_DLL_NOT_FOUND: NtStatus = 0xc000_0135;
 const INITIAL_VALUE: u64 = 0x1234_5678_9abc;
 
@@ -94,10 +101,12 @@ impl Api {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -107,6 +116,7 @@ impl Checks {
         write_file(stdout(), &hex32(self.0));
         print(" got ");
         write_file(stdout(), &hex32(got as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -174,11 +184,21 @@ fn ldr_list(
         let base = usize_at(entry + 0x30);
         let pe = base + u32_at(base + 0x3c) as usize;
         c.eq(u32_at(entry + 0x40).into(), u32_at(pe + 24 + 56).into())?; // SizeOfImage
-        // BaseDllName is the end of FullDllName.
+        // BaseDllName reads as the end of FullDllName. Its buffer may be
+        // its own (Windows 11 25H2: ntdll's is not inside FullDllName's;
+        // gala's point into it), so the text is compared, without case.
         let (full_len, full) = (usize::from(u32_at(entry + 0x48) as u16), usize_at(entry + 0x50));
         let (name_len, name) = (usize::from(u32_at(entry + 0x58) as u16), usize_at(entry + 0x60));
+        let lower = |at: usize| {
+            // SAFETY: a character of the loader's UNICODE_STRING.
+            let ch = unsafe { (at as *const u16).read() };
+            if (u16::from(b'A')..=u16::from(b'Z')).contains(&ch) { ch + 32 } else { ch }
+        };
+        let tail = full + full_len.saturating_sub(name_len);
         c.ok(
-            name_len > 0 && name_len <= full_len && name == full + full_len - name_len,
+            name_len > 0
+                && name_len <= full_len
+                && (0..name_len / 2).all(|i| lower(name + 2 * i) == lower(tail + 2 * i)),
             name_len as u64,
         )?;
         out[n] = base;
@@ -268,6 +288,173 @@ fn resolve(c: &mut Checks) -> Result<Api, u32> {
     }
 }
 
+/// A path built in place: UTF-16 units, no NUL.
+struct Path {
+    b: [u16; 300],
+    n: usize,
+}
+
+impl Path {
+    fn new() -> Self {
+        Path { b: [0; 300], n: 0 }
+    }
+    fn units(mut self, s: &[u16]) -> Self {
+        for &u in s {
+            if self.n < self.b.len() {
+                self.b[self.n] = u;
+                self.n += 1;
+            }
+        }
+        self
+    }
+    fn s(self, s: &str) -> Self {
+        let mut p = self;
+        for u in s.encode_utf16() {
+            p = p.units(&[u]);
+        }
+        p
+    }
+    fn get(&self) -> &[u16] {
+        &self.b[..self.n]
+    }
+    /// The NT form (`\??\` before a DOS path).
+    fn nt(&self) -> Path {
+        let p = Path::new();
+        let p = if self.get().starts_with(&wide!("\\??\\")) { p } else { p.s("\\??\\") };
+        p.units(self.get())
+    }
+}
+
+/// `PEB->ProcessParameters` (public x64 layout).
+fn params() -> *const u8 {
+    // SAFETY: the loader always provides ProcessParameters.
+    unsafe { *(peb().add(0x20) as *const *const u8) }
+}
+
+/// The directory of this executable (ImagePathName up to its last `\`).
+fn exe_dir() -> &'static [u16] {
+    // SAFETY: ImagePathName (+0x60) is a UNICODE_STRING the loader filled.
+    let path = unsafe {
+        let len = usize::from(*(params().add(0x60) as *const u16)) / 2;
+        core::slice::from_raw_parts(*(params().add(0x68) as *const *const u16), len)
+    };
+    &path[..path.iter().rposition(|&u| u == u16::from(b'\\')).unwrap_or(0)]
+}
+
+/// The environment variable `name`'s value (ProcessParameters'
+/// Environment, +0x80: `NAME=value` strings, an empty one last).
+fn env(name: &str) -> Option<&'static [u16]> {
+    // SAFETY: the environment block is NUL-terminated strings ending in an
+    // empty one.
+    unsafe {
+        let mut p = *(params().add(0x80) as *const *const u16);
+        loop {
+            let mut n = 0;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            if n == 0 {
+                return None;
+            }
+            let entry = core::slice::from_raw_parts(p, n);
+            let k = name.len();
+            if n > k
+                && entry[k] == u16::from(b'=')
+                && entry[..k]
+                    .iter()
+                    .zip(name.bytes())
+                    .all(|(&a, b)| u8::try_from(a).is_ok_and(|a| a.eq_ignore_ascii_case(&b)))
+            {
+                return Some(&entry[k + 1..]);
+            }
+            p = p.add(n + 1);
+        }
+    }
+}
+
+/// NtCreateFile of `path` (a DOS path): the status and the handle.
+fn open_path(path: &Path, access: u32, disposition: u32, options: u32) -> (NtStatus, Handle) {
+    let nt = path.nt();
+    let name = UnicodeString::new(nt.get());
+    let attrs = ObjectAttributes::new(&name, Handle(0), OBJ_CASE_INSENSITIVE);
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let options = options | FILE_SYNCHRONOUS_IO_NONALERT;
+    let (st, h, _) = create_file(&attrs, access, share, disposition, options);
+    (st, h)
+}
+
+/// Makes directory `path` (or opens the one there).
+fn make_dir(path: &Path) -> NtStatus {
+    let (st, h) = open_path(path, FILE_LIST_DIRECTORY, FILE_OPEN_IF, FILE_DIRECTORY_FILE);
+    if st == STATUS_SUCCESS {
+        close(h);
+    }
+    st
+}
+
+/// Copies file `from` to `to` (replaced if there).
+fn copy_file(from: &Path, to: &Path) -> NtStatus {
+    let (st, src) = open_path(from, GENERIC_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+    if st != STATUS_SUCCESS {
+        return st;
+    }
+    let (st, dst) = open_path(to, GENERIC_WRITE, FILE_OVERWRITE_IF, FILE_NON_DIRECTORY_FILE);
+    let mut result = st;
+    if st == STATUS_SUCCESS {
+        let mut buf = [0u8; 4096];
+        loop {
+            let (st, n) = read_file(src, &mut buf, None);
+            if st != STATUS_SUCCESS || n == 0 {
+                break;
+            }
+            result = write_file(dst, &buf[..n]);
+            if result != STATUS_SUCCESS {
+                break;
+            }
+        }
+        close(dst);
+    }
+    close(src);
+    result
+}
+
+/// Deletes file or (empty) directory `path`, if it is there.
+fn remove_path(path: &Path, directory: bool) {
+    let kind = if directory { FILE_DIRECTORY_FILE } else { FILE_NON_DIRECTORY_FILE };
+    let (st, h) = open_path(path, DELETE, FILE_OPEN, kind | FILE_DELETE_ON_CLOSE);
+    if st == STATUS_SUCCESS {
+        close(h);
+    }
+}
+
+/// `%TEMP%\gala_loader` and its `sub`, with copies of testdll.dll and
+/// testdll2.dll from beside the exe in `sub`: a DLL loaded by path from
+/// there (Windows has no C:\gala; the copies go in %TEMP%, which an
+/// ordinary user may write). An earlier run's are replaced.
+fn sub_dir(c: &mut Checks) -> Result<(Path, Path), u32> {
+    let temp = env("TEMP");
+    c.ok(temp.is_some(), 0)?;
+    let temp = temp.unwrap_or(&[]);
+    let temp = if temp.ends_with(&[u16::from(b'\\')]) { &temp[..temp.len() - 1] } else { temp };
+    let top = Path::new().units(temp).s("\\gala_loader");
+    let sub = Path::new().units(top.get()).s("\\sub");
+    c.eq(make_dir(&top).into(), STATUS_SUCCESS.into())?;
+    c.eq(make_dir(&sub).into(), STATUS_SUCCESS.into())?;
+    for name in ["\\testdll.dll", "\\testdll2.dll"] {
+        let from = Path::new().units(exe_dir()).s(name);
+        let to = Path::new().units(sub.get()).s(name);
+        c.eq(copy_file(&from, &to).into(), STATUS_SUCCESS.into())?;
+    }
+    Ok((top, sub))
+}
+
+/// Case-insensitive (ASCII) suffix test of two UTF-16 strings.
+fn ends_with_units(s: &[u16], suffix: &[u16]) -> bool {
+    let up = |u: u16| if (0x61..=0x7a).contains(&u) { u - 32 } else { u };
+    s.len() >= suffix.len()
+        && s[s.len() - suffix.len()..].iter().zip(suffix).all(|(&a, &b)| up(a) == up(b))
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let api = resolve(&mut c)?;
@@ -297,7 +484,8 @@ fn run() -> Result<(), u32> {
     c.eq(s.into(), STATUS_SUCCESS.into())?;
     c.eq(by_ordinal as u64, add as u64)?;
     let (s, _) = api.proc(dll, b"no_such_export");
-    c.eq(s.into(), STATUS_PROCEDURE_NOT_FOUND.into())?;
+    // By name: STATUS_ENTRYPOINT_NOT_FOUND (Windows 11 25H2).
+    c.eq(s.into(), STATUS_ENTRYPOINT_NOT_FOUND.into())?;
     let (s, count) = api.proc(dll, b"GALA_ATTACH_COUNT");
     c.eq(s.into(), STATUS_SUCCESS.into())?;
     // SAFETY: testdll's exported counter.
@@ -398,6 +586,82 @@ fn run() -> Result<(), u32> {
     c.ok(seq2.is_some(), 0)?;
     c.ok(seq.is_some(), 0)?;
     c.ok(seq > seq2, u64::from(seq.unwrap_or(0)))?;
+
+    // A DLL loaded by path: its dependencies come from the usual places
+    // (testdll next to the exe), or, with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+    // (0x100, passed in DllPath with its low bit set, as LoadLibraryExW
+    // does), from the DLL's own directory first (%TEMP%\gala_loader\sub's
+    // testdll; CPython loads _ctypes.pyd and its libffi-8.dll from DLLs so).
+    let (top, sub) = sub_dir(&mut c)?;
+    let sub2 = Path::new().units(sub.get()).s("\\testdll2.dll");
+    let sub2 = sub2.get();
+    // Beside the exe: its directory without the drive ("\gala" on gala).
+    let dir = exe_dir();
+    let beside =
+        Path::new().units(&dir[dir.iter().position(|&u| u == 0x3a).map_or(0, |i| i + 1)..]);
+    let beside = beside.s("\\testdll.dll");
+    let in_sub = wide!("\\sub\\testdll.dll");
+    for (flags, dir) in [(0usize, beside.get()), (0x101, &in_sub[..])] {
+        let mut dll2 = 0;
+        let path = if flags == 0 { core::ptr::null() } else { flags as *const u16 };
+        let s = (api.load)(path, core::ptr::null(), &UnicodeString::new(sub2), &mut dll2);
+        c.eq(s.into(), STATUS_SUCCESS.into())?;
+        let (s, dep) = api.handle(&wide!("testdll.dll"));
+        c.eq(s.into(), STATUS_SUCCESS.into())?;
+        let mut buf = [0u8; 600];
+        c.ok(
+            mapped_file_name(dep, &mut buf).is_ok_and(|name| ends_with_units(name, dir)),
+            flags as u64,
+        )?;
+        c.eq((api.unload)(dll2).into(), STATUS_SUCCESS.into())?;
+        let (s, _) = api.handle(&wide!("testdll.dll"));
+        c.eq(s.into(), STATUS_DLL_NOT_FOUND.into())?;
+    }
+
+    // LdrAddDllDirectory (kernel32's AddDllDirectory): with
+    // LOAD_LIBRARY_SEARCH_USER_DIRS (0x400) alone, the dependencies come
+    // from the added directories only (numpy finds its OpenBLAS so);
+    // once removed, testdll is found nowhere.
+    let ntdll = find_ntdll().unwrap_or(0);
+    let (Some(add), Some(remove)) =
+        (find_export(ntdll, b"LdrAddDllDirectory"), find_export(ntdll, b"LdrRemoveDllDirectory"))
+    else {
+        return c.ok(false, 0);
+    };
+    // SAFETY: ntdll's exports with these signatures.
+    let (add, remove) = unsafe {
+        (
+            core::mem::transmute::<
+                usize,
+                extern "system" fn(*const UnicodeString, *mut usize) -> NtStatus,
+            >(add),
+            core::mem::transmute::<usize, extern "system" fn(usize) -> NtStatus>(remove),
+        )
+    };
+    let mut cookie = 0usize;
+    c.eq(add(&UnicodeString::new(sub.get()), &mut cookie).into(), STATUS_SUCCESS.into())?;
+    c.ok(cookie != 0, 0)?;
+    let user_dirs = 0x401 as *const u16;
+    let mut dll2 = 0;
+    let s = (api.load)(user_dirs, core::ptr::null(), &UnicodeString::new(sub2), &mut dll2);
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    let (s, dep) = api.handle(&wide!("testdll.dll"));
+    c.eq(s.into(), STATUS_SUCCESS.into())?;
+    let mut buf = [0u8; 600];
+    c.ok(
+        mapped_file_name(dep, &mut buf).is_ok_and(|name| ends_with_ci(name, "\\sub\\testdll.dll")),
+        0,
+    )?;
+    c.eq((api.unload)(dll2).into(), STATUS_SUCCESS.into())?;
+    c.eq(remove(cookie).into(), STATUS_SUCCESS.into())?;
+    let s = (api.load)(user_dirs, core::ptr::null(), &UnicodeString::new(sub2), &mut dll2);
+    c.eq(s.into(), STATUS_DLL_NOT_FOUND.into())?;
+    // No leftovers (an earlier round's moved later checks).
+    for name in ["\\testdll.dll", "\\testdll2.dll"] {
+        remove_path(&Path::new().units(sub.get()).s(name), false);
+    }
+    remove_path(&sub, true);
+    remove_path(&top, true);
     Ok(())
 }
 
@@ -412,3 +676,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

@@ -42,11 +42,31 @@ pub const VT_BYREF: u16 = 0x4000;
 pub(crate) const VARIANT_ALPHABOOL: u16 = 0x2;
 const VARIANT_LOCALBOOL: u16 = 0x10;
 
+/// VARIANT's value words: its union is 8 bytes or two pointers (a
+/// BRECORD), whichever is larger: 24-byte VARIANTs on x64, 16 on x86.
+pub(crate) const WORDS: usize = 2 * core::mem::size_of::<usize>() / 8;
+
 #[repr(C)]
 pub struct Variant {
     pub vt: u16,
     reserved: [u16; 3],
-    pub value: [u64; 2],
+    pub value: [u64; WORDS],
+}
+
+const _: () = assert!(core::mem::size_of::<Variant>() == if WORDS == 2 { 24 } else { 16 });
+
+/// A value in the union's first 8 bytes, the rest zero.
+pub(crate) const fn word(v: u64) -> [u64; WORDS] {
+    let mut w = [0; WORDS];
+    w[0] = v;
+    w
+}
+
+impl Variant {
+    /// A VT_EMPTY variant.
+    pub(crate) const fn empty() -> Variant {
+        Variant { vt: VT_EMPTY, reserved: [0; 3], value: [0; WORDS] }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -88,20 +108,20 @@ pub extern "system" fn VariantClear(v: *mut Variant) -> HResult {
 
 /// A copy of the value of a variant of type `vt` (BSTRs duplicated,
 /// interfaces referenced, arrays copied).
-fn copy_value(vt: u16, value: [u64; 2]) -> Result<[u64; 2], HResult> {
+fn copy_value(vt: u16, value: [u64; WORDS]) -> Result<[u64; WORDS], HResult> {
     if vt & VT_BYREF != 0 {
         return Ok(value);
     }
     if vt & VT_ARRAY != 0 {
         let mut copy = core::ptr::null_mut();
         let hr = SafeArrayCopy(value[0] as *const SafeArray, &mut copy);
-        return if hr < 0 { Err(hr) } else { Ok([copy as u64, 0]) };
+        return if hr < 0 { Err(hr) } else { Ok(word(copy as u64)) };
     }
     match vt {
         VT_BSTR if value[0] != 0 => {
             let s = value[0] as *const u16;
             let p = SysAllocStringLen(s, SysStringLen(s));
-            if p.is_null() { Err(E_OUTOFMEMORY) } else { Ok([p as u64, 0]) }
+            if p.is_null() { Err(E_OUTOFMEMORY) } else { Ok(word(p as u64)) }
         }
         VT_UNKNOWN | VT_DISPATCH => {
             add_ref(value[0] as usize);
@@ -156,10 +176,14 @@ pub extern "system" fn VariantCopyInd(dst: *mut Variant, src: *const Variant) ->
         unsafe { (*(p as *const Variant)).value }
     } else {
         let size = element_size(base);
-        let mut v = [0u64; 2];
-        // SAFETY: the referenced value of that size.
+        let mut v = [0u64; WORDS];
+        // SAFETY: the referenced value of that size (at most the union's).
         unsafe {
-            core::ptr::copy_nonoverlapping(p.cast::<u8>(), v.as_mut_ptr().cast(), size.min(16))
+            core::ptr::copy_nonoverlapping(
+                p.cast::<u8>(),
+                v.as_mut_ptr().cast(),
+                size.min(8 * WORDS),
+            )
         };
         v
     };
@@ -207,7 +231,7 @@ pub(crate) enum Value {
     Text(*const u16, usize),
 }
 
-pub(crate) fn value_of(vt: u16, v: [u64; 2]) -> Result<Value, HResult> {
+pub(crate) fn value_of(vt: u16, v: [u64; WORDS]) -> Result<Value, HResult> {
     let raw = v[0];
     Ok(match vt {
         VT_EMPTY => Value::Int(0),
@@ -484,7 +508,7 @@ fn format_real(v: f64, out: &mut [u8; 48]) -> usize {
 }
 
 /// Converts `value` to type `vt`.
-pub(crate) fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HResult> {
+pub(crate) fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; WORDS], HResult> {
     let as_real = |v: Value| -> Result<f64, HResult> {
         Ok(match v {
             Value::Int(i) => i as f64,
@@ -525,7 +549,7 @@ pub(crate) fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HRe
         VT_CY => {
             if let Value::Text(s, n) = value {
                 let number = parse_number(chars(s, n)).ok_or(DISP_E_TYPEMISMATCH)?;
-                return Ok([number_currency(&number).ok_or(DISP_E_OVERFLOW)? as u64, 0]);
+                return Ok(word(number_currency(&number).ok_or(DISP_E_OVERFLOW)? as u64));
             }
             let r = as_real(value)? * 10000.0;
             round_even(r)
@@ -575,7 +599,7 @@ pub(crate) fn convert(value: Value, vt: u16, flags: u16) -> Result<[u64; 2], HRe
             return Err(DISP_E_TYPEMISMATCH);
         }
     };
-    Ok([bits, 0])
+    Ok(word(bits))
 }
 
 /// "#TRUE#"/"#FALSE#" (as written), or English "True"/"False" in any

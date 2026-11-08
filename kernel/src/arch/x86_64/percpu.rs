@@ -204,6 +204,21 @@ pub fn set_user_gs_base(base: u64) {
     unsafe { cpu::wrmsr(IA32_KERNEL_GS_BASE, base) };
 }
 
+/// Loads the segments of a thread that runs 32-bit code (WOW64), its
+/// 32-bit TEB at `teb32` as FS (`gdt::set_teb32`). Called by the context
+/// switch with interrupts disabled, before `set_user_fs_base(teb32)`
+/// (which then has nothing to write).
+pub fn load_teb32(teb32: u32) {
+    let block = current();
+    // SAFETY: the block is this CPU's and its TSS is in this CPU's tables;
+    // interrupts are off, so nothing else uses them meanwhile. Loading FS
+    // set the FS base to `teb32`, which the cache records.
+    unsafe {
+        gdt::set_teb32((*block).tss, teb32);
+        (*block).user_fs_base = u64::from(teb32);
+    }
+}
+
 /// Sets the FS base user mode sees (the kernel does not use FS; a Linux
 /// thread's TLS pointer). Written to the MSR only when it changes.
 /// Called with interrupts disabled (a context switch, or under the

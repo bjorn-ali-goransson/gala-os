@@ -209,6 +209,7 @@ type RegEnumValueW = unsafe extern "system" fn(
 type RegDeleteKeyW = unsafe extern "system" fn(isize, *const u16) -> u32;
 type RegDeleteValueW = unsafe extern "system" fn(isize, *const u16) -> u32;
 type RegCloseKey = unsafe extern "system" fn(isize) -> u32;
+type CheckTokenMembership = unsafe extern "system" fn(isize, *const u8, *mut i32) -> i32;
 
 struct Reg {
     open: RegOpenKeyExW,
@@ -220,6 +221,8 @@ struct Reg {
     delete_key: RegDeleteKeyW,
     delete_value: RegDeleteValueW,
     close: RegCloseKey,
+    /// Whether the caller is an administrator (Host::is_admin).
+    check_membership: Option<CheckTokenMembership>,
 }
 
 const KEY_READ: u32 = 0x2_0019;
@@ -265,6 +268,8 @@ impl Reg {
                     b"RegDeleteValueW\0",
                 )?),
                 close: core::mem::transmute::<*mut c_void, RegCloseKey>(f(b"RegCloseKey\0")?),
+                check_membership: f(b"CheckTokenMembership\0")
+                    .map(|p| core::mem::transmute::<*mut c_void, CheckTokenMembership>(p)),
             })
         }
     }
@@ -754,6 +759,27 @@ impl Host for Win32 {
     fn sleep(&mut self, ms: u32) {
         // SAFETY: a plain call.
         unsafe { Sleep(ms) };
+    }
+
+    fn is_admin(&mut self) -> bool {
+        // BUILTIN\Administrators, S-1-5-32-544: an enabled group of the
+        // caller's token (CheckTokenMembership with a null token, as
+        // Microsoft's documentation tests for an administrator).
+        const ADMINISTRATORS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0];
+        let Some(check) = self.reg.as_ref().and_then(|r| r.check_membership) else {
+            self.log("elevation unknown: advapi32!CheckTokenMembership is missing");
+            return false;
+        };
+        let mut member = 0;
+        // SAFETY: a valid SID and our output.
+        let ok = unsafe { check(0, ADMINISTRATORS.as_ptr(), &mut member) };
+        if ok == 0 {
+            // SAFETY: a plain call.
+            let e = unsafe { GetLastError() };
+            self.log(&format!("elevation unknown: CheckTokenMembership failed error={e}"));
+            return false;
+        }
+        member != 0
     }
 }
 

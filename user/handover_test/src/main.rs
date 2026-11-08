@@ -42,8 +42,8 @@
 //! allowed)`.
 //!
 //! GalaRequestHandover is gala's own (number 0x7f5a), as are the timer
-//! services' numbers here: on Windows the request fails and the test
-//! reports itself skipped (exit 0).
+//! services' numbers here: elsewhere (`ntrt::on_gala`) the test calls
+//! none of them and reports itself skipped (exit 0).
 //!
 //! Prints `handover_test: ok` or exits with the number of the failing check.
 
@@ -234,7 +234,6 @@ fn refused() -> Result<&'static str, u32> {
     match request_handover() {
         STATUS_SUCCESS => {}
         STATUS_ACCESS_DENIED => return Ok("ok (no handover allowed)"),
-        STATUS_INVALID_SYSTEM_SERVICE => return Ok("skipped (no GalaRequestHandover: not gala)"),
         _ => return Err(102),
     }
     check(delay(relative_ms(1000)) == STATUS_SUCCESS, 103)?;
@@ -247,6 +246,12 @@ fn refused() -> Result<&'static str, u32> {
 }
 
 fn main() -> u32 {
+    // Not on gala: the services' numbers would reach Windows' win32k table
+    // (the first call faults, STATUS_FATAL_USER_CALLBACK_EXCEPTION).
+    if !on_gala() {
+        say("handover_test: skipped (GalaRequestHandover is gala's own)\r\n");
+        return 0;
+    }
     let result = if last_arg_is("refuse") {
         refused()
     } else if last_arg_is("late") {
@@ -343,10 +348,6 @@ fn run() -> Result<(), u32> {
     say("handover_test: ready, asking for a handover\r\n");
     match request_handover() {
         STATUS_SUCCESS => {}
-        STATUS_INVALID_SYSTEM_SERVICE => {
-            say("handover_test: skipped (no GalaRequestHandover: not gala)\r\n");
-            exit(0);
-        }
         STATUS_ACCESS_DENIED if last_arg_is("late") => {
             say("handover_test: ok (no handover allowed)\r\n");
             exit(0);

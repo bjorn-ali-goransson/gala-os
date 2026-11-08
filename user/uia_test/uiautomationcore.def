@@ -1,0 +1,4 @@
+LIBRARY UIAutomationCore.dll
+EXPORTS
+    UiaReturnRawElementProvider
+    UiaHostProviderFromHwnd

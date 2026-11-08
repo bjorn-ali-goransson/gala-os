@@ -12,11 +12,20 @@
 
 use core::ffi::c_void;
 
+mod arith;
 mod conversions;
 mod date;
 mod safearray;
+mod unimplemented;
 mod variant;
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -32,15 +41,24 @@ unsafe extern "C" {
 }
 
 /// MSVC-target codegen references this marker symbol directly.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;

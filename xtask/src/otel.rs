@@ -1,7 +1,8 @@
 //! OpenTelemetry export of a boot (ROADMAP OT, stage OT1;
 //! docs/OBSERVABILITY.md "OpenTelemetry export"): the event stream
 //! (`<image>.events.jsonl`, debugcon) and the serial log of one boot
-//! become OTLP/JSON traces, logs and metrics, which an OTel collector,
+//! become OpenTelemetry traces, logs and metrics (OTLP/JSON files; sent as
+//! batched OTLP protobuf, `send`), which an OTel collector,
 //! Jaeger, Tempo or Grafana read. `cargo xtask otel <log-or-scenario>`;
 //! `XTASK_OTEL=1 cargo xtask boot-test ...` for every boot.
 //!
@@ -26,13 +27,17 @@
 //! kind in the [`Report`], never dropped silently; what the stream lacks
 //! (an exit, a parent) is counted as a gap for OT2.
 //!
-//! Hand-written (no OTel crates): the encoder follows the OTLP/JSON
-//! mapping of opentelemetry-proto (Apache-2.0; THIRD_PARTY.md): ids in
-//! hex, 64-bit integers and enums as JSON strings and numbers, field
-//! names in lowerCamelCase.
+//! Hand-written (no OTel crates): the conversion builds one model
+//! ([`wire::Data`]) that `wire` encodes as OTLP/JSON (the files) and as
+//! OTLP protobuf (what [`post`] sends by default, batched; `send`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+
+pub mod send;
+pub mod wire;
+
+pub use send::post;
 
 /// One boot to convert.
 /// Function names for a module's offsets, in order (None: unknown).
@@ -53,9 +58,11 @@ pub struct Boot<'a> {
     pub symbols: Option<Symbols<'a>>,
 }
 
-/// The OTLP/JSON requests (each one an `Export*ServiceRequest`, the body
-/// of a POST to `/v1/traces`, `/v1/logs`, `/v1/metrics`).
+/// One boot's export: its items ([`wire::Data`], what [`post`] sends) and
+/// their OTLP/JSON requests for files (each one an `Export*ServiceRequest`,
+/// `SPANS_PER_REQUEST` and `LOGS_PER_REQUEST` items each).
 pub struct Export {
+    pub data: wire::Data,
     pub traces: Vec<String>,
     pub logs: Vec<String>,
     pub metrics: String,
@@ -85,6 +92,9 @@ pub struct Report {
     /// at most `SLOWEST` of each kind.
     pub slow_pipes: Vec<(u64, String)>,
     pub slow_completions: Vec<(u64, String)>,
+    /// Buttons and keys that waited longest for their program to take
+    /// them (`button`/`key` to `input taken`).
+    pub slow_input: Vec<(u64, String)>,
 }
 
 /// How many of the slowest IPC hand-offs the report keeps.
@@ -134,6 +144,13 @@ impl Report {
                 *ns as f64 / 1e6
             );
         }
+        for (ns, what) in &self.slow_input {
+            let _ = writeln!(
+                o,
+                "otel: slow input: {:.1} ms delivered before taken: {what}",
+                *ns as f64 / 1e6
+            );
+        }
         for (ns, what) in &self.slow_completions {
             let _ = writeln!(
                 o,
@@ -154,7 +171,7 @@ pub enum Val {
     Arr(Vec<Val>),
 }
 
-type Attrs = Vec<(String, Val)>;
+pub type Attrs = Vec<(String, Val)>;
 
 /// The writes into each (pipe, reading end): (first byte, end, span).
 type PipeWrites = HashMap<(u64, u64), Vec<(u64, u64, usize)>>;
@@ -228,6 +245,12 @@ impl Json {
         }
     }
     pub fn u64(&self, key: &str) -> Option<u64> {
+        match self.get(key)? {
+            Json::Num(n) => n.parse().ok(),
+            _ => None,
+        }
+    }
+    pub fn i64(&self, key: &str) -> Option<i64> {
         match self.get(key)? {
             Json::Num(n) => n.parse().ok(),
             _ => None,
@@ -413,50 +436,6 @@ fn esc(out: &mut String, text: &str) {
     }
     out.push('"');
 }
-
-fn val_json(out: &mut String, v: &Val) {
-    match v {
-        Val::Str(t) => {
-            out.push_str("{\"stringValue\":");
-            esc(out, t);
-            out.push('}');
-        }
-        // int64 is a JSON string in the OTLP/JSON mapping.
-        Val::Int(i) => {
-            let _ = write!(out, "{{\"intValue\":\"{i}\"}}");
-        }
-        Val::Bool(b) => {
-            let _ = write!(out, "{{\"boolValue\":{b}}}");
-        }
-        Val::Arr(a) => {
-            out.push_str("{\"arrayValue\":{\"values\":[");
-            for (i, v) in a.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                val_json(out, v);
-            }
-            out.push_str("]}}");
-        }
-    }
-}
-
-fn attrs_json(out: &mut String, attrs: &[(String, Val)]) {
-    out.push('[');
-    for (i, (k, v)) in attrs.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"key\":");
-        esc(out, k);
-        out.push_str(",\"value\":");
-        val_json(out, v);
-        out.push('}');
-    }
-    out.push(']');
-}
-
-const SCOPE: &str = r#"{"name":"gala-xtask-otel","version":"1"}"#;
 
 // ---- the conversion ----
 
@@ -739,7 +718,7 @@ pub fn convert(boot: &Boot) -> Export {
         trace_seed: seed,
         report: Report::default(),
     };
-    let trace_id = format!("{:016x}{:016x}", mix(seed) | 1, mix(seed ^ 0x5555));
+    let trace_id = wire::hex_id(&trace_bytes(seed));
     let root = st.new_span(
         None,
         format!("boot {}", boot.scenario),
@@ -767,6 +746,9 @@ pub fn convert(boot: &Boot) -> Export {
     let mut pipe_names: HashMap<u64, String> = HashMap::new();
     let mut pipe_writes: PipeWrites = HashMap::new();
     let mut posts: Posts = HashMap::new();
+    // Delivered buttons and keys per (window, message), oldest first: a
+    // window gets them in order, so the next `input taken` is the oldest.
+    let mut deliveries: Posts = HashMap::new();
     for (t, ev) in &events {
         let t = *t;
         last = last.max(t);
@@ -846,6 +828,52 @@ pub fn convert(boot: &Boot) -> Export {
                     }
                 }
                 st.report.mapped(&kind, "span, linked write to read");
+            }
+            "button" | "key" => {
+                let (window, message) =
+                    (ev.u64("window").unwrap_or(0), ev.u64("message").unwrap_or(0));
+                let mut attrs: Attrs = vec![
+                    ("gala.input.window".into(), Val::Int(window as i64)),
+                    ("gala.input.message".into(), hex(message)),
+                    ("gala.input.owner".into(), Val::Int(ev.u64("owner").unwrap_or(0) as i64)),
+                ];
+                if kind == "key" {
+                    attrs.push(("gala.input.vk".into(), hex(ev.u64("vk").unwrap_or(0))));
+                } else {
+                    attrs.push(("gala.input.x".into(), Val::Int(ev.i64("x").unwrap_or(0))));
+                    attrs.push(("gala.input.y".into(), Val::Int(ev.i64("y").unwrap_or(0))));
+                }
+                let sp = ipc_span(&mut st, &kind, attrs);
+                deliveries.entry((window, message)).or_default().push_back(sp);
+                st.report.mapped(&kind, "span, linked delivery to taking");
+            }
+            "input taken" => {
+                let (window, message) =
+                    (ev.u64("window").unwrap_or(0), ev.u64("message").unwrap_or(0));
+                let mut attrs: Attrs = vec![
+                    ("gala.input.window".into(), Val::Int(window as i64)),
+                    ("gala.input.message".into(), hex(message)),
+                ];
+                let from = deliveries.get_mut(&(window, message)).and_then(|q| q.pop_front());
+                if let Some(d) = from {
+                    let waited = t.saturating_sub(st.spans[d].start);
+                    attrs.push(("gala.input.queued_ns".into(), Val::Int(waited as i64)));
+                    keep_slowest(&mut st.report.slow_input, waited, || {
+                        format!(
+                            "window {window} message {message:#x}, delivered at {} ns, taken by thread {} at {t} ns",
+                            st.spans[d].start,
+                            by.unwrap_or(0)
+                        )
+                    });
+                }
+                let sp = ipc_span(&mut st, &kind, attrs);
+                match from {
+                    Some(d) => {
+                        st.spans[sp].links.push((d, vec![("gala.link".into(), s("input from"))]))
+                    }
+                    None => st.report.gap("input taken without its delivery"),
+                }
+                st.report.mapped(&kind, "span, linked delivery to taking");
             }
             "iocp post" | "iocp dequeue" => {
                 let (port, ctx) = (ev.u64("port").unwrap_or(0), ev.u64("ctx").unwrap_or(0));
@@ -1457,209 +1485,95 @@ pub fn convert(boot: &Boot) -> Export {
         resource.push(("service.version".into(), s("unknown")));
     }
     let base = boot.start_unix_ns;
-    let mut res_json = String::from("{\"attributes\":");
-    attrs_json(&mut res_json, &resource);
-    res_json.push('}');
-
-    let encode_span = |o: &mut String, sp: &Span| {
-        let _ = write!(o, "{{\"traceId\":\"{trace_id}\",\"spanId\":\"{:016x}\"", sp.id);
-        if let Some(p) = sp.parent {
-            let _ = write!(o, ",\"parentSpanId\":\"{:016x}\"", st.spans[p].id);
-        }
-        o.push_str(",\"name\":");
-        esc(o, &sp.name);
-        let _ = write!(
-            o,
-            ",\"kind\":1,\"startTimeUnixNano\":\"{}\",\"endTimeUnixNano\":\"{}\",\"attributes\":",
-            base + sp.start,
-            base + sp.end.unwrap_or(last)
-        );
-        attrs_json(o, &sp.attrs);
-        o.push_str(",\"events\":[");
-        for (i, e) in sp.events.iter().enumerate() {
-            if i > 0 {
-                o.push(',');
-            }
-            let _ = write!(o, "{{\"timeUnixNano\":\"{}\",\"name\":", base + e.t);
-            esc(o, &e.name);
-            o.push_str(",\"attributes\":");
-            attrs_json(o, &e.attrs);
-            o.push('}');
-        }
-        o.push_str("],\"links\":[");
-        for (i, (to, attrs)) in sp.links.iter().enumerate() {
-            if i > 0 {
-                o.push(',');
-            }
-            let _ = write!(
-                o,
-                "{{\"traceId\":\"{trace_id}\",\"spanId\":\"{:016x}\",\"attributes\":",
-                st.spans[*to].id
-            );
-            attrs_json(o, attrs);
-            o.push('}');
-        }
-        let _ = write!(o, "],\"status\":{{\"code\":{}", sp.status.0);
-        if !sp.status.1.is_empty() {
-            o.push_str(",\"message\":");
-            esc(o, &sp.status.1);
-        }
-        o.push_str("}}");
-    };
-    let mut traces = Vec::new();
-    for chunk in st.spans.chunks(SPANS_PER_REQUEST) {
-        let mut o = format!(
-            "{{\"resourceSpans\":[{{\"resource\":{res_json},\"scopeSpans\":[{{\"scope\":{SCOPE},\"spans\":["
-        );
-        for (i, sp) in chunk.iter().enumerate() {
-            if i > 0 {
-                o.push(',');
-            }
-            encode_span(&mut o, sp);
-        }
-        o.push_str("]}]}]}");
-        traces.push(o);
-    }
-    let mut log_requests = Vec::new();
-    for chunk in logs.chunks(LOGS_PER_REQUEST) {
-        let mut o = format!(
-            "{{\"resourceLogs\":[{{\"resource\":{res_json},\"scopeLogs\":[{{\"scope\":{SCOPE},\"logRecords\":["
-        );
-        for (i, l) in chunk.iter().enumerate() {
-            if i > 0 {
-                o.push(',');
-            }
-            let _ = write!(
-                o,
-                "{{\"timeUnixNano\":\"{}\",\"observedTimeUnixNano\":\"{}\",\"severityNumber\":{}",
-                base + l.t,
-                base + l.t,
-                l.severity
-            );
-            if !l.text.is_empty() {
-                let _ = write!(o, ",\"severityText\":\"{}\"", l.text);
-            }
-            o.push_str(",\"body\":{\"stringValue\":");
-            esc(&mut o, &l.body);
-            o.push_str("},\"attributes\":");
-            attrs_json(&mut o, &l.attrs);
-            if let Some(sp) = l.span {
-                let _ = write!(
-                    o,
-                    ",\"traceId\":\"{trace_id}\",\"spanId\":\"{:016x}\"",
-                    st.spans[sp].id
-                );
-            }
-            o.push('}');
-        }
-        o.push_str("]}]}]}");
-        log_requests.push(o);
-    }
-    let mut m = format!(
-        "{{\"resourceMetrics\":[{{\"resource\":{res_json},\"scopeMetrics\":[{{\"scope\":{SCOPE},\"metrics\":["
-    );
-    for (i, metric) in metrics.iter().enumerate() {
-        if i > 0 {
-            m.push(',');
-        }
-        m.push_str("{\"name\":");
-        esc(&mut m, &metric.name);
-        let _ = write!(m, ",\"unit\":\"{}\",", metric.unit);
-        if metric.sum {
-            m.push_str(
-                "\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[",
-            );
-        } else {
-            m.push_str("\"gauge\":{\"dataPoints\":[");
-        }
-        for (j, (t, v, a)) in metric.points.iter().enumerate() {
-            if j > 0 {
-                m.push(',');
-            }
-            if metric.sum {
-                let _ = write!(m, "{{\"startTimeUnixNano\":\"{base}\",");
-            } else {
-                m.push('{');
-            }
-            let _ =
-                write!(m, "\"timeUnixNano\":\"{}\",\"asInt\":\"{v}\",\"attributes\":", base + t);
-            attrs_json(&mut m, a);
-            m.push('}');
-        }
-        m.push_str("]}}");
-    }
-    m.push_str("]}]}]}");
+    let res_json = wire::resource_json(&resource);
+    let trace = trace_bytes(seed);
+    let spans: Vec<wire::Span> = st
+        .spans
+        .iter()
+        .map(|sp| wire::Span {
+            trace_id: trace,
+            span_id: sp.id,
+            parent: sp.parent.map(|p| st.spans[p].id),
+            name: sp.name.clone(),
+            kind: 1,
+            start: base + sp.start,
+            end: base + sp.end.unwrap_or(last),
+            attrs: sp.attrs.clone(),
+            events: sp
+                .events
+                .iter()
+                .map(|e| wire::Event {
+                    time: base + e.t,
+                    name: e.name.clone(),
+                    attrs: e.attrs.clone(),
+                })
+                .collect(),
+            links: sp
+                .links
+                .iter()
+                .map(|(to, attrs)| wire::Link {
+                    trace_id: trace,
+                    span_id: st.spans[*to].id,
+                    attrs: attrs.clone(),
+                })
+                .collect(),
+            status: sp.status.0,
+            message: sp.status.1.clone(),
+        })
+        .collect();
+    let logs: Vec<wire::Log> = logs
+        .into_iter()
+        .map(|l| wire::Log {
+            time: base + l.t,
+            severity: l.severity,
+            text: l.text.to_string(),
+            body: l.body,
+            attrs: l.attrs,
+            context: l.span.map(|sp| (trace, st.spans[sp].id)),
+        })
+        .collect();
+    let points: Vec<wire::Point> = metrics
+        .into_iter()
+        .flat_map(|m| {
+            m.points.into_iter().map(move |(t, value, attrs)| wire::Point {
+                name: m.name.clone(),
+                unit: m.unit.to_string(),
+                sum: m.sum,
+                start: base,
+                time: base + t,
+                value,
+                attrs,
+            })
+        })
+        .collect();
+    let traces = spans.chunks(SPANS_PER_REQUEST).map(|c| wire::traces_json(&res_json, c)).collect();
+    let log_requests =
+        logs.chunks(LOGS_PER_REQUEST).map(|c| wire::logs_json(&res_json, c)).collect();
+    let metrics = wire::metrics_json(&res_json, &points);
     let profiles = profiles_json(&events, &st, &trace_id, &res_json, base, boot.symbols);
-    Export { traces, logs: log_requests, metrics: m, profiles, report: st.report }
+    Export {
+        data: wire::Data { resource, spans, logs, points },
+        traces,
+        logs: log_requests,
+        metrics,
+        profiles,
+        report: st.report,
+    }
 }
 
-/// Spans per OTLP request (a collector's default body limit is 20 MiB;
-/// a system call span is about 600 bytes).
+/// The trace id of a boot (`seed`: its content's hash), as bytes; its hex
+/// is the resource's `service.instance.id`.
+fn trace_bytes(seed: u64) -> [u8; 16] {
+    let mut id = [0; 16];
+    id[..8].copy_from_slice(&(mix(seed) | 1).to_be_bytes());
+    id[8..].copy_from_slice(&mix(seed ^ 0x5555).to_be_bytes());
+    id
+}
+
+/// Spans per OTLP/JSON request in the files `--out` writes (one request a
+/// line); what is sent goes in batches of `send::MAX_BATCH`.
 pub const SPANS_PER_REQUEST: usize = 5000;
 pub const LOGS_PER_REQUEST: usize = 5000;
-
-/// POSTs the export to an OTLP/HTTP endpoint (`http://host:4318`, as in
-/// `OTEL_EXPORTER_OTLP_ENDPOINT`; plain HTTP only).
-pub fn post(endpoint: &str, export: &Export) -> Result<String, String> {
-    let rest = endpoint.strip_prefix("http://").ok_or_else(|| {
-        format!("{endpoint}: only http:// endpoints (OTLP/HTTP, JSON) are supported")
-    })?;
-    let (host, prefix) = match rest.split_once('/') {
-        Some((h, p)) => (h, format!("/{}", p.trim_end_matches('/'))),
-        None => (rest, String::new()),
-    };
-    let host = if host.contains(':') { host.to_string() } else { format!("{host}:80") };
-    let mut sent = Vec::new();
-    let bodies = export
-        .traces
-        .iter()
-        .map(|b| ("traces", b))
-        .chain(export.logs.iter().map(|b| ("logs", b)))
-        .chain(std::iter::once(("metrics", &export.metrics)))
-        .chain((!export.profiles.is_empty()).then_some(("profiles", &export.profiles)));
-    for (signal, body) in bodies {
-        // Profiles are still a development signal: their own path.
-        let version = if signal == "profiles" { "v1development" } else { "v1" };
-        let path = format!("{prefix}/{version}/{signal}");
-        let status = http_post(&host, &path, body)?;
-        if !(200..300).contains(&status.0) {
-            return Err(format!("POST {path} to {host}: HTTP {}: {}", status.0, status.1.trim()));
-        }
-        sent.push(format!("{signal} {} KiB", body.len() / 1024));
-    }
-    Ok(sent.join(", "))
-}
-
-fn http_post(host: &str, path: &str, body: &str) -> Result<(u16, String), String> {
-    use std::io::{Read, Write};
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-    let addr = host
-        .to_socket_addrs()
-        .map_err(|e| format!("{host}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("{host}: no address"))?;
-    let mut c = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .map_err(|e| format!("{host}: {e}"))?;
-    c.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    c.write_all(head.as_bytes())
-        .and_then(|()| c.write_all(body.as_bytes()))
-        .map_err(|e| format!("{host}: send: {e}"))?;
-    let mut response = Vec::new();
-    let _ = c.read_to_end(&mut response);
-    let text = String::from_utf8_lossy(&response).into_owned();
-    let code = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(|| format!("{host}: no HTTP response"))?;
-    let body = text.split_once("\r\n\r\n").map_or("", |(_, b)| b).chars().take(300).collect();
-    Ok((code, body))
-}
 
 #[cfg(test)]
 mod tests;
@@ -1928,7 +1842,8 @@ fn profiles_json(
         last - first
     );
     format!(
-        "{{\"resourceProfiles\":[{{\"resource\":{res_json},\"scopeProfiles\":[{{\"scope\":{SCOPE},\"profiles\":[{profile}]}}]}}],\"dictionary\":{{\"mappingTable\":{},\"locationTable\":{},\"functionTable\":{},\"linkTable\":{},\"stringTable\":{},\"attributeTable\":{},\"stackTable\":{}}}}}",
+        "{{\"resourceProfiles\":[{{\"resource\":{res_json},\"scopeProfiles\":[{{\"scope\":{},\"profiles\":[{profile}]}}]}}],\"dictionary\":{{\"mappingTable\":{},\"locationTable\":{},\"functionTable\":{},\"linkTable\":{},\"stringTable\":{},\"attributeTable\":{},\"stackTable\":{}}}}}",
+        wire::scope_json(),
         mappings.json(),
         locations.json(),
         functions.json(),

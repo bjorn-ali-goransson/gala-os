@@ -306,8 +306,10 @@ pub(super) fn nt_filter_token(call: &mut Call<'_>) -> NtStatus {
     call.return_handle(out, new, entry.access, 0)
 }
 
-/// NtPrivilegeCheck(ClientToken, RequiredPrivileges, *Result): an
-/// impersonation token at identification level or above; the privileges
+/// NtPrivilegeCheck(ClientToken, RequiredPrivileges, *Result): a primary
+/// token (Windows 11 25H2's PrivilegeCheck accepts one, although the docs
+/// speak of a client's impersonation token) or an impersonation token at
+/// identification level or above; the privileges
 /// found enabled are marked SE_PRIVILEGE_USED_FOR_ACCESS in the caller's
 /// PRIVILEGE_SET, and *Result (a BOOLEAN) says whether they suffice.
 pub(super) fn nt_privilege_check(call: &mut Call<'_>) -> NtStatus {
@@ -322,9 +324,8 @@ pub(super) fn nt_privilege_check(call: &mut Call<'_>) -> NtStatus {
     let held = {
         let d = t.data.lock();
         match d.level() {
-            None => return NtStatus::NO_IMPERSONATION_TOKEN,
             Some(l) if l < SECURITY_IDENTIFICATION => return NtStatus::BAD_IMPERSONATION_LEVEL,
-            Some(_) => token::privilege_check(&d, &mut set, all),
+            None | Some(_) => token::privilege_check(&d, &mut set, all),
         }
     };
     for (i, p) in set.iter().enumerate() {
@@ -546,6 +547,21 @@ pub(super) fn nt_set_information_token(call: &mut Call<'_>) -> NtStatus {
                 }
                 bytes
             };
+            // Its dynamic part is charged for what the new default DACL
+            // takes (nt::quota; the data's lock is not held meanwhile: the
+            // quota's is taken before it when the token is claimed).
+            let new = token::dynamic_charge(bytes.len());
+            let old = t.dynamic.swap(new, core::sync::atomic::Ordering::AcqRel);
+            if new > old
+                && let Err(e) =
+                    super::super::quota::grow(&object, super::super::quota::Pool::Paged, new - old)
+            {
+                t.dynamic.store(old, core::sync::atomic::Ordering::Release);
+                return e;
+            }
+            if new < old {
+                super::super::quota::shrink(&object, super::super::quota::Pool::Paged, old - new);
+            }
             let mut d = t.data.lock();
             d.default_dacl = bytes;
             d.modified_id = token::next_luid();

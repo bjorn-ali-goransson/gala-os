@@ -13,25 +13,34 @@
 //!   directory too. Names are UTF-8 (anything else, or a `\`, is EINVAL
 //!   and ledgered: the file system keeps UTF-16 names) of at most 255
 //!   bytes (ENAMETOOLONG), the path at most PATH_MAX (4096 with its NUL).
-//!   Names compare as the file system's do: case-insensitively (seam 4).
-//!   A node whose delete is pending (unlinked while open) is not found.
+//!   Symbolic links are followed in the middle of a path and, unless the
+//!   call says not to (lstat, O_NOFOLLOW, AT_SYMLINK_NOFOLLOW, unlink,
+//!   rename, ...), at its end; a trailing slash follows one too. A target
+//!   is walked from the link's directory (`/` from the root); more than 40
+//!   links followed in one walk is ELOOP (path_resolution(7)).
+//!   Names compare as their directory's do: exactly in a directory a
+//!   Linux program made (case-sensitive, `ramfs::RamFs::create_posix`),
+//!   case-insensitively in the boot's and NT programs' directories.
+//!   A node NT deletes (delete pending until its last close) is not found.
 //! - **Metadata**: the type from the node; the permission bits are the
 //!   node's POSIX mode (`ramfs::Node::mode`, set when Linux creates it,
-//!   from the mode argument and the umask, or by chmod), else 0755 (0555
-//!   for a read-only file): files the boot or NT programs made run and
-//!   read as a Linux user's own. Owner uid/gid `exec::UID`/`GID`; inode
-//!   the node's index + 1; one device ([`DEV`]); nlink 1 for a file, 2
-//!   plus the subdirectories for a directory; atime the node's access
-//!   time, mtime and ctime its write time (utimensat sets both).
+//!   from the mode argument and the umask, or by chmod; kept across
+//!   reboots by the change log), else 0755 (0555 for a read-only file):
+//!   files the boot or NT programs made run and read as a Linux user's
+//!   own; a symbolic link 0777. Owner uid/gid `exec::UID`/`GID`; inode
+//!   the node's index + 1; one device ([`DEV`]); nlink the node's names
+//!   (hard links; 0 once unlinked while open), 2 plus the subdirectories
+//!   for a directory; atime the node's access time, mtime and ctime its
+//!   write time (utimensat sets both).
 //! - **Opens** register with the file system sharing everything (Linux
 //!   has no share modes; an NT program's open that shares nothing makes
 //!   the Linux open EBUSY, ledgered). Reads and writes go through a
 //!   kernel buffer a piece at a time; O_APPEND writes at the end each
 //!   time.
-//! - **Deleting**: unlink and rmdir mark the node delete-pending and close
-//!   a delete open: it goes at once unless something has it open, then at
-//!   its last close (NT's rule: until then its name stays taken, which
-//!   Linux would free at once: ledgered as `linux option missing`).
+//! - **Deleting**: unlink and rmdir remove the name at once
+//!   (`ramfs::RamFs::unlink`): the node lives on under its other hard
+//!   links, or, while open, detached until its last close (Linux's rule).
+//!   An NT open that does not share delete access refuses it (EBUSY).
 //!
 //! Observability: every unsupported flag or case goes to the ledger
 //! (`linux option missing`, `linux syscall stub`); a refused open logs
@@ -45,8 +54,8 @@ use lx_abi::layout::{self as abi, Stat, Timespec};
 
 use super::dispatch::{Call, Result};
 use super::errno::{
-    EACCES, EBADF, EBUSY, EEXIST, EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOMEM, ENOTDIR,
-    ENOTEMPTY, ENXIO, EOPNOTSUPP, ERANGE, ESPIPE,
+    EACCES, EBADF, EBUSY, EEXIST, EFAULT, EINVAL, EISDIR, ELOOP, ENAMETOOLONG, ENOENT, ENOMEM,
+    ENOTDIR, ENOTEMPTY, ENXIO, EOPNOTSUPP, EPERM, ERANGE, ESPIPE,
 };
 use super::state::{Fd, Object};
 use crate::fs::ramfs::{self, Access, FsError, NodeId, Share};
@@ -62,6 +71,12 @@ const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const AT_REMOVEDIR: u64 = 0x200;
 const AT_NO_AUTOMOUNT: u64 = 0x800;
 const AT_EMPTY_PATH: u64 = 0x1000;
+const AT_SYMLINK_FOLLOW: u64 = 0x400;
+/// statx's AT_STATX_SYNC_TYPE bits (how to sync with a remote file
+/// system: nothing to do here).
+const AT_STATX_SYNC_TYPE: u64 = 0x6000;
+/// The most symbolic links one path walk follows (path_resolution(7)).
+const MAXSYMLINKS: u32 = 40;
 const AT_EACCESS: u64 = 0x200;
 
 /// The longest path with its NUL (PATH_MAX) and name (NAME_MAX).
@@ -86,8 +101,7 @@ pub const O_CLOEXEC: u64 = 0o2000000;
 const O_SYNC: u64 = 0o4010000;
 pub const O_PATH: u64 = 0o10000000;
 const O_TMPFILE: u64 = 0o20000000;
-/// The flags open takes as Linux does (O_NOFOLLOW has nothing to refuse:
-/// no symbolic links yet).
+/// The flags open takes as Linux does.
 const OPEN_FLAGS: u64 = O_ACCMODE
     | O_CREAT
     | O_EXCL
@@ -253,6 +267,7 @@ fn errno_of(e: FsError) -> u16 {
         FsError::DirectoryNotEmpty => ENOTEMPTY,
         FsError::AccessDenied => EACCES,
         FsError::NoMemory => ENOMEM,
+        FsError::Symlink => ELOOP,
     }
 }
 
@@ -298,6 +313,20 @@ enum Part {
     Dot,
     DotDot,
     Name(Vec<u16>),
+}
+
+impl Part {
+    fn try_clone(&self) -> core::result::Result<Part, u16> {
+        Ok(match self {
+            Part::Dot => Part::Dot,
+            Part::DotDot => Part::DotDot,
+            Part::Name(n) => {
+                let mut v = Vec::new();
+                v.try_extend_from_slice(n).map_err(|_| ENOMEM)?;
+                Part::Name(v)
+            }
+        })
+    }
 }
 
 /// A path split into components.
@@ -395,69 +424,136 @@ fn start_dir(call: &Call<'_>, dirfd: u64) -> core::result::Result<NodeId, u16> {
     }
 }
 
-/// Resolves `path` (bytes, without the NUL) from `dirfd`.
-pub fn resolve(call: &Call<'_>, dirfd: u64, path: &[u8]) -> core::result::Result<Found, u16> {
+/// Resolves `path` (bytes, without the NUL) from `dirfd`, following a
+/// symbolic link at its end if `follow`.
+pub fn resolve(
+    call: &Call<'_>,
+    dirfd: u64,
+    path: &[u8],
+    follow: bool,
+) -> core::result::Result<Found, u16> {
     if path.is_empty() {
         return Err(ENOENT);
     }
     let parsed = parse(path)?;
     let start = if parsed.absolute { ramfs::ROOT } else { start_dir(call, dirfd)? };
-    with_fs(|fs| walk(fs, start, &parsed))
+    with_fs(|fs| walk(fs, start, &parsed, follow))
 }
 
-fn walk(fs: &ramfs::RamFs, start: NodeId, p: &Parsed) -> core::result::Result<Found, u16> {
+fn is_symlink(fs: &ramfs::RamFs, n: NodeId) -> bool {
+    fs.node(n).is_some_and(ramfs::Node::is_symlink)
+}
+
+/// Walks `p` from directory `start` (see the module's doc): the components
+/// left are a stack (last first) into which a followed link's target is
+/// spliced.
+fn walk(
+    fs: &ramfs::RamFs,
+    start: NodeId,
+    p: &Parsed,
+    follow: bool,
+) -> core::result::Result<Found, u16> {
     let mut dir = start;
     if !is_dir(fs, dir) {
         return Err(ENOENT);
     }
-    let count = p.parts.len();
-    for part in p.parts.iter().take(count.saturating_sub(1)) {
-        dir = match part {
-            Part::Dot => dir,
-            Part::DotDot => parent(fs, dir),
-            Part::Name(name) => {
-                let next = child(fs, dir, name)?.ok_or(ENOENT)?;
-                if !is_dir(fs, next) {
+    let mut todo = Vec::new();
+    todo.try_reserve_exact(p.parts.len()).map_err(|_| ENOMEM)?;
+    for part in p.parts.iter().rev() {
+        todo.try_push(part.try_clone()?).map_err(|_| ENOMEM)?;
+    }
+    let mut slash = p.trailing_slash;
+    let mut links = 0;
+    loop {
+        let Some(part) = todo.pop() else {
+            // Nothing (left) to walk: `/`, or a link to a directory.
+            return Ok(Found { dir: parent(fs, dir), name: None, node: Some(dir), dots: None });
+        };
+        let last = todo.is_empty();
+        let name = match part {
+            Part::Dot if last => {
+                return Ok(Found {
+                    dir: parent(fs, dir),
+                    name: None,
+                    node: Some(dir),
+                    dots: Some(true),
+                });
+            }
+            Part::DotDot if last => {
+                let up = parent(fs, dir);
+                return Ok(Found {
+                    dir: parent(fs, up),
+                    name: None,
+                    node: Some(up),
+                    dots: Some(false),
+                });
+            }
+            Part::Dot => continue,
+            Part::DotDot => {
+                dir = parent(fs, dir);
+                continue;
+            }
+            Part::Name(name) => name,
+        };
+        let node = child(fs, dir, &name)?;
+        match node {
+            Some(n) if is_symlink(fs, n) && (!last || follow || slash) => {
+                links += 1;
+                if links > MAXSYMLINKS {
+                    return Err(ELOOP);
+                }
+                let target = fs.node(n).and_then(ramfs::Node::symlink_target).unwrap_or(&[]);
+                if target.is_empty() {
+                    return Err(ENOENT);
+                }
+                let t = parse(target)?;
+                if t.absolute {
+                    dir = ramfs::ROOT;
+                }
+                if last {
+                    slash |= t.trailing_slash;
+                }
+                todo.try_reserve(t.parts.len()).map_err(|_| ENOMEM)?;
+                todo.extend(t.parts.into_iter().rev());
+            }
+            Some(n) if !last => {
+                if !is_dir(fs, n) {
                     return Err(ENOTDIR);
                 }
-                next
+                dir = n;
             }
-        };
+            None if !last => return Err(ENOENT),
+            node => {
+                if slash
+                    && let Some(n) = node
+                    && !is_dir(fs, n)
+                {
+                    return Err(ENOTDIR);
+                }
+                return Ok(Found { dir, name: Some(name), node, dots: None });
+            }
+        }
     }
-    let found = match p.parts.last() {
-        None => Found { dir: parent(fs, dir), name: None, node: Some(dir), dots: None },
-        Some(Part::Dot) => {
-            Found { dir: parent(fs, dir), name: None, node: Some(dir), dots: Some(true) }
-        }
-        Some(Part::DotDot) => {
-            let up = parent(fs, dir);
-            Found { dir: parent(fs, up), name: None, node: Some(up), dots: Some(false) }
-        }
-        Some(Part::Name(name)) => {
-            let node = child(fs, dir, name)?;
-            let mut owned = Vec::new();
-            owned.try_extend_from_slice(name).map_err(|_| ENOMEM)?;
-            Found { dir, name: Some(owned), node, dots: None }
-        }
-    };
-    if p.trailing_slash
-        && let Some(n) = found.node
-        && !is_dir(fs, n)
-    {
-        return Err(ENOTDIR);
-    }
-    Ok(found)
 }
 
-/// Reads the path argument at `addr` and resolves it from `dirfd`.
-fn lookup(call: &Call<'_>, dirfd: u64, addr: u64) -> core::result::Result<(Found, bool), u16> {
+/// Reads the path argument at `addr` and resolves it from `dirfd`
+/// (following a link at its end if `follow`).
+fn lookup(
+    call: &Call<'_>,
+    dirfd: u64,
+    addr: u64,
+    follow: bool,
+) -> core::result::Result<(Found, bool), u16> {
     let path = read_path(&call.process, addr)?;
     let slash = path.last() == Some(&b'/');
-    Ok((resolve(call, dirfd, &path)?, slash))
+    Ok((resolve(call, dirfd, &path, follow)?, slash))
 }
 
 /// The permission bits Linux sees for node `n` (see the module's doc).
 fn perm(n: &ramfs::Node) -> u32 {
+    if n.is_symlink() {
+        return 0o777;
+    }
     match n.mode {
         Some(m) => u32::from(m),
         None if n.attributes & ramfs::ATTRIBUTE_READONLY != 0 && !n.is_dir() => 0o555,
@@ -478,8 +574,10 @@ fn stat_of(fs: &ramfs::RamFs, id: NodeId) -> core::result::Result<Stat, u16> {
     let (kind, nlink, size) = if n.is_dir() {
         let subdirs = fs.list(id).map_err(errno_of)?.iter().filter(|&&c| is_dir(fs, c)).count();
         (abi::S_IFDIR, 2 + subdirs as u64, 4096)
+    } else if n.is_symlink() {
+        (abi::S_IFLNK, u64::from(n.nlink()), n.size() as i64)
     } else {
-        (abi::S_IFREG, 1, n.size() as i64)
+        (abi::S_IFREG, u64::from(n.nlink()), n.size() as i64)
     };
     let time = unix_time(n.written);
     let accessed = unix_time(n.accessed);
@@ -529,13 +627,13 @@ fn put_stat(call: &Call<'_>, addr: u64, st: &Stat) -> Result {
     Ok(0)
 }
 
-/// stat and lstat (no symbolic links: the same).
-pub fn stat(call: &Call<'_>, path: u64, buf: u64) -> Result {
+/// stat (`follow`) and lstat.
+pub fn stat(call: &Call<'_>, path: u64, buf: u64, follow: bool) -> Result {
     let bytes = read_path(&call.process, path)?;
     if let Some(kind) = device_at(&bytes) {
         return put_stat(call, buf, &kind.stat());
     }
-    let found = resolve(call, AT_FDCWD, &bytes)?;
+    let found = resolve(call, AT_FDCWD, &bytes, follow)?;
     let node = found.existing()?;
     let st = with_fs(|fs| stat_of(fs, node))?;
     put_stat(call, buf, &st)
@@ -567,9 +665,63 @@ pub fn newfstatat(call: &Call<'_>, dirfd: u64, path: u64, buf: u64, flags: u64) 
     if let Some(kind) = device_at(&bytes) {
         return put_stat(call, buf, &kind.stat());
     }
-    let node = resolve(call, dirfd, &bytes)?.existing()?;
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let node = resolve(call, dirfd, &bytes, follow)?.existing()?;
     let st = with_fs(|fs| stat_of(fs, node))?;
     put_stat(call, buf, &st)
+}
+
+/// statx: what newfstatat gives, as `struct statx` (STATX_BASIC_STATS
+/// filled whatever `mask` asks; a reserved mask bit is EINVAL).
+pub fn statx(call: &Call<'_>, dirfd: u64, path: u64, flags: u64, mask: u64, buf: u64) -> Result {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE) != 0
+        || flags & AT_STATX_SYNC_TYPE == AT_STATX_SYNC_TYPE
+        || mask as u32 & abi::STATX_RESERVED != 0
+    {
+        return Err(EINVAL);
+    }
+    let bytes = read_path(&call.process, path)?;
+    let st = if bytes.is_empty() && flags & AT_EMPTY_PATH != 0 {
+        if dirfd as u32 as i32 == AT_FDCWD as i64 as i32 {
+            let cwd = *call.lx.cwd.lock();
+            with_fs(|fs| stat_of(fs, cwd))?
+        } else {
+            let f = call.lx.fd(u64::from(dirfd as u32)).ok_or(EBADF)?;
+            match &f.object {
+                Object::File(file) => with_fs(|fs| stat_of(fs, file.node))?,
+                Object::Device(dev) => dev.kind.stat(),
+                other => stat_other(other),
+            }
+        }
+    } else if let Some(kind) = device_at(&bytes) {
+        kind.stat()
+    } else {
+        let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+        let node = resolve(call, dirfd, &bytes, follow)?.existing()?;
+        with_fs(|fs| stat_of(fs, node))?
+    };
+    let stamp = |t: Timespec| abi::StatxTimestamp { sec: t.sec, nsec: t.nsec as u32, _reserved: 0 };
+    let sx = abi::Statx {
+        mask: abi::STATX_BASIC_STATS,
+        blksize: st.blksize as u32,
+        nlink: st.nlink as u32,
+        uid: st.uid,
+        gid: st.gid,
+        mode: st.mode as u16,
+        ino: st.ino,
+        size: st.size as u64,
+        blocks: st.blocks as u64,
+        atime: stamp(st.atime),
+        ctime: stamp(st.ctime),
+        mtime: stamp(st.mtime),
+        rdev_major: (st.rdev >> 8) as u32,
+        rdev_minor: (st.rdev & 0xff) as u32,
+        dev_major: (st.dev >> 8) as u32,
+        dev_minor: (st.dev & 0xff) as u32,
+        ..abi::Statx::default()
+    };
+    call.process.write(buf, &sx.to_bytes()).map_err(|_| EFAULT)?;
+    Ok(0)
 }
 
 /// open and openat.
@@ -606,7 +758,9 @@ pub fn openat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
         return call.lx.install_from(fd, flags & O_CLOEXEC != 0, 0);
     }
     let slash = bytes.last() == Some(&b'/');
-    let found = resolve(call, dirfd, &bytes)?;
+    // O_CREAT|O_EXCL never follows a link at the end: it exists.
+    let follow = flags & O_NOFOLLOW == 0 && flags & (O_CREAT | O_EXCL) != O_CREAT | O_EXCL;
+    let found = resolve(call, dirfd, &bytes, follow)?;
     let creating = flags & O_CREAT != 0 && !path_only;
     let umask = *call.lx.umask.lock();
     let now = platform::system_time();
@@ -618,6 +772,15 @@ pub fn openat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
                     return Err(EEXIST);
                 }
                 let node = fs.node(n).ok_or(ENOENT)?;
+                if node.is_symlink() {
+                    // Not followed (O_NOFOLLOW): only O_PATH opens the link.
+                    if flags & O_DIRECTORY != 0 {
+                        return Err(ENOTDIR);
+                    }
+                    if !path_only {
+                        return Err(ELOOP);
+                    }
+                }
                 if node.is_dir() {
                     if writable || (creating && flags & O_DIRECTORY == 0) {
                         return Err(EISDIR);
@@ -644,16 +807,16 @@ pub fn openat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
                     return Err(EISDIR);
                 }
                 let name = found.name.as_deref().ok_or(ENOENT)?;
-                let n = fs.create(found.dir, name, false, now).map_err(|e| match e {
-                    // A name unlinked while open is still taken.
+                let bits = (mode as u16) & !(umask as u16);
+                fs.create_posix(found.dir, name, false, bits, now).map_err(|e| match e {
+                    // A name an NT program deletes stays taken until its
+                    // last close (NT's delete).
                     FsError::Exists => {
                         ledger::record("openat", "linux option missing", 3);
                         EBUSY
                     }
                     e => errno_of(e),
-                })?;
-                fs.set_mode(n, (mode as u16) & !(umask as u16) & 0o7777).map_err(errno_of)?;
-                n
+                })?
             }
         };
         fs.open(node, access, SHARE_ALL).map_err(|e| {
@@ -911,7 +1074,8 @@ fn fill_dirents(
     cursor: &mut Cursor,
     out: &mut [u8],
 ) -> core::result::Result<(usize, bool), u16> {
-    let entries = fs.list(dir).map_err(errno_of)?;
+    // Every name: first names and hard links.
+    let entries = fs.entries(dir).map_err(errno_of)?;
     let mut used = 0;
     let mut name = Vec::new();
     // Where in `entries` to go on: after the last name returned (or as
@@ -919,7 +1083,7 @@ fn fill_dirents(
     let mut next = match &cursor.last {
         Some(last) => entries
             .iter()
-            .position(|&e| fs.node(e).is_some_and(|n| ramfs::collate(n.name(), last).is_gt()))
+            .position(|&(_, n)| ramfs::order(n, last).is_gt())
             .unwrap_or(entries.len()),
         None => cursor.index.saturating_sub(2) as usize,
     };
@@ -929,19 +1093,25 @@ fn fill_dirents(
             0 => (dir, abi::DT_DIR, None),
             1 => (parent(fs, dir), abi::DT_DIR, None),
             _ => {
-                let Some(&e) = entries.get(next) else { break };
+                let Some(&(e, entry)) = entries.get(next) else { break };
                 if fs.delete_pending(e) {
                     next += 1;
                     continue;
                 }
-                let d_type = if is_dir(fs, e) { abi::DT_DIR } else { abi::DT_REG };
-                (e, d_type, Some(e))
+                let d_type = if is_dir(fs, e) {
+                    abi::DT_DIR
+                } else if is_symlink(fs, e) {
+                    abi::DT_LNK
+                } else {
+                    abi::DT_REG
+                };
+                (e, d_type, Some(entry))
             }
         };
         name.clear();
         match is_name {
             None => name.try_extend_from_slice(if index == 0 { b"." } else { b".." }),
-            Some(e) => utf8_name(fs.node(e).map_or(&[][..], ramfs::Node::name), &mut name),
+            Some(entry) => utf8_name(entry, &mut name),
         }
         .map_err(|_| ENOMEM)?;
         let Some(len) =
@@ -951,10 +1121,9 @@ fn fill_dirents(
         };
         used += len;
         cursor.index += 1;
-        if let Some(e) = is_name {
+        if let Some(entry) = is_name {
             let mut last = Vec::new();
-            last.try_extend_from_slice(fs.node(e).map_or(&[][..], ramfs::Node::name))
-                .map_err(|_| ENOMEM)?;
+            last.try_extend_from_slice(entry).map_err(|_| ENOMEM)?;
             cursor.last = Some(last);
             next += 1;
         }
@@ -978,37 +1147,36 @@ fn utf8_name(
 
 /// mkdir and mkdirat.
 pub fn mkdirat(call: &Call<'_>, dirfd: u64, path: u64, mode: u64) -> Result {
-    let (found, _) = lookup(call, dirfd, path)?;
+    let (found, _) = lookup(call, dirfd, path, false)?;
     if found.node.is_some() {
         return Err(EEXIST);
     }
     let name = found.name.as_deref().ok_or(EEXIST)?;
     let umask = *call.lx.umask.lock();
     let now = platform::system_time();
-    with_fs(|fs| {
-        let n = fs.create(found.dir, name, true, now).map_err(errno_of)?;
-        fs.set_mode(n, (mode as u16) & !(umask as u16) & 0o7777).map_err(errno_of)
-    })?;
+    let bits = (mode as u16) & !(umask as u16);
+    with_fs(|fs| fs.create_posix(found.dir, name, true, bits, now)).map_err(errno_of)?;
     Ok(0)
 }
 
-/// Removes node `n` (unlink, rmdir, a directory a rename replaces): a
-/// delete open, delete pending, closed.
-fn remove(fs: &mut ramfs::RamFs, n: NodeId) -> core::result::Result<(), u16> {
+/// Removes the name `name` of directory `dir` (unlink, rmdir, what a
+/// rename replaces) at once, Linux's way (`ramfs::RamFs::unlink`). An NT
+/// open of the node that does not share delete access refuses it (EBUSY,
+/// ledgered), as Windows' POSIX delete does.
+fn remove(fs: &mut ramfs::RamFs, dir: NodeId, name: &[u16]) -> core::result::Result<(), u16> {
+    let n = fs.find(dir, name).map_err(errno_of)?.ok_or(ENOENT)?;
     if n == ramfs::ROOT {
         return Err(EBUSY);
     }
     let access = Access { read: false, write: false, delete: true };
-    fs.open(n, access, SHARE_ALL).map_err(errno_of)?;
-    let pending = fs.set_delete_pending(n, true);
+    fs.open(n, access, SHARE_ALL).map_err(|e| {
+        if e == FsError::SharingViolation {
+            ledger::record("unlink", "linux option missing", 1);
+        }
+        errno_of(e)
+    })?;
     fs.close(n, access, SHARE_ALL);
-    pending.map_err(errno_of)?;
-    if fs.node(n).is_some() {
-        // Open elsewhere: it goes at its last close, its name taken until
-        // then (Linux frees the name at once).
-        ledger::record("unlink", "linux option missing", 1);
-    }
-    Ok(())
+    fs.unlink(dir, name).map_err(errno_of)
 }
 
 /// unlink, rmdir and unlinkat.
@@ -1016,7 +1184,7 @@ pub fn unlinkat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64) -> Result {
     if flags & !AT_REMOVEDIR != 0 {
         return Err(EINVAL);
     }
-    let (found, _) = lookup(call, dirfd, path)?;
+    let (found, _) = lookup(call, dirfd, path, false)?;
     let rmdir = flags & AT_REMOVEDIR != 0;
     let n = found.existing()?;
     with_fs(|fs| {
@@ -1033,13 +1201,15 @@ pub fn unlinkat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64) -> Result {
         } else if dir {
             return Err(EISDIR);
         }
-        remove(fs, n)
+        remove(fs, found.dir, found.name.as_deref().ok_or(EBUSY)?)
     })?;
     Ok(0)
 }
 
-/// rename, renameat and renameat2 (RENAME_NOREPLACE; RENAME_EXCHANGE and
-/// RENAME_WHITEOUT ledgered).
+/// rename, renameat and renameat2 (RENAME_NOREPLACE, RENAME_EXCHANGE;
+/// RENAME_WHITEOUT ledgered). Neither end's link is followed; a target
+/// that exists is replaced Linux's way (`remove`: its name goes at once,
+/// whoever has it open).
 pub fn renameat(
     call: &Call<'_>,
     olddir: u64,
@@ -1049,21 +1219,31 @@ pub fn renameat(
     flags: u64,
 ) -> Result {
     const RENAME_NOREPLACE: u64 = 1;
-    if flags & !RENAME_NOREPLACE != 0 {
+    const RENAME_EXCHANGE: u64 = 2;
+    if flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE) != 0 {
         ledger::record("renameat2", "linux option missing", flags);
         return Err(EINVAL);
     }
-    let (from, _) = lookup(call, olddir, old)?;
-    let (to, _) = lookup(call, newdir, new)?;
+    if flags == RENAME_NOREPLACE | RENAME_EXCHANGE {
+        return Err(EINVAL);
+    }
+    let (from, _) = lookup(call, olddir, old, false)?;
+    let (to, _) = lookup(call, newdir, new, false)?;
     let n = from.existing()?;
     if from.dots.is_some() || n == ramfs::ROOT || to.dots.is_some() {
         return Err(EBUSY);
     }
+    let from_name = from.name.as_deref().ok_or(EBUSY)?;
     let name = to.name.as_deref().ok_or(EBUSY)?;
     with_fs(|fs| {
         let moving_dir = is_dir(fs, n);
+        if flags & RENAME_EXCHANGE != 0 {
+            to.node.ok_or(ENOENT)?;
+            return fs.exchange(from.dir, from_name, to.dir, name).map_err(errno_of);
+        }
         if let Some(t) = to.node {
             if t == n {
+                // Two names of one file (or the same name): nothing to do.
                 return Ok(());
             }
             if flags & RENAME_NOREPLACE != 0 {
@@ -1088,18 +1268,16 @@ pub fn renameat(
                 up = parent(fs, up);
             }
         }
-        if let Some(t) = to.node
-            && is_dir(fs, t)
-        {
-            // An empty directory is replaced.
-            if !fs.list(t).map_err(errno_of)?.is_empty() {
+        if let Some(t) = to.node {
+            // An empty directory or a file is replaced.
+            if is_dir(fs, t) && !fs.is_empty_dir(t).map_err(errno_of)? {
                 return Err(ENOTEMPTY);
             }
-            remove(fs, t)?;
+            remove(fs, to.dir, name)?;
         }
-        fs.rename(n, to.dir, name, true).map_err(|e| {
+        fs.rename_entry(from.dir, from_name, to.dir, name, false).map_err(|e| {
             if e == FsError::AccessDenied || e == FsError::Exists {
-                // The target open elsewhere (NT's rule).
+                // An NT rule refused it (an NT program's open).
                 ledger::record("rename", "linux option missing", 1);
                 EBUSY
             } else {
@@ -1107,6 +1285,50 @@ pub fn renameat(
             }
         })
     })?;
+    Ok(0)
+}
+
+/// link and linkat: `new` becomes another name of the file at `old`
+/// (AT_SYMLINK_FOLLOW: of what a link there points at; else the link
+/// itself). A directory is EPERM.
+pub fn linkat(call: &Call<'_>, olddir: u64, old: u64, newdir: u64, new: u64, flags: u64) -> Result {
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(EINVAL);
+    }
+    if flags & AT_EMPTY_PATH != 0 {
+        ledger::record("linkat", "linux option missing", AT_EMPTY_PATH);
+        return Err(EINVAL);
+    }
+    let (from, _) = lookup(call, olddir, old, flags & AT_SYMLINK_FOLLOW != 0)?;
+    let n = from.existing()?;
+    let (to, _) = lookup(call, newdir, new, false)?;
+    if to.node.is_some() {
+        return Err(EEXIST);
+    }
+    let name = to.name.as_deref().ok_or(EEXIST)?;
+    with_fs(|fs| {
+        if is_dir(fs, n) {
+            return Err(EPERM);
+        }
+        fs.link(n, to.dir, name).map_err(errno_of)
+    })?;
+    Ok(0)
+}
+
+/// symlink and symlinkat: a link at `path` pointing at `target` (kept as
+/// given; an empty one is ENOENT).
+pub fn symlinkat(call: &Call<'_>, target: u64, dirfd: u64, path: u64) -> Result {
+    let target = read_path(&call.process, target)?;
+    if target.is_empty() {
+        return Err(ENOENT);
+    }
+    let (found, _) = lookup(call, dirfd, path, false)?;
+    if found.node.is_some() {
+        return Err(EEXIST);
+    }
+    let name = found.name.as_deref().ok_or(EEXIST)?;
+    let now = platform::system_time();
+    with_fs(|fs| fs.symlink(found.dir, name, &target, now)).map_err(errno_of)?;
     Ok(0)
 }
 
@@ -1120,7 +1342,8 @@ pub fn faccessat(call: &Call<'_>, dirfd: u64, path: u64, mode: u64, flags: u64) 
     if device_at(&bytes).is_some() {
         return Ok(0);
     }
-    let n = resolve(call, dirfd, &bytes)?.existing()?;
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let n = resolve(call, dirfd, &bytes, follow)?.existing()?;
     let ok = with_fs(|fs| {
         let node = fs.node(n)?;
         let bits = perm(node);
@@ -1139,7 +1362,7 @@ pub fn faccessat(call: &Call<'_>, dirfd: u64, path: u64, mode: u64, flags: u64) 
 }
 
 pub fn chdir(call: &Call<'_>, path: u64) -> Result {
-    let (found, _) = lookup(call, AT_FDCWD, path)?;
+    let (found, _) = lookup(call, AT_FDCWD, path, true)?;
     let n = found.existing()?;
     if !with_fs(|fs| is_dir(fs, n)) {
         return Err(ENOTDIR);
@@ -1185,15 +1408,24 @@ pub fn getcwd(call: &Call<'_>, buf: u64, size: u64) -> Result {
     Ok(path.len() as u64)
 }
 
-/// readlink and readlinkat: there are no symbolic links yet, so an
-/// existing path is not one (EINVAL).
-pub fn readlinkat(call: &Call<'_>, dirfd: u64, path: u64, size: u64) -> Result {
+/// readlink and readlinkat: a link's target, cut to `size` bytes, with
+/// no NUL; EINVAL for what is not a link.
+pub fn readlinkat(call: &Call<'_>, dirfd: u64, path: u64, buf: u64, size: u64) -> Result {
     if (size as i64) <= 0 {
         return Err(EINVAL);
     }
-    let (found, _) = lookup(call, dirfd, path)?;
-    found.existing()?;
-    Err(EINVAL)
+    let (found, _) = lookup(call, dirfd, path, false)?;
+    let n = found.existing()?;
+    let mut target = Vec::new();
+    with_fs(|fs| match fs.node(n).and_then(ramfs::Node::symlink_target) {
+        Some(t) => {
+            let k = t.len().min(size as usize);
+            target.try_extend_from_slice(&t[..k]).map_err(|_| ENOMEM)
+        }
+        None => Err(EINVAL),
+    })?;
+    call.process.write(buf, &target).map_err(|_| EFAULT)?;
+    Ok(target.len() as u64)
 }
 
 /// ftruncate (`fd`) and truncate (`path`).
@@ -1218,7 +1450,7 @@ pub fn truncate(call: &Call<'_>, path: u64, length: u64) -> Result {
     if (length as i64) < 0 {
         return Err(EINVAL);
     }
-    let (found, _) = lookup(call, AT_FDCWD, path)?;
+    let (found, _) = lookup(call, AT_FDCWD, path, true)?;
     let n = found.existing()?;
     let now = platform::system_time();
     with_fs(|fs| {
@@ -1255,7 +1487,7 @@ pub fn chmod(call: &Call<'_>, target: ChmodTarget, mode: u64) -> Result {
                 _ => return Ok(0),
             }
         }
-        ChmodTarget::Path(dirfd, path) => lookup(call, dirfd, path)?.0.existing()?,
+        ChmodTarget::Path(dirfd, path) => lookup(call, dirfd, path, true)?.0.existing()?,
     };
     with_fs(|fs| fs.set_mode(n, mode as u16)).map_err(errno_of)?;
     Ok(0)
@@ -1336,7 +1568,7 @@ pub fn utimensat(
             // A device's times are not kept.
             return Ok(0);
         }
-        resolve(call, dirfd, &bytes)?.existing()?
+        resolve(call, dirfd, &bytes, flags & AT_SYMLINK_NOFOLLOW == 0)?.existing()?
     };
     let t = ramfs::Times { created: None, accessed: set[0], written: set[1] };
     with_fs(|fs| fs.set_basic(node, t, None)).map_err(errno_of)?;
@@ -1355,7 +1587,7 @@ pub fn umask(call: &Call<'_>, mask: u64) -> Result {
 /// ENOTDIR as for any path; EACCES for a directory or a file without
 /// its owner's execute bit.
 pub fn executable(call: &Call<'_>, path: &[u8]) -> core::result::Result<Vec<u8>, u16> {
-    let n = resolve(call, AT_FDCWD, path)?.existing()?;
+    let n = resolve(call, AT_FDCWD, path, true)?.existing()?;
     let ok = with_fs(|fs| fs.node(n).is_some_and(|node| !node.is_dir() && perm(node) & 0o100 != 0));
     if !ok {
         return Err(EACCES);
@@ -1370,7 +1602,10 @@ pub fn executable(call: &Call<'_>, path: &[u8]) -> core::result::Result<Vec<u8>,
 pub fn directory_of(path: &str) -> NodeId {
     let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
     let Ok(parsed) = parse(dir.as_bytes()) else { return ramfs::ROOT };
-    with_fs(|fs| walk(fs, ramfs::ROOT, &parsed)).ok().and_then(|f| f.node).unwrap_or(ramfs::ROOT)
+    with_fs(|fs| walk(fs, ramfs::ROOT, &parsed, true))
+        .ok()
+        .and_then(|f| f.node)
+        .unwrap_or(ramfs::ROOT)
 }
 
 #[cfg(test)]
@@ -1392,8 +1627,12 @@ mod tests {
         (fs, lx, d, inner)
     }
 
+    fn d_parent(fs: &RamFs, d: NodeId) -> NodeId {
+        fs.node(d).unwrap().parent()
+    }
+
     fn walk_str(fs: &RamFs, start: NodeId, path: &str) -> core::result::Result<Found, u16> {
-        walk(fs, start, &parse(path.as_bytes())?)
+        walk(fs, start, &parse(path.as_bytes())?, true)
     }
 
     /// fileio_test on Linux: `.`, `..` and empty components resolve as
@@ -1416,6 +1655,42 @@ mod tests {
         assert_eq!(parse(b"a\\b").err(), Some(EINVAL));
         assert_eq!(parse(&[0xff]).err(), Some(EINVAL));
         assert_eq!(parse(&[b'x'; 256]).err(), Some(ENAMETOOLONG));
+    }
+
+    /// fs_test on Linux: links are followed in the middle of a path and
+    /// (if asked, or before a trailing slash) at its end, relative to the
+    /// link's directory or from the root; 40 links resolve, 41 are ELOOP.
+    #[test]
+    fn symlinks_are_followed_as_linux_walks_them() {
+        let (mut fs, lx, d, inner) = tree();
+        fs.symlink(lx, &w("dl"), b"d", 1).unwrap();
+        fs.symlink(d, &w("up"), b"..", 1).unwrap();
+        fs.symlink(d, &w("abs"), b"/lx/d/inner", 1).unwrap();
+        let file_link = fs.symlink(lx, &w("fl"), b"d/inner", 1).unwrap();
+        fs.symlink(lx, &w("dangling"), b"d/new", 1).unwrap();
+        assert_eq!(walk_str(&fs, lx, "dl/inner").unwrap().node, Some(inner));
+        assert_eq!(walk_str(&fs, lx, "dl/up/dl/abs").unwrap().node, Some(inner));
+        let no = |path: &str| walk(&fs, lx, &parse(path.as_bytes()).unwrap(), false);
+        assert_eq!(no("fl").unwrap().node, Some(file_link));
+        assert_eq!(no("dl/").unwrap().node, Some(d), "a trailing slash follows");
+        assert_eq!(no("fl/").err(), Some(ENOTDIR));
+        assert_eq!(walk_str(&fs, lx, "fl/x").err(), Some(ENOTDIR));
+        // A dangling link's target is where O_CREAT creates.
+        let new = walk_str(&fs, lx, "dangling").unwrap();
+        assert_eq!((new.dir, new.node, new.name.as_deref()), (d, None, Some(&w("new")[..])));
+        // A chain: c0 -> c1 -> ... -> c40 -> d/inner.
+        for i in 0..=40 {
+            let target = if i == 40 {
+                alloc::string::String::from("d/inner")
+            } else {
+                alloc::format!("c{}", i + 1)
+            };
+            fs.symlink(lx, &w(&alloc::format!("c{i}")), target.as_bytes(), 1).unwrap();
+        }
+        assert_eq!(walk_str(&fs, lx, "c1").unwrap().node, Some(inner));
+        assert_eq!(walk_str(&fs, lx, "c0").err(), Some(ELOOP));
+        fs.symlink(lx, &w("loop"), b"loop", 1).unwrap();
+        assert_eq!(walk_str(&fs, lx, "loop/x").err(), Some(ELOOP));
     }
 
     fn names(fs: &RamFs, dir: NodeId, cursor: &mut Cursor, room: usize) -> (Vec<Vec<u8>>, bool) {
@@ -1448,8 +1723,7 @@ mod tests {
         assert!(full);
         // "a" and "b" go before the next call.
         for n in ["a", "b"] {
-            let id = fs.find(d, &w(n)).unwrap().unwrap();
-            assert_eq!(remove(&mut fs, id), Ok(()));
+            assert_eq!(remove(&mut fs, d, &w(n)), Ok(()));
         }
         let (rest, full) = names(&fs, d, &mut cursor, 4096);
         assert_eq!(rest, [b"c".to_vec(), b"inner".to_vec(), b"sub".to_vec()]);
@@ -1460,7 +1734,8 @@ mod tests {
         assert_eq!(names(&fs, d, &mut fresh, 8), (Vec::new(), true));
         // A file is not a directory to list; a non-empty one is not removed.
         assert!(fill_dirents(&fs, inner, &mut Cursor::default(), &mut [0u8; 64]).is_err());
-        assert_eq!(remove(&mut fs, d), Err(ENOTEMPTY));
+        let up = d_parent(&fs, d);
+        assert_eq!(remove(&mut fs, up, &w("d")), Err(ENOTEMPTY));
     }
 
     #[test]

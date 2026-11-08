@@ -22,6 +22,7 @@ mod blend;
 mod dib;
 mod draw;
 mod font;
+mod older;
 mod palette;
 mod region;
 mod shapes;
@@ -39,9 +40,17 @@ use surface::Surface;
 use gala_heap as _;
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
-/// come from an import.
+/// come from an import. On x86, ntrt's.
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
+
+// The 32-bit build (SysWOW64's gdi32) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime: a
+// raw-dylib import does not give the symbols the compiler calls there
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
 
 /// DllMain (the entry point our link flags name).
 #[unsafe(no_mangle)]
@@ -49,6 +58,7 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
     1
 }
 
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -63,13 +73,21 @@ unsafe extern "C" {
     fn __chkstk();
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaScreenInfo(info: *mut [i32; 8]) -> u32;
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn VirtualAlloc(at: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn VirtualFree(at: *mut c_void, size: usize, kind: u32) -> i32;
@@ -877,6 +895,15 @@ fn give(out: *mut u8, size: i32, bytes: &[u8]) -> i32 {
 /// it) DIBSECTION.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
+    // The sizes with a pointer in them: LOGBRUSH (lbHatch), BITMAP (bmBits
+    // at 24 on x64, 20 on x86) and DIBSECTION (a BITMAP, the
+    // BITMAPINFOHEADER after it, dsBitfields, dshSection, dsOffset: 104
+    // bytes on x64, 84 on x86).
+    const P: usize = size_of::<usize>();
+    const LOGBRUSH: usize = 8 + P;
+    const BM_BITS: usize = if P == 8 { 24 } else { 20 };
+    const BITMAP: usize = BM_BITS + P;
+    const DIBSECTION: usize = if P == 8 { 104 } else { 84 };
     let Some(i) = slot_of(h) else { return 0 };
     let object = with(|slots, _| slots[i]);
     let mut buf = [0u8; 104];
@@ -885,7 +912,7 @@ pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
         Object::Brush { color, null } => {
             put(&mut buf, 0, &u32::from(null).to_le_bytes()); // BS_SOLID 0, BS_NULL 1
             put(&mut buf, 4, &pixel(color).to_le_bytes());
-            give(out, size, &buf[..16])
+            give(out, size, &buf[..LOGBRUSH])
         }
         Object::Pen { color, null, width, style } => {
             put(&mut buf, 0, &(if null { 5 } else { style as u32 }).to_le_bytes());
@@ -908,20 +935,21 @@ pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
             put(&mut buf, 12, &width_bytes.to_le_bytes());
             put(&mut buf, 16, &1u16.to_le_bytes());
             put(&mut buf, 18, &b.bpp.to_le_bytes());
-            let bits = if b.dib { s.bits as u64 } else { 0 };
-            put(&mut buf, 24, &bits.to_le_bytes());
-            if b.dib && (out.is_null() || size >= 104) {
+            let bits = if b.dib { s.bits as usize } else { 0 };
+            put(&mut buf, BM_BITS, &bits.to_le_bytes());
+            if b.dib && (out.is_null() || size as usize >= DIBSECTION) {
                 // The BITMAPINFOHEADER (bottom-up: positive height).
-                put(&mut buf, 32, &40u32.to_le_bytes());
-                put(&mut buf, 36, &s.width.to_le_bytes());
+                let at = BITMAP;
+                put(&mut buf, at, &40u32.to_le_bytes());
+                put(&mut buf, at + 4, &s.width.to_le_bytes());
                 let h = if s.bottom_up { s.height } else { -s.height };
-                put(&mut buf, 40, &h.to_le_bytes());
-                put(&mut buf, 44, &1u16.to_le_bytes());
-                put(&mut buf, 46, &b.bpp.to_le_bytes());
-                put(&mut buf, 52, &((s.stride * s.height) as u32).to_le_bytes());
-                return give(out, size, &buf[..104]);
+                put(&mut buf, at + 8, &h.to_le_bytes());
+                put(&mut buf, at + 12, &1u16.to_le_bytes());
+                put(&mut buf, at + 14, &b.bpp.to_le_bytes());
+                put(&mut buf, at + 20, &((s.stride * s.height) as u32).to_le_bytes());
+                return give(out, size, &buf[..DIBSECTION]);
             }
-            give(out, size, &buf[..32])
+            give(out, size, &buf[..BITMAP])
         }
         Object::Palette(p) => {
             let count = if p == usize::MAX { 20u16 } else { palette::count(p) };
@@ -943,13 +971,11 @@ pub extern "system" fn SetBkColor(hdc: Handle, color: u32) -> u32 {
         .unwrap_or(0xffff_ffff)
 }
 
-/// SetStretchBltMode: BLACKONWHITE (1) .. HALFTONE (4); the previous
-/// mode, 0 for an invalid one.
+/// SetStretchBltMode: the previous mode. Any value is kept, as on Windows
+/// (25H2 keeps 0, 5 and -1 and returns them, the last error untouched);
+/// StretchBlt samples the nearest pixel whatever it is.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetStretchBltMode(hdc: Handle, mode: i32) -> i32 {
-    if !(1..=4).contains(&mode) {
-        return 0;
-    }
     with_dc(hdc, |dc, _| core::mem::replace(&mut dc.stretch, mode)).unwrap_or(0)
 }
 
@@ -1247,12 +1273,14 @@ pub extern "system" fn SetBoundsRect(hdc: Handle, rect: *const [i32; 4], flags: 
 
 /// GetBoundsRect(hdc, lprcBounds, flags): the accumulated bounds in
 /// logical coordinates (DCB_SET) or none (DCB_RESET, the rectangle
-/// zeroed), with the accumulation state; DCB_RESET in flags clears them
+/// zeroed), without the accumulation state (Windows 11 25H2 measured
+/// DCB_RESET alone with accumulation on; SetBoundsRect reports the
+/// state); DCB_RESET in flags clears them
 /// afterwards. Device coordinates are the DC's surface's (gala's window
 /// DCs have no other mapping than the origins).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetBoundsRect(hdc: Handle, rect: *mut [i32; 4], flags: u32) -> u32 {
-    let Some((state, bounds)) = bounds_of(hdc) else { return 0 };
+    let Some((_, bounds)) = bounds_of(hdc) else { return 0 };
     let got = bounds.get();
     if !rect.is_null() {
         let (dx, dy) = with_dc(hdc, |dc, _| {
@@ -1270,5 +1298,5 @@ pub extern "system" fn GetBoundsRect(hdc: Handle, rect: *mut [i32; 4], flags: u3
     if flags & DCB_RESET != 0 {
         bounds.reset();
     }
-    state | if got.is_some() { DCB_SET } else { DCB_RESET }
+    if got.is_some() { DCB_SET } else { DCB_RESET }
 }

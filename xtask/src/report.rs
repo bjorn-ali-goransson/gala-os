@@ -2,9 +2,9 @@
 //! one platform (gala or Windows), stored as JSON, and their comparison.
 //!
 //! Schema (written by `cargo xtask report` and by `user/bin/run-all.ps1`):
-//! `{"platform": "...", "results": [{"program": "x", "exit": 0, "line": "..."}]}`
+//! `{"platform": "...", "results": [{"program": "x", "exit": 0, "line": "...", "ms": 42}]}`
 //! with `exit` null (and an optional `"skipped": "reason"`) for programs
-//! that did not run. Programs report through their exit status (0, the
+//! that did not run; `ms` (optional) is how long the program ran. Programs report through their exit status (0, the
 //! number of the failing check, or an NTSTATUS for crashes), so that is
 //! what is compared; `line` is the program's own report line, for humans.
 
@@ -17,6 +17,11 @@ pub struct Outcome {
     pub exit: Option<u32>,
     pub line: String,
     pub skipped: Option<String>,
+    /// How long the program ran, in milliseconds: on Windows run-all.ps1's
+    /// stopwatch around the process, on gala the process's lifetime (its
+    /// exit line's `after N ms`), so the two compare like for like (a
+    /// gala boot's firmware and kernel start are not in it).
+    pub ms: Option<u64>,
 }
 
 /// Extracts a program's outcome from a gala serial log.
@@ -27,6 +32,11 @@ pub fn outcome_from_serial(program: &str, serial: &str) -> Outcome {
         let hex = rest.split("exited with status 0x").nth(1)?;
         u32::from_str_radix(hex.get(..8)?, 16).ok()
     });
+    let ms = serial.lines().find_map(|l| {
+        let rest = &l[l.find(&exited)?..];
+        let after = rest.split(" after ").nth(1)?;
+        after.strip_suffix(" ms")?.trim().parse().ok()
+    });
     let prefix = format!("{program}: ");
     let line = serial
         .lines()
@@ -35,7 +45,7 @@ pub fn outcome_from_serial(program: &str, serial: &str) -> Outcome {
         .unwrap_or("")
         .trim_end()
         .to_string();
-    Outcome { program: program.to_string(), exit, line, skipped: None }
+    Outcome { program: program.to_string(), exit, line, skipped: None, ms }
 }
 
 fn escape(s: &str, out: &mut String) {
@@ -74,6 +84,9 @@ pub fn to_json(platform: &str, results: &[Outcome]) -> String {
         if let Some(reason) = &r.skipped {
             out.push_str(", \"skipped\": ");
             escape(reason, &mut out);
+        }
+        if let Some(ms) = r.ms {
+            let _ = write!(out, ", \"ms\": {ms}");
         }
         out.push('}');
         out.push_str(if i + 1 < results.len() { ",\n" } else { "\n" });
@@ -277,6 +290,10 @@ pub fn from_json(text: &str) -> Result<(String, Vec<Outcome>), String> {
             exit,
             line: text("line").unwrap_or_default(),
             skipped: text("skipped"),
+            ms: match o.get("ms") {
+                Some(Json::Number(n)) if *n >= 0.0 => Some(*n as u64),
+                _ => None,
+            },
         });
     }
     Ok((platform, results))
@@ -403,18 +420,21 @@ mod tests {
     use super::*;
 
     fn outcome(program: &str, exit: Option<u32>) -> Outcome {
-        Outcome { program: program.into(), exit, line: String::new(), skipped: None }
+        Outcome { program: program.into(), exit, ..Default::default() }
     }
 
     #[test]
     fn serial_logs() {
         let serial = "[info ] run: /boot/vm_test.exe\nvm_test: check 00000003 got c0000005\r\n\
-                      [info ] process vm_test.exe (pid 4) exited with status 0x00000003\n";
+                      [info ] process vm_test.exe (pid 4) exited with status 0x00000003 after 412 ms\n";
         let o = outcome_from_serial("vm_test", serial);
         assert_eq!(o.exit, Some(3));
+        assert_eq!(o.ms, Some(412));
         assert_eq!(o.line, "vm_test: check 00000003 got c0000005");
         let crash = "[warn ] user exception\n[info ] process crash.exe (pid 4) exited with status 0xc0000005\n";
         assert_eq!(outcome_from_serial("crash", crash).exit, Some(0xc000_0005));
+        // An older kernel's line has no time.
+        assert_eq!(outcome_from_serial("crash", crash).ms, None);
         assert_eq!(outcome_from_serial("missing", crash).exit, None);
     }
 
@@ -426,12 +446,14 @@ mod tests {
                 exit: Some(0),
                 line: "a_test: ok \"quoted\"\\".into(),
                 skipped: None,
+                ms: Some(37),
             },
             Outcome {
                 program: "b".into(),
                 exit: None,
                 line: String::new(),
                 skipped: Some("needs gala".into()),
+                ms: None,
             },
             outcome("crash", Some(0xc000_0005)),
         ];
@@ -443,10 +465,12 @@ mod tests {
     fn powershell_output() {
         // ConvertTo-Json style: BOM, indentation, \u escapes, signed exit codes.
         let text = "\u{feff}{\r\n    \"platform\":  \"windows\",\r\n    \"results\":  [\r\n \
-                    {\"program\": \"x_test\", \"exit\": 0, \"line\": \"x_test: ok\"},\r\n \
+                    {\"program\": \"x_test\", \"exit\": 0, \"line\": \"x_test: ok\", \"ms\": 50},\r\n \
                     {\"program\": \"crash\", \"exit\": -1073741819, \"line\": \"it\\u0027s\"}]}";
         let (platform, r) = from_json(text).unwrap();
         assert_eq!(platform, "windows");
+        assert_eq!(r[0].ms, Some(50));
+        assert_eq!(r[1].ms, None);
         assert_eq!(r[1].exit, Some(0xc000_0005));
         assert_eq!(r[1].line, "it's");
         let single = "{\"platform\": \"windows\", \"results\": {\"program\": \"x\", \"exit\": 1}}";

@@ -3,12 +3,10 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("crypt32.dll":
-    CertAddCRLContextToStore
     CertAddCRLLinkToStore
     CertAddCTLContextToStore
     CertAddCTLLinkToStore
     CertAddCertificateLinkToStore
-    CertAddEncodedCRLToStore
     CertAddEncodedCTLToStore
     CertAddEncodedCertificateToSystemStoreA
     CertAddEncodedCertificateToSystemStoreW
@@ -21,14 +19,11 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertCompareCertificate
     CertCompareIntegerBlob
     CertComparePublicKeyInfo
-    CertCreateCRLContext
     CertCreateCTLContext
     CertCreateCTLEntryFromCertificateContextProperties
     CertCreateContext
     CertCreateSelfSignCertificate
-    CertDeleteCRLFromStore
     CertDeleteCTLFromStore
-    CertDuplicateCRLContext
     CertDuplicateCTLContext
     CertEnumCRLContextProperties
     CertEnumCTLContextProperties
@@ -38,13 +33,10 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertEnumSystemStore
     CertEnumSystemStoreLocation
     CertFindAttribute
-    CertFindCRLInStore
     CertFindCTLInStore
-    CertFindCertificateInCRL
     CertFindRDNAttr
     CertFindSubjectInCTL
     CertFindSubjectInSortedCTL
-    CertFreeCRLContext
     CertFreeCTLContext
     CertFreeCertificateChainList
     CertFreeServerOcspResponseContext
@@ -82,10 +74,7 @@ gala_stubs::unimplemented_exports!("crypt32.dll":
     CertStrToNameW
     CertUnregisterPhysicalStore
     CertUnregisterSystemStore
-    CertVerifyCRLRevocation
-    CertVerifyCRLTimeValidity
     CertVerifyCTLUsage
-    CertVerifyRevocation
     CertVerifySubjectCertificateContext
     CertVerifyValidityNesting
     CryptCreateKeyIdentifierFromCSP

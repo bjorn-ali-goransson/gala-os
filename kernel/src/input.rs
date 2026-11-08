@@ -57,19 +57,19 @@ fn input_thread(_: usize) {
     crate::info!("input: PS/2 mouse enabled (wheel: {wheel})");
     let mut packet = Packet { size: if wheel { 4 } else { 3 }, ..Packet::default() };
     let mut keys = Keys::default();
+    let mut mouse = Coalescer::default();
     let mut rounds = 0u32;
     loop {
-        // Moves with the same buttons are summed (one redraw per poll).
-        let mut pending: Option<(i64, i64, u8)> = None;
+        // Moves with the buttons held are summed (one redraw per poll);
+        // a press or release is delivered where it happened.
+        let mut deliver = |dx, dy, b| deliver(dx, dy, b);
         while let Some((byte, aux)) = controller.poll() {
             if !aux {
                 if let Some((vk, scan, extended, down)) = keys.push(byte) {
                     if down {
                         KEYS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     }
-                    if let Some((dx, dy, b)) = pending.take() {
-                        deliver(dx, dy, b);
-                    }
+                    mouse.flush(&mut deliver);
                     crate::nt::desktop::key_event(vk, scan, extended, down);
                 }
                 continue;
@@ -79,23 +79,12 @@ fn input_thread(_: usize) {
             if dz != 0 {
                 WHEEL_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 WHEEL_NOTCHES.fetch_add(dz, core::sync::atomic::Ordering::Relaxed);
-                if let Some((px, py, b)) = pending.take() {
-                    deliver(px, py, b);
-                }
+                mouse.flush(&mut deliver);
                 crate::nt::desktop::wheel_event(dz);
             }
-            pending = match pending {
-                Some((px, py, b)) if b == buttons => Some((px + dx, py + dy, b)),
-                Some((px, py, b)) => {
-                    deliver(px, py, b);
-                    Some((dx, dy, buttons))
-                }
-                None => Some((dx, dy, buttons)),
-            };
+            mouse.packet(dx, dy, buttons, &mut deliver);
         }
-        if let Some((dx, dy, b)) = pending {
-            deliver(dx, dy, b);
-        }
+        mouse.flush(&mut deliver);
         rounds = rounds.wrapping_add(1);
         if rounds.is_multiple_of(200) {
             crate::nt::desktop::tick();
@@ -108,6 +97,41 @@ fn input_thread(_: usize) {
 fn deliver(dx: i64, dy: i64, buttons: u8) {
     if let Some((session, program)) = crate::nt::desktop::pointer_event(dx, dy, buttons) {
         crate::nt::action::start_from_menu(session, program);
+    }
+}
+
+/// Mouse packets turned into the desktop's pointer events while the input
+/// thread catches up with what queued: moves with the buttons held are
+/// summed (one event, one redraw); a packet that changes the buttons is
+/// delivered at once with its own move, after the moves before it. A
+/// later move is never folded into a press or release: a release taken
+/// late would otherwise land where the pointer went next (a drag ending
+/// there, a click missing its target).
+#[derive(Default)]
+struct Coalescer {
+    /// The buttons as last delivered.
+    held: u8,
+    /// Moves not delivered yet, with `held`.
+    moves: Option<(i64, i64)>,
+}
+
+impl Coalescer {
+    fn packet(&mut self, dx: i64, dy: i64, buttons: u8, out: &mut impl FnMut(i64, i64, u8)) {
+        if buttons == self.held {
+            let (x, y) = self.moves.unwrap_or((0, 0));
+            self.moves = Some((x + dx, y + dy));
+        } else {
+            self.flush(out);
+            out(dx, dy, buttons);
+            self.held = buttons;
+        }
+    }
+
+    /// Delivers the summed moves, if any.
+    fn flush(&mut self, out: &mut impl FnMut(i64, i64, u8)) {
+        if let Some((x, y)) = self.moves.take() {
+            out(x, y, self.held);
+        }
     }
 }
 
@@ -217,7 +241,27 @@ impl Keys {
 
 #[cfg(test)]
 mod tests {
-    use super::{Keys, Packet};
+    use super::{Coalescer, Keys, Packet};
+
+    #[test]
+    fn a_release_is_delivered_where_it_happened() {
+        // chromium_window's drag as a late input thread found it queued:
+        // a move with the button held, the release, then the next step's
+        // moves (QEMU splits a long one).
+        let mut m = Coalescer { held: 1, moves: None };
+        let mut got = std::vec::Vec::new();
+        let mut out = |dx, dy, b| got.push((dx, dy, b));
+        m.packet(50, 50, 1, &mut out);
+        m.packet(50, 50, 1, &mut out);
+        m.packet(0, 0, 0, &mut out);
+        m.packet(-255, 255, 0, &mut out);
+        m.packet(-45, 126, 0, &mut out);
+        m.packet(0, 0, 1, &mut out);
+        m.flush(&mut out);
+        // The drag's moves summed, the release at their end, the next moves
+        // summed, the press where they end.
+        assert_eq!(got, [(100, 100, 1), (0, 0, 0), (-300, 381, 0), (0, 0, 1)]);
+    }
 
     #[test]
     fn set_1_scan_codes_become_virtual_keys() {

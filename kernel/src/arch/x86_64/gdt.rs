@@ -19,6 +19,12 @@ pub const USER32_CS: u16 = 0x20 | 3;
 pub const USER_SS: u16 = 0x28 | 3;
 pub const USER_CS: u16 = 0x30 | 3;
 pub const TSS_SELECTOR: u16 = 0x40;
+/// The 32-bit TEB of the thread running here, as FS for 32-bit code (WOW64:
+/// ARCHITECTURE "Plan: WOW64"): a 4 KiB data segment whose base the
+/// context switch sets (`set_teb32`), Windows' 0x53.
+pub const TEB32_SELECTOR: u16 = 0x50 | 3;
+/// The GDT's entries: the selectors above, the TSS taking two.
+const GDT_ENTRIES: usize = 11;
 
 /// Interrupt stack table slots (1-based, as encoded in IDT gates).
 pub const IST_DOUBLE_FAULT: u8 = 1;
@@ -53,7 +59,7 @@ pub struct Tss {
 const _: () = assert!(size_of::<Tss>() == 104);
 
 #[repr(C, align(16))]
-struct Gdt([u64; 10]);
+struct Gdt([u64; GDT_ENTRIES]);
 
 /// One CPU's GDT and TSS.
 #[repr(C, align(16))]
@@ -65,7 +71,7 @@ pub struct CpuTables {
 impl CpuTables {
     pub const fn new() -> Self {
         CpuTables {
-            gdt: Gdt([0; 10]),
+            gdt: Gdt([0; GDT_ENTRIES]),
             tss: Tss {
                 _reserved0: 0,
                 rsp: [0; 3],
@@ -160,6 +166,7 @@ pub unsafe fn load(tables: *mut CpuTables, ist_tops: [u64; 3]) -> *mut Tss {
         gdt.0[usize::from(USER_CS / 8)] = USER_CODE64;
         gdt.0[usize::from(TSS_SELECTOR / 8)] = tss_low;
         gdt.0[usize::from(TSS_SELECTOR / 8) + 1] = tss_high;
+        gdt.0[usize::from(TEB32_SELECTOR / 8)] = teb32_segment(0);
 
         let pointer = descriptor_pointer((&raw const (*tables).gdt).cast(), size_of::<Gdt>());
         asm!(
@@ -187,6 +194,49 @@ pub unsafe fn load(tables: *mut CpuTables, ist_tops: [u64; 3]) -> *mut Tss {
     }
 }
 
+/// A present, ring-3, read/write 32-bit data segment of one 4 KiB page
+/// (byte granular, limit 0xfff) at `base`: a TEB32 for FS.
+const fn teb32_segment(base: u32) -> u64 {
+    let base = base as u64;
+    0xfff
+        | ((base & 0xff_ffff) << 16)
+        | (0xf2 << 40) // present, DPL 3, data, read/write
+        | (0b0100 << 52) // D/B: 32-bit
+        | ((base >> 24) << 56)
+}
+
+/// Points this CPU's TEB32 segment at `base` and loads the segments
+/// 32-bit code runs with: DS and ES the user data segment, FS the TEB32
+/// (which also sets the FS base to `base`; 64-bit code reaches its TEB
+/// through GS, unchanged). Called by the context switch for a thread that
+/// runs 32-bit code, with interrupts disabled.
+///
+/// # Safety
+/// `tss` must be this CPU's TSS (from `init_bsp`/`load`), inside the
+/// `CpuTables` this CPU's GDT is in.
+pub unsafe fn set_teb32(tss: *mut Tss, base: u32) {
+    // SAFETY: `tss` is the `tss` field of this CPU's `CpuTables`
+    // (repr(C)), so stepping back by its offset gives the tables, used by
+    // this CPU only; the TEB32 entry is not the one any segment register
+    // holds while the kernel runs (it reloads FS right after), and
+    // loading ring-3 data segments in ring 0 is allowed (DPL 3 >= CPL and
+    // RPL). The kernel uses neither DS/ES bases (64-bit mode) nor FS.
+    unsafe {
+        let tables =
+            tss.cast::<u8>().sub(core::mem::offset_of!(CpuTables, tss)).cast::<CpuTables>();
+        let gdt = &raw mut (*tables).gdt;
+        (*gdt).0[usize::from(TEB32_SELECTOR / 8)] = teb32_segment(base);
+        asm!(
+            "mov ds, {data:x}",
+            "mov es, {data:x}",
+            "mov fs, {teb:x}",
+            data = in(reg) u64::from(USER_SS),
+            teb = in(reg) u64::from(TEB32_SELECTOR),
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
 /// Sets the ring-0 stack loaded when an interrupt arrives in user mode.
 ///
 /// # Safety
@@ -209,6 +259,27 @@ mod tests {
         assert_eq!(USER_CODE32, 0x00cf_fa00_0000_ffff);
         assert_eq!(USER_DATA, 0x00cf_f200_0000_ffff);
         assert_eq!(USER_CODE64, 0x00af_fa00_0000_ffff);
+        // Base 0x12345678, limit 0xfff, DPL 3 data, 32-bit, byte granular.
+        assert_eq!(teb32_segment(0x1234_5678), 0x1240_f234_5678_0fff);
+    }
+
+    /// 64-bit SYSRET's (CS, SS) from STAR's base, by each vendor's rule:
+    /// Intel ORs RPL 3 into both (the SDM's SYSRET), AMD ORs it into CS
+    /// only and loads SS as base + 8 exactly (the APM's SYSRET). An RPL-0
+    /// base gave user mode SS 0x28 on AMD, and the next IRETQ from an
+    /// interrupt there raised #GP(0x28).
+    fn sysret_selectors(star: u64) -> [(u16, u16); 2] {
+        let base = (star >> 48) as u16;
+        [((base + 16) | 3, (base + 8) | 3), ((base + 16) | 3, base + 8)]
+    }
+
+    #[test]
+    fn sysret_gives_the_user_selectors_on_intel_and_amd() {
+        let star = super::super::syscall::STAR;
+        for (cs, ss) in sysret_selectors(star) {
+            assert_eq!((cs, ss), (USER_CS, USER_SS));
+        }
+        assert_eq!((star >> 32) as u16, KERNEL_CS);
     }
 
     #[test]

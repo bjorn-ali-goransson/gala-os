@@ -77,6 +77,7 @@ unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn ExitProcess(code: u32) -> !;
+    fn GetModuleFileNameW(module: Handle, name: *mut u16, size: u32) -> u32;
     fn CloseHandle(h: Handle) -> Bool;
     fn GetCurrentProcess() -> Handle;
     fn GetCurrentThread() -> Handle;
@@ -93,6 +94,7 @@ unsafe extern "system" {
     fn QueueUserAPC(f: extern "system" fn(usize), thread: Handle, data: usize) -> u32;
     fn SleepEx(ms: u32, alertable: Bool) -> u32;
     fn GetActiveProcessorGroupCount() -> u16;
+    fn GetActiveProcessorCount(group: u16) -> u32;
     fn GetCurrentProcessorNumberEx(n: *mut ProcessorNumber);
     fn GetProcessGroupAffinity(process: Handle, count: *mut u16, groups: *mut u16) -> Bool;
     fn GetThreadGroupAffinity(thread: Handle, affinity: *mut GroupAffinity) -> Bool;
@@ -229,6 +231,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -238,10 +241,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -284,9 +289,14 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         let me = GetCurrentThread();
         c.eq(GetActiveProcessorGroupCount().into(), 1)?;
+        // The machine's processors (2 in gala's scenarios; a real machine
+        // has its own count): the checks below follow it.
+        let cpus = GetActiveProcessorCount(0);
+        c.ok((1..=64).contains(&cpus), cpus.into())?;
+        let all = if cpus == 64 { u64::MAX } else { (1u64 << cpus) - 1 };
         let mut n = ProcessorNumber { group: 9, number: 9, reserved: 9 };
         GetCurrentProcessorNumberEx(&mut n);
-        c.ok(n.group == 0 && n.number < 2, n.number.into())?;
+        c.ok(n.group == 0 && u32::from(n.number) < cpus, n.number.into())?;
         let mut groups = [7u16; 4];
         let mut count = 4u16;
         c.ok(
@@ -296,18 +306,20 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
         c.ok(count == 1 && groups[0] == 0, count.into())?;
         let mut ga = GroupAffinity::default();
         c.ok(GetThreadGroupAffinity(me, &mut ga) != 0, GetLastError().into())?;
-        c.ok(ga.mask == 3 && ga.group == 0, ga.mask as u64)?;
+        c.ok(ga.mask as u64 == all && ga.group == 0, ga.mask as u64)?;
         let one = GroupAffinity { mask: 1, ..GroupAffinity::default() };
         let mut previous = GroupAffinity::default();
         c.ok(SetThreadGroupAffinity(me, &one, &mut previous) != 0, GetLastError().into())?;
-        c.eq(previous.mask as u64, 3)?;
-        c.eq(SetThreadAffinityMask(me, 3) as u64, 1)?;
+        c.eq(previous.mask as u64, all)?;
+        c.eq(SetThreadAffinityMask(me, all as usize) as u64, 1)?;
         // Not a subset of the process's processors.
-        c.eq(SetThreadAffinityMask(me, 4) as u64, 0)?;
-        c.eq(GetLastError().into(), 87)?; // ERROR_INVALID_PARAMETER
+        if cpus < 64 {
+            c.eq(SetThreadAffinityMask(me, 1 << cpus) as u64, 0)?;
+            c.eq(GetLastError().into(), 87)?; // ERROR_INVALID_PARAMETER
+        }
         let mut ideal = ProcessorNumber::default();
         c.ok(GetThreadIdealProcessorEx(me, &mut ideal) != 0, 0)?;
-        c.ok(ideal.group == 0 && ideal.number < 2, ideal.number.into())?;
+        c.ok(ideal.group == 0 && u32::from(ideal.number) < cpus, ideal.number.into())?;
         let zero = ProcessorNumber::default();
         c.ok(SetThreadIdealProcessorEx(me, &zero, &mut ideal) != 0, GetLastError().into())?;
         let mut node = 9u16;
@@ -327,14 +339,16 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
                 mask |= e[0];
             }
         }
-        c.ok(cores == 2 && mask == 3, cores)?;
+        // One entry per core: one per processor without SMT (gala), fewer
+        // with it.
+        c.ok(cores >= 1 && cores <= u64::from(cpus) && mask == all, cores)?;
 
         // The Ex form: variable-sized entries, RelationProcessorCore (0)
         // ones are 48 bytes with one GROUP_AFFINITY.
         let mut len = 0u32;
         c.eq(GetLogicalProcessorInformationEx(0, core::ptr::null_mut(), &mut len) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INSUFFICIENT_BUFFER)?;
-        c.eq(len.into(), 2 * 48)?;
+        c.eq(len.into(), cores * 48)?;
         let p = buf.as_mut_ptr().cast::<u8>();
         c.ok(GetLogicalProcessorInformationEx(0, p, &mut len) != 0, 0)?;
         let mut mask = 0u64;
@@ -347,20 +361,20 @@ fn processors(c: &mut Checks) -> Result<(), u32> {
             mask |= *(p.add(at + 32) as *const u64);
             at += size as usize;
         }
-        c.eq(mask, 3)?;
+        c.eq(mask, all)?;
         // RelationAll (0xffff): the entries' sizes add up.
         let mut len = 4096u32;
         c.ok(GetLogicalProcessorInformationEx(0xffff, p, &mut len) != 0, 0)?;
-        let (mut at, mut cores) = (0, 0);
+        let (mut at, mut all_cores) = (0, 0);
         while at < len as usize {
             if *(p.add(at) as *const u32) == 0 {
-                cores += 1;
+                all_cores += 1;
             }
             let size = *(p.add(at + 4) as *const u32) as usize;
             c.ok(size >= 8, size as u64)?;
             at += size;
         }
-        c.ok(at == len as usize && cores == 2, cores)?;
+        c.ok(at == len as usize && all_cores == cores, all_cores)?;
     }
     Ok(())
 }
@@ -535,6 +549,19 @@ fn w(s: &str) -> [u16; 64] {
     b
 }
 
+/// `file` in the directory of this program (C:\gala under gala, the
+/// directory run-all.ps1 runs it from on Windows), NUL-terminated.
+fn beside_me(file: &str) -> [u16; 300] {
+    let mut b = [0u16; 300];
+    // SAFETY: a buffer of 260 characters for the name.
+    let len = unsafe { GetModuleFileNameW(core::ptr::null_mut(), b.as_mut_ptr(), 260) } as usize;
+    let dir = b[..len].iter().rposition(|&ch| ch == u16::from(b'\\')).map_or(0, |i| i + 1);
+    for (d, ch) in b[dir..].iter_mut().zip(file.bytes().chain(Some(0))) {
+        *d = ch.into();
+    }
+    b
+}
+
 /// The NUL-terminated UTF-16 string at `p` is `want`.
 fn same_text(p: *const u16, want: &str) -> bool {
     // SAFETY: a NUL-terminated string the system wrote.
@@ -551,7 +578,7 @@ fn same_text(p: *const u16, want: &str) -> bool {
 fn libraries(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain calls with NUL-terminated names.
     unsafe {
-        let path = w("C:\\gala\\testdll.dll");
+        let path = beside_me("testdll.dll");
         let name = w("testdll.dll");
         let data = LoadLibraryExW(path.as_ptr(), core::ptr::null_mut(), 0x2); // AS_DATAFILE
         c.ok(!data.is_null() && data as usize & 3 == 1, data as u64)?;
@@ -572,7 +599,7 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
 
         // A 32-bit IL-only .NET assembly loads as a module in a 64-bit
         // process (how CoreCLR loads every assembly on Windows).
-        let il_path = w("C:\\gala\\dotnet_hello.dll");
+        let il_path = beside_me("dotnet_hello.dll");
         let il_name = w("dotnet_hello.dll");
         let il = LoadLibraryExW(il_path.as_ptr(), core::ptr::null_mut(), 0x8);
         c.ok(!il.is_null() && il as usize & 3 == 0, GetLastError().into())?;
@@ -581,7 +608,7 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
         c.ok(FreeLibrary(il) != 0, GetLastError().into())?;
         c.ok(GetModuleHandleW(il_name.as_ptr()).is_null(), 0)?;
         // A 32-bit image that is not IL-only cannot be loaded.
-        let bad = w("C:\\gala\\x86_native.dll");
+        let bad = beside_me("x86_native.dll");
         c.ok(LoadLibraryExW(bad.as_ptr(), core::ptr::null_mut(), 0).is_null(), 0)?;
         c.eq(GetLastError().into(), 193)?; // ERROR_BAD_EXE_FORMAT
 
@@ -593,9 +620,10 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
         RtlSetProcessPlaceholderCompatibilityMode(0);
 
         let gala = w("gala worker");
-        c.eq(SetThreadDescription(GetCurrentThread(), gala.as_ptr()) as u64, 0)?;
+        // HRESULT_FROM_NT(STATUS_SUCCESS) (Windows 11 25H2).
+        c.eq(SetThreadDescription(GetCurrentThread(), gala.as_ptr()) as u64, 0x1000_0000)?;
         let mut text = core::ptr::null_mut();
-        c.eq(GetThreadDescription(GetCurrentThread(), &mut text) as u64, 0)?;
+        c.eq(GetThreadDescription(GetCurrentThread(), &mut text) as u64, 0x1000_0000)?;
         c.ok(!text.is_null() && same_text(text, "gala worker"), 0)?;
         LocalFree(text.cast());
 
@@ -741,4 +769,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

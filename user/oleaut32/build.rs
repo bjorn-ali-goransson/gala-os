@@ -74,6 +74,19 @@ fn main() {
         ("VarBstrFromR8", 112),
         ("VarBoolFromDate", 123),
         ("VarBoolFromCy", 124),
+        ("VarR4FromStr", 74),
+        ("VarBstrFromDate", 114),
+        ("VarAdd", 141),
+        ("VarAnd", 142),
+        ("VarDiv", 143),
+        ("VarIdiv", 153),
+        ("VarMod", 155),
+        ("VarMul", 156),
+        ("VarOr", 157),
+        ("VarSub", 159),
+        ("VarXor", 167),
+        ("VarNeg", 173),
+        ("VarNot", 174),
     ];
     for (name, ordinal) in ordinals {
         println!("cargo:rustc-cdylib-link-arg=/EXPORT:{name},@{ordinal}");

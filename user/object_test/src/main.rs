@@ -13,17 +13,20 @@ const STATUS_OBJECT_NAME_NOT_FOUND: NtStatus = 0xc000_0034;
 const STATUS_OBJECT_NAME_COLLISION: NtStatus = 0xc000_0035;
 const STATUS_OBJECT_PATH_NOT_FOUND: NtStatus = 0xc000_003a;
 const STATUS_OBJECT_PATH_SYNTAX_BAD: NtStatus = 0xc000_003b;
-const DIRECTORY_ALL_ACCESS: u32 = 0xf_000f;
+const DIRECTORY_TRAVERSE: u32 = 0x1;
+const DIRECTORY_CREATE_OBJECT: u32 = 0x4;
 const OBJECT_BASIC_INFORMATION: u32 = 0;
 const OBJECT_NAME_INFORMATION: u32 = 1;
 
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: u32, want: u32) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u32) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -33,6 +36,7 @@ impl Checks {
         write_file(stdout(), &hex32(self.0));
         print(" got ");
         write_file(stdout(), &hex32(got));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -123,11 +127,13 @@ fn run() -> Result<(), u32> {
     bad_len.length = 12;
     c.eq(open_event(EVENT_ALL_ACCESS, &bad_len).0, STATUS_INVALID_PARAMETER)?;
 
-    // Names relative to a directory handle.
+    // Names relative to a directory handle, opened with the access the
+    // creates need (an ordinary user is not granted DIRECTORY_ALL_ACCESS
+    // on the global directory).
     let dir_name = wide!("\\BaseNamedObjects");
     let dir_name = UnicodeString::new(&dir_name);
     let (st, dir) = open_directory(
-        DIRECTORY_ALL_ACCESS,
+        DIRECTORY_TRAVERSE | DIRECTORY_CREATE_OBJECT,
         &ObjectAttributes::new(&dir_name, Handle(0), OBJ_CASE_INSENSITIVE),
     );
     c.eq(st, STATUS_SUCCESS)?;
@@ -179,3 +185,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

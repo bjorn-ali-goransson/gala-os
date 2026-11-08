@@ -2,6 +2,15 @@
 //! strftime. gala's time zone is UTC (kernel32's GetTimeZoneInformation
 //! says so too), so local time is UTC with no daylight saving.
 
+/// time_t of the functions without a size in their names (time, gmtime,
+/// localtime, mktime, ctime, difftime): 64 bits in x64 msvcrt.dll, 32 in
+/// the x86 one (mingw-w64's i686 headers define _USE_32BIT_TIME_T and
+/// call these for time_t).
+#[cfg(target_arch = "x86")]
+pub type TimeT = i32;
+#[cfg(not(target_arch = "x86"))]
+pub type TimeT = i64;
+
 /// struct tm.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -271,4 +280,50 @@ pub extern "C" fn _ctime64(t: *const i64) -> *mut u8 {
         out[25] = 0;
         out.as_mut_ptr()
     }
+}
+
+// ---- The functions on the architecture's time_t ----
+
+/// time(t): `_time64`'s seconds in a time_t (-1 past 2038 with a 32-bit
+/// one, as documented for _time32).
+#[unsafe(no_mangle)]
+pub extern "C" fn time(t: *mut TimeT) -> TimeT {
+    let now = TimeT::try_from(crate::misc::_time64(core::ptr::null_mut())).unwrap_or(-1);
+    if !t.is_null() {
+        // SAFETY: the caller's output pointer.
+        unsafe { *t = now };
+    }
+    now
+}
+
+/// A time_t (either size) as a 64-bit time.
+pub fn to_i64(t: impl Into<i64>) -> i64 {
+    t.into()
+}
+
+/// A time_t argument as a 64-bit time.
+fn widen(t: *const TimeT) -> Option<i64> {
+    // SAFETY: the caller's time, when given.
+    (!t.is_null()).then(|| to_i64(unsafe { *t }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gmtime(t: *const TimeT) -> *mut Tm {
+    widen(t).map_or(core::ptr::null_mut(), |t| _gmtime64(&t))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn localtime(t: *const TimeT) -> *mut Tm {
+    widen(t).map_or(core::ptr::null_mut(), |t| _localtime64(&t))
+}
+
+/// mktime(tm): -1 when the time does not fit the time_t.
+#[unsafe(no_mangle)]
+pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
+    TimeT::try_from(_mktime64(tm)).unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ctime(t: *const TimeT) -> *mut u8 {
+    widen(t).map_or(core::ptr::null_mut(), |t| _ctime64(&t))
 }

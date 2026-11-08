@@ -120,6 +120,7 @@ fn hex(v: u64) -> [u8; 16] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -129,10 +130,12 @@ impl Checks {
         out(&hex(self.0.into()));
         out(b" failed, got 0x");
         out(&hex(got));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -156,9 +159,18 @@ fn run() -> Result<(), u32> {
             flags: 0,
             reserved: 0,
         };
+        // The machine's batteries (none in gala's VMs; a laptop has one or
+        // more), then ERROR_NO_MORE_ITEMS at the index after the last.
+        let mut n = 0;
+        while n < 64
+            && SetupDiEnumDeviceInterfaces(set, core::ptr::null_mut(), &BATTERY, n, &mut data) != 0
+        {
+            c.ok(data.class.0 == BATTERY.0 && data.class.3 == BATTERY.3, data.class.0.into())?;
+            n += 1;
+        }
         SetLastError(0);
         c.eq(
-            SetupDiEnumDeviceInterfaces(set, core::ptr::null_mut(), &BATTERY, 0, &mut data) as u64,
+            SetupDiEnumDeviceInterfaces(set, core::ptr::null_mut(), &BATTERY, n, &mut data) as u64,
             0,
         )?;
         c.eq(GetLastError().into(), ERROR_NO_MORE_ITEMS)?;
@@ -168,7 +180,13 @@ fn run() -> Result<(), u32> {
             devinst: 0,
             reserved: 0,
         };
-        c.eq(SetupDiEnumDeviceInfo(set, 0, &mut info) as u64, 0)?;
+        // One device per battery interface found (at most).
+        let mut devices = 0;
+        while devices < 64 && SetupDiEnumDeviceInfo(set, devices, &mut info) != 0 {
+            devices += 1;
+        }
+        c.ok(devices <= n && (devices == 0) == (n == 0), devices.into())?;
+        c.eq(SetupDiEnumDeviceInfo(set, devices, &mut info) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_NO_MORE_ITEMS)?;
         c.ok(SetupDiDestroyDeviceInfoList(set) != 0, GetLastError().into())?;
         SetLastError(0);
@@ -206,4 +224,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

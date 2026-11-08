@@ -45,6 +45,14 @@
  *   (I_CHILDRENCALLBACK), rectangles, hit testing, image lists, deleting
  *   (with children; TVI_ROOT: all).
  *
+ * - Flat scroll bars (Delphi's VCL initializes them on every scrolling
+ *   control): FlatSB_GetScrollProp(WSB_PROP_HSTYLE) is FALSE before
+ *   InitializeFlatSB and TRUE after; properties set are read back;
+ *   WSB_PROP_WINSTYLE is the window's WS_HSCROLL/WS_VSCROLL bits with
+ *   0x2 for a vertical and 0x4 for a horizontal scroll bar; the
+ *   FlatSB_ scroll functions keep the range, page and position;
+ *   UninitializeFlatSB is S_OK, then S_FALSE.
+ *
  * Prints "comctl32_test: ok" or exits with the number of the failing
  * check. */
 #include <windows.h>
@@ -558,6 +566,36 @@ static void tree_view(HWND parent, HIMAGELIST il) {
     DestroyWindow(tv);
 }
 
+static void flat_scroll_bars(HWND parent) {
+    HWND w = CreateWindowExW(0, L"Comctl32TestParent", L"flat", WS_CHILD | WS_VISIBLE | WS_VSCROLL, 0, 0, 100, 100,
+                             parent, NULL, GetModuleHandleW(NULL), NULL);
+    int v = -1;
+    CHECK(w != NULL && !FlatSB_GetScrollProp(w, WSB_PROP_HSTYLE, &v));
+    CHECK(InitializeFlatSB(w));
+    CHECK(FlatSB_GetScrollProp(w, WSB_PROP_HSTYLE, &v));
+    CHECK(FlatSB_SetScrollProp(w, WSB_PROP_VSTYLE, FSB_REGULAR_MODE, TRUE));
+    CHECK(FlatSB_GetScrollProp(w, WSB_PROP_VSTYLE, &v) && v == FSB_REGULAR_MODE);
+    CHECK(FlatSB_SetScrollProp(w, WSB_PROP_CXVSCROLL, 21, FALSE));
+    CHECK(FlatSB_GetScrollProp(w, WSB_PROP_CXVSCROLL, &v) && v == 21);
+    CHECK(FlatSB_SetScrollProp(w, WSB_PROP_VBKGCOLOR, RGB(1, 2, 3), FALSE));
+    CHECK(FlatSB_GetScrollProp(w, WSB_PROP_VBKGCOLOR, &v) && v == RGB(1, 2, 3));
+    /* The window's WS_*SCROLL bits and a low bit per scroll bar: 0x2
+       vertical, 0x4 horizontal (Windows 11 25H2, comctl32 5). */
+    CHECK(FlatSB_GetScrollProp(w, WSB_PROP_WINSTYLE, &v) && v == (WS_VSCROLL | 0x2));
+    SCROLLINFO si = {sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, 100, 10, 30};
+    FlatSB_SetScrollInfo(w, SB_VERT, &si, TRUE);
+    SCROLLINFO got = {sizeof got, SIF_RANGE | SIF_PAGE | SIF_POS};
+    CHECK(FlatSB_GetScrollInfo(w, SB_VERT, &got));
+    CHECK(got.nMin == 0 && got.nMax == 100 && got.nPage == 10 && got.nPos == 30);
+    CHECK(FlatSB_SetScrollPos(w, SB_VERT, 40, TRUE) == 30 && FlatSB_GetScrollPos(w, SB_VERT) == 40);
+    CHECK(FlatSB_SetScrollRange(w, SB_VERT, 0, 50, TRUE));
+    int lo = -1, hi = -1;
+    CHECK(FlatSB_GetScrollRange(w, SB_VERT, &lo, &hi) && lo == 0 && hi == 50);
+    CHECK(FlatSB_ShowScrollBar(w, SB_VERT, TRUE));
+    CHECK(UninitializeFlatSB(w) == S_OK && UninitializeFlatSB(w) == S_FALSE);
+    DestroyWindow(w);
+}
+
 int main(void) {
     INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_WIN95_CLASSES | ICC_BAR_CLASSES};
     CHECK(InitCommonControlsEx(&icc));
@@ -569,6 +607,7 @@ int main(void) {
     HWND parent = CreateWindowExW(0, L"Comctl32TestParent", L"comctl32", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40,
                                   400, 300, NULL, NULL, GetModuleHandleW(NULL), NULL);
     CHECK(parent != NULL);
+    flat_scroll_bars(parent);
     HDC screen = GetDC(NULL);
     HDC dc = CreateCompatibleDC(screen);
     HBITMAP canvas = CreateCompatibleBitmap(screen, 64, 64);

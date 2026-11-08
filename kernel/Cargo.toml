@@ -15,12 +15,6 @@ test = false
 bench = false
 
 [features]
-# shasha, the graphical shell (the compositor, wallpapers, fonts, start
-# menu, taskbar): on by default; a server kernel leaves it out
-# (`--no-default-features`; ROADMAP SD, ARCHITECTURE "Server and desktop
-# workloads").
-default = ["shasha"]
-shasha = []
 # gala-um: the kernel library as the NT layer inside a Linux process
 # (kernel/src/hosted, docs/GALA_UM.md). Never set for the kernel binary.
 hosted = ["dep:libc"]
@@ -39,6 +33,9 @@ libc = { version = "=0.2.191", optional = true }
 # The Linux personality's ABI data (signals, layouts; kernel/lx_abi,
 # host-tested against transcripts recorded on Linux).
 lx_abi = { path = "lx_abi" }
+# AFD's request layouts for both pointer sizes (kernel/afd_abi, shared
+# with ws2_32: a WOW64 caller's are read as x86 ones).
+afd_abi = { path = "afd_abi" }
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["size_16", "size_24", "regular", "bold", "unicode-basic-latin", "unicode-specials"] }
 smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 spin = { version = "0.12.3", default-features = false, features = ["spin_mutex", "once"] }

@@ -236,18 +236,27 @@ fn copy_on_write(
 }
 
 /// A touched guard page: the guard is removed. In the current thread's
-/// stack, the guard moves one page down and StackLimit follows, silently;
-/// with no room left (the bottom page stays reserved) the stack overflows.
-/// Elsewhere the program gets STATUS_GUARD_PAGE_VIOLATION.
+/// stack (a WOW64 thread's 32-bit one too: its TEB32's), the guard moves
+/// one page down and StackLimit follows, silently; with no room left (the
+/// bottom page stays reserved) the stack overflows. Elsewhere the program
+/// gets STATUS_GUARD_PAGE_VIOLATION.
 fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> Fault {
+    use super::layout::{teb, wow64::teb32};
     let page = addr / PAGE_SIZE * PAGE_SIZE;
-    let stack = super::thread::current_stack(process);
+    // (the stack, where its StackLimit is, that field's width)
+    let stack = super::thread::current_stack(process)
+        .map(|(t, bottom, base)| ((t + teb::STACK_LIMIT, bottom, base), 8))
+        .filter(|((_, bottom, base), _)| (*bottom..*base).contains(&page))
+        .or_else(|| {
+            super::thread::current_stack32(process)
+                .map(|(t, bottom, base)| ((t + teb32::STACK_LIMIT, bottom, base), 4))
+        });
     let (result, new_limit) = {
         if vad.protect(page, PAGE_SIZE, protect).is_err() {
             return Fault::OutOfMemory;
         }
         match stack {
-            Some((teb, bottom, base)) if (bottom..base).contains(&page) => {
+            Some(((limit_at, bottom, base), width)) if (bottom..base).contains(&page) => {
                 let next = page - PAGE_SIZE;
                 let room = next > bottom;
                 let grown = room
@@ -266,7 +275,7 @@ fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> 
                     );
                     Fault::Raise(NtStatus::STACK_OVERFLOW)
                 };
-                (result, Some((teb, page)))
+                (result, Some((limit_at, page, width)))
             }
             _ => (Fault::Raise(NtStatus::GUARD_PAGE_VIOLATION), None),
         }
@@ -275,8 +284,8 @@ fn guard_hit(process: &Process, vad: &mut vad::Vad, addr: u64, protect: u32) -> 
     if space.is_mapped(page) {
         let _ = space.set_flags(page, flags_for(protect));
     }
-    if let Some((teb, limit)) = new_limit {
-        let _ = space.write(teb + super::layout::teb::STACK_LIMIT, &limit.to_le_bytes());
+    if let Some((at, limit, width)) = new_limit {
+        let _ = space.write(at, &limit.to_le_bytes()[..width]);
     }
     result
 }

@@ -300,8 +300,14 @@ fn a_frameless_window_is_resized_when_its_program_asks() {
     let f = d.create(7, 300, 120, 200, 100, &title("own frame"), STYLE_FRAMELESS).unwrap();
     d.show(f, 7, true).unwrap();
     let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    // MAKELONG pairs, as WM_MOVE and WM_SIZE (fits a 32-bit WPARAM).
     let place = |wparam: u64, lparam: u64| {
-        (wparam as u32 as i32, (wparam >> 32) as u32 as i32, lparam as u32, (lparam >> 32) as u32)
+        (
+            i32::from(wparam as u16 as i16),
+            i32::from((wparam >> 16) as u16 as i16),
+            u32::from(lparam as u16),
+            u32::from((lparam >> 16) as u16),
+        )
     };
     go(&mut d, 498, 218, 0);
     go(&mut d, 498, 218, 1);
@@ -441,7 +447,7 @@ fn the_windows_key_with_arrows_snaps_the_active_window() {
     let work_h = 768 - u64::from(TASKBAR);
     let placed: Vec<_> =
         d.s.input.iter().map(|e| (e.window, e.message, e.wparam, e.lparam)).collect();
-    assert_eq!(placed, [(a, GALA_WM_PLACE, 0, 512 | work_h << 32)]);
+    assert_eq!(placed, [(a, GALA_WM_PLACE, 0, 512 | work_h << 16)]);
     // The program moves it; Win+Right: the right half.
     d.place(a, 7, 0, 0, 512, work_h as u32).unwrap();
     d.s.input.clear();
@@ -451,8 +457,8 @@ fn the_windows_key_with_arrows_snaps_the_active_window() {
     d.s.input.clear();
     snap(&mut d, 0x28);
     assert_eq!(d.s.input[0].message, GALA_WM_PLACE);
-    assert_eq!(d.s.input[0].wparam, 300 | 100 << 32);
-    assert_eq!(d.s.input[0].lparam, 400 | 300 << 32);
+    assert_eq!(d.s.input[0].wparam, 300 | 100 << 16);
+    assert_eq!(d.s.input[0].lparam, 400 | 300 << 16);
     // Win+Up maximizes; Win+Down on a window not snapped minimizes it.
     d.s.input.clear();
     snap(&mut d, 0x26);
@@ -518,7 +524,7 @@ fn named_actions_do_what_the_mouse_and_keys_do() {
     // Snap left a window that is not active: placed, raised, active.
     assert_eq!(d.s.active, Some(b));
     d.act(a, Action::Snap(SnapTo::Left)).unwrap();
-    assert_eq!(sent(&mut d), [(a, GALA_WM_PLACE, 0, 512 | work_h << 32)]);
+    assert_eq!(sent(&mut d), [(a, GALA_WM_PLACE, 0, 512 | work_h << 16)]);
     assert_eq!(d.s.active, Some(a));
     assert_eq!(d.s.windows.last().map(|w| w.id), Some(a));
     // The program moves it: the list shows it snapped.
@@ -542,7 +548,7 @@ fn named_actions_do_what_the_mouse_and_keys_do() {
     // Back in its snapped place, Restore gives it its first rectangle.
     d.place(a, 7, 0, 0, 512, work_h as u32).unwrap();
     d.act(a, Action::Restore).unwrap();
-    assert_eq!(sent(&mut d), [(a, GALA_WM_PLACE, 300 | 100 << 32, 400 | 300 << 32)]);
+    assert_eq!(sent(&mut d), [(a, GALA_WM_PLACE, 300 | 100 << 16, 400 | 300 << 16)]);
     d.place(a, 7, 300, 100, 400, 300).unwrap();
     // Minimize and Activate: as its taskbar button.
     d.act(a, Action::Minimize).unwrap();
@@ -556,7 +562,7 @@ fn named_actions_do_what_the_mouse_and_keys_do() {
     assert_eq!(sent(&mut d), [(a, GALA_WM_MINIMIZED, 0, 0)]);
     // Move: the program places it; a size no window may have is refused.
     d.act(b, Action::Place { x: 10, y: 20, w: 300, h: 200 }).unwrap();
-    assert_eq!(sent(&mut d), [(b, GALA_WM_PLACE, 10 | 20 << 32, 300 | 200 << 32)]);
+    assert_eq!(sent(&mut d), [(b, GALA_WM_PLACE, 10 | 20 << 16, 300 | 200 << 16)]);
     assert_eq!(
         d.act(b, Action::Place { x: 0, y: 0, w: 5, h: 5 }),
         Err(NtStatus::INVALID_PARAMETER)
@@ -842,4 +848,68 @@ fn injected_input_reaches_a_desktop_a_test_frame_shows() {
     // Shown by nothing again: no input.
     move_console(&two, Some(Presenter::None)).unwrap();
     assert_eq!(inject(&two, at(0)).err(), Some(NtStatus::INVALID_DEVICE_STATE));
+}
+
+/// A bare desktop (nothing can show it: the server profile, no screen and
+/// no `presenter=`) is the window state alone:
+/// windows are made, shown, placed, retitled and painted, the clock runs,
+/// and nothing is laid out or drawn for them (no wallpaper, taskbar or
+/// caption), so a machine nothing shows pays for no composition.
+#[test]
+fn a_bare_desktop_keeps_windows_and_draws_nothing() {
+    let mut d = Desktop::new();
+    d.bare = Some("no screen and no presenter=");
+    d.s.screen = (1280, 800);
+    d.s.live = true;
+    let a = d.create(1, 10, 10, 200, 80, &title("Hi"), 0).unwrap();
+    d.show(a, 1, true).unwrap();
+    d.place(a, 1, 20, 30, 300, 100).unwrap();
+    d.set_title(a, 1, &title("There")).unwrap();
+    d.set_minute(12_345);
+    let red = [0x00ff_0000u32; 4];
+    d.present(a, Rect { x: 0, y: 0, w: 2, h: 2 }, &red, 2).unwrap();
+    let w = d.s.window(a).unwrap();
+    assert_eq!((w.x, w.y, w.w, w.h), (20, 30, 300, 100));
+    assert!(w.client.first().is_some_and(|p| p & 0x00ff_ffff == 0x00ff_0000));
+    assert!(w.chrome.caption.is_none());
+    assert!(d.wallpaper.is_none() && d.taskbar.is_none());
+    assert_eq!(d.list().len(), 1);
+    assert_eq!(d.presenter.kind(), Kind::None);
+    // Its program's own move loop finds no button down (no pointer moves
+    // here).
+    assert_eq!(d.begin_drag(a, 1).err(), Some(NtStatus::INVALID_DEVICE_STATE));
+    d.destroy_owned(1);
+    assert!(d.s.window(a).is_none() && d.list().is_empty());
+}
+
+#[test]
+fn delivered_input_is_noted_until_its_program_takes_it() {
+    let (mut d, a) = desktop_with_window();
+    // A click in the client area: its press and release are noted, not
+    // yet taken.
+    click(&mut d, 500, 300);
+    let fresh: Vec<_> = d.s.recent_input().copied().collect();
+    let presses: Vec<_> = fresh
+        .iter()
+        .filter(|n| n.window == a && (n.message == WM_LBUTTONDOWN || n.message == WM_LBUTTONUP))
+        .collect();
+    assert_eq!(presses.len(), 2);
+    assert!(presses.iter().all(|n| n.taken == 0 && !n.dropped));
+    // The program takes its input: both are marked taken.
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    let taken: Vec<_> =
+        d.s.recent_input()
+            .filter(|n| n.window == a && (n.message == WM_LBUTTONDOWN || n.message == WM_LBUTTONUP))
+            .map(|n| n.taken != 0)
+            .collect();
+    assert_eq!(taken, [true, true]);
+    // A second click stays "not taken" until the program asks again.
+    click(&mut d, 500, 300);
+    let waiting =
+        d.s.recent_input()
+            .filter(|n| n.window == a && n.message == WM_LBUTTONDOWN && n.taken == 0)
+            .count();
+    assert_eq!(waiting, 1);
+    assert_eq!(d.s.input_dropped, 0);
 }

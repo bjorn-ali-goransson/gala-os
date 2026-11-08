@@ -12,6 +12,7 @@ const PE32_PLUS_MAGIC: u16 = 0x20b;
 const IMAGE_FILE_EXECUTABLE_IMAGE: u16 = 0x0002;
 const IMAGE_FILE_DLL: u16 = 0x2000;
 const IMAGE_FILE_RELOCS_STRIPPED: u16 = 0x0001;
+const IMAGE_FILE_LARGE_ADDRESS_AWARE: u16 = 0x0020;
 
 pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 pub const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
@@ -105,17 +106,19 @@ pub struct PeImage<'a> {
     pub is_dll: bool,
     /// Whether the image can be loaded away from `image_base`.
     pub relocatable: bool,
-    /// A 32-bit (PE32) image: it can be mapped, not run.
+    /// A 32-bit (PE32, x86) image: an executable runs through WOW64
+    /// (ARCHITECTURE "Plan: WOW64").
     pub pe32: bool,
+    /// IMAGE_FILE_LARGE_ADDRESS_AWARE: a 32-bit process may use addresses
+    /// up to 4 GiB rather than 2.
+    pub large_address_aware: bool,
 }
 
 impl<'a> PeImage<'a> {
-    /// Parses an executable (.exe) image.
+    /// Parses an executable (.exe) image: x64 (PE32+) or x86 (PE32, run
+    /// through WOW64).
     pub fn parse(data: &'a [u8]) -> Result<Self, PeError> {
         let image = Self::parse_image(data)?;
-        if image.pe32 {
-            return Err(PeError::NotPe32Plus);
-        }
         if image.is_dll {
             return Err(PeError::NotExecutable);
         }
@@ -203,6 +206,7 @@ impl<'a> PeImage<'a> {
             is_dll,
             relocatable: false,
             pe32,
+            large_address_aware: characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE != 0,
         };
         let mut prev_end = size_of_headers;
         for i in 0..section_count {
@@ -294,7 +298,10 @@ pub fn find_export(image: &[u8], name: &[u8]) -> Option<u32> {
         Some(u32::from_le_bytes(image.get(off..off.checked_add(4)?)?.try_into().ok()?))
     };
     let pe = u32_at(0x3c)? as usize;
-    let dir = u32_at(pe + 24 + 112)? as usize; // DataDirectory[0]
+    // DataDirectory[0]: after a PE32+ optional header's 112 bytes, a PE32
+    // one's 96 (32-bit images: the WOW64 ntdll and wow64.dll's peers).
+    let directories = if u32_at(pe + 24)? & 0xffff == u32::from(PE32_MAGIC) { 96 } else { 112 };
+    let dir = u32_at(pe + 24 + directories)? as usize;
     if dir == 0 {
         return None;
     }
@@ -372,6 +379,35 @@ pub fn apply_relocations(
 /// `relocation_index`), only the page's block and the one before are
 /// read; without, the whole table is walked (fine for small images: a
 /// 340 MB DLL has 80 000 pages and a table of several MB).
+/// The mapped header of an image loaded `delta` away from its preferred
+/// base names where it is: its OptionalHeader.ImageBase is moved by
+/// `delta`. Measured on Windows 11 25H2 for both kinds: a PE32 DLL in a
+/// WOW64 process (testdll32 at 0x74ca0000 instead of 0x400000) and PE32+
+/// DLLs (kernel32, ntdll, advapi32: 0x180000000 in the file, their real
+/// base in memory).
+fn rebase_header(page: &mut [u8; 4096], delta: u64) {
+    let Some(&[a, b, c, d]) = page.get(0x3c..0x40) else { return };
+    let nt = u32::from_le_bytes([a, b, c, d]) as usize;
+    let Some(magic) = page.get(nt + 24..nt + 26) else { return };
+    // OptionalHeader.ImageBase: a u32 at +28 in PE32, a u64 at +24 in PE32+.
+    match magic {
+        [0x0b, 0x01] => {
+            if let Some(slot) = page.get_mut(nt + 24 + 28..nt + 24 + 32) {
+                let old = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
+                slot.copy_from_slice(&old.wrapping_add(delta as u32).to_le_bytes());
+            }
+        }
+        [0x0b, 0x02] => {
+            if let Some(slot) = page.get_mut(nt + 24 + 24..nt + 24 + 32) {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(slot);
+                slot.copy_from_slice(&u64::from_le_bytes(b).wrapping_add(delta).to_le_bytes());
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn relocate_page(
     image: &[u8],
     reloc: DataDirectory,
@@ -386,6 +422,9 @@ pub fn relocate_page(
     out[have..].fill(0);
     if delta == 0 || reloc.size == 0 {
         return Ok(());
+    }
+    if page_rva == 0 {
+        rebase_header(out, delta);
     }
     let start = reloc.rva as usize;
     let end = start.checked_add(reloc.size as usize).ok_or(PeError::BadRelocation)?;
@@ -484,6 +523,24 @@ fn apply_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relocated header names its load address, PE32 and PE32+.
+    #[test]
+    fn rebased_header() {
+        let mut page = [0u8; 4096];
+        page[0x3c] = 0x80;
+        page[0x80 + 24..0x80 + 26].copy_from_slice(&0x10bu16.to_le_bytes());
+        page[0x80 + 52..0x80 + 56].copy_from_slice(&0x40_0000u32.to_le_bytes());
+        rebase_header(&mut page, 0x74ca_0000u64.wrapping_sub(0x40_0000));
+        assert_eq!(page[0x80 + 52..0x80 + 56], 0x74ca_0000u32.to_le_bytes());
+        // PE32+: the 8-byte ImageBase at +24 moves too.
+        let mut page = [0u8; 4096];
+        page[0x3c] = 0x80;
+        page[0x80 + 24..0x80 + 26].copy_from_slice(&0x20bu16.to_le_bytes());
+        page[0x80 + 48..0x80 + 56].copy_from_slice(&0x1_8000_0000u64.to_le_bytes());
+        rebase_header(&mut page, 0x7ff8_0000_0000u64.wrapping_sub(0x1_8000_0000));
+        assert_eq!(page[0x80 + 48..0x80 + 56], 0x7ff8_0000_0000u64.to_le_bytes());
+    }
 
     /// Builds a minimal PE32+ image: headers in the first 0x200 bytes,
     /// sections described by (name, rva, vsize, raw bytes, characteristics).
@@ -673,6 +730,14 @@ mod tests {
         assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
         assert_eq!(find_export(&image, b"Gamma"), None);
         assert_eq!(find_export(&image, b"Alf"), None);
+        // The same in a PE32 image: its data directories start 16 bytes
+        // earlier (no 64-bit ImageBase and stack/heap sizes).
+        let opt = 0x44 + 24;
+        image[opt..opt + 2].copy_from_slice(&PE32_MAGIC.to_le_bytes());
+        image.copy_within(opt + 112..opt + 120, opt + 96);
+        image[opt + 112..opt + 120].fill(0);
+        assert_eq!(find_export(&image, b"Alfa"), Some(0x2010));
+        assert_eq!(find_export(&image, b"Beta"), Some(0x2000));
     }
 
     #[test]

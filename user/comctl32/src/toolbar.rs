@@ -9,6 +9,7 @@
 //! for a pressed or checked button.
 
 use crate::common::*;
+use crate::layout::{TbButton, TbButtonInfoW, get, set};
 use alloc::vec::Vec;
 
 const TB_ENABLEBUTTON: u32 = WM_USER + 1;
@@ -148,18 +149,17 @@ fn with<R>(hwnd: Hwnd, f: impl FnOnce(&mut Bar) -> R) -> Option<R> {
     BARS.with(hwnd, new_bar, f)
 }
 
-/// TBBUTTON (64-bit): iBitmap, idCommand (i32 at 0, 4), fsState, fsStyle
-/// (u8 at 8, 9), dwData (16), iString (24).
-fn button_of(p: *const u8, strings: &[Vec<u16>]) -> Button {
+/// TBBUTTON: iBitmap, idCommand, fsState, fsStyle, dwData, iString.
+fn button_of(p: *const TbButton, strings: &[Vec<u16>]) -> Button {
     // SAFETY: the caller's TBBUTTON.
     let (image, id, state, style, data, string) = unsafe {
         (
-            p.cast::<i32>().read_unaligned(),
-            p.add(4).cast::<i32>().read_unaligned(),
-            *p.add(8),
-            *p.add(9),
-            p.add(16).cast::<usize>().read_unaligned(),
-            p.add(24).cast::<isize>().read_unaligned(),
+            get!(p, image),
+            get!(p, id),
+            get!(p, state),
+            get!(p, style),
+            get!(p, data),
+            get!(p, string),
         )
     };
     let text = if (0..0x10000).contains(&string) {
@@ -321,19 +321,17 @@ fn click(hwnd: Hwnd, i: usize) {
     unsafe { SendMessageW(target, WM_COMMAND, id as u32 as usize & 0xffff, hwnd as isize) };
 }
 
-fn insert(hwnd: Hwnd, at: Option<usize>, count: usize, p: *const u8) -> isize {
+fn insert(hwnd: Hwnd, at: Option<usize>, count: usize, p: *const TbButton) -> isize {
     if p.is_null() {
         return 0;
     }
-    // TBBUTTON's size on x64 (TB_BUTTONSTRUCTSIZE is always this).
-    let size = 32;
     with(hwnd, |b| {
         if b.buttons.try_reserve(count).is_err() {
             return 0;
         }
         for k in 0..count {
             // SAFETY: the caller's array of `count` TBBUTTONs.
-            let button = button_of(unsafe { p.add(k * size) }, &b.strings);
+            let button = button_of(unsafe { p.add(k) }, &b.strings);
             match at {
                 Some(i) if i <= b.buttons.len() => b.buttons.insert(i + k, button),
                 _ => b.buttons.push(button),
@@ -468,10 +466,10 @@ fn tip_note(hwnd: Hwnd, wparam: usize, lparam: isize) -> isize {
     let target = if target != 0 { target } else { unsafe { GetParent(hwnd) } };
     // SAFETY: plain call; the sender's NMHDR passed on.
     let r = unsafe { SendMessageW(target, WM_NOTIFY, wparam, lparam) };
-    // SAFETY: the sender's NMHDR: idFrom at 8, code at 16.
+    // SAFETY: the sender's NMHDR.
     let (id, code) = unsafe {
-        let p = lparam as *const u8;
-        (p.add(8).cast::<usize>().read_unaligned(), p.add(16).cast::<u32>().read_unaligned())
+        let p = lparam as *const NmHdr;
+        (get!(p, id), get!(p, code))
     };
     if code == crate::tooltips::GETDISPINFOW {
         let text = with(hwnd, |b| {
@@ -554,10 +552,10 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
             0
         }
         TB_BUTTONSTRUCTSIZE => 0,
-        TB_ADDBUTTONSW => insert(hwnd, None, wparam, lparam as *const u8),
+        TB_ADDBUTTONSW => insert(hwnd, None, wparam, lparam as *const TbButton),
         TB_INSERTBUTTONW => {
             let at = if (wparam as isize) < 0 { None } else { Some(wparam) };
-            let r = insert(hwnd, at, 1, lparam as *const u8);
+            let r = insert(hwnd, at, 1, lparam as *const TbButton);
             redraw(hwnd);
             r
         }
@@ -581,17 +579,18 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
                 return 0;
             };
             if lparam != 0 {
-                let p = lparam as *mut u8;
                 // SAFETY: the caller's TBBUTTON.
                 unsafe {
-                    core::ptr::write_bytes(p, 0, 32);
-                    p.cast::<i32>().write_unaligned(b.image);
-                    p.add(4).cast::<i32>().write_unaligned(b.id);
-                    *p.add(8) = b.state;
-                    *p.add(9) = b.style;
-                    p.add(16).cast::<usize>().write_unaligned(b.data);
-                    p.add(24).cast::<isize>().write_unaligned(-1);
-                }
+                    (lparam as *mut TbButton).write_unaligned(TbButton {
+                        image: b.image,
+                        id: b.id,
+                        state: b.state,
+                        style: b.style,
+                        reserved: [0; 2],
+                        data: b.data,
+                        string: -1,
+                    })
+                };
             }
             1
         }
@@ -894,11 +893,11 @@ pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize)
         }
         WM_NOTIFY
             if lparam != 0
-                // SAFETY: the sender's NMHDR: hwndFrom at 0, code at 16.
+                // SAFETY: the sender's NMHDR.
                 && unsafe {
-                    let p = lparam as *const u8;
-                    p.cast::<usize>().read_unaligned() == with(hwnd, |b| b.tooltips).unwrap_or(0)
-                        && crate::tooltips::is_tip_note(p.add(16).cast::<u32>().read_unaligned())
+                    let p = lparam as *const NmHdr;
+                    get!(p, from) == with(hwnd, |b| b.tooltips).unwrap_or(0)
+                        && crate::tooltips::is_tip_note(get!(p, code))
                 } =>
         {
             tip_note(hwnd, wparam, lparam)
@@ -922,36 +921,34 @@ fn button_info(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     if lparam == 0 {
         return -1;
     }
-    let p = lparam as *mut u8;
-    // SAFETY: the caller's TBBUTTONINFOW: dwMask at 4, idCommand 8,
-    // iImage 12, fsState 16, fsStyle 17, cx 18 (u16), lParam 24,
-    // pszText 32, cchText 40.
-    let mask = unsafe { p.add(4).cast::<u32>().read_unaligned() };
+    let p = lparam as *mut TbButtonInfoW;
+    // SAFETY: the caller's TBBUTTONINFOW.
+    let mask = unsafe { get!(p, mask) };
     let index = if mask & TBIF_BYINDEX != 0 { Some(wparam) } else { index_of(hwnd, wparam) };
     let Some(i) = index else { return -1 };
     let found = with(hwnd, |b| {
         let Some(x) = b.buttons.get_mut(i) else { return false };
-        // SAFETY: as above.
+        // SAFETY: as above (the fields its mask names).
         unsafe {
             if msg == TB_GETBUTTONINFOW {
                 if mask & TBIF_COMMAND != 0 {
-                    p.add(8).cast::<i32>().write_unaligned(x.id);
+                    set!(p, id, x.id);
                 }
                 if mask & TBIF_IMAGE != 0 {
-                    p.add(12).cast::<i32>().write_unaligned(x.image);
+                    set!(p, image, x.image);
                 }
                 if mask & TBIF_STATE != 0 {
-                    *p.add(16) = x.state;
+                    set!(p, state, x.state);
                 }
                 if mask & TBIF_STYLE != 0 {
-                    *p.add(17) = x.style;
+                    set!(p, style, x.style);
                 }
                 if mask & TBIF_LPARAM != 0 {
-                    p.add(24).cast::<usize>().write_unaligned(x.data);
+                    set!(p, param, x.data);
                 }
                 if mask & TBIF_TEXT != 0 {
-                    let out = p.add(32).cast::<*mut u16>().read_unaligned();
-                    let room = p.add(40).cast::<i32>().read_unaligned().max(0) as usize;
+                    let out = get!(p, text);
+                    let room = get!(p, text_max).max(0) as usize;
                     if !out.is_null() && room > 0 {
                         let n = x.text.len().min(room - 1);
                         core::ptr::copy_nonoverlapping(x.text.as_ptr(), out, n);
@@ -960,22 +957,22 @@ fn button_info(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
                 }
             } else {
                 if mask & TBIF_COMMAND != 0 {
-                    x.id = p.add(8).cast::<i32>().read_unaligned();
+                    x.id = get!(p, id);
                 }
                 if mask & TBIF_IMAGE != 0 {
-                    x.image = p.add(12).cast::<i32>().read_unaligned();
+                    x.image = get!(p, image);
                 }
                 if mask & TBIF_STATE != 0 {
-                    x.state = *p.add(16);
+                    x.state = get!(p, state);
                 }
                 if mask & TBIF_STYLE != 0 {
-                    x.style = *p.add(17);
+                    x.style = get!(p, style);
                 }
                 if mask & TBIF_LPARAM != 0 {
-                    x.data = p.add(24).cast::<usize>().read_unaligned();
+                    x.data = get!(p, param);
                 }
                 if mask & TBIF_TEXT != 0 {
-                    x.text = owned(wide(p.add(32).cast::<*const u16>().read_unaligned(), 256));
+                    x.text = owned(wide(get!(p, text), 256));
                 }
             }
         }

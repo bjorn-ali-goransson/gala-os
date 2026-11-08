@@ -21,6 +21,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt;
+use core::panic::Location;
 
 use crate::arch::context::{Context, KernelStack, StackError};
 use crate::arch::paging::{self, SharedUserSpace};
@@ -84,6 +85,9 @@ struct Thread {
     user: Option<UserThread>,
     /// Why the last `wait` ended.
     wake_reason: WakeReason,
+    /// Where the last `prepare_wait` was called from (printed beside
+    /// `Waiting` in the state dump: which wait a stuck thread is in).
+    wait_site: Option<&'static Location<'static>>,
     /// Some CPU is running on this thread's stack (see the module docs).
     on_cpu: bool,
     /// CPUs this thread may run on.
@@ -113,8 +117,13 @@ struct UserThread {
     /// GS base in user mode (the TEB; a Linux thread's arch_prctl value).
     gs_base: u64,
     /// FS base in user mode: 0 for NT threads; a Linux thread's
-    /// arch_prctl(ARCH_SET_FS) value (its TLS).
+    /// arch_prctl(ARCH_SET_FS) value (its TLS); a WOW64 thread's 32-bit
+    /// TEB.
     fs_base: u64,
+    /// A WOW64 thread (`set_teb32`): its FS is the TEB32 segment, loaded
+    /// with DS and ES at every switch to it (they are per CPU, and 32-bit
+    /// code needs them).
+    teb32: bool,
     /// Its process's personality: which dispatcher its system calls go to
     /// (`crate::personality`; fixed for the thread's life).
     personality: Personality,
@@ -267,6 +276,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
         joiners: Vec::new(),
         user: None,
         wake_reason: WakeReason::Woken,
+        wait_site: None,
         on_cpu: true,
         affinity,
         is_idle,
@@ -344,7 +354,7 @@ pub fn spawn_user(
         name,
         entry,
         arg,
-        Some(UserThread { space, root, gs_base, fs_base: 0, personality, client }),
+        Some(UserThread { space, root, gs_base, fs_base: 0, teb32: false, personality, client }),
     )
 }
 
@@ -366,6 +376,7 @@ fn spawn_inner(
         joiners: Vec::new(),
         user,
         wake_reason: WakeReason::Woken,
+        wait_site: None,
         on_cpu: false,
         affinity: ALL_CPUS,
         is_idle: false,
@@ -425,6 +436,22 @@ pub fn user_bases() -> (u64, u64) {
     with(|s| {
         let id = s.current();
         s.thread(id).user.as_ref().map_or((0, 0), |u| (u.fs_base, u.gs_base))
+    })
+}
+
+/// Makes the current user thread one that runs 32-bit code (WOW64), with
+/// its 32-bit TEB at `teb32` (below 4 GiB) as FS from this return to user
+/// mode on (ARCHITECTURE "Plan: WOW64"). False for a kernel thread or an
+/// address above 4 GiB.
+pub fn set_teb32(teb32: u64) -> bool {
+    let Ok(base) = u32::try_from(teb32) else { return false };
+    with(|s| {
+        let id = s.current();
+        let Some(u) = s.thread(id).user.as_mut() else { return false };
+        u.fs_base = teb32;
+        u.teb32 = true;
+        percpu::load_teb32(base);
+        true
     })
 }
 
@@ -520,7 +547,7 @@ pub fn check_user_return() {
         let (root, gs) = t.user.as_ref().map_or((0, 0), |u| (u.root, u.gs_base));
         let personality = t.user.as_ref().map_or(Personality::Nt, |u| u.personality);
         let (cr3, kstack, ugs) =
-            (cpu::read_cr3() & !0xfff, percpu::kernel_stack(), percpu::user_gs_base());
+            (paging::active_root(), percpu::kernel_stack(), percpu::user_gs_base());
         let cpu_personality = percpu::personality();
         if others != 0
             || !t.on_cpu
@@ -630,6 +657,7 @@ fn schedule() {
                 root: n.user.as_ref().map_or_else(paging::kernel_root, |u| u.root),
                 user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
                 user_fs_base: n.user.as_ref().map_or(0, |u| u.fs_base),
+                teb32: n.user.as_ref().is_some_and(|u| u.teb32),
                 personality: n.user.as_ref().map_or(Personality::Nt, |u| u.personality),
                 client: n.user.as_ref().map_or(0, |u| u.client),
             };
@@ -737,11 +765,14 @@ pub fn reap() -> usize {
 /// or the tick `deadline`). The caller then releases the locks that protect
 /// its wait condition and calls [`wait`]. A `wake` in between is not lost:
 /// the thread is simply already runnable when it calls `wait`.
+#[track_caller]
 pub fn prepare_wait(deadline: Option<u64>) {
+    let site = Location::caller();
     with(|s| {
         let id = s.current();
         let t = s.thread(id);
         t.wake_reason = WakeReason::Woken;
+        t.wait_site = Some(site);
         t.state = State::Waiting { until_tick: deadline };
         if deadline.is_some_and(|d| d <= time::ticks()) {
             t.wake_reason = WakeReason::TimedOut;
@@ -908,8 +939,11 @@ pub fn dump() {
     with(|s| {
         for (i, t) in s.threads.iter().enumerate() {
             info!(
-                "sched: thread {i} ({}) {:?} affinity {:#x} (now tick {now})",
-                t.name, t.state, t.affinity
+                "sched: thread {i} ({}) {:?}{} affinity {:#x} (now tick {now})",
+                t.name,
+                t.state,
+                WaitSite(&t.state, t.wait_site),
+                t.affinity
             );
         }
     });
@@ -930,6 +964,18 @@ pub fn try_cpu_threads(mut f: impl FnMut(usize, usize, &'static str, &'static st
         }
     }
     true
+}
+
+/// ` at <file:line>` for a waiting thread whose wait site is known.
+struct WaitSite<'a>(&'a State, Option<&'static Location<'static>>);
+
+impl fmt::Display for WaitSite<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.0, self.1) {
+            (State::Waiting { .. }, Some(at)) => write!(f, " at {}:{}", at.file(), at.line()),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn state_name(state: &State) -> &'static str {

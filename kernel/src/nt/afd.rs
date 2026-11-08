@@ -5,6 +5,7 @@
 //! Windows) and ReactOS's `drivers/afd/shared.h` (marked "to be verified"
 //! there); see THIRD_PARTY.md.
 
+use afd_abi::Layout;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -16,6 +17,7 @@ use crate::mm::heap::{KArc, TryVec};
 use crate::net::tcp::{self, Addr, NetError, SocketId};
 use crate::net::udp;
 use crate::net::{Ip, Scope};
+use crate::quota::Block;
 use crate::sync::IrqMutex;
 
 pub const IOCTL_AFD_BIND: u32 = 0x12003;
@@ -34,6 +36,10 @@ pub const IOCTL_AFD_SUPER_ACCEPT: u32 = 0x12083;
 pub const IOCTL_AFD_POLL: u32 = 0x12024;
 pub const IOCTL_AFD_SET_INFO: u32 = 0x1203b;
 const AFD_INFO_BLOCKING_MODE: u32 = 2;
+/// SO_RCVBUF and SO_SNDBUF (ReactOS's `drivers/afd/shared.h`: a ULONG at
+/// 8): the sizes of the socket's buffers (`tcp::Owner`).
+const AFD_INFO_RECEIVE_WINDOW_SIZE: u32 = 6;
+const AFD_INFO_SEND_WINDOW_SIZE: u32 = 7;
 /// gala's own AFD_INFO class (Windows passes IPV6_V6ONLY to the transport,
 /// whose interface is undocumented): a BOOLEAN at 8, IPV6_V6ONLY.
 const GALA_AFD_INFO_V6ONLY: u32 = 0x6761_0001;
@@ -120,6 +126,17 @@ impl Transport {
 }
 
 impl EndpointState {
+    /// Its owner for the stack: its token, quota and buffer sizes.
+    fn owner(&self) -> tcp::Owner {
+        tcp::Owner {
+            token: self.token,
+            purse: self.purse.clone(),
+            rx: self.rcvbuf.load(Ordering::Acquire) as usize,
+            tx: self.sndbuf.load(Ordering::Acquire) as usize,
+            unchecked: false,
+        }
+    }
+
     /// The families its socket takes: IPv4; IPv6 only; or both (an IPv6
     /// endpoint with IPV6_V6ONLY off).
     fn scope(&self) -> Scope {
@@ -238,6 +255,14 @@ pub struct EndpointState {
     /// IPV6_V6ONLY of an IPv6 endpoint (on, Windows' default; off: dual
     /// stack), taken at bind (`scope`).
     v6only: AtomicBool,
+    /// The quota its sockets' buffers are charged to: its creator's (none
+    /// for an endpoint a kernel handover carried: its process's quota is
+    /// restored after it).
+    purse: Option<KArc<Block>>,
+    /// SO_RCVBUF and SO_SNDBUF (AFD_INFO_*_WINDOW_SIZE; 0: the default),
+    /// for the sockets it makes from then on.
+    rcvbuf: AtomicU32,
+    sndbuf: AtomicU32,
     pending: IrqMutex<Vec<Pending>>,
     /// How many polls (IOCTL_AFD_POLL) are pending: `notify` keeps the
     /// endpoint in POLLERS while there are any, without taking `pending`
@@ -248,6 +273,22 @@ pub struct EndpointState {
     /// The selected events that happened since WSAEnumNetworkEvents last
     /// read them.
     recorded: AtomicU32,
+    /// Of ONCE (FD_CONNECT's AFD_POLL_* events), those already recorded:
+    /// never recorded again for this endpoint.
+    recorded_once: AtomicU32,
+    /// The sending side (`send_side`): open, shut down with the FIN
+    /// waiting for the sends issued before it, or shut down. Changed under
+    /// `pending`'s lock.
+    send_side: AtomicU32,
+}
+
+/// `EndpointState::send_side` (also carried across a handover).
+pub mod send_side {
+    pub const OPEN: u32 = 0;
+    /// shutdown(SD_SEND) came while sends were pending: the FIN follows
+    /// once none is (`fin_after_sends`).
+    pub const AFTER_SENDS: u32 = 1;
+    pub const SHUT: u32 = 2;
 }
 
 /// A socket endpoint (`ObjectBody::Socket`).
@@ -275,6 +316,16 @@ static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 fn notify(token: u64) {
     let state = REGISTRY.lock().iter().find(|e| e.token == token).cloned();
     if let Some(state) = state {
+        // A readiness change for an endpoint that does not know its socket
+        // yet would be lost (to WSAEventSelect, to a pending poll): the
+        // socket is stored under the lock held across the stack call that
+        // makes it (BIND, CONNECT, ACCEPT), so this should never be seen.
+        if state.socket.lock().is_none() && !state.transport.is_udp() {
+            let selected = state.select.lock().as_ref().map_or(0, |s| s.1);
+            afd_event(&state, "afd notify before its socket", |f| {
+                write!(f, r#","token":{token},"selected":{selected}"#)
+            });
+        }
         try_complete(&state);
         check_select(&state);
     }
@@ -329,14 +380,30 @@ fn poll_events(state: &EndpointState) -> u32 {
     events
 }
 
+/// The AFD_POLL_* events of FD_CONNECT: WSAEventSelect reports them once
+/// per socket (Windows documents no function that re-enables FD_CONNECT),
+/// where the others are recorded again while they hold.
+const ONCE: u32 = AFD_POLL_CONNECT | AFD_POLL_CONNECT_ERR;
+
 /// WSAEventSelect's half of a readiness change: the selected events that
-/// hold now are recorded and the event is set.
+/// hold now are recorded (those of ONCE only the first time) and the
+/// event is set.
+///
+/// Recording and setting the event happen under the selection's lock, as
+/// WSAEnumNetworkEvents' copy, clear and reset do (`get_events`): a record
+/// made between that copy and that reset would keep its bit but lose its
+/// signal (FD_CONNECT is recorded once: nothing would signal it again).
 fn check_select(state: &EndpointState) {
-    let Some((event, mask)) = state.select.lock().clone() else { return };
-    let ready = poll_events(state) & mask;
+    // The readiness first (it takes the socket slot and the stack's lock),
+    // then the record and the signal under the selection's lock.
+    let ready_now = poll_events(state);
+    let select = state.select.lock();
+    let Some((event, mask)) = select.as_ref() else { return };
+    let ready = ready_now & mask & !state.recorded_once.load(Ordering::Acquire);
     if ready != 0 {
+        state.recorded_once.fetch_or(ready & ONCE, Ordering::AcqRel);
         state.recorded.fetch_or(ready, Ordering::AcqRel);
-        wait::set_signal(&event, 1);
+        wait::set_signal(event, 1);
     }
 }
 
@@ -358,10 +425,19 @@ pub fn event_select(socket: &ObjectRef, event: Option<ObjectRef>, mask: u32) -> 
 }
 
 /// IOCTL_AFD_GET_EVENTS (WSAEnumNetworkEvents): the recorded events,
-/// cleared.
-pub fn get_events(socket: &ObjectRef) -> Result<u32, NtStatus> {
+/// cleared, and `event` (the caller's, if given) reset, in one step under
+/// the selection's lock, as documented ("copying the network event
+/// record, clearing it and resetting any associated event object are
+/// atomic"): what `check_select` records after it signals again.
+pub fn get_events(socket: &ObjectRef, event: Option<&ObjectRef>) -> Result<u32, NtStatus> {
     let ObjectBody::Socket(endpoint) = &socket.body else { return Err(NtStatus::INVALID_HANDLE) };
-    Ok(endpoint.state.recorded.swap(0, Ordering::AcqRel))
+    let state = &endpoint.state;
+    let _select = state.select.lock();
+    let recorded = state.recorded.swap(0, Ordering::AcqRel);
+    if let Some(e) = event {
+        wait::set_signal(e, 0);
+    }
+    Ok(recorded)
 }
 
 /// Reports a finished request: IO_STATUS_BLOCK, event, the endpoint's own
@@ -370,10 +446,7 @@ pub fn get_events(socket: &ObjectRef) -> Result<u32, NtStatus> {
 /// SUCCESS suppresses the packet of a success).
 fn finish(state: &EndpointState, io: &Io, status: NtStatus, information: u64, immediate: bool) {
     if io.iosb != 0 {
-        let mut b = [0u8; 16];
-        b[0..4].copy_from_slice(&status.0.to_le_bytes());
-        b[8..16].copy_from_slice(&information.to_le_bytes());
-        let _ = io.process.write(io.iosb, &b);
+        let _ = io.process.write_iosb(io.iosb, status, information);
     }
     let failed = status.0 >= 0xc000_0000;
     if immediate && failed {
@@ -555,7 +628,7 @@ fn attempt_inner(
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER.into());
             }
-            let new = tcp::accept(id, sequence, accept.token)?;
+            let new = tcp::accept(id, sequence, accept.owner())?;
             // Like Windows, an accepted socket inherits the listener's
             // non-blocking mode (Nginx relies on it).
             accept.non_blocking.store(non_blocking, Ordering::Release);
@@ -590,17 +663,20 @@ fn poll_once(
     wait: bool,
     process: &Process,
 ) -> Result<Option<u64>, Failure> {
+    let l = layout_of(process);
     let mut out = Vec::new();
-    out.try_reserve(POLL_HEADER + POLL_ENTRY * sockets.len()).map_err(|_| NtStatus::NO_MEMORY)?;
-    out.resize(POLL_HEADER, 0);
+    out.try_reserve(Layout::POLL_HEADER + l.poll_entry() * sockets.len())
+        .map_err(|_| NtStatus::NO_MEMORY)?;
+    out.resize(Layout::POLL_HEADER, 0);
     let mut count = 0u32;
     for (handle, state, wanted) in sockets {
         let events = poll_events(state) & wanted;
         if events != 0 {
-            // Capacity is reserved above.
-            let _ = out.try_extend_from_slice(&handle.to_le_bytes());
-            let _ = out.try_extend_from_slice(&events.to_le_bytes());
-            let _ = out.try_extend_from_slice(&0u32.to_le_bytes());
+            // Capacity is reserved above: {HANDLE; events; status}.
+            let at = out.len();
+            out.resize(at + l.poll_entry(), 0);
+            l.put_ptr(&mut out, at, *handle);
+            out[at + l.poll_events()..][..4].copy_from_slice(&events.to_le_bytes());
             count += 1;
         }
     }
@@ -615,10 +691,11 @@ fn poll_once(
     Ok(Some(out.len() as u64))
 }
 
-/// afd_poll_params: timeout (i64), count (u32), exclusive (u8), padding;
-/// then 16-byte entries (packed to 4).
-const POLL_HEADER: usize = 16;
-const POLL_ENTRY: usize = 16;
+/// The layouts of `process`'s AFD requests: its pointers' width (a WOW64
+/// process's are 4 bytes; afd_abi).
+fn layout_of(process: &Process) -> Layout {
+    if process.wow64.is_some() { Layout::X86 } else { Layout::X64 }
+}
 
 /// Completes the pending requests that can finish now, oldest first
 /// (a receive, send, accept or connect waits while an older one of its
@@ -642,6 +719,17 @@ fn try_complete(state: &EndpointState) {
                 if usize::from(p.op.kind()) == POLL_KIND {
                     state.polls.fetch_sub(1, Ordering::AcqRel);
                 }
+                if let Op::Send { buffers, done } = &p.op
+                    && status.0 >= 0xc000_0000
+                {
+                    // Its first `done` bytes are in the stream, the rest
+                    // never will be: a peer that comes up short says how
+                    // much from here.
+                    let total: usize = buffers.iter().map(|&(_, l)| l).sum();
+                    afd_event(state, "afd send failed", |f| {
+                        write!(f, r#","status":{},"queued":{done},"of":{total}"#, status.0)
+                    });
+                }
                 finish(state, &p.io, status, information, false);
             }
             Attempt::Wait => {
@@ -650,6 +738,49 @@ fn try_complete(state: &EndpointState) {
             }
         }
     }
+    fin_after_sends(state, &pending);
+}
+
+/// `Op::kind` of a send.
+const SEND_KIND: u8 = 1;
+
+/// The FIN of a shutdown(SD_SEND) that came while sends were pending,
+/// once none is (they completed, failed or were cancelled). Called with
+/// `pending` locked.
+fn fin_after_sends(state: &EndpointState, pending: &[Pending]) {
+    if state.send_side.load(Ordering::Acquire) != send_side::AFTER_SENDS
+        || pending.iter().any(|p| p.op.kind() == SEND_KIND)
+    {
+        return;
+    }
+    state.send_side.store(send_side::SHUT, Ordering::Release);
+    let socket = *state.socket.lock();
+    let result = socket.ok_or(NetError::NotConnected).and_then(tcp::shutdown_send);
+    if let Err(e) = result {
+        afd_event(state, "afd shutdown failed", |f| write!(f, r#","error":"{e:?}""#));
+    }
+}
+
+/// An endpoint event (`events=net`): its kernel socket's number (as the
+/// "tcp ..." events name it, -1 without one), then `fields` (each
+/// starting with a comma).
+fn afd_event(
+    state: &EndpointState,
+    what: &str,
+    fields: impl Fn(&mut core::fmt::Formatter<'_>) -> core::fmt::Result,
+) {
+    struct Fields<F>(F);
+    impl<F: Fn(&mut core::fmt::Formatter<'_>) -> core::fmt::Result> core::fmt::Display for Fields<F> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            (self.0)(f)
+        }
+    }
+    let socket = state.socket.lock().map_or(-1, |id| i64::from(id.number()));
+    crate::events::emit(
+        crate::events::Category::Net,
+        what,
+        format_args!(r#""socket":{socket}{}"#, Fields(fields)),
+    );
 }
 
 /// `Op::kind` of a poll.
@@ -750,6 +881,7 @@ pub fn cancel(state: &EndpointState, process: Option<&KArc<Process>>, iosb: Opti
             i += 1;
         }
     }
+    fin_after_sends(state, &pending);
     n
 }
 
@@ -839,8 +971,9 @@ fn transport_of(packet: &[u8]) -> Result<Transport, NtStatus> {
     }
 }
 
-/// Opens an endpoint (NtCreateFile below `\Device\Afd`).
-pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
+/// Opens an endpoint (NtCreateFile below `\Device\Afd`) for the process
+/// with quota block `purse`.
+pub fn open(ea: &[u8], purse: &KArc<Block>) -> Result<ObjectRef, NtStatus> {
     let transport = if ea.is_empty() { Transport::None } else { parse_open_packet(ea)? };
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     let state = KArc::try_new(EndpointState {
@@ -852,10 +985,15 @@ pub fn open(ea: &[u8]) -> Result<ObjectRef, NtStatus> {
         modes: AtomicU32::new(0),
         non_blocking: AtomicBool::new(false),
         v6only: AtomicBool::new(true),
+        purse: Some(purse.clone()),
+        rcvbuf: AtomicU32::new(0),
+        sndbuf: AtomicU32::new(0),
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(None),
         recorded: AtomicU32::new(0),
+        recorded_once: AtomicU32::new(0),
         polls: AtomicUsize::new(0),
+        send_side: AtomicU32::new(send_side::OPEN),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -874,6 +1012,8 @@ pub fn status_of(e: NetError) -> NtStatus {
         NetError::NotConnected => NtStatus::INVALID_CONNECTION,
         NetError::Unreachable => NtStatus::NETWORK_UNREACHABLE,
         NetError::NoMemory => NtStatus::INSUFFICIENT_RESOURCES,
+        // WSAENOBUFS in ws2_32.
+        NetError::OverQuota => NtStatus::QUOTA_EXCEEDED,
         NetError::NoSocket => NtStatus::INVALID_HANDLE,
         NetError::TooLarge => NtStatus::INVALID_BUFFER_SIZE,
     }
@@ -897,6 +1037,11 @@ impl Request<'_> {
 
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), NtStatus> {
         self.process.write(addr, data).map_err(|_| NtStatus::ACCESS_VIOLATION)
+    }
+
+    /// The caller's request layouts (afd_abi).
+    fn layout(&self) -> Layout {
+        layout_of(self.process)
     }
 
     fn input<const N: usize>(&self) -> Result<[u8; N], NtStatus> {
@@ -928,6 +1073,26 @@ impl Request<'_> {
         }
         self.write(self.output, data)?;
         Ok(data.len() as u64)
+    }
+}
+
+/// SOMAXCONN (winsock2.h): "a maximum reasonable value".
+const SOMAXCONN: i32 = 0x7fff_ffff;
+/// The backlog SOMAXCONN gives, and the most an ordinary value gets
+/// (gala's reasonable maximum; the bottom of SOMAXCONN_HINT's range).
+const REASONABLE_BACKLOG: usize = 200;
+
+/// The connections a listen backlog lets wait, as Microsoft Learn's listen
+/// describes it: SOMAXCONN is a reasonable maximum (200 here),
+/// SOMAXCONN_HINT(N) (that is -N) is N kept within 200 to 65535, other
+/// values are limited to a reasonable one (1 to 200). Nothing is set aside
+/// for them: each connection is a socket of its own when it comes
+/// (ARCHITECTURE "TCP: net::tcp").
+fn backlog_of(asked: i32) -> usize {
+    match asked {
+        SOMAXCONN => REASONABLE_BACKLOG,
+        n if n < 0 => (n.unsigned_abs() as usize).clamp(REASONABLE_BACKLOG, tcp::MAX_BACKLOG),
+        n => (n as usize).clamp(1, REASONABLE_BACKLOG),
     }
 }
 
@@ -1022,18 +1187,20 @@ fn to_transport_address(a: Addr, v6: bool) -> ([u8; TRANSPORT_ADDRESS6_LEN], usi
 
 /// Reads the WSABUF array of a RECV/SEND request: (address, length) pairs.
 fn buffers(r: &Request<'_>) -> Result<Vec<(u64, usize)>, NtStatus> {
-    let info: [u8; 24] = r.input()?;
-    let (array, count) = (u64_at(&info, 0), u32_at(&info, 8) as usize);
+    let l = r.layout();
+    let (info, _): ([u8; 24], usize) = r.input_upto(l.info_size())?;
+    let (array, count) = (l.get_ptr(&info, 0), u32_at(&info, l.info_count()) as usize);
     if count > 1024 {
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let mut out = Vec::new();
     out.try_reserve(count).map_err(|_| NtStatus::NO_MEMORY)?;
     for i in 0..count {
-        // WSABUF: {u32 len; (pad); char *buf}.
+        // WSABUF: {u32 len; char *buf}.
         let mut wsabuf = [0u8; 16];
-        r.read(array + 16 * i as u64, &mut wsabuf)?;
-        out.try_push((u64_at(&wsabuf, 8), u32_at(&wsabuf, 0) as usize))
+        let size = l.wsabuf_size();
+        r.read(array + (size * i) as u64, &mut wsabuf[..size])?;
+        out.try_push((l.get_ptr(&wsabuf, l.wsabuf_buf()), u32_at(&wsabuf, 0) as usize))
             .map_err(|_| NtStatus::NO_MEMORY)?;
     }
     Ok(out)
@@ -1103,7 +1270,7 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            let id = tcp::bind_scoped(local, ep.scope(), ep.token).map_err(status_of)?;
+            let id = tcp::bind_scoped(local, ep.scope(), ep.owner()).map_err(status_of)?;
             *slot = Some(id);
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
@@ -1118,8 +1285,8 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         }
         IOCTL_AFD_LISTEN => {
             let b: [u8; 12] = r.input()?;
-            let backlog = u32_at(&b, 4) as i32;
-            tcp::listen(socket()?, backlog.max(1) as usize).map_err(status_of)?;
+            tcp::listen(socket()?, backlog_of(u32_at(&b, 4) as i32), tcp::WhenFull::Refuse)
+                .map_err(status_of)?;
             Immediate::Done(0)
         }
         IOCTL_AFD_CONNECT | IOCTL_AFD_SUPER_CONNECT => {
@@ -1132,8 +1299,15 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
                     r.input_upto(4 + TRANSPORT_ADDRESS_LEN)?;
                 transport_address(&b[4..n])?
             };
-            let id = tcp::connect(current(), remote, ep.token).map_err(status_of)?;
-            *ep.socket.lock() = Some(id);
+            // The endpoint learns its socket under the lock held across
+            // the stack's connect (as BIND and ACCEPT do): the stack may
+            // report the handshake from the `net` thread before connect
+            // returns here, and that notify (WSAEventSelect's FD_CONNECT)
+            // must find the socket, not None. Lost, it was the only
+            // report: Chromium waited for its 240 s connect timeout.
+            let owner = ep.owner();
+            let mut slot = ep.socket.lock();
+            *slot = Some(tcp::connect(*slot, remote, owner).map_err(status_of)?);
             Immediate::Async(Op::Connect)
         }
         IOCTL_AFD_WAIT_FOR_LISTEN => {
@@ -1141,14 +1315,16 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             Immediate::Async(Op::WaitForListen { output: r.output, output_len: r.output_len })
         }
         IOCTL_AFD_ACCEPT => {
-            let b: [u8; 16] = r.input()?;
-            let (sequence, handle) = (u32_at(&b, 4), u64_at(&b, 8));
+            let l = r.layout();
+            let (b, _): ([u8; 16], usize) = r.input_upto(l.accept_size())?;
+            let sequence = u32_at(&b, Layout::ACCEPT_SEQUENCE);
+            let handle = l.get_handle(&b, Layout::ACCEPT_HANDLE);
             let accepting = endpoint_of(r.process, handle)?;
             let mut slot = accepting.socket.lock();
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            *slot = Some(tcp::accept(socket()?, sequence, accepting.token).map_err(status_of)?);
+            *slot = Some(tcp::accept(socket()?, sequence, accepting.owner()).map_err(status_of)?);
             // The listener's non-blocking mode carries over (as on Windows).
             accepting
                 .non_blocking
@@ -1158,9 +1334,12 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         IOCTL_AFD_SUPER_ACCEPT => {
             // {u8 san; u8 fix_alignment; HANDLE accept; u32 receive_length;
             //  u32 local_length; u32 remote_length}
-            let b: [u8; 28] = r.input()?;
-            let (handle, receive) = (u64_at(&b, 8), u32_at(&b, 16));
-            let (local, remote) = (u32_at(&b, 20), u32_at(&b, 24));
+            let l = r.layout();
+            let (b, _): ([u8; 28], usize) = r.input_upto(l.super_accept_size())?;
+            let handle = l.get_handle(&b, l.super_accept_handle());
+            let receive = u32_at(&b, l.super_accept_receive());
+            let (local, remote) =
+                (u32_at(&b, l.super_accept_local()), u32_at(&b, l.super_accept_remote()));
             if receive != 0 {
                 // AcceptEx that also waits for the first data.
                 super::ledger::record(
@@ -1182,20 +1361,27 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             Immediate::Async(Op::SuperAccept { accept, output: r.output, receive, local })
         }
         IOCTL_AFD_POLL => {
-            let header: [u8; POLL_HEADER] = r.input()?;
+            // AFD_POLL_INFO: the header, then {HANDLE; events; status}
+            // entries of the caller's width (afd_abi).
+            let l = r.layout();
+            let header: [u8; Layout::POLL_HEADER] = r.input()?;
             let timeout = u64_at(&header, 0) as i64;
             let count = u32_at(&header, 8) as usize;
-            if count > 1024 || (r.input_len as usize) < POLL_HEADER + POLL_ENTRY * count {
+            let entry_size = l.poll_entry();
+            if count > 1024 || (r.input_len as usize) < Layout::POLL_HEADER + entry_size * count {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
             let mut sockets = Vec::new();
             sockets.try_reserve(count).map_err(|_| NtStatus::NO_MEMORY)?;
             for i in 0..count {
-                let mut entry = [0u8; POLL_ENTRY];
-                r.read(r.input + (POLL_HEADER + POLL_ENTRY * i) as u64, &mut entry)?;
-                let handle = u64_at(&entry, 0);
+                let mut entry = [0u8; 16];
+                r.read(
+                    r.input + (Layout::POLL_HEADER + entry_size * i) as u64,
+                    &mut entry[..entry_size],
+                )?;
+                let handle = l.get_handle(&entry, 0);
                 let state = endpoint_of(r.process, handle)?;
-                let _ = sockets.try_push((handle, state, u32_at(&entry, 8)));
+                let _ = sockets.try_push((handle, state, u32_at(&entry, l.poll_events())));
             }
             // The timeout is left to the caller (a wait with a timeout,
             // then NtCancelIoFileEx); only 0 (just look) is honoured here.
@@ -1212,6 +1398,24 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             match u32_at(&b, 0) {
                 AFD_INFO_BLOCKING_MODE => ep.non_blocking.store(b[8] != 0, Ordering::Release),
                 GALA_AFD_INFO_V6ONLY => ep.v6only.store(b[8] != 0, Ordering::Release),
+                class @ (AFD_INFO_RECEIVE_WINDOW_SIZE | AFD_INFO_SEND_WINDOW_SIZE) => {
+                    let size = u32_at(&b, 8);
+                    let slot =
+                        if class == AFD_INFO_RECEIVE_WINDOW_SIZE { &ep.rcvbuf } else { &ep.sndbuf };
+                    slot.store(size, Ordering::Release);
+                    // Bound or listening: its next sockets get them. A
+                    // connection's (or a bound datagram socket's) buffers
+                    // stay as they are: they are made whole at the start.
+                    if let Some(id) = current()
+                        && tcp::set_owner(id, ep.owner()).is_err()
+                    {
+                        super::ledger::record(
+                            "NtDeviceIoControlFile",
+                            "afd buffer size of a connected socket",
+                            u64::from(size),
+                        );
+                    }
+                }
                 class => {
                     super::ledger::record(
                         "NtDeviceIoControlFile",
@@ -1225,14 +1429,19 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
         }
         IOCTL_AFD_SEND => {
             socket()?;
+            if ep.send_side.load(Ordering::Acquire) != send_side::OPEN {
+                // After shutdown(SD_SEND): WSAESHUTDOWN (Wine's mapping).
+                return Err(NtStatus::PIPE_DISCONNECTED);
+            }
             Immediate::Async(Op::Send { buffers: buffers(r)?, done: 0 })
         }
         IOCTL_AFD_RECV => {
             socket()?;
             // afd_recv_params.msg_flags (Wine): AFD_MSG_PEEK 0x80; OOB
             // (0x40) and WAITALL (0x4000) are not supported yet.
-            let info: [u8; 24] = r.input()?;
-            let msg_flags = u32_at(&info, 16);
+            let l = r.layout();
+            let (info, _): ([u8; 24], usize) = r.input_upto(l.info_size())?;
+            let msg_flags = u32_at(&info, l.info_tdi_flags());
             if msg_flags & (AFD_MSG_OOB | AFD_MSG_WAITALL) != 0 {
                 super::ledger::record(
                     "NtDeviceIoControlFile",
@@ -1247,11 +1456,39 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
             let b: [u8; 16] = r.input()?;
             let kind = u32_at(&b, 0);
             if kind & AFD_DISCONNECT_ABORT != 0 {
+                // Reset: no FIN is owed any more.
+                let _pending = ep.pending.lock();
+                ep.send_side.store(send_side::SHUT, Ordering::Release);
                 if let Some(id) = ep.socket.lock().take() {
                     tcp::close(id, true);
                 }
             } else if kind & AFD_DISCONNECT_SEND != 0 {
-                tcp::shutdown_send(socket()?).map_err(status_of)?;
+                let id = socket()?;
+                // The FIN follows the bytes of every send issued before the
+                // shutdown, also of overlapped ones still pending
+                // (Win32-OpenSSH shuts a channel's socket down while its
+                // last WSASend waits for room); shutdown itself does not
+                // wait. Sending the FIN now would lose the rest of those
+                // sends (`sshd_forward`, winsock_async_test).
+                let pending = ep.pending.lock();
+                if ep.send_side.load(Ordering::Acquire) == send_side::OPEN {
+                    let sends = pending.iter().filter(|p| p.op.kind() == SEND_KIND);
+                    let (count, left) = sends.fold((0usize, 0usize), |(n, left), p| match &p.op {
+                        Op::Send { buffers, done } => {
+                            (n + 1, left + buffers.iter().map(|&(_, l)| l).sum::<usize>() - done)
+                        }
+                        _ => (n, left),
+                    });
+                    if count == 0 {
+                        tcp::shutdown_send(id).map_err(status_of)?;
+                        ep.send_side.store(send_side::SHUT, Ordering::Release);
+                    } else {
+                        ep.send_side.store(send_side::AFTER_SENDS, Ordering::Release);
+                        afd_event(ep, "afd shutdown after sends", |f| {
+                            write!(f, r#","sends":{count},"bytes":{left}"#)
+                        });
+                    }
+                }
             }
             Immediate::Done(0)
         }
@@ -1273,15 +1510,10 @@ fn immediate(r: &Request<'_>, ep: &EndpointState) -> Result<Immediate, NtStatus>
     })
 }
 
-/// AFD_RECV_INFO_UDP (ReactOS `drivers/afd/shared.h`, to be verified):
-/// `{WSABUF *buffers; u32 count; u32 afd_flags; u32 tdi_flags; (pad);
-/// void *address; int *address_length}`.
-const RECV_DATAGRAM_INFO: usize = 40;
-/// AFD_SEND_INFO_UDP (ReactOS, to be verified): `{WSABUF *buffers; u32
-/// count; u32 afd_flags; TDI_REQUEST_SEND_DATAGRAM (40 bytes);
-/// TDI_CONNECTION_INFORMATION at 56}`, whose RemoteAddressLength (at 88)
-/// and RemoteAddress (a TRANSPORT_ADDRESS, at 96) name the destination.
-const SEND_DATAGRAM_INFO: usize = 104;
+// AFD_RECV_INFO_UDP and AFD_SEND_INFO_UDP (ReactOS `drivers/afd/
+// shared.h`, to be verified): their layouts for the caller's width are
+// afd_abi's (the destination is TDI_CONNECTION_INFORMATION's
+// RemoteAddressLength and RemoteAddress).
 
 /// The requests a datagram endpoint answers differently from a stream
 /// one (None: the shared handling applies).
@@ -1293,7 +1525,7 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         if let Some(id) = *slot {
             return Ok(id);
         }
-        let id = udp::bind_scoped(ep.transport.any_address(), ep.scope(), ep.token)
+        let id = udp::bind_scoped(ep.transport.any_address(), ep.scope(), ep.owner())
             .map_err(status_of)?;
         *slot = Some(id);
         Ok(id)
@@ -1306,7 +1538,7 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
             if slot.is_some() {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
-            let id = udp::bind_scoped(local, ep.scope(), ep.token).map_err(status_of)?;
+            let id = udp::bind_scoped(local, ep.scope(), ep.owner()).map_err(status_of)?;
             *slot = Some(id);
             drop(slot);
             let bound = tcp::local(id).map_err(status_of)?;
@@ -1336,14 +1568,15 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
             Immediate::Done(0)
         }
         IOCTL_AFD_SEND_DATAGRAM => {
-            let info: [u8; SEND_DATAGRAM_INFO] = r.input()?;
-            let len = u32_at(&info, 88) as usize;
+            let l = r.layout();
+            let (info, _): ([u8; 104], usize) = r.input_upto(l.send_dgram_size())?;
+            let len = u32_at(&info, l.send_dgram_address_len()) as usize;
             if len < TRANSPORT_ADDRESS_LEN {
                 return Err(NtStatus::INVALID_PARAMETER);
             }
             let mut ta = [0u8; TRANSPORT_ADDRESS6_LEN];
             let n = len.min(TRANSPORT_ADDRESS6_LEN);
-            r.read(u64_at(&info, 96), &mut ta[..n])?;
+            r.read(l.get_ptr(&info, l.send_dgram_address()), &mut ta[..n])?;
             let to = transport_address(&ta[..n])?;
             let buffers = buffers(r)?;
             bound_or_bind()?;
@@ -1357,8 +1590,9 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
         IOCTL_AFD_RECV | IOCTL_AFD_RECV_DATAGRAM => {
             // Receiving needs a bound socket (WSAEINVAL otherwise).
             (*ep.socket.lock()).ok_or(NtStatus::INVALID_PARAMETER)?;
-            let info: [u8; 24] = r.input()?;
-            let msg_flags = u32_at(&info, 16);
+            let l = r.layout();
+            let (info, _): ([u8; 24], usize) = r.input_upto(l.info_size())?;
+            let msg_flags = u32_at(&info, l.info_tdi_flags());
             if msg_flags & (AFD_MSG_OOB | AFD_MSG_WAITALL) != 0 {
                 super::ledger::record(
                     "NtDeviceIoControlFile",
@@ -1368,8 +1602,8 @@ fn immediate_udp(r: &Request<'_>, ep: &EndpointState) -> Result<Option<Immediate
                 return Err(NtStatus::NOT_SUPPORTED);
             }
             let (address, address_len) = if r.code == IOCTL_AFD_RECV_DATAGRAM {
-                let b: [u8; RECV_DATAGRAM_INFO] = r.input()?;
-                (u64_at(&b, 24), u64_at(&b, 32))
+                let (b, _): ([u8; 40], usize) = r.input_upto(l.recv_dgram_size())?;
+                (l.get_ptr(&b, l.recv_dgram_address()), l.get_ptr(&b, l.recv_dgram_address_len()))
             } else {
                 (0, 0)
             };
@@ -1434,6 +1668,8 @@ pub struct CarriedEndpoint {
     pub select: Option<(ObjectRef, u32)>,
     pub recorded: u32,
     pub signal: i32,
+    /// `send_side` (`send_side::*`).
+    pub send_side: u32,
     pub requests: Vec<CarriedRequest>,
 }
 
@@ -1546,6 +1782,7 @@ pub fn carry(state: &EndpointState) -> Result<CarriedEndpoint, NtStatus> {
         select: state.select.lock().clone(),
         recorded: state.recorded.load(Ordering::Acquire),
         signal: state.dispatcher.signal_state(),
+        send_side: state.send_side.load(Ordering::Acquire),
         requests,
     })
 }
@@ -1568,10 +1805,17 @@ pub fn adopt(
         non_blocking: AtomicBool::new(c.non_blocking),
         // Carried endpoints are IPv4 (a handover refuses IPv6 ones).
         v6only: AtomicBool::new(true),
+        purse: None,
+        rcvbuf: AtomicU32::new(0),
+        sndbuf: AtomicU32::new(0),
         pending: IrqMutex::new(Vec::new()),
         select: IrqMutex::new(c.select.clone()),
         recorded: AtomicU32::new(c.recorded),
+        // Not carried: a carried connection may report FD_CONNECT once
+        // more after the handover.
+        recorded_once: AtomicU32::new(0),
         polls: AtomicUsize::new(0),
+        send_side: AtomicU32::new(c.send_side),
     })
     .map_err(|_| NtStatus::NO_MEMORY)?;
     REGISTRY.lock().try_push(state.clone()).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -1658,6 +1902,20 @@ pub fn adopt_requests(object: &ObjectRef, requests: Vec<CarriedRequest>) -> Resu
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    /// listen's backlog as Microsoft Learn describes it.
+    #[test]
+    fn backlogs() {
+        assert_eq!(backlog_of(SOMAXCONN), 200);
+        assert_eq!(backlog_of(0), 1);
+        assert_eq!(backlog_of(5), 5);
+        assert_eq!(backlog_of(511), 200);
+        // SOMAXCONN_HINT(N) is -N, kept within 200 to 65535.
+        assert_eq!(backlog_of(-10), 200);
+        assert_eq!(backlog_of(-1000), 1000);
+        assert_eq!(backlog_of(-100_000), 65535);
+        assert_eq!(backlog_of(i32::MIN), 65535);
+    }
 
     #[test]
     fn open_packet_transport() {

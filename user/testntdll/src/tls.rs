@@ -3,7 +3,7 @@
 //!
 //! Each image with a TLS directory gets an index when it is loaded, written
 //! to its `AddressOfIndex`. Each thread has an array of block pointers at
-//! TEB.ThreadLocalStoragePointer (gs:[0x58]); a block is a copy of the
+//! TEB.ThreadLocalStoragePointer (gs:[0x58]; fs:[0x2c] in x86); a block is a copy of the
 //! image's template followed by `SizeOfZeroFill` zero bytes. A DLL loaded
 //! later gets a block in every thread that already exists; new threads get
 //! blocks for every image when they start (`GalaInitializeThread`).
@@ -18,7 +18,8 @@
 //! Everything here runs under the loader lock (`loader_lock`).
 
 use crate::{
-    GalaRecordMissing, MODULE_COUNT, directory, entry_point, heap, rd32, rd64, with_modules,
+    GalaRecordMissing, MODULE_COUNT, PEB_PROCESS_HEAP, PTR, directory, entry_point, heap, peb,
+    rd32, rdp, set_tls_array, tls_array, with_modules,
 };
 
 pub const DLL_PROCESS_ATTACH: u32 = 1;
@@ -54,30 +55,20 @@ fn state() -> &'static mut State {
     unsafe { &mut *STATE.0.get() }
 }
 
-/// An image's IMAGE_TLS_DIRECTORY64: (template start, template end, the
+/// An image's IMAGE_TLS_DIRECTORY64 (IMAGE_TLS_DIRECTORY32 in the x86
+/// build: pointer-sized fields): (template start, template end, the
 /// index's address, the callback array's address, zero fill).
 fn tls_directory(base: usize) -> Option<(usize, usize, usize, usize, usize)> {
     let (rva, size) = directory(base, 9); // IMAGE_DIRECTORY_ENTRY_TLS
-    if rva == 0 || size < 40 {
+    if rva == 0 || size < 4 * PTR + 8 {
         return None;
     }
     let d = base + rva;
-    Some((
-        rd64(d) as usize,
-        rd64(d + 8) as usize,
-        rd64(d + 16) as usize,
-        rd64(d + 24) as usize,
-        rd32(d + 32) as usize,
-    ))
+    Some((rdp(d), rdp(d + PTR), rdp(d + 2 * PTR), rdp(d + 3 * PTR), rd32(d + 4 * PTR) as usize))
 }
 
 fn process_heap() -> *mut u8 {
-    // SAFETY: gs:[0x60] is the PEB; ProcessHeap is at +0x30.
-    unsafe {
-        let peb: usize;
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        rd64(peb + 0x30) as *mut u8
-    }
+    rdp(peb() + PEB_PROCESS_HEAP) as *mut u8
 }
 
 /// A new block for the image at `base`: its template, then zeros.
@@ -93,10 +84,7 @@ fn new_block(base: usize) -> usize {
 }
 
 fn current_array() -> usize {
-    let array: usize;
-    // SAFETY: gs:[0x58] is TEB.ThreadLocalStoragePointer.
-    unsafe { core::arch::asm!("mov {}, gs:[0x58]", out(reg) array, options(nostack, readonly)) };
-    array
+    tls_array()
 }
 
 /// Gives the current thread its TLS array and a block for every image with
@@ -105,7 +93,7 @@ pub fn thread_init() {
     let s = state();
     let mut array = current_array();
     if array == 0 {
-        array = heap::RtlAllocateHeap(process_heap(), 0x8, 8 * MAX_TLS) as usize;
+        array = heap::RtlAllocateHeap(process_heap(), 0x8, PTR * MAX_TLS) as usize;
         if array == 0 {
             return;
         }
@@ -115,11 +103,10 @@ pub fn thread_init() {
             return;
         };
         *free = array;
-        // SAFETY: TEB.ThreadLocalStoragePointer of this thread.
-        unsafe { core::arch::asm!("mov gs:[0x58], {}", in(reg) array, options(nostack)) };
+        set_tls_array(array);
     }
     for (index, &owner) in s.owners.iter().enumerate() {
-        let slot = (array + 8 * index) as *mut usize;
+        let slot = (array + PTR * index) as *mut usize;
         // SAFETY: inside this thread's array.
         unsafe {
             if owner != 0 && *slot == 0 {
@@ -146,7 +133,7 @@ pub fn register(base: usize) -> bool {
     unsafe { *(index_at as *mut u32) = index as u32 };
     for &array in s.threads.iter().filter(|&&a| a != 0) {
         // SAFETY: a thread's array of MAX_TLS slots.
-        unsafe { *((array + 8 * index) as *mut usize) = new_block(base) };
+        unsafe { *((array + PTR * index) as *mut usize) = new_block(base) };
     }
     true
 }
@@ -161,7 +148,7 @@ pub fn unregister(base: usize) {
         }
         s.owners[index] = 0;
         for &array in s.threads.iter().filter(|&&a| a != 0) {
-            let slot = (array + 8 * index) as *mut usize;
+            let slot = (array + PTR * index) as *mut usize;
             // SAFETY: a thread's array; the block came from the heap.
             unsafe {
                 if *slot != 0 {
@@ -181,14 +168,14 @@ pub fn callbacks(base: usize, reason: u32) {
     }
     let mut at = list;
     loop {
-        let f = rd64(at) as usize;
+        let f = rdp(at);
         if f == 0 {
             break;
         }
         // SAFETY: a PIMAGE_TLS_CALLBACK the image lists.
         let f: extern "system" fn(usize, u32, usize) = unsafe { core::mem::transmute(f) };
         f(base, reason, 0);
-        at += 8;
+        at += PTR;
     }
 }
 
@@ -200,7 +187,7 @@ fn thread_exit() {
     }
     let s = state();
     for index in 0..MAX_TLS {
-        let slot = (array + 8 * index) as *const usize;
+        let slot = (array + PTR * index) as *const usize;
         // SAFETY: this thread's array; blocks came from the heap.
         unsafe {
             if *slot != 0 {
@@ -212,8 +199,7 @@ fn thread_exit() {
         *t = 0;
     }
     heap::RtlFreeHeap(process_heap(), 0, array as *mut u8);
-    // SAFETY: TEB.ThreadLocalStoragePointer of this thread.
-    unsafe { core::arch::asm!("mov qword ptr gs:[0x58], 0", options(nostack)) };
+    set_tls_array(0);
 }
 
 /// The loaded modules as (base, whether DllMain gets thread

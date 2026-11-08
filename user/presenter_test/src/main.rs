@@ -32,8 +32,8 @@
 //!   last pixels while nothing showed it.
 //! - Input a Test presenter brings (GalaSession's SESSION_INPUT, as
 //!   screen checks without the PS/2 devices do): a left click at client
-//!   (200, 100) reaches the child (WM_LBUTTONDOWN; it marks the point in
-//!   magenta), which the frame shows; a desktop shown by nothing takes no
+//!   (200, 100) reaches the child (WM_LBUTTONDOWN marks the point in
+//!   magenta, WM_LBUTTONUP counts the click), which the frame shows; a desktop shown by nothing takes no
 //!   input (STATUS_INVALID_DEVICE_STATE).
 //! - Bad requests: an area outside the frame, an unknown presenter and an
 //!   unknown input kind are STATUS_INVALID_PARAMETER; the console on
@@ -56,12 +56,14 @@
 //!   Test frame.
 //!
 //! `server` (scenario `server_windows`, the server kernel: no compositor,
-//! ROADMAP SD): a desktop nobody shows, as on a machine whose desktop no
-//! presenter shows. Session 2's child makes, shows and paints its window
+//! ROADMAP SD; and the desktop kernel where nothing can show a desktop:
+//! `noscreen_windows`, a BIOS boot without `presenter=`, and
+//! `server_profile_windows`, `profile=server`): a desktop nobody shows, as
+//! on a machine whose desktop no presenter shows. Session 2's child makes, shows and paints its window
 //! as above (1280 x 800, visible); the query says live, shown by none,
 //! 1280 x 800, one window; a frame and injected input are
 //! STATUS_INVALID_DEVICE_STATE; presenter none is accepted, Test and
-//! Console are STATUS_NOT_SUPPORTED (nothing in this kernel composes);
+//! Console are STATUS_NOT_SUPPORTED (nothing there composes);
 //! the child repaints while nothing shows it, then destroys its window
 //! (IsWindow FALSE) and ends: the query counts no window.
 //!
@@ -248,6 +250,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00cf_0000;
 const WM_PAINT: u32 = 0x000f;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
 const QS_ALLINPUT: u32 = 0x04ff;
 const SW_SHOW: i32 = 5;
 const PM_REMOVE: u32 = 1;
@@ -295,10 +298,12 @@ struct Checks {
 }
 
 impl Checks {
+    #[track_caller]
     fn new(first: u32, quiet: bool) -> Self {
         Checks { n: core::cell::Cell::new(first), quiet }
     }
 
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.n.set(self.n.get() + 1);
         if cond {
@@ -306,14 +311,19 @@ impl Checks {
         }
         if !self.quiet {
             // One line, one WriteFile (WORKFLOW).
-            let mut line = *b"presenter_test: check 00000000 got 00000000\r\n";
+            let mut line = [0u8; 63];
+            line[..43].copy_from_slice(b"presenter_test: check 00000000 got 00000000");
             line[22..30].copy_from_slice(&ntrt::hex32(self.n.get()));
             line[35..43].copy_from_slice(&ntrt::hex32(got as u32));
-            out(&line);
+            let (at, at_len) = line_text(core::panic::Location::caller().line());
+            line[43..43 + at_len].copy_from_slice(&at[..at_len]);
+            line[43 + at_len..43 + at_len + 2].copy_from_slice(b"\r\n");
+            out(&line[..43 + at_len + 2]);
         }
         Err(self.n.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -395,6 +405,13 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
             // SAFETY: our window and rectangle.
             unsafe { InvalidateRect(hwnd, &mark_rect(lparam as u32), 0) };
         }
+        return 0;
+    }
+    // The click counts once the button is up: the program may end on the
+    // last one, and so it ends only after the release xtask sends with it
+    // (it ended between press and release under KVM, and xtask's write of
+    // the release found QEMU gone).
+    if msg == WM_LBUTTONUP {
         CLICKED.store(1, Ordering::Relaxed);
         return 0;
     }
@@ -915,8 +932,9 @@ fn server_mode() -> bool {
         .is_some_and(|w| w.iter().copied().eq("server".encode_utf16()))
 }
 
-/// `server`: session 2's desktop on the server kernel, which nothing in
-/// the kernel composes: its window is kept, queried and closed.
+/// `server`: session 2's desktop where nothing composes it (the server
+/// kernel, or the desktop kernel's bare desktops): its window is kept,
+/// queried and closed.
 fn run_server() -> Result<bool, u32> {
     let c = Checks::new(0, false);
     let (st, _) = session_query(SESSION);
@@ -1000,3 +1018,24 @@ fn main() -> u32 {
 }
 
 ntrt::entry!(main);
+
+/// ` (line L)` for the failing check's source line (`#[track_caller]` on
+/// Checks' methods), as bytes and their length.
+fn line_text(line: u32) -> ([u8; 18], usize) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    (b, 8 + len)
+}

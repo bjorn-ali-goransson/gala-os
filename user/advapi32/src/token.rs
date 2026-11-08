@@ -7,9 +7,15 @@
 
 use core::ffi::c_void;
 
+use super::layout::{GROUPS_AT, SecurityAttributes, SidAndAttributes, group};
+
 use super::fail;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenProcessToken(process: usize, access: u32, token: *mut usize) -> u32;
     fn NtOpenThreadToken(thread: usize, access: u32, as_self: u8, token: *mut usize) -> u32;
@@ -50,7 +56,11 @@ unsafe extern "system" {
     fn RtlNtStatusToDosError(status: u32) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
@@ -80,7 +90,7 @@ const ERROR_NO_IMPERSONATION_TOKEN: u32 = 1309;
 const SE_GROUP_ENABLED: u32 = 0x4;
 const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x10;
 
-/// OBJECT_ATTRIBUTES (x64).
+/// OBJECT_ATTRIBUTES.
 #[repr(C)]
 struct ObjectAttributes {
     length: u32,
@@ -192,12 +202,11 @@ pub extern "system" fn DuplicateTokenEx(
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let quality = Quality { length: 12, level, tracking: 0, effective_only: 0 };
-    // SECURITY_ATTRIBUTES: nLength, lpSecurityDescriptor, bInheritHandle.
     let inherit = !attributes.is_null()
         // SAFETY: the caller's SECURITY_ATTRIBUTES.
-        && unsafe { attributes.cast::<u8>().add(16).cast::<i32>().read_unaligned() } != 0;
+        && unsafe { attributes.cast::<SecurityAttributes>().read_unaligned().inherit } != 0;
     let oa = ObjectAttributes {
-        length: 48,
+        length: size_of::<ObjectAttributes>() as u32,
         root: 0,
         name: core::ptr::null(),
         attributes: if inherit { 2 } else { 0 }, // OBJ_INHERIT
@@ -223,9 +232,14 @@ pub extern "system" fn DuplicateToken(token: usize, level: u32, new: *mut usize)
 }
 
 fn set_thread_token(thread: usize, token: usize) -> i32 {
-    // SAFETY: our handle value, 8 bytes.
+    // SAFETY: our handle value, pointer-sized.
     result(unsafe {
-        NtSetInformationThread(thread, THREAD_IMPERSONATION_TOKEN, (&raw const token).cast(), 8)
+        NtSetInformationThread(
+            thread,
+            THREAD_IMPERSONATION_TOKEN,
+            (&raw const token).cast(),
+            size_of::<usize>() as u32,
+        )
     })
 }
 
@@ -285,8 +299,8 @@ pub extern "system" fn PrivilegeCheck(token: usize, set: *mut u8, out: *mut i32)
 }
 
 /// A LocalAlloc'd copy of `count` entries of `size` bytes at `entries`,
-/// after a count (TOKEN_GROUPS: padded to 8; TOKEN_PRIVILEGES: 4); null
-/// for none.
+/// after a count taking `head` bytes (TOKEN_GROUPS: GROUPS_AT;
+/// TOKEN_PRIVILEGES: 4); null for none.
 fn counted(count: u32, entries: *const u8, size: usize, head: usize) -> Result<*mut u8, ()> {
     if count == 0 || entries.is_null() {
         return Ok(core::ptr::null_mut());
@@ -326,9 +340,9 @@ pub extern "system" fn CreateRestrictedToken(
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let lists = (
-        counted(disable_count, disable, 16, 8),
+        counted(disable_count, disable, size_of::<SidAndAttributes>(), GROUPS_AT),
         counted(delete_count, delete, 12, 4),
-        counted(restrict_count, restrict, 16, 8),
+        counted(restrict_count, restrict, size_of::<SidAndAttributes>(), GROUPS_AT),
     );
     let free = |p: Result<*mut u8, ()>| {
         if let Ok(p) = p {
@@ -376,15 +390,16 @@ fn query_alloc(token: usize, class: u32) -> Result<*mut u8, u32> {
 /// IsTokenRestricted: whether the token has restricting SIDs.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsTokenRestricted(token: usize) -> i32 {
-    let mut groups = [0u64; 1];
+    let mut groups = [0usize; 1];
     let mut size = 0;
-    // SAFETY: our 8-byte buffer: room for an empty TOKEN_GROUPS only.
+    // SAFETY: our buffer: room for an empty TOKEN_GROUPS only (its count,
+    // padded to the array).
     let status = unsafe {
         NtQueryInformationToken(
             token,
             TOKEN_RESTRICTED_SIDS,
             groups.as_mut_ptr().cast(),
-            8,
+            GROUPS_AT as u32,
             &mut size,
         )
     };
@@ -402,9 +417,8 @@ fn in_groups(p: *const u8, sid: *const u8, ok: impl Fn(u32) -> bool) -> bool {
     unsafe {
         let count = p.cast::<u32>().read() as usize;
         (0..count).any(|i| {
-            let e = p.add(8 + 16 * i);
-            let s = e.cast::<*const u8>().read();
-            ok(e.add(8).cast::<u32>().read()) && super::EqualSid(s, sid) != 0
+            let e = group(p, i);
+            ok(e.attributes) && super::EqualSid(e.sid, sid) != 0
         })
     }
 }
@@ -460,8 +474,8 @@ pub extern "system" fn CheckTokenMembership(token: usize, sid: *const u8, member
             let usable = |a: u32| a & SE_GROUP_USE_FOR_DENY_ONLY == 0;
             let enabled = |a: u32| a & SE_GROUP_ENABLED != 0 && a & SE_GROUP_USE_FOR_DENY_ONLY == 0;
             // SAFETY: TOKEN_USER: a SID_AND_ATTRIBUTES.
-            let (user_sid, user_attrs) =
-                unsafe { (user.cast::<*const u8>().read(), user.add(8).cast::<u32>().read()) };
+            let SidAndAttributes { sid: user_sid, attributes: user_attrs } =
+                unsafe { user.cast::<SidAndAttributes>().read_unaligned() };
             let mut yes = (usable(user_attrs) && super::EqualSid(user_sid, sid) != 0)
                 || in_groups(groups, sid, enabled);
             // SAFETY: TOKEN_GROUPS' count.
@@ -513,7 +527,11 @@ pub fn primary_copy(token: usize, out: *mut usize) -> i32 {
 /// makes the calling thread impersonate the pipe's client).
 #[unsafe(no_mangle)]
 pub extern "system" fn ImpersonateNamedPipeClient(pipe: usize) -> i32 {
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn NtFsControlFile(
             h: usize,
@@ -578,7 +596,11 @@ pub extern "system" fn LogonUserW(
     _provider: u32,
     token: *mut usize,
 ) -> i32 {
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn GalaLogonUser(
             user: *const UnicodeString,
@@ -643,9 +665,8 @@ pub extern "system" fn LogonUserExExW(
                 // TOKEN_GROUPS: the logon SID has SE_GROUP_LOGON_ID.
                 let count = groups.cast::<u32>().read() as usize;
                 for i in 0..count {
-                    let e = groups.add(8 + 16 * i);
-                    let sid = e.cast::<*const u8>().read();
-                    if e.add(8).cast::<u32>().read() & 0xc000_0000 == 0xc000_0000 {
+                    let SidAndAttributes { sid, attributes } = group(groups, i);
+                    if attributes & 0xc000_0000 == 0xc000_0000 {
                         let len = 8 + 4 * usize::from(*sid.add(1));
                         let copy = LocalAlloc(0, len);
                         if !copy.is_null() {
@@ -708,7 +729,11 @@ pub extern "system" fn CreateProcessAsUserW(
     startup: *const u8,
     info: *mut usize,
 ) -> i32 {
-    #[link(name = "kernel32", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn GetModuleHandleA(name: *const u8) -> usize;
         fn GetProcAddress(module: usize, name: *const u8) -> usize;
@@ -771,7 +796,11 @@ pub extern "system" fn CreateProcessAsUserA(
     startup: *const u8,
     info: *mut usize,
 ) -> i32 {
-    #[link(name = "kernel32", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn GetModuleHandleA(name: *const u8) -> usize;
         fn GetProcAddress(module: usize, name: *const u8) -> usize;
@@ -827,7 +856,11 @@ pub extern "system" fn SetTokenInformation(
     info: *const u8,
     length: u32,
 ) -> i32 {
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn NtSetInformationToken(token: usize, class: u32, info: *const u8, length: u32) -> u32;
     }
@@ -838,7 +871,11 @@ pub extern "system" fn SetTokenInformation(
 /// AllocateLocallyUniqueId(*Luid): NtAllocateLocallyUniqueId.
 #[unsafe(no_mangle)]
 pub extern "system" fn AllocateLocallyUniqueId(luid: *mut u64) -> i32 {
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn NtAllocateLocallyUniqueId(luid: *mut u64) -> u32;
     }

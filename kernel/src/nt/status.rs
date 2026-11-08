@@ -69,6 +69,10 @@ impl NtStatus {
     pub const FILE_DELETED: NtStatus = NtStatus(0xc000_0123);
     pub const INVALID_ADDRESS: NtStatus = NtStatus(0xc000_0141);
     pub const USER_MAPPED_FILE: NtStatus = NtStatus(0xc000_0243);
+    /// A reparse point no file system filter handles (a Linux symbolic
+    /// link opened without FILE_OPEN_REPARSE_POINT, as Windows answers a
+    /// WSL symlink).
+    pub const IO_REPARSE_TAG_NOT_HANDLED: NtStatus = NtStatus(0xc000_0279);
     pub const MAPPED_FILE_SIZE_ZERO: NtStatus = NtStatus(0xc000_011e);
     pub const STACK_OVERFLOW: NtStatus = NtStatus(0xc000_00fd);
     pub const CONFLICTING_ADDRESSES: NtStatus = NtStatus(0xc000_0018);
@@ -118,6 +122,7 @@ impl NtStatus {
     pub const INTERNAL_ERROR: NtStatus = NtStatus(0xc000_00e5);
     pub const INVALID_FILE_FOR_SECTION: NtStatus = NtStatus(0xc000_0020);
     pub const IMAGE_NOT_AT_BASE: NtStatus = NtStatus(0x4000_0003);
+    pub const IMAGE_MACHINE_TYPE_MISMATCH: NtStatus = NtStatus(0x4000_000e);
     // Network (AFD) statuses.
     pub const NOT_SUPPORTED: NtStatus = NtStatus(0xc000_00bb);
     pub const INVALID_BUFFER_SIZE: NtStatus = NtStatus(0xc000_0206);

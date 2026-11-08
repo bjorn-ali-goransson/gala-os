@@ -15,10 +15,12 @@ const STATUS_SECTION_PROTECTION: NtStatus = 0xc000_004e;
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -28,6 +30,7 @@ impl Checks {
         write_file(stdout(), &hex32(self.0));
         print(" got ");
         write_file(stdout(), &hex32(got as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -41,6 +44,38 @@ fn peek(addr: usize) -> u64 {
 fn poke(addr: usize, v: u64) {
     // SAFETY: callers only pass addresses inside writable views.
     unsafe { (addr as *mut u64).write_volatile(v) }
+}
+
+const PEB_SESSION_ID: usize = 0x2c0;
+
+/// The caller's session's BaseNamedObjects followed by `rest`:
+/// `\BaseNamedObjects` in session 0, `\Sessions\<n>\BaseNamedObjects`
+/// in session n. Outside session 0 an ordinary user may not create sections
+/// in the global directory (SeCreateGlobalPrivilege) (STATUS_ACCESS_DENIED on Windows).
+fn session_bno(rest: &str) -> ([u16; 160], usize) {
+    // SAFETY: SessionId in the PEB.
+    let session = unsafe { *(peb().add(PEB_SESSION_ID) as *const u32) };
+    let mut digits = [0u8; 10];
+    let (mut v, mut k) = (session, 10);
+    loop {
+        k -= 1;
+        digits[k] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    let prefix: [&[u8]; 3] =
+        if session == 0 { [b"", b"", b""] } else { [b"\\Sessions\\", &digits[k..], b""] };
+    let mut path = [0u16; 160];
+    let mut n = 0;
+    for part in prefix.into_iter().chain([&b"\\BaseNamedObjects"[..], rest.as_bytes()]) {
+        for &b in part {
+            path[n] = u16::from(b);
+            n += 1;
+        }
+    }
+    (path, n)
 }
 
 fn run() -> Result<(), u32> {
@@ -120,8 +155,8 @@ fn run() -> Result<(), u32> {
     close(big);
 
     // Named sections are shared through the object namespace.
-    let name = wide!("\\BaseNamedObjects\\gala_section_test");
-    let name = UnicodeString::new(&name);
+    let (name, n) = session_bno("\\gala_section_test");
+    let name = UnicodeString::new(&name[..n]);
     let attrs = ObjectAttributes::new(&name, Handle(0), OBJ_CASE_INSENSITIVE);
     let (st, named) = create_section(Some(&attrs), Some(0x1000), PAGE_READWRITE);
     c.eq(st.into(), ok)?;
@@ -151,3 +186,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

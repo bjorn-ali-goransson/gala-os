@@ -189,6 +189,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(core::cell::Cell<u32>);
 
 impl Checks {
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.0.set(self.0.get() + 1);
         if cond {
@@ -198,10 +199,12 @@ impl Checks {
         out(&hex(self.0.get()));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -272,6 +275,9 @@ fn is_child() -> bool {
     }
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -281,7 +287,11 @@ fn run() -> Result<(), u32> {
         c.ok(OpenProcessToken(GetCurrentProcess(), 0x8 | 0x20, &mut token) != 0, last_error())?;
         let mut b = Buf([0; 1024]);
         c.ok(query(token, 1, &mut b), last_error())?;
-        c.ok(EqualSid(first_sid(&b), SYSTEM.as_ptr()) != 0, 0)?;
+        // An ordinary user's run says "skipped" (gala's scenario starts it
+        // as SYSTEM: `as=system`).
+        if EqualSid(first_sid(&b), SYSTEM.as_ptr()) == 0 {
+            return Err(SKIPPED);
+        }
         // LocalSystem is a user account (SidTypeUser): Win32-OpenSSH's
         // getpwuid accepts only SidTypeUser accounts, and sshd runs as
         // SYSTEM on Windows.
@@ -424,6 +434,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
             out(b"system_test: ok\r\n");
             0
         }
+        Err(SKIPPED) => {
+            out(b"system_test: skipped (needs SYSTEM)\r\n");
+            0
+        }
         Err(id) => id,
     };
     // SAFETY: ends the process.
@@ -434,4 +448,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

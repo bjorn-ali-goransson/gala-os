@@ -32,7 +32,7 @@
 //!   the data changed and restored, for each scope;
 //!   ERROR_INVALID_PARAMETER for a size that is not a multiple of
 //!   CRYPTPROTECTMEMORY_BLOCK_SIZE, 16); PFXIsPFXBlob (a PFX's outer
-//!   SEQUENCE { INTEGER 3, ContentInfo }, not another version or a
+//!   SEQUENCE { INTEGER, ContentInfo }, whatever the version, not a
 //!   certificate).
 //! - Certificate stores (documented behaviour, no Windows run yet):
 //!   CertOpenStore(CERT_STORE_PROV_MEMORY) and the "ROOT" system store
@@ -62,7 +62,11 @@
 //!   serverAuth and clientAuth) CertGetIntendedKeyUsage gives the bits
 //!   0xa0 and CertGetEnhancedKeyUsage the two OIDs (size first); with CERT
 //!   (neither extension) the first is FALSE with last error 0 and the
-//!   second an empty list with CRYPT_E_NOT_FOUND (every usage);
+//!   second an empty list with CRYPT_E_NOT_FOUND (every usage); with
+//!   CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG and no usage property set, or
+//!   CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG and no extension, it fails with
+//!   CRYPT_E_NOT_FOUND (Python's enum_certificates: trusted for every
+//!   purpose);
 //!   CertCompareCertificateName of a name with itself and with another;
 //!   CertVerifyTimeValidity before, inside and after the validity;
 //!   CryptVerifyCertificateSignatureEx of each self-signed certificate by
@@ -81,7 +85,10 @@
 //!   into the caller's buffer after a size query; ERROR_MORE_DATA when
 //!   the buffer is short.
 //! - The chain engine and its policies (chain.rs: CertGetCertificateChain,
-//!   CertVerifyCertificateChainPolicy, engines with an exclusive root).
+//!   CertVerifyCertificateChainPolicy, engines with an exclusive root,
+//!   revocation from CRLs).
+//! - CRLs (crl.rs: CRL contexts, CRL stores, CertFindCertificateInCRL,
+//!   CertVerifyCRLRevocation, CertVerifyRevocation).
 //! - PFXImportCertStore (pfx.rs: PKCS #12 files from OpenSSL, modern and
 //!   legacy algorithms, the key kept or not).
 //!
@@ -308,7 +315,7 @@ unsafe extern "system" {
         prev: *const CertContext,
     ) -> *const CertContext;
     fn CertDeleteCertificateFromStore(cert: *const CertContext) -> Bool;
-    fn CertEnumCRLsInStore(store: Handle, prev: *const c_void) -> *const c_void;
+    fn CertEnumCRLsInStore(store: Handle, prev: *const crl::CrlContext) -> *const crl::CrlContext;
     fn CryptQueryObject(
         object_type: u32,
         object: *const c_void,
@@ -371,6 +378,7 @@ unsafe extern "system" {
 }
 
 mod chain;
+mod crl;
 mod pfx;
 mod vectors;
 
@@ -418,6 +426,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -427,10 +436,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -495,7 +506,9 @@ fn run() -> Result<(), u32> {
         let cert = CertCreateCertificateContext(encoding, CERT.as_ptr(), CERT.len() as u32);
         c.ok(!cert.is_null(), GetLastError().into())?;
         let ctx = &*cert;
-        c.eq(ctx.encoding.into(), encoding.into())?;
+        // Only the certificate encoding (the low word) is kept (Windows 11
+        // 25H2: 1 for X509_ASN_ENCODING | PKCS_7_ASN_ENCODING).
+        c.eq(ctx.encoding.into(), X509_ASN_ENCODING.into())?;
         c.ok(
             ctx.encoded_len as usize == CERT.len() && ctx.encoded.cast_const() != CERT.as_ptr(),
             ctx.encoded_len.into(),
@@ -638,7 +651,10 @@ fn run() -> Result<(), u32> {
             narrow.as_mut_ptr(),
             5,
         );
-        c.ok(got == 5 && &narrow[..5] == b"gala\0", got.into())?;
+        // The A form does not truncate: a buffer too small gives 1, the
+        // count of an empty string (Windows 11 25H2; what the buffer then
+        // holds is not measured).
+        c.eq(got.into(), 1)?;
 
         // The public key verifies the certificate's own signature.
         let mut key = null;
@@ -790,10 +806,11 @@ fn run() -> Result<(), u32> {
         ];
         let b = Blob { size: pfx.len() as u32, data: pfx.as_ptr().cast_mut() };
         c.eq(PFXIsPFXBlob(&b) as u64, 1)?;
+        // The version is not looked at (Windows 11 25H2: TRUE for 1).
         let mut v1 = pfx;
         v1[4] = 1;
         let b = Blob { size: v1.len() as u32, data: v1.as_mut_ptr() };
-        c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
+        c.eq(PFXIsPFXBlob(&b) as u64, 1)?;
         let b = Blob { size: CERT.len() as u32, data: CERT.as_ptr().cast_mut() };
         c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
 
@@ -803,6 +820,7 @@ fn run() -> Result<(), u32> {
         query(&mut c)?;
         alt_names(&mut c)?;
         chain::chains(&mut c)?;
+        crl::crls(&mut c)?;
         pfx::pfx(&mut c)?;
     }
     Ok(())
@@ -907,6 +925,23 @@ fn usage(c: &mut Checks) -> Result<(), u32> {
         c.ok(CertGetEnhancedKeyUsage(plain, 0, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
         c.eq(buf[0] as u32 as u64, 0)?;
         c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        // Asking for the property only (CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG,
+        // Python's enum_certificates): none set fails with
+        // CRYPT_E_NOT_FOUND, which callers read as "every usage".
+        size = core::mem::size_of_val(&buf) as u32;
+        c.eq(CertGetEnhancedKeyUsage(plain, 4, buf.as_mut_ptr().cast(), &mut size) as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        let mut size = 0u32;
+        c.eq(CertGetEnhancedKeyUsage(eku, 4, core::ptr::null_mut(), &mut size) as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        // The extension alone (CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG): none
+        // fails the same way; EKU_CERT's two OIDs.
+        size = core::mem::size_of_val(&buf) as u32;
+        c.eq(CertGetEnhancedKeyUsage(plain, 2, buf.as_mut_ptr().cast(), &mut size) as u64, 0)?;
+        c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
+        size = core::mem::size_of_val(&buf) as u32;
+        c.ok(CertGetEnhancedKeyUsage(eku, 2, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
+        c.eq(buf[0] as u32 as u64, 2)?;
 
         let info = &*(*plain).info;
         let other = &*(*eku).info;
@@ -1194,7 +1229,7 @@ fn stores(c: &mut Checks) -> Result<(), u32> {
         CertFreeCertificateContext(any);
         CertFreeCertificateContext(added);
         CertFreeCertificateContext(outside);
-        c.ok(CertEnumCRLsInStore(store, null).is_null(), 0)?;
+        c.ok(CertEnumCRLsInStore(store, core::ptr::null()).is_null(), 0)?;
         c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
         let dup = CertDuplicateStore(store);
         c.ok(dup == store, 0)?;
@@ -1459,4 +1494,26 @@ fn alt_names(c: &mut Checks) -> Result<(), u32> {
         )?;
     }
     Ok(())
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

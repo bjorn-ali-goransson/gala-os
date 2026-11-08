@@ -5,7 +5,11 @@
  * MSG_PEEK, shutdown, getsockname/getpeername, the socket options a
  * server and a client set, poll on sockets, a child serving a connection
  * after fork, and the errors (EADDRINUSE, ECONNREFUSED, ENOTCONN,
- * EAGAIN, EINVAL, ENOTSOCK, EAFNOSUPPORT, EISCONN, EPIPE).
+ * EAGAIN, EINVAL, ENOTSOCK, EAFNOSUPPORT, EISCONN, EPIPE); many listeners
+ * open at once (a listener holds no fixed share of the stack's sockets),
+ * and a full backlog: Linux completes backlog + 1 connections and ignores
+ * the SYNs beyond (no ECONNREFUSED, tcp(7)'s tcp_abort_on_overflow off),
+ * so those connect once accepts make room (the client's SYN retransmits).
  *
  * Ports are the kernel's choice (bind to port 0) and printed only as
  * relations; the refused connect goes to a port just bound and closed.
@@ -76,6 +80,21 @@ static i64 listener(unsigned short *port)
 	loopback(&a, 0);
 	sys3(SYS_bind, s, &a, sizeof a);
 	sys2(SYS_listen, s, 8);
+	sys3(SYS_getsockname, s, &a, &len);
+	*port = a.port;
+	return s;
+}
+
+/* A listener on 127.0.0.1, a kernel-chosen port and `backlog`. */
+static i64 listener_with(unsigned short *port, int backlog)
+{
+	struct lx_sockaddr_in a;
+	u64 len = sizeof a;
+	i64 s = tcp_socket(0);
+	loopback(&a, 0);
+	sys3(SYS_bind, s, &a, sizeof a);
+	if (sys2(SYS_listen, s, backlog) != 0)
+		return -1;
 	sys3(SYS_getsockname, s, &a, &len);
 	*port = a.port;
 	return s;
@@ -294,6 +313,71 @@ int main(void)
 	say_ret("read(client) then (the child closed it)", sys3(SYS_read, c, buf, sizeof buf));
 	sys1(SYS_close, c);
 	sys1(SYS_close, s);
+
+	say_text("-- many listeners");
+	{
+		enum { MANY = 12 };
+		i64 l[MANY];
+		unsigned short ports[MANY];
+		int listening = 0, served = 0;
+		for (int i = 0; i < MANY; i++) {
+			l[i] = listener_with(&ports[i], 511);
+			listening += l[i] >= 0;
+		}
+		say("listeners at backlog 511", listening);
+		for (int i = 0; i < MANY; i++) {
+			char in = 0, back = 0, mine = (char)('a' + i);
+			c = tcp_socket(0);
+			if (connect_to(c, ports[i]) != 0) {
+				sys1(SYS_close, c);
+				continue;
+			}
+			d = sys3(SYS_accept, l[i], 0, 0);
+			if (d >= 0 && sys3(SYS_write, c, &mine, 1) == 1 && sys3(SYS_read, d, &in, 1) == 1 && sys3(SYS_write, d, &in, 1) == 1 && sys3(SYS_read, c, &back, 1) == 1 && back == mine)
+				served++;
+			sys1(SYS_close, d);
+			sys1(SYS_close, c);
+		}
+		say("  each accepted a connection and echoed a byte", served);
+		for (int i = 0; i < MANY; i++)
+			sys1(SYS_close, l[i]);
+	}
+
+	say_text("-- a full backlog");
+	{
+		enum { CLIENTS = 4 };
+		unsigned short bport;
+		i64 l = listener_with(&bport, 1);
+		i64 cl[CLIENTS];
+		int connected = 0, failed = 0, accepted = 0, settled = 0;
+		for (int i = 0; i < CLIENTS; i++) {
+			cl[i] = tcp_socket(SOCK_NONBLOCK_);
+			connect_to(cl[i], bport);
+		}
+		for (int i = 0; i < CLIENTS; i++) {
+			poll1(cl[i], POLLOUT_, 300, &rev);
+			connected += (rev & POLLOUT_) != 0 && (rev & POLLERR_) == 0;
+			failed += (rev & POLLERR_) != 0;
+		}
+		say("listen(1), 4 non-blocking connects: connected within 300 ms", connected);
+		say("  refused or failed", failed);
+		/* Each accept makes room; a waiting client's next SYN gets in. */
+		for (int i = 0; i < CLIENTS; i++) {
+			d = sys3(SYS_accept, l, 0, 0);
+			accepted += d >= 0;
+			sys1(SYS_close, d);
+		}
+		say("  accepted, one by one", accepted);
+		for (int i = 0; i < CLIENTS; i++) {
+			len = sizeof v;
+			v = -1;
+			sys5(SYS_getsockopt, cl[i], SOL_SOCKET_, SO_ERROR_, &v, &len);
+			settled += v == 0;
+			sys1(SYS_close, cl[i]);
+		}
+		say("  clients with SO_ERROR 0", settled);
+		sys1(SYS_close, l);
+	}
 	say_text("socket_test: ok");
 	return 0;
 }

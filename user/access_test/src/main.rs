@@ -256,6 +256,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(core::cell::Cell<u32>);
 
 impl Checks {
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.0.set(self.0.get() + 1);
         if cond {
@@ -265,15 +266,18 @@ impl Checks {
         out(&hex(self.0.get()));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
     /// A call that must fail with `error` (`failed`: it did).
+    #[track_caller]
     fn fails(&self, failed: bool, error: u32) -> Result<(), u32> {
         self.ok(failed, 0)?;
         self.eq(last_error(), error.into())
@@ -374,6 +378,31 @@ fn granted(h: Handle) -> u64 {
     u64::from(b[1])
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
+/// Whether the second local account `galatest` is absent
+/// (LookupAccountNameW fails with ERROR_NONE_MAPPED): a machine not set up
+/// for this test, where it says "skipped" (gala's scenarios have it).
+fn galatest_missing() -> bool {
+    let (mut sid, mut domain) = ([0u8; 68], [0u16; 64]);
+    let (mut sid_size, mut domain_size, mut kind) = (68u32, 64u32, 0u32);
+    let name = w("galatest");
+    // SAFETY: our buffers and their sizes.
+    unsafe {
+        LookupAccountNameW(
+            core::ptr::null(),
+            name.p(),
+            sid.as_mut_ptr(),
+            &mut sid_size,
+            domain.as_mut_ptr(),
+            &mut domain_size,
+            &mut kind,
+        ) == 0
+            && GetLastError() == 1332
+    }
+}
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -382,10 +411,12 @@ fn run() -> Result<(), u32> {
         // LogonUserW.
         let (user, dot) = (w("galatest"), w("."));
         let mut test = null;
-        c.ok(
-            LogonUserW(user.p(), dot.p(), w("Gala-Test-1").p(), 2, 0, &mut test) != 0,
-            last_error(),
-        )?;
+        let logged_on = LogonUserW(user.p(), dot.p(), w("Gala-Test-1").p(), 2, 0, &mut test) != 0;
+        let error = last_error();
+        if !logged_on && galatest_missing() {
+            return Err(SKIPPED);
+        }
+        c.ok(logged_on, error)?;
         let mut nothing = null;
         c.fails(
             LogonUserW(user.p(), dot.p(), w("wrong").p(), 2, 0, &mut nothing) == 0,
@@ -613,6 +644,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
             out(b"access_test: ok\r\n");
             0
         }
+        Err(SKIPPED) => {
+            out(b"access_test: skipped (needs the galatest account)\r\n");
+            0
+        }
         Err(id) => id,
     };
     // SAFETY: ends the process.
@@ -623,4 +658,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

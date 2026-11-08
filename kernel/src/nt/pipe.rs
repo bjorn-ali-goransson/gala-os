@@ -20,7 +20,10 @@
 //! the length of each message in it. Reads return what is there (at
 //! least one byte, waiting if there is none); in message read mode at
 //! most one message, and STATUS_BUFFER_OVERFLOW if it does not fit (the
-//! rest stays for the next read). Writes complete fully, waiting while
+//! rest stays for the next read). A zero-byte read waits too, and ends
+//! when data comes with no bytes, or STATUS_BUFFER_OVERFLOW for a
+//! message (libuv and multiprocessing wait for a readable pipe so).
+//! Writes complete fully, waiting while
 //! the pipe is full (a message waits until it fits whole, or the queue is
 //! empty). When the other end is closed a reader drains what is left and
 //! gets STATUS_PIPE_BROKEN; a writer fails with STATUS_PIPE_CLOSING.
@@ -440,7 +443,13 @@ fn attempt(
             if let Err(e) = s.check_connected(end, generation) {
                 return Some(Err(e));
             }
-            if s.inbox[end].is_empty() && max > 0 {
+            // An empty pipe makes every read wait, a zero-byte one too
+            // (libuv's and multiprocessing's "wait until readable"): it
+            // ends when data comes, with no bytes (byte mode) or
+            // STATUS_BUFFER_OVERFLOW (a message, left for the next read).
+            // A zero-length message is something to read.
+            let empty_message = message && s.message_type && s.messages[end].front() == Some(&0);
+            if s.inbox[end].is_empty() && !empty_message {
                 let peer_open = if peer == 0 { s.server_open } else { s.conn == Conn::Connected };
                 return if peer_open { None } else { Some(Err(NtStatus::PIPE_BROKEN)) };
             }
@@ -1048,6 +1057,51 @@ impl PipeEnd {
         }
         self.message_reads.store(message, Ordering::Release);
         Ok(())
+    }
+
+    /// FilePipeInformation: (ReadMode, CompletionMode): message reads,
+    /// and always FILE_PIPE_QUEUE_OPERATION (no PIPE_NOWAIT pipes).
+    pub fn pipe_information(&self) -> [u32; 2] {
+        [u32::from(self.message_reads.load(Ordering::Acquire)), 0]
+    }
+
+    /// FilePipeLocalInformation: NamedPipeType, NamedPipeConfiguration
+    /// (full duplex), MaximumInstances, CurrentInstances (of the name),
+    /// InboundQuota, ReadDataAvailable (for this end), OutboundQuota,
+    /// WriteQuotaAvailable (room in the other end's inbox),
+    /// NamedPipeState, NamedPipeEnd (0 client, 1 server).
+    pub fn local_information(&self) -> [u32; 10] {
+        const FILE_PIPE_FULL_DUPLEX: u32 = 2;
+        let (max, current) = {
+            let instances = INSTANCES.lock();
+            let name =
+                instances.iter().find(|i| KArc::ptr_eq(&i.pipe, &self.pipe)).map(|i| &i.name);
+            match name {
+                Some(name) => {
+                    let mine = instances.iter().filter(|i| &i.name == name);
+                    let max = instances.iter().find(|i| &i.name == name).map_or(1, |i| i.max);
+                    (max, mine.count() as u32)
+                }
+                // The server end closed: the instance is no longer listed.
+                None => (1, 0),
+            }
+        };
+        let state = self.state();
+        let s = self.pipe.state.lock();
+        let peer = 1 - self.end;
+        let room = s.quota[peer].saturating_sub(s.inbox[peer].len());
+        [
+            u32::from(s.message_type),
+            FILE_PIPE_FULL_DUPLEX,
+            max,
+            current,
+            s.quota[0] as u32,
+            s.inbox[self.end].len() as u32,
+            s.quota[1] as u32,
+            room as u32,
+            state,
+            u32::from(self.end == 0),
+        ]
     }
 
     /// The NamedPipeState of this end (FilePipeLocalInformation).

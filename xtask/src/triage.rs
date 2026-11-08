@@ -166,8 +166,19 @@ fn dumped_threads(serial: &str) -> Vec<String> {
                 .split_once(" session ")
                 .and_then(|(_, r)| r.split_whitespace().next())
                 .map_or(String::new(), |s| format!(" session {s}"));
+            // Where the thread started (its Win32 start routine): which
+            // thread it is (a pool worker, the program's own, a helper).
+            let start = rest
+                .split_once(" start ")
+                .and_then(|(_, r)| r.split_whitespace().next())
+                .map_or(String::new(), |s| format!(" start {s}"));
+            // Its name (SetThreadDescription), quoted as the kernel prints it.
+            let named = rest
+                .split_once(" name \"")
+                .and_then(|(_, r)| r.split_once('"'))
+                .map_or(String::new(), |(n, _)| format!(" \"{n}\""));
             out.push(format!(
-                "pid {pid} tid {tid}{}{session}{}:",
+                "pid {pid} tid {tid}{named}{}{start}{session}{}:",
                 if name.is_empty() { String::new() } else { format!(" ({name})") },
                 if exited { " (exited)" } else { "" }
             ));
@@ -532,7 +543,7 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
 [info ] thread: pid 4 tid 8 (sched Some(ThreadId(5))) suspend 0 exited false in a system call true (java.exe)
 [info ] thread:   NtWaitForSingleObject from rip 0x1400010de
 [info ] thread:   on handle 0x14: Event signal 0
-[info ] thread: pid 4 tid 12 (sched Some(ThreadId(6))) suspend 0 exited false in a system call false session 1 (java.exe)
+[info ] thread: pid 4 tid 12 (sched Some(ThreadId(6))) start 0x140001000 name \"worker\" suspend 0 exited false in a system call false session 1 (java.exe)
 [info ] thread:   in user mode at rip 0x1400010b9 (last tick)
 [info ] statedump: end
 ";
@@ -566,7 +577,7 @@ statedump: NMI part done; the threads follow from the boot thread if it still ru
             "triage: thread pid 4 tid 8 (java.exe): NtWaitForSingleObject from rip 0x1400010de on handle 0x14: Event signal 0",
         );
         has(
-            "triage: thread pid 4 tid 12 (java.exe) session 1: in user mode at rip 0x1400010b9 (last tick)",
+            "triage: thread pid 4 tid 12 \"worker\" (java.exe) start 0x140001000 session 1: in user mode at rip 0x1400010b9 (last tick)",
         );
         has("triage: last calls of tid 8 (flight recorder): NtCreateEvent, NtWaitForSingleObject");
         assert!(!t.contains("no \"statedump: end\""));

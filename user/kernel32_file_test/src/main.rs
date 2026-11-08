@@ -3,7 +3,8 @@
 //! CreateFileW (CREATE_NEW, OPEN_EXISTING, directories with
 //! FILE_FLAG_BACKUP_SEMANTICS), WriteFile/ReadFile/SetFilePointerEx,
 //! GetFileInformationByHandle, GetFileSizeEx, GetFileAttributes(Ex)W,
-//! FindFirstFileW/FindNextFileW, GetFileInformationByHandleEx's directory
+//! FindFirstFileW/FindNextFileW (DOS wildcards: `*.*` lists names
+//! without a dot too), GetFileInformationByHandleEx's directory
 //! classes, GetVolumeInformationByHandleW, GetFinalPathNameByHandleW,
 //! GetFileTime/SetFileTime (each time its own, the access time too),
 //! GetFullPathNameW, GetShortPathNameW,
@@ -44,6 +45,8 @@ extern "system" fn completed(error: u32, count: u32, ov: *mut usize) {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn GetLastError() -> u32;
     fn GetFileType(h: Handle) -> u32;
     fn DeviceIoControl(
@@ -211,6 +214,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -220,10 +224,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -249,8 +255,51 @@ impl Path {
     }
 }
 
+/// Deletes `<temp>gala_k32` and the files in it, if it is there.
+///
+/// # Safety
+/// `temp` is the temporary directory's path, ending with a backslash.
+unsafe fn remove_tree(temp: &[u16]) {
+    let mut find = [0u16; 296]; // WIN32_FIND_DATAW
+    // SAFETY: documented calls with valid buffers.
+    unsafe {
+        let f = FindFirstFileW(Path::new(temp, b"gala_k32\\*").ptr(), find.as_mut_ptr());
+        if f != INVALID_HANDLE_VALUE {
+            loop {
+                let name = &find[22..]; // cFileName at byte 44
+                let len = name.iter().position(|&ch| ch == 0).unwrap_or(0);
+                if !names_eq(&name[..len], b".") && !names_eq(&name[..len], b"..") {
+                    let mut path = Path::new(temp, b"gala_k32\\");
+                    let at = temp.len() + 9;
+                    path.buf[at..at + len].copy_from_slice(&name[..len]);
+                    if find[0] & 0x10 != 0 {
+                        RemoveDirectoryW(path.ptr());
+                    } else {
+                        DeleteFileW(path.ptr());
+                    }
+                }
+                if FindNextFileW(f, find.as_mut_ptr()) == 0 {
+                    break;
+                }
+            }
+            FindClose(f);
+        }
+        RemoveDirectoryW(Path::new(temp, b"gala_k32").ptr());
+    }
+}
+
 fn names_eq(name: &[u16], s: &[u8]) -> bool {
     name.len() == s.len() && name.iter().zip(s).all(|(&a, &b)| a == u16::from(b))
+}
+
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
 }
 
 fn run() -> Result<(), u32> {
@@ -262,6 +311,11 @@ fn run() -> Result<(), u32> {
         let temp = &temp[..n]; // ends with a backslash
         let dir = Path::new(temp, b"gala_k32");
         let file = Path::new(temp, b"gala_k32\\a.txt");
+
+        // What an earlier run left (one that failed part-way does not get
+        // to its own cleanup) is removed first: the checks start from no
+        // directory.
+        remove_tree(temp);
 
         // Directories.
         c.ok(CreateDirectoryW(dir.ptr(), core::ptr::null_mut()) != 0, 0)?;
@@ -366,12 +420,14 @@ fn run() -> Result<(), u32> {
         c.eq(u64::from(info[3]) | u64::from(info[4]) << 32, JAN_2018)?; // ftLastAccessTime
         c.ok(FlushFileBuffers(h) != 0, 0)?;
         // ntdll's NtFlushBuffersFileEx (PostgreSQL's fdatasync): the data
-        // only (FLUSH_FLAGS_FILE_DATA_SYNC_ONLY); unknown flags are
-        // STATUS_INVALID_PARAMETER.
+        // only (FLUSH_FLAGS_FILE_DATA_SYNC_ONLY); a flag with no documented
+        // meaning (0x100) is not refused (Windows 11 25H2, NTFS).
         let mut iosb = [usize::MAX; 2];
         c.eq(NtFlushBuffersFileEx(h, 4, core::ptr::null(), 0, &mut iosb).into(), 0)?;
-        c.eq(iosb[0] as u64, 0)?;
-        c.eq(NtFlushBuffersFileEx(h, 0x100, core::ptr::null(), 0, &mut iosb).into(), 0xc000_000d)?;
+        // IO_STATUS_BLOCK.Status is a 32-bit NTSTATUS: Windows writes only
+        // the low half of the pointer-sized union.
+        c.eq(u64::from(iosb[0] as u32), 0)?;
+        c.eq(NtFlushBuffersFileEx(h, 0x100, core::ptr::null(), 0, &mut iosb).into(), 0)?;
         c.ok(CloseHandle(h) != 0, 0)?;
 
         // Attributes by path.
@@ -414,6 +470,52 @@ fn run() -> Result<(), u32> {
         c.ok(seen, 0)?;
         c.eq(GetLastError().into(), ERROR_NO_MORE_FILES.into())?;
         c.ok(FindClose(f) != 0, 0)?;
+
+        // Win32 patterns are DOS wildcards: `*.*` lists every name, ones
+        // without a dot too (CPython lists its Lib so), `*.txt` only that
+        // extension, `?` one character, `a.b*` a prefix with a dot.
+        for name in [&b"gala_k32\\noext"[..], b"gala_k32\\a.b.c"] {
+            let h = CreateFileW(
+                Path::new(temp, name).ptr(),
+                GENERIC_WRITE,
+                SHARE_ALL,
+                core::ptr::null_mut(),
+                2, // CREATE_ALWAYS
+                0,
+                core::ptr::null_mut(),
+            );
+            c.ok(h != INVALID_HANDLE_VALUE, GetLastError().into())?;
+            CloseHandle(h);
+        }
+        for (pattern, want) in [
+            (&b"gala_k32\\*.*"[..], 0b111u32),
+            (b"gala_k32\\*.txt", 0b001),
+            (b"gala_k32\\?.txt", 0b001),
+            (b"gala_k32\\no?xt", 0b010),
+            (b"gala_k32\\a.b*", 0b100),
+            (b"gala_k32\\*.c", 0b100),
+        ] {
+            let f = FindFirstFileW(Path::new(temp, pattern).ptr(), find.as_mut_ptr());
+            c.ok(f != INVALID_HANDLE_VALUE, GetLastError().into())?;
+            let mut got = 0u32;
+            loop {
+                let name = &find[22..];
+                let len = name.iter().position(|&ch| ch == 0).unwrap_or(0);
+                for (bit, known) in [&b"a.txt"[..], b"noext", b"a.b.c"].iter().enumerate() {
+                    if names_eq(&name[..len], known) {
+                        got |= 1 << bit;
+                    }
+                }
+                if FindNextFileW(f, find.as_mut_ptr()) == 0 {
+                    break;
+                }
+            }
+            FindClose(f);
+            c.eq(got.into(), want.into())?;
+        }
+        for name in [&b"gala_k32\\noext"[..], b"gala_k32\\a.b.c"] {
+            c.ok(DeleteFileW(Path::new(temp, name).ptr()) != 0, GetLastError().into())?;
+        }
 
         // The directory as a handle: volume flags and Go's listing classes.
         let d = CreateFileW(
@@ -603,12 +705,20 @@ fn run() -> Result<(), u32> {
         DeleteFileW(exfile.ptr());
 
         // DOS device names: C: is the volume's device, NUL the null
-        // device; the target is followed by two NULs (counted).
+        // device; the target is followed by two NULs (counted). The
+        // volume's number is the machine's (25H2 measured one digit, not
+        // 1: the EFI and recovery partitions come first); gala's is 1.
         let mut target = [0u16; 64];
         let c_drive = b"C:\0".map(u16::from);
         let n = QueryDosDeviceW(c_drive.as_ptr(), target.as_mut_ptr(), 64) as usize;
-        let volume = b"\\Device\\HarddiskVolume1\0\0".map(u16::from);
-        c.ok(n == volume.len() && target[..n] == volume, n as u64)?;
+        let prefix = b"\\Device\\HarddiskVolume".map(u16::from);
+        c.ok(n > prefix.len() + 2 && n <= 64 && target[..prefix.len()] == prefix, n as u64)?;
+        let digits = &target[prefix.len()..n - 2];
+        c.ok(digits.iter().all(|&d| (0x30..=0x39).contains(&d)), n as u64)?;
+        c.ok(target[n - 2..n] == [0, 0], n as u64)?;
+        if on_gala() {
+            c.ok(target[prefix.len()..n] == [u16::from(b'1'), 0, 0], n as u64)?;
+        }
         let null = b"NUL\0".map(u16::from);
         let n = QueryDosDeviceW(null.as_ptr(), target.as_mut_ptr(), 64) as usize;
         let device = b"\\Device\\Null\0\0".map(u16::from);
@@ -719,4 +829,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

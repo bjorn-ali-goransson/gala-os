@@ -9,9 +9,16 @@
 //!   around initialization with the apartment reference counts),
 //!   CoGetMalloc (the task allocator), GUID strings (CLSIDFromString,
 //!   IIDFromString, StringFromCLSID/IID), CoGetContextToken (CO_E_NOTINITIALIZED outside an apartment),
-//!   CoGetObjectContext and CoGetApartmentType (MTA), CoTaskMem*,
+//!   CoGetObjectContext and CoGetApartmentType (MTA; on a thread that
+//!   never initialized COM while the MTA exists: MTA, qualifier
+//!   APTTYPEQUALIFIER_IMPLICIT_MTA; CO_E_NOTINITIALIZED with no MTA),
+//!   the thread's OLE data (TEB.ReservedForOle) carrying the apartment
+//!   flags where programs read them (0x140 MTA, 0x80 STA, cleared when
+//!   the thread leaves),
+//!   CoTaskMem*,
 //!   CoCreateGuid (random version-4 GUIDs), CoGetClassObject
 //!   (REGDB_E_CLASSNOTREG), CLSIDFromProgID (CO_E_CLASSSTRING),
+//!   ProgIDFromCLSID (REGDB_E_CLASSNOTREG, the output null),
 //!   CreateStreamOnHGlobal (an IStream: write, seek, read, stat),
 //!   CoCreateFreeThreadedMarshaler (IMarshal), CoWaitForMultipleHandles
 //!   (RPC_S_CALLPENDING on timeout).
@@ -40,6 +47,80 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn CloseHandle(h: Handle) -> Bool;
     fn CreateEventW(attrs: *mut c_void, manual: Bool, initial: Bool, name: *const u16) -> Handle;
+    fn CreateThread(
+        attrs: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        param: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+}
+
+/// What an uninitialized thread's CoGetApartmentType gave: the HRESULT,
+/// the type and the qualifier.
+static mut IMPLICIT: [i32; 3] = [0; 3];
+
+extern "system" fn implicit_thread(_: *mut c_void) -> u32 {
+    let (mut kind, mut qualifier) = (-1, -1);
+    // SAFETY: plain calls; the static is read after the thread ends.
+    unsafe {
+        let hr = CoGetApartmentType(&mut kind, &mut qualifier);
+        IMPLICIT = [hr, kind, qualifier];
+    }
+    0
+}
+
+/// The apartment flags in the thread's OLE data (TEB.ReservedForOle, x64
+/// 0x1758: two pointers, the apartment id, then the flags, as Chromium's
+/// base::win::GetComApartmentTypeForThread reads them): 0x80 STA, 0x140
+/// MTA; 0 with no OLE data.
+fn ole_flags() -> u32 {
+    let teb: usize;
+    // SAFETY: gs:[0x30] is the TEB's self pointer; the OLE data, when
+    // there is some, is ole32's block of at least 24 bytes.
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, readonly));
+        let ole = *((teb + 0x1758) as *const usize);
+        if ole == 0 { 0 } else { *((ole + 20) as *const u32) }
+    }
+}
+
+/// An STA thread's flags: [after CoInitializeEx(STA), after
+/// CoUninitialize].
+static mut STA_FLAGS: [u32; 2] = [0; 2];
+
+extern "system" fn sta_thread(_: *mut c_void) -> u32 {
+    // SAFETY: plain calls; the static is read after the thread ends.
+    unsafe {
+        CoInitializeEx(core::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+        let inside = ole_flags();
+        CoUninitialize();
+        STA_FLAGS = [inside, ole_flags()];
+    }
+    0
+}
+
+/// CoGetApartmentType on a new thread that never initializes COM.
+fn on_uninitialized_thread() -> [i32; 3] {
+    // SAFETY: plain calls; the thread has ended when the static is read.
+    unsafe {
+        let t = CreateThread(
+            core::ptr::null_mut(),
+            0,
+            implicit_thread,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        if t.is_null() {
+            return [-1; 3];
+        }
+        WaitForSingleObject(t, 0xffff_ffff);
+        CloseHandle(t);
+        IMPLICIT
+    }
 }
 
 #[link(name = "ole32", kind = "raw-dylib")]
@@ -79,6 +160,7 @@ unsafe extern "system" {
         out: *mut *mut c_void,
     ) -> HResult;
     fn CLSIDFromProgID(progid: *const u16, clsid: *mut Guid) -> HResult;
+    fn ProgIDFromCLSID(clsid: *const Guid, progid: *mut *mut u16) -> HResult;
     fn CreateStreamOnHGlobal(global: Handle, delete: Bool, out: *mut *mut c_void) -> HResult;
     fn CoCreateFreeThreadedMarshaler(outer: *mut c_void, out: *mut *mut c_void) -> HResult;
     fn CoWaitForMultipleHandles(
@@ -264,6 +346,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -273,15 +356,18 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
     /// The UTF-16 text at `p` is `want` (not necessarily terminated).
+    #[track_caller]
     fn text(&mut self, p: *const u16, want: &str) -> Result<(), u32> {
         // SAFETY: at least `want.len()` characters at `p`.
         let same = unsafe { want.bytes().enumerate().all(|(i, b)| *p.add(i) == u16::from(b)) };
@@ -456,6 +542,30 @@ fn apartments(c: &mut Checks) -> Result<(), u32> {
         let (mut kind, mut qualifier) = (-1, -1);
         c.eq(hr(CoGetApartmentType(&mut kind, &mut qualifier)), S_OK)?;
         c.eq(kind as u64, 1)?; // APTTYPE_MTA
+        // While the MTA exists, a thread that never initialized COM is in
+        // it implicitly: APTTYPE_MTA, APTTYPEQUALIFIER_IMPLICIT_MTA (1).
+        let [implicit_hr, implicit_kind, implicit_qualifier] = on_uninitialized_thread();
+        c.eq(hr(implicit_hr), S_OK)?;
+        c.eq(implicit_kind as u64, 1)?;
+        c.eq(implicit_qualifier as u64, 1)?;
+        // The thread's OLE data says MTA where programs read it (Chromium:
+        // OleTlsData's apartment_flags), and an STA thread's says STA
+        // until it leaves.
+        c.eq(u64::from(ole_flags() & 0x1c0), 0x140)?;
+        let t = CreateThread(
+            core::ptr::null_mut(),
+            0,
+            sta_thread,
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        c.ok(!t.is_null(), 0)?;
+        WaitForSingleObject(t, 0xffff_ffff);
+        CloseHandle(t);
+        let [sta_inside, sta_after] = STA_FLAGS;
+        c.eq(u64::from(sta_inside & 0x1c0), 0x80)?;
+        c.eq(u64::from(sta_after & 0x1c0), 0)?;
         let mut context = core::ptr::null_mut();
         c.eq(hr(CoGetObjectContext(&IID_IUNKNOWN, &mut context)), S_OK)?;
         let mut info = core::ptr::null_mut();
@@ -472,6 +582,9 @@ fn apartments(c: &mut Checks) -> Result<(), u32> {
         CoUninitialize();
         c.ok((*me).post_uninit == 2 && (*me).last_refs == 0, (*me).last_refs.into())?;
         c.eq(hr(CoGetContextToken(&mut token)), 0x8004_01f0)?;
+        // The MTA's last thread has left: no implicit MTA any more.
+        c.eq(hr(on_uninitialized_thread()[0]), 0x8004_01f0)?; // CO_E_NOTINITIALIZED
+        c.eq(u64::from(ole_flags() & 0x1c0), 0)?;
         c.eq(hr(CoRevokeInitializeSpy(cookie)), S_OK)?;
         c.eq(hr(CoRevokeInitializeSpy(cookie)), 0x8007_0057)?; // E_INVALIDARG
         // Revoked: no longer told.
@@ -506,6 +619,9 @@ fn memory_guids_classes(c: &mut Checks) -> Result<(), u32> {
         let progid = w("Gala.NoSuchProgID");
         let mut clsid = [7u8; 16];
         c.eq(hr(CLSIDFromProgID(progid.as_ptr(), &mut clsid)), 0x8004_01f3)?; // CO_E_CLASSSTRING
+        let mut text = 7 as *mut u16;
+        c.eq(hr(ProgIDFromCLSID(&NOBODY, &mut text)), 0x8004_0154)?; // REGDB_E_CLASSNOTREG
+        c.ok(text.is_null(), text as u64)?;
 
         // An IStream on memory.
         let mut stream = core::ptr::null_mut();
@@ -614,10 +730,16 @@ fn automation(c: &mut Checks) -> Result<(), u32> {
         c.eq(hr(SafeArrayDestroy(sa)), S_OK)?;
         let mut sa = core::ptr::null_mut();
         c.eq(hr(SafeArrayAllocDescriptorEx(VT_I4, 1, &mut sa)), S_OK)?;
+        // FADF_HAVEVARTYPE and the VARTYPE before the descriptor, but no
+        // element size (Windows 11 25H2: cbElements 0, still 0 after
+        // SafeArrayAllocData, whose pvData is not NULL).
+        c.eq((*sa).features.into(), 0x80)?; // FADF_HAVEVARTYPE
+        c.eq((sa.cast::<u8>().sub(4) as *const u32).read().into(), VT_I4.into())?;
+        c.eq((*sa).element_size.into(), 0)?;
         (*sa).count = 3;
         (*sa).lower = 1;
         c.eq(hr(SafeArrayAllocData(sa)), S_OK)?;
-        c.ok(!(*sa).data.is_null() && (*sa).element_size == 4, 0)?;
+        c.ok(!(*sa).data.is_null() && (*sa).element_size == 0, (*sa).element_size.into())?;
         c.eq(hr(SafeArrayDestroy(sa)), S_OK)?;
 
         // Error info: none set.
@@ -735,4 +857,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

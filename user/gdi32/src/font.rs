@@ -169,8 +169,19 @@ pub fn metrics(f: &LogFont) -> Metrics {
         h => i64::from(h.min(1024)) * 64 * upem / (asc + desc),
     }
     .max(64);
-    let ascent = round_div(em64 * asc, 64 * upem);
-    let height = ascent + round_div(em64 * desc, 64 * upem);
+    // From an em (lfHeight <= 0) the cell and the ascent are truncated,
+    // not rounded: Segoe UI (whose winAscent, winDescent and unitsPerEm
+    // Selawik shares: 2210, 514, 2048) at lfHeight -12 is 15 high with 12
+    // above the baseline (Windows 11 25H2, 96 DPI; 12.95 and 15.96 before
+    // truncation). Only that size is measured. A cell height (lfHeight > 0)
+    // is kept as asked, so it rounds.
+    let (ascent, height) = if f.height <= 0 {
+        let ascent = (em64 * asc / (64 * upem)) as i32;
+        (ascent, (em64 * (asc + desc) / (64 * upem)) as i32)
+    } else {
+        let ascent = round_div(em64 * asc, 64 * upem);
+        (ascent, ascent + round_div(em64 * desc, 64 * upem))
+    };
     let average = selawik_average(SELAWIK[face])
         .map_or(em64 as i32 / 128, |avg| round_div(em64 * avg, 64 * upem));
     let kind = Kind::Selawik { face, em64: em64 as u32 };

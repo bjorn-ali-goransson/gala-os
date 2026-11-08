@@ -105,7 +105,7 @@ pub extern "system" fn CryptUnprotectMemory(data: *mut u8, size: u32, flags: u32
 
 /// CertGetNameStringA: CertGetNameStringW's name in the ANSI code page;
 /// the size in characters with the NUL (with a NULL buffer or `len` 0,
-/// the size needed).
+/// the size needed; with a buffer too small, 1 and an empty string).
 #[unsafe(no_mangle)]
 pub extern "system" fn CertGetNameStringA(
     cert: *const crate::cert::CertContext,
@@ -137,6 +137,14 @@ pub extern "system" fn CertGetNameStringA(
     if out.is_null() || len == 0 {
         return needed.max(0) as u32;
     }
+    // A buffer too small is not filled with a truncated name: the result
+    // is 1, an empty string (Windows 11 25H2, cert_test; that the buffer
+    // then holds a NUL is gala's choice, it was not measured).
+    if needed as u32 > len {
+        // SAFETY: the caller's buffer of `len` >= 1 bytes.
+        unsafe { out.write(0) };
+        return 1;
+    }
     let mut bytes = [0u8; 4096];
     // SAFETY: as above, into our buffer.
     let m = unsafe {
@@ -152,8 +160,8 @@ pub extern "system" fn CertGetNameStringA(
         )
     };
     let m = (m.max(1) as usize).min(len as usize);
-    // SAFETY: the caller's buffer of `len` >= `m` bytes; NUL-terminated
-    // (truncated as the W form truncates).
+    // SAFETY: the caller's buffer of `len` >= `m` bytes (the name fits);
+    // NUL-terminated.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, m);
         out.add(m - 1).write(0);
@@ -190,8 +198,9 @@ fn element(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
 }
 
 /// PFXIsPFXBlob: whether the blob's outer layer decodes as a PFX: a
-/// SEQUENCE of INTEGER 3 (the version) and a ContentInfo (a SEQUENCE
-/// starting with an OBJECT IDENTIFIER).
+/// SEQUENCE of an INTEGER (the version, not looked at: Windows 11 25H2
+/// said TRUE for version 1) and a ContentInfo (a SEQUENCE starting with an
+/// OBJECT IDENTIFIER).
 #[unsafe(no_mangle)]
 pub extern "system" fn PFXIsPFXBlob(pfx: *const DataBlob) -> i32 {
     if pfx.is_null() {
@@ -210,8 +219,8 @@ pub extern "system" fn PFXIsPFXBlob(pfx: *const DataBlob) -> i32 {
             return Some(false);
         }
         let outer = &b[..end];
-        let (tag, vs, ve) = element(outer, start)?;
-        if tag != 0x02 || outer[vs..ve] != [3] {
+        let (tag, _, ve) = element(outer, start)?;
+        if tag != 0x02 {
             return Some(false);
         }
         let (tag, cs, _) = element(outer, ve)?;

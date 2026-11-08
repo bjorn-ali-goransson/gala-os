@@ -5,7 +5,11 @@
 use super::sync::ansi_to_wide;
 use super::*;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaCreateProcess(parameters: *mut u8) -> u32;
 }
@@ -27,6 +31,41 @@ const IGNORED_FLAGS: u32 = DETACHED_PROCESS
     | CREATE_NO_WINDOW
     | CREATE_DEFAULT_ERROR_MODE;
 const STARTF_USESTDHANDLES: u32 = 0x100;
+
+/// STARTUPINFOW (and STARTUPINFOA, the same layout) followed by
+/// STARTUPINFOEXW's lpAttributeList.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct StartupInfoEx {
+    pub cb: u32,
+    reserved: usize,
+    desktop: usize,
+    title: usize,
+    position_and_size: [u32; 7],
+    pub flags: u32,
+    show_window: u16,
+    reserved2_len: u16,
+    reserved2: usize,
+    /// hStdInput, hStdOutput, hStdError.
+    pub std: [usize; 3],
+    pub attribute_list: usize,
+}
+
+/// sizeof(STARTUPINFOW): 104 on x64, 68 on x86.
+const STARTUPINFO_SIZE: usize = core::mem::offset_of!(StartupInfoEx, attribute_list);
+
+/// The most handles a 32-bit caller's PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+/// may name (widened for GalaCreateProcess on the stack).
+const MAX_HANDLE_LIST: usize = 64;
+
+/// STARTUPINFO.dwFlags.
+///
+/// # Safety
+/// `startup` is the caller's STARTUPINFO.
+unsafe fn startup_flags(startup: *const u8) -> u32 {
+    // SAFETY: as the caller promises.
+    unsafe { (*startup.cast::<StartupInfoEx>()).flags }
+}
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x2_0002;
 const PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY: usize = 0x2_0007;
@@ -244,7 +283,11 @@ pub extern "system" fn CreateProcessAsUserW(
     }
     // SeAssignPrimaryTokenPrivilege enabled for the call (a service holds
     // it disabled), then restored.
-    #[link(name = "ntdll", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn NtOpenProcessToken(process: isize, access: u32, token: *mut usize) -> u32;
         fn NtAdjustPrivilegesToken(
@@ -383,14 +426,10 @@ fn create_process(
         }
     };
     // Standard handles: from STARTUPINFO if it says so, else ours.
-    // SAFETY: the caller's STARTUPINFOW (dwFlags at 60, handles at 80).
+    // SAFETY: the caller's STARTUPINFOW.
     let std = unsafe {
-        if !startup.is_null() && *startup.add(60).cast::<u32>() & STARTF_USESTDHANDLES != 0 {
-            [
-                *startup.add(80).cast::<usize>(),
-                *startup.add(88).cast::<usize>(),
-                *startup.add(96).cast::<usize>(),
-            ]
+        if !startup.is_null() && startup_flags(startup) & STARTF_USESTDHANDLES != 0 {
+            (*startup.cast::<StartupInfoEx>()).std
         } else {
             [
                 GetStdHandle(-10i32 as u32) as usize,
@@ -399,10 +438,10 @@ fn create_process(
             ]
         }
     };
-    // STARTUPINFOEXW: lpAttributeList after the 104-byte STARTUPINFOW.
+    // STARTUPINFOEXW: lpAttributeList after the STARTUPINFOW.
     let list = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 && !startup.is_null() {
-        // SAFETY: the caller's STARTUPINFOEXW (cb is at least 112).
-        unsafe { *startup.add(104).cast::<*const AttributeList>() }
+        // SAFETY: the caller's STARTUPINFOEXW.
+        unsafe { (*startup.cast::<StartupInfoEx>()).attribute_list as *const AttributeList }
     } else {
         core::ptr::null()
     };
@@ -411,18 +450,19 @@ fn create_process(
     let pseudo_console = attribute(list, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE)
         // SAFETY: an HPCON from CreatePseudoConsole (a PseudoConsole).
         .map(|(value, _)| unsafe { *(value as *const u32) });
-    // SAFETY: the caller's STARTUPINFOW (dwFlags at 60).
+    // SAFETY: the caller's STARTUPINFOW.
     let own_std =
-        !startup.is_null() && unsafe { *startup.add(60).cast::<u32>() } & STARTF_USESTDHANDLES != 0;
+        !startup.is_null() && unsafe { startup_flags(startup) } & STARTF_USESTDHANDLES != 0;
     let mut p = [0u8; 184];
     let mut put = |at: usize, v: u64| p[at..at + 8].copy_from_slice(&v.to_le_bytes());
     put(0, image.chars.as_ptr() as u64);
     put(16, line.as_ptr() as u64);
     put(32, cwd.chars.as_ptr() as u64);
     put(48, env as u64);
-    put(64, std[0] as u64);
-    put(72, std[1] as u64);
-    put(80, std[2] as u64);
+    // Handles sign-extended (a 32-bit caller's INVALID_HANDLE_VALUE).
+    put(64, std[0] as isize as u64);
+    put(72, std[1] as isize as u64);
+    put(80, std[2] as isize as u64);
     let lens = [(8, image.len), (24, line.len()), (40, cwd.len), (56, block_len(env))];
     for (at, len) in lens {
         p[at..at + 4].copy_from_slice(&(len as u32).to_le_bytes());
@@ -434,27 +474,45 @@ fn create_process(
     if flags & CREATE_SUSPENDED != 0 {
         bits |= 2;
     }
-    // STARTUPINFO cbReserved2 (66) / lpReserved2 (72): the C runtime's
-    // inherited descriptors, for the child's RuntimeData.
+    // STARTUPINFO cbReserved2 / lpReserved2: the C runtime's inherited
+    // descriptors, for the child's RuntimeData.
     // SAFETY: the caller's STARTUPINFO.
     let (reserved_len, reserved) = if startup.is_null() {
         (0, 0)
     } else {
-        unsafe { (*startup.add(66).cast::<u16>(), *startup.add(72).cast::<u64>()) }
+        let s = unsafe { &*startup.cast::<StartupInfoEx>() };
+        (s.reserved2_len, s.reserved2 as u64)
     };
     if reserved_len != 0 && reserved != 0 {
         bits |= 8;
         p[136..144].copy_from_slice(&reserved.to_le_bytes());
         p[144..148].copy_from_slice(&u32::from(reserved_len).to_le_bytes());
     }
+    // The block's handle list holds 64-bit handles: a 32-bit caller's are
+    // widened (sign-extended) into `wide`.
+    let mut wide = [0u64; MAX_HANDLE_LIST];
     if let Some((handles, size)) = handle_list {
+        let count = size / size_of::<usize>();
+        let handles = if size_of::<usize>() == 8 {
+            handles as u64
+        } else if count <= MAX_HANDLE_LIST {
+            // SAFETY: the attribute's array of `count` handles.
+            let list = unsafe { core::slice::from_raw_parts(handles as *const usize, count) };
+            for (w, &h) in wide.iter_mut().zip(list) {
+                *w = h as isize as u64;
+            }
+            wide.as_ptr() as u64
+        } else {
+            unsupported(b"kernel32.dll!CreateProcess(handle list)", count as u64);
+            return fail_with(ERROR_NOT_SUPPORTED, FALSE);
+        };
         bits |= 4;
-        p[120..128].copy_from_slice(&(handles as u64).to_le_bytes());
-        p[128..132].copy_from_slice(&((size / 8) as u32).to_le_bytes());
+        p[120..128].copy_from_slice(&handles.to_le_bytes());
+        p[128..132].copy_from_slice(&(count as u32).to_le_bytes());
     }
     if token != 0 {
         bits |= 16;
-        p[152..160].copy_from_slice(&(token as u64).to_le_bytes());
+        p[152..160].copy_from_slice(&(token as isize as u64).to_le_bytes());
     }
     // Flag 32: attached to a pseudo console; 64: with its own standard
     // handles (the documented default without STARTF_USESTDHANDLES).
@@ -468,13 +526,13 @@ fn create_process(
         // Flag 128: no console at all.
         bits |= 128;
     }
-    // Flag 256: STARTUPINFO.lpDesktop (at 16), the window station and
-    // desktop the child connects to (else it inherits the caller's).
+    // Flag 256: STARTUPINFO.lpDesktop, the window station and desktop the
+    // child connects to (else it inherits the caller's).
     // SAFETY: the caller's STARTUPINFOW.
     let desktop = if startup.is_null() {
         core::ptr::null()
     } else {
-        unsafe { *startup.add(16).cast::<*const u16>() }
+        unsafe { (*startup.cast::<StartupInfoEx>()).desktop as *const u16 }
     };
     if !desktop.is_null() {
         bits |= 256;
@@ -605,24 +663,29 @@ fn create_process_a(
         Ok(p) => p,
         Err(e) => return fail_with(e, FALSE),
     };
-    // STARTUPINFOA's lpDesktop (at 16) as UTF-16, in a copy of the
-    // structure (STARTUPINFOEXA's 112 bytes with its attribute list).
+    // STARTUPINFOA's lpDesktop as UTF-16, in a copy of the structure
+    // (STARTUPINFOEXA's, with its attribute list).
     let mut desktop = [0u16; 260];
-    let mut startup_w = [0u64; 14];
+    // SAFETY: an all-zero STARTUPINFOEX is a valid bit pattern.
+    let mut startup_w: StartupInfoEx = unsafe { core::mem::zeroed() };
     let startup = if startup.is_null() {
         startup
     } else {
-        let size = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 { 112 } else { 104 };
+        let size = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 {
+            size_of::<StartupInfoEx>()
+        } else {
+            STARTUPINFO_SIZE
+        };
         // SAFETY: the caller's STARTUPINFO(EX)A of `size` bytes; our copy.
         unsafe {
-            core::ptr::copy_nonoverlapping(startup, startup_w.as_mut_ptr().cast::<u8>(), size);
+            core::ptr::copy_nonoverlapping(startup, (&raw mut startup_w).cast::<u8>(), size);
         }
-        let name = startup_w[2] as *const u8;
+        let name = startup_w.desktop as *const u8;
         match convert(name, &mut desktop) {
-            Ok(p) => startup_w[2] = p as u64,
+            Ok(p) => startup_w.desktop = p as usize,
             Err(e) => return fail_with(e, FALSE),
         }
-        startup_w.as_ptr().cast::<u8>()
+        (&raw const startup_w).cast::<u8>()
     };
     match token {
         Some(token) => CreateProcessAsUserW(
@@ -677,7 +740,11 @@ pub extern "system" fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u
     n as u32
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LdrGetDllFullName(module: Handle, name: *mut UnicodeString) -> u32;
     fn LdrSetDllDirectory(dir: *const UnicodeString) -> u32;
@@ -739,15 +806,14 @@ pub extern "system" fn GetDllDirectoryW(size: u32, buffer: *mut u16) -> u32 {
 /// ERROR_MOD_NOT_FOUND for an unknown handle.
 pub(crate) fn module_path(module: Handle) -> Result<([u16; 520], usize), u32> {
     let mut out = [0u16; 520];
-    // SAFETY: gs:[0x60] is the PEB; ImageBaseAddress at +0x10.
-    let image = unsafe { *((teb_u64(0x60) as usize + 0x10) as *const Handle) };
+    let image = mapping::image_base();
     if module.is_null() || module == image {
-        // RTL_USER_PROCESS_PARAMETERS.ImagePathName (UNICODE_STRING at +0x60).
+        // RTL_USER_PROCESS_PARAMETERS.ImagePathName (a UNICODE_STRING).
         // SAFETY: the PEB's process parameters are always set.
         let path = unsafe {
-            let params = *((teb_u64(0x60) as usize + 0x20) as *const usize);
-            let len = usize::from(*((params + 0x60) as *const u16)) / 2;
-            core::slice::from_raw_parts(*((params + 0x68) as *const *const u16), len)
+            let params = process_parameters() + PARAMS_IMAGE_PATH;
+            let len = usize::from(*(params as *const u16)) / 2;
+            core::slice::from_raw_parts(*((params + US_BUFFER) as *const *const u16), len)
         };
         let n = path.len().min(out.len());
         out[..n].copy_from_slice(&path[..n]);
@@ -983,21 +1049,10 @@ pub extern "system" fn GetProcessTimes(
 /// GetProcessId: PROCESS_BASIC_INFORMATION.UniqueProcessId.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetProcessId(process: Handle) -> u32 {
-    let mut info = [0u64; 6];
-    // SAFETY: a 48-byte PROCESS_BASIC_INFORMATION buffer.
-    let status = unsafe {
-        NtQueryInformationProcess(
-            process as isize,
-            0,
-            info.as_mut_ptr().cast(),
-            48,
-            core::ptr::null_mut(),
-        )
-    };
-    if status != STATUS_SUCCESS {
-        return fail(status, 0);
+    match process_basic(process) {
+        Ok(b) => b.pid as u32,
+        Err(status) => fail(status, 0),
     }
-    info[4] as u32
 }
 
 /// ProcessIdToSessionId(pid, *session): the caller's own from its PEB;
@@ -1050,12 +1105,37 @@ pub extern "system" fn WTSGetActiveConsoleSessionId() -> u32 {
     unsafe { core::ptr::read_volatile(0x7ffe_02d8 as *const u32) }
 }
 
-/// IsWow64Process: gala runs 64-bit processes only.
+/// Whether `process` is a 32-bit (WOW64) process: ProcessWow64Information
+/// (its PEB32, 0 for a 64-bit process); the status on failure.
+pub(crate) fn is_wow64(process: Handle) -> Result<bool, u32> {
+    let mut peb32 = 0usize;
+    // SAFETY: a ULONG_PTR buffer.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            26,
+            (&raw mut peb32).cast(),
+            size_of::<usize>() as u32,
+            core::ptr::null_mut(),
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return Err(status);
+    }
+    Ok(peb32 != 0)
+}
+
+/// IsWow64Process: whether `process` is a 32-bit program running through
+/// WOW64 (ARCHITECTURE "Plan: WOW64").
 #[unsafe(no_mangle)]
-pub extern "system" fn IsWow64Process(_process: Handle, wow64: *mut Bool) -> Bool {
+pub extern "system" fn IsWow64Process(process: Handle, wow64: *mut Bool) -> Bool {
+    let answer = match is_wow64(process) {
+        Ok(w) => w,
+        Err(status) => return fail(status, FALSE),
+    };
     if !wow64.is_null() {
         // SAFETY: the caller's output pointer.
-        unsafe { *wow64 = FALSE };
+        unsafe { *wow64 = Bool::from(answer) };
     }
     TRUE
 }
@@ -1083,7 +1163,11 @@ pub extern "system" fn OpenProcess(access: u32, inherit: Bool, id: u32) -> Handl
     h as Handle
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtReadVirtualMemory(
         p: Handle,
@@ -1164,23 +1248,26 @@ pub extern "system" fn CreateRemoteThread(
 #[unsafe(no_mangle)]
 pub extern "system" fn GetStartupInfoW(info: *mut u8) {
     let params = process_parameters();
-    // SAFETY: the caller's STARTUPINFOW (104 bytes); our parameters:
-    // standard handles at 0x20, RuntimeData (Length, Buffer) at 0xe0.
-    unsafe {
-        core::ptr::write_bytes(info, 0, 104);
-        info.cast::<u32>().write_unaligned(104);
-        info.add(60).cast::<u32>().write_unaligned(STARTF_USESTDHANDLES);
-        for i in 0..3 {
-            let h = *((params + 0x20 + 8 * i) as *const u64);
-            info.add(80 + 8 * i).cast::<u64>().write_unaligned(h);
-        }
-        let len = *((params + 0xe0) as *const u16);
-        let data = *((params + 0xe8) as *const u64);
-        if len != 0 && data != 0 {
-            info.add(66).cast::<u16>().write_unaligned(len);
-            info.add(72).cast::<u64>().write_unaligned(data);
-        }
+    // SAFETY: our parameters: the standard handles, RuntimeData (a
+    // UNICODE_STRING's Length and Buffer).
+    let (std, len, data) = unsafe {
+        (
+            *((params + PARAMS_STANDARD_INPUT) as *const [usize; 3]),
+            *((params + PARAMS_RUNTIME_DATA) as *const u16),
+            *((params + PARAMS_RUNTIME_DATA + US_BUFFER) as *const usize),
+        )
+    };
+    // SAFETY: an all-zero STARTUPINFO is a valid bit pattern.
+    let mut s: StartupInfoEx = unsafe { core::mem::zeroed() };
+    s.cb = STARTUPINFO_SIZE as u32;
+    s.flags = STARTF_USESTDHANDLES;
+    s.std = std;
+    if len != 0 && data != 0 {
+        s.reserved2_len = len;
+        s.reserved2 = data;
     }
+    // SAFETY: the caller's STARTUPINFOW (without the EX part).
+    unsafe { core::ptr::copy_nonoverlapping((&raw const s).cast::<u8>(), info, STARTUPINFO_SIZE) };
 }
 
 /// GetStartupInfoA: the same fields (the string fields stay null).
@@ -1192,16 +1279,15 @@ pub extern "system" fn GetStartupInfoA(info: *mut u8) {
 // ---- Small thread and processor functions ----
 
 /// The process's pointer-encoding secret, chosen at first use.
-static POINTER_COOKIE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static POINTER_COOKIE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-fn pointer_cookie() -> u64 {
+fn pointer_cookie() -> usize {
     use core::sync::atomic::Ordering;
     let c = POINTER_COOKIE.load(Ordering::Relaxed);
     if c != 0 {
         return c;
     }
-    // SAFETY: rdtsc only reads the time stamp counter.
-    let fresh = unsafe { core::arch::x86_64::_rdtsc() } | 1;
+    let fresh = rdtsc() as usize | 1;
     match POINTER_COOKIE.compare_exchange(0, fresh, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => fresh,
         Err(other) => other,
@@ -1213,13 +1299,13 @@ fn pointer_cookie() -> u64 {
 #[unsafe(no_mangle)]
 pub extern "system" fn EncodePointer(p: *mut c_void) -> *mut c_void {
     let c = pointer_cookie();
-    ((p as u64 ^ c).rotate_right((c & 63) as u32)) as *mut c_void
+    ((p as usize ^ c).rotate_right(c as u32 % usize::BITS)) as *mut c_void
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn DecodePointer(p: *mut c_void) -> *mut c_void {
     let c = pointer_cookie();
-    ((p as u64).rotate_left((c & 63) as u32) ^ c) as *mut c_void
+    ((p as usize).rotate_left(c as u32 % usize::BITS) ^ c) as *mut c_void
 }
 
 #[unsafe(no_mangle)]
@@ -1235,13 +1321,8 @@ pub extern "system" fn DecodeSystemPointer(p: *mut c_void) -> *mut c_void {
 /// IsDebuggerPresent: PEB.BeingDebugged.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsDebuggerPresent() -> Bool {
-    let peb: usize;
-    // SAFETY: gs:[0x60] is TEB.ProcessEnvironmentBlock; BeingDebugged is
-    // the byte at PEB+2.
-    unsafe {
-        core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
-        Bool::from(*((peb + 2) as *const u8))
-    }
+    // SAFETY: the PEB's BeingDebugged byte.
+    unsafe { Bool::from(*((peb() + PEB_BEING_DEBUGGED) as *const u8)) }
 }
 
 /// DebugBreak: a breakpoint exception.
@@ -1267,8 +1348,7 @@ pub extern "system" fn IsProcessorFeaturePresent(feature: u32) -> Bool {
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCurrentProcessorNumber() -> u32 {
     let mut aux = 0u32;
-    // SAFETY: rdtscp reads the time stamp counter and TSC_AUX.
-    unsafe { core::arch::x86_64::__rdtscp(&mut aux) };
+    rdtscp(&mut aux);
     aux & 0xfff
 }
 
@@ -1328,14 +1408,10 @@ pub extern "system" fn GetThreadTimes(
 /// GetThreadId: from ThreadBasicInformation's ClientId.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetThreadId(h: Handle) -> u32 {
-    let mut basic = [0u64; 6];
-    let mut ret = 0;
-    // SAFETY: a 48-byte THREAD_BASIC_INFORMATION buffer.
-    let status = unsafe { NtQueryInformationThread(h, 0, basic.as_mut_ptr().cast(), 48, &mut ret) };
-    if status != STATUS_SUCCESS {
-        return fail(status, 0);
+    match thread_basic(h) {
+        Ok(b) => b.client_id[1] as u32,
+        Err(status) => fail(status, 0),
     }
-    basic[3] as u32 // ClientId.UniqueThread
 }
 
 /// OpenThread: NtOpenThread on the thread's id (ERROR_INVALID_PARAMETER
@@ -1358,4 +1434,12 @@ pub extern "system" fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle
         return fail(status, core::ptr::null_mut());
     }
     h as Handle
+}
+
+/// SetProcessDEPPolicy: for 32-bit processes only; a 64-bit process (all
+/// of gala's: DEP is always on for them) gets ERROR_NOT_SUPPORTED, as
+/// documented.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetProcessDEPPolicy(_flags: u32) -> Bool {
+    fail_with(ERROR_NOT_SUPPORTED, FALSE)
 }

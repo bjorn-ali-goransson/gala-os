@@ -3,7 +3,7 @@
 //!
 //! - Predefined keys, zero- or sign-extended to 64 bits.
 //! - Keys real programs read exist: HKLM\SOFTWARE\Microsoft\Windows
-//!   NT\CurrentVersion (CurrentBuild "26100", CurrentMajorVersionNumber 10,
+//!   NT\CurrentVersion (CurrentBuild "26100" or the newer build a machine runs, CurrentMajorVersionNumber 10,
 //!   ProductName "Windows ..."), HKLM\SYSTEM\CurrentControlSet\Control\Nls
 //!   \CodePage, HARDWARE\DESCRIPTION\System\CentralProcessor\0,
 //!   HKCU\Environment, HKU\.DEFAULT. Names are case-insensitive.
@@ -299,6 +299,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -308,15 +309,18 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
     /// A Reg* result of ERROR_SUCCESS.
+    #[track_caller]
     fn ok0(&mut self, r: i32) -> Result<(), u32> {
         self.eq(r as u64, 0)
     }
@@ -344,6 +348,26 @@ fn a(s: &str) -> [u8; 96] {
 }
 
 /// Whether the UTF-16 units `got` are `want` (ASCII).
+/// Whether `got` is the running build's number ("26100" on gala; a real
+/// machine may run a newer one): what CurrentBuild holds.
+fn is_build(got: &[u16]) -> bool {
+    let mut n = os_build();
+    let mut digits = [0u16; 5];
+    for d in digits.iter_mut().rev() {
+        *d = u16::from(b'0') + (n % 10) as u16;
+        n /= 10;
+    }
+    got == digits
+}
+
+/// The running build: KUSER_SHARED_DATA's NtBuildNumber (+0x260, the page
+/// at 0x7ffe0000 in every process). gala's is its pinned 26100; a real
+/// machine may run a newer build, which the checks follow.
+fn os_build() -> u32 {
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process.
+    unsafe { core::ptr::read_volatile(0x7ffe_0260 as *const u32) }
+}
+
 fn same(got: &[u16], want: &str) -> bool {
     got.len() == want.len() && got.iter().zip(want.bytes()).all(|(&g, b)| g == u16::from(b))
 }
@@ -415,7 +439,7 @@ fn seeded(c: &mut Checks) -> Result<(), u32> {
             data.as_mut_ptr(),
             &mut size,
         ))?;
-        c.ok(same(&units(&data[..10])[..5], "26100"), size.into())?;
+        c.ok(is_build(&units(&data[..10])[..5]), size.into())?;
         // Value names are case-insensitive too.
         let mut major = 0u32;
         size = 4;
@@ -488,7 +512,7 @@ fn seeded(c: &mut Checks) -> Result<(), u32> {
             &mut size,
         ))?;
         c.eq(size.into(), 12)?;
-        c.ok(same(&buf[..6], "26100\0"), buf[0].into())?;
+        c.ok(is_build(&buf[..5]) && buf[5] == 0, buf[0].into())?;
         // The wrong type.
         size = 64;
         let r = RegGetValueW(
@@ -564,8 +588,11 @@ fn seeded(c: &mut Checks) -> Result<(), u32> {
         );
         c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
         c.eq(RegCloseKey(0x1234) as u64, ERROR_INVALID_HANDLE)?;
-        // Predefined keys close successfully.
-        c.ok0(RegCloseKey(HKEY_LOCAL_MACHINE))?;
+        // A predefined key closes successfully in its sign-extended form
+        // (the SDK's HKEY on x64; checked above); the same number
+        // zero-extended, which the other calls take as the key, is no
+        // handle to RegCloseKey: ERROR_INVALID_HANDLE (Windows 25H2).
+        c.eq(RegCloseKey(HKEY_LOCAL_MACHINE) as u64, ERROR_INVALID_HANDLE)?;
     }
     Ok(())
 }
@@ -962,7 +989,8 @@ fn nt(c: &mut Checks, test: Hkey) -> Result<(), u32> {
         c.eq(ret.into(), 24)?;
         c.eq(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]).into(), REG_SZ.into())?;
         c.eq(u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]).into(), 12)?;
-        c.ok(same(&units(&buf[12..24])[..6], "26100\0"), buf[12].into())?;
+        let got = units(&buf[12..24]);
+        c.ok(is_build(&got[..5]) && got[5] == 0, buf[12].into())?;
         ret = 0;
         let r = NtQueryValueKey(key, &build_name, 2, buf.as_mut_ptr(), 12, &mut ret);
         c.eq(r.into(), STATUS_BUFFER_OVERFLOW)?;
@@ -1024,4 +1052,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

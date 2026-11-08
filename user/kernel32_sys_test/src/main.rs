@@ -1,8 +1,11 @@
 //! More of kernel32, the process-level functions the Go runtime calls at
 //! startup, with the results real Windows gives when standard output is
 //! redirected (as `run-all.ps1` runs it, and as gala's serial console is):
-//! console mode fails with ERROR_INVALID_HANDLE (and WriteConsoleW, unless
-//! the handle is a character device: gala's serial console); error modes,
+//! console mode fails with ERROR_INVALID_HANDLE, and WriteConsoleW (unless
+//! the handle is a character device: gala's serial console) fails with
+//! ERROR_INVALID_FUNCTION on a pipe and ERROR_INVALID_HANDLE on a file
+//! (also on a pipe and a file made here, and WriteConsoleA the same);
+//! error modes,
 //! WER flags, priority boost and console control handlers are kept;
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
@@ -20,6 +23,7 @@ use core::ffi::c_void;
 
 type Bool = i32;
 type Handle = *mut c_void;
+const INVALID_HANDLE_VALUE: Handle = usize::MAX as Handle;
 
 #[repr(C)]
 #[derive(Default)]
@@ -57,6 +61,13 @@ unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetConsoleMode(h: Handle, mode: *mut u32) -> Bool;
+    fn WriteConsoleA(
+        h: Handle,
+        buf: *const u8,
+        len: u32,
+        written: *mut u32,
+        reserved: *mut c_void,
+    ) -> Bool;
     fn WriteConsoleW(
         h: Handle,
         buf: *const u16,
@@ -106,6 +117,18 @@ unsafe extern "system" {
     fn VirtualQuery(addr: *const c_void, info: *mut MemoryBasicInformation, len: usize) -> usize;
     fn SwitchToThread() -> Bool;
     fn GetFileType(h: Handle) -> u32;
+    fn GetModuleFileNameW(module: Handle, buf: *mut u16, len: u32) -> u32;
+    fn CreatePipe(read: *mut Handle, write: *mut Handle, sa: *const c_void, size: u32) -> Bool;
+    fn GetTempPathW(n: u32, buf: *mut u16) -> u32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sa: *const c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
     fn GetCommandLineW() -> *const u16;
     fn ExitProcess(code: u32) -> !;
 }
@@ -142,6 +165,7 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_INVALID_FUNCTION: u32 = 1;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const WAIT_TIMEOUT: u32 = 258;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
@@ -191,6 +215,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -200,10 +225,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -224,14 +251,57 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.eq(GetConsoleMode(stdout, &mut mode) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
-        // WriteConsoleW fails on redirected output (a file or pipe); gala's
-        // serial console is a character device, which it writes to.
-        if GetFileType(stdout) != 2 {
+        // WriteConsoleW fails on redirected output: ERROR_INVALID_FUNCTION
+        // on a pipe, ERROR_INVALID_HANDLE on a file (what Windows gives).
+        // gala's serial console is a character device, which it writes to.
+        let kind = GetFileType(stdout);
+        if kind != 2 {
             let mut written = 0;
             SetLastError(0);
             c.eq(WriteConsoleW(stdout, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
-            c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+            let expected = if kind == 3 { ERROR_INVALID_FUNCTION } else { ERROR_INVALID_HANDLE };
+            c.eq(GetLastError().into(), expected.into())?;
         }
+        // The same on handles made here, whatever standard output is.
+        let (mut read, mut write) = (0 as Handle, 0 as Handle);
+        c.ok(CreatePipe(&mut read, &mut write, core::ptr::null(), 0) != 0, GetLastError().into())?;
+        let mut written = 0;
+        SetLastError(0);
+        c.eq(WriteConsoleW(write, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_FUNCTION.into())?;
+        // WriteConsoleA: the same (the error follows the handle's type).
+        SetLastError(0);
+        c.eq(
+            WriteConsoleA(write, b"x".as_ptr(), 1, &mut written, core::ptr::null_mut()) as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), ERROR_INVALID_FUNCTION.into())?;
+        CloseHandle(read);
+        CloseHandle(write);
+        let mut path = [0u16; 300];
+        let n = GetTempPathW(260, path.as_mut_ptr()) as usize;
+        c.ok(n > 0 && n < 260, GetLastError().into())?;
+        for (i, ch) in "gala_wc.tmp\0".encode_utf16().enumerate() {
+            path[n + i] = ch;
+        }
+        // FILE_FLAG_DELETE_ON_CLOSE: nothing is left behind.
+        let file = CreateFileW(
+            path.as_ptr(),
+            0x4000_0000,
+            0,
+            core::ptr::null(),
+            2,
+            0x0400_0000,
+            0 as Handle,
+        );
+        c.ok(file != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        SetLastError(0);
+        c.eq(WriteConsoleW(file, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+        SetLastError(0);
+        c.eq(WriteConsoleA(file, b"x".as_ptr(), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+        CloseHandle(file);
 
         // Process settings that are kept.
         let old = SetErrorMode(0x8003);
@@ -340,7 +410,21 @@ fn run() -> Result<(), u32> {
         // LoadLibraryW, and LoadLibraryExW searching System32 only.
         // By a full path with forward slashes first (PostgreSQL loads its
         // modules so), then by name: the same module.
-        let by_path = LoadLibraryW(w!("C:/gala/testdll.dll"));
+        // The DLL next to this program (C:\gala on gala, user\bin on
+        // Windows), its path written with forward slashes.
+        let mut path = [0u16; 300];
+        let n = GetModuleFileNameW(core::ptr::null_mut(), path.as_mut_ptr(), 260) as usize;
+        c.ok(n > 0 && n < 260, GetLastError().into())?;
+        let dir = path[..n].iter().rposition(|&ch| ch == u16::from(b'\\')).map_or(0, |i| i + 1);
+        for ch in &mut path[..dir] {
+            if *ch == u16::from(b'\\') {
+                *ch = u16::from(b'/');
+            }
+        }
+        for (i, ch) in "testdll.dll\0".encode_utf16().enumerate() {
+            path[dir + i] = ch;
+        }
+        let by_path = LoadLibraryW(path.as_ptr());
         c.ok(!by_path.is_null(), GetLastError().into())?;
         let dll = LoadLibraryW(w!("testdll.dll"));
         c.ok(dll == by_path, 0)?;
@@ -461,4 +545,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

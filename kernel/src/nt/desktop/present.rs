@@ -14,8 +14,8 @@ use super::Rect;
 use super::platform;
 use alloc::vec::Vec;
 
-/// The size of a desktop no screen sizes (the window state's, which the
-/// server kernel's desktops have too).
+/// The size of a desktop no screen sizes (the window state's, which bare
+/// desktops have too).
 pub use super::super::winstate::DEFAULT_SIZE;
 
 /// The largest side of a Test frame (as of a window).

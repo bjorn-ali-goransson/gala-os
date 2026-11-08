@@ -19,6 +19,7 @@ use crate::frame::{self, TITLE};
 use crate::grid;
 use crate::items::{self, Kind};
 use crate::menus;
+use crate::providers;
 use crate::{
     E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, EnumWindows, GetAncestor, GetClassNameW,
     GetDesktopWindow, GetDlgCtrlID, GetFocus, GetWindow, GetWindowLongW, GetWindowRect,
@@ -92,6 +93,7 @@ const TAB: i32 = 50018;
 pub const TEXT: i32 = 50020;
 const TOOL_BAR: i32 = 50021;
 const TREE: i32 = 50023;
+const CUSTOM: i32 = 50025;
 const GROUP: i32 = 50026;
 const SEPARATOR: i32 = 50038;
 pub const WINDOW: i32 = 50032;
@@ -111,6 +113,9 @@ const GW_CHILD: u32 = 5;
 const GA_PARENT: u32 = 1;
 /// UiaAppendRuntimeId's first part for HWND-based elements.
 const RUNTIME_ID_HWND: i32 = 42;
+
+/// A node that is a provider's fragment (Node::fragment).
+pub const FRAGMENT: u8 = 6;
 
 /// What an element stands for: a window, item `item` of the list
 /// control `hwnd`, or (`menu` nonzero, menus.rs) the menu bar of window
@@ -136,6 +141,12 @@ impl Node {
 
     pub const fn menu(hwnd: Hwnd, item: Option<u32>, menu: u8) -> Node {
         Node { hwnd, item, menu, col: 0 }
+    }
+
+    /// Fragment `handle` of the provider of window `hwnd`
+    /// (providers.rs).
+    pub const fn fragment(hwnd: Hwnd, handle: u32) -> Node {
+        Node { hwnd, item: Some(handle), menu: FRAGMENT, col: 0 }
     }
 
     /// Item `row`'s cell in column `col` of report-view list view `hwnd`
@@ -166,6 +177,9 @@ pub fn alive(h: Hwnd) -> bool {
 /// Whether the element is still there: its window, and for an item its
 /// index within the list's count.
 pub fn exists(n: Node) -> bool {
+    if let Some(handle) = fragment_handle(n) {
+        return alive(n.hwnd) && providers::alive(n.hwnd, handle);
+    }
     if is_grid_node(n) {
         return alive(n.hwnd) && grid::exists(n);
     }
@@ -209,6 +223,12 @@ fn tree_owner(h: Hwnd) -> Hwnd {
 /// owned window's its owner.
 pub fn parent(n: Node) -> Option<Node> {
     let h = n.hwnd;
+    if let Some(handle) = fragment_handle(n) {
+        return Some(match providers::navigate_from(h, handle, providers::PARENT) {
+            providers::Toward::Fragment(p) => Node::fragment(h, p),
+            _ => Node::window(h),
+        });
+    }
     if is_grid_node(n) {
         return Some(grid::parent(n));
     }
@@ -251,6 +271,14 @@ extern "system" fn collect(h: Hwnd, data: isize) -> i32 {
 /// items.
 pub fn children(n: Node, out: &mut List<Node>) {
     let h = n.hwnd;
+    if let Some(handle) = fragment_handle(n) {
+        if let providers::Toward::Fragment(first) =
+            providers::navigate_from(h, handle, providers::FIRST_CHILD)
+        {
+            fragment_siblings(h, first, out);
+        }
+        return;
+    }
     if n.menu == TITLE {
         // The title bar: its buttons.
         frame::children(n, out);
@@ -322,6 +350,33 @@ pub fn children(n: Node, out: &mut List<Node>) {
     }
     // A header control: its items.
     grid::children(n, out);
+    // The window's provider's fragments (when it is a fragment root).
+    if h != desktop()
+        && let Some(first) = providers::root_child(h, providers::FIRST_CHILD)
+    {
+        fragment_siblings(h, first, out);
+    }
+}
+
+/// The fragment that is node `n` (its handle), if it is one.
+pub fn fragment_handle(n: Node) -> Option<u32> {
+    if n.menu == FRAGMENT { n.item } else { None }
+}
+
+/// Fragment `first` of window `h` and its next siblings, in order (4096
+/// at most).
+fn fragment_siblings(h: Hwnd, first: u32, out: &mut List<Node>) {
+    let mut at = first;
+    for _ in 0..4096 {
+        if !out.push(Node::fragment(h, at)) {
+            return;
+        }
+        match providers::navigate_from(h, at, providers::NEXT_SIBLING) {
+            providers::Toward::Fragment(next) => at = next,
+            _ => return,
+        }
+    }
+    missing(b"UIAutomationCore.dll!fragments(over 4096 siblings)", h as u64);
 }
 
 /// Whether the node is a cell or a header item (grid.rs).
@@ -429,6 +484,7 @@ fn localized_control_type(t: i32) -> &'static str {
         TITLE_BAR => "title bar",
         HEADER => "header",
         HEADER_ITEM => "header item",
+        CUSTOM => "custom",
         _ => "pane",
     }
 }
@@ -576,7 +632,70 @@ pub fn property(n: Node, id: i32) -> Variant {
 }
 
 /// A property's current value; None when the element does not support it.
+/// A window with a provider (providers.rs) answers first.
 fn lookup(n: Node, id: i32) -> Option<Variant> {
+    if let Some(handle) = fragment_handle(n) {
+        return fragment_lookup(n, handle, id);
+    }
+    if n.item.is_none()
+        && n.menu == 0
+        && !is_grid_node(n)
+        && let Some(v) = providers::provided(n.hwnd, id)
+    {
+        return Some(v);
+    }
+    window_lookup(n, id)
+}
+
+/// A fragment's property: the provider's value, else the defaults a
+/// provider-only element has (ProcessId its window's, enabled, a control
+/// and content element, empty strings, ControlType Custom, no patterns).
+fn fragment_lookup(n: Node, handle: u32, id: i32) -> Option<Variant> {
+    if let Some(v) = providers::fragment_property(n.hwnd, handle, id) {
+        return Some(v);
+    }
+    Some(match id {
+        PROCESS_ID => {
+            let mut pid = 0;
+            // SAFETY: our output.
+            unsafe { GetWindowThreadProcessId(n.hwnd, &mut pid) };
+            Variant::int(pid as i32)
+        }
+        CONTROL_TYPE => Variant::int(CUSTOM),
+        LOCALIZED_CONTROL_TYPE => {
+            let t = providers::fragment_property(n.hwnd, handle, CONTROL_TYPE)
+                .filter(|v| v.vt == crate::VT_I4)
+                .map_or(CUSTOM, |v| v.as_int());
+            Variant::bstr(bstr_str(localized_control_type(t)))
+        }
+        NAME | AUTOMATION_ID | CLASS_NAME | ACCELERATOR_KEY | ACCESS_KEY | HELP_TEXT
+        | ITEM_TYPE | ITEM_STATUS | ARIA_ROLE | ARIA_PROPERTIES | FRAMEWORK_ID => {
+            Variant::bstr(bstr(&[]))
+        }
+        IS_ENABLED | IS_CONTROL_ELEMENT | IS_CONTENT_ELEMENT => Variant::boolean(true),
+        IS_OFFSCREEN | IS_PASSWORD | HAS_KEYBOARD_FOCUS | IS_KEYBOARD_FOCUSABLE => {
+            Variant::boolean(false)
+        }
+        PROVIDER_DESCRIPTION => Variant::bstr(bstr_str("[gala: provider fragment]")),
+        30027..=30044 => {
+            Variant::boolean(pattern::supports(n, PATTERN_AVAILABLE[(id - 30027) as usize]))
+        }
+        _ => return None,
+    })
+}
+
+/// The window's own value of a property (the host provider's), whatever
+/// provider the window has: as `property`.
+pub fn window_property(n: Node, id: i32) -> Variant {
+    window_lookup(n, id).unwrap_or(if id == NATIVE_WINDOW_HANDLE {
+        Variant::int(0)
+    } else {
+        Variant::EMPTY
+    })
+}
+
+/// A property's value from the node itself (the window, item or part).
+fn window_lookup(n: Node, id: i32) -> Option<Variant> {
     let h = n.hwnd;
     if is_grid_node(n) {
         return grid_lookup(n, id);
@@ -908,6 +1027,16 @@ fn menu_rect(n: Node, menu: &menus::Menu) -> Option<[i32; 4]> {
 
 /// The element's rectangle on the screen.
 fn node_rect(n: Node) -> [i32; 4] {
+    if let Some(handle) = fragment_handle(n) {
+        // The provider's (left, top, width, height) in doubles.
+        let Some(mut v) = providers::fragment_property(n.hwnd, handle, BOUNDING_RECTANGLE) else {
+            return [0; 4];
+        };
+        let r = providers::doubles(&v);
+        v.clear();
+        let [l, t, w, h] = [0, 1, 2, 3].map(|i| r.as_slice().get(i).copied().unwrap_or(0.0) as i32);
+        return [l, t, l + w, t + h];
+    }
     if is_grid_node(n) {
         return grid::rect(n);
     }

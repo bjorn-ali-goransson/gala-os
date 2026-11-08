@@ -9,5 +9,18 @@ publish.workspace = true
 # R8: signs the test images' manifests (xtask/src/trust.rs); the kernel
 # verifies with the same crate.
 ed25519-compact = { version = "=2.6.0", default-features = false }
+# R8 step 4: the update feed's TUF metadata (user/tuf; xtask/src/feed.rs).
+tuf = { path = "../user/tuf" }
+# LN: the analyzers of `cargo xtask lint` parse the source (xtask/src/lint.rs);
+# span-locations for findings' line numbers.
+syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "visit", "printing"] }
+proc-macro2 = { version = "=1.0.107", default-features = false, features = ["span-locations"] }
+# OT: gzip of the OTLP requests xtask sends (xtask/src/otel/send.rs).
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 fontdue = { version = "0.9.5", default-features = false, features = ["hashbrown"] }
 resvg = { version = "0.49.0", default-features = false }
+
+# lx-expect closes the descriptors xtask inherited before it runs the Linux
+# test programs (xtask/src/lx_expect.rs, `close_inherited`).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "=0.2.191", default-features = false }

@@ -18,7 +18,7 @@ listen(999) = -9 (EBADF)
 setsockopt(SO_REUSEADDR, 1) = 0
   getsockopt(SO_REUSEADDR) is set = yes
 bind(short address) = -22 (EINVAL)
-bind(AF_INET6 address to an AF_INET socket) = -22 (EINVAL)
+bind(AF_INET6 address to an AF_INET socket) = -97 (EAFNOSUPPORT)
 bind(127.0.0.1:0) = 0
 bind again = -22 (EINVAL)
 getsockname = 0
@@ -79,5 +79,13 @@ connect(non-blocking, closed port) = EINPROGRESS or ECONNREFUSED = yes
 child: exited 0
 read(client) the child's answer = 11 "served:ping"
 read(client) then (the child closed it) = 0
+-- many listeners
+listeners at backlog 511 = 12
+  each accepted a connection and echoed a byte = 12
+-- a full backlog
+listen(1), 4 non-blocking connects: connected within 300 ms = 2
+  refused or failed = 0
+  accepted, one by one = 4
+  clients with SO_ERROR 0 = 4
 socket_test: ok
 -- exit status 0

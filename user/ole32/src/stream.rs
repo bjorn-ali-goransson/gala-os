@@ -28,7 +28,11 @@ use super::{
     VTable, alloc, com_call, free, ole_iid, put,
 };
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GlobalAlloc(flags: u32, bytes: usize) -> usize;
     fn GlobalReAlloc(mem: usize, bytes: usize, flags: u32) -> usize;

@@ -36,7 +36,11 @@ struct ObjectAttributes {
     qos: usize,
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtOpenKey(out: *mut usize, access: u32, attributes: *const ObjectAttributes) -> u32;
     fn NtCreateKey(
@@ -87,7 +91,11 @@ unsafe extern "system" {
     fn RtlNtStatusToDosError(status: u32) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, bytes: usize) -> *mut u8;
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
@@ -131,6 +139,8 @@ const DELETE: u32 = 0x0001_0000;
 const KEY_QUERY_VALUE: u32 = 0x0001;
 const KEY_SET_VALUE: u32 = 0x0002;
 const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
+/// KEY_WOW64_64KEY | KEY_WOW64_32KEY: which registry view a name is in.
+const KEY_WOW64_RES: u32 = 0x0300;
 const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 const REG_OPENED_EXISTING_KEY: u32 = 2;
 
@@ -318,8 +328,8 @@ static PREDEFINED: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
 /// programs pass zero- or sign-extended (winreg.h's `(HKEY)(ULONG_PTR)
 /// ((LONG)0x80000000)` is 0xFFFFFFFF80000000 on x64).
 fn predefined(key: usize) -> Option<usize> {
-    let high = key >> 32;
-    let low = key & 0xffff_ffff;
+    let high = (key as u64) >> 32;
+    let low = (key as u64 & 0xffff_ffff) as usize;
     let extended = high == 0 || high == 0xffff_ffff;
     (extended && (HKEY_CLASSES_ROOT..=HKEY_CLASSES_ROOT + 7).contains(&low))
         .then(|| low - HKEY_CLASSES_ROOT)
@@ -380,7 +390,9 @@ fn descriptor_of(sa: *mut c_void) -> usize {
     if sa.is_null() {
         0
     } else {
-        unsafe { sa.cast::<u8>().add(8).cast::<usize>().read_unaligned() }
+        unsafe {
+            sa.cast::<super::layout::SecurityAttributes>().read_unaligned().descriptor as usize
+        }
     }
 }
 
@@ -590,7 +602,12 @@ pub extern "system" fn RegOpenCurrentUser(access: u32, out: *mut usize) -> i32 {
 /// RegCloseKey: predefined keys stay open.
 #[unsafe(no_mangle)]
 pub extern "system" fn RegCloseKey(key: usize) -> i32 {
-    if predefined(key).is_some() {
+    // A predefined key in its sign-extended form (as the SDK's HKEY
+    // constants are on x64) closes with nothing to do; the same number
+    // zero-extended, which other calls take as the predefined key, is a
+    // handle to NtClose here (ERROR_INVALID_HANDLE), as on Windows.
+    let sign_extended = (key as u64) >> 32 == 0xffff_ffff || usize::BITS == 32;
+    if sign_extended && predefined(key).is_some() {
         return ERROR_SUCCESS;
     }
     // SAFETY: plain call.
@@ -670,7 +687,8 @@ fn create_w(
     let mut at = Opened { h: base, owned: false };
     for (i, part) in parts.enumerate() {
         let last = i + 1 == count;
-        let want = if last { access } else { MAXIMUM_ALLOWED };
+        // The keys on the way are in the view the caller names too.
+        let want = if last { access } else { MAXIMUM_ALLOWED | access & KEY_WOW64_RES };
         let sd = if last { descriptor } else { 0 };
         match create_one(at.h, part, if last { class } else { &[] }, options, want, sd) {
             Ok((h, d)) if last => {
@@ -1457,11 +1475,13 @@ fn info_counts(
 
 // ---- Deleting keys ----
 
-fn delete_key(key: usize, sub: &[u16]) -> i32 {
+/// Deletes `sub` below `key`, in the registry view `view` names
+/// (KEY_WOW64_32KEY, KEY_WOW64_64KEY, or 0 for the caller's own).
+fn delete_key(key: usize, sub: &[u16], view: u32) -> i32 {
     if sub.is_empty() {
         return ERROR_INVALID_PARAMETER;
     }
-    let opened = match subkey(key, sub, DELETE) {
+    let opened = match subkey(key, sub, DELETE | view & KEY_WOW64_RES) {
         Ok(o) => o,
         Err(e) => return e,
     };
@@ -1472,37 +1492,41 @@ fn delete_key(key: usize, sub: &[u16]) -> i32 {
 /// RegDeleteKeyW(hKey, lpSubKey): the key must have no subkeys.
 #[unsafe(no_mangle)]
 pub extern "system" fn RegDeleteKeyW(key: usize, sub: *const u16) -> i32 {
-    delete_key(key, wide_arg(sub))
+    delete_key(key, wide_arg(sub), 0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn RegDeleteKeyA(key: usize, sub: *const u8) -> i32 {
     match ansi_to_wide(sub, None) {
-        Ok(s) => delete_key(key, s.as_ref().map_or(&[], WStr::units)),
+        Ok(s) => delete_key(key, s.as_ref().map_or(&[], WStr::units), 0),
         Err(e) => e,
     }
 }
 
-/// RegDeleteKeyExW(hKey, lpSubKey, samDesired, Reserved): one registry
-/// view here, so samDesired's WOW64 flags change nothing.
+/// RegDeleteKeyExW(hKey, lpSubKey, samDesired, Reserved): samDesired's
+/// KEY_WOW64_32KEY or KEY_WOW64_64KEY names the registry view the key is
+/// deleted from (the kernel resolves the name in it).
 #[unsafe(no_mangle)]
 pub extern "system" fn RegDeleteKeyExW(
     key: usize,
     sub: *const u16,
-    _access: u32,
+    access: u32,
     _reserved: u32,
 ) -> i32 {
-    delete_key(key, wide_arg(sub))
+    delete_key(key, wide_arg(sub), access)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn RegDeleteKeyExA(
     key: usize,
     sub: *const u8,
-    _access: u32,
+    access: u32,
     _reserved: u32,
 ) -> i32 {
-    RegDeleteKeyA(key, sub)
+    match ansi_to_wide(sub, None) {
+        Ok(s) => delete_key(key, s.as_ref().map_or(&[], WStr::units), access),
+        Err(e) => e,
+    }
 }
 
 /// Deletes every subkey of `h` (depth first) and, if `values`, its values.

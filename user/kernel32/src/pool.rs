@@ -645,6 +645,25 @@ pub extern "system" fn CopyFileExW(
     copy_file(from, to, flags & COPY_FILE_FAIL_IF_EXISTS != 0)
 }
 
+/// CopyFile2(pwszExistingFileName, pwszNewFileName, pExtendedParameters):
+/// CopyFileExW with COPYFILE2_EXTENDED_PARAMETERS' flags
+/// (COPY_FILE_FAIL_IF_EXISTS; no progress callback or cancellation), the
+/// result as an HRESULT (HRESULT_FROM_WIN32 of the error).
+#[unsafe(no_mangle)]
+pub extern "system" fn CopyFile2(from: *const u16, to: *const u16, params: *const u8) -> i32 {
+    // COPYFILE2_EXTENDED_PARAMETERS { dwSize, dwCopyFlags, ... }.
+    let flags = if params.is_null() {
+        0
+    } else {
+        // SAFETY: the caller's structure, at least its first two DWORDs.
+        unsafe { params.add(4).cast::<u32>().read_unaligned() }
+    };
+    if copy_file(from, to, flags & COPY_FILE_FAIL_IF_EXISTS != 0) != FALSE {
+        return 0;
+    }
+    ((GetLastError() & 0xffff) | 0x8007_0000) as i32
+}
+
 fn copy_file(from: *const u16, to: *const u16, fail_if_exists: bool) -> Bool {
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;

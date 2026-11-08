@@ -3,7 +3,11 @@
 
 use super::*;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn RtlCreateHeap(
         flags: u32,
@@ -27,8 +31,8 @@ const HEAP_GROWABLE: u32 = 0x2;
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetProcessHeap() -> Handle {
-    // SAFETY: PEB (gs:[0x60]) -> ProcessHeap (+0x30).
-    unsafe { *((teb_u64(0x60) as usize + 0x30) as *const Handle) }
+    // SAFETY: the PEB's ProcessHeap.
+    unsafe { *((peb() + PEB_PROCESS_HEAP) as *const Handle) }
 }
 
 #[unsafe(no_mangle)]

@@ -349,6 +349,9 @@ pub struct Credential {
     pub client_cert: Option<Arc<CertifiedKey>>,
     /// SCH_CRED_NO_DEFAULT_CREDS: no automatic choice from the MY store.
     pub no_default_creds: bool,
+    /// The SCH_CRED_REVOCATION_CHECK_* and SCH_CRED_IGNORE_* revocation
+    /// flags, for automatic validation (trust.rs).
+    pub revocation: u32,
 }
 
 const SP_PROT_TLS1_2: u32 = 0xc00;
@@ -361,7 +364,10 @@ const SCH_CRED_NO_SERVERNAME_CHECK: u32 = 0x4;
 const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x8;
 const SCH_CRED_NO_DEFAULT_CREDS: u32 = 0x10;
 const SCH_CRED_DISABLE_RECONNECTS: u32 = 0x80;
-const SCH_CRED_REVOCATION_CHECKS: u32 = 0x100 | 0x200 | 0x400;
+/// SCH_CRED_REVOCATION_CHECK_END_CERT, _CHAIN, _CHAIN_EXCLUDE_ROOT,
+/// SCH_CRED_IGNORE_NO_REVOCATION_CHECK, SCH_CRED_IGNORE_REVOCATION_OFFLINE,
+/// SCH_CRED_REVOCATION_CHECK_CACHE_ONLY.
+const SCH_CRED_REVOCATION_FLAGS: u32 = 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x4000;
 
 fn read32(p: *const u8, at: usize) -> u32 {
     // SAFETY: the caller's structure, at a field of it.
@@ -418,10 +424,6 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
             }
         }
     }
-    if flags & SCH_CRED_REVOCATION_CHECKS != 0 {
-        // No CRLs or OCSP here: certificates are not checked for revocation.
-        missing(b"schannel.dll!revocation checking", flags.into());
-    }
     // Each protocol has a client and a server bit (SP_PROT_TLS1_2_CLIENT,
     // _SERVER): only this side's count (curl disables every protocol but
     // the client's TLS 1.0 to 1.3, the server halves included).
@@ -452,6 +454,7 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
         server_cache: Arc::new(ServerCache::new(reconnects && inbound)),
         client_cert: None,
         no_default_creds: flags & SCH_CRED_NO_DEFAULT_CREDS != 0,
+        revocation: flags & SCH_CRED_REVOCATION_FLAGS,
     };
     if count > 0 && !certs.is_null() {
         // SAFETY: the caller's array of `count` PCCERT_CONTEXT.

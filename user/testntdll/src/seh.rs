@@ -39,8 +39,7 @@
 use core::arch::global_asm;
 
 use crate::{
-    ExceptionPointers, NtContinue, NtTerminateProcess, call_handlers, rd32, with_handlers,
-    with_modules,
+    ExceptionPointers, NtContinue, NtTerminateProcess, call_handlers, image_of, rd32, with_handlers,
 };
 
 const UNW_FLAG_EHANDLER: u32 = 1;
@@ -51,6 +50,7 @@ const EXCEPTION_NONCONTINUABLE: u32 = 1;
 const EXCEPTION_UNWINDING: u32 = 2;
 const EXCEPTION_EXIT_UNWIND: u32 = 4;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
+const EXCEPTION_SOFTWARE_ORIGINATE: u32 = 0x80;
 
 const DISPOSITION_CONTINUE_EXECUTION: u32 = 0;
 
@@ -263,20 +263,6 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
 
 fn with_tables<R>(f: impl FnOnce(&mut [(usize, u32, u64); MAX_TABLES]) -> R) -> R {
     with_state(|s| f(&mut s.tables))
-}
-
-/// The base of the loaded image containing `pc`, if any.
-fn image_of(pc: usize) -> Option<usize> {
-    with_modules(|m| {
-        m.iter().find_map(|module| {
-            let base = module.base;
-            if base == 0 || pc < base {
-                return None;
-            }
-            let size = rd32(base + rd32(base + 0x3c) as usize + 24 + 56) as usize; // SizeOfImage
-            (pc < base + size).then_some(base)
-        })
-    })
 }
 
 /// Binary search of a sorted RUNTIME_FUNCTION table for `rva`.
@@ -514,21 +500,6 @@ pub extern "system" fn RtlDeleteFunctionTable(table: *const RuntimeFunction) -> 
             None => 0,
         }
     })
-}
-
-/// RtlPcToFileHeader(PcValue, *BaseOfImage): the base of the image
-/// containing `pc` (also stored), or null.
-///
-/// # Safety
-/// `base` must be writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn RtlPcToFileHeader(pc: usize, base: *mut usize) -> usize {
-    let found = image_of(pc).unwrap_or(0);
-    if !base.is_null() {
-        // SAFETY: the caller's output pointer.
-        unsafe { *base = found };
-    }
-    found
 }
 
 // --- Virtual unwinding -------------------------------------------------
@@ -1050,7 +1021,11 @@ extern "system" fn unwind_to(
     };
     // SAFETY: as above.
     let flags = unsafe { (record.add(ER_FLAGS) as *const u32).read_unaligned() };
-    let mut flags = flags | EXCEPTION_UNWINDING;
+    // The unwind's handlers do not see the record's
+    // EXCEPTION_SOFTWARE_ORIGINATE (Windows 11 25H2 measured 0x02 where
+    // the dispatch had seen 0x80; seh_test). Whether other record flags
+    // (EXCEPTION_NONCONTINUABLE) go too is not measured: they are kept.
+    let mut flags = (flags & !EXCEPTION_SOFTWARE_ORIGINATE) | EXCEPTION_UNWINDING;
     if target_frame == 0 {
         flags |= EXCEPTION_EXIT_UNWIND;
     }
@@ -1126,6 +1101,12 @@ extern "system" fn raise(record: *mut u8, context: *mut u8) -> ! {
     unsafe {
         let flags = context.add(CTX_FLAGS).cast::<u32>();
         flags.write_unaligned(flags.read_unaligned() | CONTEXT_UNWOUND_TO_CALL);
+        // The record is marked EXCEPTION_SOFTWARE_ORIGINATE (0x80), with
+        // whatever flags the caller set: Windows 25H2's 64-bit
+        // RtlRaiseException does so itself (a record raised with flags 0
+        // reaches the handlers with 0x80; the 32-bit one leaves them).
+        let er = record.add(ER_FLAGS).cast::<u32>();
+        er.write_unaligned(er.read_unaligned() | EXCEPTION_SOFTWARE_ORIGINATE);
     }
     dispatch_exception(record, context)
 }

@@ -11,7 +11,11 @@
 //! processor and a group affinity in its attribute list (and the
 //! mitigation policy attribute, 8 or 16 bytes, accepted); OpenThread of
 //! another thread by its id (waited on through that handle; an unknown id
-//! is ERROR_INVALID_PARAMETER). Prints `kernel32_thread_test: ok` or
+//! is ERROR_INVALID_PARAMETER); a CreateThread thread's
+//! ThreadQuerySetWin32StartAddress is the start routine it was given;
+//! SetThreadDescription's name is the thread's, read back by
+//! NtQueryInformationThread(ThreadNameInformation) and GetThreadDescription.
+//! Prints `kernel32_thread_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -27,6 +31,9 @@ type StartRoutine = extern "system" fn(*mut c_void) -> u32;
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetCurrentThread() -> Handle;
+    fn SetThreadDescription(h: Handle, text: *const u16) -> i32;
+    fn GetThreadDescription(h: Handle, text: *mut *mut u16) -> i32;
+    fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn SetThreadPriority(h: Handle, priority: i32) -> Bool;
     fn GetThreadPriority(h: Handle) -> i32;
     fn GetLastError() -> u32;
@@ -104,6 +111,17 @@ unsafe extern "system" {
     fn GetThreadId(h: Handle) -> u32;
 }
 
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtQueryInformationThread(
+        h: Handle,
+        class: u32,
+        buf: *mut u8,
+        len: u32,
+        ret: *mut u32,
+    ) -> i32;
+}
+
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -168,6 +186,7 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -177,10 +196,12 @@ impl Checks {
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -252,7 +273,11 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.eq(low as u64, deallocation as u64)?;
         c.ok(low < sp && sp < high, sp as u64)?;
         // Process priority classes: NORMAL to start with; set and read
-        // back; an unknown class is ERROR_INVALID_PARAMETER.
+        // back. A value that is no single class: Windows ignores the bits
+        // that are no class and the lowest class among the rest wins, IDLE
+        // first (0x12345, 0xffffffff, 0x60, 0x4040 are IDLE; 0x4080 is
+        // BELOW_NORMAL, 0x8020 NORMAL, 0x8080 ABOVE_NORMAL); one with no
+        // class bit (0, 1, 0x10000) is ERROR_INVALID_PARAMETER.
         const NORMAL: u32 = 0x20;
         const BELOW_NORMAL: u32 = 0x4000;
         let me = GetCurrentProcess();
@@ -261,8 +286,20 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetPriorityClass(me).into(), BELOW_NORMAL.into())?;
         c.eq(SetPriorityClass(me, NORMAL) as u64, 1)?;
         c.eq(GetPriorityClass(me).into(), NORMAL.into())?;
-        c.eq(SetPriorityClass(me, 0x12345) as u64, 0)?;
-        c.eq(GetLastError().into(), 87)?;
+        const IDLE: u32 = 0x40;
+        for odd in [0x12345, 0xffff_ffff, 0x60, 0x4040] {
+            c.eq(SetPriorityClass(me, odd) as u64, 1)?;
+            c.eq(GetPriorityClass(me).into(), IDLE.into())?;
+        }
+        for (pair, class) in [(0x4080, BELOW_NORMAL), (0x8020, NORMAL), (0x8080, 0x8000)] {
+            c.eq(SetPriorityClass(me, pair) as u64, 1)?;
+            c.eq(GetPriorityClass(me).into(), class.into())?;
+        }
+        for none in [0, 1, 0x1_0000] {
+            c.eq(SetPriorityClass(me, none) as u64, 0)?;
+            c.eq(GetLastError().into(), 87)?;
+        }
+        c.eq(SetPriorityClass(me, NORMAL) as u64, 1)?;
         // Times: a creation time (100 ns since 1601), no exit time yet.
         let (mut creation, mut exit, mut kernel, mut user) = (0, 1, 0, 0);
         c.ok(
@@ -287,6 +324,41 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         let other = OpenThread(0x0010_0000 | 0x0040 | 0x0002, 0, tid); // SYNCHRONIZE, QUERY, SUSPEND_RESUME
         c.ok(!other.is_null(), GetLastError().into())?;
         c.eq(GetThreadId(other).into(), tid.into())?;
+        // ThreadQuerySetWin32StartAddress (9): the start routine given to
+        // CreateThread (not kernel32's thunk).
+        let mut start = 0usize;
+        let st = NtQueryInformationThread(t, 9, (&raw mut start).cast(), 8, core::ptr::null_mut());
+        c.eq(st as u64, 0)?;
+        c.eq(start as u64, worker as *const () as u64)?;
+        // ThreadNameInformation (38): SetThreadDescription's name, as a
+        // UNICODE_STRING followed by its characters.
+        let name: [u16; 11] = [
+            b'g' as u16,
+            b'a' as u16,
+            b'l' as u16,
+            b'a' as u16,
+            b' ' as u16,
+            b'w' as u16,
+            b'o' as u16,
+            b'r' as u16,
+            b'k' as u16,
+            b'e' as u16,
+            0,
+        ];
+        // HRESULT_FROM_NT(STATUS_SUCCESS), not S_OK (Windows 11 25H2).
+        c.eq(SetThreadDescription(t, name.as_ptr()) as u64, 0x1000_0000)?;
+        let mut info = [0u64; 16];
+        let mut ret = 0u32;
+        let st = NtQueryInformationThread(t, 38, info.as_mut_ptr().cast(), 128, &mut ret);
+        c.eq(st as u64, 0)?;
+        let length = (info[0] & 0xffff) as usize; // UNICODE_STRING.Length, bytes
+        c.eq(length as u64, 20)?;
+        let text = core::slice::from_raw_parts(info[1] as *const u16, length / 2);
+        c.ok(text == &name[..10], u64::from(text.first().copied().unwrap_or(0)))?;
+        let mut back: *mut u16 = core::ptr::null_mut();
+        c.eq(GetThreadDescription(t, &mut back) as u64, 0x1000_0000)?; // as SetThreadDescription
+        c.ok(!back.is_null() && core::slice::from_raw_parts(back, 11) == &name[..], 0)?;
+        LocalFree(back.cast());
         c.ok(ResumeThread(other) == 1, 0)?;
         c.eq(WaitForSingleObject(other, 10_000).into(), 0)?;
         let mut code = 0;
@@ -511,4 +583,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

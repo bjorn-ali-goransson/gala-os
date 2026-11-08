@@ -203,6 +203,30 @@ pub struct Token {
     /// without SeAssignPrimaryTokenPrivilege (nt::token::may_assign).
     pub origin: u64,
     pub data: IrqMutex<TokenData>,
+    /// What its groups, privileges and restricting SIDs take (fixed at
+    /// creation), and its dynamic part (TOKEN_STATISTICS.DynamicCharged:
+    /// what its default DACL may take, `dynamic_charge`): charged to the
+    /// token's holder's paged pool quota (nt::quota), the dynamic part
+    /// again when a larger default DACL is set.
+    pub fixed: u64,
+    pub dynamic: core::sync::atomic::AtomicU64,
+}
+
+/// The least a token's dynamic part is charged (gala's DynamicCharged
+/// floor).
+pub const DYNAMIC_CHARGE: u64 = 4096;
+
+/// A token's DynamicCharged for a default DACL of `dacl_len` bytes.
+pub fn dynamic_charge(dacl_len: usize) -> u64 {
+    DYNAMIC_CHARGE.max(dacl_len as u64)
+}
+
+impl TokenData {
+    /// What its groups, privileges and restricting SIDs take.
+    fn fixed_bytes(&self) -> u64 {
+        ((1 + self.groups.len() + self.restricted.len()) * core::mem::size_of::<Group>()
+            + self.privileges.len() * core::mem::size_of::<Privilege>()) as u64
+    }
 }
 
 /// A token object holding `data`.
@@ -242,9 +266,15 @@ pub const SYSTEM_LOGON: u64 = 0x3e7;
 
 static BOOT_SYSTEM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// The boot option `as=system`: processes the kernel starts run as SYSTEM.
+/// The boot options `as=system` and `start_as=system`: processes the
+/// kernel starts from here on run as SYSTEM.
 pub fn set_boot_system(on: bool) {
     BOOT_SYSTEM.store(on, Ordering::Relaxed);
+}
+
+/// Whether the processes the kernel starts now run as SYSTEM.
+pub fn boot_system() -> bool {
+    BOOT_SYSTEM.load(Ordering::Relaxed)
 }
 
 static NEXT_LUID: AtomicU64 = AtomicU64::new(0x0010_0000);
@@ -503,19 +533,30 @@ impl TokenData {
 impl Token {
     /// A token derived from one of lineage `origin`.
     pub fn derived(data: TokenData, origin: u64) -> Token {
-        Token { id: next_luid(), origin, data: IrqMutex::new(data) }
+        Token::with_ids(next_luid(), origin, data)
     }
 
     pub fn new(data: TokenData) -> Token {
         let id = next_luid();
-        Token { id, origin: id, data: IrqMutex::new(data) }
+        Token::with_ids(id, id, data)
     }
 
     /// A token a kernel handover carried over, with its id and lineage
     /// (LUIDs go on above them).
     pub fn adopt(id: u64, origin: u64, data: TokenData) -> Token {
         NEXT_LUID.fetch_max(id.max(origin).saturating_add(1), Ordering::Relaxed);
-        Token { id, origin, data: IrqMutex::new(data) }
+        Token::with_ids(id, origin, data)
+    }
+
+    fn with_ids(id: u64, origin: u64, data: TokenData) -> Token {
+        let (fixed, dynamic) = (data.fixed_bytes(), dynamic_charge(data.default_dacl.len()));
+        Token {
+            id,
+            origin,
+            data: IrqMutex::new(data),
+            fixed,
+            dynamic: core::sync::atomic::AtomicU64::new(dynamic),
+        }
     }
 
     /// Whether the holder of `caller` (a process's primary token) may make
@@ -858,8 +899,9 @@ pub fn query(id: u64, data: &TokenData, class: u32, base: u64) -> Result<Vec<u8>
             o.u64(i64::MAX as u64)?; // ExpirationTime: never
             o.u32(if data.level().is_some() { 2 } else { 1 })?;
             o.u32(data.level().unwrap_or(0))?;
-            o.u32(4096)?; // DynamicCharged
-            o.u32(4096 - data.default_dacl.len() as u32)?; // DynamicAvailable
+            let charged = dynamic_charge(data.default_dacl.len());
+            o.u32(charged as u32)?; // DynamicCharged
+            o.u32((charged - data.default_dacl.len() as u64) as u32)?; // DynamicAvailable
             o.u32(data.groups.len() as u32)?;
             o.u32(data.privileges.len() as u32)?;
             o.u64(data.modified_id)?;
@@ -913,10 +955,13 @@ pub fn query(id: u64, data: &TokenData, class: u32, base: u64) -> Result<Vec<u8>
         TOKEN_MANDATORY_POLICY => return dword(3),
         TOKEN_APP_CONTAINER_SID => o.u64(0)?,
         TOKEN_INTEGRITY_LEVEL => {
-            // TOKEN_MANDATORY_LABEL: the label with SE_GROUP_INTEGRITY.
+            // TOKEN_MANDATORY_LABEL: the label with SE_GROUP_INTEGRITY |
+            // SE_GROUP_INTEGRITY_ENABLED (0x60, as Windows 11 25H2 reports
+            // it).
+            let attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
             let label = data.groups.iter().find(|g| g.sid.is_label()).map_or(
-                Group { sid: Sid::new(16, &[8192]), attributes: SE_GROUP_INTEGRITY },
-                |g| Group { sid: g.sid, attributes: SE_GROUP_INTEGRITY },
+                Group { sid: Sid::new(16, &[8192]), attributes },
+                |g| Group { sid: g.sid, attributes },
             );
             o.sid_list(&[label])?
         }

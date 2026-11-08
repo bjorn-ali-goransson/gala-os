@@ -60,7 +60,11 @@ pub extern "system" fn GetKeyboardLayoutNameW(name: *mut u16) -> i32 {
     1
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetTickCount() -> u32;
 }
@@ -220,19 +224,32 @@ pub extern "system" fn ClipCursor(_rect: *const i32) -> i32 {
 /// GetCursorInfo(pci): CURSORINFO { cbSize (24), flags, hCursor,
 /// ptScreenPos }: showing, the arrow (gala's cursor is not a handle: 0),
 /// at the cursor's position.
+/// CURSORINFO (24 bytes on x64, 20 on x86).
+#[repr(C)]
+pub struct CursorInfo {
+    size: u32,
+    flags: u32,
+    cursor: usize,
+    point: [i32; 2],
+}
+
 #[unsafe(no_mangle)]
-pub extern "system" fn GetCursorInfo(info: *mut u8) -> i32 {
+pub extern "system" fn GetCursorInfo(info: *mut CursorInfo) -> i32 {
     // SAFETY: the caller's CURSORINFO.
     unsafe {
-        if info.is_null() || info.cast::<u32>().read_unaligned() != 24 {
+        if info.is_null() || info.cast::<u32>().read_unaligned() != size_of::<CursorInfo>() as u32 {
             set_error(87);
             return 0;
         }
-        info.add(4).cast::<u32>().write_unaligned(1); // CURSOR_SHOWING
-        info.add(8).cast::<usize>().write_unaligned(0);
         let mut point = [0i32; 2];
         super::window::GetCursorPos(&mut point);
-        info.add(16).cast::<[i32; 2]>().write_unaligned(point);
+        // CURSOR_SHOWING.
+        info.write_unaligned(CursorInfo {
+            size: size_of::<CursorInfo>() as u32,
+            flags: 1,
+            cursor: 0,
+            point,
+        });
     }
     1
 }
@@ -535,7 +552,11 @@ static CLIPBOARD: Clipboard = Clipboard {
 };
 static CLIP_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
 }
@@ -682,6 +703,12 @@ pub extern "system" fn EnumClipboardFormats(format: u32) -> u32 {
     })
 }
 
+/// CountClipboardFormats: how many formats the clipboard holds.
+#[unsafe(no_mangle)]
+pub extern "system" fn CountClipboardFormats() -> i32 {
+    with_clipboard(|c| c.count as i32)
+}
+
 /// The clipboard's change count (GetClipboardSequenceNumber).
 fn clipboard_sequence() -> u32 {
     CLIP_SEQUENCE.load(Ordering::Relaxed)
@@ -821,19 +848,6 @@ pub extern "system" fn UnregisterClassA(name: *const u8, instance: usize) -> i32
 
 // ---- Layered windows, regions, printing, input injection -------------------
 
-/// GetLayeredWindowAttributes: FALSE (gala keeps no layered attributes:
-/// as for a window SetLayeredWindowAttributes was never called on).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetLayeredWindowAttributes(
-    _hwnd: usize,
-    _key: *mut u32,
-    _alpha: *mut u8,
-    _flags: *mut u32,
-) -> i32 {
-    set_error(87);
-    0
-}
-
 /// UpdateLayeredWindow: not supported yet (reported; FALSE).
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
@@ -879,39 +893,6 @@ pub extern "system" fn SendInput(count: u32, _inputs: *const u8, _size: i32) -> 
     super::window::unsupported(b"user32.dll!SendInput", u64::from(count));
     set_error(50);
     0
-}
-
-/// ToUnicodeEx(wVirtKey, wScanCode, lpKeyState, pwszBuff, cchBuff,
-/// wFlags, dwhkl): the US English character of the key for letters,
-/// digits and the space (with shift and caps lock); 0 (no character) for
-/// the other keys.
-#[unsafe(no_mangle)]
-pub extern "system" fn ToUnicodeEx(
-    vk: u32,
-    _scan: u32,
-    state: *const u8,
-    buf: *mut u16,
-    count: i32,
-    _flags: u32,
-    _layout: usize,
-) -> i32 {
-    if buf.is_null() || count < 1 || state.is_null() {
-        return 0;
-    }
-    // SAFETY: the caller's 256-byte key state.
-    let (shift, caps) = unsafe { (*state.add(0x10) & 0x80 != 0, *state.add(0x14) & 1 != 0) };
-    let c = match vk {
-        0x41..=0x5a => {
-            let upper = shift != caps;
-            if upper { vk as u16 } else { vk as u16 + 32 }
-        }
-        0x30..=0x39 if !shift => vk as u16,
-        0x20 => 0x20,
-        _ => return 0,
-    };
-    // SAFETY: the caller's buffer of at least one character.
-    unsafe { *buf = c };
-    1
 }
 
 /// FrameRect(hDC, lprc, hbr): a one-pixel border with the brush (four
@@ -1067,18 +1048,17 @@ pub extern "system" fn DrawFrameControl(
 pub extern "system" fn GetClassInfoW(
     instance: *mut core::ffi::c_void,
     name: *const u16,
-    out: *mut u8,
+    out: *mut super::window::WndClassW,
 ) -> i32 {
     if out.is_null() {
         set_error(87);
         return 0;
     }
-    let mut ex = [0u8; 80];
-    ex[..4].copy_from_slice(&80u32.to_le_bytes());
-    let atom = super::window::GetClassInfoExW(instance, name, ex.as_mut_ptr().cast());
+    let mut ex = super::window::WndClassExW::EMPTY;
+    let atom = super::window::GetClassInfoExW(instance, name, &mut ex);
     if atom != 0 {
-        // SAFETY: the caller's 72-byte WNDCLASSW: style .. lpszClassName.
-        unsafe { core::ptr::copy_nonoverlapping(ex.as_ptr().add(4), out, 72) };
+        // SAFETY: the caller's WNDCLASSW.
+        unsafe { out.write_unaligned(ex.without_size()) };
     }
     atom
 }

@@ -25,7 +25,10 @@ echo "wget -O - to a pipe: $(busybox wget -q -O - http://127.0.0.1:8080/index.ht
 busybox wget -q -O missing.html http://127.0.0.1:8080/missing.html 2>/dev/null
 echo "wget missing.html: status $?"
 busybox kill $server
-wait $server
+# The shell's "Terminated" report goes to wait's stderr or nowhere,
+# depending on whether the server was reaped before wait ran (a race on
+# Linux too): discarded, so the transcript does not depend on timing.
+wait $server 2>/dev/null
 echo "server ended by SIGTERM: status $?"
 busybox rm -r www got.html got.txt
 echo "httpd.sh: ok"

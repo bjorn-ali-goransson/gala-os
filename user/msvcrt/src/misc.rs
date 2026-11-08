@@ -5,7 +5,11 @@
 use crate::heap::malloc;
 use core::ptr::null_mut;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
@@ -329,6 +333,15 @@ pub extern "C" fn ___mb_cur_max_func() -> i32 {
 #[unsafe(no_mangle)]
 pub static __mb_cur_max: i32 = 1;
 
+/// _ismbblead(c): whether `c` is the lead byte of a multibyte character
+/// in the multibyte code page. Ours is single-byte (as `__mb_cur_max`
+/// says; on en-US Windows it is ANSI 1252): no byte leads one, 0.
+/// mingw's WinMain entry calls it to skip the program's name.
+#[unsafe(no_mangle)]
+pub extern "C" fn _ismbblead(_c: u32) -> i32 {
+    0
+}
+
 /// perror(s): "s: <strerror(errno)>" on stderr (just the message if `s`
 /// is NULL or empty).
 #[unsafe(no_mangle)]
@@ -470,7 +483,11 @@ pub extern "C" fn rand_s(value: *mut u32) -> i32 {
     0
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;
@@ -557,10 +574,10 @@ pub extern "C" fn _difftime64(end: i64, start: i64) -> f64 {
     end as f64 - start as f64
 }
 
-/// difftime: x64 msvcrt.dll's time_t is 64 bits, so _difftime64.
+/// difftime: with the architecture's time_t (`time.rs`).
 #[unsafe(no_mangle)]
-pub extern "C" fn difftime(end: i64, start: i64) -> f64 {
-    _difftime64(end, start)
+pub extern "C" fn difftime(end: crate::time::TimeT, start: crate::time::TimeT) -> f64 {
+    _difftime64(crate::time::to_i64(end), crate::time::to_i64(start))
 }
 
 #[unsafe(no_mangle)]
@@ -783,7 +800,11 @@ pub extern "C" fn _ultoa(value: u32, buf: *mut u8, radix: i32) -> *mut u8 {
     buf
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CreateThread(
         attributes: *mut core::ffi::c_void,
@@ -835,7 +856,8 @@ pub extern "C" fn __dllonexit(func: usize, begin: *mut *mut usize, end: *mut *mu
     // SAFETY: the caller's table pointers; the table came from malloc.
     unsafe {
         let count = ((*end) as usize - (*begin) as usize) / 8;
-        let grown = crate::heap::realloc((*begin).cast(), (count + 1) * 8).cast::<usize>();
+        let grown =
+            crate::heap::realloc((*begin).cast(), (count + 1) * size_of::<usize>()).cast::<usize>();
         if grown.is_null() {
             return 0;
         }

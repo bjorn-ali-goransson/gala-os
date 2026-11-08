@@ -1,0 +1,4 @@
+#!/bin/sh
+# gala's pre-commit check (ROADMAP LN): the analyzers and cargo fmt.
+# Enabled by `git config core.hooksPath hooks` (xtask sets it on first use).
+exec cargo xtask lint

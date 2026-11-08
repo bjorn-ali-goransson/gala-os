@@ -86,7 +86,14 @@ fn key_dir() -> PathBuf {
 /// The test signing key: its 32-byte seed in `target/trust/test-signing.seed`,
 /// made from the system's random source the first time.
 pub fn test_key() -> Result<KeyPair> {
-    let path = key_dir().join("test-signing.seed");
+    named_key("test-signing")
+}
+
+/// A test key by name: its 32-byte seed in `target/trust/<name>.seed`, made
+/// from the system's random source the first time (the public half beside
+/// it in `<name>.pub`).
+pub fn named_key(name: &str) -> Result<KeyPair> {
+    let path = key_dir().join(format!("{name}.seed"));
     let seed = match fs::read(&path) {
         Ok(seed) => seed,
         Err(_) => {
@@ -99,9 +106,9 @@ pub fn test_key() -> Result<KeyPair> {
             let pair = KeyPair::try_from_seed(Seed::from_slice(&seed).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("test key: {e}"))?;
             let public = hex(&pair.pk[..]);
-            let _ = fs::write(key_dir().join("test-signing.pub"), format!("{public}\n"));
+            let _ = fs::write(key_dir().join(format!("{name}.pub")), format!("{public}\n"));
             eprintln!(
-                "xtask: made the test signing key {} (id {:016x})",
+                "xtask: made the test key {} (id {:016x})",
                 path.display(),
                 manifest::key_id(&pair.pk)
             );
@@ -207,6 +214,15 @@ pub fn seal(iso_root: &Path, config: &str, signing: &Signing) -> Result<String> 
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| !signing.leave_out.contains(&n.as_str()))
         .collect();
+    // The 32-bit DLLs (boot/x86: their names are often the 64-bit ones').
+    if let Ok(dir) = fs::read_dir(boot.join("x86")) {
+        names.extend(
+            dir.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .map(|n| format!("x86/{n}")),
+        );
+    }
     names.sort();
     let paths: Vec<PathBuf> = names.iter().map(|n| boot.join(n)).collect();
     let sha = hash_files("sha256sum", &paths)?;

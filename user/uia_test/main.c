@@ -90,6 +90,30 @@
  *   destroyed (IsWindow FALSE); its pattern then reports
  *   UIA_E_ELEMENTNOTAVAILABLE. Maximized on a window without
  *   WS_MAXIMIZEBOX is UIA_E_INVALIDOPERATION.
+ * - Providers (a window's WM_GETOBJECT answer, UiaRootObjectId, through
+ *   UiaReturnRawElementProvider, in this process): the window "UIA
+ *   Provided" answers with its own IRawElementProviderSimple, whose host
+ *   provider is UiaHostProviderFromHwnd(its window). ElementFromHandle
+ *   gives the provider's Name ("Provided"), AutomationId ("provided-id")
+ *   and ControlType (Button) instead of the window's, and the host's
+ *   (the window's) ClassName, NativeWindowHandle and ProcessId where the
+ *   provider gives none (VT_EMPTY); the provider was asked. FindFirst
+ *   under the desktop by AutomationId "provided-id" finds the window.
+ *   The same across processes: the child's provided window is found by
+ *   its provider's AutomationId ("remote-provided-id") and gives its
+ *   provider's Name and ControlType and the window's ClassName, handle
+ *   and ProcessId (the child's).
+ * - Fragments (IRawElementProviderFragment, FragmentRoot): the provided
+ *   window's provider is a fragment root with two children, "Fragment
+ *   A" (Text) and "Fragment B" (Hyperlink). They are the window's
+ *   element's children (FindFirst by AutomationId "frag-b"; the raw
+ *   walker's first, next, last child), with the provider's rectangles
+ *   (BoundingRectangle), no window handle, distinct runtime ids, and the
+ *   window as parent; in this process and in the child's window. Their
+ *   patterns are the provider's (GetPatternProvider): Fragment B's
+ *   Invoke (IsInvokePatternAvailable; the window is retitled "fragment
+ *   invoked"), Fragment A's Value ("start", set to "typed" and read
+ *   back, not read-only); A has no Invoke, B no Value.
  *
  * Prints "uia_test: ok" or exits with the number of the failing check. */
 #define COBJMACROS
@@ -270,6 +294,286 @@ static HWND make_list_view(HWND parent, int id, int x, int y, const wchar_t *pre
     return lv;
 }
 
+/* ---- A provider (WM_GETOBJECT), in this process and in the child ---- */
+
+static HWND provided_hwnd;
+/* What the provider answers (the child's differ: both windows are top-level). */
+static const wchar_t *provided_name = L"Provided", *provided_id = L"provided-id";
+static volatile LONG provider_refs = 1, provider_asked;
+
+/* The provider is a fragment root (frags[0], the window's provider) with
+ * two child fragments (frags[1], frags[2]); each object answers
+ * IRawElementProviderSimple, IRawElementProviderFragment and (the root)
+ * IRawElementProviderFragmentRoot. Static objects: references are
+ * counted in one counter. */
+typedef struct Frag {
+    IRawElementProviderSimple simple;
+    IRawElementProviderFragment frag;
+    IRawElementProviderFragmentRoot root;
+    IInvokeProvider invoke;  /* Fragment B's */
+    IValueProvider value;    /* Fragment A's */
+    int index;
+} Frag;
+/* Fragment A's value (the Value pattern's). */
+static WCHAR frag_value[64] = L"start";
+static Frag frags[3];
+
+#define FRAG_OF(p, member) ((Frag *)((char *)(p) - offsetof(Frag, member)))
+
+static HRESULT frag_qi(Frag *f, REFIID riid, void **out) {
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IRawElementProviderSimple))
+        *out = &f->simple;
+    else if (IsEqualIID(riid, &IID_IRawElementProviderFragment))
+        *out = &f->frag;
+    else if (IsEqualIID(riid, &IID_IRawElementProviderFragmentRoot) && f->index == 0)
+        *out = &f->root;
+    else {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    InterlockedIncrement(&provider_refs);
+    return S_OK;
+}
+static ULONG STDMETHODCALLTYPE frag_addref(void *This) {
+    (void)This;
+    return (ULONG)InterlockedIncrement(&provider_refs);
+}
+static ULONG STDMETHODCALLTYPE frag_release(void *This) {
+    (void)This;
+    return (ULONG)InterlockedDecrement(&provider_refs);
+}
+
+/* A child fragment's rectangle: 50x20 at (10 + 60 * (i - 1), 30) from the
+ * window's corner. */
+static RECT frag_rect(int i) {
+    RECT w;
+    GetWindowRect(provided_hwnd, &w);
+    RECT r = { w.left + 10 + 60 * (i - 1), w.top + 30, 0, 0 };
+    r.right = r.left + 50;
+    r.bottom = r.top + 20;
+    return r;
+}
+
+static HRESULT STDMETHODCALLTYPE prov_qi(IRawElementProviderSimple *This, REFIID riid, void **out) {
+    return frag_qi(FRAG_OF(This, simple), riid, out);
+}
+static HRESULT STDMETHODCALLTYPE prov_options(IRawElementProviderSimple *This, enum ProviderOptions *out) {
+    (void)This;
+    *out = ProviderOptions_ServerSideProvider;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE prov_pattern(IRawElementProviderSimple *This, PATTERNID id, IUnknown **out) {
+    Frag *f = FRAG_OF(This, simple);
+    *out = NULL;
+    if (f->index == 2 && id == UIA_InvokePatternId)
+        *out = (IUnknown *)&f->invoke;
+    else if (f->index == 1 && id == UIA_ValuePatternId)
+        *out = (IUnknown *)&f->value;
+    if (*out)
+        InterlockedIncrement(&provider_refs);
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE prov_property(IRawElementProviderSimple *This, PROPERTYID id, VARIANT *out) {
+    int i = FRAG_OF(This, simple)->index;
+    static const wchar_t *names[3] = { NULL, L"Fragment A", L"Fragment B" };
+    static const wchar_t *ids[3] = { NULL, L"frag-a", L"frag-b" };
+    InterlockedIncrement(&provider_asked);
+    VariantInit(out);
+    if (id == UIA_NamePropertyId) {
+        out->vt = VT_BSTR;
+        out->bstrVal = SysAllocString(i == 0 ? provided_name : names[i]);
+    } else if (id == UIA_AutomationIdPropertyId) {
+        out->vt = VT_BSTR;
+        out->bstrVal = SysAllocString(i == 0 ? provided_id : ids[i]);
+    } else if (id == UIA_ControlTypePropertyId) {
+        out->vt = VT_I4;
+        out->lVal = i == 0 ? UIA_ButtonControlTypeId : i == 1 ? UIA_TextControlTypeId : UIA_HyperlinkControlTypeId;
+    }
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE prov_host(IRawElementProviderSimple *This, IRawElementProviderSimple **out) {
+    if (FRAG_OF(This, simple)->index != 0) {
+        *out = NULL;
+        return S_OK;
+    }
+    return UiaHostProviderFromHwnd(provided_hwnd, out);
+}
+static IRawElementProviderSimpleVtbl provider_vtbl = {
+    prov_qi, (void *)frag_addref, (void *)frag_release, prov_options, prov_pattern, prov_property, prov_host,
+};
+
+static HRESULT STDMETHODCALLTYPE fr_qi(IRawElementProviderFragment *This, REFIID riid, void **out) {
+    return frag_qi(FRAG_OF(This, frag), riid, out);
+}
+static HRESULT STDMETHODCALLTYPE fr_navigate(IRawElementProviderFragment *This, enum NavigateDirection d,
+                                             IRawElementProviderFragment **out) {
+    int i = FRAG_OF(This, frag)->index, to = -1;
+    if (i == 0)
+        to = d == NavigateDirection_FirstChild ? 1 : d == NavigateDirection_LastChild ? 2 : -1;
+    else if (d == NavigateDirection_Parent)
+        to = 0;
+    else if (d == NavigateDirection_NextSibling && i == 1)
+        to = 2;
+    else if (d == NavigateDirection_PreviousSibling && i == 2)
+        to = 1;
+    *out = NULL;
+    if (to >= 0) {
+        *out = &frags[to].frag;
+        InterlockedIncrement(&provider_refs);
+    }
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE fr_runtime_id(IRawElementProviderFragment *This, SAFEARRAY **out) {
+    int i = FRAG_OF(This, frag)->index;
+    *out = NULL;
+    if (i == 0) /* The root's: its host's (the window's). */
+        return S_OK;
+    SAFEARRAY *sa = SafeArrayCreateVector(VT_I4, 0, 2);
+    if (!sa)
+        return E_OUTOFMEMORY;
+    LONG at = 0, v = UiaAppendRuntimeId;
+    SafeArrayPutElement(sa, &at, &v);
+    at = 1;
+    v = i;
+    SafeArrayPutElement(sa, &at, &v);
+    *out = sa;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE fr_rect(IRawElementProviderFragment *This, struct UiaRect *out) {
+    int i = FRAG_OF(This, frag)->index;
+    memset(out, 0, sizeof *out);
+    if (i == 0) /* The host's. */
+        return S_OK;
+    RECT r = frag_rect(i);
+    out->left = r.left;
+    out->top = r.top;
+    out->width = r.right - r.left;
+    out->height = r.bottom - r.top;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE fr_embedded(IRawElementProviderFragment *This, SAFEARRAY **out) {
+    (void)This;
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE fr_focus(IRawElementProviderFragment *This) {
+    (void)This;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE fr_root(IRawElementProviderFragment *This, IRawElementProviderFragmentRoot **out) {
+    (void)This;
+    *out = &frags[0].root;
+    InterlockedIncrement(&provider_refs);
+    return S_OK;
+}
+static IRawElementProviderFragmentVtbl fragment_vtbl = {
+    fr_qi,         (void *)frag_addref, (void *)frag_release, fr_navigate, fr_runtime_id,
+    fr_rect,       fr_embedded,         fr_focus,             fr_root,
+};
+
+static HRESULT STDMETHODCALLTYPE rt_qi(IRawElementProviderFragmentRoot *This, REFIID riid, void **out) {
+    return frag_qi(FRAG_OF(This, root), riid, out);
+}
+static HRESULT STDMETHODCALLTYPE rt_from_point(IRawElementProviderFragmentRoot *This, double x, double y,
+                                               IRawElementProviderFragment **out) {
+    (void)This;
+    *out = NULL;
+    for (int i = 1; i <= 2; i++) {
+        RECT r = frag_rect(i);
+        if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) {
+            *out = &frags[i].frag;
+            InterlockedIncrement(&provider_refs);
+        }
+    }
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE rt_focus(IRawElementProviderFragmentRoot *This, IRawElementProviderFragment **out) {
+    (void)This;
+    *out = NULL;
+    return S_OK;
+}
+static IRawElementProviderFragmentRootVtbl root_vtbl = {
+    rt_qi, (void *)frag_addref, (void *)frag_release, rt_from_point, rt_focus,
+};
+
+/* Fragment B's Invoke: the window is retitled "fragment invoked". */
+static HRESULT STDMETHODCALLTYPE inv_qi(IInvokeProvider *This, REFIID riid, void **out) {
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IInvokeProvider)) {
+        *out = This;
+        InterlockedIncrement(&provider_refs);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT STDMETHODCALLTYPE inv_invoke(IInvokeProvider *This) {
+    (void)This;
+    SetWindowTextW(provided_hwnd, L"fragment invoked");
+    return S_OK;
+}
+static IInvokeProviderVtbl invoke_vtbl = { inv_qi, (void *)frag_addref, (void *)frag_release, inv_invoke };
+
+/* Fragment A's Value: frag_value, writable. */
+static HRESULT STDMETHODCALLTYPE val_qi(IValueProvider *This, REFIID riid, void **out) {
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IValueProvider)) {
+        *out = This;
+        InterlockedIncrement(&provider_refs);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT STDMETHODCALLTYPE val_set(IValueProvider *This, LPCWSTR v) {
+    (void)This;
+    lstrcpynW(frag_value, v, 64);
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE val_get(IValueProvider *This, BSTR *out) {
+    (void)This;
+    *out = SysAllocString(frag_value);
+    return *out ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT STDMETHODCALLTYPE val_readonly(IValueProvider *This, BOOL *out) {
+    (void)This;
+    *out = FALSE;
+    return S_OK;
+}
+static IValueProviderVtbl value_vtbl = {
+    val_qi, (void *)frag_addref, (void *)frag_release, val_set, val_get, val_readonly,
+};
+
+static void init_frags(void) {
+    for (int i = 0; i < 3; i++) {
+        frags[i].simple.lpVtbl = &provider_vtbl;
+        frags[i].frag.lpVtbl = &fragment_vtbl;
+        frags[i].root.lpVtbl = &root_vtbl;
+        frags[i].invoke.lpVtbl = &invoke_vtbl;
+        frags[i].value.lpVtbl = &value_vtbl;
+        frags[i].index = i;
+    }
+}
+
+static LRESULT CALLBACK provided_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_GETOBJECT && (LONG)lparam == UiaRootObjectId)
+        return UiaReturnRawElementProvider(hwnd, wparam, lparam, &frags[0].simple);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/* The provided window, titled `title`: no caption, so its children are
+ * only its provider's fragments (a frame's title bar comes first). */
+static HWND make_provided(const wchar_t *title) {
+    init_frags();
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = provided_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"UiaProvided";
+    if (!RegisterClassW(&wc))
+        return NULL;
+    provided_hwnd = CreateWindowExW(0, L"UiaProvided", title, WS_POPUP | WS_BORDER | WS_VISIBLE, 40, 40, 200, 100,
+                                    NULL, NULL, wc.hInstance, NULL);
+    return provided_hwnd;
+}
+
 static LRESULT CALLBACK child_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_COMMAND && LOWORD(wparam) == 101 && HIWORD(wparam) == BN_CLICKED) {
         SetWindowTextW(hwnd, L"pressed");
@@ -328,6 +632,10 @@ static int child(void) {
     if (!frame_closed || !register_frame_class() || !make_frame(L"UIA Frame", 300, 300, NULL, WS_OVERLAPPEDWINDOW) ||
         !make_frame(L"UIA Closable", 340, 340, NULL, WS_OVERLAPPEDWINDOW))
         return 7;
+    provided_name = L"Remote provided";
+    provided_id = L"remote-provided-id";
+    if (!make_provided(L"UIA Remote Provided"))
+        return 8;
     SetEvent(ready);
     for (;;) {
         DWORD r = MsgWaitForMultipleObjects(1, &done, FALSE, 30000, QS_ALLINPUT);
@@ -946,6 +1254,81 @@ static void remote_frames(IUIAutomation *uia, IUIAutomationElement *root) {
     }
 }
 
+/* The provided window `win` (handle `hwnd`)'s fragments, as elements:
+ * its children "Fragment A" (Text) and "Fragment B" (Hyperlink) in
+ * order, found by AutomationId and walked to, their rectangles the
+ * provider's, no window handle, distinct runtime ids, their parent the
+ * window. */
+static void fragments(IUIAutomation *uia, IUIAutomationElement *win, HWND hwnd) {
+    IUIAutomationCondition *c = prop_str(uia, UIA_AutomationIdPropertyId, L"frag-b");
+    IUIAutomationElement *b = NULL;
+    CHECK(IUIAutomationElement_FindFirst(win, TreeScope_Children, c, &b) == S_OK && b != NULL);
+    IUIAutomationCondition_Release(c);
+    CHECK(name_is(b, L"Fragment B"));
+    CHECK(control_type(b) == UIA_HyperlinkControlTypeId);
+    CHECK(element_hwnd(b) == NULL);
+    RECT w, r;
+    CHECK(GetWindowRect(hwnd, &w));
+    CHECK(IUIAutomationElement_get_CurrentBoundingRectangle(b, &r) == S_OK);
+    CHECK(r.left == w.left + 70 && r.top == w.top + 30 && r.right == r.left + 50 && r.bottom == r.top + 20);
+    IUIAutomationTreeWalker *raw = NULL;
+    CHECK(IUIAutomation_get_RawViewWalker(uia, &raw) == S_OK && raw);
+    IUIAutomationElement *a = NULL, *next = NULL, *last = NULL, *parent = NULL;
+    CHECK(IUIAutomationTreeWalker_GetFirstChildElement(raw, win, &a) == S_OK && a != NULL);
+    CHECK(name_is(a, L"Fragment A") && control_type(a) == UIA_TextControlTypeId);
+    CHECK(IUIAutomationTreeWalker_GetNextSiblingElement(raw, a, &next) == S_OK && next != NULL);
+    CHECK(same_element(uia, next, b));
+    CHECK(!same_element(uia, a, b));
+    CHECK(IUIAutomationTreeWalker_GetLastChildElement(raw, win, &last) == S_OK && last != NULL);
+    CHECK(same_element(uia, last, b));
+    CHECK(IUIAutomationTreeWalker_GetParentElement(raw, b, &parent) == S_OK && parent != NULL);
+    CHECK(same_element(uia, parent, win));
+    IUIAutomationElement *none = NULL;
+    CHECK(IUIAutomationTreeWalker_GetNextSiblingElement(raw, b, &none) == S_OK && none == NULL);
+    /* Patterns from the provider: B's Invoke retitles the window; A's
+     * Value is set and read back; neither has the other's. */
+    VARIANT avail;
+    CHECK(IUIAutomationElement_GetCurrentPropertyValue(b, UIA_IsInvokePatternAvailablePropertyId, &avail) == S_OK);
+    CHECK(avail.vt == VT_BOOL && avail.boolVal == VARIANT_TRUE);
+    CHECK(IUIAutomationElement_GetCurrentPropertyValue(b, UIA_IsValuePatternAvailablePropertyId, &avail) == S_OK);
+    CHECK(avail.vt == VT_BOOL && avail.boolVal == VARIANT_FALSE);
+    IUnknown *unk = NULL;
+    CHECK(IUIAutomationElement_GetCurrentPattern(b, UIA_InvokePatternId, &unk) == S_OK && unk != NULL);
+    IUIAutomationInvokePattern *invoke = NULL;
+    CHECK(IUnknown_QueryInterface(unk, &IID_IUIAutomationInvokePattern, (void **)&invoke) == S_OK && invoke);
+    IUnknown_Release(unk);
+    CHECK(IUIAutomationInvokePattern_Invoke(invoke) == S_OK);
+    IUIAutomationInvokePattern_Release(invoke);
+    WCHAR title[64] = L"";
+    for (int i = 0; i < 100 && wcscmp(title, L"fragment invoked") != 0; i++) {
+        Sleep(20);
+        GetWindowTextW(hwnd, title, 64);
+    }
+    CHECK(wcscmp(title, L"fragment invoked") == 0);
+    CHECK(IUIAutomationElement_GetCurrentPattern(a, UIA_InvokePatternId, &unk) == S_OK && unk == NULL);
+    CHECK(IUIAutomationElement_GetCurrentPattern(a, UIA_ValuePatternId, &unk) == S_OK && unk != NULL);
+    IUIAutomationValuePattern *value = NULL;
+    CHECK(IUnknown_QueryInterface(unk, &IID_IUIAutomationValuePattern, (void **)&value) == S_OK && value);
+    IUnknown_Release(unk);
+    BSTR text = NULL;
+    CHECK(IUIAutomationValuePattern_get_CurrentValue(value, &text) == S_OK && bstr_is(text, L"start"));
+    SysFreeString(text);
+    BSTR typed = SysAllocString(L"typed");
+    CHECK(IUIAutomationValuePattern_SetValue(value, typed) == S_OK);
+    SysFreeString(typed);
+    CHECK(IUIAutomationValuePattern_get_CurrentValue(value, &text) == S_OK && bstr_is(text, L"typed"));
+    SysFreeString(text);
+    BOOL ro = TRUE;
+    CHECK(IUIAutomationValuePattern_get_CurrentIsReadOnly(value, &ro) == S_OK && !ro);
+    IUIAutomationValuePattern_Release(value);
+    IUIAutomationElement_Release(parent);
+    IUIAutomationElement_Release(last);
+    IUIAutomationElement_Release(next);
+    IUIAutomationElement_Release(a);
+    IUIAutomationTreeWalker_Release(raw);
+    IUIAutomationElement_Release(b);
+}
+
 /* UI Automation over another process's windows: found from the root by
  * Name, its controls by AutomationId, driven by Invoke, Value and Toggle. */
 static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
@@ -1069,6 +1452,20 @@ static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
 
     remote_frames(uia, root);
 
+    // The child's provided window: the child's provider answers across
+    // processes; the host (the window) gives the rest.
+    IUIAutomationCondition *rid = prop_str(uia, UIA_AutomationIdPropertyId, L"remote-provided-id");
+    IUIAutomationElement *rp = NULL;
+    CHECK(IUIAutomationElement_FindFirst(root, TreeScope_Children, rid, &rp) == S_OK && rp != NULL);
+    CHECK(name_is(rp, L"Remote provided"));
+    CHECK(control_type(rp) == UIA_ButtonControlTypeId);
+    CHECK(class_is(rp, L"UiaProvided"));
+    CHECK(IUIAutomationElement_get_CurrentProcessId(rp, &pid) == S_OK && pid == (int)pi.dwProcessId);
+    CHECK(element_hwnd(rp) == FindWindowW(L"UiaProvided", L"UIA Remote Provided"));
+    fragments(uia, rp, element_hwnd(rp));
+    IUIAutomationElement_Release(rp);
+    IUIAutomationCondition_Release(rid);
+
     IUIAutomationElement_Release(box);
     IUIAutomationCondition_Release(id103);
     IUIAutomationElement_Release(field);
@@ -1079,6 +1476,36 @@ static void other_process(IUIAutomation *uia, IUIAutomationElement *root) {
     IUIAutomationCondition_Release(named);
     CHECK(SetEvent(done));
     CHECK(WaitForSingleObject(pi.hProcess, 20000) == WAIT_OBJECT_0);
+}
+
+static void providers(IUIAutomation *uia) {
+    CHECK(make_provided(L"UIA Provided") != NULL);
+    IUIAutomationElement *e = NULL;
+    CHECK(IUIAutomation_ElementFromHandle(uia, provided_hwnd, &e) == S_OK && e != NULL);
+    CHECK(name_is(e, L"Provided"));
+    BSTR id = NULL;
+    CHECK(IUIAutomationElement_get_CurrentAutomationId(e, &id) == S_OK && bstr_is(id, L"provided-id"));
+    SysFreeString(id);
+    CHECK(control_type(e) == UIA_ButtonControlTypeId);
+    CHECK(provider_asked > 0);
+    /* The host's: what the provider leaves empty. */
+    CHECK(class_is(e, L"UiaProvided"));
+    CHECK(element_hwnd(e) == provided_hwnd);
+    int pid = 0;
+    CHECK(IUIAutomationElement_get_CurrentProcessId(e, &pid) == S_OK && pid == (int)GetCurrentProcessId());
+    fragments(uia, e, provided_hwnd);
+    IUIAutomationElement_Release(e);
+    /* Searches see the provider's values: the desktop's child with
+     * AutomationId "provided-id" is the window. */
+    IUIAutomationElement *root = NULL, *found = NULL;
+    CHECK(IUIAutomation_GetRootElement(uia, &root) == S_OK && root != NULL);
+    IUIAutomationCondition *c = prop_str(uia, UIA_AutomationIdPropertyId, L"provided-id");
+    CHECK(IUIAutomationElement_FindFirst(root, TreeScope_Children, c, &found) == S_OK && found != NULL);
+    CHECK(element_hwnd(found) == provided_hwnd);
+    IUIAutomationElement_Release(found);
+    IUIAutomationCondition_Release(c);
+    IUIAutomationElement_Release(root);
+    DestroyWindow(provided_hwnd);
 }
 
 int main(int argc, char **argv) {
@@ -1319,6 +1746,7 @@ int main(int argc, char **argv) {
     IUIAutomationCondition_Release(id101);
     lists(uia);
     frames(uia);
+    providers(uia);
     other_process(uia, root);
     IUIAutomationElement_Release(root);
     IUIAutomationElement_Release(win);

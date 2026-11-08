@@ -86,30 +86,24 @@ pub struct Call<'a> {
 }
 
 impl Call<'_> {
+    /// System call argument `i` (where the architecture's Linux ABI has
+    /// it: `machine::syscall_arg`).
     fn arg(&self, i: usize) -> u64 {
-        let f = self.frame;
-        [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9][i]
+        super::machine::syscall_arg(self.frame, i)
     }
 }
 
 pub type Result = core::result::Result<u64, u16>;
 
-/// The user registers a system call returns with through SYSRET: rcx
-/// holds the return address and r11 the flags (the `syscall`
+/// The user registers a system call returns with (x86-64's SYSRET: rcx
+/// holds the return address and r11 the flags, the `syscall`
 /// instruction's convention, which Linux programs expect).
 pub fn return_regs(f: &SyscallFrame) -> UserRegs {
-    UserRegs {
-        gpr: [
-            f.rax, f.rip, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10, f.rflags,
-            f.r12, f.r13, f.r14, f.r15,
-        ],
-        rip: f.rip,
-        rflags: f.rflags,
-    }
+    f.return_regs()
 }
 
 fn dispatch(frame: &mut SyscallFrame) {
-    let number = frame.rax;
+    let number = frame.number();
     let Some(me) = thread::current() else {
         panic!("linux syscall {number} from a thread without a process");
     };
@@ -120,7 +114,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     crate::flight::record(crate::flight::Kind::Syscall, number | (process.id << 32), tid);
     let Some(lx) = state::get(process.id) else {
         crate::warn!("lx: pid {}: system call {number} with no Linux state", process.id);
-        frame.rax = errno::to_return(ENOSYS);
+        frame.set_result(errno::to_return(ENOSYS));
         return;
     };
     let call = Call { process, lx, frame, tid, resume: Cell::new(None) };
@@ -133,7 +127,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     super::timer::fire(&call);
     crate::flight::record(crate::flight::Kind::SyscallDone, number, rax);
     let Call { process, lx, resume, .. } = call;
-    frame.rax = rax;
+    frame.set_result(rax);
     let resume = resume.take();
     let mut regs = resume.unwrap_or_else(|| return_regs(frame));
     let delivered = sigcalls::deliver(&process, &lx, tid, number, resume.is_some(), &mut regs);
@@ -223,7 +217,9 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::OPEN => file::openat(call, file::AT_FDCWD, a(0), a(1), a(2)),
         nr::CREAT => file::openat(call, file::AT_FDCWD, a(0), CREAT_FLAGS, a(1)),
         nr::OPENAT => file::openat(call, a(0), a(1), a(2), a(3)),
-        nr::STAT | nr::LSTAT => file::stat(call, a(0), a(1)),
+        nr::STAT => file::stat(call, a(0), a(1), true),
+        nr::LSTAT => file::stat(call, a(0), a(1), false),
+        nr::STATX => file::statx(call, a(0), a(1), a(2), a(3), a(4)),
         nr::FSTAT => file::fstat(call, a(0), a(1)),
         nr::NEWFSTATAT => file::newfstatat(call, a(0), a(1), a(2), a(3)),
         nr::GETDENTS64 => file::getdents64(call, a(0), a(1), a(2)),
@@ -241,8 +237,12 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::CHDIR => file::chdir(call, a(0)),
         nr::FCHDIR => file::fchdir(call, a(0)),
         nr::GETCWD => file::getcwd(call, a(0), a(1)),
-        nr::READLINK => file::readlinkat(call, file::AT_FDCWD, a(0), a(2)),
-        nr::READLINKAT => file::readlinkat(call, a(0), a(1), a(3)),
+        nr::READLINK => file::readlinkat(call, file::AT_FDCWD, a(0), a(1), a(2)),
+        nr::READLINKAT => file::readlinkat(call, a(0), a(1), a(2), a(3)),
+        nr::LINK => file::linkat(call, file::AT_FDCWD, a(0), file::AT_FDCWD, a(1), 0),
+        nr::LINKAT => file::linkat(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::SYMLINK => file::symlinkat(call, a(0), file::AT_FDCWD, a(1)),
+        nr::SYMLINKAT => file::symlinkat(call, a(0), a(1), a(2)),
         nr::FTRUNCATE => file::ftruncate(call, a(0), a(1)),
         nr::TRUNCATE => file::truncate(call, a(0), a(1)),
         nr::FSYNC | nr::FDATASYNC => file::fsync(call, a(0)),

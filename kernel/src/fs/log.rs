@@ -10,7 +10,8 @@
 //! field zero) and payload, then the payload, padded to 8 bytes. A record
 //! whose magic, generation or CRC does not match ends the log (a torn
 //! write, or older contents of the disk). Paths are u32 length + UTF-16
-//! units; descriptors u32 length + bytes (0: none). Little endian.
+//! units; descriptors and symbolic links' targets u32 length + bytes
+//! (0: none). Little endian.
 
 use crate::mm::heap::TryVec;
 use alloc::vec::Vec;
@@ -19,12 +20,16 @@ use alloc::vec::Vec;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// A directory or file was created (a file: emptied if it exists).
+    /// Version 3 added its POSIX permission bits (None: made without them)
+    /// and a directory's case sensitivity; older records have neither.
     Create {
         path: Vec<u16>,
         directory: bool,
         attributes: u32,
         created: u64,
         written: u64,
+        mode: Option<u16>,
+        case_sensitive: bool,
     },
     Write {
         path: Vec<u16>,
@@ -54,9 +59,27 @@ pub enum Op {
         from: Vec<u16>,
         to: Vec<u16>,
     },
-    /// Removed (a directory with everything below it).
+    /// The name removed (a directory with everything below it; a file's
+    /// node lives on under its other hard links).
     Delete {
         path: Vec<u16>,
+    },
+    /// The POSIX permission bits changed (version 3).
+    SetMode {
+        path: Vec<u16>,
+        mode: u16,
+    },
+    /// A symbolic link was created, pointing at `target` (version 3).
+    Symlink {
+        path: Vec<u16>,
+        target: Vec<u8>,
+        created: u64,
+    },
+    /// `to` was made another name (a hard link) of the node at `from`
+    /// (version 3).
+    Link {
+        from: Vec<u16>,
+        to: Vec<u16>,
     },
 }
 
@@ -66,7 +89,13 @@ const MAGIC: u32 = u32::from_le_bytes(*b"GLOG");
 /// log for it (as an unknown record would), so an older kernel never
 /// misreads a newer one's records.
 /// 2: SetBasic carries the access time after the attributes.
-pub const VERSION: u8 = 2;
+/// 3: Create carries the POSIX mode and case sensitivity after the times;
+/// the SetMode, Symlink and Link records (LX seam 4).
+pub const VERSION: u8 = 3;
+/// Create's mode field when the node has no POSIX mode.
+const NO_MODE: u32 = u32::MAX;
+/// Create's flag bit: a case-sensitive directory.
+const CASE_SENSITIVE: u32 = 1;
 pub const HEADER: usize = 24;
 /// The largest payload a record may have (a Write's data is split).
 pub const MAX_PAYLOAD: usize = 128 * 1024;
@@ -127,17 +156,23 @@ impl Op {
             Op::SetSecurity { .. } => 5,
             Op::Rename { .. } => 6,
             Op::Delete { .. } => 7,
+            Op::SetMode { .. } => 8,
+            Op::Symlink { .. } => 9,
+            Op::Link { .. } => 10,
         }
     }
 
     fn payload(&self, out: &mut Vec<u8>) -> Result<(), NoMemory> {
         match self {
-            Op::Create { path, directory, attributes, created, written } => {
+            Op::Create { path, directory, attributes, created, written, mode, case_sensitive } => {
                 put_path(out, path)?;
                 put(out, &[u8::from(*directory)])?;
                 put(out, &attributes.to_le_bytes())?;
                 put(out, &created.to_le_bytes())?;
-                put(out, &written.to_le_bytes())
+                put(out, &written.to_le_bytes())?;
+                put(out, &mode.map_or(NO_MODE, u32::from).to_le_bytes())?;
+                let flags = if *case_sensitive { CASE_SENSITIVE } else { 0 };
+                put(out, &flags.to_le_bytes())
             }
             Op::Write { path, offset, data, written } => {
                 put_path(out, path)?;
@@ -166,6 +201,19 @@ impl Op {
                 put_path(out, to)
             }
             Op::Delete { path } => put_path(out, path),
+            Op::SetMode { path, mode } => {
+                put_path(out, path)?;
+                put(out, &u32::from(*mode).to_le_bytes())
+            }
+            Op::Symlink { path, target, created } => {
+                put_path(out, path)?;
+                put(out, &created.to_le_bytes())?;
+                put_bytes(out, target)
+            }
+            Op::Link { from, to } => {
+                put_path(out, from)?;
+                put_path(out, to)
+            }
         }
     }
 
@@ -292,7 +340,13 @@ fn parse(kind: u8, version: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemor
             let path = path!();
             let directory = r.take(1)?[0] != 0;
             let (attributes, created, written) = (r.u32()?, r.u64()?, r.u64()?);
-            Op::Create { path, directory, attributes, created, written }
+            let (mode, case_sensitive) = if version >= 3 {
+                let (mode, flags) = (r.u32()?, r.u32()?);
+                (u16::try_from(mode).ok(), flags & CASE_SENSITIVE != 0)
+            } else {
+                (None, false)
+            };
+            Op::Create { path, directory, attributes, created, written, mode, case_sensitive }
         }
         2 => {
             let path = path!();
@@ -325,6 +379,23 @@ fn parse(kind: u8, version: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemor
             Op::Rename { from, to }
         }
         7 => Op::Delete { path: path!() },
+        8 if version >= 3 => {
+            let path = path!();
+            Op::SetMode { path, mode: u16::try_from(r.u32()?).ok()? }
+        }
+        9 if version >= 3 => {
+            let path = path!();
+            let created = r.u64()?;
+            match r.bytes()? {
+                Ok(target) => Op::Symlink { path, target, created },
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        10 if version >= 3 => {
+            let from = path!();
+            let to = path!();
+            Op::Link { from, to }
+        }
         _ => return None,
     }))
 }
@@ -379,6 +450,51 @@ mod tests {
 
     use super::*;
 
+    /// `op`'s record as an older format `version` wrote it: the payload's
+    /// last `drop` bytes left out.
+    fn as_version(op: &Op, version: u8, drop: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        op.encode(5, &mut out).unwrap();
+        let len = u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize - drop;
+        let mut old = out[..HEADER + len].to_vec();
+        old[4..8].copy_from_slice(&(len as u32).to_le_bytes());
+        old[17] = version;
+        old[20..24].fill(0);
+        let crc = crc32(0, &old);
+        old[20..24].copy_from_slice(&crc.to_le_bytes());
+        old
+    }
+
+    /// A Create of version 2 (before POSIX modes) still reads: no mode,
+    /// not case-sensitive. The kinds version 3 added are not records of an
+    /// older version (they end the log there).
+    #[test]
+    fn a_version_2_create_has_no_mode() {
+        let path = w("\\d");
+        let op = Op::Create {
+            path: path.clone(),
+            directory: true,
+            attributes: 0x10,
+            created: 1,
+            written: 2,
+            mode: Some(0o700),
+            case_sensitive: true,
+        };
+        let old = as_version(&op, 2, 8);
+        let want = Op::Create {
+            path,
+            directory: true,
+            attributes: 0x10,
+            created: 1,
+            written: 2,
+            mode: None,
+            case_sensitive: false,
+        };
+        assert!(matches!(decode(&old, 5), Decoded::Record(op, _) if op == want));
+        let link = Op::Link { from: w("\\a"), to: w("\\b") };
+        assert_eq!(decode(&as_version(&link, 2, 0), 5), Decoded::End);
+    }
+
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
     }
@@ -391,6 +507,17 @@ mod tests {
                 attributes: 0x10,
                 created: 5,
                 written: 6,
+                mode: Some(0o750),
+                case_sensitive: true,
+            },
+            Op::Create {
+                path: w("\\n"),
+                directory: false,
+                attributes: 0x20,
+                created: 5,
+                written: 6,
+                mode: None,
+                case_sensitive: false,
             },
             Op::Write { path: w("\\d\\f"), offset: 7, data: vec![1, 2, 3], written: 9 },
             Op::SetSize { path: w("\\d\\f"), size: 2, written: 10 },
@@ -404,6 +531,9 @@ mod tests {
             Op::SetSecurity { path: w("\\d"), descriptor: vec![1, 0, 4, 0x80] },
             Op::Rename { from: w("\\d\\f"), to: w("\\d\\g") },
             Op::Delete { path: w("\\d\\g") },
+            Op::SetMode { path: w("\\d\\h"), mode: 0o4755 },
+            Op::Symlink { path: w("\\d\\s"), target: b"../t".to_vec(), created: 11 },
+            Op::Link { from: w("\\d\\h"), to: w("\\d\\h2") },
         ]
     }
 

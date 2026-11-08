@@ -13,9 +13,12 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   linker.ld             higher-half layout, kernel linked at 0xffffffff80000000
   src/main.rs           entry symbol `kmain` + panic handler only
   src/lib.rs            boot sequence (`kernel_main`)
-  src/arch/x86_64/      CPU, GDT/TSS, IDT + ISR stubs, APIC, paging, SMP,
-                        syscall entry, XSAVE, UART, PCI, virtio transport,
-                        PS/2, kernel handover's machine side      [unsafe allowed]
+  src/arch/             the architecture seam ("The architecture seam") [unsafe allowed]
+  src/arch/x86_64/      CPU, GDT/TSS, IDT + ISR stubs, APIC timer, paging, SMP,
+                        syscall entry, XSAVE, UART, PCI config ports, PS/2,
+                        kernel handover's machine side
+  src/arch/aarch64/     a stub of the same interface that only compiles (CI's check)
+  src/arch/{pci,virtio,trap}.rs  shared: PCI functions, virtio transport, trap kinds
   src/boot/             Limine protocol bindings and handoff -> plain types [unsafe allowed]
   src/sync.rs           IrqMutex: spinlock that masks interrupts while held
   src/time.rs           periodic tick + TSC monotonic clock; clockcal.rs its arithmetic
@@ -44,12 +47,16 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/input.rs          PS/2 mouse polling for the desktop
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
+  src/nt/abi/           Windows' ABI on this architecture (x64/: CONTEXT, frames, ...)
   src/platform.rs       the kernel's implementation of nt::platform
   src/personality.rs    per-process system-call ABI and its dispatcher table
   src/lx/               the Linux personality's groundwork (ROADMAP LX)
+  src/lx/machine/       Linux's ABI on this architecture (x86_64.rs: registers, signal frame)
   src/hosted/           gala-um's platform (feature `hosted`; memfd, host threads, signals) [unsafe allowed]
 user/                   freestanding Windows programs and DLLs (x86_64-pc-windows-msvc)
   ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
+                        (x64.rs; x86.rs for 32-bit programs, "Plan: WOW64")
+  wow64/                wow64.dll, the 64-bit side of 32-bit processes
   <name>_test/          test programs (one per feature)
   <dll>/                gala's system DLLs ("gala's system DLLs" below)
   bin/                  the built test binaries, checked in (`cargo xtask export-tests`)
@@ -75,6 +82,73 @@ hardware-independent logic (memory map validation, the mapper, command
 line, calibration arithmetic, ...) is unit-tested on the host with
 `cargo test -p kernel --lib`.
 
+## The architecture seam
+
+Everything that depends on the processor architecture is in
+`kernel/src/arch`, behind one interface each architecture implements in
+its own module, selected by `target_arch` (x86_64; aarch64, a stub).
+The kernel's aarch64 check (CI's Clippy step: `cargo clippy -p kernel
+--target aarch64-unknown-none`) builds everything else against the stub,
+so code outside `arch` that names an x86-64 type, register, instruction,
+`asm!` or `core::arch::x86_64` fails to build. What an architecture
+provides (the module names neutral code uses):
+
+- **Registers** (`syscall`, `interrupts`): `UserRegs` (a thread's user
+  registers), `SyscallFrame` (a system call's), `TrapFrame` (an
+  exception's or interrupt's). Their fields are private to `arch`; the
+  rest of the kernel uses architecture-neutral accessors: instruction
+  pointer, stack pointer, flags, the call's number and result, the
+  registers it returns with (`return_regs`), the handover state's words
+  (`to_words`/`from_words`, `UserRegs::WORDS`), a trap's `kind()`
+  (`trap::TrapKind`), page-fault access, interrupted `mode()`, vector
+  and error code for logs. The architecture's named registers (`Gpr`:
+  x86-64's rax..r15) are for the per-architecture ABI modules only.
+- **Entering and leaving user mode** (`syscall`): the dispatchers per
+  personality, `enter_user_regs`, `continue_with`, `reissue`, the
+  user-return hook.
+- **The user's FP/SIMD state** (`xstate`): `XState` (initial, its image
+  as bytes, the 512-byte "legacy" part and component mask the handover
+  carries), save/restore, the enabled components.
+- **Time** (`cpu::cycles`, `timer`): the free-running cycle counter
+  (x86-64: the TSC), the tick source and its `Calibration`
+  (`calibrate`, `recalibrate`, `start_periodic(_here)`, `eoi`, the
+  counter's and timer's rates, the calibration's log line and
+  `clock_cal` event), a wall-clock seconds reference (`rtc_seconds`).
+- **Boot and CPUs**: `init_boot_cpu` (before lock-order checking) and
+  `init_boot_traps`, the boot phase names (`bootphase::mark`,
+  `bootphase::TIMER`), `percpu`, `smp` (online CPUs as (index, hardware
+  id), IPIs, `send_nmi`, TLB shootdowns, starting the APs), `paging`
+  (the kernel's and user address spaces), `context` (kernel stacks,
+  the context switch), `backtrace` (`walk`, `walk_trap`), `cpu`
+  (interrupt masking, halting, `hw_random`), the console and debug
+  ports, `qemu::exit`, the kernel handover's machine part, PS/2.
+- **Devices**: `port` and `pci_config` (x86-64: I/O ports and the 0xcf8
+  mechanism); `arch::pci` and `arch::virtio` are shared by every
+  architecture on top of them.
+
+The personalities' ABIs are per architecture too, outside `arch` (they
+are Windows' and Linux's, not the machine's): `nt::abi` (x64: the
+CONTEXT record, system call arguments in r10, rdx, r8, r9 and the
+stack, thread starts, exception and APC frames, the CONTEXT services,
+KUSER_SHARED_DATA's processor fields, the registry's processor
+identity, the crash report's registers) and `lx::machine` (x86_64:
+argument registers, restart, start registers, AT_PLATFORM/AT_HWCAP, the
+signal frame; the system call table is `lx/syscalls.rs`). Their aarch64
+counterparts are stubs (`nt/abi/arm64.rs`, `lx/machine/aarch64.rs`,
+`lx/syscalls_aarch64.rs`).
+
+By nature x86-64 only: gala-um's host side (`hosted`, a Linux x86-64
+process's signal contexts; `compile_error!` elsewhere). WOW64's NT part
+(`nt/wow64.rs`, 32-bit Windows' layouts) is plain data and compiles on
+every architecture; it runs only where the platform can enter 32-bit
+code (`set_teb32`: x86-64's compatibility mode).
+
+Limits (ROADMAP PT): `mm::paging` is x86-64's page-table format (generic
+over table access for host tests); the user thread-pointer bases keep
+x86-64's names (`gs_base`, `fs_base`, `teb32`) and the FP control
+register MXCSR's; `boot` is Limine's x86-64 protocol; gala's DLLs are not
+checked for aarch64 yet.
+
 ## Boot
 
 1. UEFI firmware (OVMF in QEMU) loads Limine from the ISO's EFI system
@@ -97,8 +171,15 @@ line, calibration arithmetic, ...) is unit-tested on the host with
 
 The GDT uses the x64 Windows selector values because user mode can
 observe them: kernel CS/SS `0x10`/`0x18`, user CS `0x33`, user SS `0x2b`,
-32-bit compat CS `0x23`, TSS `0x40`. This ordering is also exactly what
-SYSCALL/SYSRET require. The TSS provides IST stacks for #DF (IST1), NMI
+32-bit compat CS `0x23`, TSS `0x40`, and `0x53`, the running WOW64
+thread's TEB32 as FS for 32-bit code (written per CPU at each switch to
+such a thread: "Plan: WOW64"). This ordering is also exactly what
+SYSCALL/SYSRET require. STAR's SYSRET base is `0x23` with its RPL:
+Intel's SYSRET forces RPL 3 into the SS it loads, AMD's loads base + 8
+as it is, so a base of `0x20` gives user mode SS `0x28` on AMD and the
+next IRETQ from an interrupt there raises #GP(0x28) (`gdt.rs`'s tests
+check both vendors' rules; the boot log's `cpu:` line names the
+vendor). The TSS provides IST stacks for #DF (IST1), NMI
 (IST2) and #MC.
 
 All 256 IDT vectors point at 16-byte stubs generated in `interrupts.rs`;
@@ -131,7 +212,9 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `fault=ud`, `fault=pagefault` | provoke that exception (tests the handler) |
 | `run=<file>[,<file>...]` | run those boot modules as user processes, one after another (each between `run: begin` and `run: end` log lines) |
 | `args=<percent-encoded>[,...]` | their command-line arguments, in the same order (`%2C` for a comma) |
-| `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot |
+| `start=<file>[,<file>...]`, `start_args=...` | start those programs first without waiting for them (a server for the `run=` programs); they end with the boot (`start: <name> (pid <n>, as <account>)`) |
+| `start_as=system` | the `start=` programs run as SYSTEM (services, session 0) while the `run=` programs stay the boot user's (`filezilla_sftp`: sshd beside a desktop program) |
+| `start_wait=<file>[,...]` | those `start=` programs are waited for before the next one starts (`ssh-keygen -A` before sshd), logged as `start: <name> (pid <n>) finished with status <s>` (a warning every minute it has not) |
 | `console=<program>` | that `start=`/`run=` program (module or file name) gets a console window ("Console windows") |
 | `cwd=C:/dir` | their current directory (default `C:\gala\`) |
 | `as=system` | the `run=` programs run as SYSTEM instead of the boot user ("Access tokens"; the sshd scenarios) |
@@ -146,7 +229,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
-| `profile=server` | never bring up the graphical interface: the desktop is not drawn even with a screen (windows still exist), `console=` starts no console window (ROADMAP SD) |
+| `profile=server` | never bring up the graphical interface: nothing draws a desktop even with a screen (each session's keeps its windows, shown by none), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (scenario `net_echo`) |
 | `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (driver recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (driver recovery test) |
@@ -266,7 +349,11 @@ boot tests only exercise xAPIC; x2APIC runs under KVM.
 
 `time` runs a 1 kHz periodic tick on vector 0x30 and offers
 `monotonic_ns()` from the TSC. The reschedule IPI is vector 0x31,
-spurious interrupts use vector 0xff.
+spurious interrupts use vector 0xff. `time` itself is
+architecture-neutral: it reads the cycle counter (`arch::cpu::cycles`)
+and drives the tick source through `arch::timer` (x86-64's local APIC
+timer and its calibration below, in `arch/x86_64/timer.rs` and
+`apic.rs`).
 
 ### Calibration
 
@@ -494,7 +581,9 @@ numbers and the version reported to programs depend on it.
   NtOpenThread (the thread's own object by its ClientId; kernel32's
   OpenThread).
   NtQuerySection is exported by ntdll; NtQueryInformationProcess answers
-  ProcessHandleCount (class 20). NtLockFile
+  ProcessHandleCount (class 20), and ProcessBasicInformation's
+  InheritedFromUniqueProcessId is the creator's id (`Process::parent_id`;
+  0 for processes the kernel started). NtLockFile
   (0x123), NtUnlockFile (0x1c5) and NtSetValueKey (0x60) use Windows-range
   numbers that are UNVERIFIED for the pinned build.
 - **Tracing and counters**: `trace` logs every call; `events=syscall`
@@ -535,7 +624,10 @@ numbers and the version reported to programs depend on it.
   executable itself is not relocated (TODO in `map_image`: relocate when
   the preferred base is taken). Executables with imports are accepted
   only when an ntdll is present: binding them is the user-mode loader's
-  job, as on Windows.
+  job, as on Windows. A PE32 (x86) executable makes a WOW64 process
+  ("Plan: WOW64"): its 32-bit address limit, a PEB32, 32-bit parameters
+  and TEB32s beside the 64-bit ones, gala's wow64.dll, and a main thread
+  that starts there.
 - **Main thread's stack**: a reservation of the header's
   SizeOfStackReserve (64 KiB units, at most 256 MiB) ending at
   `layout::STACK_TOP` (0x200000) when it fits below it, else anywhere;
@@ -569,7 +661,7 @@ numbers and the version reported to programs depend on it.
   (boot modules can name a target directory in their module string), it
   is loaded once as an image section and mapped into every new process.
   The initial thread starts at its `LdrInitializeThunk` export with rcx =
-  a CONTEXT (`nt::context`) at the top of the stack describing the real
+  a CONTEXT (`nt::abi::context`) at the top of the stack describing the real
   start (entry point, rcx = PEB) and rdx = the ntdll base; ntdll resumes
   it with NtContinue, which returns through IRETQ
   (`syscall::continue_with`) because SYSRET cannot restore rcx/r11.
@@ -596,7 +688,7 @@ one flat structure, 120 bytes plus the extensions its flags name:
 | 120, 128 | with flag 4: PROC_THREAD_ATTRIBUTE_HANDLE_LIST, count |
 | 136, 144 | with flag 8: lpReserved2 (the C runtime's descriptors), length |
 | 152 | with flag 16: the primary token (CreateProcessAsUserW; "Access tokens") |
-| 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES); flag 128: DETACHED_PROCESS, no console session |
+| 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES), without 64 a NULL one at 64..88 is a new console handle; flag 128: DETACHED_PROCESS, no console session |
 | 168, 176 | with flag 256: STARTUPINFO.lpDesktop (UTF-16, `station\desktop` or `desktop`), length in characters ("Window stations and desktops") |
 
 - **Search** (kernel32): a program named without a directory is searched
@@ -706,17 +798,27 @@ current process, -2 = current thread.
   parent there exits at once.
 - **Priority classes**: NtSetInformationProcess (0x1c) takes
   ProcessPriorityClass only and records it (Get/SetPriorityClass read it
-  back); the scheduler runs every thread alike.
+  back); the scheduler runs every thread alike. SetPriorityClass, as
+  Windows: the bits that are no class are ignored, the lowest class among
+  the rest wins (measured over every pair), a value with
+  no class bit is ERROR_INVALID_PARAMETER; REALTIME needs
+  SeIncreaseBasePriorityPrivilege held (STATUS_PRIVILEGE_NOT_HELD from
+  the kernel), and kernel32 settles on HIGH without it.
 
 ### Threads
 
 - **Thread information**: each NtThread records its create/exit times,
   its Win32 start address (the image entry point for main threads;
   CONTEXT.Rax for NtCreateThread, as ReactOS does) and (Priority,
-  BasePriority), which are reported and validated but not scheduled on.
+  BasePriority), which are reported and validated but not scheduled on;
+  THREAD_BASIC_INFORMATION's BasePriority is the increment over the
+  process's base (as on Windows; GetThreadPriority returns it), the
+  absolute one stays in SYSTEM_THREAD_INFORMATION.
   No processor time is accounted (TODO, in the scheduler): thread times
   are zero and kernel32's GetSystemTimes reports every processor idle
-  since boot.
+  since boot. ThreadBasicInformation's TebBaseAddress is NULL once the
+  thread has ended (Windows frees the TEB then; gala's stays mapped
+  until the process ends).
 - **NtCreateThread** takes DeallocationStack from
   INITIAL_TEB.StackAllocationBase and applies the CONTEXT's MxCsr only
   (TODO: the rest of FltSave and the XSTATE area). kernel32's CreateThread
@@ -777,7 +879,7 @@ holds the user's registers.
   layer reaches them through `platform::xsave/xrstor/xstate_enabled`;
   gala-um reads and writes the signal frame's XSAVE area (Linux's
   `_fpx_sw_bytes`, host XCR0 as `usable`, Linux's own header bits kept).
-- **CONTEXT_EX** (`nt::context`): exception delivery's frame is the
+- **CONTEXT_EX** (`nt::abi::context`): exception delivery's frame is the
   CONTEXT (CONTEXT_FULL | SEGMENTS | XSTATE), its CONTEXT_EX at 0x4d0
   (chunks All, Legacy, XState), the record at 0x4f0, the machine frame
   at 0x590 and the XSTATE area at 0x5c0 (XSAVE header: Mask = the
@@ -847,13 +949,19 @@ Microsoft's "x64 exception handling" documentation; `seh_test`,
 - RtlUnwindEx walks from its caller to the target frame calling
   UNW_FLAG_UHANDLER handlers with EXCEPTION_UNWINDING (plus
   EXCEPTION_TARGET_UNWIND for the target), then resumes the target
-  frame's context at TargetIp with rax = ReturnValue (NtContinue).
+  frame's context at TargetIp with rax = ReturnValue (NtContinue). The
+  record's EXCEPTION_SOFTWARE_ORIGINATE is dropped from the flags the
+  unwind's handlers see (Windows 11 25H2: 0x02 where the dispatch saw
+  0x80); its other flags are kept (not measured).
 - Unwind consolidation (STATUS_UNWIND_CONSOLIDATE, how MSVC runs C++
   catch blocks, from RtlUnwindEx or RtlRestoreContext): the callback runs
   on the current stack (the removed frames still hold the exception
   object) in a frame whose unwind data, like KiUserExceptionDispatcher's,
   restores the target CONTEXT from a block on the stack; the target then
   resumes at the address the callback returned.
+- kernel32's RaiseException sets EXCEPTION_SOFTWARE_ORIGINATE (0x80) in
+  the record's flags, as Windows does (whether RtlRaiseException itself
+  does is not measured: testntdll's does not).
 - RtlCaptureContext, RtlRaiseException, RtlUnwindEx and
   KiUserExceptionDispatcher are assembly with their own unwind data, so
   walks pass through them like any frame; they are exported through
@@ -914,7 +1022,9 @@ unless the runs grow, then only the shift of the runs after it (bench
   protect never has a large page to split (`vmcycle_test`: across 2 MiB
   boundaries, page by page, beside pages another processor writes).
 - **MEM_DECOMMIT** unmaps the pages and frees their frames (after the TLB
-  shootdown), so a later MEM_COMMIT faults in fresh zeroed frames.
+  shootdown), so a later MEM_COMMIT faults in fresh zeroed frames. Size 0
+  means the whole allocation and is refused away from its base
+  (STATUS_FREE_VM_NOT_AT_BASE).
   **MEM_RESET** keeps the contents (Windows may discard them; keeping
   them is allowed) and MEM_RESET_UNDO, alone in the allocation type, then
   succeeds.
@@ -1009,13 +1119,16 @@ fails, not whichever one faults next on an empty frame pool.
 
 ### Pool and handle quotas
 
-`nt::quota` (ROADMAP R6; `quota_test` checks the Windows behaviour):
-what a process makes the kernel hold for it (objects, handle table
-entries, an object's own big buffers) is charged to the process, and a
-process over its limit fails, not whichever process next finds the heap
-empty: STATUS_QUOTA_EXCEEDED (ERROR_NOT_ENOUGH_QUOTA) over a pool quota,
-STATUS_INSUFFICIENT_RESOURCES (ERROR_NO_SYSTEM_RESOURCES) at the handle
-limit. Only the failing call fails; the process and every other process
+`crate::quota` (the block, below every personality: the network stack
+charges it too) and `nt::quota` (objects, handle entries) (ROADMAP R6;
+`quota_test` and `quota_sockets` check the Windows behaviour): what a
+process makes the kernel hold for it (objects, handle table entries, an
+object's own big buffers, sockets' buffers, queued completion packets)
+is charged to the process, and a process over its limit fails, not
+whichever process next finds the heap empty: STATUS_QUOTA_EXCEEDED
+(ERROR_NOT_ENOUGH_QUOTA; WSAENOBUFS for a socket, ENOBUFS for a Linux
+one) over a pool quota, STATUS_INSUFFICIENT_RESOURCES
+(ERROR_NO_SYSTEM_RESOURCES) at the handle limit. Only the failing call fails; the process and every other process
 go on (a handle leak in one process leaves the others their full
 limits).
 
@@ -1027,9 +1140,10 @@ limits).
 - **Two pools**, as Windows' QUOTA_LIMITS and VM_COUNTERS name them,
   over gala's one heap: waitable objects (`KObject::dispatcher` is some:
   events, mutants, semaphores, timers, completion ports, threads,
-  processes, files, pipes, sockets) and pipe buffers are "nonpaged",
-  the rest (handle entries, sections and their page tables, keys,
-  tokens, directories, names, security descriptors) "paged". The split
+  processes, files, pipes, sockets), pipe buffers, sockets' buffers and
+  completion packets are "nonpaged", the rest (handle entries, sections
+  and their page tables, keys, tokens, directories, names, security
+  descriptors) "paged". The split
   is gala's choice following Windows' (dispatcher objects live in
   nonpaged pool there).
 - **What is charged** (`quota::object_cost`): every handle entry
@@ -1043,8 +1157,31 @@ limits).
   system's and never charged. On top: a thread's boxed `NtThread`, a pipe
   instance's buffers (both quotas, at most 1 MiB: what its queues may
   hold, charged with the server end), a pagefile-backed section's page
-  table. Windows charges an object's quota to its creator and gives it
-  back at deletion; a second opener pays only its handle entry, as here.
+  table, a token's groups, privileges and restricting SIDs and its
+  dynamic part (`Token::fixed`, `Token::dynamic`). Windows charges an
+  object's quota to its creator and gives it back at deletion; a second
+  opener pays only its handle entry, as here.
+- **What grows after creation** is charged as it grows, to whoever the
+  object is charged to (`quota::grow`, `shrink`), or to its owner:
+  - a token's dynamic part (TOKEN_STATISTICS.DynamicCharged: at least
+    4096 bytes, else the default DACL's size): a larger default DACL
+    charges the difference (STATUS_QUOTA_EXCEEDED over the quota, the
+    DACL unchanged), a smaller one gives it back. Groups and privileges
+    never grow (NtAdjustGroupsToken and NtAdjustPrivilegesToken change
+    attributes only).
+  - a completion port's packets (`CompletionQueue`, `PACKET_COST` each):
+    queued packets and the slots kept for requests in progress, to the
+    port's creator, given back as they are taken or the port goes.
+    NtSetIoCompletion (PostQueuedCompletionStatus) is refused over the
+    quota (STATUS_QUOTA_EXCEEDED): a program posting without taking runs
+    out of its own quota; a completed I/O's packet and a request's slot
+    are charged whatever the limit (an I/O done cannot be refused; they
+    are bounded by the I/O in progress).
+  - a socket's buffers (`net::tcp::Owner`, "Networking"): each socket in
+    the stack's sets, while its owner holds it, to the AFD endpoint's
+    creator or the Linux socket's process; SO_RCVBUF/SO_SNDBUF size
+    them (up to 4 MiB each way), so a program asking for big buffers
+    pays for them.
 - **Where**: `HandleTable::insert` checks the handle limit, then charges
   the entry, then claims the object (`quota::claim`), each one atomic
   step against its limit; a refusal undoes the earlier steps and the
@@ -1056,27 +1193,49 @@ limits).
   handover) are charged without a limit (`attach_quota`, `insert_at`).
 - **Limits**, fixed when a process is created: `quota=` on the command
   line (tests), else `paged` a quarter of memory, `nonpaged` an eighth
-  (each at least 16 MiB), and Windows' documented 2^24 handles ("Kernel
-  Objects" on Microsoft Learn). Windows' own default pool quotas are not
+  (each at least 16 MiB), and Windows' 0xff0000 handles (2^24 - 2^16,
+  measured by quota_test on Windows; "Kernel Objects" on Microsoft Learn
+  documents 2^24). Windows' own default pool quotas are not
   documented and not reachable by a test; gala's are chosen from the
   peaks measured below with ample headroom. The handle limit is reached
-  only with a configured one: at 16 bytes an entry, 2^24 handles are
-  256 MiB, more than the pool quota.
+  only with a configured one: at 16 bytes an entry, 0xff0000 handles are
+  255 MiB, more than the pool quota.
 - **Measured peaks** of the largest process (the `quota: most per
-  process` and `quota: new most` lines): chromium_window's chrome.exe
-  196 KiB paged, about 1.1 MiB nonpaged, 517 handles (its VM's limits
-  1280 MiB and 640 MiB); java_http's java.exe between 256 and 512 KiB
-  nonpaged; nginx, nginx_master, nginx_tls under 256 KiB (nginx.exe
-  about 128 KiB nonpaged, 16 handles); go_http 3 KiB paged, 51 KiB
-  nonpaged, 26 handles. In a 512 MiB VM the defaults are 128 MiB paged
-  and 64 MiB nonpaged: over 50 times the largest peak.
+  process` and `quota: new most` lines), sockets' buffers included (a
+  default socket holds 128 KiB): chromium_https's chrome.exe 175 KiB
+  paged, about 1.5 MiB nonpaged, 522 handles (chromium_window and
+  chromium_host about 1.1 and 1.4 MiB; their VMs' limits 1280 MiB and
+  640 MiB); curl's nginx.exe about 1.2 MiB nonpaged; go_http 692 KiB;
+  java_http's java.exe between 512 KiB and 1 MiB; sshd's sshd.exe between
+  512 KiB and 1 MiB; nginx, nginx_master, nginx_tls between 256 and
+  512 KiB. In a 512 MiB VM the defaults are 128 MiB paged and 64 MiB
+  nonpaged: over 50 times the largest peak.
+- **Changed** by NtSetInformationProcess(ProcessQuotaLimits) (class 1,
+  QUOTA_LIMITS or QUOTA_LIMITS_EX, PROCESS_SET_QUOTA): a nonzero pool
+  limit becomes the process's, which needs SeIncreaseQuotaPrivilege
+  (Microsoft Learn's Privilege Constants: "Required to adjust the memory
+  quota for a process"; STATUS_PRIVILEGE_NOT_HELD without it: a
+  standard user lacks it); what is charged stays charged, later charges
+  meet the new limit; logged `quota: pid P (x.exe) .. pool limit set to
+  N`. The working set's sizes are kept and reported (gala keeps no
+  working sets; both (SIZE_T)-1 trims, changing nothing; a minimum over
+  the maximum is STATUS_INVALID_PARAMETER); PagefileLimit and TimeLimit
+  are ledgered. kernel32's SetProcessWorkingSetSize does not call it yet
+  (it keeps the sizes in the process).
 - **Exposed**: NtQueryInformationProcess ProcessQuotaLimits (class 1,
-  QUOTA_LIMITS: the pool limits, the commit limit as PagefileLimit; no
-  working-set or time limits, 0), ProcessVmCounters (class 3,
-  VM_COUNTERS or VM_COUNTERS_EX: QuotaPeakPagedPoolUsage ...
-  QuotaNonPagedPoolUsage; virtual size, working set and page faults are
-  not kept, 0), ProcessHandleCount (GetProcessHandleCount);
-  K32GetProcessMemoryInfo takes its quota fields from ProcessVmCounters.
+  QUOTA_LIMITS: the pool limits, the working set's sizes as set, the
+  commit limit as PagefileLimit; no time limit, 0), ProcessVmCounters (class 3,
+  VM_COUNTERS or VM_COUNTERS_EX: VirtualSize, the reserved bytes, and
+  WorkingSetSize, the committed ones (committed pages stay resident),
+  with their peaks (the most a query has seen, `Vad::sizes`);
+  QuotaPeakPagedPoolUsage ... QuotaNonPagedPoolUsage; page faults are
+  not counted, 0), ProcessHandleCount (GetProcessHandleCount).
+  K32GetProcessMemoryInfo and GlobalMemoryStatusEx (ullAvailVirtual: the
+  user space less VirtualSize) take their figures from
+  ProcessVmCounters, one query: they walked the address space with a
+  NtQueryVirtualMemory per region, which Chromium's frequent memory
+  checks turned into thousands of system calls on its main threads.
+  Module enumeration (psapi, Toolhelp) still walks.
 - **Object size**: every `KObject` is as large as the largest
   `ObjectBody` variant, so a large body is boxed (`Thread`, about
   10 KiB of saved register states; unboxed, every event and file cost
@@ -1086,16 +1245,18 @@ limits).
   over its ...` line (first four refusals per process), the `quota
   exceeded` process event (every refusal), each process's usage in the
   state dump (`process: pid P ...`), the end-of-run peaks.
-- Not charged yet: registry data (hive keys and values a program writes:
-  Windows does not charge them to a process either), file data in ramfs
-  (a disk's, not pool), window and message state (bounded on its own:
-  at most `window::MAX_POSTED` posted messages wait, as Windows bounds a
-  queue at 10000), a socket's
-  buffers, a completion port's queued packets, image layouts (shared by
-  every process that loads the image). Not done: NtSetInformationProcess
-  (ProcessQuotaLimits) to change a process's limits, job-wide pool
-  limits, and charging an object's memory that grows after its creation
-  (a key's subkeys, a token's groups).
+- Not charged, by design: registry data (hive keys, subkeys and values
+  a program writes: Windows does not charge them to a process either;
+  the registry has its own bounds), file data in ramfs (a disk's, not
+  pool), image layouts (`section::image_layout`: a file's laid-out
+  pages, shared by every process that loads it and kept by the system's
+  image cache, as Windows' image sections are the file cache's, not a
+  process's pool), window and message state (bounded on its own: at
+  most `window::MAX_POSTED` posted messages wait, as Windows bounds a
+  queue at 10000), lingering sockets (closed, still finishing: the
+  stack's, bounded by its budget). Job-wide pool limits: Windows has
+  none to copy (JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits only
+  commit: "Commit charge").
 
 ### Sections
 
@@ -1161,7 +1322,11 @@ address-space teardown never free.
   Only when that range is taken in a process is the view placed
   anywhere, with private pages relocated a page at a time (never a
   whole-image copy). A view not at the preferred base returns
-  STATUS_IMAGE_NOT_AT_BASE.
+  STATUS_IMAGE_NOT_AT_BASE, and a PE32 view's header page names its
+  load address (OptionalHeader.ImageBase moved by the delta, as Windows
+  does; PE32+ headers keep their preferred base until measured); a PE32
+  image in a 64-bit process returns STATUS_IMAGE_MACHINE_TYPE_MISMATCH
+  (informational, before NOT_AT_BASE: the view is mapped).
 - **Large images** (chrome.dll is 340 MB): a layout keeps, per page, the
   offset of its relocation block (`ImageLayout::reloc_index`, built once
   with `pe::relocation_blocks`), so relocating a page reads two blocks,
@@ -1386,10 +1551,45 @@ limits) and NtIsProcessInJob (0x7f0a-0x7f0e).
 ### Files
 
 `fs::ramfs` (the file system) and `nt::file` (the services). ramfs is an
-in-memory file system: node arena, case-insensitive names, NT
+in-memory file system: node arena, case-preserving names, NT
 share-access accounting, delete pending until the last open closes. It is
 the volume device `\Device\HarddiskVolume1`, linked as `\??\C:`; with
-`persist` its changes are kept on the disk ("Disk").
+`persist` its changes are kept on the disk ("Disk"). Both personalities
+share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
+
+- **Case sensitivity per directory**: names compare case-insensitively
+  (NTFS collation, ASCII folding so far) unless the directory's
+  `case_sensitive` flag is set, Windows' per-directory case sensitivity
+  (learn.microsoft.com, WSL "Case sensitivity"): then exactly, for NT
+  callers too, as Windows treats a flagged directory. Every directory a
+  Linux program makes has the flag (`create_posix`); one NT makes
+  inherits its parent's (Windows' inheritance rule); the boot's have
+  none. A pair such as `Case` and `case` made by a Linux program is two
+  files to NT as well: listed apart (directory order is collation, then
+  the UTF-16 units: `ramfs::order`), each opened only by its exact name;
+  in a directory without the flag the second name is a collision for
+  both personalities. Not yet: FileCaseSensitiveInformation (query and
+  set from NT; Windows sets it only on an empty directory).
+- **Hard links**: a node's own `parent`/`name` is its first name (what
+  `path_of`, FileNameInformation and the change notifications use);
+  further names are `RamFs::links` entries (`link`). `find` and
+  `entries` (getdents64, NtQueryDirectoryFile) see every name;
+  NumberOfLinks and st_nlink count them. Removing a first name while
+  links remain moves the node to one of them (`promote`). Directories
+  have exactly one name. Limit: an NT delete of a handle opened by a
+  link name removes the node's first name.
+- **Symbolic links**: `Kind::Symlink` keeps the target bytes as Linux
+  gave them; `lx::file` follows them. NT sees one as a file with
+  FILE_ATTRIBUTE_REPARSE_POINT whose open fails with
+  STATUS_IO_REPARSE_TAG_NOT_HANDLED unless FILE_OPEN_REPARSE_POINT is
+  given (how Windows answers a WSL symlink); NT symbolic links
+  (CreateSymbolicLinkW, reparse data) are not built.
+- **Two ways to delete**: NT's (`set_delete_pending`, then the last
+  close removes the node: the name stays taken until then) and Linux's
+  (`unlink`, POSIX semantics: the name goes at once; a node still open
+  lives on *detached*, nlink 0, freed at its last close, never recorded
+  again). `exchange` swaps two names (renameat2's RENAME_EXCHANGE) by
+  three renames under the file system's lock.
 
 - **Contents from boot modules**: modules appear read-only in `C:\gala`
   (or the directory their module string names), copied to the heap on
@@ -1409,7 +1609,15 @@ the volume device `\Device\HarddiskVolume1`, linked as `\??\C:`; with
   `DirScan` (mask fixed by the first query, "." and ".." outside the
   root, then children in NTFS collation order, resuming after the last
   returned name); an empty first result is STATUS_NO_SUCH_FILE, later
-  ones STATUS_NO_MORE_FILES.
+  ones STATUS_NO_MORE_FILES. The mask matches as FsRtlIsNameInExpression
+  does: `*` and `?`, and the DOS forms kernel32's FindFirstFileW makes of
+  a Win32 pattern (`?` to DOS_QM `>`, a `.` before `?` or `*` to DOS_DOT
+  `"`, a `*` before `.` to DOS_STAR `<`): DOS_STAR takes any run up to
+  the name's final period, DOS_QM one character or none at a period or
+  the end, DOS_DOT a period or none at the end. So `*.*` lists every name
+  (CPython lists its Lib so: `encodings` has no dot) while NT's own
+  `*.*` keeps its literal period (`ramfs::wildcard_match`, a set of mask
+  positions, no backtracking).
 - **Rename and delete**: FileRenameInformation (DELETE access) moves the
   node; FILE_DELETE_ON_CLOSE needs DELETE and takes effect when that open
   closes.
@@ -1510,10 +1718,16 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
   - NtReadFile returns what is there (at least one byte, waiting
     otherwise); in message read mode (the server's ReadMode, or
     FilePipeInformation from SetNamedPipeHandleState; clients start in
-    byte mode) at most one message, STATUS_BUFFER_OVERFLOW
+    byte mode; NtQueryInformationFile answers FilePipeInformation, the
+    read mode and FILE_PIPE_QUEUE_OPERATION, and FilePipeLocalInformation:
+    type, full duplex, maximum and current instances of the name, the
+    quotas, bytes waiting and room, state, end) at most one message, STATUS_BUFFER_OVERFLOW
     (ERROR_MORE_DATA) with the part that fits and the rest left for the
     next read; STATUS_PIPE_BROKEN (ERROR_BROKEN_PIPE) once the other end
-    is closed and the queue is empty.
+    is closed and the queue is empty. A zero-byte read waits as well
+    (libuv's and multiprocessing's way to wait for a readable pipe): it
+    ends when data comes with no bytes, or with STATUS_BUFFER_OVERFLOW
+    for a message, which stays; a zero-length message is read by it.
   - NtWriteFile completes fully, waiting while the queue is full (a
     message waits until it fits whole or the queue is empty), and fails
     with STATUS_PIPE_CLOSING (ERROR_NO_DATA; Windows' exact code here is
@@ -1524,7 +1738,10 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
     its answer.
   - FSCTL_PIPE_PEEK (NtFsControlFile, 0x7f04) reports the state, the
     bytes available, the message count and the first message's length,
-    and a copy (STATUS_BUFFER_OVERFLOW if it does not all fit).
+    and a copy (STATUS_BUFFER_OVERFLOW if it does not all fit);
+    PeekNamedPipe's lpBytesLeftThisMessage is that length less what was
+    copied whatever the mode, so a byte pipe's goes below 0 (Windows does
+    the same, its docs say 0).
 - **Asynchronous ends** (opened without FILE_SYNCHRONOUS_IO_*): a listen
   or read that would wait pends (STATUS_PENDING) and completes through a
   `notify::Request` (status block, event, the end's signal, its
@@ -1535,7 +1752,13 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
   (SetFileCompletionNotificationModes) works as on sockets:
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS posts no packet for an I/O that
   completed in its call, FILE_SKIP_SET_EVENT_ON_HANDLE leaves the end's
-  signal alone. Writes on asynchronous ends still wait in the call (a
+  signal alone. A request that fails in its call with an error status
+  (STATUS_PIPE_CONNECTED for a client already there, ...) is only its
+  return value, as in NT: no status block written, no event set, no
+  packet; asyncio sets the event itself after ConnectNamedPipe's
+  ERROR_PIPE_CONNECTED, and kernel32's GetOverlappedResult waits once on
+  a caller's event and succeeds for any NT_SUCCESS status (a status
+  still pending included), failing for warnings and errors. Writes on asynchronous ends still wait in the call (a
   documented simplification).
 - **Waiters**: synchronous waiters are on the pipe's waiter list, woken
   on every change; they leave on termination.
@@ -1587,7 +1810,9 @@ Pipes report FILE_DEVICE_NAMED_PIPE (GetFileType: FILE_TYPE_PIPE).
 - **System time** comes from Limine's boot timestamp plus the TSC clock
   (or from `clock=`/`replay=`); the time zone is UTC. The performance
   counter runs at 10 MHz; SystemQueryPerformanceCounterInformation (124)
-  says KernelQpc (QueryPerformanceCounter is a system call).
+  says KernelQpc (QueryPerformanceCounter is a system call); the caller
+  fills in Version 1 (else STATUS_NOT_SUPPORTED) and any buffer of 12
+  bytes or more gets 12.
 - GetSystemTimeAsFileTime is KUSER_SHARED_DATA's SystemTime, as of the
   last tick, as on Windows; the precise time (NtQuerySystemTime) is
   GetSystemTimePreciseAsFileTime's. The coarse clock must step: a program
@@ -1632,7 +1857,9 @@ around a thread exit's log line.
   functions (WriteConsoleW and friends) also accept any handle the kernel
   reports as FILE_DEVICE_CONSOLE (output if a zero-length write
   succeeds), so programs that write to a character-device stderr with
-  WriteConsoleW (Win32-OpenSSH) are seen.
+  WriteConsoleW (Win32-OpenSSH) are seen. Any other handle fails as on
+  Windows: WriteConsoleW and WriteConsoleA give ERROR_INVALID_FUNCTION on
+  a pipe and ERROR_INVALID_HANDLE on anything else.
 
 #### Console windows
 
@@ -1755,7 +1982,9 @@ CreatePseudoConsole / ResizePseudoConsole / ClosePseudoConsole pages
   {session id, signal pipe, host process}; CreateProcess with
   PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE passes the id (GalaCreateProcess
   flag 32) and, without STARTF_USESTDHANDLES, the child gets new console
-  handles (flag 64). ResizePseudoConsole sets the size;
+  handles (flag 64); with it, each NULL standard handle is a new console
+  handle (Microsoft's ConPTY samples pass three NULLs so that the child
+  does not take the parent's). ResizePseudoConsole sets the size;
   ClosePseudoConsole closes the session (its programs end), closes the
   signal pipe and waits up to 5 s for the host (the caller drains the
   output pipe, as documented).
@@ -1842,8 +2071,9 @@ SECURITY.md phase S1 holds the model; the kernel side is
   - NtFilterToken: deny-only SIDs, deleted privileges,
     DISABLE_MAX_PRIVILEGE, restricting SIDs intersected with existing
     ones; the new handle has the old one's access;
-  - NtPrivilegeCheck: impersonation tokens only; marks
-    SE_PRIVILEGE_USED_FOR_ACCESS;
+  - NtPrivilegeCheck: a primary token or an impersonation token at
+    identification level or above (Windows' PrivilegeCheck takes a
+    primary one too); marks SE_PRIVILEGE_USED_FOR_ACCESS;
   - NtSetInformationToken (0x7f23): TokenOwner (the user or an
     SE_GROUP_OWNER group), TokenPrimaryGroup (the user or one of its
     groups), TokenDefaultDacl, TokenIntegrityLevel (lowering; raising
@@ -1866,9 +2096,12 @@ SECURITY.md phase S2; rules in `kernel/src/nt/security.rs`, services in
     enabled; else STATUS_INVALID_OWNER);
   - DACL given (files and keys: automatic inheritance, so an unprotected
     given DACL gets the parent's inheritable ACEs after its own and
+    SE_DACL_AUTO_INHERITED; a given DACL keeps its own
     SE_DACL_AUTO_INHERITED), else the parent's inheritable ACEs (the
-    documented OI/CI/NP/IO rules; effective ACEs get INHERITED_ACE,
-    generic rights mapped through the type's mapping and CREATOR
+    documented OI/CI/NP/IO rules; for files and keys the ACEs get
+    INHERITED_ACE, and the DACL SE_DACL_AUTO_INHERITED, only when the
+    parent's DACL is auto-inherited, as on Windows 11 25H2; other types
+    always mark them; generic rights mapped through the type's mapping and CREATOR
     OWNER/GROUP replaced, with an inherit-only copy when they also
     propagate), else the token's default DACL (mapped);
   - named objects take the descriptor from OBJECT_ATTRIBUTES
@@ -1962,7 +2195,8 @@ SECURITY.md phase S3; `security::access_check` (`access_test`,
   LogonUserExExW with LOGON32_PROVIDER_VIRTUAL) it is a virtual-account
   logon (`accounts::virtual_logon`, below).
 - **LSA** (secur32 `lsa.rs`, over GalaLogonUser): LsaConnectUntrusted,
-  LsaRegisterLogonProcess (SeTcbPrivilege), LsaLookupAuthenticationPackage
+  LsaRegisterLogonProcess (SeTcbPrivilege; without it
+  STATUS_PORT_CONNECTION_REFUSED), LsaLookupAuthenticationPackage
   (Negotiate 0, MSV1_0 1, Kerberos 2; STATUS_NO_SUCH_PACKAGE),
   LsaLogonUser with MSV1_0 (or Negotiate) MSV1_0_S4U_LOGON and
   MSV1_0_INTERACTIVE_LOGON (string buffers as addresses or offsets into
@@ -2047,7 +2281,33 @@ shutdown.
 - **Access**: checked against the handle (KEY_QUERY_VALUE, KEY_SET_VALUE,
   KEY_ENUMERATE_SUB_KEYS, DELETE; KeyNameInformation needs none), and at
   open against the key's descriptor ("Access checks"). The WOW64 view
-  bits are dropped (one view).
+  bits (KEY_WOW64_32KEY, KEY_WOW64_64KEY) choose a view, not rights:
+  dropped from the handle's access.
+- **The 32-bit view** (`nt/regview.rs`; tested by
+  `wow64_adv_test`): NtOpenKey(Ex) and NtCreateKey resolve a name in the
+  32-bit view for a WOW64 process unless its access has KEY_WOW64_64KEY,
+  and for any process with KEY_WOW64_32KEY, as Microsoft Learn's
+  "Registry Redirector" and "Registry Keys Affected by WOW64" (Windows 7
+  and later) have it: on the full name (the RootDirectory key's name and
+  the relative one, so opens relative to a handle redirect as absolute
+  ones), `MACHINE\SOFTWARE\<x>` becomes `SOFTWARE\WOW6432Node\<x>`
+  except the documented shared keys and their subkeys (a table:
+  `Classes`, `Clients`, `Policies`, `RegisteredApplications` and the
+  listed `Microsoft\...` keys); in `SOFTWARE\Classes` and each user's
+  `Software\Classes` only CLSID, DirectShow, Interface, Media Type and
+  MediaFoundation are redirected, to `Classes\WOW6432Node\<key>`. A name
+  already through `WOW6432Node` is the 32-bit name it spells: a shared
+  key below it is the shared key itself (a 32-bit program's handle to
+  SOFTWARE is WOW6432Node's, and ProfileList below it is the machine's),
+  the rest stays. A create in the 32-bit view makes the WOW6432Node key
+  first when it is missing. The seed gives WOW6432Node the version keys
+  and the 32-bit ProgramFilesDir/CommonFilesDir (the `(x86)`
+  directories) and `Classes\WOW6432Node\CLSID` and `Interface` (empty:
+  no 32-bit COM servers). Not modelled: Vista's reflection,
+  WOW6432Node's own `Classes` link (a 32-bit name through it is taken as
+  `SOFTWARE\Classes`'s), `HKEY_USERS\<SID>_Classes`. advapi32 passes
+  the view flags on to every key it opens on the way (RegCreateKeyEx's
+  intermediate keys, RegDeleteKeyEx's).
 - **Services**: NtOpenKey 0x12, NtEnumerateValueKey 0x13, NtQueryKey
   0x16, NtQueryValueKey 0x17, NtCreateKey 0x1d, NtEnumerateKey 0x32
   (long-stable on x64), NtSetValueKey 0x60 (to be verified), and gala's
@@ -2061,11 +2321,16 @@ shutdown.
   scenario's keys, such as what an installer would write;
   `user/sqllocaldb/sqllocaldb.regseed` is SqlLocalDB.msi's Registry
   table). NtOpenKey of a missing key records it in the ledger
-  (`registry:MACHINE/...`, "absent key"), which is how the seed grows.
+  (`registry:MACHINE/...`, "absent key"), which is how the seed grows;
+  a name in the 32-bit view is recorded as it was resolved
+  (`registry:MACHINE/SOFTWARE/WOW6432Node/...`), so a 32-bit program's
+  missing key shows which view it looked in.
 - **advapi32** (`user/advapi32/src/registry.rs`): the Reg* functions over
   ntdll's Nt*Key services. The predefined HKEYs (zero- or sign-extended,
   as winreg.h's x64 values are) open their key on first use and keep the
-  handle for the process (RegCloseKey of one does nothing): HKLM
+  handle for the process (RegCloseKey of one in its sign-extended form
+  does nothing; zero-extended it is no handle to RegCloseKey,
+  ERROR_INVALID_HANDLE, as on Windows): HKLM
   `\Registry\Machine`, HKU `\Registry\User`, HKCU
   `\Registry\User\<the user's SID>`, HKCR
   `\Registry\Machine\SOFTWARE\Classes` (no per-user merge yet),
@@ -2102,12 +2367,12 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 
 | Role | DLLs |
 |---|---|
-| core | ntdll, kernel32, kernelbase (what programs look up only there: QueryInterruptTime and friends, SetThreadDescription), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions) |
+| core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles, PathCch, WaitOnAddress and interrupt-time functions, which Windows' kernel32 lacks; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
 | C runtime | msvcrt (mingw-w64 programs' C runtime) |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
-| UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation") |
+| UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
 | COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite |
 | other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils |
 
@@ -2145,16 +2410,71 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   directory (LdrSetDllDirectory, kept under the loader lock), then
   `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A name with an
   absolute directory (`C:\jdk\bin\server\jvm.dll`) is loaded from that
-  directory only; its imports are searched as usual.
-  LOAD_WITH_ALTERED_SEARCH_PATH loads normally (TODO: the DLL's own
-  directory first for its dependencies).
+  directory only; its imports are searched as usual, or, with
+  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (LdrLoadDll's DllPath with its low bit
+  set, from LoadLibraryExW), first in that directory, for every
+  dependency of that load (CPython loads `DLLs\_ctypes.pyd` and its
+  `libffi-8.dll` so). LOAD_WITH_ALTERED_SEARCH_PATH is passed on as that
+  flag (Windows also leaves the executable's directory out then; gala
+  looks there after). The other LOAD_LIBRARY_SEARCH_* flags (LdrLoadDll's
+  DllPath with its low bit set; kernel32 passes LoadLibraryExW's, or
+  SetDefaultDllDirectories', through) choose where the DLL and every
+  dependency of that load are looked for, in this order:
+  APPLICATION_DIR, USER_DIRS (the directories of LdrAddDllDirectory,
+  kernel32's AddDllDirectory, up to 16, kept by the loader), SYSTEM32;
+  DEFAULT_DIRS is all three; SetDllDirectory's directory is not used
+  then (numpy finds the OpenBLAS in `numpy.libs` through
+  os.add_dll_directory so).
 - **API sets** (`api-ms-win-*`) are resolved in name normalization, as
-  the schema does on Windows whatever files exist: `crt-` sets to
-  ucrtbase, `core-com-`/`core-winrt-` to ole32 (no combase),
-  security/eventing/registry/service sets to advapi32, other `core-` sets
-  to kernel32 (no kernelbase), `downlevel-<dll>-*` to that DLL,
-  `shcore-*` to shcore, `power-*` to powrprof; unknown contracts are
-  looked up as files (and so not found).
+  the schema does on Windows whatever files exist: the `core-` sets to
+  kernelbase, as on Windows, except those the schema gives another host
+  (`CORE_HOSTS` in user/testntdll, by contract name up to its level, from
+  Wine's `dlls/apisetschema/apisetschema.spec`: rtlsupport, apiquery-l1
+  and xstate-l1 to ntdll; processthreads, kernel32-legacy, util,
+  toolhelp, the `-ansi` sets and the other kernel32 ones to kernel32;
+  registry-l2, shutdown and sysinfo-l2 to advapi32; com, marshal and
+  winrt to ole32, standing in for combase, coml2 and wintypes;
+  crt to msvcrt); `crt-` sets to ucrtbase, security/eventing/service
+  sets to advapi32, `downlevel-<dll>-*` to that DLL, `shcore-*` to
+  shcore, `power-*` to powrprof; unknown contracts are looked up as files
+  (and so not found). The same map is in `tools/import_survey.py`.
+- **kernelbase** (`user/kernelbase`) exports Windows' kernelbase list
+  (`exports.txt`, made from Wine's kernelbase.spec by
+  `tools/kernelbase_exports.py`), each name a forwarder to the gala DLL
+  that implements it: the DLL Wine's specs list it in (advapi32,
+  version, shlwapi, user32), else kernel32, which implements the kernel32
+  family, plus the names Windows 11 25H2's kernelbase has that the spec
+  lacks (the tool's MEASURED: FlsGetValue2 and TlsGetValue2, one
+  function behind both DLLs as on Windows; CheckTokenMembershipEx,
+  SetFileIoOverlappedRange). kernelbase implements itself (build.rs's
+  OWN) what is kernelbase's alone, which kernel32 does not export:
+  CompareObjectHandles (documented "DLL: Kernelbase.dll") and, as
+  measured on 25H2, the PathCch functions (`path.rs`; PathCchAppend,
+  PathCchCombine, PathCchRemoveBackslash and PathCchRemoveExtension are
+  stubs), WaitOnAddress and WakeByAddressSingle/All, and the
+  interrupt-time queries. MapUserPhysicalPagesScatter is kernel32's
+  alone (absent from the spec too). Test: `kernel32_test` and
+  `wow64_k32_test` (`export_split.rs`: presence read from each DLL's
+  export directory, absence as GetProcAddress NULL too). The address
+  waits are one source, `kernelbase/src/address_wait.rs`, built by two
+  DLLs: kernelbase exports it; kernel32 builds its own copy (`#[path]`,
+  not exported) for its SRW locks, condition variables and InitOnce.
+  Each copy has its own waiter list and keyed event, which is correct
+  because an address is always waited on and woken through the same
+  DLL (a kernel32 lock word only by kernel32's own code, a program's
+  address only through kernelbase's exports); that is the invariant
+  that keeps the two apart (neither DLL may export or forward the other's
+  copy). Calling kernelbase from kernel32 instead would make kernel32
+  import kernelbase, which it does not (below). A
+  forwarder to a function gala lacks resolves to nothing: GetProcAddress
+  is NULL and an import of it is a missing export in the ledger (under
+  the API set's name), as an absent export would be; it works once the
+  target has the function. Built for x64 and x86. Invariant: kernelbase
+  is part of the system wherever kernel32 is: xtask ships it beside
+  every scenario's kernel32 (System32 and SysWOW64; `extra_modules`), so
+  a program importing a core set always finds its host. gala's kernel32
+  does not import kernelbase (Windows' does), so kernelbase is loaded
+  only once something imports a core set or loads it.
 - **PEB.Ldr** (+0x18): a PEB_LDR_DATA and one LDR_DATA_TABLE_ENTRY per
   module slot, in ntdll's own data (so in the process's memory, where
   another process reads them: Crashpad's handler walks a crashed
@@ -2218,6 +2538,16 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   NtQueryTimerResolution, and the critical sections: kernel32's
   Enter/LeaveCriticalSection call ntdll's RtlEnter/LeaveCriticalSection
   (one implementation, so a section works whichever DLL a program uses).
+  LockCount is -1 when free and, while taken, the number of waiters; an
+  entering thread spins 100 rounds, then counts itself in and sleeps on
+  a process-wide keyed event keyed by the section's address. A leaving
+  owner with waiters hands the section to one of them (releasing the
+  key, which waits until that waiter is there): no wake is lost, no
+  waiter polls. Invariant: a blocked thread sleeps in the kernel, as on
+  Windows (`kernel32_sync_test` counts a blocked thread's context
+  switches); a thread that polls takes processor time from the one it
+  waits for. Without the keyed event (it could not be created: no
+  memory) the handover goes through OwningThread and waiters yield.
 
 ### kernel32
 
@@ -2241,10 +2571,18 @@ ntdll imports.
 - **Synchronization** (`sync.rs`): events and waits (single and
   multiple), semaphores, completion ports, waitable timers, SRW locks,
   condition variables, InitOnce and interlocked SLists. The lightweight
-  ones have no kernel object and wait by spinning, yielding, then
-  sleeping 1 ms at a time (TODO: a kernel address wait, as
-  WaitOnAddress, so that long waits sleep); every wake ends every wait,
-  which the API allows.
+  ones are one word with no kernel object: a waiter spins 64 rounds,
+  then sleeps on the word with WaitOnAddress (`address_wait.rs`) until
+  it changes; whoever changes it in a way waiters wait for wakes them
+  (an SRW lock's release to free, the last shared release, InitOnce's
+  end (its callback gets the caller's Context pointer as it is, NULL
+  included, and what the callback left there is the data kept), a condition variable's wake: WakeConditionVariable wakes one
+  sleeper, and a waiter not yet asleep sees the counter moved and
+  returns, a spurious wake the API allows). A wake with nobody waiting
+  costs no system call (the waiter list is in the process). Invariant:
+  a blocked thread sleeps (see the critical sections in ntdll); the
+  thread pool's WaitFor*Callbacks still polls (Sleep(1)) until the
+  callbacks finish.
 - **Global and local memory** (`global.rs`; `kernel32_misc_test`):
   GMEM_FIXED/LMEM_FIXED memory is a process-heap block (at least one
   byte) and its pointer is the handle. Moveable memory is a handle to a
@@ -2326,7 +2664,12 @@ ntdll imports.
   resource directory (type, name, language; ids, case-insensitive names,
   "#n"); an HRSRC is the data entry's address, LoadResource and
   LockResource give the data inside the mapped image. The manifest read
-  for the reported version uses the same walk.
+  for the reported version uses the same walk, and so does
+  EnumResourceLanguagesW (a resource's languages in directory order;
+  ERROR_RESOURCE_TYPE/NAME_NOT_FOUND). Writing resources
+  (BeginUpdateResourceW, UpdateResourceW, EndUpdateResourceW: rewriting
+  a PE's resource section) is not there: they are stubs, which Inno
+  Setup's compiler imports and calls when it makes a Setup.
 - **Activation contexts** (`actctx.rs`): CreateActCtxW checks that the
   manifest exists (an RT_MANIFEST resource of the module or PE file, or
   a manifest file) and returns a reference-counted handle;
@@ -2341,6 +2684,18 @@ ntdll imports.
   %n %r %t %b %0 %%), IGNORE_INSERTS, argument arrays or va_lists,
   ALLOCATE_BUFFER (LocalAlloc).
 - **Consoles** (`console.rs`, `pty.rs`): "Consoles".
+- **Initialization files** (`profile.rs`; `kernel32_misc_test`):
+  Get/WritePrivateProfileStringW and the win.ini forms read the whole
+  file on each call and write it back whole on each change (no cache;
+  Windows' caching is not observable but in timing). A bare file name
+  is in the Windows directory; sections and keys match without case,
+  blanks around names and values and one pair of quotes around a value
+  are not part of them, ';' lines are comments; lists (a NULL section
+  or key) are NUL-separated with a final NUL, cut at size - 2. Text is
+  UTF-16 after its byte-order mark, else the ANSI code page (UTF-8),
+  written back as read (new files ANSI). A new key goes after its
+  section's last entry, a new section at the end. win.ini is a file, not
+  mapped to the registry (IniFileMapping).
 - **Files replaced in one step**: MoveFileExW with
   MOVEFILE_REPLACE_EXISTING renames with FileRenameInformation's
   ReplaceIfExists (the target is never deleted first); ReplaceFileW
@@ -2358,6 +2713,19 @@ ntdll imports.
 - **Version resource**: kernel32.dll carries a VS_VERSION_INFO with the
   pinned build, 10.0.26100.<UBR of the registry seed> (`build.rs` writes
   the .res); programs read the system's version from it.
+- **What CPython imports** (`path.rs`, `procinfo.rs`; `kernel32_py_test`):
+  PathCchSkipRoot and PathCchCombineEx (the `api-ms-win-core-path` set:
+  roots `X:\`, `\\server\share\`, `\\?\`; joined and canonicalized,
+  an absolute second path replaces the first, a rooted one keeps its
+  drive), NeedCurrentDirectoryForExePathW, CopyFile2 (CopyFileExW's
+  flags, an HRESULT), SetWaitableTimerEx (no wake context or coalescing),
+  GetNamedPipeHandleStateW (modes and instance count; no client user
+  name), VerifyVersionInfoA (OSVERSIONINFOEXA translated to the W
+  form), and process snapshots: PssCaptureSnapshot keeps the process's
+  PSS_PROCESS_INFORMATION (basic information, times, priority class, VM
+  counters, image path) in a heap block, PssQuerySnapshot answers that
+  class only (64-bit; the other capture flags are recorded and not
+  taken).
 - **Process and system queries** (what Chromium's start-up asks):
   mitigation policies kept per process and read back (not enforced),
   Get/SetProcessInformation (memory priority, power throttling,
@@ -2374,14 +2742,47 @@ ntdll imports.
 
 ### msvcrt
 
-`user/msvcrt` (`msvcrt_test`): the C runtime of mingw-w64 programs.
+`user/msvcrt` (`msvcrt_test`; the 32-bit one `wow64_crt_test`): the C
+runtime of mingw-w64 programs.
 
-- **FILE**: streams from fopen are a 48-byte FILE (the real layout,
-  `_cnt` 0, because mingw's inline getc reads it and calls `_filbuf`)
+- **Two architectures**: built for x64 (System32) and for x86
+  (SysWOW64, "Plan: WOW64"); what differs is in `x64.rs` and `x86.rs`.
+  The `v` functions take a `va_list` (`va.rs`) walked by the
+  architecture's slots: 8 bytes per argument on x64 (the variadic entry
+  points spill the register arguments into the caller's home area,
+  `global_asm!` exported by name in build.rs), on x86 cdecl's stack
+  arguments rounded to 4 bytes (a double or an __int64 takes 8; the
+  entry points are naked functions pushing the `va_list`'s address).
+  printf's `%I`, `%z`, `%t` and `%p` (all the pointer's digits) and
+  scanf's `%z` and `%p` are pointer-sized. setjmp/longjmp: x64's
+  256-byte `_JUMP_BUFFER` (no unwinding); x86's 64-byte one (ebp, ebx,
+  edi, esi, esp, eip, the SEH registration, try level, the "VC20" cookie
+  and unwind function of `_setjmp3(buf, count, ...)`, mingw's and MSVC's
+  `setjmp`), whose longjmp first unwinds the SEH frames registered since
+  the setjmp (RtlUnwind to the saved registration: their handlers see
+  EXCEPTION_UNWINDING) and runs the buffer's unwind function. The
+  floating-point control: `_controlfp` is MXCSR on x64; on x86
+  `_control87` sets the x87 control word (masks, rounding, precision,
+  infinity control) and MXCSR (masks, rounding, flush-to-zero) together
+  and answers the x87 form with `_EM_AMBIGUOUS` when they disagree,
+  `_controlfp` leaves the denormal mask alone; `_fpreset` gives x87
+  0x27f and MXCSR 0x1f80 (`_CW_DEFAULT`, 0x9001f on x86). time_t of the
+  unsized names (`time`, `gmtime`, `localtime`, `mktime`, `ctime`,
+  `difftime`) is 64 bits on x64 and 32 on x86, as in msvcrt.dll
+  (mingw's i686 headers use 32 and call them). On x86 the memory
+  routines, 64-bit division helpers and stack probe come from ntrt's x86
+  runtime (memcmp and strlen are exported from there, as are its bcmp
+  and __CxxFrameHandler3); `_except_handler3/4` are not there yet.
+- **FILE**: `struct _iobuf` (48 bytes on x64, 32 on x86, typed with
+  pointer-sized fields); `_iob` is exported (20 FILEs, `__iob_func`
+  returns it; 32-bit programs import the data), its first three the
+  console streams with `_file` 0, 1, 2. Streams from fopen are a FILE
+  (`_cnt` 0, because mingw's inline getc reads it and calls `_filbuf`)
   followed by a CRITICAL_SECTION, as msvcrt.dll's `_FILEX`: mingw's
-  `_lock_file` enters that lock directly (for the console slots it calls
-  `_lock`). `fscanf` reads a line at a time and scans it with `vsscanf`
-  (a conversion cannot span lines; what a line leaves unread is dropped).
+  `_lock_file` enters that lock directly (for the console slots, inside
+  `_iob`'s 20, it calls `_lock`). `fscanf` reads a line at a time and
+  scans it with `vsscanf` (a conversion cannot span lines; what a line
+  leaves unread is dropped).
   _getmaxstdio starts at 512 and _setmaxstdio accepts 20-2048.
 - **Descriptors**: a new descriptor is the lowest free one; 0-2 are the
   standard handles and are free after `_close` (then the new handle
@@ -2390,7 +2791,8 @@ ntdll imports.
   process's standard handle, so redirections reach children.
 - **Descriptor inheritance** (busybox): msvcrt passes its open
   descriptors to children in STARTUPINFO cbReserved2/lpReserved2 (a
-  count, a flags byte and a HANDLE per descriptor). `_spawnve` writes the
+  count, a flags byte and a pointer-sized HANDLE per descriptor).
+  `_spawnve` writes the
   block (inheritable handles only, so a child never trusts a value it did
   not inherit) and DLL attach reads it; kernel32 passes it through
   GalaCreateProcess (flag 8).
@@ -2436,7 +2838,9 @@ ntdll imports.
 
 ### advapi32
 
-`user/advapi32` (`advapi32_test`).
+`user/advapi32` (`advapi32_test`; built for i686 too, `wow64_adv_test`:
+its structures with pointer-sized fields are typed in `layout.rs`, one
+definition for both layouts, "Plan: WOW64").
 
 - **Security** (`security.rs`): SIDs, ACLs and absolute security
   descriptors built and read as documented; the user "gala"
@@ -2512,7 +2916,11 @@ ntdll imports.
     crypt32's certificate signatures), BCryptSignHash with a private key
     (no padding info or flags; r || s, cbKey bytes each; RFC 6979's nonce,
     where Windows draws a random one: both are valid signatures; ncrypt's
-    ECDSA keys). No generation, export or P-521 (recorded). The RSA pseudo-handle
+    ECDSA keys), BCryptExportKey of ECCPUBLICBLOB and (with the private
+    part) ECCPRIVATEBLOB (Inno Setup's IDE exports the trusted keys it
+    imports). No generation or P-521 (recorded). Key objects carry a
+    magic as their first field (`repr(C)`), which tells an RSA, ECDSA or
+    symmetric key's handle apart. The RSA pseudo-handle
     (0xe1) imports RSA keys without opening a provider.
   - The `rsa` crate needs `alloc`: `user/gala_heap` makes the process
     heap the global allocator (in bcrypt, and in secur32 because Cargo
@@ -2538,7 +2946,8 @@ ntdll imports.
   reader: definite lengths, v1-v3, UTCTime/GeneralizedTime, unique ids,
   extensions) into CERT_CONTEXT and CERT_INFO in one heap block with a
   copy of the encoding (blobs point into it), the extensions and the
-  dotted OID strings; bad encodings fail with CRYPT_E_ASN1_*. Contexts
+  dotted OID strings (dwCertEncodingType keeps only the certificate
+  encoding, the low word); bad encodings fail with CRYPT_E_ASN1_*. Contexts
   are reference-counted and keep a property list (data blobs, handles,
   CERT_KEY_CONTEXT, CRYPT_KEY_PROV_INFO flattened with its strings); the
   SHA-1/MD5/SHA-256 hash and key identifier properties are computed
@@ -2563,17 +2972,24 @@ ntdll imports.
   store), so a store lives until its last handle is closed and its last
   context held outside is freed, and a context's hCertStore stays
   usable, as on Windows (Schannel's remote certificate relies on it).
-  A copy keeps the added context's encoding type. No CRLs or CTLs. The "ROOT" system store (any location; CertOpenStore with
-  the system providers or "System", CertOpenSystemStoreW/A) is a memory
-  store filled with **gala's machine root store**, the certificates (DER,
-  or PEM with any number) in `%SystemRoot%\System32\gala\roots`
-  (`roots.rs`), the anchors Schannel trusts too. Collections nest
+  A copy keeps the added context's encoding type. CRLs are a second list
+  in each store with the same ownership (below); no CTLs. The "ROOT"
+  system store (any location; CertOpenStore with the system providers or
+  "System", CertOpenSystemStoreW/A) is a memory store filled with
+  **gala's machine root store**, the certificates (DER, or PEM with any
+  number) in `%SystemRoot%\System32\gala\roots` (`roots.rs`), the
+  anchors Schannel trusts too; "CA" likewise from
+  `%SystemRoot%\System32\gala\ca`: intermediate certificates and the
+  CRLs revocation is checked with (PEM `X509 CRL` blocks or DER; of one
+  issuer's CRLs the latest is kept; no directory is no CRLs, not an
+  error). Collections nest
   (enumeration and finds walk members depth first, at most 64 stores 4
   deep, a store met twice skipped): Chromium's issuer lookup searches a
   collection of its roots and intermediates collections. Programs that build
   trust from crypt32's stores (Chromium's TrustStoreWin) trust the same
   roots. The other system stores are empty memory stores (no persistent
-  certificate store; each open recorded with the store's name). CryptQueryObject
+  certificate store; each open recorded with the store's name; a CRL
+  added to "CA" at run time is not seen by another open of it). CryptQueryObject
   recognises one certificate (DER, or base64 with or without PEM lines);
   CryptDecodeObjectEx decodes GeneralNames into CERT_ALT_NAME_INFO
   (e-mail, DNS, URL as UTF-16 strings, IPs as blobs, all in one block;
@@ -2601,11 +3017,18 @@ ntdll imports.
   INVALID_EXTENSION | HAS_NOT_SUPPORTED_CRITICAL_EXT, name constraints
   (not evaluated: INVALID_NAME_CONSTRAINTS |
   HAS_NOT_SUPPORTED_NAME_CONSTRAINT, fails closed, ROADMAP "Known issues
-  and stopgaps"); with a CERT_CHAIN_REVOCATION_CHECK_* flag
-  REVOCATION_STATUS_UNKNOWN, with IS_OFFLINE_REVOCATION when the
-  certificate names a CRL or OCSP responder (revocation is not checked;
-  never on a self-signed root; the policies' CRYPT_E_REVOCATION_OFFLINE
-  or CRYPT_E_NO_REVOCATION_CHECK). Info: the issuer match
+  and stopgaps"); revocation with a CERT_CHAIN_REVOCATION_CHECK_* flag
+  (END_CERT, CHAIN, CHAIN_EXCLUDE_ROOT; never a self-signed root),
+  offline from the CRLs in hAdditionalStore and the engine's stores
+  ("CRLs and revocation" below): IS_REVOKED, REVOCATION_STATUS_UNKNOWN
+  | IS_OFFLINE_REVOCATION (out-of-date CRLs, or the CRL or OCSP
+  responder the certificate names is not there),
+  REVOCATION_STATUS_UNKNOWN alone (it names no CRL distribution
+  point); the
+  policies' CRYPT_E_REVOKED, CRYPT_E_REVOCATION_OFFLINE,
+  CRYPT_E_NO_REVOCATION_CHECK, each element kind ignorable with
+  CERT_CHAIN_POLICY_IGNORE_*_REV_UNKNOWN_FLAG and all with
+  SECURITY_FLAG_IGNORE_REVOCATION; pRevocationInfo stays NULL. Info: the issuer match
   (KEY/NAME_MATCH_ISSUER), IS_SELF_SIGNED, HAS_PREFERRED_ISSUER and
   IS_FROM_EXCLUSIVE_TRUST_STORE on a trusted root; the chain's status
   is the elements' (info without the bottom nibble).
@@ -2621,6 +3044,46 @@ ntdll imports.
   element indexes are those Wine's conformance tests record on Windows.
   A failed policy is recorded as `crypt32.dll!<policy>: <error>` with
   the chain's error bits, so a refused certificate says why.
+- **CRLs and revocation** (`crl.rs`; `cert_test` crl.rs and chain.rs,
+  CRLs made by `user/cert_test/chain/make.sh`; `schannel_test`,
+  `curl_schannel`): CertCreateCRLContext decodes a DER CRL (v1/v2) into
+  CRL_CONTEXT and CRL_INFO in one heap block with a copy of the encoding,
+  the entries (serials little-endian), their and the CRL's extensions
+  and OID strings; reference-counted, and a context a caller holds holds
+  its store, as certificate contexts do. Stores: CertAddCRLContextToStore
+  / CertAddEncodedCRLToStore (a CRL of the same issuer is the existing
+  one: ADD_NEW gives CRYPT_E_EXISTS, ADD_NEWER keeps the later
+  thisUpdate), CertEnumCRLsInStore (collections walk their members),
+  CertFindCRLInStore (ANY, ISSUED_BY with the signature flag, EXISTING),
+  CertDeleteCRLFromStore. CertFindCertificateInCRL,
+  CertVerifyCRLRevocation, CertVerifyCRLTimeValidity. **The revocation
+  decision** (`check`, shared by the chain engine and
+  CertVerifyRevocation's default provider) is **offline only**: the
+  issuer's CRLs in the stores given whose signature verifies with the
+  issuer's key (which must allow cRLSign), current at the present time
+  (not the chain's pTime, as documented), and whose scope covers the
+  certificate (RFC 5280: a delta CRL, an issuing distribution point for
+  other kinds of certificate, some reasons only or an indirect CRL is not
+  used, recorded; the distribution point's name is not compared). Listed:
+  revoked (the entry's reason code). A current CRL that does not list it:
+  good. Only out-of-date ones: offline. None: offline (not fetched,
+  recorded `crypt32.dll!revocation: CRL not fetched (offline only)`).
+  Only a certificate that names a CRL distribution point is checked by
+  CRL: one naming only an OCSP responder is offline (recorded), one
+  naming neither has no check (CRYPT_E_NO_REVOCATION_CHECK) whatever
+  the stores hold, as Windows' default provider answers even with the
+  issuer's CRL in hCrlStore (Wine's tests, testVerifyRevocation).
+  Nothing is fetched (no cryptnet, no OCSP):
+  CRLs come from gala's CA store (`gala\ca`), the caller's stores and
+  hAdditionalStore; fetching from the distribution point over winhttp is
+  the next step (ROADMAP TLS). CertVerifyRevocation: the issuer is
+  pIssuerCert, the next context with CERT_VERIFY_REV_CHAIN_FLAG, else
+  one in the given stores whose key signed it; CRLs from hCrlStore,
+  rgCertStore and the CA store; the first context revoked or unchecked
+  gives FALSE with its index, the CRYPT_E_* status and the reason (a
+  status of another size than 16 or 24 bytes E_INVALIDARG, an encoding
+  without X509_ASN_ENCODING CRYPT_E_NO_REVOCATION_DLL, as Wine's tests
+  record), recorded as `crypt32.dll!CertVerifyRevocation: CRYPT_E_...`.
 - **DPAPI** (`dpapi.rs`; `dpapi_test`): CryptProtectData/
   CryptUnprotectData with a per-machine master key (32 random bytes kept
   in `HKLM\SOFTWARE\gala\DPAPI` MasterKey, made on first use). gala's own
@@ -2635,7 +3098,8 @@ ntdll imports.
   per user) with a fixed label, SAME_PROCESS also with 32 random bytes
   made once per process.
 - **crypt32 misc** (`misc.rs`): CryptMemAlloc/Realloc/Free (the process
-  heap), PFXIsPFXBlob (the outer SEQUENCE { INTEGER 3, ContentInfo }).
+  heap), PFXIsPFXBlob (the outer SEQUENCE { INTEGER, ContentInfo }; the
+  version is not looked at, as on Windows 11 25H2).
 - **PKCS #12** (`pfx.rs`; `cert_test` pfx.rs): PFXImportCertStore reads a
   PFX whose authSafe is `data` (public-key integrity is recorded and
   fails), checks its MAC (HMAC-SHA1/SHA-2, key from the PKCS #12 KDF;
@@ -2676,8 +3140,8 @@ ntdll imports.
   exchange in one process; interoperability with Windows' NTLM is not
   proven yet.
 - **Kerberos** as on a machine in a workgroup: the package and its
-  credentials exist, a context never starts
-  (SEC_E_NO_AUTHENTICATING_AUTHORITY: no domain controller).
+  credentials exist, a context never starts (SEC_E_NO_CREDENTIALS, what
+  Windows off a domain gives).
 - **Negotiate**: NTLM underneath, with NTLM's own tokens (Windows'
   Negotiate accepts those); SPNEGO-wrapped tokens are not understood yet
   (recorded). Its contexts report NTLM as the negotiated package
@@ -2697,7 +3161,16 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
 `ole32_test`, `oleaut32_test`).
 
 - **ole32**: apartments per thread behind TEB.ReservedForOle (MTA/STA
-  with reference counts, initialize spies, the error object), one MTA
+  with reference counts, initialize spies, the error object). Invariant:
+  that block's head is laid out as programs read it (Chromium's
+  GetComApartmentTypeForThread; Wine's oletls agrees): two pointers,
+  the apartment id, then the apartment flags (0x80 STA, 0x140 MTA, 0
+  outside), kept in step with the apartment; ole32's own fields follow.
+  While any
+  thread holds the MTA, a thread that never initialized COM is an
+  implicit MTA member: CoGetApartmentType gives APTTYPE_MTA with
+  APTTYPEQUALIFIER_IMPLICIT_MTA, as Chromium's thread-pool checks
+  expect), one MTA
   context object and one per STA thread (CoGetContextToken,
   CoGetObjectContext with IComThreadingInfo), task memory on the process
   heap, version-4 GUIDs and their braced string forms
@@ -2709,7 +3182,11 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   clones share the block and its size with positions of their own; the
   block is freed with the last stream when asked; positions are 32-bit,
   Seek past them STG_E_SEEKERROR), CoFileTimeNow, CoGetCurrentProcess (a
-  per-thread number from a count, never reused), an aggregatable
+  per-thread number from a count, never reused), a server process's
+  reference count (CoAddRefServerProcess/CoReleaseServerProcess: the
+  new count; at 0 the class objects are suspended, as
+  CoSuspendClassObjects does until CoResumeClassObjects; with no local
+  servers nothing is refused while suspended), an aggregatable
   free-threaded marshaler whose IMarshal methods are E_NOTIMPL, and
   CoWaitForMultipleHandles (no message pumping). In-process classes
   registered under HKCR\CLSID are created from their DLLs ("UI
@@ -2755,10 +3232,19 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   month/day/year, year-month-day and English month names; the forms
   Windows reads relative to the current year are recorded); VarCmp
   (Windows' rules: a string is greater than any number, an empty one
-  equals VT_EMPTY, strings through kernel32's CompareStringW), VarBstrCmp
+  equals VT_EMPTY, strings through kernel32's CompareStringW), variant
+  arithmetic and logic (`arith.rs`: VarAdd/Sub/Mul/Div/Idiv/Mod,
+  VarAnd/Or/Xor, VarNeg/Not, with the result types Wine's vartest.c
+  records for Windows: the wider operand type, integers moving up a
+  type on overflow, NULL propagating, BSTRs concatenated or read as
+  doubles; VT_DECIMAL and object operands are DISP_E_BADVARTYPE,
+  recorded), VarR4FromStr, VarBstrFromDate (en-US "M/D/YYYY h:mm:ss
+  AM", the date alone at midnight, the time alone on day 0), VarBstrCmp
   (#314: CompareStringW in the locale given, a NULL BSTR empty);
   SAFEARRAYs (descriptors with the VARTYPE/IRecordInfo/IID prefix, bounds
-  stored rightmost first, BSTR/interface/VARIANT elements owned);
+  stored rightmost first, BSTR/interface/VARIANT elements owned;
+  SafeArrayAllocDescriptorEx leaves cbElements 0, as Windows does, and
+  SafeArrayCreate sets it);
   GetActiveObject (no running object table: MK_E_UNAVAILABLE, recorded).
   Locales other than English and the defaults are read as en-US and
   recorded. Type libraries are not registered. Its exports have
@@ -2768,7 +3254,13 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
 ### Other DLLs and programs
 
 - **shell32, version, powrprof, comctl32, user32 strings**: profile
-  folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath),
+  folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath:
+  the profile's, the Start menu's and Programs under it, per user in
+  %APPDATA% and for all in %ProgramData%, FOLDERID_UserProgramFiles in
+  %LOCALAPPDATA%\Programs; CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
+  missing folder and its parents; without them the path is given even
+  when the folder is missing, as gala's profile does not hold every
+  folder Windows makes with one; `shell32_test`),
   version resources read from PE files and walked (GetFileVersionInfo*,
   VerQueryValue*; a bare file name is found as LoadLibrary searches,
   through SearchPathW; the Ex forms ignore the MUI flags: no MUI files),
@@ -2799,7 +3291,10 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   show Windows following, per scheme family: http-like schemes read
   backslashes as slashes, opaque ones escape `/`, `?` and `#`; `#` is a
   fragment in a file URL only after a .htm/.html name), AssocQueryStringW
-  (the user's classes, then HKCR; shell\<verb>\command) and
+  (the user's classes, then HKCR; shell\<verb>\command;
+  ASSOCSTR_EXECUTABLE is CO_E_APPNOTFOUND when the program is not
+  there; a short buffer gets the string truncated, the size and
+  HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), as on Windows) and
   SHCreateStreamOnFileEx (`assoc.rs`, an IStream over a file handle; no
   transactions, CopyTo, Clone or region locks: recorded) with
   SHCreateStreamOnFileW over it (STGM_CONVERT, _DELETEONRELEASE and
@@ -2837,8 +3332,11 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   `cmd_test`) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
   the internal commands `echo`, `exit`, `rem`, and programs found with
-  .COM/.EXE in the current directory and the PATH (9009 and cmd's message
-  when not found); pipelines, command lists, batch files, `set`/`if`/
+  .COM/.EXE in the current directory and the PATH (cmd's message when
+  not found, and exit code 1, with a redirection on the line or without:
+  Windows 11 25H2 with `2>`, `>`, `<` and none). A redirection is removed from the command and the rest
+  stays as written: the spaces before it end the program's command line
+  and `echo x > f` writes "x " (as Windows' cmd does). Pipelines, command lists, batch files, `set`/`if`/
   `for` and the prompt are recorded and end it.
 
 ### Gaps are never silent
@@ -2858,15 +3356,25 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   call reports `dll!function` ("not implemented") and ends the process
   with STATUS_NOT_IMPLEMENTED (`unimplemented_test`). The stubs live in a
   `.gstub` section: LdrGetProcedureAddress (GetProcAddress) treats an
-  export resolving there as absent, so programs probing for optional
+  export resolving there as absent (by name STATUS_ENTRYPOINT_NOT_FOUND,
+  by ordinal STATUS_ORDINAL_NOT_FOUND, as a missing export), so programs probing for optional
   functions keep their fallbacks; only static imports bind to them. The
   lists were generated from the import closures of SQL Server LocalDB and
-  FileZilla (W3: FileZilla 3.69.3's imports across user32, gdi32, msvcrt,
+  FileZilla (W3: FileZilla 3.69.3's and 3.71.0's imports across user32, gdi32, msvcrt,
   comctl32, shell32, ole32 and others); a function is implemented by
   removing its name from the list.
 - **Stub-only DLLs**: pdh, urlmon, xolehlp, odbc32, authz,
-  wintrust, webservices, dhcpcsvc, comdlg32 and oleacc are nothing but
-  such stubs. Mostly stubs: userenv (GetUserProfileDirectoryW,
+  wintrust, webservices, dhcpcsvc and oleacc are nothing but such stubs.
+  comdlg32 (`comdlg32_test`) draws no dialog yet: GetFileTitleW (the
+  name without its directory, the size needed when the buffer is
+  short; the extension kept), the parameter checks FindTextW,
+  ReplaceTextW, ChooseColorW and PrintDlgW make before their dialog
+  (CDERR_* and FRERR_* as Windows', Wine's finddlg.c and printdlg.c),
+  CommDlgExtendedError per thread (a TLS slot), PrintDlgW's default
+  printer (winspool has none: PDERR_NODEFAULTPRN, as on a Windows
+  without printers); a call that would show a dialog fails with
+  CDERR_DIALOGFAILURE and is recorded; the file and font dialogs are
+  stubs. Mostly stubs: userenv (GetUserProfileDirectoryW,
   LoadUserProfileW, UnloadUserProfile: "Accounts and logon"), mpr
   (WNetGetConnectionW: no network drives), rpcrt4, netapi32, wldap32
   ("Other DLLs and programs").
@@ -2943,8 +3451,8 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   AcquireCredentialsHandleW/A for UNISP_NAME / "Schannel". The package
   is listed under both names (EnumerateSecurityPackagesW/A,
   QuerySecurityPackageInfoW/A: RPC id 14, cbMaxToken 24576). Two
-  dispatch tables, InitSecurityInterfaceW and InitSecurityInterfaceA
-  (the ANSI functions where a slot takes or gives strings; programs
+  dispatch tables, InitSecurityInterfaceW (version 4) and
+  InitSecurityInterfaceA (version 1, as on Windows; the ANSI functions where a slot takes or gives strings; programs
   built without UNICODE, such as curl, call SSPI through it; the ANSI
   functions besides AcquireCredentialsHandleA, InitializeSecurityContextA,
   QueryContextAttributesA and the package queries are recorded and give
@@ -2965,9 +3473,10 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   client handshake recorded so it can run again, below), `tests.rs`.
 - Around it: crypt32 (`user/crypt32`) decodes certificates into
   CERT_CONTEXTs, has memory stores (`store.rs`; "ROOT" holds the
-  machine root store, the other system stores open empty) and the chain
-  engine that decides trust (`chain.rs`, "Certificate chains" under
-  "Cryptography"); ncrypt imports RSA and ECDSA keys into the
+  machine root store, "CA" the machine's CRLs, the other system stores
+  open empty), the chain engine that decides trust (`chain.rs`,
+  "Certificate chains" under "Cryptography") and the offline revocation
+  check (`crl.rs`, "CRLs and revocation"); ncrypt imports RSA and ECDSA keys into the
   Microsoft Software Key Storage Provider and signs with them (no key
   generation yet); bcrypt has hashes, AES/DES/RC2, RSA (PKCS#1 v1.5,
   PSS, OAEP) and ECDSA P-256/P-384. winhttp and wininet are HTTP(S)
@@ -3003,8 +3512,25 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   a program that validates itself (curl's `--cacert` with manual
   validation, Go, Chromium's issuer lookup) gets the same answer from
   the same engine. The host tests (`cargo test -p schannel_tls`) plug
-  in webpki with the test CA instead. Revocation is not checked (the
-  flags are recorded).
+  in webpki with the test CA instead.
+- **Revocation** (`trust.rs`): as the credential's flags ask:
+  SCH_CRED_REVOCATION_CHECK_END_CERT, _CHAIN, _CHAIN_EXCLUDE_ROOT (and
+  _CACHE_ONLY) become CertGetCertificateChain's
+  CERT_CHAIN_REVOCATION_CHECK_* flags; without one nothing is checked, as
+  on Windows (curl's `--ssl-no-revoke`, Git's
+  `http.schannelCheckRevoke=false`, winhttp and wininet, which never ask).
+  SCH_CRED_IGNORE_NO_REVOCATION_CHECK and SCH_CRED_IGNORE_REVOCATION_OFFLINE
+  excuse the elements whose revocation is unknown without and with
+  CERT_TRUST_IS_OFFLINE_REVOCATION; when all are excused the SSL policy
+  is asked again with CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS. A
+  revoked certificate fails the handshake with CRYPT_E_REVOKED, an
+  unchecked one with CRYPT_E_NO_REVOCATION_CHECK or
+  CRYPT_E_REVOCATION_OFFLINE: the statuses themselves, as Schannel
+  returns them (curl: exit 35). Through rustls they travel as
+  CertificateError::Revoked, UnknownRevocationStatus and
+  ExpiredRevocationList (rustls has no "offline" kind; schannel_tls
+  `code`). The check is crypt32's, so offline: the CRLs in gala's CA
+  store.
 - **The machine root store's contents**: every full image (`cargo
   xtask iso`, the images `image_modules` makes) ships
   `gala\roots\public-roots.pem`, the public CA bundle: Mozilla's root
@@ -3151,7 +3677,8 @@ are recorded.
   (ASC_REQ_MUTUAL_AUTH), a client certificate chosen from the MY store,
   intermediates sent with a client's or server's certificate,
   renegotiation requests (SCHANNEL_RENEGOTIATE), SCHANNEL_ALERT tokens
-  (accepted, not sent), revocation, DTLS. A client context whose first
+  (accepted, not sent), revocation information fetched from where the
+  certificate says (CRLs over HTTP, OCSP, stapled OCSP responses), DTLS. A client context whose first
   call fails still has a handle (Windows gives none).
 
 ### WinHTTP and WinINet
@@ -3493,8 +4020,36 @@ only. ROADMAP N1 (TCP/IP and sockets) and N2 (Nginx) are the items.
   handover"); `net::tcp::stop`/`restart` park the net thread for a
   kernel handover. Its `alloc` feature is on only so that a socket can
   own its buffers (`ManagedSlice::Owned`): socket buffers are allocated
-  fallibly by gala, and the socket sets are pre-filled to a fixed
-  capacity, so smoltcp never grows them.
+  fallibly by gala, and a socket set grows only through gala (the
+  patch's `SocketSet::has_room`/`try_reserve`: `Stack::admit` reserves
+  room fallibly before smoltcp's `add` would push), so smoltcp never
+  allocates infallibly.
+- **The buffer budget**: every interface's sockets' buffers together are
+  bounded by `buffer_budget`, a quarter of the machine's memory (at
+  least 64 default sockets' worth; 128 MiB at 512 MiB, 1024 default
+  sockets). A socket refused for it, or for want of memory, is logged
+  once until a socket goes: `net: a loopback socket is refused: its N
+  KiB of buffers are over the budget (.. sockets in use: loopback ..,
+  card ..; their buffers .. KiB of the stack's .. KiB, a quarter of
+  memory; frames free ..)`.
+- **Charged to the owner** (`tcp::Owner`, `Bill`; ARCHITECTURE "Pool and
+  handle quotas"): every socket in a set has a bill, its bytes against
+  the budget and their charge to its owner's nonpaged pool quota while
+  the owner holds it: a bound socket's connection to its owner, a
+  listener's listening sockets and the connections waiting on it to the
+  listener's owner, an accepted connection from then on to the
+  acceptor's (`rebill`: over the acceptor's quota the accept fails and
+  the connection stays pending); a socket its owner closed that still
+  finishes (FIN, TIME-WAIT) is the stack's alone (`unbill`), counted
+  only against the budget. Over the owner's quota a socket is refused
+  with `NetError::OverQuota` (AFD: STATUS_QUOTA_EXCEEDED, which ws2_32
+  reports as WSAENOBUFS; lx: ENOBUFS), logged by the quota (`quota: pid
+  P (x.exe) over its nonpaged pool`); a listener refused a listening
+  socket asks again quietly (`Listener::over_quota`, `Block::fits`) so
+  a starved listener logs once per stretch, not once per poll. A socket
+  a kernel handover carried is charged whatever its limit (the process
+  held it already), but an AFD endpoint carried has no quota (its
+  process's is restored after it), so its sockets are not charged.
 - `net: ...` at the end of every boot logs frames, loopback packets,
   polls and the sockets still open (0 after programs that closed
   theirs).
@@ -3507,18 +4062,56 @@ The kernel's socket API, independent of NT: `listen(local, backlog)`,
 `SocketId` (interface + smoltcp handle + generation).
 
 - A listener bound to 0.0.0.0 listens on both interfaces. smoltcp has no
-  accept queue (a listening socket *becomes* the connection), so a
-  listener keeps `backlog` (1-8) listening sockets per interface; when
-  one is established it moves to the listener's ready queue and a fresh
-  one replaces it.
+  accept queue (a listening socket *becomes* the connection when a SYN
+  comes), so a listener (`Listener`) holds **one listening socket per
+  interface** and the connections it took: `opening` (SYN received) and
+  `ready` (established, waiting to be accepted, with sequence numbers).
+  The net thread takes received packets one at a time
+  (`poll_ingress_single`) and after each one `tend`s every listener: a
+  listening socket that took a SYN joins `opening` and a fresh one takes
+  its place, so the next SYN, even in the same burst, meets one; an
+  opened connection moves to `ready`; one reset during the handshake
+  goes. Nothing is set aside for the backlog: each connection is a
+  socket of its own when it comes, under the socket limit.
+- **The backlog** counts `opening` and `ready` together; what happens to
+  a SYN beyond it is the personality's (`WhenFull`): **Refuse** (AFD,
+  Windows' documented listen: WSAECONNREFUSED): while the backlog is
+  full the listener has no listening socket, smoltcp answers the SYN
+  with RST, and the client's connect is refused; an accept brings a
+  listening socket back at once. **Ignore** (lx, Linux): the listening
+  socket stays; one that took a SYN over the backlog is dropped before
+  smoltcp sent its SYN-ACK, so the SYN goes unanswered and the client's
+  retransmission gets in after an accept. AFD's backlog: SOMAXCONN is
+  200, SOMAXCONN_HINT(N) is N within 200-65535, other values 1-200
+  (`afd::backlog_of`; gala's ws2_32 still turns a negative hint into 1).
+  lx's: negative or above 4096 (somaxconn) is 4096, and backlog + 1
+  connections complete, as observed on Linux (listen(0) completes one).
+  A second listen on a listening socket changes nothing (Windows keeps
+  the first backlog). `events=net`: `tcp backlog full` each time a
+  listener's backlog fills, `tcp syn ignored` (with the client's
+  address) for each SYN Ignore drops.
 - Port 0 gets an ephemeral port (49152-65535, as Windows).
 - Closing is graceful: the socket sends FIN and stays in the set until
   it is closed or in TIME-WAIT, then it is removed and its buffers freed
   (`reap` in the poll loop).
-- Buffers are 64 KiB each way. Every listening socket owns full buffers
-  (128 KiB), so a listener on 0.0.0.0 with backlog 5 holds 1.25 MiB
-  (TODO: fewer listening sockets or smaller buffers for servers with
-  many listeners).
+- Buffers are 64 KiB each way unless the owner asks for more
+  (`Owner::rx`/`tx`: SO_RCVBUF/SO_SNDBUF, at least 64 KiB, at most
+  `MAX_BUFFER`, 4 MiB), owned by each socket (a listening socket's too:
+  smoltcp fixes a socket's buffers when it is made, and the window it
+  advertises in its SYN-ACK comes from them), so a listener on 0.0.0.0
+  holds 256 KiB besides its connections. The sizes apply to the sockets
+  made after they are set (`set_owner`: a bound socket's connection, a
+  listener's next listening sockets, which become its connections); a
+  connection's buffers stay as they were made. gala allocates a socket's
+  buffers whole when it is made (Windows grows AFD's as data comes), so
+  large ones are charged at once.
+- Byte counts: an entry counts what its owner sent (queued) and
+  received (took); `tcp shutdown` and `tcp close`/`tcp reset`
+  (`events=net`) carry them with the queues' lengths then (`unsent`:
+  queued, not yet acknowledged; `unread`: received, never taken).
+  Comparing one end's `sent` with the other end's `received` says where
+  a short stream lost its bytes. They start at 0 for a connection
+  adopted after a handover.
 - Errors: a connection attempt answered by RST is refused
   (STATUS_CONNECTION_REFUSED), an established one reset by the peer is
   STATUS_CONNECTION_RESET. TODO: smoltcp ends a reset and a FIN both in
@@ -3538,8 +4131,11 @@ peer), `recv_from` (a datagram, its whole length and its sender;
   received into the socket's own queue (`drain`): datagrams from other
   addresses than a connected socket's peer are discarded there
   (Windows' connect on a datagram socket); the queue holds 256 datagrams
-  / 64 KiB and drops what comes beyond (and on allocation failure). That
-  queue is what a handover carries.
+  / 64 KiB (more with SO_RCVBUF set before bind, up to 4 MiB) and drops
+  what comes beyond (and on allocation failure). That queue is what a
+  handover carries.
+- Charged like TCP's: each smoltcp socket's buffers, and with the first
+  the most its queue may hold.
 - Sends go into the smoltcp socket of the interface that reaches the
   destination (WouldBlock while its queue is full).
 - No IP fragmentation: a datagram larger than the interface's IP MTU
@@ -3572,6 +4168,16 @@ object in the namespace; opening anything below it creates an endpoint
   WSAIoctl SIO_BASE_HANDLE / SIO_BSP_HANDLE_POLL, which return the
   socket itself (no layered providers).
 
+- **The caller's layouts**: AFD's structures hold pointers and handles
+  of the caller's width. A WOW64 process's requests are read as x86
+  ones, as Windows' AFD reads a 32-bit caller's (IoIs32bitProcess), and
+  wow64.dll passes AFD's IOCTLs through unconverted. The layouts for both
+  widths come from one definition, `kernel/afd_abi` (`Layout`: each
+  structure's offsets from the pointer size by the C rules, host-tested
+  for both), which the kernel (`layout_of(process)`) and gala's ws2_32
+  (`Layout::NATIVE`, `user/ws2_32/src/afd.rs`) share. The offsets below
+  are x64's.
+
 #### IOCTLs
 
 Code = 0x12000 | function << 2 | method. Layouts marked "to be verified"
@@ -3592,7 +4198,7 @@ come from ReactOS and have not been checked against Windows.
 | 0x1202b | DISCONNECT: `{u32 type (1 send, 2 receive, 4 abort); i64 timeout}` | ReactOS, to be verified |
 | 0x1202f | GETSOCKNAME: returns the local sockaddr | Wine |
 | 0x12033 | GET_PEER_NAME: returns the remote sockaddr | ReactOS, to be verified |
-| 0x1203b | SET_INFO: `{u32 class; union at 8; u32 pad}`; class 2 (blocking mode, the union's BOOLEAN = non-blocking) | ReactOS, to be verified |
+| 0x1203b | SET_INFO: `{u32 class; union at 8; u32 pad}`; class 2 (blocking mode, the union's BOOLEAN = non-blocking); 6 and 7 (AFD_INFO_RECEIVE_WINDOW_SIZE, AFD_INFO_SEND_WINDOW_SIZE: SO_RCVBUF, SO_SNDBUF, the union's ULONG) | ReactOS, to be verified |
 | 0x12083 | SUPER_ACCEPT (AcceptEx): `{u8 san; u8 fix; HANDLE accept; u32 receive_length; u32 local_length; u32 remote_length}`; the output buffer receives [data][local address][remote address] | ReactOS, to be verified |
 | 0x120c7 | SUPER_CONNECT (ConnectEx): `{u8 san; TRANSPORT_ADDRESS at 4}` | ReactOS, to be verified |
 | 0x12087 | EVENT_SELECT (WSAEventSelect), below | Wine |
@@ -3631,8 +4237,20 @@ endpoint's I/O completion port.
   the endpoint's pending lock: perform the operation, write the
   IO_STATUS_BLOCK, set the event, signal the endpoint (unless
   FILE_SKIP_SET_EVENT_ON_HANDLE), post (key, ApcContext, status,
-  information) to the port. **Lock order: pending, then the stack, the
-  address space, the dispatcher.**
+  information) to the port. **Lock order: pending, then the endpoint's
+  socket slot, the stack, the address space, the dispatcher.**
+- **An endpoint learns its socket before the stack can report on it**:
+  BIND, CONNECT, ACCEPT and AcceptEx store the new socket id under the
+  endpoint's socket lock held across the stack call that makes it, so
+  the `net` thread's notify (which takes that lock) never finds an
+  endpoint without its socket. A change reported then would be lost:
+  with WSAEventSelect(FD_CONNECT) and a non-blocking connect (Chromium's
+  way) the handshake's report is the only one, and Chromium waits for
+  its 240 s connect timeout. `winsock_async_test`'s FD_CONNECT rounds
+  check it (busy threads, `events=net,sample`'s interrupts and the
+  event written under the stack's lock preempt
+  connect's thread often enough to hit the moment); `events=net`
+  "afd notify before its socket" shows a violation.
 - A request that completes at once returns its status and is also
   posted to the port, unless the endpoint has
   FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (what Go asks for, after
@@ -3664,8 +4282,19 @@ endpoint's I/O completion port.
   maps FD_* to them), records those that hold whenever its readiness
   changes (and at once), and sets the event; the socket becomes
   non-blocking. IOCTL_AFD_GET_EVENTS (WSAEnumNetworkEvents) returns and
-  clears what was recorded; ws2_32 resets the event. Level-triggered: an
-  event that still holds is recorded again at the next change.
+  clears what was recorded and resets the event its input names, in one
+  step under the selection's lock, under which a readiness change also
+  records and sets the event (as documented: the copy, the clear and
+  the reset are atomic; a record made between a copy and a later reset
+  in ws2_32 kept its bit but lost its signal, and FD_CONNECT, recorded
+  once, was then never signaled: Chromium's ~240 s page stalls;
+  `winsock_async_test`'s FD_CONNECT rounds race one call against the
+  handshake). Level-triggered: an
+  event that still holds is recorded again at the next change, except
+  FD_CONNECT (connected or refused), recorded once per socket: Windows
+  documents no function that re-enables it, and a closing connection's
+  changes must not report it again (on an event the program has
+  already reused for its next socket).
 - **Cancellation**: NtCancelIoFileEx (CancelIoEx; gala's service number
   0x7f01 until Windows' is verified) completes the matching pending
   requests (all of the process's, or the one whose IO_STATUS_BLOCK is
@@ -3691,6 +4320,22 @@ endpoint's I/O completion port.
   queued part of its bytes succeeds with that count (the bytes are in
   the socket). An accepted socket inherits the listener's mode (Nginx
   never sets it on accepted sockets).
+- **Invariant: a graceful shutdown follows the sends issued before
+  it.** DISCONNECT with the send flag (shutdown SD_SEND/SD_BOTH) gives
+  the FIN to `net::tcp` at once only when no send is pending; otherwise
+  the endpoint's `send_side` is AFTER_SENDS and the FIN goes once the
+  last pending send has completed, failed or been cancelled
+  (`fin_after_sends`, from `try_complete` and `cancel`). The call itself
+  does not wait. Sends issued after the shutdown fail in their call with
+  STATUS_PIPE_DISCONNECTED (WSAESHUTDOWN). Win32-OpenSSH depends on it:
+  its sockets keep one overlapped WSASend of up to 70 KiB pending (more
+  than a socket's 64 KiB send buffer) and a channel calls shutdown as
+  soon as its own buffer is empty; a FIN sent then ended the stream and
+  failed the send's rest (`sshd_forward` lost tens of KiB now and then;
+  winsock_async_test sends 256 KiB, shuts down, and reads it all back).
+  Events (`events=net`): `afd shutdown after sends` (the sends and bytes
+  still pending), `afd send failed` (a pending send that failed: its
+  status, bytes already queued and its length), `afd shutdown failed`.
 - **Receive flags** (afd_recv_params.msg_flags, Wine's layout):
   AFD_MSG_PEEK (0x80) leaves the bytes in the socket (Nginx peeks to
   tell TLS from plain HTTP); OOB and WAITALL are not supported (ledger).
@@ -3751,16 +4396,33 @@ SOCKET values are the endpoint handles.
   (WSAGetLastError is GetLastError, as on Windows);
   STATUS_BUFFER_OVERFLOW and STATUS_INVALID_BUFFER_SIZE map to
   WSAEMSGSIZE.
-- AcceptEx, GetAcceptExSockaddrs and ConnectEx are in ws2_32 (also
-  handed out by WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER)); gala's
-  mswsock.dll forwards its AcceptEx and GetAcceptExSockaddrs exports
-  there (Go imports them from mswsock).
+- AcceptEx, GetAcceptExSockaddrs, ConnectEx, DisconnectEx and
+  TransmitFile are in ws2_32 (handed out by
+  WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER); asyncio's _overlapped
+  asks for all of them at import); gala's mswsock.dll forwards its
+  AcceptEx, GetAcceptExSockaddrs and TransmitFile exports there (Go
+  imports them from mswsock). DisconnectEx closes both directions
+  gracefully (IOCTL_AFD_DISCONNECT), overlapped or not; its
+  TF_REUSE_SOCKET is not supported (WSAEOPNOTSUPP, ledgered), nor is
+  TransmitFile (WSAEOPNOTSUPP, ledgered; callers fall back to read and
+  send). WSAStringToAddressA/W parse `a.b.c.d[:port]` and IPv6 `addr`,
+  `addr%scope`, `[addr]` and `[addr]:port` (WSAEINVAL otherwise,
+  WSAEFAULT with the needed length for a short buffer).
+- SO_ERROR is asked of AFD with a poll that does not wait: a connect
+  that failed (AFD_POLL_CONNECT_FAIL, select's except set) is
+  WSAECONNREFUSED, otherwise 0; kept while the socket stays failed
+  (Windows clears it on read).
 - Socket options: those that only tune the stack (TCP_NODELAY,
-  keepalive, SO_UPDATE_*_CONTEXT, buffer sizes) are accepted and have no
-  effect yet. The integer ones (SO_REUSEADDR, SO_KEEPALIVE,
+  keepalive, SO_UPDATE_*_CONTEXT) are accepted and have no effect yet;
+  SO_RCVBUF and SO_SNDBUF go to AFD as well (SET_INFO classes 6 and 7)
+  and size the buffers of the sockets made from then on ("TCP"; set on
+  a connected socket they change nothing, ledgered `afd buffer size of
+  a connected socket`). The integer ones (SO_REUSEADDR, SO_KEEPALIVE,
   SO_SNDBUF/RCVBUF, SO_EXCLUSIVEADDRUSE, TCP_NODELAY, the TCP
   keep-alive idle/count/interval, SO_BROADCAST, SO_TYPE,
-  SO_RANDOMIZE_PORT, IP_DONTFRAGMENT and IP_RECVECN, the last three set
+  SO_RANDOMIZE_PORT (unbound sockets only: WSAEINVAL once bound; read
+  back as one byte, Windows' BOOLEAN),
+  IP_DONTFRAGMENT and IP_RECVECN, the last three set
   by Chromium's UDP sockets and kept only: ports and datagrams as
   without them, receives with no ECN control data) are kept per
   socket so getsockopt reports what was set, or Windows' defaults
@@ -3964,23 +4626,31 @@ the disk is only written (never read) while running.
 
 - `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
   not survive a reboot): Create (directory or file, attributes, times; a
-  file that exists is emptied), Write (offset, data of at most 64 KiB,
-  time), SetSize, SetBasic (creation, access and write times,
-  attributes; record version 2 added the access time after the
-  attributes, a version 1 record's is its write time), SetSecurity (the
-  self-relative descriptor), Rename, Delete (with everything below).
-  Each record carries the log's generation and a CRC-32; the first
-  record that does not check out ends the log.
+  file that exists is emptied; version 3 added the POSIX mode, or none,
+  and a directory's case sensitivity, which older records lack),
+  Write (offset, data of at most 64 KiB, time), SetSize, SetBasic
+  (creation, access and write times, attributes; record version 2 added
+  the access time after the attributes, a version 1 record's is its
+  write time), SetSecurity (the self-relative descriptor), Rename (of a
+  name: a first name or a hard link), Delete (of a name: a directory
+  with everything below it; a file with other names lives on there),
+  and, from version 3, SetMode, Symlink (target, creation time) and
+  Link (an existing path, the new name). Each record carries the log's
+  generation, its format version and a CRC-32; the first record that
+  does not check out, or is of a newer version, ends the log.
 - `RamFs` (`fs::ramfs`) records while `recording` is on: each mutator
-  (create, write, set_size, set_basic, set_security, rename, and
-  removal when the last handle of a delete-pending node closes) pushes
-  its record and marks the node *dirty*. Nodes the boot made are *boot*
+  (create, write, set_size, set_basic, set_security, set_mode, symlink,
+  link, rename, unlink, and removal when the last handle of a
+  delete-pending node closes) pushes its record and marks the node
+  *dirty*. A node unlinked while open (detached) records nothing more:
+  its old path may name another file by then. Nodes the boot made are *boot*
   nodes; when one is removed or renamed away its path becomes a
   *tombstone* (the boot will make it again). Renaming a directory marks
   everything below it dirty. `apply` replays a record (not recording
   it; a missing path is skipped); `snapshot` describes the same state
   from scratch: Delete for each tombstone, then every dirty node in tree
-  order with its descriptor, contents and times. A record that cannot be
+  order with its descriptor, mode, contents and times (a symbolic link
+  as Symlink), then a Link for every hard link. A record that cannot be
   made (no memory) makes the next sync write a snapshot instead.
 - `fs::volume` (over a `Blocks` trait, so host tests run it on a disk
   in memory, crashes included): sector 0 is the superblock (magic,
@@ -4003,8 +4673,12 @@ the disk is only written (never read) while running.
   `DiskScenario::earlier_boots`): the first boot makes files and
   directories (a descriptor, attributes, a time, a 200,000-byte file, a
   truncation, a rename, a delete, nested directories), the second
-  checks them. Host tests: the record format, replay and snapshot over
-  a boot tree (tombstones, a renamed boot directory), the volume
+  checks them. Host tests: the record format (every kind; a version 2
+  Create read as one without a mode), replay and snapshot over a boot
+  tree (tombstones, a renamed boot directory; modes, a case-sensitive
+  directory with a case pair, symbolic and hard links, a boot file whose
+  first name went while a link kept it, an unlinked open file:
+  `posix_changes_replay_and_snapshot`), the volume
   (remounts, compaction into either area, torn writes and cut-short
   compactions). `sqllocaldb_persist` (pending: needs the LocalDB
   download and 3 GiB) keeps a SQL Server LocalDB database across a
@@ -4043,7 +4717,7 @@ rather than a format of their own.
 
 **shasha** (Arabic شاشة, "screen") is gala's graphical shell: a
 compositor, window manager and shell in the kernel for now (module
-`nt::desktop`, the `shasha` cargo feature; ROADMAP SH moves the shell,
+`nt::desktop`; ROADMAP SH moves the shell,
 then the compositor, to user mode). It imitates Windows 11's look
 (layout, metrics and colours of captions, taskbar and start menu) with
 gala's own artwork (the Masmak fortress and the wordmark) and an open
@@ -4062,7 +4736,7 @@ sessions and remote shasha" (one desktop per session).
 
 ### The kernel side: `nt::desktop`
 
-Code: `kernel/src/nt/winstate/` (the window state both kernels keep:
+Code: `kernel/src/nt/winstate/` (the window state every desktop keeps, a bare one too:
 windows, Z order, focus, capture, client pixels, input for programs,
 the named actions; host tests in `winstate/tests.rs`),
 `kernel/src/nt/desktop/` (`mod.rs`: the compositor and shell on top of
@@ -4100,8 +4774,11 @@ session's is shown by nothing unless GalaSession attaches a presenter
 - **Devices** (`arch::ps2`, `input.rs`): the i8042 polled every 5 ms
   from a kernel thread (IRQ 1 and 12 are not routed); the configuration
   turns both ports on and translation to scan code set 1; mouse
-  0xF6/0xF4, keyboard 0xF4. Mouse packets with the same buttons are
-  summed per poll; set 1 codes (E0 for extended keys) map to virtual
+  0xF6/0xF4, keyboard 0xF4. Mouse packets with the buttons held are
+  summed per poll (`Coalescer`); a packet that changes the buttons goes
+  to the desktop at once with its own move, so a press or release taken
+  late still lands where it happened (a later move is never folded into
+  it); set 1 codes (E0 for extended keys) map to virtual
   keys. The input thread turns on an IntelliMouse-compatible wheel (the
   sample-rate knock 200, 100, 80, then device id 3: 4-byte packets, the
   fourth byte's low nibble the signed movement, positive towards the
@@ -4185,8 +4862,9 @@ WM_SYSCOMMAND or gala's own messages and user32 calls SetWindowPos, so
 the program always sees WM_SIZE/WM_MOVE.
 
 - gala's own window messages, above any Windows message number:
-  GALA_WM_PLACE (0x10001; wParam left | top << 32, lParam width |
-  height << 32: user32's input pump posts it to the window's thread and
+  GALA_WM_PLACE (0x10001; wParam left | top << 16 as 16-bit signed
+  values, lParam width | height << 16, so both fit a 32-bit WPARAM:
+  user32's input pump posts it to the window's thread and
   DispatchMessage calls SetWindowPos, no longer maximized) and
   GALA_WM_MINIMIZED (the desktop minimized the window, so IsIconic
   follows).
@@ -4289,16 +4967,15 @@ registry ("Plan: windows across processes").
   bounds).
 - The desktop's keyboard focus is the active top-level window; focus
   among child windows is user32's.
-- In the desktop kernel without a screen and without `presenter=` (or
-  in the server profile), desktop calls are STATUS_NOT_SUPPORTED and the
-  window registry still works; the server kernel keeps every session's
-  window state with nothing to compose it ("Server and desktop
-  workloads"). A session the console does not show keeps a live desktop
-  (presenter None).
+- Where nothing can show a desktop (no screen and no `presenter=`, or
+  the server profile) every session's desktop is bare: the window state
+  alone, shown by none ("Server and desktop workloads"). A session the
+  console does not show on a machine that draws keeps a live desktop
+  (presenter None) with the compositor's layout, ready to be shown.
 - `nt::winstate` holds what a window is and what the named actions do;
   `nt::desktop` only draws it. Damage rectangles come from the window
-  state (with the compositor's shadow margin, `winstate::Shadow`; none in
-  the server kernel, which drops them).
+  state (with the compositor's shadow margin, `winstate::Shadow`); a
+  bare desktop drops them.
 - TODO: the shell belongs in a user-mode program (an explorer.exe of
   gala's); the clock is UTC; popups and hidden windows are not listed by
   GalaDesktopAction's Windows (the registry has them:
@@ -4309,10 +4986,11 @@ registry ("Plan: windows across processes").
 Servers and console programs (nginx, PostgreSQL, Elasticsearch, Go and
 Java services, the Docker image) must never bring up the graphical
 interface; GUI programs on a machine with a screen get the desktop.
-**The desktop edition is a strict superset of the server edition**: the
-server/CLI edition plus shasha. The `shasha` cargo feature only adds (it
-never changes or removes server behaviour), and every scenario a server
-kernel passes also runs on the desktop kernel. ROADMAP SD.
+**One kernel serves both**: shasha (the compositor, wallpapers, start
+menu, taskbar) is always built in, and a server machine boots it with
+`profile=server`, or simply has no screen. Where nothing can show a
+desktop, shasha does no work and adds nothing to a server program's
+path. ROADMAP SD.
 
 **Rule for new code**: nothing in the boot path, the console path or a
 server program's path may touch the desktop, start a GUI process or
@@ -4320,46 +4998,37 @@ load a GUI DLL unless a program asked for a window. user32 and gdi32
 themselves stay (many server programs import them, and loading them
 draws nothing; user32 loads gdi32 lazily).
 
-- **Lazy desktop**: `desktop::with` paints the desktop the first time a
-  program creates a window, and only when there is a screen
-  (`desktop::screen`); without one the window registry still works (UI
-  Automation and cross-process windows need no screen).
+- **Lazy desktop**: a session's desktop goes live at its first GUI call
+  (`desktop::with`, `desktop::screen`) and is drawn only when something
+  shows it (the screen, `presenter=`); on a machine nothing shows it is
+  bare (below) and nothing is laid out or drawn.
+- **Bare desktops.** A machine with no screen and no `presenter=` (BIOS
+  boots, gala-um) or in the server profile has nothing that can show a
+  desktop (`desktop::bare`, fixed before any program runs). There each
+  session's desktop is the window state alone (`nt::winstate`): live at
+  DEFAULT_SIZE (1280 x 800) on the first GUI call, shown by none;
+  windows are made, shown, placed, painted and queried (GalaSession's
+  query reports them); GalaScreenInfo reports DEFAULT_SIZE with the
+  taskbar's rows out of the work area; GalaWindowListen takes the event;
+  a frame, injected input and GalaWindowDrag/Resize are
+  STATUS_INVALID_DEVICE_STATE; presenter none is accepted, Test and
+  Console are STATUS_NOT_SUPPORTED; the shell's actions, lists and
+  wallpaper are STATUS_NOT_SUPPORTED (`has_shell` false). The compositor
+  does no work for it (`Desktop::bare`: no wallpaper or taskbar laid
+  out, no captions rendered, no PS/2 input or clock). Scenarios:
+  `noscreen_windows` (BIOS) and `server_profile_windows` (UEFI,
+  `profile=server`) run presenter_test's `server` mode; user32_test's
+  scenario checks the line on BIOS and in gala-um.
 - **Console windows**: a console window (conhost.exe) is started only
   for the program named by `console=`; otherwise console output goes to
   the boot console.
-- **`profile=server`** (scenario `server_profile`, by UEFI so there is
-  a screen): the desktop is never drawn (`desktop::screen()` is None;
-  logged once as "desktop: not drawn (server profile)"),
-  GalaWindowListen and GalaScreenInfo answer as without a screen, and
-  `console=` starts no conhost.exe. The screen keeps the text console.
-- **The server kernel** (scenarios `server_kernel`, `server_windows`):
-  the kernel's `shasha` feature is on by default; without it
-  (`--no-default-features`) `nt::desktop` is `nt/desktop_off.rs`, the
-  same interface over the window state alone (`nt::winstate`): each
-  session's desktop keeps its windows, their last client pixels, Z
-  order, focus, capture and input for programs as on a machine whose
-  desktop nobody shows (live at DEFAULT_SIZE, 1280 x 800, on its first
-  GUI call; GalaScreenInfo reports it with the taskbar's rows out of the
-  work area; damage is dropped). Nothing composes it: GalaSession's
-  query reports the windows (shown by none), a frame and injected input
-  are STATUS_INVALID_DEVICE_STATE (no Test frame shows it), presenter
-  none is accepted and Test and Console are STATUS_NOT_SUPPORTED;
-  GalaWindowDrag/Resize are STATUS_INVALID_DEVICE_STATE (no button is
-  down where no pointer moves); the shell's window actions, lists and
-  wallpaper are STATUS_NOT_SUPPORTED (`desktop::has_shell` false: no
-  shell). The compositor, wallpapers and start menu are not in the
-  binary (2.5 MB less in release). Logged: `desktop: no compositor in
-  this kernel (server build: windows are kept, nothing draws them)` at
-  boot, `desktop: session 2 keeps its windows (1280x800), shown by none
-  (no compositor in this kernel)` (event `presenter`, op `live`) per
-  session, a refused presenter as a warning. Limit: the desktop kernel
-  without a screen or `presenter=`, and with `profile=server`, still
-  refuses GUI calls, where the server kernel keeps the windows (ROADMAP
-  SD: the shasha feature should only add). xtask
-  builds it into `target/server` beside the normal one; scenarios in
-  `SERVER_KERNEL_SCENARIOS` boot it; CI runs clippy on it.
-  **Invariant: a change to `nt::desktop`'s public interface needs the
-  same change in `desktop_off.rs`.**
+- **`profile=server`** (scenarios `server_profile` and
+  `server_profile_windows`, by UEFI so there is a screen): nothing ever
+  draws a desktop; each session's is bare (`desktop: session 1 keeps its
+  windows (1280x800), shown by none (server profile)`), the PS/2
+  keyboard and mouse reach none, `console=` starts no conhost.exe, and
+  `gala`'s window commands are not supported (gala_cli_test's `server`
+  mode). The screen keeps the text console.
 
 #### CLI parity: named actions
 
@@ -4395,8 +5064,8 @@ CLI-first.
   Windows are named by their HWND: the window registry's record
   (version 2) carries the window's id on the desktop, so the kernel
   goes from HWND to the desktop's window and back. Without shasha's
-  shell (`desktop::has_shell`: the server kernel, which keeps windows
-  but has no shell; `profile=server`; no screen) the window actions,
+  shell (`desktop::has_shell`: false on a bare desktop, so with
+  `profile=server` or no screen) the window actions,
   Windows, Programs and Wallpaper are STATUS_NOT_SUPPORTED, checked
   before the window, so a server always says so. List output
   that does not fit is cut at a whole entry.
@@ -4433,8 +5102,7 @@ Exit codes: 0 done, 1 usage, 2 not found, 3 not supported here (no
 graphical shell), 4 failed (status printed; "access denied" for UIPI).
 
 Tests: `gala_cli_test` (scenario `gala_cli`, UEFI with a screen check
-after `gala snap left`; its server mode in `server_kernel` and
-`server_profile`) starts a window through `gala`, drives it through
+after `gala snap left`; its server mode in `server_profile`) starts a window through `gala`, drives it through
 every action and checks what the program saw and what `gala windows`
 and the registry (FindWindowW, GetWindowRect, IsZoomed, IsIconic from
 another process) say; host tests in `desktop/tests.rs` and `action.rs`.
@@ -4456,9 +5124,32 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (`window::is_popup`; `window::frame` gives each top-level window's
   frame: none for these). An unregistered class makes CreateWindowExW
   fail with ERROR_CANNOT_FIND_WND_CLASS and records
-  `user32.dll!CreateWindowExW(<class>)`.
+  `user32.dll!CreateWindowExW(<class>)`. GetClassInfoW copies
+  GetClassInfoExW's fields to WNDCLASSW's offsets (the style at 0, then
+  padding, the procedure at 8): frameworks that register a class per
+  control type (Delphi's VCL) compare the procedure with their own
+  before registering again. Classes are process-wide (32), keyed by name
+  without the instance.
+- **Effects and ownership** (`effects.rs`): SetLayeredWindowAttributes
+  keeps a WS_EX_LAYERED window's key, alpha and flags for
+  GetLayeredWindowAttributes (the desktop does not blend: recorded);
+  AnimateWindow shows or hides as documented, with its failure cases,
+  without playing the animation (recorded); ShutdownBlockReasonCreate/
+  Query/Destroy keep a window's reason; GetLastActivePopup is the owned
+  popup `window::activate` recorded with its owner, while it is there
+  and shown; ShowOwnedPopups hides the shown owned popups and shows the
+  ones it hid; DisableProcessWindowsGhosting does nothing (no ghosts).
 - **The message queue**: one per process (256 entries, an auto-reset
-  event), filtered by thread. WM_PAINT is synthesised by GetMessage /
+  event), filtered by thread. Invariant: a thread's messages come out
+  oldest first (each queued message has a sequence number; the entries
+  are reused in any order, so the first matching entry is not the
+  oldest), and the desktop's input (what `pump` takes: keys, buttons,
+  moves, the activation and placement it brings) comes out only when no
+  posted message matches, as from Windows' own input queue: GetMessage's
+  order is posted messages, then input, then WM_PAINT and timers. So the
+  WM_CHAR TranslateMessage posts comes before the next key even when the
+  thread was busy while keys were typed (gui_test checks that order;
+  Chromium pairs WM_KEYDOWN with the WM_CHAR after it). WM_PAINT is synthesised by GetMessage /
   PeekMessage when a visible window is invalid and the queue is empty,
   as on Windows. GetMessageTime/Pos are the last retrieved message's
   (pt: the pointer when it was queued).
@@ -4502,7 +5193,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   borders outside it are like Windows 11's invisible resize borders);
   the desktop window is made again when the frame changes. Test:
   `user32_test` (custom_frame). Limits: uneven borders take the left one
-  (ledger). A left-button press in such a window goes first to its
+  (ledger); gala's own frame has 1-pixel sides, Windows 11's
+  WS_OVERLAPPEDWINDOW 8 (a 320-wide window's client is 318 here, 304
+  there; user32_test asserts only that WM_SIZE and GetClientRect agree). A left-button press in such a window goes first to its
   WM_NCHITTEST (on its thread, posted GALA_WM_NCDOWN): HTCAPTION makes the
   desktop drag it (GalaWindowDrag, 0x7f54: while the button stays down;
   logged), a border (HTLEFT..HTBOTTOMRIGHT) a resize (GalaWindowResize,
@@ -4531,17 +5224,21 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (TRUE) and WM_ACTIVATE (WA_ACTIVE or WA_CLICKACTIVE, lParam the old
   one); DefWindowProc's WM_ACTIVATE gives a window that is not minimized
   the focus. ShowWindow activates except with SW_SHOWNOACTIVATE,
-  SW_SHOWMINNOACTIVE and SW_SHOWNA; a click activates its window on the
+  SW_SHOWMINNOACTIVE and SW_SHOWNA; SetWindowPos without SWP_NOACTIVATE
+  (or SWP_HIDEWINDOW) activates a top-level window that is not active,
+  shown or not, as Windows 11 does a never-shown window's first one: a
+  second WM_WINDOWPOSCHANGING (SWP_NOMOVE | SWP_NOSIZE, for the raise to
+  the top), then the activation, before WM_WINDOWPOSCHANGED; a click activates its window on the
   window's thread before the click is dispatched (posted
   GALA_WM_ACTIVATE); popups (menus, drop-down lists) are never
   activated. Chromium's views take keys only once their window is
-  activated. Test: `user32_test` (activation). TODO: another process's
+  activated. Test: `user32_test` (activation, positions). TODO: another process's
   window becoming active does not deactivate ours (the desktop does not
   say so yet); no WM_ACTIVATEAPP.
 - **The display** (`monitor.rs`): one monitor (a constant HMONITOR), the
   desktop's screen; GalaScreenInfo gives the screen and the work area
-  (STATUS_NOT_SUPPORTED without a screen: user32 then assumes 1280 x
-  800). EnumDisplayMonitors, MonitorFromWindow/Point/Rect (off-screen:
+  (DEFAULT_SIZE, 1280 x 800, for a desktop nothing shows, in both
+  kernels; user32 assumes the same if the call fails). EnumDisplayMonitors, MonitorFromWindow/Point/Rect (off-screen:
   by the default flags), GetMonitorInfoW/A (`\\.\DISPLAY1`) and
   GetSystemMetrics' screen metrics come from it.
 - **TrackMouseEvent**: TME_LEAVE watches one window (process-wide),
@@ -4578,7 +5275,13 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   GalaWindowSetTitle).
 - Window longs: GWLP_WNDPROC, HINSTANCE, HWNDPARENT, ID, GWL_STYLE (with
   WS_VISIBLE/WS_DISABLED as they are), EXSTYLE, USERDATA. Window extra
-  bytes are not supported (recorded).
+  bytes (`extra.rs`): the class's cbWndExtra (GetClassInfo gives it
+  back), zeroed bytes from the process heap made with the window and
+  freed with it; Get/SetWindowLongPtrW read and write a pointer-sized
+  value at an offset from 0, Get/SetWindowLongW 4 bytes (little-endian,
+  overlapping); an offset whose value does not fit fails with
+  ERROR_INVALID_INDEX. A heap failure leaves the window without them
+  (recorded).
 - Hit testing and update areas: WindowFromPoint (the topmost visible
   top-level window at the point, then its topmost visible child,
   recursively), GetUpdateRgn/GetUpdateRect (the client area while
@@ -4591,7 +5294,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   EndDeferWindowPos applies them in order with SetWindowPos.
 - Not yet: WS_CLIPCHILDREN/CLIPSIBLINGS (overlapping siblings paint in
   Z order only when invalidated together), WM_PARENTNOTIFY,
-  WM_NCCALCSIZE and child borders, owned windows.
+  WM_NCCALCSIZE and child borders, owned windows; SetWindowPos's
+  WM_GETMINMAXINFO and WM_NCCALCSIZE on a resize (Windows sends both
+  after the first WM_WINDOWPOSCHANGING).
 
 #### Window icons, icons and cursors
 
@@ -4623,7 +5328,13 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 
 - **Keyboard layout** (`keyboard.rs`, US English): VkKeyScanW,
   MapVirtualKeyW (virtual keys, set 1 scan codes, characters),
-  GetKeyboardLayout.
+  GetKeyboardLayout (0x04090409); LoadKeyboardLayoutW gives it for KLID
+  00000409 and fails for any other (NULL, ERROR_FILE_NOT_FOUND,
+  recorded: there are no layout DLLs); ToUnicode(Ex) with a key state:
+  letters by Shift and Caps Lock, the shifted row and OEM keys by Shift,
+  the keypad's characters, Ctrl+letter its control character (Ctrl+[ \ ]
+  ESC FS GS, Ctrl+Enter LF, Ctrl+Backspace DEL), nothing for Ctrl+Alt
+  (US has no AltGr) or keys without a character; no dead keys.
 - **Accelerators** (`accel.rs`): HACCEL tables (create, copy, destroy,
   RT_ACCELERATOR resources); TranslateAcceleratorW turns a matching key
   down (with the modifiers held now) or character into WM_COMMAND (high
@@ -4678,7 +5389,11 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   user32 draws the bar (light, a rounded highlight for the hot or open
   item) and presents its rows; moves over it light items; a press is
   WM_NCLBUTTONDOWN HTMENU, which DefWindowProc turns into WM_SYSCOMMAND
-  SC_MOUSEMENU and the menu loop.
+  SC_MOUSEMENU and the menu loop. GetMenuBarInfo(OBJID_MENU) and
+  GetMenuItemRect give the bar's and its items' screen rectangles from
+  the same layout (an empty bar: an empty rectangle; the errors as Wine's
+  menu.c records Windows'); a popup menu's item rectangles,
+  OBJID_SYSMENU and OBJID_CLIENT of a popup are recorded.
 - **The menu loop** (also TrackPopupMenu(Ex)): WM_ENTERMENULOOP,
   WM_INITMENU, WM_INITMENUPOPUP before each popup (the program enables
   and checks items then), WM_MENUSELECT, WM_UNINITMENUPOPUP and
@@ -4724,7 +5439,8 @@ allocator (`gala_heap`).
   EN_KILLFOCUS. Not yet: the clipboard, undo, multi-line selection and
   scrolling, radio groups (every auto radio button of a parent is one
   group).
-- **COMBOBOX**: strings with data, the selection, an EDIT child for
+- **COMBOBOX**: strings with data, the selection (CB_SETCURSEL past the
+  end is CB_ERR and keeps it), an EDIT child for
   CBS_DROPDOWN/CBS_SIMPLE whose text is the combo box's. Its list is one
   ComboLBox window per combo box (GetComboBoxInfo's hwndList), a desktop
   popup placed under the box's window rectangle (above when the work
@@ -4772,8 +5488,9 @@ allocator (`gala_heap`).
 - DefDlgProcW asks the dialog procedure first (DWLP_MSGRESULT, or the
   result itself for the messages that return one), then defaults:
   WM_CLOSE is IDCANCEL, DM_GETDEFID/SETDEFID, the face colour.
-  DWLP_MSGRESULT/DLGPROC/USER live in the dialog table (no window extra
-  bytes). EndDialog hides a modeless dialog.
+  DWLP_MSGRESULT/DLGPROC/USER (0 and one and two pointers on: 8 and 16
+  on x64, 4 and 8 on x86) live in the dialog table; a dialog class's
+  other extra bytes are the window's. EndDialog hides a modeless dialog.
 - IsDialogMessageW: Tab/Shift+Tab between WS_TABSTOP children via
   GetNextDlgTabItem, Enter: DM_GETDEFID's button or IDOK, Esc: IDCANCEL,
   unless WM_GETDLGCODE asks for the key; the dialog's other messages are
@@ -4835,6 +5552,16 @@ but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
   window, position); the calls answer as documented while it lasts, but
   nothing draws the drag image yet (recorded per drag; it needs saving
   and restoring the window's pixels under it).
+- **Flat scroll bars** (`flatsb.rs`): comctl32 6 draws no flat ones, so
+  a window's are its user32 scroll bars (every FlatSB_ scroll call is
+  user32's); InitializeFlatSB gives the window a record of the
+  properties (the system metrics' sizes, FSB_FLAT_MODE), which
+  FlatSB_Set/GetScrollProp change and read (WSB_PROP_HSTYLE: whether it
+  was initialized; WSB_PROP_WINSTYLE: the window's scroll styles with
+  0x2 for a vertical and 0x4 for a horizontal bar, as comctl32 5 gives);
+  UninitializeFlatSB drops it (S_FALSE when there was none). Records of
+  windows that are gone are dropped at the next InitializeFlatSB (no
+  subclass: the window procedure stays the program's).
 
 #### Tooltips
 
@@ -4980,7 +5707,8 @@ then riched20.dll).
   while accumulation is on (DCB_ENABLE; a pointer into a per-slot table
   the DC's surface copies carry, kept across SelectObject); GetBoundsRect
   gives them in logical coordinates (the origins only: window DCs have
-  no other mapping). user32 presents a foreign DC's bounds (above).
+  no other mapping) and returns DCB_SET or DCB_RESET only, SetBoundsRect
+  the previous state with DCB_ENABLE or DCB_DISABLE. user32 presents a foreign DC's bounds (above).
 - **Bitmaps** (`surface.rs`): 32-bit device-dependent ones (stored
   top-down; a monochrome one turns what is written into black or white;
   CreateCompatibleBitmap on a memory DC with the default bitmap is
@@ -4999,9 +5727,10 @@ then riched20.dll).
   StretchDIBits read 1/4/8 bits with palettes, 16 bits as 5-5-5, 24 and
   32, either row order.
 - **Blits**: PatBlt, BitBlt and StretchBlt (nearest pixel, mirroring;
-  SetStretchBltMode is kept) evaluate any ternary raster operation from
-  its truth table; overlapping copies run in the safe direction. MaskBlt
-  picks the foreground or background ROP3 by the monochrome mask.
+  SetStretchBltMode keeps any value, unchecked, as Windows does)
+  evaluate any ternary raster operation from its truth table;
+  overlapping copies run in the safe direction. MaskBlt picks the
+  foreground or background ROP3 by the monochrome mask.
   GdiAlphaBlend by the BLENDFUNCTION formulas (premultiplied per-pixel
   alpha with AC_SRC_ALPHA, the constant alpha otherwise; FALSE when the
   source rectangle leaves the source surface), GdiTransparentBlt (a
@@ -5022,8 +5751,10 @@ then riched20.dll).
     fontdue (`no_std` + `alloc` over `gala_heap`) and kept in a glyph
     cache (256 buckets of 16, its own spin lock; **lock order: taken
     inside the object table's, never the other way**). GDI's metrics:
-    ascent and descent are the Windows ascent/descent scaled and rounded
-    each (-12 gives 16 = 13 + 3), advances the hinted ones rounded to
+    from an em (lfHeight <= 0) the cell (winAscent + winDescent scaled)
+    and the ascent are truncated (-12 gives 15 = 12 + 3, as Windows 11
+    25H2 measures Segoe UI), from a cell height (lfHeight > 0) the scaled
+    ascent and descent are rounded each, advances the hinted ones rounded to
     pixels and added up, no kerning; tmAveCharWidth from OS/2
     xAvgCharWidth; pitch-and-family 0x27 (variable pitch, TrueType,
     FF_SWISS).
@@ -5035,7 +5766,12 @@ then riched20.dll).
     (TA_RIGHT/CENTER, TA_BOTTOM/BASELINE) and OPAQUE backgrounds;
     ExtTextOutW (ETO_OPAQUE, ETO_CLIPPED, lpDx); GetTextMetricsW,
     GetTextExtentPoint32W, GetTextExtentExPointW (fit and partial
-    widths) and GetTextFaceW from the same metrics.
+    widths, with lpnFit only those of what fits, as documented) and
+    GetTextFaceW from the same metrics. The ANSI forms
+    (TextOutA, ExtTextOutA, GetTextExtentPoint32A, GetTextExtentExPointA,
+    GetTextMetricsA) take UTF-8 (the ANSI code page) and call the wide
+    ones; their per-character arrays (lpDx, the partial widths, the fit)
+    count bytes, a character's bytes sharing its advance or extent.
 - **Shapes** (`shapes.rs`): pen pixels go through the DC's ROP2 mix;
   polygons fill row by row (ALTERNATE or WINDING crossings), then their
   outline; ellipses and rounded rectangles fill rows by integer square
@@ -5067,7 +5803,15 @@ then riched20.dll).
   file's tables by tag (table 0: the whole file; GDI_ERROR for the
   bitmap fixed-pitch font, which has no file); EnumFontFamiliesExW knows
   one family, Selawik (an empty name enumerates its Regular face, its
-  name each of its four faces; other names nothing).
+  name each of its four faces; other names nothing); EnumFontsW is it
+  with DEFAULT_CHARSET (ENUMLOGFONTEXW and NEWTEXTMETRICEXW start with
+  what FONTENUMPROCW takes).
+- **Older calls** (`older.rs`, Delphi's VCL): GetTextExtentPointW is
+  GetTextExtentPoint32W, CreatePenIndirect CreatePen, UnrealizeObject
+  TRUE for brushes and palettes (nothing realized to reset),
+  RectVisible against the clip box, LineDDA (one point per step of the
+  longer axis, the other coordinate rounded half away from the start,
+  the last point not reported).
 - **Exports with no use on gala yet** (`absent.rs`): chrome.dll
   resolves all its gdi32 imports at once with GetProcAddress, which does
   not return `gala_stubs` stubs, so these are real exports that fail as
@@ -5109,7 +5853,9 @@ windows can use them too.
   auto-hidden; with no screen there is none and ABM_GETTASKBARPOS fails;
   app bars of one's own are recorded), ShellExecuteA,
   SHChangeNotifyRegister (an ID, never notified: gala's shell sends no
-  change notifications). The shell namespace's objects (desktop folder,
+  change notifications), SHGetIconOverlayIndexW (an index from 5 per
+  distinct path and icon index, missing files included, as Windows hands
+  them out; 32 paths, then -1, recorded). The shell namespace's objects (desktop folder,
   parsing names, property stores, association registration, stock
   icons, the Open With dialog) are E_NOTIMPL, recorded. shell32 and
   shlwapi load advapi32, ole32 and user32 on first use, never as static
@@ -5129,12 +5875,46 @@ windows can use them too.
   recycle bin it proceeds without confirmation and deletes for good
   (both recorded when asked otherwise). SHChangeNotify has no listener
   to tell; Shell_NotifyIconW fails (no notification area, recorded).
+- **shell32's shell links** (`link.rs`; `shell32_test`): CLSID_ShellLink,
+  registered in the seed's `HKLM\SOFTWARE\Classes\CLSID` with shell32
+  as its in-process server (Windows serves it from windows.storage.dll)
+  and made by shell32's DllGetClassObject: one object with IShellLinkW,
+  IPersistFile, IShellLinkDataList and IPropertyStore (other interfaces:
+  E_NOINTERFACE, recorded by data1). SetPath as Windows does it (quotes
+  dropped, environment variables expanded with the given form kept as
+  SLDF_HAS_EXP_SZ and its EXP_SZ_LINK block, a bare or extensionless
+  name found by SearchPath with ".exe", made absolute, a trailing
+  backslash dropped; the target's attributes, times and size taken for
+  the header and GetPath's WIN32_FIND_DATAW); the strings, icon (with
+  HasExpIcon for variables), show command and hot key as given. The
+  file is [MS-SHLLINK]'s: the 76-byte header, LinkInfo (a drive path's
+  VolumeID and local base path, Unicode copies when not ASCII; a UNC
+  path's CommonNetworkRelativeLink and suffix), the StringData in
+  Unicode, the extra blocks (environment and icon environment blocks,
+  blocks a loaded link had that gala does not read, kept as they were;
+  the PropertyStoreDataBlock: [MS-PROPSTORE] storages per FMTID, values
+  as [MS-OLEPS] TypedPropertyValues; strings kept as VT_LPWSTR), and the
+  terminal block. No IDList is written (Windows' shell item IDs are not
+  documented and gala's own lists mean nothing elsewhere); a loaded
+  link's IDList is written back while the target is unchanged, and a
+  link whose only target is an IDList has no path (recorded). Load reads
+  every part (the target from the environment block or LinkInfo);
+  GetCurFile/IsDirty/Save(NULL) as Wine's shelllink.c records Windows';
+  sharing: Load opens for read sharing read and write, Save writes
+  sharing read. Limits (recorded): IShellLinkA, Darwin and namespace
+  (`::{CLSID}`) targets, Resolve of a target that moved (no link
+  tracking), properties of other types than strings, booleans, 4- and
+  8-byte integers, FILETIME and CLSID. SHAddToRecentDocs (SHARD_PATHW,
+  PATHA, PIDL) saves a link named after the document in the user's
+  Recent folder (CSIDL_RECENT); NULL clears it; the policies that turn
+  the list off are not read.
 - **shell32's icon extraction** (`icons.rs`): ExtractIconW/
   ExtractIconExW/SHDefExtractIconW read the file (not loaded) and walk
   the PE resource directory's RT_GROUP_ICON entries in directory order
   (named, then IDs; a negative index is an ID), pick the image nearest
   the size asked with the most bits per pixel, and make the icon with
-  user32's CreateIconFromResourceEx; .ico files too.
+  user32's CreateIconFromResourceEx; .ico files too. A file that is
+  neither is NULL with no error (as on Windows; the docs say 1).
 - **ole32** (`user/ole32`; `ole32_test`, `user32_test`):
   - Drop targets per window with a reference (RegisterDragDrop/
     RevokeDragDrop; IsWindow loaded from user32 on first use); nothing
@@ -5153,7 +5933,9 @@ windows can use them too.
     answers on Windows).
   - `bindctx.rs`: CoCreateInstanceEx creates through
     CoCreateInstance(IID_IUnknown) and fills each MULTI_QI by
-    QueryInterface; CreateBindCtx's object keeps up to 32 bound objects
+    QueryInterface (the entries in order are reset to (E_NOINTERFACE,
+    NULL); one whose pItf is not NULL on input stops there with
+    E_INVALIDARG, it and the rest untouched); CreateBindCtx's object keeps up to 32 bound objects
     and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
     CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
     serves no COM calls across processes).
@@ -5161,13 +5943,16 @@ windows can use them too.
   `dbghelp_test`): ImageNtHeader checks "MZ" and "PE\0\0";
   SymSrvGetFileIndexInfoW reads an image file's headers (no mapping):
   TimeDateStamp, SizeOfImage, IMAGE_FILE_DEBUG_STRIPPED, and the debug
-  directory's CodeView RSDS record (PDB base name, GUID, age); NB10
+  directory's CodeView RSDS record (PDB base name, GUID, age); an image
+  without a debug directory is ERROR_BAD_EXE_FORMAT, a sizeofstruct
+  other than 1608 ERROR_INVALID_PARAMETER; NB10
   records and PDB/DBG files are recorded. SymLoadModuleExW keeps (base,
   size) of up to 64 modules of this process (the size from the mapped
   image's SizeOfImage when not given); SymFromAddr checks the image is
   mapped (VirtualQuery), walks its export directory and names the
-  nearest export at or below the address (SYMFLAG_EXPORT,
-  SymTagPublicSymbol), forwarders skipped. gala's own DLLs link with
+  nearest export at or below the address (SYMFLAG_EXPORT, ModBase 0,
+  Size 0, SymTagPublicSymbol), forwarders skipped; SizeOfStruct other
+  than 88 is ERROR_INVALID_PARAMETER. gala's own DLLs link with
   /OPT:ICF, so identical functions share an address and SymFromAddr
   names the first export there. StackWalk64 walks x64 frames of this
   process (Chromium's exception filter prints a crash's stack with it):
@@ -5177,7 +5962,8 @@ windows can use them too.
   data is a leaf: its return address at Rsp), and the walk ends at a
   return address of 0, an unreadable stack or a frame that does not
   move up; another process or a ReadMemoryRoutine is recorded and
-  FALSE. SymFunctionTableAccess64 is RtlLookupFunctionEntry,
+  FALSE, and so is IMAGE_FILE_MACHINE_I386 (Windows' x64 dbghelp walks
+  x86 stacks too: TRUE on 25H2); other machines are FALSE. SymFunctionTableAccess64 is RtlLookupFunctionEntry,
   SymGetModuleBase64 the allocation base of a MEM_IMAGE region.
   MiniDumpWriteDump stays a stub (exported, so SqlDumper loads).
 - **normaliz** (`user/normaliz`): forwards IdnToAscii to kernel32 and
@@ -5214,7 +6000,8 @@ process never reach the kernel's check (one level).
   Low, or another process's window: STATUS_ACCESS_DENIED. Filters go
   with their window (unregister, its thread's end) and process.
 - The always-passing messages and gala's own messages (0x3f0..0x3ff:
-  GALA_MENU, GALA_SETWINDOWPOS, GALA_SHOWWINDOW 0x3f2) are never stored:
+  GALA_MENU, GALA_SETWINDOWPOS, GALA_SHOWWINDOW 0x3f2, GALA_UIA 0x3f3)
+  are never stored:
   the first always pass, the second never do from a lower level.
 - SetWindowPos and ShowWindow of another process's window are sent to
   it as GALA_SETWINDOWPOS and GALA_SHOWWINDOW, which user32 answers
@@ -5276,10 +6063,10 @@ ROADMAP PK has the stages and their status; in short:
 
 | Piece | State |
 |---|---|
-| Client commands, winget-pkgs trees, zip and portable installs, shims, transactions (PK stages 1-2) | in use; scenario `pk_install_zip` |
+| Client commands, winget-pkgs trees, zip and portable installs (per user and machine-wide), shims, transactions (PK stages 1-2) | in use; scenarios `pk_install_zip`, `pk_install_machine` |
 | Downloads and manifests over HTTP(S) (PK stages 1-2, TLS step 4) | in use: gala.exe over winhttp and Schannel; GitHub sources host-tested; scenario `pk_install_https` |
 | The winget resolver (`galapkg::winget`) | in use by every package command: selection, dependencies, ARP matching; scenarios `pk_install_zip`, `pk_install_nsis` |
-| Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`); Inno host-tested |
+| Inno Setup, NSIS, `exe` installers (PK stage 3) | in use for NSIS (scenario `pk_install_nsis`) and Inno Setup (Inno Setup 7.1.1's own installer, scenario `pk_install_inno`: installed, run, uninstalled; its shortcuts and its IDE's file associations not made yet) |
 | MSIX/AppX reading (PK stage 4 groundwork) | built, host-tested; nothing installed |
 | MSI reading, LZX, install plans (PK stage 5 groundwork) | built, host-tested; nothing runs an installer |
 
@@ -5327,8 +6114,9 @@ meet them is rejected, with its reason in the log), `-h|--silent`,
 `-l|--location`. winget's no-op flags (`-e`, the agreements) are
 accepted. Exit codes: 0, 1 usage, 2 not found (package, version, an
 applicable installer, a dependency), 3 not supported yet (installer
-type, machine scope, HTTP(S) sources), 4 failed (rolled back), 5
-SHA-256 mismatch.
+type, HTTP(S) sources), 4 failed (rolled back), 5 SHA-256 mismatch, 6
+needs administrator rights (a machine-wide portable install or
+uninstall; winget's APPINSTALLER_CLI_ERROR_COMMAND_REQUIRES_ADMIN).
 
 ### Sources and downloads
 
@@ -5410,6 +6198,29 @@ portable):
   (and uninstall takes it off).
 - Installing what is installed at the same version says so (exit 0);
   another version is `gala upgrade`'s.
+- **Scope** (`install::Layout`): the installer's Scope, else `--scope`,
+  else user (winget's default for portable packages). Machine scope is
+  winget's machine layout (its portablePackageMachineRoot default;
+  `winget --info` lists the Links directory): files in
+  `%ProgramFiles%\WinGet\Packages\<key>`, commands in
+  `%ProgramFiles%\WinGet\Links`, that directory on the machine's PATH
+  (`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\Path`,
+  `%VAR%`s expanded when looking for it), the ARP entry under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\<key>`.
+  An upgrade removes from the installed entry's layout (HKCU user, HKLM
+  machine) and installs into the new installer's (the same unless the
+  new version has no installer for that scope).
+- **Elevation**: a machine-wide install, upgrade or uninstall of a
+  portable package needs administrator rights, checked before anything
+  changes (dependencies included) through `Host::is_admin`: gala.exe
+  asks CheckTokenMembership(NULL, BUILTIN\Administrators), as
+  Microsoft's documentation tests for an administrator. Without them:
+  exit 6, "needs administrator rights", nothing changed. The check is
+  gala's own (gala's default descriptors let the boot user write
+  Program Files and HKLM, so the access checks would not refuse): the
+  boot user is a standard user; SYSTEM (`as=system`) is an
+  administrator. Installers that are programs elevate themselves on
+  Windows (UAC); gala does not check for them.
 
 ### Command shims
 
@@ -5475,10 +6286,18 @@ as it was.**
   ...` per undo step), timestamped with the process id; `--verbose`
   copies it to stderr.
 - What gala cannot install is recorded in the ledger
-  (`gala.exe!install(InstallerType msix)`, `gala.exe!install(machine
-  scope portable)`, `gala.exe!install(x86 portable: WOW64)`,
+  (`gala.exe!install(InstallerType msix)`,
+  `gala.exe!install(x86 portable: WOW64)`,
   `gala.exe!install(WindowsFeatures <name>)`), so `cargo xtask report`
   lists what real packages needed.
+- Scope and elevation: `layout scope= packages= links= arp= path=` for a
+  portable install, `elevation administrator=yes` or `error
+  requires-admin administrator=no for=<what>` (then `failed exit=6`).
+- A program installer that fails with a Log switch's file (Inno's /LOG)
+  has that file's last 40 lines copied into the install log as
+  `setup-log: <line>` after `setup-log path= lines= shown=` (or
+  `setup-log none path=`): Inno's own reason ("This program does not
+  support the version of Windows...") is beside gala's steps.
 - The scenario tees the log into the serial log (`logtee=`), and
   pk_install_test prints it when a check fails.
 
@@ -5508,6 +6327,11 @@ as winget runs them:
   `restart-required`); anything else is exit 4 naming the code.
   ERROR_BAD_EXE_FORMAT (a 32-bit installer: gala has no WOW64) is exit
   3 and the ledger line `gala.exe!install(32-bit installer: WOW64)`.
+  Inno Setup 7 builds x64 installers (SetupArchitecture=x64), but every
+  Inno Setup refuses a Windows without x86 support (it asks
+  IsWow64GuestMachineSupported and looks for SysWOW64\kernel32.dll; its
+  log says "Machine types supported by system: x86 x64" since WOW stage
+  1).
 - **Finding the install**: through its ARP entry, from a snapshot of the
   HKCU and HKLM Uninstall keys taken before the run: the manifest's
   ProductCode if that key exists; else the one new key, or the new key
@@ -5545,9 +6369,79 @@ as winget runs them:
   FILE_FLAG_DELETE_ON_CLOSE and MoveFileExW's DELAY_UNTIL_REBOOT
   ("kernel32"); CreateProcessW accepting CREATE_DEFAULT_ERROR_MODE (the
   error mode is never inherited on gala). All are checked by
-  win32_misc_test. DialogBoxParamW, MessageBoxIndirectW,
-  SetClassLongPtrW, WritePrivateProfileStringW and SHCLSIDFromString are
-  stubs (UI and INI paths a silent install does not take).
+  win32_misc_test. DialogBoxParamW, MessageBoxIndirectW and
+  SHCLSIDFromString are stubs (UI paths a silent install does not
+  take).
+- **What Inno Setup's loader and Setup (Delphi's VCL) need of gala**
+  (win32_misc_test, kernel32_locale_test, gui_test): kernel32's
+  EnumCalendarInfoW (the era, by LCID), SetSearchPathMode (the mode
+  SearchPathW follows: safe search puts the current directory after
+  the system directories; PERMANENT then refuses a change,
+  ERROR_ACCESS_DENIED), SetProcessDEPPolicy (ERROR_NOT_SUPPORTED, as
+  for every 64-bit process), GetThreadUILanguage and
+  SetThreadPreferredUILanguages (en-US is the only valid language: the
+  thread's list is en-US or empty, nothing is kept; another language is
+  skipped and recorded), the global atom table (GlobalAddAtomW,
+  GlobalFindAtomW, GlobalDeleteAtom, GlobalGetAtomNameW: integer atoms
+  and counted string atoms from 0xC000; **limit**: per process, where
+  Windows keeps one per session, so other processes do not see them),
+  IsWow64GuestMachineSupported and GetSystemWow64DirectoryW (x86 and
+  SysWOW64, through WOW64: Inno's check); the LCTYPEs Delphi reads (LOCALE_SSHORTTIME,
+  ITIMEMARKPOSN, ICALENDARTYPE, IOPTIONALCALENDAR, IFIRSTDAYOFWEEK,
+  IFIRSTWEEKOFYEAR, IDIGITSUBSTITUTION; their numbers checked against
+  winnls.h); user32's SetClassLongPtrW (procedure, background, icons,
+  style; another index recorded, ERROR_INVALID_INDEX), CharLowerW,
+  GetCursor, IsWindowUnicode (every gala window), CountClipboardFormats,
+  AdjustWindowRectExForDpi and PhysicalToLogicalPoint (96 DPI, no
+  scaling), SetGestureConfig, GetGestureInfo and CloseGestureInfoHandle
+  (no touch input: no gesture handle is valid; GetGestureInfo's NULL
+  GESTUREINFO is ERROR_INVALID_PARAMETER first),
+  SPI_GETMOUSEWHEELROUTING (hybrid); gdi32's GetCurrentPositionEx;
+  ole32's IsEqualGUID; uxtheme's buffered painting (BufferedPaintInit
+  and UnInit succeed; BeginBufferedPaint and BeginBufferedAnimation give
+  NULL and are recorded: the program paints directly) and
+  OpenThemeDataForDpi (no theme); winspool.drv (`user/winspool`, a
+  machine without printers: EnumPrintersW lists none, GetDefaultPrinterW
+  ERROR_FILE_NOT_FOUND, OpenPrinterW ERROR_INVALID_PRINTER_NAME); the
+  UCRT (Microsoft's ucrtbase.dll, as other scenarios ship it). Its
+  second stage (Setup run again as `<installer>.tmp`, which installs)
+  needs: comctl32's flat scroll bars (the VCL initializes them on every
+  scrolling control), user32's GetClassInfoW (the procedure where
+  WNDCLASSW has it: the VCL compares it with its own before registering
+  a control's class, and a wrong one made it re-register, failing with
+  ERROR_CLASS_ALREADY_EXISTS), GetLastActivePopup and ShowOwnedPopups
+  (the VCL asks for the active popup when a run ends), gdi32's
+  EnumFontsW, GetTextExtentPointW, LineDDA and the other older calls
+  (`older.rs`), shell32's Start menu folders and
+  FOLDERID_UserProgramFiles (`{group}`, `{userpf}`; created with
+  CSIDL_FLAG_CREATE/KF_FLAG_CREATE), kernel32's private profile
+  functions (its `.url` Internet shortcut), and what Delphi's units look
+  up at start (oleaut32's Var* arithmetic, ole32's server-process
+  count, user32's AnimateWindow and SetLayeredWindowAttributes, msctf's
+  SetInputScope): comctl32_test, user32_test, gdi32_test, shell32_test,
+  kernel32_misc_test, oleaut32_test, ole32_test. Its `[Icons]` are
+  CLSID_ShellLink shortcuts (IShellLinkW, IPersistFile, and
+  IPropertyStore for the IDE's AppUserModel ID; shell32's `link.rs`),
+  and its `[Run]` entry `ISIDE.exe /assoc` (the IDE writing the `.iss`
+  association under `HKCU\Software\Classes` for a user who is not an
+  administrator; `/unassoc` at uninstall) needed for the IDE to load:
+  comdlg32's GetFileTitleW, ReplaceTextW, ChooseColorW, PrintDlgW,
+  shell32's SHAddToRecentDocs, user32's SendDlgItemMessageW,
+  GetMenuBarInfo and RegisterClassExA, kernel32's FileTimeToDosDateTime,
+  FindStringOrdinal and EnumResourceLanguagesW (and the resource-writing
+  stubs ISCmplr.dll imports), gdi32's text functions' ANSI forms and
+  imm32's input-context calls (its Scintilla, isscint-x64.dll), and
+  bcrypt's ECDSA BCryptExportKey (the IDE checks ISCmplr.dll's `.issig`
+  signature with its trusted keys before loading it): shell32_test,
+  comdlg32_test, user32_test, gdi32_test, kernel32_misc_test,
+  bcrypt_test. What a silent install still reports and skips: the
+  shortcuts' Start-menu unpinning at uninstall
+  (SHCreateItemFromParsingName, recorded: Inno then deletes the link
+  anyway), SHPathPrepareForWriteW, the taskbar list (CLSID_TaskbarList),
+  the Restart Manager (rstrtmgr.dll) and HTML Help (hhctrl.ocx). The
+  rest of Setup's static imports (ImageList_*, MDI, metafile and
+  printing functions) are stubs a silent install does not call;
+  `tools/inno_setup_exe.py` writes Setup out of an installer for `tools/import_survey.py`.
 
 ### Tests
 
@@ -5566,9 +6460,21 @@ that fails (no winhttp.dll in that image). Its expected results are
 winget's documented behaviour: x64 chosen over x86, Inno's progress
 switches by default and `/VERYSILENT` with `--silent`, a dependency
 installed first and left by the dependant's uninstall, a missing
-dependency changing nothing (exit 2), `--scope machine` refused (exit
-3), `--scope user` taking the second installer and the upgrade keeping
-user scope. `pk_install_test https` (scenario `pk_install_https`, with
+dependency changing nothing (exit 2), `--scope machine` refused to
+the boot user, a standard user (exit 6, nothing in Program Files),
+`--scope user` taking the second installer and the upgrade keeping
+user scope. `pk_install_test machine` (scenario `pk_install_machine`,
+`as=system`: an administrator) installs PkScoped machine-wide (Program
+Files, the HKLM entry, Links on the machine's PATH), runs its command
+from that PATH, lists, upgrades it keeping machine scope and
+uninstalls it. `pk_install_test inno` (scenario `pk_install_inno`)
+installs JRSoftware.InnoSetup.7 (winget-pkgs' real
+manifest; the installer, PREBUILT `innosetup`, in the snapshot's
+mirror) with `--scope user --silent` and expects Inno's files, its
+`Inno Setup 7_is1` entry found by ProductCode, ISCC.exe running, `list`,
+and uninstall through its QuietUninstallString (Setup's own log is in
+the serial log, and on a failure its last lines are the install log's
+`setup-log:` lines). `pk_install_test https` (scenario `pk_install_https`, with
 schannel_test's Nginx in the guest) installs GalaTest.PkHttps, whose
 zip is not mirrored: Nginx serves it (`user/pk_install_test/served`)
 behind a release URL that answers 302, so gala downloads it over
@@ -5672,11 +6578,10 @@ more).
   the selected installer, the runners-up and every rejection's reason.
   `install::gap` says what gala cannot install: a type of a later stage
   (msi, wix, burn, msix, appx, a zip of those), an x86 portable program
-  (no WOW64), a portable package for machine scope (Program Files and
-  HKLM are not built; a portable installer without Scope takes the scope
-  asked for). For the first two `choose` takes the best-ranked runner-up
-  gala can install (a stopgap, ROADMAP "Known issues and stopgaps");
-  scope never falls back. Each gap is a ledger line.
+  (no WOW64). For both `choose` takes the best-ranked runner-up gala can
+  install (a stopgap, ROADMAP "Known issues and stopgaps"); scope never
+  falls back (a portable installer without Scope takes the scope asked
+  for, `install::portable_scope`). Each gap is a ledger line.
 - **Dependencies**: `deps::plan_with` with gala's chooser and a
   `Catalog` over the source and the ARP entries; the plan's lines go to
   the log. Each dependency not installed at its MinimumVersion is
@@ -5699,9 +6604,11 @@ more).
   --source` upgrades a matched program (an installer that is a program
   runs over it and gala then tags its entry; a portable upgrade of an
   untagged entry is refused: gala has no record of its files).
-- TODO (ROADMAP PK step 1): machine-scope portable installs, an
-  upgrade's new dependencies, UpgradeBehavior and RequireExplicitUpgrade,
-  winget's settings (preferences, requirements), the user's locale.
+- TODO (ROADMAP PK step 1): an upgrade's new dependencies,
+  UpgradeBehavior and RequireExplicitUpgrade, winget's settings
+  (preferences, requirements; portablePackageMachineRoot), the user's
+  locale; x86 portable programs machine-wide in `%ProgramFiles(x86)%`
+  (with WOW64).
 
 ### Reading MSI packages
 
@@ -6035,19 +6942,15 @@ packages (.eappx), flat bundles; AppxSignature.p7x is only noticed.
 
 ### Limits and next steps
 
-In ROADMAP PK's order: the HTTPS fetcher (on winhttp and Schannel);
-stage 3's rest (a real Inno Setup installer in a scenario: they are
-32-bit, so WOW64 first, and Inno's compiler runs only on Windows; the
-manifest's InstallerSuccessCodes/ExpectedReturnCodes; Scope switches
-and elevation for machine-wide installers; a tracking catalog of
-gala's own instead of tagging vendors' ARP keys); stage 4
-(MSIX on the reader above: signature validation against trusted
-certificates, staging under WindowsApps, registration, package identity
-for full-trust apps); stage 5 (MSI, on the plan above); machine scope
-(`%ProgramFiles%\WinGet\Packages`, HKLM, needs elevation); the install
-command switched over to `galapkg::winget`, which brings dependencies
-and `gala list` matching ARP entries to packages by
-ProductCode/AppsAndFeaturesEntries.
+In ROADMAP PK's order: winget's source index; stage 3's rest (what Inno
+Setup's own install still lacks: shortcuts through IShellLinkW, its
+IDE's `/assoc` run; an x86 Inno installer, after WOW stage 3; the
+manifest's InstallerSuccessCodes/ExpectedReturnCodes; Scope
+switches and elevation for machine-wide installers that are programs;
+a tracking catalog of gala's own instead of tagging vendors' ARP keys);
+stage 4 (MSIX on the reader above: signature validation against
+trusted certificates, staging under WindowsApps, registration, package
+identity for full-trust apps); stage 5 (MSI, on the plan above).
 
 ## A web browser: Chromium, then Edge
 
@@ -6086,6 +6989,10 @@ stations and desktops a program creates are refused until stage 3).
 
 ### Other DLLs
 
+- msctf (`user/msctf`): SetInputScope and SetInputScopes, S_OK for a
+  window and without effect (no text services to read them; Delphi's
+  VCL calls them on its edit controls); the TSF COM objects are not
+  provided (`user32_test`).
 - advapi32: trustees and BuildSecurityDescriptorW, AddMandatoryAce,
   GetSecurityDescriptorSacl, RegNotifyChangeKeyValue (asynchronous:
   accepted, never signaled, recorded).
@@ -6098,7 +7005,9 @@ stations and desktops a program creates are refused until stage 3).
 - New DLLs: `shcore.dll` (GetDpiForMonitor, SetProcessDpiAwareness),
   `dwmapi.dll` (no DWM: attributes accepted without effect or
   E_NOTIMPL, recorded), `wtsapi32.dll` (the one console session,
-  active), `imm32.dll` (no IMEs). powrprof: platform role and active
+  active), `imm32.dll` (no IMEs and no input contexts: ImmGetContext is
+  NULL, and every call on a context fails as on an invalid one, FALSE
+  with ERROR_INVALID_HANDLE, nothing set for NULL). powrprof: platform role and active
   scheme. uxtheme: DrawThemeBackgroundEx as ordinal 47.
 - ntdll: RtlGetDeviceFamilyInfoEnum (10.0.26100.<UBR>, the desktop
   family, an unknown form).
@@ -6108,7 +7017,9 @@ stations and desktops a program creates are refused until stage 3).
   member flagged CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG, else to the
   collection's own list); CertGetIntendedKeyUsage and
   CertGetEnhancedKeyUsage from the extensions (no EKU: every usage,
-  CRYPT_E_NOT_FOUND); CertCompareCertificateName; CertVerifyTimeValidity;
+  CRYPT_E_NOT_FOUND; asked for the property alone, none is kept, or for
+  the extension alone and there is none: FALSE with CRYPT_E_NOT_FOUND,
+  which Python's enum_certificates reads as trusted for every purpose); CertCompareCertificateName; CertVerifyTimeValidity;
   CryptVerifyCertificateSignatureEx (RSA PKCS #1 and ECDSA P-256/P-384
   with SHA-1/2 through bcrypt); CertControlStore (nothing outside changes a store: resyncs do
   nothing, change notifications never fire, recorded); CertFindChainInStore
@@ -6175,6 +7086,494 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
 - No Windows Runtime classes, no shell namespace objects, no COM
   proxies (see their sections).
 
+## Plan: WOW64 (32-bit x86 programs)
+
+32-bit x86 Windows programs run on gala as on 64-bit Windows (ROADMAP
+WOW; the owner's approval): unmodified PE32 executables and DLLs, with
+the answers 64-bit Windows gives about them. Sources: Microsoft Learn
+("WOW64 Implementation Details", "File System Redirector", "Registry
+Keys Affected by WOW64", the x86 calling conventions, the PE format),
+the public x86 TEB/PEB/CONTEXT layouts (winnt.h, winternl.h), Intel's
+and AMD's manuals for compatibility mode, Wine's WOW64 headers
+(WOW64_CPURESERVED, the TLS slot numbers) and its
+RtlWow64EnableFsRedirectionEx's contract as documentation, the
+documented x86 SEH model (EXCEPTION_REGISTRATION_RECORD,
+EXCEPTION_DISPOSITION; Matt Pietrek's "A Crash Course on the Depths of
+Win32 Structured Exception Handling", MSJ 1997).
+
+### Where the code is
+
+| Part | Where |
+|---|---|
+| PE32 executables, the 32-bit address limit, the PEB32 and 32-bit parameters, TEB32s, the CPU area | `kernel/src/nt/wow64.rs`, `nt/process.rs` (`spawn_inner`), `nt/thread.rs` (`create_wow64`), `nt/params.rs` (`build32`), `nt/layout.rs` (`wow64`) |
+| The TEB32 segment, DS/ES/FS at every switch | `arch/x86_64/gdt.rs` (`TEB32_SELECTOR`, `set_teb32`), `percpu::load_teb32`, `sched::set_teb32`, `sched/switch.rs` |
+| gala's wow64.dll: thread start, the transition, the exception and APC dispatchers | `user/wow64/src/lib.rs` (x64 DLL, no imports) |
+| Its conversions: services by argument kind, information classes, threads and contexts, fault-safe access | `user/wow64/src/generic.rs`, `info.rs`, `thread.rs`, `mem.rs` |
+| Exceptions and APCs handed to 32-bit code; the file system redirector | `user/wow64/src/dispatch.rs`, `redirect.rs` |
+| The 32-bit ntdll (SysWOW64): the loader, the stubs, x86 SEH, the APC dispatcher | `user/testntdll` built for i686 (`x86.rs`, `seh_x86.rs`; `x64.rs` the 64-bit one's parts); the kernel's `nt/ntdll.rs` (`get32`), `nt/wow64.rs` (`through_ntdll32`, `exception_stack`), `nt/process.rs` (`deliver_to_user`) |
+| The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
+| The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
+| The 32-bit advapi32 and bcryptprimitives (SysWOW64) | `user/advapi32` built for i686 (its typed structures in `layout.rs`), `user/bcryptprimitives` |
+| The 32-bit user32 and gdi32 (SysWOW64) | `user/user32`, `user/gdi32`, `user/gala_heap` built for i686; their services' rows in `user/wow64/src/generic.rs` |
+| The 32-bit comctl32, oleaut32, ole32, shell32, shlwapi, winhttp, ws2_32 and the rest of what an x86 Inno installer loads | those crates built for i686 (`USER_DLLS_X86`); typed structures in `user/comctl32/src/layout.rs`, `user/ws2_32/src/layout.rs` |
+| The stubs, callers and table agree | `xtask/src/stub_audit.rs` (`cargo xtask stub-audit`) |
+| 32-bit sockets: AFD's requests in the caller's layout | `kernel/afd_abi` (shared), `kernel/src/nt/afd.rs` (`layout_of`), `user/ws2_32/src/afd.rs` |
+| The registry's 32-bit view | `kernel/src/nt/regview.rs`, applied in `nt/registry_calls.rs` (`key_view`) |
+| The environment by bitness | `nt/wow64.rs` (`environment`) |
+| 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
+| The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
+| The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
+
+### Decisions
+
+- **The kernel stays 64-bit; WOW64 is a user-mode layer**, as on
+  Windows: every system call the kernel serves is an x64 one. A 32-bit
+  program's call goes to gala's wow64.dll, 64-bit code inside the
+  32-bit process, which converts its arguments and structures, makes
+  the 64-bit call and converts the results back. Reasons: no second
+  system call ABI and no 32-bit structure parsing in the trusted core
+  (smaller attack surface, one dispatcher, the handover's formats
+  unchanged); conversion is data work, written once in Rust beside the
+  services' user-mode contracts; programs and tools see what Windows
+  has (64-bit code and a 64-bit TEB in every 32-bit process); and
+  SYSCALL raises #UD in compatibility mode on Intel CPUs, so a direct
+  32-bit entry would need another entry path (SYSENTER or an interrupt
+  gate). The kernel does what only it can: the 32-bit address space,
+  the PEB32/TEB32 beside the 64-bit ones, the compatibility-mode
+  segments, mapping wow64.dll, the answers about a process's machine
+  (ProcessWow64Information), the IO_STATUS_BLOCK in the x86 layout
+  (below), a WOW64 thread's 64-bit stack and its 32-bit stack's guard
+  page, and the 32-bit view of the registry.
+- **One DLL, gala's own ABI**: Windows splits the layer into wow64.dll,
+  wow64cpu.dll and wow64win.dll on top of the 64-bit ntdll; gala has one
+  `wow64.dll` (in System32, 64-bit, no imports: it makes system calls
+  directly) whose entry points are gala's (`GalaWow64Start`,
+  `GalaWow64Transition`, `GalaWow64Exception`), found by the kernel by
+  export name. There is no 64-bit ntdll in a 32-bit process: the
+  kernel delivers exceptions and APCs to wow64.dll's own dispatchers
+  (the process's exception and APC dispatchers are `GalaWow64Exception`
+  and `GalaWow64Apc`), which hand those of 32-bit code to the 32-bit
+  ntdll's. Programs that look for the 64-bit ntdll in a 32-bit
+  process (debuggers, code switching to 64-bit itself) are out of scope.
+- **What the 32-bit side sees is Windows'**: CS 0x23, DS/ES/SS 0x2b,
+  FS 0x53 whose base is the TEB32; the 32-bit ntdll's system call stub
+  `mov eax, N; call fs:[0xc0]` (TEB32.WOW32Reserved; Windows 10's
+  ntdll calls its Wow64Transition pointer, same shape), with the x64
+  service numbers and the arguments on the 32-bit stack;
+  TEB64.TlsSlots[1] (WOW64_TLS_CPURESERVED) pointing at the thread's CPU
+  area (WOW64_CPURESERVED: Flags, Machine 0x14c, then the x86 CONTEXT);
+  TEB64.NtTib.ExceptionList pointing at the TEB32.
+
+### The CPU and the segments
+
+The GDT has Windows' selectors ("CPU tables"): 0x23 is the 32-bit user
+code segment, 0x2b the user data segment, 0x53 (entry 0x50) a 4 KiB
+ring-3 data segment whose base is the running thread's TEB32. A WOW64
+thread's scheduler record says so (`sched::set_teb32`, called before
+its first entry to user mode): every switch to it writes this CPU's
+0x50 entry and loads DS, ES (0x2b) and FS (0x53), which also sets the
+FS base to the TEB32 (`percpu::load_teb32`). They are reloaded at every
+switch because segment registers belong to the CPU, not the thread, and
+an IRET to ring 3 nulls data selectors with DPL 0 (the kernel's), with
+which 32-bit code faults at its first memory access. GS is never
+loaded: its base (the 64-bit TEB, the per-thread `user_gs_base`) is how
+the transition finds the CPU area. An interrupt in 32-bit code saves and
+restores the full 64-bit registers and returns with IRETQ to CS 0x23;
+SYSCALL only ever comes from wow64.dll's 64-bit code.
+
+### A 32-bit process
+
+- **Image**: `PeImage::parse` takes PE32 (machine i386) executables;
+  `ImageInfo.x86` makes the process a WOW64 one (`Process.wow64`). An
+  executable with imports needs the 32-bit ntdll
+  (`\Windows\SysWOW64\ntdll.dll`, `ntdll::get32`, a PE32 image): without
+  one it is refused (`wow64: <name> imports DLLs, and there is no
+  ...SysWOW64\ntdll.dll to bind them`; STATUS_INVALID_IMAGE_FORMAT to
+  CreateProcess).
+- **Address space**: the VAD's limit (`Vad::set_limit`) keeps every
+  allocation made without an address below 2 GiB, or 4 GiB less 64 KiB
+  for an IMAGE_FILE_LARGE_ADDRESS_AWARE image (Rust's i686 target sets
+  it), as 64-bit Windows does; image views without a given address go
+  below it too (a preferred or alternative base above counts as taken).
+  Placements at given addresses are not limited: the 64-bit PEB,
+  parameters and TEBs stay where every process has them (Windows keeps
+  them below 4 GiB; only 64-bit code reads them, through GS).
+- **PEB32** at 0x7ffd0000 (the PEB's values at the x86 offsets:
+  ImageBaseAddress, ProcessParameters, NumberOfProcessors, the OS
+  version, subsystem, SessionId); the **32-bit parameters** below it
+  (`params::build32`: the same block with 4-byte pointers and handles,
+  normalized); ProcessWow64Information answers the PEB32 (0 for a
+  64-bit process), which kernel32's IsWow64Process(2) read.
+- **wow64.dll** is mapped when the process is made (`wow64::map_dll`);
+  without it the process is not created (`wow64: <name> is a 32-bit
+  program, and there is no ...wow64.dll`; ERROR_BAD_EXE_FORMAT, as a
+  Windows without WOW64).
+- **Threads**: each has a TEB32 (one page, placed top-down below the
+  limit: Self, StackBase/Limit, DeallocationStack, ClientId, the PEB32,
+  WOW32Reserved = the transition, ExceptionList = 0xffffffff), a 64-bit
+  stack for wow64.dll's code (256 KiB reserved, below the limit; the
+  64-bit TEB describes it: `wow64::reserve_stack64`) and a CPU area in
+  its 64-bit TEB's second page (TEB64 + 0x1a00): the x86 context and the
+  64-bit stack pointer the transition switches to. Every thread of a
+  WOW64 process is a WOW64 thread: NtCreateThread there takes the
+  32-bit start as wow64.dll converts it (a CONTEXT with SegCs 0x23 and
+  the 32-bit registers, an INITIAL_TEB with the 32-bit stack, both
+  zero-extended; `create_wow64_thread`); any other CONTEXT is refused
+  (STATUS_INVALID_PARAMETER, in the ledger). A WOW64 thread's 64-bit
+  stack and TEB32 are freed when it exits (unless it is the process's
+  last: `wow64::release_thread`). Its 32-bit stack grows like a 64-bit
+  one: a guard page in the TEB32's stack range moves down and the
+  TEB32's StackLimit follows (`vm::guard_hit`, `current_stack32`). The
+  main thread starts in wow64.dll's
+  `GalaWow64Start` (rcx = the CPU area) on a 256 KiB 64-bit stack, with
+  the area's context set to the 32-bit start: eip the entry point (also
+  in eax), esp the image's stack (its reservation, below 2 MiB as for
+  x64) with a null return address and the PEB32 above it (also in ebx).
+  `GalaWow64Start` enters 32-bit code with IRETQ. With a 32-bit ntdll
+  (any 32-bit process, imports or not, once it exists), that start goes
+  through it as the 64-bit one's does (`wow64::through_ntdll32`): its
+  view is mapped below the limit, the x86 CONTEXT of the real start goes
+  on the 32-bit stack, and the thread starts at its
+  LdrInitializeThunk(Context, NtdllBase) (stdcall, above a null return
+  address), which binds the imports and NtContinues the CONTEXT. Its
+  KiUserExceptionDispatcher and KiUserApcDispatcher are recorded
+  (`Wow64Process.dispatcher32`, `apc_dispatcher32`) and named in every
+  thread's CPU area (`cpu::DISPATCHER32`, `APC_DISPATCHER32`, 0 without
+  a 32-bit ntdll), where wow64.dll finds them.
+- **Environment**: as WOW64 sets it by bitness (Microsoft Learn, "WOW64
+  Implementation Details"; `wow64::environment`, from the system's
+  variables or the creator's): a 32-bit process gets
+  PROCESSOR_ARCHITECTURE=x86, PROCESSOR_ARCHITEW6432 the native one,
+  ProgramFiles and CommonProgramFiles the `(x86)` directories,
+  ProgramW6432 and CommonProgramW6432 the native ones; a 64-bit process
+  (a 32-bit parent's variables) gets the native values back and no
+  PROCESSOR_ARCHITEW6432. Variables keep their place, new ones go where
+  they sort. `C:\Program Files (x86)` (and its Common Files) exists from
+  boot.
+
+### The transition and the thunks
+
+`GalaWow64Transition` is 32-bit code: it far-returns to CS 0x33 at the
+next instruction (position independent: the address of a call's return
+plus a fixed 6), where 64-bit code zero-extends esp, finds the CPU area
+through GS, saves the caller's registers there (eip = the return into
+the stub, esp after it), moves to the 64-bit stack and calls
+`gala_wow64_service(number, args, area)`. The status goes into the
+area's eax and `gala_wow64_enter32` re-enters 32-bit code with IRETQ
+from the area (so a changed context, NtSetContextThread or NtContinue
+of the caller, takes effect the same way; those return the new eax).
+Conversions:
+
+- **By argument kind** (`generic::TABLE`, most services): handles
+  sign-extended (pseudo-handles are negative); values and pointers to
+  data laid out alike zero-extended; HANDLE* (probed before the call, so
+  a handle is never created that cannot be handed back), PVOID* and
+  SIZE_T* through 64-bit temporaries; OBJECT_ATTRIBUTES (with its
+  UNICODE_STRING and an absolute security descriptor; a self-relative
+  one holds offsets and passes), UNICODE_STRING, CLIENT_ID in and out.
+  An APC routine (I/O, timers) is queued as wow64.dll's marker with the
+  32-bit routine and its context packed in the 64-bit context
+  (`dispatch::apc32`), and runs in 32-bit code (below). A 64-bit value
+  passed by value takes two stack words (`K::Hi`: GalaRecordMissing's
+  detail). gala's own GalaCreateProcess
+  block has fixed 8-byte fields whatever the caller's bitness, so it
+  passes.
+- **By information class** (`info`): classes with pointer-sized fields
+  converted (process basic/quota/VM counters/debug port/WOW64/image
+  name, thread basic with the TEB32 (from TEB64.ExceptionList) and start
+  address, set-thread affinity/token/start/name, system basic with the
+  32-bit application range and the process list, token SIDs, groups and
+  DACL with their pointers rebased into the caller's buffer and the x86
+  length (STATUS_BUFFER_TOO_SMALL when short), object name and type,
+  section basic and image, memory basic and section name, file rename,
+  link and completion, directory-object entries, a symbolic link's
+  target, a wait's handle array); classes laid out alike pass; any other
+  fails with STATUS_INVALID_INFO_CLASS. Variable results go through
+  scratch memory (wow64.dll has no heap: `mem::Scratch`).
+- **Threads and contexts** (`thread`): NtCreateThread (above);
+  NtGetContextThread gives the x86 CONTEXT from the CPU area (the
+  caller's own, or a thread in wow64.dll's code: a system call) or from
+  the registers of a thread the kernel stopped in 32-bit code (its
+  64-bit CONTEXT says CS 0x23); NtSetContextThread writes the same
+  places; the x87/SSE state from FXSAVE (EXTENDED_REGISTERS, and
+  FLOATING_SAVE_AREA derived from it).
+
+A service or class without a conversion fails with
+STATUS_NOT_IMPLEMENTED (STATUS_INVALID_INFO_CLASS for a class) and is
+recorded in the ledger (`wow64.dll!service 0x00c1`,
+`wow64.dll!NtQueryVirtualMemory(class)`), so a program's first missing
+thunk names itself. NtDeviceIoControlFile's control codes pass through:
+AFD (sockets) reads a WOW64 caller's structures in their x86 layout
+(`kernel/afd_abi`, "AFD").
+
+**Fault-safe access**: wow64.dll reads and writes a caller's memory
+(its arguments on the 32-bit stack included) only through
+`gala_wow64_copy`, whose one memory-touching instruction
+`GalaWow64Exception` recognizes: a fault there resumes at the copy's
+failure exit (NtContinue), and the call fails with
+STATUS_ACCESS_VIOLATION, as Windows' thunks do with `__try`. Any other
+exception in wow64.dll's own code is a bug: reported through
+GalaUnhandledException (the crash report shows wow64.dll's 64-bit
+registers) and the process ends. Exceptions in 32-bit code come there
+too, told apart by the CONTEXT's CS 0x23 (below).
+
+**IO_STATUS_BLOCK**: the kernel writes it in the x86 layout (Status,
+Information: 8 bytes) for a WOW64 process (`Process::write_iosb`, at
+every place it is written, in the call or at a later completion), so
+wow64.dll passes the caller's block through and pending I/O completes
+into it. Invariant: in a WOW64 process every system call comes from
+wow64.dll on behalf of 32-bit code; wow64.dll never passes a 64-bit
+block of its own.
+
+### The 32-bit system DLLs (stage 3)
+
+gala's DLLs are rebuilt for `i686-pc-windows-msvc` and shipped in
+`C:\Windows\SysWOW64` (the directory exists from boot;
+GetSystemWow64DirectoryW names it). Done: the 32-bit ntdll, testntdll
+built for i686. Its loader is the 64-bit one's (PE32 images: the data
+directories at +96, 4-byte IAT and TLS-directory entries, the ordinal
+flag in bit 31; images of the other kind refused unless IL-only;
+SysWOW64 as the system directory), its parts by architecture in
+`x64.rs` and `x86.rs`: the stubs (`mov eax, N; call fs:[0xc0]; ret
+<bytes>`, stdcall), the TEB32/PEB32 through FS and their offsets
+(LoaderLock +0xa0, Ldr +0x0c, ProcessHeap +0x18, the x86 LDR_* layouts),
+the memory routines and 64-bit division helpers, KiUserApcDispatcher;
+`seh_x86.rs` the x86 SEH (below). Done too: the 32-bit kernel32, gala's
+kernel32 built for i686 (`user/kernel32`): what differs by architecture
+is in its `x64.rs` and `x86.rs` (TEB access through GS or FS and the
+TEB's offsets: LastErrorValue +0x34, TlsSlots +0xe10, DeallocationStack
++0xe0c; the PEB's, the process parameters', the optional header's stack
+sizes, the CONTEXT's layout for the context functions, a new thread's
+CONTEXT: x86 stdcall arguments written on its stack, SLIST_HEADER: 8
+bytes changed by cmpxchg8b), and the structures with pointer-sized fields
+are `repr(C)` with `usize` fields, so one definition has both layouts
+(the basic information classes, whose x86 lengths wow64.dll requires,
+MEMORY_BASIC_INFORMATION, OVERLAPPED, STARTUPINFO, toolhelp's entries;
+GalaCreateProcess's block keeps its 8-byte fields, handles
+sign-extended). The compiler's runtime symbols (`memcpy`, `__aulldiv`,
+`__chkstk`) come from ntrt's x86 runtime, not from ntdll as on x64: a
+raw-dylib import does not define the symbol the compiler calls on x86.
+Its x86 answers: GetSystemInfo PROCESSOR_ARCHITECTURE_INTEL with the
+process's range (wow64.dll's SystemBasicInformation), GetNativeSystemInfo
+AMD64, GetSystemDirectory SysWOW64. Done too: the 32-bit msvcrt
+(`user/msvcrt` built for i686, "msvcrt": the `va_list` slots, the cdecl
+variadic entry points, the x86 jump buffer and SEH unwinding of
+longjmp, the x87 control word, FILE/lconv/STARTUPINFO with 4-byte
+pointers, the 32-bit time_t). Done too: the 32-bit advapi32 and the
+bcryptprimitives it imports (`user/advapi32` and `user/bcryptprimitives`
+built for i686): the predefined HKEYs are 32-bit values there (no
+sign-extended form to fold), its structures with pointers are typed in
+`layout.rs` (SID_AND_ATTRIBUTES, TOKEN_GROUPS whose array starts at 4,
+the absolute SECURITY_DESCRIPTOR of 20 bytes, SECURITY_ATTRIBUTES,
+TRUSTEE_W, EXPLICIT_ACCESS_W; the LSA mapping inputs in `policy.rs`); a
+self-relative descriptor's offsets, SIDs, ACLs and ACEs are alike in
+both; TEB.ActivityId at fs:0xf50; RDRAND/RDSEED fill 32-bit words. The
+32-bit ntdll's descriptor functions take the absolute form's pointers at
+its own width. Done too: the 32-bit user32 and gdi32 (`user/user32`,
+`user/gdi32` built for i686, with gala_heap): user32 calls window
+procedures directly in user mode (no kernel callbacks), so a 32-bit
+window procedure is just stdcall; its structures with pointers
+(MSG, WNDCLASSEXW, CREATESTRUCTW, PAINTSTRUCT) are `repr(C)` with
+pointer-sized fields; the records it hands the kernel (window
+information, send requests, input events) are fixed-width little-endian
+bytes alike for both, so wow64.dll passes them through, and an HWND,
+WPARAM or LPARAM it passes as a u64 takes two words (`Hi`); gala's own
+messages pack their values to fit a 32-bit WPARAM (GALA_WM_PLACE). Built
+for i686 too, for what an x86 Inno Setup installer (Delphi's VCL) loads:
+comctl32 (its message structures with pointers, HDITEMW, LVCOLUMNW,
+LVFINDINFOW, TBBUTTON, TBBUTTONINFOW, TOOLINFOW, MSG, WINDOWPOS,
+HDLAYOUT, typed in `layout.rs` and read field by field with `get!`/
+`set!`, as a caller's older, shorter version may be all there is;
+TVINSERTSTRUCTW and TVHITTESTINFO in `treeview.rs`), oleaut32 (a VARIANT
+of 16 bytes on x86, 24 on x64: its union is 8 bytes or two pointers),
+ole32 (TEB.ReservedForOle at fs:[0x18] + 0xf80; an HSTRING's header fits
+the caller's 20-byte HSTRING_HEADER), shlwapi (QITAB typed), shell32
+(its ShellLink class registered in `Classes\WOW6432Node` too), version,
+mpr, comdlg32, uxtheme, imm32, dwmapi, msimg32, msctf, winspool,
+wtsapi32, shfolder, bcrypt (its padding infos typed), winhttp, secur32
+(its handle tags the low half on x86) and ws2_32 (WSADATA, whose fields
+come in another order on x86, ADDRINFO and ADDRINFOEX typed in
+`layout.rs`; its AFD requests in the caller's layout, `afd_abi`'s, which
+the kernel reads as such: `wow64_sock_test`). user32 and gdi32's structures with pointers are
+typed for both too: WNDCLASSW (GetClassInfoW), CURSORINFO, FLASHWINFO,
+HIGHCONTRAST's size, BITMAP (CreateBitmapIndirect), and GetObjectW's
+LOGBRUSH, BITMAP and DIBSECTION sizes by pointer size; WM_COPYDATA's
+COPYDATASTRUCT crosses between processes in one wire form (the x64
+layout, written field by field), so 32-bit and 64-bit windows exchange
+it. The 32-bit ntdll exports the MSVC 64-bit arithmetic helpers that
+compiled programs import from it (`_allmul`, `_alldiv`, `_allrem`,
+`_aulldiv`, `_aullrem`, `_alldvrm`, `_aulldvrm`, `_allshl`, `_allshr`,
+`_aullshr`: `x86.rs`). Inno Setup 6.5.4's x86 installer installs on
+these (`wow64_inno`). To come, as programs need them: kernelbase,
+crypt32 and the rest (ROADMAP WOW).
+
+The 32-bit stubs pop the bytes their own declaration names (stdcall
+`ret N`), and wow64.dll's table converts one entry per 4-byte word:
+a DLL declaring a stub's function with another argument size (a 4-byte
+handle where the stub says u64) moves its caller's stack pointer on
+every call and corrupts the caller's locals far from the cause, and a
+table row of another length reads the wrong words. `cargo xtask
+stub-audit` (run by `cargo xtask test`) checks both from the sources.
+Arch-specific code moves behind `cfg(target_arch)`;
+`extern "system"` is stdcall there, which Windows' exports are, and
+exports keep their undecorated names (naked functions too; `/EXPORT:`
+for `global_asm!` symbols); imports from them are `raw-dylib` with
+`import_name_type = "undecorated"`. xtask builds `USER_DLLS_X86` and
+`USER_PROGRAMS_X86` with the i686 target; a scenario ships a 32-bit DLL
+as `x86/<file>` in EXTRA_MODULES (under `boot/x86` on the ISO, its name
+being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
+(`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`,
+`testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
+`testuser32_32.dll`, `testgdi32_32.dll`, `testcomctl3232.dll` and the
+rest of the Inno set as `test<name>32.dll`; test DLLs
+under their own names: `testdll32.dll`).
+
+### Redirection, the 32-bit environment and the answers
+
+- **File system** (`redirect.rs`): in wow64.dll's file thunks
+  (NtCreateFile, NtOpenFile, NtQueryAttributesFile: the names of their
+  OBJECT_ATTRIBUTES, full NT paths `\??\<windir>\...` without a
+  RootDirectory, any case), as on Windows: `%windir%\System32` becomes
+  `SysWOW64` for 32-bit callers except the documented exemptions
+  (catroot, catroot2, drivers\etc, driverstore, logfiles, spool),
+  `Sysnative` names the real System32 and `%windir%\regedit.exe` is
+  SysWOW64's (`%windir%` from KUSER_SHARED_DATA.NtSystemRoot). The
+  per-thread flag is where Windows keeps it, TEB64.TlsSlots[8]
+  (WOW64_TLS_FILESYSREDIR); 32-bit code cannot reach the 64-bit TEB
+  (above 4 GiB), so the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex)
+  sets it through `GalaWow64FsRedirection` (0x7ffe), a service of
+  wow64.dll's own (no kernel service has the number). The image path of
+  GalaCreateProcess is redirected too (the image is a file the caller
+  opens: a 32-bit program starting `System32\x.exe` gets
+  `SysWOW64\x.exe`, `Sysnative\x.exe` the 64-bit one), pointed for the
+  call at wow64.dll's rewritten copy and put back after.
+  Where: below the Win32 layer, as Microsoft documents it (the
+  redirector is WOW64's, under every API that opens a file, not
+  kernel32's), and in wow64.dll rather than the kernel's path
+  resolution: the switch is per thread and set from user mode, the
+  rewrite is string work on the name the caller passed, and the
+  kernel's namespace and its 64-bit callers stay unaware of it (one
+  path resolution for everything; a 64-bit process's opens never pay
+  for it). So the 32-bit kernel32 above it names System32 as Windows'
+  does: GetSystemDirectory is `C:\Windows\system32` (Windows 11 25H2:
+  "C:\WINDOWS\system32"), and code that must reach a native program
+  names Sysnative (kernel32's pseudo console host, conhost.exe). Not
+  redirected yet: names relative to a RootDirectory handle (wow64.dll
+  would need the handle's full name).
+- **Registry**: the 32-bit view (`HKLM\Software\Wow6432Node` and the
+  other redirected keys of "Registry Keys Affected by WOW64", shared keys
+  left alone) in the kernel's registry, chosen per open by the caller (a
+  WOW64 process) and the access mask (KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+  which 64-bit programs pass too): the kernel resolves key paths,
+  including opens relative to a handle, where a user-mode rewrite of
+  names would not see the full path ("Registry", "The 32-bit view").
+- **Answers**: IsWow64GuestMachineSupported: x86 only; IsWow64Process
+  and IsWow64Process2 (I386 for a WOW64 process, UNKNOWN for a native
+  one, AMD64 native) from ProcessWow64Information;
+  GetSystemWow64Directory(W/A): `<Windows>\SysWOW64`; the 32-bit
+  environment ("A 32-bit process"). The 32-bit kernel32's:
+  GetSystemInfo reports PROCESSOR_ARCHITECTURE_INTEL (PROCESSOR_INTEL_PENTIUM)
+  and the 2/4 GiB application range, GetNativeSystemInfo AMD64 with the
+  same range, GetSystemDirectory System32 (redirected below it),
+  GetSystemWow64Directory SysWOW64; Wow64DisableWow64FsRedirection,
+  Wow64RevertWow64FsRedirection and Wow64EnableWow64FsRedirection call
+  the 32-bit ntdll's RtlWow64EnableFsRedirection(Ex).
+- **Exceptions** (`dispatch.rs`, `seh_x86.rs`): an exception in 32-bit
+  code (a CS 0x23 trap frame) goes to wow64.dll's dispatcher in 64-bit
+  code: `deliver_to_user` pushes the x64 CONTEXT (marked CS 0x23, the
+  32-bit registers zero-extended) and EXCEPTION_RECORD on the thread's
+  64-bit stack (its top, the CPU area's STACK64: a thread in 32-bit code
+  has no 64-bit frames) and makes the trap frame return to 64-bit code
+  (CS 0x33, SS 0x2b) at `GalaWow64Exception`, if the CPU area names a
+  32-bit dispatcher (else the exception ends the process, as before).
+  wow64.dll converts both to the x86 forms, puts them on the 32-bit
+  stack below the faulting esp with [record*, context*] at the new esp,
+  and enters the 32-bit KiUserExceptionDispatcher (the 64-bit frames are
+  left behind; the next transition starts at the stack's top again).
+  The 32-bit ntdll dispatches as the documented x86 SEH model has it:
+  the vectored handlers, then each EXCEPTION_REGISTRATION_RECORD of the
+  fs:[0] chain (on the stack, aligned; otherwise
+  EXCEPTION_STACK_INVALID), `handler(record, frame, context,
+  dispatcher_context)` until one continues execution (a noncontinuable
+  one then raises STATUS_NONCONTINUABLE_EXCEPTION); the continue
+  handlers; unhandled: GalaUnhandledException (wow64.dll converts the
+  x86 record and context into the x64 ones with CS 0x23: the crash
+  report's 32-bit registers), the top-level filter, the process ends.
+  RtlUnwind calls the handlers of the frames above the target with
+  EXCEPTION_UNWINDING (EXIT_UNWIND without one), unlinks them and
+  returns to its caller with ReturnValue; RtlRaiseException dispatches
+  from its caller's context (ExceptionAddress: the return address); both
+  and RtlCaptureContext are naked functions capturing the caller's
+  registers. Not yet: nested exceptions (EXCEPTION_NESTED_CALL),
+  collided unwinds, SafeSEH tables.
+- **APCs**: a 32-bit APC routine (NtQueueApcThread's, an I/O or timer
+  APC's) is queued as wow64.dll's marker with the routine and its
+  context packed in NormalContext. The kernel runs user APCs of a WOW64
+  process at `GalaWow64Apc` (the process's APC dispatcher), always in
+  wow64.dll's code (an alertable wait, NtContinue's TestAlert); it puts
+  the x86 CONTEXT of the 32-bit caller (the CPU area's; eax
+  STATUS_USER_APC, the wait's status, unless it came from NtContinue's
+  TestAlert, `gala_wow64_test_alert`, whose context resumes as it is)
+  and [routine, context, argument 1, argument 2, CONTEXT*] on the
+  32-bit stack and enters the 32-bit KiUserApcDispatcher, which calls
+  the routine (stdcall) and NtContinues with TestAlert: the next APC,
+  or the caller resumes. NtContinue's TestAlert in wow64.dll is an
+  alertable zero wait after taking the new context.
+- **Contexts**: ThreadWow64Context (Wow64Get/SetThreadContext, for
+  64-bit debuggers) would read and write what wow64.dll's
+  NtGet/SetContextThread do: the CPU area, or the 32-bit registers of a
+  thread stopped in 32-bit code.
+
+### Observability
+
+- The process start line and event say a process is 32-bit:
+  `process x.exe (pid N, session S): starting at 0x..., personality nt,
+  32-bit x86 (WOW64)`, `"machine":"x86"` (`"x64"` otherwise) in
+  `process start`; `thread create` carries `"teb32"`.
+- `wow64: using ...wow64.dll, GalaWow64Start at rva ..., GalaWow64Transition
+  at rva ..., GalaWow64Exception at rva ..., GalaWow64Apc at rva ...`
+  once, `ntdll: using \Windows\SysWOW64\ntdll.dll, LdrInitializeThunk at
+  rva ...` (or why it is not usable: not a PE32 image, no
+  LdrInitializeThunk); `wow64: <name> (pid N): cannot free an exited
+  thread's 64-bit stack|TEB32 at ...` if freeing fails; a missing or
+  unusable wow64.dll, a 32-bit program with imports and no 32-bit ntdll
+  (`wow64: <name> imports DLLs, and there is no ... to bind them`) and a
+  platform that cannot run 32-bit code (gala-um) each have their line;
+  a DLL the 32-bit loader cannot find is in the ledger (`<name> missing
+  dll`), as for 64-bit programs.
+- An exception or APC wow64.dll cannot hand to 32-bit code is in the
+  ledger (`wow64.dll!exception (32-bit stack full)`, `wow64.dll!APC (no
+  32-bit ntdll|32-bit stack full|64-bit routine)`); an exception no
+  32-bit handler takes leaves the crash report with the 32-bit
+  registers (`wow64_seh_crash`) and the ledger's `ntdll.dll!unhandled
+  exception`.
+- Crash reports of an exception in 32-bit code (CS 0x23) say `32-bit
+  x86 (WOW64)` and show eax..esp, eip and the 4-byte stack words
+  (`[esp+0x..]`); the thread dump shows, for a WOW64 thread in a system
+  call, the 32-bit caller's registers from its CPU area (`called from
+  32-bit code: eip=...`); the NMI state dump marks a CPU in 32-bit code
+  `user 32-bit`.
+- Every service or class wow64.dll cannot convert is in the ledger.
+- A bug in wow64.dll (an exception outside the fault-safe copy) ends the
+  process with a crash report of wow64.dll's own registers
+  (`at 0x... (wow64.dll+0x...)`).
+- The 32-bit tests name a failing check's source line (`(line 0x...)
+  wow64_test: check N failed, got ...`).
+
+### Limits (now)
+
+- The 32-bit ntdll is the only 32-bit system DLL: programs that import
+  kernel32 or others do not start yet (the ledger names the DLL).
+- Without a 32-bit ntdll an exception in 32-bit code ends the process
+  (with its crash report) and 32-bit APCs are dropped (in the ledger).
+- Not converted yet (the ledger names them): the job information
+  classes, the pseudo console's services, CONTEXT_FLOATING_POINT on
+  NtSetContextThread. gala has no
+  NtCreateThreadEx (kernel32 uses NtCreateThread).
+- A kernel handover refuses a WOW64 process ("32-bit code (WOW64)").
+- gala-um cannot run 32-bit code (the segments are the host kernel's).
+
 ## Plan: sessions and remote shasha
 
 One design covers remote shell access, a remote graphical desktop
@@ -6203,9 +7602,8 @@ What this builds on:
   GalaDesktopAction); every shell action is a named `Action` through
   `Desktop::act`; the only hardware seams are `platform::Display` and the
   PS/2 input thread; the window state is `nt::winstate`, apart from the
-  compositor, and `kernel/src/nt/desktop_off.rs` (the server kernel's
-  `Shell`: that state with no compositor) shows the compositor can be
-  left out.
+  compositor, which a bare desktop (`Desktop::bare`) does not run:
+  the seam a user-mode compositor (ROADMAP SH) takes over.
 
 ### Sessions and named objects (B1)
 
@@ -6283,7 +7681,7 @@ while another session's is taken:
 |---|---|---|
 | `windows` | `window::Windows` | the window registry: windows, message queues, posted and sent messages, listeners, UIPI filters |
 | `hooks` | `winevent::Hooks` | SetWinEventHook's hooks and waiting events |
-| `shell` | `desktop::Shell` | the desktop's window state (`nt::winstate`) and, in the desktop kernel, shasha's compositor and its presenter (`desktop_off::Shell`: the window state alone, in the server kernel) |
+| `shell` | `desktop::Shell` | the desktop's window state (`nt::winstate`), shasha's compositor and its presenter (a bare desktop: the window state alone) |
 
 - HWNDs come from one global counter (`window::NEXT_HWND`), so a value
   is never reused across sessions.
@@ -6425,22 +7823,22 @@ same program as SYSTEM).
 `desktop/tests.rs`), `kernel/src/nt/session_calls.rs` (GalaSession),
 `nt::session::active_console` (the session the console shows). Test
 programs: `user/presenter_test` (scenario `presenter_test`, with a
-screen check of the console switch; its `server` mode, scenario
-`server_windows`, on the server kernel) and gui_test on a headless
+screen check of the console switch; its `server` mode, scenarios
+`noscreen_windows` and `server_profile_windows`) and gui_test on a headless
 desktop (scenario `gui_test_headless`); host tests of the window state
 alone in `winstate/tests.rs`.
 
-- **Window state apart from composition** (`nt::winstate::State`, in
-  both kernels): a session's desktop (its windows, Z order, focus,
+- **Window state apart from composition** (`nt::winstate::State`): a
+  session's desktop (its windows, Z order, focus,
   capture, each window's client pixels, input for programs) is kept
   whether or not anything shows it. Composition is the presenter's
-  business: the compositor (`nt::desktop::Desktop`, the shasha kernel's)
-  holds the state and draws it; `redraw` composes a damaged area only
+  business: the compositor (`nt::desktop::Desktop`, shasha's) holds the
+  state and draws it; `redraw` composes a damaged area only
   while a presenter shows the desktop, and hands it the rows
   (`write_row`) and the area (`flush`). With none, damage is dropped;
-  attaching one draws the desktop whole. The server kernel holds the
-  same state with no compositor: its desktops are shown by none, always
-  ("Server and desktop workloads").
+  attaching one draws the desktop whole. A bare desktop is that state
+  with no composition at all: shown by none, always ("Server and desktop
+  workloads").
 - **Presenters** (`Presenter`), one per desktop:
   - **Console**: the screen through `platform::Display`, on a machine
     with a screen; at most one desktop has it, the one the console
@@ -6456,10 +7854,10 @@ alone in `winstate/tests.rs`.
   out at its presenter's size, else DEFAULT_SIZE (1280 x 800: QEMU's
   default UEFI mode, which user32 also assumes without screen
   information; gala's choice for a desktop nothing shows), the clock
-  set, drawn whole. Desktops exist where the machine has a screen or the
-  boot option `presenter=` asks for a headless one, never in the server
-  profile; without either, GUI calls are STATUS_NOT_SUPPORTED as on a
-  machine without a screen.
+  set, drawn whole. Where nothing can show desktops (the server profile;
+  no screen and no `presenter=`) it is bare instead: the window state
+  alone at DEFAULT_SIZE, shown by none for good ("Server and desktop
+  workloads").
 - **`presenter=test|none`**: the console session's desktop is shown by
   a Test frame of DEFAULT_SIZE or by nothing, with or without a screen;
   the PS/2 keyboard and mouse still go to it (`platform::local_input`).
@@ -6505,8 +7903,8 @@ alone in `winstate/tests.rs`.
   presenter shows.
 - **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
   another session's pixels are its users'; STATUS_NOT_FOUND for a
-  session that does not exist; STATUS_NOT_SUPPORTED where there are no
-  desktops; the server kernel's answers are in "Server and desktop
+  session that does not exist; a bare desktop's answers are in "Server
+  and desktop
   workloads", tested by presenter_test's `server` mode):
   - SESSION_QUERY (0): what shows the desktop (0 none, 1 console, 2
     test), whether it is live, its size, its windows; nothing is made
@@ -6537,13 +7935,17 @@ alone in `winstate/tests.rs`.
   (1280x800; was session 1, which keeps its 1 windows shown by none)`
   (a failed one a warning: `the console could not move ...; it stays`);
   refused injected input is logged (the first 8, with the status);
-  `desktop: no screen and no presenter= (...)` once on a machine without
-  desktops. Events (category `window`): `"ev":"presenter"` with `"op":
-  "live"` and `"attach"` (session, presenter, was, size), `"console"`
+  a bare desktop going live: `desktop: session 1 keeps its windows
+  (1280x800), shown by none (no screen and no presenter=)` (or `(server
+  profile)`), a refused presenter there `desktop: session 2 cannot be
+  shown by test: server profile`. Events (category `window`): `"ev":"presenter"` with `"op":
+  "live"` (a bare desktop's with `"bare"`: why nothing shows it) and
+  `"attach"` (session, presenter, was, size), `"console"`
   (session, from: the session it left or -1, was: what showed the
   target, kept: the windows the left desktop keeps, size). The state
   dump's sessions part says which session the console shows and per
-  session whether its desktop is live and what shows it. A failed headless screen check leaves its frames as
+  session whether its desktop is live and what shows it (a bare one:
+  `never shown: <why>`). A failed headless screen check leaves its frames as
   `test-<scenario>.screen<n>.png` and quotes the monitor's reply to
   `memsave`.
 - **Limits**: no remote presenter (B3b); no console switch without a
@@ -6552,8 +7954,8 @@ alone in `winstate/tests.rs`.
   and no keys released by WM_KEYUP when the console leaves; `gala
   attach` needs SeTcbPrivilege until B4 checks who may attach where; a
   kernel handover puts the console back on session 1 (B5); gala-um takes
-  no `presenter=` (its sessions have no desktops); frames are read, not
-  recorded over time.
+  no `presenter=` (its sessions' desktops are bare, shown by none);
+  frames are read, not recorded over time.
 
 ### Target design (B3-B5)
 
@@ -6569,12 +7971,12 @@ Numbering: 0 for services and SYSTEM (sshd and its logons are session 0
 on Windows too), 1 for the local console, 2+ for remote logons.
 
 1. **Window state apart from composition** (gala's own addition; B3a;
-   built: `nt::winstate` in both kernels, "Presenters (B3a)", "Server and
-   desktop workloads"): the desktop's window state and each window's
-   last pixels are kept in every kernel; the compositor (frames, taskbar, start menu, wallpaper,
-   fonts) is a presenter. So the server kernel (no `shasha` feature,
-   ROADMAP SD) can serve GUI programs to a remote shasha client without a
-   compositor of its own, and a desktop with no presenter keeps its
+   built: `nt::winstate`, "Presenters (B3a)", "Server and desktop
+   workloads"): the desktop's window state and each window's last pixels
+   are kept whether or not anything shows them; the compositor (frames,
+   taskbar, start menu, wallpaper, fonts) is a presenter. So a server
+   (`profile=server`, ROADMAP SD) can serve GUI programs to a remote
+   shasha client without composing anything itself, and a desktop with no presenter keeps its
    windows alive (RDP-style disconnect and resume).
 2. **Presenters** (B3a; Console, None and Test and the console switch
    are built, "Presenters (B3a)"), at most one per desktop at a time:
@@ -6703,7 +8105,7 @@ Design rules:
 | 1. Terminal core | planned |
 | 2. Per-process system-call dispatch | built |
 | 3. Core process vs NT process | built (the `Core` still lives in `nt`) |
-| 4. File-system metadata | planned |
+| 4. File-system metadata | built for Linux (NT surface planned) |
 | 5. Shared objects | planned |
 | 6. `net` free of `nt` | built |
 
@@ -6765,14 +8167,19 @@ Design rules:
    TODO (LX): `Core` still lives in `nt::process` and uses NT types (the
    token, ObjectRef threads); moving it out of `nt` comes with seam 5's
    core objects.
-4. **File-system metadata**, while persistence is young: a
-   per-directory case-sensitivity flag exposed to NT as Windows'
-   FileCaseSensitiveInformation (testable against Windows 10 1803+); a
-   persisted slot for POSIX metadata per file (uid, gid, mode, device
-   numbers; NT ignores it); symlinks, hard links and POSIX delete/rename
-   of open files, with FILE_DISPOSITION_POSIX_SEMANTICS and
-   FILE_RENAME_POSIX_SEMANTICS as the NT-side surface (testable on real
-   Windows).
+4. **File-system metadata** (ramfs, "Files"; fs_test, `lx_fs`): a
+   per-directory case-sensitivity flag (set on every directory Linux
+   makes, inherited by NT's, honoured for both personalities as Windows
+   honours its flag); the POSIX mode per node, kept by the change log
+   (record version 3; uid/gid and device numbers not yet: one user);
+   symbolic links (followed by `lx::file`, a reparse point NT does not
+   follow); hard links; POSIX unlink of open files (the name goes at
+   once, the node lives on detached). Still planned, each testable on
+   real Windows: FileCaseSensitiveInformation to query and set the flag
+   from NT, FILE_DISPOSITION_POSIX_SEMANTICS and
+   FILE_RENAME_POSIX_SEMANTICS (NT's surface for the same unlink and
+   rename), CreateHardLinkW (FileLinkInformation) and NT symbolic links
+   (CreateSymbolicLinkW).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
 6. **`net` free of `nt`**: `kernel/src/net/` reaches threads, waits and
@@ -6793,7 +8200,7 @@ calls; priorities come from `strace` of target programs on real Linux.
 | Milestone | Scope | State |
 |---|---|---|
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
-| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run (`lx_busybox`); threads, futex and musl's pthreads run (`lx_thread`) |
+| 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run, by name through symbolic links (`lx_busybox`); links, unlink of open files, case-sensitive directories (`lx_fs`); threads, futex and musl's pthreads run (`lx_thread`) |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
 | 4 | dynamic linking (ld.so, glibc), epoll, sockets | TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
@@ -6802,13 +8209,14 @@ Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
 mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_hello`, `lx_write_exit`, `lx_brk`, `lx_mmap`, `lx_arch_prctl`,
 `lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
-exec_test, socket_test, thread_test, poll_test and epoll_test
+exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
-`lx_epoll`, each also `_pie`), and clock_test, fork_test, fs_test,
+`lx_epoll`, `lx_fs`, each also `_pie`), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
 static busybox from busybox.net (a `PREBUILT`) runs our scripts in
-`user/lx/busybox/` (`lx_busybox`: the shell and coreutils-style applets;
+`user/lx/busybox/` (`lx_busybox`: the shell and coreutils-style applets,
+called by their own names through symbolic links to busybox;
 `lx_httpd`: httpd and wget over loopback).
 
 ### The lx module
@@ -6968,40 +8376,60 @@ The running parts (milestone 1; `lxrun=`):
   a buffer fault before anything was written is EFAULT). readv reads
   into one vector after another while each fills. Anything else:
   `errno::to_return(ENOSYS)`.
-- **Files** (`lx::file`; fileio_test, fs_test the fuller spec): Linux
-  paths walked on the shared ramfs (`/` separators, `.` and `..` by the
-  walk, ENOTDIR/ENOENT on the way, a trailing slash makes the last a
-  directory, UTF-8 names of up to 255 bytes: other bytes or a `\` are
-  EINVAL, ledgered; names compare case-insensitively as the file
-  system's: seam 4). An open registers with the file system sharing
+- **Files** (`lx::file`; fileio_test and fs_test, `lx_fileio`,
+  `lx_fs`): Linux paths walked on the shared ramfs (`/` separators, `.`
+  and `..` by the walk, ENOTDIR/ENOENT on the way, a trailing slash makes
+  the last a directory, UTF-8 names of up to 255 bytes: other bytes or a
+  `\` are EINVAL, ledgered). Symbolic links are followed in the middle
+  of a path and at its end unless the call says not to (lstat,
+  O_NOFOLLOW, AT_SYMLINK_NOFOLLOW, linkat without AT_SYMLINK_FOLLOW,
+  unlink, rename, mkdir, symlink, readlink; O_CREAT|O_EXCL), a trailing
+  slash following one too; a target is spliced into the components left
+  and walked from the link's directory (or the root), at most 40 links
+  per walk (ELOOP, path_resolution(7)). Names compare as their
+  directory's: exactly in a directory a Linux program made, otherwise
+  case-insensitively (the boot's `/lx`, NT's directories; ramfs
+  "Files"). An open registers with the file system sharing
   everything and keeps the offset in the description (dup'ed and
   inherited fds share it; its lock is never held across user memory).
   The calls: open/openat/creat (O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
-  O_DIRECTORY, O_PATH, O_CLOEXEC, O_NONBLOCK; O_TMPFILE EOPNOTSUPP), read,
+  O_DIRECTORY, O_PATH, O_CLOEXEC, O_NONBLOCK, O_NOFOLLOW: a link at the
+  end is ELOOP, or ENOTDIR with O_DIRECTORY, and opens as itself with
+  O_PATH; O_TMPFILE EOPNOTSUPP), read,
   write, pread64/pwrite64, readv/writev, lseek (SEEK_DATA/HOLE: one hole
   at the end; a directory only back to an offset getdents64 gave),
   ftruncate/truncate, fsync/fdatasync, the stat family (stat, lstat,
-  fstat, newfstatat with AT_EMPTY_PATH), getdents64 (`.` and `..` first,
-  then the entries in the file system's order; it goes on after the last
-  name it returned, so `rm -r` deleting between calls skips nothing;
-  d_ino the node + 1, d_off the entry's index + 1), mkdir/mkdirat,
-  unlink/unlinkat/rmdir, rename/renameat/renameat2 (RENAME_NOREPLACE;
-  an empty directory replaced; into itself EINVAL), access/faccessat/
+  fstat, newfstatat with AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW, statx
+  with STATX_BASIC_STATS whatever the mask asks, a reserved mask bit
+  EINVAL), getdents64 (`.` and `..` first,
+  then every name, hard links included, in the file system's order; it
+  goes on after the last name it returned, so `rm -r` deleting between
+  calls skips nothing; d_ino the node + 1, d_off the entry's index + 1;
+  DT_LNK for a link), mkdir/mkdirat,
+  unlink/unlinkat/rmdir (the name goes at once: `ramfs::RamFs::unlink`;
+  an open file lives on with nlink 0, its name free for a new file),
+  rename/renameat/renameat2 (RENAME_NOREPLACE, RENAME_EXCHANGE; an
+  existing target, open or not, replaced the same way; an empty
+  directory replaced; into itself EINVAL; two names of one file: a
+  no-op), link/linkat (AT_SYMLINK_FOLLOW; a directory EPERM;
+  AT_EMPTY_PATH ledgered, EINVAL), symlink/symlinkat (the target kept as
+  given; empty ENOENT), readlink/readlinkat (cut to the buffer, no NUL;
+  EINVAL for what is not a link), access/faccessat/
   faccessat2 (the owner's bits: every file is uid 1000's),
-  chdir/fchdir/getcwd, readlink (EINVAL: no symlinks yet),
-  chmod/fchmod/fchmodat, chown and friends (to the ids it has, else
-  EPERM), umask, utimensat/utimes/futimesat (UTIME_NOW, UTIME_OMIT; to
-  the 100 ns the file system keeps), sendfile. Metadata: the type from the node, the
-  permission bits the node's POSIX mode (`ramfs::Node::mode`, set at
-  creation from the mode and umask, or by chmod; not in the change log
-  yet), else 0755 (0555 for a read-only file); nlink 1 for a file, 2 +
-  subdirectories for a directory; atime the access time, mtime and ctime
-  the write time. Unlink and
-  rmdir mark the node delete-pending and close a delete open: an open
-  node stays until its last close, its name taken meanwhile (Linux frees
-  it at once; ledgered). Character devices by exact path (no /dev
-  directory yet): /dev/null, zero, full, random, urandom; /dev/tty is
-  ENXIO (no controlling terminal).
+  chdir/fchdir/getcwd, chmod/fchmod/fchmodat, chown and friends (to the
+  ids it has, else EPERM), umask, utimensat/utimes/futimesat (UTIME_NOW,
+  UTIME_OMIT; to the 100 ns the file system keeps), sendfile. Metadata:
+  the type from the node, the permission bits the node's POSIX mode
+  (`ramfs::Node::mode`, set at creation from the mode and umask, or by
+  chmod; kept across reboots by the change log), else 0755 (0555 for a
+  read-only file), 0777 for a link; nlink the node's names (0 once
+  unlinked while open), 2 + subdirectories for a directory; a link's
+  size its target's length; atime the access time, mtime and ctime the
+  write time. An NT program's open that does not share delete access
+  refuses an unlink or a replacing rename (EBUSY, ledgered), as does a
+  name NT's delete keeps until its last close. Character devices by
+  exact path (no /dev directory yet): /dev/null, zero, full, random,
+  urandom; /dev/tty is ENXIO (no controlling terminal).
 - **vfork** (and clone(CLONE_VM|CLONE_VFORK), posix_spawn's): a fork
   whose parent then waits until the child execs or ends (`state::Vfork`,
   woken by `release_vfork`); the child's memory is a copy, not shared
@@ -7243,8 +8671,8 @@ The running parts (milestone 1; `lxrun=`):
   `linux clone flags missing` (and vfork's CLONE_VM, unsupported thread
   flag sets), `linux signal action missing`
   (Stop), `linux signal option missing` (SA_ONSTACK), `linux option
-  missing` (wait4's and kill's process groups, open flags, unlink of an
-  open file, a rename onto an open file, names the file system cannot
+  missing` (wait4's and kill's process groups, open flags, an unlink or
+  rename an NT program's open refuses, names the file system cannot
   hold, socket families and types, socket options, CPU-time clocks and
   timers, a script as interpreter, futex ops not supported, an execve
   with other threads running), `linux syscall stub` (ioctl,
@@ -7274,9 +8702,8 @@ The running parts (milestone 1; `lxrun=`):
   sharing its parent's memory; execve ending the other threads first;
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
-  ITIMER_VIRTUAL/PROF, rusage); symlinks, hard links, POSIX unlink of an
-  open file, case-sensitive names and POSIX metadata in the change log
-  (seam 4: fs_test is the spec); a /dev
+  ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
+  (seam 4's rest; one user so far); a /dev
   directory and /proc; datagram and Unix sockets; process groups
   and sessions; a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
@@ -7582,7 +9009,7 @@ video.
 
 ### virtio-gpu 2D
 
-The first GPU driver (G1). Code: `kernel/src/arch/x86_64/virtio.rs`
+The first GPU driver (G1). Code: `kernel/src/arch/virtio.rs`
 (`ModernDevice`), `kernel/src/display/` (`mod.rs`, `pci.rs`,
 `virtio_gpu/{mod,proto,tests}.rs`).
 
@@ -7679,7 +9106,9 @@ write such tests: WORKFLOW "FlaUI".
   CreateInstance (vtable index 3). ThreadingModel is ignored (no
   marshaling: every object is used on the caller's thread).
   Out-of-process contexts and unregistered classes give
-  REGDB_E_CLASSNOTREG (recorded in the ledger).
+  REGDB_E_CLASSNOTREG (recorded in the ledger). ProgIDFromCLSID reads
+  the class's `ProgID` subkey the same way (REGDB_E_CLASSNOTREG, a null
+  output, without one).
 - The registry seed registers CUIAutomation
   ({ff48dba4-60ef-4201-aa87-54103eef594e}) and CUIAutomation8
   ({e22ad333-b25f-460c-83d0-0581107395c9}) as
@@ -8054,8 +9483,87 @@ ignored.
 - Provider API: UiaClientsAreListening is FALSE;
   UiaRaiseAutomationEvent / ...PropertyChangedEvent /
   ...StructureChangedEvent / UiaDisconnect(All)Provider(s) succeed doing
-  nothing; UiaReturnRawElementProvider returns 0 (recorded);
-  UiaHostProviderFromHwnd is E_NOTIMPL.
+  nothing.
+- Providers inside programs (providers.rs). For a window node (not an
+  item, menu or grid part), every property read first sends the window
+  WM_GETOBJECT (wParam 0, lParam UiaRootObjectId -25), across processes
+  as any message. The window answers with
+  UiaReturnRawElementProvider(hwnd, wParam, lParam, its
+  IRawElementProviderSimple), which AddRefs the provider into a 32-slot
+  answer table of the window's process and returns a cookie
+  (1..=0xffff, counting; the slot is cookie mod 32); any other object id
+  gives 0, and an answer outside 1..=0xffff is recorded as
+  "WM_GETOBJECT(answer not ours)". The cookie is claimed once, by the
+  operation that uses it, which takes the reference out of the table; an
+  answer never claimed is released when its slot is reused.
+  - Operations: everything the client asks of a provider is an
+    operation that GalaUiaServe, in the provider's process, serves:
+    called directly when the window is the client's process's, else
+    through gala's GALA_UIA (0x03f3) sent to the window. wParam: the
+    property id (bits 0-15), the operation (16-23), a NavigateDirection
+    (24-31), a cookie or fragment handle (32-63; 64-bit processes only,
+    as 32-bit ones have no UIAutomationCore); lParam: a 4096-byte value
+    buffer that `foreign` marshals back, or 0. user32 there answers
+    GALA_UIA itself on the window's thread, as GALA_MENU, by calling
+    GalaUiaServe (found with GetModuleHandle: the process made the
+    cookie, so the DLL is loaded; without it, 0). Operations: the root's
+    property (cookie), the root's first child (cookie: QI
+    IRawElementProviderFragment, Navigate), a fragment's property, a
+    fragment's Navigate (a handle, -1 for a fragment root: the window's
+    element, 0 for none), whether a handle is alive, whether a
+    fragment has a pattern (GetPatternProvider, then QI for the pattern's
+    provider interface), Invoke (IInvokeProvider::Invoke), SetValue
+    (IValueProvider::SetValue; its text, NUL-terminated UTF-16 cut at
+    2047 characters (recorded), goes in the buffer: wParam's bit 31,
+    GALA_UIA_INPUT, makes `foreign` marshal the buffer in instead of
+    out). Invoke and SetValue give 1 for S_OK or the provider's failure
+    HRESULT; 0 (not served) becomes UIA_E_ELEMENTNOTAVAILABLE. A value
+    operation's
+    0 is recorded on the client ("GALA_UIA(not served)"), and the missing
+    answer in the provider's process.
+  - The value's wire form: vt (u16), reserved u16, a count (u32), the
+    value (u64: VT_I4, VT_BOOL, VT_R8), then from byte 16 a BSTR's
+    characters (2040 at most: longer ones are cut, recorded) or a VT_I4
+    or VT_R8 vector's elements. Other types (objects, other arrays) come
+    back VT_EMPTY (recorded in the provider's process).
+  - Fragments: a window whose provider is a fragment root has, after
+    its other children, the root's FirstChild and that fragment's
+    NextSiblings (4096 at most, recorded). A fragment is a node
+    (Node::fragment: the window and a handle) naming a slot of the
+    provider's process's 1024-slot fragment table, which holds one
+    reference to each fragment handed out; the handle is the slot (10
+    bits) and a generation (22 bits), so a handle whose slot was reused
+    (round robin) names nothing and its element is not available. A
+    fragment already in the table (same IUnknown identity, same window)
+    keeps its handle, so elements for one fragment are equal
+    (CompareElements compares nodes). A fragment's parent is Navigate's
+    Parent (a fragment root: the window), its children FirstChild and
+    the siblings. Its properties: the provider's GetPropertyValue (QI
+    IRawElementProviderSimple); RuntimeId from GetRuntimeId (after the
+    host's {42, window} when it starts with UiaAppendRuntimeId; {42,
+    window, handle} when it gives none); BoundingRectangle from
+    get_BoundingRectangle; what the provider leaves empty takes the
+    defaults of a provider-only element (its window's ProcessId,
+    ControlType Custom, enabled, a control and content element, empty
+    strings, no window handle). Patterns: the fragment's pattern objects,
+    Invoke and Value so far (Is*PatternAvailable asks the provider; the
+    client's Invoke and Value pattern objects call the operations above;
+    Value.Value and IsReadOnly come from IValueProvider's getters, served
+    as the fragment's properties 30045 and 30046).
+  A root provider's value wins over the window's; VT_EMPTY (or a failed
+  call) falls back to the window's own value, which is what the host
+  provider would give, so the provider's HostRawElementProvider is not
+  called. Conditions, searches and events read properties the same way,
+  so they see the provider's values. UiaHostProviderFromHwnd makes a
+  counted IRawElementProviderSimple (ProviderOptions_ClientSideProvider,
+  no patterns, no host) whose GetPropertyValue is the window's own value
+  (`element::window_property`, which skips the provider). Invariant: a
+  provider is asked afresh for every read (no cache), so one that
+  changes answers is seen at once; the price is a WM_GETOBJECT per read
+  of a window (and an operation per read when it has a provider), and
+  for a fragment one operation per property and per step of the tree
+  (a sibling is found from the parent's children list, so walking a
+  long list of fragments is quadratic).
 
 ### Programs driven through UI Automation
 
@@ -8077,6 +9585,19 @@ FlaUI's Application uses Process.Start (CreateProcessW), GetMainWindow
 across processes; .NET skips owned windows) and Process.CloseMainWindow
 (PostMessage WM_CLOSE across processes).
 
+**Chromium** (`chromium_uia`): the first program read through its own
+provider. Chromium's top-level window (Chrome_WidgetWin_1) answers
+WM_GETOBJECT with UiaRootObjectId through UiaReturnRawElementProvider
+(its fragment root, in the browser process), and builds its
+accessibility tree once a client asks: the page's elements are
+fragments under the window. The test finds window.html's link (an
+`<a>` with aria-label "gala link") by ControlType Hyperlink and Name
+about 80 s after the window shows under TCG, reads its
+BoundingRectangle (screen coordinates, inside the window) and invokes
+it through the fragment's IInvokeProvider; Chromium follows the link.
+Chromium also asks oleacc for CreateStdAccessibleObject (unsupported,
+recorded) and goes on.
+
 **FileZilla** (`filezilla_flaui`): wx's controls are plain Win32
 windows (Edit, Button, Static, SysListView32, ToolbarWindow32,
 msctls_statusbar32; panels and splitters are wxWindowNR panes whose
@@ -8095,9 +9616,15 @@ ledger has no UIAutomationCore lines.
 
 TODO (ROADMAP UIA):
 
-- providers inside programs (WM_GETOBJECT answered with
-  IRawElementProviderSimple via UiaReturnRawElementProvider, which wx
-  and Qt implement) are not consulted; UiaRaise* do nothing;
+- providers inside programs give properties (strings, integers,
+  booleans, doubles and their vectors across processes), their
+  fragment tree and their fragments' Invoke and Value patterns; not the
+  other patterns, nor a root provider's own patterns (the window's
+  element has the window's), focus
+  (GetFocus, SetFocus), ElementProviderFromPoint (ElementFromPoint
+  gives the window), embedded fragment roots or ProviderOptions;
+  provider elements raise no events; 32-bit processes have no
+  UIAutomationCore, so no providers; UiaRaise* do nothing;
 - events only through IUIAutomation's own Add*EventHandler;
   IUIAutomation3..6's handlers (text edit, changes, notification,
   handler groups, active text position), AutomationFocusChanged,
@@ -8228,7 +9755,8 @@ The private calls (gala's numbers, `kernel/src/nt/syscalls.rs` and
 - Marshaled: WM_SETTEXT's string in; WM_GETTEXT's buffer out (written
   straight into the sender's buffer); WM_COPYDATA (the 24-byte
   COPYDATASTRUCT and its cbData bytes in one block; the receiver points
-  lpData at its copy); GALA_MENU and GALA_SETWINDOWPOS. Other messages go
+  lpData at its copy); GALA_MENU, GALA_SETWINDOWPOS and GALA_UIA (its
+  4096-byte value buffer out). Other messages go
   as numbers. GetWindowText of another process's window returns the
   mirrored text, as documented (it does not send WM_GETTEXT across
   processes; programs send WM_GETTEXT themselves).
@@ -9180,8 +10708,9 @@ under TCG), never a reset. Host tests in `net::tcp`,
   delayed-ACK state.
 - **smoltcp** has no public way to set a socket's sequence numbers, so
   it is vendored (`vendor/smoltcp`, 0.12.0, `[patch.crates-io]`) with
-  one patch between `gala: begin` and `gala: end` markers
-  (THIRD_PARTY.md): `Socket::carried` (the state as plain values),
+  gala's additions between `gala: begin` and `gala: end` markers
+  (THIRD_PARTY.md; the other is `SocketSet`'s fallible growth, "The
+  stack"): `Socket::carried` (the state as plain values),
   `Socket::queued_bytes` (copies of the queues) and `Socket::restore` (a
   new, closed socket becomes the connection; refused if the buffers are
   smaller than the carried ones or the state is inconsistent).
@@ -9191,9 +10720,9 @@ under TCG), never a reset. Host tests in `net::tcp`,
 - **Kernel sockets** (`net::tcp::carry_entry`/`adopt_entry`): a bound
   socket (its address); a listener (its address, backlog, next sequence
   number, its accept queue with the sequence numbers already handed to
-  the program by WAIT_FOR_LISTEN, and its listening sockets that are not
-  plain LISTEN: half-open, or established while the backlog was full;
-  plain LISTEN sockets are made fresh); a connection (and whether its
+  the program by WAIT_FOR_LISTEN, and its connections being opened
+  (half-open); its listening sockets are made fresh, and an adopted
+  listener refuses when full, as AFD's do); a connection (and whether its
   connect completed). The stack's own state (`carry_stack`/
   `adopt_stack`): the card's address configuration (IP, prefix,
   gateway, MAC; gala's static configuration stands for a DHCP lease, and
@@ -9224,13 +10753,15 @@ under TCG), never a reset. Host tests in `net::tcp`,
   bytes come. Socket options gala's ws2_32 keeps are in the program's
   memory (carried as it is).
 - **Record**: NET (tag 34, version 1: a header entry, then the closing
-  connections) and SOCKETS (tag 35, version 2: per endpoint object a
+  connections) and SOCKETS (tag 35, version 3: per endpoint object a
   `SocketRec`, with the connections as CONNECTION entries carrying a
   role (the socket's own, READY with its sequence number, OPENING,
   LINGERING) and the pending requests as `RequestRec`s; version 2 adds
   UDP sockets and the datagram requests at the ends of their entries,
   must_read 2 only when the record holds a UDP socket,
-  `sockets::sockets_must_read`; version 1 reads with them absent). Both
+  `sockets::sockets_must_read`; version 1 reads with them absent;
+  version 3 appends the endpoint's `send_side`, must_read 3 only while a
+  shutdown's FIN waits for pending sends, read as open when absent). Both
   REQUIRED and written only when a program holds a socket
   (`version::Kind::when_present`): `agree` does not ask for them up
   front, the record as written is checked (`check_record`), so programs
@@ -9273,7 +10804,8 @@ format differs; every format change follows these rules. Code
   TIMERS 2) raises it to the new version. It may depend on the data:
   THREADS 3 needs a version-3 reader only when a thread's
   extended-state blob is not empty (`programs::threads_must_read`);
-  SOCKETS 2 only when a UDP socket is carried.
+  SOCKETS 2 only when a UDP socket is carried, SOCKETS 3 only when a
+  shutdown's FIN waits for pending sends.
 - **The note**: each kernel image carries its read facts in an ELF note
   (name "GALA", type 0x47410001, section `.gala_note` in a PT_NOTE
   segment, `boot::HANDOVER_NOTE`, built at compile time from `KINDS`):
@@ -9489,6 +11021,142 @@ the kernel and a minimal set stay in `limine.conf`, the rest checked by
 manifest), and how a developer's machine runs unsigned builds with
 Secure Boot (Secure Boot off, and a kernel built to accept unsigned
 images refuses to raise the rollback floor).
+
+### The update feed
+
+How releases reach machines (ROADMAP R8 step 4): static files in TUF's
+format (The Update Framework, specification 1.0) that any bucket, CDN or
+mirror serves without being trusted. The metadata code is `user/tuf`
+(safe, `no_std` with `alloc`, host-tested): xtask writes and checks
+feeds with it (`xtask/src/feed.rs`, `cargo xtask feed`), and gala's
+update client will check them with the same `Client`.
+
+- **Layout** (consistent snapshots: every version of a role is its own
+  file, so a mirror caught mid-upload never mixes two):
+  `<N>.root.json`, `<N>.targets.json`, `<N>.snapshot.json`,
+  `timestamp.json`, and the release's files under
+  `blobs/sha256/<hex digest>` (unchanged files are shared between
+  releases). Every file but `timestamp.json` is immutable once
+  published.
+- **Roles and keys** (Ed25519, key id = SHA-256 of the key object's
+  canonical JSON): root (3 keys, threshold 2; root N+1 must
+  carry a threshold of root N's root keys and of its own), targets (the
+  release key: each file's length and SHA-256, the release number and
+  rollback floor in `custom`), snapshot (the targets metadata's version,
+  length and hash), timestamp (the snapshot's). Expiry: root 90 days,
+  targets 30, snapshot 7, timestamp 1; `feed refresh` re-signs snapshot
+  and timestamp on a schedule (online keys), so a client can tell a
+  frozen feed (expired timestamp) from a quiet one (a new timestamp,
+  same snapshot), and targets too (a new version of the same release)
+  when it expires within 15 days, so a quiet main never freezes the
+  feed; `feed renew-root` writes root N+1 with the same keys and a
+  fresh 90 days, signed by all three root keys, and takes it as a
+  client at root N would before keeping it.
+- **Keys from the environment**: every role's Ed25519 seed, root's
+  included (ROADMAP R8: all keys in CI's secrets for now), in one
+  variable, `GALA_FEED_KEYS`: a `<role> <64 hex digits>` line for
+  `root-1`, `root-2`, `root-3`, `targets`, `snapshot`, `timestamp`
+  (`#` comments allowed). When it is set the feed commands use it and
+  never make or read test keys; set but empty (a secret the job cannot
+  see) is an error, as is a missing, repeated, malformed or shared
+  role's key, named by role or line, never showing the value. Without
+  it, test keys in `target/trust/feed-*.seed`. Every command that signs
+  first compares each role's key ids with the feed's latest root and
+  refuses other keys (`root 2 lists other root keys (...) than
+  GALA_FEED_KEYS (...)`): what they signed every client would refuse.
+  The key ids in use are logged (never the seeds); `feed keygen` makes
+  a value from `/dev/urandom`.
+- **Signatures** cover the canonical JSON (OLPC canonical JSON as
+  python-tuf and go-tuf sign it: no whitespace, keys sorted by bytes,
+  integers only, only `"` and `\` escaped) of the `signed` value; the
+  reader re-encodes what it parsed. The parser refuses duplicate keys,
+  fractions and nesting deeper than 32. Signatures by keys root does not
+  list for that role, and repeated signatures by one key, count for
+  nothing.
+- **The client's checks** (`tuf::Client`, the specification's section
+  5): roots one version at a time; an expired root stops it; timestamp,
+  snapshot and targets each signed by their role's threshold; snapshot
+  and targets must be the bytes (length, SHA-256) and version their
+  parent lists; no role's version, nor the snapshot version timestamp
+  lists, nor the targets version snapshot lists, may go below the
+  trusted one (rollback); a role past its expiry is refused (freeze); a
+  file must be in the signed targets with its length and SHA-256
+  (mix-and-match, tampering). A rotation of the timestamp or snapshot
+  keys in a new root drops the trusted timestamp and snapshot (recovery
+  from versions an attacker pushed far ahead). Metadata from the
+  client's own store is checked again (signatures, order) but not for
+  expiry. Each refusal is a `tuf::Refusal` whose text names the role
+  and the numbers (`timestamp: expired at ... (now ...): a frozen
+  feed`, `targets: version 2 below the trusted 3: a rollback`).
+- **The client's flow** (`tuf::update::update`, over a `Remote` the
+  caller provides for the feed's files and a `Store` for what it keeps):
+  the stored root (else the one shipped in the image), each newer
+  `<N>.root.json`, the expired-root check; the store's timestamp,
+  snapshot and targets loaded as the rollback floor (one that no longer
+  checks out is dropped and fetched again); timestamp, snapshot and
+  targets fetched with at most the length their parent signed; then only
+  the release's files the store lacks, each checked before it is kept.
+  Each metadata file taken is saved at once; nothing refused is saved.
+  Every step is an `update::Event` (`root 2 taken`, `timestamp 3
+  unchanged`, `boot/kernel: 8 bytes fetched and checked`, `snapshot in
+  the store dropped: ...`). `cargo xtask feed check` runs the same flow
+  over the feed's directory with an empty store; gala's updater gives
+  it HTTPS and its disk.
+- **The release** is the image's file tree as `make_iso` stages it,
+  without the test programs, test DLLs and scenario modules (`cargo
+  xtask release-tree <dir>`, `release_tree` and `system_modules` in
+  xtask): `boot/kernel` (stripped), every DLL of USER_DLLS but the test
+  DLLs (`boot/<dll>`, module string `Windows/System32`), the root store
+  (`public-roots.pem`), Limine (`EFI/BOOT/BOOTX64.EFI`,
+  `boot/limine/*`), the sealed `boot/limine/limine.conf` (empty kernel
+  command line, as `cargo xtask build`'s) and `boot/gala.manifest`;
+  about 76 files, 14 MB. Chosen because it is what a machine boots
+  (steps 2-5 of "Chain of trust" cover exactly these files) and the
+  system `cargo xtask iso` ships, minus what only tests use; the
+  32-bit DLLs (SysWOW64) are not in it yet, as they are in no full
+  image. The manifest is signed with the building machine's test key
+  and says release 1 (ROADMAP R8 step 4's next items).
+- **Publishing** (`.github/workflows/release.yml`, jobs in the
+  environment `release`, one run at a time: `concurrency: feed`). Each
+  job starts from an empty directory: `feed pull <public URL>` fetches
+  the metadata a client follows (every root, the timestamp, its
+  snapshot, its targets), verified as the client does but for expiry,
+  and records each file's SHA-256 in `.pulled`; no blobs (`publish`
+  writes the release's blobs it lacks locally; content-addressed, the
+  bucket's are the same bytes). The job signs (`publish`, `refresh`,
+  `renew-root`), checks with `feed check <dir> --over <public URL>`
+  (the directory over the bucket: the feed as it will be once
+  uploaded, blobs read from the bucket), `feed push`es, and checks the
+  public URL again. A missing `1.root.json` at the public URL (HTTP
+  404, nothing else) is an empty feed: the first publish makes root 1.
+  Publish runs after CI passes on a push to main, for main's head only
+  (an older commit's run is skipped); refresh every 6 hours (the
+  timestamp lasts a day and scheduled runs can be late); renew-root on
+  the 3rd of each month. Every step is logged and the feed's state
+  (release, files, new blobs, each role's version and expiry; a
+  warning when root expires within 45 days) goes to the job summary.
+- **Upload order** (`feed push`): the blobs the bucket lacks (`aws s3
+  sync --size-only`), then new roots, targets, snapshots (each by
+  version), `timestamp.json` last. Each file is in the bucket before
+  any file that names it (timestamp names snapshot names targets names
+  blobs), and a new root before metadata its keys may sign, so a client
+  reading mid-upload only meets files whose references resolve. Push
+  uploads only what changed since the pull; a published version (any
+  file but `timestamp.json`) is never rewritten: one the bucket has
+  already (`head-object`) stops the push, which is what a feed pulled
+  from somewhere else than it is pushed to (a wrong URL that looks
+  empty) would do to root 1. Immutable files carry `Cache-Control:
+  public, max-age=31536000, immutable`, `timestamp.json` `no-cache`.
+- **Checked against python-tuf**: a feed `cargo xtask feed publish`
+  writes is read and verified by python-tuf 6.0.0 (`Metadata`,
+  `verify_delegate`, `verify_length_and_hashes` over every role and
+  blob), and its canonical bytes equal securesystemslib's
+  `encode_canonical` (WORKFLOW "The update feed").
+- **Limits**: every key is in CI's secrets (ROADMAP R8: root keys
+  offline, the targets key in a KMS or HSM later); no key rotation
+  command (renew-root keeps the keys); no delegations, no staged
+  rollout field yet; files are hashed whole in memory; the bucket's
+  old versions and blobs are never deleted.
 
 ## Known limits
 

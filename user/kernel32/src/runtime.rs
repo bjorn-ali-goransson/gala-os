@@ -8,12 +8,13 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use super::arch::*;
 use super::files::WaitForSingleObjectEx;
 use super::process::GetThreadTimes;
 use super::sync::{CreateEventW, ReleaseMutex, ReleaseSemaphore};
 use super::{
     Bool, FALSE, GetLastError, Handle, NtWaitForMultipleObjects, STATUS_SUCCESS, STATUS_TIMEOUT,
-    SetEvent, TRUE, fail, fail_with, teb_u64, timeout, unsupported,
+    SetEvent, TRUE, fail, fail_with, timeout, unsupported,
 };
 
 const WAIT_FAILED: u32 = u32::MAX;
@@ -78,25 +79,20 @@ pub extern "system" fn QueueUserAPC(routine: usize, thread: Handle, data: usize)
 
 /// The current thread's TEB.
 pub(crate) fn teb() -> usize {
-    teb_u64(0x30) as usize
+    teb_read(TEB_SELF)
 }
 
 /// GetCurrentThreadStackLimits: the stack the system reserved for the
-/// thread, from the TEB's DeallocationStack (+0x1478, the reservation's
-/// base) to its StackBase (+0x8).
+/// thread, from the TEB's DeallocationStack (the reservation's base) to
+/// its StackBase.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize) {
     // SAFETY: the caller passes writable pointers, as documented.
     unsafe {
-        low.write(teb_u64(0x1478) as usize);
-        high.write(teb_u64(0x8) as usize);
+        low.write(teb_read(TEB_DEALLOCATION_STACK));
+        high.write(teb_read(TEB_STACK_BASE));
     }
 }
-
-/// TEB.GuaranteedStackBytes (x64 offset 0x1748).
-const TEB_GUARANTEED_STACK_BYTES: usize = 0x1748;
-/// TEB.HardErrorMode (x64 offset 0x16b0).
-const TEB_HARD_ERROR_MODE: usize = 0x16b0;
 
 /// SetThreadStackGuarantee: raises the stack the thread keeps for its
 /// stack-overflow handler (never lowers it) and returns the previous
@@ -260,22 +256,44 @@ pub extern "system" fn QueryMemoryResourceNotification(h: Handle, state: *mut Bo
     }
 }
 
-/// IsWow64Process2: every gala process is native x64
-/// (IMAGE_FILE_MACHINE_UNKNOWN for the process, AMD64 for the machine).
+/// IsWow64GuestMachineSupported(machine, *supported): whether WOW64 runs
+/// programs of that machine type: x86 (IMAGE_FILE_MACHINE_I386), as on
+/// 64-bit Windows on x64 (ARCHITECTURE "Plan: WOW64"); no other.
+#[unsafe(no_mangle)]
+pub extern "system" fn IsWow64GuestMachineSupported(machine: u16, supported: *mut Bool) -> i32 {
+    const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+    if supported.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's output.
+    unsafe { *supported = Bool::from(machine == IMAGE_FILE_MACHINE_I386) };
+    0
+}
+
+const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+/// IsWow64Process2(process, *processMachine, *nativeMachine): the
+/// process's machine if it runs through WOW64 (x86), else
+/// IMAGE_FILE_MACHINE_UNKNOWN; the native machine is AMD64.
 #[unsafe(no_mangle)]
 pub extern "system" fn IsWow64Process2(
-    _process: Handle,
+    process: Handle,
     machine: *mut u16,
     native: *mut u16,
 ) -> Bool {
     if machine.is_null() {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
+    let wow64 = match super::process::is_wow64(process) {
+        Ok(w) => w,
+        Err(status) => return fail(status, FALSE),
+    };
     // SAFETY: the caller's outputs.
     unsafe {
-        *machine = 0;
+        *machine = if wow64 { IMAGE_FILE_MACHINE_I386 } else { 0 };
         if !native.is_null() {
-            *native = 0x8664;
+            *native = IMAGE_FILE_MACHINE_AMD64;
         }
     }
     TRUE
@@ -423,7 +441,11 @@ pub extern "system" fn VirtualQueryEx(
     if status != STATUS_SUCCESS { fail(status, 0) } else { ret }
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtCreateJobObject(out: *mut Handle, access: u32, attributes: *const c_void) -> u32;
     fn NtAssignProcessToJobObject(job: Handle, process: Handle) -> u32;
@@ -541,96 +563,89 @@ pub extern "system" fn FlushInstructionCache(
     TRUE
 }
 
-/// Thread descriptions (SetThreadDescription), by thread id: up to 64
-/// threads, 63 characters each (longer ones are cut).
-const MAX_NAMED: usize = 64;
-
-struct Names {
-    lock: AtomicBool,
-    names: core::cell::UnsafeCell<[(u32, [u16; 64]); MAX_NAMED]>,
+/// HRESULT_FROM_NT of a failed status (the NTSTATUS with FACILITY_NT_BIT).
+fn nt_hresult(status: u32) -> i32 {
+    (status | 0x1000_0000) as i32
 }
 
-// SAFETY: `names` is only touched with `lock` held.
-unsafe impl Sync for Names {}
-
-static NAMES: Names = Names {
-    lock: AtomicBool::new(false),
-    names: core::cell::UnsafeCell::new([(0, [0; 64]); MAX_NAMED]),
-};
-
-fn with_names<R>(f: impl FnOnce(&mut [(u32, [u16; 64]); MAX_NAMED]) -> R) -> R {
-    while NAMES
-        .lock
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    // SAFETY: the lock is held.
-    let r = f(unsafe { &mut *NAMES.names.get() });
-    NAMES.lock.store(false, Ordering::Release);
-    r
-}
-
-/// HRESULT_FROM_WIN32 of the last error.
-fn last_hresult() -> i32 {
-    ((GetLastError() & 0xffff) | 0x8007_0000) as i32
-}
-
+/// SetThreadDescription: the thread's name, kept by the kernel
+/// (NtSetInformationThread ThreadNameInformation), so other processes,
+/// the state dump and the event stream see it too.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetThreadDescription(thread: Handle, text: *const u16) -> i32 {
-    let id = super::process::GetThreadId(thread);
-    if id == 0 {
-        return last_hresult();
-    }
     if text.is_null() {
         return 0x8007_0057u32 as i32; // E_INVALIDARG
     }
-    let mut name = [0u16; 64];
+    let mut n = 0usize;
     // SAFETY: the caller's NUL-terminated string.
-    unsafe {
-        for (i, slot) in name.iter_mut().take(63).enumerate() {
-            let ch = *text.add(i);
-            if ch == 0 {
-                break;
-            }
-            *slot = ch;
-        }
+    while n < 0x7fff && unsafe { *text.add(n) } != 0 {
+        n += 1;
     }
-    let stored = with_names(|n| {
-        let slot = n.iter().position(|e| e.0 == id).or_else(|| n.iter().position(|e| e.0 == 0));
-        slot.map(|i| n[i] = (id, name)).is_some()
-    });
-    if !stored {
-        unsupported(b"kernel32.dll!SetThreadDescription(too many threads)", MAX_NAMED as u64);
-    }
-    0
+    // THREAD_NAME_INFORMATION { UNICODE_STRING }: Length, MaximumLength,
+    // then the pointer at its natural alignment (16 bytes on 64-bit, 8 on
+    // 32-bit).
+    const P: usize = size_of::<usize>();
+    let mut us = [0u8; 2 * P];
+    us[0..2].copy_from_slice(&((n * 2) as u16).to_le_bytes());
+    us[2..4].copy_from_slice(&((n * 2) as u16).to_le_bytes());
+    us[P..2 * P].copy_from_slice(&(text as usize).to_le_bytes());
+    // SAFETY: a THREAD_NAME_INFORMATION pointing at the caller's string.
+    let status = unsafe { super::NtSetInformationThread(thread, 38, us.as_ptr(), (2 * P) as u32) };
+    // Success too is HRESULT_FROM_NT(STATUS_SUCCESS), 0x10000000, not S_OK
+    // (Windows 11 25H2).
+    nt_hresult(status)
 }
 
-/// GetThreadDescription: a LocalAlloc'ed copy (empty if none was set).
+/// GetThreadDescription: a LocalAlloc'ed NUL-terminated copy of the
+/// thread's name (empty if none was set).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetThreadDescription(thread: Handle, out: *mut *mut u16) -> i32 {
-    let id = super::process::GetThreadId(thread);
-    if id == 0 {
-        return last_hresult();
-    }
     if out.is_null() {
         return 0x8007_0057u32 as i32;
     }
-    let name = with_names(|n| n.iter().find(|e| e.0 == id).map_or([0; 64], |e| e.1));
-    let p = super::global::LocalAlloc(0, 128).cast::<u16>();
+    // THREAD_NAME_INFORMATION and up to 256 characters (the kernel keeps
+    // no more).
+    let mut info = [0u64; 2 + 64];
+    let mut ret = 0u32;
+    // SAFETY: our buffer of the size given.
+    let status = unsafe {
+        super::NtQueryInformationThread(
+            thread,
+            38,
+            info.as_mut_ptr().cast(),
+            core::mem::size_of_val(&info) as u32,
+            &mut ret,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return nt_hresult(status);
+    }
+    let chars = (info[0] & 0xffff) as usize / 2;
+    // SAFETY: the UNICODE_STRING the kernel wrote at the start of `info`;
+    // its Buffer, after Length and MaximumLength at pointer alignment.
+    let text =
+        unsafe { info.as_ptr().cast::<u8>().add(size_of::<usize>()).cast::<*const u16>().read() };
+    let p = super::global::LocalAlloc(0, (chars + 1) * 2).cast::<u16>();
     if p.is_null() {
         return 0x8007_000eu32 as i32; // E_OUTOFMEMORY
     }
-    // SAFETY: a fresh block of 64 characters; the caller's output.
+    // SAFETY: the characters the kernel wrote into `info` (Buffer points
+    // there); a fresh block of chars + 1; the caller's output.
     unsafe {
-        core::ptr::copy_nonoverlapping(name.as_ptr(), p, 64);
+        core::ptr::copy_nonoverlapping(text, p, chars);
+        *p.add(chars) = 0;
         *out = p;
     }
-    0
+    // HRESULT_FROM_NT(STATUS_SUCCESS), 0x10000000, as SetThreadDescription
+    // (Windows 11 25H2).
+    nt_hresult(STATUS_SUCCESS)
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
 }
@@ -650,10 +665,7 @@ pub extern "system" fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *m
     if status != STATUS_SUCCESS {
         return fail(status, FALSE);
     }
-    let mut basic = [0u8; 64];
-    // SAFETY: a 64-byte SYSTEM_BASIC_INFORMATION buffer.
-    unsafe { NtQuerySystemInformation(0, basic.as_mut_ptr(), 64, core::ptr::null_mut()) };
-    let processors = u64::from(basic[56].max(1));
+    let processors = u64::from(super::basic_information().processors.max(1));
     let elapsed = tod[1].saturating_sub(tod[0]).max(1) * processors;
     // SAFETY: the caller's outputs (each may be null).
     unsafe {
@@ -670,7 +682,11 @@ pub extern "system" fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *m
     TRUE
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NtSetInformationProcess(process: Handle, class: u32, buf: *const u8, len: u32) -> u32;
 }
@@ -678,6 +694,17 @@ unsafe extern "system" {
 /// ProcessPriorityClass.
 const PROCESS_PRIORITY_CLASS: u32 = 18;
 /// (Win32 priority class, PROCESS_PRIORITY_CLASS_* value).
+/// The classes' bits from the lowest class up: the first one a value has
+/// is its class (SetPriorityClass).
+const PRIORITY_ORDER: [(u32, u8); 6] = [
+    (0x40, 1),   // IDLE
+    (0x4000, 5), // BELOW_NORMAL
+    (0x20, 2),   // NORMAL
+    (0x8000, 6), // ABOVE_NORMAL
+    (0x80, 3),   // HIGH
+    (0x100, 4),  // REALTIME
+];
+
 const PRIORITY_CLASSES: [(u32, u8); 6] = [
     (0x40, 1),   // IDLE
     (0x20, 2),   // NORMAL
@@ -716,13 +743,26 @@ pub extern "system" fn SetPriorityClass(process: Handle, class: u32) -> Bool {
         unsupported(b"kernel32.dll!SetPriorityClass(background mode)", class.into());
         return fail_with(super::ERROR_NOT_SUPPORTED, 0);
     }
-    let Some(&(_, nt)) = PRIORITY_CLASSES.iter().find(|&&(win32, _)| win32 == class) else {
+    // As Windows: the bits that are no class are ignored and, of the
+    // class bits there, the lowest class wins (measured over every pair:
+    // IDLE beats all, REALTIME none); a value with no class bit (0 too) is
+    // ERROR_INVALID_PARAMETER.
+    let Some(&(_, nt)) = PRIORITY_ORDER.iter().find(|&&(bit, _)| class & bit != 0) else {
         return fail_with(ERROR_INVALID_PARAMETER, 0);
     };
     let info = [0u8, nt];
     // SAFETY: our buffer of the given size.
-    let status =
+    let mut status =
         unsafe { NtSetInformationProcess(process, PROCESS_PRIORITY_CLASS, info.as_ptr(), 2) };
+    // REALTIME without SeIncreaseBasePriorityPrivilege: TRUE, and the
+    // class is HIGH (what Windows does for such a caller).
+    const STATUS_PRIVILEGE_NOT_HELD: u32 = 0xc000_0061;
+    if nt == 4 && status == STATUS_PRIVILEGE_NOT_HELD {
+        let high = [0u8, 3];
+        // SAFETY: as above.
+        status =
+            unsafe { NtSetInformationProcess(process, PROCESS_PRIORITY_CLASS, high.as_ptr(), 2) };
+    }
     if status != STATUS_SUCCESS {
         return fail(status, 0);
     }
