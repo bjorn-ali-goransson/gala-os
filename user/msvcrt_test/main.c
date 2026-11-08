@@ -64,6 +64,7 @@ unsigned int __cdecl _controlfp(unsigned int new_value, unsigned int mask);
 #include <wctype.h>
 #include <shellapi.h>
 #include <sys/stat.h>
+#include <mbctype.h>
 typedef struct { int newmode; } startup_info;
 int __cdecl __wgetmainargs(int *argc, wchar_t ***argv, wchar_t ***envp, int glob,
                            startup_info *si);
@@ -152,6 +153,12 @@ static void filezilla_checks(void) {
     CHECK(strxfrm(nx, "abc", 8) == 3 && strcmp(nx, "abc") == 0);
     char cat[16] = "abc";
     CHECK(strncat(cat, "defgh", 2) == cat && strcmp(cat, "abcde") == 0);
+    /* FileZilla 3.71's startup (mingw's WinMain entry) skips the program
+     * name with _ismbblead. A single-byte multibyte code page (msvcrt's
+     * at startup is the ANSI one, 1252 on en-US Windows) has no lead
+     * bytes. */
+    for (unsigned c = 0; c < 256; c++)
+        CHECK(_ismbblead(c) == 0);
 
     struct tm tm = {0};
     tm.tm_year = 126; tm.tm_mon = 10; tm.tm_mday = 1;

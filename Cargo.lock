@@ -2794,6 +2794,7 @@ dependencies = [
  "ed25519-compact",
  "flate2",
  "fontdue",
+ "libc",
  "proc-macro2",
  "resvg",
  "syn 2.0.119",

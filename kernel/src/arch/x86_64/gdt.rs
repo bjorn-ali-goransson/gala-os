@@ -263,6 +263,25 @@ mod tests {
         assert_eq!(teb32_segment(0x1234_5678), 0x1240_f234_5678_0fff);
     }
 
+    /// 64-bit SYSRET's (CS, SS) from STAR's base, by each vendor's rule:
+    /// Intel ORs RPL 3 into both (the SDM's SYSRET), AMD ORs it into CS
+    /// only and loads SS as base + 8 exactly (the APM's SYSRET). An RPL-0
+    /// base gave user mode SS 0x28 on AMD, and the next IRETQ from an
+    /// interrupt there raised #GP(0x28).
+    fn sysret_selectors(star: u64) -> [(u16, u16); 2] {
+        let base = (star >> 48) as u16;
+        [((base + 16) | 3, (base + 8) | 3), ((base + 16) | 3, base + 8)]
+    }
+
+    #[test]
+    fn sysret_gives_the_user_selectors_on_intel_and_amd() {
+        let star = super::super::syscall::STAR;
+        for (cs, ss) in sysret_selectors(star) {
+            assert_eq!((cs, ss), (USER_CS, USER_SS));
+        }
+        assert_eq!((star >> 32) as u16, KERNEL_CS);
+    }
+
     #[test]
     fn selectors_satisfy_syscall_sysret_layout() {
         // SYSCALL: CS = STAR[47:32], SS = CS + 8.

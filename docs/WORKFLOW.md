@@ -65,9 +65,38 @@ cargo xtask test            # stub-audit, host tests, alloc-audit, gala-um, repl
 cargo xtask export-tests    # refresh user/bin (CI compares)
 ```
 
-- CI also runs `cargo xtask lx-expect && git diff --exit-code user/lx`
-  and `cargo xtask export-tests && git diff --exit-code user/bin`:
-  checked-in binaries and transcripts must match their sources.
+- CI (`.github/workflows/ci.yml`, GitHub's hosted runners; the
+  repository is public) runs on every pull request and on main after a
+  merge (a branch without a pull request gets no run; a newer push to a
+  pull request cancels the older run). Work reaches main through a pull
+  request once its checks are green, or by a direct push after the local
+  gate (`cargo xtask test`) passed; main's ruleset allows both for now.
+  Its jobs:
+  - `linux` (Ubuntu 24.04): the format and clippy lines, `cargo xtask
+    lx-expect && git diff --exit-code user/lx`, `cargo xtask test
+    --no-boot` (everything but the boots) and `cargo xtask export-tests &&
+    git diff --exit-code user/bin` (checked-in binaries and transcripts
+    must match their sources).
+  - `boot (i/6)`: every boot scenario, dealt out over six runners with
+    `XTASK_SHARD=i/n` (`cargo xtask boot-test` boots the i-th of n
+    round-robin shares of the planned VMs; a batch stays in one share,
+    and the shard prints what it took). A failed shard keeps
+    `target/failed/` (each failed boot's log and triage) as an artifact.
+    The runners have hardware virtualization: a step opens /dev/kvm to
+    the runner's user, so the boots run under KVM (the boot log's
+    `xtask: vm time` line, and a QEMU standard error without "falling
+    back to tcg", show it). A step deletes the runner's preinstalled
+    Android, .NET and GHC toolchains for disk space.
+  - `windows` (Windows Server 2025, build 26100: the pinned build): the
+    checked-in `user/bin` through `run-all.ps1`, elevated, with the
+    `galatest` account and Defender excluded from the checkout, as the
+    sweep brief asks. The report (`windows.json`,
+    `windows-output.txt`) is the job's `windows-report` artifact, in
+    `cargo xtask compare`'s schema; `user/windows/ci_summary.py` writes
+    the job summary (passes, and each failing program's exit and line).
+    With `user/windows/ci-passing.txt` (program names) the job fails
+    when a listed program does not pass on Windows: a test's expectation
+    stopped being Windows' answer.
 - Commit messages pass through the shell: do not put backticks in a
   double-quoted `-m`; use a heredoc with `-F -`.
 - Borrowed code or a new dependency gets a `THIRD_PARTY.md` entry in the
@@ -427,7 +456,11 @@ the modes, resets and errors.
   scenarios: drawing text roughly doubles kernel time under emulation.
 - **KVM**: QEMU uses KVM when `/dev/kvm` is available (near-native
   speed); otherwise TCG with one host thread per processor (multi-threaded
-  TCG), except `SINGLE_THREAD_TCG` scenarios.
+  TCG), except `SINGLE_THREAD_TCG` scenarios. TCG executes the
+  instructions the Intel way whatever vendor the guest's CPUID names, so
+  behaviour that differs between Intel and AMD only shows under KVM on
+  that vendor's host (CI's runners are AMD: an AMD-only bug is CI-only
+  here). The boot log's `cpu:` line names the vendor.
 - **Docker**: `cargo xtask docker-test [xtask args]` builds
   `docker/test.Dockerfile` (Ubuntu 24.04, QEMU, OVMF, xorriso, the
   pinned toolchain) and runs `cargo xtask test` (or the given arguments)
@@ -1124,7 +1157,15 @@ source).
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
   skips the rebuild. Transcripts avoid version-dependent values because
-  CI's runner kernel differs from the recording machine's.
+  CI's runner kernel differs from the recording machine's, and so does its
+  CPU: GitHub's runners are a mix of AMD and Intel, some with 5-level
+  paging (user space up to 2^56), so a test finds such a boundary on its
+  host (arch_prctl_test probes a mapping above 2^47) instead of assuming
+  it. lx-expect
+  closes the descriptors it inherited first (it says how many): fork
+  sizes a program's descriptor table by the parent's highest open
+  descriptor, and answers such as select's on a descriptor beyond the
+  table depend on that size.
 - **Skips**: pty_test and proc_test print a single `SKIP:
   open(/dev/ptmx) = -errno` (or readlink /proc/self) line when that is
   unavailable, so a machine without them shows a mismatch whose diff
@@ -1448,17 +1489,24 @@ it on first use.
   package: FlaUI) is a plain zip, its members paths such as
   `lib/net8.0-windows7.0/FlaUI.Core.dll`. One fetch runs at a time
   (ISOs are built in parallel), and a `.unpacked-<sha256>` marker makes
-  an interrupted unpack run again.
+  an interrupted unpack run again. An unpack (no marker for the pinned
+  checksum and selection: a new version, changed members, an interrupted
+  run) starts by clearing `target/prebuilt/<name>`, so an older
+  release's files never stay beside the new ones.
 - `members` are unzip patterns (`*` crosses `/`), `excludes` unzip `-x`
   patterns; the marker includes a hash of both, so changing them unpacks
   again. For an MSI, members are directories of the installed layout,
   each moved to `target/prebuilt/<name>/<last component>`, and excludes
   are paths removed after that; for 7-Zip archives members are
   directories.
-- A pinned release can vanish upstream (the FileZilla 3.69.3 client
-  installer's SourceForge URL answers 404; ROADMAP AG): keep a fetched
-  `target/prebuilt/<name>` around, and change a URL only for an official
-  one with the same SHA-256.
+- A pinned release can vanish upstream (SourceForge dropped FileZilla
+  3.69.3's installer): pin a release through a source that keeps old
+  versions, such as Chocolatey's package of the official installer
+  (FileZilla Client and Server), and change the pinned version when it
+  goes; a package carrying a 32-bit and a 64-bit installer is unpacked
+  from the 64-bit one (by name: `win64`/`x64`). Copy a fetched
+  `target/prebuilt/<name>` aside first to compare against the new
+  version (the re-pin clears it).
 - **Large programs**: a module path ending in `/`
   (`target/prebuilt/jdk/jdk-21.0.5+11/`) ships the whole tree as
   `C:\<dir>` with its subdirectories, packed into one USTAR archive

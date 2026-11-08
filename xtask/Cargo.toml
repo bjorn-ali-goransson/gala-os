@@ -19,3 +19,8 @@ proc-macro2 = { version = "=1.0.107", default-features = false, features = ["spa
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 fontdue = { version = "0.9.5", default-features = false, features = ["hashbrown"] }
 resvg = { version = "0.49.0", default-features = false }
+
+# lx-expect closes the descriptors xtask inherited before it runs the Linux
+# test programs (xtask/src/lx_expect.rs, `close_inherited`).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "=0.2.191", default-features = false }

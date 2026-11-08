@@ -297,7 +297,7 @@ pub fn print(args: fmt::Arguments) {
 
 /// gala-um: user-mode output goes to stdout.
 #[cfg(feature = "hosted")]
-pub fn write_bytes(bytes: &[u8]) {
+pub fn write_bytes(_pid: u64, bytes: &[u8]) {
     use std::io::Write;
     let _host = crate::hosted::HostCode::enter();
     let mut out = std::io::stdout().lock();
@@ -326,7 +326,8 @@ pub fn emergency_line(args: fmt::Arguments) {
 /// timer tick breaks the line and releases what is held, and so does
 /// the program's exit ([`end_program_line`]) and a full buffer.
 /// One line state for all programs: two programs writing at once can
-/// still share a line (each has its own console on Windows).
+/// still share a line (each has its own console on Windows); a
+/// program's exit ends only the line it opened ([`exit_ends_line`]).
 #[cfg(not(feature = "hosted"))]
 struct Held {
     bytes: [u8; HELD_BYTES],
@@ -343,6 +344,18 @@ const HOLD_NS: u64 = 100_000_000;
 /// only under the COM1 lock; read without it by the tick's check.
 #[cfg(not(feature = "hosted"))]
 static LINE_OPEN_SINCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The process whose output opened that line (its id; set with it).
+#[cfg(not(feature = "hosted"))]
+static LINE_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether `exiting`'s exit ends the open program line: only its own
+/// line. Another program's exit leaves it open (a chrome.exe exiting
+/// between the two writes msvcrt made of uia_chromium_test's last line
+/// broke it, and the scenario missed the line).
+pub fn exit_ends_line(open: bool, owner: u64, exiting: u64) -> bool {
+    open && owner == exiting
+}
+
 /// Kernel lines waiting for the program's line to end. Taken only under
 /// the COM1 lock.
 #[cfg(not(feature = "hosted"))]
@@ -424,12 +437,13 @@ pub fn release_overdue() {
     }
 }
 
-/// A program is gone: its open line ends (a newline) and held kernel
-/// lines go out.
+/// Process `pid` is gone: the line it left open ends (a newline) and held
+/// kernel lines go out. Another program's open line stays.
 #[cfg(not(feature = "hosted"))]
-pub fn end_program_line() {
+pub fn end_program_line(pid: u64) {
     use core::sync::atomic::Ordering;
-    if LINE_OPEN_SINCE.load(Ordering::Relaxed) == 0 {
+    let open = LINE_OPEN_SINCE.load(Ordering::Relaxed) != 0;
+    if !exit_ends_line(open, LINE_OWNER.load(Ordering::Relaxed), pid) {
         return;
     }
     let mut port = serial::COM1.lock();
@@ -437,7 +451,7 @@ pub fn end_program_line() {
 }
 
 #[cfg(feature = "hosted")]
-pub fn end_program_line() {}
+pub fn end_program_line(_pid: u64) {}
 
 #[cfg(feature = "hosted")]
 pub fn release_overdue() {}
@@ -458,9 +472,9 @@ pub fn print(args: fmt::Arguments) {
     }
 }
 
-/// Writes raw bytes (no newline translation), e.g. user-mode output.
+/// Writes raw bytes (no newline translation): process `pid`'s output.
 #[cfg(not(feature = "hosted"))]
-pub fn write_bytes(bytes: &[u8]) {
+pub fn write_bytes(pid: u64, bytes: &[u8]) {
     use core::sync::atomic::Ordering;
     {
         let mut port = serial::COM1.lock();
@@ -474,6 +488,7 @@ pub fn write_bytes(bytes: &[u8]) {
             } else if LINE_OPEN_SINCE.load(Ordering::Relaxed) == 0 || bytes.contains(&b'\n') {
                 // A new line opened (0 before the clock runs: no holding).
                 LINE_OPEN_SINCE.store(crate::time::raw_monotonic_ns(), Ordering::Relaxed);
+                LINE_OWNER.store(pid, Ordering::Relaxed);
             }
         }
     }
@@ -566,4 +581,18 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => { $crate::kprintln!("[error] {}", format_args!($($arg)*)) };
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::exit_ends_line;
+
+    #[test]
+    fn only_the_programs_own_exit_ends_its_open_line() {
+        // uia_chromium_test (pid 4) has half a line out; a chrome.exe
+        // (pid 12) exits: the line stays open for the rest of it.
+        assert!(!exit_ends_line(true, 4, 12));
+        assert!(exit_ends_line(true, 4, 4));
+        assert!(!exit_ends_line(false, 4, 4));
+    }
 }

@@ -18,6 +18,11 @@
 //!   any, then `-- exit status N` or `-- killed by signal N`. A mismatch
 //!   prints a line diff, leaves `actual.txt` in the run directory and
 //!   fails the command.
+//! - The programs start with descriptors 0-2 only, in a fresh-size
+//!   descriptor table: xtask first closes whatever it inherited (a CI
+//!   runner leaves descriptors above 100 open), because fork sizes the
+//!   child's table by the parent's highest open descriptor and Linux's
+//!   answers depend on that size (select ignores descriptors beyond it).
 //! - `--runs N` runs each binary N times (default 1) and fails if the
 //!   transcripts differ between runs: a check that a test is
 //!   deterministic, made before recording (WORKFLOW "Linux test
@@ -51,6 +56,7 @@ pub fn lx_expect(args: &[String]) -> Result {
     let record = args.iter().any(|a| a == "--record");
     let no_build = args.iter().any(|a| a == "--no-build");
     let runs = runs_arg(args)?;
+    close_inherited();
     let lx = root().join("user/lx");
     if !no_build {
         build(&lx)?;
@@ -190,6 +196,35 @@ fn tests(lx: &Path) -> Result<Vec<String>> {
 }
 
 /// Runs one binary as `./<name>` in `dir` and returns its transcript.
+/// Closes every descriptor above 2, which at this point are only the ones
+/// xtask inherited (none of its own is open yet), and says which: the
+/// programs' fork then sizes their descriptor table from 0-2 and the pipes
+/// of their standard streams, as a login shell's would.
+fn close_inherited() {
+    let fds: Vec<i32> = fs::read_dir("/proc/self/fd")
+        .map(|d| {
+            d.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .filter(|&fd| fd > 2)
+                .collect()
+        })
+        .unwrap_or_default();
+    // The directory's own descriptor is closed by now; it was in the list.
+    let inherited: Vec<i32> =
+        fds.into_iter().filter(|&fd| Path::new(&format!("/proc/self/fd/{fd}")).exists()).collect();
+    #[cfg(target_os = "linux")]
+    // SAFETY: close_range only closes descriptors; none above 2 belongs to
+    // anything xtask holds at this point (see the function's comment).
+    unsafe {
+        libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+    }
+    if let Some(max) = inherited.iter().max() {
+        eprintln!(
+            "lx-expect: closed {} inherited descriptor(s) (highest {max}), so each program starts with 0-2 only",
+            inherited.len()
+        );
+    }
+}
+
 fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
