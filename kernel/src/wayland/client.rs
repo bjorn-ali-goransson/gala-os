@@ -1,0 +1,1611 @@
+//! One Wayland client's protocol state (ROADMAP LD step 2; ARCHITECTURE
+//! "Linux applications on the desktop (Wayland)"): its object table, the
+//! requests it may send and the events they cause, apart from sockets,
+//! files and windows, which the `Host` gives it (the kernel's in
+//! `wayland`, a fake in the host tests).
+//!
+//! - **Bytes in, bytes out.** The server puts what it read in `input_room`
+//!   (and each descriptor that came with it through `push_fd`), then
+//!   `dispatch` handles every whole message: decoded by `wl_abi` against
+//!   its signature, each object argument checked to exist with the
+//!   interface the protocol names, then acted on. Events are appended to
+//!   `output`, which the server writes to the socket.
+//! - **Objects** (`Object`): ids the client chose, kept in a table indexed
+//!   by id, as libwayland keeps them: a new id is the next unused one or
+//!   a free one below it, at most `MAX_OBJECTS`. Destroying one (a
+//!   destructor request, or a callback the server is done with) frees its
+//!   id and answers `wl_display.delete_id`.
+//! - **Errors**: anything the protocol does not allow (a malformed message,
+//!   an unknown object or opcode, a request newer than the object's
+//!   version, a wrong argument, an interface or request gala lacks) is
+//!   answered with `wl_display.error` (object, code, message) and ends the
+//!   client (`End`). Nothing here panics on a client's bytes; running out
+//!   of memory is a `no_memory` error.
+//! - **Globals**: wl_compositor 6, wl_shm 2 (ARGB8888 and XRGB8888),
+//!   xdg_wm_base 6, wl_output 4. No wl_seat yet (input is next).
+//! - **Surfaces**: `attach`, `damage`/`damage_buffer` and `frame` are
+//!   pending until `commit`. An xdg_toplevel's first commit (without a
+//!   buffer) is answered with its configure (configure_bounds and
+//!   wm_capabilities first where its version has them, then
+//!   `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`); once it is
+//!   acked, a commit with a buffer maps it as a window
+//!   (`Host::window_create`, titled by `set_title`), copies the damaged
+//!   rows (all of them for a new or resized window) from the buffer's
+//!   pool and releases the buffer at once (the pixels are copied); a
+//!   commit with a null buffer unmaps it, and the next one configures it
+//!   again. Frame callbacks are done when their commit was applied (there
+//!   is no composition clock to wait for yet).
+//! - **Accepted and not acted on** (`Note::Ignored`, ledgered by the
+//!   server): regions, buffer scale and transform other than 1 and
+//!   normal, surface offsets, window geometry, and the toplevel's
+//!   requests for move, resize, menus, sizes and states.
+
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+use core::fmt::{self, Write as _};
+
+use wl_abi::{Arg, Header, Interface, MAX_ARGS, MAX_FDS, MAX_MESSAGE, Message};
+
+use crate::mm::heap::TryVec;
+
+/// The most objects a client has (and the highest id it may use).
+pub const MAX_OBJECTS: u32 = 4096;
+/// The most descriptors waiting for the messages that take them.
+pub const MAX_QUEUED_FDS: usize = 2 * MAX_FDS;
+/// The input buffer: whole messages are handled as soon as they are in.
+pub const INPUT: usize = 4 * MAX_MESSAGE;
+/// Events not yet taken by the client beyond this end it (libwayland
+/// disconnects a client whose buffer is full too).
+pub const MAX_OUTPUT: usize = 256 * 1024;
+/// The largest shm pool (a pool is a view of the client's own file;
+/// this bounds what one buffer can make the server read).
+pub const MAX_POOL: u64 = 256 << 20;
+/// A title or app id is kept up to this many bytes.
+const TITLE_MAX: usize = 256;
+/// Rows copied from a buffer at a time.
+const ROWS_AT_ONCE: u32 = 64;
+/// Ids from here on are the server's (none are made yet).
+const SERVER_IDS: u32 = 0xff00_0000;
+
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The interface called `name` (at compile time: a missing one does not
+/// build).
+const fn find(name: &str) -> &'static Interface {
+    let all = wl_abi::INTERFACES;
+    let mut i = 0;
+    while i < all.len() {
+        if same(all[i].name.as_bytes(), name.as_bytes()) {
+            return &all[i];
+        }
+        i += 1;
+    }
+    panic!("an interface the protocol XML does not have")
+}
+
+pub static WL_DISPLAY: &Interface = find("wl_display");
+pub static WL_REGISTRY: &Interface = find("wl_registry");
+pub static WL_CALLBACK: &Interface = find("wl_callback");
+pub static WL_COMPOSITOR: &Interface = find("wl_compositor");
+pub static WL_SHM: &Interface = find("wl_shm");
+pub static WL_SHM_POOL: &Interface = find("wl_shm_pool");
+pub static WL_BUFFER: &Interface = find("wl_buffer");
+pub static WL_SURFACE: &Interface = find("wl_surface");
+pub static WL_REGION: &Interface = find("wl_region");
+pub static WL_OUTPUT: &Interface = find("wl_output");
+pub static XDG_WM_BASE: &Interface = find("xdg_wm_base");
+pub static XDG_SURFACE: &Interface = find("xdg_surface");
+pub static XDG_TOPLEVEL: &Interface = find("xdg_toplevel");
+
+/// The globals offered, in registry order (name = index + 1), with the
+/// version offered.
+pub fn globals() -> [(&'static Interface, u32); 4] {
+    [(WL_COMPOSITOR, 6), (WL_SHM, 2), (XDG_WM_BASE, 6), (WL_OUTPUT, 4)]
+}
+
+// Error codes (the XML's enums).
+const DISPLAY_INVALID_OBJECT: u32 = 0;
+const DISPLAY_INVALID_METHOD: u32 = 1;
+const DISPLAY_NO_MEMORY: u32 = 2;
+const DISPLAY_IMPLEMENTATION: u32 = 3;
+const SHM_INVALID_FORMAT: u32 = 0;
+const SHM_INVALID_STRIDE: u32 = 1;
+const SHM_INVALID_FD: u32 = 2;
+const SURFACE_INVALID_SCALE: u32 = 0;
+const SURFACE_INVALID_TRANSFORM: u32 = 1;
+const SURFACE_INVALID_OFFSET: u32 = 3;
+const WM_BASE_ROLE: u32 = 0;
+const WM_BASE_INVALID_SURFACE_STATE: u32 = 4;
+const XDG_SURFACE_NOT_CONSTRUCTED: u32 = 1;
+const XDG_SURFACE_ALREADY_CONSTRUCTED: u32 = 2;
+const XDG_SURFACE_UNCONFIGURED_BUFFER: u32 = 3;
+const XDG_SURFACE_INVALID_SERIAL: u32 = 4;
+const XDG_SURFACE_INVALID_SIZE: u32 = 5;
+const XDG_SURFACE_DEFUNCT_ROLE_OBJECT: u32 = 6;
+
+// wl_shm formats.
+pub const ARGB8888: u32 = 0;
+pub const XRGB8888: u32 = 1;
+
+/// What the client's protocol state needs from outside.
+pub trait Host {
+    /// A file descriptor the client passed (an open file description).
+    type Fd;
+    /// Whether `fd` is a file whose bytes can be read (a pool's memory).
+    fn readable(&mut self, fd: &Self::Fd) -> bool;
+    /// Fills `out` from `fd` at `offset`: false if not all of it is there.
+    fn read(&mut self, fd: &Self::Fd, offset: u64, out: &mut [u8]) -> bool;
+    /// A copy of `fd` (another reference to the same description).
+    fn share(&mut self, fd: &Self::Fd) -> Option<Self::Fd>;
+    /// The screen's size (wl_output's mode, configure_bounds).
+    fn screen(&mut self) -> (u32, u32);
+    /// Milliseconds (wl_callback.done of a frame).
+    fn now_ms(&mut self) -> u32;
+    /// A new window showing a `width` x `height` surface, titled `title`
+    /// (UTF-8 as the client gave it): its id, None if it cannot be made.
+    fn window_create(&mut self, title: &[u8], width: u32, height: u32) -> Option<u32>;
+    fn window_resize(&mut self, id: u32, width: u32, height: u32);
+    /// Rows `y..y + rows` of the window's pixels (0x00RRGGBB, `width` per
+    /// row).
+    fn window_present(&mut self, id: u32, y: u32, width: u32, rows: u32, pixels: &[u32]);
+    fn window_title(&mut self, id: u32, title: &[u8]);
+    fn window_destroy(&mut self, id: u32);
+    /// Something observability wants to know (events, log, ledger).
+    fn note(&mut self, note: Note<'_>);
+    /// Whether every request and event is to be traced.
+    fn tracing(&self) -> bool;
+    fn trace(&mut self, line: fmt::Arguments<'_>);
+}
+
+/// What happened, for the server's events, log and ledger.
+#[derive(Debug)]
+pub enum Note<'a> {
+    /// A surface was given a role (`object` is the role's object).
+    Role { surface: u32, role: &'static str, object: u32 },
+    /// A commit applied: the size of the buffer it showed (none: no new
+    /// buffer), the rows copied into the window (none: nothing damaged or
+    /// no window), the window.
+    Commit {
+        surface: u32,
+        buffer: Option<(u32, u32)>,
+        rows: Option<(u32, u32)>,
+        window: Option<u32>,
+    },
+    /// A window was shown for a surface, or could not be made.
+    Mapped { surface: u32, window: Option<u32> },
+    /// A protocol error: wl_display.error sent, the client ends.
+    Error { object: u32, interface: &'static str, code: u32, message: &'a str },
+    /// A request gala does not implement (answered with an error).
+    Missing { interface: &'static str, request: &'static str },
+    /// A request accepted but not acted on.
+    Ignored { interface: &'static str, request: &'static str },
+}
+
+/// Why a client ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    /// A protocol error (wl_display.error is in the output).
+    Error,
+    /// More events waiting than MAX_OUTPUT.
+    OutputFull,
+}
+
+type Result<T = ()> = core::result::Result<T, End>;
+
+/// A short message (protocol errors), cut at `TEXT` bytes on a character
+/// boundary.
+const TEXT: usize = 160;
+
+pub struct Text {
+    buf: [u8; TEXT],
+    len: usize,
+}
+
+impl Text {
+    fn new() -> Text {
+        Text { buf: [0; TEXT], len: 0 }
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("?")
+    }
+}
+
+impl fmt::Write for Text {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for c in s.chars() {
+            let n = c.len_utf8();
+            if self.len + n > TEXT {
+                break;
+            }
+            c.encode_utf8(&mut self.buf[self.len..]);
+            self.len += n;
+        }
+        Ok(())
+    }
+}
+
+/// Bytes a client sent (a name, a title) as text: printable ASCII as is,
+/// the rest as `\xNN`.
+pub struct Bytes<'a>(pub &'a [u8]);
+
+impl fmt::Display for Bytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &b in self.0 {
+            if (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\' {
+                f.write_char(b as char)?;
+            } else {
+                write!(f, "\\x{b:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct Pool<F> {
+    fd: F,
+    size: u64,
+}
+
+struct Buffer<F> {
+    fd: F,
+    offset: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+}
+
+#[derive(Default)]
+struct Pending {
+    /// None: no attach since the last commit; Some(None): a null buffer.
+    buffer: Option<Option<u32>>,
+    /// The damaged rows (buffer and surface coordinates are the same at
+    /// scale 1 without a transform), from and to (exclusive).
+    damage: Option<(i64, i64)>,
+    frames: Vec<u32>,
+}
+
+#[derive(Default)]
+struct Surface {
+    pending: Pending,
+    /// Its xdg_surface.
+    xdg: Option<u32>,
+    /// The window showing it, while mapped.
+    window: Option<u32>,
+    /// The size of the buffer last shown.
+    size: (u32, u32),
+}
+
+struct XdgSurface {
+    /// 0 once the wl_surface is gone.
+    surface: u32,
+    /// Its xdg_toplevel.
+    toplevel: Option<u32>,
+    /// The serial of the last configure sent.
+    sent: Option<u32>,
+    /// A configure was acked since the role was given (or since unmapped).
+    acked: bool,
+}
+
+struct Toplevel {
+    xdg: u32,
+    title: Vec<u8>,
+    app_id: Vec<u8>,
+}
+
+enum Kind<F> {
+    Display,
+    Registry,
+    Callback,
+    Compositor,
+    Shm,
+    Pool(Pool<F>),
+    Buffer(Buffer<F>),
+    Surface(Surface),
+    Region,
+    Output,
+    WmBase,
+    XdgSurface(XdgSurface),
+    Toplevel(Toplevel),
+}
+
+struct Object<F> {
+    iface: &'static Interface,
+    version: u32,
+    kind: Kind<F>,
+}
+
+/// A client's protocol state (see the module's doc).
+pub struct Client<F> {
+    objects: Vec<Option<Object<F>>>,
+    input: Vec<u8>,
+    filled: usize,
+    fds: VecDeque<F>,
+    output: Vec<u8>,
+    serial: u32,
+    /// Requests handled (the state dump).
+    pub requests: u64,
+}
+
+/// Arguments as WAYLAND_DEBUG=1 shows them.
+struct ShowArgs<'a, F> {
+    objects: &'a [Option<Object<F>>],
+    sig: &'static Message,
+    args: &'a [Arg<'a>],
+}
+
+fn fixed(f: &mut fmt::Formatter<'_>, v: i32) -> fmt::Result {
+    let sign = if v < 0 { "-" } else { "" };
+    let a = v.unsigned_abs();
+    write!(f, "{sign}{}.{:03}", a >> 8, (a & 0xff) * 1000 / 256)
+}
+
+impl<F> fmt::Display for ShowArgs<'_, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, (arg, spec)) in self.args.iter().zip(self.sig.args).enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            match *arg {
+                Arg::Int(v) => write!(f, "{v}")?,
+                Arg::Uint(v) => write!(f, "{v}")?,
+                Arg::Fixed(v) => fixed(f, v)?,
+                Arg::String(Some(s)) => write!(f, "\"{}\"", Bytes(s))?,
+                Arg::String(None) | Arg::Object(None) => f.write_str("nil")?,
+                Arg::Object(Some(id)) => {
+                    let name = self
+                        .objects
+                        .get(id as usize)
+                        .and_then(|o| o.as_ref())
+                        .map_or("[unknown]", |o| o.iface.name);
+                    write!(f, "{name}#{id}")?
+                }
+                Arg::NewId(id) => {
+                    write!(f, "new id {}#{id}", spec.interface.unwrap_or("[unknown]"))?
+                }
+                Arg::UntypedNewId { interface, version, id } => {
+                    let name = Bytes(interface);
+                    write!(f, "\"{name}\", {version}, new id {name}#{id}")?
+                }
+                Arg::Array(a) => write!(f, "array[{}]", a.len())?,
+                Arg::Fd => f.write_str("fd")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<F> Client<F> {
+    /// A client with only wl_display (id 1).
+    pub fn new() -> core::result::Result<Client<F>, crate::mm::heap::AllocError> {
+        let mut input = Vec::new();
+        input.try_reserve_exact(INPUT).map_err(|_| crate::mm::heap::AllocError)?;
+        input.resize(INPUT, 0);
+        let mut objects = Vec::new();
+        objects.try_reserve(16).map_err(|_| crate::mm::heap::AllocError)?;
+        objects.try_push(None)?;
+        objects.try_push(Some(Object { iface: WL_DISPLAY, version: 1, kind: Kind::Display }))?;
+        Ok(Client {
+            objects,
+            input,
+            filled: 0,
+            fds: VecDeque::new(),
+            output: Vec::new(),
+            serial: 0,
+            requests: 0,
+        })
+    }
+
+    /// Where the next bytes read go (never empty: a message is at most a
+    /// quarter of it, and whole ones are taken out after each read).
+    pub fn input_room(&mut self) -> &mut [u8] {
+        &mut self.input[self.filled..]
+    }
+
+    /// `n` bytes were read into `input_room`.
+    pub fn filled(&mut self, n: usize) {
+        self.filled = (self.filled + n).min(self.input.len());
+    }
+
+    /// The events waiting to be written.
+    pub fn output(&self) -> &[u8] {
+        &self.output
+    }
+
+    /// `n` bytes of the output were written.
+    pub fn written(&mut self, n: usize) {
+        let n = n.min(self.output.len());
+        self.output.copy_within(n.., 0);
+        self.output.truncate(self.output.len() - n);
+    }
+
+    /// How many objects it has.
+    pub fn object_count(&self) -> usize {
+        self.objects.iter().flatten().count()
+    }
+
+    /// A descriptor that came with the bytes read last.
+    pub fn push_fd<H: Host<Fd = F>>(&mut self, host: &mut H, fd: F) -> Result {
+        if self.fds.len() >= MAX_QUEUED_FDS {
+            return Err(self.fail(
+                host,
+                1,
+                DISPLAY_IMPLEMENTATION,
+                format_args!("more than {MAX_QUEUED_FDS} file descriptors waiting"),
+            ));
+        }
+        if self.fds.try_reserve(1).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        self.fds.push_back(fd);
+        Ok(())
+    }
+
+    /// The client is gone: its windows go (its objects with it).
+    pub fn end<H: Host<Fd = F>>(&mut self, host: &mut H) {
+        for o in self.objects.iter_mut().flatten() {
+            if let Kind::Surface(s) = &mut o.kind
+                && let Some(w) = s.window.take()
+            {
+                host.window_destroy(w);
+            }
+        }
+        self.objects.clear();
+        self.fds.clear();
+    }
+
+    /// Its objects for the state dump, one per line.
+    pub fn describe(&self, out: &mut dyn FnMut(fmt::Arguments<'_>)) {
+        for (id, o) in self.objects.iter().enumerate() {
+            let Some(o) = o else { continue };
+            let (name, v) = (o.iface.name, o.version);
+            match &o.kind {
+                Kind::Surface(s) => out(format_args!(
+                    "{name}#{id} v{v}: window {:?}, size {}x{}, xdg {:?}, {} frame callbacks pending",
+                    s.window,
+                    s.size.0,
+                    s.size.1,
+                    s.xdg,
+                    s.pending.frames.len()
+                )),
+                Kind::Pool(p) => out(format_args!("{name}#{id} v{v}: {} bytes", p.size)),
+                Kind::Buffer(b) => out(format_args!(
+                    "{name}#{id} v{v}: {}x{}, stride {}, offset {}",
+                    b.width, b.height, b.stride, b.offset
+                )),
+                Kind::XdgSurface(x) => out(format_args!(
+                    "{name}#{id} v{v}: surface {}, toplevel {:?}, configure sent {:?}, acked {}",
+                    x.surface, x.toplevel, x.sent, x.acked
+                )),
+                Kind::Toplevel(t) => out(format_args!(
+                    "{name}#{id} v{v}: \"{}\" (app id \"{}\")",
+                    Bytes(&t.title),
+                    Bytes(&t.app_id)
+                )),
+                _ => out(format_args!("{name}#{id} v{v}")),
+            }
+        }
+    }
+
+    fn next_serial(&mut self) -> u32 {
+        self.serial = self.serial.wrapping_add(1);
+        self.serial
+    }
+
+    fn object(&self, id: u32) -> Option<&Object<F>> {
+        self.objects.get(id as usize).and_then(|o| o.as_ref())
+    }
+
+    fn object_mut(&mut self, id: u32) -> Option<&mut Object<F>> {
+        self.objects.get_mut(id as usize).and_then(|o| o.as_mut())
+    }
+
+    fn surface(&mut self, id: u32) -> Option<&mut Surface> {
+        match self.object_mut(id) {
+            Some(Object { kind: Kind::Surface(s), .. }) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn xdg(&mut self, id: u32) -> Option<&mut XdgSurface> {
+        match self.object_mut(id) {
+            Some(Object { kind: Kind::XdgSurface(x), .. }) => Some(x),
+            _ => None,
+        }
+    }
+
+    fn toplevel(&mut self, id: u32) -> Option<&mut Toplevel> {
+        match self.object_mut(id) {
+            Some(Object { kind: Kind::Toplevel(t), .. }) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// A protocol error on `object`: wl_display.error goes out, the client
+    /// ends.
+    fn fail<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        object: u32,
+        code: u32,
+        message: fmt::Arguments<'_>,
+    ) -> End {
+        let mut text = Text::new();
+        let _ = text.write_fmt(message);
+        let interface = self.object(object).map_or("?", |o| o.iface.name);
+        host.note(Note::Error { object, interface, code, message: text.as_str() });
+        let args = [
+            Arg::Object(Some(object)),
+            Arg::Uint(code),
+            Arg::String(Some(text.as_str().as_bytes())),
+        ];
+        // The client ends whether or not the error fits.
+        let _ = self.event(host, 1, WL_DISPLAY, 0, &args);
+        End::Error
+    }
+
+    fn out_of_memory<H: Host<Fd = F>>(&mut self, host: &mut H) -> End {
+        self.fail(host, 1, DISPLAY_NO_MEMORY, format_args!("no memory"))
+    }
+
+    /// Appends event `opcode` of `iface` on `object`.
+    fn event<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        object: u32,
+        iface: &'static Interface,
+        opcode: u16,
+        args: &[Arg<'_>],
+    ) -> Result {
+        let Some(sig) = iface.events.get(usize::from(opcode)) else { return Err(End::Error) };
+        let mut buf = [0u8; MAX_MESSAGE];
+        // Our own events fit their signatures; a title or message too long
+        // for a message is cut by the caller.
+        let Ok((n, _)) = wl_abi::encode(object, opcode, sig, args, &mut buf) else {
+            return Err(End::Error);
+        };
+        if self.output.len() + n > MAX_OUTPUT {
+            return Err(End::OutputFull);
+        }
+        if self.output.try_extend_from_slice(&buf[..n]).is_err() {
+            return Err(End::OutputFull);
+        }
+        if host.tracing() {
+            let shown = ShowArgs { objects: &self.objects, sig, args };
+            host.trace(format_args!(" -> {}#{object}.{}({shown})", iface.name, sig.name));
+        }
+        Ok(())
+    }
+
+    /// Frees `id` and tells the client (wl_display.delete_id).
+    fn delete<H: Host<Fd = F>>(&mut self, host: &mut H, id: u32) -> Result {
+        if let Some(slot) = self.objects.get_mut(id as usize) {
+            *slot = None;
+        }
+        self.event(host, 1, WL_DISPLAY, 1, &[Arg::Uint(id)])
+    }
+
+    /// Makes object `id` (a new_id the client chose).
+    fn insert<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        id: u32,
+        iface: &'static Interface,
+        version: u32,
+        kind: Kind<F>,
+    ) -> Result {
+        if id >= SERVER_IDS {
+            return Err(self.fail(
+                host,
+                1,
+                DISPLAY_INVALID_OBJECT,
+                format_args!("invalid new id {id}"),
+            ));
+        }
+        if id > MAX_OBJECTS {
+            return Err(self.fail(
+                host,
+                1,
+                DISPLAY_NO_MEMORY,
+                format_args!("new id {id}: at most {MAX_OBJECTS} objects"),
+            ));
+        }
+        let object = Some(Object { iface, version, kind });
+        let i = id as usize;
+        let len = self.objects.len();
+        match self.objects.get_mut(i) {
+            Some(slot @ None) => *slot = object,
+            Some(Some(_)) => {
+                return Err(self.fail(
+                    host,
+                    1,
+                    DISPLAY_INVALID_OBJECT,
+                    format_args!("new id {id} is in use"),
+                ));
+            }
+            None if i == len => {
+                if self.objects.try_push(object).is_err() {
+                    return Err(self.out_of_memory(host));
+                }
+            }
+            None => {
+                return Err(self.fail(
+                    host,
+                    1,
+                    DISPLAY_INVALID_OBJECT,
+                    format_args!("invalid new id {id}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles every whole message in the input.
+    pub fn dispatch<H: Host<Fd = F>>(&mut self, host: &mut H) -> Result {
+        let mut at = 0;
+        let mut msg = [0u8; MAX_MESSAGE];
+        let result = loop {
+            let rest = &self.input[at..self.filled];
+            if rest.len() < wl_abi::HEADER {
+                break Ok(());
+            }
+            let header = match Header::parse(rest) {
+                Ok(h) => h,
+                Err(e) => {
+                    break Err(self.fail(
+                        host,
+                        1,
+                        DISPLAY_INVALID_METHOD,
+                        format_args!("malformed message header ({e:?})"),
+                    ));
+                }
+            };
+            let size = usize::from(header.size);
+            if rest.len() < size {
+                break Ok(());
+            }
+            msg[..size].copy_from_slice(&rest[..size]);
+            at += size;
+            self.requests += 1;
+            if let Err(e) = self.request(host, header, &msg[..size]) {
+                break Err(e);
+            }
+        };
+        self.input.copy_within(at..self.filled, 0);
+        self.filled -= at;
+        result
+    }
+
+    /// One request.
+    fn request<H: Host<Fd = F>>(&mut self, host: &mut H, header: Header, msg: &[u8]) -> Result {
+        let id = header.object;
+        let Some(o) = self.object(id) else {
+            return Err(self.fail(
+                host,
+                1,
+                DISPLAY_INVALID_OBJECT,
+                format_args!("invalid object {id}"),
+            ));
+        };
+        let (iface, version) = (o.iface, o.version);
+        let op = header.opcode;
+        let sig = match iface.requests.get(usize::from(op)) {
+            Some(sig) if sig.since <= version => sig,
+            _ => {
+                return Err(self.fail(
+                    host,
+                    1,
+                    DISPLAY_INVALID_METHOD,
+                    format_args!("invalid method {op}, object {}@{id}", iface.name),
+                ));
+            }
+        };
+        let mut args = [Arg::Fd; MAX_ARGS];
+        let used = match wl_abi::decode(msg, sig, self.fds.len(), &mut args) {
+            Ok((_, used)) => used,
+            Err(e) => {
+                return Err(self.fail(
+                    host,
+                    1,
+                    DISPLAY_INVALID_METHOD,
+                    format_args!("invalid arguments for {}@{id}.{} ({e:?})", iface.name, sig.name),
+                ));
+            }
+        };
+        let args = &args[..sig.args.len()];
+        if host.tracing() {
+            let shown = ShowArgs { objects: &self.objects, sig, args };
+            host.trace(format_args!("{}#{id}.{}({shown})", iface.name, sig.name));
+        }
+        // The descriptors it takes (only wl_shm.create_pool takes one).
+        let mut fd = None;
+        for _ in 0..used {
+            if let Some(f) = self.fds.pop_front()
+                && fd.is_none()
+            {
+                fd = Some(f);
+            }
+        }
+        // Object arguments name live objects of the interface the protocol
+        // gives them (libwayland checks the same).
+        for (arg, spec) in args.iter().zip(sig.args) {
+            if let (Arg::Object(Some(other)), Some(want)) = (*arg, spec.interface) {
+                let have = self.object(other).map(|o| o.iface.name);
+                if have != Some(want) {
+                    return Err(self.fail(
+                        host,
+                        1,
+                        DISPLAY_INVALID_OBJECT,
+                        format_args!(
+                            "invalid object {other} for {}@{id}.{}: not a {want}",
+                            iface.name, sig.name
+                        ),
+                    ));
+                }
+            }
+        }
+        let tag = match self.object(id).map(|o| &o.kind) {
+            Some(Kind::Display) => Tag::Display,
+            Some(Kind::Registry) => Tag::Registry,
+            Some(Kind::Callback) => Tag::Callback,
+            Some(Kind::Compositor) => Tag::Compositor,
+            Some(Kind::Shm) => Tag::Shm,
+            Some(Kind::Pool(_)) => Tag::Pool,
+            Some(Kind::Buffer(_)) => Tag::Buffer,
+            Some(Kind::Surface(_)) => Tag::Surface,
+            Some(Kind::Region) => Tag::Region,
+            Some(Kind::Output) => Tag::Output,
+            Some(Kind::WmBase) => Tag::WmBase,
+            Some(Kind::XdgSurface(_)) => Tag::XdgSurface,
+            Some(Kind::Toplevel(_)) => Tag::Toplevel,
+            None => return Ok(()),
+        };
+        let r = Req { id, version, iface, sig, op, args, fd };
+        match tag {
+            Tag::Display => self.display(host, r),
+            Tag::Registry => self.registry(host, r),
+            // wl_callback has no requests: refused above.
+            Tag::Callback => Ok(()),
+            Tag::Compositor => self.compositor(host, r),
+            Tag::Shm => self.shm(host, r),
+            Tag::Pool => self.pool(host, r),
+            Tag::Buffer => self.buffer(host, r),
+            Tag::Surface => self.surface_request(host, r),
+            Tag::Region | Tag::Output => {
+                // Regions are accepted and not used yet; wl_output's only
+                // request is release. Both: destroy on their destructor.
+                if sig.destructor {
+                    self.delete(host, id)
+                } else {
+                    host.note(Note::Ignored { interface: iface.name, request: sig.name });
+                    Ok(())
+                }
+            }
+            Tag::WmBase => self.wm_base(host, r),
+            Tag::XdgSurface => self.xdg_surface(host, r),
+            Tag::Toplevel => self.toplevel_request(host, r),
+        }
+    }
+
+    /// A request gala does not implement: ledgered and refused.
+    fn missing<H: Host<Fd = F>>(&mut self, host: &mut H, r: &Req<'_, F>) -> Result {
+        host.note(Note::Missing { interface: r.iface.name, request: r.sig.name });
+        Err(self.fail(
+            host,
+            r.id,
+            DISPLAY_IMPLEMENTATION,
+            format_args!("{}.{} is not implemented by gala yet", r.iface.name, r.sig.name),
+        ))
+    }
+
+    fn display<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            // sync(callback)
+            (0, [Arg::NewId(cb)]) => {
+                self.insert(host, *cb, WL_CALLBACK, 1, Kind::Callback)?;
+                let serial = self.next_serial();
+                self.event(host, *cb, WL_CALLBACK, 0, &[Arg::Uint(serial)])?;
+                self.delete(host, *cb)
+            }
+            // get_registry(registry)
+            (1, [Arg::NewId(reg)]) => {
+                self.insert(host, *reg, WL_REGISTRY, 1, Kind::Registry)?;
+                for (i, (g, v)) in globals().into_iter().enumerate() {
+                    let args = [
+                        Arg::Uint(i as u32 + 1),
+                        Arg::String(Some(g.name.as_bytes())),
+                        Arg::Uint(v),
+                    ];
+                    self.event(host, *reg, WL_REGISTRY, 0, &args)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn registry<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let [Arg::Uint(name), Arg::UntypedNewId { interface, version, id }] = *r.args else {
+            return Ok(());
+        };
+        let global = globals().get((name as usize).wrapping_sub(1)).copied();
+        let Some((g, offered)) = global.filter(|(g, _)| g.name.as_bytes() == interface) else {
+            return Err(self.fail(
+                host,
+                r.id,
+                DISPLAY_INVALID_OBJECT,
+                format_args!("invalid global {} ({name})", Bytes(interface)),
+            ));
+        };
+        if version == 0 || version > offered {
+            return Err(self.fail(
+                host,
+                r.id,
+                DISPLAY_INVALID_OBJECT,
+                format_args!(
+                    "invalid version for global {} ({name}): have {offered}, wanted {version}",
+                    g.name
+                ),
+            ));
+        }
+        let kind = if core::ptr::eq(g, WL_COMPOSITOR) {
+            Kind::Compositor
+        } else if core::ptr::eq(g, WL_SHM) {
+            Kind::Shm
+        } else if core::ptr::eq(g, XDG_WM_BASE) {
+            Kind::WmBase
+        } else {
+            Kind::Output
+        };
+        let output = matches!(kind, Kind::Output);
+        let shm = matches!(kind, Kind::Shm);
+        self.insert(host, id, g, version, kind)?;
+        if shm {
+            for format in [ARGB8888, XRGB8888] {
+                self.event(host, id, WL_SHM, 0, &[Arg::Uint(format)])?;
+            }
+        }
+        if output {
+            self.output_bound(host, id, version)?;
+        }
+        Ok(())
+    }
+
+    /// wl_output's description of the screen, on bind.
+    fn output_bound<H: Host<Fd = F>>(&mut self, host: &mut H, id: u32, version: u32) -> Result {
+        let (w, h) = host.screen();
+        let (w, h) = (w as i32, h as i32);
+        // geometry(x, y, physical size unknown, subpixel unknown, make,
+        // model, transform normal)
+        let geometry = [
+            Arg::Int(0),
+            Arg::Int(0),
+            Arg::Int(0),
+            Arg::Int(0),
+            Arg::Int(0),
+            Arg::String(Some(b"gala")),
+            Arg::String(Some(b"shasha")),
+            Arg::Int(0),
+        ];
+        self.event(host, id, WL_OUTPUT, 0, &geometry)?;
+        // mode(current | preferred, w, h, 60 Hz)
+        self.event(
+            host,
+            id,
+            WL_OUTPUT,
+            1,
+            &[Arg::Uint(3), Arg::Int(w), Arg::Int(h), Arg::Int(60_000)],
+        )?;
+        if version >= 2 {
+            self.event(host, id, WL_OUTPUT, 3, &[Arg::Int(1)])?;
+        }
+        if version >= 4 {
+            self.event(host, id, WL_OUTPUT, 4, &[Arg::String(Some(b"gala-1"))])?;
+            self.event(host, id, WL_OUTPUT, 5, &[Arg::String(Some(b"shasha's screen"))])?;
+        }
+        if version >= 2 {
+            self.event(host, id, WL_OUTPUT, 2, &[])?;
+        }
+        Ok(())
+    }
+
+    fn compositor<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            (0, [Arg::NewId(id)]) => {
+                self.insert(host, *id, WL_SURFACE, r.version, Kind::Surface(Surface::default()))
+            }
+            (1, [Arg::NewId(id)]) => self.insert(host, *id, WL_REGION, 1, Kind::Region),
+            _ => Ok(()),
+        }
+    }
+
+    fn shm<H: Host<Fd = F>>(&mut self, host: &mut H, mut r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            // create_pool(id, fd, size)
+            (0, [Arg::NewId(id), Arg::Fd, Arg::Int(size)]) => {
+                let (id, size) = (*id, *size);
+                let fd = match r.fd.take() {
+                    Some(fd) if host.readable(&fd) => fd,
+                    _ => {
+                        return Err(self.fail(
+                            host,
+                            r.id,
+                            SHM_INVALID_FD,
+                            format_args!("the pool's file descriptor is not a readable file"),
+                        ));
+                    }
+                };
+                if size <= 0 || size as u64 > MAX_POOL {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        SHM_INVALID_STRIDE,
+                        format_args!("invalid pool size {size} (at most {MAX_POOL})"),
+                    ));
+                }
+                self.insert(host, id, WL_SHM_POOL, 1, Kind::Pool(Pool { fd, size: size as u64 }))
+            }
+            // release (version 2)
+            (1, []) => self.delete(host, r.id),
+            _ => Ok(()),
+        }
+    }
+
+    fn pool<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            // create_buffer(id, offset, width, height, stride, format)
+            (
+                0,
+                [
+                    Arg::NewId(id),
+                    Arg::Int(offset),
+                    Arg::Int(width),
+                    Arg::Int(height),
+                    Arg::Int(stride),
+                    Arg::Uint(format),
+                ],
+            ) => {
+                let (id, offset, width, height, stride, format) =
+                    (*id, *offset, *width, *height, *stride, *format);
+                if format != ARGB8888 && format != XRGB8888 {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        SHM_INVALID_FORMAT,
+                        format_args!("invalid format {format:#x}"),
+                    ));
+                }
+                let Some(Object { kind: Kind::Pool(pool), .. }) = self.object(r.id) else {
+                    return Ok(());
+                };
+                let size = pool.size;
+                let fits = offset >= 0
+                    && width > 0
+                    && height > 0
+                    && i64::from(stride) >= 4 * i64::from(width)
+                    && offset as u64 + stride as u64 * height as u64 <= size;
+                if !fits {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        SHM_INVALID_STRIDE,
+                        format_args!(
+                            "invalid buffer: offset {offset}, {width}x{height}, stride {stride} in a pool of {size} bytes"
+                        ),
+                    ));
+                }
+                let Some(fd) = self.object(r.id).and_then(|o| match &o.kind {
+                    Kind::Pool(p) => Some(&p.fd),
+                    _ => None,
+                }) else {
+                    return Ok(());
+                };
+                let Some(fd) = host.share(fd) else { return Err(self.out_of_memory(host)) };
+                let buffer = Buffer {
+                    fd,
+                    offset: offset as u64,
+                    width: width as u32,
+                    height: height as u32,
+                    stride: stride as u32,
+                };
+                self.insert(host, id, WL_BUFFER, 1, Kind::Buffer(buffer))
+            }
+            // destroy: the buffers keep the memory.
+            (1, []) => self.delete(host, r.id),
+            // resize(size): only larger.
+            (2, [Arg::Int(size)]) => {
+                let size = *size;
+                let Some(Object { kind: Kind::Pool(pool), .. }) = self.object_mut(r.id) else {
+                    return Ok(());
+                };
+                if size <= 0 || (size as u64) < pool.size || size as u64 > MAX_POOL {
+                    let had = pool.size;
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        SHM_INVALID_STRIDE,
+                        format_args!("invalid pool size {size} (was {had}; it may only grow)"),
+                    ));
+                }
+                pool.size = size as u64;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn buffer<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        if r.op != 0 {
+            return Ok(());
+        }
+        // destroy: a surface's pending attach of it becomes null, as
+        // libwayland's destroy listener makes it.
+        for o in self.objects.iter_mut().flatten() {
+            if let Kind::Surface(s) = &mut o.kind
+                && s.pending.buffer == Some(Some(r.id))
+            {
+                s.pending.buffer = Some(None);
+            }
+        }
+        self.delete(host, r.id)
+    }
+
+    fn surface_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let sid = r.id;
+        match (r.op, r.args) {
+            // destroy
+            (0, []) => {
+                let Some(s) = self.surface(sid) else { return Ok(()) };
+                let window = s.window.take();
+                let frames = core::mem::take(&mut s.pending.frames);
+                let xdg = s.xdg;
+                if let Some(w) = window {
+                    host.window_destroy(w);
+                }
+                if let Some(x) = xdg.and_then(|x| self.xdg(x)) {
+                    x.surface = 0;
+                }
+                for cb in frames {
+                    self.delete(host, cb)?;
+                }
+                self.delete(host, sid)
+            }
+            // attach(buffer, x, y)
+            (1, [Arg::Object(buffer), Arg::Int(x), Arg::Int(y)]) => {
+                if r.version >= 5 && (*x != 0 || *y != 0) {
+                    return Err(self.fail(
+                        host,
+                        sid,
+                        SURFACE_INVALID_OFFSET,
+                        format_args!("attach with an offset ({x}, {y}); use wl_surface.offset"),
+                    ));
+                }
+                if *x != 0 || *y != 0 {
+                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                }
+                if let Some(s) = self.surface(sid) {
+                    s.pending.buffer = Some(*buffer);
+                }
+                Ok(())
+            }
+            // damage(x, y, w, h), damage_buffer(x, y, w, h)
+            (2 | 9, [Arg::Int(_), Arg::Int(y), Arg::Int(_), Arg::Int(h)]) => {
+                if *h > 0
+                    && let Some(s) = self.surface(sid)
+                {
+                    let (from, to) = (i64::from(*y), i64::from(*y) + i64::from(*h));
+                    s.pending.damage = Some(match s.pending.damage {
+                        Some((a, b)) => (a.min(from), b.max(to)),
+                        None => (from, to),
+                    });
+                }
+                Ok(())
+            }
+            // frame(callback)
+            (3, [Arg::NewId(cb)]) => {
+                self.insert(host, *cb, WL_CALLBACK, 1, Kind::Callback)?;
+                let pushed = self.surface(sid).map(|s| s.pending.frames.try_push(*cb));
+                if let Some(Err(_)) = pushed {
+                    return Err(self.out_of_memory(host));
+                }
+                Ok(())
+            }
+            // set_opaque_region, set_input_region: not used yet.
+            (4 | 5, _) => {
+                host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                Ok(())
+            }
+            (6, []) => self.commit(host, sid),
+            // set_buffer_transform(transform)
+            (7, [Arg::Int(t)]) => {
+                if !(0..=7).contains(t) {
+                    return Err(self.fail(
+                        host,
+                        sid,
+                        SURFACE_INVALID_TRANSFORM,
+                        format_args!("invalid transform {t}"),
+                    ));
+                }
+                if *t != 0 {
+                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                }
+                Ok(())
+            }
+            // set_buffer_scale(scale)
+            (8, [Arg::Int(scale)]) => {
+                if *scale < 1 {
+                    return Err(self.fail(
+                        host,
+                        sid,
+                        SURFACE_INVALID_SCALE,
+                        format_args!("invalid scale {scale}"),
+                    ));
+                }
+                if *scale != 1 {
+                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                }
+                Ok(())
+            }
+            // offset(x, y)
+            (10, [Arg::Int(x), Arg::Int(y)]) => {
+                if *x != 0 || *y != 0 {
+                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// wl_surface.commit: the pending state applies (see the module's doc).
+    fn commit<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32) -> Result {
+        let Some(s) = self.surface(sid) else { return Ok(()) };
+        let attach = s.pending.buffer.take();
+        let damage = s.pending.damage.take();
+        let frames = core::mem::take(&mut s.pending.frames);
+        let xdg = s.xdg;
+        let toplevel = xdg.and_then(|x| match self.object(x) {
+            Some(Object { kind: Kind::XdgSurface(x), .. }) => Some(x.toplevel),
+            _ => None,
+        });
+        let mut shown = None;
+        match (xdg, toplevel) {
+            (Some(x), Some(Some(t))) => {
+                let (acked, sent) = match self.xdg(x) {
+                    Some(xs) => (xs.acked, xs.sent),
+                    None => (false, None),
+                };
+                if !acked {
+                    if matches!(attach, Some(Some(_))) {
+                        return Err(self.fail(
+                            host,
+                            x,
+                            XDG_SURFACE_UNCONFIGURED_BUFFER,
+                            format_args!(
+                                "a buffer was attached before the first configure was acked"
+                            ),
+                        ));
+                    }
+                    if sent.is_none() {
+                        self.configure(host, x, t)?;
+                    }
+                } else {
+                    match attach {
+                        Some(Some(b)) => {
+                            shown = self.show(host, sid, t, b, damage)?;
+                            self.release(host, b)?;
+                        }
+                        Some(None) => self.unmap(host, sid, x),
+                        None => {}
+                    }
+                }
+            }
+            (Some(x), _) => {
+                return Err(self.fail(
+                    host,
+                    x,
+                    XDG_SURFACE_NOT_CONSTRUCTED,
+                    format_args!("commit of an xdg_surface without a role"),
+                ));
+            }
+            (None, _) => {
+                // No role: nothing shows it; the buffer is free again.
+                if let Some(Some(b)) = attach {
+                    self.release(host, b)?;
+                }
+            }
+        }
+        let window = self.surface(sid).and_then(|s| s.window);
+        host.note(Note::Commit {
+            surface: sid,
+            buffer: shown.map(|(size, _)| size),
+            rows: shown.and_then(|(_, rows)| rows),
+            window,
+        });
+        let now = host.now_ms();
+        for cb in frames {
+            if self.object(cb).is_some() {
+                self.event(host, cb, WL_CALLBACK, 0, &[Arg::Uint(now)])?;
+                self.delete(host, cb)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// wl_buffer.release (if the client has not destroyed it).
+    fn release<H: Host<Fd = F>>(&mut self, host: &mut H, b: u32) -> Result {
+        if matches!(self.object(b), Some(Object { kind: Kind::Buffer(_), .. })) {
+            self.event(host, b, WL_BUFFER, 0, &[])?;
+        }
+        Ok(())
+    }
+
+    /// The toplevel's configure: bounds and capabilities first where its
+    /// version has them, then the size (0x0: the client chooses) and the
+    /// xdg_surface's serial.
+    fn configure<H: Host<Fd = F>>(&mut self, host: &mut H, x: u32, t: u32) -> Result {
+        let version = self.object(t).map_or(1, |o| o.version);
+        if version >= 4 {
+            let (w, h) = host.screen();
+            self.event(host, t, XDG_TOPLEVEL, 2, &[Arg::Int(w as i32), Arg::Int(h as i32)])?;
+        }
+        if version >= 5 {
+            // None of window_menu, maximize, fullscreen, minimize yet.
+            self.event(host, t, XDG_TOPLEVEL, 3, &[Arg::Array(&[])])?;
+        }
+        self.event(host, t, XDG_TOPLEVEL, 0, &[Arg::Int(0), Arg::Int(0), Arg::Array(&[])])?;
+        let serial = self.next_serial();
+        self.event(host, x, XDG_SURFACE, 0, &[Arg::Uint(serial)])?;
+        if let Some(xs) = self.xdg(x) {
+            xs.sent = Some(serial);
+        }
+        Ok(())
+    }
+
+    /// Shows buffer `b` on surface `sid` (toplevel `t`): maps its window
+    /// if it has none, then copies the rows. The buffer's size and the
+    /// rows copied.
+    fn show<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        sid: u32,
+        t: u32,
+        b: u32,
+        damage: Option<(i64, i64)>,
+    ) -> Result<Option<Shown>> {
+        let (width, height) = match self.object(b) {
+            Some(Object { kind: Kind::Buffer(buf), .. }) => (buf.width, buf.height),
+            _ => return Ok(None),
+        };
+        let mut title = [0u8; TITLE_MAX];
+        let n = match self.toplevel(t) {
+            Some(top) => {
+                title[..top.title.len()].copy_from_slice(&top.title);
+                top.title.len()
+            }
+            None => 0,
+        };
+        let Some(s) = self.surface(sid) else { return Ok(None) };
+        let (had, resized) = (s.window, s.size != (width, height));
+        s.size = (width, height);
+        let window = match had {
+            Some(w) => {
+                if resized {
+                    host.window_resize(w, width, height);
+                }
+                Some(w)
+            }
+            None => {
+                let w = host.window_create(&title[..n], width, height);
+                host.note(Note::Mapped { surface: sid, window: w });
+                w
+            }
+        };
+        if let Some(s) = self.surface(sid) {
+            s.window = window;
+        }
+        // A new or resized window gets every row, else the damaged ones.
+        let rows = if had.is_none() || resized {
+            Some((0, height))
+        } else {
+            damage.and_then(|(from, to)| {
+                let (from, to) = (from.clamp(0, height.into()), to.clamp(0, height.into()));
+                (from < to).then_some((from as u32, to as u32))
+            })
+        };
+        let Some(w) = window else { return Ok(Some(((width, height), None))) };
+        if let Some((from, to)) = rows {
+            self.copy(host, b, w, from, to)?;
+        }
+        Ok(Some(((width, height), rows)))
+    }
+
+    /// Copies rows `from..to` of buffer `b` into window `w`.
+    fn copy<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        b: u32,
+        w: u32,
+        from: u32,
+        to: u32,
+    ) -> Result {
+        let Some(Object { kind: Kind::Buffer(buf), .. }) = self.object(b) else { return Ok(()) };
+        let (width, stride, offset) = (buf.width, buf.stride, buf.offset);
+        let row_bytes = 4 * width as usize;
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut pixels: Vec<u32> = Vec::new();
+        let chunk = (to - from).min(ROWS_AT_ONCE) as usize;
+        if bytes.try_reserve_exact(row_bytes).is_err()
+            || pixels.try_reserve_exact(chunk * width as usize).is_err()
+        {
+            return Err(self.out_of_memory(host));
+        }
+        bytes.resize(row_bytes, 0);
+        let mut y = from;
+        while y < to {
+            let rows = (to - y).min(ROWS_AT_ONCE);
+            pixels.clear();
+            for row in y..y + rows {
+                let at = offset + u64::from(row) * u64::from(stride);
+                let Some(Object { kind: Kind::Buffer(buf), .. }) = self.object(b) else {
+                    return Ok(());
+                };
+                if !host.read(&buf.fd, at, &mut bytes) {
+                    return Err(self.fail(
+                        host,
+                        b,
+                        SHM_INVALID_FD,
+                        format_args!("error accessing SHM buffer (row {row} past the file's end)"),
+                    ));
+                }
+                // XRGB8888 and ARGB8888 are 0xAARRGGBB little-endian;
+                // shasha's pixels are 0x00RRGGBB (alpha not composed yet).
+                pixels.extend(
+                    bytes.chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], 0])),
+                );
+            }
+            host.window_present(w, y, width, rows, &pixels);
+            y += rows;
+        }
+        Ok(())
+    }
+
+    /// A null buffer committed: the window goes and the surface waits for
+    /// a new initial commit (and configure).
+    fn unmap<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32, x: u32) {
+        if let Some(s) = self.surface(sid) {
+            s.size = (0, 0);
+            if let Some(w) = s.window.take() {
+                host.window_destroy(w);
+            }
+        }
+        if let Some(xs) = self.xdg(x) {
+            xs.sent = None;
+            xs.acked = false;
+        }
+    }
+
+    fn wm_base<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        match (r.op, r.args) {
+            (0, []) => self.delete(host, r.id),
+            // create_positioner: popups are not there yet.
+            (1, _) => self.missing(host, &r),
+            // get_xdg_surface(id, surface)
+            (2, [Arg::NewId(id), Arg::Object(Some(sid))]) => {
+                let (id, sid) = (*id, *sid);
+                let Some(s) = self.surface(sid) else { return Ok(()) };
+                if s.xdg.is_some() {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        WM_BASE_ROLE,
+                        format_args!("wl_surface@{sid} already has an xdg_surface"),
+                    ));
+                }
+                if matches!(s.pending.buffer, Some(Some(_))) || s.window.is_some() {
+                    return Err(self.fail(
+                        host,
+                        r.id,
+                        WM_BASE_INVALID_SURFACE_STATE,
+                        format_args!("wl_surface@{sid} has a buffer attached"),
+                    ));
+                }
+                let x = XdgSurface { surface: sid, toplevel: None, sent: None, acked: false };
+                self.insert(host, id, XDG_SURFACE, r.version, Kind::XdgSurface(x))?;
+                if let Some(s) = self.surface(sid) {
+                    s.xdg = Some(id);
+                }
+                Ok(())
+            }
+            // pong(serial): no pings are sent yet.
+            (3, _) => Ok(()),
+            _ => Ok(()),
+        }
+    }
+
+    fn xdg_surface<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let x = r.id;
+        let Some(xs) = self.xdg(x) else { return Ok(()) };
+        let (surface, toplevel, sent) = (xs.surface, xs.toplevel, xs.sent);
+        match (r.op, r.args) {
+            (0, []) => {
+                if toplevel.is_some() {
+                    return Err(self.fail(
+                        host,
+                        x,
+                        XDG_SURFACE_DEFUNCT_ROLE_OBJECT,
+                        format_args!("xdg_surface destroyed before its xdg_toplevel"),
+                    ));
+                }
+                if let Some(s) = self.surface(surface) {
+                    s.xdg = None;
+                }
+                self.delete(host, x)
+            }
+            // get_toplevel(id)
+            (1, [Arg::NewId(id)]) => {
+                if toplevel.is_some() {
+                    return Err(self.fail(
+                        host,
+                        x,
+                        XDG_SURFACE_ALREADY_CONSTRUCTED,
+                        format_args!("xdg_surface@{x} already has a role"),
+                    ));
+                }
+                let t = Toplevel { xdg: x, title: Vec::new(), app_id: Vec::new() };
+                self.insert(host, *id, XDG_TOPLEVEL, r.version, Kind::Toplevel(t))?;
+                if let Some(xs) = self.xdg(x) {
+                    xs.toplevel = Some(*id);
+                }
+                host.note(Note::Role { surface, role: "xdg_toplevel", object: *id });
+                Ok(())
+            }
+            (2, _) => self.missing(host, &r),
+            // set_window_geometry(x, y, width, height)
+            (3, [_, _, Arg::Int(w), Arg::Int(h)]) => {
+                if *w <= 0 || *h <= 0 {
+                    return Err(self.fail(
+                        host,
+                        x,
+                        XDG_SURFACE_INVALID_SIZE,
+                        format_args!("invalid window geometry {w}x{h}"),
+                    ));
+                }
+                host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                Ok(())
+            }
+            // ack_configure(serial)
+            (4, [Arg::Uint(serial)]) => {
+                if toplevel.is_none() {
+                    return Err(self.fail(
+                        host,
+                        x,
+                        XDG_SURFACE_NOT_CONSTRUCTED,
+                        format_args!("ack_configure without a role"),
+                    ));
+                }
+                if sent != Some(*serial) {
+                    return Err(self.fail(
+                        host,
+                        x,
+                        XDG_SURFACE_INVALID_SERIAL,
+                        format_args!("ack_configure of serial {serial}, not one sent ({sent:?})"),
+                    ));
+                }
+                if let Some(xs) = self.xdg(x) {
+                    xs.acked = true;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn toplevel_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let t = r.id;
+        let Some(top) = self.toplevel(t) else { return Ok(()) };
+        let x = top.xdg;
+        match (r.op, r.args) {
+            // destroy: unmapped, the xdg_surface without a role again.
+            (0, []) => {
+                let surface = match self.xdg(x) {
+                    Some(xs) => {
+                        xs.toplevel = None;
+                        xs.surface
+                    }
+                    None => 0,
+                };
+                self.unmap(host, surface, x);
+                self.delete(host, t)
+            }
+            // set_title(title), set_app_id(app_id)
+            (2 | 3, [Arg::String(Some(text))]) => {
+                // Cut to TITLE_MAX bytes on a character boundary.
+                let mut n = text.len().min(TITLE_MAX);
+                while n > 0 && n < text.len() && text[n] & 0xc0 == 0x80 {
+                    n -= 1;
+                }
+                let mut kept = Vec::new();
+                if kept.try_extend_from_slice(&text[..n]).is_err() {
+                    return Err(self.out_of_memory(host));
+                }
+                let Some(top) = self.toplevel(t) else { return Ok(()) };
+                if r.op == 2 {
+                    top.title = kept;
+                } else {
+                    top.app_id = kept;
+                    return Ok(());
+                }
+                let surface = match self.object(x) {
+                    Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.surface,
+                    _ => 0,
+                };
+                let window = self.surface(surface).and_then(|s| s.window);
+                if let (Some(w), Some(top)) = (window, self.toplevel(t)) {
+                    let title = core::mem::take(&mut top.title);
+                    host.window_title(w, &title);
+                    if let Some(top) = self.toplevel(t) {
+                        top.title = title;
+                    }
+                }
+                Ok(())
+            }
+            // set_parent, show_window_menu, move, resize, set_max_size,
+            // set_min_size, set_maximized, unset_maximized, set_fullscreen,
+            // unset_fullscreen, set_minimized: accepted, not acted on yet.
+            _ => {
+                host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                Ok(())
+            }
+        }
+    }
+}
+
+/// What a commit showed: the buffer's size and the rows copied.
+type Shown = ((u32, u32), Option<(u32, u32)>);
+
+/// Which handler an object's requests go to.
+#[derive(Clone, Copy)]
+enum Tag {
+    Display,
+    Registry,
+    Callback,
+    Compositor,
+    Shm,
+    Pool,
+    Buffer,
+    Surface,
+    Region,
+    Output,
+    WmBase,
+    XdgSurface,
+    Toplevel,
+}
+
+/// A decoded request.
+struct Req<'a, F> {
+    id: u32,
+    version: u32,
+    iface: &'static Interface,
+    sig: &'static Message,
+    op: u16,
+    args: &'a [Arg<'a>],
+    /// The descriptor it took.
+    fd: Option<F>,
+}
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

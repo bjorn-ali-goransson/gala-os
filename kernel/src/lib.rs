@@ -61,6 +61,7 @@ pub mod sync;
 pub mod time;
 pub mod trust;
 pub mod unix;
+pub mod wayland;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -334,6 +335,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // console; `replay=<boot module>`: they read it from that recording
     // (kernel/src/replay.rs).
     start_record_replay(&info, &cmdline);
+    // `wayland=on` (or `trace`: every request and event logged): the
+    // Wayland server for Linux desktop programs, listening on
+    // /run/user/<uid>/wayland-0 before any program starts (ROADMAP LD).
+    if let Some(mode) = cmdline.value("wayland")
+        && let Err(e) = wayland::start(mode)
+    {
+        error!("wayland: cannot start the server: {e:?}");
+    }
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
     // end with the boot. `start_as=system`: they run as SYSTEM (services,

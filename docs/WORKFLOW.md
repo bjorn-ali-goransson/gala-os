@@ -1321,7 +1321,11 @@ source).
   weston of their own (`weston --backend=headless`, apt package `weston`)
   on a socket in their run directory, named by `XDG_RUNTIME_DIR` and
   `WAYLAND_DISPLAY` added to their environment; its log is `weston.log`
-  there. `--runs 5` runs each binary 5 times and fails if a transcript
+  there. In gala their scenarios (`lx_wl`) start the kernel's server
+  with `wayland=on` and pass `XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=wayland-0` with `lxenv=`; `wayland=trace` logs both
+  directions as `WAYLAND_DEBUG=1` prints them, to compare with the same
+  client run against weston under `WAYLAND_DEBUG=1`. `--runs 5` runs each binary 5 times and fails if a transcript
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
   skips the rebuild. Transcripts avoid version-dependent values because

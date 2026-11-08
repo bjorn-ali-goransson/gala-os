@@ -58,6 +58,10 @@ const WAIT_SITES: &[(&str, &str)] = &[
     ("lx/fork.rs", "wait_for_exec"),
     // The net thread: KICKED tested after prepare_wait.
     ("net/tcp.rs", "net_thread"),
+    // The Wayland server's thread: it is on every socket's waiters (each
+    // change wakes it) and looks at their readiness again after
+    // prepare_wait.
+    ("wayland/mod.rs", "serve"),
     // The wrappers themselves and the scheduler.
     ("nt/platform.rs", "prepare_wait"),
     ("platform.rs", "prepare_wait"),

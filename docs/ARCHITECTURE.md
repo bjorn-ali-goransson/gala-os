@@ -223,9 +223,10 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `restart=<file>[:<max>][,...]` | those `run=` programs are services: started again 1 s after they end, at most `max` times (default 10; a run of over a minute resets the count), logged as `service: ... restarting it (n of max)` and a `service restart` event (scenario `service_restart`) |
 | `persist` | keep what programs change on C: and in the registry on the virtio-blk disk (a log replayed at the next boot; "Disk") |
 | `logtee=C:/dir` | what programs write to files below that directory (percent-encoded) is also logged line by line, `logtee: <file>: <line>` |
+| `wayland=on`, `wayland=trace` | start the Wayland server at boot, listening on `/run/user/<uid>/wayland-0` ("Linux applications on the desktop (Wayland)"); `trace` also logs every request and event as `WAYLAND_DEBUG=1` prints them |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window` or `all` (`window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
@@ -8393,8 +8394,8 @@ exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 copy-on-write private pages, shared MAP_SHARED anonymous memory and its
 futexes: `lx_forkmem`, `_pie`), memfd_test (`lx_memfd`, also `_pie`;
 ROADMAP LD step 2), unix_test (`lx_unix`, also `_pie`; LD step 2),
-wl_test (a Wayland client, recorded against weston; its scenario comes
-with gala's server, LD step 2),
+wl_test (a Wayland client, recorded against weston, against the
+kernel's Wayland server: `lx_wl`, also `_pie`; LD step 2),
 dyn_test (glibc, dynamic:
 `lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
@@ -9209,7 +9210,7 @@ tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
 never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
 AT_MINSIGSTKSZ).
 
-## Plan: Linux applications on the desktop (Wayland)
+## Linux applications on the desktop (Wayland)
 
 ROADMAP LD steps 2-4: graphical Linux programs on shasha beside Windows
 programs. Linux desktop programs draw through a display server: GTK 4
@@ -9222,45 +9223,91 @@ into the kernel.
 
 ### Where the server runs
 
-**In the kernel, beside the compositor, for now.** shasha's compositor and
-window state are in the kernel (`nt::winstate`, `nt::desktop`), so a
-Wayland surface becomes a `winstate` window directly. Its pixels are
-copied from the client's shared-memory buffer, which is already a kernel
-section, and the input it gets is the desktop's own. A user-mode server
-would need a window system call surface for Linux processes, and a second
-copy of every frame. When ROADMAP SH moves the compositor to user mode,
-the Wayland server moves with it, as one more client of the same
-window-state interface.
+**In the kernel, beside the compositor, for now** (`kernel/src/wayland`).
+shasha's compositor and window state are in the kernel (`nt::winstate`,
+`nt::desktop`), so a Wayland surface becomes a `winstate` window
+directly. Its pixels are copied from the client's shared-memory buffer,
+which is already a file the kernel holds, and the input it gets is the
+desktop's own. A user-mode server would need a window system call surface
+for Linux processes, and a second copy of every frame. When ROADMAP SH
+moves the compositor to user mode, the Wayland server moves with it, as
+one more client of the same window-state interface.
 
-The cost is a protocol parser in the kernel that reads untrusted client
-messages. It is bounded and isolated like the other ABI parsers:
-- **The wire format** is a `no_std` crate of its own, `kernel/wl_abi`
-  (built), as `lx_abi` and `afd_abi` are: no allocation, no `unsafe`, no
-  dependencies. `Header::parse` checks a header's size (at least 8, a
-  multiple of 4, at most 4096); `decode` checks a whole message against
-  its signature and gives its arguments (`Arg`: int, uint, fixed,
-  string without its NUL or null, object or null, new_id, the untyped
-  new_id `wl_registry.bind` takes as interface name, version and id,
-  array, and fd, taken from those that came with the message), refusing
-  with a `WireError` what the protocol does not allow: truncation,
-  trailing bytes, a string without its NUL or with one inside, null where
-  the XML has no `allow-null`, a new_id of 0, a missing fd. `encode`
-  builds messages the same way. `INTERFACES` (with `MAX_ARGS`) is
-  generated by its build script from `protocol/wayland.xml`,
-  `xdg-shell.xml` and `xdg-decoration-unstable-v1.xml` (names, versions,
-  `since`, destructors, argument types; opcodes are positions). Host
-  tests (`cargo test -p wl_abi`, part of `cargo xtask test`) check known
-  byte sequences (`wl_display.get_registry`, `wl_registry.bind`),
-  malformed messages, and a round trip of every request and event of
-  every interface. It is the first target of the fuzzing that
-  OBSERVABILITY plans.
-- **Limits**, each one charged to the client process's quota
-  ("Resource limits"): a message is at most 4096 bytes (libwayland's own
-  limit), a message carries at most 28 file descriptors, there are at most
-  4096 objects per client, and shm pools are limited in size.
-- **Any malformed message** is a protocol error: `wl_display.error`, then
-  the client is disconnected, as Wayland specifies. It is logged and goes
-  in the ledger. The kernel never panics on client input.
+- **Starting**: `wayland=on` (or `wayland=trace`) on the kernel command
+  line starts it at boot, before the programs (`wayland::start`). It
+  makes the boot user's runtime directory `/run/user/<uid>` (0700;
+  `/run` and `/run/user` 0755 if missing) and a socket node `wayland-0`
+  in it (an old node of that name is replaced), held open while the
+  server lives, and listens on a stream socket of the core's table bound
+  to it (`unix::Socket::bind` with that node, backlog 128), so a
+  client's connect finds it as it finds any listener (`wayland:
+  listening on /run/user/1000/wayland-0` in the log). Programs find it
+  through `XDG_RUNTIME_DIR=/run/user/<uid>` and `WAYLAND_DISPLAY=wayland-0`;
+  for now whoever starts them passes those (`lxenv=` in the scenarios).
+  The socket's peer credentials are pid 0 and the boot user.
+- **One kernel thread** (`wayland`) serves every client. A round accepts
+  the waiting connections, then for each client reads what came (bytes
+  into its input buffer, each SCM_RIGHTS right, a `KArc<lx::state::Fd>`
+  open file description, into its descriptor queue; a right of another
+  personality is dropped), handles the whole messages, and writes the
+  events back (what the socket does not take waits in the client's
+  output). A round reads at most 256 KiB from one client before going on
+  to the next. Between rounds the thread waits: it is on the listener's
+  and every client socket's `unix::Waiters` (each change of a socket
+  wakes them), prepares its wait, looks once more at the sockets'
+  readiness (a connection waiting, bytes or an end to read, events to
+  write where there is room), and blocks. The server's state is one
+  `IrqMutex` the thread holds for a round (the state dump only tries
+  it).
+- **The cost** is a protocol parser in the kernel that reads untrusted
+  client messages. It is bounded and isolated like the other ABI
+  parsers:
+  - **The wire format** is a `no_std` crate of its own, `kernel/wl_abi`,
+    as `lx_abi` and `afd_abi` are: no allocation, no `unsafe`, no
+    dependencies. `Header::parse` checks a header's size (at least 8, a
+    multiple of 4, at most 4096); `decode` checks a whole message against
+    its signature and gives its arguments (`Arg`: int, uint, fixed,
+    string without its NUL or null, object or null, new_id, the untyped
+    new_id `wl_registry.bind` takes as interface name, version and id,
+    array, and fd, taken from those that came with the message), refusing
+    with a `WireError` what the protocol does not allow: truncation,
+    trailing bytes, a string without its NUL or with one inside, null
+    where the XML has no `allow-null`, a new_id of 0, a missing fd.
+    `encode` builds messages the same way. `INTERFACES` (with `MAX_ARGS`)
+    is generated by its build script from `protocol/wayland.xml`,
+    `xdg-shell.xml` and `xdg-decoration-unstable-v1.xml` (names,
+    versions, `since`, destructors, argument types; opcodes are
+    positions). Host tests (`cargo test -p wl_abi`, part of `cargo xtask
+    test`) check known byte sequences (`wl_display.get_registry`,
+    `wl_registry.bind`), malformed messages, and a round trip of every
+    request and event of every interface. It is the first target of the
+    fuzzing that OBSERVABILITY plans.
+  - **The protocol state** is `wayland::client::Client`, apart from
+    sockets, files and windows (a `Host` gives those: the kernel's, or
+    the host tests' fake), so all of it is host-tested (`cargo test -p
+    kernel --lib wayland`).
+  - **Limits**: a message is at most 4096 bytes (libwayland's limit), a
+    message carries at most 28 descriptors and at most 56 wait for their
+    messages, a client has at most 4096 objects (ids are dense, as
+    libwayland makes them: a new id is the next one or a free one below
+    it, at most 4096), at most 256 KiB of events wait for it (beyond,
+    it is disconnected, as libwayland disconnects a client whose buffer
+    is full), and a pool is at most 256 MiB.
+  - **Any malformed message** is a protocol error: `wl_display.error`
+    (object, code, message, the codes and texts libwayland and weston
+    use), then the client is disconnected once the error is written.
+    Errors: a bad header or arguments (`invalid_method` on wl_display),
+    an unknown object or one of the wrong interface in an argument, a
+    new id in use or out of order (`invalid_object`), an opcode the
+    interface lacks or newer than the object's version (`invalid_method`),
+    too many objects (`no_memory`), a request gala lacks
+    (`implementation`), and each interface's own (wl_shm's
+    `invalid_format`, `invalid_stride`, `invalid_fd`; wl_surface's
+    `invalid_scale`, `invalid_transform`, `invalid_offset`; xdg_wm_base's
+    `role`, `invalid_surface_state`; xdg_surface's `not_constructed`,
+    `already_constructed`, `unconfigured_buffer`, `invalid_serial`,
+    `invalid_size`, `defunct_role_object`). It is logged, and evented.
+    The kernel never panics on client input.
 
 ### Prerequisites in the LX layer
 
@@ -9268,85 +9315,121 @@ messages. It is bounded and isolated like the other ABI parsers:
   sockets" under "The seams"; `lx::unix`, `lx_unix`): socket, bind to a
   path, listen, accept, connect, socketpair, with `SCM_RIGHTS` (file
   descriptors move between processes as references to the same open
-  file) and `SO_PEERCRED`; seqpacket and datagram pairs too. Wayland's
-  socket is `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`
-  (`/run/user/<uid>/wayland-0`); the kernel's server binds it through
-  the same core table (`unix::Socket::bind` on a node it makes), so a
-  client's connect finds it as it finds any listener. D-Bus, which GTK
-  also opens, needs the same sockets.
+  file) and `SO_PEERCRED`; seqpacket and datagram pairs too. The
+  server binds through the same core table. D-Bus, which GTK also
+  opens, needs the same sockets.
 - **`memfd_create`** (built: `lx::memfd`, `lx_memfd`) with `ftruncate`,
   `mmap(MAP_SHARED)`, and the seals: an anonymous file of the shared file
-  system whose pages every mapping shares (LD step 1's file views). The
-  server reads a `wl_shm_pool` through a view of the same pages, with no
-  copy until composition.
+  system whose pages every mapping shares. The server reads a
+  `wl_shm_pool`'s rows from the same pages (`RamFs::read`), with one copy
+  into the window's client pixels.
 - Each prerequisite is test first, in the corpus: a `unix_test` and a
   `memfd_test` against real Linux transcripts.
 
 ### Objects and how they map
 
+Offered globals: `wl_compositor` 6, `wl_shm` 2, `xdg_wm_base` 6,
+`wl_output` 4 (registry names 1 to 4). Not yet: `wl_seat`.
+
 | Wayland | gala |
 |---|---|
-| a client connection | a `wl::Client` owned by the server: the socket, the client's process, its object table, its quota |
-| `wl_compositor`, `wl_surface` | a surface holds its committed state (buffer, damage, frame callbacks, input region); it is a window only once a role gives it one |
-| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process: title (`set_title`), app id, minimum and maximum size, configure/ack, close (the desktop's close button sends `xdg_toplevel.close`) |
-| `xdg_popup` | a frameless owned window, as user32's popups are (menus) |
-| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a view of the pool's memfd section. ARGB8888 and XRGB8888, which are shasha's 0x00RRGGBB with alpha ignored for opaque windows |
-| `wl_surface.commit` | the damaged rows are copied from the buffer into the window's client pixels. `wl_buffer.release` goes out after the copy (the client may reuse the buffer at once), and `frame` callbacks are answered after the next composition |
-| `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for that window: enter and leave from focus and the pointer, motion, buttons as evdev codes, axis from the wheel. Keys go out as evdev key codes, mapped from the desktop's scan codes, with an XKB keymap (a fixed US keymap in text form, sent as a memfd) |
-| `wl_output` | each presenter's screen: size, scale 1 |
-| `zxdg_decoration_manager_v1` | offered with server-side decoration preferred, so a Linux window wears shasha's frame like a Windows window does; a client that insists on client-side decorations gets a frameless window |
+| a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
+| `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
+| `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The app id is kept; window geometry, move, resize, menus, sizes and states are accepted and not acted on yet (ledgered); pings are not sent |
+| `xdg_popup`, `xdg_positioner` | not yet: `create_positioner` and `get_popup` are protocol errors, ledgered (a frameless owned window, as user32's popups are, comes next) |
+| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet) |
+| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied), and `frame` callbacks are done in the same round, with the time in milliseconds: there is no composition clock to wait for yet |
+| `wl_output` | the client's session's screen: geometry (make "gala", model "shasha"), mode (current and preferred, 60 Hz), scale 1, name `gala-1`, done |
 
-Later: `wl_data_device` (the clipboard, bridged to the Windows clipboard
-so copy and paste works across personalities), `wp_viewporter`,
-fractional scale, `xdg_activation`, and `linux-dmabuf` once GPU G2's
-lavapipe/llvmpipe serve Linux clients through EGL.
+A surface smaller than a framed window's minimum (134 x 34 outer) gets a
+larger client area, white beyond the buffer; one larger than
+`winstate::MAX_SIDE` is clipped. When the client goes, its windows go
+(`Client::end`); when its process ends first, `desktop::process_ended`
+takes them.
+
+Next: `wl_seat`, `wl_pointer`, `wl_keyboard` (the desktop's input for
+that window: enter and leave from focus and the pointer, motion, buttons
+as evdev codes, axis from the wheel; keys as evdev key codes mapped from
+the desktop's scan codes, with an XKB keymap, a fixed US keymap in text
+form sent as a memfd); `xdg_toplevel.close` from the frame's close
+button (today the desktop queues a WM_CLOSE nobody takes); configure
+from the desktop's resizes, maximize and Snap; frame callbacks paced by
+composition; `zxdg_decoration_manager_v1` offered with server-side
+decoration preferred, so a Linux window wears shasha's frame like a
+Windows window does (a client that insists on client-side decorations
+gets a frameless window); popups. Later: `wl_data_device` (the
+clipboard, bridged to the Windows clipboard so copy and paste works
+across personalities), `wp_viewporter`, fractional scale,
+`xdg_activation`, and `linux-dmabuf` once GPU G2's lavapipe/llvmpipe
+serve Linux clients through EGL. What the server allocates for a client
+is not charged to its process's quota yet ("Resource limits").
 
 ### Sessions
 
-Each session's desktop has its own Wayland socket, under its user's
-`/run/user/<uid>`. A Linux program started in a session gets
-`WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` for it, and its windows appear on
-that session's desktop and are shown by whatever presents it ("Plan:
-sessions and remote shasha"). Server and bare desktops ("Server and
-desktop workloads") keep Wayland windows as they keep Windows ones: the
-pixels are kept and nothing draws them.
+One socket for the boot user today. Next, each session's desktop has
+its own Wayland socket, under its user's `/run/user/<uid>`, and a Linux
+program started in a session gets `WAYLAND_DISPLAY` and
+`XDG_RUNTIME_DIR` for it, its windows on that session's desktop, shown
+by whatever presents it ("Plan: sessions and remote shasha"). Server
+and bare desktops ("Server and desktop workloads") keep Wayland windows
+as they keep Windows ones: the pixels are kept and nothing draws them
+(the `lx_wl` scenario's desktop is such a one).
 
 ### Observability
 
-- `events=wayland`: one event per client connection and disconnection,
-  per surface given a role, per commit (surface, damage rows, buffer
-  size), and per protocol error. The client's pid and the object are in
-  each.
+- `events=wayland`: `wayland connect` and `wayland disconnect` (with
+  why: closed, protocol error, output full, no memory; and how many
+  requests), `wayland role` (surface, role, its object), `wayland map`
+  (surface, window or -1), `wayland commit` (surface, whether a buffer
+  came, its size, the rows copied, the window) and `wayland error`
+  (object, interface, code, message). The client's pid and number are
+  in each.
 - `wayland=trace`: every request and event decoded, as libwayland's
-  `WAYLAND_DEBUG=1` prints them, so a transcript from real Linux can be
-  compared with gala's.
-- The ledger: an interface or request gala doesn't implement is answered
-  with a protocol error, and the ledger records `wayland: <interface>.<request>`.
-- The state dump lists each client's objects and surfaces.
+  `WAYLAND_DEBUG=1` prints them (`wayland: pid 7
+  wl_display#1.get_registry(new id wl_registry#2)`, events after `->`),
+  so a transcript from real Linux can be compared with gala's.
+- The log: a protocol error (`wayland: pid P: protocol error on
+  xdg_surface@9, code 3: ...; disconnecting`), a request gala lacks, a
+  surface that got no window, a connection closed for its output or for
+  memory.
+- The ledger: a request gala doesn't implement is answered with a
+  protocol error and counted as `wayland request missing` (service: the
+  interface, detail: the opcode); one accepted and not acted on as
+  `wayland request ignored`.
+- The state dump lists the socket, each client (pid, objects, requests,
+  bytes of events waiting) and its objects (a surface's window, size and
+  frame callbacks; a buffer's size and stride; an xdg_surface's
+  configure state; a toplevel's title and app id).
 
 ### Tests
 
-- **Test first:** `user/lx/wl_test` (written and recorded), a client of
-  our own in C over a raw AF_UNIX socket (no libwayland, so the test
-  checks the wire format itself). It connects at
-  `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, checks the globals (wl_compositor,
-  wl_shm, xdg_wm_base, wl_output; not wl_seat, which a headless weston
-  lacks), binds the first three at versions 4, 1 and 1, sees ARGB8888
-  and XRGB8888 announced, makes a 64x64 XRGB8888 buffer in a memfd pool
-  (the fd as SCM_RIGHTS), an `xdg_toplevel` titled "wl_test", commits
-  without a buffer, acks the configure, attaches, damages and commits
-  with a frame callback, sees the frame done and the buffer released by
-  the next round trip and `delete_id` for what it destroys, and on a
-  second connection gets `wl_display.error` (object 1, invalid_method)
-  for an unknown opcode, then the end of the stream. Its transcript is
-  recorded on Linux against weston's headless backend: lx-expect starts
-  `weston --backend=headless` for it (`WAYLAND_TESTS`, with
-  `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` added to its environment), and
-  CI installs weston. On gala the same transcript must match (its
-  `lx_wl` scenario comes with the server), and a screen check finds the
-  pixels inside shasha's frame. `xdg_toplevel.close` from the frame's
-  close button is checked when the scenario can click.
-- The wire format and the object table: host tests in `wl_abi`.
+- **`user/lx/wl_test`**, a client of our own in C over a raw AF_UNIX
+  socket (no libwayland, so the test checks the wire format itself). It
+  connects at `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, checks the globals
+  (wl_compositor, wl_shm, xdg_wm_base, wl_output; not wl_seat, which a
+  headless weston lacks), binds the first three at versions 4, 1 and 1,
+  sees ARGB8888 and XRGB8888 announced, makes a 64x64 XRGB8888 buffer in
+  a memfd pool (the fd as SCM_RIGHTS), an `xdg_toplevel` titled
+  "wl_test", commits without a buffer, acks the configure, attaches,
+  damages and commits with a frame callback, sees the frame done and the
+  buffer released by the next round trip and `delete_id` for what it
+  destroys, and on a second connection gets `wl_display.error` (object
+  1, invalid_method) for an unknown opcode, then the end of the stream.
+  Its transcript is recorded on Linux against weston's headless backend:
+  lx-expect starts `weston --backend=headless` for it (`WAYLAND_TESTS`,
+  with `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` added to its
+  environment), and CI installs weston. Scenarios `lx_wl` (`wayland=on
+  events=wayland`; the log shows `desktop: shown window 'wl_test'`) and
+  `lx_wl_pie` (`wayland=trace`) match the same transcript. Next: a
+  screen check that finds the pixels inside shasha's frame, and
+  `xdg_toplevel.close` from the frame's close button once the scenario
+  can click.
+- The wire format: host tests in `wl_abi`. The protocol state: host
+  tests in `kernel/src/wayland/tests.rs` (wl_test's flow against a fake
+  desktop, the pixels and damaged rows copied, unmapping, versions,
+  every protocol error above, ids, descriptor and output limits, the
+  trace's format).
 - Then a real client: `weston-simple-shm` from weston's demos; then
   GTK (LD step 3).
 

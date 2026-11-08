@@ -130,7 +130,10 @@ port. Lines that tools and agents rely on:
   and its result), `logtee=C:/dir` (what programs write below a
   directory, as `logtee: <file>: <line>`; sshd's and sshd-session's logs
   in the sshd scenarios), `conpty=trace` (a pseudo console's VT traffic
-  in both directions).
+  in both directions), `wayland=trace` (every Wayland request and event
+  as `WAYLAND_DEBUG=1` prints them: `wayland: pid P
+  wl_display#1.get_registry(new id wl_registry#2)`, events after `->`;
+  scenario `lx_wl_pie`).
 
 Emergency output (panic, watchdog, state dump) takes the port's lock
 when it comes free within 10 ms, so whole lines do not mix with a
@@ -175,6 +178,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
 | `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names) |
+| `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window) and `wayland error` (object, interface, code, message): each with the client's pid and number. Scenario `lx_wl` |
 | `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `button` and `key` (the desktop's delivery: message, window, owner; the screen point or virtual key), `input taken` (a button or key its program took from the queue: message, window, owner; `by` the taking thread), `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h; a bare one, which nothing can show, `bare`: why), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none, `bare`), `noscreen_windows` and `server_profile_windows` (the desktop kernel's bare `live` without a screen and in the server profile) |
 
 A `record` boot's recording also goes to this port (`"ev":"rec"`,
@@ -438,7 +442,12 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    futex waiter (`lx: futex waiter: pid P address A bitset B thread
    T`), every named AF_UNIX socket (`dump: unix: stream by pid P,
    node N|abstract NAME, listening (K of B waiting)|connected (side S:
-   Q queued, shutdown F, peer open|gone), W waiting`), the statistics,
+   Q queued, shutdown F, peer open|gone), W waiting`), the Wayland
+   server's clients and their objects (`statedump: wayland client N (pid
+   P): K objects, R requests, B bytes of events waiting`, then a line per
+   object: a surface's window, size and pending frame callbacks, a
+   buffer's size and stride, an xdg_surface's configure state, a
+   toplevel's title), the statistics,
    each session's
    windows (`statedump: session N: ... windows ...`) and window stations
    (`statedump: session N window stations: WinSta0 ...`), its input
