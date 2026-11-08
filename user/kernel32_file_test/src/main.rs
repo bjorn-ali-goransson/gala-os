@@ -45,6 +45,8 @@ extern "system" fn completed(error: u32, count: u32, ov: *mut usize) {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn GetLastError() -> u32;
     fn GetFileType(h: Handle) -> u32;
     fn DeviceIoControl(
@@ -288,6 +290,16 @@ unsafe fn remove_tree(temp: &[u16]) {
 
 fn names_eq(name: &[u16], s: &[u8]) -> bool {
     name.len() == s.len() && name.iter().zip(s).all(|(&a, &b)| a == u16::from(b))
+}
+
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
 }
 
 fn run() -> Result<(), u32> {
@@ -693,12 +705,20 @@ fn run() -> Result<(), u32> {
         DeleteFileW(exfile.ptr());
 
         // DOS device names: C: is the volume's device, NUL the null
-        // device; the target is followed by two NULs (counted).
+        // device; the target is followed by two NULs (counted). The
+        // volume's number is the machine's (25H2 measured one digit, not
+        // 1: the EFI and recovery partitions come first); gala's is 1.
         let mut target = [0u16; 64];
         let c_drive = b"C:\0".map(u16::from);
         let n = QueryDosDeviceW(c_drive.as_ptr(), target.as_mut_ptr(), 64) as usize;
-        let volume = b"\\Device\\HarddiskVolume1\0\0".map(u16::from);
-        c.ok(n == volume.len() && target[..n] == volume, n as u64)?;
+        let prefix = b"\\Device\\HarddiskVolume".map(u16::from);
+        c.ok(n > prefix.len() + 2 && n <= 64 && target[..prefix.len()] == prefix, n as u64)?;
+        let digits = &target[prefix.len()..n - 2];
+        c.ok(digits.iter().all(|&d| (0x30..=0x39).contains(&d)), n as u64)?;
+        c.ok(target[n - 2..n] == [0, 0], n as u64)?;
+        if on_gala() {
+            c.ok(target[prefix.len()..n] == [u16::from(b'1'), 0, 0], n as u64)?;
+        }
         let null = b"NUL\0".map(u16::from);
         let n = QueryDosDeviceW(null.as_ptr(), target.as_mut_ptr(), 64) as usize;
         let device = b"\\Device\\Null\0\0".map(u16::from);

@@ -2,8 +2,10 @@
 //! them, with the results real Windows gives for the en-US locale in the
 //! UTC time zone (documented contracts and the en-US locale data):
 //!
-//! - GetUserDefaultLCID/GetUserDefaultUILanguage/GetSystemDefaultLCID:
-//!   0x409; IsValidLocale; EnumSystemLocalesW lists "00000409".
+//! - GetUserDefaultLCID/GetUserDefaultUILanguage: 0x409;
+//!   GetSystemDefaultLCID: the machine's, installed and the LCID of
+//!   GetSystemDefaultLocaleName (gala: 0x409); IsValidLocale;
+//!   EnumSystemLocalesW lists "00000409".
 //! - GetLocaleInfoW/A: decimal and thousands separators, ISO language and
 //!   country names, the OEM code page; counts include the NUL; a size
 //!   query; ERROR_INSUFFICIENT_BUFFER; LOCALE_RETURN_NUMBER.
@@ -43,6 +45,9 @@ type LocaleEnumProcEx = extern "system" fn(*const u16, u32, isize) -> Bool;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
+    fn GetSystemDefaultLocaleName(buf: *mut u16, size: i32) -> i32;
     fn IdnToAscii(flags: u32, unicode: *const u16, n: i32, ascii: *mut u16, size: i32) -> i32;
     fn GetNLSVersionEx(function: u32, locale: *const u16, info: *mut u32) -> i32;
     fn GetUserPreferredUILanguages(
@@ -205,6 +210,7 @@ const LOCALE_SISO639LANGNAME: u32 = 0x59;
 const LOCALE_SISO3166CTRYNAME: u32 = 0x5a;
 const LOCALE_RETURN_NUMBER: u32 = 0x2000_0000;
 const LOCALE_USER_DEFAULT: u32 = 0x400;
+const LCID_INSTALLED: u32 = 1;
 const LCID_SUPPORTED: u32 = 2;
 const LCMAP_LOWERCASE: u32 = 0x100;
 const LCMAP_UPPERCASE: u32 = 0x200;
@@ -307,11 +313,31 @@ extern "system" fn on_locale(name: *const u16) -> Bool {
     1
 }
 
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
+}
+
 fn locales(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain kernel32 calls with buffers of ours.
     unsafe {
         c.eq(GetUserDefaultLCID().into(), 0x409)?;
-        c.eq(GetSystemDefaultLCID().into(), 0x409)?;
+        // The system locale ("language for non-Unicode programs") is the
+        // machine's (25H2 measured 0x401, ar-SA, with an en-US user):
+        // installed, and the same as its name's; gala's is en-US.
+        let system = GetSystemDefaultLCID();
+        c.ok(IsValidLocale(system, LCID_INSTALLED) != 0, system.into())?;
+        let mut name = [0u16; 85];
+        c.ok(GetSystemDefaultLocaleName(name.as_mut_ptr(), 85) > 1, GetLastError().into())?;
+        c.eq(LocaleNameToLCID(name.as_ptr(), 0).into(), system.into())?;
+        if on_gala() {
+            c.eq(system.into(), 0x409)?;
+        }
         c.eq(GetUserDefaultUILanguage().into(), 0x409)?;
         c.ok(IsValidLocale(0x409, LCID_SUPPORTED) != 0, 0)?;
         c.eq(IsValidLocale(0x0012_3456, LCID_SUPPORTED) as u64, 0)?;

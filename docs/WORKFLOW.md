@@ -680,8 +680,10 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   own UI language): files and directories go in `%TEMP%` (GetTempPathW),
   not C:\ (a user may not create files there) or C:\gala, and an
   earlier run's leftovers are removed first; values that depend on the
-  machine (the processor count, devices) are read from another API, not
-  typed in; named sections and symbolic links go in the session's
+  machine (the processor count, devices, the system locale, the build,
+  the volume's number) are read from another API, not typed in; per-user
+  state another process may hold (the clipboard) is skipped, naming the
+  holder, when it is held; named sections and symbolic links go in the session's
   `\Sessions\<n>\BaseNamedObjects` (`\BaseNamedObjects` in session 0):
   creating them in the global one needs SeCreateGlobalPrivilege outside
   session 0, and DIRECTORY_ALL_ACCESS on it is not granted (ask

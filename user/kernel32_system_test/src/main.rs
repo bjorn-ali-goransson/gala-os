@@ -22,8 +22,9 @@
 //!   named mapping.
 //! - RtlCaptureStackBackTrace (this function's caller first),
 //!   VerSetConditionMask and VerifyVersionInfoW, Beep, GetProductInfo.
-//! - ntdll's RtlVerifyVersionInfo: the real version (10.0, build 26100),
-//!   though this program has no manifest (VerifyVersionInfoW: 6.2);
+//! - ntdll's RtlVerifyVersionInfo: the real version (10.0, the running
+//!   build: KUSER_SHARED_DATA's NtBuildNumber, 26100 on gala), though this
+//!   program has no manifest (VerifyVersionInfoW: 6.2);
 //!   STATUS_REVISION_MISMATCH when it does not match, an empty TypeMask
 //!   STATUS_INVALID_PARAMETER (curl asks it whether Schannel has TLS
 //!   1.3: 10.0 build 20348 or later).
@@ -660,7 +661,14 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         v.minor = 0;
         v.build = 20348;
         c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), 0)?;
-        v.build = 26101;
+        // The running build (KUSER_SHARED_DATA's NtBuildNumber, at least
+        // gala's 26100; 25H2 is 26200) passes, the next one does not.
+        // (KUSER_SHARED_DATA is mapped read-only in every process.)
+        let build = core::ptr::read_volatile(0x7ffe_0260 as *const u32);
+        c.ok(build >= 26100, build.into())?;
+        v.build = build;
+        c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), 0)?;
+        v.build = build + 1;
         c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), STATUS_REVISION_MISMATCH)?;
         v.build = 0;
         v.major = 11;

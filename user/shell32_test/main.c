@@ -222,7 +222,9 @@ static IShellLinkW *new_link(void) {
 }
 
 static void links(const wchar_t *self) {
-    CHECK(SUCCEEDED(CoInitialize(NULL)));
+    /* main's apartment: S_FALSE (initialised again, the same kind). */
+    HRESULT init = CoInitialize(NULL);
+    CHECK(init == S_FALSE || init == S_OK);
     IShellLinkW *sl = new_link();
     wchar_t buf[MAX_PATH], dir[MAX_PATH], link[MAX_PATH];
     WIN32_FIND_DATAW fd;
@@ -397,6 +399,12 @@ static void recent_docs(void) {
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "child") == 0)
         return 7;
+
+    /* ShellExecuteEx may go through shell extensions, so its
+       documentation asks for COM first (single-threaded); without it a
+       shell call left the thread in another apartment on 25H2, and links'
+       CoInitialize failed. */
+    CHECK(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK);
 
     /* Start menu and per-user program folders. */
     wchar_t folder[MAX_PATH], want[MAX_PATH];

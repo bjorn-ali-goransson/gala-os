@@ -54,6 +54,8 @@ struct FindData {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn CreateFileW(
         name: *const u16,
         access: u32,
@@ -473,6 +475,16 @@ fn check_descriptor(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
+}
+
 fn second_boot(c: &mut Checks) -> Result<(), u32> {
     check_descriptor(c)?;
     let mut buf = [0u8; 64];
@@ -486,7 +498,15 @@ fn second_boot(c: &mut Checks) -> Result<(), u32> {
             last_error(),
         )?;
         c.eq(written, WRITTEN)?;
-        c.eq(accessed, ACCESSED)?;
+        // On gala nothing reads the file between the boots. On Windows
+        // anything that reads it (Defender, the indexer) moves the
+        // last-access time forward (NTFS updates a stored time over an hour
+        // old): Rounds 3-5 measured one move, after the first run.
+        if on_gala() {
+            c.eq(accessed, ACCESSED)?;
+        } else {
+            c.ok(accessed >= ACCESSED, accessed)?;
+        }
         let n = read(h, &mut buf).unwrap_or(0);
         c.ok(&buf[..n] == TEXT, n as u64)?;
         CloseHandle(h);

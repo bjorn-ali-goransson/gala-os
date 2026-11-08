@@ -1662,7 +1662,21 @@ wow64_adv_test's registry view: ERROR_ACCESS_DENIED with TokenElevation
 clock_test, handover_test, handover_k32_test and gala_cli_test,
 pk_install_test whole, handover_net_test's `handover` line), since gala's
 service numbers reach win32k's table on Windows and fault
-(STATUS_FATAL_USER_CALLBACK_EXCEPTION, Round 5's three crashes).
+(STATUS_FATAL_USER_CALLBACK_EXCEPTION, Round 5's three crashes). Also:
+advapi32_test's files go in %TEMP% (an earlier run's removed first);
+kernel32_file_test's QueryDosDeviceW("C:") checks the form
+`\Device\HarddiskVolume<digits>` (gala: 1); kernel32_locale_test's
+system locale is the machine's (installed, the LCID of
+GetSystemDefaultLocaleName; 25H2 measured ar-SA under an en-US user;
+gala: 0x409); kernel32_system_test's RtlVerifyVersionInfo compares with
+the running build (NtBuildNumber) and the next; loader_test copies
+testdll and testdll2 to %TEMP%\gala_loader\sub itself (and removes
+them), expecting the plain load's dependency beside the exe;
+shell32_test initialises COM (single-threaded) before ShellExecuteEx, as
+its documentation asks; persist_test's last-access time may move forward
+off gala (a reader such as Defender moves it); win32_misc_test skips its
+clipboard part off gala when another process holds the clipboard,
+naming that process.
 
 Next:
 1. The next run on Windows (each fix may reveal a program's next
