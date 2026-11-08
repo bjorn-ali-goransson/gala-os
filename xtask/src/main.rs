@@ -6996,7 +6996,7 @@ const SCENARIOS: &[Scenario] = &[
             "cell=22 1,1 104 Size",
             "row=gamma.txt,333",
             "window=True True False False Normal modal=0",
-            "titlebar=FlaUI Pressed Minimize,Maximize,Close",
+            "titlebar= Minimize,Maximize,Close",
             "moved=100,80",
             "state=Maximized",
             "state=Normal 100,80",
