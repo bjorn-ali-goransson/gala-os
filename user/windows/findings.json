@@ -20,7 +20,9 @@
     "run-all.ps1 keeps only the first line a program prints that starts with its name, so a program that prints anything informational before failing loses its failure message (quota_test is the case here). Keeping the last such line, or the one carrying \"check\", would make those diagnosable.",
     "Round 2, second batch (from user/windows/notes-from-linux.md): SetPriorityClass's precedence is answered above and confirms gala's current choice. The other open probe, REALTIME by a process whose token holds SeIncreaseBasePriority disabled, needs an elevated prompt and was not done: elevation was declined for this machine, so it stays open by choice rather than by evidence. run-all.ps1 now keeps the last line a program prints that starts with its name, as asked.",
     "The check-to-line mapping in these entries is counted from the source and is a guess wherever the reported value cannot come from the line it lands on. Five entries are marked so. The tests are being changed to print their own failing line, which removes the guesswork; until then prefer the report line's own \"(line L)\" where a test gives one.",
-    "A correction worth keeping in view: the registry_test finding above was wrong when first reported, because the probe passed a zero-extended predefined key rather than the sign-extended one the x64 SDK defines, and the two behave differently. A probe of a handle-like constant has to use the exact encoding the header produces, and \"with a control\" did not catch it, since the control was an ordinary opened key rather than the other encoding of the same key."
+    "A correction worth keeping in view: the registry_test finding above was wrong when first reported, because the probe passed a zero-extended predefined key rather than the sign-extended one the x64 SDK defines, and the two behave differently. A probe of a handle-like constant has to use the exact encoding the header produces, and \"with a control\" did not catch it, since the control was an ordinary opened key rather than the other encoding of the same key.",
+    "Round 3 (binaries from 73e727e8, every test printing its failing check's line): kernel32_sync_test, kernel32_sys_test and smpsched_test pass. registry_test moved from check 39 to 100, kernel32_thread_test from 36 to 50, threadinfo_test from 23 back to 14. 68 of 103 entries are mapped from the report's own (line L) and none are counted guesses any more. exit 0 went 76 -> 73, which is the three fixes less bench and the five tcc scripts, all six lost to Defender rather than to code.",
+    "A correction: I reported after the first Round 3 attempt that the fixes had had no effect and that the export looked stale. Both were wrong, and from the same cause: that run died on a stderr line before writing windows.json, so I compared the Round 2 report against itself. The three fixes above work. The lesson is to check a report's own timestamp before comparing it, which costs one line."
   ],
   "peb_test": {
     "windows": "Passes now (exit 0), the build pin having been relaxed.",
@@ -32,7 +34,7 @@
     "windows": "KUSER_SHARED_DATA+0x260 (NtBuildNumber) reads 26200.",
     "class": "environment",
     "evidence": "the check got 0x6658 = 26200.",
-    "note": "Same build pin as peb_test. MAPPING IS A GUESS for check 18 (got 0x49): the Linux side showed one of these cannot be the line counted to (kernel32_thread_test 36 maps to a value masked to 16 bits, which cannot give 0x10000000). Counting calls is being replaced by the tests printing their own failing line through #[track_caller], so take the line here as provisional until that export."
+    "note": "Same build pin as peb_test. Round 3: the tests now print their own failing line, so the mapping is exact and no longer counted."
   },
   "manifest_test": {
     "windows": "Passes now (exit 0), the build pin having been relaxed.",
@@ -44,7 +46,7 @@
     "windows": "The 32-bit PEB's OSBuildNumber reads 26200.",
     "class": "environment",
     "evidence": "the check got 00000000 00006658, the low word 26200.",
-    "note": "Same build pin as peb_test, through the WOW64 PEB. MAPPING IS A GUESS for check 71 (line 0x18a, got 0xc0000005): the Linux side showed one of these cannot be the line counted to (kernel32_thread_test 36 maps to a value masked to 16 bits, which cannot give 0x10000000). Counting calls is being replaced by the tests printing their own failing line through #[track_caller], so take the line here as provisional until that export."
+    "note": "Same build pin as peb_test, through the WOW64 PEB. Round 3: the tests now print their own failing line, so the mapping is exact and no longer counted."
   },
   "access_test": {
     "windows": "LogonUserW(\"galatest\", \".\", \"Gala-Test-1\", LOGON32_LOGON_NETWORK) fails with ERROR_LOGON_FAILURE.",
@@ -98,13 +100,13 @@
     "windows": "SetPriorityClass does not validate the value as a whole: it takes the recognised class bits out of it and the lowest class wins, IDLE first. A value carrying at least one recognised bit succeeds; a nonzero value carrying none is refused like 0, with FALSE and ERROR_INVALID_PARAMETER (87). REALTIME (0x100) returns TRUE but leaves the class at HIGH (0x80) without SeIncreaseBasePriorityPrivilege. The precedence among the recognised bits is a strict order, and it is the inverse of scheduling priority: the lowest class always wins. Over all fifteen pairs, IDLE beats all five others, BELOW_NORMAL four, NORMAL three, ABOVE_NORMAL two, HIGH one, and REALTIME none.",
     "class": "expectation",
     "evidence": "probed here, resetting to NORMAL between calls. Recognised alone: 0x20->0x20, 0x40->0x40, 0x80->0x80, 0x4000->0x4000, 0x8000->0x8000, 0x100->1 err=0 but class 0x80. IDLE wins over the rest: 0x60, 0xc0, 0x140, 0x4040 all -> 0x40. 0x12345 (has 0x40 and 0x100) -> 0x40, and 0x12305, the same value with 0x40 cleared, -> 0x80 through its 0x100. No recognised bit: 0x1, 0x2, 0x8, 0x10, 0x200, 0x1000, 0x10000 all -> 0 err=87. Round 2, every pair probed: 0x4020 and 0x4080 -> BELOW_NORMAL, 0x8020 -> NORMAL, 0x8080 -> ABOVE_NORMAL, 0xa0 and 0x120 -> NORMAL, 0x180 -> HIGH, 0x4100 -> BELOW_NORMAL, 0x8100 -> ABOVE_NORMAL, 0xc000 -> BELOW_NORMAL, and every pair containing IDLE -> IDLE.",
-    "note": "A real divergence, and the rule is not the one it first looks like: it is not that the IDLE bit means IDLE, but that unrecognised bits are ignored while any recognised one decides, with IDLE taking precedence. So an unknown value is refused when it carries no class bit at all, which means gala cannot simply accept every nonzero value either. The REALTIME downgrade is a second, separate thing to match. Round 2, from ROADMAP WD Next item 1. So the Linux side's \"gala takes the lowest class for now\" is already right, and the test can assert it. Answers the open probe for two class bits with neither being IDLE's. MAPPING IS A GUESS for check 36 (got 0x10000000): the Linux side showed one of these cannot be the line counted to (kernel32_thread_test 36 maps to a value masked to 16 bits, which cannot give 0x10000000). Counting calls is being replaced by the tests printing their own failing line through #[track_caller], so take the line here as provisional until that export."
+    "note": "A real divergence, and the rule is not the one it first looks like: it is not that the IDLE bit means IDLE, but that unrecognised bits are ignored while any recognised one decides, with IDLE taking precedence. So an unknown value is refused when it carries no class bit at all, which means gala cannot simply accept every nonzero value either. The REALTIME downgrade is a second, separate thing to match. Round 2, from ROADMAP WD Next item 1. So the Linux side's \"gala takes the lowest class for now\" is already right, and the test can assert it. Answers the open probe for two class bits with neither being IDLE's. Round 3: the tests now print their own failing line, so the mapping is exact and no longer counted."
   },
   "kernel32_sync_test": {
-    "windows": "No longer crashes: it reaches check 81 (user/kernel32_sync_test/src/main.rs:710, c.ok(grew <= MOST_SWITCHES, grew)) and got 0.",
-    "class": "expectation",
-    "evidence": "run-all.ps1 against 746404e7's binaries; the access violation at +0x2ad7 is gone.",
-    "note": "The InitOnce Context fix held. The new check counts context switches and got 0 where it wants at most MOST_SWITCHES but more than none, so it is a different question and not probed here."
+    "windows": "Passes now (exit 0). The larger SystemProcessInformation buffer was the cause, as the Linux side read it: a real machine with hundreds of processes overflowed 64 KiB.",
+    "class": "resolved",
+    "evidence": "Round 3 sweep, against the binaries exported in 73e727e8.",
+    "note": "Was failing in Round 2; nothing further seen here."
   },
   "dwrite_test": {
     "windows": "Passes now (exit 0). The catch-all QueryInterface was the cause, as diagnosed.",
@@ -143,10 +145,10 @@
     "note": "Round 2: still exit 10 against the new binary, and it is the slowest program measured here at 11682 ms. With run-all.ps1 now keeping the last line a program prints, the report carries \"got 16711680\" rather than the informational limit line; \"check 10 failed\" is still dropped, but the check number is the exit status anyway. The earlier mapping of check 10 to WSAStartup was a guess and should be ignored."
   },
   "bench": {
-    "windows": "Runs: \"bench: cpu_loop ns_per_op 1\", exit 0.",
+    "windows": "Quarantined again: Defender blocked it at 07:14, and run-all.ps1 recorded \"antivirus blocked it (ERROR_VIRUS_INFECTED)\".",
     "class": "skipped",
-    "evidence": "this run; the earlier bench.exe (338432 bytes) was quarantined by Microsoft Defender as Trojan:Win32/Bearfoos.A!ml, the branch's build (343040 bytes) was not.",
-    "note": "Not a divergence. Noted because a quarantine removes the file and the earlier sweep lost it."
+    "evidence": "Get-MpThreatDetection, ThreatID 2147731250 (Trojan:Win32/Bearfoos.A!ml), on the clone's user/bin/bench.exe.",
+    "note": "Not a divergence. Note that this is the detection reporting working as intended: the program is named and the reason given rather than vanishing from the report."
   },
   "disk_test": {
     "windows": null,
@@ -155,10 +157,10 @@
     "note": "Not the galatest account, although the source mentions it elsewhere: the failing check is about the media type. Still to be probed (what IOCTL_DISK_GET_DRIVE_GEOMETRY reports for this machine's disk)."
   },
   "kernel32_sys_test": {
-    "windows": "Not reproduced: LoadLibraryExW(\"kernel32.dll\", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32) returns a handle with no error from an ordinary process, with the flag and without it.",
-    "class": "expectation",
-    "evidence": "the test's new check 54 (user/kernel32_sys_test/src/main.rs:399, c.ok(!k32.is_null(), 0)) got 0x7e ERROR_MOD_NOT_FOUND; probed here, the same call succeeds.",
-    "note": "So the failure belongs to the freestanding program's own context, not to the API, and a probe from outside cannot settle it. The WriteConsoleW fix held: this is a later check. The program would have to report more for this one."
+    "windows": "Passes now (exit 0). Loading testdll from the program's own directory rather than gala's C:/gala path was the cause.",
+    "class": "resolved",
+    "evidence": "Round 3 sweep, against the binaries exported in 73e727e8.",
+    "note": "Was failing in Round 2; nothing further seen here."
   },
   "registry_test": {
     "windows": "A predefined key closes successfully in its sign-extended form, which is what the SDK's HKEY is on x64: RegCloseKey(0xffffffff80000000/1/2/3) returns 0 for HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE and HKEY_USERS alike. The same number zero-extended (0x0000000080000002) is not a handle at all and gives ERROR_INVALID_HANDLE (6).",
@@ -176,7 +178,7 @@
     "windows": "CreateDirectoryW(%TEMP%\\gala_k32) returns 0 with ERROR_ALREADY_EXISTS (183), because the directory is still there from an earlier run, holding a.txt.",
     "class": "environment",
     "evidence": "probed here: the directory exists with a.txt in it; CreateDirectoryW -> 0, GetLastError 183. The test's own next check asserts that a second CreateDirectoryW returns 0, so check 1 can only pass against a clean %TEMP%.",
-    "note": "NOT a divergence: leftover state. It also explains part of the run-to-run movement, this program having failed check 0x28 in the first sweep (clean) and check 1 in the second. The test does not remove what it creates; run it against a fresh %TEMP% or have it clean up first. MAPPING IS A GUESS for check 40: the Linux side showed one of these cannot be the line counted to (kernel32_thread_test 36 maps to a value masked to 16 bits, which cannot give 0x10000000). Counting calls is being replaced by the tests printing their own failing line through #[track_caller], so take the line here as provisional until that export."
+    "note": "NOT a divergence: leftover state. It also explains part of the run-to-run movement, this program having failed check 0x28 in the first sweep (clean) and check 1 in the second. The test does not remove what it creates; run it against a fresh %TEMP% or have it clean up first. Round 3: the tests now print their own failing line, so the mapping is exact and no longer counted."
   },
   "restricted_test": {
     "windows": "CheckTokenMembership(NULL, S-1-5-32-544) succeeds and reports is-member = 0 with GetLastError 0: this token is not in Administrators.",
@@ -200,7 +202,7 @@
     "windows": "The name a server sees for this client is DESKTOP-0GMLOBR\\a (GetUserNameEx, NameSamCompatible).",
     "class": "environment",
     "evidence": "probed here; the check asserts the name is \"GALA\\gala\".",
-    "note": "The test hardcodes gala's own machine and user name, so it cannot pass on any other machine. The SSPI exchange itself got as far as this check, so the mechanism works here. MAPPING IS A GUESS for check 48 (got 0x8009030e, SEC_E_NO_CREDENTIALS): the Linux side showed one of these cannot be the line counted to (kernel32_thread_test 36 maps to a value masked to 16 bits, which cannot give 0x10000000). Counting calls is being replaced by the tests printing their own failing line through #[track_caller], so take the line here as provisional until that export."
+    "note": "The test hardcodes gala's own machine and user name, so it cannot pass on any other machine. The SSPI exchange itself got as far as this check, so the mechanism works here. Round 3: the tests now print their own failing line, so the mapping is exact and no longer counted."
   },
   "clock_test": {
     "windows": "STATUS_FATAL_USER_CALLBACK_EXCEPTION, preceded by a first-chance STATUS_ACCESS_VIOLATION at the same address, ntdll.dll+0x165d8b: the fault is inside ntdll's user-callback dispatcher, not in the test's own code.",
@@ -243,5 +245,41 @@
     "class": "skipped",
     "evidence": "timed out after 60 s.",
     "note": "Timed out in both sweeps; same as winhttp_test."
+  },
+  "smpsched_test": {
+    "windows": "Passes now (exit 0). Same buffer cause as kernel32_sync_test.",
+    "class": "resolved",
+    "evidence": "Round 3 sweep, against the binaries exported in 73e727e8.",
+    "note": "Was failing in Round 2; nothing further seen here."
+  },
+  "tcc": {
+    "windows": "Cannot run on this machine: Defender quarantines the tcc.exe each script builds, so busybox fails to exec it (\"./tcc.exe: Invalid argument\") and the script exits 0x7e, ERROR_MOD_NOT_FOUND.",
+    "class": "environment",
+    "evidence": "Get-MpThreatDetection, ThreatID 2147738096 (Behavior:Win32/DefenseEvasion.A!ml), on tcc.exe in all four working directories: %TEMP%\\gala_tcc, gala_lua, gala_make and gala_sqlite, at 07:03 and 07:31.",
+    "note": "All five passed in Round 2 and fail now, so this is the machine changing rather than the code: a freshly built compiler that writes and executes code is what the behaviour detection is for. They stay blocked here until user/bin and %TEMP% are excluded from Defender, which was declined for this machine."
+  },
+  "tcc_make": {
+    "windows": "Cannot run on this machine: Defender quarantines the tcc.exe each script builds, so busybox fails to exec it (\"./tcc.exe: Invalid argument\") and the script exits 0x7e, ERROR_MOD_NOT_FOUND.",
+    "class": "environment",
+    "evidence": "Get-MpThreatDetection, ThreatID 2147738096 (Behavior:Win32/DefenseEvasion.A!ml), on tcc.exe in all four working directories: %TEMP%\\gala_tcc, gala_lua, gala_make and gala_sqlite, at 07:03 and 07:31.",
+    "note": "All five passed in Round 2 and fail now, so this is the machine changing rather than the code: a freshly built compiler that writes and executes code is what the behaviour detection is for. They stay blocked here until user/bin and %TEMP% are excluded from Defender, which was declined for this machine."
+  },
+  "tcc_self": {
+    "windows": "Cannot run on this machine: Defender quarantines the tcc.exe each script builds, so busybox fails to exec it (\"./tcc.exe: Invalid argument\") and the script exits 0x7e, ERROR_MOD_NOT_FOUND.",
+    "class": "environment",
+    "evidence": "Get-MpThreatDetection, ThreatID 2147738096 (Behavior:Win32/DefenseEvasion.A!ml), on tcc.exe in all four working directories: %TEMP%\\gala_tcc, gala_lua, gala_make and gala_sqlite, at 07:03 and 07:31.",
+    "note": "All five passed in Round 2 and fail now, so this is the machine changing rather than the code: a freshly built compiler that writes and executes code is what the behaviour detection is for. They stay blocked here until user/bin and %TEMP% are excluded from Defender, which was declined for this machine."
+  },
+  "lua": {
+    "windows": "Cannot run on this machine: Defender quarantines the tcc.exe each script builds, so busybox fails to exec it (\"./tcc.exe: Invalid argument\") and the script exits 0x7e, ERROR_MOD_NOT_FOUND.",
+    "class": "environment",
+    "evidence": "Get-MpThreatDetection, ThreatID 2147738096 (Behavior:Win32/DefenseEvasion.A!ml), on tcc.exe in all four working directories: %TEMP%\\gala_tcc, gala_lua, gala_make and gala_sqlite, at 07:03 and 07:31.",
+    "note": "All five passed in Round 2 and fail now, so this is the machine changing rather than the code: a freshly built compiler that writes and executes code is what the behaviour detection is for. They stay blocked here until user/bin and %TEMP% are excluded from Defender, which was declined for this machine."
+  },
+  "sqlite": {
+    "windows": "Cannot run on this machine: Defender quarantines the tcc.exe each script builds, so busybox fails to exec it (\"./tcc.exe: Invalid argument\") and the script exits 0x7e, ERROR_MOD_NOT_FOUND.",
+    "class": "environment",
+    "evidence": "Get-MpThreatDetection, ThreatID 2147738096 (Behavior:Win32/DefenseEvasion.A!ml), on tcc.exe in all four working directories: %TEMP%\\gala_tcc, gala_lua, gala_make and gala_sqlite, at 07:03 and 07:31.",
+    "note": "All five passed in Round 2 and fail now, so this is the machine changing rather than the code: a freshly built compiler that writes and executes code is what the behaviour detection is for. They stay blocked here until user/bin and %TEMP% are excluded from Defender, which was declined for this machine."
   }
 }
