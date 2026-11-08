@@ -164,6 +164,17 @@ side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
 
+A program that leaves a child of its own running holds the pipe its
+standard output goes through, and the end of that output never comes:
+quota_test creates its children suspended and leaks them when a check
+fails before it resumes them, which costs nothing under gala (the
+machine goes away with the scenario) and strands them on a real one.
+The per-program timeout does not cover this, since the program itself
+exited; the runner bounds the wait for the output too, kills what the
+program left running and goes on, so that program still reaches the
+report with its exit status. A program whose output is lost that way
+says so in place of its report line.
+
 Requirements (README "Requirements"): Linux, rustup (the pinned
 toolchain in `rust-toolchain.toml` installs itself), `git`, `xorriso`,
 QEMU, OVMF for UEFI boots (`OVMF_CODE`, `OVMF_VARS` if it is somewhere

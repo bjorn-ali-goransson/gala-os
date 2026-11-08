@@ -38,6 +38,21 @@ Add-Type -Namespace Gala -Name Native -MemberDefinition @'
 # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
 [void][Gala.Native]::SetErrorMode(0x0001 -bor 0x0002 -bor 0x8000)
 
+$runStart = Get-Date
+# Kills what a program left running. Kill() reaches the program itself, not
+# the children it started, and those keep its standard output open (below).
+# Only processes started after this run began, so that a process which has
+# since taken a dead one's id is left alone.
+function Stop-Descendants([int]$parent, [datetime]$since) {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    foreach ($p in @($all | Where-Object {
+        $_.ParentProcessId -eq $parent -and $null -ne $_.CreationDate -and $_.CreationDate -ge $since
+    })) {
+        Stop-Descendants $p.ProcessId $since
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Command lines that scenarios pass (gala: `args=` in xtask/src/main.rs).
 # nginx.exe would serve until stopped: -v prints its version and exits.
 $arguments = @{ "args_test" = 'alpha "beta gamma"'; "wow64_crt_test" = 'one "two three"'; "go_http" = 'self'; "handover_net_test" = 'self'; "nginx" = '-v'; "busybox" = 'sh -c "echo hello | cat; echo pipe=$?; echo abc | sed s/b/X/; echo count=$(printf ''x\ny\nx\n'' | grep -c x); exit 3"' }
@@ -129,6 +144,7 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $process.Kill()
         $process.WaitForExit()
+        Stop-Descendants $process.Id $runStart
         $results += [ordered]@{
             program = $name; exit = $null; line = ""; skipped = "timed out after $TimeoutSeconds s"
         }
@@ -136,13 +152,27 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
         continue
     }
     $process.WaitForExit()
-    $text = $stdout.Result
+    # ReadToEndAsync ends at EOF, and that needs every handle on the write
+    # end of the pipe closed: a program that leaves a child of its own
+    # running keeps one open (quota_test creates its children suspended and
+    # leaks them when a check fails before it resumes them), and waiting
+    # for the text would then hang for good, past the timeout above, which
+    # waited only for the program itself. So bound this wait too, clear the
+    # children out, and go on with what arrived.
+    if (-not $stdout.Wait($TimeoutSeconds * 1000)) {
+        Write-Host ("{0,-18} its output is held open by a child it left running" -f $name)
+        Stop-Descendants $process.Id $runStart
+        [void]$stdout.Wait(5000)
+    }
+    $lost = $stdout.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion
+    $text = if ($lost) { "" } else { $stdout.Result }
     # ExitCode is signed; report the 32-bit value as unsigned (NTSTATUS).
     $code = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$process.ExitCode), 0)
     $lines = @($text -split "`r?`n")
     $line = $lines | Where-Object { $_ -like "${name}: *" } | Select-Object -First 1
     if ($null -eq $line) { $line = $lines | Select-Object -First 1 }
     if ($null -eq $line) { $line = "" }
+    if ($lost) { $line = "(output lost: a child it left running held the pipe open)" }
     $results += [ordered]@{ program = $name; exit = $code; line = $line }
     # The benchmarks' numbers, for `cargo xtask bench <this file>`.
     if ($name -eq "bench") {
