@@ -22,7 +22,12 @@
     "The check-to-line mapping in these entries is counted from the source and is a guess wherever the reported value cannot come from the line it lands on. Five entries are marked so. The tests are being changed to print their own failing line, which removes the guesswork; until then prefer the report line's own \"(line L)\" where a test gives one.",
     "A correction worth keeping in view: the registry_test finding above was wrong when first reported, because the probe passed a zero-extended predefined key rather than the sign-extended one the x64 SDK defines, and the two behave differently. A probe of a handle-like constant has to use the exact encoding the header produces, and \"with a control\" did not catch it, since the control was an ordinary opened key rather than the other encoding of the same key.",
     "Round 3 (binaries from 73e727e8, every test printing its failing check's line): kernel32_sync_test, kernel32_sys_test and smpsched_test pass. registry_test moved from check 39 to 100, kernel32_thread_test from 36 to 50, threadinfo_test from 23 back to 14. 68 of 103 entries are mapped from the report's own (line L) and none are counted guesses any more. exit 0 went 76 -> 73, which is the three fixes less bench and the five tcc scripts, all six lost to Defender rather than to code.",
-    "A correction: I reported after the first Round 3 attempt that the fixes had had no effect and that the export looked stale. Both were wrong, and from the same cause: that run died on a stderr line before writing windows.json, so I compared the Round 2 report against itself. The three fixes above work. The lesson is to check a report's own timestamp before comparing it, which costs one line."
+    "A correction: I reported after the first Round 3 attempt that the fixes had had no effect and that the export looked stale. Both were wrong, and from the same cause: that run died on a stderr line before writing windows.json, so I compared the Round 2 report against itself. The three fixes above work. The lesson is to check a report's own timestamp before comparing it, which costs one line.",
+    "Round 3 probes (user/windows/round3-analysis.md asked for 19): the five answered so far are gdi32_test, shell32_test, shlwapi_test, sysinfo_test and udp_test, above. run-all.ps1 now also writes every program's whole output to windows-output.txt beside the report, which is what the conpty_test, wow64_k32_test, quota_test and clusapi_test sections asked for ('capture the full stdout') without needing a change to those tests.",
+    "Round 3 probes, second batch: com_test and dbghelp_test above, making seven of the nineteen answered (with gdi32_test, shell32_test, shlwapi_test, sysinfo_test and udp_test). The remaining twelve need a window and a message loop (user32_test, controls_test, comctl32_test), a COM server (ole32_test, uia_test), overlapped sockets (winsock_async_test), a 32-bit process (wow64_thread_test), or the program's own instrumentation (quota_test, conpty_test, browser_api_test, wow64_k32_test, clusapi_test), for which windows-output.txt now carries what they print.",
+    "Round 3 probes, third batch: controls_test and comctl32_test above, nine of the nineteen answered. The comctl32 one needed care: a probe from Python loads comctl32 version 6 through its manifest, where the FlatSB family returns FALSE for everything, so the first attempt disagreed with the test for a reason that had nothing to do with the question. Loading System32's comctl32 by full path gives version 5 and reproduces the test's own results exactly.",
+    "Round 3 probes, fourth batch: user32_test above, ten of the nineteen answered. It took two attempts worth noting: the hook callback first declared lParam signed, so CallNextHookEx raised on every notification and the hook chain was never continued. The counts happened to be right anyway, but the run was not trustworthy until the signature was fixed and it was repeated.",
+    "Round 3 probes, fifth batch: ole32_test above, eleven of the nineteen answered. It is worth recording how it was found: the first probe copied the test exactly and got E_INVALIDARG, which said nothing; the single-interface call in the same run happened to pass pItf=NULL and succeeded, and running the three-interface call both ways isolated pItf as the whole difference."
   ],
   "peb_test": {
     "windows": "Passes now (exit 0), the build pin having been relaxed.",
@@ -281,5 +286,71 @@
     "class": "environment",
     "evidence": "Get-MpThreatDetection, ThreatID 2147738096 (Behavior:Win32/DefenseEvasion.A!ml), on tcc.exe in all four working directories: %TEMP%\\gala_tcc, gala_lua, gala_make and gala_sqlite, at 07:03 and 07:31.",
     "note": "All five passed in Round 2 and fail now, so this is the machine changing rather than the code: a freshly built compiler that writes and executes code is what the behaviour detection is for. They stay blocked here until user/bin and %TEMP% are excluded from Defender, which was declined for this machine."
+  },
+  "gdi32_test": {
+    "windows": "GetBoundsRect on a memory DC returns DCB_RESET alone (0x1), not DCB_RESET|DCB_ENABLE (0x5). SetBoundsRect(dc, NULL, DCB_ENABLE|DCB_RESET) itself returns 0x9, the previous state.",
+    "class": "expectation",
+    "evidence": "probed here on a CreateCompatibleDC(NULL) memory DC; the bounds read back as all zeroes.",
+    "note": "A real divergence, and it confirms the Linux side's guess: the test asserts 0x5. So the enable bit is not reported back by GetBoundsRect on this build."
+  },
+  "shell32_test": {
+    "windows": "SHGetIconOverlayIndexW on a path that does not exist does not return -1: it returns an index, and a new one per path. 'C:\\nothing.ico' gave 5 on three consecutive calls and a different missing path gave 6.",
+    "class": "expectation",
+    "evidence": "probed here, repeated to show the value is stable per path and increments across paths.",
+    "note": "A real divergence, with a second point for whoever fixes the test: the value is not a constant. It depends on how many overlay identifiers the machine has handed out, so the test can assert that it is not -1, or that two different paths differ, but not a particular number."
+  },
+  "shlwapi_test": {
+    "windows": "AssocQueryStringW(ASSOCSTR_EXECUTABLE) for an unregistered extension returns 0x800401f5, CO_E_APPNOTFOUND (\"Application not found\"), not S_OK, and writes nothing.",
+    "class": "expectation",
+    "evidence": "probed here with .galatest; the control, .txt, returns S_OK with Notepad's full path, so the call itself works.",
+    "note": "A real divergence: the test asserts S_OK for .galatest. Either the extension has to be registered first or the test should expect CO_E_APPNOTFOUND."
+  },
+  "sysinfo_test": {
+    "windows": "NtQuerySystemInformation(124, SystemQueryPerformanceCounterInformation) needs its Version field pre-filled with 1 in the input buffer. Without it the call returns STATUS_NOT_SUPPORTED whatever the buffer size; with it, it succeeds and returns 12 bytes.",
+    "class": "expectation",
+    "evidence": "probed here at sizes 8, 12, 16 and 24, with and without Version=1. Without: 0xc00000bb at every size. With: 0 at 12, 16 and 24, returning 12 bytes, 01000000 00000000 01000000.",
+    "note": "This answers the probe exactly: the status is about the input, not the length. The test passes a 12-byte buffer it has not filled in, so it must set Version=1 first."
+  },
+  "udp_test": {
+    "windows": "setsockopt(SO_RANDOMIZE_PORT) succeeds on an unbound UDP socket and fails on a bound one with WSAEINVAL (10022). The option has to be set before bind.",
+    "class": "expectation",
+    "evidence": "probed here on two UDP sockets, one bound to 0.0.0.0:0 and one untouched.",
+    "note": "A real divergence in ordering rather than in the option: the test sets it on an already-bound socket. The 0xffffffff it reported is setsockopt's -1."
+  },
+  "com_test": {
+    "windows": "SafeArrayAllocDescriptorEx(VT_I4, 1) succeeds and sets fFeatures to 0x0080 (FADF_HAVEVARTYPE) with the VARTYPE 3 in the four bytes before the descriptor, but leaves cbElements at 0. SafeArrayAllocData then succeeds and gives a non-NULL pvData, and cbElements is still 0. SafeArrayGetVartype reads VT_I4 back correctly.",
+    "class": "expectation",
+    "evidence": "probed here, recording cbElements, fFeatures, the VARTYPE at -4 and pvData after each call, as the analysis asked.",
+    "note": "A real divergence, and a narrow one: of the two things check 110 asserts, pvData != NULL holds and cbElements == 4 does not. This build does not derive the element size from the VARTYPE, so SafeArrayAllocData allocated three elements of zero bytes. gala filling cbElements in is the wrong half to keep."
+  },
+  "dbghelp_test": {
+    "windows": "SymSrvGetFileIndexInfoW fails with ERROR_BAD_EXE_FORMAT (193) on an image that has no debug directory, and succeeds on one that has any entry at all. It also requires sizeofstruct to be exactly 1608; 1604, 1607, 1609, 0 and 4096 all give ERROR_INVALID_PARAMETER.",
+    "class": "expectation",
+    "evidence": "probed here. dbghelp_test.exe and user32_test.exe, both C tests, have an empty debug directory (rva 0, size 0) and fail with 193. commit_test.exe has one 28-byte entry, the single IMAGE_DEBUG_DIRECTORY that /Brepro writes, and succeeds; so do kernel32.dll (112 bytes of entries) and an ordinary python.exe. The test's own struct is the documented one and does come to 1608, so sizeofstruct is not the problem here.",
+    "note": "The test calls it on its own file, which is the one case that cannot work: the C tests are built by user/<test>/build.sh without /Brepro, so they carry no debug directory, while the Rust tests get one from the linker flags in .cargo/config.toml. Either give the C builds a debug directory or have the test ask about a file that has one. Not a divergence in the API."
+  },
+  "controls_test": {
+    "windows": "CB_SETCURSEL with an index past the end returns CB_ERR, and leaves the selection as it was: on a three-item combo with item 1 selected, CB_SETCURSEL 7 returns -1 and CB_GETCURSEL still returns 1.",
+    "class": "expectation",
+    "evidence": "probed here on a real COMBOBOX (CBS_DROPDOWNLIST, three items, CB_GETCOUNT 3), recording the two return values separately as the analysis asked: CB_SETCURSEL 1 -> 1, CB_GETCURSEL -> 1; then CB_SETCURSEL 7 -> -1, CB_GETCURSEL -> 1.",
+    "note": "Half the check holds. This is the branch the analysis anticipated: the selection is kept, so the documented \"the selection is cleared\" does not describe this build, and the test's second clause should expect 1."
+  },
+  "comctl32_test": {
+    "windows": "FlatSB_GetScrollProp(WSB_PROP_WINSTYLE) returns the window's WS_*SCROLL bits plus one low bit per scroll bar: 0x2 for vertical, 0x4 for horizontal. For a WS_VSCROLL-only window, which is what the test creates, it returns 0x00200002 rather than WS_VSCROLL's 0x00200000.",
+    "class": "expectation",
+    "evidence": "probed here against comctl32 5.82.26100.8328, loaded by full path. WS_VSCROLL only -> 0x00200002; WS_HSCROLL only -> 0x00100004; both -> 0x00300006; neither -> 0. The other properties the test sets read back exactly: VSTYLE 0, CXVSCROLL 21, VBKGCOLOR 0x00030201.",
+    "note": "A real divergence, and a one-bit one: the test asserts v == WS_VSCROLL and should mask or expect the extra bit. Also worth knowing for anyone probing this: in a process that activates comctl32 version 6, every FlatSB_GetScrollProp returns FALSE and leaves the output untouched, so the whole family has to be probed against version 5, which is what a test without a manifest gets."
+  },
+  "user32_test": {
+    "windows": "One CreateWindowExW raises HCBT_CREATEWND twice when the new window is the first in its thread: once for the window itself and once for the thread's default IME window, class \"IME\", title \"Default IME\". With a window already created in the thread it fires once.",
+    "class": "expectation",
+    "evidence": "probed here with a WH_CBT hook on the current thread, logging each HCBT_CREATEWND's hwnd, GetClassNameW and the CREATESTRUCT's title, as the analysis asked. First window in the thread: [('ProbeB','hooked'), ('IME','Default IME')]. With one window made beforehand: [('ProbeB','hooked')].",
+    "note": "A real divergence that the test can absorb: check 42 asserts cbt_creates == 1, and the hooked window is the thread's first, so Windows makes the IME window inside the same call and the hook counts two. gala presumably creates no IME window, which is why it passes there. The test can create a throwaway window before installing the hook, ignore HCBT_CREATEWND for class \"IME\", or count the window it asked for rather than the calls."
+  },
+  "ole32_test": {
+    "windows": "CoCreateInstanceEx requires every MULTI_QI's pItf to be NULL on input. The test pre-fills it with 1, and the call then returns E_INVALIDARG without touching the array at all. With pItf NULL and the same three interfaces it returns CO_S_NOTALLINTERFACES and fills in exactly what the test's next two checks expect: mqi[0] and mqi[1] S_OK with non-NULL pItf, mqi[2] E_NOINTERFACE with pItf NULL.",
+    "class": "expectation",
+    "evidence": "probed here with the test's own CLSID_CUIAutomation and its three IIDs, run twice: pItf=1 -> 0x80070057 and hr still the 7 sentinel in all three entries; pItf=NULL -> 0x00080012 with hr 0, 0, 0x80004002. The single-interface call succeeds either way when pItf is NULL, and count=0 gives E_INVALIDARG as the test expects.",
+    "note": "A test bug of one line, and the rest of what check 31's block asserts is right. The sentinel in hr is harmless; it is pItf that has to start NULL. Since gala accepts the non-NULL pItf, gala is wrong here too and should reject it."
   }
 }
