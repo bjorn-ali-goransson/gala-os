@@ -171,6 +171,16 @@ side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
 
+Each result carries `ms`, how long the program took here, and the runner
+prints it per program. `cargo xtask compare` does not read it yet
+(`report.rs` keeps `program`, `exit`, `line` and `skipped`, and ignores
+the rest, so an older xtask reads these reports unchanged). It is not a
+ratio against gala: here a program is a process, under gala it is a
+machine boot, and xtask's own summary separates firmware, bootloader and
+kernel. It is for finding what is slow or hanging, and as the baseline
+for the work itself; `cargo xtask bench` against `bench-windows.txt`
+remains the measured comparison ("Benchmarks", docs/PERF.md).
+
 A program that leaves a child of its own running holds the pipe its
 standard output goes through, and the end of that output never comes:
 quota_test creates its children suspended and leaks them when a check
