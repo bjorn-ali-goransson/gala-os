@@ -1962,6 +1962,29 @@ and panics red). The boot splash replaces the text console: add
     cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
     cargo xtask screenshot --name tcc --scenario tcc --at 16 run=busybox.exe "args=sh%20C:/gala/tcc.sh%20C:/gala/tcc.tar"
 
+#### Watching the screen live
+
+The pinned QEMU is built `--disable-gtk --disable-sdl`, so its only
+display backends are `none` and `dbus` and it opens no window of its
+own. VNC is compiled in, though, and `XTASK_QEMU_ARGS` is appended
+after everything else, so a `-vnc` there wins over the `-display none`
+that `run --headless` adds:
+
+    XTASK_QEMU_ARGS="-vnc 127.0.0.1:1" cargo xtask run --headless
+
+keeps the machine up (serial log on stdio, Ctrl-C to stop) with a VNC
+server on port 5901. Unlike a screendump this takes mouse and keyboard,
+so the desktop can be driven by hand.
+
+From Windows over WSL2, `localhost:5901` reaches it: localhost
+forwarding covers a port bound to the loopback address, so there is no
+need to listen on every interface. Windows has no VNC client of its own
+(`winget install TigerVNC.TigerVNC`, then `"C:\Program
+Files\TigerVNC\vncviewer.exe" localhost:5901`). Prefer the loopback
+form to `-vnc :1`, which listens on every interface with no password:
+under WSL's default NAT only the host can reach that, but mirrored
+networking would put it on the network.
+
 #### Screen checks
 
 A scenario in `SCREEN_SCENARIOS` gets a QEMU monitor socket; when its
