@@ -163,6 +163,7 @@ unsafe extern "system" {
     ) -> Bool;
     fn GetUserGeoID(class: u32) -> i32;
     fn LCIDToLocaleName(lcid: u32, buf: *mut u16, n: i32, flags: u32) -> i32;
+    fn GetSystemDefaultUILanguage() -> u16;
     fn LocaleNameToLCID(name: *const u16, flags: u32) -> u32;
     fn IsValidLocaleName(name: *const u16) -> Bool;
     fn EnumSystemLocalesEx(
@@ -526,7 +527,8 @@ fn times(c: &mut Checks) -> Result<(), u32> {
 }
 
 /// The preferred UI languages: one, en-US, as a double-NUL-terminated
-/// list of names (MUI_LANGUAGE_NAME) or hexadecimal ids (MUI_LANGUAGE_ID).
+/// list of names (MUI_LANGUAGE_NAME) or hexadecimal ids (MUI_LANGUAGE_ID);
+/// the system's list starts with its default UI language.
 fn ui_languages(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain calls with buffers of ours.
     unsafe {
@@ -548,7 +550,14 @@ fn ui_languages(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetLastError().into(), 122)?; // ERROR_INSUFFICIENT_BUFFER
         let mut len = 16u32;
         c.ok(GetSystemPreferredUILanguages(0x8, &mut count, buf.as_mut_ptr(), &mut len) != 0, 0)?;
-        c.text(&buf, "en-US")?;
+        // The system's first preferred UI language is its default UI
+        // language (machine-dependent: not en-US on every Windows; en-US
+        // under gala).
+        let mut system = [0u16; 86];
+        let n = LCIDToLocaleName(GetSystemDefaultUILanguage().into(), system.as_mut_ptr(), 86, 0);
+        c.ok(n > 1, n as u64)?;
+        let n = n as usize; // with its NUL
+        c.ok(buf.len() >= n && buf[..n] == system[..n], buf[0].into())?;
     }
     Ok(())
 }

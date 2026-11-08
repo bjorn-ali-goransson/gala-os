@@ -5266,7 +5266,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     // Flag 32: the child is attached to the console session whose id is
     // at 160 (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE); flag 64 with it: its
     // standard handles are new handles to that console (no
-    // STARTF_USESTDHANDLES), not the ones at 64..88.
+    // STARTF_USESTDHANDLES), not the ones at 64..88; without 64, a NULL
+    // one there is a new handle to the console too.
     let console = if flags & 32 != 0 {
         let mut id = [0u8; 4];
         if call.process.read(ptr + 160, &mut id).is_err() {
@@ -5372,13 +5373,20 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
             }
         }
     }
-    // A pseudo console's own standard handles (CONIN$, CONOUT$ twice).
-    if flags & 96 == 96 {
+    // A pseudo console's own standard handles (CONIN$, CONOUT$ twice):
+    // all three without STARTF_USESTDHANDLES (flag 64, zeroed above), and
+    // each one given as NULL with it. Microsoft's ConPTY samples pass
+    // STARTF_USESTDHANDLES with NULL handles so that the child does not
+    // take the parent's (Windows 11 25H2: conpty_test's child is then
+    // attached to the pseudo console).
+    if flags & 32 != 0 && std.contains(&0) {
         let input = KObject::new(ObjectBody::ConsoleInput).map_err(|_| NtStatus::NO_MEMORY);
         let output = KObject::new(ObjectBody::ConsoleOutput).map_err(|_| NtStatus::NO_MEMORY);
         let (input, output) = (tri!(input), tri!(output));
         for (i, object) in [input, output.clone(), output].into_iter().enumerate() {
-            std[i] = tri!(table.insert_object(object)).0;
+            if std[i] == 0 {
+                std[i] = tri!(table.insert_object(object)).0;
+            }
         }
     }
 

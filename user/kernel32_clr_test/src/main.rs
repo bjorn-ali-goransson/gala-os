@@ -77,6 +77,7 @@ unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn ExitProcess(code: u32) -> !;
+    fn GetModuleFileNameW(module: Handle, name: *mut u16, size: u32) -> u32;
     fn CloseHandle(h: Handle) -> Bool;
     fn GetCurrentProcess() -> Handle;
     fn GetCurrentThread() -> Handle;
@@ -548,6 +549,19 @@ fn w(s: &str) -> [u16; 64] {
     b
 }
 
+/// `file` in the directory of this program (C:\gala under gala, the
+/// directory run-all.ps1 runs it from on Windows), NUL-terminated.
+fn beside_me(file: &str) -> [u16; 300] {
+    let mut b = [0u16; 300];
+    // SAFETY: a buffer of 260 characters for the name.
+    let len = unsafe { GetModuleFileNameW(core::ptr::null_mut(), b.as_mut_ptr(), 260) } as usize;
+    let dir = b[..len].iter().rposition(|&ch| ch == u16::from(b'\\')).map_or(0, |i| i + 1);
+    for (d, ch) in b[dir..].iter_mut().zip(file.bytes().chain(Some(0))) {
+        *d = ch.into();
+    }
+    b
+}
+
 /// The NUL-terminated UTF-16 string at `p` is `want`.
 fn same_text(p: *const u16, want: &str) -> bool {
     // SAFETY: a NUL-terminated string the system wrote.
@@ -564,7 +578,7 @@ fn same_text(p: *const u16, want: &str) -> bool {
 fn libraries(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain calls with NUL-terminated names.
     unsafe {
-        let path = w("C:\\gala\\testdll.dll");
+        let path = beside_me("testdll.dll");
         let name = w("testdll.dll");
         let data = LoadLibraryExW(path.as_ptr(), core::ptr::null_mut(), 0x2); // AS_DATAFILE
         c.ok(!data.is_null() && data as usize & 3 == 1, data as u64)?;
@@ -585,7 +599,7 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
 
         // A 32-bit IL-only .NET assembly loads as a module in a 64-bit
         // process (how CoreCLR loads every assembly on Windows).
-        let il_path = w("C:\\gala\\dotnet_hello.dll");
+        let il_path = beside_me("dotnet_hello.dll");
         let il_name = w("dotnet_hello.dll");
         let il = LoadLibraryExW(il_path.as_ptr(), core::ptr::null_mut(), 0x8);
         c.ok(!il.is_null() && il as usize & 3 == 0, GetLastError().into())?;
@@ -594,7 +608,7 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
         c.ok(FreeLibrary(il) != 0, GetLastError().into())?;
         c.ok(GetModuleHandleW(il_name.as_ptr()).is_null(), 0)?;
         // A 32-bit image that is not IL-only cannot be loaded.
-        let bad = w("C:\\gala\\x86_native.dll");
+        let bad = beside_me("x86_native.dll");
         c.ok(LoadLibraryExW(bad.as_ptr(), core::ptr::null_mut(), 0).is_null(), 0)?;
         c.eq(GetLastError().into(), 193)?; // ERROR_BAD_EXE_FORMAT
 

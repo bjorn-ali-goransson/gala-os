@@ -1408,6 +1408,21 @@ fn token_groups(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// The process's token is elevated (TokenElevation, class 20).
+fn elevated() -> bool {
+    // SAFETY: a token handle of ours and a 4-byte TOKEN_ELEVATION.
+    unsafe {
+        let mut token = core::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), 0x8, &mut token) == 0 {
+            return false;
+        }
+        let (mut elevation, mut ret) = (0u32, 0u32);
+        let ok = GetTokenInformation(token, 20, (&raw mut elevation).cast(), 4, &mut ret);
+        CloseHandle(token);
+        ok != 0 && elevation != 0
+    }
+}
+
 fn service_sids(c: &mut Checks) -> Result<(), u32> {
     const HKLM: usize = 0x8000_0002;
     // The expected SID of "GalaTestSvc" (SHA-1 of "GALATESTSVC" in UTF-16).
@@ -1427,6 +1442,13 @@ fn service_sids(c: &mut Checks) -> Result<(), u32> {
             &mut key,
             core::ptr::null_mut(),
         );
+        // A standard user may not write HKLM\SYSTEM (ERROR_ACCESS_DENIED
+        // on Windows): without an elevated token there is no service to
+        // look up.
+        if r == 5 && !elevated() {
+            out(b"advapi32_test: service_sids: skipped (needs an administrator)\r\n");
+            return Ok(());
+        }
         c.eq(r.into(), 0)?;
         RegCloseKey(key);
 

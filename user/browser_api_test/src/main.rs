@@ -330,19 +330,54 @@ fn out(text: &[u8]) {
     };
 }
 
-/// Ends the program with check `n` failed.
-fn fail(n: u32) -> ! {
-    let mut line = *b"browser_api_test: check 00 failed\r\n";
-    line[24] = b'0' + (n / 10) as u8;
-    line[25] = b'0' + (n % 10) as u8;
-    out(&line);
+/// Appends `v` in decimal to `line` at `*at`.
+fn put_decimal(line: &mut [u8], at: &mut usize, v: u32) {
+    let mut digits = [0u8; 10];
+    let mut n = 0;
+    let mut v = v;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        line[*at] = digits[n];
+        *at += 1;
+    }
+}
+
+/// Ends the program with check `n` failed at source line `source_line`,
+/// reported in one write: `check N failed (line L)`.
+fn fail(n: u32, source_line: u32) -> ! {
+    let mut line = [0u8; 64];
+    let head = b"browser_api_test: check ";
+    line[..head.len()].copy_from_slice(head);
+    let mut at = head.len();
+    put_decimal(&mut line, &mut at, n);
+    for &b in b" failed (line " {
+        line[at] = b;
+        at += 1;
+    }
+    put_decimal(&mut line, &mut at, source_line);
+    for &b in b")\r\n" {
+        line[at] = b;
+        at += 1;
+    }
+    out(&line[..at]);
     // SAFETY: ends the process.
     unsafe { ExitProcess(n) }
 }
 
+/// Fails check `n` unless `ok`; the report names the calling line, so a
+/// number shared by several call sites still says which one failed.
+#[track_caller]
 fn check(ok: bool, n: u32) {
     if !ok {
-        fail(n);
+        fail(n, core::panic::Location::caller().line());
     }
 }
 

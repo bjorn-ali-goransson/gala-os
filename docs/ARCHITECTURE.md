@@ -681,7 +681,7 @@ one flat structure, 120 bytes plus the extensions its flags name:
 | 120, 128 | with flag 4: PROC_THREAD_ATTRIBUTE_HANDLE_LIST, count |
 | 136, 144 | with flag 8: lpReserved2 (the C runtime's descriptors), length |
 | 152 | with flag 16: the primary token (CreateProcessAsUserW; "Access tokens") |
-| 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES); flag 128: DETACHED_PROCESS, no console session |
+| 160 | with flag 32: the console session (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: the HPCON's first field); flag 64 with it: the child gets new console handles as its standard handles (no STARTF_USESTDHANDLES), without 64 a NULL one at 64..88 is a new console handle; flag 128: DETACHED_PROCESS, no console session |
 | 168, 176 | with flag 256: STARTUPINFO.lpDesktop (UTF-16, `station\desktop` or `desktop`), length in characters ("Window stations and desktops") |
 
 - **Search** (kernel32): a program named without a directory is searched
@@ -1969,7 +1969,9 @@ CreatePseudoConsole / ResizePseudoConsole / ClosePseudoConsole pages
   {session id, signal pipe, host process}; CreateProcess with
   PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE passes the id (GalaCreateProcess
   flag 32) and, without STARTF_USESTDHANDLES, the child gets new console
-  handles (flag 64). ResizePseudoConsole sets the size;
+  handles (flag 64); with it, each NULL standard handle is a new console
+  handle (Microsoft's ConPTY samples pass three NULLs so that the child
+  does not take the parent's). ResizePseudoConsole sets the size;
   ClosePseudoConsole closes the session (its programs end), closes the
   signal pipe and waits up to 5 s for the host (the caller drains the
   output pipe, as documented).

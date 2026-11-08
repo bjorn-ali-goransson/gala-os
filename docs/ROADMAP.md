@@ -1605,6 +1605,25 @@ view in a 64-bit process is IMAGE_MACHINE_TYPE_MISMATCH whether or not
 its base was free; PeekNamedPipe's bytes left in byte mode is 0 minus
 what was read (0 with no buffer), as gala had it.
 
+Done (Round 4, the tests' own bugs): browser_api_test's report names the
+failing line (its check numbers are shared by several calls);
+quota_test judges the handle limit against the count just before its
+duplicate loop and prints base, that count and n with a failure (the
+children and the event as all that came in between is gala's claim
+only); kernel32_clr_test opens its DLLs beside itself (x86_native.dll
+exported to user/bin); advapi32_test's service SIDs say "skipped" when a
+standard user may not create the service key; win32_misc_test counts the
+clipboard's formats against what enumerating it yields; wow64_test grows
+its SystemProcessInformation buffer to what is needed; conpty_test
+passes STARTF_USESTDHANDLES with NULL handles, as Microsoft's ConPTY
+samples do (without it a console child takes the parent's non-console
+handles), and gala makes each NULL one a handle to the pseudo console;
+token_test's SIDs are ULONG-aligned; user32_test's activation checks are
+skipped, with a line, when SetForegroundWindow is refused (the
+foreground lock); oleaut32_test's GetActiveObject runs in an apartment;
+kernel32_locale_test compares the system's preferred UI languages with
+its default UI language.
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
@@ -1628,9 +1647,15 @@ Next:
      SO_RANDOMIZE_PORT on a bound TCP socket; seh_test's lookup of a
      dynamic table's indirect entry (the test now registers it for
      VirtualAlloc'd memory);
-   - kernel32_locale_test's GetSystemPreferredUILanguages (the whole
-     list, against GetSystemDefaultUILanguage), before its expectation
-     changes; persist_test needs run-all.ps1 to remove C:\persist and
+   - token_test's CreateRestrictedToken with its SIDs aligned (Round 4
+     gave ERROR_NOACCESS with an unaligned one): if it passes, gala's
+     NtFilterToken refuses a misaligned SID as Windows does;
+     GetActiveObject without CoInitialize (gala: MK_E_UNAVAILABLE;
+     Windows likely CO_E_NOTINITIALIZED); a console child started on a
+     pseudo console without STARTF_USESTDHANDLES from a parent whose
+     standard handles are a mix of console and pipe handles (which ones
+     it takes; gala gives it the console's three);
+     persist_test needs run-all.ps1 to remove C:\persist and
      HKCU\Software\GalaPersist and run it twice, judging the second run.
 2. The tests that need a setting run-all.ps1 cannot give: system_test
    (LocalSystem), session_test, restricted_test (an administrator), the

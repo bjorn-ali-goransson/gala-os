@@ -169,6 +169,9 @@ unsafe extern "system" {
         size: u32,
     ) -> Bool;
     fn CountClipboardFormats() -> i32;
+    fn OpenClipboard(owner: Handle) -> Bool;
+    fn EnumClipboardFormats(format: u32) -> u32;
+    fn CloseClipboard() -> Bool;
     fn IsWindowUnicode(hwnd: Handle) -> Bool;
     fn CharNextExA(code_page: u16, s: *const u8, flags: u32) -> *const u8;
     fn CharUpperW(s: *mut u16) -> *mut u16;
@@ -1184,10 +1187,10 @@ fn wow64(c: &mut Checks) -> Result<(), u32> {
 /// What Delphi's VCL (Inno Setup's Setup) calls as it starts, with
 /// Windows' documented results where gala has no paint buffers and no
 /// touch input: IsWow64GuestMachineSupported and GetSystemWow64DirectoryW
-/// (`wow64`), the *ForDpi forms (96 DPI), gesture handles (none valid), the clipboard's format
-/// count, IsEqualGUID, GetCurrentPositionEx after MoveToEx, uxtheme's
-/// buffered painting (Init succeeds, no buffer is started) and
-/// OpenThemeDataForDpi (no theme).
+/// (`wow64`), the *ForDpi forms (96 DPI), gesture handles (none valid),
+/// the clipboard's format count (as many as it enumerates), IsEqualGUID,
+/// GetCurrentPositionEx after MoveToEx, uxtheme's buffered painting (Init
+/// succeeds, no buffer is started) and OpenThemeDataForDpi (no theme).
 fn vcl(c: &mut Checks) -> Result<(), u32> {
     wow64(c)?;
     // SAFETY: plain calls with our buffers; exports looked up by name
@@ -1203,7 +1206,21 @@ fn vcl(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetLastError().into(), 87)?;
         c.ok(SetGestureConfig(core::ptr::null_mut(), 0, 0, core::ptr::null(), 0) == 0, 0)?;
         c.eq(GetLastError().into(), 1400)?;
-        c.eq(CountClipboardFormats() as u64, 0)?;
+        // The user's clipboard is theirs (it held 7 formats on the
+        // Windows machine): the count is what enumerating it yields, and
+        // nothing here empties it.
+        let count = CountClipboardFormats();
+        c.ok(OpenClipboard(core::ptr::null_mut()) != 0, GetLastError().into())?;
+        let (mut format, mut listed) = (0, 0);
+        loop {
+            format = EnumClipboardFormats(format);
+            if format == 0 {
+                break;
+            }
+            listed += 1;
+        }
+        c.ok(CloseClipboard() != 0, GetLastError().into())?;
+        c.eq(count as u64, listed)?;
         c.ok(IsWindowUnicode(core::ptr::null_mut()) == 0, 0)?;
         let dc = CreateCompatibleDC(core::ptr::null_mut());
         c.ok(!dc.is_null(), 0)?;

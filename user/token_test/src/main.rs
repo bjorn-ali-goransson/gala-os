@@ -178,9 +178,15 @@ const ERROR_NO_TOKEN: u32 = 1008;
 const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
 const ERROR_BAD_TOKEN_TYPE: u32 = 1349;
 
+/// A SID in memory aligned as one (its subauthorities are ULONGs): a
+/// byte array may sit at an odd address, which Windows' token calls can
+/// refuse (ERROR_NOACCESS from CreateRestrictedToken).
+#[repr(C, align(4))]
+struct Sid<const N: usize>([u8; N]);
+
 /// S-1-1-0 (Everyone) and S-1-5-32-544 (BUILTIN\Administrators).
-const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
-const ADMINISTRATORS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0];
+static EVERYONE: Sid<12> = Sid([1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+static ADMINISTRATORS: Sid<16> = Sid([1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0]);
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -555,22 +561,22 @@ fn run() -> Result<(), u32> {
         c.eq(IsTokenRestricted(restricted) as u64, 0)?;
         c.ok(statistics(&c, restricted)?.0 != id, 0)?;
         // Everyone deny-only, SeShutdown deleted, Everyone restricting.
-        let everyone = [EVERYONE.as_ptr() as usize, 0];
+        let everyone = [EVERYONE.0.as_ptr() as usize, 0];
         let delete = [SE_SHUTDOWN, 0, 0];
         let mut filtered = null;
         let r =
             CreateRestrictedToken(full, 0, 1, &everyone, 1, &delete, 1, &everyone, &mut filtered);
         c.ok(r != 0, last_error())?;
-        let attrs = group(&c, filtered, TOKEN_GROUPS, &EVERYONE)?.unwrap_or(0);
+        let attrs = group(&c, filtered, TOKEN_GROUPS, &EVERYONE.0)?.unwrap_or(0);
         c.ok(attrs & SE_GROUP_USE_FOR_DENY_ONLY != 0, attrs.into())?;
         c.eq((attrs & SE_GROUP_ENABLED).into(), 0)?;
         c.eq(privilege(&c, filtered, SE_SHUTDOWN)?.map_or(9, u64::from), 9)?;
         c.ok(privilege(&c, filtered, SE_CHANGE_NOTIFY)?.is_some(), 0)?;
         c.eq(dword(&c, filtered, TOKEN_RESTRICTED_SIDS)?.into(), 1)?;
-        c.ok(group(&c, filtered, TOKEN_RESTRICTED_SIDS, &EVERYONE)?.is_some(), 0)?;
+        c.ok(group(&c, filtered, TOKEN_RESTRICTED_SIDS, &EVERYONE.0)?.is_some(), 0)?;
         c.eq(IsTokenRestricted(filtered) as u64, 1)?;
         // The original is unchanged.
-        let attrs = group(&c, query_only, TOKEN_GROUPS, &EVERYONE)?.unwrap_or(0);
+        let attrs = group(&c, query_only, TOKEN_GROUPS, &EVERYONE.0)?.unwrap_or(0);
         c.ok(attrs & SE_GROUP_ENABLED != 0, attrs.into())?;
         c.eq(dword(&c, query_only, TOKEN_RESTRICTED_SIDS)?.into(), 0)?;
         // Without TOKEN_DUPLICATE.
@@ -592,14 +598,14 @@ fn run() -> Result<(), u32> {
         // CheckTokenMembership (an impersonation token): Everyone yes,
         // Administrators no (a standard user), a deny-only group no.
         let mut member = 7;
-        c.ok(CheckTokenMembership(imp, EVERYONE.as_ptr(), &mut member) != 0, last_error())?;
+        c.ok(CheckTokenMembership(imp, EVERYONE.0.as_ptr(), &mut member) != 0, last_error())?;
         c.eq(member as u64, 1)?;
-        c.ok(CheckTokenMembership(imp, ADMINISTRATORS.as_ptr(), &mut member) != 0, 0)?;
+        c.ok(CheckTokenMembership(imp, ADMINISTRATORS.0.as_ptr(), &mut member) != 0, 0)?;
         c.eq(member as u64, 0)?;
         let mut filtered_imp = null;
         let r = DuplicateTokenEx(filtered, TOKEN_ALL_ACCESS, null, 2, 2, &mut filtered_imp);
         c.ok(r != 0, last_error())?;
-        c.ok(CheckTokenMembership(filtered_imp, EVERYONE.as_ptr(), &mut member) != 0, 0)?;
+        c.ok(CheckTokenMembership(filtered_imp, EVERYONE.0.as_ptr(), &mut member) != 0, 0)?;
         c.eq(member as u64, 0)?;
 
         for h in [

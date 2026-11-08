@@ -13512,6 +13512,11 @@ fn docker_test(args: &[String]) -> Result {
     run_cmd(&mut cmd)
 }
 
+/// Checked-in files a test program opens beside itself, exported to
+/// user/bin so that it finds them there on Windows as in C:\gala.
+const EXPORTED_TEST_DATA: &[(&str, &str)] =
+    &[("user/kernel32_clr_test/x86_native.dll", "x86_native.dll")];
+
 /// Copies the test programs to `user/bin/`, where they are checked in so
 /// they can be run on real Windows without a Rust toolchain.
 fn export_tests() -> Result {
@@ -13526,6 +13531,9 @@ fn export_tests() -> Result {
     }
     for dll in USER_DLLS_X86 {
         copy(&built_dll_x86(dll.file), &dir.join(dll.exported_as))?;
+    }
+    for (file, exported_as) in EXPORTED_TEST_DATA {
+        copy(&root().join(file), &dir.join(exported_as))?;
     }
     eprintln!("xtask: exported {} test programs to {}", USER_PROGRAMS.len(), dir.display());
     // pk_install_test's package source zips user/bin/hello.exe, so it is

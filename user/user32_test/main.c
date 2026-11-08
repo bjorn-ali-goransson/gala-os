@@ -887,8 +887,17 @@ static void dialog_units(void) {
      * active window; BringWindowToTop succeeds. */
     HWND w = CreateWindowExW(0, L"User32TestHooks", L"active", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, NULL,
                              NULL, GetModuleHandleW(NULL), NULL);
-    CHECK(SetForegroundWindow(w) && GetForegroundWindow() == w && GetActiveWindow() == w);
-    CHECK(SetActiveWindow(w) == w && BringWindowToTop(w));
+    if (!SetForegroundWindow(w)) {
+        /* The documented foreground lock: a process that is not the
+         * foreground one and had no recent input (started from a
+         * background shell) may not take the foreground. */
+        CHECK(GetForegroundWindow() != w);
+        printf("user32_test: activation skipped (no foreground rights)\n");
+        fflush(stdout);
+    } else {
+        CHECK(GetForegroundWindow() == w && GetActiveWindow() == w);
+        CHECK(SetActiveWindow(w) == w && BringWindowToTop(w));
+    }
     DestroyWindow(w);
 }
 

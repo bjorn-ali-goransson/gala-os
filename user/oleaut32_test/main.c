@@ -34,8 +34,8 @@
  * - VarCmp: VARCMP_LT/EQ/GT/NULL; numbers by value, strings as
  *   strings, a string is greater than any number, an empty string
  *   equals VT_EMPTY.
- * - GetActiveObject: MK_E_UNAVAILABLE for a class nothing registered as
- *   running.
+ * - GetActiveObject (in a single-threaded apartment): MK_E_UNAVAILABLE
+ *   for a class nothing registered as running.
  * - VarBstrCmp (#314, imported by ordinal by Chromium): VARCMP_LT, _EQ,
  *   _GT by the locale's order; NORM_IGNORECASE makes case equal; a NULL
  *   BSTR is the empty string.
@@ -400,7 +400,11 @@ int main(void) {
     /* GetActiveObject: nothing is running. */
     static const CLSID nothing = {0x6a0c8d1e, 0x3f2b, 0x4c55, {0x9e, 0x10, 0x5a, 0x77, 0x12, 0x34, 0x56, 0x78}};
     IUnknown *unk = (IUnknown *)1;
+    /* The running object table is COM's: the thread joins an apartment
+     * first (without one Windows' answer is likely CO_E_NOTINITIALIZED). */
+    CHECK(SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)));
     CHECK(GetActiveObject(&nothing, NULL, &unk) == MK_E_UNAVAILABLE && unk == NULL);
+    CoUninitialize();
 
     BSTR apple = SysAllocString(L"apple"), apple2 = SysAllocString(L"APPLE"), pear = SysAllocString(L"pear");
     BSTR blank = SysAllocString(L"");

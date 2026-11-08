@@ -926,10 +926,23 @@ fn thread_and_process(c: &mut Checks, teb: usize, pid: usize, tid: usize) -> Res
     c.ok(ends_with(len, name.as_ptr() as usize + 8, "\\wow64_test.exe"), len as u64)?;
     // SystemProcessInformation (5): the x86 records (0xb8 bytes, threads of
     // 0x40, the name after them); this process's.
-    let (status, list, _) = allocate(0, 0x4_0000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    c.eq(status.into(), 0)?;
-    let args = [5, list, 0x4_0000, mptr(&mut returned)];
-    c.eq(sys(NT_QUERY_SYSTEM_INFORMATION, &args).into(), 0)?;
+    // The size depends on the machine (a real one runs hundreds of
+    // processes): grow to what STATUS_INFO_LENGTH_MISMATCH says is needed,
+    // with room for processes started meanwhile.
+    let mut size = 0x4_0000;
+    let list = loop {
+        let (status, list, _) = allocate(0, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        c.eq(status.into(), 0)?;
+        let args = [5, list, size, mptr(&mut returned)];
+        let status = sys(NT_QUERY_SYSTEM_INFORMATION, &args);
+        if status != 0xc000_0004 || size >= 0x400_0000 {
+            c.eq(status.into(), 0)?;
+            break list;
+        }
+        let (status, _, _) = free(list, 0, MEM_RELEASE);
+        c.eq(status.into(), 0)?;
+        size = (returned as usize).max(size) + 0x1_0000;
+    };
     let (mut at, mut mine) = (list, 0);
     loop {
         if read_u32(at + 0x44) as usize == pid {
