@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds user/windows/triage.json from a run-all.ps1 report.
+"""Builds a triage of a run-all.ps1 report, for its sweep issue.
 
 For every program that did not exit 0, this fills in the mechanical part
 of docs/windows-triage-brief.md step 2: which check failed, where it is in
@@ -20,7 +20,7 @@ The classification is a first pass from evidence that needs no probe:
   expectation  everything else: the test asserts something this machine
                does not do, which needs a probe to say what it does
 
-    python triage.py <windows.json> [--out user/windows/triage.json]
+    python triage.py <windows.json> [--out <path>]
                      [--sources <tree the binaries were built from>]
 
 Run from the repository root: the test sources are read from
@@ -217,7 +217,10 @@ def main(argv):
         print(__doc__)
         return 2
     global SOURCES
-    report, out = argv[0], os.path.join("user", "windows", "triage.json")
+    # Not under version control any more (issue #9): a sweep's triage is
+    # reported on its issue, so the default output is a scratch path.
+    report, out = argv[0], os.path.join(
+        os.environ.get("TEMP", "."), "gala-triage", "triage.json")
     if "--out" in argv:
         out = argv[argv.index("--out") + 1]
     if "--sources" in argv:
@@ -249,7 +252,9 @@ def main(argv):
         })
     # What was actually observed here, kept by hand so that a new run of
     # run-all.ps1 does not lose it.
-    found_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "findings.json")
+    found_path = os.environ.get(
+        "GALA_FINDINGS",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "findings.json"))
     found, notes = {}, []
     if os.path.exists(found_path):
         with open(found_path, encoding="utf-8") as f:
@@ -264,6 +269,7 @@ def main(argv):
             if f_.get(key) is not None:
                 e[key] = f_[key]
     entries.sort(key=lambda e: (e["class"], e["program"]))
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         json.dump({"platform": d["platform"], "source_report": os.path.basename(report),
                    "entries": entries}, f, indent=2)
