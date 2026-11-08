@@ -417,6 +417,12 @@ pub extern "system" fn WriteConsoleW(
     _reserved: *mut c_void,
 ) -> Bool {
     if output(h).is_none() {
+        // Not a console: Windows' WriteConsoleW fails with
+        // ERROR_INVALID_FUNCTION on a pipe (ERROR_INVALID_HANDLE otherwise).
+        const FILE_TYPE_PIPE: u32 = 3;
+        const ERROR_INVALID_FUNCTION: u32 = 1;
+        let pipe = crate::GetFileType(h) == FILE_TYPE_PIPE;
+        SetLastError(if pipe { ERROR_INVALID_FUNCTION } else { ERROR_INVALID_HANDLE });
         return FALSE;
     }
     if buffer.is_null() && length > 0 {

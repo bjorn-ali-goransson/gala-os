@@ -9,6 +9,10 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use super::abi::{
+    ArgSlot, create_wow64_thread, deliver_apc_after, gala_unhandled_exception, nt_continue,
+    nt_get_context_thread, nt_set_context_thread,
+};
 use super::file;
 use super::namespace;
 use super::object::{
@@ -533,20 +537,17 @@ pub fn service_name(number: u32) -> &'static str {
 
 /// One system call in progress.
 pub struct Call<'a> {
-    frame: &'a SyscallFrame,
-    process: KArc<Process>,
+    pub(in crate::nt) frame: &'a SyscallFrame,
+    pub(in crate::nt) process: KArc<Process>,
 }
 
 impl Call<'_> {
-    /// Argument `i` (0-based): r10, rdx, r8, r9, then the user stack.
-    fn arg(&self, i: usize) -> Result<u64, NtStatus> {
-        Ok(match i {
-            0 => self.frame.r10,
-            1 => self.frame.rdx,
-            2 => self.frame.r8,
-            3 => self.frame.r9,
-            _ => {
-                let addr = self.frame.rsp + 0x28 + 8 * (i as u64 - 4);
+    /// Argument `i` (0-based), where the architecture's ABI has it
+    /// (`abi::syscall_arg`; x64: r10, rdx, r8, r9, then the user stack).
+    pub(in crate::nt) fn arg(&self, i: usize) -> Result<u64, NtStatus> {
+        Ok(match super::abi::syscall_arg(self.frame, i) {
+            ArgSlot::Value(v) => v,
+            ArgSlot::Stack(addr) => {
                 self.process.read_u64(addr).map_err(|_| NtStatus::ACCESS_VIOLATION)?
             }
         })
@@ -554,7 +555,7 @@ impl Call<'_> {
 }
 
 impl Call<'_> {
-    fn read_u64(&self, addr: u64) -> Result<u64, NtStatus> {
+    pub(in crate::nt) fn read_u64(&self, addr: u64) -> Result<u64, NtStatus> {
         self.process.read_u64(addr).map_err(|_| NtStatus::ACCESS_VIOLATION)
     }
 
@@ -635,7 +636,7 @@ macro_rules! arg {
 }
 
 fn dispatch(frame: &mut SyscallFrame) {
-    let number = frame.rax as u32;
+    let number = frame.number() as u32;
     let Some(me) = thread::current() else {
         panic!("syscall {number:#x} from a thread without a process");
     };
@@ -709,7 +710,7 @@ fn dispatch(frame: &mut SyscallFrame) {
     if TRACE.load(Ordering::Relaxed) {
         trace(&call, number, service.map(|&(_, name, argc, _)| (name, argc)), status);
     }
-    frame.rax = u64::from(status.0);
+    frame.set_result(u64::from(status.0));
 }
 
 /// Set by the `trace` kernel command-line flag: log every system call.
@@ -1518,7 +1519,8 @@ fn nt_create_event(call: &mut Call<'_>) -> NtStatus {
     let kind = match arg!(call, 3) as u32 {
         0 => EventType::Notification,
         1 => EventType::Synchronization,
-        _ => return NtStatus::INVALID_PARAMETER_4,
+        // Windows names no parameter here (unlike NtCreateTimer's).
+        _ => return NtStatus::INVALID_PARAMETER,
     };
     let initial = arg!(call, 4) as u8 != 0;
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));
@@ -3038,11 +3040,14 @@ fn nt_query_timer(call: &mut Call<'_>) -> NtStatus {
     call.return_info(&b, arg!(call, 2), arg!(call, 3) as u32 as u64, arg!(call, 4))
 }
 
-const THREAD_GET_CONTEXT: u32 = 0x0008;
-const THREAD_SET_CONTEXT: u32 = 0x0010;
+pub(in crate::nt) const THREAD_SET_CONTEXT: u32 = 0x0010;
 
 /// A thread handle with `access`, for the thread services.
-fn thread_object(call: &Call<'_>, h: u64, access: u32) -> Result<ObjectRef, NtStatus> {
+pub(in crate::nt) fn thread_object(
+    call: &Call<'_>,
+    h: u64,
+    access: u32,
+) -> Result<ObjectRef, NtStatus> {
     let entry = call.handle(Handle(h))?;
     let object = entry.require(access)?.clone();
     match &object.body {
@@ -3053,22 +3058,12 @@ fn thread_object(call: &Call<'_>, h: u64, access: u32) -> Result<ObjectRef, NtSt
     }
 }
 
-fn is_current_thread(object: &ObjectRef) -> bool {
-    thread::current().is_some_and(|me| KArc::ptr_eq(&me, object))
-}
-
 /// The calling thread's user registers as they will be when this system
-/// call returns (rax = STATUS_SUCCESS).
-fn caller_regs(call: &Call<'_>) -> UserRegs {
-    let f = call.frame;
-    UserRegs {
-        gpr: [
-            0, f.rip, f.rdx, f.rbx, f.rsp, f.rbp, f.rsi, f.rdi, f.r8, f.r9, f.r10, f.rflags, f.r12,
-            f.r13, f.r14, f.r15,
-        ],
-        rip: f.rip,
-        rflags: f.rflags,
-    }
+/// call returns (the result STATUS_SUCCESS).
+pub(in crate::nt) fn caller_regs(call: &Call<'_>) -> UserRegs {
+    let mut regs = call.frame.return_regs();
+    regs.set_syscall_result(0);
+    regs
 }
 
 /// NtSuspendThread(ThreadHandle, *PreviousSuspendCount)
@@ -3080,125 +3075,6 @@ fn nt_suspend_thread(call: &mut Call<'_>) -> NtStatus {
         tri!(call.write_u32(ptr, previous));
     }
     NtStatus::SUCCESS
-}
-
-/// Where the CONTEXT at `ctx_ptr` (with CONTEXT_XSTATE) has its XSTATE
-/// area, from the CONTEXT_EX after it: (address, length), the length at
-/// most what gala reads or writes. None without extended features or with
-/// a CONTEXT_EX that does not describe one.
-fn user_xstate_area(call: &Call<'_>, ctx_ptr: u64, flags: u32) -> Option<(u64, usize)> {
-    use super::context::{self as ctx, CONTEXT_XSTATE};
-    if !ctx::has(flags, CONTEXT_XSTATE) || ctx::xstate_len() == 0 {
-        return None;
-    }
-    let mut ex = [0u8; ctx::EX_SIZE];
-    call.process.read(ctx_ptr.checked_add(ctx::SIZE as u64)?, &mut ex).ok()?;
-    let (offset, len) = ctx::xstate_area(&ex)?;
-    Some((ctx_ptr.checked_add(offset)?, len.min(ctx::xstate_len())))
-}
-
-/// The x87/SSE/AVX state a thread resumes with when given the CONTEXT
-/// `ctx` (read from `ctx_ptr`): `base` with the CONTEXT's FltSave
-/// (CONTEXT_FLOATING_POINT) and XSTATE area (CONTEXT_XSTATE) applied.
-/// Whether anything was applied, too.
-fn resume_state(
-    call: &Call<'_>,
-    ctx_ptr: u64,
-    ctx: &[u8],
-    mut state: platform::XState,
-) -> Result<(platform::XState, bool), NtStatus> {
-    use super::context as c;
-    let mut changed = false;
-    if let Some(legacy) = c::float_state(ctx) {
-        state.set_legacy(&legacy);
-        changed = true;
-    }
-    if let Some((addr, len)) = user_xstate_area(call, ctx_ptr, c::flags(ctx)) {
-        let mut area = [0u8; c::MAX_XSTATE];
-        let area = &mut area[..len];
-        call.process.read(addr, area).map_err(|_| NtStatus::ACCESS_VIOLATION)?;
-        c::apply_xstate(&mut state, area);
-        changed = true;
-    }
-    Ok((state, changed))
-}
-
-/// NtGetContextThread(ThreadHandle, *Context): the parts of the user
-/// registers that ContextFlags names, of the caller or of a suspended
-/// thread once it has stopped; with CONTEXT_XSTATE, the features the
-/// XSTATE area's Mask asks for (the Mask then says which of them hold
-/// values, the rest being in their initial state).
-fn nt_get_context_thread(call: &mut Call<'_>) -> NtStatus {
-    use super::context as c;
-    let object = tri!(thread_object(call, arg!(call, 0), THREAD_GET_CONTEXT));
-    let ptr = arg!(call, 1);
-    let mut ctx = [0u8; c::SIZE];
-    if call.process.read(ptr, &mut ctx).is_err() {
-        return NtStatus::ACCESS_VIOLATION;
-    }
-    let flags = c::flags(&ctx);
-    let (regs, fx, compat) = if is_current_thread(&object) {
-        (caller_regs(call), platform::xsave(), false)
-    } else {
-        let p = tri!(thread::parked_state(&object));
-        (p.regs, p.fx, p.compat)
-    };
-    c::fill(&mut ctx, flags, &regs, Some(&fx));
-    // A WOW64 thread stopped in 32-bit code: its selectors (CS 0x23, FS
-    // the TEB32's), as Windows reports them.
-    if compat {
-        c::mark_compat(&mut ctx, flags);
-    }
-    if call.process.write(ptr, &ctx).is_err() {
-        return NtStatus::ACCESS_VIOLATION;
-    }
-    if let Some((addr, len)) = user_xstate_area(call, ptr, flags) {
-        let Ok(wanted) = call.process.read_u64(addr) else { return NtStatus::ACCESS_VIOLATION };
-        let area = c::xstate_bytes(&fx, wanted, len);
-        if call.process.write(addr, &area[..len]).is_err() {
-            return NtStatus::ACCESS_VIOLATION;
-        }
-    }
-    NtStatus::SUCCESS
-}
-
-/// NtSetContextThread(ThreadHandle, *Context): the parts ContextFlags
-/// names; for the caller it takes effect on return (as NtContinue), for
-/// a suspended thread on resume. CONTEXT_XSTATE: the features in the
-/// XSTATE area's Mask take its values, the others their initial state.
-fn nt_set_context_thread(call: &mut Call<'_>) -> NtStatus {
-    use super::context as c;
-    let object = tri!(thread_object(call, arg!(call, 0), THREAD_SET_CONTEXT));
-    let ptr = arg!(call, 1);
-    let mut ctx = [0u8; c::SIZE];
-    if call.process.read(ptr, &mut ctx).is_err() {
-        return NtStatus::ACCESS_VIOLATION;
-    }
-    let flags = c::flags(&ctx);
-    if is_current_thread(&object) {
-        let mut regs = caller_regs(call);
-        c::apply(&mut regs, &ctx, flags);
-        if !regs.is_valid() {
-            return NtStatus::INVALID_PARAMETER;
-        }
-        let (state, changed) = tri!(resume_state(call, ptr, &ctx, platform::xsave()));
-        if changed {
-            platform::xrstor(&state);
-        }
-        platform::continue_with(regs);
-        return NtStatus::SUCCESS;
-    }
-    let parked = tri!(thread::parked_state(&object));
-    let mut regs = parked.regs;
-    c::apply(&mut regs, &ctx, flags);
-    if !regs.is_valid() {
-        return NtStatus::INVALID_PARAMETER;
-    }
-    let (state, changed) = tri!(resume_state(call, ptr, &ctx, parked.fx));
-    match thread::set_parked_state(&object, regs, changed.then_some(state)) {
-        Ok(()) => NtStatus::SUCCESS,
-        Err(e) => e,
-    }
 }
 
 /// NtQueueApcThread(ThreadHandle, ApcRoutine, ApcArgument1, ApcArgument2,
@@ -3219,99 +3095,6 @@ fn nt_queue_apc_thread(call: &mut Call<'_>) -> NtStatus {
         Ok(()) => NtStatus::SUCCESS,
         Err(e) => e,
     }
-}
-
-/// After an alertable wait ended with STATUS_USER_APC, makes the system
-/// call return through ntdll!KiUserApcDispatcher to run the first queued
-/// APC; the CONTEXT it gets resumes the caller with rax = STATUS_USER_APC.
-fn deliver_apc_after(call: &Call<'_>, status: NtStatus) -> NtStatus {
-    if status != NtStatus::USER_APC {
-        return status;
-    }
-    let f = call.frame;
-    let regs = UserRegs {
-        // rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15; SYSCALL left the
-        // return address in rcx and the flags in r11.
-        gpr: [
-            u64::from(status.0),
-            f.rip,
-            f.rdx,
-            f.rbx,
-            f.rsp,
-            f.rbp,
-            f.rsi,
-            f.rdi,
-            f.r8,
-            f.r9,
-            f.r10,
-            f.rflags,
-            f.r12,
-            f.r13,
-            f.r14,
-            f.r15,
-        ],
-        rip: f.rip,
-        rflags: f.rflags,
-    };
-    let state = platform::xsave();
-    let context = super::context::to_bytes(&regs, Some(&state));
-    deliver_apc(call, context, f.rsp, &state);
-    status
-}
-
-/// Where an APC frame has its XSTATE area: after the CONTEXT and its
-/// CONTEXT_EX, 64-byte aligned (the frame is).
-const APC_XSTATE_AT: usize = 0x500;
-
-/// Runs the next user APC, if any, by resuming the thread in
-/// ntdll!KiUserApcDispatcher with `context` (the state to return to, with
-/// stack pointer `rsp`, and extended state `state`) at the top of a new
-/// frame below `rsp`. The x64 contract (Windows Internals): rsp points to
-/// the CONTEXT, whose P1Home..P4Home hold NormalContext, SystemArgument1,
-/// SystemArgument2 and NormalRoutine; the dispatcher calls the routine and
-/// NtContinues the CONTEXT with TestAlert set, which delivers the next
-/// APC. With extended features the CONTEXT has CONTEXT_XSTATE, its
-/// CONTEXT_EX after it and the XSTATE area at APC_XSTATE_AT, so the
-/// routine's use of the YMM registers does not reach the resumed code.
-// TODO: verify the frame against the pinned build's ntdll.
-fn deliver_apc(
-    call: &Call<'_>,
-    mut context: [u8; super::context::SIZE],
-    rsp: u64,
-    state: &platform::XState,
-) -> bool {
-    use super::context as c;
-    let dispatcher = call.process.apc_dispatcher.load(Ordering::Relaxed);
-    if dispatcher == 0 {
-        return false;
-    }
-    let Some(apc) = thread::take_user_apc() else { return false };
-    for (i, v) in [apc.args[0], apc.args[1], apc.args[2], apc.routine].iter().enumerate() {
-        context[8 * i..8 * i + 8].copy_from_slice(&v.to_le_bytes());
-    }
-    let xlen = c::xstate_len();
-    let size = if xlen == 0 { c::SIZE } else { APC_XSTATE_AT + xlen };
-    let frame = (rsp.wrapping_sub(size as u64)) & !0x3f;
-    if xlen != 0 {
-        let flags = c::flags(&context) | c::CONTEXT_XSTATE;
-        c::set_flags(&mut context, flags);
-    }
-    if frame >= rsp || call.process.write(frame, &context).is_err() {
-        return false;
-    }
-    if xlen != 0 {
-        let ex = c::context_ex(APC_XSTATE_AT, xlen);
-        let area = c::xstate_bytes(state, u64::MAX, xlen);
-        if call.process.write(frame + c::SIZE as u64, &ex).is_err()
-            || call.process.write(frame + APC_XSTATE_AT as u64, &area[..xlen]).is_err()
-        {
-            return false;
-        }
-    }
-    let mut gpr = [0u64; 16];
-    gpr[4] = frame;
-    platform::continue_with(UserRegs { gpr, rip: dispatcher, rflags: 0 });
-    true
 }
 
 const DUPLICATE_CLOSE_SOURCE: u32 = 1;
@@ -3428,36 +3211,6 @@ fn nt_query_system_time(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
-/// NtContinue(*Context, TestAlert): resumes the calling thread with the
-/// registers in `Context` (returned to user mode through IRETQ, since
-/// SYSRET cannot restore rcx and r11).
-fn nt_continue(call: &mut Call<'_>) -> NtStatus {
-    let ctx_ptr = arg!(call, 0);
-    let mut ctx = [0u8; super::context::SIZE];
-    if call.process.read(ctx_ptr, &mut ctx).is_err() {
-        return NtStatus::ACCESS_VIOLATION;
-    }
-    let regs = super::context::from_bytes(&ctx);
-    if !regs.is_valid() {
-        return NtStatus::INVALID_PARAMETER;
-    }
-    let (state, changed) = tri!(resume_state(call, ctx_ptr, &ctx, platform::xsave()));
-    // TestAlert: run the next queued user APC before resuming the context.
-    if arg!(call, 1) as u8 != 0
-        && thread::has_user_apc()
-        && deliver_apc(call, ctx, regs.gpr[4], &state)
-    {
-        return NtStatus::SUCCESS;
-    }
-    // The kernel does not use x87/SSE/AVX, so the state loaded now is what
-    // the thread resumes with (context switches save and restore it).
-    if changed {
-        platform::xrstor(&state);
-    }
-    platform::continue_with(regs);
-    NtStatus::SUCCESS
-}
-
 /// NtCreateThread(*ThreadHandle, DesiredAccess, ObjectAttributes,
 ///                ProcessHandle, *ClientId, *ThreadContext, *InitialTeb,
 ///                CreateSuspended)
@@ -3469,13 +3222,11 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     if ctx_ptr == 0 || teb_ptr == 0 {
         return NtStatus::INVALID_PARAMETER;
     }
-    let mut ctx = [0u8; super::context::SIZE];
+    let mut ctx = [0u8; super::abi::context::SIZE];
     if call.process.read(ctx_ptr, &mut ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let regs = super::context::from_bytes(&ctx);
-    // TODO: the rest of FltSave (x87 state, XMM registers).
-    let mxcsr = super::context::mxcsr(&ctx);
+    let (regs, win32_start, mxcsr) = super::abi::thread_start(&ctx);
     // INITIAL_TEB { OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase }
     let stack_base = tri!(call.read_u64(teb_ptr + 16));
     let stack_limit = tri!(call.read_u64(teb_ptr + 24));
@@ -3486,12 +3237,7 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
         tri!(thread::create(
             &call.process,
             regs,
-            // As ReactOS does: the "return register" of the start context
-            // (kernel32's thunks pass the Win32 start routine there); a
-            // context without it reports its start rip (never 0: the
-            // thread's events and ThreadQuerySetWin32StartAddress name
-            // where it starts).
-            if regs.gpr[0] != 0 { regs.gpr[0] } else { regs.rip },
+            win32_start,
             mxcsr,
             (stack_base, stack_limit, stack_bottom),
             suspended
@@ -3513,43 +3259,6 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
         tri!(call.write_u64(cid_ptr + 8, tid));
     }
     NtStatus::SUCCESS
-}
-
-/// NtCreateThread in a WOW64 process, where every thread runs 32-bit
-/// code: wow64.dll converts its 32-bit caller's x86 CONTEXT and
-/// INITIAL_TEB into the 64-bit ones, with SegCs 0x23 and the 32-bit
-/// registers and stack zero-extended ("Plan: WOW64"). The thread gets a
-/// 64-bit stack for wow64.dll's code, a TEB32, and starts in wow64.dll,
-/// which enters 32-bit code with those registers.
-fn create_wow64_thread(
-    call: &Call<'_>,
-    ctx: &[u8],
-    (base, limit, bottom): (u64, u64, u64),
-    suspended: bool,
-) -> Result<ObjectRef, NtStatus> {
-    use super::context as c;
-    if u32::from(c::seg_cs(ctx)) != super::layout::wow64::CS32 {
-        // A 64-bit thread would have no 64-bit ntdll to run.
-        super::ledger::record("NtCreateThread", "64-bit thread in a WOW64 process", 0);
-        return Err(NtStatus::INVALID_PARAMETER);
-    }
-    let regs = c::from_bytes(ctx);
-    let low = |i: usize| regs.gpr[i] as u32;
-    let stack64 = super::wow64::reserve_stack64(&mut call.process.vad.lock())?;
-    let start = super::wow64::Start32 {
-        eip: regs.rip as u32,
-        esp: low(4),
-        // eax, ecx, edx, ebx, esi, edi, ebp (UserRegs order: rax, rcx, rdx,
-        // rbx, rsp, rbp, rsi, rdi).
-        gpr: [low(0), low(1), low(2), low(3), low(6), low(7), low(5)],
-        stack: (base as u32, limit as u32, bottom as u32),
-        stack64: stack64.0,
-    };
-    let created = thread::create_wow64(&call.process, start, stack64, suspended);
-    if created.is_err() {
-        let _ = super::vm::free(&call.process, stack64.2, 0, super::vm::MEM_RELEASE);
-    }
-    created
 }
 
 /// NtResumeThread(ThreadHandle, *PreviousSuspendCount)
@@ -3898,7 +3607,8 @@ pub fn restart_as(process: &Process, number: u32, regs: &UserRegs) -> bool {
     if number != NT_READ_FILE {
         return true;
     }
-    let entry = process.handles.lock().get(Handle(regs.gpr[10]));
+    let ArgSlot::Value(handle) = super::abi::saved_arg(regs, 0) else { return false };
+    let entry = process.handles.lock().get(Handle(handle));
     matches!(entry.map(|e| e.object), Some(o) if matches!(&o.body, ObjectBody::Pipe(end) if end.synchronous))
 }
 
@@ -3949,40 +3659,6 @@ pub fn set_handover_pause(generation: u64, ms: u64) {
 /// a handover ends up to that much late (its deadline is kept: it ends
 /// at the deadline or when the threads go on, whichever is later); tests
 /// bound their sleeps by it instead of guessing the handover's time.
-/// GalaUnhandledException(ExceptionRecord, ContextRecord): ntdll's
-/// report of an exception no handler took, before it calls the top-level
-/// filter; (0, 0) when the filter continued execution. Kept as the
-/// process's crash report, printed when it ends (nt::crashreport).
-fn gala_unhandled_exception(call: &mut Call<'_>) -> NtStatus {
-    let (record, context) = (arg!(call, 0), arg!(call, 1));
-    if record == 0 {
-        *call.process.unhandled_exception.lock() = None;
-        return NtStatus::SUCCESS;
-    }
-    // EXCEPTION_RECORD: code +0, address +0x10, parameter count +0x18,
-    // parameters +0x20; CONTEXT: rax..r15 from +0x78.
-    let code = tri!(call.read_u64(record)) as u32;
-    let rip = tri!(call.read_u64(record + 0x10));
-    let count = tri!(call.read_u64(record + 0x18)) as u32;
-    let access = if code == NtStatus::ACCESS_VIOLATION.0 && count >= 2 {
-        Some((tri!(call.read_u64(record + 0x28)), tri!(call.read_u64(record + 0x20))))
-    } else {
-        None
-    };
-    let mut regs = [0u64; 16];
-    for (i, r) in regs.iter_mut().enumerate() {
-        *r = tri!(call.read_u64(context + 0x78 + 8 * i as u64));
-    }
-    // From a 32-bit ntdll, wow64.dll passes the x86 registers in a 64-bit
-    // CONTEXT that says CS 0x23 (the report shows them as 32-bit).
-    let mut cs = [0u8; 2];
-    tri!(call.process.read(context + 0x38, &mut cs).map_err(|_| NtStatus::ACCESS_VIOLATION));
-    let x86 = u32::from(u16::from_le_bytes(cs)) == super::layout::wow64::CS32;
-    let note = super::crashreport::Note::new(&call.process, NtStatus(code), rip, access, regs, x86);
-    *call.process.unhandled_exception.lock() = Some(note);
-    NtStatus::SUCCESS
-}
-
 fn gala_handover_pause(call: &mut Call<'_>) -> NtStatus {
     use core::sync::atomic::Ordering;
     let generation = HANDOVER_PAUSE[0].load(Ordering::Acquire);

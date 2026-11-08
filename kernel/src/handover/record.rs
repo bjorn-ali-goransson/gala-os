@@ -767,13 +767,15 @@ impl Clock {
         ]
     }
 
-    /// TSC ticks per second, as calibrated at the first boot.
-    pub fn tsc_hz(&self) -> u64 {
+    /// The cycle counter's ticks per second (x86-64: the TSC), as
+    /// calibrated at the first boot.
+    pub fn counter_hz(&self) -> u64 {
         self.fields()[0]
     }
 
-    /// The TSC value at the clock's zero (the first boot's clock start).
-    pub fn tsc_at_zero(&self) -> u64 {
+    /// The cycle counter's value at the clock's zero (the first boot's clock
+    /// start).
+    pub fn counter_at_zero(&self) -> u64 {
         self.fields()[1]
     }
 
@@ -1230,7 +1232,7 @@ mod tests {
         assert_eq!(r.version, 0);
         let c = Clock::read(&mut r);
         assert_eq!(
-            (c.tsc_hz(), c.monotonic_ns(), c.boot_system_time(), c.timer_hz()),
+            (c.counter_hz(), c.monotonic_ns(), c.boot_system_time(), c.timer_hz()),
             (10, 40, 0, 0)
         );
         let v = Volume::read(&mut rec.section(tag::VOLUME).unwrap());
@@ -1284,7 +1286,10 @@ mod tests {
         }
         assert_eq!(data, &expected[..]);
         let c = Clock::read(&mut rec.section(tag::CLOCK).unwrap());
-        assert_eq!([c.tsc_hz(), c.tsc_at_zero(), c.ticks(), c.monotonic_ns()], [1, 2, 3, 4]);
+        assert_eq!(
+            [c.counter_hz(), c.counter_at_zero(), c.ticks(), c.monotonic_ns()],
+            [1, 2, 3, 4]
+        );
         assert_eq!([c.boot_system_time(), c.timer_hz()], [5, 6]);
     }
 

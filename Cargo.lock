@@ -2794,7 +2794,9 @@ dependencies = [
  "ed25519-compact",
  "flate2",
  "fontdue",
+ "proc-macro2",
  "resvg",
+ "syn 2.0.119",
  "tuf",
 ]
 

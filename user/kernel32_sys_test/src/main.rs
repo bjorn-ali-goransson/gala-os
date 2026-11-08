@@ -1,8 +1,10 @@
 //! More of kernel32, the process-level functions the Go runtime calls at
 //! startup, with the results real Windows gives when standard output is
 //! redirected (as `run-all.ps1` runs it, and as gala's serial console is):
-//! console mode fails with ERROR_INVALID_HANDLE (and WriteConsoleW, unless
-//! the handle is a character device: gala's serial console); error modes,
+//! console mode fails with ERROR_INVALID_HANDLE, and WriteConsoleW (unless
+//! the handle is a character device: gala's serial console) fails with
+//! ERROR_INVALID_FUNCTION on a pipe and ERROR_INVALID_HANDLE on a file
+//! (also on a pipe and a file made here); error modes,
 //! WER flags, priority boost and console control handlers are kept;
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
@@ -20,6 +22,7 @@ use core::ffi::c_void;
 
 type Bool = i32;
 type Handle = *mut c_void;
+const INVALID_HANDLE_VALUE: Handle = usize::MAX as Handle;
 
 #[repr(C)]
 #[derive(Default)]
@@ -106,6 +109,17 @@ unsafe extern "system" {
     fn VirtualQuery(addr: *const c_void, info: *mut MemoryBasicInformation, len: usize) -> usize;
     fn SwitchToThread() -> Bool;
     fn GetFileType(h: Handle) -> u32;
+    fn CreatePipe(read: *mut Handle, write: *mut Handle, sa: *const c_void, size: u32) -> Bool;
+    fn GetTempPathW(n: u32, buf: *mut u16) -> u32;
+    fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sa: *const c_void,
+        disposition: u32,
+        flags: u32,
+        template: Handle,
+    ) -> Handle;
     fn GetCommandLineW() -> *const u16;
     fn ExitProcess(code: u32) -> !;
 }
@@ -142,6 +156,7 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_INVALID_FUNCTION: u32 = 1;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const WAIT_TIMEOUT: u32 = 258;
 const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
@@ -224,14 +239,47 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.eq(GetConsoleMode(stdout, &mut mode) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
-        // WriteConsoleW fails on redirected output (a file or pipe); gala's
-        // serial console is a character device, which it writes to.
-        if GetFileType(stdout) != 2 {
+        // WriteConsoleW fails on redirected output: ERROR_INVALID_FUNCTION
+        // on a pipe, ERROR_INVALID_HANDLE on a file (what Windows gives).
+        // gala's serial console is a character device, which it writes to.
+        let kind = GetFileType(stdout);
+        if kind != 2 {
             let mut written = 0;
             SetLastError(0);
             c.eq(WriteConsoleW(stdout, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
-            c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+            let expected = if kind == 3 { ERROR_INVALID_FUNCTION } else { ERROR_INVALID_HANDLE };
+            c.eq(GetLastError().into(), expected.into())?;
         }
+        // The same on handles made here, whatever standard output is.
+        let (mut read, mut write) = (0 as Handle, 0 as Handle);
+        c.ok(CreatePipe(&mut read, &mut write, core::ptr::null(), 0) != 0, GetLastError().into())?;
+        let mut written = 0;
+        SetLastError(0);
+        c.eq(WriteConsoleW(write, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_FUNCTION.into())?;
+        CloseHandle(read);
+        CloseHandle(write);
+        let mut path = [0u16; 300];
+        let n = GetTempPathW(260, path.as_mut_ptr()) as usize;
+        c.ok(n > 0 && n < 260, GetLastError().into())?;
+        for (i, ch) in "gala_wc.tmp\0".encode_utf16().enumerate() {
+            path[n + i] = ch;
+        }
+        // FILE_FLAG_DELETE_ON_CLOSE: nothing is left behind.
+        let file = CreateFileW(
+            path.as_ptr(),
+            0x4000_0000,
+            0,
+            core::ptr::null(),
+            2,
+            0x0400_0000,
+            0 as Handle,
+        );
+        c.ok(file != INVALID_HANDLE_VALUE, GetLastError().into())?;
+        SetLastError(0);
+        c.eq(WriteConsoleW(file, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+        CloseHandle(file);
 
         // Process settings that are kept.
         let old = SetErrorMode(0x8003);

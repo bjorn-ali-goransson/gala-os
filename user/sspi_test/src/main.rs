@@ -107,6 +107,7 @@ unsafe extern "system" {
 
 #[link(name = "secur32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetUserNameExW(format: u32, buf: *mut u16, size: *mut u32) -> u8;
     fn QuerySecurityPackageInfoW(name: *const u16, info: *mut *mut SecPkgInfo) -> i32;
     fn EnumerateSecurityPackagesW(count: *mut u32, info: *mut *mut SecPkgInfo) -> i32;
     fn EnumerateSecurityPackagesA(count: *mut u32, info: *mut *mut SecPkgInfoA) -> i32;
@@ -270,6 +271,15 @@ fn same_a(p: *const u8, want: &[u8]) -> bool {
     !p.is_null()
         && unsafe {
             want.iter().enumerate().all(|(i, &b)| *p.add(i) == b) && *p.add(want.len()) == 0
+        }
+}
+
+/// The NUL-terminated string at `p` equals `want` (UTF-16, no NUL).
+fn same_w(p: *const u16, want: &[u16]) -> bool {
+    // SAFETY: callers pass a NUL-terminated string.
+    !p.is_null()
+        && unsafe {
+            want.iter().enumerate().all(|(i, &u)| *p.add(i) == u) && *p.add(want.len()) == 0
         }
 }
 
@@ -453,7 +463,12 @@ fn run() -> Result<(), u32> {
         // The client's name, as the server sees it.
         let mut name: *mut u16 = null.cast();
         c.eq(QueryContextAttributesW(&mut ctx_s, 1, (&raw mut name).cast()) as u64, SEC_E_OK)?;
-        c.ok(same(name, "GALA\\gala"), 0)?;
+        // This process's own account (NameSamCompatible: GALA\gala on
+        // gala, MACHINE\user on a real machine).
+        let mut own = [0u16; 256];
+        let mut size = 256u32;
+        c.ok(GetUserNameExW(2, own.as_mut_ptr(), &mut size) != 0, 0)?;
+        c.ok(same_w(name, &own[..size as usize]), 0)?;
         FreeContextBuffer(name.cast());
         // SecPkgContext_Sizes: cbMaxToken, cbMaxSignature, cbBlockSize,
         // cbSecurityTrailer.

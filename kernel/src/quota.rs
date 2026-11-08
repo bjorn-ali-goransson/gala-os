@@ -21,8 +21,9 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::mm::heap::{AllocError, KArc};
 use crate::sync::IrqMutex;
 
-/// Windows' documented per-process handle limit ("Kernel Objects": 2^24).
-pub const DEFAULT_HANDLES: u64 = 1 << 24;
+/// Windows' per-process handle limit: 0xff0000 (2^24 - 2^16) measured on
+/// Windows 25H2 by quota_test ("Kernel Objects" documents 2^24).
+pub const DEFAULT_HANDLES: u64 = 0xff_0000;
 
 /// Default pool limits, per process: a fraction of the machine's memory
 /// (1/DEFAULT_*_SHARE of it), at least DEFAULT_MIN. The largest

@@ -13,9 +13,12 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   linker.ld             higher-half layout, kernel linked at 0xffffffff80000000
   src/main.rs           entry symbol `kmain` + panic handler only
   src/lib.rs            boot sequence (`kernel_main`)
-  src/arch/x86_64/      CPU, GDT/TSS, IDT + ISR stubs, APIC, paging, SMP,
-                        syscall entry, XSAVE, UART, PCI, virtio transport,
-                        PS/2, kernel handover's machine side      [unsafe allowed]
+  src/arch/             the architecture seam ("The architecture seam") [unsafe allowed]
+  src/arch/x86_64/      CPU, GDT/TSS, IDT + ISR stubs, APIC timer, paging, SMP,
+                        syscall entry, XSAVE, UART, PCI config ports, PS/2,
+                        kernel handover's machine side
+  src/arch/aarch64/     a stub of the same interface that only compiles (CI's check)
+  src/arch/{pci,virtio,trap}.rs  shared: PCI functions, virtio transport, trap kinds
   src/boot/             Limine protocol bindings and handoff -> plain types [unsafe allowed]
   src/sync.rs           IrqMutex: spinlock that masks interrupts while held
   src/time.rs           periodic tick + TSC monotonic clock; clockcal.rs its arithmetic
@@ -44,9 +47,11 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/input.rs          PS/2 mouse polling for the desktop
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
   src/nt/platform.rs    the seam: traits for what nt needs from the machine
+  src/nt/abi/           Windows' ABI on this architecture (x64/: CONTEXT, frames, ...)
   src/platform.rs       the kernel's implementation of nt::platform
   src/personality.rs    per-process system-call ABI and its dispatcher table
   src/lx/               the Linux personality's groundwork (ROADMAP LX)
+  src/lx/machine/       Linux's ABI on this architecture (x86_64.rs: registers, signal frame)
   src/hosted/           gala-um's platform (feature `hosted`; memfd, host threads, signals) [unsafe allowed]
 user/                   freestanding Windows programs and DLLs (x86_64-pc-windows-msvc)
   ntrt/                 tiny runtime: ntdll-shaped syscall stubs, PEB access
@@ -76,6 +81,73 @@ later. The kernel is a library plus a tiny binary so that
 hardware-independent logic (memory map validation, the mapper, command
 line, calibration arithmetic, ...) is unit-tested on the host with
 `cargo test -p kernel --lib`.
+
+## The architecture seam
+
+Everything that depends on the processor architecture is in
+`kernel/src/arch`, behind one interface each architecture implements in
+its own module, selected by `target_arch` (x86_64; aarch64, a stub).
+The kernel's aarch64 check (CI's Clippy step: `cargo clippy -p kernel
+--target aarch64-unknown-none`) builds everything else against the stub,
+so code outside `arch` that names an x86-64 type, register, instruction,
+`asm!` or `core::arch::x86_64` fails to build. What an architecture
+provides (the module names neutral code uses):
+
+- **Registers** (`syscall`, `interrupts`): `UserRegs` (a thread's user
+  registers), `SyscallFrame` (a system call's), `TrapFrame` (an
+  exception's or interrupt's). Their fields are private to `arch`; the
+  rest of the kernel uses architecture-neutral accessors: instruction
+  pointer, stack pointer, flags, the call's number and result, the
+  registers it returns with (`return_regs`), the handover state's words
+  (`to_words`/`from_words`, `UserRegs::WORDS`), a trap's `kind()`
+  (`trap::TrapKind`), page-fault access, interrupted `mode()`, vector
+  and error code for logs. The architecture's named registers (`Gpr`:
+  x86-64's rax..r15) are for the per-architecture ABI modules only.
+- **Entering and leaving user mode** (`syscall`): the dispatchers per
+  personality, `enter_user_regs`, `continue_with`, `reissue`, the
+  user-return hook.
+- **The user's FP/SIMD state** (`xstate`): `XState` (initial, its image
+  as bytes, the 512-byte "legacy" part and component mask the handover
+  carries), save/restore, the enabled components.
+- **Time** (`cpu::cycles`, `timer`): the free-running cycle counter
+  (x86-64: the TSC), the tick source and its `Calibration`
+  (`calibrate`, `recalibrate`, `start_periodic(_here)`, `eoi`, the
+  counter's and timer's rates, the calibration's log line and
+  `clock_cal` event), a wall-clock seconds reference (`rtc_seconds`).
+- **Boot and CPUs**: `init_boot_cpu` (before lock-order checking) and
+  `init_boot_traps`, the boot phase names (`bootphase::mark`,
+  `bootphase::TIMER`), `percpu`, `smp` (online CPUs as (index, hardware
+  id), IPIs, `send_nmi`, TLB shootdowns, starting the APs), `paging`
+  (the kernel's and user address spaces), `context` (kernel stacks,
+  the context switch), `backtrace` (`walk`, `walk_trap`), `cpu`
+  (interrupt masking, halting, `hw_random`), the console and debug
+  ports, `qemu::exit`, the kernel handover's machine part, PS/2.
+- **Devices**: `port` and `pci_config` (x86-64: I/O ports and the 0xcf8
+  mechanism); `arch::pci` and `arch::virtio` are shared by every
+  architecture on top of them.
+
+The personalities' ABIs are per architecture too, outside `arch` (they
+are Windows' and Linux's, not the machine's): `nt::abi` (x64: the
+CONTEXT record, system call arguments in r10, rdx, r8, r9 and the
+stack, thread starts, exception and APC frames, the CONTEXT services,
+KUSER_SHARED_DATA's processor fields, the registry's processor
+identity, the crash report's registers) and `lx::machine` (x86_64:
+argument registers, restart, start registers, AT_PLATFORM/AT_HWCAP, the
+signal frame; the system call table is `lx/syscalls.rs`). Their aarch64
+counterparts are stubs (`nt/abi/arm64.rs`, `lx/machine/aarch64.rs`,
+`lx/syscalls_aarch64.rs`).
+
+By nature x86-64 only: gala-um's host side (`hosted`, a Linux x86-64
+process's signal contexts; `compile_error!` elsewhere). WOW64's NT part
+(`nt/wow64.rs`, 32-bit Windows' layouts) is plain data and compiles on
+every architecture; it runs only where the platform can enter 32-bit
+code (`set_teb32`: x86-64's compatibility mode).
+
+Limits (ROADMAP PT): `mm::paging` is x86-64's page-table format (generic
+over table access for host tests); the user thread-pointer bases keep
+x86-64's names (`gs_base`, `fs_base`, `teb32`) and the FP control
+register MXCSR's; `boot` is Limine's x86-64 protocol; gala's DLLs are not
+checked for aarch64 yet.
 
 ## Boot
 
@@ -270,7 +342,11 @@ boot tests only exercise xAPIC; x2APIC runs under KVM.
 
 `time` runs a 1 kHz periodic tick on vector 0x30 and offers
 `monotonic_ns()` from the TSC. The reschedule IPI is vector 0x31,
-spurious interrupts use vector 0xff.
+spurious interrupts use vector 0xff. `time` itself is
+architecture-neutral: it reads the cycle counter (`arch::cpu::cycles`)
+and drives the tick source through `arch::timer` (x86-64's local APIC
+timer and its calibration below, in `arch/x86_64/timer.rs` and
+`apic.rs`).
 
 ### Calibration
 
@@ -578,7 +654,7 @@ numbers and the version reported to programs depend on it.
   (boot modules can name a target directory in their module string), it
   is loaded once as an image section and mapped into every new process.
   The initial thread starts at its `LdrInitializeThunk` export with rcx =
-  a CONTEXT (`nt::context`) at the top of the stack describing the real
+  a CONTEXT (`nt::abi::context`) at the top of the stack describing the real
   start (entry point, rcx = PEB) and rdx = the ntdll base; ntdll resumes
   it with NtContinue, which returns through IRETQ
   (`syscall::continue_with`) because SYSRET cannot restore rcx/r11.
@@ -715,7 +791,10 @@ current process, -2 = current thread.
   parent there exits at once.
 - **Priority classes**: NtSetInformationProcess (0x1c) takes
   ProcessPriorityClass only and records it (Get/SetPriorityClass read it
-  back); the scheduler runs every thread alike.
+  back); the scheduler runs every thread alike. SetPriorityClass takes,
+  as Windows does, a value that is no single class but has IDLE's bit as
+  IDLE; 0 is ERROR_INVALID_PARAMETER, other mixes are refused and
+  recorded until Windows' choice for them is measured.
 
 ### Threads
 
@@ -786,7 +865,7 @@ holds the user's registers.
   layer reaches them through `platform::xsave/xrstor/xstate_enabled`;
   gala-um reads and writes the signal frame's XSAVE area (Linux's
   `_fpx_sw_bytes`, host XCR0 as `usable`, Linux's own header bits kept).
-- **CONTEXT_EX** (`nt::context`): exception delivery's frame is the
+- **CONTEXT_EX** (`nt::abi::context`): exception delivery's frame is the
   CONTEXT (CONTEXT_FULL | SEGMENTS | XSTATE), its CONTEXT_EX at 0x4d0
   (chunks All, Legacy, XState), the record at 0x4f0, the machine frame
   at 0x590 and the XSTATE area at 0x5c0 (XSAVE header: Mask = the
@@ -1092,12 +1171,13 @@ limits).
   handover) are charged without a limit (`attach_quota`, `insert_at`).
 - **Limits**, fixed when a process is created: `quota=` on the command
   line (tests), else `paged` a quarter of memory, `nonpaged` an eighth
-  (each at least 16 MiB), and Windows' documented 2^24 handles ("Kernel
-  Objects" on Microsoft Learn). Windows' own default pool quotas are not
+  (each at least 16 MiB), and Windows' 0xff0000 handles (2^24 - 2^16,
+  measured by quota_test on Windows; "Kernel Objects" on Microsoft Learn
+  documents 2^24). Windows' own default pool quotas are not
   documented and not reachable by a test; gala's are chosen from the
   peaks measured below with ample headroom. The handle limit is reached
-  only with a configured one: at 16 bytes an entry, 2^24 handles are
-  256 MiB, more than the pool quota.
+  only with a configured one: at 16 bytes an entry, 0xff0000 handles are
+  255 MiB, more than the pool quota.
 - **Measured peaks** of the largest process (the `quota: most per
   process` and `quota: new most` lines), sockets' buffers included (a
   default socket holds 128 KiB): chromium_https's chrome.exe 175 KiB
@@ -1746,7 +1826,9 @@ around a thread exit's log line.
   functions (WriteConsoleW and friends) also accept any handle the kernel
   reports as FILE_DEVICE_CONSOLE (output if a zero-length write
   succeeds), so programs that write to a character-device stderr with
-  WriteConsoleW (Win32-OpenSSH) are seen.
+  WriteConsoleW (Win32-OpenSSH) are seen. Any other handle fails as on
+  Windows: WriteConsoleW gives ERROR_INVALID_FUNCTION on a pipe and
+  ERROR_INVALID_HANDLE on anything else.
 
 #### Console windows
 
@@ -2410,7 +2492,8 @@ ntdll imports.
   then sleeps on the word with WaitOnAddress (`address_wait.rs`) until
   it changes; whoever changes it in a way waiters wait for wakes them
   (an SRW lock's release to free, the last shared release, InitOnce's
-  end, a condition variable's wake: WakeConditionVariable wakes one
+  end (its callback gets the caller's Context pointer as it is, NULL
+  included, and what the callback left there is the data kept), a condition variable's wake: WakeConditionVariable wakes one
   sleeper, and a waiter not yet asleep sees the counter moved and
   returns, a spurious wake the API allows). A wake with nobody waiting
   costs no system call (the waiter list is in the process). Invariant:
@@ -8820,7 +8903,7 @@ video.
 
 ### virtio-gpu 2D
 
-The first GPU driver (G1). Code: `kernel/src/arch/x86_64/virtio.rs`
+The first GPU driver (G1). Code: `kernel/src/arch/virtio.rs`
 (`ModernDevice`), `kernel/src/display/` (`mod.rs`, `pci.rs`,
 `virtio_gpu/{mod,proto,tests}.rs`).
 

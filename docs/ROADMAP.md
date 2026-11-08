@@ -93,10 +93,9 @@ In order:
    **H11**: busybox-w32's httpd and wget over loopback (the Linux
    busybox's run: `lx_httpd`).
 10. **LN**: lints before every commit (the owner: quality built in
-    before committing, not found later); started right after the
-    WSAEnumNetworkEvents fix in flight, ahead of the items above.
+    before committing, not found later).
 11. **PT**: the portability seams for a second architecture (the owner:
-    the ARM64 port itself later), when the machine is free.
+    the ARM64 port itself later): the kernel's done, user mode's next.
 12. **Last, once everything above is done** (the owner): a performance
     profile on a real Windows machine, then optimization. The same
     workloads (the scenarios' programs, `bench`, Chromium's page loads,
@@ -134,8 +133,8 @@ has a section under "Open items".
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
-| LN | Lints before every commit | planned | `cargo xtask lint` from a committed pre-commit hook: architecture code, check-then-sleep, split atomic operations, hard-coded answers |
-| PT | Portability seams for a second architecture | in progress | the audit done (by seam: the register model, the clock and timer, boot, x86-only by nature, user mode); the ARM64 port itself is in "Later" |
+| LN | Lints before every commit | in progress | `cargo xtask lint` from a committed pre-commit hook: architecture code, check-then-sleep, split atomic operations, hard-coded answers |
+| PT | Portability seams for a second architecture | in progress | the kernel's seam done (`arch`'s interface, the per-architecture ABIs `nt::abi`/`lx::machine`, an aarch64 stub CI checks); user mode's next; the ARM64 port itself is in "Later" |
 | HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
 
 ### NT core services (done, by test)
@@ -173,6 +172,7 @@ has a section under "Open items".
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
+| WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 
@@ -342,22 +342,24 @@ first.
 
 **Next** (each lint with a test of its own: a fixture that must be
 flagged and one that must not):
-1. The entry point and the hook: fmt, the clippy lines ci.yml lists,
-   the `SAFETY:` and fallible-allocation checks there are today.
+1. Done: `cargo xtask lint` (also first in `cargo xtask test`) and the
+   committed pre-commit hook, which any xtask run enables; the
+   analyzers and `cargo fmt --check`. Next: the clippy lines ci.yml
+   lists (minutes, not seconds: a `--full` mode, or the hook runs only
+   the crates a commit touches).
 2. Architecture code only in `kernel/src/arch`: the kernel's clippy
    for `aarch64-unknown-none` (item PT).
-3. No check-then-sleep: every kernel wait through one primitive that
-   registers the waiter before it tests its condition; the raw waits
-   banned elsewhere (`disallowed_methods` in `kernel/clippy.toml`, as
-   infallible allocation is). A debug-build watchdog alongside: a
+3. No check-then-sleep: `wait-site` (done) allows the kernel's raw
+   `prepare_wait` only at the reviewed sites (each registers and tests
+   its condition under the lock its waker takes); a new one needs a
+   review. Next: those sites through one primitive. A debug-build watchdog alongside: a
    pending request (an AFD poll or select, a pipe read or listen, a
    keyed-event wait) whose condition already holds is reported as a
    lost wake-up.
-4. No documented-atomic operation split across calls: in gala's DLLs a
-   call to `NtClearEvent`, `NtResetEvent` or `NtSetEvent` right after a
-   kernel request doing the same job is flagged (WSAEnumNetworkEvents
-   reset its event after the kernel's copy and lost connects); a site
-   that needs it says why.
+4. No documented-atomic operation split across calls: `event-reset`
+   (done) flags an event reset in gala's DLLs outside the reset APIs
+   themselves (WSAEnumNetworkEvents reset its event after the kernel's
+   copy and lost connects); a site that needs one says why.
 5. No hard-coded answers: `stub_audit` flags functions and match arms
    that return a constant without reading anything (`SO_ERROR => 0`
    hid refused connects), unless a comment names the documented
@@ -370,51 +372,54 @@ part behind the `arch` layer, so an ARM64 port ("Later") starts from a
 clean seam and new code cannot add x86 coupling unnoticed. Not the port
 itself (the owner: later).
 
+**Done so far** (design: ARCHITECTURE "The architecture seam"; the rule
+in WORKFLOW "Rules for every change"):
+- The audit: the x86 assumptions outside `kernel/src/arch`, by seam (the
+  register model, the clock and timer, boot, x86 only by nature, user
+  mode).
+- The kernel (steps 2 and 3): everything architecture-specific is behind
+  `arch`'s interface, x86_64 its one implementation and aarch64 a stub
+  that compiles; CI's Clippy step checks the kernel for
+  `aarch64-unknown-none` (with and without `shasha`), so an x86
+  assumption outside `arch` fails the build. The register frames
+  (`UserRegs`, `SyscallFrame`, `TrapFrame`) keep their fields private to
+  `arch` behind neutral accessors; the clock reads `cpu::cycles` and
+  drives `arch::timer`; the boot steps, phase names, per-CPU snapshot and
+  NMIs are `arch`'s; PCI and virtio are shared over `pci_config` and
+  `port`. Windows' x64 ABI is `nt::abi::x64` (CONTEXT, argument
+  registers, thread starts, exception and APC frames, the CONTEXT
+  services, KUSER_SHARED_DATA's processor fields, CPUID's registry
+  values, the crash report's registers); Linux's x86-64 ABI is
+  `lx::machine::x86_64` (arguments, restart, start registers, auxv, the
+  signal frame) with the system call table `lx/syscalls.rs`; their
+  aarch64 counterparts are stubs. gala-um is x86_64-only
+  (`compile_error!` elsewhere).
+
 **Next**:
-1. The audit (done): the x86 assumptions outside `kernel/src/arch`, by
-   seam, with where each belongs:
-   - The register model: `UserRegs` (rip, rsp, 16 general registers,
-     rflags) used as such by the NT layer (`nt/process.rs`: a first
-     thread's start state, rcx = PEB and the shadow area;
-     `nt/syscalls.rs`: arguments 5 on from the user stack at
-     rsp + 0x28, NtGetContextThread/NtSetContextThread;
-     `nt/context.rs`: CONTEXT's AMD64 layout; `nt/thread.rs` and
-     `crashreport.rs`: the dump's and crash report's registers), the
-     Linux personality (`lx/signal.rs`, `sigcalls.rs`, `stack.rs`: the
-     x86-64 signal frame and ucontext; `lx/syscalls.rs`, `dispatch.rs`,
-     `errno.rs`: the x86-64 system call table and argument registers),
-     the handover (`handover/carry.rs`, `record.rs`, `mod.rs`: saved
-     registers in the state format) and the simulator (`sim.rs`:
-     SpinCapture's registers). Belongs in `arch`: a register frame type
-     with named accessors (instruction pointer, stack pointer, the
-     system call number and its arguments, the return value), CONTEXT
-     and the Linux signal frame per architecture.
-   - The clock and timer: `time.rs` (the local APIC's periodic timer,
-     the TSC), `clockcal.rs`, `flight.rs` (rdtsc stamps),
-     `platform.rs`. Belongs in `arch`: a cycle counter and a tick source.
-   - Boot: `lib.rs` (the xsave and APIC boot phases, local APIC ids),
-     `boot/limine.rs` and `boot/mod.rs` (UEFI x86_64), `statedump.rs`
-     (each CPU's rip and rsp at the NMI). Belongs in `arch`: the boot
-     phases' names and the per-CPU snapshot.
-   - By nature x86 only, kept so behind `cfg`: WOW64 (`nt/wow64.rs`,
-     `user/wow64`, the 32-bit DLLs); gala-um's host side
-     (`kernel/src/hosted`: a Linux x86_64 process's ucontext).
-   - User mode: ntdll's (`user/testntdll`) and ntrt's x64/x86 modules
-     (system call stubs, context, unwinding), kernel32's `x64.rs` and
-     `x86.rs` (a new thread's context); every other DLL is
-     architecture-neutral Rust.
-2. Kernel: those parts behind `arch` traits or modules (the register
-   frame of a system call and an exception, a thread's saved context,
-   the cycle counter, the personality's system call numbers and
-   argument registers), x86_64 the only implementation; nothing changes
-   for programs (every scenario passes as before).
-3. CI: the kernel compiled for `aarch64-unknown-none` (no boot; the
-   arch layer for it a stub that compiles), so an x86 assumption outside
-   `arch` fails the build. gala's DLLs compiled for
-   `aarch64-pc-windows-msvc` where they have no architecture-specific
-   code, as the same guard for user mode.
-4. ARCHITECTURE: the seam (what an architecture provides) and the rule
-   in WORKFLOW's "Rules for every change".
+1. User mode: gala's DLLs compiled for `aarch64-pc-windows-msvc` where
+   they have no architecture-specific code, as the same guard. Their x86
+   parts: ntdll's (`user/testntdll`) and ntrt's x64/x86 modules (system
+   call stubs, context, unwinding), kernel32's `x64.rs` and `x86.rs` (a
+   new thread's context).
+2. The kernel's remaining x86-shaped parts, each named here with why it
+   stays for now:
+   - `mm::paging` is x86-64's page-table format (entry bits, PAT), kept
+     outside `arch` so the mapper is host-tested; ARM64's (VMSAv8
+     descriptors, MAIR) moves it behind `arch` with the port.
+   - The user thread-pointer bases keep x86-64's names in `sched`, the
+     platform traits and `percpu` (`gs_base`, `fs_base`, `teb32`), as
+     does the floating-point control register (`mxcsr`: NtCreateThread's
+     start state, `set_mxcsr`); renamed when a second implementation
+     gives them a meaning (TPIDR_EL0/x18, FPCR).
+   - `boot` reads Limine's x86-64 protocol (the MP response's local APIC
+     ids, `boot::Processors::lapic_id`) and the ACPI tables the x86-64
+     calibration uses; aarch64's Limine responses come with the port.
+   - WOW64's NT part (`nt/wow64.rs`: 32-bit Windows' layouts) compiles
+     everywhere and runs only where `set_teb32` can enter 32-bit code
+     (x86-64): no `cfg` needed.
+   - Field and variable names in the handover's state format and logs
+     (`tsc_hz`, `rip` in events) stay: they are formats readers depend
+     on.
 
 **Done when**: the aarch64 builds pass in CI and the audit's list is
 empty or each remaining item is named in it with why it stays.
@@ -1515,6 +1520,66 @@ module set) cannot be fetched on a machine without
 `target/prebuilt/filezilla`. No official mirror with the pinned SHA-256
 (e87b8787...) has been found; the URL stays until one is.
 
+### WD. Windows divergences: the test programs on real Windows
+
+**Goal**: every test program passes on real Windows too, so that what
+the tests assert is what Windows does (and gala, which passes them,
+does it). The agent on a Windows machine runs `user/bin/run-all.ps1`,
+finds each failing check and probes it (`docs/windows-triage-brief.md`);
+its findings are `user/windows/triage.json` and `triage.md` (Windows 11
+25H2, build 26200). Fixes are made here, test first; a fix only follows
+what was observed there or is documented.
+
+Done (the first triage): InitOnceExecuteOnce passes the caller's Context
+to the callback as it is, NULL included (kernel32_sync_test faulted
+writing through it); DirectWrite asks a custom loader for its extended
+interfaces, so dwrite_test's objects answer QueryInterface only for
+IUnknown and their own; the 32-bit RtlUnwind does not preserve ebx, esi,
+edi and ebp (wow64_seh_test saves them around it); WriteConsoleW on a
+pipe is ERROR_INVALID_FUNCTION (ERROR_INVALID_HANDLE on a file);
+SetPriorityClass takes a value with IDLE's bit as IDLE, only 0 is
+ERROR_INVALID_PARAMETER; NtCreateEvent with an unknown type is
+STATUS_INVALID_PARAMETER (not _4); the process handle limit is 0xff0000
+(quota_test, which also ends its children on every path now); the
+build-number checks (kuser_test, peb_test, manifest_test, registry_test,
+wow64_test) follow KUSER_SHARED_DATA's NtBuildNumber, at least 26100;
+kernel32_file_test removes an earlier run's directory first; sspi_test
+compares the client's name with the process's own account;
+browser_api_test imports CompareObjectHandles through its API set.
+
+Next:
+1. The next run on Windows (each fix may reveal a program's next
+   failing check), and the probes still open, asked of the agent there:
+   - SetPriorityClass with mixed class bits that lack IDLE's (0x8020,
+     0x4080, 0x100|0x80, 1): which class Windows settles on;
+   - WriteConsoleA on a pipe and on a file (the same errors as W?);
+   - NtCreateTimer with an unknown TimerType (STATUS_INVALID_PARAMETER_4
+     or plain _PARAMETER?);
+   - the not-yet-probed checks in `triage.md` (75 programs classed
+     "expectation" without a probe), most numerous first: the kernel32
+     tests, then user32/gdi32/comctl32/shell32/shlwapi;
+   - clock_test and handover_k32_test's STATUS_FATAL_USER_CALLBACK_EXCEPTION
+     (both fault at the same ntdll address in a user callback): which
+     call of theirs makes Windows call back into the process;
+   - oleaut32_test (OLEAUT32.dll writes through NULL) and clusapi_test
+     (resutils.dll faults, no cluster installed): the call each makes
+     last (they print nothing first: a line per step would tell).
+2. The tests that need a setting run-all.ps1 cannot give: system_test
+   (LocalSystem), session_test, restricted_test (an administrator), the
+   galatest account's tests (access, logon, profile, disk, lsa): run-all
+   gets a way to run those (psexec-like as SYSTEM, elevated, the account
+   created) or they say "skipped" with the reason, as presenter_test.
+3. run-all.ps1's `fault` field: it reads Windows Error Reporting's
+   event 1000, which SEM_NOGPFAULTERRORBOX (set by the runner) prevents;
+   `user/windows/fault.py`, which debugs the program, gives the same
+   facts. run-all uses that way instead.
+4. **KB**: kernelbase as the host of the core API sets, as on Windows
+   (`api_set_host` maps them to kernel32 today), and kernel32 exporting
+   only what Windows' does (CompareObjectHandles is kernelbase's only).
+   Needs kernelbase in every scenario that imports a core set (the JDK's
+   ucrtbase, pwsh, sqllocaldb, Chromium) and forwarders for the rest of
+   each set.
+
 ### LX. Linux personality
 
 **Goal**: Linux programs on the same kernel core through their own
@@ -2103,9 +2168,9 @@ fail the program using too much; NtSetInformationProcess
 (ProcessQuotaLimits) changes the limits (SeIncreaseQuotaPrivilege).
 Registry data, image layouts and job-wide pool limits are left out by
 design (ARCHITECTURE says why). Next:
-1. quota_test on real Windows (run-all.ps1): the handle limit's status
-   (ERROR_NO_SYSTEM_RESOURCES is assumed) and its exact count; the
-   socket part (SO_RCVBUF read back, connected sockets' charge).
+1. quota_test on real Windows: the socket part (SO_RCVBUF read back,
+   connected sockets' charge); the handle limit's status and count are
+   measured (ERROR_NO_SYSTEM_RESOURCES at 0xff0000).
 2. kernel32's SetProcessWorkingSetSize through ProcessQuotaLimits; the
    sockets of an AFD endpoint a kernel handover carried charged again
    (its process's quota is restored after it).

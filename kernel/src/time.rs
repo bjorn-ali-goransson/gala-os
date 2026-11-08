@@ -1,4 +1,6 @@
-//! Kernel timekeeping: a periodic tick and a TSC-based monotonic clock.
+//! Kernel timekeeping: a periodic tick and a monotonic clock read from the
+//! cycle counter (`arch::cpu::cycles`; x86-64: the TSC), both from the
+//! architecture's tick source and calibration (`arch::timer`).
 //!
 //! `ticks`, `monotonic_ns` and `system_time` are the clock programs and
 //! wait deadlines use: with `clock=` (clock control, `clockctl`) it is the
@@ -10,15 +12,17 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering, fence};
 
-use crate::arch::{apic, cpu, interrupts::TrapFrame};
-use crate::clockcal;
+use crate::arch::timer::{self, Calibration};
+use crate::arch::{cpu, interrupts::TrapFrame};
+use crate::clockcal::{self, Mhz};
 
 /// Timer interrupt rate.
 pub const TICK_HZ: u64 = 1000;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
-static TSC_HZ: AtomicU64 = AtomicU64::new(0);
-static TSC_AT_BOOT: AtomicU64 = AtomicU64::new(0);
+/// The cycle counter's rate and its value at monotonic zero.
+static COUNTER_HZ: AtomicU64 = AtomicU64::new(0);
+static COUNTER_AT_BOOT: AtomicU64 = AtomicU64::new(0);
 /// NT system time (100 ns units since 1601-01-01 UTC) at `init`.
 static SYSTEM_TIME_AT_INIT: AtomicU64 = AtomicU64::new(0);
 
@@ -51,21 +55,20 @@ pub fn system_time() -> u64 {
 }
 
 /// Starts the periodic tick. Interrupts must be enabled by the caller.
-pub fn init(calibration: &apic::Calibration) {
+pub fn init(calibration: &Calibration) {
     *CALIBRATION.lock() = Some(*calibration);
-    set_rate(calibration.tsc_hz, cpu::rdtsc());
-    apic::start_periodic_timer(calibration, TICK_HZ, on_tick);
+    set_rate(calibration.counter_hz(), cpu::cycles());
+    timer::start_periodic(calibration, TICK_HZ, on_tick);
 }
 
-static CALIBRATION: crate::sync::IrqMutex<Option<apic::Calibration>> =
-    crate::sync::IrqMutex::new(None);
+static CALIBRATION: crate::sync::IrqMutex<Option<Calibration>> = crate::sync::IrqMutex::new(None);
 
 /// Starts the tick on a CPU other than the boot CPU (it only preempts; the
 /// boot CPU's tick keeps time).
 pub fn start_tick_here() {
     let calibration = *CALIBRATION.lock();
     if let Some(c) = calibration {
-        apic::start_periodic_timer_here(&c, TICK_HZ);
+        timer::start_periodic_here(&c, TICK_HZ);
     }
 }
 
@@ -221,12 +224,12 @@ fn sample_tick(frame: &TrapFrame, idle: bool) {
     if crate::sched::cpu_idle(target) && !probing {
         return;
     }
-    let Some((_, apic_id)) = crate::arch::smp::online_cpus().find(|&(i, _)| i as usize == target)
+    let Some((_, hw_id)) = crate::arch::smp::online_cpus().find(|&(i, _)| i as usize == target)
     else {
         return;
     };
     SAMPLE_ASKED[target].store(true, Ordering::Release);
-    crate::arch::apic::send_nmi(apic_id);
+    crate::arch::smp::send_nmi(hw_id);
 }
 
 /// A profiler NMI on this CPU: records where it was into its ring (only
@@ -251,12 +254,12 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     let e = &ring.entries[head as usize % RING];
     e.t.store(raw_monotonic_ns(), Ordering::Relaxed);
     e.by.store(crate::arch::percpu::client(), Ordering::Relaxed);
-    e.rip.store(frame.rip, Ordering::Relaxed);
+    e.rip.store(frame.ip(), Ordering::Relaxed);
     let user = frame.from_user_mode();
     e.user.store(user, Ordering::Relaxed);
     let mut len = 0;
     if !user {
-        crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+        crate::arch::backtrace::walk_trap(frame, |ret| {
             if len < SAMPLE_FRAMES {
                 e.frames[len].store(ret, Ordering::Relaxed);
                 len += 1;
@@ -305,14 +308,14 @@ fn sample_here(frame: &TrapFrame) {
     let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
     let user = frame.from_user_mode();
     if !user {
-        crate::arch::backtrace::walk_from(frame.rbp, frame.rsp, |ret| {
+        crate::arch::backtrace::walk_trap(frame, |ret| {
             if stack.len < SAMPLE_FRAMES {
                 stack.addrs[stack.len] = ret;
                 stack.len += 1;
             }
         });
     }
-    emit_sample(raw_monotonic_ns(), crate::arch::percpu::client(), user, frame.rip, &stack, 0);
+    emit_sample(raw_monotonic_ns(), crate::arch::percpu::client(), user, frame.ip(), &stack, 0);
 }
 
 /// The `sample` event: the thread (`by`), the mode, the address and in
@@ -417,7 +420,7 @@ fn on_tick(frame: &mut TrapFrame) {
         if frame.from_user_mode() {
             crate::flight::progress(id.as_usize());
         } else if !idle {
-            crate::flight::on_kernel_tick(id.as_usize(), frame.rip);
+            crate::flight::on_kernel_tick(id.as_usize(), frame.ip());
         }
         // The profiler (idle CPUs ask too: they sample their neighbor).
         if crate::events::enabled(crate::events::Category::Sample) {
@@ -440,7 +443,7 @@ fn on_tick(frame: &mut TrapFrame) {
         let cpu = crate::arch::percpu::cpu_index() as usize;
         if let Some((t, rip)) = USER_RIP.get(cpu) {
             t.store(crate::sched::current().as_usize() as u64 + 1, Ordering::Relaxed);
-            rip.store(frame.rip, Ordering::Relaxed);
+            rip.store(frame.ip(), Ordering::Relaxed);
         }
     }
     if crate::arch::percpu::cpu_index() != 0 {
@@ -452,12 +455,12 @@ fn on_tick(frame: &mut TrapFrame) {
         {
             start_tick_here();
         }
-        apic::eoi();
+        timer::eoi();
         crate::sched::on_tick_here();
         return;
     }
     let raw = next_tick();
-    apic::eoi();
+    timer::eoi();
     let now = if crate::clockctl::armed() { ticks() } else { raw };
     let callback = *TICK_CALLBACK.lock();
     if let Some(callback) = callback {
@@ -487,11 +490,11 @@ impl SpinDeadline {
     pub fn after_ns(ns: u64) -> SpinDeadline {
         let hz = rate().0.max(TIMEOUT_FLOOR_HZ);
         let ticks = (u128::from(ns) * u128::from(hz) / 1_000_000_000) as u64;
-        SpinDeadline { start: cpu::rdtsc(), ticks }
+        SpinDeadline { start: cpu::cycles(), ticks }
     }
 
     pub fn passed(&self) -> bool {
-        cpu::rdtsc().wrapping_sub(self.start) >= self.ticks
+        cpu::cycles().wrapping_sub(self.start) >= self.ticks
     }
 }
 
@@ -543,7 +546,7 @@ pub fn ticks() -> u64 {
 /// their lag (replay_test's Sleep(5) took under 4 ms on the performance
 /// counter when only the interrupts caught up).
 pub fn raw_ticks() -> u64 {
-    if TSC_HZ.load(Ordering::Relaxed) == 0 {
+    if COUNTER_HZ.load(Ordering::Relaxed) == 0 {
         return TICKS.load(Ordering::Relaxed);
     }
     TICKS.load(Ordering::Relaxed).max(due_ticks())
@@ -574,7 +577,7 @@ pub fn snapshot() -> crate::handover::record::Clock {
         raw_ticks(),
         raw_monotonic_ns(),
         SYSTEM_TIME_AT_INIT.load(Ordering::Relaxed),
-        CALIBRATION.lock().map_or(0, |c| c.timer_hz),
+        CALIBRATION.lock().map_or(0, |c| c.timer_hz()),
     )
 }
 
@@ -588,10 +591,10 @@ pub fn snapshot() -> crate::handover::record::Clock {
 /// deadlines of the waits a handover carries are ticks; restarting the
 /// count from the TSC would end them early by that lag.
 pub fn resume(clock: &crate::handover::record::Clock) {
-    if clock.tsc_hz() == 0 {
+    if clock.counter_hz() == 0 {
         return;
     }
-    set_rate(clock.tsc_hz(), clock.tsc_at_zero());
+    set_rate(clock.counter_hz(), clock.counter_at_zero());
     let passed = raw_monotonic_ns().saturating_sub(clock.monotonic_ns());
     let ticks = clock.ticks() + passed / (1_000_000_000 / TICK_HZ);
     TICKS.store(ticks, Ordering::Relaxed);
@@ -609,7 +612,7 @@ pub fn raw_monotonic_ns() -> u64 {
     if hz == 0 {
         return 0;
     }
-    let delta = cpu::rdtsc().wrapping_sub(zero);
+    let delta = cpu::cycles().wrapping_sub(zero);
     (u128::from(delta) * 1_000_000_000 / u128::from(hz)) as u64
 }
 
@@ -623,11 +626,11 @@ static CAL_GEN_SEEN: [AtomicU64; crate::arch::smp::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::arch::smp::MAX_CPUS];
 
 /// Sets the TSC's rate and its value at monotonic zero together.
-fn set_rate(hz: u64, tsc_at_zero: u64) {
+fn set_rate(hz: u64, counter_at_zero: u64) {
     RATE_SEQ.fetch_add(1, Ordering::Relaxed);
     fence(Ordering::Release);
-    TSC_HZ.store(hz, Ordering::Relaxed);
-    TSC_AT_BOOT.store(tsc_at_zero, Ordering::Relaxed);
+    COUNTER_HZ.store(hz, Ordering::Relaxed);
+    COUNTER_AT_BOOT.store(counter_at_zero, Ordering::Relaxed);
     RATE_SEQ.fetch_add(1, Ordering::Release);
 }
 
@@ -637,25 +640,15 @@ fn set_rate(hz: u64, tsc_at_zero: u64) {
 fn rate() -> (u64, u64) {
     for _ in 0..1000 {
         let s = RATE_SEQ.load(Ordering::Acquire);
-        let hz = TSC_HZ.load(Ordering::Relaxed);
-        let zero = TSC_AT_BOOT.load(Ordering::Relaxed);
+        let hz = COUNTER_HZ.load(Ordering::Relaxed);
+        let zero = COUNTER_AT_BOOT.load(Ordering::Relaxed);
         fence(Ordering::Acquire);
         if s & 1 == 0 && RATE_SEQ.load(Ordering::Relaxed) == s {
             return (hz, zero);
         }
         core::hint::spin_loop();
     }
-    (TSC_HZ.load(Ordering::Relaxed), TSC_AT_BOOT.load(Ordering::Relaxed))
-}
-
-/// A rate in MHz with a tenth.
-struct Mhz(u64);
-
-impl fmt::Display for Mhz {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let (m, t) = clockcal::mhz(self.0);
-        write!(f, "{m}.{t} MHz")
-    }
+    (COUNTER_HZ.load(Ordering::Relaxed), COUNTER_AT_BOOT.load(Ordering::Relaxed))
 }
 
 /// Parts per million as a signed percentage.
@@ -668,90 +661,16 @@ impl fmt::Display for Ppm {
     }
 }
 
-/// How the samples went.
-struct How<'a>(&'a apic::CalibrationReport);
-
-impl fmt::Display for How<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let r = self.0;
-        if r.reference == crate::arch::refclock::Kind::Carried {
-            return write!(f, "carried over by the kernel handover, not measured");
-        }
-        match r.estimate {
-            Some(e) => {
-                let (p, h) = clockcal::percent(e.spread_ppm);
-                write!(
-                    f,
-                    "{} samples of {} ({} paused, {} outliers), spread {p}.{h:02}%",
-                    e.used, r.samples, e.wide, e.outliers
-                )
-            }
-            None => {
-                write!(f, "UNRELIABLE: too few good samples of {}, the best one used", r.samples)
-            }
-        }?;
-        match r.cpuid {
-            Some((hz, leaf)) => write!(
-                f,
-                "; {leaf} says {} ({})",
-                Mhz(hz),
-                if r.cpuid_used { "used" } else { "disagrees, not used" }
-            ),
-            None => write!(f, "; CPUID: no TSC rate"),
-        }
-    }
-}
-
-/// Logs how the clock was calibrated (`tsc:` line, `phase tsc_mhz`).
-pub fn log_calibration(c: &apic::Calibration) {
-    let r = &c.report;
-    let source = if r.cpuid_used { "CPUID" } else { r.reference.name() };
-    let stall = if r.stalls > 0 { " (calstall: stalls injected)" } else { "" };
-    if r.estimate.is_some() || r.reference == crate::arch::refclock::Kind::Carried {
-        crate::info!(
-            "tsc: {} from {source} ({} kHz; measured {}), {}; APIC timer {} kHz{stall}",
-            Mhz(c.tsc_hz),
-            r.reference_hz / 1000,
-            Mhz(r.measured_tsc_hz),
-            How(r),
-            c.timer_hz / 1000
-        );
-    } else {
-        crate::warn!(
-            "tsc: {} from {source} ({} kHz; measured {}), {}; APIC timer {} kHz{stall}",
-            Mhz(c.tsc_hz),
-            r.reference_hz / 1000,
-            Mhz(r.measured_tsc_hz),
-            How(r),
-            c.timer_hz / 1000
-        );
-    }
-    crate::arch::bootphase::mark_n("tsc_mhz", c.tsc_hz / 1_000_000);
+/// Logs how the clock was calibrated (`Calibration::log`).
+pub fn log_calibration(c: &Calibration) {
+    c.log();
 }
 
 /// The calibration as an event (`clock_cal`), once the event stream is
 /// set up (category `clock`).
 pub fn emit_calibration_event() {
     let Some(c) = *CALIBRATION.lock() else { return };
-    let r = &c.report;
-    let (used, wide, outliers, spread) =
-        r.estimate.map_or((0, 0, 0, 0), |e| (e.used, e.wide, e.outliers, e.spread_ppm));
-    crate::events::emit(
-        crate::events::Category::Clock,
-        "clock_cal",
-        format_args!(
-            r#""source":{},"ref_hz":{},"tsc_hz":{},"measured_tsc_hz":{},"timer_hz":{},"samples":{},"used":{used},"paused":{wide},"outliers":{outliers},"spread_ppm":{spread},"cpuid_hz":{},"cpuid_used":{},"reliable":{}"#,
-            crate::events::Str(r.reference.name()),
-            r.reference_hz,
-            c.tsc_hz,
-            r.measured_tsc_hz,
-            c.timer_hz,
-            r.samples,
-            r.cpuid.map_or(0, |x| x.0),
-            r.cpuid_used,
-            r.estimate.is_some()
-        ),
-    );
+    c.emit_event();
 }
 
 fn uptime_ms() -> u64 {
@@ -844,21 +763,21 @@ fn clock_check(_: usize) {
 /// verdict twice in a row); the verdict and the seconds it took, None if
 /// it never did.
 fn watch_rtc(calibrated: u64) -> Option<(u64, clockcal::RtcVerdict)> {
-    use crate::arch::refclock::rtc_seconds;
+    use crate::arch::timer::rtc_seconds;
     // (seconds, TSC before the read) of the last poll.
     let mut prev: Option<(u8, u64)> = None;
     // The first edge and the second it began.
     let mut first: Option<(clockcal::Edge, u8)> = None;
     let mut started_at = 0u8;
     let mut wrong = 0;
-    let started = cpu::rdtsc();
+    let started = cpu::cycles();
     // A stuck RTC: give up after this many TSC ticks at the rate calibrated
     // (raised for a rate calibrated low).
     let limit = calibrated.max(1_000_000_000).saturating_mul(RTC_CHECK_MAX_SECONDS + 5);
-    while cpu::rdtsc().wrapping_sub(started) < limit {
-        let before = cpu::rdtsc();
+    while cpu::cycles().wrapping_sub(started) < limit {
+        let before = cpu::cycles();
         let now = rtc_seconds();
-        let after = cpu::rdtsc();
+        let after = cpu::cycles();
         if let Some(now) = now {
             if let Some((was, at)) = prev
                 && was != now
@@ -919,31 +838,29 @@ fn recalibrate(rtc_hz: u64) {
         }
         return;
     };
-    let mut new = apic::recalibrate(&old).unwrap_or(old);
-    let mut from = new.report.reference.name();
+    let mut new = timer::recalibrate(&old).unwrap_or(old);
+    let mut from = new.source_name();
     // The measurement unreliable (too few good samples) and far from the
     // RTC's: the RTC's rate, the timer's scaled alike. A good measurement
     // wins over the RTC's coarse one.
-    if new.report.estimate.is_none()
-        && u128::from(new.tsc_hz.abs_diff(rtc_hz)) * 100 > u128::from(rtc_hz) * 3
+    if !new.reliable()
+        && u128::from(new.counter_hz().abs_diff(rtc_hz)) * 100 > u128::from(rtc_hz) * 3
     {
-        new.timer_hz =
-            (u128::from(new.timer_hz) * u128::from(rtc_hz) / u128::from(new.tsc_hz.max(1))) as u64;
-        new.tsc_hz = rtc_hz;
+        new.rescale(rtc_hz);
         from = "the RTC";
     }
     let now_ns = raw_monotonic_ns();
-    let tsc = cpu::rdtsc();
-    let zero =
-        tsc.wrapping_sub((u128::from(now_ns) * u128::from(new.tsc_hz) / 1_000_000_000) as u64);
-    set_rate(new.tsc_hz, zero);
+    let counter = cpu::cycles();
+    let zero = counter
+        .wrapping_sub((u128::from(now_ns) * u128::from(new.counter_hz()) / 1_000_000_000) as u64);
+    set_rate(new.counter_hz(), zero);
     // The tick count keeps up with the new rate from here (it ran at the
     // wrong one until now).
     TICK_BASE.store(raw_ticks(), Ordering::Relaxed);
     TICK_BASE_NS.store(now_ns, Ordering::Relaxed);
     *CALIBRATION.lock() = Some(new);
     CAL_GEN.fetch_add(1, Ordering::Relaxed);
-    apic::start_periodic_timer_here(&new, TICK_HZ);
+    timer::start_periodic_here(&new, TICK_HZ);
     if restore {
         cpu::enable_interrupts();
     }
@@ -951,15 +868,18 @@ fn recalibrate(rtc_hz: u64) {
     crate::warn!(
         "clock: recalibrated: TSC {} (was {}), APIC timer {} kHz (was {}), from {from}; {} \
          (uptime_ms={})",
-        Mhz(new.tsc_hz),
-        Mhz(old.tsc_hz),
-        new.timer_hz / 1000,
-        old.timer_hz / 1000,
-        How(&new.report),
+        Mhz(new.counter_hz()),
+        Mhz(old.counter_hz()),
+        new.timer_hz() / 1000,
+        old.timer_hz() / 1000,
+        new.describe(),
         uptime_ms()
     );
     crate::events::emit_always(format_args!(
         r#""ev":"clock_recalibrated","tsc_hz":{},"timer_hz":{},"old_tsc_hz":{},"old_timer_hz":{}"#,
-        new.tsc_hz, new.timer_hz, old.tsc_hz, old.timer_hz
+        new.counter_hz(),
+        new.timer_hz(),
+        old.counter_hz(),
+        old.timer_hz()
     ));
 }

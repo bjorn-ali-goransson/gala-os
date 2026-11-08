@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 mod alloc_audit;
 mod clockcheck;
 mod feed;
+mod lint;
 mod lx_expect;
 mod stub_audit;
 mod telemetry;
@@ -2628,6 +2629,8 @@ commands:
   alloc-audit  find infallible allocations in the kernel's machine code (calls that
                abort on out-of-memory: Vec::clone, collect, ...; clippy cannot see
                them): alloc-audit [kernel ELF] [--all: also growth after try_reserve]
+  lint         the analyzers (event resets, wait sites) and cargo fmt --check; the
+               pre-commit hook (hooks/, enabled by any xtask run) runs it
   feed         the update feed (TUF metadata over content-addressed files; R8):
                feed publish <files dir> <feed dir> [--release N] [--floor F] |
                feed refresh <feed dir> (re-sign snapshot and timestamp) |
@@ -2670,6 +2673,7 @@ commands:
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
+    lint::enable_hook(&root());
     let release = args.iter().any(|a| a == "--release");
     let headless = args.iter().any(|a| a == "--headless");
     let result =
@@ -2677,7 +2681,9 @@ fn main() -> ExitCode {
             Some("build") => build(release, "gala-os", "").map(drop),
             Some("run") => build(release, "gala-os", "").and_then(|iso| run(&iso, headless)),
             // gala-um first: it fails in seconds, before minutes of boots.
-            Some("test") => stub_audit::stub_audit(&root())
+            Some("lint") => lint::cli(&root()),
+            Some("test") => lint::cli(&root())
+                .and_then(|()| stub_audit::stub_audit(&root()))
                 .and_then(|()| unit_tests())
                 .and_then(|()| alloc_audit(release, None, false))
                 .and_then(|()| um_test(release))

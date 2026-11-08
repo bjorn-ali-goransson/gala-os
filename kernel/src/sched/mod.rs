@@ -547,7 +547,7 @@ pub fn check_user_return() {
         let (root, gs) = t.user.as_ref().map_or((0, 0), |u| (u.root, u.gs_base));
         let personality = t.user.as_ref().map_or(Personality::Nt, |u| u.personality);
         let (cr3, kstack, ugs) =
-            (cpu::read_cr3() & !0xfff, percpu::kernel_stack(), percpu::user_gs_base());
+            (paging::active_root(), percpu::kernel_stack(), percpu::user_gs_base());
         let cpu_personality = percpu::personality();
         if others != 0
             || !t.on_cpu

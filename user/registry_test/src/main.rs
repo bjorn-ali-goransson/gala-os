@@ -3,7 +3,7 @@
 //!
 //! - Predefined keys, zero- or sign-extended to 64 bits.
 //! - Keys real programs read exist: HKLM\SOFTWARE\Microsoft\Windows
-//!   NT\CurrentVersion (CurrentBuild "26100", CurrentMajorVersionNumber 10,
+//!   NT\CurrentVersion (CurrentBuild "26100" or the newer build a machine runs, CurrentMajorVersionNumber 10,
 //!   ProductName "Windows ..."), HKLM\SYSTEM\CurrentControlSet\Control\Nls
 //!   \CodePage, HARDWARE\DESCRIPTION\System\CentralProcessor\0,
 //!   HKCU\Environment, HKU\.DEFAULT. Names are case-insensitive.
@@ -344,6 +344,26 @@ fn a(s: &str) -> [u8; 96] {
 }
 
 /// Whether the UTF-16 units `got` are `want` (ASCII).
+/// Whether `got` is the running build's number ("26100" on gala; a real
+/// machine may run a newer one): what CurrentBuild holds.
+fn is_build(got: &[u16]) -> bool {
+    let mut n = os_build();
+    let mut digits = [0u16; 5];
+    for d in digits.iter_mut().rev() {
+        *d = u16::from(b'0') + (n % 10) as u16;
+        n /= 10;
+    }
+    got == digits
+}
+
+/// The running build: KUSER_SHARED_DATA's NtBuildNumber (+0x260, the page
+/// at 0x7ffe0000 in every process). gala's is its pinned 26100; a real
+/// machine may run a newer build, which the checks follow.
+fn os_build() -> u32 {
+    // SAFETY: KUSER_SHARED_DATA is mapped read-only in every process.
+    unsafe { core::ptr::read_volatile(0x7ffe_0260 as *const u32) }
+}
+
 fn same(got: &[u16], want: &str) -> bool {
     got.len() == want.len() && got.iter().zip(want.bytes()).all(|(&g, b)| g == u16::from(b))
 }
@@ -415,7 +435,7 @@ fn seeded(c: &mut Checks) -> Result<(), u32> {
             data.as_mut_ptr(),
             &mut size,
         ))?;
-        c.ok(same(&units(&data[..10])[..5], "26100"), size.into())?;
+        c.ok(is_build(&units(&data[..10])[..5]), size.into())?;
         // Value names are case-insensitive too.
         let mut major = 0u32;
         size = 4;
@@ -488,7 +508,7 @@ fn seeded(c: &mut Checks) -> Result<(), u32> {
             &mut size,
         ))?;
         c.eq(size.into(), 12)?;
-        c.ok(same(&buf[..6], "26100\0"), buf[0].into())?;
+        c.ok(is_build(&buf[..5]) && buf[5] == 0, buf[0].into())?;
         // The wrong type.
         size = 64;
         let r = RegGetValueW(
@@ -962,7 +982,8 @@ fn nt(c: &mut Checks, test: Hkey) -> Result<(), u32> {
         c.eq(ret.into(), 24)?;
         c.eq(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]).into(), REG_SZ.into())?;
         c.eq(u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]).into(), 12)?;
-        c.ok(same(&units(&buf[12..24])[..6], "26100\0"), buf[12].into())?;
+        let got = units(&buf[12..24]);
+        c.ok(is_build(&got[..5]) && got[5] == 0, buf[12].into())?;
         ret = 0;
         let r = NtQueryValueKey(key, &build_name, 2, buf.as_mut_ptr(), 12, &mut ret);
         c.eq(r.into(), STATUS_BUFFER_OVERFLOW)?;

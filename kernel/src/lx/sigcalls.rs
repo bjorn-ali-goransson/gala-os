@@ -18,11 +18,12 @@
 
 use lx_abi::signal::{
     self as abi, KSIGACTION_SIZE, KSigaction, SA_ONSTACK, SA_RESTART, SA_RESTORER, SIGSET_SIZE,
-    SigSet, Siginfo, UCONTEXT_SIZE, Ucontext,
+    SigSet, Siginfo,
 };
 
 use super::dispatch::{Call, Result};
 use super::errno::{self, EAGAIN, EFAULT, EINTR, EINVAL};
+use super::machine;
 use super::signal::{self, Disposition, Raised, Target};
 use super::state::LxProcess;
 use super::syscalls::nr;
@@ -326,28 +327,25 @@ pub fn pause(call: &Call<'_>) -> Result {
 /// popped the return address: rsp is the ucontext). The call returns
 /// with every register of the saved context (`Call::resume`).
 pub fn rt_sigreturn(call: &Call<'_>) -> Result {
-    let sp = call.frame.rsp;
-    let mut b = [0u8; UCONTEXT_SIZE];
-    let uc = match call.process.read(sp, &mut b) {
-        Ok(()) => Ucontext::from_bytes(&b),
-        Err(_) => return bad_frame(call, sp, "the ucontext is not readable"),
+    let sp = call.frame.sp();
+    let (regs, fp, mask) = match machine::read_sigframe(&call.process, sp) {
+        Ok(saved) => saved,
+        Err(why) => return bad_frame(call, sp, why),
     };
-    let regs = signal::regs_of(&uc.uc_mcontext);
     if !regs.is_valid() {
         return bad_frame(call, sp, "rip or rsp outside user space");
     }
     let mut fx = XState::initial();
-    let fp = uc.uc_mcontext.fpstate;
     if fp != 0 {
         let len = xstate::size();
-        if call.process.read(fp, &mut fx.0[..len]).is_err() {
+        if call.process.read(fp, &mut fx.bytes_mut()[..len]).is_err() {
             return bad_frame(call, sp, "the FPU state is not readable");
         }
     }
     platform::xrstor(&fx);
-    call.lx.signals.lock().restore_mask(call.tid, SigSet(uc.uc_sigmask));
+    call.lx.signals.lock().restore_mask(call.tid, mask);
     call.resume.set(Some(regs));
-    Ok(regs.gpr[0])
+    Ok(regs.syscall_result())
 }
 
 /// A signal frame that cannot be used: Linux kills the process with
@@ -400,13 +398,9 @@ fn restartable(number: u64) -> bool {
     )
 }
 
-/// The `syscall` instruction's length: a restarted call goes back to it.
-const SYSCALL_LEN: u64 = 2;
-
 /// Makes the interrupted call `number` again when it returns to `regs`.
 fn restart(regs: &mut UserRegs, number: u64) {
-    regs.gpr[0] = number;
-    regs.rip -= SYSCALL_LEN;
+    machine::restart(regs, number);
 }
 
 /// On the way back to user mode from system call `number` (`resumed`:
@@ -423,7 +417,7 @@ pub fn deliver(
     resumed: bool,
     regs: &mut UserRegs,
 ) -> bool {
-    let interrupted = !resumed && regs.gpr[0] == errno::to_return(EINTR);
+    let interrupted = !resumed && regs.syscall_result() == errno::to_return(EINTR);
     let mut changed = false;
     loop {
         if process.exit_status().is_some() {
@@ -479,7 +473,7 @@ pub fn deliver(
                             process.id,
                             signal::name(sig),
                             action.handler,
-                            regs.gpr[4]
+                            regs.sp()
                         );
                         let segv = Siginfo::zeroed(abi::SIGSEGV as i32, abi::SI_KERNEL);
                         kill(process, tid, abi::SIGSEGV, &segv);
@@ -512,9 +506,9 @@ fn push_frame(
     }
     let fx = platform::xsave();
     let fp_len = xstate::size();
-    let frame = signal::build_frame(regs, sig, info, action, old_mask, fp_len as u64)
+    let frame = machine::build_frame(regs, sig, info, action, old_mask, fp_len as u64)
         .ok_or("no room below the stack pointer")?;
-    process.write(frame.fpstate, &fx.0[..fp_len]).map_err(|_| "the stack is not writable")?;
+    process.write(frame.fpstate, &fx.bytes()[..fp_len]).map_err(|_| "the stack is not writable")?;
     process.write(frame.addr, &frame.bytes).map_err(|_| "the stack is not writable")?;
     Ok(frame.regs)
 }

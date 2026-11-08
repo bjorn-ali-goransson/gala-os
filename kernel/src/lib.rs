@@ -31,10 +31,13 @@ pub mod failpoint;
 pub mod flight;
 pub mod fs;
 pub mod handover;
-/// gala-um's platform: the NT layer inside a Linux process.
+/// gala-um's platform: the NT layer inside a Linux process (a Linux x86_64
+/// host's: its signal contexts are x86-64's).
 #[cfg(feature = "hosted")]
 #[allow(unsafe_code)]
 pub mod hosted;
+#[cfg(all(feature = "hosted", not(target_arch = "x86_64")))]
+compile_error!("gala-um (the `hosted` feature) runs on Linux x86_64 hosts only");
 #[cfg(not(feature = "hosted"))]
 pub mod input;
 /// The Linux personality's groundwork (ROADMAP LX): not wired in yet.
@@ -60,7 +63,7 @@ pub mod trust;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use arch::interrupts::{self, Fault};
+use arch::interrupts::Fault;
 use arch::qemu::{self, QemuExitCode};
 use boot::{BootInfo, FirmwareType};
 use cmdline::Cmdline;
@@ -94,16 +97,10 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         QEMU_EXIT.store(true, Ordering::Relaxed);
     }
 
-    arch::gdt::init_bsp();
-    arch::percpu::init_bsp();
+    arch::init_boot_cpu();
     // Lock-order checking (debug builds) needs to know the CPU: from here.
     sync::lockdep::enable();
-    arch::cpu::enable_sse();
-    arch::bootphase::mark("xsave");
-    interrupts::init();
-    arch::syscall::init_cpu();
-    arch::bootphase::mark("gdt_idt");
-    info!("cpu: GDT, TSS and IDT loaded");
+    arch::init_boot_traps();
 
     log_boot_info(&info);
     handover::report(&info);
@@ -141,7 +138,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     init_paging(&info);
     arch::bootphase::mark("paging");
     init_timer(&info, cmdline.flag("calstall"), cmdline.flag("calwrong"));
-    arch::bootphase::mark("apic");
+    arch::bootphase::mark(arch::bootphase::TIMER);
     // A state dump on an NMI (xtask asks for one when a boot test times out).
     statedump::init();
     handover::check_marker(&info);
@@ -445,7 +442,7 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
                 // On a scheduler thread, so stack overflows hit a guard page.
                 info!("provoking fault {fault:?}");
                 let index = Fault::ALL.iter().position(|&f| f == fault).unwrap_or(0);
-                let provoke = |i: usize| interrupts::provoke(Fault::ALL[i]);
+                let provoke = |i: usize| arch::interrupts::provoke(Fault::ALL[i]);
                 match sched::spawn("fault", provoke, index) {
                     Ok(t) => {
                         let _ = sched::join(t);
@@ -873,41 +870,25 @@ fn init_paging(info: &BootInfo) {
 /// `stall` (`calstall`): the calibration's test stalls; `wrong`
 /// (`calwrong`): its result made 20x low, for the RTC check to catch.
 fn init_timer(info: &BootInfo, stall: bool, wrong: bool) {
-    let inputs = arch::apic::CalibrationInputs {
-        hpet: info.clock_tables.hpet,
-        pm_timer: info.clock_tables.pm_timer.map(|t| (t.port, t.bits32)),
-        stall,
-        carried: {
-            let (mut tsc, mut timer) = (0, 0);
-            handover::carried_rates(info, &mut tsc, &mut timer);
-            (tsc != 0 && timer != 0).then_some((tsc, timer))
-        },
+    let carried = {
+        let (mut counter, mut timer) = (0, 0);
+        handover::carried_rates(info, &mut counter, &mut timer);
+        (counter != 0 && timer != 0).then_some((counter, timer))
     };
-    let mut calibration = match arch::apic::init_bsp(inputs) {
-        Ok(c) => c,
-        Err(e) => panic!("local APIC: {e:?}"),
-    };
+    let mut calibration = arch::timer::calibrate(info, stall, carried);
     time::log_calibration(&calibration);
     if stall {
-        info!(
-            "clockcal: stall injected ({} stalls inside the calibration)",
-            calibration.report.stalls
-        );
+        info!("clockcal: stall injected ({} stalls inside the calibration)", calibration.stalls());
     }
     if wrong {
-        calibration.tsc_hz /= 20;
-        calibration.timer_hz /= 20;
+        calibration.set_rates(calibration.counter_hz() / 20, calibration.timer_hz() / 20);
         warn!("clockcal: calibration made 20x low (calwrong): guest time runs 20x fast");
     }
     // After a handover: the first boot's rates (one clock across kernels).
-    handover::carried_rates(info, &mut calibration.tsc_hz, &mut calibration.timer_hz);
-    info!(
-        "apic: id {} ({}), timer {} kHz, TSC {} MHz",
-        calibration.apic_id,
-        if calibration.x2apic { "x2APIC" } else { "xAPIC" },
-        calibration.timer_hz / 1000,
-        calibration.tsc_hz / 1_000_000
-    );
+    let (mut counter, mut timer) = (calibration.counter_hz(), calibration.timer_hz());
+    handover::carried_rates(info, &mut counter, &mut timer);
+    calibration.set_rates(counter, timer);
+    calibration.log_started();
     time::init(&calibration);
     if info.handover.is_some() {
         // The clock goes on from the previous kernel's.

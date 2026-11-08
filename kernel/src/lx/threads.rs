@@ -84,9 +84,9 @@ pub fn clone_thread(
         return Err(ENOSYS);
     }
     let mut regs = return_regs(call.frame);
-    regs.gpr[0] = 0;
+    regs.set_syscall_result(0);
     if stack != 0 {
-        regs.gpr[4] = stack;
+        regs.set_sp(stack);
     }
     let (fs, gs) = platform::user_bases();
     let fs = if flags & CLONE_SETTLS != 0 {

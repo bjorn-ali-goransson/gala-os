@@ -694,17 +694,26 @@ pub extern "system" fn InitOnceExecuteOnce(
         if v == 0
             && state.compare_exchange(0, ONCE_RUNNING, Ordering::Acquire, Ordering::Relaxed).is_ok()
         {
-            let mut ctx: *mut c_void = core::ptr::null_mut();
-            if f(once, param, &mut ctx) == 0 {
+            // The callback gets the caller's Context as it is, NULL
+            // included (as on Windows, where a callback that writes
+            // through a NULL Context faults); what it left there is the
+            // data kept with the once.
+            if f(once, param, context) == 0 {
                 state.store(0, Ordering::Release);
                 wake_all(once);
                 return FALSE;
             }
-            state.store((ctx as usize & !3) | ONCE_DONE, Ordering::Release);
+            let ctx = if context.is_null() {
+                0
+            } else {
+                // SAFETY: the caller's output pointer, set by the callback.
+                unsafe { *context as usize & !3 }
+            };
+            state.store(ctx | ONCE_DONE, Ordering::Release);
             wake_all(once);
             if !context.is_null() {
                 // SAFETY: as above.
-                unsafe { *context = (ctx as usize & !3) as *mut c_void };
+                unsafe { *context = ctx as *mut c_void };
             }
             return TRUE;
         }

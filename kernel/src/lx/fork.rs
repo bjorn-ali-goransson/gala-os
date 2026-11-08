@@ -73,9 +73,9 @@ fn copy_space(parent: &Process) -> core::result::Result<(UserSpace, Vad, u64), &
 pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
     let parent = &call.process;
     let mut regs = return_regs(call.frame);
-    regs.gpr[0] = 0;
+    regs.set_syscall_result(0);
     if let Some(sp) = stack {
-        regs.gpr[4] = sp;
+        regs.set_sp(sp);
     }
     let fx = platform::xsave();
     let bases = platform::user_bases();
@@ -142,7 +142,7 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
         if vfork { "vfork" } else { "fork" },
         child.id
     );
-    process::announce_start(&child, regs.rip, child.path);
+    process::announce_start(&child, regs.ip(), child.path);
     if vfork {
         ledger::record("vfork", "linux clone flags missing", CLONE_VM);
         wait_for_exec(call, &lx);

@@ -58,8 +58,8 @@ pub mod at {
     pub const MINSIGSTKSZ: u64 = 51;
 }
 
-/// AT_PLATFORM's string on x86_64 (auxv_test).
-pub const PLATFORM: &[u8] = b"x86_64";
+/// AT_PLATFORM's string (the architecture's: x86_64's for auxv_test).
+pub use super::machine::PLATFORM;
 /// AT_CLKTCK: clock ticks per second as times(2) counts them (auxv_test).
 pub const CLKTCK: u64 = 100;
 
@@ -84,7 +84,8 @@ pub struct Aux {
     /// AT_SECURE: set-uid/set-gid or a capability gain: libc then ignores
     /// LD_* and the like.
     pub secure: bool,
-    /// AT_HWCAP: CPUID leaf 1's EDX on x86_64 (auxv_test).
+    /// AT_HWCAP (`machine::hwcap`: CPUID leaf 1's EDX on x86_64,
+    /// auxv_test).
     pub hwcap: u64,
     pub clktck: u64,
     pub hwcap2: Option<u64>,

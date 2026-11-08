@@ -19,59 +19,26 @@ const TICK_COUNT_MULTIPLIER: usize = 0x004;
 const INTERRUPT_TIME: usize = 0x008;
 const SYSTEM_TIME: usize = 0x014;
 const TIME_ZONE_BIAS: usize = 0x020;
-const IMAGE_NUMBER_LOW: usize = 0x02c;
-const IMAGE_NUMBER_HIGH: usize = 0x02e;
+pub(in crate::nt) const IMAGE_NUMBER_LOW: usize = 0x02c;
+pub(in crate::nt) const IMAGE_NUMBER_HIGH: usize = 0x02e;
 const NT_SYSTEM_ROOT: usize = 0x030;
 const NT_BUILD_NUMBER: usize = 0x260;
 const NT_PRODUCT_TYPE: usize = 0x264;
 const PRODUCT_TYPE_IS_VALID: usize = 0x268;
-const NATIVE_PROCESSOR_ARCHITECTURE: usize = 0x26a;
+pub(in crate::nt) const NATIVE_PROCESSOR_ARCHITECTURE: usize = 0x26a;
 const NT_MAJOR_VERSION: usize = 0x26c;
 const NT_MINOR_VERSION: usize = 0x270;
-const PROCESSOR_FEATURES: usize = 0x274;
 /// The session the console shows (WTSGetActiveConsoleSessionId).
 const ACTIVE_CONSOLE_ID: usize = 0x2d8;
 const NUMBER_OF_PHYSICAL_PAGES: usize = 0x2e8;
-const TEST_RET_INSTRUCTION: usize = 0x2f8;
 const QPC_FREQUENCY: usize = 0x300;
 const TICK_COUNT: usize = 0x320;
 const ACTIVE_PROCESSOR_COUNT: usize = 0x3c0;
 const ACTIVE_GROUP_COUNT: usize = 0x3c4;
-/// XSTATE_CONFIGURATION XState (winnt.h's layout; at 0x3d8 since Windows
-/// 10): EnabledFeatures, EnabledVolatileFeatures, Size, ControlFlags,
-/// Features[64] (offset, size), EnabledSupervisorFeatures,
-/// AlignedFeatures, AllFeatureSize, AllFeatures[64],
-/// EnabledUserVisibleSupervisorFeatures, ExtendedFeatureDisableFeatures,
-/// AllNonLargeFeatureSize.
-const XSTATE: usize = 0x3d8;
-const XSTATE_ENABLED_FEATURES: usize = XSTATE;
-const XSTATE_ENABLED_VOLATILE_FEATURES: usize = XSTATE + 0x08;
-const XSTATE_SIZE: usize = XSTATE + 0x10;
-const XSTATE_CONTROL_FLAGS: usize = XSTATE + 0x14;
-const XSTATE_FEATURES: usize = XSTATE + 0x18;
-const XSTATE_ALL_FEATURE_SIZE: usize = XSTATE + 0x228;
-const XSTATE_ALL_FEATURES: usize = XSTATE + 0x22c;
-const XSTATE_ALL_NON_LARGE_FEATURE_SIZE: usize = XSTATE + 0x340;
-/// ControlFlags.OptimizedSave (XSAVEOPT); CompactionEnabled stays 0: the
-/// CONTEXT_EX areas gala makes are in the standard format.
-const XSTATE_CONTROLFLAG_XSAVEOPT: u32 = 1;
-
-const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
-const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
 const NT_PRODUCT_WIN_NT: u32 = 1;
 /// One tick = 1 ms: ms = TickCount * multiplier >> 24.
 const TICK_MULTIPLIER: u32 = (1000 / platform::TICK_HZ as u32) << 24;
 const SYSTEM_ROOT: &str = "C:\\Windows";
-
-/// ProcessorFeatures[] indices (PF_* in winnt.h) we can always report.
-const PF_RDTSC_INSTRUCTION_AVAILABLE: usize = 8;
-const PF_XMMI_INSTRUCTIONS_AVAILABLE: usize = 6;
-const PF_XMMI64_INSTRUCTIONS_AVAILABLE: usize = 10;
-const PF_NX_ENABLED: usize = 12;
-const PF_XSAVE_ENABLED: usize = 17;
-const PF_AVX_INSTRUCTIONS_AVAILABLE: usize = 39;
-const PF_AVX2_INSTRUCTIONS_AVAILABLE: usize = 40;
-const PF_AVX512F_INSTRUCTIONS_AVAILABLE: usize = 41;
 
 pub const MAJOR_VERSION: u32 = 10;
 pub const MINOR_VERSION: u32 = 0;
@@ -93,29 +60,18 @@ pub fn init(physical_pages: u64) -> Result<(), platform::PagingError> {
     let page = SharedPage::new()?;
     page.write_u32(TICK_COUNT_MULTIPLIER, TICK_MULTIPLIER);
     write_ksystem_time(&page, TIME_ZONE_BIAS, 0); // UTC
-    page.write(IMAGE_NUMBER_LOW, &IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
-    page.write(IMAGE_NUMBER_HIGH, &IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
+    // The machine, its processor features and the XState configuration.
+    super::abi::write_kuser_processor(&page);
     for (i, b) in SYSTEM_ROOT.bytes().enumerate() {
         page.write(NT_SYSTEM_ROOT + 2 * i, &u16::from(b).to_le_bytes());
     }
     page.write_u32(NT_BUILD_NUMBER, BUILD_NUMBER);
     page.write_u32(NT_PRODUCT_TYPE, NT_PRODUCT_WIN_NT);
     page.write(PRODUCT_TYPE_IS_VALID, &[1]);
-    page.write(NATIVE_PROCESSOR_ARCHITECTURE, &PROCESSOR_ARCHITECTURE_AMD64.to_le_bytes());
     page.write_u32(NT_MAJOR_VERSION, 10);
     page.write_u32(NT_MINOR_VERSION, 0);
-    for pf in [
-        PF_RDTSC_INSTRUCTION_AVAILABLE,
-        PF_XMMI_INSTRUCTIONS_AVAILABLE,
-        PF_XMMI64_INSTRUCTIONS_AVAILABLE,
-        PF_NX_ENABLED,
-    ] {
-        page.write(PROCESSOR_FEATURES + pf, &[1]);
-    }
-    write_xstate(&page);
     page.write_u32(ACTIVE_CONSOLE_ID, super::session::CONSOLE);
     page.write_u32(NUMBER_OF_PHYSICAL_PAGES, physical_pages.min(u64::from(u32::MAX)) as u32);
-    page.write(TEST_RET_INSTRUCTION, &[0xc3]); // ret
     page.write(QPC_FREQUENCY, &platform::PERFORMANCE_FREQUENCY.to_le_bytes());
     page.write_u32(ACTIVE_PROCESSOR_COUNT, platform::online_count());
     page.write(ACTIVE_GROUP_COUNT, &[1]);
@@ -123,40 +79,6 @@ pub fn init(physical_pages: u64) -> Result<(), platform::PagingError> {
     *PAGE.lock() = Some(page);
     platform::set_tick_callback(on_tick);
     Ok(())
-}
-
-/// The XState configuration (what kernel32's XState functions read) and
-/// the processor features that depend on it: the components the platform
-/// enables (XCR0), in the standard XSAVE layout.
-fn write_xstate(page: &SharedPage) {
-    use platform::xstate::{AVX, AVX512, COMPONENTS, LEGACY, size_of};
-    let enabled = platform::xstate_enabled();
-    let size = size_of(enabled) as u32;
-    page.write(XSTATE_ENABLED_FEATURES, &enabled.to_le_bytes());
-    page.write(XSTATE_ENABLED_VOLATILE_FEATURES, &enabled.to_le_bytes());
-    page.write_u32(XSTATE_SIZE, size);
-    page.write_u32(XSTATE_CONTROL_FLAGS, XSTATE_CONTROLFLAG_XSAVEOPT);
-    for (i, &(offset, len)) in COMPONENTS.iter().enumerate() {
-        if enabled & (1 << i) != 0 {
-            page.write_u32(XSTATE_FEATURES + 8 * i, offset as u32);
-            page.write_u32(XSTATE_FEATURES + 8 * i + 4, len as u32);
-            page.write_u32(XSTATE_ALL_FEATURES + 4 * i, len as u32);
-        }
-    }
-    page.write_u32(XSTATE_ALL_FEATURE_SIZE, size);
-    page.write_u32(XSTATE_ALL_NON_LARGE_FEATURE_SIZE, size);
-    // What the CPU has and the state that programs can use: AVX2 and
-    // AVX-512F need the AVX (and AVX-512) state enabled.
-    let leaf7 = core::arch::x86_64::__cpuid_count(7, 0).ebx;
-    let features = [
-        (PF_XSAVE_ENABLED, enabled != LEGACY),
-        (PF_AVX_INSTRUCTIONS_AVAILABLE, enabled & AVX != 0),
-        (PF_AVX2_INSTRUCTIONS_AVAILABLE, enabled & AVX != 0 && leaf7 & (1 << 5) != 0),
-        (PF_AVX512F_INSTRUCTIONS_AVAILABLE, enabled & AVX512 != 0 && leaf7 & (1 << 16) != 0),
-    ];
-    for (pf, present) in features {
-        page.write(PROCESSOR_FEATURES + pf, &[u8::from(present)]);
-    }
 }
 
 fn update_page(page: &SharedPage, ticks: u64) {

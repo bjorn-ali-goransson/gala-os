@@ -9,8 +9,9 @@
 //!   frame: STATUS_ACCESS_VIOLATION, ExceptionAddress the faulting
 //!   instruction, parameters (1 = write, address 0), the x86 CONTEXT (CS
 //!   0x23, Eip the faulting instruction, ebx as the code set it, esp on the
-//!   stack); the handler unwinds to its frame (RtlUnwind) and resumes
-//!   there. A read of address 0x10: parameters (0, 0x10).
+//!   stack); the handler unwinds to its frame (RtlUnwind, with ebx, esi,
+//!   edi and ebp saved around it: Windows' does not preserve them) and
+//!   resumes there. A read of address 0x10: parameters (0, 0x10).
 //! - A frame whose handler returns ExceptionContinueSearch under one that
 //!   handles: the inner handler is called to dispatch, then once with
 //!   EXCEPTION_UNWINDING by the outer handler's RtlUnwind; fs:[0] is back
@@ -58,6 +59,40 @@ unsafe extern "system" {
         previous: *mut u8,
     ) -> u32;
     fn NtClose(h: usize) -> u32;
+}
+
+/// RtlUnwind(frame, 0, record, 0) with ebx, esi, edi and ebp saved
+/// around it: the 32-bit RtlUnwind on Windows does not preserve them (a
+/// handler that kept `frame` in esi across the call read it back as 0), so
+/// callers save them themselves, as the C runtime's unwind helpers do.
+///
+/// # Safety
+/// RtlUnwind's: `frame` a registration on this thread's fs:[0] list,
+/// `record` the exception being dispatched.
+unsafe fn unwind(frame: usize, record: usize) {
+    // SAFETY: the registers RtlUnwind may change are pushed and popped
+    // around it; it pops its four stdcall arguments.
+    unsafe {
+        core::arch::asm!(
+            "push ebx",
+            "push esi",
+            "push edi",
+            "push ebp",
+            "push 0",
+            "push ecx",
+            "push 0",
+            "push eax",
+            "call edx",
+            "pop ebp",
+            "pop edi",
+            "pop esi",
+            "pop ebx",
+            in("eax") frame,
+            in("ecx") record,
+            in("edx") RtlUnwind as unsafe extern "system" fn(usize, usize, *mut u8, usize) as usize,
+            clobber_abi("system"),
+        )
+    };
 }
 
 type Vectored = extern "system" fn(*mut [usize; 2]) -> i32;
@@ -210,7 +245,7 @@ unsafe extern "C" fn catch_handler(record: usize, frame: usize, context: usize, 
     // The frames above this one are unwound, then the frame's function
     // goes on at its landing (esp: the record; ebp: the frame's).
     // SAFETY: our own registration; the record the dispatcher passed.
-    unsafe { RtlUnwind(frame, 0, record as *mut u8, 0) };
+    unsafe { unwind(frame, record) };
     wr(context + CTX_ESP, frame as u32);
     wr(context + CTX_EBP, rd(frame + 8));
     wr(context + CTX_EIP, rd(frame + 12));
