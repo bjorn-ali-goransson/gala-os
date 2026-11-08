@@ -710,9 +710,19 @@ fn run() -> Result<(), u32> {
             c.eq(WSAEventSelect(c5, ev5, FD_CONNECT) as u64, 0)?;
             let r = connect(c5, &name, ADDR_LEN);
             c.ok(r != 0 && WSAGetLastError() == WSAEWOULDBLOCK, WSAGetLastError() as u64)?;
-            // The round that lost it, as the failing check's value.
-            c.ok(WaitForSingleObject(ev5, 5000) == 0, round)?;
+            // At once, racing the handshake: WSAEnumNetworkEvents copies
+            // the record, clears it and resets the event atomically (as
+            // documented), so if this call does not report FD_CONNECT the
+            // event is still to be set and the next call reports it. (gala
+            // reset the event after the kernel's copy: a connection
+            // recorded in between lost its signal, and Chromium waited.)
+            ne = [0; 11];
             c.eq(WSAEnumNetworkEvents(c5, ev5, ne.as_mut_ptr()) as u64, 0)?;
+            if ne[0] & FD_CONNECT == 0 {
+                // The round that lost it, as the failing check's value.
+                c.ok(WaitForSingleObject(ev5, 5000) == 0, round)?;
+                c.eq(WSAEnumNetworkEvents(c5, ev5, ne.as_mut_ptr()) as u64, 0)?;
+            }
             c.ok(ne[0] & FD_CONNECT != 0 && ne[1 + FD_CONNECT_BIT] == 0, ne[0] as u64)?;
             let a5 = accept(l5, core::ptr::null_mut(), core::ptr::null_mut());
             c.ok(a5 != INVALID_SOCKET, WSAGetLastError() as u64)?;
