@@ -29,6 +29,13 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 # current directory, so the files written beside the report have a path.
 if (-not [IO.Path]::IsPathRooted($Out)) { $Out = Join-Path (Get-Location).Path $Out }
 $outDir = Split-Path -Parent $Out
+# Every program's whole output, beside the report. The report keeps one line
+# per program, which is the failing check and nothing else; triaging a
+# divergence often needs what the program printed before it (which call it
+# had reached, the values it had found), and asking for that one program at
+# a time costs a round trip each. One file per run, replaced at the start.
+$outAll = Join-Path $outDir "windows-output.txt"
+Remove-Item $outAll -ErrorAction SilentlyContinue
 
 # A crashing program (crash.exe crashes on purpose) must not open a Windows
 # Error Reporting dialog; the error mode is inherited by child processes.
@@ -189,6 +196,9 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     $entry = [ordered]@{
         program = $name; exit = $code; line = $line; ms = [int]$sw.Elapsed.TotalMilliseconds
     }
+    ("== {0}  exit 0x{1:x8}  {2} ms" -f $name, $code, $entry.ms) |
+        Add-Content -Path $outAll -Encoding UTF8
+    if ($text) { $text.TrimEnd() | Add-Content -Path $outAll -Encoding UTF8 }
     # A crash (an NTSTATUS error as the exit code: 0xC0000005 and the like)
     # leaves only its code here; Windows Error Reporting logs where it
     # happened (Application log, event 1000, readable without
@@ -293,6 +303,9 @@ foreach ($s in $scripts) {
     $ErrorActionPreference = $before
     $sw.Stop()
     $text | Set-Content -Path (Join-Path $outDir "$($s.name)-windows.txt") -Encoding UTF8
+    ("== {0}  exit 0x{1:x8}  {2} ms" -f $s.name, $code, [int]$sw.Elapsed.TotalMilliseconds) |
+        Add-Content -Path $outAll -Encoding UTF8
+    if ($text) { $text.TrimEnd() | Add-Content -Path $outAll -Encoding UTF8 }
     $last = @($text -split "`r?`n" | Where-Object { $_ -ne "" }) | Select-Object -Last 1
     $results += [ordered]@{
         program = $s.name; exit = $code; line = $last; ms = [int]$sw.Elapsed.TotalMilliseconds

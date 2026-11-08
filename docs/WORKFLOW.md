@@ -192,6 +192,12 @@ side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
 
+Every program's whole output goes to `windows-output.txt` beside the
+report, with a header per program. The report keeps one line, the
+failing check; triaging often needs what the program printed before it
+(which call it had reached, the values it had found), and this saves
+asking for one program at a time.
+
 Each result carries `ms`, how long the program ran, on both sides: on
 Windows the runner's stopwatch around the process (printed per
 program), on gala the process's lifetime from creation to exit (the
