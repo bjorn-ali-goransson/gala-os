@@ -1597,7 +1597,13 @@ without a debug directory (dbghelp_test, which now indexes
 kernel32.dll); CB_SETCURSEL past the end keeps the selection
 (controls_test); WSB_PROP_WINSTYLE has a low bit per scroll bar
 (comctl32_test); user32_test counts only its own windows in its CBT hook
-(Windows adds the thread's "Default IME" window).
+(Windows adds the thread's "Default IME" window). From Round 4's probes:
+the 64-bit RtlRaiseException itself marks the record 0x80 (the 32-bit
+one does not; seh_test, wow64_seh_test); a relocated image's mapped
+OptionalHeader.ImageBase names its load address, PE32+ as PE32; a PE32
+view in a 64-bit process is IMAGE_MACHINE_TYPE_MISMATCH whether or not
+its base was free; PeekNamedPipe's bytes left in byte mode is 0 minus
+what was read (0 with no buffer), as gala had it.
 
 Next:
 1. The next run on Windows (each fix may reveal a program's next
@@ -1614,12 +1620,9 @@ Next:
    - clusapi_test (resutils.dll faults, no cluster installed): the call
      it makes last (it prints nothing first: a line per step would
      tell);
-   - what Round 3's changes left unmeasured: whether RtlRaiseException
-     itself sets EXCEPTION_SOFTWARE_ORIGINATE; a PE32+ image's mapped
-     ImageBase when relocated (gala keeps the preferred base); which of
-     IMAGE_MACHINE_TYPE_MISMATCH and IMAGE_NOT_AT_BASE a relocated PE32
-     view in a 64-bit process gets; PeekNamedPipe peeking 1 byte
-     (0xffffffff expected) and with no buffer (0); PrivilegeCheck's
+   - what Round 3's changes left unmeasured: whether the unwind keeps
+     the record's EXCEPTION_SOFTWARE_ORIGINATE (gala: 0x82, seh_test
+     asserts it); PrivilegeCheck's
      attributes on a primary token (SE_PRIVILEGE_USED_FOR_ACCESS);
      GetBoundsRect after SetBoundsRect(DCB_DISABLE) (gala: DCB_RESET);
      SO_RANDOMIZE_PORT on a bound TCP socket; seh_test's lookup of a

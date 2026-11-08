@@ -50,6 +50,7 @@ const EXCEPTION_NONCONTINUABLE: u32 = 1;
 const EXCEPTION_UNWINDING: u32 = 2;
 const EXCEPTION_EXIT_UNWIND: u32 = 4;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
+const EXCEPTION_SOFTWARE_ORIGINATE: u32 = 0x80;
 
 const DISPOSITION_CONTINUE_EXECUTION: u32 = 0;
 
@@ -1096,6 +1097,12 @@ extern "system" fn raise(record: *mut u8, context: *mut u8) -> ! {
     unsafe {
         let flags = context.add(CTX_FLAGS).cast::<u32>();
         flags.write_unaligned(flags.read_unaligned() | CONTEXT_UNWOUND_TO_CALL);
+        // The record is marked EXCEPTION_SOFTWARE_ORIGINATE (0x80), with
+        // whatever flags the caller set: Windows 25H2's 64-bit
+        // RtlRaiseException does so itself (a record raised with flags 0
+        // reaches the handlers with 0x80; the 32-bit one leaves them).
+        let er = record.add(ER_FLAGS).cast::<u32>();
+        er.write_unaligned(er.read_unaligned() | EXCEPTION_SOFTWARE_ORIGINATE);
     }
     dispatch_exception(record, context)
 }

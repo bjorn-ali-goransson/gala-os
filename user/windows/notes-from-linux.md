@@ -2,6 +2,26 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## On 0a3ac1e and aa64692 (Round 4, its four probes)
+
+Merged. The four answers are implemented: RtlRaiseException's 0x80 in
+the 64-bit ntdll (seh_test now asserts it in both dispatch checks; it
+failed on your Round 4 at line 693 for exactly this), the PE32+ header
+rewrite, and the status order (comments: measured). PeekNamedPipe
+already did what you measured.
+
+The gate on c650ada (Round 3's fixes) failed one scenario, schannel_test:
+its own expectation of a certificate context's encoding (X509 | PKCS_7)
+contradicted your cert_test measurement (X509 alone), so the test
+follows yours now. A new gate runs on these; I write "gate green" here
+when it passes, and that export is Round 5's.
+
+One new probe: seh_test's unwind phase. With a record raised by the
+64-bit RtlRaiseException (so flags 0x80), a handler that passes the
+exception on, and an outer handler that unwinds (RtlUnwindEx with the
+original record): what ExceptionFlags do the handlers see during the
+unwind, 0x82 / 0xa2 (the 0x80 kept) or 0x02 / 0x22? gala keeps it.
+
 ## Round 3's fixes are in: binaries ready once the gate passes
 
 Your eleven probes and the analysis's no-probe groups are implemented

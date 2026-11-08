@@ -690,7 +690,10 @@ fn run() -> Result<(), u32> {
     let r = unsafe { seh_outer(raise_it, CODE_CONTINUE.into()) };
     c.eq(r, 5)?;
     c.eq(inner(0), 1)?;
-    c.eq(inner(1), 0)?; // flags
+    // EXCEPTION_SOFTWARE_ORIGINATE (0x80): the 64-bit RtlRaiseException
+    // marks the record so itself (Windows 25H2; the 32-bit one does not,
+    // wow64_seh_test).
+    c.eq(inner(1), 0x80)?; // flags
     c.eq(inner(3), CODE_CONTINUE.into())?;
     c.eq(inner(4), seh_raise_ret as *const () as u64)?; // ExceptionAddress
     c.eq(inner(5), 2)?;
@@ -708,12 +711,14 @@ fn run() -> Result<(), u32> {
     let r = unsafe { seh_outer(raise_it, CODE_UNWIND.into()) };
     c.eq(r, 42)?;
     c.eq(inner(0), 2)?;
-    c.eq(inner(1), 0)?;
-    c.eq(inner(2), EXCEPTION_UNWINDING.into())?;
+    c.eq(inner(1), 0x80)?; // dispatch: EXCEPTION_SOFTWARE_ORIGINATE, as above
+    // The unwind keeps the record's 0x80 and adds its own flags (not yet
+    // measured on Windows; ROADMAP WD's probes).
+    c.eq(inner(2), (0x80 | EXCEPTION_UNWINDING).into())?;
     c.eq(inner(3), CODE_UNWIND.into())?;
     c.eq(outer(0), 2)?;
-    c.eq(outer(1), 0)?;
-    c.eq(outer(2), (EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND).into())?;
+    c.eq(outer(1), 0x80)?;
+    c.eq(outer(2), (0x80 | EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND).into())?;
     c.eq(outer(3), CODE_UNWIND.into())?;
     c.eq(outer(4), OUTER_RSP.load(Ordering::SeqCst))?; // establisher frame
     c.eq(outer(5), seh_outer_resume as *const () as u64)?; // ControlPc: the return address

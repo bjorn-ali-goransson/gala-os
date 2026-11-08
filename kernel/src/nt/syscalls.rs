@@ -4502,9 +4502,9 @@ fn nt_map_view_of_section(call: &mut Call<'_>) -> NtStatus {
         tri!(section::map_view(&call.process, object, base, offset, size, protect, top_down));
     tri!(call.write_u64(base_ptr, view.base));
     tri!(call.write_u64(size_ptr, view.size));
-    // The machine mismatch is reported before the relocation (Windows 11
-    // 25H2 gave it for a PE32 DLL in a 64-bit process; which wins when both
-    // hold is not measured).
+    // The machine mismatch wins over the relocation (Windows 11 25H2: a
+    // PE32 DLL in a 64-bit process gives 0x4000000E whether its preferred
+    // base is free or taken, and the view is mapped).
     if view.foreign {
         NtStatus::IMAGE_MACHINE_TYPE_MISMATCH
     } else if view.relocated {
