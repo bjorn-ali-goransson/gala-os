@@ -59,6 +59,12 @@ static const char *errno_name(i64 e)
 	case 39: return "ENOTEMPTY";
 	case 40: return "ELOOP";
 	case 88: return "ENOTSOCK";
+	case 89: return "EDESTADDRREQ";
+	case 90: return "EMSGSIZE";
+	case 91: return "EPROTOTYPE";
+	case 92: return "ENOPROTOOPT";
+	case 93: return "EPROTONOSUPPORT";
+	case 94: return "ESOCKTNOSUPPORT";
 	case 95: return "EOPNOTSUPP";
 	case 97: return "EAFNOSUPPORT";
 	case 98: return "EADDRINUSE";
@@ -194,6 +200,14 @@ static void lx_memset(void *p, int c, u64 n)
 	volatile unsigned char *q = p;
 	for (u64 i = 0; i < n; i++)
 		q[i] = c;
+}
+
+static void lx_memcpy(void *to, const void *from, u64 n)
+{
+	volatile unsigned char *q = to;
+	const unsigned char *s = from;
+	for (u64 i = 0; i < n; i++)
+		q[i] = s[i];
 }
 
 /* The number of leading bytes of `buf` (filled with `fill` before) that a

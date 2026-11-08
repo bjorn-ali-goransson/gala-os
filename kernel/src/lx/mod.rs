@@ -42,6 +42,12 @@
 //!   [`futex`]: futex(2); [`wait`]: wait queues and the one way a Linux
 //!   thread blocks (a signal for it, the process's end or a timer
 //!   interrupts it).
+//!
+//! LD step 2's prerequisites:
+//! - [`memfd`]: memfd_create and file seals: anonymous files whose
+//!   pages every mapping shares.
+//! - [`unix`]: AF_UNIX sockets (the core's `crate::unix`), SCM_RIGHTS,
+//!   sendmsg/recvmsg.
 
 pub mod dispatch;
 pub mod elf;
@@ -52,6 +58,7 @@ pub mod file;
 pub mod fork;
 pub mod futex;
 pub mod machine;
+pub mod memfd;
 pub mod mm;
 pub mod poll;
 pub mod resource;
@@ -70,6 +77,7 @@ pub mod syscalls;
 pub mod threads;
 pub mod time;
 pub mod timer;
+pub mod unix;
 pub mod wait;
 
 /// Registers the Linux personality's dispatcher (at start, after NT's).
@@ -82,7 +90,9 @@ pub fn init() {
 /// before the parent is told (frames it shared copy-on-write are the
 /// parent's alone again, and a section's frames are freed only after no
 /// page table maps them: the address space itself may outlive the
-/// process, held by a reap or `run`), then its Linux state (`state::ended`).
+/// process, held by a reap or `run`; its mappings release their files, so
+/// a memfd mapped only by it can be sealed against writing once its parent
+/// hears of the end, memfd_test), then its Linux state (`state::ended`).
 pub fn process_ended(process: &crate::nt::process::Process, status: crate::nt::status::NtStatus) {
     // The robust futex lists of the threads that did not leave by exit(2)
     // (exit_group, a signal), as each of Linux's exiting threads releases

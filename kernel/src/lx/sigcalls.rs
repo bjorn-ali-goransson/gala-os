@@ -394,7 +394,9 @@ fn restartable(number: u64) -> bool {
             | nr::ACCEPT
             | nr::ACCEPT4
             | nr::RECVFROM
-            | nr::SENDTO)
+            | nr::SENDTO
+            | nr::RECVMSG
+            | nr::SENDMSG)
     )
 }
 
