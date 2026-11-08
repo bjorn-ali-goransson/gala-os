@@ -764,10 +764,10 @@
       "asserts": "c.ok0(RegCloseKey(HKEY_LOCAL_MACHINE))?;",
       "certainty": "exact (source order is the run order this far)",
       "report_line": "registry_test: check 00000027 got 00000006",
-      "windows": "RegCloseKey on a predefined key fails with ERROR_INVALID_HANDLE (6). HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER and HKEY_CLASSES_ROOT all do; a key from RegOpenKeyEx closes with 0.",
+      "windows": "A predefined key closes successfully in its sign-extended form, which is what the SDK's HKEY is on x64: RegCloseKey(0xffffffff80000000/1/2/3) returns 0 for HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE and HKEY_USERS alike. The same number zero-extended (0x0000000080000002) is not a handle at all and gives ERROR_INVALID_HANDLE (6).",
       "class": "expectation",
-      "evidence": "probed here, with the opened key as a control. The check is user/registry_test/src/main.rs:588, c.ok0(RegCloseKey(HKEY_LOCAL_MACHINE)), under the comment \"Predefined keys close successfully\", and it got 6.",
-      "note": "A real divergence: the test's assumption does not hold on this build, so gala closing them successfully is wrong too. The build pin earlier in this test is fixed; this is the next check it reaches."
+      "evidence": "probed here in both encodings, all four keys, with a key from RegOpenKeyEx as the control (closes with 0). user/registry_test/src/main.rs:234 defines HKEY_LOCAL_MACHINE zero-extended, which is why its check 39 got 6, while line 479 uses the sign-extended form elsewhere.",
+      "note": "CORRECTION of what this entry said before. My first probe passed only the zero-extended value and I generalised it to \"predefined keys fail\", concluding the test's comment was wrong and that gala closing them successfully was wrong too. That was my error: the comment was right, and the divergence is the test's own constant, not Windows' behaviour. The Linux side arrived at the correct, narrower statement in 341dfad1 before acting on mine."
     },
     {
       "program": "richedit_test",
