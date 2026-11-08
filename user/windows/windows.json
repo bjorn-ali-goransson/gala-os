@@ -52,13 +52,13 @@
                     {
                         "program":  "bench",
                         "exit":  0,
-                        "line":  "bench: cpu_loop ns_per_op 1",
+                        "line":  "bench: cpu_loop ns_per_op 2",
                         "fault":  "no Application Error event found"
                     },
                     {
                         "program":  "browser_api_test",
-                        "exit":  3221225785,
-                        "line":  "",
+                        "exit":  23,
+                        "line":  "browser_api_test: check 23 failed",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -82,7 +82,7 @@
                     {
                         "program":  "clockcal_test",
                         "exit":  0,
-                        "line":  "clockcal_test: mark 1 uptime_ms=2175863735",
+                        "line":  "clockcal_test: mark 1 uptime_ms=2179619727",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -213,8 +213,8 @@
                     },
                     {
                         "program":  "dwrite_test",
-                        "exit":  3221225477,
-                        "line":  "",
+                        "exit":  0,
+                        "line":  "dwrite_test: ok",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -274,7 +274,7 @@
                     {
                         "program":  "go_gc",
                         "exit":  0,
-                        "line":  "go_gc: ok 75 collections",
+                        "line":  "go_gc: ok 77 collections",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -405,8 +405,8 @@
                     },
                     {
                         "program":  "kernel32_file_test",
-                        "exit":  1,
-                        "line":  "kernel32_file_test: check 00000001 got 00000000",
+                        "exit":  40,
+                        "line":  "kernel32_file_test: check 00000028 got 00000000",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -435,14 +435,14 @@
                     },
                     {
                         "program":  "kernel32_sync_test",
-                        "exit":  3221225477,
-                        "line":  "",
+                        "exit":  81,
+                        "line":  "kernel32_sync_test: check 00000051 got 00000000",
                         "fault":  "no Application Error event found"
                     },
                     {
                         "program":  "kernel32_sys_test",
-                        "exit":  4,
-                        "line":  "kernel32_sys_test: check 00000004 got 00000001",
+                        "exit":  54,
+                        "line":  "kernel32_sys_test: check 00000036 got 0000007e",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -459,8 +459,8 @@
                     },
                     {
                         "program":  "kernel32_thread_test",
-                        "exit":  18,
-                        "line":  "kernel32_thread_test: check 00000012 got 00000001",
+                        "exit":  36,
+                        "line":  "kernel32_thread_test: check 00000024 got 10000000",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -471,8 +471,8 @@
                     },
                     {
                         "program":  "kuser_test",
-                        "exit":  9,
-                        "line":  "kuser_test: check 00000009 got 00006658",
+                        "exit":  18,
+                        "line":  "kuser_test: check 00000012 got 00000049",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -507,8 +507,8 @@
                     },
                     {
                         "program":  "manifest_test",
-                        "exit":  4,
-                        "line":  "manifest_test: check 00000004 got 00006658",
+                        "exit":  0,
+                        "line":  "manifest_test: ok",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -561,14 +561,14 @@
                     },
                     {
                         "program":  "peb_test",
-                        "exit":  15,
-                        "line":  "peb_test: check 0000000f got 00006658",
+                        "exit":  0,
+                        "line":  "peb_test: ok",
                         "fault":  "no Application Error event found"
                     },
                     {
                         "program":  "persist_test",
-                        "exit":  56,
-                        "line":  "persist_test: check 00000038 got 00000000",
+                        "exit":  14,
+                        "line":  "persist_test: check 0000000e got b359ad23",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -615,14 +615,14 @@
                     },
                     {
                         "program":  "registry_test",
-                        "exit":  8,
-                        "line":  "registry_test: check 00000008 got 0000000c",
+                        "exit":  39,
+                        "line":  "registry_test: check 00000027 got 00000006",
                         "fault":  "no Application Error event found"
                     },
                     {
                         "program":  "replay_test",
                         "exit":  0,
-                        "line":  "replay_test: random ba9fd7ed33e6a924bf6f93a7f4383689",
+                        "line":  "replay_test: random d8a2357adb96db6ac23208af9ae02477",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -753,8 +753,8 @@
                     },
                     {
                         "program":  "sspi_test",
-                        "exit":  21,
-                        "line":  "sspi_test: check 00000015 got 00000000",
+                        "exit":  48,
+                        "line":  "sspi_test: check 00000030 got 8009030e",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -826,7 +826,7 @@
                     {
                         "program":  "tls_test",
                         "exit":  6,
-                        "line":  "tls_test: check 00000006 got 52547379",
+                        "line":  "tls_test: check 00000006 got ed94aac8",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -844,7 +844,7 @@
                     {
                         "program":  "uia_chromium_test",
                         "exit":  116,
-                        "line":  "uia_chromium_test: check failed (line 116) at 16 ms: CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, \u0026si, \u0026pi)",
+                        "line":  "uia_chromium_test: check failed (line 116) at 47 ms: CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, \u0026si, \u0026pi)",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -885,8 +885,8 @@
                     },
                     {
                         "program":  "wait_test",
-                        "exit":  16,
-                        "line":  "wait_test: check 00000010 got c000000d",
+                        "exit":  0,
+                        "line":  "wait_test: ok",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -934,7 +934,7 @@
                     {
                         "program":  "winsta_test",
                         "exit":  58,
-                        "line":  "winsta_test: check 0000003a got 000000d0",
+                        "line":  "winsta_test: check 0000003a got 000000e8",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -981,8 +981,8 @@
                     },
                     {
                         "program":  "wow64_seh_test",
-                        "exit":  3221225477,
-                        "line":  "",
+                        "exit":  0,
+                        "line":  "wow64_seh_test: ok",
                         "fault":  "no Application Error event found"
                     },
                     {
@@ -993,8 +993,8 @@
                     },
                     {
                         "program":  "wow64_test",
-                        "exit":  11,
-                        "line":  "(line 0x000000bf) wow64_test: check 0000000b failed, got 00000000 00006658",
+                        "exit":  71,
+                        "line":  "(line 0x0000018a) wow64_test: check 00000047 failed, got 00000000 c0000005",
                         "fault":  "no Application Error event found"
                     },
                     {
