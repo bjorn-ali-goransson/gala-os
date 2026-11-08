@@ -725,10 +725,10 @@
       "asserts": "CHECK(CoCreateInstanceEx(&clsid_uia, NULL, CLSCTX_INPROC_SERVER, NULL, 3, mqi) == CO_S_NOTALLINTERFACES);",
       "certainty": "exact (user\\ole32_test\\main.c:447, the line the report names)",
       "report_line": "ole32_test: check 31 (line 447) failed",
-      "windows": null,
+      "windows": "CoCreateInstanceEx requires every MULTI_QI's pItf to be NULL on input. The test pre-fills it with 1, and the call then returns E_INVALIDARG without touching the array at all. With pItf NULL and the same three interfaces it returns CO_S_NOTALLINTERFACES and fills in exactly what the test's next two checks expect: mqi[0] and mqi[1] S_OK with non-NULL pItf, mqi[2] E_NOINTERFACE with pItf NULL.",
       "class": "expectation",
-      "evidence": "needs a probe: what does this machine do here?",
-      "note": null
+      "evidence": "probed here with the test's own CLSID_CUIAutomation and its three IIDs, run twice: pItf=1 -> 0x80070057 and hr still the 7 sentinel in all three entries; pItf=NULL -> 0x00080012 with hr 0, 0, 0x80004002. The single-interface call succeeds either way when pItf is NULL, and count=0 gives E_INVALIDARG as the test expects.",
+      "note": "A test bug of one line, and the rest of what check 31's block asserts is right. The sentinel in hr is harmless; it is pItf that has to start NULL. Since gala accepts the non-NULL pItf, gala is wrong here too and should reject it."
     },
     {
       "program": "persist_test",
