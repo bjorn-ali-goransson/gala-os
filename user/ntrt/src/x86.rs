@@ -899,6 +899,13 @@ pub fn ntdll_export(name: &[u8]) -> Option<usize> {
     if base == 1 { None } else { find_export(base, name) }
 }
 
+/// Whether this runs on gala: no 32-bit ntdll is mapped (gala's bare
+/// kernel), or the one mapped is gala's (it exports its Gala* services).
+/// Tests skip what only gala has (its private services) elsewhere.
+pub fn on_gala() -> bool {
+    find_ntdll().is_none_or(|base| find_export(base, b"GalaConsoleCreate").is_some())
+}
+
 /// The ntdll export of the services in `nr` whose numbers are gala's own
 /// (they change between builds, or are not yet verified on the pinned
 /// one).

@@ -267,16 +267,34 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     let lower = teb_field(teb::STACK_LIMIT);
     c.ok(lower < limit && lower <= sp - 48 * 0x800, lower as u64)?;
 
+    // Each part announces itself first: a crash (no check line) is then
+    // in the part the last line names (run-all.ps1 keeps the last line).
+    print("wow64_test: bad pointers\n");
     bad_pointers(c)?;
+    print("wow64_test: objects\n");
     objects(c)?;
+    print("wow64_test: files\n");
     files(c)?;
+    print("wow64_test: pending\n");
     pending(c)?;
+    print("wow64_test: sections\n");
     sections(c)?;
+    print("wow64_test: tokens\n");
     let user = tokens(c)?;
+    print("wow64_test: registry\n");
     registry(c, &user)?;
+    print("wow64_test: system\n");
     system(c)?;
+    print("wow64_test: thread and process\n");
     thread_and_process(c, teb, pid, tid)?;
-    child(c)?;
+    // The child is started with gala's own service (GALA_CREATE_PROCESS):
+    // on Windows that number is another service, so the part is gala's.
+    if on_gala() {
+        print("wow64_test: child\n");
+        child(c)?;
+    } else {
+        print("wow64_test: child skipped (gala's process creation service)\n");
+    }
     Ok(())
 }
 

@@ -2,6 +2,27 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## On c18e996 (Round 5): the two regressions
+
+Both are explained, and both came from code that never ran on Windows
+before this round:
+- wait_test: a timed wait expires on a clock tick, measured from a
+  base up to one tick old, so it may return up to one timer resolution
+  early (Sleep's documentation says as much). The test's ">= 15 of 20
+  ms" ignored that. It now reads the resolution
+  (NtQueryTimerResolution, through ntdll's export) and checks waited +
+  resolution >= 20. Your 12 ms with 15.625 ms resolution passes that;
+  gala's 1 ms tick keeps it strict there.
+- wow64_test: Round 4 stopped it at check 1478 (the process list too
+  big for its buffer), so the parts after it ran on Windows for the
+  first time. The last one, `child`, starts the child with
+  GALA_CREATE_PROCESS, gala's own system service; on Windows that
+  number is some other service, hence the fault with no check line.
+  The test now skips that part off gala ("child skipped"), and prints
+  each part's name before running it, so a crash names its part.
+These two are in the next export (I will write "gate green" here). The
+rest of Round 5 I am reading now.
+
 ## Gate green at 68638d3: sweep for Round 5
 
 All 312 scenarios passed on 68638d3 and it is on main. `user/bin` there

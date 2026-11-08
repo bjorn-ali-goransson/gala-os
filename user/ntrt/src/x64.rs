@@ -492,6 +492,19 @@ pub fn create_timer(kind: u32) -> (NtStatus, Handle) {
     (st, h)
 }
 
+/// NtQueryTimerResolution's current resolution (100 ns units), through
+/// ntdll's export; None where no ntdll is mapped (gala's kernel has no
+/// such system call: its ntdll answers in user mode).
+pub fn timer_resolution() -> Option<u32> {
+    type F = unsafe extern "system" fn(*mut u32, *mut u32, *mut u32) -> NtStatus;
+    let f = ntdll_export(b"NtQueryTimerResolution")?;
+    let (mut max, mut min, mut current) = (0u32, 0u32, 0u32);
+    // SAFETY: the export has NtQueryTimerResolution's documented signature;
+    // three outputs of ours.
+    let st = unsafe { core::mem::transmute::<usize, F>(f)(&mut max, &mut min, &mut current) };
+    (st == STATUS_SUCCESS).then_some(current)
+}
+
 /// NtSetTimer with no APC: due at `due` (NT time: negative = relative),
 /// every `period` ms after (0: once). Through ntdll's export.
 pub fn set_timer(h: Handle, due: i64, period: i32) -> NtStatus {
