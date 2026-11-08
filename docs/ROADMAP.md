@@ -172,6 +172,7 @@ has a section under "Open items".
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
+| WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
 
@@ -1519,6 +1520,66 @@ module set) cannot be fetched on a machine without
 `target/prebuilt/filezilla`. No official mirror with the pinned SHA-256
 (e87b8787...) has been found; the URL stays until one is.
 
+### WD. Windows divergences: the test programs on real Windows
+
+**Goal**: every test program passes on real Windows too, so that what
+the tests assert is what Windows does (and gala, which passes them,
+does it). The agent on a Windows machine runs `user/bin/run-all.ps1`,
+finds each failing check and probes it (`docs/windows-triage-brief.md`);
+its findings are `user/windows/triage.json` and `triage.md` (Windows 11
+25H2, build 26200). Fixes are made here, test first; a fix only follows
+what was observed there or is documented.
+
+Done (the first triage): InitOnceExecuteOnce passes the caller's Context
+to the callback as it is, NULL included (kernel32_sync_test faulted
+writing through it); DirectWrite asks a custom loader for its extended
+interfaces, so dwrite_test's objects answer QueryInterface only for
+IUnknown and their own; the 32-bit RtlUnwind does not preserve ebx, esi,
+edi and ebp (wow64_seh_test saves them around it); WriteConsoleW on a
+pipe is ERROR_INVALID_FUNCTION (ERROR_INVALID_HANDLE on a file);
+SetPriorityClass takes a value with IDLE's bit as IDLE, only 0 is
+ERROR_INVALID_PARAMETER; NtCreateEvent with an unknown type is
+STATUS_INVALID_PARAMETER (not _4); the process handle limit is 0xff0000
+(quota_test, which also ends its children on every path now); the
+build-number checks (kuser_test, peb_test, manifest_test, registry_test,
+wow64_test) follow KUSER_SHARED_DATA's NtBuildNumber, at least 26100;
+kernel32_file_test removes an earlier run's directory first; sspi_test
+compares the client's name with the process's own account;
+browser_api_test imports CompareObjectHandles through its API set.
+
+Next:
+1. The next run on Windows (each fix may reveal a program's next
+   failing check), and the probes still open, asked of the agent there:
+   - SetPriorityClass with mixed class bits that lack IDLE's (0x8020,
+     0x4080, 0x100|0x80, 1): which class Windows settles on;
+   - WriteConsoleA on a pipe and on a file (the same errors as W?);
+   - NtCreateTimer with an unknown TimerType (STATUS_INVALID_PARAMETER_4
+     or plain _PARAMETER?);
+   - the not-yet-probed checks in `triage.md` (75 programs classed
+     "expectation" without a probe), most numerous first: the kernel32
+     tests, then user32/gdi32/comctl32/shell32/shlwapi;
+   - clock_test and handover_k32_test's STATUS_FATAL_USER_CALLBACK_EXCEPTION
+     (both fault at the same ntdll address in a user callback): which
+     call of theirs makes Windows call back into the process;
+   - oleaut32_test (OLEAUT32.dll writes through NULL) and clusapi_test
+     (resutils.dll faults, no cluster installed): the call each makes
+     last (they print nothing first: a line per step would tell).
+2. The tests that need a setting run-all.ps1 cannot give: system_test
+   (LocalSystem), session_test, restricted_test (an administrator), the
+   galatest account's tests (access, logon, profile, disk, lsa): run-all
+   gets a way to run those (psexec-like as SYSTEM, elevated, the account
+   created) or they say "skipped" with the reason, as presenter_test.
+3. run-all.ps1's `fault` field: it reads Windows Error Reporting's
+   event 1000, which SEM_NOGPFAULTERRORBOX (set by the runner) prevents;
+   `user/windows/fault.py`, which debugs the program, gives the same
+   facts. run-all uses that way instead.
+4. **KB**: kernelbase as the host of the core API sets, as on Windows
+   (`api_set_host` maps them to kernel32 today), and kernel32 exporting
+   only what Windows' does (CompareObjectHandles is kernelbase's only).
+   Needs kernelbase in every scenario that imports a core set (the JDK's
+   ucrtbase, pwsh, sqllocaldb, Chromium) and forwarders for the rest of
+   each set.
+
 ### LX. Linux personality
 
 **Goal**: Linux programs on the same kernel core through their own
@@ -2107,9 +2168,9 @@ fail the program using too much; NtSetInformationProcess
 (ProcessQuotaLimits) changes the limits (SeIncreaseQuotaPrivilege).
 Registry data, image layouts and job-wide pool limits are left out by
 design (ARCHITECTURE says why). Next:
-1. quota_test on real Windows (run-all.ps1): the handle limit's status
-   (ERROR_NO_SYSTEM_RESOURCES is assumed) and its exact count; the
-   socket part (SO_RCVBUF read back, connected sockets' charge).
+1. quota_test on real Windows: the socket part (SO_RCVBUF read back,
+   connected sockets' charge); the handle limit's status and count are
+   measured (ERROR_NO_SYSTEM_RESOURCES at 0xff0000).
 2. kernel32's SetProcessWorkingSetSize through ProcessQuotaLimits; the
    sockets of an AFD endpoint a kernel handover carried charged again
    (its process's quota is restored after it).

@@ -47,7 +47,6 @@ const PP_ENVIRONMENT: usize = 0x80;
 const PP_ENVIRONMENT_SIZE: usize = 0x3f0;
 const RTL_USER_PROC_PARAMS_NORMALIZED: u32 = 1;
 const IMAGE_SUBSYSTEM_WINDOWS_CUI: u32 = 3;
-const BUILD: u64 = 26100;
 
 struct Checks(u32);
 
@@ -142,7 +141,7 @@ fn run() -> Result<(), u32> {
     c.ok(rd::<u32>(peb, PEB_NUMBER_OF_PROCESSORS) >= 1, 0)?;
     c.eq(rd::<u32>(peb, PEB_OS_MAJOR).into(), 10)?;
     c.eq(rd::<u32>(peb, PEB_OS_MINOR).into(), 0)?;
-    c.eq(rd::<u16>(peb, PEB_OS_BUILD).into(), BUILD)?;
+    c.eq(rd::<u16>(peb, PEB_OS_BUILD).into(), os_build().into())?;
     c.eq(rd::<u32>(peb, PEB_OS_PLATFORM_ID).into(), 2)?; // VER_PLATFORM_WIN32_NT
     // Subsystem fields mirror this image's optional header.
     let nt = rd::<u32>(image, 0x3c) as usize;

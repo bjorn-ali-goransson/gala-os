@@ -1519,7 +1519,8 @@ fn nt_create_event(call: &mut Call<'_>) -> NtStatus {
     let kind = match arg!(call, 3) as u32 {
         0 => EventType::Notification,
         1 => EventType::Synchronization,
-        _ => return NtStatus::INVALID_PARAMETER_4,
+        // Windows names no parameter here (unlike NtCreateTimer's).
+        _ => return NtStatus::INVALID_PARAMETER,
     };
     let initial = arg!(call, 4) as u8 != 0;
     let attrs = tri!(call.object_attributes(attrs_ptr, DIRECTORY_CREATE_OBJECT));

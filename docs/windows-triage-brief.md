@@ -61,3 +61,13 @@ The last group is what matters: find what Windows really does.
 `{ "program", "exit", "check", "source_line", "asserts", "windows",
 "class", "evidence", "note" }`, plus a short `triage.md` summary by
 class. Commit both with the `windows.json` they came from.
+
+## Round 2
+
+The first round's fixes are in (ROADMAP WD lists them). Pull, run
+`run-all.ps1` again, and triage what still fails the same way; programs
+fixed for one check may now fail a later one. Also probe the open
+questions listed in ROADMAP WD "Next" item 1 (SetPriorityClass with
+other mixed values, WriteConsoleA, NtCreateTimer's unknown type, the
+user-callback faults, oleaut32_test and clusapi_test's last call), and
+record each in `user/windows/findings.json` as before.

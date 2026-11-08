@@ -791,7 +791,10 @@ current process, -2 = current thread.
   parent there exits at once.
 - **Priority classes**: NtSetInformationProcess (0x1c) takes
   ProcessPriorityClass only and records it (Get/SetPriorityClass read it
-  back); the scheduler runs every thread alike.
+  back); the scheduler runs every thread alike. SetPriorityClass takes,
+  as Windows does, a value that is no single class but has IDLE's bit as
+  IDLE; 0 is ERROR_INVALID_PARAMETER, other mixes are refused and
+  recorded until Windows' choice for them is measured.
 
 ### Threads
 
@@ -1168,12 +1171,13 @@ limits).
   handover) are charged without a limit (`attach_quota`, `insert_at`).
 - **Limits**, fixed when a process is created: `quota=` on the command
   line (tests), else `paged` a quarter of memory, `nonpaged` an eighth
-  (each at least 16 MiB), and Windows' documented 2^24 handles ("Kernel
-  Objects" on Microsoft Learn). Windows' own default pool quotas are not
+  (each at least 16 MiB), and Windows' 0xff0000 handles (2^24 - 2^16,
+  measured by quota_test on Windows; "Kernel Objects" on Microsoft Learn
+  documents 2^24). Windows' own default pool quotas are not
   documented and not reachable by a test; gala's are chosen from the
   peaks measured below with ample headroom. The handle limit is reached
-  only with a configured one: at 16 bytes an entry, 2^24 handles are
-  256 MiB, more than the pool quota.
+  only with a configured one: at 16 bytes an entry, 0xff0000 handles are
+  255 MiB, more than the pool quota.
 - **Measured peaks** of the largest process (the `quota: most per
   process` and `quota: new most` lines), sockets' buffers included (a
   default socket holds 128 KiB): chromium_https's chrome.exe 175 KiB
@@ -1822,7 +1826,9 @@ around a thread exit's log line.
   functions (WriteConsoleW and friends) also accept any handle the kernel
   reports as FILE_DEVICE_CONSOLE (output if a zero-length write
   succeeds), so programs that write to a character-device stderr with
-  WriteConsoleW (Win32-OpenSSH) are seen.
+  WriteConsoleW (Win32-OpenSSH) are seen. Any other handle fails as on
+  Windows: WriteConsoleW gives ERROR_INVALID_FUNCTION on a pipe and
+  ERROR_INVALID_HANDLE on anything else.
 
 #### Console windows
 
@@ -2486,7 +2492,8 @@ ntdll imports.
   then sleeps on the word with WaitOnAddress (`address_wait.rs`) until
   it changes; whoever changes it in a way waiters wait for wakes them
   (an SRW lock's release to free, the last shared release, InitOnce's
-  end, a condition variable's wake: WakeConditionVariable wakes one
+  end (its callback gets the caller's Context pointer as it is, NULL
+  included, and what the callback left there is the data kept), a condition variable's wake: WakeConditionVariable wakes one
   sleeper, and a waiter not yet asleep sees the counter moved and
   returns, a spurious wake the API allows). A wake with nobody waiting
   costs no system call (the waiter list is in the process). Invariant:

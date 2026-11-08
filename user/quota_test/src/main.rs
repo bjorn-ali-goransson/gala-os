@@ -1,8 +1,8 @@
 //! Pool and handle quotas (ROADMAP R6), with the results real Windows
-//! gives: a process that leaks handles fails at its handle limit (2^24 on
-//! Windows, "Kernel Objects" on Microsoft Learn) with
-//! ERROR_NO_SYSTEM_RESOURCES (STATUS_INSUFFICIENT_RESOURCES: the status is
-//! assumed, Learn documents only the limit); GetProcessHandleCount and
+//! gives: a process that leaks handles fails at its handle limit
+//! (0xff0000 on Windows, measured: 2^24 - 2^16, where "Kernel Objects" on
+//! Microsoft Learn documents 2^24) with ERROR_NO_SYSTEM_RESOURCES
+//! (measured too); GetProcessHandleCount and
 //! NtQueryInformationProcess(ProcessHandleCount) count every handle; the
 //! handle entries are charged to its paged pool quota
 //! (PROCESS_MEMORY_COUNTERS.QuotaPagedPoolUsage); a second process created
@@ -18,7 +18,7 @@
 //! closing them gives the objects' charge back. (Windows' default pool
 //! quotas are not reachable by a test, and a test cannot lower them:
 //! without arguments that part is skipped and the handle limit is
-//! checked to be about 2^24.)
+//! checked to be Windows' 0xff0000.)
 //!
 //! In that mode a completion port's queued packets are charged too:
 //! PostQueuedCompletionStatus without taking fails with
@@ -61,7 +61,9 @@ const DUPLICATE_SAME_ACCESS: u32 = 2;
 const CREATE_SUSPENDED: u32 = 4;
 const ERROR_NO_SYSTEM_RESOURCES: u32 = 1450;
 const ERROR_NOT_ENOUGH_QUOTA: u32 = 1816;
-const WINDOWS_HANDLE_LIMIT: u64 = 1 << 24;
+/// The handle limit real Windows (25H2, build 26200) stops a process at:
+/// 0xff0000 = 2^24 - 2^16, a little under the documented 2^24.
+const WINDOWS_HANDLE_LIMIT: u64 = 0xff_0000;
 /// Duplicates the leak stops at whatever happens (a little over 2^24).
 const MAX_LEAK: usize = (1 << 24) + 4096;
 /// Objects the children create.
@@ -102,6 +104,24 @@ struct ProcessInformation {
     thread: Handle,
     process_id: u32,
     thread_id: u32,
+}
+
+/// A child is ended and its handles closed whichever way the test leaves
+/// (a failed check returns early): a child left suspended would outlive
+/// the test, holding what it inherited (run-all.ps1's output pipe).
+impl Drop for ProcessInformation {
+    fn drop(&mut self) {
+        // SAFETY: the handles CreateProcessW gave (or null, which fails).
+        unsafe {
+            if !self.process.is_null() {
+                TerminateProcess(self.process, 1);
+                CloseHandle(self.process);
+            }
+            if !self.thread.is_null() {
+                CloseHandle(self.thread);
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -154,6 +174,7 @@ unsafe extern "system" {
     fn ResumeThread(h: Handle) -> u32;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
     fn GetExitCodeProcess(h: Handle, code: *mut u32) -> Bool;
+    fn TerminateProcess(h: Handle, code: u32) -> Bool;
     fn ExitProcess(code: u32) -> !;
     fn CreateIoCompletionPort(file: Handle, port: Handle, key: usize, threads: u32) -> Handle;
     fn PostQueuedCompletionStatus(port: Handle, bytes: u32, key: usize, ov: usize) -> Bool;
@@ -586,8 +607,7 @@ fn run() -> Result<(), u32> {
         if gala {
             c.ok(at_limit == handle_limit, at_limit)?;
         } else {
-            c.ok(at_limit <= WINDOWS_HANDLE_LIMIT, at_limit)?;
-            c.ok(at_limit > WINDOWS_HANDLE_LIMIT - (1 << 16), at_limit)?;
+            c.ok(at_limit == WINDOWS_HANDLE_LIMIT, at_limit)?;
         }
         // The entries are charged to the paged pool quota.
         let (paged_full, _) = pool_usage();

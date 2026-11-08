@@ -24,7 +24,9 @@
 //!    (ERROR_TIMEOUT) when it does not change, and wakes on
 //!    WakeByAddressSingle and (two threads) WakeByAddressAll;
 //! 17. CompareObjectHandles: a duplicate is the same object, another handle
-//!    is not (ERROR_NOT_SAME_OBJECT);
+//!    is not (ERROR_NOT_SAME_OBJECT); imported through its API set
+//!    (api-ms-win-core-handle-l1-1-0) as Chromium does: Windows' kernel32
+//!    does not export it (kernelbase does);
 //! 18. FlsGetValue2/TlsGetValue2 read the slot without touching the last
 //!    error;
 //! 19. RtlFormatCurrentUserKeyPath is `\REGISTRY\USER\S-1-5-...`;
@@ -75,6 +77,12 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 type Handle = *mut c_void;
+
+// Not kernel32's: Windows has it in kernelbase, behind this API set.
+#[link(name = "api-ms-win-core-handle-l1-1-0", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn CompareObjectHandles(a: Handle, b: Handle) -> i32;
+}
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -167,7 +175,6 @@ unsafe extern "system" {
         id: *mut u32,
     ) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
-    fn CompareObjectHandles(a: Handle, b: Handle) -> i32;
     fn FlsAlloc(callback: usize) -> u32;
     fn FlsSetValue(i: u32, v: *mut c_void) -> i32;
     fn FlsGetValue2(i: u32) -> *mut c_void;

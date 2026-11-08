@@ -8,7 +8,9 @@
 //!   (shared mode): a waiter woken by another thread; a timeout returns
 //!   FALSE with ERROR_TIMEOUT.
 //! - InitOnceExecuteOnce: the callback runs once, its context is kept; a
-//!   callback that fails leaves the once uninitialized.
+//!   callback that fails leaves the once uninitialized; the callback gets
+//!   the caller's Context pointer as it is, NULL when there is none (on
+//!   Windows a callback writing through it faults).
 //! - Fiber local storage: FlsAlloc/Set/GetValue, a new thread starts with
 //!   null, the callback runs at thread exit and at FlsFree for non-null
 //!   values.
@@ -263,10 +265,18 @@ extern "system" fn signal_srw(_: *mut c_void) -> u32 {
 
 static ONCE_CALLS: AtomicU32 = AtomicU32::new(0);
 
+/// The Context pointer the last once_ok call was given.
+static ONCE_CONTEXT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
 extern "system" fn once_ok(_: *mut usize, param: *mut c_void, context: *mut *mut c_void) -> Bool {
     ONCE_CALLS.fetch_add(1, Ordering::SeqCst);
-    // SAFETY: the context output InitOnceExecuteOnce passes.
-    unsafe { *context = param };
+    ONCE_CONTEXT.store(context as usize, Ordering::SeqCst);
+    // Windows passes the caller's Context as it is: NULL when the caller
+    // gave none (a write through it would fault there).
+    if !context.is_null() {
+        // SAFETY: the caller's context output, passed through.
+        unsafe { *context = param };
+    }
     1
 }
 
@@ -412,6 +422,8 @@ fn init_once(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         c.ok(InitOnceExecuteOnce(&mut once, once_ok, 0x1230 as *mut c_void, &mut context) != 0, 0)?;
         c.eq(context as u64, 0x1230)?;
+        // The callback was given the caller's own Context pointer.
+        c.eq(ONCE_CONTEXT.load(Ordering::SeqCst) as u64, (&raw mut context) as u64)?;
         context = core::ptr::null_mut();
         c.ok(InitOnceExecuteOnce(&mut once, once_ok, 0x4560 as *mut c_void, &mut context) != 0, 0)?;
         c.eq(context as u64, 0x1230)?; // the first context
@@ -432,6 +444,8 @@ fn init_once(c: &mut Checks) -> Result<(), u32> {
                 != 0,
             0,
         )?;
+        // No Context: the callback gets NULL, not a pointer of kernel32's.
+        c.eq(ONCE_CONTEXT.load(Ordering::SeqCst) as u64, 0)?;
         c.eq(ONCE_CALLS.load(Ordering::SeqCst).into(), 3)?;
     }
     Ok(())

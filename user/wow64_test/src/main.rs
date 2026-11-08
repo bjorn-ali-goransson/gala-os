@@ -188,7 +188,7 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     c.eq(read_u32(peb_addr + peb::IMAGE_BASE_ADDRESS).into(), image as u64)?;
     c.eq(read_u32(peb_addr + peb::OS_MAJOR_VERSION).into(), 10)?;
     c.eq(read_u32(peb_addr + peb::OS_MINOR_VERSION).into(), 0)?;
-    c.eq(read_u16(peb_addr + peb::OS_BUILD_NUMBER).into(), 26100)?;
+    c.eq(read_u16(peb_addr + peb::OS_BUILD_NUMBER).into(), os_build().into())?;
     c.eq(read_u32(peb_addr + peb::OS_PLATFORM_ID).into(), VER_PLATFORM_WIN32_NT.into())?;
     let cpus = read_u32(peb_addr + peb::NUMBER_OF_PROCESSORS);
     c.ok(cpus > 0, cpus.into())?;
@@ -804,7 +804,9 @@ fn registry(c: &mut Checks, user: &SidText) -> Result<(), u32> {
     c.eq(sys(NT_QUERY_VALUE_KEY, &args).into(), 0)?;
     c.eq(word(&info, 4).into(), 1)?; // REG_SZ
     c.eq(word(&info, 8).into(), 12)?;
-    c.ok(ends_with(10, info.as_ptr() as usize + 12, "26100"), 0)?;
+    let digits = os_build_digits();
+    let build = core::str::from_utf8(&digits).unwrap_or("");
+    c.ok(ends_with(10, info.as_ptr() as usize + 12, build), 0)?;
     c.eq(close(k).into(), 0)?;
 
     // A volatile key under the user's own (HKCU\Software is not

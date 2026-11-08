@@ -250,6 +250,39 @@ impl Path {
     }
 }
 
+/// Deletes `<temp>gala_k32` and the files in it, if it is there.
+///
+/// # Safety
+/// `temp` is the temporary directory's path, ending with a backslash.
+unsafe fn remove_tree(temp: &[u16]) {
+    let mut find = [0u16; 296]; // WIN32_FIND_DATAW
+    // SAFETY: documented calls with valid buffers.
+    unsafe {
+        let f = FindFirstFileW(Path::new(temp, b"gala_k32\\*").ptr(), find.as_mut_ptr());
+        if f != INVALID_HANDLE_VALUE {
+            loop {
+                let name = &find[22..]; // cFileName at byte 44
+                let len = name.iter().position(|&ch| ch == 0).unwrap_or(0);
+                if !names_eq(&name[..len], b".") && !names_eq(&name[..len], b"..") {
+                    let mut path = Path::new(temp, b"gala_k32\\");
+                    let at = temp.len() + 9;
+                    path.buf[at..at + len].copy_from_slice(&name[..len]);
+                    if find[0] & 0x10 != 0 {
+                        RemoveDirectoryW(path.ptr());
+                    } else {
+                        DeleteFileW(path.ptr());
+                    }
+                }
+                if FindNextFileW(f, find.as_mut_ptr()) == 0 {
+                    break;
+                }
+            }
+            FindClose(f);
+        }
+        RemoveDirectoryW(Path::new(temp, b"gala_k32").ptr());
+    }
+}
+
 fn names_eq(name: &[u16], s: &[u8]) -> bool {
     name.len() == s.len() && name.iter().zip(s).all(|(&a, &b)| a == u16::from(b))
 }
@@ -263,6 +296,11 @@ fn run() -> Result<(), u32> {
         let temp = &temp[..n]; // ends with a backslash
         let dir = Path::new(temp, b"gala_k32");
         let file = Path::new(temp, b"gala_k32\\a.txt");
+
+        // What an earlier run left (one that failed part-way does not get
+        // to its own cleanup) is removed first: the checks start from no
+        // directory.
+        remove_tree(temp);
 
         // Directories.
         c.ok(CreateDirectoryW(dir.ptr(), core::ptr::null_mut()) != 0, 0)?;

@@ -1,6 +1,7 @@
 //! KUSER_SHARED_DATA at 0x7FFE0000 (public layout from Microsoft's
 //! documentation / ntddk.h), with values expected on the pinned build
-//! (Windows 11 24H2, 26100). Prints `kuser_test: ok` or exits with the
+//! (Windows 11 24H2, 26100; the build number may be a newer one, as on a
+//! real machine, and matches the PEB's). Prints `kuser_test: ok` or exits with the
 //! number of the failing check.
 
 #![no_std]
@@ -78,7 +79,12 @@ fn run() -> Result<(), u32> {
     c.eq(u16_at(0x2e).into(), 0x8664)?; // ImageNumberHigh
     c.eq(u32_at(0x26c).into(), 10)?; // NtMajorVersion
     c.eq(u32_at(0x270).into(), 0)?; // NtMinorVersion
-    c.eq(u32_at(0x260).into(), 26100)?; // NtBuildNumber
+    // NtBuildNumber: gala's pinned 26100 or a newer build (a real machine
+    // runs one), five digits; the PEB's OSBuildNumber agrees.
+    let build = u32_at(0x260);
+    c.ok((26100..100_000).contains(&build), build.into())?;
+    // SAFETY: the PEB's OSBuildNumber (+0x120, a u16).
+    c.eq(unsafe { (peb().add(0x120) as *const u16).read() }.into(), build.into())?;
     c.eq(u32_at(0x264).into(), 1)?; // NtProductType = NtProductWinNt
     c.eq(u8_at(0x268).into(), 1)?; // ProductTypeIsValid
     c.eq(u16_at(0x26a).into(), 9)?; // NativeProcessorArchitecture = AMD64

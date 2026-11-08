@@ -87,6 +87,28 @@ const IID_FACTORY: Iid =
     guid(0xb859ee5a, 0xd838, 0x4b5b, [0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48]);
 const IID_LOCAL_LOADER: Iid =
     guid(0xb2d9f3ec, 0xc9fe, 0x4a11, [0xa2, 0xec, 0xd8, 0x62, 0x08, 0xf7, 0xc0, 0xa2]);
+const IID_UNKNOWN: Iid = guid(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+
+/// The test's objects' QueryInterface: themselves for IUnknown and their
+/// own interface, E_NOINTERFACE (and NULL) for anything else. DirectWrite
+/// on Windows asks a custom file loader for its extended interfaces
+/// (IDWriteRemoteFontFileLoader) and calls their methods when told yes,
+/// past the end of a vtable that has only IDWriteFontFileLoader's.
+///
+/// # Safety
+/// `iid` and `out` are the caller's, as QueryInterface's contract has them.
+unsafe fn query(this: *mut c_void, own: &Iid, iid: *const Iid, out: *mut *mut c_void) -> HResult {
+    // SAFETY: the caller's IID and output.
+    unsafe {
+        if *iid == IID_UNKNOWN || *iid == *own {
+            *out = this;
+            0
+        } else {
+            *out = core::ptr::null_mut();
+            0x8000_4002_u32 as i32 // E_NOINTERFACE
+        }
+    }
+}
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -189,10 +211,12 @@ mod sink {
         }
     }
 
-    extern "system" fn qi(this: *mut c_void, _iid: *const Iid, out: *mut *mut c_void) -> HResult {
-        // SAFETY: the caller's output.
-        unsafe { *out = this };
-        0
+    /// ID2D1SimplifiedGeometrySink (IDWriteGeometrySink is the same).
+    const IID_SINK: Iid =
+        super::guid(0x2cd9069e, 0x12e2, 0x11dc, [0x9f, 0xed, 0x00, 0x11, 0x43, 0xa0, 0x55, 0xf9]);
+    extern "system" fn qi(this: *mut c_void, iid: *const Iid, out: *mut *mut c_void) -> HResult {
+        // SAFETY: QueryInterface's arguments.
+        unsafe { super::query(this, &IID_SINK, iid, out) }
     }
     extern "system" fn add_ref(_: *mut c_void) -> u32 {
         1
@@ -293,10 +317,27 @@ mod custom {
         (&raw const COLLECTION_LOADER).cast_mut().cast()
     }
 
-    extern "system" fn qi(this: *mut c_void, _iid: *const Iid, out: *mut *mut c_void) -> HResult {
-        // SAFETY: the caller's output.
-        unsafe { *out = this };
-        0
+    const IID_FILE_LOADER: Iid =
+        super::guid(0x727cad4e, 0xd6af, 0x4c9e, [0x8a, 0x08, 0xd6, 0x95, 0xb1, 0x1c, 0xaa, 0x49]);
+    const IID_STREAM: Iid =
+        super::guid(0x6d4865fe, 0x0ab8, 0x4d91, [0x8f, 0x62, 0x5d, 0xd6, 0xbe, 0x34, 0xa3, 0xe0]);
+    const IID_COLLECTION_LOADER: Iid =
+        super::guid(0xcca920e4, 0x52f0, 0x492b, [0xbf, 0xa8, 0x29, 0xc7, 0x2e, 0xe0, 0xa4, 0x68]);
+    const IID_ENUMERATOR: Iid =
+        super::guid(0x72755049, 0x5ff7, 0x435d, [0x83, 0x48, 0x4b, 0xe9, 0x7c, 0xfa, 0x6c, 0x7c]);
+    /// Each object's own interface; QueryInterface answers it and IUnknown.
+    extern "system" fn qi(this: *mut c_void, iid: *const Iid, out: *mut *mut c_void) -> HResult {
+        let own = if this == (&raw const FILE_LOADER).cast_mut().cast() {
+            &IID_FILE_LOADER
+        } else if this == (&raw const STREAM).cast_mut().cast() {
+            &IID_STREAM
+        } else if this == (&raw const COLLECTION_LOADER).cast_mut().cast() {
+            &IID_COLLECTION_LOADER
+        } else {
+            &IID_ENUMERATOR
+        };
+        // SAFETY: QueryInterface's arguments.
+        unsafe { super::query(this, own, iid, out) }
     }
     extern "system" fn add_ref(_: *mut c_void) -> u32 {
         1

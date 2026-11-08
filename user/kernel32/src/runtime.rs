@@ -728,8 +728,19 @@ pub extern "system" fn SetPriorityClass(process: Handle, class: u32) -> Bool {
         unsupported(b"kernel32.dll!SetPriorityClass(background mode)", class.into());
         return fail_with(super::ERROR_NOT_SUPPORTED, 0);
     }
-    let Some(&(_, nt)) = PRIORITY_CLASSES.iter().find(|&&(win32, _)| win32 == class) else {
-        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    let exact = PRIORITY_CLASSES.iter().find(|&&(win32, _)| win32 == class);
+    // A value that is no single class: Windows takes one with IDLE's bit
+    // (0x12345, 0xffffffff) as IDLE. Which class wins for other mixes of
+    // bits is not known yet (ROADMAP WD); those stay refused, recorded.
+    let nt = match exact {
+        Some(&(_, nt)) => nt,
+        None if class & 0x40 != 0 => 1,
+        None => {
+            if class != 0 {
+                unsupported(b"kernel32.dll!SetPriorityClass(mixed class bits)", class.into());
+            }
+            return fail_with(ERROR_INVALID_PARAMETER, 0);
+        }
     };
     let info = [0u8, nt];
     // SAFETY: our buffer of the given size.

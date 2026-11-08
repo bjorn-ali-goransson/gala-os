@@ -9,6 +9,9 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use ntrt::*;
 
+/// What Windows' NtCreateEvent returns for an unknown EventType.
+const STATUS_INVALID_PARAMETER: NtStatus = 0xc000_000d;
+
 /// The event the `released` workers wait on, and their wait statuses.
 static SHARED_EVENT: AtomicUsize = AtomicUsize::new(0);
 static RELEASED: [AtomicU32; 2] = [const { AtomicU32::new(u32::MAX) }; 2];
@@ -78,7 +81,7 @@ fn run() -> Result<(), u32> {
     c.same(query_event(auto), (STATUS_SUCCESS, SYNCHRONIZATION_EVENT, 0))?;
 
     // Bad event type.
-    c.eq(create_event(EVENT_ALL_ACCESS, 2, false).0, STATUS_INVALID_PARAMETER_4)?;
+    c.eq(create_event(EVENT_ALL_ACCESS, 2, false).0, STATUS_INVALID_PARAMETER)?; // not _4
 
     // Access is checked per handle.
     let (st, sync_only) = create_event(SYNCHRONIZE, NOTIFICATION_EVENT, false);
