@@ -509,14 +509,16 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 }
 
 /// The end of the boot thread's work: QEMU exits with `code` (`qemu_exit`),
-/// else the CPU idles.
+/// else the boot thread ends and its CPU runs its idle thread. (A boot
+/// thread that halted in a loop instead stayed "in the kernel without
+/// blocking" forever: the flight recorder's watchdog reported it every
+/// 20 s and its reports pushed every real event out of the ring.)
 fn stop(code: QemuExitCode) -> ! {
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(code);
     }
-    loop {
-        arch::cpu::enable_interrupts_and_halt();
-    }
+    info!("boot: the boot thread's work is done; it ends");
+    sched::exit()
 }
 
 /// Raises the disk's rollback floor to the verified manifest's (R8).

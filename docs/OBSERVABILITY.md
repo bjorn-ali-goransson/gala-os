@@ -389,7 +389,11 @@ watchdog report and in the state dump.
   in user mode or a voluntary yield (a polling wait); blocking restarts
   the count when the thread runs again (a long wait is not time in the
   kernel); preemption is not progress. Scenario `kernel_watchdog`
-  (`spintest` spins the boot thread 25 s).
+  (`spintest` spins the boot thread 25 s). A kernel thread with nothing
+  more to do ends (`sched::exit`) rather than halting in a loop, which
+  the watchdog would rightly count as time in the kernel: the boot
+  thread ends after `gala: boot ok` when there is no `qemu_exit`, so an
+  idle machine reports nothing.
 
 ### State dump
 
