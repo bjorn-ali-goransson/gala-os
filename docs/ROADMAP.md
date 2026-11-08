@@ -92,9 +92,11 @@ In order:
 9. **SSH**: the client against the host's sshd, agent forwarding;
    **H11**: busybox-w32's httpd and wget over loopback (the Linux
    busybox's run: `lx_httpd`).
-10. **PT**: the portability seams for a second architecture (the owner:
+10. **LN**: lints before every commit (the owner: quality built in
+    before committing); first, as each class it catches recurs.
+11. **PT**: the portability seams for a second architecture (the owner:
     the ARM64 port itself later), when the machine is free.
-11. **Last, once everything above is done** (the owner): a performance
+12. **Last, once everything above is done** (the owner): a performance
     profile on a real Windows machine, then optimization. The same
     workloads (the scenarios' programs, `bench`, Chromium's page loads,
     Python) are profiled on Windows (Windows Performance Recorder/WPA,
@@ -131,6 +133,7 @@ has a section under "Open items".
 | U4 | gala-um: more than one NT process | planned | child processes and `start=`; GALA_UM "Limits and open questions" |
 | U5 | gala-um: a window on the host | planned | the desktop in a host window (X11/Wayland), with its input; headless in um-test |
 | U6 | Windows applications in CI through gala-um | planned | a Windows app and its FlaUI tests headless in a stock GitHub Actions runner; needs U4 and U5 |
+| LN | Lints before every commit | planned | `cargo xtask lint` from a committed pre-commit hook: architecture code, check-then-sleep, split atomic operations, hard-coded answers |
 | PT | Portability seams for a second architecture | in progress | the audit done (by seam: the register model, the clock and timer, boot, x86-only by nature, user mode); the ARM64 port itself is in "Later" |
 | HS | Hygiene sweeps | parked | first sweep and its four leftovers done; no further sweeps until gala runs live (the owner) |
 
@@ -322,6 +325,39 @@ decision, not yet taken; step 5 waits on it.
 
 **Design**: GALA_UM.md ("How a Windows program runs inside a Linux
 process", "Limits and open questions"); ARCHITECTURE "UI Automation".
+
+### LN. Lints before every commit
+
+**Goal** (the owner): the classes of defect we have had are caught
+before a commit exists, by checks that fail on the pattern itself, not
+on its symptom hours later. One entry point, `cargo xtask lint`, run by
+a committed git pre-commit hook (`core.hooksPath` to a tracked `hooks/`
+directory, set by xtask on first use), so every commit (a session's or
+a sub-agent's) passes through it; also what `cargo xtask test` runs
+first.
+
+**Next** (each lint with a test of its own: a fixture that must be
+flagged and one that must not):
+1. The entry point and the hook: fmt, the clippy lines ci.yml lists,
+   the `SAFETY:` and fallible-allocation checks there are today.
+2. Architecture code only in `kernel/src/arch`: the kernel's clippy
+   for `aarch64-unknown-none` (item PT).
+3. No check-then-sleep: every kernel wait through one primitive that
+   registers the waiter before it tests its condition; the raw waits
+   banned elsewhere (`disallowed_methods` in `kernel/clippy.toml`, as
+   infallible allocation is). A debug-build watchdog alongside: a
+   pending request (an AFD poll or select, a pipe read or listen, a
+   keyed-event wait) whose condition already holds is reported as a
+   lost wake-up.
+4. No documented-atomic operation split across calls: in gala's DLLs a
+   call to `NtClearEvent`, `NtResetEvent` or `NtSetEvent` right after a
+   kernel request doing the same job is flagged (WSAEnumNetworkEvents
+   reset its event after the kernel's copy and lost connects); a site
+   that needs it says why.
+5. No hard-coded answers: `stub_audit` flags functions and match arms
+   that return a constant without reading anything (`SO_ERROR => 0`
+   hid refused connects), unless a comment names the documented
+   constant.
 
 ### PT. Portability seams for a second architecture
 
