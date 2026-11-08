@@ -1864,8 +1864,8 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   rt_sigtimedwait, rt_sigreturn; SIGPIPE from a pipe with no reader;
   delivery on the way back from a system call (default actions, SIG_IGN,
   handlers on an rt_sigframe with SA_RESTORER, SA_RESTART for
-  read/write/wait4). fork (and clone with only SIGCHLD) with an eagerly
-  copied address space, wait4, SIGCHLD at the child's end. Scenario
+  read/write/wait4). fork (and clone with only SIGCHLD) with a
+  copy-on-write address space, wait4, SIGCHLD at the child's end. Scenario
   `lx_pipe` matches pipe_test's transcript exactly.
 - Milestone 2's static busybox runs: busybox.net's static musl build
   (a `PREBUILT`, run only in gala) runs a shell script of pipelines,

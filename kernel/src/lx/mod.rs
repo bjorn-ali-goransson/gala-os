@@ -29,8 +29,8 @@
 //!   and the handler's frame (plain data, host-tested), on
 //!   `lx_abi::signal`'s layouts; [`sigcalls`]: the signal system calls,
 //!   SIGPIPE, and delivery on the way back from a system call.
-//! - [`fork`]: fork (clone as a fork) with a copied address space, and
-//!   wait4.
+//! - [`fork`]: fork (clone as a fork) with a copy-on-write copy of the
+//!   address space, and wait4.
 //! - [`file`]: files and directories on the shared file system: Linux
 //!   paths, open file descriptions, the stat family, getdents64, mkdir,
 //!   unlink, rename, chdir/getcwd, umask; [`exec`]'s execve (with `#!`
