@@ -690,6 +690,17 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   STATUS_DATATYPE_MISALIGNMENT for a `[u8; 4]` at an odd address); and
   `cmd /c` with more than two quotes strips the first and the last, so
   such a line is wrapped in one more pair.
+- **A test that needs what an ordinary user lacks** (the `galatest`
+  account, an administrator, SYSTEM) checks for it with a real query
+  (LookupAccountNameW's ERROR_NONE_MAPPED, TokenElevation, TokenUser,
+  CheckTokenMembership) and without it prints one line `<test>: skipped
+  (<reason>)` and exits 0; never a guess from an error alone. gala's
+  scenario provides it (`as=system`, the account), so there the test runs
+  whole. What only gala has (its Gala* services, gala.exe, `C:\gala`)
+  runs only when `ntrt::on_gala()` (kernel32 tests ask GetProcAddress for
+  ntdll's GalaConsoleCreate): on Windows gala's private service numbers
+  have bit 12 set, reach win32k's table, and the first call faults
+  (STATUS_FATAL_USER_CALLBACK_EXCEPTION), so a status check comes too late.
 - **testntdll is gala's stand-in ntdll**, shipped only in scenarios that
   list it in `EXTRA_MODULES`: a small loader (LdrLoadDll and friends),
   the exception/APC dispatchers and the stubs. Adding an export there

@@ -357,6 +357,9 @@ fn is_child() -> bool {
     s.ends_with(&w::<5>("child"))
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -364,7 +367,13 @@ fn run() -> Result<(), u32> {
     unsafe {
         let mut mine = null;
         c.ok(OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut mine) != 0, 0)?;
-        c.ok(member(null, &ADMINS) == Some(true), last_error())?;
+        // An ordinary user's run says "skipped" (gala's scenario starts it
+        // as SYSTEM, an administrator: `as=system`).
+        let admin = member(null, &ADMINS);
+        if admin == Some(false) {
+            return Err(SKIPPED);
+        }
+        c.ok(admin == Some(true), last_error())?;
         // A primary token is not an impersonation token.
         let mut is = 0;
         c.eq(CheckTokenMembership(mine, ADMINS.as_ptr(), &mut is) as u64, 0)?;
@@ -575,6 +584,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let code = match run() {
         Ok(()) => {
             out(b"restricted_test: ok\r\n");
+            0
+        }
+        Err(SKIPPED) => {
+            out(b"restricted_test: skipped (needs an elevated administrator)\r\n");
             0
         }
         Err(id) => id,

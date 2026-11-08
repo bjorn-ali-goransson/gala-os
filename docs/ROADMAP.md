@@ -1651,6 +1651,19 @@ error (shell32_test); SymFromAddr's export-table symbol has ModBase 0
 and SizeOfStruct must be 88 (dbghelp_test; Windows' Size, 112, is not
 asserted: gala cannot know it from the exports).
 
+Done (Round 5, the tests' own bugs): what needs a precondition an
+ordinary user lacks checks for it and says "skipped" without it (exit
+0), while gala's scenarios give it and run the test whole: the galatest
+account (access_test, logon_test, profile_test: LookupAccountNameW's
+ERROR_NONE_MAPPED), SYSTEM (system_test, session_test: TokenUser), an
+administrator (restricted_test: CheckTokenMembership; disk_test and
+wow64_adv_test's registry view: ERROR_ACCESS_DENIED with TokenElevation
+0); what is gala's own runs only on gala (`ntrt::on_gala`, now on x64 too:
+clock_test, handover_test, handover_k32_test and gala_cli_test,
+pk_install_test whole, handover_net_test's `handover` line), since gala's
+service numbers reach win32k's table on Windows and fault
+(STATUS_FATAL_USER_CALLBACK_EXCEPTION, Round 5's three crashes).
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
@@ -1660,9 +1673,6 @@ Next:
    - the not-yet-probed checks in `triage.md` (75 programs classed
      "expectation" without a probe), most numerous first: the kernel32
      tests, then user32/gdi32/comctl32/shell32/shlwapi;
-   - clock_test and handover_k32_test's STATUS_FATAL_USER_CALLBACK_EXCEPTION
-     (both fault at the same ntdll address in a user callback): which
-     call of theirs makes Windows call back into the process;
    - clusapi_test (resutils.dll faults, no cluster installed): the call
      it makes last (it prints nothing first: a line per step would
      tell);
@@ -1700,11 +1710,12 @@ Next:
      of its own);
      persist_test needs run-all.ps1 to remove C:\persist and
      HKCU\Software\GalaPersist and run it twice, judging the second run.
-2. The tests that need a setting run-all.ps1 cannot give: system_test
-   (LocalSystem), session_test, restricted_test (an administrator), the
-   galatest account's tests (access, logon, profile, disk, lsa): run-all
-   gets a way to run those (psexec-like as SYSTEM, elevated, the account
-   created) or they say "skipped" with the reason, as presenter_test.
+2. The tests that need a setting run-all.ps1 cannot give say "skipped"
+   without it (system_test, session_test: SYSTEM; restricted_test,
+   disk_test, wow64_adv_test's view: an administrator; access, logon,
+   profile, lsa: the galatest account or SeTcbPrivilege): run-all gets a
+   way to run them for real (psexec-like as SYSTEM, elevated, the account
+   created).
 3. run-all.ps1's `fault` field: it reads Windows Error Reporting's
    event 1000, which SEM_NOGPFAULTERRORBOX (set by the runner) prevents;
    `user/windows/fault.py`, which debugs the program, gives the same

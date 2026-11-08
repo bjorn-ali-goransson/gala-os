@@ -378,6 +378,31 @@ fn granted(h: Handle) -> u64 {
     u64::from(b[1])
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
+/// Whether the second local account `galatest` is absent
+/// (LookupAccountNameW fails with ERROR_NONE_MAPPED): a machine not set up
+/// for this test, where it says "skipped" (gala's scenarios have it).
+fn galatest_missing() -> bool {
+    let (mut sid, mut domain) = ([0u8; 68], [0u16; 64]);
+    let (mut sid_size, mut domain_size, mut kind) = (68u32, 64u32, 0u32);
+    let name = w("galatest");
+    // SAFETY: our buffers and their sizes.
+    unsafe {
+        LookupAccountNameW(
+            core::ptr::null(),
+            name.p(),
+            sid.as_mut_ptr(),
+            &mut sid_size,
+            domain.as_mut_ptr(),
+            &mut domain_size,
+            &mut kind,
+        ) == 0
+            && GetLastError() == 1332
+    }
+}
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -386,10 +411,12 @@ fn run() -> Result<(), u32> {
         // LogonUserW.
         let (user, dot) = (w("galatest"), w("."));
         let mut test = null;
-        c.ok(
-            LogonUserW(user.p(), dot.p(), w("Gala-Test-1").p(), 2, 0, &mut test) != 0,
-            last_error(),
-        )?;
+        let logged_on = LogonUserW(user.p(), dot.p(), w("Gala-Test-1").p(), 2, 0, &mut test) != 0;
+        let error = last_error();
+        if !logged_on && galatest_missing() {
+            return Err(SKIPPED);
+        }
+        c.ok(logged_on, error)?;
         let mut nothing = null;
         c.fails(
             LogonUserW(user.p(), dot.p(), w("wrong").p(), 2, 0, &mut nothing) == 0,
@@ -615,6 +642,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let code = match run() {
         Ok(()) => {
             out(b"access_test: ok\r\n");
+            0
+        }
+        Err(SKIPPED) => {
+            out(b"access_test: skipped (needs the galatest account)\r\n");
             0
         }
         Err(id) => id,

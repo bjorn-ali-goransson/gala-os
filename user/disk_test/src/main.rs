@@ -79,6 +79,7 @@ unsafe extern "system" {
     fn GetLastError() -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn ExitProcess(code: u32) -> !;
+    fn GetCurrentProcess() -> Handle;
 }
 
 // The compiler's memcpy/memset/memcmp, from ntdll.
@@ -102,6 +103,14 @@ unsafe extern "system" {
     ) -> Bool;
     fn ImpersonateLoggedOnUser(token: Handle) -> Bool;
     fn RevertToSelf() -> Bool;
+    fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> Bool;
+    fn GetTokenInformation(
+        token: Handle,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        returned: *mut u32,
+    ) -> Bool;
 }
 
 const GENERIC_READ: u32 = 0x8000_0000;
@@ -381,6 +390,25 @@ fn scratch_disk(disk: Handle) -> bool {
     seek(disk, 0, FILE_BEGIN) == Some(0) && marked
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
+/// TokenElevation of the process's token: whether it runs elevated (None
+/// when the query fails).
+fn elevated() -> Option<bool> {
+    let mut token = core::ptr::null_mut();
+    let (mut elevation, mut n) = (0u32, 0u32);
+    // SAFETY: plain calls; a 4-byte TOKEN_ELEVATION.
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), 0x8, &mut token) == 0 {
+            return None;
+        }
+        let ok = GetTokenInformation(token, 20, (&raw mut elevation).cast(), 4, &mut n) != 0;
+        CloseHandle(token);
+        ok.then_some(elevation != 0)
+    }
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let name: [u16; 20] = wide("\\\\.\\PhysicalDrive0");
@@ -392,7 +420,13 @@ fn run() -> Result<(), u32> {
         let none = core::ptr::null_mut();
         let disk =
             CreateFileW(name.as_ptr(), access, share, core::ptr::null(), OPEN_EXISTING, 0, none);
-        c.ok(disk as isize != -1, last_error())?;
+        let error = last_error();
+        // A standard user may not open the disk: that run says "skipped"
+        // (gala's scenario runs it as SYSTEM).
+        if disk as isize == -1 && error == ERROR_ACCESS_DENIED && elevated() == Some(false) {
+            return Err(SKIPPED);
+        }
+        c.ok(disk as isize != -1, error)?;
         if !scratch_disk(disk) {
             out(b"disk_test: refused: PhysicalDrive0 is not xtask's 16 MiB scratch disk\r\n");
             CloseHandle(disk);
@@ -438,6 +472,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let code = match run() {
         Ok(()) => {
             out(b"disk_test: ok\r\n");
+            0
+        }
+        Err(SKIPPED) => {
+            out(b"disk_test: skipped (needs an administrator)\r\n");
             0
         }
         Err(id) => id,

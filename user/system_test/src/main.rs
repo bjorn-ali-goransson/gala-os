@@ -275,6 +275,9 @@ fn is_child() -> bool {
     }
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
 fn run() -> Result<(), u32> {
     let c = Checks(core::cell::Cell::new(0));
     let null = core::ptr::null_mut();
@@ -284,7 +287,11 @@ fn run() -> Result<(), u32> {
         c.ok(OpenProcessToken(GetCurrentProcess(), 0x8 | 0x20, &mut token) != 0, last_error())?;
         let mut b = Buf([0; 1024]);
         c.ok(query(token, 1, &mut b), last_error())?;
-        c.ok(EqualSid(first_sid(&b), SYSTEM.as_ptr()) != 0, 0)?;
+        // An ordinary user's run says "skipped" (gala's scenario starts it
+        // as SYSTEM: `as=system`).
+        if EqualSid(first_sid(&b), SYSTEM.as_ptr()) == 0 {
+            return Err(SKIPPED);
+        }
         // LocalSystem is a user account (SidTypeUser): Win32-OpenSSH's
         // getpwuid accepts only SidTypeUser accounts, and sshd runs as
         // SYSTEM on Windows.
@@ -425,6 +432,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let code = match run() {
         Ok(()) => {
             out(b"system_test: ok\r\n");
+            0
+        }
+        Err(SKIPPED) => {
+            out(b"system_test: skipped (needs SYSTEM)\r\n");
             0
         }
         Err(id) => id,

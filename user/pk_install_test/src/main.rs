@@ -65,6 +65,7 @@ struct SecurityAttributes {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetModuleHandleA(name: *const u8) -> Handle;
     fn GetLastError() -> u32;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
@@ -1394,8 +1395,25 @@ fn has_arg(word: &str) -> bool {
     }
 }
 
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+/// Elsewhere gala's own services are not called: their numbers would reach
+/// Windows' win32k table and the first call faults.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
+    if !on_gala() {
+        out(b"pk_install_test: skipped (gala install is gala's own)\r\n");
+        // SAFETY: ends the process.
+        unsafe { ExitProcess(0) }
+    }
     let result = if has_arg("nsis") {
         nsis_test()
     } else if has_arg("https") {

@@ -394,8 +394,8 @@ pub const CLOCK_FROZEN: u32 = 1;
 pub const CLOCK_SIMULATED: u32 = 2;
 
 /// GalaClockControl(Operation, A, B, *State): gala's test-only clock
-/// control (a boot with `clock=control`); STATUS_INVALID_SYSTEM_SERVICE on
-/// Windows.
+/// control (a boot with `clock=control`). Gala's only: call it only when
+/// [`on_gala`] (on Windows the number reaches win32k's table and faults).
 pub fn clock_control(operation: u32, a: i64, b: i64) -> (NtStatus, ClockState) {
     let mut state = ClockState::default();
     // SAFETY: a valid output record.
@@ -405,7 +405,7 @@ pub fn clock_control(operation: u32, a: i64, b: i64) -> (NtStatus, ClockState) {
 /// GalaRequestHandover(): asks gala for a kernel handover (test-only, a
 /// boot with `handover=`; ROADMAP R9): it happens once every thread of
 /// every program is blocked in a wait. STATUS_ACCESS_DENIED without
-/// `handover=`, STATUS_INVALID_SYSTEM_SERVICE on Windows.
+/// `handover=`. Gala's only: call it only when [`on_gala`].
 pub fn request_handover() -> NtStatus {
     // SAFETY: no arguments.
     unsafe { ntrt_gala_request_handover() }
@@ -1696,6 +1696,16 @@ pub fn ntdll_export(name: &[u8]) -> Option<usize> {
         NTDLL.store(base, Ordering::Relaxed);
     }
     if base == 1 { None } else { find_export(base, name) }
+}
+
+/// Whether this runs on gala: no ntdll is mapped (gala's bare kernel, a
+/// scenario that ships none), or the one mapped is gala's (it exports its
+/// Gala* services, GalaConsoleCreate among them). Tests skip what only gala
+/// has (its private services, gala.exe, `C:\gala`) elsewhere, with a
+/// `<test>: skipped (<reason>)` line: on Windows gala's service numbers
+/// reach the win32k table and the first call faults.
+pub fn on_gala() -> bool {
+    find_ntdll().is_none_or(|base| find_export(base, b"GalaConsoleCreate").is_some())
 }
 
 /// The base of the image mapped from `...\System32\ntdll.dll`, found by

@@ -482,6 +482,22 @@ fn registry(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// TokenElevation of the process's token: whether it runs elevated (None
+/// when the query fails).
+fn elevated() -> Option<bool> {
+    let mut token = 0;
+    let (mut elevation, mut n) = (0u32, 0u32);
+    // SAFETY: plain calls; a 4-byte TOKEN_ELEVATION.
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), 0x8, &mut token) == 0 {
+            return None;
+        }
+        let ok = GetTokenInformation(token, 20, (&raw mut elevation).cast(), 4, &mut n) != 0;
+        CloseHandle(token);
+        ok.then_some(elevation != 0)
+    }
+}
+
 /// The registry's 32-bit view: HKLM\SOFTWARE is WOW6432Node's for a
 /// 32-bit program; KEY_WOW64_64KEY and KEY_WOW64_32KEY choose.
 fn registry_view(c: &mut Checks) -> Result<(), u32> {
@@ -502,6 +518,12 @@ fn registry_view(c: &mut Checks) -> Result<(), u32> {
             &mut key,
             &mut disposition,
         );
+        // A standard user may not create keys under HKLM\SOFTWARE: that
+        // run skips the view's checks (gala's scenario is an administrator).
+        if r == 5 && elevated() == Some(false) {
+            print(b"wow64_adv_test: registry_view: skipped (needs an administrator)\r\n");
+            return Ok(());
+        }
         c.eq(r as u32, 0)?;
         c.eq(disposition, REG_CREATED_NEW_KEY)?;
         let name = wide("bits");

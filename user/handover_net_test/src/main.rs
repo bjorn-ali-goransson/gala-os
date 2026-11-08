@@ -31,7 +31,7 @@
 //! loopback (127.0.0.1:7), so the program also runs alone, on Windows
 //! (user/bin/run-all.ps1) and in the `handover_net_self` scenario: the
 //! answer to `handover` is then `<n> handover skipped (not gala)` on
-//! Windows (GalaRequestHandover is not a system service there) or
+//! Windows (GalaRequestHandover is gala's own: not called there) or
 //! `<n> handover skipped (none allowed)` on gala without `handover=`, and
 //! the rest is the same. Prints `handover_net_test: ok` or exits with the
 //! number of the failing check.
@@ -46,6 +46,8 @@ type Socket = usize;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> i32;
     fn ExitProcess(code: u32) -> !;
@@ -156,7 +158,6 @@ const IPPROTO_UDP: i32 = 17;
 const INVALID_SOCKET: Socket = !0;
 const PORT: u16 = 7;
 const CONNECTIONS: u32 = 3;
-const STATUS_INVALID_SYSTEM_SERVICE: u32 = 0xc000_001c;
 const STATUS_ACCESS_DENIED: u32 = 0xc000_0022;
 
 fn out(text: &[u8]) {
@@ -305,11 +306,14 @@ fn serve(s: Socket, udp: Socket, count: &mut u64) -> Result<u64, u32> {
             put(b" ");
             let bye = line == b"bye";
             if line == b"handover" {
-                put(match request_handover() {
-                    0 => b"handover requested",
-                    STATUS_INVALID_SYSTEM_SERVICE => b"handover skipped (not gala)",
-                    STATUS_ACCESS_DENIED => b"handover skipped (none allowed)",
-                    _ => b"handover failed",
+                put(if !on_gala() {
+                    b"handover skipped (not gala)"
+                } else {
+                    match request_handover() {
+                        0 => b"handover requested",
+                        STATUS_ACCESS_DENIED => b"handover skipped (none allowed)",
+                        _ => b"handover failed",
+                    }
                 });
             } else if line == b"udp" {
                 put(b"udp ");
@@ -600,6 +604,18 @@ fn run() -> Result<(), u32> {
         }
     }
     Ok(())
+}
+
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+/// Elsewhere gala's own services are not called: their numbers would reach
+/// Windows' win32k table and the first call faults.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
 }
 
 #[unsafe(no_mangle)]

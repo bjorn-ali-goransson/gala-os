@@ -6,8 +6,8 @@
 //! waits already in progress.
 //!
 //! The service is gala's own, so the expected results are gala's spec
-//! (ARCHITECTURE), not Windows': on Windows the call is an unknown system
-//! service and the test reports itself skipped (exit 0).
+//! (ARCHITECTURE), not Windows': elsewhere (`ntrt::on_gala`) the test
+//! does not call it and reports itself skipped (exit 0).
 //!
 //! Arguments: none (booted with `clock=control`), `off` (booted without
 //! it: the service answers STATUS_NOT_SUPPORTED), `boot` (booted with
@@ -352,10 +352,12 @@ fn last_arg_is(word: &str) -> bool {
 
 fn run() -> Result<&'static str, u32> {
     let mut c = Checks(0);
-    let (st, _) = clock_control(CLOCK_QUERY, 0, 0);
-    if st == STATUS_INVALID_SYSTEM_SERVICE {
-        return Ok("skipped (no gala clock control)");
+    // Not on gala: the service's number would reach Windows' win32k table
+    // (the first call faults, STATUS_FATAL_USER_CALLBACK_EXCEPTION).
+    if !on_gala() {
+        return Ok("skipped (GalaClockControl is gala's own)");
     }
+    let (st, _) = clock_control(CLOCK_QUERY, 0, 0);
     if last_arg_is("off") {
         c.eq(st.into(), STATUS_NOT_SUPPORTED.into())?;
         return Ok("ok (off)");
