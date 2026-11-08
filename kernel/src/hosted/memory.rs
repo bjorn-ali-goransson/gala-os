@@ -340,6 +340,19 @@ impl UserSpace {
         self.pages.get(&(virt / PAGE_SIZE * PAGE_SIZE)).map(|p| (p.frame, p.borrowed))
     }
 
+    /// Moves the page at `from` to `to` (unmapped) with its frame and
+    /// flags (the kernel's `move_page`). Returns whether `from` was mapped.
+    pub fn move_page(&mut self, from: u64, to: u64) -> Result<bool, PagingError> {
+        let from = from / PAGE_SIZE * PAGE_SIZE;
+        let to = check_user(to)?;
+        let Some(p) = self.pages.get(&from) else { return Ok(false) };
+        let moved = Page { frame: p.frame, flags: p.flags, borrowed: p.borrowed };
+        self.insert(to, moved)?;
+        self.pages.remove(&from);
+        unmap(from);
+        Ok(true)
+    }
+
     pub fn map_private_copy(
         &mut self,
         virt: u64,

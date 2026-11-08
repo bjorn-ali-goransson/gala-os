@@ -402,6 +402,25 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["busybox"],
         excludes: &[],
     },
+    // glibc 2.39 as Ubuntu 24.04 (noble) ships it: the libc6 package of
+    // the release pocket (2.39-0ubuntu8, never changed once released;
+    // the SHA-256 is the one we measured, Ubuntu signs the archive's
+    // index, not the .deb: THIRD_PARTY.md). A Debian package (an ar
+    // archive) unpacked with dpkg-deb; its members moved here by their
+    // file names. The program interpreter, libc and libm that dynamically
+    // linked Linux programs (user/lx's GLIBC_TESTS) load (ROADMAP LD);
+    // they run only inside gala.
+    Prebuilt {
+        name: "glibc",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.39-0ubuntu8_amd64.deb",
+        checksum: "af36c7ac770770fe3d3c10e85d6bc538e76e57570ba7db7d397fb9f654783ef3",
+        members: &[
+            "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "usr/lib/x86_64-linux-gnu/libc.so.6",
+            "usr/lib/x86_64-linux-gnu/libm.so.6",
+        ],
+        excludes: &[],
+    },
     // Inno Setup 7.1.1's own installer, x64 edition (jrsoftware.org's
     // GitHub release; the SHA-256 is winget-pkgs' JRSoftware.InnoSetup.7
     // 7.1.1 manifest's): an Inno Setup installer built with
@@ -1090,6 +1109,19 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_epoll_pie", "user/lx/bin/epoll_test-pie", "lx"),
     ("lx_fs", "user/lx/bin/fs_test", "lx"),
     ("lx_fs_pie", "user/lx/bin/fs_test-pie", "lx"),
+    // Dynamically linked glibc programs (ROADMAP LD): the program and its
+    // libraries in C:\lx, glibc where Ubuntu's ld.so looks for it (its
+    // system directory, and /lib64 as PT_INTERP names it).
+    ("lx_dyn", "user/lx/bin/dyn_test", "lx"),
+    ("lx_dyn", "user/lx/bin/libdyn.so", "lx"),
+    ("lx_dyn", "user/lx/bin/libdyn2.so", "lx"),
+    ("lx_dyn_pie", "user/lx/bin/dyn_test-pie", "lx"),
+    ("lx_dyn_pie", "user/lx/bin/libdyn.so", "lx"),
+    ("lx_dyn_pie", "user/lx/bin/libdyn2.so", "lx"),
+    ("glibc", "target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib64"),
+    ("glibc", "target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib/x86_64-linux-gnu"),
+    ("glibc", "target/prebuilt/glibc/libc.so.6", "lib/x86_64-linux-gnu"),
+    ("glibc", "target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -3410,6 +3442,8 @@ fn fetch_prebuilt(path: &str) -> Result {
         fs::rename(&zip, &to).map_err(|e| format!("moving {zip:?} to {to:?}: {e}"))?;
     } else if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
+    } else if p.url.ends_with(".deb") {
+        unpack_deb(p, &zip, &dir)?;
     } else if p.url.ends_with(".7z.exe") || p.url.ends_with("-setup.exe") || chocolatey {
         // A 7-Zip self-extracting archive (Git for Windows' PortableGit) or
         // an NSIS installer (FileZilla): 7-Zip reads it without running it.
@@ -3435,6 +3469,26 @@ fn fetch_prebuilt(path: &str) -> Result {
         return Err(format!("{path} is not in {}", p.url));
     }
     write(&done, p.url)
+}
+
+/// Unpacks the Debian package `deb` (dpkg-deb, its data archive as the
+/// package would install it) and moves `p`'s member files into `dir`
+/// under their file names (`usr/lib/x86_64-linux-gnu/libc.so.6` becomes
+/// `libc.so.6`).
+fn unpack_deb(p: &Prebuilt, deb: &Path, dir: &Path) -> Result {
+    let tree = dir.join("deb");
+    if tree.exists() {
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    run_quiet(Command::new("dpkg-deb").arg("-x").arg(deb).arg(&tree))
+        .map_err(|e| format!("{e} (dpkg-deb is in dpkg)"))?;
+    for member in p.members {
+        let last = member.rsplit('/').next().unwrap_or(member);
+        fs::rename(tree.join(member), dir.join(last))
+            .map_err(|e| format!("{member} in {}: {e}", p.url))?;
+    }
+    fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
 
 /// Unpacks the MSI `msi` (msitools' msiextract, the files laid out as
@@ -7665,6 +7719,23 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/auxv_test", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/dyn_test, linked dynamically against glibc (ROADMAP LD):
+        // started through its interpreter, ld.so, which loads libdyn.so
+        // and glibc's libc from the image; its transcript must be its
+        // expected.txt (real Linux's).
+        name: "lx_dyn",
+        cmdline: "qemu_exit lxrun=/lx/dyn_test lxargs=./dyn_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/dyn_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/dyn_test as a PIE with an interpreter.
+        name: "lx_dyn_pie",
+        cmdline: "qemu_exit lxrun=/lx/dyn_test-pie lxargs=./dyn_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/dyn_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
         // user/lx/auxv_test, static-pie (ET_DYN): its transcript must be its
         // expected.txt (real Linux's; `lx_expect::check_boot`).
         name: "lx_auxv_pie",
@@ -7989,6 +8060,10 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("git_https", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
     ("winsta_service", "winsta_test"),
+    ("lx_dyn", "lx_dyn"),
+    ("lx_dyn", "glibc"),
+    ("lx_dyn_pie", "lx_dyn_pie"),
+    ("lx_dyn_pie", "glibc"),
 ];
 
 /// The boot modules (file, directory) scenario `name` ships besides the

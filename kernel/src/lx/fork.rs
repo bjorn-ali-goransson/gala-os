@@ -4,15 +4,19 @@
 //!
 //! A fork's child is a new core process (`nt::process::create_bare`,
 //! parent_id set) with a copy of the parent's address space: its VAD
-//! cloned and every page the parent has mapped copied into a frame of
-//! its own at once (no copy-on-write sharing between the two yet; pages
-//! never touched stay demand-zero in both). Its Linux state is
+//! cloned, its file mappings' views with the same sections (a file's
+//! pages mapped as the same frames: MAP_SHARED stays shared, MAP_PRIVATE
+//! pages stay copy-on-write) and every other page the parent has mapped
+//! copied into a frame of its own at once (no copy-on-write sharing of
+//! anonymous memory between the two yet; pages never touched stay
+//! demand-zero in both). Its Linux state is
 //! `lx::state::fork`'s (the same open file descriptions, signal actions
 //! and mask). Its one thread goes on from the parent's `syscall` with
 //! rax 0 and the parent's registers, x87/SSE/AVX state and FS/GS bases
 //! (`nt::thread::create_forked`).
 //!
-//! Observability: `lx: pid <p> fork: child pid <c> (<n> pages copied)`
+//! Observability: `lx: pid <p> fork: child pid <c> (<n> pages copied,
+//! <m> file pages shared)`
 //! and the core's `process ... starting at ..` line and `process start`
 //! event (ppid set); a failed fork logs why. A clone with flags beyond
 //! the exit signal is `"what":"linux clone flags missing"` in the ledger
@@ -22,9 +26,12 @@
 use super::dispatch::{Call, Result, return_regs};
 use super::errno::{EAGAIN, ECHILD, EFAULT, EINVAL, ENOMEM, ENOSYS};
 use super::state;
+use alloc::vec::Vec;
+
 use crate::mm::heap::TryVec;
 use crate::nt::platform::{self, Personality, UserSpace};
 use crate::nt::process::{self, Process};
+use crate::nt::section::View;
 use crate::nt::vad::Vad;
 use crate::nt::{charge, ledger, thread};
 
@@ -38,32 +45,60 @@ const WCLONE: u64 = 0x8000_0000;
 
 use super::threads::CLONE_VM;
 
-/// The parent's address space for a child: its VAD and every mapped page
+/// The parent's address space for a child: its VAD, its file mappings'
+/// views (the same sections: a MAP_SHARED page stays shared, a
+/// MAP_PRIVATE page the parent never wrote shows the file in both) and
+/// every mapped page: a file's page mapped as the same frame, any other
 /// copied (the parent is in this system call; with one thread nothing
-/// changes them meanwhile). Returns the pages copied.
-fn copy_space(parent: &Process) -> core::result::Result<(UserSpace, Vad, u64), &'static str> {
+/// changes them meanwhile). Returns the pages copied and shared.
+fn copy_space(parent: &Process) -> core::result::Result<CopiedSpace, &'static str> {
     let mut space = UserSpace::new().map_err(|_| "no memory for page tables")?;
-    // Lock order: the VAD, then the space.
+    // Lock order: the views, the VAD, then the space.
+    let views_lock = parent.views.lock();
+    let mut views = Vec::new();
+    views.try_reserve_exact(views_lock.len()).map_err(|_| "no memory for the views")?;
+    for v in views_lock.iter() {
+        let _ = views.try_push(View {
+            base: v.base,
+            size: v.size,
+            offset: v.offset,
+            section: v.section.clone(),
+        });
+    }
     let vad_lock = parent.vad.lock();
     let vad = vad_lock.try_clone().map_err(|_| "no memory for the VAD")?;
-    let mut pages = 0u64;
+    let (mut copied, mut shared) = (0u64, 0u64);
     let mut failed = false;
     parent.space.lock().for_each_page(|virt, frame, flags| {
         if failed {
             return;
         }
-        // A borrowed frame (a section's) becomes a private copy too: a
-        // Linux process maps none today.
-        if space.map_private_copy(virt, frame, flags).is_err() {
-            failed = true;
-        }
-        pages += 1;
+        // A borrowed frame is a file mapping's page (its section, which
+        // the child's views hold too); the parent's own pages are copied.
+        let done = if flags.borrowed {
+            shared += 1;
+            space.map_borrowed(virt, frame, flags)
+        } else {
+            copied += 1;
+            space.map_private_copy(virt, frame, flags)
+        };
+        failed = done.is_err();
     });
     drop(vad_lock);
+    drop(views_lock);
     if failed {
         return Err("no memory for the pages");
     }
-    Ok((space, vad, pages))
+    Ok(CopiedSpace { space, vad, views, copied, shared })
+}
+
+/// A child's address space (`copy_space`).
+struct CopiedSpace {
+    space: UserSpace,
+    vad: Vad,
+    views: Vec<View>,
+    copied: u64,
+    shared: u64,
 }
 
 /// fork (and clone without flags; `stack`: clone's new stack pointer);
@@ -83,7 +118,7 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
         crate::warn!("lx: pid {} fork failed: {why}", parent.id);
         Err(errno)
     };
-    let (space, vad, pages) = match copy_space(parent) {
+    let CopiedSpace { space, vad, views, copied, shared } = match copy_space(parent) {
         Ok(v) => v,
         Err(why) => return failed(why, ENOMEM),
     };
@@ -99,6 +134,8 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
         Ok(c) => c,
         Err(_) => return failed("no memory for the process", ENOMEM),
     };
+    // Its views before its thread runs (no fault there finds none).
+    *child.views.lock() = views;
     {
         // Linux overcommits: the charge counts the copy, never refuses it.
         let vad = child.vad.lock();
@@ -137,7 +174,7 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
     }
     thread::resume(&object);
     crate::info!(
-        "lx: pid {} {}: child pid {} ({pages} pages copied)",
+        "lx: pid {} {}: child pid {} ({copied} pages copied, {shared} file pages shared)",
         parent.id,
         if vfork { "vfork" } else { "fork" },
         child.id

@@ -8192,9 +8192,10 @@ Design rules:
 ### The Linux layer's milestones
 
 Test first: static (musl) Linux test programs in `user/lx/` (built by
-`user/lx/build.sh`, binaries in `user/lx/bin/`, each also as `-pie`)
-whose expected results come from running them on real Linux; scenarios
-in xtask. Most programs need about 150-200 of Linux's ~450 system
+`user/lx/build.sh`, binaries in `user/lx/bin/`, each also as `-pie`),
+and dynamically linked glibc ones (`GLIBC_TESTS`: dyn_test, with its
+shared libraries), whose expected results come from running them on
+real Linux; scenarios in xtask. Most programs need about 150-200 of Linux's ~450 system
 calls; priorities come from `strace` of target programs on real Linux.
 
 | Milestone | Scope | State |
@@ -8202,7 +8203,7 @@ calls; priorities come from `strace` of target programs on real Linux.
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
 | 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run, by name through symbolic links (`lx_busybox`); links, unlink of open files, case-sensitive directories (`lx_fs`); threads, futex and musl's pthreads run (`lx_thread`) |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
-| 4 | dynamic linking (ld.so, glibc), epoll, sockets | TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
+| 4 | dynamic linking (ld.so, glibc), epoll, sockets | glibc programs run through ld.so with shared libraries, dlopen and TLS (`lx_dyn`, ROADMAP LD step 1); TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
 
 Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
@@ -8211,7 +8212,8 @@ mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
 exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
-`lx_epoll`, `lx_fs`, each also `_pie`), and clock_test, fork_test,
+`lx_epoll`, `lx_fs`, each also `_pie`), dyn_test (glibc, dynamic:
+`lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
 static busybox from busybox.net (a `PREBUILT`) runs our scripts in
@@ -8278,12 +8280,27 @@ The running parts (milestone 1; `lxrun=`):
   `lxargs=` gives each one's whole argv (argv[0] first, percent-encoded
   shell-style words, comma-separated per program; default the path
   alone), `lxenv=` the environment of all of them (default none)):
-  - the Linux path `/a/b` is `C:\a\b` (one file system); the file is read
-    whole and parsed; an `ElfError` becomes ENOEXEC/EINVAL; a PT_INTERP
-    is refused (milestone 4); the process starts in its program's
-    directory (as `cargo xtask lx-expect` runs the tests), umask 022;
+  - the Linux path `/a/b` is `C:\a\b` (one file system), walked as any
+    Linux path (`file::executable_at`: symbolic links followed, the
+    owner's x bit); the file is read whole and parsed; an `ElfError`
+    becomes ENOEXEC; the process starts in its program's directory (as
+    `cargo xtask lx-expect` runs the tests), umask 022;
+  - a dynamic program (PT_INTERP, ROADMAP LD): its interpreter (glibc's
+    ld.so) is read the same way (a relative path from the program's
+    directory), parsed (ELIBBAD for one that is not a loadable ELF
+    image or has an interpreter itself; its open's errno, ENOENT or
+    EACCES, as execve(2) lists) and placed as Linux places an mmap
+    without a hint: an ET_DYN interpreter ends at or below `MMAP_TOP`,
+    aligned down to its largest p_align (ld.so's own mmaps go below
+    it); both images are mapped; the thread starts at the interpreter's
+    entry, AT_ENTRY and AT_PHDR stay the program's, AT_BASE is the
+    interpreter's load address. ld.so then loads the libraries itself
+    through openat, read/pread64, fstat and file mmap. `prepare` does
+    every step that can fail before anything is mapped (the auxv's
+    machine inputs, AT_RANDOM and AT_HWCAP, passed in: host tests);
   - ET_EXEC is mapped at its addresses, ET_DYN at `DEFAULT_DYN_BASE`
-    (rounded to its alignment); each segment's page range goes in the
+    (rounded to its alignment; a dynamic PIE too, as Linux places one
+    without randomization); each segment's page range goes in the
     VAD (`Vad::map_exact`, page-granular, MEM_PRIVATE, committed); a page
     two segments share gets both protections; the file bytes are copied
     into frames mapped at once (`write_initial`), the bss past them is
@@ -8336,18 +8353,59 @@ The running parts (milestone 1; `lxrun=`):
   (`lx::process_ended`): the fds close first, then the parent is told
   (a zombie, SIGCHLD, its wait4 waiters woken), so a parent woken by a
   child's end reads EOF from a pipe only the child held.
-- **Memory** (`lx::mm`): anonymous mmap (the hint if free, else
-  top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
-  gives EEXIST), munmap (cuts VAD allocations: `Vad::unmap_range`),
-  mprotect (every page must be mapped, else ENOMEM), brk (byte-exact
-  break, pages up to it rounded and mapped; a refused request returns
-  the old break). Pages are demand-zero through the core fault path;
-  `vm::sync_range` frees the frames of removed pages. Linux overcommits:
-  the commit charge counts but never refuses. MAP_SHARED anonymous is
-  private: a fork copies it (not yet shared with the child).
+- **Memory** (`lx::mm`; mmap_test, dyn_test): mmap (the hint if free,
+  else top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
+  gives EEXIST; MAP_DENYWRITE, MAP_STACK and the other hints ignored, as
+  Linux ignores them), munmap (cuts VAD allocations:
+  `Vad::unmap_range`), mprotect (every page must be mapped, else
+  ENOMEM), brk (byte-exact break, pages up to it rounded and mapped; a
+  refused request returns the old break). Anonymous pages are
+  demand-zero through the core fault path; `vm::sync_range` frees the
+  frames of removed pages. Linux overcommits: the commit charge counts
+  but never refuses. MAP_SHARED anonymous is private: a fork copies it
+  (not yet shared with the child).
+  - **File mappings**: an mmap of a regular file is a view
+    (`nt::section::View` in the process's `views`, MEM_MAPPED in the
+    VAD) of a section made for it (`Section::new_linux_file`, holding the
+    open file description: the mapping outlives its fd and its name,
+    mmap(2)), whose pages are the file's own (ramfs keeps a mapped file
+    in whole pages), mapped at the first touch by the core fault path and
+    shared by every process mapping the file. MAP_PRIVATE pages are
+    PAGE_WRITECOPY while PROT_WRITE (the first write makes a private
+    copy: `vm::copy_on_write`; a page never written shows later writes
+    to the file, as Linux's page cache does); MAP_SHARED pages on a file
+    open for writing write the file; pages past the file's last page
+    fault (Linux: SIGBUS; here the access violation's SIGSEGV).
+    Errors as mmap(2) lists them: EBADF (no fd, O_PATH), ENODEV (a
+    directory, pipe, socket or device; /dev/zero maps anonymous memory),
+    EACCES (not open for reading; MAP_SHARED with PROT_WRITE without
+    write access or on an O_APPEND file; mprotect beyond that later),
+    EOVERFLOW (offset plus length wraps). Linux cuts and moves mappings
+    by pages, so the views are cut with them (`mm::cut`): a munmap,
+    MAP_FIXED, mprotect or mremap over part of a view leaves views for
+    the parts outside, each at its offset (host-tested); a removed view
+    is dropped after the locks (its section may close the file). Lock
+    order: views, VAD, space.
+  - **mremap** (mmap_test): shrinks in place; grows in place when the
+    pages after it are free (anonymous memory, or the next pages of a
+    file's view); else with MREMAP_MAYMOVE moves the mapping whole (to a
+    free range, or MREMAP_FIXED's address, replacing what is there):
+    its VAD runs, its views and its pages move, frames and all
+    (`UserSpace::move_page`: no copy). The range must be mapped
+    (EFAULT); without MREMAP_MAYMOVE and no room ENOMEM;
+    MREMAP_DONTUNMAP and old length 0 are EINVAL, ledgered.
+  - **madvise**: MADV_DONTNEED drops the range's frames (anonymous pages
+    read zero again, a private file page written goes back to
+    copy-on-write and shows the file); the hints (NORMAL, RANDOM,
+    SEQUENTIAL, WILLNEED, FREE, (UN)MERGEABLE, (NO)HUGEPAGE, DONTDUMP,
+    DODUMP) change nothing; other advice EINVAL, ledgered; ENOMEM if the
+    range is not all mapped.
+  - execve unmaps everything, views too (`mm::clear`). The program and
+    its interpreter are still mapped by copying their bytes into private
+    pages (not as file views: ROADMAP LD).
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
-  munmap, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
+  munmap, mremap, madvise, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
   rt_sigpending, rt_sigtimedwait (below), fork, clone (CLONE_THREAD: a
   thread; only an exit signal of SIGCHLD: a fork; CLONE_VM|CLONE_VFORK:
   a vfork; other flags ENOSYS), wait4, ioctl (ENOTTY),
@@ -8362,7 +8420,8 @@ The running parts (milestone 1; `lxrun=`):
   it has; else EPERM), getppid, uname (`Linux`, `gala`, release
   `6.18.0-gala`: the corpus's kernel, `x86_64`), the file calls, execve,
   vfork, kill, rt_sigsuspend, the clocks and timers, sockets and poll
-  (below),
+  (below), clone3, set_robust_list and get_robust_list (below),
+  prlimit64, getrlimit, setrlimit and getrandom (`lx::resource`, below),
   arch_prctl (SET/GET FS/GS; a base at or above TASK_SIZE is EPERM),
   pipe and pipe2 (O_NONBLOCK, O_CLOEXEC; blocking reads and writes wait
   on the pipe's wait queue: `lx::wait`). A pipe keeps its bytes as Linux does, in
@@ -8435,6 +8494,23 @@ The running parts (milestone 1; `lxrun=`):
   woken by `release_vfork`); the child's memory is a copy, not shared
   (ledgered `linux clone flags missing` CLONE_VM): fork_test's vfork
   check does not pass yet.
+- **Limits and randomness** (`lx::resource`; exec_test): the resource
+  limits are the process's (`LxProcess::rlimits`, inherited by a fork,
+  kept by execve) and say what gala does: RLIMIT_STACK 8 MiB (the main
+  stack) with no hard limit, RLIMIT_NOFILE 1024/1024 (`MAX_FDS`),
+  RLIMIT_CORE 0 (no core files), the rest unlimited. prlimit64 (pid 0
+  or its own; another's is ESRCH, ledgered), getrlimit and setrlimit
+  follow the unprivileged rules (EINVAL soft above hard or a resource
+  past RLIM_NLIMITS, EPERM for a raised hard limit, EFAULT); a limit set
+  to anything but gala's value is kept and read back but not enforced
+  (ledgered `linux option missing`, the resource). getrandom: the
+  platform's generator (ready from the start: never blocks), EINVAL for
+  unknown flags or GRND_RANDOM|GRND_INSECURE; no generator is EAGAIN,
+  ledgered. `/proc/self/exe` (readlink/readlinkat, by exact path as the
+  devices are; glibc's ld.so reads it for `$ORIGIN`): the path of the
+  program the process runs (`LxProcess::exe`, its node: execve sets it,
+  to the interpreter for a `#!` script; a fork's child has its
+  parent's); other /proc paths are ENOENT (ledgered for readlink).
 - **Clocks and timers** (`lx::time`, `lx::timer`; clock_test is the
   spec): clock_gettime/clock_getres (REALTIME and its variants from the
   system time, MONOTONIC, _RAW, _COARSE, BOOTTIME from the monotonic
@@ -8529,7 +8605,24 @@ The running parts (milestone 1; `lxrun=`):
   (pthread_join), what was pending for it alone goes, and the process
   ends with its last thread (that thread's status); exit_group ends
   every thread. musl's pthreads (create, join, mutexes, condition
-  variables with FUTEX_REQUEUE, pthread_kill) run on these.
+  variables with FUTEX_REQUEUE, pthread_kill) and glibc's (dyn_test)
+  run on these. clone3 (thread_test; glibc tries it first) reads struct
+  clone_args (version 0 to 2: EINVAL below 64 bytes, E2BIG above a page
+  or for non-zero bytes past the fields known) and becomes clone: the
+  same flags, the exit signal from its field (EINVAL in the flags or
+  above 64), the stack as its lowest address plus its size (EINVAL for
+  one without the other), child_tid for both CHILD_SETTID and
+  CHILD_CLEARTID; a pidfd, set_tid, a cgroup and CLONE_CLEAR_SIGHAND
+  are ENOSYS, ledgered `linux clone flags missing`. set_robust_list
+  keeps each thread's list head (EINVAL for a length other than 24);
+  get_robust_list reads it back (0: the caller; another thread of the
+  process by its tid; ESRCH otherwise). The list is not walked at a
+  thread's exit (its futexes are not marked FUTEX_OWNER_DIED): an exit
+  with entries on it is ledgered `linux option missing`. rseq is not
+  implemented (ENOSYS, logged and ledgered): registering one means
+  keeping its cpu_id current and aborting its critical sections on
+  preemption, migration and signals; glibc then goes without (its
+  sched_getcpu makes the system call).
 - **futex** (`lx::futex`; thread_test): WAIT (relative timeout), WAKE,
   REQUEUE and CMP_REQUEUE (both return woken plus moved), WAIT_BITSET
   (absolute timeout, FUTEX_CLOCK_REALTIME allowed: a real-time deadline
@@ -8612,9 +8705,12 @@ The running parts (milestone 1; `lxrun=`):
     software-reserved bytes in the FPU state.
 - **Fork** (`lx::fork`): fork, and clone with only SIGCHLD (the C
   library's fork), make a child core process (`create_bare`, parent_id
-  set) with the parent's VAD cloned (`Vad::try_clone`) and every mapped
-  page copied into its own frame at once (`map_private_copy`; no
-  copy-on-write yet, untouched pages stay demand-zero in both); the
+  set) with the parent's VAD cloned (`Vad::try_clone`), its file
+  mappings' views with the same sections and their mapped file pages as
+  the same frames (MAP_SHARED stays shared, an unwritten MAP_PRIVATE
+  page stays copy-on-write in both), and every other mapped page copied
+  into its own frame at once (`map_private_copy`; no copy-on-write of
+  anonymous memory yet, untouched pages stay demand-zero in both); the
   charge follows (`charge::sync`, Linux overcommits); its Linux state is
   `state::fork`'s (the same open file descriptions in the same slots,
   so pipe ends stay open while either holds them; the same actions and
@@ -8640,10 +8736,13 @@ The running parts (milestone 1; `lxrun=`):
   program's transcript from those lines and compares it with
   expected.txt exactly.
 - **Observability**: `lx: exec <path> (<n> bytes): <plan>` (bias, entry,
-  break, a line per segment); `personality linux` on the process line
+  break, a line per segment) and, for a dynamic program, `lx: exec
+  interpreter <path> (<n> bytes): <plan>`; `personality linux` on the process line
   and `"personality":"linux"` in the process events; a failed exec logs
-  `lx: exec <path> failed: <why>` and emits an `lx exec failed` event
-  (path, errno, why); every call goes to the flight recorder (number |
+  `lx: exec <path> failed: <why>` (an interpreter's path and what is
+  wrong with it: `its interpreter /lib64/ld-linux-x86-64.so.2: cannot
+  read it (ENOENT)`) and emits an `lx exec failed` event (path, errno,
+  why); every call goes to the flight recorder (number |
   pid << 32); an unimplemented call logs `<name> (pid <p>):
   unimplemented system call <name> (<nr>) (dispatcher lx::dispatch,
   personality linux): ENOSYS` once per process and number, and goes to
@@ -8654,7 +8753,8 @@ The running parts (milestone 1; `lxrun=`):
   discarded, ignored, handler, killed, taken); `lx: pid <p> (thread
   <t>): killed by signal <n> (<name>), its default action`; a frame that
   cannot be written or read back logs why. Fork: `lx: pid <p> fork:
-  child pid <c> (<n> pages copied)` then the core's process line and
+  child pid <c> (<n> pages copied, <m> file pages shared)` then the
+  core's process line and
   `process start` event (ppid); a failed fork logs why; an `lx child
   ended` event (pid, child, wait status, signal, whether the SIGCHLD was
   discarded, whether reaped at once); a vfork logs `lx: pid <p> vfork:
@@ -8675,8 +8775,13 @@ The running parts (milestone 1; `lxrun=`):
   rename an NT program's open refuses, names the file system cannot
   hold, socket families and types, socket options, CPU-time clocks and
   timers, a script as interpreter, futex ops not supported, an execve
-  with other threads running), `linux syscall stub` (ioctl,
-  wait4's rusage).
+  with other threads running, an mmap of what is not a regular file,
+  mremap's MREMAP_DONTUNMAP and old length 0, madvise advice not taken,
+  a resource limit set but not enforced, another process's limits, a
+  thread exiting with robust futexes, the shrinking of a mapped file,
+  /proc paths other than /proc/self/exe, no random generator), `linux
+  syscall stub` (ioctl, wait4's rusage); a page mremap could not move
+  logs why (and `out of memory`).
 - **Invariants**: a Linux process is never handed over (carry refuses "a
   personality other than NT"); its threads have no TEB; NT threads' FS
   base is 0. Signals are delivered only on the way back from a Linux
@@ -8695,8 +8800,14 @@ The running parts (milestone 1; `lxrun=`):
   `signals` before the scheduler's (a raise wakes sleepers under it);
   an epoll's entries are never held while an object's readiness is
   asked.
-- **TODO** (ROADMAP LX): randomization (the stack gap, AT_RANDOM's
-  source, the bases); PT_INTERP and dynamic linking; the signal calls
+- **TODO** (ROADMAP LX, LD): randomization (the stack gap, AT_RANDOM's
+  source, the bases); the program and its interpreter mapped as file
+  views (shared text, as libraries are) instead of copied; rseq; robust
+  futex lists released at a thread's exit; SIGBUS for a file page past
+  the end and the shrinking of a mapped file (ramfs refuses it while
+  mapped, as NT's truncation is: EBUSY); `/proc/self/exe` is a node id
+  (`LxProcess::exe`), not a held file, so a program deleted while it
+  runs does not read as Linux's `<path> (deleted)`; the signal calls
   and deliveries listed as not yet above; copy-on-write fork and shared
   MAP_SHARED memory (then shared futexes keyed by the page), vfork
   sharing its parent's memory; execve ending the other threads first;

@@ -149,9 +149,11 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
                 Err(EBADF)
             }
         }
-        nr::MMAP => super::mm::mmap(&call.process, a(0), a(1), a(2), a(3), a(4) as i64, a(5)),
+        nr::MMAP => super::mm::mmap(call, a(0), a(1), a(2), a(3), a(4) as i32 as i64, a(5)),
         nr::MPROTECT => super::mm::mprotect(&call.process, a(0), a(1), a(2)),
         nr::MUNMAP => super::mm::munmap(&call.process, a(0), a(1)),
+        nr::MREMAP => super::mm::mremap(&call.process, a(0), a(1), a(2), a(3), a(4)),
+        nr::MADVISE => super::mm::madvise(&call.process, a(0), a(1), a(2)),
         nr::BRK => Ok(super::mm::brk(&call.process, &call.lx.brk, a(0))),
         nr::RT_SIGACTION => sigcalls::rt_sigaction(call, a(0), a(1), a(2), a(3)),
         nr::RT_SIGPROCMASK => sigcalls::rt_sigprocmask(call, a(0), a(1), a(2), a(3)),
@@ -166,6 +168,13 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::FORK => super::fork::fork(call, None, false),
         nr::VFORK => super::fork::fork(call, None, true),
         nr::CLONE => super::fork::clone(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::CLONE3 => super::threads::clone3(call, a(0), a(1)),
+        nr::SET_ROBUST_LIST => super::threads::set_robust_list(call, a(0), a(1)),
+        nr::GET_ROBUST_LIST => super::threads::get_robust_list(call, a(0), a(1), a(2)),
+        nr::PRLIMIT64 => super::resource::prlimit64(call, a(0), a(1), a(2), a(3)),
+        nr::GETRLIMIT => super::resource::getrlimit(call, a(0), a(1)),
+        nr::SETRLIMIT => super::resource::setrlimit(call, a(0), a(1)),
+        nr::GETRANDOM => super::resource::getrandom(call, a(0), a(1), a(2)),
         nr::WAIT4 => super::fork::wait4(call, a(0), a(1), a(2), a(3)),
         nr::IOCTL => match call.lx.fd(a(0)) {
             None => Err(EBADF),

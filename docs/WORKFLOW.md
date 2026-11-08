@@ -1189,14 +1189,25 @@ source).
   (static, ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN),
   reproducibly (stripped, no build id, `-fno-stack-protector`: the
   canary is read from %fs:0x28, so a test that moves FS would crash).
+  The tests in its `GLIBC_TESTS` (dyn_test) are built with the host's
+  gcc against glibc instead, dynamically: `<name>_test` (ET_EXEC with an
+  interpreter) and `<name>_test-pie` (a PIE), each `lib*.c` beside the
+  test a `user/lx/bin/lib*.so` linked with `--as-needed` (one only
+  dlopen()ed is not DT_NEEDED), found through DT_RUNPATH `$ORIGIN`.
+  They use libc as a program does (printf, malloc, dlopen), not raw
+  system calls: what they check is that glibc's programs run. CI's
+  rebuild (ubuntu-24.04: gcc 13.3, glibc 2.39) must give the same bytes:
+  their start-up files (`crt1.o`, `crti.o`) come from the host's
+  libc6-dev, so the binaries are rebuilt on that Ubuntu release.
   The binaries are checked in under `user/lx/bin`, not `user/bin`
   (`export-tests` copies only the Windows build's outputs); the kernel's
   host tests `include_bytes!` them.
 - **Transcripts**: `cargo xtask lx-expect` rebuilds them (when musl-gcc
   is there; else it runs the checked-in ones), runs each binary on this
   host as `./<name>_test first '' 'third arg'` from
-  `target/lx-expect/<binary>/` with only `A=1 EMPTY= LONGER_NAME=some
-  value` in its environment, and compares stdout + `-- exit status N`
+  `target/lx-expect/<binary>/` (with `user/lx/bin/lib*.so` copied
+  beside it) with only `A=1 EMPTY= LONGER_NAME=some value` in its
+  environment, and compares stdout + `-- exit status N`
   with `user/lx/<name>_test/expected.txt` (both binaries against the
   same file). A mismatch prints a line diff and leaves `actual.txt`
   there. `--runs 5` runs each binary 5 times and fails if a transcript
@@ -1241,6 +1252,19 @@ source).
   the `unimplemented system call <name>` lines and the `ledger:` lines
   (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
   the next work list.
+- **Dynamic programs in gala** (`lx_dyn`, `lx_dyn_pie`): the image holds
+  the test and its libraries in `/lx` and glibc where Ubuntu's ld.so
+  finds it: `ld-linux-x86-64.so.2`, `libc.so.6` and `libm.so.6` from
+  the pinned `libc6` .deb (`PREBUILT` "glibc", unpacked with dpkg-deb)
+  in `/lib/x86_64-linux-gnu`, ld.so also in `/lib64` (PT_INTERP's path;
+  a copy, boot modules make no links). The scenarios ship them as the
+  module set "glibc" (MODULE_SETS); a new glibc test adds its program
+  and libraries to its own scenario and that set. ld.so needs
+  `/proc/self/exe` for `$ORIGIN` (served by exact path) and reads
+  `/etc/ld.so.cache` if there is one (there is none: it searches its
+  system directories). Bring-up: `lx: exec interpreter ...` shows where
+  ld.so went; the ledger's `linux syscall missing` lines (rseq is the
+  one glibc 2.39 reaches and does without) are the next calls.
 - **Linux programs that are not tests** (busybox): fetched as a
   `PREBUILT` (never run on the host), shipped to `C:\lx` by an
   EXTRA_MODULES entry, driven by a script of ours in
@@ -1268,7 +1292,13 @@ source).
   whose buffer runs into an unmapped page fails with EFAULT, not a
   partial count (write_exit_test); a store to a never-touched bss page
   after mprotect(PROT_READ) faults with error code 6 (not present), so
-  signal_test touches it first (7).
+  signal_test touches it first (7). A MAP_PRIVATE page never written
+  shows later writes to its file (the page cache; mmap_test asserts it),
+  one written keeps its copy. A relation over a path from getcwd must
+  count its NUL: the system call's length includes it (exec_test's
+  `/proc/self/exe` checks). Kernel code a host test calls must not log
+  (`crate::info!` is the serial port: SIGSEGV on the host): exec's
+  `prepare` returns its plan and the caller logs it.
 
 ## Program recipes
 
@@ -1536,7 +1566,9 @@ it on first use.
   or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
   package: FlaUI) is a plain zip, its members paths such as
-  `lib/net8.0-windows7.0/FlaUI.Core.dll`. One fetch runs at a time
+  `lib/net8.0-windows7.0/FlaUI.Core.dll`; a Debian package (`.deb`:
+  Ubuntu's glibc) is unpacked with `dpkg-deb -x`, its member files
+  (`usr/lib/x86_64-linux-gnu/libc.so.6`) moved up by their names. One fetch runs at a time
   (ISOs are built in parallel), and a `.unpacked-<sha256>` marker makes
   an interrupted unpack run again. An unpack (no marker for the pinned
   checksum and selection: a new version, changed members, an interrupted
