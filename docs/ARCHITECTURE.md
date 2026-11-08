@@ -8383,6 +8383,8 @@ exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 copy-on-write private pages, shared MAP_SHARED anonymous memory and its
 futexes: `lx_forkmem`, `_pie`), memfd_test (`lx_memfd`, also `_pie`;
 ROADMAP LD step 2), unix_test (`lx_unix`, also `_pie`; LD step 2),
+wl_test (a Wayland client, recorded against weston; its scenario comes
+with gala's server, LD step 2),
 dyn_test (glibc, dynamic:
 `lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
@@ -9314,15 +9316,26 @@ pixels are kept and nothing draws them.
 
 ### Tests
 
-- **Test first:** `wl_test`, a small client of our own in C over raw
-  sockets (no libwayland, so the test checks the wire format itself).
-  It binds the globals, creates a pool and a buffer, draws known pixels,
-  creates an `xdg_toplevel`, commits, waits for configure and the frame
-  callback, then quits on `xdg_toplevel.close`. Its transcript is
-  recorded on real Linux against weston's headless backend: lx-expect
-  starts `weston --backend=headless` for it, and CI installs weston. On
-  gala the same transcript must match, and a screen check finds the
-  pixels inside shasha's frame.
+- **Test first:** `user/lx/wl_test` (written and recorded), a client of
+  our own in C over a raw AF_UNIX socket (no libwayland, so the test
+  checks the wire format itself). It connects at
+  `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, checks the globals (wl_compositor,
+  wl_shm, xdg_wm_base, wl_output; not wl_seat, which a headless weston
+  lacks), binds the first three at versions 4, 1 and 1, sees ARGB8888
+  and XRGB8888 announced, makes a 64x64 XRGB8888 buffer in a memfd pool
+  (the fd as SCM_RIGHTS), an `xdg_toplevel` titled "wl_test", commits
+  without a buffer, acks the configure, attaches, damages and commits
+  with a frame callback, sees the frame done and the buffer released by
+  the next round trip and `delete_id` for what it destroys, and on a
+  second connection gets `wl_display.error` (object 1, invalid_method)
+  for an unknown opcode, then the end of the stream. Its transcript is
+  recorded on Linux against weston's headless backend: lx-expect starts
+  `weston --backend=headless` for it (`WAYLAND_TESTS`, with
+  `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` added to its environment), and
+  CI installs weston. On gala the same transcript must match (its
+  `lx_wl` scenario comes with the server), and a screen check finds the
+  pixels inside shasha's frame. `xdg_toplevel.close` from the frame's
+  close button is checked when the scenario can click.
 - The wire format and the object table: host tests in `wl_abi`.
 - Then a real client: `weston-simple-shm` from weston's demos; then
   GTK (LD step 3).

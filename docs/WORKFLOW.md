@@ -1309,6 +1309,10 @@ source).
   environment, and compares stdout + `-- exit status N`
   with `user/lx/<name>_test/expected.txt` (both binaries against the
   same file). A mismatch prints a line diff and leaves `actual.txt`
+  there. The Wayland clients (lx_expect.rs `WAYLAND_TESTS`: wl_test) get a
+  weston of their own (`weston --backend=headless`, apt package `weston`)
+  on a socket in their run directory, named by `XDG_RUNTIME_DIR` and
+  `WAYLAND_DISPLAY` added to their environment; its log is `weston.log`
   there. `--runs 5` runs each binary 5 times and fails if a transcript
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
