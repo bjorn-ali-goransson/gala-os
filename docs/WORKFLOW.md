@@ -26,7 +26,11 @@ or of real Linux for the Linux personality.
 1. **Test first.** Create `user/<feature>_test/` (copy `Cargo.toml` from
    another test with `sed 's/file_test/<feature>_test/g'`). Its `main`
    returns 0 or the number of the failing check and prints
-   `<feature>_test: ok`. Expected values are what real Windows returns;
+   `<feature>_test: ok`, or on a failure one line with the check's
+   number, the value it got and its source line (`check N got X (line
+   L)`: `#[track_caller]` on every method of its `Checks`, the line from
+   `core::panic::Location::caller()`), so a report from any machine
+   names the line without counting checks. Expected values are what real Windows returns;
    say in the doc comment what is assumed.
 2. **Wire it up:**
    - `xtask/src/main.rs`: add to `USER_PROGRAMS`, add a `Scenario`

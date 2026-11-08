@@ -89,10 +89,12 @@ fn views() -> Views {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq(&mut self, got: i64, want: i64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: i64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -103,11 +105,13 @@ impl Checks {
         print(" got ");
         write_file(stdout(), &hex32((got as u64 >> 32) as u32));
         write_file(stdout(), &hex32(got as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
 
     /// The control call succeeded; its state.
+    #[track_caller]
     fn control(&mut self, op: u32, a: i64, b: i64) -> Result<ClockState, u32> {
         let (st, state) = clock_control(op, a, b);
         self.eq(st.into(), STATUS_SUCCESS.into())?;
@@ -116,6 +120,7 @@ impl Checks {
     }
 
     /// Every view moved by `delta` (100 ns; the system time by `system`).
+    #[track_caller]
     fn moved(&mut self, a: &Views, b: &Views, delta: i64, system: i64) -> Result<(), u32> {
         self.eq(b.qpc - a.qpc, delta)?;
         self.eq(b.interrupt - a.interrupt, delta)?;
@@ -376,3 +381,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

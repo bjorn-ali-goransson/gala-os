@@ -437,6 +437,7 @@ fn dump_log() {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u32, what: &str) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -448,11 +449,13 @@ impl Checks {
         out(what.as_bytes());
         out(b") got ");
         out(&hex(got));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
     /// `gala <args>` exits with `code` and its output has every `has`.
+    #[track_caller]
     fn gala(&mut self, args: &str, code: u32, has: &[&[u8]]) -> Result<Output, u32> {
         let mut line = [0u8; 512];
         let n = args.len().min(500);
@@ -474,12 +477,14 @@ impl Checks {
     }
 
     /// `pkhello <args>` found on PATH: hello.exe's line, exit 0.
+    #[track_caller]
     fn pkhello_runs(&mut self) -> Result<(), u32> {
         self.command_runs("pkhello --some \"args here\"")
     }
 
     /// A command line whose program is an installed command found on
     /// PATH (all are hello.exe): its line, exit 0.
+    #[track_caller]
     fn command_runs(&mut self, line: &str) -> Result<(), u32> {
         let (got, o) = run(None, line);
         if got != 0 || !o.has(HELLO) {
@@ -1422,4 +1427,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

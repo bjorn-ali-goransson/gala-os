@@ -9,6 +9,7 @@ use ntrt::*;
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn eq<T: PartialEq + Copy + Into<u64>>(&mut self, got: T, want: T) -> Result<(), u32> {
         self.0 += 1;
         if got == want {
@@ -20,6 +21,7 @@ impl Checks {
         write_file(stdout(), &hex32(got.into() as u32));
         print(" want ");
         write_file(stdout(), &hex32(want.into() as u32));
+        check_line(core::panic::Location::caller().line());
         print("\r\n");
         Err(self.0)
     }
@@ -127,3 +129,25 @@ fn main() -> u32 {
 }
 
 entry!(main);
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    print(core::str::from_utf8(&b[..8 + len]).unwrap_or(""));
+}

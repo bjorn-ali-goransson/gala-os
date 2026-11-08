@@ -113,6 +113,7 @@ fn hex(mut v: u64) {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
@@ -122,11 +123,13 @@ impl Checks {
         hex(self.0.into());
         out(b" failed, got ");
         hex(got);
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0)
     }
 
     /// A commit that must fail with ERROR_COMMITMENT_LIMIT.
+    #[track_caller]
     fn refused(&mut self, at: *mut c_void, size: usize, kind: u32) -> Result<(), u32> {
         // SAFETY: a request for memory; on success it is given back.
         let p = unsafe {
@@ -335,4 +338,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

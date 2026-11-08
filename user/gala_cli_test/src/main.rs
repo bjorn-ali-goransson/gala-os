@@ -586,6 +586,7 @@ fn gala_as(token: Handle, args: &str) -> (u32, Output) {
 struct Checks(core::cell::Cell<u32>);
 
 impl Checks {
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.0.set(self.0.get() + 1);
         if cond {
@@ -595,16 +596,19 @@ impl Checks {
         out(&hex(self.0.get()));
         out(b" got ");
         out(&hex(got as u32));
+        check_line(core::panic::Location::caller().line());
         out(b"\r\n");
         Err(self.0.get())
     }
 
     /// `gala <args>` exits with `code` and its output has `has`.
+    #[track_caller]
     fn run(&self, args: &str, code: u32, has: &[u8]) -> Result<Output, u32> {
         self.run_as(core::ptr::null_mut(), args, code, has)
     }
 
     /// The same, `gala` run under primary token `token` (null: ours).
+    #[track_caller]
     fn run_as(&self, token: Handle, args: &str, code: u32, has: &[u8]) -> Result<Output, u32> {
         let (got, o) = gala_as(token, args);
         if got != code || !o.has(has) {
@@ -1175,4 +1179,26 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)`: the source line of the failing check, from
+/// `#[track_caller]` on Checks' methods (so a report names the line
+/// without anyone counting checks).
+fn check_line(line: u32) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    out(&b[..8 + len]);
 }

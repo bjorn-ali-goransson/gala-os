@@ -282,13 +282,27 @@ fn line(prefix: &[u8], n: u64, suffix: &[u8]) {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
             return Ok(());
         }
-        line(b"quota_test: check ", self.0.into(), b" failed");
-        line(b"quota_test: got ", got, b"");
+        // One line: run-all.ps1 keeps the last line with the program's
+        // name, so the check, its value and its source line go together.
+        let (at, at_len) = line_text(core::panic::Location::caller().line());
+        let mut text = [0u8; 128];
+        let mut digits = [0u8; 20];
+        let mut n = 0;
+        let check = decimal(self.0.into(), &mut digits);
+        let mut more = [0u8; 20];
+        let value = decimal(got, &mut more);
+        for part in [&b"quota_test: check "[..], check, b" failed, got ", value, &at[..at_len]] {
+            text[n..n + part.len()].copy_from_slice(part);
+            n += part.len();
+        }
+        text[n..n + 2].copy_from_slice(b"\r\n");
+        out(&text[..n + 2]);
         Err(self.0)
     }
 }
@@ -825,4 +839,25 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)` for the failing check's source line (`#[track_caller]` on
+/// Checks' methods), as bytes and their length.
+fn line_text(line: u32) -> ([u8; 18], usize) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    (b, 8 + len)
 }

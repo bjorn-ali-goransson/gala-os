@@ -195,13 +195,14 @@ fn hex(v: u32) -> [u8; 8] {
 struct Checks(u32);
 
 impl Checks {
+    #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
         self.0 += 1;
         if cond {
             return Ok(());
         }
         // One write per line (the kernel's log shares the port).
-        let mut line = [0u8; 48];
+        let mut line = [0u8; 72];
         let head = b"winsta_test: check ";
         line[..head.len()].copy_from_slice(head);
         let mut n = head.len();
@@ -211,16 +212,21 @@ impl Checks {
         n += 5;
         line[n..n + 8].copy_from_slice(&hex(got as u32));
         n += 8;
+        let (at, at_len) = line_text(core::panic::Location::caller().line());
+        line[n..n + at_len].copy_from_slice(&at[..at_len]);
+        n += at_len;
         line[n..n + 2].copy_from_slice(b"\r\n");
         out(&line[..n + 2]);
         Err(self.0)
     }
 
+    #[track_caller]
     fn eq(&mut self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
 
     /// The call failed (returned 0) with last error `error`.
+    #[track_caller]
     fn fails(&mut self, result: u64, error: u32) -> Result<(), u32> {
         // SAFETY: a plain call.
         let e = unsafe { GetLastError() };
@@ -593,4 +599,25 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)` for the failing check's source line (`#[track_caller]` on
+/// Checks' methods), as bytes and their length.
+fn line_text(line: u32) -> ([u8; 18], usize) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    (b, 8 + len)
 }

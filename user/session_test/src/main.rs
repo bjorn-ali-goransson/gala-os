@@ -333,10 +333,12 @@ struct Checks {
 }
 
 impl Checks {
+    #[track_caller]
     fn new(first: u32, quiet: bool) -> Self {
         Checks { n: core::cell::Cell::new(first), quiet }
     }
 
+    #[track_caller]
     fn ok(&self, cond: bool, got: u64) -> Result<(), u32> {
         self.n.set(self.n.get() + 1);
         if cond {
@@ -344,14 +346,19 @@ impl Checks {
         }
         if !self.quiet {
             // One line, one WriteFile (WORKFLOW).
-            let mut line = *b"session_test: check 00000000 got 00000000\r\n";
+            let mut line = [0u8; 61];
+            line[..41].copy_from_slice(b"session_test: check 00000000 got 00000000");
             line[20..28].copy_from_slice(&hex(self.n.get()));
             line[33..41].copy_from_slice(&hex(got as u32));
-            out(&line);
+            let (at, at_len) = line_text(core::panic::Location::caller().line());
+            line[41..41 + at_len].copy_from_slice(&at[..at_len]);
+            line[41 + at_len..41 + at_len + 2].copy_from_slice(b"\r\n");
+            out(&line[..41 + at_len + 2]);
         }
         Err(self.n.get())
     }
 
+    #[track_caller]
     fn eq(&self, got: u64, want: u64) -> Result<(), u32> {
         self.ok(got == want, got)
     }
@@ -1079,4 +1086,25 @@ pub extern "C" fn mainCRTStartup() -> ! {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdead) }
+}
+
+/// ` (line L)` for the failing check's source line (`#[track_caller]` on
+/// Checks' methods), as bytes and their length.
+fn line_text(line: u32) -> ([u8; 18], usize) {
+    let mut b = *b" (line 0000000000)";
+    let mut digits = [0u8; 10];
+    let (mut n, mut len) = (line, 0);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        b[7 + i] = digits[len - 1 - i];
+    }
+    b[7 + len] = b')';
+    (b, 8 + len)
 }
