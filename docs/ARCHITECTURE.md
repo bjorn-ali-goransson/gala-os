@@ -5193,7 +5193,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   borders outside it are like Windows 11's invisible resize borders);
   the desktop window is made again when the frame changes. Test:
   `user32_test` (custom_frame). Limits: uneven borders take the left one
-  (ledger). A left-button press in such a window goes first to its
+  (ledger); gala's own frame has 1-pixel sides, Windows 11's
+  WS_OVERLAPPEDWINDOW 8 (a 320-wide window's client is 318 here, 304
+  there; user32_test asserts only that WM_SIZE and GetClientRect agree). A left-button press in such a window goes first to its
   WM_NCHITTEST (on its thread, posted GALA_WM_NCDOWN): HTCAPTION makes the
   desktop drag it (GalaWindowDrag, 0x7f54: while the button stays down;
   logged), a border (HTLEFT..HTBOTTOMRIGHT) a resize (GalaWindowResize,
@@ -5222,11 +5224,15 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   (TRUE) and WM_ACTIVATE (WA_ACTIVE or WA_CLICKACTIVE, lParam the old
   one); DefWindowProc's WM_ACTIVATE gives a window that is not minimized
   the focus. ShowWindow activates except with SW_SHOWNOACTIVATE,
-  SW_SHOWMINNOACTIVE and SW_SHOWNA; a click activates its window on the
+  SW_SHOWMINNOACTIVE and SW_SHOWNA; SetWindowPos without SWP_NOACTIVATE
+  (or SWP_HIDEWINDOW) activates a top-level window that is not active,
+  shown or not, as Windows 11 does a never-shown window's first one: a
+  second WM_WINDOWPOSCHANGING (SWP_NOMOVE | SWP_NOSIZE, for the raise to
+  the top), then the activation, before WM_WINDOWPOSCHANGED; a click activates its window on the
   window's thread before the click is dispatched (posted
   GALA_WM_ACTIVATE); popups (menus, drop-down lists) are never
   activated. Chromium's views take keys only once their window is
-  activated. Test: `user32_test` (activation). TODO: another process's
+  activated. Test: `user32_test` (activation, positions). TODO: another process's
   window becoming active does not deactivate ours (the desktop does not
   say so yet); no WM_ACTIVATEAPP.
 - **The display** (`monitor.rs`): one monitor (a constant HMONITOR), the
@@ -5288,7 +5294,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   EndDeferWindowPos applies them in order with SetWindowPos.
 - Not yet: WS_CLIPCHILDREN/CLIPSIBLINGS (overlapping siblings paint in
   Z order only when invalidated together), WM_PARENTNOTIFY,
-  WM_NCCALCSIZE and child borders, owned windows.
+  WM_NCCALCSIZE and child borders, owned windows; SetWindowPos's
+  WM_GETMINMAXINFO and WM_NCCALCSIZE on a resize (Windows sends both
+  after the first WM_WINDOWPOSCHANGING).
 
 #### Window icons, icons and cursors
 

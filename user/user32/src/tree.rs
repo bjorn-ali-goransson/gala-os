@@ -1107,6 +1107,7 @@ struct WindowPos {
 const SWP_NOSIZE: u32 = 0x1;
 const SWP_NOMOVE: u32 = 0x2;
 const SWP_NOZORDER: u32 = 0x4;
+const SWP_NOACTIVATE: u32 = 0x10;
 const SWP_SHOWWINDOW: u32 = 0x40;
 const SWP_HIDEWINDOW: u32 = 0x80;
 const SWP_NOSENDCHANGING: u32 = 0x400;
@@ -1294,6 +1295,33 @@ pub extern "system" fn SetWindowPos(
     }
     if flags & SWP_HIDEWINDOW != 0 {
         crate::window::ShowWindow(hwnd, 0);
+    }
+    // Without SWP_NOACTIVATE a top-level window that is not active is
+    // activated (popups never are, as with ShowWindow), shown or not
+    // (Windows 11 25H2, a never-shown window's first SetWindowPos): it
+    // goes to the top of the Z order, which asks WM_WINDOWPOSCHANGING
+    // again (SWP_NOMOVE | SWP_NOSIZE here: what Windows' second WINDOWPOS
+    // holds is not measured), then `activate`'s WM_NCACTIVATE and
+    // WM_ACTIVATE, all before WM_WINDOWPOSCHANGED.
+    if top_level
+        && flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW) == 0
+        && !w.popup
+        && crate::window::GetForegroundWindow() != hwnd
+    {
+        if flags & SWP_NOSENDCHANGING == 0 {
+            let mut z = WindowPos {
+                hwnd,
+                after: 0, // HWND_TOP
+                x: nx,
+                y: ny,
+                cx: nw,
+                cy: nh,
+                flags: SWP_NOMOVE | SWP_NOSIZE,
+            };
+            SendMessageW(hwnd, WM_WINDOWPOSCHANGING, 0, &mut z as *mut WindowPos as isize);
+        }
+        with(|s| s.windows[i].z = next_z(false));
+        crate::window::set_foreground(hwnd);
     }
     crate::foreign::sync_tree(hwnd);
     SendMessageW(hwnd, WM_WINDOWPOSCHANGED, 0, &mut pos as *mut WindowPos as isize);

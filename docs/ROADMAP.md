@@ -1717,7 +1717,11 @@ TlsGetValue2 are one function behind both, CheckTokenMembershipEx,
 SetFileIoOverlappedRange and the XState functions in both
 (kernel32_test, wow64_k32_test: `export_split.rs`). SetStretchBltMode
 keeps any mode, 0, 5 and -1 included, and returns the previous one
-(gdi32_test, a DISPLAY DC and a memory DC).
+(gdi32_test, a DISPLAY DC and a memory DC). The first SetWindowPos of a
+never-shown window activates it (a second WM_WINDOWPOSCHANGING, then
+WM_ACTIVATE, before WM_WINDOWPOSCHANGED), the next one does not
+(user32_test, when the process may set the foreground; it prints the
+sequence when that check fails).
 
 Next:
 1. The next run on Windows (each fix may reveal a program's next
@@ -1775,6 +1779,13 @@ Next:
      AclRevision, AclSize, AceCount), before browser_api_test and gala
      follow (25H2 said SE_SACL_PRESENT); shell32_test's CoInitialize
      result now (did a shell call change the apartment?).
+     From issue #12: user32_test's first SetWindowPos when
+     run-all's process has (and has not) the foreground (the measurement
+     ran from a console that held it; the test prints foreground rights,
+     activation and the message sequence if they disagree), and what the
+     second WM_WINDOWPOSCHANGING's WINDOWPOS holds (gala: SWP_NOMOVE |
+     SWP_NOSIZE, HWND_TOP); a WS_OVERLAPPEDWINDOW's client width at
+     other DPIs (25H2 at 96: 304 of 320; gala's frame: 318).
      The open probes are GitHub issues labelled `windows` and `probe`
      (#6 Round 5's, #8 the older ones); the runner's skips and expected
      exits are #7.

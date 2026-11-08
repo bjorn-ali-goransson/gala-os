@@ -1891,8 +1891,9 @@ static CAPTURE: AtomicUsize = AtomicUsize::new(0);
 static FOREGROUND: AtomicUsize = AtomicUsize::new(0);
 
 /// The foreground window changes: EVENT_SYSTEM_FOREGROUND when it is
-/// another.
-fn set_foreground(hwnd: Hwnd) {
+/// another. ShowWindow, SetForegroundWindow and SetWindowPos activate
+/// through it.
+pub(crate) fn set_foreground(hwnd: Hwnd) {
     activate(hwnd, WA_ACTIVE);
 }
 
