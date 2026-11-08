@@ -61,10 +61,16 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
 }
 
+/// An information buffer, 8-byte aligned: Windows checks a class's
+/// alignment before its length (STATUS_DATATYPE_MISALIGNMENT), and a byte
+/// array on the stack has none.
+#[repr(C, align(8))]
+struct Al<const N: usize>([u8; N]);
+
 fn query_u32(h: Handle, class: u32) -> (NtStatus, u64) {
-    let mut b = [0xffu8; 4];
-    let (s, _) = query_thread(h, class, &mut b);
-    (s, u32_at(&b, 0))
+    let mut b = Al([0xffu8; 4]);
+    let (s, _) = query_thread(h, class, &mut b.0);
+    (s, u32_at(&b.0, 0))
 }
 
 /// The worker's TLS slot 5 as it saw it, plus 1 (0 = not yet run).
@@ -99,11 +105,12 @@ fn run() -> Result<(), u32> {
         let pe = image + (*((image + 0x3c) as *const u32)) as usize;
         *((pe + 24 + 16) as *const u32)
     };
-    let mut b = [0u8; 8];
-    let (s, ret) = query_thread(CURRENT_THREAD, THREAD_WIN32_START_ADDRESS, &mut b);
+    let mut b = Al([0u8; 8]);
+    let b = &mut b.0;
+    let (s, ret) = query_thread(CURRENT_THREAD, THREAD_WIN32_START_ADDRESS, b);
     c.eq(s.into(), ok)?;
     c.eq(ret.into(), 8)?;
-    c.eq(u64_at(&b, 0), (image + entry_rva as usize) as u64)?;
+    c.eq(u64_at(b, 0), (image + entry_rva as usize) as u64)?;
 
     let (s, last) = query_u32(CURRENT_THREAD, THREAD_AM_I_LAST_THREAD);
     c.eq(s.into(), ok)?;
@@ -111,13 +118,14 @@ fn run() -> Result<(), u32> {
     c.eq(query_u32(CURRENT_THREAD, THREAD_IS_TERMINATED).1, 0)?;
 
     // Times: created before now, not exited.
-    let mut times = [0u8; 32];
-    let (s, ret) = query_thread(CURRENT_THREAD, THREAD_TIMES, &mut times);
+    let mut times = Al([0u8; 32]);
+    let times = &mut times.0;
+    let (s, ret) = query_thread(CURRENT_THREAD, THREAD_TIMES, times);
     let (_, now) = system_time();
     c.eq(s.into(), ok)?;
     c.eq(ret.into(), 32)?;
-    c.ok(u64_at(&times, 0) > 0 && u64_at(&times, 0) <= now as u64, u64_at(&times, 0))?;
-    c.eq(u64_at(&times, 8), 0)?;
+    c.ok(u64_at(times, 0) > 0 && u64_at(times, 0) <= now as u64, u64_at(times, 0))?;
+    c.eq(u64_at(times, 8), 0)?;
     c.eq(
         query_thread(CURRENT_THREAD, THREAD_TIMES, &mut times[..16]).0.into(),
         STATUS_INFO_LENGTH_MISMATCH.into(),
@@ -126,7 +134,7 @@ fn run() -> Result<(), u32> {
     // HideFromDebugger takes no data.
     c.eq(set_thread(CURRENT_THREAD, THREAD_HIDE_FROM_DEBUGGER, &[]).into(), ok)?;
     c.eq(
-        set_thread(CURRENT_THREAD, THREAD_HIDE_FROM_DEBUGGER, &[0; 4]).into(),
+        set_thread(CURRENT_THREAD, THREAD_HIDE_FROM_DEBUGGER, &Al([0; 4]).0).into(),
         STATUS_INFO_LENGTH_MISMATCH.into(),
     )?;
 
@@ -147,24 +155,30 @@ fn run() -> Result<(), u32> {
     c.eq(WORKER_SLOT.load(Ordering::SeqCst), 1)?; // all slots zero
     c.eq(tls_slot(5), 0x77)?;
     c.eq(query_u32(CURRENT_THREAD, THREAD_AM_I_LAST_THREAD).1, 0)?;
-    let (s, _) = query_thread(t, THREAD_WIN32_START_ADDRESS, &mut b);
+    let (s, _) = query_thread(t, THREAD_WIN32_START_ADDRESS, b);
     c.eq(s.into(), ok)?;
-    c.eq(u64_at(&b, 0), entry as u64)?;
+    c.eq(u64_at(b, 0), entry as u64)?;
 
-    // Priorities: BasePriority = process base (8) + increment.
-    c.eq(set_thread(t, THREAD_BASE_PRIORITY, &1i32.to_le_bytes()).into(), ok)?;
-    let mut basic = [0u8; 48];
-    c.eq(query_thread(t, 0, &mut basic).0.into(), ok)?;
-    c.eq(u32_at(&basic, 44), 9)?; // BasePriority
-    c.eq(set_thread(t, THREAD_PRIORITY, &12i32.to_le_bytes()).into(), ok)?;
-    c.eq(query_thread(t, 0, &mut basic).0.into(), ok)?;
-    c.eq(u32_at(&basic, 40), 12)?; // Priority
+    // Priorities: THREAD_BASIC_INFORMATION.BasePriority is the increment
+    // over the process's base, not the absolute priority (Windows 11
+    // 25H2: 1 after ThreadBasePriority 1).
+    c.eq(set_thread(t, THREAD_BASE_PRIORITY, &Al(1i32.to_le_bytes()).0).into(), ok)?;
+    let mut basic = Al([0u8; 48]);
+    let basic = &mut basic.0;
+    c.eq(query_thread(t, 0, basic).0.into(), ok)?;
+    c.eq(u32_at(basic, 44), 1)?; // BasePriority
+    c.eq(set_thread(t, THREAD_BASE_PRIORITY, &Al((-2i32).to_le_bytes()).0).into(), ok)?;
+    c.eq(query_thread(t, 0, basic).0.into(), ok)?;
+    c.eq(u32_at(basic, 44), u64::from(-2i32 as u32))?;
+    c.eq(set_thread(t, THREAD_PRIORITY, &Al(12i32.to_le_bytes()).0).into(), ok)?;
+    c.eq(query_thread(t, 0, basic).0.into(), ok)?;
+    c.eq(u32_at(basic, 40), 12)?; // Priority
     c.eq(
-        set_thread(t, THREAD_PRIORITY, &12u64.to_le_bytes()).into(),
+        set_thread(t, THREAD_PRIORITY, &Al(12u64.to_le_bytes()).0).into(),
         STATUS_INFO_LENGTH_MISMATCH.into(),
     )?;
     c.eq(
-        set_thread(t, THREAD_PRIORITY, &32i32.to_le_bytes()).into(),
+        set_thread(t, THREAD_PRIORITY, &Al(32i32.to_le_bytes()).0).into(),
         STATUS_INVALID_PARAMETER.into(),
     )?;
 
@@ -172,8 +186,8 @@ fn run() -> Result<(), u32> {
     RELEASE.store(1, Ordering::SeqCst);
     c.eq(wait(t, None).into(), ok)?;
     c.eq(query_u32(t, THREAD_IS_TERMINATED).1, 1)?;
-    c.eq(query_thread(t, THREAD_TIMES, &mut times).0.into(), ok)?;
-    c.ok(u64_at(&times, 8) >= u64_at(&times, 0) && u64_at(&times, 8) != 0, u64_at(&times, 8))?;
+    c.eq(query_thread(t, THREAD_TIMES, times).0.into(), ok)?;
+    c.ok(u64_at(times, 8) >= u64_at(times, 0) && u64_at(times, 8) != 0, u64_at(times, 8))?;
     close(t);
     c.eq(query_u32(CURRENT_THREAD, THREAD_AM_I_LAST_THREAD).1, 1)?;
     Ok(())

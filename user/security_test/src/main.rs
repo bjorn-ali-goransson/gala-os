@@ -7,16 +7,19 @@
 //! - A directory created with a protected DACL (Everyone FILE_ALL_ACCESS
 //!   inherited by files and directories, SYSTEM FILE_GENERIC_READ not
 //!   inheritable) keeps it; its owner is the creator (TokenUser).
-//! - A file created in it inherits the Everyone ACE (INHERITED_ACE, no
-//!   inheritance flags); a subdirectory inherits it with OI|CI kept; the
-//!   SYSTEM ACE is not inherited; neither child's DACL is protected.
+//! - A file created in it inherits the Everyone ACE (no inheritance
+//!   flags); a subdirectory inherits it with OI|CI kept; the SYSTEM ACE is
+//!   not inherited; neither child's DACL is protected. The ACEs are marked
+//!   INHERITED_ACE, and the children's DACLs auto-inherited, only under a
+//!   parent whose DACL is auto-inherited ("D:PAI"; Windows 11 25H2 gives
+//!   flags 0 under "D:P").
 //! - A file created with its own protected DACL keeps exactly that.
 //! - SetFileSecurityW replaces the DACL (read back); a size query reports
 //!   ERROR_INSUFFICIENT_BUFFER and the size.
 //! - SetSecurityInfo with PROTECTED_DACL_SECURITY_INFORMATION protects
 //!   the DACL it sets; GetSecurityInfo reads owner and DACL of a handle.
 //! - Registry keys: a key created with a DACL keeps it, a subkey inherits
-//!   its container-inherit ACE (CI kept, INHERITED_ACE), RegSetKeySecurity
+//!   its container-inherit ACE (CI kept), RegSetKeySecurity
 //!   replaces it (reading and DELETE, which deleting the key needs);
 //!   RegGetKeySecurity size queries.
 //! - Kernel objects: a named event created with a DACL keeps it
@@ -56,6 +59,7 @@ unsafe extern "system" {
     fn LocalFree(p: *mut c_void) -> *mut c_void;
     fn CreateDirectoryW(path: *const u16, sa: *const SecurityAttributes) -> Bool;
     fn RemoveDirectoryW(path: *const u16) -> Bool;
+    fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
     fn DeleteFileW(path: *const u16) -> Bool;
     fn CreateFileW(
         name: *const u16,
@@ -179,6 +183,7 @@ const DACL: u32 = 4;
 const PROTECTED_DACL: u32 = 0x8000_0000;
 const SE_DACL_PRESENT: u16 = 0x0004;
 const SE_DACL_PROTECTED: u16 = 0x1000;
+const SE_DACL_AUTO_INHERITED: u16 = 0x0400;
 const SE_FILE_OBJECT: u32 = 1;
 const SE_KERNEL_OBJECT: u32 = 6;
 
@@ -255,11 +260,25 @@ fn last_error() -> u64 {
 }
 
 /// A NUL-terminated UTF-16 string.
-struct W([u16; 96]);
+struct W([u16; 160]);
 
 fn w(s: &str) -> W {
-    let mut b = [0u16; 96];
+    let mut b = [0u16; 160];
     for (slot, c) in b.iter_mut().zip(s.encode_utf16()) {
+        *slot = c;
+    }
+    W(b)
+}
+
+/// `%TEMP%\security_test<rest>`: a directory of the user's (on Windows
+/// C:\ keeps what earlier runs left).
+fn scratch(rest: &str) -> W {
+    let mut b = [0u16; 160];
+    // SAFETY: the buffer holds 128 characters.
+    let n = unsafe { GetTempPathW(128, b.as_mut_ptr()) } as usize;
+    for (slot, c) in
+        b[n..].iter_mut().zip("security_test".encode_utf16().chain(rest.encode_utf16()))
+    {
         *slot = c;
     }
     W(b)
@@ -358,7 +377,16 @@ fn run() -> Result<(), u32> {
         let user_sid = user.0.as_ptr().cast::<*const u8>().read();
 
         // A directory with a protected DACL.
-        let dir = w("C:\\security_test");
+        let dir = scratch("");
+        let file = scratch("\\a.txt");
+        let sub = scratch("\\sub");
+        let own = scratch("\\b.txt");
+        // What an earlier run on the same machine left (the directory's
+        // Everyone:FA lets its files be deleted).
+        DeleteFileW(text_ptr(&file));
+        DeleteFileW(text_ptr(&own));
+        RemoveDirectoryW(text_ptr(&sub));
+        RemoveDirectoryW(text_ptr(&dir));
         let sa = SecurityAttributes {
             length: 24,
             descriptor: sddl(&c, "D:P(A;OICI;FA;;;WD)(A;;FR;;;SY)")?,
@@ -383,20 +411,46 @@ fn run() -> Result<(), u32> {
         c.ok(needed > 20, needed.into())?;
 
         // A file inherits the Everyone ACE; a subdirectory with OI|CI.
-        let file = w("C:\\security_test\\a.txt");
         let h = CreateFileW(text_ptr(&file), GENERIC_WRITE, 0, core::ptr::null(), 1, 0x80, null);
         c.ok(h as isize != -1, last_error())?;
         CloseHandle(h);
+        // The parent's DACL is not auto-inherited (no "AI"), so neither are
+        // the children's, and their ACEs carry no INHERITED_ACE (Windows
+        // 11 25H2: flags 0).
         let (_b, dacl, control) = file_dacl(&c, &file)?;
-        c.eq((control & SE_DACL_PROTECTED).into(), 0)?;
-        expect_aces(&c, dacl, &[(0x10, FILE_ALL_ACCESS, &EVERYONE)])?;
-        let sub = w("C:\\security_test\\sub");
+        c.eq((control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED)).into(), 0)?;
+        expect_aces(&c, dacl, &[(0, FILE_ALL_ACCESS, &EVERYONE)])?;
         c.ok(CreateDirectoryW(text_ptr(&sub), core::ptr::null()) != 0, last_error())?;
         let (_b, dacl, _) = file_dacl(&c, &sub)?;
+        expect_aces(&c, dacl, &[(3, FILE_ALL_ACCESS, &EVERYONE)])?;
+        // Under an auto-inherited parent ("D:PAI") the inherited ACEs are
+        // marked INHERITED_ACE and the children's DACLs auto-inherited.
+        let ai_dir = scratch("_ai");
+        let ai_file = scratch("_ai\\a.txt");
+        let ai_sub = scratch("_ai\\sub");
+        DeleteFileW(text_ptr(&ai_file));
+        RemoveDirectoryW(text_ptr(&ai_sub));
+        RemoveDirectoryW(text_ptr(&ai_dir));
+        let sa = SecurityAttributes {
+            length: 24,
+            descriptor: sddl(&c, "D:PAI(A;OICI;FA;;;WD)(A;;FR;;;SY)")?,
+            inherit: 0,
+        };
+        c.ok(CreateDirectoryW(text_ptr(&ai_dir), &sa) != 0, last_error())?;
+        let h = CreateFileW(text_ptr(&ai_file), GENERIC_WRITE, 0, core::ptr::null(), 1, 0x80, null);
+        c.ok(h as isize != -1, last_error())?;
+        CloseHandle(h);
+        let (_b, dacl, control) = file_dacl(&c, &ai_file)?;
+        c.eq((control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED)).into(), 0x400)?;
+        expect_aces(&c, dacl, &[(0x10, FILE_ALL_ACCESS, &EVERYONE)])?;
+        c.ok(CreateDirectoryW(text_ptr(&ai_sub), core::ptr::null()) != 0, last_error())?;
+        let (_b, dacl, _) = file_dacl(&c, &ai_sub)?;
         expect_aces(&c, dacl, &[(0x13, FILE_ALL_ACCESS, &EVERYONE)])?;
+        c.ok(DeleteFileW(text_ptr(&ai_file)) != 0, last_error())?;
+        c.ok(RemoveDirectoryW(text_ptr(&ai_sub)) != 0, last_error())?;
+        c.ok(RemoveDirectoryW(text_ptr(&ai_dir)) != 0, last_error())?;
 
         // A file with its own protected DACL keeps exactly that.
-        let own = w("C:\\security_test\\b.txt");
         let sa =
             SecurityAttributes { length: 24, descriptor: sddl(&c, "D:P(A;;FR;;;SY)")?, inherit: 0 };
         let h = CreateFileW(text_ptr(&own), GENERIC_WRITE, 0, &sa, 1, 0x80, null);
@@ -510,7 +564,9 @@ fn run() -> Result<(), u32> {
         size = 1024;
         c.eq(RegGetKeySecurity(subkey, DACL, kb.0.as_mut_ptr(), &mut size) as u64, 0)?;
         let (dacl, _) = dacl_of(&c, kb.0.as_ptr())?;
-        expect_aces(&c, dacl, &[(0x12, KEY_ALL_ACCESS, &EVERYONE)])?;
+        // CI kept, not INHERITED_ACE: the parent's DACL is not
+        // auto-inherited (the files' rule; not measured for keys).
+        expect_aces(&c, dacl, &[(2, KEY_ALL_ACCESS, &EVERYONE)])?;
         c.eq(RegSetKeySecurity(subkey, DACL, sddl(&c, "D:P(A;;KRSD;;;WD)")?) as u64, 0)?;
         size = 1024;
         c.eq(RegGetKeySecurity(subkey, DACL, kb.0.as_mut_ptr(), &mut size) as u64, 0)?;

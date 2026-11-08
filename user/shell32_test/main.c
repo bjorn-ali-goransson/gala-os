@@ -23,8 +23,8 @@
  * - DragAcceptFiles sets and clears WS_EX_ACCEPTFILES.
  * - ExtractIconW: with index -1 the number of icon groups; index n the
  *   n-th group's icon (SM_CXICON sized), a negative index the group with
- *   that resource ID; NULL past the last or for a missing file; 1 for a
- *   file that is not an image. ExtractIconExW: the count, or large
+ *   that resource ID; NULL past the last, for a missing file and for a
+ *   file that is not an image (with no error; the docs say 1). ExtractIconExW: the count, or large
  *   (32) and small (16) icons. SHDefExtractIconW: S_OK, S_FALSE when the
  *   icon is not there.
  * - SHFileOperationW: FO_COPY of a directory to a new name copies the
@@ -222,7 +222,9 @@ static IShellLinkW *new_link(void) {
 }
 
 static void links(const wchar_t *self) {
-    CHECK(SUCCEEDED(CoInitialize(NULL)));
+    /* main's apartment: S_FALSE (initialised again, the same kind). */
+    HRESULT init = CoInitialize(NULL);
+    CHECK(init == S_FALSE || init == S_OK);
     IShellLinkW *sl = new_link();
     wchar_t buf[MAX_PATH], dir[MAX_PATH], link[MAX_PATH];
     WIN32_FIND_DATAW fd;
@@ -398,6 +400,12 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "child") == 0)
         return 7;
 
+    /* ShellExecuteEx may go through shell extensions, so its
+       documentation asks for COM first (single-threaded); without it a
+       shell call left the thread in another apartment on 25H2, and links'
+       CoInitialize failed. */
+    CHECK(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK);
+
     /* Start menu and per-user program folders. */
     wchar_t folder[MAX_PATH], want[MAX_PATH];
     CHECK(SHGetFolderPathW(NULL, CSIDL_PROGRAMS | CSIDL_FLAG_CREATE, NULL, 0, folder) == S_OK);
@@ -489,7 +497,15 @@ int main(int argc, char **argv) {
 
     /* Notifications nothing listens to. */
     SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, L"C:\\", NULL);
-    CHECK(SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0) == -1);
+    /* An overlay index for any path, even a missing one: the same for
+       the same path, another for another (Windows 11 25H2: 5, 5, 5, then
+       6). */
+    int overlay = SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0);
+    CHECK(overlay != -1);
+    CHECK(SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0) == overlay);
+    int other = SHGetIconOverlayIndexW(L"C:\\nothing2.ico", 0);
+    CHECK(other != -1 && other != overlay);
+    CHECK(SHGetIconOverlayIndexW(L"C:\\nothing.ico", 0) == overlay);
 
     /* Icons: this program has two icon groups (build.sh: one with 16 and
      * 32 pixel images, one with 32 only). */
@@ -509,7 +525,10 @@ int main(int argc, char **argv) {
     DWORD wrote;
     WriteFile(text, "not an image", 12, &wrote, NULL);
     CloseHandle(text);
-    CHECK((UINT_PTR)ExtractIconW(NULL, L"sh_text.txt", 0) == 1);
+    /* NULL with no error, not the documented 1 (Windows 11 25H2, by a
+       relative or an absolute path). */
+    SetLastError(0);
+    CHECK(ExtractIconW(NULL, L"sh_text.txt", 0) == NULL && GetLastError() == 0);
     DeleteFileW(L"sh_text.txt");
     CHECK(ExtractIconExW(self, -1, NULL, NULL, 0) == 2);
     HICON large[2] = {0}, small[2] = {0};

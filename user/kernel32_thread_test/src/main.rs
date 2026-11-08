@@ -345,7 +345,8 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
             b'e' as u16,
             0,
         ];
-        c.eq(SetThreadDescription(t, name.as_ptr()) as u64, 0)?;
+        // HRESULT_FROM_NT(STATUS_SUCCESS), not S_OK (Windows 11 25H2).
+        c.eq(SetThreadDescription(t, name.as_ptr()) as u64, 0x1000_0000)?;
         let mut info = [0u64; 16];
         let mut ret = 0u32;
         let st = NtQueryInformationThread(t, 38, info.as_mut_ptr().cast(), 128, &mut ret);
@@ -355,7 +356,7 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         let text = core::slice::from_raw_parts(info[1] as *const u16, length / 2);
         c.ok(text == &name[..10], u64::from(text.first().copied().unwrap_or(0)))?;
         let mut back: *mut u16 = core::ptr::null_mut();
-        c.eq(GetThreadDescription(t, &mut back) as u64, 0)?;
+        c.eq(GetThreadDescription(t, &mut back) as u64, 0x1000_0000)?; // as SetThreadDescription
         c.ok(!back.is_null() && core::slice::from_raw_parts(back, 11) == &name[..], 0)?;
         LocalFree(back.cast());
         c.ok(ResumeThread(other) == 1, 0)?;

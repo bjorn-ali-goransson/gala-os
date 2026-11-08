@@ -53,6 +53,23 @@ impl CacheMode {
     }
 }
 
+/// What a fork made of one of the parent's pages in the child
+/// (`UserSpace::share_into`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkedPage {
+    /// Nothing mapped there.
+    Absent,
+    /// A frame owned elsewhere (a section's, a shared page), mapped in
+    /// both.
+    Borrowed,
+    /// An owned frame now owned by both, read-only in both until a write
+    /// copies it.
+    CopyOnWrite,
+    /// An owned frame that could not be shared, copied into one of the
+    /// child's own.
+    Copied,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageFlags {
     pub writable: bool,

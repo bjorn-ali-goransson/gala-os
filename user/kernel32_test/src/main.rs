@@ -2,8 +2,11 @@
 //! bound by the loader): console output, last-error, process and thread
 //! ids, virtual memory, events and waits, sleeping and tick counts, the
 //! performance counter, LoadLibrary/GetProcAddress/FreeLibrary,
-//! SetDllDirectoryW/GetDllDirectoryW, and
-//! ExitProcess. Expected results, last-error codes included, are those of
+//! SetDllDirectoryW/GetDllDirectoryW (a copy of testdll2.dll in %TEMP%),
+//! which names kernel32 and kernelbase each export (`export_split`: the
+//! PathCch, address-wait and interrupt-time functions are kernelbase's
+//! alone, MapUserPhysicalPagesScatter kernel32's, FlsGetValue2 and
+//! TlsGetValue2 one function behind both), and ExitProcess. Expected results, last-error codes included, are those of
 //! real Windows (its kernel32); on gala the test runs against gala's own
 //! kernel32.dll. Prints `kernel32_test: ok` and ends with ExitProcess(0),
 //! or exits with the number of the failing check.
@@ -11,7 +14,9 @@
 #![no_std]
 #![no_main]
 
-use core::ffi::c_void;
+use core::ffi::{CStr, c_void};
+
+mod export_split;
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -39,7 +44,33 @@ unsafe extern "system" {
     fn FreeLibrary(module: Handle) -> Bool;
     fn SetDllDirectoryW(dir: *const u16) -> Bool;
     fn GetDllDirectoryW(size: u32, buffer: *mut u16) -> u32;
+    fn GetModuleFileNameW(module: Handle, buf: *mut u16, size: u32) -> u32;
+    fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
+    fn CreateDirectoryW(path: *const u16, attrs: *mut c_void) -> Bool;
+    fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: Bool) -> Bool;
+    fn DeleteFileW(path: *const u16) -> Bool;
+    fn RemoveDirectoryW(path: *const u16) -> Bool;
     fn ExitProcess(code: u32) -> !;
+}
+
+// What the compiler's code calls (path buffers are copied and zeroed):
+// ntdll's exports, as other tests take them.
+#[allow(dead_code)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "C" {
+    fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    fn __chkstk();
+    fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
+    fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+}
+
+#[unsafe(no_mangle)]
+pub static _fltused: i32 = 0;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __CxxFrameHandler3() -> ! {
+    // SAFETY: ends the process.
+    unsafe { ExitProcess(0xdeac) }
 }
 
 const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
@@ -193,24 +224,93 @@ fn run() -> Result<(), u32> {
         c.ok(LoadLibraryA(c"no_such_dll.dll".as_ptr().cast()).is_null(), 0)?;
         c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
 
+        // Which names kernel32 and kernelbase export (Windows 11 25H2).
+        let k32 = LoadLibraryA(c"kernel32.dll".as_ptr().cast());
+        let kb = LoadLibraryA(c"kernelbase.dll".as_ptr().cast());
+        c.ok(!k32.is_null() && !kb.is_null(), 0)?;
+        let find = |m: Handle| {
+            move |name: &CStr| export_split::Found {
+                address: GetProcAddress(m, name.as_ptr().cast()) as usize,
+                exported: export_split::exported(m as usize, name),
+            }
+        };
+        let mismatch = export_split::first_mismatch(find(k32), find(kb));
+        if let Some((name, a, b)) = mismatch {
+            out(b"kernel32_test: ");
+            out(name.to_bytes());
+            for (dll, f) in [(&b": kernel32 "[..], a), (&b", kernelbase "[..], b)] {
+                out(dll);
+                out(&hex((f.address as u64 >> 32) as u32));
+                out(&hex(f.address as u32));
+                out(if f.exported { b" exported" } else { b" absent  " });
+            }
+            out(b"\r\n");
+        }
+        c.ok(mismatch.is_none(), 0)?;
+
         // SetDllDirectoryW adds a directory to the search, after the
-        // executable's: testdll2.dll is only in C:\gala\lib.
-        let lib = b"C:\\gala\\lib\0".map(u16::from);
-        let mut buf = [0u16; 16];
-        c.eq(GetDllDirectoryW(16, buf.as_mut_ptr()).into(), 0)?;
-        c.ok(LoadLibraryA(c"testdll2.dll".as_ptr().cast()).is_null(), 0)?;
+        // executable's: a copy of testdll2.dll under a name found nowhere
+        // else, in %TEMP%\gala-kernel32-test (testdll2.dll itself sits in
+        // the exe's directory when run from user/bin on Windows; gala's
+        // scenario ships it in <exe dir>\lib).
+        let (lib, n) = join(&temp(), "gala-kernel32-test");
+        let (dll_path, _) = join(&lib, "\\gala_k32_dll.dll");
+        DeleteFileW(dll_path.as_ptr());
+        CreateDirectoryW(lib.as_ptr(), core::ptr::null_mut());
+        let (mut exe, mut exe_n) = ([0u16; 192], 0);
+        let got = GetModuleFileNameW(core::ptr::null_mut(), exe.as_mut_ptr(), 160) as usize;
+        for (i, &ch) in exe[..got].iter().enumerate() {
+            if ch == u16::from(b'\\') {
+                exe_n = i + 1;
+            }
+        }
+        exe[exe_n..].fill(0);
+        let (in_lib, _) = join(&exe, "lib\\testdll2.dll");
+        let (beside, _) = join(&exe, "testdll2.dll");
+        c.ok(
+            CopyFileW(in_lib.as_ptr(), dll_path.as_ptr(), 0) != 0
+                || CopyFileW(beside.as_ptr(), dll_path.as_ptr(), 0) != 0,
+            GetLastError().into(),
+        )?;
+        let mut buf = [0u16; 192];
+        c.eq(GetDllDirectoryW(192, buf.as_mut_ptr()).into(), 0)?;
+        c.ok(LoadLibraryA(c"gala_k32_dll.dll".as_ptr().cast()).is_null(), 0)?;
         c.eq(SetDllDirectoryW(lib.as_ptr()) as u64, 1)?;
-        c.eq(GetDllDirectoryW(16, buf.as_mut_ptr()).into(), 11)?;
-        c.ok(buf[..12] == lib, buf[0].into())?;
-        c.eq(GetDllDirectoryW(4, buf.as_mut_ptr()).into(), 12)?; // too small: the size needed
-        let dll2 = LoadLibraryA(c"testdll2.dll".as_ptr().cast());
+        c.eq(GetDllDirectoryW(192, buf.as_mut_ptr()).into(), n as u64)?;
+        c.ok(buf[..=n] == lib[..=n], buf[0].into())?;
+        c.eq(GetDllDirectoryW(4, buf.as_mut_ptr()).into(), n as u64 + 1)?; // too small: the size needed
+        let dll2 = LoadLibraryA(c"gala_k32_dll.dll".as_ptr().cast());
         c.ok(!dll2.is_null(), GetLastError().into())?;
+        c.ok(!GetProcAddress(dll2, c"gala2_add3".as_ptr().cast()).is_null(), 0)?;
         c.eq(FreeLibrary(dll2) as u64, 1)?;
         // NULL restores the default search.
         c.eq(SetDllDirectoryW(core::ptr::null()) as u64, 1)?;
-        c.eq(GetDllDirectoryW(16, buf.as_mut_ptr()).into(), 0)?;
+        c.eq(GetDllDirectoryW(192, buf.as_mut_ptr()).into(), 0)?;
+        c.ok(DeleteFileW(dll_path.as_ptr()) != 0, GetLastError().into())?;
+        c.ok(RemoveDirectoryW(lib.as_ptr()) != 0, GetLastError().into())?;
     }
     Ok(())
+}
+
+/// The user's temporary directory (with its trailing backslash),
+/// NUL-terminated.
+fn temp() -> [u16; 192] {
+    let mut b = [0u16; 192];
+    // SAFETY: the buffer holds 128 characters.
+    unsafe { GetTempPathW(128, b.as_mut_ptr()) };
+    b
+}
+
+/// `base` (NUL-terminated) followed by `rest`, and its length.
+fn join(base: &[u16; 192], rest: &str) -> ([u16; 192], usize) {
+    let mut b = *base;
+    let mut n = b.iter().position(|&c| c == 0).unwrap_or(0);
+    for ch in rest.bytes() {
+        b[n] = ch.into();
+        n += 1;
+    }
+    b[n] = 0;
+    (b, n)
 }
 
 #[unsafe(no_mangle)]

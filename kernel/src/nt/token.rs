@@ -266,9 +266,15 @@ pub const SYSTEM_LOGON: u64 = 0x3e7;
 
 static BOOT_SYSTEM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// The boot option `as=system`: processes the kernel starts run as SYSTEM.
+/// The boot options `as=system` and `start_as=system`: processes the
+/// kernel starts from here on run as SYSTEM.
 pub fn set_boot_system(on: bool) {
     BOOT_SYSTEM.store(on, Ordering::Relaxed);
+}
+
+/// Whether the processes the kernel starts now run as SYSTEM.
+pub fn boot_system() -> bool {
+    BOOT_SYSTEM.load(Ordering::Relaxed)
 }
 
 static NEXT_LUID: AtomicU64 = AtomicU64::new(0x0010_0000);
@@ -949,10 +955,13 @@ pub fn query(id: u64, data: &TokenData, class: u32, base: u64) -> Result<Vec<u8>
         TOKEN_MANDATORY_POLICY => return dword(3),
         TOKEN_APP_CONTAINER_SID => o.u64(0)?,
         TOKEN_INTEGRITY_LEVEL => {
-            // TOKEN_MANDATORY_LABEL: the label with SE_GROUP_INTEGRITY.
+            // TOKEN_MANDATORY_LABEL: the label with SE_GROUP_INTEGRITY |
+            // SE_GROUP_INTEGRITY_ENABLED (0x60, as Windows 11 25H2 reports
+            // it).
+            let attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
             let label = data.groups.iter().find(|g| g.sid.is_label()).map_or(
-                Group { sid: Sid::new(16, &[8192]), attributes: SE_GROUP_INTEGRITY },
-                |g| Group { sid: g.sid, attributes: SE_GROUP_INTEGRITY },
+                Group { sid: Sid::new(16, &[8192]), attributes },
+                |g| Group { sid: g.sid, attributes },
             );
             o.sid_list(&[label])?
         }

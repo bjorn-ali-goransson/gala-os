@@ -586,10 +586,46 @@ pub extern "system" fn Shell_NotifyIconW(message: u32, _data: *const c_void) -> 
     0
 }
 
-/// SHGetIconOverlayIndexW: no overlay icons are registered (-1, as
-/// documented for an overlay that is not found).
+/// The icon paths SHGetIconOverlayIndexW has handed indexes for (a hash
+/// of each, case folded; 0 = free), the index being FIRST_OVERLAY plus
+/// the slot.
+static OVERLAYS: [core::sync::atomic::AtomicU64; 32] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 32];
+const FIRST_OVERLAY: i32 = 5;
+
+/// SHGetIconOverlayIndexW(pszIconPath, iIconIndex): an overlay index for
+/// the path, whether or not the file exists: the same for the same path,
+/// the next free one for a new path (Windows 11 25H2 measured 5 for a
+/// missing path three times, then 6 for another; -1 is documented for
+/// "not found"). -1 once gala's table is full (recorded).
 #[unsafe(no_mangle)]
-pub extern "system" fn SHGetIconOverlayIndexW(_path: *const u16, _index: i32) -> i32 {
+pub extern "system" fn SHGetIconOverlayIndexW(path: *const u16, index: i32) -> i32 {
+    use core::sync::atomic::Ordering;
+    if path.is_null() {
+        return -1;
+    }
+    // FNV-1a over the path (ASCII case folded) and the icon index; never 0.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    loop {
+        // SAFETY: the caller's NUL-terminated string.
+        let c = unsafe { *path.add(i) };
+        if c == 0 {
+            break;
+        }
+        let c = if (0x41..=0x5a).contains(&c) { c | 0x20 } else { c };
+        h = (h ^ u64::from(c)).wrapping_mul(0x100_0000_01b3);
+        i += 1;
+    }
+    h = (h ^ index as u32 as u64).wrapping_mul(0x100_0000_01b3) | 1;
+    for (slot, entry) in OVERLAYS.iter().enumerate() {
+        match entry.compare_exchange(0, h, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return FIRST_OVERLAY + slot as i32,
+            Err(seen) if seen == h => return FIRST_OVERLAY + slot as i32,
+            Err(_) => {}
+        }
+    }
+    record(b"shell32.dll!SHGetIconOverlayIndexW(table full)", OVERLAYS.len() as u64);
     -1
 }
 

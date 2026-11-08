@@ -341,8 +341,8 @@ fn extract(s: &Source, index: i32, size: u32) -> usize {
 
 /// ExtractIconW: with index -1 (0xFFFFFFFF) the number of icons in the
 /// file; else the icon (SM_CXICON pixels) at that index (a negative one:
-/// the resource ID); NULL if there is none or the file cannot be read,
-/// 1 for a file that is neither an image nor an icon file.
+/// the resource ID); NULL if there is none, the file cannot be read or
+/// it is neither an image nor an icon file.
 #[unsafe(no_mangle)]
 pub extern "system" fn ExtractIconW(_instance: usize, file: *const u16, index: u32) -> usize {
     if file.is_null() {
@@ -350,8 +350,10 @@ pub extern "system" fn ExtractIconW(_instance: usize, file: *const u16, index: u
     }
     let Some(data) = read(file) else { return 0 };
     let s = source(data.bytes());
+    // A file that is neither an image nor an icon file: NULL with no error,
+    // not the documented 1 (Windows 11 25H2, a .txt file).
     if matches!(s, Source::Neither) {
-        return 1;
+        return 0;
     }
     if index == u32::MAX {
         return count(&s) as usize;

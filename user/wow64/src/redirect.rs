@@ -12,7 +12,9 @@
 //! work on the name the caller passed; the kernel's namespace stays
 //! unaware. It applies to the names of the file services' OBJECT_ATTRIBUTES
 //! (NtCreateFile, NtOpenFile, NtQueryAttributesFile) given as full NT paths
-//! (`\??\C:\Windows\System32\...`, no RootDirectory).
+//! (`\??\C:\Windows\System32\...`, no RootDirectory), and to the image
+//! GalaCreateProcess starts (a 32-bit program starting System32's program
+//! gets SysWOW64's, as on Windows).
 
 use crate::generic::Us64;
 use crate::mem::{self, Res};
@@ -155,29 +157,64 @@ fn fold(c: u16) -> u16 {
     if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c }
 }
 
-/// Redirects the name `us` (an OBJECT_ATTRIBUTES's, converted; no root
-/// directory) if this thread's redirection is on and it names a
-/// redirected path: `us` then points at the new name in `buf`.
-pub fn apply(us: &mut Us64, root: u64, buf: &mut [u16; MAX_NAME]) -> Res<()> {
-    if root != 0 || us.buffer == 0 || !enabled() {
-        return Ok(());
-    }
-    let len = usize::from(us.length) / 2;
-    if len > MAX_NAME {
-        return Ok(());
+/// The redirected form of the caller's NT path at `addr` (`len` UTF-16
+/// units) into `buf` (its length), if this thread's redirection is on and
+/// the path is redirected.
+fn redirect_at(addr: u64, len: usize, buf: &mut [u16; MAX_NAME]) -> Res<Option<usize>> {
+    if addr == 0 || len > MAX_NAME || !enabled() {
+        return Ok(None);
     }
     let mut name = [0u16; MAX_NAME];
     let mut raw = [0u8; 2 * MAX_NAME];
-    mem::read(us.buffer, &mut raw[..2 * len])?;
+    mem::read(addr, &mut raw[..2 * len])?;
     for (i, c) in name[..len].iter_mut().enumerate() {
         *c = u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]]);
     }
     let mut windir = [0u16; 260];
     let n = windows_dir(&mut windir);
-    if let Some(total) = rewrite(&name[..len], &windir[..n], buf) {
+    Ok(rewrite(&name[..len], &windir[..n], buf))
+}
+
+/// Redirects the name `us` (an OBJECT_ATTRIBUTES's, converted; no root
+/// directory) if this thread's redirection is on and it names a
+/// redirected path: `us` then points at the new name in `buf`.
+pub fn apply(us: &mut Us64, root: u64, buf: &mut [u16; MAX_NAME]) -> Res<()> {
+    if root != 0 {
+        return Ok(());
+    }
+    if let Some(total) = redirect_at(us.buffer, usize::from(us.length) / 2, buf)? {
         us.length = (2 * total) as u16;
         us.maximum_length = (2 * total) as u16;
         us.buffer = buf.as_ptr() as u64;
     }
     Ok(())
+}
+
+/// GalaCreateProcess's parameter block (gala's kernel32 builds it; its
+/// fields are 8 bytes whatever the caller's bitness): the image path's
+/// pointer at 0, its length in characters at 8.
+const IMAGE_PATH: u64 = 0;
+const IMAGE_LENGTH: u64 = 8;
+
+/// The image a 32-bit caller starts is a file it opens, redirected as its
+/// other opens are: GalaCreateProcess's image path in the caller's block
+/// `block` is pointed at its redirected form in `buf` for the call.
+/// Returns the original (pointer, length) to put back with `restore`.
+pub fn apply_image(block: u64, buf: &mut [u16; MAX_NAME]) -> Res<Option<(u64, u32)>> {
+    let mut field = [0u8; 8];
+    mem::read(block + IMAGE_PATH, &mut field)?;
+    let path = u64::from_le_bytes(field);
+    let len = mem::get32(block + IMAGE_LENGTH)?;
+    let Some(total) = redirect_at(path, len as usize, buf)? else {
+        return Ok(None);
+    };
+    mem::write(block + IMAGE_PATH, &(buf.as_ptr() as u64).to_le_bytes())?;
+    mem::put32(block + IMAGE_LENGTH, total as u32)?;
+    Ok(Some((path, len)))
+}
+
+/// Puts back what `apply_image` changed in the caller's block.
+pub fn restore_image(block: u64, (path, len): (u64, u32)) -> Res<()> {
+    mem::write(block + IMAGE_PATH, &path.to_le_bytes())?;
+    mem::put32(block + IMAGE_LENGTH, len)
 }

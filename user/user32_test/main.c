@@ -18,7 +18,11 @@
  *   what the window gets (not asked with SWP_NOSENDCHANGING);
  *   GetWindowRect/GetClientRect are the new ones
  *   in WM_WINDOWPOSCHANGED and WM_SIZE; WM_SIZE's wParam is
- *   SIZE_MAXIMIZED after SC_MAXIMIZE and SIZE_RESTORED otherwise.
+ *   SIZE_MAXIMIZED after SC_MAXIMIZE and SIZE_RESTORED otherwise. The
+ *   first SetWindowPos (without SWP_NOACTIVATE) of a never-shown window
+ *   also activates it when the process may set the foreground: a second
+ *   WM_WINDOWPOSCHANGING, then WM_ACTIVATE, before WM_WINDOWPOSCHANGED;
+ *   the next one of the active window does not.
  * - WM_NCCALCSIZE (a custom frame, as Chromium's browser window draws
  *   its own): CreateWindowEx sends it (wParam FALSE, the window's
  *   rectangle); returning it unchanged makes the whole window the client
@@ -89,6 +93,10 @@
  *   ERROR_CLASS_ALREADY_EXISTS); ImmNotifyIME of no input context fails,
  *   leaving ERROR_SUCCESS for NULL and ERROR_INVALID_HANDLE for a handle
  *   that is no context (Wine's imm32.c records Windows' answers).
+ * - What Mesa's llvmpipe imports: RegisterClassA (as RegisterClassExA),
+ *   CreateWindowExA of that class; WindowFromDC of GetDC's DC is the
+ *   window, of a memory DC NULL; EnumDisplaySettingsA's current mode is
+ *   the screen's size, at least 24 bits per pixel, in DEVMODEA's layout.
  * - RegisterWindowMessageW: a message in 0xC000-0xFFFF, the same for the
  *   same name in any case, another for another name.
  * - Child windows (WS_CHILD): GetParent, GetDlgCtrlID/GetDlgItem (the id
@@ -216,6 +224,12 @@ static HWND cbt_created, cbt_destroyed;
 static int title_seen;
 
 static LRESULT CALLBACK cbt(int code, WPARAM wparam, LPARAM lparam) {
+    WCHAR cls[8];
+    /* A thread's first window brings its default IME window (class "IME",
+       "Default IME") on Windows, which the hook sees too; gala makes none.
+       Only the test's own windows are counted (created and destroyed). */
+    if ((code == HCBT_CREATEWND || code == HCBT_DESTROYWND) && GetClassNameW((HWND)wparam, cls, 8) == 3 && wcscmp(cls, L"IME") == 0)
+        return CallNextHookEx(cbt_hook, code, wparam, lparam);
     if (code == HCBT_CREATEWND) {
         cbt_creates++;
         cbt_created = (HWND)wparam;
@@ -610,6 +624,43 @@ static void scintilla_imports(void) {
     CHECK(!ImmNotifyIME((HIMC)0xdeadcafe, NI_COMPOSITIONSTR, CPS_CANCEL, 0) && GetLastError() == ERROR_INVALID_HANDLE);
 }
 
+/* What Mesa's llvmpipe (libgallium_wgl.dll) imports besides: RegisterClassA
+ * registers a class CreateWindowExA finds by its name (again:
+ * ERROR_CLASS_ALREADY_EXISTS); EnumDisplaySettingsA's current mode is the
+ * screen's size (SM_CXSCREEN x SM_CYSCREEN), in DEVMODEA's own layout. */
+static void mesa_imports(void) {
+    WNDCLASSA wca;
+    memset(&wca, 0, sizeof wca);
+    wca.lpfnWndProc = DefWindowProcA;
+    wca.hInstance = GetModuleHandleW(NULL);
+    wca.lpszClassName = "User32TestAnsiPlain";
+    ATOM atom = RegisterClassA(&wca);
+    CHECK(atom >= 0xC000);
+    SetLastError(0);
+    CHECK(!RegisterClassA(&wca) && GetLastError() == ERROR_CLASS_ALREADY_EXISTS);
+    HWND w = CreateWindowExA(0, "User32TestAnsiPlain", "ansi", WS_POPUP, 0, 0, 10, 10, NULL, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    wchar_t cls[32];
+    CHECK(w != NULL && GetClassNameW(w, cls, 32) == 19 && wcscmp(cls, L"User32TestAnsiPlain") == 0);
+    /* WindowFromDC: the window a DC from GetDC draws on; a memory DC has
+     * none. */
+    HDC dc = GetDC(w);
+    CHECK(dc != NULL && WindowFromDC(dc) == w);
+    HDC mem = CreateCompatibleDC(dc);
+    CHECK(mem != NULL && WindowFromDC(mem) == NULL);
+    DeleteDC(mem);
+    ReleaseDC(w, dc);
+    CHECK(DestroyWindow(w));
+    DEVMODEA mode;
+    memset(&mode, 0, sizeof mode);
+    mode.dmSize = sizeof mode;
+    CHECK(EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &mode));
+    CHECK(mode.dmPelsWidth == (DWORD)GetSystemMetrics(SM_CXSCREEN));
+    CHECK(mode.dmPelsHeight == (DWORD)GetSystemMetrics(SM_CYSCREEN));
+    CHECK((mode.dmFields & (DM_PELSWIDTH | DM_PELSHEIGHT)) == (DM_PELSWIDTH | DM_PELSHEIGHT));
+    CHECK(mode.dmBitsPerPel >= 24);
+}
+
 static int monitors_seen;
 static HMONITOR monitor_seen;
 static RECT monitor_rect;
@@ -871,6 +922,11 @@ static void bitmaps(void) {
 // takes the invalidation back.
 /* GetDialogBaseUnits: the system font's average width (low word) and
  * height (high word), both positive. */
+/* Whether this process may set the foreground (dialog_units'
+ * SetForegroundWindow succeeded): what decides whether a SetWindowPos
+ * activates (positions). */
+static int foreground_rights;
+
 static void dialog_units(void) {
     LONG u = GetDialogBaseUnits();
     CHECK(LOWORD(u) > 0 && HIWORD(u) > LOWORD(u));
@@ -881,8 +937,18 @@ static void dialog_units(void) {
      * active window; BringWindowToTop succeeds. */
     HWND w = CreateWindowExW(0, L"User32TestHooks", L"active", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, NULL,
                              NULL, GetModuleHandleW(NULL), NULL);
-    CHECK(SetForegroundWindow(w) && GetForegroundWindow() == w && GetActiveWindow() == w);
-    CHECK(SetActiveWindow(w) == w && BringWindowToTop(w));
+    if (!SetForegroundWindow(w)) {
+        /* The documented foreground lock: a process that is not the
+         * foreground one and had no recent input (started from a
+         * background shell) may not take the foreground. */
+        CHECK(GetForegroundWindow() != w);
+        printf("user32_test: activation skipped (no foreground rights)\n");
+        fflush(stdout);
+    } else {
+        foreground_rights = 1;
+        CHECK(GetForegroundWindow() == w && GetActiveWindow() == w);
+        CHECK(SetActiveWindow(w) == w && BringWindowToTop(w));
+    }
     DestroyWindow(w);
 }
 
@@ -1045,8 +1111,16 @@ static void clipboard_formats(void) {
 // resized, e.g. snapped): WM_WINDOWPOSCHANGING may change the WINDOWPOS
 // and the window gets what it says; WM_WINDOWPOSCHANGED and then WM_SIZE
 // (DefWindowProc) see the new rectangle; WM_SIZE's wParam is
-// SIZE_MAXIMIZED after SC_MAXIMIZE, else SIZE_RESTORED.
+// SIZE_MAXIMIZED after SC_MAXIMIZE, else SIZE_RESTORED. The first
+// SetWindowPos without SWP_NOACTIVATE of a window that is not active
+// activates it, when the process may set the foreground (Windows 11 25H2,
+// a never-shown window: WM_WINDOWPOSCHANGING, WM_GETMINMAXINFO,
+// WM_NCCALCSIZE, WM_WINDOWPOSCHANGING again, then WM_ACTIVATEAPP,
+// WM_NCACTIVATE and WM_ACTIVATE, WM_SETFOCUS, then WM_WINDOWPOSCHANGED and
+// WM_SIZE); the next SetWindowPos of the active window does not.
 static int pos_force_cx, pos_seq[8], pos_n, pos_changed_w, pos_size_client_w;
+/* pos_n when WM_ACTIVATE(WA_ACTIVE) came (-1: not yet). */
+static int pos_activate_at;
 static WPARAM pos_size_wparam;
 static LRESULT CALLBACK pos_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     RECT r;
@@ -1061,6 +1135,8 @@ static LRESULT CALLBACK pos_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             pos_seq[pos_n++] = 2;
         GetWindowRect(hwnd, &r);
         pos_changed_w = r.right - r.left;
+    } else if (msg == WM_ACTIVATE && LOWORD(wparam) == WA_ACTIVE) {
+        pos_activate_at = pos_n;
     } else if (msg == WM_SIZE) {
         if (pos_n < 8)
             pos_seq[pos_n++] = 3;
@@ -1081,15 +1157,38 @@ static void positions(void) {
                              GetModuleHandleW(NULL), NULL);
     CHECK(w != NULL);
     RECT r, c;
+    CHECK(GetActiveWindow() != w);
     pos_n = 0;
+    pos_activate_at = -1;
     pos_size_wparam = 99;
     CHECK(SetWindowPos(w, NULL, 0, 0, 320, 220, SWP_NOMOVE | SWP_NOZORDER));
-    CHECK(pos_n == 3 && pos_seq[0] == 1 && pos_seq[1] == 2 && pos_seq[2] == 3);
+    int activated = GetActiveWindow() == w;
+    /* Activation: a second WM_WINDOWPOSCHANGING, WM_ACTIVATE after it. */
+    int first_ok = activated ? pos_n == 4 && pos_seq[0] == 1 && pos_seq[1] == 1 && pos_seq[2] == 2 && pos_seq[3] == 3
+                                   && pos_activate_at == 2
+                             : pos_n == 3 && pos_seq[0] == 1 && pos_seq[1] == 2 && pos_seq[2] == 3;
+    if (!first_ok || activated != foreground_rights) {
+        printf("user32_test: first SetWindowPos: foreground rights %d, activated %d, WM_ACTIVATE at %d, pos_n %d, "
+               "pos_seq",
+               foreground_rights, activated, pos_activate_at, pos_n);
+        for (int i = 0; i < pos_n && i < 8; i++)
+            printf(" %d", pos_seq[i]);
+        printf("\n");
+        fflush(stdout);
+    }
+    CHECK(first_ok);
+    CHECK(activated == foreground_rights);
     CHECK(pos_changed_w == 320 && pos_size_wparam == SIZE_RESTORED);
+    /* WM_SIZE saw the client rectangle GetClientRect gives (Windows 11:
+       304 of 320, its 8-pixel sides; gala's frame is its own). */
     CHECK(GetClientRect(w, &c) && pos_size_client_w == c.right);
-    /* The window procedure narrows it in WM_WINDOWPOSCHANGING. */
+    /* The window procedure narrows it in WM_WINDOWPOSCHANGING. Now
+       active (or not to be), the window is not activated again. */
     pos_force_cx = 260;
+    pos_n = 0;
+    pos_activate_at = -1;
     CHECK(SetWindowPos(w, NULL, 0, 0, 400, 220, SWP_NOMOVE | SWP_NOZORDER));
+    CHECK(pos_n == 3 && pos_seq[0] == 1 && pos_seq[1] == 2 && pos_seq[2] == 3 && pos_activate_at == -1);
     CHECK(GetWindowRect(w, &r) && r.right - r.left == 260 && r.left == 30 && pos_changed_w == 260);
     CHECK(GetClientRect(w, &c) && pos_size_client_w == c.right && c.right < 260);
     /* SWP_NOSENDCHANGING: no WM_WINDOWPOSCHANGING, so no say in it. */
@@ -1385,6 +1484,7 @@ int main(void) {
     menu_bar();
     menu_bar_info();
     scintilla_imports();
+    mesa_imports();
     monitors();
     menus();
     children();

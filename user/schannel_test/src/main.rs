@@ -1258,7 +1258,9 @@ fn check_connection(c: &mut Checks, client: &mut Client, tls13: bool) -> Result<
     // SAFETY: the context Schannel made; our buffer.
     unsafe {
         let ctx = &*cert.cast::<CertContext>();
-        c.eq(ctx.encoding.into(), (X509_ASN_ENCODING | PKCS_7_ASN_ENCODING).into())?;
+        // A certificate context's encoding is X509_ASN_ENCODING alone (the
+        // message part dropped), as cert_test measured on Windows 25H2.
+        c.eq(ctx.encoding.into(), X509_ASN_ENCODING.into())?;
         c.ok(ctx.encoded_size > 100, ctx.encoded_size.into())?;
         let n = CertGetNameStringW(
             cert,

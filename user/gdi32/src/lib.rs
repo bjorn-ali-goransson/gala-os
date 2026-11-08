@@ -6,7 +6,8 @@
 //! LOGFONTW, bitmaps: 32-bit device-dependent ones and 24/32-bit DIB
 //! sections), drawing (PatBlt, Rectangle, pixels, BitBlt/StretchBlt with
 //! any ternary raster operation) and text in Noto Sans Mono scaled to the
-//! font's height (`font`). Coordinates go through the window and viewport
+//! font's height (`font`). OpenGL's pixel formats and SwapBuffers go to
+//! the process's opengl32 (`opengl`). Coordinates go through the window and viewport
 //! origins and are clipped to the DC's clip rectangle. Pixels are
 //! 0x00RRGGBB; COLORREFs 0x00BBGGRR. Objects live in a fixed table; a
 //! handle is 0x0100_0000 plus the slot (stock objects keep theirs).
@@ -23,6 +24,7 @@ mod dib;
 mod draw;
 mod font;
 mod older;
+mod opengl;
 mod palette;
 mod region;
 mod shapes;
@@ -959,6 +961,29 @@ pub extern "system" fn GetObjectW(h: Handle, size: i32, out: *mut u8) -> i32 {
     }
 }
 
+/// GetObjectA: GetObjectW's answer, a font's as LOGFONTA (LOGFONTW's 28
+/// bytes of fields, then the face name in 32 ANSI characters: gala's
+/// code page is UTF-8, and names beyond ASCII become '?').
+#[unsafe(no_mangle)]
+pub extern "system" fn GetObjectA(h: Handle, size: i32, out: *mut u8) -> i32 {
+    let Some(i) = slot_of(h) else { return 0 };
+    let Object::Font(lf) = with(|slots, _| slots[i]) else { return GetObjectW(h, size, out) };
+    let mut wide = [0u8; 92];
+    // SAFETY: LOGFONTW is plain data of 92 bytes.
+    let bytes = unsafe { core::slice::from_raw_parts((&lf as *const LogFont).cast::<u8>(), 92) };
+    wide.copy_from_slice(bytes);
+    let mut ansi = [0u8; 60];
+    ansi[..28].copy_from_slice(&wide[..28]);
+    for (k, a) in ansi[28..59].iter_mut().enumerate() {
+        let c = u16::from_le_bytes([wide[28 + 2 * k], wide[29 + 2 * k]]);
+        if c == 0 {
+            break;
+        }
+        *a = u8::try_from(c).ok().filter(u8::is_ascii).unwrap_or(b'?');
+    }
+    give(out, size, &ansi)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn SetTextColor(hdc: Handle, color: u32) -> u32 {
     with_dc(hdc, |dc, _| pixel(core::mem::replace(&mut dc.text, pixel(color))))
@@ -971,13 +996,11 @@ pub extern "system" fn SetBkColor(hdc: Handle, color: u32) -> u32 {
         .unwrap_or(0xffff_ffff)
 }
 
-/// SetStretchBltMode: BLACKONWHITE (1) .. HALFTONE (4); the previous
-/// mode, 0 for an invalid one.
+/// SetStretchBltMode: the previous mode. Any value is kept, as on Windows
+/// (25H2 keeps 0, 5 and -1 and returns them, the last error untouched);
+/// StretchBlt samples the nearest pixel whatever it is.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetStretchBltMode(hdc: Handle, mode: i32) -> i32 {
-    if !(1..=4).contains(&mode) {
-        return 0;
-    }
     with_dc(hdc, |dc, _| core::mem::replace(&mut dc.stretch, mode)).unwrap_or(0)
 }
 
@@ -1275,12 +1298,14 @@ pub extern "system" fn SetBoundsRect(hdc: Handle, rect: *const [i32; 4], flags: 
 
 /// GetBoundsRect(hdc, lprcBounds, flags): the accumulated bounds in
 /// logical coordinates (DCB_SET) or none (DCB_RESET, the rectangle
-/// zeroed), with the accumulation state; DCB_RESET in flags clears them
+/// zeroed), without the accumulation state (Windows 11 25H2 measured
+/// DCB_RESET alone with accumulation on; SetBoundsRect reports the
+/// state); DCB_RESET in flags clears them
 /// afterwards. Device coordinates are the DC's surface's (gala's window
 /// DCs have no other mapping than the origins).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetBoundsRect(hdc: Handle, rect: *mut [i32; 4], flags: u32) -> u32 {
-    let Some((state, bounds)) = bounds_of(hdc) else { return 0 };
+    let Some((_, bounds)) = bounds_of(hdc) else { return 0 };
     let got = bounds.get();
     if !rect.is_null() {
         let (dx, dy) = with_dc(hdc, |dc, _| {
@@ -1298,5 +1323,5 @@ pub extern "system" fn GetBoundsRect(hdc: Handle, rect: *mut [i32; 4], flags: u3
     if flags & DCB_RESET != 0 {
         bounds.reset();
     }
-    state | if got.is_some() { DCB_SET } else { DCB_RESET }
+    if got.is_some() { DCB_SET } else { DCB_RESET }
 }

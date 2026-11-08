@@ -46,6 +46,38 @@ fn poke(addr: usize, v: u64) {
     unsafe { (addr as *mut u64).write_volatile(v) }
 }
 
+const PEB_SESSION_ID: usize = 0x2c0;
+
+/// The caller's session's BaseNamedObjects followed by `rest`:
+/// `\BaseNamedObjects` in session 0, `\Sessions\<n>\BaseNamedObjects`
+/// in session n. Outside session 0 an ordinary user may not create sections
+/// in the global directory (SeCreateGlobalPrivilege) (STATUS_ACCESS_DENIED on Windows).
+fn session_bno(rest: &str) -> ([u16; 160], usize) {
+    // SAFETY: SessionId in the PEB.
+    let session = unsafe { *(peb().add(PEB_SESSION_ID) as *const u32) };
+    let mut digits = [0u8; 10];
+    let (mut v, mut k) = (session, 10);
+    loop {
+        k -= 1;
+        digits[k] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    let prefix: [&[u8]; 3] =
+        if session == 0 { [b"", b"", b""] } else { [b"\\Sessions\\", &digits[k..], b""] };
+    let mut path = [0u16; 160];
+    let mut n = 0;
+    for part in prefix.into_iter().chain([&b"\\BaseNamedObjects"[..], rest.as_bytes()]) {
+        for &b in part {
+            path[n] = u16::from(b);
+            n += 1;
+        }
+    }
+    (path, n)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     let ok = u64::from(STATUS_SUCCESS);
@@ -123,8 +155,8 @@ fn run() -> Result<(), u32> {
     close(big);
 
     // Named sections are shared through the object namespace.
-    let name = wide!("\\BaseNamedObjects\\gala_section_test");
-    let name = UnicodeString::new(&name);
+    let (name, n) = session_bno("\\gala_section_test");
+    let name = UnicodeString::new(&name[..n]);
     let attrs = ObjectAttributes::new(&name, Handle(0), OBJ_CASE_INSENSITIVE);
     let (st, named) = create_section(Some(&attrs), Some(0x1000), PAGE_READWRITE);
     c.eq(st.into(), ok)?;

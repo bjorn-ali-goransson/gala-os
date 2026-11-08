@@ -897,7 +897,7 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
         // session's would interleave with the log); `conpty=trace` logs it.
         let pseudo = call.process.console.as_ref().is_some_and(|s| s.pseudo);
         if !pseudo {
-            console::write_bytes(&chunk[..n]);
+            console::write_bytes(call.process.id, &chunk[..n]);
         }
         // A console window's session sees it too.
         if let Some(session) = &call.process.console
@@ -3377,12 +3377,18 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
     let (priority, base) = *t.priority.lock();
     let mut b = [0u8; BASIC_INFORMATION_SIZE];
     b[0..4].copy_from_slice(&t.exit_status().0.to_le_bytes());
-    b[8..16].copy_from_slice(&t.teb.to_le_bytes());
+    // A thread that has ended has no TEB: NULL (Windows 11 25H2, which
+    // frees it on exit; gala's stays mapped until the process ends).
+    let teb = if t.has_exited() { 0 } else { t.teb };
+    b[8..16].copy_from_slice(&teb.to_le_bytes());
     b[16..24].copy_from_slice(&t.process.id.to_le_bytes());
     b[24..32].copy_from_slice(&t.id.to_le_bytes());
     b[32..40].copy_from_slice(&t.affinity().to_le_bytes());
     b[40..44].copy_from_slice(&priority.to_le_bytes());
-    b[44..48].copy_from_slice(&base.to_le_bytes());
+    // BasePriority is the increment over the process's base (Windows 11
+    // 25H2: 1 after ThreadBasePriority 1), the saturated ones as set.
+    let increment = super::thread::base_increment(base);
+    b[44..48].copy_from_slice(&increment.to_le_bytes());
     call.return_info(&b, buffer, length, ret_ptr)
 }
 
@@ -3907,7 +3913,19 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION => {
+            // The caller fills in Version = 1 first: without it
+            // STATUS_NOT_SUPPORTED whatever the length; with it any
+            // buffer of 12 bytes or more gets the 12 (Windows 11 25H2:
+            // lengths 8, 12, 16, 24 measured).
+            let mut version = [0u8; 4];
+            if length < 4 || call.process.read(buffer, &mut version).is_err() {
+                return NtStatus::NOT_SUPPORTED;
+            }
+            if u32::from_le_bytes(version) != 1 {
+                return NtStatus::NOT_SUPPORTED;
+            }
             let info = sysinfo::query_performance_counter_information();
+            let length = if length >= info.len() as u64 { info.len() as u64 } else { length };
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_PROCESS_INFORMATION => {
@@ -4487,7 +4505,16 @@ fn nt_map_view_of_section(call: &mut Call<'_>) -> NtStatus {
         tri!(section::map_view(&call.process, object, base, offset, size, protect, top_down));
     tri!(call.write_u64(base_ptr, view.base));
     tri!(call.write_u64(size_ptr, view.size));
-    if view.relocated { NtStatus::IMAGE_NOT_AT_BASE } else { NtStatus::SUCCESS }
+    // The machine mismatch wins over the relocation (Windows 11 25H2: a
+    // PE32 DLL in a 64-bit process gives 0x4000000E whether its preferred
+    // base is free or taken, and the view is mapped).
+    if view.foreign {
+        NtStatus::IMAGE_MACHINE_TYPE_MISMATCH
+    } else if view.relocated {
+        NtStatus::IMAGE_NOT_AT_BASE
+    } else {
+        NtStatus::SUCCESS
+    }
 }
 
 /// NtUnmapViewOfSection(ProcessHandle, BaseAddress)
@@ -5242,7 +5269,8 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
     // Flag 32: the child is attached to the console session whose id is
     // at 160 (PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE); flag 64 with it: its
     // standard handles are new handles to that console (no
-    // STARTF_USESTDHANDLES), not the ones at 64..88.
+    // STARTF_USESTDHANDLES), not the ones at 64..88; without 64, a NULL
+    // one there is a new handle to the console too.
     let console = if flags & 32 != 0 {
         let mut id = [0u8; 4];
         if call.process.read(ptr + 160, &mut id).is_err() {
@@ -5348,13 +5376,20 @@ fn gala_create_process(call: &mut Call<'_>) -> NtStatus {
             }
         }
     }
-    // A pseudo console's own standard handles (CONIN$, CONOUT$ twice).
-    if flags & 96 == 96 {
+    // A pseudo console's own standard handles (CONIN$, CONOUT$ twice):
+    // all three without STARTF_USESTDHANDLES (flag 64, zeroed above), and
+    // each one given as NULL with it. Microsoft's ConPTY samples pass
+    // STARTF_USESTDHANDLES with NULL handles so that the child does not
+    // take the parent's (Windows 11 25H2: conpty_test's child is then
+    // attached to the pseudo console).
+    if flags & 32 != 0 && std.contains(&0) {
         let input = KObject::new(ObjectBody::ConsoleInput).map_err(|_| NtStatus::NO_MEMORY);
         let output = KObject::new(ObjectBody::ConsoleOutput).map_err(|_| NtStatus::NO_MEMORY);
         let (input, output) = (tri!(input), tri!(output));
         for (i, object) in [input, output.clone(), output].into_iter().enumerate() {
-            std[i] = tri!(table.insert_object(object)).0;
+            if std[i] == 0 {
+                std[i] = tri!(table.insert_object(object)).0;
+            }
         }
     }
 

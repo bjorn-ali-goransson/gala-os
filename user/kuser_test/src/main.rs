@@ -91,9 +91,12 @@ fn run() -> Result<(), u32> {
     c.eq(u32_at(0x264).into(), 1)?; // NtProductType = NtProductWinNt
     c.eq(u8_at(0x268).into(), 1)?; // ProductTypeIsValid
     c.eq(u16_at(0x26a).into(), 9)?; // NativeProcessorArchitecture = AMD64
+    // NtSystemRoot, compared without case: setup and upgrades often
+    // leave it "C:\WINDOWS" on a real machine.
+    let lower = |ch: u16| if (0x41..=0x5a).contains(&ch) { ch | 0x20 } else { ch };
     let root = wide!("C:\\Windows");
     for (i, &ch) in root.iter().enumerate() {
-        c.eq(u16_at(0x30 + 2 * i).into(), ch.into())?; // NtSystemRoot
+        c.eq(lower(u16_at(0x30 + 2 * i)).into(), lower(ch).into())?;
     }
     c.eq(u16_at(0x30 + 2 * root.len()).into(), 0)?;
     c.ok(u32_at(0x2e8) > 0, u32_at(0x2e8).into())?; // NumberOfPhysicalPages

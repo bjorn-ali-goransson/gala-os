@@ -169,6 +169,9 @@ unsafe extern "system" {
         size: u32,
     ) -> Bool;
     fn CountClipboardFormats() -> i32;
+    fn OpenClipboard(owner: Handle) -> Bool;
+    fn EnumClipboardFormats(format: u32) -> u32;
+    fn CloseClipboard() -> Bool;
     fn IsWindowUnicode(hwnd: Handle) -> Bool;
     fn CharNextExA(code_page: u16, s: *const u8, flags: u32) -> *const u8;
     fn CharUpperW(s: *mut u16) -> *mut u16;
@@ -303,6 +306,90 @@ const CSIDL_WINDOWS: i32 = 0x24;
 const FOLDERID_PROFILE: [u8; 16] = [
     0x8f, 0x85, 0x6c, 0x5e, 0x22, 0x0e, 0x60, 0x47, 0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73,
 ];
+
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleW([0x6e, 0x74, 0x64, 0x6c, 0x6c, 0].as_ptr()); // "ntdll"
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
+}
+
+/// Whether another window holds the clipboard open
+/// (GetOpenClipboardWindow): if so, prints `clipboard part skipped (held
+/// by <its process's image>)`. The functions are looked up by name: this
+/// runs only off gala.
+fn clipboard_holder() -> bool {
+    type OpenWindow = unsafe extern "system" fn() -> Handle;
+    type ThreadProcess = unsafe extern "system" fn(Handle, *mut u32) -> u32;
+    type Open = unsafe extern "system" fn(u32, Bool, u32) -> Handle;
+    type ImageName = unsafe extern "system" fn(Handle, u32, *mut u16, *mut u32) -> Bool;
+    // SAFETY: documented exports with these signatures; our buffers.
+    unsafe {
+        let user32 = LoadLibraryA(c"user32.dll".as_ptr().cast());
+        let kernel32 = LoadLibraryA(c"kernel32.dll".as_ptr().cast());
+        let f = [
+            GetProcAddress(user32, c"GetOpenClipboardWindow".as_ptr().cast()),
+            GetProcAddress(user32, c"GetWindowThreadProcessId".as_ptr().cast()),
+            GetProcAddress(kernel32, c"OpenProcess".as_ptr().cast()),
+            GetProcAddress(kernel32, c"QueryFullProcessImageNameW".as_ptr().cast()),
+        ];
+        if f.iter().any(|f| f.is_null()) {
+            return false;
+        }
+        let window = core::mem::transmute::<*mut c_void, OpenWindow>(f[0])();
+        if window.is_null() {
+            return false;
+        }
+        let mut pid = 0;
+        core::mem::transmute::<*mut c_void, ThreadProcess>(f[1])(window, &mut pid);
+        let mut name = [0u16; 260];
+        let mut n = 260u32;
+        // PROCESS_QUERY_LIMITED_INFORMATION
+        let process = core::mem::transmute::<*mut c_void, Open>(f[2])(0x1000, 0, pid);
+        let named = !process.is_null()
+            && core::mem::transmute::<*mut c_void, ImageName>(f[3])(
+                process,
+                0,
+                name.as_mut_ptr(),
+                &mut n,
+            ) != 0;
+        if !process.is_null() {
+            CloseHandle(process);
+        }
+        let mut line = [0u8; 400];
+        let mut len = 0;
+        let mut put = |b: u8| {
+            if len < line.len() {
+                line[len] = b;
+                len += 1;
+            }
+        };
+        b"win32_misc_test: clipboard part skipped (held by ".iter().for_each(|&b| put(b));
+        if named {
+            // The image's name, non-ASCII as '?'.
+            name[..n as usize].iter().for_each(|&u| put(u8::try_from(u).unwrap_or(b'?')));
+        } else {
+            b"process ".iter().for_each(|&b| put(b));
+            let mut digits = [0u8; 10];
+            let (mut v, mut k) = (pid, 0);
+            loop {
+                digits[k] = b'0' + (v % 10) as u8;
+                k += 1;
+                v /= 10;
+                if v == 0 {
+                    break;
+                }
+            }
+            digits[..k].iter().rev().for_each(|&b| put(b));
+        }
+        b")\r\n".iter().for_each(|&b| put(b));
+        out(&line[..len]);
+        true
+    }
+}
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -1184,10 +1271,10 @@ fn wow64(c: &mut Checks) -> Result<(), u32> {
 /// What Delphi's VCL (Inno Setup's Setup) calls as it starts, with
 /// Windows' documented results where gala has no paint buffers and no
 /// touch input: IsWow64GuestMachineSupported and GetSystemWow64DirectoryW
-/// (`wow64`), the *ForDpi forms (96 DPI), gesture handles (none valid), the clipboard's format
-/// count, IsEqualGUID, GetCurrentPositionEx after MoveToEx, uxtheme's
-/// buffered painting (Init succeeds, no buffer is started) and
-/// OpenThemeDataForDpi (no theme).
+/// (`wow64`), the *ForDpi forms (96 DPI), gesture handles (none valid),
+/// the clipboard's format count (as many as it enumerates), IsEqualGUID,
+/// GetCurrentPositionEx after MoveToEx, uxtheme's buffered painting (Init
+/// succeeds, no buffer is started) and OpenThemeDataForDpi (no theme).
 fn vcl(c: &mut Checks) -> Result<(), u32> {
     wow64(c)?;
     // SAFETY: plain calls with our buffers; exports looked up by name
@@ -1197,11 +1284,35 @@ fn vcl(c: &mut Checks) -> Result<(), u32> {
         c.ok(AdjustWindowRectEx(&mut a, 0x00cf_0000, 0, 0) != 0, 0)?;
         c.ok(AdjustWindowRectExForDpi(&mut b, 0x00cf_0000, 0, 0, 96) != 0, 0)?;
         c.ok(a == b, 0)?;
+        // A NULL GESTUREINFO is refused before the handle is looked at:
+        // ERROR_INVALID_PARAMETER (Windows 11 25H2).
         c.ok(GetGestureInfo(0x1234, core::ptr::null_mut()) == 0, 0)?;
-        c.eq(GetLastError().into(), 6)?;
+        c.eq(GetLastError().into(), 87)?;
         c.ok(SetGestureConfig(core::ptr::null_mut(), 0, 0, core::ptr::null(), 0) == 0, 0)?;
         c.eq(GetLastError().into(), 1400)?;
-        c.eq(CountClipboardFormats() as u64, 0)?;
+        // The user's clipboard is theirs (it held 7 formats on the
+        // Windows machine): the count is what enumerating it yields, and
+        // nothing here empties it.
+        // Another process may hold it open (clipboard history, a
+        // terminal, a VM's clipboard agent: ERROR_ACCESS_DENIED on 25H2);
+        // that run names the holder and skips this part.
+        let count = CountClipboardFormats();
+        let opened = OpenClipboard(core::ptr::null_mut()) != 0;
+        let error = GetLastError();
+        let held = !opened && error == 5 && !on_gala() && clipboard_holder();
+        if !held {
+            c.ok(opened, error.into())?;
+            let (mut format, mut listed) = (0, 0);
+            loop {
+                format = EnumClipboardFormats(format);
+                if format == 0 {
+                    break;
+                }
+                listed += 1;
+            }
+            c.ok(CloseClipboard() != 0, GetLastError().into())?;
+            c.eq(count as u64, listed)?;
+        }
         c.ok(IsWindowUnicode(core::ptr::null_mut()) == 0, 0)?;
         let dc = CreateCompatibleDC(core::ptr::null_mut());
         c.ok(!dc.is_null(), 0)?;

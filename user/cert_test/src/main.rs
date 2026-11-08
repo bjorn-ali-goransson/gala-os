@@ -32,7 +32,7 @@
 //!   the data changed and restored, for each scope;
 //!   ERROR_INVALID_PARAMETER for a size that is not a multiple of
 //!   CRYPTPROTECTMEMORY_BLOCK_SIZE, 16); PFXIsPFXBlob (a PFX's outer
-//!   SEQUENCE { INTEGER 3, ContentInfo }, not another version or a
+//!   SEQUENCE { INTEGER, ContentInfo }, whatever the version, not a
 //!   certificate).
 //! - Certificate stores (documented behaviour, no Windows run yet):
 //!   CertOpenStore(CERT_STORE_PROV_MEMORY) and the "ROOT" system store
@@ -506,7 +506,9 @@ fn run() -> Result<(), u32> {
         let cert = CertCreateCertificateContext(encoding, CERT.as_ptr(), CERT.len() as u32);
         c.ok(!cert.is_null(), GetLastError().into())?;
         let ctx = &*cert;
-        c.eq(ctx.encoding.into(), encoding.into())?;
+        // Only the certificate encoding (the low word) is kept (Windows 11
+        // 25H2: 1 for X509_ASN_ENCODING | PKCS_7_ASN_ENCODING).
+        c.eq(ctx.encoding.into(), X509_ASN_ENCODING.into())?;
         c.ok(
             ctx.encoded_len as usize == CERT.len() && ctx.encoded.cast_const() != CERT.as_ptr(),
             ctx.encoded_len.into(),
@@ -649,7 +651,10 @@ fn run() -> Result<(), u32> {
             narrow.as_mut_ptr(),
             5,
         );
-        c.ok(got == 5 && &narrow[..5] == b"gala\0", got.into())?;
+        // The A form does not truncate: a buffer too small gives 1, the
+        // count of an empty string (Windows 11 25H2; what the buffer then
+        // holds is not measured).
+        c.eq(got.into(), 1)?;
 
         // The public key verifies the certificate's own signature.
         let mut key = null;
@@ -801,10 +806,11 @@ fn run() -> Result<(), u32> {
         ];
         let b = Blob { size: pfx.len() as u32, data: pfx.as_ptr().cast_mut() };
         c.eq(PFXIsPFXBlob(&b) as u64, 1)?;
+        // The version is not looked at (Windows 11 25H2: TRUE for 1).
         let mut v1 = pfx;
         v1[4] = 1;
         let b = Blob { size: v1.len() as u32, data: v1.as_mut_ptr() };
-        c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
+        c.eq(PFXIsPFXBlob(&b) as u64, 1)?;
         let b = Blob { size: CERT.len() as u32, data: CERT.as_ptr().cast_mut() };
         c.eq(PFXIsPFXBlob(&b) as u64, 0)?;
 

@@ -246,6 +246,9 @@ pub struct LxThread {
     /// set_tid_address / CLONE_CHILD_CLEARTID: at the thread's exit a 0
     /// is stored there and one futex waiter woken (pthread_join).
     pub clear_tid: u64,
+    /// set_robust_list's head (get_robust_list reads it back; the locks
+    /// on it are released when the thread ends: `futex::release_robust`).
+    pub robust_list: u64,
 }
 
 pub struct LxProcess {
@@ -271,6 +274,12 @@ pub struct LxProcess {
     pub cwd: IrqMutex<NodeId>,
     /// The file-mode creation mask (umask(2); 022 at the start).
     pub umask: IrqMutex<u32>,
+    /// The program it runs (its node: `/proc/self/exe`; execve changes
+    /// it, a fork's child has its parent's).
+    pub exe: IrqMutex<NodeId>,
+    /// Its resource limits (getrlimit(2), `lx::resource`): a fork's child
+    /// has its parent's, execve keeps them.
+    pub rlimits: IrqMutex<super::resource::Limits>,
     /// ITIMER_REAL (`lx::timer`; alarm, setitimer).
     pub alarm: IrqMutex<Option<super::timer::Alarm>>,
     /// A vfork child's hold on its parent (`lx::fork`): released when it
@@ -284,9 +293,9 @@ pub struct LxProcess {
 
 static TABLE: IrqMutex<Vec<KArc<LxProcess>>> = IrqMutex::new(Vec::new());
 
-/// Creates the state of a new Linux process `pid` with fds 0, 1 and 2 on
-/// the console, in directory `cwd`.
-pub fn create(pid: u64, brk: u64, cwd: NodeId) -> Result<KArc<LxProcess>, AllocError> {
+/// Creates the state of a new Linux process `pid` running the program at
+/// node `exe`, with fds 0, 1 and 2 on the console, in directory `cwd`.
+pub fn create(pid: u64, brk: u64, cwd: NodeId, exe: NodeId) -> Result<KArc<LxProcess>, AllocError> {
     let mut fds = Vec::new();
     for stream in [Stream::Stdin, Stream::Stdout, Stream::Stderr] {
         let fd = KArc::try_new(Fd::new(Object::Console(stream), false))?;
@@ -304,6 +313,8 @@ pub fn create(pid: u64, brk: u64, cwd: NodeId) -> Result<KArc<LxProcess>, AllocE
         fds: IrqMutex::new(fds),
         cwd: IrqMutex::new(cwd),
         umask: IrqMutex::new(0o022),
+        exe: IrqMutex::new(exe),
+        rlimits: IrqMutex::new(super::resource::Limits::default()),
         vfork: IrqMutex::new(Vfork { released: true, waiter: None }),
         alarm: IrqMutex::new(None),
         lines: IrqMutex::new([Vec::new(), Vec::new()]),
@@ -332,6 +343,8 @@ pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>
     let signals = parent.signals.lock().forked();
     let cwd = *parent.cwd.lock();
     let umask = *parent.umask.lock();
+    let exe = *parent.exe.lock();
+    let rlimits = parent.rlimits.lock().clone();
     let state = KArc::try_new(LxProcess {
         pid,
         main_tid: AtomicU64::new(0),
@@ -344,6 +357,8 @@ pub fn fork(parent: &LxProcess, pid: u64, vfork: bool) -> Result<KArc<LxProcess>
         fds: IrqMutex::new(fds),
         cwd: IrqMutex::new(cwd),
         umask: IrqMutex::new(umask),
+        exe: IrqMutex::new(exe),
+        rlimits: IrqMutex::new(rlimits),
         vfork: IrqMutex::new(Vfork { released: !vfork, waiter: None }),
         // A child starts with no timer (setitimer(2)).
         alarm: IrqMutex::new(None),
@@ -486,7 +501,7 @@ impl LxProcess {
     /// A new thread `tid` of this process (exec's, fork's or clone's)
     /// with signal mask `mask`; the first is the main thread (tid = pid).
     pub fn add_thread(&self, tid: u64, mask: lx_abi::signal::SigSet) -> Result<(), AllocError> {
-        self.threads.lock().try_push(LxThread { tid, clear_tid: 0 })?;
+        self.threads.lock().try_push(LxThread { tid, clear_tid: 0, robust_list: 0 })?;
         if let Err(e) = self.signals.lock().add_thread(tid, mask) {
             self.threads.lock().retain(|t| t.tid != tid);
             return Err(e);
@@ -496,13 +511,26 @@ impl LxProcess {
     }
 
     /// Thread `tid` leaves (exit): its record and what was pending for it
-    /// alone go; returns its clear-tid address.
-    pub fn remove_thread(&self, tid: u64) -> u64 {
+    /// alone go; returns its clear-tid address and robust list head.
+    pub fn remove_thread(&self, tid: u64) -> (u64, u64) {
         self.signals.lock().remove_thread(tid);
         let mut threads = self.threads.lock();
-        let clear = threads.iter().find(|t| t.tid == tid).map_or(0, |t| t.clear_tid);
+        let found =
+            threads.iter().find(|t| t.tid == tid).map_or((0, 0), |t| (t.clear_tid, t.robust_list));
         threads.retain(|t| t.tid != tid);
-        clear
+        found
+    }
+
+    /// Sets thread `tid`'s robust list head (set_robust_list).
+    pub fn set_robust_list(&self, tid: u64, head: u64) {
+        if let Some(t) = self.threads.lock().iter_mut().find(|t| t.tid == tid) {
+            t.robust_list = head;
+        }
+    }
+
+    /// Thread `tid`'s robust list head, if it is one of this process's.
+    pub fn robust_list(&self, tid: u64) -> Option<u64> {
+        self.threads.lock().iter().find(|t| t.tid == tid).map(|t| t.robust_list)
     }
 
     /// Sets thread `tid`'s clear-tid address (set_tid_address).

@@ -541,7 +541,9 @@ pub extern "system" fn CertCreateCertificateContext(
             props: core::ptr::null_mut(),
             owned_key: 0,
             context: CertContext {
-                encoding,
+                // Only the certificate encoding type, the low word
+                // (Windows 11 25H2 keeps 1 of X509_ASN | PKCS_7_ASN).
+                encoding: encoding & 0xffff,
                 encoded,
                 encoded_len: used as u32,
                 info: core::ptr::null_mut(),

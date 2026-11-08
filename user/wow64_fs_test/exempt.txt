@@ -1,0 +1,3 @@
+wow64_fs_test's marker: shipped only into System32's exempt directories
+(catroot, catroot2, DriverStore, LogFiles, spool), so that a 32-bit program
+finds them there only if the redirector leaves them alone.

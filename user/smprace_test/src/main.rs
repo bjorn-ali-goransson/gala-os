@@ -14,7 +14,7 @@
 //!    expiry of the earlier setting that happens before the re-arm is
 //!    undone by it. gala's timer thread decided an expiry under the
 //!    timer's lock and signaled it after letting go, so a re-arm in
-//!    between was followed by the stale signal: checks 20-21.
+//!    between was followed by the stale signal: checks 20-25.
 //! 3. A named object keeps its name while any handle is open, and an open
 //!    by name that succeeds always finds the object of the creator's
 //!    handle. gala removed the name when the handle count reached zero
@@ -214,22 +214,22 @@ static TIMER: AtomicUsize = AtomicUsize::new(0);
 fn round2() -> Result<(), u32> {
     status(20, pin(0))?;
     let (s, h) = create_timer(NOTIFICATION_TIMER);
-    status(20, s)?;
+    status(22, s)?;
     TIMER.store(h.0, Ordering::Release);
     for i in 0..TIMER_ROUNDS {
         // Due at once (an absolute time in the past): the timer thread
         // fires it as soon as it looks, on whichever processor it runs.
-        status(20, set_timer(h, 1, 0))?;
+        status(23, set_timer(h, 1, 0))?;
         // Re-armed for a minute after a varying delay, to meet the
         // timer thread's expiry at different points.
         spin(i % 512 * 8);
-        status(20, set_timer(h, -600_000_000, 0))?;
+        status(24, set_timer(h, -600_000_000, 0))?;
         spin(2000);
         let s = wait(h, Some(0));
         check(21, s == STATUS_TIMEOUT, u64::from(i))?;
     }
     close(h);
-    status(20, pin_all())?;
+    status(25, pin_all())?;
     Ok(())
 }
 

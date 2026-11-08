@@ -567,7 +567,8 @@ fn calls(c: &mut Checks) -> Result<(), u32> {
         c.ok(!describe.is_null(), 0)?;
         let describe: extern "system" fn(Handle, *const u16) -> i32 =
             core::mem::transmute(describe);
-        c.eq(describe(GetCurrentThread(), w::<4>("sig").as_ptr()) as u64, 0)?; // S_OK
+        // HRESULT_FROM_NT(STATUS_SUCCESS), not S_OK (Windows 11 25H2).
+        c.eq(describe(GetCurrentThread(), w::<4>("sig").as_ptr()) as u64, 0x1000_0000)?;
     }
     Ok(())
 }

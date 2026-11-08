@@ -754,9 +754,35 @@ fn put_number(line: &mut [u16], n: &mut usize, v: usize) {
     }
 }
 
+/// What a skipped run returns: the machine lacks what the test needs.
+const SKIPPED: u32 = u32::MAX;
+
+/// Whether the process runs as SYSTEM: its TokenUser is S-1-5-18. gala's
+/// scenario starts it so (`as=system`); elsewhere an ordinary user's run
+/// says "skipped".
+fn is_system() -> bool {
+    const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+    let mut token = core::ptr::null_mut();
+    let mut b = [0u64; 32];
+    let mut n = 0;
+    // SAFETY: plain calls; our buffer of 256 bytes, whose TOKEN_USER points
+    // at a SID inside it.
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let ok = GetTokenInformation(token, 1, b.as_mut_ptr().cast(), 256, &mut n) != 0;
+        CloseHandle(token);
+        ok && core::slice::from_raw_parts(b[0] as *const u8, 12) == SYSTEM
+    }
+}
+
 fn run() -> Result<(), u32> {
     let c = Checks::new(0, false);
     let null = core::ptr::null_mut();
+    if !is_system() {
+        return Err(SKIPPED);
+    }
     // SYSTEM: session 0.
     check_own_session(&c, 0)?;
 
@@ -1074,6 +1100,10 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let code = match run() {
         Ok(()) => {
             out(b"session_test: ok\r\n");
+            0
+        }
+        Err(SKIPPED) => {
+            out(b"session_test: skipped (needs SYSTEM)\r\n");
             0
         }
         Err(id) => id,

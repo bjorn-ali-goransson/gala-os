@@ -730,10 +730,16 @@ fn automation(c: &mut Checks) -> Result<(), u32> {
         c.eq(hr(SafeArrayDestroy(sa)), S_OK)?;
         let mut sa = core::ptr::null_mut();
         c.eq(hr(SafeArrayAllocDescriptorEx(VT_I4, 1, &mut sa)), S_OK)?;
+        // FADF_HAVEVARTYPE and the VARTYPE before the descriptor, but no
+        // element size (Windows 11 25H2: cbElements 0, still 0 after
+        // SafeArrayAllocData, whose pvData is not NULL).
+        c.eq((*sa).features.into(), 0x80)?; // FADF_HAVEVARTYPE
+        c.eq((sa.cast::<u8>().sub(4) as *const u32).read().into(), VT_I4.into())?;
+        c.eq((*sa).element_size.into(), 0)?;
         (*sa).count = 3;
         (*sa).lower = 1;
         c.eq(hr(SafeArrayAllocData(sa)), S_OK)?;
-        c.ok(!(*sa).data.is_null() && (*sa).element_size == 4, 0)?;
+        c.ok(!(*sa).data.is_null() && (*sa).element_size == 0, (*sa).element_size.into())?;
         c.eq(hr(SafeArrayDestroy(sa)), S_OK)?;
 
         // Error info: none set.

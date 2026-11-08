@@ -75,6 +75,9 @@ type Handle = *mut c_void;
 unsafe extern "system" {
     fn GetLastError() -> u32;
     fn SetLastError(e: u32);
+    fn GetTempPathW(size: u32, buffer: *mut u16) -> u32;
+    fn GetTempPathA(size: u32, buffer: *mut u8) -> u32;
+    fn DeleteFileW(name: *const u16) -> Bool;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn ExitProcess(code: u32) -> !;
@@ -614,10 +617,8 @@ fn acls(c: &mut Checks) -> Result<(), u32> {
         let (mut present, mut dacl, mut defaulted) = (0, core::ptr::null_mut(), 1);
         c.ok(GetSecurityDescriptorDacl(p, &mut present, &mut dacl, &mut defaulted) != 0, 0)?;
         c.ok(present == 1 && dacl == a && defaulted == 0, present as u64)?;
-        let mut name = [0u16; 32];
-        for (d, b) in name.iter_mut().zip(b"C:\\gala-advapi32-test.txt") {
-            *d = u16::from(*b);
-        }
+        let name = temp_file("gala-advapi32-test.txt");
+        DeleteFileW(name.as_ptr()); // an earlier run's
         let h = CreateFileW(
             name.as_ptr(),
             0xc000_0000,
@@ -630,7 +631,7 @@ fn acls(c: &mut Checks) -> Result<(), u32> {
         c.ok(h as isize != -1, GetLastError().into())?;
         CloseHandle(h);
         c.ok(
-            SetFileSecurityA(c"C:\\gala-advapi32-test.txt".as_ptr().cast(), 4, p) != 0,
+            SetFileSecurityA(temp_file_a("gala-advapi32-test.txt").as_ptr(), 4, p) != 0,
             GetLastError().into(),
         )?;
         FreeSid(sid);
@@ -733,6 +734,30 @@ fn token(c: &mut Checks) -> Result<(), u32> {
 }
 
 /// A NUL-terminated UTF-16 copy of an ASCII string.
+/// `%TEMP%\<name>` (GetTempPathW), NUL-terminated: the test's files go
+/// there, not in C:\ (a standard user may not create files in the drive
+/// root).
+fn temp_file(name: &str) -> [u16; 260] {
+    let mut b = [0u16; 260];
+    // SAFETY: our buffer of 260 units.
+    let n = unsafe { GetTempPathW(260, b.as_mut_ptr()) } as usize;
+    for (d, ch) in b[n.min(259)..259].iter_mut().zip(name.bytes()) {
+        *d = ch.into();
+    }
+    b
+}
+
+/// [`temp_file`] in the ANSI code page (GetTempPathA).
+fn temp_file_a(name: &str) -> [u8; 260] {
+    let mut b = [0u8; 260];
+    // SAFETY: our buffer of 260 bytes.
+    let n = unsafe { GetTempPathA(260, b.as_mut_ptr()) } as usize;
+    for (d, ch) in b[n.min(259)..259].iter_mut().zip(name.bytes()) {
+        *d = ch;
+    }
+    b
+}
+
 fn w(s: &str) -> [u16; 64] {
     let mut b = [0u16; 64];
     for (d, ch) in b.iter_mut().zip(s.bytes()) {
@@ -830,7 +855,7 @@ fn more(c: &mut Checks) -> Result<(), u32> {
         c.eq(mask.into(), 1)?;
 
         // A file's owner.
-        let path = w("C:\\gala-advapi32-test.txt");
+        let path = temp_file("gala-advapi32-test.txt");
         let mut needed = 0u32;
         c.eq(GetFileSecurityW(path.as_ptr(), 1, core::ptr::null_mut(), 0, &mut needed) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INSUFFICIENT_BUFFER.into())?;
@@ -1252,9 +1277,12 @@ fn security_info(c: &mut Checks) -> Result<(), u32> {
         c.ok(GetAce(acl3, 0, &mut ace) != 0, 0)?;
         c.eq((*ace).into(), 1)?;
 
-        // The new DACL on a file handle.
+        // The new DACL on a file handle (an earlier run's file removed
+        // first: its DACL lets nobody write).
+        let path = temp_file("gala-advapi32-sec.txt");
+        DeleteFileW(path.as_ptr());
         let h = CreateFileW(
-            w("C:\\gala-advapi32-sec.txt").as_ptr(),
+            path.as_ptr(),
             0xc004_0000, // GENERIC_READ | GENERIC_WRITE | WRITE_DAC
             0,
             core::ptr::null_mut(),
@@ -1388,7 +1416,8 @@ fn token_groups(c: &mut Checks) -> Result<(), u32> {
         )?;
         let (x, subs, n) = sid_parts(label[0] as *const u8);
         c.ok(x == 16 && n == 1 && subs[0] == 8192, subs[0].into())?;
-        c.eq(label[1] as u32 as u64, 0x20)?; // SE_GROUP_INTEGRITY
+        // SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED (Windows 11 25H2).
+        c.eq(label[1] as u32 as u64, 0x60)?;
 
         // TokenLogonSid: TOKEN_GROUPS with the logon SID.
         let mut l = [0u64; 8];
@@ -1405,6 +1434,21 @@ fn token_groups(c: &mut Checks) -> Result<(), u32> {
         CloseHandle(token);
     }
     Ok(())
+}
+
+/// The process's token is elevated (TokenElevation, class 20).
+fn elevated() -> bool {
+    // SAFETY: a token handle of ours and a 4-byte TOKEN_ELEVATION.
+    unsafe {
+        let mut token = core::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), 0x8, &mut token) == 0 {
+            return false;
+        }
+        let (mut elevation, mut ret) = (0u32, 0u32);
+        let ok = GetTokenInformation(token, 20, (&raw mut elevation).cast(), 4, &mut ret);
+        CloseHandle(token);
+        ok != 0 && elevation != 0
+    }
 }
 
 fn service_sids(c: &mut Checks) -> Result<(), u32> {
@@ -1426,6 +1470,13 @@ fn service_sids(c: &mut Checks) -> Result<(), u32> {
             &mut key,
             core::ptr::null_mut(),
         );
+        // A standard user may not write HKLM\SYSTEM (ERROR_ACCESS_DENIED
+        // on Windows): without an elevated token there is no service to
+        // look up.
+        if r == 5 && !elevated() {
+            out(b"advapi32_test: service_sids: skipped (needs an administrator)\r\n");
+            return Ok(());
+        }
         c.eq(r.into(), 0)?;
         RegCloseKey(key);
 

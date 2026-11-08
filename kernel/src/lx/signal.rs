@@ -437,6 +437,7 @@ pub fn killed_by(status: NtStatus) -> Option<u32> {
     }
     Some(match status {
         NtStatus::ACCESS_VIOLATION | NtStatus::STACK_OVERFLOW => abi::SIGSEGV,
+        NtStatus::IN_PAGE_ERROR => abi::SIGBUS,
         NtStatus::ILLEGAL_INSTRUCTION => abi::SIGILL,
         NtStatus::INTEGER_DIVIDE_BY_ZERO => abi::SIGFPE,
         NtStatus::BREAKPOINT => abi::SIGTRAP,
@@ -659,6 +660,7 @@ mod tests {
         assert_eq!(killed_by(killed_status(SIGPIPE)), Some(SIGPIPE));
         assert_eq!(killed_by(killed_status(64)), Some(64));
         assert_eq!(killed_by(NtStatus::ACCESS_VIOLATION), Some(abi::SIGSEGV));
+        assert_eq!(killed_by(NtStatus::IN_PAGE_ERROR), Some(abi::SIGBUS));
         // wait(2)'s macros, as pipe_test's put_status reads them.
         assert_eq!(wait_status(NtStatus(7)), 7 << 8);
         assert_eq!(wait_status(killed_status(SIGPIPE)), 13);

@@ -7,7 +7,9 @@
 //!   (ERROR_PRIVILEGE_NOT_HELD), HeapQueryInformation (the
 //!   low-fragmentation heap, 2).
 //! - psapi's K32EnumProcessModules (the executable first; also through
-//!   psapi.dll's EnumProcessModules and GetModuleFileNameExA),
+//!   psapi.dll's EnumProcessModules and GetModuleFileNameExA) and
+//!   K32EnumProcessModulesEx (LIST_MODULES_DEFAULT and LIST_MODULES_ALL
+//!   give the same list in a 64-bit process),
 //!   K32GetModuleInformation, K32GetModuleFileNameExA, K32GetModuleBaseNameW
 //!   (the file name's last component),
 //!   K32GetProcessMemoryInfo; QueryFullProcessImageNameW;
@@ -22,8 +24,9 @@
 //!   named mapping.
 //! - RtlCaptureStackBackTrace (this function's caller first),
 //!   VerSetConditionMask and VerifyVersionInfoW, Beep, GetProductInfo.
-//! - ntdll's RtlVerifyVersionInfo: the real version (10.0, build 26100),
-//!   though this program has no manifest (VerifyVersionInfoW: 6.2);
+//! - ntdll's RtlVerifyVersionInfo: the real version (10.0, the running
+//!   build: KUSER_SHARED_DATA's NtBuildNumber, 26100 on gala), though this
+//!   program has no manifest (VerifyVersionInfoW: 6.2);
 //!   STATUS_REVISION_MISMATCH when it does not match, an empty TypeMask
 //!   STATUS_INVALID_PARAMETER (curl asks it whether Schannel has TLS
 //!   1.3: 10.0 build 20348 or later).
@@ -77,6 +80,13 @@ unsafe extern "system" {
         ret: *mut usize,
     ) -> Bool;
     fn K32EnumProcessModules(h: Handle, mods: *mut Handle, size: u32, needed: *mut u32) -> Bool;
+    fn K32EnumProcessModulesEx(
+        h: Handle,
+        mods: *mut Handle,
+        size: u32,
+        needed: *mut u32,
+        filter: u32,
+    ) -> Bool;
     fn K32GetModuleInformation(h: Handle, module: Handle, info: *mut ModuleInfo, size: u32)
     -> Bool;
     fn K32GetModuleFileNameExA(h: Handle, module: Handle, buf: *mut u8, size: u32) -> u32;
@@ -104,6 +114,8 @@ unsafe extern "system" {
     ) -> Handle;
     fn GetFileAttributesW(path: *const u16) -> u32;
     fn SetFileAttributesW(path: *const u16, attributes: u32) -> Bool;
+    fn DeleteFileW(path: *const u16) -> Bool;
+    fn RemoveDirectoryW(path: *const u16) -> Bool;
     fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> Bool;
     fn SetFileInformationByHandle(h: Handle, class: u32, info: *const c_void, size: u32) -> Bool;
     fn GetFileSizeEx(h: Handle, size: *mut i64) -> Bool;
@@ -264,6 +276,9 @@ impl Checks {
         out(b"kernel32_system_test: check ");
         out(&hex(self.0));
         out(b" got ");
+        if got >> 32 != 0 {
+            out(&hex((got >> 32) as u32));
+        }
         out(&hex(got as u32));
         check_line(core::panic::Location::caller().line());
         out(b"\r\n");
@@ -283,6 +298,19 @@ fn w(s: &str) -> [u16; 64] {
         *d = c.into();
     }
     b
+}
+
+/// `%TEMP%\gala-system-test<rest>`, NUL-terminated, as bytes and as
+/// UTF-16: a directory of the user's (C:\ keeps what earlier runs left
+/// and an ordinary user may not create files there).
+fn scratch(rest: &str) -> ([u8; 160], [u16; 160]) {
+    let mut a = [0u8; 160];
+    // SAFETY: the buffer holds 128 characters (what is left for the name).
+    let n = unsafe { GetTempPathA(128, a.as_mut_ptr()) } as usize;
+    for (d, c) in a[n..].iter_mut().zip("gala-system-test".bytes().chain(rest.bytes())) {
+        *d = c;
+    }
+    (a, core::array::from_fn(|i| a[i].into()))
 }
 
 fn memory(c: &mut Checks) -> Result<(), u32> {
@@ -352,6 +380,19 @@ fn process(c: &mut Checks) -> Result<(), u32> {
         let kernel32 = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         let count = (needed / 8) as usize;
         c.ok(mods[..count.min(32)].contains(&kernel32), 0)?;
+        // K32EnumProcessModulesEx (Mesa's llvmpipe calls it): in a 64-bit
+        // process LIST_MODULES_DEFAULT (0) and LIST_MODULES_ALL (3) list
+        // the same modules as K32EnumProcessModules.
+        for filter in [0, 3] {
+            let mut ex = [core::ptr::null_mut(); 32];
+            let mut needed_ex = 0;
+            c.ok(
+                K32EnumProcessModulesEx(me, ex.as_mut_ptr(), 256, &mut needed_ex, filter) != 0,
+                0,
+            )?;
+            c.eq(needed_ex.into(), needed.into())?;
+            c.ok(ex[..count.min(32)] == mods[..count.min(32)], filter.into())?;
+        }
 
         // psapi.dll's names for them (forwarded to kernel32 on Windows 7+).
         let mut via_psapi = [core::ptr::null_mut(); 32];
@@ -445,18 +486,20 @@ fn process(c: &mut Checks) -> Result<(), u32> {
 fn files(c: &mut Checks) -> Result<(), u32> {
     // SAFETY: plain kernel32 calls with buffers and handles of ours.
     unsafe {
-        c.ok(
-            CreateDirectoryA(c"C:\\gala-system-test".as_ptr().cast(), core::ptr::null_mut()) != 0,
-            GetLastError().into(),
-        )?;
-        c.eq(
-            CreateDirectoryA(c"C:\\gala-system-test".as_ptr().cast(), core::ptr::null_mut()) as u64,
-            0,
-        )?;
+        let (dir, dir_w) = scratch("");
+        let (_, a) = scratch("\\a.txt");
+        let (_, b) = scratch("\\b.txt");
+        let (_, s_path) = scratch("\\streams.txt");
+        // What an earlier run on the same machine left.
+        SetFileAttributesW(a.as_ptr(), FILE_ATTRIBUTE_NORMAL);
+        for f in [&a, &b, &s_path] {
+            DeleteFileW(f.as_ptr());
+        }
+        RemoveDirectoryW(dir_w.as_ptr());
+        c.ok(CreateDirectoryA(dir.as_ptr(), core::ptr::null_mut()) != 0, GetLastError().into())?;
+        c.eq(CreateDirectoryA(dir.as_ptr(), core::ptr::null_mut()) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_ALREADY_EXISTS.into())?;
 
-        let a = w("C:\\gala-system-test\\a.txt");
-        let b = w("C:\\gala-system-test\\b.txt");
         for name in [&a, &b] {
             let h = CreateFileW(
                 name.as_ptr(),
@@ -510,7 +553,6 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetFileAttributesW(b.as_ptr()).into(), INVALID_FILE_ATTRIBUTES.into())?;
 
         // Streams: a file's unnamed data stream ("::$DATA") and its size.
-        let s_path = w("C:\\gala-system-test\\streams.txt");
         let h = CreateFileW(
             s_path.as_ptr(),
             GENERIC_READ_WRITE,
@@ -554,18 +596,14 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         CloseHandle(h);
 
         let mut data = [0u16; 320];
-        let pattern = w("C:\\gala-system-test\\*");
+        let (_, pattern) = scratch("\\*");
         let find =
             FindFirstFileExW(pattern.as_ptr(), 1, data.as_mut_ptr(), 0, core::ptr::null_mut(), 0);
         c.ok(find != INVALID_HANDLE_VALUE, GetLastError().into())?;
         FindClose(find);
 
         let mut volume = [0u16; 16];
-        let path = w("C:\\gala-system-test\\b.txt");
-        c.ok(
-            GetVolumePathNameW(path.as_ptr(), volume.as_mut_ptr(), 16) != 0,
-            GetLastError().into(),
-        )?;
+        c.ok(GetVolumePathNameW(b.as_ptr(), volume.as_mut_ptr(), 16) != 0, GetLastError().into())?;
         c.ok(
             volume[..4] == [u16::from(b'C'), u16::from(b':'), u16::from(b'\\'), 0],
             volume[0].into(),
@@ -593,6 +631,9 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         UnmapViewOfFile(view);
         CloseHandle(other);
         CloseHandle(map);
+
+        c.ok(DeleteFileW(s_path.as_ptr()) != 0, GetLastError().into())?;
+        c.ok(RemoveDirectoryW(dir_w.as_ptr()) != 0, GetLastError().into())?;
     }
     Ok(())
 }
@@ -612,8 +653,10 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
     c.ok(frames[0] > image && frames[0] < image + 0x10_0000, frames[0] as u64)?;
     // SAFETY: plain kernel32 calls.
     unsafe {
+        // The condition at three times the type's bit index, and bit 63
+        // set as well (Windows 11 25H2: 0x8000000000000018).
         let mask = VerSetConditionMask(0, VER_MAJORVERSION, VER_GREATER_EQUAL);
-        c.eq(mask, 0x18)?;
+        c.eq(mask, 0x8000_0000_0000_0018)?;
         let mut v = OsVersionInfoExW {
             size: 284,
             major: 6,
@@ -634,12 +677,20 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         // RtlVerifyVersionInfo: 10.0 build 20348 or later, as curl asks.
         let ge = |m: u64, kind: u32| VerSetConditionMask(m, kind, VER_GREATER_EQUAL);
         let mask = ge(ge(ge(0, VER_MAJORVERSION), VER_MINORVERSION), VER_BUILDNUMBER);
+        c.eq(mask, 0x8000_0000_0000_00db)?;
         let all = VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER;
         v.major = 10;
         v.minor = 0;
         v.build = 20348;
         c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), 0)?;
-        v.build = 26101;
+        // The running build (KUSER_SHARED_DATA's NtBuildNumber, at least
+        // gala's 26100; 25H2 is 26200) passes, the next one does not.
+        // (KUSER_SHARED_DATA is mapped read-only in every process.)
+        let build = core::ptr::read_volatile(0x7ffe_0260 as *const u32);
+        c.ok(build >= 26100, build.into())?;
+        v.build = build;
+        c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), 0)?;
+        v.build = build + 1;
         c.eq(RtlVerifyVersionInfo(&v, all, mask).into(), STATUS_REVISION_MISMATCH)?;
         v.build = 0;
         v.major = 11;

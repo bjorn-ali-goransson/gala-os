@@ -20,6 +20,7 @@ static IL_DLL: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../bin/dotnet_hello.dll"));
 
 const STATUS_IMAGE_NOT_AT_BASE: NtStatus = 0x4000_0003;
+const STATUS_IMAGE_MACHINE_TYPE_MISMATCH: NtStatus = 0x4000_000e;
 const STATUS_INVALID_IMAGE_NOT_MZ: NtStatus = 0xc000_012f;
 const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_WRITECOPY: u32 = 0x08;
@@ -181,7 +182,9 @@ fn run() -> Result<(), u32> {
     let (s, sec) = create_image_section(f);
     c.eq(st(s), ok)?;
     let (s, a, size) = map_view(sec, 0, 0, PAGE_READONLY);
-    c.ok(s == STATUS_SUCCESS || s == STATUS_IMAGE_NOT_AT_BASE, st(s))?;
+    // Mapped, but for another machine: the informational
+    // STATUS_IMAGE_MACHINE_TYPE_MISMATCH (Windows 11 25H2).
+    c.eq(st(s), STATUS_IMAGE_MACHINE_TYPE_MISMATCH.into())?;
     let pe = a + read_u32(a + 0x3c) as usize;
     c.eq(read_u32(pe + 24) as u64 & 0xffff, 0x10b)?; // PE32
     c.eq(read_u32(pe + 24 + 56).into(), size as u64)?; // SizeOfImage

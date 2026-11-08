@@ -65,9 +65,38 @@ cargo xtask test            # stub-audit, host tests, alloc-audit, gala-um, repl
 cargo xtask export-tests    # refresh user/bin (CI compares)
 ```
 
-- CI also runs `cargo xtask lx-expect && git diff --exit-code user/lx`
-  and `cargo xtask export-tests && git diff --exit-code user/bin`:
-  checked-in binaries and transcripts must match their sources.
+- CI (`.github/workflows/ci.yml`, GitHub's hosted runners; the
+  repository is public) runs on every pull request and on main after a
+  merge (a branch without a pull request gets no run; a newer push to a
+  pull request cancels the older run). Work reaches main through a pull
+  request once its checks are green, or by a direct push after the local
+  gate (`cargo xtask test`) passed; main's ruleset allows both for now.
+  Its jobs:
+  - `linux` (Ubuntu 24.04): the format and clippy lines, `cargo xtask
+    lx-expect && git diff --exit-code user/lx`, `cargo xtask test
+    --no-boot` (everything but the boots) and `cargo xtask export-tests &&
+    git diff --exit-code user/bin` (checked-in binaries and transcripts
+    must match their sources).
+  - `boot (i/6)`: every boot scenario, dealt out over six runners with
+    `XTASK_SHARD=i/n` (`cargo xtask boot-test` boots the i-th of n
+    round-robin shares of the planned VMs; a batch stays in one share,
+    and the shard prints what it took). A failed shard keeps
+    `target/failed/` (each failed boot's log and triage) as an artifact.
+    The runners have hardware virtualization: a step opens /dev/kvm to
+    the runner's user, so the boots run under KVM (the boot log's
+    `xtask: vm time` line, and a QEMU standard error without "falling
+    back to tcg", show it). A step deletes the runner's preinstalled
+    Android, .NET and GHC toolchains for disk space.
+  - `windows` (Windows Server 2025, build 26100: the pinned build): the
+    checked-in `user/bin` through `run-all.ps1`, elevated, with the
+    `galatest` account and Defender excluded from the checkout, as the
+    sweep brief asks. The report (`windows.json`,
+    `windows-output.txt`) is the job's `windows-report` artifact, in
+    `cargo xtask compare`'s schema; `user/windows/ci_summary.py` writes
+    the job summary (passes, and each failing program's exit and line).
+    With `user/windows/ci-passing.txt` (program names) the job fails
+    when a listed program does not pass on Windows: a test's expectation
+    stopped being Windows' answer.
 - Commit messages pass through the shell: do not put backticks in a
   double-quoted `-m`; use a heredoc with `-F -`.
 - Borrowed code or a new dependency gets a `THIRD_PARTY.md` entry in the
@@ -88,6 +117,11 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
   file, line and analyzer; fix the code, or for `event-reset` justify
   the site with `// lint(event-reset): <reason>`, or for `wait-site`
   add the reviewed site to `WAIT_SITES` with the review's reason.
+- Before a push the pre-push hook runs `cargo xtask lint --full`: the
+  same, then every command of CI's Clippy step, read from
+  `.github/workflows/ci.yml` (add a crate's line there and the hook
+  runs it too). It names the commands that failed; fix them rather than
+  pushing with `--no-verify`.
 
 - **Observability is part of every change** (OBSERVABILITY.md): a new
   subsystem, driver, boot stage, format or test comes with its
@@ -139,7 +173,7 @@ alone prints the usage.
 
 | Command | What it does |
 |---|---|
-| `build` | kernel (default and server builds), DLLs, programs, `target/<profile>/gala-os.iso` |
+| `build` | kernel, DLLs, programs, `target/<profile>/gala-os.iso` |
 | `run [--headless]` | build, then boot in QEMU (UEFI) with the serial log on stdio |
 | `test` | `stub-audit`, host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` |
 | `boot-test [filter]` | boot scenarios only; a filter matches names containing it, `name$` exactly that one, `a,b,c` exactly those |
@@ -234,8 +268,7 @@ Requirements (README "Requirements"): Linux, rustup (the pinned
 toolchain in `rust-toolchain.toml` installs itself), `git`, `xorriso`,
 QEMU, OVMF for UEFI boots (`OVMF_CODE`, `OVMF_VARS` if it is somewhere
 unusual), Linux 5.11+ for gala-um. The first build fetches the pinned
-Limine into `target/`. The server kernel (`--no-default-features`, no
-shasha) is built into `target/server`, the `handover_next` kernel into
+Limine into `target/`. The `handover_next` kernel is built into
 `target/next`.
 
 ### Environment variables
@@ -411,6 +444,31 @@ is not visible (the firmware's framebuffer is no longer shown): read the
 serial log. The kernel flag `gputrace` logs every command; `events=display`
 the modes, resets and errors.
 
+Software 3D (GPU G2) needs no device: its scenarios run Mesa (PREBUILT
+`mesa`) on the CPU and check a headless desktop's frame
+(`presenter=test`, BIOS). `gl_test` (user/gl_test, C, `build.sh`) is
+OpenGL on llvmpipe, `vk_test` (user/vk_test, C; its `build.sh` needs
+`glslangValidator`, apt `glslang-tools`, and clones the pinned
+Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
+`vulkan-runtime`), about 10 s each under TCG. When one fails:
+
+- Read the ledger first: `missing export` stops a load; `missing dll`
+  for d3d12/vulkan-1 is Mesa looking for drivers, D3DKMT* and
+  IDXGIFactory6 the Vulkan loader probing (not failures).
+- A crash report inside `vulkan-1.dll`: `llvm-symbolizer
+  --obj=target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll
+  0x180000000+<offset>` names the loader's source line (its PDB is
+  unpacked beside it; the loader's source is
+  github.com/KhronosGroup/Vulkan-Loader at the same version).
+- vk_test printing `skipped (no Vulkan driver)` means the loader found
+  no driver: the Drivers key (the scenario's `registry` module), the
+  manifest and `vulkan_lvp.dll` in System32, and `dxgi.dll` (the loader
+  takes no driver from the key without a DXGI factory).
+- Mesa's own `MESA:` lines are in the serial log.
+- A frame that renders (the read-back pixels are right) but is not on
+  the screen is user32's presentation of a kept DC (ARCHITECTURE
+  "Software 3D (G2)").
+
 ### Test speed and environments
 
 - **BIOS boot by default.** ISOs are hybrid (BIOS and UEFI). SeaBIOS
@@ -431,7 +489,11 @@ the modes, resets and errors.
   scenarios: drawing text roughly doubles kernel time under emulation.
 - **KVM**: QEMU uses KVM when `/dev/kvm` is available (near-native
   speed); otherwise TCG with one host thread per processor (multi-threaded
-  TCG), except `SINGLE_THREAD_TCG` scenarios.
+  TCG), except `SINGLE_THREAD_TCG` scenarios. TCG executes the
+  instructions the Intel way whatever vendor the guest's CPUID names, so
+  behaviour that differs between Intel and AMD only shows under KVM on
+  that vendor's host (CI's runners are AMD: an AMD-only bug is CI-only
+  here). The boot log's `cpu:` line names the vendor.
 - **Docker**: `cargo xtask docker-test [xtask args]` builds
   `docker/test.Dockerfile` (Ubuntu 24.04, QEMU, OVMF, xorriso, the
   pinned toolchain) and runs `cargo xtask test` (or the given arguments)
@@ -659,15 +721,58 @@ code `xtask/src/trust.rs`).
   feed are kept (and must hash to their name).
 - `cargo xtask feed refresh <feed dir>`: new snapshot and timestamp
   over the same targets (what a scheduled CI job runs, more often than
-  the timestamp's 1-day expiry).
-- `cargo xtask feed check <feed dir> [--root <trusted root.json>]`:
-  the feed as gala's client sees it now, every blob hashed; prints the
-  versions, expiries and release, or the first refusal
-  (`timestamp.json: refused: timestamp: expired at ...`).
-- Keys: test keys made on first use in `target/trust/feed-root-{1,2,3}`,
+  the timestamp's 1-day expiry), and targets signed again (same
+  release, new version) when it expires within 15 days.
+- `cargo xtask feed renew-root <feed dir>`: root N+1, the same keys, a
+  fresh 90-day expiry (CI runs it monthly).
+- `cargo xtask feed check <feed> [--over <source>] [--root <trusted
+  root.json>]`: the feed as gala's client sees it now, every blob
+  hashed; prints the versions and release, or the first refusal
+  (`timestamp.json: refused: timestamp: expired at ...`). `<feed>` is a
+  directory or an http(s) URL (read with curl); `--over` reads what the
+  directory lacks from a second source (a work directory over the
+  bucket: the feed as it will be once pushed).
+- `cargo xtask feed pull <source> <empty dir>`: the metadata a client
+  follows, verified, into a new directory (no blobs), with `.pulled`
+  listing what came; `cargo xtask feed push <dir> <s3://bucket | dir>`:
+  what changed since, blobs first and `timestamp.json` last, refusing to
+  overwrite a published version. `s3://` runs the `aws` CLI with its
+  usual environment (`AWS_ENDPOINT_URL`, credentials).
+- `cargo xtask release-tree <dir> [--release]`: the files of a release
+  (kernel, system DLLs, Limine, sealed config, manifest; no test
+  programs), what CI publishes.
+- Keys: `GALA_FEED_KEYS` (one `<role> <64 hex>` line each for `root-1`,
+  `root-2`, `root-3`, `targets`, `snapshot`, `timestamp`) when set;
+  otherwise test keys made on first use in `target/trust/feed-root-{1,2,3}`,
   `feed-targets`, `feed-snapshot`, `feed-timestamp` (`.seed`, mode 0600;
   `.pub`). A new `target/trust/` means a new root: start a new feed
-  directory.
+  directory. Signing a feed whose root lists other keys is refused.
+- **CI** (`.github/workflows/release.yml`, environment `release`):
+  `publish` after CI passes on main (main's head only), `refresh` every
+  6 hours, `renew-root` on the 3rd of each month; each pulls from the
+  public URL (`FEED_URL`, the one place it is written), signs, checks,
+  pushes to `s3://$R2_BUCKET` through R2's S3 endpoint, and checks the
+  public URL. The job summary lists the release, files, new blobs and
+  each role's expiry. A manual run: Actions, "Release", "Run workflow",
+  choose publish (from main), refresh or renew-root.
+- **One-time setup** (the owner): make the keys and store them as the
+  secret without them touching the screen or a file: `cargo xtask feed
+  keygen | gh secret set GALA_FEED_KEYS --env release` (the key ids go
+  to standard error: keep them to recognise the keys later). Besides
+  it, the environment `release` (or the repository) needs the secrets
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and the variables
+  `R2_ACCOUNT_ID`, `R2_BUCKET`. The first publish against the empty
+  bucket makes root 1. A lost secret means a new root 1 for a new
+  bucket (clients trust root 1 or a later root they took): keep a copy
+  offline. GitHub disables the schedules of a public repository without
+  activity for 60 days (the feed then freezes within a day): re-enable
+  the workflow on the Actions page.
+- Locally, against a directory standing in for the bucket:
+  `GALA_FEED_KEYS="$(cargo xtask feed keygen)"` exported, then `feed
+  pull bucket w1`, `feed publish <release tree> w1`, `feed check w1
+  --over bucket`, `feed push w1 bucket`, `feed check bucket`; the host
+  test `feed::tests::workflows_against_a_local_bucket` runs that
+  sequence (publish, refresh, renew-root, publish).
 - Cross-check with python-tuf (optional, host only): `python3 -m venv
   <dir> && <dir>/bin/pip install tuf==6.0.0`, then load each role with
   `Metadata.from_bytes`, `root.verify_delegate(role, md)` and
@@ -687,6 +792,40 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   services through ntdll exports (`find_ntdll()` + `find_export()` in
   ntrt), and `user/testntdll` provides stubs with gala's numbers
   (`syscall_stubs!`). On Windows the same test then uses the real ntdll.
+  ntrt does so itself where it wraps such a service (`create_timer`,
+  `set_timer`, `create_semaphore`, `query_semaphore` on x64, through
+  `ntdll_export`; on x86 `nt_call` takes the 32-bit ntdll's export for
+  the numbers that are gala's own), falling back to gala's number only
+  when no ntdll is mapped (gala scenarios that ship none). A raw
+  `mov eax, N` in a test is for long-stable numbers only.
+- **A test must hold on an ordinary user's machine too** (run-all.ps1
+  runs as a non-admin user in session 1, with many CPUs, a battery, its
+  own UI language): files and directories go in `%TEMP%` (GetTempPathW),
+  not C:\ (a user may not create files there) or C:\gala, and an
+  earlier run's leftovers are removed first; values that depend on the
+  machine (the processor count, devices, the system locale, the build,
+  the volume's number) are read from another API, not typed in; per-user
+  state another process may hold (the clipboard) is skipped, naming the
+  holder, when it is held; named sections and symbolic links go in the session's
+  `\Sessions\<n>\BaseNamedObjects` (`\BaseNamedObjects` in session 0):
+  creating them in the global one needs SeCreateGlobalPrivilege outside
+  session 0, and DIRECTORY_ALL_ACCESS on it is not granted (ask
+  TRAVERSE | CREATE_OBJECT); information buffers are aligned for their
+  class (NtSetInformationThread checks alignment before length:
+  STATUS_DATATYPE_MISALIGNMENT for a `[u8; 4]` at an odd address); and
+  `cmd /c` with more than two quotes strips the first and the last, so
+  such a line is wrapped in one more pair.
+- **A test that needs what an ordinary user lacks** (the `galatest`
+  account, an administrator, SYSTEM) checks for it with a real query
+  (LookupAccountNameW's ERROR_NONE_MAPPED, TokenElevation, TokenUser,
+  CheckTokenMembership) and without it prints one line `<test>: skipped
+  (<reason>)` and exits 0; never a guess from an error alone. gala's
+  scenario provides it (`as=system`, the account), so there the test runs
+  whole. What only gala has (its Gala* services, gala.exe, `C:\gala`)
+  runs only when `ntrt::on_gala()` (kernel32 tests ask GetProcAddress for
+  ntdll's GalaConsoleCreate): on Windows gala's private service numbers
+  have bit 12 set, reach win32k's table, and the first call faults
+  (STATUS_FATAL_USER_CALLBACK_EXCEPTION), so a status check comes too late.
 - **testntdll is gala's stand-in ntdll**, shipped only in scenarios that
   list it in `EXTRA_MODULES`: a small loader (LdrLoadDll and friends),
   the exception/APC dispatchers and the stubs. Adding an export there
@@ -735,7 +874,11 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   guessed time while xtask looks; it waits for xtask's input
   (console_window's "q"), and a step whose input acts on output the
   program is still printing waits for that output (`ScreenStep::after`).
-  On the host side, timing xtask's own observations in a loop that does
+  A program that ends on xtask's input ends on the last thing xtask
+  sends: a click counts on WM_LBUTTONUP, not on the press, or under KVM
+  the program and QEMU are gone before xtask writes the release
+  ("screen: Broken pipe"; presenter_test, gl_test and vk_test count the
+  release). On the host side, timing xtask's own observations in a loop that does
   other work is the same mistake: xtask times `uptime_ms=` marks in a
   thread of its own.
 - **Single-CPU tests that measure ticks** pin themselves
@@ -804,6 +947,20 @@ kernel32 through `raw-dylib`), run under gala and under Windows
    `STATUS_TO_ERROR` (unmapped ones give 317 and are reported).
 5. Run the program you are bringing up and read the `ledger:` lines:
    they list every missing import by name.
+6. Which DLL: what Windows' kernel32 exports goes in kernel32; what only
+   kernelbase has (its documentation says "DLL: Kernelbase.dll", Wine's
+   kernel32.spec lacks it, or GetProcAddress on Windows says so: add it
+   to `export_split.rs`) goes in `user/kernelbase/src/` (`lib.rs`,
+   `path.rs`, `address_wait.rs`), named in its build.rs's `OWN`. A name
+   Windows' kernelbase has that Wine's spec lacks goes in
+   `tools/kernelbase_exports.py`'s MEASURED. Programs reach either through the core
+   API sets: kernelbase forwards every name of Windows' list
+   (`user/kernelbase/exports.txt`) to the DLL that has it, so a new
+   kernel32 function is reachable through its set with nothing more.
+   kernelbase ships wherever kernel32 does (xtask's `extra_modules`):
+   scenarios need not list it. `exports.txt` is regenerated with
+   `python3 -I tools/kernelbase_exports.py <dir of Wine's .spec files>
+   <commit>` (record the commit in THIRD_PARTY.md).
 
 ### Programs that import functions gala lacks
 
@@ -1084,21 +1241,43 @@ source).
   (static, ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN),
   reproducibly (stripped, no build id, `-fno-stack-protector`: the
   canary is read from %fs:0x28, so a test that moves FS would crash).
+  The tests in its `GLIBC_TESTS` (dyn_test) are built with the host's
+  gcc against glibc instead, dynamically: `<name>_test` (ET_EXEC with an
+  interpreter) and `<name>_test-pie` (a PIE), each `lib*.c` beside the
+  test a `user/lx/bin/lib*.so` linked with `--as-needed` (one only
+  dlopen()ed is not DT_NEEDED), found through DT_RUNPATH `$ORIGIN`.
+  They use libc as a program does (printf, malloc, dlopen), not raw
+  system calls: what they check is that glibc's programs run. CI's
+  rebuild (ubuntu-24.04: gcc 13.3, glibc 2.39) must give the same bytes:
+  their start-up files (`crt1.o`, `crti.o`) come from the host's
+  libc6-dev, so the binaries are rebuilt on that Ubuntu release.
   The binaries are checked in under `user/lx/bin`, not `user/bin`
   (`export-tests` copies only the Windows build's outputs); the kernel's
   host tests `include_bytes!` them.
 - **Transcripts**: `cargo xtask lx-expect` rebuilds them (when musl-gcc
   is there; else it runs the checked-in ones), runs each binary on this
   host as `./<name>_test first '' 'third arg'` from
-  `target/lx-expect/<binary>/` with only `A=1 EMPTY= LONGER_NAME=some
-  value` in its environment, and compares stdout + `-- exit status N`
+  `target/lx-expect/<binary>/` (with `user/lx/bin/lib*.so` copied
+  beside it) with only `A=1 EMPTY= LONGER_NAME=some value` in its
+  environment, and compares stdout + `-- exit status N`
   with `user/lx/<name>_test/expected.txt` (both binaries against the
   same file). A mismatch prints a line diff and leaves `actual.txt`
   there. `--runs 5` runs each binary 5 times and fails if a transcript
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
   skips the rebuild. Transcripts avoid version-dependent values because
-  CI's runner kernel differs from the recording machine's.
+  CI's runner kernel differs from the recording machine's, and so does its
+  CPU: GitHub's runners are a mix of AMD and Intel, some with 5-level
+  paging (user space up to 2^56), so a test finds such a boundary on its
+  host (arch_prctl_test probes a mapping above 2^47) instead of assuming
+  it. Nor may a transcript assert what Linux leaves to timing: a chain of
+  exactly 40 symbolic links reads or fails with ELOOP, depending on
+  whether the lookup's lockless walk fell back (fs_test asserts 20 and
+  41, and "opens or ELOOP" for 40). lx-expect
+  closes the descriptors it inherited first (it says how many): fork
+  sizes a program's descriptor table by the parent's highest open
+  descriptor, and answers such as select's on a descriptor beyond the
+  table depend on that size.
 - **Skips**: pty_test and proc_test print a single `SKIP:
   open(/dev/ptmx) = -errno` (or readlink /proc/self) line when that is
   unavailable, so a machine without them shows a mismatch whose diff
@@ -1125,6 +1304,19 @@ source).
   the `unimplemented system call <name>` lines and the `ledger:` lines
   (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
   the next work list.
+- **Dynamic programs in gala** (`lx_dyn`, `lx_dyn_pie`): the image holds
+  the test and its libraries in `/lx` and glibc where Ubuntu's ld.so
+  finds it: `ld-linux-x86-64.so.2`, `libc.so.6` and `libm.so.6` from
+  the pinned `libc6` .deb (`PREBUILT` "glibc", unpacked with dpkg-deb)
+  in `/lib/x86_64-linux-gnu`, ld.so also in `/lib64` (PT_INTERP's path;
+  a copy, boot modules make no links). The scenarios ship them as the
+  module set "glibc" (MODULE_SETS); a new glibc test adds its program
+  and libraries to its own scenario and that set. ld.so needs
+  `/proc/self/exe` for `$ORIGIN` (served by exact path) and reads
+  `/etc/ld.so.cache` if there is one (there is none: it searches its
+  system directories). Bring-up: `lx: exec interpreter ...` shows where
+  ld.so went; the ledger's `linux syscall missing` lines (rseq is the
+  one glibc 2.39 reaches and does without) are the next calls.
 - **Linux programs that are not tests** (busybox): fetched as a
   `PREBUILT` (never run on the host), shipped to `C:\lx` by an
   EXTRA_MODULES entry, driven by a script of ours in
@@ -1152,7 +1344,13 @@ source).
   whose buffer runs into an unmapped page fails with EFAULT, not a
   partial count (write_exit_test); a store to a never-touched bss page
   after mprotect(PROT_READ) faults with error code 6 (not present), so
-  signal_test touches it first (7).
+  signal_test touches it first (7). A MAP_PRIVATE page never written
+  shows later writes to its file (the page cache; mmap_test asserts it),
+  one written keeps its copy. A relation over a path from getcwd must
+  count its NUL: the system call's length includes it (exec_test's
+  `/proc/self/exe` checks). Kernel code a host test calls must not log
+  (`crate::info!` is the serial port: SIGSEGV on the host): exec's
+  `prepare` returns its plan and the caller logs it.
 
 ## Program recipes
 
@@ -1417,24 +1615,34 @@ it on first use.
   component: the download is kept as it is.
 - Unpackers: unzip for zips (`apt install unzip`; a fresh Ubuntu, WSL's
   included, has none, and the prebuilt fails to spawn it), msitools'
-  `msiextract` for an MSI (`apt
-  install msitools`), 7-Zip (`7z` from p7zip-full) for an NSIS installer
-  or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
+  `msiextract` for an MSI (`apt install msitools`), 7-Zip (`7z` from
+  p7zip-full) for a `.7z` archive (mesa-dist-win's; members are file
+  paths such as `x64/opengl32.dll`), an NSIS installer or a 7-Zip
+  self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
   package: FlaUI) is a plain zip, its members paths such as
-  `lib/net8.0-windows7.0/FlaUI.Core.dll`. One fetch runs at a time
+  `lib/net8.0-windows7.0/FlaUI.Core.dll`; a Debian package (`.deb`:
+  Ubuntu's glibc) is unpacked with `dpkg-deb -x`, its member files
+  (`usr/lib/x86_64-linux-gnu/libc.so.6`) moved up by their names. One fetch runs at a time
   (ISOs are built in parallel), and a `.unpacked-<sha256>` marker makes
-  an interrupted unpack run again.
+  an interrupted unpack run again. An unpack (no marker for the pinned
+  checksum and selection: a new version, changed members, an interrupted
+  run) starts by clearing `target/prebuilt/<name>`, so an older
+  release's files never stay beside the new ones.
 - `members` are unzip patterns (`*` crosses `/`), `excludes` unzip `-x`
   patterns; the marker includes a hash of both, so changing them unpacks
   again. For an MSI, members are directories of the installed layout,
   each moved to `target/prebuilt/<name>/<last component>`, and excludes
   are paths removed after that; for 7-Zip archives members are
   directories.
-- A pinned release can vanish upstream (the FileZilla 3.69.3 client
-  installer's SourceForge URL answers 404; ROADMAP AG): keep a fetched
-  `target/prebuilt/<name>` around, and change a URL only for an official
-  one with the same SHA-256.
+- A pinned release can vanish upstream (SourceForge dropped FileZilla
+  3.69.3's installer): pin a release through a source that keeps old
+  versions, such as Chocolatey's package of the official installer
+  (FileZilla Client and Server), and change the pinned version when it
+  goes; a package carrying a 32-bit and a 64-bit installer is unpacked
+  from the 64-bit one (by name: `win64`/`x64`). Copy a fetched
+  `target/prebuilt/<name>` aside first to compare against the new
+  version (the re-pin clears it).
 - **Large programs**: a module path ending in `/`
   (`target/prebuilt/jdk/jdk-21.0.5+11/`) ships the whole tree as
   `C:\<dir>` with its subdirectories, packed into one USTAR archive
@@ -2955,14 +3163,13 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   `cfg(test)` (`nt::session`'s and `display::virtio_gpu`'s `log!`);
   events are fine (`events::emit` is a no-op in tests). Find the test
   with `--test-threads=1` or by filtering module names.
-- **Changing `nt::desktop`'s public functions or types**: the server
-  kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
-  `--no-default-features` clippy line in CI fails. What a window is
+- **Window behaviour belongs in `nt::winstate`**: what a window is
   (rectangles, Z order, focus, capture, client pixels, input for
-  programs, the named actions) belongs in `nt::winstate`, which both
-  kernels build; `nt::desktop` only draws it (frames, taskbar, start
+  programs, the named actions) lives there, which every desktop has, a
+  bare one too; `nt::desktop` only draws it (frames, taskbar, start
   menu, pointer). A change to window behaviour made in the compositor
-  instead is missing from the server kernel (`server_windows`).
+  instead is missing where nothing shows the desktop
+  (`noscreen_windows`, `server_profile_windows`).
 - **Windows live in a session**: kernel code reaches the window
   registry, WinEvent hooks and shasha's desktop through the process
   (`process.desk.windows` / `.hooks` / `.shell`), never a global;
@@ -2985,6 +3192,22 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### gala's DLLs
 
+- **A stub is invisible to GetProcAddress**: gala_stubs' exports live in
+  `.gstub`, which ntdll's GetProcAddress skips (a probing program takes
+  its fallback), while they are in the export directory. A test of which
+  names a DLL exports reads the export directory for presence
+  (`kernel32_test`'s `export_split.rs`) and GetProcAddress only for
+  absence and addresses.
+- **kernel32 builds kernelbase's `address_wait.rs` for itself**: its
+  locks wait on their words through a private copy with its own waiter
+  list. Keep it unexported in kernel32 and keep its users there to
+  kernel32's own words; a WakeByAddress* from one DLL never wakes a
+  waiter of the other.
+- **Which DLL exports a name is measured, not guessed**: Wine's specs
+  are the list's starting point, but Windows' kernel32 and kernelbase
+  split differently in places (`tools/kernelbase_exports.py`'s
+  MEASURED); a name moved between them goes in `export_split.rs` with
+  the measurement.
 - **Objects told apart by a leading magic must be `#[repr(C)]`**:
   Rust reorders a plain struct's fields, so "every key object starts
   with its magic" is false without it. bcrypt's RSA and ECDSA key
@@ -3212,7 +3435,8 @@ ARCHITECTURE "Waits".
 | winget manifest resolver and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Third-party program builds, scripts and configuration | `user/<program>/` (`build.sh`) |
 | Checked-in binaries, Windows runner (`run-all.ps1`) | `user/bin/` |
-| Triage of the test programs on real Windows: probes and findings | `user/windows/` (`docs/windows-triage-brief.md`) |
+| Triage of the test programs on real Windows: run-all's data and probe scripts | `user/windows/` (`docs/windows-triage-brief.md`; requests and findings are GitHub issues labelled `windows` / `from-windows`) |
+| gala under KVM on the Windows machine: Chromium's memory, the WPT run, the performance profile | `docs/windows-kvm-brief.md` (GitHub issue #1, branch `windows-kvm`) |
 | Build, boot tests, scenarios, reports | `xtask/src/main.rs`; signing `xtask/src/trust.rs`; triage `triage.rs`; OTLP `otel.rs` (encoders `otel/wire.rs`, batching and sending `otel/send.rs`); lx transcripts `lx_expect.rs`; audit `alloc_audit.rs`; clock check `clockcheck.rs` |
 | Docker test image | `docker/test.Dockerfile` |
 | Vendored dependencies (smoltcp with gala's handover patch) | `vendor/` |
@@ -3229,5 +3453,5 @@ Output under `target/`:
 | `target/trust/` | the test signing key |
 | `target/net-client/<port>/` | a net client's files during a boot |
 | `target/lx-expect/<binary>/` | lx-expect's runs and `actual.txt` |
-| `target/server/`, `target/next/` | the server kernel and the `handover_next` kernel |
+| `target/next/` | the `handover_next` kernel |
 | `~/.cache/gala-qemu/<version>` | the pinned QEMU |

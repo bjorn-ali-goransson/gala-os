@@ -1524,6 +1524,14 @@ pub extern "system" fn setsockopt(
     if !started() {
         return fail(WSANOTINITIALISED);
     }
+    // SO_RANDOMIZE_PORT picks the port bind will take: refused once the
+    // socket is bound (WSAEINVAL; Windows 11 25H2, a UDP socket).
+    if (level, name) == (SOL_SOCKET, 0x3005) {
+        let mut local = [0u8; 28];
+        if afd(s, IOCTL_AFD_GETSOCKNAME, &[], &mut local).is_ok() {
+            return fail(WSAEINVAL);
+        }
+    }
     let accepted = match (level, name) {
         // SO_REUSEADDR, SO_KEEPALIVE, SO_BROADCAST, SO_LINGER, SO_SNDBUF,
         // SO_RCVBUF, SO_EXCLUSIVEADDRUSE, SO_UPDATE_ACCEPT_CONTEXT,
@@ -1632,6 +1640,14 @@ pub extern "system" fn getsockopt(
     unsafe {
         if value.is_null() || len.is_null() || *len < 4 {
             return fail(WSAEFAULT);
+        }
+        // SO_RANDOMIZE_PORT is a 1-byte BOOLEAN: only its byte is written
+        // (Windows 11 25H2: an int set to -1 reads 0xffffff01). The length
+        // it reports is not measured; 1, the option's size, is given.
+        if (level, name) == (SOL_SOCKET, 0x3005) {
+            *value = u8::from(v != 0);
+            *len = 1;
+            return 0;
         }
         core::ptr::write_unaligned(value.cast::<i32>(), v);
         *len = 4;

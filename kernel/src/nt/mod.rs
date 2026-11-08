@@ -7,11 +7,6 @@ pub mod afd;
 pub mod charge;
 pub mod conhost;
 pub mod crashreport;
-#[cfg(feature = "shasha")]
-pub mod desktop;
-/// A server kernel (no `shasha` feature): the same interface, no desktop.
-#[cfg(not(feature = "shasha"))]
-#[path = "desktop_off.rs"]
 pub mod desktop;
 pub mod disk;
 pub mod file;

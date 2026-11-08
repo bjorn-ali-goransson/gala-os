@@ -94,15 +94,22 @@ fn run() -> Result<(), u32> {
     c.eq(set_event(sync_only).0, STATUS_ACCESS_DENIED)?;
     c.eq(wait(sync_only, poll), STATUS_TIMEOUT)?;
 
-    // A relative timeout really waits.
+    // A relative timeout really waits: 20 ms, less at most one tick of
+    // the system timer (a timed wait expires on a tick, from a base up to
+    // one tick old; Sleep's documentation allows the same), so `waited`
+    // plus the current timer resolution is at least 20 ms. (Windows 25H2,
+    // resolution 15.625 ms: a 20 ms wait once returned after 12.)
+    // No ntdll mapped: gala's bare kernel, whose timer ticks every ms.
+    let tick_ms = timer_resolution().map_or(1, |r| (i64::from(r) + 9_999) / 10_000);
+    c.ok((1..=16).contains(&tick_ms), tick_ms)?;
     let t0 = now_ms();
     c.eq(wait(ev, Some(relative_ms(20))), STATUS_TIMEOUT)?;
     let waited = now_ms() - t0;
-    c.ok(waited >= 15, waited)?;
+    c.ok(waited + tick_ms >= 20, waited)?;
     let t0 = now_ms();
     c.eq(delay(relative_ms(20)), STATUS_SUCCESS)?;
     let delayed = now_ms() - t0;
-    c.ok(delayed >= 15, delayed)?;
+    c.ok(delayed + tick_ms >= 20, delayed)?;
 
     // Wait for several objects.
     let (_, set) = create_event(EVENT_ALL_ACCESS, NOTIFICATION_EVENT, true);

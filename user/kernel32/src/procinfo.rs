@@ -709,43 +709,6 @@ pub extern "system" fn FindFirstFileExA(
     find
 }
 
-/// QueryInterruptTime(Precise) and QueryUnbiasedInterruptTimePrecise
-/// (API set api-ms-win-core-realtime, which gala hosts in kernel32):
-/// KUSER_SHARED_DATA's InterruptTime, 100 ns since boot.
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryInterruptTimePrecise(out: *mut u64) {
-    let _ = super::mapping::QueryUnbiasedInterruptTime(out);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryUnbiasedInterruptTimePrecise(out: *mut u64) {
-    let _ = super::mapping::QueryUnbiasedInterruptTime(out);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryInterruptTime(out: *mut u64) {
-    let _ = super::mapping::QueryUnbiasedInterruptTime(out);
-}
-
-#[cfg_attr(
-    target_arch = "x86",
-    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
-)]
-#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
-unsafe extern "system" {
-    fn NtCompareObjects(first: Handle, second: Handle) -> u32;
-}
-
-/// CompareObjectHandles(hFirstObjectHandle, hSecondObjectHandle): whether
-/// both handles refer to the same kernel object (NtCompareObjects). FALSE
-/// for different objects, with ERROR_NOT_SAME_OBJECT.
-#[unsafe(no_mangle)]
-pub extern "system" fn CompareObjectHandles(first: Handle, second: Handle) -> Bool {
-    // SAFETY: the kernel checks both handles.
-    let status = unsafe { NtCompareObjects(first, second) };
-    if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
-}
-
 // ---- Power status, prefetch, mapped file names ---------------------------
 
 /// GetSystemPowerStatus(lpSystemPowerStatus): on AC power with no system

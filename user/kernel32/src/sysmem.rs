@@ -292,6 +292,32 @@ pub extern "system" fn K32EnumProcessModules(
     TRUE
 }
 
+/// K32EnumProcessModulesEx / EnumProcessModulesEx: a 64-bit process's
+/// modules are all 64-bit, so LIST_MODULES_DEFAULT (0), _64BIT (2) and
+/// _ALL (3) list what K32EnumProcessModules does; LIST_MODULES_32BIT (1)
+/// lists none.
+#[unsafe(no_mangle)]
+pub extern "system" fn K32EnumProcessModulesEx(
+    process: Handle,
+    out: *mut Handle,
+    size: u32,
+    needed: *mut u32,
+    filter: u32,
+) -> Bool {
+    match filter {
+        0 | 2 | 3 => K32EnumProcessModules(process, out, size, needed),
+        1 if is_current(process) => {
+            // SAFETY: the caller's output.
+            unsafe { *needed = 0 };
+            TRUE
+        }
+        _ => {
+            unsupported(b"kernel32.dll!K32EnumProcessModulesEx(filter)", filter.into());
+            fail_with(ERROR_INVALID_PARAMETER, FALSE)
+        }
+    }
+}
+
 /// MODULEINFO from the image's headers.
 #[unsafe(no_mangle)]
 pub extern "system" fn K32GetModuleInformation(

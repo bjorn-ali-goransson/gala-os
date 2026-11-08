@@ -434,6 +434,8 @@ pub struct ObjectAttributes {
 
 const STATUS_SUCCESS: u32 = 0;
 const STATUS_IMAGE_NOT_AT_BASE: u32 = 0x4000_0003;
+/// A view of an image for another machine (informational: mapped).
+const STATUS_IMAGE_MACHINE_TYPE_MISMATCH: u32 = 0x4000_000e;
 const STATUS_DLL_NOT_FOUND: u32 = 0xc000_0135;
 const STATUS_ENTRYPOINT_NOT_FOUND: u32 = 0xc000_0139;
 const STATUS_INVALID_IMAGE_FORMAT: u32 = 0xc000_007b;
@@ -734,23 +736,69 @@ fn set_module_path(slot: usize, path: &[u16]) {
     ldr_link(slot);
 }
 
+/// Resolves the `.` and `..` components of the absolute directory `dir`
+/// (`C:\\a\\.\\b\\..\\` or `\\\\server\\share\\...`, backslashes, ending in
+/// one) in place, as RtlGetFullPathName does: `.` goes, `..` takes the
+/// component before it with it, never the drive or the share. Returns the
+/// new length.
+fn resolve_dots(dir: &mut [u16]) -> usize {
+    let sep = u16::from(b'\\');
+    let dot = u16::from(b'.');
+    // The root that `..` never removes: `C:\` or `\\server\share\`.
+    let root = if dir.len() >= 2 && dir[0] == sep && dir[1] == sep {
+        let mut seps = 0;
+        dir.iter()
+            .position(|&c| {
+                seps += usize::from(c == sep);
+                seps == 4
+            })
+            .map_or(dir.len(), |i| i + 1)
+    } else {
+        dir.iter().position(|&c| c == sep).map_or(dir.len(), |i| i + 1)
+    };
+    let (mut read, mut write) = (root, root);
+    while read < dir.len() {
+        let end = dir[read..].iter().position(|&c| c == sep).map_or(dir.len(), |i| read + i);
+        let part = read..end;
+        let next = (end + 1).min(dir.len());
+        if dir[part.clone()] == [dot] || part.is_empty() {
+            // `.` (or an empty component): nothing.
+        } else if dir[part.clone()] == [dot, dot] {
+            // `..`: back to the separator before the last component.
+            if write > root {
+                write = dir[root..write - 1]
+                    .iter()
+                    .rposition(|&c| c == sep)
+                    .map_or(root, |i| root + i + 1);
+            }
+        } else {
+            dir.copy_within(read..next, write);
+            write += next - read;
+        }
+        read = next;
+    }
+    write
+}
+
 fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
     let mut path = [0u16; 300];
     let prefix = *b"\\??\\";
-    let total = prefix.len() + dir.len() + dll.len();
-    if total > path.len() {
+    if prefix.len() + dir.len() + dll.len() > path.len() {
         return Err(STATUS_DLL_NOT_FOUND);
     }
     for (i, &b) in prefix.iter().enumerate() {
         path[i] = u16::from(b);
     }
-    // A DOS path's forward slashes are backslashes in an NT path (as
-    // RtlDosPathNameToNtPathName makes them).
+    // A DOS path's forward slashes are backslashes in an NT path, and its
+    // `.` and `..` components are resolved (as RtlDosPathNameToNtPathName
+    // makes them).
     for (slot, &c) in path[prefix.len()..prefix.len() + dir.len()].iter_mut().zip(dir) {
         *slot = if c == u16::from(b'/') { u16::from(b'\\') } else { c };
     }
+    let dir_len = resolve_dots(&mut path[prefix.len()..prefix.len() + dir.len()]);
+    let total = prefix.len() + dir_len + dll.len();
     for (i, &b) in dll.iter().enumerate() {
-        path[prefix.len() + dir.len() + i] = u16::from(b);
+        path[prefix.len() + dir_len + i] = u16::from(b);
     }
     let name = UnicodeString {
         length: (total * 2) as u16,
@@ -800,7 +848,7 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
         NtMapViewOfSection(section, -1, &mut base, 0, 0, core::ptr::null_mut(), &mut size, 1, 0, 4);
     NtClose(section);
     match st {
-        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => {}
+        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE | STATUS_IMAGE_MACHINE_TYPE_MISMATCH => {}
         _ => return Err(st),
     }
     // Image sections take both kinds; an image of the other kind loads as
@@ -1317,6 +1365,35 @@ fn find_module(name: &[u8]) -> Option<usize> {
     with_modules(|m| m.iter().position(|m| m.base != 0 && &m.name[..m.name_len] == name))
 }
 
+/// The loaded module mapped from `dir` (a path-qualified load's
+/// directory, ending in a backslash) and `name` (normalized): the same
+/// file, compared as Windows compares paths (case-insensitively, `/` as
+/// `\`, `.` and `..` resolved). Another directory's DLL of that name is
+/// another module.
+fn find_module_at(dir: &[u16], name: &[u8]) -> Option<usize> {
+    let mut want = [0u16; MAX_PATH];
+    if dir.len() + name.len() > want.len() {
+        return None;
+    }
+    for (slot, &c) in want.iter_mut().zip(dir) {
+        *slot = if c == u16::from(b'/') { u16::from(b'\\') } else { c };
+    }
+    let n = resolve_dots(&mut want[..dir.len()]);
+    for (i, &b) in name.iter().enumerate() {
+        want[n + i] = u16::from(b);
+    }
+    let want = &want[..n + name.len()];
+    let fold = |c: u16| if (u16::from(b'A')..=u16::from(b'Z')).contains(&c) { c + 32 } else { c };
+    with_modules(|m| {
+        m.iter().position(|m| {
+            m.base != 0
+                && &m.name[..m.name_len] == name
+                && m.path_len == want.len()
+                && m.path[..m.path_len].iter().zip(want).all(|(&a, &b)| fold(a) == fold(b))
+        })
+    })
+}
+
 /// Records a new module; returns its slot.
 fn add_module(name: &[u8], base: usize, refs: u32) -> Result<usize, u32> {
     if name.len() > MAX_NAME {
@@ -1389,26 +1466,71 @@ pub extern "system" fn RtlSetProcessPlaceholderCompatibilityMode(mode: i8) -> i8
     PLACEHOLDER_MODE.swap(mode, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The core API sets Windows' schema does not give kernelbase (as Wine's
+/// apisetschema.spec lists them), by contract name up to its level, and
+/// their hosts; gala's ole32 stands in for combase, coml2 and wintypes.
+const CORE_HOSTS: &[(&[u8], &[u8])] = &[
+    (b"core-apiquery-l1-", b"ntdll.dll"),
+    (b"core-rtlsupport-l1-", b"ntdll.dll"),
+    (b"core-xstate-l1-", b"ntdll.dll"),
+    (b"core-appinit-l1-", b"kernel32.dll"),
+    (b"core-atoms-l1-", b"kernel32.dll"),
+    (b"core-calendar-l1-", b"kernel32.dll"),
+    (b"core-console-ansi-l2-", b"kernel32.dll"),
+    (b"core-file-ansi-l1-", b"kernel32.dll"),
+    (b"core-file-ansi-l2-", b"kernel32.dll"),
+    (b"core-firmware-l1-", b"kernel32.dll"),
+    (b"core-heap-obsolete-l1-", b"kernel32.dll"),
+    (b"core-io-l1-", b"kernel32.dll"),
+    (b"core-job-l2-", b"kernel32.dll"),
+    (b"core-kernel32-legacy-ansi-l1-", b"kernel32.dll"),
+    (b"core-kernel32-legacy-l1-", b"kernel32.dll"),
+    (b"core-kernel32-private-l1-", b"kernel32.dll"),
+    (b"core-localization-ansi-l1-", b"kernel32.dll"),
+    (b"core-namedpipe-ansi-l1-", b"kernel32.dll"),
+    (b"core-namespace-ansi-l1-", b"kernel32.dll"),
+    (b"core-privateprofile-l1-", b"kernel32.dll"),
+    (b"core-processenvironment-ansi-l1-", b"kernel32.dll"),
+    (b"core-processsecurity-l1-", b"kernel32.dll"),
+    (b"core-processthreads-l1-", b"kernel32.dll"),
+    (b"core-processtopology-obsolete-l1-", b"kernel32.dll"),
+    (b"core-sidebyside-ansi-l1-", b"kernel32.dll"),
+    (b"core-string-obsolete-l1-", b"kernel32.dll"),
+    (b"core-synch-ansi-l1-", b"kernel32.dll"),
+    (b"core-toolhelp-l1-", b"kernel32.dll"),
+    (b"core-ums-l1-", b"kernel32.dll"),
+    (b"core-util-l1-", b"kernel32.dll"),
+    (b"core-registry-l2-", b"advapi32.dll"),
+    (b"core-registry-private-l1-", b"advapi32.dll"),
+    (b"core-shutdown-ansi-l1-", b"advapi32.dll"),
+    (b"core-shutdown-l1-", b"advapi32.dll"),
+    (b"core-sysinfo-l2-", b"advapi32.dll"),
+    (b"core-com-", b"ole32.dll"),
+    (b"core-marshal-l1-", b"ole32.dll"),
+    (b"core-winrt-", b"ole32.dll"),
+    (b"core-crt-", b"msvcrt.dll"),
+    (b"core-multipleproviderrouter-l1-", b"mpr.dll"),
+    (b"core-featurestaging-l1-", b"shcore.dll"),
+    (b"core-slapi-l1-", b"slc.dll"),
+    (b"core-biplmapi-", b"twinapi.appcore.dll"),
+    (b"core-biptcltapi-", b"twinapi.appcore.dll"),
+    (b"core-psm-", b"twinapi.appcore.dll"),
+];
+
 /// The DLL implementing API set `name` (`api-ms-win-...`, normalized), as
 /// Windows' API set schema maps these contract names to the DLLs that
-/// implement them (whatever files of those names exist). gala keeps the
-/// mapping coarse: the C runtime sets are ucrtbase, COM and WinRT are
-/// ole32 (gala has no combase), security, eventing, registry and services
-/// are advapi32, the other core sets are kernel32 (gala has no
-/// kernelbase); other names are looked up as files.
+/// implement them (whatever files of those names exist): the core sets to
+/// kernelbase but those of CORE_HOSTS, the C runtime sets to ucrtbase;
+/// gala keeps the rest coarse: security, eventing and services are
+/// advapi32; other names are looked up as files.
 fn api_set_host(name: &[u8]) -> Option<&'static [u8]> {
     let set = name.strip_prefix(b"api-ms-win-")?;
     let host: &[u8] = if set.starts_with(b"crt-") {
         b"ucrtbase.dll"
-    } else if set.starts_with(b"core-com-") || set.starts_with(b"core-winrt-") {
-        b"ole32.dll"
-    } else if ["security-", "eventing-", "core-registry-", "service-"]
-        .iter()
-        .any(|p| set.starts_with(p.as_bytes()))
-    {
-        b"advapi32.dll"
     } else if set.starts_with(b"core-") {
-        b"kernel32.dll"
+        CORE_HOSTS.iter().find(|(p, _)| set.starts_with(p)).map_or(b"kernelbase.dll", |&(_, h)| h)
+    } else if ["security-", "eventing-", "service-"].iter().any(|p| set.starts_with(p.as_bytes())) {
+        b"advapi32.dll"
     } else if set.starts_with(b"shcore-") {
         b"shcore.dll"
     } else if set.starts_with(b"power-") {
@@ -1459,7 +1581,11 @@ fn entry_point(base: usize) -> Option<extern "system" fn(usize, u32, usize) -> i
 /// maps it from the executable's directory, binds its imports (loading
 /// those DLLs first) and calls its DllMain with DLL_PROCESS_ATTACH once.
 fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
-    if let Some(i) = find_module(name) {
+    let loaded = match search {
+        Search::Dir(dir) => find_module_at(dir, name),
+        Search::Default => find_module(name),
+    };
+    if let Some(i) = loaded {
         return Ok(with_modules(|m| {
             if m[i].refs != PINNED {
                 m[i].refs += 1;
@@ -1797,12 +1923,14 @@ unsafe extern "system" fn ldr_get_procedure_address(
         };
         match name {
             [] => Err(STATUS_PROCEDURE_NOT_FOUND),
-            _ => export(module, name, 0).ok_or(STATUS_PROCEDURE_NOT_FOUND),
+            // A missing name is STATUS_ENTRYPOINT_NOT_FOUND (Windows 11
+            // 25H2); both are ERROR_PROC_NOT_FOUND to GetProcAddress.
+            _ => export(module, name, 0).ok_or(STATUS_ENTRYPOINT_NOT_FOUND),
         }
     };
     let found = found.and_then(|target| {
         let missing =
-            if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_PROCEDURE_NOT_FOUND };
+            if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_ENTRYPOINT_NOT_FOUND };
         if is_unimplemented_stub(target) { Err(missing) } else { Ok(target) }
     });
     // Programs probe for optional functions this way: every miss goes to
@@ -1947,6 +2075,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_003b, 161),  // OBJECT_PATH_SYNTAX_BAD -> ERROR_BAD_PATHNAME
     (0x8000_0011, 170),  // DEVICE_BUSY -> ERROR_BUSY
     (0xc000_0235, 6),    // HANDLE_NOT_CLOSABLE -> ERROR_INVALID_HANDLE
+    (0xc000_0041, 5),    // PORT_CONNECTION_REFUSED -> ERROR_ACCESS_DENIED
     (0xc000_0043, 32),   // SHARING_VIOLATION
     (0xc000_0045, 87),   // INVALID_PAGE_PROTECTION -> ERROR_INVALID_PARAMETER
     (0xc000_0046, 288),  // MUTANT_NOT_OWNED -> ERROR_NOT_OWNER
@@ -1977,7 +2106,10 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
 /// NtFlushBuffersFileEx(FileHandle, Flags, Parameters, ParametersSize,
 /// *IoStatusBlock): NtFlushBuffersFile (gala's volume is in memory, so the
 /// FLUSH_FLAGS_FILE_DATA_ONLY / NO_SYNC / FILE_DATA_SYNC_ONLY variants are
-/// all the same); other flags or parameters are STATUS_INVALID_PARAMETER.
+/// all the same). Flags beyond those are not refused: Windows 11 25H2
+/// flushed with 0x100 on NTFS (kernel32_file_test); which, if any, it
+/// refuses is not measured, so they are recorded in the ledger and
+/// ignored. Parameters are STATUS_INVALID_PARAMETER (none is documented).
 #[unsafe(no_mangle)]
 pub extern "system" fn NtFlushBuffersFileEx(
     h: usize,
@@ -1986,8 +2118,12 @@ pub extern "system" fn NtFlushBuffersFileEx(
     size: u32,
     iosb: *mut [usize; 2],
 ) -> u32 {
-    if flags & !7 != 0 || !parameters.is_null() || size != 0 {
+    if !parameters.is_null() || size != 0 {
         return 0xc000_000d;
+    }
+    if flags & !7 != 0 {
+        let what = b"ntdll.dll!NtFlushBuffersFileEx(unknown flags)";
+        GalaRecordMissing(what.as_ptr(), what.len(), 2, flags.into());
     }
     NtFlushBuffersFile(h, iosb)
 }
@@ -2169,14 +2305,17 @@ pub unsafe extern "system" fn LdrInitializeThunk(context: *const u8, ntdll_base:
 }
 
 /// VerSetConditionMask: three condition bits for each VER_* type bit,
-/// at three times the bit's index (kernel32 forwards here, as on Windows).
+/// at three times the bit's index, and bit 63 set once a condition is
+/// (Windows 11 25H2: (0, VER_MAJORVERSION, VER_GREATER_EQUAL) is
+/// 0x8000000000000018; with no type bit the mask is returned as it is,
+/// which is not measured). kernel32 forwards here, as on Windows.
 #[unsafe(no_mangle)]
 pub extern "system" fn VerSetConditionMask(mask: u64, kind: u32, condition: u8) -> u64 {
     let mut mask = mask;
     for bit in 0..8 {
         if kind & (1 << bit) != 0 {
             let shift = 3 * bit;
-            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift);
+            mask = (mask & !(7 << shift)) | (u64::from(condition & 7) << shift) | 1 << 63;
         }
     }
     mask

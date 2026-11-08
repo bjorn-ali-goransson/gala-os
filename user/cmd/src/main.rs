@@ -15,7 +15,7 @@
 //!   `rem`; others are run as programs: found with the extensions .COM and
 //!   .EXE in the current directory and then the PATH, started with the
 //!   command line as written (without the redirections), waited for; its
-//!   exit code is cmd's. Not found: exit code 9009 and "'name' is not
+//!   exit code is cmd's. Not found: exit code 1 and "'name' is not
 //!   recognized as an internal or external command," / "operable program
 //!   or batch file." on stderr.
 //! - Not yet: `&`, `&&`, `||`, `|`, `( )`, batch files, `if`/`for`/`set`,
@@ -116,8 +116,10 @@ const STARTF_USESTDHANDLES: u32 = 0x100;
 const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const DUPLICATE_SAME_ACCESS: u32 = 2;
-/// The exit code of a command cmd cannot find.
-const NOT_FOUND: u32 = 9009;
+/// The exit code of `/c` with a command cmd cannot find: 1, with a
+/// redirection on the line or without (Windows 11 25H2 measured `2> f`,
+/// `> f`, `< f` and none).
+const NOT_FOUND: u32 = 1;
 /// The longest command line handled (as Windows' cmd: 8191 characters).
 const MAX: usize = 8192;
 
@@ -427,10 +429,9 @@ fn parse(command: &[u16], names: &mut Text) -> Command {
         c.redirects[handle] = (handle, Some(Target::File(start, end, append)));
         i = j;
     }
-    // Trailing whitespace (before a removed redirection) goes.
-    while c.text.n > 0 && is_space(c.text.b[c.text.n - 1]) {
-        c.text.n -= 1;
-    }
+    // The text stays as written, the spaces before a removed redirection
+    // included: a program's command line ends with them and `echo x > f`
+    // writes "x " (Windows 11 25H2: cmd_test's `"prog" tail > f`).
     c
 }
 

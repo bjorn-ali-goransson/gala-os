@@ -43,6 +43,8 @@ type QueueCallback = extern "system" fn(*mut c_void, u8);
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetTempPathW(size: u32, buf: *mut u16) -> u32;
+    fn DeleteFileW(path: *const u16) -> Bool;
     fn GetLastError() -> u32;
     fn CreateTimerQueue() -> Handle;
     fn CreateTimerQueueTimer(
@@ -198,10 +200,13 @@ impl Checks {
     }
 }
 
-/// A NUL-terminated UTF-16 copy of an ASCII string.
-fn w(s: &str) -> [u16; 64] {
-    let mut b = [0u16; 64];
-    for (d, c) in b.iter_mut().zip(s.bytes()) {
+/// `%TEMP%\<name>`, NUL-terminated: a directory an ordinary user may
+/// create files in (C:\ is not one on Windows).
+fn temp(name: &str) -> [u16; 160] {
+    let mut b = [0u16; 160];
+    // SAFETY: the buffer holds 128 characters (what is left for the name).
+    let n = unsafe { GetTempPathW(128, b.as_mut_ptr()) } as usize;
+    for (d, c) in b[n..].iter_mut().zip(name.bytes()) {
         *d = c.into();
     }
     b
@@ -498,7 +503,12 @@ fn files(c: &mut Checks) -> Result<(), u32> {
         c.eq(WaitForSingleObject(e, 0).into(), 0)?; // still set
         CloseHandle(e);
 
-        let (a, b, d) = (w("C:\\pool-a.txt"), w("C:\\pool-b.txt"), w("C:\\pool-c.txt"));
+        let (a, b, d) = (temp("gala-pool-a.txt"), temp("gala-pool-b.txt"), temp("gala-pool-c.txt"));
+        let link = temp("gala-pool-link.txt");
+        // Left by an earlier run on the same machine.
+        for f in [&a, &b, &d, &link] {
+            DeleteFileW(f.as_ptr());
+        }
         let h = CreateFileW(
             a.as_ptr(),
             0xc000_0000,
@@ -543,9 +553,11 @@ fn files(c: &mut Checks) -> Result<(), u32> {
             GetLastError().into(),
         )?;
 
-        let link = w("C:\\pool-link.txt");
         c.eq(CreateSymbolicLinkW(link.as_ptr(), a.as_ptr(), 0).into(), 0)?;
         c.eq(GetLastError().into(), ERROR_PRIVILEGE_NOT_HELD.into())?;
+        for f in [&a, &b, &d] {
+            c.ok(DeleteFileW(f.as_ptr()) != 0, GetLastError().into())?;
+        }
     }
     Ok(())
 }

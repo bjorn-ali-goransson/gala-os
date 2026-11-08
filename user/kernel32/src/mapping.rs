@@ -221,8 +221,9 @@ pub extern "system" fn MapViewOfFileEx(
             protect,
         )
     };
-    if status != STATUS_SUCCESS && status != 0x4000_0003 {
-        // (STATUS_IMAGE_NOT_AT_BASE is a success.)
+    if !matches!(status, STATUS_SUCCESS | 0x4000_0003 | 0x4000_000e) {
+        // (STATUS_IMAGE_NOT_AT_BASE and STATUS_IMAGE_MACHINE_TYPE_MISMATCH
+        // are successes: the view is mapped.)
         return fail(status, core::ptr::null_mut());
     }
     at
@@ -649,6 +650,7 @@ unsafe extern "system" {
 /// EXCEPTION_MAXIMUM_PARAMETERS.
 const EXCEPTION_MAXIMUM_PARAMETERS: u32 = 15;
 const EXCEPTION_NONCONTINUABLE: u32 = 1;
+const EXCEPTION_SOFTWARE_ORIGINATE: u32 = 0x80;
 
 /// RaiseException(code, flags, count, arguments): raises a software
 /// exception with at most EXCEPTION_MAXIMUM_PARAMETERS parameters
@@ -677,7 +679,10 @@ pub unsafe extern "system" fn RaiseException(
     let count = if args.is_null() { 0 } else { count.min(EXCEPTION_MAXIMUM_PARAMETERS) };
     let mut record = ExceptionRecord {
         code,
-        flags: flags & EXCEPTION_NONCONTINUABLE,
+        // EXCEPTION_SOFTWARE_ORIGINATE (0x80, current winnt.h): Windows 11
+        // 25H2 marks the record RaiseException makes (measured with flags
+        // 0; whether RtlRaiseException itself sets it is not known).
+        flags: flags & EXCEPTION_NONCONTINUABLE | EXCEPTION_SOFTWARE_ORIGINATE,
         record: 0,
         address: 0,
         count,
@@ -978,7 +983,8 @@ pub(crate) fn map_image_file(path: *const u16) -> Result<usize, u32> {
         )
     };
     CloseHandle(section);
-    if status != STATUS_SUCCESS && status != 0x4000_0003 {
+    // Mapped: STATUS_IMAGE_NOT_AT_BASE, STATUS_IMAGE_MACHINE_TYPE_MISMATCH.
+    if !matches!(status, STATUS_SUCCESS | 0x4000_0003 | 0x4000_000e) {
         // SAFETY: plain call.
         return Err(unsafe { RtlNtStatusToDosError(status) });
     }

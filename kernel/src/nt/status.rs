@@ -36,6 +36,9 @@ impl NtStatus {
     pub const NOT_A_DIRECTORY: NtStatus = NtStatus(0xc000_0103);
     pub const NOT_IMPLEMENTED: NtStatus = NtStatus(0xc000_0002);
     pub const ACCESS_VIOLATION: NtStatus = NtStatus(0xc000_0005);
+    /// A mapped file's page could not be brought in (a Linux file
+    /// mapping's page past the file's end: SIGBUS).
+    pub const IN_PAGE_ERROR: NtStatus = NtStatus(0xc000_0006);
     pub const INVALID_CID: NtStatus = NtStatus(0xc000_000b);
     pub const INVALID_PARAMETER_MIX: NtStatus = NtStatus(0xc000_0030);
     pub const INVALID_HANDLE: NtStatus = NtStatus(0xc000_0008);
@@ -122,6 +125,7 @@ impl NtStatus {
     pub const INTERNAL_ERROR: NtStatus = NtStatus(0xc000_00e5);
     pub const INVALID_FILE_FOR_SECTION: NtStatus = NtStatus(0xc000_0020);
     pub const IMAGE_NOT_AT_BASE: NtStatus = NtStatus(0x4000_0003);
+    pub const IMAGE_MACHINE_TYPE_MISMATCH: NtStatus = NtStatus(0x4000_000e);
     // Network (AFD) statuses.
     pub const NOT_SUPPORTED: NtStatus = NtStatus(0xc000_00bb);
     pub const INVALID_BUFFER_SIZE: NtStatus = NtStatus(0xc000_0206);

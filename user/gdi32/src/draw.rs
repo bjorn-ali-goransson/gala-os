@@ -675,8 +675,12 @@ pub extern "system" fn ExtTextOutW(
 }
 
 /// GetTextExtentExPointW(hdc, text, n, max, fit, dx, size): the extent,
-/// each prefix's width in `dx`, and in `fit` how many characters fit in
-/// `max` (when `fit` is given).
+/// and in `fit` how many characters fit in `max` (when `fit` is given;
+/// otherwise `max` is ignored). `dx` gets each prefix's width, only for
+/// the characters that fit when `fit` is given (documented: "fills the
+/// array with extents only for as many characters as are specified by
+/// the lpnFit parameter"; Windows 11 25H2 left dx[7] unwritten for a fit
+/// of 4).
 #[unsafe(no_mangle)]
 pub extern "system" fn GetTextExtentExPointW(
     hdc: Handle,
@@ -701,7 +705,7 @@ pub extern "system" fn GetTextExtentExPointW(
             if total <= max {
                 fits = i as i32 + 1;
             }
-            if !dx.is_null() {
+            if !dx.is_null() && (fit.is_null() || total <= max) {
                 // SAFETY: the caller's array of `n` widths.
                 unsafe { dx.add(i).write(total) };
             }
@@ -1006,7 +1010,7 @@ pub extern "system" fn GetTextExtentPoint32A(
 
 /// GetTextExtentExPointA: GetTextExtentExPointW of the text; `fit` counts
 /// bytes and `dx` has an extent per byte (each byte of a character has
-/// the extent up to its end).
+/// the extent up to its end), for the bytes that fit when `fit` is given.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetTextExtentExPointA(
     hdc: Handle,
@@ -1020,7 +1024,8 @@ pub extern "system" fn GetTextExtentExPointA(
     let (mut w, mut from) = ([0u16; 512], [0u8; 512]);
     let Some(count) = ansi_units(text, n, &mut w, &mut from) else { return 0 };
     let (mut wfit, mut wdx) = (0i32, [0i32; 512]);
-    if GetTextExtentExPointW(hdc, w.as_ptr(), count as i32, max, &mut wfit, wdx.as_mut_ptr(), size)
+    let wfit_ptr: *mut i32 = if fit.is_null() { core::ptr::null_mut() } else { &mut wfit };
+    if GetTextExtentExPointW(hdc, w.as_ptr(), count as i32, max, wfit_ptr, wdx.as_mut_ptr(), size)
         == 0
     {
         return 0;
@@ -1033,8 +1038,9 @@ pub extern "system" fn GetTextExtentExPointA(
         }
         // A surrogate pair's extent is at its second unit.
         let extent = if k + 1 < count && from[k + 1] == 0 { wdx[k + 1] } else { wdx[k] };
+        let fits = fit.is_null() || (k as i32) < wfit;
         for _ in 0..bytes {
-            if !dx.is_null() {
+            if !dx.is_null() && fits {
                 // SAFETY: the caller's array of an extent per byte.
                 unsafe { dx.add(at).write(extent) };
             }

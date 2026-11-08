@@ -13,7 +13,7 @@
 //! frame in memory, or nothing; the windows and their pixels are kept
 //! either way). The window state itself (windows, Z order, focus,
 //! capture, client pixels, input for programs) is `nt::winstate`'s, which
-//! the server kernel keeps too; this module is the compositor on top.
+//! a bare desktop is alone; this module is the compositor on top.
 //!
 //! The mouse: a click raises and activates a window, its caption drags
 //! it, the caption buttons minimize it or ask it to close (WM_CLOSE to the
@@ -35,7 +35,7 @@ use super::object::ObjectRef;
 use super::platform;
 use super::status::NtStatus;
 /// The window state's names, as the desktop's (the system calls, the
-/// named actions and the server kernel's `desktop_off` use them).
+/// named actions use them).
 pub use super::winstate::{
     Action, BORDER, CAPTION, GALA_WM_MINIMIZED, GALA_WM_PLACE, ICON, InputEvent, LISTED_ACTIVE,
     LISTED_MAXIMIZED, LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Rect, SC_CLOSE,
@@ -1744,8 +1744,7 @@ fn redraw_damage(d: &mut Desktop) {
 
 /// `profile=server` (ROADMAP SD, ARCHITECTURE "Server and desktop
 /// workloads"): nothing ever draws a desktop, even with a screen; each
-/// session's desktop keeps its windows as the server kernel's does
-/// (`bare`).
+/// session's desktop keeps its windows, shown by none (`bare`).
 static SERVER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Boots in the server profile (before any program runs).
@@ -1766,7 +1765,7 @@ pub fn set_local_presenter(name: &str) -> bool {
 /// Why nothing can show this machine's desktops, if so: the server
 /// profile (it never draws), or no screen and no `presenter=` (BIOS boots,
 /// gala-um). Then every session's desktop is bare: the window state alone,
-/// shown by none, exactly as the server kernel keeps it (`desktop_off`):
+/// shown by none:
 /// GUI programs work, GalaSession's query reports their windows, and
 /// frames, injected input, the Test and Console presenters and the
 /// shell's actions are refused. Fixed before any program runs.
@@ -1882,8 +1881,7 @@ pub fn screen(shell: &Shell) -> Option<(u32, u32)> {
 
 /// Whether shasha's shell (taskbar, start menu, the named window
 /// actions) runs on `shell`'s desktop (made live if it was not): not on a
-/// bare one (the server profile, no screen and no `presenter=`), as the
-/// server kernel has none.
+/// bare one (the server profile, no screen and no `presenter=`).
 pub fn has_shell(shell: &Shell) -> bool {
     let mut d = shell.d.lock();
     ensure_live(shell, &mut d).is_ok() && d.bare.is_none()
@@ -1913,7 +1911,7 @@ pub fn with<R>(
 /// Console on another session than the one the console shows is a
 /// console switch (`switch_console`). Where nothing shows desktops
 /// (`bare`) only none is accepted (what shows it already; the desktop
-/// goes live), as in the server kernel; STATUS_NOT_SUPPORTED for the
+/// goes live); STATUS_NOT_SUPPORTED for the
 /// others there, for Console without a screen or on session 0;
 /// STATUS_NO_MEMORY for a frame.
 pub fn attach(shell: &Shell, kind: Kind, size: Option<(u32, u32)>) -> Result<Kind, NtStatus> {

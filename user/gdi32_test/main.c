@@ -19,11 +19,14 @@
  *   an offset: drawing appears in another view of the mapping, at the
  *   offset; DeleteObject unmaps the bitmap's view only.
  *   Bounds accumulation: SetBoundsRect(DCB_ENABLE | DCB_RESET), then a
- *   PatBlt and a SetPixel: GetBoundsRect gives DCB_SET | DCB_ENABLE and
+ *   PatBlt and a SetPixel: GetBoundsRect gives DCB_SET and
  *   the rectangle around both; with DCB_RESET it is empty afterwards
- *   (DCB_RESET | DCB_ENABLE); DCB_DISABLE stops it.
+ *   (DCB_RESET); DCB_DISABLE stops it. SetBoundsRect returns the previous
+ *   state with its DCB_ENABLE or DCB_DISABLE bit.
  *   BitBlt SRCCOPY copies between memory DCs; SRCINVERT xors;
  *   StretchBlt doubles.
+ * - GetObjectA: a bitmap's BITMAP as GetObjectW's, a font's LOGFONTA (the
+ *   face name in ANSI).
  * - Fonts: CreateFontIndirectW keeps the LOGFONTW (GetObjectW returns it,
  *   92 bytes); selected into a DC, GetTextMetricsW gives a height of at
  *   least |lfHeight|, internal leading tmHeight - |lfHeight|, ascent +
@@ -32,8 +35,9 @@
  *   a bigger font measures bigger. GetTextFaceW gives the face name.
  *   Segoe UI -12 has Windows' 16/13/3 cell and is proportional ("iiii"
  *   much narrower than "WWWW", TMPF_FIXED_PITCH | TMPF_TRUETYPE,
- *   FF_SWISS); extents add up; GetTextExtentExPointW gives partial
- *   widths and the fit; TextOutW draws only inside its extent;
+ *   FF_SWISS); extents add up; GetTextExtentExPointW gives the fit and
+ *   the partial widths of what fits, the rest left as they were (all of them
+ *   without lpnFit); TextOutW draws only inside its extent;
  *   ExtTextOutW ETO_OPAQUE fills its rectangle; Courier New is fixed
  *   pitch (TMPF_FIXED_PITCH clear, equal advances). The ANSI forms
  *   (GetTextExtentPoint32A, GetTextExtentExPointA, GetTextMetricsA,
@@ -42,8 +46,11 @@
  *   GetObjectType says OBJ_FONT; GetCurrentObject(OBJ_FONT) is the font.
  *
  * - CreateDIBitmap: a DDB of the reference DC's depth; CBM_INIT sets
- *   the DIB's bits as SetDIBits does (bottom-up rows). SetStretchBltMode
- *   returns the previous mode (BLACKONWHITE at first), 0 for an invalid one.
+ *   the DIB's bits as SetDIBits does (bottom-up rows).
+ *
+ * - SetStretchBltMode keeps any mode, 0, 5 and -1 included, and returns
+ *   the previous one (BLACKONWHITE at first), the last error untouched:
+ *   on a DISPLAY DC and on a memory DC.
  *
  * - Mapping: MM_TEXT at first (extents 1 x 1, SetWindowExtEx ignored);
  *   LPtoDP/DPtoLP through the origins; MM_ANISOTROPIC scales by viewport
@@ -128,6 +135,9 @@ static void bitmaps(void) {
     BITMAP info;
     CHECK(GetObjectW(bmp, sizeof info, &info) == sizeof info);
     CHECK(info.bmWidth == 20 && info.bmHeight == 10 && info.bmBitsPixel == 32 && info.bmPlanes == 1);
+    /* GetObjectA (Mesa's lavapipe calls it): a bitmap's BITMAP as W's. */
+    BITMAP info_a;
+    CHECK(GetObjectA(bmp, sizeof info_a, &info_a) == sizeof info_a && memcmp(&info, &info_a, sizeof info) == 0);
     HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
     CHECK(old != NULL && GetObjectW(old, sizeof info, &info) == sizeof info);
     CHECK(info.bmWidth == 1 && info.bmHeight == 1 && info.bmBitsPixel == 1);
@@ -189,16 +199,20 @@ static void bitmaps(void) {
     /* Bounds accumulation on a DC. */
     {
         RECT b;
-        CHECK(SetBoundsRect(dmem, NULL, DCB_ENABLE | DCB_RESET) != 0);
-        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_ENABLE));
+        /* SetBoundsRect returns the previous state, accumulation bits
+           included (a new DC: DCB_RESET | DCB_DISABLE, 0x9); GetBoundsRect
+           only DCB_SET or DCB_RESET (Windows 11 25H2: DCB_RESET alone
+           after enabling; the docs say the same). */
+        CHECK(SetBoundsRect(dmem, NULL, DCB_ENABLE | DCB_RESET) == (DCB_RESET | DCB_DISABLE));
+        CHECK(GetBoundsRect(dmem, &b, 0) == DCB_RESET);
         CHECK(PatBlt(dmem, 2, 1, 3, 2, BLACKNESS));
         CHECK(SetPixel(dmem, 6, 3, RGB(1, 1, 1)) == RGB(1, 1, 1));
-        CHECK(GetBoundsRect(dmem, &b, DCB_RESET) == (DCB_SET | DCB_ENABLE));
+        CHECK(GetBoundsRect(dmem, &b, DCB_RESET) == DCB_SET);
         CHECK(b.left == 2 && b.top == 1 && b.right == 7 && b.bottom == 4);
-        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_ENABLE));
-        CHECK(SetBoundsRect(dmem, NULL, DCB_DISABLE) != 0);
+        CHECK(GetBoundsRect(dmem, &b, 0) == DCB_RESET);
+        CHECK(SetBoundsRect(dmem, NULL, DCB_DISABLE) == (DCB_RESET | DCB_ENABLE));
         CHECK(SetPixel(dmem, 0, 0, RGB(2, 2, 2)) == RGB(2, 2, 2));
-        CHECK(GetBoundsRect(dmem, &b, 0) == (DCB_RESET | DCB_DISABLE));
+        CHECK(GetBoundsRect(dmem, &b, 0) == DCB_RESET);
     }
 
     /* BitBlt between memory DCs; SRCINVERT; StretchBlt. */
@@ -226,6 +240,9 @@ static void fonts(void) {
     LOGFONTW back;
     CHECK(GetObjectW(font, sizeof back, &back) == sizeof back);
     CHECK(back.lfHeight == -12 && wcscmp(back.lfFaceName, L"Segoe UI") == 0);
+    LOGFONTA back_a;
+    CHECK(GetObjectA(font, sizeof back_a, &back_a) == sizeof back_a);
+    CHECK(back_a.lfHeight == -12 && back_a.lfWeight == FW_NORMAL && strcmp(back_a.lfFaceName, "Segoe UI") == 0);
     HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
     HGDIOBJ old = SelectObject(screen, font);
     CHECK(old != NULL && GetCurrentObject(screen, OBJ_FONT) == font);
@@ -239,10 +256,14 @@ static void fonts(void) {
     CHECK(one.cx > 0 && two.cx > one.cx && one.cy == tm.tmHeight);
     WCHAR face[LF_FACESIZE];
     CHECK(GetTextFaceW(screen, LF_FACESIZE, face) > 0);
-    // Segoe UI at 96 DPI: a 12-pixel em gives a 16-pixel cell, 13 above
-    // the baseline and 3 below; a TrueType, variable-pitch Swiss face
-    // (TMPF_FIXED_PITCH set means variable pitch).
-    CHECK(tm.tmHeight == 16 && tm.tmAscent == 13 && tm.tmDescent == 3);
+    // Segoe UI at 96 DPI (the display DC of the machine measured, and
+    // gala's): a 12-pixel em gives a 15-pixel cell, 12 above the baseline
+    // and 3 below, 3 of internal leading and none external (Windows 11
+    // 25H2); a TrueType, variable-pitch Swiss face (TMPF_FIXED_PITCH set
+    // means variable pitch).
+    CHECK(GetDeviceCaps(screen, LOGPIXELSY) == 96);
+    CHECK(tm.tmHeight == 15 && tm.tmAscent == 12 && tm.tmDescent == 3);
+    CHECK(tm.tmInternalLeading == 3 && tm.tmExternalLeading == 0);
     CHECK((tm.tmPitchAndFamily & (TMPF_FIXED_PITCH | TMPF_TRUETYPE)) == (TMPF_FIXED_PITCH | TMPF_TRUETYPE));
     CHECK((tm.tmPitchAndFamily & 0xf0) == FF_SWISS && tm.tmMaxCharWidth > tm.tmAveCharWidth);
     SIZE narrow, wide;
@@ -251,18 +272,31 @@ static void fonts(void) {
     // Extents add up: "iiiiWWWW" is the two together.
     SIZE both;
     CHECK(GetTextExtentPoint32W(screen, L"iiiiWWWW", 8, &both) && both.cx == narrow.cx + wide.cx);
-    // GetTextExtentExPointW: the partial widths and how many fit.
+    // GetTextExtentExPointW: the partial widths and how many fit. With
+    // lpnFit, only the first lpnFit widths are filled in (documented;
+    // Windows 11 25H2's dx[7] was not the whole extent); the size is the
+    // whole string's.
+    // The widths past lpnFit are left as they were (Windows 11 25H2: the
+    // -1s below stay).
     INT fit = 0, dx[8];
     SIZE ex;
+    for (int i = 0; i < 8; i++) dx[i] = -1;
     CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, narrow.cx + 1, &fit, dx, &ex));
-    CHECK(fit == 4 && dx[3] == narrow.cx && dx[7] == both.cx && ex.cx == both.cx && ex.cy == tm.tmHeight);
+    CHECK(fit == 4 && dx[0] > 0 && dx[0] <= dx[1] && dx[1] <= dx[2] && dx[2] <= dx[3]);
+    CHECK(dx[3] == narrow.cx && ex.cx == both.cx && ex.cy == tm.tmHeight);
+    CHECK(dx[4] == -1 && dx[5] == -1 && dx[6] == -1 && dx[7] == -1);
+    // Without lpnFit (nMaxExtent ignored) every width is.
+    CHECK(GetTextExtentExPointW(screen, L"iiiiWWWW", 8, 0, NULL, dx, &ex));
+    CHECK(dx[3] == narrow.cx && dx[7] == both.cx && ex.cx == both.cx);
     // The ANSI forms (what Scintilla, in Inno Setup's IDE, imports) measure
     // the same text the same way.
     SIZE a_both, a_ex;
     INT a_fit = 0, a_dx[8];
     CHECK(GetTextExtentPoint32A(screen, "iiiiWWWW", 8, &a_both) && a_both.cx == both.cx && a_both.cy == both.cy);
     CHECK(GetTextExtentExPointA(screen, "iiiiWWWW", 8, narrow.cx + 1, &a_fit, a_dx, &a_ex));
-    CHECK(a_fit == 4 && a_dx[3] == narrow.cx && a_dx[7] == both.cx && a_ex.cx == both.cx);
+    CHECK(a_fit == 4 && a_dx[3] == narrow.cx && a_ex.cx == both.cx);
+    CHECK(GetTextExtentExPointA(screen, "iiiiWWWW", 8, 0, NULL, a_dx, &a_ex));
+    CHECK(a_dx[3] == narrow.cx && a_dx[7] == both.cx);
     TEXTMETRICA tma;
     CHECK(GetTextMetricsA(screen, &tma) && tma.tmHeight == tm.tmHeight && tma.tmAscent == tm.tmAscent);
     CHECK(tma.tmAveCharWidth == tm.tmAveCharWidth && tma.tmPitchAndFamily == tm.tmPitchAndFamily);
@@ -323,14 +357,25 @@ static void fonts(void) {
     DeleteDC(screen);
 }
 
+// SetStretchBltMode does not check the mode: it keeps whatever it is
+// given and returns the previous one, the last error untouched; a new DC
+// starts at BLACKONWHITE (Windows 11 25H2, a DISPLAY DC and a memory DC).
+static void stretch_mode(HDC dc) {
+    SetLastError(0xdead);
+    CHECK(GetStretchBltMode(dc) == BLACKONWHITE);
+    CHECK(SetStretchBltMode(dc, HALFTONE) == BLACKONWHITE && GetStretchBltMode(dc) == HALFTONE);
+    CHECK(SetStretchBltMode(dc, 0) == HALFTONE && GetStretchBltMode(dc) == 0);
+    CHECK(SetStretchBltMode(dc, 5) == 0 && GetStretchBltMode(dc) == 5);
+    CHECK(SetStretchBltMode(dc, -1) == 5 && GetStretchBltMode(dc) == -1);
+    CHECK(GetLastError() == 0xdead);
+    DeleteDC(dc);
+}
+
 // CreateDIBitmap: a DDB in the reference DC's format; with CBM_INIT, the
 // DIB's bits set as SetDIBits would (row 0 of a bottom-up DIB is the
 // bottom line).
 static void dibitmap(void) {
     HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
-    // The stretch mode: BLACKONWHITE at first; set returns the previous.
-    CHECK(GetStretchBltMode(screen) == BLACKONWHITE && SetStretchBltMode(screen, HALFTONE) == BLACKONWHITE);
-    CHECK(GetStretchBltMode(screen) == HALFTONE && SetStretchBltMode(screen, 0) == 0);
     BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), 2, 2, 1, 32, BI_RGB}};
     // Bottom row: blue, green; top row: red, white (BGRX).
     DWORD px[4] = {0x0000ff, 0x00ff00, 0xff0000, 0xffffff};
@@ -915,6 +960,8 @@ int main(void) {
     display_dc();
     bitmaps();
     fonts();
+    stretch_mode(CreateDCW(L"DISPLAY", NULL, NULL, NULL));
+    stretch_mode(CreateCompatibleDC(NULL));
     dibitmap();
     mapping();
     mono_dib();

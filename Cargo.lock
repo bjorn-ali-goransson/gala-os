@@ -237,6 +237,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "cfgmgr32"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "chacha20"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1093,6 +1100,7 @@ name = "kernelbase"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -2794,6 +2802,7 @@ dependencies = [
  "ed25519-compact",
  "flate2",
  "fontdue",
+ "libc",
  "proc-macro2",
  "resvg",
  "syn 2.0.119",

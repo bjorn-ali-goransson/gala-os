@@ -6,6 +6,19 @@ github.com/bjorn-ali-goransson/gala-os (branch `ccr-3715ad98-k2vzr6`, or
 checked in as binaries in `user/bin/`, and PowerShell's `Add-Type` (C#
 with P/Invoke) is enough to probe any API on this machine.
 
+## Talking to the Linux side: GitHub issues
+
+Requests to this machine are GitHub issues on
+bjorn-ali-goransson/gala-os labelled `windows`, with one label for the
+kind of work: `probe` (measure a call from outside), `sweep` (run
+run-all.ps1 and triage), `runner` (change run-all.ps1), `kvm` (gala
+under KVM, docs/windows-kvm-brief.md). Answer each on its issue (a
+comment with the result and any commit), tick off its checklist, and
+close it when it is done (a `kvm` issue once the Linux side has merged
+and gated the branch). A finding of your own that needs the Linux side,
+a regression for instance, is a new issue labelled `from-windows`.
+Nothing of this goes into the repository as notes or message files.
+
 ## Why
 
 gala is a clean-room kernel that runs Windows programs. Each test
@@ -57,22 +70,11 @@ The last group is what matters: find what Windows really does.
 
 ## Output
 
-`user/windows/triage.json`: one entry per non-zero program,
-`{ "program", "exit", "check", "source_line", "asserts", "windows",
-"class", "evidence", "note" }`, plus a short `triage.md` summary by
-class. Commit both with the `windows.json` they came from.
-
-## Notes from the Linux side
-
-`user/windows/notes-from-linux.md` answers each push of yours (newest
-first): read it after every pull.
-
-## Round 2
-
-The first round's fixes are in (ROADMAP WD lists them). Pull, run
-`run-all.ps1` again, and triage what still fails the same way; programs
-fixed for one check may now fail a later one. Also probe the open
-questions listed in ROADMAP WD "Next" item 1 (SetPriorityClass with
-other mixed values, WriteConsoleA, NtCreateTimer's unknown type, the
-user-callback faults, oleaut32_test and clusapi_test's last call), and
-record each in `user/windows/findings.json` as before.
+A sweep's data stays in version control, as the data `cargo xtask
+compare` reads: `user/windows/windows.json` and `windows-output.txt`
+from `run-all.ps1`, committed on your branch. Everything said about it
+goes on GitHub: the triage of a sweep as comments on its `sweep` issue
+(one per program, or one table: program, exit, check, source line,
+what it asserts, what Windows does, class, evidence), a probe's result
+on its `probe` issue, a finding of your own as a new issue labelled
+`from-windows`. No notes or findings files in the repository.

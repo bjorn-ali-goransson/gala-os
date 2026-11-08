@@ -379,6 +379,35 @@ pub fn apply_relocations(
 /// `relocation_index`), only the page's block and the one before are
 /// read; without, the whole table is walked (fine for small images: a
 /// 340 MB DLL has 80 000 pages and a table of several MB).
+/// The mapped header of an image loaded `delta` away from its preferred
+/// base names where it is: its OptionalHeader.ImageBase is moved by
+/// `delta`. Measured on Windows 11 25H2 for both kinds: a PE32 DLL in a
+/// WOW64 process (testdll32 at 0x74ca0000 instead of 0x400000) and PE32+
+/// DLLs (kernel32, ntdll, advapi32: 0x180000000 in the file, their real
+/// base in memory).
+fn rebase_header(page: &mut [u8; 4096], delta: u64) {
+    let Some(&[a, b, c, d]) = page.get(0x3c..0x40) else { return };
+    let nt = u32::from_le_bytes([a, b, c, d]) as usize;
+    let Some(magic) = page.get(nt + 24..nt + 26) else { return };
+    // OptionalHeader.ImageBase: a u32 at +28 in PE32, a u64 at +24 in PE32+.
+    match magic {
+        [0x0b, 0x01] => {
+            if let Some(slot) = page.get_mut(nt + 24 + 28..nt + 24 + 32) {
+                let old = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
+                slot.copy_from_slice(&old.wrapping_add(delta as u32).to_le_bytes());
+            }
+        }
+        [0x0b, 0x02] => {
+            if let Some(slot) = page.get_mut(nt + 24 + 24..nt + 24 + 32) {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(slot);
+                slot.copy_from_slice(&u64::from_le_bytes(b).wrapping_add(delta).to_le_bytes());
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn relocate_page(
     image: &[u8],
     reloc: DataDirectory,
@@ -393,6 +422,9 @@ pub fn relocate_page(
     out[have..].fill(0);
     if delta == 0 || reloc.size == 0 {
         return Ok(());
+    }
+    if page_rva == 0 {
+        rebase_header(out, delta);
     }
     let start = reloc.rva as usize;
     let end = start.checked_add(reloc.size as usize).ok_or(PeError::BadRelocation)?;
@@ -491,6 +523,24 @@ fn apply_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relocated header names its load address, PE32 and PE32+.
+    #[test]
+    fn rebased_header() {
+        let mut page = [0u8; 4096];
+        page[0x3c] = 0x80;
+        page[0x80 + 24..0x80 + 26].copy_from_slice(&0x10bu16.to_le_bytes());
+        page[0x80 + 52..0x80 + 56].copy_from_slice(&0x40_0000u32.to_le_bytes());
+        rebase_header(&mut page, 0x74ca_0000u64.wrapping_sub(0x40_0000));
+        assert_eq!(page[0x80 + 52..0x80 + 56], 0x74ca_0000u32.to_le_bytes());
+        // PE32+: the 8-byte ImageBase at +24 moves too.
+        let mut page = [0u8; 4096];
+        page[0x3c] = 0x80;
+        page[0x80 + 24..0x80 + 26].copy_from_slice(&0x20bu16.to_le_bytes());
+        page[0x80 + 48..0x80 + 56].copy_from_slice(&0x1_8000_0000u64.to_le_bytes());
+        rebase_header(&mut page, 0x7ff8_0000_0000u64.wrapping_sub(0x1_8000_0000));
+        assert_eq!(page[0x80 + 48..0x80 + 56], 0x7ff8_0000_0000u64.to_le_bytes());
+    }
 
     /// Builds a minimal PE32+ image: headers in the first 0x200 bytes,
     /// sections described by (name, rva, vsize, raw bytes, characteristics).

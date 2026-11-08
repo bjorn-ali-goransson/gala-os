@@ -61,7 +61,13 @@ pub extern "system" fn CoCreateInstanceEx(
     }
     // SAFETY: the caller's array of `count` entries.
     let results = unsafe { core::slice::from_raw_parts_mut(results, count as usize) };
+    // The entries in order: each reset to (E_NOINTERFACE, NULL); one whose
+    // pItf is not NULL on input stops there with E_INVALIDARG, it and the
+    // rest untouched (Windows 11 25H2).
     for r in results.iter_mut() {
+        if !r.itf.is_null() {
+            return E_INVALIDARG;
+        }
         r.itf = core::ptr::null_mut();
         r.hr = E_NOINTERFACE;
         if r.iid.is_null() {

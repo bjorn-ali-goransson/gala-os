@@ -284,6 +284,13 @@ struct Checks(u32);
 impl Checks {
     #[track_caller]
     fn ok(&mut self, cond: bool, got: u64) -> Result<(), u32> {
+        self.ok_with(cond, got, &[])
+    }
+
+    /// As `ok`, with named values that explain the failure appended to
+    /// the same line (`, base 34 n 16711641`).
+    #[track_caller]
+    fn ok_with(&mut self, cond: bool, got: u64, extra: &[(&[u8], u64)]) -> Result<(), u32> {
         self.0 += 1;
         if cond {
             return Ok(());
@@ -291,15 +298,26 @@ impl Checks {
         // One line: run-all.ps1 keeps the last line with the program's
         // name, so the check, its value and its source line go together.
         let (at, at_len) = line_text(core::panic::Location::caller().line());
-        let mut text = [0u8; 128];
+        let mut text = [0u8; 256];
         let mut digits = [0u8; 20];
         let mut n = 0;
         let check = decimal(self.0.into(), &mut digits);
         let mut more = [0u8; 20];
         let value = decimal(got, &mut more);
+        let mut put = |part: &[u8]| {
+            let len = part.len().min(text.len() - 2 - n);
+            text[n..n + len].copy_from_slice(&part[..len]);
+            n += len;
+        };
         for part in [&b"quota_test: check "[..], check, b" failed, got ", value, &at[..at_len]] {
-            text[n..n + part.len()].copy_from_slice(part);
-            n += part.len();
+            put(part);
+        }
+        for (i, (name, v)) in extra.iter().enumerate() {
+            put(if i == 0 { b", " } else { b" " });
+            put(name);
+            put(b" ");
+            let mut d = [0u8; 20];
+            put(decimal(*v, &mut d));
         }
         text[n..n + 2].copy_from_slice(b"\r\n");
         out(&text[..n + 2]);
@@ -601,6 +619,10 @@ fn run() -> Result<(), u32> {
             VirtualAlloc(core::ptr::null_mut(), room, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
                 as *mut Handle;
         c.ok(!leaked.is_null(), GetLastError().into())?;
+        // The loop is judged against the count just before it: whatever
+        // else the process holds by then (on Windows the loader and
+        // CreateProcess may keep handles of their own) is not the loop's.
+        let before_loop = handle_count();
         let mut n = 0;
         let error = loop {
             let mut dup = core::ptr::null_mut();
@@ -617,7 +639,15 @@ fn run() -> Result<(), u32> {
         c.ok(error == ERROR_NO_SYSTEM_RESOURCES, error.into())?;
         let at_limit = handle_count();
         line(b"quota_test: handle limit at ", at_limit, b" handles");
-        c.ok(at_limit == base + 2 * 2 + 1 + n as u64, at_limit)?;
+        let explain: [(&[u8], u64); 3] =
+            [(b"base", base), (b"before_loop", before_loop), (b"n", n as u64)];
+        c.ok_with(at_limit == before_loop + n as u64, at_limit, &explain)?;
+        // gala: the two children (a process and a thread handle each) and
+        // the event are all that was opened since `base`. On Windows other
+        // handles may come and go meanwhile, so it is gala's claim only.
+        if gala {
+            c.ok_with(before_loop == base + 2 * 2 + 1, before_loop, &explain)?;
+        }
         if gala {
             c.ok(at_limit == handle_limit, at_limit)?;
         } else {
@@ -636,7 +666,7 @@ fn run() -> Result<(), u32> {
         for i in 0..n {
             c.ok(CloseHandle(*leaked.add(i)) != 0, i as u64)?;
         }
-        c.ok(handle_count() == base + 2 * 2 + 1, handle_count())?;
+        c.ok(handle_count() == before_loop, handle_count())?;
         c.ok(DuplicateHandle(me, event, me, &mut dup, 0, 0, DUPLICATE_SAME_ACCESS) != 0, 0)?;
         c.ok(CloseHandle(dup) != 0, 0)?;
 

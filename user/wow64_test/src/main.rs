@@ -267,16 +267,34 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     let lower = teb_field(teb::STACK_LIMIT);
     c.ok(lower < limit && lower <= sp - 48 * 0x800, lower as u64)?;
 
+    // Each part announces itself first: a crash (no check line) is then
+    // in the part the last line names (run-all.ps1 keeps the last line).
+    print("wow64_test: bad pointers\n");
     bad_pointers(c)?;
+    print("wow64_test: objects\n");
     objects(c)?;
+    print("wow64_test: files\n");
     files(c)?;
+    print("wow64_test: pending\n");
     pending(c)?;
+    print("wow64_test: sections\n");
     sections(c)?;
+    print("wow64_test: tokens\n");
     let user = tokens(c)?;
+    print("wow64_test: registry\n");
     registry(c, &user)?;
+    print("wow64_test: system\n");
     system(c)?;
+    print("wow64_test: thread and process\n");
     thread_and_process(c, teb, pid, tid)?;
-    child(c)?;
+    // The child is started with gala's own service (GALA_CREATE_PROCESS):
+    // on Windows that number is another service, so the part is gala's.
+    if on_gala() {
+        print("wow64_test: child\n");
+        child(c)?;
+    } else {
+        print("wow64_test: child skipped (gala's process creation service)\n");
+    }
     Ok(())
 }
 
@@ -305,11 +323,13 @@ const BAD: usize = 0x10;
 /// A word after each IO_STATUS_BLOCK that must stay as it is.
 const SENTINEL: usize = 0x5a5a_5a5a;
 
-/// The system call `n` with `args` (ntrt's generic 32-bit stub).
+/// The service `n` with `args`: the 32-bit system call for numbers that
+/// are long-stable, the 32-bit ntdll's export for those gala chose itself
+/// (ntrt's `nt_call`; on gala, without a 32-bit ntdll, the system call).
 fn sys(n: u32, args: &[usize]) -> u32 {
     // SAFETY: the callers pass what each service expects, or deliberately
     // invalid pointers the service must reject.
-    unsafe { syscall(n, args) }
+    unsafe { nt_call(n, args) }
 }
 
 fn ptr<T>(v: &T) -> usize {
@@ -924,10 +944,23 @@ fn thread_and_process(c: &mut Checks, teb: usize, pid: usize, tid: usize) -> Res
     c.ok(ends_with(len, name.as_ptr() as usize + 8, "\\wow64_test.exe"), len as u64)?;
     // SystemProcessInformation (5): the x86 records (0xb8 bytes, threads of
     // 0x40, the name after them); this process's.
-    let (status, list, _) = allocate(0, 0x4_0000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    c.eq(status.into(), 0)?;
-    let args = [5, list, 0x4_0000, mptr(&mut returned)];
-    c.eq(sys(NT_QUERY_SYSTEM_INFORMATION, &args).into(), 0)?;
+    // The size depends on the machine (a real one runs hundreds of
+    // processes): grow to what STATUS_INFO_LENGTH_MISMATCH says is needed,
+    // with room for processes started meanwhile.
+    let mut size = 0x4_0000;
+    let list = loop {
+        let (status, list, _) = allocate(0, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        c.eq(status.into(), 0)?;
+        let args = [5, list, size, mptr(&mut returned)];
+        let status = sys(NT_QUERY_SYSTEM_INFORMATION, &args);
+        if status != 0xc000_0004 || size >= 0x400_0000 {
+            c.eq(status.into(), 0)?;
+            break list;
+        }
+        let (status, _, _) = free(list, 0, MEM_RELEASE);
+        c.eq(status.into(), 0)?;
+        size = (returned as usize).max(size) + 0x1_0000;
+    };
     let (mut at, mut mine) = (list, 0);
     loop {
         if read_u32(at + 0x44) as usize == pid {

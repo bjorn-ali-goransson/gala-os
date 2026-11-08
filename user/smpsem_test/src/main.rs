@@ -29,50 +29,24 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use ntrt::*;
 
 const THREAD_AFFINITY_MASK: u32 = 4;
-const SEMAPHORE_ALL_ACCESS: u32 = 0x1f_0003;
 const STATUS_TIMEOUT: NtStatus = 0x102;
 /// Iterations per thread in each round.
 const ROUNDS: u32 = 20_000;
 
-// The semaphore services of the pinned build (ntdll's stub shape; the
-// numbers match kernel/src/nt/syscalls.rs).
+// NtReleaseSemaphore, whose x64 number (0x0a) is long-stable, in ntdll's
+// stub shape; NtCreateSemaphore and NtQuerySemaphore change between builds
+// and are ntrt's (through ntdll's exports).
 global_asm!(
-    ".globl smpsem_create_semaphore",
-    "smpsem_create_semaphore:",
-    "mov r10, rcx",
-    "mov eax, 0xcf",
-    "syscall",
-    "ret",
     ".globl smpsem_release_semaphore",
     "smpsem_release_semaphore:",
     "mov r10, rcx",
     "mov eax, 0x0a",
     "syscall",
     "ret",
-    ".globl smpsem_query_semaphore",
-    "smpsem_query_semaphore:",
-    "mov r10, rcx",
-    "mov eax, 0x15a",
-    "syscall",
-    "ret",
 );
 
 unsafe extern "C" {
-    fn smpsem_create_semaphore(
-        handle: *mut Handle,
-        access: u32,
-        attributes: *const ObjectAttributes,
-        initial: i32,
-        maximum: i32,
-    ) -> NtStatus;
     fn smpsem_release_semaphore(handle: Handle, count: i32, previous: *mut i32) -> NtStatus;
-    fn smpsem_query_semaphore(
-        handle: Handle,
-        class: u32,
-        info: *mut [i32; 2],
-        length: u32,
-        returned: *mut u32,
-    ) -> NtStatus;
 }
 
 fn release(h: Handle) -> NtStatus {
@@ -83,10 +57,7 @@ fn release(h: Handle) -> NtStatus {
 
 /// SEMAPHORE_BASIC_INFORMATION's CurrentCount.
 fn current_count(h: Handle) -> (NtStatus, i32) {
-    let mut info = [-1; 2];
-    let mut returned = 0;
-    // SAFETY: an 8-byte buffer and a valid output pointer.
-    let s = unsafe { smpsem_query_semaphore(h, 0, &mut info, 8, &mut returned) };
+    let (s, info) = query_semaphore(h);
     (s, info[0])
 }
 
@@ -223,11 +194,7 @@ fn run() -> Result<(), u32> {
     let workers = cpus.clamp(1, 2);
     WORKERS.store(workers, Ordering::Relaxed);
 
-    let mut h = Handle(0);
-    // SAFETY: valid output pointer, no attributes.
-    let s = unsafe {
-        smpsem_create_semaphore(&mut h, SEMAPHORE_ALL_ACCESS, core::ptr::null(), 0, i32::MAX)
-    };
+    let (s, h) = create_semaphore(0, i32::MAX);
     status(2, s)?;
     SEMAPHORE.store(h.0, Ordering::Release);
 

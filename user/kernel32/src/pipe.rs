@@ -410,9 +410,12 @@ pub extern "system" fn PeekNamedPipe(
                 *available = peek.add(4).cast::<u32>().read_unaligned();
             }
             if !left.is_null() {
-                // MessageLength: the first message's (0 in byte mode).
+                // MessageLength (the first message's; 0 in byte mode) less
+                // what was read, without regard to the mode: Windows 11
+                // 25H2 gives 0xfffffffd after peeking 3 bytes of a byte
+                // pipe (the docs say 0).
                 let message = peek.add(12).cast::<u32>().read_unaligned();
-                *left = message.saturating_sub(copied as u32);
+                *left = message.wrapping_sub(copied as u32);
             }
         }
     }

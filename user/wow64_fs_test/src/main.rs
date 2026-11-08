@@ -6,7 +6,9 @@
 //!   NtOpenFile, NtCreateFile, NtQueryAttributesFile) reach
 //!   `C:\Windows\SysWOW64`: its ntdll.dll is the 32-bit one (machine
 //!   0x14c); `C:\Windows\Sysnative` is the real System32 (0x8664).
-//! - `System32\drivers\etc` is exempt: its hosts file is found there.
+//! - `System32\drivers\etc` is exempt: its hosts file is found there; so
+//!   are `catroot`, `catroot2`, `DriverStore`, `LogFiles` and `spool` (any
+//!   case), System32's directories.
 //! - RtlWow64EnableFsRedirectionEx(TRUE, &old) turns redirection off for
 //!   this thread (old: 0), System32 is System32; giving back the old value
 //!   turns it on again (the previous one: 1). RtlWow64EnableFsRedirection
@@ -222,8 +224,21 @@ fn run() -> Result<(), u32> {
     // Sysnative: the real System32.
     c.eq(machine("\\??\\C:\\Windows\\Sysnative\\ntdll.dll", false), AMD64)?;
     c.eq(machine("\\??\\C:\\Windows\\sysnative\\ntdll.dll", true), AMD64)?;
-    // An exemption.
+    // The exemptions: System32's own (gala's scenario has them only
+    // there), any case.
     c.eq(attributes("\\??\\C:\\Windows\\System32\\drivers\\etc\\hosts").0, 0)?;
+    for dir in [
+        "\\??\\C:\\Windows\\System32\\catroot",
+        "\\??\\C:\\Windows\\System32\\catroot2",
+        "\\??\\C:\\Windows\\System32\\DriverStore",
+        "\\??\\C:\\Windows\\system32\\driverstore",
+        "\\??\\C:\\Windows\\System32\\LogFiles",
+        "\\??\\C:\\Windows\\System32\\spool",
+    ] {
+        let (status, attrs) = attributes(dir);
+        c.eq(status, 0)?;
+        c.eq(attrs & FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_DIRECTORY)?;
+    }
 
     // Turned off for this thread, and back on.
     let mut old = 0x55usize;

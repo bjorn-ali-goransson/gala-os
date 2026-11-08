@@ -158,13 +158,16 @@ fn read_index(f: &File, info: &mut IndexInfo) -> Option<()> {
         0x20b => optional + 112,
         _ => return None,
     };
+    // An image without a debug directory is refused (ERROR_BAD_EXE_FORMAT,
+    // measured on Windows 11 25H2 with a gcc -s image); one with a
+    // directory but no CodeView entry (a /Brepro image) is indexed.
     let count = u32_at(h, directories - 4)?;
     if count <= 6 {
-        return Some(());
+        return None;
     }
     let (debug_rva, debug_size) = (u32_at(h, directories + 48)?, u32_at(h, directories + 52)?);
     if debug_rva == 0 || debug_size == 0 {
-        return Some(());
+        return None;
     }
     // The section holding the debug directory: its file offset.
     let table = optional + optional_size;
@@ -208,8 +211,9 @@ fn read_index(f: &File, info: &mut IndexInfo) -> Option<()> {
 /// file `path` (its name, TimeDateStamp, SizeOfImage, whether its debug
 /// information is stripped, and its CodeView record's PDB name, GUID and
 /// age). FALSE with the file's error when it cannot be opened, or
-/// ERROR_BAD_EXE_FORMAT for a file that is not an image (PDB and DBG
-/// files are not read yet: recorded).
+/// ERROR_BAD_EXE_FORMAT for a file that is not an image or an image
+/// without a debug directory (PDB and DBG files are not read yet:
+/// recorded); ERROR_INVALID_PARAMETER unless sizeofstruct is 1608.
 #[unsafe(no_mangle)]
 pub extern "system" fn SymSrvGetFileIndexInfoW(
     path: *const u16,

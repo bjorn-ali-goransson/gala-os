@@ -13,7 +13,8 @@ const STATUS_OBJECT_NAME_NOT_FOUND: NtStatus = 0xc000_0034;
 const STATUS_OBJECT_NAME_COLLISION: NtStatus = 0xc000_0035;
 const STATUS_OBJECT_PATH_NOT_FOUND: NtStatus = 0xc000_003a;
 const STATUS_OBJECT_PATH_SYNTAX_BAD: NtStatus = 0xc000_003b;
-const DIRECTORY_ALL_ACCESS: u32 = 0xf_000f;
+const DIRECTORY_TRAVERSE: u32 = 0x1;
+const DIRECTORY_CREATE_OBJECT: u32 = 0x4;
 const OBJECT_BASIC_INFORMATION: u32 = 0;
 const OBJECT_NAME_INFORMATION: u32 = 1;
 
@@ -126,11 +127,13 @@ fn run() -> Result<(), u32> {
     bad_len.length = 12;
     c.eq(open_event(EVENT_ALL_ACCESS, &bad_len).0, STATUS_INVALID_PARAMETER)?;
 
-    // Names relative to a directory handle.
+    // Names relative to a directory handle, opened with the access the
+    // creates need (an ordinary user is not granted DIRECTORY_ALL_ACCESS
+    // on the global directory).
     let dir_name = wide!("\\BaseNamedObjects");
     let dir_name = UnicodeString::new(&dir_name);
     let (st, dir) = open_directory(
-        DIRECTORY_ALL_ACCESS,
+        DIRECTORY_TRAVERSE | DIRECTORY_CREATE_OBJECT,
         &ObjectAttributes::new(&dir_name, Handle(0), OBJ_CASE_INSENSITIVE),
     );
     c.eq(st, STATUS_SUCCESS)?;

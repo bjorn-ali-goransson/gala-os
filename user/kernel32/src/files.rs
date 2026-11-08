@@ -770,7 +770,11 @@ fn system_root(out: &mut [u8; 280], sub: &[u8]) -> usize {
     n
 }
 
-/// The Windows directory's subdirectories these functions return.
+/// The Windows directory's subdirectories these functions return. The
+/// system directory is System32 for 32-bit programs too (Windows 11 25H2:
+/// "C:\WINDOWS\system32"): the file system redirector, below this layer
+/// (wow64.dll), makes their opens of it reach SysWOW64.
+const SYSTEM32: &[u8] = b"\\system32";
 const SYSWOW64: &[u8] = b"\\SysWOW64";
 
 /// GetWindowsDirectoryW / A, GetSystemWindowsDirectoryW, GetSystemDirectoryW
@@ -809,7 +813,7 @@ pub extern "system" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
-    put_directory(super::arch::SYSTEM_DIRECTORY, buf, size)
+    put_directory(SYSTEM32, buf, size)
 }
 
 /// GetSystemWow64DirectoryW / A: where the 32-bit system DLLs are
@@ -827,7 +831,7 @@ pub extern "system" fn GetSystemWow64DirectoryA(buf: *mut u8, size: u32) -> u32 
 
 #[unsafe(no_mangle)]
 pub extern "system" fn GetSystemDirectoryA(buf: *mut u8, size: u32) -> u32 {
-    put_directory(super::arch::SYSTEM_DIRECTORY, buf, size)
+    put_directory(SYSTEM32, buf, size)
 }
 
 // ---- WOW64 file system redirection (the 32-bit kernel32's) ----

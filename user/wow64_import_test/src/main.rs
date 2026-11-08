@@ -272,7 +272,9 @@ fn run() -> Result<(), u32> {
     c.ok(add > base && add < base + 0x10_0000, add as u32)?;
     c.eq(read_u16(base).into(), 0x5a4d)?; // "MZ"
     let pe = base + read_u32(base + 0x3c) as usize;
-    c.eq(read_u32(pe + 24 + 28), 0x40_0000)?; // ImageBase: its preferred base
+    // The mapped header's ImageBase is where it was loaded (Windows 11
+    // 25H2 rewrites it when relocating).
+    c.eq(read_u32(pe + 24 + 28), base as u32)?;
     // TLS: the callback before DllMain, once each; lpvReserved non-null.
     // SAFETY: imported functions.
     unsafe {

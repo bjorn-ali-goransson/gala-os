@@ -301,7 +301,11 @@ pub extern "system" fn SymFromAddr(
     displacement: *mut u64,
     info: *mut SymbolInfo,
 ) -> i32 {
-    if info.is_null() {
+    // SizeOfStruct must be sizeof(SYMBOL_INFO), 88: else
+    // ERROR_INVALID_PARAMETER with the structure untouched (Windows 11
+    // 25H2).
+    // SAFETY: the caller's SYMBOL_INFO.
+    if info.is_null() || unsafe { (*info).size_of_struct } != 88 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let module = with(|t| {
@@ -329,7 +333,10 @@ pub extern "system" fn SymFromAddr(
         s.type_index = 0;
         s.index = 0;
         s.size = 0;
-        s.mod_base = m.base;
+        // An export-table symbol (gala reads no PDB) has no ModBase
+        // (Windows 11 25H2: 0, Flags SYMFLAG_EXPORT; Windows' Size, 112
+        // for SymFromAddr, is not known from the exports: 0 here).
+        s.mod_base = 0;
         s.flags = SYMFLAG_EXPORT;
         s.value = 0;
         s.address = m.base + u64::from(rva);

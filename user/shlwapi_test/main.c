@@ -51,7 +51,7 @@
 #include <stdio.h>
 
 static int check;
-#define CHECK(cond) do { check++; if (!(cond)) { printf("shlwapi_test: check %d (line %d) failed\n", check, __LINE__); fflush(stdout); ExitProcess(check); } } while (0)
+#define CHECK(cond) do { check++; if (!(cond)) { printf("shlwapi_test: check %d (%s line %d) failed\n", check, __FILE_NAME__, __LINE__); fflush(stdout); ExitProcess(check); } } while (0)
 
 #ifndef INTERNET_MAX_URL_LENGTH
 #define INTERNET_MAX_URL_LENGTH 2084

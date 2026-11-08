@@ -39,10 +39,10 @@ rented from elsewhere. The values of that family apply here:
    meanwhile every change keeps the design open for it (ARCHITECTURE,
    "Built in early": state as versioned data, restartable system calls,
    drivers that survive a device reset, one clock).
-4. **Two editions.** The *server* edition (console programs and servers,
-   no graphical interface) and the *desktop* edition, a strict superset:
-   the same system plus **shasha** (Arabic شاشة, "screen"), gala's
-   graphical shell. Everything shasha can do can also be done from a
+4. **One system for servers and desktops.** Console programs and
+   servers never get a graphical interface (`profile=server`, or a
+   machine with no screen); a desktop machine gets **shasha** (Arabic
+   شاشة, "screen"), gala's graphical shell, in the same kernel. Everything shasha can do can also be done from a
    terminal with the `gala` command (ROADMAP SD).
 5. **A second personality.** Linux programs on the same core, through
    their own system call layer (ROADMAP LX).

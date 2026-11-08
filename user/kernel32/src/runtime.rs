@@ -591,7 +591,9 @@ pub extern "system" fn SetThreadDescription(thread: Handle, text: *const u16) ->
     us[P..2 * P].copy_from_slice(&(text as usize).to_le_bytes());
     // SAFETY: a THREAD_NAME_INFORMATION pointing at the caller's string.
     let status = unsafe { super::NtSetInformationThread(thread, 38, us.as_ptr(), (2 * P) as u32) };
-    if status != STATUS_SUCCESS { nt_hresult(status) } else { 0 }
+    // Success too is HRESULT_FROM_NT(STATUS_SUCCESS), 0x10000000, not S_OK
+    // (Windows 11 25H2).
+    nt_hresult(status)
 }
 
 /// GetThreadDescription: a LocalAlloc'ed NUL-terminated copy of the
@@ -634,7 +636,9 @@ pub extern "system" fn GetThreadDescription(thread: Handle, out: *mut *mut u16) 
         *p.add(chars) = 0;
         *out = p;
     }
-    0
+    // HRESULT_FROM_NT(STATUS_SUCCESS), 0x10000000, as SetThreadDescription
+    // (Windows 11 25H2).
+    nt_hresult(STATUS_SUCCESS)
 }
 
 #[cfg_attr(

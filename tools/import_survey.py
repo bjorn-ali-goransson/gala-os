@@ -39,13 +39,15 @@ def exports(dll):
     real, stub = set(), set()
     text = readobj(["--coff-exports"], path)
     ordinal = name = None
+    forwards = []
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("Ordinal:"): ordinal = int(line.split()[1]); name = None
         elif line.startswith("Name:"): name = line[5:].strip()
         elif line.startswith("ForwardedTo:"):
-            if name: real.add(name)
-            real.add(f"#{ordinal}")
+            # Counted if its target has it (kernelbase forwards Windows'
+            # whole list, some to functions gala lacks).
+            forwards.append((name, ordinal, line.split(None, 1)[1].strip()))
         elif line.startswith("RVA:"):
             rva = int(line.split()[1], 16)
             if rva == 0: continue
@@ -54,9 +56,33 @@ def exports(dll):
             if name: target.add(name)
             target.add(f"#{ordinal}")
     cache[key] = (real, stub)
+    for name, ordinal, to in forwards:
+        dll, _, func = to.rpartition(".")
+        # (The cache entry is in place: a cycle ends.)
+        ex = exports(resolve(dll + ".dll"))
+        target = ex and (real if func in ex[0] else stub if func in ex[1] else None)
+        if target is not None:
+            if name: target.add(name)
+            target.add(f"#{ordinal}")
     return cache[key]
 
-APISET = {"shcore": "shcore.dll", "power": "powrprof.dll"}
+# The core sets not hosted by kernelbase: user/testntdll's CORE_HOSTS.
+CORE_HOSTS = [
+    ("ntdll.dll", "apiquery-l1- rtlsupport-l1- xstate-l1-"),
+    ("kernel32.dll", "appinit-l1- atoms-l1- calendar-l1- console-ansi-l2- file-ansi-l1- "
+     "file-ansi-l2- firmware-l1- heap-obsolete-l1- io-l1- job-l2- kernel32-legacy-ansi-l1- "
+     "kernel32-legacy-l1- kernel32-private-l1- localization-ansi-l1- namedpipe-ansi-l1- "
+     "namespace-ansi-l1- privateprofile-l1- processenvironment-ansi-l1- processsecurity-l1- "
+     "processthreads-l1- processtopology-obsolete-l1- sidebyside-ansi-l1- string-obsolete-l1- "
+     "synch-ansi-l1- toolhelp-l1- ums-l1- util-l1-"),
+    ("advapi32.dll", "registry-l2- registry-private-l1- shutdown-ansi-l1- shutdown-l1- sysinfo-l2-"),
+    ("ole32.dll", "com- marshal-l1- winrt-"),
+    ("msvcrt.dll", "crt-"),
+    ("mpr.dll", "multipleproviderrouter-l1-"),
+    ("shcore.dll", "featurestaging-l1-"),
+    ("slc.dll", "slapi-l1-"),
+    ("twinapi.appcore.dll", "biplmapi- biptcltapi- psm-"),
+]
 def resolve(dll):
     d = dll.lower()
     m = re.match(r"api-ms-win-downlevel-(\w+?)-l", d)
@@ -64,9 +90,10 @@ def resolve(dll):
     if d.startswith("api-ms-win-"):
         r = d[len("api-ms-win-"):]
         if r.startswith("crt-"): return "ucrtbase.dll"
-        if r.startswith(("core-com-", "core-winrt-")): return "ole32.dll"
-        if r.startswith(("security-", "eventing-", "core-registry-", "service-")): return "advapi32.dll"
-        if r.startswith("core-"): return "kernel32.dll"
+        if r.startswith("core-"):
+            c = r[len("core-"):]
+            return next((h for h, ps in CORE_HOSTS if c.startswith(tuple(ps.split()))), "kernelbase.dll")
+        if r.startswith(("security-", "eventing-", "service-")): return "advapi32.dll"
         if r.startswith("shcore-"): return "shcore.dll"
         if r.startswith("power-"): return "powrprof.dll"
     return d

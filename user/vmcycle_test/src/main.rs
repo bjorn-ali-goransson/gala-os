@@ -29,6 +29,7 @@ use ntrt::*;
 const THREAD_AFFINITY_MASK: u32 = 4;
 const MEM_RESET: u32 = 0x8_0000;
 const MEM_RESET_UNDO: u32 = 0x100_0000;
+const STATUS_FREE_VM_NOT_AT_BASE: NtStatus = 0xc000_009f;
 const PAGE: usize = 0x1000;
 const CHUNK: usize = 0x1_0000;
 /// Chunks in the concurrent phase's reservation (4 MiB: two 2 MiB
@@ -221,8 +222,14 @@ fn single() -> Result<(), u32> {
     status(37, s)?;
     check(38, filled(base + MIB, MIB).is_none(), 0)?;
 
-    // Decommit to the end of the reservation (size 0), recommit: zero.
-    status(39, free(base + 2 * MIB, 0, MEM_DECOMMIT).0)?;
+    // Size 0 means the whole region only at the allocation base:
+    // elsewhere STATUS_FREE_VM_NOT_AT_BASE (Windows 11 25H2), nothing
+    // decommitted. Then decommit to the end of the reservation, recommit:
+    // zero.
+    let s = free(base + 2 * MIB, 0, MEM_DECOMMIT).0;
+    check(39, s == STATUS_FREE_VM_NOT_AT_BASE, s.into())?;
+    region(39, base, base, 5 * MIB, MEM_COMMIT, PAGE_READWRITE)?;
+    status(39, free(base + 2 * MIB, 6 * MIB, MEM_DECOMMIT).0)?;
     region(40, base + 2 * MIB, base + 2 * MIB, 6 * MIB, MEM_RESERVE, 0)?;
     status(41, allocate(base + 2 * MIB, 6 * MIB, MEM_COMMIT, PAGE_READWRITE).0)?;
     let bad = all_zero(base + 2 * MIB, 6 * MIB);

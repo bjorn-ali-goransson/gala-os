@@ -46,6 +46,7 @@ pub fn init() -> Result<(), &'static str> {
         let bitmap = alloc::vec![0u64; words].leak();
         mm::init_hosted(view as u64, MEMORY_SIZE, bitmap);
     }
+    mm::init_sharing();
     Ok(())
 }
 
@@ -250,9 +251,14 @@ impl UserSpace {
         self.pages.range(virt / PAGE_SIZE * PAGE_SIZE..end).next().map(|(&p, _)| p)
     }
 
-    pub fn set_flags(&mut self, virt: u64, flags: PageFlags) -> Result<(), PagingError> {
+    /// An owned frame another space shares (a fork's copy-on-write
+    /// page) stays read-only (the kernel's `set_flags`).
+    pub fn set_flags(&mut self, virt: u64, mut flags: PageFlags) -> Result<(), PagingError> {
         let page = virt / PAGE_SIZE * PAGE_SIZE;
         let entry = self.pages.get_mut(&page).ok_or(PagingError::Map(MapError::BadAddress))?;
+        if flags.writable && !entry.borrowed && mm::frame_shared(entry.frame) {
+            flags.writable = false;
+        }
         entry.flags = PageFlags { borrowed: entry.borrowed, ..flags };
         // SAFETY: a page of the program's half that gala-um mapped.
         let r =
@@ -338,6 +344,60 @@ impl UserSpace {
 
     pub fn mapping(&mut self, virt: u64) -> Option<(Frame, bool)> {
         self.pages.get(&(virt / PAGE_SIZE * PAGE_SIZE)).map(|p| (p.frame, p.borrowed))
+    }
+
+    /// Moves the page at `from` to `to` (unmapped) with its frame and
+    /// flags (the kernel's `move_page`). Returns whether `from` was mapped.
+    pub fn move_page(&mut self, from: u64, to: u64) -> Result<bool, PagingError> {
+        let from = from / PAGE_SIZE * PAGE_SIZE;
+        let to = check_user(to)?;
+        let Some(p) = self.pages.get(&from) else { return Ok(false) };
+        let moved = Page { frame: p.frame, flags: p.flags, borrowed: p.borrowed };
+        self.insert(to, moved)?;
+        self.pages.remove(&from);
+        unmap(from);
+        Ok(true)
+    }
+
+    /// The kernel's `make_writable`: a shared owned frame is copied first.
+    pub fn make_writable(&mut self, virt: u64, flags: PageFlags) -> Result<bool, PagingError> {
+        match self.mapping(virt) {
+            Some((frame, false)) if mm::frame_shared(frame) => {
+                self.map_private_copy(virt, frame, flags)?;
+                mm::COW_COPIES.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            }
+            _ => self.set_flags(virt, flags).map(|()| false),
+        }
+    }
+
+    /// The kernel's `share_into` (a fork's pages).
+    pub fn share_into(
+        &mut self,
+        child: &mut UserSpace,
+        virt: u64,
+    ) -> Result<crate::mm::paging::ForkedPage, PagingError> {
+        use crate::mm::paging::ForkedPage;
+        let page = virt / PAGE_SIZE * PAGE_SIZE;
+        let Some(p) = self.pages.get(&page) else { return Ok(ForkedPage::Absent) };
+        let (frame, flags, borrowed) = (p.frame, p.flags, p.borrowed);
+        if borrowed {
+            child.map_borrowed(page, frame, flags)?;
+            return Ok(ForkedPage::Borrowed);
+        }
+        if !mm::share_frame(frame) {
+            child.map_private_copy(page, frame, flags)?;
+            return Ok(ForkedPage::Copied);
+        }
+        let read_only = PageFlags { writable: false, ..flags };
+        if let Err(e) = child.insert(page, Page { frame, flags: read_only, borrowed: false }) {
+            let _ = mm::free_frame(frame);
+            return Err(e);
+        }
+        if flags.writable {
+            let _ = self.set_flags(page, read_only);
+        }
+        Ok(ForkedPage::CopyOnWrite)
     }
 
     pub fn map_private_copy(

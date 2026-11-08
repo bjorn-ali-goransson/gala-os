@@ -35,8 +35,8 @@
 //! With the argument `twice`, it asks again afterwards (pipes, DLL views
 //! and kernel32's state go on into a third kernel).
 //!
-//! On Windows GalaRequestHandover (0x7f5a) is not a system service: the
-//! program reports itself skipped and exits 0. Prints
+//! GalaRequestHandover (0x7f5a) is gala's own: elsewhere (no gala ntdll)
+//! the program reports itself skipped and exits 0. Prints
 //! `handover_k32_test: ok` or exits with the number of the failing check.
 
 #![no_std]
@@ -61,6 +61,8 @@ struct CriticalSection {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
+    fn GetModuleHandleA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *mut c_void;
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, ov: *mut c_void) -> Bool;
@@ -138,7 +140,6 @@ const INFINITE: u32 = u32::MAX;
 const WAIT_TIMEOUT: u32 = 0x102;
 const WAIT_IO_COMPLETION: u32 = 0xc0;
 const STILL_ACTIVE: u32 = 0x103;
-const STATUS_INVALID_SYSTEM_SERVICE: u32 = 0xc000_001c;
 
 /// How long the main thread sleeps across the handover (ms).
 const SLEEP_MS: u64 = 4000;
@@ -584,10 +585,6 @@ fn run() -> Result<&'static str, u32> {
         let generation = handover_pause().1;
         match request_handover() {
             0 => {}
-            STATUS_INVALID_SYSTEM_SERVICE => {
-                STOP.store(1, Ordering::SeqCst);
-                return Ok("skipped (no GalaRequestHandover: not gala)");
-            }
             0xc000_0022 => {
                 STOP.store(1, Ordering::SeqCst);
                 return Ok("skipped (no handover allowed)");
@@ -722,8 +719,25 @@ fn run() -> Result<&'static str, u32> {
     Ok("ok")
 }
 
+/// Whether this runs on gala: no ntdll is loaded, or the loaded one is
+/// gala's (it exports GalaConsoleCreate), as `ntrt::on_gala` decides.
+/// Elsewhere gala's own services are not called: their numbers would reach
+/// Windows' win32k table and the first call faults.
+fn on_gala() -> bool {
+    // SAFETY: NUL-terminated names.
+    unsafe {
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        ntdll.is_null() || !GetProcAddress(ntdll, c"GalaConsoleCreate".as_ptr().cast()).is_null()
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
+    if !on_gala() {
+        out(b"handover_k32_test: skipped (GalaRequestHandover is gala's own)\r\n");
+        // SAFETY: ends the process.
+        unsafe { ExitProcess(0) }
+    }
     let code = match run() {
         Ok(what) => {
             let mut line = [0u8; 80];
