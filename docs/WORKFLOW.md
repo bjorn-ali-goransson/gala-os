@@ -65,9 +65,25 @@ cargo xtask test            # stub-audit, host tests, alloc-audit, gala-um, repl
 cargo xtask export-tests    # refresh user/bin (CI compares)
 ```
 
-- CI also runs `cargo xtask lx-expect && git diff --exit-code user/lx`
-  and `cargo xtask export-tests && git diff --exit-code user/bin`:
-  checked-in binaries and transcripts must match their sources.
+- CI (`.github/workflows/ci.yml`, GitHub's hosted runners; the
+  repository is public) has two jobs:
+  - `linux` (Ubuntu 24.04): the lint and clippy lines, `cargo xtask
+    lx-expect && git diff --exit-code user/lx`, `cargo xtask test` and
+    `cargo xtask export-tests && git diff --exit-code user/bin` (checked-in
+    binaries and transcripts must match their sources). The runner has
+    hardware virtualization: a step opens /dev/kvm to the runner's user,
+    so gala's boots run under KVM (the boot log's `xtask: vm time` line
+    and a QEMU standard error without "falling back to tcg" show it).
+  - `windows` (Windows Server 2025, build 26100: the pinned build): the
+    checked-in `user/bin` through `run-all.ps1`, elevated, with the
+    `galatest` account and Defender excluded from the checkout, as the
+    sweep brief asks. The report (`windows.json`,
+    `windows-output.txt`) is the job's `windows-report` artifact, in
+    `cargo xtask compare`'s schema; `user/windows/ci_summary.py` writes
+    the job summary (passes, and each failing program's exit and line).
+    With `user/windows/ci-passing.txt` (program names) the job fails
+    when a listed program does not pass on Windows: a test's expectation
+    stopped being Windows' answer.
 - Commit messages pass through the shell: do not put backticks in a
   double-quoted `-m`; use a heredoc with `-F -`.
 - Borrowed code or a new dependency gets a `THIRD_PARTY.md` entry in the
