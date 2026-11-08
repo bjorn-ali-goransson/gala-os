@@ -1201,6 +1201,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_unix_pie", "user/lx/bin/unix_test-pie", "lx"),
     ("lx_wl", "user/lx/bin/wl_test", "lx"),
     ("lx_wl_pie", "user/lx/bin/wl_test-pie", "lx"),
+    ("lx_wl_input", "user/lx/bin/wl_input_test", "lx"),
+    ("lx_wl_input_pie", "user/lx/bin/wl_input_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
     ("lx_forkmem", "user/lx/bin/forkmem_test", "lx"),
     ("lx_forkmem_pie", "user/lx/bin/forkmem_test-pie", "lx"),
@@ -8032,6 +8034,42 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // user/lx/wl_input_test (LD step 2): wl_seat, wl_pointer and
+        // wl_keyboard (an XKB keymap as a memfd), xdg_toplevel.close from
+        // the frame's close button and xdg-decoration (server-side
+        // framed, client-side frameless), driven by the PS/2 mouse and
+        // keyboard from xtask's screen check (WL_INPUT_SCREEN) on a
+        // headless desktop (`presenter=test`), which also checks the
+        // windows' pixels. Its expected.txt is written from the
+        // protocol's specification (weston's headless backend has no
+        // input devices to record it with; lx_expect.rs INPUT_TESTS).
+        name: "lx_wl_input",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland,window lxrun=/lx/wl_input_test lxargs=./wl_input_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'wl_input_test'",
+            "xtask: screen ok",
+            "run: end /lx/wl_input_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_input_test as a static-pie, every request and event
+        // traced (`wayland=trace`).
+        name: "lx_wl_input_pie",
+        cmdline: "qemu_exit presenter=test wayland=trace lxrun=/lx/wl_input_test-pie lxargs=./wl_input_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            " -> wl_keyboard#",
+            " -> xdg_toplevel#",
+            "xtask: screen ok",
+            "run: end /lx/wl_input_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // user/lx/thread_test (LX): clone of threads, futex, signals per
         // thread, musl's pthreads; its transcript must be its expected.txt
         // (real Linux's; `lx_expect::check_boot`).
@@ -10238,6 +10276,77 @@ enum PixelCheck {
     AnyIn(u32, u32, u32, u32, u32),
 }
 
+/// user/lx/wl_input_test's windows on a headless desktop (1280 x 800,
+/// the pointer starting in its middle): the first, 200 x 150 with
+/// shasha's frame (server-side decoration), is the first Wayland window
+/// and so at (64, 48) (kernel/src/wayland: cascaded from there), its
+/// client area from (65, 81); the second, 100 x 80 and frameless
+/// (client-side decoration), at (96, 80). Each step waits for the line
+/// the program prints once it has the input before (its transcript is
+/// the check of the events; these steps drive it and check the pixels).
+const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "wl_input_test: mapped",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(80, 50, 40, 4, 0xeef2f7), // the active caption above it
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699), // the buffer's top half
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800), // and its bottom half
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // From (640, 400) to surface point (100, 75) at (165, 156),
+            // and a left click there.
+            input: &[
+                "mouse_move -240 -122",
+                "mouse_move -235 -122",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // The wheel one notch away from the user.
+            after: "button 272 released",
+            input: &["mouse_move 0 0 1"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "axis frame",
+            input: &["sendkey a", "sendkey shift-a", "sendkey left"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // Off the window to the right: the pointer leaves.
+            after: "key 105 released",
+            input: &["mouse_move 200 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // Up, then left along the caption (never over the client
+            // area) to the close button at (240, 60), and a click.
+            after: "pointer leave",
+            input: &["mouse_move 0 -96", "mouse_move -125 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // The frameless window: its own pixels where a frame's caption
+            // and outline would be.
+            after: "wl_input_test: frameless mapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(96 + 50, 80 + 1, 0x8a2be2),
+                PixelCheck::At(96, 80 + 40, 0x8a2be2),
+                PixelCheck::At(96 + 50, 80 + 70, 0x8a2be2),
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey q"], pixels: &[] },
+    ],
+};
+
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
 /// 1-pixel outline and a 32-pixel caption (Windows 11's metrics), so its
 /// client area starts at (101, 133) (kernel/src/nt/desktop). The screen is
@@ -10493,6 +10602,8 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         },
     ),
     ("gui_test", GUI_TEST_SCREEN),
+    ("lx_wl_input", WL_INPUT_SCREEN),
+    ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows
     // the scanout, so the pixels got there by TRANSFER_TO_HOST_2D and

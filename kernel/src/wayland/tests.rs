@@ -13,6 +13,7 @@ use std::vec;
 struct Win {
     title: Vec<u8>,
     size: (u32, u32),
+    decorated: bool,
     pixels: Vec<u32>,
     alive: bool,
 }
@@ -58,18 +59,34 @@ impl Host for Fake {
         77
     }
 
-    fn window_create(&mut self, title: &[u8], width: u32, height: u32) -> Option<u32> {
+    fn keymap(&mut self) -> Option<(usize, u32)> {
+        let mut text = input::KEYMAP.as_bytes().to_vec();
+        text.push(0);
+        let size = text.len() as u32;
+        self.files.push(text);
+        Some((self.files.len() - 1, size))
+    }
+
+    fn window_create(
+        &mut self,
+        title: &[u8],
+        width: u32,
+        height: u32,
+        decorated: bool,
+    ) -> Option<u32> {
         self.windows.push(Win {
             title: title.to_vec(),
             size: (width, height),
+            decorated,
             pixels: vec![0xffff_ffff; (width * height) as usize],
             alive: true,
         });
         Some(self.windows.len() as u32 - 1)
     }
 
-    fn window_resize(&mut self, id: u32, width: u32, height: u32) {
+    fn window_resize(&mut self, id: u32, width: u32, height: u32, decorated: bool) {
         let w = &mut self.windows[id as usize];
+        assert_eq!(w.decorated, decorated);
         w.size = (width, height);
         w.pixels = vec![0xffff_ffff; (width * height) as usize];
     }
@@ -176,7 +193,7 @@ impl T {
             let iface = self.ids[&h.object];
             let sig = &iface.events[usize::from(h.opcode)];
             let mut args = [Arg::Fd; MAX_ARGS];
-            wl_abi::decode(&out[at..at + size], sig, 0, &mut args).unwrap();
+            wl_abi::decode(&out[at..at + size], sig, MAX_FDS, &mut args).unwrap();
             let shown: Vec<String> = args[..sig.args.len()]
                 .iter()
                 .map(|a| match *a {
@@ -305,6 +322,8 @@ fn the_registry_offers_the_globals_and_binds_them() {
             "wl_registry#2.global(2, \"wl_shm\", 2)",
             "wl_registry#2.global(3, \"xdg_wm_base\", 6)",
             "wl_registry#2.global(4, \"wl_output\", 4)",
+            "wl_registry#2.global(5, \"wl_seat\", 7)",
+            "wl_registry#2.global(6, \"zxdg_decoration_manager_v1\", 1)",
             "wl_callback#3.done(1)",
             "wl_display#1.delete_id(3)",
         ]
@@ -508,7 +527,7 @@ fn a_message_split_across_reads_waits_for_its_end() {
     assert_eq!(t.feed(&b[..5]), Ok(()));
     assert!(t.events().is_empty());
     assert_eq!(t.feed(&b[5..]), Ok(()));
-    assert_eq!(t.events().len(), 4);
+    assert_eq!(t.events().len(), globals().len());
 }
 
 #[test]
@@ -648,7 +667,7 @@ fn trace_lines_read_as_wayland_debug() {
     assert_eq!(t.h.traces[0], "wl_display#1.get_registry(new id wl_registry#2)");
     assert_eq!(t.h.traces[1], " -> wl_registry#2.global(1, \"wl_compositor\", 6)");
     assert_eq!(
-        t.h.traces[5],
+        t.h.traces[1 + globals().len()],
         "wl_registry#2.bind(1, \"wl_compositor\", 4, new id wl_compositor#3)"
     );
     let r = t.feed(&[1, 0, 0, 0, 7, 0, 8, 0]);
@@ -670,4 +689,376 @@ fn the_end_takes_the_windows() {
     t.c.end(&mut t.h);
     assert!(!t.h.windows[0].alive);
     assert_eq!(t.c.object_count(), 0);
+}
+
+impl T {
+    /// `T::toplevel` with wl_seat 7 (11), a pointer (12) and a keyboard
+    /// (13), configured, acked and mapped (window 0); events read.
+    fn mapped() -> T {
+        let mut t = T::toplevel();
+        let seat = [Arg::Uint(5), Arg::UntypedNewId { interface: b"wl_seat", version: 7, id: 11 }];
+        t.ok(2, "bind", &seat);
+        t.ok(11, "get_pointer", &[Arg::NewId(12)]);
+        t.ok(11, "get_keyboard", &[Arg::NewId(13)]);
+        t.ok(8, "commit", &[]);
+        t.ok(9, "ack_configure", &[Arg::Uint(1)]);
+        t.ok(8, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+        t.ok(8, "commit", &[]);
+        assert!(t.h.windows[0].alive);
+        t.events();
+        t
+    }
+
+    fn input(&mut self, i: Input) -> Vec<String> {
+        assert_eq!(self.c.input(&mut self.h, i), Ok(()), "{:?}", self.h.notes);
+        self.events()
+    }
+}
+
+/// The serial-free form of events (serials and times vary with order).
+fn plain(events: Vec<String>) -> Vec<String> {
+    events
+        .into_iter()
+        .map(|e| {
+            // enter/leave/key/button/modifiers start with a serial;
+            // motion/axis/key/button carry a time: shown as S and T.
+            let (head, args) = e.split_once('(').unwrap();
+            let args = args.strip_suffix(')').unwrap();
+            let mut parts: Vec<String> = args.split(", ").map(|a| a.to_string()).collect();
+            let event = head.rsplit('.').next().unwrap();
+            let serial = matches!(event, "enter" | "leave" | "key" | "button" | "modifiers");
+            let time = matches!(event, "motion" | "axis" | "key" | "button");
+            if serial {
+                parts[0] = "S".into();
+            }
+            if time {
+                let at = usize::from(serial);
+                parts[at] = "T".into();
+            }
+            format!("{head}({})", parts.join(", "))
+        })
+        .collect()
+}
+
+#[test]
+fn the_seat_has_a_pointer_and_a_keyboard_with_gala_s_keymap() {
+    let mut t = T::bound();
+    let seat = [Arg::Uint(5), Arg::UntypedNewId { interface: b"wl_seat", version: 7, id: 6 }];
+    t.ok(2, "bind", &seat);
+    assert_eq!(t.events(), ["wl_seat#6.capabilities(3)", "wl_seat#6.name(\"seat0\")"]);
+    t.ok(6, "get_pointer", &[Arg::NewId(7)]);
+    t.ok(6, "get_keyboard", &[Arg::NewId(8)]);
+    let size = input::KEYMAP.len() + 1;
+    assert_eq!(
+        t.events(),
+        [
+            format!("wl_keyboard#8.keymap(1, Fd, {size})"),
+            "wl_keyboard#8.repeat_info(30, 500)".into()
+        ]
+    );
+    // The descriptor goes with the bytes of its event (here: all of them).
+    let fd = t.c.take_fd(usize::MAX).unwrap();
+    assert_eq!(t.c.take_fd(usize::MAX), None);
+    let file = &t.h.files[fd];
+    assert_eq!(file.len(), size);
+    assert!(file.starts_with(b"xkb_keymap {") && file[size - 1] == 0);
+    // Touch it never had; release ends each.
+    t.ok(7, "release", &[]);
+    t.ok(8, "release", &[]);
+    t.ok(6, "release", &[]);
+    assert_eq!(
+        t.events(),
+        ["wl_display#1.delete_id(7)", "wl_display#1.delete_id(8)", "wl_display#1.delete_id(6)"]
+    );
+    let mut t = T::bound();
+    t.ok(2, "bind", &seat);
+    let r = t.send(6, "get_touch", &[Arg::NewId(7)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#6, 0, "));
+}
+
+#[test]
+fn a_descriptor_is_written_no_later_than_its_event() {
+    let mut t = T::bound();
+    t.ok(1, "sync", &[Arg::NewId(6)]);
+    let before = t.c.output().len();
+    let seat = [Arg::Uint(5), Arg::UntypedNewId { interface: b"wl_seat", version: 7, id: 6 }];
+    t.ok(2, "bind", &seat);
+    t.ok(6, "get_keyboard", &[Arg::NewId(7)]);
+    // keymap(format, fd, size) and repeat_info(rate, delay): 16 bytes each.
+    let keymap_at = t.c.output().len() - 32;
+    assert!(keymap_at > before);
+    // Not with a write that ends before the event starts...
+    assert_eq!(t.c.take_fd(keymap_at), None);
+    // ...but with one that holds its first byte, or after part was written.
+    t.c.written(before);
+    assert!(t.c.take_fd(keymap_at - before + 1).is_some());
+}
+
+#[test]
+fn the_desktop_s_input_becomes_pointer_and_keyboard_events() {
+    let mut t = T::mapped();
+    // Activation: the keyboard focus, no keys down, the modifiers.
+    assert_eq!(
+        plain(t.input(Input::Focus { window: 0, active: true })),
+        ["wl_keyboard#13.enter(S, #8, [0])", "wl_keyboard#13.modifiers(S, 0, 0, 0, 0)"]
+    );
+    // The pointer comes onto the surface, moves, clicks.
+    assert_eq!(
+        plain(t.input(Input::Motion { window: 0, x: 10, y: 20 })),
+        ["wl_pointer#12.enter(S, #8, Fixed(2560), Fixed(5120))", "wl_pointer#12.frame()"]
+    );
+    assert_eq!(
+        plain(t.input(Input::Motion { window: 0, x: 11, y: 20 })),
+        ["wl_pointer#12.motion(T, Fixed(2816), Fixed(5120))", "wl_pointer#12.frame()"]
+    );
+    let press = Input::Button { window: 0, x: 11, y: 20, button: 0x110, pressed: true };
+    assert_eq!(
+        plain(t.input(press)),
+        ["wl_pointer#12.button(S, T, 272, 1)", "wl_pointer#12.frame()"]
+    );
+    // Held, the pointer stays with the surface outside it.
+    let release = Input::Button { window: 0, x: 90, y: 20, button: 0x110, pressed: false };
+    assert_eq!(
+        plain(t.input(release)),
+        [
+            "wl_pointer#12.motion(T, Fixed(23040), Fixed(5120))",
+            "wl_pointer#12.frame()",
+            "wl_pointer#12.button(S, T, 272, 0)",
+            "wl_pointer#12.frame()",
+        ]
+    );
+    // A release whose press it never had is not passed on.
+    let stray = Input::Button { window: 0, x: 11, y: 20, button: 0x111, pressed: false };
+    assert!(t.input(stray).iter().all(|e| !e.contains("button")));
+    // The wheel, one notch away from the user: up (where the pointer is:
+    // it moved back first).
+    assert_eq!(
+        plain(t.input(Input::Wheel { window: 0, x: 11, y: 20, delta: 120 })),
+        [
+            "wl_pointer#12.motion(T, Fixed(2816), Fixed(5120))",
+            "wl_pointer#12.frame()",
+            "wl_pointer#12.axis_source(0)",
+            "wl_pointer#12.axis_discrete(0, -1)",
+            "wl_pointer#12.axis(T, 0, Fixed(-2560))",
+            "wl_pointer#12.frame()",
+        ]
+    );
+    // Keys: Shift's modifier after its key, a repeated press dropped.
+    let key = |key, pressed| Input::Key { window: 0, key, pressed };
+    assert_eq!(
+        plain(t.input(key(42, true))),
+        ["wl_keyboard#13.key(S, T, 42, 1)", "wl_keyboard#13.modifiers(S, 1, 0, 0, 0)"]
+    );
+    assert_eq!(plain(t.input(key(30, true))), ["wl_keyboard#13.key(S, T, 30, 1)"]);
+    assert!(t.input(key(30, true)).is_empty());
+    assert_eq!(plain(t.input(key(30, false))), ["wl_keyboard#13.key(S, T, 30, 0)"]);
+    assert_eq!(
+        plain(t.input(key(42, false))),
+        ["wl_keyboard#13.key(S, T, 42, 0)", "wl_keyboard#13.modifiers(S, 0, 0, 0, 0)"]
+    );
+    // Caps Lock toggles the locked mask.
+    t.input(key(58, true));
+    assert_eq!(t.c.seat.locked, input::MOD_LOCK);
+    t.input(key(58, false));
+    // A point beyond the surface (a client area larger than the buffer)
+    // is off it; the desktop's notice too.
+    assert_eq!(
+        plain(t.input(Input::Motion { window: 0, x: 64, y: 3 })),
+        ["wl_pointer#12.leave(S, #8)", "wl_pointer#12.frame()"]
+    );
+    t.input(Input::Motion { window: 0, x: 1, y: 1 });
+    assert_eq!(
+        plain(t.input(Input::Left { window: 0 })),
+        ["wl_pointer#12.leave(S, #8)", "wl_pointer#12.frame()"]
+    );
+    // The close button.
+    assert_eq!(t.input(Input::Close { window: 0 }), ["xdg_toplevel#10.close()"]);
+    // Deactivated.
+    assert_eq!(
+        plain(t.input(Input::Focus { window: 0, active: false })),
+        ["wl_keyboard#13.leave(S, #8)"]
+    );
+    // A window it does not show: dropped and noted.
+    assert!(t.input(Input::Key { window: 5, key: 30, pressed: true }).is_empty());
+    assert!(t.h.notes.iter().any(|n| n.contains("InputDropped { window: 5 }")));
+    // Window actions not followed yet are noted (the ledger).
+    t.input(Input::Unhandled { window: 0, what: "maximize" });
+    assert!(t.h.notes.iter().any(|n| n.contains("Unhandled { what: \"maximize\"")));
+}
+
+#[test]
+fn objects_made_later_learn_the_focus_and_unmapping_leaves() {
+    let mut t = T::mapped();
+    t.input(Input::Focus { window: 0, active: true });
+    t.input(Input::Motion { window: 0, x: 5, y: 6 });
+    t.ok(11, "get_pointer", &[Arg::NewId(14)]);
+    t.ok(11, "get_keyboard", &[Arg::NewId(15)]);
+    let size = input::KEYMAP.len() + 1;
+    assert_eq!(
+        plain(t.events()),
+        [
+            "wl_pointer#14.enter(S, #8, Fixed(1280), Fixed(1536))".to_string(),
+            "wl_pointer#14.frame()".into(),
+            format!("wl_keyboard#15.keymap(1, Fd, {size})"),
+            "wl_keyboard#15.repeat_info(30, 500)".into(),
+            "wl_keyboard#15.enter(S, #8, [0])".into(),
+            "wl_keyboard#15.modifiers(S, 0, 0, 0, 0)".into(),
+        ]
+    );
+    // A null buffer unmaps: both foci leave.
+    t.ok(8, "attach", &[Arg::Object(None), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    let left = plain(t.events());
+    assert!(left.contains(&"wl_keyboard#13.leave(S, #8)".to_string()), "{left:?}");
+    assert!(left.contains(&"wl_pointer#12.leave(S, #8)".to_string()), "{left:?}");
+    // A destroyed surface loses its focus without a leave.
+    let mut t = T::mapped();
+    t.input(Input::Focus { window: 0, active: true });
+    t.ok(8, "destroy", &[]);
+    assert!(t.events().iter().all(|e| !e.contains("leave")));
+    assert_eq!(t.c.seat.keyboard, None);
+    // set_cursor with a surface that has a role is a role error.
+    let mut t = T::mapped();
+    let r =
+        t.send(12, "set_cursor", &[Arg::Uint(1), Arg::Object(Some(8)), Arg::Int(0), Arg::Int(0)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#12, 0, "));
+}
+
+#[test]
+fn decorations_are_server_side_unless_the_client_asks() {
+    let deco = [
+        Arg::Uint(6),
+        Arg::UntypedNewId { interface: b"zxdg_decoration_manager_v1", version: 1, id: 11 },
+    ];
+    // Nothing asked: server-side, in the first configure; a framed window.
+    let mut t = T::toplevel();
+    t.ok(2, "bind", &deco);
+    t.ok(11, "get_toplevel_decoration", &[Arg::NewId(12), Arg::Object(Some(10))]);
+    t.ok(8, "commit", &[]);
+    assert_eq!(
+        t.events(),
+        [
+            "wl_display#1.delete_id(6)",
+            "xdg_toplevel#10.configure(0, 0, [0])",
+            "zxdg_toplevel_decoration_v1#12.configure(2)",
+            "xdg_surface#9.configure(1)",
+        ]
+    );
+    t.ok(9, "ack_configure", &[Arg::Uint(1)]);
+    t.ok(8, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    assert!(t.h.windows[0].decorated);
+    // Asked for client-side once mapped: the configure says the window's
+    // mode.
+    t.events();
+    t.ok(12, "set_mode", &[Arg::Uint(1)]);
+    assert_eq!(
+        t.events(),
+        [
+            "xdg_toplevel#10.configure(0, 0, [0])",
+            "zxdg_toplevel_decoration_v1#12.configure(2)",
+            "xdg_surface#9.configure(2)",
+        ]
+    );
+    // The decoration goes before its toplevel, else orphaned.
+    let r = t.send(10, "destroy", &[]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#12, 2, "));
+
+    // Client-side asked before the first commit: configured client-side, a
+    // frameless window.
+    let mut t = T::toplevel();
+    t.ok(2, "bind", &deco);
+    t.ok(11, "get_toplevel_decoration", &[Arg::NewId(12), Arg::Object(Some(10))]);
+    t.ok(12, "set_mode", &[Arg::Uint(1)]);
+    t.ok(8, "commit", &[]);
+    assert!(t.events().contains(&"zxdg_toplevel_decoration_v1#12.configure(1)".to_string()));
+    t.ok(9, "ack_configure", &[Arg::Uint(1)]);
+    t.ok(8, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    assert!(!t.h.windows[0].decorated);
+    t.ok(12, "destroy", &[]);
+    t.ok(10, "destroy", &[]);
+
+    // Errors: a second decoration, an invalid mode, one for a mapped
+    // toplevel.
+    let mut t = T::toplevel();
+    t.ok(2, "bind", &deco);
+    t.ok(11, "get_toplevel_decoration", &[Arg::NewId(12), Arg::Object(Some(10))]);
+    let r = t.send(11, "get_toplevel_decoration", &[Arg::NewId(13), Arg::Object(Some(10))]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#11, 1, "));
+    let mut t = T::toplevel();
+    t.ok(2, "bind", &deco);
+    t.ok(11, "get_toplevel_decoration", &[Arg::NewId(12), Arg::Object(Some(10))]);
+    let r = t.send(12, "set_mode", &[Arg::Uint(3)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#12, 3, "));
+    let mut t = T::mapped();
+    t.ok(
+        2,
+        "bind",
+        &[
+            Arg::Uint(6),
+            Arg::UntypedNewId { interface: b"zxdg_decoration_manager_v1", version: 1, id: 14 },
+        ],
+    );
+    let r = t.send(14, "get_toplevel_decoration", &[Arg::NewId(15), Arg::Object(Some(10))]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#14, 0, "));
+}
+
+#[test]
+fn window_messages_translate_to_wayland_input() {
+    use crate::nt::winstate::*;
+    let lp = |x: i16, y: i16| u64::from(y as u16) << 16 | u64::from(x as u16);
+    assert_eq!(
+        input::translate(3, WM_LBUTTONDOWN, 1, lp(-2, 7)),
+        Some(Input::Button { window: 3, x: -2, y: 7, button: 0x110, pressed: true })
+    );
+    assert_eq!(
+        input::translate(3, WM_MOUSEWHEEL, 0xff88 << 16, lp(1, 1)),
+        Some(Input::Wheel { window: 3, x: 1, y: 1, delta: -120 })
+    );
+    // "a" (scan 0x1e), Left (E0 4B), right Ctrl (E0 1D), keypad 7 (0x47).
+    let key = |scan: u64, ext: u64| 1 | scan << 16 | ext << 24;
+    let k = |m, lparam| input::translate(3, m, 0, lparam);
+    assert_eq!(k(WM_KEYDOWN, key(0x1e, 0)), Some(Input::Key { window: 3, key: 30, pressed: true }));
+    assert_eq!(
+        k(WM_SYSKEYUP, key(0x4b, 1)),
+        Some(Input::Key { window: 3, key: 105, pressed: false })
+    );
+    assert_eq!(k(WM_KEYDOWN, key(0x1d, 1)), Some(Input::Key { window: 3, key: 97, pressed: true }));
+    assert_eq!(k(WM_KEYDOWN, key(0x47, 0)), Some(Input::Key { window: 3, key: 71, pressed: true }));
+    assert_eq!(k(WM_KEYDOWN, key(0x60, 0)), None);
+    assert_eq!(input::translate(3, WM_SYSCOMMAND, SC_CLOSE, 0), Some(Input::Close { window: 3 }));
+    assert_eq!(
+        input::translate(3, GALA_WM_ACTIVE, 1, 0),
+        Some(Input::Focus { window: 3, active: true })
+    );
+    assert_eq!(input::translate(3, GALA_WM_POINTER_LEFT, 0, 0), Some(Input::Left { window: 3 }));
+    assert_eq!(input::translate(3, WM_MOVE, 0, 0), None);
+    assert_eq!(
+        input::translate(3, WM_SYSCOMMAND, SC_MAXIMIZE, 0),
+        Some(Input::Unhandled { window: 3, what: "maximize" })
+    );
+}
+
+#[test]
+fn every_key_the_scan_codes_give_is_in_the_keymap() {
+    // The keymap names each evdev code it has as an X keycode (+8).
+    let codes: Vec<u32> = input::KEYMAP
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('<'))
+        .filter_map(|l| l.split_once("> = "))
+        .filter_map(|(_, n)| n.trim_end_matches(';').parse().ok())
+        .collect();
+    for scan in 0..=0x7fu8 {
+        for ext in [false, true] {
+            if let Some(k) = input::evdev_key(scan, ext) {
+                assert!(codes.contains(&(k + 8)), "scan {scan:#x} ext {ext}: evdev {k}");
+            }
+        }
+    }
+    // And the modifiers it knows are bound to their symbols there.
+    for (key, sym) in [(42, "Shift_L"), (29, "Control_L"), (56, "Alt_L"), (58, "Caps_Lock")] {
+        assert!(input::modifier(key).is_some());
+        assert!(input::KEYMAP.contains(sym));
+    }
 }

@@ -1,0 +1,52 @@
+connect = 0
+global wl_compositor: yes
+global wl_shm: yes
+global xdg_wm_base: yes
+global wl_seat: yes
+global zxdg_decoration_manager_v1: yes
+bind wl_seat version 7
+seat capabilities = 3
+seat name: seat0
+keymap = yes
+keymap format = 1
+keymap fd = yes
+keymap mapped = yes
+keymap text = yes
+keymap us = yes
+repeat rate = 30
+repeat delay = 500
+decoration mode = 2
+xdg_surface configure = yes
+keyboard enter first = yes
+keyboard enter keys down = 0
+wl_input_test: mapped
+pointer enter first
+button 272 pressed at 100,75
+button frame
+button 272 released at 100,75
+button frame
+axis source = 0
+axis discrete 0 -1
+axis 0 value -10
+axis frame
+key 30 pressed
+key 30 released
+key 42 pressed
+modifiers 1 0 0 0
+key 30 pressed
+key 30 released
+key 42 released
+modifiers 0 0 0 0
+key 105 pressed
+key 105 released
+pointer leave first
+toplevel close
+keyboard leave first
+decoration mode = 1
+xdg_surface configure = yes
+keyboard enter second, keys down 0
+modifiers 0 0 0 0
+wl_input_test: frameless mapped
+key 16 pressed
+wl_input_test: ok
+-- exit status 0

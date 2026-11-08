@@ -4961,7 +4961,9 @@ the program always sees WM_SIZE/WM_MOVE.
   user32's input pump posts it to the window's thread and
   DispatchMessage calls SetWindowPos, no longer maximized) and
   GALA_WM_MINIMIZED (the desktop minimized the window, so IsIconic
-  follows).
+  follows); for windows a kernel server serves (Wayland's), also
+  GALA_WM_ACTIVE and GALA_WM_POINTER_LEFT ("Linux applications on the
+  desktop (Wayland)", "Input").
 - **Mouse** (`Desktop::pointer`): a press on the start button toggles
   the menu; with the menu open, a press elsewhere only closes it. A
   taskbar button restores a minimized window, minimizes the active one,
@@ -5010,10 +5012,14 @@ the program always sees WM_SIZE/WM_MOVE.
 
 - The desktop queues `InputEvent`s (owner, window id, message, wParam,
   lParam; at most 512; a move replaces the window's unread move) and
-  signals the owner's event registered with GalaWindowListen after
-  letting go of its lock. user32 creates its queue event on first use
-  and registers it; `next` (GetMessage, PeekMessage) first moves input
-  in with GalaWindowInput (24-byte records) to the window's thread.
+  tells the owner's listener after letting go of its lock (every path
+  that can queue input or move the activation does: `with` too): an
+  event registered with GalaWindowListen is signalled
+  (`Listener::Event`), a kernel server's thread woken
+  (`Listener::Server`: the Wayland server for a Linux client's
+  windows). user32 creates its queue event on first use and registers
+  it; `next` (GetMessage, PeekMessage) first moves input in with
+  GalaWindowInput (24-byte records) to the window's thread.
 - **Two key states**, as Windows documents: GetAsyncKeyState's follows
   the input as it is moved in, GetKeyState's (and TranslateMessage's)
   follows the key messages as they are taken from the queue (one state
@@ -9331,14 +9337,17 @@ one more client of the same window-state interface.
 ### Objects and how they map
 
 Offered globals: `wl_compositor` 6, `wl_shm` 2, `xdg_wm_base` 6,
-`wl_output` 4 (registry names 1 to 4). Not yet: `wl_seat`.
+`wl_output` 4, `wl_seat` 7 and `zxdg_decoration_manager_v1` 1 (registry
+names 1 to 6).
 
 | Wayland | gala |
 |---|---|
 | a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
 | `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
 | `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
-| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The app id is kept; window geometry, move, resize, menus, sizes and states are accepted and not acted on yet (ledgered); pings are not sent |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The app id is kept; window geometry, move, resize, menus, sizes and states are accepted and not acted on yet (ledgered), and so are the desktop's maximize, restore and Snap for a Wayland window (`wayland window action missing`). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
+| `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side, and a toplevel without a decoration object is framed too (wl_test; programs that draw their own frame negotiate it: GTK asks for client-side). Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, the surface's size, on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
+| `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
 | `xdg_popup`, `xdg_positioner` | not yet: `create_positioner` and `get_popup` are protocol errors, ledgered (a frameless owned window, as user32's popups are, comes next) |
 | `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet) |
 | `wl_surface.commit` | the damaged rows (all of them for a new or resized window) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied), and `frame` callbacks are done in the same round, with the time in milliseconds: there is no composition clock to wait for yet |
@@ -9350,22 +9359,89 @@ larger client area, white beyond the buffer; one larger than
 (`Client::end`); when its process ends first, `desktop::process_ended`
 takes them.
 
-Next: `wl_seat`, `wl_pointer`, `wl_keyboard` (the desktop's input for
-that window: enter and leave from focus and the pointer, motion, buttons
-as evdev codes, axis from the wheel; keys as evdev key codes mapped from
-the desktop's scan codes, with an XKB keymap, a fixed US keymap in text
-form sent as a memfd); `xdg_toplevel.close` from the frame's close
-button (today the desktop queues a WM_CLOSE nobody takes); configure
-from the desktop's resizes, maximize and Snap; frame callbacks paced by
-composition; `zxdg_decoration_manager_v1` offered with server-side
-decoration preferred, so a Linux window wears shasha's frame like a
-Windows window does (a client that insists on client-side decorations
-gets a frameless window); popups. Later: `wl_data_device` (the
+Next: configure from the desktop's resizes, maximize and Snap (the
+input already carries them: GALA_WM_PLACE, SC_MAXIMIZE, SC_RESTORE);
+frame callbacks paced by composition; popups; a decoration mode change
+on a mapped window (the frame put on or taken off in place). Later: `wl_data_device` (the
 clipboard, bridged to the Windows clipboard so copy and paste works
 across personalities), `wp_viewporter`, fractional scale,
 `xdg_activation`, and `linux-dmabuf` once GPU G2's lavapipe/llvmpipe
 serve Linux clients through EGL. What the server allocates for a client
 is not charged to its process's quota yet ("Resource limits").
+
+### Input
+
+The desktop's input reaches a Wayland window the way it reaches a
+user32 window: as window messages queued for the window's owner
+(`winstate::InputEvent`), which the Wayland server takes instead of
+user32 (`kernel/src/wayland/input.rs`, `Client::input`).
+
+- **Waking**: at each connection the server registers itself as the
+  client process's listener (`desktop::listen_server`:
+  `winstate::Listener::Server`, the server thread, beside the user32
+  programs' `Listener::Event`); the desktop wakes the thread after
+  letting go of its lock, as it signals user32's event. The server's
+  wait also looks at whether input waits for any client (prepare, look,
+  block), so input queued during a round is not lost. The listener goes
+  when the process's last connection closes (`unlisten_server`), or with
+  the process.
+- **gala's notices for served owners** (only owners with a
+  `Listener::Server` get them; user32 follows activation and
+  TrackMouseEvent itself): `GALA_WM_ACTIVE` (0x10010; wParam 1: the
+  window became the active one, 0: it no longer is), queued by
+  `State::activate` for the old window then the new one, so a click that
+  activates comes before its button and keys after it go to the new
+  focus; `GALA_WM_POINTER_LEFT` (0x10011), queued when the window whose
+  client area the pointer was over (`State::hovered`: the target of the
+  moves, the capture, none during a drag or resize) changes.
+- **Translation** (`input::translate`): WM_MOUSEMOVE is a position;
+  WM_LBUTTONDOWN/UP and WM_RBUTTONDOWN/UP are BTN_LEFT (0x110) and
+  BTN_RIGHT (0x111); WM_MOUSEWHEEL is the wheel (WHEEL_DELTA a notch,
+  positive away from the user); WM_(SYS)KEYDOWN/UP are evdev key codes
+  from lParam's set 1 scan code and E0 bit (0x01-0x58 are the evdev
+  codes; the E0 keys from a table; the virtual key is not used: the
+  keymap says what a key means); SC_CLOSE is close; SC_MAXIMIZE,
+  SC_RESTORE and GALA_WM_PLACE are ledgered; WM_MOVE and
+  GALA_WM_MINIMIZED mean nothing to a Wayland client.
+- **The client's seat** (`Seat`): the surface with the pointer and
+  where, buttons held, the surface with the keyboard focus, keys down
+  and modifiers. A position on the surface enters it (leaving another;
+  enter and frame) or moves on it (motion and frame); off the surface (a
+  framed client area larger than the buffer) the pointer leaves, unless
+  a button holds it (an implicit grab: the desktop also sends a held
+  button's moves and release to the window it went down in). A button
+  or wheel first brings the pointer where the message says. A button is
+  `button` and `frame`; a wheel notch `axis_source` wheel,
+  `axis_discrete` -1 per notch away from the user (versions 5 to 7;
+  `axis_value120` from 8), `axis` -10 per notch on the vertical axis (as
+  weston and mutter report a click), `frame`. A release whose press the
+  client did not have is not sent. Focus: `enter` with no keys down,
+  then `modifiers`; deactivation `leave` (the keys down are forgotten).
+  A key already down (the device's typematic repeat) is not sent again:
+  clients repeat by `repeat_info`. After a key that changes them,
+  `modifiers` (depressed: Shift 1, Control 4, Alt 8, Super 64 while
+  held; locked: Caps Lock 2, Num Lock 16 toggled; the keymap's real
+  modifier bits). An unmapped surface (null buffer, destroyed toplevel)
+  gets the leaves of the foci it had; a destroyed one loses them
+  without one (a leave could not name it).
+- **The keymap** (`kernel/src/wayland/keymap.xkb`, `input::KEYMAP`): a
+  US layout in XKB's text format written for gala (keycodes named as
+  xkeyboard-config's `evdev` names them, the types ONE_LEVEL, TWO_LEVEL,
+  ALPHABETIC and KEYPAD, the modifiers above), about 7 KB, in one
+  anonymous file of the shared file system made at the first keyboard,
+  written with its NUL, sealed (shrink, grow, write, seal) and opened
+  read-only: every keyboard of every client gets that description, which
+  no client can change (they map it MAP_PRIVATE, as wl_keyboard 7
+  requires).
+- **Descriptors in events**: an event's fd waits in the client's
+  `out_fds` with where its event starts; a write takes those whose event
+  starts within the bytes it offers, as SCM_RIGHTS with them. A stream
+  read stops after the write that carried rights, so the client has
+  each descriptor no later than its message (libwayland queues
+  descriptors that come early).
+- Limits: 32 keys down at once per client (more are not sent), 56
+  descriptors waiting in events (beyond, the client is disconnected as
+  for output).
 
 ### Sessions
 
@@ -9384,13 +9460,20 @@ as they keep Windows ones: the pixels are kept and nothing draws them
   why: closed, protocol error, output full, no memory; and how many
   requests), `wayland role` (surface, role, its object), `wayland map`
   (surface, window or -1), `wayland commit` (surface, whether a buffer
-  came, its size, the rows copied, the window) and `wayland error`
-  (object, interface, code, message). The client's pid and number are
-  in each.
+  came, its size, the rows copied, the window), `wayland error`
+  (object, interface, code, message) and `wayland input` (what: enter,
+  leave, button, axis, key, focus, unfocus, close, or dropped for a
+  window the client shows no surface in; the surface, the window, the
+  button or key code, pressed or released; motion is not evented). The
+  client's pid and number are in each. With `events=window` too, the
+  desktop's `button` and `key` events say where the input went first.
 - `wayland=trace`: every request and event decoded, as libwayland's
   `WAYLAND_DEBUG=1` prints them (`wayland: pid 7
   wl_display#1.get_registry(new id wl_registry#2)`, events after `->`),
-  so a transcript from real Linux can be compared with gala's.
+  so a transcript from real Linux can be compared with gala's; and each
+  window message taken from the desktop (`wayland: pid 7 input: window 1
+  message 0x201 wparam 0x1 lparam 0x4b0064`), before the events it
+  became.
 - The log: a protocol error (`wayland: pid P: protocol error on
   xdg_surface@9, code 3: ...; disconnecting`), a request gala lacks, a
   surface that got no window, a connection closed for its output or for
@@ -9398,11 +9481,15 @@ as they keep Windows ones: the pixels are kept and nothing draws them
 - The ledger: a request gala doesn't implement is answered with a
   protocol error and counted as `wayland request missing` (service: the
   interface, detail: the opcode); one accepted and not acted on as
-  `wayland request ignored`.
+  `wayland request ignored`; a desktop action a Wayland window does not
+  follow yet as `wayland window action missing` (service: maximize,
+  restore, place; detail: the window).
 - The state dump lists the socket, each client (pid, objects, requests,
   bytes of events waiting) and its objects (a surface's window, size and
   frame callbacks; a buffer's size and stride; an xdg_surface's
-  configure state; a toplevel's title and app id).
+  configure state; a toplevel's title, app id and decoration object; a
+  decoration's mode asked for) and its seat (the pointer's surface and
+  place, buttons held, the keyboard's surface, keys down, modifiers).
 
 ### Tests
 
@@ -9423,15 +9510,36 @@ as they keep Windows ones: the pixels are kept and nothing draws them
   with `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` added to its
   environment), and CI installs weston. Scenarios `lx_wl` (`wayland=on
   events=wayland`; the log shows `desktop: shown window 'wl_test'`) and
-  `lx_wl_pie` (`wayland=trace`) match the same transcript. Next: a
-  screen check that finds the pixels inside shasha's frame, and
-  `xdg_toplevel.close` from the frame's close button once the scenario
-  can click.
+  `lx_wl_pie` (`wayland=trace`) match the same transcript.
+- **`user/lx/wl_input_test`**, the same kind of client for input and
+  window control: wl_seat 7 (capabilities, name), the keymap (format,
+  the descriptor mapped MAP_PRIVATE, its text, its NUL), repeat_info, a
+  200x150 toplevel with a decoration object (server-side), the keyboard
+  focus it gets when shown, then what the scenario does with QEMU's PS/2
+  mouse and keyboard: a click (enter, BTN_LEFT pressed and released at
+  the surface point aimed at, each in its frame), a wheel notch (source,
+  discrete, axis, frame), "a", Shift+A (Shift's modifier), Left (an E0
+  key), the pointer moved off (leave), the frame's close button
+  (`xdg_toplevel.close`); then a second toplevel asking for client-side
+  decorations, shown frameless and focused; "q" ends it. Not recordable
+  on Linux (weston's headless backend has no input devices): its
+  expected.txt is written from the protocol's specification and says so,
+  and lx-expect builds it and does not run it (`INPUT_TESTS`). Scenarios
+  `lx_wl_input` and `lx_wl_input_pie` (`wayland=trace`) run it on a
+  headless desktop (`presenter=test`) with a screen check
+  (`WL_INPUT_SCREEN`) that sends the input step by step, each after the
+  line the program prints for the step before, and checks the pixels:
+  the first window's buffer inside shasha's frame (the active caption
+  above it), the second's where a frame would be.
 - The wire format: host tests in `wl_abi`. The protocol state: host
   tests in `kernel/src/wayland/tests.rs` (wl_test's flow against a fake
   desktop, the pixels and damaged rows copied, unmapping, versions,
   every protocol error above, ids, descriptor and output limits, the
-  trace's format).
+  trace's format; the seat, the keymap's descriptor and when it is
+  written, every kind of input with its serial-free events, foci after
+  unmapping and destroying, decoration modes and their errors, the
+  window messages' translation, every key the scan codes give being in
+  the keymap). The notices for served owners: `winstate/tests.rs`.
 - Then a real client: `weston-simple-shm` from weston's demos; then
   GTK (LD step 3).
 

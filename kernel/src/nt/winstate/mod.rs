@@ -55,6 +55,15 @@ pub const GALA_WM_PLACE: u32 = 0x0001_0001;
 /// gala's notice to a window's program that the desktop minimized
 /// (wParam 1) or restored (0) its window itself (user32 keeps IsIconic).
 pub const GALA_WM_MINIMIZED: u32 = 0x0001_0002;
+/// gala's notice to a window's server (a kernel thread serving the
+/// owner's windows, `Listener::Server`: the Wayland server) that the
+/// window became the active one (wParam 1) or no longer is (0). Only
+/// served owners get it: user32 follows activation itself.
+pub const GALA_WM_ACTIVE: u32 = 0x0001_0010;
+/// gala's notice to a window's server that the pointer is no longer over
+/// its client area (it moved onto a frame, another window, the desktop).
+/// Only served owners get it (user32 has TrackMouseEvent).
+pub const GALA_WM_POINTER_LEFT: u32 = 0x0001_0011;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_MOUSEWHEEL: u32 = 0x020a;
 /// One wheel notch (WHEEL_DELTA).
@@ -96,6 +105,18 @@ pub struct InputEvent {
     pub message: u32,
     pub wparam: u64,
     pub lparam: u64,
+}
+
+/// Who is told that input waits for a process's windows.
+#[derive(Clone)]
+pub enum Listener {
+    /// A program's event, signalled (GalaWindowListen: user32's queue
+    /// event).
+    Event(ObjectRef),
+    /// A kernel thread serving the process's windows (the Wayland server
+    /// for a Linux client), woken. Its owner also gets GALA_WM_ACTIVE and
+    /// GALA_WM_POINTER_LEFT.
+    Server(crate::nt::platform::ThreadId),
 }
 
 /// Messages `recent_input` notes: mouse buttons and keys.
@@ -377,8 +398,11 @@ pub struct State<X> {
     pub input: Vec<InputEvent>,
     /// Each process's event to signal when input arrives for it
     /// (GalaWindowListen), and the processes with new input.
-    listeners: Vec<(u64, ObjectRef)>,
+    listeners: Vec<(u64, Listener)>,
     woken: Vec<u64>,
+    /// The window whose client area the pointer is over (the last to get
+    /// its moves): GALA_WM_POINTER_LEFT when that changes.
+    pub hovered: Option<u32>,
     /// The last mouse buttons and keys delivered (`note_button`,
     /// `key`), newest at `input_at - 1`, each with when its program took
     /// it: the state dump shows them, so input a program did not act on
@@ -424,6 +448,7 @@ impl<X: Default> State<X> {
             input: Vec::new(),
             listeners: Vec::new(),
             woken: Vec::new(),
+            hovered: None,
             recent_input: [InputNote {
                 t: 0,
                 message: 0,
@@ -592,7 +617,7 @@ impl<X: Default> State<X> {
             let popup = self.window(id).is_some_and(|w| w.popup);
             self.raise(id);
             if !popup {
-                self.active = Some(id);
+                self.activate(Some(id));
             }
         }
         if visible && was && was_minimized {
@@ -790,6 +815,9 @@ impl<X: Default> State<X> {
         if self.captured == Some(id) {
             self.captured = None;
         }
+        if self.hovered == Some(id) {
+            self.hovered = None;
+        }
         if self.active == Some(id) {
             self.activate_top();
         }
@@ -862,24 +890,57 @@ impl<X: Default> State<X> {
         }
     }
 
-    /// `owner`'s event to signal when input arrives for it (one per
-    /// process; a new one replaces the old).
-    pub fn listen(&mut self, owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
+    /// Who to tell when input arrives for `owner` (one per process; a new
+    /// one replaces the old).
+    pub fn listen(&mut self, owner: u64, listener: Listener) -> Result<(), NtStatus> {
+        self.listeners.try_reserve(1).map_err(|_| NtStatus::NO_MEMORY)?;
         self.listeners.retain(|(o, _)| *o != owner);
-        self.listeners.try_push((owner, event)).map_err(|_| NtStatus::NO_MEMORY)?;
+        let _ = self.listeners.try_push((owner, listener));
         if self.has_input(owner) && !self.woken.contains(&owner) {
             let _ = self.woken.try_push(owner);
         }
         Ok(())
     }
 
-    /// The events to signal for processes with new input (signalled by the
-    /// caller after letting go of the desktop).
-    pub fn take_wakes(&mut self) -> Vec<ObjectRef> {
+    /// `owner` is no longer served by `thread` (its last Wayland
+    /// connection closed): its listener goes if it is that one.
+    pub fn unlisten_server(&mut self, owner: u64, thread: crate::nt::platform::ThreadId) {
+        self.listeners
+            .retain(|(o, l)| *o != owner || !matches!(l, Listener::Server(t) if *t == thread));
+    }
+
+    /// Whether `owner`'s windows are served by a kernel thread.
+    pub fn served(&self, owner: u64) -> bool {
+        self.listeners.iter().any(|(o, l)| *o == owner && matches!(l, Listener::Server(_)))
+    }
+
+    /// Queues `message` for window `id` if its owner is served (gala's
+    /// notices user32 does not take).
+    fn notify_served(&mut self, id: u32, message: u32, wparam: u64) {
+        if self.window(id).is_some_and(|w| self.served(w.owner)) {
+            self.send(id, message, wparam, 0);
+        }
+    }
+
+    /// The pointer is over window `id`'s client area (None: no client
+    /// area): the window it was over before is told it left, if served.
+    pub fn pointer_over(&mut self, id: Option<u32>) {
+        if self.hovered == id {
+            return;
+        }
+        if let Some(old) = self.hovered {
+            self.notify_served(old, GALA_WM_POINTER_LEFT, 0);
+        }
+        self.hovered = id;
+    }
+
+    /// Who to wake for processes with new input (each told by the caller
+    /// after letting go of the desktop).
+    pub fn take_wakes(&mut self) -> Vec<Listener> {
         let mut out = Vec::new();
         for owner in core::mem::take(&mut self.woken) {
-            if let Some((_, e)) = self.listeners.iter().find(|(o, _)| *o == owner) {
-                let _ = out.try_push(e.clone());
+            if let Some((_, l)) = self.listeners.iter().find(|(o, _)| *o == owner) {
+                let _ = out.try_push(l.clone());
             }
         }
         out
@@ -1149,9 +1210,17 @@ impl<X: Default> State<X> {
         }
     }
 
+    /// The active window becomes `id`: the old and the new one are told
+    /// if served (GALA_WM_ACTIVE), in that order.
     pub fn activate(&mut self, id: Option<u32>) {
         if self.active != id {
-            self.active = id;
+            let old = core::mem::replace(&mut self.active, id);
+            if let Some(old) = old {
+                self.notify_served(old, GALA_WM_ACTIVE, 0);
+            }
+            if let Some(new) = id {
+                self.notify_served(new, GALA_WM_ACTIVE, 1);
+            }
             self.listing_changed = true;
         }
     }

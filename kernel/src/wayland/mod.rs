@@ -34,7 +34,18 @@
 //!   (`nt::desktop::Desktop::present`), owned by the client's process (so
 //!   its end removes them too). The frame is shasha's; a surface smaller
 //!   than a framed window's minimum gets a larger client area (white
-//!   beyond the buffer).
+//!   beyond the buffer). A toplevel whose decoration object asks for
+//!   client-side decorations gets a frameless window (`STYLE_FRAMELESS`).
+//! - **Input**: the server listens for its clients' windows' input as a
+//!   kernel listener (`desktop::listen_server`, by the client's pid): the
+//!   desktop wakes its thread when it queues input for them, which
+//!   includes gala's notices of activation and of the pointer leaving
+//!   (`GALA_WM_ACTIVE`, `GALA_WM_POINTER_LEFT`); each round takes that
+//!   input (`desktop::take_input`), the same window messages user32 reads,
+//!   and the client turns it into wl_pointer, wl_keyboard and
+//!   xdg_toplevel events (`input::translate`, `Client::input`). The
+//!   keymap is one sealed read-only memfd-like file (`keymap`), passed to
+//!   every wl_keyboard as SCM_RIGHTS beside its event's bytes.
 //!
 //! Observability (OBSERVABILITY.md): `events=wayland` writes `wayland
 //! connect`, `wayland disconnect` (with why), `wayland role`, `wayland
@@ -42,25 +53,33 @@
 //! client's pid and object; a protocol error is also a log line; the
 //! ledger counts the requests gala lacks (`wayland request missing`,
 //! detail the opcode, service the interface) and those it accepts without
-//! acting on them (`wayland request ignored`); `wayland=trace` logs every
-//! request and event as `WAYLAND_DEBUG=1` prints them; the state dump
-//! lists every client and its objects (`dump`).
+//! acting on them (`wayland request ignored`) and the window actions
+//! Wayland windows do not follow yet (`wayland window action missing`);
+//! `wayland input` events say where input went (enter, leave, button,
+//! axis, key, focus, unfocus, close; or dropped, for a window the client
+//! does not show); `wayland=trace` logs every request and event as
+//! `WAYLAND_DEBUG=1` prints them and each window message taken from the
+//! desktop (`input:` lines); the state dump lists every client, its
+//! objects and its seat (focus, keys down, modifiers).
 
 pub mod client;
+pub mod input;
 
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::fs::ramfs::{Access, FsError, NodeId, Share};
+use crate::fs::ramfs::{
+    Access, FsError, NodeId, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE, Share,
+};
 use crate::lx::state::{Fd, Object};
-use crate::mm::heap::{KArc, TryVec};
+use crate::mm::heap::{KArc, TryVec, try_box};
 use crate::nt::desktop::{self, Rect};
 use crate::nt::file::with_fs;
 use crate::nt::{ledger, winstate};
 use crate::runtime::{self, ThreadId};
 use crate::sync::IrqMutex;
-use crate::unix::{self, Address, Cred, Kind, Socket};
+use crate::unix::{self, Address, Cred, Kind, Right, Socket};
 use client::{Client, End, Host, Note};
 
 /// The socket's name in the runtime directory.
@@ -81,6 +100,9 @@ struct Connection {
     pid: u64,
     sock: KArc<Socket>,
     client: Client<KArc<Fd>>,
+    /// Descriptors going with the next write (taken from the client's
+    /// events; kept while the socket has no room).
+    rights: Vec<Right>,
 }
 
 struct Server {
@@ -91,6 +113,10 @@ struct Server {
 }
 
 static SERVER: IrqMutex<Option<Server>> = IrqMutex::new(None);
+/// The keymap file every wl_keyboard gets (made at the first one).
+static KEYMAP: IrqMutex<Option<KArc<Fd>>> = IrqMutex::new(None);
+/// How many desktop messages are taken at a time.
+const INPUT_AT_ONCE: usize = 16;
 
 /// The runtime directory of user `uid`: `/run/user/<uid>`.
 fn runtime_dir(uid: u64, out: &mut [u8; 64]) -> usize {
@@ -265,6 +291,10 @@ impl Server {
                 let r = c.sock.readiness();
                 r.readable || r.hangup || (!c.client.output().is_empty() && r.writable)
             })
+            || self.clients.iter().any(|c| {
+                crate::nt::process::by_id(c.pid)
+                    .is_some_and(|p| desktop::has_input(&p.desk.shell, c.pid))
+            })
     }
 
     /// Accepts, then serves each client once. True if a client had more
@@ -287,7 +317,10 @@ impl Server {
                 }
                 Err(why) => {
                     let c = self.clients.swap_remove(i);
-                    c.close(me, why);
+                    // Its process's windows stay served while it has
+                    // another connection.
+                    let last = !self.clients.iter().any(|o| o.pid == c.pid);
+                    c.close(me, why, last);
                 }
             }
         }
@@ -310,12 +343,19 @@ impl Server {
             sock.release();
             return;
         }
+        // Its windows' input wakes this thread (a Linux process has no
+        // other listener).
+        if let Some(p) = crate::nt::process::by_id(pid)
+            && desktop::listen_server(&p.desk.shell, pid, me).is_err()
+        {
+            crate::warn!("wayland: no memory to take pid {pid}'s input; it gets none");
+        }
         crate::events::emit(
             crate::events::Category::Wayland,
             "wayland connect",
             format_args!(r#""pid":{pid},"client":{number}"#),
         );
-        let _ = self.clients.try_push(Connection { number, pid, sock, client });
+        let _ = self.clients.try_push(Connection { number, pid, sock, client, rights: Vec::new() });
     }
 }
 
@@ -395,29 +435,74 @@ impl Connection {
                 break;
             }
         }
-        self.flush();
+        if ended.is_none()
+            && let Err(e) = self.take_input(&mut host)
+        {
+            ended = Some(e);
+        }
+        if let Err(e) = self.flush() {
+            ended = Some(e);
+        }
         match ended {
             Some(why) => Err(why),
             None => Ok(taken >= BUDGET),
         }
     }
 
-    /// Writes what the socket takes of the events waiting.
-    fn flush(&mut self) {
-        let mut none = Vec::new();
-        while !self.client.output().is_empty() {
-            match self.sock.send(self.client.output(), &mut none, None) {
-                Ok(n) if n > 0 => self.client.written(n),
-                _ => break,
+    /// The desktop's input for the client's windows, as events.
+    fn take_input(&mut self, host: &mut KernelHost) -> Result<(), Why> {
+        let Some(process) = crate::nt::process::by_id(self.pid) else { return Ok(()) };
+        let none = winstate::InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 };
+        let mut taken = [none; INPUT_AT_ONCE];
+        loop {
+            let n = desktop::take_input(&process.desk.shell, self.pid, &mut taken);
+            for e in &taken[..n] {
+                if TRACE.load(Ordering::Relaxed) {
+                    crate::info!(
+                        "wayland: pid {} input: window {} message {:#x} wparam {:#x} lparam {:#x}",
+                        self.pid,
+                        e.window,
+                        e.message,
+                        e.wparam,
+                        e.lparam
+                    );
+                }
+                if let Some(i) = input::translate(e.window, e.message, e.wparam, e.lparam) {
+                    self.client.input(host, i).map_err(Why::from)?;
+                }
+            }
+            if n < taken.len() {
+                return Ok(());
             }
         }
     }
 
+    /// Writes what the socket takes of the events waiting, each event's
+    /// descriptors with the write that holds its first byte (or an
+    /// earlier one).
+    fn flush(&mut self) -> Result<(), Why> {
+        while !self.client.output().is_empty() {
+            let len = self.client.output().len();
+            while let Some(fd) = self.client.take_fd(len) {
+                let right: Right = try_box(fd).map_err(|_| Why::NoMemory)?;
+                self.rights.try_push(right).map_err(|_| Why::NoMemory)?;
+            }
+            match self.sock.send(self.client.output(), &mut self.rights, None) {
+                Ok(n) if n > 0 => self.client.written(n),
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
     /// The connection ends: its windows go, its socket closes (the
     /// client still reads what was written, then the end).
-    fn close(mut self, me: ThreadId, why: Why) {
+    fn close(mut self, me: ThreadId, why: Why, last: bool) {
         let mut host = self.host();
         self.client.end(&mut host);
+        if last && let Some(p) = crate::nt::process::by_id(self.pid) {
+            desktop::unlisten_server(&p.desk.shell, self.pid, me);
+        }
         self.sock.waiters.remove(me);
         self.sock.release();
         crate::events::emit(
@@ -480,9 +565,13 @@ fn utf16(text: &[u8], out: &mut [u16; 256]) -> usize {
     n
 }
 
-/// A framed window's outer size for a `width` x `height` client area
-/// (at least what a framed window needs, at most what the desktop takes).
-fn outer(width: u32, height: u32) -> (u32, u32) {
+/// A window's outer size for a `width` x `height` client area: framed
+/// (`decorated`), at least what a framed window needs; frameless, the
+/// surface's size; at most what the desktop takes.
+fn outer(width: u32, height: u32, decorated: bool) -> (u32, u32) {
+    if !decorated {
+        return (width.clamp(1, winstate::MAX_SIDE), height.clamp(1, winstate::MAX_SIDE));
+    }
     let (b, top) = (winstate::BORDER, winstate::BORDER + winstate::CAPTION);
     let min_w = 2 * b + 2 * winstate::CAPTION_BUTTON as u32 + 40;
     let w = (width + 2 * b).clamp(min_w, winstate::MAX_SIDE);
@@ -517,23 +606,42 @@ impl Host for KernelHost {
         (runtime::monotonic_ns() / 1_000_000) as u32
     }
 
-    fn window_create(&mut self, title: &[u8], width: u32, height: u32) -> Option<u32> {
+    fn keymap(&mut self) -> Option<(KArc<Fd>, u32)> {
+        let mut made = KEYMAP.lock();
+        if made.is_none() {
+            *made = make_keymap();
+            if made.is_none() {
+                crate::warn!("wayland: no memory for the keymap file");
+            }
+        }
+        let fd = made.as_ref()?.clone();
+        Some((fd, input::KEYMAP.len() as u32 + 1))
+    }
+
+    fn window_create(
+        &mut self,
+        title: &[u8],
+        width: u32,
+        height: u32,
+        decorated: bool,
+    ) -> Option<u32> {
         let mut text = [0u16; 256];
         let n = utf16(title, &mut text);
-        let (w, h) = outer(width, height);
+        let (w, h) = outer(width, height, decorated);
+        let style = if decorated { 0 } else { winstate::STYLE_FRAMELESS };
         // Cascaded from the top left, as programs' default places are.
         let step = PLACED.fetch_add(1, Ordering::Relaxed) % 8;
         let (x, y) = (64 + 32 * step as i32, 48 + 32 * step as i32);
         let owner = self.pid;
         self.desktop(|d| {
-            let id = d.create(owner, x, y, w, h, &text[..n], 0)?;
+            let id = d.create(owner, x, y, w, h, &text[..n], style)?;
             let shown = d.show(id, owner, true)?;
             Ok((id, Some(shown)))
         })
     }
 
-    fn window_resize(&mut self, id: u32, width: u32, height: u32) {
-        let (w, h) = outer(width, height);
+    fn window_resize(&mut self, id: u32, width: u32, height: u32, decorated: bool) {
+        let (w, h) = outer(width, height, decorated);
         let owner = self.pid;
         self.desktop(|d| {
             let (x, y, _, _) =
@@ -620,6 +728,28 @@ impl Host for KernelHost {
             Note::Ignored { interface, request } => {
                 ledger::record(interface, "wayland request ignored", opcode_of(interface, request))
             }
+            Note::Input { what, surface, window, code, state } => emit(
+                Category::Wayland,
+                "wayland input",
+                format_args!(
+                    r#""pid":{pid},"client":{client},"what":"{what}","surface":{surface},"window":{window},"code":{code},"state":{state}"#
+                ),
+            ),
+            Note::InputDropped { window } => emit(
+                Category::Wayland,
+                "wayland input",
+                format_args!(
+                    r#""pid":{pid},"client":{client},"what":"dropped","surface":0,"window":{window},"code":0,"state":0"#
+                ),
+            ),
+            Note::Unhandled { what, window } => {
+                if self.tracing() {
+                    crate::info!(
+                        "wayland: pid {pid}: window {window}'s {what} is not followed yet"
+                    );
+                }
+                ledger::record(what, "wayland window action missing", u64::from(window))
+            }
         }
     }
 
@@ -630,6 +760,34 @@ impl Host for KernelHost {
     fn trace(&mut self, line: fmt::Arguments<'_>) {
         crate::info!("wayland: pid {} {}", self.pid, line);
     }
+}
+
+/// The keymap file: an anonymous file of the shared file system (as a
+/// memfd is) holding `input::KEYMAP` and its NUL, sealed against any
+/// change, opened for reading only. Every keyboard of every client shares
+/// this description: none can write it, and a client maps it privately.
+fn make_keymap() -> Option<KArc<Fd>> {
+    let text = input::KEYMAP.as_bytes();
+    let now = crate::nt::platform::system_time();
+    let mut name = [0u16; 32];
+    let len = wide("gala-keymap", &mut name);
+    let (rw, share) = (crate::lx::file::READ_WRITE, crate::lx::file::SHARE_ALL);
+    let node = with_fs(|fs| {
+        let node = fs.create_anonymous(&name[..len], 0o444, Some(0), rw, share, now).ok()?;
+        let written = fs.write(node, 0, text, now).is_ok()
+            && fs.write(node, text.len() as u64, &[0], now).is_ok()
+            && fs.add_seals(node, SEAL_SHRINK | SEAL_GROW | SEAL_WRITE | SEAL_SEAL).is_ok();
+        if !written {
+            fs.close(node, rw, share);
+            return None;
+        }
+        Some(node)
+    })?;
+    // From here on dropping the description closes (and frees) the file.
+    let mut open = crate::lx::file::OpenFile::read_write(node);
+    open.writable = false;
+    let open = KArc::try_new(open).ok()?;
+    KArc::try_new(Fd::new(Object::File(open), false)).ok()
 }
 
 /// A request's opcode (the ledger's detail).
