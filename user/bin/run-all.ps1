@@ -6,8 +6,8 @@ Runs gala-os's test programs on Windows and writes a report for
 .DESCRIPTION
 Runs every *.exe next to this script (PowerShell 5 or later, no admin
 rights needed, except for schannel_test, which is skipped without them),
-captures each program's output and exit status, and writes
-them as JSON in the schema of `cargo xtask report` (see
+captures each program's output, exit status and how long it took, and
+writes them as JSON in the schema of `cargo xtask report` (see
 xtask/src/report.rs). Programs report through their exit status: 0, the
 number of the failing check, or an NTSTATUS if they crash.
 
@@ -140,17 +140,27 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
         Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
     }
     if ($null -eq $process) { continue }
+    # How long the program took, as `ms` in the report. On Windows this is
+    # the program itself; under gala a program is a whole machine boot, so
+    # the two are not a ratio (xtask's own summary separates firmware,
+    # bootloader and kernel). It is here to find what is slow or hanging,
+    # and as the baseline for how long the work itself takes.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     $stdout = $process.StandardOutput.ReadToEndAsync()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $sw.Stop()
         $process.Kill()
         $process.WaitForExit()
         Stop-Descendants $process.Id $runStart
         $results += [ordered]@{
-            program = $name; exit = $null; line = ""; skipped = "timed out after $TimeoutSeconds s"
+            program = $name; exit = $null; line = ""
+            ms = [int]$sw.Elapsed.TotalMilliseconds
+            skipped = "timed out after $TimeoutSeconds s"
         }
         Write-Host ("{0,-18} timed out" -f $name)
         continue
     }
+    $sw.Stop()
     $process.WaitForExit()
     # ReadToEndAsync ends at EOF, and that needs every handle on the write
     # end of the pipe closed: a program that leaves a child of its own
@@ -173,7 +183,9 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     if ($null -eq $line) { $line = $lines | Select-Object -First 1 }
     if ($null -eq $line) { $line = "" }
     if ($lost) { $line = "(output lost: a child it left running held the pipe open)" }
-    $entry = [ordered]@{ program = $name; exit = $code; line = $line }
+    $entry = [ordered]@{
+        program = $name; exit = $code; line = $line; ms = [int]$sw.Elapsed.TotalMilliseconds
+    }
     # A crash (an NTSTATUS error as the exit code: 0xC0000005 and the like)
     # leaves only its code here; Windows Error Reporting logs where it
     # happened (Application log, event 1000, readable without
@@ -207,7 +219,7 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     if ($name -eq "bench") {
         $text | Set-Content -Path (Join-Path $outDir "bench-windows.txt") -Encoding UTF8
     }
-    Write-Host ("{0,-18} {1:x8}  {2}" -f $name, $code, $line)
+    Write-Host ("{0,-18} {1:x8} {2,7} ms  {3}" -f $name, $code, $entry.ms, $line)
 }
 
 if ($null -ne $schannelNginx) { Stop-Process -Id $schannelNginx.Id -Force -ErrorAction SilentlyContinue }
@@ -264,12 +276,16 @@ $scripts = @(
 foreach ($s in $scripts) {
     $path = Join-Path $here $s.path
     if (-not (Test-Path $path) -or -not (Test-Path (Join-Path $here "busybox.exe"))) { continue }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     $text = & (Join-Path $here "busybox.exe") sh $path @($s.args) 2>&1 | Out-String
     $code = $LASTEXITCODE
+    $sw.Stop()
     $text | Set-Content -Path (Join-Path $outDir "$($s.name)-windows.txt") -Encoding UTF8
     $last = @($text -split "`r?`n" | Where-Object { $_ -ne "" }) | Select-Object -Last 1
-    $results += [ordered]@{ program = $s.name; exit = $code; line = $last }
-    Write-Host ("{0,-18} {1:x8}  {2}" -f $s.name, $code, $last)
+    $results += [ordered]@{
+        program = $s.name; exit = $code; line = $last; ms = [int]$sw.Elapsed.TotalMilliseconds
+    }
+    Write-Host ("{0,-18} {1:x8} {2,7} ms  {3}" -f $s.name, $code, [int]$sw.Elapsed.TotalMilliseconds, $last)
 }
 
 $os = Get-CimInstance Win32_OperatingSystem
