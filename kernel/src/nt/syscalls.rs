@@ -897,7 +897,7 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
         // session's would interleave with the log); `conpty=trace` logs it.
         let pseudo = call.process.console.as_ref().is_some_and(|s| s.pseudo);
         if !pseudo {
-            console::write_bytes(&chunk[..n]);
+            console::write_bytes(call.process.id, &chunk[..n]);
         }
         // A console window's session sees it too.
         if let Some(session) = &call.process.console

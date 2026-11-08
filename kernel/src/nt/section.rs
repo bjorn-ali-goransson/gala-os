@@ -37,14 +37,26 @@ pub struct Section {
     file: Option<FileMapping>,
 }
 
-/// A mapped file: the open file object (keeping the file alive) and its
-/// node, whose pages (`ramfs::RamFs::page_address`) are the section's.
+/// A mapped file: the open file (keeping the file alive) and its node,
+/// whose pages (`ramfs::RamFs::page_address`) are the section's.
 struct FileMapping {
-    _object: ObjectRef,
+    holder: FileHolder,
     node: crate::fs::ramfs::NodeId,
     /// The section's protection lets views write the file (PAGE_READWRITE,
     /// PAGE_EXECUTE_READWRITE; copy-on-write views get private pages).
     writable: bool,
+}
+
+/// What keeps a mapped file open for as long as its section lives: an NT
+/// file object, or a Linux open file description (`lx::mm`'s file
+/// mappings: a mapping keeps its file, as mmap(2) says, after the fd is
+/// closed and the name unlinked).
+enum FileHolder {
+    Object(ObjectRef),
+    Linux(
+        #[expect(dead_code, reason = "held for its drop: the file stays open while mapped")]
+        KArc<crate::lx::file::OpenFile>,
+    ),
 }
 
 /// SEC_FILE: reported for sections backed by a file.
@@ -467,8 +479,50 @@ impl Section {
             pages: IrqMutex::new(Vec::new()),
             image: None,
             file_name: super::file::nt_path(node).ok(),
-            file: Some(FileMapping { _object: object, node, writable }),
+            file: Some(FileMapping { holder: FileHolder::Object(object), node, writable }),
         })
+    }
+
+    /// A section for a Linux file mapping (`lx::mm`): the first `size`
+    /// bytes of the file open as `file` (node `node`, at least that
+    /// large). A `shared` one (MAP_SHARED) shows the file's pages to
+    /// every view and, if the file is open for writing (`writable`),
+    /// writes through to them; a private one (MAP_PRIVATE,
+    /// PAGE_EXECUTE_WRITECOPY) gives a view a copy of each page it
+    /// writes.
+    pub fn new_linux_file(
+        file: KArc<crate::lx::file::OpenFile>,
+        node: crate::fs::ramfs::NodeId,
+        size: u64,
+        shared: bool,
+        writable: bool,
+    ) -> Result<Self, NtStatus> {
+        let (protect, writes) = match (shared, writable) {
+            (true, true) => (vad::PAGE_EXECUTE_READWRITE, true),
+            (true, false) => (vad::PAGE_EXECUTE_READ, false),
+            (false, _) => (vad::PAGE_EXECUTE_WRITECOPY, false),
+        };
+        let shared = writes;
+        super::file::with_fs(|fs| fs.map(node, size, shared)).map_err(super::file::fs_status)?;
+        Ok(Section {
+            size,
+            protect,
+            attributes: SEC_COMMIT | SEC_FILE,
+            pages: IrqMutex::new(Vec::new()),
+            image: None,
+            file_name: super::file::nt_path(node).ok(),
+            file: Some(FileMapping { holder: FileHolder::Linux(file), node, writable: shared }),
+        })
+    }
+
+    /// Whether views write through to its pages (a pagefile-backed
+    /// section, a file mapped writable); else a write makes a private
+    /// copy (an image, a file mapped copy-on-write).
+    pub fn writes_through(&self) -> bool {
+        match &self.file {
+            Some(f) => f.writable,
+            None => self.image.is_none(),
+        }
     }
 
     /// A SEC_IMAGE section for the PE file contents `data`.
@@ -513,7 +567,10 @@ impl Section {
     /// For a data section on a file: the file object it was made from and
     /// the file's node.
     pub fn mapped_file(&self) -> Option<(&ObjectRef, crate::fs::ramfs::NodeId)> {
-        self.file.as_ref().map(|f| (&f._object, f.node))
+        match self.file.as_ref()? {
+            FileMapping { holder: FileHolder::Object(o), node, .. } => Some((o, *node)),
+            FileMapping { holder: FileHolder::Linux(_), .. } => None,
+        }
     }
 
     /// Whether it is pagefile-backed (neither an image nor a file's data).
@@ -591,6 +648,13 @@ pub struct View {
     /// Byte offset of the view in the section.
     pub offset: u64,
     pub section: ObjectRef,
+}
+
+impl View {
+    /// The section it maps.
+    pub fn section(&self) -> &Section {
+        section_of(&self.section)
+    }
 }
 
 fn section_of(object: &ObjectRef) -> &Section {
@@ -863,6 +927,24 @@ pub fn frame_for(process: &Process, addr: u64) -> Option<(ObjectRef, Frame)> {
         None => section_of(&section).frame(index)?,
     };
     Some((section, frame))
+}
+
+/// The frame behind `addr` if it is in a view whose pages every process
+/// mapping the section shares (a pagefile-backed section, a file mapped
+/// writable through), made now if it was not yet: the identity of the
+/// memory there across processes (a Linux shared futex's key).
+pub fn shared_frame_at(process: &Process, addr: u64) -> Option<Frame> {
+    let (section, frame) = frame_for(process, addr)?;
+    section_of(&section).writes_through().then_some(frame)
+}
+
+/// For `addr` in one of `views` (the process's, locked by the caller):
+/// whether its page is past the end of the view's section (no page
+/// there to map); None if it is in no view.
+pub fn beyond_end(views: &[View], addr: u64) -> Option<bool> {
+    let v = views.iter().find(|v| (v.base..v.base + v.size).contains(&addr))?;
+    let offset = addr - v.base + v.offset;
+    Some(offset / PAGE_SIZE >= v.section().size.div_ceil(PAGE_SIZE))
 }
 
 /// Whether `addr` is in one of `views` (the process's, locked by the

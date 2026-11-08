@@ -7,13 +7,24 @@
 //! absent export would; it starts working when the target gains the
 //! function. Those of the architecture built.
 
-/// What src/lib.rs defines (and gala_stubs' VirtualAlloc2).
+/// What src/ defines (and gala_stubs' stubs): kernelbase's alone, which
+/// Windows' kernel32 does not export (measured on 25H2), and VirtualAlloc2.
 const OWN: &[&str] = &[
     "CompareObjectHandles",
+    "PathCchAppend",
+    "PathCchCombine",
+    "PathCchCombineEx",
+    "PathCchRemoveBackslash",
+    "PathCchRemoveExtension",
+    "PathCchRemoveFileSpec",
+    "PathCchSkipRoot",
     "QueryInterruptTime",
     "QueryInterruptTimePrecise",
     "QueryUnbiasedInterruptTimePrecise",
     "VirtualAlloc2",
+    "WaitOnAddress",
+    "WakeByAddressAll",
+    "WakeByAddressSingle",
 ];
 
 fn main() {

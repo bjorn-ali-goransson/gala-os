@@ -709,24 +709,6 @@ pub extern "system" fn FindFirstFileExA(
     find
 }
 
-/// QueryInterruptTime(Precise) and QueryUnbiasedInterruptTimePrecise
-/// (API set api-ms-win-core-realtime, whose host kernelbase has its own):
-/// KUSER_SHARED_DATA's InterruptTime, 100 ns since boot.
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryInterruptTimePrecise(out: *mut u64) {
-    let _ = super::mapping::QueryUnbiasedInterruptTime(out);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryUnbiasedInterruptTimePrecise(out: *mut u64) {
-    let _ = super::mapping::QueryUnbiasedInterruptTime(out);
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn QueryInterruptTime(out: *mut u64) {
-    let _ = super::mapping::QueryUnbiasedInterruptTime(out);
-}
-
 // ---- Power status, prefetch, mapped file names ---------------------------
 
 /// GetSystemPowerStatus(lpSystemPowerStatus): on AC power with no system

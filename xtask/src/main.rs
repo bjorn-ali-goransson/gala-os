@@ -243,16 +243,17 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["bin", "cmd", "etc", "usr/bin", "mingw64/bin", "mingw64/libexec/git-core"],
         excludes: &[],
     },
-    // FileZilla Client 3.69.3 for 64-bit Windows: the official build, from
-    // the project's SourceForge files (its own site serves downloads only
-    // through JavaScript). An NSIS installer: 7-Zip reads it without running
-    // it. SHA-256 measured (SourceForge publishes the MD5
-    // e334f2446615c7ee295c27039d372165, which matches). The programs, their
-    // DLLs and resources; not the NSIS plugins, translations or docs.
+    // FileZilla Client 3.71.0 for 64-bit Windows: the official installer,
+    // as Chocolatey's package carries it (the project's site hands out
+    // download links only to browsers, and SourceForge drops old releases).
+    // The package's SHA-256 is measured; it carries the 32-bit and the
+    // 64-bit installer, and the unpack takes the 64-bit one. An NSIS
+    // installer, read by 7-Zip: the program, its DLLs and resources; not
+    // the NSIS plugins, translations or docs.
     Prebuilt {
         name: "filezilla",
-        url: "https://downloads.sourceforge.net/project/filezilla/FileZilla_3.69.3_win64-setup.exe",
-        checksum: "e87b878746e62c7d16ff04723199ec0ecbbea6680a814c4508b18b8b41ddcdad",
+        url: "https://packages.chocolatey.org/filezilla.3.71.0.nupkg",
+        checksum: "fa234cea2f88d73062de1b5b0cac509a295ea63ee13f5a8618839a5552a51780",
         members: &["*.exe", "*.dll", "resources"],
         excludes: &["$PLUGINSDIR", "uninstall.exe"],
     },
@@ -401,6 +402,25 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["busybox"],
         excludes: &[],
     },
+    // glibc 2.39 as Ubuntu 24.04 (noble) ships it: the libc6 package of
+    // the release pocket (2.39-0ubuntu8, never changed once released;
+    // the SHA-256 is the one we measured, Ubuntu signs the archive's
+    // index, not the .deb: THIRD_PARTY.md). A Debian package (an ar
+    // archive) unpacked with dpkg-deb; its members moved here by their
+    // file names. The program interpreter, libc and libm that dynamically
+    // linked Linux programs (user/lx's GLIBC_TESTS) load (ROADMAP LD);
+    // they run only inside gala.
+    Prebuilt {
+        name: "glibc",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.39-0ubuntu8_amd64.deb",
+        checksum: "af36c7ac770770fe3d3c10e85d6bc538e76e57570ba7db7d397fb9f654783ef3",
+        members: &[
+            "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "usr/lib/x86_64-linux-gnu/libc.so.6",
+            "usr/lib/x86_64-linux-gnu/libm.so.6",
+        ],
+        excludes: &[],
+    },
     // Inno Setup 7.1.1's own installer, x64 edition (jrsoftware.org's
     // GitHub release; the SHA-256 is winget-pkgs' JRSoftware.InnoSetup.7
     // 7.1.1 manifest's): an Inno Setup installer built with
@@ -424,6 +444,44 @@ const PREBUILT: &[Prebuilt] = &[
         url: "https://github.com/jrsoftware/issrc/releases/download/is-6_5_4/innosetup-6.5.4.exe",
         checksum: "fa73bf47a4da250d185d07561c2bfda387e5e20db77e4570004cf6a133cc10b1",
         members: &["innosetup-6.5.4.exe"],
+        excludes: &[],
+    },
+    // Mesa 26.2.5 for 64-bit Windows (MIT), pal1000/mesa-dist-win's MSVC
+    // release package (the build Mesa's own documentation points Windows
+    // users to; static C runtime). No checksum is published with the
+    // release: the SHA-256 is the one we measured (THIRD_PARTY.md). GPU G2's
+    // software 3D: llvmpipe's OpenGL (`opengl32.dll`, the WGL runtime, and
+    // `libgallium_wgl.dll`, the gallium megadriver it loads) and lavapipe's
+    // Vulkan ICD (`vulkan_lvp.dll` and its manifest). 26.2.6's MSVC package
+    // lacks the OpenGL files, hence 26.2.5.
+    Prebuilt {
+        name: "mesa",
+        url: "https://github.com/pal1000/mesa-dist-win/releases/download/26.2.5/mesa3d-26.2.5-release-msvc.7z",
+        checksum: "997123ef4ce8896204ab912d5b54f19372c487ff9835bcefafa2fca23b8953c2",
+        members: &[
+            "x64/opengl32.dll",
+            "x64/libgallium_wgl.dll",
+            "x64/vulkan_lvp.dll",
+            "x64/lvp_icd.x86_64.json",
+        ],
+        excludes: &[],
+    },
+    // The Vulkan Runtime 1.4.341.0 for x64 (LunarG's components zip of
+    // the Khronos loader, Apache-2.0 and MIT; the SHA-256 is the one we
+    // measured: LunarG publishes none for it): `vulkan-1.dll`, which
+    // Windows' GPU drivers install in System32, its PDB (not shipped:
+    // `llvm-symbolizer --obj=<dll> <address>` names the loader's source
+    // line in a crash report), and `vulkaninfo.exe`.
+    Prebuilt {
+        name: "vulkan-runtime",
+        url: "https://sdk.lunarg.com/sdk/download/1.4.341.0/windows/VulkanRT-X64-1.4.341.0-Components.zip",
+        checksum: "20571dcc8292b80a47d68bbbfa4094d87044041f50f4e2e1f326a01e3732b226",
+        members: &[
+            "VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+            "VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.pdb",
+            "VulkanRT-X64-1.4.341.0-Components/x64/vulkaninfo.exe",
+            "VulkanRT-X64-1.4.341.0-Components/VulkanRT-License.txt",
+        ],
         excludes: &[],
     },
 ];
@@ -516,6 +574,9 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "shcore", file: "shcore.dll", exported_as: "testshcore.dll" },
     // dwmapi, wtsapi32, imm32: what chrome.dll asks of them (BR).
     Dll { package: "dwmapi", file: "dwmapi.dll", exported_as: "testdwmapi.dll" },
+    // cfgmgr32: the device-tree queries of the Khronos Vulkan loader (GPU
+    // G2).
+    Dll { package: "cfgmgr32", file: "cfgmgr32.dll", exported_as: "testcfgmgr32.dll" },
     Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
     Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
     // msctf.dll: the input scope functions (Delphi's VCL; Inno Setup).
@@ -981,6 +1042,56 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("gpu_stub_test", "d3d11.dll", "Windows/System32"),
     ("gpu_stub_test", "d3d12.dll", "Windows/System32"),
     ("gpu_stub_test", "dcomp.dll", "Windows/System32"),
+    // gl_test (GPU G2): OpenGL through Mesa's llvmpipe (PREBUILT mesa),
+    // its opengl32.dll and the gallium megadriver it loads in System32 as
+    // the system's OpenGL (ARCHITECTURE "Plan: graphics and GPU"), with
+    // what libgallium_wgl.dll imports.
+    ("gl_test", "ntdll.dll", "Windows/System32"),
+    ("gl_test", "kernel32.dll", "Windows/System32"),
+    ("gl_test", "msvcrt.dll", "Windows/System32"),
+    ("gl_test", "user32.dll", "Windows/System32"),
+    ("gl_test", "gdi32.dll", "Windows/System32"),
+    ("gl_test", "advapi32.dll", "Windows/System32"),
+    ("gl_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("gl_test", "shell32.dll", "Windows/System32"),
+    ("gl_test", "shlwapi.dll", "Windows/System32"),
+    ("gl_test", "ole32.dll", "Windows/System32"),
+    ("gl_test", "version.dll", "Windows/System32"),
+    ("gl_test", "target/prebuilt/mesa/x64/opengl32.dll", "Windows/System32"),
+    ("gl_test", "target/prebuilt/mesa/x64/libgallium_wgl.dll", "Windows/System32"),
+    ("gl_test", "user/bin/gl_test.exe", "gala"),
+    // cfgmgr32_test: the device-tree queries the Vulkan loader makes.
+    ("cfgmgr32_test", "ntdll.dll", "Windows/System32"),
+    ("cfgmgr32_test", "kernel32.dll", "Windows/System32"),
+    ("cfgmgr32_test", "msvcrt.dll", "Windows/System32"),
+    ("cfgmgr32_test", "cfgmgr32.dll", "Windows/System32"),
+    ("cfgmgr32_test", "user/bin/cfgmgr32_test.exe", "gala"),
+    // vk_test (GPU G2): Vulkan through the Khronos loader (PREBUILT
+    // vulkan-runtime) and Mesa's lavapipe (PREBUILT mesa), registered
+    // under HKLM\SOFTWARE\Khronos\Vulkan\Drivers (user/mesa), all in
+    // System32 as a driver installs them.
+    ("vk_test", "ntdll.dll", "Windows/System32"),
+    ("vk_test", "kernel32.dll", "Windows/System32"),
+    ("vk_test", "msvcrt.dll", "Windows/System32"),
+    ("vk_test", "user32.dll", "Windows/System32"),
+    ("vk_test", "gdi32.dll", "Windows/System32"),
+    ("vk_test", "advapi32.dll", "Windows/System32"),
+    ("vk_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("vk_test", "cfgmgr32.dll", "Windows/System32"),
+    // The loader verifies registered drivers through a DXGI factory.
+    ("vk_test", "dxgi.dll", "Windows/System32"),
+    ("vk_test", "shell32.dll", "Windows/System32"),
+    ("vk_test", "shlwapi.dll", "Windows/System32"),
+    ("vk_test", "ole32.dll", "Windows/System32"),
+    (
+        "vk_test",
+        "target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll",
+        "Windows/System32",
+    ),
+    ("vk_test", "target/prebuilt/mesa/x64/vulkan_lvp.dll", "Windows/System32"),
+    ("vk_test", "target/prebuilt/mesa/x64/lvp_icd.x86_64.json", "Windows/System32"),
+    ("vk_test", "user/mesa/lavapipe.regseed", "registry"),
+    ("vk_test", "user/bin/vk_test.exe", "gala"),
     ("dwrite_test", "ntdll.dll", "Windows/System32"),
     ("dwrite_test", "kernel32.dll", "Windows/System32"),
     ("dwrite_test", "dwrite.dll", "Windows/System32"),
@@ -1082,6 +1193,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_socket", "user/lx/bin/socket_test", "lx"),
     ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
+    ("lx_forkmem", "user/lx/bin/forkmem_test", "lx"),
+    ("lx_forkmem_pie", "user/lx/bin/forkmem_test-pie", "lx"),
     ("lx_thread_pie", "user/lx/bin/thread_test-pie", "lx"),
     ("lx_poll", "user/lx/bin/poll_test", "lx"),
     ("lx_poll_pie", "user/lx/bin/poll_test-pie", "lx"),
@@ -1089,6 +1202,19 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_epoll_pie", "user/lx/bin/epoll_test-pie", "lx"),
     ("lx_fs", "user/lx/bin/fs_test", "lx"),
     ("lx_fs_pie", "user/lx/bin/fs_test-pie", "lx"),
+    // Dynamically linked glibc programs (ROADMAP LD): the program and its
+    // libraries in C:\lx, glibc where Ubuntu's ld.so looks for it (its
+    // system directory, and /lib64 as PT_INTERP names it).
+    ("lx_dyn", "user/lx/bin/dyn_test", "lx"),
+    ("lx_dyn", "user/lx/bin/libdyn.so", "lx"),
+    ("lx_dyn", "user/lx/bin/libdyn2.so", "lx"),
+    ("lx_dyn_pie", "user/lx/bin/dyn_test-pie", "lx"),
+    ("lx_dyn_pie", "user/lx/bin/libdyn.so", "lx"),
+    ("lx_dyn_pie", "user/lx/bin/libdyn2.so", "lx"),
+    ("glibc", "target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib64"),
+    ("glibc", "target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib/x86_64-linux-gnu"),
+    ("glibc", "target/prebuilt/glibc/libc.so.6", "lib/x86_64-linux-gnu"),
+    ("glibc", "target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -2541,6 +2667,7 @@ const SLOW_SCENARIOS: &[&str] = &[
     "dotnet_hello",
     "flaui_test",
     "filezilla_flaui",
+    "filezilla_sftp",
     "pwsh_hello",
     "postgres",
     "filezilla",
@@ -2606,8 +2733,9 @@ commands:
   build        build the kernel and a bootable UEFI ISO (target/<profile>/gala-os.iso)
   run          build, then boot in QEMU with serial on stdio [--headless]
   test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
-               boot tests
+               boot tests [--no-boot: all but the boot tests]
   boot-test    only the QEMU boot tests [scenario name filter, or exact names a,b,c]
+               (XTASK_SHARD=i/n: the i-th of n shares of the VMs)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -2643,7 +2771,12 @@ commands:
   feed         the update feed (TUF metadata over content-addressed files; R8):
                feed publish <files dir> <feed dir> [--release N] [--floor F] |
                feed refresh <feed dir> (re-sign snapshot and timestamp) |
-               feed check <feed dir> [--root <trusted root.json>]
+               feed renew-root <feed dir> (root N+1, same keys, fresh expiry) |
+               feed check <feed> [--over <source>] [--root <trusted root.json>] |
+               feed pull <source> <empty dir> | feed push <feed dir> <s3://bucket | dir> |
+               feed keygen (a new GALA_FEED_KEYS value on stdout; keys from it when set)
+  release-tree the files of a release, as the feed publishes them (kernel, system DLLs,
+               Limine, sealed config, manifest; no test programs): release-tree <dir>
   symbolize    resolve the kernel backtraces in a serial log to functions
                and source lines: symbolize <log> [--release]
   triage       what a (failed) boot's log says, in one block: verdict, guest CPUs and
@@ -2697,7 +2830,15 @@ fn main() -> ExitCode {
                 .and_then(|()| alloc_audit(release, None, false))
                 .and_then(|()| um_test(release))
                 .and_then(|()| replay_test(release))
-                .and_then(|()| boot_tests(release, None)),
+                // `--no-boot`: everything but the boot scenarios (CI boots
+                // them in parallel jobs with XTASK_SHARD).
+                .and_then(|()| {
+                    if args.iter().any(|a| a == "--no-boot") {
+                        Ok(())
+                    } else {
+                        boot_tests(release, None)
+                    }
+                }),
             Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
             Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
             Some("report") => gala_report(release),
@@ -2767,6 +2908,10 @@ fn main() -> ExitCode {
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
             Some("feed") => feed::cli(&args[1..]),
+            Some("release-tree") => match args.get(1).filter(|a| !a.starts_with("--")) {
+                Some(dir) => release_tree(release, Path::new(dir)),
+                None => Err("usage: cargo xtask release-tree <dir> [--release]".into()),
+            },
             Some("otel") => otel_cli(&args[1..]),
             Some("profile") => profile_cli(&args[1..]),
             Some("perfetto") => perfetto_cli(&args[1..]),
@@ -3049,7 +3194,7 @@ fn make_signed_iso(
     // The disk is shared with other worktrees and fills up: say so plainly
     // instead of a copy or xorriso failing half-way.
     check_disk_space(name, MIN_FREE_MIB)?;
-    make_iso_unchecked(release, name, cmdline, extra, signing).map_err(|e| {
+    make_iso_unchecked(release, name, cmdline, extra, signing, None).map_err(|e| {
         if e.contains("No space left") || e.contains("os error 28") {
             format!("{e}\n{}", disk_hint(name, None))
         } else {
@@ -3096,12 +3241,17 @@ fn tree_size(dir: &Path) -> u64 {
         .sum()
 }
 
+/// Stages the image's tree (kernel, test programs, `extra`, Limine, the
+/// sealed config and manifest) and makes the ISO from it; with `tree`,
+/// stages into that directory without the test programs and stops there
+/// (`release-tree`: what a release publishes).
 fn make_iso_unchecked(
     release: bool,
     name: &str,
     cmdline: &str,
     extra: &[(&str, &str)],
     signing: &trust::Signing,
+    tree: Option<&Path>,
 ) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let mut kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
@@ -3120,7 +3270,7 @@ fn make_iso_unchecked(
     }
     let limine = fetch_limine()?;
     let out = target_dir().join(profile);
-    let iso_root = out.join(format!("{name}-iso-root"));
+    let iso_root = tree.map_or_else(|| out.join(format!("{name}-iso-root")), Path::to_path_buf);
     if iso_root.exists() {
         fs::remove_dir_all(&iso_root).map_err(|e| format!("cleaning {iso_root:?}: {e}"))?;
     }
@@ -3135,7 +3285,10 @@ fn make_iso_unchecked(
         copy_kernel(path, &boot.join(module))?;
         modules += &format!("    module_path: boot():/boot/{module}\n");
     }
-    for program in USER_PROGRAMS.iter().chain(GO_PROGRAMS).chain(USER_PROGRAMS_X86) {
+    let programs = if tree.is_some() { &[][..] } else { USER_PROGRAMS };
+    let others = if tree.is_some() { &[][..] } else { GO_PROGRAMS };
+    let x86 = if tree.is_some() { &[][..] } else { USER_PROGRAMS_X86 };
+    for program in programs.iter().chain(others).chain(x86) {
         copy(&built_program(program), &boot.join(format!("{program}.exe")))?;
         modules += &format!("    module_path: boot():/boot/{program}.exe\n");
     }
@@ -3189,6 +3342,9 @@ fn make_iso_unchecked(
     );
     // R8: the manifest, the config's hashes, the enrolled executables.
     trust::seal(&iso_root, &config, signing)?;
+    if tree.is_some() {
+        return Ok(iso_root);
+    }
 
     let iso = out.join(format!("{name}.iso"));
     // The ISO is as large as its tree.
@@ -3311,6 +3467,13 @@ fn fetch_prebuilt(path: &str) -> Result {
     if full.exists() && done.exists() {
         return Ok(());
     }
+    // Another release (a re-pinned version) or a partial unpack: start
+    // from nothing, or the old release's files stay beside the new ones
+    // (and ship with a directory module).
+    if dir.exists() {
+        eprintln!("xtask: {}: no unpack of the pinned release; clearing {dir:?}", p.name);
+        fs::remove_dir_all(&dir).map_err(|e| format!("clearing {dir:?}: {e}"))?;
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
     let zip = dir.join("download.zip");
     eprintln!("xtask: fetching {} ({})", p.name, p.url);
@@ -3339,12 +3502,26 @@ fn fetch_prebuilt(path: &str) -> Result {
                 .arg(&inner),
         )?;
         let _ = fs::remove_file(&zip);
+        // A package may carry a 32-bit and a 64-bit installer (FileZilla's
+        // does): the 64-bit one, by name, whatever order the directory
+        // lists them in; otherwise the first by name.
         let tools = inner.join("tools");
-        let exe = fs::read_dir(&tools)
+        let mut exes: Vec<PathBuf> = fs::read_dir(&tools)
             .map_err(|e| format!("reading {tools:?}: {e}"))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|p| p.extension().is_some_and(|x| x == "exe"))
-            .ok_or(format!("{}: no installer in tools/", p.url))?;
+            .filter(|p| p.extension().is_some_and(|x| x == "exe"))
+            .collect();
+        let is_64 = |p: &PathBuf| {
+            let n = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            n.contains("win64") || n.contains("x64")
+        };
+        exes.sort_by_key(|p| (!is_64(p), p.clone()));
+        eprintln!(
+            "xtask: {}: installers in tools/: {:?}, using the first",
+            p.name,
+            exes.iter().filter_map(|p| p.file_name()).collect::<Vec<_>>()
+        );
+        let exe = exes.into_iter().next().ok_or(format!("{}: no installer in tools/", p.url))?;
         let moved = dir.join("download.exe");
         fs::rename(&exe, &moved).map_err(|e| format!("moving {exe:?}: {e}"))?;
         let _ = fs::remove_dir_all(&inner);
@@ -3358,10 +3535,17 @@ fn fetch_prebuilt(path: &str) -> Result {
         fs::rename(&zip, &to).map_err(|e| format!("moving {zip:?} to {to:?}: {e}"))?;
     } else if p.url.ends_with(".msi") {
         unpack_msi(p, &zip, &dir)?;
-    } else if p.url.ends_with(".7z.exe") || p.url.ends_with("-setup.exe") || chocolatey {
-        // A 7-Zip self-extracting archive (Git for Windows' PortableGit) or
-        // an NSIS installer (FileZilla): 7-Zip reads it without running it.
-        // Members are directories or wildcards.
+    } else if p.url.ends_with(".deb") {
+        unpack_deb(p, &zip, &dir)?;
+    } else if p.url.ends_with(".7z")
+        || p.url.ends_with(".7z.exe")
+        || p.url.ends_with("-setup.exe")
+        || chocolatey
+    {
+        // A 7-Zip archive (mesa-dist-win's), a 7-Zip self-extracting
+        // archive (Git for Windows' PortableGit) or an NSIS installer
+        // (FileZilla): 7-Zip reads it without running it. Members are
+        // files, directories or wildcards.
         let mut cmd = Command::new("7z");
         cmd.args(["x", "-y", "-bd", "-bso0"]).arg(format!("-o{}", dir.display())).arg(&zip);
         cmd.args(p.members);
@@ -3383,6 +3567,26 @@ fn fetch_prebuilt(path: &str) -> Result {
         return Err(format!("{path} is not in {}", p.url));
     }
     write(&done, p.url)
+}
+
+/// Unpacks the Debian package `deb` (dpkg-deb, its data archive as the
+/// package would install it) and moves `p`'s member files into `dir`
+/// under their file names (`usr/lib/x86_64-linux-gnu/libc.so.6` becomes
+/// `libc.so.6`).
+fn unpack_deb(p: &Prebuilt, deb: &Path, dir: &Path) -> Result {
+    let tree = dir.join("deb");
+    if tree.exists() {
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+    run_quiet(Command::new("dpkg-deb").arg("-x").arg(deb).arg(&tree))
+        .map_err(|e| format!("{e} (dpkg-deb is in dpkg)"))?;
+    for member in p.members {
+        let last = member.rsplit('/').next().unwrap_or(member);
+        fs::rename(tree.join(member), dir.join(last))
+            .map_err(|e| format!("{member} in {}: {e}", p.url))?;
+    }
+    fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
 
 /// Unpacks the MSI `msi` (msitools' msiextract, the files laid out as
@@ -3663,6 +3867,7 @@ const PENDING: &[&str] = &[
     "elasticsearch",
     "filezilla",
     "filezilla_flaui",
+    "filezilla_sftp",
     "gitbash",
     "mingit",
     "sqllocaldb",
@@ -4769,6 +4974,45 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=gpu_stub_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["gpu_stub_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The PnP configuration manager's queries (cfgmgr32): gala has no
+        // device tree, only its root.
+        name: "cfgmgr32_test",
+        cmdline: "qemu_exit run=cfgmgr32_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["cfgmgr32_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // GPU G2: Vulkan on Mesa's lavapipe through the Khronos loader (a
+        // triangle read back, then presented with VK_KHR_win32_surface),
+        // on a headless desktop whose frame the screen check reads.
+        name: "vk_test",
+        cmdline: "qemu_exit presenter=test run=vk_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "vk_test: device llvmpipe",
+            "vk_test: read back 0x336699 0xffcc00",
+            "vk_test: presented",
+            "xtask: screen ok",
+            "vk_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // GPU G2: OpenGL on Mesa's llvmpipe (WGL: a pixel format, a
+        // context, a frame read back and presented), on a headless desktop
+        // (`presenter=test`, BIOS) whose frame the screen check reads.
+        name: "gl_test",
+        cmdline: "qemu_exit presenter=test run=gl_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "gl_test: renderer llvmpipe",
+            "gl_test: presented",
+            "xtask: screen ok",
+            "gl_test: ok",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         // BR stage 1: DirectWrite's system font collection (gala's
@@ -6212,21 +6456,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: net client: ftp ok"],
     },
     Scenario {
-        // W3: FileZilla 3.69.3's SFTP engine (PuTTY's psftp adapted),
-        // unmodified and headless: its version report, as psftp -V prints
-        // it.
-        name: "fzsftp",
-        cmdline: "qemu_exit run=filezilla/fzsftp.exe args=-V",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "fzSftp started, protocol_version=11",
-            "psftp: 3.69.3",
-            "Build platform: 64-bit x86 Windows",
-            "exited with status 0x00000000",
-        ],
-    },
-    Scenario {
-        // W3: FileZilla 3.69.3 itself (wxWidgets 3.2): its main window and
+        // W3: FileZilla 3.71.0 itself (wxWidgets 3.2): its main window and
         // Welcome dialog on the desktop, clicked closed (SCREEN_SCENARIOS).
         name: "filezilla",
         cmdline: "qemu_exit wallpaper=dunes \
@@ -6236,7 +6466,7 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["xtask: screen ok", "exited with status 0x00000000"],
     },
     Scenario {
-        // W3 and UI Automation: FileZilla 3.69.3 driven by FlaUI 5.0.0 on
+        // W3 and UI Automation: FileZilla 3.71.0 driven by FlaUI 5.0.0 on
         // .NET 8 (user/flaui_test/FileZillaFlaUI.cs) through gala's
         // UIAutomationCore, with FileZilla Server started first: the
         // Welcome dialog, Quickconnect, the connection's dialogs, the
@@ -6258,6 +6488,40 @@ const SCENARIOS: &[Scenario] = &[
             "grid=Filename,Filesize,Filetype,Last modified,Permissions,Owner/Group rows=2",
             "row=hello.txt ",
             "events=title opened=Remember passwords?,Unknown certificate",
+            "selected=hello.txt True",
+            "menu=File Exit",
+            "exited=True",
+            "filezilla_flaui: ok",
+            "dotnet.exe finished with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // W3: FileZilla 3.71.0's SFTP engine (its own libfzssh) against
+        // Win32-OpenSSH's sshd: ssh-keygen -A makes the host keys, then
+        // sshd serves as a service (`start_as=system`: SYSTEM, session 0)
+        // while the boot user's FlaUI test (filezilla_flaui.dll `sftp`)
+        // Quickconnects as galatest with its password, accepts the
+        // unknown host key and lists C:\ftp over SFTP (sftp-server.exe as
+        // galatest), then File > Exit.
+        name: "filezilla_sftp",
+        cmdline: "qemu_exit logtee=C:/ProgramData/ssh/logs events=net,logon \
+                  start_as=system start=ssh-keygen.exe,sshd.exe start_args=-A, \
+                  start_wait=ssh-keygen.exe run=dotnet.exe args=C:/gala/filezilla_flaui.dll%20sftp",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "start: ssh-keygen.exe (pid ",
+            ") finished with status 0x00000000",
+            "start: sshd.exe (pid ",
+            "welcome=Welcome to FileZilla OK",
+            "quickconnect=sftp://127.0.0.1/C:/ftp galatest 22",
+            "dialog=Remember passwords? OK",
+            "dialog=Unknown host key OK",
+            "logtee: sshd.log: ",
+            "Accepted password for galatest",
+            "remote=..,hello.txt",
+            "grid=Filename,Filesize,Filetype,Last modified,Permissions,Owner/Group rows=2",
+            "row=hello.txt ",
+            "events=title opened=Remember passwords?,Unknown host key",
             "selected=hello.txt True",
             "menu=File Exit",
             "exited=True",
@@ -7536,6 +7800,32 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/pipe_test", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/forkmem_test (LD step 1): fork's memory, its transcript
+        // real Linux's (`lx_expect::check_boot`); a fork shares its
+        // private pages copy-on-write and copies none (the fork line).
+        name: "lx_forkmem",
+        cmdline: "qemu_exit lxrun=/lx/forkmem_test lxargs=./forkmem_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "pages shared copy-on-write, 0 copied",
+            "run: end /lx/forkmem_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/forkmem_test, static-pie: as `lx_forkmem`.
+        name: "lx_forkmem_pie",
+        cmdline: "qemu_exit lxrun=/lx/forkmem_test-pie lxargs=./forkmem_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "pages shared copy-on-write, 0 copied",
+            "run: end /lx/forkmem_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // user/lx/brk_test, static (ET_EXEC): its transcript must be its
         // expected.txt (real Linux's; `lx_expect::check_boot`).
         name: "lx_brk",
@@ -7590,6 +7880,23 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/auxv_test lxargs=./auxv_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/auxv_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/dyn_test, linked dynamically against glibc (ROADMAP LD):
+        // started through its interpreter, ld.so, which loads libdyn.so
+        // and glibc's libc from the image; its transcript must be its
+        // expected.txt (real Linux's).
+        name: "lx_dyn",
+        cmdline: "qemu_exit lxrun=/lx/dyn_test lxargs=./dyn_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/dyn_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/dyn_test as a PIE with an interpreter.
+        name: "lx_dyn_pie",
+        cmdline: "qemu_exit lxrun=/lx/dyn_test-pie lxargs=./dyn_test%20first%20%27%27%20%27third%20arg%27 lxenv=A=1%20EMPTY=%20%27LONGER_NAME=some%20value%27",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/dyn_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         // user/lx/auxv_test, static-pie (ET_DYN): its transcript must be its
@@ -7850,7 +8157,6 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("failpoint_disk", "persist_test"),
     ("failpoint_disk_delay", "persist_test"),
     ("dotnet_info", "dotnet"),
-    ("fzsftp", "filezilla"),
     ("filezilla_server", "filezilla"),
     ("sshd_server", "sshd_login"),
     ("sshd_server", "sshd_server"),
@@ -7873,6 +8179,11 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("flaui_test", "dotnet"),
     ("filezilla_flaui", "dotnet"),
     ("filezilla_flaui", "filezilla"),
+    ("filezilla_sftp", "dotnet"),
+    ("filezilla_sftp", "filezilla"),
+    ("filezilla_sftp", "sshd_login"),
+    ("filezilla_sftp", "sshd_server"),
+    ("filezilla_sftp", "sshd_sftp"),
     ("pwsh_hello", "pwsh"),
     ("python_pip_https", "python_pip"),
     ("python_numpy", "python_pip"),
@@ -7912,6 +8223,10 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("git_https", "schannel_test"),
     ("sqllocaldb_persist", "sqllocaldb"),
     ("winsta_service", "winsta_test"),
+    ("lx_dyn", "lx_dyn"),
+    ("lx_dyn", "glibc"),
+    ("lx_dyn_pie", "lx_dyn_pie"),
+    ("lx_dyn_pie", "glibc"),
 ];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
@@ -7995,6 +8310,34 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     vms
 }
 
+/// `XTASK_SHARD=i/n` (1-based): only every n-th VM, starting at the i-th,
+/// so n machines boot the whole set between them (CI's boot jobs). The VMs
+/// are dealt out after `plan_vms`, so a batch stays in one shard; the
+/// shard says what it took.
+fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
+    let Ok(spec) = env::var("XTASK_SHARD") else {
+        return Ok(vms);
+    };
+    let parsed = spec
+        .split_once('/')
+        .and_then(|(i, n)| Some((i.parse::<usize>().ok()?, n.parse::<usize>().ok()?)));
+    let Some((i, n)) = parsed.filter(|&(i, n)| i >= 1 && i <= n) else {
+        return Err(format!("XTASK_SHARD={spec:?}: expected i/n with 1 <= i <= n"));
+    };
+    let total = vms.len();
+    let mine: Vec<Vm<'_>> =
+        vms.into_iter().enumerate().filter(|(k, _)| k % n == i - 1).map(|(_, vm)| vm).collect();
+    let scenarios: usize = mine
+        .iter()
+        .map(|vm| match vm {
+            Vm::Single(_) => 1,
+            Vm::Batch(group) => group.len(),
+        })
+        .sum();
+    eprintln!("xtask: shard {i} of {n}: {} of {total} VMs ({scenarios} scenarios)", mine.len());
+    Ok(mine)
+}
+
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     RELEASE.store(release, std::sync::atomic::Ordering::Relaxed);
     let t0 = Instant::now();
@@ -8025,7 +8368,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
-    let vms = plan_vms(&selected);
+    let vms = shard(plan_vms(&selected))?;
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
     let screen = |s: &Scenario| {
@@ -10084,6 +10427,70 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     // guest's memory (`dump_frame`), not a screendump.
     ("gui_test_headless", GUI_TEST_SCREEN),
     (
+        // GPU G2: vk_test's frame (lavapipe), presented through
+        // VK_KHR_win32_surface (Mesa's software swapchain blits it into
+        // the window's DC) into its 400 x 300 window at (100, 100), client
+        // 398 x 266 from (101, 133): the clear colour in the corner, the
+        // triangle's inside; then a click there ends the program.
+        "vk_test",
+        ScreenCheck {
+            marker: "vk_test: presented",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(101 + 4, 133 + 4, 0x336699),
+                        PixelCheck::At(101 + 199, 133 + 173, 0xffcc00),
+                        PixelCheck::At(101 + 30, 133 + 240, 0x336699),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
+    (
+        // GPU G2: gl_test's frame (llvmpipe through Mesa's WGL), presented
+        // by SwapBuffers into its 400 x 300 window at (100, 100), client
+        // 398 x 266 from (101, 133): the clear colour in the client's
+        // corner, the triangle's at (199, 173) of the client; then a click
+        // there ends the program (the pointer starts at (640, 400)).
+        "gl_test",
+        ScreenCheck {
+            marker: "gl_test: presented",
+            steps: &[
+                ScreenStep {
+                    after: "",
+                    input: &[],
+                    pixels: &[
+                        PixelCheck::At(101 + 4, 133 + 4, 0x336699),
+                        PixelCheck::At(101 + 199, 133 + 173, 0xffcc00),
+                        PixelCheck::At(101 + 30, 133 + 240, 0x336699),
+                    ],
+                },
+                ScreenStep {
+                    after: "",
+                    input: &[
+                        "mouse_move -255 -94",
+                        "mouse_move -85 0",
+                        "mouse_button 1",
+                        "mouse_button 0",
+                    ],
+                    pixels: &[],
+                },
+            ],
+        },
+    ),
+    (
         // RS B3a's console switch (user/presenter_test): session 1's
         // yellow window (client from (601, 133)) on the screen, clicked;
         // after `gala attach 2` session 2's (client from (101, 133), blue,
@@ -10383,15 +10790,15 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                     ],
                     // Then, after the TLS handshake, the server's
                     // self-signed certificate: the "Unknown certificate"
-                    // dialog's OK.
-                    pixels: &[PixelCheck::AnyIn(800, 646, 60, 18, 0x005fb8)],
+                    // dialog's OK (y 632-652).
+                    pixels: &[PixelCheck::AnyIn(800, 636, 60, 12, 0x005fb8)],
                 },
                 ScreenStep {
                     after: "",
-                    // OK (833, 655): FileZilla trusts it, logs on and lists
+                    // OK (833, 642): FileZilla trusts it, logs on and lists
                     // the remote directory (C:\ftp): "hello.txt" at the left
                     // of the remote list.
-                    input: &["mouse_move 70 154", "mouse_button 1", "mouse_button 0"],
+                    input: &["mouse_move 70 141", "mouse_button 1", "mouse_button 0"],
                     pixels: &[PixelCheck::AnyIn(650, 405, 150, 40, 0x1b1b1b)],
                 },
                 ScreenStep {
@@ -10416,7 +10823,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
                 },
                 ScreenStep {
                     after: "",
-                    // A click in the console (300, 400) activates it, and
+                    // A click in the console (300, 387) activates it, and
                     // Win+Left snaps it to the left half: the server's log
                     // next to FileZilla.
                     input: &[
@@ -13131,21 +13538,9 @@ fn image_modules(
 ) -> Result<Vec<(&'static str, &'static str)>> {
     let mut modules: Vec<(&str, &str)> = USER_DLLS
         .iter()
-        .map(|d| {
-            (
-                d.file,
-                if d.file.starts_with("testdll") || d.file == "tlsdll.dll" {
-                    "gala"
-                } else {
-                    "Windows/System32"
-                },
-            )
-        })
+        .map(|d| (d.file, if is_test_dll(d.file) { "gala" } else { "Windows/System32" }))
         .collect();
-    // The machine root store's public CAs (THIRD_PARTY.md: Mozilla's, as
-    // curl.se publishes them), which Schannel and crypt32's ROOT store
-    // read: a full image trusts the public web, as Windows does.
-    modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules.extend(system_modules().into_iter().filter(|(file, _)| file.contains('/')));
     if cmdline.iter().any(|w| w.contains("nginx.exe")) {
         let nginx = if cmdline.iter().any(|w| w.contains("nginx-master")) {
             "nginx_master"
@@ -13164,6 +13559,89 @@ fn image_modules(
         modules.extend(files.into_iter().filter(|(file, _)| file.contains('/')));
     }
     Ok(modules)
+}
+
+/// The test DLLs among USER_DLLS (shipped to C:\gala, not System32).
+fn is_test_dll(file: &str) -> bool {
+    file.starts_with("testdll") || file == "tlsdll.dll"
+}
+
+/// The system a full image ships besides the kernel (`cargo xtask iso`'s,
+/// and a release's: `release-tree`): every DLL of USER_DLLS but the test
+/// DLLs in C:\Windows\System32, and the machine root store's public CAs
+/// (THIRD_PARTY.md: Mozilla's, as curl.se publishes them), which Schannel
+/// and crypt32's ROOT store read: a full image trusts the public web, as
+/// Windows does.
+fn system_modules() -> Vec<(&'static str, &'static str)> {
+    let mut modules: Vec<(&str, &str)> = USER_DLLS
+        .iter()
+        .filter(|d| !is_test_dll(d.file))
+        .map(|d| (d.file, "Windows/System32"))
+        .collect();
+    modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules
+}
+
+/// `cargo xtask release-tree <dir> [--release]`: the files of a release
+/// (what the update feed publishes, ARCHITECTURE "The update feed"): the
+/// image tree `make_iso` stages, with the kernel, system_modules, Limine,
+/// the sealed config and the signed manifest, and no test programs, test
+/// DLLs or scenario modules. The kernel command line is empty, as
+/// `cargo xtask build`'s. `dir` must not exist or be empty.
+fn release_tree(release: bool, dir: &Path) -> Result {
+    if fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some()) {
+        return Err(format!("{}: not empty (release-tree writes a new tree)", dir.display()));
+    }
+    // The kernel and the DLLs; no test programs.
+    let mut cmd = cargo();
+    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET]);
+    trust::kernel_env(&mut cmd)?;
+    if release {
+        cmd.arg("--release");
+    }
+    run_cmd(&mut cmd)?;
+    let mut cmd = user_build();
+    for dll in USER_DLLS {
+        cmd.args(["--package", dll.package]);
+    }
+    run_cmd(&mut cmd)?;
+    let modules = system_modules();
+    make_iso_unchecked(release, "release", "", &modules, &trust::DEFAULT, Some(dir))?;
+    let files = tree_size(dir);
+    let mut count = Vec::new();
+    tree_files(dir, Path::new(""), &mut count)?;
+    let count = count.iter().filter(|p| dir.join(p).is_file()).count();
+    eprintln!(
+        "xtask: release tree {}: {count} files, {files} bytes (kernel, {} system modules, \
+         Limine, limine.conf, gala.manifest)",
+        dir.display(),
+        modules.len()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod release_tree_tests {
+    use super::*;
+
+    /// A release is the system: gala's DLLs in System32 and the root
+    /// store, no test DLL or program.
+    #[test]
+    fn release_modules_are_the_system() {
+        let m = system_modules();
+        for dll in ["ntdll.dll", "kernel32.dll", "kernelbase.dll", "user32.dll", "ws2_32.dll"] {
+            assert!(m.contains(&(dll, "Windows/System32")), "{dll}");
+        }
+        assert!(m.contains(&("user/roots/public-roots.pem", "Windows/System32/gala/roots")));
+        for (file, _) in &m {
+            assert!(!is_test_dll(file) && !file.ends_with(".exe"), "{file}");
+            assert!(!USER_PROGRAMS.iter().any(|p| file.starts_with(p)), "{file}");
+        }
+        // `cargo xtask iso` ships the same system, and the test DLLs apart.
+        let iso = image_modules(&[], None).unwrap();
+        assert!(m.iter().all(|f| iso.contains(f)));
+        assert!(iso.contains(&("testdll.dll", "gala")));
+    }
 }
 
 /// What `cargo xtask iso` runs without a command line: a few programs that

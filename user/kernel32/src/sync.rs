@@ -456,9 +456,10 @@ pub extern "system" fn InitializeCriticalSectionEx(
 //
 // SRW locks, condition variables and InitOnce are one pointer-sized word
 // with no kernel object. A waiter spins briefly, then sleeps on the word
-// with WaitOnAddress (`address_wait`: a keyed event) until it changes;
-// whoever changes it in a way a waiter waits for wakes them
-// (WakeByAddress*, which costs no system call when nobody waits).
+// on its address (`address_wait`, kernel32's own copy of kernelbase's
+// WaitOnAddress: a keyed event) until it changes; whoever changes it in a
+// way a waiter waits for wakes them (a wake costs no system call when
+// nobody waits).
 
 /// Spins a few rounds while the word may change soon.
 const SPINS: u32 = 64;
@@ -473,16 +474,17 @@ fn wait_step(word: *mut usize, seen: usize, spins: &mut u32, ms: u32) -> bool {
         return true;
     }
     let compare = seen;
-    super::address_wait::WaitOnAddress(
+    super::address_wait::wait(
         word.cast_const().cast(),
         (&raw const compare).cast(),
         core::mem::size_of::<usize>(),
         ms,
-    ) != FALSE
+    )
+    .is_ok()
 }
 
 fn wake_all(word: *mut usize) {
-    super::address_wait::WakeByAddressAll(word.cast_const().cast());
+    super::address_wait::wake(word.cast_const().cast(), true);
 }
 
 // --- Slim reader/writer locks --------------------------------------------
@@ -576,7 +578,7 @@ pub extern "system" fn InitializeConditionVariable(cv: *mut usize) {
 #[unsafe(no_mangle)]
 pub extern "system" fn WakeConditionVariable(cv: *mut usize) {
     srw(cv).fetch_add(1, Ordering::AcqRel);
-    super::address_wait::WakeByAddressSingle(cv.cast_const().cast());
+    super::address_wait::wake(cv.cast_const().cast(), false);
 }
 
 #[unsafe(no_mangle)]

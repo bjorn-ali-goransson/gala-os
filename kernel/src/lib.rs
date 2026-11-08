@@ -146,6 +146,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         panic!("scheduler: {e:?}");
     }
     arch::bootphase::mark("sched");
+    // The frames' owner counts (a fork's copy-on-write pages), from the heap.
+    mm::init_sharing();
     info!("sched: boot thread {} running, idle thread started", sched::current());
     arch::smp::init_bsp();
     arch::bootphase::mark("smp_start");
@@ -333,22 +335,17 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     start_record_replay(&info, &cmdline);
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
-    // end with the boot.
+    // end with the boot. `start_as=system`: they run as SYSTEM (services,
+    // in session 0) while the `run=` programs stay the boot user's.
+    // `start_wait=a.exe,...`: those are waited for before the next one
+    // starts (`ssh-keygen -A` making sshd's host keys).
     if let Some(names) = cmdline.value("start") {
-        let mut args = cmdline.value("start_args").unwrap_or("").split(',');
-        for name in names.split(',').filter(|n| !n.is_empty()) {
-            let mut decoded = alloc::vec::Vec::new();
-            if cmdline::percent_decode(args.next().unwrap_or(""), &mut decoded).is_err() {
-                error!("start: out of memory for {name}'s arguments");
-                continue;
-            }
-            if let Some(p) = handover::carry::resumed(name) {
-                info!("start: {name} goes on from the previous kernel (pid {})", p.id);
-                continue;
-            }
-            let console = console_window(&info, name, cmdline.value("console"));
-            start_program(&info, name, core::str::from_utf8(&decoded).unwrap_or(""), console);
+        let start_system = cmdline.value("start_as") == Some("system");
+        if start_system {
+            nt::token::set_boot_system(true);
         }
+        start_programs(&info, &cmdline, names);
+        nt::token::set_boot_system(cmdline.value("as") == Some("system"));
     }
     // `sampleprobe`: before the programs, while nothing waits on this CPU.
     time::sample_probe();
@@ -478,7 +475,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs, {} after a move to another CPU), \
          {} frames leaked by deferred frees, {} freed twice; \
          heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
-         frames free {} of {}; heap peak {} KiB, fewest frames free {}",
+         frames free {} of {}; heap peak {} KiB, fewest frames free {}; \
+         {} frames shared copy-on-write, {} copied at a write",
         arch::smp::moved_flushes(),
         arch::paging::leaked_frames(),
         mm::double_frees(),
@@ -487,7 +485,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         mm::frame_stats().0,
         mm::frame_stats().1,
         heap.peak_in_use / 1024,
-        mm::frame_low_water()
+        mm::frame_low_water(),
+        mm::sharing_stats().0,
+        mm::sharing_stats().1
     );
     // R8 step 6: this release has booted and done its work; the disk's
     // rollback floor goes up to what its manifest says.
@@ -1069,6 +1069,57 @@ impl core::fmt::Write for Cursor<'_> {
     }
 }
 
+/// The `start=` programs (`names`, with `start_args=`), one after another
+/// without waiting for them, except those `start_wait=` names: each of
+/// those ends (its status logged) before the next one starts.
+fn start_programs(info: &BootInfo, cmdline: &Cmdline, names: &str) {
+    let mut args = cmdline.value("start_args").unwrap_or("").split(',');
+    let waited = cmdline.value("start_wait").unwrap_or("");
+    for name in names.split(',').filter(|n| !n.is_empty()) {
+        let mut decoded = alloc::vec::Vec::new();
+        if cmdline::percent_decode(args.next().unwrap_or(""), &mut decoded).is_err() {
+            error!("start: out of memory for {name}'s arguments");
+            continue;
+        }
+        if let Some(p) = handover::carry::resumed(name) {
+            info!("start: {name} goes on from the previous kernel (pid {})", p.id);
+            continue;
+        }
+        let console = console_window(info, name, cmdline.value("console"));
+        let started =
+            start_program(info, name, core::str::from_utf8(&decoded).unwrap_or(""), console);
+        if let Some(process) = started
+            && waited.split(',').any(|w| w.eq_ignore_ascii_case(name))
+        {
+            await_started(&process);
+        }
+    }
+}
+
+/// Waits for the `start_wait=` program `process` to end (logging every
+/// minute it has not) and logs its status.
+fn await_started(process: &mm::heap::KArc<nt::process::Process>) {
+    let object = match nt::object::KObject::new(nt::object::ObjectBody::Process(process.clone())) {
+        Ok(object) => object,
+        Err(_) => {
+            error!("start: out of memory waiting for {}; not waited for", process.name);
+            return;
+        }
+    };
+    let mut objects = alloc::vec::Vec::new();
+    if mm::heap::TryVec::try_push(&mut objects, object).is_err() {
+        error!("start: out of memory waiting for {}; not waited for", process.name);
+        return;
+    }
+    let mut minutes = 0u32;
+    while wait_real_secs_any(&objects, 60).is_none() {
+        minutes += 1;
+        warn!("start: still waiting for {} (pid {}) after {minutes} min", process.name, process.id);
+    }
+    let status = process.exit_status().map_or(0, |s| s.0);
+    info!("start: {} (pid {}) finished with status {status:#010x}", process.name, process.id);
+}
+
 /// Starts the boot module `name` as a user process (C:\gala as its
 /// current directory) without waiting for it.
 fn start_program(
@@ -1076,14 +1127,25 @@ fn start_program(
     name: &str,
     args: &str,
     console: Option<mm::heap::KArc<nt::conhost::Session>>,
-) {
+) -> Option<mm::heap::KArc<nt::process::Process>> {
     let mut buf = [0u8; 512];
     let Some((file_name, data, directory)) = find_program(info, name, &mut buf) else {
         panic!("start: no boot module named {name:?}");
     };
     match nt::process::spawn_from_pe(file_name, directory, data, args, None, console) {
-        Ok((process, _thread)) => info!("start: {} (pid {})", process.name, process.id),
-        Err(e) => error!("start: cannot start {name}: {e:?}"),
+        Ok((process, _thread)) => {
+            info!(
+                "start: {} (pid {}, as {})",
+                process.name,
+                process.id,
+                if nt::token::boot_system() { "SYSTEM" } else { "the boot user" }
+            );
+            Some(process)
+        }
+        Err(e) => {
+            error!("start: cannot start {name}: {e:?}");
+            None
+        }
     }
 }
 

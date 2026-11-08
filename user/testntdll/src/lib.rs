@@ -736,23 +736,69 @@ fn set_module_path(slot: usize, path: &[u16]) {
     ldr_link(slot);
 }
 
+/// Resolves the `.` and `..` components of the absolute directory `dir`
+/// (`C:\\a\\.\\b\\..\\` or `\\\\server\\share\\...`, backslashes, ending in
+/// one) in place, as RtlGetFullPathName does: `.` goes, `..` takes the
+/// component before it with it, never the drive or the share. Returns the
+/// new length.
+fn resolve_dots(dir: &mut [u16]) -> usize {
+    let sep = u16::from(b'\\');
+    let dot = u16::from(b'.');
+    // The root that `..` never removes: `C:\` or `\\server\share\`.
+    let root = if dir.len() >= 2 && dir[0] == sep && dir[1] == sep {
+        let mut seps = 0;
+        dir.iter()
+            .position(|&c| {
+                seps += usize::from(c == sep);
+                seps == 4
+            })
+            .map_or(dir.len(), |i| i + 1)
+    } else {
+        dir.iter().position(|&c| c == sep).map_or(dir.len(), |i| i + 1)
+    };
+    let (mut read, mut write) = (root, root);
+    while read < dir.len() {
+        let end = dir[read..].iter().position(|&c| c == sep).map_or(dir.len(), |i| read + i);
+        let part = read..end;
+        let next = (end + 1).min(dir.len());
+        if dir[part.clone()] == [dot] || part.is_empty() {
+            // `.` (or an empty component): nothing.
+        } else if dir[part.clone()] == [dot, dot] {
+            // `..`: back to the separator before the last component.
+            if write > root {
+                write = dir[root..write - 1]
+                    .iter()
+                    .rposition(|&c| c == sep)
+                    .map_or(root, |i| root + i + 1);
+            }
+        } else {
+            dir.copy_within(read..next, write);
+            write += next - read;
+        }
+        read = next;
+    }
+    write
+}
+
 fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
     let mut path = [0u16; 300];
     let prefix = *b"\\??\\";
-    let total = prefix.len() + dir.len() + dll.len();
-    if total > path.len() {
+    if prefix.len() + dir.len() + dll.len() > path.len() {
         return Err(STATUS_DLL_NOT_FOUND);
     }
     for (i, &b) in prefix.iter().enumerate() {
         path[i] = u16::from(b);
     }
-    // A DOS path's forward slashes are backslashes in an NT path (as
-    // RtlDosPathNameToNtPathName makes them).
+    // A DOS path's forward slashes are backslashes in an NT path, and its
+    // `.` and `..` components are resolved (as RtlDosPathNameToNtPathName
+    // makes them).
     for (slot, &c) in path[prefix.len()..prefix.len() + dir.len()].iter_mut().zip(dir) {
         *slot = if c == u16::from(b'/') { u16::from(b'\\') } else { c };
     }
+    let dir_len = resolve_dots(&mut path[prefix.len()..prefix.len() + dir.len()]);
+    let total = prefix.len() + dir_len + dll.len();
     for (i, &b) in dll.iter().enumerate() {
-        path[prefix.len() + dir.len() + i] = u16::from(b);
+        path[prefix.len() + dir_len + i] = u16::from(b);
     }
     let name = UnicodeString {
         length: (total * 2) as u16,
@@ -1319,6 +1365,35 @@ fn find_module(name: &[u8]) -> Option<usize> {
     with_modules(|m| m.iter().position(|m| m.base != 0 && &m.name[..m.name_len] == name))
 }
 
+/// The loaded module mapped from `dir` (a path-qualified load's
+/// directory, ending in a backslash) and `name` (normalized): the same
+/// file, compared as Windows compares paths (case-insensitively, `/` as
+/// `\`, `.` and `..` resolved). Another directory's DLL of that name is
+/// another module.
+fn find_module_at(dir: &[u16], name: &[u8]) -> Option<usize> {
+    let mut want = [0u16; MAX_PATH];
+    if dir.len() + name.len() > want.len() {
+        return None;
+    }
+    for (slot, &c) in want.iter_mut().zip(dir) {
+        *slot = if c == u16::from(b'/') { u16::from(b'\\') } else { c };
+    }
+    let n = resolve_dots(&mut want[..dir.len()]);
+    for (i, &b) in name.iter().enumerate() {
+        want[n + i] = u16::from(b);
+    }
+    let want = &want[..n + name.len()];
+    let fold = |c: u16| if (u16::from(b'A')..=u16::from(b'Z')).contains(&c) { c + 32 } else { c };
+    with_modules(|m| {
+        m.iter().position(|m| {
+            m.base != 0
+                && &m.name[..m.name_len] == name
+                && m.path_len == want.len()
+                && m.path[..m.path_len].iter().zip(want).all(|(&a, &b)| fold(a) == fold(b))
+        })
+    })
+}
+
 /// Records a new module; returns its slot.
 fn add_module(name: &[u8], base: usize, refs: u32) -> Result<usize, u32> {
     if name.len() > MAX_NAME {
@@ -1506,7 +1581,11 @@ fn entry_point(base: usize) -> Option<extern "system" fn(usize, u32, usize) -> i
 /// maps it from the executable's directory, binds its imports (loading
 /// those DLLs first) and calls its DllMain with DLL_PROCESS_ATTACH once.
 fn load_module(name: &[u8], search: Search) -> Result<usize, u32> {
-    if let Some(i) = find_module(name) {
+    let loaded = match search {
+        Search::Dir(dir) => find_module_at(dir, name),
+        Search::Default => find_module(name),
+    };
+    if let Some(i) = loaded {
         return Ok(with_modules(|m| {
             if m[i].refs != PINNED {
                 m[i].refs += 1;

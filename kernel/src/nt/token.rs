@@ -266,9 +266,15 @@ pub const SYSTEM_LOGON: u64 = 0x3e7;
 
 static BOOT_SYSTEM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// The boot option `as=system`: processes the kernel starts run as SYSTEM.
+/// The boot options `as=system` and `start_as=system`: processes the
+/// kernel starts from here on run as SYSTEM.
 pub fn set_boot_system(on: bool) {
     BOOT_SYSTEM.store(on, Ordering::Relaxed);
+}
+
+/// Whether the processes the kernel starts now run as SYSTEM.
+pub fn boot_system() -> bool {
+    BOOT_SYSTEM.load(Ordering::Relaxed)
 }
 
 static NEXT_LUID: AtomicU64 = AtomicU64::new(0x0010_0000);

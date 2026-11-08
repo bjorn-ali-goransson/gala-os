@@ -36,6 +36,9 @@ impl NtStatus {
     pub const NOT_A_DIRECTORY: NtStatus = NtStatus(0xc000_0103);
     pub const NOT_IMPLEMENTED: NtStatus = NtStatus(0xc000_0002);
     pub const ACCESS_VIOLATION: NtStatus = NtStatus(0xc000_0005);
+    /// A mapped file's page could not be brought in (a Linux file
+    /// mapping's page past the file's end: SIGBUS).
+    pub const IN_PAGE_ERROR: NtStatus = NtStatus(0xc000_0006);
     pub const INVALID_CID: NtStatus = NtStatus(0xc000_000b);
     pub const INVALID_PARAMETER_MIX: NtStatus = NtStatus(0xc000_0030);
     pub const INVALID_HANDLE: NtStatus = NtStatus(0xc000_0008);

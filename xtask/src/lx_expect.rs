@@ -8,6 +8,9 @@
 //!   reproducible; CI then checks `git diff --exit-code user/lx/bin`).
 //!   Without it, the checked-in binaries are run. `--no-build` skips the
 //!   build.
+//! - The glibc tests (build.sh's GLIBC_TESTS, dynamically linked) are
+//!   built with the host's gcc in the same run; their shared libraries
+//!   (`user/lx/bin/lib*.so`) are copied beside each binary run.
 //! - Each `user/lx/<name>_test` has two binaries: `<name>_test` (static,
 //!   ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN). Both must give
 //!   the same transcript. Each is copied to
@@ -18,6 +21,11 @@
 //!   any, then `-- exit status N` or `-- killed by signal N`. A mismatch
 //!   prints a line diff, leaves `actual.txt` in the run directory and
 //!   fails the command.
+//! - The programs start with descriptors 0-2 only, in a fresh-size
+//!   descriptor table: xtask first closes whatever it inherited (a CI
+//!   runner leaves descriptors above 100 open), because fork sizes the
+//!   child's table by the parent's highest open descriptor and Linux's
+//!   answers depend on that size (select ignores descriptors beyond it).
 //! - `--runs N` runs each binary N times (default 1) and fails if the
 //!   transcripts differ between runs: a check that a test is
 //!   deterministic, made before recording (WORKFLOW "Linux test
@@ -51,6 +59,7 @@ pub fn lx_expect(args: &[String]) -> Result {
     let record = args.iter().any(|a| a == "--record");
     let no_build = args.iter().any(|a| a == "--no-build");
     let runs = runs_arg(args)?;
+    close_inherited();
     let lx = root().join("user/lx");
     if !no_build {
         build(&lx)?;
@@ -190,12 +199,50 @@ fn tests(lx: &Path) -> Result<Vec<String>> {
 }
 
 /// Runs one binary as `./<name>` in `dir` and returns its transcript.
+/// Closes every descriptor above 2, which at this point are only the ones
+/// xtask inherited (none of its own is open yet), and says which: the
+/// programs' fork then sizes their descriptor table from 0-2 and the pipes
+/// of their standard streams, as a login shell's would.
+fn close_inherited() {
+    let fds: Vec<i32> = fs::read_dir("/proc/self/fd")
+        .map(|d| {
+            d.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .filter(|&fd| fd > 2)
+                .collect()
+        })
+        .unwrap_or_default();
+    // The directory's own descriptor is closed by now; it was in the list.
+    let inherited: Vec<i32> =
+        fds.into_iter().filter(|&fd| Path::new(&format!("/proc/self/fd/{fd}")).exists()).collect();
+    #[cfg(target_os = "linux")]
+    // SAFETY: close_range only closes descriptors; none above 2 belongs to
+    // anything xtask holds at this point (see the function's comment).
+    unsafe {
+        libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+    }
+    if let Some(max) = inherited.iter().max() {
+        eprintln!(
+            "lx-expect: closed {} inherited descriptor(s) (highest {max}), so each program starts with 0-2 only",
+            inherited.len()
+        );
+    }
+}
+
 fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let copy = dir.join(name);
     fs::copy(exe, &copy)
         .map_err(|e| format!("copying {} to {}: {e}", exe.display(), copy.display()))?;
+    // The glibc tests' shared libraries (user/lx/bin/lib*.so) beside it:
+    // the programs find them through DT_RUNPATH $ORIGIN.
+    if let Some(bin) = exe.parent() {
+        for lib in shared_libraries(bin)? {
+            let to = dir.join(lib.file_name().unwrap_or_default());
+            fs::copy(&lib, &to)
+                .map_err(|e| format!("copying {} to {}: {e}", lib.display(), to.display()))?;
+        }
+    }
     let mut child = Command::new(format!("./{name}"))
         .current_dir(dir)
         .args(ARGS)
@@ -228,6 +275,22 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
         err.read_to_string(&mut stderr).map_err(|e| format!("{name}'s stderr: {e}"))?;
     }
     Ok(transcript(&stdout, &stderr, status.code(), status.signal()))
+}
+
+/// The shared libraries in `bin` (`lib*.so`), sorted.
+fn shared_libraries(bin: &Path) -> Result<Vec<PathBuf>> {
+    let entries = fs::read_dir(bin).map_err(|e| format!("reading {}: {e}", bin.display()))?;
+    let mut libs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("lib") && n.ends_with(".so"))
+        })
+        .collect();
+    libs.sort();
+    Ok(libs)
 }
 
 /// stdout, stderr and how the program ended, as expected.txt holds them.

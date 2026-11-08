@@ -11,6 +11,10 @@ kernel32 family and what only kernelbase has (Wine's own forwards to ntdll
 are its implementation, not followed: gala's ntdll lacks those Rtl
 functions). The `arch` column: all, x86 or x64.
 
+MEASURED adds the names Windows 11 25H2's kernelbase exports that the
+spec lacks (GetProcAddress of each on build 26200, issue #15;
+kernel32_test's export_split.rs asserts them).
+
 usage: python3 -I tools/kernelbase_exports.py <dir with Wine's kernelbase,
 kernel32, advapi32, version, shlwapi, user32 .spec files> <wine commit>
 """
@@ -41,9 +45,13 @@ def arch(flags):
     raise SystemExit(f"unknown arch {a}")
 
 kernelbase = entries("kernelbase")
+MEASURED = ["CheckTokenMembershipEx", "FlsGetValue2", "SetFileIoOverlappedRange", "TlsGetValue2"]
+for name in MEASURED:
+    kernelbase.setdefault(name, ("", ""))
 homes = [(d, set(entries(d))) for d in ("advapi32", "version", "shlwapi", "user32")]
 print(f"# Windows' kernelbase.dll exports (Wine {commit}, dlls/kernelbase/kernelbase.spec)")
-print("# and the gala DLL each is forwarded to; written by tools/kernelbase_exports.py.")
+print("# with those 25H2 adds (the tool's MEASURED), and the gala DLL each is forwarded to;")
+print("# written by tools/kernelbase_exports.py.")
 print("# name target arch")
 for name in sorted(kernelbase):
     flags, _ = kernelbase[name]

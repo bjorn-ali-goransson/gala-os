@@ -263,7 +263,15 @@ fn errno_of(e: FsError) -> u16 {
         FsError::Exists => EEXIST,
         FsError::NotADirectory => ENOTDIR,
         FsError::IsADirectory => EISDIR,
-        FsError::SharingViolation | FsError::UserMapped => EBUSY,
+        FsError::SharingViolation => EBUSY,
+        FsError::UserMapped => {
+            // Linux shrinks a mapped file (its pages past the end then
+            // fault with SIGBUS, as a mapping's pages past the end do
+            // here); the file system refuses while it is mapped, as NT
+            // does.
+            ledger::record("lx file", "linux option missing", 3);
+            EBUSY
+        }
         FsError::DirectoryNotEmpty => ENOTEMPTY,
         FsError::AccessDenied => EACCES,
         FsError::NoMemory => ENOMEM,
@@ -1414,8 +1422,18 @@ pub fn readlinkat(call: &Call<'_>, dirfd: u64, path: u64, buf: u64, size: u64) -
     if (size as i64) <= 0 {
         return Err(EINVAL);
     }
-    let (found, _) = lookup(call, dirfd, path, false)?;
-    let n = found.existing()?;
+    let bytes = read_path(&call.process, path)?;
+    if bytes == PROC_SELF_EXE {
+        let exe = path_of(*call.lx.exe.lock())?;
+        let n = exe.len().min(size as usize);
+        call.process.write(buf, &exe[..n]).map_err(|_| EFAULT)?;
+        return Ok(n as u64);
+    }
+    if bytes.starts_with(b"/proc/") {
+        // Any other /proc path: no /proc yet (ENOENT from the walk).
+        ledger::record("readlinkat", "linux option missing", 0);
+    }
+    let n = resolve(call, dirfd, &bytes, false)?.existing()?;
     let mut target = Vec::new();
     with_fs(|fs| match fs.node(n).and_then(ramfs::Node::symlink_target) {
         Some(t) => {
@@ -1586,15 +1604,35 @@ pub fn umask(call: &Call<'_>, mask: u64) -> Result {
 /// The executable at `path` for execve: its node's bytes. ENOENT,
 /// ENOTDIR as for any path; EACCES for a directory or a file without
 /// its owner's execute bit.
-pub fn executable(call: &Call<'_>, path: &[u8]) -> core::result::Result<Vec<u8>, u16> {
-    let n = resolve(call, AT_FDCWD, path, true)?.existing()?;
+pub fn executable(call: &Call<'_>, path: &[u8]) -> core::result::Result<(NodeId, Vec<u8>), u16> {
+    executable_at(*call.lx.cwd.lock(), path)
+}
+
+/// `executable` for a path taken from directory `cwd` (an absolute path
+/// from the root): the node (symbolic links followed) and its bytes.
+/// Also how a program's interpreter (PT_INTERP) is read, and a program
+/// `lxrun=` starts.
+pub fn executable_at(cwd: NodeId, path: &[u8]) -> core::result::Result<(NodeId, Vec<u8>), u16> {
+    if path.is_empty() {
+        return Err(ENOENT);
+    }
+    let parsed = parse(path)?;
+    let start = if parsed.absolute { ramfs::ROOT } else { cwd };
+    let n = with_fs(|fs| walk(fs, start, &parsed, true))?.existing()?;
     let ok = with_fs(|fs| fs.node(n).is_some_and(|node| !node.is_dir() && perm(node) & 0o100 != 0));
     if !ok {
         return Err(EACCES);
     }
-    crate::nt::file::read_all(n)
-        .map_err(|s| if s == crate::nt::status::NtStatus::NO_MEMORY { ENOMEM } else { ENOENT })
+    let data = crate::nt::file::read_all(n)
+        .map_err(|s| if s == crate::nt::status::NtStatus::NO_MEMORY { ENOMEM } else { ENOENT })?;
+    Ok((n, data))
 }
+
+/// The link `/proc/self/exe` (proc(5)): the program the process runs, by
+/// its path. There is no /proc on the file system yet; this one path is
+/// recognised as given, as the devices are (glibc's ld.so reads it for
+/// `$ORIGIN` in a library search path).
+const PROC_SELF_EXE: &[u8] = b"/proc/self/exe";
 
 /// The directory of the Linux path `path` (where a program `lxrun=`
 /// starts runs: its own directory, as `cargo xtask lx-expect` runs the

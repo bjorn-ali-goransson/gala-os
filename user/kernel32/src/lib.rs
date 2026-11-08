@@ -32,6 +32,10 @@ mod arch;
 use arch::*;
 
 mod actctx;
+// kernel32's own address waits, for its SRW locks, condition variables
+// and InitOnce: kernelbase's source, built here with a list of its own and
+// not exported (WaitOnAddress and WakeByAddress* are kernelbase's alone).
+#[path = "../../kernelbase/src/address_wait.rs"]
 mod address_wait;
 mod ansi;
 mod atom;

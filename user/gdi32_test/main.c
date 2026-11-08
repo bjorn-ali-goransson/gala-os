@@ -25,6 +25,8 @@
  *   state with its DCB_ENABLE or DCB_DISABLE bit.
  *   BitBlt SRCCOPY copies between memory DCs; SRCINVERT xors;
  *   StretchBlt doubles.
+ * - GetObjectA: a bitmap's BITMAP as GetObjectW's, a font's LOGFONTA (the
+ *   face name in ANSI).
  * - Fonts: CreateFontIndirectW keeps the LOGFONTW (GetObjectW returns it,
  *   92 bytes); selected into a DC, GetTextMetricsW gives a height of at
  *   least |lfHeight|, internal leading tmHeight - |lfHeight|, ascent +
@@ -44,8 +46,11 @@
  *   GetObjectType says OBJ_FONT; GetCurrentObject(OBJ_FONT) is the font.
  *
  * - CreateDIBitmap: a DDB of the reference DC's depth; CBM_INIT sets
- *   the DIB's bits as SetDIBits does (bottom-up rows). SetStretchBltMode
- *   returns the previous mode (BLACKONWHITE at first), 0 for an invalid one.
+ *   the DIB's bits as SetDIBits does (bottom-up rows).
+ *
+ * - SetStretchBltMode keeps any mode, 0, 5 and -1 included, and returns
+ *   the previous one (BLACKONWHITE at first), the last error untouched:
+ *   on a DISPLAY DC and on a memory DC.
  *
  * - Mapping: MM_TEXT at first (extents 1 x 1, SetWindowExtEx ignored);
  *   LPtoDP/DPtoLP through the origins; MM_ANISOTROPIC scales by viewport
@@ -130,6 +135,9 @@ static void bitmaps(void) {
     BITMAP info;
     CHECK(GetObjectW(bmp, sizeof info, &info) == sizeof info);
     CHECK(info.bmWidth == 20 && info.bmHeight == 10 && info.bmBitsPixel == 32 && info.bmPlanes == 1);
+    /* GetObjectA (Mesa's lavapipe calls it): a bitmap's BITMAP as W's. */
+    BITMAP info_a;
+    CHECK(GetObjectA(bmp, sizeof info_a, &info_a) == sizeof info_a && memcmp(&info, &info_a, sizeof info) == 0);
     HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
     CHECK(old != NULL && GetObjectW(old, sizeof info, &info) == sizeof info);
     CHECK(info.bmWidth == 1 && info.bmHeight == 1 && info.bmBitsPixel == 1);
@@ -232,6 +240,9 @@ static void fonts(void) {
     LOGFONTW back;
     CHECK(GetObjectW(font, sizeof back, &back) == sizeof back);
     CHECK(back.lfHeight == -12 && wcscmp(back.lfFaceName, L"Segoe UI") == 0);
+    LOGFONTA back_a;
+    CHECK(GetObjectA(font, sizeof back_a, &back_a) == sizeof back_a);
+    CHECK(back_a.lfHeight == -12 && back_a.lfWeight == FW_NORMAL && strcmp(back_a.lfFaceName, "Segoe UI") == 0);
     HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
     HGDIOBJ old = SelectObject(screen, font);
     CHECK(old != NULL && GetCurrentObject(screen, OBJ_FONT) == font);
@@ -346,14 +357,25 @@ static void fonts(void) {
     DeleteDC(screen);
 }
 
+// SetStretchBltMode does not check the mode: it keeps whatever it is
+// given and returns the previous one, the last error untouched; a new DC
+// starts at BLACKONWHITE (Windows 11 25H2, a DISPLAY DC and a memory DC).
+static void stretch_mode(HDC dc) {
+    SetLastError(0xdead);
+    CHECK(GetStretchBltMode(dc) == BLACKONWHITE);
+    CHECK(SetStretchBltMode(dc, HALFTONE) == BLACKONWHITE && GetStretchBltMode(dc) == HALFTONE);
+    CHECK(SetStretchBltMode(dc, 0) == HALFTONE && GetStretchBltMode(dc) == 0);
+    CHECK(SetStretchBltMode(dc, 5) == 0 && GetStretchBltMode(dc) == 5);
+    CHECK(SetStretchBltMode(dc, -1) == 5 && GetStretchBltMode(dc) == -1);
+    CHECK(GetLastError() == 0xdead);
+    DeleteDC(dc);
+}
+
 // CreateDIBitmap: a DDB in the reference DC's format; with CBM_INIT, the
 // DIB's bits set as SetDIBits would (row 0 of a bottom-up DIB is the
 // bottom line).
 static void dibitmap(void) {
     HDC screen = CreateDCW(L"DISPLAY", NULL, NULL, NULL);
-    // The stretch mode: BLACKONWHITE at first; set returns the previous.
-    CHECK(GetStretchBltMode(screen) == BLACKONWHITE && SetStretchBltMode(screen, HALFTONE) == BLACKONWHITE);
-    CHECK(GetStretchBltMode(screen) == HALFTONE && SetStretchBltMode(screen, 0) == 0);
     BITMAPINFO bi = {{sizeof(BITMAPINFOHEADER), 2, 2, 1, 32, BI_RGB}};
     // Bottom row: blue, green; top row: red, white (BGRX).
     DWORD px[4] = {0x0000ff, 0x00ff00, 0xff0000, 0xffffff};
@@ -938,6 +960,8 @@ int main(void) {
     display_dc();
     bitmaps();
     fonts();
+    stretch_mode(CreateDCW(L"DISPLAY", NULL, NULL, NULL));
+    stretch_mode(CreateCompatibleDC(NULL));
     dibitmap();
     mapping();
     mono_dib();

@@ -42,5 +42,9 @@ pub fn init_boot_traps() {
     interrupts::init();
     syscall::init_cpu();
     bootphase::mark("gdt_idt");
-    crate::info!("cpu: GDT, TSS and IDT loaded");
+    let vendor = cpu::vendor();
+    crate::info!(
+        "cpu: GDT, TSS and IDT loaded ({})",
+        core::str::from_utf8(&vendor).unwrap_or("unknown vendor")
+    );
 }

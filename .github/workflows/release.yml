@@ -1,0 +1,160 @@
+name: Release
+
+# The update feed (ROADMAP R8 step 4; ARCHITECTURE and WORKFLOW "The update
+# feed"): every commit on main whose CI passes is published to the R2
+# bucket as a release (TUF metadata over content-addressed blobs), and
+# schedules keep the feed fresh. Each job pulls the feed's metadata from
+# the bucket's public URL, signs with the keys in GALA_FEED_KEYS, checks
+# the result as gala's client does, uploads (blobs, roots, targets,
+# snapshot, timestamp last) and checks the public feed again.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  schedule:
+    # refresh: the timestamp expires after 1 day, and scheduled runs can be
+    # late or dropped, so every 6 hours.
+    - cron: "17 */6 * * *"
+    # renew-root: root expires after 90 days; monthly.
+    - cron: "43 4 3 * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: What to run
+        type: choice
+        options: [publish, refresh, renew-root]
+        default: refresh
+
+# Two runs never interleave: each one's pull would miss the other's push.
+concurrency:
+  group: feed
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The bucket's public read URL (a development URL: a custom domain may
+  # replace it; this is the only place it is written).
+  FEED_URL: https://pub-d0d768e3efcd4e689e036af8c597569a.r2.dev
+  # R2's S3 API for the uploads (the aws CLI reads these).
+  AWS_ENDPOINT_URL: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+  AWS_DEFAULT_REGION: auto
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+  FEED_BUCKET: s3://${{ vars.R2_BUCKET }}
+
+jobs:
+  publish:
+    # CI passed on a push to main (not a pull request whose branch is
+    # called main), or a manual run from main.
+    if: >-
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_repository.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && inputs.job == 'publish')
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 60
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - name: Only main's head is published
+        id: head
+        run: |
+          main=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$main" = "$SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$SHA is not main's head ($main): its run publishes instead"
+            echo "Not published: $SHA is not main's head ($main)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Install toolchain
+        if: steps.head.outputs.current == 'true'
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the release tree
+        if: steps.head.outputs.current == 'true'
+        run: |
+          echo "### Release of $SHA" >> "$GITHUB_STEP_SUMMARY"
+          cargo xtask release-tree target/release-tree --release
+      - name: Pull the feed's metadata
+        if: steps.head.outputs.current == 'true'
+        run: cargo xtask feed pull "$FEED_URL" target/feed
+      - name: Publish (numbered from the last release) and check
+        if: steps.head.outputs.current == 'true'
+        env:
+          GALA_FEED_KEYS: ${{ secrets.GALA_FEED_KEYS }}
+        run: |
+          cargo xtask feed publish target/release-tree target/feed
+          cargo xtask feed check target/feed --over "$FEED_URL"
+      - name: Upload (blobs, roots, targets, snapshot, timestamp last)
+        if: steps.head.outputs.current == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: cargo xtask feed push target/feed "$FEED_BUCKET"
+      - name: Check the public feed
+        if: steps.head.outputs.current == 'true'
+        run: cargo xtask feed check "$FEED_URL"
+
+  refresh:
+    if: >-
+      github.event.schedule == '17 */6 * * *'
+      || (github.event_name == 'workflow_dispatch' && inputs.job == 'refresh')
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Pull the feed's metadata
+        run: cargo xtask feed pull "$FEED_URL" target/feed
+      - name: Refresh (snapshot and timestamp; targets near its expiry) and check
+        env:
+          GALA_FEED_KEYS: ${{ secrets.GALA_FEED_KEYS }}
+        run: |
+          cargo xtask feed refresh target/feed
+          cargo xtask feed check target/feed --over "$FEED_URL"
+      - name: Upload (targets if re-signed, snapshot, timestamp last)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: cargo xtask feed push target/feed "$FEED_BUCKET"
+      - name: Check the public feed
+        run: cargo xtask feed check "$FEED_URL"
+
+  renew-root:
+    if: >-
+      github.event.schedule == '43 4 3 * *'
+      || (github.event_name == 'workflow_dispatch' && inputs.job == 'renew-root')
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Pull the feed's metadata
+        run: cargo xtask feed pull "$FEED_URL" target/feed
+      - name: Renew root, refresh and check
+        env:
+          GALA_FEED_KEYS: ${{ secrets.GALA_FEED_KEYS }}
+        run: |
+          cargo xtask feed renew-root target/feed
+          cargo xtask feed refresh target/feed
+          cargo xtask feed check target/feed --over "$FEED_URL"
+      - name: Upload (root, then targets if re-signed, snapshot, timestamp last)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: cargo xtask feed push target/feed "$FEED_BUCKET"
+      - name: Check the public feed
+        run: cargo xtask feed check "$FEED_URL"

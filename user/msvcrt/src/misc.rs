@@ -333,6 +333,15 @@ pub extern "C" fn ___mb_cur_max_func() -> i32 {
 #[unsafe(no_mangle)]
 pub static __mb_cur_max: i32 = 1;
 
+/// _ismbblead(c): whether `c` is the lead byte of a multibyte character
+/// in the multibyte code page. Ours is single-byte (as `__mb_cur_max`
+/// says; on en-US Windows it is ANSI 1252): no byte leads one, 0.
+/// mingw's WinMain entry calls it to skip the program's name.
+#[unsafe(no_mangle)]
+pub extern "C" fn _ismbblead(_c: u32) -> i32 {
+    0
+}
+
 /// perror(s): "s: <strerror(errno)>" on stderr (just the message if `s`
 /// is NULL or empty).
 #[unsafe(no_mangle)]

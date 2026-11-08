@@ -114,16 +114,24 @@ pub fn note_user_map(frame: Frame, add: bool) {
     }
 }
 
+/// An owner gives `frame` up: it is freed with its last owner (see
+/// `share_frame`).
 pub fn free_frame(frame: Frame) -> Result<(), FreeError> {
-    if FRAME_CHECK.load(Ordering::Relaxed)
-        && let Some(count) = USER_MAPS.get(frame.number() as usize)
-    {
-        let n = count.load(Ordering::Acquire);
-        if n != 0 {
-            panic!("mm: frame {:#x} freed while user spaces map it {n} times", frame.start());
+    let result = with_frames(|a| {
+        // Only the last owner's free makes the frame free: then no user
+        // space may map it any more.
+        if FRAME_CHECK.load(Ordering::Relaxed)
+            && !a.is_shared(frame)
+            && let Some(count) = USER_MAPS.get(frame.number() as usize)
+        {
+            let n = count.load(Ordering::Acquire);
+            if n != 0 {
+                panic!("mm: frame {:#x} freed while user spaces map it {n} times", frame.start());
+            }
         }
-    }
-    let result = with_frames(|a| a.free(frame)).unwrap_or(Err(FreeError::OutOfRange));
+        a.free(frame)
+    })
+    .unwrap_or(Err(FreeError::OutOfRange));
     if result == Err(FreeError::NotAllocated) {
         // A frame freed twice: a bug (callers ignore the result), which
         // a reuse in between would turn into memory shared by two owners.
@@ -132,6 +140,50 @@ pub fn free_frame(frame: Frame) -> Result<(), FreeError> {
         }
     }
     result
+}
+
+/// Gives the frame allocator its owner counts (`frame::FrameAllocator::
+/// share`): one `u16` per tracked frame from the heap, once it is up.
+/// Without them (no memory) nothing is shared: a fork copies its pages,
+/// as the log line says.
+pub fn init_sharing() {
+    let Some(frames) = with_frames(|a| a.total_frames()) else { return };
+    let Ok(count) = usize::try_from(frames) else { return };
+    let mut table: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+    if table.try_reserve_exact(count).is_err() {
+        crate::warn!("mm: no memory for {count} frames' owner counts: forks copy their pages");
+        return;
+    }
+    table.resize(count, 0);
+    let table = table.leak();
+    with_frames(|a| a.set_share_table(table));
+    crate::info!(
+        "mm: owner counts for {count} frames ({} KiB): copy-on-write sharing on",
+        count * 2 / 1024
+    );
+}
+
+/// Adds an owner to `frame` (a fork's copy-on-write page); false if it
+/// cannot have another (the caller copies it).
+pub fn share_frame(frame: Frame) -> bool {
+    with_frames(|a| a.share(frame).is_ok()).unwrap_or(false)
+}
+
+/// Whether `frame` has more than one owner: a page on it is mapped
+/// read-only, and a write copies it (`UserSpace::make_writable`).
+pub fn frame_shared(frame: Frame) -> bool {
+    with_frames(|a| a.is_shared(frame)).unwrap_or(false)
+}
+
+/// Pages copied at a write because their frame was shared (copy-on-write
+/// copies since boot).
+pub static COW_COPIES: AtomicU64 = AtomicU64::new(0);
+
+/// `(frames with more than one owner, copy-on-write copies)` (the stats
+/// line).
+pub fn sharing_stats() -> (u64, u64) {
+    let shared = with_frames(|a| a.shared_frames()).unwrap_or(0);
+    (shared, COW_COPIES.load(Ordering::Relaxed))
 }
 
 static DOUBLE_FREES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

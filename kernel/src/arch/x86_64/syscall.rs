@@ -198,8 +198,15 @@ pub fn set_handler(personality: Personality, name: &'static str, handler: Handle
 
 /// Enables SYSCALL on this CPU. Each CPU calls it during its own setup
 /// (MSRs are per CPU), before any thread can move between CPUs.
+/// IA32_STAR: SYSCALL's kernel CS (SS is CS + 8), and 64-bit SYSRET's
+/// base selector (CS = base + 16, SS = base + 8). The base carries RPL 3:
+/// AMD's SYSRET loads SS as base + 8 without forcing the RPL (Intel's
+/// does), and user mode with SS 0x28 faults at the next IRETQ back to it
+/// (gdt.rs's tests check both vendors' rules).
+pub(super) const STAR: u64 = (USER32_CS as u64) << 48 | (KERNEL_CS as u64) << 32;
+
 pub fn init_cpu() {
-    let star = u64::from(USER32_CS & !3) << 48 | u64::from(KERNEL_CS) << 32;
+    let star = STAR;
     // SAFETY: architected MSRs. The entry point switches to the kernel
     // stack set by `percpu::set_kernel_stack` before touching memory, and
     // FMASK keeps interrupts off until it has.

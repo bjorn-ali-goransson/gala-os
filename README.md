@@ -80,7 +80,7 @@ Scenarios marked *pending* are still being brought up.
 | **PostgreSQL** 17.2 | `initdb` makes a cluster, `postgres` serves it (a backend per connection, a restricted token as pg_ctl uses), the host's `psql` queries it | `postgres` |
 | **Win32-OpenSSH** 9.8 | the host logs in with a key or a password; sshd as a server started at boot (sequential and concurrent logins, restarted if it dies); an interactive shell over a pseudo console (ConPTY: line editing, Ctrl+C); sftp upload, listing and download | `sshd_login`, `sshd_password`, `sshd_server`, `sshd_shell`, `sshd_sftp`, `service_restart` |
 | **FileZilla Server** 1.12.6 | generates its TLS certificates, serves FTP; the host logs on | `filezilla_server` |
-| **FileZilla** 3.69.3 | its SFTP engine headless; the GUI client on gala's desktop connecting to FileZilla Server over TLS 1.3 (pending), also driven by FlaUI on .NET through UI Automation (pending) | `fzsftp`, `filezilla`, `filezilla_flaui` |
+| **FileZilla** 3.71.0 | the GUI client on gala's desktop connecting to FileZilla Server over TLS 1.3 (pending), also driven by FlaUI on .NET through UI Automation (pending), and over SFTP to Win32-OpenSSH's sshd (pending) | `filezilla`, `filezilla_flaui`, `filezilla_sftp` |
 | **FlaUI** 5.0 on .NET 8 | drives another program's window through gala's UI Automation (element tree, Invoke, Value, Toggle, Window patterns) | `flaui_test` |
 | **SQL Server 2022 LocalDB** | the database engine starts, answers a TDS login and `SELECT @@VERSION`, shuts down; a database kept across a reboot on the disk (both pending) | `sqllocaldb`, `sqllocaldb_persist` |
 | **MinGit** 2.47.1 | `git init`, `add`, `commit`, `log` in the user's profile (pending) | `mingit` |

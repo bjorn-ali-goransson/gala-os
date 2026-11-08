@@ -75,9 +75,22 @@ int main(void)
 
 	say("ARCH_SET_FS(non-canonical)", sys2(NR_arch_prctl, ARCH_SET_FS, 0x8000000000000000UL));
 	say("ARCH_SET_FS(kernel address)", sys2(NR_arch_prctl, ARCH_SET_FS, 0xffff800000000000UL));
-	say("ARCH_SET_FS(top of user space)", sys2(NR_arch_prctl, ARCH_SET_FS, 0x7ffffffff000UL));
+	/* User space ends at TASK_SIZE_MAX: 2^47 - 4096 with 4-level paging,
+	 * 2^56 - 4096 where the kernel uses 5-level paging (LA57: one of CI's
+	 * runners). A fixed mapping just above 2^47 tells which, so the
+	 * transcript is the same on both. */
+	u64 top = 0x7ffffffff000UL;
 	{
-		i64 last = sys2(NR_arch_prctl, ARCH_SET_FS, 0x7fffffffe000UL);
+		i64 m = sys6(NR_mmap, (i64)0x800000000000UL, 4096, 1 /* PROT_READ */,
+			     0x22 | 0x100000 /* MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE */, -1, 0);
+		if (m == (i64)0x800000000000UL) {
+			top = 0xfffffffffff000UL;
+			sys2(NR_munmap, m, 4096);
+		}
+	}
+	say("ARCH_SET_FS(top of user space)", sys2(NR_arch_prctl, ARCH_SET_FS, top));
+	{
+		i64 last = sys2(NR_arch_prctl, ARCH_SET_FS, top - 4096);
 		i64 back = sys2(NR_arch_prctl, ARCH_SET_FS, fs);
 		say("ARCH_SET_FS(last user page)", last);
 		say("ARCH_SET_FS(musl's) again", back);

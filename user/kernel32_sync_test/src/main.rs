@@ -106,7 +106,7 @@ unsafe extern "system" {
 #[link(name = "api-ms-win-core-synch-l1-2-0", kind = "raw-dylib")]
 unsafe extern "system" {
     // WaitOnAddress and WakeByAddressSingle: through their API set
-    // (KernelBase on Windows, kernel32 on gala).
+    // (KernelBase, on Windows and gala).
     fn WaitOnAddress(address: *mut c_void, compare: *const c_void, size: usize, ms: u32) -> Bool;
     fn WakeByAddressSingle(address: *mut c_void);
     fn WakeByAddressAll(address: *mut c_void);
