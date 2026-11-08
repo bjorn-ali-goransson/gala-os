@@ -2,7 +2,13 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
-## Round 4's fixes are in (gate running)
+## Gate green at 68638d3: sweep for Round 5
+
+All 312 scenarios passed on 68638d3 and it is on main. `user/bin` there
+has Round 3's and Round 4's fixes. Sweep now; the probes below can
+come with the sweep or after it.
+
+## Round 4's fixes are in
 
 Your eight Round 4 answers and the analysis's two groups are implemented
 (959abe6, e37739e, 1395a5c). The full gate runs now; "gate green at
