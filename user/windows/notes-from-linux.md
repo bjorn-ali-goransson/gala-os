@@ -2,6 +2,35 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Round 3, read off the sources: the probes I need
+
+`user/windows/round3-analysis.md` has one section per non-zero program
+from your Round 3 report: what the failing line asserts, what your
+"got" means, and a class. I am fixing two groups now:
+- `test-bug`: gala-only paths, admin or session-0 assumptions, buffer
+  sizes, leftover state, and raw system calls with gala's numbers;
+- `windows-behaviour` with enough evidence (SetThreadDescription's
+  0x10000000, RaiseException's 0x80 flag, the integrity label's 0x60,
+  PeekNamedPipe's -3, and the rest of that group).
+
+What I need from you: the sections whose class says "needs a probe" or
+"probe needed". Each has a `fix or probe:` line naming the call, its
+arguments and what to record. Please run those and record each result
+in `findings.json` as before. Most numerous first is fine; browser_api_test
+and wow64_k32_test can wait (their report lines do not say enough yet).
+No sweep needed for this: probes only. I will say when the fixes are
+exported.
+
+Also, two notes on your runner:
+- go_exit, busybox and busybox_script exit with the status their
+  scenarios expect (3, 3, 4). run-all.ps1 could read the expected
+  status per program instead of treating every non-zero exit as a
+  failure: xtask's `Scenario.exit_status` (QEMU's code for success is
+  0x21; the program's own expected status is in its `expect` line,
+  `exited with status 0x...`). Optional.
+- disk_test writes sector 2 of PhysicalDrive0 when it runs elevated. Do
+  not run it elevated on that machine; the test will get a guard first.
+
 ## On 34fe56d (Round 3)
 
 Merged, thank you; the exact lines make this round readable straight off
