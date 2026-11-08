@@ -1,0 +1,251 @@
+{
+  "_comment": [
+    "What this machine was observed to do, per program, merged over the",
+    "mechanical part by triage.py so that a new run-all.ps1 run keeps it.",
+    "Only entries verified here: a probe's output, a PE header, or the",
+    "program's own report line. Anything absent is still to be probed.",
+    "Machine: Windows 11 25H2, build 26200.9711, non-admin, no galatest",
+    "account. docs/windows-triage-brief.md."
+  ],
+
+  "_notes": [
+    "run-all.ps1's `fault` field cannot work as written: it reads the Application log's Application Error event (1000), and the runner sets SEM_NOGPFAULTERRORBOX (so crash.exe opens no dialog), which the children inherit and which stops a faulting process reporting to Windows Error Reporting. The log holds no such event from either sweep while holding four older ones, so every entry, crashes included, reads \"no Application Error event found\". user/windows/fault.py gets the same three facts by debugging the program instead.",
+    "Results are not stable between runs on the same machine. Comparing the two sweeps here: com_test 0x6c -> 0x6e, kernel32_system_test 0x58 -> 0x34, security_test 0x21 -> 0x4, pipe_test 0x137 -> 0x14b, process_test 0x47 -> 0x4a, persist_test 0 -> 0x38, tds_test's line went from \"first start of the instance\". Some of that is tests that keep state across runs (persist_test, tds_test), and some is ordering or timing. A single report does not pin a divergence down.",
+    "Only the first failing check of a program is ever known, so fixing one may reveal the next; a count here is of programs, not of divergences.",
+    "No test source or binary was changed, as the brief requires. The binaries are cross-compiled on Linux and CI checks user/bin against the sources, and there is no Rust toolchain on this machine.",
+    "Some of what a run reports is leftover state rather than a difference: kernel32_file_test fails its first check only because %TEMP%\\gala_k32 is still there from the run before. A program that leaves what it made behind reports a different check the second time, so a report is only clean on a clean machine.",
+    "Which methods count a check is worked out per test rather than assumed, and has to be: the tests use eq and ok mostly, but also st, ok0, fails and wrappers of their own, the counter is a named field in session_test and a Cell in others, and some methods carry generic parameters. Twelve mappings were wrong before that was handled, registry_test's among them, where the check moved from the ProductName line to the CurrentBuild line and the reported value then made sense.",
+    "The brief's step 1 was deliberately not done: no galatest account was created and nothing ran elevated. access_test, logon_test and profile_test (ERROR_LOGON_FAILURE), restricted_test (not an administrator) and schannel_test (skipped) are therefore unresolved by choice, not by evidence."
+  ],
+
+  "peb_test": {
+    "windows": "PEB+0x120 (OSBuildNumber) reads 26200 on this machine.",
+    "class": "environment",
+    "evidence": "DisplayVersion 25H2, CurrentBuild 26200, UBR 9711; the check got 0x6658 = 26200.",
+    "note": "Passes only on the pinned 26100. Four programs assert the build this way."
+  },
+  "kuser_test": {
+    "windows": "KUSER_SHARED_DATA+0x260 (NtBuildNumber) reads 26200.",
+    "class": "environment",
+    "evidence": "the check got 0x6658 = 26200.",
+    "note": "Same build pin as peb_test."
+  },
+  "manifest_test": {
+    "windows": "The manifest's build field reads 26200.",
+    "class": "environment",
+    "evidence": "the check got 0x6658 = 26200.",
+    "note": "Same build pin as peb_test."
+  },
+  "wow64_test": {
+    "windows": "The 32-bit PEB's OSBuildNumber reads 26200.",
+    "class": "environment",
+    "evidence": "the check got 00000000 00006658, the low word 26200.",
+    "note": "Same build pin as peb_test, through the WOW64 PEB."
+  },
+
+  "access_test": {
+    "windows": "LogonUserW(\"galatest\", \".\", \"Gala-Test-1\", LOGON32_LOGON_NETWORK) fails with ERROR_LOGON_FAILURE.",
+    "class": "environment",
+    "evidence": "the check got 0x52e; Get-LocalUser galatest reports \"User galatest was not found\".",
+    "note": "Needs the account from the brief's step 1. Only the first check is known; more may follow."
+  },
+  "logon_test": {
+    "windows": "Same: no galatest account, so LogonUserW fails with ERROR_LOGON_FAILURE.",
+    "class": "environment",
+    "evidence": "the check got 0x52e.",
+    "note": "Needs the account from the brief's step 1."
+  },
+  "profile_test": {
+    "windows": "Same: no galatest account, so LogonUserW fails with ERROR_LOGON_FAILURE.",
+    "class": "environment",
+    "evidence": "the check got 0x52e; user/profile_test/src/main.rs:206 names the account.",
+    "note": "Needs the account from the brief's step 1."
+  },
+
+  "gala": {
+    "windows": "The loader refuses the image: ntdll.dll exports no GalaSession, GalaRecordMissing or GalaDesktopAction.",
+    "class": "gala-only",
+    "evidence": "imports.py over user/bin/gala.exe against this machine's ntdll.dll.",
+    "note": "gala's own program, not a test. Nothing to compare."
+  },
+  "cmd": {
+    "windows": "The loader refuses the image: ntdll.dll exports no GalaRecordMissing.",
+    "class": "gala-only",
+    "evidence": "imports.py over user/bin/cmd.exe.",
+    "note": "gala's own cmd, not Windows'."
+  },
+  "conhost": {
+    "windows": "The loader refuses the image: ntdll.dll exports none of GalaConsoleCreate/Close/Host/Input/Read/Size/Trace.",
+    "class": "gala-only",
+    "evidence": "imports.py over user/bin/conhost.exe.",
+    "note": "gala's own conhost, not Windows'."
+  },
+  "missing_import_test": {
+    "windows": "The loader refuses the image with STATUS_ENTRYPOINT_NOT_FOUND, which is exactly what the test asserts.",
+    "class": "loader",
+    "evidence": "imports.py: kernel32.dll exports neither GalaNoSuchFunctionOne nor GalaNoSuchFunctionTwo, by design.",
+    "note": "NOT a divergence. Its own doc: \"As on Windows, the process must not start: it ends with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before its entry point runs.\" The non-zero status is the expected result; the program cannot report it itself because it never runs."
+  },
+  "browser_api_test": {
+    "windows": "kernel32.dll does not export CompareObjectHandles; KernelBase.dll does. The import cannot be bound, so the image does not load.",
+    "class": "expectation",
+    "evidence": "export directories read from the PE headers: kernel32.dll has 1698 exported names, without CompareObjectHandles; KernelBase.dll has 2037, with it.",
+    "note": "A real divergence: gala's kernel32 exports CompareObjectHandles where Windows' does not. The test should import it from KernelBase.dll (or through its api set), and gala should move the export."
+  },
+
+  "kernel32_thread_test": {
+    "windows": "SetPriorityClass(GetCurrentProcess(), 0x12345) returns TRUE with GetLastError 0, and GetPriorityClass then reads 0x40 (IDLE_PRIORITY_CLASS). 0xFFFFFFFF behaves the same. Only 0 is rejected, returning FALSE with ERROR_INVALID_PARAMETER (87).",
+    "class": "expectation",
+    "evidence": "probed here: before 0x20; SetPriorityClass(0x12345)->1 err=0 class 0x40; (0xFFFFFFFF)->1 err=0 class 0x40; (0)->0 err=87; (NORMAL 0x20)->1 class 0x20.",
+    "note": "A real divergence: the test asserts an unknown class is refused, and Windows accepts any nonzero value, settling on IDLE. gala refuses it, so gala is wrong here too. Only check 18 is known; later checks may differ as well."
+  },
+
+  "kernel32_sync_test": {
+    "windows": "Faults in the program itself: STATUS_ACCESS_VIOLATION at kernel32_sync_test.exe+0x2ad7, writing to address 0.",
+    "class": "crash",
+    "evidence": "fault.py (CreateProcess with DEBUG_ONLY_THIS_PROCESS; second-chance exception, VirtualQueryEx + GetModuleFileNameExW).",
+    "note": "A write through a null pointer in the test, so some call returned NULL here where gala returns a pointer. It prints nothing, so no check is known; run() calls srw, condition_variables, init_once, fls, slist, semaphores, waiters_sleep, lost_wakeups in that order. Which call returns NULL is still to be found."
+  },
+  "dwrite_test": {
+    "windows": "Faults in the program itself: STATUS_ACCESS_VIOLATION at dwrite_test.exe+0x2330, writing to address 0x4.",
+    "class": "crash",
+    "evidence": "fault.py.",
+    "note": "A write at null+4, so a field of a structure behind a NULL pointer: a DirectWrite call returned NULL and was not checked."
+  },
+  "wow64_seh_test": {
+    "windows": "Faults in the program itself: STATUS_ACCESS_VIOLATION at wow64_seh_test.exe+0x11ac, reading address 0x8.",
+    "class": "crash",
+    "evidence": "fault.py (32-bit process; fault address 0xa311ac).",
+    "note": "A read at null+8, again a dereference of something NULL here."
+  },
+  "oleaut32_test": {
+    "windows": "Faults inside Windows' own OLEAUT32.dll: STATUS_ACCESS_VIOLATION at OLEAUT32.dll+0x9c5f, writing to address 0.",
+    "class": "crash",
+    "evidence": "fault.py.",
+    "note": "The fault is in the system DLL, not the test, so the test passes OLEAUT32 something this build will not take (a NULL out-parameter is the usual cause). user/oleaut32_test is C (main.c) and prints no line before dying."
+  },
+  "clusapi_test": {
+    "windows": "Faults inside Windows' own resutils.dll: STATUS_ACCESS_VIOLATION at resutils.dll+0x2a724, reading address 0x753399fb14.",
+    "class": "crash",
+    "evidence": "fault.py.",
+    "note": "Also inside a system DLL. This machine has no Failover Clustering feature installed, which is the first thing to check."
+  },
+  "crash": {
+    "windows": "STATUS_ACCESS_VIOLATION at crash.exe+0x1097, writing to address 0.",
+    "class": "crash",
+    "evidence": "fault.py; agrees with the program's own line \"crash: writing to address 0\".",
+    "note": "NOT a divergence: crash.exe crashes on purpose, and this is the expected result. It served as the check that fault.py is right."
+  },
+
+  "quota_test": {
+    "windows": "The process handle limit reads 16711680 (0xff0000) handles, not 2^24 = 16777216.",
+    "class": "expectation",
+    "evidence": "the program's own line, \"quota_test: handle limit at 16711680 handles\", exit 10.",
+    "note": "Answers docs/ROADMAP.md R6 \"Next\" item 1 in part (the exact count). Separately, quota_test leaks the children it creates suspended when a check fails before it resumes them, which strands them on a real machine and held run-all.ps1's output pipe open; that is a bug in the test, not a divergence."
+  },
+  "bench": {
+    "windows": "Runs: \"bench: cpu_loop ns_per_op 1\", exit 0.",
+    "class": "skipped",
+    "evidence": "this run; the earlier bench.exe (338432 bytes) was quarantined by Microsoft Defender as Trojan:Win32/Bearfoos.A!ml, the branch's build (343040 bytes) was not.",
+    "note": "Not a divergence. Noted because a quarantine removes the file and the earlier sweep lost it."
+  },
+  "disk_test": {
+    "windows": null,
+    "class": "expectation",
+    "evidence": "check 1 is user/disk_test/src/main.rs:200, c.eq(u32_at(g, 8).into(), FIXED_MEDIA.into()), and it got 5.",
+    "note": "Not the galatest account, although the source mentions it elsewhere: the failing check is about the media type. Still to be probed (what IOCTL_DISK_GET_DRIVE_GEOMETRY reports for this machine's disk)."
+  },
+
+  "kernel32_sys_test": {
+    "windows": "WriteConsoleW's error depends on what the handle is: on a file handle (FILE_TYPE_DISK) it fails with ERROR_INVALID_HANDLE (6), and on a pipe (FILE_TYPE_PIPE) with ERROR_INVALID_FUNCTION (1).",
+    "class": "expectation",
+    "evidence": "probed here: WriteConsoleW on a CreateFileW handle -> 0, GetLastError 6; on a CreatePipe write end -> 0, GetLastError 1.",
+    "note": "A real divergence, and one the runner decides: the check asserts ERROR_INVALID_HANDLE for both, its comment reading \"redirected output (a file or pipe)\", and run-all.ps1 redirects standard output to a pipe, so the test gets 1. Windows separates the two cases; the test and gala do not."
+  },
+  "registry_test": {
+    "windows": "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion CurrentBuild reads \"26200\", 12 bytes with its terminator.",
+    "class": "environment",
+    "evidence": "the check got 12, which is \"26200\" plus NUL as UTF-16; probed here, ProductName is \"Windows 10 Pro\" and the key reads as the test expects otherwise.",
+    "note": "A fifth program asserting the pinned build, beside peb_test, kuser_test, manifest_test and wow64_test. The earlier mapping put this check on the ProductName line; counting the right methods (it uses ok0 as well as eq and ok) moved it to the CurrentBuild line, which the value 12 confirms."
+  },
+  "wait_test": {
+    "windows": "NtCreateEvent with an invalid EventType (2) returns STATUS_INVALID_PARAMETER (0xc000000d).",
+    "class": "expectation",
+    "evidence": "the check got c000000d where it asserts STATUS_INVALID_PARAMETER_4 (0xc00000f3); user/wait_test/src/main.rs:81.",
+    "note": "A real divergence: this build names the parameter in some rejections and not here, so gala returning STATUS_INVALID_PARAMETER_4 is wrong too. Not probed independently, the evidence being the program's own value."
+  },
+  "kernel32_file_test": {
+    "windows": "CreateDirectoryW(%TEMP%\\gala_k32) returns 0 with ERROR_ALREADY_EXISTS (183), because the directory is still there from an earlier run, holding a.txt.",
+    "class": "environment",
+    "evidence": "probed here: the directory exists with a.txt in it; CreateDirectoryW -> 0, GetLastError 183. The test's own next check asserts that a second CreateDirectoryW returns 0, so check 1 can only pass against a clean %TEMP%.",
+    "note": "NOT a divergence: leftover state. It also explains part of the run-to-run movement, this program having failed check 0x28 in the first sweep (clean) and check 1 in the second. The test does not remove what it creates; run it against a fresh %TEMP% or have it clean up first."
+  },
+  "restricted_test": {
+    "windows": "CheckTokenMembership(NULL, S-1-5-32-544) succeeds and reports is-member = 0 with GetLastError 0: this token is not in Administrators.",
+    "class": "environment",
+    "evidence": "probed here; the token's user is DESKTOP-0GMLOBR\\a, an ordinary account, and the sweep ran non-elevated as the brief's non-admin case.",
+    "note": "The test asserts the process is an administrator. The 0xbb in the report is a stale last error, since the call itself succeeded. Needs an elevated run, which was deliberately not done."
+  },
+  "system_test": {
+    "windows": "The token's user is DESKTOP-0GMLOBR\\a, SID S-1-5-21-143635261-1314383964-2185545505-1001, not LocalSystem (S-1-5-18).",
+    "class": "environment",
+    "evidence": "probed here: OpenProcessToken + GetTokenInformation(TokenUser), then LookupAccountSid.",
+    "note": "The test expects to run as LocalSystem, which its gala scenario arranges with as=system. run-all.ps1 runs it as the logged-on user, so this check cannot pass that way."
+  },
+  "session_test": {
+    "windows": "This process's session id is 1 (ProcessIdToSessionId), which is what the check got.",
+    "class": "environment",
+    "evidence": "probed here.",
+    "note": "An interactive Windows logon is session 1, while services are in session 0. The check got 1 and failed, so the test asked for another value; which one is in check_own_session's caller and was not read."
+  },
+  "sspi_test": {
+    "windows": "The name a server sees for this client is DESKTOP-0GMLOBR\\a (GetUserNameEx, NameSamCompatible).",
+    "class": "environment",
+    "evidence": "probed here; the check asserts the name is \"GALA\\gala\".",
+    "note": "The test hardcodes gala's own machine and user name, so it cannot pass on any other machine. The SSPI exchange itself got as far as this check, so the mechanism works here."
+  },
+
+  "clock_test": {
+    "windows": "STATUS_FATAL_USER_CALLBACK_EXCEPTION, preceded by a first-chance STATUS_ACCESS_VIOLATION at the same address, ntdll.dll+0x165d8b: the fault is inside ntdll's user-callback dispatcher, not in the test's own code.",
+    "class": "crash",
+    "evidence": "fault.py, which now keeps first-chance exceptions because the fatal status is only ntdll reporting that one escaped a callback.",
+    "note": "handover_k32_test faults at the identical address, so both share a cause. A callback dispatched into a process whose PEB KernelCallbackTable is not set up would fault exactly there; unverified, and the next step is to find what makes these two take a callback at all."
+  },
+  "handover_k32_test": {
+    "windows": "The same as clock_test: STATUS_FATAL_USER_CALLBACK_EXCEPTION after a first-chance STATUS_ACCESS_VIOLATION at ntdll.dll+0x165d8b.",
+    "class": "crash",
+    "evidence": "fault.py; byte-identical fault address to clock_test.",
+    "note": "Shares clock_test's cause. Also a handover test, which is a gala facility, so it may not be meaningful on Windows at all."
+  },
+  "handover_net_test": {
+    "windows": null,
+    "class": "crash",
+    "evidence": "run-all.ps1 recorded 0xc000041d; under fault.py, with no arguments, it produced no debug event in 60 s instead.",
+    "note": "run-all.ps1 passes it `self`; it was not run that way here, so the status and this probe do not describe the same run. Still to be probed with the argument."
+  },
+
+  "schannel_test": {
+    "windows": null,
+    "class": "skipped",
+    "evidence": "run-all.ps1 skipped it: the test CA must go into LocalMachine\\Root, which needs an administrator.",
+    "note": "Needs the elevated run from the brief's step 1."
+  },
+  "statedump_test": {
+    "windows": null,
+    "class": "skipped",
+    "evidence": "timed out after 60 s.",
+    "note": "Timed out in both sweeps. Whether it hangs or merely needs longer is unknown."
+  },
+  "winhttp_test": {
+    "windows": null,
+    "class": "skipped",
+    "evidence": "timed out after 60 s.",
+    "note": "Timed out in both sweeps; it reaches the network, so it may be waiting on something this machine cannot reach."
+  },
+  "wininet_test": {
+    "windows": null,
+    "class": "skipped",
+    "evidence": "timed out after 60 s.",
+    "note": "Timed out in both sweeps; same as winhttp_test."
+  }
+}
