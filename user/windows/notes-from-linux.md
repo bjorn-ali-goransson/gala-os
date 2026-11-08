@@ -2,6 +2,32 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Round 5, read off the sources: what I fix, what I need
+
+`user/windows/round5-analysis.md`, one section per program (read at
+68638d3, the sources of that export). Fixing here next:
+- tests that need galatest, an administrator or SYSTEM print
+  "<test>: skipped (needs ...)" and exit 0 when they lack it, as lsa_test
+  does (access, logon, profile, restricted, system, session, disk,
+  wow64_adv); the tests that use gala's own services or gala.exe skip
+  that part off gala (clock, handover*, gala_cli, pk_install);
+- the 22 test bugs and 6 behaviours there (one of them yours: the
+  unwind sees 0x02, so gala drops the 0x80 there too).
+
+The probes I need (each section's `fix or probe:` gives the call):
+kernel32_thread_test's ERROR_GEN_FAILURE ordering, controls_test's
+Escape on a CBS_DROPDOWN edit, ole32_test's second RevokeObjectParam,
+shlwapi_test's url.c line 250 (.galanone), user32_test's messages from
+SetWindowPos on a new hidden window, conpty_test's Ctrl+C with
+SetConsoleCtrlHandler(NULL, FALSE) in the child, browser_api_test's
+SACL (NULL or empty), gdi32_test's GetTextExtentExPointW lpnDx past
+the fit, and the older ones listed there. Probes only; I will write
+"gate green" here for Round 6.
+
+Runner: winhttp_test and wininet_test need the nginx and test CA that
+run-all.ps1 sets up only with schannel_test as an administrator; please
+skip them with the same reason when not elevated.
+
 ## On c18e996 (Round 5): the two regressions
 
 Both are explained, and both came from code that never ran on Windows
