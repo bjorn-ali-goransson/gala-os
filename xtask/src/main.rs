@@ -2606,8 +2606,9 @@ commands:
   build        build the kernel and a bootable UEFI ISO (target/<profile>/gala-os.iso)
   run          build, then boot in QEMU with serial on stdio [--headless]
   test         run host unit tests, then um-test (gala-um), replay-test, then the QEMU
-               boot tests
+               boot tests [--no-boot: all but the boot tests]
   boot-test    only the QEMU boot tests [scenario name filter, or exact names a,b,c]
+               (XTASK_SHARD=i/n: the i-th of n shares of the VMs)
   export-tests copy the built test programs to user/bin/ (checked in)
   screenshot   boot and save PNG screenshots of the screen:
                screenshot [--uefi] [--at 1,3,5] [--name N] [kernel cmdline...]
@@ -2697,7 +2698,15 @@ fn main() -> ExitCode {
                 .and_then(|()| alloc_audit(release, None, false))
                 .and_then(|()| um_test(release))
                 .and_then(|()| replay_test(release))
-                .and_then(|()| boot_tests(release, None)),
+                // `--no-boot`: everything but the boot scenarios (CI boots
+                // them in parallel jobs with XTASK_SHARD).
+                .and_then(|()| {
+                    if args.iter().any(|a| a == "--no-boot") {
+                        Ok(())
+                    } else {
+                        boot_tests(release, None)
+                    }
+                }),
             Some("boot-test") => boot_tests(release, args.get(1).filter(|a| !a.starts_with("--"))),
             Some("export-tests") => build_kernel(release).and_then(|()| export_tests()),
             Some("report") => gala_report(release),
@@ -7995,6 +8004,34 @@ fn plan_vms<'a>(selected: &[&'a Scenario]) -> Vec<Vm<'a>> {
     vms
 }
 
+/// `XTASK_SHARD=i/n` (1-based): only every n-th VM, starting at the i-th,
+/// so n machines boot the whole set between them (CI's boot jobs). The VMs
+/// are dealt out after `plan_vms`, so a batch stays in one shard; the
+/// shard says what it took.
+fn shard(vms: Vec<Vm<'_>>) -> Result<Vec<Vm<'_>>> {
+    let Ok(spec) = env::var("XTASK_SHARD") else {
+        return Ok(vms);
+    };
+    let parsed = spec
+        .split_once('/')
+        .and_then(|(i, n)| Some((i.parse::<usize>().ok()?, n.parse::<usize>().ok()?)));
+    let Some((i, n)) = parsed.filter(|&(i, n)| i >= 1 && i <= n) else {
+        return Err(format!("XTASK_SHARD={spec:?}: expected i/n with 1 <= i <= n"));
+    };
+    let total = vms.len();
+    let mine: Vec<Vm<'_>> =
+        vms.into_iter().enumerate().filter(|(k, _)| k % n == i - 1).map(|(_, vm)| vm).collect();
+    let scenarios: usize = mine
+        .iter()
+        .map(|vm| match vm {
+            Vm::Single(_) => 1,
+            Vm::Batch(group) => group.len(),
+        })
+        .sum();
+    eprintln!("xtask: shard {i} of {n}: {} of {total} VMs ({scenarios} scenarios)", mine.len());
+    Ok(mine)
+}
+
 fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     RELEASE.store(release, std::sync::atomic::Ordering::Relaxed);
     let t0 = Instant::now();
@@ -8025,7 +8062,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     if selected.is_empty() {
         return Err("no boot test scenario matches the filter".into());
     }
-    let vms = plan_vms(&selected);
+    let vms = shard(plan_vms(&selected))?;
     // Tests read the serial log; the screen console stays on only where
     // the scenario boots by UEFI, which keeps that code covered.
     let screen = |s: &Scenario| {

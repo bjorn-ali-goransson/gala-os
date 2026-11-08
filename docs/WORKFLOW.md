@@ -66,14 +66,25 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
 ```
 
 - CI (`.github/workflows/ci.yml`, GitHub's hosted runners; the
-  repository is public) has two jobs:
-  - `linux` (Ubuntu 24.04): the lint and clippy lines, `cargo xtask
-    lx-expect && git diff --exit-code user/lx`, `cargo xtask test` and
-    `cargo xtask export-tests && git diff --exit-code user/bin` (checked-in
-    binaries and transcripts must match their sources). The runner has
-    hardware virtualization: a step opens /dev/kvm to the runner's user,
-    so gala's boots run under KVM (the boot log's `xtask: vm time` line
-    and a QEMU standard error without "falling back to tcg" show it).
+  repository is public) runs on every pull request and on main after a
+  merge (a branch without a pull request gets no run; a newer push to a
+  pull request cancels the older run). Work reaches main through a pull
+  request whose checks are green (main's ruleset). Its jobs:
+  - `linux` (Ubuntu 24.04): the format and clippy lines, `cargo xtask
+    lx-expect && git diff --exit-code user/lx`, `cargo xtask test
+    --no-boot` (everything but the boots) and `cargo xtask export-tests &&
+    git diff --exit-code user/bin` (checked-in binaries and transcripts
+    must match their sources).
+  - `boot (i/6)`: every boot scenario, dealt out over six runners with
+    `XTASK_SHARD=i/n` (`cargo xtask boot-test` boots the i-th of n
+    round-robin shares of the planned VMs; a batch stays in one share,
+    and the shard prints what it took). A failed shard keeps
+    `target/failed/` (each failed boot's log and triage) as an artifact.
+    The runners have hardware virtualization: a step opens /dev/kvm to
+    the runner's user, so the boots run under KVM (the boot log's
+    `xtask: vm time` line, and a QEMU standard error without "falling
+    back to tcg", show it). A step deletes the runner's preinstalled
+    Android, .NET and GHC toolchains for disk space.
   - `windows` (Windows Server 2025, build 26100: the pinned build): the
     checked-in `user/bin` through `run-all.ps1`, elevated, with the
     `galatest` account and Defender excluded from the checkout, as the

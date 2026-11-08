@@ -1,8 +1,16 @@
 name: CI
 
 on:
+  # Pull requests, and main after a merge; a branch without a pull request
+  # gets no run (each push to a pull request's branch ran twice otherwise).
   push:
+    branches: [main]
   pull_request:
+
+# A newer push to the same pull request cancels the run of the older one.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # gala itself: the kernel and its programs, booted in QEMU. GitHub's Linux
@@ -12,6 +20,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space (the runner's Android, .NET and GHC toolchains; gala needs none)
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - name: Let QEMU use KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -60,10 +73,61 @@ jobs:
           cargo clippy --release --target i686-pc-windows-msvc -p ntrt -p wow64_test -p wow64_thread_test -p testntdll -p testdll32 -p wow64_import_test -p wow64_seh_test -p wow64_fs_test -p wow64_k32_test -p kernel32 -p kernelbase -p msvcrt -p advapi32 -p bcryptprimitives -p wow64_adv_test -p user32 -p gdi32 -p gala_heap -p comctl32 -p oleaut32 -p ole32 -p shell32 -p shlwapi -p version -p mpr -p comdlg32 -p uxtheme -p imm32 -p dwmapi -p msimg32 -p msctf -p winspool -p wtsapi32 -p winhttp -p ws2_32 -p secur32 -p shfolder -p bcrypt -- -D warnings
       - name: Linux test programs (user/lx) against real Linux; binaries match their sources
         run: cargo xtask lx-expect && git diff --exit-code user/lx
-      - name: Unit tests, gala-um and the QEMU boot tests
-        run: cargo xtask test
+      - name: Unit tests, gala-um and replay (the boots run in the boot jobs)
+        run: cargo xtask test --no-boot
       - name: Checked-in test binaries match their sources
         run: cargo xtask export-tests && git diff --exit-code user/bin
+
+  # Every boot scenario, dealt out over parallel runners (xtask's
+  # XTASK_SHARD=i/n deals the planned VMs round-robin; a batch stays whole).
+  # Each shard builds what it boots and fetches the prebuilt programs.
+  boot:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    name: boot (${{ matrix.shard }}/6)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space (the runner's Android, .NET and GHC toolchains; gala needs none)
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Let QEMU use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Install QEMU's build dependencies, OVMF, xorriso
+        run: sudo apt-get update && sudo apt-get install -y ovmf xorriso msitools openssh-client postgresql-client musl-tools libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+      - name: Cache the pinned QEMU
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/gala-qemu
+          key: gala-qemu-11.1.3
+      - name: Build the pinned QEMU
+        run: cargo xtask qemu
+      - name: Install Go (for user/go_hello; pinned in xtask GO_TOOLCHAIN)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.7"
+          cache: false
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Boot scenarios, shard ${{ matrix.shard }} of 6
+        env:
+          XTASK_SHARD: ${{ matrix.shard }}/6
+        run: cargo xtask boot-test
+      - name: Keep the failed boots' logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-boots-${{ matrix.shard }}
+          path: target/failed/
+          if-no-files-found: ignore
 
   # The same test programs (the checked-in user/bin) on real Windows: Windows
   # Server 2025 is build 26100, the pinned build. The report has the schema
