@@ -38,6 +38,7 @@ import checks as checks_mod  # noqa: E402  (same directory)
 # A test may print more than one value after "got" (wow64_test prints a
 # 64-bit value as two words), so every one of them is considered.
 GOT = re.compile(r"\bgot\b([0-9a-fA-Fx \t]+)")
+FILELINE = re.compile(r"([A-Za-z0-9_.\-]+\.(?:c|rs|h))\s+line\s+(\d+)")
 LINE = re.compile(r"\bline\s+(?:0x)?([0-9a-fA-F]+)")
 NTSTATUS_MIN = 0xC0000000
 
@@ -99,6 +100,20 @@ def assertion(program, check, report_line):
         return None, None, "no source found under user/%s/" % program
     # A source line in the report is exact, inside a loop as much as outside,
     # and is all the C tests give: read that line whatever it holds.
+    # A report that names the file as well as the line settles which file a
+    # multi-file C test means: "check 228 (url.c line 242)".
+    fm = FILELINE.search(report_line or "")
+    if fm:
+        want = int(fm.group(2), 10)
+        named = fm.group(1)
+        for cand in sources_of(program):
+            if os.path.basename(cand).lower() == named.lower():
+                t = text_at(cand, want)
+                if t is not None:
+                    return want, t, "exact (%s:%d, the file and line the report names)" % (cand, want)
+                return want, None, "the report names %s line %d, past its end" % (named, want)
+        return want, None, "the report names %s line %d, and no such file is under user/%s/" % (
+            named, want, program)
     m = LINE.search(report_line or "")
     if m:
         # The tests do not agree on a base: wow64_test prints "line
