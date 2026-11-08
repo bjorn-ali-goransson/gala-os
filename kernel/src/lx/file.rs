@@ -126,7 +126,7 @@ const BLKSIZE: i64 = 4096;
 const CHUNK: usize = 64 * 1024;
 
 /// What a Linux open shares with other opens: everything.
-const SHARE_ALL: Share = Share { read: true, write: true, delete: true };
+pub const SHARE_ALL: Share = Share { read: true, write: true, delete: true };
 
 /// An open regular file or directory (one open file description: dup'ed
 /// fds share it, and with it the offset).
@@ -155,6 +155,28 @@ pub struct Cursor {
     pub index: u64,
     pub last: Option<Vec<u16>>,
 }
+
+impl OpenFile {
+    /// The description of a file just opened for reading and writing with
+    /// `fs.open` (or made opened: `RamFs::create_anonymous`), sharing
+    /// everything as Linux opens do; its drop closes it.
+    pub fn read_write(node: NodeId) -> OpenFile {
+        OpenFile {
+            node,
+            dir: false,
+            readable: true,
+            writable: true,
+            path_only: false,
+            append: AtomicBool::new(false),
+            position: IrqMutex::new(0),
+            cursor: IrqMutex::new(Cursor::default()),
+            access: READ_WRITE,
+        }
+    }
+}
+
+/// What a read-write open asks of the file system.
+pub const READ_WRITE: Access = Access { read: true, write: true, delete: false };
 
 impl Drop for OpenFile {
     fn drop(&mut self) {
@@ -276,6 +298,12 @@ fn errno_of(e: FsError) -> u16 {
         FsError::AccessDenied => EACCES,
         FsError::NoMemory => ENOMEM,
         FsError::Symlink => ELOOP,
+        // A socket's contents (open(2): ENXIO).
+        FsError::Socket => super::errno::ENXIO,
+        // A seal forbids it, or no more seals (fcntl(2)).
+        FsError::Sealed => super::errno::EPERM,
+        FsError::WriteMapped => EBUSY,
+        FsError::NotSealable => EINVAL,
     }
 }
 
@@ -584,6 +612,8 @@ fn stat_of(fs: &ramfs::RamFs, id: NodeId) -> core::result::Result<Stat, u16> {
         (abi::S_IFDIR, 2 + subdirs as u64, 4096)
     } else if n.is_symlink() {
         (abi::S_IFLNK, u64::from(n.nlink()), n.size() as i64)
+    } else if n.is_socket() {
+        (abi::S_IFSOCK, u64::from(n.nlink()), 0)
     } else {
         (abi::S_IFREG, u64::from(n.nlink()), n.size() as i64)
     };
@@ -612,7 +642,7 @@ fn stat_of(fs: &ramfs::RamFs, id: NodeId) -> core::result::Result<Stat, u16> {
 fn stat_other(object: &Object) -> Stat {
     let (mode, rdev) = match object {
         Object::PipeRead(_) | Object::PipeWrite(_) => (abi::S_IFIFO | 0o600, 0),
-        Object::Socket(_) => (abi::S_IFSOCK | 0o777, 0),
+        Object::Socket(_) | Object::Unix(_) => (abi::S_IFSOCK | 0o777, 0),
         // An anonymous inode: no file type, 0600.
         Object::Epoll(_) => (0o600, 0),
         _ => (abi::S_IFCHR | 0o620, 136 << 8),
@@ -788,6 +818,11 @@ pub fn openat(call: &Call<'_>, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
                     if !path_only {
                         return Err(ELOOP);
                     }
+                }
+                // A socket's name opens as nothing (open(2): ENXIO), but
+                // as itself with O_PATH.
+                if node.is_socket() && !path_only {
+                    return Err(ENXIO);
                 }
                 if node.is_dir() {
                     if writable || (creating && flags & O_DIRECTORY == 0) {
@@ -1110,6 +1145,8 @@ fn fill_dirents(
                     abi::DT_DIR
                 } else if is_symlink(fs, e) {
                     abi::DT_LNK
+                } else if fs.node(e).is_some_and(ramfs::Node::is_socket) {
+                    abi::DT_SOCK
                 } else {
                     abi::DT_REG
                 };

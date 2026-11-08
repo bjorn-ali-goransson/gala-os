@@ -60,6 +60,7 @@ pub mod statedump;
 pub mod sync;
 pub mod time;
 pub mod trust;
+pub mod unix;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 

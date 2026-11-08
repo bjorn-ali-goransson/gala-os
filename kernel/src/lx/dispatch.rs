@@ -32,6 +32,7 @@ use super::socket;
 use super::state::{self, Fd, LxProcess, Object, PIPE_MAX, PIPE_PAGE, Stream};
 use super::syscalls::{self, nr};
 use super::time;
+use super::unix;
 use crate::mm::heap::{KArc, TryVec};
 use crate::nt::object::ObjectBody;
 use crate::nt::platform::{self, Personality, SyscallFrame, UserRegs};
@@ -67,6 +68,8 @@ const F_DUPFD: u64 = 0;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const F_SETPIPE_SZ: u64 = 1031;
 const F_GETPIPE_SZ: u64 = 1032;
+const F_ADD_SEALS: u64 = 1033;
+const F_GET_SEALS: u64 = 1034;
 const FD_CLOEXEC: u64 = 1;
 /// Writes up to this size to a pipe are atomic (PIPE_BUF).
 const PIPE_BUF: usize = 4096;
@@ -253,6 +256,7 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::SYMLINK => file::symlinkat(call, a(0), file::AT_FDCWD, a(1)),
         nr::SYMLINKAT => file::symlinkat(call, a(0), a(1), a(2)),
         nr::FTRUNCATE => file::ftruncate(call, a(0), a(1)),
+        nr::MEMFD_CREATE => super::memfd::memfd_create(call, a(0), a(1)),
         nr::TRUNCATE => file::truncate(call, a(0), a(1)),
         nr::FSYNC | nr::FDATASYNC => file::fsync(call, a(0)),
         nr::CHMOD => file::chmod(call, file::ChmodTarget::Path(file::AT_FDCWD, a(0)), a(1)),
@@ -278,18 +282,56 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::SELECT => super::poll::select(call, a(0), a(1), a(2), a(3), a(4)),
         nr::PSELECT6 => super::poll::pselect6(call, a(0), a(1), a(2), a(3), a(4), a(5)),
         nr::SOCKET => socket::socket(call, a(0), a(1), a(2)),
-        nr::BIND => socket::bind(call, a(0), a(1), a(2)),
-        nr::LISTEN => socket::listen(call, a(0), a(1)),
-        nr::ACCEPT => socket::accept4(call, a(0), a(1), a(2), 0),
-        nr::ACCEPT4 => socket::accept4(call, a(0), a(1), a(2), a(3)),
-        nr::CONNECT => socket::connect(call, a(0), a(1), a(2)),
-        nr::SENDTO => socket::sendto(call, a(0), a(1), a(2), a(3)),
-        nr::RECVFROM => socket::recvfrom(call, a(0), a(1), a(2), a(3), a(4), a(5)),
-        nr::SHUTDOWN => socket::shutdown(call, a(0), a(1)),
-        nr::GETSOCKNAME => socket::getsockname(call, a(0), a(1), a(2)),
-        nr::GETPEERNAME => socket::getpeername(call, a(0), a(1), a(2)),
-        nr::SETSOCKOPT => socket::setsockopt(call, a(0), a(1), a(2), a(3), a(4)),
-        nr::GETSOCKOPT => socket::getsockopt(call, a(0), a(1), a(2), a(3), a(4)),
+        nr::SOCKETPAIR => unix::socketpair(call, a(0), a(1), a(2), a(3)),
+        nr::SENDMSG => unix::sendmsg(call, a(0), a(1), a(2)),
+        nr::RECVMSG => unix::recvmsg(call, a(0), a(1), a(2)),
+        nr::BIND => match unix::of(call, a(0)) {
+            Some((_, u)) => unix::bind(call, a(0), &u, a(1), a(2)),
+            None => socket::bind(call, a(0), a(1), a(2)),
+        },
+        nr::LISTEN => match unix::of(call, a(0)) {
+            Some((_, u)) => unix::listen(call, a(0), &u, a(1)),
+            None => socket::listen(call, a(0), a(1)),
+        },
+        nr::ACCEPT | nr::ACCEPT4 => {
+            let flags = if n == nr::ACCEPT { 0 } else { a(3) };
+            match unix::of(call, a(0)) {
+                Some((f, u)) => unix::accept4(call, a(0), &f, &u, a(1), a(2), flags),
+                None => socket::accept4(call, a(0), a(1), a(2), flags),
+            }
+        }
+        nr::CONNECT => match unix::of(call, a(0)) {
+            Some((f, u)) => unix::connect(call, a(0), &f, &u, a(1), a(2)),
+            None => socket::connect(call, a(0), a(1), a(2)),
+        },
+        nr::SENDTO => match unix::of(call, a(0)) {
+            Some((f, u)) => unix::send(call, &f, &u, a(1), a(2), a(3), a(4)),
+            None => socket::sendto(call, a(0), a(1), a(2), a(3)),
+        },
+        nr::RECVFROM => match unix::of(call, a(0)) {
+            Some(_) => unix::recvfrom(call, a(0), a(1), a(2), a(3), a(4), a(5)),
+            None => socket::recvfrom(call, a(0), a(1), a(2), a(3), a(4), a(5)),
+        },
+        nr::SHUTDOWN => match unix::of(call, a(0)) {
+            Some((_, u)) => unix::shutdown(&u, a(1)),
+            None => socket::shutdown(call, a(0), a(1)),
+        },
+        nr::GETSOCKNAME => match unix::of(call, a(0)) {
+            Some((_, u)) => unix::getsockname(call, &u, a(1), a(2)),
+            None => socket::getsockname(call, a(0), a(1), a(2)),
+        },
+        nr::GETPEERNAME => match unix::of(call, a(0)) {
+            Some((_, u)) => unix::getpeername(call, &u, a(1), a(2)),
+            None => socket::getpeername(call, a(0), a(1), a(2)),
+        },
+        nr::SETSOCKOPT => match unix::of(call, a(0)) {
+            Some((_, u)) => unix::setsockopt(call, &u, a(1), a(2), a(3), a(4)),
+            None => socket::setsockopt(call, a(0), a(1), a(2), a(3), a(4)),
+        },
+        nr::GETSOCKOPT => match unix::of(call, a(0)) {
+            Some((_, u)) => unix::getsockopt(call, &u, a(1), a(2), a(3), a(4)),
+            None => socket::getsockopt(call, a(0), a(1), a(2), a(3), a(4)),
+        },
         nr::CLOCK_GETTIME => time::clock_gettime(call, a(0), a(1)),
         nr::CLOCK_GETRES => time::clock_getres(call, a(0), a(1)),
         nr::GETTIMEOFDAY => time::gettimeofday(call, a(0), a(1)),
@@ -377,6 +419,7 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
         | Object::File(_)
         | Object::Device(_)
         | Object::Socket(_)
+        | Object::Unix(_)
         | Object::Epoll(_) => None,
     };
     match cmd {
@@ -398,7 +441,7 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
                 Object::PipeWrite(_) => 1,
                 Object::Console(_) => 2,
                 Object::File(file) => file::status_flags(file),
-                Object::Socket(_) | Object::Epoll(_) => file::O_RDWR,
+                Object::Socket(_) | Object::Unix(_) | Object::Epoll(_) => file::O_RDWR,
                 Object::Device(d) => match (d.readable, d.writable) {
                     (true, true) => file::O_RDWR,
                     (false, true) => file::O_WRONLY,
@@ -418,6 +461,8 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
             Ok(0)
         }
         F_GETPIPE_SZ => Ok(pipe.ok_or(EBADF)?.state.lock().capacity as u64),
+        F_ADD_SEALS => super::memfd::add_seals(call, &f, fd, arg),
+        F_GET_SEALS => super::memfd::get_seals(&f),
         F_SETPIPE_SZ => {
             let pipe = pipe.ok_or(EBADF)?;
             // Whole pages, a power of two of them, at least one.
@@ -507,6 +552,7 @@ fn lseek(call: &Call<'_>, fd: u64, offset: u64, whence: u64) -> Result {
         | Object::PipeWrite(_)
         | Object::Console(_)
         | Object::Socket(_)
+        | Object::Unix(_)
         | Object::Epoll(_) => Err(ESPIPE),
         Object::File(file) => file::lseek(file, offset, whence),
         // A device's position means nothing: always 0.
@@ -563,6 +609,7 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         Object::File(file) => file::read(call, file, buf, count),
         Object::Device(dev) => file::device_read(call, dev, buf, count),
         Object::Socket(sock) => socket::recv(call, &f, sock, buf, count, 0),
+        Object::Unix(u) => unix::recv(call, fd, &f, u, buf, count, 0),
         Object::PipeRead(pipe) => loop {
             if count == 0 {
                 return Ok(0);
@@ -613,6 +660,7 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         Object::Socket(sock) => socket::send(call, &f, sock, count as usize, 0, |at, out| {
             call.process.read(buf + at as u64, out).map_err(|_| EFAULT)
         }),
+        Object::Unix(u) => unix::send(call, &f, u, buf, count, 0, 0),
         Object::Console(stream) => {
             // A piece at a time; a fault after some pieces ends the write
             // with what was written, one at the start is EFAULT.
@@ -842,6 +890,7 @@ fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
             out.copy_from_slice(&data[at..at + out.len()]);
             Ok(())
         }),
+        Object::Unix(u) => unix::send_bytes(call, &f, u, data),
         Object::Console(stream) => {
             call.lx.console_write(*stream, data).map_err(|_| ENOMEM)?;
             Ok(data.len() as u64)

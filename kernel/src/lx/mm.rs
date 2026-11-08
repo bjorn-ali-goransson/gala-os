@@ -37,8 +37,9 @@
 use alloc::vec::Vec;
 
 use super::dispatch::Call;
-use super::errno::{EACCES, EBADF, EEXIST, EFAULT, EINVAL, ENODEV, ENOMEM, EOVERFLOW};
+use super::errno::{EACCES, EBADF, EEXIST, EFAULT, EINVAL, ENODEV, ENOMEM, EOVERFLOW, EPERM};
 use super::state::Object;
+use crate::fs::ramfs::{SEAL_FUTURE_WRITE, SEAL_WRITE};
 use crate::mm::heap::TryVec;
 use crate::nt::object::{KObject, ObjectBody};
 use crate::nt::process::Process;
@@ -231,9 +232,23 @@ fn file_source(
         return Err(EACCES);
     }
     let node = file.node;
-    let size = crate::nt::file::with_fs(|fs| fs.node(node).map_or(0, crate::fs::ramfs::Node::size));
-    let section = Section::new_linux_file(file.clone(), node, size, shared, file.writable)
-        .map_err(|s| if s == NtStatus::NO_MEMORY { ENOMEM } else { ENODEV })?;
+    let (size, seals) =
+        crate::nt::file::with_fs(|fs| fs.node(node).map_or((0, None), |n| (n.size(), n.seals())));
+    // A file sealed against writing (`lx::memfd`) maps shared only
+    // read-only, and its section cannot be made writable (mprotect:
+    // EACCES).
+    let sealed = seals.unwrap_or(0) & (SEAL_WRITE | SEAL_FUTURE_WRITE) != 0;
+    if sealed && shared && prot & PROT_WRITE != 0 {
+        return Err(EPERM);
+    }
+    let writable = file.writable && !sealed;
+    let section = match Section::new_linux_file(file.clone(), node, size, shared, writable) {
+        Ok(s) => s,
+        Err(NtStatus::NO_MEMORY) => return Err(ENOMEM),
+        // Sealed between the look above and the mapping.
+        Err(NtStatus::ACCESS_DENIED) => return Err(EPERM),
+        Err(_) => return Err(ENODEV),
+    };
     Ok(Source::File(section, offset))
 }
 

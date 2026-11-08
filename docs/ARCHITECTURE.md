@@ -43,6 +43,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
   src/fs/               ramfs (C:), USTAR boot modules, the persistence log
   src/net/              virtio-net, loopback, smoltcp TCP/UDP
+  src/unix.rs           AF_UNIX sockets as core objects (seam 5): names, connections, rights in flight
   src/display/          virtio-gpu (`display=virtio`): protocol, driver (host-tested), PCI transport
   src/input.rs          PS/2 mouse polling for the desktop
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
@@ -1617,6 +1618,24 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   lives on *detached*, nlink 0, freed at its last close, never recorded
   again). `exchange` swaps two names (renameat2's RENAME_EXCHANGE) by
   three renames under the file system's lock.
+- **Anonymous files** (`create_anonymous`, Linux's memfd_create:
+  `lx::memfd`): made detached (in no directory, nlink 0), opened once,
+  freed at their last close, never recorded. Their seals
+  (`Node::seals`, Linux's F_SEAL_* bits; None for every other file,
+  which cannot be sealed) are checked by `write`, `set_size`, `map` and
+  `set_mode` under the file system's lock, and `add_seals` refuses
+  SEAL_WRITE while a section maps the file writable (`write_maps`), so a
+  seal and a writer never race.
+- **Socket nodes** (`create_socket`: a bound AF_UNIX socket's name,
+  `unix`): no contents (`FsError::Socket`: Linux's open is ENXIO);
+  what is bound to one is the socket layer's, keyed by the node, which
+  the bound socket keeps open so its id is not reused while bound. NT
+  sees a reparse point (FILE_ATTRIBUTE_REPARSE_POINT, an open without
+  FILE_OPEN_REPARSE_POINT STATUS_IO_REPARSE_TAG_NOT_HANDLED), as Windows
+  shows an AF_UNIX socket's file. Not kept across reboots (the change
+  log has no record for them; a later change of the name replays as a
+  change of a missing path, skipped): what was bound to one is gone
+  then anyway.
 
 - **Contents from boot modules**: modules appear read-only in `C:\gala`
   (or the directory their module string names), copied to the heap on
@@ -8138,7 +8157,7 @@ Design rules:
 | 2. Per-process system-call dispatch | built |
 | 3. Core process vs NT process | built (the `Core` still lives in `nt`) |
 | 4. File-system metadata | built for Linux (NT surface planned) |
-| 5. Shared objects | planned |
+| 5. Shared objects | first object built: AF_UNIX sockets (`unix`); pipes, files and TCP sockets planned |
 | 6. `net` free of `nt` | built |
 
 1. **Terminal core**: the pty as a core object (master/slave pair with a
@@ -8214,6 +8233,73 @@ Design rules:
    (CreateSymbolicLinkW).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
+   The first is the AF_UNIX socket ("AF_UNIX sockets" below): the core
+   `unix` module owns the socket, its name, its connection, its queues
+   and the rights in flight; `lx::unix` is the Linux view, Windows'
+   AF_UNIX through afd will be the NT one. Pipes, files and TCP sockets
+   still keep their state in the personalities.
+
+#### AF_UNIX sockets
+
+Where a socket and its file-system name live is seam 5's question; the
+answer keeps both core objects, so a Windows program's AF_UNIX socket
+(Windows has one, through afd, `AF_UNIX` = 1, a socket file shown as a
+reparse point) can later bind, connect to and accept from the same
+names and connections as a Linux program's.
+
+- **The socket** is `unix::Socket` (`kernel/src/unix.rs`, core: no
+  `nt`, no `lx`; xtask's `unix_sockets_do_not_depend_on_a_personality`
+  keeps it so): its kind (stream, seqpacket, datagram), its creator's
+  credentials (`Cred`: pid, uid, gid), its name, its phase (fresh,
+  listening with its queue of connections not yet accepted, connected
+  to a `Conn`), its peer's name and credentials, and its waiters
+  (`Waiters`: thread ids, woken through `crate::runtime`). A
+  personality wraps it in its own description (`lx::unix::UnixSocket`
+  in an `lx::state::Fd`; an afd endpoint for NT) and calls `release`
+  at that description's last close.
+- **The name** is either a socket node of the shared file system
+  (`RamFs::create_socket`: a node of its own kind, S_IFSOCK for Linux,
+  a reparse point for NT, as Windows shows an AF_UNIX socket's file) or
+  an abstract name (bytes after a leading NUL: in no file system). The
+  binding (name to socket) is the core's table `BOUND`, keyed by the
+  node's id or the abstract bytes, not a field of the node: the node is
+  the file system's and outlives the socket (Linux leaves a socket's
+  file behind when it closes; a connect to it is then ECONNREFUSED),
+  the binding lives exactly as long as the bound socket. The bound
+  socket keeps the node open (an open without data access), so an
+  unlinked node's id is not reused while the binding names it; rename
+  keeps the binding (the node is the same). Path resolution, the mode
+  (0777 less the umask) and the errors of a path stay the
+  personality's.
+- **A connection** (`Conn`) holds a queue toward each side (records:
+  bytes, the rights that came with them, the quota charge for them),
+  each side's shutdown flags as Linux keeps them (RCV, SEND; a stream
+  or seqpacket side that closes sets both on its peer) and arrival
+  counters (epoll's EPOLLET). It references its sockets' waiters, not
+  the sockets, so nothing cycles. connect makes the listener's side at
+  once and queues it for accept (backlog + 1 may wait, as Linux; then
+  `Error::Full` with the listener's waiters to block on).
+- **Rights** (Linux's SCM_RIGHTS) are opaque to the core
+  (`Box<dyn Any + Send>`): the Linux view passes `KArc<Fd>`, so the
+  receiver's descriptor is the same open file description (its offset,
+  its flags, a memfd's pages). The core drops rights only outside its
+  locks: dropping one can release another socket. A stream read stops
+  after a record that carried rights, so they arrive with their bytes.
+- **Waiting** is the personality's: add to the socket's waiters,
+  prepare, look again, block (`lx::unix::wait_on`; poll and epoll put
+  the thread on the waiters through `poll::Watch`). Every change of a
+  socket, its connection or its listener's queue wakes them.
+- **Limits**: `CAPACITY` (212992, Linux's default send buffer) per
+  direction, each message counting `RECORD_OVERHEAD` more; charged to
+  the sending process's nonpaged pool quota (`quota::Held`: ENOBUFS
+  over it). Not kept across reboots (socket nodes are not in the change
+  log). Rights that refer back to their own queue through a socket
+  (a socket sent over itself) are not collected (Linux has a collector
+  for such cycles).
+- **Observability**: `unix::dump` in the state dump (`dump: unix:` a
+  line per named socket: kind, creator, name, phase, queued, shutdown,
+  peer, waiters); the personality's events (`lx unix`, `lx unix
+  rights`).
 6. **`net` free of `nt`**: `kernel/src/net/` reaches threads, waits and
    time through `crate::runtime` (`kernel/src/runtime.rs`): the kernel's
    `sched`/`time`, or with `hosted` gala-um's host threads and clocks
@@ -8235,7 +8321,7 @@ calls; priorities come from `strace` of target programs on real Linux.
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
 | 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run, by name through symbolic links (`lx_busybox`); links, unlink of open files, case-sensitive directories (`lx_fs`); threads, futex and musl's pthreads run (`lx_thread`) |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
-| 4 | dynamic linking (ld.so, glibc), epoll, sockets | glibc programs run through ld.so with shared libraries, dlopen and TLS (`lx_dyn`, ROADMAP LD step 1); TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
+| 4 | dynamic linking (ld.so, glibc), epoll, sockets | glibc programs run through ld.so with shared libraries, dlopen and TLS (`lx_dyn`, ROADMAP LD step 1); TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); AF_UNIX sockets with SCM_RIGHTS and memfd (`lx_unix`, `lx_memfd`, LD step 2); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
 
 Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
@@ -8246,7 +8332,9 @@ exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
 `lx_epoll`, `lx_fs`, each also `_pie`), forkmem_test (fork's memory:
 copy-on-write private pages, shared MAP_SHARED anonymous memory and its
-futexes: `lx_forkmem`, `_pie`), dyn_test (glibc, dynamic:
+futexes: `lx_forkmem`, `_pie`), memfd_test (`lx_memfd`, also `_pie`;
+ROADMAP LD step 2), unix_test (`lx_unix`, also `_pie`; LD step 2),
+dyn_test (glibc, dynamic:
 `lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
@@ -8436,7 +8524,10 @@ The running parts (milestone 1; `lxrun=`):
     file's view); else with MREMAP_MAYMOVE moves the mapping whole (to a
     free range, or MREMAP_FIXED's address, replacing what is there):
     its VAD runs, its views and its pages move, frames and all
-    (`UserSpace::move_page`: no copy). The range must be mapped
+    (`UserSpace::move_page`: no copy). A file view reaches as far as
+    the file is when a page is touched (`Section::frame` asks the file
+    system), so a mapping grown after the file grew shows the new pages
+    (memfd_test). The range must be mapped
     (EFAULT); without MREMAP_MAYMOVE and no room ENOMEM;
     MREMAP_DONTUNMAP and old length 0 are EINVAL, ledgered.
   - **madvise**: MADV_DONTNEED drops the range's frames (anonymous pages
@@ -8448,6 +8539,28 @@ The running parts (milestone 1; `lxrun=`):
   - execve unmaps everything, views too (`mm::clear`). The program and
     its interpreter are still mapped by copying their bytes into private
     pages (not as file views: ROADMAP LD).
+- **memfd** (`lx::memfd`; memfd_test, `lx_memfd`): memfd_create
+  (MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL: mode 0666 and
+  F_SEAL_EXEC; MFD_HUGETLB and unknown flags EINVAL, ledgered; a name of
+  more than 249 bytes EINVAL) makes an anonymous file of the shared file
+  system ("Files": `RamFs::create_anonymous`), S_IFREG mode 0777 (no
+  umask), nlink 0, open read-write as one description, so read, write,
+  pread/pwrite, lseek, ftruncate, fstat and fchmod are the file calls'.
+  Its pages are the file's whole pages, so every mapping of it shares
+  them: in one process, through a fork, or a descriptor passed with
+  SCM_RIGHTS (the same description). fcntl F_ADD_SEALS/F_GET_SEALS:
+  the seals live on the node (`ramfs::Node::seals`); SHRINK and GROW
+  refuse a ftruncate that shrinks or grows it and a write past its end,
+  WRITE (and FUTURE_WRITE) writes and writable shared mappings (EPERM),
+  EXEC a change of the execute bits, SEAL further seals (EPERM); WRITE
+  cannot be added while a shared mapping of it open for writing exists,
+  even a read-only one (EBUSY, as Linux 6.18 shows); a read-only shared
+  mapping of a write-sealed file gets a read-only section (mprotect to
+  PROT_WRITE: EACCES). F_ADD_SEALS on an fd not open for writing is
+  EPERM, on what is not a memfd EINVAL. A process's memory is released
+  when it ends (`lx::process_ended`: `mm::clear`, before the parent
+  hears of it, as Linux does), so its mappings no longer count then.
+  Events: `lx memfd` and `lx memfd seal` (`events=ipc`).
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
   munmap, mremap, madvise, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
@@ -8570,8 +8683,9 @@ The running parts (milestone 1; `lxrun=`):
 - **Sockets** (`lx::socket`; socket_test): AF_INET and AF_INET6 (dual
   stack unless IPV6_V6ONLY) stream sockets on `net::tcp`, the stack NT's
   AFD uses, with a token AFD does not know (Linux sockets poll, the
-  notify hook is AFD's): socket (SOCK_NONBLOCK, SOCK_CLOEXEC; datagram,
-  Unix and netlink sockets ledgered, refused), bind, listen (binds an
+  notify hook is AFD's): socket (SOCK_NONBLOCK, SOCK_CLOEXEC; datagram
+  and netlink sockets ledgered, refused; AF_UNIX is `lx::unix`), bind,
+  listen (binds an
   ephemeral port first if needed), accept/accept4, connect (blocking;
   non-blocking always EINPROGRESS, the next connect after it finished
   returns 0 once, then EISCONN; refused: ECONNREFUSED or SO_ERROR once,
@@ -8583,7 +8697,43 @@ The running parts (milestone 1; `lxrun=`):
   SO_REUSEADDR, SO_KEEPALIVE, SO_REUSEPORT, SO_BROADCAST, buffer sizes
   (doubled, as Linux reports them), SO_LINGER, timeouts, TCP_NODELAY
   kept and read back without effect on the stack; others ENOPROTOOPT,
-  ledgered). A socket closes with its last description.
+  ledgered), sendmsg/recvmsg (`lx::unix`'s: the iovecs gathered and
+  scattered; control data on TCP EINVAL, ledgered). A socket closes
+  with its last description.
+- **AF_UNIX sockets** (`lx::unix` on the core's `unix`, "AF_UNIX
+  sockets" above; unix_test, `lx_unix`): socket (SOCK_STREAM,
+  SOCK_SEQPACKET, SOCK_DGRAM, SOCK_RAW as datagram as Linux takes it,
+  other types ESOCKTNOSUPPORT; protocol 0 or PF_UNIX, else
+  EPROTONOSUPPORT) and socketpair (another family EOPNOTSUPP); bind to a
+  path (a socket node, mode 0777 less the umask; an existing name, even
+  the socket's own, EADDRINUSE; a missing directory ENOENT; a family
+  other than AF_UNIX or a length past 110 EINVAL), to an abstract name,
+  or autobind (only the family: a NUL and five hex digits); listen
+  (unbound or connected EINVAL; a datagram socket EOPNOTSUPP); accept
+  and accept4 (the peer's name, unnamed: the family alone; not
+  listening EINVAL); connect (the path followed: ENOENT; not a socket,
+  or nothing listening there, ECONNREFUSED; another kind EPROTOTYPE;
+  connected EISCONN; a full backlog EAGAIN, or it blocks); read/write,
+  readv/writev, send/recv/sendto/recvfrom, sendmsg/recvmsg (MSG_PEEK,
+  MSG_DONTWAIT, MSG_WAITALL, MSG_NOSIGNAL, MSG_TRUNC,
+  MSG_CMSG_CLOEXEC; an unconnected stream's read EINVAL, write
+  ENOTCONN; EPIPE with SIGPIPE on a stream or seqpacket that cannot
+  send; a datagram to a pair whose peer went ECONNREFUSED; a message
+  truncated: MSG_TRUNC); SCM_RIGHTS (the fds checked, EBADF, at most
+  253; recvmsg installs what its control buffer holds, the rest closed
+  with MSG_CTRUNC; msg_controllen the CMSG_SPACE used, at most what was
+  given; msg_flags keeps MSG_CMSG_CLOEXEC, as Linux's do); shutdown
+  (unconnected: 0); getsockname/getpeername (a path with its NUL in the
+  length; the socket keeps its name after an unlink); SO_TYPE,
+  SO_DOMAIN, SO_PROTOCOL, SO_ACCEPTCONN, SO_ERROR, SO_PEERCRED,
+  SO_PASSCRED, SO_SNDBUF/SO_RCVBUF (doubled), the timeouts (kept);
+  poll and epoll (a fresh socket OUT|HUP, a listener IN with a
+  connection waiting, a connection IN with bytes or a shut peer, RDHUP
+  then, OUT while a quarter of the buffer or less waits, HUP once both
+  directions are shut; a datagram pair's peer going changes nothing
+  but sends). fstat: S_IFSOCK; open of a socket's node ENXIO; stat
+  S_IFSOCK; getdents DT_SOCK. Not yet, ledgered: a datagram socket's
+  connect or sendto by name, SCM_CREDENTIALS, rights on a peek.
 - **poll** (`lx::poll`; poll_test's poll and select parts, socket_test):
   poll, ppoll, select, pselect6 over every kind of description (pipes:
   IN with bytes, HUP without writers, OUT with a whole page free, ERR
@@ -8625,10 +8775,11 @@ The running parts (milestone 1; `lxrun=`):
   after its check finds it waiting. poll, select and epoll add the
   thread to every pipe they look at (`poll::Watch`) and look once more
   after preparing. Sleeps, rt_sigsuspend, pause, rt_sigtimedwait,
-  futex waits and wait4 block the same way. Sockets have no wait queue
-  (the stack's notify hook is AFD's): their waits, and poll/epoll over a
-  socket or a nested epoll, look again every millisecond (`dispatch::
-  pause`, `wait::POLL_NS`) until seam 5 gives the core objects queues.
+  futex waits and wait4 block the same way, and AF_UNIX sockets on
+  their core waiters. TCP sockets have no wait queue (the stack's
+  notify hook is AFD's): their waits, and poll/epoll over a TCP socket
+  or a nested epoll, look again every millisecond (`dispatch::pause`,
+  `wait::POLL_NS`) until seam 5 gives the core objects queues.
 - **Threads** (`lx::threads`; thread_test): clone with
   CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD (required)
   and CLONE_SYSVSEM, CLONE_SETTLS, CLONE_PARENT_SETTID,
@@ -8830,7 +8981,11 @@ The running parts (milestone 1; `lxrun=`):
   image's `lx: exec` line; a refused image logs `lx: pid <p> execve
   <path> failed: <why>`, one that cannot be mapped after the old is gone
   `... killed by SIGSEGV`. Sockets: the stack's `tcp accept`, `tcp
-  connect`, `tcp close` events (`events=net`). Threads: an `lx thread`
+  connect`, `tcp close` events (`events=net`); AF_UNIX: `lx unix`
+  events (socketpair, bind, listen, connect, accept, the close of a
+  named socket; refusals with their errno) and `lx unix rights` (sent,
+  received, dropped), memfd: `lx memfd` and `lx memfd seal`
+  (`events=ipc`); the state dump's `dump: unix:` lines. Threads: an `lx thread`
   event per clone (pid, tid, flags) after the core's `thread create`; a
   failed clone logs why. The state dump (OBSERVABILITY "State dump")
   lists every Linux thread (Linux and core tid, mask, pending, blocked
@@ -8881,7 +9036,8 @@ The running parts (milestone 1; `lxrun=`):
   CPU time (the CPU clocks,
   ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
   (seam 4's rest; one user so far); a /dev
-  directory and /proc; datagram and Unix sockets; process groups
+  directory and /proc; datagram sockets (AF_INET; AF_UNIX ones by
+  name), SCM_CREDENTIALS; process groups
   and sessions; a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
   name them yet).
@@ -9032,19 +9188,21 @@ messages. It is bounded and isolated like the other ABI parsers:
 
 ### Prerequisites in the LX layer
 
-- **`AF_UNIX` stream sockets**: socket, bind to a path, listen, accept,
-  connect, socketpair. They carry ancillary data: `SCM_RIGHTS` (file
+- **`AF_UNIX` stream sockets** (built: the core's `unix`, "AF_UNIX
+  sockets" under "The seams"; `lx::unix`, `lx_unix`): socket, bind to a
+  path, listen, accept, connect, socketpair, with `SCM_RIGHTS` (file
   descriptors move between processes as references to the same open
-  file) and `SO_PEERCRED`. Wayland's socket is
-  `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` (`/run/user/<uid>/wayland-0`). The
-  socket's file-system node is a core object, so seam 5 (shared core
-  objects) is the place for it. D-Bus, which GTK also opens, needs the same
-  sockets.
-- **`memfd_create`** with `ftruncate`, `mmap(MAP_SHARED)`, and `F_ADD_SEALS`
-  as far as clients use it: an anonymous file whose pages are one section,
-  shared by every process that maps it. LD step 1's file views provide the
-  mapping. The server reads a `wl_shm_pool` through the same section, with
-  no copy until composition.
+  file) and `SO_PEERCRED`; seqpacket and datagram pairs too. Wayland's
+  socket is `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`
+  (`/run/user/<uid>/wayland-0`); the kernel's server binds it through
+  the same core table (`unix::Socket::bind` on a node it makes), so a
+  client's connect finds it as it finds any listener. D-Bus, which GTK
+  also opens, needs the same sockets.
+- **`memfd_create`** (built: `lx::memfd`, `lx_memfd`) with `ftruncate`,
+  `mmap(MAP_SHARED)`, and the seals: an anonymous file of the shared file
+  system whose pages every mapping shares (LD step 1's file views). The
+  server reads a `wl_shm_pool` through a view of the same pages, with no
+  copy until composition.
 - Each prerequisite is test first, in the corpus: a `unix_test` and a
   `memfd_test` against real Linux transcripts.
 
