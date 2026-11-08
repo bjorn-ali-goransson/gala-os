@@ -1115,10 +1115,10 @@
       "asserts": "CHECK(w != NULL && cbt_creates == 1 && cbt_created == w && title_seen == 1);",
       "certainty": "exact (user\\user32_test\\main.c:289, the line the report names)",
       "report_line": "user32_test: check 42 (line 289) failed",
-      "windows": null,
+      "windows": "One CreateWindowExW raises HCBT_CREATEWND twice when the new window is the first in its thread: once for the window itself and once for the thread's default IME window, class \"IME\", title \"Default IME\". With a window already created in the thread it fires once.",
       "class": "expectation",
-      "evidence": "needs a probe: what does this machine do here?",
-      "note": null
+      "evidence": "probed here with a WH_CBT hook on the current thread, logging each HCBT_CREATEWND's hwnd, GetClassNameW and the CREATESTRUCT's title, as the analysis asked. First window in the thread: [('ProbeB','hooked'), ('IME','Default IME')]. With one window made beforehand: [('ProbeB','hooked')].",
+      "note": "A real divergence that the test can absorb: check 42 asserts cbt_creates == 1, and the hooked window is the thread's first, so Windows makes the IME window inside the same call and the hook counts two. gala presumably creates no IME window, which is why it passes there. The test can create a throwaway window before installing the hook, ignore HCBT_CREATEWND for class \"IME\", or count the window it asked for rather than the calls."
     },
     {
       "program": "vmcycle_test",
