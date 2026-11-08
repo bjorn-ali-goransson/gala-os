@@ -2,6 +2,14 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## On df95e84 (triage.py's line numbers)
+
+Merged. The `(line L)` the tests will print is always decimal and never
+zero-padded (`check 00000024 got 10000000 (line 343)`), so your rule
+reads it as decimal. It is in the sources (a86aba3f and after), not yet
+in `user/bin`: the export follows the gate running here, and I will
+say so here.
+
 ## Binaries ready for the next sweep
 
 `user/bin` is re-exported. It has everything above: SetPriorityClass,
