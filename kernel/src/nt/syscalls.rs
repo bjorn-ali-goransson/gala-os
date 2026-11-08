@@ -1113,9 +1113,7 @@ fn nt_resume_process(call: &mut Call<'_>) -> NtStatus {
 fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
     let handle = Handle(arg!(call, 0));
     let status = NtStatus(arg!(call, 1) as u32);
-    if status.0 == STATUS_CONTROL_C_EXIT
-        && (handle == Handle(0) || handle == Handle::CURRENT_PROCESS)
-    {
+    if handle == Handle(0) || handle == Handle::CURRENT_PROCESS {
         ctrl_exit_ordered(call);
     }
     if handle == Handle(0) {
@@ -1898,24 +1896,25 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
     }
 }
 
-/// STATUS_CONTROL_C_EXIT: how a process ended by Ctrl+C ends (Windows'
-/// default handler).
-const STATUS_CONTROL_C_EXIT: u32 = 0xc000_013a;
-/// How long a process ending because of Ctrl+C waits for the session's
-/// other handler threads to take it: a backstop for one busy with an
-/// earlier event, logged when reached.
+/// How long a process ending while it handles a Ctrl+C waits for the
+/// session's other handler threads to take it: a backstop for one busy
+/// with an earlier event, logged when reached.
 const CTRL_EXIT_BACKSTOP_MS: i64 = 1000;
 
-/// A process ending with STATUS_CONTROL_C_EXIT (its default handler, for
-/// Ctrl+C k) is seen to end only once every other process of its console
-/// session with a handler thread has taken Ctrl+C k: on Windows the
-/// parent's handler starts about 12 ms before a handler-less child's end
-/// is visible (6 of 6 runs, #33), so a shell's handler has run before the
-/// shell sees its child end and prompts (sshd_shell; ROADMAP SSH item 7).
+/// A process ending itself after its handler thread took Ctrl+C k (the
+/// default handler's STATUS_CONTROL_C_EXIT, or a handler that exits, as
+/// busybox-w32's does with its own status) is seen to end only once every
+/// other process of its console session with a handler thread has taken
+/// Ctrl+C k: on Windows the parent's handler starts about 12 ms before a
+/// handler-less child's end is visible (6 of 6 runs, #33), so a shell's
+/// handler has run before the shell sees its child end and prompts
+/// (sshd_shell). A process that took no Ctrl+C, or ends long after the
+/// others took it, does not wait.
 fn ctrl_exit_ordered(call: &Call<'_>) {
     let Some(session) = call.process.console.clone() else { return };
-    let count = session.ctrl_count();
     let me = call.process.id;
+    // The Ctrl+C it is ending with: the last one its handler took.
+    let Some(count) = session.taken_by(me).filter(|&c| c != 0) else { return };
     let start = platform::monotonic_ns();
     let mut late = [0u64; 4];
     loop {

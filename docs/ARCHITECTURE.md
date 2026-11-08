@@ -1974,9 +1974,11 @@ xtask types: "hi" with ReadFile, echoed, the program getting "hi\r\n";
   Ctrl+C k after m ms`, a warning from 250 ms: late is a lost wake-up;
   event `console ctrl taken`). GalaConsoleCtrl has a 1 s backstop.
   The session keeps each process's handler thread as a taker with the
-  last Ctrl+C it took. A process ending with STATUS_CONTROL_C_EXIT
-  (NtTerminateProcess on itself, as the default handler does) waits
-  until every other taker has taken that Ctrl+C before it ends, so a
+  last Ctrl+C it took. A process ending itself (NtTerminateProcess on
+  itself, whatever the status: the default handler's
+  STATUS_CONTROL_C_EXIT, or a handler that exits, as busybox-w32's does
+  with its own) after its handler took Ctrl+C k waits until every other
+  taker has taken k before it ends, so a
   shell's handler has run before the shell can see its child end (on
   Windows the parent's handler starts about 12 ms before a
   handler-less child's end is visible; handlers otherwise start
