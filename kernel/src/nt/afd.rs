@@ -388,13 +388,22 @@ const ONCE: u32 = AFD_POLL_CONNECT | AFD_POLL_CONNECT_ERR;
 /// WSAEventSelect's half of a readiness change: the selected events that
 /// hold now are recorded (those of ONCE only the first time) and the
 /// event is set.
+///
+/// Recording and setting the event happen under the selection's lock, as
+/// WSAEnumNetworkEvents' copy, clear and reset do (`get_events`): a record
+/// made between that copy and that reset would keep its bit but lose its
+/// signal (FD_CONNECT is recorded once: nothing would signal it again).
 fn check_select(state: &EndpointState) {
-    let Some((event, mask)) = state.select.lock().clone() else { return };
-    let ready = poll_events(state) & mask & !state.recorded_once.load(Ordering::Acquire);
+    // The readiness first (it takes the socket slot and the stack's lock),
+    // then the record and the signal under the selection's lock.
+    let ready_now = poll_events(state);
+    let select = state.select.lock();
+    let Some((event, mask)) = select.as_ref() else { return };
+    let ready = ready_now & mask & !state.recorded_once.load(Ordering::Acquire);
     if ready != 0 {
         state.recorded_once.fetch_or(ready & ONCE, Ordering::AcqRel);
         state.recorded.fetch_or(ready, Ordering::AcqRel);
-        wait::set_signal(&event, 1);
+        wait::set_signal(event, 1);
     }
 }
 
@@ -416,10 +425,19 @@ pub fn event_select(socket: &ObjectRef, event: Option<ObjectRef>, mask: u32) -> 
 }
 
 /// IOCTL_AFD_GET_EVENTS (WSAEnumNetworkEvents): the recorded events,
-/// cleared.
-pub fn get_events(socket: &ObjectRef) -> Result<u32, NtStatus> {
+/// cleared, and `event` (the caller's, if given) reset, in one step under
+/// the selection's lock, as documented ("copying the network event
+/// record, clearing it and resetting any associated event object are
+/// atomic"): what `check_select` records after it signals again.
+pub fn get_events(socket: &ObjectRef, event: Option<&ObjectRef>) -> Result<u32, NtStatus> {
     let ObjectBody::Socket(endpoint) = &socket.body else { return Err(NtStatus::INVALID_HANDLE) };
-    Ok(endpoint.state.recorded.swap(0, Ordering::AcqRel))
+    let state = &endpoint.state;
+    let _select = state.select.lock();
+    let recorded = state.recorded.swap(0, Ordering::AcqRel);
+    if let Some(e) = event {
+        wait::set_signal(e, 0);
+    }
+    Ok(recorded)
 }
 
 /// Reports a finished request: IO_STATUS_BLOCK, event, the endpoint's own

@@ -3331,20 +3331,15 @@ pub extern "system" fn WSAWaitForMultipleEvents(
 /// the event is reset.
 #[unsafe(no_mangle)]
 pub extern "system" fn WSAEnumNetworkEvents(s: usize, event: usize, out: *mut u8) -> i32 {
-    #[cfg_attr(
-        target_arch = "x86",
-        link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
-    )]
-    #[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
-    unsafe extern "system" {
-        fn NtClearEvent(h: usize) -> u32;
-    }
     if out.is_null() {
         return fail(WSAEFAULT);
     }
-    // afd_get_events_params {int flags; int status[13];}
+    // afd_get_events_params {int flags; int status[13];}; the input is the
+    // event AFD resets with its copy, in one step (as documented: a record
+    // made between a copy and a later reset here would lose its signal).
     let mut got = [0u8; 56];
-    if let Err(e) = afd_call(s, IOCTL_AFD_GET_EVENTS, &[], &mut got) {
+    let input = event.to_le_bytes();
+    if let Err(e) = afd_call(s, IOCTL_AFD_GET_EVENTS, &input, &mut got) {
         return e;
     }
     let flags = u32::from_le_bytes([got[0], got[1], got[2], got[3]]);
@@ -3363,9 +3358,5 @@ pub extern "system" fn WSAEnumNetworkEvents(s: usize, event: usize, out: *mut u8
     }
     // SAFETY: the caller's WSANETWORKEVENTS (44 bytes).
     unsafe { core::ptr::copy_nonoverlapping(result.as_ptr().cast::<u8>(), out, 44) };
-    if event != 0 {
-        // SAFETY: a plain call.
-        unsafe { NtClearEvent(event) };
-    }
     0
 }

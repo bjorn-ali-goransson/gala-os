@@ -5389,7 +5389,8 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
     }
     // WSAEventSelect / WSAEnumNetworkEvents: an event handle in, or the
     // events out (afd_event_select_params {event, mask};
-    // afd_get_events_params {flags, status[13]}); done at once.
+    // afd_get_events_params {flags, status[13]}, its input the event to
+    // reset with the copy); done at once.
     if code == super::afd::IOCTL_AFD_EVENT_SELECT || code == super::afd::IOCTL_AFD_GET_EVENTS {
         let status = if code == super::afd::IOCTL_AFD_EVENT_SELECT {
             // {HANDLE event; int mask} of the caller's width (afd_abi).
@@ -5417,7 +5418,22 @@ fn nt_device_io_control_file(call: &mut Call<'_>) -> NtStatus {
             if output_len < 56 {
                 return NtStatus::INVALID_PARAMETER;
             }
-            let flags = tri!(super::afd::get_events(&entry.object));
+            // The event to reset with the copy (a HANDLE of the caller's
+            // width; none: no input or 0).
+            let width = if call.process.wow64.is_some() { 4 } else { 8 };
+            let event = if (input_len as usize) >= width {
+                let mut b = [0u8; 8];
+                if call.process.read(input, &mut b[..width]).is_err() {
+                    return NtStatus::ACCESS_VIOLATION;
+                }
+                match u64::from_le_bytes(b) {
+                    0 => None,
+                    h => Some(tri!(event_object(call, Handle(h), EVENT_MODIFY_STATE))),
+                }
+            } else {
+                None
+            };
+            let flags = tri!(super::afd::get_events(&entry.object, event.as_ref()));
             let mut out = [0u8; 56];
             out[0..4].copy_from_slice(&flags.to_le_bytes());
             if call.process.write(output, &out).is_err() {

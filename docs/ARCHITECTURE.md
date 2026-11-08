@@ -4105,7 +4105,14 @@ endpoint's I/O completion port.
   maps FD_* to them), records those that hold whenever its readiness
   changes (and at once), and sets the event; the socket becomes
   non-blocking. IOCTL_AFD_GET_EVENTS (WSAEnumNetworkEvents) returns and
-  clears what was recorded; ws2_32 resets the event. Level-triggered: an
+  clears what was recorded and resets the event its input names, in one
+  step under the selection's lock, under which a readiness change also
+  records and sets the event (as documented: the copy, the clear and
+  the reset are atomic; a record made between a copy and a later reset
+  in ws2_32 kept its bit but lost its signal, and FD_CONNECT, recorded
+  once, was then never signaled: Chromium's ~240 s page stalls;
+  `winsock_async_test`'s FD_CONNECT rounds race one call against the
+  handshake). Level-triggered: an
   event that still holds is recorded again at the next change, except
   FD_CONNECT (connected or refused), recorded once per socket: Windows
   documents no function that re-enables it, and a closing connection's
