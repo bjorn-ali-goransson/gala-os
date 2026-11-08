@@ -21,6 +21,7 @@ The classification is a first pass from evidence that needs no probe:
                does not do, which needs a probe to say what it does
 
     python triage.py <windows.json> [--out user/windows/triage.json]
+                     [--sources <tree the binaries were built from>]
 
 Run from the repository root: the test sources are read from
 user/<program>/src/main.rs.
@@ -47,14 +48,40 @@ ERROR_LOGON_FAILURE = 0x52E
 GALA_ONLY_HINT = "Gala"
 
 
-def source_of(program):
-    """The program's source. The GUI and COM tests are C, not Rust."""
-    for p in (os.path.join("user", program, "src", "main.rs"),
-              os.path.join("user", program, "main.c"),
-              os.path.join("user", program, "src", "lib.rs")):
+# Where to read the test sources from. The report comes from binaries built
+# at some commit, and reading a newer working tree shifts every line: that
+# is how nineteen entries came to quote a neighbouring line. Point this at
+# the tree the binaries were built from.
+SOURCES = "."
+
+
+def sources_of(program):
+    """Every source file of the program, the likeliest first.
+
+    shlwapi_test is main.c plus url.c, which main.c includes, and a line
+    number in its report belongs to whichever file the check is in.
+    """
+    base = os.path.join(SOURCES, "user", program)
+    out = []
+    for p in (os.path.join(base, "src", "main.rs"),
+              os.path.join(base, "main.c"),
+              os.path.join(base, "src", "lib.rs")):
         if os.path.exists(p):
-            return p
-    return None
+            out.append(p)
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            p = os.path.join(base, name)
+            if name.endswith(".c") and p not in out:
+                out.append(p)
+    return out
+
+
+def source_of(program):
+    s = sources_of(program)
+    return s[0] if s else None
+
+
+CHECKISH = re.compile(r"CHECK|check\s*\(|\.(eq|ok|ok0|st|fails|is|text|gala)\s*\(|assert")
 
 
 def text_at(src, line):
@@ -90,9 +117,31 @@ def assertion(program, check, report_line):
                 want = int(raw, 10)
         except ValueError:
             return None, None, "cannot read a line number out of %r" % m.group(0)
-        t = text_at(src, want)
-        if t is not None:
-            return want, t, "exact (%s:%d, the line the report names)" % (src, want)
+        # Prefer the file in which that line actually holds a check: a
+        # multi-file C test puts it in the include, and a source tree newer
+        # than the binaries puts a neighbour there instead.
+        best, hits = None, []
+        for cand in sources_of(program):
+            t = text_at(cand, want)
+            if t is None:
+                continue
+            if CHECKISH.search(t):
+                hits.append((cand, t))
+            elif best is None:
+                best = (cand, t)
+        if len(hits) == 1:
+            return want, hits[0][1], "exact (%s:%d, the line the report names)" % (hits[0][0], want)
+        if len(hits) > 1:
+            # shlwapi_test is main.c plus the url.c it includes, and both have
+            # a check at some of the same line numbers: say so rather than pick.
+            where = ", ".join("%s: %s" % (os.path.basename(c), t) for c, t in hits)
+            return want, hits[0][1], (
+                "ambiguous: line %d holds a check in %d of this test's files, so which one the report "
+                "means cannot be told from the number (%s)" % (want, len(hits), where))
+        if best:
+            return want, best[1], (
+                "doubtful: %s:%d is what the report names but holds no check, so the sources are "
+                "probably newer than the binaries, or the check is in a file not searched" % (best[0], want))
         return want, None, "the report names line %d, past the end of %s" % (want, src)
     if not src.endswith(".rs"):
         return None, None, "%s is C and the report names no line" % src
@@ -152,9 +201,12 @@ def main(argv):
     if not argv:
         print(__doc__)
         return 2
+    global SOURCES
     report, out = argv[0], os.path.join("user", "windows", "triage.json")
     if "--out" in argv:
         out = argv[argv.index("--out") + 1]
+    if "--sources" in argv:
+        SOURCES = argv[argv.index("--sources") + 1]
     with open(report, encoding="utf-8-sig") as f:
         d = json.load(f)
     entries = []
