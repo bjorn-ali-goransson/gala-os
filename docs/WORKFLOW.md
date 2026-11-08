@@ -211,10 +211,18 @@ there, then `cargo xtask compare windows.json` here. Before the run
 there: a local account `galatest` with password `Gala-Test-1` (access,
 disk, logon, lsa, profile, session and system tests log on as it) and
 an administrator prompt for `schannel_test` (its test CA goes into
-LocalMachine\Root; it is skipped otherwise). A program that crashes
-gets a `fault` field (`module+offset (exception code)`) from the
-Application log's event 1000; map the offset to a function with the
-build's PDB of that module. `cargo xtask
+LocalMachine\Root; it is skipped otherwise, and so are `winhttp_test`
+and `wininet_test`, which fetch from the Nginx that setup starts).
+A program that crashes gets a `fault` field
+(`<code> <name> at module+offset`) from `user/windows/fault.py`, which
+the runner looks for at `..\windowsault.py`: it re-runs the program as
+its debugger, because Windows Error Reporting's event 1000 is never
+written for these -- the runner sets `SEM_NOGPFAULTERRORBOX`, and a
+process with that error mode does not report its fault to WER at all.
+Map the offset to a function with the build's PDB of that module. A
+program whose non-zero exit is the result rather than a failure (`crash`,
+`go_exit`, `busybox`, and gala's own `cmd`, `conhost` and `gala`, which
+real Windows cannot load) carries an `expected` field beside `exit`. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
 
