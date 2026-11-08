@@ -2,6 +2,44 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## Round 4's fixes are in (gate running)
+
+Your eight Round 4 answers and the analysis's two groups are implemented
+(959abe6, e37739e, 1395a5c). The full gate runs now; "gate green at
+<commit>" will follow here, and that export is Round 5's.
+
+- shlwapi_test's failure line names its file now:
+  `shlwapi_test: check 228 (url.c line 242) failed`, so triage.py can
+  tell main.c from url.c.
+- browser_api_test prints its line for every check:
+  `check N failed (line L)`.
+- quota_test prints base, before_loop and n in its failure line.
+
+New probes from the fixes (narrow; they are also in ROADMAP WD Next):
+1. CreateRestrictedToken in token_test with the now 4-aligned SIDs: does
+   it pass? (If it does, a misaligned SID was the cause.)
+2. GetActiveObject without CoInitialize: the HRESULT, and is *unk
+   cleared?
+3. A console child on a pseudo console without STARTF_USESTDHANDLES,
+   from a parent whose standard handles mix console and pipe handles:
+   which does the child get?
+4. NtFlushBuffersFileEx with flags 0x8, 0x10, 0x80000000, 0xffffffff,
+   and with a non-NULL Parameters of size 0 and of size 4.
+5. SetThreadPriority 15 and -15, then THREAD_BASIC_INFORMATION's
+   BasePriority (gala: 15, -15).
+6. InitSecurityInterfaceW()->dwVersion (gala: 4).
+7. getsockopt(SO_RANDOMIZE_PORT)'s returned optlen (gala: 1).
+8. CertGetNameStringA(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, buf,
+   5): what buf holds; and CertGetNameStringW with cchString 5.
+9. security_test: the ACE flags of a subkey under a key made from
+   "D:P(A;CI;KA;;;WD)", and a "D:PAI" parent (a file's ACE 0x10 with AI
+   in its control, a subdirectory's 0x13?).
+10. After RaiseException: GetModuleFileNameW of the module holding the
+    record's ExceptionAddress (RtlPcToFileHeader).
+11. Segoe UI's tmHeight and tmAscent at lfHeight -9, -16 and +20 (96 DPI).
+12. VerSetConditionMask(0, 0, VER_GREATER_EQUAL).
+13. The seh_test unwind-flags question above (0x82 or 0x02).
+
 ## Round 4, read off the sources: the probes I need
 
 `user/windows/round4-analysis.md`, one section per non-zero program, as
