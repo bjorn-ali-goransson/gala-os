@@ -380,6 +380,12 @@ pub(super) fn file_access(
     })
 }
 
+/// Whether the caller's effective token holds privilege `luid`, enabled
+/// or not.
+pub(super) fn holds_privilege(call: &Call<'_>, luid: u64) -> bool {
+    with_token(call, |t| t.privileges.iter().any(|p| p.luid == luid))
+}
+
 /// Whether privilege `luid` is enabled in the caller's effective token.
 pub(super) fn effective_privilege(call: &Call<'_>, luid: u64) -> bool {
     with_token(call, |t| t.privileges.iter().any(|p| p.luid == luid && p.attributes & 2 != 0))

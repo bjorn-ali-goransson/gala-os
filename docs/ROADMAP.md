@@ -1536,9 +1536,11 @@ writing through it); DirectWrite asks a custom loader for its extended
 interfaces, so dwrite_test's objects answer QueryInterface only for
 IUnknown and their own; the 32-bit RtlUnwind does not preserve ebx, esi,
 edi and ebp (wow64_seh_test saves them around it); WriteConsoleW on a
-pipe is ERROR_INVALID_FUNCTION (ERROR_INVALID_HANDLE on a file);
-SetPriorityClass takes a value with IDLE's bit as IDLE, only 0 is
-ERROR_INVALID_PARAMETER; NtCreateEvent with an unknown type is
+pipe is ERROR_INVALID_FUNCTION (ERROR_INVALID_HANDLE on a file), and
+WriteConsoleA the same; SetPriorityClass ignores the bits that are no
+class and IDLE's wins, a value with no class bit is
+ERROR_INVALID_PARAMETER, REALTIME without SeIncreaseBasePriorityPrivilege
+is HIGH; NtCreateTimer's unknown type is STATUS_INVALID_PARAMETER_4; NtCreateEvent with an unknown type is
 STATUS_INVALID_PARAMETER (not _4); the process handle limit is 0xff0000
 (quota_test, which also ends its children on every path now); the
 build-number checks (kuser_test, peb_test, manifest_test, registry_test,
@@ -1550,11 +1552,10 @@ browser_api_test imports CompareObjectHandles through its API set.
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
-   - SetPriorityClass with mixed class bits that lack IDLE's (0x8020,
-     0x4080, 0x100|0x80, 1): which class Windows settles on;
-   - WriteConsoleA on a pipe and on a file (the same errors as W?);
-   - NtCreateTimer with an unknown TimerType (STATUS_INVALID_PARAMETER_4
-     or plain _PARAMETER?);
+   - SetPriorityClass with two class bits neither of which is IDLE's
+     (0x4020, 0x8080, 0x4080, 0x8020): which wins (gala takes the lowest
+     class; measured so far: IDLE wins, no class bit is
+     ERROR_INVALID_PARAMETER, REALTIME without the privilege is HIGH);
    - the not-yet-probed checks in `triage.md` (75 programs classed
      "expectation" without a probe), most numerous first: the kernel32
      tests, then user32/gdi32/comctl32/shell32/shlwapi;

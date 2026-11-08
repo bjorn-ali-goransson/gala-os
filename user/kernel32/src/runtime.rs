@@ -690,6 +690,17 @@ unsafe extern "system" {
 /// ProcessPriorityClass.
 const PROCESS_PRIORITY_CLASS: u32 = 18;
 /// (Win32 priority class, PROCESS_PRIORITY_CLASS_* value).
+/// The classes' bits from the lowest class up: the first one a value has
+/// is its class (SetPriorityClass).
+const PRIORITY_ORDER: [(u32, u8); 6] = [
+    (0x40, 1),   // IDLE
+    (0x4000, 5), // BELOW_NORMAL
+    (0x20, 2),   // NORMAL
+    (0x8000, 6), // ABOVE_NORMAL
+    (0x80, 3),   // HIGH
+    (0x100, 4),  // REALTIME
+];
+
 const PRIORITY_CLASSES: [(u32, u8); 6] = [
     (0x40, 1),   // IDLE
     (0x20, 2),   // NORMAL
@@ -728,24 +739,27 @@ pub extern "system" fn SetPriorityClass(process: Handle, class: u32) -> Bool {
         unsupported(b"kernel32.dll!SetPriorityClass(background mode)", class.into());
         return fail_with(super::ERROR_NOT_SUPPORTED, 0);
     }
-    let exact = PRIORITY_CLASSES.iter().find(|&&(win32, _)| win32 == class);
-    // A value that is no single class: Windows takes one with IDLE's bit
-    // (0x12345, 0xffffffff) as IDLE. Which class wins for other mixes of
-    // bits is not known yet (ROADMAP WD); those stay refused, recorded.
-    let nt = match exact {
-        Some(&(_, nt)) => nt,
-        None if class & 0x40 != 0 => 1,
-        None => {
-            if class != 0 {
-                unsupported(b"kernel32.dll!SetPriorityClass(mixed class bits)", class.into());
-            }
-            return fail_with(ERROR_INVALID_PARAMETER, 0);
-        }
+    // As Windows: the bits that are no class are ignored and, of the
+    // class bits there, IDLE wins (0x12345, 0xffffffff, 0x60, 0x4040 are
+    // IDLE: measured); a value with no class bit (0 too) is
+    // ERROR_INVALID_PARAMETER. Between the other classes the lowest is
+    // taken, which Windows has not been asked yet (ROADMAP WD).
+    let Some(&(_, nt)) = PRIORITY_ORDER.iter().find(|&&(bit, _)| class & bit != 0) else {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
     };
     let info = [0u8, nt];
     // SAFETY: our buffer of the given size.
-    let status =
+    let mut status =
         unsafe { NtSetInformationProcess(process, PROCESS_PRIORITY_CLASS, info.as_ptr(), 2) };
+    // REALTIME without SeIncreaseBasePriorityPrivilege: TRUE, and the
+    // class is HIGH (what Windows does for such a caller).
+    const STATUS_PRIVILEGE_NOT_HELD: u32 = 0xc000_0061;
+    if nt == 4 && status == STATUS_PRIVILEGE_NOT_HELD {
+        let high = [0u8, 3];
+        // SAFETY: as above.
+        status =
+            unsafe { NtSetInformationProcess(process, PROCESS_PRIORITY_CLASS, high.as_ptr(), 2) };
+    }
     if status != STATUS_SUCCESS {
         return fail(status, 0);
     }

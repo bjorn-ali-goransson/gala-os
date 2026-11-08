@@ -4,7 +4,8 @@
 //! console mode fails with ERROR_INVALID_HANDLE, and WriteConsoleW (unless
 //! the handle is a character device: gala's serial console) fails with
 //! ERROR_INVALID_FUNCTION on a pipe and ERROR_INVALID_HANDLE on a file
-//! (also on a pipe and a file made here); error modes,
+//! (also on a pipe and a file made here, and WriteConsoleA the same);
+//! error modes,
 //! WER flags, priority boost and console control handlers are kept;
 //! GetSystemInfo, GetSystemDirectoryA, GetProcessAffinityMask,
 //! GetEnvironmentStringsW, CreateEventA, LoadLibraryW/LoadLibraryExW (with
@@ -60,6 +61,13 @@ unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> Bool;
     fn GetConsoleMode(h: Handle, mode: *mut u32) -> Bool;
+    fn WriteConsoleA(
+        h: Handle,
+        buf: *const u8,
+        len: u32,
+        written: *mut u32,
+        reserved: *mut c_void,
+    ) -> Bool;
     fn WriteConsoleW(
         h: Handle,
         buf: *const u16,
@@ -257,6 +265,13 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.eq(WriteConsoleW(write, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INVALID_FUNCTION.into())?;
+        // WriteConsoleA: the same (the error follows the handle's type).
+        SetLastError(0);
+        c.eq(
+            WriteConsoleA(write, b"x".as_ptr(), 1, &mut written, core::ptr::null_mut()) as u64,
+            0,
+        )?;
+        c.eq(GetLastError().into(), ERROR_INVALID_FUNCTION.into())?;
         CloseHandle(read);
         CloseHandle(write);
         let mut path = [0u16; 300];
@@ -278,6 +293,9 @@ fn run() -> Result<(), u32> {
         c.ok(file != INVALID_HANDLE_VALUE, GetLastError().into())?;
         SetLastError(0);
         c.eq(WriteConsoleW(file, w!("x"), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
+        c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
+        SetLastError(0);
+        c.eq(WriteConsoleA(file, b"x".as_ptr(), 1, &mut written, core::ptr::null_mut()) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_INVALID_HANDLE.into())?;
         CloseHandle(file);
 

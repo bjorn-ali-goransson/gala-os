@@ -1187,7 +1187,14 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     if let Some(note) = note.filter(|n| n.status == status).or(unhandled) {
         super::crashreport::report(process, &note, status);
     }
-    info!("process {} (pid {}) exited with status {:#010x}", process.name, process.id, status.0);
+    // How long it lived (creation to exit, 100 ns units): what run-all.ps1
+    // times a program by on Windows (`cargo xtask compare` sets them side
+    // by side).
+    let lived_ms = process.exit_time.lock().saturating_sub(process.create_time) / 10_000;
+    info!(
+        "process {} (pid {}) exited with status {:#010x} after {} ms",
+        process.name, process.id, status.0, lived_ms
+    );
     crate::events::emit(
         crate::events::Category::Process,
         "process exit",

@@ -270,9 +270,10 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.eq(low as u64, deallocation as u64)?;
         c.ok(low < sp && sp < high, sp as u64)?;
         // Process priority classes: NORMAL to start with; set and read
-        // back. Windows takes a value that is no class (0x12345 and
-        // 0xffffffff, both with IDLE's bit) and settles on IDLE; only 0 is
-        // ERROR_INVALID_PARAMETER.
+        // back. A value that is no single class: Windows ignores the bits
+        // that are no class and the lowest class among the rest wins, IDLE
+        // first (0x12345, 0xffffffff, 0x60, 0x4040 are IDLE); one with no
+        // class bit (0, 1, 0x10000) is ERROR_INVALID_PARAMETER.
         const NORMAL: u32 = 0x20;
         const BELOW_NORMAL: u32 = 0x4000;
         let me = GetCurrentProcess();
@@ -282,12 +283,14 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
         c.eq(SetPriorityClass(me, NORMAL) as u64, 1)?;
         c.eq(GetPriorityClass(me).into(), NORMAL.into())?;
         const IDLE: u32 = 0x40;
-        for odd in [0x12345, 0xffff_ffff] {
+        for odd in [0x12345, 0xffff_ffff, 0x60, 0x4040] {
             c.eq(SetPriorityClass(me, odd) as u64, 1)?;
             c.eq(GetPriorityClass(me).into(), IDLE.into())?;
         }
-        c.eq(SetPriorityClass(me, 0) as u64, 0)?;
-        c.eq(GetLastError().into(), 87)?;
+        for none in [0, 1, 0x1_0000] {
+            c.eq(SetPriorityClass(me, none) as u64, 0)?;
+            c.eq(GetLastError().into(), 87)?;
+        }
         c.eq(SetPriorityClass(me, NORMAL) as u64, 1)?;
         // Times: a creation time (100 ns since 1601), no exit time yet.
         let (mut creation, mut exit, mut kernel, mut user) = (0, 1, 0, 0);

@@ -791,10 +791,12 @@ current process, -2 = current thread.
   parent there exits at once.
 - **Priority classes**: NtSetInformationProcess (0x1c) takes
   ProcessPriorityClass only and records it (Get/SetPriorityClass read it
-  back); the scheduler runs every thread alike. SetPriorityClass takes,
-  as Windows does, a value that is no single class but has IDLE's bit as
-  IDLE; 0 is ERROR_INVALID_PARAMETER, other mixes are refused and
-  recorded until Windows' choice for them is measured.
+  back); the scheduler runs every thread alike. SetPriorityClass, as
+  Windows: the bits that are no class are ignored, the lowest class among
+  the rest wins (IDLE first; between two others unmeasured), a value with
+  no class bit is ERROR_INVALID_PARAMETER; REALTIME needs
+  SeIncreaseBasePriorityPrivilege held (STATUS_PRIVILEGE_NOT_HELD from
+  the kernel), and kernel32 settles on HIGH without it.
 
 ### Threads
 
@@ -1827,8 +1829,8 @@ around a thread exit's log line.
   reports as FILE_DEVICE_CONSOLE (output if a zero-length write
   succeeds), so programs that write to a character-device stderr with
   WriteConsoleW (Win32-OpenSSH) are seen. Any other handle fails as on
-  Windows: WriteConsoleW gives ERROR_INVALID_FUNCTION on a pipe and
-  ERROR_INVALID_HANDLE on anything else.
+  Windows: WriteConsoleW and WriteConsoleA give ERROR_INVALID_FUNCTION on
+  a pipe and ERROR_INVALID_HANDLE on anything else.
 
 #### Console windows
 

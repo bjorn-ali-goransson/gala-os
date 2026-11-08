@@ -182,6 +182,17 @@ fn console_device(h: Handle) -> Option<bool> {
 }
 
 /// `Some(())` for a console output handle, else the error is set.
+/// WriteConsoleW/A on a handle that is no console: FALSE, with
+/// ERROR_INVALID_FUNCTION on a pipe and ERROR_INVALID_HANDLE otherwise
+/// (Windows: the error follows the handle's type, not the A/W variant).
+fn not_console(h: Handle) -> Bool {
+    const FILE_TYPE_PIPE: u32 = 3;
+    const ERROR_INVALID_FUNCTION: u32 = 1;
+    let pipe = crate::GetFileType(h) == FILE_TYPE_PIPE;
+    SetLastError(if pipe { ERROR_INVALID_FUNCTION } else { ERROR_INVALID_HANDLE });
+    FALSE
+}
+
 fn output(h: Handle) -> Option<()> {
     match kind(h).or_else(|| console_device(h)) {
         Some(false) => Some(()),
@@ -417,13 +428,7 @@ pub extern "system" fn WriteConsoleW(
     _reserved: *mut c_void,
 ) -> Bool {
     if output(h).is_none() {
-        // Not a console: Windows' WriteConsoleW fails with
-        // ERROR_INVALID_FUNCTION on a pipe (ERROR_INVALID_HANDLE otherwise).
-        const FILE_TYPE_PIPE: u32 = 3;
-        const ERROR_INVALID_FUNCTION: u32 = 1;
-        let pipe = crate::GetFileType(h) == FILE_TYPE_PIPE;
-        SetLastError(if pipe { ERROR_INVALID_FUNCTION } else { ERROR_INVALID_HANDLE });
-        return FALSE;
+        return not_console(h);
     }
     if buffer.is_null() && length > 0 {
         return fail_with(ERROR_INVALID_PARAMETER, FALSE);
@@ -467,7 +472,7 @@ pub extern "system" fn WriteConsoleA(
     _reserved: *mut c_void,
 ) -> Bool {
     if output(h).is_none() {
-        return FALSE;
+        return not_console(h);
     }
     // SAFETY: the caller's `length` bytes.
     let text = if length == 0 {

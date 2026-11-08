@@ -9297,8 +9297,13 @@ fn compare_reports(windows: &Path, gala: Option<&Path>) -> Result {
         Some(report::Outcome { skipped: Some(s), .. }) => format!("skipped ({s})"),
         _ => "-".to_string(),
     };
-    println!("| program | windows | gala | |\n|---|---|---|---|");
+    // How long each ran (ms), and how many times Windows' time gala took.
+    let ms = |o: &Option<report::Outcome>| o.as_ref().and_then(|o| o.ms);
+    let time = |t: Option<u64>| t.map_or_else(|| "-".to_string(), |t| t.to_string());
+    println!("| program | windows | gala | | windows ms | gala ms | gala/windows |");
+    println!("|---|---|---|---|---|---|---|");
     let mut different = 0;
+    let (mut win_total, mut gala_total) = (0u64, 0u64);
     for (name, win, gal, verdict) in report::compare(&w, &g) {
         let mark = match verdict {
             report::Verdict::Same => "same",
@@ -9308,7 +9313,28 @@ fn compare_reports(windows: &Path, gala: Option<&Path>) -> Result {
             }
             report::Verdict::Missing => "missing",
         };
-        println!("| {name} | {} | {} | {mark} |", show(&win), show(&gal));
+        let ratio = match (ms(&win), ms(&gal)) {
+            (Some(a), Some(b)) => {
+                win_total += a;
+                gala_total += b;
+                format!("{:.1}", b as f64 / a.max(1) as f64)
+            }
+            _ => "-".to_string(),
+        };
+        println!(
+            "| {name} | {} | {} | {mark} | {} | {} | {ratio} |",
+            show(&win),
+            show(&gal),
+            time(ms(&win)),
+            time(ms(&gal))
+        );
+    }
+    if win_total > 0 {
+        println!(
+            "\ntimes of the programs timed on both: windows {win_total} ms, gala {gala_total} ms \
+             ({:.1}x)",
+            gala_total as f64 / win_total as f64
+        );
     }
     if different == 0 { Ok(()) } else { Err(format!("{different} programs differ")) }
 }

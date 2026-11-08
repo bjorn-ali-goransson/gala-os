@@ -188,15 +188,18 @@ side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
 
-Each result carries `ms`, how long the program took here, and the runner
-prints it per program. `cargo xtask compare` does not read it yet
-(`report.rs` keeps `program`, `exit`, `line` and `skipped`, and ignores
-the rest, so an older xtask reads these reports unchanged). It is not a
-ratio against gala: here a program is a process, under gala it is a
-machine boot, and xtask's own summary separates firmware, bootloader and
-kernel. It is for finding what is slow or hanging, and as the baseline
-for the work itself; `cargo xtask bench` against `bench-windows.txt`
-remains the measured comparison ("Benchmarks", docs/PERF.md).
+Each result carries `ms`, how long the program ran, on both sides: on
+Windows the runner's stopwatch around the process (printed per
+program), on gala the process's lifetime from creation to exit (the
+kernel's `process ... exited with status 0x... after N ms` line, which
+`cargo xtask report` reads). Both leave out what is not the program: a
+gala boot's firmware, bootloader and kernel start are xtask's summary's
+own lines. `cargo xtask compare` prints both times per program, gala's
+as a multiple of Windows', and the totals over the programs timed on
+both: how much slower the same tests run under QEMU (TCG without KVM)
+than on the Windows machine. `cargo xtask bench` against
+`bench-windows.txt` stays the operation-by-operation comparison
+("Benchmarks", docs/PERF.md).
 
 A program that leaves a child of its own running holds the pipe its
 standard output goes through, and the end of that output never comes:

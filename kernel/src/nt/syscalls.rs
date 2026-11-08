@@ -3966,6 +3966,14 @@ fn nt_set_information_process(call: &mut Call<'_>) -> NtStatus {
     if !(1..=6).contains(&info[1]) {
         return NtStatus::INVALID_PARAMETER;
     }
+    // REALTIME (4) needs SeIncreaseBasePriorityPrivilege (14) held, enabled
+    // or not (kernel32 turns the refusal into HIGH, as Windows'
+    // SetPriorityClass reports for a caller without it; the NT status is
+    // gala's).
+    const SE_INCREASE_BASE_PRIORITY: u64 = 14;
+    if info[1] == 4 && !security_calls::holds_privilege(call, SE_INCREASE_BASE_PRIORITY) {
+        return NtStatus::PRIVILEGE_NOT_HELD;
+    }
     p.priority_class.store(info[1], core::sync::atomic::Ordering::Relaxed);
     NtStatus::SUCCESS
 }
