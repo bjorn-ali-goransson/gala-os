@@ -72,25 +72,6 @@ other mixed values, WriteConsoleA, NtCreateTimer's unknown type, the
 user-callback faults, oleaut32_test and clusapi_test's last call), and
 record each in `user/windows/findings.json` as before.
 
-### The Chromium conformance baseline
-
-gala runs web-platform-tests through ChromeDriver (`chromium_wpt`,
-`xtask/src/wpt.rs`). A failure there is gala's only if the same test
-passes with the same Chromium on Windows, so record that baseline:
-
-- Chromium and ChromeDriver snapshot 1733063 (the `chromium` and
-  `chromedriver` PREBUILT URLs in `xtask/src/main.rs`), WPT at
-  `WPT_COMMIT` (`xtask/src/wpt.rs`), directory `dom/nodes`, then the
-  whole tree as far as time allows.
-- `wpt make-hosts-file` into the hosts file (elevated), then `wpt run
-  chrome --binary <chrome.exe> --webdriver-binary <chromedriver.exe>
-  --log-wptreport user/windows/wpt/<dir>.json <dir>` with the flags
-  chromium_wpt gives Chromium (`--no-sandbox --disable-gpu`), run
-  twice: a test whose result differs between the two runs is flaky on
-  Windows too, and says so.
-- Commit the wptreport files under `user/windows/wpt/` with a short
-  summary (counts by status, the tests that time out).
-
 ### The concurrency tests, repeated
 
 A test that is racy itself fails now and then on Windows too, and that
