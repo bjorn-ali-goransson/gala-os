@@ -673,15 +673,58 @@ code `xtask/src/trust.rs`).
   feed are kept (and must hash to their name).
 - `cargo xtask feed refresh <feed dir>`: new snapshot and timestamp
   over the same targets (what a scheduled CI job runs, more often than
-  the timestamp's 1-day expiry).
-- `cargo xtask feed check <feed dir> [--root <trusted root.json>]`:
-  the feed as gala's client sees it now, every blob hashed; prints the
-  versions, expiries and release, or the first refusal
-  (`timestamp.json: refused: timestamp: expired at ...`).
-- Keys: test keys made on first use in `target/trust/feed-root-{1,2,3}`,
+  the timestamp's 1-day expiry), and targets signed again (same
+  release, new version) when it expires within 15 days.
+- `cargo xtask feed renew-root <feed dir>`: root N+1, the same keys, a
+  fresh 90-day expiry (CI runs it monthly).
+- `cargo xtask feed check <feed> [--over <source>] [--root <trusted
+  root.json>]`: the feed as gala's client sees it now, every blob
+  hashed; prints the versions and release, or the first refusal
+  (`timestamp.json: refused: timestamp: expired at ...`). `<feed>` is a
+  directory or an http(s) URL (read with curl); `--over` reads what the
+  directory lacks from a second source (a work directory over the
+  bucket: the feed as it will be once pushed).
+- `cargo xtask feed pull <source> <empty dir>`: the metadata a client
+  follows, verified, into a new directory (no blobs), with `.pulled`
+  listing what came; `cargo xtask feed push <dir> <s3://bucket | dir>`:
+  what changed since, blobs first and `timestamp.json` last, refusing to
+  overwrite a published version. `s3://` runs the `aws` CLI with its
+  usual environment (`AWS_ENDPOINT_URL`, credentials).
+- `cargo xtask release-tree <dir> [--release]`: the files of a release
+  (kernel, system DLLs, Limine, sealed config, manifest; no test
+  programs), what CI publishes.
+- Keys: `GALA_FEED_KEYS` (one `<role> <64 hex>` line each for `root-1`,
+  `root-2`, `root-3`, `targets`, `snapshot`, `timestamp`) when set;
+  otherwise test keys made on first use in `target/trust/feed-root-{1,2,3}`,
   `feed-targets`, `feed-snapshot`, `feed-timestamp` (`.seed`, mode 0600;
   `.pub`). A new `target/trust/` means a new root: start a new feed
-  directory.
+  directory. Signing a feed whose root lists other keys is refused.
+- **CI** (`.github/workflows/release.yml`, environment `release`):
+  `publish` after CI passes on main (main's head only), `refresh` every
+  6 hours, `renew-root` on the 3rd of each month; each pulls from the
+  public URL (`FEED_URL`, the one place it is written), signs, checks,
+  pushes to `s3://$R2_BUCKET` through R2's S3 endpoint, and checks the
+  public URL. The job summary lists the release, files, new blobs and
+  each role's expiry. A manual run: Actions, "Release", "Run workflow",
+  choose publish (from main), refresh or renew-root.
+- **One-time setup** (the owner): make the keys and store them as the
+  secret without them touching the screen or a file: `cargo xtask feed
+  keygen | gh secret set GALA_FEED_KEYS --env release` (the key ids go
+  to standard error: keep them to recognise the keys later). Besides
+  it, the environment `release` (or the repository) needs the secrets
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and the variables
+  `R2_ACCOUNT_ID`, `R2_BUCKET`. The first publish against the empty
+  bucket makes root 1. A lost secret means a new root 1 for a new
+  bucket (clients trust root 1 or a later root they took): keep a copy
+  offline. GitHub disables the schedules of a public repository without
+  activity for 60 days (the feed then freezes within a day): re-enable
+  the workflow on the Actions page.
+- Locally, against a directory standing in for the bucket:
+  `GALA_FEED_KEYS="$(cargo xtask feed keygen)"` exported, then `feed
+  pull bucket w1`, `feed publish <release tree> w1`, `feed check w1
+  --over bucket`, `feed push w1 bucket`, `feed check bucket`; the host
+  test `feed::tests::workflows_against_a_local_bucket` runs that
+  sequence (publish, refresh, renew-root, publish).
 - Cross-check with python-tuf (optional, host only): `python3 -m venv
   <dir> && <dir>/bin/pip install tuf==6.0.0`, then load each role with
   `Metadata.from_bytes`, `root.verify_delegate(role, md)` and
