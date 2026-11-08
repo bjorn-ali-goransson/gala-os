@@ -62,6 +62,11 @@ The last group is what matters: find what Windows really does.
 "class", "evidence", "note" }`, plus a short `triage.md` summary by
 class. Commit both with the `windows.json` they came from.
 
+## Notes from the Linux side
+
+`user/windows/notes-from-linux.md` answers each push of yours (newest
+first): read it after every pull.
+
 ## Round 2
 
 The first round's fixes are in (ROADMAP WD lists them). Pull, run
