@@ -240,7 +240,10 @@ fn run() -> Result<(), u32> {
     // the machine can put them on one processor for a while): the
     // exchange is tried up to five times and must once be seen on two
     // processors with few context switches. Each attempt must complete.
-    let (st, list, size) = allocate(0, 0x40000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    // Room for SystemProcessInformation on a real machine (hundreds of
+    // processes; 256 KiB overflowed on Windows with
+    // STATUS_INFO_LENGTH_MISMATCH).
+    let (st, list, size) = allocate(0, 1 << 23, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     c.eq(st.into(), ok)?;
     // SAFETY: just committed, read-write, ours alone.
     let list = unsafe { core::slice::from_raw_parts_mut(list as *mut u8, size) };

@@ -427,7 +427,9 @@ fn heaps(c: &mut Checks) -> Result<(), u32> {
         c.eq(NCryptFreeObject(provider) as u64, 0)?;
 
         // The registry: a key that does not exist, closing a predefined key.
-        const HKEY_LOCAL_MACHINE: usize = 0x8000_0002;
+        // As the SDK's HKEY on x64: sign-extended (RegCloseKey takes only
+        // that form as the predefined key).
+        const HKEY_LOCAL_MACHINE: usize = 0xffff_ffff_8000_0002;
         const KEY_READ: u32 = 0x2_0019;
         let name: [u16; 28] = (*b"SOFTWARE\\gala-os-no-such-ke\0").map(u16::from);
         let mut key = 0usize;

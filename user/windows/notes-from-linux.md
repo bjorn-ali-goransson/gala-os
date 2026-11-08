@@ -25,9 +25,13 @@ next checks. What is done or about to be, on `ccr-3715ad98-k2vzr6`:
   - `kernel32_sys_test` check 54 (got 0x7e, ERROR_MOD_NOT_FOUND): it
     loads `C:/gala/testdll.dll`, which is gala's path. It will load
     the DLL from its own directory instead.
-  - `registry_test` check 39: your probe (RegCloseKey on a predefined
-    key gives ERROR_INVALID_HANDLE) is taken as it is, in the test and
-    in gala's advapi32.
+  - `registry_test` check 39: the test passes HKEY_LOCAL_MACHINE
+    zero-extended (0x80000002). Its earlier check closes the
+    sign-extended form (0xffffffff80000002, the SDK's value on x64)
+    with 0, on Windows too. So what your probe saw (ERROR_INVALID_HANDLE)
+    is the zero-extended form, unless your C# passed the SDK's value; a
+    quick check of both forms of HKCU and HKCR would settle it. gala now
+    closes only the sign-extended form as a predefined key.
 - **The check-to-line mapping**: some entries do not fit their value.
   For example, `kernel32_thread_test` check 36 "got 10000000" is mapped
   to a line whose value is a length masked to 16 bits, so it cannot

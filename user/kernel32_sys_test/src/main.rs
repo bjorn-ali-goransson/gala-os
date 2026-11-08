@@ -117,6 +117,7 @@ unsafe extern "system" {
     fn VirtualQuery(addr: *const c_void, info: *mut MemoryBasicInformation, len: usize) -> usize;
     fn SwitchToThread() -> Bool;
     fn GetFileType(h: Handle) -> u32;
+    fn GetModuleFileNameW(module: Handle, buf: *mut u16, len: u32) -> u32;
     fn CreatePipe(read: *mut Handle, write: *mut Handle, sa: *const c_void, size: u32) -> Bool;
     fn GetTempPathW(n: u32, buf: *mut u16) -> u32;
     fn CreateFileW(
@@ -406,7 +407,21 @@ fn run() -> Result<(), u32> {
         // LoadLibraryW, and LoadLibraryExW searching System32 only.
         // By a full path with forward slashes first (PostgreSQL loads its
         // modules so), then by name: the same module.
-        let by_path = LoadLibraryW(w!("C:/gala/testdll.dll"));
+        // The DLL next to this program (C:\gala on gala, user\bin on
+        // Windows), its path written with forward slashes.
+        let mut path = [0u16; 300];
+        let n = GetModuleFileNameW(core::ptr::null_mut(), path.as_mut_ptr(), 260) as usize;
+        c.ok(n > 0 && n < 260, GetLastError().into())?;
+        let dir = path[..n].iter().rposition(|&ch| ch == u16::from(b'\\')).map_or(0, |i| i + 1);
+        for ch in &mut path[..dir] {
+            if *ch == u16::from(b'\\') {
+                *ch = u16::from(b'/');
+            }
+        }
+        for (i, ch) in "testdll.dll\0".encode_utf16().enumerate() {
+            path[dir + i] = ch;
+        }
+        let by_path = LoadLibraryW(path.as_ptr());
         c.ok(!by_path.is_null(), GetLastError().into())?;
         let dll = LoadLibraryW(w!("testdll.dll"));
         c.ok(dll == by_path, 0)?;

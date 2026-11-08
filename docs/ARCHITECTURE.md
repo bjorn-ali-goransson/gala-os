@@ -2292,7 +2292,9 @@ shutdown.
 - **advapi32** (`user/advapi32/src/registry.rs`): the Reg* functions over
   ntdll's Nt*Key services. The predefined HKEYs (zero- or sign-extended,
   as winreg.h's x64 values are) open their key on first use and keep the
-  handle for the process (RegCloseKey of one does nothing): HKLM
+  handle for the process (RegCloseKey of one in its sign-extended form
+  does nothing; zero-extended it is no handle to RegCloseKey,
+  ERROR_INVALID_HANDLE, as on Windows): HKLM
   `\Registry\Machine`, HKU `\Registry\User`, HKCU
   `\Registry\User\<the user's SID>`, HKCR
   `\Registry\Machine\SOFTWARE\Classes` (no per-user merge yet),

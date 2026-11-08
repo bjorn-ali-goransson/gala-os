@@ -556,7 +556,10 @@ const THREAD_ENTRY: usize = 0x50;
 const MOST_SWITCHES: u64 = 10;
 const SLEEP_MS: u32 = 300;
 
-static SNAPSHOT: Shared<[u8; 1 << 16]> = Shared(core::cell::UnsafeCell::new([0; 1 << 16]));
+/// Room for SystemProcessInformation on a real machine (hundreds of
+/// processes and thousands of threads; 64 KiB overflowed on Windows):
+/// zero pages until the query writes them.
+static SNAPSHOT: Shared<[u8; 1 << 23]> = Shared(core::cell::UnsafeCell::new([0; 1 << 23]));
 
 /// Thread `tid`'s ContextSwitches (SystemProcessInformation), or None.
 fn switches(tid: u32) -> Option<u64> {

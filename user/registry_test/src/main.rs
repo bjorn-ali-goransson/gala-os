@@ -584,8 +584,11 @@ fn seeded(c: &mut Checks) -> Result<(), u32> {
         );
         c.eq(r as u64, ERROR_FILE_NOT_FOUND)?;
         c.eq(RegCloseKey(0x1234) as u64, ERROR_INVALID_HANDLE)?;
-        // Predefined keys close successfully.
-        c.ok0(RegCloseKey(HKEY_LOCAL_MACHINE))?;
+        // A predefined key closes successfully in its sign-extended form
+        // (the SDK's HKEY on x64; checked above); the same number
+        // zero-extended, which the other calls take as the key, is no
+        // handle to RegCloseKey: ERROR_INVALID_HANDLE (Windows 25H2).
+        c.eq(RegCloseKey(HKEY_LOCAL_MACHINE) as u64, ERROR_INVALID_HANDLE)?;
     }
     Ok(())
 }

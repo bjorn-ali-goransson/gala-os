@@ -602,7 +602,12 @@ pub extern "system" fn RegOpenCurrentUser(access: u32, out: *mut usize) -> i32 {
 /// RegCloseKey: predefined keys stay open.
 #[unsafe(no_mangle)]
 pub extern "system" fn RegCloseKey(key: usize) -> i32 {
-    if predefined(key).is_some() {
+    // A predefined key in its sign-extended form (as the SDK's HKEY
+    // constants are on x64) closes with nothing to do; the same number
+    // zero-extended, which other calls take as the predefined key, is a
+    // handle to NtClose here (ERROR_INVALID_HANDLE), as on Windows.
+    let sign_extended = (key as u64) >> 32 == 0xffff_ffff || usize::BITS == 32;
+    if sign_extended && predefined(key).is_some() {
         return ERROR_SUCCESS;
     }
     // SAFETY: plain call.
