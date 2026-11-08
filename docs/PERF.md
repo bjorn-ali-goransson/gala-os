@@ -42,8 +42,9 @@ machine. Each measurement below keeps its date and how it was taken.
   --release [bench-windows.txt]` boots it (`run=bench.exe`, BIOS, no
   screen), writes `target/report/bench.json` (platform `gala qemu-tcg`
   or `qemu-kvm`) and prints a table next to Windows' numbers
-  (`run-all.ps1` saves `bench-windows.txt`). The kernel is a release
-  build only with `--release`.
+  (`run-all.ps1` saves `bench-windows.txt`, unless antivirus quarantined
+  `bench.exe`: WORKFLOW, "To compare with Windows"). The kernel is a
+  release build only with `--release`.
 - **Without kernel changes**: QEMU TCG plugins (`-plugin`) count
   instructions per address range (needs a QEMU built with plugins;
   Ubuntu's has none); under KVM, `perf kvm` on the host.
