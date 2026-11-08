@@ -5,764 +5,664 @@
                         "program":  "abi_test",
                         "exit":  0,
                         "line":  "abi_test: ok",
-                        "ms":  32,
-                        "fault":  "no Application Error event found"
+                        "ms":  33
                     },
                     {
                         "program":  "access_test",
                         "exit":  18,
                         "line":  "access_test: check 00000012 got 000000b7 (line 477)",
-                        "ms":  104,
-                        "fault":  "no Application Error event found"
+                        "ms":  42
                     },
                     {
                         "program":  "advapi32_test",
                         "exit":  117,
                         "line":  "advapi32_test: check 00000075 got 00000057 (line 1187)",
-                        "ms":  42,
-                        "fault":  "no Application Error event found"
+                        "ms":  43
                     },
                     {
                         "program":  "afd_poll_test",
                         "exit":  0,
                         "line":  "afd_poll_test: ok",
-                        "ms":  137,
-                        "fault":  "no Application Error event found"
+                        "ms":  140
                     },
                     {
                         "program":  "apc_test",
                         "exit":  0,
                         "line":  "apc_test: ok",
-                        "ms":  117,
-                        "fault":  "no Application Error event found"
+                        "ms":  112
                     },
                     {
                         "program":  "args_test",
                         "exit":  0,
                         "line":  "args_test: ok",
-                        "ms":  38,
-                        "fault":  "no Application Error event found"
+                        "ms":  40
                     },
                     {
                         "program":  "async_test",
                         "exit":  0,
                         "line":  "async_test: ok",
-                        "ms":  85,
-                        "fault":  "no Application Error event found"
+                        "ms":  37
                     },
                     {
                         "program":  "bcrypt_test",
                         "exit":  0,
                         "line":  "bcrypt_test: ok",
-                        "ms":  80,
-                        "fault":  "no Application Error event found"
+                        "ms":  65
                     },
                     {
                         "program":  "bench",
                         "exit":  0,
                         "line":  "bench: done",
-                        "ms":  690,
-                        "fault":  "no Application Error event found"
+                        "ms":  499
                     },
                     {
                         "program":  "browser_api_test",
                         "exit":  23,
                         "line":  "browser_api_test: check 23 failed (line 670)",
-                        "ms":  285,
-                        "fault":  "no Application Error event found"
+                        "ms":  319
                     },
                     {
                         "program":  "busybox",
                         "exit":  3,
                         "line":  "hello",
-                        "ms":  338,
-                        "fault":  "no Application Error event found"
+                        "ms":  432,
+                        "expected":  3
                     },
                     {
                         "program":  "cert_test",
                         "exit":  117,
                         "line":  "cert_test: check 00000075 got 80092004 (line 1255)",
-                        "ms":  123,
-                        "fault":  "no Application Error event found"
+                        "ms":  71
                     },
                     {
                         "program":  "clock_test",
                         "exit":  0,
                         "line":  "clock_test: skipped (GalaClockControl is gala\u0027s own)",
-                        "ms":  49,
-                        "fault":  "no Application Error event found"
+                        "ms":  39
                     },
                     {
                         "program":  "clockcal_test",
                         "exit":  0,
                         "line":  "clockcal_test: ok",
-                        "ms":  5093,
-                        "fault":  "no Application Error event found"
+                        "ms":  5064
                     },
                     {
                         "program":  "clusapi_test",
                         "exit":  3221225477,
                         "line":  "",
-                        "ms":  61,
-                        "fault":  "no Application Error event found"
+                        "ms":  69,
+                        "fault":  "0xc0000005 STATUS_ACCESS_VIOLATION at resutils.dll+0x2a724 (address 0x7ffd20b0a724, read of 0x82397bfdf4); first-chance before it: 0x000006d9  at KERNELBASE.dll+0xc408a then 0xc0000005 STATUS_ACCESS_VIOLATION at resutils.dll+0x2a724"
                     },
                     {
                         "program":  "cmd",
                         "exit":  3221225785,
                         "line":  "",
-                        "ms":  44,
-                        "fault":  "no Application Error event found"
+                        "ms":  59,
+                        "expected":  3221225785
                     },
                     {
                         "program":  "cmd_test",
                         "exit":  21,
                         "line":  "cmd_test: check 00000015 got 00000001 (line 390)",
-                        "ms":  762,
-                        "fault":  "no Application Error event found"
+                        "ms":  713
                     },
                     {
                         "program":  "com_test",
                         "exit":  0,
                         "line":  "com_test: ok",
-                        "ms":  76,
-                        "fault":  "no Application Error event found"
+                        "ms":  73
                     },
                     {
                         "program":  "comctl32_test",
                         "exit":  56,
                         "line":  "comctl32_test: check 56 (line 319) failed",
-                        "ms":  186,
-                        "fault":  "no Application Error event found"
+                        "ms":  112
                     },
                     {
                         "program":  "comdlg32_test",
                         "exit":  0,
                         "line":  "comdlg32_test: ok",
-                        "ms":  989,
-                        "fault":  "no Application Error event found"
+                        "ms":  804
                     },
                     {
                         "program":  "commit_test",
                         "exit":  0,
                         "line":  "commit_test: ok",
-                        "ms":  71,
-                        "fault":  "no Application Error event found"
+                        "ms":  77
                     },
                     {
                         "program":  "conhost",
                         "exit":  3221225785,
                         "line":  "",
-                        "ms":  147,
-                        "fault":  "no Application Error event found"
+                        "ms":  42,
+                        "expected":  3221225785
                     },
                     {
                         "program":  "conpty_test",
                         "exit":  0,
                         "line":  "conpty_test: ok",
-                        "ms":  488,
-                        "fault":  "no Application Error event found"
+                        "ms":  531
                     },
                     {
                         "program":  "console_test",
                         "exit":  0,
                         "line":  "console_test: ok",
-                        "ms":  66,
-                        "fault":  "no Application Error event found"
+                        "ms":  36
                     },
                     {
                         "program":  "console_window_test",
                         "exit":  1,
                         "line":  "console_window_test: no line",
-                        "ms":  46,
-                        "fault":  "no Application Error event found"
+                        "ms":  39
                     },
                     {
                         "program":  "context_test",
                         "exit":  0,
                         "line":  "context_test: ok",
-                        "ms":  216,
-                        "fault":  "no Application Error event found"
+                        "ms":  197
                     },
                     {
                         "program":  "controls_test",
                         "exit":  136,
                         "line":  "controls_test: check 136 (line 417) failed",
-                        "ms":  2644,
-                        "fault":  "no Application Error event found"
+                        "ms":  2699
                     },
                     {
                         "program":  "cow_test",
                         "exit":  0,
                         "line":  "cow_test: ok",
-                        "ms":  53,
-                        "fault":  "no Application Error event found"
+                        "ms":  76
                     },
                     {
                         "program":  "crash",
                         "exit":  3221225477,
                         "line":  "crash: writing to address 0",
-                        "ms":  39,
-                        "fault":  "no Application Error event found"
+                        "ms":  136,
+                        "expected":  3221225477
                     },
                     {
                         "program":  "cxx_eh_test",
                         "exit":  0,
                         "line":  "cxx_eh_test: ok",
-                        "ms":  62,
-                        "fault":  "no Application Error event found"
+                        "ms":  117
                     },
                     {
                         "program":  "dbghelp_test",
                         "exit":  0,
                         "line":  "dbghelp_test: ok",
-                        "ms":  166,
-                        "fault":  "no Application Error event found"
+                        "ms":  203
                     },
                     {
                         "program":  "dir_test",
                         "exit":  0,
                         "line":  "dir_test: ok",
-                        "ms":  53,
-                        "fault":  "no Application Error event found"
+                        "ms":  186
                     },
                     {
                         "program":  "dirchange_test",
                         "exit":  0,
                         "line":  "dirchange_test: ok",
-                        "ms":  653,
-                        "fault":  "no Application Error event found"
+                        "ms":  467
                     },
                     {
                         "program":  "disk_test",
                         "exit":  0,
                         "line":  "disk_test: skipped (needs an administrator)",
-                        "ms":  50,
-                        "fault":  "no Application Error event found"
+                        "ms":  113
                     },
                     {
                         "program":  "dpapi_test",
                         "exit":  0,
                         "line":  "dpapi_test: ok",
-                        "ms":  48,
-                        "fault":  "no Application Error event found"
+                        "ms":  51
                     },
                     {
                         "program":  "dwrite_test",
                         "exit":  0,
                         "line":  "dwrite_test: ok",
-                        "ms":  49,
-                        "fault":  "no Application Error event found"
+                        "ms":  46
                     },
                     {
                         "program":  "exception_test",
                         "exit":  0,
                         "line":  "exception_test: ok",
-                        "ms":  132,
-                        "fault":  "no Application Error event found"
+                        "ms":  52
                     },
                     {
                         "program":  "file_test",
                         "exit":  0,
                         "line":  "file_test: ok",
-                        "ms":  49,
-                        "fault":  "no Application Error event found"
+                        "ms":  57
                     },
                     {
                         "program":  "filemap_test",
                         "exit":  0,
                         "line":  "filemap_test: ok",
-                        "ms":  152,
-                        "fault":  "no Application Error event found"
+                        "ms":  71
                     },
                     {
                         "program":  "fpu_test",
                         "exit":  21,
                         "line":  "fpu_test: check 00000015 got 00001f80 (line 250)",
-                        "ms":  262,
-                        "fault":  "no Application Error event found"
+                        "ms":  279
                     },
                     {
                         "program":  "gala",
                         "exit":  3221225785,
                         "line":  "",
-                        "ms":  33,
-                        "fault":  "no Application Error event found"
+                        "ms":  51,
+                        "expected":  3221225785
                     },
                     {
                         "program":  "gala_cli_test",
                         "exit":  0,
                         "line":  "gala_cli_test: skipped (gala.exe is gala\u0027s own)",
-                        "ms":  52,
-                        "fault":  "no Application Error event found"
+                        "ms":  43
                     },
                     {
                         "program":  "gdi32_test",
                         "exit":  103,
                         "line":  "gdi32_test: check 103 (line 351) failed",
-                        "ms":  61,
-                        "fault":  "no Application Error event found"
+                        "ms":  57
                     },
                     {
                         "program":  "go_exec",
                         "exit":  0,
                         "line":  "go_exec: ok",
-                        "ms":  165,
-                        "fault":  "no Application Error event found"
+                        "ms":  136
                     },
                     {
                         "program":  "go_exit",
                         "exit":  3,
                         "line":  "go_exit: exiting with 3",
-                        "ms":  50,
-                        "fault":  "no Application Error event found"
+                        "ms":  59,
+                        "expected":  3
                     },
                     {
                         "program":  "go_gc",
                         "exit":  0,
-                        "line":  "go_gc: ok 67 collections",
-                        "ms":  137,
-                        "fault":  "no Application Error event found"
+                        "line":  "go_gc: ok 94 collections",
+                        "ms":  103
                     },
                     {
                         "program":  "go_goroutines",
                         "exit":  0,
                         "line":  "go_goroutines: ok 12 CPUs",
-                        "ms":  90,
-                        "fault":  "no Application Error event found"
+                        "ms":  66
                     },
                     {
                         "program":  "go_hello",
                         "exit":  0,
                         "line":  "Hello from Go on gala!",
-                        "ms":  45,
-                        "fault":  "no Application Error event found"
+                        "ms":  39
                     },
                     {
                         "program":  "go_http",
                         "exit":  0,
                         "line":  "go_http: ok",
-                        "ms":  73,
-                        "fault":  "no Application Error event found"
+                        "ms":  50
                     },
                     {
                         "program":  "go_os",
                         "exit":  0,
                         "line":  "go_os: ok C:\\Users\\a\\Desktop\\dev\\gala-sweep\\user\\bin",
-                        "ms":  91,
-                        "fault":  "no Application Error event found"
+                        "ms":  58
                     },
                     {
                         "program":  "go_time",
                         "exit":  0,
                         "line":  "go_time: ok",
-                        "ms":  256,
-                        "fault":  "no Application Error event found"
+                        "ms":  161
                     },
                     {
                         "program":  "gpu_stub_test",
                         "exit":  2,
                         "line":  "gpu_stub_test: check 02 failed",
-                        "ms":  944,
-                        "fault":  "no Application Error event found"
+                        "ms":  490
                     },
                     {
                         "program":  "guard_test",
                         "exit":  0,
                         "line":  "guard_test: ok",
-                        "ms":  74,
-                        "fault":  "no Application Error event found"
+                        "ms":  51
                     },
                     {
                         "program":  "gui_test",
                         "exit":  23,
                         "line":  "gui_test: check 00000017 line 0000032f got 00000000",
-                        "ms":  75,
-                        "fault":  "no Application Error event found"
+                        "ms":  92
                     },
                     {
                         "program":  "handover_k32_test",
                         "exit":  0,
                         "line":  "handover_k32_test: skipped (GalaRequestHandover is gala\u0027s own)",
-                        "ms":  34,
-                        "fault":  "no Application Error event found"
+                        "ms":  65
                     },
                     {
                         "program":  "handover_net_test",
                         "exit":  0,
                         "line":  "handover_net_test: ok",
-                        "ms":  766,
-                        "fault":  "no Application Error event found"
+                        "ms":  810
                     },
                     {
                         "program":  "handover_test",
                         "exit":  0,
                         "line":  "handover_test: skipped (GalaRequestHandover is gala\u0027s own)",
-                        "ms":  41,
-                        "fault":  "no Application Error event found"
+                        "ms":  58
                     },
                     {
                         "program":  "hello",
                         "exit":  0,
                         "line":  "Hello from user mode!",
-                        "ms":  37,
-                        "fault":  "no Application Error event found"
+                        "ms":  64
                     },
                     {
                         "program":  "hostnet_test",
                         "exit":  8,
                         "line":  "hostnet_test: failed at step 8",
-                        "ms":  115,
-                        "fault":  "no Application Error event found"
+                        "ms":  132
                     },
                     {
                         "program":  "image_test",
                         "exit":  0,
                         "line":  "image_test: ok",
-                        "ms":  106,
-                        "fault":  "no Application Error event found"
+                        "ms":  51
                     },
                     {
                         "program":  "import_test",
                         "exit":  0,
                         "line":  "import_test: ok",
-                        "ms":  31,
-                        "fault":  "no Application Error event found"
+                        "ms":  43
                     },
                     {
                         "program":  "ioapc_test",
                         "exit":  22,
                         "line":  "ioapc_test: check 00000016 got 00000000 (line 130)",
-                        "ms":  38,
-                        "fault":  "no Application Error event found"
+                        "ms":  47
                     },
                     {
                         "program":  "iocp_test",
                         "exit":  0,
                         "line":  "iocp_test: ok",
-                        "ms":  128,
-                        "fault":  "no Application Error event found"
+                        "ms":  123
                     },
                     {
                         "program":  "iphlpapi_test",
                         "exit":  0,
                         "line":  "iphlpapi_test: ok",
-                        "ms":  39,
-                        "fault":  "no Application Error event found"
+                        "ms":  40
                     },
                     {
                         "program":  "ipv6_test",
                         "exit":  0,
                         "line":  "ipv6_test: ok",
-                        "ms":  2115,
-                        "fault":  "no Application Error event found"
+                        "ms":  2099
                     },
                     {
                         "program":  "kernel32_clr_test",
                         "exit":  0,
                         "line":  "kernel32_clr_test: ok",
-                        "ms":  130,
-                        "fault":  "no Application Error event found"
+                        "ms":  111
                     },
                     {
                         "program":  "kernel32_env_test",
                         "exit":  0,
                         "line":  "kernel32_env_test: ok",
-                        "ms":  34,
-                        "fault":  "no Application Error event found"
+                        "ms":  44
                     },
                     {
                         "program":  "kernel32_file_test",
                         "exit":  0,
                         "line":  "kernel32_file_test: ok",
-                        "ms":  52,
-                        "fault":  "no Application Error event found"
+                        "ms":  55
                     },
                     {
                         "program":  "kernel32_locale_test",
                         "exit":  100,
                         "line":  "kernel32_locale_test: check 00000064 got 00000001 (line 352)",
-                        "ms":  49,
-                        "fault":  "no Application Error event found"
+                        "ms":  43
                     },
                     {
                         "program":  "kernel32_misc_test",
                         "exit":  34,
                         "line":  "kernel32_misc_test: check 00000022 got 3c860000 (line 547)",
-                        "ms":  403,
-                        "fault":  "no Application Error event found"
+                        "ms":  405
                     },
                     {
                         "program":  "kernel32_pool_test",
                         "exit":  0,
                         "line":  "kernel32_pool_test: ok",
-                        "ms":  595,
-                        "fault":  "no Application Error event found"
+                        "ms":  623
                     },
                     {
                         "program":  "kernel32_py_test",
                         "exit":  0,
                         "line":  "kernel32_py_test: ok",
-                        "ms":  93,
-                        "fault":  "no Application Error event found"
+                        "ms":  79
                     },
                     {
                         "program":  "kernel32_sync_test",
                         "exit":  0,
                         "line":  "kernel32_sync_test: ok",
-                        "ms":  2197,
-                        "fault":  "no Application Error event found"
+                        "ms":  2222
                     },
                     {
                         "program":  "kernel32_sys_test",
                         "exit":  0,
                         "line":  "kernel32_sys_test: ok",
-                        "ms":  40,
-                        "fault":  "no Application Error event found"
+                        "ms":  56
                     },
                     {
                         "program":  "kernel32_system_test",
                         "exit":  0,
                         "line":  "kernel32_system_test: ok",
-                        "ms":  79,
-                        "fault":  "no Application Error event found"
+                        "ms":  72
                     },
                     {
                         "program":  "kernel32_test",
                         "exit":  0,
                         "line":  "kernel32_test: ok",
-                        "ms":  166,
-                        "fault":  "no Application Error event found"
+                        "ms":  154
                     },
                     {
                         "program":  "kernel32_thread_test",
                         "exit":  81,
                         "line":  "kernel32_thread_test: check 00000051 got 0000001f (line 458)",
-                        "ms":  54,
-                        "fault":  "no Application Error event found"
+                        "ms":  49
                     },
                     {
                         "program":  "keyed_event_test",
                         "exit":  0,
                         "line":  "keyed_event_test: ok",
-                        "ms":  706,
-                        "fault":  "no Application Error event found"
+                        "ms":  716
                     },
                     {
                         "program":  "kuser_test",
                         "exit":  0,
                         "line":  "kuser_test: ok",
-                        "ms":  66,
-                        "fault":  "no Application Error event found"
+                        "ms":  67
                     },
                     {
                         "program":  "ledger_test",
                         "exit":  0,
                         "line":  "ledger_test: ok",
-                        "ms":  40,
-                        "fault":  "no Application Error event found"
+                        "ms":  64
                     },
                     {
                         "program":  "loader_test",
                         "exit":  0,
                         "line":  "loader_test: ok",
-                        "ms":  128,
-                        "fault":  "no Application Error event found"
+                        "ms":  74
                     },
                     {
                         "program":  "lock_test",
                         "exit":  0,
                         "line":  "lock_test: ok",
-                        "ms":  320,
-                        "fault":  "no Application Error event found"
+                        "ms":  259
                     },
                     {
                         "program":  "logon_test",
                         "exit":  8,
                         "line":  "logon_test: check 00000008 got 00000000 (line 413)",
-                        "ms":  89,
-                        "fault":  "no Application Error event found"
+                        "ms":  76
                     },
                     {
                         "program":  "lsa_test",
                         "exit":  0,
                         "line":  "lsa_test: skipped: needs SYSTEM (SeTcbPrivilege)",
-                        "ms":  49,
-                        "fault":  "no Application Error event found"
+                        "ms":  42
                     },
                     {
                         "program":  "manifest_test",
                         "exit":  0,
                         "line":  "manifest_test: ok",
-                        "ms":  52,
-                        "fault":  "no Application Error event found"
+                        "ms":  80
                     },
                     {
                         "program":  "missing_import_test",
                         "exit":  3221225785,
                         "line":  "",
                         "ms":  42,
-                        "fault":  "no Application Error event found"
+                        "expected":  3221225785
                     },
                     {
                         "program":  "msvcrt_test",
                         "exit":  3221225477,
                         "line":  "",
-                        "ms":  464,
-                        "fault":  "no Application Error event found"
+                        "ms":  357,
+                        "fault":  "0xc0000005 STATUS_ACCESS_VIOLATION at ntdll.dll+0x20191 (address 0x7ffd3f560191, read of 0xab39400408); first-chance before it: 0xc0000005 STATUS_ACCESS_VIOLATION at ntdll.dll+0x20191 then 0xc00000fd STATUS_STACK_OVERFLOW at ntdll.dll+0x166447 then 0xc0000005 STATUS_ACCESS_VIOLATION at ntdll.dll+0x20191"
                     },
                     {
                         "program":  "netapi32_test",
                         "exit":  0,
                         "line":  "netapi32_test: ok",
-                        "ms":  85,
-                        "fault":  "no Application Error event found"
+                        "ms":  48
                     },
                     {
                         "program":  "nginx",
                         "exit":  0,
                         "line":  "",
-                        "ms":  82,
-                        "fault":  "no Application Error event found"
+                        "ms":  43
                     },
                     {
                         "program":  "object_test",
                         "exit":  0,
                         "line":  "object_test: ok",
-                        "ms":  42,
-                        "fault":  "no Application Error event found"
+                        "ms":  34
                     },
                     {
                         "program":  "ole32_test",
                         "exit":  52,
                         "line":  "ole32_test: check 52 (line 500) failed",
-                        "ms":  112,
-                        "fault":  "no Application Error event found"
+                        "ms":  78
                     },
                     {
                         "program":  "oleaut32_test",
                         "exit":  0,
                         "line":  "oleaut32_test: ok",
-                        "ms":  99,
-                        "fault":  "no Application Error event found"
+                        "ms":  55
                     },
                     {
                         "program":  "pdh_test",
                         "exit":  0,
                         "line":  "pdh_test: ok",
-                        "ms":  2677,
-                        "fault":  "no Application Error event found"
+                        "ms":  860
                     },
                     {
                         "program":  "peb_test",
                         "exit":  0,
                         "line":  "peb_test: ok",
-                        "ms":  59,
-                        "fault":  "no Application Error event found"
+                        "ms":  29
                     },
                     {
                         "program":  "persist_test",
                         "exit":  56,
                         "line":  "persist_test: check 00000038 got 00000000 (line 690)",
-                        "ms":  123,
-                        "fault":  "no Application Error event found"
+                        "ms":  30
                     },
                     {
                         "program":  "pipe_test",
                         "exit":  0,
                         "line":  "pipe_test: ok",
-                        "ms":  118,
-                        "fault":  "no Application Error event found"
+                        "ms":  42
                     },
                     {
                         "program":  "pk_install_test",
                         "exit":  0,
                         "line":  "pk_install_test: skipped (gala install is gala\u0027s own)",
-                        "ms":  66,
-                        "fault":  "no Application Error event found"
+                        "ms":  28
                     },
                     {
                         "program":  "presenter_test",
                         "exit":  0,
                         "line":  "presenter_test: skipped (GalaSession is gala\u0027s own)",
-                        "ms":  51,
-                        "fault":  "no Application Error event found"
+                        "ms":  37
                     },
                     {
                         "program":  "prng_test",
                         "exit":  0,
                         "line":  "prng_test: ok",
-                        "ms":  47,
-                        "fault":  "no Application Error event found"
+                        "ms":  30
                     },
                     {
                         "program":  "process_test",
                         "exit":  74,
                         "line":  "process_test: check 0000004a got 00000000 (line 683)",
-                        "ms":  427,
-                        "fault":  "no Application Error event found"
+                        "ms":  410
                     },
                     {
                         "program":  "profile_test",
                         "exit":  4,
                         "line":  "profile_test: check 00000004 got 00000522 (line 269)",
-                        "ms":  73,
-                        "fault":  "no Application Error event found"
+                        "ms":  51
                     },
                     {
                         "program":  "quota_test",
-                        "exit":  null,
-                        "line":  "",
-                        "ms":  60008,
-                        "skipped":  "timed out after 60 s"
+                        "exit":  0,
+                        "line":  "quota_test: ok",
+                        "ms":  43542
                     },
                     {
                         "program":  "registry_test",
                         "exit":  100,
                         "line":  "registry_test: check 00000064 got 00000024 (line 813)",
-                        "ms":  111,
-                        "fault":  "no Application Error event found"
+                        "ms":  34
                     },
                     {
                         "program":  "replay_test",
                         "exit":  0,
                         "line":  "replay_test: ok",
-                        "ms":  66,
-                        "fault":  "no Application Error event found"
+                        "ms":  36
                     },
                     {
                         "program":  "restricted_test",
                         "exit":  2,
                         "line":  "restricted_test: check 00000002 got 000003e6 (line 376)",
-                        "ms":  81,
-                        "fault":  "no Application Error event found"
+                        "ms":  29
                     },
                     {
                         "program":  "richedit_test",
                         "exit":  12,
                         "line":  "richedit_test: check 12 (line 151) failed",
-                        "ms":  260,
-                        "fault":  "no Application Error event found"
+                        "ms":  143
                     },
                     {
                         "program":  "rpcrt4_test",
                         "exit":  0,
                         "line":  "rpcrt4_test: ok",
-                        "ms":  82,
-                        "fault":  "no Application Error event found"
+                        "ms":  30
                     },
                     {
                         "program":  "rtl_test",
                         "exit":  0,
                         "line":  "rtl_test: ok",
-                        "ms":  72,
-                        "fault":  "no Application Error event found"
+                        "ms":  37
                     },
                     {
                         "program":  "safepoint_test",
                         "exit":  0,
-                        "line":  "safepoint_test: ok 00000258 safepoints, noise 000084e5",
-                        "ms":  7232,
-                        "fault":  "no Application Error event found"
+                        "line":  "safepoint_test: ok 00000258 safepoints, noise 0000f328",
+                        "ms":  6348
                     },
                     {
                         "program":  "schannel_test",
@@ -774,120 +674,103 @@
                         "program":  "section_test",
                         "exit":  0,
                         "line":  "section_test: ok",
-                        "ms":  107,
-                        "fault":  "no Application Error event found"
+                        "ms":  28
                     },
                     {
                         "program":  "security_test",
                         "exit":  53,
                         "line":  "security_test: check 00000035 got 00000000 (line 444)",
-                        "ms":  56,
-                        "fault":  "no Application Error event found"
+                        "ms":  40
                     },
                     {
                         "program":  "seh_test",
                         "exit":  74,
                         "line":  "seh_test: check 0000004a got 0000000000000000 (line 732)",
-                        "ms":  36,
-                        "fault":  "no Application Error event found"
+                        "ms":  30
                     },
                     {
                         "program":  "session_test",
                         "exit":  0,
                         "line":  "session_test: skipped (needs SYSTEM)",
-                        "ms":  66,
-                        "fault":  "no Application Error event found"
+                        "ms":  43
                     },
                     {
                         "program":  "setupapi_test",
                         "exit":  0,
                         "line":  "setupapi_test: ok",
-                        "ms":  63,
-                        "fault":  "no Application Error event found"
+                        "ms":  38
                     },
                     {
                         "program":  "shell32_test",
                         "exit":  0,
                         "line":  "shell32_test: ok",
-                        "ms":  3087,
-                        "fault":  "no Application Error event found"
+                        "ms":  2125
                     },
                     {
                         "program":  "shlwapi_test",
                         "exit":  237,
                         "line":  "shlwapi_test: check 237 (url.c line 250) failed",
-                        "ms":  141,
-                        "fault":  "no Application Error event found"
+                        "ms":  63
                     },
                     {
                         "program":  "shootdown_test",
                         "exit":  0,
                         "line":  "shootdown_test: ok 00000fa0",
-                        "ms":  5538,
-                        "fault":  "no Application Error event found"
+                        "ms":  1007
                     },
                     {
                         "program":  "smp_test",
                         "exit":  0,
                         "line":  "smp_test: ok",
-                        "ms":  77,
-                        "fault":  "no Application Error event found"
+                        "ms":  34
                     },
                     {
                         "program":  "smpcow_test",
                         "exit":  0,
                         "line":  "smpcow_test: ok",
-                        "ms":  211,
-                        "fault":  "no Application Error event found"
+                        "ms":  83
                     },
                     {
                         "program":  "smpmem_test",
                         "exit":  0,
                         "line":  "smpmem_test: ok",
-                        "ms":  1059,
-                        "fault":  "no Application Error event found"
+                        "ms":  899
                     },
                     {
                         "program":  "smprace_test",
                         "exit":  0,
                         "line":  "smprace_test: ok",
-                        "ms":  6262,
-                        "fault":  "no Application Error event found"
+                        "ms":  2763
                     },
                     {
                         "program":  "smpsched_test",
                         "exit":  0,
                         "line":  "smpsched_test: ok",
-                        "ms":  96,
-                        "fault":  "no Application Error event found"
+                        "ms":  108
                     },
                     {
                         "program":  "smpsem_test",
                         "exit":  0,
                         "line":  "smpsem_test: ok",
-                        "ms":  254,
-                        "fault":  "no Application Error event found"
+                        "ms":  158
                     },
                     {
                         "program":  "sshfwd_test",
                         "exit":  0,
                         "line":  "sshfwd_test: ok",
-                        "ms":  42,
-                        "fault":  "no Application Error event found"
+                        "ms":  52
                     },
                     {
                         "program":  "sspi_test",
                         "exit":  0,
                         "line":  "sspi_test: ok",
-                        "ms":  83,
-                        "fault":  "no Application Error event found"
+                        "ms":  64
                     },
                     {
                         "program":  "startup_test",
                         "exit":  0,
                         "line":  "startup_test: ok",
-                        "ms":  41,
-                        "fault":  "no Application Error event found"
+                        "ms":  36
                     },
                     {
                         "program":  "statedump_test",
@@ -900,330 +783,291 @@
                         "program":  "straddle_test",
                         "exit":  0,
                         "line":  "straddle_test: ok",
-                        "ms":  33,
-                        "fault":  "no Application Error event found"
+                        "ms":  37
                     },
                     {
                         "program":  "symlink_test",
                         "exit":  0,
                         "line":  "symlink_test: ok",
-                        "ms":  33,
-                        "fault":  "no Application Error event found"
+                        "ms":  47
                     },
                     {
                         "program":  "sync_test",
                         "exit":  0,
                         "line":  "sync_test: ok",
-                        "ms":  28,
-                        "fault":  "no Application Error event found"
+                        "ms":  36
                     },
                     {
                         "program":  "sysinfo_test",
                         "exit":  0,
                         "line":  "sysinfo_test: ok",
-                        "ms":  27,
-                        "fault":  "no Application Error event found"
+                        "ms":  40
                     },
                     {
                         "program":  "system_test",
                         "exit":  0,
                         "line":  "system_test: skipped (needs SYSTEM)",
-                        "ms":  41,
-                        "fault":  "no Application Error event found"
+                        "ms":  40
                     },
                     {
                         "program":  "tds_test",
                         "exit":  1,
                         "line":  "tds_test: step 00000001 (CreateProcessW) got 0000010b",
-                        "ms":  30,
-                        "fault":  "no Application Error event found"
+                        "ms":  38
                     },
                     {
                         "program":  "thread_test",
                         "exit":  0,
                         "line":  "thread_test: ok",
-                        "ms":  87,
-                        "fault":  "no Application Error event found"
+                        "ms":  76
                     },
                     {
                         "program":  "threadinfo_test",
                         "exit":  0,
                         "line":  "threadinfo_test: ok",
-                        "ms":  26,
-                        "fault":  "no Application Error event found"
+                        "ms":  38
                     },
                     {
                         "program":  "timer_test",
                         "exit":  0,
                         "line":  "timer_test: ok",
-                        "ms":  389,
-                        "fault":  "no Application Error event found"
+                        "ms":  400
                     },
                     {
                         "program":  "tls_test",
                         "exit":  6,
-                        "line":  "tls_test: check 00000006 got 6b5ce6ad (line 298)",
-                        "ms":  30,
-                        "fault":  "no Application Error event found"
+                        "line":  "tls_test: check 00000006 got b2f0ea89 (line 298)",
+                        "ms":  38
                     },
                     {
                         "program":  "token_test",
                         "exit":  0,
                         "line":  "token_test: ok",
-                        "ms":  32,
-                        "fault":  "no Application Error event found"
+                        "ms":  44
                     },
                     {
                         "program":  "udp_test",
                         "exit":  0,
                         "line":  "udp_test: ok",
-                        "ms":  337,
-                        "fault":  "no Application Error event found"
+                        "ms":  368
                     },
                     {
                         "program":  "uia_chromium_test",
                         "exit":  116,
                         "line":  "uia_chromium_test: check failed (line 116) at 16 ms: CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, \u0026si, \u0026pi)",
-                        "ms":  59,
-                        "fault":  "no Application Error event found"
+                        "ms":  63
                     },
                     {
                         "program":  "uia_test",
                         "exit":  76,
                         "line":  "uia_test: check 76 (line 1665) failed",
-                        "ms":  12212,
-                        "fault":  "no Application Error event found"
+                        "ms":  12243
                     },
                     {
                         "program":  "uipi_test",
                         "exit":  1,
                         "line":  "uipi_test: check 38 (line 345) failed (last error 87)",
-                        "ms":  107,
-                        "fault":  "no Application Error event found"
+                        "ms":  136
                     },
                     {
                         "program":  "unimplemented_test",
                         "exit":  3,
                         "line":  "",
-                        "ms":  37,
-                        "fault":  "no Application Error event found"
+                        "ms":  36,
+                        "expected":  3
                     },
                     {
                         "program":  "user32_test",
                         "exit":  148,
                         "line":  "user32_test: check 148 (line 1102) failed",
-                        "ms":  495,
-                        "fault":  "no Application Error event found"
+                        "ms":  384
                     },
                     {
                         "program":  "vm_test",
                         "exit":  0,
                         "line":  "vm_test: ok",
-                        "ms":  27,
-                        "fault":  "no Application Error event found"
+                        "ms":  31
                     },
                     {
                         "program":  "vmcycle_test",
                         "exit":  0,
                         "line":  "vmcycle_test: ok",
-                        "ms":  62,
-                        "fault":  "no Application Error event found"
+                        "ms":  71
                     },
                     {
                         "program":  "wait_test",
                         "exit":  0,
                         "line":  "wait_test: ok",
-                        "ms":  340,
-                        "fault":  "no Application Error event found"
+                        "ms":  341
                     },
                     {
                         "program":  "win32_misc_test",
                         "exit":  73,
                         "line":  "win32_misc_test: check 00000049 got 00000005 (line 1304)",
-                        "ms":  53,
-                        "fault":  "no Application Error event found"
+                        "ms":  48
                     },
                     {
                         "program":  "windows_across_test",
                         "exit":  0,
                         "line":  "windows_across_test: ok",
-                        "ms":  1026,
-                        "fault":  "no Application Error event found"
+                        "ms":  1062
                     },
                     {
                         "program":  "winevent_test",
                         "exit":  0,
                         "line":  "winevent_test: ok",
-                        "ms":  1600,
-                        "fault":  "no Application Error event found"
+                        "ms":  1446
                     },
                     {
                         "program":  "winhttp_test",
                         "exit":  null,
                         "line":  "",
-                        "ms":  60000,
-                        "skipped":  "timed out after 60 s"
+                        "skipped":  "no Nginx: needs an administrator (the test CA goes into LocalMachine\\Root)"
                     },
                     {
                         "program":  "wininet_test",
                         "exit":  null,
                         "line":  "",
-                        "ms":  60009,
-                        "skipped":  "timed out after 60 s"
+                        "skipped":  "no Nginx: needs an administrator (the test CA goes into LocalMachine\\Root)"
                     },
                     {
                         "program":  "winsock_async_test",
                         "exit":  26,
                         "line":  "winsock_async_test: check 0000001a got 00000000 (line 483)",
-                        "ms":  48,
-                        "fault":  "no Application Error event found"
+                        "ms":  41
                     },
                     {
                         "program":  "winsock_test",
                         "exit":  0,
                         "line":  "winsock_test: ok",
-                        "ms":  6186,
-                        "fault":  "no Application Error event found"
+                        "ms":  6159
                     },
                     {
                         "program":  "winsta_test",
                         "exit":  58,
                         "line":  "winsta_test: check 0000003a got 000000d0 (line 470)",
-                        "ms":  46,
-                        "fault":  "no Application Error event found"
+                        "ms":  43
                     },
                     {
                         "program":  "wow64_adv_test",
                         "exit":  0,
                         "line":  "wow64_adv_test: ok",
-                        "ms":  70,
-                        "fault":  "no Application Error event found"
+                        "ms":  60
                     },
                     {
                         "program":  "wow64_c_test",
                         "exit":  0,
                         "line":  "wow64_c_test: ok",
-                        "ms":  65,
-                        "fault":  "no Application Error event found"
+                        "ms":  70
                     },
                     {
                         "program":  "wow64_crt_test",
                         "exit":  0,
                         "line":  "wow64_crt_test: atexit ran",
-                        "ms":  62,
-                        "fault":  "no Application Error event found"
+                        "ms":  117
                     },
                     {
                         "program":  "wow64_fs_test",
                         "exit":  0,
                         "line":  "wow64_fs_test: ok",
-                        "ms":  47,
-                        "fault":  "no Application Error event found"
+                        "ms":  53
                     },
                     {
                         "program":  "wow64_gui_test",
                         "exit":  0,
                         "line":  "wow64_gui_test: ok",
-                        "ms":  201,
-                        "fault":  "no Application Error event found"
+                        "ms":  110
                     },
                     {
                         "program":  "wow64_import_test",
                         "exit":  12,
                         "line":  "(line 0x00000119) wow64_import_test: check 0000000c failed, got 00000000",
-                        "ms":  44,
-                        "fault":  "no Application Error event found"
+                        "ms":  44
                     },
                     {
                         "program":  "wow64_k32_test",
                         "exit":  28,
                         "line":  "wow64_k32_test: hello",
-                        "ms":  35,
-                        "fault":  "no Application Error event found"
+                        "ms":  45
                     },
                     {
                         "program":  "wow64_seh_test",
                         "exit":  0,
                         "line":  "wow64_seh_test: ok",
-                        "ms":  71,
-                        "fault":  "no Application Error event found"
+                        "ms":  73
                     },
                     {
                         "program":  "wow64_sock_test",
                         "exit":  0,
                         "line":  "wow64_sock_test: ok",
-                        "ms":  59,
-                        "fault":  "no Application Error event found"
+                        "ms":  82
                     },
                     {
                         "program":  "wow64_test",
                         "exit":  0,
                         "line":  "wow64_test: ok",
-                        "ms":  88,
-                        "fault":  "no Application Error event found"
+                        "ms":  83
                     },
                     {
                         "program":  "wow64_thread_test",
                         "exit":  1,
                         "line":  "(line 0x00000105) wow64_thread_test: check 00000001 failed, got 00000000 c0000022",
-                        "ms":  47,
-                        "fault":  "no Application Error event found"
+                        "ms":  41
                     },
                     {
                         "program":  "xmodify_test",
                         "exit":  0,
                         "line":  "xmodify_test: ok",
-                        "ms":  380,
-                        "fault":  "no Application Error event found"
+                        "ms":  474
                     },
                     {
                         "program":  "xstate_test",
                         "exit":  0,
                         "line":  "xstate_test: ok",
-                        "ms":  906,
-                        "fault":  "no Application Error event found"
+                        "ms":  949
                     },
                     {
                         "program":  "busybox_files",
                         "exit":  0,
                         "line":  "files: ok",
-                        "ms":  958
+                        "ms":  1069
                     },
                     {
                         "program":  "busybox_script",
                         "exit":  4,
                         "line":  "script: ok",
-                        "ms":  427
+                        "ms":  410,
+                        "expected":  4
                     },
                     {
                         "program":  "tcc",
                         "exit":  0,
                         "line":  "status=7",
-                        "ms":  1705
+                        "ms":  2304
                     },
                     {
                         "program":  "tcc_make",
                         "exit":  0,
                         "line":  "broken status=2",
-                        "ms":  3785
+                        "ms":  4378
                     },
                     {
                         "program":  "lua",
                         "exit":  0,
                         "line":  "lua status=0",
-                        "ms":  5254
+                        "ms":  6696
                     },
                     {
                         "program":  "sqlite",
                         "exit":  0,
                         "line":  "integrity after writers: ok",
-                        "ms":  2867
+                        "ms":  3199
                     },
                     {
                         "program":  "tcc_self",
                         "exit":  0,
                         "line":  "msvcrt_test status=0",
-                        "ms":  2272
+                        "ms":  2356
                     }
                 ]
 }

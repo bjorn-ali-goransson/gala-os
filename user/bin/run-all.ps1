@@ -60,10 +60,76 @@ function Stop-Descendants([int]$parent, [datetime]$since) {
     }
 }
 
+# Runs a program once and throws away what it printed. persist_test's
+# first run creates the state (C:\persist, HKCU\Software\GalaPersist) that
+# its second run checks, so only the second run is a result.
+function Invoke-Priming([string]$path, [string]$dir, [int]$seconds) {
+    $p = New-Object System.Diagnostics.ProcessStartInfo
+    $p.FileName = $path
+    $p.WorkingDirectory = $dir
+    $p.UseShellExecute = $false
+    $p.RedirectStandardOutput = $true
+    $p.CreateNoWindow = $true
+    $proc = $null
+    try { $proc = [System.Diagnostics.Process]::Start($p) } catch { return }
+    if ($null -eq $proc) { return }
+    [void]$proc.StandardOutput.ReadToEndAsync()
+    if (-not $proc.WaitForExit($seconds * 1000)) {
+        $proc.Kill()
+        $proc.WaitForExit()
+    }
+}
+
+# Where a crashed program faulted: module, offset and exception code.
+# Windows Error Reporting's event 1000 is never written for these, because
+# the runner sets SEM_NOGPFAULTERRORBOX above and a process with that error
+# mode does not report its fault to WER at all -- so the Application log has
+# nothing to find, and the field used to read "no Application Error event
+# found" for every crash. user/windows/fault.py gets the same three facts by
+# being the debugger instead (CreateProcess with DEBUG_ONLY_THIS_PROCESS, the
+# second-chance EXCEPTION_DEBUG_EVENT, VirtualQueryEx and
+# GetModuleFileNameExW for the module): it runs the program a second time.
+function Get-Fault([string]$exePath) {
+    $script = Join-Path $here "..\windows\fault.py"
+    if (-not (Test-Path $script)) { return "no ..\windows\fault.py beside user/bin" }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $python) { return "no python on PATH to run fault.py" }
+    $before = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $out = & $python.Source -I $script $exePath 2>&1 | Out-String
+    $ErrorActionPreference = $before
+    $line = @($out -split "`r?`n" | Where-Object { $_.Trim() -ne "" }) | Select-Object -First 1
+    if ($null -eq $line) { return "fault.py printed nothing" }
+    # "<name>.exe   0xc0000005 STATUS_ACCESS_VIOLATION at ntdll.dll+0x1fb5c ..."
+    return ($line -replace '^\S+\s+', '').Trim()
+}
+
 # Command lines that scenarios pass (gala: `args=` in xtask/src/main.rs).
 # nginx.exe would serve until stopped: -v prints its version and exits.
 $arguments = @{ "args_test" = 'alpha "beta gamma"'; "wow64_crt_test" = 'one "two three"'; "go_http" = 'self'; "handover_net_test" = 'self'; "nginx" = '-v'; "busybox" = 'sh -c "echo hello | cat; echo pipe=$?; echo abc | sed s/b/X/; echo count=$(printf ''x\ny\nx\n'' | grep -c x); exit 3"' }
 # smp_test takes an expected processor count (cpus=N); none on Windows.
+
+# Programs whose non-zero exit is the answer, not a failure, so that a
+# reader (and `cargo xtask compare`) can tell the two apart. Each value is
+# what Windows gives; where xtask's scenario says the same for gala, its
+# `exited with status 0x...` line agrees.
+#
+# Written in decimal because PowerShell 5.1 reads a hex literal above
+# 0x7fffffff as a signed Int32.
+$expected = @{
+    "go_exit"             = 3           # 0x3: it prints "exiting with 3" and does
+    "busybox"             = 3           # 0x3: its command line here ends `exit 3`
+    "busybox_script"      = 4           # 0x4: script.sh ends `exit 4`
+    "crash"               = 3221225477  # 0xc0000005: it crashes on purpose
+    "unimplemented_test"  = 3           # 0x3 is Windows' own answer (gala: 0xc0000002)
+    "missing_import_test" = 3221225785  # 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND, the point of it
+    # gala's own programs (user/cmd, user/conhost, user/gala), not tests:
+    # they import ntdll!GalaRecordMissing, which the real ntdll has not, so
+    # Windows refuses to load them. 0xc0000139.
+    "cmd"                 = 3221225785
+    "conhost"             = 3221225785
+    "gala"                = 3221225785
+}
 
 $results = @()
 
@@ -107,10 +173,29 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     # Driven by flaui_test (a .NET program: docs/WORKFLOW.md, "FlaUI");
     # alone it waits for its window to be closed.
     if ($name -eq "flaui_target") { continue }
+    # winhttp_test and wininet_test fetch from the Nginx that the
+    # schannel_test setup above starts (plain HTTP on 127.0.0.1:8080, TLS on
+    # 8443 with the test CA's certificate for localhost), and that setup
+    # needs an administrator. Without it they wait for a server that is not
+    # there and are killed at the timeout, a minute each.
+    if (($name -eq "winhttp_test" -or $name -eq "wininet_test") -and $null -ne $schannelSkip) {
+        $why = "no Nginx: " + $schannelSkip
+        $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $why }
+        Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
+        continue
+    }
     if ($name -eq "schannel_test" -and $null -ne $schannelSkip) {
         $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $schannelSkip }
         Write-Host ("{0,-18} skipped: {1}" -f $name, $schannelSkip)
         continue
+    }
+    # persist_test checks on its second run what its first run wrote, so
+    # both a stale state from an earlier round and a missing one decide the
+    # result. Clear it, prime it, and judge the run after that.
+    if ($name -eq "persist_test") {
+        Remove-Item -Recurse -Force "C:\persist" -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force "HKCU:\Software\GalaPersist" -ErrorAction SilentlyContinue
+        Invoke-Priming $exe.FullName $here $TimeoutSeconds
     }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe.FullName
@@ -196,6 +281,12 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     $entry = [ordered]@{
         program = $name; exit = $code; line = $line; ms = [int]$sw.Elapsed.TotalMilliseconds
     }
+    # A program whose exit is what it is for is not a failure: record what
+    # was expected beside what happened, so neither a reader nor
+    # `cargo xtask compare` has to know the list.
+    $want = 0
+    if ($expected.ContainsKey($name)) { $want = [uint32]$expected[$name] }
+    if ($want -ne 0) { $entry.expected = $want }
     ("== {0}  exit 0x{1:x8}  {2} ms" -f $name, $code, $entry.ms) |
         Add-Content -Path $outAll -Encoding UTF8
     if ($text) { $text.TrimEnd() | Add-Content -Path $outAll -Encoding UTF8 }
@@ -205,27 +296,15 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     # administrator rights): the faulting module, exception code and
     # offset, which `cargo xtask symbolize`-style lookups map to a function
     # through the build's PDB. WER may take a moment to write it.
-    if ($code -ge 0xC0000000) {
-        $pidHex = "0x{0:x}" -f $process.Id
-        $fault = $null
-        foreach ($try in 1..6) {
-            $fault = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = $runStart } `
-                -ErrorAction SilentlyContinue |
-                Where-Object { $_.Message -like "*$($exe.Name)*" -and $_.Message -like "*$pidHex*" } |
-                Select-Object -First 1
-            if ($null -ne $fault) { break }
-            Start-Sleep -Milliseconds 500
-        }
-        if ($null -ne $fault) {
-            $m = $fault.Message
-            $module = if ($m -match 'Faulting module name: ([^,\r\n]+)') { $Matches[1].Trim() } else { "?" }
-            $exception = if ($m -match 'Exception code: (0x[0-9a-fA-F]+)') { $Matches[1] } else { "?" }
-            $offset = if ($m -match 'Fault offset: (0x[0-9a-fA-F]+)') { $Matches[1] } else { "?" }
-            $entry.fault = "$module+$offset ($exception)"
-            Write-Host ("{0,-18} crashed in {1}" -f $name, $entry.fault)
-        } else {
-            $entry.fault = "no Application Error event found"
-        }
+    # A crash (an NTSTATUS as the exit code) that was not the point of the
+    # program: find where it faulted. Not for `crash`, which crashes on
+    # purpose and would only be run twice for nothing.
+    # 3221225472 is 0xc0000000 in decimal: PowerShell 5.1 reads a hex
+    # literal that large as a negative Int32, so `-ge 0xC0000000` was true
+    # for every program and the field used to be filled in for passing ones.
+    if ($code -ge 3221225472 -and $code -ne $want) {
+        $entry.fault = Get-Fault $exe.FullName
+        Write-Host ("{0,-18} crashed: {1}" -f $name, $entry.fault)
     }
     $results += $entry
     # The benchmarks' numbers, for `cargo xtask bench <this file>`.
@@ -288,15 +367,19 @@ $scripts = @(
 )
 foreach ($s in $scripts) {
     $path = Join-Path $here $s.path
-    # A scenario that cannot run is reported as skipped with the reason
-    # (its script or busybox.exe missing: not copied, or quarantined), so
-    # the report's count does not drop silently.
-    $why = $null
-    if (-not (Test-Path (Join-Path $here "busybox.exe"))) { $why = "busybox.exe is missing" }
-    elseif (-not (Test-Path $path)) { $why = "$($s.path) not found" }
-    if ($why) {
-        $results += [ordered]@{ program = $s.name; exit = $null; line = ""; skipped = $why }
-        Write-Host ("{0,-18} skipped: {1}" -f $s.name, $why)
+    # A scenario that cannot run leaves a record saying why. It used to
+    # `continue` silently, so copying only user/bin (which is what the
+    # procedure in docs/WORKFLOW used to say) reported 169 programs instead
+    # of 176 with nothing to explain the seven that were gone.
+    $missing = $null
+    if (-not (Test-Path (Join-Path $here "busybox.exe"))) {
+        $missing = "no busybox.exe (quarantined, or not exported)"
+    } elseif (-not (Test-Path $path)) {
+        $missing = "its script $($s.path) is not beside user/bin (copy user/busybox, user/tcc, user/lua, user/sqlite and user/msvcrt_test too)"
+    }
+    if ($null -ne $missing) {
+        $results += [ordered]@{ program = $s.name; exit = $null; line = ""; skipped = $missing }
+        Write-Host ("{0,-18} skipped: {1}" -f $s.name, $missing)
         continue
     }
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -317,9 +400,11 @@ foreach ($s in $scripts) {
         Add-Content -Path $outAll -Encoding UTF8
     if ($text) { $text.TrimEnd() | Add-Content -Path $outAll -Encoding UTF8 }
     $last = @($text -split "`r?`n" | Where-Object { $_ -ne "" }) | Select-Object -Last 1
-    $results += [ordered]@{
+    $entry = [ordered]@{
         program = $s.name; exit = $code; line = $last; ms = [int]$sw.Elapsed.TotalMilliseconds
     }
+    if ($expected.ContainsKey($s.name)) { $entry.expected = [uint32]$expected[$s.name] }
+    $results += $entry
     Write-Host ("{0,-18} {1:x8} {2,7} ms  {3}" -f $s.name, $code, [int]$sw.Elapsed.TotalMilliseconds, $last)
 }
 
