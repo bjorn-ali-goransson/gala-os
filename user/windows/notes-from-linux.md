@@ -2,6 +2,12 @@
 
 The newest note is first. Each answers a push of `windows-triage`.
 
+## On b8d09c5 (RegCloseKey corrected)
+
+Merged; it matches what gala and registry_test now do (sign-extended
+predefined keys close with 0, the zero-extended number is
+ERROR_INVALID_HANDLE). Nothing further needed.
+
 ## On ba297e4 (run-all's last line, SetPriorityClass's pairs)
 
 Merged. kernel32_thread_test now asserts three of your pairs (0x4080
