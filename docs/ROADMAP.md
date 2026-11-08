@@ -113,6 +113,13 @@ In order:
     operation, gala's hot spots fixed in order of the gap, each with a
     benchmark in `bench` and its numbers in PERF.md.
 
+Then the next breakthroughs (the owner), in this order: **LD**, desktop
+Linux applications (dynamic glibc programs first, then the Wayland
+server); **GPU** G2, software rendering, which serves both personalities
+(Mesa's llvmpipe and lavapipe are the same code behind Windows' DLLs and
+Linux's libraries); **AR**, the ARM64 port; **XT**, x64 Windows programs
+on ARM64; **AN**, Android applications.
+
 ## Status at a glance
 
 States: **done**, **in progress** (some built, work open), **planned**
@@ -183,6 +190,10 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
+| LD | Desktop Linux applications | planned | dynamic glibc programs, a Wayland server (`wl_shm`), a GTK application, Xwayland |
+| AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
+| XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
+| AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
 
 ### Desktop, sessions and remote access
 
@@ -376,7 +387,7 @@ flagged and one that must not):
 ### PT. Portability seams for a second architecture
 
 **Goal**: the kernel and gala's DLLs keep every architecture-specific
-part behind the `arch` layer, so an ARM64 port ("Later") starts from a
+part behind the `arch` layer, so the ARM64 port (item AR) starts from a
 clean seam and new code cannot add x86 coupling unnoticed. Not the port
 itself (the owner: later).
 
@@ -1995,6 +2006,102 @@ WSL's source (MIT) is an allowed source (CLEAN_ROOM "WSL").
 
 **Design**: ARCHITECTURE "Plan: Linux containers through a WSL facade".
 
+### LD. Desktop Linux applications
+
+**Goal**: graphical Linux programs (GTK and Qt applications as
+distributions ship them) run on gala, each a window on shasha's desktop
+beside Windows programs, on the LX personality (the owner: the first of
+the next breakthroughs).
+
+**Next**:
+1. Dynamically linked programs: a glibc program through its `ld.so`
+   (PT_INTERP, the program interpreter mapped beside the program, shared
+   libraries from a root file system image, file-backed private and
+   shared mappings at their sizes, copy-on-write `fork`). Test first: a
+   corpus program linked against glibc (user/lx), its transcript
+   recorded on real Linux as the static ones are.
+2. A Wayland server in gala speaking the core protocol and `wl_shm`
+   (shared-memory buffers: software-rendered clients need no GPU) and
+   `xdg-shell` for top-level windows: each surface a shasha window,
+   pointer and keyboard input through `wl_seat`. Test first: a small
+   client of our own drawing known pixels, checked on the screen.
+3. A first real application: a GTK 3 or 4 program (a calculator or text
+   editor) from a distribution's packages, its window and input checked
+   on the screen; then a Qt one.
+4. X11 programs through Xwayland, once the Wayland server holds.
+
+**Done when** (each step): its test and scenario pass, and the Linux
+programs' transcripts match real Linux's.
+
+**Design**: written in ARCHITECTURE before step 2 (where the Wayland
+server runs, its buffers as sections, its surfaces as the desktop's
+windows). Wayland's protocol XML and libwayland are open source
+(CLEAN_ROOM "Linux").
+
+### AR. ARM64 port
+
+**Goal**: gala boots and runs on ARM64 (QEMU's `virt` machine first),
+on the seams item PT prepared: native ARM64 Windows programs
+(`aarch64-pc-windows-msvc` PE images) and ARM64 Linux programs.
+
+**Next**:
+1. The kernel's `arch` for aarch64: boot through Limine's aarch64
+   protocol on UEFI, the exception vectors, the GIC, the generic timer,
+   VMSAv8 page tables behind `arch` (`mm::paging`'s format moves there),
+   the context switch, PSCI for the other CPUs, the PL011 UART. Test
+   first: the boot scenario `hello` reaching its kernel line under
+   `qemu-system-aarch64`.
+2. User mode: Windows' ARM64 ABI (`nt::abi::arm64`: CONTEXT, the system
+   call convention, unwinding) and gala's DLLs built for ARM64; Linux's
+   aarch64 ABI (`lx::machine::aarch64`, its system call table).
+3. CI: the aarch64 boot scenarios on GitHub's ARM64 runners (free for
+   public repositories) or under QEMU's emulation.
+
+**Done when**: the boot scenarios of the native ARM64 test programs pass
+on aarch64 in CI.
+
+### XT. 64-bit Windows programs on ARM64
+
+**Goal**: x64 Windows programs run on ARM64 gala (the owner: needed,
+since most Windows programs ship for x64 only), through dynamic binary
+translation as Windows' own Prism does: x64 code translated to ARM64
+when it first runs, and cached. After AR runs native programs.
+
+**Next**:
+1. An interpreter of user-mode x86-64 for correctness first (the x86-64
+   manuals and Arm's Architecture Reference Manual as the sources); its
+   tests are the existing x64 test programs.
+2. A block-at-a-time JIT to ARM64 with a translation cache, lazy flags,
+   x87/SSE on NEON, self-modifying code caught through write protection,
+   and x64's strong memory ordering kept on ARM64's weaker one (the
+   classic source of multithreaded bugs in translators).
+3. The boundary, measured before choosing: x64 DLLs loaded as on x86-64
+   and the system call boundary translated (the NT layer stays native),
+   or gala's system DLLs native with translated code calling into them
+   (Windows' documented ARM64EC/ARM64X design).
+
+Open-source translators (FEX-Emu, Box64; MIT) may be read, and anything
+borrowed is recorded in THIRD_PARTY; the clean-room rule is about
+Windows' code.
+
+### AN. Android applications
+
+**Goal**: Android applications run on gala, on the LX personality:
+x86_64 Android images (AOSP's emulator builds) first, ARM64 after AR.
+
+**Next** (each test first against real Android where it applies):
+1. LX far enough for Android's userspace: binder (the IPC driver),
+   ashmem/memfd, bionic's needs, Android's init and property service.
+2. ART running a command-line Java program (dalvikvm), then the
+   framework's system server.
+3. Graphics: gralloc and EGL over SwiftShader (Android's own software
+   renderer), SurfaceFlinger's output as a shasha window.
+4. A first application: an APK from AOSP's samples, its window and input
+   checked on the screen.
+
+AOSP is open source (Apache-2.0; the kernel GPL-2.0; CLEAN_ROOM
+"Linux"). Needs LD's dynamic linking and most of LX.
+
 ### WOW. 32-bit x86 programs (WOW64)
 
 **Goal** (approved by the owner): unmodified 32-bit x86 Windows programs
@@ -2471,9 +2578,14 @@ floor in the superblock's sector. Next:
      one signed list of a release's files, not two.
    - CI: publish every release that passes the gate on main (upload the
      blobs, then targets, snapshot, timestamp) and run `feed refresh`
-     on a schedule. Stopgap until then, named: the feed is signed with
-     test keys from `target/trust/feed-*` (root keys belong offline,
-     the targets key in a KMS or HSM).
+     on a schedule. Every key, root included, lives in CI's secrets
+     (the owner's decision, for now): CI can then also rotate keys and
+     re-sign root, at the price that whoever controls CI controls the
+     trust chain. Root's validity is short (90 days, re-signed monthly;
+     targets 30 days, snapshot 7, timestamp 1), so a later move of root
+     offline is one rotation that every client takes within weeks.
+     Until the publish job exists, the feed is signed with test keys
+     from `target/trust/feed-*`.
    - A staged rollout field in targets (a share of machines by
      machine-id hash).
    - Out of it: distributions inside LX update themselves (their own
@@ -2784,25 +2896,11 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
 - **gala's own drivers** against published standards: after virtio,
   AHCI/NVMe, xHCI, e1000; device interrupts (all devices are polled
   today).
-- **ARM64**: a second arch port (boot, MMU, exceptions, timer, context
-  switch), ARM64 PE images and ARM64 builds of gala's DLLs, on the seams
-  item PT prepares. x86_64 (Intel and AMD) is the only port today; most
-  Windows programs ship for x64 only, so without the translator below
-  an ARM64 gala runs native ARM64 builds (Chromium/Edge, .NET, Python,
-  Node, Git, ...).
-- **Raspberry Pi** (on the ARM64 port): Pi 4/5, QEMU's `raspi4b`/`virt`
+- **Raspberry Pi** (on item AR's port): Pi 4/5, QEMU's `raspi4b`/`virt`
   first; Limine or the Pi's firmware loading the kernel, the GIC and the
   generic timer, the PL011 UART, the mailbox framebuffer, then EMMC2/SD,
   USB through xHCI (the Pi 5's RP1, the Pi 4's VL805) and GENET
   Ethernet, all against published datasheets.
-- **x64 programs on ARM64**: a translator of gala's own from documented
-  behaviour (the x86-64 manuals, Arm's ARM): an interpreter of user-mode
-  x86-64 for correctness first, then a block-at-a-time JIT to ARM64 with
-  a translation cache, lazy flags, x87/SSE on NEON, self-modifying code
-  caught through write protection, x64 DLLs loaded as on x86, and the
-  syscall boundary translated (the NT layer stays native). Windows'
-  documented ARM64EC/CHPE design can guide the interface between
-  emulated and native code. After the ARM64 port runs native programs.
 - **Smaller gaps with no item yet** (each stated as a limit in its
   ARCHITECTURE section; cross-cutting ones in its "Known limits"):
   - Scheduler: processor time accounting (thread times are 0,

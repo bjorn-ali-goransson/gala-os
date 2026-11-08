@@ -11039,12 +11039,12 @@ update client will check them with the same `Client`.
   releases). Uploads go blobs, targets, snapshot, then timestamp, the
   one file a client reads first.
 - **Roles and keys** (Ed25519, key id = SHA-256 of the key object's
-  canonical JSON): root (3 keys, threshold 2, offline; root N+1 must
+  canonical JSON): root (3 keys, threshold 2; in CI's secrets for now, ROADMAP R8; root N+1 must
   carry a threshold of root N's root keys and of its own), targets (the
   release key: each file's length and SHA-256, the release number and
   rollback floor in `custom`), snapshot (the targets metadata's version,
-  length and hash), timestamp (the snapshot's). Expiry: root 730 days,
-  targets 365, snapshot 7, timestamp 1; `feed refresh` re-signs snapshot
+  length and hash), timestamp (the snapshot's). Expiry: root 90 days,
+  targets 30, snapshot 7, timestamp 1; `feed refresh` re-signs snapshot
   and timestamp on a schedule (online keys), so a client can tell a
   frozen feed (expired timestamp) from a quiet one (a new timestamp,
   same snapshot).
