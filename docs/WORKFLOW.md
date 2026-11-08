@@ -1140,7 +1140,11 @@ source).
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
   skips the rebuild. Transcripts avoid version-dependent values because
-  CI's runner kernel differs from the recording machine's.
+  CI's runner kernel differs from the recording machine's. lx-expect
+  closes the descriptors it inherited first (it says how many): fork
+  sizes a program's descriptor table by the parent's highest open
+  descriptor, and answers such as select's on a descriptor beyond the
+  table depend on that size.
 - **Skips**: pty_test and proc_test print a single `SKIP:
   open(/dev/ptmx) = -errno` (or readlink /proc/self) line when that is
   unavailable, so a machine without them shows a mismatch whose diff

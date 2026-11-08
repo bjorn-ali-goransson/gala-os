@@ -235,14 +235,9 @@ pub fn socket(call: &Call<'_>, domain: u64, kind: u64, protocol: u64) -> Result 
 }
 
 /// A `sockaddr_in`/`sockaddr_in6` from user memory, for a socket of
-/// `family`: EINVAL if too short, `wrong_family` for another family.
-fn read_addr(
-    call: &Call<'_>,
-    family: u16,
-    addr: u64,
-    len: u64,
-    wrong_family: u16,
-) -> core::result::Result<Addr, u16> {
+/// `family`: EINVAL if too short, EAFNOSUPPORT for another family (bind
+/// and connect alike; user/lx/socket_test).
+fn read_addr(call: &Call<'_>, family: u16, addr: u64, len: u64) -> core::result::Result<Addr, u16> {
     let len = u64::from(len as u32);
     let need = if family == AF_INET { 16 } else { 24 };
     if len < need {
@@ -251,7 +246,7 @@ fn read_addr(
     let mut b = [0u8; 24];
     call.process.read(addr, &mut b[..need as usize]).map_err(|_| EFAULT)?;
     if u16::from_le_bytes([b[0], b[1]]) != family {
-        return Err(wrong_family);
+        return Err(EAFNOSUPPORT);
     }
     let port = u16::from_be_bytes([b[2], b[3]]);
     let ip = if family == AF_INET {
@@ -313,7 +308,7 @@ fn scope(sock: &Socket) -> Scope {
 
 pub fn bind(call: &Call<'_>, fd: u64, addr: u64, len: u64) -> Result {
     let (_, sock) = socket_of(call, fd)?;
-    let local = read_addr(call, sock.family, addr, len, EINVAL)?;
+    let local = read_addr(call, sock.family, addr, len)?;
     let mut state = sock.state.lock();
     if *state != SockState::Fresh {
         return Err(EINVAL);
@@ -434,7 +429,7 @@ fn progress(
 
 pub fn connect(call: &Call<'_>, fd: u64, addr: u64, len: u64) -> Result {
     let (f, sock) = socket_of(call, fd)?;
-    let mut remote = read_addr(call, sock.family, addr, len, EAFNOSUPPORT)?;
+    let mut remote = read_addr(call, sock.family, addr, len)?;
     if remote.ip.is_unspecified() {
         // Linux connects to the local host.
         remote.ip = remote.ip.loopback_like();
