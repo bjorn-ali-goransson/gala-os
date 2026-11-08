@@ -25,6 +25,8 @@
 //!   `C:\Windows\Sysnative\cmd.exe /c exit 7` starts the 64-bit cmd
 //!   (IsWow64Process FALSE, exit code 7), and so does `System32\cmd.exe`
 //!   with redirection off.
+//! - Which names the 32-bit kernel32 and kernelbase each export, split as
+//!   64-bit Windows 11 25H2's are (`export_split`, kernel32_test's table).
 //! - It ends with ExitProcess(0).
 //!
 //! Prints `wow64_k32_test: ok` and exits with 0, or exits with the number
@@ -91,7 +93,12 @@ unsafe extern "system" {
     fn Wow64DisableWow64FsRedirection(old: *mut usize) -> i32;
     fn Wow64RevertWow64FsRedirection(old: usize) -> i32;
     fn ExitProcess(code: u32) -> !;
+    fn LoadLibraryA(name: *const u8) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> usize;
 }
+
+#[path = "../../kernel32_test/src/export_split.rs"]
+mod export_split;
 
 // The memory routines the compiler calls: ntrt's x86 runtime (nothing
 // else of it is used).
@@ -254,6 +261,29 @@ fn run() -> Result<(), u32> {
         let mut n = 0;
         c.eq(WriteFile(out, hello.as_ptr(), hello.len() as u32, &mut n, 0) as u32, 1)?;
         c.eq(n, hello.len() as u32)?;
+
+        // Which names kernel32 and kernelbase export.
+        let k32 = LoadLibraryA(c"kernel32.dll".as_ptr().cast());
+        let kb = LoadLibraryA(c"kernelbase.dll".as_ptr().cast());
+        c.ok(k32 != 0 && kb != 0, 0)?;
+        let find = |m: Handle| {
+            move |name: &core::ffi::CStr| export_split::Found {
+                address: GetProcAddress(m, name.as_ptr().cast()),
+                exported: export_split::exported(m, name),
+            }
+        };
+        let mismatch = export_split::first_mismatch(find(k32), find(kb));
+        if let Some((name, a, b)) = mismatch {
+            print(b"wow64_k32_test: ");
+            print(name.to_bytes());
+            for (dll, f) in [(&b": kernel32 "[..], a), (&b", kernelbase "[..], b)] {
+                print(dll);
+                print(&hex32(f.address as u32));
+                print(if f.exported { b" exported" } else { b" absent  " });
+            }
+            print(b"\r\n");
+        }
+        c.ok(mismatch.is_none(), 0)?;
 
         // A file.
         let path = wide("C:\\Users\\Public\\wow64_k32_test.txt");

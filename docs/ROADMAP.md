@@ -1707,6 +1707,16 @@ one, the drivers\etc exemption; Wow64Disable/Revert/EnableWow64FsRedirection
 per thread; CreateProcessW's image redirected, Sysnative's cmd 64-bit;
 wow64_fs_test: every documented exemption).
 
+Done (issue #15, Windows' behaviour from measurements on 25H2):
+kernel32 does not export the PathCch functions, WaitOnAddress,
+WakeByAddressSingle/All or the interrupt-time queries, which kernelbase
+implements itself (the address waits from a source kernel32 also builds
+privately for its locks: ARCHITECTURE "API sets");
+MapUserPhysicalPagesScatter is kernel32's alone; FlsGetValue2 and
+TlsGetValue2 are one function behind both, CheckTokenMembershipEx,
+SetFileIoOverlappedRange and the XState functions in both
+(kernel32_test, wow64_k32_test: `export_split.rs`).
+
 Next:
 1. The next run on Windows (each fix may reveal a program's next
    failing check), and the probes still open, asked of the agent there:
@@ -1776,23 +1786,14 @@ Next:
    event 1000, which SEM_NOGPFAULTERRORBOX (set by the runner) prevents;
    `user/windows/fault.py`, which debugs the program, gives the same
    facts. run-all uses that way instead.
-4. **KB**'s rest: kernel32 exports gala implements that Windows' kernel32
-   may not (absent from Wine's kernel32.spec, present in its
-   kernelbase.spec): PathCchAppend, PathCchCombine, PathCchCombineEx,
-   PathCchRemoveBackslash, PathCchRemoveExtension, PathCchRemoveFileSpec,
-   PathCchSkipRoot, WaitOnAddress, WakeByAddressAll, WakeByAddressSingle,
-   QueryInterruptTime, QueryInterruptTimePrecise,
-   QueryUnbiasedInterruptTimePrecise, FlsGetValue2, TlsGetValue2,
-   CheckTokenMembershipEx, GetEnabledXStateFeatures,
-   GetXStateFeaturesMask, LocateXStateFeature, SetXStateFeaturesMask,
-   MapUserPhysicalPagesScatter, SetFileIoOverlappedRange: to measure on
-   Windows (GetProcAddress(GetModuleHandleW(L"kernel32.dll"), name) for
-   each, NULL or not) and move those Windows' kernel32 lacks into
-   kernelbase, test first, as CompareObjectHandles was. Also kernel32's
-   exports of ntrt's runtime symbols (`__C_specific_handler`, `_fltused`,
-   `mainCRTStartup`), which Windows' has not. gala's kernel32 does not
-   import kernelbase (Windows' does, so there kernelbase is in every
-   process).
+4. **KB**'s rest: kernel32's exports of ntrt's runtime symbols
+   (`__C_specific_handler`, `_fltused`, `mainCRTStartup`), which
+   Windows' has not; the 32-bit kernel32/kernelbase split, asserted as
+   the 64-bit one measured (wow64_k32_test), to confirm on a 32-bit run;
+   the four PathCch stubs (PathCchAppend, PathCchCombine,
+   PathCchRemoveBackslash, PathCchRemoveExtension) to implement from
+   pathcch.h's contracts, test first. gala's kernel32 does not import
+   kernelbase (Windows' does, so there kernelbase is in every process).
 5. **The default IME window**: on Windows a thread's first window brings
    the thread's IME window (class "IME", title "Default IME"; a CBT hook
    sees its HCBT_CREATEWND too). gala makes none (user32_test counts

@@ -2,8 +2,11 @@
 //! bound by the loader): console output, last-error, process and thread
 //! ids, virtual memory, events and waits, sleeping and tick counts, the
 //! performance counter, LoadLibrary/GetProcAddress/FreeLibrary,
-//! SetDllDirectoryW/GetDllDirectoryW (a copy of testdll2.dll in %TEMP%), and
-//! ExitProcess. Expected results, last-error codes included, are those of
+//! SetDllDirectoryW/GetDllDirectoryW (a copy of testdll2.dll in %TEMP%),
+//! which names kernel32 and kernelbase each export (`export_split`: the
+//! PathCch, address-wait and interrupt-time functions are kernelbase's
+//! alone, MapUserPhysicalPagesScatter kernel32's, FlsGetValue2 and
+//! TlsGetValue2 one function behind both), and ExitProcess. Expected results, last-error codes included, are those of
 //! real Windows (its kernel32); on gala the test runs against gala's own
 //! kernel32.dll. Prints `kernel32_test: ok` and ends with ExitProcess(0),
 //! or exits with the number of the failing check.
@@ -11,7 +14,9 @@
 #![no_std]
 #![no_main]
 
-use core::ffi::c_void;
+use core::ffi::{CStr, c_void};
+
+mod export_split;
 
 type Bool = i32;
 type Handle = *mut c_void;
@@ -218,6 +223,30 @@ fn run() -> Result<(), u32> {
         SetLastError(0);
         c.ok(LoadLibraryA(c"no_such_dll.dll".as_ptr().cast()).is_null(), 0)?;
         c.eq(GetLastError().into(), ERROR_MOD_NOT_FOUND.into())?;
+
+        // Which names kernel32 and kernelbase export (Windows 11 25H2).
+        let k32 = LoadLibraryA(c"kernel32.dll".as_ptr().cast());
+        let kb = LoadLibraryA(c"kernelbase.dll".as_ptr().cast());
+        c.ok(!k32.is_null() && !kb.is_null(), 0)?;
+        let find = |m: Handle| {
+            move |name: &CStr| export_split::Found {
+                address: GetProcAddress(m, name.as_ptr().cast()) as usize,
+                exported: export_split::exported(m as usize, name),
+            }
+        };
+        let mismatch = export_split::first_mismatch(find(k32), find(kb));
+        if let Some((name, a, b)) = mismatch {
+            out(b"kernel32_test: ");
+            out(name.to_bytes());
+            for (dll, f) in [(&b": kernel32 "[..], a), (&b", kernelbase "[..], b)] {
+                out(dll);
+                out(&hex((f.address as u64 >> 32) as u32));
+                out(&hex(f.address as u32));
+                out(if f.exported { b" exported" } else { b" absent  " });
+            }
+            out(b"\r\n");
+        }
+        c.ok(mismatch.is_none(), 0)?;
 
         // SetDllDirectoryW adds a directory to the search, after the
         // executable's: a copy of testdll2.dll under a name found nowhere

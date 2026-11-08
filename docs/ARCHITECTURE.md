@@ -2367,7 +2367,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 
 | Role | DLLs |
 |---|---|
-| core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles and QueryInterruptTime and friends; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
+| core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles, PathCch, WaitOnAddress and interrupt-time functions, which Windows' kernel32 lacks; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
 | C runtime | msvcrt (mingw-w64 programs' C runtime) |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
@@ -2443,10 +2443,29 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   `tools/kernelbase_exports.py`), each name a forwarder to the gala DLL
   that implements it: the DLL Wine's specs list it in (advapi32,
   version, shlwapi, user32), else kernel32, which implements the kernel32
-  family and, until each is moved, what only kernelbase has. kernelbase
-  implements itself what is kernelbase's alone and documented so
-  (CompareObjectHandles, "DLL: Kernelbase.dll"; kernel32 no longer
-  exports it) and the interrupt-time queries (build.rs's OWN). A
+  family, plus the names Windows 11 25H2's kernelbase has that the spec
+  lacks (the tool's MEASURED: FlsGetValue2 and TlsGetValue2, one
+  function behind both DLLs as on Windows; CheckTokenMembershipEx,
+  SetFileIoOverlappedRange). kernelbase implements itself (build.rs's
+  OWN) what is kernelbase's alone, which kernel32 does not export:
+  CompareObjectHandles (documented "DLL: Kernelbase.dll") and, as
+  measured on 25H2, the PathCch functions (`path.rs`; PathCchAppend,
+  PathCchCombine, PathCchRemoveBackslash and PathCchRemoveExtension are
+  stubs), WaitOnAddress and WakeByAddressSingle/All, and the
+  interrupt-time queries. MapUserPhysicalPagesScatter is kernel32's
+  alone (absent from the spec too). Test: `kernel32_test` and
+  `wow64_k32_test` (`export_split.rs`: presence read from each DLL's
+  export directory, absence as GetProcAddress NULL too). The address
+  waits are one source, `kernelbase/src/address_wait.rs`, built by two
+  DLLs: kernelbase exports it; kernel32 builds its own copy (`#[path]`,
+  not exported) for its SRW locks, condition variables and InitOnce.
+  Each copy has its own waiter list and keyed event, which is correct
+  because an address is always waited on and woken through the same
+  DLL (a kernel32 lock word only by kernel32's own code, a program's
+  address only through kernelbase's exports); that is the invariant
+  that keeps the two apart (neither DLL may export or forward the other's
+  copy). Calling kernelbase from kernel32 instead would make kernel32
+  import kernelbase, which it does not (below). A
   forwarder to a function gala lacks resolves to nothing: GetProcAddress
   is NULL and an import of it is a missing export in the ledger (under
   the API set's name), as an absent export would be; it works once the
