@@ -851,7 +851,7 @@ fn injected_input_reaches_a_desktop_a_test_frame_shows() {
 }
 
 /// A bare desktop (nothing can show it: the server profile, no screen and
-/// no `presenter=`) is the window state alone, as the server kernel's:
+/// no `presenter=`) is the window state alone:
 /// windows are made, shown, placed, retitled and painted, the clock runs,
 /// and nothing is laid out or drawn for them (no wallpaper, taskbar or
 /// caption), so a machine nothing shows pays for no composition.
@@ -876,7 +876,7 @@ fn a_bare_desktop_keeps_windows_and_draws_nothing() {
     assert_eq!(d.list().len(), 1);
     assert_eq!(d.presenter.kind(), Kind::None);
     // Its program's own move loop finds no button down (no pointer moves
-    // here), as in the server kernel.
+    // here).
     assert_eq!(d.begin_drag(a, 1).err(), Some(NtStatus::INVALID_DEVICE_STATE));
     d.destroy_owned(1);
     assert!(d.s.window(a).is_none() && d.list().is_empty());

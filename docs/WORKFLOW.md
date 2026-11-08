@@ -144,7 +144,7 @@ alone prints the usage.
 
 | Command | What it does |
 |---|---|
-| `build` | kernel (default and server builds), DLLs, programs, `target/<profile>/gala-os.iso` |
+| `build` | kernel, DLLs, programs, `target/<profile>/gala-os.iso` |
 | `run [--headless]` | build, then boot in QEMU (UEFI) with the serial log on stdio |
 | `test` | `stub-audit`, host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` |
 | `boot-test [filter]` | boot scenarios only; a filter matches names containing it, `name$` exactly that one, `a,b,c` exactly those |
@@ -231,8 +231,7 @@ Requirements (README "Requirements"): Linux, rustup (the pinned
 toolchain in `rust-toolchain.toml` installs itself), `git`, `xorriso`,
 QEMU, OVMF for UEFI boots (`OVMF_CODE`, `OVMF_VARS` if it is somewhere
 unusual), Linux 5.11+ for gala-um. The first build fetches the pinned
-Limine into `target/`. The server kernel (`--no-default-features`, no
-shasha) is built into `target/server`, the `handover_next` kernel into
+Limine into `target/`. The `handover_next` kernel is built into
 `target/next`.
 
 ### Environment variables
@@ -2957,14 +2956,13 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   `cfg(test)` (`nt::session`'s and `display::virtio_gpu`'s `log!`);
   events are fine (`events::emit` is a no-op in tests). Find the test
   with `--test-threads=1` or by filtering module names.
-- **Changing `nt::desktop`'s public functions or types**: the server
-  kernel's stand-in `kernel/src/nt/desktop_off.rs` must follow, or the
-  `--no-default-features` clippy line in CI fails. What a window is
+- **Window behaviour belongs in `nt::winstate`**: what a window is
   (rectangles, Z order, focus, capture, client pixels, input for
-  programs, the named actions) belongs in `nt::winstate`, which both
-  kernels build; `nt::desktop` only draws it (frames, taskbar, start
+  programs, the named actions) lives there, which every desktop has, a
+  bare one too; `nt::desktop` only draws it (frames, taskbar, start
   menu, pointer). A change to window behaviour made in the compositor
-  instead is missing from the server kernel (`server_windows`).
+  instead is missing where nothing shows the desktop
+  (`noscreen_windows`, `server_profile_windows`).
 - **Windows live in a session**: kernel code reaches the window
   registry, WinEvent hooks and shasha's desktop through the process
   (`process.desk.windows` / `.hooks` / `.shell`), never a global;
@@ -3232,5 +3230,5 @@ Output under `target/`:
 | `target/trust/` | the test signing key |
 | `target/net-client/<port>/` | a net client's files during a boot |
 | `target/lx-expect/<binary>/` | lx-expect's runs and `actual.txt` |
-| `target/server/`, `target/next/` | the server kernel and the `handover_next` kernel |
+| `target/next/` | the `handover_next` kernel |
 | `~/.cache/gala-qemu/<version>` | the pinned QEMU |

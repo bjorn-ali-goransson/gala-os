@@ -222,7 +222,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
 | `display=virtio` | the screen is the first virtio-gpu instead of the bootloader's framebuffer (`display=fb`, the default); without one the framebuffer is used ("Plan: graphics and GPU", G1) |
-| `profile=server` | never bring up the graphical interface: nothing draws a desktop even with a screen (each session's keeps its windows, shown by none, as in the server kernel), `console=` starts no console window (ROADMAP SD) |
+| `profile=server` | never bring up the graphical interface: nothing draws a desktop even with a screen (each session's keeps its windows, shown by none), `console=` starts no console window (ROADMAP SD) |
 | `net_echo` | start the network card and serve one TCP echo connection on port 7 (scenario `net_echo`) |
 | `netreset=<n>` | the network card is reset under the driver after the n-th frame sent (driver recovery test) |
 | `diskreset=<n>` | the n-th disk request has the device reset under the driver just after it is posted (driver recovery test) |
@@ -4691,7 +4691,7 @@ rather than a format of their own.
 
 **shasha** (Arabic شاشة, "screen") is gala's graphical shell: a
 compositor, window manager and shell in the kernel for now (module
-`nt::desktop`, the `shasha` cargo feature; ROADMAP SH moves the shell,
+`nt::desktop`; ROADMAP SH moves the shell,
 then the compositor, to user mode). It imitates Windows 11's look
 (layout, metrics and colours of captions, taskbar and start menu) with
 gala's own artwork (the Masmak fortress and the wordmark) and an open
@@ -4710,7 +4710,7 @@ sessions and remote shasha" (one desktop per session).
 
 ### The kernel side: `nt::desktop`
 
-Code: `kernel/src/nt/winstate/` (the window state both kernels keep:
+Code: `kernel/src/nt/winstate/` (the window state every desktop keeps, a bare one too:
 windows, Z order, focus, capture, client pixels, input for programs,
 the named actions; host tests in `winstate/tests.rs`),
 `kernel/src/nt/desktop/` (`mod.rs`: the compositor and shell on top of
@@ -4941,16 +4941,15 @@ registry ("Plan: windows across processes").
   bounds).
 - The desktop's keyboard focus is the active top-level window; focus
   among child windows is user32's.
-- Where nothing can show a desktop (the desktop kernel without a screen
-  and without `presenter=`, or in the server profile) every session's
-  desktop is bare: the window state alone, shown by none, exactly as the
-  server kernel keeps it ("Server and desktop workloads"). A session the
+- Where nothing can show a desktop (no screen and no `presenter=`, or
+  the server profile) every session's desktop is bare: the window state
+  alone, shown by none ("Server and desktop workloads"). A session the
   console does not show on a machine that draws keeps a live desktop
   (presenter None) with the compositor's layout, ready to be shown.
 - `nt::winstate` holds what a window is and what the named actions do;
   `nt::desktop` only draws it. Damage rectangles come from the window
-  state (with the compositor's shadow margin, `winstate::Shadow`; none in
-  the server kernel, which drops them).
+  state (with the compositor's shadow margin, `winstate::Shadow`); a
+  bare desktop drops them.
 - TODO: the shell belongs in a user-mode program (an explorer.exe of
   gala's); the clock is UTC; popups and hidden windows are not listed by
   GalaDesktopAction's Windows (the registry has them:
@@ -4961,10 +4960,11 @@ registry ("Plan: windows across processes").
 Servers and console programs (nginx, PostgreSQL, Elasticsearch, Go and
 Java services, the Docker image) must never bring up the graphical
 interface; GUI programs on a machine with a screen get the desktop.
-**The desktop edition is a strict superset of the server edition**: the
-server/CLI edition plus shasha. The `shasha` cargo feature only adds (it
-never changes or removes server behaviour), and every scenario a server
-kernel passes also runs on the desktop kernel. ROADMAP SD.
+**One kernel serves both**: shasha (the compositor, wallpapers, start
+menu, taskbar) is always built in, and a server machine boots it with
+`profile=server`, or simply has no screen. Where nothing can show a
+desktop, shasha does no work and adds nothing to a server program's
+path. ROADMAP SD.
 
 **Rule for new code**: nothing in the boot path, the console path or a
 server program's path may touch the desktop, start a GUI process or
@@ -4976,63 +4976,33 @@ draws nothing; user32 loads gdi32 lazily).
   (`desktop::with`, `desktop::screen`) and is drawn only when something
   shows it (the screen, `presenter=`); on a machine nothing shows it is
   bare (below) and nothing is laid out or drawn.
-- **Bare desktops: the shasha feature only adds.** In the desktop
-  kernel, a machine with no screen and no `presenter=` (BIOS boots,
-  gala-um) or in the server profile has nothing that can show a desktop
-  (`desktop::bare`, fixed before any program runs). There each session's
-  desktop is the window state alone, exactly as the server kernel's:
-  live at DEFAULT_SIZE (1280 x 800) on the first GUI call, shown by
-  none; windows are made, shown, placed, painted and queried
-  (GalaSession's query reports them); GalaScreenInfo reports DEFAULT_SIZE
-  with the taskbar's rows out of the work area; GalaWindowListen takes
-  the event; a frame, injected input and GalaWindowDrag/Resize are
+- **Bare desktops.** A machine with no screen and no `presenter=` (BIOS
+  boots, gala-um) or in the server profile has nothing that can show a
+  desktop (`desktop::bare`, fixed before any program runs). There each
+  session's desktop is the window state alone (`nt::winstate`): live at
+  DEFAULT_SIZE (1280 x 800) on the first GUI call, shown by none;
+  windows are made, shown, placed, painted and queried (GalaSession's
+  query reports them); GalaScreenInfo reports DEFAULT_SIZE with the
+  taskbar's rows out of the work area; GalaWindowListen takes the event;
+  a frame, injected input and GalaWindowDrag/Resize are
   STATUS_INVALID_DEVICE_STATE; presenter none is accepted, Test and
   Console are STATUS_NOT_SUPPORTED; the shell's actions, lists and
   wallpaper are STATUS_NOT_SUPPORTED (`has_shell` false). The compositor
   does no work for it (`Desktop::bare`: no wallpaper or taskbar laid
-  out, no captions rendered, no PS/2 input or clock), so GUI programs
-  without a screen cost what they cost in the server kernel. GUI
-  programs behave the same in both kernels whenever nothing shows the
-  desktop: `noscreen_windows` (BIOS) and `server_profile_windows` (UEFI,
-  `profile=server`) run presenter_test's `server` mode, which
-  `server_windows` runs on the server kernel; user32_test's scenario
-  checks the line on BIOS and in gala-um.
+  out, no captions rendered, no PS/2 input or clock). Scenarios:
+  `noscreen_windows` (BIOS) and `server_profile_windows` (UEFI,
+  `profile=server`) run presenter_test's `server` mode; user32_test's
+  scenario checks the line on BIOS and in gala-um.
 - **Console windows**: a console window (conhost.exe) is started only
   for the program named by `console=`; otherwise console output goes to
   the boot console.
 - **`profile=server`** (scenarios `server_profile` and
   `server_profile_windows`, by UEFI so there is a screen): nothing ever
-  draws a desktop; each session's is bare, as the server kernel's
-  (`desktop: session 1 keeps its windows (1280x800), shown by none
-  (server profile)`), the PS/2 keyboard and mouse reach none, and
-  `console=` starts no conhost.exe. The screen keeps the text console.
-- **The server kernel** (scenarios `server_kernel`, `server_windows`):
-  the kernel's `shasha` feature is on by default; without it
-  (`--no-default-features`) `nt::desktop` is `nt/desktop_off.rs`, the
-  same interface over the window state alone (`nt::winstate`): each
-  session's desktop keeps its windows, their last client pixels, Z
-  order, focus, capture and input for programs as on a machine whose
-  desktop nobody shows (live at DEFAULT_SIZE, 1280 x 800, on its first
-  GUI call; GalaScreenInfo reports it with the taskbar's rows out of the
-  work area; damage is dropped). Nothing composes it: GalaSession's
-  query reports the windows (shown by none), a frame and injected input
-  are STATUS_INVALID_DEVICE_STATE (no Test frame shows it), presenter
-  none is accepted and Test and Console are STATUS_NOT_SUPPORTED;
-  GalaWindowDrag/Resize are STATUS_INVALID_DEVICE_STATE (no button is
-  down where no pointer moves); the shell's window actions, lists and
-  wallpaper are STATUS_NOT_SUPPORTED (`desktop::has_shell` false: no
-  shell). The compositor, wallpapers and start menu are not in the
-  binary (2.5 MB less in release). Logged: `desktop: no compositor in
-  this kernel (server build: windows are kept, nothing draws them)` at
-  boot, `desktop: session 2 keeps its windows (1280x800), shown by none
-  (no compositor in this kernel)` (event `presenter`, op `live`) per
-  session (with `"bare":"no compositor in this kernel"`), a refused
-  presenter as a warning; the state dump says `never shown: no
-  compositor in this kernel`. xtask
-  builds it into `target/server` beside the normal one; scenarios in
-  `SERVER_KERNEL_SCENARIOS` boot it; CI runs clippy on it.
-  **Invariant: a change to `nt::desktop`'s public interface needs the
-  same change in `desktop_off.rs`.**
+  draws a desktop; each session's is bare (`desktop: session 1 keeps its
+  windows (1280x800), shown by none (server profile)`), the PS/2
+  keyboard and mouse reach none, `console=` starts no conhost.exe, and
+  `gala`'s window commands are not supported (gala_cli_test's `server`
+  mode). The screen keeps the text console.
 
 #### CLI parity: named actions
 
@@ -5068,8 +5038,8 @@ CLI-first.
   Windows are named by their HWND: the window registry's record
   (version 2) carries the window's id on the desktop, so the kernel
   goes from HWND to the desktop's window and back. Without shasha's
-  shell (`desktop::has_shell`: the server kernel, which keeps windows
-  but has no shell; `profile=server`; no screen) the window actions,
+  shell (`desktop::has_shell`: false on a bare desktop, so with
+  `profile=server` or no screen) the window actions,
   Windows, Programs and Wallpaper are STATUS_NOT_SUPPORTED, checked
   before the window, so a server always says so. List output
   that does not fit is cut at a whole entry.
@@ -5106,8 +5076,7 @@ Exit codes: 0 done, 1 usage, 2 not found, 3 not supported here (no
 graphical shell), 4 failed (status printed; "access denied" for UIPI).
 
 Tests: `gala_cli_test` (scenario `gala_cli`, UEFI with a screen check
-after `gala snap left`; its server mode in `server_kernel` and
-`server_profile`) starts a window through `gala`, drives it through
+after `gala snap left`; its server mode in `server_profile`) starts a window through `gala`, drives it through
 every action and checks what the program saw and what `gala windows`
 and the registry (FindWindowW, GetWindowRect, IsZoomed, IsIconic from
 another process) say; host tests in `desktop/tests.rs` and `action.rs`.
@@ -7598,9 +7567,8 @@ What this builds on:
   GalaDesktopAction); every shell action is a named `Action` through
   `Desktop::act`; the only hardware seams are `platform::Display` and the
   PS/2 input thread; the window state is `nt::winstate`, apart from the
-  compositor, and `kernel/src/nt/desktop_off.rs` (the server kernel's
-  `Shell`: that state with no compositor) shows the compositor can be
-  left out.
+  compositor, which a bare desktop (`Desktop::bare`) does not run:
+  the seam a user-mode compositor (ROADMAP SH) takes over.
 
 ### Sessions and named objects (B1)
 
@@ -7678,7 +7646,7 @@ while another session's is taken:
 |---|---|---|
 | `windows` | `window::Windows` | the window registry: windows, message queues, posted and sent messages, listeners, UIPI filters |
 | `hooks` | `winevent::Hooks` | SetWinEventHook's hooks and waiting events |
-| `shell` | `desktop::Shell` | the desktop's window state (`nt::winstate`) and, in the desktop kernel, shasha's compositor and its presenter (`desktop_off::Shell`: the window state alone, in the server kernel) |
+| `shell` | `desktop::Shell` | the desktop's window state (`nt::winstate`), shasha's compositor and its presenter (a bare desktop: the window state alone) |
 
 - HWNDs come from one global counter (`window::NEXT_HWND`), so a value
   is never reused across sessions.
@@ -7820,22 +7788,22 @@ same program as SYSTEM).
 `desktop/tests.rs`), `kernel/src/nt/session_calls.rs` (GalaSession),
 `nt::session::active_console` (the session the console shows). Test
 programs: `user/presenter_test` (scenario `presenter_test`, with a
-screen check of the console switch; its `server` mode, scenario
-`server_windows`, on the server kernel) and gui_test on a headless
+screen check of the console switch; its `server` mode, scenarios
+`noscreen_windows` and `server_profile_windows`) and gui_test on a headless
 desktop (scenario `gui_test_headless`); host tests of the window state
 alone in `winstate/tests.rs`.
 
-- **Window state apart from composition** (`nt::winstate::State`, in
-  both kernels): a session's desktop (its windows, Z order, focus,
+- **Window state apart from composition** (`nt::winstate::State`): a
+  session's desktop (its windows, Z order, focus,
   capture, each window's client pixels, input for programs) is kept
   whether or not anything shows it. Composition is the presenter's
-  business: the compositor (`nt::desktop::Desktop`, the shasha kernel's)
-  holds the state and draws it; `redraw` composes a damaged area only
+  business: the compositor (`nt::desktop::Desktop`, shasha's) holds the
+  state and draws it; `redraw` composes a damaged area only
   while a presenter shows the desktop, and hands it the rows
   (`write_row`) and the area (`flush`). With none, damage is dropped;
-  attaching one draws the desktop whole. The server kernel holds the
-  same state with no compositor: its desktops are shown by none, always
-  ("Server and desktop workloads").
+  attaching one draws the desktop whole. A bare desktop is that state
+  with no composition at all: shown by none, always ("Server and desktop
+  workloads").
 - **Presenters** (`Presenter`), one per desktop:
   - **Console**: the screen through `platform::Display`, on a machine
     with a screen; at most one desktop has it, the one the console
@@ -7853,8 +7821,8 @@ alone in `winstate/tests.rs`.
   information; gala's choice for a desktop nothing shows), the clock
   set, drawn whole. Where nothing can show desktops (the server profile;
   no screen and no `presenter=`) it is bare instead: the window state
-  alone at DEFAULT_SIZE, shown by none for good, as the server kernel's
-  ("Server and desktop workloads").
+  alone at DEFAULT_SIZE, shown by none for good ("Server and desktop
+  workloads").
 - **`presenter=test|none`**: the console session's desktop is shown by
   a Test frame of DEFAULT_SIZE or by nothing, with or without a screen;
   the PS/2 keyboard and mouse still go to it (`platform::local_input`).
@@ -7900,8 +7868,8 @@ alone in `winstate/tests.rs`.
   presenter shows.
 - **GalaSession** (0x7fb0; SeTcbPrivilege for every operation, since
   another session's pixels are its users'; STATUS_NOT_FOUND for a
-  session that does not exist; a bare desktop's and the server kernel's
-  answers are in "Server and desktop
+  session that does not exist; a bare desktop's answers are in "Server
+  and desktop
   workloads", tested by presenter_test's `server` mode):
   - SESSION_QUERY (0): what shows the desktop (0 none, 1 console, 2
     test), whether it is live, its size, its windows; nothing is made
@@ -7968,12 +7936,12 @@ Numbering: 0 for services and SYSTEM (sshd and its logons are session 0
 on Windows too), 1 for the local console, 2+ for remote logons.
 
 1. **Window state apart from composition** (gala's own addition; B3a;
-   built: `nt::winstate` in both kernels, "Presenters (B3a)", "Server and
-   desktop workloads"): the desktop's window state and each window's
-   last pixels are kept in every kernel; the compositor (frames, taskbar, start menu, wallpaper,
-   fonts) is a presenter. So the server kernel (no `shasha` feature,
-   ROADMAP SD) can serve GUI programs to a remote shasha client without a
-   compositor of its own, and a desktop with no presenter keeps its
+   built: `nt::winstate`, "Presenters (B3a)", "Server and desktop
+   workloads"): the desktop's window state and each window's last pixels
+   are kept whether or not anything shows them; the compositor (frames,
+   taskbar, start menu, wallpaper, fonts) is a presenter. So a server
+   (`profile=server`, ROADMAP SD) can serve GUI programs to a remote
+   shasha client without composing anything itself, and a desktop with no presenter keeps its
    windows alive (RDP-style disconnect and resume).
 2. **Presenters** (B3a; Console, None and Test and the console switch
    are built, "Presenters (B3a)"), at most one per desktop at a time:

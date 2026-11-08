@@ -2947,17 +2947,6 @@ fn build_kernel(release: bool) -> Result {
         cmd.arg("--release");
     }
     run_cmd(&mut cmd)?;
-    // The server kernel (no `shasha` feature: ROADMAP SD), in its own
-    // target directory so the two builds don't replace each other.
-    let mut cmd = cargo();
-    cmd.args(["build", "--package", "kernel", "--bin", "kernel", "--target", KERNEL_TARGET])
-        .args(["--no-default-features", "--target-dir"])
-        .arg(server_target_dir());
-    trust::kernel_env(&mut cmd)?;
-    if release {
-        cmd.arg("--release");
-    }
-    run_cmd(&mut cmd)?;
     // User programs are always optimized: without a CRT there is no
     // `memcpy` etc. for unoptimized code to call. DLLs that programs embed
     // are built first.
@@ -3013,13 +3002,6 @@ fn build_go_programs() -> Result {
 }
 
 /// Where the server kernel (built without the desktop) goes.
-fn server_target_dir() -> PathBuf {
-    target_dir().join("server")
-}
-
-/// Scenarios booted with the server kernel (no `shasha` feature).
-const SERVER_KERNEL_SCENARIOS: &[&str] = &["server_kernel", "server_windows"];
-
 /// R9 (d): scenarios that hand over between the default kernel and the
 /// `handover_next` build (a stand-in for the next release, with a changed
 /// state format), with whether they boot the next build; the other kernel
@@ -3122,9 +3104,7 @@ fn make_iso_unchecked(
     signing: &trust::Signing,
 ) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
-    let server = name.strip_prefix("test-").is_some_and(|n| SERVER_KERNEL_SCENARIOS.contains(&n));
-    let kernel_dir = if server { server_target_dir() } else { target_dir() };
-    let mut kernel = kernel_dir.join(KERNEL_TARGET).join(profile).join("kernel");
+    let mut kernel = target_dir().join(KERNEL_TARGET).join(profile).join("kernel");
     // R9 (d): the other build as a boot module, to hand over to.
     let builds = name
         .strip_prefix("test-")
@@ -3564,17 +3544,8 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        // RS step B3a on the server kernel: session 2's window state is
-        // kept with nothing to compose it.
-        "server_windows",
-        &[
-            r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800,"bare":"no compositor in this kernel""#,
-            r#""ev":"window","op":"create""#,
-        ],
-    ),
-    (
-        // SD: the desktop kernel without a screen or `presenter=` keeps
-        // session 2's windows as the server kernel does.
+        // SD: the kernel without a screen or `presenter=` keeps session 2's
+        // windows with nothing showing them.
         "noscreen_windows",
         &[
             r#""ev":"presenter","op":"live","session":2,"presenter":"none","w":1280,"h":800,"bare":"no screen and no presenter=""#,
@@ -5511,52 +5482,11 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
-        // ROADMAP SD: the server kernel, built without shasha (no
-        // compositor in the binary): windows are kept as on a desktop
-        // nobody shows (server_windows), nothing is drawn, a console
-        // program runs.
-        name: "server_kernel",
-        // gala_cli_test server: `gala`'s window commands are not
-        // supported (exit code 3), start, ps and kill work.
-        cmdline: "qemu_exit run=hello.exe,user32_test.exe,gala_cli_test.exe args=,,server",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)",
-            "Hello from user mode!",
-            "user32_test: ok",
-            "gala_cli_test: ok",
-            "exited with status 0x00000000",
-        ],
-    },
-    Scenario {
-        // ROADMAP RS B3a / SD: the server kernel keeps a session's window
-        // state with nothing to compose it (user/presenter_test `server`):
-        // session 2's window is made, shown and painted, GalaSession's
-        // query reports it on a desktop shown by none, frames, injected
-        // input and Test/Console presenters are refused, and the window
-        // is closed.
-        name: "server_windows",
-        cmdline: "qemu_exit as=system events=window run=presenter_test.exe args=server",
-        exit_status: QEMU_EXIT_SUCCESS,
-        expect: &[
-            "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)",
-            "session: 2 made, named objects in \\Sessions\\2\\BaseNamedObjects",
-            "desktop: session 2 keeps its windows (1280x800), shown by none (no compositor in this kernel)",
-            "presenter_test: child painted",
-            "desktop: session 2 cannot be shown by test: no compositor in this kernel",
-            "presenter_test: the window is kept with nothing showing it",
-            "presenter_test: the window was closed",
-            "presenter_test: ok",
-            "exited with status 0x00000000",
-        ],
-    },
-    Scenario {
-        // ROADMAP SD: the desktop kernel on a machine with no screen and
-        // no `presenter=` (a BIOS boot) keeps windows exactly as the
-        // server kernel does (server_windows, the same program): the
-        // shasha feature only adds. Nothing can show the desktop here, so
-        // frames, injected input and the Test and Console presenters are
-        // refused as there.
+        // ROADMAP SD: on a machine with no screen and no `presenter=` (a
+        // BIOS boot) the kernel keeps windows with nothing showing them
+        // (server_profile_windows: the same with a screen). Nothing can
+        // show the desktop here, so frames, injected input and the Test
+        // and Console presenters are refused.
         name: "noscreen_windows",
         cmdline: "qemu_exit as=system events=window run=presenter_test.exe args=server",
         exit_status: QEMU_EXIT_SUCCESS,
@@ -7892,8 +7822,6 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("kernel_watchdog", "hello"),
     ("service_restart", "hello"),
     ("server_profile", "user32_test"),
-    ("server_kernel", "user32_test"),
-    ("server_windows", "presenter_test"),
     ("noscreen_windows", "presenter_test"),
     ("server_profile_windows", "presenter_test"),
     ("gala_cli", "gui_test"),

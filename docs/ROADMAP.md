@@ -19,11 +19,11 @@ with programs kept running (item R; PROJECT_BRIEF goal 3). Until that is
 built, every change keeps R1's invariants: state as data, restartable
 system calls, versioned formats, drivers that survive a reset, one clock;
 a change that would make the kernel handover harder argues for itself in
-its commit. gala ships as two editions: the *server* edition (console
-programs and servers, never a graphical interface) and the *desktop*
-edition, a strict superset with **shasha** (Arabic شاشة, "screen"), the
-graphical shell, where everything shasha does can also be done with the
-`gala` command (item SD). See `PROJECT_BRIEF.md` for goals, values and
+its commit. gala is one kernel for two workloads: servers and console
+programs (`profile=server`, or no screen: never a graphical interface)
+and the desktop with **shasha** (Arabic شاشة, "screen"), the graphical
+shell, where everything shasha does can also be done with the `gala`
+command (item SD). See `PROJECT_BRIEF.md` for goals, values and
 scope.
 
 ## Priorities
@@ -195,10 +195,10 @@ has a section under "Open items".
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
-| SD | Server and desktop workloads kept apart | in progress | `profile=server`, CLI parity, server kernel, bare desktops (the shasha feature only adds) done |
+| SD | Server and desktop workloads kept apart | in progress | one kernel: `profile=server`, CLI parity, bare desktops done |
 | SSH | SSH as a remote shell | in progress | steps 1-5 in their first form |
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
-| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (server kernel and bare desktops too) done; B3b next |
+| RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 next; G3 parked |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
@@ -685,7 +685,7 @@ shell part) leaves it.
 **Done when**: a scenario boots to a desktop drawn by `shasha.exe`
 under the boot user's token, starts a program from the start menu and
 switches to it from the taskbar (UIA), kills the shell and sees it
-restarted; the server kernel and `profile=server` start no shell.
+restarted; `profile=server` starts no shell.
 
 **Design**: ARCHITECTURE "Windows on the screen" (shasha), "Server and
 desktop workloads", "Plan: sessions and remote shasha" (presenters).
@@ -808,8 +808,8 @@ desktop can do is reachable from the command line.
 **Done so far**:
 - `profile=server` (scenarios `server_profile`,
   `server_profile_windows`): nothing draws a desktop even with a screen,
-  each session's keeps its windows as the server kernel's do, `console=`
-  starts no conhost.exe.
+  each session's keeps its windows shown by none, `console=` starts no
+  conhost.exe, `gala`'s window commands are not supported.
 - **CLI parity** (scenario `gala_cli`): one kernel entry point,
   GalaDesktopAction (0x7f58: Start, Windows, Programs, Activate,
   Minimize, Maximize, Restore, Close, Snap, Move, Wallpaper), which
@@ -819,21 +819,17 @@ desktop can do is reachable from the command line.
 - UIPI on cross-process messages and on GalaDesktopAction's window
   actions; `gala start` runs the program under a copy of the caller's
   token (`uipi_test`, SECURITY S6).
-- The server kernel (cargo feature `shasha` off; scenario
-  `server_kernel`): no compositor, wallpapers or start menu (2.5 MB
-  smaller); it keeps GUI programs' windows and their pixels as on a
-  desktop nobody shows (`nt::winstate`, scenario `server_windows`), with
-  no shell (window actions STATUS_NOT_SUPPORTED). A server image without user32/gdi32 is not planned: many
-  console and server programs import them, and loading them starts
-  nothing; only wallpapers, fonts and GUI-only programs (conhost.exe,
-  FileZilla) stay out of a server image.
-
-- The shasha feature only adds: where nothing can show a desktop (no
-  screen and no `presenter=`: BIOS boots, gala-um; `profile=server`)
-  the desktop kernel's desktops are bare, the window state alone shown
-  by none, exactly as the server kernel's (scenarios `noscreen_windows`,
-  `server_profile_windows`, the same program as `server_windows`;
-  user32_test's line on BIOS and in gala-um).
+- One kernel for both: shasha is always built in (the owner: a
+  separate server build was not worth its 2.5 MB). Where nothing can
+  show a desktop (no screen and no `presenter=`: BIOS boots, gala-um;
+  `profile=server`) the desktops are bare, the window state alone shown
+  by none, with no shell (window actions STATUS_NOT_SUPPORTED) and no
+  composition work (scenarios `noscreen_windows`,
+  `server_profile_windows`; user32_test's line on BIOS and in gala-um).
+  A server image without user32/gdi32 is not planned: many console and
+  server programs import them, and loading them starts nothing; only
+  wallpapers, fonts and GUI-only programs (conhost.exe, FileZilla) stay
+  out of a server image.
 
 **Next**: the wallpaper kept across boots; a `gala` command for each new
 shasha feature (it comes first).
@@ -996,15 +992,14 @@ own session and shell.
   click injected into session 2's frame, session 1's window on the
   screen, `gala attach 2`, PS/2 clicks reaching session 2's window,
   back to session 1 with its window kept (a screen check).
-- B3a, the window state apart from the compositor (`nt::winstate`, in
-  both kernels; shasha's `Desktop` draws it): the server kernel keeps
-  each session's windows, their last pixels, Z order, focus, capture and
-  input as on a desktop nobody shows (GalaSession's query reports them,
-  frames and Test/Console presenters refused; `server_windows`,
-  presenter_test's `server` mode; host tests in `winstate/tests.rs`);
-  so does the desktop kernel wherever nothing can show a desktop (bare
-  desktops: no screen and no `presenter=`, `profile=server`, gala-um;
-  `noscreen_windows`, `server_profile_windows`).
+- B3a, the window state apart from the compositor (`nt::winstate`;
+  shasha's `Desktop` draws it): wherever nothing can show a desktop
+  (bare desktops: no screen and no `presenter=`, `profile=server`,
+  gala-um) each session's windows, their last pixels, Z order, focus,
+  capture and input are kept as on a desktop nobody shows (GalaSession's
+  query reports them, frames and Test/Console presenters refused;
+  presenter_test's `server` mode in `noscreen_windows` and
+  `server_profile_windows`; host tests in `winstate/tests.rs`).
 
 **Next**:
 1. B3a: `presenter=` in gala-um

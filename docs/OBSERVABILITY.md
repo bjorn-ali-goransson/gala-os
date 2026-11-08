@@ -91,12 +91,7 @@ port. Lines that tools and agents rely on:
   read it), a bare desktop (nothing can show it) going live: `desktop:
   session S keeps its windows (WxH), shown by none (no screen and no
   presenter=)` or `(server profile)`, a presenter refused there
-  `desktop: session S cannot be shown by test: server profile`; the server
-  kernel's `desktop: no compositor in this kernel (server build: windows
-  are kept, nothing draws them)` at boot, `desktop: session S keeps its
-  windows (WxH), shown by none (no compositor in this kernel)` and the
-  warning `desktop: session S cannot be shown by test: no compositor in
-  this kernel`; `desktop: the
+  `desktop: session S cannot be shown by test: server profile`; `desktop: the
   console now shows session S (WxH; was session T, which keeps its N
   windows shown by none)` (a console switch; a warning `the console
   could not move ...; it stays` when it fails), `desktop: pid P's input

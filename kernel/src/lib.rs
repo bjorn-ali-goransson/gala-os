@@ -248,10 +248,6 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
             warn!("desktop: presenter={name} is not a presenter (test, none); ignored");
         }
     }
-    #[cfg(not(feature = "shasha"))]
-    info!(
-        "desktop: no compositor in this kernel (server build: windows are kept, nothing draws them)"
-    );
     // `profile=server` (ROADMAP SD): no graphical interface, ever.
     if cmdline.value("profile") == Some("server") {
         nt::desktop::set_server_profile();

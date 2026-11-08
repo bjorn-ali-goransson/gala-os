@@ -3,8 +3,8 @@
 //! (ROADMAP SD "CLI parity", ARCHITECTURE "Server and desktop
 //! workloads"). Starting a program works on every kernel; the window
 //! actions are shasha's shell's (`nt::desktop::Action`, `has_shell`) and
-//! fail with STATUS_NOT_SUPPORTED on the server kernel (which keeps
-//! windows but has no shell) and with `profile=server`.
+//! fail with STATUS_NOT_SUPPORTED where a desktop is bare (no shell runs
+//! on it: `profile=server`, no screen and no `presenter=`).
 //!
 //! The request (little-endian, version 1):
 //!
