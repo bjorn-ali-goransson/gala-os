@@ -150,6 +150,19 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force target/windows | Out-Null
           powershell -ExecutionPolicy Bypass -File user\bin\run-all.ps1 -Out target\windows\windows.json
+      - name: Fault signatures of crashed programs
+        if: always()
+        shell: pwsh
+        # Each program the report shows ending with an exception status is
+        # run again under user/windows/fault.py (a debugger: the runner's
+        # SEM_NOGPFAULTERRORBOX keeps Windows Error Reporting from recording
+        # it): exception code, module+offset, address and the first-chance
+        # exceptions before it (#27).
+        run: |
+          if (Test-Path target/windows/windows.json) {
+            python user/windows/fault.py --report target/windows/windows.json user/bin | Tee-Object -FilePath target/windows/faults.md
+            Get-Content target/windows/faults.md >> $env:GITHUB_STEP_SUMMARY
+          }
       - name: Summary
         if: always()
         shell: pwsh

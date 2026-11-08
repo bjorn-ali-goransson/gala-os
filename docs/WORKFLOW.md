@@ -96,7 +96,11 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
     the job summary (passes, and each failing program's exit and line).
     With `user/windows/ci-passing.txt` (program names) the job fails
     when a listed program does not pass on Windows: a test's expectation
-    stopped being Windows' answer.
+    stopped being Windows' answer. Each program that ended with an
+    exception status is run again under `user/windows/fault.py --report`
+    (a debugger: exception code, module+offset, address, the first-chance
+    exceptions before it), into the summary and `faults.md` in the
+    artifact; one that does not crash again says so.
 - Commit messages pass through the shell: do not put backticks in a
   double-quoted `-m`; use a heredoc with `-F -`.
 - Borrowed code or a new dependency gets a `THIRD_PARTY.md` entry in the
