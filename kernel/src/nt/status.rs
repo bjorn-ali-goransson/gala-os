@@ -122,6 +122,7 @@ impl NtStatus {
     pub const INTERNAL_ERROR: NtStatus = NtStatus(0xc000_00e5);
     pub const INVALID_FILE_FOR_SECTION: NtStatus = NtStatus(0xc000_0020);
     pub const IMAGE_NOT_AT_BASE: NtStatus = NtStatus(0x4000_0003);
+    pub const IMAGE_MACHINE_TYPE_MISMATCH: NtStatus = NtStatus(0x4000_000e);
     // Network (AFD) statuses.
     pub const NOT_SUPPORTED: NtStatus = NtStatus(0xc000_00bb);
     pub const INVALID_BUFFER_SIZE: NtStatus = NtStatus(0xc000_0206);

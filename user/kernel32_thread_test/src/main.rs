@@ -345,7 +345,8 @@ fn misc(c: &mut Checks) -> Result<(), u32> {
             b'e' as u16,
             0,
         ];
-        c.eq(SetThreadDescription(t, name.as_ptr()) as u64, 0)?;
+        // HRESULT_FROM_NT(STATUS_SUCCESS), not S_OK (Windows 11 25H2).
+        c.eq(SetThreadDescription(t, name.as_ptr()) as u64, 0x1000_0000)?;
         let mut info = [0u64; 16];
         let mut ret = 0u32;
         let st = NtQueryInformationThread(t, 38, info.as_mut_ptr().cast(), 128, &mut ret);

@@ -3377,7 +3377,10 @@ fn nt_query_information_thread(call: &mut Call<'_>) -> NtStatus {
     let (priority, base) = *t.priority.lock();
     let mut b = [0u8; BASIC_INFORMATION_SIZE];
     b[0..4].copy_from_slice(&t.exit_status().0.to_le_bytes());
-    b[8..16].copy_from_slice(&t.teb.to_le_bytes());
+    // A thread that has ended has no TEB: NULL (Windows 11 25H2, which
+    // frees it on exit; gala's stays mapped until the process ends).
+    let teb = if t.has_exited() { 0 } else { t.teb };
+    b[8..16].copy_from_slice(&teb.to_le_bytes());
     b[16..24].copy_from_slice(&t.process.id.to_le_bytes());
     b[24..32].copy_from_slice(&t.id.to_le_bytes());
     b[32..40].copy_from_slice(&t.affinity().to_le_bytes());
@@ -3907,7 +3910,19 @@ fn nt_query_system_information(call: &mut Call<'_>) -> NtStatus {
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_QUERY_PERFORMANCE_COUNTER_INFORMATION => {
+            // The caller fills in Version = 1 first: without it
+            // STATUS_NOT_SUPPORTED whatever the length; with it any
+            // buffer of 12 bytes or more gets the 12 (Windows 11 25H2:
+            // lengths 8, 12, 16, 24 measured).
+            let mut version = [0u8; 4];
+            if length < 4 || call.process.read(buffer, &mut version).is_err() {
+                return NtStatus::NOT_SUPPORTED;
+            }
+            if u32::from_le_bytes(version) != 1 {
+                return NtStatus::NOT_SUPPORTED;
+            }
             let info = sysinfo::query_performance_counter_information();
+            let length = if length >= info.len() as u64 { info.len() as u64 } else { length };
             call.return_info(&info, buffer, length, ret_ptr)
         }
         sysinfo::SYSTEM_PROCESS_INFORMATION => {
@@ -4487,7 +4502,16 @@ fn nt_map_view_of_section(call: &mut Call<'_>) -> NtStatus {
         tri!(section::map_view(&call.process, object, base, offset, size, protect, top_down));
     tri!(call.write_u64(base_ptr, view.base));
     tri!(call.write_u64(size_ptr, view.size));
-    if view.relocated { NtStatus::IMAGE_NOT_AT_BASE } else { NtStatus::SUCCESS }
+    // The machine mismatch is reported before the relocation (Windows 11
+    // 25H2 gave it for a PE32 DLL in a 64-bit process; which wins when both
+    // hold is not measured).
+    if view.foreign {
+        NtStatus::IMAGE_MACHINE_TYPE_MISMATCH
+    } else if view.relocated {
+        NtStatus::IMAGE_NOT_AT_BASE
+    } else {
+        NtStatus::SUCCESS
+    }
 }
 
 /// NtUnmapViewOfSection(ProcessHandle, BaseAddress)

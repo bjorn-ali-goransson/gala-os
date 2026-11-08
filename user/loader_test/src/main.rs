@@ -34,7 +34,7 @@
 
 use ntrt::*;
 
-const STATUS_PROCEDURE_NOT_FOUND: NtStatus = 0xc000_007a;
+const STATUS_ENTRYPOINT_NOT_FOUND: NtStatus = 0xc000_0139;
 const STATUS_DLL_NOT_FOUND: NtStatus = 0xc000_0135;
 const INITIAL_VALUE: u64 = 0x1234_5678_9abc;
 
@@ -306,7 +306,8 @@ fn run() -> Result<(), u32> {
     c.eq(s.into(), STATUS_SUCCESS.into())?;
     c.eq(by_ordinal as u64, add as u64)?;
     let (s, _) = api.proc(dll, b"no_such_export");
-    c.eq(s.into(), STATUS_PROCEDURE_NOT_FOUND.into())?;
+    // By name: STATUS_ENTRYPOINT_NOT_FOUND (Windows 11 25H2).
+    c.eq(s.into(), STATUS_ENTRYPOINT_NOT_FOUND.into())?;
     let (s, count) = api.proc(dll, b"GALA_ATTACH_COUNT");
     c.eq(s.into(), STATUS_SUCCESS.into())?;
     // SAFETY: testdll's exported counter.

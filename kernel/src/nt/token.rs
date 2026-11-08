@@ -949,10 +949,13 @@ pub fn query(id: u64, data: &TokenData, class: u32, base: u64) -> Result<Vec<u8>
         TOKEN_MANDATORY_POLICY => return dword(3),
         TOKEN_APP_CONTAINER_SID => o.u64(0)?,
         TOKEN_INTEGRITY_LEVEL => {
-            // TOKEN_MANDATORY_LABEL: the label with SE_GROUP_INTEGRITY.
+            // TOKEN_MANDATORY_LABEL: the label with SE_GROUP_INTEGRITY |
+            // SE_GROUP_INTEGRITY_ENABLED (0x60, as Windows 11 25H2 reports
+            // it).
+            let attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
             let label = data.groups.iter().find(|g| g.sid.is_label()).map_or(
-                Group { sid: Sid::new(16, &[8192]), attributes: SE_GROUP_INTEGRITY },
-                |g| Group { sid: g.sid, attributes: SE_GROUP_INTEGRITY },
+                Group { sid: Sid::new(16, &[8192]), attributes },
+                |g| Group { sid: g.sid, attributes },
             );
             o.sid_list(&[label])?
         }

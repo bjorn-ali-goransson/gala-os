@@ -87,7 +87,8 @@ fn run() -> Result<(), u32> {
     let (st, exit, info_teb, info_tid) = thread_basic_info(h);
     c.eq(st.into(), STATUS_SUCCESS.into())?;
     c.eq(exit.into(), 0x1234)?;
-    c.eq(info_teb as u64, teb as u64)?;
+    // The TEB is freed when the thread ends: NULL (Windows 11 25H2).
+    c.eq(info_teb as u64, 0)?;
     c.eq(info_tid as u64, tid as u64)?;
     close(h);
 
@@ -96,9 +97,10 @@ fn run() -> Result<(), u32> {
     c.eq(st.into(), STATUS_SUCCESS.into())?;
     delay(relative_ms(20));
     c.eq(RAN.load(Ordering::SeqCst) as u64, 1)?;
-    let (st, exit, _, _) = thread_basic_info(h);
+    let (st, exit, info_teb, _) = thread_basic_info(h);
     c.eq(st.into(), STATUS_SUCCESS.into())?;
     c.eq(exit.into(), STATUS_PENDING.into())?;
+    c.ok(info_teb != 0 && info_teb != teb_field(0x30), info_teb as u64)?; // its own TEB
     c.eq(wait(h, Some(0)).into(), STATUS_TIMEOUT.into())?;
     let (st, previous) = resume_thread(h);
     c.eq(st.into(), STATUS_SUCCESS.into())?;

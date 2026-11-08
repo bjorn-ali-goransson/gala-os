@@ -379,6 +379,26 @@ pub fn apply_relocations(
 /// `relocation_index`), only the page's block and the one before are
 /// read; without, the whole table is walked (fine for small images: a
 /// 340 MB DLL has 80 000 pages and a table of several MB).
+/// The mapped header of an image loaded `delta` away from its preferred
+/// base names where it is: its OptionalHeader.ImageBase is moved by
+/// `delta`. Measured on Windows 11 25H2 for a PE32 DLL in a WOW64
+/// process (testdll32 at 0x74ca0000 instead of 0x400000); PE32+ is not
+/// measured yet and keeps its preferred base.
+fn rebase_header(page: &mut [u8; 4096], delta: u64) {
+    let Some(&[a, b, c, d]) = page.get(0x3c..0x40) else { return };
+    let nt = u32::from_le_bytes([a, b, c, d]) as usize;
+    let (Some(magic), Some(field)) = (page.get(nt + 24..nt + 26), nt.checked_add(24 + 28)) else {
+        return;
+    };
+    if magic != [0x0b, 0x01] {
+        return; // PE32 only (above)
+    }
+    if let Some(slot) = page.get_mut(field..field + 4) {
+        let old = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
+        slot.copy_from_slice(&old.wrapping_add(delta as u32).to_le_bytes());
+    }
+}
+
 pub fn relocate_page(
     image: &[u8],
     reloc: DataDirectory,
@@ -393,6 +413,9 @@ pub fn relocate_page(
     out[have..].fill(0);
     if delta == 0 || reloc.size == 0 {
         return Ok(());
+    }
+    if page_rva == 0 {
+        rebase_header(out, delta);
     }
     let start = reloc.rva as usize;
     let end = start.checked_add(reloc.size as usize).ok_or(PeError::BadRelocation)?;
@@ -491,6 +514,21 @@ fn apply_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relocated PE32 header names its load address; a PE32+ one keeps
+    /// its preferred base.
+    #[test]
+    fn rebased_header() {
+        let mut page = [0u8; 4096];
+        page[0x3c] = 0x80;
+        page[0x80 + 24..0x80 + 26].copy_from_slice(&0x10bu16.to_le_bytes());
+        page[0x80 + 52..0x80 + 56].copy_from_slice(&0x40_0000u32.to_le_bytes());
+        rebase_header(&mut page, 0x74ca_0000u64.wrapping_sub(0x40_0000));
+        assert_eq!(page[0x80 + 52..0x80 + 56], 0x74ca_0000u32.to_le_bytes());
+        page[0x80 + 24..0x80 + 26].copy_from_slice(&0x20bu16.to_le_bytes());
+        rebase_header(&mut page, 0x1000);
+        assert_eq!(page[0x80 + 52..0x80 + 56], 0x74ca_0000u32.to_le_bytes());
+    }
 
     /// Builds a minimal PE32+ image: headers in the first 0x200 bytes,
     /// sections described by (name, rva, vsize, raw bytes, characteristics).

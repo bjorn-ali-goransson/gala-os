@@ -422,11 +422,16 @@ impl Vad {
         self.private_commit
     }
 
-    /// Decommits pages (MEM_DECOMMIT). Size 0 means "to the end of the
-    /// allocation", from `base`.
+    /// Decommits pages (MEM_DECOMMIT). Size 0 means the whole allocation,
+    /// with `base` its base.
     pub fn decommit(&mut self, base: u64, size: u64) -> Result<(u64, u64), NtStatus> {
         let i = self.index_of(base).ok_or(NtStatus::MEMORY_NOT_ALLOCATED)?;
         let a = &mut self.allocs[i];
+        // Size 0 is the whole reservation, from its base only: elsewhere
+        // STATUS_FREE_VM_NOT_AT_BASE (Windows 11 25H2), as for MEM_RELEASE.
+        if size == 0 && base / PAGE * PAGE != a.base {
+            return Err(NtStatus::FREE_VM_NOT_AT_BASE);
+        }
         let (start, end) =
             if size == 0 { (base / PAGE * PAGE, a.end()) } else { page_round(base, size)? };
         if end > a.end() {

@@ -653,7 +653,9 @@ fn run() -> Result<(), u32> {
         c.ok(peeked != 0, GetLastError().into())?;
         c.eq(got.into(), 3)?;
         c.eq(avail.into(), 5)?;
-        c.eq(left.into(), 0)?; // byte mode: no message boundaries
+        // lpBytesLeftThisMessage: the message length (0 in byte mode)
+        // less what was read, -3 here (Windows 11 25H2; the docs say 0).
+        c.eq(left.into(), 0u32.wrapping_sub(3).into())?;
         c.ok(&buf[..3] == b"hel", buf[0].into())?;
         let peeked = PeekNamedPipe(
             r,

@@ -606,6 +606,9 @@ pub struct Mapped {
     pub size: u64,
     /// An image view not at its preferred base (STATUS_IMAGE_NOT_AT_BASE).
     pub relocated: bool,
+    /// An image view for another machine: a PE32 image in a 64-bit
+    /// process (STATUS_IMAGE_MACHINE_TYPE_MISMATCH, informational).
+    pub foreign: bool,
 }
 
 /// Maps a view of `object` (a section) into `process`.
@@ -655,7 +658,7 @@ pub fn map_view(
         vad.commit(base, size, protect)?;
     }
     let _ = views.try_push(View { base, size, offset, section: object.clone() });
-    Ok(Mapped { base, size, relocated: false })
+    Ok(Mapped { base, size, relocated: false, foreign: false })
 }
 
 /// Maps an image view: at the preferred base or the image's alternative
@@ -671,6 +674,9 @@ fn map_image_view(
     if offset != 0 {
         return Err(NtStatus::INVALID_PARAMETER);
     }
+    // Measured on Windows 11 25H2: a PE32 (IL-only) DLL mapped in a 64-bit
+    // process. A 64-bit image in a WOW64 process is not measured.
+    let foreign = image.info.x86 && process.wow64.is_none();
     let size = image.size();
     let wanted = if base != 0 { base } else { image.base };
     let mut views = process.views.lock();
@@ -729,7 +735,7 @@ fn map_image_view(
             i += run;
         }
         let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
-        return Ok(Mapped { base: view_base, size, relocated: delta != 0 });
+        return Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign });
     }
     // Elsewhere private pages, relocated a page at a time (a large image
     // is never copied whole).
@@ -784,7 +790,7 @@ fn map_image_view(
         }
     }
     let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
-    Ok(Mapped { base: view_base, size, relocated: delta != 0 })
+    Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign })
 }
 
 /// Unmaps the view containing `addr`.

@@ -7,7 +7,8 @@
 //!   code (CS 0x23) on the given stack, with its own TEB32 (Self, its
 //!   ClientId as returned in the x86 CLIENT_ID, StackBase the given one);
 //!   it ends with NtTerminateThread, whose status ThreadBasicInformation
-//!   (x86, 28 bytes) reports with its TEB32.
+//!   (x86, 28 bytes) reports, with no TEB once it ended (a suspended
+//!   thread's is its own).
 //! - A thread created suspended: NtGetContextThread gives the x86 CONTEXT
 //!   it was created with (SegCs 0x23, Eip, Esp, Ebx).
 //! - A running thread spinning in 32-bit code, suspended (previous count
@@ -273,7 +274,9 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     c.eq(status.into(), 0)?;
     c.eq(returned.into(), 28)?;
     c.eq(info[0] as u64, EXIT_A.into())?;
-    c.eq(info[1] as u64, teb_a as u64)?;
+    // An ended thread has no TEB: NULL (as Windows 11 25H2 reports for a
+    // 64-bit thread; thread_test).
+    c.eq(info[1] as u64, 0)?;
     c.eq(info[3] as u64, a.cid[1] as u64)?;
     c.eq(close(a.handle).into(), 0)?;
 
@@ -282,6 +285,8 @@ fn run(c: &mut Checks) -> Result<(), u32> {
     c.eq(b.status.into(), 0)?;
     let (status, ctx_b) = context(b.handle);
     c.eq(status.into(), 0)?;
+    let (status, info, _) = basic(b.handle);
+    c.ok(status == 0 && info[1] != 0 && info[1] != main_teb, info[1] as u64)?; // its TEB
     c.eq(get(&ctx_b, ctx::SEG_CS).into(), 0x23)?;
     c.eq(get(&ctx_b, ctx::EIP).into(), spin as *const () as usize as u64)?;
     c.eq(get(&ctx_b, ctx::ESP).into(), b.esp as u64)?;

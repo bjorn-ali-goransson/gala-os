@@ -14,6 +14,7 @@ use ntrt::*;
 
 const STATUS_INFO_LENGTH_MISMATCH: NtStatus = 0xc000_0004;
 const STATUS_INVALID_INFO_CLASS: NtStatus = 0xc000_0003;
+const STATUS_NOT_SUPPORTED: NtStatus = 0xc000_00bb;
 const SYSTEM_BASIC_INFORMATION: u32 = 0;
 const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 const PROCESS_DEBUG_PORT: u32 = 7;
@@ -102,8 +103,17 @@ fn run() -> Result<(), u32> {
     c.ok(current <= now as u64 && now as u64 - current < 10_000_000, current)?; // within 1 s
 
     // SystemQueryPerformanceCounterInformation (124, 12 bytes): Version,
-    // Flags, ValidFlags (bit 0: KernelQpc).
+    // Flags, ValidFlags (bit 0: KernelQpc). The caller fills in Version
+    // = 1: without it STATUS_NOT_SUPPORTED; with it a larger buffer also
+    // gets 12 bytes (Windows 11 25H2).
     let mut q = [0u8; 12];
+    c.eq(query_system(124, &mut q).0.into(), STATUS_NOT_SUPPORTED.into())?;
+    let mut big = [0u8; 24];
+    big[0] = 1;
+    let (s, ret) = query_system(124, &mut big);
+    c.eq(s.into(), ok)?;
+    c.eq(ret.into(), 12)?;
+    q[0] = 1;
     let (s, ret) = query_system(124, &mut q);
     c.eq(s.into(), ok)?;
     c.eq(ret.into(), 12)?;

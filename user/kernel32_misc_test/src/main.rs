@@ -532,7 +532,9 @@ fn run() -> Result<(), u32> {
         let args: [usize; 17] = core::array::from_fn(|i| 100 + i);
         RaiseException(CODE_RAISED, 0, 17, args.as_ptr());
         let raised = |i: usize| RAISED[i].load(Ordering::SeqCst);
-        c.eq(raised(0), 0)?; // flags
+        // ExceptionFlags: EXCEPTION_SOFTWARE_ORIGINATE (0x80), which
+        // Windows 11 25H2 sets on a raised exception.
+        c.eq(raised(0), 0x80)?;
         c.eq(raised(2), 15)?;
         c.eq(raised(3), 100)?;
         c.eq(raised(4), 114)?;

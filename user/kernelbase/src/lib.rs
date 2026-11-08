@@ -59,11 +59,12 @@ pub extern "system" fn QueryUnbiasedInterruptTimePrecise(out: *mut u64) {
     put(out);
 }
 
-/// SetThreadDescription(thread, description): S_OK; the description is
-/// not kept (TODO: GetThreadDescription).
+/// SetThreadDescription(thread, description): HRESULT_FROM_NT(STATUS_SUCCESS)
+/// (0x10000000, as Windows 11 25H2 returns, not S_OK); the description is
+/// not kept (TODO: GetThreadDescription; kernel32's keeps it).
 #[unsafe(no_mangle)]
 pub extern "system" fn SetThreadDescription(_thread: *mut c_void, _description: *const u16) -> i32 {
-    0
+    0x1000_0000
 }
 
 gala_stubs::unimplemented_exports!("kernelbase.dll":

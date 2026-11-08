@@ -60,7 +60,8 @@ A `Token` kernel object type, as documented in "Access Tokens": user
 SID; groups (SID and attributes: mandatory, enabled, owner, logon id,
 deny-only, integrity); privileges (LUID and attributes); owner and
 primary group; default DACL; integrity level (the mandatory label
-group); logon session (AuthenticationId LUID); type (primary,
+group, which TokenIntegrityLevel reports with SE_GROUP_INTEGRITY |
+SE_GROUP_INTEGRITY_ENABLED); logon session (AuthenticationId LUID); type (primary,
 impersonation) and impersonation level; token and modified ids;
 restricting SIDs (CreateRestrictedToken); source; elevation type.
 

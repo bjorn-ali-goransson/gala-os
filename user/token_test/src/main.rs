@@ -28,8 +28,8 @@
 //!   that token (the same object); RevertToSelf and SetThreadToken(NULL)
 //!   end it; ImpersonateSelf impersonates at the level asked; another
 //!   thread has no token.
-//! - PrivilegeCheck needs an impersonation token
-//!   (ERROR_NO_IMPERSONATION_TOKEN); enabled privileges pass and are
+//! - PrivilegeCheck takes a primary token too (as Windows 11 25H2 does,
+//!   although the docs speak of a client's); enabled privileges pass and are
 //!   marked SE_PRIVILEGE_USED_FOR_ACCESS; all-necessary and any-of sets.
 //! - CreateRestrictedToken: DISABLE_MAX_PRIVILEGE keeps only
 //!   SeChangeNotifyPrivilege; disabled SIDs become deny-only, deleted
@@ -176,7 +176,6 @@ const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_NO_TOKEN: u32 = 1008;
 const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
-const ERROR_NO_IMPERSONATION_TOKEN: u32 = 1309;
 const ERROR_BAD_TOKEN_TYPE: u32 = 1349;
 
 /// S-1-1-0 (Everyone) and S-1-5-32-544 (BUILTIN\Administrators).
@@ -515,8 +514,11 @@ fn run() -> Result<(), u32> {
         c.fails(OpenThreadToken(thread, TOKEN_QUERY, 1, &mut t), ERROR_NO_TOKEN)?;
 
         // PrivilegeCheck.
-        let (r, _, _) = check_privileges(query_only, 0, &[SE_CHANGE_NOTIFY]);
-        c.fails(r, ERROR_NO_IMPERSONATION_TOKEN)?;
+        // A primary token is accepted too (Windows 11 25H2; the docs speak
+        // of a client's impersonation token): SeChangeNotify is enabled.
+        let (r, held, _) = check_privileges(query_only, 0, &[SE_CHANGE_NOTIFY]);
+        c.ok(r != 0, last_error())?;
+        c.eq(held as u64, 1)?;
         let (r, held, attrs) = check_privileges(imp, PRIVILEGE_SET_ALL_NECESSARY, &[SE_SHUTDOWN]);
         c.ok(r != 0, last_error())?;
         c.eq(held as u64, 1)?;

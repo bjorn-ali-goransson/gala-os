@@ -1388,7 +1388,8 @@ fn token_groups(c: &mut Checks) -> Result<(), u32> {
         )?;
         let (x, subs, n) = sid_parts(label[0] as *const u8);
         c.ok(x == 16 && n == 1 && subs[0] == 8192, subs[0].into())?;
-        c.eq(label[1] as u32 as u64, 0x20)?; // SE_GROUP_INTEGRITY
+        // SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED (Windows 11 25H2).
+        c.eq(label[1] as u32 as u64, 0x60)?;
 
         // TokenLogonSid: TOKEN_GROUPS with the logon SID.
         let mut l = [0u64; 8];

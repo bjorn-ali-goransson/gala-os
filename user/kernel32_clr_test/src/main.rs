@@ -606,7 +606,8 @@ fn libraries(c: &mut Checks) -> Result<(), u32> {
         RtlSetProcessPlaceholderCompatibilityMode(0);
 
         let gala = w("gala worker");
-        c.eq(SetThreadDescription(GetCurrentThread(), gala.as_ptr()) as u64, 0)?;
+        // HRESULT_FROM_NT(STATUS_SUCCESS) (Windows 11 25H2).
+        c.eq(SetThreadDescription(GetCurrentThread(), gala.as_ptr()) as u64, 0x1000_0000)?;
         let mut text = core::ptr::null_mut();
         c.eq(GetThreadDescription(GetCurrentThread(), &mut text) as u64, 0)?;
         c.ok(!text.is_null() && same_text(text, "gala worker"), 0)?;

@@ -434,6 +434,8 @@ pub struct ObjectAttributes {
 
 const STATUS_SUCCESS: u32 = 0;
 const STATUS_IMAGE_NOT_AT_BASE: u32 = 0x4000_0003;
+/// A view of an image for another machine (informational: mapped).
+const STATUS_IMAGE_MACHINE_TYPE_MISMATCH: u32 = 0x4000_000e;
 const STATUS_DLL_NOT_FOUND: u32 = 0xc000_0135;
 const STATUS_ENTRYPOINT_NOT_FOUND: u32 = 0xc000_0139;
 const STATUS_INVALID_IMAGE_FORMAT: u32 = 0xc000_007b;
@@ -800,7 +802,7 @@ fn open_dll(dir: &[u16], dll: &[u8]) -> Result<usize, u32> {
         NtMapViewOfSection(section, -1, &mut base, 0, 0, core::ptr::null_mut(), &mut size, 1, 0, 4);
     NtClose(section);
     match st {
-        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE => {}
+        STATUS_SUCCESS | STATUS_IMAGE_NOT_AT_BASE | STATUS_IMAGE_MACHINE_TYPE_MISMATCH => {}
         _ => return Err(st),
     }
     // Image sections take both kinds; an image of the other kind loads as
@@ -1797,12 +1799,14 @@ unsafe extern "system" fn ldr_get_procedure_address(
         };
         match name {
             [] => Err(STATUS_PROCEDURE_NOT_FOUND),
-            _ => export(module, name, 0).ok_or(STATUS_PROCEDURE_NOT_FOUND),
+            // A missing name is STATUS_ENTRYPOINT_NOT_FOUND (Windows 11
+            // 25H2); both are ERROR_PROC_NOT_FOUND to GetProcAddress.
+            _ => export(module, name, 0).ok_or(STATUS_ENTRYPOINT_NOT_FOUND),
         }
     };
     let found = found.and_then(|target| {
         let missing =
-            if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_PROCEDURE_NOT_FOUND };
+            if name.is_null() { STATUS_ORDINAL_NOT_FOUND } else { STATUS_ENTRYPOINT_NOT_FOUND };
         if is_unimplemented_stub(target) { Err(missing) } else { Ok(target) }
     });
     // Programs probe for optional functions this way: every miss goes to
@@ -1947,6 +1951,7 @@ const STATUS_TO_ERROR: &[(u32, u32)] = &[
     (0xc000_003b, 161),  // OBJECT_PATH_SYNTAX_BAD -> ERROR_BAD_PATHNAME
     (0x8000_0011, 170),  // DEVICE_BUSY -> ERROR_BUSY
     (0xc000_0235, 6),    // HANDLE_NOT_CLOSABLE -> ERROR_INVALID_HANDLE
+    (0xc000_0041, 5),    // PORT_CONNECTION_REFUSED -> ERROR_ACCESS_DENIED
     (0xc000_0043, 32),   // SHARING_VIOLATION
     (0xc000_0045, 87),   // INVALID_PAGE_PROTECTION -> ERROR_INVALID_PARAMETER
     (0xc000_0046, 288),  // MUTANT_NOT_OWNED -> ERROR_NOT_OWNER
