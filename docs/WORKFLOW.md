@@ -3122,6 +3122,7 @@ ARCHITECTURE "Waits".
 | winget manifest resolver and its corpus | `user/galapkg/src/winget/`, `user/galapkg/testdata/winget-corpus/` |
 | Third-party program builds, scripts and configuration | `user/<program>/` (`build.sh`) |
 | Checked-in binaries, Windows runner (`run-all.ps1`) | `user/bin/` |
+| Triage of the test programs on real Windows: probes and findings | `user/windows/` (`docs/windows-triage-brief.md`) |
 | Build, boot tests, scenarios, reports | `xtask/src/main.rs`; signing `xtask/src/trust.rs`; triage `triage.rs`; OTLP `otel.rs` (encoders `otel/wire.rs`, batching and sending `otel/send.rs`); lx transcripts `lx_expect.rs`; audit `alloc_audit.rs`; clock check `clockcheck.rs` |
 | Docker test image | `docker/test.Dockerfile` |
 | Vendored dependencies (smoltcp with gala's handover patch) | `vendor/` |
