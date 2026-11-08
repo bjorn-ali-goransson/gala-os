@@ -214,6 +214,14 @@ build's PDB of that module. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
 
+Run it from an ordinary directory, never one under `%TEMP%`: Windows
+treats a temporary path differently, so a test that works from its
+current directory reads that instead of Windows. shell32_test's check
+174 is what caught it: `SHAddToRecentDocs(SHARD_PATHW, <a file in the
+current directory>)` creates the Recent `.lnk` within about 200 ms for
+an ordinary path and never for one under `%TEMP%`, so the check also
+spent its full ten-second wait.
+
 Antivirus is what goes wrong there: the test binaries are unsigned and
 freshly built, which Microsoft Defender's machine-learning heuristic
 takes for malware (`bench.exe` as `Trojan:Win32/Bearfoos.A!ml`). A
@@ -512,7 +520,14 @@ networking).
   QEMU it uses.
 - Build dependencies (Ubuntu): `libglib2.0-dev libpixman-1-dev
   libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
-  pkg-config`. CI builds it once and caches it.
+  pkg-config bzip2`. CI builds it once and caches it. `python3-venv` is
+  what provides `ensurepip`, which configure's own venv needs, and
+  `bzip2` is needed although nothing unpacks a `.bz2` here. Configure
+  does report "Compiler for language cpp ... not found" and "Program
+  iasl found: NO" on a machine without `g++` or `acpica-tools` and
+  carries on regardless, so those two are not required; it fails on a
+  missing dependency rather than warning, one at a time, so read the
+  last line of its output rather than the first.
 - Why not the distribution's: QEMU 8.1.0-8.2.5 (Ubuntu 24.04 ships
   8.2.2) keeps running stale translations of code rewritten on a
   translated block's second page, which corrupted JIT-compiled code
@@ -521,7 +536,15 @@ networking).
   and fails on 8.2.2 (check 2, round 1 gets the pre-rewrite value), so
   it is the quick way to tell whether a QEMU build has the bug. On the
   pinned QEMU `java_stress` passed 15 of 15 boots; on 8.2.2, 2 of 6
-  failed.
+  failed. A newer distribution QEMU is no safer: on 10.2.1 (Ubuntu
+  26.04's) the `hello` scenario wedges **under KVM** before the kernel
+  logs a phase, three runs of three timing out at 120 s with CPU 1 at
+  the reset vector (`EIP=0000fff0 CS=f000`, `HLT=1`) and no state dump,
+  while `lx_hello`, `lx_hello_pie` and `go_hello` passed in the same
+  runs; on the pinned 11.1.3 `hello` boots under KVM in 9-16 s. So a
+  distribution QEMU can produce what looks exactly like a kernel that
+  never starts, and the first question about any such failure is which
+  QEMU ran.
 - QEMU TCG (8.x) has no x2APIC: boot tests exercise only the xAPIC path;
   the x2APIC path runs only under KVM.
 - A cloud container is ephemeral: run `cargo xtask qemu` in the
@@ -1590,10 +1613,12 @@ it on first use.
 - A release that is a single file (busybox.net's static Linux
   `busybox`) names only that file as its one member, the URL's last
   component: the download is kept as it is.
-- Unpackers: unzip for zips, msitools' `msiextract` for an MSI (`apt
-  install msitools`), 7-Zip (`7z` from p7zip-full) for a `.7z` archive
-  (mesa-dist-win's; members are file paths such as
-  `x64/opengl32.dll`), an NSIS installer or a 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
+- Unpackers: unzip for zips (`apt install unzip`; a fresh Ubuntu, WSL's
+  included, has none, and the prebuilt fails to spawn it), msitools'
+  `msiextract` for an MSI (`apt install msitools`), 7-Zip (`7z` from
+  p7zip-full) for a `.7z` archive (mesa-dist-win's; members are file
+  paths such as `x64/opengl32.dll`), an NSIS installer or a 7-Zip
+  self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
   package: FlaUI) is a plain zip, its members paths such as
   `lib/net8.0-windows7.0/FlaUI.Core.dll`; a Debian package (`.deb`:
@@ -2144,6 +2169,29 @@ and panics red). The boot splash replaces the text console: add
 
     cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
     cargo xtask screenshot --name tcc --scenario tcc --at 16 run=busybox.exe "args=sh%20C:/gala/tcc.sh%20C:/gala/tcc.tar"
+
+#### Watching the screen live
+
+The pinned QEMU is built `--disable-gtk --disable-sdl`, so its only
+display backends are `none` and `dbus` and it opens no window of its
+own. VNC is compiled in, though, and `XTASK_QEMU_ARGS` is appended
+after everything else, so a `-vnc` there wins over the `-display none`
+that `run --headless` adds:
+
+    XTASK_QEMU_ARGS="-vnc 127.0.0.1:1" cargo xtask run --headless
+
+keeps the machine up (serial log on stdio, Ctrl-C to stop) with a VNC
+server on port 5901. Unlike a screendump this takes mouse and keyboard,
+so the desktop can be driven by hand.
+
+From Windows over WSL2, `localhost:5901` reaches it: localhost
+forwarding covers a port bound to the loopback address, so there is no
+need to listen on every interface. Windows has no VNC client of its own
+(`winget install TigerVNC.TigerVNC`, then `"C:\Program
+Files\TigerVNC\vncviewer.exe" localhost:5901`). Prefer the loopback
+form to `-vnc :1`, which listens on every interface with no password:
+under WSL's default NAT only the host can reach that, but mirrored
+networking would put it on the network.
 
 #### Screen checks
 
