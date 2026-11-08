@@ -973,12 +973,18 @@ fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize, ansi: bool) -
             {
                 return E_INVALIDARG;
             }
+            // Characters with GTL_DEFAULT (0) or GTL_NUMCHARS; any other
+            // flags without GTL_NUMCHARS (GTL_USECRLF alone among them)
+            // count bytes. A Unicode window's bytes are UTF-16's whatever
+            // the code page says (Windows 11, RICHEDIT50W and RichEdit20W
+            // alike).
+            let bytes = flags != 0 && flags & GTL_NUMCHARS == 0;
             with(hwnd, ansi, |e| {
                 let crlf = flags & GTL_USECRLF != 0;
                 let chars = if crlf { doc::crlf_len(&e.doc.text) } else { e.doc.len() };
-                if flags & GTL_NUMBYTES == 0 {
+                if !bytes {
                     chars as isize
-                } else if cp == CP_UNICODE {
+                } else if cp == CP_UNICODE || !ansi {
                     2 * chars as isize
                 } else {
                     let s = if crlf { with_crlf(&e.doc.text) } else { owned(&e.doc.text) };

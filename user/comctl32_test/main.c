@@ -19,7 +19,9 @@
  *   that exists is going on; BeginDrag of a missing image fails.
  * - The status bar: at the bottom of its parent, full width (and after
  *   WM_SIZE); parts, their texts and rectangles.
- * - Tooltips: tools added, counted, deleted; TTM_SETMAXTIPWIDTH. Hover
+ * - Tooltips: tools added, counted, deleted; TTM_SETMAXTIPWIDTH; the
+ *   full TOOLINFOW (with lpReserved) refused, as comctl32 5.82 does for a
+ *   program without a comctl32 6 manifest. Hover
  *   (TTF_SUBCLASS on a button under the pointer): the delay times'
  *   documented defaults (initial = GetDoubleClickTime(), autopop 10x,
  *   reshow 1/5); TTM_ACTIVATE FALSE keeps the tip hidden; a WM_MOUSEMOVE
@@ -311,11 +313,18 @@ static void tooltips(HWND parent) {
                               CW_USEDEFAULT, CW_USEDEFAULT, parent, NULL, GetModuleHandleW(NULL), NULL);
     CHECK(tt != NULL);
     TOOLINFOW ti = {0};
+    /* Without a manifest asking for comctl32 6 the program gets 5.82,
+     * which refuses the full TOOLINFOW (72 bytes on x64, with lpReserved)
+     * and takes one up to lParam (TTTOOLINFOW_V2_SIZE, 64) or smaller
+     * (Windows 11). */
     ti.cbSize = sizeof ti;
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.hwnd = parent;
     ti.uId = (UINT_PTR)parent;
     ti.lpszText = L"tip";
+    CHECK(!SendMessageW(tt, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+    CHECK(SendMessageW(tt, TTM_GETTOOLCOUNT, 0, 0) == 0);
+    ti.cbSize = TTTOOLINFOW_V2_SIZE;
     CHECK(SendMessageW(tt, TTM_ADDTOOLW, 0, (LPARAM)&ti));
     CHECK(SendMessageW(tt, TTM_GETTOOLCOUNT, 0, 0) == 1);
     CHECK(SendMessageW(tt, TTM_SETMAXTIPWIDTH, 0, 300) == -1);
@@ -367,7 +376,7 @@ static void tooltip_hover(void) {
     CHECK(SendMessageW(tt, TTM_GETDELAYTIME, TTDT_INITIAL, 0) == 50);
 
     TOOLINFOW ti = {0};
-    ti.cbSize = sizeof ti;
+    ti.cbSize = TTTOOLINFOW_V2_SIZE;
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.hwnd = win;
     ti.uId = (UINT_PTR)button;

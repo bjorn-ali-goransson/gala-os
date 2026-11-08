@@ -191,6 +191,24 @@ fn delay(hwnd: Hwnd, which: usize) -> u32 {
 /// TOOLINFO's members: cbSize, uFlags, hwnd, uId, rect, hinst, lpszText,
 /// lParam (when cbSize covers it). An ANSI text is widened (Latin-1); a resource id (with
 /// hinst) is loaded.
+/// Whether TTM_ADDTOOL takes a TOOLINFO of its cbSize: comctl32 5.82
+/// takes one up to lParam (TTTOOLINFO_V2_SIZE), 6 also the full one with
+/// lpReserved; anything larger neither (Windows 11; smaller sizes, even
+/// 0, are taken). `common::version6` says which one the process gets.
+fn size_accepted(info: isize) -> bool {
+    if info == 0 {
+        return true; // tool_of refuses it
+    }
+    // SAFETY: the caller's TOOLINFO starts with cbSize.
+    let size = unsafe { get!(info as *const ToolInfoW, size) } as usize;
+    let largest = if crate::common::version6() {
+        size_of::<ToolInfoW>()
+    } else {
+        core::mem::offset_of!(ToolInfoW, reserved)
+    };
+    size <= largest
+}
+
 fn tool_of(info: isize, ansi: bool) -> Option<Tool> {
     if info == 0 {
         return None;
@@ -787,6 +805,7 @@ fn delete(hwnd: Hwnd, key: Key) {
 
 pub extern "system" fn proc_(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
+        TTM_ADDTOOLW | TTM_ADDTOOLA if !size_accepted(lparam) => 0,
         TTM_ADDTOOLW | TTM_ADDTOOLA => match tool_of(lparam, msg == TTM_ADDTOOLA) {
             Some(tool) => add(hwnd, tool),
             None => 0,

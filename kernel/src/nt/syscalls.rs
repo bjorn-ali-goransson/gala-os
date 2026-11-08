@@ -865,7 +865,7 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(handle));
     if let ObjectBody::File(file) = &entry.object.body {
         let offset_ptr = arg!(call, 7);
-        let apc = tri!(io_apc(call, file, io_status));
+        let apc = tri!(io_apc(call, io_status));
         let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
         let status = file_write(call, &entry, file, io_status, buffer, length, offset_ptr);
         finish_io(&entry.object, event.as_ref(), apc, status);
@@ -1019,10 +1019,10 @@ fn pipe_request(
     length: u32,
 ) -> Result<super::notify::Request, NtStatus> {
     let routine = call.arg(2)?;
+    // On a synchronous end as on an asynchronous one, as for files (the
+    // I/O manager queues it at completion whatever the handle's mode).
     let apc = if routine == 0 {
         None
-    } else if end.synchronous {
-        return Err(NtStatus::INVALID_PARAMETER);
     } else {
         let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] };
         thread::current().map(|t| (t, apc))
@@ -5685,7 +5685,7 @@ fn nt_file_segments(call: &mut Call<'_>, write: bool) -> NtStatus {
     let offset = tri!(call.read_u64(offset_ptr));
     let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
     tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), write));
-    let apc = tri!(io_apc(call, file, iosb));
+    let apc = tri!(io_apc(call, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let transfer = || -> Result<u64, NtStatus> {
         if !write && offset >= size && length > 0 {
@@ -5751,7 +5751,7 @@ fn nt_lock_file(call: &mut Call<'_>) -> NtStatus {
     let (start, len) = (tri!(call.read_u64(arg!(call, 5))), tri!(call.read_u64(arg!(call, 6))));
     let key = arg!(call, 7) as u32;
     let (fail_now, exclusive) = (arg!(call, 8) as u8 != 0, arg!(call, 9) as u8 != 0);
-    let apc = tri!(io_apc(call, file, iosb));
+    let apc = tri!(io_apc(call, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let owner = file.lock_owner();
     let status = match super::locks::lock(file.node, owner, key, start, len, exclusive, !fail_now) {
@@ -5824,7 +5824,7 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
         }
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
-    let apc = tri!(io_apc(call, file, iosb));
+    let apc = tri!(io_apc(call, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let status = file_read(call, &entry, file, iosb, buffer, length, offset_ptr);
     finish_io(&entry.object, event.as_ref(), apc, status);
@@ -6010,19 +6010,15 @@ fn nt_query_io_completion(call: &mut Call<'_>) -> NtStatus {
 
 /// The I/O completion APC of a read or write (ApcRoutine, ApcContext):
 /// queued to the calling thread when the I/O completes successfully, as
-/// ApcRoutine(ApcContext, IoStatusBlock, 0). Synchronous handles take none.
-fn io_apc(
-    call: &Call<'_>,
-    file: &file::FileObject,
-    iosb: u64,
-) -> Result<Option<thread::UserApc>, NtStatus> {
+/// ApcRoutine(ApcContext, IoStatusBlock, 0), on a synchronous handle too.
+fn io_apc(call: &Call<'_>, iosb: u64) -> Result<Option<thread::UserApc>, NtStatus> {
     let routine = call.arg(2)?;
     if routine == 0 {
         return Ok(None);
     }
-    if file.synchronous {
-        return Err(NtStatus::INVALID_PARAMETER);
-    }
+    // A synchronous handle takes one too: the I/O completes inline and
+    // the routine still runs at the thread's next alertable wait (Windows
+    // 11, ioapc_test).
     Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] }))
 }
 
@@ -6566,7 +6562,7 @@ fn nt_notify_change_directory_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::INVALID_PARAMETER;
     }
     let event = tri!(start_io(call, &entry.object, event_handle));
-    let apc = tri!(io_apc(call, dir, iosb)).and_then(|apc| thread::current().map(|t| (t, apc)));
+    let apc = tri!(io_apc(call, iosb)).and_then(|apc| thread::current().map(|t| (t, apc)));
     let done = if dir.synchronous {
         let e = Event { kind: EventType::Notification, dispatcher: Dispatcher::new(0) };
         match KObject::new(ObjectBody::Event(e)) {

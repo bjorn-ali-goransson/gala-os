@@ -1821,8 +1821,9 @@ Next:
      SWP_NOSIZE, HWND_TOP); a WS_OVERLAPPEDWINDOW's client width at
      other DPIs (25H2 at 96: 304 of 320; gala's frame: 318).
      The open probes are GitHub issues labelled `windows` and `probe`
-     (#6 Round 5's, #8 the older ones); the runner's skips and expected
-     exits are #7.
+     (#6 Round 5's); the runner's skips and expected exits are #7. #8's
+     fifteen measurements are acted on: the tests now expect what
+     Windows does, except the two WOW64 ones (WOW item 3).
 2. The tests that need a setting run-all.ps1 cannot give say "skipped"
    without it (system_test, session_test: SYSTEM; restricted_test,
    disk_test, wow64_adv_test's view: an administrator; access, logon,
@@ -2377,7 +2378,26 @@ wow64.dll converts 32-bit system calls in user mode).
    access violation, not yet understood), comctl32's TaskDialogIndirect,
    shell32's SHPathPrepareForWriteW, rstrtmgr, riched20/msftedit and sfc
    for i686.
-3. Later: the handover carrying WOW64 processes; gala-um running 32-bit
+3. Two Windows 11 measurements (issue #8) that change how threads and
+   static TLS start in a 32-bit process. **NtCreateThread** (the old call
+   with a CONTEXT and an INITIAL_TEB) is refused with
+   STATUS_ACCESS_DENIED in a WOW64 process, by syscall and by export;
+   NtCreateThreadEx and kernel32's CreateThread work. gala has no
+   NtCreateThreadEx yet and its 32-bit kernel32 creates threads with
+   NtCreateThread. So: NtCreateThreadEx in the kernel (the kernel
+   allocates the stack and TEB, and the thread starts at ntdll's
+   RtlUserThreadStart), kernel32 moved onto it (64-bit too, as Windows
+   does), then NtCreateThread refused for WOW64 and `wow64_thread_test`
+   creating its thread with NtCreateThreadEx (checking CS, TEB, TID and
+   stack bounds from inside the thread). **testdll32's static TLS** is
+   never set up on Windows: no TLS callback, `_tls_index` never written,
+   by static import and by LoadLibrary alike, although its TLS
+   directory and relocations are well formed, so `wow64_import_test`
+   check 12 fails there. Still to explain before gala changes:
+   testdll.dll (x64) has no TLS directory at all, so the 64-bit build is
+   not even linking `_tls_used`; the question is whether the DLLs'
+   build (lld, `_tls_used`) or the loader is what differs.
+4. Later: the handover carrying WOW64 processes; gala-um running 32-bit
    code (a 32-bit code segment and a TEB32 through the host's
    modify_ldt); ARM64 guests are out of scope.
 

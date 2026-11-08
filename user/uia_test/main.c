@@ -66,10 +66,10 @@
  *   Off, then On after Toggle (BM_GETCHECK agrees).
  *
  * - Title bars (Windows' Win32 window proxy): a top-level window with a
- *   caption has a TitleBar child first (no HWND of its own, Name the
- *   title, AutomationId "TitleBar"): "UIA Test" (WS_CAPTION, no system
- *   menu) has four children, the TitleBar (without buttons) and the
- *   three controls. A WS_OVERLAPPEDWINDOW window's title bar has three
+ *   caption has a TitleBar child last, after its child windows (no HWND
+ *   of its own, an empty Name; Windows 11 in process): "UIA Test"
+ *   (WS_CAPTION, no system menu) has four children, the three controls
+ *   and then the TitleBar (without buttons). A WS_OVERLAPPEDWINDOW window's title bar has three
  *   Buttons, AutomationId and Name "Minimize", "Maximize" ("Restore"
  *   while maximized), "Close" (what FlaUI's TitleBar looks them up by;
  *   unverified on Windows); a WS_SYSMENU dialog's only "Close".
@@ -204,6 +204,15 @@ static int name_is(IUIAutomationElement *e, const wchar_t *s) {
     int same = bstr_is(b, s);
     SysFreeString(b);
     return same;
+}
+
+/* An empty Name (NULL or ""; a client may see either). */
+static int name_empty(IUIAutomationElement *e) {
+    BSTR b = NULL;
+    CHECK(IUIAutomationElement_get_CurrentName(e, &b) == S_OK);
+    int empty = b == NULL || SysStringLen(b) == 0;
+    SysFreeString(b);
+    return empty;
 }
 
 static int class_is(IUIAutomationElement *e, const wchar_t *s) {
@@ -1009,8 +1018,8 @@ static int rect_is(HWND h, int x, int y, int w, int hgt) {
     return GetWindowRect(h, &r) && r.left == x && r.top == y && r.right - r.left == w && r.bottom - r.top == hgt;
 }
 
-/* The title bar of `win` (titled `title`): its first child, a TitleBar
- * without a window, named by the title, AutomationId "TitleBar"; its
+/* The title bar of `win` (titled `title`, which the bar does not carry):
+ * its last child, a TitleBar without a window and with an empty Name; its
  * buttons (Minimize, Maximize, Close) in `buttons`. */
 static IUIAutomationElement *title_bar(IUIAutomation *uia, IUIAutomationElement *win, const wchar_t *title,
                                        IUIAutomationElement *buttons[3]) {
@@ -1020,12 +1029,13 @@ static IUIAutomationElement *title_bar(IUIAutomation *uia, IUIAutomationElement 
     IUIAutomationCondition_Release(is_bar);
     IUIAutomationTreeWalker *raw = NULL;
     CHECK(IUIAutomation_get_RawViewWalker(uia, &raw) == S_OK && raw);
-    IUIAutomationElement *first = NULL;
-    CHECK(IUIAutomationTreeWalker_GetFirstChildElement(raw, win, &first) == S_OK && first);
-    CHECK(same_element(uia, first, bar));
-    IUIAutomationElement_Release(first);
+    IUIAutomationElement *last = NULL;
+    CHECK(IUIAutomationTreeWalker_GetLastChildElement(raw, win, &last) == S_OK && last);
+    CHECK(same_element(uia, last, bar));
+    IUIAutomationElement_Release(last);
     IUIAutomationTreeWalker_Release(raw);
-    CHECK(name_is(bar, title) && automation_id_is(bar, L"TitleBar") && element_hwnd(bar) == NULL);
+    (void)title;
+    CHECK(name_empty(bar) && element_hwnd(bar) == NULL);
     IUIAutomationCondition *all = NULL;
     CHECK(IUIAutomation_CreateTrueCondition(uia, &all) == S_OK);
     IUIAutomationElementArray *kids = NULL;
@@ -1661,9 +1671,8 @@ int main(int argc, char **argv) {
     CHECK(IUIAutomationElement_FindAll(win, TreeScope_Children, all, &list) == S_OK && list != NULL);
     CHECK(IUIAutomationElementArray_get_Length(list, &n) == S_OK && n == 4);
     IUIAutomationElement *first = NULL;
-    CHECK(IUIAutomationElementArray_GetElement(list, 0, &first) == S_OK && first != NULL);
-    CHECK(control_type(first) == UIA_TitleBarControlTypeId && name_is(first, L"UIA Test") &&
-          element_hwnd(first) == NULL);
+    CHECK(IUIAutomationElementArray_GetElement(list, 3, &first) == S_OK && first != NULL);
+    CHECK(control_type(first) == UIA_TitleBarControlTypeId && name_empty(first) && element_hwnd(first) == NULL);
     // No system menu: a title bar without buttons.
     IUIAutomationElementArray *bar_kids = NULL;
     CHECK(IUIAutomationElement_FindAll(first, TreeScope_Children, all, &bar_kids) == S_OK && bar_kids != NULL);

@@ -3606,16 +3606,23 @@ pub extern "system" fn SetClassLongPtrW(hwnd: Hwnd, index: i32, value: usize) ->
     }
 }
 
-/// SetGestureConfig: accepted for an existing window (gala has no touch
-/// input, so no gesture is ever delivered).
+/// SetGestureConfig: accepted for an existing window given at least one
+/// GESTURECONFIG of exactly 12 bytes; no entries, a NULL array or another
+/// size is ERROR_INVALID_PARAMETER ("reset" is not spelled (0, NULL, 0);
+/// Windows 11). gala has no touch input, so no gesture is ever delivered.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetGestureConfig(
     hwnd: Hwnd,
     _reserved: u32,
-    _count: u32,
-    _config: *const u8,
-    _size: u32,
+    count: u32,
+    config: *const u8,
+    size: u32,
 ) -> i32 {
+    const GESTURECONFIG_SIZE: u32 = 12;
+    if count == 0 || config.is_null() || size != GESTURECONFIG_SIZE {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
     if IsWindow(hwnd) == 0 {
         set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
         return 0;

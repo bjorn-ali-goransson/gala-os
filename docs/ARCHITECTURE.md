@@ -1556,9 +1556,11 @@ Invariants:
   SystemArgument2, NormalRoutine (to be checked against the pinned
   ntdll). The dispatcher calls the routine and NtContinues with
   TestAlert, which delivers the next APC first. I/O completion routines
-  use the same queue: a read or write on an asynchronous handle with an
-  ApcRoutine queues ApcRoutine(ApcContext, IoStatusBlock, 0) to the
-  caller when it completes successfully.
+  use the same queue: a read or write with an ApcRoutine queues
+  ApcRoutine(ApcContext, IoStatusBlock, 0) to the caller when it
+  completes successfully, on a synchronous handle too (the I/O completes
+  inline and the routine runs at the next alertable wait, as on Windows
+  11; files and pipe ends alike).
 
 ### Job objects
 
@@ -4454,7 +4456,11 @@ SOCKET values are the endpoint handles.
   WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER); asyncio's _overlapped
   asks for all of them at import); gala's mswsock.dll forwards its
   AcceptEx, GetAcceptExSockaddrs and TransmitFile exports there (Go
-  imports them from mswsock). DisconnectEx closes both directions
+  imports them from mswsock). A deliberate difference: on Windows 11
+  mswsock's GetAcceptExSockaddrs export is another function than the one
+  WSAIoctl hands out and leaves the address pointers NULL; gala's export
+  does the work (`winsock_async_test` uses WSAIoctl's, as documented).
+  DisconnectEx closes both directions
   gracefully (IOCTL_AFD_DISCONNECT), overlapped or not; its
   TF_REUSE_SOCKET is not supported (WSAEOPNOTSUPP, ledgered), nor is
   TransmitFile (WSAEOPNOTSUPP, ledgered; callers fall back to read and
@@ -5556,6 +5562,15 @@ allocator (`gala_heap`).
 the classes (once). comctl32 imports user32 (the controls are windows)
 but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
 
+- **Which comctl32** (`common::version6`): Windows gives a process
+  comctl32 6.10 (WinSxS) when its executable's manifest (RT_MANIFEST 1)
+  depends on Microsoft.Windows.Common-Controls 6, else 5.82. gala has one
+  comctl32 that answers as the one the process would get where the two
+  differ visibly: TTM_ADDTOOL takes a TOOLINFO up to lParam on 5.82 and
+  also the full one (with lpReserved) on 6, nothing larger on either
+  (Windows 11; `comctl32_test`, `gui_test` without a manifest,
+  `manifest_test` with one). A DLL's own activation context and UTF-16
+  manifests are not looked at.
 - **Common pieces** (`common.rs`): each control's state in a `Store` (by
   window, under a spin lock **that is never held while a message is
   sent**), drawing helpers (rounded fills, text through DrawTextW) and
@@ -5677,7 +5692,10 @@ then riched20.dll).
   CRLF and a lone LF into CR (a single-line control keeps the first
   paragraph); WM_GETTEXT/WM_GETTEXTLENGTH give CRLF; EM_GETTEXTEX CR or
   CRLF (GT_USECRLF), Unicode (1200) or ANSI (WideCharToMultiByte);
-  EM_GETTEXTLENGTHEX characters, CRLF characters or bytes. "RichEdit20A"
+  EM_GETTEXTLENGTHEX characters (GTL_DEFAULT, GTL_NUMCHARS) or, with any
+  other flags, bytes (GTL_USECRLF alone counts bytes; a Unicode window's
+  are UTF-16's whatever the code page, as Windows 11 counts), CRs counted
+  as CRLFs with GTL_USECRLF. "RichEdit20A"
   takes and gives ANSI text (gala's user32 passes SendMessageA's strings
   unchanged and has no ANSI windows, so the class's own procedure
   converts).
@@ -9607,13 +9625,15 @@ HEAD).
 
 - **The tree**: the root is GetDesktopWindow(). Its children are the
   visible top-level windows without an owner (EnumWindows). A top-level
-  window's children, in order: its TitleBar (if it has a caption), its
-  MenuBar (if it has a menu), the visible top-level windows it owns
+  window's children, in order: its MenuBar (if it has a menu), the
+  visible top-level windows it owns
   (GetWindow GW_OWNER: its dialogs, its open popup menu; UIA puts owned
   windows under their owner, which FlaUI's Window.ModalWindows and Win32
   menu handling rely on), its visible child windows in z order, then a
-  list box's or list view's items in index order. An open popup menu
-  (class #32768) has its items instead.
+  list box's or list view's items in index order, a provider's
+  fragments, and last its TitleBar (if it has a caption; Windows 11's
+  proxy, measured in process). An open popup menu (class #32768) has its
+  items instead.
 - **Window properties**:
   - AutomationId: the control id in decimal (none for top-level
     windows);
@@ -9810,9 +9830,9 @@ under the root), with its items as children.
 - Their properties (30073-30078, 30087-30089) are read on any element
   (not-supported without the pattern), which FlaUI's Window.ModalWindows
   relies on (a FindAllDescendants with an IsModal condition).
-- **Title bar**: the window's first child is a TitleBar element (no
-  HWND; `Node.menu` = `frame::TITLE`, item None), Name the window's
-  title, AutomationId "TitleBar", the caption band as its rectangle
+- **Title bar**: the window's last child is a TitleBar element (no
+  HWND; `Node.menu` = `frame::TITLE`, item None) with an empty Name and
+  AutomationId (Windows 11, in process), the caption band as its rectangle
   (SM_CYCAPTION below the border). With WS_SYSMENU its children are
   Buttons (items 0-2): Minimize and Maximize when the window has
   WS_MINIMIZEBOX or WS_MAXIMIZEBOX (each enabled by its own style),

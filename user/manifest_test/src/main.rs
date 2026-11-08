@@ -5,8 +5,12 @@
 //! major version 10. (Programs without the manifest get 6.2, build 9200:
 //! kernel32_test.) An activation context made from the manifest activates
 //! and deactivates (CreateActCtxW, ActivateActCtx, GetCurrentActCtx,
-//! DeactivateActCtx, ReleaseActCtx). Prints `manifest_test: ok` or exits with the number of
-//! the failing check.
+//! DeactivateActCtx, ReleaseActCtx). The manifest also depends on
+//! Microsoft.Windows.Common-Controls 6, so the program gets comctl32 6,
+//! whose TTM_ADDTOOLW takes the full TOOLINFOW (72 bytes, with
+//! lpReserved; 5.82 refuses it: comctl32_test) and refuses a larger one.
+//! Prints `manifest_test: ok` or exits with the number of the failing
+//! check.
 
 #![no_std]
 #![no_main]
@@ -33,6 +37,45 @@ unsafe extern "system" {
     fn GetCurrentActCtx(ctx: *mut Handle) -> Bool;
     fn ReleaseActCtx(ctx: Handle);
     fn GetLastError() -> u32;
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn CreateWindowExW(
+        ex_style: u32,
+        class: *const u16,
+        title: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        parent: Handle,
+        menu: Handle,
+        instance: Handle,
+        param: *mut c_void,
+    ) -> Handle;
+    fn SendMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn DestroyWindow(hwnd: Handle) -> Bool;
+}
+
+#[link(name = "comctl32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn InitCommonControls();
+}
+
+/// TOOLINFOW (TTTOOLINFOW_V3: with lpReserved, 72 bytes on x64).
+#[repr(C)]
+struct ToolInfoW {
+    size: u32,
+    flags: u32,
+    hwnd: Handle,
+    id: usize,
+    rect: [i32; 4],
+    instance: Handle,
+    text: *const u16,
+    lparam: isize,
+    reserved: *mut c_void,
 }
 
 /// ACTCTXW.
@@ -171,6 +214,51 @@ fn run() -> Result<(), u32> {
         ctx.resource_name = core::ptr::without_provenance(2);
         c.eq(CreateActCtxW(&ctx) as u64, invalid as u64)?;
         c.eq(GetLastError().into(), 1814)?; // ERROR_RESOURCE_NAME_NOT_FOUND
+
+        // comctl32 6 (this manifest's dependency): TTM_ADDTOOLW takes the
+        // full TOOLINFOW and refuses 1024 bytes.
+        InitCommonControls();
+        let class: [u16; 17] =
+            core::array::from_fn(|i| b"tooltips_class32\0".get(i).map_or(0, |&b| u16::from(b)));
+        let null: Handle = core::ptr::null_mut();
+        let none = core::ptr::null();
+        let tt = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            none,
+            0x8000_0000,
+            0,
+            0,
+            0,
+            0,
+            null,
+            null,
+            null,
+            null,
+        );
+        c.eq(u64::from(!tt.is_null()), 1)?;
+        let text: [u16; 4] = [b't'.into(), b'i'.into(), b'p'.into(), 0];
+        let mut ti = ToolInfoW {
+            size: 1024,
+            flags: 0,
+            hwnd: tt,
+            id: 1,
+            rect: [0, 0, 10, 10],
+            instance: null,
+            text: text.as_ptr(),
+            lparam: 0,
+            reserved: null,
+        };
+        const TTM_ADDTOOLW: u32 = 0x0400 + 50;
+        const TTM_GETTOOLCOUNT: u32 = 0x0400 + 13;
+        let info = &raw const ti as isize;
+        c.eq(SendMessageW(tt, TTM_ADDTOOLW, 0, info) as u64, 0)?;
+        c.eq(SendMessageW(tt, TTM_GETTOOLCOUNT, 0, 0) as u64, 0)?;
+        ti.size = core::mem::size_of::<ToolInfoW>() as u32;
+        let info = &raw const ti as isize;
+        c.eq(u64::from(SendMessageW(tt, TTM_ADDTOOLW, 0, info) != 0), 1)?;
+        c.eq(SendMessageW(tt, TTM_GETTOOLCOUNT, 0, 0) as u64, 1)?;
+        DestroyWindow(tt);
     }
     Ok(())
 }

@@ -4,7 +4,8 @@
 //! the I/O completes, runs only at the next alertable wait or delay as
 //! ApcRoutine(ApcContext, IoStatusBlock, 0) with the IO_STATUS_BLOCK filled
 //! in, in completion order; an event given as well is still signaled; a
-//! synchronous handle rejects an ApcRoutine. Prints `ioapc_test: ok` or
+//! synchronous handle takes one too (the read completes inline, the
+//! routine runs at the next alertable wait). Prints `ioapc_test: ok` or
 //! exits with the number of the failing check.
 
 #![no_std]
@@ -14,7 +15,6 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use ntrt::*;
 
-const STATUS_INVALID_PARAMETER: NtStatus = 0xc000_000d;
 const FILE_DISPOSITION_INFORMATION: u32 = 13;
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const SECOND: i64 = -10_000_000;
@@ -122,18 +122,24 @@ fn run() -> Result<(), u32> {
     c.eq(logged(3)[0], 3)?;
     close(event);
 
-    // A synchronous handle does not take an ApcRoutine.
+    // A synchronous handle takes an ApcRoutine too: the read completes
+    // inline (STATUS_SUCCESS, not pending), and the routine runs at the
+    // next alertable wait with the completed IOSB (Windows 11).
     let sync = FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE;
     let (s, h, _) = open_file(&attrs, GENERIC_READ, SHARE_ALL, sync);
     c.eq(s.into(), ok)?;
     let mut r = IoStatusBlock { status: 0xdead, information: 0xdead };
-    c.eq(
-        read_file_apc(h, &mut buf, Some(0), Handle(0), done, 4, &mut r).into(),
-        STATUS_INVALID_PARAMETER.into(),
-    )?;
+    c.eq(read_file_apc(h, &mut buf, Some(0), Handle(0), done, 4, &mut r).into(), ok)?;
+    c.eq(r.status as u64, ok)?;
+    c.eq(r.information as u64, buf.len().min(DATA.len()) as u64)?;
+    c.eq(calls(), 4)?; // not before an alertable wait
+    c.eq(delay_alertable(SECOND).into(), STATUS_USER_APC.into())?;
+    c.eq(calls(), 5)?;
+    let [context, _, _, status, count] = logged(4);
+    c.eq(context, 4)?;
+    c.eq(status, ok)?;
+    c.eq(count, buf.len().min(DATA.len()) as u64)?;
     close(h);
-    c.eq(delay_alertable(SECOND / 100).into(), ok)?; // nothing queued
-    c.eq(calls(), 4)?;
 
     c.eq(set_file(file, FILE_DISPOSITION_INFORMATION, &[1]).into(), ok)?;
     close(file);

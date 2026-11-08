@@ -8,8 +8,9 @@
  *   EM_REPLACESEL turn CRLF (and a lone LF) into CR; WM_GETTEXT and
  *   WM_GETTEXTLENGTH give CRLF; EM_GETTEXTEX gives CR, or CRLF with
  *   GT_USECRLF, in Unicode (1200) or the ANSI code page;
- *   EM_GETTEXTLENGTHEX counts CRs (GTL_USECRLF: CRLFs; GTL_NUMBYTES:
- *   bytes); EM_GETTEXTRANGE and EM_GETSELTEXT copy CR text.
+ *   EM_GETTEXTLENGTHEX counts CRs (GTL_USECRLF: CRLFs), in characters
+ *   with GTL_DEFAULT or GTL_NUMCHARS and in UTF-16 bytes with any other
+ *   flags (GTL_USECRLF alone too); EM_GETTEXTRANGE and EM_GETSELTEXT copy CR text.
  * - Lines: EM_GETLINECOUNT (a text ending in a paragraph mark has an
  *   empty last line), EM_LINEINDEX, EM_LINEFROMCHAR, EM_EXLINEFROMCHAR,
  *   EM_LINELENGTH, EM_GETLINE (the line with its CR, no NUL).
@@ -148,7 +149,13 @@ static void text_and_lines(HWND e) {
     // A buffer too small: what fits, terminated.
     CHECK(SendMessageW(e, WM_GETTEXT, 4, (LPARAM)buf) == 3 && wcscmp(buf, L"Hel") == 0);
     CHECK(length_ex(e, GTL_DEFAULT, 1200) == 11);
-    CHECK(length_ex(e, GTL_USECRLF, 1200) == 12);
+    /* GTL_USECRLF without GTL_NUMCHARS counts bytes (UTF-16's, whatever
+     * the code page); with it, characters (Windows 11). */
+    CHECK(length_ex(e, GTL_USECRLF, 1200) == 24);
+    CHECK(length_ex(e, GTL_USECRLF, CP_ACP) == 24);
+    CHECK(length_ex(e, GTL_NUMCHARS | GTL_USECRLF, 1200) == 12);
+    CHECK(length_ex(e, GTL_NUMCHARS, 1200) == 11);
+    CHECK(length_ex(e, GTL_NUMBYTES | GTL_USECRLF, 1200) == 24);
     CHECK(length_ex(e, GTL_NUMBYTES, 1200) == 22);
     CHECK(text_ex(e, GT_DEFAULT, buf, 64) == 11 && wcscmp(buf, L"Hello\rworld") == 0);
     CHECK(text_ex(e, GT_USECRLF, buf, 64) == 12 && wcscmp(buf, L"Hello\r\nworld") == 0);
