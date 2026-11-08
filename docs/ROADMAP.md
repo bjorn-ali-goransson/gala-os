@@ -330,8 +330,11 @@ process", "Limits and open questions"); ARCHITECTURE "UI Automation".
 ### LN. Lints before every commit
 
 **Goal** (the owner): the classes of defect we have had are caught
-before a commit exists, by checks that fail on the pattern itself, not
-on its symptom hours later. One entry point, `cargo xtask lint`, run by
+before a commit exists, by custom analyzers that prove a property over
+the source (parsed with `syn` in xtask), not by tests that hope to hit
+its symptom hours later; the scenarios then verify, they are not the
+only defence. Each analyzer has fixtures of its own (code it must flag
+and code it must not), which verify the analyzer. One entry point, `cargo xtask lint`, run by
 a committed git pre-commit hook (`core.hooksPath` to a tracked `hooks/`
 directory, set by xtask on first use), so every commit (a session's or
 a sub-agent's) passes through it; also what `cargo xtask test` runs
