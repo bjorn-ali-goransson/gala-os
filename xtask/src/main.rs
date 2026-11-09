@@ -10444,6 +10444,10 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
+    (
+        "rpc_test",
+        "a child process: the RPC client of `rpc_test.exe client` (one NT process per Linux process)",
+    ),
     ("shell32_test", "a child process (ShellExecuteExW runs it)"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
