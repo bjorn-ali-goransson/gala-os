@@ -394,6 +394,7 @@ fn the_registry_offers_the_globals_and_binds_them() {
             "wl_registry#2.global(4, \"wl_output\", 4)",
             "wl_registry#2.global(5, \"wl_seat\", 7)",
             "wl_registry#2.global(6, \"zxdg_decoration_manager_v1\", 1)",
+            "wl_registry#2.global(7, \"wl_data_device_manager\", 3)",
             "wl_callback#3.done(1)",
             "wl_display#1.delete_id(3)",
         ]
@@ -774,6 +775,36 @@ impl T {
         t
     }
 
+    /// `T::mapped` but framed: the toplevel's decoration object (15,
+    /// from the manager 14) asks for nothing, so it is server-side.
+    fn framed() -> T {
+        let mut t = T::toplevel();
+        let seat = [Arg::Uint(5), Arg::UntypedNewId { interface: b"wl_seat", version: 7, id: 11 }];
+        t.ok(2, "bind", &seat);
+        t.ok(11, "get_pointer", &[Arg::NewId(12)]);
+        t.ok(11, "get_keyboard", &[Arg::NewId(13)]);
+        t.decorate(14, 15);
+        t.ok(8, "commit", &[]);
+        t.ok(9, "ack_configure", &[Arg::Uint(1)]);
+        t.ok(8, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+        t.ok(8, "commit", &[]);
+        assert!(t.h.windows[0].alive && t.h.windows[0].decorated);
+        t.events();
+        t
+    }
+
+    /// Binds the decoration manager as `manager` and gives toplevel 10 the
+    /// decoration object `decoration`, asking for no mode.
+    fn decorate(&mut self, manager: u32, decoration: u32) {
+        let bind = [
+            Arg::Uint(6),
+            Arg::UntypedNewId { interface: b"zxdg_decoration_manager_v1", version: 1, id: manager },
+        ];
+        self.ok(2, "bind", &bind);
+        let args = [Arg::NewId(decoration), Arg::Object(Some(10))];
+        self.ok(manager, "get_toplevel_decoration", &args);
+    }
+
     fn input(&mut self, i: Input) -> Vec<String> {
         assert_eq!(self.c.input(&mut self.h, i), Ok(()), "{:?}", self.h.notes);
         self.events()
@@ -840,6 +871,109 @@ fn the_seat_has_a_pointer_and_a_keyboard_with_gala_s_keymap() {
     t.ok(2, "bind", &seat);
     let r = t.send(6, "get_touch", &[Arg::NewId(7)]);
     assert!(t.error(r).starts_with("wl_display#1.error(#6, 0, "));
+}
+
+impl T {
+    /// `T::mapped` with wl_data_device_manager 3 (14) and a data device
+    /// (15) for the seat; events read.
+    fn with_data_device() -> T {
+        let mut t = T::mapped();
+        let manager = [
+            Arg::Uint(7),
+            Arg::UntypedNewId { interface: b"wl_data_device_manager", version: 3, id: 14 },
+        ];
+        t.ok(2, "bind", &manager);
+        t.ok(14, "get_data_device", &[Arg::NewId(15), Arg::Object(Some(11))]);
+        assert_eq!(t.events(), Vec::<String>::new());
+        t
+    }
+}
+
+#[test]
+fn a_data_device_hears_of_no_selection_before_each_keyboard_focus() {
+    let mut t = T::with_data_device();
+    // GTK 3 makes its seat only once this global is there; the selection
+    // event comes right before the keyboard's enter (wayland.xml).
+    assert_eq!(
+        plain(t.input(Input::Focus { window: 0, active: true })),
+        [
+            "wl_data_device#15.selection(Object(None))",
+            "wl_keyboard#13.enter(S, #8, [])",
+            "wl_keyboard#13.modifiers(S, 0, 0, 0, 0)",
+            "xdg_toplevel#10.configure(0, 0, [4])",
+            "xdg_surface#9.configure(S)",
+        ]
+    );
+    t.input(Input::Focus { window: 0, active: false });
+    // The client's own selection it keeps knowing: nothing is said.
+    t.ok(14, "create_data_source", &[Arg::NewId(16)]);
+    t.ok(16, "offer", &[Arg::String(Some(b"text/plain;charset=utf-8"))]);
+    t.ok(15, "set_selection", &[Arg::Object(Some(16)), Arg::Uint(1)]);
+    assert_eq!(t.events(), Vec::<String>::new());
+    let focus = plain(t.input(Input::Focus { window: 0, active: true }));
+    assert_eq!(focus[0], "wl_keyboard#13.enter(S, #8, [])");
+    // Replaced, the old source is cancelled; destroyed, it is no
+    // selection any more.
+    t.ok(14, "create_data_source", &[Arg::NewId(17)]);
+    t.ok(15, "set_selection", &[Arg::Object(Some(17)), Arg::Uint(2)]);
+    assert_eq!(t.events(), ["wl_data_source#16.cancelled()"]);
+    t.ok(16, "destroy", &[]);
+    t.ok(17, "destroy", &[]);
+    t.events();
+    t.input(Input::Focus { window: 0, active: false });
+    let focus = plain(t.input(Input::Focus { window: 0, active: true }));
+    assert_eq!(focus[0], "wl_data_device#15.selection(Object(None))");
+    // Unsetting cancels the one there was.
+    t.ok(14, "create_data_source", &[Arg::NewId(16)]);
+    t.ok(15, "set_selection", &[Arg::Object(Some(16)), Arg::Uint(3)]);
+    t.ok(15, "set_selection", &[Arg::Object(None), Arg::Uint(4)]);
+    assert_eq!(t.events(), ["wl_data_source#16.cancelled()"]);
+    t.ok(15, "release", &[]);
+    assert_eq!(t.events(), ["wl_display#1.delete_id(15)"]);
+}
+
+#[test]
+fn a_drag_is_cancelled_and_sources_are_used_once() {
+    let mut t = T::with_data_device();
+    t.ok(14, "create_data_source", &[Arg::NewId(16)]);
+    t.ok(16, "set_actions", &[Arg::Uint(1)]);
+    let drag = [Arg::Object(Some(16)), Arg::Object(Some(8)), Arg::Object(None), Arg::Uint(1)];
+    t.ok(15, "start_drag", &drag);
+    assert_eq!(t.events(), ["wl_data_source#16.cancelled()"]);
+    assert!(
+        t.h.notes.iter().any(|n| n.contains("start_drag")),
+        "ignored drags are noted: {:?}",
+        t.h.notes
+    );
+    // Used once: again is used_source on the device.
+    let r = t.send(15, "set_selection", &[Arg::Object(Some(16)), Arg::Uint(2)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#15, 1, "));
+    // A drag's source as a selection: invalid_source on the source.
+    let mut t = T::with_data_device();
+    t.ok(14, "create_data_source", &[Arg::NewId(16)]);
+    t.ok(16, "set_actions", &[Arg::Uint(2)]);
+    let r = t.send(15, "set_selection", &[Arg::Object(Some(16)), Arg::Uint(2)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#16, 1, "));
+    // Actions: known bits only, once, before the source is used.
+    let mut t = T::with_data_device();
+    t.ok(14, "create_data_source", &[Arg::NewId(16)]);
+    let r = t.send(16, "set_actions", &[Arg::Uint(8)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#16, 0, "));
+    let mut t = T::with_data_device();
+    t.ok(14, "create_data_source", &[Arg::NewId(16)]);
+    t.ok(16, "set_actions", &[Arg::Uint(1)]);
+    let r = t.send(16, "set_actions", &[Arg::Uint(1)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#16, 0, "));
+    let mut t = T::with_data_device();
+    t.ok(14, "create_data_source", &[Arg::NewId(16)]);
+    t.ok(15, "set_selection", &[Arg::Object(Some(16)), Arg::Uint(1)]);
+    let r = t.send(16, "set_actions", &[Arg::Uint(1)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#16, 1, "));
+    // A drag icon is a surface without another role.
+    let mut t = T::with_data_device();
+    let drag = [Arg::Object(None), Arg::Object(Some(8)), Arg::Object(Some(8)), Arg::Uint(1)];
+    let r = t.send(15, "start_drag", &drag);
+    assert!(t.error(r).starts_with("wl_display#1.error(#15, 0, "));
 }
 
 #[test]
@@ -1001,7 +1135,7 @@ impl T {
 #[test]
 fn the_desktop_s_maximize_restore_and_snap_are_configures() {
     // xdg_wm_base 1: no tiled states (they are xdg_toplevel 2's).
-    let mut t = T::mapped();
+    let mut t = T::framed();
     t.input(Input::Focus { window: 0, active: true });
     let w = |t: &T| (t.h.windows[0].at, t.h.windows[0].size);
     assert_eq!(w(&t), ((10, 20), (64, 64)));
@@ -1059,6 +1193,7 @@ fn snap_is_tiled_from_version_2_and_acks_may_name_older_configures() {
     t.ok(3, "create_surface", &[Arg::NewId(8)]);
     t.ok(5, "get_xdg_surface", &[Arg::NewId(9), Arg::Object(Some(8))]);
     t.ok(9, "get_toplevel", &[Arg::NewId(10)]);
+    t.decorate(11, 12);
     t.ok(8, "commit", &[]);
     // The capabilities: maximize (2) and minimize (4).
     assert!(t.events().contains(&"xdg_toplevel#10.wm_capabilities([2 4])".to_string()));
@@ -1622,7 +1757,7 @@ fn get_popup_checks_its_positioner_parent_and_role() {
 
 #[test]
 fn a_popup_is_configured_then_shown_above_its_parent() {
-    let mut t = T::mapped();
+    let mut t = T::framed();
     let ((s, x, p), events) = t.popup(9, MENU, None);
     assert_eq!(
         events,
@@ -1640,16 +1775,50 @@ fn a_popup_is_configured_then_shown_above_its_parent() {
     let w = t.window_of(s);
     assert!(w.popup && w.alive && !w.decorated);
     assert_eq!((w.at, w.size), ((31, 83), (120, 80)));
-    // Its window geometry starts 4, 6 into its surface: the window moves
-    // by -4, -6 at the commit that applies it, and a popup of the popup
-    // is placed against that geometry.
+    // Its window geometry starts 4, 6 into its surface: from the commit
+    // that applies it the window shows that geometry (100 x 60, its
+    // shadow outside not shown) at the same place, and a popup of the
+    // popup is placed against that geometry.
     t.ok(x, "set_window_geometry", &[Arg::Int(4), Arg::Int(6), Arg::Int(100), Arg::Int(60)]);
     t.show_on(s, x, 0, 120, 80);
-    assert_eq!(t.window_of(s).at, (27, 77));
+    assert_eq!((t.window_of(s).at, t.window_of(s).size), ((31, 83), (100, 60)));
     let nested = ((30, 20), (0, 0, 100, 60), popup::RIGHT, popup::RIGHT, 0, (0, 0));
     let ((s2, _, _), conf, _) = t.shown_popup(x, nested, None);
     assert_eq!(conf, "100, 20, 30, 20");
-    assert_eq!(t.window_of(s2).at, (27 + 4 + 100, 77 + 6 + 20));
+    assert_eq!(t.window_of(s2).at, (31 + 100, 83 + 20));
+}
+
+#[test]
+fn a_frameless_window_shows_its_window_geometry() {
+    // No decoration object: client-side, frameless (as GTK 3).
+    let mut t = T::toplevel();
+    let seat = [Arg::Uint(5), Arg::UntypedNewId { interface: b"wl_seat", version: 7, id: 11 }];
+    t.ok(2, "bind", &seat);
+    t.ok(11, "get_pointer", &[Arg::NewId(12)]);
+    t.ok(8, "commit", &[]);
+    t.ok(9, "ack_configure", &[Arg::Uint(1)]);
+    // A shadow of 10 columns and 8 rows around a 44 x 48 window.
+    t.ok(9, "set_window_geometry", &[Arg::Int(10), Arg::Int(8), Arg::Int(44), Arg::Int(48)]);
+    t.ok(8, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    t.events();
+    let w = &t.h.windows[0];
+    assert!(w.alive && !w.decorated);
+    assert_eq!(w.size, (44, 48));
+    // T::toplevel's buffer: 0x336699 in its top 32 rows, 0xff8800 below;
+    // the window's row 0 is the buffer's row 8, so rows 24 and 23 differ.
+    assert_eq!(w.pixels[23 * 44], 0x0033_6699);
+    assert_eq!(w.pixels[24 * 44], 0x00ff_8800);
+    // The pointer at the window's corner is at the geometry's corner.
+    assert_eq!(
+        plain(t.input(Input::Motion { window: 0, x: 0, y: 0 })),
+        ["wl_pointer#12.enter(S, #8, Fixed(2560), Fixed(2048))", "wl_pointer#12.frame()"]
+    );
+    // Clamped to the buffer: a geometry past its edge shows what is there.
+    t.ok(9, "set_window_geometry", &[Arg::Int(-5), Arg::Int(60), Arg::Int(100), Arg::Int(100)]);
+    t.ok(8, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    assert_eq!(t.h.windows[0].size, (64, 4));
 }
 
 #[test]

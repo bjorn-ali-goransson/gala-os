@@ -425,7 +425,8 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
             return Err(ExecError::Map("first thread", status));
         }
     };
-    if lx.add_thread(thread::id_of(&object), lx_abi::signal::SigSet::EMPTY).is_err() {
+    let comm = state::Comm::of_path(path.as_bytes());
+    if lx.add_thread(thread::id_of(&object), lx_abi::signal::SigSet::EMPTY, comm).is_err() {
         thread::request_termination(&object, NtStatus::NO_MEMORY);
         thread::resume(&object);
         return Err(ExecError::OutOfMemory);
@@ -584,6 +585,9 @@ pub fn execve(
 ) -> super::dispatch::Result {
     use super::errno::ENOMEM;
     let path = super::file::read_path(&call.process, path)?;
+    // Its name once it runs: the path given (a script's, not its
+    // interpreter's).
+    let comm = state::Comm::of_path(&path);
     let mut args = read_strings(&call.process, argv)?;
     let env = read_strings(&call.process, envp)?;
     let (mut exe, mut data) = super::file::executable(call, &path)?;
@@ -658,6 +662,7 @@ pub fn execve(
     }
     *call.lx.brk.lock() = state::Brk { start: p.plan.brk, current: p.plan.brk };
     *call.lx.exe.lock() = exe;
+    call.lx.set_comm(call.tid, comm);
     call.lx.release_vfork();
     call.lx.close_on_exec();
     call.lx.signals.lock().exec();

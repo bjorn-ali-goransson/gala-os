@@ -282,6 +282,7 @@ pub fn epoll_ctl(call: &Call<'_>, epfd: u64, op: u64, fd: u64, event: u64) -> Re
         | Object::PipeWrite(_)
         | Object::Socket(_)
         | Object::Unix(_)
+        | Object::EventFd(_)
         | Object::Console(_) => {}
     }
     let desc = f.id();

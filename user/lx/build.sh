@@ -9,7 +9,8 @@
 #
 # Needs musl-gcc (Ubuntu/Debian: apt install musl-tools; musl 1.2.4 and
 # gcc 13 on Ubuntu 24.04, which CI uses) and, for GLIBC_TESTS, gcc with
-# glibc's headers (gcc 13 and glibc 2.39 on Ubuntu 24.04). The build is reproducible
+# glibc's headers (gcc 13 and glibc 2.39 on Ubuntu 24.04), and for
+# gtk_test GTK 3's libraries (apt install libgtk-3-0t64). The build is reproducible
 # (stripped, no build id, no file paths), so CI rebuilds and checks the
 # result against the checked-in binaries (`cargo xtask lx-expect`).
 #
@@ -22,12 +23,19 @@ out=$(cd "$out" && pwd)
 cc=${MUSL_GCC:-musl-gcc}
 gcc=${GLIBC_GCC:-gcc}
 # Linked against glibc, dynamically.
-GLIBC_TESTS="dyn_test"
+GLIBC_TESTS="dyn_test gtk_test"
+# Linked against GTK 3 as well (the host's Ubuntu 24.04 libgtk-3-0t64, its
+# libraries by soname: no development package needed; the program
+# declares what it calls). The binary depends only on the sonames and
+# the symbols' names, so any 3.24 build gives the same bytes.
+GTK_LIBS="-l:libgtk-3.so.0 -l:libgdk-3.so.0 -l:libgobject-2.0.so.0 -l:libglib-2.0.so.0"
 flags="-O2 -fno-stack-protector -fno-asynchronous-unwind-tables -fno-ident -Wall -Wextra -Werror -Wno-unused-function -Wl,--build-id=none -s"
 cd "$here"
 for dir in $GLIBC_TESTS; do
 	libs=
+	[ "$dir" = gtk_test ] && libs=$GTK_LIBS
 	for src in "$dir"/lib*.c; do
+		[ -f "$src" ] || continue
 		lib=$(basename "$src" .c)
 		"$gcc" $flags -shared -fPIC -Wl,-soname,"$lib.so" -o "$out/$lib.so" "$src"
 		libs="$libs -l${lib#lib}"
