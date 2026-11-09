@@ -2512,7 +2512,10 @@ impersonating thread's, as services.exe impersonates its RPC client).
   matching service, status and names; advapi32 lays out
   ENUM_SERVICE_STATUS_PROCESSW, the group filter and the resume index);
   GalaServiceControl(handle, op, code, *status) (close, delete, start,
-  control). Every argument is a ULONG, handle or pointer to data laid
+  control); GalaServiceConfigure(service, level, record, length)
+  (0x7fd7: ChangeServiceConfig2, SERVICE_CHANGE_CONFIG, and SERVICE_START
+  for a restart action) and GalaServiceQuery's classes 0x100 + level
+  (QueryServiceConfig2). Every argument is a ULONG, handle or pointer to data laid
   out alike in x86 and x64, so wow64.dll converts them generically.
 - **advapi32**: OpenSCManagerW/A (this machine only: another is
   RPC_S_SERVER_UNAVAILABLE, recorded; "ServicesActive" or NULL;
@@ -2520,7 +2523,24 @@ impersonating thread's, as services.exe impersonates its RPC client).
   ERROR_INVALID_NAME), OpenServiceW/A, CreateServiceW/A (the password
   is not kept), CloseServiceHandle, DeleteService, StartServiceW/A,
   ControlService, QueryServiceStatus(Ex), QueryServiceConfigW/A,
-  EnumServicesStatusExW.
+  EnumServicesStatusExW, ChangeServiceConfig2W/A and
+  QueryServiceConfig2W/A.
+- **Further configuration** (`nt/scm_config.rs`, ChangeServiceConfig2's
+  levels): values of the service's key under Windows' names
+  (Description, FailureActions with RebootMessage and FailureCommand,
+  DelayedAutostart, FailureActionsOnNonCrashFailures, ServiceSidType,
+  RequiredPrivileges, PreshutdownTimeout), carried as a width-independent
+  record (32-bit integers; strings as a length, u32::MAX for NULL, then
+  the characters). NULL strings leave a value, "" removes it;
+  lpsaActions NULL leaves the period and actions; the delayed start is
+  0 or 1, the SID type 0, 1 or 3 (else ERROR_INVALID_PARAMETER); the
+  preshutdown time-out is 10 s when not set (Windows 10 1709 on). An
+  unknown level is ERROR_INVALID_LEVEL before a NULL *Needed is
+  ERROR_INVALID_ADDRESS; QueryServiceConfig2A counts its strings as
+  UTF-16 (Wine's service.c on Windows). FailureActions' stored layout
+  (a 20-byte header, then the SC_ACTIONs) is gala's reading of Windows'
+  and not measured. Levels 8, 9 and 12 (triggers, preferred node, launch
+  protection) are recorded and ERROR_NOT_SUPPORTED.
 - **Observability**: every connection, open, creation, deletion mark,
   start request and control is a `scm:` log line (the first 64 per boot;
   pid, program, name, access granted or the status) and a `service`

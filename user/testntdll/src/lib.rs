@@ -314,6 +314,7 @@ syscall_stubs! {
         scm: usize, kinds: u32, states: u32, buffer: *mut u8, length: u32, needed: *mut u32
     );
     GalaServiceControl = 0x7fd5, fn(handle: usize, op: u32, code: u32, status: *mut u32);
+    GalaServiceConfigure = 0x7fd7, fn(service: usize, level: u32, record: *const u8, length: u32);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);

@@ -760,3 +760,359 @@ pub extern "system" fn EnumServicesStatusExW(
     }
     fail(ERROR_SUCCESS, 1)
 }
+
+// ---- ChangeServiceConfig2 and QueryServiceConfig2 ----
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn GalaServiceConfigure(service: usize, level: u32, record: *const u8, length: u32) -> u32;
+}
+
+const PTR: usize = core::mem::size_of::<usize>();
+
+/// Whether advapi32 knows `level` (the kernel answers the levels it does
+/// not keep: 8, 9 and 12, recorded).
+fn level_known(level: u32) -> bool {
+    matches!(level, 1..=9 | 12)
+}
+
+/// A level's record (the kernel's `scm_config` layout), built in two
+/// passes: sizing, then writing.
+struct Record {
+    mem: Option<Mem>,
+    at: usize,
+}
+
+impl Record {
+    fn u32(&mut self, v: u32) {
+        if let Some(m) = &self.mem {
+            // SAFETY: inside the record sized by the first pass.
+            unsafe { m.ptr.add(self.at).cast::<u32>().write_unaligned(v) };
+        }
+        self.at += 4;
+    }
+
+    fn text(&mut self, t: Option<&[u16]>) {
+        match t {
+            None => self.u32(u32::MAX),
+            Some(t) => {
+                self.u32(t.len() as u32);
+                if let Some(m) = &self.mem {
+                    // SAFETY: as in `u32`.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            t.as_ptr().cast::<u8>(),
+                            m.ptr.add(self.at),
+                            2 * t.len(),
+                        )
+                    };
+                }
+                self.at += 2 * t.len();
+            }
+        }
+    }
+}
+
+fn record(fill: impl Fn(&mut Record)) -> Result<Mem, u32> {
+    let mut sizing = Record { mem: None, at: 0 };
+    fill(&mut sizing);
+    let mut r = Record { mem: Some(Mem::new(sizing.at).map_err(|e| e as u32)?), at: 0 };
+    fill(&mut r);
+    let mut m = r.mem.take().ok_or(ERROR_NOT_ENOUGH_MEMORY)?;
+    m.len = sizing.at;
+    Ok(m)
+}
+
+/// A pointer-sized field of the caller's structure at byte `off`.
+fn field(info: *const u8, off: usize) -> usize {
+    // SAFETY: the caller's structure for its level.
+    unsafe { info.add(off).cast::<usize>().read_unaligned() }
+}
+
+fn dword_field(info: *const u8, off: usize) -> u32 {
+    // SAFETY: as in `field`.
+    unsafe { info.add(off).cast::<u32>().read_unaligned() }
+}
+
+/// The multi-string at `p` with its inner NULs and its final one.
+fn multi_arg<'a>(p: *const u16) -> &'a [u16] {
+    let mut n = 0;
+    // SAFETY: the caller's double-NUL-terminated list.
+    unsafe {
+        while *p.add(n) != 0 || *p.add(n + 1) != 0 {
+            n += 1;
+        }
+        core::slice::from_raw_parts(p, n + 1)
+    }
+}
+
+/// ChangeServiceConfig2's record for `level`, with the caller's strings
+/// read by `text` (UTF-16 as given, or converted from ANSI).
+fn change2(
+    h: usize,
+    level: u32,
+    info: *const u8,
+    text: impl Fn(usize, bool) -> Option<Vec16>,
+) -> i32 {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if !level_known(level) {
+        return fail(ERROR_INVALID_LEVEL, 0);
+    }
+    if info.is_null() {
+        return fail(ERROR_INVALID_ADDRESS, 0);
+    }
+    let rec = match level {
+        1 => {
+            let t = text(field(info, 0), false);
+            record(|r| r.text(t.as_ref().map(|t| t.units())))
+        }
+        2 => {
+            // SERVICE_FAILURE_ACTIONS: period, two strings, count, actions.
+            let (reboot, command) =
+                (text(field(info, PTR), false), text(field(info, 2 * PTR), false));
+            let count = dword_field(info, 3 * PTR);
+            let actions = field(info, 4 * PTR) as *const u32;
+            record(|r| {
+                r.u32(dword_field(info, 0));
+                r.text(reboot.as_ref().map(|t| t.units()));
+                r.text(command.as_ref().map(|t| t.units()));
+                if actions.is_null() {
+                    r.u32(u32::MAX);
+                } else {
+                    r.u32(count);
+                    for i in 0..2 * count as usize {
+                        // SAFETY: the caller's SC_ACTION array of `count`.
+                        r.u32(unsafe { *actions.add(i) });
+                    }
+                }
+            })
+        }
+        6 => {
+            let t = text(field(info, 0), true);
+            record(|r| r.text(t.as_ref().map(|t| t.units())))
+        }
+        3 | 4 | 5 | 7 => record(|r| r.u32(dword_field(info, 0))),
+        _ => record(|_| {}),
+    };
+    let rec = match rec {
+        Ok(m) => m,
+        Err(e) => return fail(e, 0),
+    };
+    // SAFETY: our record.
+    done(unsafe { GalaServiceConfigure(h, level, rec.ptr, rec.len as u32) })
+}
+
+/// A string argument made UTF-16 (`Mem`-backed for ANSI, borrowed for
+/// UTF-16).
+enum Vec16 {
+    Borrowed(&'static [u16]),
+    Converted(WStr),
+}
+
+impl Vec16 {
+    fn units(&self) -> &[u16] {
+        match self {
+            Vec16::Borrowed(s) => s,
+            Vec16::Converted(w) => w.units(),
+        }
+    }
+}
+
+/// ChangeServiceConfig2W: the levels of `scm_config` (description,
+/// failure actions, delayed start, the non-crash failures flag, the SID
+/// type, required privileges, the preshutdown time-out);
+/// SERVICE_CHANGE_CONFIG.
+#[unsafe(no_mangle)]
+pub extern "system" fn ChangeServiceConfig2W(h: usize, level: u32, info: *const u8) -> i32 {
+    change2(h, level, info, |p, multi| {
+        let p = p as *const u16;
+        if p.is_null() {
+            return None;
+        }
+        Some(Vec16::Borrowed(if multi { multi_arg(p) } else { wide_arg(p) }))
+    })
+}
+
+/// ChangeServiceConfig2A: the same with ANSI strings.
+#[unsafe(no_mangle)]
+pub extern "system" fn ChangeServiceConfig2A(h: usize, level: u32, info: *const u8) -> i32 {
+    change2(h, level, info, |p, multi| {
+        let p = p as *const u8;
+        if p.is_null() {
+            return None;
+        }
+        let len = multi.then(|| {
+            let mut n = 0;
+            // SAFETY: the caller's double-NUL-terminated list.
+            while unsafe { *p.add(n) != 0 || *p.add(n + 1) != 0 } {
+                n += 1;
+            }
+            n + 1
+        });
+        ansi_to_wide(p, len).ok().flatten().map(Vec16::Converted)
+    })
+}
+
+/// The kernel's record of `level` for the service.
+fn query2_record(h: usize, level: u32) -> Result<Mem, u32> {
+    // SAFETY: our buffers.
+    fetch(|b, n, needed| unsafe { GalaServiceQuery(h, 0x100 + level, b, n, needed) })
+}
+
+/// A string of the record at byte `*at` (advanced past it).
+fn record_text<'a>(m: &'a Mem, at: &mut usize) -> Option<&'a [u16]> {
+    let n = u32_at(m, *at);
+    *at += 4;
+    if n == u32::MAX {
+        return None;
+    }
+    let t = text_at(m, *at, n as usize);
+    *at += 2 * n as usize;
+    Some(t)
+}
+
+/// A string of a level's structure: its characters (None: NULL), whether
+/// it is a multi-string, and the byte offset of its pointer.
+type Text<'a> = (Option<&'a [u16]>, bool, usize);
+
+/// Lays out level `level`'s structure from its record into `out`, the
+/// strings after it written by `put` (as in `write_config`); *Needed is
+/// the size.
+fn write2(
+    level: u32,
+    m: &Mem,
+    out: *mut u8,
+    size: u32,
+    needed: *mut u32,
+    put: impl Fn(&[u16], bool, *mut u8) -> usize,
+) -> i32 {
+    // The fixed part, the strings (with whether each is a multi-string)
+    // and where each string's pointer goes.
+    let mut at = 0;
+    let (fixed, texts): (usize, [Text<'_>; 2]) = match level {
+        1 => (PTR, [(record_text(m, &mut at), false, 0), (None, false, usize::MAX)]),
+        6 => (PTR, [(record_text(m, &mut at), true, 0), (None, false, usize::MAX)]),
+        2 => {
+            at = 4;
+            let reboot = record_text(m, &mut at);
+            let command = record_text(m, &mut at);
+            (5 * PTR, [(reboot, false, PTR), (command, false, 2 * PTR)])
+        }
+        _ => (4, [(None, false, usize::MAX), (None, false, usize::MAX)]),
+    };
+    // Failure actions: the count and the SC_ACTIONs after the structure.
+    let (count, actions_at) = if level == 2 { (u32_at(m, at), at + 4) } else { (0, 0) };
+    let mut total = fixed + 8 * count as usize;
+    for (t, multi, _) in &texts {
+        if let Some(t) = t {
+            total += put(t, *multi, null_mut());
+        }
+    }
+    // SAFETY: the caller's DWORD.
+    unsafe { *needed = total as u32 };
+    if out.is_null() || (size as usize) < total {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `total` bytes or more, written field
+    // by field.
+    unsafe {
+        core::ptr::write_bytes(out, 0, fixed);
+        match level {
+            1 | 6 => {}
+            2 => {
+                out.cast::<u32>().write_unaligned(u32_at(m, 0));
+                out.add(3 * PTR).cast::<u32>().write_unaligned(count);
+                let a = out.add(fixed);
+                core::ptr::copy_nonoverlapping(m.ptr.add(actions_at), a, 8 * count as usize);
+                let p = if count == 0 { 0 } else { a as usize };
+                out.add(4 * PTR).cast::<usize>().write_unaligned(p);
+            }
+            _ => out.cast::<u32>().write_unaligned(u32_at(m, 0)),
+        }
+        let mut next = fixed + 8 * count as usize;
+        for (t, multi, slot) in texts {
+            if let Some(t) = t {
+                let dst = out.add(next);
+                next += put(t, multi, dst);
+                out.add(slot).cast::<usize>().write_unaligned(dst as usize);
+            }
+        }
+    }
+    fail(ERROR_SUCCESS, 1)
+}
+
+fn query2(
+    h: usize,
+    level: u32,
+    out: *mut u8,
+    size: u32,
+    needed: *mut u32,
+    put: impl Fn(&[u16], bool, *mut u8) -> usize,
+) -> i32 {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if !level_known(level) {
+        return fail(ERROR_INVALID_LEVEL, 0);
+    }
+    if needed.is_null() {
+        return fail(ERROR_INVALID_ADDRESS, 0);
+    }
+    match query2_record(h, level) {
+        Ok(m) => write2(level, &m, out, size, needed, put),
+        Err(e) => fail(e, 0),
+    }
+}
+
+/// QueryServiceConfig2W: SERVICE_QUERY_CONFIG; an unknown level is
+/// ERROR_INVALID_LEVEL before a NULL *Needed is ERROR_INVALID_ADDRESS
+/// (Wine's service.c on Windows); a short buffer
+/// ERROR_INSUFFICIENT_BUFFER with the size.
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryServiceConfig2W(
+    h: usize,
+    level: u32,
+    out: *mut u8,
+    size: u32,
+    needed: *mut u32,
+) -> i32 {
+    query2(h, level, out, size, needed, |t, multi, dst| {
+        // A multi-string's record keeps its last NUL: one more ends the list.
+        let _ = multi;
+        let units = t.len() + 1;
+        if !dst.is_null() {
+            // SAFETY: room counted by the caller.
+            unsafe {
+                core::ptr::copy_nonoverlapping(t.as_ptr(), dst.cast::<u16>(), t.len());
+                core::ptr::write_bytes(dst.add(2 * t.len()), 0, 2 * (units - t.len()));
+            }
+        }
+        2 * units
+    })
+}
+
+/// QueryServiceConfig2A: the same in the ANSI code page; *Needed counts
+/// the strings as UTF-16, as Windows does (Wine's service.c).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryServiceConfig2A(
+    h: usize,
+    level: u32,
+    out: *mut u8,
+    size: u32,
+    needed: *mut u32,
+) -> i32 {
+    query2(h, level, out, size, needed, |t, _multi, dst| {
+        if !dst.is_null() {
+            let n = wide_to_ansi(t, dst, usize::MAX >> 1);
+            // SAFETY: room counted (as UTF-16) by the caller.
+            unsafe { *dst.add(n) = 0 };
+        }
+        2 * (t.len() + 1)
+    })
+}

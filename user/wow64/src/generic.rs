@@ -454,6 +454,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7fd3, &[H, U, U, U, U]),    // GalaServiceQuery
     (0x7fd4, &[H, U, U, U, U, U]), // GalaServiceEnum
     (0x7fd5, &[H, U, U, U]),       // GalaServiceControl
+    (0x7fd7, &[H, U, U, U]),       // GalaServiceConfigure
     (0x7f4d, &[U, U]),             // GalaRandom
     (0x7f90, &[H, H]),             // NtCompareObjects
     (0x7f91, &[H]),                // NtSuspendProcess

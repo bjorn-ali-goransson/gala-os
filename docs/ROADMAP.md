@@ -1654,18 +1654,24 @@ need gala's.
      security descriptors (recorded: no access check), and it creates
      the ClickToRunSvc service (`scm:` lines: automatic start, its
      `OfficeClickToRun.exe /service` path).
+     It sets the service's description and failure actions (done:
+     ChangeServiceConfig2W/A and QueryServiceConfig2W/A, levels 1-7 as
+     the service key's values; `svc_test`, `wow64_svc_test`, Wine's
+     service.c test_queryconfig2 on Windows; ARCHITECTURE "The service
+     control manager").
      Where the run ends now: it delay-loads advapi32's
-     ChangeServiceConfig2W for the new service, missing, so the client
-     ends with 0xc06d007f about 1.9 s in, and setup.exe and its parent
-     exit with that status after about 89 s ("C2RClient returned a failing
+     SetServiceObjectSecurity for the new service, missing, so the client
+     ends with 0xc06d007f about 1.6 s in, and setup.exe and its parent
+     exit with that status after about 73 s ("C2RClient returned a failing
      exit code"). slc.dll, kernelbase's SetSystemFileCacheSize and
      ntdll's NtSetSystemInformation are still asked for only on the way
      out (after "Bootstrapper Finished").
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: ChangeServiceConfig2W (and
-     the service configuration it sets); the RPC calls the client's
+     Next, in the order the run reaches them: SetServiceObjectSecurity
+     (the service key's `Security\Security`, which the SCM already
+     reads); the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
      names a format the interpreter lacks; rpcrt4 for x86 if a 32-bit
      piece needs it); CryptCATAdmin*
