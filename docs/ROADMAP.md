@@ -214,6 +214,7 @@ has a section under "Open items".
 | W3 | FileZilla | in progress | 3.71.0: connects to FileZilla Server (FTP over TLS) and to sshd (SFTP), driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
+| SM | Start menu: default apps and install-on-click | next (the owner) | see "SM. The start menu's apps" below |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | one kernel: `profile=server`, CLI parity, bare desktops done |
@@ -673,6 +674,35 @@ Windows' metrics (`gdi32_test`).
    (SH's step 1 needs it); the shell itself leaves the kernel in item SH.
 
 **Design**: ARCHITECTURE "Windows on the screen".
+
+### SM. The start menu's apps
+
+**Goal** (the owner): the start menu offers what a fresh Windows does
+(the Command Prompt and gala's other default programs) and, beside them,
+apps that are not installed yet: a click installs them through
+`gala install` (winget manifests, item PK) and the tile then starts the
+installed program. The first: Microsoft Office (`Microsoft.Office`, the
+Office Deployment Tool: item OF), FileZilla (`TimKosse.FileZilla.Client`),
+.NET (`Microsoft.DotNet.SDK.9`), Python (`Python.Python.3.13`), Chromium
+(`Hibbiki.Chromium`), Git (`Git.Git`), 7-Zip (`7zip.7zip`).
+
+**Next** (each test first: the desktop's host tests, a screen scenario,
+a screenshot):
+1. Default apps always listed: Command Prompt
+   (`C:\Windows\System32\cmd.exe`) and gala's own programs there.
+2. Install-on-click tiles: a catalog entry is a name, a winget id and
+   where its program lands; not yet installed it shows with a download
+   mark, and a click starts `gala install <id>` in a console window
+   (its progress and errors in view, recorded in the event stream);
+   once the program exists the tile starts it. Installs that fail on
+   gala (Office until OF is done, an installer needing elevation without
+   UAC's prompt) fail in that window with `gala install`'s own message.
+3. Then the Windows way of listing installed apps: the start menu reads
+   the shortcuts under the Start Menu\Programs folders (all users and
+   the user's, `.lnk` per [MS-SHLLINK]) that installers create, so
+   anything installed appears without a catalog entry; the catalog then
+   only names what can be installed. With SH, all of this moves to
+   `shasha.exe`.
 
 ### SH. The shell in user mode
 
