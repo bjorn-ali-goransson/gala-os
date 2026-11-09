@@ -324,7 +324,7 @@ pub struct FramePages;
 
 impl PageSource for FramePages {
     fn alloc_pages(&mut self, pages: usize, align_pages: usize) -> Option<NonNull<u8>> {
-        let frame = super::allocate_frames(pages as u64, align_pages as u64)?;
+        let frame = super::allocate_frames(pages as u64, align_pages as u64, super::Use::Heap)?;
         let virt = super::hhdm_offset().checked_add(frame.start())?;
         NonNull::new(core::ptr::with_exposed_provenance_mut(virt as usize))
     }
@@ -360,7 +360,7 @@ impl PageSource for FramePages {
         let base = Region::address(start);
         for i in 0..pages {
             let virt = base + (i * PAGE) as u64;
-            let mapped = super::allocate_frame().and_then(|frame| {
+            let mapped = super::allocate_frame(super::Use::Heap).and_then(|frame| {
                 let flags = super::paging::PageFlags::KERNEL_RW;
                 match crate::arch::paging::map_kernel_page(virt, frame, flags) {
                     Ok(()) => Some(()),

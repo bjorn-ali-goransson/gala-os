@@ -67,10 +67,11 @@ pub fn stats_line(heap: Option<crate::mm::heap::HeapStats>, frames: Option<(u64,
             match self.0 {
                 Some(h) => write!(
                     f,
-                    "statedump: heap {} KiB in use (peak {} KiB, {} large pages)",
+                    "statedump: heap {} KiB in use (peak {} KiB, {} large pages, {} slab pages)",
                     h.in_use / 1024,
                     h.peak_in_use / 1024,
-                    h.large_pages
+                    h.large_pages,
+                    h.slab_pages
                 )?,
                 None => f.write_str("statedump: heap (lock held)")?,
             }
@@ -83,6 +84,15 @@ pub fn stats_line(heap: Option<crate::mm::heap::HeapStats>, frames: Option<(u64,
         }
     }
     crate::console::emergency_line(format_args!("{}", Line(heap, frames)));
+    match crate::mm::try_frame_uses() {
+        Some(uses) => crate::console::emergency_line(format_args!(
+            "statedump: frames in use by {}",
+            crate::mm::FrameUses(uses)
+        )),
+        None => {
+            crate::console::emergency_line(format_args!("statedump: frames by use (lock held)"))
+        }
+    }
 }
 
 #[cfg(not(any(test, feature = "hosted")))]

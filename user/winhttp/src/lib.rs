@@ -9,7 +9,9 @@
 //! closes, and automatic redirects by WINHTTP_OPTION_REDIRECT_POLICY
 //! (default: all but https to http) up to
 //! WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS (default 10), and the
-//! status callbacks of a synchronous session (`callback.rs`). The engine
+//! status callbacks of a synchronous session (`callback.rs`); connections
+//! are kept for the next request to the same server (`http_client::pool`).
+//! The engine
 //! is `user/http_client`, shared with wininet.dll; this crate is
 //! WinHTTP's functions, options and error codes over it (`request.rs`:
 //! the request's functions).
@@ -17,8 +19,7 @@
 //! Limits (each recorded in the ledger where a program meets it):
 //! asynchronous sessions (WINHTTP_FLAG_ASYNC: ERROR_NOT_SUPPORTED),
 //! proxies (named proxies, WinHttpGetProxyForUrl), authentication, cookies,
-//! decompression, HTTP/2, connection reuse (each request has its own
-//! connection) and the resolve time-out (GetAddrInfoW's own applies). There are no Internet Explorer proxy settings on gala
+//! decompression, HTTP/2 and the resolve time-out (GetAddrInfoW's own applies). There are no Internet Explorer proxy settings on gala
 //! (WinHttpGetIEProxyConfigForCurrentUser: ERROR_FILE_NOT_FOUND, as
 //! documented for that case). A handle must not be closed while another
 //! thread uses it.

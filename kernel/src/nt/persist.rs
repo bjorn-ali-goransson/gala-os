@@ -18,7 +18,7 @@
 
 use super::reglog::{self, RegOp};
 use super::{file, platform, registry};
-use crate::fs::ramfs::{FsError, NodeId, ROOT, RamFs};
+use crate::fs::ramfs::{FsError, NodeId, ROOT, RamFs, Writeback};
 use crate::fs::volume::{Blocks, IoError, Mounted, Volume, VolumeError};
 use crate::mm::heap::TryVec;
 use crate::sync::IrqMutex;
@@ -167,6 +167,18 @@ pub fn mount() {
                 }
             }
             Err(e) => warn!("persist: cannot attach the data area ({e:?}); files stay in memory"),
+        }
+    }
+    let mut volume = volume;
+    // Writing back and appending need no memory from here on (a sync short
+    // of memory must still write what lets memory go).
+    if volume.reserve().is_err() {
+        warn!("persist: no memory to reserve the log's buffer; appends will allocate");
+    }
+    if DATA_START.load(Ordering::Relaxed) != 0 {
+        match reserve() {
+            Some(b) => *BUFFERS.lock() = Some(b),
+            None => warn!("persist: no memory to reserve the writeback's buffers"),
         }
     }
     *VOLUME.lock() = Some(volume);
@@ -350,6 +362,27 @@ impl Drop for Turn {
     }
 }
 
+/// What a sync writes pages through, reserved at mount (`reserve`) so
+/// that writing back, which is what lets file pages leave memory, never
+/// needs memory: the pages' list and their copies.
+struct Buffers {
+    list: Vec<Writeback>,
+    staging: Vec<u8>,
+}
+
+/// Taken by the sync writing (with TURN held), put back after.
+static BUFFERS: IrqMutex<Option<Buffers>> = IrqMutex::new(None);
+
+/// Reserves the writeback's buffers (`WRITEBACK_BATCH` pages).
+fn reserve() -> Option<Buffers> {
+    let mut list = Vec::new();
+    let mut staging = Vec::new();
+    list.try_reserve_exact(WRITEBACK_BATCH).ok()?;
+    staging.try_reserve_exact(WRITEBACK_BATCH * crate::fs::ramfs::PAGE).ok()?;
+    staging.resize(WRITEBACK_BATCH * crate::fs::ramfs::PAGE, 0);
+    Some(Buffers { list, staging })
+}
+
 /// Writes the recorded changes to the disk (see the module comment).
 pub fn sync() {
     if !PENDING.load(Ordering::Acquire) {
@@ -360,42 +393,64 @@ pub fn sync() {
         return;
     }
     let Some(mut volume) = VOLUME.lock().take() else { return };
+    let taken = BUFFERS.lock().take();
+    let Some(mut bufs) = taken.or_else(reserve) else {
+        // Only when mount could not reserve them either.
+        warn!("persist: no memory for the writeback's buffers; the changes wait");
+        PENDING.store(true, Ordering::Release);
+        *VOLUME.lock() = Some(volume);
+        return;
+    };
     // The registry's changes become changes of a file on C: first.
     sync_registry();
-    // Pages to their clusters first: every record taken below names
-    // clusters that hold their pages by the time it is appended.
+    // Pages to their clusters first, a batch per hold of the file system;
+    // the records are taken in the hold whose batch leaves no page dirty,
+    // so every record names clusters that hold their pages by the time it
+    // is appended.
     let mut data_ok = true;
+    let mut wrote = false;
+    let mut taken = None;
     loop {
-        let batch = file::with_fs(|fs| fs.writeback(WRITEBACK_BATCH));
-        if batch.is_empty() {
-            break;
+        let (more, records) = file::with_fs(|fs| {
+            if fs.writeback(&mut bufs.list, &mut bufs.staging) {
+                return (true, None);
+            }
+            let (ops, lost) = fs.take_ops();
+            (false, Some((ops, lost, fs.take_pending())))
+        });
+        if !bufs.list.is_empty() {
+            wrote = true;
+            data_ok = write_pages(&bufs.list, &bufs.staging);
         }
-        if !write_pages(&batch) {
-            data_ok = false;
+        taken = taken.or(records);
+        if !data_ok || !more {
             break;
         }
     }
-    let (ops, lost, pending, last) = file::with_fs(|fs| {
-        let last = if data_ok { fs.writeback(usize::MAX) } else { Vec::new() };
-        let (ops, lost) = fs.take_ops();
-        (ops, lost, fs.take_pending(), last)
-    });
-    if !write_pages(&last) || !data_ok {
+    *BUFFERS.lock() = Some(bufs);
+    if !data_ok {
         warn!("persist: pages not written to the data area; their records wait for the next sync");
-        file::with_fs(|fs| {
-            fs.lose_ops();
-            fs.release_pending(pending, false);
-        });
+        if let Some((ops, lost, pending)) = taken {
+            file::with_fs(|fs| {
+                fs.restore_ops(ops, lost);
+                fs.release_pending(pending, false);
+            });
+        }
         PENDING.store(true, Ordering::Release);
         *VOLUME.lock() = Some(volume);
         return;
     }
-    if !last.is_empty() && platform::disk_flush().is_err() {
+    let Some((ops, lost, pending)) = taken else {
+        *VOLUME.lock() = Some(volume);
+        return;
+    };
+    if wrote && platform::disk_flush().is_err() {
         warn!("persist: the disk failed a flush");
     }
     let mut result = if lost { Err(VolumeError::Full) } else { volume.append(&ops) };
+    let mut ops = Some(ops);
     if result == Err(VolumeError::Full) {
-        drop(ops);
+        ops = None;
         result = match file::with_fs(|fs| fs.snapshot()) {
             Ok(snapshot) => volume.compact(&snapshot),
             Err(_) => Err(VolumeError::NoMemory),
@@ -407,8 +462,12 @@ pub fn sync() {
     let written = result.is_ok();
     if let Err(e) = result {
         warn!("persist: changes not written to the disk ({e:?})");
-        // Try again with a snapshot next time.
-        file::with_fs(|fs| fs.lose_ops());
+        // Again at the next sync: the same records, or a snapshot when
+        // they were lost or the area is full.
+        file::with_fs(|fs| match ops {
+            Some(ops) => fs.restore_ops(ops, false),
+            None => fs.lose_ops(),
+        });
         PENDING.store(true, Ordering::Release);
     }
     file::with_fs(|fs| fs.release_pending(pending, written));
@@ -419,53 +478,30 @@ pub fn sync() {
     }
 }
 
-/// Writes copies of dirty pages to their clusters, consecutive clusters
-/// in one request; on a failure the pages are dirty again. Whether all
-/// were written.
-fn write_pages(batch: &[crate::fs::ramfs::Writeback]) -> bool {
-    if batch.is_empty() {
-        return true;
-    }
+/// Writes the copies in `staging` of the pages `list` names (in cluster
+/// order, `RamFs::writeback`) to their clusters, consecutive clusters in
+/// one request; on a failure the pages are dirty again. Allocates
+/// nothing. Whether all were written.
+fn write_pages(list: &[Writeback], staging: &[u8]) -> bool {
+    use crate::fs::ramfs::PAGE;
     let start = DATA_START.load(Ordering::Acquire);
-    let mut order: Vec<usize> = Vec::new();
-    if order.try_reserve_exact(batch.len()).is_err() {
-        warn!("persist: no memory to order {} pages for writing", batch.len());
-        file::with_fs(|fs| fs.writeback_failed(batch));
-        return false;
-    }
-    order.extend(0..batch.len());
-    order.sort_unstable_by_key(|&i| batch[i].cluster);
-    let mut buf: Vec<u8> = Vec::new();
-    if buf.try_reserve_exact(WRITE_RUN * crate::fs::ramfs::PAGE).is_err() {
-        warn!("persist: no memory for a {WRITE_RUN}-page write buffer");
-        file::with_fs(|fs| fs.writeback_failed(batch));
-        return false;
-    }
     let mut i = 0;
-    while i < order.len() {
+    while i < list.len() {
         // A run of consecutive clusters, at most WRITE_RUN.
-        let first = batch[order[i]].cluster;
+        let first = list[i].cluster;
         let mut n = 1;
-        while i + n < order.len()
-            && n < WRITE_RUN
-            && batch[order[i + n]].cluster == first + n as u32
-        {
+        while i + n < list.len() && n < WRITE_RUN && list[i + n].cluster == first + n as u32 {
             n += 1;
         }
-        buf.clear();
-        for k in 0..n {
-            // Room for WRITE_RUN pages was reserved above.
-            let _ = buf.try_extend_from_slice(&batch[order[i + k]].page.0);
-        }
         let sector = start + u64::from(first) * crate::fs::volume::CLUSTER_SECTORS;
-        if platform::disk_write(sector, &buf).is_err() {
+        if platform::disk_write(sector, &staging[i * PAGE..(i + n) * PAGE]).is_err() {
             warn!("persist: the disk failed a write of {n} pages at cluster {first}");
-            file::with_fs(|fs| fs.writeback_failed(batch));
+            file::with_fs(|fs| fs.writeback_failed(list));
             return false;
         }
         i += n;
     }
-    PAGES_WRITTEN.fetch_add(batch.len() as u64, Ordering::Relaxed);
+    PAGES_WRITTEN.fetch_add(list.len() as u64, Ordering::Relaxed);
     true
 }
 
@@ -488,6 +524,9 @@ fn evict() {
     let (free, total) = platform::frame_stats();
     let low = (total / 4).max(64 * 256);
     if free >= low {
+        if free >= low + 16 * 256 {
+            SHORT.store(false, Ordering::Relaxed);
+        }
         return;
     }
     let want = (low + 16 * 256 - free) as usize;
@@ -504,21 +543,29 @@ fn evict() {
             warn!(
                 "persist: free memory stays low after letting {gone} pages go: {after} of {total} \
                  frames free (want {low}); files' pages in memory {} ({} dirty, {} never \
-                 written, {} of mapped files), queued clean {} dirty {}; heap {} KiB in use, \
-                 {} slab and {} large pages",
+                 written, {} of mapped files), queued dirty {}; heap {} KiB in use, \
+                 {} slab and {} large pages; frames in use by {}",
                 c.resident,
                 c.dirty,
                 c.unstored,
                 c.mapped,
-                c.queued_clean,
                 c.queued_dirty,
                 heap.in_use / 1024,
                 heap.slab_pages,
                 heap.large_pages,
+                crate::mm::FrameUses(crate::mm::frame_uses()),
+            );
+            let (threads, dead, stacks) = crate::sched::thread_counts();
+            warn!(
+                "persist: {threads} kernel threads, {dead} dead ({stacks} with their stacks not \
+                 freed yet); {} sockets open",
+                crate::net::tcp::stats().3
             );
             super::process::dump();
         }
-    } else {
+    } else if after >= low + 16 * 256 {
+        // Back at the target (not merely the mark: memory hovering at the
+        // mark would repeat the warning).
         SHORT.store(false, Ordering::Relaxed);
     }
 }

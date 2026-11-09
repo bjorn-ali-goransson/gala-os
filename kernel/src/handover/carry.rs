@@ -1968,9 +1968,7 @@ fn restore_process(
     for mut v in e.table().iter() {
         let v = ViewRec::read(&mut v);
         let section = objects.get(v.section).ok_or(NtStatus::INVALID_HANDLE)?.clone();
-        views
-            .try_push(section::View { base: v.base, size: v.size, offset: v.offset, section })
-            .map_err(no_memory)?;
+        views.try_push(section::View::new(v.base, v.size, v.offset, section)).map_err(no_memory)?;
     }
     let mut space = crate::nt::platform::UserSpace::new().map_err(|_| NtStatus::NO_MEMORY)?;
     for mut page in e.table().iter() {

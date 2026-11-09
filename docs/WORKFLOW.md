@@ -141,8 +141,13 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
 - **Fallible allocation only** (`try_box`, `try_push`, `try_reserve`,
   `mm::heap::try_to_vec`); clippy bans the rest (`collect` and `to_vec`
   included) and `cargo xtask alloc-audit` finds what clippy cannot see
-  ("Fault injection"). `unsafe` only where `CLAUDE.md` allows it, each
-  block with a `SAFETY:` comment.
+  ("Fault injection"); it still flags growth after a reservation the
+  compiler moved into another function (`VecDeque::push_back`,
+  `TryVec::try_insert` inlined: `extend(once(..))`, or `try_push` and
+  `rotate_right(1)` for a front insert, pass). Code that frees memory
+  (writeback, eviction) must need none: reserve its buffers up front.
+  `unsafe` only where `CLAUDE.md` allows it, each block with a
+  `SAFETY:` comment.
 - **Unsupported paths are recorded**: when you leave a flag, class or
   case unimplemented, call `nt::ledger::record(service, what, detail)`
   there (in DLLs: `unsupported(b"dll!Name(case)", detail)`), so real
@@ -508,7 +513,8 @@ image, what the image must hold afterwards).
   boots apart by what it finds on C:).
 - `persist` keeps C: on the disk, files' contents in its data area (a
   disk-backed C:, ARCHITECTURE "A disk-backed C:"): a scenario that
-  writes more than the VM's memory (`volume_test`, `office_install`)
+  writes more than the VM's memory (`volume_test`, `memload_test`,
+  `office_install`)
   needs it; without it a disk is left alone (the raw disk tests).
 - The image is sparse (`set_len`): only what the guest writes takes room
   on the host. xtask refuses to start the scenario with less free than
@@ -529,6 +535,16 @@ image, what the image must hold afterwards).
   write ...` in the serial log), where QEMU's default would pause the VM
   until the scenario timed out.
 - A slow disk: `failpoint=disk_io:delay:<ms>` (with `persist`).
+- Memory that does not come back: the `persist: free memory stays low
+  ...` line (and `stats: frames in use by ...` at the end, `statedump:
+  frames in use by ...` in a dump) says which use holds the frames:
+  `user pages` growing with a process's commit and reservations is a
+  process's memory (threads that ended keep nothing: a growing count of
+  reservations is a leak to find), `heap` is the file cache and kernel
+  objects (the files' pages in memory are on the same line), `untagged`
+  is the kernel and the boot modules. `memload_test` reproduces a long
+  download in four minutes; it runs in a 256 MiB VM (`MEMLOAD_MEMORY_MIB`)
+  so that its file cache holds less than it downloads.
 
 ### GPU tests
 

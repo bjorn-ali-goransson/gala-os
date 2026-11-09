@@ -98,7 +98,7 @@ pub struct BuildStats {
 }
 
 fn alloc_table() -> Option<Frame> {
-    crate::mm::allocate_frame()
+    crate::mm::allocate_frame(crate::mm::Use::PageTable)
 }
 
 fn enable_cpu_features() -> Result<(), PagingError> {
@@ -374,7 +374,8 @@ pub struct SharedPage {
 
 impl SharedPage {
     pub fn new() -> Result<Self, PagingError> {
-        let frame = crate::mm::allocate_frame().ok_or(PagingError::Map(MapError::OutOfMemory))?;
+        let frame = crate::mm::allocate_frame(crate::mm::Use::SectionPage)
+            .ok_or(PagingError::Map(MapError::OutOfMemory))?;
         // SAFETY: a freshly allocated frame, HHDM-mapped, owned by us.
         unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
         Ok(Self { frame })
@@ -572,8 +573,8 @@ impl UserSpace {
             return Err(PagingError::Map(MapError::BadAddress));
         }
         for i in 0..pages {
-            let frame =
-                crate::mm::allocate_frame().ok_or(PagingError::Map(MapError::OutOfMemory))?;
+            let frame = crate::mm::allocate_frame(crate::mm::Use::UserPage)
+                .ok_or(PagingError::Map(MapError::OutOfMemory))?;
             // SAFETY: a freshly allocated frame, HHDM-mapped, owned by us.
             unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
             if let Err(e) = self.mapper.map(
@@ -751,7 +752,8 @@ impl UserSpace {
         mut flags: PageFlags,
     ) -> Result<(), PagingError> {
         use crate::mm::paging::PageSize;
-        let frame = crate::mm::allocate_frame().ok_or(MapError::OutOfMemory)?;
+        let frame =
+            crate::mm::allocate_frame(crate::mm::Use::UserPage).ok_or(MapError::OutOfMemory)?;
         // SAFETY: `frame` is freshly allocated and `source` is a mapped
         // user frame; both are distinct 4 KiB frames in the HHDM.
         unsafe {
@@ -788,7 +790,7 @@ impl UserSpace {
 
     /// Allocates a zeroed frame (for section pages backed on demand).
     pub fn zeroed_frame() -> Option<Frame> {
-        let frame = crate::mm::allocate_frame()?;
+        let frame = crate::mm::allocate_frame(crate::mm::Use::SectionPage)?;
         // SAFETY: a freshly allocated frame, HHDM-mapped, owned by the caller.
         unsafe { hhdm_ptr(frame.start()).write_bytes(0, PAGE_SIZE as usize) };
         Some(frame)

@@ -29,6 +29,7 @@ extern crate alloc;
 
 pub mod handles;
 pub mod net;
+pub mod pool;
 pub mod request;
 pub mod url;
 

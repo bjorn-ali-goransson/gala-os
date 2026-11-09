@@ -656,12 +656,39 @@ pub struct View {
     /// Byte offset of the view in the section.
     pub offset: u64,
     pub section: ObjectRef,
+    /// The file it shows (node, whether views write it), counted in the
+    /// file system's views of that file while it lives (`RamFs::view_started`):
+    /// a disk-backed file's pages may leave memory only while no view
+    /// shows them.
+    file: Option<(crate::fs::ramfs::NodeId, bool)>,
 }
 
 impl View {
+    /// A view of `section` at `base` (`size` bytes from `offset` in the
+    /// section), counted as a view of its file if it maps one.
+    pub fn new(base: u64, size: u64, offset: u64, section: ObjectRef) -> View {
+        let file = section_of(&section).file.as_ref().map(|f| (f.node, f.writable));
+        if let Some((node, _)) = file {
+            let bytes = offset..offset.saturating_add(size);
+            super::file::with_fs(|fs| fs.view_started(node, bytes));
+        }
+        View { base, size, offset, section, file }
+    }
+
     /// The section it maps.
     pub fn section(&self) -> &Section {
         section_of(&self.section)
+    }
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        // A writable view may have changed any page it showed: they are
+        // written to the disk before they may leave memory.
+        if let Some((node, writable)) = self.file {
+            let bytes = self.offset..self.offset.saturating_add(self.size);
+            super::file::with_fs(|fs| fs.view_ended(node, writable, bytes));
+        }
     }
 }
 
@@ -729,7 +756,7 @@ pub fn map_view(
     if section.attributes & SEC_RESERVE == 0 {
         vad.commit(base, size, protect)?;
     }
-    let _ = views.try_push(View { base, size, offset, section: object.clone() });
+    let _ = views.try_push(View::new(base, size, offset, object.clone()));
     Ok(Mapped { base, size, relocated: false, foreign: false })
 }
 
@@ -806,7 +833,7 @@ fn map_image_view(
             }
             i += run;
         }
-        let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
+        let _ = views.try_push(View::new(view_base, size, 0, object.clone()));
         return Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign });
     }
     // Elsewhere private pages, relocated a page at a time (a large image
@@ -861,7 +888,7 @@ fn map_image_view(
             return Err(fail(&mut vad, &mut space, NtStatus::NO_MEMORY));
         }
     }
-    let _ = views.try_push(View { base: view_base, size, offset: 0, section: object.clone() });
+    let _ = views.try_push(View::new(view_base, size, 0, object.clone()));
     Ok(Mapped { base: view_base, size, relocated: delta != 0, foreign })
 }
 

@@ -405,8 +405,9 @@ fn set_thread(a: &Args) -> Res<NtStatus> {
             let args = [thread, class.into(), &raw const us as u64, 16];
             Ok(syscall(NT_SET_INFORMATION_THREAD, &args))
         }
-        // KPRIORITY, ULONGs, ThreadHideFromDebugger (no data).
-        2 | 3 | 17 => pass(NT_SET_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U]),
+        // KPRIORITY, ULONGs, ThreadHideFromDebugger and gala's
+        // GALA_THREAD_FREE_STACK (no data).
+        2 | 3 | 17 | 0x4761_0001 => pass(NT_SET_INFORMATION_THREAD, a, &[K::H, K::U, K::U, K::U]),
         _ => no_class(b"wow64.dll!NtSetInformationThread(class)", class),
     }
 }
