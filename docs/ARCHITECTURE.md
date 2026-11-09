@@ -6602,10 +6602,10 @@ windows can use them too.
     serves no COM calls across processes).
   - Call cancellation (`lib.rs`): CoEnableCallCancellation counts per
     thread (in the thread's OLE state; CoUninitialize's last call resets
-    it), CoDisableCallCancellation undoes one (S_OK when that disables
-    it, CO_E_CANCEL_DISABLED while enables remain or when there were
-    none); CoCancelCall is RPC_E_NO_CONTEXT (as Windows answers with no
-    call pending, measured with cancellation disabled): gala's COM never
+    it), CoDisableCallCancellation undoes one (S_OK, measured on
+    Windows; CO_E_CANCEL_DISABLED when none is left to undo);
+    CoCancelCall is RPC_E_NO_CONTEXT (as Windows answers with no call
+    pending, measured with cancellation enabled and disabled): gala's COM never
     has a pending cross-apartment call to cancel (recorded,
     `ole32.dll!CoCancelCall(no pending call)`). `combase_test`,
     `wow64_combase_test`.

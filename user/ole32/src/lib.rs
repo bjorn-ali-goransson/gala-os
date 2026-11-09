@@ -676,26 +676,20 @@ pub extern "system" fn CoEnableCallCancellation(reserved: *mut c_void) -> HResul
     S_OK
 }
 
-/// CoDisableCallCancellation(reserved): undoes one enable: S_OK when that
-/// disables cancellation, CO_E_CANCEL_DISABLED when enables remain (as
-/// documented) or when none was made.
+/// CoDisableCallCancellation(reserved): undoes one enable: S_OK while
+/// one remains to undo (measured on Windows: the first of two disables
+/// after two enables is S_OK), CO_E_CANCEL_DISABLED when there is none.
 #[unsafe(no_mangle)]
 pub extern "system" fn CoDisableCallCancellation(reserved: *mut c_void) -> HResult {
     if !reserved.is_null() {
         return E_INVALIDARG;
     }
     let Some(state) = thread_state() else { return E_OUTOFMEMORY };
-    match state.cancel_enables {
-        0 => CO_E_CANCEL_DISABLED,
-        1 => {
-            state.cancel_enables = 0;
-            S_OK
-        }
-        _ => {
-            state.cancel_enables -= 1;
-            CO_E_CANCEL_DISABLED
-        }
+    if state.cancel_enables == 0 {
+        return CO_E_CANCEL_DISABLED;
     }
+    state.cancel_enables -= 1;
+    S_OK
 }
 
 /// CoCancelCall(thread, timeout): cancels the thread's pending synchronous
