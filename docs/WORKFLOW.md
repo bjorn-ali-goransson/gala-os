@@ -693,6 +693,13 @@ rest.
   `*.iso`. The session's disk allowance is shared with any agents'
   worktrees (`.claude/worktrees/*/target`); `du -sh target/*
   .claude/worktrees/*/target` shows who uses it.
+- An agent's worktree whose `target` is a symlink to the main
+  checkout's (to save disk) shares `target/debug/xtask` with it: whichever
+  checkout built last owns it, and `cargo xtask` may run the other's
+  sources (paths under `.claude/worktrees/...` in its output, or
+  `export-tests` changing nothing after a test changed). Build and copy
+  the binary (`touch xtask/src/main.rs && cargo build -p xtask && cp
+  target/debug/xtask <scratch>/`) and run that copy while an agent works.
 - Low on disk, a few user programs can be built alone into a scratch
   target directory with xtask's flags (`cargo build --release --target
   x86_64-pc-windows-msvc --config 'target.x86_64-pc-windows-msvc.rustflags=

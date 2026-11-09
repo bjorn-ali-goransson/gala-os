@@ -762,11 +762,16 @@ fn rtl_strings(c: &mut Checks) -> Result<(), u32> {
                 us.length.into(),
             )?;
         }
-        // Exactly the digits: no NUL.
+        // Room for the digits but not their NUL: too small (Windows,
+        // measured by CI's windows job: STATUS_BUFFER_OVERFLOW), untouched.
         buf = [u16::from(b'-'); 36];
         let mut us = UnicodeString { length: 0, maximum: 2, buffer: buf.as_mut_ptr() };
+        c.eq(RtlIntegerToUnicodeString(0xa, 16, &mut us).into(), STATUS_BUFFER_OVERFLOW.into())?;
+        c.ok(buf[0] == u16::from(b'-'), buf[0].into())?;
+        // Room for the NUL too: written.
+        let mut us = UnicodeString { length: 0, maximum: 4, buffer: buf.as_mut_ptr() };
         c.eq(RtlIntegerToUnicodeString(0xa, 16, &mut us).into(), 0)?;
-        c.ok(buf[0] == u16::from(b'A') && buf[1] == u16::from(b'-'), buf[1].into())?;
+        c.ok(buf[0] == u16::from(b'A') && buf[1] == 0, buf[1].into())?;
         // Too small: the buffer is untouched.
         buf = [u16::from(b'-'); 36];
         let mut us = UnicodeString { length: 0, maximum: 14, buffer: buf.as_mut_ptr() };

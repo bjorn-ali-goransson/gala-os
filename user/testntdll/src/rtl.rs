@@ -153,9 +153,9 @@ const STATUS_BUFFER_OVERFLOW: u32 = 0x8000_0005;
 
 /// RtlIntegerToUnicodeString(value, base, string): `value` (unsigned) in
 /// base 2, 8, 10 or 16 (0: 10), upper-case digits, into the string's
-/// buffer with a NUL if it fits; STATUS_BUFFER_OVERFLOW (the buffer
-/// untouched) if the digits do not; STATUS_INVALID_PARAMETER for another
-/// base.
+/// buffer with its NUL; STATUS_BUFFER_OVERFLOW (the buffer untouched)
+/// unless the digits and the NUL fit (Windows refuses room for the digits
+/// alone; office_api_test); STATUS_INVALID_PARAMETER for another base.
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlIntegerToUnicodeString(
     value: u32,
@@ -182,13 +182,13 @@ pub extern "system" fn RtlIntegerToUnicodeString(
     unsafe {
         let s = &mut *string;
         let room = usize::from(s.maximum) / 2;
-        if text.len() > room {
+        // The digits and their NUL must fit (Windows: STATUS_BUFFER_OVERFLOW
+        // for room for the digits alone, the buffer untouched).
+        if text.len() >= room {
             return STATUS_BUFFER_OVERFLOW;
         }
         core::ptr::copy_nonoverlapping(text.as_ptr(), s.buffer, text.len());
-        if text.len() < room {
-            *s.buffer.add(text.len()) = 0;
-        }
+        *s.buffer.add(text.len()) = 0;
         s.length = (2 * text.len()) as u16;
     }
     STATUS_SUCCESS

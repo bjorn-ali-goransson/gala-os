@@ -94,6 +94,7 @@ system_test
 thread_test
 threadinfo_test
 timer_test
+ucrt_test
 udp_test
 vm_test
 vmcycle_test
@@ -111,3 +112,4 @@ wow64_k32_test
 wow64_seh_test
 wow64_sock_test
 wow64_test
+wow64_ucrt_test
