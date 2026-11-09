@@ -1,6 +1,8 @@
 //! System and process information that ntdll/kernel32 initialization reads,
 //! with results expected to match real Windows (x64): NtQuerySystemInformation
-//! SystemBasicInformation, SystemTimeOfDayInformation and
+//! SystemBasicInformation (its memory figures included),
+//! SystemPerformanceInformation's memory counts,
+//! SystemTimeOfDayInformation and
 //! SystemQueryPerformanceCounterInformation (version 1; the KernelQpc
 //! flag valid), and
 //! NtQueryInformationProcess ProcessImageFileName, ProcessDebugPort,
@@ -16,6 +18,7 @@ const STATUS_INFO_LENGTH_MISMATCH: NtStatus = 0xc000_0004;
 const STATUS_INVALID_INFO_CLASS: NtStatus = 0xc000_0003;
 const STATUS_NOT_SUPPORTED: NtStatus = 0xc000_00bb;
 const SYSTEM_BASIC_INFORMATION: u32 = 0;
+const SYSTEM_PERFORMANCE_INFORMATION: u32 = 2;
 const SYSTEM_TIME_OF_DAY_INFORMATION: u32 = 3;
 const PROCESS_DEBUG_PORT: u32 = 7;
 const PROCESS_SESSION_INFORMATION: u32 = 24;
@@ -91,6 +94,35 @@ fn run() -> Result<(), u32> {
         STATUS_INFO_LENGTH_MISMATCH.into(),
     )?;
     c.eq(query_system(0x7fff, &mut big).0.into(), STATUS_INVALID_INFO_CLASS.into())?;
+
+    // NumberOfPhysicalPages is the memory the machine has; Lowest and
+    // Highest bound the page numbers it is spread over. A hole in the
+    // memory map leaves fewer pages than that span, never more: measured
+    // on Windows 11 26200, 8320524 pages over a span of 8898559 (93.5%
+    // of it), the PCI hole accounting for the rest.
+    let phys = u32_at(&b, 12);
+    let lowest = u32_at(&b, 16);
+    let highest = u32_at(&b, 20);
+    c.ok(lowest >= 1, lowest)?;
+    c.ok(highest >= lowest, highest)?;
+    c.ok(phys <= highest - lowest + 1, phys)?;
+
+    // SystemPerformanceInformation: of its 0x158 bytes only the memory
+    // counts are read here. The commit limit is physical memory plus any
+    // page file, so it is never below the memory; what is committed is
+    // never above the limit, and the peak never below what is committed.
+    let mut p = [0u8; 0x158];
+    let (s, ret) = query_system(SYSTEM_PERFORMANCE_INFORMATION, &mut p);
+    c.eq(s.into(), ok)?;
+    c.eq(ret.into(), 0x158)?;
+    let available = u32_at(&p, 0x2c);
+    let committed = u32_at(&p, 0x30);
+    let limit = u32_at(&p, 0x34);
+    let peak = u32_at(&p, 0x38);
+    c.ok(available <= phys, available)?;
+    c.ok(limit >= phys, limit)?;
+    c.ok(committed <= limit, committed)?;
+    c.ok(peak >= committed, peak)?;
 
     // SystemTimeOfDayInformation (48 bytes).
     let mut t = [0u8; 48];

@@ -401,10 +401,11 @@ pub fn dump() {
         let (recent, dropped, waiting) = d.shell.recent_input();
         log!(
             info,
-            "statedump: session {} input queue: {} waiting, {} dropped (full)",
+            "statedump: session {} input queue: {} waiting, {} dropped (full); popup grab: {:?}",
             d.session,
             waiting,
-            dropped
+            dropped,
+            d.shell.popup_grab()
         );
         let now = crate::nt::platform::monotonic_ns();
         for b in recent.iter().flatten() {

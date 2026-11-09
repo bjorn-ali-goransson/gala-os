@@ -59,6 +59,40 @@ __asm__(".text\n"
 	"	hlt\n"
 	"1:	ret\n");
 
+/* clone3_thread(args, size, fn, arg): clone3 with struct clone_args; the
+ * new thread (or child) calls fn(arg) and exits with its result. */
+i64 clone3_thread(void *args, u64 size, int (*fn)(void *), void *arg);
+__asm__(".text\n"
+	".globl clone3_thread\n"
+	"clone3_thread:\n"
+	"	mov %rdx, %r8\n"
+	"	mov %rcx, %r9\n"
+	"	mov $435, %eax\n" /* clone3 */
+	"	syscall\n"
+	"	test %rax, %rax\n"
+	"	jnz 1f\n"
+	"	xor %ebp, %ebp\n"
+	"	mov %r9, %rdi\n"
+	"	call *%r8\n"
+	"	mov %eax, %edi\n"
+	"	mov $60, %eax\n" /* exit */
+	"	syscall\n"
+	"	hlt\n"
+	"1:	ret\n");
+
+/* struct clone_args (clone3(2)), version 2. */
+struct clone_args {
+	u64 flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size,
+		cgroup;
+};
+
+/* struct robust_list_head (set_robust_list(2)). */
+struct robust_head {
+	void *next;
+	i64 futex_offset;
+	void *pending;
+};
+
 #define THREAD_FLAGS (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | \
 		      CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)
 
@@ -375,6 +409,65 @@ static int ender(void *arg)
 	lx_exit(42);
 }
 
+/* A robust lock as glibc lays one out: the list entry, then the futex
+ * word (futex_offset 8). */
+struct robust_lock {
+	void *next;
+	volatile unsigned word;
+};
+#define FUTEX_WAITERS 0x80000000u
+#define FUTEX_OWNER_DIED 0x40000000u
+#define FUTEX_TID_MASK 0x3fffffffu
+
+/* held, held with waiters, another thread's, and the one being taken
+ * (list_op_pending); a thread that exits holding them. */
+static struct robust_lock rl_held, rl_waiters, rl_other, rl_pending;
+static struct robust_head rl_head;
+static volatile int rl_ready;
+
+/* Registers `head` (in `locks` order, plus `pending`) with this thread's
+ * tid in the words it holds. */
+static void hold_robust(struct robust_head *head, struct robust_lock **locks, int n,
+			struct robust_lock *pending, unsigned extra)
+{
+	unsigned me = (unsigned)sys0(SYS_gettid);
+	head->futex_offset = 8;
+	head->next = n ? (void *)locks[0] : (void *)head;
+	for (int i = 0; i < n; i++)
+		locks[i]->next = i + 1 < n ? (void *)locks[i + 1] : (void *)head;
+	for (int i = 0; i < n; i++)
+		if (locks[i] != &rl_other)
+			locks[i]->word = me | (locks[i] == &rl_waiters ? FUTEX_WAITERS : 0) | extra;
+	head->pending = pending;
+	if (pending)
+		pending->word = me;
+	sys2(SYS_set_robust_list, head, sizeof *head);
+}
+
+static int robust_holder(void *arg)
+{
+	(void)arg;
+	struct robust_lock *locks[] = { &rl_held, &rl_waiters, &rl_other };
+	rl_other.word = 12345;
+	hold_robust(&rl_head, locks, 3, &rl_pending, 0);
+	return 0;
+}
+
+/* In a forked child: holds a lock in shared memory, then waits for the
+ * process's exit_group. */
+static struct robust_lock *rl_shared;
+static int robust_shared_holder(void *arg)
+{
+	(void)arg;
+	static struct robust_head head;
+	struct robust_lock *locks[] = { rl_shared };
+	hold_robust(&head, locks, 1, 0, 0);
+	rl_ready = 1;
+	for (;;)
+		sys0(SYS_pause);
+	return 0;
+}
+
 static i64 spawn_with(int i, u64 flags, int *ptid, int *ctid, int (*fn)(void *), void *arg)
 {
 	tls_blocks[i][0] = (u64)&tls_blocks[i][0];
@@ -605,6 +698,90 @@ int main(void)
 	join(&settid_word);
 	say_bool("CLONE_CHILD_SETTID: the thread found its tid there", settid_seen_ok);
 	say("  cleared at exit to", settid_word);
+
+	say_text("-- clone3");
+	{
+		static struct clone_args ca;
+		static volatile int c3tid;
+		static int c3ptid;
+		lx_memset(&ca, 0, sizeof ca);
+		tls_blocks[6][0] = (u64)&tls_blocks[6][0];
+		t_ran = 0;
+		c3tid = -1;
+		ca.flags = THREAD_FLAGS;
+		ca.child_tid = (u64)&c3tid;
+		ca.parent_tid = (u64)&c3ptid;
+		ca.stack = (u64)stacks[6];
+		ca.stack_size = sizeof stacks[6];
+		ca.tls = (u64)&tls_blocks[6][0];
+		r = clone3_thread(&ca, sizeof ca, first, 0);
+		say_bool("clone3 of a thread returned a tid > 0", r > 0);
+		say_bool("  parent_tid stored it", c3ptid == r);
+		join(&c3tid);
+		say_bool("  the thread ran, on its TLS", t_ran && t_fs == (i64)&tls_blocks[6][0]);
+		say_bool("  its gettid() is clone3's result", t_tid == r);
+		say("  child_tid cleared at exit to", c3tid);
+		lx_memset(&ca, 0, sizeof ca);
+		ca.exit_signal = SIGCHLD;
+		child = clone3_thread(&ca, sizeof ca, ender, 0);
+		say_status("clone3 as fork (exit_signal SIGCHLD)", wait_for(child, 0));
+		say_ret("clone3(size 8)", clone3_thread(&ca, 8, first, 0));
+		say_ret("clone3(size 4097)", clone3_thread(&ca, 4097, first, 0));
+		static u64 bigger[16];
+		lx_memset(bigger, 0, sizeof bigger);
+		bigger[4] = SIGCHLD;
+		bigger[12] = 1;
+		say_ret("clone3(unknown field set)", clone3_thread(bigger, sizeof bigger, first, 0));
+		ca.flags = SIGCHLD;
+		ca.exit_signal = 0;
+		say_ret("clone3(a signal in the flags)", clone3_thread(&ca, sizeof ca, first, 0));
+		ca.flags = THREAD_FLAGS;
+		ca.stack = (u64)stacks[6];
+		ca.stack_size = 0;
+		say_ret("clone3(a stack without a size)", clone3_thread(&ca, sizeof ca, first, 0));
+	}
+
+	say_text("-- robust futex lists");
+	{
+		static struct robust_head head;
+		head.next = &head;
+		head.futex_offset = 0;
+		head.pending = 0;
+		say_ret("set_robust_list(head, 24)", sys2(SYS_set_robust_list, &head, sizeof head));
+		void *got = 0;
+		u64 len = 0;
+		say_ret("get_robust_list(0)", sys3(SYS_get_robust_list, 0, &got, &len));
+		say_bool("  it is the head set", got == &head);
+		say("  its length", len);
+		say_ret("get_robust_list(own tid)", sys3(SYS_get_robust_list, tid, &got, &len));
+		say_ret("set_robust_list(head, 23)", sys2(SYS_set_robust_list, &head, 23));
+		say_ret("get_robust_list(no such thread)", sys3(SYS_get_robust_list, 0x3ffffff0, &got, &len));
+		say_ret("get_robust_list(bad pointer)", sys3(SYS_get_robust_list, 0, 8, &len));
+
+		/* A thread exits holding robust locks: those whose word has its
+		 * tid get FUTEX_OWNER_DIED (FUTEX_WAITERS kept), the pending
+		 * one too; another thread's is left alone. */
+		static volatile int rl_ctid = -1;
+		spawn(1, &ptid, (int *)&rl_ctid, robust_holder);
+		join(&rl_ctid);
+		say_hex("exited holder's lock", rl_held.word);
+		say_hex("  one with FUTEX_WAITERS", rl_waiters.word);
+		say_hex("  list_op_pending's", rl_pending.word);
+		say("  another thread's", rl_other.word);
+		/* exit_group with a thread holding a lock in shared memory: the
+		 * parent sees it released. */
+		rl_shared = (struct robust_lock *)sys6(SYS_mmap, 0, 4096, 3, 0x21, -1, 0);
+		child = lx_fork();
+		if (child == 0) {
+			static volatile int c4 = -1;
+			spawn(2, &ptid, (int *)&c4, robust_shared_holder);
+			while (!rl_ready)
+				sys0(SYS_sched_yield);
+			sys1(SYS_exit_group, 0);
+		}
+		say_status("child ended by exit_group", wait_for(child, 0));
+		say_hex("  its thread's lock in shared memory", rl_shared->word & ~FUTEX_TID_MASK);
+	}
 
 	say_text("-- clone's errors and exits");
 	char *top = stacks[0] + sizeof stacks[0];

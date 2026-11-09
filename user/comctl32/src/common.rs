@@ -16,6 +16,90 @@ pub type WndProc = extern "system" fn(Hwnd, u32, usize, isize) -> isize;
 
 #[cfg_attr(
     target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn GetModuleHandleW(name: *const u16) -> usize;
+    fn FindResourceW(module: usize, name: usize, kind: usize) -> usize;
+    fn LoadResource(module: usize, res: usize) -> *const u8;
+    fn SizeofResource(module: usize, res: usize) -> u32;
+}
+
+/// 0: not looked at yet; 1: comctl32 5.82; 2: comctl32 6.
+static VERSION: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Whether the process asked for comctl32 6: its executable's manifest
+/// (RT_MANIFEST 1, CREATEPROCESS_MANIFEST_RESOURCE_ID) depends on
+/// Microsoft.Windows.Common-Controls version 6. Windows then loads
+/// comctl32 6.10 from WinSxS, otherwise 5.82 from System32, and the two
+/// differ where a program can tell (TOOLINFO's largest cbSize). gala has
+/// one comctl32 that answers as the one the process would get. An
+/// activation context a DLL activates itself (its own manifest) is not
+/// looked at, nor a UTF-16 manifest.
+pub fn version6() -> bool {
+    match VERSION.load(Ordering::Relaxed) {
+        0 => {
+            let six = manifest_wants_v6();
+            VERSION.store(if six { 2 } else { 1 }, Ordering::Relaxed);
+            six
+        }
+        v => v == 2,
+    }
+}
+
+fn manifest_wants_v6() -> bool {
+    const RT_MANIFEST: usize = 24;
+    // SAFETY: plain calls; the resource is mapped with the image for the
+    // process's life and is SizeofResource bytes long.
+    let manifest = unsafe {
+        let exe = GetModuleHandleW(core::ptr::null());
+        let res = FindResourceW(exe, 1, RT_MANIFEST);
+        if exe == 0 || res == 0 {
+            return false;
+        }
+        let data = LoadResource(exe, res);
+        if data.is_null() {
+            return false;
+        }
+        core::slice::from_raw_parts(data, SizeofResource(exe, res) as usize)
+    };
+    names_common_controls_6(manifest)
+}
+
+/// Whether manifest text names an assemblyIdentity of
+/// Microsoft.Windows.Common-Controls with a version 6.x (within the
+/// element that follows the name).
+pub fn names_common_controls_6(manifest: &[u8]) -> bool {
+    const NAME: &[u8] = b"microsoft.windows.common-controls";
+    let lower = |b: &u8| b.to_ascii_lowercase();
+    let mut at = 0;
+    while at + NAME.len() <= manifest.len() {
+        if manifest[at..at + NAME.len()].iter().map(lower).eq(NAME.iter().copied()) {
+            // The rest of this element (up to its '>'), and what came
+            // before the name within it (attributes in any order).
+            let start = manifest[..at].iter().rposition(|&b| b == b'<').unwrap_or(0);
+            let end =
+                manifest[at..].iter().position(|&b| b == b'>').map_or(manifest.len(), |e| at + e);
+            let element = &manifest[start..end];
+            let version = b"version=";
+            if let Some(v) = element.windows(version.len()).position(|w| w == version) {
+                let value = &element[v + version.len()..];
+                if value.len() >= 3
+                    && matches!(value[0], b'"' | b'\'')
+                    && value[1..].starts_with(b"6.")
+                {
+                    return true;
+                }
+            }
+        }
+        at += 1;
+    }
+    false
+}
+
+#[cfg_attr(
+    target_arch = "x86",
     link(name = "user32", kind = "raw-dylib", import_name_type = "undecorated")
 )]
 #[cfg_attr(not(target_arch = "x86"), link(name = "user32", kind = "raw-dylib"))]

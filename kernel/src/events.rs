@@ -51,9 +51,14 @@ pub enum Category {
     /// mode and the instruction pointer; `cargo xtask profile` attributes
     /// them to threads, modules and symbols.
     Sample = 16384,
+    /// The Wayland server (`wayland`): clients connected and gone,
+    /// surfaces given a role and mapped, commits, protocol errors (each
+    /// with the client's pid and the object).
+    Wayland = 32768,
 }
 
-const NAMES: [(&str, u32); 15] = [
+const NAMES: [(&str, u32); 16] = [
+    ("wayland", Category::Wayland as u32),
     ("sample", Category::Sample as u32),
     ("ipc", Category::Ipc as u32),
     ("file", Category::File as u32),

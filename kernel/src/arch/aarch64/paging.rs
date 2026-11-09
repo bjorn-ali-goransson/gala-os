@@ -210,6 +210,22 @@ impl UserSpace {
         None
     }
 
+    pub fn move_page(&mut self, _from: u64, _to: u64) -> Result<bool, PagingError> {
+        unported("UserSpace::move_page")
+    }
+
+    pub fn make_writable(&mut self, _virt: u64, _flags: PageFlags) -> Result<bool, PagingError> {
+        unported("UserSpace::make_writable")
+    }
+
+    pub fn share_into(
+        &mut self,
+        _child: &mut UserSpace,
+        _virt: u64,
+    ) -> Result<crate::mm::paging::ForkedPage, PagingError> {
+        unported("UserSpace::share_into")
+    }
+
     pub fn map_private_copy(
         &mut self,
         _virt: u64,

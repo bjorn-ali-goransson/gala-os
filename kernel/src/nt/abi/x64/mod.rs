@@ -115,17 +115,19 @@ pub fn ldr_thunk_regs(
     Ok(UserRegs::new(gpr, thunk, 0))
 }
 
-/// What a new thread's CONTEXT says (NtCreateThread): its registers, the
-/// start address ThreadQuerySetWin32StartAddress reports and its MXCSR.
+/// What a new thread's CONTEXT says (NtCreateThread): its registers and
+/// the start address ThreadQuerySetWin32StartAddress reports. Its
+/// floating-point part (MxCsr, FltSave) is ignored: a new thread starts
+/// with a fresh x87/SSE state, MXCSR 0x1f80 and XMM 0, whatever the
+/// CONTEXT and its flags say (Windows 11, fpu_test).
 /// As ReactOS does: the start address is the "return register" (kernel32's
 /// thunks pass the Win32 start routine there); a context without it
 /// reports its start rip (never 0: the thread's events and
 /// ThreadQuerySetWin32StartAddress name where it starts).
-pub fn thread_start(ctx: &[u8]) -> (UserRegs, u64, Option<u32>) {
+pub fn thread_start(ctx: &[u8]) -> (UserRegs, u64) {
     let regs = context::from_bytes(ctx);
     let win32_start = if regs.gpr(Rax) != 0 { regs.gpr(Rax) } else { regs.ip() };
-    // TODO: the rest of FltSave (x87 state, XMM registers).
-    (regs, win32_start, context::mxcsr(ctx))
+    (regs, win32_start)
 }
 
 /// A trap in 32-bit code (CS 0x23: a WOW64 thread's).

@@ -10,8 +10,8 @@
 //! - RegQueryValueExW: the type and size alone (NULL data), ERROR_MORE_DATA
 //!   with the needed size, ERROR_FILE_NOT_FOUND for a missing value.
 //! - RegGetValueW: type restrictions (ERROR_UNSUPPORTED_TYPE), REG_EXPAND_SZ
-//!   expanded and reported as REG_SZ, RRF_RT_REG_EXPAND_SZ needs
-//!   RRF_NOEXPAND.
+//!   expanded and reported as REG_SZ, so RRF_RT_REG_EXPAND_SZ without
+//!   RRF_NOEXPAND finds no such type (ERROR_UNSUPPORTED_TYPE).
 //! - RegCreateKeyExW creates missing intermediate keys; dispositions
 //!   (REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY); a volatile key's
 //!   children must be volatile (ERROR_CHILD_MUST_BE_VOLATILE).
@@ -259,7 +259,6 @@ const RRF_NOEXPAND: u32 = 0x1000_0000;
 const ERROR_FILE_NOT_FOUND: u64 = 2;
 const ERROR_ACCESS_DENIED: u64 = 5;
 const ERROR_INVALID_HANDLE: u64 = 6;
-const ERROR_INVALID_PARAMETER: u64 = 87;
 const ERROR_MORE_DATA: u64 = 234;
 const ERROR_NO_MORE_ITEMS: u64 = 259;
 const ERROR_KEY_DELETED: u64 = 1018;
@@ -810,7 +809,50 @@ fn written(c: &mut Checks) -> Result<(), u32> {
         ))?;
         c.eq(kind.into(), REG_SZ.into())?;
         c.ok(same(&buf[..10], "C:\\gala\\x\0"), buf[0].into())?;
-        c.eq(size.into(), 20)?;
+        // pcbData is the stored size, not the expansion's, and the stored
+        // value's tail stays after the expansion's NUL (Windows 11).
+        c.eq(size.into(), 36)?;
+        c.ok(same(&buf[10..18], "TEST%\\x\0"), buf[10].into())?;
+        // The size query says the same.
+        size = 0;
+        c.ok0(RegGetValueW(
+            test,
+            core::ptr::null(),
+            w("exp").as_ptr(),
+            RRF_RT_REG_SZ,
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        ))?;
+        c.eq(size.into(), 36)?;
+        // With RRF_NOEXPAND the type stays REG_EXPAND_SZ, which REG_SZ
+        // does not accept; the size query still reports stored + 2.
+        size = 0;
+        let r = RegGetValueW(
+            test,
+            core::ptr::null(),
+            w("exp").as_ptr(),
+            RRF_RT_REG_SZ | RRF_NOEXPAND,
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        );
+        c.eq(r as u64, ERROR_UNSUPPORTED_TYPE)?;
+        c.eq(size.into(), 38)?;
+        // A size query with RRF_NOEXPAND leaves room for a NUL (stored + 2);
+        // the fetch reports the stored size.
+        size = 0;
+        c.ok0(RegGetValueW(
+            test,
+            core::ptr::null(),
+            w("exp").as_ptr(),
+            RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        ))?;
+        c.eq(kind.into(), REG_EXPAND_SZ.into())?;
+        c.eq(size.into(), 38)?;
         size = 96;
         c.ok0(RegGetValueW(
             test,
@@ -833,7 +875,7 @@ fn written(c: &mut Checks) -> Result<(), u32> {
             buf.as_mut_ptr().cast(),
             &mut size,
         );
-        c.eq(r as u64, ERROR_INVALID_PARAMETER)?;
+        c.eq(r as u64, ERROR_UNSUPPORTED_TYPE)?;
 
         // The A functions.
         let mut abuf = [0u8; 32];

@@ -305,14 +305,15 @@ static class FlaUITest
                 if (!pattern.CanMaximize.Value || !pattern.CanMinimize.Value || pattern.IsModal.Value ||
                     pattern.WindowVisualState.Value != WindowVisualState.Normal || window.ModalWindows.Length != 0)
                     return Fail(17, "window pattern");
-                // The title bar (named by the title) and its buttons.
+                // The title bar (no name of its own, as Windows 11's proxy
+                // gives it) and its buttons.
                 var titleBar = window.TitleBar;
                 var names = "";
                 if (titleBar != null)
                     foreach (var c in titleBar.FindAllChildren())
                         names += (names.Length > 0 ? "," : "") + c.AutomationId;
                 Console.WriteLine("titlebar=" + (titleBar == null ? "-" : titleBar.Name) + " " + names);
-                if (titleBar == null || titleBar.Name != "FlaUI Pressed" || titleBar.CloseButton == null ||
+                if (titleBar == null || !string.IsNullOrEmpty(titleBar.Name) || titleBar.CloseButton == null ||
                     titleBar.MinimizeButton == null || titleBar.MaximizeButton == null)
                     return Fail(18, "title bar");
                 // Window.Move: the Transform pattern.

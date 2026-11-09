@@ -1,0 +1,68 @@
+libdyn: constructor
+main
+argc = 4
+argv[1] = [first]
+argv[2] = []
+argv[3] = [third arg]
+argv[argc] NULL = yes
+environ[0] = [A=1]
+environ[1] = [EMPTY=]
+environ[2] = [LONGER_NAME=some value]
+environ entries = 3
+environ right after argv = yes
+getenv(LONGER_NAME) = [some value]
+getenv(EMPTY) = []
+getenv(MISSING) is NULL = yes
+after setenv and unsetenv: entries = 3, ADDED = [new value], A unset = yes
+AT_BASE is ld.so's load address = yes
+AT_BASE page aligned = yes
+AT_PHDR is the program's headers = yes
+AT_PHNUM = the program's = yes
+AT_PHENT = 56
+AT_ENTRY is _start = yes
+AT_EXECFN is argv[0] = yes
+AT_PAGESZ = 4096
+AT_SECURE = 0
+AT_RANDOM given = yes
+PT_PHDR + load bias = AT_PHDR = yes
+PT_INTERP = /lib64/ld-linux-x86-64.so.2
+objects after the program = libdyn.so libc.so.6 ld-linux-x86-64.so.2
+libc.so.6 and libdyn.so loaded = yes
+malloc(100) = [hello from malloc]
+1 MiB block grown to 4 MiB keeps its bytes: sum = 136839168
+calloc zeroed = yes
+qsort = 3 7 19 25 42
+strdup = [hello from malloc]
+printf formats = [ 3.14|42  |ff|str|c|1.000000e+10]
+snprintf = [-002.500] (8)
+strtol("-0x1f", 16) = -31, atof("2.75") = 2.75
+libdyn constructed before main = 1
+dyn_add(2, 3) = 5
+dyn_name() = libdyn
+dyn_value = 1234
+dyn_value after dyn_bump = 1235
+dladdr(dyn_add) = dyn_add in libdyn.so
+dlsym(RTLD_DEFAULT, dyn_add) is dyn_add = yes
+libdyn TLS = 7, zero = 0, main's TLS = 3
+pthread_create = 0, pthread_join = 0
+second thread saw libdyn TLS = 7, zero = 0, main's TLS = 3; set 99
+main thread keeps libdyn TLS = 42, zero = 43, main's TLS = 4
+libdyn2: constructor
+dlopen(libdyn2.so) = a handle
+dyn2_mul(6, 7) = 42
+dyn2_tls_next = 101, 102
+dlsym(no_such_symbol) is NULL = yes
+libdyn2: destructor
+dlclose = 0
+libdyn2: constructor
+dlopen again: dyn2_tls_next = 101
+libdyn2: destructor
+dlclose = 0
+dlopen(libm.so.6) = a handle
+cos(0) = 1.000000, sqrt(2) = 1.414214, pow(2, 10) = 1024.0
+dlclose(libm) = 0
+dlopen(libno_such_library.so) is NULL = yes, dlerror set = yes
+dyn_test: ok
+atexit handler
+libdyn: destructor
+-- exit status 0

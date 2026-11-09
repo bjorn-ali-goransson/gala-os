@@ -66,7 +66,7 @@ pub fn ldr_thunk_regs(
     Err(NtStatus::NOT_IMPLEMENTED)
 }
 
-pub fn thread_start(_ctx: &[u8]) -> (UserRegs, u64, Option<u32>) {
+pub fn thread_start(_ctx: &[u8]) -> (UserRegs, u64) {
     unported("NtCreateThread's ARM64 CONTEXT")
 }
 

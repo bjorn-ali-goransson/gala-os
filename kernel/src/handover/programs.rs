@@ -289,7 +289,8 @@ pub mod thread_state {
     pub const SYSCALL: u32 = 0;
     /// Stopped in user mode: goes on with `regs` and `fx`.
     pub const USER: u32 = 1;
-    /// Created suspended, never run: starts with `regs` (and `mxcsr`).
+    /// Created suspended, never run: starts with `regs` and a fresh
+    /// x87/SSE state.
     pub const START: u32 = 2;
 }
 
@@ -323,7 +324,9 @@ pub struct ThreadRec<'a> {
     /// Version 2: `thread_state` (0 from an older writer: SYSCALL).
     pub state: u32,
     pub suspend: u32,
-    /// START: the MXCSR it starts with, if set.
+    /// START: an MXCSR to start with. Written as none and ignored when
+    /// read (a new thread's x87/SSE state is fresh); kept for the
+    /// record's layout.
     pub mxcsr: Option<u32>,
     /// The impersonation token's object id (TOKENS), 0: none.
     pub impersonation: u32,

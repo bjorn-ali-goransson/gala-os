@@ -232,6 +232,7 @@ unsafe extern "system" {
     fn ExitProcess(code: u32) -> !;
     fn GetModuleHandleW(name: *const u16) -> Handle;
     fn Sleep(ms: u32);
+    fn GetLastError() -> u32;
     fn CreateThread(
         sa: *const c_void,
         stack: usize,
@@ -668,7 +669,7 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
                 }
                 w
             };
-            let ti = ToolInfoW {
+            let mut ti = ToolInfoW {
                 size: size_of::<ToolInfoW>() as u32,
                 flags: 0x1 | 0x10, // TTF_IDISHWND | TTF_SUBCLASS
                 hwnd,
@@ -679,7 +680,15 @@ extern "system" fn window_proc(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isiz
                 lparam: 0,
                 reserved: core::ptr::null_mut(),
             };
+            // This program has no manifest asking for comctl32 6, so it
+            // gets 5.82, which takes a TOOLINFO up to lParam (64 bytes) and
+            // refuses the full V3 size, 72 with lpReserved (Windows 11).
             // SAFETY: our tooltip and TOOLINFOW.
+            let added =
+                unsafe { SendMessageW(tip, TTM_ADDTOOLW, 0, &ti as *const ToolInfoW as isize) };
+            let _ = check(added == 0, 0);
+            ti.size = core::mem::offset_of!(ToolInfoW, reserved) as u32;
+            // SAFETY: as above.
             let added =
                 unsafe { SendMessageW(tip, TTM_ADDTOOLW, 0, &ti as *const ToolInfoW as isize) };
             let _ = check(added != 0, 0);
@@ -812,7 +821,16 @@ fn run() -> Result<(), u32> {
         check(GetClassLongPtrW(hwnd, GCLP_HICONSM) == icon as usize, 0)?;
         check(SetClassLongPtrW(hwnd, GCLP_HICONSM, 0) == icon as usize, 0)?;
         check(IsWindowUnicode(hwnd) != 0, 0)?;
-        check(SetGestureConfig(hwnd, 0, 0, core::ptr::null(), 0) != 0, 0)?;
+        // The VCL's form: one GESTURECONFIG {dwID 0, dwWant GC_ALLGESTURES,
+        // dwBlock 0} of 12 bytes. No entries is ERROR_INVALID_PARAMETER,
+        // and so is another size (Windows 11).
+        let all_gestures: [u32; 3] = [0, 1, 0];
+        let config = all_gestures.as_ptr().cast();
+        check(SetGestureConfig(hwnd, 0, 1, config, 12) != 0, GetLastError().into())?;
+        check(SetGestureConfig(hwnd, 0, 0, core::ptr::null(), 0) == 0, 0)?;
+        check(GetLastError() == 87, GetLastError().into())?;
+        check(SetGestureConfig(hwnd, 0, 1, config, 11) == 0, 0)?;
+        check(GetLastError() == 87, GetLastError().into())?;
         let mut point = [10, 20];
         check(PhysicalToLogicalPoint(hwnd, &mut point) != 0 && point == [10, 20], 0)?;
         check(IsWindowVisible(hwnd) == 0, 0)?;

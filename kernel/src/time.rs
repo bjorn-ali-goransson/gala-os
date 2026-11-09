@@ -184,6 +184,13 @@ static SAMPLE_ASKED: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS
 /// NMI samples dropped because the CPU's ring was full (interrupts off
 /// for longer than `RING` samples); in the `events:` line.
 pub static SAMPLES_LOST: AtomicU64 = AtomicU64::new(0);
+/// Samples written, in user mode and in the kernel (the `events:` line:
+/// a profile with none in user mode says so at the end of the boot).
+pub static SAMPLES_USER: AtomicU64 = AtomicU64::new(0);
+pub static SAMPLES_KERNEL: AtomicU64 = AtomicU64::new(0);
+/// Samples asked of another CPU (an NMI sent), and taken by this CPU from
+/// its own tick (one CPU online).
+pub static SAMPLES_ASKED: AtomicU64 = AtomicU64::new(0);
 
 /// `sampleprobe`: the boot thread spins with interrupts off for half a
 /// second and reports whether samples landed inside (the NMI sampler's
@@ -229,6 +236,7 @@ fn sample_tick(frame: &TrapFrame, idle: bool) {
         return;
     };
     SAMPLE_ASKED[target].store(true, Ordering::Release);
+    SAMPLES_ASKED.fetch_add(1, Ordering::Relaxed);
     crate::arch::smp::send_nmi(hw_id);
 }
 
@@ -325,6 +333,7 @@ fn sample_here(frame: &TrapFrame) {
 /// `lost`: samples dropped after this one (`"lost"`, when not 0).
 fn emit_sample(t: u64, by: u64, user: bool, rip: u64, stack: &SampleStack, lost: u64) {
     use crate::events::Category::Sample;
+    if user { &SAMPLES_USER } else { &SAMPLES_KERNEL }.fetch_add(1, Ordering::Relaxed);
     let lost = Lost(lost);
     if user {
         crate::events::emit_at(

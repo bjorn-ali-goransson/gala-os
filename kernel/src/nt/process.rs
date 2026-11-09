@@ -986,7 +986,6 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             &process,
             regs,
             start.ip(),
-            None,
             (stack_top, stack_limit, stack_bottom),
             suspended,
         )
@@ -1176,10 +1175,14 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     *process.exit_time.lock() = platform::system_time();
     // A line the program left open ends here, before the exit lines.
     crate::console::end_program_line(process.id);
+    // Its control-handler thread takes no more Ctrl+C.
+    if let Some(session) = &process.console {
+        session.forget_taker(process.id);
+    }
     // A Linux process's last output lines and how it ended, before the
     // core's line (ROADMAP LX).
     if process.personality == Personality::Linux {
-        crate::lx::process_ended(process.id, status);
+        crate::lx::process_ended(process, status);
     }
     // Ended by an exception: what Windows' error report would say.
     let note = *process.last_exception.lock();

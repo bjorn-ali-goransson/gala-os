@@ -96,7 +96,11 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
     the job summary (passes, and each failing program's exit and line).
     With `user/windows/ci-passing.txt` (program names) the job fails
     when a listed program does not pass on Windows: a test's expectation
-    stopped being Windows' answer.
+    stopped being Windows' answer. Each program that ended with an
+    exception status is run again under `user/windows/fault.py --report`
+    (a debugger: exception code, module+offset, address, the first-chance
+    exceptions before it), into the summary and `faults.md` in the
+    artifact; one that does not crash again says so.
 - Commit messages pass through the shell: do not put backticks in a
   double-quoted `-m`; use a heredoc with `-F -`.
 - Borrowed code or a new dependency gets a `THIRD_PARTY.md` entry in the
@@ -207,12 +211,37 @@ there, then `cargo xtask compare windows.json` here. Before the run
 there: a local account `galatest` with password `Gala-Test-1` (access,
 disk, logon, lsa, profile, session and system tests log on as it) and
 an administrator prompt for `schannel_test` (its test CA goes into
-LocalMachine\Root; it is skipped otherwise). A program that crashes
-gets a `fault` field (`module+offset (exception code)`) from the
-Application log's event 1000; map the offset to a function with the
-build's PDB of that module. `cargo xtask
+LocalMachine\Root; it is skipped otherwise, and so are `winhttp_test`
+and `wininet_test`, which fetch from the Nginx that setup starts).
+A program that crashes gets a `fault` field
+(`<code> <name> at module+offset`) from `user/windows/fault.py`, which
+the runner looks for at `..\windowsault.py`: it re-runs the program as
+its debugger, because Windows Error Reporting's event 1000 is never
+written for these -- the runner sets `SEM_NOGPFAULTERRORBOX`, and a
+process with that error mode does not report its fault to WER at all.
+Map the offset to a function with the build's PDB of that module. A
+program whose non-zero exit is the result rather than a failure (`crash`,
+`go_exit`, `busybox`, and gala's own `cmd`, `conhost` and `gala`, which
+real Windows cannot load) carries an `expected` field beside `exit`. `cargo xtask
 report` also lists programs that pass in QEMU but not in gala-um, or the
 other way round (one of the two platforms is then wrong).
+
+`user/bin` alone is not the whole sweep. The seven script scenarios
+(`busybox_files`, `busybox_script`, `tcc`, `tcc_make`, `tcc_self`, `lua`,
+`sqlite`) run `busybox.exe sh ..\<dir>\<script>.sh`, so they also need
+`user/busybox`, `user/tcc`, `user/lua`, `user/sqlite` and
+`user/msvcrt_test` beside it. run-all.ps1 reports a scenario whose
+script or `busybox.exe` is missing as skipped with that reason (a round
+that copied only `user/bin` has seven such skips). Copy `user/` (or
+those five directories) and check the count.
+
+Run it from an ordinary directory, never one under `%TEMP%`: Windows
+treats a temporary path differently, so a test that works from its
+current directory reads that instead of Windows. shell32_test's check
+174 is what caught it: `SHAddToRecentDocs(SHARD_PATHW, <a file in the
+current directory>)` creates the Recent `.lnk` within about 200 ms for
+an ordinary path and never for one under `%TEMP%`, so the check also
+spent its full ten-second wait.
 
 Antivirus is what goes wrong there: the test binaries are unsigned and
 freshly built, which Microsoft Defender's machine-learning heuristic
@@ -225,6 +254,40 @@ and no other; `cargo xtask compare` shows them as missing on the Windows
 side, never as a check that passed or failed. An administrator's
 `Add-MpPreference -ExclusionPath <user/bin>` brings them back, for as
 long as that exclusion stands.
+
+Windows' firewall prompts for two programs, `ipv6_test` and
+`handover_net_test`, the first time each one listens: the dialog creates
+a `TCP Query User{<guid>}<path>` and a `UDP Query User{...}` rule **keyed
+on the absolute path**, so a sweep from a new directory asks again (an
+old clone's rules do not carry over). Answer Allow. Answering No writes
+a *Block* rule instead, which is permanent and would fail those two
+silently in every later round -- check with `Get-NetFirewallRule -Action
+Block | Get-NetFirewallApplicationFilter` if either starts failing. The
+permission is not actually needed: both are in CI's passing baseline
+(`user/windows/ci-passing.txt`), and CI's runner is headless with nobody
+to answer the prompt, so they talk over loopback, which the firewall
+does not filter. The prompt only costs the time it sits unanswered.
+
+**Probing a divergence from a script, rather than from the test
+program, has two traps that silently answer a different question.** A
+probe host brings its own environment:
+
+- **comctl32's version.** A process with a v6 manifest (python.exe has
+  one) loads 6.10 from WinSxS; the test programs have no manifest and
+  get 5.82, which behaves differently -- it rejects `TOOLINFOW` with
+  `cbSize` 72 where 6.10 accepts it. Print the module's path before
+  trusting a comctl32 result: `GetModuleFileNameW(GetModuleHandleW(
+  L"comctl32.dll"))` names the WinSxS directory, version and all.
+- **UI Automation in-process or out.** A client in another process sees
+  these controls as `ControlType.Pane` and does not see the non-client
+  title bar at all (three children where the test sees four); the same
+  query from inside the process that owns the window gives Button, Edit,
+  Text and a TitleBar. uia_test queries in-process, so only an
+  in-process client answers its checks (Python can, with `comtypes`).
+
+Where the environment is the question, instrument the test program
+instead: build it from the same sources, add prints, run it, revert.
+That is how the MXCSR, static-TLS and comctl32 answers were measured.
 
 Every program's whole output goes to `windows-output.txt` beside the
 report, with a header per program. The report keeps one line, the
@@ -436,6 +499,31 @@ is not visible (the firmware's framebuffer is no longer shown): read the
 serial log. The kernel flag `gputrace` logs every command; `events=display`
 the modes, resets and errors.
 
+Software 3D (GPU G2) needs no device: its scenarios run Mesa (PREBUILT
+`mesa`) on the CPU and check a headless desktop's frame
+(`presenter=test`, BIOS). `gl_test` (user/gl_test, C, `build.sh`) is
+OpenGL on llvmpipe, `vk_test` (user/vk_test, C; its `build.sh` needs
+`glslangValidator`, apt `glslang-tools`, and clones the pinned
+Vulkan-Headers) Vulkan on lavapipe through the Khronos loader (PREBUILT
+`vulkan-runtime`), about 10 s each under TCG. When one fails:
+
+- Read the ledger first: `missing export` stops a load; `missing dll`
+  for d3d12/vulkan-1 is Mesa looking for drivers, D3DKMT* and
+  IDXGIFactory6 the Vulkan loader probing (not failures).
+- A crash report inside `vulkan-1.dll`: `llvm-symbolizer
+  --obj=target/prebuilt/vulkan-runtime/VulkanRT-X64-1.4.341.0-Components/x64/vulkan-1.dll
+  0x180000000+<offset>` names the loader's source line (its PDB is
+  unpacked beside it; the loader's source is
+  github.com/KhronosGroup/Vulkan-Loader at the same version).
+- vk_test printing `skipped (no Vulkan driver)` means the loader found
+  no driver: the Drivers key (the scenario's `registry` module), the
+  manifest and `vulkan_lvp.dll` in System32, and `dxgi.dll` (the loader
+  takes no driver from the key without a DXGI factory).
+- Mesa's own `MESA:` lines are in the serial log.
+- A frame that renders (the read-back pixels are right) but is not on
+  the screen is user32's presentation of a kept DC (ARCHITECTURE
+  "Software 3D (G2)").
+
 ### Test speed and environments
 
 - **BIOS boot by default.** ISOs are hybrid (BIOS and UEFI). SeaBIOS
@@ -487,7 +575,14 @@ networking).
   QEMU it uses.
 - Build dependencies (Ubuntu): `libglib2.0-dev libpixman-1-dev
   libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
-  pkg-config`. CI builds it once and caches it.
+  pkg-config bzip2`. CI builds it once and caches it. `python3-venv` is
+  what provides `ensurepip`, which configure's own venv needs, and
+  `bzip2` is needed although nothing unpacks a `.bz2` here. Configure
+  does report "Compiler for language cpp ... not found" and "Program
+  iasl found: NO" on a machine without `g++` or `acpica-tools` and
+  carries on regardless, so those two are not required; it fails on a
+  missing dependency rather than warning, one at a time, so read the
+  last line of its output rather than the first.
 - Why not the distribution's: QEMU 8.1.0-8.2.5 (Ubuntu 24.04 ships
   8.2.2) keeps running stale translations of code rewritten on a
   translated block's second page, which corrupted JIT-compiled code
@@ -496,7 +591,15 @@ networking).
   and fails on 8.2.2 (check 2, round 1 gets the pre-rewrite value), so
   it is the quick way to tell whether a QEMU build has the bug. On the
   pinned QEMU `java_stress` passed 15 of 15 boots; on 8.2.2, 2 of 6
-  failed.
+  failed. A newer distribution QEMU is no safer: on 10.2.1 (Ubuntu
+  26.04's) the `hello` scenario wedges **under KVM** before the kernel
+  logs a phase, three runs of three timing out at 120 s with CPU 1 at
+  the reset vector (`EIP=0000fff0 CS=f000`, `HLT=1`) and no state dump,
+  while `lx_hello`, `lx_hello_pie` and `go_hello` passed in the same
+  runs; on the pinned 11.1.3 `hello` boots under KVM in 9-16 s. So a
+  distribution QEMU can produce what looks exactly like a kernel that
+  never starts, and the first question about any such failure is which
+  QEMU ran.
 - QEMU TCG (8.x) has no x2APIC: boot tests exercise only the xAPIC path;
   the x2APIC path runs only under KVM.
 - A cloud container is ephemeral: run `cargo xtask qemu` in the
@@ -826,7 +929,11 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   guessed time while xtask looks; it waits for xtask's input
   (console_window's "q"), and a step whose input acts on output the
   program is still printing waits for that output (`ScreenStep::after`).
-  On the host side, timing xtask's own observations in a loop that does
+  A program that ends on xtask's input ends on the last thing xtask
+  sends: a click counts on WM_LBUTTONUP, not on the press, or under KVM
+  the program and QEMU are gone before xtask writes the release
+  ("screen: Broken pipe"; presenter_test, gl_test and vk_test count the
+  release). On the host side, timing xtask's own observations in a loop that does
   other work is the same mistake: xtask times `uptime_ms=` marks in a
   thread of its own.
 - **Single-CPU tests that measure ticks** pin themselves
@@ -1129,6 +1236,21 @@ a packer that stores them (NSIS's `File` without `SetDateSave off`)
 gives a new binary on every run. Check a generated binary by building it
 twice with a `touch` of its inputs in between.
 
+### The Office survey (ROADMAP OF)
+
+The `office-survey` workflow (`.github/workflows/office-survey.yml`; runs
+on a push that changes it or `tools/office_survey.py`, or by hand)
+installs Microsoft 365 Apps unactivated on a Windows runner with the
+Office Deployment Tool (the owner accepted the licence terms for this)
+and uploads only metadata (`tools/office_survey.py`: imports, the
+export lists of Office's DLLs, COM classes, services, scheduled tasks;
+never a binary). Download the `office-survey` artifact, then rank it
+against gala's DLLs: `python3 -I tools/import_survey.py
+target/x86_64-pc-windows-msvc/release --dumps <artifact>/imports
+<artifact>/exports`; `--roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE` keeps only
+what those programs load (static imports through Office's own DLLs,
+then delay imports), `--static` after it only what loading needs.
+
 ### Linux test programs (user/lx, ROADMAP LX)
 
 Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
@@ -1162,6 +1284,12 @@ source).
   a directory it makes (fs_test's `w`): gala runs it in `/lx`, beside
   every other binary, and only a directory a Linux program makes is
   case-sensitive there.
+- **A test of a mount the host may not have** (run_test needs `/run`
+  a tmpfs of mode 0755, as on systemd systems and CI; a container's
+  `/run` is often a plain directory): record it in a mount namespace
+  that has it, `unshare -m sh -c 'mount -t tmpfs -o mode=755 none /run
+  && cargo xtask lx-expect --record'` (as root). Check what it prints
+  only before permissions, so the runner's user does not matter.
 - **Determinism**: children report through exit status or a pipe and
   the parent waits before printing on; never rely on timing for an
   ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
@@ -1189,17 +1317,75 @@ source).
   (static, ET_EXEC) and `<name>_test-pie` (static-pie, ET_DYN),
   reproducibly (stripped, no build id, `-fno-stack-protector`: the
   canary is read from %fs:0x28, so a test that moves FS would crash).
+  The tests in its `GLIBC_TESTS` (dyn_test) are built with the host's
+  gcc against glibc instead, dynamically: `<name>_test` (ET_EXEC with an
+  interpreter) and `<name>_test-pie` (a PIE), each `lib*.c` beside the
+  test a `user/lx/bin/lib*.so` linked with `--as-needed` (one only
+  dlopen()ed is not DT_NEEDED), found through DT_RUNPATH `$ORIGIN`.
+  They use libc as a program does (printf, malloc, dlopen), not raw
+  system calls: what they check is that glibc's programs run. CI's
+  rebuild (ubuntu-24.04: gcc 13.3, glibc 2.39) must give the same bytes:
+  their start-up files (`crt1.o`, `crti.o`) come from the host's
+  libc6-dev, so the binaries are rebuilt on that Ubuntu release.
   The binaries are checked in under `user/lx/bin`, not `user/bin`
   (`export-tests` copies only the Windows build's outputs); the kernel's
   host tests `include_bytes!` them.
 - **Transcripts**: `cargo xtask lx-expect` rebuilds them (when musl-gcc
   is there; else it runs the checked-in ones), runs each binary on this
   host as `./<name>_test first '' 'third arg'` from
-  `target/lx-expect/<binary>/` with only `A=1 EMPTY= LONGER_NAME=some
-  value` in its environment, and compares stdout + `-- exit status N`
+  `target/lx-expect/<binary>/` (with `user/lx/bin/lib*.so` copied
+  beside it) with only `A=1 EMPTY= LONGER_NAME=some value` in its
+  environment, and compares stdout + `-- exit status N`
   with `user/lx/<name>_test/expected.txt` (both binaries against the
   same file). A mismatch prints a line diff and leaves `actual.txt`
-  there. `--runs 5` runs each binary 5 times and fails if a transcript
+  there. The Wayland clients (lx_expect.rs `WAYLAND_TESTS`: wl_test,
+  wl_popup_test) get a
+  weston of their own (`weston --backend=headless`, apt package `weston`)
+  on a socket in a runtime directory of its own in the system's
+  temporary directory (`gala-wl-<pid>`, removed after; a socket's path
+  must fit sun_path's 108 bytes, which the run directory of a deep
+  checkout does not), named by `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`
+  added to their environment; its log is `weston.log` in their run
+  directory. A headless weston 13 differs from the protocol in places: it
+  has no wl_seat, adjusts no constrained popup, accepts set_gravity and
+  set_anchor out of their enums and an xdg_surface destroyed before its
+  popup, and answers an incomplete positioner and get_popup on a
+  toplevel's xdg_surface with codes on other objects than the protocol
+  names. A recorded test leaves those cases out (wl_popup_test's header
+  lists them); gala follows the specification there, checked by host
+  tests, and wl_input_test (written from the specification) covers what
+  needs a seat or a known window place. A client that needs a seat to
+  behave as on a desktop (GTK 3 warns without one: lx_expect.rs
+  `SEATED_TESTS`, gtk_test) gets weston's X11 backend instead
+  (`--backend=x11 --use-pixman`) in an Xvfb of its own (apt package
+  `xvfb`; Xvfb picks a free display and names it with `-displayfd`;
+  its log is `xvfb.log` in the run directory): Xvfb's keyboard and
+  pointer make weston's seat, and nothing types or clicks there, so
+  such a program drives itself when run by lx-expect (gtk_test clicks
+  its own button: its header). In gala their scenarios (`lx_wl`) start the kernel's server
+  with `wayland=on` and pass `XDG_RUNTIME_DIR=/run/user/1000
+  WAYLAND_DISPLAY=wayland-0` with `lxenv=`; `wayland=trace` logs both
+  directions as `WAYLAND_DEBUG=1` prints them, to compare with the same
+  client run against weston under `WAYLAND_DEBUG=1`. A test real Linux
+  cannot record (`INPUT_TESTS` in lx_expect.rs, with the reason:
+  wl_input_test, as weston's headless backend has no input devices)
+  is built and checked in like the others but not run by lx-expect; its
+  expected.txt is written from the specification and its header says
+  so, and its gala scenarios drive it: `lx_wl_input` runs on a headless
+  desktop (`presenter=test`) with a screen check (`WL_INPUT_SCREEN`)
+  whose steps each wait for the line the program printed for the step
+  before (`after:`), then send PS/2 input with QEMU's monitor and check
+  pixels; a step's moves avoid crossing a window's client area on the
+  way (an enter or leave on the path would add lines), and only where a
+  button lands is printed (how many motion events come depends on how
+  the host's packets arrive). The server's keymap,
+  `kernel/src/wayland/keymap.xkb`, is checked after a change with the
+  host's `xkbcomp -w 10 -xkb keymap.xkb out.xkb` (x11-xkb-utils) and by
+  compiling it with libxkbcommon (`xkb_keymap_new_from_string` from a
+  scratch C program linked against `libxkbcommon.so.0`; no headers
+  needed); the host test `every_key_the_scan_codes_give_is_in_the_keymap`
+  checks that each key the scan codes give has a keycode there.
+  `--runs 5` runs each binary 5 times and fails if a transcript
   varies (do it before recording); `--record` writes expected.txt (on
   real Linux only, and check the diff: it is the spec); `--no-build`
   skips the rebuild. Transcripts avoid version-dependent values because
@@ -1241,13 +1427,56 @@ source).
   the `unimplemented system call <name>` lines and the `ledger:` lines
   (`"what":"linux syscall missing"`, by hits) after `run: end`: that is
   the next work list.
+- **Dynamic programs in gala** (`lx_dyn`, `lx_dyn_pie`): the image holds
+  the test and its libraries in `/lx` and glibc where Ubuntu's ld.so
+  finds it: `ld-linux-x86-64.so.2`, `libc.so.6` and `libm.so.6` from
+  the pinned `libc6` .deb (`PREBUILT` "glibc", unpacked with dpkg-deb)
+  in `/lib/x86_64-linux-gnu`, ld.so also in `/lib64` (PT_INTERP's path;
+  a copy, boot modules make no links). The scenarios ship them as the
+  module set "glibc" (MODULE_SETS); a new glibc test adds its program
+  and libraries to its own scenario and that set. ld.so needs
+  `/proc/self/exe` for `$ORIGIN` (served by exact path) and reads
+  `/etc/ld.so.cache` if there is one (there is none: it searches its
+  system directories). Bring-up: `lx: exec interpreter ...` shows where
+  ld.so went; the ledger's `linux syscall missing` lines (rseq is the
+  one glibc 2.39 reaches and does without) are the next calls.
+- **GTK programs** (`user/lx/gtk_test`, build.sh's `GLIBC_TESTS` with
+  `GTK_LIBS`): no GTK development package is needed; the program
+  declares the functions it calls (from docs.gtk.org) and links against
+  the runtime libraries by soname (`-l:libgtk-3.so.0`), so the host
+  needs only `libgtk-3-0t64` (CI installs it, with `xvfb`); the bytes
+  depend only on the sonames and symbol names, so any 3.24 build links
+  the same binary. In gala it runs on the Linux root "gtk3" (below).
+  Bring-up of such a program: run it on Linux under `strace -f -e
+  trace=%file` (its own files are the root's list: what it opens and
+  finds) and `WAYLAND_DEBUG=1` (what it binds, compared with
+  `wayland=trace`); then in gala read stderr (GLib's warnings,
+  fontconfig's errors), the crash report and the ledger.
+- **Linux roots** (`LINUX_ROOTS` in xtask, ARCHITECTURE "GTK programs
+  and Linux roots"): a distribution's packages assembled into
+  `target/prebuilt/<name>/` on first use, shipped as trees (`usr/`,
+  `etc/`, `home/`; a module set such as "gtk3"). To add a library or
+  data file, find its package on Ubuntu 24.04 (`dpkg -S <file>`), take
+  the release pocket's version, path and SHA-256 from the signed index
+  (`dists/noble/InRelease`, checked with `gpgv --keyring
+  /usr/share/keyrings/ubuntu-archive-keyring.gpg`, then
+  `dists/noble/main/binary-amd64/Packages.xz`, whose hash InRelease
+  lists) and add a `Deb` row with the files used; a THIRD_PARTY row too.
+  The packages are kept in `target/prebuilt/debs/` (shared, checked at
+  each use), so a re-assembly or an interrupted fetch downloads only
+  what is missing. Assembly runs the host's `update-mime-database`
+  (shared-mime-info) for a root with the MIME XML. A root carries no
+  user database: the kernel makes `/etc/passwd` and `/etc/group` from
+  gala's accounts (ARCHITECTURE "The lx module", Linux identity).
 - **Linux programs that are not tests** (busybox): fetched as a
   `PREBUILT` (never run on the host), shipped to `C:\lx` by an
   EXTRA_MODULES entry, driven by a script of ours in
   `user/lx/<program>/` (`lx_busybox` runs `busybox sh /lx/shell.sh` with
   `lxenv=PATH=/lx`). Their transcript is per scenario,
-  `user/lx/<program>/<scenario>.txt` (`lx_expect::check_boot`), written
-  from POSIX's and the program's documented output, one labelled line per
+  `user/lx/<program>/<scenario>.txt` (`lx_expect::check_boot`; a
+  Wayland client's, such as `weston-simple-shm/lx_simple_shm.txt`, is
+  its run against the host's weston headless backend, the same build),
+  written from POSIX's and the program's documented output, one labelled line per
   check; cross-check it with the host's dash and coreutils (shell.sh's
   part after its setup, or httpd.sh behind a `busybox() { "$@"; }`
   shim; busybox is a test subject: it runs inside gala, where its
@@ -1268,7 +1497,20 @@ source).
   whose buffer runs into an unmapped page fails with EFAULT, not a
   partial count (write_exit_test); a store to a never-touched bss page
   after mprotect(PROT_READ) faults with error code 6 (not present), so
-  signal_test touches it first (7).
+  signal_test touches it first (7). A MAP_PRIVATE page never written
+  shows later writes to its file (the page cache; mmap_test asserts it),
+  one written keeps its copy. A relation over a path from getcwd must
+  count its NUL: the system call's length includes it (exec_test's
+  `/proc/self/exe` checks). Kernel code a host test calls must not log
+  (`crate::info!` is the serial port: SIGSEGV on the host): exec's
+  `prepare` returns its plan and the caller logs it. An address length
+  passed to accept, getsockname or recvfrom is value-result: reusing
+  the variable for a later bind or connect passes what the kernel
+  wrote (2 for an unnamed peer: an autobind, or EINVAL), so unix_test
+  keeps separate ones. A Linux process's memory goes when it ends,
+  before its parent's wait4 returns, so whatever the parent does next
+  (sealing a memfd against writing: EBUSY while a writable mapping is
+  left) must not see the child's mappings (`lx::process_ended`).
 
 ## Program recipes
 
@@ -1531,12 +1773,21 @@ it on first use.
 - A release that is a single file (busybox.net's static Linux
   `busybox`) names only that file as its one member, the URL's last
   component: the download is kept as it is.
-- Unpackers: unzip for zips, msitools' `msiextract` for an MSI (`apt
-  install msitools`), 7-Zip (`7z` from p7zip-full) for an NSIS installer
-  or 7-Zip self-extractor, and for a Chocolatey `.nupkg` the installer in
+- Unpackers: unzip for zips (`apt install unzip`; a fresh Ubuntu, WSL's
+  included, has none, and the prebuilt fails to spawn it), msitools'
+  `msiextract` for an MSI (`apt install msitools`), 7-Zip (`7z` from
+  p7zip-full) for a `.7z` archive (mesa-dist-win's; members are file
+  paths such as `x64/opengl32.dll`), an NSIS installer or a 7-Zip
+  self-extractor, and for a Chocolatey `.nupkg` the installer in
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
   package: FlaUI) is a plain zip, its members paths such as
-  `lib/net8.0-windows7.0/FlaUI.Core.dll`. One fetch runs at a time
+  `lib/net8.0-windows7.0/FlaUI.Core.dll`; a Debian package (`.deb`:
+  Ubuntu's glibc, weston, libwayland-client, libffi) is unpacked with
+  `dpkg-deb -x`, its member files (`usr/lib/x86_64-linux-gnu/libc.so.6`)
+  moved up by their names; a member that is a symbolic link (a
+  library's soname, `libffi.so.8`) is its target under the link's name.
+  Take a .deb's SHA-256 from the release's signed `Packages` index
+  (`dists/noble/<component>/binary-amd64/Packages.gz`). One fetch runs at a time
   (ISOs are built in parallel), and a `.unpacked-<sha256>` marker makes
   an interrupted unpack run again. An unpack (no marker for the pinned
   checksum and selection: a new version, changed members, an interrupted
@@ -1891,7 +2142,11 @@ about a minute under TCG. Read, in order:
   has the `amd64-unicode` stubs, so `Target amd64-unicode` gives an x64
   installer, which gala can run: there is no WOW64 for 32-bit ones; it
   has no amd64 plug-ins, so the script uses none). The build is
-  reproducible; without makensis the checked-in installers are kept.
+  reproducible; without makensis the checked-in installers are written
+  back from the working tree unchanged, so `export-tests` leaves the same
+  bytes either way (make_source.py removes and remakes `source/installers`
+  on every run, so keeping them means writing them back, not skipping
+  them; it stops with a message if one is missing and it cannot build it).
   Third-party installers are test subjects: they run inside QEMU (see
   "Third-party code on the host"). The
   boot test is `cargo xtask boot-test pk_install_nsis`; a missing import
@@ -2082,6 +2337,29 @@ and panics red). The boot splash replaces the text console: add
 
     cargo xtask screenshot --name demo --at 6 run=hello.exe,smp_test.exe args=,cpus=2
     cargo xtask screenshot --name tcc --scenario tcc --at 16 run=busybox.exe "args=sh%20C:/gala/tcc.sh%20C:/gala/tcc.tar"
+
+#### Watching the screen live
+
+The pinned QEMU is built `--disable-gtk --disable-sdl`, so its only
+display backends are `none` and `dbus` and it opens no window of its
+own. VNC is compiled in, though, and `XTASK_QEMU_ARGS` is appended
+after everything else, so a `-vnc` there wins over the `-display none`
+that `run --headless` adds:
+
+    XTASK_QEMU_ARGS="-vnc 127.0.0.1:1" cargo xtask run --headless
+
+keeps the machine up (serial log on stdio, Ctrl-C to stop) with a VNC
+server on port 5901. Unlike a screendump this takes mouse and keyboard,
+so the desktop can be driven by hand.
+
+From Windows over WSL2, `localhost:5901` reaches it: localhost
+forwarding covers a port bound to the loopback address, so there is no
+need to listen on every interface. Windows has no VNC client of its own
+(`winget install TigerVNC.TigerVNC`, then `"C:\Program
+Files\TigerVNC\vncviewer.exe" localhost:5901`). Prefer the loopback
+form to `-vnc :1`, which listens on every interface with no password:
+under WSL's default NAT only the host can reach that, but mirrored
+networking would put it on the network.
 
 #### Screen checks
 

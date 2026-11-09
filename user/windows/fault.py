@@ -18,6 +18,7 @@ the offset is the address less that base. First-chance exceptions are
 handed to the program, so one it handles itself is not reported.
 
     python fault.py user/bin/kernel32_sync_test.exe [...]
+    python fault.py --report windows.json user/bin   # CI: each crashed one
 
 Prints one line per program: exception code, module+offset, and the
 address. A program that exits without a fatal exception says so.
@@ -191,10 +192,47 @@ def run(path):
     return verdict or "exited with no fatal exception"
 
 
+def crashed(report_path):
+    """The programs run-all.ps1's report shows ending with a fatal
+    exception status (0xC0000000-0xCFFFFFFF, or 0x80000001-0x8000FFFF such
+    as STATUS_GUARD_PAGE_VIOLATION), with their executables beside it."""
+    import json
+    with open(report_path, encoding="utf-8-sig") as f:
+        report = json.load(f)
+    out = []
+    for r in report["results"]:
+        code = r.get("exit")
+        if code is None:
+            continue
+        code &= 0xFFFFFFFF
+        if code >> 28 == 0xC or 0x80000001 <= code <= 0x8000FFFF:
+            out.append((r["program"], code))
+    return out
+
+
 def main(argv):
     if not argv:
         print(__doc__)
         return 2
+    if argv[0] == "--report":
+        # CI: run each crashed program of a run-all.ps1 report again under
+        # the debugger (without the arguments run-all may have given it)
+        # and print a Markdown section, one line per program. A crash that
+        # does not happen again says so, which separates "crashes every
+        # time on this runner" from "crashed once".
+        report, bin_dir = argv[1], argv[2]
+        programs = crashed(report)
+        print("### Fault signatures of the programs that crashed")
+        print()
+        if not programs:
+            print("None crashed.")
+        for name, code in programs:
+            path = os.path.join(bin_dir, name + ".exe")
+            if not os.path.exists(path):
+                print(f"- `{name}` (exit 0x{code:08x}): no {name}.exe to run again")
+                continue
+            print(f"- `{name}` (exit 0x{code:08x}), again under the debugger: {run(path)}")
+        return 0
     for path in argv:
         print(f"{os.path.basename(path):24} {run(path)}")
     return 0

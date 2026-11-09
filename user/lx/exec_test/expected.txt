@@ -6,6 +6,36 @@ uname = 0
 uname(bad pointer) = -14 (EFAULT)
 setuid(getuid()) = 0
 setgid(getgid()) = 0
+-- resource limits
+getrlimit(RLIMIT_STACK) = 0
+prlimit64(0, RLIMIT_STACK, NULL, old) = 0
+prlimit64(getpid(), RLIMIT_STACK, NULL, old) = 0
+  the three agree = yes
+  soft <= hard = yes
+setrlimit(RLIMIT_NOFILE, 64) = 0
+  read back = 64
+setrlimit(RLIMIT_NOFILE, as it was) = 0
+setrlimit(soft above hard) = -22 (EINVAL)
+prlimit64(RLIMIT_CORE, 0/0, old) = 0
+setrlimit(RLIMIT_CORE, hard raised) = -1 (EPERM)
+getrlimit(resource 99) = -22 (EINVAL)
+prlimit64(0, resource 99) = -22 (EINVAL)
+getrlimit(bad pointer) = -14 (EFAULT)
+-- getrandom
+getrandom(32) = 32
+getrandom(32, GRND_NONBLOCK) = 32
+  not all zero, and the two differ = yes
+getrandom(0 bytes) = 0
+getrandom(unknown flag) = -22 (EINVAL)
+getrandom(GRND_RANDOM|GRND_INSECURE) = -22 (EINVAL)
+getrandom(bad pointer) = -14 (EFAULT)
+-- /proc/self/exe
+readlink(/proc/self/exe) is a path in the current directory = yes
+readlink(/proc/self/exe, 1 byte) = 1
+  its first byte is / = yes
+readlinkat(AT_FDCWD, /proc/self/exe) = 0
+readlink(/proc/self/exe, size 0) = -22 (EINVAL)
+readlink(/proc/self/no_such_entry) = -2 (ENOENT)
 -- execve
 mkdir(exec.dir) = 0
 chdir(exec.dir) = 0
@@ -33,6 +63,7 @@ exec child: SIGUSR1 handler (was caught) = 0
 exec child: SIGUSR2 handler (was ignored) = 1
 exec child: SIGTERM still blocked = yes
 exec child: still in the directory exec.dir = yes
+exec child: /proc/self/exe is in exec.dir's parent = yes
 execve'd child: exited 3
 exec child: argc = 2
 exec child: argv[0] = "renamed"
@@ -45,6 +76,7 @@ exec child: SIGUSR1 handler (was caught) = 0
 exec child: SIGUSR2 handler (was ignored) = 1
 exec child: SIGTERM still blocked = yes
 exec child: still in the directory exec.dir = yes
+exec child: /proc/self/exe is in exec.dir's parent = yes
 execve'd child with argv[0] renamed and no environment: exited 3
 -- scripts
 script child: argc = 5

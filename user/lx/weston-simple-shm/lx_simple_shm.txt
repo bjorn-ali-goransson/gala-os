@@ -1,0 +1,3 @@
+-- stderr:
+simple-shm exiting
+-- exit status 0

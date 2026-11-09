@@ -60,6 +60,8 @@ pub mod statedump;
 pub mod sync;
 pub mod time;
 pub mod trust;
+pub mod unix;
+pub mod wayland;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -146,6 +148,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         panic!("scheduler: {e:?}");
     }
     arch::bootphase::mark("sched");
+    // The frames' owner counts (a fork's copy-on-write pages), from the heap.
+    mm::init_sharing();
     info!("sched: boot thread {} running, idle thread started", sched::current());
     arch::smp::init_bsp();
     arch::bootphase::mark("smp_start");
@@ -206,6 +210,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // Profiles among the boot's files belong to their users.
     if let Err(e) = nt::accounts::assign_boot_profiles() {
         warn!("profiles: {e:?}");
+    }
+    // The Linux view's user database, from the accounts (lx::identity):
+    // /etc/passwd and /etc/group, and the boot user's profile.
+    if let Err(e) = lx::identity::publish() {
+        error!("lx: identity: cannot publish the user database: {e:?}");
     }
     // `persist`: C: is kept on the disk (changes since earlier boots are
     // replayed now, over the boot's files).
@@ -331,6 +340,18 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // console; `replay=<boot module>`: they read it from that recording
     // (kernel/src/replay.rs).
     start_record_replay(&info, &cmdline);
+    // The Wayland server for Linux desktop programs, listening on
+    // /run/user/<uid>/wayland-0 before any program starts (ROADMAP LD):
+    // on where the desktop has a shell (not bare: the server profile, or
+    // no screen and no `presenter=`), unless `wayland=off`; `wayland=on`
+    // starts it anyway, `trace` also logs every request and event.
+    let wayland_mode =
+        cmdline.value("wayland").unwrap_or(if nt::desktop::is_bare() { "off" } else { "on" });
+    if wayland_mode != "off"
+        && let Err(e) = wayland::start(wayland_mode)
+    {
+        error!("wayland: cannot start the server: {e:?}");
+    }
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
     // end with the boot. `start_as=system`: they run as SYSTEM (services,
@@ -454,10 +475,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 
     nt::ledger::dump();
     if events::written() > 0 {
+        use core::sync::atomic::Ordering::Relaxed;
         info!(
-            "events: {} written to the debug console, {} profiler samples lost (interrupts off too long)",
+            "events: {} written to the debug console; profiler samples: {} asked of another CPU, {} in user mode, {} in the kernel, {} lost (interrupts off too long)",
             events::written(),
-            time::SAMPLES_LOST.load(core::sync::atomic::Ordering::Relaxed)
+            time::SAMPLES_ASKED.load(Relaxed),
+            time::SAMPLES_USER.load(Relaxed),
+            time::SAMPLES_KERNEL.load(Relaxed),
+            time::SAMPLES_LOST.load(Relaxed)
         );
     }
     net::log_stats();
@@ -473,7 +498,8 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         "stats: {shootdowns} TLB shootdowns ({ipis} IPIs, {} after a move to another CPU), \
          {} frames leaked by deferred frees, {} freed twice; \
          heap {} KiB in use, {} large pages, {window_flushes} mapped-window flushes; \
-         frames free {} of {}; heap peak {} KiB, fewest frames free {}",
+         frames free {} of {}; heap peak {} KiB, fewest frames free {}; \
+         {} frames shared copy-on-write, {} copied at a write",
         arch::smp::moved_flushes(),
         arch::paging::leaked_frames(),
         mm::double_frees(),
@@ -482,7 +508,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         mm::frame_stats().0,
         mm::frame_stats().1,
         heap.peak_in_use / 1024,
-        mm::frame_low_water()
+        mm::frame_low_water(),
+        mm::sharing_stats().0,
+        mm::sharing_stats().1
     );
     // R8 step 6: this release has booted and done its work; the disk's
     // rollback floor goes up to what its manifest says.
@@ -503,14 +531,16 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 }
 
 /// The end of the boot thread's work: QEMU exits with `code` (`qemu_exit`),
-/// else the CPU idles.
+/// else the boot thread ends and its CPU runs its idle thread. (A boot
+/// thread that halted in a loop instead stayed "in the kernel without
+/// blocking" forever: the flight recorder's watchdog reported it every
+/// 20 s and its reports pushed every real event out of the ring.)
 fn stop(code: QemuExitCode) -> ! {
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(code);
     }
-    loop {
-        arch::cpu::enable_interrupts_and_halt();
-    }
+    info!("boot: the boot thread's work is done; it ends");
+    sched::exit()
 }
 
 /// Raises the disk's rollback floor to the verified manifest's (R8).

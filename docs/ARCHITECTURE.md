@@ -43,6 +43,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
   src/fs/               ramfs (C:), USTAR boot modules, the persistence log
   src/net/              virtio-net, loopback, smoltcp TCP/UDP
+  src/unix.rs           AF_UNIX sockets as core objects (seam 5): names, connections, rights in flight
   src/display/          virtio-gpu (`display=virtio`): protocol, driver (host-tested), PCI transport
   src/input.rs          PS/2 mouse polling for the desktop
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
@@ -222,9 +223,10 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `restart=<file>[:<max>][,...]` | those `run=` programs are services: started again 1 s after they end, at most `max` times (default 10; a run of over a minute resets the count), logged as `service: ... restarting it (n of max)` and a `service restart` event (scenario `service_restart`) |
 | `persist` | keep what programs change on C: and in the registry on the virtio-blk disk (a log replayed at the next boot; "Disk") |
 | `logtee=C:/dir` | what programs write to files below that directory (percent-encoded) is also logged line by line, `logtee: <file>: <line>` |
+| `wayland=on`, `wayland=trace`, `wayland=off` | the Wayland server at boot, listening on `/run/user/<uid>/wayland-0` ("Linux applications on the desktop (Wayland)"): on by default where the desktop has a shell (not the server profile; a screen or `presenter=`), off where desktops are bare; `on` starts it anyway, `off` never; `trace` also logs every request and event as `WAYLAND_DEBUG=1` prints them |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window` or `all` (`window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
@@ -270,6 +272,33 @@ address.
   aligned runs (DMA, large pages) use a linear scan. Double frees are
   rejected.
 - The first 1 MiB is never handed out (SMP trampolines and similar).
+- **The span and the memory are different numbers.** The bitmap spans
+  every frame up to the top of memory, holes included, and `frame_count`
+  is that span: a bound for the bitmap, not a quantity of memory. Above
+  about 2 GiB a PC's RAM is split below 2 GiB and above 4 GiB with the
+  PCI hole between, so the span is far larger than the memory (on a
+  3 GiB machine, 5 GiB of span against 2.57 GiB usable). `total_frames`,
+  and so `mm::frame_stats().1`, is the frames the allocator *manages*:
+  the usable ones, free or in use, counted in `from_memory_map` once the
+  usable regions are free and before the reserved ranges are claimed
+  (a reserved frame is in use, not unmanaged). Memory figures must use
+  that one, since the commit limit and both pool quotas are derived from
+  it (`nt::charge::limit`, `nt::quota::memory`); the span would make them
+  about twice the machine.
+- **Frames with more than one owner** (a Linux fork's copy-on-write
+  pages): a `u16` per frame counts the owners beyond the first
+  (`share`), from a table on the heap given to the allocator once the
+  heap is up (`mm::init_sharing`, logged `mm: owner counts for <n>
+  frames`); `free` by an owner while others remain only drops the
+  count, so a frame goes with its last owner, and `framecheck`'s
+  mapped-while-freed check applies to that last free. A count at its
+  limit, or no table (no memory for it), refuses another owner: the
+  caller copies the frame instead. Invariant: an owned page whose frame
+  is shared is never mapped writable (`UserSpace::set_flags` keeps it
+  read-only; only `make_writable` makes it writable, by copying it);
+  `write_initial`, which ignores page protection, is used only on a
+  space being built. Host-tested (`mm::frame`). The `stats:` line ends
+  with the frames shared and the copies made at a write since boot.
 
 ## Virtual memory
 
@@ -820,8 +849,11 @@ current process, -2 = current thread.
   thread has ended (Windows frees the TEB then; gala's stays mapped
   until the process ends).
 - **NtCreateThread** takes DeallocationStack from
-  INITIAL_TEB.StackAllocationBase and applies the CONTEXT's MxCsr only
-  (TODO: the rest of FltSave and the XSTATE area). kernel32's CreateThread
+  INITIAL_TEB.StackAllocationBase and the CONTEXT's integer and control
+  registers; its floating-point part (MxCsr, FltSave, the XSTATE area) is
+  ignored whatever ContextFlags say: a new thread starts with a fresh
+  x87/SSE state, MXCSR 0x1f80 and XMM 0, as on Windows 11 (`fpu_test`).
+  NtContinue on an existing thread does load it. kernel32's CreateThread
   builds the stack and start CONTEXT itself ("kernel32").
 - **Suspension and context**: a thread with a suspend count parks in the
   user-return hook, publishing its registers and XSAVE state;
@@ -1526,9 +1558,11 @@ Invariants:
   SystemArgument2, NormalRoutine (to be checked against the pinned
   ntdll). The dispatcher calls the routine and NtContinues with
   TestAlert, which delivers the next APC first. I/O completion routines
-  use the same queue: a read or write on an asynchronous handle with an
-  ApcRoutine queues ApcRoutine(ApcContext, IoStatusBlock, 0) to the
-  caller when it completes successfully.
+  use the same queue: a read or write with an ApcRoutine queues
+  ApcRoutine(ApcContext, IoStatusBlock, 0) to the caller when it
+  completes successfully, on a synchronous handle too (the I/O completes
+  inline and the routine runs at the next alertable wait, as on Windows
+  11; files and pipe ends alike).
 
 ### Job objects
 
@@ -1537,6 +1571,10 @@ through the namespace like events), NtAssignProcessToJobObject,
 NtSet/NtQueryInformationJobObject (basic accounting, basic and extended
 limits) and NtIsProcessInJob (0x7f0a-0x7f0e).
 
+- A new job has no limits in effect (LimitFlags 0) but reports
+  PriorityClass NORMAL_PRIORITY_CLASS (32) and SchedulingClass 5 in its
+  basic limits, as Windows 11 does; what NtSetInformationJobObject sets
+  is reported back as given.
 - A process is in at most one job (`Process::job`); a process created by
   one in a job joins it. Nested jobs (Windows 8+) are not done: assigning
   a process that is in another job is STATUS_ACCESS_DENIED.
@@ -1590,6 +1628,32 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   lives on *detached*, nlink 0, freed at its last close, never recorded
   again). `exchange` swaps two names (renameat2's RENAME_EXCHANGE) by
   three renames under the file system's lock.
+- **Anonymous files** (`create_anonymous`, Linux's memfd_create:
+  `lx::memfd`): made detached (in no directory, nlink 0), opened once,
+  freed at their last close, never recorded. Their seals
+  (`Node::seals`, Linux's F_SEAL_* bits; None for every other file,
+  which cannot be sealed) are checked by `write`, `set_size`, `map` and
+  `set_mode` under the file system's lock, and `add_seals` refuses
+  SEAL_WRITE while a section maps the file writable (`write_maps`), so a
+  seal and a writer never race.
+- **Socket nodes** (`create_socket`: a bound AF_UNIX socket's name,
+  `unix`): no contents (`FsError::Socket`: Linux's open is ENXIO);
+  what is bound to one is the socket layer's, keyed by the node, which
+  the bound socket keeps open so its id is not reused while bound. NT
+  sees a reparse point (FILE_ATTRIBUTE_REPARSE_POINT, an open without
+  FILE_OPEN_REPARSE_POINT STATUS_IO_REPARSE_TAG_NOT_HANDLED), as Windows
+  shows an AF_UNIX socket's file. Not kept across reboots (the change
+  log has no record for them; a later change of the name replays as a
+  change of a missing path, skipped): what was bound to one is gone
+  then anyway.
+- **Volumes** (`create_volume`; the Linux view's `/run` is the one
+  user): a directory tree beside the root's, its root its own parent,
+  so no path from `C:\` reaches it and NT never sees it. Each node
+  knows its tree (`Node::volume`); nothing in a volume goes to the
+  change log or a snapshot (a tmpfs: gone at shutdown); `path_of` is
+  the path within the volume (the Linux side puts the mount point
+  before it); a rename or hard link from one tree into another is
+  refused (`FsError::CrossVolume`: EXDEV, STATUS_NOT_SAME_DEVICE).
 
 - **Contents from boot modules**: modules appear read-only in `C:\gala`
   (or the directory their module string names), copied to the heap on
@@ -1917,6 +1981,23 @@ xtask types: "hi" with ReadFile, echoed, the program getting "hi\r\n";
   ctrl`) and so is each process's handler thread taking it (`... takes
   Ctrl+C k after m ms`, a warning from 250 ms: late is a lost wake-up;
   event `console ctrl taken`). GalaConsoleCtrl has a 1 s backstop.
+  The session keeps each process's handler thread as a taker with the
+  last Ctrl+C it took and the last it is done with: its thread came back
+  to wait with that count (its handlers returned), or the process is
+  ending. A process ending itself (NtTerminateProcess on
+  itself, whatever the status: the default handler's
+  STATUS_CONTROL_C_EXIT, or a handler that exits, as busybox-w32's does
+  with its own) after its handler took Ctrl+C k waits until every other
+  taker is done with k before it ends, so a
+  shell's handler has run before the shell can see its child end (on
+  Windows the parent's handler starts about 12 ms before a
+  handler-less child's end is visible; handlers otherwise start
+  together and none waits for another; #33). Taken is not enough: a
+  handler thread that woke but was scheduled late (a busy host) ran
+  busybox-w32's handler after the shell had cleared its "got a signal"
+  flag for the next line, which then ate the next key as ^C. A handler
+  that blocks is waited for 1 s at most (`... ends with Ctrl+C k
+  before N other process(es) handled it`, a warning).
 - **The host** (`user/conhost`): the kernel starts `conhost.exe` (a boot
   module) with the session's id and the program's file name before the
   program. Its system calls: GalaConsoleHost(id, event) 0x7f3a (become
@@ -2338,7 +2419,15 @@ shutdown.
   is the NT key handle itself. The functions return Win32 errors from
   RtlNtStatusToDosError. RegGetValue filters by type (RRF_RT_*,
   REG_BINARY of 4/8 bytes for DWORD/QWORD; its flags are checked first),
-  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. The A
+  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. As
+  Windows 11 does, an expanded string is read over the stored one: the
+  stored value's tail stays after the expansion's NUL and pcbData is the
+  larger of the two sizes (the stored size when the expansion is
+  shorter), an upper bound rather than the string's length; a size query
+  for an unexpanded string reports stored + 2 (room for a NUL), and one
+  that fails with ERROR_UNSUPPORTED_TYPE still reports it.
+  RRF_RT_REG_EXPAND_SZ without RRF_NOEXPAND is that error too (the
+  expanded value is a REG_SZ). The A
   functions convert names and string data (REG_SZ, REG_EXPAND_SZ,
   REG_MULTI_SZ) through the ANSI code page (UTF-8 on gala).
 
@@ -2408,9 +2497,14 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   loading, unloading and thread notifications.
 - **Search** (`map_dll`): the executable's directory, SetDllDirectoryW's
   directory (LdrSetDllDirectory, kept under the loader lock), then
-  `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A name with an
-  absolute directory (`C:\jdk\bin\server\jvm.dll`) is loaded from that
-  directory only; its imports are searched as usual, or, with
+  `<NtSystemRoot>\System32` (from KUSER_SHARED_DATA). A bare name is
+  the loaded module of that name if there is one. A name with an
+  absolute directory (`C:\jdk\bin\server\jvm.dll`; `.` and `..`
+  resolved as RtlDosPathNameToNtPathName does) is loaded from that
+  directory only, and is the loaded module only if that one came from
+  the same file: a DLL of the same name from another directory is a
+  second module (DXVK's `dxgi.dll` beside a program, and the Vulkan
+  loader's `System32\dxgi.dll`; `loader_test`). Its imports are searched as usual, or, with
   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR (LdrLoadDll's DllPath with its low bit
   set, from LoadLibraryExW), first in that directory, for every
   dependency of that load (CPython loads `DLLs\_ctypes.pyd` and its
@@ -2509,7 +2603,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 - **Static TLS** (`tls.rs`): each image with a TLS directory gets an
   index at load; each thread has an array at
   TEB.ThreadLocalStoragePointer with a block per image (the template,
-  then zero fill); a DLL loaded later gets blocks in every existing
+  then zero fill, which gala zeroes; Windows leaves the zero fill as its
+  heap had it, freed loader strings or zeros by chance, so a program
+  relying on it relies on luck and `tls_test` reads it without checking
+  it); a DLL loaded later gets blocks in every existing
   thread. Threads started by kernel32 call `GalaInitializeThread` first
   (their blocks, then DLL_THREAD_ATTACH to TLS callbacks and DllMains in
   load order; Windows does this in LdrInitializeThunk) and ExitThread
@@ -3327,7 +3424,13 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   GetProcAddress): GetNodeClusterState reports ClusterStateNotInstalled;
   functions returning handles give NULL with RPC_S_SERVER_UNAVAILABLE (no
   cluster service), state queries the Unknown state, the rest that error;
-  resutils parses CLUSPROP property lists (`clusapi_test`).
+  resutils parses CLUSPROP property lists (`clusapi_test`). A deliberate
+  difference: gala's ResUtilFind*Property find a property anywhere in the
+  list, within its size, by name; Windows' examine only the first
+  property and ignore the size, so a later property is not found or the
+  walk runs off the list (Windows 11), and a name the first property does
+  not have is answered from it all the same (Windows Server 2025). The test uses one property per list, the shape
+  both answer alike.
 - **cmd.exe** (`user/cmd`, built as a program and placed in System32;
   `cmd_test`) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -4401,7 +4504,11 @@ SOCKET values are the endpoint handles.
   WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER); asyncio's _overlapped
   asks for all of them at import); gala's mswsock.dll forwards its
   AcceptEx, GetAcceptExSockaddrs and TransmitFile exports there (Go
-  imports them from mswsock). DisconnectEx closes both directions
+  imports them from mswsock). A deliberate difference: on Windows 11
+  mswsock's GetAcceptExSockaddrs export is another function than the one
+  WSAIoctl hands out and leaves the address pointers NULL; gala's export
+  does the work (`winsock_async_test` uses WSAIoctl's, as documented).
+  DisconnectEx closes both directions
   gracefully (IOCTL_AFD_DISCONNECT), overlapped or not; its
   TF_REUSE_SOCKET is not supported (WSAEOPNOTSUPP, ledgered), nor is
   TransmitFile (WSAEOPNOTSUPP, ledgered; callers fall back to read and
@@ -4867,7 +4974,9 @@ the program always sees WM_SIZE/WM_MOVE.
   user32's input pump posts it to the window's thread and
   DispatchMessage calls SetWindowPos, no longer maximized) and
   GALA_WM_MINIMIZED (the desktop minimized the window, so IsIconic
-  follows).
+  follows); for windows a kernel server serves (Wayland's), also
+  GALA_WM_ACTIVE and GALA_WM_POINTER_LEFT ("Linux applications on the
+  desktop (Wayland)", "Input").
 - **Mouse** (`Desktop::pointer`): a press on the start button toggles
   the menu; with the menu open, a press elsewhere only closes it. A
   taskbar button restores a minimized window, minimizes the active one,
@@ -4916,10 +5025,14 @@ the program always sees WM_SIZE/WM_MOVE.
 
 - The desktop queues `InputEvent`s (owner, window id, message, wParam,
   lParam; at most 512; a move replaces the window's unread move) and
-  signals the owner's event registered with GalaWindowListen after
-  letting go of its lock. user32 creates its queue event on first use
-  and registers it; `next` (GetMessage, PeekMessage) first moves input
-  in with GalaWindowInput (24-byte records) to the window's thread.
+  tells the owner's listener after letting go of its lock (every path
+  that can queue input or move the activation does: `with` too): an
+  event registered with GalaWindowListen is signalled
+  (`Listener::Event`), a kernel server's thread woken
+  (`Listener::Server`: the Wayland server for a Linux client's
+  windows). user32 creates its queue event on first use and registers
+  it; `next` (GetMessage, PeekMessage) first moves input in with
+  GalaWindowInput (24-byte records) to the window's thread.
 - **Two key states**, as Windows documents: GetAsyncKeyState's follows
   the input as it is moved in, GetKeyState's (and TranslateMessage's)
   follows the key messages as they are taken from the queue (one state
@@ -5503,6 +5616,15 @@ allocator (`gala_heap`).
 the classes (once). comctl32 imports user32 (the controls are windows)
 but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
 
+- **Which comctl32** (`common::version6`): Windows gives a process
+  comctl32 6.10 (WinSxS) when its executable's manifest (RT_MANIFEST 1)
+  depends on Microsoft.Windows.Common-Controls 6, else 5.82. gala has one
+  comctl32 that answers as the one the process would get where the two
+  differ visibly: TTM_ADDTOOL takes a TOOLINFO up to lParam on 5.82 and
+  also the full one (with lpReserved) on 6, nothing larger on either
+  (Windows 11; `comctl32_test`, `gui_test` without a manifest,
+  `manifest_test` with one). A DLL's own activation context and UTF-16
+  manifests are not looked at.
 - **Common pieces** (`common.rs`): each control's state in a `Store` (by
   window, under a spin lock **that is never held while a message is
   sent**), drawing helpers (rounded fills, text through DrawTextW) and
@@ -5624,7 +5746,10 @@ then riched20.dll).
   CRLF and a lone LF into CR (a single-line control keeps the first
   paragraph); WM_GETTEXT/WM_GETTEXTLENGTH give CRLF; EM_GETTEXTEX CR or
   CRLF (GT_USECRLF), Unicode (1200) or ANSI (WideCharToMultiByte);
-  EM_GETTEXTLENGTHEX characters, CRLF characters or bytes. "RichEdit20A"
+  EM_GETTEXTLENGTHEX characters (GTL_DEFAULT, GTL_NUMCHARS) or, with any
+  other flags, bytes (GTL_USECRLF alone counts bytes; a Unicode window's
+  are UTF-16's whatever the code page, as Windows 11 counts), CRs counted
+  as CRLFs with GTL_USECRLF. "RichEdit20A"
   takes and gives ANSI text (gala's user32 passes SendMessageA's strings
   unchanged and has no ANSI windows, so the class's own procedure
   converts).
@@ -7785,8 +7910,15 @@ same program as SYSTEM).
   STATUS_HANDLE_NOT_CLOSABLE (ERROR_INVALID_HANDLE), CloseDesktop
   STATUS_DEVICE_BUSY (ERROR_BUSY), CloseWindowStation of the process's
   station too. A thread's own desktop handle is freed when it ends.
-- **Other calls**: OpenWindowStation (an unknown or empty name is
-  STATUS_OBJECT_NAME_NOT_FOUND, a backslash STATUS_OBJECT_PATH_NOT_FOUND),
+- **Other calls**: OpenWindowStation (an unknown name is
+  STATUS_OBJECT_NAME_NOT_FOUND, a backslash inside the name
+  STATUS_OBJECT_PATH_NOT_FOUND, a leading one STATUS_OBJECT_PATH_SYNTAX_BAD;
+  the empty name opens the caller's logon session's own station,
+  `Service-0x<high>-<low>$` (not visible), if the logon has one, even for
+  an interactive process connected to WinSta0, and is
+  STATUS_OBJECT_NAME_NOT_FOUND if it has none: OpenWindowStation never
+  makes it; a Windows 11 desktop's logon had one, a Windows Server 2025
+  runner's had none),
   OpenDesktop (empty: STATUS_OBJECT_TYPE_MISMATCH, a backslash
   STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
   OpenInputDesktop (the process's station's Default, a new handle each
@@ -8084,8 +8216,9 @@ Design rules:
   objects are core objects; an NT handle and a Linux fd are two views of
   one object (later: a Windows and a Linux program on one pipe, each
   launching the other).
-- **Identity**: Linux uid/gid map to SIDs on the existing tokens; one
-  access-check implementation.
+- **Identity**: Linux uid/gid map to SIDs on the existing tokens
+  (`lx::identity`, "The lx module"); one access-check implementation
+  (not yet: Linux checks a file's mode bits as its owner's).
 - **One file system** for both: case sensitivity per directory, POSIX
   metadata per file, symlinks and hard links, POSIX unlink/rename of
   open files.
@@ -8106,7 +8239,7 @@ Design rules:
 | 2. Per-process system-call dispatch | built |
 | 3. Core process vs NT process | built (the `Core` still lives in `nt`) |
 | 4. File-system metadata | built for Linux (NT surface planned) |
-| 5. Shared objects | planned |
+| 5. Shared objects | first object built: AF_UNIX sockets (`unix`); pipes, files and TCP sockets planned |
 | 6. `net` free of `nt` | built |
 
 1. **Terminal core**: the pty as a core object (master/slave pair with a
@@ -8182,6 +8315,73 @@ Design rules:
    (CreateSymbolicLinkW).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
+   The first is the AF_UNIX socket ("AF_UNIX sockets" below): the core
+   `unix` module owns the socket, its name, its connection, its queues
+   and the rights in flight; `lx::unix` is the Linux view, Windows'
+   AF_UNIX through afd will be the NT one. Pipes, files and TCP sockets
+   still keep their state in the personalities.
+
+#### AF_UNIX sockets
+
+Where a socket and its file-system name live is seam 5's question; the
+answer keeps both core objects, so a Windows program's AF_UNIX socket
+(Windows has one, through afd, `AF_UNIX` = 1, a socket file shown as a
+reparse point) can later bind, connect to and accept from the same
+names and connections as a Linux program's.
+
+- **The socket** is `unix::Socket` (`kernel/src/unix.rs`, core: no
+  `nt`, no `lx`; xtask's `unix_sockets_do_not_depend_on_a_personality`
+  keeps it so): its kind (stream, seqpacket, datagram), its creator's
+  credentials (`Cred`: pid, uid, gid), its name, its phase (fresh,
+  listening with its queue of connections not yet accepted, connected
+  to a `Conn`), its peer's name and credentials, and its waiters
+  (`Waiters`: thread ids, woken through `crate::runtime`). A
+  personality wraps it in its own description (`lx::unix::UnixSocket`
+  in an `lx::state::Fd`; an afd endpoint for NT) and calls `release`
+  at that description's last close.
+- **The name** is either a socket node of the shared file system
+  (`RamFs::create_socket`: a node of its own kind, S_IFSOCK for Linux,
+  a reparse point for NT, as Windows shows an AF_UNIX socket's file) or
+  an abstract name (bytes after a leading NUL: in no file system). The
+  binding (name to socket) is the core's table `BOUND`, keyed by the
+  node's id or the abstract bytes, not a field of the node: the node is
+  the file system's and outlives the socket (Linux leaves a socket's
+  file behind when it closes; a connect to it is then ECONNREFUSED),
+  the binding lives exactly as long as the bound socket. The bound
+  socket keeps the node open (an open without data access), so an
+  unlinked node's id is not reused while the binding names it; rename
+  keeps the binding (the node is the same). Path resolution, the mode
+  (0777 less the umask) and the errors of a path stay the
+  personality's.
+- **A connection** (`Conn`) holds a queue toward each side (records:
+  bytes, the rights that came with them, the quota charge for them),
+  each side's shutdown flags as Linux keeps them (RCV, SEND; a stream
+  or seqpacket side that closes sets both on its peer) and arrival
+  counters (epoll's EPOLLET). It references its sockets' waiters, not
+  the sockets, so nothing cycles. connect makes the listener's side at
+  once and queues it for accept (backlog + 1 may wait, as Linux; then
+  `Error::Full` with the listener's waiters to block on).
+- **Rights** (Linux's SCM_RIGHTS) are opaque to the core
+  (`Box<dyn Any + Send>`): the Linux view passes `KArc<Fd>`, so the
+  receiver's descriptor is the same open file description (its offset,
+  its flags, a memfd's pages). The core drops rights only outside its
+  locks: dropping one can release another socket. A stream read stops
+  after a record that carried rights, so they arrive with their bytes.
+- **Waiting** is the personality's: add to the socket's waiters,
+  prepare, look again, block (`lx::unix::wait_on`; poll and epoll put
+  the thread on the waiters through `poll::Watch`). Every change of a
+  socket, its connection or its listener's queue wakes them.
+- **Limits**: `CAPACITY` (212992, Linux's default send buffer) per
+  direction, each message counting `RECORD_OVERHEAD` more; charged to
+  the sending process's nonpaged pool quota (`quota::Held`: ENOBUFS
+  over it). Not kept across reboots (socket nodes are not in the change
+  log). Rights that refer back to their own queue through a socket
+  (a socket sent over itself) are not collected (Linux has a collector
+  for such cycles).
+- **Observability**: `unix::dump` in the state dump (`dump: unix:` a
+  line per named socket: kind, creator, name, phase, queued, shutdown,
+  peer, waiters); the personality's events (`lx unix`, `lx unix
+  rights`).
 6. **`net` free of `nt`**: `kernel/src/net/` reaches threads, waits and
    time through `crate::runtime` (`kernel/src/runtime.rs`): the kernel's
    `sched`/`time`, or with `hosted` gala-um's host threads and clocks
@@ -8192,9 +8392,10 @@ Design rules:
 ### The Linux layer's milestones
 
 Test first: static (musl) Linux test programs in `user/lx/` (built by
-`user/lx/build.sh`, binaries in `user/lx/bin/`, each also as `-pie`)
-whose expected results come from running them on real Linux; scenarios
-in xtask. Most programs need about 150-200 of Linux's ~450 system
+`user/lx/build.sh`, binaries in `user/lx/bin/`, each also as `-pie`),
+and dynamically linked glibc ones (`GLIBC_TESTS`: dyn_test, with its
+shared libraries), whose expected results come from running them on
+real Linux; scenarios in xtask. Most programs need about 150-200 of Linux's ~450 system
 calls; priorities come from `strace` of target programs on real Linux.
 
 | Milestone | Scope | State |
@@ -8202,7 +8403,7 @@ calls; priorities come from `strace` of target programs on real Linux.
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
 | 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run, by name through symbolic links (`lx_busybox`); links, unlink of open files, case-sensitive directories (`lx_fs`); threads, futex and musl's pthreads run (`lx_thread`) |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
-| 4 | dynamic linking (ld.so, glibc), epoll, sockets | TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
+| 4 | dynamic linking (ld.so, glibc), epoll, sockets | glibc programs run through ld.so with shared libraries, dlopen and TLS (`lx_dyn`, ROADMAP LD step 1); TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); AF_UNIX sockets with SCM_RIGHTS and memfd (`lx_unix`, `lx_memfd`, LD step 2); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
 
 Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
@@ -8211,7 +8412,14 @@ mmap_test, arch_prctl_test, auxv_test (milestone 1, with scenarios
 `lx_auxv` and their `_pie` variants), pipe_test (`lx_pipe`), fileio_test,
 exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
-`lx_epoll`, `lx_fs`, each also `_pie`), and clock_test, fork_test,
+`lx_epoll`, `lx_fs`, each also `_pie`), forkmem_test (fork's memory:
+copy-on-write private pages, shared MAP_SHARED anonymous memory and its
+futexes: `lx_forkmem`, `_pie`), memfd_test (`lx_memfd`, also `_pie`;
+ROADMAP LD step 2), unix_test (`lx_unix`, also `_pie`; LD step 2),
+wl_test (a Wayland client, recorded against weston, against the
+kernel's Wayland server: `lx_wl`, also `_pie`; LD step 2),
+dyn_test (glibc, dynamic:
+`lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
 static busybox from busybox.net (a `PREBUILT`) runs our scripts in
@@ -8278,12 +8486,27 @@ The running parts (milestone 1; `lxrun=`):
   `lxargs=` gives each one's whole argv (argv[0] first, percent-encoded
   shell-style words, comma-separated per program; default the path
   alone), `lxenv=` the environment of all of them (default none)):
-  - the Linux path `/a/b` is `C:\a\b` (one file system); the file is read
-    whole and parsed; an `ElfError` becomes ENOEXEC/EINVAL; a PT_INTERP
-    is refused (milestone 4); the process starts in its program's
-    directory (as `cargo xtask lx-expect` runs the tests), umask 022;
+  - the Linux path `/a/b` is `C:\a\b` (one file system), walked as any
+    Linux path (`file::executable_at`: symbolic links followed, the
+    owner's x bit); the file is read whole and parsed; an `ElfError`
+    becomes ENOEXEC; the process starts in its program's directory (as
+    `cargo xtask lx-expect` runs the tests), umask 022;
+  - a dynamic program (PT_INTERP, ROADMAP LD): its interpreter (glibc's
+    ld.so) is read the same way (a relative path from the program's
+    directory), parsed (ELIBBAD for one that is not a loadable ELF
+    image or has an interpreter itself; its open's errno, ENOENT or
+    EACCES, as execve(2) lists) and placed as Linux places an mmap
+    without a hint: an ET_DYN interpreter ends at or below `MMAP_TOP`,
+    aligned down to its largest p_align (ld.so's own mmaps go below
+    it); both images are mapped; the thread starts at the interpreter's
+    entry, AT_ENTRY and AT_PHDR stay the program's, AT_BASE is the
+    interpreter's load address. ld.so then loads the libraries itself
+    through openat, read/pread64, fstat and file mmap. `prepare` does
+    every step that can fail before anything is mapped (the auxv's
+    machine inputs, AT_RANDOM and AT_HWCAP, passed in: host tests);
   - ET_EXEC is mapped at its addresses, ET_DYN at `DEFAULT_DYN_BASE`
-    (rounded to its alignment); each segment's page range goes in the
+    (rounded to its alignment; a dynamic PIE too, as Linux places one
+    without randomization); each segment's page range goes in the
     VAD (`Vad::map_exact`, page-granular, MEM_PRIVATE, committed); a page
     two segments share gets both protections; the file bytes are copied
     into frames mapped at once (`write_initial`), the bss past them is
@@ -8291,7 +8514,8 @@ The running parts (milestone 1; `lxrun=`):
   - the stack: 8 MiB committed ending at `mm::STACK_END`
     (0x7fff_fffe_0000), executable only if PT_GNU_STACK says so (or is
     missing); `stack::build`'s bytes (gap 0, AT_RANDOM from
-    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, uid/gid 1000)
+    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, AT_UID/AT_GID
+    the program's ids, `lx::identity`)
     copied to its top;
   - then `nt::process::create_bare` (no PEB, ntdll, handles or image
     layout: `Process::layout()` is None) and `thread::create`, which
@@ -8333,21 +8557,105 @@ The running parts (milestone 1; `lxrun=`):
   parent's pid and the exit signal, the children (running, ended
   zombies with their status, threads waiting in wait4), the
   stdout/stderr line buffers; dropped in `nt::process::finish`
-  (`lx::process_ended`): the fds close first, then the parent is told
+  (`lx::process_ended`): the memory goes first (`mm::clear`: frames it
+  shared copy-on-write are its parent's alone again, and a section's
+  frames are freed only once no page table maps them, though the
+  address space itself may outlive the process, held by a reap or by
+  `run`; `framecheck` caught the order), the fds close next, then the parent is told
   (a zombie, SIGCHLD, its wait4 waiters woken), so a parent woken by a
   child's end reads EOF from a pipe only the child held.
-- **Memory** (`lx::mm`): anonymous mmap (the hint if free, else
-  top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
-  gives EEXIST), munmap (cuts VAD allocations: `Vad::unmap_range`),
-  mprotect (every page must be mapped, else ENOMEM), brk (byte-exact
-  break, pages up to it rounded and mapped; a refused request returns
-  the old break). Pages are demand-zero through the core fault path;
-  `vm::sync_range` frees the frames of removed pages. Linux overcommits:
-  the commit charge counts but never refuses. MAP_SHARED anonymous is
-  private: a fork copies it (not yet shared with the child).
+- **Memory** (`lx::mm`; mmap_test, dyn_test): mmap (the hint if free,
+  else top-down below `MMAP_TOP`; MAP_FIXED replaces, MAP_FIXED_NOREPLACE
+  gives EEXIST; MAP_DENYWRITE, MAP_STACK and the other hints ignored, as
+  Linux ignores them), munmap (cuts VAD allocations:
+  `Vad::unmap_range`), mprotect (every page must be mapped, else
+  ENOMEM), brk (byte-exact break, pages up to it rounded and mapped; a
+  refused request returns the old break). Anonymous pages are
+  demand-zero through the core fault path; `vm::sync_range` frees the
+  frames of removed pages. Linux overcommits: the commit charge counts
+  but never refuses. MAP_SHARED anonymous memory (and a MAP_SHARED
+  mapping of /dev/zero) is a view of a pagefile-backed section of its
+  own (`Section::new`, pages made zeroed at the first touch), MEM_MAPPED,
+  so a fork's child shares it, pages first touched after the fork
+  included (forkmem_test); an mremap growing it maps past the section's
+  end, pages that fault (Linux grows the memory).
+  - **File mappings**: an mmap of a regular file is a view
+    (`nt::section::View` in the process's `views`, MEM_MAPPED in the
+    VAD) of a section made for it (`Section::new_linux_file`, holding the
+    open file description: the mapping outlives its fd and its name,
+    mmap(2)), whose pages are the file's own (ramfs keeps a mapped file
+    in whole pages), mapped at the first touch by the core fault path and
+    shared by every process mapping the file. MAP_PRIVATE pages are
+    PAGE_WRITECOPY while PROT_WRITE (the first write makes a private
+    copy: `vm::copy_on_write`; a page never written shows later writes
+    to the file, as Linux's page cache does); MAP_SHARED pages on a file
+    open for writing write the file; pages past the file's last page
+    fault with STATUS_IN_PAGE_ERROR (`vm::resolve_once`, from
+    `section::beyond_end`), which ends a Linux process with SIGBUS as
+    Linux's do (mmap_test; a system call reading or writing there
+    gets EFAULT).
+    Errors as mmap(2) lists them: EBADF (no fd, O_PATH), ENODEV (a
+    directory, pipe, socket or device; /dev/zero maps anonymous memory),
+    EACCES (not open for reading; MAP_SHARED with PROT_WRITE without
+    write access or on an O_APPEND file; mprotect beyond that later),
+    EOVERFLOW (offset plus length wraps). Linux cuts and moves mappings
+    by pages, so the views are cut with them (`mm::cut`): a munmap,
+    MAP_FIXED, mprotect or mremap over part of a view leaves views for
+    the parts outside, each at its offset (host-tested); a removed view
+    is dropped after the locks (its section may close the file). Lock
+    order: views, VAD, space.
+  - **mremap** (mmap_test): shrinks in place; grows in place when the
+    pages after it are free (anonymous memory, or the next pages of a
+    file's view); else with MREMAP_MAYMOVE moves the mapping whole (to a
+    free range, or MREMAP_FIXED's address, replacing what is there):
+    its VAD runs, its views and its pages move, frames and all
+    (`UserSpace::move_page`: no copy). A file view reaches as far as
+    the file is when a page is touched (`Section::frame` asks the file
+    system), so a mapping grown after the file grew shows the new pages
+    (memfd_test). The range must be mapped
+    (EFAULT); without MREMAP_MAYMOVE and no room ENOMEM;
+    MREMAP_DONTUNMAP and old length 0 are EINVAL, ledgered.
+  - **madvise**: MADV_DONTNEED drops the range's frames (anonymous pages
+    read zero again, a private file page written goes back to
+    copy-on-write and shows the file); the hints (NORMAL, RANDOM,
+    SEQUENTIAL, WILLNEED, FREE, (UN)MERGEABLE, (NO)HUGEPAGE, DONTDUMP,
+    DODUMP) change nothing; other advice EINVAL, ledgered; ENOMEM if the
+    range is not all mapped.
+  - execve unmaps everything, views too (`mm::clear`). The program and
+    its interpreter are still mapped by copying their bytes into private
+    pages (not as file views: ROADMAP LD).
+- **memfd** (`lx::memfd`; memfd_test, `lx_memfd`): memfd_create
+  (MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL: mode 0666 and
+  F_SEAL_EXEC; MFD_HUGETLB and unknown flags EINVAL, ledgered; a name of
+  more than 249 bytes EINVAL) makes an anonymous file of the shared file
+  system ("Files": `RamFs::create_anonymous`), S_IFREG mode 0777 (no
+  umask), nlink 0, open read-write as one description, so read, write,
+  pread/pwrite, lseek, ftruncate, fallocate, fstat and fchmod are the
+  file calls'. fallocate (`lx::file::fallocate`; glibc's
+  posix_fallocate, which Wayland clients' buffer files use): the file
+  system keeps no holes, so mode 0 only grows the file to the range's
+  end (never shrinks it), KEEP_SIZE alone changes nothing, PUNCH_HOLE
+  (with KEEP_SIZE, as Linux requires) writes zeros over the range inside
+  the file; the other modes are EOPNOTSUPP, as on tmpfs, and ledgered;
+  SEAL_GROW refuses growing, SEAL_WRITE punching (EPERM).
+  Its pages are the file's whole pages, so every mapping of it shares
+  them: in one process, through a fork, or a descriptor passed with
+  SCM_RIGHTS (the same description). fcntl F_ADD_SEALS/F_GET_SEALS:
+  the seals live on the node (`ramfs::Node::seals`); SHRINK and GROW
+  refuse a ftruncate that shrinks or grows it and a write past its end,
+  WRITE (and FUTURE_WRITE) writes and writable shared mappings (EPERM),
+  EXEC a change of the execute bits, SEAL further seals (EPERM); WRITE
+  cannot be added while a shared mapping of it open for writing exists,
+  even a read-only one (EBUSY, as Linux 6.18 shows); a read-only shared
+  mapping of a write-sealed file gets a read-only section (mprotect to
+  PROT_WRITE: EACCES). F_ADD_SEALS on an fd not open for writing is
+  EPERM, on what is not a memfd EINVAL. A process's memory is released
+  when it ends (`lx::process_ended`: `mm::clear`, before the parent
+  hears of it, as Linux does), so its mappings no longer count then.
+  Events: `lx memfd` and `lx memfd seal` (`events=ipc`).
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
-  munmap, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
+  munmap, mremap, madvise, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
   rt_sigpending, rt_sigtimedwait (below), fork, clone (CLONE_THREAD: a
   thread; only an exit signal of SIGCHLD: a fork; CLONE_VM|CLONE_VFORK:
   a vfork; other flags ENOSYS), wait4, ioctl (ENOTTY),
@@ -8362,7 +8670,8 @@ The running parts (milestone 1; `lxrun=`):
   it has; else EPERM), getppid, uname (`Linux`, `gala`, release
   `6.18.0-gala`: the corpus's kernel, `x86_64`), the file calls, execve,
   vfork, kill, rt_sigsuspend, the clocks and timers, sockets and poll
-  (below),
+  (below), clone3, set_robust_list and get_robust_list (below),
+  prlimit64, getrlimit, setrlimit and getrandom (`lx::resource`, below),
   arch_prctl (SET/GET FS/GS; a base at or above TASK_SIZE is EPERM),
   pipe and pipe2 (O_NONBLOCK, O_CLOEXEC; blocking reads and writes wait
   on the pipe's wait queue: `lx::wait`). A pipe keeps its bytes as Linux does, in
@@ -8376,6 +8685,34 @@ The running parts (milestone 1; `lxrun=`):
   a buffer fault before anything was written is EFAULT). readv reads
   into one vector after another while each fills. Anything else:
   `errno::to_return(ENOSYS)`.
+- **Linux identity** (`lx::identity`; id_test, `lx_id`): a Linux
+  program is the account its NT token is. The uid is a function of the
+  token's user SID: SYSTEM is root (0); a local account of this machine
+  with RID 1001 or more is RID - 1 (the boot user `gala`, RID 1001, is
+  1000, Linux's first user); any other SID is `nobody` (65534). The gid
+  is the user's own group of the same number (root's 0); the
+  supplementary groups are it and the enabled token groups with Linux
+  names (BUILTIN\Administrators `sudo` 27, BUILTIN\Users `users` 100).
+  Real, effective and saved ids are the same (no setuid programs):
+  setuid/setgid to one's own id succeed, anything else EPERM; chown
+  keeps the caller's ids. Every place Linux reports ids takes them from
+  there: getuid and friends, getgroups, getresuid/getresgid, auxv's
+  AT_UID/AT_GID, SO_PEERCRED, siginfo's si_uid, stat's owner (the
+  caller's, as before: we own every file; root for the user database),
+  the Wayland server's credentials (the boot user's). **The user
+  database** is made at boot from the accounts (`nt::accounts::
+  local_users`: `gala` and `SAM\Gala\Users`) and published as two
+  files of a ramfs volume of their own, bound by the walk over
+  `/etc/passwd` and `/etc/group` (listed in `/etc`, covering any file
+  of those names there; `/etc` made if missing): root's 0644 files
+  (opening them for writing EACCES, chmod EPERM, unlink or rename
+  EBUSY), never in the change log, never `C:\etc\passwd`. A user's
+  home is their profile, `/Users/<name>` (the boot user's made at boot
+  if no module made it); root's is SYSTEM's
+  (`/Windows/System32/config/systemprofile`); the shell `/bin/sh`.
+  Limits: an account added after boot appears at the next (there is no
+  NetUserAdd yet); a file's owner is not yet its security descriptor's
+  owner (the caller's for every file but the user database's).
 - **Files** (`lx::file`; fileio_test and fs_test, `lx_fileio`,
   `lx_fs`): Linux paths walked on the shared ramfs (`/` separators, `.`
   and `..` by the walk, ENOTDIR/ENOENT on the way, a trailing slash makes
@@ -8389,7 +8726,16 @@ The running parts (milestone 1; `lxrun=`):
   per walk (ELOOP, path_resolution(7)). Names compare as their
   directory's: exactly in a directory a Linux program made, otherwise
   case-insensitively (the boot's `/lx`, NT's directories; ramfs
-  "Files"). An open registers with the file system sharing
+  "Files"). **`/run`** is mounted on it (run_test, `lx_run`): a ramfs
+  volume only the Linux view reaches (ramfs "Volumes"), made at the
+  first walk, a tmpfs as Linux has it. The walk enters it at `run` in
+  `/` (a `C:\run`, if one exists, is hidden by it); `..` of its root is
+  `/`; its root has no name in `/` to remove or rename (rmdir, rename:
+  EBUSY, as `/`), mkdir of it EEXIST; getdents64 of `/` lists `run`
+  after `..`; its nodes' st_dev is `RUN_DEV`, the shared tree's `DEV`;
+  getcwd puts `/run` before a path in it; a rename whose parents, or a
+  link whose file and new parent, are on different sides is EXDEV
+  before any other check (Linux compares the mounts first). An open registers with the file system sharing
   everything and keeps the offset in the description (dup'ed and
   inherited fds share it; its lock is never held across user memory).
   The calls: open/openat/creat (O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
@@ -8398,7 +8744,8 @@ The running parts (milestone 1; `lxrun=`):
   O_PATH; O_TMPFILE EOPNOTSUPP), read,
   write, pread64/pwrite64, readv/writev, lseek (SEEK_DATA/HOLE: one hole
   at the end; a directory only back to an offset getdents64 gave),
-  ftruncate/truncate, fsync/fdatasync, the stat family (stat, lstat,
+  ftruncate/truncate, fallocate (see memfd above), fsync/fdatasync, the
+  stat family (stat, lstat,
   fstat, newfstatat with AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW, statx
   with STATX_BASIC_STATS whatever the mask asks, a reserved mask bit
   EINVAL), getdents64 (`.` and `..` first,
@@ -8435,6 +8782,40 @@ The running parts (milestone 1; `lxrun=`):
   woken by `release_vfork`); the child's memory is a copy, not shared
   (ledgered `linux clone flags missing` CLONE_VM): fork_test's vfork
   check does not pass yet.
+- **Limits and randomness** (`lx::resource`; exec_test): the resource
+  limits are the process's (`LxProcess::rlimits`, inherited by a fork,
+  kept by execve) and say what gala does: RLIMIT_STACK 8 MiB (the main
+  stack) with no hard limit, RLIMIT_NOFILE 1024/1024 (`MAX_FDS`),
+  RLIMIT_CORE 0 (no core files), the rest unlimited. prlimit64 (pid 0
+  or its own; another's is ESRCH, ledgered), getrlimit and setrlimit
+  follow the unprivileged rules (EINVAL soft above hard or a resource
+  past RLIM_NLIMITS, EPERM for a raised hard limit, EFAULT); a limit set
+  to anything but gala's value is kept and read back but not enforced
+  (ledgered `linux option missing`, the resource). getrandom: the
+  platform's generator (ready from the start: never blocks), EINVAL for
+  unknown flags or GRND_RANDOM|GRND_INSECURE; no generator is EAGAIN,
+  ledgered. `/proc/self/exe` (readlink/readlinkat, by exact path as the
+  devices are; glibc's ld.so reads it for `$ORIGIN`): the path of the
+  program the process runs (`LxProcess::exe`, its node: execve sets it,
+  to the interpreter for a `#!` script; a fork's child has its
+  parent's); other /proc paths are ENOENT (ledgered for readlink).
+- **Process attributes** (`lx::prctl`; prctl_test, `lx_prctl`): prctl's
+  PR_SET_NAME and PR_GET_NAME are the calling thread's name
+  (`state::Comm` in `LxThread`, Linux's "comm": up to 15 bytes and a
+  NUL; a new thread has its creator's, a fork's child its parent's,
+  execve gives the program's file name, the path it was given, and so a
+  script's own), PR_CAPBSET_READ the full bounding set (1 up to
+  CAP_LAST_CAP, 40; EINVAL beyond, by which libcap finds the last); any
+  other option EINVAL and ledgered (`linux option missing`, service
+  prctl). getresuid and getresgid: the one user's ids, three times.
+- **statfs** (`lx::file`; statfs_test, `lx_statfs`): statfs (the path
+  found as stat finds it, its errors) and fstatfs report the shared
+  file system as a tmpfs (TMPFS_MAGIC; 4 KiB blocks, the machine's
+  memory as its size and what is free of it as its room, no inode limit,
+  names of 255 bytes, ST_VALID, fsid 0); a pipe, a socket and an
+  anonymous inode their pseudo file systems' magics, without blocks.
+  fontconfig asks whether its cache may be mapped, libselinux whether
+  /sys/fs/selinux is there, GLib a file's file system.
 - **Clocks and timers** (`lx::time`, `lx::timer`; clock_test is the
   spec): clock_gettime/clock_getres (REALTIME and its variants from the
   system time, MONOTONIC, _RAW, _COARSE, BOOTTIME from the monotonic
@@ -8449,8 +8830,9 @@ The running parts (milestone 1; `lxrun=`):
 - **Sockets** (`lx::socket`; socket_test): AF_INET and AF_INET6 (dual
   stack unless IPV6_V6ONLY) stream sockets on `net::tcp`, the stack NT's
   AFD uses, with a token AFD does not know (Linux sockets poll, the
-  notify hook is AFD's): socket (SOCK_NONBLOCK, SOCK_CLOEXEC; datagram,
-  Unix and netlink sockets ledgered, refused), bind, listen (binds an
+  notify hook is AFD's): socket (SOCK_NONBLOCK, SOCK_CLOEXEC; datagram
+  and netlink sockets ledgered, refused; AF_UNIX is `lx::unix`), bind,
+  listen (binds an
   ephemeral port first if needed), accept/accept4, connect (blocking;
   non-blocking always EINPROGRESS, the next connect after it finished
   returns 0 once, then EISCONN; refused: ECONNREFUSED or SO_ERROR once,
@@ -8462,7 +8844,43 @@ The running parts (milestone 1; `lxrun=`):
   SO_REUSEADDR, SO_KEEPALIVE, SO_REUSEPORT, SO_BROADCAST, buffer sizes
   (doubled, as Linux reports them), SO_LINGER, timeouts, TCP_NODELAY
   kept and read back without effect on the stack; others ENOPROTOOPT,
-  ledgered). A socket closes with its last description.
+  ledgered), sendmsg/recvmsg (`lx::unix`'s: the iovecs gathered and
+  scattered; control data on TCP EINVAL, ledgered). A socket closes
+  with its last description.
+- **AF_UNIX sockets** (`lx::unix` on the core's `unix`, "AF_UNIX
+  sockets" above; unix_test, `lx_unix`): socket (SOCK_STREAM,
+  SOCK_SEQPACKET, SOCK_DGRAM, SOCK_RAW as datagram as Linux takes it,
+  other types ESOCKTNOSUPPORT; protocol 0 or PF_UNIX, else
+  EPROTONOSUPPORT) and socketpair (another family EOPNOTSUPP); bind to a
+  path (a socket node, mode 0777 less the umask; an existing name, even
+  the socket's own, EADDRINUSE; a missing directory ENOENT; a family
+  other than AF_UNIX or a length past 110 EINVAL), to an abstract name,
+  or autobind (only the family: a NUL and five hex digits); listen
+  (unbound or connected EINVAL; a datagram socket EOPNOTSUPP); accept
+  and accept4 (the peer's name, unnamed: the family alone; not
+  listening EINVAL); connect (the path followed: ENOENT; not a socket,
+  or nothing listening there, ECONNREFUSED; another kind EPROTOTYPE;
+  connected EISCONN; a full backlog EAGAIN, or it blocks); read/write,
+  readv/writev, send/recv/sendto/recvfrom, sendmsg/recvmsg (MSG_PEEK,
+  MSG_DONTWAIT, MSG_WAITALL, MSG_NOSIGNAL, MSG_TRUNC,
+  MSG_CMSG_CLOEXEC; an unconnected stream's read EINVAL, write
+  ENOTCONN; EPIPE with SIGPIPE on a stream or seqpacket that cannot
+  send; a datagram to a pair whose peer went ECONNREFUSED; a message
+  truncated: MSG_TRUNC); SCM_RIGHTS (the fds checked, EBADF, at most
+  253; recvmsg installs what its control buffer holds, the rest closed
+  with MSG_CTRUNC; msg_controllen the CMSG_SPACE used, at most what was
+  given; msg_flags keeps MSG_CMSG_CLOEXEC, as Linux's do); shutdown
+  (unconnected: 0); getsockname/getpeername (a path with its NUL in the
+  length; the socket keeps its name after an unlink); SO_TYPE,
+  SO_DOMAIN, SO_PROTOCOL, SO_ACCEPTCONN, SO_ERROR, SO_PEERCRED,
+  SO_PASSCRED, SO_SNDBUF/SO_RCVBUF (doubled), the timeouts (kept);
+  poll and epoll (a fresh socket OUT|HUP, a listener IN with a
+  connection waiting, a connection IN with bytes or a shut peer, RDHUP
+  then, OUT while a quarter of the buffer or less waits, HUP once both
+  directions are shut; a datagram pair's peer going changes nothing
+  but sends). fstat: S_IFSOCK; open of a socket's node ENXIO; stat
+  S_IFSOCK; getdents DT_SOCK. Not yet, ledgered: a datagram socket's
+  connect or sendto by name, SCM_CREDENTIALS, rights on a peek.
 - **poll** (`lx::poll`; poll_test's poll and select parts, socket_test):
   poll, ppoll, select, pselect6 over every kind of description (pipes:
   IN with bytes, HUP without writers, OUT with a whole page free, ERR
@@ -8493,6 +8911,18 @@ The running parts (milestone 1; `lxrun=`):
   (`Fd::watchers`, `Epoll::forget`); closing the epoll fd empties its
   set. Ready entries come out in the order they were added; struct
   epoll_event is the packed 12 bytes.
+- **eventfd** (`lx::eventfd`; eventfd_test, `lx_eventfd`): eventfd and
+  eventfd2 (EFD_SEMAPHORE, EFD_NONBLOCK, EFD_CLOEXEC; another flag
+  EINVAL), a 64-bit counter as `Object::EventFd`: a read (8 bytes at
+  least, else EINVAL) gives it and zeroes it (a semaphore's gives 1 and
+  takes 1) and blocks while it is 0, a write adds (u64::MAX is EINVAL)
+  and blocks while the sum would pass 0xffff_ffff_ffff_fffe, EAGAIN for
+  either when non-blocking; readable while above 0, writable while 1
+  fits. Readers and writers wait on its core `Waiters` (as AF_UNIX
+  sockets do), which `poll::Watch` joins for poll, select and epoll; a
+  value read and not copied out (EFAULT) is given back. fstat: an
+  anonymous inode (0600); fstatfs: anon_inodefs. GLib's main loop wakes
+  its threads with one (it falls back to a pipe without).
 - **Waiting** (`lx::wait`): a thread blocks by `prepare` (the
   scheduler's prepare_wait, its deadline the earlier of the call's and
   ITIMER_REAL's), then `block`, which records it as its signal state's
@@ -8504,10 +8934,11 @@ The running parts (milestone 1; `lxrun=`):
   after its check finds it waiting. poll, select and epoll add the
   thread to every pipe they look at (`poll::Watch`) and look once more
   after preparing. Sleeps, rt_sigsuspend, pause, rt_sigtimedwait,
-  futex waits and wait4 block the same way. Sockets have no wait queue
-  (the stack's notify hook is AFD's): their waits, and poll/epoll over a
-  socket or a nested epoll, look again every millisecond (`dispatch::
-  pause`, `wait::POLL_NS`) until seam 5 gives the core objects queues.
+  futex waits and wait4 block the same way, and AF_UNIX sockets on
+  their core waiters. TCP sockets have no wait queue (the stack's
+  notify hook is AFD's): their waits, and poll/epoll over a TCP socket
+  or a nested epoll, look again every millisecond (`dispatch::pause`,
+  `wait::POLL_NS`) until seam 5 gives the core objects queues.
 - **Threads** (`lx::threads`; thread_test): clone with
   CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD (required)
   and CLONE_SYSVSEM, CLONE_SETTLS, CLONE_PARENT_SETTID,
@@ -8529,15 +8960,44 @@ The running parts (milestone 1; `lxrun=`):
   (pthread_join), what was pending for it alone goes, and the process
   ends with its last thread (that thread's status); exit_group ends
   every thread. musl's pthreads (create, join, mutexes, condition
-  variables with FUTEX_REQUEUE, pthread_kill) run on these.
+  variables with FUTEX_REQUEUE, pthread_kill) and glibc's (dyn_test)
+  run on these. clone3 (thread_test; glibc tries it first) reads struct
+  clone_args (version 0 to 2: EINVAL below 64 bytes, E2BIG above a page
+  or for non-zero bytes past the fields known) and becomes clone: the
+  same flags, the exit signal from its field (EINVAL in the flags or
+  above 64), the stack as its lowest address plus its size (EINVAL for
+  one without the other), child_tid for both CHILD_SETTID and
+  CHILD_CLEARTID; a pidfd, set_tid, a cgroup and CLONE_CLEAR_SIGHAND
+  are ENOSYS, ledgered `linux clone flags missing`. set_robust_list
+  keeps each thread's list head (EINVAL for a length other than 24);
+  get_robust_list reads it back (0: the caller; another thread of the
+  process by its tid; ESRCH otherwise). The list is walked when the
+  thread ends (`futex::release_robust`; thread_test): at exit(2), and
+  for the threads still there when the process ends (exit_group, a
+  signal) before its memory goes. Each lock whose word holds the
+  thread's tid, list_op_pending's too, gets FUTEX_OWNER_DIED with
+  FUTEX_WAITERS kept, and one waiter wakes if it had waiters (a
+  non-private wake, so a waiter in another process sharing the memory
+  wakes); at most 2048 entries, an unreadable one ends the walk. The
+  word is read and written, not compared and exchanged as Linux does,
+  so a waiter's change from another process at that moment can be lost.
+  Logged: `lx: pid <p> thread <t> ended holding <n> robust locks (<w>
+  with waiters woken)` (and `its list is broken`). rseq is not
+  implemented (ENOSYS, logged and ledgered): registering one means
+  keeping its cpu_id current and aborting its critical sections on
+  preemption, migration and signals; glibc then goes without (its
+  sched_getcpu makes the system call).
 - **futex** (`lx::futex`; thread_test): WAIT (relative timeout), WAKE,
   REQUEUE and CMP_REQUEUE (both return woken plus moved), WAIT_BITSET
   (absolute timeout, FUTEX_CLOCK_REALTIME allowed: a real-time deadline
   is converted again on every wake) and WAKE_BITSET (bitset 0 EINVAL),
   with FUTEX_PRIVATE_FLAG; CLOCK_REALTIME with any other op is ENOSYS,
   as are the PI ops and WAKE_OP (ledgered). One table of waiters (key:
-  pid and address, so private and shared futexes are alike: no memory
-  is shared between processes yet), oldest first. A WAIT queues itself
+  pid and address; for a shared futex, without FUTEX_PRIVATE_FLAG, on
+  memory processes share, a view of a section that writes through such
+  as MAP_SHARED anonymous memory, the word's physical address under
+  pid 0, the same in every process: `section::shared_frame_at`;
+  forkmem_test), oldest first. A WAIT queues itself
   before it reads the word (a waker that changes the word then wakes
   either finds it queued or the read sees the change: EAGAIN), learns
   it was woken from its ticket having left the table, and takes itself
@@ -8612,10 +9072,23 @@ The running parts (milestone 1; `lxrun=`):
     software-reserved bytes in the FPU state.
 - **Fork** (`lx::fork`): fork, and clone with only SIGCHLD (the C
   library's fork), make a child core process (`create_bare`, parent_id
-  set) with the parent's VAD cloned (`Vad::try_clone`) and every mapped
-  page copied into its own frame at once (`map_private_copy`; no
-  copy-on-write yet, untouched pages stay demand-zero in both); the
-  charge follows (`charge::sync`, Linux overcommits); its Linux state is
+  set) with the parent's VAD cloned (`Vad::try_clone`), its views with
+  the same sections and their mapped pages as the same frames (a file's
+  MAP_SHARED and MAP_SHARED anonymous memory stay shared, an unwritten
+  MAP_PRIVATE file page stays copy-on-write in both), and every other
+  mapped page (anonymous memory, private copies) shared copy-on-write
+  (`UserSpace::share_into`: the frame gets the child as a second owner,
+  `mm::share_frame`, and is read-only in both; untouched pages stay
+  demand-zero in both). The parent's space stays locked for the whole
+  walk, so its other processors are flushed once and none writes a
+  frame after the child has it. A write fault on such a page
+  (`vm::resolve_once`, and `vm::copy_on_write` for a file's private
+  copy) goes through `UserSpace::make_writable`: a frame still shared is
+  copied into the writer's own and given up, one whose other owners are
+  gone is made writable as it is; the kernel's own writes (read(2) into
+  the page) take the same fault path. A frame that cannot be shared (no
+  owner counts, a count at its limit) is copied at once. The charge
+  follows (`charge::sync`, Linux overcommits); its Linux state is
   `state::fork`'s (the same open file descriptions in the same slots,
   so pipe ends stay open while either holds them; the same actions and
   mask; nothing pending); its thread (`thread::create_forked`) goes on
@@ -8640,10 +9113,13 @@ The running parts (milestone 1; `lxrun=`):
   program's transcript from those lines and compares it with
   expected.txt exactly.
 - **Observability**: `lx: exec <path> (<n> bytes): <plan>` (bias, entry,
-  break, a line per segment); `personality linux` on the process line
+  break, a line per segment) and, for a dynamic program, `lx: exec
+  interpreter <path> (<n> bytes): <plan>`; `personality linux` on the process line
   and `"personality":"linux"` in the process events; a failed exec logs
-  `lx: exec <path> failed: <why>` and emits an `lx exec failed` event
-  (path, errno, why); every call goes to the flight recorder (number |
+  `lx: exec <path> failed: <why>` (an interpreter's path and what is
+  wrong with it: `its interpreter /lib64/ld-linux-x86-64.so.2: cannot
+  read it (ENOENT)`) and emits an `lx exec failed` event (path, errno,
+  why); every call goes to the flight recorder (number |
   pid << 32); an unimplemented call logs `<name> (pid <p>):
   unimplemented system call <name> (<nr>) (dispatcher lx::dispatch,
   personality linux): ENOSYS` once per process and number, and goes to
@@ -8654,7 +9130,9 @@ The running parts (milestone 1; `lxrun=`):
   discarded, ignored, handler, killed, taken); `lx: pid <p> (thread
   <t>): killed by signal <n> (<name>), its default action`; a frame that
   cannot be written or read back logs why. Fork: `lx: pid <p> fork:
-  child pid <c> (<n> pages copied)` then the core's process line and
+  child pid <c> (<n> pages shared copy-on-write, <k> copied, <m> section
+  pages shared)` (`lx_forkmem` requires `0 copied`) then the
+  core's process line and
   `process start` event (ppid); a failed fork logs why; an `lx child
   ended` event (pid, child, wait status, signal, whether the SIGCHLD was
   discarded, whether reaped at once); a vfork logs `lx: pid <p> vfork:
@@ -8662,7 +9140,11 @@ The running parts (milestone 1; `lxrun=`):
   image's `lx: exec` line; a refused image logs `lx: pid <p> execve
   <path> failed: <why>`, one that cannot be mapped after the old is gone
   `... killed by SIGSEGV`. Sockets: the stack's `tcp accept`, `tcp
-  connect`, `tcp close` events (`events=net`). Threads: an `lx thread`
+  connect`, `tcp close` events (`events=net`); AF_UNIX: `lx unix`
+  events (socketpair, bind, listen, connect, accept, the close of a
+  named socket; refusals with their errno) and `lx unix rights` (sent,
+  received, dropped), memfd: `lx memfd` and `lx memfd seal`
+  (`events=ipc`); the state dump's `dump: unix:` lines. Threads: an `lx thread`
   event per clone (pid, tid, flags) after the core's `thread create`; a
   failed clone logs why. The state dump (OBSERVABILITY "State dump")
   lists every Linux thread (Linux and core tid, mask, pending, blocked
@@ -8675,8 +9157,13 @@ The running parts (milestone 1; `lxrun=`):
   rename an NT program's open refuses, names the file system cannot
   hold, socket families and types, socket options, CPU-time clocks and
   timers, a script as interpreter, futex ops not supported, an execve
-  with other threads running), `linux syscall stub` (ioctl,
-  wait4's rusage).
+  with other threads running, an mmap of what is not a regular file,
+  mremap's MREMAP_DONTUNMAP and old length 0, madvise advice not taken,
+  a resource limit set but not enforced, another process's limits, the
+  shrinking of a mapped file,
+  /proc paths other than /proc/self/exe, no random generator), `linux
+  syscall stub` (ioctl, wait4's rusage); a page mremap could not move
+  logs why (and `out of memory`).
 - **Invariants**: a Linux process is never handed over (carry refuses "a
   personality other than NT"); its threads have no TEB; NT threads' FS
   base is 0. Signals are delivered only on the way back from a Linux
@@ -8695,16 +9182,22 @@ The running parts (milestone 1; `lxrun=`):
   `signals` before the scheduler's (a raise wakes sleepers under it);
   an epoll's entries are never held while an object's readiness is
   asked.
-- **TODO** (ROADMAP LX): randomization (the stack gap, AT_RANDOM's
-  source, the bases); PT_INTERP and dynamic linking; the signal calls
-  and deliveries listed as not yet above; copy-on-write fork and shared
-  MAP_SHARED memory (then shared futexes keyed by the page), vfork
-  sharing its parent's memory; execve ending the other threads first;
+- **TODO** (ROADMAP LX, LD): randomization (the stack gap, AT_RANDOM's
+  source, the bases); the program and its interpreter mapped as file
+  views (shared text, as libraries are) instead of copied; rseq; the
+  shrinking of a mapped file (ramfs refuses it while
+  mapped, as NT's truncation is: EBUSY); `/proc/self/exe` is a node id
+  (`LxProcess::exe`), not a held file, so a program deleted while it
+  runs does not read as Linux's `<path> (deleted)`; the signal calls
+  and deliveries listed as not yet above; vfork sharing its parent's
+  memory; a MAP_SHARED anonymous mapping grown by mremap; execve ending the other threads first;
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
-  ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
-  (seam 4's rest; one user so far); a /dev
-  directory and /proc; datagram and Unix sockets; process groups
+  ITIMER_VIRTUAL/PROF, rusage); a file's owner from its security
+  descriptor (seam 4's rest: the caller's today; the device is per file
+  system: the shared one's and `/run`'s); a /dev
+  directory and /proc; datagram sockets (AF_INET; AF_UNIX ones by
+  name), SCM_CREDENTIALS; process groups
   and sessions; a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
   name them yet).
@@ -8815,6 +9308,630 @@ tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
 never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
 AT_MINSIGSTKSZ).
 
+## Linux applications on the desktop (Wayland)
+
+ROADMAP LD steps 2-4: graphical Linux programs on shasha beside Windows
+programs. Linux desktop programs draw through a display server: GTK 4
+and Qt 6 speak Wayland natively, and X11-only programs reach Wayland
+through Xwayland. gala implements a Wayland server, not an X server.
+Sources: the Wayland protocol's XML and documentation, and wayland-protocols'
+XML (MIT), read as specifications; libwayland, weston and GTK as
+open-source references (CLEAN_ROOM "Linux"). Nothing of them is copied
+into the kernel.
+
+### Where the server runs
+
+**In the kernel, beside the compositor, for now** (`kernel/src/wayland`).
+shasha's compositor and window state are in the kernel (`nt::winstate`,
+`nt::desktop`), so a Wayland surface becomes a `winstate` window
+directly. Its pixels are copied from the client's shared-memory buffer,
+which is already a file the kernel holds, and the input it gets is the
+desktop's own. A user-mode server would need a window system call surface
+for Linux processes, and a second copy of every frame. When ROADMAP SH
+moves the compositor to user mode, the Wayland server moves with it, as
+one more client of the same window-state interface.
+
+- **Starting**: at boot, before the programs (`wayland::start`), on
+  every boot whose desktop has a shell (not bare: `nt::desktop::is_bare`,
+  the server profile or no screen and no `presenter=`); `wayland=off`
+  keeps it off, `wayland=on` (or `trace`) starts it on a bare one too. It
+  makes the boot user's runtime directory `/run/user/<uid>` (0700;
+  `/run/user` 0755 if missing) in `/run`, the Linux view's tmpfs ("The
+  lx module"), and a socket node `wayland-0`
+  in it (an old node of that name is replaced), held open while the
+  server lives, and listens on a stream socket of the core's table bound
+  to it (`unix::Socket::bind` with that node, backlog 128), so a
+  client's connect finds it as it finds any listener (`wayland:
+  listening on /run/user/1000/wayland-0` in the log). Programs find it
+  through `XDG_RUNTIME_DIR=/run/user/<uid>` and `WAYLAND_DISPLAY=wayland-0`;
+  for now whoever starts them passes those (`lxenv=` in the scenarios).
+  The socket's peer credentials are pid 0 and the boot user.
+- **One kernel thread** (`wayland`) serves every client. A round accepts
+  the waiting connections, then for each client reads what came (bytes
+  into its input buffer, each SCM_RIGHTS right, a `KArc<lx::state::Fd>`
+  open file description, into its descriptor queue; a right of another
+  personality is dropped), handles the whole messages, and writes the
+  events back (what the socket does not take waits in the client's
+  output). A round reads at most 256 KiB from one client before going on
+  to the next. Between rounds the thread waits: it is on the listener's
+  and every client socket's `unix::Waiters` (each change of a socket
+  wakes them), prepares its wait, looks once more at the sockets'
+  readiness (a connection waiting, bytes or an end to read, events to
+  write where there is room), and blocks. The server's state is one
+  `IrqMutex` the thread holds for a round (the state dump only tries
+  it).
+- **The cost** is a protocol parser in the kernel that reads untrusted
+  client messages. It is bounded and isolated like the other ABI
+  parsers:
+  - **The wire format** is a `no_std` crate of its own, `kernel/wl_abi`,
+    as `lx_abi` and `afd_abi` are: no allocation, no `unsafe`, no
+    dependencies. `Header::parse` checks a header's size (at least 8, a
+    multiple of 4, at most 4096); `decode` checks a whole message against
+    its signature and gives its arguments (`Arg`: int, uint, fixed,
+    string without its NUL or null, object or null, new_id, the untyped
+    new_id `wl_registry.bind` takes as interface name, version and id,
+    array, and fd, taken from those that came with the message), refusing
+    with a `WireError` what the protocol does not allow: truncation,
+    trailing bytes, a string without its NUL or with one inside, null
+    where the XML has no `allow-null`, a new_id of 0, a missing fd.
+    `encode` builds messages the same way. `INTERFACES` (with `MAX_ARGS`)
+    is generated by its build script from `protocol/wayland.xml`,
+    `xdg-shell.xml` and `xdg-decoration-unstable-v1.xml` (names,
+    versions, `since`, destructors, argument types; opcodes are
+    positions). Host tests (`cargo test -p wl_abi`, part of `cargo xtask
+    test`) check known byte sequences (`wl_display.get_registry`,
+    `wl_registry.bind`), malformed messages, and a round trip of every
+    request and event of every interface. It is the first target of the
+    fuzzing that OBSERVABILITY plans.
+  - **The protocol state** is `wayland::client::Client`, apart from
+    sockets, files and windows (a `Host` gives those: the kernel's, or
+    the host tests' fake), so all of it is host-tested (`cargo test -p
+    kernel --lib wayland`).
+  - **Limits**: a message is at most 4096 bytes (libwayland's limit), a
+    message carries at most 28 descriptors and at most 56 wait for their
+    messages, a client has at most 4096 objects (ids are dense, as
+    libwayland makes them: a new id is the next one or a free one below
+    it, at most 4096), at most 256 KiB of events wait for it (beyond,
+    it is disconnected, as libwayland disconnects a client whose buffer
+    is full), and a pool is at most 256 MiB.
+  - **Any malformed message** is a protocol error: `wl_display.error`
+    (object, code, message, the codes and texts libwayland and weston
+    use), then the client is disconnected once the error is written.
+    Errors: a bad header or arguments (`invalid_method` on wl_display),
+    an unknown object or one of the wrong interface in an argument, a
+    new id in use or out of order (`invalid_object`), an opcode the
+    interface lacks or newer than the object's version (`invalid_method`),
+    too many objects (`no_memory`), a request gala lacks
+    (`implementation`; none of the offered interfaces' today), and each
+    interface's own (wl_shm's `invalid_format`, `invalid_stride`,
+    `invalid_fd`; wl_surface's `invalid_scale`, `invalid_transform`,
+    `invalid_offset`; xdg_wm_base's `role`, `invalid_surface_state`,
+    `not_the_topmost_popup`, `invalid_popup_parent`,
+    `invalid_positioner`; xdg_surface's `not_constructed`,
+    `already_constructed`, `unconfigured_buffer`, `invalid_serial`,
+    `invalid_size`, `defunct_role_object`; xdg_positioner's
+    `invalid_input`; xdg_popup's `invalid_grab`). It is logged, and
+    evented.
+    The kernel never panics on client input.
+
+### Prerequisites in the LX layer
+
+- **`AF_UNIX` stream sockets** (built: the core's `unix`, "AF_UNIX
+  sockets" under "The seams"; `lx::unix`, `lx_unix`): socket, bind to a
+  path, listen, accept, connect, socketpair, with `SCM_RIGHTS` (file
+  descriptors move between processes as references to the same open
+  file) and `SO_PEERCRED`; seqpacket and datagram pairs too. The
+  server binds through the same core table. D-Bus, which GTK also
+  opens, needs the same sockets.
+- **`memfd_create`** (built: `lx::memfd`, `lx_memfd`) with `ftruncate`,
+  `mmap(MAP_SHARED)`, and the seals: an anonymous file of the shared file
+  system whose pages every mapping shares. The server reads a
+  `wl_shm_pool`'s rows from the same pages (`RamFs::read`), with one copy
+  into the window's client pixels.
+- Each prerequisite is test first, in the corpus: a `unix_test` and a
+  `memfd_test` against real Linux transcripts.
+
+### Objects and how they map
+
+Offered globals: `wl_compositor` 6, `wl_shm` 2, `xdg_wm_base` 6,
+`wl_output` 4, `wl_seat` 7, `zxdg_decoration_manager_v1` 1 and
+`wl_data_device_manager` 3 (registry names 1 to 7).
+
+| Wayland | gala |
+|---|---|
+| a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
+| `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
+| `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; the window geometry is what a frameless window shows ("Frameless windows") and what its popups are placed against; move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
+| `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side. A toplevel without a decoration object is client-side: "if compositor and client do not negotiate the use of a server-side decoration using this protocol, clients continue to self-decorate as they see fit" (the protocol's description). GTK 3 never binds the manager and draws its own title bar (gtk_test), GTK 4 negotiates; a client that draws no frame (weston-simple-shm, wl_test) is shown without one. Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, its window geometry's size ("Frameless windows" below), on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
+| `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
+| `xdg_positioner`, `xdg_popup` | a popup window (`STYLE_POPUP`: frameless, above the framed windows, never active, not on the taskbar, as user32's menus are) at the place the positioner gives against its parent's window geometry and the work area; a grab takes the keyboard focus and the desktop's popup grab, which a press outside the client's windows ends ("Popups" below) |
+| `wl_data_device_manager`, `wl_data_source`, `wl_data_device` | the selection (copy and paste) and drag-and-drop, as far as a client that has them needs them: GTK 3 makes its seat only once this global is there. A data device hears `selection` (nil) right before each keyboard focus while the client holds no selection of its own (the protocol sends it "immediately before receiving keyboard focus"). `set_selection` makes a source the client's selection, kept for itself: the one it replaces gets `cancelled`, as does the old one when it is unset; it is offered to no other client nor to the Windows clipboard yet (ledgered as ignored). `start_drag` is not followed: its source gets `cancelled` at once, as for a drag the compositor ended (ledgered). Errors: a source used twice (`used_source`), a drag's source (one with actions) as a selection and actions on a used source (`invalid_source`), actions set twice or outside copy, move and ask (`invalid_action_mask`), a drag icon with another role (`role`) |
+| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet: "Frameless windows") |
+| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) of the part the window shows (its view: the whole buffer, or a frameless window's geometry) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
+| `wl_output` | the client's session's screen: geometry (make "gala", model "shasha"), mode (current and preferred, 60 Hz), scale 1, name `gala-1`, done |
+
+A surface smaller than a framed window's minimum (134 x 34 outer) gets a
+larger client area, white beyond the buffer; one larger than
+`winstate::MAX_SIDE` is clipped. When the client goes, its windows go
+(`Client::end`); when its process ends first, `desktop::process_ended`
+takes them.
+
+### Frameless windows
+
+A client that decorates itself (a client-side toplevel, and every
+popup) draws a shadow around its window, translucent pixels outside its
+window geometry (`xdg_surface.set_window_geometry`, xdg-shell's
+"visible bounds" of the window). shasha does not compose alpha yet, so
+those pixels would show as black. The window shows its **view** instead
+(`client::view_of`): the window geometry clamped to the buffer (as
+xdg-shell clamps it), or the whole buffer when none was set; a framed
+window always shows its whole buffer. So:
+
+- the window's size is the view's; its client origin shows the view's
+  corner, and pointer positions on it are moved by the view's offset
+  into surface coordinates (`surface_point`);
+- a popup's window is placed so that its geometry is at the place its
+  configure gave, and its children are placed against that geometry on
+  the screen (`geometry_origin`), as before;
+- the desktop's sizes (maximize, Snap) were already window geometry
+  sizes, which is what xdg-shell's configure carries: a client then
+  draws a buffer of that geometry (GTK drops its shadow when maximized
+  or tiled), and the window takes the view's size.
+
+What is left: the rounded corners of a client's title bar show the
+transparent pixels' colour (a few pixels); translucent windows and
+shadows need the compositor to compose alpha (shasha's presenter;
+ROADMAP LD "Next").
+
+### Configure from the desktop
+
+A user32 program moves its own window when the desktop asks
+(SC_MAXIMIZE, SC_RESTORE, GALA_WM_PLACE in its input: "Server and
+desktop workloads"); for a Wayland window the server is that program,
+and the client draws the size it is told:
+
+- **The toplevel's sizing** (`client::Sizing`): the surface size each
+  configure carries (0x0, the client's choice, until the desktop sizes
+  the window), maximized, the tiled sides, the outer rectangle a
+  maximized window goes back to, and the outer position the desktop put
+  it at, not yet applied. Unmapping (a null buffer, the toplevel
+  destroyed) forgets it: the next window is the client's size, cascaded.
+- **Maximize** (SC_MAXIMIZE): the work area (the screen above the
+  taskbar) less shasha's frame for a framed window (1278 x 718 on a
+  1280 x 800 screen), states maximized and activated, at (0, 0); the
+  window's rectangle is kept. **Restore** (SC_RESTORE of a maximized
+  one): that rectangle's surface size and place (none kept: 0x0, the
+  client chooses). **Place** (GALA_WM_PLACE: Snap, back from Snap,
+  `gala place`): the rectangle's surface size; against the work area's
+  left or right edge and its full height (Snap), tiled on that side and
+  top and bottom, sent from xdg_toplevel 2 (the desktop marks it
+  snapped); a place filling the work area is maximized.
+- **Activated** follows the keyboard focus, which follows the desktop's
+  active window (GALA_WM_ACTIVE): each change sends the toplevel a
+  configure, as weston and mutter do. `resizing` is not sent: shasha's
+  frame has no resize border, and a client's own (`xdg_toplevel.resize`)
+  is not followed yet.
+- **Applying**: the window does not move when the configure goes out.
+  Each configure's serial is kept with the place it asked for (at most
+  `MAX_CONFIGURES`, 16, not yet acked; beyond, the oldest is forgotten
+  and acking it is `invalid_serial`); an ack may name any of them (a
+  client acks only the last it saw), and drops those before it. The
+  commit of a buffer after an ack moves the window to the acked place
+  with the buffer's size (`Desktop::place`; the desktop marks it
+  maximized or snapped from its rectangle, as for a user32 window); a
+  buffer of another size than asked is shown at its own size there.
+- wm_capabilities (xdg_toplevel 5): maximize and minimize.
+
+Next: frame callbacks paced by the presenter's refresh; a decoration mode change
+on a mapped window (the frame put on or taken off in place). Later: the
+selection shared (across clients, and bridged to the Windows clipboard
+so copy and paste works across personalities: data offers, receive with
+the descriptor passed to the source's `send`), drag-and-drop,
+`wp_viewporter`, fractional scale,
+`xdg_activation`, and `linux-dmabuf` once GPU G2's lavapipe/llvmpipe
+serve Linux clients through EGL. What the server allocates for a client
+is not charged to its process's quota yet ("Resource limits").
+
+### Popups
+
+Menus, tooltips and popovers (what GTK and Qt need after toplevels):
+`kernel/src/wayland/popup.rs` places them, `client.rs` keeps their
+state. Source: xdg-shell.xml (CLEAN_ROOM "Linux"); weston's answers
+where its headless backend gives them (user/lx/wl_popup_test).
+
+- **xdg_positioner**: its rules (size, anchor rectangle, anchor,
+  gravity, constraint adjustment, offset; set_reactive kept), each
+  checked as it comes (`invalid_input`: a size not above 0, an anchor
+  rectangle of negative size, an anchor or gravity out of its enum;
+  unknown adjustment bits are ignored). `get_popup` and `reposition`
+  copy them: the positioner may change or go after. One without a size
+  or an anchor rectangle is xdg_wm_base's `invalid_positioner` (on the
+  xdg_wm_base the xdg_surface came from). set_parent_size and
+  set_parent_configure are accepted and not used (ledgered: a popup is
+  placed against its parent's present state).
+- **The place** (`popup::place`): the anchor point (a corner of the
+  anchor rectangle, the middle of an edge, the centre; halves round
+  down), the popup towards the gravity from it (centred on an axis
+  without one), the offset; then, on each axis where the popup is partly
+  outside the work area (the screen above the taskbar, in the parent's
+  coordinates), the protocol's order: flip (anchor and gravity inverted
+  on that axis, kept only if no longer constrained), slide (towards the
+  gravity first, then against it, each until the far edge is inside or
+  the near edge would leave), resize (cut to the area, if any of it is
+  inside). A parent that shows no window yet gives no area: nothing is
+  adjusted.
+- **The parent**: an xdg_surface with a role (a toplevel or a popup),
+  not the popup's own (else `invalid_popup_parent`); null is allowed by
+  get_popup and is `invalid_popup_parent` at the first commit (no
+  protocol here gives a parent another way). Its window geometry
+  (`set_window_geometry`, applied at commit; the whole surface if never
+  set) is what the anchor rectangle and the configure's x and y are
+  relative to; on the screen it is the parent window's client origin
+  plus the geometry's x and y.
+- **Configure and map**: the first commit (no buffer) is answered with
+  `xdg_popup.configure` (x, y, width, height) and `xdg_surface.configure`;
+  the place goes with the serial as a toplevel's desktop place does, and
+  applies at the commit of a buffer after the ack. The popup window shows
+  its window geometry (its view: "Frameless windows"; a client-side
+  shadow outside it is not shown), placed with that geometry at the
+  parent's geometry on the screen plus the place; moved when the place,
+  the geometry or the size changes.
+  Mapping while the parent shows nothing is `invalid_popup_parent`. A
+  null buffer unmaps it and the next commit configures it again.
+- **reposition** (version 3): new rules; `repositioned` with the token,
+  then the configures; the window moves at the commit after the ack.
+  Before the first configure it only changes the rules that one uses.
+  A popup is not reconstrained when its parent moves (set_reactive is
+  ledgered).
+- **Grab** (`xdg_popup.grab`): before the first commit only (else
+  `invalid_grab`); its parent must be the topmost grabbing popup or,
+  without one, a toplevel (`invalid_grab`, as weston answers); granted
+  for the serial of the client's last button or key press, else denied:
+  popup_done at once, as the protocol says of a denied grab (and for a
+  parent dismissed already). The client's grabs are a stack (`grabs`,
+  bottom first). When a grabbing popup shows, the topmost shown one
+  takes the keyboard focus (leave on the toplevel, enter on it; keys the
+  desktop sends to the active window go to it) and the desktop's popup
+  grab (`State::popup_grab`, its window; `Host::grab`). The toplevel
+  stays the desktop's active window and its configures still say
+  activated (the seat's `active` is apart from the keyboard focus).
+  Pointer input is the client's as usual on all its surfaces (an
+  owner-events grab, as the protocol says).
+- **Dismissal**: a button pressed outside the windows of the grab's
+  owner (another program's window, a frame, the taskbar, the desktop)
+  ends the desktop's grab and goes nowhere else, its release neither
+  (as a click outside the start menu closes it); the owner gets
+  GALA_WM_POPUP_DONE (0x10012) on the grab's window, which outlives that
+  window in the queue. The server dismisses every grabbing popup topmost
+  first: `popup_done`, its window gone (and its foci: the keyboard's
+  leave if it had it), its own popups before it; then the keyboard
+  focus goes back to the active toplevel. The same when the toplevel
+  stops being the active window (GALA_WM_ACTIVE 0), and for the popups
+  of a toplevel unmapped or destroyed. A dismissed popup shows nothing
+  again (its buffers are released); the client destroys it, in any
+  order.
+- **Destroying**: only the topmost grabbing popup may be destroyed or
+  unmapped (else xdg_wm_base's `not_the_topmost_popup`); the grab and
+  the keyboard focus go back to the popup below or the toplevel.
+  Popups without a grab go in any order, and a popup's children stay
+  where they are when it goes first (orphans: no popup_done; weston
+  does the same, recorded by wl_popup_test). The xdg_surface destroyed
+  before its popup is `defunct_role_object`.
+- Limits: the grab is the client process's on the desktop (a press on a
+  window of another connection of the same process counts as inside);
+  no touch; a popup never follows its parent's later moves.
+
+### Input
+
+The desktop's input reaches a Wayland window the way it reaches a
+user32 window: as window messages queued for the window's owner
+(`winstate::InputEvent`), which the Wayland server takes instead of
+user32 (`kernel/src/wayland/input.rs`, `Client::input`).
+
+- **Waking**: at each connection the server registers itself as the
+  client process's listener (`desktop::listen_server`:
+  `winstate::Listener::Server`, the server thread, beside the user32
+  programs' `Listener::Event`); the desktop wakes the thread after
+  letting go of its lock, as it signals user32's event. The server's
+  wait also looks at whether input waits for any client (prepare, look,
+  block), so input queued during a round is not lost. The listener goes
+  when the process's last connection closes (`unlisten_server`), or with
+  the process.
+- **gala's notices for served owners** (only owners with a
+  `Listener::Server` get them; user32 follows activation and
+  TrackMouseEvent itself): `GALA_WM_ACTIVE` (0x10010; wParam 1: the
+  window became the active one, 0: it no longer is), queued by
+  `State::activate` for the old window then the new one, so a click that
+  activates comes before its button and keys after it go to the new
+  focus; `GALA_WM_POINTER_LEFT` (0x10011), queued when the window whose
+  client area the pointer was over (`State::hovered`: the target of the
+  moves, the capture, none during a drag or resize) changes;
+  `GALA_WM_POPUP_DONE` (0x10012), when a press outside its windows ended
+  its popup grab ("Popups").
+- **Translation** (`input::translate`): WM_MOUSEMOVE is a position;
+  WM_LBUTTONDOWN/UP and WM_RBUTTONDOWN/UP are BTN_LEFT (0x110) and
+  BTN_RIGHT (0x111); WM_MOUSEWHEEL is the wheel (WHEEL_DELTA a notch,
+  positive away from the user); WM_(SYS)KEYDOWN/UP are evdev key codes
+  from lParam's set 1 scan code and E0 bit (0x01-0x58 are the evdev
+  codes; the E0 keys from a table; the virtual key is not used: the
+  keymap says what a key means); SC_CLOSE is close; SC_MAXIMIZE,
+  SC_RESTORE and GALA_WM_PLACE (wParam MAKELONG(left, top), lParam
+  MAKELONG(width, height)) are the desktop's sizing ("Configure from the
+  desktop"); WM_MOVE and GALA_WM_MINIMIZED mean nothing to a Wayland
+  client; any other message is ledgered.
+- **Activation** (GALA_WM_ACTIVE) sets the seat's active surface, moves
+  the keyboard focus (to the topmost grabbing popup while there is one)
+  and sends each toplevel whose activation changed a configure; losing
+  it dismisses the client's grabbing popups.
+- **The client's seat** (`Seat`): the surface with the pointer and
+  where, buttons held, the surface with the keyboard focus, keys down
+  and modifiers. A position on the surface enters it (leaving another;
+  enter and frame) or moves on it (motion and frame); off the surface (a
+  framed client area larger than the buffer) the pointer leaves, unless
+  a button holds it (an implicit grab: the desktop also sends a held
+  button's moves and release to the window it went down in). A button
+  or wheel first brings the pointer where the message says. A button is
+  `button` and `frame`; a wheel notch `axis_source` wheel,
+  `axis_discrete` -1 per notch away from the user (versions 5 to 7;
+  `axis_value120` from 8), `axis` -10 per notch on the vertical axis (as
+  weston and mutter report a click), `frame`. A release whose press the
+  client did not have is not sent. Focus: `enter` with no keys down,
+  then `modifiers`; deactivation `leave` (the keys down are forgotten).
+  A key already down (the device's typematic repeat) is not sent again:
+  clients repeat by `repeat_info`. After a key that changes them,
+  `modifiers` (depressed: Shift 1, Control 4, Alt 8, Super 64 while
+  held; locked: Caps Lock 2, Num Lock 16 toggled; the keymap's real
+  modifier bits). An unmapped surface (null buffer, destroyed toplevel)
+  gets the leaves of the foci it had; a destroyed one loses them
+  without one (a leave could not name it).
+- **The keymap** (`kernel/src/wayland/keymap.xkb`, `input::KEYMAP`): a
+  US layout in XKB's text format written for gala (keycodes named as
+  xkeyboard-config's `evdev` names them, the types ONE_LEVEL, TWO_LEVEL,
+  ALPHABETIC and KEYPAD, the modifiers above), about 7 KB, in one
+  anonymous file of the shared file system made at the first keyboard,
+  written with its NUL, sealed (shrink, grow, write, seal) and opened
+  read-only: every keyboard of every client gets that description, which
+  no client can change (they map it MAP_PRIVATE, as wl_keyboard 7
+  requires).
+- **Descriptors in events**: an event's fd waits in the client's
+  `out_fds` with where its event starts; a write takes those whose event
+  starts within the bytes it offers, as SCM_RIGHTS with them. A stream
+  read stops after the write that carried rights, so the client has
+  each descriptor no later than its message (libwayland queues
+  descriptors that come early).
+- Limits: 32 keys down at once per client (more are not sent), 56
+  descriptors waiting in events (beyond, the client is disconnected as
+  for output).
+
+### Sessions
+
+One socket for the boot user today. Next, each session's desktop has
+its own Wayland socket, under its user's `/run/user/<uid>`, and a Linux
+program started in a session gets `WAYLAND_DISPLAY` and
+`XDG_RUNTIME_DIR` for it, its windows on that session's desktop, shown
+by whatever presents it ("Plan: sessions and remote shasha"). Server
+and bare desktops ("Server and desktop workloads") keep Wayland windows
+as they keep Windows ones: the pixels are kept and nothing draws them
+(the `lx_wl` scenario's desktop is such a one).
+
+**The runtime directory is Linux's alone**: `/run` is a tmpfs of the
+Linux view (a ramfs volume mounted in `lx`'s path walk: not under
+`C:\`, never logged, gone at shutdown; run_test is its spec), so the
+server's directories and socket are invisible to Windows programs and
+leave nothing on a disk.
+
+### Observability
+
+- `events=wayland`: `wayland connect` and `wayland disconnect` (with
+  why: closed, protocol error, output full, no memory; and how many
+  requests), `wayland role` (surface, role, its object), `wayland map`
+  (surface, window or -1), `wayland commit` (surface, whether a buffer
+  came, its size, the rows copied, the window, the place it was put at
+  for the configure the commit answers), `wayland configure` (surface,
+  size, states as bits, serial), `wayland error` (object, interface,
+  code, message) and `wayland input` (what: enter, leave, button, axis,
+  key, focus, unfocus, close, maximize, restore, place, or dropped for a
+  window the client shows no surface in; the surface, the window, the
+  button or key code, pressed or released; motion is not evented) and
+  `wayland popup` (configure with the place and size, repositioned,
+  grab, grab denied, dismissed and orphaned, with why). The client's pid
+  and number are in each; `events=window`'s `popup grab ended` is the
+  desktop's side. With `events=window` too, the
+  desktop's `button` and `key` events say where the input went first.
+- `wayland=trace`: every request and event decoded, as libwayland's
+  `WAYLAND_DEBUG=1` prints them (`wayland: pid 7
+  wl_display#1.get_registry(new id wl_registry#2)`, events after `->`),
+  so a transcript from real Linux can be compared with gala's; and each
+  window message taken from the desktop (`wayland: pid 7 input: window 1
+  message 0x201 wparam 0x1 lparam 0x4b0064`), before the events it
+  became.
+- The log: a protocol error (`wayland: pid P: protocol error on
+  xdg_surface@9, code 3: ...; disconnecting`), a request gala lacks, a
+  surface that got no window; each connection's end with why and what it
+  did (`wayland: pid P's connection N ended (closed): R requests, C
+  commits shown, F frame callbacks done`; a warning when it was closed
+  for its output or for memory).
+- The ledger: a request gala doesn't implement is answered with a
+  protocol error and counted as `wayland request missing` (service: the
+  interface, detail: the opcode); one accepted and not acted on as
+  `wayland request ignored`; a window message from the desktop a
+  Wayland window does not follow as `wayland window action missing`
+  (service: message; detail: the window).
+- The state dump lists the socket, each client (pid, objects, requests,
+  bytes of events waiting) and its objects (a surface's window, size,
+  view and frame callbacks; a buffer's size and stride; an xdg_surface's
+  configure state, the serials not acked and the place acked; a
+  toplevel's title, app id, decoration object and sizing; a
+  decoration's mode asked for; a positioner's rules; a popup's parent,
+  rules, configured and applied place, where its window is, grab and
+  dismissed; a data source's mime types offered, whether it was used,
+  its actions and whether it is the selection) and its seat (the pointer's surface and place, buttons
+  held, the keyboard's surface, keys down, modifiers, the active
+  surface, the last press's serial, the popup grabs); the session's
+  `input queue` line names the window with the desktop's popup grab.
+
+### Tests
+
+- **`user/lx/wl_test`**, a client of our own in C over a raw AF_UNIX
+  socket (no libwayland, so the test checks the wire format itself). It
+  connects at `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, checks the globals
+  (wl_compositor, wl_shm, xdg_wm_base, wl_output; not wl_seat, which a
+  headless weston lacks), binds the first three at versions 4, 1 and 1,
+  sees ARGB8888 and XRGB8888 announced, makes a 64x64 XRGB8888 buffer in
+  a memfd pool (the fd as SCM_RIGHTS), an `xdg_toplevel` titled
+  "wl_test", commits without a buffer, acks the configure, attaches,
+  damages and commits with a frame callback, sees the frame done and the
+  buffer released by the next round trip and `delete_id` for what it
+  destroys, and on a second connection gets `wl_display.error` (object
+  1, invalid_method) for an unknown opcode, then the end of the stream.
+  Its transcript is recorded on Linux against weston's headless backend:
+  lx-expect starts `weston --backend=headless` for it (`WAYLAND_TESTS`,
+  with `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` added to its
+  environment), and CI installs weston. Scenarios `lx_wl` (`wayland=on
+  events=wayland`; the log shows `desktop: shown window 'wl_test'`) and
+  `lx_wl_pie` (`wayland=trace`) match the same transcript.
+- **`user/lx/wl_popup_test`**, the same kind of client for popups,
+  recorded against weston's headless backend (`WAYLAND_TESTS`): every
+  anchor with gravity bottom_right and every gravity with anchor
+  top_left on a 200x150 toplevel, an offset with odd sizes, a nested
+  popup, reposition (repositioned, then the configures), the version 3
+  positioner requests, delete_id for each popup destroyed, a far place
+  kept without adjustment, the positioner's set_size and set_anchor_rect
+  errors on connections of their own, and a parent popup destroyed
+  before its child without an error and without dismissing it.
+  Nothing it prints depends on where the toplevel is (positions are
+  relative to the parent). What weston's headless backend cannot show
+  (no seat, no constraint adjustment) or answers otherwise than the
+  protocol is wl_input_test's and the host tests'. Scenarios
+  `lx_wl_popup` and `lx_wl_popup_pie` (`wayland=trace`).
+- **`user/lx/wl_input_test`**, the same kind of client for input and
+  window control: wl_seat 7 (capabilities, name), the keymap (format,
+  the descriptor mapped MAP_PRIVATE, its text, its NUL), repeat_info, a
+  200x150 toplevel with a decoration object (server-side), the keyboard
+  focus it gets when shown, then what the scenario does with QEMU's PS/2
+  mouse and keyboard: a click (enter, BTN_LEFT pressed and released at
+  the surface point aimed at, each in its frame), a wheel notch (source,
+  discrete, axis, frame), "a", Shift+A (Shift's modifier), Left (an E0
+  key), the pointer moved off (leave), then the Snap keys: Win+Up
+  (a configure of the work area's surface size, maximized and activated),
+  Win+Down (the size before), Win+Left (the left half, tiled left, top
+  and bottom: it binds xdg_wm_base 6), Win+Down, each acked and answered
+  with a buffer of that size; then "m": six popups whose places are
+  constrained against the work area (flip_y, flip_x that would still be
+  constrained, flip_x then slide_x, slide_y, slide_x off the left edge,
+  resize_x; the window's place is known: the first Wayland window), then
+  a menu grabbing with the "m" press's serial (the keyboard focus moves
+  to it), "s" (the menu has it) opening a grabbing submenu, both checked
+  on the screen frameless above the window, and a click on the desktop
+  dismissing them topmost first (the keyboard back on the window); the
+  frame's close button (`xdg_toplevel.close`); then a second toplevel
+  asking for client-side decorations, shown frameless and focused; "q"
+  opens a grabbing popup and one nested in it, and destroying the
+  outer one first ends the test with xdg_wm_base's
+  not_the_topmost_popup. It also checks
+  wm_capabilities (maximize, minimize) and the activated state once
+  shown. Not recordable
+  on Linux (weston's headless backend has no input devices): its
+  expected.txt is written from the protocol's specification and says so,
+  and lx-expect builds it and does not run it (`INPUT_TESTS`). Scenarios
+  `lx_wl_input` and `lx_wl_input_pie` (`wayland=trace`) run it on a
+  headless desktop (`presenter=test`) with a screen check
+  (`WL_INPUT_SCREEN`) that sends the input step by step, each after the
+  line the program prints for the step before, and checks the pixels:
+  the first window's buffer inside shasha's frame (the active caption
+  above it), maximized, restored, snapped left and back, the menu and
+  submenu above it and gone after the click, the second's where a frame
+  would be.
+- The wire format: host tests in `wl_abi`. The protocol state: host
+  tests in `kernel/src/wayland/tests.rs` (wl_test's flow against a fake
+  desktop, the pixels and damaged rows copied, unmapping, versions,
+  every protocol error above, ids, descriptor and output limits, the
+  trace's format; the seat, the keymap's descriptor and when it is
+  written, every kind of input with its serial-free events, foci after
+  unmapping and destroying, decoration modes and their errors, the
+  window messages' translation, every key the scan codes give being in
+  the keymap; positioners' errors, every anchor and gravity, flip, slide
+  and resize, popups placed against window geometry, grabs granted,
+  denied and refused, dismissal top-down, the topmost rule, reposition,
+  orphans). The notices for served owners: `winstate/tests.rs`; the
+  desktop's popup grab (a press outside ends it and goes nowhere, nor
+  its release): `desktop/tests.rs`.
+- **`weston-simple-shm`** (`lx_simple_shm`), the first real client:
+  weston 13's demo as Ubuntu 24.04 builds it, on Ubuntu's
+  libwayland-client, libffi and glibc (`PREBUILT`s in
+  `/lib/x86_64-linux-gnu`). It binds wl_compositor, wl_shm, xdg_wm_base
+  and wl_seat, makes its 250x250 buffers in a `memfd` it fallocates,
+  waits for the configure, then draws a moving pattern on every frame
+  callback. The scenario runs it on a headless desktop
+  (`SIMPLE_SHM_SCREEN`: frameless, it negotiates no decoration; many
+  colours in its window), then presses Esc (its keyboard handler ends
+  it). Its transcript
+  (`user/lx/weston-simple-shm/lx_simple_shm.txt`: "simple-shm exiting"
+  on stderr, status 0) is real Linux's against weston's headless backend,
+  ended there by SIGINT (the same flag Esc clears). The server's summary
+  line at the end of the connection says how many commits and frames it
+  served.
+- **`user/lx/gtk_test`** (`lx_gtk`, `lx_gtk_pie`), the first GTK
+  program: a GTK 3 window titled "gtk_test" with a label and a button,
+  printing when it was first drawn, when the button was clicked, when
+  the window was asked to close and when it went. It declares the
+  dozen GTK, GDK and GObject functions it calls from GTK's reference
+  documentation (no development headers) and links against the
+  libraries by soname (build.sh), so its bytes depend only on the
+  names. Run as `./gtk_test --input` (`lx_gtk`) it waits for real input:
+  the screen check (`GTK_SCREEN`) finds GTK's drawing frameless at
+  (64, 48) (its own header bar where shasha's caption would be, the
+  title, the close button, the label's text), clicks the button with
+  the PS/2 mouse, then GTK's close button. Run any other way
+  (lx-expect, `lx_gtk_pie`) it clicks its button and closes its window
+  itself once drawn, which GTK handles as the same signals; the
+  transcript is the same either way, recorded on Linux against weston
+  on Xvfb (a compositor with a seat: GTK warns without one, which
+  weston's headless backend lacks).
+
+### GTK programs and Linux roots
+
+What a GTK program needs besides the Wayland server, as gtk_test found
+it (each gap first seen on gala as a crash, a warning on stderr that
+real Linux does not print, or a ledger line):
+
+- **A distribution's libraries**: GTK 3's closure is 65 shared
+  libraries (GLib, GIO, Pango, cairo, HarfBuzz, fontconfig, FreeType,
+  pixman, libxkbcommon, libwayland-client and -cursor, gdk-pixbuf, ATK
+  and its D-Bus bridge, libX11 and friends, which GDK links whatever
+  backend it uses). They come as a **Linux root**: xtask's
+  `LINUX_ROOTS` table names Ubuntu 24.04's packages (the release
+  pocket, never changed once released), each with its SHA-256 from the
+  release's signed index and the files used at their paths in the
+  package (a library's soname link resolved to its file: boot modules
+  make no links). xtask assembles the root in `target/prebuilt/<name>/`
+  (packages downloaded once into `target/prebuilt/debs/`) and ships
+  `usr/`, `etc/` and `home/` as trees: `/usr/lib/x86_64-linux-gnu` is on
+  ld.so's default path beside glibc's `/lib/x86_64-linux-gnu`.
+- **What installing a system adds** besides its packages' files, done
+  at assembly as dpkg and its triggers would: the MIME database's
+  `mime.cache` (`update-mime-database` from shared-mime-info's XML;
+  gdk-pixbuf picks a loader by MIME type through GIO, so without it GTK
+  aborts on its own PNG icons). The user database is not the root's:
+  the kernel makes `/etc/passwd` and `/etc/group` from gala's accounts
+  ("The lx module", Linux identity); the user's home is their profile
+  (`/Users/gala`), where fontconfig keeps its cache.
+- **A session's environment**: `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`
+  and `HOME` (fontconfig expands `~` from `HOME` only and keeps its
+  cache in `~/.cache/fontconfig`; without a writable cache directory it
+  prints an error at every start), passed by the scenarios today
+  ("Sessions").
+- **Not needed**, and left out: icon and cursor themes (GTK 3 falls
+  back to the icons in its own resources, libwayland-cursor to its
+  built-in cursors, and the desktop draws its own pointer), GSettings
+  schemas and GIO modules (GLib's memory settings backend), a D-Bus
+  session bus (GTK skips accessibility and portals without one), the
+  gdk-pixbuf loader modules (PNG is GIO's MIME type plus the library's
+  built-in loader). Of xkb-data (libxkbcommon0 depends on it) the files
+  GDK's default keymap reads (rules evdev, model pc105, layout us)
+  before the server's keymap arrives.
+
 ## Plan: Linux containers through a WSL facade
 
 Docker Desktop and Podman for Windows run their Linux side (dockerd,
@@ -8871,8 +9988,9 @@ Windows containers are out of scope. Sources: CLEAN_ROOM "WSL" and
 GPU support serves the browser first (ROADMAP BR stages 2 and 5), then
 remote shasha (RS), then programs in general; it is ordered for the
 shortest path to a rendered web page and nothing needs a GPU to work
-(every VM, servers, CI). ROADMAP GPU tracks it: G1 (virtio-gpu 2D) is
-built; G0 and G2-G4 are the planned design. Clean room: Microsoft's
+(every VM, servers, CI). ROADMAP GPU tracks it: G0 and G1 (virtio-gpu 2D) are
+built, G2 (software 3D) is being built ("Software 3D (G2)"), G3 and G4
+are the planned design. Clean room: Microsoft's
 public documentation, the Khronos and virtio specifications and
 open-source projects (Mesa, DXVK, vkd3d-proton, ANGLE, SwiftShader,
 virglrenderer, QEMU) may be read; nothing is disassembled; everything
@@ -8885,7 +10003,7 @@ shipped or borrowed is recorded in THIRD_PARTY.md with its licence.
 | DXGI | `dxgi.dll` | factories, adapters, outputs; swap chains presenting to an HWND (flip model, `DXGI_SWAP_EFFECT_FLIP_DISCARD`); shared resources as NT handles; `DXGI_ERROR_DEVICE_REMOVED` when the GPU goes away |
 | Direct3D 11, 12 (9, 10) | `d3d11.dll`, `d3d12.dll`, `d3d9.dll`, `d3d10*.dll` | devices, resources, shaders (DXBC, DXIL), command lists; the runtime is Microsoft's on Windows, gala needs an open-source one |
 | Direct2D, DirectWrite | `d2d1.dll`, `dwrite.dll` | D2D draws on D3D11 (or WARP); DirectWrite (fonts, shaping, glyphs) is CPU work needed without a GPU (Chromium's text, BR stage 1) |
-| OpenGL | `opengl32.dll`, gdi32's `ChoosePixelFormat`/`SetPixelFormat`/`SwapBuffers` | WGL (`wglCreateContext`, `wglGetProcAddress`); Microsoft's opengl32 loads a vendor ICD; gala uses Mesa's own `opengl32.dll` (gallium WGL) as the whole implementation |
+| OpenGL | `opengl32.dll`, gdi32's `ChoosePixelFormat`/`SetPixelFormat`/`SwapBuffers` | WGL (`wglCreateContext`, `wglGetProcAddress`); Microsoft's opengl32 loads a vendor ICD; gala ships Mesa's own `opengl32.dll` (gallium WGL) in System32 as the whole implementation ("Software 3D (G2)" below) |
 | Vulkan | `vulkan-1.dll` (Khronos loader, Apache-2.0) | ICDs found through `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (JSON manifests); presentation through `VK_KHR_win32_surface` |
 | DirectComposition | `dcomp.dll` | Chromium composes overlays with it on a GPU and does without when creating a DComp device fails |
 | GDI | gdi32 | exists: draws into client pixel buffers that shasha composes; stays every program's path |
@@ -8948,12 +10066,12 @@ Linux host's Vulkan (as Wine's winevulkan does), in a VM through Venus.
 
 ### Stages
 
-| Stage | Content | Tests |
-|---|---|---|
-| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
-| G1 | virtio-gpu 2D | built: `virtio_gpu`, `virtio_gpu_reset` |
-| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs |
-| G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) |
+| Stage | Content | Tests | Status |
+|---|---|---|---|
+| G0 (for BR stage 2) | `dxgi.dll`, `d3d11.dll`, `d3d12.dll`, `dcomp.dll` as gala stubs (`user/gpu_common.rs`): every device entry point fails with DXGI_ERROR_UNSUPPORTED (E_INVALIDARG for a missing output), its outputs set to NULL, the call in the ledger; dxgi's factory exists but lists no adapters (G2: the Vulkan loader needs it); d3d12's ordinals 101/102 pinned as Wine's spec numbers them (chrome.dll imports #101). Chromium's GPU process takes the failure as "no GPU" (its callers check `FAILED`); a Windows machine always has an adapter, so this is gala's contract until G2 | `gpu_stub_test` | done |
+| G1 | virtio-gpu 2D | `virtio_gpu`, `virtio_gpu_reset` | built |
+| G2 (software 3D everywhere) | `vulkan-1.dll`, lavapipe as ICD, DXVK (d3d9/10/11, dxgi), vkd3d-proton (d3d12), llvmpipe `opengl32.dll`; all PREBUILT (fetched and checked by xtask, never committed), registered in the registry as on Windows | `vk_test` (instance, device, a triangle read back), `d3d11_test` (device, swap chain on an HWND, a frame in a screen check), `gl_test` (WGL context, glClear, SwapBuffers), then DXVK's and vkd3d-proton's test programs | OpenGL and Vulkan built (`gl_test`, `vk_test`); D3D in progress |
+| G3 (virtio-gpu 3D, Venus) | the `GalaGpu*` calls, blob resources, per-context fences; Mesa's venus ICD with a gala backend; Zink for GL | the G2 programs again with `virtio-gpu-gl-pci,venus=on` where the host has a GPU (skipped otherwise) | parked |
 | G4 (GPU presentation) | DXGI flip-model swap chains presented as resources (no readback through GDI), shasha composing resources, then BR stage 5 (Chromium `--use-angle=vulkan` on Venus) | planned |
 
 How it serves the other items: BR stage 2 needs G0 only (plus
@@ -9085,6 +10203,115 @@ The first GPU driver (G1). Code: `kernel/src/arch/virtio.rs`
   longer shows once the driver has started, so the screen is black until
   the desktop draws).
 
+### Software 3D (G2)
+
+Unmodified open-source Windows builds (PREBUILT, never committed:
+THIRD_PARTY.md) do the rendering on the CPU; gala supplies the Win32
+around them. Everything here runs on any machine, with or without a
+GPU or a screen (`presenter=test`).
+
+- **OpenGL: Mesa's llvmpipe as the system's OpenGL.** On Windows,
+  `opengl32.dll` is Microsoft's and loads a vendor ICD (registered under
+  `...\Windows NT\CurrentVersion\OpenGLDrivers`); on a machine with
+  no GPU driver, mesa-dist-win's system-wide deployment (what its
+  documentation gives cloud VMs and RDP sessions) installs Mesa's
+  gallium driver as that ICD. gala has no opengl32 of its own to load
+  an ICD, so it ships Mesa's own `opengl32.dll` (the WGL runtime) and
+  `libgallium_wgl.dll` (the gallium megadriver it imports) in System32:
+  every program gets Mesa's OpenGL, as after the system-wide deployment,
+  and a program that carries its own opengl32 (mesa-dist-win's
+  per-application deployment) still loads that one first (the
+  application's directory comes before System32; opengl32 is not a
+  KnownDLL). Mesa picks its driver in order d3d12 (GLonD3D12: gala's
+  G0 `d3d12.dll` fails, or there is none), zink (needs `vulkan-1.dll`
+  and a non-CPU Vulkan device), llvmpipe; the environment variable
+  `GALLIUM_DRIVER=llvmpipe` (or `softpipe`) forces one. `GL_RENDERER` is then `llvmpipe (LLVM
+  23.1.4, 256 bits)`; LLVM JIT-compiles the shaders (VirtualAlloc and
+  VirtualProtect to executable). Mesa's binaries need AVX: TCG's
+  `-cpu max` has it.
+- **gdi32's pixel formats** (`user/gdi32/src/opengl.rs`):
+  ChoosePixelFormat, DescribePixelFormat, SetPixelFormat, GetPixelFormat
+  and SwapBuffers go to the process's opengl32 (`wglChoosePixelFormat`
+  and the rest, which Mesa exports), loading it for the first three. The
+  ICD keeps each window's format; gdi32 keeps Windows' rule that it is
+  set once (the same format again succeeds, another fails, without
+  reaching the ICD: Mesa's DrvSetPixelFormat calls SetPixelFormat back
+  only when GetPixelFormat is still 0, so there is no loop). Without an
+  opengl32 they fail (0 / FALSE, ERROR_NOT_SUPPORTED) and the ledger
+  has `gdi32.dll!<name>(no opengl32)`.
+- **Presenting a frame**: Mesa's SwapBuffers draws the back buffer into
+  the program's DC with StretchDIBits (its GDI winsys). A GL program
+  keeps that DC (CS_OWNDC) and never releases it, while a window's
+  drawing reaches the desktop at ReleaseDC or EndPaint. user32 therefore
+  tracks the DCs it hands out (`window.rs`, "Window DCs a program
+  keeps": 64 at once; more are in the ledger as `user32.dll!GetDC(more
+  DCs out than tracked)`): at the thread's idle moments (GetMessage,
+  PeekMessage, waits) a DC still out shows its whole window the first
+  time, after which gdi32 accumulates its bounds (SetBoundsRect) and
+  only what it drew shows. Short GetDC/ReleaseDC pairs never pay for
+  the bounds. The same table answers WindowFromDC, which Mesa needs to
+  find a DC's window (its framebuffers are per window, sized by
+  GetClientRect).
+- **Vulkan: the Khronos loader and lavapipe, installed as a driver
+  is.** `vulkan-1.dll` (LunarG's Vulkan Runtime build of the Khronos
+  loader) is in System32, where Windows' GPU drivers put it; lavapipe
+  (`vulkan_lvp.dll`) and its manifest `lvp_icd.x86_64.json` (whose
+  `library_path` is `.\\vulkan_lvp.dll`, beside it) too, registered as
+  a value named by the manifest's path (DWORD 0) under
+  `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` (`user/mesa/lavapipe.regseed`,
+  a scenario's `registry` module: what an installer writes). The loader
+  finds drivers two ways on Windows: through the display adapters'
+  devnodes (cfgmgr32) and through that key. gala has no Plug and Play
+  device tree, so gala's `cfgmgr32.dll` has only the root devnode and
+  empty device lists (`cfgmgr32_test`; each list asked for is in the
+  ledger), and the key is what finds lavapipe. Presenting
+  (VK_KHR_win32_surface) is lavapipe's software swapchain: GetDC of the
+  window kept for the swapchain's life, StretchBlt from a DIB section
+  per present, which user32 shows as a kept DC's drawing (above).
+- **The loader needs a DXGI factory.** Before it reads the Drivers key
+  it calls System32's `dxgi.dll` CreateDXGIFactory1 to check vendor
+  drivers against the adapters (it calls through a NULL pointer when
+  there is no dxgi.dll, and takes no driver from the key when the
+  factory fails). gala's dxgi.dll (G0's stub) therefore gives a real
+  IDXGIFactory1 with no adapters (EnumAdapters/EnumAdapters1:
+  DXGI_ERROR_NOT_FOUND; IDXGIFactory2 and later, swap chains and
+  software adapters fail and are in the ledger). That is G0's contract
+  still: no Direct3D device (d3d11 and d3d12 fail as before), and
+  Chromium's GPU process, which lists adapters through the factory,
+  finds none (`gpu_stub_test`, the Chromium scenarios). On Windows every
+  machine has at least the Basic Render Driver's adapter; WARP is not
+  redistributable, so gala lists none.
+- **DLL paths are resolved**: the loader loads a driver as `<manifest's
+  directory>\.\vulkan_lvp.dll`; ntdll's loader resolves `.` and `..` in
+  a DLL's directory as RtlDosPathNameToNtPathName does (`loader_test`).
+- **What Mesa and the loader import** beyond what gala had:
+  RegisterClassA, EnumDisplaySettingsA, K32EnumProcessModulesEx,
+  GetObjectA, cfgmgr32's device-tree functions, GetGlyphOutlineA (for
+  wglUseFontOutlines; not implemented: GDI_ERROR and the ledger). Probes
+  that are not failures show in the ledger too: Mesa's LoadLibrary of
+  `d3d12.dll`, `vulkan-1.dll` and
+  `api-ms-win-appmodel-runtime-l1-1-2.dll` (`missing dll`), the loader's
+  GetProcAddress of gdi32's `D3DKMTEnumAdapters2` and
+  `D3DKMTQueryAdapterInfo` and its IDXGIFactory6 (`CreateDXGIFactory1
+  (interface)`, IID c1b6694f-...), and LLVM's search of every module for
+  `__register_frame` (`missing export`).
+- **Observability**: Mesa's own messages go to standard error, which is
+  the serial log (`MESA: error: ...`); unsupported paths and probes are
+  in the ledger as above; a crash in the Vulkan loader symbolizes with
+  its PDB, which PREBUILT keeps on the host (WORKFLOW "GPU tests").
+- **Tests**: `gl_test` (user/gl_test, C): a window, a pixel format
+  (Windows' set-once rule), a WGL context, glClear and a flat triangle
+  read back with glReadPixels, SwapBuffers, the frame checked on a
+  headless desktop's screen, a click to end. `vk_test` (user/vk_test, C,
+  SPIR-V from GLSL): the loader loaded at run time, an instance with
+  the surface extensions, lavapipe as the physical device, a render
+  pass clearing an image and drawing a triangle, read back; then a
+  win32 surface, a FIFO swapchain of the client's size, the same frame
+  read back from the swapchain image and presented, checked on the
+  screen. About 10 s each under TCG; on a Windows machine without a
+  Vulkan driver vk_test says `skipped`.
+- **TODO** (ROADMAP GPU): DXVK, vkd3d-proton.
+
 ## UI Automation
 
 Screen tests drive programs as testers do on Windows: find elements by
@@ -9182,13 +10409,15 @@ HEAD).
 
 - **The tree**: the root is GetDesktopWindow(). Its children are the
   visible top-level windows without an owner (EnumWindows). A top-level
-  window's children, in order: its TitleBar (if it has a caption), its
-  MenuBar (if it has a menu), the visible top-level windows it owns
+  window's children, in order: its MenuBar (if it has a menu), the
+  visible top-level windows it owns
   (GetWindow GW_OWNER: its dialogs, its open popup menu; UIA puts owned
   windows under their owner, which FlaUI's Window.ModalWindows and Win32
   menu handling rely on), its visible child windows in z order, then a
-  list box's or list view's items in index order. An open popup menu
-  (class #32768) has its items instead.
+  list box's or list view's items in index order, a provider's
+  fragments, and last its TitleBar (if it has a caption; Windows 11's
+  proxy, measured in process). An open popup menu (class #32768) has its
+  items instead.
 - **Window properties**:
   - AutomationId: the control id in decimal (none for top-level
     windows);
@@ -9385,9 +10614,9 @@ under the root), with its items as children.
 - Their properties (30073-30078, 30087-30089) are read on any element
   (not-supported without the pattern), which FlaUI's Window.ModalWindows
   relies on (a FindAllDescendants with an IsModal condition).
-- **Title bar**: the window's first child is a TitleBar element (no
-  HWND; `Node.menu` = `frame::TITLE`, item None), Name the window's
-  title, AutomationId "TitleBar", the caption band as its rectangle
+- **Title bar**: the window's last child is a TitleBar element (no
+  HWND; `Node.menu` = `frame::TITLE`, item None) with an empty Name and
+  AutomationId (Windows 11, in process), the caption band as its rectangle
   (SM_CYCAPTION below the border). With WS_SYSMENU its children are
   Buttons (items 0-2): Minimize and Maximize when the window has
   WS_MINIMIZEBOX or WS_MAXIMIZEBOX (each enabled by its own style),

@@ -447,11 +447,78 @@ impl UserSpace {
 
     /// Changes the flags of a mapped page; `user` is not forced, so a
     /// kernel-only flags value makes the page inaccessible to user mode.
+    /// An owned frame another space shares (a fork's copy-on-write page)
+    /// stays read-only: only `make_writable` makes it writable, by
+    /// copying it.
     pub fn set_flags(&mut self, virt: u64, mut flags: PageFlags) -> Result<(), PagingError> {
+        let virt = virt / PAGE_SIZE * PAGE_SIZE;
         flags.global = false;
-        self.mapper.update_flags_4k(virt / PAGE_SIZE * PAGE_SIZE, flags)?;
+        if flags.writable
+            && let Some(t) = self.mapper.translate(virt)
+            && !t.flags.borrowed
+            && crate::mm::frame_shared(Frame::containing(t.phys))
+        {
+            flags.writable = false;
+        }
+        self.mapper.update_flags_4k(virt, flags)?;
         self.invalidate(virt);
         Ok(())
+    }
+
+    /// Gives the page at `virt` `flags`, writable (a write the VAD
+    /// allows): an owned frame another space shares (a fork's
+    /// copy-on-write page) is copied into a frame of this space's own
+    /// first, and the shared one given up (its last owner keeps it).
+    /// Returns whether it was copied.
+    pub fn make_writable(&mut self, virt: u64, flags: PageFlags) -> Result<bool, PagingError> {
+        match self.mapping(virt) {
+            Some((frame, false)) if crate::mm::frame_shared(frame) => {
+                self.map_private_copy(virt, frame, flags)?;
+                crate::mm::COW_COPIES.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            }
+            _ => self.set_flags(virt, flags).map(|()| false),
+        }
+    }
+
+    /// Gives `child` (a fork's new space) the page mapped at `virt`: a
+    /// borrowed frame is mapped there too; an owned one gets the child as
+    /// another owner and is read-only in both until a write copies it
+    /// (`make_writable`), or is copied now if it cannot have another
+    /// owner. On an error the child has nothing there (and the frame no
+    /// extra owner).
+    pub fn share_into(
+        &mut self,
+        child: &mut UserSpace,
+        virt: u64,
+    ) -> Result<crate::mm::paging::ForkedPage, PagingError> {
+        use crate::mm::paging::{ForkedPage, PageSize};
+        let virt = virt / PAGE_SIZE * PAGE_SIZE;
+        let Some(t) = self.mapper.translate(virt) else { return Ok(ForkedPage::Absent) };
+        let frame = Frame::containing(t.phys);
+        if t.flags.borrowed {
+            child.map_borrowed(virt, frame, t.flags)?;
+            return Ok(ForkedPage::Borrowed);
+        }
+        if !crate::mm::share_frame(frame) {
+            child.map_private_copy(virt, frame, t.flags)?;
+            return Ok(ForkedPage::Copied);
+        }
+        let read_only = PageFlags { writable: false, global: false, ..t.flags };
+        if let Err(e) =
+            child.mapper.map(virt, frame.start(), PageSize::Size4K, read_only, &mut alloc_table)
+        {
+            // The child's share given back.
+            let _ = crate::mm::free_frame(frame);
+            return Err(e.into());
+        }
+        crate::mm::note_user_map(frame, true);
+        if t.flags.writable {
+            // A flags change of a mapped leaf allocates nothing.
+            let _ = self.mapper.update_flags_4k(virt, read_only);
+            self.invalidate(virt);
+        }
+        Ok(ForkedPage::CopyOnWrite)
     }
 
     /// Unmaps a page and frees its frame. Returns whether it was mapped.
@@ -647,6 +714,25 @@ impl UserSpace {
     /// frame belongs to a section, an image or a shared page).
     pub fn for_each_page(&mut self, mut f: impl FnMut(u64, Frame, PageFlags)) {
         self.mapper.for_each_user_leaf(&mut |virt, t| f(virt, Frame::containing(t.phys), t.flags));
+    }
+
+    /// Moves the page mapped at `from` to `to` (which must be unmapped),
+    /// its frame and flags with it, owned or borrowed as it was: memory
+    /// moved without a copy (a Linux mremap). Returns whether `from` was
+    /// mapped; on an error (no memory for a page table at `to`) nothing
+    /// changed.
+    pub fn move_page(&mut self, from: u64, to: u64) -> Result<bool, PagingError> {
+        use crate::mm::paging::PageSize;
+        let (from, to) = (from / PAGE_SIZE * PAGE_SIZE, to / PAGE_SIZE * PAGE_SIZE);
+        let Some(t) = self.mapper.translate(from) else { return Ok(false) };
+        let frame = Frame::containing(t.phys);
+        self.mapper.map(to, frame.start(), PageSize::Size4K, t.flags, &mut alloc_table)?;
+        crate::mm::note_user_map(frame, true);
+        if self.mapper.unmap_4k_owned(from).is_some() {
+            crate::mm::note_user_map(frame, false);
+        }
+        self.invalidate(from);
+        Ok(true)
     }
 
     /// The frame mapped at `virt` and whether it is borrowed.

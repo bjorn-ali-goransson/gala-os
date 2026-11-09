@@ -7,7 +7,9 @@
 //!   (ERROR_PRIVILEGE_NOT_HELD), HeapQueryInformation (the
 //!   low-fragmentation heap, 2).
 //! - psapi's K32EnumProcessModules (the executable first; also through
-//!   psapi.dll's EnumProcessModules and GetModuleFileNameExA),
+//!   psapi.dll's EnumProcessModules and GetModuleFileNameExA) and
+//!   K32EnumProcessModulesEx (LIST_MODULES_DEFAULT and LIST_MODULES_ALL
+//!   give the same list in a 64-bit process),
 //!   K32GetModuleInformation, K32GetModuleFileNameExA, K32GetModuleBaseNameW
 //!   (the file name's last component),
 //!   K32GetProcessMemoryInfo; QueryFullProcessImageNameW;
@@ -78,6 +80,13 @@ unsafe extern "system" {
         ret: *mut usize,
     ) -> Bool;
     fn K32EnumProcessModules(h: Handle, mods: *mut Handle, size: u32, needed: *mut u32) -> Bool;
+    fn K32EnumProcessModulesEx(
+        h: Handle,
+        mods: *mut Handle,
+        size: u32,
+        needed: *mut u32,
+        filter: u32,
+    ) -> Bool;
     fn K32GetModuleInformation(h: Handle, module: Handle, info: *mut ModuleInfo, size: u32)
     -> Bool;
     fn K32GetModuleFileNameExA(h: Handle, module: Handle, buf: *mut u8, size: u32) -> u32;
@@ -147,6 +156,7 @@ unsafe extern "system" {
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "system" {
     fn RtlVerifyVersionInfo(info: *const OsVersionInfoExW, kind: u32, mask: u64) -> u32;
+    fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
 }
 
 #[allow(dead_code)]
@@ -315,6 +325,26 @@ fn memory(c: &mut Checks) -> Result<(), u32> {
         c.ok(GlobalMemoryStatusEx(&mut ms) != 0, GetLastError().into())?;
         c.ok(ms.load <= 100, ms.load.into())?;
         c.ok(ms.total_phys > 0 && ms.avail_phys <= ms.total_phys, ms.avail_phys)?;
+        // The figures are the system classes', so they agree with them:
+        // physical memory is SystemBasicInformation's NumberOfPhysicalPages,
+        // and the "page file" ones are the commit charge from
+        // SystemPerformanceInformation. A page file only adds to the limit,
+        // so it is never below the memory (on Windows 11 26200, 31.74 GiB
+        // of memory against a 91.30 GiB limit; with no page file the two
+        // are equal). The totals are stable, so they are compared exactly;
+        // what is available moves between the calls, so it is bounded.
+        let mut ret = 0u32;
+        let mut basic = [0u8; 64];
+        c.eq(NtQuerySystemInformation(0, basic.as_mut_ptr(), 64, &mut ret).into(), 0)?;
+        let mut perf = [0u8; 0x158];
+        c.eq(NtQuerySystemInformation(2, perf.as_mut_ptr(), 0x158, &mut ret).into(), 0)?;
+        let at = |b: &[u8], o: usize| {
+            u64::from(u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]))
+        };
+        c.eq(ms.total_phys, at(&basic, 12) * 4096)?;
+        c.eq(ms.total_page_file, at(&perf, 0x34) * 4096)?;
+        c.ok(ms.total_page_file >= ms.total_phys, ms.total_page_file)?;
+        c.ok(ms.avail_page_file <= ms.total_page_file, ms.avail_page_file)?;
         c.eq(ms.total_virtual, 0x7fff_fffe_0000)?;
         c.ok(ms.avail_virtual <= ms.total_virtual && ms.avail_virtual > 0, ms.avail_virtual)?;
         c.eq(ms.avail_extended_virtual, 0)?;
@@ -371,6 +401,19 @@ fn process(c: &mut Checks) -> Result<(), u32> {
         let kernel32 = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         let count = (needed / 8) as usize;
         c.ok(mods[..count.min(32)].contains(&kernel32), 0)?;
+        // K32EnumProcessModulesEx (Mesa's llvmpipe calls it): in a 64-bit
+        // process LIST_MODULES_DEFAULT (0) and LIST_MODULES_ALL (3) list
+        // the same modules as K32EnumProcessModules.
+        for filter in [0, 3] {
+            let mut ex = [core::ptr::null_mut(); 32];
+            let mut needed_ex = 0;
+            c.ok(
+                K32EnumProcessModulesEx(me, ex.as_mut_ptr(), 256, &mut needed_ex, filter) != 0,
+                0,
+            )?;
+            c.eq(needed_ex.into(), needed.into())?;
+            c.ok(ex[..count.min(32)] == mods[..count.min(32)], filter.into())?;
+        }
 
         // psapi.dll's names for them (forwarded to kernel32 on Windows 7+).
         let mut via_psapi = [core::ptr::null_mut(); 32];

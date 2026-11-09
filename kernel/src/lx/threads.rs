@@ -107,7 +107,7 @@ pub fn clone_thread(
         Err(status) => return failed(status_text(status), EAGAIN),
     };
     let tid = thread::id_of(&object);
-    if call.lx.add_thread(tid, mask_of(call)).is_err() {
+    if call.lx.add_thread(tid, mask_of(call), call.lx.comm(call.tid)).is_err() {
         // It never ran: it ends at once, never entering user mode.
         thread::request_termination(&object, NtStatus::NO_MEMORY);
         thread::resume(&object);
@@ -150,11 +150,15 @@ pub fn gettid(call: &Call<'_>) -> u64 {
 }
 
 /// exit(2): the calling thread ends (the process with its last thread,
-/// whose status it is). Its clear-tid address, if any, gets a 0 and one
-/// futex waiter there wakes (pthread_join); what was pending for it
+/// whose status it is). The locks on its robust futex list are released
+/// (`futex::release_robust`); its clear-tid address, if any, gets a 0 and
+/// one futex waiter there wakes (pthread_join); what was pending for it
 /// alone goes.
 pub fn exit(call: &Call<'_>, status: u64) -> Result {
-    let clear = call.lx.remove_thread(call.tid);
+    let (clear, robust) = call.lx.remove_thread(call.tid);
+    if robust != 0 {
+        super::release_robust_list(&call.process, call.lx.linux_tid(call.tid), robust);
+    }
     if clear != 0 {
         // A bad address is ignored (as Linux does), and logged: a joiner
         // would wait for a wake that does not come.
@@ -170,6 +174,95 @@ pub fn exit(call: &Call<'_>, status: u64) -> Result {
     }
     thread::exit_current_on_return(NtStatus((status & 0xff) as u32));
     Ok(0)
+}
+
+/// struct robust_list_head's size (set_robust_list(2)).
+const ROBUST_LIST_HEAD_SIZE: u64 = 24;
+
+/// set_robust_list(head, len): the calling thread's robust futex list
+/// (glibc registers one for every thread); EINVAL for another `len`.
+pub fn set_robust_list(call: &Call<'_>, head: u64, len: u64) -> Result {
+    if len != ROBUST_LIST_HEAD_SIZE {
+        return Err(EINVAL);
+    }
+    call.lx.set_robust_list(call.tid, head);
+    Ok(0)
+}
+
+/// get_robust_list(tid, head_ptr, len_ptr): a thread's (0: the caller's)
+/// list head and its size; ESRCH for no such thread in this process
+/// (another process's: not reached yet).
+pub fn get_robust_list(call: &Call<'_>, tid: u64, head_ptr: u64, len_ptr: u64) -> Result {
+    let core =
+        if tid as u32 == 0 { Some(call.tid) } else { call.lx.core_tid(u64::from(tid as u32)) };
+    let head = core.and_then(|t| call.lx.robust_list(t)).ok_or(super::errno::ESRCH)?;
+    call.process.write(head_ptr, &head.to_le_bytes()).map_err(|_| super::errno::EFAULT)?;
+    call.process
+        .write(len_ptr, &ROBUST_LIST_HEAD_SIZE.to_le_bytes())
+        .map_err(|_| super::errno::EFAULT)?;
+    Ok(0)
+}
+
+/// clone3's struct clone_args sizes: version 0 (up to tls), 1 (set_tid),
+/// 2 (cgroup).
+const CLONE_ARGS_SIZE_VER0: u64 = 64;
+const CLONE_ARGS_SIZE_VER2: u64 = 88;
+/// clone3-only flags.
+const CLONE_PIDFD: u64 = 0x1000;
+const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
+const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+
+/// clone3(args, size): clone(2) with its arguments in struct clone_args
+/// (glibc's pthread_create and fork try it first): the same flags as
+/// clone takes, the exit signal in its own field, the stack as its
+/// lowest address and size. EINVAL for a size below version 0's, an exit
+/// signal in the flags or above 64, a stack without a size; E2BIG for a
+/// size above a page or non-zero bytes past the fields known. A pidfd,
+/// set_tid, a cgroup or CLONE_CLEAR_SIGHAND are not supported (ENOSYS,
+/// ledgered as `linux clone flags missing`).
+pub fn clone3(call: &Call<'_>, args: u64, size: u64) -> Result {
+    if size < CLONE_ARGS_SIZE_VER0 {
+        return Err(EINVAL);
+    }
+    if size > 4096 {
+        return Err(super::errno::E2BIG);
+    }
+    let known = size.min(CLONE_ARGS_SIZE_VER2) as usize;
+    let mut fields = [0u8; CLONE_ARGS_SIZE_VER2 as usize];
+    let b = &mut fields[..known];
+    call.process.read(args, b).map_err(|_| super::errno::EFAULT)?;
+    // A newer caller's fields past the ones known must be zero.
+    let mut at = args + CLONE_ARGS_SIZE_VER2;
+    while at < args + size {
+        let mut rest = [0u8; 64];
+        let n = (args + size - at).min(64) as usize;
+        call.process.read(at, &mut rest[..n]).map_err(|_| super::errno::EFAULT)?;
+        if rest[..n].iter().any(|&x| x != 0) {
+            return Err(super::errno::E2BIG);
+        }
+        at += n as u64;
+    }
+    let b = &fields[..known];
+    let field = |i: usize| {
+        b.get(i * 8..i * 8 + 8).and_then(|w| w.try_into().ok()).map_or(0, u64::from_le_bytes)
+    };
+    // Field 1, pidfd, is used only with CLONE_PIDFD.
+    let (flags, child_tid, parent_tid, exit_signal) = (field(0), field(2), field(3), field(4));
+    let (stack, stack_size, tls, set_tid, set_tid_size, cgroup) =
+        (field(5), field(6), field(7), field(8), field(9), field(10));
+    if flags & CSIGNAL != 0 || exit_signal > 64 || (stack == 0) != (stack_size == 0) {
+        return Err(EINVAL);
+    }
+    if flags & (CLONE_PIDFD | CLONE_CLEAR_SIGHAND | CLONE_INTO_CGROUP) != 0
+        || set_tid != 0
+        || set_tid_size != 0
+        || cgroup != 0
+    {
+        ledger::record("clone3", "linux clone flags missing", flags);
+        return Err(ENOSYS);
+    }
+    let sp = if stack == 0 { 0 } else { stack.checked_add(stack_size).ok_or(EINVAL)? };
+    super::fork::clone(call, flags | exit_signal, sp, parent_tid, child_tid, tls)
 }
 
 /// The signal mask a new thread or forked child starts with: the

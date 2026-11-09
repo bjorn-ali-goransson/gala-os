@@ -163,7 +163,11 @@ pub(super) fn gala_user_object_open(call: &mut Call<'_>) -> NtStatus {
     }
     let name = tri!(call.read_wide(ptr, len));
     let object = match kind {
-        0 => match winsta::station_by_name(call.process.session, &name) {
+        0 => match winsta::station_to_open(
+            call.process.session,
+            &call.process.token.lock().clone(),
+            &name,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 note_not_found(call, "window station", &name, e);

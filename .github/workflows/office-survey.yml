@@ -1,0 +1,57 @@
+# ROADMAP OF step 1: install Microsoft 365 Apps (Word, Excel, PowerPoint;
+# unactivated, no sign-in) on a Windows runner with the Office Deployment
+# Tool and keep only their metadata (tools/office_survey.py: imports,
+# exports, COM classes, services; never a binary). The owner accepted
+# Microsoft's licence terms for this (AcceptEULA below).
+name: office-survey
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/office-survey.yml
+      - tools/office_survey.py
+permissions:
+  contents: read
+jobs:
+  survey:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Microsoft 365 Apps with the Office Deployment Tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force odt | Out-Null
+          Invoke-WebRequest https://officecdn.microsoft.com/pr/wsus/setup.exe -OutFile odt\setup.exe
+          @'
+          <Configuration>
+            <Add OfficeClientEdition="64" Channel="Current">
+              <Product ID="O365ProPlusRetail">
+                <Language ID="en-us" />
+                <ExcludeApp ID="Access" />
+                <ExcludeApp ID="Groove" />
+                <ExcludeApp ID="Lync" />
+                <ExcludeApp ID="OneDrive" />
+                <ExcludeApp ID="OneNote" />
+                <ExcludeApp ID="Outlook" />
+                <ExcludeApp ID="Publisher" />
+                <ExcludeApp ID="Teams" />
+              </Product>
+            </Add>
+            <Updates Enabled="FALSE" />
+            <Display Level="None" AcceptEULA="TRUE" />
+          </Configuration>
+          '@ | Set-Content odt\config.xml
+          $p = Start-Process odt\setup.exe -ArgumentList '/configure', 'odt\config.xml' -Wait -PassThru
+          "setup.exe exit code: $($p.ExitCode)"
+          Get-ChildItem 'C:\Program Files\Microsoft Office\root\Office16' -Filter *.exe | Select-Object -First 40 Name
+      - name: Survey (metadata only)
+        shell: pwsh
+        run: python -I tools/office_survey.py office-survey
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: office-survey
+          path: office-survey
+          retention-days: 30

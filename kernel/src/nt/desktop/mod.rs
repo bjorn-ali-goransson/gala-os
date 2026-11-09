@@ -37,12 +37,12 @@ use super::status::NtStatus;
 /// The window state's names, as the desktop's (the system calls, the
 /// named actions use them).
 pub use super::winstate::{
-    Action, BORDER, CAPTION, GALA_WM_MINIMIZED, GALA_WM_PLACE, ICON, InputEvent, LISTED_ACTIVE,
-    LISTED_MAXIMIZED, LISTED_MINIMIZED, LISTED_SNAPPED, LISTED_TITLE, Listed, Rect, SC_CLOSE,
-    SC_MAXIMIZE, SC_RESTORE, SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR,
-    WHEEL_DELTA, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_MOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, scale_icon, scale_icon_to,
+    Action, BORDER, CAPTION, GALA_WM_ACTIVE, GALA_WM_MINIMIZED, GALA_WM_PLACE,
+    GALA_WM_POINTER_LEFT, ICON, InputEvent, LISTED_ACTIVE, LISTED_MAXIMIZED, LISTED_MINIMIZED,
+    LISTED_SNAPPED, LISTED_TITLE, Listed, Listener, Rect, SC_CLOSE, SC_MAXIMIZE, SC_RESTORE,
+    SMALL_ICON, STYLE_FRAMELESS, STYLE_POPUP, SnapTo, TASKBAR, WHEEL_DELTA, WM_CLOSE, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, scale_icon, scale_icon_to,
 };
 use super::winstate::{CAPTION_BUTTON, Shadow, State, VK_MENU, Window};
 use crate::mm::heap::TryVec;
@@ -359,6 +359,9 @@ pub struct Desktop {
     /// bit 1 right).
     pointer: (i64, i64),
     buttons: u8,
+    /// Buttons whose press ended a popup grab: their release goes
+    /// nowhere either.
+    swallowed: u8,
     hover: Hit,
     /// Where the left button went down.
     pressed: Hit,
@@ -408,6 +411,7 @@ impl Desktop {
             programs: Vec::new(),
             pointer: (0, 0),
             buttons: 0,
+            swallowed: 0,
             hover: Hit::Nothing,
             pressed: Hit::Nothing,
             drag: None,
@@ -535,6 +539,22 @@ impl Desktop {
         Ok(r)
     }
 
+    /// Gives `owner`'s window `id` the popup grab (0: ends `owner`'s):
+    /// `State::set_popup_grab`.
+    pub fn popup_grab(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        self.s.set_popup_grab(id, owner)
+    }
+
+    /// `owner`'s window `id`'s client area's screen position.
+    pub fn client_origin(&self, id: u32, owner: u64) -> Option<(i64, i64)> {
+        self.s.owned(id, owner).map(|w| w.client_origin())
+    }
+
+    /// `owner`'s window `id`'s outer rectangle (x, y, width, height).
+    pub fn outer(&self, id: u32, owner: u64) -> Option<(i32, i32, u32, u32)> {
+        self.s.owned(id, owner).map(|w| (w.x, w.y, w.w, w.h))
+    }
+
     /// A window's new title (the caption and the taskbar show it).
     pub fn set_title(&mut self, id: u32, owner: u64, title: &[u16]) -> Result<Rect, NtStatus> {
         let r = self.s.set_title(id, owner, title)?;
@@ -598,9 +618,9 @@ impl Desktop {
         self.s.has_input(owner)
     }
 
-    /// `owner`'s event to signal when input arrives for it.
-    pub fn listen(&mut self, owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
-        self.s.listen(owner, event)
+    /// Who to tell when input arrives for `owner`.
+    pub fn listen(&mut self, owner: u64, listener: Listener) -> Result<(), NtStatus> {
+        self.s.listen(owner, listener)
     }
 
     /// The windows the taskbar shows (in its order).
@@ -702,7 +722,7 @@ impl Desktop {
         self.s.send(id, WM_MOUSEWHEEL, u64::from(delta) << 16, lp);
     }
 
-    fn take_wakes(&mut self) -> Vec<ObjectRef> {
+    fn take_wakes(&mut self) -> Vec<Listener> {
         self.s.take_wakes()
     }
 
@@ -864,6 +884,27 @@ impl Desktop {
             let c = self.cursor_rect();
             self.s.add_damage(c);
         }
+        // A press outside the windows of a popup grab's owner ends the
+        // grab (the owner dismisses its popups) and goes nowhere else, as
+        // a click outside the start menu closes it.
+        let up = self.swallowed & !buttons;
+        self.swallowed &= !up;
+        self.buttons &= !up;
+        let pressed = buttons & !self.buttons;
+        if pressed != 0 && self.s.popup_grab.is_some() {
+            let target = match self.s.captured.filter(|&c| self.s.window(c).is_some()) {
+                Some(c) => Some(c),
+                None => match self.hit(x, y) {
+                    Hit::Client(id) => Some(id),
+                    _ => None,
+                },
+            };
+            if self.s.outside_popup_grab(target) {
+                self.s.end_popup_grab(x, y);
+                self.buttons |= pressed;
+                self.swallowed |= pressed;
+            }
+        }
         // The capture gets every mouse message, in its client coordinates.
         if let Some(id) = self.s.captured
             && self.s.window(id).is_some()
@@ -873,6 +914,7 @@ impl Desktop {
             let pressed = buttons & !self.buttons;
             let released = self.buttons & !buttons;
             self.buttons = buttons;
+            self.s.pointer_over(Some(id));
             if (dx, dy) != (0, 0) {
                 self.s.send(id, WM_MOUSEMOVE, keys, lp);
             }
@@ -908,6 +950,10 @@ impl Desktop {
             (_, Hit::Client(id)) => Some(id),
             _ => None,
         };
+        // A window the pointer left is told so if served (the Wayland
+        // server's pointer leave); a drag or resize leaves it too.
+        let over = if self.drag.is_some() || self.resize.is_some() { None } else { target };
+        self.s.pointer_over(over);
         if (dx, dy) != (0, 0)
             && self.drag.is_none()
             && self.resize.is_none()
@@ -1659,6 +1705,11 @@ impl Shell {
         }
         (out, d.s.input_dropped, d.s.input.len())
     }
+
+    /// The window holding the popup grab (the state dump).
+    pub fn popup_grab(&self) -> Option<u32> {
+        self.d.lock().s.popup_grab
+    }
 }
 
 /// The desktop the console shows (the input thread's), if any: none
@@ -1779,6 +1830,12 @@ fn bare() -> Option<&'static str> {
     Some("no screen and no presenter=")
 }
 
+/// Whether desktops are bare (see `bare`): nothing shows them, and
+/// shasha's shell does not run on them.
+pub fn is_bare() -> bool {
+    bare().is_some()
+}
+
 /// What shows the console session's desktop when it goes live: the
 /// screen, or what `presenter=` names.
 fn local_presenter() -> Result<Presenter, NtStatus> {
@@ -1895,12 +1952,17 @@ pub fn with<R>(
 ) -> Result<R, NtStatus> {
     let mut d = shell.d.lock();
     ensure_live(shell, &mut d)?;
-    let (r, area) = f(&mut d)?;
-    if let Some(area) = area {
-        d.s.add_damage(area);
+    let result = f(&mut d);
+    if let Ok((_, Some(area))) = &result {
+        d.s.add_damage(*area);
     }
     redraw_damage(&mut d);
-    Ok(r)
+    // A window shown, hidden or gone moves the activation: its served
+    // owners are told (GALA_WM_ACTIVE).
+    let wakes = d.take_wakes();
+    drop(d);
+    signal(wakes);
+    result.map(|(r, _)| r)
 }
 
 /// Attaches a presenter of `kind` to `shell`'s desktop (GalaSession):
@@ -2104,6 +2166,9 @@ pub fn process_ended(shell: &Shell, owner: u64) {
     }
     d.destroy_owned(owner);
     redraw_damage(&mut d);
+    let wakes = d.take_wakes();
+    drop(d);
+    signal(wakes);
 }
 
 /// Mouse input: the pointer moved by (dx, dy) with `buttons` held (bit 0
@@ -2288,10 +2353,16 @@ pub fn set_wallpaper(shell: &Shell, name: &str) -> Result<(), NtStatus> {
     Ok(())
 }
 
-/// Signals input events (outside the desktop's lock).
-fn signal(events: Vec<ObjectRef>) {
-    for e in events {
-        super::wait::set_signal(&e, 1);
+/// Tells the listeners of processes with new input (outside the
+/// desktop's lock): an event is signalled, a server's thread woken.
+fn signal(listeners: Vec<Listener>) {
+    for l in listeners {
+        match l {
+            Listener::Event(e) => {
+                super::wait::set_signal(&e, 1);
+            }
+            Listener::Server(thread) => platform::wake(thread),
+        }
     }
 }
 
@@ -2335,8 +2406,28 @@ fn key_on(shell: &Shell, vk: u8, scan: u8, extended: bool, down: bool) {
 
 /// GalaWindowListen: `owner`'s input event.
 pub fn listen(shell: &Shell, owner: u64, event: ObjectRef) -> Result<(), NtStatus> {
+    listen_with(shell, owner, Listener::Event(event))
+}
+
+/// `owner`'s windows are served by kernel thread `thread` (the Wayland
+/// server, for a Linux client's windows): it is woken for their input,
+/// which then includes GALA_WM_ACTIVE and GALA_WM_POINTER_LEFT.
+pub fn listen_server(
+    shell: &Shell,
+    owner: u64,
+    thread: platform::ThreadId,
+) -> Result<(), NtStatus> {
+    listen_with(shell, owner, Listener::Server(thread))
+}
+
+/// `thread` no longer serves `owner`'s windows.
+pub fn unlisten_server(shell: &Shell, owner: u64, thread: platform::ThreadId) {
+    shell.d.lock().s.unlisten_server(owner, thread);
+}
+
+fn listen_with(shell: &Shell, owner: u64, listener: Listener) -> Result<(), NtStatus> {
     let mut d = shell.d.lock();
-    d.listen(owner, event)?;
+    d.listen(owner, listener)?;
     let wakes = d.take_wakes();
     drop(d);
     signal(wakes);

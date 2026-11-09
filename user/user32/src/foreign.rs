@@ -1123,7 +1123,8 @@ fn filter_result(status: u32) -> i32 {
 
 /// ChangeWindowMessageFilterEx: lets `message` reach `hwnd` (one of ours)
 /// from processes of lower integrity (MSGFLT_ALLOW 1), blocks it again
-/// (MSGFLT_DISALLOW 2) or resets the window's filter (MSGFLT_RESET 0);
+/// (MSGFLT_DISALLOW 2) or resets the window's filter (MSGFLT_RESET 0, with
+/// message 0 only);
 /// CHANGEFILTERSTRUCT's ExtStatus says what was already so (its cbSize
 /// must be right: ERROR_INVALID_PARAMETER). Another process's window or a
 /// caller at Low integrity: ERROR_ACCESS_DENIED.
@@ -1137,6 +1138,13 @@ pub extern "system" fn ChangeWindowMessageFilterEx(
     const ERROR_INVALID_PARAMETER: u32 = 87;
     // SAFETY: the caller's structure, if any.
     if !change.is_null() && unsafe { (*change).size } as usize != size_of::<ChangeFilterStruct>() {
+        crate::window::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // MSGFLT_RESET (0) resets the window's whole filter and takes message
+    // 0 only; MSGFLT_ALLOW and MSGFLT_DISALLOW take a nonzero message
+    // (Windows 11).
+    if (action == 0) != (message == 0) {
         crate::window::set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     }
