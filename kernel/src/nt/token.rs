@@ -133,6 +133,11 @@ impl Sid {
         Some(sid)
     }
 
+    /// Its last sub-authority (a local account's RID), if it has any.
+    pub fn last_sub(&self) -> Option<u32> {
+        self.count.checked_sub(1).map(|i| self.subs[usize::from(i)])
+    }
+
     fn is_label(&self) -> bool {
         self.authority == [0, 0, 0, 0, 0, 16] && self.count == 1
     }

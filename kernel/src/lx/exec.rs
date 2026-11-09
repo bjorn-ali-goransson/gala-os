@@ -33,11 +33,6 @@ use crate::nt::status::NtStatus;
 use crate::nt::vad::{self, Vad};
 use crate::nt::{ledger, thread, vm};
 
-/// The uid and gid every Linux program runs as for now (the boot user;
-/// later mapped to and from the token's SIDs).
-pub const UID: u64 = 1000;
-pub const GID: u64 = 1000;
-
 /// The most the initial stack's strings and vectors may take (Linux
 /// allows a quarter of the stack limit).
 const STACK_MAX: u64 = STACK_SIZE / 4;
@@ -280,16 +275,22 @@ fn interp_error(path: &[u8], why: InterpError) -> ExecError {
 struct Machine {
     random: [u8; 16],
     hwcap: u64,
+    /// The program's uid and gid (auxv's AT_UID/AT_EUID, AT_GID/AT_EGID).
+    ids: (u64, u64),
 }
 
 impl Machine {
-    fn now() -> Machine {
+    fn now(ids: super::identity::Ids) -> Machine {
         let mut random = [0u8; 16];
         if !platform::fill_entropy(&mut random) {
             // No generator: still not all zero (auxv_test checks that much).
             random = (platform::monotonic_ns() as u128 | 1).to_le_bytes();
         }
-        Machine { random, hwcap: super::machine::hwcap() }
+        Machine {
+            random,
+            hwcap: super::machine::hwcap(),
+            ids: (u64::from(ids.uid), u64::from(ids.gid)),
+        }
     }
 }
 
@@ -327,7 +328,7 @@ fn prepare(
     let stack_exec = image.gnu_stack.is_none_or(|p| p.exec);
     let stack_protect = if stack_exec { vad::PAGE_EXECUTE_READWRITE } else { vad::PAGE_READWRITE };
     let execfn = argv.first().copied().unwrap_or(path.as_bytes());
-    let Machine { random, hwcap } = machine;
+    let Machine { random, hwcap, ids } = machine;
     let params = StackParams {
         argv,
         envp,
@@ -344,10 +345,10 @@ fn prepare(
             base: interp.as_ref().map_or(0, |i| i.plan.start),
             pagesz: PAGE,
             flags: 0,
-            uid: UID,
-            euid: UID,
-            gid: GID,
-            egid: GID,
+            uid: ids.0,
+            euid: ids.0,
+            gid: ids.1,
+            egid: ids.1,
             secure: false,
             hwcap,
             clktck: stack::CLKTCK,
@@ -374,7 +375,10 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
     let (exe, data) =
         super::file::executable_at(ramfs::ROOT, path.as_bytes()).map_err(ExecError::File)?;
     let read = |p: &[u8]| super::file::executable_at(cwd, p).map(|(_, d)| d);
-    let p = prepare(path, data, &read, argv, envp, Machine::now())?;
+    // A program the kernel starts runs with the boot token (nt::token).
+    let ids = crate::nt::token::TokenData::boot()
+        .map_or(super::identity::boot_user(), |t| super::identity::of_token(&t));
+    let p = prepare(path, data, &read, argv, envp, Machine::now(ids))?;
     p.log(path);
     let plan = &p.plan;
 
@@ -425,7 +429,8 @@ fn spawn_inner(path: &str, argv: &[&[u8]], envp: &[&[u8]]) -> Result<KArc<Proces
             return Err(ExecError::Map("first thread", status));
         }
     };
-    if lx.add_thread(thread::id_of(&object), lx_abi::signal::SigSet::EMPTY).is_err() {
+    let comm = state::Comm::of_path(path.as_bytes());
+    if lx.add_thread(thread::id_of(&object), lx_abi::signal::SigSet::EMPTY, comm).is_err() {
         thread::request_termination(&object, NtStatus::NO_MEMORY);
         thread::resume(&object);
         return Err(ExecError::OutOfMemory);
@@ -584,6 +589,9 @@ pub fn execve(
 ) -> super::dispatch::Result {
     use super::errno::ENOMEM;
     let path = super::file::read_path(&call.process, path)?;
+    // Its name once it runs: the path given (a script's, not its
+    // interpreter's).
+    let comm = state::Comm::of_path(&path);
     let mut args = read_strings(&call.process, argv)?;
     let env = read_strings(&call.process, envp)?;
     let (mut exe, mut data) = super::file::executable(call, &path)?;
@@ -629,7 +637,8 @@ pub fn execve(
     }
     crate::info!("lx: pid {} execve {shown}", call.process.id);
     let read = |p: &[u8]| super::file::executable(call, p).map(|(_, d)| d);
-    let p = match prepare(shown, data, &read, &argv_refs, &envp_refs, Machine::now()) {
+    let ids = super::identity::of_process(&call.process);
+    let p = match prepare(shown, data, &read, &argv_refs, &envp_refs, Machine::now(ids)) {
         Ok(p) => p,
         Err(e) => {
             crate::warn!("lx: pid {} execve {shown} failed: {e}", call.process.id);
@@ -658,6 +667,7 @@ pub fn execve(
     }
     *call.lx.brk.lock() = state::Brk { start: p.plan.brk, current: p.plan.brk };
     *call.lx.exe.lock() = exe;
+    call.lx.set_comm(call.tid, comm);
     call.lx.release_vfork();
     call.lx.close_on_exec();
     call.lx.signals.lock().exec();
@@ -728,7 +738,7 @@ mod tests {
     }
 
     fn machine() -> Machine {
-        Machine { random: [7; 16], hwcap: 0 }
+        Machine { random: [7; 16], hwcap: 0, ids: (1000, 1000) }
     }
 
     fn prepared(program: &[u8], interp: &[u8]) -> Result<Prepared, ExecError> {

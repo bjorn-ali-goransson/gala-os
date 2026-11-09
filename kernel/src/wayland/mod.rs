@@ -229,8 +229,9 @@ pub fn start(mode: &str) -> Result<(), StartError> {
     if SERVER.lock().is_some() {
         return Err(StartError::AlreadyRunning);
     }
-    let uid = crate::lx::exec::UID;
-    let cred = Cred { pid: 0, uid: uid as u32, gid: crate::lx::exec::GID as u32 };
+    let ids = crate::lx::identity::boot_user();
+    let uid = u64::from(ids.uid);
+    let cred = Cred { pid: 0, uid: ids.uid, gid: ids.gid };
     let (dir, node) = make_node(uid).map_err(StartError::Fs)?;
     let mut path = [0u8; 64];
     let dir_len = runtime_dir(uid, &mut path);

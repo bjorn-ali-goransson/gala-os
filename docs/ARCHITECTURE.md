@@ -1982,17 +1982,22 @@ xtask types: "hi" with ReadFile, echoed, the program getting "hi\r\n";
   Ctrl+C k after m ms`, a warning from 250 ms: late is a lost wake-up;
   event `console ctrl taken`). GalaConsoleCtrl has a 1 s backstop.
   The session keeps each process's handler thread as a taker with the
-  last Ctrl+C it took. A process ending itself (NtTerminateProcess on
+  last Ctrl+C it took and the last it is done with: its thread came back
+  to wait with that count (its handlers returned), or the process is
+  ending. A process ending itself (NtTerminateProcess on
   itself, whatever the status: the default handler's
   STATUS_CONTROL_C_EXIT, or a handler that exits, as busybox-w32's does
   with its own) after its handler took Ctrl+C k waits until every other
-  taker has taken k before it ends, so a
+  taker is done with k before it ends, so a
   shell's handler has run before the shell can see its child end (on
   Windows the parent's handler starts about 12 ms before a
   handler-less child's end is visible; handlers otherwise start
-  together and none waits for another; #33). A taker still busy with
-  an earlier event is waited for 1 s at most (`... ends with Ctrl+C k
-  before N other process(es) took it`, a warning).
+  together and none waits for another; #33). Taken is not enough: a
+  handler thread that woke but was scheduled late (a busy host) ran
+  busybox-w32's handler after the shell had cleared its "got a signal"
+  flag for the next line, which then ate the next key as ^C. A handler
+  that blocks is waited for 1 s at most (`... ends with Ctrl+C k
+  before N other process(es) handled it`, a warning).
 - **The host** (`user/conhost`): the kernel starts `conhost.exe` (a boot
   module) with the session's id and the program's file name before the
   program. Its system calls: GalaConsoleHost(id, event) 0x7f3a (become
@@ -8211,8 +8216,9 @@ Design rules:
   objects are core objects; an NT handle and a Linux fd are two views of
   one object (later: a Windows and a Linux program on one pipe, each
   launching the other).
-- **Identity**: Linux uid/gid map to SIDs on the existing tokens; one
-  access-check implementation.
+- **Identity**: Linux uid/gid map to SIDs on the existing tokens
+  (`lx::identity`, "The lx module"); one access-check implementation
+  (not yet: Linux checks a file's mode bits as its owner's).
 - **One file system** for both: case sensitivity per directory, POSIX
   metadata per file, symlinks and hard links, POSIX unlink/rename of
   open files.
@@ -8508,7 +8514,8 @@ The running parts (milestone 1; `lxrun=`):
   - the stack: 8 MiB committed ending at `mm::STACK_END`
     (0x7fff_fffe_0000), executable only if PT_GNU_STACK says so (or is
     missing); `stack::build`'s bytes (gap 0, AT_RANDOM from
-    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, uid/gid 1000)
+    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, AT_UID/AT_GID
+    the program's ids, `lx::identity`)
     copied to its top;
   - then `nt::process::create_bare` (no PEB, ntdll, handles or image
     layout: `Process::layout()` is None) and `thread::create`, which
@@ -8678,6 +8685,34 @@ The running parts (milestone 1; `lxrun=`):
   a buffer fault before anything was written is EFAULT). readv reads
   into one vector after another while each fills. Anything else:
   `errno::to_return(ENOSYS)`.
+- **Linux identity** (`lx::identity`; id_test, `lx_id`): a Linux
+  program is the account its NT token is. The uid is a function of the
+  token's user SID: SYSTEM is root (0); a local account of this machine
+  with RID 1001 or more is RID - 1 (the boot user `gala`, RID 1001, is
+  1000, Linux's first user); any other SID is `nobody` (65534). The gid
+  is the user's own group of the same number (root's 0); the
+  supplementary groups are it and the enabled token groups with Linux
+  names (BUILTIN\Administrators `sudo` 27, BUILTIN\Users `users` 100).
+  Real, effective and saved ids are the same (no setuid programs):
+  setuid/setgid to one's own id succeed, anything else EPERM; chown
+  keeps the caller's ids. Every place Linux reports ids takes them from
+  there: getuid and friends, getgroups, getresuid/getresgid, auxv's
+  AT_UID/AT_GID, SO_PEERCRED, siginfo's si_uid, stat's owner (the
+  caller's, as before: we own every file; root for the user database),
+  the Wayland server's credentials (the boot user's). **The user
+  database** is made at boot from the accounts (`nt::accounts::
+  local_users`: `gala` and `SAM\Gala\Users`) and published as two
+  files of a ramfs volume of their own, bound by the walk over
+  `/etc/passwd` and `/etc/group` (listed in `/etc`, covering any file
+  of those names there; `/etc` made if missing): root's 0644 files
+  (opening them for writing EACCES, chmod EPERM, unlink or rename
+  EBUSY), never in the change log, never `C:\etc\passwd`. A user's
+  home is their profile, `/Users/<name>` (the boot user's made at boot
+  if no module made it); root's is SYSTEM's
+  (`/Windows/System32/config/systemprofile`); the shell `/bin/sh`.
+  Limits: an account added after boot appears at the next (there is no
+  NetUserAdd yet); a file's owner is not yet its security descriptor's
+  owner (the caller's for every file but the user database's).
 - **Files** (`lx::file`; fileio_test and fs_test, `lx_fileio`,
   `lx_fs`): Linux paths walked on the shared ramfs (`/` separators, `.`
   and `..` by the walk, ENOTDIR/ENOENT on the way, a trailing slash makes
@@ -8764,6 +8799,23 @@ The running parts (milestone 1; `lxrun=`):
   program the process runs (`LxProcess::exe`, its node: execve sets it,
   to the interpreter for a `#!` script; a fork's child has its
   parent's); other /proc paths are ENOENT (ledgered for readlink).
+- **Process attributes** (`lx::prctl`; prctl_test, `lx_prctl`): prctl's
+  PR_SET_NAME and PR_GET_NAME are the calling thread's name
+  (`state::Comm` in `LxThread`, Linux's "comm": up to 15 bytes and a
+  NUL; a new thread has its creator's, a fork's child its parent's,
+  execve gives the program's file name, the path it was given, and so a
+  script's own), PR_CAPBSET_READ the full bounding set (1 up to
+  CAP_LAST_CAP, 40; EINVAL beyond, by which libcap finds the last); any
+  other option EINVAL and ledgered (`linux option missing`, service
+  prctl). getresuid and getresgid: the one user's ids, three times.
+- **statfs** (`lx::file`; statfs_test, `lx_statfs`): statfs (the path
+  found as stat finds it, its errors) and fstatfs report the shared
+  file system as a tmpfs (TMPFS_MAGIC; 4 KiB blocks, the machine's
+  memory as its size and what is free of it as its room, no inode limit,
+  names of 255 bytes, ST_VALID, fsid 0); a pipe, a socket and an
+  anonymous inode their pseudo file systems' magics, without blocks.
+  fontconfig asks whether its cache may be mapped, libselinux whether
+  /sys/fs/selinux is there, GLib a file's file system.
 - **Clocks and timers** (`lx::time`, `lx::timer`; clock_test is the
   spec): clock_gettime/clock_getres (REALTIME and its variants from the
   system time, MONOTONIC, _RAW, _COARSE, BOOTTIME from the monotonic
@@ -8859,6 +8911,18 @@ The running parts (milestone 1; `lxrun=`):
   (`Fd::watchers`, `Epoll::forget`); closing the epoll fd empties its
   set. Ready entries come out in the order they were added; struct
   epoll_event is the packed 12 bytes.
+- **eventfd** (`lx::eventfd`; eventfd_test, `lx_eventfd`): eventfd and
+  eventfd2 (EFD_SEMAPHORE, EFD_NONBLOCK, EFD_CLOEXEC; another flag
+  EINVAL), a 64-bit counter as `Object::EventFd`: a read (8 bytes at
+  least, else EINVAL) gives it and zeroes it (a semaphore's gives 1 and
+  takes 1) and blocks while it is 0, a write adds (u64::MAX is EINVAL)
+  and blocks while the sum would pass 0xffff_ffff_ffff_fffe, EAGAIN for
+  either when non-blocking; readable while above 0, writable while 1
+  fits. Readers and writers wait on its core `Waiters` (as AF_UNIX
+  sockets do), which `poll::Watch` joins for poll, select and epoll; a
+  value read and not copied out (EFAULT) is given back. fstat: an
+  anonymous inode (0600); fstatfs: anon_inodefs. GLib's main loop wakes
+  its threads with one (it falls back to a pipe without).
 - **Waiting** (`lx::wait`): a thread blocks by `prepare` (the
   scheduler's prepare_wait, its deadline the earlier of the call's and
   ITIMER_REAL's), then `block`, which records it as its signal state's
@@ -9129,9 +9193,9 @@ The running parts (milestone 1; `lxrun=`):
   memory; a MAP_SHARED anonymous mapping grown by mremap; execve ending the other threads first;
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
-  ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
-  (seam 4's rest; one user so far; the device is per file system:
-  the shared one's and `/run`'s); a /dev
+  ITIMER_VIRTUAL/PROF, rusage); a file's owner from its security
+  descriptor (seam 4's rest: the caller's today; the device is per file
+  system: the shared one's and `/run`'s); a /dev
   directory and /proc; datagram sockets (AF_INET; AF_UNIX ones by
   name), SCM_CREDENTIALS; process groups
   and sessions; a vDSO; Linux in gala-um; the
@@ -9370,20 +9434,21 @@ one more client of the same window-state interface.
 ### Objects and how they map
 
 Offered globals: `wl_compositor` 6, `wl_shm` 2, `xdg_wm_base` 6,
-`wl_output` 4, `wl_seat` 7 and `zxdg_decoration_manager_v1` 1 (registry
-names 1 to 6).
+`wl_output` 4, `wl_seat` 7, `zxdg_decoration_manager_v1` 1 and
+`wl_data_device_manager` 3 (registry names 1 to 7).
 
 | Wayland | gala |
 |---|---|
 | a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
 | `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
 | `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
-| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; window geometry (a toplevel's: it places its popups), move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
-| `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side, and a toplevel without a decoration object is framed too (wl_test; programs that draw their own frame negotiate it: GTK asks for client-side). Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, the surface's size, on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; the window geometry is what a frameless window shows ("Frameless windows") and what its popups are placed against; move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
+| `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side. A toplevel without a decoration object is client-side: "if compositor and client do not negotiate the use of a server-side decoration using this protocol, clients continue to self-decorate as they see fit" (the protocol's description). GTK 3 never binds the manager and draws its own title bar (gtk_test), GTK 4 negotiates; a client that draws no frame (weston-simple-shm, wl_test) is shown without one. Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, its window geometry's size ("Frameless windows" below), on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
 | `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
 | `xdg_positioner`, `xdg_popup` | a popup window (`STYLE_POPUP`: frameless, above the framed windows, never active, not on the taskbar, as user32's menus are) at the place the positioner gives against its parent's window geometry and the work area; a grab takes the keyboard focus and the desktop's popup grab, which a press outside the client's windows ends ("Popups" below) |
-| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet) |
-| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
+| `wl_data_device_manager`, `wl_data_source`, `wl_data_device` | the selection (copy and paste) and drag-and-drop, as far as a client that has them needs them: GTK 3 makes its seat only once this global is there. A data device hears `selection` (nil) right before each keyboard focus while the client holds no selection of its own (the protocol sends it "immediately before receiving keyboard focus"). `set_selection` makes a source the client's selection, kept for itself: the one it replaces gets `cancelled`, as does the old one when it is unset; it is offered to no other client nor to the Windows clipboard yet (ledgered as ignored). `start_drag` is not followed: its source gets `cancelled` at once, as for a drag the compositor ended (ledgered). Errors: a source used twice (`used_source`), a drag's source (one with actions) as a selection and actions on a used source (`invalid_source`), actions set twice or outside copy, move and ask (`invalid_action_mask`), a drag icon with another role (`role`) |
+| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet: "Frameless windows") |
+| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) of the part the window shows (its view: the whole buffer, or a frameless window's geometry) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
 | `wl_output` | the client's session's screen: geometry (make "gala", model "shasha"), mode (current and preferred, 60 Hz), scale 1, name `gala-1`, done |
 
 A surface smaller than a framed window's minimum (134 x 34 outer) gets a
@@ -9391,6 +9456,33 @@ larger client area, white beyond the buffer; one larger than
 `winstate::MAX_SIDE` is clipped. When the client goes, its windows go
 (`Client::end`); when its process ends first, `desktop::process_ended`
 takes them.
+
+### Frameless windows
+
+A client that decorates itself (a client-side toplevel, and every
+popup) draws a shadow around its window, translucent pixels outside its
+window geometry (`xdg_surface.set_window_geometry`, xdg-shell's
+"visible bounds" of the window). shasha does not compose alpha yet, so
+those pixels would show as black. The window shows its **view** instead
+(`client::view_of`): the window geometry clamped to the buffer (as
+xdg-shell clamps it), or the whole buffer when none was set; a framed
+window always shows its whole buffer. So:
+
+- the window's size is the view's; its client origin shows the view's
+  corner, and pointer positions on it are moved by the view's offset
+  into surface coordinates (`surface_point`);
+- a popup's window is placed so that its geometry is at the place its
+  configure gave, and its children are placed against that geometry on
+  the screen (`geometry_origin`), as before;
+- the desktop's sizes (maximize, Snap) were already window geometry
+  sizes, which is what xdg-shell's configure carries: a client then
+  draws a buffer of that geometry (GTK drops its shadow when maximized
+  or tiled), and the window takes the view's size.
+
+What is left: the rounded corners of a client's title bar show the
+transparent pixels' colour (a few pixels); translucent windows and
+shadows need the compositor to compose alpha (shasha's presenter;
+ROADMAP LD "Next").
 
 ### Configure from the desktop
 
@@ -9432,9 +9524,11 @@ and the client draws the size it is told:
 - wm_capabilities (xdg_toplevel 5): maximize and minimize.
 
 Next: frame callbacks paced by the presenter's refresh; a decoration mode change
-on a mapped window (the frame put on or taken off in place). Later: `wl_data_device` (the
-clipboard, bridged to the Windows clipboard so copy and paste works
-across personalities), `wp_viewporter`, fractional scale,
+on a mapped window (the frame put on or taken off in place). Later: the
+selection shared (across clients, and bridged to the Windows clipboard
+so copy and paste works across personalities: data offers, receive with
+the descriptor passed to the source's `send`), drag-and-drop,
+`wp_viewporter`, fractional scale,
 `xdg_activation`, and `linux-dmabuf` once GPU G2's lavapipe/llvmpipe
 serve Linux clients through EGL. What the server allocates for a client
 is not charged to its process's quota yet ("Resource limits").
@@ -9478,10 +9572,11 @@ where its headless backend gives them (user/lx/wl_popup_test).
 - **Configure and map**: the first commit (no buffer) is answered with
   `xdg_popup.configure` (x, y, width, height) and `xdg_surface.configure`;
   the place goes with the serial as a toplevel's desktop place does, and
-  applies at the commit of a buffer after the ack. The popup window is at
-  the parent's geometry on the screen plus the place, less the popup's
-  own geometry offset (a client-side shadow outside the geometry), the
-  buffer's size; moved when the place, the geometry or the size changes.
+  applies at the commit of a buffer after the ack. The popup window shows
+  its window geometry (its view: "Frameless windows"; a client-side
+  shadow outside it is not shown), placed with that geometry at the
+  parent's geometry on the screen plus the place; moved when the place,
+  the geometry or the size changes.
   Mapping while the parent shows nothing is `invalid_popup_parent`. A
   null buffer unmaps it and the next commit configures it again.
 - **reposition** (version 3): new rules; `repositioned` with the token,
@@ -9664,13 +9759,14 @@ leave nothing on a disk.
   Wayland window does not follow as `wayland window action missing`
   (service: message; detail: the window).
 - The state dump lists the socket, each client (pid, objects, requests,
-  bytes of events waiting) and its objects (a surface's window, size and
-  frame callbacks; a buffer's size and stride; an xdg_surface's
+  bytes of events waiting) and its objects (a surface's window, size,
+  view and frame callbacks; a buffer's size and stride; an xdg_surface's
   configure state, the serials not acked and the place acked; a
   toplevel's title, app id, decoration object and sizing; a
   decoration's mode asked for; a positioner's rules; a popup's parent,
   rules, configured and applied place, where its window is, grab and
-  dismissed) and its seat (the pointer's surface and place, buttons
+  dismissed; a data source's mime types offered, whether it was used,
+  its actions and whether it is the selection) and its seat (the pointer's surface and place, buttons
   held, the keyboard's surface, keys down, modifiers, the active
   surface, the last press's serial, the popup grabs); the session's
   `input queue` line names the window with the desktop's popup grab.
@@ -9768,13 +9864,73 @@ leave nothing on a disk.
   and wl_seat, makes its 250x250 buffers in a `memfd` it fallocates,
   waits for the configure, then draws a moving pattern on every frame
   callback. The scenario runs it on a headless desktop
-  (`SIMPLE_SHM_SCREEN`: the active caption, many colours in its client
-  area), then presses Esc (its keyboard handler ends it). Its transcript
+  (`SIMPLE_SHM_SCREEN`: frameless, it negotiates no decoration; many
+  colours in its window), then presses Esc (its keyboard handler ends
+  it). Its transcript
   (`user/lx/weston-simple-shm/lx_simple_shm.txt`: "simple-shm exiting"
   on stderr, status 0) is real Linux's against weston's headless backend,
   ended there by SIGINT (the same flag Esc clears). The server's summary
   line at the end of the connection says how many commits and frames it
-  served. Next: GTK (LD step 3).
+  served.
+- **`user/lx/gtk_test`** (`lx_gtk`, `lx_gtk_pie`), the first GTK
+  program: a GTK 3 window titled "gtk_test" with a label and a button,
+  printing when it was first drawn, when the button was clicked, when
+  the window was asked to close and when it went. It declares the
+  dozen GTK, GDK and GObject functions it calls from GTK's reference
+  documentation (no development headers) and links against the
+  libraries by soname (build.sh), so its bytes depend only on the
+  names. Run as `./gtk_test --input` (`lx_gtk`) it waits for real input:
+  the screen check (`GTK_SCREEN`) finds GTK's drawing frameless at
+  (64, 48) (its own header bar where shasha's caption would be, the
+  title, the close button, the label's text), clicks the button with
+  the PS/2 mouse, then GTK's close button. Run any other way
+  (lx-expect, `lx_gtk_pie`) it clicks its button and closes its window
+  itself once drawn, which GTK handles as the same signals; the
+  transcript is the same either way, recorded on Linux against weston
+  on Xvfb (a compositor with a seat: GTK warns without one, which
+  weston's headless backend lacks).
+
+### GTK programs and Linux roots
+
+What a GTK program needs besides the Wayland server, as gtk_test found
+it (each gap first seen on gala as a crash, a warning on stderr that
+real Linux does not print, or a ledger line):
+
+- **A distribution's libraries**: GTK 3's closure is 65 shared
+  libraries (GLib, GIO, Pango, cairo, HarfBuzz, fontconfig, FreeType,
+  pixman, libxkbcommon, libwayland-client and -cursor, gdk-pixbuf, ATK
+  and its D-Bus bridge, libX11 and friends, which GDK links whatever
+  backend it uses). They come as a **Linux root**: xtask's
+  `LINUX_ROOTS` table names Ubuntu 24.04's packages (the release
+  pocket, never changed once released), each with its SHA-256 from the
+  release's signed index and the files used at their paths in the
+  package (a library's soname link resolved to its file: boot modules
+  make no links). xtask assembles the root in `target/prebuilt/<name>/`
+  (packages downloaded once into `target/prebuilt/debs/`) and ships
+  `usr/`, `etc/` and `home/` as trees: `/usr/lib/x86_64-linux-gnu` is on
+  ld.so's default path beside glibc's `/lib/x86_64-linux-gnu`.
+- **What installing a system adds** besides its packages' files, done
+  at assembly as dpkg and its triggers would: the MIME database's
+  `mime.cache` (`update-mime-database` from shared-mime-info's XML;
+  gdk-pixbuf picks a loader by MIME type through GIO, so without it GTK
+  aborts on its own PNG icons). The user database is not the root's:
+  the kernel makes `/etc/passwd` and `/etc/group` from gala's accounts
+  ("The lx module", Linux identity); the user's home is their profile
+  (`/Users/gala`), where fontconfig keeps its cache.
+- **A session's environment**: `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`
+  and `HOME` (fontconfig expands `~` from `HOME` only and keeps its
+  cache in `~/.cache/fontconfig`; without a writable cache directory it
+  prints an error at every start), passed by the scenarios today
+  ("Sessions").
+- **Not needed**, and left out: icon and cursor themes (GTK 3 falls
+  back to the icons in its own resources, libwayland-cursor to its
+  built-in cursors, and the desktop draws its own pointer), GSettings
+  schemas and GIO modules (GLib's memory settings backend), a D-Bus
+  session bus (GTK skips accessibility and portals without one), the
+  gdk-pixbuf loader modules (PNG is GIO's MIME type plus the library's
+  built-in loader). Of xkb-data (libxkbcommon0 depends on it) the files
+  GDK's default keymap reads (rules evdev, model pc105, layout us)
+  before the server's keymap arrives.
 
 ## Plan: Linux containers through a WSL facade
 

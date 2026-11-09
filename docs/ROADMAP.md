@@ -199,7 +199,7 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); next: a socket per session, then a GTK application, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); next: a distribution's GTK application, a socket per session, Xwayland |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -1354,9 +1354,9 @@ need gala's.
 1. The load list above, test first (a kernel32/ntdll test program for
    the functions, expected results from Windows), until the three
    apps' processes start in gala with Office's files in place; a
-   scenario that boots them (where the files come from: the native
-   install below, or a directory a local run provides; never
-   committed or published).
+   scenario that boots them, with the files gala's own install put
+   there (the owner: no files from elsewhere; the native install below
+   comes first).
    - The UCRT for the installer: gala's own `ucrtbase.dll` and
      `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
      msvcrt, test first against Windows (the owner's decision; also
@@ -2005,6 +2005,14 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   symbolic and hard links kept across reboots (`fs::log` record
   version 3, older records still read; host tests). busybox's applets
   run by their own names through symbolic links (`lx_busybox`).
+- Linux identity from gala's accounts (`lx_id` with id_test, recorded
+  on Linux as an ordinary user; the owner: user accounts from the
+  start): uid, gid and groups from the process's token (the boot user
+  `gala` is 1000, SYSTEM root, other SIDs nobody), everywhere Linux
+  reports them; `/etc/passwd` and `/etc/group` made at boot from the
+  account database, bound over the shared tree's `/etc`; homes on the
+  users' profiles (`/Users/gala`); getgroups (ARCHITECTURE "The lx
+  module", Linux identity).
 - Milestone 4's dynamic linking (LD step 1): glibc programs start
   through their interpreter (PT_INTERP) and ld.so loads their libraries
   (`lx_dyn`, `lx_dyn_pie`); file mappings (views of sections on the
@@ -2039,8 +2047,10 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    FileCaseSensitiveInformation (query, and set on an empty directory),
    FILE_DISPOSITION_POSIX_SEMANTICS and FILE_RENAME_POSIX_SEMANTICS,
    CreateHardLinkW (FileLinkInformation), CreateSymbolicLinkW; an NT
-   delete through a hard link's name removing that name; uid/gid per
-   file with more than one Linux user; a reboot scenario for Linux
+   delete through a hard link's name removing that name; a file's
+   owner from its security descriptor's owner (the Linux ids come from
+   the token, `lx::identity`; a file shows the caller as its owner
+   today); a reboot scenario for Linux
    files (modes and links are host-tested only).
 5. Seam 5: shared core objects when pipes, sockets or files are
    reworked. Built: AF_UNIX sockets (`unix`, under `lx::unix`); next for
@@ -2246,8 +2256,7 @@ the next breakthroughs).
 - Step 2's first real client: `weston-simple-shm` (`lx_simple_shm`:
   weston 13's demo, Ubuntu 24.04's build with its libwayland-client and
   libffi, `PREBUILT`s, on glibc) draws its animated frames on a headless
-  desktop inside shasha's frame (the screen check: many colours in its
-  client area) and ends at Esc, its transcript real Linux's (against
+  desktop (the screen check: many colours in its window) and ends at Esc, its transcript real Linux's (against
   weston's headless backend). Built for it: fallocate (`posix_fallocate`
   of its buffer file; memfd_test, recorded on Linux: allocate, KEEP_SIZE,
   PUNCH_HOLE, the seals, the errors); frame callbacks done at the 60 Hz
@@ -2255,6 +2264,39 @@ the next breakthroughs).
   callbacks no longer redraws as fast as the CPU allows); the
   connection's summary line (requests, commits shown, frame callbacks
   done).
+- Step 2's server, what GTK 3 needs of it (host tests in
+  `kernel/src/wayland/tests.rs`): `wl_data_device_manager` 3 (GTK 3
+  makes its seat only once the global is there): data sources and
+  devices, `selection` (nil) before each keyboard focus, the client's
+  own selection kept and the replaced one cancelled, `start_drag`'s
+  source cancelled at once (ledgered), the protocol's errors; a toplevel
+  without a decoration object is client-side, frameless (xdg-decoration:
+  a client that does not negotiate decorates itself; GTK 3 never binds
+  the manager); a frameless window shows its window geometry, so a
+  client's translucent shadow outside it is not shown as black while
+  alpha is not composed (ARCHITECTURE "Frameless windows").
+- Step 3, the first GTK program (`lx_gtk`, `lx_gtk_pie`:
+  user/lx/gtk_test, a GTK 3 window with a label and a button, linked
+  against Ubuntu 24.04's libgtk-3.so.0 by build.sh's GLIBC_TESTS, its
+  transcript recorded on Linux by lx-expect against weston on Xvfb, a
+  compositor with a seat): GTK 3 and its whole library closure (58 of
+  Ubuntu's packages, from GLib, Pango, cairo and HarfBuzz to libX11) as
+  a Linux root assembled from the release's packages (xtask's
+  `LINUX_ROOTS` "gtk3", each .deb's SHA-256 from the signed index, the
+  downloads in a shared package cache), with what an installation adds:
+  the MIME database's mime.cache (gdk-pixbuf picks its PNG loader by
+  MIME type through GIO), the xkb-data GDK's default keymap reads, DejaVu Sans as
+  the one font. On a headless desktop its window is drawn frameless with
+  GTK's own title bar (`GTK_SCREEN` checks GTK's pixels), a PS/2 click on
+  its button prints its line, a click on GTK's close button closes it,
+  and its transcript is Linux's; the `_pie` scenario clicks itself, as
+  on Linux. Built for it: the server's part above; and what GTK's start
+  reached, each in a corpus test recorded on Linux: eventfd and eventfd2
+  (`lx_eventfd`: GLib's main loop wakes its threads with one), prctl's
+  thread name and capability bounding set with getresuid and getresgid
+  (`lx_prctl`), statfs and fstatfs (`lx_statfs`). Its ledger after:
+  rseq and SA_ONSTACK (below), and the Wayland requests accepted and
+  not used (regions, set_cursor, min and max sizes, set_parent).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2264,9 +2306,12 @@ the next breakthroughs).
    - rseq (glibc registers one; ENOSYS, ledgered, until the scheduler
      keeps its cpu_id and aborts its critical sections), shrinking a
      mapped file (ramfs refuses it while mapped: EBUSY, ledgered);
-   - a root file system image of a distribution's libraries (more than
-     glibc), as the GTK step needs; what its programs reach, from the
-     ledger (`linux syscall missing`).
+     sigaltstack (glibc 2.39 installs its SIGRT_1 handler with
+     SA_ONSTACK, ledgered: without an alternate stack the current one is
+     used, as on Linux, so it changes nothing until a program sets one);
+   - Linux roots for more programs (`LINUX_ROOTS`: today GTK 3's), and
+     what their programs reach, from the ledger (`linux syscall
+     missing`).
 2. The Wayland server's rest (its first part is done, above; each
    step test first, in wl_test or a client like it recorded against
    weston):
@@ -2294,15 +2339,42 @@ the next breakthroughs).
      `/run`, the Linux view's tmpfs, `lx_run`);
    - more of weston's demos as clients (simple-damage: buffer scale
      and transform, viewporter; eventdemo: input through libwayland),
-     each a `PREBUILT` member of the same package.
+     each a `PREBUILT` member of the same package;
+   - drag-and-drop (the clipboard is step 3 below); alpha composed by shasha (translucent
+     windows, client-side shadows and rounded corners, which a
+     frameless window's view leaves out today).
    Still open in the prerequisites, ledgered: a datagram socket's
    connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
    on a MSG_PEEK, collecting rights cycles in flight.
-3. A first real application: a GTK 3 or 4 program (a calculator or text
-   editor) from a distribution's packages, its window and input checked
-   on the screen; then a Qt one.
-4. X11 programs through Xwayland, once the Wayland server holds.
-5. Linux Chromium beside Windows Chromium (BR's): a distribution's
+3. **One clipboard for both personalities** (the owner: "would be
+   amazing"), test first at each layer:
+   - Windows' clipboard as Windows has it, one per window station in
+     the kernel (user32's is per process today): OpenClipboard's owner
+     and its lock across processes, SetClipboardData/GetClipboardData
+     of memory handles copied through the kernel, delayed rendering
+     (WM_RENDERFORMAT), the sequence number and the format listeners
+     (WM_CLIPBOARDUPDATE); a test copying between two processes,
+     recorded on Windows;
+   - the Wayland selection across clients: data offers to the focused
+     client, `receive` passing its descriptor to the source's `send`;
+     a two-client test against weston;
+   - the bridge: the session's clipboard is one; a Wayland selection
+     offers Windows the formats it maps (`text/plain;charset=utf-8` as
+     CF_UNICODETEXT, `image/png` as a PNG format and CF_DIB later) and a
+     Windows copy offers Wayland clients the same MIME types, the data
+     converted when pasted (delayed rendering on both sides); a
+     scenario copying from a GTK window and pasting into a Windows edit
+     control, and back.
+4. Step 3's rest: an application as a distribution ships it (GTK 3, the
+   owner's choice for now: gnome-calculator or gedit's GTK 3 builds),
+   with its GSettings schemas, icon theme and keyboard input checked on
+   the screen; then a Qt one; GTK 4 later. A session gives Linux programs
+   their environment (`HOME`, `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`: the
+   scenarios pass them today; who the program is comes from its token,
+   `lx::identity`) and has no D-Bus session bus yet (GTK goes
+   without it: accessibility and portals are skipped).
+5. X11 programs through Xwayland, once the Wayland server holds.
+6. Linux Chromium beside Windows Chromium (BR's): a distribution's
    Chromium (or Google's Linux build) with `--ozone-platform=wayland
    --no-sandbox` in a boot scenario, its window on the same desktop as
    `chromium_window`'s, both browsers running at once and loading a page

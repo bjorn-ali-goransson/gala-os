@@ -1,0 +1,48 @@
+-- counter
+eventfd2(3, NONBLOCK) = 3
+read = 8, value 3
+read again = -11 (EAGAIN)
+write 5 = 8
+write 7 = 8
+poll after writes (IN|OUT) = 5
+read = 8, value 12
+poll when 0 (OUT) = 4
+read of 4 bytes = -22 (EINVAL)
+write of 4 bytes = -22 (EINVAL)
+read into a bad pointer = -11 (EAGAIN)
+write from a bad pointer = -14 (EFAULT)
+read of 16 bytes = 8
+its value = 9
+-- the limit
+write 0xffffffffffffffff = -22 (EINVAL)
+write 0xfffffffffffffffe = 8
+poll at the limit (IN) = 1
+write 1 more (would block) = -11 (EAGAIN)
+write 0 at the limit = 8
+read the limit back = yes
+-- semaphore
+eventfd2(2, SEMAPHORE|NONBLOCK) = 3
+read = 8, value 1
+read = 8, value 1
+read = -11 (EAGAIN)
+-- flags
+eventfd2 with an unknown flag = -22 (EINVAL)
+eventfd2(0, CLOEXEC) = 3
+F_GETFD = 1
+F_GETFL (O_RDWR) = 02
+eventfd(4) = 3
+F_GETFD = 0
+F_GETFL has O_NONBLOCK = 00
+read = 8, value 4
+-- blocking
+read waits for the child's write = 8, value 42
+child: exited 0
+epoll_ctl ADD = 0
+epoll_wait before a write = 0
+epoll_wait after the child's write = 1
+its data = 77
+its events = 0x1
+child: exited 0
+read = 8, value 1
+eventfd_test: ok
+-- exit status 0

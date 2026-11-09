@@ -1354,7 +1354,15 @@ source).
   names. A recorded test leaves those cases out (wl_popup_test's header
   lists them); gala follows the specification there, checked by host
   tests, and wl_input_test (written from the specification) covers what
-  needs a seat or a known window place. In gala their scenarios (`lx_wl`) start the kernel's server
+  needs a seat or a known window place. A client that needs a seat to
+  behave as on a desktop (GTK 3 warns without one: lx_expect.rs
+  `SEATED_TESTS`, gtk_test) gets weston's X11 backend instead
+  (`--backend=x11 --use-pixman`) in an Xvfb of its own (apt package
+  `xvfb`; Xvfb picks a free display and names it with `-displayfd`;
+  its log is `xvfb.log` in the run directory): Xvfb's keyboard and
+  pointer make weston's seat, and nothing types or clicks there, so
+  such a program drives itself when run by lx-expect (gtk_test clicks
+  its own button: its header). In gala their scenarios (`lx_wl`) start the kernel's server
   with `wayland=on` and pass `XDG_RUNTIME_DIR=/run/user/1000
   WAYLAND_DISPLAY=wayland-0` with `lxenv=`; `wayland=trace` logs both
   directions as `WAYLAND_DEBUG=1` prints them, to compare with the same
@@ -1432,6 +1440,34 @@ source).
   system directories). Bring-up: `lx: exec interpreter ...` shows where
   ld.so went; the ledger's `linux syscall missing` lines (rseq is the
   one glibc 2.39 reaches and does without) are the next calls.
+- **GTK programs** (`user/lx/gtk_test`, build.sh's `GLIBC_TESTS` with
+  `GTK_LIBS`): no GTK development package is needed; the program
+  declares the functions it calls (from docs.gtk.org) and links against
+  the runtime libraries by soname (`-l:libgtk-3.so.0`), so the host
+  needs only `libgtk-3-0t64` (CI installs it, with `xvfb`); the bytes
+  depend only on the sonames and symbol names, so any 3.24 build links
+  the same binary. In gala it runs on the Linux root "gtk3" (below).
+  Bring-up of such a program: run it on Linux under `strace -f -e
+  trace=%file` (its own files are the root's list: what it opens and
+  finds) and `WAYLAND_DEBUG=1` (what it binds, compared with
+  `wayland=trace`); then in gala read stderr (GLib's warnings,
+  fontconfig's errors), the crash report and the ledger.
+- **Linux roots** (`LINUX_ROOTS` in xtask, ARCHITECTURE "GTK programs
+  and Linux roots"): a distribution's packages assembled into
+  `target/prebuilt/<name>/` on first use, shipped as trees (`usr/`,
+  `etc/`, `home/`; a module set such as "gtk3"). To add a library or
+  data file, find its package on Ubuntu 24.04 (`dpkg -S <file>`), take
+  the release pocket's version, path and SHA-256 from the signed index
+  (`dists/noble/InRelease`, checked with `gpgv --keyring
+  /usr/share/keyrings/ubuntu-archive-keyring.gpg`, then
+  `dists/noble/main/binary-amd64/Packages.xz`, whose hash InRelease
+  lists) and add a `Deb` row with the files used; a THIRD_PARTY row too.
+  The packages are kept in `target/prebuilt/debs/` (shared, checked at
+  each use), so a re-assembly or an interrupted fetch downloads only
+  what is missing. Assembly runs the host's `update-mime-database`
+  (shared-mime-info) for a root with the MIME XML. A root carries no
+  user database: the kernel makes `/etc/passwd` and `/etc/group` from
+  gala's accounts (ARCHITECTURE "The lx module", Linux identity).
 - **Linux programs that are not tests** (busybox): fetched as a
   `PREBUILT` (never run on the host), shipped to `C:\lx` by an
   EXTRA_MODULES entry, driven by a script of ours in

@@ -1,0 +1,38 @@
+-- the ids
+geteuid() is getuid() = yes
+getegid() is getgid() = yes
+getresuid = 0
+real, effective and saved uid are getuid() = yes
+getresgid = 0
+real, effective and saved gid are getgid() = yes
+not root = yes
+-- the user database
+/etc/passwd is readable = yes
+/etc/passwd has getuid() = yes
+its name is not empty = yes
+its gid is getgid() = yes
+its home is a directory = yes
+its shell is named = yes
+/etc/passwd has root as 0 = yes
+/etc/group is readable = yes
+/etc/group has getgid() = yes
+getgroups succeeds = yes
+/etc/group has every supplementary group = yes
+/etc/passwd is root's regular file, mode = 0644
+/etc/group is root's regular file, mode = 0644
+-- where the kernel reports them
+a new file's owner is getuid() = yes
+a new file's group is getgid() = yes
+a new directory's owner is getuid() = yes
+socketpair = 0
+SO_PEERCRED = 0
+its uid and gid are getuid() and getgid() = yes
+a signal from itself carries getuid() = yes
+-- changing them
+setuid(getuid()) = 0
+setgid(getgid()) = 0
+setuid(0) = -1 (EPERM)
+setgid(0) = -1 (EPERM)
+still getuid() = yes
+id_test: ok
+-- exit status 0

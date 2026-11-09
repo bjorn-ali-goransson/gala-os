@@ -142,6 +142,8 @@ pub enum Object {
     Epoll(KArc<super::epoll::Epoll>),
     /// An AF_UNIX socket (`lx::unix` on `crate::unix`).
     Unix(KArc<super::unix::UnixSocket>),
+    /// An eventfd's counter (`lx::eventfd`).
+    EventFd(KArc<super::eventfd::EventFd>),
 }
 
 impl Drop for Fd {
@@ -172,7 +174,11 @@ impl Drop for Fd {
             // A unix socket's last description: its name is free, its
             // connection's side closes.
             Object::Unix(u) => u.release(),
-            Object::Console(_) | Object::File(_) | Object::Device(_) | Object::Socket(_) => {}
+            Object::Console(_)
+            | Object::File(_)
+            | Object::Device(_)
+            | Object::Socket(_)
+            | Object::EventFd(_) => {}
         }
     }
 }
@@ -198,7 +204,8 @@ impl Fd {
             | Object::Device(_)
             | Object::Socket(_)
             | Object::Unix(_)
-            | Object::Epoll(_) => {}
+            | Object::Epoll(_)
+            | Object::EventFd(_) => {}
         }
         Fd { object, nonblock: AtomicBool::new(nonblock), watchers: IrqMutex::new(Vec::new()) }
     }
@@ -255,6 +262,30 @@ pub struct LxThread {
     /// set_robust_list's head (get_robust_list reads it back; the locks
     /// on it are released when the thread ends: `futex::release_robust`).
     pub robust_list: u64,
+    /// Its name (prctl's PR_SET_NAME and PR_GET_NAME, Linux's "comm"):
+    /// at most 15 bytes and a NUL, the rest NULs. A new thread has its
+    /// creator's, a process its program's file name (`Comm::of_path`).
+    pub comm: Comm,
+}
+
+/// A thread's name: 16 bytes, NUL-terminated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Comm(pub [u8; 16]);
+
+impl Comm {
+    /// The name execve gives: the path's last component, cut to 15 bytes.
+    pub fn of_path(path: &[u8]) -> Comm {
+        let base = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+        Comm::of_bytes(base)
+    }
+
+    /// `bytes` up to a NUL, cut to 15 bytes.
+    pub fn of_bytes(bytes: &[u8]) -> Comm {
+        let mut c = [0u8; 16];
+        let n = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len()).min(15);
+        c[..n].copy_from_slice(&bytes[..n]);
+        Comm(c)
+    }
 }
 
 pub struct LxProcess {
@@ -478,7 +509,9 @@ fn child_ended(parent: &LxProcess, child: &LxProcess, status: NtStatus) {
     };
     let (code, value) = signal::child_code(status);
     let info = if child.exit_signal == SIGCHLD {
-        Siginfo::child(code, child.pid as i32, super::exec::UID as u32, value)
+        let uid = crate::nt::process::by_id(child.pid)
+            .map_or(super::identity::NOBODY, |p| super::identity::of_process(&p).uid);
+        Siginfo::child(code, child.pid as i32, uid, value)
     } else {
         Siginfo::from_process(child.exit_signal as i32, 0, child.pid as i32, 0)
     };
@@ -506,8 +539,13 @@ fn log_line(pid: u64, stream: Stream, line: &[u8]) {
 impl LxProcess {
     /// A new thread `tid` of this process (exec's, fork's or clone's)
     /// with signal mask `mask`; the first is the main thread (tid = pid).
-    pub fn add_thread(&self, tid: u64, mask: lx_abi::signal::SigSet) -> Result<(), AllocError> {
-        self.threads.lock().try_push(LxThread { tid, clear_tid: 0, robust_list: 0 })?;
+    pub fn add_thread(
+        &self,
+        tid: u64,
+        mask: lx_abi::signal::SigSet,
+        comm: Comm,
+    ) -> Result<(), AllocError> {
+        self.threads.lock().try_push(LxThread { tid, clear_tid: 0, robust_list: 0, comm })?;
         if let Err(e) = self.signals.lock().add_thread(tid, mask) {
             self.threads.lock().retain(|t| t.tid != tid);
             return Err(e);
@@ -537,6 +575,18 @@ impl LxProcess {
     /// Thread `tid`'s robust list head, if it is one of this process's.
     pub fn robust_list(&self, tid: u64) -> Option<u64> {
         self.threads.lock().iter().find(|t| t.tid == tid).map(|t| t.robust_list)
+    }
+
+    /// Thread `tid`'s name (an unknown thread's is empty).
+    pub fn comm(&self, tid: u64) -> Comm {
+        self.threads.lock().iter().find(|t| t.tid == tid).map(|t| t.comm).unwrap_or_default()
+    }
+
+    /// Names thread `tid` (prctl's PR_SET_NAME, execve).
+    pub fn set_comm(&self, tid: u64, comm: Comm) {
+        if let Some(t) = self.threads.lock().iter_mut().find(|t| t.tid == tid) {
+            t.comm = comm;
+        }
     }
 
     /// Sets thread `tid`'s clear-tid address (set_tid_address).
@@ -742,10 +792,19 @@ pub fn dump() {
         }
         let fds = p.fds.lock();
         for (i, slot) in fds.iter().enumerate() {
-            if let Some(Slot { fd, .. }) = slot
-                && let Object::Epoll(e) = &fd.object
-            {
-                super::epoll::dump(p.pid, i, e);
+            let Some(Slot { fd, .. }) = slot else { continue };
+            match &fd.object {
+                Object::Epoll(e) => super::epoll::dump(p.pid, i, e),
+                Object::EventFd(e) => {
+                    let (count, semaphore) = e.describe();
+                    crate::info!(
+                        "lx: pid {} fd {i}: eventfd (count {count}{}), {} waiting",
+                        p.pid,
+                        if semaphore { ", semaphore" } else { "" },
+                        e.waiters.len()
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -785,6 +844,16 @@ pub fn new_pipe() -> Result<KArc<Pipe>, AllocError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thread_name_is_15_bytes_of_the_program_s_file_name() {
+        assert_eq!(&Comm::of_path(b"/lx/prctl_test-pie").0, b"prctl_test-pie\0\0");
+        assert_eq!(&Comm::of_path(b"./a-very-long-program-name").0, b"a-very-long-pro\0");
+        assert_eq!(Comm::of_path(b"plain"), Comm::of_bytes(b"plain"));
+        // prctl's bytes stop at a NUL.
+        assert_eq!(&Comm::of_bytes(b"ab\0cd").0[..3], b"ab\0");
+        assert_eq!(Comm::of_bytes(b""), Comm::default());
+    }
 
     #[test]
     fn endings_read_as_a_shell_reports_them() {
