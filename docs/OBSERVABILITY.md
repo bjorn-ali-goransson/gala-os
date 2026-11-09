@@ -332,6 +332,17 @@ hit (scenario `ledger_test`).
   signed`, `cabinet hash differs`, `signer's signature`, `timestamp`,
   `Authenticode policy`, ...), with crypt32's
   `crypt32.dll!AUTHENTICODE: <error>` naming the chain's error bits.
+  The RPC runtime (rpcrt4): `rpcrt4.dll!NdrClientCall2 raised`, "other",
+  for every status a client call raises (detail: the procedure number
+  << 32 | the status: a program that fails over RPC names the call);
+  `rpcrt4.dll!server: call answered with a fault` (detail: the opnum <<
+  32 | the status) for each fault a server sends; `rpcrt4.dll!bind:
+  interface not registered` when a client binds an interface no server
+  registered; `rpcrt4.dll!NDR(<what>)` with the format character as
+  detail for a format the interpreter does not handle (the call fails
+  with RPC_X_BAD_STUB_DATA); `rpcrt4.dll!protocol sequence(<name>)` and
+  `rpcrt4.dll!endpoint mapper (binding without endpoint)` for what local
+  RPC does not reach.
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall

@@ -3932,6 +3932,88 @@ x64 and x86.
   the selection's own methods and the enumerators (`get__newEnum`).
   Implement them when a program's run reaches one.
 
+### RPC: rpcrt4
+
+The RPC runtime for local RPC (`user/rpcrt4`, `rpc_test`): string
+bindings and binding handles, servers and clients over ncalrpc and
+ncacn_np on the local machine, and the NDR engine's interpreter for
+MIDL's -Oif/-Oicf stubs (NdrClientCall2, NdrServerCall2), x64. What
+Office's Click-to-Run client and its App-V pieces import (an RPC server
+of their own, clients of it) is the yardstick.
+
+- **Transport** (`transport.rs`): named pipes in message mode, one
+  DCE/RPC connection-oriented PDU per message (`pdu.rs`, C706 chapter
+  12: bind, bind_ack, alter_context(_resp), request, response, fault;
+  fragments up to 34240 bytes; no authentication trailers). ncacn_np's
+  endpoint `\pipe\x` is `\\.\pipe\x`; ncalrpc's endpoint `x` is the
+  runtime's private pipe `\\.\pipe\LRPC-x` (Windows carries ncalrpc
+  over ALPC ports, which gala has not; both ends here are gala's). The
+  network protocol sequences are RPC_S_PROTSEQ_NOT_SUPPORTED, recorded;
+  there is no endpoint mapper (a binding without an endpoint is
+  EPT_S_NOT_REGISTERED, recorded).
+- **Server** (`server.rs`): RpcServerUseProtseqEp makes the endpoint's
+  first pipe instance (FILE_FLAG_FIRST_PIPE_INSTANCE: an endpoint
+  another process holds is RPC_S_DUPLICATE_ENDPOINT) and its listener
+  thread. Invariant: a listening instance always exists, since the
+  listener creates the next instance before it waits on the current one
+  (gala has no WaitNamedPipe, so a client finding none would fail). Each
+  connection has a thread reading its PDUs; a bind accepts an interface
+  that is registered (or the management interface) over NDR. Requests
+  are dispatched through the interface's dispatch table under
+  `guard.rs`'s exception guard (assembly with unwind information and a
+  language handler; exceptions RpcExceptionFilter passes on, such as
+  access violations, are not caught, as on Windows); a routine's
+  exception is the call's fault. Interfaces that are not
+  RPC_IF_AUTOLISTEN are served only while listening (otherwise
+  RPC_S_SERVER_TOO_BUSY); the interface's security callback is asked
+  before every call. Listening follows Windows' answers (Wine's rpc.c
+  and server.c run on Windows): NO_PROTSEQS, ALREADY_LISTENING,
+  NOT_LISTENING before a listen, a second stop RPC_S_OK, and
+  RpcMgmtWaitServerListen returning once the calls in progress ended.
+  Not done: security descriptors (recorded; no access check),
+  RpcServerInqBindings, RpcServerUnregisterIf waiting for one
+  interface's calls (it waits for all calls).
+- **Association groups**: a bind names its group (0: a new one); server
+  context handles belong to the group, and when its last connection
+  closes their rundown routines run (guarded). The client's association
+  (`client.rs`) is the binding's group and its idle connections, shared
+  by the binding's copies and the context handles made over it
+  (reference counted); a call takes an idle connection or connects one,
+  binds its interface once per connection (bind, then alter_context),
+  and a call that fails on a reused connection is sent once more over
+  a new one (the server may have closed the idle connection).
+- **The caller**: over ncalrpc RpcBindingInqAuthClient is packet
+  privacy, NTLM, privileges "DOMAIN\user" (from the token the pipe
+  captured, LookupAccountSidW: advapi32 loaded when first asked, so
+  rpcrt4 imports only kernel32, ntdll and bcryptprimitives); over
+  unauthenticated ncacn_np RPC_S_BINDING_HAS_NO_AUTH.
+  RpcImpersonateClient is the pipe's impersonation; RpcBindingSetAuthInfo
+  checks its level and service and keeps nothing.
+- **RpcMgmtIsServerListening** with a binding is a call of the
+  management interface (afa8bd80-7d8a-11c9-bef4-08002b102989,
+  rpc__mgmt_is_server_listening), which the server's runtime answers;
+  a server that is not there is the connection's error
+  (RPC_S_SERVER_UNAVAILABLE: Windows' answer here is not measured yet).
+- **NDR** (`ndr.rs`): the procedure's Oi and Oif headers, its explicit
+  handle (primitive, generic, context) or implicit one, 6-byte parameter
+  descriptors; a simple reference parameter's type is its referent's.
+  Types: base types (enum16 and the 3264 integers narrowed on the wire),
+  reference and unique pointers (full pointers as unique), conformant,
+  sized and fixed strings, simple and complex structures, fixed,
+  conformant, conformant varying and complex arrays, ranges, context
+  handles (client: NDR_CCONTEXT records with a copy of the binding;
+  server: the group's table). Embedded pointers' referents follow the
+  outermost construct (deferral). NdrClientCall2 is an assembly entry
+  that spills the variadic arguments and raises the returned status
+  itself (RpcRaiseException), so no Rust frame is unwound; a float
+  argument comes as a double. The server allocates [in] referents and
+  [out] slots with the stub's allocator and frees them, and what the
+  routine allocated for [out] data, after the reply. Not done
+  (recorded, RPC_X_BAD_STUB_DATA): object procedures, pipes, async,
+  user_marshal, interface pointers, unions, conformant structures,
+  transmit_as/represent_as, expression callbacks, comm/fault status
+  parameters, the x86 build.
+
 ### Other DLLs and programs
 
 - **shell32, version, powrprof, comctl32, user32 strings**: profile
@@ -3992,7 +4074,8 @@ x64 and x86.
   freed with ole32's CoTaskMemFree, loaded when first needed; too long:
   E_NOT_SUFFICIENT_BUFFER and an empty buffer). x64 and x86:
   `wow64_shlwapi_test` is shlwapi_test's C source built for x86.
-- **rpcrt4**: UUID functions (`rpcrt4_test`). **netapi32**:
+- **rpcrt4**: UUID functions (`rpcrt4_test`); the RPC runtime is
+  "RPC: rpcrt4" below. **netapi32**:
   NetWkstaGetInfo; NetUserGetInfo levels 0 and 1 for the accounts
   LookupAccountNameW finds as users (all USER_PRIV_USER, password age 0:
   no alias memberships or change times are kept; Chromium's password

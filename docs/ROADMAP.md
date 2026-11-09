@@ -1645,19 +1645,30 @@ need gala's.
      (REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG, recorded: gala has
      no registry virtualization) and installs a global hook
      (`user32.dll!SetWindowsHookExW(global)`, recorded).
-     Where the run ends now: it delay-loads rpcrt4's RpcServerRegisterIf3
-     (and If2), missing: it means to be an RPC server, so the delay-load
-     fails (0xc06d007f) about 1.7 s in, and setup.exe and its parent exit
-     with that status after about 82 s ("C2RClient returned a failing
+     It then becomes an RPC server (done: gala's RPC runtime in rpcrt4,
+     local RPC over ncalrpc and ncacn_np with the NDR engine's -Oicf
+     interpreter, every rpcrt4 function the Click-to-Run client, C2R64.dll,
+     ApiClient.dll and the App-V DLLs import; `rpc_test`, expectations
+     from Wine's rpc.c and server.c run on Windows; ARCHITECTURE "RPC:
+     rpcrt4"): RpcServerUseProtseqEpW and RpcServerRegisterIf3 with
+     security descriptors (recorded: no access check), and it creates
+     the ClickToRunSvc service (`scm:` lines: automatic start, its
+     `OfficeClickToRun.exe /service` path).
+     Where the run ends now: it delay-loads advapi32's
+     ChangeServiceConfig2W for the new service, missing, so the client
+     ends with 0xc06d007f about 1.9 s in, and setup.exe and its parent
+     exit with that status after about 89 s ("C2RClient returned a failing
      exit code"). slc.dll, kernelbase's SetSystemFileCacheSize and
      ntdll's NtSetSystemInformation are still asked for only on the way
      out (after "Bootstrapper Finished").
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: an RPC server in rpcrt4
-     (RpcServerRegisterIf2/3 and what serving its interface needs: gala's
-     rpcrt4 has only the UUID functions, no RPC runtime); CryptCATAdmin*
+     Next, in the order the run reaches them: ChangeServiceConfig2W (and
+     the service configuration it sets); the RPC calls the client's
+     pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
+     names a format the interpreter lacks; rpcrt4 for x86 if a 32-bit
+     piece needs it); CryptCATAdmin*
      (catalogs: a catalog SIP, member lookup
      by hash); slc.dll and the two exports once a run needs them (their
      Windows answers for a standard and an elevated caller first);
