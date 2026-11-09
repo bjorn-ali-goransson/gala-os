@@ -419,25 +419,33 @@ fn null_handles(c: &mut Checks) -> Result<(), u32> {
     let mut needed = 0u32;
     // SAFETY: plain calls with our buffers throughout.
     unsafe {
-        clear_error();
-        c.fails(CloseServiceHandle(0) != 0, ERROR_INVALID_HANDLE)?;
+        // CloseServiceHandle(NULL) is not called: Windows Server 2025 faults
+        // on it in ntdll (CI: the last line before the fault named it),
+        // though Wine's tests call it.
+        progress("NULL handles: OpenServiceW");
         clear_error();
         c.no_handle(OpenServiceW(0, null(), 0), ERROR_INVALID_HANDLE)?;
+        progress("NULL handles: QueryServiceStatus");
         clear_error();
         c.fails(QueryServiceStatus(0, null_mut()) != 0, ERROR_INVALID_HANDLE)?;
         // QueryServiceStatusEx: the level first, then the size, then the
         // handle.
+        progress("NULL handles: QueryServiceStatusEx level");
         clear_error();
         c.fails(QueryServiceStatusEx(0, 1, null_mut(), 0, null_mut()) != 0, ERROR_INVALID_LEVEL)?;
+        progress("NULL handles: QueryServiceStatusEx size");
         clear_error();
         let r = QueryServiceStatusEx(0, SC_STATUS_PROCESS_INFO, null_mut(), 0, &mut needed);
         c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
         c.eq(needed.into(), 36)?;
+        progress("NULL handles: QueryServiceStatusEx handle");
         clear_error();
         let r = QueryServiceStatusEx(0, 0, (&raw mut sp).cast(), 36, &mut needed);
         c.fails(r != 0, ERROR_INVALID_HANDLE)?;
+        progress("NULL handles: DeleteService");
         clear_error();
         c.fails(DeleteService(0) != 0, ERROR_INVALID_HANDLE)?;
+        progress("NULL handles: CreateServiceW");
         clear_error();
         let h = CreateServiceW(
             0,
@@ -459,6 +467,7 @@ fn null_handles(c: &mut Checks) -> Result<(), u32> {
         for (level, want) in
             [(1, ERROR_INVALID_LEVEL), (SC_ENUM_PROCESS_INFO, ERROR_INVALID_HANDLE)]
         {
+            progress("NULL handles: EnumServicesStatusExW");
             clear_error();
             let r = EnumServicesStatusExW(
                 0,

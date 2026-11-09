@@ -3852,7 +3852,7 @@ x64 and x86.
   FileZilla (W3: FileZilla 3.69.3's and 3.71.0's imports across user32, gdi32, msvcrt,
   comctl32, shell32, ole32 and others); a function is implemented by
   removing its name from the list.
-- **Stub-only DLLs**: pdh, urlmon, xolehlp, odbc32, authz,
+- **Stub-only DLLs**: pdh, xolehlp, odbc32, authz,
   wintrust, webservices, dhcpcsvc and oleacc are nothing but such stubs.
   comdlg32 (`comdlg32_test`) draws no dialog yet: GetFileTitleW (the
   name without its directory, the size needed when the buffer is
@@ -3929,7 +3929,9 @@ crypt32's chain engine as its trust decision) are ROADMAP item TLS.
 
 Tests: `schannel_test` (scenario of the same name; the peers are Nginx
 with OpenSSL on the loopback address, started with `start=`, and the
-test's own in-process server) and the host tests of `user/schannel_tls`
+test's own in-process server), `wow64_schannel_test` (its source built
+for x86, through SysWOW64's secur32, schannel, crypt32, ncrypt and
+bcrypt, against the same Nginx) and the host tests of `user/schannel_tls`
 (`cargo test -p schannel_tls`).
 
 ### Where the code is
@@ -3947,9 +3949,17 @@ test's own in-process server) and the host tests of `user/schannel_tls`
   QueryContextAttributesA and the package queries are recorded and give
   SEC_E_UNSUPPORTED_FUNCTION). secur32 also has NTLM, Kerberos as on a
   workgroup machine and Negotiate over NTLM (`sspi_test`).
-- `user/schannel` (schannel.dll; it also exports the SSPI functions, as
-  Windows' does): credentials (`creds.rs`), the SecBuffer rules
-  (`lib.rs`), QueryContextAttributes (`attrs.rs`).
+- `user/schannel` (schannel.dll, x64 and x86; it also exports the SSPI
+  functions, as Windows' does): credentials (`creds.rs`), the SecBuffer
+  rules (`lib.rs`), QueryContextAttributes (`attrs.rs`). The caller's
+  structures with pointers (SCHANNEL_CRED, SCH_CREDENTIALS,
+  TLS_PARAMETERS, CERT_CONTEXT, CRYPT_KEY_PROV_INFO, SecPkgInfoW,
+  SecPkgContext_NegotiationInfoW and _IssuerListInfoEx, CERT_NAME_BLOB,
+  the chain para, context and policy structures) are typed in
+  `layout.rs`, each held by compile-time checks to the SDK headers'
+  sizes and offsets for both widths (SCHANNEL_CRED 56/80,
+  SCH_CREDENTIALS 44/72); the handle tags are their low half on x86, as
+  secur32's.
 - `user/schannel_tls` (a `no_std` library, host-tested): the context
   state machine over rustls' unbuffered API, with rustls-rustcrypto as
   the crypto provider (THIRD_PARTY.md). Why this engine: rustls is a
@@ -8005,10 +8015,21 @@ come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
 ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 (`wow64_cert_test`, cert_test's source built for x86), msi
-(`wow64_msi_test`), normaliz, powrprof and wldp (`wow64_office_api_test`;
-powrprof reads CPUID through `core::arch::x86` there), combase and
+(`wow64_msi_test`), normaliz, powrprof, wldp and urlmon
+(`wow64_office_api_test`; powrprof reads CPUID through `core::arch::x86`
+there), schannel and the RustCrypto crates under it
+(`wow64_schannel_test`; getrandom's ProcessPrng imported undecorated), combase and
 appxdeploymentclient (`wow64_combase_test`; PackageManager is registered
-in the 32-bit registry view too). wldp.dll answers
+in the 32-bit registry view too). urlmon.dll has the default URL security manager
+(CoInternetCreateSecurityManager, `secmgr.rs`): MapUrlToZone and
+GetSecurityId as Windows' default settings with no zone mappings answer
+them (a drive path, file: with a drive and res: the Local Machine zone;
+http:, https:, ftp: and file: with a host the Internet zone for a
+dotted host, the Local Intranet zone for a plain one; other schemes the
+Internet zone; a relative URL E_INVALIDARG; the ID `scheme:host` or
+"file:" then the zone's DWORD), each zone asked recorded to the ledger
+("other"); ProcessUrlAction, QueryCustomPolicy and the zone mappings
+are E_NOTIMPL, recorded; its IUri functions are still stubs. wldp.dll answers
 as an unlocked Windows without App Control: WldpQueryWindowsLockdownMode
 UNLOCKED (no S mode), WldpGetLockdownPolicy WLDP_LOCKDOWN_DEFINED_FLAG
 alone for every host, WldpIsDynamicCodePolicyEnabled FALSE. crypt32's own

@@ -1978,6 +1978,7 @@ name = "schannel"
 version = "0.1.0"
 dependencies = [
  "gala_heap",
+ "ntrt",
  "schannel_tls",
  "sha2",
 ]
@@ -2568,6 +2569,7 @@ name = "urlmon"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -2882,6 +2884,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_runas_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_schannel_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

@@ -1142,7 +1142,9 @@ numbers, 0x7f.., fail there).
   `llvm-readobj --coff-imports`.
 - Imports on x86 are `#[link(name = "...", kind = "raw-dylib",
   import_name_type = "undecorated")]` (without it a stdcall import is
-  named `_Name@N`, which no DLL exports). Keep data imports (`static`)
+  named `_Name@N`, which no DLL exports; that holds for a dependency's
+  imports too, e.g. `vendor/getrandom`'s ProcessPrng: check a new
+  32-bit DLL with `llvm-readobj --coff-imports` for `@`). Keep data imports (`static`)
   in an `extern "C"` block: one in an `extern "system"` raw-dylib block
   crashes rustc 1.97 ("Ty::fn_sig() called on non-fn type"). The
   memory routines the compiler calls (`memcpy`) do not come from a

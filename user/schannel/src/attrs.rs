@@ -5,12 +5,17 @@
 use core::ffi::c_void;
 
 use crate::ffi::{self, CONTEXT_TAG, SecHandle, missing, state};
+use crate::layout::{IssuerListEx, NameBlob, NegotiationInfo, SecPkgInfo};
 use crate::{
     Context, PACKAGE, SEC_E_INSUFFICIENT_MEMORY, SEC_E_INVALID_HANDLE, SEC_E_UNSUPPORTED_FUNCTION,
 };
 use schannel_tls::sec;
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CertCreateCertificateContext(encoding: u32, data: *const u8, size: u32) -> *const c_void;
     fn CertOpenStore(
@@ -50,26 +55,31 @@ pub const MAX_TOKEN: u32 = 0x6000;
 const COMMENT: &str = "Schannel Security Package";
 
 /// SecPkgInfoW and its strings in one block (FreeContextBuffer frees it).
-fn package_info() -> *mut u8 {
+fn package_info() -> *mut SecPkgInfo {
     let (name, comment) = (PACKAGE.len() + 1, COMMENT.len() + 1);
-    let block = ffi::allocate(32 + 2 * (name + comment));
+    let head = size_of::<SecPkgInfo>();
+    let block = ffi::allocate(head + 2 * (name + comment));
     if block.is_null() {
-        return block;
+        return block.cast();
     }
-    // SAFETY: inside the block just allocated (zeroed: the NULs are there).
+    // SAFETY: inside the block just allocated (zeroed: the NULs are there;
+    // heap blocks are aligned for the structure).
     unsafe {
-        let text = block.add(32).cast::<u16>();
+        let text = block.add(head).cast::<u16>();
         ffi::put_wide(core::slice::from_raw_parts_mut(text, name), PACKAGE);
         let text2 = text.add(name);
         ffi::put_wide(core::slice::from_raw_parts_mut(text2, comment), COMMENT);
-        block.cast::<u32>().write(CAPABILITIES);
-        block.add(4).cast::<u16>().write(1);
-        block.add(6).cast::<u16>().write(RPC_ID);
-        block.add(8).cast::<u32>().write(MAX_TOKEN);
-        block.add(16).cast::<*const u16>().write(text);
-        block.add(24).cast::<*const u16>().write(text2);
+        let info = block.cast::<SecPkgInfo>();
+        info.write(SecPkgInfo {
+            capabilities: CAPABILITIES,
+            version: 1,
+            rpc_id: RPC_ID,
+            max_token: MAX_TOKEN,
+            name: text,
+            comment: text2,
+        });
+        info
     }
-    block
 }
 
 /// (IANA name, cipher, cipher bits, hash, hash bits) of a suite.
@@ -185,11 +195,14 @@ pub extern "system" fn QueryContextAttributesW(
                 return SEC_E_INSUFFICIENT_MEMORY;
             }
             unsafe {
-                buffer.cast::<*mut u8>().write_unaligned(p);
                 if attribute == SECPKG_ATTR_NEGOTIATION_INFO {
                     // SECPKG_NEGOTIATION_COMPLETE (0) or IN_PROGRESS (2).
-                    let s = if ctx.session.established() { 0u32 } else { 2 };
-                    buffer.add(8).cast::<u32>().write_unaligned(s);
+                    let state = if ctx.session.established() { 0u32 } else { 2 };
+                    let info = NegotiationInfo { package_info: p, state };
+                    buffer.cast::<NegotiationInfo>().write_unaligned(info);
+                } else {
+                    // SecPkgContext_PackageInfoW: its PackageInfo.
+                    buffer.cast::<*mut SecPkgInfo>().write_unaligned(p);
                 }
             }
         }
@@ -262,30 +275,30 @@ pub extern "system" fn QueryContextAttributesW(
             // cbData, pbData; the DER names the server's CertificateRequest
             // gave, in one block FreeContextBuffer frees), cIssuers.
             let issuers = ctx.session.issuers().unwrap_or(&[]);
+            let blob = size_of::<NameBlob>();
             let block = if issuers.is_empty() {
                 core::ptr::null_mut()
             } else {
-                let size: usize = issuers.iter().map(|i| 16 + i.len()).sum();
+                let size: usize = issuers.iter().map(|i| blob + i.len()).sum();
                 let block = ffi::allocate(size);
                 if block.is_null() {
                     return SEC_E_INSUFFICIENT_MEMORY;
                 }
-                let mut data = 16 * issuers.len();
+                let mut data = blob * issuers.len();
                 for (n, name) in issuers.iter().enumerate() {
                     unsafe {
-                        let blob = block.add(16 * n);
-                        blob.cast::<u32>().write(name.len() as u32);
-                        blob.add(8).cast::<*mut u8>().write(block.add(data));
+                        block
+                            .cast::<NameBlob>()
+                            .add(n)
+                            .write(NameBlob { size: name.len() as u32, data: block.add(data) });
                         core::ptr::copy_nonoverlapping(name.as_ptr(), block.add(data), name.len());
                     }
                     data += name.len();
                 }
-                block
+                block.cast::<NameBlob>()
             };
-            unsafe {
-                buffer.cast::<*mut u8>().write_unaligned(block);
-                buffer.add(8).cast::<u32>().write_unaligned(issuers.len() as u32);
-            }
+            let list = IssuerListEx { issuers: block, count: issuers.len() as u32 };
+            unsafe { buffer.cast::<IssuerListEx>().write_unaligned(list) };
         }
         SECPKG_ATTR_CIPHER_INFO => {
             // SecPkgContext_CipherInfo (version 1): dwVersion, dwProtocol,

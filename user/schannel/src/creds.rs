@@ -17,13 +17,22 @@ use schannel_tls::rustls::{Error, SignatureAlgorithm, SignatureScheme};
 use schannel_tls::{ClientCache, Protocols, ServerCache, sec};
 
 use crate::ffi::{self, missing};
+use crate::layout::{CertContext, KeyProvInfo, SchCredentials, SchannelCred, TlsParameters};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CertGetCertificateContextProperty(
         cert: *const c_void,
@@ -33,7 +42,11 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-#[link(name = "ncrypt", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ncrypt", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ncrypt", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NCryptOpenStorageProvider(provider: *mut usize, name: *const u16, flags: u32) -> i32;
     fn NCryptOpenKey(
@@ -257,9 +270,12 @@ fn ecdsa_der(rs: &[u8]) -> Option<Vec<u8>> {
 fn encoded<'a>(cert: *const c_void) -> &'a [u8] {
     // SAFETY: the caller's CERT_CONTEXT.
     unsafe {
-        let data = cert.cast::<u8>().add(8).cast::<*const u8>().read_unaligned();
-        let size = cert.cast::<u8>().add(16).cast::<u32>().read_unaligned();
-        if data.is_null() { &[] } else { core::slice::from_raw_parts(data, size as usize) }
+        let cert = &*cert.cast::<CertContext>();
+        if cert.encoded.is_null() {
+            &[]
+        } else {
+            core::slice::from_raw_parts(cert.encoded, cert.encoded_size as usize)
+        }
     }
 }
 
@@ -267,28 +283,30 @@ fn encoded<'a>(cert: *const c_void) -> &'a [u8] {
 /// CERT_NCRYPT_KEY_HANDLE_PROP_ID, or the key CERT_KEY_PROV_INFO_PROP_ID
 /// names (opened from its provider).
 pub fn certificate_key(cert: *const c_void, kind: KeyKind) -> Result<CngKey, u32> {
-    let mut handle = 0u64;
-    let mut size = 8u32;
+    // NCRYPT_KEY_HANDLE: a ULONG_PTR.
+    let mut handle = 0usize;
+    let mut size = size_of::<usize>() as u32;
     // SAFETY: crypt32's property of the caller's context; our output.
-    if unsafe {
-        CertGetCertificateContextProperty(cert, 78, (&mut handle as *mut u64).cast(), &mut size)
-    } != 0
+    if unsafe { CertGetCertificateContextProperty(cert, 78, (&raw mut handle).cast(), &mut size) }
+        != 0
     {
-        return Ok(CngKey { handle: handle as usize, owned: false, kind });
+        return Ok(CngKey { handle, owned: false, kind });
     }
-    let mut info = [0u64; 300];
-    let mut size = (info.len() * 8) as u32;
-    // SAFETY: as above (CRYPT_KEY_PROV_INFO, with its strings).
-    if unsafe { CertGetCertificateContextProperty(cert, 2, info.as_mut_ptr().cast(), &mut size) }
+    // CRYPT_KEY_PROV_INFO with its strings after it (pointer-aligned).
+    let mut block = [0usize; 600];
+    let mut size = size_of_val(&block) as u32;
+    // SAFETY: as above.
+    if unsafe { CertGetCertificateContextProperty(cert, 2, block.as_mut_ptr().cast(), &mut size) }
         == 0
+        || (size as usize) < size_of::<KeyProvInfo>()
     {
         missing(b"schannel.dll!certificate without a private key", 0);
         return Err(sec::E_NO_CREDENTIALS);
     }
-    let container = info[0] as *const u16;
-    let provider = info[1] as *const u16;
-    let provider_type = info[2] as u32;
-    let spec = info[5] as u32;
+    // SAFETY: crypt32 wrote a CRYPT_KEY_PROV_INFO at the block's start.
+    let info = unsafe { &*block.as_ptr().cast::<KeyProvInfo>() };
+    let (container, provider) = (info.container, info.provider);
+    let (provider_type, spec) = (info.provider_type, info.key_spec);
     if provider_type != 0 {
         // A CryptoAPI (CSP) key container: not in gala.
         missing(b"schannel.dll!certificate key in a CryptoAPI provider", provider_type.into());
@@ -369,51 +387,47 @@ const SCH_CRED_DISABLE_RECONNECTS: u32 = 0x80;
 /// SCH_CRED_REVOCATION_CHECK_CACHE_ONLY.
 const SCH_CRED_REVOCATION_FLAGS: u32 = 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x4000;
 
-fn read32(p: *const u8, at: usize) -> u32 {
-    // SAFETY: the caller's structure, at a field of it.
-    unsafe { p.add(at).cast::<u32>().read_unaligned() }
-}
-
-fn read_ptr(p: *const u8, at: usize) -> *const u8 {
-    // SAFETY: as above.
-    unsafe { p.add(at).cast::<*const u8>().read_unaligned() }
-}
-
 /// The credentials AcquireCredentialsHandle's pAuthData describes
 /// (SCHANNEL_CRED version 4, SCH_CREDENTIALS version 5, or none).
 pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
     let (mut enabled, mut disabled, mut flags) = (0u32, 0u32, 0u32);
-    let (mut count, mut certs) = (0u32, core::ptr::null::<u8>());
+    let (mut count, mut certs) = (0u32, core::ptr::null::<*const CertContext>());
     if !auth.is_null() {
-        match read32(auth, 0) {
+        // SAFETY: the caller's pAuthData starts with its dwVersion.
+        match unsafe { auth.cast::<u32>().read_unaligned() } {
             4 => {
-                count = read32(auth, 4);
-                certs = read_ptr(auth, 8);
-                enabled = read32(auth, 56);
-                flags = read32(auth, 72);
-                if read32(auth, 40) != 0 {
-                    missing(
-                        b"schannel.dll!SCHANNEL_CRED palgSupportedAlgs",
-                        read32(auth, 40).into(),
-                    );
+                // SAFETY: a SCHANNEL_CRED (version 4), as documented.
+                let cred = unsafe { auth.cast::<SchannelCred>().read_unaligned() };
+                count = cred.cred_count;
+                certs = cred.creds;
+                enabled = cred.enabled_protocols;
+                flags = cred.flags;
+                if cred.alg_count != 0 {
+                    missing(b"schannel.dll!SCHANNEL_CRED palgSupportedAlgs", cred.alg_count.into());
                 }
             }
             5 => {
-                count = read32(auth, 8);
-                certs = read_ptr(auth, 16);
-                flags = read32(auth, 52);
-                let tls = read_ptr(auth, 64);
-                for i in 0..read32(auth, 56) as usize {
-                    // TLS_PARAMETERS (40 bytes): only those for every ALPN
-                    // id (cAlpnIds 0) say what is disabled overall.
-                    let t = tls.wrapping_add(40 * i);
-                    if !tls.is_null() && read32(t, 0) == 0 {
-                        disabled |= read32(t, 16);
+                // SAFETY: a SCH_CREDENTIALS (version 5), as documented.
+                let cred = unsafe { auth.cast::<SchCredentials>().read_unaligned() };
+                count = cred.cred_count;
+                certs = cred.creds;
+                flags = cred.flags;
+                let tls = cred.tls_parameters;
+                for i in 0..cred.tls_parameter_count as usize {
+                    if tls.is_null() {
+                        break;
                     }
-                    if !tls.is_null() && read32(t, 20) != 0 {
+                    // SAFETY: the caller's array of cTlsParameters.
+                    let t = unsafe { tls.add(i).cast::<TlsParameters>().read_unaligned() };
+                    // Only the parameters for every ALPN id (cAlpnIds 0)
+                    // say what is disabled overall.
+                    if t.alpn_id_count == 0 {
+                        disabled |= t.disabled_protocols;
+                    }
+                    if t.disabled_crypto_count != 0 {
                         missing(
                             b"schannel.dll!TLS_PARAMETERS pDisabledCrypto",
-                            read32(t, 20).into(),
+                            t.disabled_crypto_count.into(),
                         );
                     }
                 }
@@ -458,7 +472,7 @@ pub fn acquire(inbound: bool, auth: *const u8) -> Result<Credential, u32> {
     };
     if count > 0 && !certs.is_null() {
         // SAFETY: the caller's array of `count` PCCERT_CONTEXT.
-        let cert = unsafe { certs.cast::<*const c_void>().read_unaligned() };
+        let cert: *const c_void = unsafe { certs.read_unaligned() }.cast();
         if !cert.is_null() {
             let der = encoded(cert);
             credential.chain.push(CertificateDer::from(der.to_vec()));

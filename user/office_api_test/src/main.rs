@@ -61,6 +61,15 @@
 //!   WldpQueryWindowsLockdownMode S_OK and UNLOCKED; WldpGetLockdownPolicy
 //!   for the global host S_OK with WLDP_LOCKDOWN_DEFINED_FLAG alone (no
 //!   code integrity policy, as on a machine without App Control).
+//! - urlmon's security manager (CoInternetCreateSecurityManager, which
+//!   setup.exe creates on its download's error path; expectations from
+//!   Wine's dlls/urlmon/tests sec_mgr.c test_SecurityManager run on
+//!   Windows): MapUrlToZone and GetSecurityId of res:, file: (with a
+//!   drive, and a host), a drive path, http:, ftp:, about: and zip: URLs
+//!   (Local Machine 0 or Internet 3; the IDs `scheme:host` or "file:"
+//!   then the zone's DWORD); a relative URL E_INVALIDARG; "http:" without
+//!   "//" S_OK with URLZONE_INVALID and no ID; NULL arguments
+//!   E_INVALIDARG, ProcessUrlAction's too.
 //! - AttachConsole and AllocConsole in a process that has a console
 //!   (GetConsoleCP not 0; run-all.ps1's programs and gala's have one):
 //!   ERROR_ACCESS_DENIED; GetDiskFreeSpaceA of the system drive.
@@ -297,6 +306,15 @@ struct WldpHostInformation {
 unsafe extern "system" {
     fn WldpQueryWindowsLockdownMode(mode: *mut u32) -> i32;
     fn WldpGetLockdownPolicy(host: *const WldpHostInformation, state: *mut u32, flags: u32) -> i32;
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "urlmon", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "urlmon", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn CoInternetCreateSecurityManager(provider: usize, manager: *mut usize, reserved: u32) -> i32;
 }
 
 #[cfg_attr(
@@ -1013,6 +1031,113 @@ fn run() -> Result<(), u32> {
     imm(&mut c)?;
     idn_and_power(&mut c)?;
     geo_and_lockdown(&mut c)?;
+    url_zones(&mut c)?;
+    Ok(())
+}
+
+/// IInternetSecurityManager's methods (urlmon.idl's order after IUnknown):
+/// SetSecuritySite, GetSecuritySite, MapUrlToZone, GetSecurityId,
+/// ProcessUrlAction, ...
+type MapUrlToZone = extern "system" fn(usize, *const u16, *mut u32, u32) -> i32;
+type GetSecurityId = extern "system" fn(usize, *const u16, *mut u8, *mut u32, usize) -> i32;
+type ProcessUrlAction =
+    extern "system" fn(usize, *const u16, u32, *mut u8, u32, *mut u8, u32, u32, u32) -> i32;
+type Release = extern "system" fn(usize) -> u32;
+
+/// Method `slot` of COM object `object`.
+fn method(object: usize, slot: usize) -> usize {
+    // SAFETY: a COM object's vtable, which has the slot.
+    unsafe { *(*(object as *const *const usize)).add(slot) }
+}
+
+/// urlmon's security manager, which setup.exe creates on its download's
+/// error path: the zones and security IDs of the default settings (no
+/// zone mappings), as Wine's urlmon tests (sec_mgr.c
+/// test_SecurityManager's table) find them on Windows.
+fn url_zones(c: &mut Checks) -> Result<(), u32> {
+    const E_INVALIDARG: u32 = 0x8007_0057;
+    const URLACTION_SCRIPT_RUN: u32 = 0x1400;
+    // (URL, zone, security ID without its zone DWORD).
+    // (res://mshtml.dll/blank.htm, Wine's first row, is not here: Windows
+    // Server 2025, which has no MSHTML, answers it as the Internet zone.)
+    let table: [(&str, u32, &[u8]); 12] = [
+        ("file://c:\\Index.htm", 0, b"file:"),
+        ("http://www.zone3.winetest", 3, b"http:www.zone3.winetest"),
+        ("about:blank", 3, b"about:blank"),
+        ("ftp://zone3.winetest/file.test", 3, b"ftp:zone3.winetest"),
+        ("file://c:/Index.htm", 0, b"file:"),
+        ("file:///c:/Index.htm", 0, b"file:"),
+        ("file:///c:", 0, b"file:"),
+        ("file:///c:c\\", 0, b"file:"),
+        ("c:\\test.htm", 0, b"file:"),
+        ("file://some%20file.jpg", 3, b"file:some%20file.jpg"),
+        ("zip:testing.com/testing", 3, b"zip:testing.com/testing"),
+        ("http://www.zone3.winetest/site/about", 3, b"http:www.zone3.winetest"),
+    ];
+    let mut manager = 0usize;
+    // SAFETY: our output.
+    c.eq(unsafe { CoInternetCreateSecurityManager(0, &mut manager, 0) }.into_u64(), 0)?;
+    c.ok(manager != 0, 0)?;
+    // SAFETY: the manager's methods, by IInternetSecurityManager's layout.
+    let (map, id, action, release) = unsafe {
+        (
+            core::mem::transmute::<usize, MapUrlToZone>(method(manager, 5)),
+            core::mem::transmute::<usize, GetSecurityId>(method(manager, 6)),
+            core::mem::transmute::<usize, ProcessUrlAction>(method(manager, 7)),
+            core::mem::transmute::<usize, Release>(method(manager, 2)),
+        )
+    };
+    for (row, (url, zone, secid)) in table.into_iter().enumerate() {
+        let wide: [u16; 64] = w(url);
+        let mut got = 100u32;
+        c.eq(map(manager, wide.as_ptr(), &mut got, 0).into_u64(), 0)?;
+        // On failure: the row in the high byte, the zone got in the low.
+        c.ok(got == zone, ((row as u64) << 8) | u64::from(got))?;
+        let mut buf = [0xf0u8; 128];
+        let mut size = buf.len() as u32;
+        c.eq(id(manager, wide.as_ptr(), buf.as_mut_ptr(), &mut size, 0).into_u64(), 0)?;
+        c.eq(size.into(), (secid.len() + 4) as u64)?;
+        c.ok(buf[..secid.len()] == *secid, buf[0].into())?;
+        c.ok(buf[secid.len()..secid.len() + 4] == zone.to_le_bytes(), buf[secid.len()].into())?;
+    }
+    // A relative URL: E_INVALIDARG (IE 7 and later), no zone.
+    let relative: [u16; 16] = w("index.htm");
+    let mut got = 100u32;
+    let r = map(manager, relative.as_ptr(), &mut got, 0) as u32;
+    c.eq(r.into(), E_INVALIDARG.into())?;
+    c.ok(got == 100 || got == u32::MAX, got.into())?;
+    let mut buf = [0u8; 128];
+    let mut size = buf.len() as u32;
+    let r = id(manager, relative.as_ptr(), buf.as_mut_ptr(), &mut size, 0) as u32;
+    c.eq(r.into(), E_INVALIDARG.into())?;
+    // http without "//": S_OK and URLZONE_INVALID; no security ID.
+    let no_host: [u16; 16] = w("http:google.com");
+    c.eq(map(manager, no_host.as_ptr(), &mut got, 0).into_u64(), 0)?;
+    c.eq(got.into(), u32::MAX.into())?;
+    let r = id(manager, no_host.as_ptr(), buf.as_mut_ptr(), &mut size, 0) as u32;
+    c.eq(r.into(), E_INVALIDARG.into())?;
+    // No URL, no buffer, no size: E_INVALIDARG.
+    c.eq((map(manager, null(), &mut got, 0) as u32).into(), E_INVALIDARG.into())?;
+    let r = id(manager, null(), buf.as_mut_ptr(), &mut size, 0) as u32;
+    c.eq(r.into(), E_INVALIDARG.into())?;
+    let r = id(manager, relative.as_ptr(), null_mut(), &mut size, 0) as u32;
+    c.eq(r.into(), E_INVALIDARG.into())?;
+    let r = id(manager, relative.as_ptr(), buf.as_mut_ptr(), null_mut(), 0) as u32;
+    c.eq(r.into(), E_INVALIDARG.into())?;
+    let mut policy = 0u32;
+    let r = action(
+        manager,
+        null(),
+        URLACTION_SCRIPT_RUN,
+        (&raw mut policy).cast(),
+        2,
+        null_mut(),
+        0,
+        0,
+        0,
+    ) as u32;
+    c.eq(r.into(), E_INVALIDARG.into())?;
+    release(manager);
     Ok(())
 }
 

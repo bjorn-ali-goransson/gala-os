@@ -3,7 +3,6 @@
 //! ends the process.
 
 gala_stubs::unimplemented_exports!("urlmon.dll":
-    CoInternetCreateSecurityManager
     CreateIUriBuilder
     CreateUri
 );

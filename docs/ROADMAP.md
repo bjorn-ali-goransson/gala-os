@@ -1536,24 +1536,52 @@ need gala's.
      answering as a machine without MSIX packages; `combase_test`,
      `wow64_combase_test`; ARCHITECTURE "COM: ole32 and oleaut32"), and
      looks for a Store Office (`appxdeploymentclient.dll!FindPackagesByNamePublisher(Microsoft.O...`
-     in the ledger: none). Where the run ends now: the elevated copy
-     (pid 12) starts its download over winhttp; the TLS credentials fail
-     (32-bit secur32 loads `schannel.dll`, which has no i686 build:
-     `schannel.dll` missing dll, `winhttp.dll!AcquireCredentialsHandleW`
-     0x80090305 SEC_E_SECPKG_NOT_FOUND), and its error path delay-loads
-     urlmon's CoInternetCreateSecurityManager, which has no i686 build
-     either: both copies end with 0xc06d007e (crash report: "delay load
-     of urlmon.dll!CoInternetCreateSecurityManager" at
-     kernel32.dll+0x24859). ODT has written no log yet (`dump=C:/gala/odtlog`
-     finds no directory).
+     in the ledger: none). The elevated copy (pid 12) then starts its
+     downloads over winhttp, on TLS from 32-bit (done: gala's
+     schannel.dll for i686, its caller structures typed for both widths;
+     `wow64_schannel_test`, schannel_test's source built for x86 against
+     the same Nginx; ARCHITECTURE "Schannel (TLS)"). The scenario ships
+     the public roots a full image has (`user/roots/public-roots.pem`).
+     DNS and TCP connections to Microsoft's servers work over QEMU's
+     NAT; in the agent sandbox the handshake then fails as it
+     should: its egress gateway intercepts TLS with its own CA ("Egress
+     Gateway SDS Issuing CA", `openssl s_client` on the host shows the
+     same), which no root store trusts (`crypt32.dll!SSL:
+     CERT_E_UNTRUSTEDROOT`, chain error 0x20, `schannel.dll!ISC:
+     UnknownIssuer`, SEC_E_UNTRUSTED_ROOT). Open bug: in about one run in
+     three the same chain (three RSA-2048 SHA-256 certificates, which
+     `openssl verify` accepts every time) fails with
+     `crypt32.dll!SSL: TRUST_E_CERT_SIGNATURE`, chain error 0x28
+     (CERT_TRUST_IS_NOT_SIGNATURE_VALID too) and SEC_E_CERT_UNKNOWN:
+     the 32-bit crypt32/bcrypt signature check is not deterministic under
+     setup.exe's threads (`wow64_cert_test` and `wow64_schannel_test`,
+     single-threaded, pass every time); not yet investigated. With direct egress the chain is Microsoft's,
+     to a public root (not yet seen in a run). Its error path asks urlmon's
+     security manager (done: urlmon.dll for x64 and x86,
+     CoInternetCreateSecurityManager with MapUrlToZone and GetSecurityId
+     as Windows' default settings answer them; `office_api_test`,
+     `wow64_office_api_test`, expectations from Wine's sec_mgr.c run on
+     Windows; ARCHITECTURE "WOW64"): ProcessUrlAction(
+     https://officeclient.microsoft.com..., URLACTION_CREDENTIALS_USE
+     0x1a00), answered E_NOTIMPL and recorded (Windows answers from the
+     Internet zone's policy under Internet Settings\Zones), and MapUrlToZone(
+     https://ecs.office.com/config/v2/Office/...) = 3, Internet. Where
+     the run ends now: setup.exe delay-loads
+     `wininet.dll!InternetGetCookieExW`, and gala's wininet has no i686
+     build: both copies end with 0xc06d007e (crash report: "delay load of
+     WININET.dll!InternetGetCookieExW"). ODT has written no log yet
+     (`dump=C:/gala/odtlog` finds no directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: schannel.dll for i686 (the
-     TLS handshake from 32-bit; the download of the configuration's
-     product data), urlmon.dll for i686 with CoInternetCreateSecurityManager
-     (an IInternetSecurityManager: URL zones, as Windows' default
-     settings answer them), then what the run reaches after them (its log
+     Next: the nondeterministic signature failure above (first: which
+     element and which call fails, then why); in the order the run
+     reaches them: wininet.dll for i686
+     (InternetGetCookieExW: no cookies, as a fresh profile; then what
+     else of wininet it calls), urlmon's ProcessUrlAction from the zones'
+     default policies (the Internet Settings\Zones keys), a run with
+     direct egress (the TLS chain of Microsoft's servers to a public
+     root), then what the run reaches after them (its log
      in `target/failed/office_install.dump/` once it writes one); starting
      a service (Click-to-Run's ClickToRunSvc, once the installer creates
      it: the SCM answers ERROR_NOT_SUPPORTED, recorded); gdiplus
@@ -1583,7 +1611,8 @@ it, for programs and for gala's own tools.
 
 **Done so far**: Schannel, client and server, TLS 1.2 and 1.3, in
 schannel.dll on rustls with the RustCrypto provider (`schannel_test`
-against Nginx with OpenSSL and an in-process server; host tests `cargo
+against Nginx with OpenSSL and an in-process server, and its x86 build
+`wow64_schannel_test` through SysWOW64's schannel.dll; host tests `cargo
 test -p schannel_tls`): SSPI's token rules, EncryptMessage/
 DecryptMessage, QueryContextAttributes, SNI and the name check, ALPN,
 validation against gala's machine root store (`System32\gala\roots`),

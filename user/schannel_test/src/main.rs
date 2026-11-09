@@ -78,7 +78,13 @@
 //! ECDHE_ECDSA), the client validating the certificate automatically
 //! (crypt32 chains the P-384 leaf to the test CA).
 //!
-//! Prints `schannel_test: ok` or exits with the number of the failing
+//! The same source builds `wow64_schannel_test`, the 32-bit (x86)
+//! program (WOW64: SysWOW64's secur32, schannel, crypt32, ncrypt and
+//! bcrypt) against the same Nginx: the structures it passes and reads
+//! have each width's layout (sspi.h, schannel.h, wincrypt.h; the `check!`
+//! lines hold them to it).
+//!
+//! Prints `schannel_test: ok` (`wow64_schannel_test: ok`) or exits with the number of the failing
 //! check (each failure prints the check's number, the value seen and the
 //! step).
 
@@ -187,12 +193,61 @@ struct CertContext {
     store: Handle,
 }
 
-/// CERT_CHAIN_PARA (no requested usage).
+/// CERT_CHAIN_PARA (no requested usage): cbSize, then RequestedUsage, a
+/// CERT_USAGE_MATCH (dwType, then a CERT_ENHKEY_USAGE: a count and a
+/// pointer).
 #[repr(C)]
 struct ChainPara {
     size: u32,
-    usage: [u64; 3],
+    usage: UsageMatch,
 }
+
+#[repr(C)]
+struct UsageMatch {
+    kind: u32,
+    usage: EnhkeyUsage,
+}
+
+#[repr(C)]
+struct EnhkeyUsage {
+    count: u32,
+    ids: *const *const u8,
+}
+
+const NO_USAGE: UsageMatch = UsageMatch { kind: 0, usage: EnhkeyUsage { count: 0, ids: null() } };
+
+/// `x86` in a 32-bit build, `x64` in a 64-bit one: a size or offset
+/// Windows gives by pointer width (sspi.h, schannel.h, wincrypt.h).
+const fn by_width(x86: usize, x64: usize) -> usize {
+    if cfg!(target_arch = "x86") { x86 } else { x64 }
+}
+
+/// The structures this test hands Schannel or reads from it, held to the
+/// sizes and offsets of the SDK headers for each width (a 32-bit caller
+/// passes the x86 layout: schannel.dll reads each width's).
+macro_rules! check {
+    ($value:expr, $x86:expr, $x64:expr) => {
+        const _: () = assert!($value == by_width($x86, $x64));
+    };
+}
+check!(size_of::<SecHandle>(), 8, 16);
+check!(size_of::<SecBuffer>(), 12, 16);
+check!(size_of::<SecBufferDesc>(), 12, 16);
+check!(size_of::<SecPkgInfo>(), 20, 32);
+check!(core::mem::offset_of!(SecPkgInfo, name), 12, 16);
+check!(size_of::<SchannelCred>(), 56, 80);
+check!(core::mem::offset_of!(SchannelCred, enabled_protocols), 32, 56);
+check!(core::mem::offset_of!(SchannelCred, flags), 48, 72);
+check!(size_of::<SchCredentials>(), 44, 72);
+check!(core::mem::offset_of!(SchCredentials, flags), 32, 52);
+check!(core::mem::offset_of!(SchCredentials, tls), 40, 64);
+check!(size_of::<TlsParameters>(), 24, 40);
+check!(core::mem::offset_of!(TlsParameters, disabled_protocols), 8, 16);
+check!(size_of::<CertContext>(), 20, 40);
+check!(size_of::<ChainPara>(), 16, 32);
+check!(size_of::<IssuerListEx>(), 8, 16);
+check!(size_of::<NameBlob>(), 8, 16);
+check!(size_of::<KeyProvInfo>(), 28, 48);
 
 /// CERT_CHAIN_CONTEXT's start: cbSize, TrustStatus (error, info).
 #[repr(C)]
@@ -274,7 +329,11 @@ struct SockaddrIn {
     zero: [u8; 8],
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> i32;
@@ -282,7 +341,11 @@ unsafe extern "system" {
     fn Sleep(ms: u32);
 }
 
-#[link(name = "ws2_32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ws2_32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ws2_32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn WSAStartup(version: u16, data: *mut WsaData) -> i32;
     fn socket(af: i32, kind: i32, protocol: i32) -> Socket;
@@ -292,7 +355,11 @@ unsafe extern "system" {
     fn closesocket(s: Socket) -> i32;
 }
 
-#[link(name = "secur32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "secur32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "secur32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn QuerySecurityPackageInfoW(name: *const u16, info: *mut *mut SecPkgInfo) -> i32;
     fn EnumerateSecurityPackagesW(count: *mut u32, info: *mut *mut SecPkgInfo) -> i32;
@@ -377,7 +444,11 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CertCreateCertificateContext(encoding: u32, data: *const u8, size: u32) -> *const c_void;
     fn CertFreeCertificateContext(cert: *const c_void) -> i32;
@@ -415,7 +486,11 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-#[link(name = "ncrypt", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ncrypt", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ncrypt", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NCryptOpenStorageProvider(provider: *mut usize, name: *const u16, flags: u32) -> i32;
     fn NCryptImportKey(
@@ -439,6 +514,12 @@ unsafe extern "system" {
     fn NCryptFreeObject(object: usize) -> i32;
 }
 
+// On x86 the compiler's runtime symbols (memcpy, the 64-bit division
+// helpers, _fltused) come from ntrt's x86 runtime.
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -450,14 +531,22 @@ unsafe extern "C" {
     fn __chkstk();
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __CxxFrameHandler3() -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdeac) }
 }
+
+/// The program's name, which its lines start with.
+#[cfg(target_arch = "x86_64")]
+const NAME: &[u8] = b"schannel_test";
+#[cfg(target_arch = "x86")]
+const NAME: &[u8] = b"wow64_schannel_test";
 
 fn out(text: &[u8]) {
     let mut written = 0;
@@ -494,7 +583,8 @@ impl Checks {
         if cond {
             return Ok(());
         }
-        out(b"schannel_test: check ");
+        out(NAME);
+        out(b": check ");
         out(&hex(self.n));
         out(b" got ");
         out(&hex(got as u32));
@@ -518,7 +608,8 @@ impl Checks {
     #[track_caller]
     fn step(&mut self, step: &'static [u8]) {
         self.step = step;
-        out(b"schannel_test: ");
+        out(NAME);
+        out(b": ");
         out(step);
         check_line(core::panic::Location::caller().line());
         out(b"\r\n");
@@ -1290,7 +1381,7 @@ fn check_connection(c: &mut Checks, client: &mut Client, tls13: bool) -> Result<
         let first = CertEnumCertificatesInStore(ctx.store, null());
         c.ok(!first.is_null(), 0)?;
         CertFreeCertificateContext(first);
-        let para = ChainPara { size: size_of::<ChainPara>() as u32, usage: [0; 3] };
+        let para = ChainPara { size: size_of::<ChainPara>() as u32, usage: NO_USAGE };
         let mut chain: *const ChainContext = null();
         c.ok(
             CertGetCertificateChain(
@@ -2246,7 +2337,8 @@ pub extern "C" fn mainCRTStartup() -> ! {
     let mut c = Checks { n: 0, step: b"start" };
     let code = match run(&mut c) {
         Ok(()) => {
-            out(b"schannel_test: ok\r\n");
+            out(NAME);
+            out(b": ok\r\n");
             0
         }
         Err(id) => id,
