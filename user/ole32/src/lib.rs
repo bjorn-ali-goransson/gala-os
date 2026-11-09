@@ -19,6 +19,9 @@
 //! - CoWaitForMultipleHandles (waits; no message pumping, gala has no
 //!   window messages).
 //! - Get/SetErrorInfo (oleaut32 forwards its ordinals 200 and 201 here).
+//! - The Windows Runtime base: HSTRINGs, activation from the registry,
+//!   error origination (winrt.rs, roerror.rs), CoIncrementMTAUsage.
+//!   combase.dll's exports forward here (user/combase).
 
 #![no_std]
 #![allow(non_snake_case)]
@@ -32,6 +35,7 @@ mod bindctx;
 mod class;
 mod marshal;
 mod props;
+mod roerror;
 mod stream;
 mod unimplemented;
 mod winrt;
@@ -462,8 +466,12 @@ pub(crate) struct ThreadState {
     spies: [usize; MAX_SPIES],
     cookies: [u64; MAX_SPIES],
     next_cookie: u64,
-    /// The thread's error object (SetErrorInfo).
+    /// The thread's error object (SetErrorInfo): its IErrorInfo.
     error_info: usize,
+    /// The same error's restricted error object (SetRestrictedErrorInfo;
+    /// 0 when the error was set by SetErrorInfo): one slot, as on
+    /// Windows (roerror.rs).
+    restricted_info: usize,
     /// CoRegisterMessageFilter's filter (an STA's; held).
     pub(crate) message_filter: usize,
     /// This STA thread's context object.
@@ -530,6 +538,7 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
                 cookies: [0; MAX_SPIES],
                 next_cookie: 1,
                 error_info: 0,
+                restricted_info: 0,
                 message_filter: 0,
                 sta_context: Context {
                     vtable: CONTEXT_UNKNOWN.0.as_ptr().cast(),
@@ -655,6 +664,40 @@ pub extern "system" fn RoInitialize(kind: u32) -> HResult {
 #[unsafe(no_mangle)]
 pub extern "system" fn RoUninitialize() {
     CoUninitialize()
+}
+
+/// The MTA kept alive by CoIncrementMTAUsage (cookies still held).
+static MTA_USAGE: AtomicU32 = AtomicU32::new(0);
+/// CoIncrementMTAUsage's cookie (opaque to callers; never 0).
+const MTA_USAGE_COOKIE: usize = 0x4d54_4155;
+
+/// CoIncrementMTAUsage: keeps the MTA alive, as a thread in it does, so
+/// threads that never initialized COM are implicit MTA members
+/// (CoGetApartmentType) and activation works on them (C++/WinRT calls
+/// it when RoGetActivationFactory finds no apartment).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoIncrementMTAUsage(cookie: *mut usize) -> HResult {
+    if cookie.is_null() {
+        return E_INVALIDARG;
+    }
+    MTA_USAGE.fetch_add(1, Ordering::Relaxed);
+    MTA_THREADS.fetch_add(1, Ordering::Relaxed);
+    put(cookie, MTA_USAGE_COOKIE);
+    S_OK
+}
+
+/// CoDecrementMTAUsage: gives back a CoIncrementMTAUsage hold.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoDecrementMTAUsage(cookie: usize) -> HResult {
+    if cookie != MTA_USAGE_COOKIE
+        || MTA_USAGE
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_err()
+    {
+        return E_INVALIDARG;
+    }
+    MTA_THREADS.fetch_sub(1, Ordering::Relaxed);
+    S_OK
 }
 
 #[unsafe(no_mangle)]
@@ -1087,8 +1130,11 @@ pub extern "system" fn SetErrorInfo(reserved: u32, info: *mut c_void) -> HResult
         add_ref(info);
     }
     let old = core::mem::replace(&mut state.error_info, info as usize);
-    if old != 0 {
-        release(old as *mut c_void);
+    let restricted = core::mem::replace(&mut state.restricted_info, 0);
+    for p in [old, restricted] {
+        if p != 0 {
+            release(p as *mut c_void);
+        }
     }
     S_OK
 }
@@ -1101,6 +1147,10 @@ pub extern "system" fn GetErrorInfo(reserved: u32, out: *mut *mut c_void) -> HRe
     }
     let Some(state) = thread_state() else { return E_OUTOFMEMORY };
     let info = core::mem::replace(&mut state.error_info, 0);
+    let restricted = core::mem::replace(&mut state.restricted_info, 0);
+    if restricted != 0 {
+        release(restricted as *mut c_void);
+    }
     put(out, info as *mut c_void);
     if info == 0 { S_FALSE } else { S_OK }
 }

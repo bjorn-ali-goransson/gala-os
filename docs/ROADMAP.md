@@ -1510,41 +1510,43 @@ need gala's.
      `wow64_svc_test`; ARCHITECTURE "The service control manager"):
      it connects (granted 0x2000b: connect, create service and lock, with
      READ_CONTROL) and opens `OfficeSvc` twice, ERROR_SERVICE_DOES_NOT_EXIST
-     as on a machine without Office (`scm:` lines). Where the run ends
-     now: setup.exe asks WinRT for an activation factory
-     (RoGetActivationFactory, by C++/WinRT: `combase.dll` is a missing
-     dll, then its fallback loads `windows.management.deployment.dll`,
-     `windows.management.dll` and `windows.dll` by the class's name, all
-     missing: the class is presumably
-     Windows.Management.Deployment.PackageManager, looking for an
-     installed Store/MSIX Office), gets CLASS_E_CLASSNOTAVAILABLE and
-     throws `winrt::hresult_class_not_available` (HRESULT 0x80040111 in
-     the crash report's object) that nothing catches: both copies end
-     with status 3 (crash report: the C++ throw at kernel32.dll+0x24859;
-     ledger `setup.exe!RoGetActivationFactory` and
-     `setup.exe!RoOriginateLanguageException` missing exports, FormatMessage
-     of 0x80040111 unsupported). ODT has written no log yet
-     (`dump=C:/gala/odtlog` finds no directory).
+     as on a machine without Office (`scm:` lines). It then asks WinRT
+     for Windows.Management.Deployment.PackageManager through C++/WinRT,
+     which loads `combase.dll` by name (done: gala's combase.dll, x64 and
+     x86, Windows' export list as forwarders to ole32, which has the
+     HSTRINGs in Windows' layout, RoGetActivationFactory from the
+     `ActivatableClassId` registration, CoIncrementMTAUsage and error
+     origination; PackageManager in gala's AppXDeploymentClient.dll,
+     answering as a machine without MSIX packages; `combase_test`,
+     `wow64_combase_test`; ARCHITECTURE "COM: ole32 and oleaut32"), and
+     looks for a Store Office (`appxdeploymentclient.dll!FindPackagesByNamePublisher(Microsoft.O...`
+     in the ledger: none). Where the run ends now: the elevated copy
+     (pid 12) starts its download over winhttp; the TLS credentials fail
+     (32-bit secur32 loads `schannel.dll`, which has no i686 build:
+     `schannel.dll` missing dll, `winhttp.dll!AcquireCredentialsHandleW`
+     0x80090305 SEC_E_SECPKG_NOT_FOUND), and its error path delay-loads
+     urlmon's CoInternetCreateSecurityManager, which has no i686 build
+     either: both copies end with 0xc06d007e (crash report: "delay load
+     of urlmon.dll!CoInternetCreateSecurityManager" at
+     kernel32.dll+0x24859). ODT has written no log yet (`dump=C:/gala/odtlog`
+     finds no directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: combase.dll for both
-     widths (HSTRINGs, RoGetActivationFactory/RoActivateInstance from an
-     activatable-class registration, RoOriginateLanguageException; test
-     first, expectations from Windows and Wine's combase tests) and
-     Windows.Management.Deployment.PackageManager's queries answering "no
-     packages" (as a clean machine without Store Office), then what the
-     run reaches after it (its log in `target/failed/office_install.dump/`
-     once it writes one); starting a service (Click-to-Run's
-     ClickToRunSvc, once the installer creates it: the SCM answers
-     ERROR_NOT_SUPPORTED, recorded); gdiplus (setup.exe's error and progress UI),
-     HKCU from the caller's token, the TLS handshake from 32-bit
-     (schannel.dll has no i686 build: secur32's x86 loads it on first
-     use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
+     Next, in the order the run reaches them: schannel.dll for i686 (the
+     TLS handshake from 32-bit; the download of the configuration's
+     product data), urlmon.dll for i686 with CoInternetCreateSecurityManager
+     (an IInternetSecurityManager: URL zones, as Windows' default
+     settings answer them), then what the run reaches after them (its log
+     in `target/failed/office_install.dump/` once it writes one); starting
+     a service (Click-to-Run's ClickToRunSvc, once the installer creates
+     it: the SCM answers ERROR_NOT_SUPPORTED, recorded); gdiplus
+     (setup.exe's error and progress UI), HKCU from the caller's token,
+     winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
      the XML it downloads (the CDN's cab manifests: more of the DOM as
      the run reaches it; load of URLs is recorded unsupported), then
      CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
-     (the signature check), wininet, urlmon, xmllite, webservices,
+     (the signature check), wininet, xmllite, webservices,
      iphlpapi, setupapi, cabinet, credui; a few shlwapi, user32, ole32
      and shell32 functions; FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit

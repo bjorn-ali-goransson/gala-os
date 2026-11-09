@@ -73,7 +73,8 @@ const KEY_QUERY_VALUE: u32 = 0x1;
 const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 const REG_SZ: u32 = 1;
 const REG_EXPAND_SZ: u32 = 2;
-const MAX_PATH: usize = 260;
+const REG_DWORD: u32 = 4;
+pub(crate) const MAX_PATH: usize = 260;
 
 /// The default value of `HKCR\CLSID\{clsid}\<subkey>` (REG_SZ or
 /// REG_EXPAND_SZ, unexpanded, NUL-terminated), if any.
@@ -90,8 +91,13 @@ fn class_value(clsid: &Guid, subkey: &str) -> Option<[u16; MAX_PATH]> {
         *name.get_mut(n)? = c;
         n += 1;
     }
-    let us =
-        UnicodeString { length: (n * 2) as u16, maximum: (n * 2) as u16, buffer: name.as_ptr() };
+    string_value(&name[..n], "")
+}
+
+/// Opens the key of NT name `key` for querying values.
+fn open_key(key: &[u16]) -> Option<usize> {
+    let bytes = u16::try_from(key.len() * 2).ok()?;
+    let us = UnicodeString { length: bytes, maximum: bytes, buffer: key.as_ptr() };
     let attributes = ObjectAttributes {
         length: size_of::<ObjectAttributes>() as u32,
         root: 0,
@@ -100,30 +106,64 @@ fn class_value(clsid: &Guid, subkey: &str) -> Option<[u16; MAX_PATH]> {
         security: 0,
         qos: 0,
     };
-    let mut key = 0;
+    let mut handle = 0;
     // SAFETY: valid attributes and output.
-    if unsafe { NtOpenKey(&mut key, KEY_QUERY_VALUE, &attributes) } != 0 {
-        return None;
+    (unsafe { NtOpenKey(&mut handle, KEY_QUERY_VALUE, &attributes) } == 0).then_some(handle)
+}
+
+/// Whether the key of NT name `key` exists.
+pub(crate) fn key_exists(key: &[u16]) -> bool {
+    open_key(key)
+        .map(|h| {
+            // SAFETY: our handle.
+            unsafe { NtClose(h) };
+        })
+        .is_some()
+}
+
+/// Value `value` ("" for the unnamed one) of key `key`: its type and up to
+/// MAX_PATH units of data (KEY_VALUE_PARTIAL_INFORMATION's TitleIndex,
+/// Type, DataLength, Data).
+fn query_value(key: &[u16], value: &str) -> Option<(u32, [u32; 3 + MAX_PATH / 2])> {
+    let handle = open_key(key)?;
+    let mut name = [0u16; 32];
+    let mut n = 0;
+    for c in value.encode_utf16() {
+        *name.get_mut(n)? = c;
+        n += 1;
     }
-    // KEY_VALUE_PARTIAL_INFORMATION: TitleIndex, Type, DataLength, Data.
+    let us =
+        UnicodeString { length: (n * 2) as u16, maximum: (n * 2) as u16, buffer: name.as_ptr() };
     let mut buf = [0u32; 3 + MAX_PATH / 2];
     let mut got = 0;
-    let empty = UnicodeString { length: 0, maximum: 0, buffer: core::ptr::null() };
     // SAFETY: our key and buffer.
     let status = unsafe {
         let s = NtQueryValueKey(
-            key,
-            &empty,
+            handle,
+            &us,
             2,
             buf.as_mut_ptr().cast(),
             size_of_val(&buf) as u32,
             &mut got,
         );
-        NtClose(key);
+        NtClose(handle);
         s
     };
-    let (kind, len) = (buf[1], buf[2] as usize / 2);
-    if status != 0 || (kind != REG_SZ && kind != REG_EXPAND_SZ) || len == 0 {
+    (status == 0).then_some((buf[1], buf))
+}
+
+/// A REG_DWORD value of key `key`.
+pub(crate) fn dword_value(key: &[u16], value: &str) -> Option<u32> {
+    let (kind, buf) = query_value(key, value)?;
+    (kind == REG_DWORD && buf[2] == 4).then_some(buf[3])
+}
+
+/// A REG_SZ or REG_EXPAND_SZ value of key `key` (unexpanded,
+/// NUL-terminated), if any and not empty.
+pub(crate) fn string_value(key: &[u16], value: &str) -> Option<[u16; MAX_PATH]> {
+    let (kind, buf) = query_value(key, value)?;
+    let len = buf[2] as usize / 2;
+    if (kind != REG_SZ && kind != REG_EXPAND_SZ) || len == 0 {
         return None;
     }
     let mut raw = [0u16; MAX_PATH];
@@ -139,14 +179,18 @@ fn class_value(clsid: &Guid, subkey: &str) -> Option<[u16; MAX_PATH]> {
     Some(raw)
 }
 
-/// The registered in-process server of `clsid` (a NUL-terminated path
-/// with environment variables expanded), if any.
-fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
-    let raw = class_value(clsid, "InprocServer32")?;
+/// `raw` (NUL-terminated) with its environment variables expanded.
+pub(crate) fn expand(raw: &[u16; MAX_PATH]) -> Option<[u16; MAX_PATH]> {
     let mut path = [0u16; MAX_PATH];
     // SAFETY: a NUL-terminated source and a buffer of MAX_PATH characters.
     let n = unsafe { ExpandEnvironmentStringsW(raw.as_ptr(), path.as_mut_ptr(), MAX_PATH as u32) };
     (n != 0 && n as usize <= MAX_PATH).then_some(path)
+}
+
+/// The registered in-process server of `clsid` (a NUL-terminated path
+/// with environment variables expanded), if any.
+fn inproc_server(clsid: &Guid) -> Option<[u16; MAX_PATH]> {
+    expand(&class_value(clsid, "InprocServer32")?)
 }
 
 /// ProgIDFromCLSID(clsid, *lplpszProgID): the class's ProgID (the

@@ -2557,7 +2557,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
-| COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6 |
+| COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
 | other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
@@ -2622,7 +2622,8 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   and xstate-l1 to ntdll; processthreads, kernel32-legacy, util,
   toolhelp, the `-ansi` sets and the other kernel32 ones to kernel32;
   registry-l2, shutdown and sysinfo-l2 to advapi32; com, marshal and
-  winrt to ole32, standing in for combase, coml2 and wintypes;
+  winrt to ole32, standing in for combase, coml2 and wintypes (combase.dll
+  itself is forwarders to ole32: "COM: ole32 and oleaut32");
   crt to msvcrt); `crt-` sets to ucrtbase, security/eventing/service
   sets to advapi32, `downlevel-<dll>-*` to that DLL, `shcore-*` to
   shcore, `power-*` to powrprof; unknown contracts are looked up as files
@@ -3552,14 +3553,72 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   and RoGetAgileReference are built on it. CoRegisterMessageFilter keeps
   an STA's filter (CO_E_NOT_SUPPORTED elsewhere); with no calls between
   apartments it is never called.
-- **Windows Runtime** (`winrt.rs`; `api-ms-win-core-winrt-*`): an
-  HSTRING is gala's 24-byte header (flags, length, text pointer,
-  references), which also fits a caller's HSTRING_HEADER for
-  WindowsCreateStringReference's strings over the caller's text; the
-  documented create, delete, duplicate, raw buffer, length and ordinal
-  comparison rules. No Windows Runtime class is registered:
-  RoGetActivationFactory and RoActivateInstance are REGDB_E_CLASSNOTREG,
-  the class name in the ledger.
+- **Windows Runtime** (`winrt.rs`, `roerror.rs`; `api-ms-win-core-winrt-*`
+  and combase.dll's forwarders). HSTRINGs: the header is laid out as
+  Windows lays it out (flags, length, two unused words, the text
+  pointer: 24 bytes on x64, 20 on x86, HSTRING_HEADER's size, as Wine's
+  string tests read it on Windows); a copy's header is followed by its
+  reference count and its NUL-terminated text in one block; a reference
+  ("fast-pass") string's header is the caller's HSTRING_HEADER, flags
+  1, over the caller's text, which must be NUL-terminated at its length
+  (E_STRING_NOT_NULL_TERMINATED otherwise, even at length 0); empty
+  strings are NULL; the create, delete, duplicate (the same copy, a new
+  one of a reference), raw buffer, length, embedded NUL, ordinal
+  comparison, substring (E_BOUNDS), concatenation, trimming and string
+  buffer (preallocate, promote: E_INVALIDARG when the terminator was
+  overwritten) rules of Wine's tests. Activation: RoGetActivationFactory
+  reads the class's registration as Windows does,
+  `HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\<class>`
+  (each registry view has its own, as for CLSIDs): DllPath (REG_SZ or
+  REG_EXPAND_SZ) is loaded and its DllGetActivationFactory gives the
+  factory, asked for the caller's IID; ActivationType other than 0
+  (in-process) is E_NOTIMPL, recorded; Threading is not looked at
+  (no cross-apartment calls). Invariant: the caller's thread is in an
+  apartment or the process has an MTA (an MTA thread, or
+  CoIncrementMTAUsage's hold, which makes threads outside apartments
+  implicit MTA members), else CO_E_NOTINITIALIZED, as Windows; C++/WinRT
+  answers that with CoIncrementMTAUsage. An unregistered class is
+  REGDB_E_CLASSNOTREG; every failure is in the ledger with the class
+  and the HRESULT. RoActivateInstance is the factory's ActivateInstance.
+  Errors (`roerror.rs`): RoOriginateError(W) and
+  RoOriginateLanguageException make an error object (IRestrictedErrorInfo,
+  IErrorInfo, ILanguageExceptionErrorInfo: the HRESULT, the message of at
+  most 512 characters, the language exception held) and make it the
+  thread's error, TRUE; a success HRESULT is FALSE and originates
+  nothing. Invariant: a thread has one error slot, as on Windows:
+  SetRestrictedErrorInfo and SetErrorInfo replace each other's object,
+  GetRestrictedErrorInfo and GetErrorInfo take it (S_FALSE and NULL when
+  empty). GetErrorDetails's description is FormatMessage's system text
+  (NULL when gala's FormatMessage has none); no capability SID or
+  reference. RoGetErrorReportingFlags starts at
+  RO_ERROR_REPORTING_USESETERRORINFO; SUPPRESSSETERRORINFO stops
+  origination. RoCaptureErrorContext captures nothing (no back traces
+  are kept). Tests: `combase_test`, `wow64_combase_test`.
+- **combase.dll** (`user/combase`): on Windows ole32 forwards much to
+  combase; on gala the COM and Windows Runtime base is ole32's (its
+  apartments, class registry and error slot are one state), and
+  combase.dll is Windows' export list (`exports.txt`, from Wine's
+  combase.spec) as forwarders to ole32, as kernelbase's are to kernel32:
+  a name ole32 lacks resolves to nothing (GetProcAddress NULL, an import
+  of it a missing export in the ledger) until ole32 has it. Programs
+  load it by name: C++/WinRT's runtime looks RoGetActivationFactory,
+  RoOriginateLanguageException and the rest up in combase.dll. Built
+  for x64 and x86.
+- **Windows Runtime classes**: Windows.Management.Deployment.PackageManager
+  (`user/appxdeploymentclient`, AppXDeploymentClient.dll, the DLL Windows
+  registers it from; registered in both registry views by the seed),
+  answering as a machine with no MSIX packages: IPackageManager and
+  IPackageManager2 (method order from Wine's
+  windows.management.deployment.idl); every Find query an empty
+  IIterable<Package> (IIterable<PackageUserInformation> for FindUsers)
+  whose iterator has no current item (HasCurrent false, Current
+  E_BOUNDS), FindPackage NULL; the all-users queries answer so for any
+  caller (Windows wants an administrator: not checked); deployment and
+  SetPackageState E_NOTIMPL, recorded. The parameterized IIDs are the
+  type system's name-based UUIDs of the pinterface signatures. The
+  factory, collections and iterators are stateless static objects
+  (nominal reference counts); every object is agile. Each query is in
+  the ledger ("other": `appxdeploymentclient.dll!<method>(<name>)`).
 - **PropVariantCopy** copies what the PROPVARIANT owns (strings, BSTRs,
   blobs, clipboard data, vectors element by element, SAFEARRAYs through
   SafeArrayCopy; interfaces AddRef'd); out of memory, what was copied is
@@ -7607,8 +7666,8 @@ snapshot's own PDBs (WORKFLOW "Chromium (BR)").
   fonts (gala's font objects are static); glyph run analysis without
   rotation, skew or sideways runs; no text layout, IDWriteFactory1+.
 - Mitigation policies are kept, not enforced; no sandbox (stage 3).
-- No Windows Runtime classes, no shell namespace objects, no COM
-  proxies (see their sections).
+- One Windows Runtime class (PackageManager, with no packages); no
+  shell namespace objects, no COM proxies (see their sections).
 
 ## Plan: WOW64 (32-bit x86 programs)
 
@@ -7924,7 +7983,9 @@ the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
 ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 (`wow64_cert_test`, cert_test's source built for x86), msi
 (`wow64_msi_test`), normaliz, powrprof and wldp (`wow64_office_api_test`;
-powrprof reads CPUID through `core::arch::x86` there). wldp.dll answers
+powrprof reads CPUID through `core::arch::x86` there), combase and
+appxdeploymentclient (`wow64_combase_test`; PackageManager is registered
+in the 32-bit registry view too). wldp.dll answers
 as an unlocked Windows without App Control: WldpQueryWindowsLockdownMode
 UNLOCKED (no S mode), WldpGetLockdownPolicy WLDP_LOCKDOWN_DEFINED_FLAG
 alone for every host, WldpIsDynamicCodePolicyEnabled FALSE. crypt32's own

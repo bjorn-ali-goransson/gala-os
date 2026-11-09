@@ -103,6 +103,15 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
+; Windows Runtime classes (ole32's RoGetActivationFactory reads them):
+; DllPath, ActivationType 0 (in-process), Threading 0 (both), TrustLevel
+; 0 (base). PackageManager answers with no packages installed (the
+; Office Deployment Tool's setup.exe asks it; user/appxdeploymentclient).
+[\Registry\Machine\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager]
+"DllPath"=expand:%SystemRoot%\System32\AppXDeploymentClient.dll
+"ActivationType"=dword:0
+"Threading"=dword:0
+"TrustLevel"=dword:0
 ; The 32-bit view (WOW64, nt::regview): what 32-bit programs read under
 ; HKLM\SOFTWARE. Windows keeps the version there too, and gives them the
 ; (x86) directories as ProgramFilesDir and CommonFilesDir.
@@ -155,6 +164,15 @@
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
 @=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
+; Windows Runtime classes (ole32's RoGetActivationFactory reads them):
+; DllPath, ActivationType 0 (in-process), Threading 0 (both), TrustLevel
+; 0 (base). PackageManager answers with no packages installed (the
+; Office Deployment Tool's setup.exe asks it; user/appxdeploymentclient).
+[\Registry\Machine\SOFTWARE\WOW6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager]
+"DllPath"=expand:%SystemRoot%\System32\AppXDeploymentClient.dll
+"ActivationType"=dword:0
+"Threading"=dword:0
+"TrustLevel"=dword:0
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\Interface]
 
 ; A workstation (WinNT; servers say ServerNT or LanmanNT).

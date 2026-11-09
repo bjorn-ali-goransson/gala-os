@@ -1047,6 +1047,15 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi.dll" },
     // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
+    // combase.dll: forwarders to ole32's COM and Windows Runtime base;
+    // appxdeploymentclient.dll: Windows.Management.Deployment.PackageManager
+    // with no packages (combase_test).
+    Dll { package: "combase", file: "combase.dll", exported_as: "testcombase.dll" },
+    Dll {
+        package: "appxdeploymentclient",
+        file: "appxdeploymentclient.dll",
+        exported_as: "testappxdeploymentclient.dll",
+    },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -1133,6 +1142,14 @@ const USER_DLLS_X86: &[Dll] = &[
     // msxml6 (ODT's setup.exe asks COM for DOMDocument60;
     // wow64_msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml632.dll" },
+    // combase and PackageManager (ODT's setup.exe activates PackageManager
+    // through C++/WinRT; wow64_combase_test).
+    Dll { package: "combase", file: "combase.dll", exported_as: "testcombase32.dll" },
+    Dll {
+        package: "appxdeploymentclient",
+        file: "appxdeploymentclient.dll",
+        exported_as: "testappxdeploymentclient32.dll",
+    },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -3050,6 +3067,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/normaliz.dll", "Windows/SysWOW64"),
     ("office_install", "x86/powrprof.dll", "Windows/SysWOW64"),
     ("office_install", "x86/wldp.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/combase.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/appxdeploymentclient.dll", "Windows/SysWOW64"),
     ("office_install", "ntdll.dll", "Windows/System32"),
     ("office_install", "kernel32.dll", "Windows/System32"),
     ("office_install", "ucrtbase.dll", "Windows/System32"),
@@ -3151,6 +3170,23 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_msxml_test", "x86/ole32.dll", "Windows/SysWOW64"),
     ("wow64_msxml_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
     ("wow64_msxml_test", "x86/msxml6.dll", "Windows/SysWOW64"),
+    // combase.dll and Windows Runtime activation (user/combase_test), x64
+    // and x86.
+    ("combase_test", "ntdll.dll", "Windows/System32"),
+    ("combase_test", "kernel32.dll", "Windows/System32"),
+    ("combase_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("combase_test", "ole32.dll", "Windows/System32"),
+    ("combase_test", "oleaut32.dll", "Windows/System32"),
+    ("combase_test", "combase.dll", "Windows/System32"),
+    ("combase_test", "appxdeploymentclient.dll", "Windows/System32"),
+    ("wow64_combase_test", "wow64.dll", "Windows/System32"),
+    ("wow64_combase_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/combase.dll", "Windows/SysWOW64"),
+    ("wow64_combase_test", "x86/appxdeploymentclient.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -3296,6 +3332,7 @@ const USER_PROGRAMS: &[&str] = &[
     "msxml_test",
     "winhttp_cb_test",
     "runas_test",
+    "combase_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -3316,6 +3353,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_msxml_test",
     "wow64_winhttp_cb_test",
     "wow64_runas_test",
+    "wow64_combase_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -6365,6 +6403,22 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wow64_msi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wow64_msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // combase.dll: HSTRINGs, RoInitialize, activation from the
+        // registry, PackageManager with no packages, error origination
+        // (user/combase_test).
+        name: "combase_test",
+        cmdline: "qemu_exit run=combase_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["combase_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/combase_test built for x86).
+        name: "wow64_combase_test",
+        cmdline: "qemu_exit run=wow64_combase_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_combase_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The service control manager's client functions as an
@@ -10100,6 +10154,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
