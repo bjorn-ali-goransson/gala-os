@@ -42,6 +42,16 @@ jobs:
           key: gala-qemu-11.1.3
       - name: Build the pinned QEMU
         run: cargo xtask qemu
+      # The pinned downloads the host tests and gala-um use (the JDK...),
+      # kept between runs as in the boot jobs (each checksum-checked at use).
+      - name: Cache the pinned prebuilt programs
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+          key: gala-prebuilt-linux-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-prebuilt-linux-
       - name: Install Go (for user/go_hello; pinned in xtask GO_TOOLCHAIN)
         uses: actions/setup-go@v5
         with:
