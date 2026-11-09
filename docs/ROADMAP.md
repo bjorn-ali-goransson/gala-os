@@ -2410,8 +2410,7 @@ the next breakthroughs).
      (SetClipboardViewer, WM_DRAWCLIPBOARD), WM_DESTROYCLIPBOARD posted
      rather than sent, CF_LOCALE's code pages (user32 converts text
      through the system's ANSI and OEM code pages); `clipboard_test`
-     joins `user/windows/ci-passing.txt` once its Windows result is
-     read;
+     passes on CI's Windows (`user/windows/ci-passing.txt`);
    - the Wayland selection across clients: data offers to the focused
      client, `receive` passing its descriptor to the source's `send`;
      a two-client test against weston;
