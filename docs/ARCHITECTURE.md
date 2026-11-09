@@ -3624,6 +3624,19 @@ through their public functions.
   typed for both widths in `layout.rs`, checked against mingw-w64's
   wintrust.h plus Windows 8's pSignatureSettings, pSigState and
   pSigSettings (which mingw lacks).
+- **Signer signatures**: a signer whose signature does not verify is
+  TRUST_E_NOSIGNATURE (crypt32's error in its dwError), as Windows
+  answers (issue #57). A dual-signed image (ODT's setup.exe: the primary
+  signer's unauthenticated attribute szOID_NESTED_SIGNATURE,
+  1.3.6.1.4.1.311.2.4.1, holds a second SignedData) falls back to the
+  nested signature when the primary's does not verify, as Windows does:
+  the state's message is reset (`reset_message`) and the nested one goes
+  through the object step's message part (`message`: its own digest
+  against the same subject), the signature, certificate and policy
+  steps; if it fails too the primary's error stands. Either signature
+  corrupted alone verifies; both is TRUST_E_NOSIGNATURE; the provider
+  data shows one signer. Recorded: `nested signature tried`, and
+  `nested signature` with its error when it fails.
 - **Roots**: Microsoft's code signing roots are not in Mozilla's bundle,
   so a full image also ships `user/roots/microsoft-roots.pem`
   (Microsoft Root Certificate Authority 2010 and 2011, Microsoft Identity
@@ -3643,8 +3656,8 @@ through their public functions.
   dwStateAction is a verification, as Wine takes it: ODT's setup.exe
   closes with an all-zero one, answered TRUST_E_SUBJECT_FORM_UNKNOWN,
   Windows' answer being `cab_probe`'s last line), catalogs (no SIP),
-  more than one signer or WIN_CERTIFICATE, secondary (nested) signatures and
-  WINTRUST_SIGNATURE_SETTINGS (the primary signature only), PKCS #9
+  more than one signer or WIN_CERTIFICATE, WINTRUST_SIGNATURE_SETTINGS
+  (the nested signature serves only as the fallback above), PKCS #9
   countersignatures (legacy timestamps: the chain is checked at the
   current time), the Disallowed store (empty in gala), the registry's
   Software Publishing state (its default is used), revocation fetching
@@ -3960,6 +3973,9 @@ x64 and x86.
   backslashes as slashes, opaque ones escape `/`, `?` and `#`; `#` is a
   fragment in a file URL only after a .htm/.html name), AssocQueryStringW
   (the user's classes, then HKCR; shell\<verb>\command;
+  REG_EXPAND_SZ values expanded; ASSOCSTR_COMMAND of an extension no
+  class claims is the `Unknown` class's, OpenWith's command, which the
+  registry seed holds, as Windows 11 25H2 answers;
   ASSOCSTR_EXECUTABLE is CO_E_APPNOTFOUND when the program is not
   there; a short buffer gets the string truncated, the size and
   HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), as on Windows) and
@@ -5166,9 +5182,9 @@ heap), ConvertInterfaceLuidToNameW/NameToLuidW (`loopback_0`,
 `ethernet_32768`), ConvertInterfaceLuidToIndex/IndexToLuid;
 ConvertLengthToIpv4Mask is computed; GetAdaptersInfo (`adapters.rs`,
 IP_ADAPTER_INFO in the caller's width, held to the SDK's offsets for
-both; on x86 with MSVC's 64-bit time_t, 648 bytes, where mingw's i686
-headers say 640: only the lease times differ, which callers reach
-through Next anyway): every adapter but loopback, named by its GUID in
+both, with the lease times 32-bit on x86 as mingw's i686 headers have
+them: 640 bytes there, 704 on x64, what Windows' own GetAdaptersInfo
+needs per adapter, issue #57): every adapter but loopback, named by its GUID in
 braces, its MAC, address and mask, the gateway (mask 255.255.255.255),
 DHCP off, no WINS (Wine's testGetAdaptersInfo, run on Windows: no size
 pointer ERROR_INVALID_PARAMETER, no adapter ERROR_NO_DATA, too small

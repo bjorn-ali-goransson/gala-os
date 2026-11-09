@@ -49,7 +49,10 @@
  * 12. InternetGetCookieExW for a URL nothing has set a cookie for: FALSE,
  *    ERROR_NO_MORE_ITEMS; for about:blank ERROR_INVALID_PARAMETER (Wine's
  *    internet.c test_cookie_url and test_cookie_attrs).
- * The test retries its first request while Nginx starts.
+ * The test retries its first request while Nginx starts. Steps 3 and 5,
+ * which need the test CA trusted, run last (after 11, before 12) and print
+ * the status and error they got, so a machine that cannot trust the CA
+ * still runs the rest.
  */
 #include <windows.h>
 #include <wininet.h>
@@ -212,15 +215,9 @@ int main(void) {
         Sleep(200);
     }
     CHECK(error == 0 && status == 200 && strstr(body, "Welcome to nginx!") != NULL);
-    /* 3. */
-    status = get(s, L"localhost", 8443, L"/", INTERNET_FLAG_SECURE, body, sizeof body, &error);
-    CHECK(error == 0 && status == 200 && strstr(body, "Welcome to nginx!") != NULL);
     /* 4. */
     status = get(s, L"127.0.0.1", 8080, L"/nope", 0, body, sizeof body, &error);
     CHECK(error == 0 && status == 404);
-    /* 5. */
-    status = get(s, L"localhost", 8444, L"/", INTERNET_FLAG_SECURE, body, sizeof body, &error);
-    CHECK(error == ERROR_INTERNET_INVALID_CA);
     /* 6. */
     status = get(s, L"127.0.0.1", 8090, L"/", 0, body, sizeof body, &error);
     CHECK(error == ERROR_INTERNET_CANNOT_CONNECT);
@@ -360,6 +357,14 @@ int main(void) {
     CHECK(InternetCloseHandle(r));
     CHECK(InternetCloseHandle(c));
     CHECK(InternetSetStatusCallbackW(s, NULL) == status_callback);
+    /* 3 and 5, the steps that need the test CA trusted, last: a machine
+       that cannot trust it still runs the others. Each prints what it got. */
+    status = get(s, L"localhost", 8443, L"/", INTERNET_FLAG_SECURE, body, sizeof body, &error);
+    printf(NAME ": step 3: status %lu, error %lu\n", status, error);
+    CHECK(error == 0 && status == 200 && strstr(body, "Welcome to nginx!") != NULL);
+    status = get(s, L"localhost", 8444, L"/", INTERNET_FLAG_SECURE, body, sizeof body, &error);
+    printf(NAME ": step 5: status %lu, error %lu\n", status, error);
+    CHECK(error == ERROR_INTERNET_INVALID_CA);
     CHECK(InternetCloseHandle(s));
 
     /* 12. */

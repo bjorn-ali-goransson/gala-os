@@ -43,6 +43,7 @@ unsafe extern "system" {
     fn FlushFileBuffers(h: usize) -> i32;
     fn CloseHandle(h: usize) -> i32;
     fn GetFileAttributesW(path: *const u16) -> u32;
+    fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32;
     fn GetLastError() -> u32;
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -151,8 +152,22 @@ fn class_value(r: &Registry, path: &[u16], name: Option<&[u16]>, out: &mut Buf) 
         );
         (r.close)(key);
         if got == 0 && (kind == REG_SZ || kind == REG_EXPAND_SZ) {
-            let n = (size as usize / 2).min(1024);
+            let n = (size as usize / 2).min(1023);
             let n = data[..n].iter().position(|&c| c == 0).unwrap_or(n);
+            if kind == REG_EXPAND_SZ {
+                // Its environment variables expanded, as Windows answers
+                // (Unknown's `%SystemRoot%\system32\OpenWith.exe "%1"`).
+                data[n] = 0;
+                let mut expanded = [0u16; 1024];
+                // SAFETY: a NUL-terminated string of ours; our buffer.
+                let m = unsafe {
+                    ExpandEnvironmentStringsW(data.as_ptr(), expanded.as_mut_ptr(), 1024)
+                } as usize;
+                if m > 0 && m <= 1024 {
+                    out.extend(&expanded[..m - 1]);
+                    return true;
+                }
+            }
             out.extend(&data[..n]);
             return true;
         }
@@ -175,7 +190,9 @@ const ASSOCSTR_DEFAULTICON: u32 = 15;
 /// S_FALSE and the size with no buffer; the string truncated, the size
 /// and HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) when it is short;
 /// HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION) when nothing is
-/// registered. Other kinds are recorded.
+/// registered (ASSOCSTR_COMMAND of an extension without a class is the
+/// Unknown class's, OpenWith). REG_EXPAND_SZ values are expanded. Other
+/// kinds are recorded.
 #[unsafe(no_mangle)]
 pub extern "system" fn AssocQueryStringW(
     _flags: u32,
@@ -205,7 +222,14 @@ pub extern "system" fn AssocQueryStringW(
             };
         }
         if !class_value(&r, a, None, &mut progid) || progid.text().is_empty() {
-            return NO_ASSOCIATION;
+            // An extension no class claims: its command is the Unknown
+            // class's (Windows 11 25H2 answers `.galanone`'s command with
+            // OpenWith's, issue #57); the other strings are not measured.
+            if what != ASSOCSTR_COMMAND {
+                return NO_ASSOCIATION;
+            }
+            progid = Buf::new();
+            progid.extend(&wide(b"Unknown")[..7]);
         }
     } else {
         progid.extend(a);

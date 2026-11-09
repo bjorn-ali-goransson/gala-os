@@ -80,7 +80,9 @@
 //!   loopback, is named by its GUID in braces, has its MAC's length (at
 //!   most 8), an address and mask, and a gateway address and mask (as
 //!   text, "0.0.0.0" when there is none). One byte less is
-//!   ERROR_BUFFER_OVERFLOW again. The scenarios give gala a network card.
+//!   ERROR_BUFFER_OVERFLOW again. The size needed is 704 bytes per
+//!   adapter in a 64-bit process, 640 in a 32-bit one (adapters with one
+//!   address each). The scenarios give gala a network card.
 //! - AttachConsole and AllocConsole in a process that has a console
 //!   (GetConsoleCP not 0; run-all.ps1's programs and gala's have one):
 //!   ERROR_ACCESS_DENIED; GetDiskFreeSpaceA of the system drive.
@@ -1118,7 +1120,9 @@ fn adapters(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetAdaptersInfo(buf, &mut len).into(), 0)?;
         let text = |s: &[u8]| s[0] != 0 && s.contains(&0);
         let mut a = buf;
+        let mut count = 0;
         while !a.is_null() {
+            count += 1;
             c.ok(
                 a as usize >= buf as usize && (a as usize) < buf as usize + len as usize,
                 a as u64,
@@ -1132,6 +1136,11 @@ fn adapters(c: &mut Checks) -> Result<(), u32> {
             c.ok(text(&i.gateway_list.address) && text(&i.gateway_list.mask), 0)?;
             a = i.next;
         }
+        // The size needed is the adapters' structures: 704 bytes each in
+        // a 64-bit process, 640 in a 32-bit one (Windows 11 25H2, eight
+        // adapters with one address each, issue #57).
+        let unit = if cfg!(target_arch = "x86") { 640 } else { 704 };
+        c.eq(len.into(), count * unit)?;
     }
     Ok(())
 }

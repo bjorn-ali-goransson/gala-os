@@ -17,6 +17,13 @@
 //!   1.3.6.1.4.1.311.3.3.1: CryptVerifyTimeStampSignature over the
 //!   signer's encrypted digest; TRUST_E_TIME_STAMP if it fails), whose time
 //!   becomes the signer's sftVerifyAsOf and whose signer the counter signer;
+//!   a signer whose signature does not verify is TRUST_E_NOSIGNATURE
+//!   (crypt32's error in its dwError), unless the signer carries a nested
+//!   signature (unauthenticated attribute 1.3.6.1.4.1.311.2.4.1,
+//!   Authenticode's dual signing): then, as Windows does, that signature
+//!   replaces the primary (its message, its digest against the same
+//!   subject, its signer) and the steps go on with it, the primary's
+//!   error standing if it fails too;
 //! - certificate (CERTPROV): the signer's chain at sftVerifyAsOf with the
 //!   code signing usage, the counter signer's at the same time with the
 //!   time stamping usage (CertGetCertificateChain, the default engine,
@@ -45,7 +52,8 @@
 //! subjects than a file (catalog members, blobs, signers, certificates)
 //! and other files than PE images (cabinets, catalogs: no SIPs), more
 //! than one signer or WIN_CERTIFICATE, the secondary signatures
-//! (WINTRUST_SIGNATURE_SETTINGS; a nested signature is left alone),
+//! (WINTRUST_SIGNATURE_SETTINGS: the nested signature serves only as
+//! the fallback below),
 //! legacy PKCS #9 countersignatures (the chain is checked at the current
 //! time instead), the Disallowed store (gala's is empty), the registry's
 //! Software Publishing state (its default is used), any UI.
@@ -461,8 +469,13 @@ fn free_certs(certs: &mut [ProvCert]) {
     }
 }
 
-fn free_state(s: &mut State) {
-    // SAFETY: everything below is ours (module comment).
+/// Releases what the message, signature, certificate and policy steps
+/// took (the message, its store, the signer and counter signer, their
+/// chains and certificates, the timestamp) and clears them, so the state
+/// can verify another signature (the nested one) or be freed.
+fn reset_message(s: &mut State) {
+    // SAFETY: everything below is ours (module comment); each pointer is
+    // cleared after it is released.
     unsafe {
         free_certs(&mut s.certs);
         free_certs(&mut s.counter_certs);
@@ -489,12 +502,59 @@ fn free_state(s: &mut State) {
         if !s.data.msg.is_null() {
             CryptMsgClose(s.data.msg);
         }
+        // All-zero is a valid value of each (integers and raw pointers).
+        core::ptr::write_bytes(&raw mut s.signer, 0, 1);
+        core::ptr::write_bytes(&raw mut s.counter, 0, 1);
+        core::ptr::write_bytes(s.certs.as_mut_ptr(), 0, MAX_CERTS);
+        core::ptr::write_bytes(s.counter_certs.as_mut_ptr(), 0, MAX_CERTS);
+    }
+    s.counter_chain = core::ptr::null();
+    s.counter_info = core::ptr::null_mut();
+    s.sip.indirect_data = core::ptr::null_mut();
+    s.timestamp = core::ptr::null_mut();
+    s.timestamp_store = core::ptr::null_mut();
+    s.store = core::ptr::null_mut();
+    s.data.msg = core::ptr::null_mut();
+    s.data.store_count = 0;
+    s.data.stores = core::ptr::null_mut();
+    s.data.signer_count = 0;
+    s.data.signers = core::ptr::null_mut();
+}
+
+fn free_state(s: &mut State) {
+    reset_message(s);
+    // SAFETY: our file handle and block (module comment).
+    unsafe {
         if s.file != 0 {
             CloseHandle(s.file);
         }
         s.magic = 0;
         heap_free((s as *mut State).cast());
     }
+}
+
+/// The primary signer's nested signature (an unauthenticated attribute
+/// szOID_NESTED_SIGNATURE, 1.3.6.1.4.1.311.2.4.1, whose value is a
+/// ContentInfo holding a SignedData: Authenticode's dual signing), copied
+/// out of the signer info the reset frees.
+fn nested_signature(s: &State) -> Option<pe::Heap> {
+    if s.signer.info.is_null() {
+        return None;
+    }
+    // SAFETY: the CMSG_SIGNER_INFO crypt32 built.
+    let info = unsafe { &*s.signer.info };
+    for i in 0..info.unauth.count as usize {
+        // SAFETY: its attribute array.
+        let a = unsafe { &*info.unauth.attrs.add(i) };
+        if c_text(a.oid) == b"1.3.6.1.4.1.311.2.4.1" && a.count > 0 {
+            // SAFETY: its value array.
+            let value = unsafe { &*a.values }.bytes();
+            let mut copy = pe::Heap::new(value.len())?;
+            copy.bytes().copy_from_slice(value);
+            return Some(copy);
+        }
+    }
+    None
 }
 
 /// One verification: a new state, its steps, kept (VERIFY: hWVTStateData)
@@ -532,16 +592,35 @@ fn run(window: usize, action: *const Guid, data: &mut WintrustData, keep: bool) 
         unsupported(b"wintrust.dll!WinVerifyTrust(signature settings: primary only)", 0);
     }
     let hash_only = d.prov_flags & WTD_HASH_ONLY_FLAG != 0;
-    let mut result = object(s, data);
+    let subject = object(s, data);
+    let mut result = subject.as_ref().map(|_| ()).map_err(|&e| e);
     if let Err(e) = result {
         s.steps[STEP_OBJPROV] = e;
     }
     if hash_only {
         result = result.map_err(|_| TRUST_E_NOSIGNATURE);
-    } else {
+    } else if let Ok((h, subject)) = &subject {
+        result = signature(s);
+        if result.is_err()
+            && let Some(mut nested) = nested_signature(s)
+        {
+            // Windows falls back to the nested signature when the primary
+            // signer's does not verify (issue #57): its message replaces
+            // the primary's and is checked in full; if it fails too, the
+            // primary's error stands.
+            observed(b"wintrust.dll!WinVerifyTrust: nested signature tried", 0);
+            reset_message(s);
+            if let Err(e) = message(s, *h, subject, nested.bytes()).and_then(|()| signature(s)) {
+                failed(b"nested signature", e);
+            } else {
+                result = Ok(());
+            }
+        }
+        if let Err(e) = result {
+            s.steps[STEP_SIGPROV] = e;
+        }
         for (step, f) in [
-            (STEP_SIGPROV, signature as fn(&mut State) -> Result<(), u32>),
-            (STEP_CERTPROV, certificate),
+            (STEP_CERTPROV, certificate as fn(&mut State) -> Result<(), u32>),
             (STEP_POLICYPROV, policy),
         ] {
             if result.is_err() {
@@ -564,7 +643,7 @@ fn run(window: usize, action: *const Guid, data: &mut WintrustData, keep: bool) 
 }
 
 /// The object step (module comment).
-fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
+fn object(s: &mut State, data: &mut WintrustData) -> Result<(usize, Subject), u32> {
     if !has!(data.size, WintrustData, file) || data.union_choice != WTD_CHOICE_FILE {
         // The detail: cbStruct in the high half, dwUnionChoice (when the
         // structure has it) in the low.
@@ -620,7 +699,14 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
         Subject::Pe(image) => pe::signature(h, image).map_err(|e| failed(b"WIN_CERTIFICATE", e))?,
         Subject::Cab(c) => cab::signature(h, c).map_err(|e| failed(b"cabinet signature", e))?,
     };
-    let der = &table.bytes()[at..at + len];
+    message(s, h, &subject, &table.bytes()[at..at + len])?;
+    Ok((h, subject))
+}
+
+/// The object step's message part: `der` (a PKCS #7 ContentInfo holding
+/// a SignedData) decoded into the state's message and store, its
+/// SpcIndirectDataContent's digest compared with the subject's hash.
+fn message(s: &mut State, h: usize, subject: &Subject, der: &[u8]) -> Result<(), u32> {
     // SAFETY: crypt32's documented calls; our buffers.
     unsafe {
         let msg = CryptMsgOpenToDecode(X509_PKCS7, 0, 0, 0, core::ptr::null(), core::ptr::null());
@@ -669,7 +755,7 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
         s.sip.indirect_data = indirect;
         let ind = &*indirect;
         let data_oid = c_text(ind.data_oid);
-        let expected = match subject {
+        let expected = match *subject {
             // SpcPeImageData.
             Subject::Pe(_) => data_oid == b"1.3.6.1.4.1.311.2.1.15",
             // SpcLink (Microsoft's signed cabinets) or SPC_CAB_DATA_OBJID.
@@ -686,7 +772,7 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
             return Err(failed(b"image hash algorithm", NTE_BAD_ALGID));
         };
         let mut hash = [0u8; 64];
-        match &subject {
+        match subject {
             Subject::Pe(image) => pe::image_hash(h, image, alg, &mut hash[..n])
                 .map_err(|e| failed(b"image hash", e))?,
             Subject::Cab(c) => {
@@ -694,7 +780,7 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
             }
         }
         if ind.digest.bytes() != &hash[..n] {
-            let what: &[u8] = match subject {
+            let what: &[u8] = match *subject {
                 Subject::Pe(_) => b"image hash differs (TRUST_E_BAD_DIGEST)",
                 Subject::Cab(_) => b"cabinet hash differs (TRUST_E_BAD_DIGEST)",
             };
@@ -766,10 +852,13 @@ fn signature(s: &mut State) -> Result<(), u32> {
     if unsafe { CryptMsgControl(msg, 0, CMSG_CTRL_VERIFY_SIGNATURE_EX, (&raw const para).cast()) }
         == 0
     {
+        // crypt32's error is the signer's; the verification's is
+        // TRUST_E_NOSIGNATURE, as Windows answers (issue #57).
         // SAFETY: plain call.
         let e = unsafe { GetLastError() };
         s.signer.error = e;
-        return Err(failed(b"signer's signature", e));
+        failed(b"signer's signature", e);
+        return Err(TRUST_E_NOSIGNATURE);
     }
     timestamp(s)?;
     let lifetime = s.data.prov_flags & WTD_LIFETIME_SIGNING_FLAG != 0 || lifetime_signing(cert);

@@ -1602,8 +1602,10 @@ need gala's.
      embedded PKCS #7, which setup.exe asks for its own signature, is
      answered too; `wintrust_test`, `wow64_wintrust_test`, expected
      results from Wine's softpub.c tests run on Windows; ARCHITECTURE
-     "wintrust: Authenticode"): its own setup.exe verifies (primary
-     signature; its WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
+     "wintrust: Authenticode"; issue #57's measurements: a signer whose
+     signature fails is TRUST_E_NOSIGNATURE, a dual-signed image falls
+     back to its nested signature): its own setup.exe verifies (its
+     WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
      CryptMsgOpenToDecode asks for CMSG_DETACHED_FLAG (recorded, decoded
      as attached), and it downloads the version descriptor cab from
      officecdn.microsoft.com over http and verifies it (done: the
@@ -1680,7 +1682,8 @@ need gala's.
      winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
      the XML it downloads (the CDN's cab manifests: more of the DOM as
      the run reaches it; load of URLs is recorded unsupported);
-     wintrust's secondary signatures and legacy countersignatures,
+     wintrust's WINTRUST_SIGNATURE_SETTINGS (choosing among the
+     signatures) and legacy countersignatures,
      crypt32's detached messages; FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
      dispatcher's nested exceptions and collided unwinds.

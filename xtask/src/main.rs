@@ -3235,7 +3235,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("cab_probe", "bcrypt.dll", "Windows/System32"),
     ("cab_probe", "bcryptprimitives.dll", "Windows/System32"),
     ("cab_probe", "ncrypt.dll", "Windows/System32"),
-    ("wintrust_test", "target/prebuilt/python/python.exe", "gala"),
     ("wow64_wintrust_test", "wow64.dll", "Windows/System32"),
     ("wow64_wintrust_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_wintrust_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3247,7 +3246,6 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_wintrust_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     ("wow64_wintrust_test", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
     ("wow64_wintrust_test", "target/prebuilt/odt/setup.exe", "gala"),
-    ("wow64_wintrust_test", "target/prebuilt/python/python.exe", "gala"),
     // SetupIterateCabinetW (user/setupcab_test), x64 and x86.
     ("setupcab_test", "ntdll.dll", "Windows/System32"),
     ("setupcab_test", "kernel32.dll", "Windows/System32"),
@@ -6552,7 +6550,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // WinVerifyTrust's Authenticode (user/wintrust_test): Wine's
         // self-signed images and their corrupted copies, an unsigned image,
-        // ODT's setup.exe and CPython's python.exe (Microsoft's roots).
+        // ODT's setup.exe, dual-signed (Microsoft's roots).
         name: "wintrust_test",
         cmdline: "qemu_exit run=wintrust_test.exe args=require",
         exit_status: QEMU_EXIT_SUCCESS,

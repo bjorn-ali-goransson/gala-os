@@ -15,8 +15,10 @@
 //!
 //! The structures have pointers, so their layout is the caller's width:
 //! `repr(C)` with `usize` pointers, held to the SDK header's offsets for
-//! both (`check` below; x86 with the 64-bit time_t of MSVC's default,
-//! 648 bytes: mingw's i686 headers have a 32-bit time_t there, 640).
+//! both (`check` below). On x86 the lease times are 32-bit, as mingw's
+//! i686 headers have them: Windows' own 32-bit GetAdaptersInfo needs 640
+//! bytes per adapter, not the 648 of MSVC's default 64-bit time_t (issue
+//! #57).
 
 use crate::tables::{IF_TYPE_SOFTWARE_LOOPBACK, Interface, interfaces};
 
@@ -57,9 +59,15 @@ struct IpAdapterInfo {
     have_wins: i32,
     primary_wins_server: IpAddrString,
     secondary_wins_server: IpAddrString,
-    lease_obtained: i64,
-    lease_expires: i64,
+    lease_obtained: LeaseTime,
+    lease_expires: LeaseTime,
 }
+
+/// time_t as IP_ADAPTER_INFO has it (module comment).
+#[cfg(target_arch = "x86")]
+type LeaseTime = i32;
+#[cfg(not(target_arch = "x86"))]
+type LeaseTime = i64;
 
 /// The SDK's sizes and offsets (clang on iphlpapi.h for both targets).
 const _: () = {
@@ -75,7 +83,7 @@ const _: () = {
     assert!(offset_of!(IpAdapterInfo, gateway_list) == if x86 { 468 } else { 488 });
     assert!(offset_of!(IpAdapterInfo, have_wins) == if x86 { 548 } else { 584 });
     assert!(offset_of!(IpAdapterInfo, lease_obtained) == if x86 { 632 } else { 688 });
-    assert!(size_of::<IpAdapterInfo>() == if x86 { 648 } else { 704 });
+    assert!(size_of::<IpAdapterInfo>() == if x86 { 640 } else { 704 });
 };
 
 /// `a.b.c.d` with its NUL into a 16-byte IP_ADDRESS_STRING.
