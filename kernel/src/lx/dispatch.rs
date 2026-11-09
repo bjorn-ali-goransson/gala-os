@@ -256,6 +256,7 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::SYMLINK => file::symlinkat(call, a(0), file::AT_FDCWD, a(1)),
         nr::SYMLINKAT => file::symlinkat(call, a(0), a(1), a(2)),
         nr::FTRUNCATE => file::ftruncate(call, a(0), a(1)),
+        nr::FALLOCATE => file::fallocate(call, a(0), a(1), a(2), a(3)),
         nr::MEMFD_CREATE => super::memfd::memfd_create(call, a(0), a(1)),
         nr::TRUNCATE => file::truncate(call, a(0), a(1)),
         nr::FSYNC | nr::FDATASYNC => file::fsync(call, a(0)),

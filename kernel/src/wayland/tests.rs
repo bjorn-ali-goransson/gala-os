@@ -16,13 +16,21 @@ struct Win {
     decorated: bool,
     pixels: Vec<u32>,
     alive: bool,
+    /// The outer position (window_create cascades nothing: (10, 20)).
+    at: (i32, i32),
 }
+
+/// The fake desktop's frame: shasha's (a 1-pixel outline, a 32-row
+/// caption).
+const FRAME: (u32, u32) = (2, 34);
 
 /// Files are byte vectors; an fd is an index (usize::MAX: not a file).
 #[derive(Default)]
 struct Fake {
     files: Vec<Vec<u8>>,
     windows: Vec<Win>,
+    /// What the client asked the desktop to do (window_act).
+    acts: Vec<(u32, Act)>,
     notes: Vec<String>,
     traces: Vec<String>,
     trace: bool,
@@ -80,6 +88,7 @@ impl Host for Fake {
             decorated,
             pixels: vec![0xffff_ffff; (width * height) as usize],
             alive: true,
+            at: (10, 20),
         });
         Some(self.windows.len() as u32 - 1)
     }
@@ -89,6 +98,30 @@ impl Host for Fake {
         assert_eq!(w.decorated, decorated);
         w.size = (width, height);
         w.pixels = vec![0xffff_ffff; (width * height) as usize];
+    }
+
+    fn window_place(&mut self, id: u32, x: i32, y: i32, width: u32, height: u32, decorated: bool) {
+        self.window_resize(id, width, height, decorated);
+        self.windows[id as usize].at = (x, y);
+    }
+
+    fn window_outer(&mut self, id: u32) -> Option<(i32, i32, u32, u32)> {
+        let w = self.windows.get(id as usize).filter(|w| w.alive)?;
+        let (fw, fh) = if w.decorated { FRAME } else { (0, 0) };
+        Some((w.at.0, w.at.1, w.size.0 + fw, w.size.1 + fh))
+    }
+
+    fn window_act(&mut self, id: u32, act: Act) {
+        self.acts.push((id, act));
+    }
+
+    fn work_area(&mut self) -> (u32, u32) {
+        (1280, 752)
+    }
+
+    fn surface_size(&mut self, width: u32, height: u32, decorated: bool) -> (u32, u32) {
+        let (fw, fh) = if decorated { FRAME } else { (0, 0) };
+        (width - fw, height - fh)
     }
 
     fn window_present(&mut self, id: u32, y: u32, width: u32, rows: u32, pixels: &[u32]) {
@@ -201,7 +234,13 @@ impl T {
                     Arg::Uint(v) => v.to_string(),
                     Arg::String(Some(s)) => format!("\"{}\"", core::str::from_utf8(s).unwrap()),
                     Arg::Object(Some(id)) => format!("#{id}"),
-                    Arg::Array(a) => format!("[{}]", a.len()),
+                    Arg::Array(a) => format!(
+                        "[{}]",
+                        a.chunks_exact(4)
+                            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]).to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
                     other => format!("{other:?}"),
                 })
                 .collect();
@@ -356,7 +395,7 @@ fn a_toplevel_is_configured_mapped_and_drawn_as_wl_test_does() {
         t.events(),
         [
             "wl_display#1.delete_id(6)",
-            "xdg_toplevel#10.configure(0, 0, [0])",
+            "xdg_toplevel#10.configure(0, 0, [])",
             "xdg_surface#9.configure(1)",
         ]
     );
@@ -365,10 +404,14 @@ fn a_toplevel_is_configured_mapped_and_drawn_as_wl_test_does() {
     t.ok(8, "damage_buffer", &[Arg::Int(0), Arg::Int(0), Arg::Int(64), Arg::Int(64)]);
     t.ok(8, "frame", &[Arg::NewId(11)]);
     t.ok(8, "commit", &[]);
-    assert_eq!(
-        t.events(),
-        ["wl_buffer#7.release()", "wl_callback#11.done(77)", "wl_display#1.delete_id(11)"]
-    );
+    // The buffer is released at once (copied); the frame callback waits
+    // for the refresh.
+    assert_eq!(t.events(), ["wl_buffer#7.release()"]);
+    assert!(t.c.frames_due());
+    assert_eq!(t.c.refresh(&mut t.h), Ok(()));
+    assert_eq!(t.events(), ["wl_callback#11.done(77)", "wl_display#1.delete_id(11)"]);
+    assert!(!t.c.frames_due());
+    assert_eq!((t.c.commits, t.c.frames), (1, 1));
     let w = &t.h.windows[0];
     assert_eq!((w.title.as_slice(), w.size, w.alive), (&b"wl_test"[..], (64, 64), true));
     assert_eq!((w.pixels[0], w.pixels[31 * 64 + 63]), (0x0033_6699, 0x0033_6699));
@@ -415,7 +458,7 @@ fn a_null_buffer_unmaps_and_the_next_commit_configures_again() {
     assert!(!t.h.windows[0].alive);
     t.events();
     t.ok(8, "commit", &[]);
-    assert_eq!(t.events(), ["xdg_toplevel#10.configure(0, 0, [0])", "xdg_surface#9.configure(2)"]);
+    assert_eq!(t.events(), ["xdg_toplevel#10.configure(0, 0, [])", "xdg_surface#9.configure(2)"]);
 }
 
 #[test]
@@ -436,8 +479,8 @@ fn newer_toplevels_get_bounds_and_capabilities_first() {
         t.events(),
         [
             "xdg_toplevel#7.configure_bounds(1280, 800)",
-            "xdg_toplevel#7.wm_capabilities([0])",
-            "xdg_toplevel#7.configure(0, 0, [0])",
+            "xdg_toplevel#7.wm_capabilities([2 4])",
+            "xdg_toplevel#7.configure(0, 0, [])",
             "xdg_surface#6.configure(1)",
         ]
     );
@@ -726,7 +769,8 @@ fn plain(events: Vec<String>) -> Vec<String> {
             let args = args.strip_suffix(')').unwrap();
             let mut parts: Vec<String> = args.split(", ").map(|a| a.to_string()).collect();
             let event = head.rsplit('.').next().unwrap();
-            let serial = matches!(event, "enter" | "leave" | "key" | "button" | "modifiers");
+            let serial = matches!(event, "enter" | "leave" | "key" | "button" | "modifiers")
+                || head.starts_with("xdg_surface#") && event == "configure";
             let time = matches!(event, "motion" | "axis" | "key" | "button");
             if serial {
                 parts[0] = "S".into();
@@ -797,10 +841,16 @@ fn a_descriptor_is_written_no_later_than_its_event() {
 #[test]
 fn the_desktop_s_input_becomes_pointer_and_keyboard_events() {
     let mut t = T::mapped();
-    // Activation: the keyboard focus, no keys down, the modifiers.
+    // Activation: the keyboard focus, no keys down, the modifiers; and a
+    // configure with the activated state (4).
     assert_eq!(
         plain(t.input(Input::Focus { window: 0, active: true })),
-        ["wl_keyboard#13.enter(S, #8, [0])", "wl_keyboard#13.modifiers(S, 0, 0, 0, 0)"]
+        [
+            "wl_keyboard#13.enter(S, #8, [])",
+            "wl_keyboard#13.modifiers(S, 0, 0, 0, 0)",
+            "xdg_toplevel#10.configure(0, 0, [4])",
+            "xdg_surface#9.configure(S)",
+        ]
     );
     // The pointer comes onto the surface, moves, clicks.
     assert_eq!(
@@ -873,17 +923,180 @@ fn the_desktop_s_input_becomes_pointer_and_keyboard_events() {
     );
     // The close button.
     assert_eq!(t.input(Input::Close { window: 0 }), ["xdg_toplevel#10.close()"]);
-    // Deactivated.
+    // Deactivated: not activated in the next configure.
     assert_eq!(
         plain(t.input(Input::Focus { window: 0, active: false })),
-        ["wl_keyboard#13.leave(S, #8)"]
+        [
+            "wl_keyboard#13.leave(S, #8)",
+            "xdg_toplevel#10.configure(0, 0, [])",
+            "xdg_surface#9.configure(S)",
+        ]
     );
     // A window it does not show: dropped and noted.
     assert!(t.input(Input::Key { window: 5, key: 30, pressed: true }).is_empty());
     assert!(t.h.notes.iter().any(|n| n.contains("InputDropped { window: 5 }")));
-    // Window actions not followed yet are noted (the ledger).
-    t.input(Input::Unhandled { window: 0, what: "maximize" });
-    assert!(t.h.notes.iter().any(|n| n.contains("Unhandled { what: \"maximize\"")));
+    // Window messages a Wayland window does not follow are noted (the
+    // ledger).
+    t.input(Input::Unhandled { window: 0, what: "message" });
+    assert!(t.h.notes.iter().any(|n| n.contains("Unhandled { what: \"message\"")));
+}
+
+/// The configures' sizes and states the desktop's sizing gives, the
+/// xdg_surface's serial of the last one.
+fn configured(events: &[String]) -> (String, u32) {
+    let size = events.iter().find(|e| e.starts_with("xdg_toplevel#10.configure(")).unwrap();
+    let serial = events.iter().find_map(|e| e.strip_prefix("xdg_surface#9.configure(")).unwrap();
+    let size = size.strip_prefix("xdg_toplevel#10.configure(").unwrap().trim_end_matches(')');
+    (size.to_string(), serial.trim_end_matches(')').parse().unwrap())
+}
+
+impl T {
+    /// Acks `serial` and commits a `w` x `h` buffer (in a pool of a new
+    /// file of that size, the next ids) on surface 8.
+    fn answer(&mut self, serial: u32, w: i32, h: i32) {
+        self.ok(9, "ack_configure", &[Arg::Uint(serial)]);
+        self.h.files.push(vec![0x11; (w * h * 4) as usize]);
+        let file = self.h.files.len() - 1;
+        self.c.push_fd(&mut self.h, file).unwrap();
+        let pool = self.ids.keys().max().unwrap() + 1;
+        let buffer = pool + 1;
+        self.ok(4, "create_pool", &[Arg::NewId(pool), Arg::Fd, Arg::Int(w * h * 4)]);
+        let args = [
+            Arg::NewId(buffer),
+            Arg::Int(0),
+            Arg::Int(w),
+            Arg::Int(h),
+            Arg::Int(w * 4),
+            Arg::Uint(1),
+        ];
+        self.ok(pool, "create_buffer", &args);
+        self.ok(8, "attach", &[Arg::Object(Some(buffer)), Arg::Int(0), Arg::Int(0)]);
+        self.ok(8, "commit", &[]);
+        self.events();
+    }
+}
+
+#[test]
+fn the_desktop_s_maximize_restore_and_snap_are_configures() {
+    // xdg_wm_base 1: no tiled states (they are xdg_toplevel 2's).
+    let mut t = T::mapped();
+    t.input(Input::Focus { window: 0, active: true });
+    let w = |t: &T| (t.h.windows[0].at, t.h.windows[0].size);
+    assert_eq!(w(&t), ((10, 20), (64, 64)));
+    // Maximize: the work area less the frame, maximized and activated;
+    // the window stays until the client answers.
+    let e = t.input(Input::Maximize { window: 0 });
+    let (size, serial) = configured(&e);
+    assert_eq!(size, "1278, 718, [1 4]");
+    assert_eq!(w(&t), ((10, 20), (64, 64)));
+    // Acked and answered with a buffer of that size: placed at the work
+    // area's corner, that size.
+    t.answer(serial, 1278, 718);
+    assert_eq!(w(&t), ((0, 0), (1278, 718)));
+    assert!(t.h.notes.iter().any(|n| n.contains("placed: Some((0, 0))")));
+    // A focus change keeps the size and maximized.
+    let e = t.input(Input::Focus { window: 0, active: false });
+    assert_eq!(configured(&e).0, "1278, 718, [1]");
+    t.input(Input::Focus { window: 0, active: true });
+    // Restore: the rectangle before.
+    let e = t.input(Input::Restore { window: 0 });
+    let (size, serial) = configured(&e);
+    assert_eq!(size, "64, 64, [4]");
+    t.answer(serial, 64, 64);
+    assert_eq!(w(&t), ((10, 20), (64, 64)));
+    // Restore when not maximized: nothing (the desktop's own minimize).
+    assert!(t.input(Input::Restore { window: 0 }).is_empty());
+    // Snap left at version 1: the size, no tiled states.
+    let e = t.input(Input::Place { window: 0, x: 0, y: 0, w: 640, h: 752 });
+    assert_eq!(configured(&e).0, "638, 718, [4]");
+    // The client asks: the desktop acts (its answer comes back as input).
+    t.ok(10, "set_maximized", &[]);
+    t.ok(10, "unset_maximized", &[]);
+    t.ok(10, "set_minimized", &[]);
+    assert_eq!(t.h.acts, [(0, Act::Maximize), (0, Act::Restore), (0, Act::Minimize)]);
+    assert!(t.h.notes.iter().any(|n| n.contains("what: \"place\"")));
+}
+
+#[test]
+fn snap_is_tiled_from_version_2_and_acks_may_name_older_configures() {
+    let mut t = T::new();
+    t.ok(1, "get_registry", &[Arg::NewId(2)]);
+    for (name, iface, version, id) in
+        [(1, "wl_compositor", 4, 3), (2, "wl_shm", 1, 4), (3, "xdg_wm_base", 6, 5)]
+    {
+        let args =
+            [Arg::Uint(name), Arg::UntypedNewId { interface: iface.as_bytes(), version, id }];
+        t.ok(2, "bind", &args);
+    }
+    t.h.files.push(vec![0; 64 * 64 * 4]);
+    t.c.push_fd(&mut t.h, 0).unwrap();
+    t.ok(4, "create_pool", &[Arg::NewId(6), Arg::Fd, Arg::Int(64 * 64 * 4)]);
+    let buffer =
+        [Arg::NewId(7), Arg::Int(0), Arg::Int(64), Arg::Int(64), Arg::Int(256), Arg::Uint(1)];
+    t.ok(6, "create_buffer", &buffer);
+    t.ok(3, "create_surface", &[Arg::NewId(8)]);
+    t.ok(5, "get_xdg_surface", &[Arg::NewId(9), Arg::Object(Some(8))]);
+    t.ok(9, "get_toplevel", &[Arg::NewId(10)]);
+    t.ok(8, "commit", &[]);
+    // The capabilities: maximize (2) and minimize (4).
+    assert!(t.events().contains(&"xdg_toplevel#10.wm_capabilities([2 4])".to_string()));
+    t.ok(9, "ack_configure", &[Arg::Uint(1)]);
+    t.ok(8, "attach", &[Arg::Object(Some(7)), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    t.events();
+    // Snapped left: tiled left, top and bottom (5, 7, 8); right: 6, 7, 8.
+    let e = t.input(Input::Place { window: 0, x: 0, y: 0, w: 640, h: 752 });
+    let (size, first) = configured(&e);
+    assert_eq!(size, "638, 718, [5 7 8]");
+    let e = t.input(Input::Place { window: 0, x: 640, y: 0, w: 640, h: 752 });
+    let (size, second) = configured(&e);
+    assert_eq!(size, "638, 718, [6 7 8]");
+    // A place filling the work area is maximized; one elsewhere neither.
+    let e = t.input(Input::Place { window: 0, x: 0, y: 0, w: 1280, h: 752 });
+    assert_eq!(configured(&e).0, "1278, 718, [1]");
+    let e = t.input(Input::Place { window: 0, x: 30, y: 40, w: 302, h: 234 });
+    let (size, last) = configured(&e);
+    assert_eq!(size, "300, 200, []");
+    // The first is acked (the client saw only it): its place applies at
+    // the next commit; the second may be acked after it.
+    t.answer(first, 638, 718);
+    assert_eq!((t.h.windows[0].at, t.h.windows[0].size), ((0, 0), (638, 718)));
+    t.ok(9, "ack_configure", &[Arg::Uint(second)]);
+    // Once a later one is acked, an earlier one is gone.
+    t.ok(9, "ack_configure", &[Arg::Uint(last)]);
+    let r = t.send(9, "ack_configure", &[Arg::Uint(second)]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#9, 4, "));
+}
+
+#[test]
+fn unmapping_forgets_the_desktop_s_sizing() {
+    let mut t = T::mapped();
+    let e = t.input(Input::Maximize { window: 0 });
+    let (_, serial) = configured(&e);
+    t.ok(9, "ack_configure", &[Arg::Uint(serial)]);
+    // A null buffer unmaps: the next configure is the client's choice
+    // again, and the acked place is not applied to the next window.
+    t.ok(8, "attach", &[Arg::Object(None), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    t.events();
+    t.ok(8, "commit", &[]);
+    let (size, serial) = configured(&t.events());
+    assert_eq!(size, "0, 0, []");
+    t.answer(serial, 64, 64);
+    assert_eq!(t.h.windows[1].at, (10, 20));
+}
+
+#[test]
+fn unacked_configures_are_bounded() {
+    let mut t = T::mapped();
+    let mut serials = Vec::new();
+    for i in 0..MAX_CONFIGURES + 2 {
+        let e = t.input(Input::Focus { window: 0, active: i % 2 == 0 });
+        serials.push(configured(&e).1);
+    }
+    // The oldest are forgotten: acking one is an invalid serial.
+    let r = t.send(9, "ack_configure", &[Arg::Uint(serials[0])]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#9, 4, "));
 }
 
 #[test]
@@ -901,7 +1114,7 @@ fn objects_made_later_learn_the_focus_and_unmapping_leaves() {
             "wl_pointer#14.frame()".into(),
             format!("wl_keyboard#15.keymap(1, Fd, {size})"),
             "wl_keyboard#15.repeat_info(30, 500)".into(),
-            "wl_keyboard#15.enter(S, #8, [0])".into(),
+            "wl_keyboard#15.enter(S, #8, [])".into(),
             "wl_keyboard#15.modifiers(S, 0, 0, 0, 0)".into(),
         ]
     );
@@ -939,7 +1152,7 @@ fn decorations_are_server_side_unless_the_client_asks() {
         t.events(),
         [
             "wl_display#1.delete_id(6)",
-            "xdg_toplevel#10.configure(0, 0, [0])",
+            "xdg_toplevel#10.configure(0, 0, [])",
             "zxdg_toplevel_decoration_v1#12.configure(2)",
             "xdg_surface#9.configure(1)",
         ]
@@ -955,7 +1168,7 @@ fn decorations_are_server_side_unless_the_client_asks() {
     assert_eq!(
         t.events(),
         [
-            "xdg_toplevel#10.configure(0, 0, [0])",
+            "xdg_toplevel#10.configure(0, 0, [])",
             "zxdg_toplevel_decoration_v1#12.configure(2)",
             "xdg_surface#9.configure(2)",
         ]
@@ -1036,7 +1249,20 @@ fn window_messages_translate_to_wayland_input() {
     assert_eq!(input::translate(3, WM_MOVE, 0, 0), None);
     assert_eq!(
         input::translate(3, WM_SYSCOMMAND, SC_MAXIMIZE, 0),
-        Some(Input::Unhandled { window: 3, what: "maximize" })
+        Some(Input::Maximize { window: 3 })
+    );
+    assert_eq!(
+        input::translate(3, WM_SYSCOMMAND, SC_RESTORE, 0),
+        Some(Input::Restore { window: 3 })
+    );
+    // Snap's place: MAKELONG(left, top) signed, MAKELONG(width, height).
+    assert_eq!(
+        input::translate(3, GALA_WM_PLACE, lp(-8, 0), lp(640, 752)),
+        Some(Input::Place { window: 3, x: -8, y: 0, w: 640, h: 752 })
+    );
+    assert_eq!(
+        input::translate(3, 0x0400, 0, 0),
+        Some(Input::Unhandled { window: 3, what: "message" })
     );
 }
 
@@ -1061,4 +1287,11 @@ fn every_key_the_scan_codes_give_is_in_the_keymap() {
         assert!(input::modifier(key).is_some());
         assert!(input::KEYMAP.contains(sym));
     }
+}
+
+#[test]
+fn refreshes_fall_on_sixtieths_of_a_second() {
+    use crate::wayland::next_refresh;
+    // Strictly after now, on ceil(k * 1000 / 60) ms.
+    assert_eq!([0, 16, 17, 33, 34, 1000].map(next_refresh), [17, 17, 34, 34, 50, 1017]);
 }

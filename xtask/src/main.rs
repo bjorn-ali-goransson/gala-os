@@ -421,6 +421,39 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // weston 13.0.0's demo clients as Ubuntu 24.04 (noble) ships them
+    // (universe, the release pocket's weston 13.0.0-4build3; the SHA-256
+    // is the one in the release's signed Packages index): only
+    // weston-simple-shm, a real libwayland client (ROADMAP LD step 2,
+    // scenario lx_simple_shm). It needs libwayland-client and libffi
+    // (below) besides glibc. Inside gala only.
+    Prebuilt {
+        name: "weston",
+        url: "https://archive.ubuntu.com/ubuntu/pool/universe/w/weston/weston_13.0.0-4build3_amd64.deb",
+        checksum: "bcf6f344c6d5bede9f3f601be1015b0550fa31dd8c7b3e51ac0fe34702dac73c",
+        members: &["usr/bin/weston-simple-shm"],
+        excludes: &[],
+    },
+    // libwayland-client 1.22.0 (Ubuntu 24.04's libwayland-client0
+    // 1.22.0-2.1build1, main; SHA-256 from the signed Packages index).
+    // The member is the soname's symbolic link: its target is kept under
+    // the link's name.
+    Prebuilt {
+        name: "libwayland-client",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-client0_1.22.0-2.1build1_amd64.deb",
+        checksum: "6af0aed41d75149bea22fa468f01eb058ffe3e35ef07ff2f13fb88a90387881d",
+        members: &["usr/lib/x86_64-linux-gnu/libwayland-client.so.0"],
+        excludes: &[],
+    },
+    // libffi 3.4.6 (Ubuntu 24.04's libffi8 3.4.6-1build1, main; SHA-256
+    // from the signed Packages index): libwayland-client's dependency.
+    Prebuilt {
+        name: "libffi",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/libf/libffi/libffi8_3.4.6-1build1_amd64.deb",
+        checksum: "637e6a7744de08cd331a41f4efd0d24e6ea9064843dea9d1c6ca87bdb5f038a2",
+        members: &["usr/lib/x86_64-linux-gnu/libffi.so.8"],
+        excludes: &[],
+    },
     // Inno Setup 7.1.1's own installer, x64 edition (jrsoftware.org's
     // GitHub release; the SHA-256 is winget-pkgs' JRSoftware.InnoSetup.7
     // 7.1.1 manifest's): an Inno Setup installer built with
@@ -1226,6 +1259,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("glibc", "target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib/x86_64-linux-gnu"),
     ("glibc", "target/prebuilt/glibc/libc.so.6", "lib/x86_64-linux-gnu"),
     ("glibc", "target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
+    // weston-simple-shm (LD step 2) and the libraries it loads beside
+    // glibc's.
+    ("weston", "target/prebuilt/weston/weston-simple-shm", "lx"),
+    (
+        "wayland_client",
+        "target/prebuilt/libwayland-client/libwayland-client.so.0",
+        "lib/x86_64-linux-gnu",
+    ),
+    ("wayland_client", "target/prebuilt/libffi/libffi.so.8", "lib/x86_64-linux-gnu"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -3596,8 +3638,13 @@ fn unpack_deb(p: &Prebuilt, deb: &Path, dir: &Path) -> Result {
         .map_err(|e| format!("{e} (dpkg-deb is in dpkg)"))?;
     for member in p.members {
         let last = member.rsplit('/').next().unwrap_or(member);
-        fs::rename(tree.join(member), dir.join(last))
-            .map_err(|e| format!("{member} in {}: {e}", p.url))?;
+        // A library's soname is a symbolic link: its target is moved
+        // under the link's name.
+        let mut from = tree.join(member);
+        if let Ok(target) = fs::read_link(&from) {
+            from = from.parent().map(|d| d.join(&target)).unwrap_or(target);
+        }
+        fs::rename(&from, dir.join(last)).map_err(|e| format!("{member} in {}: {e}", p.url))?;
     }
     fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
@@ -8036,8 +8083,10 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         // user/lx/wl_input_test (LD step 2): wl_seat, wl_pointer and
         // wl_keyboard (an XKB keymap as a memfd), xdg_toplevel.close from
-        // the frame's close button and xdg-decoration (server-side
-        // framed, client-side frameless), driven by the PS/2 mouse and
+        // the frame's close button, configures from the desktop's
+        // maximize, restore and Snap (the Snap keys), and xdg-decoration
+        // (server-side framed, client-side frameless), driven by the
+        // PS/2 mouse and
         // keyboard from xtask's screen check (WL_INPUT_SCREEN) on a
         // headless desktop (`presenter=test`), which also checks the
         // windows' pixels. Its expected.txt is written from the
@@ -8051,6 +8100,28 @@ const SCENARIOS: &[Scenario] = &[
             "desktop: shown window 'wl_input_test'",
             "xtask: screen ok",
             "run: end /lx/wl_input_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // weston-simple-shm (LD step 2): weston 13's demo client, a real
+        // libwayland program (Ubuntu 24.04's build with its libwayland-
+        // client, libffi and glibc: PREBUILT), drawing its animated frames
+        // through wl_shm on a headless desktop until the screen check
+        // (SIMPLE_SHM_SCREEN) has seen them inside shasha's frame and
+        // presses Esc, which ends it. Its transcript (user/lx/
+        // weston-simple-shm/lx_simple_shm.txt) is real Linux's against
+        // weston's headless backend; the server's summary line says how
+        // many commits and frames it served.
+        name: "lx_simple_shm",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/weston-simple-shm lxargs=./weston-simple-shm lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'simple-shm'",
+            "xtask: screen ok",
+            "'s connection 1 ended (closed): ",
+            "run: end /lx/weston-simple-shm",
             BOOT_OK_MARKER,
         ],
     },
@@ -8342,6 +8413,9 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_dyn", "glibc"),
     ("lx_dyn_pie", "lx_dyn_pie"),
     ("lx_dyn_pie", "glibc"),
+    ("lx_simple_shm", "weston"),
+    ("lx_simple_shm", "wayland_client"),
+    ("lx_simple_shm", "glibc"),
 ];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
@@ -10274,6 +10348,9 @@ enum PixelCheck {
     /// Some pixel in the rectangle (x, y, w, h) is close to this colour
     /// (anti-aliased text, scaled images).
     AnyIn(u32, u32, u32, u32, u32),
+    /// The rectangle (x, y, w, h) holds at least this many distinct
+    /// colours (a program's drawing, whatever its frame shows).
+    Varied(u32, u32, u32, u32, usize),
 }
 
 /// user/lx/wl_input_test's windows on a headless desktop (1280 x 800,
@@ -10281,7 +10358,10 @@ enum PixelCheck {
 /// shasha's frame (server-side decoration), is the first Wayland window
 /// and so at (64, 48) (kernel/src/wayland: cascaded from there), its
 /// client area from (65, 81); the second, 100 x 80 and frameless
-/// (client-side decoration), at (96, 80). Each step waits for the line
+/// (client-side decoration), at (96, 80). Between them the Snap keys
+/// maximize, restore, snap left and restore the first (the work area is
+/// 1280 x 752 above the taskbar; the frame a 1-pixel outline and a
+/// 32-row caption). Each step waits for the line
 /// the program prints once it has the input before (its transcript is
 /// the check of the events; these steps drive it and check the pixels).
 const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
@@ -10326,9 +10406,69 @@ const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[],
         },
         ScreenStep {
+            // Win+Up: maximized by the desktop (a configure of the work
+            // area's client size), at (0, 0), client area from (1, 33),
+            // 1278 x 718.
+            after: "pointer leave",
+            input: &["sendkey meta_l-up"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: maximized",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(300, 2, 40, 4, 0xeef2f7), // the active caption at the top
+                PixelCheck::At(1 + 600, 33 + 400, 0x2e8b57),
+                PixelCheck::At(1 + 1277, 33 + 717, 0x2e8b57), // its last pixel
+            ],
+        },
+        ScreenStep {
+            // Win+Down: restored where it was, its first buffer again.
+            after: "",
+            input: &["sendkey meta_l-down"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: restored",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep {
+            // Win+Left: the left half of the work area, (0, 0, 640, 752),
+            // its client area 638 x 718 from (1, 33).
+            after: "",
+            input: &["sendkey meta_l-left"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: snapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(1 + 300, 33 + 400, 0x8b4513),
+                PixelCheck::At(1 + 637, 33 + 717, 0x8b4513), // its last pixel
+            ],
+        },
+        ScreenStep {
+            // Win+Down: back where it was before Snap.
+            after: "",
+            input: &["sendkey meta_l-down"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: unsnapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep {
             // Up, then left along the caption (never over the client
             // area) to the close button at (240, 60), and a click.
-            after: "pointer leave",
+            after: "wl_input_test: unsnapped",
             input: &["mouse_move 0 -96", "mouse_move -125 0", "mouse_button 1", "mouse_button 0"],
             pixels: &[],
         },
@@ -10344,6 +10484,26 @@ const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep { after: "", input: &["sendkey q"], pixels: &[] },
+    ],
+};
+
+/// weston-simple-shm's window: 250 x 250, the first Wayland window and
+/// so at (64, 48) with shasha's frame (it asks for no decoration: the
+/// server's default), its client area from (65, 81). It paints a moving
+/// pattern inside a 20-pixel margin: many colours there, each frame
+/// different. The active caption above it; then Esc ends it.
+const SIMPLE_SHM_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'simple-shm'",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(80, 50, 40, 4, 0xeef2f7), // the active caption
+                PixelCheck::Varied(65 + 20, 81 + 20, 210, 210, 64),
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey esc"], pixels: &[] },
     ],
 };
 
@@ -10603,6 +10763,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ),
     ("gui_test", GUI_TEST_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
+    ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows
@@ -11274,6 +11435,20 @@ fn dump_and_check(
                     .any(|yy| (x..x + rw).any(|xx| at(xx, yy).is_some_and(|c| close(c, want))));
                 if !found {
                     return Err(format!("no pixel near {want:06x} in ({x}, {y}, {rw}, {rh})"));
+                }
+            }
+            PixelCheck::Varied(x, y, rw, rh, want) => {
+                let mut seen = std::collections::HashSet::new();
+                for yy in y..y + rh {
+                    for xx in x..x + rw {
+                        seen.extend(at(xx, yy));
+                    }
+                }
+                if seen.len() < want {
+                    return Err(format!(
+                        "{} distinct colours in ({x}, {y}, {rw}, {rh}), not at least {want}",
+                        seen.len()
+                    ));
                 }
             }
         }

@@ -54,8 +54,8 @@ use lx_abi::layout::{self as abi, Stat, Timespec};
 
 use super::dispatch::{Call, Result};
 use super::errno::{
-    EACCES, EBADF, EBUSY, EEXIST, EFAULT, EINVAL, EISDIR, ELOOP, ENAMETOOLONG, ENOENT, ENOMEM,
-    ENOTDIR, ENOTEMPTY, ENXIO, EOPNOTSUPP, EPERM, ERANGE, ESPIPE,
+    EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINVAL, EISDIR, ELOOP, ENAMETOOLONG, ENODEV,
+    ENOENT, ENOMEM, ENOTDIR, ENOTEMPTY, ENXIO, EOPNOTSUPP, EPERM, ERANGE, ESPIPE,
 };
 use super::state::{Fd, Object};
 use crate::fs::ramfs::{self, Access, FsError, NodeId, Share};
@@ -1498,6 +1498,71 @@ pub fn ftruncate(call: &Call<'_>, fd: u64, length: u64) -> Result {
     }
     let now = platform::system_time();
     with_fs(|fs| fs.set_size(file.node, length, now)).map_err(errno_of)?;
+    Ok(0)
+}
+
+/// fallocate's modes (FALLOC_FL_*).
+const FALLOC_KEEP_SIZE: u64 = 1;
+const FALLOC_PUNCH_HOLE: u64 = 2;
+/// Zeros a hole is punched with, a chunk at a time.
+static ZEROS: [u8; 4096] = [0; 4096];
+
+/// fallocate (glibc's posix_fallocate; memfd_test, recorded on Linux):
+/// the file system keeps no holes, so allocating is growing: mode 0 makes
+/// `offset..offset + len` part of the file (grown with zeros, never
+/// shrunk); KEEP_SIZE alone changes nothing; PUNCH_HOLE (with KEEP_SIZE,
+/// as Linux requires) writes zeros over the part of the range inside the
+/// file. The other modes (collapse, zero, insert and unshare a range) are
+/// EOPNOTSUPP, as on tmpfs, and ledgered. The seals apply (growing past
+/// SEAL_GROW, punching under SEAL_WRITE: EPERM). Checked in Linux's
+/// order: the arguments, the mode, a writable description, its kind.
+pub fn fallocate(call: &Call<'_>, fd: u64, mode: u64, offset: u64, len: u64) -> Result {
+    let f = call.lx.fd(fd).ok_or(EBADF)?;
+    if (offset as i64) < 0 || (len as i64) <= 0 {
+        return Err(EINVAL);
+    }
+    let mode = mode as u32 as u64;
+    if mode & !(FALLOC_KEEP_SIZE | FALLOC_PUNCH_HOLE) != 0 {
+        ledger::record("fallocate", "linux option missing", mode);
+        return Err(EOPNOTSUPP);
+    }
+    if mode & FALLOC_PUNCH_HOLE != 0 && mode & FALLOC_KEEP_SIZE == 0 {
+        return Err(EOPNOTSUPP);
+    }
+    let file = match &f.object {
+        Object::File(file) => file,
+        Object::PipeWrite(_) => return Err(ESPIPE),
+        Object::PipeRead(_) => return Err(EBADF),
+        _ => return Err(ENODEV),
+    };
+    if file.path_only || !file.writable {
+        return Err(EBADF);
+    }
+    if file.dir {
+        return Err(EISDIR);
+    }
+    let end = offset.checked_add(len).filter(|e| *e <= i64::MAX as u64).ok_or(EFBIG)?;
+    let (node, now) = (file.node, platform::system_time());
+    with_fs(|fs| {
+        let n = fs.node(node).ok_or(EBADF)?;
+        let size = n.size();
+        if mode & FALLOC_PUNCH_HOLE != 0 {
+            if n.seals().unwrap_or(0) & (ramfs::SEAL_WRITE | ramfs::SEAL_FUTURE_WRITE) != 0 {
+                return Err(EPERM);
+            }
+            let (mut at, to) = (offset, end.min(size));
+            while at < to {
+                let k = (to - at).min(ZEROS.len() as u64) as usize;
+                fs.write(node, at, &ZEROS[..k], now).map_err(errno_of)?;
+                at += k as u64;
+            }
+            return Ok(());
+        }
+        if mode & FALLOC_KEEP_SIZE == 0 && end > size {
+            fs.set_size(node, end, now).map_err(errno_of)?;
+        }
+        Ok(())
+    })?;
     Ok(0)
 }
 

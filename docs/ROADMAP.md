@@ -2135,6 +2135,32 @@ the next breakthroughs).
   (no window is marked not responding yet). `events=wayland`'s
   `wayland input`, the trace's `input:` lines, the ledger's `wayland
   window action missing`, the seat in the state dump.
+- Step 2's server, third part: configure from the desktop (wl_input_test's
+  Snap steps in `lx_wl_input`): the desktop's maximize (SC_MAXIMIZE: the
+  caption's button, Win+Up, `gala maximize`), restore (SC_RESTORE) and
+  place (GALA_WM_PLACE: Snap, back from Snap, `gala place`) become an
+  `xdg_toplevel.configure` of the surface size (the work area or the
+  rectangle less shasha's frame) with the states maximized, activated
+  (following the desktop's active window, a configure at each change) and
+  tiled_left/right/top/bottom (xdg_toplevel 2), and the window moves to
+  the desktop's place and takes the buffer's size at the commit after
+  the client acks it; an ack may name any configure not yet acked (at
+  most 16 kept); `set_maximized`, `unset_maximized` and `set_minimized`
+  are the desktop's actions on the window; wm_capabilities maximize and
+  minimize. `events=wayland`'s `wayland configure`, `placed` in `wayland
+  commit`.
+- Step 2's first real client: `weston-simple-shm` (`lx_simple_shm`:
+  weston 13's demo, Ubuntu 24.04's build with its libwayland-client and
+  libffi, `PREBUILT`s, on glibc) draws its animated frames on a headless
+  desktop inside shasha's frame (the screen check: many colours in its
+  client area) and ends at Esc, its transcript real Linux's (against
+  weston's headless backend). Built for it: fallocate (`posix_fallocate`
+  of its buffer file; memfd_test, recorded on Linux: allocate, KEEP_SIZE,
+  PUNCH_HOLE, the seals, the errors); frame callbacks done at the 60 Hz
+  refresh after their commit instead of at once (a client drawing on its
+  callbacks no longer redraws as fast as the CPU allows); the
+  connection's summary line (requests, commits shown, frame callbacks
+  done).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2150,25 +2176,31 @@ the next breakthroughs).
 2. The Wayland server's rest (its first part is done, above; each
    step test first, in wl_test or a client like it recorded against
    weston):
-   - configure from the desktop's resizes, maximize and Snap (they
-     reach the server as input and are ledgered: `wayland window action
-     missing`), a decoration mode change on a mapped window (the frame
+   - the `resizing` state and `xdg_toplevel.resize`/`move` (an
+     interactive resize from a client-side frame through the desktop's
+     `begin_resize`/`begin_drag`; ledgered as ignored today), fullscreen,
+     a decoration mode change on a mapped window (the frame
      put on or taken off in place; today the mode is fixed at mapping),
      popups (`xdg_positioner`, `xdg_popup`; ledgered protocol errors
      today), the middle button and horizontal wheel once the desktop
      has them;
    - `xdg_wm_base.ping` on a timer once the desktop marks windows that
      do not answer (none, Windows' or Linux's, are marked today);
-   - frame callbacks paced by composition (done at commit today), the
+   - frame callbacks paced by the presenter's own refresh (a 60 Hz
+     tick of the server's today, not the display's vblank), the
      server's allocations charged to the client's quota;
    - a socket per session's desktop under its user's `/run/user/<uid>`,
      with `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` given to the Linux
      programs started there (today one socket for the boot user, the
      environment passed by whoever starts them), and the server on
-     by default where a desktop is;
-   - `weston-simple-shm` from weston's demos (wl_input_test's screen
-     check already finds a Wayland window's pixels inside shasha's
-     frame).
+     by default where a desktop is. That waits for `/run` as a tmpfs
+     mount of the Linux view (the decision and why: ARCHITECTURE
+     "Sessions" under the Wayland section): today the runtime
+     directory is `C:\run` in the shared file system, which Windows
+     programs see and the change log keeps;
+   - more of weston's demos as clients (simple-damage: buffer scale
+     and transform, viewporter; eventdemo: input through libwayland),
+     each a `PREBUILT` member of the same package.
    Still open in the prerequisites, ledgered: a datagram socket's
    connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
    on a MSG_PEEK, collecting rights cycles in flight.

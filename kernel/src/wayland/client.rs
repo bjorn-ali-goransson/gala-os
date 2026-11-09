@@ -52,15 +52,26 @@
 //!   rows (all of them for a new or resized window) from the buffer's
 //!   pool and releases the buffer at once (the pixels are copied); a
 //!   commit with a null buffer unmaps it, and the next one configures it
-//!   again. Frame callbacks are done when their commit was applied (there
-//!   is no composition clock to wait for yet).
+//!   again. Frame callbacks are done at the refresh after their commit
+//!   was applied (`refresh`, which the server calls at 60 Hz while any
+//!   are due): the commit is presented at once, and a client drawing on
+//!   its frame callbacks draws at the display's rate, not as fast as it
+//!   can.
 //! - **Accepted and not acted on** (`Note::Ignored`, ledgered by the
 //!   server): regions, buffer scale and transform other than 1 and
 //!   normal, surface offsets, window geometry, and the toplevel's
-//!   requests for move, resize, menus, sizes and states; a cursor surface
-//!   (wl_pointer.set_cursor: the desktop draws its own pointer). The
-//!   desktop's maximize, restore and Snap for a window are noted too
-//!   (`Note::Unhandled`).
+//!   requests for move, resize, menus, min and max sizes and fullscreen;
+//!   a cursor surface (wl_pointer.set_cursor: the desktop draws its own
+//!   pointer). A window message the desktop sends that a Wayland window
+//!   does not follow is noted too (`Note::Unhandled`).
+//! - **The desktop's sizing** (ARCHITECTURE "Configure from the
+//!   desktop"): maximize, restore and place (Snap) set the toplevel's
+//!   `Sizing` and send a configure of that surface size and states
+//!   (maximized, activated with the keyboard focus, tiled from version
+//!   2); the window moves to the desktop's place at the commit after the
+//!   client acked it (`XdgSurface::unacked`, `place`). The client's
+//!   set_maximized, unset_maximized and set_minimized are the desktop's
+//!   actions (`Host::window_act`), answered the same way.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -177,6 +188,20 @@ const DECORATION_ALREADY_CONSTRUCTED: u32 = 1;
 const DECORATION_ORPHANED: u32 = 2;
 const DECORATION_INVALID_MODE: u32 = 3;
 
+/// xdg_toplevel's states (the configure's array).
+pub const STATE_MAXIMIZED: u32 = 1;
+pub const STATE_ACTIVATED: u32 = 4;
+pub const STATE_TILED_LEFT: u32 = 5;
+pub const STATE_TILED_RIGHT: u32 = 6;
+pub const STATE_TILED_TOP: u32 = 7;
+pub const STATE_TILED_BOTTOM: u32 = 8;
+/// xdg_toplevel's wm_capabilities: the desktop maximizes and minimizes.
+const CAPABILITY_MAXIMIZE: u32 = 2;
+const CAPABILITY_MINIMIZE: u32 = 4;
+/// Configures sent and not acked kept per xdg_surface (an ack names one
+/// of them); beyond, the oldest is forgotten.
+pub const MAX_CONFIGURES: usize = 16;
+
 /// zxdg_toplevel_decoration_v1's modes.
 pub const MODE_CLIENT_SIDE: u32 = 1;
 pub const MODE_SERVER_SIDE: u32 = 2;
@@ -220,6 +245,22 @@ pub trait Host {
         decorated: bool,
     ) -> Option<u32>;
     fn window_resize(&mut self, id: u32, width: u32, height: u32, decorated: bool);
+    /// Moves the window's outer rectangle to (x, y) for a `width` x
+    /// `height` surface (the desktop's place, from a configure the client
+    /// acked).
+    fn window_place(&mut self, id: u32, x: i32, y: i32, width: u32, height: u32, decorated: bool);
+    /// The window's outer rectangle (x, y, width, height).
+    fn window_outer(&mut self, id: u32) -> Option<(i32, i32, u32, u32)>;
+    /// The desktop does `act` to the window (the client asked for it:
+    /// xdg_toplevel.set_maximized and the like); what follows comes back
+    /// as input (SC_MAXIMIZE and the others).
+    fn window_act(&mut self, id: u32, act: Act);
+    /// The desktop's work area (the screen above the taskbar): a
+    /// maximized window's outer size.
+    fn work_area(&mut self) -> (u32, u32);
+    /// The surface size of a window whose outer size is `width` x
+    /// `height` (framed: less shasha's frame).
+    fn surface_size(&mut self, width: u32, height: u32, decorated: bool) -> (u32, u32);
     /// Rows `y..y + rows` of the window's pixels (0x00RRGGBB, `width` per
     /// row).
     fn window_present(&mut self, id: u32, y: u32, width: u32, rows: u32, pixels: &[u32]);
@@ -245,7 +286,14 @@ pub enum Note<'a> {
         buffer: Option<(u32, u32)>,
         rows: Option<(u32, u32)>,
         window: Option<u32>,
+        /// Where the window was put (outer position) for the configure
+        /// this commit answers.
+        placed: Option<(i32, i32)>,
     },
+    /// A toplevel's configure sent: the size asked for (0x0: the client's
+    /// choice), the states (`STATE_*` bits: 1 << state), the xdg_surface's
+    /// serial.
+    Configure { surface: u32, width: u32, height: u32, states: u32, serial: u32 },
     /// A window was shown for a surface, or could not be made.
     Mapped { surface: u32, window: Option<u32> },
     /// A protocol error: wl_display.error sent, the client ends.
@@ -255,15 +303,24 @@ pub enum Note<'a> {
     /// A request accepted but not acted on.
     Ignored { interface: &'static str, request: &'static str },
     /// Input delivered (`what`: "enter", "leave", "button", "axis", "key",
-    /// "focus", "unfocus", "close") to `surface` (window `window`):
+    /// "focus", "unfocus", "close", "maximize", "restore", "place") to
+    /// `surface` (window `window`):
     /// `code` the button or key, `state` pressed (1) or released (0).
     Input { what: &'static str, surface: u32, window: u32, code: u32, state: u32 },
     /// Input for a window the client has no surface showing (gone since,
     /// or never its own): dropped.
     InputDropped { window: u32 },
-    /// A window action Wayland windows do not follow yet (maximize,
-    /// restore, Snap's placing): ledgered.
+    /// A window message Wayland windows do not follow: ledgered.
     Unhandled { what: &'static str, window: u32 },
+}
+
+/// What a client asks the desktop to do to its window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Act {
+    Maximize,
+    /// Back from maximized (or snapped).
+    Restore,
+    Minimize,
 }
 
 /// Why a client ends.
@@ -372,6 +429,14 @@ struct XdgSurface {
     sent: Option<u32>,
     /// A configure was acked since the role was given (or since unmapped).
     acked: bool,
+    /// The configures sent and not acked yet, oldest first: serial and
+    /// the outer position the desktop asked for with it (at most
+    /// MAX_CONFIGURES). An ack may name any of them (the client need ack
+    /// only the last one it saw); it drops those before it too.
+    unacked: Vec<(u32, Option<(i32, i32)>)>,
+    /// The position of the configure acked, applied at the next commit
+    /// of a buffer (with the buffer's size).
+    place: Option<(i32, i32)>,
 }
 
 struct Toplevel {
@@ -380,6 +445,25 @@ struct Toplevel {
     decoration: Option<u32>,
     title: Vec<u8>,
     app_id: Vec<u8>,
+    /// What the desktop asks for: the surface size in each configure
+    /// (0x0, the client's choice, until the desktop sizes the window), its
+    /// states, and where the window goes.
+    sizing: Sizing,
+}
+
+/// A toplevel's size and states as the desktop set them (maximize, Snap,
+/// a place); activated follows the keyboard focus.
+#[derive(Clone, Copy, Default, Debug)]
+struct Sizing {
+    size: (u32, u32),
+    maximized: bool,
+    /// STATE_TILED_* as bits (1 << state): sent from xdg_toplevel 2.
+    tiled: u32,
+    /// The outer rectangle a maximized window goes back to.
+    restore: Option<(i32, i32, u32, u32)>,
+    /// The outer position the desktop put the window at, until a commit
+    /// applied it.
+    target: Option<(i32, i32)>,
 }
 
 enum Kind<F> {
@@ -445,8 +529,15 @@ pub struct Client<F> {
     out_fds: VecDeque<(usize, F)>,
     seat: Seat,
     serial: u32,
+    /// Frame callbacks whose commit was applied, waiting for the next
+    /// refresh (`refresh`).
+    due: Vec<u32>,
     /// Requests handled (the state dump).
     pub requests: u64,
+    /// Commits that showed a buffer, and frame callbacks done (the state
+    /// dump, the connection's summary).
+    pub commits: u64,
+    pub frames: u64,
 }
 
 /// Arguments as WAYLAND_DEBUG=1 shows them.
@@ -516,7 +607,10 @@ impl<F> Client<F> {
             out_fds: VecDeque::new(),
             seat: Seat::default(),
             serial: 0,
+            due: Vec::new(),
             requests: 0,
+            commits: 0,
+            frames: 0,
         })
     }
 
@@ -591,6 +685,7 @@ impl<F> Client<F> {
         self.objects.clear();
         self.fds.clear();
         self.out_fds.clear();
+        self.due.clear();
     }
 
     /// Its objects for the state dump, one per line.
@@ -613,14 +708,15 @@ impl<F> Client<F> {
                     b.width, b.height, b.stride, b.offset
                 )),
                 Kind::XdgSurface(x) => out(format_args!(
-                    "{name}#{id} v{v}: surface {}, toplevel {:?}, configure sent {:?}, acked {}",
-                    x.surface, x.toplevel, x.sent, x.acked
+                    "{name}#{id} v{v}: surface {}, toplevel {:?}, configure sent {:?}, acked {}, unacked {:?}, place {:?}",
+                    x.surface, x.toplevel, x.sent, x.acked, x.unacked, x.place
                 )),
                 Kind::Toplevel(t) => out(format_args!(
-                    "{name}#{id} v{v}: \"{}\" (app id \"{}\"), decoration {:?}",
+                    "{name}#{id} v{v}: \"{}\" (app id \"{}\"), decoration {:?}, {:?}",
                     Bytes(&t.title),
                     Bytes(&t.app_id),
-                    t.decoration
+                    t.decoration,
+                    t.sizing
                 )),
                 Kind::Decoration(d) => out(format_args!(
                     "{name}#{id} v{v}: toplevel {}, mode asked {:?}",
@@ -1397,6 +1493,7 @@ impl<F> Client<F> {
             _ => None,
         });
         let mut shown = None;
+        let mut placed = None;
         match (xdg, toplevel) {
             (Some(x), Some(Some(t))) => {
                 let (acked, sent) = match self.xdg(x) {
@@ -1420,7 +1517,16 @@ impl<F> Client<F> {
                 } else {
                     match attach {
                         Some(Some(b)) => {
-                            shown = self.show(host, sid, t, b, damage)?;
+                            // The position of an acked configure goes with
+                            // this buffer.
+                            placed = self.xdg(x).and_then(|xs| xs.place.take());
+                            shown = self.show(host, sid, t, b, damage, placed)?;
+                            if let Some(top) = self.toplevel(t)
+                                && placed.is_some()
+                                && top.sizing.target == placed
+                            {
+                                top.sizing.target = None;
+                            }
                             self.release(host, b)?;
                         }
                         Some(None) => self.unmap(host, sid, x)?,
@@ -1443,20 +1549,44 @@ impl<F> Client<F> {
                 }
             }
         }
+        if shown.is_some() {
+            self.commits += 1;
+        }
         let window = self.surface(sid).and_then(|s| s.window);
         host.note(Note::Commit {
             surface: sid,
             buffer: shown.map(|(size, _)| size),
             rows: shown.and_then(|(_, rows)| rows),
             window,
+            placed: placed.filter(|_| window.is_some()),
         });
+        // Done at the next refresh (the commit is presented already).
+        if self.due.try_extend_from_slice(&frames).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        Ok(())
+    }
+
+    /// Whether frame callbacks wait for the next refresh.
+    pub fn frames_due(&self) -> bool {
+        !self.due.is_empty()
+    }
+
+    /// The refresh came: every frame callback whose commit was applied is
+    /// done, with the time in milliseconds, and deleted.
+    pub fn refresh<H: Host<Fd = F>>(&mut self, host: &mut H) -> Result {
         let now = host.now_ms();
-        for cb in frames {
-            if self.object(cb).is_some() {
+        let due = core::mem::take(&mut self.due);
+        for &cb in &due {
+            if matches!(self.object(cb), Some(Object { kind: Kind::Callback, .. })) {
                 self.event(host, cb, WL_CALLBACK, 0, &[Arg::Uint(now)])?;
                 self.delete(host, cb)?;
+                self.frames += 1;
             }
         }
+        // The vector's room is kept for the next ones.
+        self.due = due;
+        self.due.clear();
         Ok(())
     }
 
@@ -1469,8 +1599,11 @@ impl<F> Client<F> {
     }
 
     /// The toplevel's configure: bounds and capabilities first where its
-    /// version has them, then the size (0x0: the client chooses) and the
-    /// xdg_surface's serial.
+    /// version has them, then the size the desktop asks for (0x0: the
+    /// client chooses) and the states (maximized, activated while the
+    /// surface has the keyboard focus, tiled from version 2), the
+    /// decoration's mode, and the xdg_surface's serial, remembered with
+    /// the position the desktop asked for until acked.
     fn configure<H: Host<Fd = F>>(&mut self, host: &mut H, x: u32, t: u32) -> Result {
         let version = self.object(t).map_or(1, |o| o.version);
         if version >= 4 {
@@ -1478,18 +1611,63 @@ impl<F> Client<F> {
             self.event(host, t, XDG_TOPLEVEL, 2, &[Arg::Int(w as i32), Arg::Int(h as i32)])?;
         }
         if version >= 5 {
-            // None of window_menu, maximize, fullscreen, minimize yet.
-            self.event(host, t, XDG_TOPLEVEL, 3, &[Arg::Array(&[])])?;
+            // Neither window_menu nor fullscreen yet.
+            let mut caps = [0u8; 8];
+            caps[..4].copy_from_slice(&CAPABILITY_MAXIMIZE.to_le_bytes());
+            caps[4..].copy_from_slice(&CAPABILITY_MINIMIZE.to_le_bytes());
+            self.event(host, t, XDG_TOPLEVEL, 3, &[Arg::Array(&caps)])?;
         }
-        self.event(host, t, XDG_TOPLEVEL, 0, &[Arg::Int(0), Arg::Int(0), Arg::Array(&[])])?;
+        let sizing = self.toplevel(t).map(|top| top.sizing).unwrap_or_default();
+        let surface = match self.object(x) {
+            Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.surface,
+            _ => 0,
+        };
+        let mut bits = 0u32;
+        if sizing.maximized {
+            bits |= 1 << STATE_MAXIMIZED;
+        }
+        if surface != 0 && self.seat.keyboard == Some(surface) {
+            bits |= 1 << STATE_ACTIVATED;
+        }
+        if version >= 2 {
+            bits |= sizing.tiled;
+        }
+        // The states in their numeric order.
+        let mut states = [0u8; 4 * 10];
+        let mut n = 0;
+        for state in 1..10u32 {
+            if bits & 1 << state != 0 {
+                states[n..n + 4].copy_from_slice(&state.to_le_bytes());
+                n += 4;
+            }
+        }
+        let (w, h) = sizing.size;
+        let size = [Arg::Int(w as i32), Arg::Int(h as i32), Arg::Array(&states[..n])];
+        self.event(host, t, XDG_TOPLEVEL, 0, &size)?;
         if let Some(d) = self.toplevel(t).and_then(|top| top.decoration) {
             let mode = self.mode(t);
             self.event(host, d, TOPLEVEL_DECORATION, 0, &[Arg::Uint(mode)])?;
         }
         let serial = self.next_serial();
         self.event(host, x, XDG_SURFACE, 0, &[Arg::Uint(serial)])?;
-        if let Some(xs) = self.xdg(x) {
-            xs.sent = Some(serial);
+        let Some(xs) = self.xdg(x) else { return Ok(()) };
+        xs.sent = Some(serial);
+        if xs.unacked.len() >= MAX_CONFIGURES {
+            xs.unacked.remove(0);
+        }
+        if xs.unacked.try_push((serial, sizing.target)).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        host.note(Note::Configure { surface, width: w, height: h, states: bits, serial });
+        Ok(())
+    }
+
+    /// Sends toplevel `t` a configure again if it was configured (its
+    /// state or size changed).
+    fn reconfigure<H: Host<Fd = F>>(&mut self, host: &mut H, t: u32) -> Result {
+        let x = self.toplevel(t).map_or(0, |top| top.xdg);
+        if self.xdg(x).is_some_and(|xs| xs.sent.is_some()) {
+            self.configure(host, x, t)?;
         }
         Ok(())
     }
@@ -1529,6 +1707,7 @@ impl<F> Client<F> {
         t: u32,
         b: u32,
         damage: Option<(i64, i64)>,
+        place: Option<(i32, i32)>,
     ) -> Result<Option<Shown>> {
         let (width, height) = match self.object(b) {
             Some(Object { kind: Kind::Buffer(buf), .. }) => (buf.width, buf.height),
@@ -1548,7 +1727,9 @@ impl<F> Client<F> {
         s.size = (width, height);
         let window = match had {
             Some(w) => {
-                if resized {
+                if let Some((x, y)) = place {
+                    host.window_place(w, x, y, width, height, s.decorated);
+                } else if resized {
                     host.window_resize(w, width, height, s.decorated);
                 }
                 Some(w)
@@ -1646,9 +1827,19 @@ impl<F> Client<F> {
                 host.window_destroy(w);
             }
         }
-        if let Some(xs) = self.xdg(x) {
-            xs.sent = None;
-            xs.acked = false;
+        let toplevel = match self.xdg(x) {
+            Some(xs) => {
+                xs.sent = None;
+                xs.acked = false;
+                xs.unacked.clear();
+                xs.place = None;
+                xs.toplevel
+            }
+            None => None,
+        };
+        // A new window is the client's size again.
+        if let Some(top) = toplevel.and_then(|t| self.toplevel(t)) {
+            top.sizing = Sizing::default();
         }
         Ok(())
     }
@@ -1678,7 +1869,14 @@ impl<F> Client<F> {
                         format_args!("wl_surface@{sid} has a buffer attached"),
                     ));
                 }
-                let x = XdgSurface { surface: sid, toplevel: None, sent: None, acked: false };
+                let x = XdgSurface {
+                    surface: sid,
+                    toplevel: None,
+                    sent: None,
+                    acked: false,
+                    unacked: Vec::new(),
+                    place: None,
+                };
                 self.insert(host, id, XDG_SURFACE, r.version, Kind::XdgSurface(x))?;
                 if let Some(s) = self.surface(sid) {
                     s.xdg = Some(id);
@@ -1720,8 +1918,13 @@ impl<F> Client<F> {
                         format_args!("xdg_surface@{x} already has a role"),
                     ));
                 }
-                let t =
-                    Toplevel { xdg: x, decoration: None, title: Vec::new(), app_id: Vec::new() };
+                let t = Toplevel {
+                    xdg: x,
+                    decoration: None,
+                    title: Vec::new(),
+                    app_id: Vec::new(),
+                    sizing: Sizing::default(),
+                };
                 self.insert(host, *id, XDG_TOPLEVEL, r.version, Kind::Toplevel(t))?;
                 if let Some(xs) = self.xdg(x) {
                     xs.toplevel = Some(*id);
@@ -1753,17 +1956,25 @@ impl<F> Client<F> {
                         format_args!("ack_configure without a role"),
                     ));
                 }
-                if sent != Some(*serial) {
+                let serial = *serial;
+                let Some(xs) = self.xdg(x) else { return Ok(()) };
+                let Some(i) = xs.unacked.iter().position(|(s, _)| *s == serial) else {
                     return Err(self.fail(
                         host,
                         x,
                         XDG_SURFACE_INVALID_SERIAL,
-                        format_args!("ack_configure of serial {serial}, not one sent ({sent:?})"),
+                        format_args!(
+                            "ack_configure of serial {serial}, not one sent and not acked (last sent {sent:?})"
+                        ),
                     ));
+                };
+                // Acking one acks those before it.
+                let at = xs.unacked[i].1;
+                xs.unacked.drain(..=i);
+                if at.is_some() {
+                    xs.place = at;
                 }
-                if let Some(xs) = self.xdg(x) {
-                    xs.acked = true;
-                }
+                xs.acked = true;
                 Ok(())
             }
             _ => Ok(()),
@@ -1828,9 +2039,31 @@ impl<F> Client<F> {
                 }
                 Ok(())
             }
+            // set_maximized, unset_maximized, set_minimized: the desktop's
+            // action on its window (as its caption buttons), which comes
+            // back as a configure; before the window is shown, nothing to
+            // act on yet.
+            (9 | 10 | 13, []) => {
+                let act = match r.op {
+                    9 => Act::Maximize,
+                    10 => Act::Restore,
+                    _ => Act::Minimize,
+                };
+                let surface = match self.object(x) {
+                    Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.surface,
+                    _ => 0,
+                };
+                match self.surface(surface).and_then(|s| s.window) {
+                    Some(w) => host.window_act(w, act),
+                    None => {
+                        host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name })
+                    }
+                }
+                Ok(())
+            }
             // set_parent, show_window_menu, move, resize, set_max_size,
-            // set_min_size, set_maximized, unset_maximized, set_fullscreen,
-            // unset_fullscreen, set_minimized: accepted, not acted on yet.
+            // set_min_size, set_fullscreen, unset_fullscreen: accepted, not
+            // acted on yet.
             _ => {
                 host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
                 Ok(())
@@ -2025,6 +2258,9 @@ impl<F> Client<F> {
             | Input::Key { window, .. }
             | Input::Left { window }
             | Input::Close { window }
+            | Input::Maximize { window }
+            | Input::Restore { window }
+            | Input::Place { window, .. }
             | Input::Unhandled { window, .. } => window,
         };
         let Some(sid) = self.surface_of(window) else {
@@ -2033,15 +2269,29 @@ impl<F> Client<F> {
         };
         let note = |what, code, state| Note::Input { what, surface: sid, window, code, state };
         match input {
+            // The keyboard focus, and the activated state with it.
             Input::Focus { active: true, .. } => {
-                if self.seat.keyboard != Some(sid) {
+                let old = self.seat.keyboard;
+                if old != Some(sid) {
                     self.keyboard_enter(host, sid)?;
+                    if let Some(o) = old.and_then(|o| self.toplevel_of(o)) {
+                        self.reconfigure(host, o)?;
+                    }
+                    if let Some(t) = self.toplevel_of(sid) {
+                        self.reconfigure(host, t)?;
+                    }
                 }
             }
             Input::Focus { active: false, .. } => {
                 if self.seat.keyboard == Some(sid) {
                     self.keyboard_leave(host)?;
+                    if let Some(t) = self.toplevel_of(sid) {
+                        self.reconfigure(host, t)?;
+                    }
                 }
+            }
+            Input::Maximize { .. } | Input::Restore { .. } | Input::Place { .. } => {
+                self.desktop_sizing(host, sid, window, input)?;
             }
             Input::Motion { x, y, .. } => {
                 self.pointer_at(host, sid, x, y)?;
@@ -2118,6 +2368,103 @@ impl<F> Client<F> {
             Input::Unhandled { what, .. } => host.note(Note::Unhandled { what, window }),
         }
         Ok(())
+    }
+
+    /// The toplevel surface `sid` has.
+    fn toplevel_of(&self, sid: u32) -> Option<u32> {
+        let x = match self.object(sid) {
+            Some(Object { kind: Kind::Surface(s), .. }) => s.xdg?,
+            _ => return None,
+        };
+        match self.object(x) {
+            Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.toplevel,
+            _ => None,
+        }
+    }
+
+    /// The desktop sizes window `window` (surface `sid`): maximized (the
+    /// work area; the window's rectangle kept for restoring), restored
+    /// (to that rectangle), or placed (Snap: tiled against the work area's
+    /// left or right edge and its top and bottom). The toplevel gets a
+    /// configure of that surface size; the window moves and takes the
+    /// buffer's size at the commit after the client acked it.
+    fn desktop_sizing<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        sid: u32,
+        window: u32,
+        input: Input,
+    ) -> Result {
+        let Some(t) = self.toplevel_of(sid) else { return Ok(()) };
+        let decorated = self.surface(sid).is_some_and(|s| s.decorated);
+        let (work_w, work_h) = host.work_area();
+        let outer = host.window_outer(window);
+        let Some(top) = self.toplevel(t) else { return Ok(()) };
+        let mut z = top.sizing;
+        let what = match input {
+            Input::Maximize { .. } => {
+                if !z.maximized {
+                    z.restore = outer;
+                }
+                z.maximized = true;
+                z.tiled = 0;
+                z.size = host.surface_size(work_w, work_h, decorated);
+                z.target = Some((0, 0));
+                "maximize"
+            }
+            Input::Restore { .. } => {
+                if !z.maximized {
+                    // Not maximized here (the desktop restores a
+                    // minimized window itself).
+                    return Ok(());
+                }
+                z.maximized = false;
+                z.tiled = 0;
+                match z.restore.take() {
+                    Some((x, y, w, h)) => {
+                        z.size = host.surface_size(w, h, decorated);
+                        z.target = Some((x, y));
+                    }
+                    // Maximized by a place: the client chooses again.
+                    None => {
+                        z.size = (0, 0);
+                        z.target = None;
+                    }
+                }
+                "restore"
+            }
+            Input::Place { x, y, w, h, .. } => {
+                let fills = (x, y) == (0, 0) && (w, h) == (work_w, work_h);
+                if fills && !z.maximized {
+                    z.restore = outer;
+                } else if !fills {
+                    z.restore = None;
+                }
+                z.maximized = fills;
+                // Against the work area's left or right edge, its height:
+                // tiled on those sides (as the desktop marks it snapped).
+                let (left, right) = (x == 0, i64::from(x) + i64::from(w) == i64::from(work_w));
+                z.tiled = 0;
+                if !fills && y == 0 && h == work_h && (left || right) {
+                    z.tiled = 1 << STATE_TILED_TOP | 1 << STATE_TILED_BOTTOM;
+                    if left {
+                        z.tiled |= 1 << STATE_TILED_LEFT;
+                    }
+                    if right {
+                        z.tiled |= 1 << STATE_TILED_RIGHT;
+                    }
+                }
+                z.size = host.surface_size(w, h, decorated);
+                z.target = Some((x, y));
+                "place"
+            }
+            _ => return Ok(()),
+        };
+        if let Some(top) = self.toplevel(t) {
+            top.sizing = z;
+        }
+        host.note(Note::Input { what, surface: sid, window, code: 0, state: 0 });
+        self.reconfigure(host, t)
     }
 
     /// The pointer at (x, y) on surface `sid` (from the desktop's window):

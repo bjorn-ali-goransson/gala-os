@@ -31,6 +31,18 @@
  * - the keyboard, as the scenario types: evdev codes (a = 30, Left = 105,
  *   an E0 key), Shift's depressed modifier (1) in a modifiers event after
  *   the key that changed it;
+ * - xdg_wm_base 6's wm_capabilities: maximize and minimize (gala's desktop
+ *   has both; no window menu or fullscreen yet);
+ * - the activated state in the toplevel's configure once the window is
+ *   the desktop's active one (xdg-shell: "the client window is active");
+ * - configure from the desktop (the scenario's Snap keys): Win+Up
+ *   maximizes (the work area's size less shasha's frame, states maximized
+ *   and activated), Win+Down restores (the size before), Win+Left snaps
+ *   to the left half (tiled_left, tiled_top, tiled_bottom: xdg_toplevel
+ *   2), Win+Down puts it back; each is acked and answered with a buffer
+ *   of the size asked for (the scenario checks the window's pixels where
+ *   the desktop placed it). The sizes are those of the scenario's
+ *   1280 x 800 screen less its 48-row taskbar;
  * - xdg_toplevel.close when the scenario clicks the frame's close button;
  *   destroying that toplevel, which has the keyboard focus, gives the
  *   keyboard's leave (an unmapped surface loses its focus);
@@ -141,6 +153,18 @@ static i32 repeat_rate = -1, repeat_delay = -1;
 static u32 decoration_mode;
 static int closed;
 
+/* The toplevel's last configure: size, states (xdg_toplevel.configure). */
+static i32 conf_w, conf_h;
+static u32 conf_states[16];
+static u32 conf_nstates;
+static int conf_activated;
+/* wm_capabilities (xdg_toplevel 5). */
+static u32 wm_caps[8];
+static u32 wm_ncaps;
+/* The first window's buffer size, and a configure asking for another. */
+static i32 shown_w, shown_h;
+static int resize_due;
+
 /* Focus and pointer state. */
 static u32 surface1, surface2;
 static u32 kb_focus, kb_enter_keys;
@@ -188,6 +212,25 @@ static void event(u32 object, u32 opcode, const unsigned char *a, u32 len)
 		send(-1);
 	} else if (k == XDG_SURFACE && opcode == 0) {
 		configure_serial = rd(a);
+		if (live && conf_w > 0 && (conf_w != shown_w || conf_h != shown_h))
+			resize_due = 1;
+	} else if (k == TOPLEVEL && opcode == 0) {
+		/* configure(width, height, states) */
+		u32 n = rd(a + 8) / 4;
+		conf_w = (i32)rd(a);
+		conf_h = (i32)rd(a + 4);
+		conf_nstates = 0;
+		conf_activated = 0;
+		for (u32 i = 0; i < n && i < 16; i++) {
+			conf_states[conf_nstates++] = rd(a + 12 + 4 * i);
+			conf_activated |= rd(a + 12 + 4 * i) == 4;
+		}
+	} else if (k == TOPLEVEL && opcode == 3) {
+		/* wm_capabilities(capabilities) */
+		u32 n = rd(a) / 4;
+		wm_ncaps = 0;
+		for (u32 i = 0; i < n && i < 8; i++)
+			wm_caps[wm_ncaps++] = rd(a + 4 + 4 * i);
 	} else if (k == TOPLEVEL && opcode == 1) {
 		closed = 1;
 		say_text("toplevel close");
@@ -473,6 +516,14 @@ static struct window make_window(const char *title, u32 buffer, int w, int h, u3
 		more("configure");
 	say("decoration mode", decoration_mode);
 	say_bool("xdg_surface configure", 1);
+	put("wm capabilities:");
+	for (u32 i = 0; i < wm_ncaps; i++) {
+		static const char *const names[] = { "?", "window_menu", "maximize", "fullscreen",
+						     "minimize" };
+		put(" ");
+		put(wm_caps[i] < 5 ? names[wm_caps[i]] : "?");
+	}
+	end_line();
 	begin(win.xdg, 4); /* ack_configure */
 	word(configure_serial);
 	send(-1);
@@ -490,6 +541,57 @@ static struct window make_window(const char *title, u32 buffer, int w, int h, u3
 	begin(win.surface, 6); /* commit */
 	send(-1);
 	return win;
+}
+
+/* The desktop asked the first window for another size (resize_due): the
+ * configure printed, acked, and a buffer of that size committed (the
+ * first buffer again for its own size), then the step's line for the
+ * scenario. */
+static void resize(struct window *w)
+{
+	static const char *const state_names[] = { "?", "maximized", "fullscreen", "resizing",
+						   "activated", "tiled_left", "tiled_right",
+						   "tiled_top", "tiled_bottom", "suspended" };
+	static const char *const steps[] = { "maximized", "restored", "snapped", "unsnapped" };
+	static const u32 colours[] = { 0x002e8b57, 0, 0x008b4513, 0 };
+	static int step;
+	resize_due = 0;
+	put("configure ");
+	put_dec((u32)conf_w);
+	put(" ");
+	put_dec((u32)conf_h);
+	put(":");
+	for (u32 i = 0; i < conf_nstates; i++) {
+		put(" ");
+		put(conf_states[i] < 10 ? state_names[conf_states[i]] : "?");
+	}
+	end_line();
+	begin(w->xdg, 4); /* ack_configure */
+	word(configure_serial);
+	send(-1);
+	u32 buffer = w->buffer;
+	if (conf_w != 200 || conf_h != 150)
+		buffer = make_buffer(conf_w, conf_h, conf_h, colours[step & 3], colours[step & 3]);
+	begin(w->surface, 1); /* attach(buffer, x, y) */
+	word(buffer);
+	word(0);
+	word(0);
+	send(-1);
+	begin(w->surface, 9); /* damage_buffer */
+	word(0);
+	word(0);
+	word((u32)conf_w);
+	word((u32)conf_h);
+	send(-1);
+	begin(w->surface, 6); /* commit */
+	send(-1);
+	roundtrip();
+	shown_w = conf_w;
+	shown_h = conf_h;
+	put("wl_input_test: ");
+	put(step < 4 ? steps[step] : "resized");
+	end_line();
+	step++;
 }
 
 int main(int argc, char **argv, char **envp)
@@ -522,9 +624,10 @@ int main(int argc, char **argv, char **envp)
 	if (missing)
 		lx_exit(1);
 
-	/* Bind wl_compositor 4, wl_shm 1, xdg_wm_base 1, wl_seat 7 and the
-	 * decoration manager 1 (at most what is offered). */
-	static const u32 want_version[WANTED] = { 4, 1, 1, 7, 1 };
+	/* Bind wl_compositor 4, wl_shm 1, xdg_wm_base 6 (tiled states,
+	 * wm_capabilities), wl_seat 7 and the decoration manager 1 (at most
+	 * what is offered). */
+	static const u32 want_version[WANTED] = { 4, 1, 6, 7, 1 };
 	static const enum kind kinds[WANTED] = { COMPOSITOR, SHM, WM_BASE, SEAT, DECO_MANAGER };
 	u32 bound[WANTED];
 	for (int i = 0; i < WANTED; i++) {
@@ -588,17 +691,26 @@ int main(int argc, char **argv, char **envp)
 	u32 buffer1 = make_buffer(200, 150, 75, 0x00336699, 0x00ff8800);
 	struct window w1 = make_window("wl_input_test", buffer1, 200, 150, 0);
 	surface1 = w1.surface;
+	shown_w = 200;
+	shown_h = 150;
 	while (kb_focus != surface1 || !mods_after_enter)
 		more("keyboard enter");
 	say_bool("keyboard enter first", 1);
 	say("keyboard enter keys down", kb_enter_keys);
+	/* Active: a configure with the activated state follows. */
+	while (!conf_activated)
+		more("activated");
+	say_bool("configure activated first", 1);
 	live = 1;
 	say_text("wl_input_test: mapped");
 
-	/* The scenario's clicks, wheel, keys and pointer moves, until the
-	 * frame's close button closes it. */
-	while (!closed)
+	/* The scenario's clicks, wheel, keys, pointer moves and Snap keys,
+	 * until the frame's close button closes it. */
+	while (!closed) {
 		more("input");
+		if (resize_due)
+			resize(&w1);
+	}
 	begin(w1.decoration, 0); /* destroy: before its toplevel */
 	send(-1);
 	begin(w1.toplevel, 0);

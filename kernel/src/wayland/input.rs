@@ -74,8 +74,16 @@ pub enum Input {
     Left { window: u32 },
     /// The frame's close button (or `gala close`): xdg_toplevel.close.
     Close { window: u32 },
-    /// A window action Wayland windows do not follow yet (maximize,
-    /// restore, Snap's placing, minimize): named for the ledger.
+    /// The desktop maximizes the window (SC_MAXIMIZE: the caption's
+    /// button, Win+Up, `gala maximize`): a configure of the work area.
+    Maximize { window: u32 },
+    /// The desktop restores a maximized window (SC_RESTORE).
+    Restore { window: u32 },
+    /// The desktop puts the window at this outer rectangle
+    /// (GALA_WM_PLACE: Snap, `gala place`, back from Snap).
+    Place { window: u32, x: i32, y: i32, w: u32, h: u32 },
+    /// A window message a Wayland window does not follow: named for the
+    /// ledger.
     Unhandled { window: u32, what: &'static str },
 }
 
@@ -154,7 +162,8 @@ fn point(lparam: u64) -> (i32, i32) {
 /// The desktop's message for `window` as Wayland input; None for one that
 /// means nothing to a Wayland client (a drag's WM_MOVE: Wayland clients do
 /// not know where their windows are) or that it cannot have (a key the
-/// keymap lacks).
+/// keymap lacks). SC_MAXIMIZE, SC_RESTORE and GALA_WM_PLACE are the
+/// desktop sizing the window: the client gets a configure for them.
 pub fn translate(window: u32, message: u32, wparam: u64, lparam: u64) -> Option<Input> {
     let (x, y) = point(lparam);
     let button = |button, pressed| Some(Input::Button { window, x, y, button, pressed });
@@ -177,13 +186,17 @@ pub fn translate(window: u32, message: u32, wparam: u64, lparam: u64) -> Option<
         GALA_WM_ACTIVE => Some(Input::Focus { window, active: wparam != 0 }),
         GALA_WM_POINTER_LEFT => Some(Input::Left { window }),
         WM_SYSCOMMAND if wparam & 0xfff0 == SC_CLOSE => Some(Input::Close { window }),
-        WM_SYSCOMMAND if wparam & 0xfff0 == SC_MAXIMIZE => {
-            Some(Input::Unhandled { window, what: "maximize" })
-        }
-        WM_SYSCOMMAND if wparam & 0xfff0 == SC_RESTORE => {
-            Some(Input::Unhandled { window, what: "restore" })
-        }
-        GALA_WM_PLACE => Some(Input::Unhandled { window, what: "place" }),
+        WM_SYSCOMMAND if wparam & 0xfff0 == SC_MAXIMIZE => Some(Input::Maximize { window }),
+        WM_SYSCOMMAND if wparam & 0xfff0 == SC_RESTORE => Some(Input::Restore { window }),
+        // wParam MAKELONG(left, top) (signed), lParam MAKELONG(width,
+        // height): winstate's send_place.
+        GALA_WM_PLACE => Some(Input::Place {
+            window,
+            x: i32::from(wparam as u16 as i16),
+            y: i32::from((wparam >> 16) as u16 as i16),
+            w: u32::from(lparam as u16),
+            h: u32::from((lparam >> 16) as u16),
+        }),
         // Minimized by the desktop (the taskbar): it just is not shown;
         // xdg-shell has no event for it.
         GALA_WM_MINIMIZED => None,

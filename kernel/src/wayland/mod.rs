@@ -27,6 +27,9 @@
 //!   bytes of events waiting); a protocol error is answered with
 //!   `wl_display.error` and the connection closed after the error is
 //!   written; the client's windows go when it does.
+//! - **Frame callbacks** are done at the 60 Hz refresh after their commit
+//!   (`next_refresh`): a connection with callbacks due waits for that
+//!   tick, and the thread's wait ends at the earliest of them.
 //! - **Pixels**: a wl_shm pool is the client's memfd (its open file
 //!   description, held while a pool or buffer uses it); a commit reads the
 //!   damaged rows from the file's pages (`RamFs::read`, the same pages the
@@ -53,11 +56,13 @@
 //! client's pid and object; a protocol error is also a log line; the
 //! ledger counts the requests gala lacks (`wayland request missing`,
 //! detail the opcode, service the interface) and those it accepts without
-//! acting on them (`wayland request ignored`) and the window actions
-//! Wayland windows do not follow yet (`wayland window action missing`);
+//! acting on them (`wayland request ignored`) and the window messages
+//! Wayland windows do not follow (`wayland window action missing`);
 //! `wayland input` events say where input went (enter, leave, button,
-//! axis, key, focus, unfocus, close; or dropped, for a window the client
-//! does not show); `wayland=trace` logs every request and event as
+//! axis, key, focus, unfocus, close, maximize, restore, place; or
+//! dropped, for a window the client does not show); `wayland configure`
+//! each configure's size, states and serial; `wayland=trace` logs every
+//! request and event as
 //! `WAYLAND_DEBUG=1` prints them and each window message taken from the
 //! desktop (`input:` lines); the state dump lists every client, its
 //! objects and its seat (focus, keys down, modifiers).
@@ -80,7 +85,7 @@ use crate::nt::{ledger, winstate};
 use crate::runtime::{self, ThreadId};
 use crate::sync::IrqMutex;
 use crate::unix::{self, Address, Cred, Kind, Right, Socket};
-use client::{Client, End, Host, Note};
+use client::{Act, Client, End, Host, Note};
 
 /// The socket's name in the runtime directory.
 pub const DISPLAY: &str = "wayland-0";
@@ -88,6 +93,15 @@ pub const DISPLAY: &str = "wayland-0";
 const BUDGET: usize = 256 * 1024;
 /// Connections waiting for the server's accept.
 const BACKLOG: usize = 128;
+/// The refresh frame callbacks are done at (wl_output's mode says 60 Hz).
+const REFRESH_HZ: u64 = 60;
+
+/// The first refresh after tick `now` (ticks are milliseconds): refreshes
+/// fall on the multiples of 1/60 s since boot.
+fn next_refresh(now: u64) -> u64 {
+    let k = now * REFRESH_HZ / runtime::TICK_HZ + 1;
+    (k * runtime::TICK_HZ).div_ceil(REFRESH_HZ)
+}
 
 static TRACE: AtomicBool = AtomicBool::new(false);
 /// Numbers clients for events and the dump.
@@ -103,6 +117,8 @@ struct Connection {
     /// Descriptors going with the next write (taken from the client's
     /// events; kept while the socket has no room).
     rights: Vec<Right>,
+    /// The tick of the refresh its due frame callbacks wait for.
+    refresh_at: Option<u64>,
 }
 
 struct Server {
@@ -265,14 +281,15 @@ pub fn start(mode: &str) -> Result<(), StartError> {
 fn serve(_: usize) {
     let me = runtime::current();
     loop {
-        let more = match SERVER.lock().as_mut() {
-            Some(s) => s.round(me),
+        let (more, refresh) = match SERVER.lock().as_mut() {
+            Some(s) => (s.round(me), s.clients.iter().filter_map(|c| c.refresh_at).min()),
             None => return,
         };
         if more {
             continue;
         }
-        runtime::prepare_wait(None);
+        // Until a socket changes, or the next refresh due.
+        runtime::prepare_wait(refresh);
         // A change from here on wakes the thread; one before it is seen
         // here.
         if SERVER.lock().as_ref().is_some_and(Server::ready) {
@@ -284,9 +301,12 @@ fn serve(_: usize) {
 
 impl Server {
     /// Whether a round would find work: a connection to accept, bytes or
-    /// an end to read, events to write where there is room.
+    /// an end to read, events to write where there is room, a refresh
+    /// due.
     fn ready(&self) -> bool {
+        let now = runtime::ticks();
         self.listener.readiness().readable
+            || self.clients.iter().any(|c| c.refresh_at.is_some_and(|at| at <= now))
             || self.clients.iter().any(|c| {
                 let r = c.sock.readiness();
                 r.readable || r.hangup || (!c.client.output().is_empty() && r.writable)
@@ -355,7 +375,14 @@ impl Server {
             "wayland connect",
             format_args!(r#""pid":{pid},"client":{number}"#),
         );
-        let _ = self.clients.try_push(Connection { number, pid, sock, client, rights: Vec::new() });
+        let _ = self.clients.try_push(Connection {
+            number,
+            pid,
+            sock,
+            client,
+            rights: Vec::new(),
+            refresh_at: None,
+        });
     }
 }
 
@@ -440,6 +467,20 @@ impl Connection {
         {
             ended = Some(e);
         }
+        // Frame callbacks: done at the refresh after their commit.
+        if ended.is_none() && self.client.frames_due() {
+            let now = runtime::ticks();
+            match self.refresh_at {
+                Some(at) if at <= now => {
+                    self.refresh_at = None;
+                    if let Err(e) = self.client.refresh(&mut host) {
+                        ended = Some(e.into());
+                    }
+                }
+                Some(_) => {}
+                None => self.refresh_at = Some(next_refresh(now)),
+            }
+        }
         if let Err(e) = self.flush() {
             ended = Some(e);
         }
@@ -516,12 +557,22 @@ impl Connection {
                 self.client.requests
             ),
         );
-        if !matches!(why, Why::Closed | Why::Error) {
+        let (pid, n, c) = (self.pid, self.number, &self.client);
+        if matches!(why, Why::Closed | Why::Error) {
+            crate::info!(
+                "wayland: pid {pid}'s connection {n} ended ({}): {} requests, {} commits shown, {} frame callbacks done",
+                why.name(),
+                c.requests,
+                c.commits,
+                c.frames
+            );
+        } else {
             crate::warn!(
-                "wayland: pid {}'s connection {} closed: {}",
-                self.pid,
-                self.number,
-                why.name()
+                "wayland: pid {pid}'s connection {n} ended ({}): {} requests, {} commits shown, {} frame callbacks done",
+                why.name(),
+                c.requests,
+                c.commits,
+                c.frames
             );
         }
     }
@@ -650,6 +701,48 @@ impl Host for KernelHost {
         });
     }
 
+    fn window_place(&mut self, id: u32, x: i32, y: i32, width: u32, height: u32, decorated: bool) {
+        let (w, h) = outer(width, height, decorated);
+        let owner = self.pid;
+        self.desktop(|d| Ok(((), Some(d.place(id, owner, x, y, w, h)?))));
+    }
+
+    fn window_outer(&mut self, id: u32) -> Option<(i32, i32, u32, u32)> {
+        let owner = self.pid;
+        self.desktop(|d| Ok((d.outer(id, owner), None))).flatten()
+    }
+
+    fn window_act(&mut self, id: u32, act: Act) {
+        let action = match act {
+            Act::Maximize => winstate::Action::Maximize,
+            Act::Restore => winstate::Action::Restore,
+            Act::Minimize => winstate::Action::Minimize,
+        };
+        let owner = self.pid;
+        // Only its own windows (act takes any window of the desktop).
+        let done = self.desktop(|d| {
+            d.outer(id, owner).ok_or(crate::nt::status::NtStatus::INVALID_HANDLE)?;
+            d.act(id, action)?;
+            Ok(((), None))
+        });
+        if done.is_none() {
+            crate::warn!("wayland: pid {owner}: the desktop refused {act:?} for window {id}");
+        }
+    }
+
+    fn work_area(&mut self) -> (u32, u32) {
+        let (w, h) = self.screen();
+        (w, h.saturating_sub(winstate::TASKBAR).max(1))
+    }
+
+    fn surface_size(&mut self, width: u32, height: u32, decorated: bool) -> (u32, u32) {
+        if !decorated {
+            return (width.max(1), height.max(1));
+        }
+        let (b, top) = (winstate::BORDER, winstate::BORDER + winstate::CAPTION);
+        (width.saturating_sub(2 * b).max(1), height.saturating_sub(top + b).max(1))
+    }
+
     fn window_present(&mut self, id: u32, y: u32, width: u32, rows: u32, pixels: &[u32]) {
         let r = Rect { x: 0, y: y.into(), w: width.into(), h: rows.into() };
         self.desktop(|d| Ok(((), Some(d.present(id, r, pixels, width as usize)?))));
@@ -693,19 +786,28 @@ impl Host for KernelHost {
                     ),
                 )
             }
-            Note::Commit { surface, buffer, rows, window } => {
+            Note::Commit { surface, buffer, rows, window, placed } => {
                 let (w, h) = buffer.unwrap_or((0, 0));
                 let (from, to) = rows.unwrap_or((0, 0));
+                let (px, py) = placed.unwrap_or((0, 0));
                 emit(
                     Category::Wayland,
                     "wayland commit",
                     format_args!(
-                        r#""pid":{pid},"client":{client},"surface":{surface},"buffer":{},"width":{w},"height":{h},"rows":[{from},{to}],"window":{}"#,
+                        r#""pid":{pid},"client":{client},"surface":{surface},"buffer":{},"width":{w},"height":{h},"rows":[{from},{to}],"window":{},"placed":{},"x":{px},"y":{py}"#,
                         buffer.is_some(),
-                        window.map_or(-1, i64::from)
+                        window.map_or(-1, i64::from),
+                        placed.is_some()
                     ),
                 )
             }
+            Note::Configure { surface, width, height, states, serial } => emit(
+                Category::Wayland,
+                "wayland configure",
+                format_args!(
+                    r#""pid":{pid},"client":{client},"surface":{surface},"width":{width},"height":{height},"states":{states},"serial":{serial}"#
+                ),
+            ),
             Note::Error { object, interface, code, message } => {
                 crate::warn!(
                     "wayland: pid {pid}: protocol error on {interface}@{object}, code {code}: {message}; disconnecting"
@@ -811,11 +913,15 @@ pub fn dump() {
     );
     for c in &s.clients {
         crate::info!(
-            "statedump: wayland client {} (pid {}): {} objects, {} requests, {} bytes of events waiting",
+            "statedump: wayland client {} (pid {}): {} objects, {} requests, {} commits shown, {} frame callbacks done, refresh at {:?} (now {}), {} bytes of events waiting",
             c.number,
             c.pid,
             c.client.object_count(),
             c.client.requests,
+            c.client.commits,
+            c.client.frames,
+            c.refresh_at,
+            runtime::ticks(),
             c.client.output().len()
         );
         c.client.describe(&mut |line| crate::info!("statedump:   {line}"));

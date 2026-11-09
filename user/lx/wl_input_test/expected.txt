@@ -17,8 +17,10 @@ repeat rate = 30
 repeat delay = 500
 decoration mode = 2
 xdg_surface configure = yes
+wm capabilities: maximize minimize
 keyboard enter first = yes
 keyboard enter keys down = 0
+configure activated first = yes
 wl_input_test: mapped
 pointer enter first
 button 272 pressed at 100,75
@@ -40,10 +42,19 @@ modifiers 0 0 0 0
 key 105 pressed
 key 105 released
 pointer leave first
+configure 1278 718: maximized activated
+wl_input_test: maximized
+configure 200 150: activated
+wl_input_test: restored
+configure 638 718: activated tiled_left tiled_top tiled_bottom
+wl_input_test: snapped
+configure 200 150: activated
+wl_input_test: unsnapped
 toplevel close
 keyboard leave first
 decoration mode = 1
 xdg_surface configure = yes
+wm capabilities: maximize minimize
 keyboard enter second, keys down 0
 modifiers 0 0 0 0
 wl_input_test: frameless mapped
