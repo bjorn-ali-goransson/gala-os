@@ -335,11 +335,15 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // console; `replay=<boot module>`: they read it from that recording
     // (kernel/src/replay.rs).
     start_record_replay(&info, &cmdline);
-    // `wayland=on` (or `trace`: every request and event logged): the
-    // Wayland server for Linux desktop programs, listening on
-    // /run/user/<uid>/wayland-0 before any program starts (ROADMAP LD).
-    if let Some(mode) = cmdline.value("wayland")
-        && let Err(e) = wayland::start(mode)
+    // The Wayland server for Linux desktop programs, listening on
+    // /run/user/<uid>/wayland-0 before any program starts (ROADMAP LD):
+    // on where the desktop has a shell (not bare: the server profile, or
+    // no screen and no `presenter=`), unless `wayland=off`; `wayland=on`
+    // starts it anyway, `trace` also logs every request and event.
+    let wayland_mode =
+        cmdline.value("wayland").unwrap_or(if nt::desktop::is_bare() { "off" } else { "on" });
+    if wayland_mode != "off"
+        && let Err(e) = wayland::start(wayland_mode)
     {
         error!("wayland: cannot start the server: {e:?}");
     }

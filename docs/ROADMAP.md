@@ -64,7 +64,16 @@ The ordering rules in force (set by the owner):
 
 ## Current focus
 
-In order:
+**The next big thing (the owner): Microsoft Office, item OF, with
+everything it depends on.** It goes before the list below (work in
+flight finishes: LD's first GTK program). Its chain, in order:
+OF step 1's gap analysis (what the apps import and register, ranked
+against gala); GPU G2's rest (DXVK: Direct3D 11 in software over
+lavapipe, which the apps' rendering expects); COM/OLE depth and the
+other blockers the analysis ranks; Click-to-Run's install and service
+(PK); then BR's WebView2 and PK stage 4's MSIX for the new Outlook.
+
+In order, after it:
 
 0. **BR stage 2** first (the owner: Chromium working, then the rest of
    this list; heavier, meatier work before polish): its window, input
@@ -741,8 +750,8 @@ parity already exposes.
    stream, a tool call included), so streaming is tested without TLS.
    Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
    Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
-   not with gala; scenarios copy the JDK's app-local copy today) need a
-   decided home in the image or the installer.
+   not with gala; scenarios copy the JDK's app-local copy today; gala's
+   own is decided, item OF).
 2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
    system store (rustls-native-certs through crypt32), which gala opens
    empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
@@ -1303,11 +1312,73 @@ and running it, not redistributing it.
 Word, Excel and PowerPoint (Click-to-Run) and the new Outlook (an MSIX
 package over WebView2). Classic Outlook is out of scope.
 
+**Priority**: the current focus (the owner), ahead of the rest of the
+list; its dependencies (GPU G2's DXVK, COM/OLE, Click-to-Run's
+install, WebView2, MSIX) are worked as the analysis ranks them.
+
+**Gap analysis** (step 1; the `office-survey` workflow, WORKFLOW "The
+Office survey"; Microsoft 365 Apps 16.0.20527.20150, Current channel,
+x64: 1486 PE files, 867 of them x64, 529 DLLs of Office's own). What
+Word, Excel and PowerPoint load (`import_survey.py --dumps ... --roots
+WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE`): 114 files at start, 85 more
+through delay imports. Office carries its own UCRT and VC runtime
+(app-local `ucrtbase.dll`, `vcruntime140.dll`), so the apps do not
+need gala's.
+- **To load** (static imports of the 114; no DLL is missing, only
+  functions): kernel32's CreateFile2 (15 files), the activation-context
+  queries FindActCtxSectionStringW and QueryActCtxW (11), CreateMutexExW,
+  FindFirstFileNameW/FindNextFileNameW, GetShortPathNameA,
+  GetThreadIOPendingFlag, GetVolumePathNamesForVolumeNameW,
+  IsSystemResumeAutomatic, OpenSemaphoreA, QueueUserWorkItem,
+  WerRegisterMemoryBlock/WerUnregisterMemoryBlock (5 each) and ten more
+  used once; ntdll's AVL generic tables (RtlInitializeGenericTableAvl
+  and its seven companions), NtNotifyChangeMultipleKeys, NtRenameKey,
+  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Some are
+  stubs today (CreateMutexExW, GetShortPathNameA, GetThreadIOPendingFlag,
+  GetVolumePathNamesForVolumeNameW): they must work, not only exist.
+- **Then, as the apps draw and work** (delay imports, files needing
+  each): gdiplus (13), Direct2D `d2d1` (7), `mscms` colour management
+  (5), Media Foundation `mfplat`/`mf` (4/2), `propsys` (4), `cryptui`
+  (4), `msi` (4), WIC `windowscodecs` (3), `rstrtmgr` (3), the
+  WinAppSDK/XAML pieces' app-model and ntuser API sets, `d3d10_1` and
+  `d3dcompiler_47` (2), `httpapi`, `srpapi`, `ninput`, `dnsapi`,
+  `activeds`, `credui`, `davclnt`; the full list with every function is
+  the survey's output. Direct2D and WIC lead the drawing path (Office
+  draws through Direct2D/DirectWrite, falling back to GDI+), with GPU
+  G2's Direct3D 11 under Direct2D.
+- **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
+  LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
+  ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
+
 **Next**:
-1. Gap analysis (black-box metadata only, CLEAN_ROOM): import tables,
-   delay loads, COM classes and services of the apps (installed with the
-   Office Deployment Tool) against gala's exports and stubs; a ranked
-   blocker list in this section, like AG's.
+1. The load list above, test first (a kernel32/ntdll test program for
+   the functions, expected results from Windows), until the three
+   apps' processes start in gala with Office's files in place; a
+   scenario that boots them (where the files come from: the native
+   install below, or a directory a local run provides; never
+   committed or published).
+   - The UCRT for the installer: gala's own `ucrtbase.dll` and
+     `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
+     msvcrt, test first against Windows (the owner's decision; also
+     the answer to PK's AIChat UCRT question and the JDK copies the
+     scenarios carry today).
+   - Alongside, natively: a pending scenario `office_install` runs the
+     Office Deployment Tool's `setup.exe /configure` in gala (its
+     ledger ranks the installer's blockers; the guest needs the CDN, so
+     on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
+     32-bit x86 program (WOW64), and by its import tables against
+     gala's i686 DLLs it does not load yet: it imports the UCRT
+     (`api-ms-win-crt-*`, which gala does not ship yet: gala's own,
+     above) and nine kernel32 functions
+     gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
+     K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
+     WerRegisterMemoryBlock/WerUnregisterMemoryBlock,
+     IsSystemResumeAutomatic, GetPhysicallyInstalledSystemMemory).
+     Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
+     wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
+     cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
+     control manager (advapi32's service calls are stubs); a few
+     shlwapi, user32, ole32, imm32 and shell32 functions.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,
@@ -2218,12 +2289,9 @@ the next breakthroughs).
    - a socket per session's desktop under its user's `/run/user/<uid>`,
      with `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` given to the Linux
      programs started there (today one socket for the boot user, the
-     environment passed by whoever starts them), and the server on
-     by default where a desktop is. That waits for `/run` as a tmpfs
-     mount of the Linux view (the decision and why: ARCHITECTURE
-     "Sessions" under the Wayland section): today the runtime
-     directory is `C:\run` in the shared file system, which Windows
-     programs see and the change log keeps;
+     environment passed by whoever starts them; the server is on by
+     default where the desktop has a shell, its runtime directory in
+     `/run`, the Linux view's tmpfs, `lx_run`);
    - more of weston's demos as clients (simple-damage: buffer scale
      and transform, viewporter; eventdemo: input through libwayland),
      each a `PREBUILT` member of the same package.
@@ -2234,6 +2302,18 @@ the next breakthroughs).
    editor) from a distribution's packages, its window and input checked
    on the screen; then a Qt one.
 4. X11 programs through Xwayland, once the Wayland server holds.
+5. Linux Chromium beside Windows Chromium (BR's): a distribution's
+   Chromium (or Google's Linux build) with `--ozone-platform=wayland
+   --no-sandbox` in a boot scenario, its window on the same desktop as
+   `chromium_window`'s, both browsers running at once and loading a page
+   from the guest's nginx. Expected blockers, each a Linux test program
+   recorded on real Linux first: `/proc` files Chromium reads
+   (`/proc/self/maps`, `status`, `stat`, `/proc/meminfo`), eventfd,
+   timerfd, inotify, `/dev/shm`, fontconfig and fonts, D-Bus optional
+   (absent: Chromium carries on without it). Then its sandbox
+   (user namespaces, seccomp-bpf; shares CT's namespace work) so
+   `--no-sandbox` goes, and the clipboard between the two browsers
+   (`wl_data_device` bridged to the Windows clipboard).
 
 **Done when** (each step): its test and scenario pass, and the Linux
 programs' transcripts match real Linux's.

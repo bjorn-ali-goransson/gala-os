@@ -1236,6 +1236,21 @@ a packer that stores them (NSIS's `File` without `SetDateSave off`)
 gives a new binary on every run. Check a generated binary by building it
 twice with a `touch` of its inputs in between.
 
+### The Office survey (ROADMAP OF)
+
+The `office-survey` workflow (`.github/workflows/office-survey.yml`; runs
+on a push that changes it or `tools/office_survey.py`, or by hand)
+installs Microsoft 365 Apps unactivated on a Windows runner with the
+Office Deployment Tool (the owner accepted the licence terms for this)
+and uploads only metadata (`tools/office_survey.py`: imports, the
+export lists of Office's DLLs, COM classes, services, scheduled tasks;
+never a binary). Download the `office-survey` artifact, then rank it
+against gala's DLLs: `python3 -I tools/import_survey.py
+target/x86_64-pc-windows-msvc/release --dumps <artifact>/imports
+<artifact>/exports`; `--roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE` keeps only
+what those programs load (static imports through Office's own DLLs,
+then delay imports), `--static` after it only what loading needs.
+
 ### Linux test programs (user/lx, ROADMAP LX)
 
 Test first against real Linux (CLEAN_ROOM.md "Linux": man-pages, the
@@ -1269,6 +1284,12 @@ source).
   a directory it makes (fs_test's `w`): gala runs it in `/lx`, beside
   every other binary, and only a directory a Linux program makes is
   case-sensitive there.
+- **A test of a mount the host may not have** (run_test needs `/run`
+  a tmpfs of mode 0755, as on systemd systems and CI; a container's
+  `/run` is often a plain directory): record it in a mount namespace
+  that has it, `unshare -m sh -c 'mount -t tmpfs -o mode=755 none /run
+  && cargo xtask lx-expect --record'` (as root). Check what it prints
+  only before permissions, so the runner's user does not matter.
 - **Determinism**: children report through exit status or a pipe and
   the parent waits before printing on; never rely on timing for an
   ordering: a FUTEX_WAKE is retried until it wakes the thread known to be

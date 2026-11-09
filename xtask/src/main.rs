@@ -1248,6 +1248,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_epoll_pie", "user/lx/bin/epoll_test-pie", "lx"),
     ("lx_fs", "user/lx/bin/fs_test", "lx"),
     ("lx_fs_pie", "user/lx/bin/fs_test-pie", "lx"),
+    ("lx_run", "user/lx/bin/run_test", "lx"),
+    ("lx_run_pie", "user/lx/bin/run_test-pie", "lx"),
     // Dynamically linked glibc programs (ROADMAP LD): the program and its
     // libraries in C:\lx, glibc where Ubuntu's ld.so looks for it (its
     // system directory, and /lib64 as PT_INTERP names it).
@@ -8236,6 +8238,23 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/fs_test-pie lxargs=./fs_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/fs_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/run_test (ROADMAP LD): `/run`, a tmpfs mounted in the
+        // Linux view (its own device, `..` out of it, `/` listing it,
+        // getcwd through it, EXDEV across it); its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_run",
+        cmdline: "qemu_exit lxrun=/lx/run_test lxargs=./run_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/run_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/run_test as a static-pie.
+        name: "lx_run_pie",
+        cmdline: "qemu_exit lxrun=/lx/run_test-pie lxargs=./run_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/run_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         // A static Linux busybox (ROADMAP LX milestone 2): its shell runs

@@ -32,6 +32,14 @@
 //!   socket's file. They are not kept across reboots (the change log has
 //!   no record for them: what was bound to one is gone then anyway).
 //!
+//! - **Volumes** (`create_volume`: what the Linux personality mounts,
+//!   its `/run`): a directory tree of its own beside the root's, its root
+//!   its own parent, so no path from the root reaches it (NT never sees
+//!   it). Nothing in it is recorded in the change log (gone at shutdown,
+//!   as a tmpfs); `path_of` gives a node's path within its volume; a
+//!   rename or hard link from one tree to another is refused
+//!   (`FsError::CrossVolume`).
+//!
 //! Pure data structure (host-tested); the NT layer maps it to file objects.
 
 use alloc::vec::Vec;
@@ -77,6 +85,8 @@ pub enum FsError {
     WriteMapped,
     /// The file cannot be sealed (only anonymous files can).
     NotSealable,
+    /// A rename or hard link from one volume's tree to another's.
+    CrossVolume,
 }
 
 /// The seals of an anonymous file, as Linux numbers them (fcntl(2)
@@ -350,6 +360,8 @@ pub struct Node {
     /// Unlinked while open (`unlink`): in no directory, freed at its last
     /// close, never recorded again.
     detached: bool,
+    /// The root of the tree it is in: ROOT, or a volume's (`create_volume`).
+    volume: NodeId,
     /// Made by the boot (modules), not by a program or the change log.
     boot: bool,
     /// Created or changed since boot (or by the change log): part of a
@@ -421,6 +433,11 @@ impl Node {
 
     pub fn parent(&self) -> NodeId {
         self.parent
+    }
+
+    /// The root of the tree it is in: ROOT, or a volume's root.
+    pub fn volume(&self) -> NodeId {
+        self.volume
     }
 
     pub fn size(&self) -> u64 {
@@ -601,6 +618,7 @@ impl RamFs {
             seals: None,
             extra_links: 0,
             detached: false,
+            volume: ROOT,
             boot: true,
             dirty: false,
         };
@@ -659,7 +677,7 @@ impl RamFs {
         let mut chain: Vec<NodeId> = Vec::new();
         let mut at = parent;
         while at != dir {
-            if !tree || at == ROOT {
+            if !tree || self.is_root(at) {
                 return None;
             }
             chain.try_push(at).ok()?;
@@ -840,6 +858,46 @@ impl RamFs {
         Ok(id)
     }
 
+    /// Creates a volume (see the module's doc): an empty, case-sensitive
+    /// directory with POSIX bits `mode`, the root of a tree of its own.
+    pub fn create_volume(&mut self, mode: u16, now: u64) -> Result<NodeId, FsError> {
+        let mut node = self.fresh_node(
+            ROOT,
+            Vec::new(),
+            Kind::Directory(Vec::new()),
+            Some(mode & 0o7777),
+            true,
+            now,
+        );
+        node.boot = false;
+        node.dirty = false;
+        let id = self.slot(node)?;
+        let node = self.node_mut(id)?;
+        node.parent = id;
+        node.volume = id;
+        Ok(id)
+    }
+
+    /// Whether `id` is a tree's root: ROOT or a volume's (its own parent).
+    fn is_root(&self, id: NodeId) -> bool {
+        id == ROOT || self.node(id).is_some_and(|n| n.parent == id)
+    }
+
+    /// Whether changes to `id` go to the change log: it is in the root's
+    /// tree, not a volume's.
+    fn logged(&self, id: NodeId) -> bool {
+        self.node(id).is_some_and(|n| n.volume == ROOT)
+    }
+
+    /// Refuses a move or link of `id` into directory `dir` of another tree.
+    fn same_volume(&self, id: NodeId, dir: NodeId) -> Result<(), FsError> {
+        let volume = |n: NodeId| self.node(n).map(|n| n.volume).ok_or(FsError::NotFound);
+        if volume(id)? != volume(dir)? {
+            return Err(FsError::CrossVolume);
+        }
+        Ok(())
+    }
+
     /// A node of `kind` named `name` in `parent` (not yet in the table).
     fn fresh_node(
         &self,
@@ -875,6 +933,7 @@ impl RamFs {
             seals: None,
             extra_links: 0,
             detached: false,
+            volume: self.node(parent).map_or(ROOT, |n| n.volume),
             boot: !self.recording && !self.replaying,
             dirty: self.recording || self.replaying,
         }
@@ -1058,11 +1117,12 @@ impl RamFs {
         Ok(())
     }
 
-    /// The full path of `id` (`\\a\\b`; `\\` for the root).
+    /// The full path of `id` (`\\a\\b`; `\\` for the root) within its tree
+    /// (a volume's: from the volume's root).
     pub fn path_of(&self, id: NodeId) -> Result<Vec<u16>, FsError> {
         let mut chain = Vec::new();
         let mut at = id;
-        while at != ROOT {
+        while !self.is_root(at) {
             chain.try_push(at).map_err(|_| FsError::NoMemory)?;
             at = self.node(at).ok_or(FsError::NotFound)?.parent;
         }
@@ -1081,7 +1141,7 @@ impl RamFs {
     /// The path of entry `name` of directory `dir` (`\\a\\name`).
     pub fn entry_path(&self, dir: NodeId, name: &[u16]) -> Result<Vec<u16>, FsError> {
         let mut out = self.path_of(dir)?;
-        if dir == ROOT {
+        if self.is_root(dir) {
             out.clear();
         }
         out.try_push(u16::from(b'\\')).map_err(|_| FsError::NoMemory)?;
@@ -1114,16 +1174,17 @@ impl RamFs {
         name: &[u16],
         replace: bool,
     ) -> Result<(), FsError> {
-        if id == ROOT {
+        if self.is_root(id) {
             return Err(FsError::AccessDenied);
         }
+        self.same_volume(id, parent)?;
         // A directory cannot move below itself.
         let mut up = parent;
         loop {
             if up == id {
                 return Err(FsError::AccessDenied);
             }
-            if up == ROOT {
+            if self.is_root(up) {
                 break;
             }
             up = self.node(up).ok_or(FsError::PathNotFound)?.parent;
@@ -1151,7 +1212,7 @@ impl RamFs {
                 }
             }
         }
-        let from = if self.recording { self.path_of(id).ok() } else { None };
+        let from = if self.recording && self.logged(id) { self.path_of(id).ok() } else { None };
         if let Some(t) = target
             && t != id
         {
@@ -1200,6 +1261,7 @@ impl RamFs {
             return self.rename(id, parent, name, replace);
         };
         self.children(parent)?;
+        self.same_volume(id, parent)?;
         if let Some(t) = self.find(parent, name)?
             && t != id
         {
@@ -1212,7 +1274,7 @@ impl RamFs {
             }
         }
         let owned = copy(name).ok_or(FsError::NoMemory)?;
-        let paths = if self.recording {
+        let paths = if self.recording && self.logged(parent) {
             Some((self.entry_path(from_dir, from_name), self.entry_path(parent, name)))
         } else {
             None
@@ -1302,11 +1364,12 @@ impl RamFs {
         if node.detached {
             return Err(FsError::NotFound);
         }
+        self.same_volume(id, parent)?;
         if self.find(parent, name)?.is_some() {
             return Err(FsError::Exists);
         }
         let owned = copy(name).ok_or(FsError::NoMemory)?;
-        let paths = if self.recording {
+        let paths = if self.recording && self.logged(parent) {
             Some((self.path_of(id), self.entry_path(parent, name)))
         } else {
             None
@@ -1331,13 +1394,17 @@ impl RamFs {
     /// must be empty.
     pub fn unlink(&mut self, dir: NodeId, name: &[u16]) -> Result<(), FsError> {
         let id = self.find(dir, name)?.ok_or(FsError::NotFound)?;
-        if id == ROOT {
+        if self.is_root(id) {
             return Err(FsError::AccessDenied);
         }
         if self.node(id).is_some_and(Node::is_dir) && !self.is_empty_dir(id)? {
             return Err(FsError::DirectoryNotEmpty);
         }
-        let path = if self.recording { Some(self.entry_path(dir, name)) } else { None };
+        let path = if self.recording && self.logged(dir) {
+            Some(self.entry_path(dir, name))
+        } else {
+            None
+        };
         if let Some(i) = self.link_at(dir, name) {
             let link = self.links.remove(i);
             self.node_mut(id)?.extra_links -= 1;
@@ -1372,7 +1439,7 @@ impl RamFs {
 
     /// Marks a node for deletion when its last open closes.
     pub fn set_delete_pending(&mut self, id: NodeId, pending: bool) -> Result<(), FsError> {
-        if pending && id == ROOT {
+        if pending && self.is_root(id) {
             return Err(FsError::DirectoryNotEmpty);
         }
         if pending && self.children(id).is_ok() && !self.is_empty_dir(id)? {
@@ -1640,7 +1707,7 @@ impl RamFs {
             // Unlinked: its path names something else now, or nothing.
             return;
         }
-        if self.node(id).is_some_and(Node::is_socket) {
+        if self.node(id).is_some_and(Node::is_socket) || !self.logged(id) {
             // Not kept across reboots (the module's doc).
             return;
         }
@@ -1679,7 +1746,7 @@ impl RamFs {
     /// Records the removal of `id` (before it goes).
     fn record_removal(&mut self, id: NodeId) {
         self.tombstone(id);
-        if self.recording {
+        if self.recording && self.logged(id) {
             match self.path_of(id) {
                 Ok(path) => self.push_op(Op::Delete { path }),
                 Err(_) => self.ops_lost = true,
@@ -2345,6 +2412,41 @@ mod tests {
         f.add_static_file(b, &w("gone.txt"), b"bye", true, 1).unwrap();
         f.recording = true;
         f
+    }
+
+    /// A volume (the Linux view's `/run`): out of the root's paths, its
+    /// changes never in the change log nor a snapshot, its paths its
+    /// own, moves and links between it and the root's tree refused.
+    #[test]
+    fn volumes_are_trees_of_their_own_never_logged() {
+        let mut f = booted();
+        let v = f.create_volume(0o755, 2).unwrap();
+        assert_eq!(f.node(v).unwrap().parent(), v);
+        assert!(f.list(ROOT).unwrap().iter().all(|&n| n != v));
+        let user = f.create_posix(v, &w("user"), true, 0o755, 3).unwrap();
+        let a = f.create_posix(user, &w("a"), false, 0o644, 3).unwrap();
+        f.write(a, 0, b"x", 4).unwrap();
+        f.set_mode(a, 0o600).unwrap();
+        f.rename(a, user, &w("b"), false).unwrap();
+        f.link(a, v, &w("c")).unwrap();
+        f.unlink(v, &w("c")).unwrap();
+        let s = f.create_socket(user, &w("wayland-0"), 0o755, 4).unwrap();
+        assert_eq!(f.node(s).unwrap().volume(), v);
+        let (ops, lost) = f.take_ops();
+        assert!(ops.is_empty() && !lost);
+        assert!(f.snapshot().unwrap().is_empty());
+        assert_eq!(String::from_utf16(&f.path_of(a).unwrap()).unwrap(), "\\user\\b");
+        assert_eq!(String::from_utf16(&f.path_of(v).unwrap()).unwrap(), "\\");
+        let boot = f.lookup(&w("\\boot")).unwrap();
+        assert_eq!(f.rename(a, boot, &w("b"), false), Err(FsError::CrossVolume));
+        assert_eq!(f.link(a, boot, &w("b")), Err(FsError::CrossVolume));
+        let keep = f.lookup(&w("\\boot\\keep.txt")).unwrap();
+        assert_eq!(f.rename(keep, v, &w("k"), false), Err(FsError::CrossVolume));
+        assert_eq!(f.rename(v, boot, &w("v"), false), Err(FsError::AccessDenied));
+        f.unlink(user, &w("b")).unwrap();
+        f.unlink(user, &w("wayland-0")).unwrap();
+        f.unlink(v, &w("user")).unwrap();
+        assert!(f.take_ops().0.is_empty());
     }
 
     fn content(f: &RamFs, path: &str) -> Option<Vec<u8>> {
