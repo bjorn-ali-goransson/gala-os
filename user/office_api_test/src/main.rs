@@ -1058,8 +1058,9 @@ fn url_zones(c: &mut Checks) -> Result<(), u32> {
     const E_INVALIDARG: u32 = 0x8007_0057;
     const URLACTION_SCRIPT_RUN: u32 = 0x1400;
     // (URL, zone, security ID without its zone DWORD).
-    let table: [(&str, u32, &[u8]); 13] = [
-        ("res://mshtml.dll/blank.htm", 0, b"file:"),
+    // (res://mshtml.dll/blank.htm, Wine's first row, is not here: Windows
+    // Server 2025, which has no MSHTML, answers it as the Internet zone.)
+    let table: [(&str, u32, &[u8]); 12] = [
         ("file://c:\\Index.htm", 0, b"file:"),
         ("http://www.zone3.winetest", 3, b"http:www.zone3.winetest"),
         ("about:blank", 3, b"about:blank"),
@@ -1086,11 +1087,12 @@ fn url_zones(c: &mut Checks) -> Result<(), u32> {
             core::mem::transmute::<usize, Release>(method(manager, 2)),
         )
     };
-    for (url, zone, secid) in table {
+    for (row, (url, zone, secid)) in table.into_iter().enumerate() {
         let wide: [u16; 64] = w(url);
         let mut got = 100u32;
         c.eq(map(manager, wide.as_ptr(), &mut got, 0).into_u64(), 0)?;
-        c.eq(got.into(), zone.into())?;
+        // On failure: the row in the high byte, the zone got in the low.
+        c.ok(got == zone, ((row as u64) << 8) | u64::from(got))?;
         let mut buf = [0xf0u8; 128];
         let mut size = buf.len() as u32;
         c.eq(id(manager, wide.as_ptr(), buf.as_mut_ptr(), &mut size, 0).into_u64(), 0)?;

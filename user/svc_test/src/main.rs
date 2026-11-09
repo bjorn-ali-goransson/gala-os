@@ -419,9 +419,9 @@ fn null_handles(c: &mut Checks) -> Result<(), u32> {
     let mut needed = 0u32;
     // SAFETY: plain calls with our buffers throughout.
     unsafe {
-        progress("NULL handles: CloseServiceHandle");
-        clear_error();
-        c.fails(CloseServiceHandle(0) != 0, ERROR_INVALID_HANDLE)?;
+        // CloseServiceHandle(NULL) is not called: Windows Server 2025 faults
+        // on it in ntdll (CI: the last line before the fault named it),
+        // though Wine's tests call it.
         progress("NULL handles: OpenServiceW");
         clear_error();
         c.no_handle(OpenServiceW(0, null(), 0), ERROR_INVALID_HANDLE)?;
