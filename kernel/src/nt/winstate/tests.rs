@@ -194,3 +194,39 @@ fn damage_past_its_limit_becomes_the_whole_desktop() {
     assert!(s.damage.contains(&Rect { x: 0, y: 0, w: 1280, h: 800 }));
     assert!(s.damage.len() <= 64);
 }
+
+#[test]
+fn served_owners_hear_of_activation_and_the_pointer_leaving() {
+    let mut s = state();
+    let thread = crate::nt::platform::ThreadId::from_raw(7);
+    // Owner 1 is served by a kernel thread (the Wayland server), owner 2
+    // is a user32 program.
+    s.listen(1, Listener::Server(thread)).unwrap();
+    assert!(s.served(1) && !s.served(2));
+    let a = s.create(1, 10, 20, 300, 200, &title("A"), 0).unwrap();
+    let b = s.create(2, 50, 60, 300, 200, &title("B"), 0).unwrap();
+    s.show(a, 1, true).unwrap();
+    assert_eq!(messages(&mut s, 1), [(a, GALA_WM_ACTIVE, 1, 0)]);
+    assert!(matches!(s.take_wakes().as_slice(), [Listener::Server(t)] if *t == thread));
+    // Another window becomes active: A is told, B's program is not.
+    s.show(b, 2, true).unwrap();
+    assert_eq!(messages(&mut s, 1), [(a, GALA_WM_ACTIVE, 0, 0)]);
+    assert!(messages(&mut s, 2).is_empty());
+    // The pointer over A's client area, then over B's: A is told it left.
+    s.pointer_over(Some(a));
+    s.pointer_over(Some(a));
+    s.pointer_over(Some(b));
+    assert_eq!(messages(&mut s, 1), [(a, GALA_WM_POINTER_LEFT, 0, 0)]);
+    s.pointer_over(None);
+    assert!(messages(&mut s, 2).is_empty());
+    // A destroyed while active: its owner hears nothing of a window that
+    // is no more, and B is active again.
+    s.activate(Some(a));
+    messages(&mut s, 1);
+    s.destroy(a, 1).unwrap();
+    assert!(messages(&mut s, 1).is_empty());
+    assert_eq!(s.active, Some(b));
+    // No longer served.
+    s.unlisten_server(1, thread);
+    assert!(!s.served(1));
+}

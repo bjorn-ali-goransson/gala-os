@@ -94,6 +94,15 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{00021401-0000-0000-C000-000000000046}\InprocServer32]
 @=expand:%SystemRoot%\System32\shell32.dll
 "ThreadingModel"=sz:Both
+; DOMDocument60 (MSXML 6, msxml6.h's CLSID_DOMDocument60; the Office
+; Deployment Tool's setup.exe reads its configuration with it).
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}]
+@=sz:XML DOM Document 6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.DOMDocument.6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
+"ThreadingModel"=sz:Both
 ; The 32-bit view (WOW64, nt::regview): what 32-bit programs read under
 ; HKLM\SOFTWARE. Windows keeps the version there too, and gives them the
 ; (x86) directories as ProgramFilesDir and CommonFilesDir.
@@ -137,6 +146,15 @@
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{00021401-0000-0000-C000-000000000046}\InprocServer32]
 @=expand:%SystemRoot%\System32\shell32.dll
 "ThreadingModel"=sz:Both
+; DOMDocument60 (MSXML 6, msxml6.h's CLSID_DOMDocument60; the Office
+; Deployment Tool's setup.exe reads its configuration with it).
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}]
+@=sz:XML DOM Document 6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.DOMDocument.6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
+"ThreadingModel"=sz:Both
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\Interface]
 
 ; A workstation (WinNT; servers say ServerNT or LanmanNT).
@@ -176,6 +194,18 @@
 "DaylightName"=sz:Coordinated Universal Time
 "DynamicDaylightTimeDisabled"=dword:0
 [\Registry\Machine\SYSTEM\CurrentControlSet\Services]
+; The service control manager's database (nt::scm): a subkey with a Type
+; value is a service. AFD, Winsock's ancillary function driver, is one
+; gala's kernel itself provides (\Device\Afd), so the SCM reports it
+; running.
+[\Registry\Machine\SYSTEM\CurrentControlSet\Services\AFD]
+"Type"=dword:1
+"Start"=dword:1
+"ErrorControl"=dword:1
+"ImagePath"=expand:\SystemRoot\system32\drivers\afd.sys
+"DisplayName"=sz:Ancillary Function Driver for Winsock
+"Description"=sz:Ancillary Function Driver for Winsock
+"Group"=sz:PNP_TDI
 [\Registry\Machine\SYSTEM\Setup]
 "SystemSetupInProgress"=dword:0
 

@@ -5,9 +5,9 @@
 //! window's children the visible top-level windows it owns (its dialogs:
 //! UIA puts owned windows under their owner), then its visible child
 //! windows in z order (GW_CHILD, GW_HWNDNEXT), then, for a list box or
-//! list view, its items in index order; a top-level window with a
-//! caption has a TitleBar child first (frame.rs), a window with a menu
-//! bar a MenuBar child next, and an open popup menu (a #32768 window)
+//! list view, its items in index order; a window with a menu bar has a
+//! MenuBar child first, a top-level window with a caption a TitleBar child
+//! last (frame.rs), and an open popup menu (a #32768 window)
 //! has its items as children (menus.rs). Properties are read from the
 //! window, the list or the menu each time (nothing is cached).
 
@@ -313,10 +313,7 @@ pub fn children(n: Node, out: &mut List<Node>) {
             }
             return;
         }
-        // The title bar, then the menu bar, as Windows' tree has them.
-        if frame::is_frame(n) && !out.push(Node::menu(h, None, TITLE)) {
-            return;
-        }
+        // The menu bar first; the title bar comes last (below).
         if menus::query(h).is_some() && !out.push(Node::menu(h, None, menus::BAR)) {
             return;
         }
@@ -355,6 +352,11 @@ pub fn children(n: Node, out: &mut List<Node>) {
         && let Some(first) = providers::root_child(h, providers::FIRST_CHILD)
     {
         fragment_siblings(h, first, out);
+    }
+    // A framed top-level window's title bar is its last child, after the
+    // windowed ones (Windows 11's proxy, in process).
+    if h != desktop() && top_level(h) && !is_popup_menu(h) && frame::is_frame(n) {
+        let _ = out.push(Node::menu(h, None, TITLE));
     }
 }
 
@@ -963,8 +965,8 @@ fn grid_lookup(n: Node, id: i32) -> Option<Variant> {
 }
 
 /// A title bar's or title-bar button's properties (frame.rs), as
-/// Windows' Win32 window proxy is reported to give them: the bar a
-/// TitleBar named by the window's title (AutomationId "TitleBar"), the
+/// Windows' Win32 window proxy gives them: the bar a TitleBar with an
+/// empty Name and AutomationId (Windows 11, measured in process), the
 /// buttons Buttons named and identified "Minimize", "Maximize" (or
 /// "Restore"), "Close"; no HWND, no ClassName; not focusable; RuntimeId
 /// {42, window, -4(, k)} (gala's choice).
@@ -985,13 +987,9 @@ fn title_lookup(n: Node, id: i32) -> Option<Variant> {
         }
         CONTROL_TYPE => Variant::int(control),
         LOCALIZED_CONTROL_TYPE => Variant::bstr(bstr_str(localized_control_type(control))),
-        NAME => Variant::bstr(match n.item {
+        NAME | AUTOMATION_ID => Variant::bstr(match n.item {
             Some(_) => bstr_str(frame::button_name(n)),
-            None => window_text(h, false),
-        }),
-        AUTOMATION_ID => Variant::bstr(match n.item {
-            Some(_) => bstr_str(frame::button_name(n)),
-            None => bstr_str("TitleBar"),
+            None => bstr(&[]),
         }),
         ACCELERATOR_KEY | ACCESS_KEY | HELP_TEXT | ITEM_TYPE | ITEM_STATUS | ARIA_ROLE
         | ARIA_PROPERTIES | CLASS_NAME => Variant::bstr(bstr(&[])),

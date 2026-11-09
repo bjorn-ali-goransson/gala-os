@@ -200,9 +200,10 @@ pub fn socket(call: &Call<'_>, domain: u64, kind: u64, protocol: u64) -> Result 
     let family = match domain {
         2 => AF_INET,
         10 => AF_INET6,
+        super::unix::AF_UNIX => return super::unix::socket(call, kind, protocol),
         _ => {
-            if domain == 1 || domain == 16 {
-                // AF_UNIX, AF_NETLINK: Linux has them; gala not yet.
+            if domain == 16 {
+                // AF_NETLINK: Linux has it; gala not yet.
                 ledger::record("socket", "linux option missing", domain);
             }
             return Err(EAFNOSUPPORT);
@@ -501,9 +502,22 @@ fn connection(sock: &Socket) -> core::result::Result<SocketId, u16> {
 /// Receives up to `count` bytes into user memory at `buf` (read, recv,
 /// recvfrom).
 pub fn recv(call: &Call<'_>, f: &Fd, sock: &Socket, buf: u64, count: u64, flags: u64) -> Result {
+    let data = recv_bytes(call, f, sock, count, flags)?;
+    call.process.write(buf, &data).map_err(|_| EFAULT)?;
+    Ok(data.len() as u64)
+}
+
+/// Receives up to `count` bytes into a kernel buffer (recv, recvmsg).
+pub fn recv_bytes(
+    call: &Call<'_>,
+    f: &Fd,
+    sock: &Socket,
+    count: u64,
+    flags: u64,
+) -> core::result::Result<Vec<u8>, u16> {
     let id = connection(sock)?;
     if sock.shut_read.load(Ordering::Relaxed) || count == 0 {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let nonblock = f.nonblock() || flags & MSG_DONTWAIT != 0;
     let want = count.min(CHUNK as u64) as usize;
@@ -541,8 +555,8 @@ pub fn recv(call: &Call<'_>, f: &Fd, sock: &Socket, buf: u64, count: u64, flags:
             Err(e) => return Err(errno_of(e)),
         }
     }
-    call.process.write(buf, &data[..done]).map_err(|_| EFAULT)?;
-    Ok(done as u64)
+    data.truncate(done);
+    Ok(data)
 }
 
 /// Sends `count` bytes, fetched by `fetch(offset, out)` (user memory or

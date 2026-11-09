@@ -2,8 +2,9 @@
 //! Windows: threads keep their xmm0-xmm15 and MXCSR across preemption;
 //! an exception's CONTEXT carries the faulting thread's XMM registers and
 //! MXCSR (to a vectored handler registered through ntdll), and changes the
-//! handler makes are restored by NtContinue; NtCreateThread honours the
-//! CONTEXT's MxCsr. Prints `fpu_test: ok` or exits with the number of the
+//! handler makes are restored by NtContinue; NtCreateThread ignores the
+//! CONTEXT's floating-point part (MxCsr, FltSave.MxCsr, XMM registers): the
+//! new thread starts with MXCSR 0x1f80 and xmm0 0. Prints `fpu_test: ok` or exits with the number of the
 //! failing check.
 
 #![no_std]
@@ -169,12 +170,15 @@ fn fault_with_state() -> (u64, u64, u32) {
 }
 
 static NEW_THREAD_MXCSR: AtomicU32 = AtomicU32::new(0);
+static NEW_THREAD_XMM0: AtomicU64 = AtomicU64::new(u64::MAX);
 
 extern "C" fn report_mxcsr(_: usize) -> ! {
     let mut csr = 0u32;
-    // SAFETY: stores MXCSR into a local.
-    unsafe { asm!("stmxcsr [{}]", in(reg) &mut csr) };
+    let xmm0: u64;
+    // SAFETY: stores MXCSR into a local and reads xmm0's low half.
+    unsafe { asm!("stmxcsr [{}]", "movq {}, xmm0", in(reg) &mut csr, out(reg) xmm0) };
     NEW_THREAD_MXCSR.store(csr, Ordering::SeqCst);
+    NEW_THREAD_XMM0.store(xmm0, Ordering::SeqCst);
     exit_thread(0)
 }
 
@@ -240,14 +244,20 @@ fn run() -> Result<(), u32> {
     c.eq(x1, XMM1_NEW)?;
     c.eq(csr.into(), mxcsr(1).into())?;
 
-    // (3) NtCreateThread honours CONTEXT.MxCsr.
+    // (3) NtCreateThread ignores the CONTEXT's floating-point state: with
+    // MxCsr, FltSave.MxCsr (CONTEXT + 0x118) and xmm0 (+ 0x1a0) set and
+    // CONTEXT_FLOATING_POINT in the flags, the thread starts with MXCSR
+    // 0x1f80 and xmm0 0 (Windows 11).
     let mut ctx = Context::for_thread(report_mxcsr, 0, 0);
     ctx.mx_csr = mxcsr(2);
+    ctx.rest[0x18..0x1c].copy_from_slice(&mxcsr(2).to_le_bytes());
+    ctx.rest[0xa0..0xa8].copy_from_slice(&0xabcd_1234u64.to_le_bytes());
     let (s, t, _) = create_thread_with_context(&mut ctx);
     c.eq(s.into(), ok)?;
     c.eq(wait(t, None).into(), ok)?;
     close(t);
-    c.eq(NEW_THREAD_MXCSR.load(Ordering::SeqCst).into(), mxcsr(2).into())?;
+    c.eq(NEW_THREAD_MXCSR.load(Ordering::SeqCst).into(), mxcsr(0).into())?;
+    c.eq(NEW_THREAD_XMM0.load(Ordering::SeqCst), 0)?;
     Ok(())
 }
 

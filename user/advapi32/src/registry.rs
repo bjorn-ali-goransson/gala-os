@@ -178,19 +178,19 @@ fn error(status: u32) -> i32 {
 // ---- Memory and strings ----
 
 /// A LocalAlloc'd buffer, freed when dropped.
-struct Mem {
-    ptr: *mut u8,
-    len: usize,
+pub(crate) struct Mem {
+    pub(crate) ptr: *mut u8,
+    pub(crate) len: usize,
 }
 
 impl Mem {
-    fn new(len: usize) -> Result<Mem, i32> {
+    pub(crate) fn new(len: usize) -> Result<Mem, i32> {
         // SAFETY: plain call; LMEM_ZEROINIT.
         let ptr = unsafe { LocalAlloc(0x40, len.max(1)) };
         if ptr.is_null() { Err(ERROR_NOT_ENOUGH_MEMORY) } else { Ok(Mem { ptr, len }) }
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: our allocation of `len` bytes.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -222,19 +222,19 @@ impl Drop for Mem {
 }
 
 /// UTF-16 text owned in local memory.
-struct WStr {
+pub(crate) struct WStr {
     mem: Mem,
     len: usize,
 }
 
 impl WStr {
-    fn units(&self) -> &[u16] {
+    pub(crate) fn units(&self) -> &[u16] {
         self.mem.wide(0, 2 * self.len)
     }
 }
 
 /// The caller's NUL-terminated UTF-16 string (empty if null).
-fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
+pub(crate) fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
     if p.is_null() {
         return &[];
     }
@@ -250,7 +250,7 @@ fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
 
 /// The caller's ANSI string (`len` bytes, or NUL-terminated if None) in
 /// UTF-16; None for a null pointer.
-fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
+pub(crate) fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
     if p.is_null() {
         return Ok(None);
     }
@@ -277,7 +277,7 @@ fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
 
 /// `w` in the ANSI code page into `out` (`cap` bytes); returns the bytes
 /// needed (which may exceed `cap`, then nothing is written).
-fn wide_to_ansi(w: &[u16], out: *mut u8, cap: usize) -> usize {
+pub(crate) fn wide_to_ansi(w: &[u16], out: *mut u8, cap: usize) -> usize {
     if w.is_empty() {
         return 0;
     }
@@ -953,10 +953,10 @@ fn get_value_w(
     size: *mut u32,
     ansi: bool,
 ) -> i32 {
-    if flags & RRF_RT_ANY == 0
-        || (!data.is_null() && size.is_null())
-        || (flags & RRF_RT_REG_EXPAND_SZ != 0 && flags & RRF_NOEXPAND == 0)
-    {
+    // RRF_RT_REG_EXPAND_SZ without RRF_NOEXPAND is no parameter error: the
+    // expanded value is a REG_SZ, which that filter refuses below
+    // (ERROR_UNSUPPORTED_TYPE, Windows Server 2025).
+    if flags & RRF_RT_ANY == 0 || (!data.is_null() && size.is_null()) {
         return ERROR_INVALID_PARAMETER;
     }
     let cap = get(size) as usize;
@@ -991,10 +991,53 @@ fn get_value_w(
             || (flags & RRF_RT_REG_QWORD != 0 && raw.len() == 8));
     if flags & filter == 0 && !binary_as {
         put(kind, 0);
+        if data.is_null() {
+            // The size query still reports the size the value would need
+            // (Windows 11: a 30-byte REG_EXPAND_SZ asked for as REG_SZ with
+            // RRF_NOEXPAND fails with 32 in pcbData).
+            put(size, query_size(k, raw.len()));
+        }
         return zero(ERROR_UNSUPPORTED_TYPE);
     }
     if (k == REG_DWORD && raw.len() != 4) || (k == REG_QWORD && raw.len() != 8) {
         return zero(ERROR_DATATYPE_MISMATCH);
+    }
+    // An expanded string is read the way Windows reads it: the stored value
+    // lands in the buffer and the expansion is written over its start, so
+    // the old tail stays after the expansion's NUL, and pcbData is the
+    // larger of the two sizes (the stored size when the expansion is
+    // shorter, as measured on Windows 11), an upper bound on the string.
+    if expanding && !ansi {
+        let expanded = match expand(raw) {
+            Ok(e) => e,
+            Err(e) => return e,
+        };
+        let text = &expanded.0.bytes()[..expanded.1];
+        let need = raw.len().max(text.len());
+        put(kind, REG_SZ);
+        let cap = get(size) as usize;
+        put(size, need as u32);
+        if data.is_null() {
+            return ERROR_SUCCESS;
+        }
+        if cap < need {
+            return zero(ERROR_MORE_DATA);
+        }
+        // SAFETY: the caller's buffer of `cap` >= need bytes, which holds
+        // both the stored value and its expansion.
+        unsafe {
+            core::ptr::copy_nonoverlapping(raw.as_ptr(), data, raw.len());
+            core::ptr::copy_nonoverlapping(text.as_ptr(), data, text.len());
+        }
+        return ERROR_SUCCESS;
+    }
+    // A size query for a string leaves room for a terminator, whether or
+    // not the stored data has one (Windows 11: stored + 2); the fetch
+    // reports what it wrote.
+    if data.is_null() && !ansi && is_string(k) {
+        put(kind, k);
+        put(size, query_size(k, raw.len()));
+        return ERROR_SUCCESS;
     }
     // Strings: expanded, and terminated if they were not.
     let expanded;
@@ -1021,6 +1064,12 @@ fn get_value_w(
     put(kind, k);
     let r = if ansi { give_a(k, bytes, data, size) } else { give(bytes, data, size) };
     zero(r)
+}
+
+/// What a RegGetValueW size query reports for `len` stored bytes of `kind`:
+/// strings get room for a terminator.
+fn query_size(kind: u32, len: usize) -> u32 {
+    if is_string(kind) { ((len & !1) + 2) as u32 } else { len as u32 }
 }
 
 /// RegGetValueA: names and string data in the ANSI code page.

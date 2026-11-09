@@ -433,6 +433,11 @@ impl Registry {
         self.node(id)?.children.get(index).copied().ok_or(NtStatus::NO_MORE_ENTRIES)
     }
 
+    /// The key's own name (its last component, as created).
+    pub fn key_name(&self, id: KeyId) -> Result<&[u16], NtStatus> {
+        Ok(&self.node(id)?.name)
+    }
+
     /// The full name, `\REGISTRY\...`.
     pub fn full_name(&self, id: KeyId) -> Result<Vec<u16>, NtStatus> {
         let mut chain = Vec::new();

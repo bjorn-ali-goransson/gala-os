@@ -149,6 +149,26 @@ pub const GALA_USER_OBJECT_ENUM: u32 = 0x7fa5;
 /// gala's session service (session_calls; ROADMAP RS): what shows a
 /// session's desktop (presenters) and a Test frame's pixels.
 pub const GALA_SESSION: u32 = 0x7fb0;
+/// The window station's clipboard (gala's own; nt::clipboard,
+/// clipboard_calls.rs), for user32.
+pub const GALA_CLIPBOARD_OPEN: u32 = 0x7fc0;
+pub const GALA_CLIPBOARD_CLOSE: u32 = 0x7fc1;
+pub const GALA_CLIPBOARD_EMPTY: u32 = 0x7fc2;
+pub const GALA_CLIPBOARD_SET: u32 = 0x7fc3;
+pub const GALA_CLIPBOARD_GET: u32 = 0x7fc4;
+pub const GALA_CLIPBOARD_INFO: u32 = 0x7fc5;
+pub const GALA_CLIPBOARD_FORMATS: u32 = 0x7fc6;
+pub const GALA_CLIPBOARD_LISTENER: u32 = 0x7fc7;
+/// The service control manager (nt::scm, scm_calls): OpenSCManager,
+/// OpenService, CreateService, the status and configuration queries,
+/// EnumServicesStatusEx, CloseServiceHandle/DeleteService/StartService/
+/// ControlService, for advapi32.
+pub const GALA_SCM_OPEN: u32 = 0x7fd0;
+pub const GALA_SERVICE_OPEN: u32 = 0x7fd1;
+pub const GALA_SERVICE_CREATE: u32 = 0x7fd2;
+pub const GALA_SERVICE_QUERY: u32 = 0x7fd3;
+pub const GALA_SERVICE_ENUM: u32 = 0x7fd4;
+pub const GALA_SERVICE_CONTROL: u32 = 0x7fd5;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -431,6 +451,20 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     ),
     (GALA_USER_OBJECT_ENUM, "GalaUserObjectEnum", 4, winsta_calls::gala_user_object_enum),
     (GALA_SESSION, "GalaSession", 5, session_calls::gala_session),
+    (GALA_CLIPBOARD_OPEN, "GalaClipboardOpen", 1, clipboard_calls::gala_clipboard_open),
+    (GALA_CLIPBOARD_CLOSE, "GalaClipboardClose", 1, clipboard_calls::gala_clipboard_close),
+    (GALA_CLIPBOARD_EMPTY, "GalaClipboardEmpty", 0, clipboard_calls::gala_clipboard_empty),
+    (GALA_CLIPBOARD_SET, "GalaClipboardSet", 5, clipboard_calls::gala_clipboard_set),
+    (GALA_CLIPBOARD_GET, "GalaClipboardGet", 4, clipboard_calls::gala_clipboard_get),
+    (GALA_CLIPBOARD_INFO, "GalaClipboardInfo", 1, clipboard_calls::gala_clipboard_info),
+    (GALA_CLIPBOARD_FORMATS, "GalaClipboardFormats", 3, clipboard_calls::gala_clipboard_formats),
+    (GALA_CLIPBOARD_LISTENER, "GalaClipboardListener", 2, clipboard_calls::gala_clipboard_listener),
+    (GALA_SCM_OPEN, "GalaScmOpen", 2, scm_calls::gala_scm_open),
+    (GALA_SERVICE_OPEN, "GalaServiceOpen", 5, scm_calls::gala_service_open),
+    (GALA_SERVICE_CREATE, "GalaServiceCreate", 5, scm_calls::gala_service_create),
+    (GALA_SERVICE_QUERY, "GalaServiceQuery", 5, scm_calls::gala_service_query),
+    (GALA_SERVICE_ENUM, "GalaServiceEnum", 6, scm_calls::gala_service_enum),
+    (GALA_SERVICE_CONTROL, "GalaServiceControl", 4, scm_calls::gala_service_control),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -865,7 +899,7 @@ fn nt_write_file(call: &mut Call<'_>) -> NtStatus {
     let entry = tri!(call.handle(handle));
     if let ObjectBody::File(file) = &entry.object.body {
         let offset_ptr = arg!(call, 7);
-        let apc = tri!(io_apc(call, file, io_status));
+        let apc = tri!(io_apc(call, io_status));
         let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
         let status = file_write(call, &entry, file, io_status, buffer, length, offset_ptr);
         finish_io(&entry.object, event.as_ref(), apc, status);
@@ -1019,10 +1053,10 @@ fn pipe_request(
     length: u32,
 ) -> Result<super::notify::Request, NtStatus> {
     let routine = call.arg(2)?;
+    // On a synchronous end as on an asynchronous one, as for files (the
+    // I/O manager queues it at completion whatever the handle's mode).
     let apc = if routine == 0 {
         None
-    } else if end.synchronous {
-        return Err(NtStatus::INVALID_PARAMETER);
     } else {
         let apc = thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] };
         thread::current().map(|t| (t, apc))
@@ -1113,6 +1147,9 @@ fn nt_resume_process(call: &mut Call<'_>) -> NtStatus {
 fn nt_terminate_process(call: &mut Call<'_>) -> NtStatus {
     let handle = Handle(arg!(call, 0));
     let status = NtStatus(arg!(call, 1) as u32);
+    if handle == Handle(0) || handle == Handle::CURRENT_PROCESS {
+        ctrl_exit_ordered(call);
+    }
     if handle == Handle(0) {
         // NULL: terminate every other thread of the current process.
         process::terminate(&call.process, status, false);
@@ -1862,9 +1899,19 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     let seen = u32::from_le_bytes(seen);
+    if seen != u32::MAX {
+        // Back to wait: the handlers for every Ctrl+C up to `seen` have
+        // returned (kernel32's thread), which a process ending with one
+        // waits for (`ctrl_exit_ordered`).
+        session.handled(call.process.id, seen);
+        wait::set_signal(&session.ctrl_taken, 1);
+    }
     if seen == u32::MAX {
-        // The count so far, at once.
-        tri!(call.write_u32(seen_ptr, session.ctrl_count()));
+        // The count so far, at once; the process's handler thread is a
+        // taker from now on (`ctrl_exit_ordered`).
+        let count = session.ctrl_count();
+        tri!(session.took(call.process.id, count));
+        tri!(call.write_u32(seen_ptr, count));
         return NtStatus::SUCCESS;
     }
     loop {
@@ -1877,6 +1924,8 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
         let count = session.ctrl_count();
         if count != seen {
             tri!(call.write_u32(seen_ptr, count));
+            tri!(session.took(call.process.id, count));
+            wait::set_signal(&session.ctrl_taken, 1);
             note_ctrl_taken(call, &session, count);
             return NtStatus::SUCCESS;
         }
@@ -1884,6 +1933,61 @@ fn gala_console_ctrl(call: &mut Call<'_>) -> NtStatus {
         let waited = wait::wait_for(event, false, wait::Timeout::from_nt(Some(-10_000_000)));
         if waited == NtStatus::THREAD_IS_TERMINATING {
             return waited;
+        }
+    }
+}
+
+/// How long a process ending while it handles a Ctrl+C waits for the
+/// session's other processes to be done with it: a backstop for a handler
+/// that blocks, logged when reached.
+const CTRL_EXIT_BACKSTOP_MS: i64 = 1000;
+
+/// A process ending itself after its handler thread took Ctrl+C k (the
+/// default handler's STATUS_CONTROL_C_EXIT, or a handler that exits, as
+/// busybox-w32's does with its own status) is seen to end only once every
+/// other process of its console session with a handler thread is done
+/// with Ctrl+C k (its handlers returned, or it is ending too): on Windows
+/// the parent's handler starts about 12 ms before a handler-less child's
+/// end is visible (6 of 6 runs, #33), so a shell's handler has run before
+/// the shell sees its child end and prompts (sshd_shell; busybox-w32
+/// clears its "got a signal" flag before reading the next line, so a
+/// handler that runs after that, as a thread scheduled late on a busy
+/// host did, shows as ^C at the next key, which it eats). "Taken" (the
+/// handler thread woke) is not enough: its handlers have not run yet. A
+/// process that took no Ctrl+C, or ends long after the others handled
+/// it, does not wait.
+fn ctrl_exit_ordered(call: &Call<'_>) {
+    let Some(session) = call.process.console.clone() else { return };
+    let me = call.process.id;
+    // The Ctrl+C it is ending with: the last one its handler took.
+    let Some(count) = session.taken_by(me).filter(|&c| c != 0) else { return };
+    // Ending is being done with it: another process ending with it does
+    // not wait for this one.
+    session.handled(me, count);
+    wait::set_signal(&session.ctrl_taken, 1);
+    let start = platform::monotonic_ns();
+    let mut late = [0u64; 4];
+    loop {
+        // Reset first, then look (as GalaConsoleCtrl does).
+        wait::set_signal(&session.ctrl_taken, 0);
+        let n = session.not_yet_handled(me, count, &mut late);
+        if n == 0 {
+            return;
+        }
+        let waited_ms = ((platform::monotonic_ns() - start) / 1_000_000) as i64;
+        if waited_ms >= CTRL_EXIT_BACKSTOP_MS {
+            warn!(
+                "console {}: pid {me} ({}) ends with Ctrl+C {count} before {n} other process(es) handled it (first pid {}): {waited_ms} ms backstop",
+                session.id, call.process.name, late[0]
+            );
+            return;
+        }
+        let left = CTRL_EXIT_BACKSTOP_MS - waited_ms;
+        let event = core::slice::from_ref(&session.ctrl_taken);
+        if wait::wait_for(event, false, wait::Timeout::from_nt(Some(-left * 10_000)))
+            == NtStatus::THREAD_IS_TERMINATING
+        {
+            return;
         }
     }
 }
@@ -3226,7 +3330,7 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
     if call.process.read(ctx_ptr, &mut ctx).is_err() {
         return NtStatus::ACCESS_VIOLATION;
     }
-    let (regs, win32_start, mxcsr) = super::abi::thread_start(&ctx);
+    let (regs, win32_start) = super::abi::thread_start(&ctx);
     // INITIAL_TEB { OldStackBase, OldStackLimit, StackBase, StackLimit, StackAllocationBase }
     let stack_base = tri!(call.read_u64(teb_ptr + 16));
     let stack_limit = tri!(call.read_u64(teb_ptr + 24));
@@ -3238,7 +3342,6 @@ fn nt_create_thread(call: &mut Call<'_>) -> NtStatus {
             &call.process,
             regs,
             win32_start,
-            mxcsr,
             (stack_base, stack_limit, stack_bottom),
             suspended
         ))
@@ -5686,7 +5789,7 @@ fn nt_file_segments(call: &mut Call<'_>, write: bool) -> NtStatus {
     let offset = tri!(call.read_u64(offset_ptr));
     let size = file::with_fs(|fs| fs.node(file.node).map_or(0, |n| n.size()));
     tri!(super::locks::check_io(file.node, file.lock_owner(), offset, u64::from(length), write));
-    let apc = tri!(io_apc(call, file, iosb));
+    let apc = tri!(io_apc(call, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let transfer = || -> Result<u64, NtStatus> {
         if !write && offset >= size && length > 0 {
@@ -5752,7 +5855,7 @@ fn nt_lock_file(call: &mut Call<'_>) -> NtStatus {
     let (start, len) = (tri!(call.read_u64(arg!(call, 5))), tri!(call.read_u64(arg!(call, 6))));
     let key = arg!(call, 7) as u32;
     let (fail_now, exclusive) = (arg!(call, 8) as u8 != 0, arg!(call, 9) as u8 != 0);
-    let apc = tri!(io_apc(call, file, iosb));
+    let apc = tri!(io_apc(call, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let owner = file.lock_owner();
     let status = match super::locks::lock(file.node, owner, key, start, len, exclusive, !fail_now) {
@@ -5825,7 +5928,7 @@ fn nt_read_file(call: &mut Call<'_>) -> NtStatus {
         }
     }
     let ObjectBody::File(file) = &entry.object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
-    let apc = tri!(io_apc(call, file, iosb));
+    let apc = tri!(io_apc(call, iosb));
     let event = tri!(start_io(call, &entry.object, arg!(call, 1)));
     let status = file_read(call, &entry, file, iosb, buffer, length, offset_ptr);
     finish_io(&entry.object, event.as_ref(), apc, status);
@@ -6011,19 +6114,15 @@ fn nt_query_io_completion(call: &mut Call<'_>) -> NtStatus {
 
 /// The I/O completion APC of a read or write (ApcRoutine, ApcContext):
 /// queued to the calling thread when the I/O completes successfully, as
-/// ApcRoutine(ApcContext, IoStatusBlock, 0). Synchronous handles take none.
-fn io_apc(
-    call: &Call<'_>,
-    file: &file::FileObject,
-    iosb: u64,
-) -> Result<Option<thread::UserApc>, NtStatus> {
+/// ApcRoutine(ApcContext, IoStatusBlock, 0), on a synchronous handle too.
+fn io_apc(call: &Call<'_>, iosb: u64) -> Result<Option<thread::UserApc>, NtStatus> {
     let routine = call.arg(2)?;
     if routine == 0 {
         return Ok(None);
     }
-    if file.synchronous {
-        return Err(NtStatus::INVALID_PARAMETER);
-    }
+    // A synchronous handle takes one too: the I/O completes inline and
+    // the routine still runs at the thread's next alertable wait (Windows
+    // 11, ioapc_test).
     Ok(Some(thread::UserApc { routine, args: [call.arg(3)?, iosb, 0] }))
 }
 
@@ -6567,7 +6666,7 @@ fn nt_notify_change_directory_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::INVALID_PARAMETER;
     }
     let event = tri!(start_io(call, &entry.object, event_handle));
-    let apc = tri!(io_apc(call, dir, iosb)).and_then(|apc| thread::current().map(|t| (t, apc)));
+    let apc = tri!(io_apc(call, iosb)).and_then(|apc| thread::current().map(|t| (t, apc)));
     let done = if dir.synchronous {
         let e = Event { kind: EventType::Notification, dispatcher: Dispatcher::new(0) };
         match KObject::new(ObjectBody::Event(e)) {
@@ -6897,3 +6996,9 @@ mod winsta_calls;
 
 #[path = "session_calls.rs"]
 mod session_calls;
+
+#[path = "clipboard_calls.rs"]
+mod clipboard_calls;
+
+#[path = "scm_calls.rs"]
+mod scm_calls;

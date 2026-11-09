@@ -190,7 +190,8 @@ pub fn fork(call: &Call<'_>, stack: Option<u64>, vfork: bool) -> Result {
         }
     };
     // Its one thread, with the forking thread's mask, before it runs.
-    if lx.add_thread(thread::id_of(&object), super::threads::mask_of(call)).is_err() {
+    let comm = call.lx.comm(call.tid);
+    if lx.add_thread(thread::id_of(&object), super::threads::mask_of(call), comm).is_err() {
         crate::warn!("lx: pid {} fork failed: no memory for the child's thread state", parent.id);
         process::terminate(&child, super::signal::killed_status(lx_abi::signal::SIGKILL), false);
         thread::resume(&object);

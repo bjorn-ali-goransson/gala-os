@@ -83,26 +83,6 @@ function Stop-Descendants([int]$parent, [datetime]$since) {
     }
 }
 
-# Runs a program once and throws away what it printed. persist_test's
-# first run creates the state (C:\persist, HKCU\Software\GalaPersist) that
-# its second run checks, so only the second run is a result.
-function Invoke-Priming([string]$path, [string]$dir, [int]$seconds) {
-    $p = New-Object System.Diagnostics.ProcessStartInfo
-    $p.FileName = $path
-    $p.WorkingDirectory = $dir
-    $p.UseShellExecute = $false
-    $p.RedirectStandardOutput = $true
-    $p.CreateNoWindow = $true
-    $proc = $null
-    try { $proc = [System.Diagnostics.Process]::Start($p) } catch { return }
-    if ($null -eq $proc) { return }
-    [void]$proc.StandardOutput.ReadToEndAsync()
-    if (-not $proc.WaitForExit($seconds * 1000)) {
-        $proc.Kill()
-        $proc.WaitForExit()
-    }
-}
-
 # Where a crashed program faulted: module, offset and exception code.
 # Windows Error Reporting's event 1000 is never written for these, because
 # the runner sets SEM_NOGPFAULTERRORBOX above and a process with that error
@@ -144,6 +124,7 @@ $expected = @{
     "busybox"             = 3           # 0x3: its command line here ends `exit 3`
     "busybox_script"      = 4           # 0x4: script.sh ends `exit 4`
     "crash"               = 3221225477  # 0xc0000005: it crashes on purpose
+    "cxx_throw"           = 3765269347  # 0xe06d7363: a C++ throw nothing catches, on purpose
     "unimplemented_test"  = 3           # 0x3 is Windows' own answer (gala: 0xc0000002)
     "missing_import_test" = 3221225785  # 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND, the point of it
     # gala's own programs (user/cmd, user/conhost, user/gala), not tests:
@@ -194,12 +175,14 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     # Driven by flaui_test (a .NET program: docs/WORKFLOW.md, "FlaUI");
     # alone it waits for its window to be closed.
     if ($name -eq "flaui_target") { continue }
-    # winhttp_test and wininet_test fetch from the Nginx that the
-    # schannel_test setup above starts (plain HTTP on 127.0.0.1:8080, TLS on
-    # 8443 with the test CA's certificate for localhost), and that setup
+    # winhttp_test, winhttp_cb_test (and its WOW64 twin) and wininet_test
+    # fetch from the Nginx that the schannel_test setup above starts (plain
+    # HTTP on 127.0.0.1:8080, TLS on 8443 with the test CA's certificate
+    # for localhost), and that setup
     # needs an administrator. Without it they wait for a server that is not
     # there and are killed at the timeout, a minute each.
-    if (($name -eq "winhttp_test" -or $name -eq "wininet_test") -and $null -ne $schannelSkip) {
+    if (($name -eq "winhttp_test" -or $name -eq "winhttp_cb_test" -or $name -eq "wow64_winhttp_cb_test" -or
+         $name -eq "wininet_test") -and $null -ne $schannelSkip) {
         $why = "no Nginx: " + $schannelSkip
         $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $why }
         Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
@@ -220,13 +203,13 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
         Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
         continue
     }
-    # persist_test checks on its second run what its first run wrote, so
-    # both a stale state from an earlier round and a missing one decide the
-    # result. Clear it, prime it, and judge the run after that.
+    # persist_test's second run checks what survives a reboot (its volatile
+    # key and temporary files are gone), which a second run in the same
+    # boot cannot show: clear any state from an earlier round so the run
+    # is always its first.
     if ($name -eq "persist_test") {
         Remove-Item -Recurse -Force "C:\persist" -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force "HKCU:\Software\GalaPersist" -ErrorAction SilentlyContinue
-        Invoke-Priming $exe.FullName $here $TimeoutSeconds
     }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe.FullName

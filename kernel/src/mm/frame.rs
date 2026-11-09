@@ -59,7 +59,16 @@ pub enum ShareError {
 
 pub struct FrameAllocator<'a> {
     bitmap: &'a mut [u64],
+    /// Frames the bitmap spans: every frame from 0 to the top of physical
+    /// memory, holes included. A bound for the bitmap, not a quantity of
+    /// memory -- above about 2 GiB the PCI hole makes it far larger than
+    /// the machine's memory, so `managed` is what memory figures use.
     frame_count: u64,
+    /// Frames the allocator manages: the usable ones, free or in use.
+    /// This is the machine's memory, and the commit limit and both pool
+    /// quotas are derived from it (`nt::charge::limit`,
+    /// `nt::quota::memory`).
+    managed: u64,
     free_count: u64,
     /// Word index where the next single-frame search starts.
     hint: usize,
@@ -79,13 +88,16 @@ impl<'a> FrameAllocator<'a> {
         end.div_ceil(PAGE_SIZE).div_ceil(64) as usize
     }
 
-    /// Creates an allocator tracking `bitmap.len() * 64` frames, all in use.
+    /// Creates an allocator spanning `bitmap.len() * 64` frames, all in
+    /// use and none managed yet: the caller says which frames it manages
+    /// by releasing them (`from_memory_map`).
     pub fn new(bitmap: &'a mut [u64]) -> Self {
         bitmap.fill(u64::MAX);
         let frame_count = bitmap.len() as u64 * 64;
         Self {
             bitmap,
             frame_count,
+            managed: 0,
             free_count: 0,
             hint: 0,
             low_free: 0,
@@ -111,6 +123,10 @@ impl<'a> FrameAllocator<'a> {
             let end = region.end() / PAGE_SIZE;
             alloc.release_range(start, end);
         }
+        // Every usable frame is free now and none has been claimed, so
+        // this is what the allocator manages. The `reserved` frames below
+        // are in use, not unmanaged, so they stay in the count.
+        alloc.managed = alloc.free_count;
         for range in reserved {
             alloc.claim_range(range.start / PAGE_SIZE, range.end.div_ceil(PAGE_SIZE));
         }
@@ -128,8 +144,10 @@ impl<'a> FrameAllocator<'a> {
         self.free_count
     }
 
+    /// Frames the allocator manages (the machine's memory), not the span
+    /// the bitmap covers.
     pub fn total_frames(&self) -> u64 {
-        self.frame_count
+        self.managed
     }
 
     /// The fewest free frames since the memory map was read.
@@ -278,7 +296,9 @@ mod tests {
         ];
         let alloc = FrameAllocator::from_memory_map(&mut bits, map, &[]);
         assert_eq!(alloc.free_frames(), 5);
-        assert_eq!(alloc.total_frames(), 128);
+        // The reserved region is not managed, so the total is the usable
+        // frames (5), not the 128 the bitmap spans.
+        assert_eq!(alloc.total_frames(), 5);
     }
 
     #[test]
@@ -345,6 +365,43 @@ mod tests {
         assert_eq!(alloc.free_frames(), 0);
         assert_eq!(alloc.allocate_contiguous(0, 1), None);
         assert_eq!(alloc.allocate_contiguous(1, 3), None);
+    }
+
+    #[test]
+    fn total_frames_counts_managed_frames_not_the_bitmap_span() {
+        // RAM split around a hole, as QEMU leaves it above about 2 GiB
+        // (below 2 GiB and above 4 GiB, the PCI hole between). The frames
+        // the allocator manages are the usable ones; the bitmap spans
+        // every frame up to the top of memory, hole included. The commit
+        // limit and both pool quotas are a share of this figure
+        // (`nt::charge::limit`, `nt::quota::memory`), so the span would
+        // make them larger than the machine.
+        let mut bits = [0; 1]; // 64 frames of span
+        let map = [region(0x1000, 0x4000), region(0x10_000, 0x2000)];
+        let alloc = FrameAllocator::from_memory_map(&mut bits, map, &[]);
+        assert_eq!(alloc.free_frames(), 6);
+        assert_eq!(alloc.total_frames(), 6);
+    }
+
+    #[test]
+    fn reserved_frames_are_managed_but_not_free() {
+        // A reserved range (the bitmap's own frames, a handover's pages)
+        // is in use, not outside the allocator: it counts in the total.
+        // The second range is outside the usable regions, so it was never
+        // managed and claiming it changes neither figure.
+        let mut bits = [0; 1];
+        let reserved = [0x2000..0x3000, 0x8000..0x9000];
+        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x1000, 0x4000)], &reserved);
+        assert_eq!((alloc.free_frames(), alloc.total_frames()), (3, 4));
+    }
+
+    #[test]
+    fn frames_beyond_the_bitmap_are_not_counted_as_managed() {
+        // A usable region the bitmap cannot address is clamped away, so it
+        // is not managed either.
+        let mut bits = [0; 1]; // 64 frames
+        let alloc = FrameAllocator::from_memory_map(&mut bits, [region(0x3f000, 0x10000)], &[]);
+        assert_eq!((alloc.free_frames(), alloc.total_frames()), (1, 1));
     }
 
     #[test]

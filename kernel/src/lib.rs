@@ -60,6 +60,8 @@ pub mod statedump;
 pub mod sync;
 pub mod time;
 pub mod trust;
+pub mod unix;
+pub mod wayland;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -209,6 +211,11 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     if let Err(e) = nt::accounts::assign_boot_profiles() {
         warn!("profiles: {e:?}");
     }
+    // The Linux view's user database, from the accounts (lx::identity):
+    // /etc/passwd and /etc/group, and the boot user's profile.
+    if let Err(e) = lx::identity::publish() {
+        error!("lx: identity: cannot publish the user database: {e:?}");
+    }
     // `persist`: C: is kept on the disk (changes since earlier boots are
     // replayed now, over the boot's files).
     if cmdline.flag("persist") {
@@ -333,6 +340,18 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     // console; `replay=<boot module>`: they read it from that recording
     // (kernel/src/replay.rs).
     start_record_replay(&info, &cmdline);
+    // The Wayland server for Linux desktop programs, listening on
+    // /run/user/<uid>/wayland-0 before any program starts (ROADMAP LD):
+    // on where the desktop has a shell (not bare: the server profile, or
+    // no screen and no `presenter=`), unless `wayland=off`; `wayland=on`
+    // starts it anyway, `trace` also logs every request and event.
+    let wayland_mode =
+        cmdline.value("wayland").unwrap_or(if nt::desktop::is_bare() { "off" } else { "on" });
+    if wayland_mode != "off"
+        && let Err(e) = wayland::start(wayland_mode)
+    {
+        error!("wayland: cannot start the server: {e:?}");
+    }
     // `start=a.exe,b.exe` (with `start_args=`) starts programs first and
     // does not wait for them: a server the `run=` programs talk to. They
     // end with the boot. `start_as=system`: they run as SYSTEM (services,
@@ -456,10 +475,14 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 
     nt::ledger::dump();
     if events::written() > 0 {
+        use core::sync::atomic::Ordering::Relaxed;
         info!(
-            "events: {} written to the debug console, {} profiler samples lost (interrupts off too long)",
+            "events: {} written to the debug console; profiler samples: {} asked of another CPU, {} in user mode, {} in the kernel, {} lost (interrupts off too long)",
             events::written(),
-            time::SAMPLES_LOST.load(core::sync::atomic::Ordering::Relaxed)
+            time::SAMPLES_ASKED.load(Relaxed),
+            time::SAMPLES_USER.load(Relaxed),
+            time::SAMPLES_KERNEL.load(Relaxed),
+            time::SAMPLES_LOST.load(Relaxed)
         );
     }
     net::log_stats();
@@ -508,14 +531,16 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
 }
 
 /// The end of the boot thread's work: QEMU exits with `code` (`qemu_exit`),
-/// else the CPU idles.
+/// else the boot thread ends and its CPU runs its idle thread. (A boot
+/// thread that halted in a loop instead stayed "in the kernel without
+/// blocking" forever: the flight recorder's watchdog reported it every
+/// 20 s and its reports pushed every real event out of the ring.)
 fn stop(code: QemuExitCode) -> ! {
     if QEMU_EXIT.load(Ordering::Relaxed) {
         qemu::exit(code);
     }
-    loop {
-        arch::cpu::enable_interrupts_and_halt();
-    }
+    info!("boot: the boot thread's work is done; it ends");
+    sched::exit()
 }
 
 /// Raises the disk's rollback floor to the verified manifest's (R8).
@@ -1150,7 +1175,9 @@ fn start_program(
 }
 
 /// Prints file `path` (`C:/dir/name`, percent-encoded) to the log, one
-/// `dump:` line per line of text; a missing file is one line saying so.
+/// `dump:` line per line of text; a directory, each file below it (a
+/// program's log directory whose file names are not known in advance);
+/// a missing path is one line saying so.
 fn dump_file(path: &str) {
     let mut decoded = alloc::vec::Vec::new();
     if cmdline::percent_decode(path, &mut decoded).is_err() {
@@ -1163,7 +1190,7 @@ fn dump_file(path: &str) {
     // stays UTF-8), copied into room reserved first.
     use crate::mm::heap::TryVec;
     let mut bytes = alloc::vec::Vec::new();
-    if bytes.try_extend_from_slice(rest.as_bytes()).is_err() {
+    if bytes.try_extend_from_slice(rest.trim_end_matches('/').as_bytes()).is_err() {
         error!("dump: out of memory");
         return;
     }
@@ -1171,19 +1198,115 @@ fn dump_file(path: &str) {
         *b = b'\\';
     }
     let Ok(volume_path) = alloc::string::String::from_utf8(bytes) else { return };
-    let data = match nt::file::lookup(&volume_path).and_then(nt::file::read_all) {
-        Ok(data) => data,
+    dump_node(text.trim_end_matches('/'), &volume_path, 0);
+}
+
+/// How deep `dump=` goes below a directory it names.
+const DUMP_DEPTH: u32 = 4;
+
+/// `a`, `separator`, `b` as one string (None: out of memory).
+fn joined(a: &str, separator: u8, b: &str) -> Option<alloc::string::String> {
+    use crate::mm::heap::TryVec;
+    let mut s = alloc::vec::Vec::new();
+    s.try_extend_from_slice(a.as_bytes()).ok()?;
+    s.try_push(separator).ok()?;
+    s.try_extend_from_slice(b.as_bytes()).ok()?;
+    alloc::string::String::from_utf8(s).ok()
+}
+
+/// Prints the file at `volume_path` (`\\`-separated, from the volume
+/// root), or every file below that directory, as `dump:` lines naming it
+/// `shown` (the path as `dump=` gave it, `/`-separated).
+fn dump_node(shown: &str, volume_path: &str, depth: u32) {
+    let node = match nt::file::lookup(volume_path) {
+        Ok(node) => node,
         Err(e) => {
-            info!("dump: {text}: none ({e:?})");
+            info!("dump: {shown}: none ({e:?})");
             return;
         }
     };
-    info!("dump: begin {text} ({} bytes)", data.len());
-    for line in data.split(|&b| b == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        info!("dump: {}", Lossy(line));
+    let directory = nt::file::with_fs(|fs| fs.node(node).is_some_and(|n| n.is_dir()));
+    if directory {
+        if depth >= DUMP_DEPTH {
+            info!("dump: {shown}: a directory {DUMP_DEPTH} levels down, not listed");
+            return;
+        }
+        // The names first (the file system's lock), then each file.
+        let names = nt::file::with_fs(|fs| -> Option<alloc::vec::Vec<alloc::string::String>> {
+            use crate::mm::heap::TryVec;
+            let mut names = alloc::vec::Vec::new();
+            for (_, name) in fs.entries(node).ok()? {
+                let mut s = alloc::vec::Vec::new();
+                for c in char::decode_utf16(name.iter().copied()) {
+                    let mut utf8 = [0u8; 4];
+                    let c = c.unwrap_or('\u{fffd}').encode_utf8(&mut utf8);
+                    s.try_extend_from_slice(c.as_bytes()).ok()?;
+                }
+                names.try_push(alloc::string::String::from_utf8(s).ok()?).ok()?;
+            }
+            Some(names)
+        });
+        let Some(names) = names else {
+            error!("dump: {shown}: cannot list the directory (out of memory)");
+            return;
+        };
+        info!("dump: {shown}: a directory of {} entries", names.len());
+        for name in &names {
+            match (joined(shown, b'/', name), joined(volume_path, b'\\', name)) {
+                (Some(child_shown), Some(child_path)) => {
+                    dump_node(&child_shown, &child_path, depth + 1)
+                }
+                _ => error!("dump: {shown}/{name}: out of memory"),
+            }
+        }
+        return;
     }
-    info!("dump: end {text}");
+    let data = match nt::file::read_all(node) {
+        Ok(data) => data,
+        Err(e) => {
+            info!("dump: {shown}: unreadable ({e:?})");
+            return;
+        }
+    };
+    // UTF-16LE text (a byte-order mark, or ASCII's zero high bytes), as
+    // Windows programs often write their logs, is shown as text too.
+    let utf16 = data.starts_with(&[0xff, 0xfe])
+        || (data.len() >= 4 && data.len() % 2 == 0 && data[0] != 0 && data[1] == 0 && data[3] == 0);
+    info!("dump: begin {shown} ({} bytes{})", data.len(), if utf16 { ", UTF-16LE" } else { "" });
+    if utf16 {
+        let body = data.strip_prefix(&[0xff, 0xfe]).unwrap_or(&data);
+        let mut line = alloc::vec::Vec::new();
+        let mut units = body.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).peekable();
+        while units.peek().is_some() {
+            line.clear();
+            for u in units.by_ref().take_while(|&u| u != u16::from(b'\n')) {
+                if mm::heap::TryVec::try_push(&mut line, u).is_err() {
+                    break;
+                }
+            }
+            let text = line.strip_suffix(&[u16::from(b'\r')]).unwrap_or(&line);
+            info!("dump: {}", Wide(text));
+        }
+    } else {
+        for line in data.split(|&b| b == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            info!("dump: {}", Lossy(line));
+        }
+    }
+    info!("dump: end {shown}");
+}
+
+/// UTF-16 text, with U+FFFD for unpaired surrogates.
+struct Wide<'a>(&'a [u16]);
+
+impl core::fmt::Display for Wide<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use core::fmt::Write;
+        for c in char::decode_utf16(self.0.iter().copied()) {
+            f.write_char(c.unwrap_or('\u{fffd}'))?;
+        }
+        Ok(())
+    }
 }
 
 /// Text that may not be UTF-8, shown with U+FFFD for bad bytes.

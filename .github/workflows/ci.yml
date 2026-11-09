@@ -31,8 +31,8 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: Install QEMU, OVMF, xorriso, musl-tools
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools openssh-client postgresql-client musl-tools libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+      - name: Install QEMU, OVMF, xorriso, musl-tools, weston, Xvfb, GTK 3
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       # Ubuntu 24.04's QEMU (8.2.2) has the translated-block bug that broke
       # JIT code (WORKFLOW "QEMU"); xtask builds and uses the pinned one.
       - name: Cache the pinned QEMU
@@ -42,6 +42,16 @@ jobs:
           key: gala-qemu-11.1.3
       - name: Build the pinned QEMU
         run: cargo xtask qemu
+      # The pinned downloads the host tests and gala-um use (the JDK...),
+      # kept between runs as in the boot jobs (each checksum-checked at use).
+      - name: Cache the pinned prebuilt programs
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+          key: gala-prebuilt-linux-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-prebuilt-linux-
       - name: Install Go (for user/go_hello; pinned in xtask GO_TOOLCHAIN)
         uses: actions/setup-go@v5
         with:
@@ -62,15 +72,18 @@ jobs:
           cargo clippy -p kernel --lib --features hosted -- -D warnings
           cargo clippy -p um -- -D warnings
           cargo clippy -p galapkg --tests -- -D warnings
+          cargo clippy -p gala_xml --tests -- -D warnings
           cargo clippy -p lx_abi --tests -- -D warnings
+          cargo clippy -p wl_abi --tests -- -D warnings
           cargo clippy -p afd_abi --tests -- -D warnings
           cargo clippy -p schannel_tls --tests -- -D warnings
           cargo clippy -p tuf --tests -- -D warnings
           cargo clippy -p lx_abi --target x86_64-unknown-none -- -D warnings
+          cargo clippy -p wl_abi --target x86_64-unknown-none -- -D warnings
           cargo build --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives
-          cargo clippy --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives -p advapi32 -p comctl32 -p powrprof -p shell32 -p version -p psapi -p ole32 -p oleaut32 -p bcrypt -p tlsdll -p iphlpapi -p secur32 -p winhttp -p http_client -p gala_stubs -p gala_heap -p netapi32 -p pdh -p setupapi -p shlwapi -p rpcrt4 -p urlmon -p wininet -p userenv -p xolehlp -p odbc32 -p wldap32 -p wsock32 -p kernelbase -p gdi32 -p authz -p wintrust -p webservices -p dhcpcsvc -p dbghelp -p msvcrt -p crypt32 -p shfolder -p dwmapi -p cfgmgr32 -p dwrite -p imm32 -p shcore -p wtsapi32 -p msctf -p xmllite -p uxtheme -p comdlg32 -p oleacc -p uiautomationcore -p mpr -p winspool -p msimg32 -p richedit -p riched20 -p msftedit -p clusapi -p resutils -p security -p normaliz -p schannel_tls -p schannel -p schannel_test -p wow64 -p user32 -- -D warnings
-          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p clock_test -p handover_test -p handover_k32_test -p handover_net_test -p udp_test -p sshfwd_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -p smpcow_test -p ledger_test -p bench -p kernel32_test -p missing_import_test -p unimplemented_test -p rpcrt4_test -p netapi32_test -p pdh_test -p setupapi_test -p clusapi_test -p sspi_test -p dpapi_test -p cert_test -p tds_test -p kernel32_sys_test -p kernel32_thread_test -p kernel32_misc_test -p prng_test -p replay_test -p kernel32_env_test -p kernel32_file_test -p pipe_test -p quota_test -p lock_test -p seh_test -p kernel32_sync_test -p kernel32_py_test -p kernel32_locale_test -p disk_test -p rtl_test -p gui_test -p persist_test -p kernel32_system_test -p kernel32_clr_test -p com_test -p bcrypt_test -p console_test -p advapi32_test -p token_test -p security_test -p access_test -p logon_test -p system_test -p lsa_test -p restricted_test -p cmd -p cmd_test -p profile_test -p registry_test -p keyed_event_test -p iphlpapi_test -p afd_poll_test -p dirchange_test -p win32_misc_test -p kernel32_pool_test -p tls_test -p manifest_test -p gala -p gala_cli_test -p pk_install_test -p galapkg -p smpsem_test -p xstate_test -p vmcycle_test -p xmodify_test -p statedump_test -p conpty_test -p session_test -p presenter_test -p winsta_test -p straddle_test -p smprace_test -p browser_api_test -p dwrite_test -p clockcal_test -p safepoint_test -p shootdown_test -p schannel_tls -p schannel -p schannel_test -- -D warnings
-          cargo clippy --release --target i686-pc-windows-msvc -p ntrt -p wow64_test -p wow64_thread_test -p testntdll -p testdll32 -p wow64_import_test -p wow64_seh_test -p wow64_fs_test -p wow64_k32_test -p kernel32 -p kernelbase -p msvcrt -p advapi32 -p bcryptprimitives -p wow64_adv_test -p user32 -p gdi32 -p gala_heap -p comctl32 -p oleaut32 -p ole32 -p shell32 -p shlwapi -p version -p mpr -p comdlg32 -p uxtheme -p imm32 -p dwmapi -p msimg32 -p msctf -p winspool -p wtsapi32 -p winhttp -p ws2_32 -p secur32 -p shfolder -p bcrypt -- -D warnings
+          cargo clippy --release --target x86_64-pc-windows-msvc -p testdll -p testdll2 -p testntdll -p kernel32 -p bcryptprimitives -p advapi32 -p comctl32 -p powrprof -p shell32 -p version -p psapi -p ole32 -p oleaut32 -p bcrypt -p tlsdll -p iphlpapi -p secur32 -p winhttp -p http_client -p gala_stubs -p gala_heap -p netapi32 -p pdh -p setupapi -p shlwapi -p rpcrt4 -p urlmon -p wininet -p userenv -p xolehlp -p odbc32 -p wldap32 -p wsock32 -p kernelbase -p gdi32 -p authz -p wintrust -p webservices -p dhcpcsvc -p dbghelp -p msvcrt -p ucrtbase -p crypt32 -p ncrypt -p msi -p msxml6 -p shfolder -p dwmapi -p cfgmgr32 -p dwrite -p imm32 -p shcore -p wtsapi32 -p msctf -p xmllite -p uxtheme -p comdlg32 -p oleacc -p uiautomationcore -p mpr -p winspool -p msimg32 -p richedit -p riched20 -p msftedit -p clusapi -p resutils -p security -p normaliz -p wldp -p schannel_tls -p schannel -p schannel_test -p wow64 -p user32 -- -D warnings
+          cargo clippy --release --target x86_64-pc-windows-msvc -p ntrt -p hello -p abi_test -p crash -p vm_test -p wait_test -p object_test -p thread_test -p kuser_test -p section_test -p file_test -p image_test -p dir_test -p peb_test -p startup_test -p exception_test -p guard_test -p import_test -p args_test -p fpu_test -p sysinfo_test -p threadinfo_test -p filemap_test -p cow_test -p async_test -p apc_test -p ioapc_test -p sync_test -p symlink_test -p iocp_test -p context_test -p timer_test -p clock_test -p handover_test -p handover_k32_test -p handover_net_test -p udp_test -p sshfwd_test -p loader_test -p smp_test -p smpsched_test -p smpmem_test -p smpcow_test -p ledger_test -p bench -p kernel32_test -p missing_import_test -p unimplemented_test -p rpcrt4_test -p netapi32_test -p pdh_test -p setupapi_test -p clusapi_test -p sspi_test -p dpapi_test -p cert_test -p tds_test -p kernel32_sys_test -p kernel32_thread_test -p kernel32_misc_test -p prng_test -p replay_test -p kernel32_env_test -p kernel32_file_test -p pipe_test -p quota_test -p lock_test -p seh_test -p kernel32_sync_test -p kernel32_py_test -p kernel32_locale_test -p disk_test -p rtl_test -p gui_test -p persist_test -p kernel32_system_test -p kernel32_clr_test -p com_test -p bcrypt_test -p console_test -p advapi32_test -p token_test -p security_test -p access_test -p logon_test -p system_test -p lsa_test -p restricted_test -p cmd -p cmd_test -p profile_test -p registry_test -p keyed_event_test -p iphlpapi_test -p afd_poll_test -p dirchange_test -p win32_misc_test -p kernel32_pool_test -p tls_test -p manifest_test -p gala -p gala_cli_test -p pk_install_test -p galapkg -p smpsem_test -p xstate_test -p vmcycle_test -p xmodify_test -p statedump_test -p conpty_test -p session_test -p presenter_test -p winsta_test -p clipboard_test -p straddle_test -p smprace_test -p browser_api_test -p dwrite_test -p clockcal_test -p safepoint_test -p shootdown_test -p schannel_tls -p schannel -p schannel_test -p ucrt_test -p office_api_test -p msi_test -p svc_test -p msxml_test -p winhttp_cb_test -p runas_test -- -D warnings
+          cargo clippy --release --target i686-pc-windows-msvc -p ntrt -p wow64_test -p wow64_thread_test -p testntdll -p testdll32 -p wow64_import_test -p wow64_seh_test -p wow64_fs_test -p wow64_k32_test -p kernel32 -p kernelbase -p msvcrt -p ucrtbase -p wow64_ucrt_test -p wow64_office_api_test -p wow64_cert_test -p wow64_msi_test -p wow64_svc_test -p wow64_msxml_test -p wow64_winhttp_cb_test -p wow64_runas_test -p advapi32 -p bcryptprimitives -p wow64_adv_test -p user32 -p gdi32 -p gala_heap -p comctl32 -p oleaut32 -p ole32 -p shell32 -p shlwapi -p version -p mpr -p comdlg32 -p uxtheme -p imm32 -p dwmapi -p msimg32 -p msctf -p winspool -p wtsapi32 -p winhttp -p ws2_32 -p secur32 -p shfolder -p bcrypt -p crypt32 -p ncrypt -p msi -p msxml6 -p normaliz -p powrprof -p wldp -- -D warnings
       - name: Linux test programs (user/lx) against real Linux; binaries match their sources
         run: cargo xtask lx-expect && git diff --exit-code user/lx
       - name: Unit tests, gala-um and replay (the boots run in the boot jobs)
@@ -102,7 +115,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
       - name: Install QEMU's build dependencies, OVMF, xorriso
-        run: sudo apt-get update && sudo apt-get install -y ovmf xorriso msitools openssh-client postgresql-client musl-tools libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y ovmf xorriso msitools openssh-client postgresql-client musl-tools shared-mime-info libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       - name: Cache the pinned QEMU
         uses: actions/cache@v4
         with:
@@ -117,6 +130,20 @@ jobs:
           cache: false
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # The pinned downloads (PREBUILT, the Linux roots' packages), kept
+      # between runs: each is checked against its pinned checksum at each
+      # use (an unpacked tree carries a marker naming it), so an older cache
+      # is safe and only what is missing is fetched; a release host's
+      # outage (a 504 from GitHub's release downloads) then fails only the
+      # runs that need a new download.
+      - name: Cache the pinned prebuilt programs
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-prebuilt-${{ matrix.shard }}-
       - name: Boot scenarios, shard ${{ matrix.shard }} of 6
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6
@@ -150,6 +177,19 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force target/windows | Out-Null
           powershell -ExecutionPolicy Bypass -File user\bin\run-all.ps1 -Out target\windows\windows.json
+      - name: Fault signatures of crashed programs
+        if: always()
+        shell: pwsh
+        # Each program the report shows ending with an exception status is
+        # run again under user/windows/fault.py (a debugger: the runner's
+        # SEM_NOGPFAULTERRORBOX keeps Windows Error Reporting from recording
+        # it): exception code, module+offset, address and the first-chance
+        # exceptions before it (#27).
+        run: |
+          if (Test-Path target/windows/windows.json) {
+            python user/windows/fault.py --report target/windows/windows.json user/bin | Tee-Object -FilePath target/windows/faults.md
+            Get-Content target/windows/faults.md >> $env:GITHUB_STEP_SUMMARY
+          }
       - name: Summary
         if: always()
         shell: pwsh

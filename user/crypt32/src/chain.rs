@@ -51,12 +51,19 @@
 //!   ledger as `crypt32.dll!<policy>: <error>` (kind "other") with the
 //!   chain's error bits as detail: why a program refused a certificate.
 //!
-//! Layouts (x64) as wincrypt.h gives them: CERT_CHAIN_CONTEXT (72
-//! bytes), CERT_SIMPLE_CHAIN (40), CERT_CHAIN_ELEMENT (56),
-//! CERT_CHAIN_PARA (32 without its later fields, 96), CERT_CHAIN_ENGINE_CONFIG
-//! (64, 80 or 88), CERT_CHAIN_POLICY_STATUS (24).
+//! Layouts as wincrypt.h gives them, typed for both widths (x86 and
+//! x64, checked against the header's sizes: `layout`):
+//! CERT_CHAIN_CONTEXT (56 or 72 bytes), CERT_SIMPLE_CHAIN (32 or 40),
+//! CERT_CHAIN_ELEMENT (32 or 56); the caller's CERT_CHAIN_PARA,
+//! CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_POLICY_PARA and _STATUS and
+//! SSL_EXTRA_CERT_CHAIN_POLICY_PARA in `layout`.
 
 use core::ffi::c_void;
+
+use crate::layout::{
+    ChainPara, ENGINE_CONFIG_SIZES, EngineConfig, EnhKeyUsage, PolicyPara, PolicyStatus,
+    SslExtraPara, UsageMatch, get, has,
+};
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use super::cert::{
@@ -71,14 +78,22 @@ use super::store::{
 };
 use super::{SetLastError, crl};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
@@ -164,6 +179,15 @@ pub struct ChainContext {
     create_flags: u32,
     id: [u8; 16],
 }
+
+crate::layout::check!(core::mem::size_of::<TrustStatus>(), 8, 8);
+crate::layout::check!(core::mem::size_of::<Element>(), 32, 56);
+crate::layout::check!(core::mem::offset_of!(Element, extended), 28, 48);
+crate::layout::check!(core::mem::size_of::<SimpleChain>(), 32, 40);
+crate::layout::check!(core::mem::offset_of!(SimpleChain, freshness), 28, 36);
+crate::layout::check!(core::mem::size_of::<ChainContext>(), 56, 72);
+crate::layout::check!(core::mem::offset_of!(ChainContext, create_flags), 36, 48);
+crate::layout::check!(core::mem::offset_of!(ChainContext, id), 40, 52);
 
 const CHAIN_MAGIC: u32 = 0x6761_6c6e; // "galn"
 
@@ -300,17 +324,15 @@ fn engine<'a>(h: *mut c_void) -> Option<&'a Engine> {
     (e.magic == ENGINE_MAGIC).then_some(e)
 }
 
-/// CERT_CHAIN_ENGINE_CONFIG: cbSize, hRestrictedRoot (8),
-/// hRestrictedTrust (16), hRestrictedOther (24), cAdditionalStore (32),
-/// rghAdditionalStore (40), dwFlags (48), ..., hExclusiveRoot (64),
-/// hExclusiveTrustedPeople (72), dwExclusiveFlags (80).
-fn read<T: Copy>(p: *const u8, at: usize) -> T {
-    // SAFETY: inside the caller's structure (its size checked).
-    unsafe { p.add(at).cast::<T>().read_unaligned() }
+/// The cbSize a caller's structure starts with.
+fn size_of_caller(p: *const u8) -> u32 {
+    // SAFETY: every structure read so starts with its DWORD cbSize.
+    unsafe { p.cast::<u32>().read_unaligned() }
 }
 
 /// CertCreateCertificateChainEngine: an engine whose roots are
-/// hExclusiveRoot (CERT_CHAIN_ENGINE_CONFIG of 80 or 88 bytes), else
+/// hExclusiveRoot (a CERT_CHAIN_ENGINE_CONFIG with it: 48 or 52 bytes on
+/// x86, 80 or 88 on x64), else
 /// hRestrictedRoot, else the ROOT store, searching rghAdditionalStore for
 /// issuers too. Other sizes are E_INVALIDARG; hRestrictedTrust,
 /// hRestrictedOther, hExclusiveTrustedPeople and dwExclusiveFlags are
@@ -325,20 +347,35 @@ pub extern "system" fn CertCreateCertificateChainEngine(
         unsafe { SetLastError(E_INVALIDARG) };
         return 0;
     }
-    let size: u32 = read(config, 0);
-    if !matches!(size, 64 | 80 | 88) {
+    let size = size_of_caller(config);
+    if !ENGINE_CONFIG_SIZES.contains(&(size as usize)) {
         // SAFETY: plain call.
         unsafe { SetLastError(E_INVALIDARG) };
         return 0;
     }
-    let restricted_root: *mut c_void = read(config, 8);
-    let others: [*mut c_void; 2] = [read(config, 16), read(config, 24)];
-    let count: u32 = read(config, 32);
-    let stores: *const *mut c_void = read(config, 40);
+    let restricted_root = get!(config, EngineConfig, restricted_root);
+    let others = [
+        get!(config, EngineConfig, restricted_trust),
+        get!(config, EngineConfig, restricted_other),
+    ];
+    let count = get!(config, EngineConfig, additional_count);
+    let stores = get!(config, EngineConfig, additional);
     let (exclusive_root, people, exclusive_flags): (*mut c_void, *mut c_void, u32) = (
-        if size >= 80 { read(config, 64) } else { core::ptr::null_mut() },
-        if size >= 80 { read(config, 72) } else { core::ptr::null_mut() },
-        if size >= 88 { read(config, 80) } else { 0 },
+        if has!(size, EngineConfig, exclusive_root) {
+            get!(config, EngineConfig, exclusive_root)
+        } else {
+            core::ptr::null_mut()
+        },
+        if has!(size, EngineConfig, exclusive_trusted_people) {
+            get!(config, EngineConfig, exclusive_trusted_people)
+        } else {
+            core::ptr::null_mut()
+        },
+        if has!(size, EngineConfig, exclusive_flags) {
+            get!(config, EngineConfig, exclusive_flags)
+        } else {
+            0
+        },
     );
     if others.iter().any(|s| !s.is_null()) || !people.is_null() || exclusive_flags != 0 {
         unsupported(
@@ -727,17 +764,15 @@ fn check(e: &Engine, b: &mut Built, time: u64) {
     }
 }
 
-/// CERT_CHAIN_PARA's RequestedUsage (cbSize at least 32): its type and
-/// OID strings.
+/// CERT_CHAIN_PARA's RequestedUsage (a cbSize that covers it): its type
+/// and OID strings.
 fn requested_usage<'a>(para: *const u8) -> (bool, [&'a [u8]; 8], usize) {
     let mut ids: [&[u8]; 8] = [&[]; 8];
-    let size: u32 = read(para, 0);
-    if size < 32 {
+    if !has!(size_of_caller(para), ChainPara, requested) {
         return (false, ids, 0);
     }
-    let kind: u32 = read(para, 8);
-    let count: u32 = read(para, 16);
-    let list: *const *const u8 = read(para, 24);
+    let UsageMatch { kind, usage: EnhKeyUsage { count, ids: list } } =
+        get!(para, ChainPara, requested);
     let n = (count as usize).min(ids.len());
     if list.is_null() {
         return (false, ids, 0);
@@ -749,7 +784,11 @@ fn requested_usage<'a>(para: *const u8) -> (bool, [&'a [u8]; 8], usize) {
     (kind == 0, ids, n) // USAGE_MATCH_TYPE_AND is 0
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
@@ -1152,12 +1191,12 @@ fn name_matches(c: *const CertContext, name: &[u8]) -> bool {
 /// server-gated-crypto usage; AUTHTYPE_CLIENT: clientAuth), then the
 /// server name.
 fn ssl_checks(b: &ChainBlock, extra: *const u8) -> Verdict {
-    if extra.is_null() || read::<u32>(extra, 0) < 24 {
+    if extra.is_null() || !has!(size_of_caller(extra), SslExtraPara, server_name) {
         return PASS;
     }
-    let auth: u32 = read(extra, 4);
-    let checks: u32 = read(extra, 8);
-    let server: *const u16 = read(extra, 16);
+    let auth = get!(extra, SslExtraPara, auth_type);
+    let checks = get!(extra, SslExtraPara, checks);
+    let server = get!(extra, SslExtraPara, server_name);
     let end = b.elements[0].cert;
     if checks & SSL_IGNORE_WRONG_USAGE == 0 {
         let wanted: &[&[u8]] = match auth {
@@ -1222,13 +1261,16 @@ pub extern "system" fn CertVerifyCertificateChainPolicy(
         unsafe { SetLastError(E_INVALIDARG) };
         return 0;
     }
-    let (flags, extra) = if para.is_null() || read::<u32>(para, 0) < 16 {
+    let (flags, extra) = if para.is_null() || !has!(size_of_caller(para), PolicyPara, extra) {
         (0u32, core::ptr::null())
     } else {
-        (read::<u32>(para, 4), read::<*const u8>(para, 8))
+        (get!(para, PolicyPara, flags), get!(para, PolicyPara, extra))
     };
-    let ssl_flags =
-        if extra.is_null() || read::<u32>(extra, 0) < 24 { 0 } else { read::<u32>(extra, 8) };
+    let ssl_flags = if extra.is_null() || !has!(size_of_caller(extra), SslExtraPara, server_name) {
+        0
+    } else {
+        get!(extra, SslExtraPara, checks)
+    };
     let (name, verdict): (&[u8], Verdict) = match policy {
         1 => (b"BASE", base(b, flags, None)),
         4 | 9 => {
@@ -1270,11 +1312,12 @@ pub extern "system" fn CertVerifyCertificateChainPolicy(
         unsafe { GalaRecordMissing(text.as_ptr(), n, 5, b.context.status.error.into()) };
     }
     // CERT_CHAIN_POLICY_STATUS: dwError, lChainIndex, lElementIndex.
+    let status = status.cast::<PolicyStatus>();
     // SAFETY: the caller's structure.
     unsafe {
-        status.add(4).cast::<u32>().write_unaligned(verdict.0);
-        status.add(8).cast::<i32>().write_unaligned(verdict.1);
-        status.add(12).cast::<i32>().write_unaligned(verdict.2);
+        core::ptr::addr_of_mut!((*status).error).write_unaligned(verdict.0);
+        core::ptr::addr_of_mut!((*status).chain_index).write_unaligned(verdict.1);
+        core::ptr::addr_of_mut!((*status).element_index).write_unaligned(verdict.2);
     }
     1
 }

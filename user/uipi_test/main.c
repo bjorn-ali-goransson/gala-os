@@ -36,8 +36,10 @@
  * - The child's post of WM_APP + 1 now arrives (the parent's title shows
  *   it), WM_APP + 4 is sent and answered, WM_APP + 2 stays blocked.
  * - MSGFLT_DISALLOW: MSGFLTINFO_NONE, then ALREADYDISALLOWED_FORWND; for
- *   WM_APP + 4 (allowed process-wide) MSGFLTINFO_ALLOWED_HIGHER; MSGFLT_RESET
- *   MSGFLTINFO_NONE. The child's post of WM_APP + 1 is blocked again,
+ *   WM_APP + 4 (allowed process-wide) MSGFLTINFO_ALLOWED_HIGHER;
+ *   MSGFLT_RESET takes message 0 only (MSGFLTINFO_NONE), and ALLOW or
+ *   DISALLOW a nonzero message: ERROR_INVALID_PARAMETER otherwise. The
+ *   child's post of WM_APP + 1 is blocked again,
  *   WM_APP + 4 still passes.
  * - A higher level reaches a lower one: the parent's SendMessage to the
  *   child's window is answered.
@@ -341,8 +343,19 @@ int main(int argc, char **argv) {
     cfs.ExtStatus = 99;
     CHECK(ChangeWindowMessageFilterEx(top, WM_APP + 4, MSGFLT_DISALLOW, &cfs));
     CHECK(cfs.ExtStatus == MSGFLTINFO_ALLOWED_HIGHER);
+    /* MSGFLT_RESET takes message 0 only (the window's whole filter), and
+     * ALLOW/DISALLOW a message other than 0: ERROR_INVALID_PARAMETER with
+     * ExtStatus untouched (Windows 11). */
     cfs.ExtStatus = 99;
-    CHECK(ChangeWindowMessageFilterEx(top, WM_APP + 1, MSGFLT_RESET, &cfs));
+    SetLastError(0);
+    CHECK(!ChangeWindowMessageFilterEx(top, WM_APP + 1, MSGFLT_RESET, &cfs));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(cfs.ExtStatus == 99);
+    SetLastError(0);
+    CHECK(!ChangeWindowMessageFilterEx(top, 0, MSGFLT_ALLOW, &cfs));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(cfs.ExtStatus == 99);
+    CHECK(ChangeWindowMessageFilterEx(top, 0, MSGFLT_RESET, &cfs));
     CHECK(cfs.ExtStatus == MSGFLTINFO_NONE);
     CHECK(SetEvent(go3));
     for (int i = 0; i < 2000; i++) {

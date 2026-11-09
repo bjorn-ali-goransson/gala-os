@@ -59,7 +59,10 @@ def main(argv):
         print("| program | exit | ms | last line |")
         print("|---|---|---|---|")
         for r in failed:
-            line = str(r.get("line", "")).replace("|", "\\|")
+            line = r.get("line", "")
+            if r.get("skipped"):
+                line = f"skipped: {r['skipped']}"
+            line = str(line).replace("|", "\\|")
             print(f"| `{r['program']}` | {fmt_exit(r.get('exit'))} | {r.get('ms', '')} | {line} |")
     return 1 if regressions else 0
 

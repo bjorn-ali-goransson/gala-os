@@ -5,14 +5,21 @@
 //! intermediate certificates and the CRLs revocation is checked with
 //! (offline: crl.rs). The "ROOT" and "CA" system stores are opened with
 //! them, so programs that build their trust from crypt32's stores
-//! (Chromium's TrustStoreWin, curl) trust what Schannel trusts. See
-//! user/cert_test.
+//! (Chromium's TrustStoreWin, curl) trust what Schannel trusts. The
+//! directories are the machine's, one set for both widths: the 32-bit
+//! crypt32 (SysWOW64's) reads them through `%SystemRoot%\Sysnative`, the
+//! real System32 (its own System32 is redirected to SysWOW64). See
+//! user/cert_test and user/wow64_cert_test.
 
 use core::ffi::c_void;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
-    fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32;
+    fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u32;
     fn FindFirstFileW(pattern: *const u16, data: *mut FindData) -> usize;
     fn FindNextFileW(find: usize, data: *mut FindData) -> i32;
     fn FindClose(find: usize) -> i32;
@@ -68,13 +75,15 @@ pub enum Directory {
 pub fn load(store: *mut c_void, dir: Directory) -> u32 {
     let mut path = [0u16; 400];
     // SAFETY: our buffer.
-    let n = unsafe { GetSystemDirectoryW(path.as_mut_ptr(), 260) } as usize;
+    let n = unsafe { GetSystemWindowsDirectoryW(path.as_mut_ptr(), 260) } as usize;
     if n == 0 || n > 260 {
         return 0;
     }
+    // The real System32 for either width (module comment).
+    let system = if cfg!(target_arch = "x86") { "\\Sysnative" } else { "\\System32" };
     let suffix = if dir == Directory::Roots { "\\gala\\roots\\" } else { "\\gala\\ca\\" };
     let mut len = n;
-    for c in suffix.encode_utf16() {
+    for c in system.encode_utf16().chain(suffix.encode_utf16()) {
         path[len] = c;
         len += 1;
     }

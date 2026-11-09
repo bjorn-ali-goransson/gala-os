@@ -3,7 +3,8 @@
 //! WSASocketW, AcceptEx and ConnectEx (loaded with WSAIoctl
 //! SIO_GET_EXTENSION_FUNCTION_POINTER) pending until the other side shows
 //! up, completion packets carrying the key and the OVERLAPPED, the
-//! SO_UPDATE_*_CONTEXT options, GetAcceptExSockaddrs (from mswsock.dll),
+//! SO_UPDATE_*_CONTEXT options, GetAcceptExSockaddrs (also through
+//! WSAIoctl: mswsock's export of that name is another function on Windows),
 //! overlapped WSARecv/WSASend, CancelIoEx (ERROR_OPERATION_ABORTED, and
 //! ERROR_NOT_FOUND when nothing is pending), WSAGetOverlappedResult and
 //! FILE_SKIP_COMPLETION_PORT_ON_SUCCESS; completion routines (WSARecv and
@@ -186,19 +187,19 @@ unsafe extern "system" {
     fn closesocket(s: Socket) -> i32;
 }
 
-#[link(name = "mswsock", kind = "raw-dylib")]
-unsafe extern "system" {
-    fn GetAcceptExSockaddrs(
-        buf: *mut u8,
-        receive_len: u32,
-        local_len: u32,
-        remote_len: u32,
-        local: *mut *mut SockaddrIn,
-        local_size: *mut i32,
-        remote: *mut *mut SockaddrIn,
-        remote_size: *mut i32,
-    );
-}
+/// GetAcceptExSockaddrs, loaded with WSAIoctl as Microsoft documents: on
+/// Windows 11 mswsock's export of the same name is a different function
+/// that leaves the pointers NULL.
+type GetAcceptExSockaddrsFn = unsafe extern "system" fn(
+    *mut u8,
+    u32,
+    u32,
+    u32,
+    *mut *mut SockaddrIn,
+    *mut i32,
+    *mut *mut SockaddrIn,
+    *mut i32,
+);
 
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
@@ -231,6 +232,8 @@ const INVALID_SOCKET: Socket = !0;
 const SIO_GET_EXTENSION_FUNCTION_POINTER: u32 = 0xc800_0006;
 const WSAID_ACCEPTEX: Guid =
     Guid(0xb536_7df1, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
+const WSAID_GETACCEPTEXSOCKADDRS: Guid =
+    Guid(0xb536_7df2, 0xcbac, 0x11cf, [0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92]);
 const WSAID_CONNECTEX: Guid =
     Guid(0x25a2_07b9, 0xddf3, 0x4660, [0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e]);
 const ERROR_IO_PENDING: u32 = 997;
@@ -470,7 +473,11 @@ fn run() -> Result<(), u32> {
         // The addresses AcceptEx stored: ours and the client's.
         let (mut local, mut remote) = (core::ptr::null_mut(), core::ptr::null_mut());
         let (mut local_len, mut remote_len) = (0i32, 0i32);
-        GetAcceptExSockaddrs(
+        let sockaddrs: Option<GetAcceptExSockaddrsFn> =
+            extension(listener, &WSAID_GETACCEPTEXSOCKADDRS);
+        c.ok(sockaddrs.is_some(), WSAGetLastError() as u64)?;
+        let Some(get_accept_ex_sockaddrs) = sockaddrs else { return Ok(()) };
+        get_accept_ex_sockaddrs(
             accept_buf.as_mut_ptr(),
             0,
             ADDR_BLOCK,

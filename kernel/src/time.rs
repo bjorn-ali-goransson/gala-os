@@ -124,13 +124,19 @@ static SAMPLE_TICKS: [AtomicU64; crate::arch::smp::MAX_CPUS] =
 // A sample must be able to land anywhere, including code that runs with
 // interrupts off (every `IrqMutex` section, interrupt handlers): a timer
 // tick held back there is taken where interrupts come back on, which
-// bills a whole locked section to its unlock. So samples are NMIs: every
-// `SAMPLE_EVERY` ticks a CPU sends one to the next online CPU (round
-// robin), which records where it was into its ring without locks; its
-// own next tick writes the events (a ring of `RING`). The sender's tick may be late (its own
-// interrupts off), but that only moves when the target is sampled, not
-// where. With one CPU the tick samples itself (and is blind inside
-// interrupts-off sections).
+// bills a whole locked section to its unlock. So kernel samples are
+// NMIs: every `SAMPLE_EVERY` ticks a CPU sends one to the next online CPU
+// (round robin), which records where it was into its ring without locks;
+// its own next tick writes the events (a ring of `RING`). The sender's
+// tick may be late (its own interrupts off), but that only moves when the
+// target is sampled, not where. User mode always runs with interrupts
+// on, so a CPU's own tick that interrupts it is already exact: every
+// `SAMPLE_EVERY` ticks a CPU in user mode samples itself, and an NMI that
+// lands in user mode records nothing. User samples so never depend on
+// the neighbor's vCPU being scheduled (on a loaded host it can miss a
+// program's whole user-mode stretch), and both kinds come at the same
+// rate, so their shares stay unbiased. With one CPU the tick samples
+// itself (and is blind inside interrupts-off sections).
 
 /// Samples a CPU can hold until its tick writes them: 8 x 10 ms at the
 /// default rate with interrupts off.
@@ -184,6 +190,13 @@ static SAMPLE_ASKED: [core::sync::atomic::AtomicBool; crate::arch::smp::MAX_CPUS
 /// NMI samples dropped because the CPU's ring was full (interrupts off
 /// for longer than `RING` samples); in the `events:` line.
 pub static SAMPLES_LOST: AtomicU64 = AtomicU64::new(0);
+/// Samples written, in user mode and in the kernel (the `events:` line:
+/// a profile with none in user mode says so at the end of the boot).
+pub static SAMPLES_USER: AtomicU64 = AtomicU64::new(0);
+pub static SAMPLES_KERNEL: AtomicU64 = AtomicU64::new(0);
+/// Samples asked of another CPU (an NMI sent), and taken by this CPU from
+/// its own tick (one CPU online).
+pub static SAMPLES_ASKED: AtomicU64 = AtomicU64::new(0);
 
 /// `sampleprobe`: the boot thread spins with interrupts off for half a
 /// second and reports whether samples landed inside (the NMI sampler's
@@ -199,7 +212,8 @@ pub fn set_sample_probe(on: bool) {
 }
 
 /// The profiler's part of a tick: write this CPU's waiting NMI sample,
-/// and every `SAMPLE_EVERY` ticks ask the next busy CPU for one.
+/// and every `SAMPLE_EVERY` ticks sample itself if the tick interrupted
+/// user mode and ask the next busy CPU for a (kernel) NMI sample.
 fn sample_tick(frame: &TrapFrame, idle: bool) {
     let cpu = crate::arch::percpu::cpu_index() as usize;
     write_samples(cpu);
@@ -215,6 +229,11 @@ fn sample_tick(frame: &TrapFrame, idle: bool) {
         }
         return;
     }
+    // This CPU's own user-mode sample (exact: user mode runs with
+    // interrupts on); its kernel samples come from the neighbor's NMI.
+    if frame.from_user_mode() {
+        sample_here(frame);
+    }
     // The next online CPU after this one.
     let n = crate::arch::smp::MAX_CPUS;
     let Some(target) = (1..n).map(|d| (cpu + d) % n).find(|&c| mask & (1 << c) != 0) else {
@@ -229,6 +248,7 @@ fn sample_tick(frame: &TrapFrame, idle: bool) {
         return;
     };
     SAMPLE_ASKED[target].store(true, Ordering::Release);
+    SAMPLES_ASKED.fetch_add(1, Ordering::Relaxed);
     crate::arch::smp::send_nmi(hw_id);
 }
 
@@ -243,6 +263,10 @@ pub fn on_sample_nmi(frame: &TrapFrame) -> bool {
     }
     if PROBING[cpu].load(Ordering::Relaxed) {
         PROBE_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    // User mode is sampled by this CPU's own tick (`sample_tick`).
+    if frame.from_user_mode() {
+        return true;
     }
     let ring = &RINGS[cpu];
     let head = ring.head.load(Ordering::Relaxed);
@@ -303,7 +327,8 @@ fn write_samples(cpu: usize) {
     }
 }
 
-/// A sample of this CPU from its own tick (one CPU only).
+/// A sample of this CPU from its own tick (in user mode, or any with one
+/// CPU).
 fn sample_here(frame: &TrapFrame) {
     let mut stack = SampleStack { addrs: [0; SAMPLE_FRAMES], len: 0 };
     let user = frame.from_user_mode();
@@ -325,6 +350,7 @@ fn sample_here(frame: &TrapFrame) {
 /// `lost`: samples dropped after this one (`"lost"`, when not 0).
 fn emit_sample(t: u64, by: u64, user: bool, rip: u64, stack: &SampleStack, lost: u64) {
     use crate::events::Category::Sample;
+    if user { &SAMPLES_USER } else { &SAMPLES_KERNEL }.fetch_add(1, Ordering::Relaxed);
     let lost = Lost(lost);
     if user {
         crate::events::emit_at(

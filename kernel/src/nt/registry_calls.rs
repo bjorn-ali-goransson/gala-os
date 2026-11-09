@@ -163,10 +163,36 @@ fn open_key(call: &mut Call<'_>) -> NtStatus {
             if status == NtStatus::OBJECT_NAME_NOT_FOUND {
                 note_absent(start, &name);
             }
+            emit_key(call, start, &name, status);
             return status;
         }
     };
-    call.return_checked_key(out, id, access, attributes)
+    let status = call.return_checked_key(out, id, access, attributes);
+    emit_key(call, start, &name, status);
+    status
+}
+
+/// The `key` event of a key open (`events=file`): the key it is relative
+/// to (`base`, its full name), the name and the status, in order with the file opens (the ledger keeps only each
+/// absent key's first time: which open came last before a failure needs
+/// this).
+fn emit_key(call: &Call<'_>, start: KeyId, name: &[u16], status: NtStatus) {
+    use crate::events::{Category, Utf16, emit, enabled};
+    if !enabled(Category::File) {
+        return;
+    }
+    let base = registry::with(|r| r.full_name(start)).unwrap_or_default();
+    emit(
+        Category::File,
+        "key",
+        format_args!(
+            r#""pid":{},"base":{},"path":{},"status":{}"#,
+            call.process.id,
+            Utf16(&base),
+            Utf16(name),
+            status.0
+        ),
+    );
 }
 
 /// Records an absent key in the ledger ("registry:MACHINE/SOFTWARE/...",

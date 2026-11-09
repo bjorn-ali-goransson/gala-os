@@ -38,7 +38,8 @@ pub enum Category {
     /// an HWND asked for from another session, and each key the desktop
     /// delivers (`key`: its window and owner).
     Window = 2048,
-    /// File opens: the name, the handle or the failing status.
+    /// File opens: the name, the handle or the failing status; registry
+    /// key opens (`key`): the name and the status.
     File = 4096,
     /// Interprocess I/O: pipes (create, connect, write and read with byte
     /// offsets, disconnect, close) and I/O completion ports (post and
@@ -51,9 +52,19 @@ pub enum Category {
     /// mode and the instruction pointer; `cargo xtask profile` attributes
     /// them to threads, modules and symbols.
     Sample = 16384,
+    /// The Wayland server (`wayland`): clients connected and gone,
+    /// surfaces given a role and mapped, commits, protocol errors (each
+    /// with the client's pid and the object).
+    Wayland = 32768,
+    /// The service control manager (nt::scm): connections, service opens
+    /// (granted access or the failure), creations, deletions and state
+    /// changes, each with the caller's pid.
+    Service = 65536,
 }
 
-const NAMES: [(&str, u32); 15] = [
+const NAMES: [(&str, u32); 17] = [
+    ("service", Category::Service as u32),
+    ("wayland", Category::Wayland as u32),
     ("sample", Category::Sample as u32),
     ("ipc", Category::Ipc as u32),
     ("file", Category::File as u32),

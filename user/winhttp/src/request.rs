@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use crate::{ERROR_INVALID_PARAMETER, done, request_of, wide};
+use crate::{ERROR_INVALID_PARAMETER, done, request_observed, request_of, wide};
 
 #[unsafe(no_mangle)]
 pub extern "system" fn WinHttpSendRequest(
@@ -14,10 +14,10 @@ pub extern "system" fn WinHttpSendRequest(
     optional: *const u8,
     optional_length: u32,
     total_length: u32,
-    _context: usize,
+    context: usize,
 ) -> i32 {
     done((|| {
-        let r = request_of(h)?;
+        let r = request_observed(h, context)?;
         let headers = if headers.is_null() || headers_length == 0 {
             Vec::new()
         } else {
@@ -69,7 +69,7 @@ pub extern "system" fn WinHttpReceiveResponse(h: usize, reserved: usize) -> i32 
         if reserved != 0 {
             return Err(ERROR_INVALID_PARAMETER);
         }
-        request_of(h)?.receive()
+        request_observed(h, 0)?.receive()
     })())
 }
 

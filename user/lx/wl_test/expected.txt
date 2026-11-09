@@ -1,0 +1,25 @@
+connect = 0
+global wl_compositor: yes
+global wl_shm: yes
+global xdg_wm_base: yes
+global wl_output: yes
+bind wl_compositor version 4
+bind wl_shm version 1
+bind xdg_wm_base version 1
+shm argb8888 = yes
+shm xrgb8888 = yes
+ftruncate = 0
+xdg_surface configure = yes
+toplevel configure before it = yes
+frame done = yes
+buffer released = yes
+delete_id toplevel: yes
+delete_id xdg_surface: yes
+delete_id surface: yes
+delete_id buffer: yes
+connect = 0
+error object = 1
+error code = 1
+then read = 0
+ok
+-- exit status 0

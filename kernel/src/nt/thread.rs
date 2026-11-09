@@ -37,9 +37,10 @@ pub struct NtThread {
     suspend_count: IrqMutex<u32>,
     /// Set when another thread asked this one to terminate.
     terminate_request: IrqMutex<Option<NtStatus>>,
+    /// What it starts with: its registers. Its x87/SSE state is always
+    /// fresh (MXCSR 0x1f80, XMM 0): NtCreateThread ignores the CONTEXT's
+    /// floating-point part, as Windows 11 does.
     start: UserRegs,
-    /// MXCSR to start with, from the creating CONTEXT.
-    start_mxcsr: Option<u32>,
     /// ThreadQuerySetWin32StartAddress.
     pub win32_start: u64,
     /// ThreadNameInformation (SetThreadDescription), UTF-16; empty if
@@ -103,7 +104,7 @@ pub enum Resume {
     /// call): goes on with exactly these registers and x87/SSE state.
     User { regs: UserRegs, fx: platform::XState },
     /// Created suspended and never run: starts with `regs` once resumed.
-    Start { regs: UserRegs, mxcsr: Option<u32> },
+    Start { regs: UserRegs },
 }
 
 /// Set while a kernel handover stops the programs: every thread that
@@ -338,11 +339,10 @@ pub fn create(
     process: &KArc<Process>,
     regs: UserRegs,
     win32_start: u64,
-    mxcsr: Option<u32>,
     stack: (u64, u64, u64),
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
-    create_inner(process, regs, win32_start, mxcsr, stack, suspended, Begin::Start)
+    create_inner(process, regs, win32_start, stack, suspended, Begin::Start)
 }
 
 /// Creates a thread of WOW64 process `process` that starts in 32-bit code
@@ -359,7 +359,7 @@ pub fn create_wow64(
     // As for 64-bit threads (`nt_create_thread`): the return register,
     // where kernel32's thunk takes the start routine; else the start eip.
     let win32_start = u64::from(if start.gpr[0] != 0 { start.gpr[0] } else { start.eip });
-    create_inner(process, regs, win32_start, None, stack, suspended, Begin::Wow64(start))
+    create_inner(process, regs, win32_start, stack, suspended, Begin::Wow64(start))
 }
 
 /// Creates a thread of the Linux personality that goes on in user mode
@@ -375,7 +375,7 @@ pub fn create_forked(
     suspended: bool,
 ) -> Result<ObjectRef, NtStatus> {
     let begin = Begin::Resume((Resume::User { regs, fx }, bases));
-    create_inner(process, regs, regs.ip(), None, (0, 0, 0), suspended, begin)
+    create_inner(process, regs, regs.ip(), (0, 0, 0), suspended, begin)
 }
 
 /// A thread object's id (its NT ClientId thread; a Linux thread's core
@@ -402,7 +402,6 @@ fn create_inner(
     process: &KArc<Process>,
     regs: UserRegs,
     win32_start: u64,
-    mxcsr: Option<u32>,
     stack: (u64, u64, u64),
     suspended: bool,
     begin: Begin,
@@ -451,7 +450,6 @@ fn create_inner(
         suspend_count: IrqMutex::named("thread.suspend_count", u32::from(suspended)),
         terminate_request: IrqMutex::new(None),
         start: regs,
-        start_mxcsr: mxcsr,
         win32_start,
         name: IrqMutex::named("thread.name", Vec::new()),
         create_time: platform::system_time(),
@@ -561,7 +559,7 @@ fn thread_entry(id: usize) {
         drop(object);
         exit_current(NtStatus::NOT_SUPPORTED);
     }
-    let (mut regs, mut mxcsr) = (t.start, t.start_mxcsr);
+    let mut regs = t.start;
     // Stopped in user mode by a handover: goes on with the parked state.
     let resumed_user = matches!(resume, Some(Resume::User { .. }));
     match resume {
@@ -583,9 +581,7 @@ fn thread_entry(id: usize) {
             // suspended), then on with every register.
             *t.parked.lock() = Some(Parked { regs, fx, changed: false, compat: false });
         }
-        Some(Resume::Start { regs: start, mxcsr: start_mxcsr }) => {
-            (regs, mxcsr) = (start, start_mxcsr);
-        }
+        Some(Resume::Start { regs: start }) => regs = start,
         None => {}
     }
     // Stay here while suspended; `resume` wakes us.
@@ -614,10 +610,6 @@ fn thread_entry(id: usize) {
     if let Some(p) = parked.filter(|p| resumed_user || p.changed) {
         platform::xrstor(&p.fx);
         platform::enter_user(&p.regs);
-    }
-    // The kernel never touches SSE state, so this is what user mode gets.
-    if let Some(value) = mxcsr {
-        platform::set_mxcsr(value);
     }
     platform::enter_user(&regs)
 }
@@ -921,7 +913,6 @@ pub struct Snapshot {
     pub entered: bool,
     /// What it starts with if it has not entered user mode yet.
     pub start: UserRegs,
-    pub start_mxcsr: Option<u32>,
 }
 
 /// `object`'s state, if it is a thread.
@@ -960,7 +951,6 @@ pub fn snapshot(object: &ObjectRef) -> Option<Snapshot> {
         parked,
         entered: t.entered.load(Ordering::SeqCst),
         start: t.start,
-        start_mxcsr: t.start_mxcsr,
     })
 }
 
@@ -1032,7 +1022,6 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         suspend_count: IrqMutex::named("thread.suspend_count", a.suspend),
         terminate_request: IrqMutex::new(None),
         start: UserRegs::default(),
-        start_mxcsr: None,
         win32_start: a.win32_start,
         name: IrqMutex::named("thread.name", Vec::new()),
         create_time: a.create_time,
@@ -1350,6 +1339,8 @@ pub fn exit_current(status: NtStatus) -> ! {
         // never got there), and messages sent to it fail.
         t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
         t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
+        // The clipboard it had open is closed (its listeners told).
+        super::clipboard::thread_ended(&t.process, t.id);
         // A desktop handle it was set to (SetThreadDesktop) may be closed.
         t.process.ui.thread_ended(t.id);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));

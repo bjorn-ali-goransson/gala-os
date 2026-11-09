@@ -3,9 +3,9 @@
 //! succeeds with ClusterStateNotInstalled (0); OpenCluster finds no
 //! cluster (NULL and an error); every function a program resolves at run
 //! time exists (GetProcAddress), as SQL Server needs. resutils: the
-//! property-list helpers (ResUtilFind*Property over a CLUSPROP list:
-//! names matched case-insensitively, ERROR_FILE_NOT_FOUND when absent,
-//! strings returned in LocalAlloc'ed memory) and ResUtilResourceTypesEqual.
+//! property-list helpers (ResUtilFind*Property over a CLUSPROP list of
+//! one property, the only shape Windows answers for: its name asked in
+//! another case, strings returned in LocalAlloc'ed memory) and ResUtilResourceTypesEqual.
 //!
 //! Prints `clusapi_test: ok` or exits with the number of the failing check.
 
@@ -54,20 +54,24 @@ fn w(s: &str) -> [u16; 32] {
 }
 
 /// Appends a CLUSPROP value (syntax, length, data padded to 4 bytes).
-fn push_value(list: &mut [u8; 256], at: &mut usize, syntax: u32, data: &[u8]) {
+fn push_value(list: &mut [u8; 128], at: &mut usize, syntax: u32, data: &[u8]) {
     list[*at..*at + 4].copy_from_slice(&syntax.to_le_bytes());
     list[*at + 4..*at + 8].copy_from_slice(&(data.len() as u32).to_le_bytes());
     list[*at + 8..*at + 8 + data.len()].copy_from_slice(data);
     *at += 8 + data.len().div_ceil(4) * 4;
 }
 
-/// A property list: Name "Port" = DWORD 1433, "Path" = SZ "C:\\x".
-fn property_list() -> ([u8; 256], usize) {
+/// A property list of one property: Name "Port" = DWORD 1433, or Name
+/// "Path" = SZ "C:\\x". One property per list, because that is the only
+/// shape Windows' ResUtilFind*Property answer for: they examine the first
+/// property only and ignore the size, so a second property is not found
+/// (or the walk runs off the list) on Windows 11.
+fn property_list(path: bool) -> ([u8; 128], usize) {
     const NAME: u32 = 0x0004_0003; // CLUSPROP_SYNTAX_NAME
     const DWORD: u32 = 0x0001_0002; // CLUSPROP_SYNTAX_LIST_VALUE_DWORD
     const SZ: u32 = 0x0001_0003; // CLUSPROP_SYNTAX_LIST_VALUE_SZ
-    let mut list = [0u8; 256];
-    list[..4].copy_from_slice(&2u32.to_le_bytes());
+    let mut list = [0u8; 128];
+    list[..4].copy_from_slice(&1u32.to_le_bytes());
     let mut at = 4;
     let utf16 = |s: &str, out: &mut [u8; 64]| {
         let mut n = 0;
@@ -78,15 +82,17 @@ fn property_list() -> ([u8; 256], usize) {
         n
     };
     let mut buf = [0u8; 64];
-    let n = utf16("Port", &mut buf);
-    push_value(&mut list, &mut at, NAME, &buf[..n]);
-    push_value(&mut list, &mut at, DWORD, &1433u32.to_le_bytes());
+    if path {
+        let n = utf16("Path", &mut buf);
+        push_value(&mut list, &mut at, NAME, &buf[..n]);
+        let n = utf16("C:\\x", &mut buf);
+        push_value(&mut list, &mut at, SZ, &buf[..n]);
+    } else {
+        let n = utf16("Port", &mut buf);
+        push_value(&mut list, &mut at, NAME, &buf[..n]);
+        push_value(&mut list, &mut at, DWORD, &1433u32.to_le_bytes());
+    }
     push_value(&mut list, &mut at, 0, &[]); // CLUSPROP_SYNTAX_ENDMARK
-    let n = utf16("Path", &mut buf);
-    push_value(&mut list, &mut at, NAME, &buf[..n]);
-    let n = utf16("C:\\x", &mut buf);
-    push_value(&mut list, &mut at, SZ, &buf[..n]);
-    push_value(&mut list, &mut at, 0, &[]);
     (list, at)
 }
 
@@ -183,18 +189,21 @@ fn run() -> Result<(), u32> {
             c.ok(GetProcAddress(module, name.as_ptr().cast()) != 0, 0)?;
         }
 
-        let (list, size) = property_list();
+        let (list, size) = property_list(false);
         let mut port = 0;
         let r = ResUtilFindDwordProperty(list.as_ptr(), size as u32, w("port").as_ptr(), &mut port);
         c.eq(r.into(), ERROR_SUCCESS)?;
         c.eq(port.into(), 1433)?;
+        let (paths, paths_size) = property_list(true);
         let mut path = core::ptr::null_mut();
-        let r = ResUtilFindSzProperty(list.as_ptr(), size as u32, w("Path").as_ptr(), &mut path);
+        let r =
+            ResUtilFindSzProperty(paths.as_ptr(), paths_size as u32, w("Path").as_ptr(), &mut path);
         c.eq(r.into(), ERROR_SUCCESS)?;
         c.ok(!path.is_null() && *path == 0x43 && *path.add(3) == 0x78 && *path.add(4) == 0, 0)?;
         LocalFree(path);
-        let r = ResUtilFindDwordProperty(list.as_ptr(), size as u32, w("Nope").as_ptr(), &mut port);
-        c.eq(r.into(), 2)?; // ERROR_FILE_NOT_FOUND
+        // A name the list does not have is not asked: Windows (Server 2025)
+        // answers it from the first property all the same, gala with
+        // ERROR_FILE_NOT_FOUND (ARCHITECTURE: a deliberate difference).
         c.ok(
             ResUtilResourceTypesEqual(w("SQL Server").as_ptr(), w("sql server").as_ptr()) != 0,
             0,

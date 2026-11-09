@@ -672,7 +672,9 @@ fn jobs(c: &mut Checks, path: &[u16; 260]) -> Result<(), u32> {
         c.ok(!job.is_null(), GetLastError().into())?;
         let mut inside = 1;
         c.ok(IsProcessInJob(me, job, &mut inside) != 0 && inside == 0, inside as u64)?;
-        // JOBOBJECT_BASIC_LIMIT_INFORMATION (64 bytes on x64): no limits.
+        // JOBOBJECT_BASIC_LIMIT_INFORMATION (64 bytes on x64): no limits,
+        // but PriorityClass (+0x38) reads NORMAL_PRIORITY_CLASS and
+        // SchedulingClass (+0x3c) 5 (Windows 11).
         let mut limits = [0u8; 64];
         let mut ret = 0;
         c.ok(
@@ -680,7 +682,9 @@ fn jobs(c: &mut Checks, path: &[u16; 260]) -> Result<(), u32> {
             0,
         )?;
         c.eq(ret.into(), 64)?;
-        c.ok(limits.iter().all(|&b| b == 0), 0)?;
+        c.ok(limits[..56].iter().all(|&b| b == 0), 0)?;
+        c.eq(u32::from_le_bytes([limits[56], limits[57], limits[58], limits[59]]).into(), 32)?;
+        c.eq(u32::from_le_bytes([limits[60], limits[61], limits[62], limits[63]]).into(), 5)?;
         // A wrong size.
         c.eq(SetInformationJobObject(job, BASIC_LIMIT, limits.as_ptr(), 63) as u64, 0)?;
         c.eq(GetLastError().into(), ERROR_BAD_LENGTH.into())?;

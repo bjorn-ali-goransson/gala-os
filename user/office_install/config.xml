@@ -1,0 +1,23 @@
+<!-- The Office Deployment Tool's configuration for scenario office_install
+     (ROADMAP OF): Microsoft 365 Apps (Word, Excel, PowerPoint), 64-bit,
+     Current channel, English, nothing shown; AcceptEULA: the owner
+     accepted Microsoft's licence terms for this. The same products as the
+     office-survey workflow's. -->
+<Configuration>
+  <Add OfficeClientEdition="64" Channel="Current">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="OneDrive" />
+      <ExcludeApp ID="OneNote" />
+      <ExcludeApp ID="Outlook" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Teams" />
+    </Product>
+  </Add>
+  <Updates Enabled="FALSE" />
+  <Display Level="None" AcceptEULA="TRUE" />
+  <Logging Level="Standard" Path="C:\gala\odtlog" />
+</Configuration>

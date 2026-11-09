@@ -104,9 +104,13 @@ fn main() {
     // The x86 build (SysWOW64's kernel32) forwards what the 32-bit ntdll
     // has: x86 has no function tables or virtual unwinding.
     let forwarders: &[&str] = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("x86") => {
-            &["RtlPcToFileHeader", "RtlCaptureContext", "RtlUnwind", "VerSetConditionMask"]
-        }
+        Ok("x86") => &[
+            "RtlPcToFileHeader",
+            "RtlCaptureContext",
+            "RtlUnwind",
+            "VerSetConditionMask",
+            "RtlCaptureStackBackTrace",
+        ],
         _ => &[
             "RtlLookupFunctionEntry",
             "RtlVirtualUnwind",

@@ -2227,12 +2227,6 @@ pub extern "system" fn GetCursorPos(point: *mut [i32; 2]) -> i32 {
     1
 }
 
-/// GetClipboardOwner: NULL (gala has no clipboard yet).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetClipboardOwner() -> Hwnd {
-    0
-}
-
 /// FindWindowW: a top-level window of ours with that class (NULL: any)
 /// and title (NULL: any); gala's user32 sees only its own windows, so
 /// another program's (e.g. Pageant's) is not found: NULL.
@@ -3606,18 +3600,28 @@ pub extern "system" fn SetClassLongPtrW(hwnd: Hwnd, index: i32, value: usize) ->
     }
 }
 
-/// SetGestureConfig: accepted for an existing window (gala has no touch
-/// input, so no gesture is ever delivered).
+/// SetGestureConfig: accepted for an existing window (else
+/// ERROR_INVALID_WINDOW_HANDLE, checked first) given at least one
+/// GESTURECONFIG of exactly 12 bytes; no entries, a NULL array or another
+/// size is ERROR_INVALID_PARAMETER ("reset" is not spelled (0, NULL, 0);
+/// Windows 11). gala has no touch input, so no gesture is ever delivered.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetGestureConfig(
     hwnd: Hwnd,
     _reserved: u32,
-    _count: u32,
-    _config: *const u8,
-    _size: u32,
+    count: u32,
+    config: *const u8,
+    size: u32,
 ) -> i32 {
+    const GESTURECONFIG_SIZE: u32 = 12;
+    // The window first (win32_misc_test: a NULL hwnd with no entries is
+    // ERROR_INVALID_WINDOW_HANDLE), then the entries (gui_test).
     if IsWindow(hwnd) == 0 {
         set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return 0;
+    }
+    if count == 0 || config.is_null() || size != GESTURECONFIG_SIZE {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     1

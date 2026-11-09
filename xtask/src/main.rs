@@ -421,6 +421,39 @@ const PREBUILT: &[Prebuilt] = &[
         ],
         excludes: &[],
     },
+    // weston 13.0.0's demo clients as Ubuntu 24.04 (noble) ships them
+    // (universe, the release pocket's weston 13.0.0-4build3; the SHA-256
+    // is the one in the release's signed Packages index): only
+    // weston-simple-shm, a real libwayland client (ROADMAP LD step 2,
+    // scenario lx_simple_shm). It needs libwayland-client and libffi
+    // (below) besides glibc. Inside gala only.
+    Prebuilt {
+        name: "weston",
+        url: "https://archive.ubuntu.com/ubuntu/pool/universe/w/weston/weston_13.0.0-4build3_amd64.deb",
+        checksum: "bcf6f344c6d5bede9f3f601be1015b0550fa31dd8c7b3e51ac0fe34702dac73c",
+        members: &["usr/bin/weston-simple-shm"],
+        excludes: &[],
+    },
+    // libwayland-client 1.22.0 (Ubuntu 24.04's libwayland-client0
+    // 1.22.0-2.1build1, main; SHA-256 from the signed Packages index).
+    // The member is the soname's symbolic link: its target is kept under
+    // the link's name.
+    Prebuilt {
+        name: "libwayland-client",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-client0_1.22.0-2.1build1_amd64.deb",
+        checksum: "6af0aed41d75149bea22fa468f01eb058ffe3e35ef07ff2f13fb88a90387881d",
+        members: &["usr/lib/x86_64-linux-gnu/libwayland-client.so.0"],
+        excludes: &[],
+    },
+    // libffi 3.4.6 (Ubuntu 24.04's libffi8 3.4.6-1build1, main; SHA-256
+    // from the signed Packages index): libwayland-client's dependency.
+    Prebuilt {
+        name: "libffi",
+        url: "https://archive.ubuntu.com/ubuntu/pool/main/libf/libffi/libffi8_3.4.6-1build1_amd64.deb",
+        checksum: "637e6a7744de08cd331a41f4efd0d24e6ea9064843dea9d1c6ca87bdb5f038a2",
+        members: &["usr/lib/x86_64-linux-gnu/libffi.so.8"],
+        excludes: &[],
+    },
     // Inno Setup 7.1.1's own installer, x64 edition (jrsoftware.org's
     // GitHub release; the SHA-256 is winget-pkgs' JRSoftware.InnoSetup.7
     // 7.1.1 manifest's): an Inno Setup installer built with
@@ -432,6 +465,18 @@ const PREBUILT: &[Prebuilt] = &[
         url: "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe",
         checksum: "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0",
         members: &["innosetup-7.1.1-x64.exe"],
+        excludes: &[],
+    },
+    // The Office Deployment Tool's setup.exe (officecdn.microsoft.com's
+    // current one, 16.0.20430.20146, x86; the SHA-256 is the one we
+    // measured: Microsoft replaces the file at this URL with each release,
+    // so a new one fails the checksum until it is pinned again). Scenario
+    // office_install (ROADMAP OF) runs it inside gala; never committed.
+    Prebuilt {
+        name: "odt",
+        url: "https://officecdn.microsoft.com/pr/wsus/setup.exe",
+        checksum: "c883ab32dffe4a371bb37411de83edc5d62ff31d315c5e3b59e830326bb4e322",
+        members: &["setup.exe"],
         excludes: &[],
     },
     // Inno Setup 6.5.4's own installer, an x86 Inno Setup installer
@@ -486,6 +531,404 @@ const PREBUILT: &[Prebuilt] = &[
     },
 ];
 
+/// A Linux root file system assembled from a distribution's packages
+/// (ROADMAP LD): the files a program's libraries and data need, each at
+/// its path in the package, unpacked on first use into
+/// `target/prebuilt/<name>/` (a module path `target/prebuilt/<name>/usr/`
+/// ships that tree as `/usr`). Not in the repository; THIRD_PARTY.md
+/// lists them.
+struct LinuxRoot {
+    name: &'static str,
+    debs: &'static [Deb],
+}
+
+/// A Debian package of Ubuntu 24.04 (noble), its release pocket's
+/// version (never changed once released; the pool keeps it).
+struct Deb {
+    /// Its path under archive.ubuntu.com/ubuntu/pool/.
+    pool: &'static str,
+    /// From the release's signed `Packages` index
+    /// (dists/noble/<component>/binary-amd64/Packages.xz, whose hash is in
+    /// the signed InRelease).
+    sha256: &'static str,
+    /// The files used, by their paths in the package; each lands at the
+    /// same path in the root. A symbolic link (a library's soname) is its
+    /// target's bytes under the link's path: boot modules carry no links.
+    files: &'static [&'static str],
+}
+
+const LINUX_ROOTS: &[LinuxRoot] = &[LinuxRoot {
+    // GTK 3 (3.24.41) and its whole library closure as Ubuntu 24.04
+    // builds them (ldd of libgtk-3.so.0 on Ubuntu 24.04, less glibc,
+    // libffi and libwayland-client: the "glibc" and "wayland_client"
+    // module sets), fontconfig's own fonts.conf and one font, DejaVu
+    // Sans: what user/lx/gtk_test needs (ROADMAP LD step 3, `lx_gtk`).
+    // Left out on purpose, as a minimal install of the packages would not
+    // be: icon and cursor themes (GTK 3 falls back to the icons in its
+    // own resources, libwayland-cursor to its built-in cursors), GSettings
+    // schemas and GIO modules (GLib's memory settings backend), the
+    // gdk-pixbuf loaders (PNG is built in). Of xkb-data (libxkbcommon0
+    // depends on it) only what GDK's default keymap (rules evdev, model
+    // pc105, layout us) includes: the server's own keymap comes whole with
+    // wl_keyboard.
+    name: "gtk3",
+    debs: &[
+        Deb {
+            pool: "main/f/fontconfig/fontconfig-config_2.15.0-1.1ubuntu2_amd64.deb",
+            sha256: "9df0579cd298a1f2b7a40efd519c849745aecd193a09733cf4d1032284a62bbf",
+            files: &["etc/fonts/fonts.conf"],
+        },
+        Deb {
+            pool: "main/f/fonts-dejavu/fonts-dejavu-core_2.37-8_all.deb",
+            sha256: "40049660c194f3b8a2541fc7369efebb10e9f94bdac836a2f38fafedd10fa73a",
+            files: &["usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+        },
+        Deb {
+            pool: "main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb",
+            sha256: "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",
+            files: &["usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0"],
+        },
+        Deb {
+            pool: "main/a/at-spi2-core/libatk1.0-0t64_2.52.0-1build1_amd64.deb",
+            sha256: "42c5d4b00954f17c2c3c4b866844f691eb8b6d57bf08b59203e65f12dc84a4f9",
+            files: &["usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/a/at-spi2-core/libatspi2.0-0t64_2.52.0-1build1_amd64.deb",
+            sha256: "d686ace4080eca9c2d6ce8de69392a5ac56c846701894c0858922d4ce341a1d7",
+            files: &["usr/lib/x86_64-linux-gnu/libatspi.so.0"],
+        },
+        Deb {
+            pool: "main/u/util-linux/libblkid1_2.39.3-9ubuntu6_amd64.deb",
+            sha256: "47433bcaf43d1c6ed2e2acbc7dc70f6d6ed149e64f12d25b2ddb714a56c4e8dd",
+            files: &["usr/lib/x86_64-linux-gnu/libblkid.so.1"],
+        },
+        Deb {
+            pool: "main/b/brotli/libbrotli1_1.1.0-2build2_amd64.deb",
+            sha256: "74492419b8fda803774b8c9acef6afc5d2f9ff31782635aae212906adae7b277",
+            files: &[
+                "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1",
+                "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1",
+            ],
+        },
+        Deb {
+            pool: "main/libb/libbsd/libbsd0_0.12.1-1build1_amd64.deb",
+            sha256: "8e97b7d541416512a81e7845c5f21910344c9c5c610893cf265d3298e0caad6b",
+            files: &["usr/lib/x86_64-linux-gnu/libbsd.so.0"],
+        },
+        Deb {
+            pool: "main/b/bzip2/libbz2-1.0_1.0.8-5.1_amd64.deb",
+            sha256: "695132af8a40fe417f7d4e5ea742d64521c04e069442a4719c2bd0f10ab93d94",
+            files: &["usr/lib/x86_64-linux-gnu/libbz2.so.1.0"],
+        },
+        Deb {
+            pool: "main/c/cairo/libcairo-gobject2_1.18.0-3build1_amd64.deb",
+            sha256: "f5483cbe43455fc9e9cba7f0e166bd0a731c02db2902ba562719848f72e8c403",
+            files: &["usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2"],
+        },
+        Deb {
+            pool: "main/c/cairo/libcairo2_1.18.0-3build1_amd64.deb",
+            sha256: "96950b306889ff6e4248bb937b0a3b56e72dacf643fe732214ce375f0f6bbb36",
+            files: &["usr/lib/x86_64-linux-gnu/libcairo.so.2"],
+        },
+        Deb {
+            pool: "main/libc/libcap2/libcap2_2.66-5ubuntu2_amd64.deb",
+            sha256: "a6cce0b5f149707a6359e4f03a05fb7417c5e1d3fde9e12c651e804b4c479bbb",
+            files: &["usr/lib/x86_64-linux-gnu/libcap.so.2"],
+        },
+        Deb {
+            pool: "main/libd/libdatrie/libdatrie1_0.2.13-3build1_amd64.deb",
+            sha256: "1ae164e40e413eac4fbd38ce1c6ef9591f7a03278ad9076d71fa29258727f447",
+            files: &["usr/lib/x86_64-linux-gnu/libdatrie.so.1"],
+        },
+        Deb {
+            pool: "main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_amd64.deb",
+            sha256: "bbb55111182a44d0fe97a84120407e17bb6e23d41e2670d73aa78f619e29efa2",
+            files: &["usr/lib/x86_64-linux-gnu/libdbus-1.so.3"],
+        },
+        Deb {
+            pool: "main/libe/libepoxy/libepoxy0_1.5.10-1build1_amd64.deb",
+            sha256: "e2e754da4e7fb89021476b093cb5ebe9b1859a688fa37739809e529627d39f1f",
+            files: &["usr/lib/x86_64-linux-gnu/libepoxy.so.0"],
+        },
+        Deb {
+            pool: "main/e/expat/libexpat1_2.6.1-2build1_amd64.deb",
+            sha256: "730b29497212289cda8a3139e693a3538af0cb57846c24f807d1bb293a591c5e",
+            files: &["usr/lib/x86_64-linux-gnu/libexpat.so.1"],
+        },
+        Deb {
+            pool: "main/f/fontconfig/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb",
+            sha256: "a2bc05cfef021fdb84285036f98eda5ebec3c4b7a378f5aa2bdba5c4d3d8d586",
+            files: &["usr/lib/x86_64-linux-gnu/libfontconfig.so.1"],
+        },
+        Deb {
+            pool: "main/f/freetype/libfreetype6_2.13.2+dfsg-1build3_amd64.deb",
+            sha256: "321dda934f62fa8af08529a8c4c34b0ec040f172c0a945dce10b8be6f1014917",
+            files: &["usr/lib/x86_64-linux-gnu/libfreetype.so.6"],
+        },
+        Deb {
+            pool: "main/f/fribidi/libfribidi0_1.0.13-3build1_amd64.deb",
+            sha256: "6cd50259d39ce0dfafee2632c6268538e6a02590e77161a133e9683af346dd1d",
+            files: &["usr/lib/x86_64-linux-gnu/libfribidi.so.0"],
+        },
+        Deb {
+            pool: "main/libg/libgcrypt20/libgcrypt20_1.10.3-2build1_amd64.deb",
+            sha256: "ff32bae487706ba6ca646b5b72d89b935e3b8b2811d02e4ad7360cb97d90e2d0",
+            files: &["usr/lib/x86_64-linux-gnu/libgcrypt.so.20"],
+        },
+        Deb {
+            pool: "main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.42.10+dfsg-3ubuntu3_amd64.deb",
+            sha256: "d9779cdbb11e5fb6056b39868b689bd2e6a152f60d7fa54fcf7113942eedab24",
+            files: &["usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0"],
+        },
+        Deb {
+            pool: "main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu1_amd64.deb",
+            sha256: "629359e915f4466cf9cb0fa6c38270d9af1e03e28fab557ce31977d5ab34f13d",
+            files: &[
+                "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0",
+                "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0",
+                "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0",
+                "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0",
+            ],
+        },
+        Deb {
+            pool: "main/libg/libgpg-error/libgpg-error0_1.47-3build2_amd64.deb",
+            sha256: "81a30b5888e0af43b72bfdbdb44209b82e521eadf8848ff201542e6d258f6a1f",
+            files: &["usr/lib/x86_64-linux-gnu/libgpg-error.so.0"],
+        },
+        Deb {
+            pool: "main/g/graphite2/libgraphite2-3_1.3.14-2build1_amd64.deb",
+            sha256: "e2a91c59a2b26649ed0b331bedab0c92e56cc2021cce27df1080089edaad7aba",
+            files: &["usr/lib/x86_64-linux-gnu/libgraphite2.so.3"],
+        },
+        Deb {
+            pool: "main/g/gtk+3.0/libgtk-3-0t64_3.24.41-4ubuntu1_amd64.deb",
+            sha256: "011d0688aeb8e40fb146b6d6cd3d892e2a81b1e181320bcf2bf7e2d7206ae156",
+            files: &[
+                "usr/lib/x86_64-linux-gnu/libgdk-3.so.0",
+                "usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
+            ],
+        },
+        Deb {
+            pool: "main/h/harfbuzz/libharfbuzz0b_8.3.0-2build2_amd64.deb",
+            sha256: "d6f7eea2244f98aa0463a056680d4629476bf624767ede301560e24add686b5c",
+            files: &["usr/lib/x86_64-linux-gnu/libharfbuzz.so.0"],
+        },
+        Deb {
+            pool: "main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb",
+            sha256: "f68b5b23bc8a1688fb787d2aed7e2cdf895a73022f6a5025e183162dac4500b2",
+            files: &["usr/lib/x86_64-linux-gnu/libjpeg.so.8"],
+        },
+        Deb {
+            pool: "main/l/lz4/liblz4-1_1.9.4-1build1_amd64.deb",
+            sha256: "b9b69dedb126755f063396a6d3a3361066f9661f1c21cf5635cdd5ff6605796a",
+            files: &["usr/lib/x86_64-linux-gnu/liblz4.so.1"],
+        },
+        Deb {
+            pool: "main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1_amd64.deb",
+            sha256: "28851b3997e4ba74bb3197bd58796bd3041c204c21df85fe0ddafdcaced647f0",
+            files: &["usr/lib/x86_64-linux-gnu/liblzma.so.5"],
+        },
+        Deb {
+            pool: "main/libm/libmd/libmd0_1.1.0-2build1_amd64.deb",
+            sha256: "77f8cdbf03a43656bbf6604e18bd16834fc8bf2c949d4fbdf24ac297869b667a",
+            files: &["usr/lib/x86_64-linux-gnu/libmd.so.0"],
+        },
+        Deb {
+            pool: "main/u/util-linux/libmount1_2.39.3-9ubuntu6_amd64.deb",
+            sha256: "ccf07f3dfdda05311e66882d420140e32aeceaaa17725a0956214d81f5944995",
+            files: &["usr/lib/x86_64-linux-gnu/libmount.so.1"],
+        },
+        Deb {
+            pool: "main/p/pango1.0/libpango-1.0-0_1.52.1+ds-1build1_amd64.deb",
+            sha256: "09dfa5c881ab273ec6bc1830adcefdc407fcd619316e68fb26ca3a23d0fc9f54",
+            files: &["usr/lib/x86_64-linux-gnu/libpango-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/p/pango1.0/libpangocairo-1.0-0_1.52.1+ds-1build1_amd64.deb",
+            sha256: "98cf5fc9076c2911fe20dfc1e41cd8f686a2bb5d539b1105fab18105b0db1376",
+            files: &["usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/p/pango1.0/libpangoft2-1.0-0_1.52.1+ds-1build1_amd64.deb",
+            sha256: "cc6bc9d86ef5f329edacaa4895232d8a9b8f95c5cbc77c3c460a3f64cecc213d",
+            files: &["usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2_amd64.deb",
+            sha256: "bb38c38adb4ef548f2851b5cf7f70bbdbcb27d582c17550aa053edb9e4098d84",
+            files: &["usr/lib/x86_64-linux-gnu/libpcre2-8.so.0"],
+        },
+        Deb {
+            pool: "main/p/pixman/libpixman-1-0_0.42.2-1build1_amd64.deb",
+            sha256: "d9c2931c4c424615eeab9dd5ae08bfc608b84e803c1d3ccddf319270db213421",
+            files: &["usr/lib/x86_64-linux-gnu/libpixman-1.so.0"],
+        },
+        Deb {
+            pool: "main/libp/libpng1.6/libpng16-16t64_1.6.43-5build1_amd64.deb",
+            sha256: "128d505038cc19dfc218658562ca5917ec242b79e6e2bbfb65ee27f297a53924",
+            files: &["usr/lib/x86_64-linux-gnu/libpng16.so.16"],
+        },
+        Deb {
+            pool: "main/libs/libselinux/libselinux1_3.5-2ubuntu2_amd64.deb",
+            sha256: "c0fe6dfac61d458f3e65c4a2bf6a920030a97d2429e33d0b405a8c4a63ef2864",
+            files: &["usr/lib/x86_64-linux-gnu/libselinux.so.1"],
+        },
+        Deb {
+            pool: "main/s/systemd/libsystemd0_255.4-1ubuntu8_amd64.deb",
+            sha256: "64ba97fddff491b86597e93b078e2fe3256cb80f9a113ae9d8dd1361f01b84ed",
+            files: &["usr/lib/x86_64-linux-gnu/libsystemd.so.0"],
+        },
+        Deb {
+            pool: "main/libt/libthai/libthai0_0.1.29-2build1_amd64.deb",
+            sha256: "5ada7045c5f84a4b774e6449151800aa6470e8d01dc9d6124ef4a44ae6af5508",
+            files: &["usr/lib/x86_64-linux-gnu/libthai.so.0"],
+        },
+        Deb {
+            pool: "main/w/wayland/libwayland-cursor0_1.22.0-2.1build1_amd64.deb",
+            sha256: "29c20da27e8e37c984cf0518635c11cd0441f4cb6a2919a9f6eee1809171d327",
+            files: &["usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0"],
+        },
+        Deb {
+            pool: "main/w/wayland/libwayland-egl1_1.22.0-2.1build1_amd64.deb",
+            sha256: "76cd17d2776428e0a0551b8f8fd954eeb3d39ca8ed2f88a38a5e4ce3ce3b2f16",
+            files: &["usr/lib/x86_64-linux-gnu/libwayland-egl.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb",
+            sha256: "397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80",
+            files: &["usr/lib/x86_64-linux-gnu/libX11.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxau/libxau6_1.0.9-1build6_amd64.deb",
+            sha256: "e40d29f1d1a62393bacaedebe0da3d9006084152a9f7e5e029293f08ce1c5c80",
+            files: &["usr/lib/x86_64-linux-gnu/libXau.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxcb/libxcb-render0_1.15-1ubuntu2_amd64.deb",
+            sha256: "7d83a0668b1a693b5ea2e496206e8371fb6beda4c54a2b4b3902005915c272c5",
+            files: &["usr/lib/x86_64-linux-gnu/libxcb-render.so.0"],
+        },
+        Deb {
+            pool: "main/libx/libxcb/libxcb-shm0_1.15-1ubuntu2_amd64.deb",
+            sha256: "229d1280d459f1ba44c22939d3f9b61d9d20932d9a646b3fe4ce50be4cdf2325",
+            files: &["usr/lib/x86_64-linux-gnu/libxcb-shm.so.0"],
+        },
+        Deb {
+            pool: "main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb",
+            sha256: "e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58",
+            files: &["usr/lib/x86_64-linux-gnu/libxcb.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxcomposite/libxcomposite1_0.4.5-1build3_amd64.deb",
+            sha256: "a12d5d9ae70b798cbbf284080eae32b87367561fc9c24492f641b8860ac0f308",
+            files: &["usr/lib/x86_64-linux-gnu/libXcomposite.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxcursor/libxcursor1_1.2.1-1build1_amd64.deb",
+            sha256: "1a4beee621454e42fe0d2f4e1633611126e43d891f0aec28e4a06744f6e9f04d",
+            files: &["usr/lib/x86_64-linux-gnu/libXcursor.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxdamage/libxdamage1_1.1.6-1build1_amd64.deb",
+            sha256: "6891faf325e996ebd28ef53ebb9c043dc96f67327500490affc3e89d366d35ed",
+            files: &["usr/lib/x86_64-linux-gnu/libXdamage.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb",
+            sha256: "bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb",
+            files: &["usr/lib/x86_64-linux-gnu/libXdmcp.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb",
+            sha256: "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679",
+            files: &["usr/lib/x86_64-linux-gnu/libXext.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxfixes/libxfixes3_6.0.0-2build1_amd64.deb",
+            sha256: "0ee1015cccd063249e01c0cd0bf45f513c8ac9a1e5e485070c12e69192455e4a",
+            files: &["usr/lib/x86_64-linux-gnu/libXfixes.so.3"],
+        },
+        Deb {
+            pool: "main/libx/libxi/libxi6_1.8.1-1build1_amd64.deb",
+            sha256: "0ea7acb5e8a8ce4d6653b30e03a319bfe136db7bfb5ee7cad34c2aa1272ea8d9",
+            files: &["usr/lib/x86_64-linux-gnu/libXi.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxinerama/libxinerama1_1.1.4-3build1_amd64.deb",
+            sha256: "c8c93a3efdbb06e314f41bf48af4ca3652e4a3826bab5b9e00887660e619f239",
+            files: &["usr/lib/x86_64-linux-gnu/libXinerama.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_amd64.deb",
+            sha256: "2b9caeb423efb540296a1cb20b872cc630c23908407ecb5c1c787a617622d664",
+            files: &["usr/lib/x86_64-linux-gnu/libxkbcommon.so.0"],
+        },
+        Deb {
+            pool: "main/libx/libxrandr/libxrandr2_1.5.2-2build1_amd64.deb",
+            sha256: "f2955a5e594f5724b58ad241d9231ea191cb36574a0d5e5ca6b661cd41d6256d",
+            files: &["usr/lib/x86_64-linux-gnu/libXrandr.so.2"],
+        },
+        Deb {
+            pool: "main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb",
+            sha256: "d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea",
+            files: &["usr/lib/x86_64-linux-gnu/libXrender.so.1"],
+        },
+        Deb {
+            pool: "main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1_amd64.deb",
+            sha256: "4dcc3ba9606a5837a55248d08162a5b426dd621f75c0eb24d86409e0d0e71d52",
+            files: &["usr/lib/x86_64-linux-gnu/libzstd.so.1"],
+        },
+        Deb {
+            pool: "main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2_amd64.deb",
+            sha256: "0b93d16d7498f092fa3070fbbad28cdbc6b3d640f1a7681b96fc37f20d1219f1",
+            files: &["usr/lib/x86_64-linux-gnu/libz.so.1"],
+        },
+        // gdk-pixbuf (which depends on it) picks an image's loader by its
+        // MIME type through GIO, which reads the MIME database's mime.cache:
+        // made at installation from this XML (`update_mime_database`).
+        Deb {
+            pool: "main/s/shared-mime-info/shared-mime-info_2.4-4_amd64.deb",
+            sha256: "7a774ea291ab99bfa987866c6b68e825531eeea7c8a732dd47d14cf480453fda",
+            files: &["usr/share/mime/packages/freedesktop.org.xml"],
+        },
+        Deb {
+            pool: "main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
+            sha256: "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
+            files: &[
+                "usr/share/X11/xkb/compat/accessx",
+                "usr/share/X11/xkb/compat/basic",
+                "usr/share/X11/xkb/compat/caps",
+                "usr/share/X11/xkb/compat/complete",
+                "usr/share/X11/xkb/compat/iso9995",
+                "usr/share/X11/xkb/compat/ledcaps",
+                "usr/share/X11/xkb/compat/lednum",
+                "usr/share/X11/xkb/compat/ledscroll",
+                "usr/share/X11/xkb/compat/level5",
+                "usr/share/X11/xkb/compat/misc",
+                "usr/share/X11/xkb/compat/mousekeys",
+                "usr/share/X11/xkb/compat/xfree86",
+                "usr/share/X11/xkb/keycodes/aliases",
+                "usr/share/X11/xkb/keycodes/evdev",
+                "usr/share/X11/xkb/rules/evdev",
+                "usr/share/X11/xkb/symbols/inet",
+                "usr/share/X11/xkb/symbols/keypad",
+                "usr/share/X11/xkb/symbols/pc",
+                "usr/share/X11/xkb/symbols/srvr_ctrl",
+                "usr/share/X11/xkb/symbols/us",
+                "usr/share/X11/xkb/types/basic",
+                "usr/share/X11/xkb/types/complete",
+                "usr/share/X11/xkb/types/extra",
+                "usr/share/X11/xkb/types/iso9995",
+                "usr/share/X11/xkb/types/level5",
+                "usr/share/X11/xkb/types/mousekeys",
+                "usr/share/X11/xkb/types/numpad",
+                "usr/share/X11/xkb/types/pc",
+            ],
+        },
+    ],
+}];
+
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
@@ -517,6 +960,9 @@ const USER_DLLS: &[Dll] = &[
     // gala's msvcrt.dll (the C runtime of mingw-w64 programs), advapi32.dll
     // and user32.dll (only what Nginx imports).
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt.dll" },
+    // gala's ucrtbase.dll (the Universal C Runtime; msvcrt's source with
+    // the UCRT's own functions: ARCHITECTURE "The UCRT").
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase.dll" },
     Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32.dll" },
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
     // gala's winmm.dll (timer resolution; Go and the JVM load it).
@@ -579,6 +1025,8 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "cfgmgr32", file: "cfgmgr32.dll", exported_as: "testcfgmgr32.dll" },
     Dll { package: "wtsapi32", file: "wtsapi32.dll", exported_as: "testwtsapi32.dll" },
     Dll { package: "imm32", file: "imm32.dll", exported_as: "testimm32.dll" },
+    // wldp.dll: Windows Lockdown Policy, unlocked (ODT's setup.exe).
+    Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp.dll" },
     // msctf.dll: the input scope functions (Delphi's VCL; Inno Setup).
     Dll { package: "msctf", file: "msctf.dll", exported_as: "testmsctf.dll" },
     // The GPU stubs (ROADMAP GPU G0): no Direct3D adapter yet.
@@ -595,6 +1043,10 @@ const USER_DLLS: &[Dll] = &[
     // normaliz.dll: forwarders to kernel32's IDN functions (libcurl).
     Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz.dll" },
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder.dll" },
+    // msi.dll: Windows Installer's queries, nothing installed (msi_test).
+    Dll { package: "msi", file: "msi.dll", exported_as: "testmsi.dll" },
+    // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
+    Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -632,6 +1084,8 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase32.dll" },
     // The 32-bit msvcrt: gala's msvcrt built for i686.
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
+    // The 32-bit ucrtbase: gala's UCRT built for i686.
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase32.dll" },
     // The 32-bit user32 and gdi32 (WOW64 stage 4; user32 loads gdi32).
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32_32.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32_32.dll" },
@@ -664,6 +1118,21 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur3232.dll" },
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder32.dll" },
     Dll { package: "bcrypt", file: "bcrypt.dll", exported_as: "testbcrypt32.dll" },
+    // crypt32 and the ncrypt it loads for keys (ODT's setup.exe delay-loads
+    // crypt32; wow64_cert_test).
+    Dll { package: "crypt32", file: "crypt32.dll", exported_as: "testcrypt3232.dll" },
+    Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt32.dll" },
+    // normaliz and powrprof (ODT's setup.exe delay-loads them after msi
+    // and imm32; wow64_office_api_test).
+    Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz32.dll" },
+    Dll { package: "powrprof", file: "powrprof.dll", exported_as: "testpowrprof32.dll" },
+    // wldp (ODT's setup.exe loads it to check for S mode).
+    Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp32.dll" },
+    // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
+    Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
+    // msxml6 (ODT's setup.exe asks COM for DOMDocument60;
+    // wow64_msxml_test).
+    Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml632.dll" },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -883,6 +1352,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("kernel32_pool_test", "winmm.dll", "Windows/System32"),
     ("manifest_test", "ntdll.dll", "Windows/System32"),
     ("manifest_test", "kernel32.dll", "Windows/System32"),
+    ("manifest_test", "user32.dll", "Windows/System32"),
+    ("manifest_test", "gdi32.dll", "Windows/System32"),
+    ("manifest_test", "comctl32.dll", "Windows/System32"),
     ("tls_test", "ntdll.dll", "Windows/System32"),
     ("tls_test", "kernel32.dll", "Windows/System32"),
     ("tls_test", "tlsdll.dll", "gala"),
@@ -949,6 +1421,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsta_test", "ntdll.dll", "Windows/System32"),
     ("winsta_test", "kernel32.dll", "Windows/System32"),
     ("winsta_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "ntdll.dll", "Windows/System32"),
+    ("clipboard_test", "kernel32.dll", "Windows/System32"),
+    ("clipboard_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "gdi32.dll", "Windows/System32"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
     ("lsa_test", "advapi32.dll", "Windows/System32"),
@@ -1192,6 +1668,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_exec_pie", "user/lx/bin/exec_test-pie", "lx"),
     ("lx_socket", "user/lx/bin/socket_test", "lx"),
     ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
+    ("lx_memfd", "user/lx/bin/memfd_test", "lx"),
+    ("lx_memfd_pie", "user/lx/bin/memfd_test-pie", "lx"),
+    ("lx_prctl", "user/lx/bin/prctl_test", "lx"),
+    ("lx_prctl_pie", "user/lx/bin/prctl_test-pie", "lx"),
+    ("lx_eventfd", "user/lx/bin/eventfd_test", "lx"),
+    ("lx_eventfd_pie", "user/lx/bin/eventfd_test-pie", "lx"),
+    ("lx_statfs", "user/lx/bin/statfs_test", "lx"),
+    ("lx_statfs_pie", "user/lx/bin/statfs_test-pie", "lx"),
+    ("lx_unix", "user/lx/bin/unix_test", "lx"),
+    ("lx_unix_pie", "user/lx/bin/unix_test-pie", "lx"),
+    ("lx_wl", "user/lx/bin/wl_test", "lx"),
+    ("lx_wl_pie", "user/lx/bin/wl_test-pie", "lx"),
+    ("lx_wl_input", "user/lx/bin/wl_input_test", "lx"),
+    ("lx_wl_input_pie", "user/lx/bin/wl_input_test-pie", "lx"),
+    ("lx_wl_popup", "user/lx/bin/wl_popup_test", "lx"),
+    ("lx_wl_popup_pie", "user/lx/bin/wl_popup_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
     ("lx_forkmem", "user/lx/bin/forkmem_test", "lx"),
     ("lx_forkmem_pie", "user/lx/bin/forkmem_test-pie", "lx"),
@@ -1202,6 +1694,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_epoll_pie", "user/lx/bin/epoll_test-pie", "lx"),
     ("lx_fs", "user/lx/bin/fs_test", "lx"),
     ("lx_fs_pie", "user/lx/bin/fs_test-pie", "lx"),
+    ("lx_run", "user/lx/bin/run_test", "lx"),
+    ("lx_id", "user/lx/bin/id_test", "lx"),
+    ("lx_id_pie", "user/lx/bin/id_test-pie", "lx"),
+    ("lx_run_pie", "user/lx/bin/run_test-pie", "lx"),
     // Dynamically linked glibc programs (ROADMAP LD): the program and its
     // libraries in C:\lx, glibc where Ubuntu's ld.so looks for it (its
     // system directory, and /lib64 as PT_INTERP names it).
@@ -1215,6 +1711,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("glibc", "target/prebuilt/glibc/ld-linux-x86-64.so.2", "lib/x86_64-linux-gnu"),
     ("glibc", "target/prebuilt/glibc/libc.so.6", "lib/x86_64-linux-gnu"),
     ("glibc", "target/prebuilt/glibc/libm.so.6", "lib/x86_64-linux-gnu"),
+    // weston-simple-shm (LD step 2) and the libraries it loads beside
+    // glibc's.
+    ("weston", "target/prebuilt/weston/weston-simple-shm", "lx"),
+    (
+        "wayland_client",
+        "target/prebuilt/libwayland-client/libwayland-client.so.0",
+        "lib/x86_64-linux-gnu",
+    ),
+    ("wayland_client", "target/prebuilt/libffi/libffi.so.8", "lib/x86_64-linux-gnu"),
+    // The first GTK program (LD step 3) and GTK 3's Linux root: its
+    // libraries in /usr/lib/x86_64-linux-gnu, a font, fontconfig's
+    // configuration (LINUX_ROOTS "gtk3"), each a tree.
+    ("lx_gtk", "user/lx/bin/gtk_test", "lx"),
+    ("lx_gtk_pie", "user/lx/bin/gtk_test-pie", "lx"),
+    ("gtk3", "target/prebuilt/gtk3/usr/", "usr"),
+    ("gtk3", "target/prebuilt/gtk3/etc/", "etc"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -1222,6 +1734,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
+    // WinHTTP's status callbacks (user/winhttp_cb_test), x64 and x86,
+    // against schannel_test's Nginx (MODULE_SETS).
+    ("winhttp_cb_test", "winhttp.dll", "Windows/System32"),
+    ("wow64_winhttp_cb_test", "wow64.dll", "Windows/System32"),
+    ("wow64_winhttp_cb_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     ("wininet_test", "msvcrt.dll", "Windows/System32"),
     ("wininet_test", "wininet.dll", "Windows/System32"),
     ("wininet_test", "user/bin/wininet_test.exe", "gala"),
@@ -1380,9 +1903,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_inno", "crypt32.dll", "Windows/System32"),
     ("pk_install_inno", "msimg32.dll", "Windows/System32"),
     ("pk_install_inno", "msctf.dll", "Windows/System32"),
-    // The UCRT (ucrtbase.dll ships with Windows; gala has none of its own:
-    // Microsoft's redistributable copy from the JDK, as other scenarios).
-    ("pk_install_inno", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    // The UCRT: gala's ucrtbase.dll, in System32 as on Windows.
+    ("pk_install_inno", "ucrtbase.dll", "Windows/System32"),
     // pk_install_https: `gala install` downloads over winhttp from
     // schannel_test's Nginx (MODULE_SETS), which serves the package; the
     // machine root store holds the public CA bundle beside the test CA.
@@ -1843,9 +2365,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
     // P1 step 6: the embeddable CPython (PREBUILT `python`) in C:\python,
-    // gala's DLLs it imports, the JDK's UCRT beside it.
+    // gala's DLLs it imports (its UCRT gala's ucrtbase).
     ("python_hello", "target/prebuilt/python/", "python"),
-    ("python_hello", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_hello", "ucrtbase.dll", "Windows/System32"),
     ("python_hello", "ntdll.dll", "Windows/System32"),
     ("python_hello", "kernel32.dll", "Windows/System32"),
     ("python_hello", "advapi32.dll", "Windows/System32"),
@@ -1867,7 +2389,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // P1 step 6: pip and venv on the full CPython layout (PREBUILT
     // `python-full`) in C:\python, as python_hello's.
     ("python_pip", "target/prebuilt/python-full/tools/", "python"),
-    ("python_pip", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_pip", "ucrtbase.dll", "Windows/System32"),
     ("python_pip", "ntdll.dll", "Windows/System32"),
     ("python_pip", "kernel32.dll", "Windows/System32"),
     ("python_pip", "advapi32.dll", "Windows/System32"),
@@ -2190,12 +2712,19 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "dotnet"),
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
     // C++ exceptions with Microsoft's C++ runtime (the JDK's
-    // redistributable copies, app-local).
+    // redistributable vcruntime140, app-local) on gala's UCRT.
     ("cxx_eh_test", "ntdll.dll", "Windows/System32"),
     ("cxx_eh_test", "kernel32.dll", "Windows/System32"),
     ("cxx_eh_test", "user/bin/cxx_eh_test.exe", "gala"),
     ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "gala"),
-    ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "gala"),
+    ("cxx_eh_test", "ucrtbase.dll", "Windows/System32"),
+    // A C++ throw nothing catches (user/cxx_eh_test/throw.cpp): the crash
+    // report names the thrown type and what().
+    ("cxx_throw", "ntdll.dll", "Windows/System32"),
+    ("cxx_throw", "kernel32.dll", "Windows/System32"),
+    ("cxx_throw", "user/bin/cxx_throw.exe", "gala"),
+    ("cxx_throw", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "gala"),
+    ("cxx_throw", "ucrtbase.dll", "Windows/System32"),
     ("java_hello", "ntdll.dll", "Windows/System32"),
     ("java_hello", "kernel32.dll", "Windows/System32"),
     ("java_hello", "advapi32.dll", "Windows/System32"),
@@ -2362,11 +2891,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     // curl for Windows, run by busybox sh (user/curl/curl.sh) against
     // schannel_test's Nginx (MODULE_SETS): curl.se's build (PREBUILT
-    // curl; the UCRT is the JDK's redistributable ucrtbase.dll, in
-    // System32 as on Windows) and Git for Windows' Schannel curl (PREBUILT
+    // curl, on gala's UCRT: ucrtbase.dll in System32, as on Windows) and
+    // Git for Windows' Schannel curl (PREBUILT
     // gitcurl), each as C:\curl.
     ("curl", "target/prebuilt/curl/curl-8.23.0_8-win64-mingw/bin/curl.exe", "curl"),
-    ("curl", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    ("curl", "ucrtbase.dll", "Windows/System32"),
     ("curl", "normaliz.dll", "Windows/System32"),
     ("curl_common", "iphlpapi.dll", "Windows/System32"),
     ("curl_schannel", "target/prebuilt/gitcurl/mingw64/bin/", "curl"),
@@ -2481,12 +3010,147 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_inno", "x86/shfolder.dll", "Windows/SysWOW64"),
     ("wow64_inno", "x86/bcrypt.dll", "Windows/SysWOW64"),
     ("wow64_inno", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "gala"),
+    // office_install: the Office Deployment Tool's setup.exe (PREBUILT odt,
+    // 32-bit) with its configuration, the 32-bit DLLs gala has of those it
+    // loads, and the 64-bit ntdll and kernel32 for the 64-bit programs it
+    // starts.
+    ("office_install", "wow64.dll", "Windows/System32"),
+    ("office_install", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/user32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comctl32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/version.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/uxtheme.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/dwmapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msimg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msctf.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shfolder.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/mpr.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winspool.drv", "Windows/SysWOW64"),
+    ("office_install", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msxml6.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/normaliz.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/powrprof.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/wldp.dll", "Windows/SysWOW64"),
+    ("office_install", "ntdll.dll", "Windows/System32"),
+    ("office_install", "kernel32.dll", "Windows/System32"),
+    ("office_install", "ucrtbase.dll", "Windows/System32"),
+    ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
+    ("office_install", "user/office_install/config.xml", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // gala's UCRT, called directly (user/ucrt_test), x64 and x86.
+    ("ucrt_test", "ntdll.dll", "Windows/System32"),
+    ("ucrt_test", "kernel32.dll", "Windows/System32"),
+    ("ucrt_test", "ucrtbase.dll", "Windows/System32"),
+    ("ucrt_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "wow64.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // ShellExecute's "runas" (user/runas_test), x64 and x86: shell32 and
+    // the advapi32 it loads for the caller's token.
+    ("runas_test", "ntdll.dll", "Windows/System32"),
+    ("runas_test", "kernel32.dll", "Windows/System32"),
+    ("runas_test", "shell32.dll", "Windows/System32"),
+    ("runas_test", "advapi32.dll", "Windows/System32"),
+    ("runas_test", "secur32.dll", "Windows/System32"),
+    ("runas_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("runas_test", "bcrypt.dll", "Windows/System32"),
+    ("wow64_runas_test", "wow64.dll", "Windows/System32"),
+    ("wow64_runas_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // The kernel32 and ntdll functions Office imports (user/office_api_test),
+    // x64 and x86.
+    ("office_api_test", "ntdll.dll", "Windows/System32"),
+    ("office_api_test", "kernel32.dll", "Windows/System32"),
+    ("office_api_test", "imm32.dll", "Windows/System32"),
+    ("office_api_test", "normaliz.dll", "Windows/System32"),
+    ("office_api_test", "powrprof.dll", "Windows/System32"),
+    ("office_api_test", "wldp.dll", "Windows/System32"),
+    ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
+    ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/normaliz.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/powrprof.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/wldp.dll", "Windows/SysWOW64"),
+    // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
+    // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
+    // which the 32-bit crypt32 reads through Sysnative.
+    ("wow64_cert_test", "wow64.dll", "Windows/System32"),
+    ("wow64_cert_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    // msi's queries (user/msi_test), x64 and x86.
+    ("msi_test", "ntdll.dll", "Windows/System32"),
+    ("msi_test", "kernel32.dll", "Windows/System32"),
+    ("msi_test", "msi.dll", "Windows/System32"),
+    ("wow64_msi_test", "wow64.dll", "Windows/System32"),
+    ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    // The service control manager's client (user/svc_test), x64 and x86.
+    ("svc_test", "ntdll.dll", "Windows/System32"),
+    ("svc_test", "kernel32.dll", "Windows/System32"),
+    ("svc_test", "advapi32.dll", "Windows/System32"),
+    ("svc_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("svc_test", "secur32.dll", "Windows/System32"),
+    ("svc_test", "bcrypt.dll", "Windows/System32"),
+    ("svc_test", "user/access_test/access_test.regseed", "registry"),
+    ("wow64_svc_test", "wow64.dll", "Windows/System32"),
+    ("wow64_svc_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "user/access_test/access_test.regseed", "registry"),
+    // MSXML 6's DOM through COM (user/msxml_test), x64 and x86.
+    ("msxml_test", "ntdll.dll", "Windows/System32"),
+    ("msxml_test", "kernel32.dll", "Windows/System32"),
+    ("msxml_test", "advapi32.dll", "Windows/System32"),
+    ("msxml_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("msxml_test", "ole32.dll", "Windows/System32"),
+    ("msxml_test", "oleaut32.dll", "Windows/System32"),
+    ("msxml_test", "msxml6.dll", "Windows/System32"),
+    ("wow64_msxml_test", "wow64.dll", "Windows/System32"),
+    ("wow64_msxml_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("wow64_msxml_test", "x86/msxml6.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2591,6 +3255,7 @@ const USER_PROGRAMS: &[&str] = &[
     "session_test",
     "presenter_test",
     "winsta_test",
+    "clipboard_test",
     "lsa_test",
     "restricted_test",
     "cmd",
@@ -2624,6 +3289,13 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "ucrt_test",
+    "office_api_test",
+    "msi_test",
+    "svc_test",
+    "msxml_test",
+    "winhttp_cb_test",
+    "runas_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -2636,6 +3308,14 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_fs_test",
     "wow64_k32_test",
     "wow64_adv_test",
+    "wow64_ucrt_test",
+    "wow64_office_api_test",
+    "wow64_cert_test",
+    "wow64_msi_test",
+    "wow64_svc_test",
+    "wow64_msxml_test",
+    "wow64_winhttp_cb_test",
+    "wow64_runas_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -3007,9 +3687,13 @@ fn unit_tests() -> Result {
     run_cmd(cargo().args(["test", "--package", "lx_abi"]))?;
     // AFD's request layouts for both pointer sizes (kernel/afd_abi).
     run_cmd(cargo().args(["test", "--package", "afd_abi"]))?;
+    // The Wayland wire format (kernel/wl_abi; ROADMAP LD step 2).
+    run_cmd(cargo().args(["test", "--package", "wl_abi"]))?;
     // `gala install`'s package manager (manifests, zip, the install
     // transaction; ROADMAP PK).
     run_cmd(cargo().args(["test", "--package", "galapkg"]))?;
+    // The XML reader galapkg and msxml6.dll share.
+    run_cmd(cargo().args(["test", "--package", "gala_xml"]))?;
     // Schannel's TLS engine (both sides in memory; ROADMAP TLS).
     run_cmd(cargo().args(["test", "--package", "schannel_tls"]))?;
     // The update feed's TUF metadata and the client's refusals (R8).
@@ -3452,6 +4136,9 @@ fn fetch_prebuilt(path: &str) -> Result {
     let _guard = FETCH.lock().unwrap_or_else(|e| e.into_inner());
     let full = root().join(path);
     let name = path.split('/').nth(2).ok_or(format!("bad prebuilt path {path}"))?;
+    if let Some(r) = LINUX_ROOTS.iter().find(|r| r.name == name) {
+        return fetch_linux_root(r, path);
+    }
     let p = PREBUILT.iter().find(|p| p.name == name).ok_or(format!("no prebuilt {name:?}"))?;
     let dir = root().join("target/prebuilt").join(p.name);
     // Written once the release is unpacked: a partial unpack (an
@@ -3569,6 +4256,137 @@ fn fetch_prebuilt(path: &str) -> Result {
     write(&done, p.url)
 }
 
+/// Makes sure the Linux root `r` is assembled in `target/prebuilt/<name>/`
+/// (`path` is the file or tree a scenario wants from it): each package
+/// fetched into the package cache (`fetch_deb`), unpacked (dpkg-deb) and
+/// its files moved to their paths. Like a prebuilt, a marker keyed by the
+/// whole selection makes a changed table or an interrupted run assemble
+/// it again from nothing (the packages already fetched are not fetched
+/// again). The caller holds the fetch lock.
+fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
+    let dir = root().join("target/prebuilt").join(r.name);
+    let selection = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for d in r.debs {
+            (d.pool, d.sha256, d.files).hash(&mut h);
+        }
+        h.finish()
+    };
+    let done = dir.join(format!(".assembled-{selection:016x}"));
+    if done.exists() {
+        return if root().join(path).exists() {
+            Ok(())
+        } else {
+            Err(format!("{path} is not in the Linux root {:?} (LINUX_ROOTS)", r.name))
+        };
+    }
+    if dir.exists() {
+        eprintln!("xtask: {}: not assembled from the pinned packages; clearing {dir:?}", r.name);
+        fs::remove_dir_all(&dir).map_err(|e| format!("clearing {dir:?}: {e}"))?;
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    eprintln!("xtask: assembling the Linux root {} from {} packages", r.name, r.debs.len());
+    let tree = dir.join("deb");
+    for d in r.debs {
+        let (deb, url) = fetch_deb(d)?;
+        let _ = fs::remove_dir_all(&tree);
+        fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+        run_quiet(Command::new("dpkg-deb").arg("-x").arg(&deb).arg(&tree))
+            .map_err(|e| format!("{e} (dpkg-deb is in dpkg)"))?;
+        for file in d.files {
+            let from = resolve_in_tree(&tree, file).map_err(|e| format!("{url}: {e}"))?;
+            let to = dir.join(file);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
+            }
+            fs::rename(&from, &to).map_err(|e| format!("{file} in {url}: {e}"))?;
+        }
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    update_mime_database(&dir)?;
+    write(&done, &format!("{} packages\n", r.debs.len()))?;
+    if !root().join(path).exists() {
+        return Err(format!("{path} is not in the Linux root {:?} (LINUX_ROOTS)", r.name));
+    }
+    Ok(())
+}
+
+/// What shared-mime-info's installation does (its dpkg trigger): the
+/// MIME database's `mime.cache` made from `usr/share/mime/packages` by
+/// the host's `update-mime-database` (Ubuntu 24.04's shared-mime-info
+/// 2.4, the same version; its output is the same at each run). Only
+/// mime.cache is kept: GIO reads nothing else when it is there. Nothing
+/// to do for a root without the package.
+fn update_mime_database(dir: &Path) -> Result {
+    let mime = dir.join("usr/share/mime");
+    if !mime.join("packages").exists() {
+        return Ok(());
+    }
+    run_quiet(
+        Command::new("update-mime-database").arg(&mime).env("XDG_DATA_DIRS", dir.join("usr/share")),
+    )
+    .map_err(|e| format!("{e} (update-mime-database is in shared-mime-info)"))?;
+    for entry in fs::read_dir(&mime).map_err(|e| format!("reading {mime:?}: {e}"))?.flatten() {
+        if entry.file_name() == "mime.cache" {
+            continue;
+        }
+        let path = entry.path();
+        let gone = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        gone.map_err(|e| format!("removing {path:?}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The package `d` in the package cache, `target/prebuilt/debs/<file>`
+/// (shared by the Linux roots; about 14 MB for GTK 3's), downloaded once
+/// (curl, to a `.part` file renamed when whole) and checked against its
+/// SHA-256 at each use. Gives the path and the URL.
+fn fetch_deb(d: &Deb) -> Result<(PathBuf, String)> {
+    let url = format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool);
+    let name = d.pool.rsplit('/').next().unwrap_or(d.pool);
+    let cache = root().join("target/prebuilt/debs");
+    fs::create_dir_all(&cache).map_err(|e| format!("creating {cache:?}: {e}"))?;
+    let deb = cache.join(name);
+    let sha256 = |path: &Path| -> Result<String> {
+        let out = Command::new("sha256sum").arg(path).output().map_err(|e| e.to_string())?;
+        let sum = String::from_utf8_lossy(&out.stdout);
+        Ok(sum.split_whitespace().next().unwrap_or_default().to_string())
+    };
+    if deb.exists() && sha256(&deb)? == d.sha256 {
+        return Ok((deb, url));
+    }
+    let part = cache.join(format!("{name}.part"));
+    eprintln!("xtask: fetching {url}");
+    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&part).arg(&url))?;
+    let sum = sha256(&part)?;
+    if sum != d.sha256 {
+        let _ = fs::remove_file(&part);
+        return Err(format!("{url}: SHA-256 {sum}, not the pinned {}", d.sha256));
+    }
+    fs::rename(&part, &deb).map_err(|e| format!("moving {part:?} to {deb:?}: {e}"))?;
+    Ok((deb, url))
+}
+
+/// The file `file` names in the unpacked package `tree`, its symbolic
+/// links followed inside the tree (an absolute target is the tree's, as
+/// the package would install it; at most 8 links).
+fn resolve_in_tree(tree: &Path, file: &str) -> Result<PathBuf> {
+    let mut rel = PathBuf::from(file);
+    for _ in 0..8 {
+        let at = tree.join(&rel);
+        let Ok(target) = fs::read_link(&at) else {
+            return if at.is_file() { Ok(at) } else { Err(format!("{file}: not in the package")) };
+        };
+        rel = if target.is_absolute() {
+            target.strip_prefix("/").map_err(|e| e.to_string())?.to_path_buf()
+        } else {
+            rel.parent().map_or_else(|| target.clone(), |p| p.join(&target))
+        };
+    }
+    Err(format!("{file}: more than 8 symbolic links"))
+}
+
 /// Unpacks the Debian package `deb` (dpkg-deb, its data archive as the
 /// package would install it) and moves `p`'s member files into `dir`
 /// under their file names (`usr/lib/x86_64-linux-gnu/libc.so.6` becomes
@@ -3583,8 +4401,13 @@ fn unpack_deb(p: &Prebuilt, deb: &Path, dir: &Path) -> Result {
         .map_err(|e| format!("{e} (dpkg-deb is in dpkg)"))?;
     for member in p.members {
         let last = member.rsplit('/').next().unwrap_or(member);
-        fs::rename(tree.join(member), dir.join(last))
-            .map_err(|e| format!("{member} in {}: {e}", p.url))?;
+        // A library's soname is a symbolic link: its target is moved
+        // under the link's name.
+        let mut from = tree.join(member);
+        if let Ok(target) = fs::read_link(&from) {
+            from = from.parent().map(|d| d.join(&target)).unwrap_or(target);
+        }
+        fs::rename(&from, dir.join(last)).map_err(|e| format!("{member} in {}: {e}", p.url))?;
     }
     fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))
 }
@@ -3789,6 +4612,20 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // ROADMAP LD step 3: the clipboard's steps across the two
+        // processes, the child's CF_TEXT synthesized from the parent's
+        // CF_UNICODETEXT and the open refused while the other holds it.
+        "clipboard_test",
+        &[
+            r#""ev":"clipboard","op":"set""#,
+            r#""format":13,"kind":0,"size":64"#,
+            r#""format":1,"source":13,"kind":0,"size":64"#,
+            r#""op":"close""#,
+            r#""changed":true,"listeners":1"#,
+            r#""op":"open denied""#,
+        ],
+    ),
+    (
         "sshd_server",
         &[
             r#""ev":"tcp accept""#,
@@ -3873,6 +4710,8 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
+    // OF: Office's installer; it needs the CDN (CI's boot runners).
+    "office_install",
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
@@ -3916,6 +4755,9 @@ enum NetClient {
     Tls,
     /// GETs `/` and expects a 200 whose body contains all of these.
     Contains(&'static [&'static str]),
+    /// Nothing: the guest only connects out (the card and QEMU's NAT to
+    /// the host's network are what the scenario needs).
+    Outbound,
     /// Logs on with the host's ssh and user/sshd/client_ed25519 as
     /// `galatest` and runs `echo` (`ssh_client`).
     Ssh,
@@ -3986,6 +4828,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
+    ("office_install", "run: begin setup.exe", NetClient::Outbound),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -4317,6 +5160,27 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=cxx_eh_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["cxx_eh_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // A C++ exception nothing catches (user/cxx_eh_test/throw.cpp):
+        // the process ends with 0xe06d7363 as on Windows, and the crash
+        // report decodes the throw (ThrowInfo's catchable types, the
+        // std::exception's what()).
+        name: "cxx_throw",
+        cmdline: "qemu_exit run=cxx_throw.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "cxx_throw: throwing std::runtime_error",
+            "crash report: cxx_throw.exe (pid 4) ended by an unhandled exception 0xe06d7363 \
+             (C++ exception)",
+            "crash report:   C++ throw of std::runtime_error (.?AVruntime_error@std@@), 2 \
+             catchable types",
+            "crash report:     catchable as std::exception",
+            "crash report:   what(): \"config missing\"",
+            // vfptr, the text, whether to free it.
+            "crash report:     word 1 (0x",
+            "process cxx_throw.exe (pid 4) exited with status 0xe06d7363",
+        ],
     },
     Scenario {
         name: "timer_test",
@@ -4851,6 +5715,16 @@ const SCENARIOS: &[Scenario] = &[
             "winsta_test: ok",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // ROADMAP LD step 3: the window station's clipboard, in the
+        // kernel, between two processes (user/clipboard_test): formats
+        // copied through the kernel, the synthesized text formats, the
+        // lock across processes, the sequence number, WM_CLIPBOARDUPDATE.
+        name: "clipboard_test",
+        cmdline: "qemu_exit events=ipc run=clipboard_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clipboard_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Security model S4 (docs/SECURITY.md): LSA logons as sshd makes
@@ -5397,6 +6271,154 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_misc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_misc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // gala's UCRT (ucrtbase.dll) called directly: start-up, printf and
+        // scanf with the UCRT's options, streams, strings, locale, math,
+        // the exit sequence (user/ucrt_test).
+        name: "ucrt_test",
+        cmdline: "qemu_exit run=ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ucrt_test: ok",
+            "ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The kernel32 and ntdll functions Office's programs import
+        // (user/office_api_test): CreateFile2, FindFirstFileNameW,
+        // CreateMutexExW, OpenSemaphoreA, K32EnumProcesses, the
+        // activation-context queries, RtlIntegerToUnicodeString,
+        // RtlIsNameInExpression, the AVL generic tables and the rest.
+        name: "office_api_test",
+        cmdline: "qemu_exit run=office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // ShellExecute's "runas" by an elevated caller (SYSTEM): no
+        // prompt, the child starts with the caller's token, elevated
+        // (user/runas_test; docs/SECURITY.md "Elevation").
+        name: "runas_test",
+        cmdline: "qemu_exit as=system run=runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "runas_test: elevated (type 1): runas started an elevated child",
+            "personality nt, elevated token",
+            "runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/runas_test built for x86): the x86
+        // SHELLEXECUTEINFOW and shell32.
+        name: "wow64_runas_test",
+        cmdline: "qemu_exit as=system run=wow64_runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_runas_test: elevated (type 1): runas started an elevated child",
+            "32-bit x86 (WOW64), elevated token",
+            "wow64_runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // "runas" by the boot user, a standard user: UAC would prompt;
+        // gala has no prompt and declines, recorded (user/runas_test).
+        name: "runas_declined",
+        cmdline: "qemu_exit run=runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "runas_test: not elevated (type 1): runas declined",
+            r#"ledger: {"service":"shell32.dll!ShellExecute(runas: elevation prompt)","what":"unsupported""#,
+            "runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/office_api_test built for x86).
+        name: "wow64_office_api_test",
+        cmdline: "qemu_exit run=wow64_office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // crypt32 through WOW64 (user/cert_test built for x86): its
+        // structures in their x86 layouts, the chain engine, CRLs, PFX.
+        name: "wow64_cert_test",
+        cmdline: "qemu_exit run=wow64_cert_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_cert_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Windows Installer's queries with nothing installed, the
+        // functions and ordinals ODT's setup.exe imports (user/msi_test).
+        name: "msi_test",
+        cmdline: "qemu_exit run=msi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/msi_test built for x86).
+        name: "wow64_msi_test",
+        cmdline: "qemu_exit run=wow64_msi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The service control manager's client functions as an
+        // administrator (SYSTEM, as CI's elevated Windows runner):
+        // opening, AFD's status and configuration, enumeration, creating
+        // and deleting a service, and a standard user's (galatest's)
+        // rights (user/svc_test).
+        name: "svc_test",
+        cmdline: "qemu_exit as=system run=svc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        // The standard user's part ran: galatest was refused all access.
+        expect: &[
+            "svc_test: ok",
+            "exited with status 0x00000000",
+            "(svc_test.exe) connected to \"ServicesActive\": 0xc0000022",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/svc_test built for x86).
+        name: "wow64_svc_test",
+        cmdline: "qemu_exit as=system run=wow64_svc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_svc_test: ok",
+            "exited with status 0x00000000",
+            "(wow64_svc_test.exe) connected to \"ServicesActive\": 0xc0000022",
+        ],
+    },
+    Scenario {
+        // MSXML 6's DOM through COM (DOMDocument60): loading, the tree,
+        // attributes, XPath selection, parse errors (user/msxml_test).
+        name: "msxml_test",
+        cmdline: "qemu_exit run=msxml_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["msxml_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/msxml_test built for x86).
+        name: "wow64_msxml_test",
+        cmdline: "qemu_exit run=wow64_msxml_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_msxml_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64: the 32-bit ucrtbase (user/ucrt_test
+        // built for x86), its `_libm_sse2_*` functions included.
+        name: "wow64_ucrt_test",
+        cmdline: "qemu_exit run=wow64_ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_ucrt_test: ok",
+            "wow64_ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         name: "prng_test",
@@ -6989,7 +8011,7 @@ const SCENARIOS: &[Scenario] = &[
             "cell=22 1,1 104 Size",
             "row=gamma.txt,333",
             "window=True True False False Normal modal=0",
-            "titlebar=FlaUI Pressed Minimize,Maximize,Close",
+            "titlebar= Minimize,Maximize,Close",
             "moved=100,80",
             "state=Maximized",
             "state=Normal 100,80",
@@ -7195,6 +8217,23 @@ const SCENARIOS: &[Scenario] = &[
                   run=winhttp_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["winhttp_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // WinHTTP's status callbacks on a synchronous session (ROADMAP OF:
+        // ODT's setup.exe), against the same Nginx.
+        name: "winhttp_cb_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=winhttp_cb_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["winhttp_cb_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/winhttp_cb_test built for x86).
+        name: "wow64_winhttp_cb_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wow64_winhttp_cb_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_winhttp_cb_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // TLS step 2: WinINet's HTTP functions (on winhttp's engine,
@@ -7580,6 +8619,20 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // OF (pending): the Office Deployment Tool's setup.exe (x86,
+        // PREBUILT odt) installs Word, Excel and PowerPoint as
+        // user/office_install/config.xml asks, from Microsoft's CDN (a
+        // net scenario: QEMU's NAT to the host's network). Its log goes to
+        // C:\gala\odtlog; the ledger ranks what it lacks (ROADMAP OF). As
+        // SYSTEM: ODT needs an administrator (its "runas" is declined for
+        // the boot user, a standard user; docs/SECURITY.md "Elevation").
+        name: "office_install",
+        cmdline: "qemu_exit as=system run=setup.exe args=/configure%20C:\\gala\\config.xml \
+                  dump=C:/gala/odtlog",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setup.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
         // (user/wow64_crt_test: mingw's i686 startup code, checked-in
         // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
@@ -7955,6 +9008,238 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["personality linux", "run: end /lx/socket_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
+        // user/lx/memfd_test (LD step 2): memfd_create, mappings every
+        // process shares, the seals; its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_memfd",
+        cmdline: "qemu_exit lxrun=/lx/memfd_test lxargs=./memfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/memfd_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/memfd_test as a static-pie.
+        name: "lx_memfd_pie",
+        cmdline: "qemu_exit lxrun=/lx/memfd_test-pie lxargs=./memfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/memfd_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/prctl_test (LD step 3, what GTK's start reached): prctl's thread name and capability bounding set, getresuid and getresgid;
+        // its transcript must be its expected.txt (real Linux's).
+        name: "lx_prctl",
+        cmdline: "qemu_exit lxrun=/lx/prctl_test lxargs=./prctl_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/prctl_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/prctl_test as a static-pie.
+        name: "lx_prctl_pie",
+        cmdline: "qemu_exit lxrun=/lx/prctl_test-pie lxargs=./prctl_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/prctl_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/eventfd_test (LD step 3, what GTK's start reached): eventfd and eventfd2: the counter, semaphore mode, the limit, waking a blocked read and epoll;
+        // its transcript must be its expected.txt (real Linux's).
+        name: "lx_eventfd",
+        cmdline: "qemu_exit lxrun=/lx/eventfd_test lxargs=./eventfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/eventfd_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/eventfd_test as a static-pie.
+        name: "lx_eventfd_pie",
+        cmdline: "qemu_exit lxrun=/lx/eventfd_test-pie lxargs=./eventfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/eventfd_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/statfs_test (LD step 3, what GTK's start reached): statfs and fstatfs: what holds on any file system, and the errors;
+        // its transcript must be its expected.txt (real Linux's).
+        name: "lx_statfs",
+        cmdline: "qemu_exit lxrun=/lx/statfs_test lxargs=./statfs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/statfs_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/statfs_test as a static-pie.
+        name: "lx_statfs_pie",
+        cmdline: "qemu_exit lxrun=/lx/statfs_test-pie lxargs=./statfs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/statfs_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/unix_test (LD step 2): AF_UNIX sockets, names, SCM_RIGHTS
+        // from a forked child, socket pairs of every kind; its transcript
+        // must be its expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_unix",
+        cmdline: "qemu_exit lxrun=/lx/unix_test lxargs=./unix_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/unix_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/unix_test as a static-pie.
+        name: "lx_unix_pie",
+        cmdline: "qemu_exit lxrun=/lx/unix_test-pie lxargs=./unix_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/unix_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/wl_test (LD step 2): a Wayland client over a raw AF_UNIX
+        // socket against the kernel's Wayland server (`wayland=on`, at
+        // /run/user/1000/wayland-0): the registry, wl_shm with a memfd
+        // pool, an xdg_toplevel's configure, a commit's frame callback and
+        // buffer release, delete_id, and a protocol error. Its transcript
+        // must be its expected.txt (recorded against weston's headless
+        // backend; `lx_expect::check_boot`); the toplevel is a window on
+        // the desktop.
+        name: "lx_wl",
+        cmdline: "qemu_exit wayland=on events=wayland lxrun=/lx/wl_test lxargs=./wl_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "wayland: listening on /run/user/1000/wayland-0",
+            "desktop: shown window 'wl_test'",
+            "run: end /lx/wl_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_test as a static-pie, with every request and event
+        // traced (`wayland=trace`, as WAYLAND_DEBUG=1 prints them).
+        name: "lx_wl_pie",
+        cmdline: "qemu_exit wayland=trace lxrun=/lx/wl_test-pie lxargs=./wl_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "wl_display#1.get_registry(new id wl_registry#2)",
+            " -> wl_display#1.error(wl_display#1, 1, ",
+            "run: end /lx/wl_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_popup_test (LD step 2): xdg_positioner and xdg_popup
+        // (every anchor and gravity, an offset, a nested popup,
+        // reposition, the positioner's errors, popups without a grab
+        // destroyed in any order), each popup a frameless popup window
+        // above its parent. Its transcript must be its expected.txt
+        // (recorded against weston's headless backend).
+        name: "lx_wl_popup",
+        cmdline: "qemu_exit wayland=on events=wayland lxrun=/lx/wl_popup_test lxargs=./wl_popup_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'wl_popup_test'",
+            "run: end /lx/wl_popup_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_popup_test as a static-pie, every request and event
+        // traced (`wayland=trace`).
+        name: "lx_wl_popup_pie",
+        cmdline: "qemu_exit wayland=trace lxrun=/lx/wl_popup_test-pie lxargs=./wl_popup_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            " -> xdg_popup#",
+            "run: end /lx/wl_popup_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_input_test (LD step 2): wl_seat, wl_pointer and
+        // wl_keyboard (an XKB keymap as a memfd), xdg_toplevel.close from
+        // the frame's close button, configures from the desktop's
+        // maximize, restore and Snap (the Snap keys), and xdg-decoration
+        // (server-side framed, client-side frameless), driven by the
+        // PS/2 mouse and
+        // keyboard from xtask's screen check (WL_INPUT_SCREEN) on a
+        // headless desktop (`presenter=test`), which also checks the
+        // windows' pixels. Its expected.txt is written from the
+        // protocol's specification (weston's headless backend has no
+        // input devices to record it with; lx_expect.rs INPUT_TESTS).
+        name: "lx_wl_input",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland,window lxrun=/lx/wl_input_test lxargs=./wl_input_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'wl_input_test'",
+            "xtask: screen ok",
+            "run: end /lx/wl_input_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // weston-simple-shm (LD step 2): weston 13's demo client, a real
+        // libwayland program (Ubuntu 24.04's build with its libwayland-
+        // client, libffi and glibc: PREBUILT), drawing its animated frames
+        // through wl_shm on a headless desktop until the screen check
+        // (SIMPLE_SHM_SCREEN) has seen them inside shasha's frame and
+        // presses Esc, which ends it. Its transcript (user/lx/
+        // weston-simple-shm/lx_simple_shm.txt) is real Linux's against
+        // weston's headless backend; the server's summary line says how
+        // many commits and frames it served.
+        name: "lx_simple_shm",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/weston-simple-shm lxargs=./weston-simple-shm lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'simple-shm'",
+            "xtask: screen ok",
+            "'s connection 1 ended (closed): ",
+            "run: end /lx/weston-simple-shm",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/gtk_test (LD step 3), the first GTK program: GTK 3 and
+        // its library closure from Ubuntu 24.04 (LINUX_ROOTS "gtk3") on
+        // glibc, its window drawn on a headless desktop. The screen check
+        // (GTK_SCREEN) finds GTK's drawing, clicks its button and its
+        // title bar's close button; its transcript is real Linux's
+        // (lx-expect, where it clicks itself). HOME as a login gives it.
+        name: "lx_gtk",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test lxargs=./gtk_test%20--input lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/Users/gala",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'gtk_test'",
+            "xtask: screen ok",
+            "run: end /lx/gtk_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/gtk_test as a PIE (LD step 3): the GTK 3 program clicks
+        // its own button and closes its own window, as on Linux (lx-expect).
+        name: "lx_gtk_pie",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test-pie lxargs=./gtk_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/Users/gala",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'gtk_test'",
+            "run: end /lx/gtk_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_input_test as a static-pie, every request and event
+        // traced (`wayland=trace`).
+        name: "lx_wl_input_pie",
+        cmdline: "qemu_exit presenter=test wayland=trace lxrun=/lx/wl_input_test-pie lxargs=./wl_input_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            " -> wl_keyboard#",
+            " -> xdg_toplevel#",
+            "xtask: screen ok",
+            "run: end /lx/wl_input_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // user/lx/thread_test (LX): clone of threads, futex, signals per
         // thread, musl's pthreads; its transcript must be its expected.txt
         // (real Linux's; `lx_expect::check_boot`).
@@ -8018,6 +9303,40 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/fs_test-pie lxargs=./fs_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/fs_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/id_test (LX "Linux identity"): the ids from the token,
+        // /etc/passwd and /etc/group made from the accounts, the ids where
+        // the kernel reports them; its transcript must be its expected.txt
+        // (real Linux's, as an ordinary user; `lx_expect::check_boot`).
+        name: "lx_id",
+        cmdline: "qemu_exit lxrun=/lx/id_test lxargs=./id_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "lx: identity: ", "run: end /lx/id_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/id_test as a static-pie.
+        name: "lx_id_pie",
+        cmdline: "qemu_exit lxrun=/lx/id_test-pie lxargs=./id_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/id_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/run_test (ROADMAP LD): `/run`, a tmpfs mounted in the
+        // Linux view (its own device, `..` out of it, `/` listing it,
+        // getcwd through it, EXDEV across it); its transcript must be its
+        // expected.txt (real Linux's; `lx_expect::check_boot`).
+        name: "lx_run",
+        cmdline: "qemu_exit lxrun=/lx/run_test lxargs=./run_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/run_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/run_test as a static-pie.
+        name: "lx_run_pie",
+        cmdline: "qemu_exit lxrun=/lx/run_test-pie lxargs=./run_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/run_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         // A static Linux busybox (ROADMAP LX milestone 2): its shell runs
@@ -8138,6 +9457,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("gala_cli", "gala_cli_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
+    ("runas_declined", "runas_test"),
     ("handover_disk", "persist_test"),
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
@@ -8210,6 +9530,10 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
     ("winhttp_test", "schannel_test"),
+    ("winhttp_cb_test", "winhttp_cb_test"),
+    ("winhttp_cb_test", "schannel_test"),
+    ("wow64_winhttp_cb_test", "wow64_winhttp_cb_test"),
+    ("wow64_winhttp_cb_test", "schannel_test"),
     ("wininet_test", "wininet_test"),
     ("wininet_test", "schannel_test"),
     ("curl", "curl"),
@@ -8227,6 +9551,17 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_dyn", "glibc"),
     ("lx_dyn_pie", "lx_dyn_pie"),
     ("lx_dyn_pie", "glibc"),
+    ("lx_simple_shm", "weston"),
+    ("lx_simple_shm", "wayland_client"),
+    ("lx_simple_shm", "glibc"),
+    ("lx_gtk", "lx_gtk"),
+    ("lx_gtk", "gtk3"),
+    ("lx_gtk", "wayland_client"),
+    ("lx_gtk", "glibc"),
+    ("lx_gtk_pie", "lx_gtk_pie"),
+    ("lx_gtk_pie", "gtk3"),
+    ("lx_gtk_pie", "wayland_client"),
+    ("lx_gtk_pie", "glibc"),
 ];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
@@ -8761,6 +10096,14 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_seh_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -8768,6 +10111,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_sock_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_runas_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
@@ -8783,6 +10127,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("session_test", "child processes; run as SYSTEM (a boot option)"),
     ("presenter_test", "a child process; run as SYSTEM (a boot option)"),
     ("winsta_test", "child processes (one NT process per Linux process)"),
+    ("clipboard_test", "a child process (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),
@@ -9816,6 +11161,7 @@ fn run_vm_once(
                 NetClient::Nginx => nginx_client(port),
                 NetClient::Tls => tls_client(port),
                 NetClient::Contains(parts) => contains_client(port, parts),
+                NetClient::Outbound => Ok(()),
                 NetClient::Ssh => ssh_client(port, false),
                 NetClient::SshPassword => ssh_client(port, true),
                 NetClient::SshServer => ssh_server_client(port),
@@ -10159,7 +11505,239 @@ enum PixelCheck {
     /// Some pixel in the rectangle (x, y, w, h) is close to this colour
     /// (anti-aliased text, scaled images).
     AnyIn(u32, u32, u32, u32, u32),
+    /// The rectangle (x, y, w, h) holds at least this many distinct
+    /// colours (a program's drawing, whatever its frame shows).
+    Varied(u32, u32, u32, u32, usize),
 }
+
+/// user/lx/wl_input_test's windows on a headless desktop (1280 x 800,
+/// the pointer starting in its middle): the first, 200 x 150 with
+/// shasha's frame (server-side decoration), is the first Wayland window
+/// and so at (64, 48) (kernel/src/wayland: cascaded from there), its
+/// client area from (65, 81); the second, 100 x 80 and frameless
+/// (client-side decoration), at (96, 80). Between them the Snap keys
+/// maximize, restore, snap left and restore the first, "m" and "s" open
+/// its menu and submenu (popups that grab, frameless above it) and a
+/// click on the desktop dismisses them (the work area is
+/// 1280 x 752 above the taskbar; the frame a 1-pixel outline and a
+/// 32-row caption). Each step waits for the line
+/// the program prints once it has the input before (its transcript is
+/// the check of the events; these steps drive it and check the pixels).
+const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "wl_input_test: mapped",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(80, 50, 40, 4, 0xeef2f7), // the active caption above it
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699), // the buffer's top half
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800), // and its bottom half
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // From (640, 400) to surface point (100, 75) at (165, 156),
+            // and a left click there.
+            input: &[
+                "mouse_move -240 -122",
+                "mouse_move -235 -122",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            // The wheel one notch away from the user.
+            after: "button 272 released",
+            input: &["mouse_move 0 0 1"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "axis frame",
+            input: &["sendkey a", "sendkey shift-a", "sendkey left"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // Off the window to the right: the pointer leaves.
+            after: "key 105 released",
+            input: &["mouse_move 200 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // Win+Up: maximized by the desktop (a configure of the work
+            // area's client size), at (0, 0), client area from (1, 33),
+            // 1278 x 718.
+            after: "pointer leave",
+            input: &["sendkey meta_l-up"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: maximized",
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(300, 2, 40, 4, 0xeef2f7), // the active caption at the top
+                PixelCheck::At(1 + 600, 33 + 400, 0x2e8b57),
+                PixelCheck::At(1 + 1277, 33 + 717, 0x2e8b57), // its last pixel
+            ],
+        },
+        ScreenStep {
+            // Win+Down: restored where it was, its first buffer again.
+            after: "",
+            input: &["sendkey meta_l-down"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: restored",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep {
+            // Win+Left: the left half of the work area, (0, 0, 640, 752),
+            // its client area 638 x 718 from (1, 33).
+            after: "",
+            input: &["sendkey meta_l-left"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: snapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(1 + 300, 33 + 400, 0x8b4513),
+                PixelCheck::At(1 + 637, 33 + 717, 0x8b4513), // its last pixel
+            ],
+        },
+        ScreenStep {
+            // Win+Down: back where it was before Snap.
+            after: "",
+            input: &["sendkey meta_l-down"],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "wl_input_test: unsnapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(65 + 100, 81 + 40, 0x336699),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep {
+            // "m": the constraint popups, then a menu that grabs, at
+            // (20, 30) in the window: (85, 111), 120 x 80.
+            after: "wl_input_test: unsnapped",
+            input: &["sendkey m"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // "s" (the menu has the keyboard): a submenu at the menu's
+            // right, (205, 121), 100 x 60.
+            after: "wl_input_test: menu mapped",
+            input: &["sendkey s"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // Both frameless above the window, which shows below them;
+            // then a click where the pointer is, (365, 156), on the
+            // desktop outside every window: the popups are dismissed.
+            after: "wl_input_test: submenu mapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(100, 150, 0x228b22),
+                PixelCheck::At(250, 150, 0xdc143c),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep { after: "", input: &["mouse_button 1", "mouse_button 0"], pixels: &[] },
+        ScreenStep {
+            // Gone: the window's own pixels there again.
+            after: "wl_input_test: popups dismissed",
+            input: &[],
+            pixels: &[PixelCheck::At(100, 150, 0x336699), PixelCheck::At(250, 150, 0x336699)],
+        },
+        ScreenStep {
+            // Up, then left along the caption (never over the client
+            // area) to the close button at (240, 60), and a click.
+            after: "wl_input_test: popups dismissed",
+            input: &["mouse_move 0 -96", "mouse_move -125 0", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // The frameless window: its own pixels where a frame's caption
+            // and outline would be.
+            after: "wl_input_test: frameless mapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(96 + 50, 80 + 1, 0x8a2be2),
+                PixelCheck::At(96, 80 + 40, 0x8a2be2),
+                PixelCheck::At(96 + 50, 80 + 70, 0x8a2be2),
+            ],
+        },
+        ScreenStep { after: "", input: &["sendkey q"], pixels: &[] },
+    ],
+};
+
+/// weston-simple-shm's window: 250 x 250, the first Wayland window and
+/// so at (64, 48), frameless (it negotiates no decoration: it decorates
+/// itself, which it does not). It paints a moving pattern inside a
+/// 20-pixel margin: many colours there, each frame different; where a
+/// frame's caption would be, its own pixels. Then Esc ends it.
+const SIMPLE_SHM_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "desktop: shown window 'simple-shm'",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[PixelCheck::Varied(64 + 20, 48 + 20, 210, 210, 64)],
+        },
+        ScreenStep { after: "", input: &["sendkey esc"], pixels: &[] },
+    ],
+};
+
+/// gtk_test's window (GTK 3, Adwaita, on a headless desktop): frameless
+/// (GTK 3 decorates itself: it negotiates no decoration), the first
+/// Wayland window and so at (64, 48), its window geometry 320 x 237
+/// (GTK's shadow outside it not shown). GTK's own header bar (0xdfdbd8)
+/// where shasha's caption would be, the title and the close button's
+/// cross (0x2e3436) at (366, 66), the label's text on the window's
+/// background (0xf6f5f4), the button "Click me" centred at (223, 243).
+/// The pointer starts in the screen's middle (640, 400): a click on the
+/// button, then (after its line) one on the close button, which ends the
+/// program (its transcript shows both).
+const GTK_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "stdout: window drawn",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(70, 60, 0xdfdbd8),               // GTK's header bar
+                PixelCheck::AnyIn(190, 58, 70, 16, 0x2e3436),   // "gtk_test"
+                PixelCheck::AnyIn(360, 58, 14, 14, 0x2e3436),   // the close button
+                PixelCheck::At(200, 120, 0xf6f5f4),             // the background
+                PixelCheck::AnyIn(140, 150, 170, 20, 0x2e3436), // the label
+                PixelCheck::Varied(190, 235, 70, 16, 16),       // "Click me"
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -255 -157",
+                "mouse_move -162 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "stdout: button clicked: Click me",
+            input: &["mouse_move 143 -177", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+    ],
+};
 
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
 /// 1-pixel outline and a 32-pixel caption (Windows 11's metrics), so its
@@ -10416,6 +11994,10 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         },
     ),
     ("gui_test", GUI_TEST_SCREEN),
+    ("lx_wl_input", WL_INPUT_SCREEN),
+    ("lx_simple_shm", SIMPLE_SHM_SCREEN),
+    ("lx_gtk", GTK_SCREEN),
+    ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows
     // the scanout, so the pixels got there by TRANSFER_TO_HOST_2D and
@@ -11086,6 +12668,20 @@ fn dump_and_check(
                     .any(|yy| (x..x + rw).any(|xx| at(xx, yy).is_some_and(|c| close(c, want))));
                 if !found {
                     return Err(format!("no pixel near {want:06x} in ({x}, {y}, {rw}, {rh})"));
+                }
+            }
+            PixelCheck::Varied(x, y, rw, rh, want) => {
+                let mut seen = std::collections::HashSet::new();
+                for yy in y..y + rh {
+                    for xx in x..x + rw {
+                        seen.extend(at(xx, yy));
+                    }
+                }
+                if seen.len() < want {
+                    return Err(format!(
+                        "{} distinct colours in ({x}, {y}, {rw}, {rh}), not at least {want}",
+                        seen.len()
+                    ));
                 }
             }
         }
@@ -12729,6 +14325,63 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// The guest files a boot's `dump=` printed (`dump: begin C:/dir/name (N
+/// bytes)`, its lines, `dump: end C:/dir/name`), written below `dir` at
+/// their guest paths (`dir/dir/name`, without the drive); the paths
+/// written. A file cut off by the end of the log is kept as far as it
+/// got.
+fn save_dumps(serial: &str, dir: &Path) -> Vec<PathBuf> {
+    let mut saved = Vec::new();
+    let mut current: Option<(PathBuf, String)> = None;
+    let flush = |file: Option<(PathBuf, String)>, saved: &mut Vec<PathBuf>| {
+        if let Some((path, text)) = file {
+            let written = path.parent().map_or(Ok(()), fs::create_dir_all);
+            if written.and_then(|()| fs::write(&path, text)).is_ok() {
+                saved.push(path);
+            }
+        }
+    };
+    for line in serial.lines() {
+        let Some(rest) = line.split_once("dump: ").map(|(_, r)| r) else { continue };
+        if let Some(begin) = rest.strip_prefix("begin ") {
+            flush(current.take(), &mut saved);
+            let guest = begin.rsplit_once(" (").map_or(begin, |(p, _)| p);
+            // The guest path's parts, without the drive or anything that
+            // would leave `dir`.
+            let mut path = dir.to_path_buf();
+            for part in guest.split(['/', '\\']) {
+                if part.is_empty() || part.ends_with(':') || part == "." || part == ".." {
+                    continue;
+                }
+                path.push(part.replace(':', "_"));
+            }
+            current = Some((path, String::new()));
+        } else if rest.starts_with("end ") {
+            flush(current.take(), &mut saved);
+        } else if let Some((_, text)) = current.as_mut() {
+            text.push_str(rest);
+            text.push('\n');
+        }
+    }
+    flush(current.take(), &mut saved);
+    saved
+}
+
+#[test]
+fn dumps_become_files() {
+    let dir = env::temp_dir().join(format!("xtask-dumps-{}", std::process::id()));
+    let serial = "[info ] dump: C:/gala/odtlog: a directory of 1 entries\n\
+                  [info ] dump: begin C:/gala/odtlog/A-1.log (12 bytes)\n\
+                  [info ] dump: one\n[info ] dump: two\n\
+                  [info ] dump: end C:/gala/odtlog/A-1.log\n\
+                  [info ] dump: begin C:/../x.log (1 bytes)\n[info ] dump: cut";
+    let saved = save_dumps(serial, &dir);
+    assert_eq!(saved, [dir.join("gala/odtlog/A-1.log"), dir.join("x.log")]);
+    assert_eq!(fs::read_to_string(&saved[0]).unwrap(), "one\ntwo\n");
+    assert_eq!(fs::read_to_string(&saved[1]).unwrap(), "cut\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Judges one scenario from the exit status and its part of the log.
 /// Judges a run; on failure the serial log is kept in
 /// `target/failed/<scenario>.log` (rare failures need it), with its
@@ -12764,8 +14417,16 @@ fn judge(
         };
         let summary = triage::triage(serial, events.as_deref(), &facts);
         let kept = format!("{serial}\n{symbols}\n{summary}");
+        // The guest files the scenario's `dump=` printed, as files again.
+        let dumps = save_dumps(serial, &dir.join(format!("{name}.dump")));
+        let dumps = match dumps.len() {
+            0 => String::new(),
+            n => format!("; {n} guest files in {}", dir.join(format!("{name}.dump")).display()),
+        };
         match fs::create_dir_all(&dir).and_then(|()| fs::write(&path, kept)) {
-            Ok(()) => format!("{e} (serial log: {}; it ends with a triage)", path.display()),
+            Ok(()) => {
+                format!("{e} (serial log: {}; it ends with a triage{dumps})", path.display())
+            }
             Err(_) => e,
         }
     })
@@ -14059,6 +15720,22 @@ mod constants {
             "net/ names the NT layer; use crate::runtime:\n{}",
             found.join("\n")
         );
+    }
+
+    /// The AF_UNIX sockets are core objects (ARCHITECTURE "AF_UNIX
+    /// sockets", seam 5): no personality's types in them, so NT and Linux
+    /// views can share one socket.
+    #[test]
+    fn unix_sockets_do_not_depend_on_a_personality() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/src/unix.rs");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let found: Vec<String> = text
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains("crate::nt") || l.contains("crate::lx"))
+            .map(|(i, l)| format!("{}:{}: {}", path.display(), i + 1, l.trim()))
+            .collect();
+        assert!(found.is_empty(), "unix.rs names a personality:\n{}", found.join("\n"));
     }
 
     #[test]

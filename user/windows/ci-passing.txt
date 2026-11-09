@@ -10,6 +10,7 @@ args_test
 async_test
 bcrypt_test
 bench
+clipboard_test
 clock_test
 clockcal_test
 cmd_test
@@ -58,9 +59,11 @@ loader_test
 lock_test
 lsa_test
 manifest_test
+msi_test
 netapi32_test
 nginx
 object_test
+office_api_test
 oleaut32_test
 pdh_test
 peb_test
@@ -72,6 +75,7 @@ prng_test
 quota_test
 replay_test
 rpcrt4_test
+runas_test
 safepoint_test
 section_test
 session_test
@@ -94,6 +98,7 @@ system_test
 thread_test
 threadinfo_test
 timer_test
+ucrt_test
 udp_test
 vm_test
 vmcycle_test
@@ -108,6 +113,10 @@ wow64_crt_test
 wow64_fs_test
 wow64_gui_test
 wow64_k32_test
+wow64_msi_test
+wow64_office_api_test
+wow64_runas_test
 wow64_seh_test
 wow64_sock_test
 wow64_test
+wow64_ucrt_test

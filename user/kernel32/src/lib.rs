@@ -1095,6 +1095,11 @@ pub extern "system" fn CreateFileW(
     if !template.is_null() {
         unsupported(b"kernel32.dll!CreateFileW(template)", 0);
     }
+    // SAFETY: the caller's NUL-terminated path (its first unit).
+    if !path.is_null() && unsafe { *path } == 0 {
+        // An empty name: no such path (Windows; Wine's test_CreateFile2).
+        return fail_with(3, INVALID_HANDLE_VALUE); // ERROR_PATH_NOT_FOUND
+    }
     let nt_disposition = match disposition {
         1 => 2, // CREATE_NEW -> FILE_CREATE
         2 => 5, // CREATE_ALWAYS -> FILE_OVERWRITE_IF
@@ -1943,6 +1948,113 @@ pub extern "system" fn FindFirstStreamW(
 #[unsafe(no_mangle)]
 pub extern "system" fn FindNextStreamW(_find: Handle, _data: *mut u8) -> Bool {
     fail_with(38, FALSE)
+}
+
+/// FindFirstFileNameW(name, 0, &length, linkName): the file's first hard
+/// link name, from the volume root without the drive (`\dir\file`).
+/// gala's file system has one name per file, so this is the file's own
+/// path; `length` (in characters with the NUL) gets the size needed,
+/// with ERROR_MORE_DATA when the buffer is too small.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindFirstFileNameW(
+    name: *const u16,
+    flags: u32,
+    length: *mut u32,
+    link: *mut u16,
+) -> Handle {
+    if name.is_null() || length.is_null() || flags != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+    }
+    let h = CreateFileW(name, 0, 7, core::ptr::null_mut(), 3, 0x0200_0000, core::ptr::null_mut());
+    if h == INVALID_HANDLE_VALUE {
+        return INVALID_HANDLE_VALUE;
+    }
+    let mut path = [0u16; 1100];
+    let n = files::GetFinalPathNameByHandleW(h, path.as_mut_ptr(), path.len() as u32, 4);
+    CloseHandle(h);
+    if n == 0 || n as usize >= path.len() {
+        return INVALID_HANDLE_VALUE;
+    }
+    let n = n as usize;
+    // SAFETY: the caller's in/out length.
+    let room = unsafe { *length } as usize;
+    // SAFETY: as above.
+    unsafe { *length = n as u32 + 1 };
+    if link.is_null() || room <= n {
+        return fail_with(234, INVALID_HANDLE_VALUE); // ERROR_MORE_DATA
+    }
+    // SAFETY: the caller's buffer of `room` > n characters.
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), link, n);
+        *link.add(n) = 0;
+    }
+    // A find handle FindClose takes (no directory behind it).
+    let state = VirtualAlloc(core::ptr::null_mut(), 0x1000, 0x3000, 4) as *mut FindState;
+    if state.is_null() {
+        return INVALID_HANDLE_VALUE;
+    }
+    // SAFETY: a fresh allocation.
+    unsafe { state.write(FindState { directory: core::ptr::null_mut() }) };
+    state.cast()
+}
+
+/// FindNextFileNameW: the only name was the first (ERROR_HANDLE_EOF).
+#[unsafe(no_mangle)]
+pub extern "system" fn FindNextFileNameW(
+    _find: Handle,
+    _length: *mut u32,
+    _link: *mut u16,
+) -> Bool {
+    fail_with(38, FALSE)
+}
+
+/// CREATEFILE2_EXTENDED_PARAMETERS (fileapi.h).
+#[repr(C)]
+pub struct CreateFile2Parameters {
+    size: u32,
+    attributes: u32,
+    flags: u32,
+    security_qos_flags: u32,
+    security: *mut c_void,
+    template: Handle,
+}
+
+/// CreateFile2(name, access, share, disposition, parameters): CreateFileW
+/// with the attributes, flags and QoS flags combined, as documented;
+/// parameters may be NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateFile2(
+    name: *const u16,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    parameters: *const CreateFile2Parameters,
+) -> Handle {
+    if parameters.is_null() {
+        return CreateFileW(
+            name,
+            access,
+            share,
+            core::ptr::null_mut(),
+            disposition,
+            0,
+            core::ptr::null_mut(),
+        );
+    }
+    // SAFETY: the caller's structure (its size checked first).
+    let p = unsafe { &*parameters };
+    if p.size as usize != size_of::<CreateFile2Parameters>() {
+        return fail_with(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+    }
+    CreateFileW(
+        name,
+        access,
+        share,
+        p.security,
+        disposition,
+        p.attributes | p.flags | p.security_qos_flags,
+        p.template,
+    )
 }
 
 /// ReOpenFile: a new handle to the file `h` names (its own file

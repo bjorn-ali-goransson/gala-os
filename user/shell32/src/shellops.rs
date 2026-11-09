@@ -5,11 +5,17 @@
 //! Shell_NotifyIconW, SHGetIconOverlayIndexW). As documented; see
 //! user/shell32_test.
 //!
-//! gala has no file associations or shell verbs: ShellExecute runs
-//! programs (.exe and .com, found as CreateProcess and the search path
-//! find them) and answers SE_ERR_NOASSOC for documents and URLs
-//! (recorded). user32 is reached at run time (DragAcceptFiles), so
-//! loading shell32 does not load the window manager.
+//! gala has no file associations: ShellExecute runs programs (.exe and
+//! .com, found as CreateProcess and the search path find them) for the
+//! verbs "open" (or none) and "runas", and answers SE_ERR_NOASSOC for
+//! documents, URLs and other verbs (recorded). "runas" (elevation, as UAC
+//! does it; docs/SECURITY.md "Elevation") starts the program with the
+//! caller's own token when that token is already elevated, which is what
+//! Windows does for an elevated administrator; a caller that is not
+//! elevated would get UAC's prompt, which gala does not have: the request
+//! is declined (recorded), as when the user cancels the prompt. user32
+//! and advapi32 are reached at run time (DragAcceptFiles, the token
+//! query), so loading shell32 loads neither.
 
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -158,7 +164,9 @@ struct ProcessInformation {
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_NO_ASSOCIATION: u32 = 1155;
+const ERROR_CANCELLED: u32 = 1223;
 const SE_ERR_FNF: usize = 2;
+const SE_ERR_ACCESSDENIED: usize = 5;
 const SE_ERR_NOASSOC: usize = 31;
 const STARTF_USESHOWWINDOW: u32 = 1;
 
@@ -180,7 +188,16 @@ fn execute(
         return Err((SE_ERR_FNF, ERROR_FILE_NOT_FOUND));
     }
     let verb = chars(verb);
-    if !verb.is_empty() && !ascii_eq(verb, b"open") {
+    if ascii_eq(verb, b"runas") {
+        // Elevation: an elevated caller's token is already the full one,
+        // so the program starts with it (CreateProcess below, no prompt);
+        // else UAC would ask (consent or credentials), and gala has no
+        // prompt: declined, as a cancelled prompt answers.
+        if !caller_elevated() {
+            record(b"shell32.dll!ShellExecute(runas: elevation prompt)", 0);
+            return Err((SE_ERR_ACCESSDENIED, ERROR_CANCELLED));
+        }
+    } else if !verb.is_empty() && !ascii_eq(verb, b"open") {
         record(b"shell32.dll!ShellExecute(verb)", verb.len() as u64);
         return Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION));
     }
@@ -286,9 +303,47 @@ fn execute(
     Ok(info.process)
 }
 
+/// The calling process's token is elevated (TokenElevation, through
+/// advapi32 loaded at run time); false when that cannot be asked.
+fn caller_elevated() -> bool {
+    type OpenProcessToken = unsafe extern "system" fn(usize, u32, *mut usize) -> i32;
+    type GetTokenInformation =
+        unsafe extern "system" fn(usize, u32, *mut c_void, u32, *mut u32) -> i32;
+    const TOKEN_QUERY: u32 = 8;
+    const TOKEN_ELEVATION: u32 = 20;
+    // "advapi32.dll".
+    const ADVAPI32: [u16; 13] = [97, 100, 118, 97, 112, 105, 51, 50, 46, 100, 108, 108, 0];
+    // SAFETY: NUL-terminated names; the functions' documented signatures;
+    // a token handle of ours, closed; a 4-byte TOKEN_ELEVATION.
+    unsafe {
+        let module = LoadLibraryW(ADVAPI32.as_ptr());
+        if module == 0 {
+            return false;
+        }
+        let open = GetProcAddress(module, c"OpenProcessToken".as_ptr().cast());
+        let query = GetProcAddress(module, c"GetTokenInformation".as_ptr().cast());
+        if open.is_null() || query.is_null() {
+            return false;
+        }
+        let open: OpenProcessToken = core::mem::transmute(open);
+        let query: GetTokenInformation = core::mem::transmute(query);
+        let mut token = 0usize;
+        // GetCurrentProcess's pseudo handle.
+        if open(usize::MAX, TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let (mut elevation, mut n) = (0u32, 0u32);
+        let ok = query(token, TOKEN_ELEVATION, (&raw mut elevation).cast(), 4, &mut n);
+        CloseHandle(token);
+        ok != 0 && elevation != 0
+    }
+}
+
 /// ShellExecuteW: runs a program; a value over 32 on success, else
-/// SE_ERR_FNF (2) for a file that is not there and SE_ERR_NOASSOC (31)
-/// for a document or URL (gala has no associations; recorded).
+/// SE_ERR_FNF (2) for a file that is not there, SE_ERR_NOASSOC (31)
+/// for a document or URL (gala has no associations; recorded), and
+/// SE_ERR_ACCESSDENIED (5) with ERROR_CANCELLED for "runas" by a caller
+/// that is not elevated (UAC's prompt, which gala lacks, declined).
 #[unsafe(no_mangle)]
 pub extern "system" fn ShellExecuteW(
     _window: usize,

@@ -1,0 +1,27 @@
+PR_GET_NAME at start = 0
+the start name is the executable's, cut to 15 bytes = yes
+PR_SET_NAME("gtk-main") = 0
+PR_GET_NAME = "gtk-main"
+PR_SET_NAME(20 bytes) = 0
+PR_GET_NAME = "abcdefghijklmno"
+PR_SET_NAME("") = 0
+PR_GET_NAME = ""
+PR_SET_NAME(bad pointer) = -14 (EFAULT)
+PR_GET_NAME(bad pointer) = -14 (EFAULT)
+pthread_create = 0
+pthread_join = 0
+thread: PR_SET_NAME("worker") = 0
+thread: PR_GET_NAME = "worker"
+main: PR_GET_NAME after it = "main"
+PR_CAPBSET_READ(CAP_CHOWN) = 1
+PR_CAPBSET_READ(63) = -22 (EINVAL)
+PR_CAPBSET_READ(-1) = -22 (EINVAL)
+prctl(12345) = -22 (EINVAL)
+getresuid = 0
+real, effective, saved uid are getuid's = yes
+getresgid = 0
+real, effective, saved gid are getgid's = yes
+getresuid(bad pointer) = -14 (EFAULT)
+getresgid(bad pointer) = -14 (EFAULT)
+prctl_test: ok
+-- exit status 0

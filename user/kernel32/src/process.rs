@@ -24,12 +24,16 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// mode instead of the caller's (gala's processes always do: the error
 /// mode is not inherited yet). NSIS uninstallers pass it.
 const CREATE_DEFAULT_ERROR_MODE: u32 = 0x0400_0000;
+/// NORMAL_PRIORITY_CLASS: the class a new process gets anyway (ODT's
+/// setup.exe passes it when it starts its copy).
+const NORMAL_PRIORITY_CLASS: u32 = 0x20;
 /// Flags that change nothing on gala (one console, no windows).
 const IGNORED_FLAGS: u32 = DETACHED_PROCESS
     | CREATE_NEW_CONSOLE
     | CREATE_NEW_PROCESS_GROUP
     | CREATE_NO_WINDOW
-    | CREATE_DEFAULT_ERROR_MODE;
+    | CREATE_DEFAULT_ERROR_MODE
+    | NORMAL_PRIORITY_CLASS;
 const STARTF_USESTDHANDLES: u32 = 0x100;
 
 /// STARTUPINFOW (and STARTUPINFOA, the same layout) followed by
@@ -1442,4 +1446,23 @@ pub extern "system" fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle
 #[unsafe(no_mangle)]
 pub extern "system" fn SetProcessDEPPolicy(_flags: u32) -> Bool {
     fail_with(ERROR_NOT_SUPPORTED, FALSE)
+}
+
+/// GetThreadIOPendingFlag(thread, &pending): whether the thread has I/O
+/// requests outstanding. gala's file I/O completes inside its call; the
+/// requests that stay pending (sockets, pipes, directory watches) are not
+/// counted per thread yet, so the answer is FALSE (a stopgap, recorded:
+/// ROADMAP OF).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadIOPendingFlag(thread: Handle, pending: *mut Bool) -> Bool {
+    if pending.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if GetThreadId(thread) == 0 {
+        return FALSE;
+    }
+    unsupported(b"kernel32.dll!GetThreadIOPendingFlag(pending socket, pipe or watch I/O)", 0);
+    // SAFETY: the caller's BOOL.
+    unsafe { *pending = FALSE };
+    TRUE
 }

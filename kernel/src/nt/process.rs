@@ -147,6 +147,16 @@ impl Process {
             _ => super::token::MEDIUM_LEVEL,
         }
     }
+
+    /// Its primary token is elevated (TokenElevation: an administrator's
+    /// full token, SYSTEM's).
+    pub fn elevated(&self) -> bool {
+        let token = self.token.lock().clone();
+        match &token.body {
+            ObjectBody::Token(t) => t.data.lock().elevated(),
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Debug for Process {
@@ -986,7 +996,6 @@ fn spawn_inner(spec: Spawn<'_>) -> Result<(KArc<Process>, ObjectRef), LoadError>
             &process,
             regs,
             start.ip(),
-            None,
             (stack_top, stack_limit, stack_bottom),
             suspended,
         )
@@ -1016,16 +1025,20 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
     crate::events::note_process(id, command_line);
     let (machine, wow64) =
         if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { ("x64", "") };
+    // An elevated primary token (an administrator's full token: SYSTEM's,
+    // or what ShellExecute's "runas" starts) is named on the line.
+    let elevated = process.elevated();
     info!(
         "process {} (pid {id}, session {session}): starting at {rip:#x}, personality \
-         {personality}{wow64}",
-        process.name
+         {personality}{wow64}{}",
+        process.name,
+        if elevated { ", elevated token" } else { "" }
     );
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"elevated":{elevated},"image_base":{},"entry":{rip},"cmdline":{}"#,
             crate::events::Str(process.name),
             process.image.0,
             crate::events::Str(command_line)
@@ -1176,6 +1189,10 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     *process.exit_time.lock() = platform::system_time();
     // A line the program left open ends here, before the exit lines.
     crate::console::end_program_line(process.id);
+    // Its control-handler thread takes no more Ctrl+C.
+    if let Some(session) = &process.console {
+        session.forget_taker(process.id);
+    }
     // A Linux process's last output lines and how it ended, before the
     // core's line (ROADMAP LX).
     if process.personality == Personality::Linux {
@@ -1211,6 +1228,7 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     );
     super::desktop::process_ended(&process.desk.shell, process.id);
     process.desk.windows.process_ended(process.id as u32);
+    super::clipboard::process_ended(process);
     process.desk.hooks.process_ended(process.id as u32);
     super::conhost::process_ended(process.id);
     super::charge::ended(process);

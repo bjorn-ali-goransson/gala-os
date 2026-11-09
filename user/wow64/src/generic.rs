@@ -438,11 +438,26 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7fa3, &[U, H]),              // GalaUserObjectClose
     (0x7fa4, &[H, U, U, U, U]),     // GalaUserObjectInformation
     (0x7fa5, &[H, U, U, U]),        // GalaUserObjectEnum
-    (0x7f4d, &[U, U]),              // GalaRandom
-    (0x7f90, &[H, H]),              // NtCompareObjects
-    (0x7f91, &[H]),                 // NtSuspendProcess
-    (0x7f92, &[H]),                 // NtResumeProcess
-    (0x7f93, &[Oh, U, Oa, Cid]),    // NtOpenThread
+    // The clipboard: hwnds are 64-bit values.
+    (0x7fc0, &[U, Hi]),            // GalaClipboardOpen
+    (0x7fc1, &[U]),                // GalaClipboardClose
+    (0x7fc2, &[]),                 // GalaClipboardEmpty
+    (0x7fc3, &[U, U, U, U, U]),    // GalaClipboardSet
+    (0x7fc4, &[U, U, U, U]),       // GalaClipboardGet
+    (0x7fc5, &[U]),                // GalaClipboardInfo
+    (0x7fc6, &[U, U, U]),          // GalaClipboardFormats
+    (0x7fc7, &[U, Hi, U]),         // GalaClipboardListener
+    (0x7fd0, &[U, Oh]),            // GalaScmOpen
+    (0x7fd1, &[H, U, U, U, Oh]),   // GalaServiceOpen
+    (0x7fd2, &[H, U, U, U, Oh]),   // GalaServiceCreate
+    (0x7fd3, &[H, U, U, U, U]),    // GalaServiceQuery
+    (0x7fd4, &[H, U, U, U, U, U]), // GalaServiceEnum
+    (0x7fd5, &[H, U, U, U]),       // GalaServiceControl
+    (0x7f4d, &[U, U]),             // GalaRandom
+    (0x7f90, &[H, H]),             // NtCompareObjects
+    (0x7f91, &[H]),                // NtSuspendProcess
+    (0x7f92, &[H]),                // NtResumeProcess
+    (0x7f93, &[Oh, U, Oa, Cid]),   // NtOpenThread
 ];
 
 /// The kinds of service `number`'s arguments, if it converts generically.

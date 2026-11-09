@@ -228,7 +228,11 @@ struct PolicyStatus {
     extra: *mut c_void,
 }
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CertCreateCertificateChainEngine(config: *const EngineConfig, engine: *mut Handle) -> Bool;
     fn CertFreeCertificateChainEngine(engine: Handle);
@@ -376,7 +380,9 @@ fn context(c: &mut Checks, der: &[u8]) -> Result<*const CertContext, u32> {
 fn para() -> ChainPara {
     let none = UsageMatch { kind: 0, usage: EnhKeyUsage { count: 0, ids: null() } };
     ChainPara {
-        size: 32, // CERT_CHAIN_PARA without its later fields
+        // CERT_CHAIN_PARA without its later fields (16 bytes on x86, 32 on
+        // x64).
+        size: core::mem::offset_of!(ChainPara, issuance) as u32,
         usage: none,
         issuance: UsageMatch { kind: 0, usage: EnhKeyUsage { count: 0, ids: null() } },
         url_timeout: 0,
@@ -417,10 +423,10 @@ fn chain(
     c.ok(ok != 0 && !out.is_null(), unsafe { GetLastError() }.into())?;
     // SAFETY: the chain crypt32 gave.
     unsafe {
-        c.eq((*out).size.into(), 72)?;
+        c.eq((*out).size.into(), super::by_width(56, 72))?;
         c.eq((*out).count.into(), 1)?;
         let simple = *(*out).chains;
-        c.eq((*simple).size.into(), 40)?;
+        c.eq((*simple).size.into(), super::by_width(32, 40))?;
         // The simple chain's errors are the context's.
         c.eq((*simple).status.error.into(), (*out).status.error.into())?;
     }
@@ -504,7 +510,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     let leaf = context(c, LEAF)?;
     let none: Handle = null_mut();
 
-    super::out(b"cert_test: chain: engines\r\n");
+    super::say(b"chain: engines\r\n");
     // 1. The engine: hExclusiveRoot trusts the test root.
     let mut config = EngineConfig {
         size: 12,
@@ -526,15 +532,16 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         c.eq(CertCreateCertificateChainEngine(&config, &mut engine) as u64, 0)?;
         c.eq(GetLastError().into(), E_INVALIDARG)?;
-        config.size = 80; // curl's: without dwExclusiveFlags
+        // curl's: without dwExclusiveFlags (48 bytes on x86, 80 on x64).
+        config.size = core::mem::offset_of!(EngineConfig, exclusive_flags) as u32;
         c.ok(CertCreateCertificateChainEngine(&config, &mut engine) != 0, GetLastError().into())?;
         CertFreeCertificateChainEngine(engine);
         config.size = core::mem::size_of::<EngineConfig>() as u32;
-        c.eq(config.size.into(), 88)?;
+        c.eq(config.size.into(), super::by_width(52, 88))?;
         c.ok(CertCreateCertificateChainEngine(&config, &mut engine) != 0, GetLastError().into())?;
     }
 
-    super::out(b"cert_test: chain: full chain\r\n");
+    super::say(b"chain: full chain\r\n");
     // 2. The full chain.
     let p = para();
     let full = chain(c, engine, leaf, Some(T2030), inter_store, &p, 0)?;
@@ -544,7 +551,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     c.eq(els.len() as u64, 3)?;
     for (i, der) in [LEAF, INTER, ROOT].iter().enumerate() {
         let e = element(full, i);
-        c.eq(e.size.into(), 56)?;
+        c.eq(e.size.into(), super::by_width(32, 56))?;
         c.ok(is_cert(e, der), i as u64)?;
         c.eq(e.status.error.into(), 0)?;
     }
@@ -601,7 +608,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
         CertFreeCertificateContext(root);
     }
 
-    super::out(b"cert_test: chain: partial chain\r\n");
+    super::say(b"chain: partial chain\r\n");
     // 3. No intermediate: a partial chain.
     let partial = chain(c, engine, leaf, Some(T2030), none, &p, 0)?;
     // SAFETY: the chain crypt32 gave.
@@ -611,7 +618,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     c.eq(r.0, CERT_E_CHAINING)?;
     free(partial);
 
-    super::out(b"cert_test: chain: untrusted root\r\n");
+    super::say(b"chain: untrusted root\r\n");
     // 4. The default engine: the test root is not trusted there.
     let both = store_of(c, &[INTER, ROOT])?;
     let untrusted = chain(c, none, leaf, Some(T2030), both, &p, 0)?;
@@ -637,7 +644,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     c.ok(r == PASS, r.0)?;
     free(untrusted);
 
-    super::out(b"cert_test: chain: time\r\n");
+    super::say(b"chain: time\r\n");
     // 5. Time.
     for t in [T2050, T2020] {
         let late = chain(c, engine, leaf, Some(t), inter_store, &p, 0)?;
@@ -658,7 +665,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
         free(late);
     }
 
-    super::out(b"cert_test: chain: signatures\r\n");
+    super::say(b"chain: signatures\r\n");
     // 6. Signatures.
     let mut bad_bytes = [0u8; 1024];
     let bad_bytes = &mut bad_bytes[..LEAF.len()];
@@ -697,7 +704,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     c.ok(r == (TRUST_E_CERT_SIGNATURE, 0, 0), r.0)?;
     free(forged);
 
-    super::out(b"cert_test: chain: usage\r\n");
+    super::say(b"chain: usage\r\n");
     // 7. Usage.
     let server_auth = c"1.3.6.1.5.5.7.3.1";
     let ids = [server_auth.as_ptr().cast::<u8>()];
@@ -718,13 +725,13 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     c.ok(r == PASS, r.0)?;
     free(wrong);
     usage.size = core::mem::size_of::<ChainPara>() as u32;
-    c.eq(usage.size.into(), 96)?;
+    c.eq(usage.size.into(), super::by_width(52, 96))?;
     let right = chain(c, engine, leaf, Some(T2030), inter_store, &usage, 0)?;
     // SAFETY: the chain crypt32 gave.
     unsafe { c.eq((*right).status.error.into(), 0)? };
     free(right);
 
-    super::out(b"cert_test: chain: basic constraints\r\n");
+    super::say(b"chain: basic constraints\r\n");
     // 8. Basic constraints.
     let signers = store_of(c, &[INTER, NOTCA])?;
     let underling = context(c, UNDERLING)?;
@@ -736,7 +743,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
     c.ok(r == (TRUST_E_BASIC_CONSTRAINTS, 0, 1), r.0)?;
     free(constrained);
 
-    super::out(b"cert_test: chain: revocation\r\n");
+    super::say(b"chain: revocation\r\n");
     // 9. Revocation, from the CRLs in hAdditionalStore (offline).
     let unknown = CERT_TRUST_REVOCATION_STATUS_UNKNOWN;
     let offline = unknown | CERT_TRUST_IS_OFFLINE_REVOCATION;
@@ -821,7 +828,7 @@ pub fn chains(c: &mut Checks) -> Result<(), u32> {
         }
     }
 
-    super::out(b"cert_test: chain: machine roots\r\n");
+    super::say(b"chain: machine roots\r\n");
     // 10. The machine's roots.
     let localhost = context(c, LOCALHOST)?;
     for default in [none, 1usize as Handle] {

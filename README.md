@@ -169,8 +169,11 @@ directories on the shared file system, clocks and timers, TCP sockets
 and poll/select, each test's transcript equal to real Linux's (`lx_*`
 scenarios). The static busybox from busybox.net runs a shell script of
 pipelines and applets (`lx_busybox`) and serves files with its httpd to
-its wget over loopback (`lx_httpd`). Threads, futex, symlinks, epoll and
-dynamic linking are not there yet (ROADMAP item LX).
+its wget over loopback (`lx_httpd`). Dynamically linked glibc programs
+run through Ubuntu's ld.so (`lx_dyn`), and graphical ones through an
+in-kernel Wayland server whose windows are shasha's: weston-simple-shm
+(`lx_simple_shm`) and a GTK 3 program on Ubuntu's GTK libraries, its
+window drawn and clicked (`lx_gtk`; ROADMAP items LX and LD).
 
 ### Not there yet
 
@@ -361,7 +364,7 @@ only those DLLs, and the kernel under them, are gala's.
 flowchart TB
     subgraph user["User mode (per process, in a session)"]
         app["Windows program (.exe)<br/>Go · Rust · mingw-w64 · MSVC · JDK · .NET · official releases"]
-        crt["msvcrt.dll<br/>(or the program's own UCRT)"]
+        crt["msvcrt.dll · ucrtbase.dll<br/>(gala's C runtimes)"]
         dlls["kernel32 · kernelbase · advapi32 · user32 · gdi32 · ws2_32<br/>shell32 · ole32 · bcrypt · ncrypt · secur32 · winhttp · ... (~50)"]
         ntdll["ntdll.dll<br/>loader · heaps · exception and APC dispatch · system call stubs"]
         tools["gala's programs<br/>conhost.exe · cmd.exe · gala.exe"]

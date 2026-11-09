@@ -483,13 +483,17 @@ impl Section {
         })
     }
 
-    /// A section for a Linux file mapping (`lx::mm`): the first `size`
-    /// bytes of the file open as `file` (node `node`, at least that
-    /// large). A `shared` one (MAP_SHARED) shows the file's pages to
-    /// every view and, if the file is open for writing (`writable`),
+    /// A section for a Linux file mapping (`lx::mm`): the file open as
+    /// `file` (node `node`, `size` bytes now). A `shared` one
+    /// (MAP_SHARED) shows the file's pages to every view and, if
+    /// `writable` (the file open for writing and not sealed against it),
     /// writes through to them; a private one (MAP_PRIVATE,
     /// PAGE_EXECUTE_WRITECOPY) gives a view a copy of each page it
-    /// writes.
+    /// writes. Its views reach as far as the file is when they touch a
+    /// page, not as it was when mapped (mmap(2): a file grown since, by
+    /// ftruncate, shows its new pages; memfd_test's mremap after
+    /// ftruncate); `size` is what the file cannot shrink below while
+    /// mapped.
     pub fn new_linux_file(
         file: KArc<crate::lx::file::OpenFile>,
         node: crate::fs::ramfs::NodeId,
@@ -548,7 +552,11 @@ impl Section {
     /// else allocated zeroed on first use.
     pub fn frame(&self, index: usize) -> Option<Frame> {
         if let Some(f) = &self.file {
-            if index as u64 >= self.size.div_ceil(PAGE_SIZE) {
+            // A Linux file's section follows the file's size (the file
+            // system has no page past its end: `page_address` is None).
+            if !matches!(f.holder, FileHolder::Linux(_))
+                && index as u64 >= self.size.div_ceil(PAGE_SIZE)
+            {
                 return None;
             }
             // File pages are whole-page heap allocations, which live in the

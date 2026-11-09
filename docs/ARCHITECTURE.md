@@ -43,6 +43,7 @@ kernel/                 the kernel (crate `kernel`, target x86_64-unknown-none)
   src/disk/             the disk: virtio-blk, whole-sector reads/writes/flush
   src/fs/               ramfs (C:), USTAR boot modules, the persistence log
   src/net/              virtio-net, loopback, smoltcp TCP/UDP
+  src/unix.rs           AF_UNIX sockets as core objects (seam 5): names, connections, rights in flight
   src/display/          virtio-gpu (`display=virtio`): protocol, driver (host-tested), PCI transport
   src/input.rs          PS/2 mouse polling for the desktop
   src/nt/               NT personality: PE loader, processes, objects, syscalls, registry, ...
@@ -222,9 +223,10 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `restart=<file>[:<max>][,...]` | those `run=` programs are services: started again 1 s after they end, at most `max` times (default 10; a run of over a minute resets the count), logged as `service: ... restarting it (n of max)` and a `service restart` event (scenario `service_restart`) |
 | `persist` | keep what programs change on C: and in the registry on the virtio-blk disk (a log replayed at the next boot; "Disk") |
 | `logtee=C:/dir` | what programs write to files below that directory (percent-encoded) is also logged line by line, `logtee: <file>: <line>` |
+| `wayland=on`, `wayland=trace`, `wayland=off` | the Wayland server at boot, listening on `/run/user/<uid>/wayland-0` ("Linux applications on the desktop (Wayland)"): on by default where the desktop has a shell (not the server profile; a screen or `presenter=`), off where desktops are bare; `on` starts it anyway, `off` never; `trace` also logs every request and event as `WAYLAND_DEBUG=1` prints them |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
-| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window` or `all` (`window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
+| `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
 | `wallpaper=<name>` | pin the desktop's wallpaper (`drawn` for the drawn one; screen checks pin one) |
 | `presenter=test`, `presenter=none` | a headless desktop: the console session's desktop is shown by a frame in memory (screen checks read it) or by nothing, with or without a screen; every session's desktop is live ("Presenters") |
 | `noscreen` | keep the console on the serial port only (no framebuffer text) |
@@ -270,6 +272,19 @@ address.
   aligned runs (DMA, large pages) use a linear scan. Double frees are
   rejected.
 - The first 1 MiB is never handed out (SMP trampolines and similar).
+- **The span and the memory are different numbers.** The bitmap spans
+  every frame up to the top of memory, holes included, and `frame_count`
+  is that span: a bound for the bitmap, not a quantity of memory. Above
+  about 2 GiB a PC's RAM is split below 2 GiB and above 4 GiB with the
+  PCI hole between, so the span is far larger than the memory (on a
+  3 GiB machine, 5 GiB of span against 2.57 GiB usable). `total_frames`,
+  and so `mm::frame_stats().1`, is the frames the allocator *manages*:
+  the usable ones, free or in use, counted in `from_memory_map` once the
+  usable regions are free and before the reserved ranges are claimed
+  (a reserved frame is in use, not unmanaged). Memory figures must use
+  that one, since the commit limit and both pool quotas are derived from
+  it (`nt::charge::limit`, `nt::quota::memory`); the span would make them
+  about twice the machine.
 - **Frames with more than one owner** (a Linux fork's copy-on-write
   pages): a `u16` per frame counts the owners beyond the first
   (`share`), from a table on the heap given to the allocator once the
@@ -579,6 +594,8 @@ numbers and the version reported to programs depend on it.
 | 0x7f5a, 0x7f5b | GalaRequestHandover, GalaHandoverPause | "Kernel handover" |
 | 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
 | 0x7fa0-0x7fa5 | GalaUserObjectOpen, GalaUserObjectConnection, GalaUserObjectSet, GalaUserObjectClose, GalaUserObjectInformation, GalaUserObjectEnum | "Window stations and desktops" |
+| 0x7fd0-0x7fd5 | GalaScmOpen, GalaServiceOpen, GalaServiceCreate, GalaServiceQuery, GalaServiceEnum, GalaServiceControl | "The service control manager" |
+| 0x7fc0-0x7fc7 | GalaClipboardOpen, GalaClipboardClose, GalaClipboardEmpty, GalaClipboardSet, GalaClipboardGet, GalaClipboardInfo, GalaClipboardFormats, GalaClipboardListener | "The clipboard" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
   gala's numbers for Windows services (until verified): 0x7f01
@@ -834,8 +851,11 @@ current process, -2 = current thread.
   thread has ended (Windows frees the TEB then; gala's stays mapped
   until the process ends).
 - **NtCreateThread** takes DeallocationStack from
-  INITIAL_TEB.StackAllocationBase and applies the CONTEXT's MxCsr only
-  (TODO: the rest of FltSave and the XSTATE area). kernel32's CreateThread
+  INITIAL_TEB.StackAllocationBase and the CONTEXT's integer and control
+  registers; its floating-point part (MxCsr, FltSave, the XSTATE area) is
+  ignored whatever ContextFlags say: a new thread starts with a fresh
+  x87/SSE state, MXCSR 0x1f80 and XMM 0, as on Windows 11 (`fpu_test`).
+  NtContinue on an existing thread does load it. kernel32's CreateThread
   builds the stack and start CONTEXT itself ("kernel32").
 - **Suspension and context**: a thread with a suspend count parks in the
   user-return hook, publishing its registers and XSAVE state;
@@ -1540,9 +1560,11 @@ Invariants:
   SystemArgument2, NormalRoutine (to be checked against the pinned
   ntdll). The dispatcher calls the routine and NtContinues with
   TestAlert, which delivers the next APC first. I/O completion routines
-  use the same queue: a read or write on an asynchronous handle with an
-  ApcRoutine queues ApcRoutine(ApcContext, IoStatusBlock, 0) to the
-  caller when it completes successfully.
+  use the same queue: a read or write with an ApcRoutine queues
+  ApcRoutine(ApcContext, IoStatusBlock, 0) to the caller when it
+  completes successfully, on a synchronous handle too (the I/O completes
+  inline and the routine runs at the next alertable wait, as on Windows
+  11; files and pipe ends alike).
 
 ### Job objects
 
@@ -1551,6 +1573,10 @@ through the namespace like events), NtAssignProcessToJobObject,
 NtSet/NtQueryInformationJobObject (basic accounting, basic and extended
 limits) and NtIsProcessInJob (0x7f0a-0x7f0e).
 
+- A new job has no limits in effect (LimitFlags 0) but reports
+  PriorityClass NORMAL_PRIORITY_CLASS (32) and SchedulingClass 5 in its
+  basic limits, as Windows 11 does; what NtSetInformationJobObject sets
+  is reported back as given.
 - A process is in at most one job (`Process::job`); a process created by
   one in a job joins it. Nested jobs (Windows 8+) are not done: assigning
   a process that is in another job is STATUS_ACCESS_DENIED.
@@ -1604,6 +1630,32 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   lives on *detached*, nlink 0, freed at its last close, never recorded
   again). `exchange` swaps two names (renameat2's RENAME_EXCHANGE) by
   three renames under the file system's lock.
+- **Anonymous files** (`create_anonymous`, Linux's memfd_create:
+  `lx::memfd`): made detached (in no directory, nlink 0), opened once,
+  freed at their last close, never recorded. Their seals
+  (`Node::seals`, Linux's F_SEAL_* bits; None for every other file,
+  which cannot be sealed) are checked by `write`, `set_size`, `map` and
+  `set_mode` under the file system's lock, and `add_seals` refuses
+  SEAL_WRITE while a section maps the file writable (`write_maps`), so a
+  seal and a writer never race.
+- **Socket nodes** (`create_socket`: a bound AF_UNIX socket's name,
+  `unix`): no contents (`FsError::Socket`: Linux's open is ENXIO);
+  what is bound to one is the socket layer's, keyed by the node, which
+  the bound socket keeps open so its id is not reused while bound. NT
+  sees a reparse point (FILE_ATTRIBUTE_REPARSE_POINT, an open without
+  FILE_OPEN_REPARSE_POINT STATUS_IO_REPARSE_TAG_NOT_HANDLED), as Windows
+  shows an AF_UNIX socket's file. Not kept across reboots (the change
+  log has no record for them; a later change of the name replays as a
+  change of a missing path, skipped): what was bound to one is gone
+  then anyway.
+- **Volumes** (`create_volume`; the Linux view's `/run` is the one
+  user): a directory tree beside the root's, its root its own parent,
+  so no path from `C:\` reaches it and NT never sees it. Each node
+  knows its tree (`Node::volume`); nothing in a volume goes to the
+  change log or a snapshot (a tmpfs: gone at shutdown); `path_of` is
+  the path within the volume (the Linux side puts the mount point
+  before it); a rename or hard link from one tree into another is
+  refused (`FsError::CrossVolume`: EXDEV, STATUS_NOT_SAME_DEVICE).
 
 - **Contents from boot modules**: modules appear read-only in `C:\gala`
   (or the directory their module string names), copied to the heap on
@@ -1931,6 +1983,23 @@ xtask types: "hi" with ReadFile, echoed, the program getting "hi\r\n";
   ctrl`) and so is each process's handler thread taking it (`... takes
   Ctrl+C k after m ms`, a warning from 250 ms: late is a lost wake-up;
   event `console ctrl taken`). GalaConsoleCtrl has a 1 s backstop.
+  The session keeps each process's handler thread as a taker with the
+  last Ctrl+C it took and the last it is done with: its thread came back
+  to wait with that count (its handlers returned), or the process is
+  ending. A process ending itself (NtTerminateProcess on
+  itself, whatever the status: the default handler's
+  STATUS_CONTROL_C_EXIT, or a handler that exits, as busybox-w32's does
+  with its own) after its handler took Ctrl+C k waits until every other
+  taker is done with k before it ends, so a
+  shell's handler has run before the shell can see its child end (on
+  Windows the parent's handler starts about 12 ms before a
+  handler-less child's end is visible; handlers otherwise start
+  together and none waits for another; #33). Taken is not enough: a
+  handler thread that woke but was scheduled late (a busy host) ran
+  busybox-w32's handler after the shell had cleared its "got a signal"
+  flag for the next line, which then ate the next key as ^C. A handler
+  that blocks is waited for 1 s at most (`... ends with Ctrl+C k
+  before N other process(es) handled it`, a warning).
 - **The host** (`user/conhost`): the kernel starts `conhost.exe` (a boot
   module) with the session's id and the program's file name before the
   program. Its system calls: GalaConsoleHost(id, event) 0x7f3a (become
@@ -2052,6 +2121,14 @@ SECURITY.md phase S1 holds the model; the kernel side is
     BUILTIN\Administrators, an owner group, Everyone, Authenticated
     Users, the System label; the system logon session 0x3e7, session 0;
     LocalSystem's privileges, enabled as in a service.
+  - **Elevation** (SECURITY.md "Elevation"): no token is split, so
+    TokenElevationType is 1 (default) for all; TokenElevation
+    (`TokenData::elevated`) is 1 when the token holds
+    BUILTIN\Administrators enabled and not deny-only (SYSTEM's), 0
+    otherwise (the boot user's, a restricted token whose Administrators
+    group was made deny-only). The `process ... starting at` line ends
+    in `, elevated token` and the `process start` event carries
+    `"elevated"` for a process whose primary token is elevated.
 - **Impersonation**: a thread may hold an impersonation token
   (`NtThread::impersonation`): NtSetInformationThread
   ThreadImpersonationToken (impersonation tokens only), and
@@ -2352,9 +2429,102 @@ shutdown.
   is the NT key handle itself. The functions return Win32 errors from
   RtlNtStatusToDosError. RegGetValue filters by type (RRF_RT_*,
   REG_BINARY of 4/8 bytes for DWORD/QWORD; its flags are checked first),
-  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. The A
+  expands REG_EXPAND_SZ unless RRF_NOEXPAND and terminates strings. As
+  Windows 11 does, an expanded string is read over the stored one: the
+  stored value's tail stays after the expansion's NUL and pcbData is the
+  larger of the two sizes (the stored size when the expansion is
+  shorter), an upper bound rather than the string's length; a size query
+  for an unexpanded string reports stored + 2 (room for a NUL), and one
+  that fails with ERROR_UNSUPPORTED_TYPE still reports it.
+  RRF_RT_REG_EXPAND_SZ without RRF_NOEXPAND is that error too (the
+  expanded value is a REG_SZ). The A
   functions convert names and string data (REG_SZ, REG_EXPAND_SZ,
   REG_MULTI_SZ) through the ANSI code page (UTF-8 on gala).
+
+## The service control manager
+
+The SCM (`nt::scm`, its calls in `nt/scm_calls.rs`; advapi32's
+`service.rs`; `svc_test`, `wow64_svc_test`) is in the kernel, beside
+the registry it reads, until a user-mode services process exists (as
+the session manager is the kernel's until RS B4): its access checks are
+then the kernel's, against the caller's effective token (an
+impersonating thread's, as services.exe impersonates its RPC client).
+
+- **The database** is Windows' own store,
+  `HKLM\SYSTEM\CurrentControlSet\Services`: a subkey with a `Type`
+  value is a service (other subkeys are not, as for the SCM on
+  Windows); its configuration is the key's values (Type, Start,
+  ErrorControl, ImagePath, DisplayName, ObjectName, Group, Tag,
+  DependOnService, DependOnGroup). Nothing is cached: a key written by
+  a program or a `registry` module is a service at once, and with
+  `persist` created services are kept with the registry. The seed has
+  AFD (Winsock's ancillary function driver, `\Device\Afd`), the one
+  driver gala's kernel provides.
+- **Handles** are kernel handles to `ScManager` and `Service` objects
+  (CloseServiceHandle is a GalaServiceControl that refuses other
+  handles). Each carries its descriptor in `KObject::security`, so
+  QueryServiceObjectSecurity-style reads through NtQuerySecurityObject
+  see it; the access check is `security::access_check` with the
+  documented mappings (`SCM_MAPPING`, `SERVICE_MAPPING`).
+- **Descriptors** ("Service Security and Access Rights"): the SCM's
+  gives Authenticated Users READ_CONTROL, CONNECT, ENUMERATE_SERVICE and
+  QUERY_LOCK_STATUS, SYSTEM those and MODIFY_BOOT_CONFIG,
+  Administrators all; a service's is its key's `Security\Security`
+  value when present, else the CreateService default (Authenticated
+  Users query, interrogate and send user controls; SYSTEM also start,
+  stop, pause; Administrators all). OpenSCManager always asks for
+  SC_MANAGER_CONNECT, as documented.
+- **State**: a table of the services with open handles (their count
+  and deletion mark). DeleteService marks; the key and its subkeys go
+  when the last handle closes (`ServiceObject`'s drop), and until then
+  the service still opens while creating it again is
+  ERROR_SERVICE_MARKED_FOR_DELETE. The built-in drivers (AFD) report
+  SERVICE_RUNNING, no process, no controls accepted; every other
+  service is SERVICE_STOPPED with exit code ERROR_SERVICE_NEVER_STARTED.
+- **Errors**: the SCM's Win32 errors travel as FACILITY_NTWIN32 statuses
+  (`scm::win32`, 0xC007xxxx) and advapi32 takes them back out; what
+  Windows' RPC client stub checks before reaching the SCM (NULL handles
+  and pointers, QueryServiceStatusEx's and EnumServicesStatusExW's level
+  first, QueryServiceStatusEx's 36-byte size second) is checked in
+  advapi32, in Windows' order (Wine's service tests).
+- **Calls** (0x7fd0-0x7fd5): GalaScmOpen(access, *handle);
+  GalaServiceOpen(scm, name, length, access, *handle);
+  GalaServiceCreate(scm, record, length, access, *handle) (a
+  width-independent record: Type, Start, ErrorControl, then offset and
+  length of the name, display name, path, group, dependencies,
+  account); GalaServiceQuery(service, class, buffer, length, *needed)
+  (0: SERVICE_STATUS_PROCESS; 1: the configuration as such a record);
+  GalaServiceEnum(scm, types, states, buffer, length, *needed) (every
+  matching service, status and names; advapi32 lays out
+  ENUM_SERVICE_STATUS_PROCESSW, the group filter and the resume index);
+  GalaServiceControl(handle, op, code, *status) (close, delete, start,
+  control). Every argument is a ULONG, handle or pointer to data laid
+  out alike in x86 and x64, so wow64.dll converts them generically.
+- **advapi32**: OpenSCManagerW/A (this machine only: another is
+  RPC_S_SERVER_UNAVAILABLE, recorded; "ServicesActive" or NULL;
+  "ServicesFailed" ERROR_DATABASE_DOES_NOT_EXIST, other names
+  ERROR_INVALID_NAME), OpenServiceW/A, CreateServiceW/A (the password
+  is not kept), CloseServiceHandle, DeleteService, StartServiceW/A,
+  ControlService, QueryServiceStatus(Ex), QueryServiceConfigW/A,
+  EnumServicesStatusExW.
+- **Observability**: every connection, open, creation, deletion mark,
+  start request and control is a `scm:` log line (the first 64 per boot;
+  pid, program, name, access granted or the status) and a `service`
+  event (`events=service`); a service's key deleted with its last
+  handle is logged with the outcome.
+- **Limits**: starting a service is not supported (StartService of a
+  startable one is ERROR_NOT_SUPPORTED, logged and recorded
+  `GalaServiceControl: start a service`; the `restart=` supervisor is
+  the piece it will use), so no service but the built-in drivers ever
+  runs and no control reaches a program; StartServiceCtrlDispatcher
+  still fails as for a console program. Not there yet (gala_stubs,
+  recorded when called): ChangeServiceConfig, QueryServiceConfig2,
+  EnumDependentServices, LockServiceDatabase, SetServiceStatus and the
+  control handler registration, user services (types 0x50/0x60,
+  refused and recorded), load-order tags, the "remote" and "local"
+  authenticated users distinction of the documented descriptors (one
+  Authenticated Users ACE), service SIDs in service tokens, SCM handles
+  across a kernel handover (refused).
 
 ## gala's system DLLs
 
@@ -2382,13 +2552,13 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | Role | DLLs |
 |---|---|
 | core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles, PathCch, WaitOnAddress and interrupt-time functions, which Windows' kernel32 lacks; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
-| C runtime | msvcrt (mingw-w64 programs' C runtime) |
+| C runtime | msvcrt (mingw-w64 programs' C runtime), ucrtbase (the Universal C Runtime, msvcrt's source with the UCRT's own functions: "The UCRT") |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
-| COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils |
+| COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6 |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -2528,7 +2698,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 - **Static TLS** (`tls.rs`): each image with a TLS directory gets an
   index at load; each thread has an array at
   TEB.ThreadLocalStoragePointer with a block per image (the template,
-  then zero fill); a DLL loaded later gets blocks in every existing
+  then zero fill, which gala zeroes; Windows leaves the zero fill as its
+  heap had it, freed loader strings or zeros by chance, so a program
+  relying on it relies on luck and `tls_test` reads it without checking
+  it); a DLL loaded later gets blocks in every existing
   thread. Threads started by kernel32 call `GalaInitializeThread` first
   (their blocks, then DLL_THREAD_ATTACH to TLS callbacks and DllMains in
   load order; Windows does this in LdrInitializeThunk) and ExitThread
@@ -2554,7 +2727,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   upcase/downcase, to ANSI as UTF-8; ASCII case folding), SIDs, ACLs,
   absolute and self-relative security descriptors (a self-relative copy
   takes the whole AclSize, as Windows'), RtlSetCurrentDirectory_U,
-  NtQueryTimerResolution, and the critical sections: kernel32's
+  NtQueryTimerResolution, RtlIntegerToUnicodeString,
+  RtlIsNameInExpression (`*`, `?` and the DOS wildcards `<`, `>`, `"`,
+  matched over a table of reachable name positions; case folding ASCII),
+  and the critical sections: kernel32's
   Enter/LeaveCriticalSection call ntdll's RtlEnter/LeaveCriticalSection
   (one implementation, so a section works whichever DLL a program uses).
   LockCount is -1 when free and, while taken, the number of waiters; an
@@ -2567,6 +2743,19 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   switches); a thread that polls takes processor time from the one it
   waits for. Without the keyed event (it could not be created: no
   memory) the handover goes through OwningThread and waiters yield.
+- **AVL generic tables** (`avl.rs`, `office_api_test`):
+  RtlInitializeGenericTableAvl and its companions (insert, delete,
+  lookup, enumerate with and without a caller's restart key, get by
+  index, count, empty, first matching) on the caller's RTL_AVL_TABLE in
+  ntddk.h's layout; nodes come from the caller's allocate routine (the
+  balanced links, padded to 8 bytes, then the element) and go back to its
+  free routine. The root's links are a sentinel above the real root; a
+  node's subtree height is kept in its first reserved byte, so a change
+  rebalances along its path only. NumberGenericTableElements and the
+  ordered-element cache are kept in the table.
+- **RtlCaptureStackBackTrace** on x86 (`x86.rs`) walks the saved frame
+  pointers inside the thread's stack (TEB32's limits); kernel32 forwards
+  it on both architectures.
 
 ### kernel32
 
@@ -2674,7 +2863,9 @@ ntdll imports.
   date format lists (EnumTimeFormatsEx, EnumDateFormatsExEx),
   FindNLSStringEx (prefix, suffix, first and last occurrence, compared
   code unit by code unit with simple case folding; linguistic
-  equivalences are recorded).
+  equivalences are recorded). One geographic region, the United States
+  (GetUserGeoID 244, GetGeoInfoA/W's values, GetUserDefaultGeoName
+  "US": its GEO_ISO2).
 - **Time**: Sleep, tick counts, the performance counter, UTC local time.
   The time zone is UTC, named "UTC" (its time-zone key name) rather than
   "Coordinated Universal Time": a deliberate difference, because programs
@@ -2694,7 +2885,33 @@ ntdll imports.
   a manifest file) and returns a reference-counted handle;
   ActivateActCtx/DeactivateActCtx keep a per-thread stack (16 deep, 64
   threads) with unique cookies. Nothing is read from the manifests (no
-  side-by-side redirection).
+  side-by-side redirection). QueryActCtxW answers
+  ActivationContextBasicInformation (the active context with
+  QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX; NULL when none is: a program
+  without a manifest); other classes are recorded and refused.
+  FindActCtxSectionStringW checks its arguments (ERROR_INVALID_PARAMETER
+  for no name, no data or a cbSize below ulAssemblyRosterIndex) and finds
+  nothing (ERROR_SXS_KEY_NOT_FOUND; recorded when a context is active,
+  whose manifest might have had the key). `office_api_test`.
+- **What Office imports** (`office_api_test`, `wow64_office_api_test`):
+  CreateFile2 (CreateFileW with the parameters' attributes, flags and
+  QoS flags; an empty name is ERROR_PATH_NOT_FOUND, in CreateFileW too),
+  FindFirstFileNameW/FindNextFileNameW (one name per file: the path from
+  the volume root, GetFinalPathNameByHandleW's VOLUME_NAME_NONE),
+  CreateMutexExW, OpenSemaphoreA/W, K32EnumProcesses
+  (SystemProcessInformation's ids), K32GetProcessImageFileNameW
+  (ProcessImageFileName: `\Device\HarddiskVolume1\...`),
+  QueueUserWorkItem (the pool's simple callbacks), GetShortPathNameA,
+  GetVolumePathNamesForVolumeNameW (gala's one volume: `C:\`),
+  GetPhysicallyInstalledSystemMemory (the physical memory gala manages),
+  IsSystemResumeAutomatic (FALSE), WerRegisterMemoryBlock (accepted and
+  recorded: gala's crash reports are the kernel's),
+  AttachConsole/AllocConsole (every gala process has a console:
+  ERROR_ACCESS_DENIED, as Windows answers a process that has one;
+  FreeConsole does not detach), GetDiskFreeSpaceA. GetThreadIOPendingFlag
+  is a stopgap: gala does not count a thread's pending socket, pipe and
+  directory-watch requests, so it answers FALSE and records it (ROADMAP
+  OF).
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA
@@ -2829,7 +3046,17 @@ runtime of mingw-w64 programs.
   digits with zeros after them and then half away from zero at the
   requested digit, as msvcrt.dll's conversion does; exponents have a sign
   and at least three digits. inf and nan print as `inf`/`nan` (msvcrt.dll
-  prints `1.#INF00`: a known difference, TODO).
+  prints `1.#INF00`: a known difference, TODO). The UCRT's style
+  (`float::Style`): every digit exact, two exponent digits.
+- **The formatting engine** (`stdio.rs` `format`) takes a `Style`
+  (msvcrt's, or the UCRT's options: which `%s`/`%c` are UTF-16 in a wide
+  function, `%T`, the float style, `%*2d`) and writes to an `Out`: a
+  handle, a byte buffer, or a UTF-16 buffer (`Sink::Wide` decodes the
+  engine's UTF-8 as it comes; `total` counts UTF-16 units), so the wide
+  functions have no length limit. `scan` takes a `ScanStyle` (the secure
+  form's buffer sizes; strings stored as UTF-16).
+- **The heap's header** keeps the size a block was asked with
+  (`heap::requested`, the UCRT's `_msize`).
 - **Math**: sin, pow, floor, fmod, ... come from the `libm` crate; the
   transcendental ones may differ from msvcrt's in the last bit.
 - **Wide functions** (`wide.rs`, `wide_more.rs`): the wide path functions
@@ -2855,6 +3082,103 @@ runtime of mingw-w64 programs.
   FILE_ATTRIBUTE_READONLY; `_aligned_malloc` keeps the block's start just
   below the aligned pointer.
 
+### The UCRT
+
+`user/ucrtbase` (`ucrt_test`, `wow64_ucrt_test`): gala's own
+`ucrtbase.dll`, the Universal C Runtime that programs built with Visual
+C++ 2015 and later import, directly or through the `api-ms-win-crt-*`
+API sets (which the loader maps to ucrtbase, "API sets"), for x64
+(System32) and x86 (SysWOW64). Written in Rust, not Microsoft's
+redistributable (the owner's decision).
+
+- **One source, two DLLs**: `user/ucrtbase` has no source of its own:
+  its Cargo.toml points its lib at `user/msvcrt/src/lib.rs` and its build
+  script at msvcrt's, which sets `cfg(ucrt)` for this package. That adds
+  `user/msvcrt/src/ucrt/` (and the UCRT's hooks in shared code, such as
+  the exit sequence). So ucrtbase exports msvcrt's functions plus the
+  UCRT's, and has its own state (heap, errno, stdio, atexit table, argv),
+  as the two runtimes do on Windows: a program that mixes them (a
+  mingw DLL in an MSVC program) has two separate runtimes. What both
+  need is written once, in msvcrt's modules; a UCRT-only helper in them
+  carries `#[cfg_attr(not(ucrt), allow(dead_code))]`.
+- **Start-up** (`ucrt/mod.rs`): what Visual C++'s static start-up code
+  calls: `_configure_narrow_argv`/`_configure_wide_argv` and
+  `_initialize_*_environment` (msvcrt's `__getmainargs`/`__wgetmainargs`
+  build the arrays; wildcard expansion, mode 2, is not done and is
+  recorded), `__p___argc`/`__p___argv`/`__p___wargv`/`__p__environ`/
+  `__p__wenviron`, `_get_narrow/wide_winmain_command_line` (after the
+  program name, quotes toggling, then blanks), `_initterm_e` (stops at
+  the first nonzero result), onexit tables (`_initialize_onexit_table`
+  keeps a table that already has an allocation; entries are plain
+  pointers, not encoded as on Windows; `_execute_onexit_table` takes the
+  table first, runs it last to first and frees it), `_crt_atexit` (the
+  runtime's atexit table), `quick_exit`, `_set_app_type`, `_set_fmode`,
+  `_set_new_mode`, `_seh_filter_exe` (msvcrt's `_XcptFilter`: no signal
+  handlers, so the search goes on). `exit` and `_cexit` first call the
+  `_register_thread_local_exe_atexit_callback` callback (thread_local
+  destructors, with DLL_PROCESS_DETACH), then the atexit functions.
+- **Invalid parameters**: the `_s` functions and the `__stdio_common_*`
+  checks call `invalid_parameter()`: the thread's handler
+  (`_set_thread_local_invalid_parameter_handler`, a TLS slot), else the
+  process's (`_set_invalid_parameter_handler`), with NULL expression,
+  function and file, line 0, then return the documented error; with no
+  handler the process ends with STATUS_STACK_BUFFER_OVERRUN (0xc0000409,
+  Windows' fast-fail status) after a line on stderr naming the cause.
+- **printf and scanf** (`ucrt/stdio.rs`): the `__stdio_common_v*`
+  functions with their option flags: legacy termination (1), standard
+  snprintf (2), neither (-2 when it does not fit); legacy wide specifiers
+  (4: `%s` in a wide function is UTF-16; without it, narrow as the C
+  standard says); three-digit exponents (16); standard rounding (32:
+  an exact tie rounds to even; without it half away from zero, as the
+  UCRT does). The UCRT prints every digit exactly (`%.30f`) and two
+  exponent digits. The `_s` forms: `_TRUNCATE` keeps what fits and returns
+  -1; `sprintf_s` with too small a buffer is an invalid parameter
+  (ERANGE, emptied). scanf's secure flag (1) reads a buffer size after
+  each `%s`/`%c`/`%[` pointer; the count limits the input. Legacy msvcrt
+  compatibility (8: `1.#INF`, `%F`/`%N` sizes) and `%a` are recorded,
+  not done.
+- **Streams**: `__acrt_iob_func` gives msvcrt's `_iob` slots;
+  `_fseeki64`/`_ftelli64`, `_fsopen`/`_wfsopen` (share modes not
+  applied), `fopen_s` and friends, `_get_stream_buffer_pointers` (the
+  FILE's fields; `_cnt` stays 0), `_chsize_s`, `_sopen_s`,
+  `_findfirst64i32`. `_lock_file` does nothing: gala's streams are
+  unbuffered and write each call with one WriteFile. No text-mode CRLF
+  translation (as msvcrt here).
+- **Strings, locale, math, time** (`string.rs`, `locale.rs`, `math.rs`,
+  `time.rs`, `compat.rs`, `c99.rs`): the `_s` string and number functions, the
+  restartable multibyte functions (UTF-8; a character beyond the BMP
+  does not fit one wchar_t: U+FFFD, recorded); one locale, "C", with
+  UTF-8 as the multibyte code page (`_create_locale` returns it and
+  records any other name; `_configthreadlocale` is kept per process);
+  `_dclass` and the classification functions with the UCRT's FP_*
+  values; `_controlfp_s`, `_clearfp`/`_statusfp` (MXCSR, and on x86 the
+  x87 status word); on x86 the `_libm_sse2_*_precise` functions that
+  SSE2 code calls (the argument in xmm0, xmm1 for pow's second, the
+  result in xmm0: naked shims around cdecl Rust); C99's float and long
+  double forms and the complex functions on `_Dcomplex`/`_Fcomplex`
+  (textbook identities; Annex G's special cases for infinite and NaN parts
+  not all followed), `fetestexcept`/`feclearexcept`; local time is UTC.
+- **Aliases** (build.rs `UCRT_ALIASES`): api-ms-win-crt-private's `_o_`
+  names are the same functions, and the `_l` forms (a locale as the last
+  argument) are the plain ones: one locale, and an extra last argument is
+  the caller's to pop in the C convention of both architectures.
+- **The environment**: `_environ` (narrow) is built on first use by
+  getenv if the start-up code built only the wide one (a `wmain`
+  program's: CPython reads PYTHONPATH through `_wgetenv`, which goes
+  through getenv).
+- **Limits**: errno is per process (msvcrt's), as are the rand state
+  and strtok's; `setlocale` answers "C" for any name; console I/O
+  (`_getwch`, `_putwch`) is the standard handles' bytes and `_kbhit`
+  reports no key (recorded); the C++ runtime functions that Windows'
+  ucrtbase also exports (`_CxxThrowException`, `__CxxFrameHandler3`,
+  `__std_exception_copy`, ...) are not there yet, nor about 55 other
+  functions the JDK, PowerShell, .NET, PostgreSQL and SQL Server LocalDB
+  import, so those scenarios still ship Microsoft's copy (ROADMAP OF).
+- **Who uses it**: setup.exe of the Office Deployment Tool (x86; all its
+  UCRT imports), curl (`curl`, `curl_schannel`), CPython (`python_*`,
+  NumPy's DLLs included),
+  `cxx_eh_test` (with Microsoft's vcruntime140), `pk_install_inno`.
+
 ### advapi32
 
 `user/advapi32` (`advapi32_test`; built for i686 too, `wow64_adv_test`:
@@ -2879,12 +3203,13 @@ definition for both layouts, "Plan: WOW64").
 - **Service SIDs**: `NT SERVICE\<name>` is S-1-5-80 followed by the SHA-1
   of the upper-cased UTF-16 name (five DWORDs; bcrypt, loaded on first
   use); LookupAccountNameW/SidW resolve them for services registered
-  under `HKLM\SYSTEM\CurrentControlSet\Services` (there is no service
-  control manager: a service is its key), and S-1-5-80-0 as ALL
+  under `HKLM\SYSTEM\CurrentControlSet\Services` (the service
+  control manager's database), and S-1-5-80-0 as ALL
   SERVICES; domain NT SERVICE, SidTypeWellKnownGroup.
-- **Services**: StartServiceCtrlDispatcherW/A fail as for a console
-  program (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: no service control
-  manager).
+- **Services**: the service control manager's client functions ("The
+  service control manager"); StartServiceCtrlDispatcherW/A fail as for
+  a console program (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: the SCM
+  starts no service processes yet).
 - **Registry**: "Registry". **LSA policy and virtual accounts**
   (`policy.rs`): "Accounts and logon".
 - **ETW** (`etw.rs`): providers register, but no trace session exists,
@@ -3143,7 +3468,10 @@ definition for both layouts, "Plan: WOW64").
   info names, opened (the caller's, or kept in the context with
   CRYPT_ACQUIRE_CACHE_FLAG); CSP keys are recorded and NTE_NOT_SUPPORTED.
   crypt32 loads bcrypt and advapi32 on first use (LoadLibrary), so it
-  keeps no static imports of them (Caddy ships crypt32 alone).
+  keeps no static imports of them (Caddy ships crypt32 alone). crypt32
+  and ncrypt are built for x86 too ("The 32-bit system DLLs"): the
+  caller's structures with pointers in crypt32's `layout.rs`, checked
+  against wincrypt.h for both widths at compile time.
 
 ### secur32: SSPI
 
@@ -3270,6 +3598,83 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   Windows' ordinals (build.rs, from Wine's spec); Get/Set/CreateErrorInfo
   forward to ole32.
 
+### msxml6 (MSXML 6's DOM)
+
+What the Office Deployment Tool's setup.exe reads its configuration with
+(`msxml_test`, `wow64_msxml_test`; ROADMAP OF). `user/msxml6`, built for
+x64 and x86.
+
+- **Registration**: DOMDocument60 ({88D96A05-F192-11D4-A65F-0040963251E5},
+  ProgID Msxml2.DOMDocument.6.0) under `HKLM\SOFTWARE\Classes\CLSID`
+  and `Classes\WOW6432Node\CLSID` (the registry seed), InprocServer32
+  `%SystemRoot%\System32\msxml6.dll` (SysWOW64's for 32-bit programs,
+  through the file system redirector); ole32's CoCreateInstance loads it
+  and calls DllGetClassObject. FreeThreadedDOMDocument60 and the older
+  MSXML classes are not registered (CoGetClassObject records the class).
+- **Objects** (`com.rs`): the document owns its tree, an arena of nodes
+  (`dom.rs`; index 0 the document node). A node object handed out is a
+  wrapper (vtable for its node type, references, document, index) that
+  holds a reference on the document, so the tree lives while anything in
+  it is held; asking for the document node gives the document object.
+  Two requests for one node give two objects (MSXML gives one). Node
+  lists are live for childNodes and fixed for selections
+  (IXMLDOMSelection too); attribute maps are live; a parse error object is
+  a copy of the document's last error. IDispatch's GetTypeInfoCount is
+  0; no type information, GetIDsOfNames or Invoke (E_NOTIMPL, recorded).
+  Documents are rental: one thread at a time, no locking.
+- **Loading**: loadXML parses the string; load takes a VT_BSTR path or
+  `file:` URL, reads the file whole (64 MiB at most) and parses it before
+  returning, whatever `async` says (async load of local files is
+  synchronous: recorded as "other"); URLs of other schemes and IStreams
+  are not supported (recorded; S_FALSE, E_NOTIMPL). The reader is
+  `gala_xml` (galapkg's MSIX reader): no DTDs (MSXML 6's ProhibitDTD;
+  setting it FALSE is recorded and changes nothing), the encoding
+  declaration is not read (UTF-8 or a BOM). White space only text is
+  dropped unless preserveWhiteSpace. A failed parse leaves an empty
+  document, S_FALSE and VARIANT_FALSE, and a parse error: the line,
+  column, the line's text, the reason (gala's words), and an errorCode
+  of XML_E_MISSINGROOT (no root), XML_E_ENDTAGMISMATCH (an end tag that
+  does not match) or XML_E_INVALIDATROOTLEVEL for every other error
+  (MSXML has a code per error); a file not found is
+  INET_E_OBJECT_NOT_FOUND. With no error, its numbers are S_FALSE and 0.
+- **Reading the tree**: names (nodeName, baseName, prefix, namespaceURI,
+  with S_FALSE and NULL where there is none), nodeType and its string,
+  nodeValue, parent, children, siblings, ownerDocument, attributes
+  (getNamedItem, getQualifiedItem, item, nextNode), text (an element's
+  text nodes and CDATA in order, trimmed at the ends unless
+  preserveWhiteSpace), xml (empty elements as `<a/>`, the document's
+  top-level nodes ending with CR LF), getAttribute (S_FALSE and VT_NULL
+  when absent), getAttributeNode, character data and processing
+  instruction getters; the properties async, validateOnParse,
+  resolveExternals (turning it on is recorded), preserveWhiteSpace,
+  readyState (4), url.
+- **Properties** (setProperty/getProperty): SelectionLanguage is XPath
+  (anything else E_FAIL, recorded), SelectionNamespaces is kept as text
+  and parsed into prefix bindings (a text that does not parse is kept,
+  E_FAIL, and binds nothing, as Wine's tests show Windows doing); the
+  other MSXML 6 properties (ProhibitDTD, ServerHTTPRequest,
+  AllowDocumentFunction, MaxElementDepth, ...) are kept with their
+  defaults; an unknown name is E_FAIL (recorded).
+- **XPath** (`xpath.rs`): XPath 1.0 whole but the namespace axis, id()
+  and lang() (E_FAIL, recorded): every other axis, node tests, predicates
+  (a number is a position), unions, filter expressions, the operators
+  with XPath's conversions and comparison rules, the core function
+  library. Prefixes resolve through SelectionNamespaces only (an
+  undeclared one is E_FAIL, as in MSXML 6); an unprefixed name is in no
+  namespace; namespace declarations are not attributes. Node-sets are in
+  document order (attributes after their element). selectNodes and
+  selectSingleNode fail with E_FAIL on an expression that is not a
+  node-set. Numbers print as Rust's shortest round-trip form (XPath
+  wants no exponent: values beyond 1e21 differ).
+- **Not implemented** (E_NOTIMPL, each recorded as
+  `msxml6.dll!<interface>::<method>`, "not implemented"): changing the
+  tree (create*, appendChild, insertBefore, removeChild, replaceChild,
+  setAttribute, put_text, put_nodeValue, cloneNode, importNode, the
+  character data editors), save, getElementsByTagName, transforms, schemas
+  and validation, typed values, the event handlers, abort, nodeFromID,
+  the selection's own methods and the enumerators (`get__newEnum`).
+  Implement them when a program's run reaches one.
+
 ### Other DLLs and programs
 
 - **shell32, version, powrprof, comctl32, user32 strings**: profile
@@ -3346,7 +3751,13 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   GetProcAddress): GetNodeClusterState reports ClusterStateNotInstalled;
   functions returning handles give NULL with RPC_S_SERVER_UNAVAILABLE (no
   cluster service), state queries the Unknown state, the rest that error;
-  resutils parses CLUSPROP property lists (`clusapi_test`).
+  resutils parses CLUSPROP property lists (`clusapi_test`). A deliberate
+  difference: gala's ResUtilFind*Property find a property anywhere in the
+  list, within its size, by name; Windows' examine only the first
+  property and ignore the size, so a later property is not found or the
+  walk runs off the list (Windows 11), and a name the first property does
+  not have is answered from it all the same (Windows Server 2025). The test uses one property per list, the shape
+  both answer alike.
 - **cmd.exe** (`user/cmd`, built as a program and placed in System32;
   `cmd_test`) implements `/c` (and switches before it): cmd's documented
   quote rules, `%VAR%`, `^`, redirections `<`, `>`, `>>`, `n>`, `n>&m`,
@@ -3709,9 +4120,10 @@ WinHTTP and WinINet references document them, on one engine,
 (`net.rs`), the request and response (`request.rs`), URL cracking
 (`url.rs`) and the live-handle list (`handles.rs`). Each DLL is its
 API's functions, flags, options and error codes over it. Tests:
-`winhttp_test` and `wininet_test` (C, mingw-w64; against
-schannel_test's Nginx, which also serves plain HTTP on
-127.0.0.1:8080).
+`winhttp_test` and `wininet_test` (C, mingw-w64), `winhttp_cb_test`
+and its x86 twin `wow64_winhttp_cb_test` (the status callbacks; Rust
+on ntrt); all against schannel_test's Nginx, which also serves plain
+HTTP on 127.0.0.1:8080.
 
 - **What the APIs share, and so the engine**: WinHTTP kept WinINet's
   numbers for the query levels and flags (WINHTTP_QUERY_* =
@@ -3837,17 +4249,55 @@ schannel_test's Nginx, which also serves plain HTTP on
   (REDIRECT_POLICY)`, `redirect: more than the maximum`, `redirect:
   Location is no http(s) URL`, ...); a panic records its
   location (`<dll>!panic <file>`) and ends the process with 0xC0000409.
+- **Status callbacks** (`user/winhttp/src/callback.rs`; WinINet's
+  InternetSetStatusCallback is not there yet): WinHttpSetStatusCallback
+  sets one handle's callback and notification flags and returns the
+  previous callback (NULL at first, last error ERROR_SUCCESS;
+  WINHTTP_INVALID_STATUS_CALLBACK with ERROR_INVALID_HANDLE for a bad
+  handle). A connection and a request get their parent's callback,
+  flags and CONTEXT_VALUE when made; WinHttpSendRequest's context, when
+  not 0, becomes the request's. A notification is delivered when its
+  status bit is in the flags, on the thread of the call that takes the
+  step, with the handle and its context: HANDLE_CREATED (connection,
+  request) and HANDLE_CLOSING (after the handle is gone), the handle as
+  information; then the engine's steps, which it tells an observer
+  (`http_client::Event`, `Observer`: the DLL hands the request a
+  snapshot of its callback before each call into the engine, so a
+  callback changed from a callback applies from the next call):
+  RESOLVING_NAME (the host), NAME_RESOLVED (the first address),
+  CONNECTING_TO_SERVER (each address tried), CONNECTED_TO_SERVER
+  (after the TLS handshake for https), SECURE_FAILURE (a failed
+  handshake: WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CA, _CERT_DATE_INVALID,
+  _CERT_CN_INVALID, _CERT_REVOKED, _CERT_REV_FAILED, _INVALID_CERT or
+  _SECURITY_CHANNEL_ERROR), SENDING_REQUEST, REQUEST_SENT (the bytes),
+  RECEIVING_RESPONSE, RESPONSE_RECEIVED (the header block's bytes, a
+  3xx's too), REDIRECT (the new URL, before its connection). Strings
+  are NUL-terminated, their length in characters with the NUL (Wine's
+  lengths). The order is that of Wine's notification tests on Windows
+  (cache_test, redirect_test); `winhttp_cb_test` and
+  `wow64_winhttp_cb_test` check it against Nginx. Not sent: the
+  asynchronous completions, INTERMEDIATE_RESPONSE (1xx are skipped),
+  CLOSING_CONNECTION / CONNECTION_CLOSED, DETECTING_PROXY.
+- **Time-outs**: the connect time-out (default 60 s) is a non-blocking
+  connect waited for with WSAPoll, for each address tried (SO_ERROR
+  says why one failed); every address timing out is
+  ERROR_WINHTTP_TIMEOUT (`winhttp.dll!connect timed out`, the time-out
+  as detail), refused ERROR_WINHTTP_CANNOT_CONNECT. -1 or 0 leaves the
+  stack's own wait. WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH is a
+  session's (exactly a DWORD) and changes nothing: Passport's sign-in is
+  retired and Windows returns its 401 to the caller (Wine's
+  test_passport_auth on Windows), as gala does.
 - **Limits** (recorded where met): asynchronous sessions
-  (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and
-  WinHttpSetStatusCallback (a `gala_stubs` stub, as are
-  WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW); named
+  (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED);
+  WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW
+  (`gala_stubs` stubs); named
   proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
   WinINet's FTP and Gopher and its cache (InternetQueryOptionW and the
   A functions are not exported yet);
   WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
   as an option, not applied; the redirect policy is);
   connection reuse (every request has its own connection, closed with
-  its body); the resolve and connect time-outs (the stack's apply);
+  its body); the resolve time-out (GetAddrInfoW's own wait applies);
   authentication, cookies, decompression, HTTP/2, client certificates,
   FLAG_SYSTEMTIME. A handle must not be closed while another thread
   uses it.
@@ -4420,7 +4870,11 @@ SOCKET values are the endpoint handles.
   WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER); asyncio's _overlapped
   asks for all of them at import); gala's mswsock.dll forwards its
   AcceptEx, GetAcceptExSockaddrs and TransmitFile exports there (Go
-  imports them from mswsock). DisconnectEx closes both directions
+  imports them from mswsock). A deliberate difference: on Windows 11
+  mswsock's GetAcceptExSockaddrs export is another function than the one
+  WSAIoctl hands out and leaves the address pointers NULL; gala's export
+  does the work (`winsock_async_test` uses WSAIoctl's, as documented).
+  DisconnectEx closes both directions
   gracefully (IOCTL_AFD_DISCONNECT), overlapped or not; its
   TF_REUSE_SOCKET is not supported (WSAEOPNOTSUPP, ledgered), nor is
   TransmitFile (WSAEOPNOTSUPP, ledgered; callers fall back to read and
@@ -4886,7 +5340,9 @@ the program always sees WM_SIZE/WM_MOVE.
   user32's input pump posts it to the window's thread and
   DispatchMessage calls SetWindowPos, no longer maximized) and
   GALA_WM_MINIMIZED (the desktop minimized the window, so IsIconic
-  follows).
+  follows); for windows a kernel server serves (Wayland's), also
+  GALA_WM_ACTIVE and GALA_WM_POINTER_LEFT ("Linux applications on the
+  desktop (Wayland)", "Input").
 - **Mouse** (`Desktop::pointer`): a press on the start button toggles
   the menu; with the menu open, a press elsewhere only closes it. A
   taskbar button restores a minimized window, minimizes the active one,
@@ -4935,10 +5391,14 @@ the program always sees WM_SIZE/WM_MOVE.
 
 - The desktop queues `InputEvent`s (owner, window id, message, wParam,
   lParam; at most 512; a move replaces the window's unread move) and
-  signals the owner's event registered with GalaWindowListen after
-  letting go of its lock. user32 creates its queue event on first use
-  and registers it; `next` (GetMessage, PeekMessage) first moves input
-  in with GalaWindowInput (24-byte records) to the window's thread.
+  tells the owner's listener after letting go of its lock (every path
+  that can queue input or move the activation does: `with` too): an
+  event registered with GalaWindowListen is signalled
+  (`Listener::Event`), a kernel server's thread woken
+  (`Listener::Server`: the Wayland server for a Linux client's
+  windows). user32 creates its queue event on first use and registers
+  it; `next` (GetMessage, PeekMessage) first moves input in with
+  GalaWindowInput (24-byte records) to the window's thread.
 - **Two key states**, as Windows documents: GetAsyncKeyState's follows
   the input as it is moved in, GetKeyState's (and TranslateMessage's)
   follows the key messages as they are taken from the queue (one state
@@ -5362,7 +5822,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 - **Registered messages** (`message.rs`): RegisterWindowMessageW gives
   0xC000 + an index per name (case-insensitive), process-wide;
   registered clipboard formats share the table (names as first
-  spelled).
+  spelled). The table is the process's, not the window station's: a
+  format registered in two processes may get two numbers (the clipboard
+  itself is the station's: "The clipboard").
 - **Hooks** (`hook.rs`): per kind and thread, newest first;
   CallNextHookEx ignores its handle (as documented) and continues from
   the hook running on the thread. WH_CBT is called on creation
@@ -5522,6 +5984,15 @@ allocator (`gala_heap`).
 the classes (once). comctl32 imports user32 (the controls are windows)
 but loads gdi32 on first use (the JVM loads comctl32 without gdi32).
 
+- **Which comctl32** (`common::version6`): Windows gives a process
+  comctl32 6.10 (WinSxS) when its executable's manifest (RT_MANIFEST 1)
+  depends on Microsoft.Windows.Common-Controls 6, else 5.82. gala has one
+  comctl32 that answers as the one the process would get where the two
+  differ visibly: TTM_ADDTOOL takes a TOOLINFO up to lParam on 5.82 and
+  also the full one (with lpReserved) on 6, nothing larger on either
+  (Windows 11; `comctl32_test`, `gui_test` without a manifest,
+  `manifest_test` with one). A DLL's own activation context and UTF-16
+  manifests are not looked at.
 - **Common pieces** (`common.rs`): each control's state in a `Store` (by
   window, under a spin lock **that is never held while a message is
   sent**), drawing helpers (rounded fills, text through DrawTextW) and
@@ -5643,7 +6114,10 @@ then riched20.dll).
   CRLF and a lone LF into CR (a single-line control keeps the first
   paragraph); WM_GETTEXT/WM_GETTEXTLENGTH give CRLF; EM_GETTEXTEX CR or
   CRLF (GT_USECRLF), Unicode (1200) or ANSI (WideCharToMultiByte);
-  EM_GETTEXTLENGTHEX characters, CRLF characters or bytes. "RichEdit20A"
+  EM_GETTEXTLENGTHEX characters (GTL_DEFAULT, GTL_NUMCHARS) or, with any
+  other flags, bytes (GTL_USECRLF alone counts bytes; a Unicode window's
+  are UTF-16's whatever the code page, as Windows 11 counts), CRs counted
+  as CRLFs with GTL_USECRLF. "RichEdit20A"
   takes and gives ANSI text (gala's user32 passes SendMessageA's strings
   unchanged and has no ANSI windows, so the class's own procedure
   converts).
@@ -5701,7 +6175,7 @@ then riched20.dll).
   options are the ES_ styles of the same values (ECO_READONLY is
   ES_READONLY).
 - Not yet (each recorded as `riched20.dll!...`): RTF (EM_STREAMIN/OUT,
-  EM_SETTEXTEX with "{\rtf"), undo, the clipboard (user32 has none), OLE
+  EM_SETTEXTEX with "{\rtf"), undo, cut, copy and paste, OLE
   (EM_GETOLEINTERFACE, EM_SETOLECALLBACK: FileZilla's wx asks for both
   and copes), zoom, per-paragraph formats, find; other EM_ and edit
   messages are recorded as `riched20.dll!message` with the number and
@@ -5884,8 +6358,15 @@ windows can use them too.
   run programs (.exe/.com, as given or along the search path, `.exe`
   added) with CreateProcessW and the documented results (hInstApp 33,
   hProcess with SEE_MASK_NOCLOSEPROCESS; SE_ERR_FNF and
-  ERROR_FILE_NOT_FOUND); other verbs, documents and URLs have no
-  associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
+  ERROR_FILE_NOT_FOUND); the verb "runas" (case-insensitive) is
+  elevation as SECURITY.md "Elevation" designs it: a caller whose token
+  is elevated (TokenElevation, read through advapi32 loaded on first
+  use) gets the program started with that token, no prompt; any other
+  caller gets ERROR_CANCELLED with hInstApp (ShellExecuteW's result)
+  SE_ERR_ACCESSDENIED, as a cancelled UAC prompt answers, recorded as
+  `shell32.dll!ShellExecute(runas: elevation prompt)` (`runas_test`,
+  `wow64_runas_test`, `runas_declined`). Other verbs, documents and URLs
+  have no associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
   DragQueryPoint/DragFinish read a DROPFILES block (wide or ANSI names);
   DragAcceptFiles sets WS_EX_ACCEPTFILES (nothing generates
   WM_DROPFILES yet). SHFileOperationW does FO_COPY/FO_MOVE/FO_RENAME/
@@ -6918,11 +7399,18 @@ file's buffer is reserved fallibly (`try_reserve_exact`, an
 package's as `<package>/<file>`), the block, expected and actual
 values, and for XML the element and line.
 
-**XML** (`xml.rs`, gala's own): elements, attributes, text, CDATA,
-comments, PIs, the predefined entities and character references,
-namespaces, UTF-8 (with or without BOM) and UTF-16 with BOM. DTDs are
-refused (no entity expansion), as are undeclared prefixes, duplicate
-attributes and nesting beyond 256; iterative, so depth costs no stack.
+**XML** (`user/gala_xml`, gala's own, shared with msxml6.dll; host
+tests `cargo test -p gala_xml`): elements, attributes, text, CDATA,
+comments, PIs (the XML declaration among them), the predefined entities
+and character references, namespaces (declarations kept as attributes
+in the xmlns namespace, as the DOM has them), UTF-8 (with or without
+BOM) and UTF-16 with BOM, line ends normalized to LF; each element keeps
+its content in document order beside its child elements and
+concatenated text. DTDs are refused (no entity expansion), as are
+undeclared prefixes, duplicate attributes and nesting beyond 256;
+errors carry the line and column; iterative, so depth costs no stack.
+Its allocations are infallible (`alloc`'s String and Vec: the input's
+size bounds them).
 **ZIP64** (`zip.rs`): the zip64 end record, locator and extra field
 (MSIX packages are zip64 with data descriptors; the central directory is
 authoritative); entries of 4 GiB or more are refused (archives are in
@@ -7008,6 +7496,23 @@ stations and desktops a program creates are refused until stage 3).
 
 ### Other DLLs
 
+- msi (`user/msi`, x64 and x86; `msi_test`, `wow64_msi_test`): Windows
+  Installer's queries as Windows answers them for products and
+  components it has not installed, which on gala is all of them (no
+  installer database, no installer service): MsiQueryProductStateW,
+  MsiGetComponentPathW and MsiLocateComponentW INSTALLSTATE_UNKNOWN,
+  MsiEnumProductsW none, MsiConfigureProductExW ERROR_UNKNOWN_PRODUCT,
+  MsiProvideQualifiedComponentExW and MsiEnumComponentQualifiersW
+  ERROR_UNKNOWN_COMPONENT; a code that is not a braced GUID is
+  INSTALLSTATE_INVALIDARG or ERROR_INVALID_PARAMETER; MsiSetInternalUI
+  keeps the process's level and owner window (an invalid level returns
+  INSTALLUILEVEL_NOCHANGE yet its known flags replace the current ones,
+  as on Windows); MsiCloseHandle knows no handle
+  but 0. Each "nothing installed" answer is recorded (`msi.dll!<function>:
+  nothing installed`, kind other, the ordinal as detail). The exports
+  carry Windows' ordinals (build.rs; ODT's setup.exe imports them by
+  ordinal). Installing (MsiInstallProduct and the rest) is absent:
+  galapkg's MSI reader (ROADMAP PK) installs packages, not msi.dll.
 - msctf (`user/msctf`): SetInputScope and SetInputScopes, S_OK for a
   window and without effect (no text services to read them; Delphi's
   VCL calls them on its edit controls); the TSF COM objects are not
@@ -7017,8 +7522,8 @@ stations and desktops a program creates are refused until stage 3).
   accepted, never signaled, recorded).
 - userenv's group policy notifications; netapi32's join and DS role (a
   workgroup workstation).
-- user32: DPI awareness (96 DPI), power and clipboard registrations,
-  device lists (empty). winmm: audio and MIDI devices (none). ws2_32:
+- user32: DPI awareness (96 DPI), power registrations, device lists
+  (empty). winmm: audio and MIDI devices (none). ws2_32:
   GetAddrInfoExW (synchronous) and the name-space provider calls.
   dbghelp: MiniDumpWriteDump refused (recorded).
 - New DLLs: `shcore.dll` (GetDpiForMonitor, SetProcessDpiAwareness),
@@ -7132,6 +7637,7 @@ Win32 Structured Exception Handling", MSJ 1997).
 | The 32-bit ntdll (SysWOW64): the loader, the stubs, x86 SEH, the APC dispatcher | `user/testntdll` built for i686 (`x86.rs`, `seh_x86.rs`; `x64.rs` the 64-bit one's parts); the kernel's `nt/ntdll.rs` (`get32`), `nt/wow64.rs` (`through_ntdll32`, `exception_stack`), `nt/process.rs` (`deliver_to_user`) |
 | The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
 | The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
+| The 32-bit UCRT (SysWOW64) | `user/ucrtbase` built for i686 ("The UCRT"; its `_libm_sse2_*` shims in `ucrt/math.rs`) |
 | The 32-bit advapi32 and bcryptprimitives (SysWOW64) | `user/advapi32` built for i686 (its typed structures in `layout.rs`), `user/bcryptprimitives` |
 | The 32-bit user32 and gdi32 (SysWOW64) | `user/user32`, `user/gdi32`, `user/gala_heap` built for i686; their services' rows in `user/wow64/src/generic.rs` |
 | The 32-bit comctl32, oleaut32, ole32, shell32, shlwapi, winhttp, ws2_32 and the rest of what an x86 Inno installer loads | those crates built for i686 (`USER_DLLS_X86`); typed structures in `user/comctl32/src/layout.rs`, `user/ws2_32/src/layout.rs` |
@@ -7142,7 +7648,7 @@ Win32 Structured Exception Handling", MSJ 1997).
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_ucrt_test` (the UCRT: `user/ucrt_test` built for x86), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
 
 ### Decisions
 
@@ -7414,7 +7920,29 @@ wtsapi32, shfolder, bcrypt (its padding infos typed), winhttp, secur32
 (its handle tags the low half on x86) and ws2_32 (WSADATA, whose fields
 come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 `layout.rs`; its AFD requests in the caller's layout, `afd_abi`'s, which
-the kernel reads as such: `wow64_sock_test`). user32 and gdi32's structures with pointers are
+the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
+ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
+(`wow64_cert_test`, cert_test's source built for x86), msi
+(`wow64_msi_test`), normaliz, powrprof and wldp (`wow64_office_api_test`;
+powrprof reads CPUID through `core::arch::x86` there). wldp.dll answers
+as an unlocked Windows without App Control: WldpQueryWindowsLockdownMode
+UNLOCKED (no S mode), WldpGetLockdownPolicy WLDP_LOCKDOWN_DEFINED_FLAG
+alone for every host, WldpIsDynamicCodePolicyEnabled FALSE. crypt32's own
+structures (CERT_CONTEXT, CERT_INFO, CRL_*, the chain contexts) are
+`repr(C)` with pointers, and the caller's ones it reads or writes
+(CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_PARA's CERT_USAGE_MATCH, the
+policy para, status and SSL extra para, CERT_REVOCATION_PARA and
+_STATUS, CRYPT_KEY_PROV_INFO, CERT_KEY_CONTEXT, CERT_ENHKEY_USAGE,
+CERT_ALT_NAME_INFO/ENTRY) are typed in `layout.rs`, a field of a
+cbSize-versioned one read (`get!`) only when the size covers it (`has!`):
+a cbSize the 64-bit code compared with 32 or 80 is 16 or 48 on x86.
+Compile-time checks hold every one to the sizes and offsets mingw-w64's
+wincrypt.h gives for each target (`check!`); they caught CERT_USAGE_MATCH,
+a struct aligned to 8 on x64, laid out flat. The kept CRYPT_KEY_PROV_INFO
+property is the native structure followed by its names; handles kept as
+properties are pointer-sized. The machine's certificate directories are
+one set: the 32-bit crypt32 reads `%SystemRoot%\Sysnative\gala\roots`
+(the real System32; its own System32 is redirected to SysWOW64). user32 and gdi32's structures with pointers are
 typed for both too: WNDCLASSW (GetClassInfoW), CURSORINFO, FLASHWINFO,
 HIGHCONTRAST's size, BITMAP (CreateBitmapIndirect), and GetObjectW's
 LOGBRUSH, BITMAP and DIBSECTION sizes by pointer size; WM_COPYDATA's
@@ -7424,8 +7952,8 @@ it. The 32-bit ntdll exports the MSVC 64-bit arithmetic helpers that
 compiled programs import from it (`_allmul`, `_alldiv`, `_allrem`,
 `_aulldiv`, `_aullrem`, `_alldvrm`, `_aulldvrm`, `_allshl`, `_allshr`,
 `_aullshr`: `x86.rs`). Inno Setup 6.5.4's x86 installer installs on
-these (`wow64_inno`). To come, as programs need them: kernelbase,
-crypt32 and the rest (ROADMAP WOW).
+these (`wow64_inno`). To come, as programs need them (ODT's setup.exe
+next: ROADMAP OF): wintrust, wininet and the rest (ROADMAP WOW).
 
 The 32-bit stubs pop the bytes their own declaration names (stdcall
 `ret N`), and wow64.dll's table converts one entry per 4-byte word:
@@ -7445,7 +7973,8 @@ being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
 (`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`,
 `testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
 `testuser32_32.dll`, `testgdi32_32.dll`, `testcomctl3232.dll` and the
-rest of the Inno set as `test<name>32.dll`; test DLLs
+rest of the Inno set as `test<name>32.dll`, `testcrypt3232.dll`,
+`testncrypt32.dll`, `testmsi32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers
@@ -7515,7 +8044,18 @@ under their own names: `testdll32.dll`).
   fs:[0] chain (on the stack, aligned; otherwise
   EXCEPTION_STACK_INVALID), `handler(record, frame, context,
   dispatcher_context)` until one continues execution (a noncontinuable
-  one then raises STATUS_NONCONTINUABLE_EXCEPTION); the continue
+  one then raises STATUS_NONCONTINUABLE_EXCEPTION). Each handler runs
+  under a registration of the dispatcher's own, linked at the head of
+  the list for the call (Windows' nested-exception frame: its Next the
+  head at the call, then the frame being handled; ExceptionNestedException
+  for a dispatch that meets it, ExceptionCollidedUnwind for an unwind,
+  unlinked after the call while still the head). Invariant: Microsoft's
+  C++ catch (x86) saves fs:[0] in the handler, unwinds to the catching
+  frame and links the saved registration back above it; without the
+  dispatcher's own registration that saved head was the throwing
+  function's, an unwound frame, and a later call registering at the
+  same address made the list loop on itself (ODT's setup.exe:
+  `wow64_seh_test` checks the head a handler sees). Then the continue
   handlers; unhandled: GalaUnhandledException (wow64.dll converts the
   x86 record and context into the x64 ones with CS 0x23: the crash
   report's 32-bit registers), the top-level filter, the process ends.
@@ -7524,8 +8064,11 @@ under their own names: `testdll32.dll`).
   returns to its caller with ReturnValue; RtlRaiseException dispatches
   from its caller's context (ExceptionAddress: the return address); both
   and RtlCaptureContext are naked functions capturing the caller's
-  registers. Not yet: nested exceptions (EXCEPTION_NESTED_CALL),
-  collided unwinds, SafeSEH tables.
+  registers. Not yet: nested exceptions (the dispatcher's registration
+  answers ExceptionNestedException, but the search is not marked
+  EXCEPTION_NESTED_CALL nor skips to the handled frame), collided
+  unwinds (both dispositions are taken as ExceptionContinueSearch),
+  SafeSEH tables.
 - **APCs**: a 32-bit APC routine (NtQueueApcThread's, an I/O or timer
   APC's) is queued as wow64.dll's marker with the routine and its
   context packed in NormalContext. The kernel runs user APCs of a WOW64
@@ -7804,8 +8347,15 @@ same program as SYSTEM).
   STATUS_HANDLE_NOT_CLOSABLE (ERROR_INVALID_HANDLE), CloseDesktop
   STATUS_DEVICE_BUSY (ERROR_BUSY), CloseWindowStation of the process's
   station too. A thread's own desktop handle is freed when it ends.
-- **Other calls**: OpenWindowStation (an unknown or empty name is
-  STATUS_OBJECT_NAME_NOT_FOUND, a backslash STATUS_OBJECT_PATH_NOT_FOUND),
+- **Other calls**: OpenWindowStation (an unknown name is
+  STATUS_OBJECT_NAME_NOT_FOUND, a backslash inside the name
+  STATUS_OBJECT_PATH_NOT_FOUND, a leading one STATUS_OBJECT_PATH_SYNTAX_BAD;
+  the empty name opens the caller's logon session's own station,
+  `Service-0x<high>-<low>$` (not visible), if the logon has one, even for
+  an interactive process connected to WinSta0, and is
+  STATUS_OBJECT_NAME_NOT_FOUND if it has none: OpenWindowStation never
+  makes it; a Windows 11 desktop's logon had one, a Windows Server 2025
+  runner's had none),
   OpenDesktop (empty: STATUS_OBJECT_TYPE_MISMATCH, a backslash
   STATUS_OBJECT_PATH_SYNTAX_BAD, as Windows reports them),
   OpenInputDesktop (the process's station's Default, a new handle each
@@ -7822,8 +8372,8 @@ same program as SYSTEM).
   ERROR_BUSY when the desktop differs); UOI_USER_SID and UOI_HEAPSIZE
   are unsupported (ledger); a process holding a station or desktop
   handle is refused by a kernel handover (B5), and a carried process
-  connects again from its logon session; no clipboard or atom tables
-  per station yet.
+  connects again from its logon session; no atom table per station yet
+  (each station has its clipboard: "The clipboard").
 - **Observability**: the first call logs where the process is and why
   (`winsta: pid 4 (x.exe, session 1) is on WinSta0\Default (its logon
   session's)`, or `(STARTUPINFO.lpDesktop)`, `(its parent's, pid 4)`, `(an
@@ -7833,6 +8383,103 @@ same program as SYSTEM).
   `window`): `"ev":"winsta"` with `"op":"connect"` (pid, session,
   station, desktop, `from`), `"connect failed"`, `"made"`. The state
   dump's sessions part lists each session's stations.
+
+### The clipboard
+
+`kernel/src/nt/clipboard.rs` (the state; host tests there),
+`kernel/src/nt/clipboard_calls.rs` (gala's services),
+`user/user32/src/clipboard.rs`. Test program: `user/clipboard_test`
+(scenario `clipboard_test`, `events=ipc`: a parent and its child copy
+to each other). ROADMAP LD step 3.
+
+- **One per window station** (`WindowStation::clipboard`), as Windows
+  keeps it ("the system keeps a serial number for the clipboard for each
+  window station"): every process connected to the station shares it;
+  a clipboard call connects the process as a window station call does
+  ("Window stations and desktops").
+- **Open**: one thread at a time, with the window it named (NULL
+  allowed): OpenClipboard by another thread, or by the same thread with
+  another window, is STATUS_ACCESS_DENIED (ERROR_ACCESS_DENIED);
+  GetOpenClipboardWindow names the window. CloseClipboard,
+  EmptyClipboard, SetClipboardData, GetClipboardData and
+  EnumClipboardFormats by a thread without it open are
+  STATUS_INVALID_LOCK_SEQUENCE (ERROR_CLIPBOARD_NOT_OPEN). A thread that
+  ends with it open closes it (as CloseClipboard would).
+- **Owner**: EmptyClipboard makes the open window the owner
+  (GetClipboardOwner); the owner it replaces gets WM_DESTROYCLIPBOARD,
+  posted (Windows sends it). An owner's process that ends leaves no
+  owner, and its delayed and handle formats go.
+- **Formats**, in the order set (the kind GalaClipboardSet is told):
+  - memory (every format but those below): user32 copies GlobalSize
+    bytes of the locked HGLOBAL into the kernel, charged to the setter's
+    paged pool quota (`quota::Held`; STATUS_QUOTA_EXCEEDED,
+    ERROR_NOT_ENOUGH_QUOTA); the handle is the system's from then on, as
+    Windows says: user32 keeps it as this process's copy and frees it
+    once the data is gone;
+  - handle values (CF_BITMAP, CF_PALETTE, CF_ENHMETAFILE, CF_DSPBITMAP,
+    CF_DSPENHMETAFILE, 0x200-0x3ff): the value, good in the setting
+    process only (another process gets NULL, ledgered);
+  - delayed (SetClipboardData with NULL): listed, never rendered
+    (ledgered: no WM_RENDERFORMAT).
+  Each format's serial is the sequence number its setting made.
+- **GetClipboardData** gives a process-local HGLOBAL made from the
+  kernel's bytes (GalaClipboardGet: a 16-byte record of size, serial,
+  source format and kind, then the bytes), kept by user32 per (format,
+  serial) and freed at its first clipboard call after an EmptyClipboard
+  or a new set of the format; the setting process gets its own handle
+  back.
+- **Synthesized formats** ("Synthesized Clipboard Formats"): at a close
+  after a change, text without CF_LOCALE gets CF_LOCALE (the closer's
+  input language, GetKeyboardLayout's: 0x0409), then CF_TEXT,
+  CF_OEMTEXT and CF_UNICODETEXT that are missing are listed (that
+  order) as made from the best text present (CF_UNICODETEXT, else
+  CF_TEXT, else CF_OEMTEXT). So CF_UNICODETEXT set enumerates as
+  CF_UNICODETEXT, CF_LOCALE, CF_TEXT, CF_OEMTEXT, as Windows does.
+  user32 converts when asked, through the ANSI and OEM code pages.
+- **Sequence number** (GetClipboardSequenceNumber): grows with each
+  EmptyClipboard and SetClipboardData.
+- **Format listeners** (AddClipboardFormatListener: a window of the
+  caller's; at most 64 per station): each gets WM_CLIPBOARDUPDATE,
+  posted through the session's window registry
+  (`Windows::post_from_system`: no UIPI check, as the system sends it),
+  at every close after a change, its own process's included; a
+  listener whose window is gone is dropped.
+- **Services** (0x7fc0-0x7fc7; numbers in `syscalls.rs`, testntdll and
+  wow64's table):
+
+| Number | Service | |
+|---|---|---|
+| 0x7fc0 | GalaClipboardOpen(Hwnd) | OpenClipboard |
+| 0x7fc1 | GalaClipboardClose(Locale) | CloseClipboard; Locale for CF_LOCALE |
+| 0x7fc2 | GalaClipboardEmpty() | EmptyClipboard |
+| 0x7fc3 | GalaClipboardSet(Format, Kind, *Data, Length, *Serial) | Kind 0 memory, 1 a handle value (8 bytes), 2 delayed |
+| 0x7fc4 | GalaClipboardGet(Format, *Buffer, Length, *Info) | STATUS_BUFFER_TOO_SMALL with the record when short (Length 0: the size) |
+| 0x7fc5 | GalaClipboardInfo(*Record) | 32 bytes: sequence, flags (1 open by the caller, 2 open), open window, owner, count, the last empty's sequence |
+| 0x7fc6 | GalaClipboardFormats(*Formats, Max, *Count) | enumeration order |
+| 0x7fc7 | GalaClipboardListener(Hwnd, Add) | Add/RemoveClipboardFormatListener |
+
+- **Seams for the Wayland selection** (ROADMAP LD step 3's parts 2 and
+  3): `Clipboard::offer` puts bytes on the clipboard in one step as an
+  owner without a window (refused while a program has it open; the
+  listeners to tell come back), `Clipboard::text` reads CF_UNICODETEXT's
+  bytes; ROADMAP lists what the bridge needs beyond them.
+- **Limits** (ROADMAP LD step 3): delayed rendering, GDI handles across
+  processes and the bitmap and metafile synthesized formats, the viewer
+  chain (SetClipboardViewer), registered formats per process
+  (user32's table), CF_LOCALE's code pages (the system's), no DACL check
+  for WINSTA_ACCESSCLIPBOARD (stations have none).
+- **Observability**: events (category `ipc`, `"ev":"clipboard"`, each
+  with pid, tid, session and station): `open` (hwnd), `open denied`
+  (the holder's pid, tid and window), `empty` (the previous owner),
+  `set` (format, kind, size, serial), `get` (format, the source a
+  synthesized format came from, size, the setter's pid), `close`
+  (whether it changed, the listeners told), `listener`. The state dump
+  has a line per used clipboard: `statedump: session 1 WinSta0
+  clipboard: sequence 4, open by Some(Opener { pid, tid, hwnd }), owner
+  Some((pid, hwnd)), 4 formats [1, 16, 7, 13] (35 bytes), 1 listeners`
+  (a holder that never closes it blocks every other program's copy
+  and paste). The ledger has delayed rendering and handle formats
+  asked across processes.
 
 ### Presenters (B3a)
 
@@ -7980,7 +8627,7 @@ alone in `winstate/tests.rs`.
 
 ```
 Session (id, its object directory, its token defaults, presenter)
- └─ window station WinSta0 (later: clipboard, atoms)
+ └─ window station WinSta0 (its clipboard; later: atoms)
      └─ desktop "Default" = window state (registry, Z order, focus,
                             capture, pixel buffers) + input queue
                             + presenter: Console | Remote | None
@@ -8061,7 +8708,7 @@ on Windows too), 1 for the local console, 2+ for remote logons.
 
 Later: several window stations and desktops per session (CreateDesktop,
 OpenDesktop, SetThreadDesktop, SwitchDesktop, a secure desktop for
-credential prompts), clipboard and atom tables per window station, and
+credential prompts), atom tables per window station, and
 Windows' real RDP (MS-RDPBCGR is openly documented; IronRDP's server
 crate is a candidate) if mstsc compatibility is wanted. Without any gala
 work, QEMU's own VNC (`-vnc :1`) shows gala's screen remotely.
@@ -8103,8 +8750,9 @@ Design rules:
   objects are core objects; an NT handle and a Linux fd are two views of
   one object (later: a Windows and a Linux program on one pipe, each
   launching the other).
-- **Identity**: Linux uid/gid map to SIDs on the existing tokens; one
-  access-check implementation.
+- **Identity**: Linux uid/gid map to SIDs on the existing tokens
+  (`lx::identity`, "The lx module"); one access-check implementation
+  (not yet: Linux checks a file's mode bits as its owner's).
 - **One file system** for both: case sensitivity per directory, POSIX
   metadata per file, symlinks and hard links, POSIX unlink/rename of
   open files.
@@ -8125,7 +8773,7 @@ Design rules:
 | 2. Per-process system-call dispatch | built |
 | 3. Core process vs NT process | built (the `Core` still lives in `nt`) |
 | 4. File-system metadata | built for Linux (NT surface planned) |
-| 5. Shared objects | planned |
+| 5. Shared objects | first object built: AF_UNIX sockets (`unix`); pipes, files and TCP sockets planned |
 | 6. `net` free of `nt` | built |
 
 1. **Terminal core**: the pty as a core object (master/slave pair with a
@@ -8201,6 +8849,73 @@ Design rules:
    (CreateSymbolicLinkW).
 5. **Shared objects**: when pipes, sockets or files are next reworked,
    their state goes in core objects that do not assume an NT handle.
+   The first is the AF_UNIX socket ("AF_UNIX sockets" below): the core
+   `unix` module owns the socket, its name, its connection, its queues
+   and the rights in flight; `lx::unix` is the Linux view, Windows'
+   AF_UNIX through afd will be the NT one. Pipes, files and TCP sockets
+   still keep their state in the personalities.
+
+#### AF_UNIX sockets
+
+Where a socket and its file-system name live is seam 5's question; the
+answer keeps both core objects, so a Windows program's AF_UNIX socket
+(Windows has one, through afd, `AF_UNIX` = 1, a socket file shown as a
+reparse point) can later bind, connect to and accept from the same
+names and connections as a Linux program's.
+
+- **The socket** is `unix::Socket` (`kernel/src/unix.rs`, core: no
+  `nt`, no `lx`; xtask's `unix_sockets_do_not_depend_on_a_personality`
+  keeps it so): its kind (stream, seqpacket, datagram), its creator's
+  credentials (`Cred`: pid, uid, gid), its name, its phase (fresh,
+  listening with its queue of connections not yet accepted, connected
+  to a `Conn`), its peer's name and credentials, and its waiters
+  (`Waiters`: thread ids, woken through `crate::runtime`). A
+  personality wraps it in its own description (`lx::unix::UnixSocket`
+  in an `lx::state::Fd`; an afd endpoint for NT) and calls `release`
+  at that description's last close.
+- **The name** is either a socket node of the shared file system
+  (`RamFs::create_socket`: a node of its own kind, S_IFSOCK for Linux,
+  a reparse point for NT, as Windows shows an AF_UNIX socket's file) or
+  an abstract name (bytes after a leading NUL: in no file system). The
+  binding (name to socket) is the core's table `BOUND`, keyed by the
+  node's id or the abstract bytes, not a field of the node: the node is
+  the file system's and outlives the socket (Linux leaves a socket's
+  file behind when it closes; a connect to it is then ECONNREFUSED),
+  the binding lives exactly as long as the bound socket. The bound
+  socket keeps the node open (an open without data access), so an
+  unlinked node's id is not reused while the binding names it; rename
+  keeps the binding (the node is the same). Path resolution, the mode
+  (0777 less the umask) and the errors of a path stay the
+  personality's.
+- **A connection** (`Conn`) holds a queue toward each side (records:
+  bytes, the rights that came with them, the quota charge for them),
+  each side's shutdown flags as Linux keeps them (RCV, SEND; a stream
+  or seqpacket side that closes sets both on its peer) and arrival
+  counters (epoll's EPOLLET). It references its sockets' waiters, not
+  the sockets, so nothing cycles. connect makes the listener's side at
+  once and queues it for accept (backlog + 1 may wait, as Linux; then
+  `Error::Full` with the listener's waiters to block on).
+- **Rights** (Linux's SCM_RIGHTS) are opaque to the core
+  (`Box<dyn Any + Send>`): the Linux view passes `KArc<Fd>`, so the
+  receiver's descriptor is the same open file description (its offset,
+  its flags, a memfd's pages). The core drops rights only outside its
+  locks: dropping one can release another socket. A stream read stops
+  after a record that carried rights, so they arrive with their bytes.
+- **Waiting** is the personality's: add to the socket's waiters,
+  prepare, look again, block (`lx::unix::wait_on`; poll and epoll put
+  the thread on the waiters through `poll::Watch`). Every change of a
+  socket, its connection or its listener's queue wakes them.
+- **Limits**: `CAPACITY` (212992, Linux's default send buffer) per
+  direction, each message counting `RECORD_OVERHEAD` more; charged to
+  the sending process's nonpaged pool quota (`quota::Held`: ENOBUFS
+  over it). Not kept across reboots (socket nodes are not in the change
+  log). Rights that refer back to their own queue through a socket
+  (a socket sent over itself) are not collected (Linux has a collector
+  for such cycles).
+- **Observability**: `unix::dump` in the state dump (`dump: unix:` a
+  line per named socket: kind, creator, name, phase, queued, shutdown,
+  peer, waiters); the personality's events (`lx unix`, `lx unix
+  rights`).
 6. **`net` free of `nt`**: `kernel/src/net/` reaches threads, waits and
    time through `crate::runtime` (`kernel/src/runtime.rs`): the kernel's
    `sched`/`time`, or with `hosted` gala-um's host threads and clocks
@@ -8222,7 +8937,7 @@ calls; priorities come from `strace` of target programs on real Linux.
 | 1 | ELF static loader, write, exit_group, brk, mmap, arch_prctl: "hello" from static musl | runs |
 | 2 | static busybox: files, directories, pipes, wait4, execve, clone for threads, futex | busybox's shell and applets run, by name through symbolic links (`lx_busybox`); links, unlink of open files, case-sensitive directories (`lx_fs`); threads, futex and musl's pthreads run (`lx_thread`) |
 | 3 | fork, signals, ptys (`ssh` into a Linux shell on gala), basic /proc and /dev | ABI data ready (`lx_abi`) |
-| 4 | dynamic linking (ld.so, glibc), epoll, sockets | glibc programs run through ld.so with shared libraries, dlopen and TLS (`lx_dyn`, ROADMAP LD step 1); TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); the rest planned |
+| 4 | dynamic linking (ld.so, glibc), epoll, sockets | glibc programs run through ld.so with shared libraries, dlopen and TLS (`lx_dyn`, ROADMAP LD step 1); TCP sockets, poll, select and epoll run (`lx_socket`, `lx_poll`, `lx_epoll`, busybox httpd and wget: `lx_httpd`); AF_UNIX sockets with SCM_RIGHTS and memfd (`lx_unix`, `lx_memfd`, LD step 2); the rest planned |
 | 5 | real workloads (a distribution's userland, build tools) | planned |
 
 Test programs in `user/lx/`: hello_test, write_exit_test, brk_test,
@@ -8233,7 +8948,11 @@ exec_test, socket_test, thread_test, poll_test, epoll_test and fs_test
 (`lx_fileio`, `lx_exec`, `lx_socket`, `lx_thread`, `lx_poll`,
 `lx_epoll`, `lx_fs`, each also `_pie`), forkmem_test (fork's memory:
 copy-on-write private pages, shared MAP_SHARED anonymous memory and its
-futexes: `lx_forkmem`, `_pie`), dyn_test (glibc, dynamic:
+futexes: `lx_forkmem`, `_pie`), memfd_test (`lx_memfd`, also `_pie`;
+ROADMAP LD step 2), unix_test (`lx_unix`, also `_pie`; LD step 2),
+wl_test (a Wayland client, recorded against weston, against the
+kernel's Wayland server: `lx_wl`, also `_pie`; LD step 2),
+dyn_test (glibc, dynamic:
 `lx_dyn`, `lx_dyn_pie`, with Ubuntu's glibc in the image), and clock_test, fork_test,
 proc_test, pty_test, signal_test, whose transcripts recorded on Linux
 fix `lx_abi`'s layouts and are the spec for what is still missing. The
@@ -8329,7 +9048,8 @@ The running parts (milestone 1; `lxrun=`):
   - the stack: 8 MiB committed ending at `mm::STACK_END`
     (0x7fff_fffe_0000), executable only if PT_GNU_STACK says so (or is
     missing); `stack::build`'s bytes (gap 0, AT_RANDOM from
-    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, uid/gid 1000)
+    `platform::fill_entropy`, AT_HWCAP from CPUID(1).EDX, AT_UID/AT_GID
+    the program's ids, `lx::identity`)
     copied to its top;
   - then `nt::process::create_bare` (no PEB, ntdll, handles or image
     layout: `Process::layout()` is None) and `thread::create`, which
@@ -8423,7 +9143,10 @@ The running parts (milestone 1; `lxrun=`):
     file's view); else with MREMAP_MAYMOVE moves the mapping whole (to a
     free range, or MREMAP_FIXED's address, replacing what is there):
     its VAD runs, its views and its pages move, frames and all
-    (`UserSpace::move_page`: no copy). The range must be mapped
+    (`UserSpace::move_page`: no copy). A file view reaches as far as
+    the file is when a page is touched (`Section::frame` asks the file
+    system), so a mapping grown after the file grew shows the new pages
+    (memfd_test). The range must be mapped
     (EFAULT); without MREMAP_MAYMOVE and no room ENOMEM;
     MREMAP_DONTUNMAP and old length 0 are EINVAL, ledgered.
   - **madvise**: MADV_DONTNEED drops the range's frames (anonymous pages
@@ -8435,6 +9158,35 @@ The running parts (milestone 1; `lxrun=`):
   - execve unmaps everything, views too (`mm::clear`). The program and
     its interpreter are still mapped by copying their bytes into private
     pages (not as file views: ROADMAP LD).
+- **memfd** (`lx::memfd`; memfd_test, `lx_memfd`): memfd_create
+  (MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL: mode 0666 and
+  F_SEAL_EXEC; MFD_HUGETLB and unknown flags EINVAL, ledgered; a name of
+  more than 249 bytes EINVAL) makes an anonymous file of the shared file
+  system ("Files": `RamFs::create_anonymous`), S_IFREG mode 0777 (no
+  umask), nlink 0, open read-write as one description, so read, write,
+  pread/pwrite, lseek, ftruncate, fallocate, fstat and fchmod are the
+  file calls'. fallocate (`lx::file::fallocate`; glibc's
+  posix_fallocate, which Wayland clients' buffer files use): the file
+  system keeps no holes, so mode 0 only grows the file to the range's
+  end (never shrinks it), KEEP_SIZE alone changes nothing, PUNCH_HOLE
+  (with KEEP_SIZE, as Linux requires) writes zeros over the range inside
+  the file; the other modes are EOPNOTSUPP, as on tmpfs, and ledgered;
+  SEAL_GROW refuses growing, SEAL_WRITE punching (EPERM).
+  Its pages are the file's whole pages, so every mapping of it shares
+  them: in one process, through a fork, or a descriptor passed with
+  SCM_RIGHTS (the same description). fcntl F_ADD_SEALS/F_GET_SEALS:
+  the seals live on the node (`ramfs::Node::seals`); SHRINK and GROW
+  refuse a ftruncate that shrinks or grows it and a write past its end,
+  WRITE (and FUTURE_WRITE) writes and writable shared mappings (EPERM),
+  EXEC a change of the execute bits, SEAL further seals (EPERM); WRITE
+  cannot be added while a shared mapping of it open for writing exists,
+  even a read-only one (EBUSY, as Linux 6.18 shows); a read-only shared
+  mapping of a write-sealed file gets a read-only section (mprotect to
+  PROT_WRITE: EACCES). F_ADD_SEALS on an fd not open for writing is
+  EPERM, on what is not a memfd EINVAL. A process's memory is released
+  when it ends (`lx::process_ended`: `mm::clear`, before the parent
+  hears of it, as Linux does), so its mappings no longer count then.
+  Events: `lx memfd` and `lx memfd seal` (`events=ipc`).
 - **System calls** (`lx::dispatch`, a table of `lx::syscalls::COUNT`
   entries indexed by number): read, write, close, mmap, mprotect,
   munmap, mremap, madvise, brk, rt_sigaction, rt_sigprocmask, rt_sigreturn,
@@ -8467,6 +9219,34 @@ The running parts (milestone 1; `lxrun=`):
   a buffer fault before anything was written is EFAULT). readv reads
   into one vector after another while each fills. Anything else:
   `errno::to_return(ENOSYS)`.
+- **Linux identity** (`lx::identity`; id_test, `lx_id`): a Linux
+  program is the account its NT token is. The uid is a function of the
+  token's user SID: SYSTEM is root (0); a local account of this machine
+  with RID 1001 or more is RID - 1 (the boot user `gala`, RID 1001, is
+  1000, Linux's first user); any other SID is `nobody` (65534). The gid
+  is the user's own group of the same number (root's 0); the
+  supplementary groups are it and the enabled token groups with Linux
+  names (BUILTIN\Administrators `sudo` 27, BUILTIN\Users `users` 100).
+  Real, effective and saved ids are the same (no setuid programs):
+  setuid/setgid to one's own id succeed, anything else EPERM; chown
+  keeps the caller's ids. Every place Linux reports ids takes them from
+  there: getuid and friends, getgroups, getresuid/getresgid, auxv's
+  AT_UID/AT_GID, SO_PEERCRED, siginfo's si_uid, stat's owner (the
+  caller's, as before: we own every file; root for the user database),
+  the Wayland server's credentials (the boot user's). **The user
+  database** is made at boot from the accounts (`nt::accounts::
+  local_users`: `gala` and `SAM\Gala\Users`) and published as two
+  files of a ramfs volume of their own, bound by the walk over
+  `/etc/passwd` and `/etc/group` (listed in `/etc`, covering any file
+  of those names there; `/etc` made if missing): root's 0644 files
+  (opening them for writing EACCES, chmod EPERM, unlink or rename
+  EBUSY), never in the change log, never `C:\etc\passwd`. A user's
+  home is their profile, `/Users/<name>` (the boot user's made at boot
+  if no module made it); root's is SYSTEM's
+  (`/Windows/System32/config/systemprofile`); the shell `/bin/sh`.
+  Limits: an account added after boot appears at the next (there is no
+  NetUserAdd yet); a file's owner is not yet its security descriptor's
+  owner (the caller's for every file but the user database's).
 - **Files** (`lx::file`; fileio_test and fs_test, `lx_fileio`,
   `lx_fs`): Linux paths walked on the shared ramfs (`/` separators, `.`
   and `..` by the walk, ENOTDIR/ENOENT on the way, a trailing slash makes
@@ -8480,7 +9260,16 @@ The running parts (milestone 1; `lxrun=`):
   per walk (ELOOP, path_resolution(7)). Names compare as their
   directory's: exactly in a directory a Linux program made, otherwise
   case-insensitively (the boot's `/lx`, NT's directories; ramfs
-  "Files"). An open registers with the file system sharing
+  "Files"). **`/run`** is mounted on it (run_test, `lx_run`): a ramfs
+  volume only the Linux view reaches (ramfs "Volumes"), made at the
+  first walk, a tmpfs as Linux has it. The walk enters it at `run` in
+  `/` (a `C:\run`, if one exists, is hidden by it); `..` of its root is
+  `/`; its root has no name in `/` to remove or rename (rmdir, rename:
+  EBUSY, as `/`), mkdir of it EEXIST; getdents64 of `/` lists `run`
+  after `..`; its nodes' st_dev is `RUN_DEV`, the shared tree's `DEV`;
+  getcwd puts `/run` before a path in it; a rename whose parents, or a
+  link whose file and new parent, are on different sides is EXDEV
+  before any other check (Linux compares the mounts first). An open registers with the file system sharing
   everything and keeps the offset in the description (dup'ed and
   inherited fds share it; its lock is never held across user memory).
   The calls: open/openat/creat (O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
@@ -8489,7 +9278,8 @@ The running parts (milestone 1; `lxrun=`):
   O_PATH; O_TMPFILE EOPNOTSUPP), read,
   write, pread64/pwrite64, readv/writev, lseek (SEEK_DATA/HOLE: one hole
   at the end; a directory only back to an offset getdents64 gave),
-  ftruncate/truncate, fsync/fdatasync, the stat family (stat, lstat,
+  ftruncate/truncate, fallocate (see memfd above), fsync/fdatasync, the
+  stat family (stat, lstat,
   fstat, newfstatat with AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW, statx
   with STATX_BASIC_STATS whatever the mask asks, a reserved mask bit
   EINVAL), getdents64 (`.` and `..` first,
@@ -8543,6 +9333,23 @@ The running parts (milestone 1; `lxrun=`):
   program the process runs (`LxProcess::exe`, its node: execve sets it,
   to the interpreter for a `#!` script; a fork's child has its
   parent's); other /proc paths are ENOENT (ledgered for readlink).
+- **Process attributes** (`lx::prctl`; prctl_test, `lx_prctl`): prctl's
+  PR_SET_NAME and PR_GET_NAME are the calling thread's name
+  (`state::Comm` in `LxThread`, Linux's "comm": up to 15 bytes and a
+  NUL; a new thread has its creator's, a fork's child its parent's,
+  execve gives the program's file name, the path it was given, and so a
+  script's own), PR_CAPBSET_READ the full bounding set (1 up to
+  CAP_LAST_CAP, 40; EINVAL beyond, by which libcap finds the last); any
+  other option EINVAL and ledgered (`linux option missing`, service
+  prctl). getresuid and getresgid: the one user's ids, three times.
+- **statfs** (`lx::file`; statfs_test, `lx_statfs`): statfs (the path
+  found as stat finds it, its errors) and fstatfs report the shared
+  file system as a tmpfs (TMPFS_MAGIC; 4 KiB blocks, the machine's
+  memory as its size and what is free of it as its room, no inode limit,
+  names of 255 bytes, ST_VALID, fsid 0); a pipe, a socket and an
+  anonymous inode their pseudo file systems' magics, without blocks.
+  fontconfig asks whether its cache may be mapped, libselinux whether
+  /sys/fs/selinux is there, GLib a file's file system.
 - **Clocks and timers** (`lx::time`, `lx::timer`; clock_test is the
   spec): clock_gettime/clock_getres (REALTIME and its variants from the
   system time, MONOTONIC, _RAW, _COARSE, BOOTTIME from the monotonic
@@ -8557,8 +9364,9 @@ The running parts (milestone 1; `lxrun=`):
 - **Sockets** (`lx::socket`; socket_test): AF_INET and AF_INET6 (dual
   stack unless IPV6_V6ONLY) stream sockets on `net::tcp`, the stack NT's
   AFD uses, with a token AFD does not know (Linux sockets poll, the
-  notify hook is AFD's): socket (SOCK_NONBLOCK, SOCK_CLOEXEC; datagram,
-  Unix and netlink sockets ledgered, refused), bind, listen (binds an
+  notify hook is AFD's): socket (SOCK_NONBLOCK, SOCK_CLOEXEC; datagram
+  and netlink sockets ledgered, refused; AF_UNIX is `lx::unix`), bind,
+  listen (binds an
   ephemeral port first if needed), accept/accept4, connect (blocking;
   non-blocking always EINPROGRESS, the next connect after it finished
   returns 0 once, then EISCONN; refused: ECONNREFUSED or SO_ERROR once,
@@ -8570,7 +9378,43 @@ The running parts (milestone 1; `lxrun=`):
   SO_REUSEADDR, SO_KEEPALIVE, SO_REUSEPORT, SO_BROADCAST, buffer sizes
   (doubled, as Linux reports them), SO_LINGER, timeouts, TCP_NODELAY
   kept and read back without effect on the stack; others ENOPROTOOPT,
-  ledgered). A socket closes with its last description.
+  ledgered), sendmsg/recvmsg (`lx::unix`'s: the iovecs gathered and
+  scattered; control data on TCP EINVAL, ledgered). A socket closes
+  with its last description.
+- **AF_UNIX sockets** (`lx::unix` on the core's `unix`, "AF_UNIX
+  sockets" above; unix_test, `lx_unix`): socket (SOCK_STREAM,
+  SOCK_SEQPACKET, SOCK_DGRAM, SOCK_RAW as datagram as Linux takes it,
+  other types ESOCKTNOSUPPORT; protocol 0 or PF_UNIX, else
+  EPROTONOSUPPORT) and socketpair (another family EOPNOTSUPP); bind to a
+  path (a socket node, mode 0777 less the umask; an existing name, even
+  the socket's own, EADDRINUSE; a missing directory ENOENT; a family
+  other than AF_UNIX or a length past 110 EINVAL), to an abstract name,
+  or autobind (only the family: a NUL and five hex digits); listen
+  (unbound or connected EINVAL; a datagram socket EOPNOTSUPP); accept
+  and accept4 (the peer's name, unnamed: the family alone; not
+  listening EINVAL); connect (the path followed: ENOENT; not a socket,
+  or nothing listening there, ECONNREFUSED; another kind EPROTOTYPE;
+  connected EISCONN; a full backlog EAGAIN, or it blocks); read/write,
+  readv/writev, send/recv/sendto/recvfrom, sendmsg/recvmsg (MSG_PEEK,
+  MSG_DONTWAIT, MSG_WAITALL, MSG_NOSIGNAL, MSG_TRUNC,
+  MSG_CMSG_CLOEXEC; an unconnected stream's read EINVAL, write
+  ENOTCONN; EPIPE with SIGPIPE on a stream or seqpacket that cannot
+  send; a datagram to a pair whose peer went ECONNREFUSED; a message
+  truncated: MSG_TRUNC); SCM_RIGHTS (the fds checked, EBADF, at most
+  253; recvmsg installs what its control buffer holds, the rest closed
+  with MSG_CTRUNC; msg_controllen the CMSG_SPACE used, at most what was
+  given; msg_flags keeps MSG_CMSG_CLOEXEC, as Linux's do); shutdown
+  (unconnected: 0); getsockname/getpeername (a path with its NUL in the
+  length; the socket keeps its name after an unlink); SO_TYPE,
+  SO_DOMAIN, SO_PROTOCOL, SO_ACCEPTCONN, SO_ERROR, SO_PEERCRED,
+  SO_PASSCRED, SO_SNDBUF/SO_RCVBUF (doubled), the timeouts (kept);
+  poll and epoll (a fresh socket OUT|HUP, a listener IN with a
+  connection waiting, a connection IN with bytes or a shut peer, RDHUP
+  then, OUT while a quarter of the buffer or less waits, HUP once both
+  directions are shut; a datagram pair's peer going changes nothing
+  but sends). fstat: S_IFSOCK; open of a socket's node ENXIO; stat
+  S_IFSOCK; getdents DT_SOCK. Not yet, ledgered: a datagram socket's
+  connect or sendto by name, SCM_CREDENTIALS, rights on a peek.
 - **poll** (`lx::poll`; poll_test's poll and select parts, socket_test):
   poll, ppoll, select, pselect6 over every kind of description (pipes:
   IN with bytes, HUP without writers, OUT with a whole page free, ERR
@@ -8601,6 +9445,18 @@ The running parts (milestone 1; `lxrun=`):
   (`Fd::watchers`, `Epoll::forget`); closing the epoll fd empties its
   set. Ready entries come out in the order they were added; struct
   epoll_event is the packed 12 bytes.
+- **eventfd** (`lx::eventfd`; eventfd_test, `lx_eventfd`): eventfd and
+  eventfd2 (EFD_SEMAPHORE, EFD_NONBLOCK, EFD_CLOEXEC; another flag
+  EINVAL), a 64-bit counter as `Object::EventFd`: a read (8 bytes at
+  least, else EINVAL) gives it and zeroes it (a semaphore's gives 1 and
+  takes 1) and blocks while it is 0, a write adds (u64::MAX is EINVAL)
+  and blocks while the sum would pass 0xffff_ffff_ffff_fffe, EAGAIN for
+  either when non-blocking; readable while above 0, writable while 1
+  fits. Readers and writers wait on its core `Waiters` (as AF_UNIX
+  sockets do), which `poll::Watch` joins for poll, select and epoll; a
+  value read and not copied out (EFAULT) is given back. fstat: an
+  anonymous inode (0600); fstatfs: anon_inodefs. GLib's main loop wakes
+  its threads with one (it falls back to a pipe without).
 - **Waiting** (`lx::wait`): a thread blocks by `prepare` (the
   scheduler's prepare_wait, its deadline the earlier of the call's and
   ITIMER_REAL's), then `block`, which records it as its signal state's
@@ -8612,10 +9468,11 @@ The running parts (milestone 1; `lxrun=`):
   after its check finds it waiting. poll, select and epoll add the
   thread to every pipe they look at (`poll::Watch`) and look once more
   after preparing. Sleeps, rt_sigsuspend, pause, rt_sigtimedwait,
-  futex waits and wait4 block the same way. Sockets have no wait queue
-  (the stack's notify hook is AFD's): their waits, and poll/epoll over a
-  socket or a nested epoll, look again every millisecond (`dispatch::
-  pause`, `wait::POLL_NS`) until seam 5 gives the core objects queues.
+  futex waits and wait4 block the same way, and AF_UNIX sockets on
+  their core waiters. TCP sockets have no wait queue (the stack's
+  notify hook is AFD's): their waits, and poll/epoll over a TCP socket
+  or a nested epoll, look again every millisecond (`dispatch::pause`,
+  `wait::POLL_NS`) until seam 5 gives the core objects queues.
 - **Threads** (`lx::threads`; thread_test): clone with
   CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD (required)
   and CLONE_SYSVSEM, CLONE_SETTLS, CLONE_PARENT_SETTID,
@@ -8817,7 +9674,11 @@ The running parts (milestone 1; `lxrun=`):
   image's `lx: exec` line; a refused image logs `lx: pid <p> execve
   <path> failed: <why>`, one that cannot be mapped after the old is gone
   `... killed by SIGSEGV`. Sockets: the stack's `tcp accept`, `tcp
-  connect`, `tcp close` events (`events=net`). Threads: an `lx thread`
+  connect`, `tcp close` events (`events=net`); AF_UNIX: `lx unix`
+  events (socketpair, bind, listen, connect, accept, the close of a
+  named socket; refusals with their errno) and `lx unix rights` (sent,
+  received, dropped), memfd: `lx memfd` and `lx memfd seal`
+  (`events=ipc`); the state dump's `dump: unix:` lines. Threads: an `lx thread`
   event per clone (pid, tid, flags) after the core's `thread create`; a
   failed clone logs why. The state dump (OBSERVABILITY "State dump")
   lists every Linux thread (Linux and core tid, mask, pending, blocked
@@ -8866,9 +9727,11 @@ The running parts (milestone 1; `lxrun=`):
   memory; a MAP_SHARED anonymous mapping grown by mremap; execve ending the other threads first;
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
-  ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
-  (seam 4's rest; one user so far); a /dev
-  directory and /proc; datagram and Unix sockets; process groups
+  ITIMER_VIRTUAL/PROF, rusage); a file's owner from its security
+  descriptor (seam 4's rest: the caller's today; the device is per file
+  system: the shared one's and `/run`'s); a /dev
+  directory and /proc; datagram sockets (AF_INET; AF_UNIX ones by
+  name), SCM_CREDENTIALS; process groups
   and sessions; a vDSO; Linux in gala-um; the
   system-call numbers 462..=469 (Linux 6.18 has them; our sources do not
   name them yet).
@@ -8979,7 +9842,7 @@ tail); `SA_RESTART`'s per-call rules (a pipe read restarts, nanosleep
 never does: signal_test); sigaltstack's minimum (MINSIGSTKSZ 2048 vs
 AT_MINSIGSTKSZ).
 
-## Plan: Linux applications on the desktop (Wayland)
+## Linux applications on the desktop (Wayland)
 
 ROADMAP LD steps 2-4: graphical Linux programs on shasha beside Windows
 programs. Linux desktop programs draw through a display server: GTK 4
@@ -8992,105 +9855,616 @@ into the kernel.
 
 ### Where the server runs
 
-**In the kernel, beside the compositor, for now.** shasha's compositor and
-window state are in the kernel (`nt::winstate`, `nt::desktop`), so a
-Wayland surface becomes a `winstate` window directly. Its pixels are
-copied from the client's shared-memory buffer, which is already a kernel
-section, and the input it gets is the desktop's own. A user-mode server
-would need a window system call surface for Linux processes, and a second
-copy of every frame. When ROADMAP SH moves the compositor to user mode,
-the Wayland server moves with it, as one more client of the same
-window-state interface.
+**In the kernel, beside the compositor, for now** (`kernel/src/wayland`).
+shasha's compositor and window state are in the kernel (`nt::winstate`,
+`nt::desktop`), so a Wayland surface becomes a `winstate` window
+directly. Its pixels are copied from the client's shared-memory buffer,
+which is already a file the kernel holds, and the input it gets is the
+desktop's own. A user-mode server would need a window system call surface
+for Linux processes, and a second copy of every frame. When ROADMAP SH
+moves the compositor to user mode, the Wayland server moves with it, as
+one more client of the same window-state interface.
 
-The cost is a protocol parser in the kernel that reads untrusted client
-messages. It is bounded and isolated like the other ABI parsers:
-- **The wire format** (message header, argument encoding, the interfaces'
-  request and event tables, generated from the protocol XML at build
-  time) is a `no_std` crate of its own, `kernel/wl_abi`, as `lx_abi` and
-  `afd_abi` are. It is host-tested, and is the first target of the fuzzing
-  that OBSERVABILITY plans.
-- **Limits**, each one charged to the client process's quota
-  ("Resource limits"): a message is at most 4096 bytes (libwayland's own
-  limit), a message carries at most 28 file descriptors, there are at most
-  4096 objects per client, and shm pools are limited in size.
-- **Any malformed message** is a protocol error: `wl_display.error`, then
-  the client is disconnected, as Wayland specifies. It is logged and goes
-  in the ledger. The kernel never panics on client input.
+- **Starting**: at boot, before the programs (`wayland::start`), on
+  every boot whose desktop has a shell (not bare: `nt::desktop::is_bare`,
+  the server profile or no screen and no `presenter=`); `wayland=off`
+  keeps it off, `wayland=on` (or `trace`) starts it on a bare one too. It
+  makes the boot user's runtime directory `/run/user/<uid>` (0700;
+  `/run/user` 0755 if missing) in `/run`, the Linux view's tmpfs ("The
+  lx module"), and a socket node `wayland-0`
+  in it (an old node of that name is replaced), held open while the
+  server lives, and listens on a stream socket of the core's table bound
+  to it (`unix::Socket::bind` with that node, backlog 128), so a
+  client's connect finds it as it finds any listener (`wayland:
+  listening on /run/user/1000/wayland-0` in the log). Programs find it
+  through `XDG_RUNTIME_DIR=/run/user/<uid>` and `WAYLAND_DISPLAY=wayland-0`;
+  for now whoever starts them passes those (`lxenv=` in the scenarios).
+  The socket's peer credentials are pid 0 and the boot user.
+- **One kernel thread** (`wayland`) serves every client. A round accepts
+  the waiting connections, then for each client reads what came (bytes
+  into its input buffer, each SCM_RIGHTS right, a `KArc<lx::state::Fd>`
+  open file description, into its descriptor queue; a right of another
+  personality is dropped), handles the whole messages, and writes the
+  events back (what the socket does not take waits in the client's
+  output). A round reads at most 256 KiB from one client before going on
+  to the next. Between rounds the thread waits: it is on the listener's
+  and every client socket's `unix::Waiters` (each change of a socket
+  wakes them), prepares its wait, looks once more at the sockets'
+  readiness (a connection waiting, bytes or an end to read, events to
+  write where there is room), and blocks. The server's state is one
+  `IrqMutex` the thread holds for a round (the state dump only tries
+  it).
+- **The cost** is a protocol parser in the kernel that reads untrusted
+  client messages. It is bounded and isolated like the other ABI
+  parsers:
+  - **The wire format** is a `no_std` crate of its own, `kernel/wl_abi`,
+    as `lx_abi` and `afd_abi` are: no allocation, no `unsafe`, no
+    dependencies. `Header::parse` checks a header's size (at least 8, a
+    multiple of 4, at most 4096); `decode` checks a whole message against
+    its signature and gives its arguments (`Arg`: int, uint, fixed,
+    string without its NUL or null, object or null, new_id, the untyped
+    new_id `wl_registry.bind` takes as interface name, version and id,
+    array, and fd, taken from those that came with the message), refusing
+    with a `WireError` what the protocol does not allow: truncation,
+    trailing bytes, a string without its NUL or with one inside, null
+    where the XML has no `allow-null`, a new_id of 0, a missing fd.
+    `encode` builds messages the same way. `INTERFACES` (with `MAX_ARGS`)
+    is generated by its build script from `protocol/wayland.xml`,
+    `xdg-shell.xml` and `xdg-decoration-unstable-v1.xml` (names,
+    versions, `since`, destructors, argument types; opcodes are
+    positions). Host tests (`cargo test -p wl_abi`, part of `cargo xtask
+    test`) check known byte sequences (`wl_display.get_registry`,
+    `wl_registry.bind`), malformed messages, and a round trip of every
+    request and event of every interface. It is the first target of the
+    fuzzing that OBSERVABILITY plans.
+  - **The protocol state** is `wayland::client::Client`, apart from
+    sockets, files and windows (a `Host` gives those: the kernel's, or
+    the host tests' fake), so all of it is host-tested (`cargo test -p
+    kernel --lib wayland`).
+  - **Limits**: a message is at most 4096 bytes (libwayland's limit), a
+    message carries at most 28 descriptors and at most 56 wait for their
+    messages, a client has at most 4096 objects (ids are dense, as
+    libwayland makes them: a new id is the next one or a free one below
+    it, at most 4096), at most 256 KiB of events wait for it (beyond,
+    it is disconnected, as libwayland disconnects a client whose buffer
+    is full), and a pool is at most 256 MiB.
+  - **Any malformed message** is a protocol error: `wl_display.error`
+    (object, code, message, the codes and texts libwayland and weston
+    use), then the client is disconnected once the error is written.
+    Errors: a bad header or arguments (`invalid_method` on wl_display),
+    an unknown object or one of the wrong interface in an argument, a
+    new id in use or out of order (`invalid_object`), an opcode the
+    interface lacks or newer than the object's version (`invalid_method`),
+    too many objects (`no_memory`), a request gala lacks
+    (`implementation`; none of the offered interfaces' today), and each
+    interface's own (wl_shm's `invalid_format`, `invalid_stride`,
+    `invalid_fd`; wl_surface's `invalid_scale`, `invalid_transform`,
+    `invalid_offset`; xdg_wm_base's `role`, `invalid_surface_state`,
+    `not_the_topmost_popup`, `invalid_popup_parent`,
+    `invalid_positioner`; xdg_surface's `not_constructed`,
+    `already_constructed`, `unconfigured_buffer`, `invalid_serial`,
+    `invalid_size`, `defunct_role_object`; xdg_positioner's
+    `invalid_input`; xdg_popup's `invalid_grab`). It is logged, and
+    evented.
+    The kernel never panics on client input.
 
 ### Prerequisites in the LX layer
 
-- **`AF_UNIX` stream sockets**: socket, bind to a path, listen, accept,
-  connect, socketpair. They carry ancillary data: `SCM_RIGHTS` (file
+- **`AF_UNIX` stream sockets** (built: the core's `unix`, "AF_UNIX
+  sockets" under "The seams"; `lx::unix`, `lx_unix`): socket, bind to a
+  path, listen, accept, connect, socketpair, with `SCM_RIGHTS` (file
   descriptors move between processes as references to the same open
-  file) and `SO_PEERCRED`. Wayland's socket is
-  `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` (`/run/user/<uid>/wayland-0`). The
-  socket's file-system node is a core object, so seam 5 (shared core
-  objects) is the place for it. D-Bus, which GTK also opens, needs the same
-  sockets.
-- **`memfd_create`** with `ftruncate`, `mmap(MAP_SHARED)`, and `F_ADD_SEALS`
-  as far as clients use it: an anonymous file whose pages are one section,
-  shared by every process that maps it. LD step 1's file views provide the
-  mapping. The server reads a `wl_shm_pool` through the same section, with
-  no copy until composition.
+  file) and `SO_PEERCRED`; seqpacket and datagram pairs too. The
+  server binds through the same core table. D-Bus, which GTK also
+  opens, needs the same sockets.
+- **`memfd_create`** (built: `lx::memfd`, `lx_memfd`) with `ftruncate`,
+  `mmap(MAP_SHARED)`, and the seals: an anonymous file of the shared file
+  system whose pages every mapping shares. The server reads a
+  `wl_shm_pool`'s rows from the same pages (`RamFs::read`), with one copy
+  into the window's client pixels.
 - Each prerequisite is test first, in the corpus: a `unix_test` and a
   `memfd_test` against real Linux transcripts.
 
 ### Objects and how they map
 
+Offered globals: `wl_compositor` 6, `wl_shm` 2, `xdg_wm_base` 6,
+`wl_output` 4, `wl_seat` 7, `zxdg_decoration_manager_v1` 1 and
+`wl_data_device_manager` 3 (registry names 1 to 7).
+
 | Wayland | gala |
 |---|---|
-| a client connection | a `wl::Client` owned by the server: the socket, the client's process, its object table, its quota |
-| `wl_compositor`, `wl_surface` | a surface holds its committed state (buffer, damage, frame callbacks, input region); it is a window only once a role gives it one |
-| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process: title (`set_title`), app id, minimum and maximum size, configure/ack, close (the desktop's close button sends `xdg_toplevel.close`) |
-| `xdg_popup` | a frameless owned window, as user32's popups are (menus) |
-| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a view of the pool's memfd section. ARGB8888 and XRGB8888, which are shasha's 0x00RRGGBB with alpha ignored for opaque windows |
-| `wl_surface.commit` | the damaged rows are copied from the buffer into the window's client pixels. `wl_buffer.release` goes out after the copy (the client may reuse the buffer at once), and `frame` callbacks are answered after the next composition |
-| `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for that window: enter and leave from focus and the pointer, motion, buttons as evdev codes, axis from the wheel. Keys go out as evdev key codes, mapped from the desktop's scan codes, with an XKB keymap (a fixed US keymap in text form, sent as a memfd) |
-| `wl_output` | each presenter's screen: size, scale 1 |
-| `zxdg_decoration_manager_v1` | offered with server-side decoration preferred, so a Linux window wears shasha's frame like a Windows window does; a client that insists on client-side decorations gets a frameless window |
+| a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
+| `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
+| `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; the window geometry is what a frameless window shows ("Frameless windows") and what its popups are placed against; move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
+| `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side. A toplevel without a decoration object is client-side: "if compositor and client do not negotiate the use of a server-side decoration using this protocol, clients continue to self-decorate as they see fit" (the protocol's description). GTK 3 never binds the manager and draws its own title bar (gtk_test), GTK 4 negotiates; a client that draws no frame (weston-simple-shm, wl_test) is shown without one. Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, its window geometry's size ("Frameless windows" below), on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
+| `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
+| `xdg_positioner`, `xdg_popup` | a popup window (`STYLE_POPUP`: frameless, above the framed windows, never active, not on the taskbar, as user32's menus are) at the place the positioner gives against its parent's window geometry and the work area; a grab takes the keyboard focus and the desktop's popup grab, which a press outside the client's windows ends ("Popups" below) |
+| `wl_data_device_manager`, `wl_data_source`, `wl_data_device` | the selection (copy and paste) and drag-and-drop, as far as a client that has them needs them: GTK 3 makes its seat only once this global is there. A data device hears `selection` (nil) right before each keyboard focus while the client holds no selection of its own (the protocol sends it "immediately before receiving keyboard focus"). `set_selection` makes a source the client's selection, kept for itself: the one it replaces gets `cancelled`, as does the old one when it is unset; it is offered to no other client nor to the Windows clipboard yet (ledgered as ignored). `start_drag` is not followed: its source gets `cancelled` at once, as for a drag the compositor ended (ledgered). Errors: a source used twice (`used_source`), a drag's source (one with actions) as a selection and actions on a used source (`invalid_source`), actions set twice or outside copy, move and ask (`invalid_action_mask`), a drag icon with another role (`role`) |
+| `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet: "Frameless windows") |
+| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) of the part the window shows (its view: the whole buffer, or a frameless window's geometry) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
+| `wl_output` | the client's session's screen: geometry (make "gala", model "shasha"), mode (current and preferred, 60 Hz), scale 1, name `gala-1`, done |
 
-Later: `wl_data_device` (the clipboard, bridged to the Windows clipboard
-so copy and paste works across personalities), `wp_viewporter`,
-fractional scale, `xdg_activation`, and `linux-dmabuf` once GPU G2's
-lavapipe/llvmpipe serve Linux clients through EGL.
+A surface smaller than a framed window's minimum (134 x 34 outer) gets a
+larger client area, white beyond the buffer; one larger than
+`winstate::MAX_SIDE` is clipped. When the client goes, its windows go
+(`Client::end`); when its process ends first, `desktop::process_ended`
+takes them.
+
+### Frameless windows
+
+A client that decorates itself (a client-side toplevel, and every
+popup) draws a shadow around its window, translucent pixels outside its
+window geometry (`xdg_surface.set_window_geometry`, xdg-shell's
+"visible bounds" of the window). shasha does not compose alpha yet, so
+those pixels would show as black. The window shows its **view** instead
+(`client::view_of`): the window geometry clamped to the buffer (as
+xdg-shell clamps it), or the whole buffer when none was set; a framed
+window always shows its whole buffer. So:
+
+- the window's size is the view's; its client origin shows the view's
+  corner, and pointer positions on it are moved by the view's offset
+  into surface coordinates (`surface_point`);
+- a popup's window is placed so that its geometry is at the place its
+  configure gave, and its children are placed against that geometry on
+  the screen (`geometry_origin`), as before;
+- the desktop's sizes (maximize, Snap) were already window geometry
+  sizes, which is what xdg-shell's configure carries: a client then
+  draws a buffer of that geometry (GTK drops its shadow when maximized
+  or tiled), and the window takes the view's size.
+
+What is left: the rounded corners of a client's title bar show the
+transparent pixels' colour (a few pixels); translucent windows and
+shadows need the compositor to compose alpha (shasha's presenter;
+ROADMAP LD "Next").
+
+### Configure from the desktop
+
+A user32 program moves its own window when the desktop asks
+(SC_MAXIMIZE, SC_RESTORE, GALA_WM_PLACE in its input: "Server and
+desktop workloads"); for a Wayland window the server is that program,
+and the client draws the size it is told:
+
+- **The toplevel's sizing** (`client::Sizing`): the surface size each
+  configure carries (0x0, the client's choice, until the desktop sizes
+  the window), maximized, the tiled sides, the outer rectangle a
+  maximized window goes back to, and the outer position the desktop put
+  it at, not yet applied. Unmapping (a null buffer, the toplevel
+  destroyed) forgets it: the next window is the client's size, cascaded.
+- **Maximize** (SC_MAXIMIZE): the work area (the screen above the
+  taskbar) less shasha's frame for a framed window (1278 x 718 on a
+  1280 x 800 screen), states maximized and activated, at (0, 0); the
+  window's rectangle is kept. **Restore** (SC_RESTORE of a maximized
+  one): that rectangle's surface size and place (none kept: 0x0, the
+  client chooses). **Place** (GALA_WM_PLACE: Snap, back from Snap,
+  `gala place`): the rectangle's surface size; against the work area's
+  left or right edge and its full height (Snap), tiled on that side and
+  top and bottom, sent from xdg_toplevel 2 (the desktop marks it
+  snapped); a place filling the work area is maximized.
+- **Activated** follows the keyboard focus, which follows the desktop's
+  active window (GALA_WM_ACTIVE): each change sends the toplevel a
+  configure, as weston and mutter do. `resizing` is not sent: shasha's
+  frame has no resize border, and a client's own (`xdg_toplevel.resize`)
+  is not followed yet.
+- **Applying**: the window does not move when the configure goes out.
+  Each configure's serial is kept with the place it asked for (at most
+  `MAX_CONFIGURES`, 16, not yet acked; beyond, the oldest is forgotten
+  and acking it is `invalid_serial`); an ack may name any of them (a
+  client acks only the last it saw), and drops those before it. The
+  commit of a buffer after an ack moves the window to the acked place
+  with the buffer's size (`Desktop::place`; the desktop marks it
+  maximized or snapped from its rectangle, as for a user32 window); a
+  buffer of another size than asked is shown at its own size there.
+- wm_capabilities (xdg_toplevel 5): maximize and minimize.
+
+Next: frame callbacks paced by the presenter's refresh; a decoration mode change
+on a mapped window (the frame put on or taken off in place). Later: the
+selection shared (across clients, and bridged to the Windows clipboard
+so copy and paste works across personalities: data offers, receive with
+the descriptor passed to the source's `send`), drag-and-drop,
+`wp_viewporter`, fractional scale,
+`xdg_activation`, and `linux-dmabuf` once GPU G2's lavapipe/llvmpipe
+serve Linux clients through EGL. What the server allocates for a client
+is not charged to its process's quota yet ("Resource limits").
+
+### Popups
+
+Menus, tooltips and popovers (what GTK and Qt need after toplevels):
+`kernel/src/wayland/popup.rs` places them, `client.rs` keeps their
+state. Source: xdg-shell.xml (CLEAN_ROOM "Linux"); weston's answers
+where its headless backend gives them (user/lx/wl_popup_test).
+
+- **xdg_positioner**: its rules (size, anchor rectangle, anchor,
+  gravity, constraint adjustment, offset; set_reactive kept), each
+  checked as it comes (`invalid_input`: a size not above 0, an anchor
+  rectangle of negative size, an anchor or gravity out of its enum;
+  unknown adjustment bits are ignored). `get_popup` and `reposition`
+  copy them: the positioner may change or go after. One without a size
+  or an anchor rectangle is xdg_wm_base's `invalid_positioner` (on the
+  xdg_wm_base the xdg_surface came from). set_parent_size and
+  set_parent_configure are accepted and not used (ledgered: a popup is
+  placed against its parent's present state).
+- **The place** (`popup::place`): the anchor point (a corner of the
+  anchor rectangle, the middle of an edge, the centre; halves round
+  down), the popup towards the gravity from it (centred on an axis
+  without one), the offset; then, on each axis where the popup is partly
+  outside the work area (the screen above the taskbar, in the parent's
+  coordinates), the protocol's order: flip (anchor and gravity inverted
+  on that axis, kept only if no longer constrained), slide (towards the
+  gravity first, then against it, each until the far edge is inside or
+  the near edge would leave), resize (cut to the area, if any of it is
+  inside). A parent that shows no window yet gives no area: nothing is
+  adjusted.
+- **The parent**: an xdg_surface with a role (a toplevel or a popup),
+  not the popup's own (else `invalid_popup_parent`); null is allowed by
+  get_popup and is `invalid_popup_parent` at the first commit (no
+  protocol here gives a parent another way). Its window geometry
+  (`set_window_geometry`, applied at commit; the whole surface if never
+  set) is what the anchor rectangle and the configure's x and y are
+  relative to; on the screen it is the parent window's client origin
+  plus the geometry's x and y.
+- **Configure and map**: the first commit (no buffer) is answered with
+  `xdg_popup.configure` (x, y, width, height) and `xdg_surface.configure`;
+  the place goes with the serial as a toplevel's desktop place does, and
+  applies at the commit of a buffer after the ack. The popup window shows
+  its window geometry (its view: "Frameless windows"; a client-side
+  shadow outside it is not shown), placed with that geometry at the
+  parent's geometry on the screen plus the place; moved when the place,
+  the geometry or the size changes.
+  Mapping while the parent shows nothing is `invalid_popup_parent`. A
+  null buffer unmaps it and the next commit configures it again.
+- **reposition** (version 3): new rules; `repositioned` with the token,
+  then the configures; the window moves at the commit after the ack.
+  Before the first configure it only changes the rules that one uses.
+  A popup is not reconstrained when its parent moves (set_reactive is
+  ledgered).
+- **Grab** (`xdg_popup.grab`): before the first commit only (else
+  `invalid_grab`); its parent must be the topmost grabbing popup or,
+  without one, a toplevel (`invalid_grab`, as weston answers); granted
+  for the serial of the client's last button or key press, else denied:
+  popup_done at once, as the protocol says of a denied grab (and for a
+  parent dismissed already). The client's grabs are a stack (`grabs`,
+  bottom first). When a grabbing popup shows, the topmost shown one
+  takes the keyboard focus (leave on the toplevel, enter on it; keys the
+  desktop sends to the active window go to it) and the desktop's popup
+  grab (`State::popup_grab`, its window; `Host::grab`). The toplevel
+  stays the desktop's active window and its configures still say
+  activated (the seat's `active` is apart from the keyboard focus).
+  Pointer input is the client's as usual on all its surfaces (an
+  owner-events grab, as the protocol says).
+- **Dismissal**: a button pressed outside the windows of the grab's
+  owner (another program's window, a frame, the taskbar, the desktop)
+  ends the desktop's grab and goes nowhere else, its release neither
+  (as a click outside the start menu closes it); the owner gets
+  GALA_WM_POPUP_DONE (0x10012) on the grab's window, which outlives that
+  window in the queue. The server dismisses every grabbing popup topmost
+  first: `popup_done`, its window gone (and its foci: the keyboard's
+  leave if it had it), its own popups before it; then the keyboard
+  focus goes back to the active toplevel. The same when the toplevel
+  stops being the active window (GALA_WM_ACTIVE 0), and for the popups
+  of a toplevel unmapped or destroyed. A dismissed popup shows nothing
+  again (its buffers are released); the client destroys it, in any
+  order.
+- **Destroying**: only the topmost grabbing popup may be destroyed or
+  unmapped (else xdg_wm_base's `not_the_topmost_popup`); the grab and
+  the keyboard focus go back to the popup below or the toplevel.
+  Popups without a grab go in any order, and a popup's children stay
+  where they are when it goes first (orphans: no popup_done; weston
+  does the same, recorded by wl_popup_test). The xdg_surface destroyed
+  before its popup is `defunct_role_object`.
+- Limits: the grab is the client process's on the desktop (a press on a
+  window of another connection of the same process counts as inside);
+  no touch; a popup never follows its parent's later moves.
+
+### Input
+
+The desktop's input reaches a Wayland window the way it reaches a
+user32 window: as window messages queued for the window's owner
+(`winstate::InputEvent`), which the Wayland server takes instead of
+user32 (`kernel/src/wayland/input.rs`, `Client::input`).
+
+- **Waking**: at each connection the server registers itself as the
+  client process's listener (`desktop::listen_server`:
+  `winstate::Listener::Server`, the server thread, beside the user32
+  programs' `Listener::Event`); the desktop wakes the thread after
+  letting go of its lock, as it signals user32's event. The server's
+  wait also looks at whether input waits for any client (prepare, look,
+  block), so input queued during a round is not lost. The listener goes
+  when the process's last connection closes (`unlisten_server`), or with
+  the process.
+- **gala's notices for served owners** (only owners with a
+  `Listener::Server` get them; user32 follows activation and
+  TrackMouseEvent itself): `GALA_WM_ACTIVE` (0x10010; wParam 1: the
+  window became the active one, 0: it no longer is), queued by
+  `State::activate` for the old window then the new one, so a click that
+  activates comes before its button and keys after it go to the new
+  focus; `GALA_WM_POINTER_LEFT` (0x10011), queued when the window whose
+  client area the pointer was over (`State::hovered`: the target of the
+  moves, the capture, none during a drag or resize) changes;
+  `GALA_WM_POPUP_DONE` (0x10012), when a press outside its windows ended
+  its popup grab ("Popups").
+- **Translation** (`input::translate`): WM_MOUSEMOVE is a position;
+  WM_LBUTTONDOWN/UP and WM_RBUTTONDOWN/UP are BTN_LEFT (0x110) and
+  BTN_RIGHT (0x111); WM_MOUSEWHEEL is the wheel (WHEEL_DELTA a notch,
+  positive away from the user); WM_(SYS)KEYDOWN/UP are evdev key codes
+  from lParam's set 1 scan code and E0 bit (0x01-0x58 are the evdev
+  codes; the E0 keys from a table; the virtual key is not used: the
+  keymap says what a key means); SC_CLOSE is close; SC_MAXIMIZE,
+  SC_RESTORE and GALA_WM_PLACE (wParam MAKELONG(left, top), lParam
+  MAKELONG(width, height)) are the desktop's sizing ("Configure from the
+  desktop"); WM_MOVE and GALA_WM_MINIMIZED mean nothing to a Wayland
+  client; any other message is ledgered.
+- **Activation** (GALA_WM_ACTIVE) sets the seat's active surface, moves
+  the keyboard focus (to the topmost grabbing popup while there is one)
+  and sends each toplevel whose activation changed a configure; losing
+  it dismisses the client's grabbing popups.
+- **The client's seat** (`Seat`): the surface with the pointer and
+  where, buttons held, the surface with the keyboard focus, keys down
+  and modifiers. A position on the surface enters it (leaving another;
+  enter and frame) or moves on it (motion and frame); off the surface (a
+  framed client area larger than the buffer) the pointer leaves, unless
+  a button holds it (an implicit grab: the desktop also sends a held
+  button's moves and release to the window it went down in). A button
+  or wheel first brings the pointer where the message says. A button is
+  `button` and `frame`; a wheel notch `axis_source` wheel,
+  `axis_discrete` -1 per notch away from the user (versions 5 to 7;
+  `axis_value120` from 8), `axis` -10 per notch on the vertical axis (as
+  weston and mutter report a click), `frame`. A release whose press the
+  client did not have is not sent. Focus: `enter` with no keys down,
+  then `modifiers`; deactivation `leave` (the keys down are forgotten).
+  A key already down (the device's typematic repeat) is not sent again:
+  clients repeat by `repeat_info`. After a key that changes them,
+  `modifiers` (depressed: Shift 1, Control 4, Alt 8, Super 64 while
+  held; locked: Caps Lock 2, Num Lock 16 toggled; the keymap's real
+  modifier bits). An unmapped surface (null buffer, destroyed toplevel)
+  gets the leaves of the foci it had; a destroyed one loses them
+  without one (a leave could not name it).
+- **The keymap** (`kernel/src/wayland/keymap.xkb`, `input::KEYMAP`): a
+  US layout in XKB's text format written for gala (keycodes named as
+  xkeyboard-config's `evdev` names them, the types ONE_LEVEL, TWO_LEVEL,
+  ALPHABETIC and KEYPAD, the modifiers above), about 7 KB, in one
+  anonymous file of the shared file system made at the first keyboard,
+  written with its NUL, sealed (shrink, grow, write, seal) and opened
+  read-only: every keyboard of every client gets that description, which
+  no client can change (they map it MAP_PRIVATE, as wl_keyboard 7
+  requires).
+- **Descriptors in events**: an event's fd waits in the client's
+  `out_fds` with where its event starts; a write takes those whose event
+  starts within the bytes it offers, as SCM_RIGHTS with them. A stream
+  read stops after the write that carried rights, so the client has
+  each descriptor no later than its message (libwayland queues
+  descriptors that come early).
+- Limits: 32 keys down at once per client (more are not sent), 56
+  descriptors waiting in events (beyond, the client is disconnected as
+  for output).
 
 ### Sessions
 
-Each session's desktop has its own Wayland socket, under its user's
-`/run/user/<uid>`. A Linux program started in a session gets
-`WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` for it, and its windows appear on
-that session's desktop and are shown by whatever presents it ("Plan:
-sessions and remote shasha"). Server and bare desktops ("Server and
-desktop workloads") keep Wayland windows as they keep Windows ones: the
-pixels are kept and nothing draws them.
+One socket for the boot user today. Next, each session's desktop has
+its own Wayland socket, under its user's `/run/user/<uid>`, and a Linux
+program started in a session gets `WAYLAND_DISPLAY` and
+`XDG_RUNTIME_DIR` for it, its windows on that session's desktop, shown
+by whatever presents it ("Plan: sessions and remote shasha"). Server
+and bare desktops ("Server and desktop workloads") keep Wayland windows
+as they keep Windows ones: the pixels are kept and nothing draws them
+(the `lx_wl` scenario's desktop is such a one).
+
+**The runtime directory is Linux's alone**: `/run` is a tmpfs of the
+Linux view (a ramfs volume mounted in `lx`'s path walk: not under
+`C:\`, never logged, gone at shutdown; run_test is its spec), so the
+server's directories and socket are invisible to Windows programs and
+leave nothing on a disk.
 
 ### Observability
 
-- `events=wayland`: one event per client connection and disconnection,
-  per surface given a role, per commit (surface, damage rows, buffer
-  size), and per protocol error. The client's pid and the object are in
-  each.
+- `events=wayland`: `wayland connect` and `wayland disconnect` (with
+  why: closed, protocol error, output full, no memory; and how many
+  requests), `wayland role` (surface, role, its object), `wayland map`
+  (surface, window or -1), `wayland commit` (surface, whether a buffer
+  came, its size, the rows copied, the window, the place it was put at
+  for the configure the commit answers), `wayland configure` (surface,
+  size, states as bits, serial), `wayland error` (object, interface,
+  code, message) and `wayland input` (what: enter, leave, button, axis,
+  key, focus, unfocus, close, maximize, restore, place, or dropped for a
+  window the client shows no surface in; the surface, the window, the
+  button or key code, pressed or released; motion is not evented) and
+  `wayland popup` (configure with the place and size, repositioned,
+  grab, grab denied, dismissed and orphaned, with why). The client's pid
+  and number are in each; `events=window`'s `popup grab ended` is the
+  desktop's side. With `events=window` too, the
+  desktop's `button` and `key` events say where the input went first.
 - `wayland=trace`: every request and event decoded, as libwayland's
-  `WAYLAND_DEBUG=1` prints them, so a transcript from real Linux can be
-  compared with gala's.
-- The ledger: an interface or request gala doesn't implement is answered
-  with a protocol error, and the ledger records `wayland: <interface>.<request>`.
-- The state dump lists each client's objects and surfaces.
+  `WAYLAND_DEBUG=1` prints them (`wayland: pid 7
+  wl_display#1.get_registry(new id wl_registry#2)`, events after `->`),
+  so a transcript from real Linux can be compared with gala's; and each
+  window message taken from the desktop (`wayland: pid 7 input: window 1
+  message 0x201 wparam 0x1 lparam 0x4b0064`), before the events it
+  became.
+- The log: a protocol error (`wayland: pid P: protocol error on
+  xdg_surface@9, code 3: ...; disconnecting`), a request gala lacks, a
+  surface that got no window; each connection's end with why and what it
+  did (`wayland: pid P's connection N ended (closed): R requests, C
+  commits shown, F frame callbacks done`; a warning when it was closed
+  for its output or for memory).
+- The ledger: a request gala doesn't implement is answered with a
+  protocol error and counted as `wayland request missing` (service: the
+  interface, detail: the opcode); one accepted and not acted on as
+  `wayland request ignored`; a window message from the desktop a
+  Wayland window does not follow as `wayland window action missing`
+  (service: message; detail: the window).
+- The state dump lists the socket, each client (pid, objects, requests,
+  bytes of events waiting) and its objects (a surface's window, size,
+  view and frame callbacks; a buffer's size and stride; an xdg_surface's
+  configure state, the serials not acked and the place acked; a
+  toplevel's title, app id, decoration object and sizing; a
+  decoration's mode asked for; a positioner's rules; a popup's parent,
+  rules, configured and applied place, where its window is, grab and
+  dismissed; a data source's mime types offered, whether it was used,
+  its actions and whether it is the selection) and its seat (the pointer's surface and place, buttons
+  held, the keyboard's surface, keys down, modifiers, the active
+  surface, the last press's serial, the popup grabs); the session's
+  `input queue` line names the window with the desktop's popup grab.
 
 ### Tests
 
-- **Test first:** `wl_test`, a small client of our own in C over raw
-  sockets (no libwayland, so the test checks the wire format itself).
-  It binds the globals, creates a pool and a buffer, draws known pixels,
-  creates an `xdg_toplevel`, commits, waits for configure and the frame
-  callback, then quits on `xdg_toplevel.close`. Its transcript is
-  recorded on real Linux against weston's headless backend: lx-expect
-  starts `weston --backend=headless` for it, and CI installs weston. On
-  gala the same transcript must match, and a screen check finds the
-  pixels inside shasha's frame.
-- The wire format and the object table: host tests in `wl_abi`.
-- Then a real client: `weston-simple-shm` from weston's demos; then
-  GTK (LD step 3).
+- **`user/lx/wl_test`**, a client of our own in C over a raw AF_UNIX
+  socket (no libwayland, so the test checks the wire format itself). It
+  connects at `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, checks the globals
+  (wl_compositor, wl_shm, xdg_wm_base, wl_output; not wl_seat, which a
+  headless weston lacks), binds the first three at versions 4, 1 and 1,
+  sees ARGB8888 and XRGB8888 announced, makes a 64x64 XRGB8888 buffer in
+  a memfd pool (the fd as SCM_RIGHTS), an `xdg_toplevel` titled
+  "wl_test", commits without a buffer, acks the configure, attaches,
+  damages and commits with a frame callback, sees the frame done and the
+  buffer released by the next round trip and `delete_id` for what it
+  destroys, and on a second connection gets `wl_display.error` (object
+  1, invalid_method) for an unknown opcode, then the end of the stream.
+  Its transcript is recorded on Linux against weston's headless backend:
+  lx-expect starts `weston --backend=headless` for it (`WAYLAND_TESTS`,
+  with `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` added to its
+  environment), and CI installs weston. Scenarios `lx_wl` (`wayland=on
+  events=wayland`; the log shows `desktop: shown window 'wl_test'`) and
+  `lx_wl_pie` (`wayland=trace`) match the same transcript.
+- **`user/lx/wl_popup_test`**, the same kind of client for popups,
+  recorded against weston's headless backend (`WAYLAND_TESTS`): every
+  anchor with gravity bottom_right and every gravity with anchor
+  top_left on a 200x150 toplevel, an offset with odd sizes, a nested
+  popup, reposition (repositioned, then the configures), the version 3
+  positioner requests, delete_id for each popup destroyed, a far place
+  kept without adjustment, the positioner's set_size and set_anchor_rect
+  errors on connections of their own, and a parent popup destroyed
+  before its child without an error and without dismissing it.
+  Nothing it prints depends on where the toplevel is (positions are
+  relative to the parent). What weston's headless backend cannot show
+  (no seat, no constraint adjustment) or answers otherwise than the
+  protocol is wl_input_test's and the host tests'. Scenarios
+  `lx_wl_popup` and `lx_wl_popup_pie` (`wayland=trace`).
+- **`user/lx/wl_input_test`**, the same kind of client for input and
+  window control: wl_seat 7 (capabilities, name), the keymap (format,
+  the descriptor mapped MAP_PRIVATE, its text, its NUL), repeat_info, a
+  200x150 toplevel with a decoration object (server-side), the keyboard
+  focus it gets when shown, then what the scenario does with QEMU's PS/2
+  mouse and keyboard: a click (enter, BTN_LEFT pressed and released at
+  the surface point aimed at, each in its frame), a wheel notch (source,
+  discrete, axis, frame), "a", Shift+A (Shift's modifier), Left (an E0
+  key), the pointer moved off (leave), then the Snap keys: Win+Up
+  (a configure of the work area's surface size, maximized and activated),
+  Win+Down (the size before), Win+Left (the left half, tiled left, top
+  and bottom: it binds xdg_wm_base 6), Win+Down, each acked and answered
+  with a buffer of that size; then "m": six popups whose places are
+  constrained against the work area (flip_y, flip_x that would still be
+  constrained, flip_x then slide_x, slide_y, slide_x off the left edge,
+  resize_x; the window's place is known: the first Wayland window), then
+  a menu grabbing with the "m" press's serial (the keyboard focus moves
+  to it), "s" (the menu has it) opening a grabbing submenu, both checked
+  on the screen frameless above the window, and a click on the desktop
+  dismissing them topmost first (the keyboard back on the window); the
+  frame's close button (`xdg_toplevel.close`); then a second toplevel
+  asking for client-side decorations, shown frameless and focused; "q"
+  opens a grabbing popup and one nested in it, and destroying the
+  outer one first ends the test with xdg_wm_base's
+  not_the_topmost_popup. It also checks
+  wm_capabilities (maximize, minimize) and the activated state once
+  shown. Not recordable
+  on Linux (weston's headless backend has no input devices): its
+  expected.txt is written from the protocol's specification and says so,
+  and lx-expect builds it and does not run it (`INPUT_TESTS`). Scenarios
+  `lx_wl_input` and `lx_wl_input_pie` (`wayland=trace`) run it on a
+  headless desktop (`presenter=test`) with a screen check
+  (`WL_INPUT_SCREEN`) that sends the input step by step, each after the
+  line the program prints for the step before, and checks the pixels:
+  the first window's buffer inside shasha's frame (the active caption
+  above it), maximized, restored, snapped left and back, the menu and
+  submenu above it and gone after the click, the second's where a frame
+  would be.
+- The wire format: host tests in `wl_abi`. The protocol state: host
+  tests in `kernel/src/wayland/tests.rs` (wl_test's flow against a fake
+  desktop, the pixels and damaged rows copied, unmapping, versions,
+  every protocol error above, ids, descriptor and output limits, the
+  trace's format; the seat, the keymap's descriptor and when it is
+  written, every kind of input with its serial-free events, foci after
+  unmapping and destroying, decoration modes and their errors, the
+  window messages' translation, every key the scan codes give being in
+  the keymap; positioners' errors, every anchor and gravity, flip, slide
+  and resize, popups placed against window geometry, grabs granted,
+  denied and refused, dismissal top-down, the topmost rule, reposition,
+  orphans). The notices for served owners: `winstate/tests.rs`; the
+  desktop's popup grab (a press outside ends it and goes nowhere, nor
+  its release): `desktop/tests.rs`.
+- **`weston-simple-shm`** (`lx_simple_shm`), the first real client:
+  weston 13's demo as Ubuntu 24.04 builds it, on Ubuntu's
+  libwayland-client, libffi and glibc (`PREBUILT`s in
+  `/lib/x86_64-linux-gnu`). It binds wl_compositor, wl_shm, xdg_wm_base
+  and wl_seat, makes its 250x250 buffers in a `memfd` it fallocates,
+  waits for the configure, then draws a moving pattern on every frame
+  callback. The scenario runs it on a headless desktop
+  (`SIMPLE_SHM_SCREEN`: frameless, it negotiates no decoration; many
+  colours in its window), then presses Esc (its keyboard handler ends
+  it). Its transcript
+  (`user/lx/weston-simple-shm/lx_simple_shm.txt`: "simple-shm exiting"
+  on stderr, status 0) is real Linux's against weston's headless backend,
+  ended there by SIGINT (the same flag Esc clears). The server's summary
+  line at the end of the connection says how many commits and frames it
+  served.
+- **`user/lx/gtk_test`** (`lx_gtk`, `lx_gtk_pie`), the first GTK
+  program: a GTK 3 window titled "gtk_test" with a label and a button,
+  printing when it was first drawn, when the button was clicked, when
+  the window was asked to close and when it went. It declares the
+  dozen GTK, GDK and GObject functions it calls from GTK's reference
+  documentation (no development headers) and links against the
+  libraries by soname (build.sh), so its bytes depend only on the
+  names. Run as `./gtk_test --input` (`lx_gtk`) it waits for real input:
+  the screen check (`GTK_SCREEN`) finds GTK's drawing frameless at
+  (64, 48) (its own header bar where shasha's caption would be, the
+  title, the close button, the label's text), clicks the button with
+  the PS/2 mouse, then GTK's close button. Run any other way
+  (lx-expect, `lx_gtk_pie`) it clicks its button and closes its window
+  itself once drawn, which GTK handles as the same signals; the
+  transcript is the same either way, recorded on Linux against weston
+  on Xvfb (a compositor with a seat: GTK warns without one, which
+  weston's headless backend lacks).
+
+### GTK programs and Linux roots
+
+What a GTK program needs besides the Wayland server, as gtk_test found
+it (each gap first seen on gala as a crash, a warning on stderr that
+real Linux does not print, or a ledger line):
+
+- **A distribution's libraries**: GTK 3's closure is 65 shared
+  libraries (GLib, GIO, Pango, cairo, HarfBuzz, fontconfig, FreeType,
+  pixman, libxkbcommon, libwayland-client and -cursor, gdk-pixbuf, ATK
+  and its D-Bus bridge, libX11 and friends, which GDK links whatever
+  backend it uses). They come as a **Linux root**: xtask's
+  `LINUX_ROOTS` table names Ubuntu 24.04's packages (the release
+  pocket, never changed once released), each with its SHA-256 from the
+  release's signed index and the files used at their paths in the
+  package (a library's soname link resolved to its file: boot modules
+  make no links). xtask assembles the root in `target/prebuilt/<name>/`
+  (packages downloaded once into `target/prebuilt/debs/`) and ships
+  `usr/`, `etc/` and `home/` as trees: `/usr/lib/x86_64-linux-gnu` is on
+  ld.so's default path beside glibc's `/lib/x86_64-linux-gnu`.
+- **What installing a system adds** besides its packages' files, done
+  at assembly as dpkg and its triggers would: the MIME database's
+  `mime.cache` (`update-mime-database` from shared-mime-info's XML;
+  gdk-pixbuf picks a loader by MIME type through GIO, so without it GTK
+  aborts on its own PNG icons). The user database is not the root's:
+  the kernel makes `/etc/passwd` and `/etc/group` from gala's accounts
+  ("The lx module", Linux identity); the user's home is their profile
+  (`/Users/gala`), where fontconfig keeps its cache.
+- **A session's environment**: `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`
+  and `HOME` (fontconfig expands `~` from `HOME` only and keeps its
+  cache in `~/.cache/fontconfig`; without a writable cache directory it
+  prints an error at every start), passed by the scenarios today
+  ("Sessions").
+- **Not needed**, and left out: icon and cursor themes (GTK 3 falls
+  back to the icons in its own resources, libwayland-cursor to its
+  built-in cursors, and the desktop draws its own pointer), GSettings
+  schemas and GIO modules (GLib's memory settings backend), a D-Bus
+  session bus (GTK skips accessibility and portals without one), the
+  gdk-pixbuf loader modules (PNG is GIO's MIME type plus the library's
+  built-in loader). Of xkb-data (libxkbcommon0 depends on it) the files
+  GDK's default keymap reads (rules evdev, model pc105, layout us)
+  before the server's keymap arrives.
 
 ## Plan: Linux containers through a WSL facade
 
@@ -9569,13 +10943,15 @@ HEAD).
 
 - **The tree**: the root is GetDesktopWindow(). Its children are the
   visible top-level windows without an owner (EnumWindows). A top-level
-  window's children, in order: its TitleBar (if it has a caption), its
-  MenuBar (if it has a menu), the visible top-level windows it owns
+  window's children, in order: its MenuBar (if it has a menu), the
+  visible top-level windows it owns
   (GetWindow GW_OWNER: its dialogs, its open popup menu; UIA puts owned
   windows under their owner, which FlaUI's Window.ModalWindows and Win32
   menu handling rely on), its visible child windows in z order, then a
-  list box's or list view's items in index order. An open popup menu
-  (class #32768) has its items instead.
+  list box's or list view's items in index order, a provider's
+  fragments, and last its TitleBar (if it has a caption; Windows 11's
+  proxy, measured in process). An open popup menu (class #32768) has its
+  items instead.
 - **Window properties**:
   - AutomationId: the control id in decimal (none for top-level
     windows);
@@ -9772,9 +11148,9 @@ under the root), with its items as children.
 - Their properties (30073-30078, 30087-30089) are read on any element
   (not-supported without the pattern), which FlaUI's Window.ModalWindows
   relies on (a FindAllDescendants with an IsModal condition).
-- **Title bar**: the window's first child is a TitleBar element (no
-  HWND; `Node.menu` = `frame::TITLE`, item None), Name the window's
-  title, AutomationId "TitleBar", the caption band as its rectangle
+- **Title bar**: the window's last child is a TitleBar element (no
+  HWND; `Node.menu` = `frame::TITLE`, item None) with an empty Name and
+  AutomationId (Windows 11, in process), the caption band as its rectangle
   (SM_CYCAPTION below the border). With WS_SYSMENU its children are
   Buttons (items 0-2): Minimize and Maximize when the window has
   WS_MINIMIZEBOX or WS_MAXIMIZEBOX (each enabled by its own style),
@@ -11563,7 +12939,7 @@ ROADMAP.
 - Struct layouts are written by hand, not generated with bindgen.
 - Bootloader-reclaimable memory is not reclaimed (it must not be reused
   until the boot info that lives there has been copied out).
-- No 32-bit programs (WOW64); no service control manager.
+- No service process is ever started ("The service control manager").
 - No Windows drivers (ROADMAP Later, DR). The invariant they keep from
   the start: a third-party driver never runs unsupervised in gala's
   kernel address space; a driver crash restarts its host, and kernel

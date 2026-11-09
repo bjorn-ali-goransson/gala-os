@@ -64,7 +64,16 @@ The ordering rules in force (set by the owner):
 
 ## Current focus
 
-In order:
+**The next big thing (the owner): Microsoft Office, item OF, with
+everything it depends on.** It goes before the list below (work in
+flight finishes: LD's first GTK program). Its chain, in order:
+OF step 1's gap analysis (what the apps import and register, ranked
+against gala); GPU G2's rest (DXVK: Direct3D 11 in software over
+lavapipe, which the apps' rendering expects); COM/OLE depth and the
+other blockers the analysis ranks; Click-to-Run's install and service
+(PK); then BR's WebView2 and PK stage 4's MSIX for the new Outlook.
+
+In order, after it:
 
 0. **BR stage 2** first (the owner: Chromium working, then the rest of
    this list; heavier, meatier work before polish): its window, input
@@ -162,7 +171,7 @@ has a section under "Open items".
 | Threads, suspension, context, TEB/PEB/KUSER_SHARED_DATA, process startup | `thread_test`, `threadinfo_test`, `context_test`, `kuser_test`, `peb_test`, `startup_test` |
 | Sections, image sections, memory-mapped files | `section_test`, `image_test`, `filemap_test` |
 | Files, directories, async I/O, APCs, IOCP, file locks, change notification | `file_test`, `dir_test`, `async_test`, `apc_test`, `ioapc_test`, `iocp_test`, `lock_test`, `dirchange_test` |
-| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `fpu_test`, `safepoint_test` |
+| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `cxx_throw`, `fpu_test`, `safepoint_test` |
 | Loader: imports, dynamic loading, static TLS, API sets | `import_test`, `loader_test`, `tls_test`, `missing_import_test` |
 | System and process information | `sysinfo_test` |
 | Pipes, child processes with redirected stdio | `pipe_test`, `process_test` |
@@ -181,16 +190,17 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; the 32-bit crypt32 and ncrypt: `wow64_cert_test`; msi: `wow64_msi_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
+| UAC | User Account Control: the consent prompt | planned | an administrator account (the boot user or a second one) logs on with a filtered token linked to its full one (TokenLinkedToken, elevation types 2/3); `runas`, `requireAdministrator` manifests and COM elevation (`Elevation:Administrator!new:`) go to an AppInfo-like service that shows a consent prompt (or a credential prompt for a standard user) on a secure desktop the user's programs cannot reach (with SH step 3's trusted process) and creates the process with the full token; CreateProcess's ERROR_ELEVATION_REQUIRED; UAC virtualization of Program Files and HKLM for legacy programs; a scenario that drives the prompt through input and screen checks. Today an elevated caller's `runas` runs without a prompt and everyone else's is declined as a cancelled prompt (SECURITY "Elevation") |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
-| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1) |
+| LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); next: a Wayland server (`wl_shm`), a GTK application, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); step 3: the first GTK program, its window drawn and clicked (`lx_gtk`, GTK 3 on a Linux root of Ubuntu's packages); next: a distribution's GTK application, a socket per session, Xwayland |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -204,6 +214,7 @@ has a section under "Open items".
 | W3 | FileZilla | in progress | 3.71.0: connects to FileZilla Server (FTP over TLS) and to sshd (SFTP), driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
+| SM | Start menu: default apps and install-on-click | next (the owner) | see "SM. The start menu's apps" below |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | one kernel: `profile=server`, CLI parity, bare desktops done |
@@ -635,8 +646,8 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
    700 x 500, so its snapped half would be 700 wide as on Windows; the
    desktop's docking test and the scenario's checks change with it);
    SetWindowPos's WM_NCCALCSIZE.
-2. Rich edit: RTF streams, undo, the clipboard (user32 has none yet),
-   OLE callbacks (wx asks for them).
+2. Rich edit: RTF streams, undo, cut, copy and paste over user32's
+   clipboard, OLE callbacks (wx asks for them).
 3. A transfer over SFTP (`filezilla_sftp` lists only): a download and
    an upload through the queue.
 
@@ -663,6 +674,35 @@ Windows' metrics (`gdi32_test`).
    (SH's step 1 needs it); the shell itself leaves the kernel in item SH.
 
 **Design**: ARCHITECTURE "Windows on the screen".
+
+### SM. The start menu's apps
+
+**Goal** (the owner): the start menu offers what a fresh Windows does
+(the Command Prompt and gala's other default programs) and, beside them,
+apps that are not installed yet: a click installs them through
+`gala install` (winget manifests, item PK) and the tile then starts the
+installed program. The first: Microsoft Office (`Microsoft.Office`, the
+Office Deployment Tool: item OF), FileZilla (`TimKosse.FileZilla.Client`),
+.NET (`Microsoft.DotNet.SDK.9`), Python (`Python.Python.3.13`), Chromium
+(`Hibbiki.Chromium`), Git (`Git.Git`), 7-Zip (`7zip.7zip`).
+
+**Next** (each test first: the desktop's host tests, a screen scenario,
+a screenshot):
+1. Default apps always listed: Command Prompt
+   (`C:\Windows\System32\cmd.exe`) and gala's own programs there.
+2. Install-on-click tiles: a catalog entry is a name, a winget id and
+   where its program lands; not yet installed it shows with a download
+   mark, and a click starts `gala install <id>` in a console window
+   (its progress and errors in view, recorded in the event stream);
+   once the program exists the tile starts it. Installs that fail on
+   gala (Office until OF is done, an installer needing elevation without
+   UAC's prompt) fail in that window with `gala install`'s own message.
+3. Then the Windows way of listing installed apps: the start menu reads
+   the shortcuts under the Start Menu\Programs folders (all users and
+   the user's, `.lnk` per [MS-SHLLINK]) that installers create, so
+   anything installed appears without a catalog entry; the catalog then
+   only names what can be installed. With SH, all of this moves to
+   `shasha.exe`.
 
 ### SH. The shell in user mode
 
@@ -740,9 +780,8 @@ parity already exposes.
    endpoint over plain HTTP (a test program serving a scripted SSE
    stream, a tool call included), so streaming is tested without TLS.
    Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
-   Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
-   not with gala; scenarios copy the JDK's app-local copy today) need a
-   decided home in the image or the installer.
+   Burn exe, PK stage 3); the UCRT is gala's own ucrtbase.dll
+   (ARCHITECTURE "The UCRT").
 2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
    system store (rustls-native-certs through crypt32), which gala opens
    empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
@@ -905,6 +944,9 @@ server, an interactive shell, file transfer, forwarding, a client.
 6. Observability: sshd's and sshd-session's logs in failed logs,
    connection and auth events in the event stream, the ledger's
    ssh-related gaps in the report.
+7. "Ignore Ctrl+C" (SetConsoleCtrlHandler(NULL, TRUE)) is inherited by
+   child processes on Windows (#33); gala's kernel32 keeps it per
+   process.
 
 **Done when**: each step's scenario passes; host keys persist across
 boots (`persist`) and sessions survive a kernel handover (R9 (e)
@@ -1034,8 +1076,8 @@ own session and shell.
    Window stations' open ends: DACLs on stations and desktops;
    CreateWindowStationW and CreateDesktopW stay unsupported until BR
    stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
-   desktops with windows of their own; UOI_USER_SID; clipboard and atoms
-   per station.
+   desktops with windows of their own; UOI_USER_SID; atoms per station
+   (the clipboard is the station's: LD step 3).
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
@@ -1051,8 +1093,8 @@ own session and shell.
 4. B5: sessions across a kernel handover (session, desktop and window
    state carried; the window registry is refused today), remote clients
    reconnecting after it.
-5. Later: several desktops per session, a secure desktop, clipboard,
-   seamless windows, RDP proper. Interim, with no gala work: QEMU's
+5. Later: several desktops per session, a secure desktop, the
+   clipboard over the remote protocol, seamless windows, RDP proper. Interim, with no gala work: QEMU's
    `-vnc`.
 
 **Done when**: B3b: an xtask test client connects through a forwarded
@@ -1105,8 +1147,7 @@ the kernel.
    redistributable). gdi32's GetGlyphOutline (Mesa's
    wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
    (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
-   import tables: the UCRT (`api-ms-win-crt-*`; the JDK's, as for
-   CPython) and gdi32's D3DKMT* functions (19 of them: failing with
+   import tables: the UCRT (`api-ms-win-crt-*`: gala's ucrtbase) and gdi32's D3DKMT* functions (19 of them: failing with
    STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
    resources); everything else it imports gala has. d3d11_test needs
    DXBC shaders, and the host has no HLSL compiler (Ubuntu's
@@ -1187,7 +1228,8 @@ samples).
    ping late); the on_device_model utility's delay import of `dxgi.dll`
    (G0). After it:
    what `tools/import_survey.py` still lists (the rest of the delay imports:
-   advapi32's services and ImpersonateAnonymousToken, iphlpapi,
+   advapi32's service functions beyond the SCM's queries (svc_test) and
+   ImpersonateAnonymousToken, iphlpapi,
    wintrust's catalogs, dbghelp's stack walking, pdh, winhttp's proxy
    resolver, oleacc; the static imports that are still `gala_stubs`:
    crypt32, kernel32's comm and locale formatting); GetAdaptersAddresses
@@ -1300,11 +1342,213 @@ and running it, not redistributing it.
 Word, Excel and PowerPoint (Click-to-Run) and the new Outlook (an MSIX
 package over WebView2). Classic Outlook is out of scope.
 
+**Priority**: the current focus (the owner), ahead of the rest of the
+list; its dependencies (GPU G2's DXVK, COM/OLE, Click-to-Run's
+install, WebView2, MSIX) are worked as the analysis ranks them.
+
+**Gap analysis** (step 1; the `office-survey` workflow, WORKFLOW "The
+Office survey"; Microsoft 365 Apps 16.0.20527.20150, Current channel,
+x64: 1486 PE files, 867 of them x64, 529 DLLs of Office's own). What
+Word, Excel and PowerPoint load (`import_survey.py --dumps ... --roots
+WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE`): 114 files at start, 85 more
+through delay imports. Office carries its own UCRT and VC runtime
+(app-local `ucrtbase.dll`, `vcruntime140.dll`), so the apps do not
+need gala's.
+- **To load** (static imports of the 114; no DLL is missing, only
+  functions): kernel32's CreateFile2 (15 files), the activation-context
+  queries FindActCtxSectionStringW and QueryActCtxW (11), CreateMutexExW,
+  FindFirstFileNameW/FindNextFileNameW, GetShortPathNameA,
+  GetThreadIOPendingFlag, GetVolumePathNamesForVolumeNameW,
+  IsSystemResumeAutomatic, OpenSemaphoreA, QueueUserWorkItem,
+  WerRegisterMemoryBlock/WerUnregisterMemoryBlock (5 each) and ten more
+  used once; ntdll's AVL generic tables (RtlInitializeGenericTableAvl
+  and its seven companions), NtNotifyChangeMultipleKeys, NtRenameKey,
+  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Some are
+  stubs today (CreateMutexExW, GetShortPathNameA, GetThreadIOPendingFlag,
+  GetVolumePathNamesForVolumeNameW): they must work, not only exist.
+- **Then, as the apps draw and work** (delay imports, files needing
+  each): gdiplus (13), Direct2D `d2d1` (7), `mscms` colour management
+  (5), Media Foundation `mfplat`/`mf` (4/2), `propsys` (4), `cryptui`
+  (4), `msi` (4), WIC `windowscodecs` (3), `rstrtmgr` (3), the
+  WinAppSDK/XAML pieces' app-model and ntuser API sets, `d3d10_1` and
+  `d3dcompiler_47` (2), `httpapi`, `srpapi`, `ninput`, `dnsapi`,
+  `activeds`, `credui`, `davclnt`; the full list with every function is
+  the survey's output. Direct2D and WIC lead the drawing path (Office
+  draws through Direct2D/DirectWrite, falling back to GDI+), with GPU
+  G2's Direct3D 11 under Direct2D.
+- **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
+  LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
+  ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
+
 **Next**:
-1. Gap analysis (black-box metadata only, CLEAN_ROOM): import tables,
-   delay loads, COM classes and services of the apps (installed with the
-   Office Deployment Tool) against gala's exports and stubs; a ranked
-   blocker list in this section, like AG's.
+1. The load list above, test first (a kernel32/ntdll test program for
+   the functions, expected results from Windows), until the three
+   apps' processes start in gala with Office's files in place; a
+   scenario that boots them, with the files gala's own install put
+   there (the owner: no files from elsewhere; the native install below
+   comes first).
+   - The UCRT (the owner's decision: gala's own; also the answer to
+     PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
+     resolve to it), x64 and x86, msvcrt's source with the UCRT's own
+     functions (ARCHITECTURE "The UCRT"; tests `ucrt_test`,
+     `wow64_ucrt_test`, expected results from Windows' ucrtbase). It
+     covers every UCRT import of ODT's setup.exe and of curl, CPython,
+     `cxx_eh_test`, `pk_install_inno` and NumPy's DLLs, whose scenarios
+     use it and no longer copy the JDK's. Next: what the JDK,
+     PowerShell, .NET, PostgreSQL and SQL Server LocalDB still import
+     that gala's lacks (65 functions across their files: the C++
+     runtime functions Windows' ucrtbase also exports,
+     `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
+     `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
+     `_Gettnames` (recorded, NULL); the `_s` path, date and case
+     functions (`_splitpath_s`, `_strdate_s`, `_wcsupr_s`, ...); the
+     multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
+     `tools/import_survey.py` on their directories lists them), then those
+     scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
+     files. `ucrt_test`/`wow64_ucrt_test` pass on CI's Windows
+     (`user/windows/ci-passing.txt`).
+   - The load list's kernel32 and ntdll functions, test first in
+     `office_api_test`/`wow64_office_api_test` (x64 and x86): done:
+     CreateFile2, FindFirstFileNameW/FindNextFileNameW, CreateMutexExW,
+     OpenSemaphoreA/W, K32EnumProcesses, K32GetProcessImageFileNameW,
+     RtlCaptureStackBackTrace (x86 too), WerRegisterMemoryBlock/
+     WerUnregisterMemoryBlock, IsSystemResumeAutomatic,
+     GetPhysicallyInstalledSystemMemory, QueryActCtxW (basic
+     information), FindActCtxSectionStringW, QueueUserWorkItem,
+     GetShortPathNameA, GetVolumePathNamesForVolumeNameW,
+     AttachConsole/AllocConsole, GetDiskFreeSpaceA, the AVL generic
+     tables, RtlIntegerToUnicodeString, RtlIsNameInExpression. Left:
+     NtNotifyChangeMultipleKeys (the kernel has no registry change
+     notification yet; advapi32's RegNotifyChangeKeyValue is a
+     never-signalled stopgap), NtRenameKey (a registry node renamed,
+     with its change-log op), the manifests' sections
+     (FindActCtxSectionStringW finds nothing, QueryActCtxW's other
+     classes), GetThreadIOPendingFlag's count of a thread's pending
+     socket, pipe and watch requests (a recorded stopgap answering
+     FALSE), and the ten functions used once. `office_api_test` and
+     `wow64_office_api_test` pass on CI's Windows (`ci-passing.txt`).
+   - Alongside, natively: the pending scenario `office_install` runs
+     the Office Deployment Tool's `setup.exe /configure` in gala
+     (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
+     re-pinned when Microsoft replaces the file at its URL;
+     `user/office_install/config.xml`: Word, Excel and PowerPoint, 64-bit,
+     Current channel, Display None, AcceptEULA; a net scenario, the
+     guest reaching the CDN through QEMU's NAT, so on CI's boot runners).
+     `setup.exe` is a 32-bit x86 program (WOW64); every static import is
+     there (the UCRT and kernel32 functions above). Done: the i686
+     crypt32 and ncrypt (`wow64_cert_test`: cert_test's source for x86,
+     the caller's structures typed and checked against wincrypt.h for
+     both widths, ARCHITECTURE "The 32-bit system DLLs"). How far it
+     gets: it starts, starts its copy (a second setup.exe), whose crypt32
+     now loads and answers (its own embedded signature asked of
+     CryptQueryObject, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED, is
+     recorded unsupported: `crypt32.dll!CryptQueryObject(content)`
+     0x400); it reads its Office and Click-to-Run registry keys (absent)
+     and ends with 0xc06d007e at its next delay-loaded DLL, msi.dll,
+     imported by ordinal (MsiCloseHandle #8, MsiEnumComponentQualifiersW
+     #39, MsiEnumProductsW #45, MsiLocateComponentW #90,
+     MsiQueryProductStateW #113, MsiSetInternalUI #141,
+     MsiGetComponentPathW #173, MsiConfigureProductExW #190,
+     MsiProvideQualifiedComponentExW #203). Done: gala's msi.dll, x64
+     and x86, these nine with their ordinals, answered as Windows does
+     for products and components it has not installed (`msi_test`,
+     `wow64_msi_test`; ARCHITECTURE "Other DLLs"). Past msi it disables
+     its input methods (imm32's ImmDisableIME: done, TRUE as Windows,
+     `office_api_test`), queries its activation context (QueryActCtxW's
+     module context and the manifest sections, recorded unsupported),
+     asks COM for a class not registered, and loads normaliz and powrprof
+     (done: both built for i686 too; `office_api_test` and
+     `wow64_office_api_test` check IdnToAscii/IdnToUnicode and
+     CallNtPowerInformation's processor information). It then sets up
+     its download of its configuration from officeclient.microsoft.com
+     over a synchronous winhttp session with a status callback (done:
+     WinHttpSetStatusCallback and the synchronous notifications, per
+     handle and inherited, in Windows' order; the real connect time-out,
+     30 s here; WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH accepted as
+     Windows does; `winhttp_cb_test`, `wow64_winhttp_cb_test`;
+     ARCHITECTURE "WinHTTP and WinINet"). Its relaunched copy asks
+     ShellExecuteEx for "runas" (done: elevation as SECURITY.md
+     "Elevation" designs it; `runas_test`, `wow64_runas_test`,
+     `runas_declined`): as the boot user, a standard user, gala declines
+     as a cancelled UAC prompt (recorded) and setup.exe goes to report the
+     error, so the scenario runs it as SYSTEM (`as=system`, an
+     administrator, as Configuration Manager and Intune run ODT), elevated
+     (the `, elevated token` start lines), which asks for no elevation.
+     Its configuration it reads with MSXML 6 (done: gala's msxml6.dll,
+     x64 and x86, DOMDocument60 registered in both registry views;
+     `msxml_test`, `wow64_msxml_test`; ARCHITECTURE "msxml6"): it loads
+     `C:\gala\config.xml` (load, async left on: loaded before load
+     returns, recorded), then documentElement, selectSingleNode("Add"),
+     selectNodes("Product", "Language", "ExcludeApp", "Remove",
+     "RemoveMSI", "Display", "Logging", "Updates", "Property", "@ID"),
+     the node lists' length and item, getAttribute (SourcePath, Version,
+     Channel, OfficeClientEdition, Level, AcceptEULA, Path, Enabled, ...),
+     attributes, nodeType and nodeValue: no DOM method it calls is
+     missing. Before that, urlmon is asked for and missing
+     (`urlmon.dll` missing dll, survived), two WinHttpSetOption options
+     are recorded unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
+     WINHTTP_OPTION_DISABLE_FEATURE), no TCP connection is made yet
+     (`events=net` shows none). After the configuration it asks kernel32
+     for GetUserDefaultGeoName (done: "US", GetUserGeoID's GEO_ISO2;
+     `office_api_test`, `wow64_office_api_test`) and loads wldp.dll to
+     check for S mode (done: gala's wldp.dll, x64 and x86, unlocked, no
+     policy in force; the same tests), looks for an Office 2013
+     Click-to-Run (`C:\Program Files\Microsoft Office 15\ClientX64\...`,
+     `HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration`:
+     absent, as on a clean Windows) and throws a C++ exception over the
+     absent key (the crash report decodes it: `shared::Exception`, a
+     std::exception, its message "Cannot open Registry Key"), which its
+     own catch takes. Done: that catch works (the 32-bit ntdll links a
+     registration of its own around each handler call, as Windows; before,
+     an earlier catch had linked an unwound frame back and the
+     registration list looped on itself, so this throw found no handler:
+     the crash report's SEH list showed it; ARCHITECTURE "WOW64",
+     `wow64_seh_test`). The elevated copy (pid 12) then delay-loads
+     advapi32's OpenSCManagerW (done: gala's service control manager,
+     in the kernel over the registry's Services key, the client
+     functions in advapi32 for both widths; `svc_test`,
+     `wow64_svc_test`; ARCHITECTURE "The service control manager"):
+     it connects (granted 0x2000b: connect, create service and lock, with
+     READ_CONTROL) and opens `OfficeSvc` twice, ERROR_SERVICE_DOES_NOT_EXIST
+     as on a machine without Office (`scm:` lines). Where the run ends
+     now: setup.exe asks WinRT for an activation factory
+     (RoGetActivationFactory, by C++/WinRT: `combase.dll` is a missing
+     dll, then its fallback loads `windows.management.deployment.dll`,
+     `windows.management.dll` and `windows.dll` by the class's name, all
+     missing: the class is presumably
+     Windows.Management.Deployment.PackageManager, looking for an
+     installed Store/MSIX Office), gets CLASS_E_CLASSNOTAVAILABLE and
+     throws `winrt::hresult_class_not_available` (HRESULT 0x80040111 in
+     the crash report's object) that nothing catches: both copies end
+     with status 3 (crash report: the C++ throw at kernel32.dll+0x24859;
+     ledger `setup.exe!RoGetActivationFactory` and
+     `setup.exe!RoOriginateLanguageException` missing exports, FormatMessage
+     of 0x80040111 unsupported). ODT has written no log yet
+     (`dump=C:/gala/odtlog` finds no directory).
+     HKCU still names the boot user's hive while running as SYSTEM
+     (advapi32's `current_user_path` is fixed to the boot user's SID;
+     Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
+     Next, in the order the run reaches them: combase.dll for both
+     widths (HSTRINGs, RoGetActivationFactory/RoActivateInstance from an
+     activatable-class registration, RoOriginateLanguageException; test
+     first, expectations from Windows and Wine's combase tests) and
+     Windows.Management.Deployment.PackageManager's queries answering "no
+     packages" (as a clean machine without Store Office), then what the
+     run reaches after it (its log in `target/failed/office_install.dump/`
+     once it writes one); starting a service (Click-to-Run's
+     ClickToRunSvc, once the installer creates it: the SCM answers
+     ERROR_NOT_SUPPORTED, recorded); gdiplus (setup.exe's error and progress UI),
+     HKCU from the caller's token, the TLS handshake from 32-bit
+     (schannel.dll has no i686 build: secur32's x86 loads it on first
+     use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
+     the XML it downloads (the CDN's cab manifests: more of the DOM as
+     the run reaches it; load of URLs is recorded unsupported), then
+     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
+     (the signature check), wininet, urlmon, xmllite, webservices,
+     iphlpapi, setupapi, cabinet, credui; a few shlwapi, user32, ole32
+     and shell32 functions; FormatMessage's system text for
+     ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
+     dispatcher's nested exceptions and collided unwinds.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,
@@ -1341,8 +1585,11 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    and chunked bodies, an untrusted issuer, a closed port,
    WinHttpCrackUrl; automatic redirects by WINHTTP_OPTION_REDIRECT_POLICY
    and MAX_HTTP_AUTOMATIC_REDIRECTS, WINHTTP_OPTION_URL; ARCHITECTURE
-   "WinHTTP and WinINet"). Still open there: connection reuse,
-   asynchronous sessions and status callbacks, proxies, authentication,
+   "WinHTTP and WinINet"); the status callbacks of a synchronous
+   session and the connect time-out (`winhttp_cb_test`,
+   `wow64_winhttp_cb_test`). Still open there: connection reuse,
+   asynchronous sessions (and their completion notifications), WinINet's
+   InternetSetStatusCallback, proxies, authentication,
    WINHTTP_DISABLE_REDIRECTS.
 2. Done: wininet's HTTP functions on the same engine as winhttp
    (`user/http_client`; `wininet_test` against the same Nginx:
@@ -1534,7 +1781,8 @@ is left is delay-loaded or stubbed.
 **Next** (what is left, by DLL):
 1. ole32: CoRegisterMallocSpy (sqlmin; the task allocator would call the
    spy around every operation and track spied blocks), the OLE clipboard
-   and DoDragDrop (need user32's clipboard).
+   (OleSetClipboard and friends, over user32's clipboard) and
+   DoDragDrop.
 2. crypt32: the other decode types the programs use (which ones is only
    seen at run time: the ledger's `CryptDecodeObjectEx` lines),
    CRLs/CTLs, collections' member stores, PFX with ECDSA keys (ncrypt
@@ -1821,8 +2069,9 @@ Next:
      SWP_NOSIZE, HWND_TOP); a WS_OVERLAPPEDWINDOW's client width at
      other DPIs (25H2 at 96: 304 of 320; gala's frame: 318).
      The open probes are GitHub issues labelled `windows` and `probe`
-     (#6 Round 5's, #8 the older ones); the runner's skips and expected
-     exits are #7.
+     (#6 Round 5's); the runner's skips and expected exits are #7. #8's
+     fifteen measurements are acted on: the tests now expect what
+     Windows does, except the two WOW64 ones (WOW item 3).
 2. The tests that need a setting run-all.ps1 cannot give say "skipped"
    without it (system_test, session_test: SYSTEM; restricted_test,
    disk_test, wow64_adv_test's view: an administrator; access, logon,
@@ -1930,6 +2179,14 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
   symbolic and hard links kept across reboots (`fs::log` record
   version 3, older records still read; host tests). busybox's applets
   run by their own names through symbolic links (`lx_busybox`).
+- Linux identity from gala's accounts (`lx_id` with id_test, recorded
+  on Linux as an ordinary user; the owner: user accounts from the
+  start): uid, gid and groups from the process's token (the boot user
+  `gala` is 1000, SYSTEM root, other SIDs nobody), everywhere Linux
+  reports them; `/etc/passwd` and `/etc/group` made at boot from the
+  account database, bound over the shared tree's `/etc`; homes on the
+  users' profiles (`/Users/gala`); getgroups (ARCHITECTURE "The lx
+  module", Linux identity).
 - Milestone 4's dynamic linking (LD step 1): glibc programs start
   through their interpreter (PT_INTERP) and ld.so loads their libraries
   (`lx_dyn`, `lx_dyn_pie`); file mappings (views of sections on the
@@ -1964,11 +2221,17 @@ milestone, test first against real Linux (CLEAN_ROOM "Linux").
    FileCaseSensitiveInformation (query, and set on an empty directory),
    FILE_DISPOSITION_POSIX_SEMANTICS and FILE_RENAME_POSIX_SEMANTICS,
    CreateHardLinkW (FileLinkInformation), CreateSymbolicLinkW; an NT
-   delete through a hard link's name removing that name; uid/gid per
-   file with more than one Linux user; a reboot scenario for Linux
+   delete through a hard link's name removing that name; a file's
+   owner from its security descriptor's owner (the Linux ids come from
+   the token, `lx::identity`; a file shows the caller as its owner
+   today); a reboot scenario for Linux
    files (modes and links are host-tested only).
 5. Seam 5: shared core objects when pipes, sockets or files are
-   reworked.
+   reworked. Built: AF_UNIX sockets (`unix`, under `lx::unix`); next for
+   them: Windows' AF_UNIX through afd on the same core sockets (a test
+   first on real Windows: bind, connect, accept, the socket file as a
+   reparse point), then pipes and TCP sockets' state (with wait queues
+   instead of TCP's 1 ms look).
 6. Also open (ARCHITECTURE "The lx module"): address randomization, a
    vDSO, Linux in gala-um, the system-call numbers 462..=469.
 
@@ -2076,6 +2339,151 @@ the next breakthroughs).
   and child); robust futex lists released when a thread ends, at exit
   or its process's end (thread_test); SIGBUS for a file mapping's page
   past the file's end (mmap_test).
+- Step 2's first prerequisite, memfd (`lx_memfd`, memfd_test recorded
+  on Linux): memfd_create as an anonymous file of the shared file
+  system, its mappings shared by every process, the seals (SHRINK,
+  GROW, WRITE, FUTURE_WRITE, EXEC, SEAL) checked by the file system;
+  a file view follows the file's size (mremap after ftruncate).
+- Step 2's second prerequisite, AF_UNIX sockets (`lx_unix`, unix_test
+  recorded on Linux), the first shared core object of seam 5: the core
+  `unix` module (sockets, names keyed by a file-system socket node or
+  abstract bytes, connections, queues, rights in flight, credentials;
+  no personality's types) under the Linux view `lx::unix`: socket and
+  socketpair (stream, seqpacket, datagram), bind to a path, abstract
+  names and autobind, listen, accept4, connect with a backlog,
+  read/write, sendmsg/recvmsg (also for TCP), shutdown, the names,
+  SO_PEERCRED, poll and epoll on wait queues, SCM_RIGHTS passing open
+  file descriptions (a memfd both processes map, a pipe end) with
+  MSG_CTRUNC and MSG_CMSG_CLOEXEC.
+- Step 2's server, first part (`lx_wl`, `lx_wl_pie`: user/lx/wl_test,
+  recorded against weston's headless backend, matches exactly): the
+  wire format (`kernel/wl_abi`, tables generated from the protocol
+  XML) and a Wayland server in the kernel (`kernel/src/wayland`,
+  `wayland=on|trace`): one kernel thread serving every client on
+  `/run/user/<uid>/wayland-0` through the core's AF_UNIX sockets; per
+  client an object table with libwayland's limits (4096-byte messages,
+  28 descriptors, 4096 objects) and every malformed or unknown request
+  answered with `wl_display.error` and a disconnect; wl_compositor 6,
+  wl_shm 2 (ARGB8888, XRGB8888, pools on the client's memfd),
+  xdg_wm_base 6 and wl_output 4; an xdg_toplevel's configure and ack,
+  then each commit's damaged rows copied from the memfd into a shasha
+  window titled by `set_title`, the buffer released and frame
+  callbacks done at once; `delete_id` for every destroyed object;
+  `events=wayland`, the trace, the ledger and the state dump. Host
+  tests for the protocol state (`cargo test -p kernel --lib wayland`).
+- Step 2's server, second part: input and window control (`lx_wl_input`,
+  `lx_wl_input_pie`: user/lx/wl_input_test, its transcript written from
+  the protocol's specification since weston's headless backend has no
+  input devices; driven by QEMU's PS/2 mouse and keyboard from a screen
+  check on a headless desktop, which also finds the windows' pixels
+  inside shasha's frame and frameless): wl_seat 7 with wl_pointer
+  (enter, leave, motion, BTN_LEFT/BTN_RIGHT, the wheel as axis_source,
+  axis_discrete and axis, frames) and wl_keyboard (gala's US keymap in
+  XKB text as a sealed read-only file passed with SCM_RIGHTS,
+  repeat_info, enter/leave following the desktop's active window, evdev
+  key codes from the scan codes, modifiers), the desktop's input taken
+  by the server as a kernel listener of the client's process
+  (`winstate::Listener::Server`, with gala's GALA_WM_ACTIVE and
+  GALA_WM_POINTER_LEFT notices); `xdg_toplevel.close` from the frame's
+  close button; zxdg_decoration_manager_v1 (server-side and framed
+  unless the client asks for client-side: frameless). Pings are not sent
+  (no window is marked not responding yet). `events=wayland`'s
+  `wayland input`, the trace's `input:` lines, the ledger's `wayland
+  window action missing`, the seat in the state dump.
+- Step 2's server, third part: configure from the desktop (wl_input_test's
+  Snap steps in `lx_wl_input`): the desktop's maximize (SC_MAXIMIZE: the
+  caption's button, Win+Up, `gala maximize`), restore (SC_RESTORE) and
+  place (GALA_WM_PLACE: Snap, back from Snap, `gala place`) become an
+  `xdg_toplevel.configure` of the surface size (the work area or the
+  rectangle less shasha's frame) with the states maximized, activated
+  (following the desktop's active window, a configure at each change) and
+  tiled_left/right/top/bottom (xdg_toplevel 2), and the window moves to
+  the desktop's place and takes the buffer's size at the commit after
+  the client acks it; an ack may name any configure not yet acked (at
+  most 16 kept); `set_maximized`, `unset_maximized` and `set_minimized`
+  are the desktop's actions on the window; wm_capabilities maximize and
+  minimize. `events=wayland`'s `wayland configure`, `placed` in `wayland
+  commit`.
+- Step 2's server, fourth part: popups (`lx_wl_popup`, `lx_wl_popup_pie`:
+  user/lx/wl_popup_test, recorded against weston's headless backend;
+  and wl_input_test's popup steps in `lx_wl_input`, written from the
+  specification): xdg_positioner (every request at version 6, each
+  checked: `invalid_input`; an incomplete one is `invalid_positioner`)
+  and xdg_popup as a frameless popup window above its parent (user32's
+  menus' `STYLE_POPUP`), placed from the anchor rectangle, anchor,
+  gravity and offset against the parent's window geometry
+  (set_window_geometry now applied at commit) and adjusted against the
+  work area: flip, slide and resize on each axis in the protocol's
+  order; configure and ack as toplevels, reposition (version 3);
+  xdg_popup.grab with the serial of the last button or key press (else
+  denied: popup_done at once): the topmost grabbing popup has the
+  keyboard focus while the toplevel stays activated, the desktop's popup
+  grab (`State::popup_grab`) ends at a press outside the client's
+  windows, which goes nowhere else (GALA_WM_POPUP_DONE), or when the
+  window loses the activation, dismissing the grabbing popups topmost
+  first; only the topmost grabbing popup may be destroyed
+  (`not_the_topmost_popup`); popups without a grab go in any order, a
+  child outliving its parent popup (as weston). `events=wayland`'s
+  `wayland popup`, `events=window`'s `popup grab ended`, the ledger's
+  ignored set_reactive, set_parent_size and set_parent_configure, the
+  grabs and popups in the state dump.
+- Step 2's first real client: `weston-simple-shm` (`lx_simple_shm`:
+  weston 13's demo, Ubuntu 24.04's build with its libwayland-client and
+  libffi, `PREBUILT`s, on glibc) draws its animated frames on a headless
+  desktop (the screen check: many colours in its window) and ends at Esc, its transcript real Linux's (against
+  weston's headless backend). Built for it: fallocate (`posix_fallocate`
+  of its buffer file; memfd_test, recorded on Linux: allocate, KEEP_SIZE,
+  PUNCH_HOLE, the seals, the errors); frame callbacks done at the 60 Hz
+  refresh after their commit instead of at once (a client drawing on its
+  callbacks no longer redraws as fast as the CPU allows); the
+  connection's summary line (requests, commits shown, frame callbacks
+  done).
+- Step 2's server, what GTK 3 needs of it (host tests in
+  `kernel/src/wayland/tests.rs`): `wl_data_device_manager` 3 (GTK 3
+  makes its seat only once the global is there): data sources and
+  devices, `selection` (nil) before each keyboard focus, the client's
+  own selection kept and the replaced one cancelled, `start_drag`'s
+  source cancelled at once (ledgered), the protocol's errors; a toplevel
+  without a decoration object is client-side, frameless (xdg-decoration:
+  a client that does not negotiate decorates itself; GTK 3 never binds
+  the manager); a frameless window shows its window geometry, so a
+  client's translucent shadow outside it is not shown as black while
+  alpha is not composed (ARCHITECTURE "Frameless windows").
+- Step 3, the first GTK program (`lx_gtk`, `lx_gtk_pie`:
+  user/lx/gtk_test, a GTK 3 window with a label and a button, linked
+  against Ubuntu 24.04's libgtk-3.so.0 by build.sh's GLIBC_TESTS, its
+  transcript recorded on Linux by lx-expect against weston on Xvfb, a
+  compositor with a seat): GTK 3 and its whole library closure (58 of
+  Ubuntu's packages, from GLib, Pango, cairo and HarfBuzz to libX11) as
+  a Linux root assembled from the release's packages (xtask's
+  `LINUX_ROOTS` "gtk3", each .deb's SHA-256 from the signed index, the
+  downloads in a shared package cache), with what an installation adds:
+  the MIME database's mime.cache (gdk-pixbuf picks its PNG loader by
+  MIME type through GIO), the xkb-data GDK's default keymap reads, DejaVu Sans as
+  the one font. On a headless desktop its window is drawn frameless with
+  GTK's own title bar (`GTK_SCREEN` checks GTK's pixels), a PS/2 click on
+  its button prints its line, a click on GTK's close button closes it,
+  and its transcript is Linux's; the `_pie` scenario clicks itself, as
+  on Linux. Built for it: the server's part above; and what GTK's start
+  reached, each in a corpus test recorded on Linux: eventfd and eventfd2
+  (`lx_eventfd`: GLib's main loop wakes its threads with one), prctl's
+  thread name and capability bounding set with getresuid and getresgid
+  (`lx_prctl`), statfs and fstatfs (`lx_statfs`). Its ledger after:
+  rseq and SA_ONSTACK (below), and the Wayland requests accepted and
+  not used (regions, set_cursor, min and max sizes, set_parent).
+- Step 3's first part, Windows' clipboard as Windows has it
+  (`clipboard_test`: two processes, its expectations Windows'
+  documented behaviour; ARCHITECTURE "The clipboard"): one per window
+  station in the kernel (`nt::clipboard`, the GalaClipboard* services
+  0x7fc0-0x7fc7), OpenClipboard's lock across processes
+  (ERROR_ACCESS_DENIED, GetOpenClipboardWindow), the owner
+  (GetClipboardOwner after EmptyClipboard), HGLOBAL formats copied
+  through the kernel and charged to the setter's paged pool quota
+  (GetClipboardData's handle made per process, freed by user32 once the
+  data changes), the synthesized text formats and CF_LOCALE in
+  Windows' enumeration order, the sequence number, the format listeners
+  (WM_CLIPBOARDUPDATE posted across processes), `events=ipc` and the
+  state dump's clipboard line.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2085,29 +2493,108 @@ the next breakthroughs).
    - rseq (glibc registers one; ENOSYS, ledgered, until the scheduler
      keeps its cpu_id and aborts its critical sections), shrinking a
      mapped file (ramfs refuses it while mapped: EBUSY, ledgered);
-   - a root file system image of a distribution's libraries (more than
-     glibc), as the GTK step needs; what its programs reach, from the
-     ledger (`linux syscall missing`).
-2. A Wayland server in gala speaking the core protocol and `wl_shm`
-   (shared-memory buffers: software-rendered clients need no GPU) and
-   `xdg-shell` for top-level windows: each surface a shasha window,
-   pointer and keyboard input through `wl_seat`. First its
-   prerequisites, each test first against real Linux: `AF_UNIX` stream
-   sockets with `SCM_RIGHTS` (`unix_test`) and `memfd_create`
-   (`memfd_test`); then the wire format as a crate of its own
-   (`kernel/wl_abi`, host-tested); then the server. Test first:
-   `wl_test`, a client of our own over raw sockets, its transcript
-   recorded against weston's headless backend, its pixels checked on
-   the screen.
-3. A first real application: a GTK 3 or 4 program (a calculator or text
-   editor) from a distribution's packages, its window and input checked
-   on the screen; then a Qt one.
-4. X11 programs through Xwayland, once the Wayland server holds.
+     sigaltstack (glibc 2.39 installs its SIGRT_1 handler with
+     SA_ONSTACK, ledgered: without an alternate stack the current one is
+     used, as on Linux, so it changes nothing until a program sets one);
+   - Linux roots for more programs (`LINUX_ROOTS`: today GTK 3's), and
+     what their programs reach, from the ledger (`linux syscall
+     missing`).
+2. The Wayland server's rest (its first part is done, above; each
+   step test first, in wl_test or a client like it recorded against
+   weston):
+   - the `resizing` state and `xdg_toplevel.resize`/`move` (an
+     interactive resize from a client-side frame through the desktop's
+     `begin_resize`/`begin_drag`; ledgered as ignored today), fullscreen,
+     a decoration mode change on a mapped window (the frame
+     put on or taken off in place; today the mode is fixed at mapping),
+     the middle button and horizontal wheel once the desktop has them;
+   - popups' rest: reconstraining a reactive popup when its parent
+     moves or resizes (set_reactive, set_parent_size and
+     set_parent_configure are accepted and ledgered today), a grab per
+     connection rather than per process on the desktop (two connections
+     of one process count as one owner), touch;
+   - `xdg_wm_base.ping` on a timer once the desktop marks windows that
+     do not answer (none, Windows' or Linux's, are marked today);
+   - frame callbacks paced by the presenter's own refresh (a 60 Hz
+     tick of the server's today, not the display's vblank), the
+     server's allocations charged to the client's quota;
+   - a socket per session's desktop under its user's `/run/user/<uid>`,
+     with `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` given to the Linux
+     programs started there (today one socket for the boot user, the
+     environment passed by whoever starts them; the server is on by
+     default where the desktop has a shell, its runtime directory in
+     `/run`, the Linux view's tmpfs, `lx_run`);
+   - more of weston's demos as clients (simple-damage: buffer scale
+     and transform, viewporter; eventdemo: input through libwayland),
+     each a `PREBUILT` member of the same package;
+   - drag-and-drop (the clipboard is step 3 below); alpha composed by shasha (translucent
+     windows, client-side shadows and rounded corners, which a
+     frameless window's view leaves out today).
+   Still open in the prerequisites, ledgered: a datagram socket's
+   connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
+   on a MSG_PEEK, collecting rights cycles in flight.
+3. **One clipboard for both personalities** (the owner: "would be
+   amazing"), test first at each layer:
+   - Windows' clipboard's open ends (its first part is done, above),
+     ledgered where a program reaches them: delayed rendering (SetClipboardData
+     with NULL is kept, WM_RENDERFORMAT and WM_RENDERALLFORMATS are not
+     sent), GDI handle formats across processes (CF_BITMAP,
+     CF_ENHMETAFILE, CF_PALETTE stay the setter's; the bitmap and
+     metafile synthesized formats CF_DIB, CF_DIBV5, CF_METAFILEPICT are
+     not made), registered formats are per process
+     (RegisterClipboardFormat shares user32's table of registered
+     messages: a station-wide atom table is to come), the viewer chain
+     (SetClipboardViewer, WM_DRAWCLIPBOARD), WM_DESTROYCLIPBOARD posted
+     rather than sent, CF_LOCALE's code pages (user32 converts text
+     through the system's ANSI and OEM code pages); `clipboard_test`
+     passes on CI's Windows (`user/windows/ci-passing.txt`);
+   - the Wayland selection across clients: data offers to the focused
+     client, `receive` passing its descriptor to the source's `send`;
+     a two-client test against weston;
+   - the bridge: the session's clipboard is one; a Wayland selection
+     offers Windows the formats it maps (`text/plain;charset=utf-8` as
+     CF_UNICODETEXT, `image/png` as a PNG format and CF_DIB later) and a
+     Windows copy offers Wayland clients the same MIME types, the data
+     converted when pasted (delayed rendering on both sides); a
+     scenario copying from a GTK window and pasting into a Windows edit
+     control, and back. What it needs from the kernel clipboard, beyond
+     the seams there (`Clipboard::offer`: the Wayland server puts text
+     on the clipboard as an owner without a window, refused while a
+     program has it open; `Clipboard::text`; the sequence number to
+     notice a Windows copy): delayed rendering first (a Wayland source
+     offered as formats with no data, rendered by the server's `send`
+     when a Windows program asks: the kernel waiting for the bytes
+     instead of WM_RENDERFORMAT), a kernel-side listener (the server
+     told of a Windows change as WM_CLIPBOARDUPDATE tells windows), the
+     session's interactive station (WinSta0) as the one bridged, and the
+     text conversion user32 does today (UTF-8 to CF_UNICODETEXT) on the
+     kernel side.
+4. Step 3's rest: an application as a distribution ships it (GTK 3, the
+   owner's choice for now: gnome-calculator or gedit's GTK 3 builds),
+   with its GSettings schemas, icon theme and keyboard input checked on
+   the screen; then a Qt one; GTK 4 later. A session gives Linux programs
+   their environment (`HOME`, `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`: the
+   scenarios pass them today; who the program is comes from its token,
+   `lx::identity`) and has no D-Bus session bus yet (GTK goes
+   without it: accessibility and portals are skipped).
+5. X11 programs through Xwayland, once the Wayland server holds.
+6. Linux Chromium beside Windows Chromium (BR's): a distribution's
+   Chromium (or Google's Linux build) with `--ozone-platform=wayland
+   --no-sandbox` in a boot scenario, its window on the same desktop as
+   `chromium_window`'s, both browsers running at once and loading a page
+   from the guest's nginx. Expected blockers, each a Linux test program
+   recorded on real Linux first: `/proc` files Chromium reads
+   (`/proc/self/maps`, `status`, `stat`, `/proc/meminfo`), eventfd,
+   timerfd, inotify, `/dev/shm`, fontconfig and fonts, D-Bus optional
+   (absent: Chromium carries on without it). Then its sandbox
+   (user namespaces, seccomp-bpf; shares CT's namespace work) so
+   `--no-sandbox` goes, and the clipboard between the two browsers
+   (`wl_data_device` bridged to the Windows clipboard).
 
 **Done when** (each step): its test and scenario pass, and the Linux
 programs' transcripts match real Linux's.
 
-**Design**: ARCHITECTURE "Plan: Linux applications on the desktop
+**Design**: ARCHITECTURE "Linux applications on the desktop
 (Wayland)": the server in the kernel beside the compositor for now
 (moving to user mode with SH), `wl_shm` pools as memfd sections,
 surfaces as `winstate` windows wearing shasha's frame through
@@ -2377,7 +2864,29 @@ wow64.dll converts 32-bit system calls in user mode).
    access violation, not yet understood), comctl32's TaskDialogIndirect,
    shell32's SHPathPrepareForWriteW, rstrtmgr, riched20/msftedit and sfc
    for i686.
-3. Later: the handover carrying WOW64 processes; gala-um running 32-bit
+3. Two Windows 11 measurements (issue #8) that change how threads and
+   static TLS start in a 32-bit process. **NtCreateThread** (the old call
+   with a CONTEXT and an INITIAL_TEB) is refused with
+   STATUS_ACCESS_DENIED in a WOW64 process, by syscall and by export;
+   NtCreateThreadEx and kernel32's CreateThread work. gala has no
+   NtCreateThreadEx yet and its 32-bit kernel32 creates threads with
+   NtCreateThread. So: NtCreateThreadEx in the kernel (the kernel
+   allocates the stack and TEB, and the thread starts at ntdll's
+   RtlUserThreadStart), kernel32 moved onto it (64-bit too, as Windows
+   does), then NtCreateThread refused for WOW64 and `wow64_thread_test`
+   creating its thread with NtCreateThreadEx (checking CS, TEB, TID and
+   stack bounds from inside the thread). **testdll32's static TLS** is
+   never set up on Windows: no TLS callback, `_tls_index` never written,
+   by static import and by LoadLibrary alike, although its TLS
+   directory and relocations are well formed, so `wow64_import_test`
+   check 12 fails there. The 64-bit tlsdll.dll is the same on a Windows
+   Server 2025 runner: its TLS callback runs, yet its first TLS value
+   reads 0 where the template says 0x5050 (tls_test check 13). Still to
+   explain before gala changes:
+   testdll.dll (x64) has no TLS directory at all, so the 64-bit build is
+   not even linking `_tls_used`; the question is whether the DLLs'
+   build (lld, `_tls_used`) or the loader is what differs.
+4. Later: the handover carrying WOW64 processes; gala-um running 32-bit
    code (a 32-bit code segment and a TEB32 through the host's
    modify_ldt); ARM64 guests are out of scope.
 

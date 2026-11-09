@@ -146,6 +146,50 @@ fn account(name: &[u16]) -> Result<(u32, [u8; 16]), NtStatus> {
     })
 }
 
+/// The RID of `sid` if it is a local account of this machine's.
+pub fn local_rid(sid: &Sid) -> Option<u32> {
+    let rid = sid.last_sub()?;
+    (user_sid(rid) == *sid).then_some(rid)
+}
+
+/// The local user accounts: the boot user `gala` and those under
+/// `SAM\Gala\Users`, as (name, RID), in RID order (an account with no
+/// readable `Rid` is left out).
+pub fn local_users() -> Result<Vec<(Vec<u16>, u32)>, NtStatus> {
+    let mut users: Vec<(Vec<u16>, u32)> = Vec::new();
+    let mut gala = Vec::new();
+    gala.try_extend_from_slice(&b"gala".map(u16::from)).map_err(|_| NtStatus::NO_MEMORY)?;
+    users.try_push((gala, BOOT_USER_RID)).map_err(|_| NtStatus::NO_MEMORY)?;
+    let mut path = Vec::new();
+    for c in "\\Registry\\Machine\\SAM\\Gala\\Users".encode_utf16() {
+        path.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
+    }
+    let rid_name = [u16::from(b'R'), u16::from(b'i'), u16::from(b'd')];
+    registry::with(|r| {
+        let relative = registry::Registry::absolute(&path)?;
+        let Ok(id) = r.lookup(registry::ROOT, relative) else { return Ok(()) };
+        for index in 0.. {
+            let Ok(key) = r.subkey(id, index) else { break };
+            let full = r.full_name(key)?;
+            let name = full.rsplit(|&c| c == u16::from(b'\\')).next().unwrap_or(&[]);
+            let Ok(v) = r.value(key, &rid_name) else { continue };
+            let Some(rid) = v.data.get(..4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)
+            else {
+                continue;
+            };
+            if same_ascii(name, "gala") || users.iter().any(|(_, r)| *r == rid) {
+                continue;
+            }
+            let mut owned = Vec::new();
+            owned.try_extend_from_slice(name).map_err(|_| NtStatus::NO_MEMORY)?;
+            users.try_push((owned, rid)).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+        Ok(())
+    })?;
+    users.sort_unstable_by_key(|(_, rid)| *rid);
+    Ok(users)
+}
+
 /// The SID of local account RID `rid`.
 pub fn user_sid(rid: u32) -> Sid {
     Sid::new(5, &[MACHINE[0], MACHINE[1], MACHINE[2], MACHINE[3], rid])
