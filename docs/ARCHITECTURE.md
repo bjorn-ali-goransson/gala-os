@@ -6604,9 +6604,9 @@ windows can use them too.
     thread (in the thread's OLE state; CoUninitialize's last call resets
     it), CoDisableCallCancellation undoes one (S_OK when that disables
     it, CO_E_CANCEL_DISABLED while enables remain or when there were
-    none); CoCancelCall is CO_E_CANCEL_DISABLED for a thread that has not
-    enabled it, otherwise E_NOINTERFACE: gala's COM never has a pending
-    cross-apartment call to cancel (recorded,
+    none); CoCancelCall is RPC_E_NO_CONTEXT (as Windows answers with no
+    call pending, measured with cancellation disabled): gala's COM never
+    has a pending cross-apartment call to cancel (recorded,
     `ole32.dll!CoCancelCall(no pending call)`). `combase_test`,
     `wow64_combase_test`.
 - **dbghelp** (`user/dbghelp/src/image.rs`, `symbols.rs`, `stack.rs`;

@@ -814,23 +814,23 @@ fn run() -> Result<(), u32> {
     Ok(())
 }
 
-/// ole32's call cancellation (ODT's setup.exe imports it): CoCancelCall
-/// before CoEnableCallCancellation CO_E_CANCEL_DISABLED; two enables
-/// S_OK; with no call pending CoCancelCall finds no cancel object
-/// (E_NOINTERFACE); the first disable CO_E_CANCEL_DISABLED (an enable
-/// remains), the second S_OK, and CoCancelCall is disabled again.
+/// ole32's call cancellation (ODT's setup.exe imports it). With no call
+/// pending, CoCancelCall finds nothing to cancel: RPC_E_NO_CONTEXT
+/// (measured on Windows before any enable; the same answer is expected
+/// with cancellation enabled). Two enables S_OK; the first disable
+/// CO_E_CANCEL_DISABLED (an enable remains), the second S_OK.
 fn cancellation(c: &mut Checks) -> Result<(), u32> {
     const CO_E_CANCEL_DISABLED: HResult = 0x8001_0140u32 as i32;
-    const E_NOINTERFACE: HResult = 0x8000_4002u32 as i32;
+    const RPC_E_NO_CONTEXT: HResult = 0x8001_011Eu32 as i32;
     // SAFETY: plain calls.
     unsafe {
-        c.hr(CoCancelCall(0, 0), CO_E_CANCEL_DISABLED)?;
+        c.hr(CoCancelCall(0, 0), RPC_E_NO_CONTEXT)?;
         c.hr(CoEnableCallCancellation(null_mut()), S_OK)?;
         c.hr(CoEnableCallCancellation(null_mut()), S_OK)?;
-        c.hr(CoCancelCall(0, 0), E_NOINTERFACE)?;
+        c.hr(CoCancelCall(0, 0), RPC_E_NO_CONTEXT)?;
         c.hr(CoDisableCallCancellation(null_mut()), CO_E_CANCEL_DISABLED)?;
         c.hr(CoDisableCallCancellation(null_mut()), S_OK)?;
-        c.hr(CoCancelCall(0, 0), CO_E_CANCEL_DISABLED)?;
+        c.hr(CoCancelCall(0, 0), RPC_E_NO_CONTEXT)?;
     }
     Ok(())
 }

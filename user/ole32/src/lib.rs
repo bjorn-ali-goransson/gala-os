@@ -662,6 +662,7 @@ pub extern "system" fn CoUninitialize() {
 // ---- Call cancellation ----
 
 const CO_E_CANCEL_DISABLED: HResult = 0x8001_0140u32 as i32;
+const RPC_E_NO_CONTEXT: HResult = 0x8001_011Eu32 as i32;
 
 /// CoEnableCallCancellation(reserved): one more enable on this thread
 /// (nested: each needs its CoDisableCallCancellation); `reserved` must be
@@ -701,18 +702,13 @@ pub extern "system" fn CoDisableCallCancellation(reserved: *mut c_void) -> HResu
 /// CoCancelCall(thread, timeout): cancels the thread's pending synchronous
 /// call to another apartment. gala's COM makes no cross-apartment or
 /// cross-process calls (every object is called directly), so there is
-/// never such a call: CO_E_CANCEL_DISABLED when the calling thread has
-/// not enabled cancellation, otherwise E_NOINTERFACE ("no cancel
-/// object"), recorded (`ole32.dll!CoCancelCall(no pending call)`).
+/// never such a call: RPC_E_NO_CONTEXT ("no call to cancel"), whether
+/// or not cancellation is enabled (measured on Windows with it disabled;
+/// `combase_test`), recorded (`ole32.dll!CoCancelCall(no pending call)`).
 #[unsafe(no_mangle)]
 pub extern "system" fn CoCancelCall(thread: u32, _timeout: u32) -> HResult {
-    // SAFETY: plain call.
-    let own = thread == 0 || thread == unsafe { GetCurrentThreadId() };
-    if own && thread_state().is_none_or(|s| s.cancel_enables == 0) {
-        return CO_E_CANCEL_DISABLED;
-    }
     missing(b"ole32.dll!CoCancelCall(no pending call)", thread.into());
-    E_NOINTERFACE
+    RPC_E_NO_CONTEXT
 }
 
 /// RoInitialize: RO_INIT_SINGLETHREADED (0) is an STA, MULTITHREADED (1)
