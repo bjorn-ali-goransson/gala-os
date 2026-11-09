@@ -269,6 +269,8 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::Sealed => NtStatus::ACCESS_DENIED,
         FsError::WriteMapped => NtStatus::USER_MAPPED_FILE,
         FsError::NotSealable => NtStatus::INVALID_PARAMETER,
+        // NT never reaches a volume's tree (ramfs's doc).
+        FsError::CrossVolume => NtStatus::NOT_SAME_DEVICE,
     }
 }
 

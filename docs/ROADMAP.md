@@ -2218,12 +2218,9 @@ the next breakthroughs).
    - a socket per session's desktop under its user's `/run/user/<uid>`,
      with `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` given to the Linux
      programs started there (today one socket for the boot user, the
-     environment passed by whoever starts them), and the server on
-     by default where a desktop is. That waits for `/run` as a tmpfs
-     mount of the Linux view (the decision and why: ARCHITECTURE
-     "Sessions" under the Wayland section): today the runtime
-     directory is `C:\run` in the shared file system, which Windows
-     programs see and the change log keeps;
+     environment passed by whoever starts them; the server is on by
+     default where the desktop has a shell, its runtime directory in
+     `/run`, the Linux view's tmpfs, `lx_run`);
    - more of weston's demos as clients (simple-damage: buffer scale
      and transform, viewporter; eventdemo: input through libwayland),
      each a `PREBUILT` member of the same package.

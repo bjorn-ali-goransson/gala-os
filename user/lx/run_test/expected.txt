@@ -1,0 +1,34 @@
+-- the mount
+stat(/) = 0
+stat(/run) = 0
+/run is a directory = yes
+/run mode = 0755
+/run's st_dev differs from /'s = yes
+/run/.. is / = yes
+/run/. is /run = yes
+/run/../run is /run = yes
+//run/ is /run = yes
+getdents64(/): entries named run = 1
+getdents64(/): run is DT_DIR = yes
+-- through it
+open(/run) = ok
+fstat(/run fd) is /run = yes
+fstatat(/run fd, ..) is / = yes
+chdir(/run) = 0
+getcwd = /run
+stat(.) is /run = yes
+chdir(..) = 0
+getcwd = /
+fchdir(/run fd) = 0
+getcwd = /run
+chdir(../run/.) = 0
+getcwd = /run
+-- across it
+rename(/run/gala-none, /gala-none) = -18 (EXDEV)
+rename(/gala-none, /run/gala-none) = -18 (EXDEV)
+renameat2(/run/gala-none, /gala-none, NOREPLACE) = -18 (EXDEV)
+link(/run, /gala-none) = -18 (EXDEV)
+mkdir(/run) = -17 (EEXIST)
+mkdir(/run/) = -17 (EEXIST)
+rmdir(/run/.) = -22 (EINVAL)
+-- exit status 0

@@ -3,10 +3,12 @@
 //! against weston): Linux desktop programs draw through it, and each
 //! xdg_toplevel is a window on shasha's desktop.
 //!
-//! - **Where**: in the kernel, beside the compositor. `wayland=on` (or
-//!   `trace`) on the command line starts it at boot, before the programs:
-//!   it makes `/run/user/<uid>` (0700; `/run` and `/run/user` 0755 if
-//!   missing) for the boot user and listens on the AF_UNIX stream socket
+//! - **Where**: in the kernel, beside the compositor. It starts at boot,
+//!   before the programs, where the desktop has a shell (`wayland=off`:
+//!   never; `wayland=on` or `trace`: on a bare desktop too):
+//!   it makes `/run/user/<uid>` (0700; `/run/user` 0755 if missing; `/run`
+//!   is the Linux view's tmpfs, `lx::file`) for the boot user and listens
+//!   on the AF_UNIX stream socket
 //!   bound to the socket node `/run/user/<uid>/wayland-0`, through the
 //!   core's sockets (`crate::unix`), so a client's connect finds it as it
 //!   finds any listener. Programs find it through `XDG_RUNTIME_DIR` and
@@ -197,8 +199,8 @@ fn make_node(uid: u64) -> Result<(NodeId, NodeId), FsError> {
     };
     let uid_text = core::str::from_utf8(&uid_text[..n]).unwrap_or("0");
     with_fs(|fs| {
-        let mut dir = crate::fs::ramfs::ROOT;
-        for (part, mode) in [("run", 0o755), ("user", 0o755), (uid_text, 0o700)] {
+        let mut dir = crate::lx::file::run_volume(fs)?;
+        for (part, mode) in [("user", 0o755), (uid_text, 0o700)] {
             let mut name = [0u16; 32];
             let len = wide(part, &mut name);
             dir = match fs.find(dir, &name[..len])? {

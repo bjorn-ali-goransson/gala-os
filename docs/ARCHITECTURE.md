@@ -223,7 +223,7 @@ Whitespace-separated `flag` and `key=value` words (`kernel/src/cmdline.rs`).
 | `restart=<file>[:<max>][,...]` | those `run=` programs are services: started again 1 s after they end, at most `max` times (default 10; a run of over a minute resets the count), logged as `service: ... restarting it (n of max)` and a `service restart` event (scenario `service_restart`) |
 | `persist` | keep what programs change on C: and in the registry on the virtio-blk disk (a log replayed at the next boot; "Disk") |
 | `logtee=C:/dir` | what programs write to files below that directory (percent-encoded) is also logged line by line, `logtee: <file>: <line>` |
-| `wayland=on`, `wayland=trace` | start the Wayland server at boot, listening on `/run/user/<uid>/wayland-0` ("Linux applications on the desktop (Wayland)"); `trace` also logs every request and event as `WAYLAND_DEBUG=1` prints them |
+| `wayland=on`, `wayland=trace`, `wayland=off` | the Wayland server at boot, listening on `/run/user/<uid>/wayland-0` ("Linux applications on the desktop (Wayland)"): on by default where the desktop has a shell (not the server profile; a screen or `presenter=`), off where desktops are bare; `on` starts it anyway, `off` never; `trace` also logs every request and event as `WAYLAND_DEBUG=1` prints them |
 | `conpty=trace` | pseudo consoles' hosts log both directions of their VT traffic (`conpty <id> in\|out\|note: ...`) |
 | `trace` | log every system call (arguments, status) |
 | `events=<cats>` | JSON event stream on the debug console: `syscall,image,thread,process,fault,mock,net,logon,console,display,window,wayland` or `all` (`wayland`: the Wayland server's clients, roles, maps, commits and protocol errors; `window`: windows registered, described, asked for across sessions, window stations, presenters; `display`: display modes, virtio-gpu resets and failed commands; `mock`: clock-control changes; `net`: TCP accept/connect/close with addresses; `logon`: LogonUser/LSA logons with user, type, result; `console`: console sessions and pseudo consoles created, resized, closed; `process start` carries the command line) |
@@ -1646,6 +1646,14 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   log has no record for them; a later change of the name replays as a
   change of a missing path, skipped): what was bound to one is gone
   then anyway.
+- **Volumes** (`create_volume`; the Linux view's `/run` is the one
+  user): a directory tree beside the root's, its root its own parent,
+  so no path from `C:\` reaches it and NT never sees it. Each node
+  knows its tree (`Node::volume`); nothing in a volume goes to the
+  change log or a snapshot (a tmpfs: gone at shutdown); `path_of` is
+  the path within the volume (the Linux side puts the mount point
+  before it); a rename or hard link from one tree into another is
+  refused (`FsError::CrossVolume`: EXDEV, STATUS_NOT_SAME_DEVICE).
 
 - **Contents from boot modules**: modules appear read-only in `C:\gala`
   (or the directory their module string names), copied to the heap on
@@ -8683,7 +8691,16 @@ The running parts (milestone 1; `lxrun=`):
   per walk (ELOOP, path_resolution(7)). Names compare as their
   directory's: exactly in a directory a Linux program made, otherwise
   case-insensitively (the boot's `/lx`, NT's directories; ramfs
-  "Files"). An open registers with the file system sharing
+  "Files"). **`/run`** is mounted on it (run_test, `lx_run`): a ramfs
+  volume only the Linux view reaches (ramfs "Volumes"), made at the
+  first walk, a tmpfs as Linux has it. The walk enters it at `run` in
+  `/` (a `C:\run`, if one exists, is hidden by it); `..` of its root is
+  `/`; its root has no name in `/` to remove or rename (rmdir, rename:
+  EBUSY, as `/`), mkdir of it EEXIST; getdents64 of `/` lists `run`
+  after `..`; its nodes' st_dev is `RUN_DEV`, the shared tree's `DEV`;
+  getcwd puts `/run` before a path in it; a rename whose parents, or a
+  link whose file and new parent, are on different sides is EXDEV
+  before any other check (Linux compares the mounts first). An open registers with the file system sharing
   everything and keeps the offset in the description (dup'ed and
   inherited fds share it; its lock is never held across user memory).
   The calls: open/openat/creat (O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
@@ -9113,7 +9130,8 @@ The running parts (milestone 1; `lxrun=`):
   wait queues on sockets (seam 5) instead of their 1 ms look; per-thread
   CPU time (the CPU clocks,
   ITIMER_VIRTUAL/PROF, rusage); uid/gid and device numbers per file
-  (seam 4's rest; one user so far); a /dev
+  (seam 4's rest; one user so far; the device is per file system:
+  the shared one's and `/run`'s); a /dev
   directory and /proc; datagram sockets (AF_INET; AF_UNIX ones by
   name), SCM_CREDENTIALS; process groups
   and sessions; a vDSO; Linux in gala-um; the
@@ -9249,10 +9267,13 @@ for Linux processes, and a second copy of every frame. When ROADMAP SH
 moves the compositor to user mode, the Wayland server moves with it, as
 one more client of the same window-state interface.
 
-- **Starting**: `wayland=on` (or `wayland=trace`) on the kernel command
-  line starts it at boot, before the programs (`wayland::start`). It
+- **Starting**: at boot, before the programs (`wayland::start`), on
+  every boot whose desktop has a shell (not bare: `nt::desktop::is_bare`,
+  the server profile or no screen and no `presenter=`); `wayland=off`
+  keeps it off, `wayland=on` (or `trace`) starts it on a bare one too. It
   makes the boot user's runtime directory `/run/user/<uid>` (0700;
-  `/run` and `/run/user` 0755 if missing) and a socket node `wayland-0`
+  `/run/user` 0755 if missing) in `/run`, the Linux view's tmpfs ("The
+  lx module"), and a socket node `wayland-0`
   in it (an old node of that name is replaced), held open while the
   server lives, and listens on a stream socket of the core's table bound
   to it (`unix::Socket::bind` with that node, backlog 128), so a
@@ -9599,20 +9620,11 @@ and bare desktops ("Server and desktop workloads") keep Wayland windows
 as they keep Windows ones: the pixels are kept and nothing draws them
 (the `lx_wl` scenario's desktop is such a one).
 
-**Why the server is not on by default yet**: its runtime directory is
-made in the shared file system, so `/run/user/<uid>` is `C:\run\user\<uid>`:
-Windows programs list it in `C:\`, and where a disk keeps the file
-system the change log keeps its directories across boots (a socket's
-name is never logged). Behind
-`wayland=on` that is acceptable; on every desktop boot it is not. The
-answer decided on is Linux's own: `/run` as a tmpfs of the Linux view, a
-mount in `lx`'s path walk onto a directory tree of its own (not under
-`C:\`, never logged, gone at shutdown), with what a mount brings
-(`..` out of it to `/`, `getcwd` through it, its own `st_dev`, EXDEV for
-a rename or link across it, `/` listing `run`). That is the first mount
-of the LX view (seam 4), larger than the server's switch, so it is its
-own step (ROADMAP LD "Next"); the server goes on by default with it,
-started with each desktop that has a shell.
+**The runtime directory is Linux's alone**: `/run` is a tmpfs of the
+Linux view (a ramfs volume mounted in `lx`'s path walk: not under
+`C:\`, never logged, gone at shutdown; run_test is its spec), so the
+server's directories and socket are invisible to Windows programs and
+leave nothing on a disk.
 
 ### Observability
 

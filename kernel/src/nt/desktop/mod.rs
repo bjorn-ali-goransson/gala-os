@@ -1830,6 +1830,12 @@ fn bare() -> Option<&'static str> {
     Some("no screen and no presenter=")
 }
 
+/// Whether desktops are bare (see `bare`): nothing shows them, and
+/// shasha's shell does not run on them.
+pub fn is_bare() -> bool {
+    bare().is_some()
+}
+
 /// What shows the console session's desktop when it goes live: the
 /// screen, or what `presenter=` names.
 fn local_presenter() -> Result<Presenter, NtStatus> {

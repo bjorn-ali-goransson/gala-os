@@ -5,6 +5,18 @@
 //! file descriptions with their offset, and the path and fd calls on
 //! them.
 //!
+//! - **`/run`** (run_test is its spec) is mounted on the shared tree:
+//!   a volume of the ramfs (`ramfs::RamFs::create_volume`, made at the
+//!   first walk) that only the Linux view reaches, a tmpfs as Linux has
+//!   it: never in the change log, gone at shutdown, invisible to NT
+//!   programs (no `C:\run`; one that exists is hidden from Linux by the
+//!   mount). The walk enters it at `run` in `/`; `..` of its root is
+//!   `/`; its root has no name to remove or rename (EBUSY, as `/`);
+//!   getdents64 of `/` lists it after `..`; its nodes report device
+//!   [`RUN_DEV`]; getcwd and `path_of` put `/run` before a path in it;
+//!   a rename whose two parents, or a hard link whose file and new
+//!   parent, are on different sides is EXDEV before anything else is
+//!   checked (Linux compares the mounts first).
 //! - **Paths**: `/` separates; empty components are skipped; `.` and `..`
 //!   are resolved by the walk (`..` of the root is the root); a relative
 //!   path starts at the fd `dirfd` names (AT_FDCWD: the process's current
@@ -28,7 +40,7 @@
 //!   reboots by the change log), else 0755 (0555 for a read-only file):
 //!   files the boot or NT programs made run and read as a Linux user's
 //!   own; a symbolic link 0777. Owner uid/gid `exec::UID`/`GID`; inode
-//!   the node's index + 1; one device ([`DEV`]); nlink the node's names
+//!   the node's index + 1; device [`DEV`] (`/run`'s: [`RUN_DEV`]); nlink the node's names
 //!   (hard links; 0 once unlinked while open), 2 plus the subdirectories
 //!   for a directory; atime the node's access time, mtime and ctime its
 //!   write time (utimensat sets both).
@@ -48,14 +60,14 @@
 //! the flight recorder's SyscallDone entry.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use lx_abi::layout::{self as abi, Stat, Timespec};
 
 use super::dispatch::{Call, Result};
 use super::errno::{
     EACCES, EBADF, EBUSY, EEXIST, EFAULT, EFBIG, EINVAL, EISDIR, ELOOP, ENAMETOOLONG, ENODEV,
-    ENOENT, ENOMEM, ENOTDIR, ENOTEMPTY, ENXIO, EOPNOTSUPP, EPERM, ERANGE, ESPIPE,
+    ENOENT, ENOMEM, ENOTDIR, ENOTEMPTY, ENXIO, EOPNOTSUPP, EPERM, ERANGE, ESPIPE, EXDEV,
 };
 use super::state::{Fd, Object};
 use crate::fs::ramfs::{self, Access, FsError, NodeId, Share};
@@ -118,8 +130,31 @@ const OPEN_FLAGS: u64 = O_ACCMODE
     | O_SYNC
     | O_PATH;
 
-/// The device number every node reports (one file system).
+/// The device number the nodes of the shared file system report.
 pub const DEV: u64 = 0x2b;
+/// The device number of `/run`'s nodes (its own file system, as a tmpfs
+/// is).
+pub const RUN_DEV: u64 = 0x1a;
+
+/// `/run`'s volume (`ramfs::RamFs::create_volume`): made at the first
+/// walk that needs it; NO_VOLUME before.
+static RUN: AtomicUsize = AtomicUsize::new(NO_VOLUME);
+const NO_VOLUME: NodeId = usize::MAX;
+/// The mount point's name in the root.
+const RUN_NAME: [u16; 3] = [b'r' as u16, b'u' as u16, b'n' as u16];
+
+/// The root of `/run`'s volume, made if it was not (under the file
+/// system's lock, so once). Also where the kernel makes what it puts
+/// in `/run` (the Wayland server's runtime directory).
+pub fn run_volume(fs: &mut ramfs::RamFs) -> core::result::Result<NodeId, FsError> {
+    let run = RUN.load(Ordering::Relaxed);
+    if fs.node(run).is_some_and(|n| n.volume() == run) {
+        return Ok(run);
+    }
+    let run = fs.create_volume(0o755, platform::system_time())?;
+    RUN.store(run, Ordering::Relaxed);
+    Ok(run)
+}
 /// Linux's block size for stat (st_blksize).
 const BLKSIZE: i64 = 4096;
 /// The most bytes one read or write moves through the kernel at a time.
@@ -304,6 +339,7 @@ fn errno_of(e: FsError) -> u16 {
         FsError::Sealed => super::errno::EPERM,
         FsError::WriteMapped => EBUSY,
         FsError::NotSealable => EINVAL,
+        FsError::CrossVolume => EXDEV,
     }
 }
 
@@ -433,8 +469,19 @@ fn is_dir(fs: &ramfs::RamFs, n: NodeId) -> bool {
     fs.node(n).is_some_and(ramfs::Node::is_dir)
 }
 
+/// The directory `..` of `n` names: its parent, the root for `/run`'s
+/// root (a volume's root is its own parent; the mount point is in `/`).
 fn parent(fs: &ramfs::RamFs, n: NodeId) -> NodeId {
-    fs.node(n).map_or(ramfs::ROOT, ramfs::Node::parent)
+    match fs.node(n) {
+        Some(node) if node.parent() != n => node.parent(),
+        _ => ramfs::ROOT,
+    }
+}
+
+/// The file system (tree) node `n` is in: the shared one (ROOT) or
+/// `/run`'s.
+fn volume(fs: &ramfs::RamFs, n: NodeId) -> NodeId {
+    fs.node(n).map_or(ramfs::ROOT, ramfs::Node::volume)
 }
 
 /// `name` in directory `dir`, unless its delete is pending.
@@ -473,7 +520,18 @@ pub fn resolve(
     }
     let parsed = parse(path)?;
     let start = if parsed.absolute { ramfs::ROOT } else { start_dir(call, dirfd)? };
-    with_fs(|fs| walk(fs, start, &parsed, follow))
+    with_fs(|fs| walk_mounted(fs, start, &parsed, follow))
+}
+
+/// `walk` with `/run` mounted.
+fn walk_mounted(
+    fs: &mut ramfs::RamFs,
+    start: NodeId,
+    p: &Parsed,
+    follow: bool,
+) -> core::result::Result<Found, u16> {
+    let run = run_volume(fs).map_err(errno_of)?;
+    walk(fs, run, start, p, follow)
 }
 
 fn is_symlink(fs: &ramfs::RamFs, n: NodeId) -> bool {
@@ -482,9 +540,10 @@ fn is_symlink(fs: &ramfs::RamFs, n: NodeId) -> bool {
 
 /// Walks `p` from directory `start` (see the module's doc): the components
 /// left are a stack (last first) into which a followed link's target is
-/// spliced.
+/// spliced. `run`: the root of the volume mounted on `/run`.
 fn walk(
     fs: &ramfs::RamFs,
+    run: NodeId,
     start: NodeId,
     p: &Parsed,
     follow: bool,
@@ -531,6 +590,15 @@ fn walk(
             }
             Part::Name(name) => name,
         };
+        if dir == ramfs::ROOT && name[..] == RUN_NAME[..] {
+            // The mount point: its volume's root, which has no name in
+            // `/` to remove or rename (EBUSY, as for `/`).
+            if last {
+                return Ok(Found { dir, name: None, node: Some(run), dots: None });
+            }
+            dir = run;
+            continue;
+        }
         let node = child(fs, dir, &name)?;
         match node {
             Some(n) if is_symlink(fs, n) && (!last || follow || slash) => {
@@ -620,7 +688,7 @@ fn stat_of(fs: &ramfs::RamFs, id: NodeId) -> core::result::Result<Stat, u16> {
     let time = unix_time(n.written);
     let accessed = unix_time(n.accessed);
     Ok(Stat {
-        dev: DEV,
+        dev: if n.volume() == ramfs::ROOT { DEV } else { RUN_DEV },
         ino: id as u64 + 1,
         nlink,
         mode: kind | perm(n),
@@ -1099,7 +1167,11 @@ pub fn getdents64(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
     // (a fault then loses them, as an EFAULT getdents64 may).
     let (used, full) = {
         let mut cursor = file.cursor.lock();
-        with_fs(|fs| fill_dirents(fs, file.node, &mut cursor, &mut out))?
+        with_fs(|fs| {
+            let run = run_volume(fs).map_err(errno_of)?;
+            let mount = (file.node == ramfs::ROOT).then_some(run);
+            fill_dirents(fs, file.node, mount, &mut cursor, &mut out)
+        })?
     };
     if used == 0 && full {
         return Err(EINVAL);
@@ -1110,13 +1182,17 @@ pub fn getdents64(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
 
 /// Writes the records from the cursor on into `out`; returns the bytes
 /// used, with the cursor moved past them, and whether an entry was left
-/// for lack of room.
+/// for lack of room. `mount`: the root of the volume mounted on `run` in
+/// `dir` (the root's): listed after `..`, hiding a `run` of the shared
+/// file system.
 fn fill_dirents(
     fs: &ramfs::RamFs,
     dir: NodeId,
+    mount: Option<NodeId>,
     cursor: &mut Cursor,
     out: &mut [u8],
 ) -> core::result::Result<(usize, bool), u16> {
+    let first = 2 + u64::from(mount.is_some());
     // Every name: first names and hard links.
     let entries = fs.entries(dir).map_err(errno_of)?;
     let mut used = 0;
@@ -1128,16 +1204,17 @@ fn fill_dirents(
             .iter()
             .position(|&(_, n)| ramfs::order(n, last).is_gt())
             .unwrap_or(entries.len()),
-        None => cursor.index.saturating_sub(2) as usize,
+        None => cursor.index.saturating_sub(first) as usize,
     };
     loop {
         let index = cursor.index;
-        let (node, d_type, is_name) = match index {
-            0 => (dir, abi::DT_DIR, None),
-            1 => (parent(fs, dir), abi::DT_DIR, None),
+        let (node, d_type, is_name) = match (index, mount) {
+            (0, _) => (dir, abi::DT_DIR, None),
+            (1, _) => (parent(fs, dir), abi::DT_DIR, None),
+            (2, Some(run)) => (run, abi::DT_DIR, None),
             _ => {
                 let Some(&(e, entry)) = entries.get(next) else { break };
-                if fs.delete_pending(e) {
+                if fs.delete_pending(e) || (mount.is_some() && entry[..] == RUN_NAME[..]) {
                     next += 1;
                     continue;
                 }
@@ -1155,7 +1232,11 @@ fn fill_dirents(
         };
         name.clear();
         match is_name {
-            None => name.try_extend_from_slice(if index == 0 { b"." } else { b".." }),
+            None => name.try_extend_from_slice(match index {
+                0 => b".",
+                1 => b"..",
+                _ => b"run",
+            }),
             Some(entry) => utf8_name(entry, &mut name),
         }
         .map_err(|_| ENOMEM)?;
@@ -1274,6 +1355,11 @@ pub fn renameat(
     }
     let (from, _) = lookup(call, olddir, old, false)?;
     let (to, _) = lookup(call, newdir, new, false)?;
+    // Across a mount: refused before anything about the names (Linux
+    // compares the parents' mounts first).
+    if with_fs(|fs| volume(fs, from.dir) != volume(fs, to.dir)) {
+        return Err(EXDEV);
+    }
     let n = from.existing()?;
     if from.dots.is_some() || n == ramfs::ROOT || to.dots.is_some() {
         return Err(EBUSY);
@@ -1352,6 +1438,9 @@ pub fn linkat(call: &Call<'_>, olddir: u64, old: u64, newdir: u64, new: u64, fla
     }
     let name = to.name.as_deref().ok_or(EEXIST)?;
     with_fs(|fs| {
+        if volume(fs, n) != volume(fs, to.dir) {
+            return Err(EXDEV);
+        }
         if is_dir(fs, n) {
             return Err(EPERM);
         }
@@ -1429,8 +1518,12 @@ pub fn fchdir(call: &Call<'_>, fd: u64) -> Result {
 
 /// The Linux path of node `n` (`/a/b`; `/` for the root).
 pub fn path_of(n: NodeId) -> core::result::Result<Vec<u8>, u16> {
-    let wide = with_fs(|fs| fs.path_of(n)).map_err(errno_of)?;
+    let (wide, mounted) =
+        with_fs(|fs| Ok((fs.path_of(n)?, volume(fs, n) != ramfs::ROOT))).map_err(errno_of)?;
     let mut out = Vec::new();
+    if mounted {
+        out.try_extend_from_slice(b"/run").map_err(|_| ENOMEM)?;
+    }
     for part in wide.split(|&c| c == u16::from(b'\\')).filter(|p| !p.is_empty()) {
         out.try_push(b'/').map_err(|_| ENOMEM)?;
         utf8_name(part, &mut out).map_err(|_| ENOMEM)?;
@@ -1720,7 +1813,7 @@ pub fn executable_at(cwd: NodeId, path: &[u8]) -> core::result::Result<(NodeId, 
     }
     let parsed = parse(path)?;
     let start = if parsed.absolute { ramfs::ROOT } else { cwd };
-    let n = with_fs(|fs| walk(fs, start, &parsed, true))?.existing()?;
+    let n = with_fs(|fs| walk_mounted(fs, start, &parsed, true))?.existing()?;
     let ok = with_fs(|fs| fs.node(n).is_some_and(|node| !node.is_dir() && perm(node) & 0o100 != 0));
     if !ok {
         return Err(EACCES);
@@ -1742,7 +1835,7 @@ const PROC_SELF_EXE: &[u8] = b"/proc/self/exe";
 pub fn directory_of(path: &str) -> NodeId {
     let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
     let Ok(parsed) = parse(dir.as_bytes()) else { return ramfs::ROOT };
-    with_fs(|fs| walk(fs, ramfs::ROOT, &parsed, true))
+    with_fs(|fs| walk_mounted(fs, ramfs::ROOT, &parsed, true))
         .ok()
         .and_then(|f| f.node)
         .unwrap_or(ramfs::ROOT)
@@ -1772,7 +1865,42 @@ mod tests {
     }
 
     fn walk_str(fs: &RamFs, start: NodeId, path: &str) -> core::result::Result<Found, u16> {
-        walk(fs, start, &parse(path.as_bytes())?, true)
+        walk(fs, NO_VOLUME, start, &parse(path.as_bytes())?, true)
+    }
+
+    /// run_test on Linux: `/run` is the mounted volume's root, `..` out
+    /// of it is `/`, a `run` of the shared tree is hidden by it, its
+    /// nodes report their own device, and `/` lists it once.
+    #[test]
+    fn run_is_a_mount_of_its_own_volume() {
+        let (mut fs, ..) = tree();
+        let hidden = fs.create(ROOT, &w("run"), true, 1).unwrap();
+        let run = fs.create_volume(0o755, 1).unwrap();
+        let user = fs.create_posix(run, &w("user"), true, 0o755, 1).unwrap();
+        let at = |path: &str| walk(&fs, run, ROOT, &parse(path.as_bytes()).unwrap(), true);
+        let mount = at("/run").unwrap();
+        assert_eq!((mount.node, mount.name, mount.dir), (Some(run), None, ROOT));
+        assert_eq!(at("/run/user").unwrap().node, Some(user));
+        assert_eq!(at("/run/..").unwrap().node, Some(ROOT));
+        assert_eq!(at("/run/user/../..").unwrap().node, Some(ROOT));
+        assert_eq!(at("/run/user/../../run").unwrap().node, Some(run));
+        assert_ne!(at("/run").unwrap().node, Some(hidden));
+        assert_eq!((volume(&fs, user), volume(&fs, ROOT)), (run, ROOT));
+        assert_eq!(stat_of(&fs, user).unwrap().dev, RUN_DEV);
+        assert_eq!(stat_of(&fs, ROOT).unwrap().dev, DEV);
+        let mut out = [0u8; 4096];
+        let (used, _) =
+            fill_dirents(&fs, ROOT, Some(run), &mut Cursor::default(), &mut out).unwrap();
+        let mut names = Vec::new();
+        let mut at = 0;
+        while at < used {
+            let reclen = u16::from_le_bytes([out[at + 16], out[at + 17]]) as usize;
+            let name = &out[at + 19..at + reclen];
+            let end = name.iter().position(|&b| b == 0).unwrap();
+            names.push(String::from_utf8(name[..end].to_vec()).unwrap());
+            at += reclen;
+        }
+        assert_eq!(names, [".", "..", "run", "lx"]);
     }
 
     /// fileio_test on Linux: `.`, `..` and empty components resolve as
@@ -1810,7 +1938,7 @@ mod tests {
         fs.symlink(lx, &w("dangling"), b"d/new", 1).unwrap();
         assert_eq!(walk_str(&fs, lx, "dl/inner").unwrap().node, Some(inner));
         assert_eq!(walk_str(&fs, lx, "dl/up/dl/abs").unwrap().node, Some(inner));
-        let no = |path: &str| walk(&fs, lx, &parse(path.as_bytes()).unwrap(), false);
+        let no = |path: &str| walk(&fs, NO_VOLUME, lx, &parse(path.as_bytes()).unwrap(), false);
         assert_eq!(no("fl").unwrap().node, Some(file_link));
         assert_eq!(no("dl/").unwrap().node, Some(d), "a trailing slash follows");
         assert_eq!(no("fl/").err(), Some(ENOTDIR));
@@ -1835,7 +1963,7 @@ mod tests {
 
     fn names(fs: &RamFs, dir: NodeId, cursor: &mut Cursor, room: usize) -> (Vec<Vec<u8>>, bool) {
         let mut out = alloc::vec![0u8; room];
-        let (used, full) = fill_dirents(fs, dir, cursor, &mut out).unwrap();
+        let (used, full) = fill_dirents(fs, dir, None, cursor, &mut out).unwrap();
         let mut v = Vec::new();
         let mut at = 0;
         while at < used {
@@ -1873,7 +2001,7 @@ mod tests {
         let mut fresh = Cursor::default();
         assert_eq!(names(&fs, d, &mut fresh, 8), (Vec::new(), true));
         // A file is not a directory to list; a non-empty one is not removed.
-        assert!(fill_dirents(&fs, inner, &mut Cursor::default(), &mut [0u8; 64]).is_err());
+        assert!(fill_dirents(&fs, inner, None, &mut Cursor::default(), &mut [0u8; 64]).is_err());
         let up = d_parent(&fs, d);
         assert_eq!(remove(&mut fs, up, &w("d")), Err(ENOTEMPTY));
     }

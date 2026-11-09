@@ -1269,6 +1269,12 @@ source).
   a directory it makes (fs_test's `w`): gala runs it in `/lx`, beside
   every other binary, and only a directory a Linux program makes is
   case-sensitive there.
+- **A test of a mount the host may not have** (run_test needs `/run`
+  a tmpfs of mode 0755, as on systemd systems and CI; a container's
+  `/run` is often a plain directory): record it in a mount namespace
+  that has it, `unshare -m sh -c 'mount -t tmpfs -o mode=755 none /run
+  && cargo xtask lx-expect --record'` (as root). Check what it prints
+  only before permissions, so the runner's user does not matter.
 - **Determinism**: children report through exit status or a pipe and
   the parent waits before printing on; never rely on timing for an
   ordering: a FUTEX_WAKE is retried until it wakes the thread known to be
