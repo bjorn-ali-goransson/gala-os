@@ -28,6 +28,9 @@
 //! All desktops of a session share its window state (`session::Desk`);
 //! several desktops with windows of their own (CreateDesktop,
 //! SwitchDesktop) are later work.
+//!
+//! Each station holds its clipboard (`nt::clipboard`), shared by the
+//! processes connected to it.
 
 use alloc::vec::Vec;
 
@@ -119,6 +122,9 @@ pub struct WindowStation {
     /// WinSta0 (it can receive input), not a logon session's station.
     pub interactive: bool,
     desktops: IrqMutex<Vec<ObjectRef>>,
+    /// Its clipboard (nt::clipboard), shared by every process connected
+    /// to it.
+    pub clipboard: super::clipboard::Clipboard,
 }
 
 impl WindowStation {
@@ -260,6 +266,7 @@ fn new_station(name: &[u16], session: u32, interactive: bool) -> Result<ObjectRe
             session,
             interactive,
             desktops: IrqMutex::new(Vec::new()),
+            clipboard: super::clipboard::Clipboard::new(),
         }),
         true,
     )

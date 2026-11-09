@@ -11,6 +11,7 @@ extern crate alloc;
 use gala_heap as _;
 
 mod accel;
+mod clipboard;
 mod combo;
 mod controls;
 mod dialog;
