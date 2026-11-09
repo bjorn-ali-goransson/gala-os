@@ -236,9 +236,6 @@ pub extern "system" fn CoGetClassObject(
         return E_INVALIDARG;
     }
     put(out, core::ptr::null_mut());
-    if apartment().is_none() {
-        return CO_E_NOTINITIALIZED;
-    }
     // SAFETY: the caller's CLSID.
     let clsid_value = unsafe { *clsid };
     let detail = u64::from(u32::from_le_bytes([
@@ -247,6 +244,12 @@ pub extern "system" fn CoGetClassObject(
         clsid_value[2],
         clsid_value[3],
     ]));
+    // A thread that never initialized COM is a member of the process's
+    // MTA when there is one (the implicit MTA).
+    if apartment().is_none() && !super::implicit_mta() {
+        missing(b"ole32.dll!CoGetClassObject(COM not initialized, no MTA)", detail);
+        return CO_E_NOTINITIALIZED;
+    }
     if context & CLSCTX_INPROC == 0 {
         missing(b"ole32.dll!CoGetClassObject(out-of-process server)", detail);
         return REGDB_E_CLASSNOTREG;

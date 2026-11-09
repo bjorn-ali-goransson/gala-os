@@ -23,12 +23,8 @@ gala_stubs::unimplemented_exports!("advapi32.dll":
     QueryAllTracesW
     RegConnectRegistryW
     RegCopyTreeW
-    RegisterServiceCtrlHandlerA
-    RegisterServiceCtrlHandlerExW
-    RegisterServiceCtrlHandlerW
     SetEntriesInAclA
     SetServiceBits
-    SetServiceStatus
     StartTraceW
     UnlockServiceDatabase
     CredDeleteW

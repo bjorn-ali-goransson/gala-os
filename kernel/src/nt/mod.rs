@@ -34,6 +34,7 @@ pub mod reglog;
 pub mod regview;
 pub mod scm;
 pub mod scm_config;
+pub mod scm_run;
 pub mod section;
 pub mod security;
 pub mod session;

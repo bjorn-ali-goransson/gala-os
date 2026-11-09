@@ -10,15 +10,15 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use super::super::object::{Handle, HandleEntry, KObject, ObjectBody, ObjectRef};
 use super::super::registry;
 use super::super::scm::{
-    self, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_INVALID_SERVICE_CONTROL,
-    ERROR_NOT_SUPPORTED, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DISABLED,
-    ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE, SC_MANAGER_CONNECT,
+    self, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_SERVICE_ALREADY_RUNNING,
+    ERROR_SERVICE_DISABLED, ERROR_SERVICE_MARKED_FOR_DELETE, SC_MANAGER_CONNECT,
     SC_MANAGER_CREATE_SERVICE, SC_MANAGER_ENUMERATE_SERVICE, SERVICE_CHANGE_CONFIG,
     SERVICE_DISABLED, SERVICE_INTERROGATE, SERVICE_PAUSE_CONTINUE, SERVICE_QUERY_CONFIG,
-    SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_STOP, SERVICE_STOPPED,
+    SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STOP, SERVICE_STOPPED,
     SERVICE_USER_DEFINED_CONTROL, ScManager, ServiceObject, win32,
 };
 use super::super::scm_config;
+use super::super::scm_run;
 use super::super::status::NtStatus;
 use super::super::winsta::Plain;
 use super::Call;
@@ -381,18 +381,17 @@ fn control_right(code: u32) -> Option<u32> {
     }
 }
 
-/// GalaServiceControl(Handle, Op, Code, *Status): Op 0 closes an SCM or
+/// GalaServiceControl(Handle, Op, Code, *Data): Op 0 closes an SCM or
 /// service handle (CloseServiceHandle); 1 marks a service for deletion
-/// (DELETE; it goes with its last handle); 2 starts it (SERVICE_START:
-/// ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_DISABLED,
-/// ERROR_SERVICE_ALREADY_RUNNING; starting a service process is not
-/// supported yet: recorded, ERROR_NOT_SUPPORTED); 3 sends control Code
-/// (ControlService): its right, then ERROR_SERVICE_NOT_ACTIVE for a
-/// stopped service and ERROR_INVALID_SERVICE_CONTROL for anything but
-/// INTERROGATE to a built-in driver (which accepts no controls), the
-/// SERVICE_STATUS (28 bytes) at Status with those answers.
+/// (DELETE; it goes with its last handle, once stopped); 2 starts it
+/// (SERVICE_START: ERROR_SERVICE_MARKED_FOR_DELETE,
+/// ERROR_SERVICE_DISABLED, ERROR_SERVICE_ALREADY_RUNNING, then
+/// `scm_run::start`), Data its arguments, Code characters long, each
+/// NUL-terminated; 3 sends control Code (ControlService: its right, then
+/// `scm_run::control`), the SERVICE_STATUS (28 bytes) at Data either way;
+/// 4 the same with SERVICE_STATUS_PROCESS (36 bytes: ControlServiceEx).
 pub(super) fn gala_service_control(call: &mut Call<'_>) -> NtStatus {
-    let (h, op, code, status_out) =
+    let (h, op, code, data) =
         (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2) as u32, arg!(call, 3));
     if op == 0 {
         let entry = tri!(call.handle(Handle(h)));
@@ -407,8 +406,15 @@ pub(super) fn gala_service_control(call: &mut Call<'_>) -> NtStatus {
     let (entry, name) = tri!(service(call, h));
     let result = match op {
         1 => entry.require(scm::DELETE).map(drop).and_then(|()| scm::mark(&name)),
-        2 => start(&entry, &name),
-        3 => return control(call, &entry, &name, code, status_out),
+        2 => {
+            if code as usize > scm_run::MAX_ARGS {
+                return NtStatus::INVALID_PARAMETER;
+            }
+            let args =
+                if code == 0 { Vec::new() } else { tri!(call.read_wide(data, u64::from(code))) };
+            start(&entry, &name, &args)
+        }
+        3 | 4 => return control(call, &entry, &name, code, data, op == 4),
         _ => return NtStatus::INVALID_PARAMETER,
     };
     drop(entry);
@@ -421,7 +427,7 @@ pub(super) fn gala_service_control(call: &mut Call<'_>) -> NtStatus {
     result.err().unwrap_or(NtStatus::SUCCESS)
 }
 
-fn start(entry: &HandleEntry, name: &[u16]) -> Result<(), NtStatus> {
+fn start(entry: &HandleEntry, name: &[u16], args: &[u16]) -> Result<(), NtStatus> {
     entry.require(SERVICE_START)?;
     if scm::marked(name) {
         return Err(win32(ERROR_SERVICE_MARKED_FOR_DELETE));
@@ -430,45 +436,77 @@ fn start(entry: &HandleEntry, name: &[u16]) -> Result<(), NtStatus> {
     if c.start == SERVICE_DISABLED {
         return Err(win32(ERROR_SERVICE_DISABLED));
     }
-    if scm::status(name, c.kind)[1] == SERVICE_RUNNING {
+    if scm::status(name, c.kind)[1] != SERVICE_STOPPED {
         return Err(win32(ERROR_SERVICE_ALREADY_RUNNING));
     }
-    warn!(
-        "scm: starting service \"{}\" (\"{}\", type {:#x}) is not supported yet",
-        Plain(name),
-        Plain(&c.path),
-        c.kind
-    );
-    super::super::ledger::record("GalaServiceControl", "start a service", u64::from(c.kind));
-    Err(win32(ERROR_NOT_SUPPORTED))
+    scm_run::start(name, &c, args).map(drop)
 }
 
-fn control(call: &Call<'_>, entry: &HandleEntry, name: &[u16], code: u32, out: u64) -> NtStatus {
+fn control(
+    call: &Call<'_>,
+    entry: &HandleEntry,
+    name: &[u16],
+    code: u32,
+    out: u64,
+    process_status: bool,
+) -> NtStatus {
     let Some(right) = control_right(code) else { return win32(ERROR_INVALID_PARAMETER) };
     tri!(entry.require(right));
     let kind = tri!(registry::with(|r| Ok(scm::config(r, scm::find(r, name)?)?.kind)));
-    let status = scm::status(name, kind);
-    let answer = if status[1] == SERVICE_STOPPED {
-        win32(ERROR_SERVICE_NOT_ACTIVE)
-    } else if code == 4 {
-        NtStatus::SUCCESS
-    } else {
-        win32(ERROR_INVALID_SERVICE_CONTROL)
-    };
+    let (result, status) = scm_run::control(name, kind, code);
     if out != 0 {
         let mut bytes = Vec::new();
-        for v in &status[..7] {
+        for v in &status[..if process_status { 9 } else { 7 }] {
             tri!(push_u32(&mut bytes, *v));
         }
         if call.process.write(out, &bytes).is_err() {
             return NtStatus::ACCESS_VIOLATION;
         }
     }
-    note(
-        call,
-        "sent a control to",
-        name,
-        if answer == NtStatus::SUCCESS { Ok(code) } else { Err(answer) },
-    );
-    answer
+    note(call, "sent a control to", name, result.map(|()| code));
+    result.err().unwrap_or(NtStatus::SUCCESS)
+}
+
+/// GalaServiceDispatch(Op, Value, *Buffer, Length, *Needed): a service
+/// process's control dispatcher (advapi32's StartServiceCtrlDispatcher).
+/// Op 0 connects it (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT for a
+/// process the SCM did not start as a service, ERROR_SERVICE_ALREADY_RUNNING
+/// on a second call); 1 waits for the next request and copies it to
+/// Buffer (`scm_run`'s record: kind, control, event type, service type,
+/// name length, argument count, arguments' length, then the name and
+/// the arguments; STATUS_BUFFER_TOO_SMALL with *Needed, the request
+/// kept); 2 answers the request taken with Value; 3 is SetServiceStatus
+/// (Buffer: SERVICE_STATUS, 28 bytes).
+pub(super) fn gala_service_dispatch(call: &mut Call<'_>) -> NtStatus {
+    let (op, value, buffer) = (arg!(call, 0) as u32, arg!(call, 1) as u32, arg!(call, 2));
+    let (length, needed) = (arg!(call, 3) as u32 as u64, arg!(call, 4));
+    let pid = call.process.id;
+    let error = |r: Result<(), u32>| r.err().map_or(NtStatus::SUCCESS, win32);
+    match op {
+        0 => error(scm_run::connect(pid)),
+        1 => {
+            let request = tri!(scm_run::next(pid));
+            if (request.len() as u64) > length {
+                // Kept for the next call with room for it.
+                if needed != 0 {
+                    tri!(call.write_u32(needed, request.len() as u32));
+                }
+                scm_run::put_back(pid, request);
+                return NtStatus::BUFFER_TOO_SMALL;
+            }
+            give(call, &request, buffer, length, needed)
+        }
+        2 => error(scm_run::reply(pid, value)),
+        3 => {
+            let mut raw = [0u8; 28];
+            if call.process.read(buffer, &mut raw).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let reported: [u32; 7] = core::array::from_fn(|i| {
+                u32::from_le_bytes([raw[4 * i], raw[4 * i + 1], raw[4 * i + 2], raw[4 * i + 3]])
+            });
+            error(scm_run::set_status(pid, reported))
+        }
+        _ => NtStatus::INVALID_PARAMETER,
+    }
 }

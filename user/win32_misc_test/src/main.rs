@@ -10,7 +10,9 @@
 //!   processor, numbered; STATUS_BUFFER_TOO_SMALL when short.
 //! - shell32: SHGetFolderPathW (and A) and SHGetKnownFolderPath name the profile
 //!   folders the environment names (USERPROFILE, APPDATA, LOCALAPPDATA)
-//!   and the Windows directory; an unknown CSIDL is E_INVALIDARG.
+//!   and the Windows directory, CSIDL_SYSTEMX86 SysWOW64 and
+//!   CSIDL_PROGRAM_FILESX86 ProgramFiles(x86); an unknown CSIDL is
+//!   E_INVALIDARG.
 //!   ShellExecuteW of a missing file: ERROR_FILE_NOT_FOUND (2).
 //! - version: GetFileVersionInfo(Size)(Ex)W of this program's own version
 //!   resource (build.rs); VerQueryValueW finds VS_FIXEDFILEINFO ("\") and
@@ -490,6 +492,24 @@ fn same(a: *const u16, b: *const u16) -> bool {
     }
 }
 
+/// `same`, ignoring ASCII case (Windows' folders may spell C:\WINDOWS).
+fn same_ci(a: *const u16, b: *const u16) -> bool {
+    let up = |c: u16| if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
+    let mut i = 0;
+    // SAFETY: NUL-terminated strings.
+    unsafe {
+        loop {
+            if up(*a.add(i)) != up(*b.add(i)) {
+                return false;
+            }
+            if *a.add(i) == 0 {
+                return true;
+            }
+            i += 1;
+        }
+    }
+}
+
 fn env(name: &str, buf: &mut [u16; 260]) -> u32 {
     let n = w(name);
     // SAFETY: a buffer of 260 units.
@@ -618,6 +638,38 @@ fn shell(c: &mut Checks) -> Result<(), u32> {
                 path.as_mut_ptr(),
             ) as u32 as u64,
             E_INVALIDARG as u32 as u64,
+        )?;
+        // CSIDL_SYSTEMX86 on 64-bit Windows: the Windows directory's
+        // SysWOW64 (the Click-to-Run service asks for it); the x86 program
+        // files: ProgramFiles(x86).
+        c.eq(
+            SHGetFolderPathW(
+                core::ptr::null_mut(),
+                0x29,
+                core::ptr::null_mut(),
+                0,
+                path.as_mut_ptr(),
+            ) as u64,
+            0,
+        )?;
+        let n = GetWindowsDirectoryW(want.as_mut_ptr(), 260) as usize;
+        for (i, b) in b"\\SysWOW64\0".iter().enumerate() {
+            want[n + i] = u16::from(*b);
+        }
+        c.ok(same_ci(path.as_ptr(), want.as_ptr()), path[0].into())?;
+        c.eq(
+            SHGetFolderPathW(
+                core::ptr::null_mut(),
+                0x2a,
+                core::ptr::null_mut(),
+                0,
+                path.as_mut_ptr(),
+            ) as u64,
+            0,
+        )?;
+        c.ok(
+            env("ProgramFiles(x86)", &mut want) > 0 && same_ci(path.as_ptr(), want.as_ptr()),
+            0x2a,
         )?;
         let mut known = core::ptr::null_mut();
         c.eq(

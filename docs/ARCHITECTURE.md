@@ -2457,8 +2457,9 @@ shutdown.
 
 ## The service control manager
 
-The SCM (`nt::scm`, its calls in `nt/scm_calls.rs`; advapi32's
-`service.rs`; `svc_test`, `wow64_svc_test`) is in the kernel, beside
+The SCM (`nt::scm`, the running services in `nt/scm_run.rs`, its calls
+in `nt/scm_calls.rs`; advapi32's `service.rs` and `service_run.rs`;
+`svc_test`, `svcrun_test` and their x86 twins) is in the kernel, beside
 the registry it reads, until a user-mode services process exists (as
 the session manager is the kernel's until RS B4): its access checks are
 then the kernel's, against the caller's effective token (an
@@ -2490,11 +2491,50 @@ impersonating thread's, as services.exe impersonates its RPC client).
   SC_MANAGER_CONNECT, as documented.
 - **State**: a table of the services with open handles (their count
   and deletion mark). DeleteService marks; the key and its subkeys go
-  when the last handle closes (`ServiceObject`'s drop), and until then
-  the service still opens while creating it again is
-  ERROR_SERVICE_MARKED_FOR_DELETE. The built-in drivers (AFD) report
-  SERVICE_RUNNING, no process, no controls accepted; every other
-  service is SERVICE_STOPPED with exit code ERROR_SERVICE_NEVER_STARTED.
+  when the last handle closes and the service is stopped (whichever
+  comes last: `scm::stopped`), and until then the service still opens
+  while creating it again is ERROR_SERVICE_MARKED_FOR_DELETE. The
+  built-in drivers (AFD) report SERVICE_RUNNING, no process, no
+  controls accepted; a service never started since boot is
+  SERVICE_STOPPED with exit code ERROR_SERVICE_NEVER_STARTED; one that
+  has run reports what it last reported (`nt/scm_run.rs`, below).
+- **Running services** (`nt/scm_run.rs`; `svcrun_test`,
+  `wow64_svcrun_test`, expectations from Wine's advapi32 and services
+  tests run on Windows): StartService of a Win32 service whose account
+  is LocalSystem claims it (SERVICE_START_PENDING, so a second start is
+  ERROR_SERVICE_ALREADY_RUNNING), starts its ImagePath (expanded,
+  `\SystemRoot\` made `C:\Windows\`; quoted, or the shortest prefix
+  before a space that names a file) with the ImagePath as its command
+  line, under a new SYSTEM token (session 0), in `C:\Windows\System32`,
+  with new standard handles that write to the kernel log, suspended
+  until the SCM has recorded its process. The handshake, as documented:
+  the process's dispatcher (StartServiceCtrlDispatcher) connects within
+  ServicesPipeTimeout (`HKLM\SYSTEM\CurrentControlSet\Control`, else
+  30 s), the SCM hands it the start request (the service's type and
+  name and StartService's arguments) and StartService returns once the
+  dispatcher has started ServiceMain's thread. A process that ends
+  first, or does not connect in time (it is then ended), makes
+  StartService ERROR_SERVICE_REQUEST_TIMEOUT, the service stopped
+  without a process; a missing executable is the open's error
+  (ERROR_PATH_NOT_FOUND, ERROR_FILE_NOT_FOUND) and leaves the status as
+  it was. Each service process has one request slot (events `free`,
+  `pending`, `answered`): StartService and ControlService take it, put
+  their request and wait for the answer (30 s each, the documented
+  handler limit, else ERROR_SERVICE_REQUEST_TIMEOUT; the process's end
+  ends the wait); the dispatcher's thread waits in GalaServiceDispatch
+  for the next request and runs it. ControlService: ERROR_SERVICE_NOT_ACTIVE
+  for a stopped service, ERROR_SERVICE_CANNOT_ACCEPT_CTRL while it
+  starts or stops, ERROR_INVALID_SERVICE_CONTROL for a control whose
+  SERVICE_ACCEPT_ bit it did not report (interrogation and user
+  controls 128-255 always go); the handler's answer is logged, not
+  returned (Windows' ControlService succeeds for a user control whose
+  handler answers 0xdeadbeef). SetServiceStatus keeps the state,
+  accepted controls and exit codes (the type stays the configuration's;
+  the check point and wait hint only in the pending states, as Windows
+  reports 0 for a running service that gave a wait hint); STOPPED clears
+  the process id and makes the dispatcher return. A process that ends
+  while its service has not stopped leaves it stopped with
+  ERROR_PROCESS_ABORTED (`process::finish` calls `scm_run::process_ended`).
 - **Errors**: the SCM's Win32 errors travel as FACILITY_NTWIN32 statuses
   (`scm::win32`, 0xC007xxxx) and advapi32 takes them back out; what
   Windows' RPC client stub checks before reaching the SCM (NULL handles
@@ -2511,8 +2551,13 @@ impersonating thread's, as services.exe impersonates its RPC client).
   GalaServiceEnum(scm, types, states, buffer, length, *needed) (every
   matching service, status and names; advapi32 lays out
   ENUM_SERVICE_STATUS_PROCESSW, the group filter and the resume index);
-  GalaServiceControl(handle, op, code, *status) (close, delete, start,
-  control); GalaServiceConfigure(service, level, record, length)
+  GalaServiceControl(handle, op, code, *data) (0 close, 1 delete, 2
+  start with `code` characters of NUL-terminated arguments at `data`, 3
+  control with SERVICE_STATUS at `data`, 4 the same with
+  SERVICE_STATUS_PROCESS); GalaServiceDispatch(op, value, buffer,
+  length, *needed) (0x7fd8, the service process's side: 0 connect, 1
+  the next request, 2 its answer, 3 SetServiceStatus);
+  GalaServiceConfigure(service, level, record, length)
   (0x7fd7: ChangeServiceConfig2, SERVICE_CHANGE_CONFIG, and SERVICE_START
   for a restart action) and GalaServiceQuery's classes 0x100 + level
   (QueryServiceConfig2). Every argument is a ULONG, handle or pointer to data laid
@@ -2523,12 +2568,23 @@ impersonating thread's, as services.exe impersonates its RPC client).
   ERROR_INVALID_NAME), OpenServiceW/A, CreateServiceW/A (the password
   is not kept), CloseServiceHandle, DeleteService, StartServiceW/A,
   ControlService, QueryServiceStatus(Ex), QueryServiceConfigW/A,
-  EnumServicesStatusExW, ChangeServiceConfig2W/A,
+  ControlServiceExW/A (level 1: the SERVICE_STATUS_PROCESS in the
+  reason structure; the reason is not kept), EnumServicesStatusExW,
+  ChangeServiceConfig2W/A,
   QueryServiceConfig2W/A, QueryServiceObjectSecurity and
   SetServiceObjectSecurity (NtQuerySecurityObject and
   NtSetSecurityObject on the service handle: a service object's new
   descriptor is stored in its key's `Security\Security`, so later opens
-  are checked against it).
+  are checked against it). The service process's side
+  (`service_run.rs`): StartServiceCtrlDispatcherW/A connects (else
+  ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, as for a console program;
+  a second call ERROR_SERVICE_ALREADY_RUNNING) and runs the requests on
+  the calling thread until every service has stopped (an own-process
+  service is the table's first entry, whatever its name; ServiceMain
+  gets the service's name, then the arguments, in the table's width,
+  on a new thread); RegisterServiceCtrlHandler(Ex)W/A (any name in an
+  own-process service; the handle is the entry's index plus one);
+  SetServiceStatus.
 - **Further configuration** (`nt/scm_config.rs`, ChangeServiceConfig2's
   levels): values of the service's key under Windows' names
   (Description, FailureActions with RebootMessage and FailureCommand,
@@ -2549,20 +2605,31 @@ impersonating thread's, as services.exe impersonates its RPC client).
   start request and control is a `scm:` log line (the first 64 per boot;
   pid, program, name, access granted or the status) and a `service`
   event (`events=service`); a service's key deleted with its last
-  handle is logged with the outcome.
-- **Limits**: starting a service is not supported (StartService of a
-  startable one is ERROR_NOT_SUPPORTED, logged and recorded
-  `GalaServiceControl: start a service`; the `restart=` supervisor is
-  the piece it will use), so no service but the built-in drivers ever
-  runs and no control reaches a program; StartServiceCtrlDispatcher
-  still fails as for a console program. Not there yet (gala_stubs,
-  recorded when called): ChangeServiceConfig, QueryServiceConfig2,
-  EnumDependentServices, LockServiceDatabase, SetServiceStatus and the
-  control handler registration, user services (types 0x50/0x60,
-  refused and recorded), load-order tags, the "remote" and "local"
-  authenticated users distinction of the documented descriptors (one
-  Authenticated Users ACE), service SIDs in service tokens, SCM handles
-  across a kernel handover (refused).
+  handle is logged with the outcome. A running service's start (pid and
+  command line), its dispatcher's connection, ServiceMain's start, each
+  state it reports, a handler's non-zero answer and its process's end
+  are `scm:` lines too (the first 96) and `service` events with the
+  state, exit codes and process id; a start that times out or a
+  process that ends while its service runs is a warning.
+- **Limits**: only LocalSystem services start (another account is
+  ERROR_SERVICE_LOGON_FAILED, recorded `GalaServiceControl: start as an
+  account`), drivers do not (ERROR_NOT_SUPPORTED, recorded `start a
+  driver`); a share-process service runs in a process of its own
+  (recorded `share process: run alone`: svchost is not there); a
+  service's environment is the boot environment (Windows gives SYSTEM's
+  profile variables), its standard handles write to the kernel log
+  (Windows gives none); SERVICE_CONTROL_SHUTDOWN is never sent (gala's
+  shutdown does not stop services), automatic-start services are not
+  started at boot, failure actions are kept but not carried out,
+  dependencies are not started first, the controls' event data
+  (device, power, session events) is never sent, and
+  NotifyServiceStatusChange is not there. Not there yet (gala_stubs,
+  recorded when called): ChangeServiceConfig, EnumDependentServices,
+  LockServiceDatabase, user services (types 0x50/0x60, refused and
+  recorded), load-order tags, the "remote" and "local" authenticated
+  users distinction of the documented descriptors (one Authenticated
+  Users ACE), service SIDs in service tokens, SCM handles and service
+  processes across a kernel handover (refused).
 
 ## gala's system DLLs
 
@@ -3732,7 +3799,10 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   thread holds the MTA, a thread that never initialized COM is an
   implicit MTA member: CoGetApartmentType gives APTTYPE_MTA with
   APTTYPEQUALIFIER_IMPLICIT_MTA, as Chromium's thread-pool checks
-  expect), one MTA
+  expect, and CoGetClassObject and CoCreateInstance create objects for
+  it (the Click-to-Run service's process pool does; with no MTA they
+  are CO_E_NOTINITIALIZED, recorded `ole32.dll!CoGetClassObject(COM not
+  initialized, no MTA)`; `msxml_test`), one MTA
   context object and one per STA thread (CoGetContextToken,
   CoGetObjectContext with IComThreadingInfo), task memory on the process
   heap, version-4 GUIDs and their braced string forms
@@ -4044,7 +4114,9 @@ of their own, clients of it) is the yardstick.
   folders from the environment (SHGetFolderPathW, SHGetKnownFolderPath:
   the profile's, the Start menu's and Programs under it, per user in
   %APPDATA% and for all in %ProgramData%, FOLDERID_UserProgramFiles in
-  %LOCALAPPDATA%\Programs; CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
+  %LOCALAPPDATA%\Programs, CSIDL_SYSTEMX86 `%windir%\SysWOW64` and
+  the x86 and common program files from their variables
+  (`win32_misc_test`); CSIDL_FLAG_CREATE and KF_FLAG_CREATE create a
   missing folder and its parents; without them the path is given even
   when the folder is missing, as gala's profile does not hold every
   folder Windows makes with one; `shell32_test`),

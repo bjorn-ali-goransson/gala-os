@@ -63,6 +63,7 @@ unsafe extern "system" {
 
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_INVALID_NAME: u32 = 123;
@@ -366,21 +367,55 @@ pub extern "system" fn DeleteService(h: usize) -> i32 {
     done(unsafe { GalaServiceControl(h, 1, 0, null_mut()) })
 }
 
-/// StartServiceW: SERVICE_START; a disabled, running or deleted service
-/// answers as on Windows; starting a service's process is not supported
-/// yet (ERROR_NOT_SUPPORTED, recorded by the kernel).
+/// StartServiceW(Service, Argc, Argv): SERVICE_START; a disabled,
+/// running or deleted service answers as on Windows; the SCM starts the
+/// service's process and returns once its dispatcher has started
+/// ServiceMain's thread, with argv[0] the service's name and then the
+/// arguments given.
 #[unsafe(no_mangle)]
-pub extern "system" fn StartServiceW(h: usize, _argc: u32, _argv: *const *const u16) -> i32 {
+pub extern "system" fn StartServiceW(h: usize, argc: u32, argv: *const *const u16) -> i32 {
     if h == 0 {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
-    // SAFETY: plain call.
-    done(unsafe { GalaServiceControl(h, 2, 0, null_mut()) })
+    if argc > 0 && argv.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's `argc` strings.
+    let arg = |i: u32| wide_arg(unsafe { *argv.add(i as usize) });
+    let total: usize = (0..argc).map(|i| arg(i).len() + 1).sum();
+    let Ok(blob) = Mem::new(2 * total) else { return fail(ERROR_NOT_ENOUGH_MEMORY, 0) };
+    let mut at = 0;
+    for i in 0..argc {
+        let a = arg(i);
+        // SAFETY: inside `blob`, sized for every argument and its NUL.
+        unsafe {
+            core::ptr::copy_nonoverlapping(a.as_ptr().cast::<u8>(), blob.ptr.add(at), 2 * a.len())
+        };
+        at += 2 * (a.len() + 1);
+    }
+    // SAFETY: our blob of `total` characters.
+    done(unsafe { GalaServiceControl(h, 2, total as u32, blob.ptr.cast()) })
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn StartServiceA(h: usize, argc: u32, _argv: *const *const u8) -> i32 {
-    StartServiceW(h, argc, null())
+pub extern "system" fn StartServiceA(h: usize, argc: u32, argv: *const *const u8) -> i32 {
+    if argc > 0 && argv.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut wide: [Option<WStr>; 64] = [const { None }; 64];
+    let mut ptrs = [null::<u16>(); 64];
+    if argc as usize > wide.len() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    for i in 0..argc as usize {
+        // SAFETY: the caller's `argc` strings.
+        match widen(unsafe { *argv.add(i) }) {
+            Ok(w) => wide[i] = w,
+            Err(_) => return fail(ERROR_NOT_ENOUGH_MEMORY, 0),
+        }
+        ptrs[i] = ptr_of(&wide[i]);
+    }
+    StartServiceW(h, argc, if argc == 0 { null() } else { ptrs.as_ptr() })
 }
 
 /// ControlService(Service, Control, *Status): the SERVICE_STATUS is
@@ -395,6 +430,43 @@ pub extern "system" fn ControlService(h: usize, control: u32, status: *mut u32) 
     }
     // SAFETY: the caller's SERVICE_STATUS.
     done(unsafe { GalaServiceControl(h, 3, control, status) })
+}
+
+/// ControlServiceExW(Service, Control, InfoLevel, *Params): level 1
+/// (SERVICE_CONTROL_STATUS_REASON_INFO) only: the control as
+/// ControlService, SERVICE_STATUS_PROCESS written into the
+/// SERVICE_CONTROL_STATUS_REASON_PARAMS (after dwReason and
+/// pszComment); the reason and comment are not kept (no event log).
+#[unsafe(no_mangle)]
+pub extern "system" fn ControlServiceExW(
+    h: usize,
+    control: u32,
+    level: u32,
+    params: *mut u8,
+) -> i32 {
+    if level != 1 {
+        return fail(ERROR_INVALID_LEVEL, 0);
+    }
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if params.is_null() {
+        return fail(ERROR_INVALID_ADDRESS, 0);
+    }
+    let at = 2 * core::mem::size_of::<usize>();
+    // SAFETY: the caller's structure; its SERVICE_STATUS_PROCESS at `at`.
+    done(unsafe { GalaServiceControl(h, 4, control, params.add(at).cast()) })
+}
+
+/// ControlServiceExA: the same (its comment is ANSI; it is not kept).
+#[unsafe(no_mangle)]
+pub extern "system" fn ControlServiceExA(
+    h: usize,
+    control: u32,
+    level: u32,
+    params: *mut u8,
+) -> i32 {
+    ControlServiceExW(h, control, level, params)
 }
 
 // ---- Queries ----

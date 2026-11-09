@@ -800,6 +800,12 @@ fn apartment() -> Option<u32> {
     thread_state().filter(|s| s.refs > 0).map(|s| s.kind)
 }
 
+/// Whether a thread that never initialized COM is an implicit member of
+/// the process's MTA (some thread holds the MTA).
+fn implicit_mta() -> bool {
+    MTA_THREADS.load(Ordering::Relaxed) > 0
+}
+
 /// APTTYPE: STA 0, MTA 1. A thread that never initialized COM while
 /// some thread holds the MTA is an implicit MTA member: APTTYPE_MTA with
 /// APTTYPEQUALIFIER_IMPLICIT_MTA (1); with no MTA, CO_E_NOTINITIALIZED.
@@ -814,7 +820,7 @@ pub extern "system" fn CoGetApartmentType(kind: *mut i32, qualifier: *mut i32) -
             put(qualifier, 0);
             S_OK
         }
-        None if MTA_THREADS.load(Ordering::Relaxed) > 0 => {
+        None if implicit_mta() => {
             put(kind, 1);
             put(qualifier, 1);
             S_OK

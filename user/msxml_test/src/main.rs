@@ -6,7 +6,9 @@
 //! run there):
 //! - CoCreateInstance(CLSID_DOMDocument60) gives IXMLDOMDocument2, which
 //!   answers QueryInterface for IXMLDOMDocument3, IXMLDOMDocument,
-//!   IXMLDOMNode, IDispatch and IUnknown;
+//!   IXMLDOMNode, IDispatch and IUnknown; on a thread that never
+//!   initialized COM it is CO_E_NOTINITIALIZED while the process has no
+//!   MTA and succeeds (the implicit MTA) while another thread holds it;
 //! - the defaults: async VARIANT_TRUE, validateOnParse VARIANT_TRUE,
 //!   preserveWhiteSpace and resolveExternals VARIANT_FALSE; the
 //!   properties SelectionLanguage "XPath", SelectionNamespaces "",
@@ -99,6 +101,15 @@ unsafe extern "system" {
     ) -> Handle;
     fn CloseHandle(h: Handle) -> i32;
     fn DeleteFileW(path: *const u16) -> i32;
+    fn CreateThread(
+        attributes: *mut c_void,
+        stack: usize,
+        start: extern "system" fn(*mut c_void) -> u32,
+        parameter: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
+    fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
 }
 
 #[cfg_attr(
@@ -141,6 +152,8 @@ const VT_I4: u16 = 3;
 const VT_BSTR: u16 = 8;
 const VT_BOOL: u16 = 11;
 const COINIT_APARTMENTTHREADED: u32 = 2;
+const COINIT_MULTITHREADED: u32 = 0;
+const CO_E_NOTINITIALIZED: HResult = 0x8004_01f0u32 as i32;
 const CLSCTX_INPROC_SERVER: u32 = 1;
 
 const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Guid {
@@ -1132,6 +1145,58 @@ fn run() -> Result<(), u32> {
     file(&mut c, doc)?;
     clone(&mut c, doc)?;
     release(doc);
+    // SAFETY: plain call.
+    unsafe { CoUninitialize() };
+    implicit_mta(&mut c)
+}
+
+/// What CoCreateInstance(CLSID_DOMDocument60) gave on a thread that
+/// never initialized COM.
+static mut IMPLICIT_HR: HResult = 0;
+
+extern "system" fn uninitialized_thread(_: *mut c_void) -> u32 {
+    let mut doc: Obj = null_mut();
+    // SAFETY: valid GUIDs and output; the static is read after the
+    // thread ends.
+    unsafe {
+        IMPLICIT_HR = CoCreateInstance(
+            &CLSID_DOMDOCUMENT60,
+            null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &IID_IXMLDOMDOCUMENT2,
+            &mut doc,
+        );
+    }
+    if !doc.is_null() {
+        release(doc);
+    }
+    0
+}
+
+/// CoCreateInstance on a new thread that never initializes COM.
+fn on_uninitialized_thread() -> HResult {
+    // SAFETY: plain calls; the thread has ended when the static is read.
+    unsafe {
+        let t = CreateThread(null_mut(), 0, uninitialized_thread, null_mut(), 0, null_mut());
+        if t == 0 {
+            return -1;
+        }
+        WaitForSingleObject(t, 0xffff_ffff);
+        CloseHandle(t);
+        IMPLICIT_HR
+    }
+}
+
+/// A thread that never initialized COM creates objects as a member of the
+/// process's MTA when there is one (the implicit MTA, as Microsoft's
+/// documentation of CoGetApartmentType's APTTYPEQUALIFIER_IMPLICIT_MTA
+/// describes; the Click-to-Run service's process pool does so), and
+/// gets CO_E_NOTINITIALIZED when there is none.
+fn implicit_mta(c: &mut Checks) -> Result<(), u32> {
+    c.hr(on_uninitialized_thread(), CO_E_NOTINITIALIZED)?;
+    // SAFETY: plain call.
+    c.hr(unsafe { CoInitializeEx(null_mut(), COINIT_MULTITHREADED) }, S_OK)?;
+    c.hr(on_uninitialized_thread(), S_OK)?;
     // SAFETY: plain call.
     unsafe { CoUninitialize() };
     Ok(())

@@ -1662,22 +1662,38 @@ need gala's.
      It gives the service its descriptor (done: SetServiceObjectSecurity
      and QueryServiceObjectSecurity, the descriptor kept in the service
      key's `Security\Security`; `svc_test`, `wow64_svc_test`).
-     Where the run ends now: it starts ClickToRunSvc (StartServiceW) to
-     run its install tasks in the service process; gala's SCM cannot start
-     a service (ERROR_NOT_SUPPORTED, recorded: `GalaServiceControl: start
-     a service`), so ODT's log has `SystemProcessPool::EnsureServiceProcess`
-     ErrorCode 50, "Failed to queue task", and the client exits with 17002
-     (0x426a) about 4.9 s in, setup.exe and its parent with the same after
-     about 84 s. slc.dll, kernelbase's SetSystemFileCacheSize and
-     ntdll's NtSetSystemInformation are still asked for only on the way
-     out (after "Bootstrapper Finished").
+     It starts ClickToRunSvc (done: the SCM runs services, own-process
+     ones as LocalSystem in session 0, with the dispatcher's handshake,
+     SetServiceStatus, the controls and a killed process's
+     ERROR_PROCESS_ABORTED; `svcrun_test`, `wow64_svcrun_test`, Wine's
+     advapi32 and services tests run on Windows; ARCHITECTURE "The
+     service control manager"): `OfficeClickToRun.exe /service` connects
+     at once and reports RUNNING (accepting stop, shutdown and
+     pre-shutdown, 0x85). Its process pool creates its COM objects from
+     a thread that never initialized COM while the process has an MTA
+     (done: the implicit MTA in CoGetClassObject; `msxml_test`; before,
+     CO_E_NOTINITIALIZED stopped the service with 17000), and it asks
+     shell32 for CSIDL_SYSTEMX86 (done: SysWOW64 and the x86 program
+     files; `win32_misc_test`).
+     Where the run ends now: the service runs the INSTALL scenario
+     (DeliveryOptimization is REGDB_E_CLASSNOTREG, it falls back to HTTP;
+     catalogs as before), downloads and indexes the stream manifest, and
+     its streaming task fails with PipelineInsufficientDiskSpace
+     (`{"Required":"5432","FreeSpace":"1024"}`, MB): C: lives in the VM's
+     memory (`file::volume_information` reports free RAM) and the
+     scenario's VM is far smaller than the 5.4 GB the products need. The
+     client then exits with 17004 (0x426c) about 217 s in, setup.exe and
+     its parent with the same at about 297 s (without KVM, with
+     `XTASK_TIMEOUT=600`; a normal run reaches the scenario's run-time
+     limit during the service's download).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: starting a service (the
-     SCM launching `OfficeClickToRun.exe /service` as LocalSystem in
-     session 0, StartServiceCtrlDispatcher, RegisterServiceCtrlHandlerEx,
-     SetServiceStatus and the controls); the RPC calls the client's
+     Next, in the order the run reaches them: room for the products
+     (a C: with 5.4 GB free: a disk-backed volume for the scenario, or
+     a VM that large; the owner's decision); a service's environment
+     (SYSTEM's profile variables, Windows' TEMP for services) and HKCU
+     from the caller's token; the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
      names a format the interpreter lacks; rpcrt4 for x86 if a 32-bit
      piece needs it); CryptCATAdmin*
