@@ -79,10 +79,12 @@ In order, after it:
    this list; heavier, meatier work before polish): its window, input
    and accessibility tree are done (`chromium_window`, `chromium_uia`),
    ChromeDriver too (`chromium_driver`); now the conformance report.
-   Its blockers (Chrome's out-of-memory exceptions 0xE0000008,
-   ChromeDriver not exiting, the full WPT run) go with item 12 to the
-   Windows machine, where gala runs under KVM (the owner;
-   `docs/windows-kvm-brief.md`).
+   Its blockers went with item 12 to the Windows machine, where gala
+   runs under KVM (the owner; `docs/windows-kvm-brief.md`): the WPT run
+   is no longer one (the whole `dom/nodes` directory passes 13326 of
+   13397 subtests there), and neither the out-of-memory exceptions nor
+   ChromeDriver's hang reproduces under KVM, so both wait on the
+   conditions they were seen under (see "Next" (b) and (c)).
 1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
@@ -1283,15 +1285,25 @@ samples).
    second full set of frames here (chrome.dll 327 MiB, where Windows
    spends 25 MiB -- per page, only what relocation writes goes private),
    now fixed (ARCHITECTURE "Sections", `pe::relocated_pages`), with the
-   `section:` stats line to show it. Whether the second browser's
-   processes do land on the alternative base is still open: it needs the
-   `chromium_wpt` reproduction, which that machine cannot run until
-   WPT's hosts are in its WSL `/etc/hosts`.
+   `section:` stats line to show it. The exception itself is not
+   reproduced under KVM on the Windows machine: not in `chromium_wpt`
+   over the whole directory (406 tests), and not in the
+   `XTASK_WPT_LIMIT=20` run the issue names, with the fix and with it
+   reverted (fewest frames free 469219 and 469775 of 673061, so no
+   pressure either way). The run keeps one session and makes a new one
+   only when the browser goes away, so "a second browser with the first
+   still alive" needs a browser that died; what the exception was seen
+   under (TCG, the VM's memory) decides where to look next.
    (c) ChromeDriver not exiting after the client's /shutdown (the
    scenario then runs to its limit; not reproduced under KVM on the
    Windows machine: `chromium_driver` passed 4 of 4, 7-9 s of kernel
-   time against about 2 minutes under TCG, so it wants the `chromium_wpt`
-   run too); (d) the whole directory again, then
+   time against about 2 minutes under TCG, and `chromium_wpt` 2 of 2
+   with `chromedriver.exe finished with status 0x00000000` after 406
+   tests, so it wants a TCG run or the conditions it was seen under);
+   (d) the whole directory runs: 406 tests, 404 harness OK, 13326 of
+   13397 subtests pass against edge-159-win's 13343 (one of the seven
+   that fail only here is a TIMEOUT, five are our testdriver shim);
+   `user/windows/wpt/` records it. Then
    the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the
