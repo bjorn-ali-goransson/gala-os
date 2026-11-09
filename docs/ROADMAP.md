@@ -1420,14 +1420,19 @@ need gala's.
      MsiProvideQualifiedComponentExW #203). Done: gala's msi.dll, x64
      and x86, these nine with their ordinals, answered as Windows does
      for products and components it has not installed (`msi_test`,
-     `wow64_msi_test`; ARCHITECTURE "Other DLLs"); where the run goes
-     past msi is still to be seen (its first run with msi is the next
-     step). Next, in the order the run reaches them: CryptQueryObject's
-     embedded PKCS #7 and wintrust's WinVerifyTrust (the signature check
-     it leads to), then wininet, urlmon, xmllite, webservices, iphlpapi,
-     setupapi, cabinet, normaliz, powrprof, credui, gdiplus; the service
-     control manager (advapi32's service calls are stubs); a few
-     shlwapi, user32, ole32, imm32 and shell32 functions.
+     `wow64_msi_test`; ARCHITECTURE "Other DLLs"). Past msi it disables
+     its input methods (imm32's ImmDisableIME: done, TRUE as Windows,
+     `office_api_test`), queries its activation context (QueryActCtxW's
+     module context and the manifest sections, recorded unsupported),
+     asks COM for a class not registered, and ends with 0xc06d007e at
+     normaliz.dll, which has no i686 build (powrprof.dll, also x64 only,
+     was missing before it without ending the run). Next, in the order
+     the run reaches them: i686 builds of normaliz and powrprof, then
+     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
+     (the signature check), wininet, urlmon, xmllite, webservices,
+     iphlpapi, setupapi, cabinet, credui, gdiplus; the service control
+     manager (advapi32's service calls are stubs); a few shlwapi,
+     user32, ole32 and shell32 functions.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,

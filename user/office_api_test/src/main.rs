@@ -28,6 +28,8 @@
 //!   firmware has no memory table: some virtual machines);
 //!   WerRegisterMemoryBlock/WerUnregisterMemoryBlock S_OK;
 //!   RtlCaptureStackBackTrace (kernel32's export) at most what was asked.
+//! - imm32's ImmDisableIME for the calling thread (0) and the process (-1):
+//!   TRUE.
 //! - GetShortPathNameA of the Windows directory is itself; a missing path
 //!   ERROR_FILE_NOT_FOUND; too small a buffer the size needed.
 //! - GetVolumePathNamesForVolumeNameW: the system drive's volume lists the
@@ -228,6 +230,15 @@ unsafe extern "system" {
         free: *mut u32,
         total: *mut u32,
     ) -> i32;
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "imm32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "imm32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn ImmDisableIME(thread: u32) -> i32;
 }
 
 #[cfg_attr(
@@ -926,6 +937,19 @@ fn run() -> Result<(), u32> {
     actctx(&mut c)?;
     rtl_strings(&mut c)?;
     avl(&mut c)?;
+    imm(&mut c)?;
+    Ok(())
+}
+
+/// imm32's ImmDisableIME, which ODT's setup.exe calls before its first
+/// window (its documentation: 0 is the calling thread, -1 every thread of
+/// the process; TRUE on success).
+fn imm(c: &mut Checks) -> Result<(), u32> {
+    // SAFETY: plain calls.
+    unsafe {
+        c.ok(ImmDisableIME(0) != 0, 0)?;
+        c.ok(ImmDisableIME(u32::MAX) != 0, 0)?;
+    }
     Ok(())
 }
 

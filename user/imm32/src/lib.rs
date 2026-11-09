@@ -29,6 +29,14 @@ pub extern "system" fn ImmGetIMEFileNameW(_layout: usize, name: *mut u16, length
     0
 }
 
+/// ImmDisableIME(idThread): TRUE. There are no IMEs, so they are
+/// disabled already for any thread (0: the calling one, -1: every thread
+/// of the process), as Windows reports success (office_api_test).
+#[unsafe(no_mangle)]
+pub extern "system" fn ImmDisableIME(_thread: u32) -> i32 {
+    1
+}
+
 /// ImmIsIME(hKL): FALSE.
 #[unsafe(no_mangle)]
 pub extern "system" fn ImmIsIME(_layout: usize) -> i32 {

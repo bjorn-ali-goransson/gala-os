@@ -3040,9 +3040,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // x64 and x86.
     ("office_api_test", "ntdll.dll", "Windows/System32"),
     ("office_api_test", "kernel32.dll", "Windows/System32"),
+    ("office_api_test", "imm32.dll", "Windows/System32"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/imm32.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.
