@@ -22,6 +22,11 @@ unsafe extern "system" {
         owner: u8,
     ) -> u32;
     fn NtOpenMutant(handle: *mut Handle, access: u32, attributes: *const ObjectAttributes) -> u32;
+    fn NtOpenSemaphore(
+        handle: *mut Handle,
+        access: u32,
+        attributes: *const ObjectAttributes,
+    ) -> u32;
     fn NtReleaseMutant(h: Handle, previous: *mut i32) -> u32;
 }
 
@@ -276,6 +281,62 @@ pub extern "system" fn CreateMutexA(
     let mut buf = [0u16; 260];
     match wide_name(name, &mut buf) {
         Ok(name) => CreateMutexW(attributes, owner, name),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+/// CreateMutexExW(attributes, name, flags, access): CreateMutexW with the
+/// access asked for; CREATE_MUTEX_INITIAL_OWNER (1) is the only flag.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateMutexExW(
+    attributes: *mut c_void,
+    name: *const u16,
+    flags: u32,
+    access: u32,
+) -> Handle {
+    if flags & !1 != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    let mut h = core::ptr::null_mut();
+    let status = with_name_sa(name, attributes, |oa| {
+        // SAFETY: valid output pointer and attributes.
+        unsafe { NtCreateMutant(&mut h, access, oa, u8::from(flags & 1 != 0)) }
+    });
+    match status {
+        Ok(status) => created(status, h),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+/// CreateMutexExA.
+#[unsafe(no_mangle)]
+pub extern "system" fn CreateMutexExA(
+    attributes: *mut c_void,
+    name: *const u8,
+    flags: u32,
+    access: u32,
+) -> Handle {
+    let mut buf = [0u16; 260];
+    match wide_name(name, &mut buf) {
+        Ok(name) => CreateMutexExW(attributes, name, flags, access),
+        Err(e) => fail_with(e, core::ptr::null_mut()),
+    }
+}
+
+/// OpenSemaphoreW(access, inherit, name).
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenSemaphoreW(access: u32, _inherit: Bool, name: *const u16) -> Handle {
+    open_named(name, access, NtOpenSemaphore)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn OpenSemaphoreA(access: u32, inherit: Bool, name: *const u8) -> Handle {
+    if name.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, core::ptr::null_mut());
+    }
+    let mut buf = [0u16; 260];
+    match wide_name(name, &mut buf) {
+        Ok(name) => OpenSemaphoreW(access, inherit, name),
         Err(e) => fail_with(e, core::ptr::null_mut()),
     }
 }

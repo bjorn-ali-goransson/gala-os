@@ -576,3 +576,56 @@ pub(crate) fn system_counts() -> (u32, u32, u32) {
     VirtualFree(buf.cast(), 0, 0x8000);
     counts
 }
+
+/// K32EnumProcesses(ids, size, &needed): the ids of the running processes
+/// (as many as `size` bytes hold), from SystemProcessInformation;
+/// `needed` the bytes written.
+#[unsafe(no_mangle)]
+pub extern "system" fn K32EnumProcesses(ids: *mut u32, size: u32, needed: *mut u32) -> Bool {
+    if needed.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let mut buf_size = 64 * 1024usize;
+    let (list, len) = loop {
+        let buf = VirtualAlloc(core::ptr::null_mut(), buf_size, 0x3000, 4).cast::<u8>();
+        if buf.is_null() {
+            return fail_with(ERROR_NOT_ENOUGH_MEMORY, FALSE);
+        }
+        let mut got = 0u32;
+        // SAFETY: our buffer of `buf_size` bytes.
+        let status = unsafe {
+            NtQuerySystemInformation(SYSTEM_PROCESS_INFORMATION, buf, buf_size as u32, &mut got)
+        };
+        if status == STATUS_SUCCESS {
+            break (buf, got as usize);
+        }
+        VirtualFree(buf.cast(), 0, 0x8000);
+        if status != STATUS_INFO_LENGTH_MISMATCH || buf_size >= 16 << 20 {
+            return fail(status, FALSE);
+        }
+        buf_size = (got as usize + 4096).max(buf_size * 2);
+    };
+    // SAFETY: the `len` bytes the query wrote.
+    let b = unsafe { core::slice::from_raw_parts(list, len) };
+    let room = size as usize / 4;
+    let (mut at, mut n) = (0usize, 0usize);
+    while at < b.len() && n < room {
+        let id = if cfg!(target_arch = "x86") {
+            u32_at(b, at + PROCESS_ID)
+        } else {
+            u64_at(b, at + PROCESS_ID) as u32
+        };
+        // SAFETY: n < room: inside the caller's array.
+        unsafe { *ids.add(n) = id };
+        n += 1;
+        let next = u32_at(b, at) as usize;
+        if next == 0 {
+            break;
+        }
+        at += next;
+    }
+    VirtualFree(list.cast(), 0, 0x8000);
+    // SAFETY: the caller's DWORD.
+    unsafe { *needed = (4 * n) as u32 };
+    TRUE
+}

@@ -2558,6 +2558,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_ucrt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_ucrt_test", "x86/ucrtbase.dll", "Windows/SysWOW64"),
     ("wow64_ucrt_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // The kernel32 and ntdll functions Office imports (user/office_api_test),
+    // x64 and x86.
+    ("office_api_test", "ntdll.dll", "Windows/System32"),
+    ("office_api_test", "kernel32.dll", "Windows/System32"),
+    ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
+    ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2696,6 +2703,7 @@ const USER_PROGRAMS: &[&str] = &[
     "pipe_test",
     "lock_test",
     "ucrt_test",
+    "office_api_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -2709,6 +2717,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_k32_test",
     "wow64_adv_test",
     "wow64_ucrt_test",
+    "wow64_office_api_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -5490,6 +5499,24 @@ const SCENARIOS: &[Scenario] = &[
             "ucrt_test: atexit ran in order",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // The kernel32 and ntdll functions Office's programs import
+        // (user/office_api_test): CreateFile2, FindFirstFileNameW,
+        // CreateMutexExW, OpenSemaphoreA, K32EnumProcesses, the
+        // activation-context queries, RtlIntegerToUnicodeString,
+        // RtlIsNameInExpression, the AVL generic tables and the rest.
+        name: "office_api_test",
+        cmdline: "qemu_exit run=office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/office_api_test built for x86).
+        name: "wow64_office_api_test",
+        cmdline: "qemu_exit run=wow64_office_api_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_office_api_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64: the 32-bit ucrtbase (user/ucrt_test
@@ -9043,6 +9070,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

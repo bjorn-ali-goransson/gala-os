@@ -362,6 +362,53 @@ pub extern "system" fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: 
 /// The kernel links `\??\Volume{...}` to the volume (nt/file.rs).
 pub(crate) const VOLUME_GUID_PATH: &[u8] = b"\\\\?\\Volume{9a1a0c00-0000-4000-8000-00000000c0de}\\";
 
+/// GetVolumePathNamesForVolumeNameW(volume, names, size, &returned): the
+/// mount points of a volume as a double-NUL-terminated list: `C:\` for
+/// gala's one volume. `returned` gets the list's length with both NULs
+/// (also when the buffer is too small: ERROR_MORE_DATA). Not a volume GUID
+/// path: ERROR_INVALID_NAME; another volume: ERROR_FILE_NOT_FOUND.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetVolumePathNamesForVolumeNameW(
+    volume: *const u16,
+    names: *mut u16,
+    size: u32,
+    returned: *mut u32,
+) -> Bool {
+    if volume.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's NUL-terminated name (read up to 64 units).
+    let given = unsafe {
+        let mut n = 0;
+        while n < 64 && *volume.add(n) != 0 {
+            n += 1;
+        }
+        core::slice::from_raw_parts(volume, n)
+    };
+    let prefix = b"\\\\?\\Volume{";
+    let shaped = given.len() == VOLUME_GUID_PATH.len()
+        && given.iter().zip(prefix).all(|(&a, &b)| a == u16::from(b))
+        && given.last() == Some(&u16::from(b'\\'));
+    if !shaped {
+        return fail_with(123, 0); // ERROR_INVALID_NAME
+    }
+    let lower = |c: u16| if (0x41..=0x5a).contains(&c) { c + 32 } else { c };
+    if !given.iter().zip(VOLUME_GUID_PATH).all(|(&a, &b)| lower(a) == lower(u16::from(b))) {
+        return fail_with(2, 0); // ERROR_FILE_NOT_FOUND: no such volume
+    }
+    let list = [u16::from(b'C'), u16::from(b':'), u16::from(b'\\'), 0, 0];
+    if !returned.is_null() {
+        // SAFETY: the caller's DWORD.
+        unsafe { *returned = list.len() as u32 };
+    }
+    if names.is_null() || (size as usize) < list.len() {
+        return fail_with(234, 0); // ERROR_MORE_DATA
+    }
+    // SAFETY: the caller's buffer of `size` >= 5 characters.
+    unsafe { core::ptr::copy_nonoverlapping(list.as_ptr(), names, list.len()) };
+    1
+}
+
 /// GetVolumeNameForVolumeMountPointW: the volume GUID path of the
 /// volume mounted at `mount` (a root with its trailing backslash; only
 /// C:\ here).

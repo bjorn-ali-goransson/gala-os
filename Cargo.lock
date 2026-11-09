@@ -1386,6 +1386,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ole32"
 version = "0.1.0"
 dependencies = [
@@ -2735,6 +2742,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_k32_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_office_api_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

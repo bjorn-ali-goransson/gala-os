@@ -27,6 +27,7 @@ mod arch;
 #[path = "x86.rs"]
 mod arch;
 
+mod avl;
 mod heap;
 mod rtl;
 #[cfg(target_arch = "x86_64")]

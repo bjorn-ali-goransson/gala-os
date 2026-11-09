@@ -1374,18 +1374,34 @@ need gala's.
      files. `ucrt_test`/`wow64_ucrt_test` join
      `user/windows/ci-passing.txt` once CI's windows job shows them
      passing.
+   - The load list's kernel32 and ntdll functions, test first in
+     `office_api_test`/`wow64_office_api_test` (x64 and x86): done:
+     CreateFile2, FindFirstFileNameW/FindNextFileNameW, CreateMutexExW,
+     OpenSemaphoreA/W, K32EnumProcesses, K32GetProcessImageFileNameW,
+     RtlCaptureStackBackTrace (x86 too), WerRegisterMemoryBlock/
+     WerUnregisterMemoryBlock, IsSystemResumeAutomatic,
+     GetPhysicallyInstalledSystemMemory, QueryActCtxW (basic
+     information), FindActCtxSectionStringW, QueueUserWorkItem,
+     GetShortPathNameA, GetVolumePathNamesForVolumeNameW,
+     AttachConsole/AllocConsole, GetDiskFreeSpaceA, the AVL generic
+     tables, RtlIntegerToUnicodeString, RtlIsNameInExpression. Left:
+     NtNotifyChangeMultipleKeys (the kernel has no registry change
+     notification yet; advapi32's RegNotifyChangeKeyValue is a
+     never-signalled stopgap), NtRenameKey (a registry node renamed,
+     with its change-log op), the manifests' sections
+     (FindActCtxSectionStringW finds nothing, QueryActCtxW's other
+     classes), GetThreadIOPendingFlag's count of a thread's pending
+     socket, pipe and watch requests (a recorded stopgap answering
+     FALSE), and the ten functions used once. `office_api_test` and
+     `wow64_office_api_test` join `ci-passing.txt` once CI's windows
+     job shows them passing.
    - Alongside, natively: a pending scenario `office_install` runs the
      Office Deployment Tool's `setup.exe /configure` in gala (its
      ledger ranks the installer's blockers; the guest needs the CDN, so
      on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
      32-bit x86 program (WOW64), and by its import tables against
-     gala's i686 DLLs it does not load yet: its UCRT imports gala's
-     ucrtbase has (above), but it imports nine kernel32 functions
-     gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
-     K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
-     WerRegisterMemoryBlock/WerUnregisterMemoryBlock,
-     IsSystemResumeAutomatic, GetPhysicallyInstalledSystemMemory).
-     Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
+     gala's i686 DLLs every static import is there (the UCRT and
+     kernel32 functions above). Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
      wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
      cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
      control manager (advapi32's service calls are stubs); a few

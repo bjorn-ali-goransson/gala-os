@@ -627,6 +627,21 @@ pub extern "system" fn FreeConsole() -> Bool {
     TRUE
 }
 
+/// AttachConsole(pid): every gala process gets a console (conhost) when it
+/// starts and FreeConsole keeps it, so the documented answer for a
+/// process already attached: FALSE, ERROR_ACCESS_DENIED.
+#[unsafe(no_mangle)]
+pub extern "system" fn AttachConsole(_pid: u32) -> Bool {
+    fail_with(5, FALSE)
+}
+
+/// AllocConsole(): as AttachConsole, the process has one already
+/// (ERROR_ACCESS_DENIED).
+#[unsafe(no_mangle)]
+pub extern "system" fn AllocConsole() -> Bool {
+    fail_with(5, FALSE)
+}
+
 /// SetStdHandle: replaces a standard handle in the process parameters.
 #[unsafe(no_mangle)]
 pub extern "system" fn SetStdHandle(which: u32, h: Handle) -> Bool {
@@ -741,6 +756,24 @@ pub extern "system" fn GetDiskFreeSpaceW(
     TRUE
 }
 
+/// GetDiskFreeSpaceA: GetDiskFreeSpaceW (the root's name is not used).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetDiskFreeSpaceA(
+    _root: *const u8,
+    sectors_per_cluster: *mut u32,
+    bytes_per_sector: *mut u32,
+    free_clusters: *mut u32,
+    total_clusters: *mut u32,
+) -> Bool {
+    GetDiskFreeSpaceW(
+        core::ptr::null(),
+        sectors_per_cluster,
+        bytes_per_sector,
+        free_clusters,
+        total_clusters,
+    )
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDiskFreeSpaceExW(
     _directory: *const u16,
@@ -804,6 +837,61 @@ pub extern "system" fn GetShortPathNameW(long: *const u16, short: *mut u16, size
         *short.add(path.len()) = 0;
     }
     path.len() as u32
+}
+
+/// GetShortPathNameA: GetShortPathNameW in the ANSI code page (UTF-8);
+/// the length in bytes, or the size needed with the NUL.
+#[unsafe(no_mangle)]
+pub extern "system" fn GetShortPathNameA(long: *const u8, short: *mut u8, size: u32) -> u32 {
+    let mut wide = [0u16; 1024];
+    let Some(path) = ansi_path_to_wide(long, &mut wide) else {
+        return crate::fail_with(crate::ERROR_INVALID_PARAMETER, 0);
+    };
+    let mut out = [0u16; 1024];
+    let n = GetShortPathNameW(path, out.as_mut_ptr(), out.len() as u32) as usize;
+    if n == 0 || n >= out.len() {
+        return 0;
+    }
+    let mut bytes = [0u8; 3 * 1024];
+    let mut len = 0;
+    for c in char::decode_utf16(out[..n].iter().copied()) {
+        let mut b = [0u8; 4];
+        for &x in c.unwrap_or(char::REPLACEMENT_CHARACTER).encode_utf8(&mut b).as_bytes() {
+            bytes[len] = x;
+            len += 1;
+        }
+    }
+    if len + 1 > size as usize {
+        return (len + 1) as u32;
+    }
+    // SAFETY: the caller's buffer of `size` bytes (len + 1 fit).
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), short, len);
+        *short.add(len) = 0;
+    }
+    len as u32
+}
+
+/// A NUL-terminated ANSI (UTF-8) string as NUL-terminated UTF-16 in
+/// `out`; None for NULL, invalid UTF-8 or a string too long.
+fn ansi_path_to_wide(s: *const u8, out: &mut [u16; 1024]) -> Option<*const u16> {
+    if s.is_null() {
+        return None;
+    }
+    let mut n = 0;
+    // SAFETY: the caller's NUL-terminated string.
+    while unsafe { *s.add(n) } != 0 {
+        n += 1;
+    }
+    // SAFETY: the `n` bytes just measured.
+    let text = core::str::from_utf8(unsafe { core::slice::from_raw_parts(s, n) }).ok()?;
+    let mut i = 0;
+    for u in text.encode_utf16() {
+        *out.get_mut(i)? = u;
+        i += 1;
+    }
+    *out.get_mut(i)? = 0;
+    Some(out.as_ptr())
 }
 
 /// GetLongPathNameW: gala has no short (8.3) names, so the path itself.

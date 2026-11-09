@@ -2627,7 +2627,10 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   upcase/downcase, to ANSI as UTF-8; ASCII case folding), SIDs, ACLs,
   absolute and self-relative security descriptors (a self-relative copy
   takes the whole AclSize, as Windows'), RtlSetCurrentDirectory_U,
-  NtQueryTimerResolution, and the critical sections: kernel32's
+  NtQueryTimerResolution, RtlIntegerToUnicodeString,
+  RtlIsNameInExpression (`*`, `?` and the DOS wildcards `<`, `>`, `"`,
+  matched over a table of reachable name positions; case folding ASCII),
+  and the critical sections: kernel32's
   Enter/LeaveCriticalSection call ntdll's RtlEnter/LeaveCriticalSection
   (one implementation, so a section works whichever DLL a program uses).
   LockCount is -1 when free and, while taken, the number of waiters; an
@@ -2640,6 +2643,19 @@ Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
   switches); a thread that polls takes processor time from the one it
   waits for. Without the keyed event (it could not be created: no
   memory) the handover goes through OwningThread and waiters yield.
+- **AVL generic tables** (`avl.rs`, `office_api_test`):
+  RtlInitializeGenericTableAvl and its companions (insert, delete,
+  lookup, enumerate with and without a caller's restart key, get by
+  index, count, empty, first matching) on the caller's RTL_AVL_TABLE in
+  ntddk.h's layout; nodes come from the caller's allocate routine (the
+  balanced links, padded to 8 bytes, then the element) and go back to its
+  free routine. The root's links are a sentinel above the real root; a
+  node's subtree height is kept in its first reserved byte, so a change
+  rebalances along its path only. NumberGenericTableElements and the
+  ordered-element cache are kept in the table.
+- **RtlCaptureStackBackTrace** on x86 (`x86.rs`) walks the saved frame
+  pointers inside the thread's stack (TEB32's limits); kernel32 forwards
+  it on both architectures.
 
 ### kernel32
 
@@ -2767,7 +2783,33 @@ ntdll imports.
   a manifest file) and returns a reference-counted handle;
   ActivateActCtx/DeactivateActCtx keep a per-thread stack (16 deep, 64
   threads) with unique cookies. Nothing is read from the manifests (no
-  side-by-side redirection).
+  side-by-side redirection). QueryActCtxW answers
+  ActivationContextBasicInformation (the active context with
+  QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX; NULL when none is: a program
+  without a manifest); other classes are recorded and refused.
+  FindActCtxSectionStringW checks its arguments (ERROR_INVALID_PARAMETER
+  for no name, no data or a cbSize below ulAssemblyRosterIndex) and finds
+  nothing (ERROR_SXS_KEY_NOT_FOUND; recorded when a context is active,
+  whose manifest might have had the key). `office_api_test`.
+- **What Office imports** (`office_api_test`, `wow64_office_api_test`):
+  CreateFile2 (CreateFileW with the parameters' attributes, flags and
+  QoS flags; an empty name is ERROR_PATH_NOT_FOUND, in CreateFileW too),
+  FindFirstFileNameW/FindNextFileNameW (one name per file: the path from
+  the volume root, GetFinalPathNameByHandleW's VOLUME_NAME_NONE),
+  CreateMutexExW, OpenSemaphoreA/W, K32EnumProcesses
+  (SystemProcessInformation's ids), K32GetProcessImageFileNameW
+  (ProcessImageFileName: `\Device\HarddiskVolume1\...`),
+  QueueUserWorkItem (the pool's simple callbacks), GetShortPathNameA,
+  GetVolumePathNamesForVolumeNameW (gala's one volume: `C:\`),
+  GetPhysicallyInstalledSystemMemory (the physical memory gala manages),
+  IsSystemResumeAutomatic (FALSE), WerRegisterMemoryBlock (accepted and
+  recorded: gala's crash reports are the kernel's),
+  AttachConsole/AllocConsole (every gala process has a console:
+  ERROR_ACCESS_DENIED, as Windows answers a process that has one;
+  FreeConsole does not detach), GetDiskFreeSpaceA. GetThreadIOPendingFlag
+  is a stopgap: gala does not count a thread's pending socket, pipe and
+  directory-watch requests, so it answers FALSE and records it (ROADMAP
+  OF).
 - **FormatMessage** (`messages.rs`): system messages from a table of the
   documented US English texts, the caller's string, or with
   FROM_HMODULE the module's RT_MESSAGETABLE (MESSAGE_RESOURCE_DATA

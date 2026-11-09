@@ -1443,3 +1443,22 @@ pub extern "system" fn OpenThread(access: u32, inherit: Bool, id: u32) -> Handle
 pub extern "system" fn SetProcessDEPPolicy(_flags: u32) -> Bool {
     fail_with(ERROR_NOT_SUPPORTED, FALSE)
 }
+
+/// GetThreadIOPendingFlag(thread, &pending): whether the thread has I/O
+/// requests outstanding. gala's file I/O completes inside its call; the
+/// requests that stay pending (sockets, pipes, directory watches) are not
+/// counted per thread yet, so the answer is FALSE (a stopgap, recorded:
+/// ROADMAP OF).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetThreadIOPendingFlag(thread: Handle, pending: *mut Bool) -> Bool {
+    if pending.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if GetThreadId(thread) == 0 {
+        return FALSE;
+    }
+    unsupported(b"kernel32.dll!GetThreadIOPendingFlag(pending socket, pipe or watch I/O)", 0);
+    // SAFETY: the caller's BOOL.
+    unsafe { *pending = FALSE };
+    TRUE
+}
