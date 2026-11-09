@@ -3179,7 +3179,14 @@ and the converter names the slowest hand-offs. The sampling profiler's
 samples go to OTLP's profiles signal (v1development), each linked to
 its thread's span; kernel samples carry their frame-pointer stack, so
 the profile names a hot kernel function's callers (user-mode stacks
-need unwinding: next). The wire format (the owner): what is sent is
+need unwinding: next). Open weakness: scenario `events_sample`'s
+user-mode sample rests on bench's `cpu_loop` (about 0.25 s of user
+time) being sampled by the other CPU's ticks; on a loaded CI runner
+(2.4 s of the run waiting for a host CPU) it once got 405 samples, none
+in user mode. Next: a user-mode probe like `sampleprobe` (the program
+spins in user mode until the kernel has taken a user-mode sample of it,
+which it can ask for), so the check no longer depends on how long the
+host lets the sampling CPU run. The wire format (the owner): what is sent is
 OTLP/HTTP binary protobuf, gzipped, in batches of at most 512 items
 from bounded queues (drops counted), retried with backoff and
 `Retry-After` (`xtask/src/otel/send.rs`, its `Batcher` meant for OT5's
