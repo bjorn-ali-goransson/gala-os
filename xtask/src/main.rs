@@ -1725,6 +1725,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
+    // WinHTTP's status callbacks (user/winhttp_cb_test), x64 and x86,
+    // against schannel_test's Nginx (MODULE_SETS).
+    ("winhttp_cb_test", "winhttp.dll", "Windows/System32"),
+    ("wow64_winhttp_cb_test", "wow64.dll", "Windows/System32"),
+    ("wow64_winhttp_cb_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_winhttp_cb_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     ("wininet_test", "msvcrt.dll", "Windows/System32"),
     ("wininet_test", "wininet.dll", "Windows/System32"),
     ("wininet_test", "user/bin/wininet_test.exe", "gala"),
@@ -3218,6 +3229,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ucrt_test",
     "office_api_test",
     "msi_test",
+    "winhttp_cb_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -3234,6 +3246,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_office_api_test",
     "wow64_cert_test",
     "wow64_msi_test",
+    "wow64_winhttp_cb_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -8032,6 +8045,23 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["winhttp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WinHTTP's status callbacks on a synchronous session (ROADMAP OF:
+        // ODT's setup.exe), against the same Nginx.
+        name: "winhttp_cb_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=winhttp_cb_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["winhttp_cb_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/winhttp_cb_test built for x86).
+        name: "wow64_winhttp_cb_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wow64_winhttp_cb_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_winhttp_cb_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // TLS step 2: WinINet's HTTP functions (on winhttp's engine,
         // user/http_client) against the same Nginx.
         name: "wininet_test",
@@ -9322,6 +9352,10 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
     ("winhttp_test", "schannel_test"),
+    ("winhttp_cb_test", "winhttp_cb_test"),
+    ("winhttp_cb_test", "schannel_test"),
+    ("wow64_winhttp_cb_test", "wow64_winhttp_cb_test"),
+    ("wow64_winhttp_cb_test", "schannel_test"),
     ("wininet_test", "wininet_test"),
     ("wininet_test", "schannel_test"),
     ("curl", "curl"),
@@ -9888,6 +9922,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

@@ -15,6 +15,12 @@
 //! to http under the default policy, a scheme other than http(s), one
 //! too many) is `err::REDIRECT_FAILED` with the reason in the ledger
 //! (`<dll>!redirect: ...`).
+//!
+//! Each step is told to the request's observer (`Event`, set by the DLL):
+//! sending and sent, receiving and received (each response's header
+//! block, a redirect's included), a redirect followed (between the 3xx's
+//! received and the new request's connection), and the connection's own
+//! (`net`).
 
 use alloc::vec::Vec;
 
@@ -26,8 +32,8 @@ use crate::err::{
 };
 use crate::net::{Conn, Target};
 use crate::{
-    REDIRECT_DISALLOW_HTTPS_TO_HTTP, REDIRECT_NEVER, RedirectRules, Settings, failed, missing,
-    narrow, put, url, wide,
+    Event, Observer, REDIRECT_DISALLOW_HTTPS_TO_HTTP, REDIRECT_NEVER, RedirectRules, Settings,
+    failed, missing, narrow, put, url, wide,
 };
 
 /// The modifiers of WinHttpAddRequestHeaders and HttpAddRequestHeaders
@@ -204,6 +210,8 @@ pub struct Request {
     body: Vec<u8>,
     body_at: usize,
     framing: Framing,
+    /// Who is told the steps (None: nobody).
+    pub observer: Option<Observer>,
 }
 
 /// Lowercase-insensitive header name comparison.
@@ -370,6 +378,7 @@ impl Request {
             body: Vec::new(),
             body_at: 0,
             framing: Framing::Done,
+            observer: None,
         };
         put(&mut r.host, o.host)?;
         if r.port == 0 {
@@ -536,10 +545,15 @@ impl Request {
             secure: self.secure,
             security_flags: self.security_flags,
             protocols: self.settings.protocols,
+            connect_timeout: t.connect,
             send_timeout: t.send,
             receive_timeout: t.receive,
+            observer: self.observer,
         })?;
+        Observer::tell(self.observer.as_ref(), Event::Sending);
         conn.write(&message)?;
+        let sent = message.len().min(u32::MAX as usize) as u32;
+        Observer::tell(self.observer.as_ref(), Event::Sent(sent));
         self.conn = Some(conn);
         self.to_write = total - self.sent_body.len() as u64;
         self.state = State::Sent;
@@ -689,6 +703,11 @@ impl Request {
         self.host = next.host;
         self.port = next.port;
         self.path = next.path;
+        if self.observer.is_some() {
+            let mut url = self.url()?;
+            put(&mut url, &[0])?;
+            Observer::tell(self.observer.as_ref(), Event::Redirect(&url));
+        }
         let total = self.sent_body.len() as u64;
         self.transmit(total)
     }
@@ -817,8 +836,11 @@ impl Request {
         if let Some(c) = self.conn.as_mut() {
             c.receive_timeout = self.settings.timeouts.response;
         }
+        Observer::tell(self.observer.as_ref(), Event::Receiving);
+        let mut received = 0usize;
         loop {
             let end = self.read_head()?;
+            received += end;
             let head = copy(&self.rx[..end])?;
             self.rx.drain(..end);
             self.parse_head(&head)?;
@@ -828,6 +850,8 @@ impl Request {
                 break;
             }
         }
+        let received = received.min(u32::MAX as usize) as u32;
+        Observer::tell(self.observer.as_ref(), Event::Received(received));
         if let Some(c) = self.conn.as_mut() {
             c.receive_timeout = self.settings.timeouts.receive;
         }

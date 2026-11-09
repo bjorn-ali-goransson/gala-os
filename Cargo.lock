@@ -2687,6 +2687,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "winhttp_cb_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wininet"
 version = "0.1.0"
 dependencies = [
@@ -2815,6 +2822,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_ucrt_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_winhttp_cb_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
