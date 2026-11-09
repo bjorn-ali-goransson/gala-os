@@ -155,6 +155,11 @@ pub fn new_document(riid: *const Guid, out: *mut *mut c_void) -> HResult {
         props: Vec::new(),
         error: ParseError::default(),
     };
+    give_document(d, riid, out)
+}
+
+/// Gives the caller document `d` as interface `riid`.
+fn give_document(d: Doc, riid: *const Guid, out: *mut *mut c_void) -> HResult {
     let Some(p) = try_box(d) else { return E_OUTOFMEMORY };
     // SAFETY: the new document, ours.
     unsafe { (*p).obj.doc = p };
@@ -162,6 +167,42 @@ pub fn new_document(riid: *const Guid, out: *mut *mut c_void) -> HResult {
     let hr = node_query(this, riid, out);
     node_release(this);
     hr
+}
+
+/// IXMLDOMNode::cloneNode(deep, out): a node of no parent in the same
+/// document, with its attributes and, deep, its children; the document
+/// node's clone is a new document with the original's settings and
+/// properties and, deep, its content (msxml_test's `clone`).
+extern "system" fn clone_node(this: Obj, deep: i16, out: *mut Obj) -> HResult {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    let d = doc(this);
+    let i = idx(this);
+    if i != 0 {
+        let copy = d.tree.copy(i, deep != 0, NONE);
+        return give(d, Some(copy), out);
+    }
+    let copy = Doc {
+        obj: NodeObj {
+            vtable: d.obj.vtable,
+            refs: AtomicU32::new(1),
+            doc: core::ptr::null_mut(),
+            idx: 0,
+        },
+        tree: if deep != 0 { d.tree.clone() } else { Tree::new() },
+        async_load: d.async_load,
+        validate: d.validate,
+        resolve: d.resolve,
+        preserve: d.preserve,
+        ready: 4,
+        url: d.url.clone(),
+        ns_text: d.ns_text.clone(),
+        ns: d.ns.clone(),
+        props: d.props.clone(),
+        error: ParseError::default(),
+    };
+    give_document(copy, &IID_IXMLDOMNODE, out.cast())
 }
 
 /// An object for node `i` of `d` (one reference, the caller's): the
@@ -364,7 +405,6 @@ not_implemented! {
     replace_child(Obj, Obj, *mut Obj) = b"IXMLDOMNode::replaceChild";
     remove_child(Obj, *mut Obj) = b"IXMLDOMNode::removeChild";
     append_child(Obj, *mut Obj) = b"IXMLDOMNode::appendChild";
-    clone_node(i16, *mut Obj) = b"IXMLDOMNode::cloneNode";
     put_text(Bstr) = b"IXMLDOMNode::put_text";
     get_specified(*mut i16) = b"IXMLDOMNode::get_specified";
     get_definition(*mut Obj) = b"IXMLDOMNode::get_definition";

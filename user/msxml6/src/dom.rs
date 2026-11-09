@@ -23,6 +23,7 @@ pub enum Kind {
     Document = 9,
 }
 
+#[derive(Clone)]
 pub struct Node {
     pub kind: Kind,
     /// The qualified name (an element's or attribute's), a processing
@@ -76,6 +77,7 @@ impl Node {
     }
 }
 
+#[derive(Clone)]
 pub struct Tree {
     pub nodes: Vec<Node>,
 }
@@ -88,6 +90,24 @@ impl Tree {
 
     pub fn node(&self, i: u32) -> &Node {
         &self.nodes[i as usize]
+    }
+
+    /// A copy of node `i` (not the document) under `parent` (NONE: a
+    /// node of no parent, as cloneNode makes): its attributes always, its
+    /// children (each copied deep) when `deep`. Returns the copy's index.
+    pub fn copy(&mut self, i: u32, deep: bool, parent: u32) -> u32 {
+        let n = self.node(i);
+        let fresh = Node::new(n.kind, &n.name, &n.ns, &n.value, parent);
+        let (attrs, children) =
+            (n.attrs.clone(), if deep { n.children.clone() } else { Vec::new() });
+        let copy = self.add(fresh);
+        for a in attrs {
+            self.copy(a, true, copy);
+        }
+        for c in children {
+            self.copy(c, true, copy);
+        }
+        copy
     }
 
     fn add(&mut self, node: Node) -> u32 {

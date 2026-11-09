@@ -51,7 +51,9 @@
 //!   line, and an empty document after; with no error, errorCode is
 //!   S_FALSE and 0;
 //! - load of a file (with async off): S_OK and VARIANT_TRUE and the same
-//!   tree; a file that does not exist is S_FALSE and VARIANT_FALSE.
+//!   tree; a file that does not exist is S_FALSE and VARIANT_FALSE;
+//! - cloneNode (`clone`: Wine's test_cloneNode and MSXML's documentation;
+//!   setup.exe clones from its version descriptor).
 //!
 //! The same source builds `wow64_msxml_test`, the 32-bit (x86) program.
 //! Prints `msxml_test: ok` (`wow64_msxml_test: ok`), or `<name>: check N
@@ -203,6 +205,7 @@ const GET_NEXT_SIBLING: usize = 16;
 const GET_ATTRIBUTES: usize = 17;
 const HAS_CHILD_NODES: usize = 22;
 const GET_OWNER_DOCUMENT: usize = 23;
+const CLONE_NODE: usize = 24;
 const GET_NODE_TYPE_STRING: usize = 25;
 const GET_TEXT: usize = 26;
 const GET_XML: usize = 34;
@@ -392,6 +395,26 @@ impl Checks {
         v.clear();
         self.ok(same, u64::from(vt))
     }
+}
+
+/// Whether two NUL-terminated wide strings are equal (both freed).
+fn bstr_eq(a: Bstr, b: Bstr) -> bool {
+    let mut equal = !a.is_null() && !b.is_null();
+    let mut i = 0;
+    // SAFETY: two NUL-terminated strings, read up to the first NUL.
+    unsafe {
+        while equal {
+            let (x, y) = (*a.add(i), *b.add(i));
+            equal = x == y;
+            if x == 0 || y == 0 {
+                break;
+            }
+            i += 1;
+        }
+        SysFreeString(a);
+        SysFreeString(b);
+    }
+    equal
 }
 
 /// Whether `s` (a NUL-terminated wide string) is `want`.
@@ -968,6 +991,116 @@ fn file(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     c.eq(ok as u16 as u64, VARIANT_FALSE as u16 as u64)
 }
 
+/// Wine's complete4A (domdoc.c), test_cloneNode's document.
+const COMPLETE4: &str = "<?xml version='1.0'?>\n<lc dl='str1'>\n<bs vr='str2' sz='1234'>fn1.txt\n</bs>\n\
+<pr id='str3' vr='1.2.3' pn='wine 20050804'>\nfn2.txt\n</pr>\n<empty></empty>\n\
+<fo>\n<ba>\nf1\n</ba>\n</fo>\n</lc>\n";
+
+fn clone_of(obj: Obj, deep: i16) -> (HResult, Obj) {
+    let mut out: Obj = 0x1 as Obj;
+    let hr = call!(obj, CLONE_NODE, fn(i16, *mut Obj) -> HResult, deep, &mut out);
+    (hr, out)
+}
+
+/// The length of `obj`'s childNodes (or attributes, `slot`).
+fn count(c: &mut Checks, obj: Obj, slot: usize, length: usize, want: u64) -> Result<(), u32> {
+    let (hr, list) = get_obj(obj, slot);
+    c.hr(hr, S_OK)?;
+    let mut n = -1i32;
+    c.hr(call!(list, length, fn(*mut i32) -> HResult, &mut n), S_OK)?;
+    release(list);
+    c.eq(n as u32 as u64, want)
+}
+
+/// cloneNode, as Wine's test_cloneNode checks it on Windows: a NULL
+/// output is E_INVALIDARG; the document cloned deep has its two children
+/// and the original's properties (Wine: SelectionLanguage), shallow no
+/// documentElement; an element cloned deep has its children, its three
+/// attributes (getNamedItem("id") finds one) and an ownerDocument,
+/// shallow no children but the attributes. From MSXML's documentation of
+/// cloneNode: the clone has no parent (parentNode S_FALSE and NULL); its
+/// xml is the original's.
+fn clone(c: &mut Checks, doc: Obj) -> Result<(), u32> {
+    let (hr, ok) = load_xml(doc, COMPLETE4);
+    c.hr(hr, S_OK)?;
+    c.eq(ok as u16 as u64, VARIANT_TRUE as u16 as u64)?;
+    let name = Wide::new("SelectionNamespaces");
+    let value = Wide::new("xmlns:w='urn:wine'");
+    let hr = call!(doc, SET_PROPERTY, fn(Bstr, Variant) -> HResult, name.0, Variant::bstr(&value));
+    c.hr(hr, S_OK)?;
+    c.hr(
+        call!(doc, CLONE_NODE, fn(i16, *mut Obj) -> HResult, VARIANT_FALSE, null_mut()),
+        E_INVALIDARG,
+    )?;
+
+    let (hr, copy) = clone_of(doc, VARIANT_TRUE);
+    c.hr(hr, S_OK)?;
+    c.eq(u64::from(node_type(copy)), 9)?;
+    count(c, copy, GET_CHILD_NODES, LIST_GET_LENGTH, 2)?;
+    let (hr, copy2) = query(copy, &IID_IXMLDOMDOCUMENT2);
+    c.hr(hr, S_OK)?;
+    let mut v = Variant::empty();
+    c.hr(call!(copy2, GET_PROPERTY, fn(Bstr, *mut Variant) -> HResult, name.0, &mut v), S_OK)?;
+    c.var_text(&mut v, "xmlns:w='urn:wine'")?;
+    let (hr, el) = get_obj(copy2, GET_DOCUMENT_ELEMENT);
+    c.hr(hr, S_OK)?;
+    get_bstr(c, el, GET_NODE_NAME, "lc")?;
+    release(el);
+    release(copy2);
+    release(copy);
+    let (hr, copy) = clone_of(doc, VARIANT_FALSE);
+    c.hr(hr, S_OK)?;
+    let (hr, el) = get_obj(copy, GET_DOCUMENT_ELEMENT);
+    c.hr(hr, S_FALSE)?;
+    c.ok(el.is_null(), el as u64)?;
+    release(copy);
+
+    let (hr, pr) = select_single(doc, "lc/pr");
+    c.hr(hr, S_OK)?;
+    c.hr(
+        call!(pr, CLONE_NODE, fn(i16, *mut Obj) -> HResult, VARIANT_TRUE, null_mut()),
+        E_INVALIDARG,
+    )?;
+    let mut xml: Bstr = null_mut();
+    c.hr(call!(pr, GET_XML, fn(*mut Bstr) -> HResult, &mut xml), S_OK)?;
+    let (hr, copy) = clone_of(pr, VARIANT_TRUE);
+    c.hr(hr, S_OK)?;
+    let (hr, first) = get_obj(copy, GET_FIRST_CHILD);
+    c.hr(hr, S_OK)?;
+    release(first);
+    let (hr, owner) = get_obj(copy, GET_OWNER_DOCUMENT);
+    c.hr(hr, S_OK)?;
+    release(owner);
+    let (hr, parent) = get_obj(copy, GET_PARENT_NODE);
+    c.hr(hr, S_FALSE)?;
+    c.ok(parent.is_null(), parent as u64)?;
+    count(c, copy, GET_CHILD_NODES, LIST_GET_LENGTH, 1)?;
+    count(c, copy, GET_ATTRIBUTES, MAP_GET_LENGTH, 3)?;
+    let (hr, map) = get_obj(copy, GET_ATTRIBUTES);
+    c.hr(hr, S_OK)?;
+    let id = Wide::new("id");
+    let mut attr: Obj = null_mut();
+    c.hr(call!(map, MAP_GET_NAMED_ITEM, fn(Bstr, *mut Obj) -> HResult, id.0, &mut attr), S_OK)?;
+    release(attr);
+    release(map);
+    let mut copy_xml: Bstr = null_mut();
+    c.hr(call!(copy, GET_XML, fn(*mut Bstr) -> HResult, &mut copy_xml), S_OK)?;
+    c.ok(bstr_eq(xml, copy_xml), 0)?;
+    release(copy);
+    let (hr, copy) = clone_of(pr, VARIANT_FALSE);
+    c.hr(hr, S_OK)?;
+    let (hr, first) = get_obj(copy, GET_FIRST_CHILD);
+    c.hr(hr, S_FALSE)?;
+    c.ok(first.is_null(), first as u64)?;
+    count(c, copy, GET_CHILD_NODES, LIST_GET_LENGTH, 0)?;
+    count(c, copy, GET_ATTRIBUTES, MAP_GET_LENGTH, 3)?;
+    release(copy);
+    release(pr);
+    let empty = Wide::new("");
+    let hr = call!(doc, SET_PROPERTY, fn(Bstr, Variant) -> HResult, name.0, Variant::bstr(&empty));
+    c.hr(hr, S_OK)
+}
+
 fn run() -> Result<(), u32> {
     let mut c = Checks(0);
     // SAFETY: plain call.
@@ -991,6 +1124,7 @@ fn run() -> Result<(), u32> {
     errors(&mut c, doc)?;
     white_space(&mut c, doc)?;
     file(&mut c, doc)?;
+    clone(&mut c, doc)?;
     release(doc);
     // SAFETY: plain call.
     unsafe { CoUninitialize() };

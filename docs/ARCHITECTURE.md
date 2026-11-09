@@ -3896,10 +3896,18 @@ x64 and x86.
   selectSingleNode fail with E_FAIL on an expression that is not a
   node-set. Numbers print as Rust's shortest round-trip form (XPath
   wants no exponent: values beyond 1e21 differ).
+- **cloneNode** (`msxml_test`'s `clone`; ODT's setup.exe clones from its
+  version descriptor): a node's clone is a new node of no parent in the
+  same tree (the arena keeps it; detached nodes are never freed before
+  the document), with its attributes always and its children copied
+  deep when asked; the document's clone is a new document with the
+  original's settings and properties (Wine's test: SelectionLanguage
+  carries over) and, deep, a copy of its tree. A NULL output is
+  E_INVALIDARG.
 - **Not implemented** (E_NOTIMPL, each recorded as
   `msxml6.dll!<interface>::<method>`, "not implemented"): changing the
   tree (create*, appendChild, insertBefore, removeChild, replaceChild,
-  setAttribute, put_text, put_nodeValue, cloneNode, importNode, the
+  setAttribute, put_text, put_nodeValue, importNode, the
   character data editors), save, getElementsByTagName, transforms, schemas
   and validation, typed values, the event handlers, abort, nodeFromID,
   the selection's own methods and the enumerators (`get__newEnum`).

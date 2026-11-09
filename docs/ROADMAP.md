@@ -1623,15 +1623,32 @@ need gala's.
      x86, over galapkg's cabinet reader, v64.cab being LZX:21;
      `setupcab_test`, `wow64_setupcab_test`, expected results from
      Wine's setupcab.c tests; ARCHITECTURE "Other DLLs").
-     Where the run ends now: it loads the descriptor's XML with MSXML 6
-     and calls IXMLDOMNode::cloneNode (`msxml6.dll!IXMLDOMNode::cloneNode`,
-     not implemented: E_NOTIMPL); ODT's log says "cloneNode failed",
-     "Cannot load version descriptor", and the elevated copy and its
-     parent exit with 0x80004001.
+     It loads the descriptor's XML with MSXML 6 and clones from it
+     (done: IXMLDOMNode::cloneNode; `msxml_test`, `wow64_msxml_test`,
+     Wine's test_cloneNode), downloads the product's cabinets and
+     streams for about 70 s (DeliveryOptimization and BITS are asked
+     first: REGDB_E_CLASSNOTREG, it falls back to HTTP), installs their
+     catalog files (wintrust's CryptCATAdminAcquireContext is a stub:
+     `wintrust.dll!CryptCATAdminAcquireContext` missing export; ODT logs
+     `C2R::CatalogFiles::Install` UnexpectedError and goes on) and
+     starts the 64-bit Click-to-Run client, `C:\Program Files\Common
+     Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe platform=x64
+     culture=en-us productstoadd=O365ProPlusRetail.16_en-us_x-none ...`.
+     Where the run ends now: that client does not load (0xc0000135: the
+     scenario ships no 64-bit oleaut32.dll, and its other imports are
+     not known yet), ODT logs "C2RClient returned a failing exit code",
+     and setup.exe and its parent exit with 0xc0000135 after about 82 s.
+     slc.dll, kernelbase's SetSystemFileCacheSize and ntdll's
+     NtSetSystemInformation are still asked for only on the way out
+     (after "Bootstrapper Finished").
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: msxml6's cloneNode;
+     Next, in the order the run reaches them: OfficeClickToRun.exe's
+     64-bit import closure in the scenario (gala's x64 DLLs, then what
+     they lack); CryptCATAdmin* (catalogs: a catalog SIP, member lookup
+     by hash); slc.dll and the two exports once a run needs them (their
+     Windows answers for a standard and an elevated caller first);
      Windows' answers from `cab_probe` (the cabinet cases of
      `wintrust_test` follow them);
      then the other DLLs
