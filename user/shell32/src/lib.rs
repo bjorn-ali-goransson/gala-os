@@ -119,6 +119,10 @@ const CSIDLS: &[(i32, Folder)] = &[
     (0x25, Folder::System),                   // CSIDL_SYSTEM
     (0x26, Folder::Env("ProgramFiles", "")),  // CSIDL_PROGRAM_FILES
     (0x28, Folder::Env("USERPROFILE", "")),   // CSIDL_PROFILE
+    (0x29, Folder::Env("windir", "\\SysWOW64")), // CSIDL_SYSTEMX86 (64-bit Windows)
+    (0x2a, Folder::Env("ProgramFiles(x86)", "")), // CSIDL_PROGRAM_FILESX86
+    (0x2b, Folder::Env("CommonProgramFiles", "")), // CSIDL_PROGRAM_FILES_COMMON
+    (0x2c, Folder::Env("CommonProgramFiles(x86)", "")), // CSIDL_PROGRAM_FILES_COMMONX86
     (0x2d, Folder::Env("ProgramData", "\\Microsoft\\Windows\\Templates")), // CSIDL_COMMON_TEMPLATES
     (0x2e, Folder::Env("PUBLIC", "\\Documents")), // CSIDL_COMMON_DOCUMENTS
 ];
@@ -234,7 +238,7 @@ fn resolve(folder: Folder, out: &mut [u16; MAX_PATH]) -> Option<usize> {
             Folder::Windows => GetWindowsDirectoryW(out.as_mut_ptr(), MAX_PATH as u32),
             Folder::System => GetSystemDirectoryW(out.as_mut_ptr(), MAX_PATH as u32),
             Folder::Env(var, sub) => {
-                let mut name = [0u16; 16];
+                let mut name = [0u16; 32];
                 for (d, c) in name.iter_mut().zip(var.encode_utf16()) {
                     *d = c;
                 }

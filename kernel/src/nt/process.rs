@@ -1231,6 +1231,8 @@ pub fn finish(process: &KArc<Process>, last_status: NtStatus) {
     super::clipboard::process_ended(process);
     process.desk.hooks.process_ended(process.id as u32);
     super::conhost::process_ended(process.id);
+    // A service it ran that had not stopped: stopped, its process aborted.
+    super::scm_run::process_ended(process);
     super::charge::ended(process);
     // Close every handle (this breaks reference cycles through handles to
     // the process's own objects) and forget the process.
@@ -1542,6 +1544,45 @@ pub fn launch(
         _ => NtStatus::NO_MEMORY,
     })?;
     Ok(process.id)
+}
+
+/// Creates a service's process (nt::scm_run): the executable at Win32
+/// path `path` with `command_line` as given (the service's ImagePath),
+/// in `current_directory` (with a trailing backslash), under primary
+/// token `token`, with new standard handles (they write to the kernel
+/// log) and no console session. Its main thread waits for a resume, so
+/// the SCM knows the process before it runs; the process and that
+/// thread.
+pub fn launch_service(
+    path: &str,
+    command_line: &str,
+    current_directory: &str,
+    token: ObjectRef,
+) -> Result<(KArc<Process>, ObjectRef), NtStatus> {
+    let object = open_program(path)?;
+    let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    let layout = super::section::image_layout(f.node)?;
+    let file_name = path.rsplit('\\').next().unwrap_or(path);
+    let name = intern(file_name).map_err(|_| NtStatus::NO_MEMORY)?;
+    let path = intern(path).map_err(|_| NtStatus::NO_MEMORY)?;
+    spawn(Spawn {
+        name,
+        path,
+        image: layout,
+        command_line,
+        current_directory,
+        environment: None,
+        handles: None,
+        suspended: true,
+        runtime_data: &[],
+        parent_id: 0,
+        token: Some(token),
+        console: None,
+    })
+    .map_err(|e| match e {
+        LoadError::Pe(_) | LoadError::NoWow64 => NtStatus::INVALID_IMAGE_FORMAT,
+        _ => NtStatus::NO_MEMORY,
+    })
 }
 
 #[cfg(test)]

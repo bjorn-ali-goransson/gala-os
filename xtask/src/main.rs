@@ -3286,6 +3286,17 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_svc_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_svc_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     ("wow64_svc_test", "user/access_test/access_test.regseed", "registry"),
+    // Services that run (user/svcrun_test): the program is its own
+    // service, x64 and x86.
+    ("svcrun_test", "ntdll.dll", "Windows/System32"),
+    ("svcrun_test", "kernel32.dll", "Windows/System32"),
+    ("svcrun_test", "advapi32.dll", "Windows/System32"),
+    ("svcrun_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_svcrun_test", "wow64.dll", "Windows/System32"),
+    ("wow64_svcrun_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_svcrun_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_svcrun_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_svcrun_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     // MSXML 6's DOM through COM (user/msxml_test), x64 and x86.
     ("msxml_test", "ntdll.dll", "Windows/System32"),
     ("msxml_test", "kernel32.dll", "Windows/System32"),
@@ -3466,6 +3477,7 @@ const USER_PROGRAMS: &[&str] = &[
     "cab_probe",
     "setupcab_test",
     "svc_test",
+    "svcrun_test",
     "msxml_test",
     "winhttp_cb_test",
     "runas_test",
@@ -3489,6 +3501,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_wintrust_test",
     "wow64_setupcab_test",
     "wow64_svc_test",
+    "wow64_svcrun_test",
     "wow64_msxml_test",
     "wow64_winhttp_cb_test",
     "wow64_runas_test",
@@ -6669,6 +6682,29 @@ const SCENARIOS: &[Scenario] = &[
             "exited with status 0x00000000",
             "(wow64_svc_test.exe) connected to \"ServicesActive\": 0xc0000022",
         ],
+    },
+    Scenario {
+        // Services that run, as an administrator (SYSTEM): the program
+        // creates services whose executable is itself, starts them (the
+        // SCM's process as SYSTEM in session 0, the dispatcher's
+        // handshake), controls, stops and kills them (user/svcrun_test).
+        name: "svcrun_test",
+        cmdline: "qemu_exit as=system run=svcrun_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "svcrun_test: ok",
+            "exited with status 0x00000000",
+            "(svcrun_test.exe) asked to start \"svcrun_test_exit\": 0xc007041d",
+            "scm: service \"svcrun_test_kill\": its process svcrun_test.exe",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/svcrun_test built for x86): a
+        // 32-bit client and 32-bit services.
+        name: "wow64_svcrun_test",
+        cmdline: "qemu_exit as=system run=wow64_svcrun_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_svcrun_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // MSXML 6's DOM through COM (DOMDocument60): loading, the tree,
@@ -10449,6 +10485,11 @@ const NOT_IN_UM: &[(&str, &str)] = &[
         "a child process: the RPC client of `rpc_test.exe client` (one NT process per Linux process)",
     ),
     ("shell32_test", "a child process (ShellExecuteExW runs it)"),
+    (
+        "svcrun_test",
+        "its services are child processes the SCM starts (one NT process per Linux process)",
+    ),
+    ("wow64_svcrun_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
@@ -14761,6 +14802,9 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
 /// written. A file cut off by the end of the log is kept as far as it
 /// got.
 fn save_dumps(serial: &str, dir: &Path) -> Vec<PathBuf> {
+    // Only this boot's files: an earlier failure's were kept beside them
+    // and read as this run's (office_install's logs, named by the time).
+    let _ = fs::remove_dir_all(dir);
     let mut saved = Vec::new();
     let mut current: Option<(PathBuf, String)> = None;
     let flush = |file: Option<(PathBuf, String)>, saved: &mut Vec<PathBuf>| {

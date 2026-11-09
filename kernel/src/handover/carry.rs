@@ -639,6 +639,11 @@ fn collect_process(p: &mut Programs, process: &KArc<Process>) -> Result<ProcessS
     if process.job.lock().is_some() {
         return Err(refuse("a job"));
     }
+    // A service's process: the SCM's record of it (its status, its
+    // dispatcher's request slot) is not carried yet.
+    if crate::nt::scm_run::runs_service(pid) {
+        return Err(refuse("a service the SCM started"));
+    }
     // The executable is laid out again from its file.
     let exe = process::open_program(process.path).map_err(|_| refuse("no executable file"))?;
     if !matches!(&exe.body, ObjectBody::File(f) if file::survives_handover(f.node)) {

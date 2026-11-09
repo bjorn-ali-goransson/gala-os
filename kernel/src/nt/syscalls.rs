@@ -173,6 +173,8 @@ pub const GALA_SERVICE_ENUM: u32 = 0x7fd4;
 pub const GALA_SERVICE_CONTROL: u32 = 0x7fd5;
 /// ChangeServiceConfig2 (0x7fd6 is NtSetInformationKey).
 pub const GALA_SERVICE_CONFIGURE: u32 = 0x7fd7;
+/// A service process's control dispatcher and SetServiceStatus.
+pub const GALA_SERVICE_DISPATCH: u32 = 0x7fd8;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -470,6 +472,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_SERVICE_ENUM, "GalaServiceEnum", 6, scm_calls::gala_service_enum),
     (GALA_SERVICE_CONTROL, "GalaServiceControl", 4, scm_calls::gala_service_control),
     (GALA_SERVICE_CONFIGURE, "GalaServiceConfigure", 4, scm_calls::gala_service_configure),
+    (GALA_SERVICE_DISPATCH, "GalaServiceDispatch", 5, scm_calls::gala_service_dispatch),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),

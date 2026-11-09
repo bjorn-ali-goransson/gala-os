@@ -5,9 +5,8 @@
 //! SCM's and each service's security descriptor decide what a connection
 //! or service handle is granted (the documented defaults of "Service
 //! Security and Access Rights", or a service key's `Security\Security`);
-//! the run-time state (open handles, deletion marks) is kept here. Only
-//! the drivers gala's kernel itself provides are running; starting a
-//! service is not supported yet (recorded). The calls are in
+//! the run-time state of handles (open handles, deletion marks) is kept
+//! here, that of running services in `scm_run.rs`. The calls are in
 //! `scm_calls.rs`; advapi32 wraps them.
 
 use alloc::vec::Vec;
@@ -116,6 +115,11 @@ const AUTHENTICATED_USERS: Sid = Sid::new(5, &[11]);
 /// running for as long as the kernel runs; their keys are in the seed.
 const BUILT_IN: &[&str] = &["AFD"];
 
+/// Whether `name` is one of the drivers gala's kernel provides.
+pub fn built_in(name: &[u16]) -> bool {
+    BUILT_IN.iter().any(|b| same_text(name, b))
+}
+
 fn descriptor(list: &[(u32, Sid, u8)]) -> Result<Vec<u8>, NtStatus> {
     let d = Descriptor {
         control: SE_DACL_PRESENT,
@@ -189,7 +193,7 @@ fn same_text(a: &[u16], b: &str) -> bool {
         && a.iter().zip(b.bytes()).all(|(&x, y)| x < 0x80 && (x as u8).eq_ignore_ascii_case(&y))
 }
 
-fn copy(s: &[u16]) -> Result<Vec<u16>, NtStatus> {
+pub fn copy(s: &[u16]) -> Result<Vec<u16>, NtStatus> {
     let mut v = Vec::new();
     v.try_extend_from_slice(s).map_err(|_| NtStatus::NO_MEMORY)?;
     Ok(v)
@@ -212,43 +216,76 @@ impl ServiceObject {
 
 impl Drop for ServiceObject {
     /// The handle's object is gone: a service marked for deletion leaves
-    /// the database with its last one (its key and every subkey).
+    /// the database with its last one (its key and every subkey), or, if
+    /// it still runs, once it has stopped (`stopped`).
     fn drop(&mut self) {
-        let delete = {
+        {
             let mut table = TABLE.lock();
             let Some(at) = table.iter().position(|e| same(&e.name, &self.name)) else { return };
             table[at].opens -= 1;
             if table[at].opens > 0 {
                 return;
             }
-            table.swap_remove(at).marked
-        };
-        if !delete {
-            return;
+            if !table[at].marked {
+                table.swap_remove(at);
+                return;
+            }
+            if super::scm_run::active(&self.name) {
+                // Kept (no handles, marked) until the service stops.
+                return;
+            }
+            table.swap_remove(at);
         }
-        let now = super::platform::system_time();
-        let result = registry::with(|r| {
-            let id = find(r, &self.name)?;
-            delete_tree(r, id, now, 0)
-        });
-        let name = super::winsta::Plain(&self.name);
-        match result {
-            Ok(()) => info!("scm: service \"{name}\" deleted (its last handle closed)"),
-            Err(e) => warn!(
-                "scm: service \"{name}\" marked for deletion could not be deleted: {:#010x}",
-                e.0
-            ),
-        }
-        crate::events::emit(
-            crate::events::Category::Service,
-            "service",
-            format_args!(
-                r#""op":"deleted","name":{},"status":{}"#,
-                crate::events::Utf16(&self.name),
-                result.err().map_or(0, |e| e.0)
-            ),
-        );
+        delete_key(&self.name, "its last handle closed");
     }
+}
+
+/// Service `name` has stopped: if it is marked for deletion and has no
+/// handles left, it leaves the database now.
+pub fn stopped(name: &[u16]) {
+    let delete = {
+        let mut table = TABLE.lock();
+        match table.iter().position(|e| same(&e.name, name)) {
+            Some(at) if table[at].opens == 0 && table[at].marked => {
+                table.swap_remove(at);
+                true
+            }
+            _ => false,
+        }
+    };
+    if delete {
+        delete_key(name, "it stopped with no handle open");
+    }
+}
+
+/// Deletes service `name`'s key and every subkey (marked for deletion,
+/// no handle and not running), logged with `why` and the outcome.
+fn delete_key(name: &[u16], why: &str) {
+    let now = super::platform::system_time();
+    let result = registry::with(|r| {
+        let id = find(r, name)?;
+        delete_tree(r, id, now, 0)
+    });
+    super::scm_run::forget(name);
+    let plain = super::winsta::Plain(name);
+    match result {
+        Ok(()) => info!("scm: service \"{plain}\" deleted ({why})"),
+        Err(e) => {
+            warn!(
+                "scm: service \"{plain}\" marked for deletion could not be deleted: {:#010x}",
+                e.0
+            )
+        }
+    }
+    crate::events::emit(
+        crate::events::Category::Service,
+        "service",
+        format_args!(
+            r#""op":"deleted","name":{},"status":{}"#,
+            crate::events::Utf16(name),
+            result.err().map_or(0, |e| e.0)
+        ),
+    );
 }
 
 /// Whether service `name` is marked for deletion.
@@ -281,7 +318,7 @@ fn delete_tree(r: &mut Registry, id: KeyId, now: u64, depth: usize) -> Result<()
     r.delete_key(id, now)
 }
 
-fn utf16(s: &str) -> Result<Vec<u16>, NtStatus> {
+pub fn utf16(s: &str) -> Result<Vec<u16>, NtStatus> {
     let mut v = Vec::new();
     for c in s.encode_utf16() {
         v.try_push(c).map_err(|_| NtStatus::NO_MEMORY)?;
@@ -422,15 +459,10 @@ pub fn config(r: &Registry, id: KeyId) -> Result<Config, NtStatus> {
     })
 }
 
-/// SERVICE_STATUS_PROCESS of service `name` of type `kind`: the built-in
-/// drivers run (no process, no controls accepted); every other service
-/// is stopped and was never started.
+/// SERVICE_STATUS_PROCESS of service `name` of type `kind`
+/// (`scm_run::status`).
 pub fn status(name: &[u16], kind: u32) -> [u32; 9] {
-    if BUILT_IN.iter().any(|b| same_text(name, b)) {
-        [kind, SERVICE_RUNNING, 0, 0, 0, 0, 0, 0, 0]
-    } else {
-        [kind, SERVICE_STOPPED, 0, ERROR_SERVICE_NEVER_STARTED, 0, 0, 0, 0, 0]
-    }
+    super::scm_run::status(name, kind)
 }
 
 /// A service as EnumServicesStatusEx lists it.
@@ -481,7 +513,7 @@ pub struct NewService<'a> {
 }
 
 /// Whether `account` is LocalSystem (empty: the default).
-fn local_system(account: &[u16]) -> bool {
+pub fn local_system(account: &[u16]) -> bool {
     account.is_empty()
         || same_text(account, "LocalSystem")
         || same_text(account, ".\\LocalSystem")

@@ -2358,6 +2358,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "svcrun_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "svgtypes"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2949,6 +2956,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_svc_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_svcrun_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
