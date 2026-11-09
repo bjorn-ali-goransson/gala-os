@@ -136,14 +136,24 @@ int main(int argc, char **argv, char **envp)
 		lx_exit(1);
 	}
 	say_status("store to address 8", wait_for(pid, 0));
+	/* The child exits only once the parent has seen it continued: an
+	 * exit before that wait replaces the continued state (exited 5 for
+	 * WCONTINUED, then ECHILD), as a busy host showed. */
+	int go[2];
+	sys2(SYS_pipe2, go, 0);
 	pid = lx_fork();
 	if (pid == 0) {
+		char b;
 		sys2(SYS_kill, sys0(SYS_getpid), SIGSTOP);
+		sys3(SYS_read, go[0], &b, 1);
 		lx_exit(5);
 	}
 	say_status("kill(self, SIGSTOP), WUNTRACED", wait_for(pid, WUNTRACED));
 	say_ret("  kill(child, SIGCONT)", sys2(SYS_kill, pid, SIGCONT));
 	say_status("  WCONTINUED", wait_for(pid, WCONTINUED));
+	sys3(SYS_write, go[1], "g", 1);
+	sys1(SYS_close, go[0]);
+	sys1(SYS_close, go[1]);
 	say_status("  then", wait_for(pid, 0));
 
 	say_text("-- memory: fork copies, vfork shares");
