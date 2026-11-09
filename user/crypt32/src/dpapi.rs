@@ -67,7 +67,11 @@ struct Api {
     reg_close: RegClose,
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryA(name: *const u8) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;
@@ -109,7 +113,11 @@ fn api() -> Option<Api> {
     }
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LocalAlloc(flags: u32, size: usize) -> *mut u8;
     fn LocalFree(p: *mut u8) -> *mut u8;
@@ -239,7 +247,11 @@ fn keys(a: &Api, entropy: &[u8]) -> Option<([u8; 32], [u8; 32])> {
 }
 
 fn fail<T>(code: u32, value: T) -> T {
-    #[link(name = "kernel32", kind = "raw-dylib")]
+    #[cfg_attr(
+        target_arch = "x86",
+        link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+    )]
+    #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
     unsafe extern "system" {
         fn SetLastError(code: u32);
     }

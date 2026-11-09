@@ -1185,6 +1185,18 @@ numbers, 0x7f.., fail there).
   crate for both ntdlls: what differs by architecture goes in its
   `x64.rs` and `x86.rs` (offsets, stubs, assembly), x86 SEH in
   `seh_x86.rs`; add `-p <name>` to CI's i686 clippy line.
+- crypt32's caller structures with pointers live in
+  `user/crypt32/src/layout.rs`: read a cbSize-versioned one's field with
+  `get!` after `has!(size, Type, field)`, never against a byte count of
+  one width (CERT_CHAIN_PARA's "32" is 16 on x86). Its `check!` lines
+  hold each type to wincrypt.h's size and offsets for both targets: take
+  the values from the header, not by hand (a C file of `int size_X =
+  sizeof(X);` compiled with `clang -target i686-w64-mingw32 -S` and
+  `x86_64-w64-mingw32` prints them in the assembly; COFF objects carry no
+  symbol sizes for `llvm-nm -S`). A 32-bit DLL's exports' argument sizes
+  can be checked against mingw's i686 import library: its `_Name@N`
+  decorations (`llvm-nm /usr/i686-w64-mingw32/lib/lib<dll>.a`) give
+  each stdcall function's bytes, which the Rust declaration must pop.
 - advapi32's structures with pointer-sized fields live in
   `user/advapi32/src/layout.rs` (SID_AND_ATTRIBUTES, TOKEN_GROUPS'
   array offset `GROUPS_AT`, the absolute SECURITY_DESCRIPTOR and

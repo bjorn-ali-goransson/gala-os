@@ -7,11 +7,16 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::too_many_arguments)]
 
-use crate::cert::{CertCreateCertificateContext, CertFreeCertificateContext};
+use crate::cert::{Blob, CertCreateCertificateContext, CertFreeCertificateContext};
+use crate::layout::{AltNameEntry, AltNameInfo, AltNameValue};
 use crate::store::{CertAddCertificateContextToStore, CertOpenStore, error, unsupported};
 use core::ffi::c_void;
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CreateFileW(
         name: *const u16,
@@ -330,37 +335,40 @@ fn alt_entries(der: &[u8], mut f: impl FnMut(u32, &[u8])) -> Result<usize, u32> 
     Ok(n)
 }
 
-/// CERT_ALT_NAME_INFO and its entries (24 bytes each: the choice, then a
-/// string pointer or a CRYPT_DATA_BLOB).
+/// CERT_ALT_NAME_INFO and its entries (CERT_ALT_NAME_ENTRY: the choice,
+/// then a string pointer or a CRYPT_DATA_BLOB; `layout`).
 fn alt_name(der: &[u8], out: *mut u8, room: usize) -> Result<usize, u32> {
+    use core::mem::size_of;
     // The size: header, entries, then the strings (UTF-16, NUL) and IPs.
     let mut extra = 0;
     let count = alt_entries(der, |choice, v| {
         extra += if choice == CERT_ALT_NAME_IP_ADDRESS { v.len() } else { (v.len() + 1) * 2 };
     })?;
-    let header = 16;
-    let size = header + count * 24 + extra.next_multiple_of(8);
+    let header = size_of::<AltNameInfo>();
+    let entry = size_of::<AltNameEntry>();
+    let size = header + count * entry + extra.next_multiple_of(size_of::<usize>());
     if out.is_null() || room < size {
         return Ok(size);
     }
     // SAFETY: the caller's (or our allocated) buffer of `size` bytes.
     unsafe {
         core::ptr::write_bytes(out, 0, size);
-        let entries = out.add(header);
-        (out as *mut u32).write(count as u32);
-        (out.add(8) as *mut *mut u8).write(entries);
-        let mut text = entries.add(count * 24);
+        let entries = out.add(header).cast::<AltNameEntry>();
+        out.cast::<AltNameInfo>().write_unaligned(AltNameInfo { count: count as u32, entries });
+        let mut text = out.add(header + count * entry);
         let mut i = 0;
         alt_entries(der, |choice, v| {
-            let e = entries.add(i * 24);
-            (e as *mut u32).write(choice);
+            let e = entries.add(i);
             if choice == CERT_ALT_NAME_IP_ADDRESS {
-                (e.add(8) as *mut u32).write(v.len() as u32);
-                (e.add(16) as *mut *mut u8).write(text);
+                let blob = Blob { size: v.len() as u32, data: text };
+                e.write_unaligned(AltNameEntry { choice, value: AltNameValue { blob } });
                 core::ptr::copy_nonoverlapping(v.as_ptr(), text, v.len());
                 text = text.add(v.len());
             } else {
-                (e.add(8) as *mut *mut u8).write(text);
+                e.write_unaligned(AltNameEntry {
+                    choice,
+                    value: AltNameValue { text: text.cast() },
+                });
                 for (k, &b) in v.iter().enumerate() {
                     (text.add(k * 2) as *mut u16).write_unaligned(b.into());
                 }

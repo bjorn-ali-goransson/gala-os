@@ -43,12 +43,20 @@ struct DataBlob {
     data: *const u8,
 }
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn PFXImportCertStore(pfx: *const DataBlob, password: *const u16, flags: u32) -> Handle;
 }
 
-#[link(name = "ncrypt", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ncrypt", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ncrypt", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn NCryptSignHash(
         key: usize,
@@ -111,6 +119,26 @@ fn only_cert(c: &mut Checks, store: Handle) -> Result<*const CertContext, u32> {
 }
 
 /// The property into `buf`: its size, or the error.
+/// CRYPT_KEY_PROV_INFO.
+#[repr(C)]
+struct KeyProvInfo {
+    container: *const u16,
+    provider: *const u16,
+    provider_type: u32,
+    flags: u32,
+    param_count: u32,
+    params: *const c_void,
+    key_spec: u32,
+}
+
+/// CERT_KEY_CONTEXT.
+#[repr(C)]
+struct KeyContext {
+    size: u32,
+    key: usize,
+    key_spec: u32,
+}
+
 fn property(cert: *const CertContext, id: u32, buf: &mut [u64; 128]) -> Result<u32, u32> {
     let mut size = 1024u32;
     // SAFETY: our buffer of `size` bytes.
@@ -229,10 +257,11 @@ pub fn pfx(c: &mut Checks) -> Result<(), u32> {
         let size = property(cert, CERT_KEY_PROV_INFO_PROP_ID, &mut buf);
         c.ok(size.is_ok(), size.err().unwrap_or(0).into())?;
         // CRYPT_KEY_PROV_INFO: the container, the provider, dwProvType.
-        let (container, provider) = (buf[0] as *const u16, buf[1] as *const u16);
+        let info = buf.as_ptr().cast::<KeyProvInfo>().read();
+        let container = info.container;
         c.ok(!container.is_null() && *container != 0, 0)?;
-        c.ok(wide_is(provider, "Microsoft Software Key Storage Provider"), 0)?;
-        c.eq(buf[2] & 0xffff_ffff, 0)?;
+        c.ok(wide_is(info.provider, "Microsoft Software Key Storage Provider"), 0)?;
+        c.eq(info.provider_type.into(), 0)?;
         let mut first = [0u16; 128];
         for (i, slot) in first.iter_mut().enumerate().take(127) {
             *slot = *container.add(i);
@@ -248,7 +277,8 @@ pub fn pfx(c: &mut Checks) -> Result<(), u32> {
         let again = import(MODERN, password.as_ptr(), PKCS12_ALWAYS_CNG_KSP);
         let other = only_cert(c, again)?;
         c.ok(property(other, CERT_KEY_PROV_INFO_PROP_ID, &mut buf).is_ok(), 0)?;
-        c.ok(!same_wide(first.as_ptr(), buf[0] as *const u16), 0)?;
+        let info = buf.as_ptr().cast::<KeyProvInfo>().read();
+        c.ok(!same_wide(first.as_ptr(), info.container), 0)?;
         CertFreeCertificateContext(other);
         CertCloseStore(again, 0);
         CertFreeCertificateContext(cert);
@@ -262,10 +292,12 @@ pub fn pfx(c: &mut Checks) -> Result<(), u32> {
         c.ok(property(cert, CERT_KEY_PROV_INFO_PROP_ID, &mut buf) == not_found, 0)?;
         let size = property(cert, CERT_KEY_CONTEXT_PROP_ID, &mut buf);
         c.ok(size.is_ok(), size.err().unwrap_or(0).into())?;
-        // CERT_KEY_CONTEXT: cbSize, the key handle, dwKeySpec.
-        c.eq(buf[0] & 0xffff_ffff, 24)?;
-        c.ok(buf[1] != 0, 0)?;
-        c.eq(buf[2] & 0xffff_ffff, CERT_NCRYPT_KEY_SPEC.into())?;
+        // CERT_KEY_CONTEXT: cbSize (12 bytes on x86, 24 on x64), the key
+        // handle, dwKeySpec.
+        let context = buf.as_ptr().cast::<KeyContext>().read();
+        c.eq(context.size.into(), super::by_width(12, 24))?;
+        c.ok(context.key != 0, 0)?;
+        c.eq(context.key_spec.into(), CERT_NCRYPT_KEY_SPEC.into())?;
         let size = property(cert, CERT_FRIENDLY_NAME_PROP_ID, &mut buf);
         c.ok(size == Ok(18), size.err().unwrap_or(0).into())?;
         c.ok(wide_is(buf.as_ptr().cast(), "gala pfx"), 0)?;

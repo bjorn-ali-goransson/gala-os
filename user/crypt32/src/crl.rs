@@ -40,6 +40,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use core::ffi::c_void;
+
+use crate::layout::{RevocationPara, RevocationStatus, get, has};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cert::{
@@ -49,7 +51,11 @@ use crate::cert::{
 };
 use crate::store::{CertCloseStore, CertEnumCRLsInStore, CertFindCertificateInStore, unsupported};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -58,7 +64,11 @@ unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
@@ -93,9 +103,9 @@ pub(crate) fn now() -> u64 {
     t
 }
 
-// ---- The structures (x64 layouts, wincrypt.h) ----
+// ---- The structures (wincrypt.h; sizes checked in `layout`) ----
 
-/// CRL_ENTRY (40 bytes).
+/// CRL_ENTRY (24 bytes on x86, 40 on x64).
 #[repr(C)]
 pub struct CrlEntry {
     pub serial: Blob,
@@ -104,7 +114,7 @@ pub struct CrlEntry {
     pub extensions: *mut Extension,
 }
 
-/// CRL_INFO (96 bytes).
+/// CRL_INFO (56 or 96 bytes).
 #[repr(C)]
 pub struct CrlInfo {
     pub version: u32,
@@ -119,7 +129,7 @@ pub struct CrlInfo {
     pub extensions: *mut Extension,
 }
 
-/// CRL_CONTEXT (40 bytes).
+/// CRL_CONTEXT (20 or 40 bytes).
 #[repr(C)]
 pub struct CrlContext {
     pub encoding: u32,
@@ -809,22 +819,18 @@ fn find_issuer(cert: *const CertContext, stores: &[*mut c_void]) -> *const CertC
 const CERT_CONTEXT_REVOCATION_TYPE: u32 = 1;
 const CERT_VERIFY_REV_CHAIN_FLAG: u32 = 1;
 
-fn read<T: Copy>(p: *const u8, at: usize) -> T {
-    // SAFETY: inside the caller's structure (its size checked).
-    unsafe { p.add(at).cast::<T>().read_unaligned() }
-}
-
 /// CERT_REVOCATION_STATUS: dwIndex, dwError, dwReason, and (cbSize 24)
 /// fHasFreshnessTime, dwFreshnessTime.
 fn set_status(status: *mut u8, size: u32, index: u32, error: u32, reason: u32, fresh: Option<u32>) {
+    let s = status.cast::<RevocationStatus>();
     // SAFETY: the caller's structure of `size` bytes (16 or 24).
     unsafe {
-        status.add(4).cast::<u32>().write_unaligned(index);
-        status.add(8).cast::<u32>().write_unaligned(error);
-        status.add(12).cast::<u32>().write_unaligned(reason);
-        if size >= 24 {
-            status.add(16).cast::<i32>().write_unaligned(i32::from(fresh.is_some()));
-            status.add(20).cast::<u32>().write_unaligned(fresh.unwrap_or(0));
+        core::ptr::addr_of_mut!((*s).index).write_unaligned(index);
+        core::ptr::addr_of_mut!((*s).error).write_unaligned(error);
+        core::ptr::addr_of_mut!((*s).reason).write_unaligned(reason);
+        if has!(size, RevocationStatus, freshness) {
+            core::ptr::addr_of_mut!((*s).has_freshness).write_unaligned(i32::from(fresh.is_some()));
+            core::ptr::addr_of_mut!((*s).freshness).write_unaligned(fresh.unwrap_or(0));
         }
     }
 }
@@ -850,7 +856,8 @@ pub extern "system" fn CertVerifyRevocation(
     if status.is_null() {
         return error(E_INVALIDARG, 0);
     }
-    let size: u32 = read(status, 0);
+    // SAFETY: the caller's structure starts with its cbSize.
+    let size = unsafe { status.cast::<u32>().read_unaligned() };
     if size != 16 && size != 24 {
         return error(E_INVALIDARG, 0);
     }
@@ -879,15 +886,34 @@ pub extern "system" fn CertVerifyRevocation(
         unsupported(b"crypt32.dll!CertVerifyRevocation(revocation type)", kind.into());
         return fail(0, CRYPT_E_NO_REVOCATION_CHECK, 0);
     }
-    // CERT_REVOCATION_PARA: cbSize, pIssuerCert (8), cCertStore (16),
-    // rgCertStore (24), hCrlStore (32), pftTimeToUse (40).
-    let psize: u32 = if para.is_null() { 0 } else { read(para, 0) };
-    let issuer: *const CertContext = if psize >= 16 { read(para, 8) } else { core::ptr::null() };
-    let store_count: u32 = if psize >= 24 { read(para, 16) } else { 0 };
-    let cert_stores: *const *mut c_void =
-        if psize >= 32 { read(para, 24) } else { core::ptr::null() };
-    let crl_store: *mut c_void = if psize >= 40 { read(para, 32) } else { core::ptr::null_mut() };
-    let time: *const u64 = if psize >= 48 { read(para, 40) } else { core::ptr::null() };
+    // CERT_REVOCATION_PARA: the fields its cbSize covers.
+    // SAFETY: the caller's structure starts with its cbSize.
+    let psize = if para.is_null() { 0 } else { unsafe { para.cast::<u32>().read_unaligned() } };
+    let issuer = if has!(psize, RevocationPara, issuer) {
+        get!(para, RevocationPara, issuer).cast::<CertContext>()
+    } else {
+        core::ptr::null()
+    };
+    let store_count = if has!(psize, RevocationPara, store_count) {
+        get!(para, RevocationPara, store_count)
+    } else {
+        0
+    };
+    let cert_stores = if has!(psize, RevocationPara, stores) {
+        get!(para, RevocationPara, stores)
+    } else {
+        core::ptr::null()
+    };
+    let crl_store = if has!(psize, RevocationPara, crl_store) {
+        get!(para, RevocationPara, crl_store)
+    } else {
+        core::ptr::null_mut()
+    };
+    let time = if has!(psize, RevocationPara, time) {
+        get!(para, RevocationPara, time)
+    } else {
+        core::ptr::null()
+    };
     // SAFETY: the caller's FILETIME.
     let at = if time.is_null() { now() } else { unsafe { time.read_unaligned() } };
     // Where CRLs and issuers are found: hCrlStore, rgCertStore, the CA store.

@@ -43,7 +43,11 @@ use crate::store::{
     CertAddEncodedCertificateToStore, CertCloseStore, CertOpenStore, error, unsupported,
 };
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -799,32 +803,20 @@ fn store_key(cert: *const CertContext, info: &[u8], flags: u32) -> Result<(), u3
         };
     }
     crate::cert::free_ncrypt_key(key);
-    // CRYPT_KEY_PROV_INFO (x64): container, provider, dwProvType,
-    // dwFlags, cProvParam, rgProvParam, dwKeySpec.
-    #[repr(C)]
-    struct ProvInfo {
-        container: *const u16,
-        provider: *const u16,
-        provider_type: u32,
-        flags: u32,
-        params: u32,
-        param_list: *const c_void,
-        spec: u32,
-    }
-    let prov_info = ProvInfo {
+    let prov_info = crate::layout::KeyProvInfo {
         container: container.as_ptr(),
         provider: provider_name.as_ptr(),
         provider_type: 0,
         flags: flags & CRYPT_MACHINE_KEYSET,
-        params: 0,
-        param_list: core::ptr::null(),
-        spec: AT_KEYEXCHANGE,
+        param_count: 0,
+        params: core::ptr::null(),
+        key_spec: AT_KEYEXCHANGE,
     };
     if CertSetCertificateContextProperty(
         cert,
         CERT_KEY_PROV_INFO_PROP_ID,
         0,
-        (&prov_info as *const ProvInfo).cast(),
+        (&prov_info as *const crate::layout::KeyProvInfo).cast(),
     ) == 0
     {
         return Err(ERROR_NOT_ENOUGH_MEMORY);

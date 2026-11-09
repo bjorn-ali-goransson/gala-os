@@ -1041,6 +1041,8 @@ const USER_DLLS: &[Dll] = &[
     // normaliz.dll: forwarders to kernel32's IDN functions (libcurl).
     Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz.dll" },
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder.dll" },
+    // msi.dll: Windows Installer's queries, nothing installed (msi_test).
+    Dll { package: "msi", file: "msi.dll", exported_as: "testmsi.dll" },
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32.dll" },
     Dll { package: "authz", file: "authz.dll", exported_as: "testauthz.dll" },
@@ -1112,6 +1114,12 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "secur32", file: "secur32.dll", exported_as: "testsecur3232.dll" },
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder32.dll" },
     Dll { package: "bcrypt", file: "bcrypt.dll", exported_as: "testbcrypt32.dll" },
+    // crypt32 and the ncrypt it loads for keys (ODT's setup.exe delay-loads
+    // crypt32; wow64_cert_test).
+    Dll { package: "crypt32", file: "crypt32.dll", exported_as: "testcrypt3232.dll" },
+    Dll { package: "ncrypt", file: "ncrypt.dll", exported_as: "testncrypt32.dll" },
+    // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
+    Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
 ];
 
 /// An EXTRA_MODULES file with the `x86/` prefix: a USER_DLLS_X86 DLL
@@ -3004,6 +3012,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
     ("office_install", "x86/winspool.drv", "Windows/SysWOW64"),
     ("office_install", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msi.dll", "Windows/SysWOW64"),
     ("office_install", "ntdll.dll", "Windows/System32"),
     ("office_install", "kernel32.dll", "Windows/System32"),
     ("office_install", "ucrtbase.dll", "Windows/System32"),
@@ -3032,6 +3043,26 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
+    // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
+    // which the 32-bit crypt32 reads through Sysnative.
+    ("wow64_cert_test", "wow64.dll", "Windows/System32"),
+    ("wow64_cert_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_cert_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    // msi's queries (user/msi_test), x64 and x86.
+    ("msi_test", "ntdll.dll", "Windows/System32"),
+    ("msi_test", "kernel32.dll", "Windows/System32"),
+    ("msi_test", "msi.dll", "Windows/System32"),
+    ("wow64_msi_test", "wow64.dll", "Windows/System32"),
+    ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -3172,6 +3203,7 @@ const USER_PROGRAMS: &[&str] = &[
     "lock_test",
     "ucrt_test",
     "office_api_test",
+    "msi_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -3186,6 +3218,8 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_adv_test",
     "wow64_ucrt_test",
     "wow64_office_api_test",
+    "wow64_cert_test",
+    "wow64_msi_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -6149,6 +6183,29 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wow64_office_api_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wow64_office_api_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // crypt32 through WOW64 (user/cert_test built for x86): its
+        // structures in their x86 layouts, the chain engine, CRLs, PFX.
+        name: "wow64_cert_test",
+        cmdline: "qemu_exit run=wow64_cert_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_cert_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // Windows Installer's queries with nothing installed, the
+        // functions and ordinals ODT's setup.exe imports (user/msi_test).
+        name: "msi_test",
+        cmdline: "qemu_exit run=msi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/msi_test built for x86).
+        name: "wow64_msi_test",
+        cmdline: "qemu_exit run=wow64_msi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_msi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64: the 32-bit ucrtbase (user/ucrt_test
@@ -9815,6 +9872,8 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
