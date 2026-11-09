@@ -64,7 +64,16 @@ The ordering rules in force (set by the owner):
 
 ## Current focus
 
-In order:
+**The next big thing (the owner): Microsoft Office, item OF, with
+everything it depends on.** It goes before the list below (work in
+flight finishes: LD's first GTK program). Its chain, in order:
+OF step 1's gap analysis (what the apps import and register, ranked
+against gala); GPU G2's rest (DXVK: Direct3D 11 in software over
+lavapipe, which the apps' rendering expects); COM/OLE depth and the
+other blockers the analysis ranks; Click-to-Run's install and service
+(PK); then BR's WebView2 and PK stage 4's MSIX for the new Outlook.
+
+In order, after it:
 
 0. **BR stage 2** first (the owner: Chromium working, then the rest of
    this list; heavier, meatier work before polish): its window, input
@@ -1302,6 +1311,10 @@ and running it, not redistributing it.
 **Goal**: find and then remove the blockers for the current Office:
 Word, Excel and PowerPoint (Click-to-Run) and the new Outlook (an MSIX
 package over WebView2). Classic Outlook is out of scope.
+
+**Priority**: the current focus (the owner), ahead of the rest of the
+list; its dependencies (GPU G2's DXVK, COM/OLE, Click-to-Run's
+install, WebView2, MSIX) are worked as the analysis ranks them.
 
 **Next**:
 1. Gap analysis (black-box metadata only, CLEAN_ROOM): import tables,
