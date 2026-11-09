@@ -1116,3 +1116,40 @@ pub extern "system" fn QueryServiceConfig2A(
         2 * (t.len() + 1)
     })
 }
+
+/// QueryServiceObjectSecurity: the service's descriptor, self-relative
+/// (READ_CONTROL; ACCESS_SYSTEM_SECURITY for the SACL); a short buffer
+/// is ERROR_INSUFFICIENT_BUFFER with the size (Wine's service.c on
+/// Windows).
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryServiceObjectSecurity(
+    h: usize,
+    info: u32,
+    sd: *mut u8,
+    size: u32,
+    needed: *mut u32,
+) -> i32 {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if needed.is_null() {
+        return fail(ERROR_INVALID_ADDRESS, 0);
+    }
+    // SAFETY: the caller's buffer of `size` bytes and its DWORD.
+    done(unsafe { crate::objsec::NtQuerySecurityObject(h, info, sd, size, needed) })
+}
+
+/// SetServiceObjectSecurity: the parts `info` names of the service's
+/// descriptor (WRITE_DAC, WRITE_OWNER, ACCESS_SYSTEM_SECURITY), kept by
+/// the SCM in the service's key: later opens are checked against it.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetServiceObjectSecurity(h: usize, info: u32, sd: *const u8) -> i32 {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if sd.is_null() {
+        return fail(ERROR_INVALID_ADDRESS, 0);
+    }
+    // SAFETY: the caller's descriptor.
+    done(unsafe { crate::objsec::NtSetSecurityObject(h, info, sd) })
+}

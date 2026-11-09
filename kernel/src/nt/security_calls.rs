@@ -116,6 +116,14 @@ fn store(object: &ObjectRef, d: &Descriptor) -> Result<(), NtStatus> {
             file::with_fs(|fs| fs.set_security(f.node, bytes)).map_err(|_| NtStatus::FILE_DELETED)
         }
         ObjectBody::Key(k) => registry::with(|r| r.set_security(k.id, bytes)),
+        // A service's descriptor is its key's `Security\Security` value
+        // (SetServiceObjectSecurity), which every later open reads.
+        ObjectBody::Service(s) => {
+            let now = super::super::platform::system_time();
+            registry::with(|r| super::super::scm::store_descriptor(r, &s.name, &bytes, now))?;
+            *object.security.lock() = Some(bytes);
+            Ok(())
+        }
         _ => {
             *object.security.lock() = Some(bytes);
             Ok(())

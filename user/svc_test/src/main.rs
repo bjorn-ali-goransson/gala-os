@@ -122,6 +122,24 @@ unsafe extern "system" {
     ) -> Handle;
     fn DeleteService(h: Handle) -> i32;
     fn ChangeServiceConfig2W(h: Handle, level: u32, info: *const u8) -> i32;
+    fn QueryServiceObjectSecurity(
+        h: Handle,
+        info: u32,
+        sd: *mut u8,
+        size: u32,
+        needed: *mut u32,
+    ) -> i32;
+    fn SetServiceObjectSecurity(h: Handle, info: u32, sd: *const u8) -> i32;
+    fn InitializeSecurityDescriptor(sd: *mut u8, revision: u32) -> i32;
+    fn SetSecurityDescriptorDacl(sd: *mut u8, present: i32, acl: *const u8, defaulted: i32) -> i32;
+    fn GetSecurityDescriptorDacl(
+        sd: *const u8,
+        present: *mut i32,
+        acl: *mut *const u8,
+        defaulted: *mut i32,
+    ) -> i32;
+    fn InitializeAcl(acl: *mut u8, size: u32, revision: u32) -> i32;
+    fn AddAccessAllowedAce(acl: *mut u8, revision: u32, mask: u32, sid: *const u8) -> i32;
     fn QueryServiceConfig2W(
         h: Handle,
         level: u32,
@@ -210,6 +228,8 @@ const ERROR_SERVICE_NEVER_STARTED: u32 = 1077;
 const ERROR_LOGON_FAILURE: u32 = 1326;
 
 const DELETE: u32 = 0x0001_0000;
+const READ_CONTROL: u32 = 0x0002_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
 const STANDARD_RIGHTS_READ: u32 = 0x0002_0000;
 const GENERIC_READ: u32 = 0x8000_0000;
 const SC_MANAGER_CONNECT: u32 = 0x0001;
@@ -867,6 +887,8 @@ fn own_service(c: &mut Checks) -> Result<(), u32> {
         c.ok(CloseServiceHandle(h) != 0, last_error().into())?;
 
         let access = SERVICE_QUERY_CONFIG
+            | READ_CONTROL
+            | WRITE_DAC
             | SERVICE_CHANGE_CONFIG
             | SERVICE_QUERY_STATUS
             | SERVICE_START
@@ -900,6 +922,7 @@ fn own_service(c: &mut Checks) -> Result<(), u32> {
         c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
 
         config2(c, h)?;
+        object_security(c, scm, h)?;
 
         // Its status: stopped, never started.
         let r =
@@ -1112,6 +1135,74 @@ fn config2(c: &mut Checks, h: Handle) -> Result<(), u32> {
         c.eq(a[0].kind.into(), SC_ACTION_RESTART.into())?;
         c.eq(a[0].delay.into(), 5000)?;
         c.eq(a[1].kind.into(), SC_ACTION_NONE.into())?;
+    }
+    Ok(())
+}
+
+const DACL_SECURITY_INFORMATION: u32 = 4;
+
+/// QueryServiceObjectSecurity and SetServiceObjectSecurity (Wine's
+/// service.c on Windows: a NULL buffer is ERROR_INSUFFICIENT_BUFFER with
+/// the size): a DACL that grants Everyone only SERVICE_QUERY_STATUS is
+/// the service's from then on (a new open for its configuration is
+/// refused), and the old one put back.
+fn object_security(c: &mut Checks, scm: Handle, h: Handle) -> Result<(), u32> {
+    let mut needed = 0u32;
+    let name = wide::<16>(SERVICE);
+    let mut old = [0u8; 1024];
+    // Everyone (S-1-1-0).
+    let everyone: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    let mut acl = [0u8; 64];
+    let mut sd = [0u64; 8];
+    let sd = sd.as_mut_ptr().cast::<u8>();
+    // SAFETY: plain calls with our buffers throughout.
+    unsafe {
+        clear_error();
+        let r =
+            QueryServiceObjectSecurity(h, DACL_SECURITY_INFORMATION, null_mut(), 0, &mut needed);
+        c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
+        c.ok(needed > 20 && needed as usize <= old.len(), needed.into())?;
+        let r = QueryServiceObjectSecurity(
+            h,
+            DACL_SECURITY_INFORMATION,
+            old.as_mut_ptr(),
+            needed,
+            &mut needed,
+        );
+        c.ok(r != 0, last_error().into())?;
+
+        c.ok(InitializeAcl(acl.as_mut_ptr(), 64, 2) != 0, last_error().into())?;
+        let r = AddAccessAllowedAce(acl.as_mut_ptr(), 2, SERVICE_QUERY_STATUS, everyone.as_ptr());
+        c.ok(r != 0, last_error().into())?;
+        c.ok(InitializeSecurityDescriptor(sd, 1) != 0, last_error().into())?;
+        c.ok(SetSecurityDescriptorDacl(sd, 1, acl.as_ptr(), 0) != 0, last_error().into())?;
+        let r = SetServiceObjectSecurity(h, DACL_SECURITY_INFORMATION, sd);
+        c.ok(r != 0, last_error().into())?;
+
+        let mut now = [0u8; 1024];
+        let r = QueryServiceObjectSecurity(
+            h,
+            DACL_SECURITY_INFORMATION,
+            now.as_mut_ptr(),
+            1024,
+            &mut needed,
+        );
+        c.ok(r != 0, last_error().into())?;
+        let (mut present, mut defaulted, mut dacl) = (0, 0, null());
+        let r = GetSecurityDescriptorDacl(now.as_ptr(), &mut present, &mut dacl, &mut defaulted);
+        c.ok(r != 0 && present != 0 && !dacl.is_null(), last_error().into())?;
+        // ACL: revision, padding, size, AceCount.
+        c.eq((*dacl.add(4)).into(), 1)?;
+
+        clear_error();
+        c.no_handle(OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_CONFIG), ERROR_ACCESS_DENIED)?;
+        let st = c.handle(OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_STATUS))?;
+        c.ok(CloseServiceHandle(st) != 0, last_error().into())?;
+
+        let r = SetServiceObjectSecurity(h, DACL_SECURITY_INFORMATION, old.as_ptr());
+        c.ok(r != 0, last_error().into())?;
+        let again = c.handle(OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_CONFIG))?;
+        c.ok(CloseServiceHandle(again) != 0, last_error().into())?;
     }
     Ok(())
 }

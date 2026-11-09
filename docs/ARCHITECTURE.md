@@ -2523,8 +2523,12 @@ impersonating thread's, as services.exe impersonates its RPC client).
   ERROR_INVALID_NAME), OpenServiceW/A, CreateServiceW/A (the password
   is not kept), CloseServiceHandle, DeleteService, StartServiceW/A,
   ControlService, QueryServiceStatus(Ex), QueryServiceConfigW/A,
-  EnumServicesStatusExW, ChangeServiceConfig2W/A and
-  QueryServiceConfig2W/A.
+  EnumServicesStatusExW, ChangeServiceConfig2W/A,
+  QueryServiceConfig2W/A, QueryServiceObjectSecurity and
+  SetServiceObjectSecurity (NtQuerySecurityObject and
+  NtSetSecurityObject on the service handle: a service object's new
+  descriptor is stored in its key's `Security\Security`, so later opens
+  are checked against it).
 - **Further configuration** (`nt/scm_config.rs`, ChangeServiceConfig2's
   levels): values of the service's key under Windows' names
   (Description, FailureActions with RebootMessage and FailureCommand,
