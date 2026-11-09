@@ -11,10 +11,16 @@
 //!
 //! Superblock: `GALAFS\0\x01`, version (u32), active area (u32),
 //! generation (u64), the disk's sectors (u64), CRC-32 of the above.
-//! Version 2 (new volumes) keeps the last CRASH_SECTORS sectors out of the
-//! areas for the crash record (`crate::crash`); version 1 volumes (all of
-//! the disk in the two areas) are still read as they are (ARCHITECTURE
-//! invariant 3).
+//! Version 2 keeps the last CRASH_SECTORS sectors out of the areas for the
+//! crash record (`crate::crash`). Version 3 (new volumes, D4: a
+//! disk-backed C:) makes the two areas small (`area_sectors_of`) and gives
+//! the rest of the disk, from the next 4 KiB boundary to the crash area,
+//! to a data area of 4 KiB clusters that hold files' pages (`data_area`;
+//! the log's Clusters records say which page is in which cluster). Version
+//! 1 and 2 volumes (no data area: files' contents are in the log) are still
+//! read as they are (ARCHITECTURE invariant 3); a kernel from before
+//! version 3 formats a version 3 disk, as one from before version 2 did a
+//! version 2 one.
 //!
 //! The rollback floor (R8, ARCHITECTURE "Chain of trust" step 6) is a block
 //! of its own at byte 64 of the superblock's sector, with its own magic,
@@ -34,8 +40,15 @@ pub const SECTOR: usize = 512;
 /// (1), so another version is not taken for this format (ARCHITECTURE
 /// invariant 3).
 const MAGIC: &[u8; 8] = b"GALAFS\0\x01";
-/// The layout's version: 2 since the crash area. Mounting reads 1 too.
-const VERSION: u32 = 2;
+/// The layout's version: 3 since the data area. Mounting reads 1 and 2
+/// too.
+const VERSION: u32 = 3;
+/// Sectors per cluster of the data area (4 KiB clusters).
+pub const CLUSTER_SECTORS: u64 = 8;
+/// A version 3 log area: 1/32 of the disk, between 1 MiB and 256 MiB
+/// (a quarter of the disk on disks too small for that).
+const MIN_AREA: u64 = 2048;
+const MAX_AREA: u64 = 512 * 1024;
 /// Sectors kept at the end of a version 2 disk for the crash record.
 pub const CRASH_SECTORS: u64 = 16;
 /// How much of an area mounting reads at a time.
@@ -174,7 +187,7 @@ impl<B: Blocks> Volume<B> {
         let crc = u32::from_le_bytes([s[32], s[33], s[34], s[35]]);
         let found = u32::from_le_bytes([s[8], s[9], s[10], s[11]]);
         let valid = &s[0..8] == MAGIC
-            && (found == 1 || found == VERSION)
+            && (1..=VERSION).contains(&found)
             && crc == log::crc32(0, &s[..32])
             && u64::from_le_bytes(s[24..32].try_into().unwrap_or([0; 8])) == sectors;
         let version = if valid { found } else { VERSION };
@@ -204,7 +217,27 @@ impl<B: Blocks> Volume<B> {
 
     /// Each area's sectors in layout `version` on a disk of `sectors`.
     fn area_sectors_of(version: u32, sectors: u64) -> u64 {
-        if version >= 2 { (sectors - 1 - CRASH_SECTORS) / 2 } else { (sectors - 1) / 2 }
+        match version {
+            1 => (sectors - 1) / 2,
+            2 => (sectors - 1 - CRASH_SECTORS) / 2,
+            _ => {
+                let usable = sectors - 1 - CRASH_SECTORS;
+                let area = (usable / 32).clamp(MIN_AREA, MAX_AREA);
+                if 4 * area > usable { usable / 4 } else { area }
+            }
+        }
+    }
+
+    /// The data area (version 3): its first sector (4 KiB aligned) and its
+    /// clusters.
+    pub fn data_area(&self) -> Option<(u64, u32)> {
+        if self.version < 3 {
+            return None;
+        }
+        let first = (1 + 2 * self.area_sectors).next_multiple_of(CLUSTER_SECTORS);
+        let end = self.dev.sectors() - CRASH_SECTORS;
+        let clusters = end.saturating_sub(first) / CLUSTER_SECTORS;
+        (clusters > 0).then(|| (first, u32::try_from(clusters).unwrap_or(u32::MAX)))
     }
 
     /// The crash record's sectors (first, count): version 2 volumes only.
@@ -457,7 +490,7 @@ mod tests {
 
     #[test]
     fn a_full_area_is_compacted_into_the_other() {
-        let (mut v, _) = Volume::mount(disk(41)).unwrap(); // areas of 20 sectors
+        let (mut v, _) = Volume::mount(disk(97)).unwrap(); // areas of 20 sectors
         let mut appended = 0;
         let full = loop {
             match v.append(&[write_op(appended, 1000)]) {
@@ -503,7 +536,7 @@ mod tests {
 
     #[test]
     fn a_too_large_snapshot_is_refused() {
-        let (mut v, _) = Volume::mount(disk(41)).unwrap();
+        let (mut v, _) = Volume::mount(disk(97)).unwrap();
         assert_eq!(v.compact(&[write_op(1, 30_000)]), Err(VolumeError::Full));
         let (_, m) = remount(v);
         assert_eq!(m, Mounted::Log(vec![]));
@@ -511,7 +544,7 @@ mod tests {
 
     #[test]
     fn new_volumes_keep_a_crash_area_and_version_1_volumes_still_mount() {
-        // A new volume: layout 2, the last CRASH_SECTORS sectors kept.
+        // A new volume: the last CRASH_SECTORS sectors kept.
         let (mut v, _) = Volume::mount(disk(200)).unwrap();
         assert_eq!(v.crash_area(), Some((200 - CRASH_SECTORS, CRASH_SECTORS)));
         v.append(&[write_op(1, 10)]).unwrap();
@@ -537,11 +570,27 @@ mod tests {
         let (v, m) = remount(old);
         assert_eq!(m, Mounted::Log(vec![write_op(2, 20)]));
         assert_eq!(v.crash_area(), None);
+        assert_eq!(v.data_area(), None);
+    }
+
+    #[test]
+    fn new_volumes_have_a_data_area_after_small_log_areas() {
+        // A small disk: areas of a quarter each, the rest is data.
+        let (v, _) = Volume::mount(disk(97)).unwrap();
+        assert_eq!(v.area_bytes(), 20 * SECTOR as u64);
+        // Data from sector 48 (41 rounded up to 8) to the crash area.
+        assert_eq!(v.data_area(), Some((48, (97 - 16 - 48) / 8)));
+        // 16 GiB: two 256 MiB areas (1/32 capped), the rest in clusters.
+        let sectors = 16u64 << 21;
+        let usable = sectors - 1 - CRASH_SECTORS;
+        assert_eq!(Volume::<MemDisk>::area_sectors_of(3, sectors), MAX_AREA.min(usable / 32));
+        // Version 2 volumes have none.
+        assert_eq!(Volume::<MemDisk>::area_sectors_of(2, 200), (200 - 1 - CRASH_SECTORS) / 2);
     }
 
     #[test]
     fn the_rollback_floor_is_kept_and_only_raised() {
-        let (mut v, _) = Volume::mount(disk(41)).unwrap();
+        let (mut v, _) = Volume::mount(disk(97)).unwrap();
         assert_eq!(v.floor(), Floor::default());
         let two = Floor { floor: 2, highest: 2 };
         assert_eq!(v.raise_floor(two).unwrap(), two);

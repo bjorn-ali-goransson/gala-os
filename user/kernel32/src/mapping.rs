@@ -727,26 +727,58 @@ pub(crate) fn unhandled_filter() -> usize {
     FILTER.load(core::sync::atomic::Ordering::Acquire)
 }
 
-/// The volume is in memory: report a fixed geometry (512-byte sectors, 4 KiB
-/// clusters) and 1 GiB free of 2 GiB.
-const CLUSTERS_FREE: u32 = 1 << 18;
-const CLUSTERS_TOTAL: u32 = 1 << 19;
+/// FILE_FS_FULL_SIZE_INFORMATION of the volume holding `path` (NULL: the
+/// current directory's): (total, caller-available, free) allocation
+/// units, sectors per unit, bytes per sector; or the error, set as
+/// GetLastError (opening the path: a missing directory fails as
+/// CreateFileW does, "" with ERROR_PATH_NOT_FOUND).
+fn volume_size(path: *const u16) -> Option<(u64, u64, u64, u32, u32)> {
+    let dot = [u16::from(b'.'), 0];
+    let path = if path.is_null() { dot.as_ptr() } else { path };
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let h = CreateFileW(
+        path,
+        0,
+        7,
+        core::ptr::null_mut(),
+        3,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        core::ptr::null_mut(),
+    );
+    if h == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let (mut iosb, mut info) = ([0usize; 2], [0u8; 32]);
+    // SAFETY: a 32-byte FILE_FS_FULL_SIZE_INFORMATION buffer (class 7).
+    let status = unsafe { NtQueryVolumeInformationFile(h, &mut iosb, info.as_mut_ptr(), 32, 7) };
+    CloseHandle(h);
+    if status != STATUS_SUCCESS {
+        return fail(status, None);
+    }
+    let u64_at = |at: usize| u64::from(u32_at(&info, at)) | u64::from(u32_at(&info, at + 4)) << 32;
+    Some((u64_at(0), u64_at(8), u64_at(16), u32_at(&info, 24), u32_at(&info, 28)))
+}
 
+/// GetDiskFreeSpaceW: the volume's geometry and cluster counts
+/// (FileFsFullSizeInformation of the root given, or of the current
+/// directory's volume for NULL); counts past 32 bits are capped.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDiskFreeSpaceW(
-    _root: *const u16,
+    root: *const u16,
     sectors_per_cluster: *mut u32,
     bytes_per_sector: *mut u32,
     free_clusters: *mut u32,
     total_clusters: *mut u32,
 ) -> Bool {
+    let Some((total, _, free, spc, bps)) = volume_size(root) else { return FALSE };
+    let cap = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
     // SAFETY: the caller's optional output pointers.
     unsafe {
         for (p, v) in [
-            (sectors_per_cluster, 8),
-            (bytes_per_sector, 512),
-            (free_clusters, CLUSTERS_FREE),
-            (total_clusters, CLUSTERS_TOTAL),
+            (sectors_per_cluster, spc),
+            (bytes_per_sector, bps),
+            (free_clusters, cap(free)),
+            (total_clusters, cap(total)),
         ] {
             if !p.is_null() {
                 *p = v;
@@ -756,35 +788,46 @@ pub extern "system" fn GetDiskFreeSpaceW(
     TRUE
 }
 
-/// GetDiskFreeSpaceA: GetDiskFreeSpaceW (the root's name is not used).
+/// GetDiskFreeSpaceA: GetDiskFreeSpaceW of the root converted to UTF-16.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDiskFreeSpaceA(
-    _root: *const u8,
+    root: *const u8,
     sectors_per_cluster: *mut u32,
     bytes_per_sector: *mut u32,
     free_clusters: *mut u32,
     total_clusters: *mut u32,
 ) -> Bool {
-    GetDiskFreeSpaceW(
-        core::ptr::null(),
-        sectors_per_cluster,
-        bytes_per_sector,
-        free_clusters,
-        total_clusters,
-    )
+    let mut wroot = [0u16; 261];
+    let root = if root.is_null() {
+        core::ptr::null()
+    } else {
+        match ansi_to_wide(root, &mut wroot[..260]) {
+            Some(n) => {
+                wroot[n] = 0;
+                wroot.as_ptr()
+            }
+            None => return fail_with(ERROR_INVALID_PARAMETER, FALSE),
+        }
+    };
+    GetDiskFreeSpaceW(root, sectors_per_cluster, bytes_per_sector, free_clusters, total_clusters)
 }
 
+/// GetDiskFreeSpaceExW: bytes available to the caller, total and free on
+/// the volume holding `directory` (any directory of it; NULL: the current
+/// directory's), from FileFsFullSizeInformation. No quotas: what is
+/// available to the caller is what is free.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetDiskFreeSpaceExW(
-    _directory: *const u16,
+    directory: *const u16,
     available: *mut u64,
     total: *mut u64,
     free: *mut u64,
 ) -> Bool {
-    let (f, t) = (u64::from(CLUSTERS_FREE) * 4096, u64::from(CLUSTERS_TOTAL) * 4096);
+    let Some((t, a, f, spc, bps)) = volume_size(directory) else { return FALSE };
+    let unit = u64::from(spc) * u64::from(bps);
     // SAFETY: the caller's optional output pointers.
     unsafe {
-        for (p, v) in [(available, f), (total, t), (free, f)] {
+        for (p, v) in [(available, a * unit), (total, t * unit), (free, f * unit)] {
             if !p.is_null() {
                 core::ptr::write_unaligned(p, v);
             }

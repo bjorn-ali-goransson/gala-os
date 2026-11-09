@@ -5550,10 +5550,12 @@ expects.
 
 ## Disk
 
-A virtio-blk disk, and with the boot option `persist` the changes to C:
-and to the registry kept on it across reboots. Three layers (named D1,
-D2, D3 in docs/SECURITY.md): the device, C: kept as a change log, the
-registry kept through a file on C:. gala-um has no disk.
+A virtio-blk disk, and with the boot option `persist` C: on it: the
+changes to C: and to the registry kept across reboots, and files'
+contents in the disk's data area rather than in memory. Four layers
+(D1-D3 named in docs/SECURITY.md): the device (D1), C: kept as a change
+log (D2), the registry kept through a file on C: (D3), files' pages in
+clusters of a data area, a disk-backed C: (D4). gala-um has no disk.
 
 ### The device
 
@@ -5614,10 +5616,12 @@ registry kept through a file on C:. gala-um has no disk.
 ### C: kept on the disk
 
 With `persist`, the disk keeps what programs change on C: (the whole
-disk; no partitions). The ramfs stays the working copy; the disk holds
-a log of the changes since the boot's files were laid down, replayed
-over them at the next boot. Files therefore still live in memory, and
-the disk is only written (never read) while running.
+disk; no partitions). The ramfs stays the tree of names and attributes;
+the disk holds a log of the changes since the boot's files were laid
+down, replayed over them at the next boot. On a volume of layout 3 (every
+new one) files' pages live in the data area ("A disk-backed C:" below);
+on an older layout 1 or 2 volume they live in memory and the log
+carries their data (Write records).
 
 - `fs::log`: the changes as records keyed by path (`\a\b`; node ids do
   not survive a reboot): Create (directory or file, attributes, times; a
@@ -5630,9 +5634,12 @@ the disk is only written (never read) while running.
   name: a first name or a hard link), Delete (of a name: a directory
   with everything below it; a file with other names lives on there),
   and, from version 3, SetMode, Symlink (target, creation time) and
-  Link (an existing path, the new name). Each record carries the log's
-  generation, its format version and a CRC-32; the first record that
-  does not check out, or is of a newer version, ends the log.
+  Link (an existing path, the new name), and, from version 4, Clusters
+  (a file's size, write time and the runs of pages now in clusters of the
+  data area: page, cluster, count; at most 4096 runs a record). Each
+  record carries the log's generation, its format version and a CRC-32;
+  the first record that does not check out, or is of a newer version,
+  ends the log.
 - `RamFs` (`fs::ramfs`) records while `recording` is on: each mutator
   (create, write, set_size, set_basic, set_security, set_mode, symlink,
   link, rename, unlink, and removal when the last handle of a
@@ -5650,8 +5657,14 @@ the disk is only written (never read) while running.
 - `fs::volume` (over a `Blocks` trait, so host tests run it on a disk
   in memory, crashes included): sector 0 is the superblock (magic,
   active area, generation, the disk's size, CRC); the rest is two equal
-  areas. The active area holds the log of the superblock's generation
-  from its start. `append` writes after the last record (rewriting the
+  areas (layout 1: the whole disk; layout 2: less the crash record's
+  last 16 sectors; layout 3: two areas of 1/32 of the disk each, between
+  1 MiB and 256 MiB, a quarter each on disks too small for that, then the
+  data area from the next 4 KiB boundary up to the crash record). The
+  active area holds the log of the superblock's generation from its
+  start. Fresh disks get layout 3; layout 1 and 2 disks mount as they
+  are; a kernel from before layout 3 formats a layout 3 disk (as one from
+  before layout 2 did a layout 2 one). `append` writes after the last record (rewriting the
   partial last sector) and flushes. When the area is full, `compact`
   writes a snapshot with the next generation into the other area,
   flushes, and only then switches the superblock. **Invariant: a crash
@@ -5678,11 +5691,103 @@ the disk is only written (never read) while running.
   compactions). `sqllocaldb_persist` (pending: needs the LocalDB
   download and 3 GiB) keeps a SQL Server LocalDB database across a
   reboot; its page writes make about 64 MB of log for one session.
-- Limits and TODO: all kept files are in memory (and are read from the
-  disk only at boot); a snapshot is built in memory under the file
-  system's lock (twice the kept data, briefly); writes through mapped
-  views of a file (data sections) are not recorded; one change log for
-  the whole of C: (no second volume).
+- Limits and TODO: a snapshot is built in memory under the file system's
+  lock (on layout 1 and 2 volumes all kept data, twice, briefly; on
+  layout 3 the names, runs and the few pages not in clusters); one change
+  log for the whole of C: (no second volume). On layout 1 and 2 volumes
+  all kept files are in memory and writes through mapped views of a file
+  are not recorded.
+
+### A disk-backed C: (D4)
+
+On a layout 3 volume (`fs::volume::data_area`) the disk past the log
+areas is a data area of 4 KiB clusters, and files' pages live there:
+the machine's memory holds the tree and a cache of pages, so C: can hold
+more than the machine's memory (Office's 5.4 GB on a VM of about 1.5
+GiB: `office_install`, a 16 GiB disk).
+
+- **Which files**: files of the root's tree (C:), not anonymous ones
+  (memfd) and not those of a Linux volume (`/run`: a tmpfs), once the
+  area is attached (`RamFs::attach_area`, by `persist::mount` after the
+  replay). Boot modules stay where they are (their unchanged pages read
+  from the module); a page of one that changes gets a cluster.
+- **Per page** (`ramfs::Slot`, beside the file's pages): its cluster, if
+  any; `dirty` (changed in memory since written); `stored` (the cluster
+  holds its data). A page is in memory, or on the disk only (`stored`,
+  not in memory), or a hole (no cluster: the module's bytes or zeros).
+- **Allocation** (`fs::clusters`, a bitmap in memory, rebuilt at each
+  mount from the replayed files' clusters: nothing on the disk to keep
+  consistent, a crash leaks nothing). A write takes a cluster for each
+  page it touches that has none, before changing anything: if there are
+  too few, the whole write fails with STATUS_DISK_FULL (ERROR_DISK_FULL),
+  checked first for the whole of an NtWriteFile (`RamFs::room_for`), as
+  NTFS fails a write it cannot allocate. Rewriting allocated pages needs
+  no cluster. Extending a file (SetEndOfFile, a write past the end)
+  allocates nothing for the gap, which reads as zeros: free space drops
+  as pages are written (NTFS allocates a non-sparse file's extension at
+  once and fails it then: a divergence, see below).
+- **Records**: a write records Clusters (the size, the time, the runs it
+  newly allocated; consecutive ones for a file merge, so one 1 MiB
+  WriteFile is one record) instead of Write; truncation and deletion
+  record SetSize and Delete as before. A snapshot names stored, clean
+  pages by their runs and carries the others (a module's bytes, a page
+  changed since its last write) as Write records.
+- **Sync** (`persist::sync`, at the end of every system call): copies of
+  dirty pages are written to their clusters (consecutive clusters in one
+  request), the remaining dirty pages and the records are taken in one
+  hold of the file system's lock and written, pages first; then the
+  records are appended; then the clusters those records gave up are
+  freed. **Invariants**: a record that names a cluster is on the disk
+  only after the cluster holds the page's data; a cluster given up is
+  reused only after the record giving it up is on the disk (until then
+  it is `pending`): a crash replays either the old owner or nothing.
+- **Leaving memory and coming back**: pages written are queued oldest
+  first; while free memory is below a quarter (at least 64 MiB) the sync,
+  and a page read about to allocate (`persist::relieve`, only when no
+  sync runs: a sync's copies must be on the disk before their pages
+  may go), let them go, except those of files a section maps. A call
+  that needs a page on the disk only fails with `FsError::NotResident`
+  and names it (`take_page_in`); `nt::file::with_pages` reads the
+  cluster with the file system released and installs it (`fill`) only
+  if nothing changed meanwhile (the node's `serial` and `epoch`: a
+  reused node id, a page let go or a cluster given up), then repeats the
+  call. Reads, writes into part of such a page, growing a file past a
+  partial last page (its cluster may hold bytes cut off earlier; `fill`
+  clears what is past the end) and mapping a page (`section::frame`, with
+  no lock held) go through it. A replay never needs a page: the disk
+  held each page as its record found it.
+- **Mapped pages**: a writable view may change any page in memory, so
+  its unmap marks them dirty (a page made from a hole then gets a
+  cluster at the sync, recorded there).
+- **Free space** (`file::volume_information`, FileFsSizeInformation and
+  FileFsFullSizeInformation, so kernel32's GetDiskFreeSpace(Ex) and every
+  32-bit caller): the area's clusters and free ones (4 KiB clusters, 8
+  sectors of 512 bytes); without a data area, the machine's memory as
+  before.
+- **Observability**: `persist: data area of N MiB at sector S, K KiB in
+  use` at mount (and a warning naming clusters the log named twice or out
+  of range: those pages read as zeros); at the end of a run `persist:
+  data area ..., N MiB free; pages written, read back, let go; dirty
+  pages that found no cluster, clusters lost`; warnings for a failed
+  write or flush of the area (its records wait for the next sync), a
+  cluster that cannot be read (the call fails with STATUS_IO_DEVICE_ERROR,
+  ERROR_IO_DEVICE), dirty pages left without a cluster. xtask attaches
+  the disk with `werror=report`: a host whose disk fills under the sparse
+  image fails the guest's writes (logged) instead of pausing the VM.
+- Tests: `volume_test` (a 640 MiB file on a 1 GiB disk in a 512 MiB VM:
+  written, read back, the disk filled, ERROR_DISK_FULL, free space back
+  after deleting; GetDiskFreeSpace(Ex)W and GetVolumeInformationW's
+  documented behaviour), `persist_test` (now on layout 3); host tests of
+  the allocator, the Clusters record, a file living in clusters and
+  leaving memory, a full area, a shrink and a later growth, a snapshot
+  replayed onto a new boot, a log of appends and a truncation replayed,
+  pages changed through a writable mapping.
+- Limits and TODO: extension allocates nothing (above); no quotas (what
+  the caller may use is what is free); the cache's policy is oldest
+  written or read first, nothing smarter; one request on the device at a
+  time (as D1); pages of a file a section maps stay in memory while it is
+  mapped; a page whose cluster cannot be read fails the call (no retry
+  beyond the device's own).
 
 ### The registry kept
 
@@ -12181,8 +12286,8 @@ New code follows them; old code is brought in line (ROADMAP R1).
    (what a kernel handover or a device reset needs).
 3. **Everything stored or shared has a version and an upgrade path**:
    the disk format (log records carry a format version at byte 17,
-   VERSION 2; the superblock's magic ends in its format version,
-   `GALAFS\0\x01`), the registry journal, the private `Gala*` system
+   VERSION 4; the superblock's magic ends in its format version,
+   `GALAFS\0\x01`, and its layout version follows it, 3), the registry journal, the private `Gala*` system
    calls' records (window records, console records...),
    KUSER_SHARED_DATA and other shared sections, the window-manager
    protocol between user32 and the desktop, the handover record. A

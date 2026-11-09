@@ -207,6 +207,13 @@ impl<'a> FrameAllocator<'a> {
         if count == 0 || !align.is_power_of_two() {
             return None;
         }
+        // One frame: the word search from the hint. The scan below starts
+        // at frame 0 and tests frame by frame, which with memory full of
+        // single-page heap allocations (file pages) cost a scan of every
+        // used frame per page.
+        if count == 1 && align == 1 {
+            return self.allocate();
+        }
         let mut start: u64 = 0;
         while start.checked_add(count)? <= self.frame_count {
             match (start..start + count).find(|&n| self.is_used(n)) {

@@ -186,7 +186,7 @@ alone prints the usage.
 |---|---|
 | `build` | kernel, DLLs, programs, `target/<profile>/gala-os.iso` |
 | `run [--headless]` | build, then boot in QEMU (UEFI) with the serial log on stdio |
-| `test` | `stub-audit`, host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` |
+| `test` | `stub-audit`, host unit tests, `alloc-audit`, `um-test`, `replay-test`, then every boot scenario not in `PENDING` or `MANUAL` |
 | `boot-test [filter]` | boot scenarios only; a filter matches names containing it, `name$` exactly that one, `a,b,c` exactly those |
 | `export-tests` | copy the built test programs and DLLs to `user/bin/`, then remake derived test data |
 | `iso [--name N] [--scenario S] [--file PATH[=DIR]]... [cmdline...]` | a bootable image ("Bootable images and USB sticks") |
@@ -349,6 +349,7 @@ Limine into `target/`. The `handover_next` kernel is built into
 | `XTASK_REPEAT=n` | boot one scenario's image n times ("Flaky tests and repeats") |
 | `XTASK_REPEAT_JOBS=n` | VMs at once for repeats (default one per two host CPUs) |
 | `XTASK_TIMEOUT=<s>` | every scenario's time limit (a hang's state dump without the wait) |
+| `XTASK_LOW_DISK=1` | start a disk scenario although the host has less free space than its image may take (`DiskScenario::host_mib`); its guest logs failed disk writes once the host's disk is full |
 | `XTASK_RECORD=1` | record every boot's outside inputs ("Clock control, record/replay") |
 | `XTASK_OTEL=1` | write OTLP files for every boot |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | where `otel` and `XTASK_OTEL=1` post |
@@ -383,11 +384,12 @@ xtask that change how a scenario boots:
 | `FULL_SYSTEM_SCENARIOS` | scenarios that also ship the whole 64-bit system a full image has (`system_modules`): installers whose product's programs import what they will (`office_install`) |
 | `WRITABLE_TREES` | directory modules programs may write to (`sql/data`, `fzs`, `ftp`) |
 | `PENDING` | still being brought up: `boot-test <name>` runs it, `test` and CI do not |
+| `MANUAL` | run by hand only, by design (too long or too large for every change's gate: `office_install`): `boot-test <name>` runs it, `test` and CI never do |
 | `SLOW_SCENARIOS` | 300 s instead of `BOOT_TEST_TIMEOUT` (120 s) |
 | `UEFI_SCENARIOS` | boot by UEFI (the rest by BIOS) |
 | `NET_SCENARIOS` | a network card and a host-side client ("Network tests") |
 | `HOST_PAGE_SCENARIOS` | a network card whose 10.0.2.100:80 is a page served from the host (`xtask serve-page`; "Network tests") |
-| `DISK_SCENARIOS` | a virtio-blk disk ("Disk tests") |
+| `DISK_SCENARIOS` | a virtio-blk disk, sparse, with the most it may take on the host ("Disk tests") |
 | `GPU_SCENARIOS` | a virtio-gpu screen ("GPU tests") |
 | `SCREEN_SCENARIOS` | pixel checks through the QEMU monitor ("Screenshots") |
 | `SINGLE_THREAD_TCG` | `-accel tcg,thread=single` without KVM ("Known intermittent") |
@@ -483,8 +485,8 @@ or `HOST_PAGE_SCENARIOS` (`-nic none` otherwise).
 ### Disk tests
 
 VMs have no disk unless the scenario is in `DISK_SCENARIOS` (name, size,
-what xtask writes into the fresh raw image, what the image must hold
-afterwards).
+what it may take on the host, what xtask writes into the fresh raw
+image, what the image must hold afterwards).
 
 - The image is `target/.../<scenario>.disk.img` next to the ISO,
   attached as a legacy virtio-blk device; such scenarios boot alone and
@@ -495,8 +497,20 @@ afterwards).
   log must have; logs kept as `<iso>.boot<n>.serial.log`): that is how a
   test checks what survives a reboot (`persist_test`, which tells the
   boots apart by what it finds on C:).
-- `persist` keeps C: on the disk; without it a disk is left alone (the
-  raw disk tests).
+- `persist` keeps C: on the disk, files' contents in its data area (a
+  disk-backed C:, ARCHITECTURE "A disk-backed C:"): a scenario that
+  writes more than the VM's memory (`volume_test`, `office_install`)
+  needs it; without it a disk is left alone (the raw disk tests).
+- The image is sparse (`set_len`): only what the guest writes takes room
+  on the host. xtask refuses to start the scenario with less free than
+  `host_mib` (the image's size when None) plus 300 MiB, naming the
+  amount (`XTASK_LOW_DISK=1` starts it anyway), and deletes the image
+  after a pass; a failed run's is kept and xtask prints what it takes on
+  the host (`xtask: kept ... (N MiB on the host; delete it when done)`).
+- The drive has `werror=report,rerror=report`: a host disk that fills
+  under the image fails the guest's request (`persist: the disk failed a
+  write ...` in the serial log), where QEMU's default would pause the VM
+  until the scenario timed out.
 - A slow disk: `failpoint=disk_io:delay:<ms>` (with `persist`).
 
 ### GPU tests
@@ -3305,6 +3319,21 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### Kernel code
 
+- **A file's data may be on the disk only** (a disk-backed C:, ARCHITECTURE
+  "A disk-backed C:"): `RamFs::read`, `write`, `set_size` and
+  `page_address` can fail with `FsError::NotResident`, and only a caller
+  outside the file system's lock can read the page. Go through
+  `nt::file::read`/`write`/`set_size`/`page_address` or
+  `nt::file::with_pages` (lx: `with_pages_errno`), never `with_fs(|fs|
+  fs.read(...))`; a closure given to `with_pages` runs again after each
+  page is read, so it must be safe to repeat.
+- **Single-frame allocations are the common case**: every file page and
+  every heap page is one frame. `FrameAllocator::allocate_contiguous`
+  scans frame by frame from frame 0, so with memory full of file pages
+  each allocation cost a scan of the used frames (writing 640 MiB took
+  minutes, 92% of samples there); one frame goes through `allocate`'s
+  word search from a hint. Profile (`XTASK_EVENTS=sample`, `cargo xtask
+  profile`) before guessing at a slow file workload.
 - **The seams**: core code (`net/`, and anything a second personality
   shares) reaches threads, waits and time through `crate::runtime`, not
   `crate::nt::platform` (the NT layer's seam) and not

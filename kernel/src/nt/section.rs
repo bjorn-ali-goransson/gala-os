@@ -561,7 +561,7 @@ impl Section {
             }
             // File pages are whole-page heap allocations, which live in the
             // HHDM: their physical address is their offset in it.
-            let addr = super::file::with_fs(|fs| fs.page_address(f.node, index))?;
+            let addr = super::file::page_address(f.node, index)?;
             return Some(platform::frame_of_heap_page(addr));
         }
         let mut pages = self.pages.lock();

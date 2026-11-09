@@ -490,6 +490,9 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
     #[cfg(not(feature = "hosted"))]
     input::log_stats();
     info!("nt: {}", nt::stats::Summary);
+    if nt::persist::has_area() {
+        info!("persist: {}", nt::persist::Summary);
+    }
     info!("quota: {}", nt::quota::peaks());
     let (shootdowns, ipis) = arch::smp::flush_stats();
     let heap = mm::heap::stats();
