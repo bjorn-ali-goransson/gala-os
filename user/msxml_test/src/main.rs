@@ -553,7 +553,8 @@ fn defaults(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     let unknown = Wide::new("askldhfaklsdf");
     let mut v = Variant::i4(7);
     c.hr(call!(doc, GET_PROPERTY, fn(Bstr, *mut Variant) -> HResult, unknown.0, &mut v), E_FAIL)?;
-    c.eq(u64::from(v.vt), u64::from(VT_I4))?;
+    // Windows clears the output first (VT_EMPTY), the CI runner's answer.
+    c.eq(u64::from(v.vt), 0)?;
     let language = Wide::new("SelectionLanguage");
     c.hr(
         call!(doc, GET_PROPERTY, fn(Bstr, *mut Variant) -> HResult, language.0, null_mut()),

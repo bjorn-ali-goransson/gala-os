@@ -159,6 +159,16 @@ pub const GALA_CLIPBOARD_GET: u32 = 0x7fc4;
 pub const GALA_CLIPBOARD_INFO: u32 = 0x7fc5;
 pub const GALA_CLIPBOARD_FORMATS: u32 = 0x7fc6;
 pub const GALA_CLIPBOARD_LISTENER: u32 = 0x7fc7;
+/// The service control manager (nt::scm, scm_calls): OpenSCManager,
+/// OpenService, CreateService, the status and configuration queries,
+/// EnumServicesStatusEx, CloseServiceHandle/DeleteService/StartService/
+/// ControlService, for advapi32.
+pub const GALA_SCM_OPEN: u32 = 0x7fd0;
+pub const GALA_SERVICE_OPEN: u32 = 0x7fd1;
+pub const GALA_SERVICE_CREATE: u32 = 0x7fd2;
+pub const GALA_SERVICE_QUERY: u32 = 0x7fd3;
+pub const GALA_SERVICE_ENUM: u32 = 0x7fd4;
+pub const GALA_SERVICE_CONTROL: u32 = 0x7fd5;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -449,6 +459,12 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (GALA_CLIPBOARD_INFO, "GalaClipboardInfo", 1, clipboard_calls::gala_clipboard_info),
     (GALA_CLIPBOARD_FORMATS, "GalaClipboardFormats", 3, clipboard_calls::gala_clipboard_formats),
     (GALA_CLIPBOARD_LISTENER, "GalaClipboardListener", 2, clipboard_calls::gala_clipboard_listener),
+    (GALA_SCM_OPEN, "GalaScmOpen", 2, scm_calls::gala_scm_open),
+    (GALA_SERVICE_OPEN, "GalaServiceOpen", 5, scm_calls::gala_service_open),
+    (GALA_SERVICE_CREATE, "GalaServiceCreate", 5, scm_calls::gala_service_create),
+    (GALA_SERVICE_QUERY, "GalaServiceQuery", 5, scm_calls::gala_service_query),
+    (GALA_SERVICE_ENUM, "GalaServiceEnum", 6, scm_calls::gala_service_enum),
+    (GALA_SERVICE_CONTROL, "GalaServiceControl", 4, scm_calls::gala_service_control),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -6983,3 +6999,6 @@ mod session_calls;
 
 #[path = "clipboard_calls.rs"]
 mod clipboard_calls;
+
+#[path = "scm_calls.rs"]
+mod scm_calls;

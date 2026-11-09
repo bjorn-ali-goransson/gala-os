@@ -214,6 +214,7 @@ has a section under "Open items".
 | W3 | FileZilla | in progress | 3.71.0: connects to FileZilla Server (FTP over TLS) and to sshd (SFTP), driven by pixels and by FlaUI; leftovers |
 | W4 | The Windows look | in progress | steps 1-2 done; step 3 (themes) next |
 | SH | The shell in user mode | planned | taskbar, start menu and wallpaper out of the kernel; the compositor later (RS B3a) |
+| SM | Start menu: default apps and install-on-click | next (the owner) | see "SM. The start menu's apps" below |
 | AI | An AI-enabled start menu | planned | aichat through `gala install`; needs crypt32's ROOT store (TLS) and SH |
 | UIA | UI Automation and windows across processes | in progress | `uia_test`, `flaui_test`, `windows_across_test`, `filezilla_flaui`; ARCHITECTURE "UI Automation" |
 | SD | Server and desktop workloads kept apart | in progress | one kernel: `profile=server`, CLI parity, bare desktops done |
@@ -673,6 +674,35 @@ Windows' metrics (`gdi32_test`).
    (SH's step 1 needs it); the shell itself leaves the kernel in item SH.
 
 **Design**: ARCHITECTURE "Windows on the screen".
+
+### SM. The start menu's apps
+
+**Goal** (the owner): the start menu offers what a fresh Windows does
+(the Command Prompt and gala's other default programs) and, beside them,
+apps that are not installed yet: a click installs them through
+`gala install` (winget manifests, item PK) and the tile then starts the
+installed program. The first: Microsoft Office (`Microsoft.Office`, the
+Office Deployment Tool: item OF), FileZilla (`TimKosse.FileZilla.Client`),
+.NET (`Microsoft.DotNet.SDK.9`), Python (`Python.Python.3.13`), Chromium
+(`Hibbiki.Chromium`), Git (`Git.Git`), 7-Zip (`7zip.7zip`).
+
+**Next** (each test first: the desktop's host tests, a screen scenario,
+a screenshot):
+1. Default apps always listed: Command Prompt
+   (`C:\Windows\System32\cmd.exe`) and gala's own programs there.
+2. Install-on-click tiles: a catalog entry is a name, a winget id and
+   where its program lands; not yet installed it shows with a download
+   mark, and a click starts `gala install <id>` in a console window
+   (its progress and errors in view, recorded in the event stream);
+   once the program exists the tile starts it. Installs that fail on
+   gala (Office until OF is done, an installer needing elevation without
+   UAC's prompt) fail in that window with `gala install`'s own message.
+3. Then the Windows way of listing installed apps: the start menu reads
+   the shortcuts under the Start Menu\Programs folders (all users and
+   the user's, `.lnk` per [MS-SHLLINK]) that installers create, so
+   anything installed appears without a catalog entry; the catalog then
+   only names what can be installed. With SH, all of this moves to
+   `shasha.exe`.
 
 ### SH. The shell in user mode
 
@@ -1198,7 +1228,8 @@ samples).
    ping late); the on_device_model utility's delay import of `dxgi.dll`
    (G0). After it:
    what `tools/import_survey.py` still lists (the rest of the delay imports:
-   advapi32's services and ImpersonateAnonymousToken, iphlpapi,
+   advapi32's service functions beyond the SCM's queries (svc_test) and
+   ImpersonateAnonymousToken, iphlpapi,
    wintrust's catalogs, dbghelp's stack walking, pdh, winhttp's proxy
    resolver, oleacc; the static imports that are still `gala_stubs`:
    crypt32, kernel32's comm and locale formatting); GetAdaptersAddresses
@@ -1472,24 +1503,41 @@ need gala's.
      an earlier catch had linked an unwound frame back and the
      registration list looped on itself, so this throw found no handler:
      the crash report's SEH list showed it; ARCHITECTURE "WOW64",
-     `wow64_seh_test`). Where the run ends now: the elevated copy (pid 12)
-     delay-loads advapi32's OpenSCManagerW (the service control manager:
-     gala's advapi32 has only ledger stubs for the service functions,
-     which GetProcAddress does not return), the delay-load helper raises
-     0xc06d007f (crash report: `delay load of ADVAPI32.dll!OpenSCManagerW`;
-     ledger `advapi32.dll!OpenSCManagerW` missing export) and both copies
-     end with it. ODT has written no log yet (`dump=C:/gala/odtlog` finds
-     no directory: it creates its log later).
+     `wow64_seh_test`). The elevated copy (pid 12) then delay-loads
+     advapi32's OpenSCManagerW (done: gala's service control manager,
+     in the kernel over the registry's Services key, the client
+     functions in advapi32 for both widths; `svc_test`,
+     `wow64_svc_test`; ARCHITECTURE "The service control manager"):
+     it connects (granted 0x2000b: connect, create service and lock, with
+     READ_CONTROL) and opens `OfficeSvc` twice, ERROR_SERVICE_DOES_NOT_EXIST
+     as on a machine without Office (`scm:` lines). Where the run ends
+     now: setup.exe asks WinRT for an activation factory
+     (RoGetActivationFactory, by C++/WinRT: `combase.dll` is a missing
+     dll, then its fallback loads `windows.management.deployment.dll`,
+     `windows.management.dll` and `windows.dll` by the class's name, all
+     missing: the class is presumably
+     Windows.Management.Deployment.PackageManager, looking for an
+     installed Store/MSIX Office), gets CLASS_E_CLASSNOTAVAILABLE and
+     throws `winrt::hresult_class_not_available` (HRESULT 0x80040111 in
+     the crash report's object) that nothing catches: both copies end
+     with status 3 (crash report: the C++ throw at kernel32.dll+0x24859;
+     ledger `setup.exe!RoGetActivationFactory` and
+     `setup.exe!RoOriginateLanguageException` missing exports, FormatMessage
+     of 0x80040111 unsupported). ODT has written no log yet
+     (`dump=C:/gala/odtlog` finds no directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: the service control manager
-     for both widths (OpenSCManagerW, then what setup.exe asks of it:
-     presumably OpenServiceW for Click-to-Run's ClickToRunSvc,
-     ERROR_SERVICE_DOES_NOT_EXIST on a machine without Office; test first
-     with Wine's dlls/advapi32/tests/service.c expectations), then what the
+     Next, in the order the run reaches them: combase.dll for both
+     widths (HSTRINGs, RoGetActivationFactory/RoActivateInstance from an
+     activatable-class registration, RoOriginateLanguageException; test
+     first, expectations from Windows and Wine's combase tests) and
+     Windows.Management.Deployment.PackageManager's queries answering "no
+     packages" (as a clean machine without Store Office), then what the
      run reaches after it (its log in `target/failed/office_install.dump/`
-     once it writes one); gdiplus (setup.exe's error and progress UI),
+     once it writes one); starting a service (Click-to-Run's
+     ClickToRunSvc, once the installer creates it: the SCM answers
+     ERROR_NOT_SUPPORTED, recorded); gdiplus (setup.exe's error and progress UI),
      HKCU from the caller's token, the TLS handshake from 32-bit
      (schannel.dll has no i686 build: secur32's x86 loads it on first
      use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for

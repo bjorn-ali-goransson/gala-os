@@ -537,6 +537,10 @@ pub enum ObjectBody {
     WindowStation(super::winsta::WindowStation),
     /// A desktop of a window station (nt::winsta).
     Desktop(super::winsta::Desktop),
+    /// A connection to the service control manager (nt::scm).
+    ScManager(super::scm::ScManager),
+    /// A service handle (nt::scm).
+    Service(super::scm::ServiceObject),
 }
 
 /// Where a named object lives in the namespace.
@@ -670,6 +674,8 @@ impl KObject {
             ObjectBody::Token(_) => "Token",
             ObjectBody::WindowStation(_) => "WindowStation",
             ObjectBody::Desktop(_) => "Desktop",
+            ObjectBody::ScManager(_) => "ScManager",
+            ObjectBody::Service(_) => "Service",
         }
     }
 
@@ -718,7 +724,9 @@ impl KObject {
             | ObjectBody::KeyedEvent(_)
             | ObjectBody::Token(_)
             | ObjectBody::WindowStation(_)
-            | ObjectBody::Desktop(_) => None,
+            | ObjectBody::Desktop(_)
+            | ObjectBody::ScManager(_)
+            | ObjectBody::Service(_) => None,
         }
     }
 
@@ -751,6 +759,8 @@ impl KObject {
             ObjectBody::Token(_) => super::token::TOKEN_MAPPING,
             ObjectBody::WindowStation(_) => super::winsta::WINSTA_MAPPING,
             ObjectBody::Desktop(_) => super::winsta::DESKTOP_MAPPING,
+            ObjectBody::ScManager(_) => super::scm::SCM_MAPPING,
+            ObjectBody::Service(_) => super::scm::SERVICE_MAPPING,
             ObjectBody::ConsoleInput | ObjectBody::ConsoleOutput => GenericMapping {
                 read: READ_CONTROL | SYNCHRONIZE | 0x89,
                 write: READ_CONTROL | SYNCHRONIZE | 0x116,

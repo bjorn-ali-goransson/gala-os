@@ -833,6 +833,10 @@ fn check_object(
         ObjectBody::WindowStation(_) | ObjectBody::Desktop(_) => {
             return Err(refuse("a window station or desktop handle"));
         }
+        // The service control manager's handles are not carried yet.
+        ObjectBody::ScManager(_) | ObjectBody::Service(_) => {
+            return Err(refuse("a service control manager handle"));
+        }
         ObjectBody::Directory(_) | ObjectBody::SymbolicLink(_) => {
             return Err(refuse("an object directory or link handle"));
         }

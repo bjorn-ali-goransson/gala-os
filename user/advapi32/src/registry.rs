@@ -178,19 +178,19 @@ fn error(status: u32) -> i32 {
 // ---- Memory and strings ----
 
 /// A LocalAlloc'd buffer, freed when dropped.
-struct Mem {
-    ptr: *mut u8,
-    len: usize,
+pub(crate) struct Mem {
+    pub(crate) ptr: *mut u8,
+    pub(crate) len: usize,
 }
 
 impl Mem {
-    fn new(len: usize) -> Result<Mem, i32> {
+    pub(crate) fn new(len: usize) -> Result<Mem, i32> {
         // SAFETY: plain call; LMEM_ZEROINIT.
         let ptr = unsafe { LocalAlloc(0x40, len.max(1)) };
         if ptr.is_null() { Err(ERROR_NOT_ENOUGH_MEMORY) } else { Ok(Mem { ptr, len }) }
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: our allocation of `len` bytes.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -222,19 +222,19 @@ impl Drop for Mem {
 }
 
 /// UTF-16 text owned in local memory.
-struct WStr {
+pub(crate) struct WStr {
     mem: Mem,
     len: usize,
 }
 
 impl WStr {
-    fn units(&self) -> &[u16] {
+    pub(crate) fn units(&self) -> &[u16] {
         self.mem.wide(0, 2 * self.len)
     }
 }
 
 /// The caller's NUL-terminated UTF-16 string (empty if null).
-fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
+pub(crate) fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
     if p.is_null() {
         return &[];
     }
@@ -250,7 +250,7 @@ fn wide_arg<'a>(p: *const u16) -> &'a [u16] {
 
 /// The caller's ANSI string (`len` bytes, or NUL-terminated if None) in
 /// UTF-16; None for a null pointer.
-fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
+pub(crate) fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
     if p.is_null() {
         return Ok(None);
     }
@@ -277,7 +277,7 @@ fn ansi_to_wide(p: *const u8, len: Option<usize>) -> Result<Option<WStr>, i32> {
 
 /// `w` in the ANSI code page into `out` (`cap` bytes); returns the bytes
 /// needed (which may exceed `cap`, then nothing is written).
-fn wide_to_ansi(w: &[u16], out: *mut u8, cap: usize) -> usize {
+pub(crate) fn wide_to_ansi(w: &[u16], out: *mut u8, cap: usize) -> usize {
     if w.is_empty() {
         return 0;
     }

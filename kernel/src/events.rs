@@ -56,9 +56,14 @@ pub enum Category {
     /// surfaces given a role and mapped, commits, protocol errors (each
     /// with the client's pid and the object).
     Wayland = 32768,
+    /// The service control manager (nt::scm): connections, service opens
+    /// (granted access or the failure), creations, deletions and state
+    /// changes, each with the caller's pid.
+    Service = 65536,
 }
 
-const NAMES: [(&str, u32); 16] = [
+const NAMES: [(&str, u32); 17] = [
+    ("service", Category::Service as u32),
     ("wayland", Category::Wayland as u32),
     ("sample", Category::Sample as u32),
     ("ipc", Category::Ipc as u32),

@@ -3121,6 +3121,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    // The service control manager's client (user/svc_test), x64 and x86.
+    ("svc_test", "ntdll.dll", "Windows/System32"),
+    ("svc_test", "kernel32.dll", "Windows/System32"),
+    ("svc_test", "advapi32.dll", "Windows/System32"),
+    ("svc_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("svc_test", "secur32.dll", "Windows/System32"),
+    ("svc_test", "bcrypt.dll", "Windows/System32"),
+    ("svc_test", "user/access_test/access_test.regseed", "registry"),
+    ("wow64_svc_test", "wow64.dll", "Windows/System32"),
+    ("wow64_svc_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_svc_test", "user/access_test/access_test.regseed", "registry"),
     // MSXML 6's DOM through COM (user/msxml_test), x64 and x86.
     ("msxml_test", "ntdll.dll", "Windows/System32"),
     ("msxml_test", "kernel32.dll", "Windows/System32"),
@@ -3278,6 +3292,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ucrt_test",
     "office_api_test",
     "msi_test",
+    "svc_test",
     "msxml_test",
     "winhttp_cb_test",
     "runas_test",
@@ -3297,6 +3312,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_office_api_test",
     "wow64_cert_test",
     "wow64_msi_test",
+    "wow64_svc_test",
     "wow64_msxml_test",
     "wow64_winhttp_cb_test",
     "wow64_runas_test",
@@ -6349,6 +6365,33 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wow64_msi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wow64_msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The service control manager's client functions as an
+        // administrator (SYSTEM, as CI's elevated Windows runner):
+        // opening, AFD's status and configuration, enumeration, creating
+        // and deleting a service, and a standard user's (galatest's)
+        // rights (user/svc_test).
+        name: "svc_test",
+        cmdline: "qemu_exit as=system run=svc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        // The standard user's part ran: galatest was refused all access.
+        expect: &[
+            "svc_test: ok",
+            "exited with status 0x00000000",
+            "(svc_test.exe) connected to \"ServicesActive\": 0xc0000022",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/svc_test built for x86).
+        name: "wow64_svc_test",
+        cmdline: "qemu_exit as=system run=wow64_svc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_svc_test: ok",
+            "exited with status 0x00000000",
+            "(wow64_svc_test.exe) connected to \"ServicesActive\": 0xc0000022",
+        ],
     },
     Scenario {
         // MSXML 6's DOM through COM (DOMDocument60): loading, the tree,
@@ -10057,6 +10100,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
