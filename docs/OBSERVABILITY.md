@@ -185,7 +185,7 @@ scenario; `EVENT_EXPECT` in xtask checks a scenario's stream (scenario
 | `console` | console sessions and pseudo consoles created, resized, closed (with how many programs it ended); `console ctrl`, `console ctrl taken` |
 | `display` | virtio-gpu modes set, device resets, failed commands with their names |
 | `clock` | `clock_cal` (how the TSC was calibrated), the RTC check, `clock_recalibrated`; a wrong clock (`clock_wrong`) is written whatever the mask |
-| `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names) |
+| `file` | `open`: each NtCreateFile/NtOpenFile with the name as given, its root directory handle, the handle made and the status (the opens no ledger line names); `key`: each NtOpenKey(Ex) with the key it is relative to (`base`, full name), the name and the status (the ledger keeps only an absent key's first time; which open came last before a failure needs this) |
 | `wayland` | the Wayland server (`wayland=on`): `wayland connect` (pid, client number), `wayland disconnect` (`why`: closed, protocol error, output full, no memory; `requests` handled), `wayland role` (surface, role, its object), `wayland map` (surface, window or -1), `wayland commit` (surface, `buffer`: whether one came, its width and height, `rows` copied into the window, window, `placed` with `x`/`y`: the outer position the window was put at for the configure this commit answers), `wayland configure` (surface, the `width` and `height` asked for, 0x0 the client's choice, `states` as bits 1 << state: maximized 2, activated 16, tiled 32-256, the xdg_surface's `serial`), `wayland error` (object, interface, code, message), `wayland popup` (surface, `what`: configure with `x`/`y` relative to the parent's window geometry, `width`, `height` and the xdg_surface's `serial`; repositioned with the token as `serial`; grab with the press's `serial`; grab denied, dismissed and orphaned with `why`: not the last press's serial, a parent dismissed already, a press outside the client's windows, its window no longer the active one, the parent unmapped, its parent popup destroyed first) and `wayland input` (`what`: enter, leave, button, axis, key, focus, unfocus, close, maximize, restore, place, or dropped for a window the client shows no surface in; surface, window, `code` the button or evdev key, `state` pressed or released, an axis's delta in WHEEL_DELTA units; motion is not evented): each with the client's pid and number. A denied grab and an orphaned popup are also log lines (`wayland: pid P: wl_surface@S's popup: grab denied (...)`). Scenarios `lx_wl`, `lx_wl_popup`, `lx_wl_input` (with `window`: the desktop's `button` and `key` say where input went before the server took it), `lx_simple_shm`, `lx_gtk`. Without the category, each connection's end is a log line with its requests, commits shown and frame callbacks done (`wayland: pid P's connection N ended (closed): ...`) |
 | `window` | `create` (hwnd, parent, pid, session), `describe` (tid, class, text once user32 knows them), `destroy`, `button` and `key` (the desktop's delivery: message, window, owner; the screen point or virtual key), `input taken` (a button or key its program took from the queue: message, window, owner; `by` the taking thread), `popup grab ended` (a press outside the windows of a popup grab's owner ended it: the grab's window, owner, the screen point; the press went nowhere else), `other session` (a process asks about, sends or posts to another session's HWND); `winsta`: `connect` (a process's window station and desktop at its first window station call: pid, session, station, desktop, `from`: `logon`, `startupinfo`, `parent`, `handle`), `connect failed` (the name it asked for, the status), `made` (a logon session's station). Scenario `winsta_test`; `presenter`: `live` (a session's desktop laid out: session, presenter, w, h; a bare one, which nothing can show, `bare`: why), `attach` (GalaSession attached a presenter: session, presenter, was, w, h), `console` (a console switch: session, from (-1: none), was, kept windows, w, h). Scenarios `presenter_test`, `server_windows` (the server kernel's `live`, presenter none, `bare`), `noscreen_windows` and `server_profile_windows` (the desktop kernel's bare `live` without a screen and in the server profile) |
 
@@ -511,6 +511,47 @@ caller's invalid 32-bit pointer (which fails that call with
 STATUS_ACCESS_VIOLATION) is a bug there: its dispatcher reports it
 through GalaUnhandledException, so the report shows the 64-bit registers
 at `wow64.dll+0x...`.
+
+What GalaUnhandledException's record says beyond the code, read while
+the process still runs (scenario `cxx_throw`, and ODT's setup.exe in
+`office_install`):
+
+- `record flags` when not 0 (noncontinuable; EXCEPTION_STACK_INVALID:
+  the search met a registration off the stack).
+- In 32-bit code, `32-bit SEH registrations, newest first`: the frame
+  and handler (module+offset) of each registration on the TEB32's
+  ExceptionList as the dispatcher offered it to them, up to 12, and
+  whether the list's end was reached. A frame listed again and again is
+  a list that loops (a registration linked above itself).
+- An MSVC C++ throw (0xe06d7363 with the C++ runtime's magic): `C++
+  throw of <type> (<decorated name>), N catchable types`, `catchable
+  as` each base a catch could take it as (from the throw's ThrowInfo,
+  CatchableTypeArray and TypeDescriptors: pointers on x86, offsets from
+  the image base in the fourth parameter on x64; the layouts Wine's
+  msvcrt cppexcept.h describes), `what(): "..."` when a base is
+  std::exception holding its text (else "the type keeps its own"), and
+  the thrown object's address, size and first words, with the text any
+  word points to (ASCII or UTF-16): an exception type with its own
+  message field shows it there (`word 3 (0x...) -> "Cannot open
+  Registry Key"`).
+- A delay-load failure (0xc06d007e, 0xc06d007f: the delay-load
+  helper's DLL or function not found): `delay load of DLL!function` (or
+  `ordinal N`), from the DelayLoadInfo its first parameter points to.
+
+### Guest files (`dump=`)
+
+The boot option `dump=C:/path,...` (percent-encoded, `/`-separated)
+prints files the programs left once the `run=` ones have ended, as
+`dump: begin <path> (N bytes)`, one `dump:` line per line, `dump: end
+<path>`: a crashing JVM's hs_err file, ChromeDriver's log, ODT's log
+directory (`office_install`: `dump=C:/gala/odtlog`). A directory gives
+each file below it (4 levels deep), for logs whose names carry a date
+or machine name; UTF-16LE text (a byte-order mark, or ASCII's zero high
+bytes) is shown as text; a missing path is one line with its status.
+When the scenario fails, xtask writes each dumped file back out under
+`target/failed/<scenario>.dump/<path without the drive>` (the verdict
+names the directory), so a program's own log is read as the file it
+wrote.
 
 ### Crash record across reboots
 

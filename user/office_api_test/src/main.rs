@@ -50,6 +50,17 @@
 //!   RtlIsNameInExpression (`*`, `?`, case); the AVL generic tables
 //!   (insert, duplicates, lookup, enumerate in order, get by index,
 //!   delete, count, empty; the callbacks get the table).
+//! - GetUserDefaultGeoName (setup.exe asks kernel32 for it after reading
+//!   its configuration): with no buffer, the size of the name with its
+//!   NUL; the name, the user's region as a two-letter ISO 3166 code that
+//!   is GetUserGeoID's GEO_ISO2 (whatever the machine's region, the two
+//!   agree) or a three-digit UN M.49 code, that size; one character less
+//!   ERROR_INSUFFICIENT_BUFFER.
+//! - wldp (Windows Lockdown Policy, which setup.exe loads to check for S
+//!   mode; expectations from Wine's dlls/wldp/tests run on Windows):
+//!   WldpQueryWindowsLockdownMode S_OK and UNLOCKED; WldpGetLockdownPolicy
+//!   for the global host S_OK with WLDP_LOCKDOWN_DEFINED_FLAG alone (no
+//!   code integrity policy, as on a machine without App Control).
 //! - AttachConsole and AllocConsole in a process that has a console
 //!   (GetConsoleCP not 0; run-all.ps1's programs and gala's have one):
 //!   ERROR_ACCESS_DENIED; GetDiskFreeSpaceA of the system drive.
@@ -256,6 +267,36 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn IdnToAscii(flags: u32, unicode: *const u16, n: i32, ascii: *mut u16, size: i32) -> i32;
     fn IdnToUnicode(flags: u32, ascii: *const u16, n: i32, unicode: *mut u16, size: i32) -> i32;
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn GetUserDefaultGeoName(name: *mut u16, size: i32) -> i32;
+    fn GetUserGeoID(class: u32) -> i32;
+    fn GetGeoInfoW(geo: i32, kind: u32, data: *mut u16, size: i32, lang: u16) -> i32;
+}
+
+/// WLDP_HOST_INFORMATION (wldp.h).
+#[repr(C)]
+struct WldpHostInformation {
+    revision: u32,
+    host_id: u32,
+    source: *const u16,
+    handle: Handle,
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "wldp", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "wldp", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn WldpQueryWindowsLockdownMode(mode: *mut u32) -> i32;
+    fn WldpGetLockdownPolicy(host: *const WldpHostInformation, state: *mut u32, flags: u32) -> i32;
 }
 
 #[cfg_attr(
@@ -971,7 +1012,67 @@ fn run() -> Result<(), u32> {
     avl(&mut c)?;
     imm(&mut c)?;
     idn_and_power(&mut c)?;
+    geo_and_lockdown(&mut c)?;
     Ok(())
+}
+
+/// GetUserDefaultGeoName and wldp's lockdown queries, which setup.exe
+/// asks for after reading its configuration.
+fn geo_and_lockdown(c: &mut Checks) -> Result<(), u32> {
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    const GEOCLASS_NATION: u32 = 16;
+    const GEO_ISO2: u32 = 4;
+    // SAFETY: our buffers with their sizes.
+    unsafe {
+        let need = GetUserDefaultGeoName(null_mut(), 0);
+        // A two-letter ISO 3166 code, or a region without one as its
+        // three-digit UN M.49 code ("001", the world), and the NUL.
+        c.ok(need == 3 || need == 4, need.into_u64())?;
+        let mut name = [0xffffu16; 8];
+        c.eq(GetUserDefaultGeoName(name.as_mut_ptr(), need).into_u64(), need as u64)?;
+        let len = need as usize - 1;
+        c.eq(name[len].into(), 0)?;
+        let first = u64::from(name[0]) << 16 | u64::from(name[1]);
+        if len == 2 {
+            let upper = |u: u16| (u16::from(b'A')..=u16::from(b'Z')).contains(&u);
+            c.ok(upper(name[0]) && upper(name[1]), first)?;
+            // The same region as GetUserGeoID's, named by GEO_ISO2.
+            let mut iso2 = [0u16; 8];
+            let geo = GetUserGeoID(GEOCLASS_NATION);
+            c.eq(GetGeoInfoW(geo, GEO_ISO2, iso2.as_mut_ptr(), 8, 0).into_u64(), 3)?;
+            c.ok(iso2[..3] == name[..3], u64::from(iso2[0]) << 16 | u64::from(iso2[1]))?;
+        } else {
+            let digit = |u: u16| (u16::from(b'0')..=u16::from(b'9')).contains(&u);
+            c.ok(name[..3].iter().all(|&u| digit(u)), first)?;
+        }
+        let short = GetUserDefaultGeoName(name.as_mut_ptr(), need - 1);
+        c.fails(short != 0, ERROR_INSUFFICIENT_BUFFER)?;
+
+        let mut mode = 0xdead_beef;
+        c.eq(WldpQueryWindowsLockdownMode(&mut mode).into_u64(), 0)?;
+        c.eq(mode.into(), 0)?; // WLDP_WINDOWS_LOCKDOWN_MODE_UNLOCKED
+        let host = WldpHostInformation {
+            revision: 1, // WLDP_HOST_INFORMATION_REVISION
+            host_id: 1,  // WLDP_HOST_ID_GLOBAL
+            source: null(),
+            handle: 0,
+        };
+        let mut state = 0xdead_beef;
+        c.eq(WldpGetLockdownPolicy(&host, &mut state, 0).into_u64(), 0)?;
+        c.eq(state.into(), 0x8000_0000)?; // WLDP_LOCKDOWN_DEFINED_FLAG
+    }
+    Ok(())
+}
+
+/// A signed result as the bits the failure line shows.
+trait IntoU64 {
+    fn into_u64(self) -> u64;
+}
+
+impl IntoU64 for i32 {
+    fn into_u64(self) -> u64 {
+        u64::from(self as u32)
+    }
 }
 
 /// normaliz's IDN functions and powrprof's processor information, the

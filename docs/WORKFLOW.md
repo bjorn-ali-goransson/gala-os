@@ -1091,7 +1091,11 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   for x86_64-pc-windows-msvc and lld-link (`build.sh`, import libraries
   from .def files with llvm-dlltool), no CRT, against Microsoft's
   vcruntime140 (the JDK's, app-local); the binary is checked in and the
-  build is reproducible.
+  build is reproducible. `throw.cpp` is `cxx_throw.exe` (a throw nothing
+  catches: scenario `cxx_throw` checks the crash report's decoding of it;
+  run-all.ps1 expects its 0xe06d7363). Pitfall: Ubuntu 24.04's clang
+  18.1.3 does not finish main.cpp at -O1 with -fasync-exceptions (it
+  loops); `build.sh throw` builds cxx_throw.exe alone.
 - **Managed (.NET) tests** are C# in `user/<name>/` built by its
   `build.sh` with Mono's `mcs` (apt package `mono-mcs`) into `user/bin`
   (reproducible: the script pins the MVID and timestamp). CI does not
@@ -1869,10 +1873,14 @@ it on first use.
   files with busybox.
 - **Java**: a crashing JVM writes `C:\hs_err_pid<N>.log` (registers, the
   faulting address, the thread's stack, the memory map); the boot option
-  `dump=C:/hs_err_pid4.log` (comma-separated, percent-encoded paths)
-  prints such files to the serial log as `dump:` lines once the `run=`
-  programs have ended. The Java scenarios have it, so a crash's report
-  is in `target/failed/<name>.log`.
+  `dump=C:/hs_err_pid4.log` (comma-separated, percent-encoded paths;
+  a directory gives every file below it) prints such files to the
+  serial log as `dump:` lines once the `run=` programs have ended, and a
+  failed scenario's dumped files are written back out under
+  `target/failed/<name>.dump/` (OBSERVABILITY "Guest files"). The Java
+  scenarios have it, so a crash's report is in `target/failed/<name>.log`;
+  any program that writes its own log (ODT's setup.exe: `office_install`)
+  should get one.
 - **.NET**: the ledger first, then `XTASK_EVENTS=syscall,image,fault`.
   CoreCLR's own source (dotnet/runtime, MIT) says what it expects of the
   OS (read only, as any application's documentation).

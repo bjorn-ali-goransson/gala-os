@@ -178,6 +178,27 @@ Rules for this file:
   `math.c`) as documentation of msvcrt.dll's behaviour (no code copied);
   the `_JUMP_BUFFER`, FILE, lconv and STARTUPINFO layouts from mingw-w64's
   headers.
+- The crash report's decoding of an MSVC C++ throw
+  (`kernel/src/nt/crashreport.rs`: the exception parameters' magic
+  numbers, ThrowInfo, CatchableTypeArray, CatchableType and
+  TypeDescriptor, and std::exception's data members), from their
+  description in Wine's `dlls/msvcrt/cppexcept.h` and `cppexcept.c`
+  (layouts only; no code copied); the delay-load exception codes and
+  DelayLoadInfo from Microsoft's delay-load helper documentation
+  (delayimp.h).
+- The 32-bit ntdll's own registration around each handler call
+  (`user/testntdll/src/seh_x86.rs`: the nested-exception frame and its
+  handlers' dispositions), from Matt Pietrek's "A Crash Course on the
+  Depths of Win32 Structured Exception Handling" (MSJ, 1997) and the
+  behaviour of Wine's `dlls/ntdll/signal_i386.c` (raise_handler,
+  unwind_handler); no code copied.
+- gala's wldp.dll (`user/wldp`) and the wldp checks of
+  `user/office_api_test`: the constants and WLDP_HOST_INFORMATION from
+  Wine's `include/wldp.h`, and Windows' answers as Wine's conformance
+  test `dlls/wldp/tests/wldp.c` checks them (WldpGetLockdownPolicy:
+  WLDP_LOCKDOWN_DEFINED_FLAG, S_OK with host information and 0x10000000
+  without; WldpQueryWindowsLockdownMode: S_OK, unlocked); master,
+  fetched 2026-11-09; LGPL-2.1, behaviour and ABI facts only.
 
 | Our code | Specification | Spec license |
 |---|---|---|

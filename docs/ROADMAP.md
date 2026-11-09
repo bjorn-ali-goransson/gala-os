@@ -171,7 +171,7 @@ has a section under "Open items".
 | Threads, suspension, context, TEB/PEB/KUSER_SHARED_DATA, process startup | `thread_test`, `threadinfo_test`, `context_test`, `kuser_test`, `peb_test`, `startup_test` |
 | Sections, image sections, memory-mapped files | `section_test`, `image_test`, `filemap_test` |
 | Files, directories, async I/O, APCs, IOCP, file locks, change notification | `file_test`, `dir_test`, `async_test`, `apc_test`, `ioapc_test`, `iocp_test`, `lock_test`, `dirchange_test` |
-| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `fpu_test`, `safepoint_test` |
+| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `cxx_throw`, `fpu_test`, `safepoint_test` |
 | Loader: imports, dynamic loading, static TLS, API sets | `import_test`, `loader_test`, `tls_test`, `missing_import_test` |
 | System and process information | `sysinfo_test` |
 | Pipes, child processes with redirected stdio | `pipe_test`, `process_test` |
@@ -1453,27 +1453,43 @@ need gala's.
      the node lists' length and item, getAttribute (SourcePath, Version,
      Channel, OfficeClientEdition, Level, AcceptEULA, Path, Enabled, ...),
      attributes, nodeType and nodeValue: no DOM method it calls is
-     missing. Where the run ends now: before that, urlmon is asked for and missing
+     missing. Before that, urlmon is asked for and missing
      (`urlmon.dll` missing dll, survived), two WinHttpSetOption options
      are recorded unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
      WINHTTP_OPTION_DISABLE_FEATURE), no TCP connection is made yet
-     (`events=net` shows none); after the configuration, setup.exe looks
-     up kernel32's GetUserDefaultGeoName (missing export: gala's
-     kernel32 has none) and loads wldp.dll (missing dll), reads
-     `HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration`
-     (absent), and then throws a C++ exception (0xe06d7363) nothing
-     catches in the elevated copy (pid 12): "abnormal program
-     termination", both copies exit with status 3. Which of these it
-     throws over is not known yet (its log, C:\gala\odtlog, stays in
-     the guest).
+     (`events=net` shows none). After the configuration it asks kernel32
+     for GetUserDefaultGeoName (done: "US", GetUserGeoID's GEO_ISO2;
+     `office_api_test`, `wow64_office_api_test`) and loads wldp.dll to
+     check for S mode (done: gala's wldp.dll, x64 and x86, unlocked, no
+     policy in force; the same tests), looks for an Office 2013
+     Click-to-Run (`C:\Program Files\Microsoft Office 15\ClientX64\...`,
+     `HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration`:
+     absent, as on a clean Windows) and throws a C++ exception over the
+     absent key (the crash report decodes it: `shared::Exception`, a
+     std::exception, its message "Cannot open Registry Key"), which its
+     own catch takes. Done: that catch works (the 32-bit ntdll links a
+     registration of its own around each handler call, as Windows; before,
+     an earlier catch had linked an unwound frame back and the
+     registration list looped on itself, so this throw found no handler:
+     the crash report's SEH list showed it; ARCHITECTURE "WOW64",
+     `wow64_seh_test`). Where the run ends now: the elevated copy (pid 12)
+     delay-loads advapi32's OpenSCManagerW (the service control manager:
+     gala's advapi32 has only ledger stubs for the service functions,
+     which GetProcAddress does not return), the delay-load helper raises
+     0xc06d007f (crash report: `delay load of ADVAPI32.dll!OpenSCManagerW`;
+     ledger `advapi32.dll!OpenSCManagerW` missing export) and both copies
+     end with it. ODT has written no log yet (`dump=C:/gala/odtlog` finds
+     no directory: it creates its log later).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: GetUserDefaultGeoName
-     (kernel32: the user's geographic region as a name, "US") and wldp
-     (Windows Lockdown Policy: what setup.exe asks of it), then what the
-     C++ exception stands for (a way to read setup.exe's log out of the
-     guest would name it); gdiplus (setup.exe's error and progress UI),
+     Next, in the order the run reaches them: the service control manager
+     for both widths (OpenSCManagerW, then what setup.exe asks of it:
+     presumably OpenServiceW for Click-to-Run's ClickToRunSvc,
+     ERROR_SERVICE_DOES_NOT_EXIST on a machine without Office; test first
+     with Wine's dlls/advapi32/tests/service.c expectations), then what the
+     run reaches after it (its log in `target/failed/office_install.dump/`
+     once it writes one); gdiplus (setup.exe's error and progress UI),
      HKCU from the caller's token, the TLS handshake from 32-bit
      (schannel.dll has no i686 build: secur32's x86 loads it on first
      use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
@@ -1481,10 +1497,10 @@ need gala's.
      the run reaches it; load of URLs is recorded unsupported), then
      CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
      (the signature check), wininet, urlmon, xmllite, webservices,
-     iphlpapi, setupapi, cabinet, credui; the service control manager
-     (advapi32's service calls are stubs); a few shlwapi, user32, ole32
+     iphlpapi, setupapi, cabinet, credui; a few shlwapi, user32, ole32
      and shell32 functions; FormatMessage's system text for
-     ERROR_CANCELLED (1223, recorded on the declined path).
+     ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
+     dispatcher's nested exceptions and collided unwinds.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,

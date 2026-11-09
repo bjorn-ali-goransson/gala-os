@@ -2472,7 +2472,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
 | COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6 |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs") |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -2777,7 +2777,9 @@ ntdll imports.
   date format lists (EnumTimeFormatsEx, EnumDateFormatsExEx),
   FindNLSStringEx (prefix, suffix, first and last occurrence, compared
   code unit by code unit with simple case folding; linguistic
-  equivalences are recorded).
+  equivalences are recorded). One geographic region, the United States
+  (GetUserGeoID 244, GetGeoInfoA/W's values, GetUserDefaultGeoName
+  "US": its GEO_ISO2).
 - **Time**: Sleep, tick counts, the performance counter, UTC local time.
   The time zone is UTC, named "UTC" (its time-zone key name) rather than
   "Coordinated Universal Time": a deliberate difference, because programs
@@ -7834,8 +7836,11 @@ come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
 ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 (`wow64_cert_test`, cert_test's source built for x86), msi
-(`wow64_msi_test`), normaliz and powrprof (`wow64_office_api_test`;
-powrprof reads CPUID through `core::arch::x86` there). crypt32's own
+(`wow64_msi_test`), normaliz, powrprof and wldp (`wow64_office_api_test`;
+powrprof reads CPUID through `core::arch::x86` there). wldp.dll answers
+as an unlocked Windows without App Control: WldpQueryWindowsLockdownMode
+UNLOCKED (no S mode), WldpGetLockdownPolicy WLDP_LOCKDOWN_DEFINED_FLAG
+alone for every host, WldpIsDynamicCodePolicyEnabled FALSE. crypt32's own
 structures (CERT_CONTEXT, CERT_INFO, CRL_*, the chain contexts) are
 `repr(C)` with pointers, and the caller's ones it reads or writes
 (CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_PARA's CERT_USAGE_MATCH, the
@@ -7952,7 +7957,18 @@ under their own names: `testdll32.dll`).
   fs:[0] chain (on the stack, aligned; otherwise
   EXCEPTION_STACK_INVALID), `handler(record, frame, context,
   dispatcher_context)` until one continues execution (a noncontinuable
-  one then raises STATUS_NONCONTINUABLE_EXCEPTION); the continue
+  one then raises STATUS_NONCONTINUABLE_EXCEPTION). Each handler runs
+  under a registration of the dispatcher's own, linked at the head of
+  the list for the call (Windows' nested-exception frame: its Next the
+  head at the call, then the frame being handled; ExceptionNestedException
+  for a dispatch that meets it, ExceptionCollidedUnwind for an unwind,
+  unlinked after the call while still the head). Invariant: Microsoft's
+  C++ catch (x86) saves fs:[0] in the handler, unwinds to the catching
+  frame and links the saved registration back above it; without the
+  dispatcher's own registration that saved head was the throwing
+  function's, an unwound frame, and a later call registering at the
+  same address made the list loop on itself (ODT's setup.exe:
+  `wow64_seh_test` checks the head a handler sees). Then the continue
   handlers; unhandled: GalaUnhandledException (wow64.dll converts the
   x86 record and context into the x64 ones with CS 0x23: the crash
   report's 32-bit registers), the top-level filter, the process ends.
@@ -7961,8 +7977,11 @@ under their own names: `testdll32.dll`).
   returns to its caller with ReturnValue; RtlRaiseException dispatches
   from its caller's context (ExceptionAddress: the return address); both
   and RtlCaptureContext are naked functions capturing the caller's
-  registers. Not yet: nested exceptions (EXCEPTION_NESTED_CALL),
-  collided unwinds, SafeSEH tables.
+  registers. Not yet: nested exceptions (the dispatcher's registration
+  answers ExceptionNestedException, but the search is not marked
+  EXCEPTION_NESTED_CALL nor skips to the handled frame), collided
+  unwinds (both dispositions are taken as ExceptionContinueSearch),
+  SafeSEH tables.
 - **APCs**: a 32-bit APC routine (NtQueueApcThread's, an I/O or timer
   APC's) is queued as wow64.dll's marker with the routine and its
   context packed in NormalContext. The kernel runs user APCs of a WOW64
