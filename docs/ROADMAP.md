@@ -190,7 +190,7 @@ has a section under "Open items".
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
 | LX | Linux personality | in progress | seams 2, 3, 6 and milestone 1 done, seam 4's Linux side (links, case-sensitive directories, modes kept); static busybox runs (milestone 2), TCP sockets, threads, futex, epoll; file mappings, glibc's dynamic programs (LD step 1); seam 5's first core object, AF_UNIX sockets, and memfd (LD step 2) |
 | CT | Linux containers: Docker Desktop and Podman over a WSL facade | planned | spec recordings first; needs LX beyond milestone 5 |
-| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`); next: wl_seat input, decorations, popups, a socket per session, then a GTK application, Xwayland |
+| LD | Desktop Linux applications | in progress | step 1: dynamically linked glibc programs run through ld.so (`lx_dyn`); step 2: memfd and AF_UNIX sockets with SCM_RIGHTS (`lx_memfd`, `lx_unix`), the Wayland wire format (`wl_abi`) and the first in-kernel Wayland server (wl_compositor, wl_shm, xdg_wm_base, wl_output; toplevels as desktop windows: `lx_wl`), wl_seat input and window control (`lx_wl_input`), weston-simple-shm (`lx_simple_shm`), popups (`lx_wl_popup`); next: a socket per session, then a GTK application, Xwayland |
 | AR | ARM64 port | planned | the kernel's aarch64 `arch` on QEMU `virt`, then ARM64 Windows and Linux user mode |
 | XT | 64-bit Windows programs on ARM64 | planned | dynamic binary translation of x64 code; after AR |
 | AN | Android applications | planned | binder, ART, SwiftShader graphics; x86_64 images first |
@@ -2149,6 +2149,29 @@ the next breakthroughs).
   are the desktop's actions on the window; wm_capabilities maximize and
   minimize. `events=wayland`'s `wayland configure`, `placed` in `wayland
   commit`.
+- Step 2's server, fourth part: popups (`lx_wl_popup`, `lx_wl_popup_pie`:
+  user/lx/wl_popup_test, recorded against weston's headless backend;
+  and wl_input_test's popup steps in `lx_wl_input`, written from the
+  specification): xdg_positioner (every request at version 6, each
+  checked: `invalid_input`; an incomplete one is `invalid_positioner`)
+  and xdg_popup as a frameless popup window above its parent (user32's
+  menus' `STYLE_POPUP`), placed from the anchor rectangle, anchor,
+  gravity and offset against the parent's window geometry
+  (set_window_geometry now applied at commit) and adjusted against the
+  work area: flip, slide and resize on each axis in the protocol's
+  order; configure and ack as toplevels, reposition (version 3);
+  xdg_popup.grab with the serial of the last button or key press (else
+  denied: popup_done at once): the topmost grabbing popup has the
+  keyboard focus while the toplevel stays activated, the desktop's popup
+  grab (`State::popup_grab`) ends at a press outside the client's
+  windows, which goes nowhere else (GALA_WM_POPUP_DONE), or when the
+  window loses the activation, dismissing the grabbing popups topmost
+  first; only the topmost grabbing popup may be destroyed
+  (`not_the_topmost_popup`); popups without a grab go in any order, a
+  child outliving its parent popup (as weston). `events=wayland`'s
+  `wayland popup`, `events=window`'s `popup grab ended`, the ledger's
+  ignored set_reactive, set_parent_size and set_parent_configure, the
+  grabs and popups in the state dump.
 - Step 2's first real client: `weston-simple-shm` (`lx_simple_shm`:
   weston 13's demo, Ubuntu 24.04's build with its libwayland-client and
   libffi, `PREBUILT`s, on glibc) draws its animated frames on a headless
@@ -2181,9 +2204,12 @@ the next breakthroughs).
      `begin_resize`/`begin_drag`; ledgered as ignored today), fullscreen,
      a decoration mode change on a mapped window (the frame
      put on or taken off in place; today the mode is fixed at mapping),
-     popups (`xdg_positioner`, `xdg_popup`; ledgered protocol errors
-     today), the middle button and horizontal wheel once the desktop
-     has them;
+     the middle button and horizontal wheel once the desktop has them;
+   - popups' rest: reconstraining a reactive popup when its parent
+     moves or resizes (set_reactive, set_parent_size and
+     set_parent_configure are accepted and ledgered today), a grab per
+     connection rather than per process on the desktop (two connections
+     of one process count as one owner), touch;
    - `xdg_wm_base.ping` on a timer once the desktop marks windows that
      do not answer (none, Windows' or Linux's, are marked today);
    - frame callbacks paced by the presenter's own refresh (a 60 Hz

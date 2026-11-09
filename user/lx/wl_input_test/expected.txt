@@ -50,6 +50,32 @@ configure 638 718: activated tiled_left tiled_top tiled_bottom
 wl_input_test: snapped
 configure 200 150: activated
 wl_input_test: unsnapped
+key 50 pressed
+key 50 released
+constraint flip_y: configure 0 560 100 40
+constraint flip_x, constrained either way: configure 200 0 1250 40
+constraint flip_x then slide_x: configure -35 0 1250 40
+constraint slide_y: configure 0 471 100 200
+constraint slide_x off the left: configure -65 -40 100 40
+constraint resize_x: configure 0 0 1215 40
+menu: configure 20 30 120 80
+keyboard leave first
+keyboard enter menu, keys down 0
+modifiers 0 0 0 0
+wl_input_test: menu mapped
+key 31 pressed
+key 31 released
+submenu: configure 120 10 100 60
+keyboard leave menu
+keyboard enter submenu, keys down 0
+modifiers 0 0 0 0
+wl_input_test: submenu mapped
+popup_done submenu
+keyboard leave submenu
+popup_done menu
+keyboard enter first, keys down 0
+modifiers 0 0 0 0
+wl_input_test: popups dismissed
 toplevel close
 keyboard leave first
 decoration mode = 1
@@ -59,5 +85,15 @@ keyboard enter second, keys down 0
 modifiers 0 0 0 0
 wl_input_test: frameless mapped
 key 16 pressed
+key 16 released
+outer: configure 10 10 40 30
+keyboard leave second
+keyboard enter outer, keys down 0
+modifiers 0 0 0 0
+inner: configure 10 10 40 30
+keyboard leave outer
+keyboard enter inner, keys down 0
+modifiers 0 0 0 0
+outer destroyed first: wl_display.error on xdg_wm_base code 2, then the end of the stream
 wl_input_test: ok
 -- exit status 0

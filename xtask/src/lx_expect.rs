@@ -53,7 +53,7 @@ pub const ENV: &[(&str, &str)] = &[("A", "1"), ("EMPTY", ""), ("LONGER_NAME", "s
 /// lx-expect starts weston's headless backend for them on a socket of
 /// their own and adds `XDG_RUNTIME_DIR` (its directory) and
 /// `WAYLAND_DISPLAY` (this name) to [`ENV`].
-const WAYLAND_TESTS: &[&str] = &["wl_test"];
+const WAYLAND_TESTS: &[&str] = &["wl_test", "wl_popup_test"];
 const WAYLAND_DISPLAY: &str = "wayland-gala";
 
 /// The programs real Linux cannot record, with why: built and checked
@@ -307,7 +307,11 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
 
 /// weston's headless backend serving one test: its runtime directory
 /// (0700, as XDG_RUNTIME_DIR must be) holds the socket; the process ends
-/// when this is dropped. Its log goes to `weston.log` beside the test.
+/// and the directory goes when this is dropped. Its log goes to
+/// `weston.log` beside the test. The runtime directory is a short one in
+/// the system's temporary directory, not the run directory: a socket's
+/// path is at most 107 bytes (sun_path), which a checkout deep in the
+/// file system (a worktree) passes.
 struct Weston {
     runtime: PathBuf,
     process: std::process::Child,
@@ -316,7 +320,9 @@ struct Weston {
 impl Weston {
     fn start(dir: &Path) -> Result<Weston> {
         use std::os::unix::fs::PermissionsExt;
-        let runtime = dir.join("xdg");
+        let runtime = std::env::temp_dir().join(format!("gala-wl-{}", std::process::id()));
+        // A directory left by a run of the same pid that was killed.
+        let _ = fs::remove_dir_all(&runtime);
         fs::create_dir_all(&runtime).map_err(|e| format!("creating {}: {e}", runtime.display()))?;
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
@@ -358,6 +364,7 @@ impl Drop for Weston {
     fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+        let _ = fs::remove_dir_all(&self.runtime);
     }
 }
 

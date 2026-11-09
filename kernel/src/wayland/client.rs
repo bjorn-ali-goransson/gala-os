@@ -57,9 +57,22 @@
 //!   are due): the commit is presented at once, and a client drawing on
 //!   its frame callbacks draws at the display's rate, not as fast as it
 //!   can.
+//! - **Popups** (ARCHITECTURE "Popups"; `popup` places them): an
+//!   xdg_positioner's rules are copied by get_popup and reposition; the
+//!   first commit is answered with xdg_popup.configure (the place relative
+//!   to the parent's window geometry, adjusted against the work area) and
+//!   xdg_surface.configure; once acked a buffer shows a popup window
+//!   (`Host::popup_create`) there. A grab (the last press's serial, the
+//!   topmost grabbing popup or a toplevel as parent) joins `grabs`: once
+//!   shown, the topmost has the keyboard focus and the desktop's popup
+//!   grab (`Host::grab`); the desktop's PopupDone, or the window losing
+//!   the activation, dismisses them topmost first (popup_done), and only
+//!   the topmost may be destroyed (not_the_topmost_popup).
 //! - **Accepted and not acted on** (`Note::Ignored`, ledgered by the
 //!   server): regions, buffer scale and transform other than 1 and
-//!   normal, surface offsets, window geometry, and the toplevel's
+//!   normal, surface offsets, a toplevel's window geometry (a popup's
+//!   places it), a positioner's set_reactive, set_parent_size and
+//!   set_parent_configure, and the toplevel's
 //!   requests for move, resize, menus, min and max sizes and fullscreen;
 //!   a cursor surface (wl_pointer.set_cursor: the desktop draws its own
 //!   pointer). A window message the desktop sends that a Wayland window
@@ -80,6 +93,7 @@ use core::fmt::{self, Write as _};
 use wl_abi::{Arg, Header, Interface, MAX_ARGS, MAX_FDS, MAX_MESSAGE, Message};
 
 use super::input::{self, Input, Modifier};
+use super::popup::{self, Rules};
 use crate::mm::heap::TryVec;
 
 /// The most objects a client has (and the highest id it may use).
@@ -147,6 +161,8 @@ pub static WL_POINTER: &Interface = find("wl_pointer");
 pub static WL_KEYBOARD: &Interface = find("wl_keyboard");
 pub static DECORATION_MANAGER: &Interface = find("zxdg_decoration_manager_v1");
 pub static TOPLEVEL_DECORATION: &Interface = find("zxdg_toplevel_decoration_v1");
+pub static XDG_POSITIONER: &Interface = find("xdg_positioner");
+pub static XDG_POPUP: &Interface = find("xdg_popup");
 
 /// The globals offered, in registry order (name = index + 1), with the
 /// version offered.
@@ -174,7 +190,12 @@ const SURFACE_INVALID_SCALE: u32 = 0;
 const SURFACE_INVALID_TRANSFORM: u32 = 1;
 const SURFACE_INVALID_OFFSET: u32 = 3;
 const WM_BASE_ROLE: u32 = 0;
+const WM_BASE_NOT_THE_TOPMOST_POPUP: u32 = 2;
+const WM_BASE_INVALID_POPUP_PARENT: u32 = 3;
 const WM_BASE_INVALID_SURFACE_STATE: u32 = 4;
+const WM_BASE_INVALID_POSITIONER: u32 = 5;
+const POSITIONER_INVALID_INPUT: u32 = 0;
+const POPUP_INVALID_GRAB: u32 = 0;
 const XDG_SURFACE_NOT_CONSTRUCTED: u32 = 1;
 const XDG_SURFACE_ALREADY_CONSTRUCTED: u32 = 2;
 const XDG_SURFACE_UNCONFIGURED_BUFFER: u32 = 3;
@@ -244,6 +265,18 @@ pub trait Host {
         height: u32,
         decorated: bool,
     ) -> Option<u32>;
+    /// A frameless popup window (above the framed windows, never active,
+    /// not on the taskbar: what user32's menus are) at screen (x, y)
+    /// showing a `width` x `height` surface: its id, None if it cannot be
+    /// made.
+    fn popup_create(&mut self, x: i32, y: i32, width: u32, height: u32) -> Option<u32>;
+    /// The screen position of the window's client area (where its surface
+    /// is).
+    fn client_origin(&mut self, id: u32) -> Option<(i32, i32)>;
+    /// The desktop's popup grab: window `id`, the topmost grabbing
+    /// popup's (a press outside the client's windows ends it: input
+    /// PopupDone); None: there is none.
+    fn grab(&mut self, id: Option<u32>);
     fn window_resize(&mut self, id: u32, width: u32, height: u32, decorated: bool);
     /// Moves the window's outer rectangle to (x, y) for a `width` x
     /// `height` surface (the desktop's place, from a configure the client
@@ -296,6 +329,12 @@ pub enum Note<'a> {
     Configure { surface: u32, width: u32, height: u32, states: u32, serial: u32 },
     /// A window was shown for a surface, or could not be made.
     Mapped { surface: u32, window: Option<u32> },
+    /// A popup's life (`what`): "configure" (the place relative to the
+    /// parent's window geometry and size, `rect`, the xdg_surface's
+    /// serial), "repositioned" (the token as `serial`), "grab", "grab
+    /// denied" (`why`), "dismissed" (`why`), "orphaned" (its parent popup
+    /// destroyed first).
+    Popup { surface: u32, what: &'static str, why: &'static str, rect: Rect, serial: u32 },
     /// A protocol error: wl_display.error sent, the client ends.
     Error { object: u32, interface: &'static str, code: u32, message: &'a str },
     /// A request gala does not implement (answered with an error).
@@ -313,6 +352,9 @@ pub enum Note<'a> {
     /// A window message Wayland windows do not follow: ledgered.
     Unhandled { what: &'static str, window: u32 },
 }
+
+/// x, y, width, height.
+pub type Rect = (i32, i32, i32, i32);
 
 /// What a client asks the desktop to do to its window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -423,14 +465,24 @@ struct Surface {
 struct XdgSurface {
     /// 0 once the wl_surface is gone.
     surface: u32,
+    /// The xdg_wm_base that made it (xdg_wm_base's errors about its
+    /// popup go there).
+    wm_base: u32,
     /// Its xdg_toplevel.
     toplevel: Option<u32>,
+    /// Its xdg_popup.
+    popup: Option<u32>,
+    /// The window geometry (set_window_geometry, applied at commit); None:
+    /// the whole surface.
+    geometry: Option<Rect>,
+    pending_geometry: Option<Rect>,
     /// The serial of the last configure sent.
     sent: Option<u32>,
     /// A configure was acked since the role was given (or since unmapped).
     acked: bool,
     /// The configures sent and not acked yet, oldest first: serial and
-    /// the outer position the desktop asked for with it (at most
+    /// the outer position the desktop asked for with it (a popup's: its
+    /// place relative to its parent's window geometry) (at most
     /// MAX_CONFIGURES). An ack may name any of them (the client need ack
     /// only the last one it saw); it drops those before it too.
     unacked: Vec<(u32, Option<(i32, i32)>)>,
@@ -466,6 +518,29 @@ struct Sizing {
     target: Option<(i32, i32)>,
 }
 
+/// An xdg_popup (ARCHITECTURE "Popups").
+struct Popup {
+    xdg: u32,
+    /// The parent's xdg_surface (0: none given, or destroyed since: an
+    /// orphan keeps its window where it was).
+    parent: u32,
+    /// The rules it was placed by (the positioner's, copied).
+    rules: Rules,
+    /// The last configure: place relative to the parent's window geometry
+    /// and size.
+    configured: Rect,
+    /// The place applied (from the configure acked, at the commit after).
+    at: Option<(i32, i32)>,
+    /// The parent's window geometry's screen position when last placed.
+    origin: Option<(i32, i32)>,
+    /// Where its window is (screen), while shown.
+    shown_at: Option<(i32, i32)>,
+    /// It asked for a grab and got it (it is in the client's `grabs`).
+    grab: bool,
+    /// The compositor dismissed it (popup_done sent): unmapped for good.
+    dismissed: bool,
+}
+
 enum Kind<F> {
     Display,
     Registry,
@@ -480,6 +555,8 @@ enum Kind<F> {
     WmBase,
     XdgSurface(XdgSurface),
     Toplevel(Toplevel),
+    Positioner(Rules),
+    Popup(Popup),
     Seat,
     Pointer,
     Keyboard,
@@ -501,8 +578,15 @@ struct Seat {
     at: (i32, i32),
     /// Buttons held (1 left, 2 right): the pointer stays with its surface.
     buttons: u32,
-    /// The surface with the keyboard focus.
+    /// The surface with the keyboard focus: the topmost grabbing popup's
+    /// while there is one, else the active toplevel's.
     keyboard: Option<u32>,
+    /// The surface whose window is the desktop's active one (a toplevel's:
+    /// its configures say activated).
+    active: Option<u32>,
+    /// The serial of the last button or key press (a popup's grab names
+    /// it).
+    press: Option<u32>,
     /// The keys down (evdev codes), at most MAX_KEYS.
     keys: Vec<u32>,
     /// The modifiers held by those keys, and those toggled (Caps Lock, Num
@@ -529,6 +613,10 @@ pub struct Client<F> {
     out_fds: VecDeque<(usize, F)>,
     seat: Seat,
     serial: u32,
+    /// The popups that grabbed, bottom (the toplevel's) first: the last
+    /// is the topmost, the only one the client may destroy, and the one
+    /// with the keyboard focus once shown.
+    grabs: Vec<u32>,
     /// Frame callbacks whose commit was applied, waiting for the next
     /// refresh (`refresh`).
     due: Vec<u32>,
@@ -607,6 +695,7 @@ impl<F> Client<F> {
             out_fds: VecDeque::new(),
             seat: Seat::default(),
             serial: 0,
+            grabs: Vec::new(),
             due: Vec::new(),
             requests: 0,
             commits: 0,
@@ -686,6 +775,7 @@ impl<F> Client<F> {
         self.fds.clear();
         self.out_fds.clear();
         self.due.clear();
+        self.grabs.clear();
     }
 
     /// Its objects for the state dump, one per line.
@@ -708,8 +798,21 @@ impl<F> Client<F> {
                     b.width, b.height, b.stride, b.offset
                 )),
                 Kind::XdgSurface(x) => out(format_args!(
-                    "{name}#{id} v{v}: surface {}, toplevel {:?}, configure sent {:?}, acked {}, unacked {:?}, place {:?}",
-                    x.surface, x.toplevel, x.sent, x.acked, x.unacked, x.place
+                    "{name}#{id} v{v}: surface {}, toplevel {:?}, popup {:?}, geometry {:?}, configure sent {:?}, acked {}, unacked {:?}, place {:?}",
+                    x.surface, x.toplevel, x.popup, x.geometry, x.sent, x.acked, x.unacked, x.place
+                )),
+                Kind::Positioner(r) => out(format_args!("{name}#{id} v{v}: {r:?}")),
+                Kind::Popup(p) => out(format_args!(
+                    "{name}#{id} v{v}: xdg_surface {}, parent {}, {:?}, configured {:?}, at {:?}, parent at {:?}, shown at {:?}, grab {}, dismissed {}",
+                    p.xdg,
+                    p.parent,
+                    p.rules,
+                    p.configured,
+                    p.at,
+                    p.origin,
+                    p.shown_at,
+                    p.grab,
+                    p.dismissed
                 )),
                 Kind::Toplevel(t) => out(format_args!(
                     "{name}#{id} v{v}: \"{}\" (app id \"{}\"), decoration {:?}, {:?}",
@@ -727,8 +830,17 @@ impl<F> Client<F> {
         }
         let st = &self.seat;
         out(format_args!(
-            "seat: pointer on {:?} at {:?}, buttons {:#x}; keyboard on {:?}, keys {:?}, modifiers depressed {:#x} locked {:#x}",
-            st.pointer, st.at, st.buttons, st.keyboard, st.keys, st.depressed, st.locked
+            "seat: pointer on {:?} at {:?}, buttons {:#x}; keyboard on {:?}, keys {:?}, modifiers depressed {:#x} locked {:#x}; active {:?}; last press serial {:?}; popup grabs {:?}",
+            st.pointer,
+            st.at,
+            st.buttons,
+            st.keyboard,
+            st.keys,
+            st.depressed,
+            st.locked,
+            st.active,
+            st.press,
+            self.grabs
         ));
     }
 
@@ -1048,6 +1160,8 @@ impl<F> Client<F> {
             Some(Kind::WmBase) => Tag::WmBase,
             Some(Kind::XdgSurface(_)) => Tag::XdgSurface,
             Some(Kind::Toplevel(_)) => Tag::Toplevel,
+            Some(Kind::Positioner(_)) => Tag::Positioner,
+            Some(Kind::Popup(_)) => Tag::Popup,
             Some(Kind::Seat) => Tag::Seat,
             Some(Kind::Pointer) => Tag::Pointer,
             Some(Kind::Keyboard) => Tag::Keyboard,
@@ -1079,6 +1193,8 @@ impl<F> Client<F> {
             Tag::WmBase => self.wm_base(host, r),
             Tag::XdgSurface => self.xdg_surface(host, r),
             Tag::Toplevel => self.toplevel_request(host, r),
+            Tag::Positioner => self.positioner_request(host, r),
+            Tag::Popup => self.popup_request(host, r),
             Tag::Seat => self.seat_request(host, r),
             Tag::Pointer => self.pointer_request(host, r),
             Tag::Keyboard => {
@@ -1088,17 +1204,6 @@ impl<F> Client<F> {
             Tag::DecorationManager => self.decoration_manager(host, r),
             Tag::Decoration => self.decoration_request(host, r),
         }
-    }
-
-    /// A request gala does not implement: ledgered and refused.
-    fn missing<H: Host<Fd = F>>(&mut self, host: &mut H, r: &Req<'_, F>) -> Result {
-        host.note(Note::Missing { interface: r.iface.name, request: r.sig.name });
-        Err(self.fail(
-            host,
-            r.id,
-            DISPLAY_IMPLEMENTATION,
-            format_args!("{}.{} is not implemented by gala yet", r.iface.name, r.sig.name),
-        ))
     }
 
     fn display<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
@@ -1386,8 +1491,16 @@ impl<F> Client<F> {
                     self.seat.keys.clear();
                     self.seat.depressed = 0;
                 }
+                if self.seat.active == Some(sid) {
+                    self.seat.active = None;
+                }
                 if let Some(x) = xdg.and_then(|x| self.xdg(x)) {
                     x.surface = 0;
+                }
+                // A grabbing popup's window may have gone: the grab and
+                // the focus move to what is left.
+                if window.is_some() && !self.grabs.is_empty() {
+                    self.grab_changed(host)?;
                 }
                 for cb in frames {
                     self.delete(host, cb)?;
@@ -1488,14 +1601,24 @@ impl<F> Client<F> {
         let damage = s.pending.damage.take();
         let frames = core::mem::take(&mut s.pending.frames);
         let xdg = s.xdg;
-        let toplevel = xdg.and_then(|x| match self.object(x) {
-            Some(Object { kind: Kind::XdgSurface(x), .. }) => Some(x.toplevel),
-            _ => None,
+        // The window geometry applies with the commit.
+        let roles = xdg.and_then(|x| self.xdg(x)).map(|xs| {
+            if let Some(g) = xs.pending_geometry.take() {
+                xs.geometry = Some(g);
+            }
+            (xs.toplevel, xs.popup)
         });
+        let (toplevel, popup) = match roles {
+            Some((t, p)) => (t, p),
+            None => (None, None),
+        };
         let mut shown = None;
         let mut placed = None;
-        match (xdg, toplevel) {
-            (Some(x), Some(Some(t))) => {
+        match (xdg, toplevel, popup) {
+            (Some(x), None, Some(p)) => {
+                shown = self.popup_commit(host, sid, x, p, attach, damage)?;
+            }
+            (Some(x), Some(t), _) => {
                 let (acked, sent) = match self.xdg(x) {
                     Some(xs) => (xs.acked, xs.sent),
                     None => (false, None),
@@ -1534,7 +1657,7 @@ impl<F> Client<F> {
                     }
                 }
             }
-            (Some(x), _) => {
+            (Some(x), None, None) => {
                 return Err(self.fail(
                     host,
                     x,
@@ -1542,7 +1665,7 @@ impl<F> Client<F> {
                     format_args!("commit of an xdg_surface without a role"),
                 ));
             }
-            (None, _) => {
+            (None, _, _) => {
                 // No role: nothing shows it; the buffer is free again.
                 if let Some(Some(b)) = attach {
                     self.release(host, b)?;
@@ -1626,7 +1749,7 @@ impl<F> Client<F> {
         if sizing.maximized {
             bits |= 1 << STATE_MAXIMIZED;
         }
-        if surface != 0 && self.seat.keyboard == Some(surface) {
+        if surface != 0 && self.seat.active == Some(surface) {
             bits |= 1 << STATE_ACTIVATED;
         }
         if version >= 2 {
@@ -1744,8 +1867,23 @@ impl<F> Client<F> {
         if let Some(s) = self.surface(sid) {
             s.window = window;
         }
-        // A new or resized window gets every row, else the damaged ones.
-        let rows = if had.is_none() || resized {
+        let rows = self.present(host, b, window, had.is_none() || resized, damage, height)?;
+        Ok(Some(((width, height), rows)))
+    }
+
+    /// Copies buffer `b` (`height` rows) into `window`: every row of a new
+    /// or resized one (`whole`), else the damaged ones. The rows copied.
+    fn present<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        b: u32,
+        window: Option<u32>,
+        whole: bool,
+        damage: Option<(i64, i64)>,
+        height: u32,
+    ) -> Result<Option<(u32, u32)>> {
+        let Some(w) = window else { return Ok(None) };
+        let rows = if whole {
             Some((0, height))
         } else {
             damage.and_then(|(from, to)| {
@@ -1753,11 +1891,10 @@ impl<F> Client<F> {
                 (from < to).then_some((from as u32, to as u32))
             })
         };
-        let Some(w) = window else { return Ok(Some(((width, height), None))) };
         if let Some((from, to)) = rows {
             self.copy(host, b, w, from, to)?;
         }
-        Ok(Some(((width, height), rows)))
+        Ok(rows)
     }
 
     /// Copies rows `from..to` of buffer `b` into window `w`.
@@ -1813,6 +1950,14 @@ impl<F> Client<F> {
     /// A null buffer committed: the window goes and the surface waits for
     /// a new initial commit (and configure).
     fn unmap<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32, x: u32) -> Result {
+        // No longer the active window's surface (the focus does not come
+        // back to it), and its popups have nothing to stand on: dismissed.
+        if self.seat.active == Some(sid) {
+            self.seat.active = None;
+        }
+        if self.dismiss_children(host, x, "parent unmapped")? {
+            self.grab_changed(host)?;
+        }
         // An unmapped surface has neither focus.
         if self.seat.pointer == Some(sid) {
             self.seat.buttons = 0;
@@ -1844,11 +1989,678 @@ impl<F> Client<F> {
         Ok(())
     }
 
+    // ---- Popups (ARCHITECTURE "Popups") -----------------------------------
+
+    fn popup(&mut self, id: u32) -> Option<&mut Popup> {
+        match self.object_mut(id) {
+            Some(Object { kind: Kind::Popup(p), .. }) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The xdg_wm_base xdg_surface `x` came from (1, the display, if it is
+    /// gone: the error still names an object).
+    fn wm_base_of(&mut self, x: u32) -> u32 {
+        self.xdg(x).map_or(1, |xs| xs.wm_base)
+    }
+
+    /// xdg_surface `x`'s get_popup(id, parent, positioner).
+    #[allow(clippy::too_many_arguments)]
+    fn get_popup<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        x: u32,
+        role: Option<u32>,
+        id: u32,
+        parent: Option<u32>,
+        positioner: u32,
+        version: u32,
+    ) -> Result {
+        if role.is_some() {
+            return Err(self.fail(
+                host,
+                x,
+                XDG_SURFACE_ALREADY_CONSTRUCTED,
+                format_args!("xdg_surface@{x} already has a role"),
+            ));
+        }
+        let rules = match self.object(positioner) {
+            Some(Object { kind: Kind::Positioner(r), .. }) => *r,
+            _ => return Ok(()),
+        };
+        let wm_base = self.wm_base_of(x);
+        if !rules.complete() {
+            return Err(self.fail(
+                host,
+                wm_base,
+                WM_BASE_INVALID_POSITIONER,
+                format_args!(
+                    "xdg_positioner@{positioner} is incomplete (size {:?}, anchor rectangle {:?})",
+                    rules.size, rules.rect
+                ),
+            ));
+        }
+        // A parent is an xdg_surface with a role, not this one.
+        if let Some(px) = parent {
+            let has_role = self.xdg(px).is_some_and(|p| p.toplevel.is_some() || p.popup.is_some());
+            if px == x || !has_role {
+                return Err(self.fail(
+                    host,
+                    wm_base,
+                    WM_BASE_INVALID_POPUP_PARENT,
+                    format_args!("xdg_surface@{px} cannot be a popup's parent (no role yet)"),
+                ));
+            }
+        }
+        let p = Popup {
+            xdg: x,
+            parent: parent.unwrap_or(0),
+            rules,
+            configured: (0, 0, 0, 0),
+            at: None,
+            origin: None,
+            shown_at: None,
+            grab: false,
+            dismissed: false,
+        };
+        self.insert(host, id, XDG_POPUP, version, Kind::Popup(p))?;
+        let surface = match self.xdg(x) {
+            Some(xs) => {
+                xs.popup = Some(id);
+                xs.surface
+            }
+            None => 0,
+        };
+        host.note(Note::Role { surface, role: "xdg_popup", object: id });
+        Ok(())
+    }
+
+    /// The screen position of the window geometry of xdg_surface `x`
+    /// (None while it shows no window).
+    fn geometry_origin<H: Host<Fd = F>>(&mut self, host: &mut H, x: u32) -> Option<(i32, i32)> {
+        let (surface, geometry) = self.xdg(x).map(|xs| (xs.surface, xs.geometry))?;
+        let window = self.surface(surface)?.window?;
+        let (sx, sy) = host.client_origin(window)?;
+        let (gx, gy) = geometry.map_or((0, 0), |g| (g.0, g.1));
+        Some((sx.saturating_add(gx), sy.saturating_add(gy)))
+    }
+
+    /// Where popup `p`'s parent's window geometry is on the screen: the
+    /// parent's while it shows, else (an orphan, or a parent not shown)
+    /// where it was when the popup was last placed.
+    fn parent_origin<H: Host<Fd = F>>(&mut self, host: &mut H, p: u32) -> Option<(i32, i32)> {
+        let (parent, kept) = self.popup(p).map(|pp| (pp.parent, pp.origin))?;
+        if parent != 0
+            && let Some(o) = self.geometry_origin(host, parent)
+        {
+            return Some(o);
+        }
+        kept
+    }
+
+    /// Places popup `p` by its rules and sends its configure (and the
+    /// xdg_surface's), remembered with the place until acked.
+    fn configure_popup<H: Host<Fd = F>>(&mut self, host: &mut H, x: u32, p: u32) -> Result {
+        let origin = self.parent_origin(host, p);
+        let (work_w, work_h) = host.work_area();
+        let Some(rules) = self.popup(p).map(|pp| pp.rules) else { return Ok(()) };
+        let rect = popup::place(&rules, origin, (0, 0, work_w, work_h));
+        let (px, py, w, h) = rect;
+        let args = [Arg::Int(px), Arg::Int(py), Arg::Int(w), Arg::Int(h)];
+        self.event(host, p, XDG_POPUP, 0, &args)?;
+        let serial = self.next_serial();
+        self.event(host, x, XDG_SURFACE, 0, &[Arg::Uint(serial)])?;
+        if let Some(pp) = self.popup(p) {
+            pp.configured = rect;
+            if origin.is_some() {
+                pp.origin = origin;
+            }
+        }
+        let Some(xs) = self.xdg(x) else { return Ok(()) };
+        xs.sent = Some(serial);
+        if xs.unacked.len() >= MAX_CONFIGURES {
+            xs.unacked.remove(0);
+        }
+        if xs.unacked.try_push((serial, Some((px, py)))).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        let surface = xs.surface;
+        host.note(Note::Popup { surface, what: "configure", why: "", rect, serial });
+        Ok(())
+    }
+
+    /// A commit of popup `p`'s surface `sid` (xdg_surface `x`): its first
+    /// is answered with its configure; once acked a buffer maps it (a
+    /// popup window at its place) and a null buffer unmaps it. A
+    /// dismissed popup shows nothing again (its buffers are released).
+    fn popup_commit<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        sid: u32,
+        x: u32,
+        p: u32,
+        attach: Option<Option<u32>>,
+        damage: Option<(i64, i64)>,
+    ) -> Result<Option<Shown>> {
+        let Some((parent, dismissed, kept)) =
+            self.popup(p).map(|pp| (pp.parent, pp.dismissed, pp.origin))
+        else {
+            return Ok(None);
+        };
+        if dismissed {
+            if let Some(Some(b)) = attach {
+                self.release(host, b)?;
+            }
+            return Ok(None);
+        }
+        let (acked, sent) = match self.xdg(x) {
+            Some(xs) => (xs.acked, xs.sent),
+            None => (false, None),
+        };
+        if !acked {
+            if matches!(attach, Some(Some(_))) {
+                return Err(self.fail(
+                    host,
+                    x,
+                    XDG_SURFACE_UNCONFIGURED_BUFFER,
+                    format_args!("a buffer was attached before the first configure was acked"),
+                ));
+            }
+            if sent.is_none() {
+                if parent == 0 && kept.is_none() {
+                    // No protocol here gives a parent another way.
+                    let wm_base = self.wm_base_of(x);
+                    return Err(self.fail(
+                        host,
+                        wm_base,
+                        WM_BASE_INVALID_POPUP_PARENT,
+                        format_args!("xdg_popup@{p} has no parent"),
+                    ));
+                }
+                self.configure_popup(host, x, p)?;
+            }
+            return Ok(None);
+        }
+        match attach {
+            Some(Some(b)) => {
+                let shown = self.show_popup(host, sid, x, p, b, damage)?;
+                self.release(host, b)?;
+                Ok(shown)
+            }
+            Some(None) => {
+                let grab = self.popup(p).is_some_and(|pp| pp.grab);
+                if grab && self.grabs.last() != Some(&p) {
+                    return Err(self.not_topmost(host, x, p, "unmapped"));
+                }
+                self.unmap_popup(host, p)?;
+                if grab {
+                    self.grab_changed(host)?;
+                }
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Shows buffer `b` on popup `p`'s surface `sid`: a popup window at
+    /// the parent's window geometry plus its place (less its own window
+    /// geometry's offset), moved when the place or size changes; a
+    /// grabbing popup shown takes the grab and the keyboard focus.
+    fn show_popup<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        sid: u32,
+        x: u32,
+        p: u32,
+        b: u32,
+        damage: Option<(i64, i64)>,
+    ) -> Result<Option<Shown>> {
+        let (width, height) = match self.object(b) {
+            Some(Object { kind: Kind::Buffer(buf), .. }) => (buf.width, buf.height),
+            _ => return Ok(None),
+        };
+        let Some(origin) = self.parent_origin(host, p) else {
+            let wm_base = self.wm_base_of(x);
+            return Err(self.fail(
+                host,
+                wm_base,
+                WM_BASE_INVALID_POPUP_PARENT,
+                format_args!("xdg_popup@{p}'s parent is not mapped"),
+            ));
+        };
+        let (place, geometry) = match self.xdg(x) {
+            Some(xs) => (xs.place.take(), xs.geometry),
+            None => (None, None),
+        };
+        let Some(pp) = self.popup(p) else { return Ok(None) };
+        if place.is_some() {
+            pp.at = place;
+        }
+        pp.origin = Some(origin);
+        let (ax, ay) = pp.at.unwrap_or((pp.configured.0, pp.configured.1));
+        let (gx, gy) = geometry.map_or((0, 0), |g| (g.0, g.1));
+        let at = (
+            origin.0.saturating_add(ax).saturating_sub(gx),
+            origin.1.saturating_add(ay).saturating_sub(gy),
+        );
+        let moved = pp.shown_at != Some(at);
+        pp.shown_at = Some(at);
+        let grab = pp.grab;
+        let Some(s) = self.surface(sid) else { return Ok(None) };
+        let (had, resized) = (s.window, s.size != (width, height));
+        s.size = (width, height);
+        s.decorated = false;
+        let window = match had {
+            Some(w) => {
+                if moved || resized {
+                    host.window_place(w, at.0, at.1, width, height, false);
+                }
+                Some(w)
+            }
+            None => {
+                let w = host.popup_create(at.0, at.1, width, height);
+                host.note(Note::Mapped { surface: sid, window: w });
+                w
+            }
+        };
+        if let Some(s) = self.surface(sid) {
+            s.window = window;
+        }
+        let rows = self.present(host, b, window, had.is_none() || resized, damage, height)?;
+        if had.is_none() && grab {
+            self.grab_changed(host)?;
+        }
+        Ok(Some(((width, height), rows)))
+    }
+
+    /// Popup `p`'s window goes (destroyed or unmapped): the foci it had,
+    /// and the grab if it was its; it waits for a new initial commit.
+    fn unmap_popup<H: Host<Fd = F>>(&mut self, host: &mut H, p: u32) -> Result {
+        let Some((x, grab)) = self.popup(p).map(|pp| (pp.xdg, pp.grab)) else { return Ok(()) };
+        if let Some(pp) = self.popup(p) {
+            pp.grab = false;
+            pp.at = None;
+            pp.shown_at = None;
+        }
+        let sid = match self.xdg(x) {
+            Some(xs) => {
+                xs.sent = None;
+                xs.acked = false;
+                xs.unacked.clear();
+                xs.place = None;
+                xs.surface
+            }
+            None => 0,
+        };
+        self.drop_foci(host, sid)?;
+        if let Some(s) = self.surface(sid) {
+            s.size = (0, 0);
+            if let Some(w) = s.window.take() {
+                host.window_destroy(w);
+            }
+        }
+        if grab {
+            self.grabs.retain(|&g| g != p);
+        }
+        Ok(())
+    }
+
+    /// Surface `sid` no longer shows: the pointer and the keyboard focus
+    /// leave it.
+    fn drop_foci<H: Host<Fd = F>>(&mut self, host: &mut H, sid: u32) -> Result {
+        if sid == 0 {
+            return Ok(());
+        }
+        if self.seat.pointer == Some(sid) {
+            self.seat.buttons = 0;
+            self.pointer_leave(host)?;
+        }
+        if self.seat.keyboard == Some(sid) {
+            self.keyboard_leave(host)?;
+        }
+        Ok(())
+    }
+
+    /// The compositor dismisses popup `p` (`why`): popup_done, unmapped
+    /// for good, and its own popups with it (topmost first).
+    fn dismiss<H: Host<Fd = F>>(&mut self, host: &mut H, p: u32, why: &'static str) -> Result {
+        let Some(pp) = self.popup(p) else { return Ok(()) };
+        if pp.dismissed {
+            return Ok(());
+        }
+        pp.dismissed = true;
+        let x = pp.xdg;
+        self.dismiss_children(host, x, why)?;
+        self.event(host, p, XDG_POPUP, 1, &[])?;
+        let surface = self.xdg(x).map_or(0, |xs| xs.surface);
+        host.note(Note::Popup { surface, what: "dismissed", why, rect: (0, 0, 0, 0), serial: 0 });
+        self.unmap_popup(host, p)
+    }
+
+    /// Dismisses the popups whose parent is xdg_surface `x` (each with
+    /// its own); whether any was.
+    fn dismiss_children<H: Host<Fd = F>>(
+        &mut self,
+        host: &mut H,
+        x: u32,
+        why: &'static str,
+    ) -> Result<bool> {
+        let mut any = false;
+        // Newest first: the topmost are the last made.
+        let mut i = self.objects.len();
+        while i > 1 {
+            i -= 1;
+            let child = match &self.objects[i] {
+                Some(Object { kind: Kind::Popup(c), .. }) if c.parent == x && !c.dismissed => {
+                    i as u32
+                }
+                _ => continue,
+            };
+            self.dismiss(host, child, why)?;
+            any = true;
+        }
+        Ok(any)
+    }
+
+    /// Every grabbing popup is dismissed, topmost first (the desktop
+    /// ended the grab, or the window lost the activation); then the
+    /// keyboard focus goes back to the active window.
+    fn dismiss_grabs<H: Host<Fd = F>>(&mut self, host: &mut H, why: &'static str) -> Result {
+        if self.grabs.is_empty() {
+            return Ok(());
+        }
+        while let Some(&p) = self.grabs.last() {
+            self.dismiss(host, p, why)?;
+            // dismiss takes it off; never loop on one it could not.
+            self.grabs.retain(|&g| g != p);
+        }
+        self.grab_changed(host)
+    }
+
+    /// The grab changed: the desktop's follows the topmost shown grabbing
+    /// popup, and so does the keyboard focus (without one: the active
+    /// window's surface).
+    fn grab_changed<H: Host<Fd = F>>(&mut self, host: &mut H) -> Result {
+        let mut top = None;
+        for &p in self.grabs.iter().rev() {
+            let x = match self.object(p) {
+                Some(Object { kind: Kind::Popup(pp), .. }) => pp.xdg,
+                _ => continue,
+            };
+            let sid = match self.object(x) {
+                Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.surface,
+                _ => continue,
+            };
+            if let Some(Object { kind: Kind::Surface(s), .. }) = self.object(sid)
+                && let Some(w) = s.window
+            {
+                top = Some((sid, w));
+                break;
+            }
+        }
+        host.grab(top.map(|(_, w)| w));
+        let focus = top.map(|(sid, _)| sid).or(self.seat.active);
+        match focus {
+            Some(f) if self.seat.keyboard != Some(f) => self.keyboard_enter(host, f),
+            Some(_) => Ok(()),
+            None => {
+                // Only a popup's focus is taken back here.
+                let on_popup = self.seat.keyboard.is_some_and(|k| {
+                    matches!(self.object(k), Some(Object { kind: Kind::Surface(s), .. })
+                        if s.xdg.is_some_and(|x| matches!(self.object(x),
+                            Some(Object { kind: Kind::XdgSurface(xs), .. }) if xs.popup.is_some())))
+                });
+                if on_popup { self.keyboard_leave(host) } else { Ok(()) }
+            }
+        }
+    }
+
+    /// The not_the_topmost_popup error: popup `p` (xdg_surface `x`) has a
+    /// grabbing popup above it.
+    fn not_topmost<H: Host<Fd = F>>(&mut self, host: &mut H, x: u32, p: u32, what: &str) -> End {
+        let wm_base = self.wm_base_of(x);
+        let top = self.grabs.last().copied().unwrap_or(0);
+        self.fail(
+            host,
+            wm_base,
+            WM_BASE_NOT_THE_TOPMOST_POPUP,
+            format_args!("xdg_popup@{p} {what} while xdg_popup@{top} grabs above it"),
+        )
+    }
+
+    fn positioner_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let id = r.id;
+        // The rules are a copy, stored back at the end.
+        let mut rules = match self.object(id) {
+            Some(Object { kind: Kind::Positioner(rules), .. }) => *rules,
+            _ => return Ok(()),
+        };
+        let invalid = |what: fmt::Arguments<'_>, this: &mut Self, host: &mut H| -> Result {
+            Err(this.fail(host, id, POSITIONER_INVALID_INPUT, what))
+        };
+        match (r.op, r.args) {
+            (0, []) => return self.delete(host, id),
+            // set_size(width, height)
+            (1, [Arg::Int(w), Arg::Int(h)]) => {
+                if *w <= 0 || *h <= 0 {
+                    return invalid(format_args!("invalid size {w}x{h}"), self, host);
+                }
+                rules.size = (*w, *h);
+            }
+            // set_anchor_rect(x, y, width, height)
+            (2, [Arg::Int(x), Arg::Int(y), Arg::Int(w), Arg::Int(h)]) => {
+                if *w < 0 || *h < 0 {
+                    return invalid(
+                        format_args!("invalid anchor rectangle size {w}x{h}"),
+                        self,
+                        host,
+                    );
+                }
+                rules.rect = Some((*x, *y, *w, *h));
+            }
+            // set_anchor(anchor), set_gravity(gravity)
+            (3 | 4, [Arg::Uint(v)]) => {
+                if !popup::valid_direction(*v) {
+                    let what = if r.op == 3 { "anchor" } else { "gravity" };
+                    return invalid(format_args!("invalid {what} {v}"), self, host);
+                }
+                if r.op == 3 {
+                    rules.anchor = *v;
+                } else {
+                    rules.gravity = *v;
+                }
+            }
+            // set_constraint_adjustment(bits): unknown bits are ignored.
+            (5, [Arg::Uint(bits)]) => rules.adjust = bits & popup::ADJUST_ALL,
+            // set_offset(x, y)
+            (6, [Arg::Int(x), Arg::Int(y)]) => rules.offset = (*x, *y),
+            // set_reactive (3): kept; a popup is not reconstrained when its
+            // parent moves yet.
+            (7, []) => {
+                rules.reactive = true;
+                host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+            }
+            // set_parent_size, set_parent_configure (3): the parent's
+            // future state is not used (popups are placed against its
+            // present one).
+            (8 | 9, _) => {
+                host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+            }
+            _ => {}
+        }
+        if let Some(Object { kind: Kind::Positioner(stored), .. }) = self.object_mut(id) {
+            *stored = rules;
+        }
+        Ok(())
+    }
+
+    fn popup_request<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
+        let p = r.id;
+        let Some((x, grab, dismissed)) = self.popup(p).map(|pp| (pp.xdg, pp.grab, pp.dismissed))
+        else {
+            return Ok(());
+        };
+        match (r.op, r.args) {
+            // destroy: unmapped; the topmost grabbing popup only. Its own
+            // popups stay where they are (orphans: weston's behaviour).
+            (0, []) => {
+                if grab && !dismissed && self.grabs.last() != Some(&p) {
+                    return Err(self.not_topmost(host, x, p, "destroyed"));
+                }
+                self.unmap_popup(host, p)?;
+                for i in 1..self.objects.len() {
+                    let child_xdg = match &mut self.objects[i] {
+                        Some(Object { kind: Kind::Popup(c), .. }) if c.parent == x => {
+                            c.parent = 0;
+                            c.xdg
+                        }
+                        _ => continue,
+                    };
+                    {
+                        let surface = self.xdg(child_xdg).map_or(0, |xs| xs.surface);
+                        host.note(Note::Popup {
+                            surface,
+                            what: "orphaned",
+                            why: "its parent popup was destroyed first",
+                            rect: (0, 0, 0, 0),
+                            serial: 0,
+                        });
+                    }
+                }
+                if let Some(xs) = self.xdg(x) {
+                    xs.popup = None;
+                }
+                if grab {
+                    self.grab_changed(host)?;
+                }
+                self.delete(host, p)
+            }
+            // grab(seat, serial)
+            (1, [Arg::Object(Some(_)), Arg::Uint(serial)]) => self.grab(host, x, p, *serial),
+            // reposition(positioner, token) (3)
+            (2, [Arg::Object(Some(pos)), Arg::Uint(token)]) => {
+                let rules = match self.object(*pos) {
+                    Some(Object { kind: Kind::Positioner(rules), .. }) => *rules,
+                    _ => return Ok(()),
+                };
+                if !rules.complete() {
+                    let wm_base = self.wm_base_of(x);
+                    return Err(self.fail(
+                        host,
+                        wm_base,
+                        WM_BASE_INVALID_POSITIONER,
+                        format_args!("xdg_positioner@{pos} is incomplete"),
+                    ));
+                }
+                if let Some(pp) = self.popup(p) {
+                    pp.rules = rules;
+                }
+                // Before the first configure, that one uses the rules; a
+                // dismissed popup is placed no more.
+                let configured = self.xdg(x).is_some_and(|xs| xs.sent.is_some());
+                if dismissed || !configured {
+                    return Ok(());
+                }
+                self.event(host, p, XDG_POPUP, 2, &[Arg::Uint(*token)])?;
+                let surface = self.xdg(x).map_or(0, |xs| xs.surface);
+                let rect = (0, 0, 0, 0);
+                host.note(Note::Popup {
+                    surface,
+                    what: "repositioned",
+                    why: "",
+                    rect,
+                    serial: *token,
+                });
+                self.configure_popup(host, x, p)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// xdg_popup.grab: allowed only before its first commit, with the
+    /// topmost grabbing popup (or, without one, a toplevel) as its parent;
+    /// granted for the serial of the client's last button or key press
+    /// (else the popup is dismissed at once, as the protocol says of a
+    /// grab the compositor denies), and so for a parent dismissed already.
+    fn grab<H: Host<Fd = F>>(&mut self, host: &mut H, x: u32, p: u32, serial: u32) -> Result {
+        let (committed, surface) = match self.xdg(x) {
+            Some(xs) => (xs.sent.is_some() || xs.acked, xs.surface),
+            None => (false, 0),
+        };
+        let mapped = self.surface(surface).is_some_and(|s| s.window.is_some());
+        let Some((parent, dismissed)) = self.popup(p).map(|pp| (pp.parent, pp.dismissed)) else {
+            return Ok(());
+        };
+        if committed || mapped {
+            return Err(self.fail(
+                host,
+                p,
+                POPUP_INVALID_GRAB,
+                format_args!("xdg_popup@{p} grabs after its first commit"),
+            ));
+        }
+        if dismissed {
+            return Ok(());
+        }
+        let parent_popup = self.xdg(parent).and_then(|px| px.popup);
+        let parent_dismissed =
+            parent_popup.and_then(|pp| self.popup(pp)).is_some_and(|pp| pp.dismissed);
+        let rect = (0, 0, 0, 0);
+        if parent_dismissed {
+            self.event(host, p, XDG_POPUP, 1, &[])?;
+            if let Some(pp) = self.popup(p) {
+                pp.dismissed = true;
+            }
+            let why = "its parent was dismissed";
+            host.note(Note::Popup { surface, what: "grab denied", why, rect, serial });
+            return Ok(());
+        }
+        let top = self.grabs.last().copied();
+        let parent_toplevel = self.xdg(parent).is_some_and(|px| px.toplevel.is_some());
+        let valid = match top {
+            None => parent_toplevel,
+            Some(t) => parent_popup == Some(t),
+        };
+        if !valid {
+            return Err(self.fail(
+                host,
+                p,
+                POPUP_INVALID_GRAB,
+                format_args!(
+                    "xdg_popup@{p}'s parent is neither the topmost grabbing popup ({top:?}) nor, without one, a toplevel"
+                ),
+            ));
+        }
+        if self.seat.press != Some(serial) {
+            self.event(host, p, XDG_POPUP, 1, &[])?;
+            if let Some(pp) = self.popup(p) {
+                pp.dismissed = true;
+            }
+            let why = "not the serial of the last button or key press";
+            host.note(Note::Popup { surface, what: "grab denied", why, rect, serial });
+            return Ok(());
+        }
+        if self.grabs.try_push(p).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        if let Some(pp) = self.popup(p) {
+            pp.grab = true;
+        }
+        host.note(Note::Popup { surface, what: "grab", why: "", rect, serial });
+        Ok(())
+    }
+
     fn wm_base<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
         match (r.op, r.args) {
             (0, []) => self.delete(host, r.id),
-            // create_positioner: popups are not there yet.
-            (1, _) => self.missing(host, &r),
+            // create_positioner(id)
+            (1, [Arg::NewId(id)]) => self.insert(
+                host,
+                *id,
+                XDG_POSITIONER,
+                r.version,
+                Kind::Positioner(Rules::default()),
+            ),
             // get_xdg_surface(id, surface)
             (2, [Arg::NewId(id), Arg::Object(Some(sid))]) => {
                 let (id, sid) = (*id, *sid);
@@ -1871,7 +2683,11 @@ impl<F> Client<F> {
                 }
                 let x = XdgSurface {
                     surface: sid,
+                    wm_base: r.id,
                     toplevel: None,
+                    popup: None,
+                    geometry: None,
+                    pending_geometry: None,
                     sent: None,
                     acked: false,
                     unacked: Vec::new(),
@@ -1892,15 +2708,17 @@ impl<F> Client<F> {
     fn xdg_surface<H: Host<Fd = F>>(&mut self, host: &mut H, r: Req<'_, F>) -> Result {
         let x = r.id;
         let Some(xs) = self.xdg(x) else { return Ok(()) };
-        let (surface, toplevel, sent) = (xs.surface, xs.toplevel, xs.sent);
+        let (surface, toplevel, popup, sent) = (xs.surface, xs.toplevel, xs.popup, xs.sent);
+        let role = toplevel.or(popup);
         match (r.op, r.args) {
             (0, []) => {
-                if toplevel.is_some() {
+                if role.is_some() {
+                    let what = if toplevel.is_some() { "xdg_toplevel" } else { "xdg_popup" };
                     return Err(self.fail(
                         host,
                         x,
                         XDG_SURFACE_DEFUNCT_ROLE_OBJECT,
-                        format_args!("xdg_surface destroyed before its xdg_toplevel"),
+                        format_args!("xdg_surface destroyed before its {what}"),
                     ));
                 }
                 if let Some(s) = self.surface(surface) {
@@ -1910,7 +2728,7 @@ impl<F> Client<F> {
             }
             // get_toplevel(id)
             (1, [Arg::NewId(id)]) => {
-                if toplevel.is_some() {
+                if role.is_some() {
                     return Err(self.fail(
                         host,
                         x,
@@ -1932,9 +2750,14 @@ impl<F> Client<F> {
                 host.note(Note::Role { surface, role: "xdg_toplevel", object: *id });
                 Ok(())
             }
-            (2, _) => self.missing(host, &r),
-            // set_window_geometry(x, y, width, height)
-            (3, [_, _, Arg::Int(w), Arg::Int(h)]) => {
+            // get_popup(id, parent, positioner)
+            (2, [Arg::NewId(id), Arg::Object(parent), Arg::Object(Some(pos))]) => {
+                self.get_popup(host, x, role, *id, *parent, *pos, r.version)
+            }
+            // set_window_geometry(x, y, width, height): applied at commit;
+            // a popup's places it (and its children), a toplevel's is not
+            // followed yet.
+            (3, [Arg::Int(gx), Arg::Int(gy), Arg::Int(w), Arg::Int(h)]) => {
                 if *w <= 0 || *h <= 0 {
                     return Err(self.fail(
                         host,
@@ -1943,12 +2766,17 @@ impl<F> Client<F> {
                         format_args!("invalid window geometry {w}x{h}"),
                     ));
                 }
-                host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                if toplevel.is_some() {
+                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
+                }
+                if let Some(xs) = self.xdg(x) {
+                    xs.pending_geometry = Some((*gx, *gy, *w, *h));
+                }
                 Ok(())
             }
             // ack_configure(serial)
             (4, [Arg::Uint(serial)]) => {
-                if toplevel.is_none() {
+                if role.is_none() {
                     return Err(self.fail(
                         host,
                         x,
@@ -2261,31 +3089,52 @@ impl<F> Client<F> {
             | Input::Maximize { window }
             | Input::Restore { window }
             | Input::Place { window, .. }
+            | Input::PopupDone { window }
             | Input::Unhandled { window, .. } => window,
         };
+        // The desktop ended the grab: its popups go, whether or not the
+        // window it named is still there (destroyed meanwhile).
+        if let Input::PopupDone { .. } = input
+            && (!self.grabs.is_empty() || self.surface_of(window).is_some())
+        {
+            return self.dismiss_grabs(host, "a press outside the client's windows");
+        }
         let Some(sid) = self.surface_of(window) else {
             host.note(Note::InputDropped { window });
             return Ok(());
         };
         let note = |what, code, state| Note::Input { what, surface: sid, window, code, state };
         match input {
-            // The keyboard focus, and the activated state with it.
+            // The activated state, and the keyboard focus with it (the
+            // topmost grabbing popup keeps it while there is one).
             Input::Focus { active: true, .. } => {
-                let old = self.seat.keyboard;
-                if old != Some(sid) {
-                    self.keyboard_enter(host, sid)?;
-                    if let Some(o) = old.and_then(|o| self.toplevel_of(o)) {
-                        self.reconfigure(host, o)?;
+                let old = self.seat.active;
+                let focus = self.grab_focus().unwrap_or(sid);
+                if old != Some(sid) || self.seat.keyboard != Some(focus) {
+                    self.seat.active = Some(sid);
+                    if self.seat.keyboard != Some(focus) {
+                        self.keyboard_enter(host, focus)?;
                     }
-                    if let Some(t) = self.toplevel_of(sid) {
-                        self.reconfigure(host, t)?;
+                    if old != Some(sid) {
+                        if let Some(o) = old.and_then(|o| self.toplevel_of(o)) {
+                            self.reconfigure(host, o)?;
+                        }
+                        if let Some(t) = self.toplevel_of(sid) {
+                            self.reconfigure(host, t)?;
+                        }
                     }
                 }
             }
+            // Another window is active: the client's popup grab ends (the
+            // user went elsewhere), then its keyboard focus.
             Input::Focus { active: false, .. } => {
-                if self.seat.keyboard == Some(sid) {
-                    self.keyboard_leave(host)?;
-                    if let Some(t) = self.toplevel_of(sid) {
+                if self.seat.active == Some(sid) || self.seat.keyboard == Some(sid) {
+                    let was = self.seat.active.take();
+                    self.dismiss_grabs(host, "its window is no longer the active one")?;
+                    if self.seat.keyboard.is_some() {
+                        self.keyboard_leave(host)?;
+                    }
+                    if let Some(t) = was.and_then(|w| self.toplevel_of(w)) {
                         self.reconfigure(host, t)?;
                     }
                 }
@@ -2311,6 +3160,9 @@ impl<F> Client<F> {
                     self.seat.buttons &= !bit;
                 }
                 let (serial, time) = (self.next_serial(), host.now_ms());
+                if pressed {
+                    self.seat.press = Some(serial);
+                }
                 let args = [
                     Arg::Uint(serial),
                     Arg::Uint(time),
@@ -2348,7 +3200,11 @@ impl<F> Client<F> {
                 self.send_all(host, WL_POINTER, 5, (5, u32::MAX), &[])?;
                 host.note(note("axis", 0, delta as u32));
             }
-            Input::Key { key, pressed, .. } => self.key(host, sid, key, pressed)?,
+            // To the topmost grabbing popup while there is one.
+            Input::Key { key, pressed, .. } => {
+                let target = self.grab_focus().unwrap_or(sid);
+                self.key(host, target, key, pressed)?
+            }
             Input::Left { .. } => {
                 if self.seat.pointer == Some(sid) && self.seat.buttons == 0 {
                     self.pointer_leave(host)?;
@@ -2366,8 +3222,29 @@ impl<F> Client<F> {
                 }
             }
             Input::Unhandled { what, .. } => host.note(Note::Unhandled { what, window }),
+            // Handled above (no grab: nothing to end).
+            Input::PopupDone { .. } => {}
         }
         Ok(())
+    }
+
+    /// The surface of the topmost shown grabbing popup (it has the
+    /// keyboard focus).
+    fn grab_focus(&self) -> Option<u32> {
+        self.grabs.iter().rev().find_map(|&p| {
+            let x = match self.object(p) {
+                Some(Object { kind: Kind::Popup(pp), .. }) => pp.xdg,
+                _ => return None,
+            };
+            let sid = match self.object(x) {
+                Some(Object { kind: Kind::XdgSurface(xs), .. }) => xs.surface,
+                _ => return None,
+            };
+            match self.object(sid) {
+                Some(Object { kind: Kind::Surface(s), .. }) if s.window.is_some() => Some(sid),
+                _ => None,
+            }
+        })
     }
 
     /// The toplevel surface `sid` has.
@@ -2651,6 +3528,9 @@ impl<F> Client<F> {
             }
         }
         let (serial, time) = (self.next_serial(), host.now_ms());
+        if pressed {
+            self.seat.press = Some(serial);
+        }
         let args = [Arg::Uint(serial), Arg::Uint(time), Arg::Uint(key), Arg::Uint(pressed.into())];
         self.send_all(host, WL_KEYBOARD, 3, (1, u32::MAX), &args)?;
         host.note(Note::Input {
@@ -2705,6 +3585,8 @@ enum Tag {
     WmBase,
     XdgSurface,
     Toplevel,
+    Positioner,
+    Popup,
     Seat,
     Pointer,
     Keyboard,
