@@ -92,7 +92,13 @@
 //! - PFXImportCertStore (pfx.rs: PKCS #12 files from OpenSSL, modern and
 //!   legacy algorithms, the key kept or not).
 //!
-//! Prints `cert_test: ok` or exits with the number of the failing check.
+//! The same source builds `wow64_cert_test`, the 32-bit (x86) program
+//! (WOW64: SysWOW64's crypt32, ncrypt and bcrypt); where Windows' sizes
+//! differ by pointer width the expected values are each width's
+//! (wincrypt.h).
+//!
+//! Prints `cert_test: ok` (`wow64_cert_test: ok`) or exits with the number
+//! of the failing check.
 
 #![no_std]
 #![no_main]
@@ -157,6 +163,19 @@ struct CertInfo {
     extensions: *mut Extension,
 }
 
+/// CERT_ENHKEY_USAGE.
+#[repr(C)]
+struct EnhKeyUsage {
+    count: u32,
+    ids: *const *const u8,
+}
+
+/// `x86` in a 32-bit build, `x64` in a 64-bit one: a size Windows gives
+/// by pointer width (wincrypt.h's structures with pointers).
+fn by_width(x86: u64, x64: u64) -> u64 {
+    if cfg!(target_arch = "x86") { x86 } else { x64 }
+}
+
 /// CERT_CONTEXT.
 #[repr(C)]
 struct CertContext {
@@ -167,7 +186,11 @@ struct CertContext {
     store: Handle,
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, ov: *mut c_void) -> i32;
@@ -177,7 +200,11 @@ unsafe extern "system" {
     fn LocalFree(p: *mut c_void) -> *mut c_void;
 }
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CryptBinaryToStringA(
         data: *const u8,
@@ -354,7 +381,11 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-#[link(name = "bcrypt", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "bcrypt", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "bcrypt", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn BCryptHash(
         alg: usize,
@@ -382,6 +413,12 @@ mod crl;
 mod pfx;
 mod vectors;
 
+// On x86 the compiler's runtime symbols (memcpy, the 64-bit division
+// helpers, _fltused) come from ntrt's x86 runtime.
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -391,13 +428,28 @@ unsafe extern "C" {
     fn strlen(s: *const u8) -> usize;
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __CxxFrameHandler3() -> ! {
     // SAFETY: ends the process.
     unsafe { ExitProcess(0xdeac) }
+}
+
+/// The program's name, which its lines start with.
+#[cfg(target_arch = "x86_64")]
+const NAME: &[u8] = b"cert_test";
+#[cfg(target_arch = "x86")]
+const NAME: &[u8] = b"wow64_cert_test";
+
+/// `<name>: <text>`.
+fn say(text: &[u8]) {
+    out(NAME);
+    out(b": ");
+    out(text);
 }
 
 fn out(text: &[u8]) {
@@ -432,7 +484,7 @@ impl Checks {
         if cond {
             return Ok(());
         }
-        out(b"cert_test: check ");
+        say(b"check ");
         out(&hex(self.0));
         out(b" got ");
         out(&hex(got as u32));
@@ -830,7 +882,7 @@ fn run() -> Result<(), u32> {
 pub extern "C" fn mainCRTStartup() -> ! {
     let code = match run() {
         Ok(()) => {
-            out(b"cert_test: ok\r\n");
+            say(b"ok\r\n");
             0
         }
         Err(id) => id,
@@ -918,12 +970,13 @@ fn usage(c: &mut Checks) -> Result<(), u32> {
         c.ok((size as usize) <= core::mem::size_of_val(&buf), size.into())?;
         c.ok(CertGetEnhancedKeyUsage(eku, 0, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
         // CERT_ENHKEY_USAGE { cUsageIdentifier, rgpszUsageIdentifier }.
-        c.eq(buf[0] as u32 as u64, 2)?;
-        let ids = buf[1] as *const *const u8;
+        let usage = buf.as_ptr().cast::<EnhKeyUsage>().read();
+        c.eq(usage.count.into(), 2)?;
+        let ids = usage.ids;
         c.ok(c_str(*ids) == b"1.3.6.1.5.5.7.3.1" && c_str(*ids.add(1)) == b"1.3.6.1.5.5.7.3.2", 0)?;
         size = core::mem::size_of_val(&buf) as u32;
         c.ok(CertGetEnhancedKeyUsage(plain, 0, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
-        c.eq(buf[0] as u32 as u64, 0)?;
+        c.eq(buf.as_ptr().cast::<EnhKeyUsage>().read().count.into(), 0)?;
         c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
         // Asking for the property only (CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG,
         // Python's enum_certificates): none set fails with
@@ -941,7 +994,7 @@ fn usage(c: &mut Checks) -> Result<(), u32> {
         c.eq(GetLastError().into(), CRYPT_E_NOT_FOUND)?;
         size = core::mem::size_of_val(&buf) as u32;
         c.ok(CertGetEnhancedKeyUsage(eku, 2, buf.as_mut_ptr().cast(), &mut size) != 0, 0)?;
-        c.eq(buf[0] as u32 as u64, 2)?;
+        c.eq(buf.as_ptr().cast::<EnhKeyUsage>().read().count.into(), 2)?;
 
         let info = &*(*plain).info;
         let other = &*(*eku).info;

@@ -412,6 +412,7 @@ name = "crypt32"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -1279,6 +1280,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "msi"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "msi_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "msimg32"
 version = "0.1.0"
 dependencies = [
@@ -1303,6 +1318,7 @@ name = "ncrypt"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -2731,6 +2747,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64_cert_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64_fs_test"
 version = "0.1.0"
 dependencies = [
@@ -2746,6 +2769,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_k32_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_msi_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

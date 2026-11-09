@@ -190,7 +190,7 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; the 32-bit crypt32 and ncrypt: `wow64_cert_test`; msi: `wow64_msi_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -1403,18 +1403,36 @@ need gala's.
      Current channel, Display None, AcceptEULA; a net scenario, the
      guest reaching the CDN through QEMU's NAT, so on CI's boot runners).
      `setup.exe` is a 32-bit x86 program (WOW64); every static import is
-     there (the UCRT and kernel32 functions above). How far it gets: it
-     starts, starts its copy (a second setup.exe), and that copy ends
-     with 0xc06d007e at its first delay-loaded DLL, crypt32.dll, which
-     has no i686 build yet (the ledger's top gap: `crypt32.dll missing
-     dll`). Next: an i686 crypt32 (its structures with pointers audited
-     for the x86 layouts, "Making a gala DLL 32-bit too"), then the rest
-     of the delay-loaded list as the run reaches them. Delay-loaded,
-     needed as it goes: i686 builds of crypt32, wininet,
-     wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
-     cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
-     control manager (advapi32's service calls are stubs); a few
-     shlwapi, user32, ole32, imm32 and shell32 functions.
+     there (the UCRT and kernel32 functions above). Done: the i686
+     crypt32 and ncrypt (`wow64_cert_test`: cert_test's source for x86,
+     the caller's structures typed and checked against wincrypt.h for
+     both widths, ARCHITECTURE "The 32-bit system DLLs"). How far it
+     gets: it starts, starts its copy (a second setup.exe), whose crypt32
+     now loads and answers (its own embedded signature asked of
+     CryptQueryObject, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED, is
+     recorded unsupported: `crypt32.dll!CryptQueryObject(content)`
+     0x400); it reads its Office and Click-to-Run registry keys (absent)
+     and ends with 0xc06d007e at its next delay-loaded DLL, msi.dll,
+     imported by ordinal (MsiCloseHandle #8, MsiEnumComponentQualifiersW
+     #39, MsiEnumProductsW #45, MsiLocateComponentW #90,
+     MsiQueryProductStateW #113, MsiSetInternalUI #141,
+     MsiGetComponentPathW #173, MsiConfigureProductExW #190,
+     MsiProvideQualifiedComponentExW #203). Done: gala's msi.dll, x64
+     and x86, these nine with their ordinals, answered as Windows does
+     for products and components it has not installed (`msi_test`,
+     `wow64_msi_test`; ARCHITECTURE "Other DLLs"). Past msi it disables
+     its input methods (imm32's ImmDisableIME: done, TRUE as Windows,
+     `office_api_test`), queries its activation context (QueryActCtxW's
+     module context and the manifest sections, recorded unsupported),
+     asks COM for a class not registered, and ends with 0xc06d007e at
+     normaliz.dll, which has no i686 build (powrprof.dll, also x64 only,
+     was missing before it without ending the run). Next, in the order
+     the run reaches them: i686 builds of normaliz and powrprof, then
+     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
+     (the signature check), wininet, urlmon, xmllite, webservices,
+     iphlpapi, setupapi, cabinet, credui, gdiplus; the service control
+     manager (advapi32's service calls are stubs); a few shlwapi,
+     user32, ole32 and shell32 functions.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,
