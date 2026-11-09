@@ -1050,9 +1050,15 @@ fn clone(c: &mut Checks, doc: Obj) -> Result<(), u32> {
     release(copy);
     let (hr, copy) = clone_of(doc, VARIANT_FALSE);
     c.hr(hr, S_OK)?;
-    let (hr, el) = get_obj(copy, GET_DOCUMENT_ELEMENT);
+    // documentElement is IXMLDOMDocument's, so it is asked through the
+    // clone's IXMLDOMDocument2 (through the IXMLDOMNode cloneNode returns,
+    // Windows' CI run answered E_INVALIDARG): S_FALSE and no element.
+    let (hr, copy2) = query(copy, &IID_IXMLDOMDOCUMENT2);
+    c.hr(hr, S_OK)?;
+    let (hr, el) = get_obj(copy2, GET_DOCUMENT_ELEMENT);
     c.hr(hr, S_FALSE)?;
     c.ok(el.is_null(), el as u64)?;
+    release(copy2);
     release(copy);
 
     let (hr, pr) = select_single(doc, "lc/pr");
