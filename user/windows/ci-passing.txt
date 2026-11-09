@@ -93,6 +93,7 @@ sshfwd_test
 sspi_test
 startup_test
 straddle_test
+svc_test
 symlink_test
 sync_test
 sysinfo_test
@@ -122,5 +123,6 @@ wow64_office_api_test
 wow64_runas_test
 wow64_seh_test
 wow64_sock_test
+wow64_svc_test
 wow64_test
 wow64_ucrt_test
