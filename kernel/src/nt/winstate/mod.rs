@@ -64,6 +64,12 @@ pub const GALA_WM_ACTIVE: u32 = 0x0001_0010;
 /// its client area (it moved onto a frame, another window, the desktop).
 /// Only served owners get it (user32 has TrackMouseEvent).
 pub const GALA_WM_POINTER_LEFT: u32 = 0x0001_0011;
+/// gala's notice to the owner of a popup grab (`State::popup_grab`: the
+/// Wayland server's xdg_popup.grab) that the desktop ended it: a mouse
+/// button went down outside every window of that owner. Queued for the
+/// grab's window (the topmost grabbing popup); the press goes nowhere
+/// else.
+pub const GALA_WM_POPUP_DONE: u32 = 0x0001_0012;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_MOUSEWHEEL: u32 = 0x020a;
 /// One wheel notch (WHEEL_DELTA).
@@ -114,8 +120,8 @@ pub enum Listener {
     /// event).
     Event(ObjectRef),
     /// A kernel thread serving the process's windows (the Wayland server
-    /// for a Linux client), woken. Its owner also gets GALA_WM_ACTIVE and
-    /// GALA_WM_POINTER_LEFT.
+    /// for a Linux client), woken. Its owner also gets GALA_WM_ACTIVE,
+    /// GALA_WM_POINTER_LEFT and GALA_WM_POPUP_DONE.
     Server(crate::nt::platform::ThreadId),
 }
 
@@ -389,6 +395,11 @@ pub struct State<X> {
     /// The window with the mouse capture (GalaWindowCapture): it gets all
     /// mouse input, wherever the pointer is.
     pub captured: Option<u32>,
+    /// A popup grab (`set_popup_grab`): the window of its topmost popup.
+    /// Input goes where it always does (the owner gets its own windows'
+    /// as usual); a button pressed outside the owner's windows ends it
+    /// (GALA_WM_POPUP_DONE) instead of going there.
+    pub popup_grab: Option<u32>,
     pub damage: Vec<Rect>,
     /// What the taskbar lists changed (a window shown, hidden, minimized,
     /// activated, renamed, given an icon, gone).
@@ -442,6 +453,7 @@ impl<X: Default> State<X> {
             screen: (0, 0),
             active: None,
             captured: None,
+            popup_grab: None,
             damage: Vec::new(),
             listing_changed: true,
             shadow,
@@ -782,6 +794,43 @@ impl<X: Default> State<X> {
         Ok(())
     }
 
+    /// Gives `owner`'s window `id` the popup grab (0: ends it if one of
+    /// `owner`'s windows has it), without a notice.
+    pub fn set_popup_grab(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        if id == 0 {
+            if self.popup_grab.and_then(|g| self.window(g)).is_some_and(|w| w.owner == owner) {
+                self.popup_grab = None;
+            }
+            return Ok(());
+        }
+        self.find(id, owner)?;
+        self.popup_grab = Some(id);
+        Ok(())
+    }
+
+    /// Whether a press going to window `target` (None: no window's client
+    /// area: a frame, the taskbar, the desktop) is outside the popup
+    /// grab's owner's windows. False without a grab.
+    pub fn outside_popup_grab(&self, target: Option<u32>) -> bool {
+        let Some(owner) = self.popup_grab.and_then(|g| self.window(g)).map(|w| w.owner) else {
+            return false;
+        };
+        !target.and_then(|t| self.window(t)).is_some_and(|w| w.owner == owner)
+    }
+
+    /// The desktop ends the popup grab (a press outside at screen (x, y)):
+    /// its window's owner gets GALA_WM_POPUP_DONE.
+    pub fn end_popup_grab(&mut self, x: i64, y: i64) {
+        let Some(id) = self.popup_grab.take() else { return };
+        let owner = self.window(id).map_or(0, |w| w.owner);
+        crate::events::emit(
+            crate::events::Category::Window,
+            "popup grab ended",
+            format_args!(r#""window":{id},"owner":{owner},"x":{x},"y":{y}"#),
+        );
+        self.send(id, GALA_WM_POPUP_DONE, 0, 0);
+    }
+
     pub fn destroy(&mut self, id: u32, owner: u64) -> Result<Rect, NtStatus> {
         let i = self.windows.iter().position(|w| w.id == id && w.owner == owner);
         let i = i.ok_or(NtStatus::INVALID_HANDLE)?;
@@ -815,13 +864,19 @@ impl<X: Default> State<X> {
         if self.captured == Some(id) {
             self.captured = None;
         }
+        if self.popup_grab == Some(id) {
+            self.popup_grab = None;
+        }
         if self.hovered == Some(id) {
             self.hovered = None;
         }
         if self.active == Some(id) {
             self.activate_top();
         }
-        self.input.retain(|e| e.window != id);
+        // The end of a popup grab is its owner's news even when the
+        // window it named went meanwhile (the owner's other popups go
+        // with it).
+        self.input.retain(|e| e.window != id || e.message == GALA_WM_POPUP_DONE);
         self.listing_changed = true;
     }
 

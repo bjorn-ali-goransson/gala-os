@@ -30,9 +30,10 @@
 //! libxkbcommon (WORKFLOW "Linux test programs").
 
 use crate::nt::winstate::{
-    GALA_WM_ACTIVE, GALA_WM_MINIMIZED, GALA_WM_PLACE, GALA_WM_POINTER_LEFT, SC_CLOSE, SC_MAXIMIZE,
-    SC_RESTORE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_MOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GALA_WM_ACTIVE, GALA_WM_MINIMIZED, GALA_WM_PLACE, GALA_WM_POINTER_LEFT, GALA_WM_POPUP_DONE,
+    SC_CLOSE, SC_MAXIMIZE, SC_RESTORE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 /// The keymap every wl_keyboard gets (wl_keyboard.keymap, format xkb_v1),
@@ -82,6 +83,10 @@ pub enum Input {
     /// The desktop puts the window at this outer rectangle
     /// (GALA_WM_PLACE: Snap, `gala place`, back from Snap).
     Place { window: u32, x: i32, y: i32, w: u32, h: u32 },
+    /// The desktop ended the client's popup grab (a press outside its
+    /// windows; `window` the topmost grabbing popup's): its grabbing
+    /// popups are dismissed.
+    PopupDone { window: u32 },
     /// A window message a Wayland window does not follow: named for the
     /// ledger.
     Unhandled { window: u32, what: &'static str },
@@ -185,6 +190,7 @@ pub fn translate(window: u32, message: u32, wparam: u64, lparam: u64) -> Option<
         }
         GALA_WM_ACTIVE => Some(Input::Focus { window, active: wparam != 0 }),
         GALA_WM_POINTER_LEFT => Some(Input::Left { window }),
+        GALA_WM_POPUP_DONE => Some(Input::PopupDone { window }),
         WM_SYSCOMMAND if wparam & 0xfff0 == SC_CLOSE => Some(Input::Close { window }),
         WM_SYSCOMMAND if wparam & 0xfff0 == SC_MAXIMIZE => Some(Input::Maximize { window }),
         WM_SYSCOMMAND if wparam & 0xfff0 == SC_RESTORE => Some(Input::Restore { window }),

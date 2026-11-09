@@ -1,0 +1,54 @@
+bind wl_compositor version 4
+bind wl_shm version 1
+bind xdg_wm_base version 3
+anchor none: configure 40 35 50 40
+delete_id anchor none: yes
+anchor top: configure 40 30 50 40
+delete_id anchor top: yes
+anchor bottom: configure 40 40 50 40
+delete_id anchor bottom: yes
+anchor left: configure 20 35 50 40
+delete_id anchor left: yes
+anchor right: configure 60 35 50 40
+delete_id anchor right: yes
+anchor top_left: configure 20 30 50 40
+delete_id anchor top_left: yes
+anchor bottom_left: configure 20 40 50 40
+delete_id anchor bottom_left: yes
+anchor top_right: configure 60 30 50 40
+delete_id anchor top_right: yes
+anchor bottom_right: configure 60 40 50 40
+gravity none: configure -5 10 50 40
+delete_id gravity none: yes
+gravity top: configure -5 -10 50 40
+delete_id gravity top: yes
+gravity bottom: configure -5 30 50 40
+delete_id gravity bottom: yes
+gravity left: configure -30 10 50 40
+delete_id gravity left: yes
+gravity right: configure 20 10 50 40
+delete_id gravity right: yes
+gravity top_left: configure -30 -10 50 40
+delete_id gravity top_left: yes
+gravity bottom_left: configure -30 30 50 40
+delete_id gravity bottom_left: yes
+gravity top_right: configure 20 -10 50 40
+delete_id gravity top_right: yes
+gravity bottom_right: configure 20 30 50 40
+delete_id gravity bottom_right: yes
+offset, odd sizes: configure 22 6 51 41
+delete_id offset: yes
+nested: configure 50 10 30 20
+reposition: repositioned 42, configure -8 23 60 30
+delete_id nested: yes
+delete_id first: yes
+far away, no adjustment: configure -100000 -100000 10 10
+delete_id far away: yes
+set_size 0: wl_display.error on xdg_positioner code 0, then the end of the stream
+set_anchor_rect negative: wl_display.error on xdg_positioner code 0, then the end of the stream
+parent: configure -5 -5 10 10
+child: configure -5 -5 10 10
+parent popup destroyed first: no error
+its child dismissed = no
+wl_popup_test: ok
+-- exit status 0

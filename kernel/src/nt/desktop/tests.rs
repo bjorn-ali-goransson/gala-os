@@ -913,3 +913,77 @@ fn delivered_input_is_noted_until_its_program_takes_it() {
     assert_eq!(waiting, 1);
     assert_eq!(d.s.input_dropped, 0);
 }
+
+#[test]
+fn a_press_outside_a_popup_grab_s_owner_ends_it_and_goes_nowhere() {
+    use crate::nt::winstate::GALA_WM_POPUP_DONE;
+    let (mut d, a) = desktop_with_window();
+    let p = d.create(7, 320, 150, 100, 60, &title(""), STYLE_POPUP).unwrap();
+    d.show(p, 7, true).unwrap();
+    let other = d.create(8, 800, 500, 200, 200, &title("Other"), 0).unwrap();
+    d.show(other, 8, true).unwrap();
+    d.s.activate(Some(a));
+    // Only the owner's own window takes the grab.
+    assert!(d.popup_grab(p, 8).is_err());
+    d.popup_grab(p, 7).unwrap();
+    let mut out = [InputEvent { owner: 0, window: 0, message: 0, wparam: 0, lparam: 0 }; 16];
+    d.take_input(7, &mut out);
+    d.take_input(8, &mut out);
+    // Clicks on the owner's windows (the popup, the window under it) go
+    // there as always; the grab stays.
+    click(&mut d, 330, 160);
+    let (ox, oy) = d.s.window(a).unwrap().client_origin();
+    click(&mut d, ox + 5, oy + 250);
+    let n = d.take_input(7, &mut out);
+    let downs: Vec<u32> =
+        out[..n].iter().filter(|e| e.message == WM_LBUTTONDOWN).map(|e| e.window).collect();
+    assert_eq!(downs, [p, a]);
+    assert_eq!(d.s.popup_grab, Some(p));
+    // A press on another program's window: the grab ends (the owner is
+    // told, on the popup), and the other window gets nothing of it.
+    click(&mut d, 850, 600);
+    let n = d.take_input(7, &mut out);
+    assert_eq!(
+        out[..n].iter().map(|e| (e.window, e.message)).collect::<Vec<_>>(),
+        [(p, GALA_WM_POPUP_DONE)]
+    );
+    // (Its moves it gets, as ever: the pointer is over it.)
+    let n = d.take_input(8, &mut out);
+    assert!(out[..n].iter().all(|e| e.message == WM_MOUSEMOVE));
+    assert_eq!(d.s.popup_grab, None);
+    // On the desktop, with the right button too: the same; nor does a
+    // right click's release reach the window under it.
+    d.popup_grab(p, 7).unwrap();
+    go(&mut d, 850, 600, 2);
+    go(&mut d, 850, 600, 0);
+    let n = d.take_input(8, &mut out);
+    assert!(out[..n].iter().all(|e| e.message == WM_MOUSEMOVE));
+    d.take_input(7, &mut out);
+    // On the desktop: the same.
+    d.popup_grab(p, 7).unwrap();
+    go(&mut d, 20, 20, 0);
+    go(&mut d, 20, 20, 2);
+    go(&mut d, 20, 20, 0);
+    let n = d.take_input(7, &mut out);
+    assert_eq!(out[..n].iter().map(|e| e.message).collect::<Vec<_>>(), [GALA_WM_POPUP_DONE]);
+    // The notice outlives its window (the owner's other popups go with
+    // it); the window's other input does not.
+    d.popup_grab(p, 7).unwrap();
+    click(&mut d, 20, 20);
+    d.s.send(p, WM_LBUTTONDOWN, 0, 0);
+    d.destroy(p, 7).unwrap();
+    let n = d.take_input(7, &mut out);
+    assert_eq!(out[..n].iter().map(|e| e.message).collect::<Vec<_>>(), [GALA_WM_POPUP_DONE]);
+    // A grab's window gone ends it without a notice; 0 releases one.
+    let q = d.create(7, 320, 150, 100, 60, &title(""), STYLE_POPUP).unwrap();
+    d.show(q, 7, true).unwrap();
+    d.popup_grab(q, 7).unwrap();
+    d.popup_grab(0, 8).unwrap();
+    assert_eq!(d.s.popup_grab, Some(q));
+    d.popup_grab(0, 7).unwrap();
+    assert_eq!(d.s.popup_grab, None);
+    d.popup_grab(q, 7).unwrap();
+    d.destroy(q, 7).unwrap();
+    assert_eq!(d.s.popup_grab, None);
+    assert_eq!(d.take_input(7, &mut out), 0);
+}

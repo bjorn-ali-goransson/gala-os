@@ -1317,11 +1317,23 @@ source).
   environment, and compares stdout + `-- exit status N`
   with `user/lx/<name>_test/expected.txt` (both binaries against the
   same file). A mismatch prints a line diff and leaves `actual.txt`
-  there. The Wayland clients (lx_expect.rs `WAYLAND_TESTS`: wl_test) get a
+  there. The Wayland clients (lx_expect.rs `WAYLAND_TESTS`: wl_test,
+  wl_popup_test) get a
   weston of their own (`weston --backend=headless`, apt package `weston`)
-  on a socket in their run directory, named by `XDG_RUNTIME_DIR` and
-  `WAYLAND_DISPLAY` added to their environment; its log is `weston.log`
-  there. In gala their scenarios (`lx_wl`) start the kernel's server
+  on a socket in a runtime directory of its own in the system's
+  temporary directory (`gala-wl-<pid>`, removed after; a socket's path
+  must fit sun_path's 108 bytes, which the run directory of a deep
+  checkout does not), named by `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`
+  added to their environment; its log is `weston.log` in their run
+  directory. A headless weston 13 differs from the protocol in places: it
+  has no wl_seat, adjusts no constrained popup, accepts set_gravity and
+  set_anchor out of their enums and an xdg_surface destroyed before its
+  popup, and answers an incomplete positioner and get_popup on a
+  toplevel's xdg_surface with codes on other objects than the protocol
+  names. A recorded test leaves those cases out (wl_popup_test's header
+  lists them); gala follows the specification there, checked by host
+  tests, and wl_input_test (written from the specification) covers what
+  needs a seat or a known window place. In gala their scenarios (`lx_wl`) start the kernel's server
   with `wayland=on` and pass `XDG_RUNTIME_DIR=/run/user/1000
   WAYLAND_DISPLAY=wayland-0` with `lxenv=`; `wayland=trace` logs both
   directions as `WAYLAND_DEBUG=1` prints them, to compare with the same

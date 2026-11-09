@@ -46,7 +46,11 @@
 //!   (`GALA_WM_ACTIVE`, `GALA_WM_POINTER_LEFT`); each round takes that
 //!   input (`desktop::take_input`), the same window messages user32 reads,
 //!   and the client turns it into wl_pointer, wl_keyboard and
-//!   xdg_toplevel events (`input::translate`, `Client::input`). The
+//!   xdg_toplevel events (`input::translate`, `Client::input`). A
+//!   client's grabbing popup holds the desktop's popup grab
+//!   (`desktop::Desktop::popup_grab`); a press outside the client's
+//!   windows ends it with `GALA_WM_POPUP_DONE`, and its popups are
+//!   dismissed. The
 //!   keymap is one sealed read-only memfd-like file (`keymap`), passed to
 //!   every wl_keyboard as SCM_RIGHTS beside its event's bytes.
 //!
@@ -61,7 +65,9 @@
 //! `wayland input` events say where input went (enter, leave, button,
 //! axis, key, focus, unfocus, close, maximize, restore, place; or
 //! dropped, for a window the client does not show); `wayland configure`
-//! each configure's size, states and serial; `wayland=trace` logs every
+//! each configure's size, states and serial; `wayland popup` a popup's
+//! configure, reposition, grab (or why it was denied), dismissal (why)
+//! and orphaning; `wayland=trace` logs every
 //! request and event as
 //! `WAYLAND_DEBUG=1` prints them and each window message taken from the
 //! desktop (`input:` lines); the state dump lists every client, its
@@ -69,6 +75,7 @@
 
 pub mod client;
 pub mod input;
+pub mod popup;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -691,6 +698,33 @@ impl Host for KernelHost {
         })
     }
 
+    fn popup_create(&mut self, x: i32, y: i32, width: u32, height: u32) -> Option<u32> {
+        let (w, h) = outer(width, height, false);
+        let owner = self.pid;
+        self.desktop(|d| {
+            let id = d.create(owner, x, y, w, h, &[], winstate::STYLE_POPUP)?;
+            let shown = d.show(id, owner, true)?;
+            Ok((id, Some(shown)))
+        })
+    }
+
+    fn client_origin(&mut self, id: u32) -> Option<(i32, i32)> {
+        let owner = self.pid;
+        let at = self.desktop(|d| Ok((d.client_origin(id, owner), None))).flatten()?;
+        let clamp = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        Some((clamp(at.0), clamp(at.1)))
+    }
+
+    fn grab(&mut self, id: Option<u32>) {
+        let owner = self.pid;
+        let done = self.desktop(|d| Ok((d.popup_grab(id.unwrap_or(0), owner)?, None)));
+        if done.is_none() {
+            crate::warn!(
+                "wayland: pid {owner}: the desktop refused the popup grab of window {id:?}"
+            );
+        }
+    }
+
     fn window_resize(&mut self, id: u32, width: u32, height: u32, decorated: bool) {
         let (w, h) = outer(width, height, decorated);
         let owner = self.pid;
@@ -798,6 +832,20 @@ impl Host for KernelHost {
                         buffer.is_some(),
                         window.map_or(-1, i64::from),
                         placed.is_some()
+                    ),
+                )
+            }
+            Note::Popup { surface, what, why, rect: (x, y, w, h), serial } => {
+                if what == "grab denied" || what == "orphaned" {
+                    crate::info!(
+                        "wayland: pid {pid}: wl_surface@{surface}'s popup: {what} ({why})"
+                    );
+                }
+                emit(
+                    Category::Wayland,
+                    "wayland popup",
+                    format_args!(
+                        r#""pid":{pid},"client":{client},"surface":{surface},"what":"{what}","why":"{why}","x":{x},"y":{y},"width":{w},"height":{h},"serial":{serial}"#
                     ),
                 )
             }

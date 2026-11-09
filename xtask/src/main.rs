@@ -1236,6 +1236,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_wl_pie", "user/lx/bin/wl_test-pie", "lx"),
     ("lx_wl_input", "user/lx/bin/wl_input_test", "lx"),
     ("lx_wl_input_pie", "user/lx/bin/wl_input_test-pie", "lx"),
+    ("lx_wl_popup", "user/lx/bin/wl_popup_test", "lx"),
+    ("lx_wl_popup_pie", "user/lx/bin/wl_popup_test-pie", "lx"),
     ("lx_thread", "user/lx/bin/thread_test", "lx"),
     ("lx_forkmem", "user/lx/bin/forkmem_test", "lx"),
     ("lx_forkmem_pie", "user/lx/bin/forkmem_test-pie", "lx"),
@@ -8081,6 +8083,36 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // user/lx/wl_popup_test (LD step 2): xdg_positioner and xdg_popup
+        // (every anchor and gravity, an offset, a nested popup,
+        // reposition, the positioner's errors, popups without a grab
+        // destroyed in any order), each popup a frameless popup window
+        // above its parent. Its transcript must be its expected.txt
+        // (recorded against weston's headless backend).
+        name: "lx_wl_popup",
+        cmdline: "qemu_exit wayland=on events=wayland lxrun=/lx/wl_popup_test lxargs=./wl_popup_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'wl_popup_test'",
+            "run: end /lx/wl_popup_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/wl_popup_test as a static-pie, every request and event
+        // traced (`wayland=trace`).
+        name: "lx_wl_popup_pie",
+        cmdline: "qemu_exit wayland=trace lxrun=/lx/wl_popup_test-pie lxargs=./wl_popup_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            " -> xdg_popup#",
+            "run: end /lx/wl_popup_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // user/lx/wl_input_test (LD step 2): wl_seat, wl_pointer and
         // wl_keyboard (an XKB keymap as a memfd), xdg_toplevel.close from
         // the frame's close button, configures from the desktop's
@@ -10359,7 +10391,9 @@ enum PixelCheck {
 /// and so at (64, 48) (kernel/src/wayland: cascaded from there), its
 /// client area from (65, 81); the second, 100 x 80 and frameless
 /// (client-side decoration), at (96, 80). Between them the Snap keys
-/// maximize, restore, snap left and restore the first (the work area is
+/// maximize, restore, snap left and restore the first, "m" and "s" open
+/// its menu and submenu (popups that grab, frameless above it) and a
+/// click on the desktop dismisses them (the work area is
 /// 1280 x 752 above the taskbar; the frame a 1-pixel outline and a
 /// 32-row caption). Each step waits for the line
 /// the program prints once it has the input before (its transcript is
@@ -10466,9 +10500,42 @@ const WL_INPUT_SCREEN: ScreenCheck = ScreenCheck {
             ],
         },
         ScreenStep {
+            // "m": the constraint popups, then a menu that grabs, at
+            // (20, 30) in the window: (85, 111), 120 x 80.
+            after: "wl_input_test: unsnapped",
+            input: &["sendkey m"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // "s" (the menu has the keyboard): a submenu at the menu's
+            // right, (205, 121), 100 x 60.
+            after: "wl_input_test: menu mapped",
+            input: &["sendkey s"],
+            pixels: &[],
+        },
+        ScreenStep {
+            // Both frameless above the window, which shows below them;
+            // then a click where the pointer is, (365, 156), on the
+            // desktop outside every window: the popups are dismissed.
+            after: "wl_input_test: submenu mapped",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(100, 150, 0x228b22),
+                PixelCheck::At(250, 150, 0xdc143c),
+                PixelCheck::At(65 + 100, 81 + 120, 0xff8800),
+            ],
+        },
+        ScreenStep { after: "", input: &["mouse_button 1", "mouse_button 0"], pixels: &[] },
+        ScreenStep {
+            // Gone: the window's own pixels there again.
+            after: "wl_input_test: popups dismissed",
+            input: &[],
+            pixels: &[PixelCheck::At(100, 150, 0x336699), PixelCheck::At(250, 150, 0x336699)],
+        },
+        ScreenStep {
             // Up, then left along the caption (never over the client
             // area) to the close button at (240, 60), and a click.
-            after: "wl_input_test: unsnapped",
+            after: "wl_input_test: popups dismissed",
             input: &["mouse_move 0 -96", "mouse_move -125 0", "mouse_button 1", "mouse_button 0"],
             pixels: &[],
         },

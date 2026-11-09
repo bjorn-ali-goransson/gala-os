@@ -359,6 +359,9 @@ pub struct Desktop {
     /// bit 1 right).
     pointer: (i64, i64),
     buttons: u8,
+    /// Buttons whose press ended a popup grab: their release goes
+    /// nowhere either.
+    swallowed: u8,
     hover: Hit,
     /// Where the left button went down.
     pressed: Hit,
@@ -408,6 +411,7 @@ impl Desktop {
             programs: Vec::new(),
             pointer: (0, 0),
             buttons: 0,
+            swallowed: 0,
             hover: Hit::Nothing,
             pressed: Hit::Nothing,
             drag: None,
@@ -533,6 +537,17 @@ impl Desktop {
         let r = self.s.place(id, owner, x, y, w, h)?;
         self.refresh();
         Ok(r)
+    }
+
+    /// Gives `owner`'s window `id` the popup grab (0: ends `owner`'s):
+    /// `State::set_popup_grab`.
+    pub fn popup_grab(&mut self, id: u32, owner: u64) -> Result<(), NtStatus> {
+        self.s.set_popup_grab(id, owner)
+    }
+
+    /// `owner`'s window `id`'s client area's screen position.
+    pub fn client_origin(&self, id: u32, owner: u64) -> Option<(i64, i64)> {
+        self.s.owned(id, owner).map(|w| w.client_origin())
     }
 
     /// `owner`'s window `id`'s outer rectangle (x, y, width, height).
@@ -868,6 +883,27 @@ impl Desktop {
             self.s.add_damage(old_cursor);
             let c = self.cursor_rect();
             self.s.add_damage(c);
+        }
+        // A press outside the windows of a popup grab's owner ends the
+        // grab (the owner dismisses its popups) and goes nowhere else, as
+        // a click outside the start menu closes it.
+        let up = self.swallowed & !buttons;
+        self.swallowed &= !up;
+        self.buttons &= !up;
+        let pressed = buttons & !self.buttons;
+        if pressed != 0 && self.s.popup_grab.is_some() {
+            let target = match self.s.captured.filter(|&c| self.s.window(c).is_some()) {
+                Some(c) => Some(c),
+                None => match self.hit(x, y) {
+                    Hit::Client(id) => Some(id),
+                    _ => None,
+                },
+            };
+            if self.s.outside_popup_grab(target) {
+                self.s.end_popup_grab(x, y);
+                self.buttons |= pressed;
+                self.swallowed |= pressed;
+            }
         }
         // The capture gets every mouse message, in its client coordinates.
         if let Some(id) = self.s.captured
@@ -1668,6 +1704,11 @@ impl Shell {
             *slot = Some(*b);
         }
         (out, d.s.input_dropped, d.s.input.len())
+    }
+
+    /// The window holding the popup grab (the state dump).
+    pub fn popup_grab(&self) -> Option<u32> {
+        self.d.lock().s.popup_grab
     }
 }
 

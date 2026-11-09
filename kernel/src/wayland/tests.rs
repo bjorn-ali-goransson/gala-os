@@ -18,6 +18,8 @@ struct Win {
     alive: bool,
     /// The outer position (window_create cascades nothing: (10, 20)).
     at: (i32, i32),
+    /// A popup window (popup_create).
+    popup: bool,
 }
 
 /// The fake desktop's frame: shasha's (a 1-pixel outline, a 32-row
@@ -31,6 +33,9 @@ struct Fake {
     windows: Vec<Win>,
     /// What the client asked the desktop to do (window_act).
     acts: Vec<(u32, Act)>,
+    /// The desktop's popup grab (Host::grab), and each change of it.
+    grab: Option<u32>,
+    grabs: Vec<Option<u32>>,
     notes: Vec<String>,
     traces: Vec<String>,
     trace: bool,
@@ -89,8 +94,34 @@ impl Host for Fake {
             pixels: vec![0xffff_ffff; (width * height) as usize],
             alive: true,
             at: (10, 20),
+            popup: false,
         });
         Some(self.windows.len() as u32 - 1)
+    }
+
+    fn popup_create(&mut self, x: i32, y: i32, width: u32, height: u32) -> Option<u32> {
+        self.windows.push(Win {
+            title: Vec::new(),
+            size: (width, height),
+            decorated: false,
+            pixels: vec![0xffff_ffff; (width * height) as usize],
+            alive: true,
+            at: (x, y),
+            popup: true,
+        });
+        Some(self.windows.len() as u32 - 1)
+    }
+
+    fn client_origin(&mut self, id: u32) -> Option<(i32, i32)> {
+        let w = self.windows.get(id as usize).filter(|w| w.alive)?;
+        // shasha's frame: a 1-pixel outline, then a 32-row caption.
+        let (fx, fy) = if w.decorated { (FRAME.0 / 2, FRAME.1 - 1) } else { (0, 0) };
+        Some((w.at.0 + fx as i32, w.at.1 + fy as i32))
+    }
+
+    fn grab(&mut self, id: Option<u32>) {
+        self.grab = id;
+        self.grabs.push(id);
     }
 
     fn window_resize(&mut self, id: u32, width: u32, height: u32, decorated: bool) {
@@ -597,15 +628,6 @@ fn ids_are_dense_and_bounded() {
     t.ok(3, "create_region", &[Arg::NewId(6)]);
     t.ok(6, "destroy", &[]);
     t.ok(3, "create_surface", &[Arg::NewId(6)]);
-}
-
-#[test]
-fn missing_requests_are_ledgered_errors() {
-    let mut t = T::bound();
-    let r = t.send(5, "create_positioner", &[Arg::NewId(6)]);
-    let e = t.error(r);
-    assert!(e.starts_with("wl_display#1.error(#5, 3, \"xdg_wm_base.create_positioner"), "{e}");
-    assert!(t.h.notes.iter().any(|n| n.contains("Missing") && n.contains("create_positioner")));
 }
 
 #[test]
@@ -1294,4 +1316,531 @@ fn refreshes_fall_on_sixtieths_of_a_second() {
     use crate::wayland::next_refresh;
     // Strictly after now, on ceil(k * 1000 / 60) ms.
     assert_eq!([0, 16, 17, 33, 34, 1000].map(next_refresh), [17, 17, 34, 34, 50, 1017]);
+}
+
+// ---- Popups ---------------------------------------------------------------
+
+/// A positioner's rules for `T::positioner`: size, anchor rectangle,
+/// anchor, gravity, constraint adjustment, offset.
+type Pos = ((i32, i32), (i32, i32, i32, i32), u32, u32, u32, (i32, i32));
+
+impl T {
+    /// The next free id.
+    fn next(&self) -> u32 {
+        self.ids.keys().max().unwrap() + 1
+    }
+
+    /// A positioner with the rules `p` (on xdg_wm_base 5); its id.
+    fn positioner(&mut self, p: Pos) -> u32 {
+        let (size, rect, anchor, gravity, adjust, offset) = p;
+        let id = self.next();
+        self.ok(5, "create_positioner", &[Arg::NewId(id)]);
+        self.ok(id, "set_size", &[Arg::Int(size.0), Arg::Int(size.1)]);
+        let r = [Arg::Int(rect.0), Arg::Int(rect.1), Arg::Int(rect.2), Arg::Int(rect.3)];
+        self.ok(id, "set_anchor_rect", &r);
+        self.ok(id, "set_anchor", &[Arg::Uint(anchor)]);
+        self.ok(id, "set_gravity", &[Arg::Uint(gravity)]);
+        self.ok(id, "set_constraint_adjustment", &[Arg::Uint(adjust)]);
+        self.ok(id, "set_offset", &[Arg::Int(offset.0), Arg::Int(offset.1)]);
+        id
+    }
+
+    /// A surface, its xdg_surface and an xdg_popup of xdg_surface
+    /// `parent` placed by `p` (the positioner destroyed after), grabbing
+    /// with `grab` (seat 11, that serial) if given, committed: (surface,
+    /// xdg_surface, popup) and the events of the commit.
+    fn popup(&mut self, parent: u32, p: Pos, grab: Option<u32>) -> ((u32, u32, u32), Vec<String>) {
+        let pos = self.positioner(p);
+        let s = self.next();
+        self.ok(3, "create_surface", &[Arg::NewId(s)]);
+        let x = self.next();
+        self.ok(5, "get_xdg_surface", &[Arg::NewId(x), Arg::Object(Some(s))]);
+        let pp = self.next();
+        let args = [Arg::NewId(pp), Arg::Object(Some(parent)), Arg::Object(Some(pos))];
+        self.ok(x, "get_popup", &args);
+        self.ok(pos, "destroy", &[]);
+        if let Some(serial) = grab {
+            self.ok(pp, "grab", &[Arg::Object(Some(11)), Arg::Uint(serial)]);
+        }
+        self.ok(s, "commit", &[]);
+        ((s, x, pp), self.events())
+    }
+
+    /// Acks `serial` on xdg_surface `x` (0: nothing to ack) and commits a
+    /// `w` x `h` buffer on surface `s` (in a pool of a new file); the
+    /// events.
+    fn show_on(&mut self, s: u32, x: u32, serial: u32, w: i32, h: i32) -> Vec<String> {
+        if serial != 0 {
+            self.ok(x, "ack_configure", &[Arg::Uint(serial)]);
+        }
+        self.h.files.push(vec![0x22; (w * h * 4) as usize]);
+        let file = self.h.files.len() - 1;
+        self.c.push_fd(&mut self.h, file).unwrap();
+        let pool = self.next();
+        self.ok(4, "create_pool", &[Arg::NewId(pool), Arg::Fd, Arg::Int(w * h * 4)]);
+        let b = pool + 1;
+        let args =
+            [Arg::NewId(b), Arg::Int(0), Arg::Int(w), Arg::Int(h), Arg::Int(w * 4), Arg::Uint(1)];
+        self.ok(pool, "create_buffer", &args);
+        self.ok(s, "attach", &[Arg::Object(Some(b)), Arg::Int(0), Arg::Int(0)]);
+        self.ok(s, "commit", &[]);
+        self.events()
+    }
+
+    /// A popup of `parent` by `p` (grabbing with `grab`), configured and
+    /// shown at its configured size: its ids, the configure's arguments
+    /// and the events of the showing.
+    fn shown_popup(
+        &mut self,
+        parent: u32,
+        p: Pos,
+        grab: Option<u32>,
+    ) -> ((u32, u32, u32), String, Vec<String>) {
+        let ((s, x, pp), events) = self.popup(parent, p, grab);
+        let conf = events
+            .iter()
+            .find_map(|e| e.strip_prefix(&format!("xdg_popup#{pp}.configure(")))
+            .unwrap_or_else(|| panic!("no configure: {events:?}"))
+            .trim_end_matches(')')
+            .to_string();
+        let serial: u32 = events
+            .iter()
+            .find_map(|e| e.strip_prefix(&format!("xdg_surface#{x}.configure(")))
+            .unwrap()
+            .trim_end_matches(')')
+            .parse()
+            .unwrap();
+        let size: Vec<i32> = conf.split(", ").map(|v| v.parse().unwrap()).collect();
+        let shown = self.show_on(s, x, serial, size[2], size[3]);
+        ((s, x, pp), conf, shown)
+    }
+
+    /// The fake window last made for surface `s`.
+    fn window_of(&self, s: u32) -> &Win {
+        let w = self
+            .h
+            .notes
+            .iter()
+            .rev()
+            .find_map(|n| {
+                n.strip_prefix(&format!("Mapped {{ surface: {s}, window: Some("))
+                    .and_then(|r| r.split(')').next())
+                    .and_then(|v| v.parse::<usize>().ok())
+            })
+            .unwrap();
+        &self.h.windows[w]
+    }
+
+    /// The toplevel (window 0) activated, then a left click at (5, 5) on
+    /// it: the press's serial.
+    fn press(&mut self) -> u32 {
+        self.input(Input::Focus { window: 0, active: true });
+        let e = self.input(Input::Button {
+            window: 0,
+            x: 5,
+            y: 5,
+            button: input::BTN_LEFT,
+            pressed: true,
+        });
+        let b = e.iter().find(|e| e.starts_with("wl_pointer#12.button(")).unwrap();
+        b["wl_pointer#12.button(".len()..].split(',').next().unwrap().parse().unwrap()
+    }
+
+    /// The serial of a key event among `events`.
+    fn key_serial(events: &[String]) -> u32 {
+        let k = events.iter().find(|e| e.starts_with("wl_keyboard#13.key(")).unwrap();
+        k["wl_keyboard#13.key(".len()..].split(',').next().unwrap().parse().unwrap()
+    }
+}
+
+const MENU: Pos = ((120, 80), (20, 30, 1, 1), popup::TOP_LEFT, popup::BOTTOM_RIGHT, 0, (0, 0));
+
+#[test]
+fn the_anchor_point_gravity_and_offset_place_a_popup() {
+    use popup::*;
+    let r = |anchor, gravity, offset| Rules {
+        size: (50, 40),
+        rect: Some((20, 30, 40, 10)),
+        anchor,
+        gravity,
+        offset,
+        ..Rules::default()
+    };
+    let at = |rules: Rules| {
+        let (x, y, _, _) = place(&rules, None, (0, 0, 1280, 752));
+        (x, y)
+    };
+    // Every anchor with gravity bottom_right, every gravity with anchor
+    // top_left (weston's answers too: user/lx/wl_popup_test).
+    let anchors =
+        [(40, 35), (40, 30), (40, 40), (20, 35), (60, 35), (20, 30), (20, 40), (60, 30), (60, 40)];
+    for (a, want) in (NONE..=BOTTOM_RIGHT).zip(anchors) {
+        assert_eq!(at(r(a, BOTTOM_RIGHT, (0, 0))), want, "anchor {a}");
+    }
+    let gravities = [
+        (-5, 10),
+        (-5, -10),
+        (-5, 30),
+        (-30, 10),
+        (20, 10),
+        (-30, -10),
+        (-30, 30),
+        (20, -10),
+        (20, 30),
+    ];
+    for (g, want) in (NONE..=BOTTOM_RIGHT).zip(gravities) {
+        assert_eq!(at(r(TOP_LEFT, g, (0, 0))), want, "gravity {g}");
+    }
+    // Odd sizes: halves round down; then the offset.
+    let mut odd = r(NONE, NONE, (7, -9));
+    odd.size = (51, 41);
+    odd.rect = Some((20, 30, 41, 11));
+    assert_eq!(place(&odd, None, (0, 0, 1280, 752)), (22, 6, 51, 41));
+    // Without an adjustment, a constrained place is kept.
+    let far = r(TOP_LEFT, BOTTOM_RIGHT, (-100_000, -100_000));
+    assert_eq!(place(&far, Some((65, 81)), (0, 0, 1280, 752)).0, -99_980);
+}
+
+#[test]
+fn constraint_adjustment_flips_then_slides_then_resizes() {
+    use popup::*;
+    let area = (0, 0, 1280, 752);
+    // wl_input_test's cases first: the parent's geometry at (65, 81),
+    // 200x150.
+    let parent = Some((65, 81));
+    let r = |size, rect, anchor, gravity, adjust, offset| Rules {
+        size,
+        rect: Some(rect),
+        anchor,
+        gravity,
+        adjust,
+        offset,
+        reactive: false,
+    };
+    let window = (0, 0, 200, 150);
+    let cases = [
+        (r((100, 40), window, BOTTOM_LEFT, BOTTOM_RIGHT, FLIP_Y, (0, 600)), (0, 560, 100, 40)),
+        (r((1250, 40), window, TOP_RIGHT, BOTTOM_RIGHT, FLIP_X, (0, 0)), (200, 0, 1250, 40)),
+        (
+            r((1250, 40), window, TOP_RIGHT, BOTTOM_RIGHT, FLIP_X | SLIDE_X, (0, 0)),
+            (-35, 0, 1250, 40),
+        ),
+        (r((100, 200), window, BOTTOM_LEFT, BOTTOM_RIGHT, SLIDE_Y, (0, 500)), (0, 471, 100, 200)),
+        (r((100, 40), (0, 0, 1, 1), TOP_LEFT, TOP_LEFT, SLIDE_X, (0, 0)), (-65, -40, 100, 40)),
+        (r((1300, 40), (0, 0, 1, 1), TOP_LEFT, BOTTOM_RIGHT, RESIZE_X, (0, 0)), (0, 0, 1215, 40)),
+        // flip_x where the flipped place fits: anchor and gravity swap
+        // sides, the offset stays (0 + 900 - 300).
+        (r((300, 40), window, TOP_RIGHT, BOTTOM_RIGHT, FLIP_X, (900, 0)), (600, 0, 300, 40)),
+        // resize_y: cut at the area's bottom (752 - 81 - 150).
+        (r((100, 900), window, BOTTOM_LEFT, BOTTOM_RIGHT, RESIZE_Y, (0, 0)), (0, 150, 100, 521)),
+        // No gravity on an axis: centred, then slid in from the right.
+        (
+            r((100, 40), (1180, 0, 0, 0), NONE, NONE, SLIDE_X | SLIDE_Y, (0, 0)),
+            (1115, -20, 100, 40),
+        ),
+        // Wider than the area, overlapping both edges: a slide cannot
+        // help; nothing moves.
+        (
+            r((1400, 40), (-100, 0, 1, 1), TOP_LEFT, BOTTOM_RIGHT, SLIDE_X, (0, 0)),
+            (-100, 0, 1400, 40),
+        ),
+        // Wholly outside: resize cannot cut it to anything; kept.
+        (r((50, 40), window, TOP_LEFT, BOTTOM_RIGHT, RESIZE_X, (-500, 0)), (-500, 0, 50, 40)),
+    ];
+    for (i, (rules, want)) in cases.iter().enumerate() {
+        assert_eq!(place(rules, parent, area), *want, "case {i}");
+    }
+}
+
+#[test]
+fn positioners_check_their_input() {
+    for (request, args) in [
+        ("set_size", vec![Arg::Int(0), Arg::Int(10)]),
+        ("set_size", vec![Arg::Int(10), Arg::Int(-1)]),
+        ("set_anchor_rect", vec![Arg::Int(0), Arg::Int(0), Arg::Int(-1), Arg::Int(5)]),
+        ("set_anchor", vec![Arg::Uint(9)]),
+        ("set_gravity", vec![Arg::Uint(9)]),
+    ] {
+        let mut t = T::bound();
+        t.ok(5, "create_positioner", &[Arg::NewId(6)]);
+        let r = t.send(6, request, &args);
+        assert!(t.error(r).starts_with("wl_display#1.error(#6, 0, "), "{request}");
+    }
+    // A zero-sized anchor rectangle is fine; unknown adjustment bits are
+    // ignored.
+    let mut t = T::bound();
+    t.ok(5, "create_positioner", &[Arg::NewId(6)]);
+    t.ok(6, "set_anchor_rect", &[Arg::Int(3), Arg::Int(4), Arg::Int(0), Arg::Int(0)]);
+    t.ok(6, "set_constraint_adjustment", &[Arg::Uint(0xffff)]);
+    let mut dump = Vec::new();
+    t.c.describe(&mut |l| dump.push(l.to_string()));
+    assert!(dump.iter().any(|l| l.contains("adjust: 63")), "{dump:?}");
+}
+
+#[test]
+fn get_popup_checks_its_positioner_parent_and_role() {
+    // An incomplete positioner: xdg_wm_base's invalid_positioner.
+    let mut t = T::mapped();
+    t.ok(5, "create_positioner", &[Arg::NewId(14)]);
+    t.ok(14, "set_size", &[Arg::Int(10), Arg::Int(10)]);
+    t.ok(3, "create_surface", &[Arg::NewId(15)]);
+    t.ok(5, "get_xdg_surface", &[Arg::NewId(16), Arg::Object(Some(15))]);
+    let args = [Arg::NewId(17), Arg::Object(Some(9)), Arg::Object(Some(14))];
+    let r = t.send(16, "get_popup", &args);
+    assert!(t.error(r).starts_with("wl_display#1.error(#5, 5, "));
+    // On an xdg_surface with a role: already_constructed.
+    let mut t = T::mapped();
+    let pos = t.positioner(MENU);
+    let args = [Arg::NewId(pos + 1), Arg::Object(Some(9)), Arg::Object(Some(pos))];
+    let r = t.send(9, "get_popup", &args);
+    assert!(t.error(r).starts_with("wl_display#1.error(#9, 2, "));
+    // A parent without a role: invalid_popup_parent.
+    let mut t = T::mapped();
+    let pos = t.positioner(MENU);
+    t.ok(3, "create_surface", &[Arg::NewId(pos + 1)]);
+    t.ok(5, "get_xdg_surface", &[Arg::NewId(pos + 2), Arg::Object(Some(pos + 1))]);
+    t.ok(3, "create_surface", &[Arg::NewId(pos + 3)]);
+    t.ok(5, "get_xdg_surface", &[Arg::NewId(pos + 4), Arg::Object(Some(pos + 3))]);
+    let args = [Arg::NewId(pos + 5), Arg::Object(Some(pos + 2)), Arg::Object(Some(pos))];
+    let r = t.send(pos + 4, "get_popup", &args);
+    assert!(t.error(r).starts_with("wl_display#1.error(#5, 3, "));
+    // No parent (no other protocol gives one here): at the commit.
+    let mut t = T::mapped();
+    let pos = t.positioner(MENU);
+    t.ok(3, "create_surface", &[Arg::NewId(pos + 1)]);
+    t.ok(5, "get_xdg_surface", &[Arg::NewId(pos + 2), Arg::Object(Some(pos + 1))]);
+    let args = [Arg::NewId(pos + 3), Arg::Object(None), Arg::Object(Some(pos))];
+    t.ok(pos + 2, "get_popup", &args);
+    let r = t.send(pos + 1, "commit", &[]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#5, 3, "));
+    // The xdg_surface destroyed before its popup: defunct_role_object.
+    let mut t = T::mapped();
+    let ((_, x, _), _) = t.popup(9, MENU, None);
+    let r = t.send(x, "destroy", &[]);
+    assert!(t.error(r).starts_with(&format!("wl_display#1.error(#{x}, 6, ")));
+}
+
+#[test]
+fn a_popup_is_configured_then_shown_above_its_parent() {
+    let mut t = T::mapped();
+    let ((s, x, p), events) = t.popup(9, MENU, None);
+    assert_eq!(
+        events,
+        [
+            format!("wl_display#1.delete_id({})", p - 3),
+            format!("xdg_popup#{p}.configure(20, 30, 120, 80)"),
+            format!("xdg_surface#{x}.configure(2)"),
+        ]
+    );
+    assert!(t.h.notes.iter().any(|n| n.contains("role: \"xdg_popup\"")));
+    // Acked, a buffer shows it: a popup window at the parent's surface
+    // (the fake toplevel's client area: (11, 53)) plus (20, 30).
+    let shown = t.show_on(s, x, 2, 120, 80);
+    assert!(shown.iter().any(|e| e.ends_with(".release()")), "{shown:?}");
+    let w = t.window_of(s);
+    assert!(w.popup && w.alive && !w.decorated);
+    assert_eq!((w.at, w.size), ((31, 83), (120, 80)));
+    // Its window geometry starts 4, 6 into its surface: the window moves
+    // by -4, -6 at the commit that applies it, and a popup of the popup
+    // is placed against that geometry.
+    t.ok(x, "set_window_geometry", &[Arg::Int(4), Arg::Int(6), Arg::Int(100), Arg::Int(60)]);
+    t.show_on(s, x, 0, 120, 80);
+    assert_eq!(t.window_of(s).at, (27, 77));
+    let nested = ((30, 20), (0, 0, 100, 60), popup::RIGHT, popup::RIGHT, 0, (0, 0));
+    let ((s2, _, _), conf, _) = t.shown_popup(x, nested, None);
+    assert_eq!(conf, "100, 20, 30, 20");
+    assert_eq!(t.window_of(s2).at, (27 + 4 + 100, 77 + 6 + 20));
+}
+
+#[test]
+fn popups_without_a_grab_go_in_any_order_and_their_children_stay() {
+    let mut t = T::mapped();
+    let ((_, x, p), _, _) = t.shown_popup(9, MENU, None);
+    let ((s2, _, p2), _, _) = t.shown_popup(x, MENU, None);
+    t.ok(p, "destroy", &[]);
+    assert_eq!(t.events(), [format!("wl_display#1.delete_id({p})")]);
+    assert!(t.window_of(s2).alive);
+    assert!(t.h.notes.iter().any(|n| n.contains("orphaned")));
+    let mut dump = Vec::new();
+    t.c.describe(&mut |l| dump.push(l.to_string()));
+    let line = dump.iter().find(|l| l.starts_with(&format!("xdg_popup#{p2} "))).unwrap();
+    assert!(line.contains("parent 0"), "{line}");
+}
+
+#[test]
+fn a_grab_takes_the_keyboard_and_a_press_outside_dismisses_top_down() {
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((s, x, p), _, shown) = t.shown_popup(9, MENU, Some(serial));
+    // Shown: the desktop's grab is its window, the keyboard is its.
+    let w = t.h.windows.iter().rposition(|w| w.popup && w.alive).unwrap() as u32;
+    assert_eq!(t.h.grab, Some(w));
+    let shown = plain(shown);
+    assert!(shown.contains(&"wl_keyboard#13.leave(S, #8)".to_string()), "{shown:?}");
+    assert!(shown.contains(&format!("wl_keyboard#13.enter(S, #{s}, [])")), "{shown:?}");
+    // Keys for the toplevel's window go to it.
+    let e = t.input(Input::Key { window: 0, key: 31, pressed: true });
+    assert_eq!(plain(e.clone()), ["wl_keyboard#13.key(S, T, 31, 1)"]);
+    let key_serial = T::key_serial(&e);
+    // A submenu, its parent the topmost grabbing popup, grabbing with
+    // the key's serial.
+    let sub = ((100, 60), (0, 10, 120, 20), popup::TOP_RIGHT, popup::BOTTOM_RIGHT, 15, (0, 0));
+    let ((s2, _, p2), conf, _) = t.shown_popup(x, sub, Some(key_serial));
+    assert_eq!(conf, "120, 10, 100, 60");
+    let w2 = t.h.windows.len() as u32 - 1;
+    assert_eq!(t.h.grab, Some(w2));
+    // The toplevel is still the active one: nothing changes.
+    assert!(t.input(Input::Focus { window: 0, active: true }).is_empty());
+    // The desktop ended the grab: popup_done topmost first, the windows
+    // gone, the keyboard back on the toplevel.
+    let e = plain(t.input(Input::PopupDone { window: w2 }));
+    assert_eq!(
+        e,
+        [
+            format!("xdg_popup#{p2}.popup_done()"),
+            format!("wl_keyboard#13.leave(S, #{s2})"),
+            format!("xdg_popup#{p}.popup_done()"),
+            "wl_keyboard#13.enter(S, #8, [])".into(),
+            "wl_keyboard#13.modifiers(S, 0, 0, 0, 0)".into(),
+        ]
+    );
+    assert!(!t.window_of(s).alive && !t.window_of(s2).alive);
+    assert_eq!(t.h.grab, None);
+    // Dismissed popups show nothing again and may go in any order.
+    t.ok(s, "commit", &[]);
+    t.ok(p, "destroy", &[]);
+    t.ok(p2, "destroy", &[]);
+}
+
+#[test]
+fn the_window_losing_the_activation_ends_the_grab() {
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((_, _, p), _, _) = t.shown_popup(9, MENU, Some(serial));
+    let e = plain(t.input(Input::Focus { window: 0, active: false }));
+    assert_eq!(e[0], format!("xdg_popup#{p}.popup_done()"));
+    assert!(e.iter().any(|l| l.starts_with("xdg_toplevel#10.configure(0, 0, [])")), "{e:?}");
+    assert_eq!(t.h.grab, None);
+}
+
+#[test]
+fn grabs_are_checked() {
+    // After the first commit: invalid_grab.
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((_, _, p), _) = t.popup(9, MENU, None);
+    let r = t.send(p, "grab", &[Arg::Object(Some(11)), Arg::Uint(serial)]);
+    assert!(t.error(r).starts_with(&format!("wl_display#1.error(#{p}, 0, ")));
+    // A serial not the last press's: denied, dismissed at once.
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((_, _, p), events) = t.popup(9, MENU, Some(serial + 100));
+    assert_eq!(events[1], format!("xdg_popup#{p}.popup_done()"));
+    assert!(t.h.notes.iter().any(|n| n.contains("grab denied")));
+    // Its parent a popup that did not grab: invalid_grab.
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((_, x, _), _, _) = t.shown_popup(9, MENU, None);
+    let pos = t.positioner(MENU);
+    let (s2, x2, p2) = (pos + 1, pos + 2, pos + 3);
+    t.ok(3, "create_surface", &[Arg::NewId(s2)]);
+    t.ok(5, "get_xdg_surface", &[Arg::NewId(x2), Arg::Object(Some(s2))]);
+    t.ok(x2, "get_popup", &[Arg::NewId(p2), Arg::Object(Some(x)), Arg::Object(Some(pos))]);
+    let r = t.send(p2, "grab", &[Arg::Object(Some(11)), Arg::Uint(serial)]);
+    assert!(t.error(r).starts_with(&format!("wl_display#1.error(#{p2}, 0, ")));
+}
+
+#[test]
+fn only_the_topmost_grabbing_popup_may_go() {
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((_, x, p), _, _) = t.shown_popup(9, MENU, Some(serial));
+    t.shown_popup(x, MENU, Some(serial));
+    let r = t.send(p, "destroy", &[]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#5, 2, "));
+    // Unmapping one with a grab above it is the same error.
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((s, x, _), _, _) = t.shown_popup(9, MENU, Some(serial));
+    t.shown_popup(x, MENU, Some(serial));
+    t.ok(s, "attach", &[Arg::Object(None), Arg::Int(0), Arg::Int(0)]);
+    let r = t.send(s, "commit", &[]);
+    assert!(t.error(r).starts_with("wl_display#1.error(#5, 2, "));
+    // In order: the grab goes back to the first, then to nothing.
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((s, x, p), _, _) = t.shown_popup(9, MENU, Some(serial));
+    let first = t.h.grab;
+    let ((s2, _, p2), _, _) = t.shown_popup(x, MENU, Some(serial));
+    t.ok(p2, "destroy", &[]);
+    let e = plain(t.events());
+    assert!(e.contains(&format!("wl_keyboard#13.leave(S, #{s2})")), "{e:?}");
+    assert!(e.contains(&format!("wl_keyboard#13.enter(S, #{s}, [])")), "{e:?}");
+    assert_eq!(t.h.grab, first);
+    // Unmapping the first (a null buffer) ends the grab.
+    t.ok(s, "attach", &[Arg::Object(None), Arg::Int(0), Arg::Int(0)]);
+    t.ok(s, "commit", &[]);
+    assert_eq!(t.h.grab, None);
+    let e = plain(t.events());
+    assert!(e.contains(&"wl_keyboard#13.enter(S, #8, [])".to_string()), "{e:?}");
+    t.ok(p, "destroy", &[]);
+}
+
+#[test]
+fn reposition_sends_repositioned_then_a_configure() {
+    let mut t = T::mapped();
+    // xdg_wm_base 3 (reposition, the positioner's version 3 requests).
+    let wm = [Arg::Uint(3), Arg::UntypedNewId { interface: b"xdg_wm_base", version: 3, id: 14 }];
+    t.ok(2, "bind", &wm);
+    t.events();
+    t.ok(14, "create_positioner", &[Arg::NewId(15)]);
+    t.ok(15, "set_size", &[Arg::Int(50), Arg::Int(40)]);
+    t.ok(15, "set_anchor_rect", &[Arg::Int(0), Arg::Int(0), Arg::Int(10), Arg::Int(10)]);
+    t.ok(15, "set_reactive", &[]);
+    t.ok(15, "set_parent_size", &[Arg::Int(200), Arg::Int(150)]);
+    t.ok(15, "set_parent_configure", &[Arg::Uint(1)]);
+    t.ok(3, "create_surface", &[Arg::NewId(16)]);
+    t.ok(14, "get_xdg_surface", &[Arg::NewId(17), Arg::Object(Some(16))]);
+    t.ok(17, "get_popup", &[Arg::NewId(18), Arg::Object(Some(9)), Arg::Object(Some(15))]);
+    t.ok(16, "commit", &[]);
+    let e = t.events();
+    assert_eq!(e[0], "xdg_popup#18.configure(-20, -15, 50, 40)");
+    t.show_on(16, 17, 2, 50, 40);
+    let at = t.window_of(16).at;
+    t.ok(15, "set_gravity", &[Arg::Uint(popup::BOTTOM_RIGHT)]);
+    t.ok(18, "reposition", &[Arg::Object(Some(15)), Arg::Uint(42)]);
+    assert_eq!(
+        t.events(),
+        [
+            "xdg_popup#18.repositioned(42)",
+            "xdg_popup#18.configure(5, 5, 50, 40)",
+            "xdg_surface#17.configure(3)",
+        ]
+    );
+    // The window moves once the configure is acked and a commit follows.
+    assert_eq!(t.window_of(16).at, at);
+    t.show_on(16, 17, 3, 50, 40);
+    assert_eq!(t.window_of(16).at, (at.0 + 25, at.1 + 20));
+    assert!(t.h.notes.iter().any(|n| n.contains("Ignored") && n.contains("set_reactive")));
+}
+
+#[test]
+fn unmapping_the_toplevel_dismisses_its_popups() {
+    let mut t = T::mapped();
+    let serial = t.press();
+    let ((s, _, p), _, _) = t.shown_popup(9, MENU, Some(serial));
+    t.ok(8, "attach", &[Arg::Object(None), Arg::Int(0), Arg::Int(0)]);
+    t.ok(8, "commit", &[]);
+    let e = plain(t.events());
+    assert_eq!(e[0], format!("xdg_popup#{p}.popup_done()"));
+    assert!(!t.window_of(s).alive);
+    assert_eq!(t.h.grab, None);
+}
+
+#[test]
+fn the_desktop_s_grab_notice_translates() {
+    assert_eq!(
+        input::translate(4, crate::nt::winstate::GALA_WM_POPUP_DONE, 0, 0),
+        Some(Input::PopupDone { window: 4 })
+    );
 }

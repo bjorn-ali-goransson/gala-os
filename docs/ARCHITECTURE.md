@@ -9317,12 +9317,16 @@ one more client of the same window-state interface.
     new id in use or out of order (`invalid_object`), an opcode the
     interface lacks or newer than the object's version (`invalid_method`),
     too many objects (`no_memory`), a request gala lacks
-    (`implementation`), and each interface's own (wl_shm's
-    `invalid_format`, `invalid_stride`, `invalid_fd`; wl_surface's
-    `invalid_scale`, `invalid_transform`, `invalid_offset`; xdg_wm_base's
-    `role`, `invalid_surface_state`; xdg_surface's `not_constructed`,
+    (`implementation`; none of the offered interfaces' today), and each
+    interface's own (wl_shm's `invalid_format`, `invalid_stride`,
+    `invalid_fd`; wl_surface's `invalid_scale`, `invalid_transform`,
+    `invalid_offset`; xdg_wm_base's `role`, `invalid_surface_state`,
+    `not_the_topmost_popup`, `invalid_popup_parent`,
+    `invalid_positioner`; xdg_surface's `not_constructed`,
     `already_constructed`, `unconfigured_buffer`, `invalid_serial`,
-    `invalid_size`, `defunct_role_object`). It is logged, and evented.
+    `invalid_size`, `defunct_role_object`; xdg_positioner's
+    `invalid_input`; xdg_popup's `invalid_grab`). It is logged, and
+    evented.
     The kernel never panics on client input.
 
 ### Prerequisites in the LX layer
@@ -9353,10 +9357,10 @@ names 1 to 6).
 | a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
 | `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
 | `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
-| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; window geometry, move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; window geometry (a toplevel's: it places its popups), move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
 | `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side, and a toplevel without a decoration object is framed too (wl_test; programs that draw their own frame negotiate it: GTK asks for client-side). Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, the surface's size, on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
 | `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
-| `xdg_popup`, `xdg_positioner` | not yet: `create_positioner` and `get_popup` are protocol errors, ledgered (a frameless owned window, as user32's popups are, comes next) |
+| `xdg_positioner`, `xdg_popup` | a popup window (`STYLE_POPUP`: frameless, above the framed windows, never active, not on the taskbar, as user32's menus are) at the place the positioner gives against its parent's window geometry and the work area; a grab takes the keyboard focus and the desktop's popup grab, which a press outside the client's windows ends ("Popups" below) |
 | `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet) |
 | `wl_surface.commit` | the damaged rows (all of them for a new or resized window) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
 | `wl_output` | the client's session's screen: geometry (make "gala", model "shasha"), mode (current and preferred, 60 Hz), scale 1, name `gala-1`, done |
@@ -9406,13 +9410,101 @@ and the client draws the size it is told:
   buffer of another size than asked is shown at its own size there.
 - wm_capabilities (xdg_toplevel 5): maximize and minimize.
 
-Next: frame callbacks paced by the presenter's refresh; popups; a decoration mode change
+Next: frame callbacks paced by the presenter's refresh; a decoration mode change
 on a mapped window (the frame put on or taken off in place). Later: `wl_data_device` (the
 clipboard, bridged to the Windows clipboard so copy and paste works
 across personalities), `wp_viewporter`, fractional scale,
 `xdg_activation`, and `linux-dmabuf` once GPU G2's lavapipe/llvmpipe
 serve Linux clients through EGL. What the server allocates for a client
 is not charged to its process's quota yet ("Resource limits").
+
+### Popups
+
+Menus, tooltips and popovers (what GTK and Qt need after toplevels):
+`kernel/src/wayland/popup.rs` places them, `client.rs` keeps their
+state. Source: xdg-shell.xml (CLEAN_ROOM "Linux"); weston's answers
+where its headless backend gives them (user/lx/wl_popup_test).
+
+- **xdg_positioner**: its rules (size, anchor rectangle, anchor,
+  gravity, constraint adjustment, offset; set_reactive kept), each
+  checked as it comes (`invalid_input`: a size not above 0, an anchor
+  rectangle of negative size, an anchor or gravity out of its enum;
+  unknown adjustment bits are ignored). `get_popup` and `reposition`
+  copy them: the positioner may change or go after. One without a size
+  or an anchor rectangle is xdg_wm_base's `invalid_positioner` (on the
+  xdg_wm_base the xdg_surface came from). set_parent_size and
+  set_parent_configure are accepted and not used (ledgered: a popup is
+  placed against its parent's present state).
+- **The place** (`popup::place`): the anchor point (a corner of the
+  anchor rectangle, the middle of an edge, the centre; halves round
+  down), the popup towards the gravity from it (centred on an axis
+  without one), the offset; then, on each axis where the popup is partly
+  outside the work area (the screen above the taskbar, in the parent's
+  coordinates), the protocol's order: flip (anchor and gravity inverted
+  on that axis, kept only if no longer constrained), slide (towards the
+  gravity first, then against it, each until the far edge is inside or
+  the near edge would leave), resize (cut to the area, if any of it is
+  inside). A parent that shows no window yet gives no area: nothing is
+  adjusted.
+- **The parent**: an xdg_surface with a role (a toplevel or a popup),
+  not the popup's own (else `invalid_popup_parent`); null is allowed by
+  get_popup and is `invalid_popup_parent` at the first commit (no
+  protocol here gives a parent another way). Its window geometry
+  (`set_window_geometry`, applied at commit; the whole surface if never
+  set) is what the anchor rectangle and the configure's x and y are
+  relative to; on the screen it is the parent window's client origin
+  plus the geometry's x and y.
+- **Configure and map**: the first commit (no buffer) is answered with
+  `xdg_popup.configure` (x, y, width, height) and `xdg_surface.configure`;
+  the place goes with the serial as a toplevel's desktop place does, and
+  applies at the commit of a buffer after the ack. The popup window is at
+  the parent's geometry on the screen plus the place, less the popup's
+  own geometry offset (a client-side shadow outside the geometry), the
+  buffer's size; moved when the place, the geometry or the size changes.
+  Mapping while the parent shows nothing is `invalid_popup_parent`. A
+  null buffer unmaps it and the next commit configures it again.
+- **reposition** (version 3): new rules; `repositioned` with the token,
+  then the configures; the window moves at the commit after the ack.
+  Before the first configure it only changes the rules that one uses.
+  A popup is not reconstrained when its parent moves (set_reactive is
+  ledgered).
+- **Grab** (`xdg_popup.grab`): before the first commit only (else
+  `invalid_grab`); its parent must be the topmost grabbing popup or,
+  without one, a toplevel (`invalid_grab`, as weston answers); granted
+  for the serial of the client's last button or key press, else denied:
+  popup_done at once, as the protocol says of a denied grab (and for a
+  parent dismissed already). The client's grabs are a stack (`grabs`,
+  bottom first). When a grabbing popup shows, the topmost shown one
+  takes the keyboard focus (leave on the toplevel, enter on it; keys the
+  desktop sends to the active window go to it) and the desktop's popup
+  grab (`State::popup_grab`, its window; `Host::grab`). The toplevel
+  stays the desktop's active window and its configures still say
+  activated (the seat's `active` is apart from the keyboard focus).
+  Pointer input is the client's as usual on all its surfaces (an
+  owner-events grab, as the protocol says).
+- **Dismissal**: a button pressed outside the windows of the grab's
+  owner (another program's window, a frame, the taskbar, the desktop)
+  ends the desktop's grab and goes nowhere else, its release neither
+  (as a click outside the start menu closes it); the owner gets
+  GALA_WM_POPUP_DONE (0x10012) on the grab's window, which outlives that
+  window in the queue. The server dismisses every grabbing popup topmost
+  first: `popup_done`, its window gone (and its foci: the keyboard's
+  leave if it had it), its own popups before it; then the keyboard
+  focus goes back to the active toplevel. The same when the toplevel
+  stops being the active window (GALA_WM_ACTIVE 0), and for the popups
+  of a toplevel unmapped or destroyed. A dismissed popup shows nothing
+  again (its buffers are released); the client destroys it, in any
+  order.
+- **Destroying**: only the topmost grabbing popup may be destroyed or
+  unmapped (else xdg_wm_base's `not_the_topmost_popup`); the grab and
+  the keyboard focus go back to the popup below or the toplevel.
+  Popups without a grab go in any order, and a popup's children stay
+  where they are when it goes first (orphans: no popup_done; weston
+  does the same, recorded by wl_popup_test). The xdg_surface destroyed
+  before its popup is `defunct_role_object`.
+- Limits: the grab is the client process's on the desktop (a press on a
+  window of another connection of the same process counts as inside);
+  no touch; a popup never follows its parent's later moves.
 
 ### Input
 
@@ -9438,7 +9530,9 @@ user32 (`kernel/src/wayland/input.rs`, `Client::input`).
   activates comes before its button and keys after it go to the new
   focus; `GALA_WM_POINTER_LEFT` (0x10011), queued when the window whose
   client area the pointer was over (`State::hovered`: the target of the
-  moves, the capture, none during a drag or resize) changes.
+  moves, the capture, none during a drag or resize) changes;
+  `GALA_WM_POPUP_DONE` (0x10012), when a press outside its windows ended
+  its popup grab ("Popups").
 - **Translation** (`input::translate`): WM_MOUSEMOVE is a position;
   WM_LBUTTONDOWN/UP and WM_RBUTTONDOWN/UP are BTN_LEFT (0x110) and
   BTN_RIGHT (0x111); WM_MOUSEWHEEL is the wheel (WHEEL_DELTA a notch,
@@ -9450,8 +9544,10 @@ user32 (`kernel/src/wayland/input.rs`, `Client::input`).
   MAKELONG(width, height)) are the desktop's sizing ("Configure from the
   desktop"); WM_MOVE and GALA_WM_MINIMIZED mean nothing to a Wayland
   client; any other message is ledgered.
-- **Activation** (GALA_WM_ACTIVE) moves the keyboard focus and sends
-  each toplevel whose activation changed a configure.
+- **Activation** (GALA_WM_ACTIVE) sets the seat's active surface, moves
+  the keyboard focus (to the topmost grabbing popup while there is one)
+  and sends each toplevel whose activation changed a configure; losing
+  it dismisses the client's grabbing popups.
 - **The client's seat** (`Seat`): the surface with the pointer and
   where, buttons held, the surface with the keyboard focus, keys down
   and modifiers. A position on the surface enters it (leaving another;
@@ -9530,8 +9626,11 @@ started with each desktop that has a shell.
   code, message) and `wayland input` (what: enter, leave, button, axis,
   key, focus, unfocus, close, maximize, restore, place, or dropped for a
   window the client shows no surface in; the surface, the window, the
-  button or key code, pressed or released; motion is not evented). The
-  client's pid and number are in each. With `events=window` too, the
+  button or key code, pressed or released; motion is not evented) and
+  `wayland popup` (configure with the place and size, repositioned,
+  grab, grab denied, dismissed and orphaned, with why). The client's pid
+  and number are in each; `events=window`'s `popup grab ended` is the
+  desktop's side. With `events=window` too, the
   desktop's `button` and `key` events say where the input went first.
 - `wayland=trace`: every request and event decoded, as libwayland's
   `WAYLAND_DEBUG=1` prints them (`wayland: pid 7
@@ -9557,8 +9656,12 @@ started with each desktop that has a shell.
   frame callbacks; a buffer's size and stride; an xdg_surface's
   configure state, the serials not acked and the place acked; a
   toplevel's title, app id, decoration object and sizing; a
-  decoration's mode asked for) and its seat (the pointer's surface and
-  place, buttons held, the keyboard's surface, keys down, modifiers).
+  decoration's mode asked for; a positioner's rules; a popup's parent,
+  rules, configured and applied place, where its window is, grab and
+  dismissed) and its seat (the pointer's surface and place, buttons
+  held, the keyboard's surface, keys down, modifiers, the active
+  surface, the last press's serial, the popup grabs); the session's
+  `input queue` line names the window with the desktop's popup grab.
 
 ### Tests
 
@@ -9580,6 +9683,20 @@ started with each desktop that has a shell.
   environment), and CI installs weston. Scenarios `lx_wl` (`wayland=on
   events=wayland`; the log shows `desktop: shown window 'wl_test'`) and
   `lx_wl_pie` (`wayland=trace`) match the same transcript.
+- **`user/lx/wl_popup_test`**, the same kind of client for popups,
+  recorded against weston's headless backend (`WAYLAND_TESTS`): every
+  anchor with gravity bottom_right and every gravity with anchor
+  top_left on a 200x150 toplevel, an offset with odd sizes, a nested
+  popup, reposition (repositioned, then the configures), the version 3
+  positioner requests, delete_id for each popup destroyed, a far place
+  kept without adjustment, the positioner's set_size and set_anchor_rect
+  errors on connections of their own, and a parent popup destroyed
+  before its child without an error and without dismissing it.
+  Nothing it prints depends on where the toplevel is (positions are
+  relative to the parent). What weston's headless backend cannot show
+  (no seat, no constraint adjustment) or answers otherwise than the
+  protocol is wl_input_test's and the host tests'. Scenarios
+  `lx_wl_popup` and `lx_wl_popup_pie` (`wayland=trace`).
 - **`user/lx/wl_input_test`**, the same kind of client for input and
   window control: wl_seat 7 (capabilities, name), the keymap (format,
   the descriptor mapped MAP_PRIVATE, its text, its NUL), repeat_info, a
@@ -9592,9 +9709,19 @@ started with each desktop that has a shell.
   (a configure of the work area's surface size, maximized and activated),
   Win+Down (the size before), Win+Left (the left half, tiled left, top
   and bottom: it binds xdg_wm_base 6), Win+Down, each acked and answered
-  with a buffer of that size; the frame's close button
-  (`xdg_toplevel.close`); then a second toplevel asking for client-side
-  decorations, shown frameless and focused; "q" ends it. It also checks
+  with a buffer of that size; then "m": six popups whose places are
+  constrained against the work area (flip_y, flip_x that would still be
+  constrained, flip_x then slide_x, slide_y, slide_x off the left edge,
+  resize_x; the window's place is known: the first Wayland window), then
+  a menu grabbing with the "m" press's serial (the keyboard focus moves
+  to it), "s" (the menu has it) opening a grabbing submenu, both checked
+  on the screen frameless above the window, and a click on the desktop
+  dismissing them topmost first (the keyboard back on the window); the
+  frame's close button (`xdg_toplevel.close`); then a second toplevel
+  asking for client-side decorations, shown frameless and focused; "q"
+  opens a grabbing popup and one nested in it, and destroying the
+  outer one first ends the test with xdg_wm_base's
+  not_the_topmost_popup. It also checks
   wm_capabilities (maximize, minimize) and the activated state once
   shown. Not recordable
   on Linux (weston's headless backend has no input devices): its
@@ -9605,8 +9732,9 @@ started with each desktop that has a shell.
   (`WL_INPUT_SCREEN`) that sends the input step by step, each after the
   line the program prints for the step before, and checks the pixels:
   the first window's buffer inside shasha's frame (the active caption
-  above it), maximized, restored, snapped left and back, the second's
-  where a frame would be.
+  above it), maximized, restored, snapped left and back, the menu and
+  submenu above it and gone after the click, the second's where a frame
+  would be.
 - The wire format: host tests in `wl_abi`. The protocol state: host
   tests in `kernel/src/wayland/tests.rs` (wl_test's flow against a fake
   desktop, the pixels and damaged rows copied, unmapping, versions,
@@ -9615,7 +9743,12 @@ started with each desktop that has a shell.
   written, every kind of input with its serial-free events, foci after
   unmapping and destroying, decoration modes and their errors, the
   window messages' translation, every key the scan codes give being in
-  the keymap). The notices for served owners: `winstate/tests.rs`.
+  the keymap; positioners' errors, every anchor and gravity, flip, slide
+  and resize, popups placed against window geometry, grabs granted,
+  denied and refused, dismissal top-down, the topmost rule, reposition,
+  orphans). The notices for served owners: `winstate/tests.rs`; the
+  desktop's popup grab (a press outside ends it and goes nowhere, nor
+  its release): `desktop/tests.rs`.
 - **`weston-simple-shm`** (`lx_simple_shm`), the first real client:
   weston 13's demo as Ubuntu 24.04 builds it, on Ubuntu's
   libwayland-client, libffi and glibc (`PREBUILT`s in
