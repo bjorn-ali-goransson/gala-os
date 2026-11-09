@@ -2862,8 +2862,8 @@ impl<F> Client<F> {
                 self.get_popup(host, x, role, *id, *parent, *pos, r.version)
             }
             // set_window_geometry(x, y, width, height): applied at commit;
-            // a popup's places it (and its children), a toplevel's is not
-            // followed yet.
+            // a frameless window shows it (its view), and its popups are
+            // placed against it.
             (3, [Arg::Int(gx), Arg::Int(gy), Arg::Int(w), Arg::Int(h)]) => {
                 if *w <= 0 || *h <= 0 {
                     return Err(self.fail(
@@ -2872,9 +2872,6 @@ impl<F> Client<F> {
                         XDG_SURFACE_INVALID_SIZE,
                         format_args!("invalid window geometry {w}x{h}"),
                     ));
-                }
-                if toplevel.is_some() {
-                    host.note(Note::Ignored { interface: r.iface.name, request: r.sig.name });
                 }
                 if let Some(xs) = self.xdg(x) {
                     xs.pending_geometry = Some((*gx, *gy, *w, *h));

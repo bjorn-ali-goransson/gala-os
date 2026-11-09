@@ -197,6 +197,11 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         }
         nr::FCNTL => fcntl(call, a(0), a(1), a(2)),
         nr::GETUID | nr::GETEUID => Ok(super::exec::UID),
+        nr::GETRESUID => super::prctl::getres(call, [a(0), a(1), a(2)], false),
+        nr::GETRESGID => super::prctl::getres(call, [a(0), a(1), a(2)], true),
+        nr::PRCTL => super::prctl::prctl(call, a(0), a(1)),
+        nr::STATFS => file::statfs(call, a(0), a(1)),
+        nr::FSTATFS => file::fstatfs(call, a(0), a(1)),
         nr::GETGID | nr::GETEGID => Ok(super::exec::GID),
         nr::ARCH_PRCTL => arch_prctl(call, a(0), a(1)),
         nr::SET_TID_ADDRESS => super::threads::set_tid_address(call, a(0)),
@@ -215,6 +220,8 @@ fn handle(call: &Call<'_>, number: u64) -> Result {
         nr::EPOLL_PWAIT => super::epoll::epoll_pwait(call, a(0), a(1), a(2), a(3), a(4), a(5)),
         nr::EPOLL_PWAIT2 => super::epoll::epoll_pwait2(call, a(0), a(1), a(2), a(3), a(4), a(5)),
         nr::PIPE2 => pipe2(call, a(0), a(1)),
+        nr::EVENTFD => super::eventfd::eventfd(call, a(0)),
+        nr::EVENTFD2 => super::eventfd::eventfd2(call, a(0), a(1)),
         nr::PIPE => pipe2(call, a(0), 0),
         nr::DUP => {
             let f = call.lx.fd(a(0)).ok_or(EBADF)?;
@@ -421,7 +428,8 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
         | Object::Device(_)
         | Object::Socket(_)
         | Object::Unix(_)
-        | Object::Epoll(_) => None,
+        | Object::Epoll(_)
+        | Object::EventFd(_) => None,
     };
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
@@ -442,7 +450,9 @@ fn fcntl(call: &Call<'_>, fd: u64, cmd: u64, arg: u64) -> Result {
                 Object::PipeWrite(_) => 1,
                 Object::Console(_) => 2,
                 Object::File(file) => file::status_flags(file),
-                Object::Socket(_) | Object::Unix(_) | Object::Epoll(_) => file::O_RDWR,
+                Object::Socket(_) | Object::Unix(_) | Object::Epoll(_) | Object::EventFd(_) => {
+                    file::O_RDWR
+                }
                 Object::Device(d) => match (d.readable, d.writable) {
                     (true, true) => file::O_RDWR,
                     (false, true) => file::O_WRONLY,
@@ -552,6 +562,7 @@ fn lseek(call: &Call<'_>, fd: u64, offset: u64, whence: u64) -> Result {
         Object::PipeRead(_)
         | Object::PipeWrite(_)
         | Object::Console(_)
+        | Object::EventFd(_)
         | Object::Socket(_)
         | Object::Unix(_)
         | Object::Epoll(_) => Err(ESPIPE),
@@ -611,6 +622,7 @@ fn read(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
         Object::Device(dev) => file::device_read(call, dev, buf, count),
         Object::Socket(sock) => socket::recv(call, &f, sock, buf, count, 0),
         Object::Unix(u) => unix::recv(call, fd, &f, u, buf, count, 0),
+        Object::EventFd(e) => super::eventfd::read(call, &f, e, buf, count),
         Object::PipeRead(pipe) => loop {
             if count == 0 {
                 return Ok(0);
@@ -662,6 +674,7 @@ fn write(call: &Call<'_>, fd: u64, buf: u64, count: u64) -> Result {
             call.process.read(buf + at as u64, out).map_err(|_| EFAULT)
         }),
         Object::Unix(u) => unix::send(call, &f, u, buf, count, 0, 0),
+        Object::EventFd(e) => super::eventfd::write(call, &f, e, buf, count),
         Object::Console(stream) => {
             // A piece at a time; a fault after some pieces ends the write
             // with what was written, one at the start is EFAULT.
@@ -892,6 +905,7 @@ fn write_bytes(call: &Call<'_>, fd: u64, data: &[u8]) -> Result {
             Ok(())
         }),
         Object::Unix(u) => unix::send_bytes(call, &f, u, data),
+        Object::EventFd(e) => super::eventfd::write_bytes(call, &f, e, data),
         Object::Console(stream) => {
             call.lx.console_write(*stream, data).map_err(|_| ENOMEM)?;
             Ok(data.len() as u64)

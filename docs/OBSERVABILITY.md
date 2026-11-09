@@ -440,7 +440,9 @@ CPU) before killing the VM and waits up to 20 s for the dump:
    `#[track_caller]` wrappers; the only clue for a Linux thread, which
    has no NT system-call record), the ledger, each Linux thread (`lx: pid P thread
    T (core C): mask .. pending .. process pending .. blocked|running`),
-   each epoll set's entries (`lx: pid P epoll fd N: fd ..`) and every
+   each epoll set's entries (`lx: pid P epoll fd N: fd ..`), each
+   eventfd (`lx: pid P fd N: eventfd (count C[, semaphore]), W
+   waiting`) and every
    futex waiter (`lx: futex waiter: pid P address A bitset B thread
    T`), every named AF_UNIX socket (`dump: unix: stream by pid P,
    node N|abstract NAME, listening (K of B waiting)|connected (side S:

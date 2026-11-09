@@ -2211,7 +2211,13 @@ the next breakthroughs).
   GTK's own title bar (`GTK_SCREEN` checks GTK's pixels), a PS/2 click on
   its button prints its line, a click on GTK's close button closes it,
   and its transcript is Linux's; the `_pie` scenario clicks itself, as
-  on Linux. Built for it: the server's part above.
+  on Linux. Built for it: the server's part above; and what GTK's start
+  reached, each in a corpus test recorded on Linux: eventfd and eventfd2
+  (`lx_eventfd`: GLib's main loop wakes its threads with one), prctl's
+  thread name and capability bounding set with getresuid and getresgid
+  (`lx_prctl`), statfs and fstatfs (`lx_statfs`). Its ledger after:
+  rseq and SA_ONSTACK (below), and the Wayland requests accepted and
+  not used (regions, set_cursor, min and max sizes, set_parent).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2221,6 +2227,9 @@ the next breakthroughs).
    - rseq (glibc registers one; ENOSYS, ledgered, until the scheduler
      keeps its cpu_id and aborts its critical sections), shrinking a
      mapped file (ramfs refuses it while mapped: EBUSY, ledgered);
+     sigaltstack (glibc 2.39 installs its SIGRT_1 handler with
+     SA_ONSTACK, ledgered: without an alternate stack the current one is
+     used, as on Linux, so it changes nothing until a program sets one);
    - Linux roots for more programs (`LINUX_ROOTS`: today GTK 3's), and
      what their programs reach, from the ledger (`linux syscall
      missing`).

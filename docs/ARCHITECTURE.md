@@ -8747,6 +8747,23 @@ The running parts (milestone 1; `lxrun=`):
   program the process runs (`LxProcess::exe`, its node: execve sets it,
   to the interpreter for a `#!` script; a fork's child has its
   parent's); other /proc paths are ENOENT (ledgered for readlink).
+- **Process attributes** (`lx::prctl`; prctl_test, `lx_prctl`): prctl's
+  PR_SET_NAME and PR_GET_NAME are the calling thread's name
+  (`state::Comm` in `LxThread`, Linux's "comm": up to 15 bytes and a
+  NUL; a new thread has its creator's, a fork's child its parent's,
+  execve gives the program's file name, the path it was given, and so a
+  script's own), PR_CAPBSET_READ the full bounding set (1 up to
+  CAP_LAST_CAP, 40; EINVAL beyond, by which libcap finds the last); any
+  other option EINVAL and ledgered (`linux option missing`, service
+  prctl). getresuid and getresgid: the one user's ids, three times.
+- **statfs** (`lx::file`; statfs_test, `lx_statfs`): statfs (the path
+  found as stat finds it, its errors) and fstatfs report the shared
+  file system as a tmpfs (TMPFS_MAGIC; 4 KiB blocks, the machine's
+  memory as its size and what is free of it as its room, no inode limit,
+  names of 255 bytes, ST_VALID, fsid 0); a pipe, a socket and an
+  anonymous inode their pseudo file systems' magics, without blocks.
+  fontconfig asks whether its cache may be mapped, libselinux whether
+  /sys/fs/selinux is there, GLib a file's file system.
 - **Clocks and timers** (`lx::time`, `lx::timer`; clock_test is the
   spec): clock_gettime/clock_getres (REALTIME and its variants from the
   system time, MONOTONIC, _RAW, _COARSE, BOOTTIME from the monotonic
@@ -8842,6 +8859,18 @@ The running parts (milestone 1; `lxrun=`):
   (`Fd::watchers`, `Epoll::forget`); closing the epoll fd empties its
   set. Ready entries come out in the order they were added; struct
   epoll_event is the packed 12 bytes.
+- **eventfd** (`lx::eventfd`; eventfd_test, `lx_eventfd`): eventfd and
+  eventfd2 (EFD_SEMAPHORE, EFD_NONBLOCK, EFD_CLOEXEC; another flag
+  EINVAL), a 64-bit counter as `Object::EventFd`: a read (8 bytes at
+  least, else EINVAL) gives it and zeroes it (a semaphore's gives 1 and
+  takes 1) and blocks while it is 0, a write adds (u64::MAX is EINVAL)
+  and blocks while the sum would pass 0xffff_ffff_ffff_fffe, EAGAIN for
+  either when non-blocking; readable while above 0, writable while 1
+  fits. Readers and writers wait on its core `Waiters` (as AF_UNIX
+  sockets do), which `poll::Watch` joins for poll, select and epoll; a
+  value read and not copied out (EFAULT) is given back. fstat: an
+  anonymous inode (0600); fstatfs: anon_inodefs. GLib's main loop wakes
+  its threads with one (it falls back to a pipe without).
 - **Waiting** (`lx::wait`): a thread blocks by `prepare` (the
   scheduler's prepare_wait, its deadline the earlier of the call's and
   ITIMER_REAL's), then `block`, which records it as its signal state's
@@ -9357,7 +9386,7 @@ Offered globals: `wl_compositor` 6, `wl_shm` 2, `xdg_wm_base` 6,
 | a client connection | a `wayland::Connection`: the accepted socket, the connector's pid (SO_PEERCRED), its `Client` (object table, input buffer and descriptor queue, output) |
 | `wl_display` | `sync` answers `wl_callback.done` (a serial) at once; `get_registry` lists the globals; every destroyed client object, and every callback once done, is answered with `delete_id` |
 | `wl_compositor`, `wl_surface` | a surface holds its pending state (attach, damage and damage_buffer as a band of rows, frame callbacks) until `commit`; it is a window only once a role gives it one. Regions, buffer scale and transform other than 1 and normal and `offset` are accepted and not used yet (ledgered) |
-| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; window geometry (a toplevel's: it places its popups), move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
+| `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` | a `winstate` window owned by the client's process (`Desktop::create`, shown at once, cascaded from (64, 48)): the first commit without a buffer is answered with `configure_bounds` (the screen's size, version 4), `wm_capabilities` (none yet, version 5), `xdg_toplevel.configure` 0x0 and `xdg_surface.configure`; once acked, a commit with a buffer maps the window (titled by `set_title`, retitled when it changes), a null buffer unmaps it and the next commit configures it again. The frame's close button (and `gala close`: `Action::Close`, a WM_SYSCOMMAND SC_CLOSE in the window's input) sends `xdg_toplevel.close`; the client decides. The desktop's sizing is a configure ("Configure from the desktop" below); `set_maximized`, `unset_maximized` and `set_minimized` are the desktop's actions on the window (`Action::Maximize`, `Restore`, `Minimize`, as its caption buttons), whose answer comes back as input; before mapping they are ignored (ledgered). The app id is kept; the window geometry is what a frameless window shows ("Frameless windows") and what its popups are placed against; move, resize, menus, min and max sizes and fullscreen are accepted and not acted on yet (ledgered). Pings are not sent: the desktop marks no window as not responding yet (a hung user32 window is not ghosted either); `xdg_wm_base.ping` on a timer comes with that, and pongs are accepted |
 | `zxdg_decoration_manager_v1`, `zxdg_toplevel_decoration_v1` | the decoration mode, sent with each configure: server-side (shasha's frame) unless the client asked for client-side. A toplevel without a decoration object is client-side: "if compositor and client do not negotiate the use of a server-side decoration using this protocol, clients continue to self-decorate as they see fit" (the protocol's description). GTK 3 never binds the manager and draws its own title bar (gtk_test), GTK 4 negotiates; a client that draws no frame (weston-simple-shm, wl_test) is shown without one. Client-side is a frameless window (`STYLE_FRAMELESS`: all client area, its window geometry's size ("Frameless windows" below), on the taskbar and activated as framed ones). The mode is fixed when the window is made: `set_mode` on a mapped toplevel is answered with a configure carrying the window's mode (the protocol lets the compositor choose), the next mapping follows the new one. Its errors: `already_constructed`, `unconfigured_buffer` (on the manager), `orphaned` (a toplevel destroyed before its decoration), `invalid_mode` |
 | `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
 | `xdg_positioner`, `xdg_popup` | a popup window (`STYLE_POPUP`: frameless, above the framed windows, never active, not on the taskbar, as user32's menus are) at the place the positioner gives against its parent's window geometry and the work area; a grab takes the keyboard focus and the desktop's popup grab, which a press outside the client's windows ends ("Popups" below) |

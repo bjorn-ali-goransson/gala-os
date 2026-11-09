@@ -1639,6 +1639,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("lx_socket_pie", "user/lx/bin/socket_test-pie", "lx"),
     ("lx_memfd", "user/lx/bin/memfd_test", "lx"),
     ("lx_memfd_pie", "user/lx/bin/memfd_test-pie", "lx"),
+    ("lx_prctl", "user/lx/bin/prctl_test", "lx"),
+    ("lx_prctl_pie", "user/lx/bin/prctl_test-pie", "lx"),
+    ("lx_eventfd", "user/lx/bin/eventfd_test", "lx"),
+    ("lx_eventfd_pie", "user/lx/bin/eventfd_test-pie", "lx"),
+    ("lx_statfs", "user/lx/bin/statfs_test", "lx"),
+    ("lx_statfs_pie", "user/lx/bin/statfs_test-pie", "lx"),
     ("lx_unix", "user/lx/bin/unix_test", "lx"),
     ("lx_unix_pie", "user/lx/bin/unix_test-pie", "lx"),
     ("lx_wl", "user/lx/bin/wl_test", "lx"),
@@ -8602,6 +8608,51 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit lxrun=/lx/memfd_test-pie lxargs=./memfd_test",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["personality linux", "run: end /lx/memfd_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/prctl_test (LD step 3, what GTK's start reached): prctl's thread name and capability bounding set, getresuid and getresgid;
+        // its transcript must be its expected.txt (real Linux's).
+        name: "lx_prctl",
+        cmdline: "qemu_exit lxrun=/lx/prctl_test lxargs=./prctl_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/prctl_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/prctl_test as a static-pie.
+        name: "lx_prctl_pie",
+        cmdline: "qemu_exit lxrun=/lx/prctl_test-pie lxargs=./prctl_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/prctl_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/eventfd_test (LD step 3, what GTK's start reached): eventfd and eventfd2: the counter, semaphore mode, the limit, waking a blocked read and epoll;
+        // its transcript must be its expected.txt (real Linux's).
+        name: "lx_eventfd",
+        cmdline: "qemu_exit lxrun=/lx/eventfd_test lxargs=./eventfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/eventfd_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/eventfd_test as a static-pie.
+        name: "lx_eventfd_pie",
+        cmdline: "qemu_exit lxrun=/lx/eventfd_test-pie lxargs=./eventfd_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/eventfd_test-pie", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/statfs_test (LD step 3, what GTK's start reached): statfs and fstatfs: what holds on any file system, and the errors;
+        // its transcript must be its expected.txt (real Linux's).
+        name: "lx_statfs",
+        cmdline: "qemu_exit lxrun=/lx/statfs_test lxargs=./statfs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/statfs_test", BOOT_OK_MARKER],
+    },
+    Scenario {
+        // user/lx/statfs_test as a static-pie.
+        name: "lx_statfs_pie",
+        cmdline: "qemu_exit lxrun=/lx/statfs_test-pie lxargs=./statfs_test",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["personality linux", "run: end /lx/statfs_test-pie", BOOT_OK_MARKER],
     },
     Scenario {
         // user/lx/unix_test (LD step 2): AF_UNIX sockets, names, SCM_RIGHTS

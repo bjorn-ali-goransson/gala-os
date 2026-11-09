@@ -1,0 +1,32 @@
+sizeof(struct statfs) = 120
+statfs("/") = 0
+  f_bsize is a power of two >= 512 = yes
+  f_frsize is f_bsize = yes
+  f_bfree <= f_blocks = yes
+  f_bavail <= f_bfree = yes
+  f_namelen = 255
+statfs(".") = 0
+  f_bsize is a power of two >= 512 = yes
+  f_frsize is f_bsize = yes
+  f_bfree <= f_blocks = yes
+  f_bavail <= f_bfree = yes
+  f_namelen = 255
+open = 3
+statfs(the file) = 0
+fstatfs(its descriptor) = 0
+the same type and fsid through the path and the descriptor = yes
+the same type as its directory's = yes
+fstatfs(the directory) = 0
+the same type as the file's = yes
+statfs(through a file) = -20 (ENOTDIR)
+-- errors
+statfs(missing) = -2 (ENOENT)
+statfs("") = -2 (ENOENT)
+statfs(bad path pointer) = -14 (EFAULT)
+statfs(bad buffer) = -14 (EFAULT)
+fstatfs(-1) = -9 (EBADF)
+fstatfs(99) = -9 (EBADF)
+fstatfs(bad buffer) = -14 (EFAULT)
+fstatfs(a pipe) = 0
+statfs_test: ok
+-- exit status 0

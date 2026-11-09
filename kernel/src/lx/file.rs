@@ -644,7 +644,7 @@ fn stat_other(object: &Object) -> Stat {
         Object::PipeRead(_) | Object::PipeWrite(_) => (abi::S_IFIFO | 0o600, 0),
         Object::Socket(_) | Object::Unix(_) => (abi::S_IFSOCK | 0o777, 0),
         // An anonymous inode: no file type, 0600.
-        Object::Epoll(_) => (0o600, 0),
+        Object::Epoll(_) | Object::EventFd(_) => (0o600, 0),
         _ => (abi::S_IFCHR | 0o620, 136 << 8),
     };
     Stat {
@@ -675,6 +675,72 @@ pub fn stat(call: &Call<'_>, path: u64, buf: u64, follow: bool) -> Result {
     let node = found.existing()?;
     let st = with_fs(|fs| stat_of(fs, node))?;
     put_stat(call, buf, &st)
+}
+
+/// statfs(2)'s file systems, by magic number (linux/magic.h): the shared
+/// file system is in memory as a tmpfs is (its files, directories and
+/// the devices found by path); pipes, sockets and anonymous inodes
+/// (epoll, eventfd) are in Linux's pseudo file systems.
+const TMPFS_MAGIC: i64 = 0x0102_1994;
+const PIPEFS_MAGIC: i64 = 0x5049_5045;
+const SOCKFS_MAGIC: i64 = 0x534f_434b;
+const ANON_INODE_FS_MAGIC: i64 = 0x0904_1934;
+/// struct statfs's f_flags: the flags are valid (ST_VALID), no mount
+/// options.
+const ST_VALID: i64 = 0x20;
+
+/// statfs(path, buf) (statfs_test): as stat finds the path.
+pub fn statfs(call: &Call<'_>, path: u64, buf: u64) -> Result {
+    let bytes = read_path(&call.process, path)?;
+    if device_at(&bytes).is_none() {
+        resolve(call, AT_FDCWD, &bytes, true)?.existing()?;
+    }
+    put_statfs(call, buf, TMPFS_MAGIC)
+}
+
+/// fstatfs(fd, buf): the file system of what `fd` is.
+pub fn fstatfs(call: &Call<'_>, fd: u64, buf: u64) -> Result {
+    let f = call.lx.fd(fd).ok_or(EBADF)?;
+    let magic = match &f.object {
+        Object::File(_) | Object::Device(_) | Object::Console(_) => TMPFS_MAGIC,
+        Object::PipeRead(_) | Object::PipeWrite(_) => PIPEFS_MAGIC,
+        Object::Socket(_) | Object::Unix(_) => SOCKFS_MAGIC,
+        Object::Epoll(_) | Object::EventFd(_) => ANON_INODE_FS_MAGIC,
+    };
+    put_statfs(call, buf, magic)
+}
+
+/// Writes struct statfs (x86-64, 120 bytes): 4 KiB blocks; the
+/// in-memory file system's size and room are the machine's memory and
+/// what is free of it (`mm::frame_stats`), as a tmpfs without a size
+/// limit reports them; no inode limit (counts 0, as tmpfs reports for
+/// none); names up to 255 bytes; fsid 0. The pseudo file systems report
+/// no blocks.
+fn put_statfs(call: &Call<'_>, buf: u64, magic: i64) -> Result {
+    let (free, total) = if magic == TMPFS_MAGIC { crate::mm::frame_stats() } else { (0, 0) };
+    let words: [i64; 15] = [
+        magic,
+        BLKSIZE,
+        total as i64,
+        free as i64,
+        free as i64,
+        0,
+        0,
+        0, // f_fsid: two ints, 0 and 0
+        255,
+        BLKSIZE,
+        ST_VALID,
+        0,
+        0,
+        0,
+        0,
+    ];
+    let mut out = [0u8; 120];
+    for (i, w) in words.iter().enumerate() {
+        out[i * 8..i * 8 + 8].copy_from_slice(&w.to_le_bytes());
+    }
+    call.process.write(buf, &out).map_err(|_| EFAULT)?;
+    Ok(0)
 }
 
 pub fn fstat(call: &Call<'_>, fd: u64, buf: u64) -> Result {
