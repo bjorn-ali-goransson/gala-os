@@ -33,8 +33,9 @@
 //! - normaliz's IdnToAscii and IdnToUnicode (setup.exe's next delay-loaded
 //!   DLL): `bücher` is `xn--bcher-kva` and back, each the length of its
 //!   result; powrprof's CallNtPowerInformation(ProcessorInformation):
-//!   STATUS_BUFFER_TOO_SMALL with no buffer, success with room for every
-//!   processor, the first entry processor 0.
+//!   STATUS_INVALID_PARAMETER with no room (as Windows answers),
+//!   STATUS_BUFFER_TOO_SMALL with room for one of several processors,
+//!   success with room for every processor, the first entry processor 0.
 //! - GetShortPathNameA of the Windows directory is itself; a missing path
 //!   ERROR_FILE_NOT_FOUND; too small a buffer the size needed.
 //! - GetVolumePathNamesForVolumeNameW: the system drive's volume lists the
@@ -149,6 +150,7 @@ type Free = extern "system" fn(*mut AvlTable, *mut c_void);
 )]
 #[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
+    fn GetSystemInfo(info: *mut u8);
     fn GetStdHandle(which: u32) -> Handle;
     fn WriteFile(h: Handle, buf: *const u8, len: u32, written: *mut u32, overlapped: usize) -> i32;
     fn ReadFile(h: Handle, buf: *mut u8, len: u32, read: *mut u32, overlapped: usize) -> i32;
@@ -994,8 +996,26 @@ fn idn_and_power(c: &mut Checks) -> Result<(), u32> {
         c.eq(
             CallNtPowerInformation(PROCESSOR_INFORMATION, null(), 0, info.as_mut_ptr().cast(), 0)
                 .into(),
-            0xc000_0023,
+            0xc000_000d,
         )?;
+        // Room for one entry is too small where there are more processors.
+        let mut system = [0u8; 64];
+        GetSystemInfo(system.as_mut_ptr());
+        let at = 8 + 3 * core::mem::size_of::<usize>();
+        let cpus = u32::from_le_bytes([system[at], system[at + 1], system[at + 2], system[at + 3]]);
+        if cpus > 1 {
+            c.eq(
+                CallNtPowerInformation(
+                    PROCESSOR_INFORMATION,
+                    null(),
+                    0,
+                    info.as_mut_ptr().cast(),
+                    24,
+                )
+                .into(),
+                0xc000_0023,
+            )?;
+        }
         let size = core::mem::size_of_val(&info) as u32;
         c.eq(
             CallNtPowerInformation(

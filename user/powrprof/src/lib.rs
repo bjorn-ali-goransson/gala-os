@@ -77,8 +77,8 @@ fn base_mhz() -> u32 {
 
 /// CallNtPowerInformation: ProcessorInformation (11) gives one
 /// PROCESSOR_POWER_INFORMATION (Number, MaxMhz, CurrentMhz, MhzLimit,
-/// MaxIdleState, CurrentIdleState) per processor; STATUS_BUFFER_TOO_SMALL
-/// for a shorter buffer. Other levels are reported.
+/// MaxIdleState, CurrentIdleState) per processor; STATUS_INVALID_PARAMETER
+/// for no buffer, STATUS_BUFFER_TOO_SMALL for a shorter one. Other levels are reported.
 #[unsafe(no_mangle)]
 pub extern "system" fn CallNtPowerInformation(
     level: u32,
@@ -96,8 +96,16 @@ pub extern "system" fn CallNtPowerInformation(
     let mut info = [0u8; 48];
     // SAFETY: a SYSTEM_INFO buffer.
     unsafe { GetSystemInfo(info.as_mut_ptr()) };
-    let cpus = u32::from_le_bytes([info[32], info[33], info[34], info[35]]);
-    if output.is_null() || output_length < 24 * cpus {
+    // dwNumberOfProcessors follows two WORDs, dwPageSize and three
+    // pointer-sized fields: offset 32 on x64, 20 on x86.
+    let at = 8 + 3 * core::mem::size_of::<usize>();
+    let cpus = u32::from_le_bytes([info[at], info[at + 1], info[at + 2], info[at + 3]]);
+    // No output buffer at all is a bad parameter (as Windows answers);
+    // one too short for every processor is too small.
+    if output.is_null() || output_length == 0 {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if output_length < 24 * cpus {
         return STATUS_BUFFER_TOO_SMALL;
     }
     let mhz = base_mhz();

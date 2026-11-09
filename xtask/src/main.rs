@@ -3071,10 +3071,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msi_test", "ntdll.dll", "Windows/System32"),
     ("msi_test", "kernel32.dll", "Windows/System32"),
     ("msi_test", "msi.dll", "Windows/System32"),
+    ("msi_test", "user32.dll", "Windows/System32"),
     ("wow64_msi_test", "wow64.dll", "Windows/System32"),
     ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    ("wow64_msi_test", "x86/user32.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
