@@ -1386,6 +1386,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "ole32"
 version = "0.1.0"
 dependencies = [
@@ -2416,6 +2423,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ucrt_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "ucrtbase"
+version = "0.1.0"
+dependencies = [
+ "gala_stubs",
+ "libm",
+ "ntrt",
+]
+
+[[package]]
 name = "udp_test"
 version = "0.1.0"
 
@@ -2725,6 +2748,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wow64_office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64_seh_test"
 version = "0.1.0"
 dependencies = [
@@ -2740,6 +2770,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_thread_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_ucrt_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

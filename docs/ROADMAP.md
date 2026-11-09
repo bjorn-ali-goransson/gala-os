@@ -749,9 +749,8 @@ parity already exposes.
    endpoint over plain HTTP (a test program serving a scripted SSE
    stream, a tool call included), so streaming is tested without TLS.
    Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
-   Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
-   not with gala; scenarios copy the JDK's app-local copy today; gala's
-   own is decided, item OF).
+   Burn exe, PK stage 3); the UCRT is gala's own ucrtbase.dll
+   (ARCHITECTURE "The UCRT").
 2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
    system store (rustls-native-certs through crypt32), which gala opens
    empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
@@ -1117,8 +1116,7 @@ the kernel.
    redistributable). gdi32's GetGlyphOutline (Mesa's
    wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
    (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
-   import tables: the UCRT (`api-ms-win-crt-*`; the JDK's, as for
-   CPython) and gdi32's D3DKMT* functions (19 of them: failing with
+   import tables: the UCRT (`api-ms-win-crt-*`: gala's ucrtbase) and gdi32's D3DKMT* functions (19 of them: failing with
    STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
    resources); everything else it imports gala has. d3d11_test needs
    DXBC shaders, and the host has no HLSL compiler (Ubuntu's
@@ -1357,24 +1355,64 @@ need gala's.
    scenario that boots them, with the files gala's own install put
    there (the owner: no files from elsewhere; the native install below
    comes first).
-   - The UCRT for the installer: gala's own `ucrtbase.dll` and
-     `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
-     msvcrt, test first against Windows (the owner's decision; also
-     the answer to PK's AIChat UCRT question and the JDK copies the
-     scenarios carry today).
-   - Alongside, natively: a pending scenario `office_install` runs the
-     Office Deployment Tool's `setup.exe /configure` in gala (its
-     ledger ranks the installer's blockers; the guest needs the CDN, so
-     on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
-     32-bit x86 program (WOW64), and by its import tables against
-     gala's i686 DLLs it does not load yet: it imports the UCRT
-     (`api-ms-win-crt-*`, which gala does not ship yet: gala's own,
-     above) and nine kernel32 functions
-     gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
-     K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
-     WerRegisterMemoryBlock/WerUnregisterMemoryBlock,
-     IsSystemResumeAutomatic, GetPhysicallyInstalledSystemMemory).
-     Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
+   - The UCRT (the owner's decision: gala's own; also the answer to
+     PK's AIChat UCRT question): gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
+     resolve to it), x64 and x86, msvcrt's source with the UCRT's own
+     functions (ARCHITECTURE "The UCRT"; tests `ucrt_test`,
+     `wow64_ucrt_test`, expected results from Windows' ucrtbase). It
+     covers every UCRT import of ODT's setup.exe and of curl, CPython,
+     `cxx_eh_test`, `pk_install_inno` and NumPy's DLLs, whose scenarios
+     use it and no longer copy the JDK's. Next: what the JDK,
+     PowerShell, .NET, PostgreSQL and SQL Server LocalDB still import
+     that gala's lacks (65 functions across their files: the C++
+     runtime functions Windows' ucrtbase also exports,
+     `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
+     `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
+     `_Gettnames` (recorded, NULL); the `_s` path, date and case
+     functions (`_splitpath_s`, `_strdate_s`, `_wcsupr_s`, ...); the
+     multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
+     `tools/import_survey.py` on their directories lists them), then those
+     scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
+     files. `ucrt_test`/`wow64_ucrt_test` join
+     `user/windows/ci-passing.txt` once CI's windows job shows them
+     passing.
+   - The load list's kernel32 and ntdll functions, test first in
+     `office_api_test`/`wow64_office_api_test` (x64 and x86): done:
+     CreateFile2, FindFirstFileNameW/FindNextFileNameW, CreateMutexExW,
+     OpenSemaphoreA/W, K32EnumProcesses, K32GetProcessImageFileNameW,
+     RtlCaptureStackBackTrace (x86 too), WerRegisterMemoryBlock/
+     WerUnregisterMemoryBlock, IsSystemResumeAutomatic,
+     GetPhysicallyInstalledSystemMemory, QueryActCtxW (basic
+     information), FindActCtxSectionStringW, QueueUserWorkItem,
+     GetShortPathNameA, GetVolumePathNamesForVolumeNameW,
+     AttachConsole/AllocConsole, GetDiskFreeSpaceA, the AVL generic
+     tables, RtlIntegerToUnicodeString, RtlIsNameInExpression. Left:
+     NtNotifyChangeMultipleKeys (the kernel has no registry change
+     notification yet; advapi32's RegNotifyChangeKeyValue is a
+     never-signalled stopgap), NtRenameKey (a registry node renamed,
+     with its change-log op), the manifests' sections
+     (FindActCtxSectionStringW finds nothing, QueryActCtxW's other
+     classes), GetThreadIOPendingFlag's count of a thread's pending
+     socket, pipe and watch requests (a recorded stopgap answering
+     FALSE), and the ten functions used once. `office_api_test` and
+     `wow64_office_api_test` join `ci-passing.txt` once CI's windows
+     job shows them passing.
+   - Alongside, natively: the pending scenario `office_install` runs
+     the Office Deployment Tool's `setup.exe /configure` in gala
+     (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
+     re-pinned when Microsoft replaces the file at its URL;
+     `user/office_install/config.xml`: Word, Excel and PowerPoint, 64-bit,
+     Current channel, Display None, AcceptEULA; a net scenario, the
+     guest reaching the CDN through QEMU's NAT, so on CI's boot runners).
+     `setup.exe` is a 32-bit x86 program (WOW64); every static import is
+     there (the UCRT and kernel32 functions above). How far it gets: it
+     starts, starts its copy (a second setup.exe), and that copy ends
+     with 0xc06d007e at its first delay-loaded DLL, crypt32.dll, which
+     has no i686 build yet (the ledger's top gap: `crypt32.dll missing
+     dll`). Next: an i686 crypt32 (its structures with pointers audited
+     for the x86 layouts, "Making a gala DLL 32-bit too"), then the rest
+     of the delay-loaded list as the run reaches them. Delay-loaded,
+     needed as it goes: i686 builds of crypt32, wininet,
      wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
      cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
      control manager (advapi32's service calls are stubs); a few

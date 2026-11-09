@@ -71,7 +71,13 @@ port. Lines that tools and agents rely on:
   `wow64.dll!APC (no 32-bit ntdll|32-bit stack full|64-bit routine)`,
   and the 32-bit msvcrt's longjmp over a `__try` level it cannot unwind
   as `msvcrt.dll!longjmp(try level)` (a missing msvcrt export stops the
-  load as `missing export`);
+  load as `missing export`); gala's UCRT records what it does not do as
+  `ucrtbase.dll!<function>(<case>)` (a printf option, wildcard argv,
+  a locale other than "C", a character beyond the BMP for `mbrtowc`),
+  and a C runtime call with an invalid argument in a program without an
+  invalid-parameter handler ends the process with 0xc0000409 after
+  `ucrtbase: invalid parameter passed to a C runtime function, ending the
+  process (0xc0000409)` on its stderr;
   `wow64: ... cannot free an exited
   thread's 64-bit stack|TEB32` if a WOW64 thread's exit leaks them; the unknown-service line names its dispatcher
   (`unimplemented system service 0x.. (dispatcher nt::syscalls,

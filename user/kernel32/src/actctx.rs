@@ -224,3 +224,158 @@ pub extern "system" fn GetCurrentActCtx(out: *mut Handle) -> Bool {
     unsafe { *out = ctx as *mut c_void };
     TRUE
 }
+
+const QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX: u32 = 0x4;
+const QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE: u32 = 0x8;
+const QUERY_ACTCTX_FLAG_ACTCTX_IS_ADDRESS: u32 = 0x10;
+const QUERY_ACTCTX_FLAG_NO_ADDREF: u32 = 0x8000_0000;
+
+/// ACTIVATION_CONTEXT_BASIC_INFORMATION.
+#[repr(C)]
+struct BasicInformation {
+    actctx: Handle,
+    flags: u32,
+}
+
+/// QueryActCtxW(flags, actctx, subinstance, class, buffer, size, &written):
+/// ActivationContextBasicInformation (1) of the context given, or with
+/// QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX of the active one (`actctx` must
+/// then be NULL): the handle (referenced unless
+/// QUERY_ACTCTX_FLAG_NO_ADDREF) and flags 0. The other classes describe a
+/// manifest's contents, which gala's contexts do not keep: recorded,
+/// ERROR_INVALID_PARAMETER.
+#[unsafe(no_mangle)]
+pub extern "system" fn QueryActCtxW(
+    flags: u32,
+    actctx: Handle,
+    _subinstance: *mut c_void,
+    class: u32,
+    buffer: *mut c_void,
+    size: usize,
+    written: *mut usize,
+) -> Bool {
+    if !written.is_null() {
+        // SAFETY: the caller's SIZE_T.
+        unsafe { *written = 0 };
+    }
+    let known = QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX
+        | QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE
+        | QUERY_ACTCTX_FLAG_ACTCTX_IS_ADDRESS
+        | QUERY_ACTCTX_FLAG_NO_ADDREF;
+    if flags & !known != 0 {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let ctx = if flags & QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX != 0 {
+        if !actctx.is_null() {
+            return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+        }
+        with_stack(|depth, entries| if *depth == 0 { 0 } else { entries[*depth - 1].0 })
+            .unwrap_or(0)
+    } else if flags & (QUERY_ACTCTX_FLAG_ACTCTX_IS_HMODULE | QUERY_ACTCTX_FLAG_ACTCTX_IS_ADDRESS)
+        != 0
+    {
+        // A module's own manifest context: gala keeps none per module.
+        super::unsupported(b"kernel32.dll!QueryActCtxW(module context)", flags.into());
+        0
+    } else {
+        actctx as usize
+    };
+    match class {
+        1 => {
+            let need = core::mem::size_of::<BasicInformation>();
+            if !written.is_null() {
+                // SAFETY: the caller's SIZE_T.
+                unsafe { *written = need };
+            }
+            if buffer.is_null() || size < need {
+                return fail_with(122, FALSE); // ERROR_INSUFFICIENT_BUFFER
+            }
+            if flags & QUERY_ACTCTX_FLAG_NO_ADDREF == 0 {
+                AddRefActCtx(ctx as Handle);
+            }
+            // SAFETY: the caller's buffer of `size` >= need bytes.
+            unsafe {
+                buffer
+                    .cast::<BasicInformation>()
+                    .write_unaligned(BasicInformation { actctx: ctx as Handle, flags: 0 })
+            };
+            TRUE
+        }
+        _ => {
+            super::unsupported(b"kernel32.dll!QueryActCtxW(class)", class.into());
+            fail_with(ERROR_INVALID_PARAMETER, FALSE)
+        }
+    }
+}
+
+/// ACTCTX_SECTION_KEYED_DATA, up to ulAssemblyRosterIndex (the smallest
+/// cbSize accepted is the offset after it).
+#[repr(C)]
+struct KeyedData {
+    size: u32,
+    version: u32,
+    data: usize,
+    length: u32,
+    section_global: usize,
+    section_global_length: u32,
+    section_base: usize,
+    section_total_length: u32,
+    actctx: Handle,
+    assembly_roster_index: u32,
+}
+
+const ERROR_SXS_SECTION_NOT_FOUND: u32 = 14004;
+const ERROR_SXS_KEY_NOT_FOUND: u32 = 14007;
+
+/// FindActCtxSectionStringW(flags, guid, section, name, &data): looks
+/// `name` up in a section (DLL redirection, window classes, ...) of the
+/// active contexts. gala's contexts keep no manifest sections, so a valid
+/// request finds nothing: ERROR_SXS_KEY_NOT_FOUND for the documented
+/// sections (1-13), ERROR_SXS_SECTION_NOT_FOUND for others; recorded when
+/// a context is active (its manifest might have had the key).
+#[unsafe(no_mangle)]
+pub extern "system" fn FindActCtxSectionStringW(
+    flags: u32,
+    _guid: *const c_void,
+    section: u32,
+    name: *const u16,
+    data: *mut c_void,
+) -> Bool {
+    let min = core::mem::offset_of!(KeyedData, assembly_roster_index) + 4;
+    // SAFETY: the caller's structure's first field.
+    if name.is_null() || data.is_null() || (unsafe { *data.cast::<u32>() } as usize) < min {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if flags & !1 != 0 {
+        // Only FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX is defined.
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let active = with_stack(|depth, _| *depth).unwrap_or(0);
+    if active > 0 {
+        super::unsupported(
+            b"kernel32.dll!FindActCtxSectionStringW(manifest sections)",
+            section.into(),
+        );
+    }
+    if (1..=13).contains(&section) {
+        fail_with(ERROR_SXS_KEY_NOT_FOUND, FALSE)
+    } else {
+        fail_with(ERROR_SXS_SECTION_NOT_FOUND, FALSE)
+    }
+}
+
+/// FindActCtxSectionStringA: the W function with the name widened.
+#[unsafe(no_mangle)]
+pub extern "system" fn FindActCtxSectionStringA(
+    flags: u32,
+    guid: *const c_void,
+    section: u32,
+    name: *const u8,
+    data: *mut c_void,
+) -> Bool {
+    let mut buf = [0u16; 260];
+    match super::sync::wide_name(name, &mut buf) {
+        Ok(name) if !name.is_null() => FindActCtxSectionStringW(flags, guid, section, name, data),
+        _ => fail_with(ERROR_INVALID_PARAMETER, FALSE),
+    }
+}

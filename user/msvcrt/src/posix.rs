@@ -597,12 +597,12 @@ pub extern "C" fn _spawnv(mode: i32, cmdname: *const u8, argv: *const *const u8)
 /// page (UTF-8 on gala).
 #[repr(C)]
 pub struct FindData64 {
-    attrib: u32,
-    time_create: i64,
-    time_access: i64,
-    time_write: i64,
-    size: i64,
-    name: [u8; 260],
+    pub(crate) attrib: u32,
+    pub(crate) time_create: i64,
+    pub(crate) time_access: i64,
+    pub(crate) time_write: i64,
+    pub(crate) size: i64,
+    pub(crate) name: [u8; 260],
 }
 
 fn found(w: &crate::wide_more::WFindData64, out: *mut FindData64) -> bool {

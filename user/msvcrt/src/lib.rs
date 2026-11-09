@@ -50,6 +50,11 @@ mod va;
 mod wide;
 mod wide_more;
 
+// gala's ucrtbase.dll: the same source with the UCRT's own functions
+// (user/ucrtbase; ARCHITECTURE "The UCRT").
+#[cfg(ucrt)]
+mod ucrt;
+
 // The 32-bit build: the memory routines, 64-bit division helpers and
 // stack probe the compiler calls on x86 (and memcmp/strlen, exported as
 // msvcrt's own) come from ntrt's x86 runtime.
@@ -493,11 +498,15 @@ fn run_exit_handlers() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _cexit() {
+    #[cfg(ucrt)]
+    ucrt::before_exit_handlers();
     run_exit_handlers();
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn exit(code: i32) -> ! {
+    #[cfg(ucrt)]
+    ucrt::before_exit_handlers();
     run_exit_handlers();
     // SAFETY: ends the process.
     unsafe { ExitProcess(code as u32) }
@@ -629,9 +638,18 @@ pub extern "C" fn setlocale(_category: i32, _locale: *const u8) -> *const u8 {
     b"C\0".as_ptr()
 }
 
-/// getenv(name): case-insensitive, as on Windows.
+/// getenv(name): case-insensitive, as on Windows. The narrow environment
+/// is built on first use if the start-up code did not (a `wmain`
+/// program's start-up builds only the wide one: the UCRT makes the other
+/// when it is first needed).
 #[unsafe(no_mangle)]
 pub extern "C" fn getenv(name: *const u8) -> *mut u8 {
+    STARTUP.with(|| {
+        // SAFETY: the runtime's own statics, under STARTUP.
+        if unsafe { _environ.is_null() } {
+            build_environment();
+        }
+    });
     // SAFETY: the caller's NUL-terminated name; the environment array
     // built at startup.
     unsafe {

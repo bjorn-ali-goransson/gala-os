@@ -400,3 +400,58 @@ pub extern "system" fn RtlWow64EnableFsRedirection(enable: u8) -> u32 {
     let mut old = 0usize;
     GalaWow64FsRedirection(usize::from(enable == 0), &mut old)
 }
+
+/// RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace,
+/// BackTraceHash), x86: the return addresses up the chain of saved frame
+/// pointers (each frame's ebp holds the caller's ebp, then the return
+/// address), while they stay inside this thread's stack (TEB32's
+/// StackLimit fs:[8] to StackBase fs:[4]) and go up. Code built without
+/// frame pointers ends the chain early, as on Windows. The hash is the
+/// addresses' sum; returns how many were captured.
+// An export called by foreign code with the pointers it documents.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "system" fn RtlCaptureStackBackTrace(
+    skip: u32,
+    count: u32,
+    frames: *mut usize,
+    hash: *mut u32,
+) -> u16 {
+    let (mut ebp, base, limit): (usize, usize, usize);
+    // SAFETY: reads ebp and TEB32.NtTib's stack bounds.
+    unsafe {
+        core::arch::asm!(
+            "mov {0}, ebp",
+            "mov {1}, fs:[4]",
+            "mov {2}, fs:[8]",
+            out(reg) ebp, out(reg) base, out(reg) limit,
+            options(nostack, readonly),
+        );
+    }
+    let (mut n, mut skipped, mut sum) = (0u32, 0u32, 0u32);
+    while n < count.min(u32::from(u16::MAX)) && ebp >= limit && ebp + 8 <= base && ebp % 4 == 0 {
+        // SAFETY: a frame inside this thread's stack.
+        let (caller_ebp, ret) = unsafe { (*(ebp as *const usize), *((ebp + 4) as *const usize)) };
+        if ret == 0 {
+            break;
+        }
+        if skipped < skip {
+            skipped += 1;
+        } else {
+            // SAFETY: the caller's array of `count` entries.
+            unsafe { *frames.add(n as usize) = ret };
+            sum = sum.wrapping_add(ret as u32);
+            n += 1;
+        }
+        if caller_ebp <= ebp {
+            break;
+        }
+        ebp = caller_ebp;
+    }
+    if !hash.is_null() {
+        // SAFETY: the caller's output.
+        unsafe { *hash = sum };
+    }
+    n as u16
+}
