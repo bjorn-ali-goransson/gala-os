@@ -160,8 +160,11 @@ fn run() -> Result<(), u32> {
         let st =
             PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, core::ptr::null_mut(), &mut value);
         c.ok(st != 0, st.into())?;
-        // Two: a percentage.
-        Sleep(100);
+        // Two: a percentage, a second later (PdhCollectQueryData's
+        // documentation: rate counters need at least one second between
+        // collections; 100 ms gave PDH_CALC_NEGATIVE_DENOMINATOR on CI's
+        // Windows once).
+        Sleep(1000);
         c.eq(PdhCollectQueryData(query).into(), 0)?;
         let mut kind = 0;
         let st = PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, &mut kind, &mut value);
