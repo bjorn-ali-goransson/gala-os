@@ -1602,8 +1602,19 @@ need gala's.
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: wintrust.dll for i686 (and
-     its WinVerifyTrust, the signature check), then the other DLLs
+     Next, in the order the run reaches them: wintrust.dll for i686 with
+     what setup.exe imports of it: WinVerifyTrust (WINTRUST_DATA typed for
+     both widths), WTHelperProvDataFromStateData,
+     WTHelperGetProvSignerFromChain and WTHelperGetProvCertFromChain.
+     gala's wintrust is two `gala_stubs` stubs today, and the signature
+     check is a chunk of its own, not a port: Authenticode (the PE image's
+     hash over its documented ranges, the PKCS #7 SignedData in its
+     security directory, decoded by crypt32's CryptMsgOpenToDecode /
+     CryptMsgGetParam, which are stubs too; the signer's signature; the
+     chain through crypt32's engine with the Authenticode policy; the
+     timestamp countersignature), test first against signed and unsigned
+     images with Windows' answers (Wine's wintrust tests softpub.c); then
+     the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
      webservices, setupapi, cabinet, credui, gdiplus; osppc.dll is
      Office's own) and the functions its imports lack (shell32's
