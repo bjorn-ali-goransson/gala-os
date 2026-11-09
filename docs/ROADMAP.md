@@ -2231,6 +2231,18 @@ the next breakthroughs).
    editor) from a distribution's packages, its window and input checked
    on the screen; then a Qt one.
 4. X11 programs through Xwayland, once the Wayland server holds.
+5. Linux Chromium beside Windows Chromium (BR's): a distribution's
+   Chromium (or Google's Linux build) with `--ozone-platform=wayland
+   --no-sandbox` in a boot scenario, its window on the same desktop as
+   `chromium_window`'s, both browsers running at once and loading a page
+   from the guest's nginx. Expected blockers, each a Linux test program
+   recorded on real Linux first: `/proc` files Chromium reads
+   (`/proc/self/maps`, `status`, `stat`, `/proc/meminfo`), eventfd,
+   timerfd, inotify, `/dev/shm`, fontconfig and fonts, D-Bus optional
+   (absent: Chromium carries on without it). Then its sandbox
+   (user namespaces, seccomp-bpf; shares CT's namespace work) so
+   `--no-sandbox` goes, and the clipboard between the two browsers
+   (`wl_data_device` bridged to the Windows clipboard).
 
 **Done when** (each step): its test and scenario pass, and the Linux
 programs' transcripts match real Linux's.
