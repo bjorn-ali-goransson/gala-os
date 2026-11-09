@@ -58,6 +58,18 @@ port. Lines that tools and agents rely on:
   fewest free since boot) and `nt:` (`nt::stats`: system calls, waits,
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
+- `section:` at the end of a run, when any image view was not at its
+  preferred base (`section::log_stats`): how many views took the image's
+  alternative base and how many went elsewhere again (private pages),
+  the frames made for relocated pages there, and the page mappings
+  served from the preferred base's frames instead (the pages no
+  relocation writes, ARCHITECTURE "Sections"). What a program's memory
+  goes on when it loads one large DLL into many processes: a second base
+  costing a second full set of frames is the failure GitHub issue #2
+  reports. With it, `section: image of N KiB takes its alternative base
+  0x...` says when an image first needs one, once per image -- and a
+  `warn` when the band for them is used up, after which such views get
+  private pages.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`
   (with `, 32-bit x86 (WOW64)` for a 32-bit program; `wow64:` lines say
   which wow64.dll is used, or why a 32-bit program cannot start, e.g.

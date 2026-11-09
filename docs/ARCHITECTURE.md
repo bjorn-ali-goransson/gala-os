@@ -1344,6 +1344,32 @@ address-space teardown never free.
   gives each image one bias; below gala-um's HOST_START, where guest code
   must stay). Views there share frames relocated a page at a time
   (`pe::relocate_page`; an entry crossing pages is written in both).
+- **Only the pages relocation writes cost a second frame.** A page no
+  relocation writes holds the same bytes at either base, so a view at the
+  alternative base maps the preferred base's frame for it
+  (`ImageLayout::relocates`, from `pe::relocated_pages`: each entry's own
+  page, the page an entry's bytes cross into, and page 0, whose header is
+  rebased). That set has to be exact in one direction only -- a page
+  relocation does write, left out, would be shared with the wrong
+  contents; one wrongly in it costs a frame. The frame stays owned by the
+  layout's `shared` set alone, so it is freed once.
+  This is what Windows does, measured per page with `QueryWorkingSetEx` on
+  chrome.dll (325 MiB, 83833 pages) mapped at the base the loader picks and
+  then forced elsewhere: at another base all 6434 pages holding a
+  relocation went private and all 76938 holding none stayed shared, so a
+  second base costs 25 MiB there and not 327 MiB. Without this, an image at
+  two bases cost two full sets of frames: for chrome.dll 655 MiB of the
+  2.57 GiB a `chromium` scenario's machine has, which is the size of
+  failure GitHub issue #2 reports (Chrome's 0xE0000008 when a second
+  browser starts with free frames left). It saves nothing where an image
+  sits at one base only, which is the common case: there the frames move
+  between the two sets rather than halving (measured on
+  `chromium_driver`: 214 views at an alternative base, 62450 page
+  mappings served from the preferred base's frames, and the fewest frames
+  free unchanged, 485496 against 485487). Every image gala builds prefers
+  0x180000000, so one image per process holds that base and the rest are
+  at theirs; the two-base case is an image that wins that race in one
+  process and loses it in another.
 - **Image views are demand-paged** at the preferred and the alternative
   base: mapping one only reserves and commits its ranges (one commit per
   run of equal protection); a page is mapped at its first touch
@@ -12400,7 +12426,7 @@ older entries).
 |---|---|---|
 | 11 | USER_FRAMES | physical ranges of the programs' own pages and of section pages: the next frame allocator claims them before anything is allocated (`mm::init`) |
 | 12 | PROCESSES | a header entry (the next NT id), then per process: id, parent, create time, image base and size, ntdll's dispatchers, threads created, priority class, name, Win32 path of the executable; v2: the digest of the executable's layout, its primary token's object id; v3: the session; v4 (`handover_next`): the handovers it came through |
-| 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags). Kinds: OWNED (frame number, kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: the image section's shared frame for the view's base, unrelocated at the preferred base, relocated at the image's alternative base) |
+| 13 | ADDRESS_SPACES | per process: the VAD (`Vad::write_to`), a table of section views (base, size, offset, section id), a table of pages (address, value, kind, flags). Kinds: OWNED (frame number, kept in place; also every written, copy-on-write-copied or privately relocated image page), IMAGE (page index: the executable laid out again from its file and the page mapped from that layout), SHARED_DATA (KUSER_SHARED_DATA: the new kernel's), SECTION (the view's section page), IMAGE_VIEW (page index in a DLL view: the image section's shared frame for the view's base, unrelocated at the preferred base, and at the alternative base the relocated frame where relocation writes that page, the unrelocated one where it does not) |
 | 14 | THREADS | per live thread: ids, TEB, start address, create time, affinity, ordinal, priorities, object id, the system call (number, the user registers at the `syscall`), its deadline (absolute timer tick, or none), its x87/SSE state (FXSAVE); v2: how it stands (SYSCALL: make the call again; USER: go on with these registers; START: start with them once resumed, with its MXCSR), suspend count, impersonation token id, a table of queued user APCs (routine, three arguments); v3: its extended state after the APCs: the XCR0 components it covers (u64; 0 from an older writer: x87 and SSE) and a length-prefixed blob, the XSAVE area past the legacy 512 bytes (header and components, standard format, `xstate::size_of(XCR0)` - 512 bytes; empty without XSAVE) |
 | 15-23 | EVENTS, SEMAPHORES, MUTANTS, TIMERS, SECTIONS, FILES, IO_COMPLETIONS, EXITED_THREADS, PROCESS_OBJECTS | per object: id, name (re-linked in the namespace when its directory is a permanent one), state: signal, count and maximum, owner thread and count, due tick and period, size/protection/attributes and frames (pagefile-backed), volume path, rights, share access, options and position (opened again), queued packets, exit status and times, the process |
 | 24 | CONSOLES | console input/output objects (no state) |

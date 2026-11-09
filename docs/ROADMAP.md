@@ -79,10 +79,12 @@ In order, after it:
    this list; heavier, meatier work before polish): its window, input
    and accessibility tree are done (`chromium_window`, `chromium_uia`),
    ChromeDriver too (`chromium_driver`); now the conformance report.
-   Its blockers (Chrome's out-of-memory exceptions 0xE0000008,
-   ChromeDriver not exiting, the full WPT run) go with item 12 to the
-   Windows machine, where gala runs under KVM (the owner;
-   `docs/windows-kvm-brief.md`).
+   Its blockers went with item 12 to the Windows machine, where gala
+   runs under KVM (the owner; `docs/windows-kvm-brief.md`): the WPT run
+   is no longer one (the whole `dom/nodes` directory passes 13326 of
+   13397 subtests there), and neither the out-of-memory exceptions nor
+   ChromeDriver's hang reproduces under KVM, so both wait on the
+   conditions they were seen under (see "Next" (b) and (c)).
 1. **TLS**: step 6's rest (revocation information fetched from the
    distribution point, winhttp keeping its credential handle so it
    resumes, a server asking for client certificates, the MY store's
@@ -120,7 +122,15 @@ In order, after it:
     programs with run-all's `ms` and `cargo xtask compare`, Chromium's
     page loads, Python) profiled on both, compared operation by
     operation, gala's hot spots fixed in order of the gap, each with a
-    benchmark in `bench` and its numbers in PERF.md.
+    benchmark in `bench` and its numbers in PERF.md. `bench` is compared
+    (PERF.md 12): the system call path is 7x Windows' and the widest
+    gap, a reservation split into 4096 runs 6x where one run is faster,
+    `demand_zero_fault` 3-8x with 3x variance of its own, and image
+    loads 8-31x faster here. Next: the scenarios' programs
+    (run-all's `ms` against `cargo xtask report`, then `cargo xtask
+    compare`), Chromium's page loads and Python, then `cargo xtask
+    profile` on the system call path -- which needs #43 first, since
+    the profiler's samples hang the boot thread under KVM.
 
 Then the next breakthroughs (the owner), in this order: **LD**, desktop
 Linux applications (dynamic glibc programs first, then the Wayland
@@ -1308,9 +1318,30 @@ samples).
    lost-wake-up stress and the state dump's keyed-event lines found no
    lost wake in the locks); (b) Chrome's out-of-memory exceptions
    (0xE0000008) when a second browser starts with the first still alive,
-   with free frames left: which limit (commit, reservations, a quota);
+   with free frames left: which limit (commit, reservations, a quota).
+   Measured on the Windows machine: an image at a second base cost a
+   second full set of frames here (chrome.dll 327 MiB, where Windows
+   spends 25 MiB -- per page, only what relocation writes goes private),
+   now fixed (ARCHITECTURE "Sections", `pe::relocated_pages`), with the
+   `section:` stats line to show it. The exception itself is not
+   reproduced under KVM on the Windows machine: not in `chromium_wpt`
+   over the whole directory (406 tests), and not in the
+   `XTASK_WPT_LIMIT=20` run the issue names, with the fix and with it
+   reverted (fewest frames free 469219 and 469775 of 673061, so no
+   pressure either way). The run keeps one session and makes a new one
+   only when the browser goes away, so "a second browser with the first
+   still alive" needs a browser that died; what the exception was seen
+   under (TCG, the VM's memory) decides where to look next.
    (c) ChromeDriver not exiting after the client's /shutdown (the
-   scenario then runs to its limit); (d) the whole directory again, then
+   scenario then runs to its limit; not reproduced under KVM on the
+   Windows machine: `chromium_driver` passed 4 of 4, 7-9 s of kernel
+   time against about 2 minutes under TCG, and `chromium_wpt` 2 of 2
+   with `chromedriver.exe finished with status 0x00000000` after 406
+   tests, so it wants a TCG run or the conditions it was seen under);
+   (d) the whole directory runs: 406 tests, 404 harness OK, 13326 of
+   13397 subtests pass against edge-159-win's 13343 (one of the seven
+   that fail only here is a TIMEOUT, five are our testdriver shim);
+   `user/windows/wpt/` records it. Then
    the comparison with Chrome on Windows (wpt.fyi). The report itself: a subset of web-platform-tests
    (DOM, HTML parsing, CSS layout basics, fetch/XHR, WebSockets,
    storage, encoding, timers) driven through ChromeDriver from the

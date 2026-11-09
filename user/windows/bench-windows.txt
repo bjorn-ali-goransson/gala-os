@@ -1,0 +1,16 @@
+﻿bench: cpu_loop ns_per_op 3
+bench: null_syscall ns_per_op 107
+bench: handle_create_close ns_per_op 788
+bench: virtual_alloc_free_64k ns_per_op 2104
+bench: commit_decommit_page ns_per_op 3892
+bench: commit_decommit_page_4096_runs ns_per_op 1001
+bench: demand_zero_fault ns_per_op 673
+bench: section_map_unmap_64k ns_per_op 2511
+bench: image_load ns_per_op 136482
+bench: image_load_32m_untouched ns_per_op 606635
+bench: thread_create_exit ns_per_op 109170
+bench: null_syscall_200_threads ns_per_op 107
+bench: event_pingpong_same_cpu ns_per_op 2539
+bench: event_pingpong_cross_cpu ns_per_op 24902
+bench: done
+

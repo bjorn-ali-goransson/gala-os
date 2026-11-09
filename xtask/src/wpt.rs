@@ -463,7 +463,16 @@ fn subtest_status(code: &str) -> &'static str {
     }
 }
 
-const CAPABILITIES: &str = r#"{"capabilities":{"alwaysMatch":{"timeouts":{"pageLoad":300000,"script":60000},"goog:chromeOptions":{"browserStartupTimeout":180000,"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrw-{n}","--enable-logging","--log-file=C:\\chromium\\chrome_wpt-{n}.log","--ipc-connection-timeout=120","--host-resolver-rules=MAP web-platform.test 10.0.2.100,MAP *.web-platform.test 10.0.2.100,MAP not-web-platform.test 10.0.2.100,MAP *.not-web-platform.test 10.0.2.100","--ignore-certificate-errors"]}}}}"#;
+/// The session's capabilities. The two feature flags are wptrunner's
+/// default for Chrome (browsers/chrome.py: `enable_experimental` unset
+/// and no `--stable-release-mode` adds
+/// `--enable-experimental-web-platform-features` and
+/// `--enable-blink-test-features`), so every run on wpt.fyi has them
+/// and a report made without them is not comparable: Chromium 159 then
+/// splits a qualified name at every colon, and 20 subtests of
+/// `DOMImplementation-createDocument` and `Document-createElementNS`
+/// fail here that pass there -- a difference in the flags, not in gala.
+const CAPABILITIES: &str = r#"{"capabilities":{"alwaysMatch":{"timeouts":{"pageLoad":300000,"script":60000},"goog:chromeOptions":{"browserStartupTimeout":180000,"binary":"C:\\chromium\\chrome.exe","args":["--headless","--no-sandbox","--enable-experimental-web-platform-features","--enable-blink-test-features","--disable-gpu","--no-first-run","--user-data-dir=C:\\tmp\\chrw-{n}","--enable-logging","--log-file=C:\\chromium\\chrome_wpt-{n}.log","--ipc-connection-timeout=120","--host-resolver-rules=MAP web-platform.test 10.0.2.100,MAP *.web-platform.test 10.0.2.100,MAP not-web-platform.test 10.0.2.100,MAP *.not-web-platform.test 10.0.2.100","--ignore-certificate-errors"]}}}}"#;
 
 /// A new session's id.
 /// A new session, its Chrome on a profile directory of its own (as
