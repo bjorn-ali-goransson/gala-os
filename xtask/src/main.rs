@@ -1135,6 +1135,12 @@ const USER_DLLS_X86: &[Dll] = &[
     // and imm32; wow64_office_api_test).
     Dll { package: "normaliz", file: "normaliz.dll", exported_as: "testnormaliz32.dll" },
     Dll { package: "powrprof", file: "powrprof.dll", exported_as: "testpowrprof32.dll" },
+    // schannel (the 32-bit secur32 loads it for TLS: ODT's setup.exe's
+    // downloads; wow64_schannel_test).
+    Dll { package: "schannel", file: "schannel.dll", exported_as: "testschannel32.dll" },
+    // urlmon (ODT's setup.exe delay-loads its security manager on its
+    // download's error path; wow64_office_api_test).
+    Dll { package: "urlmon", file: "urlmon.dll", exported_as: "testurlmon32.dll" },
     // wldp (ODT's setup.exe loads it to check for S mode).
     Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp32.dll" },
     // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
@@ -1769,6 +1775,20 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_winhttp_cb_test", "x86/secur32.dll", "Windows/SysWOW64"),
     ("wow64_winhttp_cb_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_winhttp_cb_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // Schannel through WOW64 (user/schannel_test built for x86) against
+    // schannel_test's Nginx (MODULE_SETS): the 32-bit secur32, schannel,
+    // crypt32, ncrypt and bcrypt.
+    ("wow64_schannel_test", "wow64.dll", "Windows/System32"),
+    ("wow64_schannel_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_schannel_test", "x86/schannel.dll", "Windows/SysWOW64"),
     ("wininet_test", "msvcrt.dll", "Windows/System32"),
     ("wininet_test", "wininet.dll", "Windows/System32"),
     ("wininet_test", "user/bin/wininet_test.exe", "gala"),
@@ -3062,6 +3082,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/winhttp.dll", "Windows/SysWOW64"),
     ("office_install", "x86/ws2_32.dll", "Windows/SysWOW64"),
     ("office_install", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/schannel.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/urlmon.dll", "Windows/SysWOW64"),
+    // The machine's root store as a full image has it (system_modules:
+    // the public CAs), which Schannel's validation of Microsoft's servers
+    // reads.
+    ("office_install", "user/roots/public-roots.pem", "Windows/System32/gala/roots"),
     ("office_install", "x86/shfolder.dll", "Windows/SysWOW64"),
     ("office_install", "x86/mpr.dll", "Windows/SysWOW64"),
     ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
@@ -3120,6 +3146,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "normaliz.dll", "Windows/System32"),
     ("office_api_test", "powrprof.dll", "Windows/System32"),
     ("office_api_test", "wldp.dll", "Windows/System32"),
+    ("office_api_test", "urlmon.dll", "Windows/System32"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3127,6 +3154,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_office_api_test", "x86/normaliz.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/powrprof.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/wldp.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/urlmon.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.
@@ -3362,6 +3390,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_winhttp_cb_test",
     "wow64_runas_test",
     "wow64_combase_test",
+    "wow64_schannel_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -8324,6 +8353,15 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_winhttp_cb_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Schannel through WOW64 (user/schannel_test built for x86)
+        // against the same Nginx.
+        name: "wow64_schannel_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wow64_schannel_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_schannel_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // TLS step 2: WinINet's HTTP functions (on winhttp's engine,
         // user/http_client) against the same Nginx.
         name: "wininet_test",
@@ -9624,6 +9662,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("winhttp_cb_test", "schannel_test"),
     ("wow64_winhttp_cb_test", "wow64_winhttp_cb_test"),
     ("wow64_winhttp_cb_test", "schannel_test"),
+    ("wow64_schannel_test", "wow64_schannel_test"),
+    ("wow64_schannel_test", "schannel_test"),
     ("wininet_test", "wininet_test"),
     ("wininet_test", "schannel_test"),
     ("curl", "curl"),
@@ -10194,6 +10234,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_schannel_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

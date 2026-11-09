@@ -7,7 +7,13 @@
 use crate::Error;
 use core::mem::MaybeUninit;
 
-#[link(name = "bcryptprimitives", kind = "raw-dylib")]
+// On x86 the import is the undecorated name, as bcryptprimitives.dll
+// exports it (a stdcall import is otherwise named `_ProcessPrng@8`).
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "bcryptprimitives", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "bcryptprimitives", kind = "raw-dylib"))]
 extern "system" {
     fn ProcessPrng(pbData: *mut u8, cbData: usize) -> i32;
 }

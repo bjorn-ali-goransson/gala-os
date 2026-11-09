@@ -33,10 +33,18 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 
 use schannel_tls::Trust;
+
+use crate::layout::{
+    ChainContext, ChainPara, EnhKeyUsage, PolicyPara, PolicyStatus, SslPara, UsageMatch,
+};
 use schannel_tls::rustls::CertificateError;
 use schannel_tls::rustls::pki_types::UnixTime;
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CertOpenStore(
         provider: usize,
@@ -110,39 +118,6 @@ const CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS: u32 = 0xf00;
 const CERT_TRUST_REVOCATION_STATUS_UNKNOWN: u32 = 0x40;
 const CERT_TRUST_IS_OFFLINE_REVOCATION: u32 = 0x100_0000;
 
-/// CERT_TRUST_STATUS.
-#[repr(C)]
-struct TrustStatus {
-    error: u32,
-    info: u32,
-}
-
-/// CERT_CHAIN_ELEMENT (its start).
-#[repr(C)]
-struct Element {
-    size: u32,
-    cert: *const c_void,
-    status: TrustStatus,
-}
-
-/// CERT_SIMPLE_CHAIN (its start).
-#[repr(C)]
-struct SimpleChain {
-    size: u32,
-    status: TrustStatus,
-    count: u32,
-    elements: *const *const Element,
-}
-
-/// CERT_CHAIN_CONTEXT (its start).
-#[repr(C)]
-struct ChainContext {
-    size: u32,
-    status: TrustStatus,
-    count: u32,
-    chains: *const *const SimpleChain,
-}
-
 /// The chain flags the credential's revocation flags ask for.
 fn chain_flags(revocation: u32) -> u32 {
     let mut flags = 0;
@@ -186,41 +161,6 @@ fn excused(chain: *const c_void, revocation: u32) -> bool {
     }
 }
 
-/// CERT_CHAIN_PARA without its later fields (no requested usage: the SSL
-/// policy checks the server usage).
-#[repr(C)]
-struct ChainPara {
-    size: u32,
-    usage: [u64; 3],
-}
-
-/// CERT_CHAIN_POLICY_PARA.
-#[repr(C)]
-struct PolicyPara {
-    size: u32,
-    flags: u32,
-    extra: *const SslPara,
-}
-
-/// SSL_EXTRA_CERT_CHAIN_POLICY_PARA.
-#[repr(C)]
-struct SslPara {
-    size: u32,
-    auth_type: u32,
-    checks: u32,
-    server_name: *const u16,
-}
-
-/// CERT_CHAIN_POLICY_STATUS.
-#[repr(C)]
-struct PolicyStatus {
-    size: u32,
-    error: u32,
-    chain_index: i32,
-    element_index: i32,
-    extra: *mut c_void,
-}
-
 /// The machine's trust, as crypt32 decides it, with the credential's
 /// revocation flags (SCH_CRED_REVOCATION_CHECK_*, SCH_CRED_IGNORE_*).
 #[derive(Debug)]
@@ -261,7 +201,13 @@ impl Trust for Crypt32 {
             }
             // FILETIME: 100 ns since 1601; 11644473600 s to 1970.
             let time = (now.as_secs() + 11_644_473_600) * 10_000_000;
-            let para = ChainPara { size: core::mem::size_of::<ChainPara>() as u32, usage: [0; 3] };
+            let para = ChainPara {
+                size: core::mem::size_of::<ChainPara>() as u32,
+                requested: UsageMatch {
+                    kind: 0,
+                    usage: EnhKeyUsage { count: 0, ids: core::ptr::null() },
+                },
+            };
             let mut chain = core::ptr::null();
             let built = CertGetCertificateChain(
                 core::ptr::null_mut(),

@@ -167,7 +167,7 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
         Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
         continue
     }
-    if ($name -eq "schannel_test" -and $null -ne $schannelSkip) {
+    if (($name -eq "schannel_test" -or $name -eq "wow64_schannel_test") -and $null -ne $schannelSkip) {
         $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $schannelSkip }
         Write-Host ("{0,-18} skipped: {1}" -f $name, $schannelSkip)
         continue
