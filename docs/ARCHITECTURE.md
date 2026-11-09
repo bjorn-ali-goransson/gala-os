@@ -3026,10 +3026,10 @@ redistributable (the owner's decision).
   functions with their option flags: legacy termination (1), standard
   snprintf (2), neither (-2 when it does not fit); legacy wide specifiers
   (4: `%s` in a wide function is UTF-16; without it, narrow as the C
-  standard says); three-digit exponents (16). The UCRT prints every digit
-  exactly (`%.30f`) and two exponent digits; ties round half away from
-  zero, as the UCRT does without `_CRT_INTERNAL_PRINTF_STANDARD_ROUNDING`
-  (32, recorded). The `_s` forms: `_TRUNCATE` keeps what fits and returns
+  standard says); three-digit exponents (16); standard rounding (32:
+  an exact tie rounds to even; without it half away from zero, as the
+  UCRT does). The UCRT prints every digit exactly (`%.30f`) and two
+  exponent digits. The `_s` forms: `_TRUNCATE` keeps what fits and returns
   -1; `sprintf_s` with too small a buffer is an invalid parameter
   (ERANGE, emptied). scanf's secure flag (1) reads a buffer size after
   each `%s`/`%c`/`%[` pointer; the count limits the input. Legacy msvcrt
@@ -3043,7 +3043,7 @@ redistributable (the owner's decision).
   unbuffered and write each call with one WriteFile. No text-mode CRLF
   translation (as msvcrt here).
 - **Strings, locale, math, time** (`string.rs`, `locale.rs`, `math.rs`,
-  `time.rs`, `compat.rs`): the `_s` string and number functions, the
+  `time.rs`, `compat.rs`, `c99.rs`): the `_s` string and number functions, the
   restartable multibyte functions (UTF-8; a character beyond the BMP
   does not fit one wchar_t: U+FFFD, recorded); one locale, "C", with
   UTF-8 as the multibyte code page (`_create_locale` returns it and
@@ -3052,18 +3052,29 @@ redistributable (the owner's decision).
   values; `_controlfp_s`, `_clearfp`/`_statusfp` (MXCSR, and on x86 the
   x87 status word); on x86 the `_libm_sse2_*_precise` functions that
   SSE2 code calls (the argument in xmm0, xmm1 for pow's second, the
-  result in xmm0: naked shims around cdecl Rust); local time is UTC.
+  result in xmm0: naked shims around cdecl Rust); C99's float and long
+  double forms and the complex functions on `_Dcomplex`/`_Fcomplex`
+  (textbook identities; Annex G's special cases for infinite and NaN parts
+  not all followed), `fetestexcept`/`feclearexcept`; local time is UTC.
+- **Aliases** (build.rs `UCRT_ALIASES`): api-ms-win-crt-private's `_o_`
+  names are the same functions, and the `_l` forms (a locale as the last
+  argument) are the plain ones: one locale, and an extra last argument is
+  the caller's to pop in the C convention of both architectures.
+- **The environment**: `_environ` (narrow) is built on first use by
+  getenv if the start-up code built only the wide one (a `wmain`
+  program's: CPython reads PYTHONPATH through `_wgetenv`, which goes
+  through getenv).
 - **Limits**: errno is per process (msvcrt's), as are the rand state
   and strtok's; `setlocale` answers "C" for any name; console I/O
   (`_getwch`, `_putwch`) is the standard handles' bytes and `_kbhit`
   reports no key (recorded); the C++ runtime functions that Windows'
   ucrtbase also exports (`_CxxThrowException`, `__CxxFrameHandler3`,
-  `__std_exception_copy`, ...) and the `_o_` aliases are not there yet,
-  nor the `_l` locale variants (PostgreSQL's), so the JDK, PowerShell,
-  .NET, PostgreSQL and SQL Server LocalDB scenarios still ship
-  Microsoft's copy (ROADMAP OF).
+  `__std_exception_copy`, ...) are not there yet, nor about 55 other
+  functions the JDK, PowerShell, .NET, PostgreSQL and SQL Server LocalDB
+  import, so those scenarios still ship Microsoft's copy (ROADMAP OF).
 - **Who uses it**: setup.exe of the Office Deployment Tool (x86; all its
-  UCRT imports), curl (`curl`, `curl_schannel`), CPython (`python_*`),
+  UCRT imports), curl (`curl`, `curl_schannel`), CPython (`python_*`,
+  NumPy's DLLs included),
   `cxx_eh_test` (with Microsoft's vcruntime140), `pk_install_inno`.
 
 ### advapi32

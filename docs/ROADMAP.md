@@ -1360,16 +1360,17 @@ need gala's.
      functions (ARCHITECTURE "The UCRT"; tests `ucrt_test`,
      `wow64_ucrt_test`, expected results from Windows' ucrtbase). It
      covers every UCRT import of ODT's setup.exe and of curl, CPython,
-     `cxx_eh_test` and `pk_install_inno`, whose scenarios use it and no
-     longer copy the JDK's. Next: what the JDK, PowerShell, .NET,
-     PostgreSQL and SQL Server LocalDB still import that gala's lacks
-     (139 functions across their files: the C++ runtime functions
-     Windows' ucrtbase also exports, `_CxxThrowException`,
-     `__CxxFrameHandler3`, `__std_exception_copy`, `__std_type_info_*`,
-     `__RTDynamicCast`; the `_o_` aliases of api-ms-win-crt-private; the
-     `_l` locale variants; `__stdio_common_vfscanf`/`vfwscanf`;
-     `_Strftime` and the `_Get*` time-name functions; float math
-     (`acosf`, `sinhf`, ...); a few `_s` string functions), then those
+     `cxx_eh_test`, `pk_install_inno` and NumPy's DLLs, whose scenarios
+     use it and no longer copy the JDK's. Next: what the JDK,
+     PowerShell, .NET, PostgreSQL and SQL Server LocalDB still import
+     that gala's lacks (65 functions across their files: the C++
+     runtime functions Windows' ucrtbase also exports,
+     `_CxxThrowException`, `__CxxFrameHandler3`, `__std_exception_copy`,
+     `__std_type_info_*`, `__RTDynamicCast`; `__stdio_common_vfwscanf`;
+     `_Gettnames` (recorded, NULL); the `_s` path, date and case
+     functions (`_splitpath_s`, `_strdate_s`, `_wcsupr_s`, ...); the
+     multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
+     `tools/import_survey.py` on their directories lists them), then those
      scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
      files. `ucrt_test`/`wow64_ucrt_test` join
      `user/windows/ci-passing.txt` once CI's windows job shows them
@@ -1395,13 +1396,22 @@ need gala's.
      FALSE), and the ten functions used once. `office_api_test` and
      `wow64_office_api_test` join `ci-passing.txt` once CI's windows
      job shows them passing.
-   - Alongside, natively: a pending scenario `office_install` runs the
-     Office Deployment Tool's `setup.exe /configure` in gala (its
-     ledger ranks the installer's blockers; the guest needs the CDN, so
-     on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
-     32-bit x86 program (WOW64), and by its import tables against
-     gala's i686 DLLs every static import is there (the UCRT and
-     kernel32 functions above). Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
+   - Alongside, natively: the pending scenario `office_install` runs
+     the Office Deployment Tool's `setup.exe /configure` in gala
+     (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
+     re-pinned when Microsoft replaces the file at its URL;
+     `user/office_install/config.xml`: Word, Excel and PowerPoint, 64-bit,
+     Current channel, Display None, AcceptEULA; a net scenario, the
+     guest reaching the CDN through QEMU's NAT, so on CI's boot runners).
+     `setup.exe` is a 32-bit x86 program (WOW64); every static import is
+     there (the UCRT and kernel32 functions above). How far it gets: it
+     starts, starts its copy (a second setup.exe), and that copy ends
+     with 0xc06d007e at its first delay-loaded DLL, crypt32.dll, which
+     has no i686 build yet (the ledger's top gap: `crypt32.dll missing
+     dll`). Next: an i686 crypt32 (its structures with pointers audited
+     for the x86 layouts, "Making a gala DLL 32-bit too"), then the rest
+     of the delay-loaded list as the run reaches them. Delay-loaded,
+     needed as it goes: i686 builds of crypt32, wininet,
      wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
      cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
      control manager (advapi32's service calls are stubs); a few

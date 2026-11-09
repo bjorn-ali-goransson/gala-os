@@ -136,6 +136,14 @@ struct Lconv {
     decimal_point: *const u8,
 }
 
+/// `_Dcomplex` (complex.h).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Dcomplex {
+    re: f64,
+    im: f64,
+}
+
 /// `mbstate_t` (corecrt.h): two unsigned longs.
 #[repr(C)]
 #[derive(Default)]
@@ -350,6 +358,13 @@ ucrt_imports! {
     fn _dsign(x: f64) -> i32;
     fn round(x: f64) -> f64;
     fn _controlfp_s(current: *mut u32, new: u32, mask: u32) -> i32;
+    fn cabs(z: Dcomplex) -> f64;
+    fn cimag(z: Dcomplex) -> f64;
+    fn cexp(z: Dcomplex) -> Dcomplex;
+    fn _dpcomp(x: f64, y: f64) -> i32;
+    fn feclearexcept(excepts: i32) -> i32;
+    fn fetestexcept(excepts: i32) -> i32;
+    fn btowc(c: i32) -> u16;
 
     // Time.
     fn _gmtime64_s(tm: *mut Tm, t: *const i64) -> i32;
@@ -789,6 +804,7 @@ const LEGACY_TERMINATION: u64 = 1;
 const STANDARD_SNPRINTF: u64 = 2;
 const LEGACY_WIDE: u64 = 4;
 const THREE_DIGIT_EXPONENTS: u64 = 16;
+const STANDARD_ROUNDING: u64 = 32;
 
 /// `__stdio_common_vsprintf(options, buf, len, fmt, NULL, args)`.
 fn sprintf(options: u64, buf: &mut [u8], len: usize, fmt: &[u8], args: &Va) -> i32 {
@@ -844,6 +860,10 @@ fn printf(c: &mut Checks) -> Result<(), u32> {
     c.str(buf.as_ptr(), b"0.333333333333333314829616256247")?;
     sprintf(0, &mut buf, 100, b"%.0f %.0f\0", &Va::new().f64(0.5).f64(2.5));
     c.str(buf.as_ptr(), b"1 3")?;
+    // _CRT_INTERNAL_PRINTF_STANDARD_ROUNDING (32): exact ties to even.
+    let ties = Va::new().f64(0.5).f64(1.5).f64(2.5).f64(0.125);
+    sprintf(STANDARD_ROUNDING, &mut buf, 100, b"%.0f %.0f %.0f %.2f\0", &ties);
+    c.str(buf.as_ptr(), b"0 2 2 0.12")?;
     sprintf(0, &mut buf, 100, b"%zx %d\0", &Va::new().size(usize::MAX).int(1));
     #[cfg(target_arch = "x86_64")]
     c.str(buf.as_ptr(), b"ffffffffffffffff 1")?;
@@ -1178,6 +1198,22 @@ fn locale_math(c: &mut Checks) -> Result<(), u32> {
         c.eq(_controlfp_s(&mut cw, 0, 0).into(), 0)?;
         // Exceptions masked: _MCW_EM's bits all set.
         c.eq((cw & 0x1f).into(), 0x1f)?;
+        // C99: complex numbers, comparison, the exception flags.
+        c.ok(cabs(Dcomplex { re: 3.0, im: 4.0 }) == 5.0, 0)?;
+        c.ok(cimag(Dcomplex { re: 3.0, im: 4.0 }) == 4.0, 0)?;
+        let e = cexp(Dcomplex { re: 0.0, im: core::f64::consts::PI });
+        c.ok((e.re + 1.0).abs() < 1e-15 && e.im.abs() < 1e-15, e.re.to_bits())?;
+        c.eq(_dpcomp(1.0, 2.0).into(), 1)?;
+        c.eq(_dpcomp(2.0, 2.0).into(), 2)?;
+        c.eq(_dpcomp(f64::NAN, 2.0).into(), 0)?;
+        c.eq(feclearexcept(0x1f).into(), 0)?;
+        c.eq(fetestexcept(0x1f).into(), 0)?;
+        let zero = core::hint::black_box(0.0f64);
+        c.ok(core::hint::black_box(1.0 / zero).is_infinite(), 0)?;
+        c.eq(fetestexcept(0x1f).into(), 8)?; // FE_DIVBYZERO
+        c.eq(feclearexcept(8).into(), 0)?;
+        c.eq(fetestexcept(0x1f).into(), 0)?;
+        c.eq(btowc(i32::from(b'A')).into(), 65)?;
 
         #[cfg(target_arch = "x86")]
         {

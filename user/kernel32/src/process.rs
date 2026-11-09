@@ -24,12 +24,16 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// mode instead of the caller's (gala's processes always do: the error
 /// mode is not inherited yet). NSIS uninstallers pass it.
 const CREATE_DEFAULT_ERROR_MODE: u32 = 0x0400_0000;
+/// NORMAL_PRIORITY_CLASS: the class a new process gets anyway (ODT's
+/// setup.exe passes it when it starts its copy).
+const NORMAL_PRIORITY_CLASS: u32 = 0x20;
 /// Flags that change nothing on gala (one console, no windows).
 const IGNORED_FLAGS: u32 = DETACHED_PROCESS
     | CREATE_NEW_CONSOLE
     | CREATE_NEW_PROCESS_GROUP
     | CREATE_NO_WINDOW
-    | CREATE_DEFAULT_ERROR_MODE;
+    | CREATE_DEFAULT_ERROR_MODE
+    | NORMAL_PRIORITY_CLASS;
 const STARTF_USESTDHANDLES: u32 = 0x100;
 
 /// STARTUPINFOW (and STARTUPINFOA, the same layout) followed by

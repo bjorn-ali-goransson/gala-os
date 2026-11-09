@@ -638,9 +638,18 @@ pub extern "C" fn setlocale(_category: i32, _locale: *const u8) -> *const u8 {
     b"C\0".as_ptr()
 }
 
-/// getenv(name): case-insensitive, as on Windows.
+/// getenv(name): case-insensitive, as on Windows. The narrow environment
+/// is built on first use if the start-up code did not (a `wmain`
+/// program's start-up builds only the wide one: the UCRT makes the other
+/// when it is first needed).
 #[unsafe(no_mangle)]
 pub extern "C" fn getenv(name: *const u8) -> *mut u8 {
+    STARTUP.with(|| {
+        // SAFETY: the runtime's own statics, under STARTUP.
+        if unsafe { _environ.is_null() } {
+            build_environment();
+        }
+    });
     // SAFETY: the caller's NUL-terminated name; the environment array
     // built at startup.
     unsafe {

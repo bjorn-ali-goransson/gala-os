@@ -24,9 +24,9 @@ const STANDARD_SNPRINTF_BEHAVIOR: u64 = 2;
 const LEGACY_WIDE_SPECIFIERS: u64 = 4;
 const LEGACY_MSVCRT_COMPATIBILITY: u64 = 8;
 const LEGACY_THREE_DIGIT_EXPONENTS: u64 = 16;
-/// The flags this runtime knows (`_CRT_INTERNAL_PRINTF_STANDARD_ROUNDING`,
-/// 32, and the rest are recorded when asked for).
-const KNOWN_PRINTF: u64 = 0x1f;
+const STANDARD_ROUNDING: u64 = 32;
+/// The flags this runtime knows (others are recorded when asked for).
+const KNOWN_PRINTF: u64 = 0x3f;
 
 const SCANF_SECURECRT: u64 = 1;
 const SCANF_LEGACY_WIDE_SPECIFIERS: u64 = 2;
@@ -45,7 +45,11 @@ fn style(options: u64, wide: bool) -> Style {
     Style {
         wide,
         legacy_wide: options & LEGACY_WIDE_SPECIFIERS != 0,
-        float: crate::float::Style { exact: true, exponent_digits },
+        float: crate::float::Style {
+            exact: true,
+            exponent_digits,
+            ties_even: options & STANDARD_ROUNDING != 0,
+        },
         ucrt: true,
     }
 }
@@ -721,4 +725,35 @@ pub extern "C" fn _wfindnext64i32(h: isize, out: *mut WFindData64i32) -> i32 {
         wide_narrow_size(&d, out);
     }
     r
+}
+
+/// `__stdio_common_vfscanf(options, stream, format, locale, args)`: scanf
+/// from a stream a line at a time (as gala's msvcrt `fscanf`: a
+/// conversion cannot span lines).
+#[unsafe(no_mangle)]
+pub extern "C" fn __stdio_common_vfscanf(
+    options: u64,
+    file: *mut u8,
+    fmt: *const u8,
+    _locale: usize,
+    args: VaList,
+) -> i32 {
+    if fmt.is_null() {
+        invalid_parameter();
+        return -1;
+    }
+    let mut line = [0u8; 1024];
+    loop {
+        if crate::stdio::fgets(line.as_mut_ptr(), line.len() as i32, file).is_null() {
+            return -1; // EOF
+        }
+        // A blank line only feeds the format's leading white space.
+        if line.iter().take_while(|&&b| b != 0).any(|b| !b.is_ascii_whitespace()) {
+            break;
+        }
+    }
+    let n = line.iter().position(|&b| b == 0).unwrap_or(line.len());
+    // SAFETY: the caller's NUL-terminated format.
+    let f = unsafe { crate::c_str(fmt) };
+    scan(&line[..n], f, args, ScanStyle { secure: options & SCANF_SECURECRT != 0, wide: false })
 }

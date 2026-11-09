@@ -498,3 +498,30 @@ pub extern "C" fn fma(x: f64, y: f64, z: f64) -> f64 {
 pub extern "C" fn fmaf(x: f32, y: f32, z: f32) -> f32 {
     libm::fmaf(x, y, z)
 }
+
+/// `_sopen(path, flags, share, mode)`: `_open` (share modes are not
+/// applied: gala opens files sharing read and write). The mode is a
+/// variadic argument read only with _O_CREAT; an int in the fourth slot
+/// either way on both architectures' conventions.
+#[unsafe(no_mangle)]
+pub extern "C" fn _sopen(path: *const u8, flags: i32, _share: i32, mode: i32) -> i32 {
+    crate::stdio::_open(path, flags, mode)
+}
+
+/// `__conio_common_vcprintf(options, format, locale, args)`: printf to
+/// the console (`_cprintf`): standard output's handle here.
+#[unsafe(no_mangle)]
+pub extern "C" fn __conio_common_vcprintf(
+    options: u64,
+    fmt: *const u8,
+    locale: usize,
+    args: crate::va::VaList,
+) -> i32 {
+    super::stdio::__stdio_common_vfprintf(
+        options,
+        crate::stdio::__iob_func().wrapping_add(crate::stdio::FILE_SIZE),
+        fmt,
+        locale,
+        args,
+    )
+}

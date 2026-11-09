@@ -250,6 +250,33 @@ fn status(clear: bool) -> u32 {
     abstract_status(flags)
 }
 
+/// Clears the raised-exception flags of `abstract_mask` (_SW_* bits; the
+/// x87's too on x86).
+pub(crate) fn clear_flags(abstract_mask: u32) {
+    const MAP: [(u32, u32); 6] =
+        [(0x1, 0x10), (0x2, 0x8_0000), (0x4, 0x8), (0x8, 0x4), (0x10, 0x2), (0x20, 0x1)];
+    let hw = MAP.iter().filter(|(_, a)| abstract_mask & a != 0).fold(0u32, |s, (h, _)| s | h);
+    let mut mxcsr = 0u32;
+    // SAFETY: reads MXCSR.
+    unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &raw mut mxcsr, options(nostack)) };
+    let cleared = mxcsr & !hw;
+    // SAFETY: writes MXCSR with only those flags cleared.
+    unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &raw const cleared, options(nostack)) };
+    #[cfg(target_arch = "x86")]
+    if hw != 0 {
+        // The x87 has no partial clear: fnclex clears all its flags, then
+        // the ones still wanted come back from the saved status word.
+        let mut env = [0u32; 7];
+        // SAFETY: an FNSTENV area of 28 bytes; the status word is its
+        // second dword, the flags its low six bits.
+        unsafe {
+            core::arch::asm!("fnstenv [{}]", in(reg) env.as_mut_ptr(), options(nostack));
+            env[1] &= !hw;
+            core::arch::asm!("fldenv [{}]", in(reg) env.as_ptr(), options(nostack));
+        }
+    }
+}
+
 /// `_clearfp()`: the status, then the flags cleared.
 #[unsafe(no_mangle)]
 pub extern "C" fn _clearfp() -> u32 {

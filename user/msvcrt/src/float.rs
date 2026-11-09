@@ -170,7 +170,8 @@ fn round(d: &mut [u8], next: u8) -> bool {
 
 /// `count` significant digits of |v| rounded, and the decimal exponent of
 /// the first (0 for zero).
-fn significant(v: f64, count: usize, sig: &mut [u8; MAX_PRECISION + 1], exact: bool) -> i32 {
+fn significant(v: f64, count: usize, sig: &mut [u8; MAX_PRECISION + 1], style: Style) -> i32 {
+    let exact = style.exact;
     let mut d = [0u8; MAX_DIGITS];
     if v == 0.0 {
         sig[..count].fill(0);
@@ -185,7 +186,8 @@ fn significant(v: f64, count: usize, sig: &mut [u8; MAX_PRECISION + 1], exact: b
         *s = d.get(first + i).copied().unwrap_or(0);
     }
     let next = d.get(first + count).copied().unwrap_or(0);
-    if round(&mut sig[..count], next) {
+    let tail_zero = d.get(first + count + 1..).is_none_or(|t| t.iter().all(|&x| x == 0));
+    if !keeps_even(style, &sig[..count], next, tail_zero) && round(&mut sig[..count], next) {
         sig[0] = 1;
         exp += 1;
     }
@@ -205,10 +207,21 @@ pub struct Style {
     pub exact: bool,
     /// The fewest exponent digits: 3 (msvcrt) or 2 (UCRT).
     pub exponent_digits: u8,
+    /// An exact tie (a 5 and nothing after it) rounds to the even digit
+    /// (the UCRT's _CRT_INTERNAL_PRINTF_STANDARD_ROUNDING), not away from
+    /// zero.
+    pub ties_even: bool,
 }
 
 impl Style {
-    pub const MSVCRT: Self = Self { exact: false, exponent_digits: 3 };
+    pub const MSVCRT: Self = Self { exact: false, exponent_digits: 3, ties_even: false };
+}
+
+/// Whether rounding `kept` with the next digit `next` (and only zeros
+/// after it when `tail_zero`) keeps it as it is because it is an exact
+/// tie and the last kept digit is even (`style.ties_even`).
+fn keeps_even(style: Style, kept: &[u8], next: u8, tail_zero: bool) -> bool {
+    style.ties_even && next == 5 && tail_zero && kept.last().is_none_or(|&x| x % 2 == 0)
 }
 
 impl Writer<'_> {
@@ -269,7 +282,9 @@ fn fixed(w: &mut Writer<'_>, v: f64, p: usize, alt: bool) {
         keep += 1;
     }
     let next = if keep < MAX_DIGITS { d[keep] } else { 0 };
-    if round(&mut d[..keep], next) {
+    let tail_zero = d.get(keep + 1..).is_none_or(|t| t.iter().all(|&x| x == 0));
+    let even = keeps_even(w.style, &d[..keep], next, tail_zero);
+    if !even && round(&mut d[..keep], next) {
         // 9.99 -> 10.0: one more integer digit.
         start = 0;
         w.push(b'1');
@@ -285,7 +300,7 @@ fn fixed(w: &mut Writer<'_>, v: f64, p: usize, alt: bool) {
 #[inline(never)]
 fn scientific(w: &mut Writer<'_>, v: f64, p: usize, alt: bool, upper: bool) {
     let mut sig = [0u8; MAX_PRECISION + 1];
-    let exp = significant(v, p + 1, &mut sig, w.style.exact);
+    let exp = significant(v, p + 1, &mut sig, w.style);
     w.digits(&sig[..1]);
     if p > 0 || alt {
         w.push(b'.');
@@ -300,7 +315,7 @@ fn scientific(w: &mut Writer<'_>, v: f64, p: usize, alt: bool, upper: bool) {
 fn general(w: &mut Writer<'_>, v: f64, p: usize, alt: bool, upper: bool) {
     let p = p.max(1);
     let mut sig = [0u8; MAX_PRECISION + 1];
-    let exp = significant(v, p, &mut sig, w.style.exact);
+    let exp = significant(v, p, &mut sig, w.style);
     let from = w.n;
     if exp < -4 || exp >= p as i32 {
         w.digits(&sig[..1]);

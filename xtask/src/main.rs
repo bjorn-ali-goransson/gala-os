@@ -467,6 +467,18 @@ const PREBUILT: &[Prebuilt] = &[
         members: &["innosetup-7.1.1-x64.exe"],
         excludes: &[],
     },
+    // The Office Deployment Tool's setup.exe (officecdn.microsoft.com's
+    // current one, 16.0.20430.20146, x86; the SHA-256 is the one we
+    // measured: Microsoft replaces the file at this URL with each release,
+    // so a new one fails the checksum until it is pinned again). Scenario
+    // office_install (ROADMAP OF) runs it inside gala; never committed.
+    Prebuilt {
+        name: "odt",
+        url: "https://officecdn.microsoft.com/pr/wsus/setup.exe",
+        checksum: "c883ab32dffe4a371bb37411de83edc5d62ff31d315c5e3b59e830326bb4e322",
+        members: &["setup.exe"],
+        excludes: &[],
+    },
     // Inno Setup 6.5.4's own installer, an x86 Inno Setup installer
     // (jrsoftware.org's GitHub release; the SHA-256 is winget-pkgs'
     // JRSoftware.InnoSetup 6.5.4 manifest's, whose only installer is x86):
@@ -2542,6 +2554,44 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_inno", "x86/shfolder.dll", "Windows/SysWOW64"),
     ("wow64_inno", "x86/bcrypt.dll", "Windows/SysWOW64"),
     ("wow64_inno", "target/prebuilt/innosetup6/innosetup-6.5.4.exe", "gala"),
+    // office_install: the Office Deployment Tool's setup.exe (PREBUILT odt,
+    // 32-bit) with its configuration, the 32-bit DLLs gala has of those it
+    // loads, and the 64-bit ntdll and kernel32 for the 64-bit programs it
+    // starts.
+    ("office_install", "wow64.dll", "Windows/System32"),
+    ("office_install", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/user32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/gdi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comctl32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/oleaut32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/version.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/uxtheme.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/imm32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/dwmapi.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msimg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/msctf.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winhttp.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/shfolder.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/mpr.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/winspool.drv", "Windows/SysWOW64"),
+    ("office_install", "x86/wtsapi32.dll", "Windows/SysWOW64"),
+    ("office_install", "ntdll.dll", "Windows/System32"),
+    ("office_install", "kernel32.dll", "Windows/System32"),
+    ("office_install", "ucrtbase.dll", "Windows/System32"),
+    ("office_install", "target/prebuilt/odt/setup.exe", "gala"),
+    ("office_install", "user/office_install/config.xml", "gala"),
     // A 32-bit program on the 32-bit advapi32.
     ("wow64_adv_test", "wow64.dll", "Windows/System32"),
     ("wow64_adv_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -3962,6 +4012,8 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
+    // OF: Office's installer; it needs the CDN (CI's boot runners).
+    "office_install",
 ];
 
 /// Boot tests that boot through UEFI, so that path stays covered.
@@ -4005,6 +4057,9 @@ enum NetClient {
     Tls,
     /// GETs `/` and expects a 200 whose body contains all of these.
     Contains(&'static [&'static str]),
+    /// Nothing: the guest only connects out (the card and QEMU's NAT to
+    /// the host's network are what the scenario needs).
+    Outbound,
     /// Logs on with the host's ssh and user/sshd/client_ed25519 as
     /// `galatest` and runs `echo` (`ssh_client`).
     Ssh,
@@ -4075,6 +4130,7 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("filezilla_server", "[FTP Server] Listening on 0.0.0.0:7", NetClient::Ftp),
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
+    ("office_install", "run: begin setup.exe", NetClient::Outbound),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -7712,6 +7768,17 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // OF (pending): the Office Deployment Tool's setup.exe (x86,
+        // PREBUILT odt) installs Word, Excel and PowerPoint as
+        // user/office_install/config.xml asks, from Microsoft's CDN (a
+        // net scenario: QEMU's NAT to the host's network). Its log goes to
+        // C:\gala\odtlog; the ledger ranks what it lacks (ROADMAP OF).
+        name: "office_install",
+        cmdline: "qemu_exit run=setup.exe args=/configure%20C:\\gala\\config.xml",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setup.exe (pid 4) exited with status 0x00000000"],
+    },
+    Scenario {
         // WOW64 stage 3: a 32-bit C program on the 32-bit msvcrt
         // (user/wow64_crt_test: mingw's i686 startup code, checked-in
         // binary): printf/scanf's 4-byte va_list slots, setjmp/longjmp's
@@ -9071,6 +9138,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -10126,6 +10194,7 @@ fn run_vm_once(
                 NetClient::Nginx => nginx_client(port),
                 NetClient::Tls => tls_client(port),
                 NetClient::Contains(parts) => contains_client(port, parts),
+                NetClient::Outbound => Ok(()),
                 NetClient::Ssh => ssh_client(port, false),
                 NetClient::SshPassword => ssh_client(port, true),
                 NetClient::SshServer => ssh_server_client(port),

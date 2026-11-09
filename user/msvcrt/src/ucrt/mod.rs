@@ -15,6 +15,7 @@
 //! `terminate`. The rest: `stdio.rs` (the `__stdio_common_*` functions
 //! and streams), `string.rs`, `locale.rs`, `math.rs`, `time.rs`.
 
+mod c99;
 mod compat;
 mod locale;
 mod math;

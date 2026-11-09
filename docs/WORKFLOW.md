@@ -459,6 +459,9 @@ or `HOST_PAGE_SCENARIOS` (`-nic none` otherwise).
   files (ssh's key copy and `-v` trace, sftp's transfer, the askpass
   script) are per port in `target/net-client/<port>/`, removed after the
   boot. On failure the end of curl's or ssh's `-v` trace is in the log.
+- A guest that only connects out (`office_install` fetching from
+  Microsoft's CDN) is a net scenario with `NetClient::Outbound`: the card
+  and QEMU's NAT to the host's network, no client run.
 - A UDP client resends until it gets its answer (the guest's first reply
   may wait for ARP) and must skip late duplicates of earlier answers.
 - QEMU's DNS (10.0.2.3) forwards to the host's resolver: a check that
