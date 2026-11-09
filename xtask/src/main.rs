@@ -1833,6 +1833,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winhttp_test", "msvcrt.dll", "Windows/System32"),
     ("winhttp_test", "winhttp.dll", "Windows/System32"),
     ("winhttp_test", "user/bin/winhttp_test.exe", "gala"),
+    // Memory under sustained work (user/memload_test, C): thread churn,
+    // downloads from schannel_test's Nginx onto a disk-backed C:.
+    ("memload_test", "msvcrt.dll", "Windows/System32"),
+    ("memload_test", "winhttp.dll", "Windows/System32"),
+    ("memload_test", "user/bin/memload_test.exe", "gala"),
     // WinHTTP's status callbacks (user/winhttp_cb_test), x64 and x86,
     // against schannel_test's Nginx (MODULE_SETS).
     ("winhttp_cb_test", "winhttp.dll", "Windows/System32"),
@@ -3602,6 +3607,7 @@ const BOOT_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// took ~45 s alone and hit 120 s there). They get this much instead of
 /// BOOT_TEST_TIMEOUT.
 const SLOW_SCENARIOS: &[&str] = &[
+    "memload_test",
     "java_version",
     "java_hello",
     "java_http",
@@ -3617,6 +3623,9 @@ const SLOW_SCENARIOS: &[&str] = &[
     "python_pip_https",
     "python_numpy",
 ];
+/// Memory for memload_test's VM (its file cache holds less than the
+/// 192 MiB it downloads).
+const MEMLOAD_MEMORY_MIB: u64 = 256;
 /// Memory for the Elasticsearch scenario's VM.
 const ELASTICSEARCH_MEMORY_MIB: u64 = 3072;
 /// Elasticsearch starts three JVMs and ~60 modules under TCG.
@@ -5340,6 +5349,12 @@ fn qemu(iso: &Path, boot: Boot) -> Result<Command> {
             .any(|s| n.to_string_lossy().contains(s))
     }) {
         memory = memory.max(ELASTICSEARCH_MEMORY_MIB);
+    }
+    // memload_test: a machine smaller than the default, so that what it
+    // downloads is more than the machine's memory within the slow
+    // scenarios' time (TCG's loopback HTTP moved about 1.4 MB/s).
+    if iso.file_name().is_some_and(|n| n.to_string_lossy().contains("memload")) {
+        memory = MEMLOAD_MEMORY_MIB;
     }
     let extra = std::env::var("XTASK_QEMU_ARGS").unwrap_or_default();
     let mut cmd = Command::new(qemu_binary());
@@ -8670,6 +8685,18 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["winhttp_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // Memory stays bounded under sustained work (ROADMAP OF: what the
+        // Click-to-Run client does): 2000 threads made and ended, 192 MiB
+        // downloaded from Nginx in 256 KiB ranges (a thread each) onto a
+        // disk-backed C: in a 256 MiB VM (`MEMLOAD_MEMORY_MIB`), read
+        // back through views (DISK_SCENARIOS: a 2 GiB sparse disk).
+        name: "memload_test",
+        cmdline: "qemu_exit persist start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=memload_test.exe args=192",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["memload_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // WinHTTP's status callbacks on a synchronous session (ROADMAP OF:
         // ODT's setup.exe), against the same Nginx.
         name: "winhttp_cb_test",
@@ -10002,6 +10029,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("chromium_https", "schannel_test"),
     ("winhttp_test", "winhttp_test"),
     ("winhttp_test", "schannel_test"),
+    ("memload_test", "memload_test"),
+    ("memload_test", "schannel_test"),
     ("winhttp_cb_test", "winhttp_cb_test"),
     ("winhttp_cb_test", "schannel_test"),
     ("wow64_winhttp_cb_test", "wow64_winhttp_cb_test"),
@@ -13551,6 +13580,16 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         name: "volume_test",
         size: 1 << 30,
         host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // memload_test's 192 MiB file and its blob (sparse until then).
+        name: "memload_test",
+        size: 2 << 30,
+        host_mib: Some(1024),
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],

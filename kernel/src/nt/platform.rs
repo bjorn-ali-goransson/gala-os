@@ -27,7 +27,11 @@ pub use crate::hosted::memory::{SharedPage, SharedUserSpace, SpaceLock, UserSpac
 pub use crate::mm::PAGE_SIZE;
 pub use crate::mm::frame::Frame;
 pub use crate::mm::paging::{CacheMode, PageFlags};
+/// Frames in use by kind and the scheduler's thread counts, for
+/// persist's low-memory line.
+pub use crate::mm::{FrameUses, frame_uses};
 pub use crate::personality::Personality;
+pub use crate::sched::thread_counts;
 pub use crate::sched::{SpawnError, ThreadId, WakeReason};
 
 /// The implementation the NT layer runs on: the kernel, or gala-um's host

@@ -311,6 +311,26 @@ impl Conn {
         send_all(self.dll, self.socket, self.send_timeout, data)
     }
 
+    /// The send and receive time-outs of the request now using it (a
+    /// connection taken from the pool).
+    pub fn set_timeouts(&mut self, send: i32, receive: i32) {
+        self.send_timeout = send;
+        self.receive_timeout = receive;
+    }
+
+    /// Whether an idle connection can carry another request: nothing
+    /// arrived while it waited (a readable socket is the server's close,
+    /// or bytes no request asked for), no TLS bytes are left over, and
+    /// no close_notify came.
+    pub fn idle_ok(&self) -> bool {
+        if !self.raw.is_empty() || self.tls.as_ref().is_some_and(|t| t.closed) {
+            return false;
+        }
+        let mut fd = PollFd { fd: self.socket, events: POLLRDNORM, revents: 0 };
+        // SAFETY: one WSAPOLLFD of ours; no wait.
+        unsafe { WSAPoll(&mut fd, 1, 0) == 0 }
+    }
+
     /// Appends what the server sends next to `out`; Ok(0) when it closed.
     fn recv_into(&self, out: &mut Vec<u8>) -> Result<usize, u32> {
         wait(self.dll, self.socket, POLLRDNORM, self.receive_timeout)?;

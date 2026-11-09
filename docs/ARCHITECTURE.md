@@ -299,6 +299,19 @@ address.
   `write_initial`, which ignores page protection, is used only on a
   space being built. Host-tested (`mm::frame`). The `stats:` line ends
   with the frames shared and the copies made at a write since boot.
+- **Every frame in use is accounted for by its use** (`frame::Use`:
+  heap, page tables, kernel stacks, user pages, section pages, devices,
+  handover, and untagged: what early boot took before the table, chiefly
+  the kernel and the boot modules). Each allocation names its use
+  (`mm::allocate_frame(use)`), a byte per frame of the span (a table
+  from the heap, `mm::init_sharing`; `mm: frames counted by use`) keeps
+  it, and the allocator counts frames per use, so the counts and the
+  free frames add up to the managed ones. Shown by the `stats: frames
+  in use by ...` line at the end of a run, `statedump: frames in use by
+  ...` in a state dump, and `persist: free memory stays low ...` (with
+  the heap's slab and large pages beside: the heap's frames are its
+  slab pages, which it never returns, its large allocations and their
+  page tables). Host-tested (`frames_are_counted_per_use_until_freed`).
 
 ## Virtual memory
 
@@ -486,7 +499,11 @@ thread's XSAVE area; the switch pushes the six callee-saved registers).
 `ThreadId` (ids are never reused) and a FIFO ready queue whose capacity is
 reserved at spawn time, so scheduling itself never allocates. Thread #0
 is the boot thread; an idle thread per CPU runs only when nothing else is
-ready and reaps dead threads. API: `spawn`, `yield_now`, `sleep_ms`,
+ready and reaps dead threads (their kernel stacks, save areas, last
+address-space references). Every spawn also reaps a batch before it
+takes a stack: a machine that never idles (KVM, a program making and
+ending threads back to back) would otherwise fill the stack window's
+1024 slots with dead threads' stacks. API: `spawn`, `yield_now`, `sleep_ms`,
 `join`, `exit`, `reap`, `set_affinity`. The boot CPU's 1 kHz tick keeps
 time and wakes sleepers and timed-out waiters; every CPU's tick preempts
 after a 10-tick quantum. There are no priorities: every thread is
@@ -849,8 +866,27 @@ current process, -2 = current thread.
   No processor time is accounted (TODO, in the scheduler): thread times
   are zero and kernel32's GetSystemTimes reports every processor idle
   since boot. ThreadBasicInformation's TebBaseAddress is NULL once the
-  thread has ended (Windows frees the TEB then; gala's stays mapped
-  until the process ends).
+  thread has ended.
+- **What an ended thread leaves**: when a thread ends and its process
+  goes on, the kernel frees its TEB (and a WOW64 thread's 64-bit stack
+  and TEB32), and, if the thread ended itself and its creator gave it its
+  stack, that stack: the reservation INITIAL_TEB.StackAllocationBase
+  named (a WOW64 thread's 32-bit one; `thread::release_user_memory`; a
+  failure is a `thread: ... cannot free an ended thread's ...` line).
+  kernel32's CreateThread gives it, as Windows frees a CreateThread
+  thread's stack when it ends ("the thread's stack is freed when the
+  thread terminates"): it creates the thread suspended, says so with
+  gala's own NtSetInformationThread class GALA_THREAD_FREE_STACK
+  (0x47610001, no data; wow64.dll passes it on), then resumes it. A raw
+  NtCreateThread's stack stays the caller's (`wow64_thread_test` frees
+  its own after the thread ends), and so does the stack of a thread
+  another one ended (TerminateThread: Windows keeps it too). A process's
+  last thread leaves all of it to the address space's end. Invariant:
+  making and ending CreateThread threads does not grow a process's
+  commit or reservations (`memload_test`: 2000 threads; kept, the
+  Click-to-Run client's thousands of short threads held 200 MiB of a
+  512 MiB machine). The scheduler's record of a dead thread stays (ids
+  are not reused) but its save area goes when its stack is reaped.
 - **NtCreateThread** takes DeallocationStack from
   INITIAL_TEB.StackAllocationBase and the CONTEXT's integer and control
   registers; its floating-point part (MxCsr, FltSave, the XSTATE area) is
@@ -4688,6 +4724,25 @@ HTTP on 127.0.0.1:8080.
   pointer into the URL; buffer: a copy or ERROR_INSUFFICIENT_BUFFER
   with the length needed). ICU_DECODE / ICU_ESCAPE are recorded, not
   applied.
+- **Connection reuse** (`pool.rs`, HTTP/1.1 persistent connections,
+  RFC 9112 section 9.3): a request whose response has been read to its
+  end gives its connection to the DLL's pool unless the request or the
+  response said `Connection: close`, the response was HTTP/1.0 without
+  `keep-alive`, its body ended with the connection, or bytes followed
+  it; the next request to the same host (as named), port and scheme
+  (over TLS also the same security flags and protocols) takes it, from
+  any connect handle or session of the process (Windows keeps WinHTTP's
+  connections across sessions: `winhttp_cb_test`'s warm-up relies on
+  it). A connection the server closed while idle reads as readable and
+  is dropped when taken; one that closes before any of the response
+  comes makes the request go again on a new connection (not when part
+  of its body came through WinHttpWriteData, which is not kept:
+  `<dll>!reused connection closed`, ERROR_WINHTTP_CONNECTION_ERROR). A
+  reused connection reports no resolving or connecting notifications.
+  Idle connections go after 30 s (gala's choice; Windows does not
+  document WinHTTP's) or when more than 16 wait. A redirect's response
+  is not drained: its connection closes. `winhttp_test` 14 checks it
+  against Nginx's connection serial numbers.
 - **The connection** (`net.rs`): sending a request resolves the host
   (GetAddrInfoW) and connects to its addresses in order (localhost is
   ::1 then 127.0.0.1); failures are ERROR_WINHTTP_NAME_NOT_RESOLVED and
@@ -4725,7 +4780,8 @@ HTTP on 127.0.0.1:8080.
   short is ERROR_WINHTTP_CONNECTION_ERROR.
 - **Redirects** (`request.rs`: `redirect`, `resolve`, `follow`):
   followed inside ReceiveResponse (WinHttpReceiveResponse,
-  HttpSendRequestW), on a new connection each, as each API's policy and
+  HttpSendRequestW), each on a connection to its server (an idle one
+  from the pool when one waits), as each API's policy and
   rules say (`Settings::redirect_policy`, `redirect_rules`; from the
   documentation and Wine's conformance tests, which run on Windows).
   WinHTTP: 301, 302, 307 and 308 (a 303 is returned), by
@@ -4817,8 +4873,8 @@ HTTP on 127.0.0.1:8080.
   functions setup.exe does not import;
   WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
   as an option, not applied; the redirect policy is);
-  connection reuse (every request has its own connection, closed with
-  its body); the resolve time-out (GetAddrInfoW's own wait applies);
+  WINHTTP_OPTION_MAX_CONNS_PER_SERVER and the idle time-out options
+  (accepted as other options); the resolve time-out (GetAddrInfoW's own wait applies);
   authentication, cookies, decompression, HTTP/2, client certificates,
   FLAG_SYSTEMTIME. A handle must not be closed while another thread
   uses it.
@@ -5716,8 +5772,8 @@ On a layout 3 volume (`fs::volume::data_area`) the disk past the log
 areas is a data area of 4 KiB clusters, and files' pages live there:
 the machine's memory holds the tree and a cache of pages, so C: can hold
 more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
-`office_install`, a 16 GiB disk; it runs out of memory about 1.5 GB in,
-ROADMAP OF).
+`office_install`, a 16 GiB disk, ROADMAP OF; `memload_test` downloads
+768 MiB onto it in the same VM).
 
 - **Which files**: files of the root's tree (C:), not anonymous ones
   (memfd) and not those of a Linux volume (`/run`: a tmpfs), once the
@@ -5745,20 +5801,32 @@ ROADMAP OF).
   record SetSize and Delete as before. A snapshot names stored, clean
   pages by their runs and carries the others (a module's bytes, a page
   changed since its last write) as Write records.
-- **Sync** (`persist::sync`, at the end of every system call): copies of
-  dirty pages are written to their clusters (consecutive clusters in one
-  request), the remaining dirty pages and the records are taken in one
-  hold of the file system's lock and written, pages first; then the
-  records are appended; then the clusters those records gave up are
-  freed. **Invariants**: a record that names a cluster is on the disk
+- **Sync** (`persist::sync`, at the end of every system call): dirty
+  pages are written to their clusters a batch (256 pages) per hold of
+  the file system's lock: `RamFs::writeback` lists them by cluster and
+  copies them into a staging buffer in that order, the sync writes the
+  copies (consecutive clusters in one request, at most 64 KiB); the
+  records are taken in the hold whose batch leaves no page dirty; then
+  they are appended; then the clusters those records gave up are freed.
+  **Writing back needs no memory**: the list, the staging buffer and
+  the log's encoding buffer (`Volume::reserve`, records streamed to the
+  disk 64 KiB at a time) are reserved at mount, so a sync short of
+  memory still writes what lets memory go. Records that do not reach the
+  disk (a failed write of their pages, a failed append) are put back
+  (`RamFs::restore_ops`) for the next sync; only lost records (no memory
+  to record them) or a full log area make a snapshot. **Invariants**: a record that names a cluster is on the disk
   only after the cluster holds the page's data; a cluster given up is
   reused only after the record giving it up is on the disk (until then
   it is `pending`): a crash replays either the old owner or nothing.
-- **Leaving memory and coming back**: pages written are queued oldest
-  first; while free memory is below a quarter (at least 64 MiB) the sync,
-  and a page read about to allocate (`persist::relieve`, only when no
-  sync runs: a sync's copies must be on the disk before their pages
-  may go), let them go, except those of files a section maps. A call
+- **Leaving memory and coming back**: while free memory is below a
+  quarter (at least 64 MiB) the sync, and a page read about to allocate
+  (`persist::relieve`, only when no sync runs: a sync's copies must be
+  on the disk before their pages may go), let pages on the disk go, back
+  to 16 MiB above the mark, except those a live view shows. A
+  clock hand (`RamFs::evict`) goes round the files' pages from where it
+  stopped; a page written or read back since it last passed (`recent`)
+  gets a second chance. It needs no memory (no queue to grow: a page
+  whose entry could not be queued would never have left). A call
   that needs a page on the disk only fails with `FsError::NotResident`
   and names it (`take_page_in`); `nt::file::with_pages` reads the
   cluster with the file system released and installs it (`fill`) only
@@ -5769,9 +5837,14 @@ ROADMAP OF).
   clears what is past the end) and mapping a page (`section::frame`, with
   no lock held) go through it. A replay never needs a page: the disk
   held each page as its record found it.
-- **Mapped pages**: a writable view may change any page in memory, so
-  its unmap marks them dirty (a page made from a hole then gets a
-  cluster at the sync, recorded there).
+- **Mapped pages**: a view's page tables show file pages by frame, so
+  the pages each live view of a file shows stay in memory
+  (`section::View::new` and its drop tell the file system the view's
+  range: `RamFs::view_started`, `view_ended`); the rest of a mapped
+  file's pages leave like any (`memload_test` reads 192 MiB back through
+  16 MiB views of a section held open). A writable view may change any
+  page it shows, so its end marks them dirty (a page made from a hole
+  then gets a cluster at the sync, recorded there).
 - **Free space** (`file::volume_information`, FileFsSizeInformation and
   FileFsFullSizeInformation, so kernel32's GetDiskFreeSpace(Ex) and every
   32-bit caller): the area's clusters and free ones (4 KiB clusters, 8
@@ -5784,28 +5857,38 @@ ROADMAP OF).
   pages that found no cluster, clusters lost`; warnings for a failed
   write or flush of the area (its records wait for the next sync), a
   cluster that cannot be read (the call fails with STATUS_IO_DEVICE_ERROR,
-  ERROR_IO_DEVICE), dirty pages left without a cluster, a writeback with
-  no memory for its buffers (`persist: no memory to ...`), and, once each
-  time free memory stays below the mark after letting pages go,
-  `persist: free memory stays low ...` with the files' pages in memory
-  (dirty, never written, of mapped files; the queues;
-  `RamFs::cache_stats`), the heap and each process's commit (`process:
-  pid ...` lines). xtask attaches
+  ERROR_IO_DEVICE), dirty pages left without a cluster, a mount that
+  could not reserve the writeback's or the log's buffers (`persist: no
+  memory to reserve ...`), and, once each time free memory stays below
+  the mark after letting pages go (again only after it was back at the
+  target), `persist: free memory stays low ...` with the files' pages in
+  memory (dirty, never written, of mapped files; the dirty list;
+  `RamFs::cache_stats`), the heap, the frames by use ("Physical
+  memory"), the kernel threads (dead ones, stacks not yet freed) and
+  sockets, and each process's commit (`process: pid ...` lines). xtask attaches
   the disk with `werror=report`: a host whose disk fills under the sparse
   image fails the guest's writes (logged) instead of pausing the VM.
-- Tests: `volume_test` (a 640 MiB file on a 1 GiB disk in a 512 MiB VM:
+- Tests: `memload_test` (2000 threads made and ended, then 768 MiB
+  downloaded from Nginx in 256 KiB ranges, a thread each, onto a 2 GiB
+  disk in the 512 MiB VM and read back through 16 MiB views: the
+  process's commit and reservations stay flat, available memory never
+  below an eighth), `volume_test` (a 640 MiB file on a 1 GiB disk in a 512 MiB VM:
   written, read back, the disk filled, ERROR_DISK_FULL, free space back
   after deleting; GetDiskFreeSpace(Ex)W and GetVolumeInformationW's
   documented behaviour), `persist_test` (now on layout 3); host tests of
-  the allocator, the Clusters record, a file living in clusters and
+  the allocator, the log streamed through its reserved buffer
+  (`appends_stream_through_the_reserved_buffer_without_growing_it`), the Clusters record, a file living in clusters and
   leaving memory, a full area, a shrink and a later growth, a snapshot
   replayed onto a new boot, a log of appends and a truncation replayed,
   pages changed through a writable mapping.
 - Limits and TODO: extension allocates nothing (above); no quotas (what
-  the caller may use is what is free); the cache's policy is oldest
-  written or read first, nothing smarter; one request on the device at a
-  time (as D1); pages of a file a section maps stay in memory while it is
-  mapped; a page whose cluster cannot be read fails the call (no retry
+  the caller may use is what is free); the cache's policy is a clock
+  with one second chance, nothing smarter; recording a change (an `Op`)
+  and the dirty list still allocate in the system call that makes the
+  change (a failure marks the records lost, a snapshot next, or the
+  dirty list lost, a scan of the files' slots by the writeback); one request on the device at a
+  time (as D1); every page a live view shows stays in memory, touched or
+  not (no per-page mapping counts); a page whose cluster cannot be read fails the call (no retry
   beyond the device's own).
 
 ### The registry kept

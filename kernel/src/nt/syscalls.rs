@@ -3514,6 +3514,10 @@ const THREAD_AM_I_LAST_THREAD: u64 = 12;
 const THREAD_HIDE_FROM_DEBUGGER: u64 = 17;
 const THREAD_IS_TERMINATED: u64 = 20;
 const THREAD_NAME_INFORMATION: u64 = 38;
+/// gala's own class (no data): the thread's stack is the thread's, freed
+/// when it ends (kernel32's CreateThread, which made it; a raw
+/// NtCreateThread's stack stays the caller's). Not a Windows class.
+pub const GALA_THREAD_FREE_STACK: u64 = 0x4761_0001;
 const THREAD_SET_LIMITED_INFORMATION: u32 = 0x0400;
 /// The longest thread name kept, in characters.
 const MAX_THREAD_NAME: usize = 256;
@@ -3554,6 +3558,13 @@ fn nt_set_information_thread(call: &mut Call<'_>) -> NtStatus {
     }
     let object = tri!(entry.require(THREAD_SET_INFORMATION));
     let ObjectBody::Thread(t) = &object.body else { return NtStatus::OBJECT_TYPE_MISMATCH };
+    if class == GALA_THREAD_FREE_STACK {
+        if length != 0 {
+            return NtStatus::INFO_LENGTH_MISMATCH;
+        }
+        t.free_stack_on_exit();
+        return NtStatus::SUCCESS;
+    }
     let need = match class {
         THREAD_HIDE_FROM_DEBUGGER => 0,
         THREAD_PRIORITY | THREAD_BASE_PRIORITY => 4,

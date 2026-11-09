@@ -143,7 +143,19 @@ pub struct Volume<B: Blocks> {
     last: [u8; SECTOR],
     /// The rollback floor (R8).
     floor: Floor,
+    /// Where records are encoded on their way to the disk, reserved once
+    /// (`reserve`) so that appending needs no memory: a sync that writes
+    /// what lets memory go must not fail for lack of it.
+    scratch: Vec<u8>,
 }
+
+/// Records are written to the disk as soon as this much is encoded (whole
+/// sectors; the rest waits for the next record).
+const STREAM: usize = CHUNK;
+/// What `reserve` keeps for encoding: a flush's worth, plus the largest
+/// record (a Clusters record of 4096 runs, a 64 KiB Write, a long path,
+/// with headers), plus a sector of the last partial one.
+pub const SCRATCH: usize = STREAM + 160 * 1024 + SECTOR;
 
 /// What mounting found.
 #[derive(Debug, PartialEq, Eq)]
@@ -201,6 +213,7 @@ impl<B: Blocks> Volume<B> {
             tail: 0,
             last: [0; SECTOR],
             floor: if valid { Floor::read(&s) } else { Floor::default() },
+            scratch: Vec::new(),
         };
         if !valid {
             // A fresh volume: an empty log of generation 1 in area 0.
@@ -297,38 +310,90 @@ impl<B: Blocks> Volume<B> {
         if ops.is_empty() {
             return Ok(());
         }
-        let mut bytes = Vec::new();
-        for op in ops {
-            op.encode(self.generation, &mut bytes)?;
-        }
+        let mut buf = core::mem::take(&mut self.scratch);
+        let generation = self.generation;
         let area_bytes = self.area_sectors * SECTOR as u64;
-        if self.tail + bytes.len() as u64 > area_bytes {
-            return Err(VolumeError::Full);
-        }
-        self.write_at_tail(self.area, &bytes)?;
-        io(self.dev.flush())
+        let r = Self::encoded_len(&mut buf, ops, generation).and_then(|len| {
+            if self.tail + len > area_bytes {
+                return Err(VolumeError::Full);
+            }
+            self.stream(self.area, &mut buf, ops, generation)?;
+            io(self.dev.flush())
+        });
+        buf.clear();
+        self.scratch = buf;
+        r
     }
 
-    /// Writes `bytes` at the tail of area `area` (whole sectors: the
-    /// partial last one is rewritten with what it held).
-    fn write_at_tail(&mut self, area: u32, bytes: &[u8]) -> Result<(), VolumeError> {
-        let partial = (self.tail % SECTOR as u64) as usize;
-        let mut out = Vec::new();
-        out.try_reserve_exact((partial + bytes.len()).next_multiple_of(SECTOR))
-            .map_err(|_| VolumeError::NoMemory)?;
-        out.try_extend_from_slice(&self.last[..partial]).map_err(|_| VolumeError::NoMemory)?;
-        out.try_extend_from_slice(bytes).map_err(|_| VolumeError::NoMemory)?;
-        let end = out.len();
-        out.resize(end.next_multiple_of(SECTOR), 0);
-        let sector = self.area_start(area) + self.tail / SECTOR as u64;
-        // Large writes go in pieces the device takes.
-        for (i, piece) in out.chunks(CHUNK).enumerate() {
-            io(self.dev.write(sector + (i * CHUNK / SECTOR) as u64, piece))?;
+    /// Reserves the memory appending encodes records in (at mount), so
+    /// that `append` and `compact` need none for records up to `SCRATCH`.
+    pub fn reserve(&mut self) -> Result<(), VolumeError> {
+        let more = SCRATCH.saturating_sub(self.scratch.len());
+        self.scratch.try_reserve_exact(more).map_err(|_| VolumeError::NoMemory)
+    }
+
+    /// The bytes `ops` take in the log, encoded one at a time in `buf`
+    /// (left empty).
+    fn encoded_len(buf: &mut Vec<u8>, ops: &[Op], generation: u64) -> Result<u64, VolumeError> {
+        let mut len = 0u64;
+        for op in ops {
+            buf.clear();
+            op.encode(generation, buf)?;
+            len += buf.len() as u64;
         }
-        self.tail += bytes.len() as u64;
+        buf.clear();
+        Ok(len)
+    }
+
+    /// Writes `ops` at the tail of area `area`, encoded into `buf` a few
+    /// at a time: whole sectors go to the disk once `STREAM` bytes wait
+    /// (the partial last sector is rewritten with what it held, then
+    /// with what follows), the rest at the end.
+    fn stream(
+        &mut self,
+        area: u32,
+        buf: &mut Vec<u8>,
+        ops: &[Op],
+        generation: u64,
+    ) -> Result<(), VolumeError> {
+        let partial = (self.tail % SECTOR as u64) as usize;
+        buf.clear();
+        buf.try_extend_from_slice(&self.last[..partial]).map_err(|_| VolumeError::NoMemory)?;
+        // Where buf[0] goes.
+        let mut sector = self.area_start(area) + self.tail / SECTOR as u64;
+        let mut added = 0u64;
+        for op in ops {
+            let before = buf.len();
+            op.encode(generation, buf)?;
+            added += (buf.len() - before) as u64;
+            if buf.len() >= STREAM {
+                let whole = buf.len() / SECTOR * SECTOR;
+                self.write_sectors(sector, &buf[..whole])?;
+                sector += (whole / SECTOR) as u64;
+                buf.drain(..whole);
+            }
+        }
+        let end = buf.len();
+        let padded = end.next_multiple_of(SECTOR);
+        buf.try_reserve(padded - end).map_err(|_| VolumeError::NoMemory)?;
+        buf.resize(padded, 0);
+        if padded > 0 {
+            self.write_sectors(sector, buf)?;
+        }
+        self.tail += added;
         let now_partial = (self.tail % SECTOR as u64) as usize;
         self.last = [0; SECTOR];
-        self.last[..now_partial].copy_from_slice(&out[end - now_partial..end]);
+        let last_start = end - now_partial;
+        self.last[..now_partial].copy_from_slice(&buf[last_start..end]);
+        buf.clear();
+        Ok(())
+    }
+
+    /// Writes whole sectors from `sector` on, in pieces the device takes.
+    fn write_sectors(&mut self, sector: u64, bytes: &[u8]) -> Result<(), VolumeError> {
+        for (i, piece) in bytes.chunks(CHUNK).enumerate() {
+            io(self.dev.write(sector + (i * CHUNK / SECTOR) as u64, piece))?;
+        }
         Ok(())
     }
 
@@ -336,20 +401,23 @@ impl<B: Blocks> Volume<B> {
     /// comment).
     pub fn compact(&mut self, snapshot: &[Op]) -> Result<(), VolumeError> {
         let generation = self.generation + 1;
-        let mut bytes = Vec::new();
-        for op in snapshot {
-            op.encode(generation, &mut bytes)?;
-        }
+        let mut buf = core::mem::take(&mut self.scratch);
+        let len = Self::encoded_len(&mut buf, snapshot, generation);
         let area_bytes = self.area_sectors * SECTOR as u64;
         // Room for the end marker below.
-        if bytes.len() as u64 + SECTOR as u64 > area_bytes {
-            return Err(VolumeError::Full);
+        let fits = len.map(|len| len + SECTOR as u64 <= area_bytes);
+        if fits != Ok(true) {
+            self.scratch = buf;
+            return Err(fits.err().unwrap_or(VolumeError::Full));
         }
         let (old_area, old_tail, old_last) = (self.area, self.tail, self.last);
         let new_area = self.area ^ 1;
         self.tail = 0;
         self.last = [0; SECTOR];
-        let written = self.write_at_tail(new_area, &bytes).and_then(|()| {
+        let streamed = self.stream(new_area, &mut buf, snapshot, generation);
+        buf.clear();
+        self.scratch = buf;
+        let written = streamed.and_then(|()| {
             // The sector after the log must not look like a record of the
             // new generation; the zeros after the last record (in its
             // sector) end it, and so does a zeroed next sector.
@@ -473,6 +541,29 @@ mod tests {
     }
 
     #[test]
+    fn appends_stream_through_the_reserved_buffer_without_growing_it() {
+        // Records past the stream size, in several appends: all read back,
+        // and the reserved buffer never had to grow (no memory needed).
+        let (mut v, _) = Volume::mount(disk(4000)).unwrap();
+        v.reserve().unwrap();
+        let cap = v.scratch.capacity();
+        let mut all = Vec::new();
+        for round in 0..3u8 {
+            let ops: Vec<Op> = (0..7u8).map(|i| write_op(round * 10 + i, 20_000)).collect();
+            v.append(&ops).unwrap();
+            assert_eq!(v.scratch.capacity(), cap);
+            all.extend(ops);
+        }
+        // A one-byte record leaves a partial sector, rewritten by the next.
+        v.append(&[write_op(99, 1)]).unwrap();
+        all.push(write_op(99, 1));
+        v.append(&[write_op(98, 3)]).unwrap();
+        all.push(write_op(98, 3));
+        let (_, m) = remount(v);
+        assert_eq!(m, Mounted::Log(all));
+    }
+
+    #[test]
     fn a_fresh_disk_is_formatted_and_records_survive_remounts() {
         let (mut v, m) = Volume::mount(disk(200)).unwrap();
         assert_eq!(m, Mounted::Formatted);
@@ -563,6 +654,7 @@ mod tests {
             tail: 0,
             last: [0; SECTOR],
             floor: Floor::default(),
+            scratch: Vec::new(),
         };
         let sb = old.superblock();
         old.dev.write(0, &sb).unwrap();

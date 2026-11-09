@@ -1,4 +1,5 @@
-//! A request: its headers, sending it (on its own connection) with a
+//! A request: its headers, sending it (on an idle connection to the same
+//! server kept from an earlier request, `pool`, else a new one) with a
 //! body from the send call and later writes, the response's status line
 //! and headers (1xx responses skipped), the header queries and the body
 //! by Content-Length, chunked transfer coding or until the server closes;
@@ -16,6 +17,14 @@
 //! too many) is `err::REDIRECT_FAILED` with the reason in the ledger
 //! (`<dll>!redirect: ...`).
 //!
+//! Connections are reused (HTTP/1.1 keep-alive): once a response has
+//! been read to its end, its connection goes back to the pool unless the
+//! request or the response said `Connection: close`, the response was
+//! HTTP/1.0 without `Connection: keep-alive`, or its body ended with the
+//! connection. A request sent on a reused connection that the server
+//! closes before answering is sent again on a new one (unless part of
+//! its body came through WinHttpWriteData, which is not kept).
+//!
 //! Each step is told to the request's observer (`Event`, set by the DLL):
 //! sending and sent, receiving and received (each response's header
 //! block, a redirect's included), a redirect followed (between the 3xx's
@@ -31,6 +40,7 @@ use crate::err::{
     REDIRECT_FAILED,
 };
 use crate::net::{Conn, Target};
+use crate::pool::{self, Key};
 use crate::{
     Event, Observer, REDIRECT_DISALLOW_HTTPS_TO_HTTP, REDIRECT_NEVER, RedirectRules, Settings,
     failed, missing, narrow, put, url, wide,
@@ -142,6 +152,10 @@ const QUERY_NAMES: [&[u8]; 79] = [
     b"", // PASSPORT_CONFIG
 ];
 
+/// `read_head`: a reused connection closed before any of the response
+/// came (never returned to the caller: the request is sent again).
+const STALE: u32 = u32::MAX;
+
 /// The largest response header block (WinHTTP's default
 /// MAX_RESPONSE_HEADER_SIZE, 64 KB; WinINet's too).
 const MAX_HEADERS: usize = 64 * 1024;
@@ -191,6 +205,11 @@ pub struct Request {
     api_added: Vec<Vec<u8>>,
     state: State,
     conn: Option<Conn>,
+    /// `conn` came from the pool and has received nothing for this
+    /// request yet (a close then means it went stale while idle).
+    reused: bool,
+    /// The connection may carry another request once the body ends.
+    keep: bool,
     /// Body bytes still to come through WinHttpWriteData.
     to_write: u64,
     /// The body given to the send call, kept for a redirect that sends
@@ -366,6 +385,8 @@ impl Request {
             api_added: Vec::new(),
             state: State::Open,
             conn: None,
+            reused: false,
+            keep: false,
             to_write: 0,
             sent_body: Vec::new(),
             streamed: false,
@@ -490,7 +511,6 @@ impl Request {
             self.add_own(b"Content-Length", &n)?;
         }
         if !self.has(b"Connection") {
-            // Every request has its own connection (no reuse yet).
             self.add_own(b"Connection", b"Keep-Alive")?;
         }
         let mut out = Vec::new();
@@ -517,14 +537,27 @@ impl Request {
         put(&mut self.sent_body, optional)?;
         self.streamed = total > optional.len() as u64;
         self.redirects = 0;
-        self.transmit(total)
+        self.transmit(total, true)
     }
 
-    /// Sends the request line, the headers and `sent_body` on a new
-    /// connection (`total` bytes of body in all).
-    fn transmit(&mut self, total: u64) -> Result<(), u32> {
-        // A new send starts over (its own connection).
+    /// The pool's key for this request's server.
+    fn key(&self) -> Result<Key, u32> {
+        let mut host = Vec::new();
+        put(&mut host, &self.host)?;
+        let (security_flags, protocols) =
+            if self.secure { (self.security_flags, self.settings.protocols) } else { (0, 0) };
+        Ok(Key { host, port: self.port, secure: self.secure, security_flags, protocols })
+    }
+
+    /// Sends the request line, the headers and `sent_body` (`total` bytes
+    /// of body in all) on an idle connection to the server if `pooled`
+    /// and one waits, else on a new one.
+    fn transmit(&mut self, total: u64, pooled: bool) -> Result<(), u32> {
+        // A new send starts over (a body not read to its end leaves its
+        // connection unusable: it goes).
         self.conn = None;
+        self.reused = false;
+        self.keep = false;
         self.state = State::Open;
         self.response.clear();
         self.rx.clear();
@@ -532,12 +565,26 @@ impl Request {
         self.body_at = 0;
         let mut message = self.build(total)?;
         put(&mut message, &self.sent_body)?;
+        let t = self.settings.timeouts;
+        if pooled && let Some(mut conn) = pool::take(&self.key()?) {
+            conn.set_timeouts(t.send, t.receive);
+            Observer::tell(self.observer.as_ref(), Event::Sending);
+            // A write that fails found the connection closed: a new one.
+            if conn.write(&message).is_ok() {
+                let sent = message.len().min(u32::MAX as usize) as u32;
+                Observer::tell(self.observer.as_ref(), Event::Sent(sent));
+                self.conn = Some(conn);
+                self.reused = true;
+                self.to_write = total - self.sent_body.len() as u64;
+                self.state = State::Sent;
+                return Ok(());
+            }
+        }
         // IPv6 literals go to the resolver without their brackets.
         let host = match &self.host[..] {
             [b, inner @ .., e] if *b == u16::from(b'[') && *e == u16::from(b']') => inner,
             h => h,
         };
-        let t = self.settings.timeouts;
         let mut conn = Conn::open(&Target {
             dll: self.settings.dll,
             host,
@@ -709,7 +756,7 @@ impl Request {
             Observer::tell(self.observer.as_ref(), Event::Redirect(&url));
         }
         let total = self.sent_body.len() as u64;
-        self.transmit(total)
+        self.transmit(total, true)
     }
 
     pub fn write_data(&mut self, data: &[u8]) -> Result<(), u32> {
@@ -745,7 +792,14 @@ impl Request {
                 return Err(HEADER_SIZE_OVERFLOW);
             }
             let conn = self.conn.as_mut().ok_or(INCORRECT_HANDLE_STATE)?;
-            if conn.read(&mut self.rx)? {
+            let closed = match conn.read(&mut self.rx) {
+                // A reused connection that ends (or fails) before any of
+                // the response: the server closed it while it was idle.
+                Err(_) | Ok(true) if self.reused && self.rx.is_empty() => return Err(STALE),
+                r => r?,
+            };
+            self.reused = false;
+            if closed {
                 let n = self.rx.len() as u64;
                 failed(self.settings.dll, b"closed before the response headers", n);
                 return Err(if self.rx.is_empty() {
@@ -825,7 +879,7 @@ impl Request {
         }
         self.state = State::Received;
         if self.framing == Framing::Done {
-            self.conn = None;
+            self.finish();
         }
         Ok(())
     }
@@ -839,7 +893,22 @@ impl Request {
         Observer::tell(self.observer.as_ref(), Event::Receiving);
         let mut received = 0usize;
         loop {
-            let end = self.read_head()?;
+            let end = match self.read_head() {
+                Err(STALE) if !self.streamed => {
+                    // Sent again on a new connection.
+                    let total = self.sent_body.len() as u64;
+                    self.transmit(total, false)?;
+                    if let Some(c) = self.conn.as_mut() {
+                        c.receive_timeout = self.settings.timeouts.response;
+                    }
+                    self.read_head()?
+                }
+                Err(STALE) => {
+                    failed(self.settings.dll, b"reused connection closed", 0);
+                    return Err(CONNECTION_ERROR);
+                }
+                r => r?,
+            };
             received += end;
             let head = copy(&self.rx[..end])?;
             self.rx.drain(..end);
@@ -876,7 +945,38 @@ impl Request {
         } else {
             Framing::UntilClose
         };
+        self.keep = self.framing != Framing::UntilClose && self.status != 101 && self.persistent();
         Ok(())
+    }
+
+    /// Whether the connection persists after this exchange (RFC 9112
+    /// section 9.3): neither side said `Connection: close`, and the
+    /// response is HTTP/1.1 or later, or HTTP/1.0 with `keep-alive`.
+    fn persistent(&self) -> bool {
+        let has = |list: Option<&[u8]>, token: &[u8]| {
+            list.is_some_and(|v| v.split(|&b| b == b',').any(|t| same(trim(t), token)))
+        };
+        let asked =
+            self.headers.iter().filter(|h| same(&h.0, b"Connection")).map(|h| &h.1[..]).next();
+        if has(asked, b"close") || has(self.header(b"Connection"), b"close") {
+            return false;
+        }
+        if same(&self.response_version, b"HTTP/1.0") {
+            return has(self.header(b"Connection"), b"keep-alive");
+        }
+        self.response_version.len() > 5
+    }
+
+    /// The body is at its end: the connection goes back to the pool if it
+    /// persists and nothing past the response came, else it closes.
+    fn finish(&mut self) {
+        let Some(conn) = self.conn.take() else { return };
+        if self.keep
+            && self.rx.is_empty()
+            && let Ok(key) = self.key()
+        {
+            pool::put(key, conn);
+        }
     }
 
     /// Moves body bytes from `rx` to `body` by the framing.
@@ -955,8 +1055,7 @@ impl Request {
         }
         self.rx.drain(..at);
         if self.framing == Framing::Done {
-            // No reuse yet: the connection ends with the body.
-            self.conn = None;
+            self.finish();
         }
         Ok(())
     }

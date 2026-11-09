@@ -66,12 +66,7 @@ fn copy_space(parent: &Process) -> core::result::Result<CopiedSpace, &'static st
     let mut views = Vec::new();
     views.try_reserve_exact(views_lock.len()).map_err(|_| "no memory for the views")?;
     for v in views_lock.iter() {
-        let _ = views.try_push(View {
-            base: v.base,
-            size: v.size,
-            offset: v.offset,
-            section: v.section.clone(),
-        });
+        let _ = views.try_push(View::new(v.base, v.size, v.offset, v.section.clone()));
     }
     let vad_lock = parent.vad.lock();
     let vad = vad_lock.try_clone().map_err(|_| "no memory for the VAD")?;

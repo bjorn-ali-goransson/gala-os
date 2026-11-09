@@ -1684,31 +1684,40 @@ need gala's.
      `free:=16506359808 required:=4437233664`).
      It stages its download through the Restart Manager (done: gala's
      rstrtmgr.dll, below) and downloads the streams over HTTP: 256 KiB
-     ranges from officecdn.microsoft.com, each on its own TCP connection
-     (gala's winhttp does not reuse connections), about 0.7 MB/s of guest
-     time under TCG (half of each range's ~320 ms is the client's own
-     work between requests; `XTASK_EVENTS=net`'s `tcp close` lines carry
-     each connection's bytes), with no request left unanswered: the two
-     90 s time-outs of earlier runs were in the staging failure's retry
-     loop and did not recur (to watch for: a `winhttp.dll!timed out`
-     ledger line, and a `tcp close` with 0 bytes received). It loads
-     wofutil.dll (done: gala's, no overlay filter, below).
-     Where the run ends now: about 30 min in (1.5 GB on C:), out of
-     memory in the 512 MiB VM (the ISO is under 64 MiB, so `qemu()`
-     gives no more): `persist: pages not written to the data area` first
-     (the writeback's buffers could not be allocated), then `persist:
-     changes not written to the disk (NoMemory)` at every sync, user page
-     faults out of memory, and OfficeClickToRun.exe (the downloader) ends
-     with 0xc0000005 when its stack cannot grow (`cannot push the
-     dispatcher frame`); the state dump has 36 frames free, the heap at
-     78 MiB (peak 177 MiB), the processes' commit about 67 MiB. What
-     holds the rest is not known yet: `persist: free memory stays low
-     after letting N pages go` (new) names the files' pages in memory
-     (dirty, never written, mapped) and each process's commit the first
-     time letting pages go cannot bring memory back. Next: rerun, read
-     that line, fix what pins the memory, then make the writeback
-     allocation-free (its page copies and buffers reserved at mount, so a
-     low-memory sync can still free memory).
+     ranges from officecdn.microsoft.com, now over kept-alive
+     connections (done: connection reuse in gala's winhttp and wininet,
+     ARCHITECTURE "WinHTTP and WinINet", `winhttp_test` 14; a connection
+     carries 95-300 MB), at 0.5-0.6 MB/s of guest time under TCG per
+     connection (`XTASK_EVENTS=net`'s `tcp close` lines carry each
+     connection's bytes; keep-alive did not raise it, so the time is the
+     network path's under TCG and the client's own work, not the
+     connections). It loads wofutil.dll (done: gala's, no overlay
+     filter, below).
+     Done: the memory. A 512 MiB VM ran out of memory about 30 min in;
+     frames counted by use (ARCHITECTURE "Physical memory") showed 224
+     MiB of user pages: the client service's commit grew with every
+     short thread it made and ended (5252 reservations), as gala freed
+     neither an ended thread's TEB nor its stack. Now the kernel frees
+     them (ARCHITECTURE "What an ended thread leaves"; `memload_test`),
+     the writeback needs no memory (buffers reserved at mount, records put
+     back instead of lost: before, one failed sync left only snapshots,
+     which failed for want of memory), eviction is a clock with no queue
+     to grow, and pages of a mapped file leave unless a live view shows
+     them (ARCHITECTURE "A disk-backed C:").
+     Where the run ends now: at the 3600 s limit with memory flat
+     (29000 frames free, no low-memory warning, the service's
+     reservations at 217), 1.7 GB in the data area: 4070 files (1.66 GB)
+     under `Program Files\Microsoft Office\Updates\Download\PackageFiles`
+     of the 5432 MB the client says it needs. After about 1400 s the
+     client's connections carry 3-10 MB each over 100-300 s, with a
+     connection now and then that receives nothing for 30 s; what it
+     waits for then is the next thing to find (its log,
+     `C:\Users\Public\GALA-*.log`, `cargo xtask disk-files`). Its log
+     also warns per file that kernel32's GetCachedSigningLevel is missing
+     (`kernel32.dll!GetCachedSigningLevel` missing export). At 0.6 MB/s
+     the 4.44 GB cannot arrive within 3600 s of TCG guest time (about
+     7400 s); the limit stays (no measurement says the run would end
+     sooner).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
@@ -1725,11 +1734,12 @@ need gala's.
      Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
      WofIsExternalFile a physical file, the driver functions
      ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
-     Next, in the order the run reaches them: the memory (above); the
-     stream download's speed (4.44 GB at 0.7 MB/s is about 100 min of
-     guest time under TCG, beyond the 3600 s limit; connection reuse in
-     winhttp, the client's time between ranges) and what applying it
-     needs; a service's environment
+     Next, in the order the run reaches them: what the client waits for
+     after its first 1400 s (the 30 s idle connections), the stream
+     download's speed under TCG (the network path: `memload_test`'s
+     loopback HTTP moves about 1.4 MB/s, its AFD calls 4 ms each) and
+     what applying it needs; GetCachedSigningLevel and
+     SetCachedSigningLevel; a service's environment
      (SYSTEM's profile variables, Windows' TEMP for services) and HKCU
      from the caller's token; the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`

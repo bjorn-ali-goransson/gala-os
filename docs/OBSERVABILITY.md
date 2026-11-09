@@ -55,7 +55,10 @@ The human log, shared by the kernel and program output on the serial
 port. Lines that tools and agents rely on:
 
 - `stats:` (heap in use and its peak, free and total frames and the
-  fewest free since boot) and `nt:` (`nt::stats`: system calls, waits,
+  fewest free since boot; then `stats: frames in use by heap N, page
+  tables N, kernel stacks N, user pages N, section pages N, ...`, every
+  frame in use by what it is for, ARCHITECTURE "Physical memory"; a
+  state dump has the same as `statedump: frames in use by ...`) and `nt:` (`nt::stats`: system calls, waits,
   user faults resolved, processes created, with their time; always on;
   docs/PERF.md) at the end of a run.
 - `process x.exe (pid 4, session 1): starting at ..., personality nt`

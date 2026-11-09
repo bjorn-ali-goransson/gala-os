@@ -205,10 +205,11 @@ pub fn prepare(
     }
     let image_pages = image.span / PAGE_SIZE;
     // 2 MiB aligned when possible (fewer page-table pages), else any.
-    let image_start = crate::mm::allocate_frames(image_pages, 512)
-        .or_else(|| crate::mm::allocate_frames(image_pages, 1))
+    let image_start = crate::mm::allocate_frames(image_pages, 512, crate::mm::Use::Handover)
+        .or_else(|| crate::mm::allocate_frames(image_pages, 1, crate::mm::Use::Handover))
         .ok_or(HandoverError::OutOfMemory)?;
-    let Some(area_start) = crate::mm::allocate_frames(AREA_PAGES, 1) else {
+    let Some(area_start) = crate::mm::allocate_frames(AREA_PAGES, 1, crate::mm::Use::Handover)
+    else {
         free_run(image_start, image_pages);
         return Err(HandoverError::OutOfMemory);
     };
@@ -299,7 +300,7 @@ pub struct OwnedPages {
 impl OwnedPages {
     /// `pages` fresh contiguous frames (zeroed).
     pub fn allocate(pages: u64) -> Option<Self> {
-        let start = crate::mm::allocate_frames(pages, 1)?;
+        let start = crate::mm::allocate_frames(pages, 1, crate::mm::Use::Handover)?;
         let owned = OwnedPages { phys: start.start(), len: pages * PAGE_SIZE };
         owned.with_bytes(|b| b.fill(0));
         Some(owned)

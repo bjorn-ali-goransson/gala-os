@@ -50,10 +50,10 @@ fn breakpoint_returns() {
 
 fn frame_alloc_roundtrip() {
     let (free_before, _) = mm::frame_stats();
-    let a = mm::allocate_frame().expect("frame");
-    let b = mm::allocate_frame().expect("frame");
+    let a = mm::allocate_frame(mm::Use::Untagged).expect("frame");
+    let b = mm::allocate_frame(mm::Use::Untagged).expect("frame");
     assert_ne!(a, b);
-    let run = mm::allocate_frames(16, 16).expect("16 contiguous frames");
+    let run = mm::allocate_frames(16, 16, mm::Use::Untagged).expect("16 contiguous frames");
     assert_eq!(run.number() % 16, 0);
     assert_eq!(mm::frame_stats().0, free_before - 18);
     mm::free_frame(a).unwrap();

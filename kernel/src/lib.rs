@@ -515,6 +515,12 @@ pub fn kernel_main(handover: Option<boot::HandoverEntry>) -> ! {
         mm::sharing_stats().0,
         mm::sharing_stats().1
     );
+    info!(
+        "stats: frames in use by {}; heap {} slab and {} large pages",
+        mm::FrameUses(mm::frame_uses()),
+        heap.slab_pages,
+        heap.large_pages
+    );
     // R8 step 6: this release has booted and done its work; the disk's
     // rollback floor goes up to what its manifest says.
     raise_rollback_floor();

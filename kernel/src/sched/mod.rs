@@ -74,7 +74,10 @@ enum State {
 struct Thread {
     name: &'static str,
     state: State,
-    context: Context,
+    /// Its saved registers and x87/SSE/AVX area; `None` once a dead
+    /// thread is reaped (the area is a heap block per thread, and dead
+    /// threads' records stay in the table).
+    context: Option<Context>,
     /// `None` for the boot thread and the APs' idle threads (stacks that
     /// are never freed), and after reaping.
     stack: Option<KernelStack>,
@@ -270,7 +273,7 @@ fn adopted(name: &'static str, is_idle: bool, affinity: u64) -> Result<Thread, S
     Ok(Thread {
         name,
         state: State::Running,
-        context: Context::current().map_err(|_| SpawnError::OutOfMemory)?,
+        context: Some(Context::current().map_err(|_| SpawnError::OutOfMemory)?),
         stack: None,
         entry: None,
         joiners: Vec::new(),
@@ -364,13 +367,20 @@ fn spawn_inner(
     arg: usize,
     user: Option<UserThread>,
 ) -> Result<ThreadId, SpawnError> {
+    // Ended threads give back their kernel stacks first: the idle threads
+    // reap only when a CPU has nothing to do, and on a machine that never
+    // idles (KVM, a program making and ending threads back to back) the
+    // dead ones' stacks would otherwise use up the stack window's slots
+    // (memload_test: CreateThread failed at its ~1040th thread). Each
+    // spawn reaps up to a batch, more than the one thread it adds.
+    reap();
     // Allocate outside the scheduler lock.
     let stack = KernelStack::new().map_err(SpawnError::Stack)?;
     let context = Context::new_thread(&stack, thread_start).map_err(|_| SpawnError::OutOfMemory)?;
     let thread = Thread {
         name,
         state: State::Ready,
-        context,
+        context: Some(context),
         stack: Some(stack),
         entry: Some((entry, arg)),
         joiners: Vec::new(),
@@ -642,9 +652,12 @@ fn schedule() {
         cpu.current = next;
         cpu.quantum_left = QUANTUM_TICKS;
         cpu.need_resched = false;
-        (next != cur).then(|| {
+        // Every thread that runs, or may run, has its context.
+        let has_contexts = s.thread(cur).context.is_some() && s.thread(next).context.is_some();
+        (next != cur && has_contexts).then_some(()).and_then(|()| {
             s.cpus[here].prev = Some(cur);
-            let from: *const Context = &s.thread(cur).context;
+            let from: *const Context =
+                s.thread(cur).context.as_ref().map_or(core::ptr::null(), |c| c as *const Context);
             let n = s.thread(next);
             n.on_cpu = true;
             if let Some(flag) = RUNNING_IDLE.get(here) {
@@ -652,7 +665,7 @@ fn schedule() {
             }
             n.switches = n.switches.wrapping_add(1);
             let target = switch::Target {
-                context: &n.context,
+                context: n.context.as_ref()?,
                 kernel_stack_top: n.stack.as_ref().map(KernelStack::top),
                 root: n.user.as_ref().map_or_else(paging::kernel_root, |u| u.root),
                 user_gs_base: n.user.as_ref().map_or(0, |u| u.gs_base),
@@ -661,7 +674,7 @@ fn schedule() {
                 personality: n.user.as_ref().map_or(Personality::Nt, |u| u.personality),
                 client: n.user.as_ref().map_or(0, |u| u.client),
             };
-            (from, target)
+            Some((from, target))
         })
     };
     // The lock is released before switching. `cur` keeps `on_cpu` until
@@ -733,11 +746,28 @@ pub fn held_by_reaps() -> usize {
     REAPING.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// `(threads, dead ones, dead ones whose stack is not freed yet)`: for
+/// low-memory reports (a dead thread's stack goes at the next `reap`).
+pub fn thread_counts() -> (usize, usize, usize) {
+    with(|s| {
+        let dead = s.threads.iter().filter(|t| t.state == State::Dead);
+        let (mut n, mut stacks) = (0, 0);
+        for t in dead {
+            n += 1;
+            if t.stack.is_some() {
+                stacks += 1;
+            }
+        }
+        (s.threads.len(), n, stacks)
+    })
+}
+
 /// Frees the stacks of dead threads that no CPU runs on any more.
 pub fn reap() -> usize {
     // Take the stacks out under the lock, drop (unmap) them outside it.
     let mut stacks: [Option<KernelStack>; 8] = Default::default();
     let mut spaces: [Option<SharedUserSpace>; 8] = Default::default();
+    let mut contexts: [Option<Context>; 8] = Default::default();
     let mut n = 0;
     with(|s| {
         for t in s.threads.iter_mut() {
@@ -746,6 +776,9 @@ pub fn reap() -> usize {
             }
             if t.state == State::Dead && !t.on_cpu && t.stack.is_some() {
                 stacks[n] = t.stack.take();
+                // Never switched to again: its save area goes (outside the
+                // lock, with the stack).
+                contexts[n] = t.context.take();
                 n += 1;
                 // Not active any more (a switch away loaded another root),
                 // so the address space may be freed with its last thread.
@@ -928,7 +961,7 @@ pub fn user_wait(id: ThreadId) -> (UserWait, Option<XState>) {
             State::Dead => UserWait::Dead,
             _ => UserWait::Busy,
         };
-        let fx = (!t.on_cpu).then(|| switch::saved_xstate(&t.context));
+        let fx = t.context.as_ref().filter(|_| !t.on_cpu).map(switch::saved_xstate);
         (state, fx)
     })
 }

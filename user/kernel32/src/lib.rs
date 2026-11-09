@@ -3045,6 +3045,10 @@ fn default_stack_commit() -> usize {
     image_optional_field(OPTIONAL_STACK_COMMIT)
 }
 
+/// gala's NtSetInformationThread class: the thread's stack is freed when it
+/// ends (the kernel's GALA_THREAD_FREE_STACK).
+const GALA_THREAD_FREE_STACK: u32 = 0x4761_0001;
+
 /// CreateThread: the stack is reserved and partly committed here, with a
 /// guard page (see below), then NtCreateThread starts the thread at
 /// `thread_start`. SECURITY_ATTRIBUTES give the thread's descriptor and
@@ -3117,13 +3121,23 @@ pub extern "system" fn CreateThread(
             &mut cid,
             &context,
             &initial_teb,
-            u8::from(flags & CREATE_SUSPENDED != 0),
+            1, // suspended until the stack is the thread's (below)
         )
     })
     .unwrap_or(0xc000_000d); // STATUS_INVALID_PARAMETER
     if status != STATUS_SUCCESS {
         VirtualFree(stack as *mut c_void, 0, 0x8000);
         return fail(status, core::ptr::null_mut());
+    }
+    // The stack goes with the thread when it ends, as Windows frees a
+    // CreateThread thread's stack (gala's own information class; before
+    // the thread can run, so it cannot end first).
+    // SAFETY: a handle just made; the class takes no data.
+    unsafe { NtSetInformationThread(h, GALA_THREAD_FREE_STACK, core::ptr::null(), 0) };
+    if flags & CREATE_SUSPENDED == 0 {
+        let mut previous = 0;
+        // SAFETY: a handle just made.
+        unsafe { NtResumeThread(h, &mut previous) };
     }
     if !thread_id.is_null() {
         // SAFETY: the caller's output pointer.
@@ -3132,8 +3146,6 @@ pub extern "system" fn CreateThread(
     h
 }
 
-/// ExitThread. TODO: DLL_THREAD_DETACH notifications; the stack is not
-/// freed (Windows frees it).
 /// TerminateThread(thread, code): ends another thread (or this one) at
 /// once with `code`, without its DLL notifications.
 #[unsafe(no_mangle)]
@@ -3143,6 +3155,9 @@ pub extern "system" fn TerminateThread(thread: Handle, code: u32) -> Bool {
     if status != STATUS_SUCCESS { fail(status, FALSE) } else { TRUE }
 }
 
+/// ExitThread: DLL_THREAD_DETACH, then NtTerminateThread; the kernel frees
+/// the thread's stack and TEB as it ends (ARCHITECTURE "What an ended
+/// thread leaves").
 #[unsafe(no_mangle)]
 pub extern "system" fn ExitThread(code: u32) -> ! {
     fls_thread_exit();

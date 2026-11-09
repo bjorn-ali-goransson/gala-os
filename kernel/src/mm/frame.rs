@@ -44,6 +44,62 @@ pub enum FreeError {
     NotAllocated,
 }
 
+/// What an allocated frame is used for: the allocator counts frames per
+/// use (`FrameAllocator::uses`) so every frame in use is accounted for in
+/// a state dump, the `stats:` line and `persist`'s low-memory warning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Use {
+    /// Allocated before the use table existed (early boot), or with no
+    /// use named.
+    Untagged = 0,
+    /// The kernel heap's pages (slabs, page and multi-page allocations;
+    /// file pages are heap pages).
+    Heap = 1,
+    /// Page tables, the kernel's and every address space's.
+    PageTable = 2,
+    /// Kernel stacks.
+    KernelStack = 3,
+    /// Private pages of user address spaces (demand-zero, copies).
+    UserPage = 4,
+    /// Pages of sections (images, shared memory) made on demand.
+    SectionPage = 5,
+    /// Device memory (virtio rings and buffers, DMA).
+    Device = 6,
+    /// A kernel handover's image and record.
+    Handover = 7,
+}
+
+/// The number of `Use`s.
+pub const USES: usize = 8;
+
+impl Use {
+    pub const ALL: [Use; USES] = [
+        Use::Untagged,
+        Use::Heap,
+        Use::PageTable,
+        Use::KernelStack,
+        Use::UserPage,
+        Use::SectionPage,
+        Use::Device,
+        Use::Handover,
+    ];
+
+    /// Its name in log lines.
+    pub fn name(self) -> &'static str {
+        match self {
+            Use::Untagged => "untagged",
+            Use::Heap => "heap",
+            Use::PageTable => "page tables",
+            Use::KernelStack => "kernel stacks",
+            Use::UserPage => "user pages",
+            Use::SectionPage => "section pages",
+            Use::Device => "devices",
+            Use::Handover => "handover",
+        }
+    }
+}
+
 /// Why a frame could not be given another owner (the caller copies it
 /// instead).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +136,10 @@ pub struct FrameAllocator<'a> {
     shares: &'a mut [u16],
     /// Frames with more than one owner.
     shared_count: u64,
+    /// Per frame, its `Use` (as a byte); empty until `set_use_table`.
+    tags: &'a mut [u8],
+    /// Frames in use per `Use` (all `Untagged` until the table is set).
+    by_use: [u64; USES],
 }
 
 impl<'a> FrameAllocator<'a> {
@@ -103,6 +163,8 @@ impl<'a> FrameAllocator<'a> {
             low_free: 0,
             shares: &mut [],
             shared_count: 0,
+            tags: &mut [],
+            by_use: [0; USES],
         }
     }
 
@@ -150,6 +212,11 @@ impl<'a> FrameAllocator<'a> {
         self.managed
     }
 
+    /// Frames the bitmap spans (a bound, holes included).
+    pub fn span(&self) -> u64 {
+        self.frame_count
+    }
+
     /// The fewest free frames since the memory map was read.
     pub fn low_free_frames(&self) -> u64 {
         self.low_free
@@ -187,6 +254,51 @@ impl<'a> FrameAllocator<'a> {
         }
     }
 
+    /// Allocates one frame for `use_`.
+    pub fn allocate_for(&mut self, use_: Use) -> Option<Frame> {
+        let frame = self.allocate()?;
+        self.tag(frame.0, 1, use_);
+        Some(frame)
+    }
+
+    /// Allocates `count` contiguous frames for `use_` (see
+    /// `allocate_contiguous`).
+    pub fn allocate_contiguous_for(&mut self, count: u64, align: u64, use_: Use) -> Option<Frame> {
+        let frame = self.allocate_contiguous(count, align)?;
+        self.tag(frame.0, count, use_);
+        Some(frame)
+    }
+
+    /// Notes frames `[first, first + count)`, just allocated, as `use_`'s.
+    fn tag(&mut self, first: u64, count: u64, use_: Use) {
+        if self.tags.is_empty() {
+            return;
+        }
+        for n in first..first + count {
+            if let Some(t) = self.tags.get_mut(n as usize) {
+                *t = use_ as u8;
+                self.by_use[use_ as usize] += 1;
+            }
+        }
+    }
+
+    /// Gives frames their uses' table (one byte per frame of the span):
+    /// every managed frame in use now counts as `Untagged`.
+    pub fn set_use_table(&mut self, table: &'a mut [u8]) {
+        table.fill(Use::Untagged as u8);
+        self.tags = table;
+        self.by_use = [0; USES];
+        // The managed frames in use (not the span's holes, which are
+        // never allocated or freed).
+        self.by_use[Use::Untagged as usize] = self.managed - self.free_count;
+    }
+
+    /// Frames in use per `Use` (indexed by `Use as usize`).
+    pub fn uses(&self) -> [u64; USES] {
+        self.by_use
+    }
+
+    /// Allocates one frame with no use named (`Untagged`).
     pub fn allocate(&mut self) -> Option<Frame> {
         let words = self.bitmap.len();
         for i in (self.hint..words).chain(0..self.hint) {
@@ -281,6 +393,12 @@ impl<'a> FrameAllocator<'a> {
             return Ok(());
         }
         self.set_used(frame.0, false);
+        if let Some(t) = self.tags.get_mut(frame.0 as usize) {
+            let use_ = core::mem::replace(t, Use::Untagged as u8) as usize;
+            if let Some(c) = self.by_use.get_mut(use_) {
+                *c = c.saturating_sub(1);
+            }
+        }
         Ok(())
     }
 }
@@ -453,6 +571,41 @@ mod tests {
         // A frame past the table is never shared.
         let (_, _, c) = (alloc.allocate(), alloc.allocate(), alloc.allocate().unwrap());
         assert_eq!(alloc.share(c), Err(ShareError::NoTable));
+    }
+
+    #[test]
+    fn frames_are_counted_per_use_until_freed() {
+        let mut bits = [0; 1];
+        let mut tags = [9u8; 64];
+        let mut alloc = FrameAllocator::from_memory_map(&mut bits, [region(0, 0x8000)], &[]);
+        // Before the table: allocated, not counted by use.
+        let early = alloc.allocate().unwrap();
+        alloc.set_use_table(&mut tags);
+        assert_eq!(alloc.uses()[Use::Untagged as usize], 1);
+        let h = alloc.allocate_for(Use::Heap).unwrap();
+        let run = alloc.allocate_contiguous_for(2, 2, Use::Device).unwrap();
+        let u = alloc.allocate_for(Use::UserPage).unwrap();
+        let mut uses = alloc.uses();
+        assert_eq!(uses[Use::Heap as usize], 1);
+        assert_eq!(uses[Use::Device as usize], 2);
+        assert_eq!(uses[Use::UserPage as usize], 1);
+        assert_eq!(uses.iter().sum::<u64>(), 8 - alloc.free_frames());
+        // A shared frame counts until its last owner frees it.
+        let mut shares = [0u16; 64];
+        alloc.set_share_table(&mut shares);
+        alloc.share(u).unwrap();
+        alloc.free(u).unwrap();
+        assert_eq!(alloc.uses()[Use::UserPage as usize], 1);
+        alloc.free(u).unwrap();
+        alloc.free(h).unwrap();
+        alloc.free(early).unwrap();
+        alloc.free(run).unwrap();
+        uses = alloc.uses();
+        assert_eq!(uses[Use::UserPage as usize], 0);
+        assert_eq!(uses[Use::Heap as usize], 0);
+        assert_eq!(uses[Use::Untagged as usize], 0);
+        assert_eq!(uses[Use::Device as usize], 1);
+        assert_eq!(uses.iter().sum::<u64>(), 8 - alloc.free_frames());
     }
 
     #[test]

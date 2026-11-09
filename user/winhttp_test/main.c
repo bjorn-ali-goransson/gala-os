@@ -37,6 +37,15 @@
  *    POST with its data (Nginx answers a POST to a static page with 405).
  * 13. The policy option: DISALLOW_HTTPS_TO_HTTP by default; a value of
  *    the wrong size is ERROR_INSUFFICIENT_BUFFER.
+ * 14. Connection reuse (keep-alive: HTTP/1.1's persistent connections,
+ *    which WinHTTP keeps for the next request to the same server once a
+ *    response has been read to its end). Nginx's /conn answers its
+ *    connection's serial number and how many requests it has carried:
+ *    a second request on the same connect handle, and one on another
+ *    connect handle of the session to the same server, go over the same
+ *    connection (its count one higher each time), over HTTP and HTTPS;
+ *    a request that says "Connection: close" ends its connection, so
+ *    the next one is on a new connection.
  * The test retries its first request while Nginx starts.
  */
 #include <windows.h>
@@ -128,6 +137,29 @@ static DWORD request(HINTERNET session, const wchar_t *host, INTERNET_PORT port,
     CHECK(WinHttpQueryOption(r, WINHTTP_OPTION_URL, url, &len));
     CHECK(WinHttpCloseHandle(r));
     CHECK(WinHttpCloseHandle(c));
+    return status;
+}
+
+/* GET /conn on `c` (with `headers`, or none), read to its end: the
+ * status, and Nginx's connection serial number and request count. */
+static DWORD conn_get(HINTERNET c, DWORD flags, const wchar_t *headers, unsigned long *id, unsigned long *n) {
+    char text[128];
+    HINTERNET r = WinHttpOpenRequest(c, L"GET", L"/conn", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    CHECK(r != NULL);
+    CHECK(WinHttpSendRequest(r, headers ? headers : WINHTTP_NO_ADDITIONAL_HEADERS, headers ? (DWORD)-1L : 0,
+                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0));
+    CHECK(WinHttpReceiveResponse(r, NULL));
+    DWORD status = 0, len = sizeof status;
+    CHECK(WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
+                              &status, &len, WINHTTP_NO_HEADER_INDEX));
+    DWORD got = 0, total = 0;
+    while (total < sizeof text - 1 && WinHttpReadData(r, text + total, sizeof text - 1 - total, &got) && got > 0)
+        total += got;
+    text[total] = 0;
+    /* The end: a read that gives nothing. */
+    CHECK(WinHttpReadData(r, text + total, sizeof text - 1 - total, &got) && got == 0);
+    CHECK(sscanf(text, "%lu %lu", id, n) == 2);
+    CHECK(WinHttpCloseHandle(r));
     return status;
 }
 
@@ -254,6 +286,34 @@ int main(void) {
     CHECK(GetLastError() == ERROR_INSUFFICIENT_BUFFER);
     CHECK(!WinHttpSetOption(s, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof policy + 1));
     CHECK(GetLastError() == ERROR_INSUFFICIENT_BUFFER);
+    /* 14. */
+    {
+        unsigned long id[4], n[4];
+        HINTERNET c = WinHttpConnect(s, L"127.0.0.1", 8080, 0);
+        CHECK(c != NULL);
+        for (int i = 0; i < 2; i++) {
+            CHECK(conn_get(c, 0, NULL, &id[i], &n[i]) == 200);
+        }
+        CHECK(id[1] == id[0] && n[1] == n[0] + 1);
+        HINTERNET c2 = WinHttpConnect(s, L"127.0.0.1", 8080, 0);
+        CHECK(c2 != NULL);
+        CHECK(conn_get(c2, 0, NULL, &id[2], &n[2]) == 200);
+        CHECK(id[2] == id[0] && n[2] == n[0] + 2);
+        /* Connection: close ends it: the next request has a new one. */
+        CHECK(conn_get(c2, 0, L"Connection: close", &id[3], &n[3]) == 200);
+        CHECK(id[3] == id[0] && n[3] == n[0] + 3);
+        CHECK(conn_get(c, 0, NULL, &id[0], &n[0]) == 200);
+        CHECK(id[0] != id[3] && n[0] == 1);
+        CHECK(WinHttpCloseHandle(c2));
+        CHECK(WinHttpCloseHandle(c));
+        /* Over TLS. */
+        c = WinHttpConnect(s, L"localhost", 8443, 0);
+        CHECK(c != NULL);
+        CHECK(conn_get(c, WINHTTP_FLAG_SECURE, NULL, &id[0], &n[0]) == 200);
+        CHECK(conn_get(c, WINHTTP_FLAG_SECURE, NULL, &id[1], &n[1]) == 200);
+        CHECK(id[1] == id[0] && n[1] == n[0] + 1);
+        CHECK(WinHttpCloseHandle(c));
+    }
     CHECK(WinHttpCloseHandle(s));
     printf("winhttp_test: ok\n");
     return 0;

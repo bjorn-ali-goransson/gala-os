@@ -28,6 +28,10 @@ pub struct NtThread {
     pub teb: u64,
     /// A WOW64 thread's 32-bit TEB (its FS in 32-bit code); 0 otherwise.
     pub teb32: u64,
+    /// The reservation of the user stack it was created with (INITIAL_TEB's
+    /// StackAllocationBase; a WOW64 thread's 32-bit one), freed with its
+    /// TEB when it ends itself (`release_user_memory`); 0: none.
+    user_stack: u64,
     pub process: KArc<Process>,
     /// Scheduler thread, once spawned.
     sched_id: IrqMutex<Option<ThreadId>>,
@@ -35,8 +39,14 @@ pub struct NtThread {
     pub dispatcher: Dispatcher,
     exit_status: IrqMutex<Option<NtStatus>>,
     suspend_count: IrqMutex<u32>,
-    /// Set when another thread asked this one to terminate.
+    /// Set when this thread is to end on its way back to user mode: asked
+    /// by another thread (`request_termination`) or by itself.
     terminate_request: IrqMutex<Option<NtStatus>>,
+    /// Another thread ended it (TerminateThread): its stack stays.
+    ended_by_other: core::sync::atomic::AtomicBool,
+    /// Its creator gave it its stack (kernel32's CreateThread:
+    /// GALA_THREAD_FREE_STACK): freed when it ends itself.
+    owns_stack: core::sync::atomic::AtomicBool,
     /// What it starts with: its registers. Its x87/SSE state is always
     /// fresh (MXCSR 0x1f80, XMM 0): NtCreateThread ignores the CONTEXT's
     /// floating-point part, as Windows 11 does.
@@ -161,6 +171,11 @@ pub fn base_increment(base: i32) -> i32 {
 }
 
 impl NtThread {
+    /// Its stack goes with it when it ends itself (GALA_THREAD_FREE_STACK).
+    pub fn free_stack_on_exit(&self) {
+        self.owns_stack.store(true, Ordering::Relaxed);
+    }
+
     pub fn affinity(&self) -> u64 {
         self.affinity.load(core::sync::atomic::Ordering::Relaxed)
     }
@@ -411,6 +426,7 @@ fn create_inner(
         Begin::Resume(r) => (Some(r), None),
         Begin::Wow64(start) => (None, Some(start)),
     };
+    let wow64_stack = wow64.as_ref().map(|s| u64::from(s.stack.2));
     if wow64.is_none() && !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
@@ -438,10 +454,16 @@ fn create_inner(
     if !regs.is_valid() {
         return Err(NtStatus::INVALID_PARAMETER);
     }
+    let user_stack = match (&wow64_stack, process.personality) {
+        (Some(bottom), _) => *bottom,
+        (None, super::platform::Personality::Nt) => stack.2,
+        _ => 0,
+    };
     let thread = NtThread {
         id,
         teb: teb_addr,
         teb32,
+        user_stack,
         process: process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(platform::online_mask()),
@@ -449,6 +471,8 @@ fn create_inner(
         exit_status: IrqMutex::new(None),
         suspend_count: IrqMutex::named("thread.suspend_count", u32::from(suspended)),
         terminate_request: IrqMutex::new(None),
+        ended_by_other: core::sync::atomic::AtomicBool::new(false),
+        owns_stack: core::sync::atomic::AtomicBool::new(false),
         start: regs,
         win32_start,
         name: IrqMutex::named("thread.name", Vec::new()),
@@ -636,6 +660,7 @@ pub fn request_termination(object: &ObjectRef, status: NtStatus) {
     if t.has_exited() {
         return;
     }
+    t.ended_by_other.store(true, Ordering::Relaxed);
     t.terminate_request.lock().get_or_insert(status);
     if let Some(tid) = *t.sched_id.lock() {
         platform::wake(tid);
@@ -1014,6 +1039,7 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         id: a.id,
         teb: a.teb,
         teb32: 0,
+        user_stack: 0,
         process: a.process.clone(),
         sched_id: IrqMutex::named("thread.sched_id", None),
         affinity: core::sync::atomic::AtomicU64::new(affinity),
@@ -1021,6 +1047,8 @@ pub fn adopt(a: Adopted) -> Result<ObjectRef, NtStatus> {
         exit_status: IrqMutex::new(a.exited.map(|e| e.0)),
         suspend_count: IrqMutex::named("thread.suspend_count", a.suspend),
         terminate_request: IrqMutex::new(None),
+        ended_by_other: core::sync::atomic::AtomicBool::new(false),
+        owns_stack: core::sync::atomic::AtomicBool::new(false),
         start: UserRegs::default(),
         win32_start: a.win32_start,
         name: IrqMutex::named("thread.name", Vec::new()),
@@ -1349,11 +1377,16 @@ pub fn exit_current(status: NtStatus) -> ! {
         }
         let process = t.process.clone();
         let (teb, teb32) = (t.teb, t.teb32);
+        // Ended by another thread (TerminateThread): its stack stays, as
+        // TerminateThread's documentation says of Windows.
+        let by_other = t.ended_by_other.load(Ordering::Relaxed);
+        let owns = t.owns_stack.load(Ordering::Relaxed);
+        let user_stack = if by_other || !owns { 0 } else { t.user_stack };
         let last = process.remove_thread(&object);
-        // A WOW64 thread's 64-bit stack and TEB32 (the kernel's to free;
-        // a process's last thread leaves them to its address space's end).
-        if teb32 != 0 && !last && !process_is_exiting(t) {
-            super::wow64::release_thread(&process, teb, teb32);
+        // What the thread's user mode had (a process's last thread leaves
+        // it to its address space's end).
+        if !last && !process_is_exiting(t) {
+            release_user_memory(&process, teb, teb32, user_stack);
         }
         wait::set_signal(&object, 1);
         drop(object);
@@ -1364,6 +1397,30 @@ pub fn exit_current(status: NtStatus) -> ! {
         }
     }
     platform::exit()
+}
+
+/// Frees an ended thread's user-mode memory while its process goes on: its
+/// TEB, a WOW64 thread's 64-bit stack and TEB32, and the user stack it
+/// was created with (`user_stack`, 0 to keep it). Windows frees a
+/// thread's TEB when it ends, and its stack when it ends itself
+/// (CreateThread's documentation: "the thread's stack is freed when the
+/// thread terminates"); kept, each thread a program makes and ends would
+/// leave both behind (the Click-to-Run client makes thousands).
+fn release_user_memory(process: &Process, teb: u64, teb32: u64, user_stack: u64) {
+    if teb32 != 0 {
+        super::wow64::release_thread(process, teb, teb32);
+    }
+    for (what, base) in [("stack", user_stack), ("TEB", teb)] {
+        if base == 0 {
+            continue;
+        }
+        if let Err(e) = super::vm::free(process, base, 0, super::vm::MEM_RELEASE) {
+            warn!(
+                "thread: {} (pid {}): cannot free an ended thread's {what} at {base:#x}: {e:?}",
+                process.name, process.id
+            );
+        }
+    }
 }
 
 /// Makes the current thread exit with `status` on its way back to user
