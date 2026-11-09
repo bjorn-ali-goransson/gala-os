@@ -25,9 +25,10 @@ pub fn query_performance_counter_information() -> [u8; 12] {
 /// is undocumented; this one is documented in docs/ARCHITECTURE.md
 /// ("Network interfaces"). Records of `INTERFACE_RECORD` bytes: index,
 /// IFTYPE, MTU, MAC length (u32 each), MAC (8 bytes), IPv4 address (4),
-/// prefix length (u32), NetLuidIndex (u32).
+/// prefix length (u32), NetLuidIndex (u32), IPv4 default gateway (4;
+/// 0.0.0.0: none).
 pub const GALA_NETWORK_INTERFACES: u32 = 0x6761_0001;
-pub const INTERFACE_RECORD: usize = 36;
+pub const INTERFACE_RECORD: usize = 40;
 
 /// One interface for GALA_NETWORK_INTERFACES.
 pub struct Interface {
@@ -39,11 +40,14 @@ pub struct Interface {
     pub ipv4: [u8; 4],
     pub prefix: u32,
     pub luid_index: u32,
+    pub gateway: [u8; 4],
 }
 
-/// The loopback interface (always) and the card's, if `ethernet` (IPv4
-/// address, prefix, MAC): index 1 and 2, as Windows numbers loopback 1.
-pub fn interfaces(ethernet: Option<([u8; 4], u8, [u8; 6])>) -> ([u8; 2 * INTERFACE_RECORD], usize) {
+/// The loopback interface (always) and the card's, if `ethernet`: index 1
+/// and 2, as Windows numbers loopback 1.
+pub fn interfaces(
+    ethernet: Option<crate::net::tcp::Ethernet>,
+) -> ([u8; 2 * INTERFACE_RECORD], usize) {
     let mut list = [
         Some(Interface {
             index: 1,
@@ -54,19 +58,21 @@ pub fn interfaces(ethernet: Option<([u8; 4], u8, [u8; 6])>) -> ([u8; 2 * INTERFA
             ipv4: [127, 0, 0, 1],
             prefix: 8,
             luid_index: 0,
+            gateway: [0; 4],
         }),
         None,
     ];
-    if let Some((ip, prefix, mac)) = ethernet {
+    if let Some(e) = ethernet {
         list[1] = Some(Interface {
             index: 2,
             if_type: 6, // IF_TYPE_ETHERNET_CSMACD
             mtu: 1500,
-            mac,
+            mac: e.mac,
             mac_len: 6,
-            ipv4: ip,
-            prefix: u32::from(prefix),
+            ipv4: e.ip,
+            prefix: u32::from(e.prefix),
             luid_index: 32768, // the first Ethernet interface's
+            gateway: e.gateway,
         });
     }
     let mut out = [0u8; 2 * INTERFACE_RECORD];
@@ -81,6 +87,7 @@ pub fn interfaces(ethernet: Option<([u8; 4], u8, [u8; 6])>) -> ([u8; 2 * INTERFA
         r[24..28].copy_from_slice(&i.ipv4);
         r[28..32].copy_from_slice(&i.prefix.to_le_bytes());
         r[32..36].copy_from_slice(&i.luid_index.to_le_bytes());
+        r[36..40].copy_from_slice(&i.gateway);
         n += 1;
     }
     (out, n * INTERFACE_RECORD)

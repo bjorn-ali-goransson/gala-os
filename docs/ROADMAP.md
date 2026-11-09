@@ -1574,20 +1574,29 @@ need gala's.
      `wow64_wininet_test`, expectations from Wine's wininet tests run on
      Windows; ARCHITECTURE "WinHTTP and WinINet"), asks the 32-bit ntdll
      for RtlConvertDeviceFamilyInfoToString through GetProcAddress
-     (missing export, survived). Where the run ends now: setup.exe
-     delay-loads `IPHLPAPI.DLL!GetAdaptersInfo`, and gala's iphlpapi has
-     no i686 build: the elevated copy ends with 0xc06d007e (crash report:
-     "delay load of IPHLPAPI.DLL!GetAdaptersInfo"), and its parent with
+     (missing export, survived), lists the network adapters (done:
+     gala's iphlpapi.dll for i686 too, with GetAdaptersInfo for both
+     widths from the kernel's interface records, which carry the
+     gateway; `office_api_test`, `wow64_office_api_test`, on a card;
+     ARCHITECTURE "Network interfaces"), asks WinRT for
+     Windows.Networking.Connectivity.NetworkInformation and
+     Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator
+     (not registered, recorded; REGDB_E_CLASSNOTREG, survived) and opens
+     an asynchronous wininet session (`wininet.dll!InternetOpenW(INTERNET_
+     FLAG_ASYNC)`, ERROR_NOT_SUPPORTED, recorded, survived). Where the run
+     ends now: setup.exe delay-loads `SHLWAPI.dll!PathIsUNCW`, which
+     gala's shlwapi lacks: the elevated copy ends with 0xc06d007f (crash
+     report: "delay load of SHLWAPI.dll!PathIsUNCW"), and its parent with
      it. ODT has written no log yet (`dump=C:/gala/odtlog` finds no
      directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: iphlpapi.dll for i686
-     (GetAdaptersInfo, a `gala_stubs` stub on x64 too, with
-     IP_ADAPTER_INFO typed for both widths; CreateSortedAddressPairs and
-     FreeMibTable, which setup.exe also imports),
-     RtlConvertDeviceFamilyInfoToString in ntdll, urlmon's
+     Next, in the order the run reaches them: shlwapi's PathIsUNCW (and
+     what else of shlwapi setup.exe imports), WinINet's asynchronous
+     sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),
+     RtlConvertDeviceFamilyInfoToString in ntdll, iphlpapi's
+     CreateSortedAddressPairs (imported, not yet called), urlmon's
      ProcessUrlAction from the zones' default policies (the Internet Settings\Zones keys), a run with
      direct egress (the TLS chain of Microsoft's servers to a public
      root), then what the run reaches after them (its log

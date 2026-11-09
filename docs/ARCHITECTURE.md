@@ -4951,9 +4951,11 @@ endpoint's I/O completion port.
 
 The kernel reports its interfaces through a class of its own,
 NtQuerySystemInformation(0x67610001, GALA_NETWORK_INTERFACES; Windows'
-iphlpapi asks the NSI driver, whose interface is undocumented): 36-byte
+iphlpapi asks the NSI driver, whose interface is undocumented): 40-byte
 records of index, IFTYPE, MTU, MAC length, MAC (8 bytes), IPv4 address,
-prefix length and NetLuidIndex.
+prefix length, NetLuidIndex and the IPv4 default gateway (0.0.0.0: none;
+the card's is QEMU's 10.0.2.2). The DLL and the kernel ship together:
+a caller with room for fewer bytes gets STATUS_INFO_LENGTH_MISMATCH.
 
 | Index | Interface | Address | NetLuidIndex |
 |---|---|---|---|
@@ -4967,7 +4969,18 @@ GetUnicastIpAddressTable (IPv4 rows; none for AF_INET6),
 GetAnycastIpAddressTable (empty), FreeMibTable (tables from the process
 heap), ConvertInterfaceLuidToNameW/NameToLuidW (`loopback_0`,
 `ethernet_32768`), ConvertInterfaceLuidToIndex/IndexToLuid;
-ConvertLengthToIpv4Mask is computed. Java's NetworkInterface lists them
+ConvertLengthToIpv4Mask is computed; GetAdaptersInfo (`adapters.rs`,
+IP_ADAPTER_INFO in the caller's width, held to the SDK's offsets for
+both; on x86 with MSVC's 64-bit time_t, 648 bytes, where mingw's i686
+headers say 640: only the lease times differ, which callers reach
+through Next anyway): every adapter but loopback, named by its GUID in
+braces, its MAC, address and mask, the gateway (mask 255.255.255.255),
+DHCP off, no WINS (Wine's testGetAdaptersInfo, run on Windows: no size
+pointer ERROR_INVALID_PARAMETER, no adapter ERROR_NO_DATA, too small
+ERROR_BUFFER_OVERFLOW with the bytes needed; `office_api_test` and
+`wow64_office_api_test`, which boot with a card). The tables have no
+pointers, so the x86 build (SysWOW64) writes the same layouts. Java's
+NetworkInterface lists them
 (Elasticsearch's default network.host, `_local_`, needs that).
 GetAdaptersAddresses, ICMP echo and address-change notification return
 ERROR_NOT_SUPPORTED and are recorded.
@@ -8072,7 +8085,8 @@ there), schannel and the RustCrypto crates under it
 appxdeploymentclient (`wow64_combase_test`; PackageManager is registered
 in the 32-bit registry view too), wininet (`wow64_wininet_test`,
 wininet_test's C source built with mingw's i686 compiler; "WinHTTP and
-WinINet"). urlmon.dll has the default URL security manager
+WinINet"), iphlpapi (`wow64_office_api_test`'s GetAdaptersInfo;
+"Network interfaces"). urlmon.dll has the default URL security manager
 (CoInternetCreateSecurityManager, `secmgr.rs`): MapUrlToZone and
 GetSecurityId as Windows' default settings with no zone mappings answer
 them (a drive path, file: with a drive and res: the Local Machine zone;

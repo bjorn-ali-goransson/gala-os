@@ -1144,6 +1144,9 @@ const USER_DLLS_X86: &[Dll] = &[
     // wininet (ODT's setup.exe delay-loads it for its cookies and its
     // downloads; wow64_wininet_test).
     Dll { package: "wininet", file: "wininet.dll", exported_as: "testwininet32.dll" },
+    // iphlpapi (ODT's setup.exe delay-loads GetAdaptersInfo;
+    // wow64_office_api_test).
+    Dll { package: "iphlpapi", file: "iphlpapi.dll", exported_as: "testiphlpapi32.dll" },
     // wldp (ODT's setup.exe loads it to check for S mode).
     Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp32.dll" },
     // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
@@ -3104,6 +3107,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/schannel.dll", "Windows/SysWOW64"),
     ("office_install", "x86/urlmon.dll", "Windows/SysWOW64"),
     ("office_install", "x86/wininet.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/iphlpapi.dll", "Windows/SysWOW64"),
     // The machine's root store as a full image has it (system_modules:
     // the public CAs), which Schannel's validation of Microsoft's servers
     // reads.
@@ -3167,6 +3171,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "powrprof.dll", "Windows/System32"),
     ("office_api_test", "wldp.dll", "Windows/System32"),
     ("office_api_test", "urlmon.dll", "Windows/System32"),
+    ("office_api_test", "iphlpapi.dll", "Windows/System32"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3175,6 +3180,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_office_api_test", "x86/powrprof.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/wldp.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/urlmon.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/iphlpapi.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.
@@ -4925,6 +4931,9 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
     ("office_install", "run: begin setup.exe", NetClient::Outbound),
+    // A card for GetAdaptersInfo to list (nothing connects).
+    ("office_api_test", "run: begin office_api_test.exe", NetClient::Outbound),
+    ("wow64_office_api_test", "run: begin wow64_office_api_test.exe", NetClient::Outbound),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",

@@ -4,7 +4,8 @@
 //! the kernel reports through its own NtQuerySystemInformation class
 //! (docs/ARCHITECTURE.md, "Network interfaces"): the loopback interface
 //! (index 1, 127.0.0.1/8) and the virtio-net card if there is one (index
-//! 2). IPv4 only. GetAdaptersAddresses, ICMP echo and address-change
+//! 2). IPv4 only. GetAdaptersInfo (`adapters.rs`) lists the card. Built
+//! for x64 and x86 (SysWOW64). GetAdaptersAddresses, ICMP echo and address-change
 //! notification return ERROR_NOT_SUPPORTED and are recorded in the
 //! ledger. ConvertLengthToIpv4Mask is computed.
 
@@ -12,6 +13,13 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+// The 32-bit build (SysWOW64) takes the memory routines, 64-bit
+// division helpers and unwind personality from ntrt's x86 runtime
+// (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -28,15 +36,24 @@ unsafe extern "C" {
 
 /// MSVC-target codegen references this marker symbol directly, so it cannot
 /// come from an import. (It becomes a harmless extra data export.)
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(e: u32);
 }
@@ -67,6 +84,7 @@ not_supported! {
     NotifyAddrChange(handle: usize, overlapped: usize);
 }
 
+mod adapters;
 mod tables;
 mod unimplemented;
 
