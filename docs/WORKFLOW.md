@@ -910,6 +910,14 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   kernel log line ("process ... exited") can land between the pieces of
   a line written in parts, so the expected substring is missing. In
   shell scripts, `echo` a captured value in one piece.
+- **Bad-argument checks are those Windows survives**: a test calls an
+  API with a NULL handle or NULL out-pointer only as Wine's conformance
+  tests do (they run on Windows and note the calls that crash there);
+  others may fault inside the system DLLs (Windows' service functions
+  faulted in ntdll on NULL handles Wine never passes them, `svc_test`).
+  A test of many sections prints `<name>: <section>` before each, so a
+  crash on Windows names the section: run-all.ps1 keeps the last
+  `<name>: ` line of a crashed program as well.
 - **Ask for exactly the access Windows would grant**: kernel32's
   CreateFileW adds SYNCHRONIZE for synchronous handles (open overlapped
   to avoid it); an object's owner only gets READ_CONTROL and WRITE_DAC
