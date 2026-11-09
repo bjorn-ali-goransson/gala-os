@@ -1373,9 +1373,8 @@ need gala's.
      multibyte `_mbs*`; `qsort_s`, `div`, `ilogb`, `nan` and a few more;
      `tools/import_survey.py` on their directories lists them), then those
      scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
-     files. `ucrt_test`/`wow64_ucrt_test` join
-     `user/windows/ci-passing.txt` once CI's windows job shows them
-     passing.
+     files. `ucrt_test`/`wow64_ucrt_test` pass on CI's Windows
+     (`user/windows/ci-passing.txt`).
    - The load list's kernel32 and ntdll functions, test first in
      `office_api_test`/`wow64_office_api_test` (x64 and x86): done:
      CreateFile2, FindFirstFileNameW/FindNextFileNameW, CreateMutexExW,
@@ -1395,8 +1394,7 @@ need gala's.
      classes), GetThreadIOPendingFlag's count of a thread's pending
      socket, pipe and watch requests (a recorded stopgap answering
      FALSE), and the ten functions used once. `office_api_test` and
-     `wow64_office_api_test` join `ci-passing.txt` once CI's windows
-     job shows them passing.
+     `wow64_office_api_test` pass on CI's Windows (`ci-passing.txt`).
    - Alongside, natively: the pending scenario `office_install` runs
      the Office Deployment Tool's `setup.exe /configure` in gala
      (PREBUILT `odt`: 16.0.20430.20146, SHA-256 c883ab32...bb4e322,
