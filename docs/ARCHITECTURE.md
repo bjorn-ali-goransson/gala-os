@@ -9795,7 +9795,66 @@ started with each desktop that has a shell.
   on stderr, status 0) is real Linux's against weston's headless backend,
   ended there by SIGINT (the same flag Esc clears). The server's summary
   line at the end of the connection says how many commits and frames it
-  served. Next: GTK (LD step 3).
+  served.
+- **`user/lx/gtk_test`** (`lx_gtk`, `lx_gtk_pie`), the first GTK
+  program: a GTK 3 window titled "gtk_test" with a label and a button,
+  printing when it was first drawn, when the button was clicked, when
+  the window was asked to close and when it went. It declares the
+  dozen GTK, GDK and GObject functions it calls from GTK's reference
+  documentation (no development headers) and links against the
+  libraries by soname (build.sh), so its bytes depend only on the
+  names. Run as `./gtk_test --input` (`lx_gtk`) it waits for real input:
+  the screen check (`GTK_SCREEN`) finds GTK's drawing frameless at
+  (64, 48) (its own header bar where shasha's caption would be, the
+  title, the close button, the label's text), clicks the button with
+  the PS/2 mouse, then GTK's close button. Run any other way
+  (lx-expect, `lx_gtk_pie`) it clicks its button and closes its window
+  itself once drawn, which GTK handles as the same signals; the
+  transcript is the same either way, recorded on Linux against weston
+  on Xvfb (a compositor with a seat: GTK warns without one, which
+  weston's headless backend lacks).
+
+### GTK programs and Linux roots
+
+What a GTK program needs besides the Wayland server, as gtk_test found
+it (each gap first seen on gala as a crash, a warning on stderr that
+real Linux does not print, or a ledger line):
+
+- **A distribution's libraries**: GTK 3's closure is 65 shared
+  libraries (GLib, GIO, Pango, cairo, HarfBuzz, fontconfig, FreeType,
+  pixman, libxkbcommon, libwayland-client and -cursor, gdk-pixbuf, ATK
+  and its D-Bus bridge, libX11 and friends, which GDK links whatever
+  backend it uses). They come as a **Linux root**: xtask's
+  `LINUX_ROOTS` table names Ubuntu 24.04's packages (the release
+  pocket, never changed once released), each with its SHA-256 from the
+  release's signed index and the files used at their paths in the
+  package (a library's soname link resolved to its file: boot modules
+  make no links). xtask assembles the root in `target/prebuilt/<name>/`
+  (packages downloaded once into `target/prebuilt/debs/`) and ships
+  `usr/`, `etc/` and `home/` as trees: `/usr/lib/x86_64-linux-gnu` is on
+  ld.so's default path beside glibc's `/lib/x86_64-linux-gnu`.
+- **What installing a system adds** besides its packages' files, done
+  at assembly as dpkg and its triggers would: the MIME database's
+  `mime.cache` (`update-mime-database` from shared-mime-info's XML;
+  gdk-pixbuf picks a loader by MIME type through GIO, so without it GTK
+  aborts on its own PNG icons), the user database (`/etc/passwd`,
+  `/etc/group` from `user/lx/root/etc`: uid 1000, every Linux process's
+  user, is the boot user `gala`, its home `/home/gala`; GLib warns
+  without the entry) and the user's home, a writable tree.
+- **A session's environment**: `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`
+  and `HOME` (fontconfig expands `~` from `HOME` only and keeps its
+  cache in `~/.cache/fontconfig`; without a writable cache directory it
+  prints an error at every start), passed by the scenarios today
+  ("Sessions").
+- **Not needed**, and left out: icon and cursor themes (GTK 3 falls
+  back to the icons in its own resources, libwayland-cursor to its
+  built-in cursors, and the desktop draws its own pointer), GSettings
+  schemas and GIO modules (GLib's memory settings backend), a D-Bus
+  session bus (GTK skips accessibility and portals without one), the
+  gdk-pixbuf loader modules (PNG is GIO's MIME type plus the library's
+  built-in loader). Of xkb-data (libxkbcommon0 depends on it) the files
+  GDK's default keymap reads (rules evdev, model pc105, layout us)
+  before the server's keymap arrives.
 
 ## Plan: Linux containers through a WSL facade
 

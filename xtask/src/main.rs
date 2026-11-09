@@ -519,6 +519,415 @@ const PREBUILT: &[Prebuilt] = &[
     },
 ];
 
+/// A Linux root file system assembled from a distribution's packages
+/// (ROADMAP LD): the files a program's libraries and data need, each at
+/// its path in the package, unpacked on first use into
+/// `target/prebuilt/<name>/` (a module path `target/prebuilt/<name>/usr/`
+/// ships that tree as `/usr`). Not in the repository; THIRD_PARTY.md
+/// lists them.
+struct LinuxRoot {
+    name: &'static str,
+    debs: &'static [Deb],
+    /// Files of gala's own (repository paths under `user/lx/root/`), at
+    /// the same path in the root: what installing a system writes beside
+    /// its packages (the user database); a path ending in `/` is a
+    /// directory made there (the user's home).
+    ours: &'static [&'static str],
+}
+
+/// A Debian package of Ubuntu 24.04 (noble), its release pocket's
+/// version (never changed once released; the pool keeps it).
+struct Deb {
+    /// Its path under archive.ubuntu.com/ubuntu/pool/.
+    pool: &'static str,
+    /// From the release's signed `Packages` index
+    /// (dists/noble/<component>/binary-amd64/Packages.xz, whose hash is in
+    /// the signed InRelease).
+    sha256: &'static str,
+    /// The files used, by their paths in the package; each lands at the
+    /// same path in the root. A symbolic link (a library's soname) is its
+    /// target's bytes under the link's path: boot modules carry no links.
+    files: &'static [&'static str],
+}
+
+const LINUX_ROOTS: &[LinuxRoot] = &[LinuxRoot {
+    // GTK 3 (3.24.41) and its whole library closure as Ubuntu 24.04
+    // builds them (ldd of libgtk-3.so.0 on Ubuntu 24.04, less glibc,
+    // libffi and libwayland-client: the "glibc" and "wayland_client"
+    // module sets), fontconfig's own fonts.conf and one font, DejaVu
+    // Sans: what user/lx/gtk_test needs (ROADMAP LD step 3, `lx_gtk`).
+    // Left out on purpose, as a minimal install of the packages would not
+    // be: icon and cursor themes (GTK 3 falls back to the icons in its
+    // own resources, libwayland-cursor to its built-in cursors), GSettings
+    // schemas and GIO modules (GLib's memory settings backend), the
+    // gdk-pixbuf loaders (PNG is built in). Of xkb-data (libxkbcommon0
+    // depends on it) only what GDK's default keymap (rules evdev, model
+    // pc105, layout us) includes: the server's own keymap comes whole with
+    // wl_keyboard.
+    name: "gtk3",
+    debs: &[
+        Deb {
+            pool: "main/f/fontconfig/fontconfig-config_2.15.0-1.1ubuntu2_amd64.deb",
+            sha256: "9df0579cd298a1f2b7a40efd519c849745aecd193a09733cf4d1032284a62bbf",
+            files: &["etc/fonts/fonts.conf"],
+        },
+        Deb {
+            pool: "main/f/fonts-dejavu/fonts-dejavu-core_2.37-8_all.deb",
+            sha256: "40049660c194f3b8a2541fc7369efebb10e9f94bdac836a2f38fafedd10fa73a",
+            files: &["usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+        },
+        Deb {
+            pool: "main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb",
+            sha256: "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",
+            files: &["usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0"],
+        },
+        Deb {
+            pool: "main/a/at-spi2-core/libatk1.0-0t64_2.52.0-1build1_amd64.deb",
+            sha256: "42c5d4b00954f17c2c3c4b866844f691eb8b6d57bf08b59203e65f12dc84a4f9",
+            files: &["usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/a/at-spi2-core/libatspi2.0-0t64_2.52.0-1build1_amd64.deb",
+            sha256: "d686ace4080eca9c2d6ce8de69392a5ac56c846701894c0858922d4ce341a1d7",
+            files: &["usr/lib/x86_64-linux-gnu/libatspi.so.0"],
+        },
+        Deb {
+            pool: "main/u/util-linux/libblkid1_2.39.3-9ubuntu6_amd64.deb",
+            sha256: "47433bcaf43d1c6ed2e2acbc7dc70f6d6ed149e64f12d25b2ddb714a56c4e8dd",
+            files: &["usr/lib/x86_64-linux-gnu/libblkid.so.1"],
+        },
+        Deb {
+            pool: "main/b/brotli/libbrotli1_1.1.0-2build2_amd64.deb",
+            sha256: "74492419b8fda803774b8c9acef6afc5d2f9ff31782635aae212906adae7b277",
+            files: &[
+                "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1",
+                "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1",
+            ],
+        },
+        Deb {
+            pool: "main/libb/libbsd/libbsd0_0.12.1-1build1_amd64.deb",
+            sha256: "8e97b7d541416512a81e7845c5f21910344c9c5c610893cf265d3298e0caad6b",
+            files: &["usr/lib/x86_64-linux-gnu/libbsd.so.0"],
+        },
+        Deb {
+            pool: "main/b/bzip2/libbz2-1.0_1.0.8-5.1_amd64.deb",
+            sha256: "695132af8a40fe417f7d4e5ea742d64521c04e069442a4719c2bd0f10ab93d94",
+            files: &["usr/lib/x86_64-linux-gnu/libbz2.so.1.0"],
+        },
+        Deb {
+            pool: "main/c/cairo/libcairo-gobject2_1.18.0-3build1_amd64.deb",
+            sha256: "f5483cbe43455fc9e9cba7f0e166bd0a731c02db2902ba562719848f72e8c403",
+            files: &["usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2"],
+        },
+        Deb {
+            pool: "main/c/cairo/libcairo2_1.18.0-3build1_amd64.deb",
+            sha256: "96950b306889ff6e4248bb937b0a3b56e72dacf643fe732214ce375f0f6bbb36",
+            files: &["usr/lib/x86_64-linux-gnu/libcairo.so.2"],
+        },
+        Deb {
+            pool: "main/libc/libcap2/libcap2_2.66-5ubuntu2_amd64.deb",
+            sha256: "a6cce0b5f149707a6359e4f03a05fb7417c5e1d3fde9e12c651e804b4c479bbb",
+            files: &["usr/lib/x86_64-linux-gnu/libcap.so.2"],
+        },
+        Deb {
+            pool: "main/libd/libdatrie/libdatrie1_0.2.13-3build1_amd64.deb",
+            sha256: "1ae164e40e413eac4fbd38ce1c6ef9591f7a03278ad9076d71fa29258727f447",
+            files: &["usr/lib/x86_64-linux-gnu/libdatrie.so.1"],
+        },
+        Deb {
+            pool: "main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_amd64.deb",
+            sha256: "bbb55111182a44d0fe97a84120407e17bb6e23d41e2670d73aa78f619e29efa2",
+            files: &["usr/lib/x86_64-linux-gnu/libdbus-1.so.3"],
+        },
+        Deb {
+            pool: "main/libe/libepoxy/libepoxy0_1.5.10-1build1_amd64.deb",
+            sha256: "e2e754da4e7fb89021476b093cb5ebe9b1859a688fa37739809e529627d39f1f",
+            files: &["usr/lib/x86_64-linux-gnu/libepoxy.so.0"],
+        },
+        Deb {
+            pool: "main/e/expat/libexpat1_2.6.1-2build1_amd64.deb",
+            sha256: "730b29497212289cda8a3139e693a3538af0cb57846c24f807d1bb293a591c5e",
+            files: &["usr/lib/x86_64-linux-gnu/libexpat.so.1"],
+        },
+        Deb {
+            pool: "main/f/fontconfig/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb",
+            sha256: "a2bc05cfef021fdb84285036f98eda5ebec3c4b7a378f5aa2bdba5c4d3d8d586",
+            files: &["usr/lib/x86_64-linux-gnu/libfontconfig.so.1"],
+        },
+        Deb {
+            pool: "main/f/freetype/libfreetype6_2.13.2+dfsg-1build3_amd64.deb",
+            sha256: "321dda934f62fa8af08529a8c4c34b0ec040f172c0a945dce10b8be6f1014917",
+            files: &["usr/lib/x86_64-linux-gnu/libfreetype.so.6"],
+        },
+        Deb {
+            pool: "main/f/fribidi/libfribidi0_1.0.13-3build1_amd64.deb",
+            sha256: "6cd50259d39ce0dfafee2632c6268538e6a02590e77161a133e9683af346dd1d",
+            files: &["usr/lib/x86_64-linux-gnu/libfribidi.so.0"],
+        },
+        Deb {
+            pool: "main/libg/libgcrypt20/libgcrypt20_1.10.3-2build1_amd64.deb",
+            sha256: "ff32bae487706ba6ca646b5b72d89b935e3b8b2811d02e4ad7360cb97d90e2d0",
+            files: &["usr/lib/x86_64-linux-gnu/libgcrypt.so.20"],
+        },
+        Deb {
+            pool: "main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.42.10+dfsg-3ubuntu3_amd64.deb",
+            sha256: "d9779cdbb11e5fb6056b39868b689bd2e6a152f60d7fa54fcf7113942eedab24",
+            files: &["usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0"],
+        },
+        Deb {
+            pool: "main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu1_amd64.deb",
+            sha256: "629359e915f4466cf9cb0fa6c38270d9af1e03e28fab557ce31977d5ab34f13d",
+            files: &[
+                "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0",
+                "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0",
+                "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0",
+                "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0",
+            ],
+        },
+        Deb {
+            pool: "main/libg/libgpg-error/libgpg-error0_1.47-3build2_amd64.deb",
+            sha256: "81a30b5888e0af43b72bfdbdb44209b82e521eadf8848ff201542e6d258f6a1f",
+            files: &["usr/lib/x86_64-linux-gnu/libgpg-error.so.0"],
+        },
+        Deb {
+            pool: "main/g/graphite2/libgraphite2-3_1.3.14-2build1_amd64.deb",
+            sha256: "e2a91c59a2b26649ed0b331bedab0c92e56cc2021cce27df1080089edaad7aba",
+            files: &["usr/lib/x86_64-linux-gnu/libgraphite2.so.3"],
+        },
+        Deb {
+            pool: "main/g/gtk+3.0/libgtk-3-0t64_3.24.41-4ubuntu1_amd64.deb",
+            sha256: "011d0688aeb8e40fb146b6d6cd3d892e2a81b1e181320bcf2bf7e2d7206ae156",
+            files: &[
+                "usr/lib/x86_64-linux-gnu/libgdk-3.so.0",
+                "usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
+            ],
+        },
+        Deb {
+            pool: "main/h/harfbuzz/libharfbuzz0b_8.3.0-2build2_amd64.deb",
+            sha256: "d6f7eea2244f98aa0463a056680d4629476bf624767ede301560e24add686b5c",
+            files: &["usr/lib/x86_64-linux-gnu/libharfbuzz.so.0"],
+        },
+        Deb {
+            pool: "main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb",
+            sha256: "f68b5b23bc8a1688fb787d2aed7e2cdf895a73022f6a5025e183162dac4500b2",
+            files: &["usr/lib/x86_64-linux-gnu/libjpeg.so.8"],
+        },
+        Deb {
+            pool: "main/l/lz4/liblz4-1_1.9.4-1build1_amd64.deb",
+            sha256: "b9b69dedb126755f063396a6d3a3361066f9661f1c21cf5635cdd5ff6605796a",
+            files: &["usr/lib/x86_64-linux-gnu/liblz4.so.1"],
+        },
+        Deb {
+            pool: "main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1_amd64.deb",
+            sha256: "28851b3997e4ba74bb3197bd58796bd3041c204c21df85fe0ddafdcaced647f0",
+            files: &["usr/lib/x86_64-linux-gnu/liblzma.so.5"],
+        },
+        Deb {
+            pool: "main/libm/libmd/libmd0_1.1.0-2build1_amd64.deb",
+            sha256: "77f8cdbf03a43656bbf6604e18bd16834fc8bf2c949d4fbdf24ac297869b667a",
+            files: &["usr/lib/x86_64-linux-gnu/libmd.so.0"],
+        },
+        Deb {
+            pool: "main/u/util-linux/libmount1_2.39.3-9ubuntu6_amd64.deb",
+            sha256: "ccf07f3dfdda05311e66882d420140e32aeceaaa17725a0956214d81f5944995",
+            files: &["usr/lib/x86_64-linux-gnu/libmount.so.1"],
+        },
+        Deb {
+            pool: "main/p/pango1.0/libpango-1.0-0_1.52.1+ds-1build1_amd64.deb",
+            sha256: "09dfa5c881ab273ec6bc1830adcefdc407fcd619316e68fb26ca3a23d0fc9f54",
+            files: &["usr/lib/x86_64-linux-gnu/libpango-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/p/pango1.0/libpangocairo-1.0-0_1.52.1+ds-1build1_amd64.deb",
+            sha256: "98cf5fc9076c2911fe20dfc1e41cd8f686a2bb5d539b1105fab18105b0db1376",
+            files: &["usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/p/pango1.0/libpangoft2-1.0-0_1.52.1+ds-1build1_amd64.deb",
+            sha256: "cc6bc9d86ef5f329edacaa4895232d8a9b8f95c5cbc77c3c460a3f64cecc213d",
+            files: &["usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0"],
+        },
+        Deb {
+            pool: "main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2_amd64.deb",
+            sha256: "bb38c38adb4ef548f2851b5cf7f70bbdbcb27d582c17550aa053edb9e4098d84",
+            files: &["usr/lib/x86_64-linux-gnu/libpcre2-8.so.0"],
+        },
+        Deb {
+            pool: "main/p/pixman/libpixman-1-0_0.42.2-1build1_amd64.deb",
+            sha256: "d9c2931c4c424615eeab9dd5ae08bfc608b84e803c1d3ccddf319270db213421",
+            files: &["usr/lib/x86_64-linux-gnu/libpixman-1.so.0"],
+        },
+        Deb {
+            pool: "main/libp/libpng1.6/libpng16-16t64_1.6.43-5build1_amd64.deb",
+            sha256: "128d505038cc19dfc218658562ca5917ec242b79e6e2bbfb65ee27f297a53924",
+            files: &["usr/lib/x86_64-linux-gnu/libpng16.so.16"],
+        },
+        Deb {
+            pool: "main/libs/libselinux/libselinux1_3.5-2ubuntu2_amd64.deb",
+            sha256: "c0fe6dfac61d458f3e65c4a2bf6a920030a97d2429e33d0b405a8c4a63ef2864",
+            files: &["usr/lib/x86_64-linux-gnu/libselinux.so.1"],
+        },
+        Deb {
+            pool: "main/s/systemd/libsystemd0_255.4-1ubuntu8_amd64.deb",
+            sha256: "64ba97fddff491b86597e93b078e2fe3256cb80f9a113ae9d8dd1361f01b84ed",
+            files: &["usr/lib/x86_64-linux-gnu/libsystemd.so.0"],
+        },
+        Deb {
+            pool: "main/libt/libthai/libthai0_0.1.29-2build1_amd64.deb",
+            sha256: "5ada7045c5f84a4b774e6449151800aa6470e8d01dc9d6124ef4a44ae6af5508",
+            files: &["usr/lib/x86_64-linux-gnu/libthai.so.0"],
+        },
+        Deb {
+            pool: "main/w/wayland/libwayland-cursor0_1.22.0-2.1build1_amd64.deb",
+            sha256: "29c20da27e8e37c984cf0518635c11cd0441f4cb6a2919a9f6eee1809171d327",
+            files: &["usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0"],
+        },
+        Deb {
+            pool: "main/w/wayland/libwayland-egl1_1.22.0-2.1build1_amd64.deb",
+            sha256: "76cd17d2776428e0a0551b8f8fd954eeb3d39ca8ed2f88a38a5e4ce3ce3b2f16",
+            files: &["usr/lib/x86_64-linux-gnu/libwayland-egl.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb",
+            sha256: "397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80",
+            files: &["usr/lib/x86_64-linux-gnu/libX11.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxau/libxau6_1.0.9-1build6_amd64.deb",
+            sha256: "e40d29f1d1a62393bacaedebe0da3d9006084152a9f7e5e029293f08ce1c5c80",
+            files: &["usr/lib/x86_64-linux-gnu/libXau.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxcb/libxcb-render0_1.15-1ubuntu2_amd64.deb",
+            sha256: "7d83a0668b1a693b5ea2e496206e8371fb6beda4c54a2b4b3902005915c272c5",
+            files: &["usr/lib/x86_64-linux-gnu/libxcb-render.so.0"],
+        },
+        Deb {
+            pool: "main/libx/libxcb/libxcb-shm0_1.15-1ubuntu2_amd64.deb",
+            sha256: "229d1280d459f1ba44c22939d3f9b61d9d20932d9a646b3fe4ce50be4cdf2325",
+            files: &["usr/lib/x86_64-linux-gnu/libxcb-shm.so.0"],
+        },
+        Deb {
+            pool: "main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb",
+            sha256: "e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58",
+            files: &["usr/lib/x86_64-linux-gnu/libxcb.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxcomposite/libxcomposite1_0.4.5-1build3_amd64.deb",
+            sha256: "a12d5d9ae70b798cbbf284080eae32b87367561fc9c24492f641b8860ac0f308",
+            files: &["usr/lib/x86_64-linux-gnu/libXcomposite.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxcursor/libxcursor1_1.2.1-1build1_amd64.deb",
+            sha256: "1a4beee621454e42fe0d2f4e1633611126e43d891f0aec28e4a06744f6e9f04d",
+            files: &["usr/lib/x86_64-linux-gnu/libXcursor.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxdamage/libxdamage1_1.1.6-1build1_amd64.deb",
+            sha256: "6891faf325e996ebd28ef53ebb9c043dc96f67327500490affc3e89d366d35ed",
+            files: &["usr/lib/x86_64-linux-gnu/libXdamage.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb",
+            sha256: "bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb",
+            files: &["usr/lib/x86_64-linux-gnu/libXdmcp.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb",
+            sha256: "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679",
+            files: &["usr/lib/x86_64-linux-gnu/libXext.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxfixes/libxfixes3_6.0.0-2build1_amd64.deb",
+            sha256: "0ee1015cccd063249e01c0cd0bf45f513c8ac9a1e5e485070c12e69192455e4a",
+            files: &["usr/lib/x86_64-linux-gnu/libXfixes.so.3"],
+        },
+        Deb {
+            pool: "main/libx/libxi/libxi6_1.8.1-1build1_amd64.deb",
+            sha256: "0ea7acb5e8a8ce4d6653b30e03a319bfe136db7bfb5ee7cad34c2aa1272ea8d9",
+            files: &["usr/lib/x86_64-linux-gnu/libXi.so.6"],
+        },
+        Deb {
+            pool: "main/libx/libxinerama/libxinerama1_1.1.4-3build1_amd64.deb",
+            sha256: "c8c93a3efdbb06e314f41bf48af4ca3652e4a3826bab5b9e00887660e619f239",
+            files: &["usr/lib/x86_64-linux-gnu/libXinerama.so.1"],
+        },
+        Deb {
+            pool: "main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_amd64.deb",
+            sha256: "2b9caeb423efb540296a1cb20b872cc630c23908407ecb5c1c787a617622d664",
+            files: &["usr/lib/x86_64-linux-gnu/libxkbcommon.so.0"],
+        },
+        Deb {
+            pool: "main/libx/libxrandr/libxrandr2_1.5.2-2build1_amd64.deb",
+            sha256: "f2955a5e594f5724b58ad241d9231ea191cb36574a0d5e5ca6b661cd41d6256d",
+            files: &["usr/lib/x86_64-linux-gnu/libXrandr.so.2"],
+        },
+        Deb {
+            pool: "main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb",
+            sha256: "d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea",
+            files: &["usr/lib/x86_64-linux-gnu/libXrender.so.1"],
+        },
+        Deb {
+            pool: "main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1_amd64.deb",
+            sha256: "4dcc3ba9606a5837a55248d08162a5b426dd621f75c0eb24d86409e0d0e71d52",
+            files: &["usr/lib/x86_64-linux-gnu/libzstd.so.1"],
+        },
+        Deb {
+            pool: "main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2_amd64.deb",
+            sha256: "0b93d16d7498f092fa3070fbbad28cdbc6b3d640f1a7681b96fc37f20d1219f1",
+            files: &["usr/lib/x86_64-linux-gnu/libz.so.1"],
+        },
+        // gdk-pixbuf (which depends on it) picks an image's loader by its
+        // MIME type through GIO, which reads the MIME database's mime.cache:
+        // made at installation from this XML (`update_mime_database`).
+        Deb {
+            pool: "main/s/shared-mime-info/shared-mime-info_2.4-4_amd64.deb",
+            sha256: "7a774ea291ab99bfa987866c6b68e825531eeea7c8a732dd47d14cf480453fda",
+            files: &["usr/share/mime/packages/freedesktop.org.xml"],
+        },
+        Deb {
+            pool: "main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
+            sha256: "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
+            files: &[
+                "usr/share/X11/xkb/compat/accessx",
+                "usr/share/X11/xkb/compat/basic",
+                "usr/share/X11/xkb/compat/caps",
+                "usr/share/X11/xkb/compat/complete",
+                "usr/share/X11/xkb/compat/iso9995",
+                "usr/share/X11/xkb/compat/ledcaps",
+                "usr/share/X11/xkb/compat/lednum",
+                "usr/share/X11/xkb/compat/ledscroll",
+                "usr/share/X11/xkb/compat/level5",
+                "usr/share/X11/xkb/compat/misc",
+                "usr/share/X11/xkb/compat/mousekeys",
+                "usr/share/X11/xkb/compat/xfree86",
+                "usr/share/X11/xkb/keycodes/aliases",
+                "usr/share/X11/xkb/keycodes/evdev",
+                "usr/share/X11/xkb/rules/evdev",
+                "usr/share/X11/xkb/symbols/inet",
+                "usr/share/X11/xkb/symbols/keypad",
+                "usr/share/X11/xkb/symbols/pc",
+                "usr/share/X11/xkb/symbols/srvr_ctrl",
+                "usr/share/X11/xkb/symbols/us",
+                "usr/share/X11/xkb/types/basic",
+                "usr/share/X11/xkb/types/complete",
+                "usr/share/X11/xkb/types/extra",
+                "usr/share/X11/xkb/types/iso9995",
+                "usr/share/X11/xkb/types/level5",
+                "usr/share/X11/xkb/types/mousekeys",
+                "usr/share/X11/xkb/types/numpad",
+                "usr/share/X11/xkb/types/pc",
+            ],
+        },
+    ],
+    // The user database: root and the one Linux user, uid 1000
+    // (`lx::exec::UID`), the boot user `gala` (GLib looks its name and
+    // home up), and that user's home (a writable tree: fontconfig keeps
+    // its cache in ~/.cache, as a desktop install without the fontconfig
+    // package's system cache does).
+    ours: &["etc/passwd", "etc/group", "home/gala/"],
+}];
+
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 /// Freestanding Windows test programs in `user/`, shipped as boot modules.
 const USER_TARGET: &str = "x86_64-pc-windows-msvc";
@@ -729,7 +1138,7 @@ fn built_dll(file: &str) -> PathBuf {
 
 /// Directory trees shipped writable (`tarw:`): data a program changes, as
 /// an installer leaves it (SQL Server's databases).
-const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp"];
+const WRITABLE_TREES: &[&str] = &["sql/data", "fzs", "ftp", "home"];
 
 /// Extra boot modules per scenario: (scenario, built DLL file or repository
 /// path, directory on C: that the kernel puts it in, passed as the module
@@ -1270,6 +1679,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
         "lib/x86_64-linux-gnu",
     ),
     ("wayland_client", "target/prebuilt/libffi/libffi.so.8", "lib/x86_64-linux-gnu"),
+    // The first GTK program (LD step 3) and GTK 3's Linux root: its
+    // libraries in /usr/lib/x86_64-linux-gnu, a font, fontconfig's
+    // configuration (LINUX_ROOTS "gtk3"), each a tree.
+    ("lx_gtk", "user/lx/bin/gtk_test", "lx"),
+    ("lx_gtk_pie", "user/lx/bin/gtk_test-pie", "lx"),
+    ("gtk3", "target/prebuilt/gtk3/usr/", "usr"),
+    ("gtk3", "target/prebuilt/gtk3/etc/", "etc"),
+    ("gtk3", "target/prebuilt/gtk3/home/", "home"),
     ("lx_busybox", "target/prebuilt/busybox-linux/busybox", "lx"),
     ("lx_busybox", "user/lx/busybox/shell.sh", "lx"),
     ("lx_httpd", "target/prebuilt/busybox-linux/busybox", "lx"),
@@ -3509,6 +3926,9 @@ fn fetch_prebuilt(path: &str) -> Result {
     let _guard = FETCH.lock().unwrap_or_else(|e| e.into_inner());
     let full = root().join(path);
     let name = path.split('/').nth(2).ok_or(format!("bad prebuilt path {path}"))?;
+    if let Some(r) = LINUX_ROOTS.iter().find(|r| r.name == name) {
+        return fetch_linux_root(r, path);
+    }
     let p = PREBUILT.iter().find(|p| p.name == name).ok_or(format!("no prebuilt {name:?}"))?;
     let dir = root().join("target/prebuilt").join(p.name);
     // Written once the release is unpacked: a partial unpack (an
@@ -3624,6 +4044,157 @@ fn fetch_prebuilt(path: &str) -> Result {
         return Err(format!("{path} is not in {}", p.url));
     }
     write(&done, p.url)
+}
+
+/// Makes sure the Linux root `r` is assembled in `target/prebuilt/<name>/`
+/// (`path` is the file or tree a scenario wants from it): each package
+/// fetched into the package cache (`fetch_deb`), unpacked (dpkg-deb) and
+/// its files moved to their paths. Like a prebuilt, a marker keyed by the
+/// whole selection makes a changed table or an interrupted run assemble
+/// it again from nothing (the packages already fetched are not fetched
+/// again). The caller holds the fetch lock.
+fn fetch_linux_root(r: &LinuxRoot, path: &str) -> Result {
+    let dir = root().join("target/prebuilt").join(r.name);
+    let selection = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for d in r.debs {
+            (d.pool, d.sha256, d.files).hash(&mut h);
+        }
+        h.finish()
+    };
+    let done = dir.join(format!(".assembled-{selection:016x}"));
+    if done.exists() {
+        copy_ours(r, &dir)?;
+        return if root().join(path).exists() {
+            Ok(())
+        } else {
+            Err(format!("{path} is not in the Linux root {:?} (LINUX_ROOTS)", r.name))
+        };
+    }
+    if dir.exists() {
+        eprintln!("xtask: {}: not assembled from the pinned packages; clearing {dir:?}", r.name);
+        fs::remove_dir_all(&dir).map_err(|e| format!("clearing {dir:?}: {e}"))?;
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    eprintln!("xtask: assembling the Linux root {} from {} packages", r.name, r.debs.len());
+    let tree = dir.join("deb");
+    for d in r.debs {
+        let (deb, url) = fetch_deb(d)?;
+        let _ = fs::remove_dir_all(&tree);
+        fs::create_dir_all(&tree).map_err(|e| format!("creating {tree:?}: {e}"))?;
+        run_quiet(Command::new("dpkg-deb").arg("-x").arg(&deb).arg(&tree))
+            .map_err(|e| format!("{e} (dpkg-deb is in dpkg)"))?;
+        for file in d.files {
+            let from = resolve_in_tree(&tree, file).map_err(|e| format!("{url}: {e}"))?;
+            let to = dir.join(file);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
+            }
+            fs::rename(&from, &to).map_err(|e| format!("{file} in {url}: {e}"))?;
+        }
+        fs::remove_dir_all(&tree).map_err(|e| format!("cleaning {tree:?}: {e}"))?;
+    }
+    update_mime_database(&dir)?;
+    write(&done, &format!("{} packages\n", r.debs.len()))?;
+    copy_ours(r, &dir)?;
+    if !root().join(path).exists() {
+        return Err(format!("{path} is not in the Linux root {:?} (LINUX_ROOTS)", r.name));
+    }
+    Ok(())
+}
+
+/// What shared-mime-info's installation does (its dpkg trigger): the
+/// MIME database's `mime.cache` made from `usr/share/mime/packages` by
+/// the host's `update-mime-database` (Ubuntu 24.04's shared-mime-info
+/// 2.4, the same version; its output is the same at each run). Only
+/// mime.cache is kept: GIO reads nothing else when it is there. Nothing
+/// to do for a root without the package.
+fn update_mime_database(dir: &Path) -> Result {
+    let mime = dir.join("usr/share/mime");
+    if !mime.join("packages").exists() {
+        return Ok(());
+    }
+    run_quiet(
+        Command::new("update-mime-database").arg(&mime).env("XDG_DATA_DIRS", dir.join("usr/share")),
+    )
+    .map_err(|e| format!("{e} (update-mime-database is in shared-mime-info)"))?;
+    for entry in fs::read_dir(&mime).map_err(|e| format!("reading {mime:?}: {e}"))?.flatten() {
+        if entry.file_name() == "mime.cache" {
+            continue;
+        }
+        let path = entry.path();
+        let gone = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        gone.map_err(|e| format!("removing {path:?}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Copies the root's own files (`user/lx/root/<path>`) into `dir`, every
+/// time: they change with the repository, not with the packages.
+fn copy_ours(r: &LinuxRoot, dir: &Path) -> Result {
+    for file in r.ours {
+        if file.ends_with('/') {
+            let made = dir.join(file);
+            fs::create_dir_all(&made).map_err(|e| format!("creating {made:?}: {e}"))?;
+            continue;
+        }
+        let to = dir.join(file);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
+        }
+        copy(&root().join("user/lx/root").join(file), &to)?;
+    }
+    Ok(())
+}
+
+/// The package `d` in the package cache, `target/prebuilt/debs/<file>`
+/// (shared by the Linux roots; about 14 MB for GTK 3's), downloaded once
+/// (curl, to a `.part` file renamed when whole) and checked against its
+/// SHA-256 at each use. Gives the path and the URL.
+fn fetch_deb(d: &Deb) -> Result<(PathBuf, String)> {
+    let url = format!("https://archive.ubuntu.com/ubuntu/pool/{}", d.pool);
+    let name = d.pool.rsplit('/').next().unwrap_or(d.pool);
+    let cache = root().join("target/prebuilt/debs");
+    fs::create_dir_all(&cache).map_err(|e| format!("creating {cache:?}: {e}"))?;
+    let deb = cache.join(name);
+    let sha256 = |path: &Path| -> Result<String> {
+        let out = Command::new("sha256sum").arg(path).output().map_err(|e| e.to_string())?;
+        let sum = String::from_utf8_lossy(&out.stdout);
+        Ok(sum.split_whitespace().next().unwrap_or_default().to_string())
+    };
+    if deb.exists() && sha256(&deb)? == d.sha256 {
+        return Ok((deb, url));
+    }
+    let part = cache.join(format!("{name}.part"));
+    eprintln!("xtask: fetching {url}");
+    run_cmd(Command::new("curl").args(["-sSfL", "-o"]).arg(&part).arg(&url))?;
+    let sum = sha256(&part)?;
+    if sum != d.sha256 {
+        let _ = fs::remove_file(&part);
+        return Err(format!("{url}: SHA-256 {sum}, not the pinned {}", d.sha256));
+    }
+    fs::rename(&part, &deb).map_err(|e| format!("moving {part:?} to {deb:?}: {e}"))?;
+    Ok((deb, url))
+}
+
+/// The file `file` names in the unpacked package `tree`, its symbolic
+/// links followed inside the tree (an absolute target is the tree's, as
+/// the package would install it; at most 8 links).
+fn resolve_in_tree(tree: &Path, file: &str) -> Result<PathBuf> {
+    let mut rel = PathBuf::from(file);
+    for _ in 0..8 {
+        let at = tree.join(&rel);
+        let Ok(target) = fs::read_link(&at) else {
+            return if at.is_file() { Ok(at) } else { Err(format!("{file}: not in the package")) };
+        };
+        rel = if target.is_absolute() {
+            target.strip_prefix("/").map_err(|e| e.to_string())?.to_path_buf()
+        } else {
+            rel.parent().map_or_else(|| target.clone(), |p| p.join(&target))
+        };
+    }
+    Err(format!("{file}: more than 8 symbolic links"))
 }
 
 /// Unpacks the Debian package `deb` (dpkg-deb, its data archive as the
@@ -8158,6 +8729,37 @@ const SCENARIOS: &[Scenario] = &[
         ],
     },
     Scenario {
+        // user/lx/gtk_test (LD step 3), the first GTK program: GTK 3 and
+        // its library closure from Ubuntu 24.04 (LINUX_ROOTS "gtk3") on
+        // glibc, its window drawn on a headless desktop. The screen check
+        // (GTK_SCREEN) finds GTK's drawing, clicks its button and its
+        // title bar's close button; its transcript is real Linux's
+        // (lx-expect, where it clicks itself). HOME as a login gives it.
+        name: "lx_gtk",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test lxargs=./gtk_test%20--input lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/home/gala",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'gtk_test'",
+            "xtask: screen ok",
+            "run: end /lx/gtk_test",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
+        // user/lx/gtk_test as a PIE (LD step 3): the GTK 3 program clicks
+        // its own button and closes its own window, as on Linux (lx-expect).
+        name: "lx_gtk_pie",
+        cmdline: "qemu_exit presenter=test wayland=on events=wayland lxrun=/lx/gtk_test-pie lxargs=./gtk_test lxenv=XDG_RUNTIME_DIR=/run/user/1000%20WAYLAND_DISPLAY=wayland-0%20HOME=/home/gala",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "personality linux",
+            "desktop: shown window 'gtk_test'",
+            "run: end /lx/gtk_test-pie",
+            BOOT_OK_MARKER,
+        ],
+    },
+    Scenario {
         // user/lx/wl_input_test as a static-pie, every request and event
         // traced (`wayland=trace`).
         name: "lx_wl_input_pie",
@@ -8448,6 +9050,14 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_simple_shm", "weston"),
     ("lx_simple_shm", "wayland_client"),
     ("lx_simple_shm", "glibc"),
+    ("lx_gtk", "lx_gtk"),
+    ("lx_gtk", "gtk3"),
+    ("lx_gtk", "wayland_client"),
+    ("lx_gtk", "glibc"),
+    ("lx_gtk_pie", "lx_gtk_pie"),
+    ("lx_gtk_pie", "gtk3"),
+    ("lx_gtk_pie", "wayland_client"),
+    ("lx_gtk_pie", "glibc"),
 ];
 
 /// The boot modules (file, directory) scenario `name` ships besides the
@@ -10571,6 +11181,49 @@ const SIMPLE_SHM_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// gtk_test's window (GTK 3, Adwaita, on a headless desktop): frameless
+/// (GTK 3 decorates itself: it negotiates no decoration), the first
+/// Wayland window and so at (64, 48), its window geometry 320 x 237
+/// (GTK's shadow outside it not shown). GTK's own header bar (0xdfdbd8)
+/// where shasha's caption would be, the title and the close button's
+/// cross (0x2e3436) at (366, 66), the label's text on the window's
+/// background (0xf6f5f4), the button "Click me" centred at (223, 243).
+/// The pointer starts in the screen's middle (640, 400): a click on the
+/// button, then (after its line) one on the close button, which ends the
+/// program (its transcript shows both).
+const GTK_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "stdout: window drawn",
+    steps: &[
+        ScreenStep {
+            after: "",
+            input: &[],
+            pixels: &[
+                PixelCheck::At(70, 60, 0xdfdbd8),               // GTK's header bar
+                PixelCheck::AnyIn(190, 58, 70, 16, 0x2e3436),   // "gtk_test"
+                PixelCheck::AnyIn(360, 58, 14, 14, 0x2e3436),   // the close button
+                PixelCheck::At(200, 120, 0xf6f5f4),             // the background
+                PixelCheck::AnyIn(140, 150, 170, 20, 0x2e3436), // the label
+                PixelCheck::Varied(190, 235, 70, 16, 16),       // "Click me"
+            ],
+        },
+        ScreenStep {
+            after: "",
+            input: &[
+                "mouse_move -255 -157",
+                "mouse_move -162 0",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "stdout: button clicked: Click me",
+            input: &["mouse_move 143 -177", "mouse_button 1", "mouse_button 0"],
+            pixels: &[],
+        },
+    ],
+};
+
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
 /// 1-pixel outline and a 32-pixel caption (Windows 11's metrics), so its
 /// client area starts at (101, 133) (kernel/src/nt/desktop). The screen is
@@ -10828,6 +11481,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
     ("gui_test", GUI_TEST_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
+    ("lx_gtk", GTK_SCREEN),
     ("lx_wl_input_pie", WL_INPUT_SCREEN),
     // The same program and checks with the screen on virtio-gpu (stage G1
     // of ARCHITECTURE "Plan: graphics and GPU"): QEMU's screendump shows

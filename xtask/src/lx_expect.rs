@@ -53,8 +53,16 @@ pub const ENV: &[(&str, &str)] = &[("A", "1"), ("EMPTY", ""), ("LONGER_NAME", "s
 /// lx-expect starts weston's headless backend for them on a socket of
 /// their own and adds `XDG_RUNTIME_DIR` (its directory) and
 /// `WAYLAND_DISPLAY` (this name) to [`ENV`].
-const WAYLAND_TESTS: &[&str] = &["wl_test", "wl_popup_test"];
+const WAYLAND_TESTS: &[&str] = &["wl_test", "wl_popup_test", "gtk_test"];
 const WAYLAND_DISPLAY: &str = "wayland-gala";
+
+/// The Wayland programs that need a seat (GTK 3 asks for the keyboard of
+/// the seat it finds and warns when there is none, as weston's headless
+/// backend has none): their weston runs on its X11 backend in an X
+/// server of its own (Xvfb, apt package `xvfb`), whose keyboard and
+/// pointer make weston's seat. Nothing gives it input: the programs
+/// drive themselves here (gtk_test's header).
+const SEATED_TESTS: &[&str] = &["gtk_test"];
 
 /// The programs real Linux cannot record, with why: built and checked
 /// like the others, not run here. Their expected.txt is written from the
@@ -269,7 +277,11 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
                 .map_err(|e| format!("copying {} to {}: {e}", lib.display(), to.display()))?;
         }
     }
-    let compositor = if WAYLAND_TESTS.contains(&name) { Some(Weston::start(dir)?) } else { None };
+    let compositor = if WAYLAND_TESTS.contains(&name) {
+        Some(Weston::start(dir, SEATED_TESTS.contains(&name))?)
+    } else {
+        None
+    };
     let mut command = Command::new(format!("./{name}"));
     command.current_dir(dir).args(ARGS).env_clear().envs(ENV.iter().copied());
     if let Some(w) = &compositor {
@@ -305,20 +317,22 @@ fn run(exe: &Path, dir: &PathBuf, name: &str) -> Result<String> {
     Ok(transcript(&stdout, &stderr, status.code(), status.signal()))
 }
 
-/// weston's headless backend serving one test: its runtime directory
-/// (0700, as XDG_RUNTIME_DIR must be) holds the socket; the process ends
+/// weston serving one test, on its headless backend or, with a seat, on
+/// its X11 backend in an Xvfb of its own: its runtime directory
+/// (0700, as XDG_RUNTIME_DIR must be) holds the socket; the processes end
 /// and the directory goes when this is dropped. Its log goes to
-/// `weston.log` beside the test. The runtime directory is a short one in
-/// the system's temporary directory, not the run directory: a socket's
-/// path is at most 107 bytes (sun_path), which a checkout deep in the
-/// file system (a worktree) passes.
+/// `weston.log` beside the test (Xvfb's to `xvfb.log`). The runtime
+/// directory is a short one in the system's temporary directory, not the
+/// run directory: a socket's path is at most 107 bytes (sun_path), which
+/// a checkout deep in the file system (a worktree) passes.
 struct Weston {
     runtime: PathBuf,
     process: std::process::Child,
+    xvfb: Option<std::process::Child>,
 }
 
 impl Weston {
-    fn start(dir: &Path) -> Result<Weston> {
+    fn start(dir: &Path, seat: bool) -> Result<Weston> {
         use std::os::unix::fs::PermissionsExt;
         let runtime = std::env::temp_dir().join(format!("gala-wl-{}", std::process::id()));
         // A directory left by a run of the same pid that was killed.
@@ -326,11 +340,19 @@ impl Weston {
         fs::create_dir_all(&runtime).map_err(|e| format!("creating {}: {e}", runtime.display()))?;
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
+        let xvfb = if seat { Some(xvfb(dir)?) } else { None };
         let log = fs::File::create(dir.join("weston.log")).map_err(|e| e.to_string())?;
-        let process = Command::new("weston")
-            .args(["--backend=headless", "--idle-time=0"])
+        let mut command = Command::new("weston");
+        command.env_clear();
+        if let Some((_, display)) = &xvfb {
+            // pixman: Xvfb has no GL.
+            command.args(["--backend=x11", "--use-pixman"]).env("DISPLAY", display);
+        } else {
+            command.arg("--backend=headless");
+        }
+        let process = command
+            .arg("--idle-time=0")
             .arg(format!("--socket={WAYLAND_DISPLAY}"))
-            .env_clear()
             .env("XDG_RUNTIME_DIR", &runtime)
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
@@ -339,7 +361,7 @@ impl Weston {
             .map_err(|e| {
                 format!("starting weston for the Wayland tests (apt install weston): {e}")
             })?;
-        let mut w = Weston { runtime, process };
+        let mut w = Weston { runtime, process, xvfb: xvfb.map(|(x, _)| x) };
         // Ready when its socket exists (or it has exited: then its log
         // says why).
         let socket = w.runtime.join(WAYLAND_DISPLAY);
@@ -364,8 +386,44 @@ impl Drop for Weston {
     fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+        if let Some(x) = &mut self.xvfb {
+            let _ = x.kill();
+            let _ = x.wait();
+        }
         let _ = fs::remove_dir_all(&self.runtime);
     }
+}
+
+/// Starts an X server for weston's X11 backend (a seat with a keyboard
+/// and a pointer) and gives it with its display name. Xvfb chooses a free
+/// display itself and writes its number to the descriptor `-displayfd`
+/// names (its stdout) once it accepts clients. Its log is `xvfb.log`.
+fn xvfb(dir: &Path) -> Result<(std::process::Child, String)> {
+    let log = fs::File::create(dir.join("xvfb.log")).map_err(|e| e.to_string())?;
+    let mut child = Command::new("Xvfb")
+        .args(["-displayfd", "1", "-nolisten", "tcp", "-screen", "0", "1280x800x24"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(log)
+        .spawn()
+        .map_err(|e| {
+            format!("starting Xvfb for the seated Wayland tests (apt install xvfb): {e}")
+        })?;
+    let mut number = String::new();
+    if let Some(out) = child.stdout.as_mut() {
+        let mut byte = [0u8; 1];
+        // The number and a newline; nothing if it failed.
+        while out.read(&mut byte).map_err(|e| e.to_string())? == 1 && byte[0] != b'\n' {
+            number.push(char::from(byte[0]));
+        }
+    }
+    if number.trim().is_empty() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("Xvfb named no display; see {}", dir.join("xvfb.log").display()));
+    }
+    Ok((child, format!(":{}", number.trim())))
 }
 
 /// The shared libraries in `bin` (`lib*.so`), sorted.

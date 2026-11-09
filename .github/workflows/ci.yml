@@ -31,8 +31,8 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: Install QEMU, OVMF, xorriso, musl-tools, weston
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools openssh-client postgresql-client musl-tools weston libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+      - name: Install QEMU, OVMF, xorriso, musl-tools, weston, Xvfb, GTK 3
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso msitools openssh-client postgresql-client musl-tools weston xvfb libgtk-3-0t64 shared-mime-info libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       # Ubuntu 24.04's QEMU (8.2.2) has the translated-block bug that broke
       # JIT code (WORKFLOW "QEMU"); xtask builds and uses the pinned one.
       - name: Cache the pinned QEMU
@@ -104,7 +104,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
       - name: Install QEMU's build dependencies, OVMF, xorriso
-        run: sudo apt-get update && sudo apt-get install -y ovmf xorriso msitools openssh-client postgresql-client musl-tools libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y ovmf xorriso msitools openssh-client postgresql-client musl-tools shared-mime-info libglib2.0-dev libpixman-1-dev libslirp-dev flex bison ninja-build python3-venv libfdt-dev zlib1g-dev
       - name: Cache the pinned QEMU
         uses: actions/cache@v4
         with:
