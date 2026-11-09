@@ -88,6 +88,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "appxdeploymentclient"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "args_test"
 version = "0.1.0"
 dependencies = [
@@ -315,6 +322,20 @@ version = "0.1.0"
 [[package]]
 name = "com_test"
 version = "0.1.0"
+
+[[package]]
+name = "combase"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "combase_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "comctl32"
@@ -2801,6 +2822,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_cert_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_combase_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

@@ -32,7 +32,7 @@ const STG_E_INVALIDPARAMETER: HResult = 0x8003_0057u32 as i32;
 
 /// The export `name` (NUL-terminated) of the DLL `dll` (NUL-terminated
 /// UTF-16), loading it; 0 if either is missing.
-fn export(dll: &[u16], name: &[u8]) -> usize {
+pub(crate) fn export(dll: &[u16], name: &[u8]) -> usize {
     // SAFETY: NUL-terminated names.
     unsafe {
         let module = LoadLibraryW(dll.as_ptr());
@@ -50,7 +50,7 @@ const fn wide<const N: usize>(s: &[u8; N]) -> [u16; N] {
     w
 }
 
-const OLEAUT32: [u16; 13] = wide(b"oleaut32.dll\0");
+pub(crate) const OLEAUT32: [u16; 13] = wide(b"oleaut32.dll\0");
 const GDI32: [u16; 10] = wide(b"gdi32.dll\0");
 
 /// Calls oleaut32's (or gdi32's) one-pointer-argument function `name`

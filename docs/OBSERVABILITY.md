@@ -312,6 +312,16 @@ hit (scenario `ledger_test`).
   `nt::ledger::record(service, what, detail)`.
 - Lines `ledger: {"service":..,"what":..,"detail":..,"hits":..}` are
   dumped after each program, before `boot ok` and in a state dump.
+- gala's user-mode DLLs record through ntdll's `GalaRecordMissing`
+  (`dll!function` names, 64 characters kept). The Windows Runtime's:
+  `ole32.dll!RoGetActivationFactory(<class>)` for a class it cannot
+  activate, with a reason in the name when the registration was found
+  (`(server DLL not found)`, `(no DllGetActivationFactory)`, `(the DLL
+  refused)`, `(out-of-process server)`) and the HRESULT returned as the
+  detail (0x80040154 REGDB_E_CLASSNOTREG: not registered);
+  `appxdeploymentclient.dll!<method>(<name asked>)`, "other", for each
+  PackageManager query answered with no packages (what a program looked
+  for: `FindPackagesByNamePublisher(Microsoft.O...` in office_install).
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall
