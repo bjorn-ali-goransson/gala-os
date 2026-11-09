@@ -190,7 +190,7 @@ has a section under "Open items".
 | N3 | IPv6 sockets: loopback ::1, IPV6_V6ONLY and dual stack, the card's addresses | parked (steps 1 and 2 done: `ipv6_test`: ::1, IPv4-mapped addresses and dual stack, IPV6_V6ONLY, ports per family, AF_UNSPEC localhost; step 3, the card's addresses and AAAA queries, out of scope for now: ARCHITECTURE "Plan: IPv6") | ARCHITECTURE "Plan: IPv6"; Chromium probes AF_INET6 (BR) |
 | H1-H10 | Toward self-hosting: pipes, busybox, scripts, TinyCC (and itself), make, Lua, build speed, SQLite, file locks | done | `busybox*`, `tcc`, `tcc_self`, `tcc_make`, `lua`, `sqlite`; PERF.md |
 | H11 | busybox httpd and wget over loopback | in progress | Linux busybox done (`lx_httpd`); busybox-w32 and the Winsock client open |
-| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; the 32-bit crypt32 and ncrypt: `wow64_cert_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
+| WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; the 32-bit crypt32 and ncrypt: `wow64_cert_test`; msi: `wow64_msi_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
@@ -1417,11 +1417,14 @@ need gala's.
      #39, MsiEnumProductsW #45, MsiLocateComponentW #90,
      MsiQueryProductStateW #113, MsiSetInternalUI #141,
      MsiGetComponentPathW #173, MsiConfigureProductExW #190,
-     MsiProvideQualifiedComponentExW #203). Next, in the order the run
-     reaches them: msi (gala has none: these nine, as on a machine
-     without Windows Installer products), CryptQueryObject's embedded
-     PKCS #7 and wintrust's WinVerifyTrust (the signature check it leads
-     to), then wininet, urlmon, xmllite, webservices, iphlpapi,
+     MsiProvideQualifiedComponentExW #203). Done: gala's msi.dll, x64
+     and x86, these nine with their ordinals, answered as Windows does
+     for products and components it has not installed (`msi_test`,
+     `wow64_msi_test`; ARCHITECTURE "Other DLLs"); where the run goes
+     past msi is still to be seen (its first run with msi is the next
+     step). Next, in the order the run reaches them: CryptQueryObject's
+     embedded PKCS #7 and wintrust's WinVerifyTrust (the signature check
+     it leads to), then wininet, urlmon, xmllite, webservices, iphlpapi,
      setupapi, cabinet, normaliz, powrprof, credui, gdiplus; the service
      control manager (advapi32's service calls are stubs); a few
      shlwapi, user32, ole32, imm32 and shell32 functions.

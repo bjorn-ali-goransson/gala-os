@@ -2464,7 +2464,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
 | COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs") |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -7269,6 +7269,21 @@ stations and desktops a program creates are refused until stage 3).
 
 ### Other DLLs
 
+- msi (`user/msi`, x64 and x86; `msi_test`, `wow64_msi_test`): Windows
+  Installer's queries as Windows answers them for products and
+  components it has not installed, which on gala is all of them (no
+  installer database, no installer service): MsiQueryProductStateW,
+  MsiGetComponentPathW and MsiLocateComponentW INSTALLSTATE_UNKNOWN,
+  MsiEnumProductsW none, MsiConfigureProductExW ERROR_UNKNOWN_PRODUCT,
+  MsiProvideQualifiedComponentExW and MsiEnumComponentQualifiersW
+  ERROR_UNKNOWN_COMPONENT; a code that is not a braced GUID is
+  INSTALLSTATE_INVALIDARG or ERROR_INVALID_PARAMETER; MsiSetInternalUI
+  keeps the process's level and window; MsiCloseHandle knows no handle
+  but 0. Each "nothing installed" answer is recorded (`msi.dll!<function>:
+  nothing installed`, kind other, the ordinal as detail). The exports
+  carry Windows' ordinals (build.rs; ODT's setup.exe imports them by
+  ordinal). Installing (MsiInstallProduct and the rest) is absent:
+  galapkg's MSI reader (ROADMAP PK) installs packages, not msi.dll.
 - msctf (`user/msctf`): SetInputScope and SetInputScopes, S_OK for a
   window and without effect (no text services to read them; Delphi's
   VCL calls them on its edit controls); the TSF COM objects are not
@@ -7678,7 +7693,8 @@ come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 `layout.rs`; its AFD requests in the caller's layout, `afd_abi`'s, which
 the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
 ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
-(`wow64_cert_test`, cert_test's source built for x86). crypt32's own
+(`wow64_cert_test`, cert_test's source built for x86), msi
+(`wow64_msi_test`). crypt32's own
 structures (CERT_CONTEXT, CERT_INFO, CRL_*, the chain contexts) are
 `repr(C)` with pointers, and the caller's ones it reads or writes
 (CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_PARA's CERT_USAGE_MATCH, the
@@ -7704,7 +7720,7 @@ compiled programs import from it (`_allmul`, `_alldiv`, `_allrem`,
 `_aulldiv`, `_aullrem`, `_alldvrm`, `_aulldvrm`, `_allshl`, `_allshr`,
 `_aullshr`: `x86.rs`). Inno Setup 6.5.4's x86 installer installs on
 these (`wow64_inno`). To come, as programs need them (ODT's setup.exe
-next: ROADMAP OF): msi, wininet, wintrust and the rest (ROADMAP WOW).
+next: ROADMAP OF): wintrust, wininet and the rest (ROADMAP WOW).
 
 The 32-bit stubs pop the bytes their own declaration names (stdcall
 `ret N`), and wow64.dll's table converts one entry per 4-byte word:
@@ -7725,7 +7741,7 @@ being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
 `testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
 `testuser32_32.dll`, `testgdi32_32.dll`, `testcomctl3232.dll` and the
 rest of the Inno set as `test<name>32.dll`, `testcrypt3232.dll`,
-`testncrypt32.dll`; test DLLs
+`testncrypt32.dll`, `testmsi32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers
