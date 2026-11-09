@@ -707,6 +707,23 @@ pub struct PageIn {
     epoch: u64,
 }
 
+/// Files' pages in memory on a disk-backed C: (`RamFs::cache_stats`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    /// Pages in memory.
+    pub resident: u64,
+    /// Of those: changed since written (they leave only once written).
+    pub dirty: u64,
+    /// Clean but not on the disk (no cluster: a boot module's page read,
+    /// a hole made): they never leave.
+    pub unstored: u64,
+    /// Of a file a section maps (they stay while it is mapped).
+    pub mapped: u64,
+    /// Entries of the queue `evict` takes from, and of the dirty list.
+    pub queued_clean: u64,
+    pub queued_dirty: u64,
+}
+
 /// A dirty page's copy to write to its cluster (`RamFs::writeback`).
 pub struct Writeback {
     pub node: NodeId,
@@ -2774,6 +2791,35 @@ impl RamFs {
                 a.clusters.keep_pending(list);
             }
         }
+    }
+
+    /// What the files' pages hold of memory on a disk-backed C: (zeros
+    /// without a data area): for a state dump and for `persist`'s warning
+    /// when letting pages go cannot bring free memory back.
+    pub fn cache_stats(&self) -> CacheStats {
+        let mut st = CacheStats::default();
+        let Some(area) = self.area.as_ref() else { return st };
+        st.queued_clean = area.clean.len() as u64;
+        st.queued_dirty = area.dirty.len() as u64;
+        for n in self.nodes.iter().flatten() {
+            let Kind::File(Data::Paged { pages, disk, .. }) = &n.kind else { continue };
+            for (i, p) in pages.iter().enumerate() {
+                if p.is_none() {
+                    continue;
+                }
+                let slot = disk.get(i).copied().unwrap_or_default();
+                st.resident += 1;
+                if slot.dirty {
+                    st.dirty += 1;
+                } else if !slot.stored || slot.cluster().is_none() {
+                    st.unstored += 1;
+                }
+                if n.map_count > 0 {
+                    st.mapped += 1;
+                }
+            }
+        }
+        st
     }
 
     /// Lets up to `max` pages that are on the disk unchanged leave memory,

@@ -429,6 +429,7 @@ fn write_pages(batch: &[crate::fs::ramfs::Writeback]) -> bool {
     let start = DATA_START.load(Ordering::Acquire);
     let mut order: Vec<usize> = Vec::new();
     if order.try_reserve_exact(batch.len()).is_err() {
+        warn!("persist: no memory to order {} pages for writing", batch.len());
         file::with_fs(|fs| fs.writeback_failed(batch));
         return false;
     }
@@ -436,6 +437,7 @@ fn write_pages(batch: &[crate::fs::ramfs::Writeback]) -> bool {
     order.sort_unstable_by_key(|&i| batch[i].cluster);
     let mut buf: Vec<u8> = Vec::new();
     if buf.try_reserve_exact(WRITE_RUN * crate::fs::ramfs::PAGE).is_err() {
+        warn!("persist: no memory for a {WRITE_RUN}-page write buffer");
         file::with_fs(|fs| fs.writeback_failed(batch));
         return false;
     }
@@ -491,7 +493,39 @@ fn evict() {
     let want = (low + 16 * 256 - free) as usize;
     let gone = file::with_fs(|fs| fs.evict(want));
     EVICTED.fetch_add(gone as u64, Ordering::Relaxed);
+    // Short of the mark: say once (until free memory is back above it)
+    // what holds the memory, so a run that ends out of memory explains
+    // itself.
+    let (after, _) = platform::frame_stats();
+    if after < low {
+        if !SHORT.swap(true, Ordering::Relaxed) {
+            let c = file::with_fs(|fs| fs.cache_stats());
+            let heap = crate::mm::heap::stats();
+            warn!(
+                "persist: free memory stays low after letting {gone} pages go: {after} of {total} \
+                 frames free (want {low}); files' pages in memory {} ({} dirty, {} never \
+                 written, {} of mapped files), queued clean {} dirty {}; heap {} KiB in use, \
+                 {} slab and {} large pages",
+                c.resident,
+                c.dirty,
+                c.unstored,
+                c.mapped,
+                c.queued_clean,
+                c.queued_dirty,
+                heap.in_use / 1024,
+                heap.slab_pages,
+                heap.large_pages,
+            );
+            super::process::dump();
+        }
+    } else {
+        SHORT.store(false, Ordering::Relaxed);
+    }
 }
+
+/// `evict` has warned that it could not bring free memory back (cleared
+/// once it is back).
+static SHORT: AtomicBool = AtomicBool::new(false);
 
 /// Warns once each time more dirty pages found no cluster, or more
 /// clusters were lost (see `summary`).

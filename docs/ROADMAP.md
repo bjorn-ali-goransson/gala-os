@@ -1682,27 +1682,54 @@ need gala's.
      C:", `volume_test`; the scenario is MANUAL, `persist` on a 16 GiB
      sparse disk, 3600 s of run time; its log: `AvailableSpace 15741`,
      `free:=16506359808 required:=4437233664`).
-     Where the run ends now: preparing the download's staging, its
-     repoman.dll delay-loads the Restart Manager and fails
-     (`Call failed delayloading RstrtMgr.DLL`, ledger `rstrtmgr.dll`
-     missing dll), so `SetCurrentState failed` and the stream task ends
-     with `Failed to stage working op, Error:0x8007007e`
-     (ERROR_MOD_NOT_FOUND) about 17 min in; the task is retried every few
-     minutes, each time the same, and two HTTP requests to the CDN go
-     90 s without an answer first (`winhttp.dll!timed out` 90000 in the
-     ledger; their `Transport2` activities report 0 bytes). Read from the
-     kept disk image with `cargo xtask disk-files ... C:/Users/Public`.
+     It stages its download through the Restart Manager (done: gala's
+     rstrtmgr.dll, below) and downloads the streams over HTTP: 256 KiB
+     ranges from officecdn.microsoft.com, each on its own TCP connection
+     (gala's winhttp does not reuse connections), about 0.7 MB/s of guest
+     time under TCG (half of each range's ~320 ms is the client's own
+     work between requests; `XTASK_EVENTS=net`'s `tcp close` lines carry
+     each connection's bytes), with no request left unanswered: the two
+     90 s time-outs of earlier runs were in the staging failure's retry
+     loop and did not recur (to watch for: a `winhttp.dll!timed out`
+     ledger line, and a `tcp close` with 0 bytes received). It loads
+     wofutil.dll (done: gala's, no overlay filter, below).
+     Where the run ends now: about 30 min in (1.5 GB on C:), out of
+     memory in the 512 MiB VM (the ISO is under 64 MiB, so `qemu()`
+     gives no more): `persist: pages not written to the data area` first
+     (the writeback's buffers could not be allocated), then `persist:
+     changes not written to the disk (NoMemory)` at every sync, user page
+     faults out of memory, and OfficeClickToRun.exe (the downloader) ends
+     with 0xc0000005 when its stack cannot grow (`cannot push the
+     dispatcher frame`); the state dump has 36 frames free, the heap at
+     78 MiB (peak 177 MiB), the processes' commit about 67 MiB. What
+     holds the rest is not known yet: `persist: free memory stays low
+     after letting N pages go` (new) names the files' pages in memory
+     (dirty, never written, mapped) and each process's commit the first
+     time letting pages go cannot bring memory back. Next: rerun, read
+     that line, fix what pins the memory, then make the writeback
+     allocation-free (its page copies and buffers reserved at mount, so a
+     low-memory sync can still free memory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: gala's rstrtmgr.dll (x64:
-     repoman.dll imports RmStartSession, RmRegisterResources, RmGetList,
-     RmEndSession; OfficeClickToRun.exe also RmAddFilter, RmShutdown,
-     RmShutdownOnlyRegistered, RmRestart), test first with Windows'
-     answers for files nobody uses; why two of winhttp's requests to the
-     CDN get no answer for 90 s (`XTASK_EVENTS=net`); then the stream
-     download itself (4.44 GB) and what applying it needs (wofutil.dll,
-     asked for and missing: WOF compression); a service's environment
+     Done: gala's rstrtmgr.dll (x64 and x86, for 32-bit installers such
+     as Inno Setup's too: sessions, RmRegisterResources,
+     RmGetList over the kernel's FileProcessIdsUsingFileInformation,
+     RmShutdown, RmRestart, the filters, RmJoinSession within a process;
+     QueryFullProcessImageNameW of other processes; `rstrtmgr_test`, `wow64_rstrtmgr_test`, from
+     Microsoft's documentation, its open answers printed for a run on
+     Windows; ARCHITECTURE "Other DLLs"). Left of it: sessions shared
+     between processes (RmJoinSession of another process's key,
+     recorded), a window lookup for RmMainWindow (recorded), asking
+     applications to close before forcing (recorded).
+     Done: gala's wofutil.dll (x64: WofShouldCompressBinaries FALSE,
+     WofIsExternalFile a physical file, the driver functions
+     ERROR_INVALID_FUNCTION recorded; `wofutil_test`).
+     Next, in the order the run reaches them: the memory (above); the
+     stream download's speed (4.44 GB at 0.7 MB/s is about 100 min of
+     guest time under TCG, beyond the 3600 s limit; connection reuse in
+     winhttp, the client's time between ranges) and what applying it
+     needs; a service's environment
      (SYSTEM's profile variables, Windows' TEMP for services) and HKCU
      from the caller's token; the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
@@ -3052,7 +3079,7 @@ wow64.dll converts 32-bit system calls in user mode).
 2. Gaps the x86 Inno runs leave in the ledger: FormatMessage's HRESULT texts (REGDB_E_CLASSNOTREG:
    on that error path, when a COM class is missing, Inno's Setup raised an
    access violation, not yet understood), comctl32's TaskDialogIndirect,
-   shell32's SHPathPrepareForWriteW, rstrtmgr, riched20/msftedit and sfc
+   shell32's SHPathPrepareForWriteW, riched20/msftedit and sfc
    for i686.
 3. Two Windows 11 measurements (issue #8) that change how threads and
    static TLS start in a 32-bit process. **NtCreateThread** (the old call
@@ -3209,7 +3236,8 @@ from the command line first (CLI parity; the server profile too).
 3. Stage 3's rest: what Inno Setup's own install still reports and
    skips (the ledger of `pk_install_inno`): unpinning its shortcuts at
    uninstall (SHCreateItemFromParsingName), SHPathPrepareForWriteW, the
-   taskbar list (CLSID_TaskbarList), the Restart Manager (rstrtmgr.dll),
+   taskbar list (CLSID_TaskbarList), the Restart Manager's sessions
+   shared between processes (rstrtmgr.dll, ARCHITECTURE "Other DLLs"),
    HTML Help (hhctrl.ocx); its compiler compiling a script (ISCC.exe and
    the IDE's ISCmplr.dll write the Setup's icons and version with
    BeginUpdateResourceW/UpdateResourceW/EndUpdateResourceW, stubs today:

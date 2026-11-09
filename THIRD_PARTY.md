@@ -222,6 +222,20 @@ Rules for this file:
   WLDP_LOCKDOWN_DEFINED_FLAG, S_OK with host information and 0x10000000
   without; WldpQueryWindowsLockdownMode: S_OK, unlocked); master,
   fetched 2026-11-09; LGPL-2.1, behaviour and ABI facts only.
+- gala's rstrtmgr.dll (`user/rstrtmgr`) and `user/rstrtmgr_test`: the
+  structure layouts and constants (RM_PROCESS_INFO, RM_UNIQUE_PROCESS,
+  CCH_RM_SESSION_KEY, RM_APP_TYPE, RM_REBOOT_REASON, RM_FILTER_ACTION)
+  from Wine's `include/restartmanager.h` and the export list from
+  `dlls/rstrtmgr/rstrtmgr.spec` (master, fetched 2026-11-09; LGPL-2.1,
+  ABI facts only; Wine's functions are stubs and have no tests), the
+  behaviour from Microsoft's documentation of each function and of
+  RM_FILTER_INFO (learn.microsoft.com, restartmanager.h), and
+  FILE_PROCESS_IDS_USING_FILE_INFORMATION from ntifs.h's documentation.
+- gala's wofutil.dll (`user/wofutil`): the export list and the answers
+  of WofIsExternalFile and WofShouldCompressBinaries as Wine's
+  `dlls/wofutil/main.c` and `wofutil.spec` give them (master, fetched
+  2026-11-09; LGPL-2.1, behaviour only, no code copied); the rest from
+  Microsoft's wofapi.h documentation.
 
 | Our code | Specification | Spec license |
 |---|---|---|

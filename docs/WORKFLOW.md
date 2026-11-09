@@ -405,8 +405,11 @@ xtask that change how a scenario boots:
   from what it needs: the 4.44 GB its Click-to-Run client downloads at
   the 3.0 MB/s a gala guest fetched that CDN with under TCG (curl, 512
   MiB in 179 s onto a disk-backed C:), plus the ~6 min before the
-  download, doubled for a slower host (`OFFICE_INSTALL_TIMEOUT`);
-  dump scenarios 25 s. A
+  download, doubled for a slower host (`OFFICE_INSTALL_TIMEOUT`). The
+  client itself fetches at about 0.7 MB/s under TCG (a connection per
+  256 KiB range and its own work between ranges, ROADMAP OF), so
+  without KVM its download cannot finish in that time; a TCG run shows
+  how far it gets. Dump scenarios 25 s. A
   `SINGLE_THREAD_TCG` scenario's limit doubles without KVM. Every limit
   counts the VM's *run time*, not wall time (`xtask/src/vmtime.rs`): the
   wall time less the run-queue wait of its most-starved vCPU thread
