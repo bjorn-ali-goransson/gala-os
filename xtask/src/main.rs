@@ -1306,6 +1306,13 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("conpty_test", "user32.dll", "Windows/System32"),
     ("conpty_test", "gdi32.dll", "Windows/System32"),
     ("conpty_test", "user/bin/conhost.exe", "Windows/System32"),
+    // start_menu: gala's cmd.exe and conhost.exe in System32 as on Windows
+    // (also C:\gala's boot modules: the menu prefers System32), and what
+    // `gala install` loads (advapi32: the registry).
+    ("start_menu", "user/bin/cmd.exe", "Windows/System32"),
+    ("start_menu", "user/bin/conhost.exe", "Windows/System32"),
+    ("start_menu", "advapi32.dll", "Windows/System32"),
+    ("start_menu", "bcryptprimitives.dll", "Windows/System32"),
     ("console_window", "ntdll.dll", "Windows/System32"),
     ("console_window", "kernel32.dll", "Windows/System32"),
     ("console_window", "user32.dll", "Windows/System32"),
@@ -3298,6 +3305,7 @@ const USER_PROGRAMS: &[&str] = &[
     "cmd_test",
     "gala",
     "gala_cli_test",
+    "start_menu_test",
     "pk_install_test",
     "profile_test",
     "registry_test",
@@ -4773,6 +4781,7 @@ const UEFI_SCENARIOS: &[&str] = &[
     "virtio_gpu_reset",
     "filezilla",
     "console_window",
+    "start_menu",
 ];
 
 /// Scenarios whose screen is a virtio-gpu (modern only, no VGA: the
@@ -5960,6 +5969,31 @@ const SCENARIOS: &[Scenario] = &[
             "console_window_test: raw z",
             "console_window_test: ctrl-c",
             "console_window_test: done",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // ROADMAP SM: the start menu's Command Prompt (gala's cmd.exe in a
+        // console window) and an install-on-click tile (7-Zip, not
+        // installed: `gala install 7zip.7zip` in a console window);
+        // START_MENU_SCREEN clicks them.
+        name: "start_menu",
+        cmdline: "qemu_exit wallpaper=night run=start_menu_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "start_menu_test: listed",
+            "desktop: start menu starts Command Prompt: C:\\Windows\\System32\\cmd.exe",
+            "desktop: started C:\\Windows\\System32\\cmd.exe (pid",
+            "gala's cmd.exe has no interactive prompt yet",
+            "start_menu_test: command prompt window",
+            "desktop: start menu: 7-Zip is not installed: C:\\gala\\gala.exe install 7zip.7zip",
+            "desktop: started C:\\gala\\gala.exe (pid",
+            // Offline (no network card, no winhttp.dll): gala says why in
+            // the window.
+            "gala: source https://github.com/microsoft/winget-pkgs: listing",
+            "start_menu_test: install window closed",
+            "xtask: screen ok",
+            "start_menu_test: ok",
             "exited with status 0x00000000",
         ],
     },
@@ -9505,6 +9539,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("noscreen_windows", "presenter_test"),
     ("server_profile_windows", "presenter_test"),
     ("gala_cli", "gui_test"),
+    ("start_menu", "gui_test"),
+    ("start_menu", "start_menu"),
     ("virtio_gpu", "gui_test"),
     ("gui_test_headless", "gui_test"),
     ("virtio_gpu_reset", "gui_test"),
@@ -10190,6 +10226,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("gui_test", "needs a screen (the desktop draws on the framebuffer)"),
     ("gala_cli", "needs a screen (shasha) and child processes"),
     ("console_window", "needs a screen (the console window is on the desktop)"),
+    ("start_menu", "needs a screen (the start menu is on the desktop)"),
 ];
 
 /// The kernel flags gala-um applies to a scenario's run (`um_command`),
@@ -11794,6 +11831,104 @@ const GTK_SCREEN: ScreenCheck = ScreenCheck {
     ],
 };
 
+/// The start menu (600 x 640 at (340, 100) on the 1280 x 800 screen) and
+/// its tiles: 89 x 84 cells from (372, 216), six to a row, each icon (32 x
+/// 32) 26 px in and 10 down, its name from 48 down. In start_menu's image:
+/// Command Prompt, Hello window (gui_test.exe), then the catalog, none of
+/// it installed (a download badge, the accent, over each icon's
+/// bottom-right corner): Microsoft Office, FileZilla, .NET, Python;
+/// Chromium, Git, 7-Zip on the second row. The pointer starts in the
+/// middle (640, 400).
+const START_MENU_SCREEN: ScreenCheck = ScreenCheck {
+    marker: "start_menu_test: ready",
+    steps: &[
+        ScreenStep {
+            after: "",
+            // To the start button (640, 776: alone on the taskbar), a
+            // click: the menu.
+            input: &["mouse_move 0 255", "mouse_move 0 121", "mouse_button 1", "mouse_button 0"],
+            pixels: &[
+                PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the menu
+                PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
+                PixelCheck::AnyIn(398, 226, 32, 32, 0x333333), // Command Prompt
+                PixelCheck::AnyIn(372, 264, 85, 14, 0x1b1b1b), // "Command"
+                PixelCheck::AnyIn(487, 226, 32, 32, 0x4a80f0), // Hello window
+                PixelCheck::AnyIn(598, 248, 12, 12, 0x005fb8), // Office's badge
+                PixelCheck::AnyIn(550, 264, 85, 30, 0x1b1b1b), // "Microsoft Office"
+                PixelCheck::AnyIn(865, 248, 12, 12, 0x005fb8), // Python's badge
+                PixelCheck::AnyIn(598, 332, 12, 12, 0x005fb8), // 7-Zip's badge
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // The Command Prompt's tile (414, 242), a click: cmd.exe in
+            // a console window.
+            input: &[
+                "mouse_move -226 -255",
+                "mouse_move 0 -255",
+                "mouse_move 0 -24",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "desktop: shown window 'cmd.exe'",
+            // conhost's window at (60, 60): Campbell's background, and
+            // what cmd said (its first line) in Campbell's grey.
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
+                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // Back to the start button (615, 776, beside the console
+            // window's button now), the menu again: the Command
+            // Prompt is recent now; 7-Zip still has its badge.
+            input: &[
+                "mouse_move 201 255",
+                "mouse_move 0 255",
+                "mouse_move 0 24",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[
+                PixelCheck::AnyIn(598, 332, 12, 12, 0x005fb8), // 7-Zip's badge
+                PixelCheck::AnyIn(392, 596, 32, 32, 0x333333), // recent: Command Prompt
+            ],
+        },
+        ScreenStep {
+            after: "",
+            // 7-Zip's tile (592, 326), a click: `gala install 7zip.7zip`
+            // in a console window.
+            input: &[
+                "mouse_move -23 -255",
+                "mouse_move 0 -195",
+                "mouse_button 1",
+                "mouse_button 0",
+            ],
+            pixels: &[],
+        },
+        ScreenStep {
+            after: "desktop: shown window 'gala.exe'",
+            // Its console window, with gala's output in it.
+            input: &[],
+            pixels: &[
+                PixelCheck::AnyIn(200, 200, 40, 40, 0x0c0c0c),
+                PixelCheck::AnyIn(64, 94, 600, 24, 0xcccccc),
+            ],
+        },
+        ScreenStep {
+            after: "start_menu_test: install window",
+            // Alt+F4 closes it (the active window): its conhost.exe ends.
+            input: &["sendkey alt-f4"],
+            pixels: &[],
+        },
+    ],
+};
+
 /// gui_test's window: 400 x 300 at (100, 100); the desktop's frame is a
 /// 1-pixel outline and a 32-pixel caption (Windows 11's metrics), so its
 /// client area starts at (101, 133) (kernel/src/nt/desktop). The screen is
@@ -11827,7 +11962,8 @@ const GUI_TEST_SCREEN: ScreenCheck = ScreenCheck {
             pixels: &[
                 PixelCheck::AnyIn(590, 600, 20, 20, 0xf2f4f8), // the start menu
                 PixelCheck::AnyIn(392, 182, 60, 18, 0x1b1b1b), // "Pinned"
-                PixelCheck::AnyIn(398, 226, 32, 32, 0x4a80f0), // "Hello window"
+                PixelCheck::AnyIn(398, 226, 32, 32, 0x333333), // "Command Prompt"
+                PixelCheck::AnyIn(487, 226, 32, 32, 0x4a80f0), // "Hello window"
             ],
         },
         ScreenStep {
@@ -12049,6 +12185,7 @@ const SCREEN_SCENARIOS: &[(&str, ScreenCheck)] = &[
         },
     ),
     ("gui_test", GUI_TEST_SCREEN),
+    ("start_menu", START_MENU_SCREEN),
     ("lx_wl_input", WL_INPUT_SCREEN),
     ("lx_simple_shm", SIMPLE_SHM_SCREEN),
     ("lx_gtk", GTK_SCREEN),

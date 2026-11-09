@@ -1448,12 +1448,66 @@ pub fn program_exists(path: &str) -> bool {
     open_program(path).is_ok()
 }
 
+/// Whether the program at Win32 path `path` is a console program
+/// (IMAGE_SUBSYSTEM_WINDOWS_CUI): started from the start menu, it gets a
+/// console window, as one started from Explorer does.
+pub fn is_console_program(path: &str) -> Result<bool, NtStatus> {
+    const IMAGE_SUBSYSTEM_WINDOWS_CUI: u16 = 3;
+    let object = open_program(path)?;
+    let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
+    Ok(super::section::image_layout(f.node)?.info.subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI)
+}
+
+/// `text` with each `%NAME%` of the initial environment (ENVIRONMENT,
+/// names compared case-insensitively, as ExpandEnvironmentStrings does)
+/// replaced by its value, in `buf`; a `%` that starts no known name stays.
+/// None when it does not fit.
+pub fn expand_environment<'b>(text: &str, buf: &'b mut [u8]) -> Option<&'b str> {
+    let mut n = 0;
+    let mut put = |buf: &mut [u8], part: &str| -> Option<()> {
+        buf.get_mut(n..n + part.len())?.copy_from_slice(part.as_bytes());
+        n += part.len();
+        Some(())
+    };
+    let mut rest = text;
+    while let Some(at) = rest.find('%') {
+        put(buf, &rest[..at])?;
+        let after = &rest[at + 1..];
+        let value = after.find('%').and_then(|end| {
+            let name = &after[..end];
+            ENVIRONMENT.iter().find_map(|v| {
+                let (k, value) = v.split_once('=')?;
+                (!name.is_empty() && k.eq_ignore_ascii_case(name)).then_some((value, end))
+            })
+        });
+        match value {
+            Some((value, end)) => {
+                put(buf, value)?;
+                rest = &after[end + 1..];
+            }
+            None => {
+                put(buf, "%")?;
+                rest = after;
+            }
+        }
+    }
+    put(buf, rest)?;
+    core::str::from_utf8(&buf[..n]).ok()
+}
+
 /// Starts the program at Win32 path `path` with arguments `args` (after
 /// the quoted path on its command line) in its own directory, with new
 /// console handles, under primary token `token` (None: the boot user's,
 /// shasha's start menu; GalaDesktopAction's Start passes a copy of the
-/// caller's, as CreateProcess would); its process id.
-pub fn launch(path: &'static str, args: &str, token: Option<ObjectRef>) -> Result<u64, NtStatus> {
+/// caller's, as CreateProcess would), in console session `console` (a
+/// console window's, `nt::action::start_from_menu`; None: none); its
+/// process id.
+pub fn launch(
+    path: &'static str,
+    args: &str,
+    token: Option<ObjectRef>,
+    console: Option<KArc<super::conhost::Session>>,
+) -> Result<u64, NtStatus> {
     let object = open_program(path)?;
     let ObjectBody::File(f) = &object.body else { return Err(NtStatus::OBJECT_TYPE_MISMATCH) };
     let layout = super::section::image_layout(f.node)?;
@@ -1481,7 +1535,7 @@ pub fn launch(path: &'static str, args: &str, token: Option<ObjectRef>) -> Resul
         runtime_data: &[],
         parent_id: 0,
         token,
-        console: None,
+        console,
     })
     .map_err(|e| match e {
         LoadError::Pe(_) => NtStatus::INVALID_IMAGE_FORMAT,
@@ -1492,7 +1546,26 @@ pub fn launch(path: &'static str, args: &str, token: Option<ObjectRef>) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::number_variable;
+    use super::{expand_environment, number_variable};
+
+    #[test]
+    fn environment_variables_expand_as_the_boot_users() {
+        let mut buf = [0u8; 96];
+        assert_eq!(
+            expand_environment("%LocalAppData%\\Programs\\x.exe", &mut buf),
+            Some("C:\\Users\\gala\\AppData\\Local\\Programs\\x.exe")
+        );
+        let mut buf = [0u8; 96];
+        assert_eq!(
+            expand_environment("%SystemRoot%\\System32\\cmd.exe", &mut buf),
+            Some("C:\\Windows\\System32\\cmd.exe")
+        );
+        // Unknown names and lone percent signs stay.
+        let mut buf = [0u8; 96];
+        assert_eq!(expand_environment("100% %NoSuch% %%", &mut buf), Some("100% %NoSuch% %%"));
+        let mut buf = [0u8; 8];
+        assert_eq!(expand_environment("%ProgramFiles%", &mut buf), None);
+    }
 
     #[test]
     fn number_variables() {

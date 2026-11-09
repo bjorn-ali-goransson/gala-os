@@ -5378,12 +5378,35 @@ session's is shown by nothing unless GalaSession attaches a presenter
 - **Start menu** (600 x 640, centred above the taskbar): a search box
   (typing filters the programs, Enter starts the first, Esc or the
   Windows key closes; the Windows key pressed and released alone also
-  opens it), "Pinned": a grid of tiles for the programs of `PROGRAMS`
-  whose files exist (checked outside the desktop's lock before a
-  click), "Recommended": the last four started, and a user foot with
-  the fortress as the avatar. A tile starts its program
-  (`nt::action::start_path` -> `process::launch`: the boot user, its
-  directory current, new console handles).
+  opens it), "Pinned": a grid of tiles (six to a row, four rows:
+  `MAX_TILES`), "Recommended": the last four started, and a user foot
+  with the fortress as the avatar. The tiles are `desktop::PROGRAMS`
+  (ROADMAP SM): each a name, candidate paths (`%NAME%` of the boot
+  user's environment expanded by `process::expand_environment`; the
+  first that exists is the program) and, for a catalog entry, a winget
+  id. gala's own programs (Command Prompt: System32's cmd.exe, else
+  C:\gala's; gui_test's "Hello window") are listed when present, the
+  catalog always (Microsoft Office, FileZilla, .NET, Python, Chromium,
+  Git, 7-Zip; their paths are where each package's installer puts the
+  program per its winget-pkgs manifest, the user scope's first), one
+  tile per name (`list_programs`, reading the file system outside the
+  desktop's lock when a press or the Windows key's release may open the
+  menu). A catalog entry not installed is drawn dimmed with a download
+  badge (an accent circle with a white arrow). A click (or Enter, the
+  first tile) hands the program to `nt::action::start_from_menu`, which
+  checks again outside the lock (`menu_request`): a program that exists
+  starts (`process::launch`: the boot user, its directory current, new
+  console handles), else `C:\gala\gala.exe install <id>` runs. A console
+  program (IMAGE_SUBSYSTEM_WINDOWS_CUI) gets a console window, as one
+  started from Explorer does: a console session hosted by conhost.exe
+  (System32's, else C:\gala's), started first with the session's id and
+  the program's name; that window stays after the program ends (an
+  install's output and errors stay in view). Logged (`desktop: start
+  menu starts <name>: <path>`, `desktop: start menu: <name> is not
+  installed: <gala> install <id>`, `desktop: started <path> (pid N) in
+  a console window`) and a `window` event `start menu` (op start,
+  install or missing; session, name, target, pid, status). Scenario
+  `start_menu` (start_menu_test, screen check).
 
 #### Window behaviour
 

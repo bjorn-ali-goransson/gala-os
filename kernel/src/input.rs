@@ -70,7 +70,11 @@ fn input_thread(_: usize) {
                         KEYS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     }
                     mouse.flush(&mut deliver);
-                    crate::nt::desktop::key_event(vk, scan, extended, down);
+                    if let Some((session, program)) =
+                        crate::nt::desktop::key_event(vk, scan, extended, down)
+                    {
+                        crate::nt::action::start_from_menu(session, program);
+                    }
                 }
                 continue;
             }
