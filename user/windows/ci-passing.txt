@@ -10,6 +10,7 @@ args_test
 async_test
 bcrypt_test
 bench
+clipboard_test
 clock_test
 clockcal_test
 cmd_test
