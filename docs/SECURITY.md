@@ -192,8 +192,12 @@ impersonation level: STATUS_BAD_IMPERSONATION_LEVEL), else the
 process's. The check runs wherever an object is opened by name or id:
 NtCreateFile and NtOpenFile (and the parent directory for creation and
 deletion: FILE_ADD_FILE, FILE_DELETE_CHILD), NtCreateKey/NtOpenKey, the
-NtOpen* of named objects and NtCreate* opening an existing one, and
-(not yet) NtOpenProcess/NtOpenThread. The handle gets the rights
+NtOpen* of named objects and NtCreate* opening an existing one, the
+service control manager's connections and service handles (the SCM's
+and each service's documented descriptors, SC_MANAGER_* and SERVICE_*
+rights: a standard user connects, enumerates and queries but creates,
+starts and stops nothing; ARCHITECTURE "The service control manager"),
+and (not yet) NtOpenProcess/NtOpenThread. The handle gets the rights
 granted; handle duplication never grants more than the source handle
 has; services then check the handle's access mask.
 

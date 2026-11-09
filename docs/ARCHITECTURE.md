@@ -594,6 +594,7 @@ numbers and the version reported to programs depend on it.
 | 0x7f5a, 0x7f5b | GalaRequestHandover, GalaHandoverPause | "Kernel handover" |
 | 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
 | 0x7fa0-0x7fa5 | GalaUserObjectOpen, GalaUserObjectConnection, GalaUserObjectSet, GalaUserObjectClose, GalaUserObjectInformation, GalaUserObjectEnum | "Window stations and desktops" |
+| 0x7fd0-0x7fd5 | GalaScmOpen, GalaServiceOpen, GalaServiceCreate, GalaServiceQuery, GalaServiceEnum, GalaServiceControl | "The service control manager" |
 | 0x7fc0-0x7fc7 | GalaClipboardOpen, GalaClipboardClose, GalaClipboardEmpty, GalaClipboardSet, GalaClipboardGet, GalaClipboardInfo, GalaClipboardFormats, GalaClipboardListener | "The clipboard" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
@@ -2440,6 +2441,91 @@ shutdown.
   functions convert names and string data (REG_SZ, REG_EXPAND_SZ,
   REG_MULTI_SZ) through the ANSI code page (UTF-8 on gala).
 
+## The service control manager
+
+The SCM (`nt::scm`, its calls in `nt/scm_calls.rs`; advapi32's
+`service.rs`; `svc_test`, `wow64_svc_test`) is in the kernel, beside
+the registry it reads, until a user-mode services process exists (as
+the session manager is the kernel's until RS B4): its access checks are
+then the kernel's, against the caller's effective token (an
+impersonating thread's, as services.exe impersonates its RPC client).
+
+- **The database** is Windows' own store,
+  `HKLM\SYSTEM\CurrentControlSet\Services`: a subkey with a `Type`
+  value is a service (other subkeys are not, as for the SCM on
+  Windows); its configuration is the key's values (Type, Start,
+  ErrorControl, ImagePath, DisplayName, ObjectName, Group, Tag,
+  DependOnService, DependOnGroup). Nothing is cached: a key written by
+  a program or a `registry` module is a service at once, and with
+  `persist` created services are kept with the registry. The seed has
+  AFD (Winsock's ancillary function driver, `\Device\Afd`), the one
+  driver gala's kernel provides.
+- **Handles** are kernel handles to `ScManager` and `Service` objects
+  (CloseServiceHandle is a GalaServiceControl that refuses other
+  handles). Each carries its descriptor in `KObject::security`, so
+  QueryServiceObjectSecurity-style reads through NtQuerySecurityObject
+  see it; the access check is `security::access_check` with the
+  documented mappings (`SCM_MAPPING`, `SERVICE_MAPPING`).
+- **Descriptors** ("Service Security and Access Rights"): the SCM's
+  gives Authenticated Users READ_CONTROL, CONNECT, ENUMERATE_SERVICE and
+  QUERY_LOCK_STATUS, SYSTEM those and MODIFY_BOOT_CONFIG,
+  Administrators all; a service's is its key's `Security\Security`
+  value when present, else the CreateService default (Authenticated
+  Users query, interrogate and send user controls; SYSTEM also start,
+  stop, pause; Administrators all). OpenSCManager always asks for
+  SC_MANAGER_CONNECT, as documented.
+- **State**: a table of the services with open handles (their count
+  and deletion mark). DeleteService marks; the key and its subkeys go
+  when the last handle closes (`ServiceObject`'s drop), and until then
+  the service still opens while creating it again is
+  ERROR_SERVICE_MARKED_FOR_DELETE. The built-in drivers (AFD) report
+  SERVICE_RUNNING, no process, no controls accepted; every other
+  service is SERVICE_STOPPED with exit code ERROR_SERVICE_NEVER_STARTED.
+- **Errors**: the SCM's Win32 errors travel as FACILITY_NTWIN32 statuses
+  (`scm::win32`, 0xC007xxxx) and advapi32 takes them back out; what
+  Windows' RPC client stub checks before reaching the SCM (NULL handles
+  and pointers, QueryServiceStatusEx's and EnumServicesStatusExW's level
+  first, QueryServiceStatusEx's 36-byte size second) is checked in
+  advapi32, in Windows' order (Wine's service tests).
+- **Calls** (0x7fd0-0x7fd5): GalaScmOpen(access, *handle);
+  GalaServiceOpen(scm, name, length, access, *handle);
+  GalaServiceCreate(scm, record, length, access, *handle) (a
+  width-independent record: Type, Start, ErrorControl, then offset and
+  length of the name, display name, path, group, dependencies,
+  account); GalaServiceQuery(service, class, buffer, length, *needed)
+  (0: SERVICE_STATUS_PROCESS; 1: the configuration as such a record);
+  GalaServiceEnum(scm, types, states, buffer, length, *needed) (every
+  matching service, status and names; advapi32 lays out
+  ENUM_SERVICE_STATUS_PROCESSW, the group filter and the resume index);
+  GalaServiceControl(handle, op, code, *status) (close, delete, start,
+  control). Every argument is a ULONG, handle or pointer to data laid
+  out alike in x86 and x64, so wow64.dll converts them generically.
+- **advapi32**: OpenSCManagerW/A (this machine only: another is
+  RPC_S_SERVER_UNAVAILABLE, recorded; "ServicesActive" or NULL;
+  "ServicesFailed" ERROR_DATABASE_DOES_NOT_EXIST, other names
+  ERROR_INVALID_NAME), OpenServiceW/A, CreateServiceW/A (the password
+  is not kept), CloseServiceHandle, DeleteService, StartServiceW/A,
+  ControlService, QueryServiceStatus(Ex), QueryServiceConfigW/A,
+  EnumServicesStatusExW.
+- **Observability**: every connection, open, creation, deletion mark,
+  start request and control is a `scm:` log line (the first 64 per boot;
+  pid, program, name, access granted or the status) and a `service`
+  event (`events=service`); a service's key deleted with its last
+  handle is logged with the outcome.
+- **Limits**: starting a service is not supported (StartService of a
+  startable one is ERROR_NOT_SUPPORTED, logged and recorded
+  `GalaServiceControl: start a service`; the `restart=` supervisor is
+  the piece it will use), so no service but the built-in drivers ever
+  runs and no control reaches a program; StartServiceCtrlDispatcher
+  still fails as for a console program. Not there yet (gala_stubs,
+  recorded when called): ChangeServiceConfig, QueryServiceConfig2,
+  EnumDependentServices, LockServiceDatabase, SetServiceStatus and the
+  control handler registration, user services (types 0x50/0x60,
+  refused and recorded), load-order tags, the "remote" and "local"
+  authenticated users distinction of the documented descriptors (one
+  Authenticated Users ACE), service SIDs in service tokens, SCM handles
+  across a kernel handover (refused).
+
 ## gala's system DLLs
 
 Windows programs need ntdll.dll, kernel32.dll and the other system DLLs
@@ -3117,12 +3203,13 @@ definition for both layouts, "Plan: WOW64").
 - **Service SIDs**: `NT SERVICE\<name>` is S-1-5-80 followed by the SHA-1
   of the upper-cased UTF-16 name (five DWORDs; bcrypt, loaded on first
   use); LookupAccountNameW/SidW resolve them for services registered
-  under `HKLM\SYSTEM\CurrentControlSet\Services` (there is no service
-  control manager: a service is its key), and S-1-5-80-0 as ALL
+  under `HKLM\SYSTEM\CurrentControlSet\Services` (the service
+  control manager's database), and S-1-5-80-0 as ALL
   SERVICES; domain NT SERVICE, SidTypeWellKnownGroup.
-- **Services**: StartServiceCtrlDispatcherW/A fail as for a console
-  program (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: no service control
-  manager).
+- **Services**: the service control manager's client functions ("The
+  service control manager"); StartServiceCtrlDispatcherW/A fail as for
+  a console program (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: the SCM
+  starts no service processes yet).
 - **Registry**: "Registry". **LSA policy and virtual accounts**
   (`policy.rs`): "Accounts and logon".
 - **ETW** (`etw.rs`): providers register, but no trace session exists,
@@ -12852,7 +12939,7 @@ ROADMAP.
 - Struct layouts are written by hand, not generated with bindgen.
 - Bootloader-reclaimable memory is not reclaimed (it must not be reused
   until the boot info that lives there has been copied out).
-- No 32-bit programs (WOW64); no service control manager.
+- No service process is ever started ("The service control manager").
 - No Windows drivers (ROADMAP Later, DR). The invariant they keep from
   the start: a third-party driver never runs unsupervised in gala's
   kernel address space; a driver crash restarts its host, and kernel

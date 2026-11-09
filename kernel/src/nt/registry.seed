@@ -194,6 +194,18 @@
 "DaylightName"=sz:Coordinated Universal Time
 "DynamicDaylightTimeDisabled"=dword:0
 [\Registry\Machine\SYSTEM\CurrentControlSet\Services]
+; The service control manager's database (nt::scm): a subkey with a Type
+; value is a service. AFD, Winsock's ancillary function driver, is one
+; gala's kernel itself provides (\Device\Afd), so the SCM reports it
+; running.
+[\Registry\Machine\SYSTEM\CurrentControlSet\Services\AFD]
+"Type"=dword:1
+"Start"=dword:1
+"ErrorControl"=dword:1
+"ImagePath"=expand:\SystemRoot\system32\drivers\afd.sys
+"DisplayName"=sz:Ancillary Function Driver for Winsock
+"Description"=sz:Ancillary Function Driver for Winsock
+"Group"=sz:PNP_TDI
 [\Registry\Machine\SYSTEM\Setup]
 "SystemSetupInProgress"=dword:0
 

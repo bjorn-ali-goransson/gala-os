@@ -55,6 +55,7 @@ mod perf;
 mod policy;
 mod registry;
 mod security;
+mod service;
 mod token;
 mod trustee;
 mod unimplemented;

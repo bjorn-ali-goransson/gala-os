@@ -304,6 +304,15 @@ syscall_stubs! {
     GalaClipboardInfo = 0x7fc5, fn(record: *mut u8);
     GalaClipboardFormats = 0x7fc6, fn(formats: *mut u32, max: u32, count: *mut u32);
     GalaClipboardListener = 0x7fc7, fn(hwnd: u64, add: u32);
+    // The service control manager (gala's own; nt::scm_calls), for advapi32.
+    GalaScmOpen = 0x7fd0, fn(access: u32, handle: *mut usize);
+    GalaServiceOpen = 0x7fd1, fn(scm: usize, name: *const u16, length: u32, access: u32, handle: *mut usize);
+    GalaServiceCreate = 0x7fd2, fn(scm: usize, record: *const u8, length: u32, access: u32, handle: *mut usize);
+    GalaServiceQuery = 0x7fd3, fn(service: usize, class: u32, buffer: *mut u8, length: u32, needed: *mut u32);
+    GalaServiceEnum = 0x7fd4, fn(
+        scm: usize, kinds: u32, states: u32, buffer: *mut u8, length: u32, needed: *mut u32
+    );
+    GalaServiceControl = 0x7fd5, fn(handle: usize, op: u32, code: u32, status: *mut u32);
     GalaWindowRegister = 0x7f41, fn(info: *const u8, hwnd: *mut u64);
     GalaWindowUpdate = 0x7f42, fn(info: *const u8);
     GalaWindowUnregister = 0x7f43, fn(hwnd: u64);

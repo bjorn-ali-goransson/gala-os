@@ -32,6 +32,7 @@ pub mod quota;
 pub mod registry;
 pub mod reglog;
 pub mod regview;
+pub mod scm;
 pub mod section;
 pub mod security;
 pub mod session;
