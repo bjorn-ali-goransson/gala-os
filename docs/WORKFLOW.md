@@ -1404,8 +1404,10 @@ source).
   EXTRA_MODULES entry, driven by a script of ours in
   `user/lx/<program>/` (`lx_busybox` runs `busybox sh /lx/shell.sh` with
   `lxenv=PATH=/lx`). Their transcript is per scenario,
-  `user/lx/<program>/<scenario>.txt` (`lx_expect::check_boot`), written
-  from POSIX's and the program's documented output, one labelled line per
+  `user/lx/<program>/<scenario>.txt` (`lx_expect::check_boot`; a
+  Wayland client's, such as `weston-simple-shm/lx_simple_shm.txt`, is
+  its run against the host's weston headless backend, the same build),
+  written from POSIX's and the program's documented output, one labelled line per
   check; cross-check it with the host's dash and coreutils (shell.sh's
   part after its setup, or httpd.sh behind a `busybox() { "$@"; }`
   shim; busybox is a test subject: it runs inside gala, where its
@@ -1711,8 +1713,12 @@ it on first use.
   its `tools/` unpacked with 7-Zip; a nuget.org `.nupkg` (a library
   package: FlaUI) is a plain zip, its members paths such as
   `lib/net8.0-windows7.0/FlaUI.Core.dll`; a Debian package (`.deb`:
-  Ubuntu's glibc) is unpacked with `dpkg-deb -x`, its member files
-  (`usr/lib/x86_64-linux-gnu/libc.so.6`) moved up by their names. One fetch runs at a time
+  Ubuntu's glibc, weston, libwayland-client, libffi) is unpacked with
+  `dpkg-deb -x`, its member files (`usr/lib/x86_64-linux-gnu/libc.so.6`)
+  moved up by their names; a member that is a symbolic link (a
+  library's soname, `libffi.so.8`) is its target under the link's name.
+  Take a .deb's SHA-256 from the release's signed `Packages` index
+  (`dists/noble/<component>/binary-amd64/Packages.gz`). One fetch runs at a time
   (ISOs are built in parallel), and a `.unpacked-<sha256>` marker makes
   an interrupted unpack run again. An unpack (no marker for the pinned
   checksum and selection: a new version, changed members, an interrupted

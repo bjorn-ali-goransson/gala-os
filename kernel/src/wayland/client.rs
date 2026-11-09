@@ -52,8 +52,11 @@
 //!   rows (all of them for a new or resized window) from the buffer's
 //!   pool and releases the buffer at once (the pixels are copied); a
 //!   commit with a null buffer unmaps it, and the next one configures it
-//!   again. Frame callbacks are done when their commit was applied (there
-//!   is no composition clock to wait for yet).
+//!   again. Frame callbacks are done at the refresh after their commit
+//!   was applied (`refresh`, which the server calls at 60 Hz while any
+//!   are due): the commit is presented at once, and a client drawing on
+//!   its frame callbacks draws at the display's rate, not as fast as it
+//!   can.
 //! - **Accepted and not acted on** (`Note::Ignored`, ledgered by the
 //!   server): regions, buffer scale and transform other than 1 and
 //!   normal, surface offsets, window geometry, and the toplevel's
@@ -526,8 +529,15 @@ pub struct Client<F> {
     out_fds: VecDeque<(usize, F)>,
     seat: Seat,
     serial: u32,
+    /// Frame callbacks whose commit was applied, waiting for the next
+    /// refresh (`refresh`).
+    due: Vec<u32>,
     /// Requests handled (the state dump).
     pub requests: u64,
+    /// Commits that showed a buffer, and frame callbacks done (the state
+    /// dump, the connection's summary).
+    pub commits: u64,
+    pub frames: u64,
 }
 
 /// Arguments as WAYLAND_DEBUG=1 shows them.
@@ -597,7 +607,10 @@ impl<F> Client<F> {
             out_fds: VecDeque::new(),
             seat: Seat::default(),
             serial: 0,
+            due: Vec::new(),
             requests: 0,
+            commits: 0,
+            frames: 0,
         })
     }
 
@@ -672,6 +685,7 @@ impl<F> Client<F> {
         self.objects.clear();
         self.fds.clear();
         self.out_fds.clear();
+        self.due.clear();
     }
 
     /// Its objects for the state dump, one per line.
@@ -1535,6 +1549,9 @@ impl<F> Client<F> {
                 }
             }
         }
+        if shown.is_some() {
+            self.commits += 1;
+        }
         let window = self.surface(sid).and_then(|s| s.window);
         host.note(Note::Commit {
             surface: sid,
@@ -1543,13 +1560,33 @@ impl<F> Client<F> {
             window,
             placed: placed.filter(|_| window.is_some()),
         });
+        // Done at the next refresh (the commit is presented already).
+        if self.due.try_extend_from_slice(&frames).is_err() {
+            return Err(self.out_of_memory(host));
+        }
+        Ok(())
+    }
+
+    /// Whether frame callbacks wait for the next refresh.
+    pub fn frames_due(&self) -> bool {
+        !self.due.is_empty()
+    }
+
+    /// The refresh came: every frame callback whose commit was applied is
+    /// done, with the time in milliseconds, and deleted.
+    pub fn refresh<H: Host<Fd = F>>(&mut self, host: &mut H) -> Result {
         let now = host.now_ms();
-        for cb in frames {
-            if self.object(cb).is_some() {
+        let due = core::mem::take(&mut self.due);
+        for &cb in &due {
+            if matches!(self.object(cb), Some(Object { kind: Kind::Callback, .. })) {
                 self.event(host, cb, WL_CALLBACK, 0, &[Arg::Uint(now)])?;
                 self.delete(host, cb)?;
+                self.frames += 1;
             }
         }
+        // The vector's room is kept for the next ones.
+        self.due = due;
+        self.due.clear();
         Ok(())
     }
 

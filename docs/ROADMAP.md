@@ -2149,6 +2149,18 @@ the next breakthroughs).
   are the desktop's actions on the window; wm_capabilities maximize and
   minimize. `events=wayland`'s `wayland configure`, `placed` in `wayland
   commit`.
+- Step 2's first real client: `weston-simple-shm` (`lx_simple_shm`:
+  weston 13's demo, Ubuntu 24.04's build with its libwayland-client and
+  libffi, `PREBUILT`s, on glibc) draws its animated frames on a headless
+  desktop inside shasha's frame (the screen check: many colours in its
+  client area) and ends at Esc, its transcript real Linux's (against
+  weston's headless backend). Built for it: fallocate (`posix_fallocate`
+  of its buffer file; memfd_test, recorded on Linux: allocate, KEEP_SIZE,
+  PUNCH_HOLE, the seals, the errors); frame callbacks done at the 60 Hz
+  refresh after their commit instead of at once (a client drawing on its
+  callbacks no longer redraws as fast as the CPU allows); the
+  connection's summary line (requests, commits shown, frame callbacks
+  done).
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2174,16 +2186,17 @@ the next breakthroughs).
      has them;
    - `xdg_wm_base.ping` on a timer once the desktop marks windows that
      do not answer (none, Windows' or Linux's, are marked today);
-   - frame callbacks paced by composition (done at commit today), the
+   - frame callbacks paced by the presenter's own refresh (a 60 Hz
+     tick of the server's today, not the display's vblank), the
      server's allocations charged to the client's quota;
    - a socket per session's desktop under its user's `/run/user/<uid>`,
      with `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` given to the Linux
      programs started there (today one socket for the boot user, the
      environment passed by whoever starts them), and the server on
      by default where a desktop is;
-   - `weston-simple-shm` from weston's demos (wl_input_test's screen
-     check already finds a Wayland window's pixels inside shasha's
-     frame).
+   - more of weston's demos as clients (simple-damage: buffer scale
+     and transform, viewporter; eventdemo: input through libwayland),
+     each a `PREBUILT` member of the same package.
    Still open in the prerequisites, ledgered: a datagram socket's
    connect and sendto by name, SCM_CREDENTIALS with SO_PASSCRED, rights
    on a MSG_PEEK, collecting rights cycles in flight.

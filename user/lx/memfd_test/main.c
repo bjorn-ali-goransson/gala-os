@@ -6,7 +6,8 @@
  * grown with mremap after the file grew, a mapping outliving its fd;
  * MFD_CLOEXEC and MFD_ALLOW_SEALING; the seals (fcntl F_ADD_SEALS and
  * F_GET_SEALS: F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE, F_SEAL_SEAL) and
- * what each refuses; MFD_NOEXEC_SEAL (F_SEAL_EXEC); the errors.
+ * what each refuses; MFD_NOEXEC_SEAL (F_SEAL_EXEC); fallocate (allocate,
+ * KEEP_SIZE, PUNCH_HOLE, the seals); the errors.
  *
  * Nothing printed varies: fd numbers are fixed by lx_init, the memfd's
  * name is never read back (its /proc link would show it), contents are
@@ -265,6 +266,40 @@ int main(void)
 	say_ret("F_GET_SEALS", seals(fd));
 	say_ret("F_ADD_SEALS after SEAL", add_seals(fd, SEAL_GROW));
 	say_ret("F_ADD_SEALS nothing after SEAL", add_seals(fd, 0));
+
+	/* fallocate (glibc's posix_fallocate, which weston's and GTK's
+	 * buffer files use): mode 0 allocates, growing the file and never
+	 * shrinking it; KEEP_SIZE does not grow it; PUNCH_HOLE needs
+	 * KEEP_SIZE and zeroes the range; the seals apply; the errors. */
+	i64 fa = sys2(SYS_memfd_create, "fa", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	say_ret("fallocate 10000", sys4(SYS_fallocate, fa, 0, 0, 10000));
+	say_stat("fstat after fallocate", fa);
+	say_ret("fallocate inside", sys4(SYS_fallocate, fa, 0, 100, 10));
+	say_ret("fallocate KEEP_SIZE past the end", sys4(SYS_fallocate, fa, 1, 0, 20000));
+	say_stat("fstat after KEEP_SIZE", fa);
+	sys4(SYS_pwrite64, fa, "punch me", 8, PAGE);
+	say_ret("fallocate PUNCH_HOLE alone", sys4(SYS_fallocate, fa, 2, PAGE, PAGE));
+	say_ret("fallocate PUNCH_HOLE|KEEP_SIZE", sys4(SYS_fallocate, fa, 3, PAGE, PAGE));
+	char hole[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+	sys4(SYS_pread64, fa, hole, 8, PAGE);
+	say_bool("the hole reads as zeros", lx_memeq(hole, "\0\0\0\0\0\0\0\0", 8));
+	say_stat("fstat after PUNCH_HOLE", fa);
+	say_ret("fallocate ZERO_RANGE", sys4(SYS_fallocate, fa, 0x10, 0, 10));
+	say_ret("fallocate unknown mode", sys4(SYS_fallocate, fa, 0x1000, 0, 10));
+	say_ret("fallocate length 0", sys4(SYS_fallocate, fa, 0, 0, 0));
+	say_ret("fallocate offset -1", sys4(SYS_fallocate, fa, 0, -1, 10));
+	say_ret("F_ADD_SEALS GROW", add_seals(fa, SEAL_GROW));
+	say_ret("fallocate past the end (GROW)", sys4(SYS_fallocate, fa, 0, 0, 20000));
+	say_ret("fallocate inside (GROW)", sys4(SYS_fallocate, fa, 0, 0, 100));
+	say_ret("F_ADD_SEALS WRITE", add_seals(fa, SEAL_WRITE));
+	say_ret("fallocate inside (WRITE)", sys4(SYS_fallocate, fa, 0, 0, 100));
+	say_ret("fallocate PUNCH_HOLE|KEEP_SIZE (WRITE)", sys4(SYS_fallocate, fa, 3, 0, 100));
+	sys1(SYS_close, fa);
+	sys2(SYS_pipe2, pfd, 0);
+	say_ret("fallocate on a pipe", sys4(SYS_fallocate, pfd[1], 0, 0, 10));
+	sys1(SYS_close, pfd[0]);
+	sys1(SYS_close, pfd[1]);
+	say_ret("fallocate on a closed fd", sys4(SYS_fallocate, pfd[1], 0, 0, 10));
 
 	/* The mapping outlives the fd. */
 	say_ret("close", sys1(SYS_close, fd));

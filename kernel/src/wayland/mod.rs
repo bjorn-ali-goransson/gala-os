@@ -27,6 +27,9 @@
 //!   bytes of events waiting); a protocol error is answered with
 //!   `wl_display.error` and the connection closed after the error is
 //!   written; the client's windows go when it does.
+//! - **Frame callbacks** are done at the 60 Hz refresh after their commit
+//!   (`next_refresh`): a connection with callbacks due waits for that
+//!   tick, and the thread's wait ends at the earliest of them.
 //! - **Pixels**: a wl_shm pool is the client's memfd (its open file
 //!   description, held while a pool or buffer uses it); a commit reads the
 //!   damaged rows from the file's pages (`RamFs::read`, the same pages the
@@ -90,6 +93,15 @@ pub const DISPLAY: &str = "wayland-0";
 const BUDGET: usize = 256 * 1024;
 /// Connections waiting for the server's accept.
 const BACKLOG: usize = 128;
+/// The refresh frame callbacks are done at (wl_output's mode says 60 Hz).
+const REFRESH_HZ: u64 = 60;
+
+/// The first refresh after tick `now` (ticks are milliseconds): refreshes
+/// fall on the multiples of 1/60 s since boot.
+fn next_refresh(now: u64) -> u64 {
+    let k = now * REFRESH_HZ / runtime::TICK_HZ + 1;
+    (k * runtime::TICK_HZ).div_ceil(REFRESH_HZ)
+}
 
 static TRACE: AtomicBool = AtomicBool::new(false);
 /// Numbers clients for events and the dump.
@@ -105,6 +117,8 @@ struct Connection {
     /// Descriptors going with the next write (taken from the client's
     /// events; kept while the socket has no room).
     rights: Vec<Right>,
+    /// The tick of the refresh its due frame callbacks wait for.
+    refresh_at: Option<u64>,
 }
 
 struct Server {
@@ -267,14 +281,15 @@ pub fn start(mode: &str) -> Result<(), StartError> {
 fn serve(_: usize) {
     let me = runtime::current();
     loop {
-        let more = match SERVER.lock().as_mut() {
-            Some(s) => s.round(me),
+        let (more, refresh) = match SERVER.lock().as_mut() {
+            Some(s) => (s.round(me), s.clients.iter().filter_map(|c| c.refresh_at).min()),
             None => return,
         };
         if more {
             continue;
         }
-        runtime::prepare_wait(None);
+        // Until a socket changes, or the next refresh due.
+        runtime::prepare_wait(refresh);
         // A change from here on wakes the thread; one before it is seen
         // here.
         if SERVER.lock().as_ref().is_some_and(Server::ready) {
@@ -286,9 +301,12 @@ fn serve(_: usize) {
 
 impl Server {
     /// Whether a round would find work: a connection to accept, bytes or
-    /// an end to read, events to write where there is room.
+    /// an end to read, events to write where there is room, a refresh
+    /// due.
     fn ready(&self) -> bool {
+        let now = runtime::ticks();
         self.listener.readiness().readable
+            || self.clients.iter().any(|c| c.refresh_at.is_some_and(|at| at <= now))
             || self.clients.iter().any(|c| {
                 let r = c.sock.readiness();
                 r.readable || r.hangup || (!c.client.output().is_empty() && r.writable)
@@ -357,7 +375,14 @@ impl Server {
             "wayland connect",
             format_args!(r#""pid":{pid},"client":{number}"#),
         );
-        let _ = self.clients.try_push(Connection { number, pid, sock, client, rights: Vec::new() });
+        let _ = self.clients.try_push(Connection {
+            number,
+            pid,
+            sock,
+            client,
+            rights: Vec::new(),
+            refresh_at: None,
+        });
     }
 }
 
@@ -442,6 +467,20 @@ impl Connection {
         {
             ended = Some(e);
         }
+        // Frame callbacks: done at the refresh after their commit.
+        if ended.is_none() && self.client.frames_due() {
+            let now = runtime::ticks();
+            match self.refresh_at {
+                Some(at) if at <= now => {
+                    self.refresh_at = None;
+                    if let Err(e) = self.client.refresh(&mut host) {
+                        ended = Some(e.into());
+                    }
+                }
+                Some(_) => {}
+                None => self.refresh_at = Some(next_refresh(now)),
+            }
+        }
         if let Err(e) = self.flush() {
             ended = Some(e);
         }
@@ -518,12 +557,22 @@ impl Connection {
                 self.client.requests
             ),
         );
-        if !matches!(why, Why::Closed | Why::Error) {
+        let (pid, n, c) = (self.pid, self.number, &self.client);
+        if matches!(why, Why::Closed | Why::Error) {
+            crate::info!(
+                "wayland: pid {pid}'s connection {n} ended ({}): {} requests, {} commits shown, {} frame callbacks done",
+                why.name(),
+                c.requests,
+                c.commits,
+                c.frames
+            );
+        } else {
             crate::warn!(
-                "wayland: pid {}'s connection {} closed: {}",
-                self.pid,
-                self.number,
-                why.name()
+                "wayland: pid {pid}'s connection {n} ended ({}): {} requests, {} commits shown, {} frame callbacks done",
+                why.name(),
+                c.requests,
+                c.commits,
+                c.frames
             );
         }
     }
@@ -864,11 +913,15 @@ pub fn dump() {
     );
     for c in &s.clients {
         crate::info!(
-            "statedump: wayland client {} (pid {}): {} objects, {} requests, {} bytes of events waiting",
+            "statedump: wayland client {} (pid {}): {} objects, {} requests, {} commits shown, {} frame callbacks done, refresh at {:?} (now {}), {} bytes of events waiting",
             c.number,
             c.pid,
             c.client.object_count(),
             c.client.requests,
+            c.client.commits,
+            c.client.frames,
+            c.refresh_at,
+            runtime::ticks(),
             c.client.output().len()
         );
         c.client.describe(&mut |line| crate::info!("statedump:   {line}"));

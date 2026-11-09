@@ -89,6 +89,27 @@ F_ADD_SEALS SEAL = 0
 F_GET_SEALS = 15
 F_ADD_SEALS after SEAL = -1 (EPERM)
 F_ADD_SEALS nothing after SEAL = -1 (EPERM)
+fallocate 10000 = 0
+fstat after fallocate: mode 0100777, size 10000, nlink 0
+fallocate inside = 0
+fallocate KEEP_SIZE past the end = 0
+fstat after KEEP_SIZE: mode 0100777, size 10000, nlink 0
+fallocate PUNCH_HOLE alone = -95 (EOPNOTSUPP)
+fallocate PUNCH_HOLE|KEEP_SIZE = 0
+the hole reads as zeros = yes
+fstat after PUNCH_HOLE: mode 0100777, size 10000, nlink 0
+fallocate ZERO_RANGE = -95 (EOPNOTSUPP)
+fallocate unknown mode = -95 (EOPNOTSUPP)
+fallocate length 0 = -22 (EINVAL)
+fallocate offset -1 = -22 (EINVAL)
+F_ADD_SEALS GROW = 0
+fallocate past the end (GROW) = -1 (EPERM)
+fallocate inside (GROW) = 0
+F_ADD_SEALS WRITE = 0
+fallocate inside (WRITE) = 0
+fallocate PUNCH_HOLE|KEEP_SIZE (WRITE) = -1 (EPERM)
+fallocate on a pipe = -29 (ESPIPE)
+fallocate on a closed fd = -9 (EBADF)
 close = 0
 read-only map after close = yes
 private map after close = yes

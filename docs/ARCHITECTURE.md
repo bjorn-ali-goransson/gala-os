@@ -8615,7 +8615,14 @@ The running parts (milestone 1; `lxrun=`):
   more than 249 bytes EINVAL) makes an anonymous file of the shared file
   system ("Files": `RamFs::create_anonymous`), S_IFREG mode 0777 (no
   umask), nlink 0, open read-write as one description, so read, write,
-  pread/pwrite, lseek, ftruncate, fstat and fchmod are the file calls'.
+  pread/pwrite, lseek, ftruncate, fallocate, fstat and fchmod are the
+  file calls'. fallocate (`lx::file::fallocate`; glibc's
+  posix_fallocate, which Wayland clients' buffer files use): the file
+  system keeps no holes, so mode 0 only grows the file to the range's
+  end (never shrinks it), KEEP_SIZE alone changes nothing, PUNCH_HOLE
+  (with KEEP_SIZE, as Linux requires) writes zeros over the range inside
+  the file; the other modes are EOPNOTSUPP, as on tmpfs, and ledgered;
+  SEAL_GROW refuses growing, SEAL_WRITE punching (EPERM).
   Its pages are the file's whole pages, so every mapping of it shares
   them: in one process, through a fork, or a descriptor passed with
   SCM_RIGHTS (the same description). fcntl F_ADD_SEALS/F_GET_SEALS:
@@ -8685,7 +8692,8 @@ The running parts (milestone 1; `lxrun=`):
   O_PATH; O_TMPFILE EOPNOTSUPP), read,
   write, pread64/pwrite64, readv/writev, lseek (SEEK_DATA/HOLE: one hole
   at the end; a directory only back to an offset getdents64 gave),
-  ftruncate/truncate, fsync/fdatasync, the stat family (stat, lstat,
+  ftruncate/truncate, fallocate (see memfd above), fsync/fdatasync, the
+  stat family (stat, lstat,
   fstat, newfstatat with AT_EMPTY_PATH and AT_SYMLINK_NOFOLLOW, statx
   with STATX_BASIC_STATS whatever the mask asks, a reserved mask bit
   EINVAL), getdents64 (`.` and `..` first,
@@ -9350,7 +9358,7 @@ names 1 to 6).
 | `wl_seat`, `wl_pointer`, `wl_keyboard` | the desktop's input for the client's windows ("Input" below): capabilities pointer and keyboard, name `seat0`; `get_touch` is `missing_capability`. A keyboard gets the keymap (xkb_v1, a sealed read-only file passed as SCM_RIGHTS, its size counting the NUL) and `repeat_info` 30/s after 500 ms (version 4; Windows' defaults); a pointer or keyboard made while the client has a focus gets its enter at once. `set_cursor` is accepted and not used (the desktop draws its pointer; a surface with another role is the `role` error) |
 | `xdg_popup`, `xdg_positioner` | not yet: `create_positioner` and `get_popup` are protocol errors, ledgered (a frameless owned window, as user32's popups are, comes next) |
 | `wl_shm`, `wl_shm_pool`, `wl_buffer` | a pool holds the client's open file description (the memfd); a buffer a copy of that reference, its offset, size and stride (the pool may be destroyed or grow). ARGB8888 and XRGB8888, shown as shasha's 0x00RRGGBB (alpha not composed yet) |
-| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied), and `frame` callbacks are done in the same round, with the time in milliseconds: there is no composition clock to wait for yet |
+| `wl_surface.commit` | the damaged rows (all of them for a new or resized window) are read from the buffer's file and presented into the window's client pixels (`Desktop::present`). `wl_buffer.release` goes out at once (the pixels are copied); `frame` callbacks are done, with the time in milliseconds, at the next 60 Hz refresh (`next_refresh`: the multiples of 1/60 s since boot; the server's wait ends at the earliest refresh a connection waits for), so a client that draws on its callbacks draws 60 frames a second at most, as on a 60 Hz output, and never in a busy loop. The refresh is the server's own tick, not the presenter's vblank (a Test frame or virtio-gpu have none to give yet) |
 | `wl_output` | the client's session's screen: geometry (make "gala", model "shasha"), mode (current and preferred, 60 Hz), scale 1, name `gala-1`, done |
 
 A surface smaller than a framed window's minimum (134 x 34 outer) gets a
@@ -9398,7 +9406,7 @@ and the client draws the size it is told:
   buffer of another size than asked is shown at its own size there.
 - wm_capabilities (xdg_toplevel 5): maximize and minimize.
 
-Next: frame callbacks paced by composition; popups; a decoration mode change
+Next: frame callbacks paced by the presenter's refresh; popups; a decoration mode change
 on a mapped window (the frame put on or taken off in place). Later: `wl_data_device` (the
 clipboard, bridged to the Windows clipboard so copy and paste works
 across personalities), `wp_viewporter`, fractional scale,
@@ -9519,8 +9527,10 @@ as they keep Windows ones: the pixels are kept and nothing draws them
   became.
 - The log: a protocol error (`wayland: pid P: protocol error on
   xdg_surface@9, code 3: ...; disconnecting`), a request gala lacks, a
-  surface that got no window, a connection closed for its output or for
-  memory.
+  surface that got no window; each connection's end with why and what it
+  did (`wayland: pid P's connection N ended (closed): R requests, C
+  commits shown, F frame callbacks done`; a warning when it was closed
+  for its output or for memory).
 - The ledger: a request gala doesn't implement is answered with a
   protocol error and counted as `wayland request missing` (service: the
   interface, detail: the opcode); one accepted and not acted on as
@@ -9591,8 +9601,20 @@ as they keep Windows ones: the pixels are kept and nothing draws them
   unmapping and destroying, decoration modes and their errors, the
   window messages' translation, every key the scan codes give being in
   the keymap). The notices for served owners: `winstate/tests.rs`.
-- Then a real client: `weston-simple-shm` from weston's demos; then
-  GTK (LD step 3).
+- **`weston-simple-shm`** (`lx_simple_shm`), the first real client:
+  weston 13's demo as Ubuntu 24.04 builds it, on Ubuntu's
+  libwayland-client, libffi and glibc (`PREBUILT`s in
+  `/lib/x86_64-linux-gnu`). It binds wl_compositor, wl_shm, xdg_wm_base
+  and wl_seat, makes its 250x250 buffers in a `memfd` it fallocates,
+  waits for the configure, then draws a moving pattern on every frame
+  callback. The scenario runs it on a headless desktop
+  (`SIMPLE_SHM_SCREEN`: the active caption, many colours in its client
+  area), then presses Esc (its keyboard handler ends it). Its transcript
+  (`user/lx/weston-simple-shm/lx_simple_shm.txt`: "simple-shm exiting"
+  on stderr, status 0) is real Linux's against weston's headless backend,
+  ended there by SIGINT (the same flag Esc clears). The server's summary
+  line at the end of the connection says how many commits and frames it
+  served. Next: GTK (LD step 3).
 
 ## Plan: Linux containers through a WSL facade
 

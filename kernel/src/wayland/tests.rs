@@ -404,10 +404,14 @@ fn a_toplevel_is_configured_mapped_and_drawn_as_wl_test_does() {
     t.ok(8, "damage_buffer", &[Arg::Int(0), Arg::Int(0), Arg::Int(64), Arg::Int(64)]);
     t.ok(8, "frame", &[Arg::NewId(11)]);
     t.ok(8, "commit", &[]);
-    assert_eq!(
-        t.events(),
-        ["wl_buffer#7.release()", "wl_callback#11.done(77)", "wl_display#1.delete_id(11)"]
-    );
+    // The buffer is released at once (copied); the frame callback waits
+    // for the refresh.
+    assert_eq!(t.events(), ["wl_buffer#7.release()"]);
+    assert!(t.c.frames_due());
+    assert_eq!(t.c.refresh(&mut t.h), Ok(()));
+    assert_eq!(t.events(), ["wl_callback#11.done(77)", "wl_display#1.delete_id(11)"]);
+    assert!(!t.c.frames_due());
+    assert_eq!((t.c.commits, t.c.frames), (1, 1));
     let w = &t.h.windows[0];
     assert_eq!((w.title.as_slice(), w.size, w.alive), (&b"wl_test"[..], (64, 64), true));
     assert_eq!((w.pixels[0], w.pixels[31 * 64 + 63]), (0x0033_6699, 0x0033_6699));
@@ -1283,4 +1287,11 @@ fn every_key_the_scan_codes_give_is_in_the_keymap() {
         assert!(input::modifier(key).is_some());
         assert!(input::KEYMAP.contains(sym));
     }
+}
+
+#[test]
+fn refreshes_fall_on_sixtieths_of_a_second() {
+    use crate::wayland::next_refresh;
+    // Strictly after now, on ceil(k * 1000 / 60) ms.
+    assert_eq!([0, 16, 17, 33, 34, 1000].map(next_refresh), [17, 17, 34, 34, 50, 1017]);
 }
