@@ -3,6 +3,43 @@
 //! Host requirements: `git`, `xorriso`, `qemu-system-x86_64` and an OVMF
 //! (UEFI) firmware image. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
 
+// The kernel's file-system modules (`diskimage`) use `alloc::` paths.
+extern crate alloc;
+
+/// What the kernel's file-system modules take from its heap module
+/// (`crate::mm::heap`), for `diskimage`, which compiles them for the host.
+mod mm {
+    pub mod heap {
+        #[derive(Debug)]
+        pub struct AllocError;
+
+        pub trait TryVec<T> {
+            fn try_push(&mut self, value: T) -> Result<(), AllocError>;
+            fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), AllocError>
+            where
+                T: Clone;
+        }
+
+        impl<T> TryVec<T> for Vec<T> {
+            fn try_push(&mut self, value: T) -> Result<(), AllocError> {
+                self.push(value);
+                Ok(())
+            }
+            fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), AllocError>
+            where
+                T: Clone,
+            {
+                self.extend_from_slice(other);
+                Ok(())
+            }
+        }
+
+        pub fn try_box<T>(value: T) -> Result<Box<T>, AllocError> {
+            Ok(Box::new(value))
+        }
+    }
+}
+
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -13,6 +50,7 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod diskimage;
 mod feed;
 mod lint;
 mod lx_expect;
@@ -3661,6 +3699,8 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  disk-files   what a disk image (a kept <iso>.disk.img) holds on C:, read with the
+               kernel's own code: disk-files <image> [C:/path] [--out DIR]
   serve-page   answer one HTTP request on standard input/output with the
                host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
   relay <port> one connection on standard input/output to 127.0.0.1:<port>
@@ -3782,6 +3822,7 @@ fn main() -> ExitCode {
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
             Some("feed") => feed::cli(&args[1..]),
+            Some("disk-files") => diskimage::disk_files(&args[1..]),
             Some("release-tree") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(dir) => release_tree(release, Path::new(dir)),
                 None => Err("usage: cargo xtask release-tree <dir> [--release]".into()),

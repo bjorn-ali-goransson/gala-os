@@ -202,6 +202,7 @@ alone prints the usage.
 | `symbolize <log> [--release]` | resolve kernel backtraces in a serial log |
 | `triage <serial log> [events.jsonl]` | the triage block of a log ("When a test fails") |
 | `events <events.jsonl>` | summarize an event stream |
+| `disk-files <image> [C:/path] [--out DIR]` | what a disk image holds on C: (the files programs wrote, read with the kernel's own volume, log and file-system code); `--out` copies them ("Disk tests") |
 | `otel <log\|events.jsonl\|scenario> [events.jsonl] [--out P] [--endpoint URL]` | OTLP/JSON ("OpenTelemetry") |
 | `profile <events.jsonl\|scenario> [--pid N] [--tid N] [--from S --to S] [--top N] [--symbols DIR] [--release]` | the sampling profiler's report (OBSERVABILITY `sample`) |
 | `perfetto <events.jsonl\|scenario> [--out FILE]` | a Perfetto trace for ui.perfetto.dev (OBSERVABILITY "Visualization") |
@@ -507,6 +508,14 @@ image, what the image must hold afterwards).
   amount (`XTASK_LOW_DISK=1` starts it anyway), and deletes the image
   after a pass; a failed run's is kept and xtask prints what it takes on
   the host (`xtask: kept ... (N MiB on the host; delete it when done)`).
+- A kept image is readable on the host: `cargo xtask disk-files
+  target/debug/test-<scenario>.disk.img C:/Users/Public --out <dir>`
+  lists what programs wrote under that path and copies it out (xtask
+  compiles the kernel's `fs::volume`, `fs::log`, `fs::ramfs` and
+  `fs::clusters` for the host, `xtask/src/diskimage.rs`). A run that hung
+  or was stopped leaves its programs' logs there (`dump=` prints only
+  after the programs end): that is how a stalled `office_install`'s
+  Click-to-Run log is read. Logs in UTF-16 (`iconv -f utf-16le`).
 - The drive has `werror=report,rerror=report`: a host disk that fills
   under the image fails the guest's request (`persist: the disk failed a
   write ...` in the serial log), where QEMU's default would pause the VM
