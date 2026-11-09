@@ -553,9 +553,9 @@ fn evict() {
                 heap.in_use / 1024,
                 heap.slab_pages,
                 heap.large_pages,
-                crate::mm::FrameUses(crate::mm::frame_uses()),
+                super::platform::FrameUses(super::platform::frame_uses()),
             );
-            let (threads, dead, stacks) = crate::sched::thread_counts();
+            let (threads, dead, stacks) = super::platform::thread_counts();
             warn!(
                 "persist: {threads} kernel threads, {dead} dead ({stacks} with their stacks not \
                  freed yet); {} sockets open",
