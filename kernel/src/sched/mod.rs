@@ -367,6 +367,13 @@ fn spawn_inner(
     arg: usize,
     user: Option<UserThread>,
 ) -> Result<ThreadId, SpawnError> {
+    // Ended threads give back their kernel stacks first: the idle threads
+    // reap only when a CPU has nothing to do, and on a machine that never
+    // idles (KVM, a program making and ending threads back to back) the
+    // dead ones' stacks would otherwise use up the stack window's slots
+    // (memload_test: CreateThread failed at its ~1040th thread). Each
+    // spawn reaps up to a batch, more than the one thread it adds.
+    reap();
     // Allocate outside the scheduler lock.
     let stack = KernelStack::new().map_err(SpawnError::Stack)?;
     let context = Context::new_thread(&stack, thread_start).map_err(|_| SpawnError::OutOfMemory)?;

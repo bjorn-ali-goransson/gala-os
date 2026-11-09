@@ -499,7 +499,11 @@ thread's XSAVE area; the switch pushes the six callee-saved registers).
 `ThreadId` (ids are never reused) and a FIFO ready queue whose capacity is
 reserved at spawn time, so scheduling itself never allocates. Thread #0
 is the boot thread; an idle thread per CPU runs only when nothing else is
-ready and reaps dead threads. API: `spawn`, `yield_now`, `sleep_ms`,
+ready and reaps dead threads (their kernel stacks, save areas, last
+address-space references). Every spawn also reaps a batch before it
+takes a stack: a machine that never idles (KVM, a program making and
+ending threads back to back) would otherwise fill the stack window's
+1024 slots with dead threads' stacks. API: `spawn`, `yield_now`, `sleep_ms`,
 `join`, `exit`, `reap`, `set_affinity`. The boot CPU's 1 kHz tick keeps
 time and wakes sleepers and timed-out waiters; every CPU's tick preempts
 after a 10-tick quantum. There are no priorities: every thread is
