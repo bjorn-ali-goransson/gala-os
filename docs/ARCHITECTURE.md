@@ -1611,6 +1611,15 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
   in a directory without the flag the second name is a collision for
   both personalities. Not yet: FileCaseSensitiveInformation (query and
   set from NT; Windows sets it only on an empty directory).
+- **Who uses a file** (FileProcessIdsUsingFileInformation, class 47,
+  what the Restart Manager asks): `file::processes_using` walks the
+  running processes and lists each that has a handle open on the node,
+  a view of a section whose file is it (a mapped data file or a loaded
+  DLL: the section's `file_name`, compared case-insensitively), or it as
+  its executable. The handle the question is asked through does not
+  count by itself. ULONG_PTR ids, 4 bytes for a WOW64 caller (wow64.dll
+  passes the buffer through); STATUS_INFO_LENGTH_MISMATCH when the
+  header and every id do not fit.
 - **Hard links**: a node's own `parent`/`name` is its first name (what
   `path_of`, FileNameInformation and the change notifications use);
   further names are `RamFs::links` entries (`link`). `find` and
@@ -2663,7 +2672,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
 | COM, shell | ole32, combase (forwarders to ole32), oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6, appxdeploymentclient (Windows.Management.Deployment.PackageManager with no packages) |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), rstrtmgr (the Restart Manager, "Other DLLs"), wofutil (the Windows Overlay Filter's API: no filter, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -3007,6 +3016,9 @@ ntdll imports.
   CreateMutexExW, OpenSemaphoreA/W, K32EnumProcesses
   (SystemProcessInformation's ids), K32GetProcessImageFileNameW
   (ProcessImageFileName: `\Device\HarddiskVolume1\...`),
+  QueryFullProcessImageNameW of any process opened with
+  PROCESS_QUERY_LIMITED_INFORMATION (ProcessImageFileNameWin32, `C:\...`;
+  PROCESS_NAME_NATIVE: ProcessImageFileName; `rstrtmgr_test`),
   QueueUserWorkItem (the pool's simple callbacks), GetShortPathNameA,
   GetVolumePathNamesForVolumeNameW (gala's one volume: `C:\`),
   GetPhysicallyInstalledSystemMemory (the physical memory gala manages),
@@ -5703,8 +5715,9 @@ carries their data (Write records).
 On a layout 3 volume (`fs::volume::data_area`) the disk past the log
 areas is a data area of 4 KiB clusters, and files' pages live there:
 the machine's memory holds the tree and a cache of pages, so C: can hold
-more than the machine's memory (Office's 5.4 GB on a VM of about 1.5
-GiB: `office_install`, a 16 GiB disk).
+more than the machine's memory (Office's 5.4 GB on a VM of 512 MiB:
+`office_install`, a 16 GiB disk; it runs out of memory about 1.5 GB in,
+ROADMAP OF).
 
 - **Which files**: files of the root's tree (C:), not anonymous ones
   (memfd) and not those of a Linux volume (`/run`: a tmpfs), once the
@@ -5771,7 +5784,13 @@ GiB: `office_install`, a 16 GiB disk).
   pages that found no cluster, clusters lost`; warnings for a failed
   write or flush of the area (its records wait for the next sync), a
   cluster that cannot be read (the call fails with STATUS_IO_DEVICE_ERROR,
-  ERROR_IO_DEVICE), dirty pages left without a cluster. xtask attaches
+  ERROR_IO_DEVICE), dirty pages left without a cluster, a writeback with
+  no memory for its buffers (`persist: no memory to ...`), and, once each
+  time free memory stays below the mark after letting pages go,
+  `persist: free memory stays low ...` with the files' pages in memory
+  (dirty, never written, of mapped files; the queues;
+  `RamFs::cache_stats`), the heap and each process's commit (`process:
+  pid ...` lines). xtask attaches
   the disk with `werror=report`: a host whose disk fills under the sparse
   image fails the guest's writes (logged) instead of pausing the VM.
 - Tests: `volume_test` (a 640 MiB file on a 1 GiB disk in a 512 MiB VM:
@@ -8174,6 +8193,52 @@ stations and desktops a program creates are refused until stage 3).
   carry Windows' ordinals (build.rs; ODT's setup.exe imports them by
   ordinal). Installing (MsiInstallProduct and the rest) is absent:
   galapkg's MSI reader (ROADMAP PK) installs packages, not msi.dll.
+- rstrtmgr (`user/rstrtmgr`, x64 and x86; `rstrtmgr_test`,
+  `wow64_rstrtmgr_test`): the Restart
+  Manager, which installers ask what uses the files they will replace
+  (Click-to-Run's repoman.dll before staging; OfficeClickToRun.exe to
+  shut down and restart). Sessions live in the calling process, under
+  one SRW lock never held across a call out: a handle is the index of
+  its slot (0 first), the key 32 lowercase hexadecimal digits from
+  ProcessPrng, at most 64 sessions (ERROR_MAX_SESSIONS_REACHED; Windows
+  counts per user, across processes). RmJoinSession gives a secondary
+  handle on a session of this process (RmAddFilter, RmRemoveFilter and
+  RmGetFilterList are then ERROR_SESSION_CREDENTIAL_CONFLICT); another
+  process's key is ERROR_SESSION_CREDENTIAL_CONFLICT, recorded
+  (`rstrtmgr.dll!RmJoinSession(another process's session)`): sessions
+  are not shared between processes yet. RmGetList asks the kernel's
+  FileProcessIdsUsingFileInformation ("Files") of each registered file
+  (a directory is ERROR_ACCESS_DENIED, a missing file uses nothing), adds
+  the registered RM_UNIQUE_PROCESSes still running with that start time
+  and the registered services running (EnumServicesStatusExW), and
+  describes each: a service's process RmService (its display and short
+  names, restartable), a console program RmConsole (its PE subsystem),
+  anything else RmUnknownApp (recorded `rstrtmgr.dll!RmGetList(application
+  without window lookup)`: no top-level window lookup yet), named by its
+  executable (QueryFullProcessImageNameW), not restartable (another
+  process's RegisterApplicationRestart is not readable); the caller in
+  the list is RmRebootReasonDetectedSelf. RmShutdown works on the same
+  list: with the caller in it ERROR_FAIL_NOACTION_REBOOT; filters mask
+  shutdown or restart; with RmShutdownOnlyRegistered and an entry not
+  restartable nothing is done (ERROR_FAIL_SHUTDOWN); services get
+  SERVICE_CONTROL_STOP and 20 s (Windows' documented wait) before
+  RmForceShutdown ends their process; applications are terminated with
+  RmForceShutdown (recorded: not asked first) and otherwise left running
+  (RmStatusErrorOnStop, ERROR_FAIL_SHUTDOWN, recorded: no
+  WM_QUERYENDSESSION or console close event from here). The status
+  callback gets the percentage after each entry (100 for an empty list).
+  RmGetList then reports that list with its statuses; RmRestart (only
+  after RmShutdown, else ERROR_REQUEST_OUT_OF_SEQUENCE) starts the
+  services it stopped.
+- wofutil (`user/wofutil`, x64; `wofutil_test`): the Windows Overlay
+  Filter's API, which Click-to-Run loads while staging. gala's volume has
+  no overlay filter: WofShouldCompressBinaries is FALSE, WofIsExternalFile
+  S_OK and FALSE for any file that exists (the Win32 error as an HRESULT
+  for one that does not), and WofGetDriverVersion,
+  WofSetFileDataLocation, WofEnumEntries and WofFileEnumFiles
+  HRESULT_FROM_WIN32(ERROR_INVALID_FUNCTION), the documented answer
+  without a driver, recorded (`wofutil.dll!<function>(no overlay
+  filter)`). The WIM functions (WofWim*) are absent.
 - msctf (`user/msctf`): SetInputScope and SetInputScopes, S_OK for a
   window and without effect (no text services to read them; Delphi's
   VCL calls them on its edit controls); the TSF COM objects are not

@@ -1889,6 +1889,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rstrtmgr"
+version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "ntrt",
+]
+
+[[package]]
+name = "rstrtmgr_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "rtl_test"
 version = "0.1.0"
 
@@ -2864,6 +2879,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wofutil"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wofutil_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wow64"
 version = "0.1.0"
 
@@ -2925,6 +2954,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_rstrtmgr_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

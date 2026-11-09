@@ -1083,6 +1083,12 @@ const USER_DLLS: &[Dll] = &[
     Dll { package: "shfolder", file: "shfolder.dll", exported_as: "testshfolder.dll" },
     // msi.dll: Windows Installer's queries, nothing installed (msi_test).
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi.dll" },
+    // rstrtmgr.dll: the Restart Manager (rstrtmgr_test; Click-to-Run's
+    // repoman.dll and OfficeClickToRun.exe).
+    Dll { package: "rstrtmgr", file: "rstrtmgr.dll", exported_as: "testrstrtmgr.dll" },
+    // wofutil.dll: the Windows Overlay Filter's API, no filter attached
+    // (wofutil_test; Click-to-Run's staging).
+    Dll { package: "wofutil", file: "wofutil.dll", exported_as: "testwofutil.dll" },
     // msxml6.dll: MSXML 6's DOM, DOMDocument60 (msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml6.dll" },
     // combase.dll: forwarders to ole32's COM and Windows Runtime base;
@@ -1189,6 +1195,8 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp32.dll" },
     // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
+    // rstrtmgr (32-bit installers: Inno Setup's; wow64_rstrtmgr_test).
+    Dll { package: "rstrtmgr", file: "rstrtmgr.dll", exported_as: "testrstrtmgr32.dll" },
     // wintrust (ODT's setup.exe delay-loads it; wow64_wintrust_test).
     Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust32.dll" },
     // setupapi (ODT's setup.exe unpacks its cabinets with
@@ -3308,10 +3316,29 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("msi_test", "ntdll.dll", "Windows/System32"),
     ("msi_test", "kernel32.dll", "Windows/System32"),
     ("msi_test", "msi.dll", "Windows/System32"),
+    ("wow64_rstrtmgr_test", "wow64.dll", "Windows/System32"),
+    ("wow64_rstrtmgr_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/rstrtmgr.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_rstrtmgr_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "wow64.dll", "Windows/System32"),
     ("wow64_msi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_msi_test", "x86/msi.dll", "Windows/SysWOW64"),
+    // The Windows Overlay Filter's API (user/wofutil_test).
+    ("wofutil_test", "ntdll.dll", "Windows/System32"),
+    ("wofutil_test", "kernel32.dll", "Windows/System32"),
+    ("wofutil_test", "wofutil.dll", "Windows/System32"),
+    // The Restart Manager (user/rstrtmgr_test): rstrtmgr and the
+    // advapi32 it asks for services.
+    ("rstrtmgr_test", "ntdll.dll", "Windows/System32"),
+    ("rstrtmgr_test", "kernel32.dll", "Windows/System32"),
+    ("rstrtmgr_test", "rstrtmgr.dll", "Windows/System32"),
+    ("rstrtmgr_test", "advapi32.dll", "Windows/System32"),
+    ("rstrtmgr_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("rstrtmgr_test", "secur32.dll", "Windows/System32"),
+    ("rstrtmgr_test", "bcrypt.dll", "Windows/System32"),
     // The service control manager's client (user/svc_test), x64 and x86.
     ("svc_test", "ntdll.dll", "Windows/System32"),
     ("svc_test", "kernel32.dll", "Windows/System32"),
@@ -3514,6 +3541,8 @@ const USER_PROGRAMS: &[&str] = &[
     "ucrt_test",
     "office_api_test",
     "msi_test",
+    "rstrtmgr_test",
+    "wofutil_test",
     "wintrust_test",
     "cab_probe",
     "setupcab_test",
@@ -3539,6 +3568,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_office_api_test",
     "wow64_cert_test",
     "wow64_msi_test",
+    "wow64_rstrtmgr_test",
     "wow64_wintrust_test",
     "wow64_setupcab_test",
     "wow64_svc_test",
@@ -6708,6 +6738,30 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=msi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["msi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Restart Manager: sessions, what uses registered files (this
+        // process, a child), shutdown and restart, filters
+        // (user/rstrtmgr_test).
+        name: "rstrtmgr_test",
+        cmdline: "qemu_exit run=rstrtmgr_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["rstrtmgr_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The Windows Overlay Filter's API with no filter attached
+        // (user/wofutil_test).
+        name: "wofutil_test",
+        cmdline: "qemu_exit run=wofutil_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wofutil_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/rstrtmgr_test built for x86).
+        name: "wow64_rstrtmgr_test",
+        cmdline: "qemu_exit run=wow64_rstrtmgr_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_rstrtmgr_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // The same through WOW64 (user/msi_test built for x86).
@@ -10537,6 +10591,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_rstrtmgr_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_wintrust_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_setupcab_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -10573,6 +10628,10 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ),
     ("wow64_svcrun_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
+    (
+        "rstrtmgr_test",
+        "a child process that holds a file open for RmGetList (one NT process per Linux process)",
+    ),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),

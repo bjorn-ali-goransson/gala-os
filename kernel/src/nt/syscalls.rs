@@ -3924,8 +3924,17 @@ fn nt_query_information_process(call: &mut Call<'_>) -> NtStatus {
             let session = p.session.to_le_bytes();
             return call.return_info(&session, buffer, length, ret_ptr);
         }
-        PROCESS_IMAGE_FILE_NAME => {
-            let name = tri!(p.image_nt_path());
+        PROCESS_IMAGE_FILE_NAME | PROCESS_IMAGE_FILE_NAME_WIN32 => {
+            // A UNICODE_STRING and its text: the NT path, or the Win32 one
+            // (`C:\\...`, QueryFullProcessImageNameW's default form).
+            let name = if class == PROCESS_IMAGE_FILE_NAME {
+                tri!(p.image_nt_path())
+            } else {
+                let mut w = Vec::new();
+                tri!(w.try_reserve_exact(p.path.len()).map_err(|_| NtStatus::NO_MEMORY));
+                w.extend(p.path.bytes().map(u16::from));
+                w
+            };
             let Some(info) = super::sysinfo::unicode_string_in_place(&name, buffer) else {
                 return NtStatus::NO_MEMORY;
             };
@@ -3965,6 +3974,7 @@ const PROCESS_HANDLE_COUNT: u64 = 20;
 const PROCESS_SESSION_INFORMATION: u64 = 24;
 const PROCESS_WOW64_INFORMATION: u64 = 26;
 const PROCESS_IMAGE_FILE_NAME: u64 = 27;
+const PROCESS_IMAGE_FILE_NAME_WIN32: u64 = 43;
 
 /// SystemProcessInformation for a buffer at user address `buffer`: the
 /// idle process (id 0), then each running process with its threads.
@@ -6335,6 +6345,9 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         let name = tri!(file::volume_path(file.node));
         return return_file_name(call, &name, buffer, length, iosb);
     }
+    if class == FILE_PROCESS_IDS_USING_FILE_INFORMATION {
+        return return_processes_using(call, file.node, arg!(call, 0), buffer, length, iosb);
+    }
     let mut out = [0u8; 40];
     let size = match class {
         FILE_BASIC_INFORMATION => {
@@ -6376,6 +6389,47 @@ fn nt_query_information_file(call: &mut Call<'_>) -> NtStatus {
         return NtStatus::ACCESS_VIOLATION;
     }
     tri!(call.write_iosb(iosb, NtStatus::SUCCESS, size as u64));
+    NtStatus::SUCCESS
+}
+
+/// FileProcessIdsUsingFileInformation (47): FILE_PROCESS_IDS_USING_FILE_
+/// INFORMATION { ULONG NumberOfProcessIdsInList; ULONG_PTR
+/// ProcessIdList[]; } (ntifs.h), what the Restart Manager asks of each
+/// file registered with it (rstrtmgr's RmGetList).
+const FILE_PROCESS_IDS_USING_FILE_INFORMATION: u64 = 47;
+
+/// FileProcessIdsUsingFileInformation for file `node` asked through
+/// `handle`: the processes `file::processes_using` finds, in the caller's
+/// layout (a WOW64 caller's ULONG_PTR is 4 bytes: the 32-bit ntdll passes
+/// the buffer through). STATUS_INFO_LENGTH_MISMATCH when the buffer holds
+/// less than the header and every id.
+fn return_processes_using(
+    call: &mut Call<'_>,
+    node: crate::fs::ramfs::NodeId,
+    handle: u64,
+    buffer: u64,
+    length: usize,
+    iosb: u64,
+) -> NtStatus {
+    let ids = tri!(file::processes_using(node, (call.process.id, handle)));
+    let width = if call.process.wow64.is_some() { 4 } else { 8 };
+    let size = width + width * ids.len().max(1);
+    if length < size {
+        return NtStatus::INFO_LENGTH_MISMATCH;
+    }
+    let mut out = Vec::new();
+    tri!(out.try_reserve_exact(size).map_err(|_| NtStatus::NO_MEMORY));
+    out.resize(size, 0u8);
+    out[..4].copy_from_slice(&(ids.len() as u32).to_le_bytes());
+    for (i, id) in ids.iter().enumerate() {
+        let at = width * (i + 1);
+        out[at..at + width].copy_from_slice(&id.to_le_bytes()[..width]);
+    }
+    let used = width + width * ids.len();
+    if call.process.write(buffer, &out[..used]).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    tri!(call.write_iosb(iosb, NtStatus::SUCCESS, used as u64));
     NtStatus::SUCCESS
 }
 

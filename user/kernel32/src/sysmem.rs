@@ -476,7 +476,10 @@ pub extern "system" fn K32GetProcessMemoryInfo(
     TRUE
 }
 
-/// QueryFullProcessImageNameW: this process's image path (Win32 form).
+/// QueryFullProcessImageNameW: a process's image path, in Win32 form
+/// (`C:\\...`, ProcessImageFileNameWin32) or with PROCESS_NAME_NATIVE in
+/// NT form (ProcessImageFileName); *size is the characters written
+/// without the NUL, ERROR_INSUFFICIENT_BUFFER when they do not fit.
 #[unsafe(no_mangle)]
 pub extern "system" fn QueryFullProcessImageNameW(
     process: Handle,
@@ -484,21 +487,47 @@ pub extern "system" fn QueryFullProcessImageNameW(
     buf: *mut u16,
     size: *mut u32,
 ) -> Bool {
-    if !is_current(process) {
-        unsupported(b"kernel32.dll!QueryFullProcessImageNameW(another process)", 0);
-        return fail_with(ERROR_ACCESS_DENIED, FALSE);
+    const PROCESS_NAME_NATIVE: u32 = 1;
+    if flags & !PROCESS_NAME_NATIVE != 0 || size.is_null() {
+        return fail_with(ERROR_INVALID_PARAMETER, FALSE);
     }
-    if flags != 0 {
-        unsupported(b"kernel32.dll!QueryFullProcessImageNameW(native)", flags.into());
+    let class = if flags & PROCESS_NAME_NATIVE != 0 {
+        27 // ProcessImageFileName
+    } else {
+        43 // ProcessImageFileNameWin32
+    };
+    // UNICODE_STRING, then its characters.
+    let mut info = [0usize; 1 + (2 * 1100) / size_of::<usize>()];
+    let mut ret = 0u32;
+    // SAFETY: a buffer of the given size.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process as isize,
+            class,
+            info.as_mut_ptr().cast(),
+            size_of_val(&info) as u32,
+            &mut ret,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return fail(status, FALSE);
     }
+    // SAFETY: the UNICODE_STRING the kernel wrote; its buffer in `info`.
+    let chars = unsafe {
+        let len = usize::from(*info.as_ptr().cast::<u16>()) / 2;
+        core::slice::from_raw_parts(*info.as_ptr().add(1) as *const u16, len)
+    };
     // SAFETY: the caller's in/out size.
-    let room = unsafe { *size };
-    let n = super::process::GetModuleFileNameW(core::ptr::null_mut(), buf, room);
-    if n == 0 || n >= room {
+    let room = unsafe { *size } as usize;
+    if buf.is_null() || chars.len() + 1 > room {
         return fail_with(ERROR_INSUFFICIENT_BUFFER, FALSE);
     }
-    // SAFETY: as above.
-    unsafe { *size = n };
+    // SAFETY: the caller's buffer of `room` > len characters, and size.
+    unsafe {
+        core::ptr::copy_nonoverlapping(chars.as_ptr(), buf, chars.len());
+        *buf.add(chars.len()) = 0;
+        *size = chars.len() as u32;
+    }
     TRUE
 }
 

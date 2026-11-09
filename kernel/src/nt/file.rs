@@ -225,6 +225,38 @@ pub fn nt_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
     Ok(out)
 }
 
+/// Whether two NT paths name the same file (the volume's names are case
+/// insensitive; ASCII case folding, as the volume's own lookups).
+pub fn same_path(a: &[u16], b: &[u16]) -> bool {
+    let fold = |c: u16| if (u16::from(b'a')..=u16::from(b'z')).contains(&c) { c - 32 } else { c };
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| fold(x) == fold(y))
+}
+
+/// FileProcessIdsUsingFileInformation: the ids of the running processes
+/// that use file `node`, in process order: a handle open on it, a view of
+/// a section on it (a mapped data file or a loaded DLL) or it as their
+/// executable. `query` (process id, handle) is the handle the question is
+/// asked through, which does not count by itself.
+pub fn processes_using(node: NodeId, query: (u64, u64)) -> Result<Vec<u64>, NtStatus> {
+    let name = nt_path(node)?;
+    let mut out = Vec::new();
+    for p in super::process::running().map_err(|_| NtStatus::NO_MEMORY)? {
+        let by_handle = p.handles.lock().iter().any(|(h, e)| {
+            matches!(&e.object.body, ObjectBody::File(f) if f.node == node) && (p.id, h.0) != query
+        });
+        let uses = by_handle
+            || p.views
+                .lock()
+                .iter()
+                .any(|v| v.section().file_name.as_deref().is_some_and(|n| same_path(n, &name)))
+            || p.image_nt_path().is_ok_and(|n| same_path(&n, &name));
+        if uses {
+            out.try_push(p.id).map_err(|_| NtStatus::NO_MEMORY)?;
+        }
+    }
+    Ok(out)
+}
+
 /// The path of `node` from the volume root (`\\dir\\name`), as
 /// FileNameInformation reports it.
 pub fn volume_path(node: NodeId) -> Result<Vec<u16>, NtStatus> {
@@ -918,5 +950,17 @@ mod tests {
         );
         assert_eq!(mode_of(FILE_NON_DIRECTORY_FILE | FILE_DIRECTORY_FILE), 0);
         assert_eq!(mode_of(FILE_DELETE_ON_CLOSE | 0x0002), FILE_DELETE_ON_CLOSE | 0x0002);
+    }
+
+    #[test]
+    fn same_path_folds_ascii_case_only() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        assert!(same_path(
+            &w("\\Device\\X\\Program Files\\a.DLL"),
+            &w("\\device\\x\\program files\\A.dll")
+        ));
+        assert!(!same_path(&w("\\a\\b.dll"), &w("\\a\\b.dl")));
+        assert!(!same_path(&w("\\a\\b"), &w("\\a\\c")));
+        assert!(!same_path(&w("[x"), &w("{x")));
     }
 }
