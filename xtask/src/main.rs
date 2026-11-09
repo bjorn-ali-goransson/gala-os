@@ -3595,6 +3595,13 @@ const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
 /// and a harness run under TCG (a report run, PENDING: not in the gate).
 const WPT_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
+/// `office_install` (MANUAL): the Click-to-Run client downloads 4.44 GB
+/// (`required:=4437233664` in its log) for Word, Excel and PowerPoint. A
+/// gala guest under TCG fetched 512 MiB of the same CDN file with curl
+/// onto a disk-backed C: in 179 s (3.0 MB/s): about 1480 s for the
+/// download, after about 360 s of setup before it (run time, measured);
+/// twice that for a slower host.
+const OFFICE_INSTALL_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Scenarios run under an artificial host load (clockcheck::HostLoad:
 /// a busy thread on every host CPU) whose guest clock must agree with the
@@ -3613,6 +3620,8 @@ fn scenario_timeout(name: &str) -> Duration {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "chromium_wpt" {
         WPT_TIMEOUT
+    } else if name == "office_install" {
+        OFFICE_INSTALL_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
         || name.starts_with("sqllocaldb")

@@ -401,7 +401,12 @@ xtask that change how a scenario boots:
 
 - **Time limits**: 120 s by default; `SLOW_SCENARIOS` (JVMs, .NET,
   PowerShell, FlaUI, PostgreSQL, FileZilla) 300 s; elasticsearch,
-  java_stress and sqllocaldb* 900 s; dump scenarios 25 s. A
+  java_stress and sqllocaldb* 900 s; office_install (MANUAL) 3600 s,
+  from what it needs: the 4.44 GB its Click-to-Run client downloads at
+  the 3.0 MB/s a gala guest fetched that CDN with under TCG (curl, 512
+  MiB in 179 s onto a disk-backed C:), plus the ~6 min before the
+  download, doubled for a slower host (`OFFICE_INSTALL_TIMEOUT`);
+  dump scenarios 25 s. A
   `SINGLE_THREAD_TCG` scenario's limit doubles without KVM. Every limit
   counts the VM's *run time*, not wall time (`xtask/src/vmtime.rs`): the
   wall time less the run-queue wait of its most-starved vCPU thread
