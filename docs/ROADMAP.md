@@ -1619,19 +1619,24 @@ need gala's.
      Accepted, setup.exe closes three all-zero WINTRUST_DATAs
      (dwStateAction CLOSE, cbStruct 0: TRUST_E_SUBJECT_FORM_UNKNOWN,
      recorded, survived; Windows' answer is `cab_probe`'s) and extracts
-     the cabinet with setupapi's SetupIterateCabinetW.
-     Where the run ends now: setupapi.dll has no i686 build, so that
-     delay-load fails (0xc06d007e) in the elevated copy and its parent.
+     the cabinet with setupapi's SetupIterateCabinetW (done: x64 and
+     x86, over galapkg's cabinet reader, v64.cab being LZX:21;
+     `setupcab_test`, `wow64_setupcab_test`, expected results from
+     Wine's setupcab.c tests; ARCHITECTURE "Other DLLs").
+     Where the run ends now: it loads the descriptor's XML with MSXML 6
+     and calls IXMLDOMNode::cloneNode (`msxml6.dll!IXMLDOMNode::cloneNode`,
+     not implemented: E_NOTIMPL); ODT's log says "cloneNode failed",
+     "Cannot load version descriptor", and the elevated copy and its
+     parent exit with 0x80004001.
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: SetupIterateCabinetW for
-     x86 (v64.cab is LZX:21; galapkg's cabinet reader has LZX and MSZIP),
-     test first from Wine's setupcab.c tests; Windows' answers from
-     `cab_probe` (the cabinet cases of `wintrust_test` follow them);
+     Next, in the order the run reaches them: msxml6's cloneNode;
+     Windows' answers from `cab_probe` (the cabinet cases of
+     `wintrust_test` follow them);
      then the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
-     webservices, setupapi, cabinet, credui, gdiplus; osppc.dll is
+     webservices, cabinet, credui, gdiplus; osppc.dll is
      Office's own) and the functions its imports lack (shell32's
      SHGetSettings, user32's CheckRadioButton and SetCoalescableTimer,
      iphlpapi's CreateSortedAddressPairs); BITS (the

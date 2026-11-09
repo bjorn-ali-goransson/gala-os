@@ -3980,6 +3980,21 @@ x64 and x86.
   interface is ERROR_NO_SUCH_DEVINST / ERROR_NO_SUCH_DEVICE_INTERFACE;
   each SetupDiGetClassDevsW is recorded ("no device tree", the class's
   first dword) (`setupapi_test`; Chromium's battery-level provider).
+  SetupIterateCabinetW (`cab.rs`, `setupcab_test`, `wow64_setupcab_test`;
+  ODT's setup.exe unpacks its version descriptor with it): the cabinet
+  read whole and parsed by galapkg's reader (MSZIP, LZX: "Installing
+  software"), then SPFILENOTIFY_CABINETINFO (the cabinet's directory with
+  a trailing backslash, set and index from the header), and per file,
+  folder by folder, FILEINCABINET (param2 the path as passed;
+  FILEOP_DOIT writes FullTargetName with the file's DOS time as local
+  time and its R/H/S/A attributes, FILEOP_SKIP leaves it, FILEOP_ABORT
+  stops) and FILEEXTRACTED; a non-zero answer stops with that error. The
+  errors are Windows' in Wine's setupcab.c (NULL path
+  ERROR_INVALID_PARAMETER, "" ERROR_NOT_ENOUGH_MEMORY, no cabinet or no
+  callback ERROR_INVALID_DATA, recorded with the reader's reason). Not
+  here (recorded): spanning cabinets (NEEDNEWCABINET), Quantum, a
+  faulting callback (Windows catches it). Built for x86 too, on
+  `gala_heap` (galapkg allocates).
   **wldap32** (PostgreSQL's LDAP
   functions): stubs, exported by Windows' ordinals.
 - **Failover clustering is not installed**: clusapi.dll and resutils.dll
@@ -8262,7 +8277,8 @@ in the 32-bit registry view too), wininet (`wow64_wininet_test`,
 wininet_test's C source built with mingw's i686 compiler; "WinHTTP and
 WinINet"), iphlpapi (`wow64_office_api_test`'s GetAdaptersInfo;
 "Network interfaces"), wintrust (`wow64_wintrust_test`: "wintrust:
-Authenticode"). urlmon.dll has the default URL security manager
+Authenticode"), setupapi (`wow64_setupcab_test`: SetupIterateCabinetW,
+"Other DLLs"). urlmon.dll has the default URL security manager
 (CoInternetCreateSecurityManager, `secmgr.rs`): MapUrlToZone and
 GetSecurityId as Windows' default settings with no zone mappings answer
 them (a drive path, file: with a drive and res: the Local Machine zone;
@@ -8321,7 +8337,8 @@ being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
 `testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
 `testuser32_32.dll`, `testgdi32_32.dll`, `testcomctl3232.dll` and the
 rest of the Inno set as `test<name>32.dll`, `testcrypt3232.dll`,
-`testncrypt32.dll`, `testmsi32.dll`, `testwintrust32.dll`; test DLLs
+`testncrypt32.dll`, `testmsi32.dll`, `testwintrust32.dll`,
+`testsetupapi32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers

@@ -1153,6 +1153,9 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
     // wintrust (ODT's setup.exe delay-loads it; wow64_wintrust_test).
     Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust32.dll" },
+    // setupapi (ODT's setup.exe unpacks its cabinets with
+    // SetupIterateCabinetW; wow64_setupcab_test).
+    Dll { package: "setupapi", file: "setupapi.dll", exported_as: "testsetupapi32.dll" },
     // msxml6 (ODT's setup.exe asks COM for DOMDocument60;
     // wow64_msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml632.dll" },
@@ -3127,6 +3130,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "user/roots/public-roots.pem", "Windows/System32/gala/roots"),
     ("office_install", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
     ("office_install", "x86/wintrust.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/setupapi.dll", "Windows/SysWOW64"),
     ("office_install", "x86/shfolder.dll", "Windows/SysWOW64"),
     ("office_install", "x86/mpr.dll", "Windows/SysWOW64"),
     ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
@@ -3244,6 +3248,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_wintrust_test", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
     ("wow64_wintrust_test", "target/prebuilt/odt/setup.exe", "gala"),
     ("wow64_wintrust_test", "target/prebuilt/python/python.exe", "gala"),
+    // SetupIterateCabinetW (user/setupcab_test), x64 and x86.
+    ("setupcab_test", "ntdll.dll", "Windows/System32"),
+    ("setupcab_test", "kernel32.dll", "Windows/System32"),
+    ("setupcab_test", "setupapi.dll", "Windows/System32"),
+    ("wow64_setupcab_test", "wow64.dll", "Windows/System32"),
+    ("wow64_setupcab_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_setupcab_test", "x86/setupapi.dll", "Windows/SysWOW64"),
     // msi's queries (user/msi_test), x64 and x86.
     ("msi_test", "ntdll.dll", "Windows/System32"),
     ("msi_test", "kernel32.dll", "Windows/System32"),
@@ -3443,6 +3455,7 @@ const USER_PROGRAMS: &[&str] = &[
     "msi_test",
     "wintrust_test",
     "cab_probe",
+    "setupcab_test",
     "svc_test",
     "msxml_test",
     "winhttp_cb_test",
@@ -3465,6 +3478,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_cert_test",
     "wow64_msi_test",
     "wow64_wintrust_test",
+    "wow64_setupcab_test",
     "wow64_svc_test",
     "wow64_msxml_test",
     "wow64_winhttp_cb_test",
@@ -6543,6 +6557,24 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=wintrust_test.exe args=require",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["wintrust_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // SetupIterateCabinetW (user/setupcab_test): Wine's setupcab.c
+        // cases (bad paths, an empty file, no callback; its MSZIP cabinet
+        // iterated and extracted, a file skipped), and the stored
+        // self-signed cabinet.
+        name: "setupcab_test",
+        cmdline: "qemu_exit run=setupcab_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["setupcab_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/setupcab_test built for x86), as
+        // ODT's 32-bit setup.exe calls it.
+        name: "wow64_setupcab_test",
+        cmdline: "qemu_exit run=wow64_setupcab_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_setupcab_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // A probe (user/cab_probe), the counterpart of its Windows run:
@@ -10364,6 +10396,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_wintrust_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_setupcab_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

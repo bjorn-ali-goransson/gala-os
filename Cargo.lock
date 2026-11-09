@@ -2097,10 +2097,22 @@ version = "0.1.0"
 [[package]]
 name = "setupapi"
 version = "0.1.0"
+dependencies = [
+ "gala_heap",
+ "galapkg",
+ "ntrt",
+]
 
 [[package]]
 name = "setupapi_test"
 version = "0.1.0"
+
+[[package]]
+name = "setupcab_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "sha1"
@@ -2915,6 +2927,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_seh_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_setupcab_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",
