@@ -220,6 +220,21 @@ disk, logon, lsa, profile, session and system tests log on as it) and
 an administrator prompt for `schannel_test` (its test CA goes into
 LocalMachine\Root; it is skipped otherwise, and so are `winhttp_test`
 and `wininet_test`, which fetch from the Nginx that setup starts).
+
+Elevation decides results in both directions, so no one run answers for
+every program and the report's `platform` says which run it was
+(`windows 10.0.26200 elevated` or `... standard user`, the first line of
+`windows-output.txt` too). An elevated run skips the four programs whose
+checks are what a *standard* user gets, since a program on gala has a
+standard user's token: `token_test` (an administrator's token holds
+SeDebugPrivilege, check 29 asserts it is absent), `kernel32_file_test`
+(an administrator may open `\\.\C:` for reading, check 144 asserts
+ERROR_ACCESS_DENIED), `kernel32_pool_test` (an administrator holds
+SeCreateSymbolicLinkPrivilege, check 61 asserts it is not held) and
+`disk_test` (an administrator opens PhysicalDrive0, which is not
+xtask's 16 MiB scratch disk). CI's windows job is elevated, which is
+why those three check numbers are what its report shows for them.
+
 A program that crashes gets a `fault` field
 (`<code> <name> at module+offset`) from `user/windows/fault.py`, which
 the runner looks for at `..\windowsault.py`: it re-runs the program as
