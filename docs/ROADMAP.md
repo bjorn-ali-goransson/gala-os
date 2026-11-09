@@ -1321,6 +1321,23 @@ install, WebView2, MSIX) are worked as the analysis ranks them.
    delay loads, COM classes and services of the apps (installed with the
    Office Deployment Tool) against gala's exports and stubs; a ranked
    blocker list in this section, like AG's.
+   - Alongside, natively: a pending scenario `office_install` runs the
+     Office Deployment Tool's `setup.exe /configure` in gala (its
+     ledger ranks the installer's blockers; the guest needs the CDN, so
+     on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
+     32-bit x86 program (WOW64), and by its import tables against
+     gala's i686 DLLs it does not load yet: it imports the UCRT
+     (`api-ms-win-crt-*`, which gala does not ship: the open question
+     of the UCRT's home, PK's AIChat item) and nine kernel32 functions
+     gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
+     K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
+     WerRegisterMemoryBlock/WerUnregisterMemoryBlock,
+     IsSystemResumeAutomatic, GetPhysicallyInstalledSystemMemory).
+     Delay-loaded, needed as it goes: i686 builds of crypt32, wininet,
+     wintrust, urlmon, xmllite, webservices, iphlpapi, setupapi,
+     cabinet, msi, normaliz, powrprof, credui, gdiplus; the service
+     control manager (advapi32's service calls are stubs); a few
+     shlwapi, user32, ole32, imm32 and shell32 functions.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,
