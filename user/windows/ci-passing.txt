@@ -15,6 +15,7 @@ clock_test
 clockcal_test
 cmd_test
 com_test
+combase_test
 comdlg32_test
 commit_test
 conpty_test
@@ -110,6 +111,7 @@ winsock_test
 winsta_test
 wow64_adv_test
 wow64_c_test
+wow64_combase_test
 wow64_crt_test
 wow64_fs_test
 wow64_gui_test
