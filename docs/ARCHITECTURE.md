@@ -9503,6 +9503,21 @@ and bare desktops ("Server and desktop workloads") keep Wayland windows
 as they keep Windows ones: the pixels are kept and nothing draws them
 (the `lx_wl` scenario's desktop is such a one).
 
+**Why the server is not on by default yet**: its runtime directory is
+made in the shared file system, so `/run/user/<uid>` is `C:\run\user\<uid>`:
+Windows programs list it in `C:\`, and where a disk keeps the file
+system the change log keeps its directories across boots (a socket's
+name is never logged). Behind
+`wayland=on` that is acceptable; on every desktop boot it is not. The
+answer decided on is Linux's own: `/run` as a tmpfs of the Linux view, a
+mount in `lx`'s path walk onto a directory tree of its own (not under
+`C:\`, never logged, gone at shutdown), with what a mount brings
+(`..` out of it to `/`, `getcwd` through it, its own `st_dev`, EXDEV for
+a rename or link across it, `/` listing `run`). That is the first mount
+of the LX view (seam 4), larger than the server's switch, so it is its
+own step (ROADMAP LD "Next"); the server goes on by default with it,
+started with each desktop that has a shell.
+
 ### Observability
 
 - `events=wayland`: `wayland connect` and `wayland disconnect` (with
