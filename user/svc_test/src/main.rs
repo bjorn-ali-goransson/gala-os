@@ -121,6 +121,32 @@ unsafe extern "system" {
         password: *const u16,
     ) -> Handle;
     fn DeleteService(h: Handle) -> i32;
+    fn ChangeServiceConfig2W(h: Handle, level: u32, info: *const u8) -> i32;
+    fn QueryServiceObjectSecurity(
+        h: Handle,
+        info: u32,
+        sd: *mut u8,
+        size: u32,
+        needed: *mut u32,
+    ) -> i32;
+    fn SetServiceObjectSecurity(h: Handle, info: u32, sd: *const u8) -> i32;
+    fn InitializeSecurityDescriptor(sd: *mut u8, revision: u32) -> i32;
+    fn SetSecurityDescriptorDacl(sd: *mut u8, present: i32, acl: *const u8, defaulted: i32) -> i32;
+    fn GetSecurityDescriptorDacl(
+        sd: *const u8,
+        present: *mut i32,
+        acl: *mut *const u8,
+        defaulted: *mut i32,
+    ) -> i32;
+    fn InitializeAcl(acl: *mut u8, size: u32, revision: u32) -> i32;
+    fn AddAccessAllowedAce(acl: *mut u8, revision: u32, mask: u32, sid: *const u8) -> i32;
+    fn QueryServiceConfig2W(
+        h: Handle,
+        level: u32,
+        buffer: *mut u8,
+        size: u32,
+        needed: *mut u32,
+    ) -> i32;
     fn StartServiceW(h: Handle, argc: u32, argv: *const *const u16) -> i32;
     fn ControlService(h: Handle, control: u32, status: *mut ServiceStatus) -> i32;
     fn LogonUserW(
@@ -202,6 +228,8 @@ const ERROR_SERVICE_NEVER_STARTED: u32 = 1077;
 const ERROR_LOGON_FAILURE: u32 = 1326;
 
 const DELETE: u32 = 0x0001_0000;
+const READ_CONTROL: u32 = 0x0002_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
 const STANDARD_RIGHTS_READ: u32 = 0x0002_0000;
 const GENERIC_READ: u32 = 0x8000_0000;
 const SC_MANAGER_CONNECT: u32 = 0x0001;
@@ -210,6 +238,7 @@ const SC_MANAGER_ENUMERATE_SERVICE: u32 = 0x0004;
 const SC_MANAGER_QUERY_LOCK_STATUS: u32 = 0x0010;
 const SC_MANAGER_ALL_ACCESS: u32 = 0x000f_003f;
 const SERVICE_QUERY_CONFIG: u32 = 0x0001;
+const SERVICE_CHANGE_CONFIG: u32 = 0x0002;
 const SERVICE_QUERY_STATUS: u32 = 0x0004;
 const SERVICE_START: u32 = 0x0010;
 const SERVICE_STOP: u32 = 0x0020;
@@ -857,8 +886,14 @@ fn own_service(c: &mut Checks) -> Result<(), u32> {
         c.fails(DeleteService(h) != 0, ERROR_ACCESS_DENIED)?;
         c.ok(CloseServiceHandle(h) != 0, last_error().into())?;
 
-        let access =
-            SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | DELETE;
+        let access = SERVICE_QUERY_CONFIG
+            | READ_CONTROL
+            | WRITE_DAC
+            | SERVICE_CHANGE_CONFIG
+            | SERVICE_QUERY_STATUS
+            | SERVICE_START
+            | SERVICE_STOP
+            | DELETE;
         let h = c.handle(OpenServiceW(scm, n, access))?;
         // Its configuration: as given, LocalSystem, no group, no
         // dependencies.
@@ -885,6 +920,9 @@ fn own_service(c: &mut Checks) -> Result<(), u32> {
         clear_error();
         let r = QueryServiceConfigW(h, b.as_mut_ptr(), needed - 1, &mut needed);
         c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
+
+        config2(c, h)?;
+        object_security(c, scm, h)?;
 
         // Its status: stopped, never started.
         let r =
@@ -921,6 +959,250 @@ fn own_service(c: &mut Checks) -> Result<(), u32> {
         c.no_handle(create(scm, n, p, 0, OWN, SERVICE_DISABLED), ERROR_SERVICE_MARKED_FOR_DELETE)?;
         c.ok(CloseServiceHandle(h) != 0, last_error().into())?;
         c.ok(CloseServiceHandle(scm) != 0, last_error().into())?;
+    }
+    Ok(())
+}
+
+/// SERVICE_DESCRIPTIONW, SERVICE_PRESHUTDOWN_INFO and the other
+/// one-field levels' structures.
+#[repr(C)]
+struct Description {
+    text: *const u16,
+}
+
+/// SERVICE_FAILURE_ACTIONSW and SC_ACTION.
+#[repr(C)]
+struct FailureActions {
+    reset: u32,
+    reboot: *const u16,
+    command: *const u16,
+    count: u32,
+    actions: *const ScAction,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScAction {
+    kind: u32,
+    delay: u32,
+}
+
+const SERVICE_CONFIG_DESCRIPTION: u32 = 1;
+const SERVICE_CONFIG_FAILURE_ACTIONS: u32 = 2;
+const SERVICE_CONFIG_DELAYED_AUTO_START_INFO: u32 = 3;
+const SERVICE_CONFIG_PRESHUTDOWN_INFO: u32 = 7;
+const SC_ACTION_NONE: u32 = 0;
+const SC_ACTION_RESTART: u32 = 1;
+
+/// ChangeServiceConfig2W and QueryServiceConfig2W (Wine's service.c
+/// test_queryconfig2, on Windows): an unknown level, a NULL *Needed, a
+/// short buffer, the description (NULL leaves it, "" removes it), the
+/// preshutdown time-out (10 s by default since Windows 10 1709, 180 s
+/// before), the delayed start flag (0 or 1 only); the failure actions as
+/// documented (NULL strings when none were given; a restart action needs
+/// SERVICE_START, which the handle has).
+fn config2(c: &mut Checks, h: Handle) -> Result<(), u32> {
+    const PTR: u32 = size_of::<usize>() as u32;
+    let b = buffer();
+    let mut needed = 0u32;
+    let text = wide::<16>("gala's service");
+    let empty = wide::<1>("");
+    // SAFETY: plain calls with our buffers throughout.
+    unsafe {
+        clear_error();
+        let r = QueryServiceConfig2W(h, 0xfff0, b.as_mut_ptr(), PTR, &mut needed);
+        c.fails(r != 0, ERROR_INVALID_LEVEL)?;
+        clear_error();
+        let r =
+            QueryServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, b.as_mut_ptr(), PTR, null_mut());
+        c.fails(r != 0, ERROR_INVALID_ADDRESS)?;
+        needed = 0;
+        clear_error();
+        let r = QueryServiceConfig2W(
+            h,
+            SERVICE_CONFIG_DESCRIPTION,
+            b.as_mut_ptr(),
+            PTR - 1,
+            &mut needed,
+        );
+        c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
+        c.eq(needed.into(), PTR.into())?;
+        b[..8].fill(0xee);
+        let r =
+            QueryServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, b.as_mut_ptr(), PTR, &mut needed);
+        c.ok(r != 0, last_error().into())?;
+        c.ok((*b.as_ptr().cast::<Description>()).text.is_null(), 0)?;
+
+        let d = Description { text: text.as_ptr() };
+        let r = ChangeServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, (&raw const d).cast());
+        c.ok(r != 0, last_error().into())?;
+        clear_error();
+        let r = QueryServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, null_mut(), 0, &mut needed);
+        c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
+        c.eq(needed.into(), (PTR + 2 * 15).into())?;
+        let r = QueryServiceConfig2W(
+            h,
+            SERVICE_CONFIG_DESCRIPTION,
+            b.as_mut_ptr(),
+            needed,
+            &mut needed,
+        );
+        c.ok(r != 0, last_error().into())?;
+        c.ok(same(units((*b.as_ptr().cast::<Description>()).text), "gala's service"), 0)?;
+        // NULL: unchanged.
+        let d = Description { text: null() };
+        let r = ChangeServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, (&raw const d).cast());
+        c.ok(r != 0, last_error().into())?;
+        let r =
+            QueryServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, b.as_mut_ptr(), 256, &mut needed);
+        c.ok(r != 0, last_error().into())?;
+        c.ok(same(units((*b.as_ptr().cast::<Description>()).text), "gala's service"), 0)?;
+        // "": removed.
+        let d = Description { text: empty.as_ptr() };
+        let r = ChangeServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, (&raw const d).cast());
+        c.ok(r != 0, last_error().into())?;
+        let r =
+            QueryServiceConfig2W(h, SERVICE_CONFIG_DESCRIPTION, b.as_mut_ptr(), 256, &mut needed);
+        c.ok(r != 0, last_error().into())?;
+        c.ok((*b.as_ptr().cast::<Description>()).text.is_null(), 0)?;
+
+        // The preshutdown time-out.
+        let mut v = 0xdead_beefu32;
+        let r = QueryServiceConfig2W(
+            h,
+            SERVICE_CONFIG_PRESHUTDOWN_INFO,
+            (&raw mut v).cast(),
+            4,
+            &mut needed,
+        );
+        c.ok(r != 0, last_error().into())?;
+        c.eq(needed.into(), 4)?;
+        c.ok(v == 10_000 || v == 180_000, v.into())?;
+        let new = u32::MAX;
+        let r = ChangeServiceConfig2W(h, SERVICE_CONFIG_PRESHUTDOWN_INFO, (&raw const new).cast());
+        c.ok(r != 0, last_error().into())?;
+        let r = QueryServiceConfig2W(
+            h,
+            SERVICE_CONFIG_PRESHUTDOWN_INFO,
+            (&raw mut v).cast(),
+            4,
+            &mut needed,
+        );
+        c.ok(r != 0, last_error().into())?;
+        c.eq(v.into(), u32::MAX.into())?;
+
+        // The delayed automatic start.
+        v = 0xdead_beef;
+        let level = SERVICE_CONFIG_DELAYED_AUTO_START_INFO;
+        let r = QueryServiceConfig2W(h, level, (&raw mut v).cast(), 4, &mut needed);
+        c.ok(r != 0, last_error().into())?;
+        c.eq(needed.into(), 4)?;
+        c.eq(v.into(), 0)?;
+        let three = 3u32;
+        clear_error();
+        let r = ChangeServiceConfig2W(h, level, (&raw const three).cast());
+        c.fails(r != 0, ERROR_INVALID_PARAMETER)?;
+        let one = 1u32;
+        let r = ChangeServiceConfig2W(h, level, (&raw const one).cast());
+        c.ok(r != 0, last_error().into())?;
+        let r = QueryServiceConfig2W(h, level, (&raw mut v).cast(), 4, &mut needed);
+        c.ok(r != 0, last_error().into())?;
+        c.eq(v.into(), 1)?;
+
+        // The failure actions: a restart after 5 s, then nothing.
+        let actions = [
+            ScAction { kind: SC_ACTION_RESTART, delay: 5000 },
+            ScAction { kind: SC_ACTION_NONE, delay: 0 },
+        ];
+        let f = FailureActions {
+            reset: 86_400,
+            reboot: null(),
+            command: null(),
+            count: 2,
+            actions: actions.as_ptr(),
+        };
+        let level = SERVICE_CONFIG_FAILURE_ACTIONS;
+        let r = ChangeServiceConfig2W(h, level, (&raw const f).cast());
+        c.ok(r != 0, last_error().into())?;
+        let r = QueryServiceConfig2W(h, level, b.as_mut_ptr(), 1024, &mut needed);
+        c.ok(r != 0, last_error().into())?;
+        let got = &*b.as_ptr().cast::<FailureActions>();
+        c.eq(got.reset.into(), 86_400)?;
+        c.eq(got.count.into(), 2)?;
+        c.ok(got.reboot.is_null() && got.command.is_null(), got.reboot as u64)?;
+        c.ok(!got.actions.is_null(), 0)?;
+        let a = core::slice::from_raw_parts(got.actions, 2);
+        c.eq(a[0].kind.into(), SC_ACTION_RESTART.into())?;
+        c.eq(a[0].delay.into(), 5000)?;
+        c.eq(a[1].kind.into(), SC_ACTION_NONE.into())?;
+    }
+    Ok(())
+}
+
+const DACL_SECURITY_INFORMATION: u32 = 4;
+
+/// QueryServiceObjectSecurity and SetServiceObjectSecurity (Wine's
+/// service.c on Windows: a NULL buffer is ERROR_INSUFFICIENT_BUFFER with
+/// the size): a DACL that grants Everyone only SERVICE_QUERY_STATUS is
+/// the service's from then on (a new open for its configuration is
+/// refused), and the old one put back.
+fn object_security(c: &mut Checks, scm: Handle, h: Handle) -> Result<(), u32> {
+    let mut needed = 0u32;
+    let name = wide::<16>(SERVICE);
+    let mut old = [0u8; 1024];
+    // Everyone (S-1-1-0).
+    let everyone: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    let mut acl = [0u8; 64];
+    let mut sd = [0u64; 8];
+    let sd = sd.as_mut_ptr().cast::<u8>();
+    // SAFETY: plain calls with our buffers throughout.
+    unsafe {
+        clear_error();
+        let r =
+            QueryServiceObjectSecurity(h, DACL_SECURITY_INFORMATION, null_mut(), 0, &mut needed);
+        c.fails(r != 0, ERROR_INSUFFICIENT_BUFFER)?;
+        c.ok(needed > 20 && needed as usize <= old.len(), needed.into())?;
+        let r = QueryServiceObjectSecurity(
+            h,
+            DACL_SECURITY_INFORMATION,
+            old.as_mut_ptr(),
+            needed,
+            &mut needed,
+        );
+        c.ok(r != 0, last_error().into())?;
+
+        c.ok(InitializeAcl(acl.as_mut_ptr(), 64, 2) != 0, last_error().into())?;
+        let r = AddAccessAllowedAce(acl.as_mut_ptr(), 2, SERVICE_QUERY_STATUS, everyone.as_ptr());
+        c.ok(r != 0, last_error().into())?;
+        c.ok(InitializeSecurityDescriptor(sd, 1) != 0, last_error().into())?;
+        c.ok(SetSecurityDescriptorDacl(sd, 1, acl.as_ptr(), 0) != 0, last_error().into())?;
+        let r = SetServiceObjectSecurity(h, DACL_SECURITY_INFORMATION, sd);
+        c.ok(r != 0, last_error().into())?;
+
+        let mut now = [0u8; 1024];
+        let r = QueryServiceObjectSecurity(
+            h,
+            DACL_SECURITY_INFORMATION,
+            now.as_mut_ptr(),
+            1024,
+            &mut needed,
+        );
+        c.ok(r != 0, last_error().into())?;
+        let (mut present, mut defaulted, mut dacl) = (0, 0, null());
+        let r = GetSecurityDescriptorDacl(now.as_ptr(), &mut present, &mut dacl, &mut defaulted);
+        c.ok(r != 0 && present != 0 && !dacl.is_null(), last_error().into())?;
+        // ACL: revision, padding, size, AceCount.
+        c.eq((*dacl.add(4)).into(), 1)?;
+
+        clear_error();
+        c.no_handle(OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_CONFIG), ERROR_ACCESS_DENIED)?;
+        let st = c.handle(OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_STATUS))?;
+        c.ok(CloseServiceHandle(st) != 0, last_error().into())?;
+
+        let r = SetServiceObjectSecurity(h, DACL_SECURITY_INFORMATION, old.as_ptr());
+        c.ok(r != 0, last_error().into())?;
+        let again = c.handle(OpenServiceW(scm, name.as_ptr(), SERVICE_QUERY_CONFIG))?;
+        c.ok(CloseServiceHandle(again) != 0, last_error().into())?;
     }
     Ok(())
 }

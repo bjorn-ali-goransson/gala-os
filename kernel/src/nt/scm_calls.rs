@@ -13,11 +13,12 @@ use super::super::scm::{
     self, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_INVALID_SERVICE_CONTROL,
     ERROR_NOT_SUPPORTED, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DISABLED,
     ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE, SC_MANAGER_CONNECT,
-    SC_MANAGER_CREATE_SERVICE, SC_MANAGER_ENUMERATE_SERVICE, SERVICE_DISABLED, SERVICE_INTERROGATE,
-    SERVICE_PAUSE_CONTINUE, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-    SERVICE_START, SERVICE_STOP, SERVICE_STOPPED, SERVICE_USER_DEFINED_CONTROL, ScManager,
-    ServiceObject, win32,
+    SC_MANAGER_CREATE_SERVICE, SC_MANAGER_ENUMERATE_SERVICE, SERVICE_CHANGE_CONFIG,
+    SERVICE_DISABLED, SERVICE_INTERROGATE, SERVICE_PAUSE_CONTINUE, SERVICE_QUERY_CONFIG,
+    SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_STOP, SERVICE_STOPPED,
+    SERVICE_USER_DEFINED_CONTROL, ScManager, ServiceObject, win32,
 };
+use super::super::scm_config;
 use super::super::status::NtStatus;
 use super::super::winsta::Plain;
 use super::Call;
@@ -295,12 +296,46 @@ pub(super) fn gala_service_query(call: &mut Call<'_>) -> NtStatus {
                 tri!(push_text(&mut out, t));
             }
         }
+        0x100.. => {
+            // QueryServiceConfig2: the level's record (scm_config).
+            tri!(entry.require(SERVICE_QUERY_CONFIG));
+            out = tri!(registry::with(|r| scm_config::get(r, scm::find(r, &name)?, class - 0x100)));
+        }
         _ => {
             super::super::ledger::record("GalaServiceQuery", "class", u64::from(class));
             return NtStatus::INVALID_INFO_CLASS;
         }
     }
     give(call, &out, buffer, length, needed)
+}
+
+/// GalaServiceConfigure(Service, Level, *Record, Length):
+/// ChangeServiceConfig2's level `Level` as `scm_config`'s record;
+/// SERVICE_CHANGE_CONFIG, and SERVICE_START for a restart action.
+pub(super) fn gala_service_configure(call: &mut Call<'_>) -> NtStatus {
+    let (h, level, ptr) = (arg!(call, 0), arg!(call, 1) as u32, arg!(call, 2));
+    let len = arg!(call, 3) as u32 as u64;
+    let (entry, name) = tri!(service(call, h));
+    if len > MAX_RECORD {
+        return NtStatus::INVALID_PARAMETER;
+    }
+    let mut record = Vec::new();
+    tri!(record.try_reserve_exact(len as usize).map_err(nomem));
+    record.resize(len as usize, 0u8);
+    if call.process.read(ptr, &mut record).is_err() {
+        return NtStatus::ACCESS_VIOLATION;
+    }
+    let result = (|| {
+        entry.require(SERVICE_CHANGE_CONFIG)?;
+        if scm_config::needs_start(level, &record)? {
+            entry.require(SERVICE_START)?;
+        }
+        let now = super::super::platform::system_time();
+        registry::with(|r| scm_config::set(r, scm::find(r, &name)?, level, &record, now))?;
+        Ok(level)
+    })();
+    note(call, "changed configuration level of", &name, result);
+    result.err().unwrap_or(NtStatus::SUCCESS)
 }
 
 /// GalaServiceEnum(Scm, Type, State, *Buffer, Length, *Needed):

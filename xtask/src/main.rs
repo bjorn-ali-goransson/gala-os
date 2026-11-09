@@ -1286,6 +1286,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("rpcrt4_test", "kernel32.dll", "Windows/System32"),
     ("rpcrt4_test", "rpcrt4.dll", "Windows/System32"),
     ("rpcrt4_test", "bcryptprimitives.dll", "Windows/System32"),
+    // rpc_test (ROADMAP OF): a local RPC server and its clients, in this
+    // process and in a second one (rpc_test.exe client).
+    ("rpc_test", "ntdll.dll", "Windows/System32"),
+    ("rpc_test", "kernel32.dll", "Windows/System32"),
+    ("rpc_test", "rpcrt4.dll", "Windows/System32"),
+    ("rpc_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("rpc_test", "advapi32.dll", "Windows/System32"),
+    ("rpc_test", "secur32.dll", "Windows/System32"),
+    ("rpc_test", "security.dll", "Windows/System32"),
+    ("rpc_test", "bcrypt.dll", "Windows/System32"),
     ("unimplemented_test", "ntdll.dll", "Windows/System32"),
     ("unimplemented_test", "kernel32.dll", "Windows/System32"),
     ("unimplemented_test", "xolehlp.dll", "Windows/System32"),
@@ -3375,6 +3385,7 @@ const USER_PROGRAMS: &[&str] = &[
     "missing_import_test",
     "unimplemented_test",
     "rpcrt4_test",
+    "rpc_test",
     "netapi32_test",
     "pdh_test",
     "setupapi_test",
@@ -5705,6 +5716,12 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=rpcrt4_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["rpcrt4_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        name: "rpc_test",
+        cmdline: "qemu_exit run=rpc_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["rpc_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         name: "unimplemented_test",
@@ -10427,6 +10444,10 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("smprace_test", "round 4 starts child processes (one NT process per Linux process)"),
     ("windows_across_test", "child processes (one NT process per Linux process)"),
     ("uipi_test", "a child process (one NT process per Linux process)"),
+    (
+        "rpc_test",
+        "a child process: the RPC client of `rpc_test.exe client` (one NT process per Linux process)",
+    ),
     ("shell32_test", "a child process (ShellExecuteExW runs it)"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
     ("uia_test", "a child process (one NT process per Linux process)"),

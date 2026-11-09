@@ -359,6 +359,20 @@ pub fn service_descriptor(r: &Registry, id: KeyId) -> Result<Vec<u8>, NtStatus> 
     }
 }
 
+/// Keeps `descriptor` as service `name`'s, in its key's
+/// `Security\Security` value (REG_BINARY), as the SCM stores it.
+pub fn store_descriptor(
+    r: &mut Registry,
+    name: &[u16],
+    descriptor: &[u8],
+    now: u64,
+) -> Result<(), NtStatus> {
+    let id = find(r, name)?;
+    let security = utf16("Security")?;
+    let (sub, _) = r.create(id, &security, 0, &[], now)?;
+    r.set_value(sub, &security, 3, descriptor, now)
+}
+
 /// A service's configuration (QUERY_SERVICE_CONFIG), from its key.
 pub struct Config {
     pub kind: u32,

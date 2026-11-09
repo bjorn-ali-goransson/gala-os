@@ -1849,9 +1849,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpc_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "rpcrt4"
 version = "0.1.0"
 dependencies = [
+ "gala_heap",
  "gala_stubs",
 ]
 
