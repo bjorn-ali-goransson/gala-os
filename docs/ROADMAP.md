@@ -221,6 +221,8 @@ has a section under "Open items".
 | CP | An interactive console prompt | planned | serial line, screen and keyboard, gala-um's terminal; no SSH needed |
 | RS | Remote access and sessions | in progress | A, B1, B2, B3a's window stations, presenters, console switch and window state apart from the compositor (bare desktops too) done; B3b next |
 | GPU | Graphics and GPU | in progress | G0 and G1 done; G2 in progress (OpenGL and Vulkan done); G3 parked |
+| SND | Sound | later | nothing yet; virtio-sound with a WAV-file check first, then WASAPI; not urgent |
+| USB | USB: xHCI, keyboards, mice and storage | later | nothing yet; device interrupts first, then xHCI on `qemu-xhci`, HID, storage; not urgent |
 | BR | A web browser: stock Edge | in progress | stage 1 done: chromium_version, chromium_dump (a page's script runs), chromium_https (a page from the guest's nginx over TLS) and chromium_host (a page from the host network) pass in the gate; stage 2 (a window) under way: chromium_window |
 | OF | Microsoft 365 apps and the new Outlook | planned | gap analysis first |
 
@@ -1247,6 +1249,94 @@ events and GPU hangs (a fence late by N s) in crash reports; `gala gpu`.
 **Design**: ARCHITECTURE "Plan: graphics and GPU" (security: contexts
 as kernel objects on `\Device\Gpu0`; handover: devices reset, programs
 see device-lost).
+
+### SND. Sound
+
+**Goal**: programs play sound (and later record it) through the
+Windows audio APIs they use, on a virtio sound device first, with what
+was played checkable in a test. Not urgent (the owner): after the
+current focus.
+
+**Today**: nothing. No audio driver; winmm has its timer functions
+only and reports no audio or MIDI devices (ARCHITECTURE "Other
+gaps"); no MMDevice API, WASAPI, DirectSound or XAudio2.
+
+**Next** (each step test first):
+1. The virtio-sound driver (virtio 1.2's sound device; QEMU's
+   `virtio-sound-pci`) over the modern virtio-pci transport GPU G1
+   uses: its streams, PCM formats and the period/buffer model, the
+   driver host-tested against a fake device as virtio-gpu's is.
+   Scenarios run QEMU with `-audiodev wav`, which writes everything
+   played to a file: a test plays a known tone and xtask compares the
+   file (frequency, length, no gaps), deterministic and without a sound
+   card on the host.
+2. The audio device list and WASAPI (`mmdevapi.dll`,
+   `audioses.dll`: IMMDeviceEnumerator, the default endpoint,
+   IAudioClient in shared mode with event-driven buffers,
+   IAudioRenderClient, the mix format), which Chromium's audio service
+   and most current programs use; `audio_test` against real Windows
+   (device listed, a stream started and fed, its position advancing).
+   Wine's mmdevapi and winmm (LGPL) are allowed sources (THIRD_PARTY.md
+   for anything borrowed).
+3. On top: winmm's waveOut and PlaySound, then DirectSound.
+4. Later: capture (a microphone; QEMU's wav backend has no input, a
+   scripted source instead), Intel HD Audio for real machines (Intel's
+   published HDA specification), exclusive mode, XAudio2, sound sent to
+   RS's remote client (ARCHITECTURE "Remote access", the client's
+   "sound").
+
+**Done when** (each step): its tests pass; stream starts, stops,
+underruns (the device starved) and the device's errors in an `events=`
+category, and the streams per process in the state dump.
+
+**Design**: to be written in ARCHITECTURE with step 1 (the driver, the
+kernel interface the audio DLLs use: shared buffers and a position
+event, as GPU's `GalaGpu*` calls are planned; handover: the device is
+reset, streams restart).
+
+### USB. USB: xHCI, keyboards, mice and storage
+
+**Goal**: gala drives USB through its own xHCI driver, so USB
+keyboards, mice and sticks work, first on QEMU's `qemu-xhci`, then on
+real machines; Windows programs see USB devices through the APIs they
+use. Not urgent (the owner): after the current focus.
+
+**Today**: nothing. The keyboard and mouse are PS/2, every device is
+polled, and xHCI is only listed among gala's own drivers under
+"Later". (The image boots from a USB stick through the firmware, not
+through gala.)
+
+**Next** (each step test first):
+1. Device interrupts: MSI/MSI-X for PCI devices, the virtio devices
+   moved off polling first (their scenarios unchanged), as xHCI's
+   event rings need them.
+2. The xHCI driver and hubs, from Intel's published xHCI
+   specification and the USB 2.0/3.x specifications: rings, slots,
+   enumeration, control and interrupt transfers, hot plug, a device
+   unplugged mid-transfer. Host tests against a fake controller; a
+   scenario with QEMU's `qemu-xhci`, devices plugged and unplugged
+   through the monitor.
+3. HID: the boot protocol for `usb-kbd` and `usb-mouse`, then report
+   descriptors; `usb-tablet` gives an absolute pointer, into the
+   desktop's input as the PS/2 driver's events are (scripted screen
+   tests can then click by position).
+4. Mass storage (bulk-only transport, SCSI commands) as a disk under
+   gala's file systems; `usb-storage` in a scenario.
+5. What Windows programs see: `hid.dll` and HID collections, device
+   enumeration through SetupAPI and cfgmgr32 (empty today:
+   `cfgmgr32_test`), raw input for HID devices, WinUSB for programs
+   talking to their own device; tests against real Windows with the
+   same QEMU devices.
+6. Third-party USB device drivers through DR's user-mode driver host
+   (UMDF); user-space Linux USB (libusb) with LX's device interfaces.
+
+**Done when** (each step): its tests pass; enumeration, plug and
+unplug, transfer errors and stalls in an `events=usb` category; the
+device tree in the state dump and in `gala devices`.
+
+**Design**: to be written in ARCHITECTURE with step 2 (the driver,
+the device tree, handover: the controller reset and devices enumerated
+again by the next kernel).
 
 ### BR. A web browser: stock Microsoft Edge
 
@@ -3519,8 +3609,8 @@ Wanted, not scheduled. Each becomes an item with a section when it is.
   dump. User-space Linux drivers (libusb, FUSE, CUPS, SANE) come with LX
   when it gets device interfaces.
 - **gala's own drivers** against published standards: after virtio,
-  AHCI/NVMe, xHCI, e1000; device interrupts (all devices are polled
-  today).
+  AHCI/NVMe, e1000 (xHCI and device interrupts: item USB; sound:
+  item SND).
 - **Raspberry Pi** (on item AR's port): Pi 4/5, QEMU's `raspi4b`/`virt`
   first; Limine or the Pi's firmware loading the kernel, the GIC and the
   generic timer, the PL011 UART, the mailbox framebuffer, then EMMC2/SD,
