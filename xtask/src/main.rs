@@ -1383,6 +1383,10 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("winsta_test", "ntdll.dll", "Windows/System32"),
     ("winsta_test", "kernel32.dll", "Windows/System32"),
     ("winsta_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "ntdll.dll", "Windows/System32"),
+    ("clipboard_test", "kernel32.dll", "Windows/System32"),
+    ("clipboard_test", "user32.dll", "Windows/System32"),
+    ("clipboard_test", "gdi32.dll", "Windows/System32"),
     ("lsa_test", "ntdll.dll", "Windows/System32"),
     ("lsa_test", "kernel32.dll", "Windows/System32"),
     ("lsa_test", "advapi32.dll", "Windows/System32"),
@@ -3061,6 +3065,7 @@ const USER_PROGRAMS: &[&str] = &[
     "session_test",
     "presenter_test",
     "winsta_test",
+    "clipboard_test",
     "lsa_test",
     "restricted_test",
     "cmd",
@@ -4400,6 +4405,20 @@ const EVENT_EXPECT: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // ROADMAP LD step 3: the clipboard's steps across the two
+        // processes, the child's CF_TEXT synthesized from the parent's
+        // CF_UNICODETEXT and the open refused while the other holds it.
+        "clipboard_test",
+        &[
+            r#""ev":"clipboard","op":"set""#,
+            r#""format":13,"kind":0,"size":64"#,
+            r#""format":1,"source":13,"kind":0,"size":64"#,
+            r#""op":"close""#,
+            r#""changed":true,"listeners":1"#,
+            r#""op":"open denied""#,
+        ],
+    ),
+    (
         "sshd_server",
         &[
             r#""ev":"tcp accept""#,
@@ -5462,6 +5481,16 @@ const SCENARIOS: &[Scenario] = &[
             "winsta_test: ok",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // ROADMAP LD step 3: the window station's clipboard, in the
+        // kernel, between two processes (user/clipboard_test): formats
+        // copied through the kernel, the synthesized text formats, the
+        // lock across processes, the sequence number, WM_CLIPBOARDUPDATE.
+        name: "clipboard_test",
+        cmdline: "qemu_exit events=ipc run=clipboard_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["clipboard_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // Security model S4 (docs/SECURITY.md): LSA logons as sshd makes
@@ -9671,6 +9700,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("session_test", "child processes; run as SYSTEM (a boot option)"),
     ("presenter_test", "a child process; run as SYSTEM (a boot option)"),
     ("winsta_test", "child processes (one NT process per Linux process)"),
+    ("clipboard_test", "a child process (one NT process per Linux process)"),
     ("bench", "measures the platform: gala-um's numbers are the host's"),
     ("go_exec", "child processes (one NT process per Linux process)"),
     ("busybox", "child processes (pipelines are child processes)"),

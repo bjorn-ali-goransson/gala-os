@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod action;
 pub mod afd;
 pub mod charge;
+pub mod clipboard;
 pub mod conhost;
 pub mod crashreport;
 pub mod desktop;

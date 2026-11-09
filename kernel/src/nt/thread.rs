@@ -1339,6 +1339,8 @@ pub fn exit_current(status: NtStatus) -> ! {
         // never got there), and messages sent to it fail.
         t.process.desk.windows.thread_ended(t.process.id as u32, t.id as u32);
         t.process.desk.hooks.thread_ended(t.process.id as u32, t.id as u32);
+        // The clipboard it had open is closed (its listeners told).
+        super::clipboard::thread_ended(&t.process, t.id);
         // A desktop handle it was set to (SetThreadDesktop) may be closed.
         t.process.ui.thread_ended(t.id);
         THREADS.lock().retain(|o| !KArc::ptr_eq(o, &object));

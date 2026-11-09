@@ -2227,12 +2227,6 @@ pub extern "system" fn GetCursorPos(point: *mut [i32; 2]) -> i32 {
     1
 }
 
-/// GetClipboardOwner: NULL (gala has no clipboard yet).
-#[unsafe(no_mangle)]
-pub extern "system" fn GetClipboardOwner() -> Hwnd {
-    0
-}
-
 /// FindWindowW: a top-level window of ours with that class (NULL: any)
 /// and title (NULL: any); gala's user32 sees only its own windows, so
 /// another program's (e.g. Pageant's) is not found: NULL.

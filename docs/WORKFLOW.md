@@ -861,7 +861,10 @@ kernel32 through `raw-dylib`), run under gala and under Windows
   machine (the processor count, devices, the system locale, the build,
   the volume's number) are read from another API, not typed in; per-user
   state another process may hold (the clipboard) is skipped, naming the
-  holder, when it is held; named sections and symbolic links go in the session's
+  holder, when it is held (a test that changes the clipboard also
+  retries, for a moment, an OpenClipboard meant to succeed: clipboard
+  history and remote-desktop agents open it after each change,
+  `clipboard_test`); named sections and symbolic links go in the session's
   `\Sessions\<n>\BaseNamedObjects` (`\BaseNamedObjects` in session 0):
   creating them in the global one needs SeCreateGlobalPrivilege outside
   session 0, and DIRECTORY_ALL_ACCESS on it is not granted (ask

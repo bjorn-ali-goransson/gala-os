@@ -279,6 +279,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipboard_test"
+version = "0.1.0"
+
+[[package]]
 name = "clock_test"
 version = "0.1.0"
 dependencies = [

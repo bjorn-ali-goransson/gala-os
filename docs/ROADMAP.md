@@ -644,8 +644,8 @@ by programs"; SECURITY.md for OpenSSH and PostgreSQL.
    700 x 500, so its snapped half would be 700 wide as on Windows; the
    desktop's docking test and the scenario's checks change with it);
    SetWindowPos's WM_NCCALCSIZE.
-2. Rich edit: RTF streams, undo, the clipboard (user32 has none yet),
-   OLE callbacks (wx asks for them).
+2. Rich edit: RTF streams, undo, cut, copy and paste over user32's
+   clipboard, OLE callbacks (wx asks for them).
 3. A transfer over SFTP (`filezilla_sftp` lists only): a download and
    an upload through the queue.
 
@@ -1046,8 +1046,8 @@ own session and shell.
    Window stations' open ends: DACLs on stations and desktops;
    CreateWindowStationW and CreateDesktopW stay unsupported until BR
    stage 3 (Chromium's sandbox) needs them, with SwitchDesktop and
-   desktops with windows of their own; UOI_USER_SID; clipboard and atoms
-   per station.
+   desktops with windows of their own; UOI_USER_SID; atoms per station
+   (the clipboard is the station's: LD step 3).
 2. B3b: remote shasha: the compositor as a crate that also builds for
    the host, a versioned protocol, the server end (also in the server
    kernel, which has no compositor), a host client (winit).
@@ -1063,8 +1063,8 @@ own session and shell.
 4. B5: sessions across a kernel handover (session, desktop and window
    state carried; the window registry is refused today), remote clients
    reconnecting after it.
-5. Later: several desktops per session, a secure desktop, clipboard,
-   seamless windows, RDP proper. Interim, with no gala work: QEMU's
+5. Later: several desktops per session, a secure desktop, the
+   clipboard over the remote protocol, seamless windows, RDP proper. Interim, with no gala work: QEMU's
    `-vnc`.
 
 **Done when**: B3b: an xtask test client connects through a forwarded
@@ -1608,7 +1608,8 @@ is left is delay-loaded or stubbed.
 **Next** (what is left, by DLL):
 1. ole32: CoRegisterMallocSpy (sqlmin; the task allocator would call the
    spy around every operation and track spied blocks), the OLE clipboard
-   and DoDragDrop (need user32's clipboard).
+   (OleSetClipboard and friends, over user32's clipboard) and
+   DoDragDrop.
 2. crypt32: the other decode types the programs use (which ones is only
    seen at run time: the ledger's `CryptDecodeObjectEx` lines),
    CRLs/CTLs, collections' member stores, PFX with ECDSA keys (ncrypt
@@ -2297,6 +2298,19 @@ the next breakthroughs).
   (`lx_prctl`), statfs and fstatfs (`lx_statfs`). Its ledger after:
   rseq and SA_ONSTACK (below), and the Wayland requests accepted and
   not used (regions, set_cursor, min and max sizes, set_parent).
+- Step 3's first part, Windows' clipboard as Windows has it
+  (`clipboard_test`: two processes, its expectations Windows'
+  documented behaviour; ARCHITECTURE "The clipboard"): one per window
+  station in the kernel (`nt::clipboard`, the GalaClipboard* services
+  0x7fc0-0x7fc7), OpenClipboard's lock across processes
+  (ERROR_ACCESS_DENIED, GetOpenClipboardWindow), the owner
+  (GetClipboardOwner after EmptyClipboard), HGLOBAL formats copied
+  through the kernel and charged to the setter's paged pool quota
+  (GetClipboardData's handle made per process, freed by user32 once the
+  data changes), the synthesized text formats and CF_LOCALE in
+  Windows' enumeration order, the sequence number, the format listeners
+  (WM_CLIPBOARDUPDATE posted across processes), `events=ipc` and the
+  state dump's clipboard line.
 
 **Next**:
 1. Step 1's rest, before real applications need it:
@@ -2348,13 +2362,20 @@ the next breakthroughs).
    on a MSG_PEEK, collecting rights cycles in flight.
 3. **One clipboard for both personalities** (the owner: "would be
    amazing"), test first at each layer:
-   - Windows' clipboard as Windows has it, one per window station in
-     the kernel (user32's is per process today): OpenClipboard's owner
-     and its lock across processes, SetClipboardData/GetClipboardData
-     of memory handles copied through the kernel, delayed rendering
-     (WM_RENDERFORMAT), the sequence number and the format listeners
-     (WM_CLIPBOARDUPDATE); a test copying between two processes,
-     recorded on Windows;
+   - Windows' clipboard's open ends (its first part is done, above),
+     ledgered where a program reaches them: delayed rendering (SetClipboardData
+     with NULL is kept, WM_RENDERFORMAT and WM_RENDERALLFORMATS are not
+     sent), GDI handle formats across processes (CF_BITMAP,
+     CF_ENHMETAFILE, CF_PALETTE stay the setter's; the bitmap and
+     metafile synthesized formats CF_DIB, CF_DIBV5, CF_METAFILEPICT are
+     not made), registered formats are per process
+     (RegisterClipboardFormat shares user32's table of registered
+     messages: a station-wide atom table is to come), the viewer chain
+     (SetClipboardViewer, WM_DRAWCLIPBOARD), WM_DESTROYCLIPBOARD posted
+     rather than sent, CF_LOCALE's code pages (user32 converts text
+     through the system's ANSI and OEM code pages); `clipboard_test`
+     joins `user/windows/ci-passing.txt` once its Windows result is
+     read;
    - the Wayland selection across clients: data offers to the focused
      client, `receive` passing its descriptor to the source's `send`;
      a two-client test against weston;
@@ -2364,7 +2385,18 @@ the next breakthroughs).
      Windows copy offers Wayland clients the same MIME types, the data
      converted when pasted (delayed rendering on both sides); a
      scenario copying from a GTK window and pasting into a Windows edit
-     control, and back.
+     control, and back. What it needs from the kernel clipboard, beyond
+     the seams there (`Clipboard::offer`: the Wayland server puts text
+     on the clipboard as an owner without a window, refused while a
+     program has it open; `Clipboard::text`; the sequence number to
+     notice a Windows copy): delayed rendering first (a Wayland source
+     offered as formats with no data, rendered by the server's `send`
+     when a Windows program asks: the kernel waiting for the bytes
+     instead of WM_RENDERFORMAT), a kernel-side listener (the server
+     told of a Windows change as WM_CLIPBOARDUPDATE tells windows), the
+     session's interactive station (WinSta0) as the one bridged, and the
+     text conversion user32 does today (UTF-8 to CF_UNICODETEXT) on the
+     kernel side.
 4. Step 3's rest: an application as a distribution ships it (GTK 3, the
    owner's choice for now: gnome-calculator or gedit's GTK 3 builds),
    with its GSettings schemas, icon theme and keyboard input checked on

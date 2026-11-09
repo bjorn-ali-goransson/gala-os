@@ -149,6 +149,16 @@ pub const GALA_USER_OBJECT_ENUM: u32 = 0x7fa5;
 /// gala's session service (session_calls; ROADMAP RS): what shows a
 /// session's desktop (presenters) and a Test frame's pixels.
 pub const GALA_SESSION: u32 = 0x7fb0;
+/// The window station's clipboard (gala's own; nt::clipboard,
+/// clipboard_calls.rs), for user32.
+pub const GALA_CLIPBOARD_OPEN: u32 = 0x7fc0;
+pub const GALA_CLIPBOARD_CLOSE: u32 = 0x7fc1;
+pub const GALA_CLIPBOARD_EMPTY: u32 = 0x7fc2;
+pub const GALA_CLIPBOARD_SET: u32 = 0x7fc3;
+pub const GALA_CLIPBOARD_GET: u32 = 0x7fc4;
+pub const GALA_CLIPBOARD_INFO: u32 = 0x7fc5;
+pub const GALA_CLIPBOARD_FORMATS: u32 = 0x7fc6;
+pub const GALA_CLIPBOARD_LISTENER: u32 = 0x7fc7;
 pub const GALA_WINDOW_REGISTER: u32 = 0x7f41;
 pub const GALA_WINDOW_UPDATE: u32 = 0x7f42;
 pub const GALA_WINDOW_UNREGISTER: u32 = 0x7f43;
@@ -431,6 +441,14 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     ),
     (GALA_USER_OBJECT_ENUM, "GalaUserObjectEnum", 4, winsta_calls::gala_user_object_enum),
     (GALA_SESSION, "GalaSession", 5, session_calls::gala_session),
+    (GALA_CLIPBOARD_OPEN, "GalaClipboardOpen", 1, clipboard_calls::gala_clipboard_open),
+    (GALA_CLIPBOARD_CLOSE, "GalaClipboardClose", 1, clipboard_calls::gala_clipboard_close),
+    (GALA_CLIPBOARD_EMPTY, "GalaClipboardEmpty", 0, clipboard_calls::gala_clipboard_empty),
+    (GALA_CLIPBOARD_SET, "GalaClipboardSet", 5, clipboard_calls::gala_clipboard_set),
+    (GALA_CLIPBOARD_GET, "GalaClipboardGet", 4, clipboard_calls::gala_clipboard_get),
+    (GALA_CLIPBOARD_INFO, "GalaClipboardInfo", 1, clipboard_calls::gala_clipboard_info),
+    (GALA_CLIPBOARD_FORMATS, "GalaClipboardFormats", 3, clipboard_calls::gala_clipboard_formats),
+    (GALA_CLIPBOARD_LISTENER, "GalaClipboardListener", 2, clipboard_calls::gala_clipboard_listener),
     (NT_SET_EVENT, "NtSetEvent", 2, nt_set_event),
     (NT_QUERY_PERFORMANCE_COUNTER, "NtQueryPerformanceCounter", 2, nt_query_performance_counter),
     (NT_DELAY_EXECUTION, "NtDelayExecution", 2, nt_delay_execution),
@@ -6962,3 +6980,6 @@ mod winsta_calls;
 
 #[path = "session_calls.rs"]
 mod session_calls;
+
+#[path = "clipboard_calls.rs"]
+mod clipboard_calls;

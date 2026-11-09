@@ -594,6 +594,7 @@ numbers and the version reported to programs depend on it.
 | 0x7f5a, 0x7f5b | GalaRequestHandover, GalaHandoverPause | "Kernel handover" |
 | 0x7f5c | GalaUnhandledException | OBSERVABILITY "Crash reports (programs)" |
 | 0x7fa0-0x7fa5 | GalaUserObjectOpen, GalaUserObjectConnection, GalaUserObjectSet, GalaUserObjectClose, GalaUserObjectInformation, GalaUserObjectEnum | "Window stations and desktops" |
+| 0x7fc0-0x7fc7 | GalaClipboardOpen, GalaClipboardClose, GalaClipboardEmpty, GalaClipboardSet, GalaClipboardGet, GalaClipboardInfo, GalaClipboardFormats, GalaClipboardListener | "The clipboard" |
 | other numbers in 0x7f30-0x7f73 | windows, screen, WinEvents, desktop actions | "Windows on the screen" |
 
   gala's numbers for Windows services (until verified): 0x7f01
@@ -5456,7 +5457,9 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
 - **Registered messages** (`message.rs`): RegisterWindowMessageW gives
   0xC000 + an index per name (case-insensitive), process-wide;
   registered clipboard formats share the table (names as first
-  spelled).
+  spelled). The table is the process's, not the window station's: a
+  format registered in two processes may get two numbers (the clipboard
+  itself is the station's: "The clipboard").
 - **Hooks** (`hook.rs`): per kind and thread, newest first;
   CallNextHookEx ignores its handle (as documented) and continues from
   the hook running on the thread. WH_CBT is called on creation
@@ -5807,7 +5810,7 @@ then riched20.dll).
   options are the ES_ styles of the same values (ECO_READONLY is
   ES_READONLY).
 - Not yet (each recorded as `riched20.dll!...`): RTF (EM_STREAMIN/OUT,
-  EM_SETTEXTEX with "{\rtf"), undo, the clipboard (user32 has none), OLE
+  EM_SETTEXTEX with "{\rtf"), undo, cut, copy and paste, OLE
   (EM_GETOLEINTERFACE, EM_SETOLECALLBACK: FileZilla's wx asks for both
   and copes), zoom, per-paragraph formats, find; other EM_ and edit
   messages are recorded as `riched20.dll!message` with the number and
@@ -7123,8 +7126,8 @@ stations and desktops a program creates are refused until stage 3).
   accepted, never signaled, recorded).
 - userenv's group policy notifications; netapi32's join and DS role (a
   workgroup workstation).
-- user32: DPI awareness (96 DPI), power and clipboard registrations,
-  device lists (empty). winmm: audio and MIDI devices (none). ws2_32:
+- user32: DPI awareness (96 DPI), power registrations, device lists
+  (empty). winmm: audio and MIDI devices (none). ws2_32:
   GetAddrInfoExW (synchronous) and the name-space provider calls.
   dbghelp: MiniDumpWriteDump refused (recorded).
 - New DLLs: `shcore.dll` (GetDpiForMonitor, SetProcessDpiAwareness),
@@ -7935,8 +7938,8 @@ same program as SYSTEM).
   ERROR_BUSY when the desktop differs); UOI_USER_SID and UOI_HEAPSIZE
   are unsupported (ledger); a process holding a station or desktop
   handle is refused by a kernel handover (B5), and a carried process
-  connects again from its logon session; no clipboard or atom tables
-  per station yet.
+  connects again from its logon session; no atom table per station yet
+  (each station has its clipboard: "The clipboard").
 - **Observability**: the first call logs where the process is and why
   (`winsta: pid 4 (x.exe, session 1) is on WinSta0\Default (its logon
   session's)`, or `(STARTUPINFO.lpDesktop)`, `(its parent's, pid 4)`, `(an
@@ -7946,6 +7949,103 @@ same program as SYSTEM).
   `window`): `"ev":"winsta"` with `"op":"connect"` (pid, session,
   station, desktop, `from`), `"connect failed"`, `"made"`. The state
   dump's sessions part lists each session's stations.
+
+### The clipboard
+
+`kernel/src/nt/clipboard.rs` (the state; host tests there),
+`kernel/src/nt/clipboard_calls.rs` (gala's services),
+`user/user32/src/clipboard.rs`. Test program: `user/clipboard_test`
+(scenario `clipboard_test`, `events=ipc`: a parent and its child copy
+to each other). ROADMAP LD step 3.
+
+- **One per window station** (`WindowStation::clipboard`), as Windows
+  keeps it ("the system keeps a serial number for the clipboard for each
+  window station"): every process connected to the station shares it;
+  a clipboard call connects the process as a window station call does
+  ("Window stations and desktops").
+- **Open**: one thread at a time, with the window it named (NULL
+  allowed): OpenClipboard by another thread, or by the same thread with
+  another window, is STATUS_ACCESS_DENIED (ERROR_ACCESS_DENIED);
+  GetOpenClipboardWindow names the window. CloseClipboard,
+  EmptyClipboard, SetClipboardData, GetClipboardData and
+  EnumClipboardFormats by a thread without it open are
+  STATUS_INVALID_LOCK_SEQUENCE (ERROR_CLIPBOARD_NOT_OPEN). A thread that
+  ends with it open closes it (as CloseClipboard would).
+- **Owner**: EmptyClipboard makes the open window the owner
+  (GetClipboardOwner); the owner it replaces gets WM_DESTROYCLIPBOARD,
+  posted (Windows sends it). An owner's process that ends leaves no
+  owner, and its delayed and handle formats go.
+- **Formats**, in the order set (the kind GalaClipboardSet is told):
+  - memory (every format but those below): user32 copies GlobalSize
+    bytes of the locked HGLOBAL into the kernel, charged to the setter's
+    paged pool quota (`quota::Held`; STATUS_QUOTA_EXCEEDED,
+    ERROR_NOT_ENOUGH_QUOTA); the handle is the system's from then on, as
+    Windows says: user32 keeps it as this process's copy and frees it
+    once the data is gone;
+  - handle values (CF_BITMAP, CF_PALETTE, CF_ENHMETAFILE, CF_DSPBITMAP,
+    CF_DSPENHMETAFILE, 0x200-0x3ff): the value, good in the setting
+    process only (another process gets NULL, ledgered);
+  - delayed (SetClipboardData with NULL): listed, never rendered
+    (ledgered: no WM_RENDERFORMAT).
+  Each format's serial is the sequence number its setting made.
+- **GetClipboardData** gives a process-local HGLOBAL made from the
+  kernel's bytes (GalaClipboardGet: a 16-byte record of size, serial,
+  source format and kind, then the bytes), kept by user32 per (format,
+  serial) and freed at its first clipboard call after an EmptyClipboard
+  or a new set of the format; the setting process gets its own handle
+  back.
+- **Synthesized formats** ("Synthesized Clipboard Formats"): at a close
+  after a change, text without CF_LOCALE gets CF_LOCALE (the closer's
+  input language, GetKeyboardLayout's: 0x0409), then CF_TEXT,
+  CF_OEMTEXT and CF_UNICODETEXT that are missing are listed (that
+  order) as made from the best text present (CF_UNICODETEXT, else
+  CF_TEXT, else CF_OEMTEXT). So CF_UNICODETEXT set enumerates as
+  CF_UNICODETEXT, CF_LOCALE, CF_TEXT, CF_OEMTEXT, as Windows does.
+  user32 converts when asked, through the ANSI and OEM code pages.
+- **Sequence number** (GetClipboardSequenceNumber): grows with each
+  EmptyClipboard and SetClipboardData.
+- **Format listeners** (AddClipboardFormatListener: a window of the
+  caller's; at most 64 per station): each gets WM_CLIPBOARDUPDATE,
+  posted through the session's window registry
+  (`Windows::post_from_system`: no UIPI check, as the system sends it),
+  at every close after a change, its own process's included; a
+  listener whose window is gone is dropped.
+- **Services** (0x7fc0-0x7fc7; numbers in `syscalls.rs`, testntdll and
+  wow64's table):
+
+| Number | Service | |
+|---|---|---|
+| 0x7fc0 | GalaClipboardOpen(Hwnd) | OpenClipboard |
+| 0x7fc1 | GalaClipboardClose(Locale) | CloseClipboard; Locale for CF_LOCALE |
+| 0x7fc2 | GalaClipboardEmpty() | EmptyClipboard |
+| 0x7fc3 | GalaClipboardSet(Format, Kind, *Data, Length, *Serial) | Kind 0 memory, 1 a handle value (8 bytes), 2 delayed |
+| 0x7fc4 | GalaClipboardGet(Format, *Buffer, Length, *Info) | STATUS_BUFFER_TOO_SMALL with the record when short (Length 0: the size) |
+| 0x7fc5 | GalaClipboardInfo(*Record) | 32 bytes: sequence, flags (1 open by the caller, 2 open), open window, owner, count, the last empty's sequence |
+| 0x7fc6 | GalaClipboardFormats(*Formats, Max, *Count) | enumeration order |
+| 0x7fc7 | GalaClipboardListener(Hwnd, Add) | Add/RemoveClipboardFormatListener |
+
+- **Seams for the Wayland selection** (ROADMAP LD step 3's parts 2 and
+  3): `Clipboard::offer` puts bytes on the clipboard in one step as an
+  owner without a window (refused while a program has it open; the
+  listeners to tell come back), `Clipboard::text` reads CF_UNICODETEXT's
+  bytes; ROADMAP lists what the bridge needs beyond them.
+- **Limits** (ROADMAP LD step 3): delayed rendering, GDI handles across
+  processes and the bitmap and metafile synthesized formats, the viewer
+  chain (SetClipboardViewer), registered formats per process
+  (user32's table), CF_LOCALE's code pages (the system's), no DACL check
+  for WINSTA_ACCESSCLIPBOARD (stations have none).
+- **Observability**: events (category `ipc`, `"ev":"clipboard"`, each
+  with pid, tid, session and station): `open` (hwnd), `open denied`
+  (the holder's pid, tid and window), `empty` (the previous owner),
+  `set` (format, kind, size, serial), `get` (format, the source a
+  synthesized format came from, size, the setter's pid), `close`
+  (whether it changed, the listeners told), `listener`. The state dump
+  has a line per used clipboard: `statedump: session 1 WinSta0
+  clipboard: sequence 4, open by Some(Opener { pid, tid, hwnd }), owner
+  Some((pid, hwnd)), 4 formats [1, 16, 7, 13] (35 bytes), 1 listeners`
+  (a holder that never closes it blocks every other program's copy
+  and paste). The ledger has delayed rendering and handle formats
+  asked across processes.
 
 ### Presenters (B3a)
 
@@ -8093,7 +8193,7 @@ alone in `winstate/tests.rs`.
 
 ```
 Session (id, its object directory, its token defaults, presenter)
- └─ window station WinSta0 (later: clipboard, atoms)
+ └─ window station WinSta0 (its clipboard; later: atoms)
      └─ desktop "Default" = window state (registry, Z order, focus,
                             capture, pixel buffers) + input queue
                             + presenter: Console | Remote | None
@@ -8174,7 +8274,7 @@ on Windows too), 1 for the local console, 2+ for remote logons.
 
 Later: several window stations and desktops per session (CreateDesktop,
 OpenDesktop, SetThreadDesktop, SwitchDesktop, a secure desktop for
-credential prompts), clipboard and atom tables per window station, and
+credential prompts), atom tables per window station, and
 Windows' real RDP (MS-RDPBCGR is openly documented; IronRDP's server
 crate is a candidate) if mstsc compatibility is wanted. Without any gala
 work, QEMU's own VNC (`-vnc :1`) shows gala's screen remotely.
