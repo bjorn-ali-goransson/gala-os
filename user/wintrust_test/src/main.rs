@@ -44,7 +44,17 @@
 //!   setup.exe's chain is 3 certificates, python.exe's 4, the last one a
 //!   trusted, self-signed root.
 //!
+//! - A signed cabinet (`data/selfsigned.cab`, from `data/make_cab.py`),
+//!   whose digest is computed as the digests of Microsoft's signed CDN
+//!   cabinets are (ARCHITECTURE "wintrust: Authenticode"): as it is,
+//!   CERT_E_CHAINING (S_OK hash only); with the header's reserved1 changed
+//!   (outside the digest) the same; with cbCabinet or a byte of its file
+//!   changed TRUST_E_BAD_DIGEST (hash only: TRUST_E_NOSIGNATURE, as for
+//!   images); without the RESERVE_PRESENT flag TRUST_E_NOSIGNATURE.
+//!
 //! Not confirmed on Windows yet (CI's run of this program confirms them):
+//! every cabinet answer above (`cab_probe` measures Windows' answers for
+//! Microsoft's cabinets and this one, byte by byte of the header);
 //! a changed byte in the signer's encrypted digest is taken as
 //! NTE_BAD_SIGNATURE, CryptMsgControl's answer (Wine reports
 //! TRUST_E_CERT_SIGNATURE); an RFC 3161 timestamp is one counter signer
@@ -539,6 +549,39 @@ fn basics(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// A signed cabinet (`data/selfsigned.cab`, made by `data/make_cab.py`:
+/// signed as Microsoft's CDN cabinets are, by a certificate whose root is
+/// not in the signature, as Wine's self-signed images), as it is and
+/// altered: the full verification and WTD_HASH_ONLY_FLAG's.
+fn cab_cases(c: &mut Checks) -> Result<(), u32> {
+    let cab: &[u8] = include_bytes!("../data/selfsigned.cab");
+    // cbCabinet: where the signature starts.
+    let end = u32::from_le_bytes([cab[8], cab[9], cab[10], cab[11]]) as usize;
+    let path = temp_path(b"signed.cab");
+    let one = |at: usize| [cab[at] ^ 0x5a];
+    let (reserved1, cb_cabinet, data, flags) = (one(4), one(8), one(end - 3), [0u8]);
+    let cases: [(&[&[u8]], u32, u32); 5] = [
+        (&[cab], CERT_E_CHAINING, S_OK),
+        // The header's reserved1, outside the digest.
+        (&[&cab[..4], &reserved1, &cab[5..]], CERT_E_CHAINING, S_OK),
+        // cbCabinet and a byte of the file's data, inside it.
+        (&[&cab[..8], &cb_cabinet, &cab[9..]], TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        (&[&cab[..end - 3], &data, &cab[end - 2..]], TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        // Without RESERVE_PRESENT the cabinet has no signature.
+        (&[&cab[..30], &flags, &cab[31..]], TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+    ];
+    for (parts, full, hash_only) in cases {
+        c.ok(write_file(&path, parts), 0)?;
+        let r = verify(c, &path, false)?;
+        c.eq(r, full)?;
+        let r = verify(c, &path, true)?;
+        c.eq(r, hash_only)?;
+    }
+    // SAFETY: a NUL-terminated path.
+    unsafe { DeleteFileW(path.as_ptr()) };
+    Ok(())
+}
+
 /// Wine's test_wintrust_digest over one of its two self-signed images.
 fn digest_cases(c: &mut Checks, image: &[u8], nt_headers: usize) -> Result<(), u32> {
     const DUMMY: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
@@ -777,6 +820,7 @@ fn run() -> Result<(), u32> {
     // IMAGE_NT_HEADERS32 is 248 bytes, IMAGE_NT_HEADERS64 264.
     digest_cases(&mut c, include_bytes!("../data/selfsigned32.exe"), 248)?;
     digest_cases(&mut c, include_bytes!("../data/selfsigned64.exe"), 264)?;
+    cab_cases(&mut c)?;
 
     let require = required();
     let setup = wide::<32>(b"C:\\gala\\setup.exe");

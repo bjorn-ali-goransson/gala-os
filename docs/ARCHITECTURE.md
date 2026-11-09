@@ -3543,17 +3543,17 @@ definition for both layouts, "Plan: WOW64").
 
 `user/wintrust` (`wintrust_test`, `wow64_wintrust_test`; x64 and x86):
 WinVerifyTrust(Ex) with WINTRUST_ACTION_GENERIC_VERIFY_V2 over a PE
-image, and WTHelperProvDataFromStateData, WTHelperGetProvSignerFromChain
+image or a cabinet, and WTHelperProvDataFromStateData, WTHelperGetProvSignerFromChain
 and WTHelperGetProvCertFromChain over its provider data (what ODT's
-setup.exe imports). The work is split as on Windows: wintrust has the PE
-subject and the image hash (`pe.rs`), crypt32 the message, the signer's
+setup.exe imports). The work is split as on Windows: wintrust has the
+subjects and their digests (`pe.rs`, `cab.rs`), crypt32 the message, the signer's
 signature, the timestamp token, the chain and the policies, reached
 through their public functions.
 
 - **Steps** (`verify.rs`), each setting its TRUSTERROR_STEP_FINAL_*
   entry, the first failure being the result (and the last error):
-  object: the file (the caller's hFile, else opened by path) is a PE
-  image (empty, no "MZ", no "PE\0\0" inside the file:
+  object: the file (the caller's hFile, else opened by path) is a
+  cabinet ("MSCF", below) or a PE image (empty, no "MZ", no "PE\0\0" inside the file:
   TRUST_E_SUBJECT_FORM_UNKNOWN) whose certificate table exists, follows
   its directory entry and ends the file (else TRUST_E_NOSIGNATURE, as
   Windows answers 4 bytes appended), its WIN_CERTIFICATE (revision 1 or
@@ -3580,6 +3580,30 @@ through their public functions.
   entry, read at offsets in 64 KiB pieces and hashed with bcrypt's
   pseudo-handles (MD5, SHA-1, SHA-2). Page hashes are not checked, as
   WinVerifyTrust does not.
+- **Cabinets** (`cab.rs`; `wintrust_test`'s `data/selfsigned.cab`,
+  `cab_probe`): a file starting "MSCF" is the cabinet subject
+  (C689AABA-8E78-11D0-8C47-00C04FC295EE, as CryptSIPRetrieveSubjectGUID
+  answers in Wine's sip.c tests). Its signature's place is the header's
+  reserve area (flag RESERVE_PRESENT, cbCFHeader at least 12: two words,
+  00 00 10 00 in Microsoft's, then the signature's offset and size;
+  Wine's crypt.c CAB_SIGNINFO); none of these, a version above 1.3 or a
+  signature outside the file is TRUST_E_NOSIGNATURE. The PKCS #7 is
+  read to its DER length (Microsoft pads it to 8 bytes). Its
+  SpcIndirectDataContent's data is an SpcLink (1.3.6.1.4.1.311.2.1.28,
+  or SPC_CAB_DATA_OBJID .25) and its digest covers the file from 0 to
+  the signature but for reserved1 (bytes 4..8), cbCFHeader (36..38) and
+  the reserve area (40..40+cbCFHeader). No published source documents
+  that range: it is the one subset of the header's fields whose hash
+  matches the signed digest of Microsoft's CDN cabinets (v64.cab,
+  v32.cab, ofl.cab, releasehistory.cab: all four, SHA-256), found by
+  hashing every subset; the moniker's one attribute
+  (1.3.6.1.4.1.311.2.5.1) is the SHA-256 of cbCabinet's 4 bytes and is
+  not checked (cbCabinet is in the digest). What Windows answers for
+  altered copies (each header byte, appended bytes, a cut signature, an
+  unsigned cabinet) is `cab_probe`'s output on CI's Windows job;
+  `wintrust_test`'s cabinet cases assume the answers of PE images
+  (TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE hash-only) until it is
+  read.
 - **State**: one heap block per verification (`State`), the
   CRYPT_PROVIDER_DATA first so its address is hWVTStateData: the step
   errors (38), the provider functions (pfnAlloc/pfnFree on the process
@@ -3608,11 +3632,12 @@ through their public functions.
   (`crypt32.dll!AUTHENTICODE: CERT_E_CHAINING`).
 - **Not here** (each recorded): other actions (TRUST_E_PROVIDER_UNKNOWN),
   other subjects (catalog members, blobs, WTD_CHOICE_CERT/SIGNER:
-  TRUST_E_SUBJECT_FORM_UNKNOWN), cabinets and catalogs (no SIP for them:
-  a cabinet's Authenticode digest is not documented in the sources gala
-  may use, and Wine does not check it, so a signed .cab is
-  TRUST_E_SUBJECT_FORM_UNKNOWN rather than trusted unchecked), more than
-  one signer or WIN_CERTIFICATE, secondary (nested) signatures and
+  TRUST_E_SUBJECT_FORM_UNKNOWN, recorded with cbStruct and the union
+  choice as detail; a WINTRUST_DATA whose cbStruct does not reach
+  dwStateAction is a verification, as Wine takes it: ODT's setup.exe
+  closes with an all-zero one, answered TRUST_E_SUBJECT_FORM_UNKNOWN,
+  Windows' answer being `cab_probe`'s last line), catalogs (no SIP),
+  more than one signer or WIN_CERTIFICATE, secondary (nested) signatures and
   WINTRUST_SIGNATURE_SETTINGS (the primary signature only), PKCS #9
   countersignatures (legacy timestamps: the chain is checked at the
   current time), the Disallowed store (empty in gala), the registry's

@@ -1606,31 +1606,30 @@ need gala's.
      signature; its WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
      CryptMsgOpenToDecode asks for CMSG_DETACHED_FLAG (recorded, decoded
      as attached), and it downloads the version descriptor cab from
-     officecdn.microsoft.com over http.
-     Where the run ends now: WinVerifyTrust of that cabinet, twice
-     (`wintrust.dll!WinVerifyTrust(subject: cabinet)`, then
-     TRUST_E_SUBJECT_FORM_UNKNOWN: gala has no cabinet SIP); setup.exe
-     then asks kernelbase for SetSystemFileCacheSize and ntdll for
-     NtSetSystemInformation (missing exports), LoadLibrary("slc.dll")
-     (missing dll), and the elevated copy and its parent exit with
-     0xffffffff after about 7 s. ODT has written no log yet
-     (`dump=C:/gala/odtlog` finds no directory).
+     officecdn.microsoft.com over http and verifies it (done: the
+     cabinet subject in gala's wintrust, its digest the range every
+     signed CDN cabinet's signature matches; `wintrust_test`'s cabinet
+     cases, `cab_probe` for Windows' answers; ARCHITECTURE "wintrust:
+     Authenticode"). Rejected, that cabinet ended the run: ODT's log
+     (`C:\Users\Public\GALA-<date>.log`, dumped) said
+     `MRO::LoadFromVCab ... InvalidSignature (HR:0x800B0003)`, "Cannot
+     download and extract version descriptor", and only then, on its
+     way out, came slc.dll and the SetSystemFileCacheSize and
+     NtSetSystemInformation lookups (telemetry at exit, not causes).
+     Accepted, setup.exe closes three all-zero WINTRUST_DATAs
+     (dwStateAction CLOSE, cbStruct 0: TRUST_E_SUBJECT_FORM_UNKNOWN,
+     recorded, survived; Windows' answer is `cab_probe`'s) and extracts
+     the cabinet with setupapi's SetupIterateCabinetW.
+     Where the run ends now: setupapi.dll has no i686 build, so that
+     delay-load fails (0xc06d007e) in the elevated copy and its parent.
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: Authenticode for cabinets
-     (the cab SIP: the signature's place is in Wine's crypt.c, the
-     reserved header area's offset and size, but the digest a signed
-     cab's SpcIndirectDataContent carries, an SpcLink with a moniker over
-     SHA-256, covers a range the allowed sources do not document and
-     Wine does not check: a contiguous hash of the cab up to the
-     signature, with the size and reserve fields left out or zeroed, does
-     not match a CDN cab; establish it from Windows' behaviour on signed
-     and altered cabs, test first), then whether the cab's acceptance is
-     what ends the run (slc.dll's licensing calls are next on the path);
-     then
-     the other DLLs
-     the other DLLs
+     Next, in the order the run reaches them: SetupIterateCabinetW for
+     x86 (v64.cab is LZX:21; galapkg's cabinet reader has LZX and MSZIP),
+     test first from Wine's setupcab.c tests; Windows' answers from
+     `cab_probe` (the cabinet cases of `wintrust_test` follow them);
+     then the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
      webservices, setupapi, cabinet, credui, gdiplus; osppc.dll is
      Office's own) and the functions its imports lack (shell32's

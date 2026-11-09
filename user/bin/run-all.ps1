@@ -89,6 +89,29 @@ function Get-Fault([string]$exePath) {
 $arguments = @{ "args_test" = 'alpha "beta gamma"'; "wow64_crt_test" = 'one "two three"'; "go_http" = 'self'; "handover_net_test" = 'self'; "nginx" = '-v'; "busybox" = 'sh -c "echo hello | cat; echo pipe=$?; echo abc | sed s/b/X/; echo count=$(printf ''x\ny\nx\n'' | grep -c x); exit 3"' }
 # smp_test takes an expected processor count (cpus=N); none on Windows.
 
+# cab_probe (a probe, on no required list) verifies Microsoft's signed
+# cabinets and altered copies of them: two from the Office CDN, the
+# version descriptor ODT's setup.exe downloads and the release history
+# (Microsoft replaces them with each release; any current ones do).
+# Without them it probes only the self-signed cabinet it embeds.
+if (Test-Path (Join-Path $here "cab_probe.exe")) {
+    $cabDir = Join-Path $env:TEMP "gala-cab-probe"
+    New-Item -ItemType Directory -Force -Path $cabDir | Out-Null
+    $cabs = @()
+    foreach ($u in @(
+        "http://officecdn.microsoft.com/pr/492350f6-3a01-4f97-b9c0-c7c6ddf67d60/Office/Data/v64.cab",
+        "http://officecdn.microsoft.com/pr/wsus/releasehistory.cab")) {
+        $f = Join-Path $cabDir ([IO.Path]::GetFileName($u))
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $f -TimeoutSec 60
+            $cabs += '"' + $f + '"'
+        } catch {
+            Write-Host ("cab_probe: {0} not downloaded: {1}" -f $u, $_.Exception.Message.Trim())
+        }
+    }
+    if ($cabs.Count -gt 0) { $arguments["cab_probe"] = $cabs -join " " }
+}
+
 # Programs whose non-zero exit is the answer, not a failure, so that a
 # reader (and `cargo xtask compare`) can tell the two apart. Each value is
 # what Windows gives; where xtask's scenario says the same for gala, its

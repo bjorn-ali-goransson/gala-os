@@ -29,6 +29,7 @@ Rules for this file:
 
 | Component | Version | Source | License | How it is used |
 |---|---|---|---|---|
+| gala's self-signed test cabinet | `user/wintrust_test/data/selfsigned.cab`, made by `make_cab.py` there (Python's standard library and the openssl command line: a test root and code signing certificate, the cabinet and its PKCS #7 built byte by byte) | this repository | gala's own | `wintrust_test` verifies it and altered copies; `cab_probe` measures Windows' answers for it. The keys are made anew each run, so the checked-in file is the one of record. |
 | Wine's self-signed Authenticode test images | `SelfSignedFile32` and `SelfSignedFile64` of Wine's `dlls/wintrust/tests/softpub.c` (gitlab.winehq.org/wine/wine, master as of 2026-11-09): tcc-built images signed with signtool by a "Test CA Root" certificate | gitlab.winehq.org/wine/wine | LGPL-2.1+ | `user/wintrust_test/data/selfsigned32.exe` and `selfsigned64.exe`, the arrays' bytes unmodified; `wintrust_test` verifies them and copies changed as Wine's test_wintrust_digest does, expecting the answers that test records for Windows. |
 | Nginx | 1.30.6 (`nginx-1.30.6.tar.gz`, SHA-256 `3cf46f5e...b8b6c8`) | nginx.org | BSD-2-Clause | `user/bin/nginx.exe`, built unmodified by `user/nginx/build.sh` with mingw-w64 (with zlib, PCRE2 and OpenSSL); run by the `nginx`, `nginx_master` and `nginx_tls` scenarios. Not part of gala itself. |
 | zlib | 1.3.2 (`zlib-1.3.2.tar.gz`, SHA-256 `bb329a0a...0119d16`) | zlib.net | zlib License | Built into `user/bin/nginx.exe` by `user/nginx/build.sh` (Nginx's gzip module). |
@@ -179,7 +180,14 @@ Rules for this file:
   (no code copied); CERT_CHAIN_POLICY_MICROSOFT_ROOT's first three keys
   as SHA-1 hashes of the msPubKey1-3 arrays in Wine's `chain.c` (the 2010
   and 2011 roots' from Microsoft's certificates); the structure layouts
-  from mingw-w64's wintrust.h and wincrypt.h.
+  from mingw-w64's wintrust.h and wincrypt.h. The cabinet subject:
+  the signature's place in the header's reserve (CAB_SIGNINFO) from
+  Wine's `dlls/wintrust/crypt.c`, the subject GUID from Wine's
+  `dlls/crypt32/tests/sip.c`, the header from Microsoft's [MS-CAB]; the
+  digest's range from no source: black-box, by hashing subsets of the
+  header of Microsoft's signed CDN cabinets until one matched their
+  signed digest (ARCHITECTURE "wintrust: Authenticode"), and `cab_probe`
+  on Windows for altered copies.
 - The C runtime's file-descriptor inheritance block (STARTUPINFO
   cbReserved2/lpReserved2: a count, a flags byte and a HANDLE per
   descriptor) in gala's msvcrt (`user/msvcrt/src/stdio.rs`), from its

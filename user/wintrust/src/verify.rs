@@ -52,6 +52,7 @@
 
 use core::ffi::c_void;
 
+use crate::cab;
 use crate::layout::{
     AuthenticodeExtra, Blob, ChainContext, ChainElement, ChainPara, EnhKeyUsage, FileInfo, Guid,
     IndirectData, PolicyPara, PolicyStatus, ProvCert, ProvData, ProvFunctions, ProvSip, Signer,
@@ -179,6 +180,16 @@ const GENERIC_VERIFY_V2: Guid =
 /// The PE image SIP's subject GUID (C689AAB8-8E78-11D0-8C47-00C04FC295EE).
 const PE_SUBJECT: Guid =
     Guid(0xc689_aab8, 0x8e78, 0x11d0, [0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee]);
+/// The cabinet SIP's subject GUID (C689AABA-8E78-11D0-8C47-00C04FC295EE,
+/// Wine's sip.c tests).
+const CAB_SUBJECT: Guid =
+    Guid(0xc689_aaba, 0x8e78, 0x11d0, [0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee]);
+
+/// The file being verified: a PE image or a cabinet.
+enum Subject {
+    Pe(pe::Image),
+    Cab(cab::Cabinet),
+}
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
@@ -555,7 +566,14 @@ fn run(window: usize, action: *const Guid, data: &mut WintrustData, keep: bool) 
 /// The object step (module comment).
 fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
     if !has!(data.size, WintrustData, file) || data.union_choice != WTD_CHOICE_FILE {
-        unsupported(b"wintrust.dll!WinVerifyTrust(subject choice)", data.union_choice.into());
+        // The detail: cbStruct in the high half, dwUnionChoice (when the
+        // structure has it) in the low.
+        let choice =
+            if has!(data.size, WintrustData, union_choice) { data.union_choice } else { 0 };
+        unsupported(
+            b"wintrust.dll!WinVerifyTrust(subject choice)",
+            u64::from(data.size) << 32 | u64::from(choice),
+        );
         return Err(failed(b"subject choice", TRUST_E_SUBJECT_FORM_UNKNOWN));
     }
     let f: &FileInfo = match unsafe { data.file.as_ref() } {
@@ -566,7 +584,7 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
     if has!(f.size, FileInfo, known_subject) && !f.known_subject.is_null() {
         // SAFETY: the caller's GUID.
         let subject = unsafe { f.known_subject.read_unaligned() };
-        if subject != PE_SUBJECT {
+        if subject != PE_SUBJECT && subject != CAB_SUBJECT {
             unsupported(b"wintrust.dll!WinVerifyTrust(known subject)", subject.0.into());
             return Err(failed(b"known subject", TRUST_E_SUBJECT_FORM_UNKNOWN));
         }
@@ -589,11 +607,19 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
         // SAFETY: plain call.
         return Err(failed(b"file size", unsafe { GetLastError() }));
     }
-    let image =
-        pe::examine(h, size as u64).map_err(|e| failed(b"subject or certificate table", e))?;
-    s.sip.subject = PE_SUBJECT;
-    let (mut table, at, len) =
-        pe::signature(h, &image).map_err(|e| failed(b"WIN_CERTIFICATE", e))?;
+    let size = size as u64;
+    let subject = if cab::is_cabinet(h, size) {
+        s.sip.subject = CAB_SUBJECT;
+        Subject::Cab(cab::examine(h, size).map_err(|e| failed(b"cabinet not signed", e))?)
+    } else {
+        let image = pe::examine(h, size).map_err(|e| failed(b"subject or certificate table", e))?;
+        s.sip.subject = PE_SUBJECT;
+        Subject::Pe(image)
+    };
+    let (mut table, at, len) = match &subject {
+        Subject::Pe(image) => pe::signature(h, image).map_err(|e| failed(b"WIN_CERTIFICATE", e))?,
+        Subject::Cab(c) => cab::signature(h, c).map_err(|e| failed(b"cabinet signature", e))?,
+    };
     let der = &table.bytes()[at..at + len];
     // SAFETY: crypt32's documented calls; our buffers.
     unsafe {
@@ -642,8 +668,17 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
         }
         s.sip.indirect_data = indirect;
         let ind = &*indirect;
-        if c_text(ind.data_oid) != b"1.3.6.1.4.1.311.2.1.15" {
-            unsupported(b"wintrust.dll!WinVerifyTrust(indirect data not SpcPeImageData)", 0);
+        let data_oid = c_text(ind.data_oid);
+        let expected = match subject {
+            // SpcPeImageData.
+            Subject::Pe(_) => data_oid == b"1.3.6.1.4.1.311.2.1.15",
+            // SpcLink (Microsoft's signed cabinets) or SPC_CAB_DATA_OBJID.
+            Subject::Cab(_) => {
+                data_oid == b"1.3.6.1.4.1.311.2.1.28" || data_oid == b"1.3.6.1.4.1.311.2.1.25"
+            }
+        };
+        if !expected {
+            unsupported(b"wintrust.dll!WinVerifyTrust(indirect data of another subject)", 0);
             return Err(failed(b"indirect data type", TRUST_E_NOSIGNATURE));
         }
         let Some((alg, n)) = pe::digest_algorithm(c_text(ind.digest_algorithm.oid)) else {
@@ -651,9 +686,19 @@ fn object(s: &mut State, data: &mut WintrustData) -> Result<(), u32> {
             return Err(failed(b"image hash algorithm", NTE_BAD_ALGID));
         };
         let mut hash = [0u8; 64];
-        pe::image_hash(h, &image, alg, &mut hash[..n]).map_err(|e| failed(b"image hash", e))?;
+        match &subject {
+            Subject::Pe(image) => pe::image_hash(h, image, alg, &mut hash[..n])
+                .map_err(|e| failed(b"image hash", e))?,
+            Subject::Cab(c) => {
+                cab::hash(h, c, alg, &mut hash[..n]).map_err(|e| failed(b"cabinet hash", e))?
+            }
+        }
         if ind.digest.bytes() != &hash[..n] {
-            return Err(failed(b"image hash differs (TRUST_E_BAD_DIGEST)", TRUST_E_BAD_DIGEST));
+            let what: &[u8] = match subject {
+                Subject::Pe(_) => b"image hash differs (TRUST_E_BAD_DIGEST)",
+                Subject::Cab(_) => b"cabinet hash differs (TRUST_E_BAD_DIGEST)",
+            };
+            return Err(failed(what, TRUST_E_BAD_DIGEST));
         }
     }
     Ok(())

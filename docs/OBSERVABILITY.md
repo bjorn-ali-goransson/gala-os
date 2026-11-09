@@ -324,8 +324,9 @@ hit (scenario `ledger_test`).
   for: `FindPackagesByNamePublisher(Microsoft.O...` in office_install).
   WinVerifyTrust's failed verifications, "other", one per step that
   failed, the error as detail: `wintrust.dll!WinVerifyTrust: <step>`
-  (`subject or certificate table`, `image hash differs`, `signer's
-  signature`, `timestamp`, `Authenticode policy`, ...), with crypt32's
+  (`subject or certificate table`, `image hash differs`, `cabinet not
+  signed`, `cabinet hash differs`, `signer's signature`, `timestamp`,
+  `Authenticode policy`, ...), with crypt32's
   `crypt32.dll!AUTHENTICODE: <error>` naming the chain's error bits.
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
@@ -560,10 +561,12 @@ The boot option `dump=C:/path,...` (percent-encoded, `/`-separated)
 prints files the programs left once the `run=` ones have ended, as
 `dump: begin <path> (N bytes)`, one `dump:` line per line, `dump: end
 <path>`: a crashing JVM's hs_err file, ChromeDriver's log, ODT's log
-directory (`office_install`: `dump=C:/gala/odtlog`). A directory gives
+directory (`office_install`: `dump=C:/gala/odtlog,C:/Users/Public`). A directory gives
 each file below it (4 levels deep), for logs whose names carry a date
 or machine name; UTF-16LE text (a byte-order mark, or ASCII's zero high
-bytes) is shown as text; a missing path is one line with its status.
+bytes) is shown as text; a binary file (a NUL in its first 4 KiB) is
+one line with its size (`binary, not shown`); a missing path is one line
+with its status.
 When the scenario fails, xtask writes each dumped file back out under
 `target/failed/<scenario>.dump/<path without the drive>` (the verdict
 names the directory), so a program's own log is read as the file it

@@ -3222,6 +3222,15 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wintrust_test", "ncrypt.dll", "Windows/System32"),
     ("wintrust_test", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
     ("wintrust_test", "target/prebuilt/odt/setup.exe", "gala"),
+    // cab_probe: the embedded self-signed cabinet through gala's wintrust.
+    ("cab_probe", "ntdll.dll", "Windows/System32"),
+    ("cab_probe", "kernel32.dll", "Windows/System32"),
+    ("cab_probe", "advapi32.dll", "Windows/System32"),
+    ("cab_probe", "wintrust.dll", "Windows/System32"),
+    ("cab_probe", "crypt32.dll", "Windows/System32"),
+    ("cab_probe", "bcrypt.dll", "Windows/System32"),
+    ("cab_probe", "bcryptprimitives.dll", "Windows/System32"),
+    ("cab_probe", "ncrypt.dll", "Windows/System32"),
     ("wintrust_test", "target/prebuilt/python/python.exe", "gala"),
     ("wow64_wintrust_test", "wow64.dll", "Windows/System32"),
     ("wow64_wintrust_test", "x86/ntdll.dll", "Windows/SysWOW64"),
@@ -3433,6 +3442,7 @@ const USER_PROGRAMS: &[&str] = &[
     "office_api_test",
     "msi_test",
     "wintrust_test",
+    "cab_probe",
     "svc_test",
     "msxml_test",
     "winhttp_cb_test",
@@ -6535,6 +6545,20 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wintrust_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // A probe (user/cab_probe), the counterpart of its Windows run:
+        // WinVerifyTrust of the self-signed cabinet and of copies with
+        // one byte of the header changed, and the candidate digests,
+        // through gala's wintrust. It asserts nothing but finishing.
+        name: "cab_probe",
+        cmdline: "qemu_exit run=cab_probe.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "cab_probe: selfsigned.cab: candidate A: 0..4, 8..36, 38..40, reserve's end..signature (gala's): matches",
+            "cab_probe: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // The same through WOW64 (user/wintrust_test built for x86).
         name: "wow64_wintrust_test",
         cmdline: "qemu_exit run=wow64_wintrust_test.exe args=require",
@@ -8861,7 +8885,7 @@ const SCENARIOS: &[Scenario] = &[
         // the boot user, a standard user; docs/SECURITY.md "Elevation").
         name: "office_install",
         cmdline: "qemu_exit as=system run=setup.exe args=/configure%20C:\\gala\\config.xml \
-                  dump=C:/gala/odtlog",
+                  dump=C:/gala/odtlog,C:/Users/Public",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["setup.exe (pid 4) exited with status 0x00000000"],
     },

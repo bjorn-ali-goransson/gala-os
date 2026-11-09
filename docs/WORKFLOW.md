@@ -1899,7 +1899,17 @@ it on first use.
   `target/failed/<name>.dump/` (OBSERVABILITY "Guest files"). The Java
   scenarios have it, so a crash's report is in `target/failed/<name>.log`;
   any program that writes its own log (ODT's setup.exe: `office_install`)
-  should get one.
+  should get one. ODT writes `C:\Users\Public\<MACHINE>-<date>.log`
+  (UTF-16, tab-separated) until it has read the configuration's Logging
+  path, so the scenario dumps `C:/Users/Public` too; its `Unexpected`
+  and `Non Task Error` lines say why it stopped (`MRO::LoadFromVCab ...
+  InvalidSignature (HR:0x800B0003)` was the cabinet's trust).
+- **The last ledger lines are not the cause.** What a program does on
+  its way out shows up last: ODT's slc.dll, SetSystemFileCacheSize and
+  NtSetSystemInformation came after its log's "Bootstrapper Finished"
+  (telemetry at exit), the cabinet's rejection before it. Read the
+  program's own log, or the events up to the first error path, before
+  filling the last gap.
 - **.NET**: the ledger first, then `XTASK_EVENTS=syscall,image,fault`.
   CoreCLR's own source (dotnet/runtime, MIT) says what it expects of the
   OS (read only, as any application's documentation).

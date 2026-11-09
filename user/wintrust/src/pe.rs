@@ -80,19 +80,19 @@ pub(crate) fn read_at(h: usize, offset: u64, buf: &mut [u8]) -> bool {
     }
 }
 
-fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+pub(crate) fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// What the file of `size` bytes is: a PE image with a certificate table,
 /// or the error WinVerifyTrust gives (as Windows does in Wine's
 /// test_wintrust_digest): TRUST_E_SUBJECT_FORM_UNKNOWN for a file that is
-/// no PE image (empty, no "MZ", no "PE\0\0" header inside it; a cabinet
-/// or a catalog is recorded, gala having no SIP for them),
+/// no PE image (empty, no "MZ", no "PE\0\0" header inside it; a catalog
+/// is recorded, gala having no SIP for it; a cabinet is `cab`'s),
 /// TRUST_E_NOSIGNATURE for an image whose certificate table is missing,
 /// does not end the file, or is not where its directory says.
 pub(crate) fn examine(h: usize, size: u64) -> Result<Image, u32> {
@@ -102,10 +102,6 @@ pub(crate) fn examine(h: usize, size: u64) -> Result<Image, u32> {
         return Err(TRUST_E_SUBJECT_FORM_UNKNOWN);
     }
     let head = &head[..n];
-    if head.starts_with(b"MSCF") {
-        crate::unsupported(b"wintrust.dll!WinVerifyTrust(subject: cabinet)", 0);
-        return Err(TRUST_E_SUBJECT_FORM_UNKNOWN);
-    }
     if !head.starts_with(b"MZ") || head.len() < 64 {
         if head.first() == Some(&0x30) {
             crate::unsupported(b"wintrust.dll!WinVerifyTrust(subject: catalog or PKCS #7)", 0);
@@ -211,6 +207,27 @@ pub(crate) fn digest_algorithm(oid: &[u8]) -> Option<(usize, usize)> {
 /// and the table's directory entry. The error is the step's (a read's
 /// last error, or bcrypt's NTSTATUS).
 pub(crate) fn image_hash(h: usize, image: &Image, alg: usize, out: &mut [u8]) -> Result<(), u32> {
+    hash_ranges(
+        h,
+        &[
+            (0, image.checksum),
+            (image.checksum + 4, image.directory),
+            (image.directory + 8, image.table),
+        ],
+        alg,
+        out,
+    )
+}
+
+/// The hash with algorithm `alg` (a bcrypt pseudo-handle) of the file's
+/// byte ranges `[start, end)`, in order, into `out`. The error is a
+/// read's last error, or bcrypt's NTSTATUS.
+pub(crate) fn hash_ranges(
+    h: usize,
+    ranges: &[(u64, u64)],
+    alg: usize,
+    out: &mut [u8],
+) -> Result<(), u32> {
     let mut hash = 0usize;
     // SAFETY: bcrypt's documented call; a pseudo-handle, no object buffer.
     let status = unsafe {
@@ -221,12 +238,7 @@ pub(crate) fn image_hash(h: usize, image: &Image, alg: usize, out: &mut [u8]) ->
     }
     let r = (|| {
         let mut buf = Heap::new(64 << 10).ok_or(ERROR_NOT_ENOUGH_MEMORY)?;
-        let ranges = [
-            (0, image.checksum),
-            (image.checksum + 4, image.directory),
-            (image.directory + 8, image.table),
-        ];
-        for (start, end) in ranges {
+        for &(start, end) in ranges {
             let mut at = start;
             while at < end {
                 let n = (end - at).min(buf.len as u64) as usize;
