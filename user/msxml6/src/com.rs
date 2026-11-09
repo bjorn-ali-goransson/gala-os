@@ -995,6 +995,9 @@ extern "system" fn get_property(this: Obj, name: Bstr, out: *mut Variant) -> HRe
     if out.is_null() {
         return E_INVALIDARG;
     }
+    // The output is cleared (VT_EMPTY) before the name is looked at: an
+    // unknown property leaves it empty, as Windows does (msxml_test).
+    put(out, Variant { vt: 0, reserved: [0; 3], value: [0, 0] });
     let d = doc(this);
     let Some(name) = text(name) else { return E_INVALIDARG };
     let v = if name.eq_ignore_ascii_case("SelectionLanguage") {
