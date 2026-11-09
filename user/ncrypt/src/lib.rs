@@ -12,6 +12,13 @@
 mod keys;
 mod unimplemented;
 
+// On x86 the compiler's runtime symbols (memcpy, the 64-bit division
+// helpers, __chkstk) come from ntrt's x86 runtime, not from a raw-dylib
+// import (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -25,11 +32,17 @@ unsafe extern "C" {
     fn __CxxFrameHandler3();
 }
 
-/// MSVC-target codegen references this marker symbol directly.
+/// MSVC-target codegen references this marker symbol directly (ntrt's
+/// x86 runtime defines it on x86).
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
@@ -38,7 +51,11 @@ unsafe extern "system" {
 // there; GnuTLS imports them from ncrypt): the same calls, through ours.
 // Found at run time: an import of the same name would bind to these
 // exports themselves.
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;
@@ -145,7 +162,7 @@ fn named(name: *const u16, want: &str) -> bool {
     for b in want.bytes() {
         // SAFETY: the caller's NUL-terminated string, read up to its NUL.
         let c = unsafe { *name.add(i) };
-        if c > 0x7f || (c as u8).to_ascii_lowercase() != b.to_ascii_lowercase() {
+        if c > 0x7f || !(c as u8).eq_ignore_ascii_case(&b) {
             return false;
         }
         i += 1;

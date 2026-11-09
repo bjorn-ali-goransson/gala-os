@@ -3371,7 +3371,10 @@ definition for both layouts, "Plan: WOW64").
   info names, opened (the caller's, or kept in the context with
   CRYPT_ACQUIRE_CACHE_FLAG); CSP keys are recorded and NTE_NOT_SUPPORTED.
   crypt32 loads bcrypt and advapi32 on first use (LoadLibrary), so it
-  keeps no static imports of them (Caddy ships crypt32 alone).
+  keeps no static imports of them (Caddy ships crypt32 alone). crypt32
+  and ncrypt are built for x86 too ("The 32-bit system DLLs"): the
+  caller's structures with pointers in crypt32's `layout.rs`, checked
+  against wincrypt.h for both widths at compile time.
 
 ### secur32: SSPI
 
@@ -7673,7 +7676,24 @@ wtsapi32, shfolder, bcrypt (its padding infos typed), winhttp, secur32
 (its handle tags the low half on x86) and ws2_32 (WSADATA, whose fields
 come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 `layout.rs`; its AFD requests in the caller's layout, `afd_abi`'s, which
-the kernel reads as such: `wow64_sock_test`). user32 and gdi32's structures with pointers are
+the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
+ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
+(`wow64_cert_test`, cert_test's source built for x86). crypt32's own
+structures (CERT_CONTEXT, CERT_INFO, CRL_*, the chain contexts) are
+`repr(C)` with pointers, and the caller's ones it reads or writes
+(CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_PARA's CERT_USAGE_MATCH, the
+policy para, status and SSL extra para, CERT_REVOCATION_PARA and
+_STATUS, CRYPT_KEY_PROV_INFO, CERT_KEY_CONTEXT, CERT_ENHKEY_USAGE,
+CERT_ALT_NAME_INFO/ENTRY) are typed in `layout.rs`, a field of a
+cbSize-versioned one read (`get!`) only when the size covers it (`has!`):
+a cbSize the 64-bit code compared with 32 or 80 is 16 or 48 on x86.
+Compile-time checks hold every one to the sizes and offsets mingw-w64's
+wincrypt.h gives for each target (`check!`); they caught CERT_USAGE_MATCH,
+a struct aligned to 8 on x64, laid out flat. The kept CRYPT_KEY_PROV_INFO
+property is the native structure followed by its names; handles kept as
+properties are pointer-sized. The machine's certificate directories are
+one set: the 32-bit crypt32 reads `%SystemRoot%\Sysnative\gala\roots`
+(the real System32; its own System32 is redirected to SysWOW64). user32 and gdi32's structures with pointers are
 typed for both too: WNDCLASSW (GetClassInfoW), CURSORINFO, FLASHWINFO,
 HIGHCONTRAST's size, BITMAP (CreateBitmapIndirect), and GetObjectW's
 LOGBRUSH, BITMAP and DIBSECTION sizes by pointer size; WM_COPYDATA's
@@ -7683,8 +7703,8 @@ it. The 32-bit ntdll exports the MSVC 64-bit arithmetic helpers that
 compiled programs import from it (`_allmul`, `_alldiv`, `_allrem`,
 `_aulldiv`, `_aullrem`, `_alldvrm`, `_aulldvrm`, `_allshl`, `_allshr`,
 `_aullshr`: `x86.rs`). Inno Setup 6.5.4's x86 installer installs on
-these (`wow64_inno`). To come, as programs need them: kernelbase,
-crypt32 and the rest (ROADMAP WOW).
+these (`wow64_inno`). To come, as programs need them (ODT's setup.exe
+next: ROADMAP OF): msi, wininet, wintrust and the rest (ROADMAP WOW).
 
 The 32-bit stubs pop the bytes their own declaration names (stdcall
 `ret N`), and wow64.dll's table converts one entry per 4-byte word:
@@ -7704,7 +7724,8 @@ being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
 (`testntdll32.dll`, `testkernel32_32.dll`, `testmsvcrt32.dll`,
 `testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
 `testuser32_32.dll`, `testgdi32_32.dll`, `testcomctl3232.dll` and the
-rest of the Inno set as `test<name>32.dll`; test DLLs
+rest of the Inno set as `test<name>32.dll`, `testcrypt3232.dll`,
+`testncrypt32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers

@@ -15,6 +15,7 @@ mod cert;
 mod chain;
 mod crl;
 mod dpapi;
+mod layout;
 mod misc;
 mod pfx;
 mod query;
@@ -22,16 +23,37 @@ mod roots;
 mod store;
 mod unimplemented;
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(code: u32);
 }
 
+// On x86 the compiler's runtime symbols (memcpy, the 64-bit division
+// helpers, __chkstk) come from ntrt's x86 runtime, not from a raw-dylib
+// import (ARCHITECTURE "Plan: WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+// The runtime functions crypt32 calls itself: ntrt's on x86.
+#[cfg(target_arch = "x86")]
+unsafe extern "C" {
+    fn strlen(s: *const u8) -> usize;
+}
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -46,7 +68,9 @@ unsafe extern "C" {
     fn __chkstk();
 }
 
-/// MSVC-target codegen references this marker symbol directly.
+/// MSVC-target codegen references this marker symbol directly (ntrt's
+/// x86 runtime defines it on x86).
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 

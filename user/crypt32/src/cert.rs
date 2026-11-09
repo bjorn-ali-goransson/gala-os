@@ -15,7 +15,13 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+use crate::layout::{EnhKeyUsage, KeyContext, KeyProvInfo, has};
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetProcessHeap() -> usize;
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
@@ -217,7 +223,7 @@ pub(crate) fn time(t: Tlv<'_>) -> Result<u64, u32> {
     Ok(secs * 10_000_000)
 }
 
-// ---- The structures (x64 layouts) ----
+// ---- The structures (wincrypt.h; sizes checked in `layout`) ----
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -800,11 +806,35 @@ pub extern "system" fn CertGetCertificateContextProperty(
     }
 }
 
-/// CRYPT_KEY_PROV_INFO (x64): container name @0, provider name @8,
-/// dwProvType @16, dwFlags @20, cProvParam @24, rgProvParam @32,
-/// dwKeySpec @40; 48 bytes. Kept as the 48 bytes followed by the two
-/// strings (UTF-16, NUL-terminated); the pointers are rebuilt on output.
-/// Provider parameters are not kept.
+/// The size of a CRYPT_KEY_PROV_INFO (28 bytes on x86, 48 on x64).
+const PROV_INFO: usize = core::mem::size_of::<KeyProvInfo>();
+
+/// The most a kept CRYPT_KEY_PROV_INFO takes: the structure and two
+/// names of up to 259 characters.
+const PROV_INFO_MAX: usize = PROV_INFO + 2 * 2 * 260;
+
+/// The bytes of `v`, a plain `repr(C)` value.
+fn bytes_of<T>(v: &T) -> &[u8] {
+    // SAFETY: `v` is `size_of::<T>()` readable bytes.
+    unsafe { core::slice::from_raw_parts((v as *const T).cast::<u8>(), core::mem::size_of::<T>()) }
+}
+
+/// A kept CRYPT_KEY_PROV_INFO: the structure, its container name and its
+/// provider name.
+fn kept_prov_info(data: &[u8]) -> Option<(KeyProvInfo, &[u8], &[u8])> {
+    let head = data.get(..PROV_INFO)?;
+    // SAFETY: PROV_INFO bytes kept by set_prov_info.
+    let info = unsafe { head.as_ptr().cast::<KeyProvInfo>().read_unaligned() };
+    let names = &data[PROV_INFO..];
+    let end = names.chunks_exact(2).position(|w| w == [0, 0])?;
+    Some((info, &names[..2 * end], &names[2 * (end + 1)..]))
+}
+
+/// CRYPT_KEY_PROV_INFO (`layout::KeyProvInfo`). Kept as the structure
+/// followed by the two names (UTF-16, NUL-terminated, an absent one
+/// empty); its pointers are kept only to say which names were given
+/// (never followed) and are rebuilt on output. Provider parameters are not
+/// kept.
 fn set_prov_info(b: &mut Block, data: *const u8) -> i32 {
     let wide_len = |p: *const u16| {
         let mut n = 0;
@@ -817,43 +847,32 @@ fn set_prov_info(b: &mut Block, data: *const u8) -> i32 {
         n
     };
     // SAFETY: the caller's CRYPT_KEY_PROV_INFO.
-    let (container, provider) = unsafe {
-        (
-            data.cast::<*const u16>().read_unaligned(),
-            data.add(8).cast::<*const u16>().read_unaligned(),
-        )
-    };
-    let (cn, pn) = (wide_len(container), wide_len(provider));
-    let size = 48 + 2 * (cn + 1) + 2 * (pn + 1);
-    let mut buf = [0u8; 48 + 2 * 2 * 260];
+    let info = unsafe { data.cast::<KeyProvInfo>().read_unaligned() };
+    let (cn, pn) = (wide_len(info.container), wide_len(info.provider));
+    let size = PROV_INFO + 2 * (cn + 1) + 2 * (pn + 1);
+    let mut buf = [0u8; PROV_INFO_MAX];
     if size > buf.len() {
         return error(ERROR_INVALID_PARAMETER, 0);
     }
+    let kept = KeyProvInfo { param_count: 0, params: core::ptr::null(), ..info };
+    buf[..PROV_INFO].copy_from_slice(bytes_of(&kept));
     // SAFETY: as above; the strings have the lengths measured.
     unsafe {
-        core::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), 48);
-        if !container.is_null() {
+        if !info.container.is_null() {
             core::ptr::copy_nonoverlapping(
-                container.cast::<u8>(),
-                buf.as_mut_ptr().add(48),
+                info.container.cast::<u8>(),
+                buf.as_mut_ptr().add(PROV_INFO),
                 2 * cn,
             );
         }
-        if !provider.is_null() {
+        if !info.provider.is_null() {
             core::ptr::copy_nonoverlapping(
-                provider.cast::<u8>(),
-                buf.as_mut_ptr().add(48 + 2 * (cn + 1)),
+                info.provider.cast::<u8>(),
+                buf.as_mut_ptr().add(PROV_INFO + 2 * (cn + 1)),
                 2 * pn,
             );
         }
     }
-    // Remember which strings were null (flags in the pointer slots).
-    buf[0..8].copy_from_slice(&u64::from(!container.is_null()).to_le_bytes());
-    buf[8..16].copy_from_slice(&u64::from(!provider.is_null()).to_le_bytes());
-    buf[24..28].copy_from_slice(&0u32.to_le_bytes());
-    buf[32..40].copy_from_slice(&0u64.to_le_bytes());
-    // The container string's length, for the output.
-    buf[28..32].copy_from_slice(&(cn as u32).to_le_bytes());
     if add_prop(b, CERT_KEY_PROV_INFO_PROP_ID, &buf[..size]) {
         1
     } else {
@@ -868,12 +887,9 @@ fn get_prov_info(b: &Block, out: *mut u8, len: *mut u32) -> i32 {
     if len.is_null() {
         return error(ERROR_INVALID_PARAMETER, 0);
     }
-    let mut buf = [0u8; 48 + 2 * 2 * 260];
-    buf[..data.len()].copy_from_slice(data);
-    let flag = |i: usize| buf[i] != 0;
-    let (has_container, has_provider) = (flag(0), flag(8));
-    let cn = u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]) as usize;
-    buf[24..32].copy_from_slice(&[0; 8]);
+    let Some((info, container, _)) = kept_prov_info(data) else {
+        return error(CRYPT_E_NOT_FOUND, 0);
+    };
     // SAFETY: the caller's size and buffer.
     unsafe {
         let room = *len as usize;
@@ -884,12 +900,19 @@ fn get_prov_info(b: &Block, out: *mut u8, len: *mut u32) -> i32 {
         if room < data.len() {
             return error(ERROR_MORE_DATA, 0);
         }
-        let base = out as u64;
-        let container = if has_container { base + 48 } else { 0 };
-        let provider = if has_provider { base + 48 + 2 * (cn as u64 + 1) } else { 0 };
-        buf[0..8].copy_from_slice(&container.to_le_bytes());
-        buf[8..16].copy_from_slice(&provider.to_le_bytes());
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), out, data.len());
+        // The names follow the structure in the caller's buffer.
+        let names = out.add(PROV_INFO);
+        let given = KeyProvInfo {
+            container: if info.container.is_null() { core::ptr::null() } else { names.cast() },
+            provider: if info.provider.is_null() {
+                core::ptr::null()
+            } else {
+                names.add(container.len() + 2).cast()
+            },
+            ..info
+        };
+        core::ptr::copy_nonoverlapping(data.as_ptr(), out, data.len());
+        out.cast::<KeyProvInfo>().write_unaligned(given);
     }
     1
 }
@@ -913,8 +936,8 @@ pub extern "system" fn CertSetCertificateContextProperty(
         CERT_KEY_PROV_HANDLE_PROP_ID
         | CERT_NCRYPT_KEY_HANDLE_PROP_ID
         | CERT_HCRYPTPROV_OR_NCRYPT_KEY_HANDLE_PROP_ID => {
-            // SAFETY: the caller's handle value.
-            let v = unsafe { data.cast::<u64>().read_unaligned() };
+            // SAFETY: the caller's handle value (pointer-sized).
+            let v = unsafe { data.cast::<usize>().read_unaligned() };
             add_prop(b, id, &v.to_le_bytes())
         }
         CERT_KEY_SPEC_PROP_ID => {
@@ -1536,7 +1559,8 @@ pub extern "system" fn CertGetEnhancedKeyUsage(
             count += 1;
         }
     }
-    let needed = 16 + 8 * count + used;
+    let (header, slot) = (core::mem::size_of::<EnhKeyUsage>(), core::mem::size_of::<usize>());
+    let needed = header + slot * count + used;
     // SAFETY: the caller's size and buffer.
     unsafe {
         let room = *size as usize;
@@ -1545,8 +1569,8 @@ pub extern "system" fn CertGetEnhancedKeyUsage(
             if room < needed {
                 return error(ERROR_MORE_DATA, 0);
             }
-            let ptrs = usage.add(16).cast::<*const u8>();
-            let strings = usage.add(16 + 8 * count);
+            let ptrs = usage.add(header).cast::<*mut u8>();
+            let strings = usage.add(header + slot * count);
             core::ptr::copy_nonoverlapping(text.as_ptr(), strings, used);
             let mut at = 0;
             for i in 0..count {
@@ -1556,12 +1580,8 @@ pub extern "system" fn CertGetEnhancedKeyUsage(
                 }
                 at += 1;
             }
-            usage.cast::<u32>().write_unaligned(count as u32);
-            usage.add(8).cast::<*const *const u8>().write_unaligned(if count == 0 {
-                core::ptr::null()
-            } else {
-                ptrs
-            });
+            let ids = if count == 0 { core::ptr::null_mut() } else { ptrs };
+            usage.cast::<EnhKeyUsage>().write_unaligned(EnhKeyUsage { count: count as u32, ids });
         }
     }
     if value.is_none() {
@@ -1598,7 +1618,11 @@ pub extern "system" fn CertCompareCertificateName(
     }
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GetSystemTimeAsFileTime(time: *mut u64);
 }
@@ -1819,6 +1843,7 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
 
 const CRYPT_E_NO_KEY_PROPERTY: u32 = 0x8009_200b;
 const NTE_NOT_SUPPORTED: u32 = 0x8009_0029;
+const NTE_BAD_KEYSET: u32 = 0x8009_0016;
 pub(crate) const CERT_NCRYPT_KEY_SPEC: u32 = 0xffff_ffff;
 const CRYPT_ACQUIRE_CACHE_FLAG: u32 = 0x1;
 const CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG: u32 = 0x1_0000;
@@ -1850,17 +1875,18 @@ pub(crate) fn free_ncrypt_key(key: usize) {
 }
 
 /// Gives context `p` the CNG key `key`, which it then owns (freed with
-/// it): CERT_KEY_CONTEXT_PROP_ID (cbSize 24, the handle, CERT_NCRYPT_KEY_
-/// SPEC) and CERT_NCRYPT_KEY_HANDLE_PROP_ID, as Windows keeps a key that
-/// is not persisted.
+/// it): CERT_KEY_CONTEXT_PROP_ID (a CERT_KEY_CONTEXT: its cbSize, the
+/// handle, CERT_NCRYPT_KEY_SPEC) and CERT_NCRYPT_KEY_HANDLE_PROP_ID (the
+/// handle), as Windows keeps a key that is not persisted.
 pub(crate) fn give_key(p: *const CertContext, key: usize) -> bool {
     let Some(b) = block(p) else { return false };
-    let mut context = [0u8; 24];
-    context[..4].copy_from_slice(&24u32.to_le_bytes());
-    context[8..16].copy_from_slice(&(key as u64).to_le_bytes());
-    context[16..20].copy_from_slice(&CERT_NCRYPT_KEY_SPEC.to_le_bytes());
-    if !add_prop(b, CERT_KEY_CONTEXT_PROP_ID, &context)
-        || !add_prop(b, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &(key as u64).to_le_bytes())
+    let context = KeyContext {
+        size: core::mem::size_of::<KeyContext>() as u32,
+        key,
+        key_spec: CERT_NCRYPT_KEY_SPEC,
+    };
+    if !add_prop(b, CERT_KEY_CONTEXT_PROP_ID, bytes_of(&context))
+        || !add_prop(b, CERT_NCRYPT_KEY_HANDLE_PROP_ID, &key.to_le_bytes())
     {
         return false;
     }
@@ -1873,25 +1899,20 @@ pub(crate) fn give_key(p: *const CertContext, key: usize) -> bool {
 
 /// The CNG key a CRYPT_KEY_PROV_INFO with dwProvType 0 names: opened
 /// from its key storage provider.
-fn open_ncrypt_key(info: &[u8]) -> Result<usize, u32> {
+fn open_ncrypt_key(kept: &[u8]) -> Result<usize, u32> {
     type Open = unsafe extern "system" fn(*mut usize, *const u16, u32) -> i32;
     type OpenKey = unsafe extern "system" fn(usize, *mut usize, *const u16, u32, u32) -> i32;
-    let field =
-        |at: usize| u32::from_le_bytes([info[at], info[at + 1], info[at + 2], info[at + 3]]);
-    // The stored strings follow the 48 bytes (set_prov_info); the
-    // container's length is at 28.
-    let container_len = field(28) as usize;
+    let (info, container_name, provider_name) = kept_prov_info(kept).ok_or(NTE_BAD_KEYSET)?;
+    // The names, NUL-terminated (set_prov_info kept them within 259
+    // characters).
     let mut container = [0u16; 260];
     let mut provider = [0u16; 260];
-    for (i, w) in info[48..].chunks_exact(2).enumerate() {
-        let c = u16::from_le_bytes([w[0], w[1]]);
-        if i < container_len {
-            container[i] = c;
-        } else if i > container_len && i - container_len - 1 < 259 {
-            provider[i - container_len - 1] = c;
+    for (out, name) in [(&mut container, container_name), (&mut provider, provider_name)] {
+        for (slot, w) in out[..259].iter_mut().zip(name.chunks_exact(2)) {
+            *slot = u16::from_le_bytes([w[0], w[1]]);
         }
     }
-    let (spec, flags) = (field(40), field(20) & CRYPT_MACHINE_KEYSET);
+    let (spec, flags) = (info.key_spec, info.flags & CRYPT_MACHINE_KEYSET);
     let (Some(open), Some(open_key)) =
         (ncrypt(c"NCryptOpenStorageProvider"), ncrypt(c"NCryptOpenKey"))
     else {
@@ -1957,10 +1978,13 @@ pub extern "system" fn CryptAcquireCertificatePrivateKey(
             | CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG
             | CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG)
         != 0;
-    let held = find_prop(b, CERT_KEY_CONTEXT_PROP_ID).filter(|c| c.len() >= 20).map(|c| {
-        let handle = u64::from_le_bytes(c[8..16].try_into().unwrap_or([0; 8])) as usize;
-        (handle, u32::from_le_bytes([c[16], c[17], c[18], c[19]]))
-    });
+    let held = find_prop(b, CERT_KEY_CONTEXT_PROP_ID)
+        .filter(|c| has!(c.len(), KeyContext, key_spec))
+        .map(|c| {
+            // SAFETY: a kept CERT_KEY_CONTEXT whose size covers the fields.
+            let context = unsafe { c.as_ptr().cast::<KeyContext>().read_unaligned() };
+            (context.key, context.key_spec)
+        });
     let info = find_prop(b, CERT_KEY_PROV_INFO_PROP_ID);
     if held.is_none() && info.is_none() {
         return error(CRYPT_E_NO_KEY_PROPERTY, 0);
@@ -1977,7 +2001,7 @@ pub extern "system" fn CryptAcquireCertificatePrivateKey(
         return 1;
     }
     let info = info.unwrap_or(&[]);
-    let provider_type = u32::from_le_bytes([info[16], info[17], info[18], info[19]]);
+    let provider_type = kept_prov_info(info).map_or(0, |(i, _, _)| i.provider_type);
     if provider_type != 0 || !ncrypt_ok {
         crate::store::unsupported(
             b"crypt32.dll!CryptAcquireCertificatePrivateKey(a CryptoAPI key)",

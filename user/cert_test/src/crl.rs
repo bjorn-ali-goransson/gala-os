@@ -118,7 +118,11 @@ struct RevocationStatus {
     freshness: u32,
 }
 
-#[link(name = "crypt32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "crypt32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "crypt32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CertCreateCRLContext(encoding: u32, data: *const u8, len: u32) -> *const CrlContext;
     fn CertDuplicateCRLContext(crl: *const CrlContext) -> *const CrlContext;
@@ -270,7 +274,7 @@ pub fn crls(c: &mut Checks) -> Result<(), u32> {
     let revoked = cert(c, REVOKED)?;
     let client = cert(c, CLIENT)?;
 
-    super::out(b"cert_test: crl: contexts\r\n");
+    super::say(b"crl: contexts\r\n");
     // 1. Decoding.
     // SAFETY: crypt32 calls with our buffers; the structures it gives.
     unsafe {
@@ -303,7 +307,7 @@ pub fn crls(c: &mut Checks) -> Result<(), u32> {
         c.eq((*(*root).info).entry_count.into(), 0)?;
         CertFreeCRLContext(root);
 
-        super::out(b"cert_test: crl: stores\r\n");
+        super::say(b"crl: stores\r\n");
         // 2. Stores.
         let store = CertOpenStore(CERT_STORE_PROV_MEMORY as *const u8, 0, 0, 0, null());
         c.ok(!store.is_null(), last_error())?;
@@ -358,7 +362,7 @@ pub fn crls(c: &mut Checks) -> Result<(), u32> {
         c.ok(CertEnumCRLsInStore(store, only).is_null(), 0)?;
         CertCloseStore(store, 0);
 
-        super::out(b"cert_test: crl: entries\r\n");
+        super::say(b"crl: entries\r\n");
         // 3. Entries.
         let mut entry: *const CrlEntry = null();
         c.ok(CertFindCertificateInCRL(revoked, x, 0, null(), &mut entry) != 0, last_error())?;
@@ -374,7 +378,7 @@ pub fn crls(c: &mut Checks) -> Result<(), u32> {
         c.ok(CertVerifyCRLRevocation(X509_ASN_ENCODING, (*revoked).info, 0, null()) != 0, 0)?;
         CertFreeCRLContext(x);
 
-        super::out(b"cert_test: crl: CertVerifyRevocation\r\n");
+        super::say(b"crl: CertVerifyRevocation\r\n");
         // 4. The revocation provider.
         let mut status = RevocationStatus {
             size: 0,
