@@ -1434,25 +1434,38 @@ need gala's.
      handle and inherited, in Windows' order; the real connect time-out,
      30 s here; WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH accepted as
      Windows does; `winhttp_cb_test`, `wow64_winhttp_cb_test`;
-     ARCHITECTURE "WinHTTP and WinINet"). Where the run ends now: urlmon
-     is asked for and missing (`urlmon.dll` missing dll, survived), two
-     WinHttpSetOption options are recorded unsupported (77
-     WINHTTP_OPTION_AUTOLOGON_POLICY, 63 WINHTTP_OPTION_DISABLE_FEATURE),
-     a worker thread connects to officeclient.microsoft.com:443, and
-     meanwhile the main thread asks ShellExecute to relaunch itself
-     elevated ("runas": `shell32.dll!ShellExecute(verb)` 5, recorded
-     unsupported); the failure is a C++ exception nobody catches and the
-     copy ends with abort's status 3 (the first setup.exe with it).
-     Next, in the order the run reaches them: elevation (ShellExecuteEx
-     "runas": the boot user's token and what Windows answers when it is
-     already an administrator or UAC is off), the TLS handshake from
-     32-bit (schannel.dll has no i686 build: secur32's x86 loads it on
-     first use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, then
-     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
-     (the signature check), wininet, urlmon, xmllite, webservices,
-     iphlpapi, setupapi, cabinet, credui, gdiplus; the service control
-     manager (advapi32's service calls are stubs); a few shlwapi,
-     user32, ole32 and shell32 functions.
+     ARCHITECTURE "WinHTTP and WinINet"). Its relaunched copy asks
+     ShellExecuteEx for "runas" (done: elevation as SECURITY.md
+     "Elevation" designs it; `runas_test`, `wow64_runas_test`,
+     `runas_declined`): as the boot user, a standard user, gala declines
+     as a cancelled UAC prompt (recorded) and setup.exe goes to report the
+     error, so the scenario runs it as SYSTEM (`as=system`, an
+     administrator, as Configuration Manager and Intune run ODT), elevated
+     (the `, elevated token` start lines), which asks for no elevation.
+     Where the run ends now: urlmon is asked for and missing (`urlmon.dll`
+     missing dll, survived), two WinHttpSetOption options are recorded
+     unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
+     WINHTTP_OPTION_DISABLE_FEATURE), no TCP connection is made yet
+     (`events=net` shows none), then setup.exe asks COM for
+     {88D96A05-F192-11D4-A65F-0040963251E5} (MSXML 6's DOMDocument60,
+     msxml6.dll: not registered, `ole32.dll!CoGetClassObject(class not
+     registered)`) and, reporting that failure, delay-loads gdiplus.dll,
+     which is missing (`gdiplus.dll` missing dll): the delay-load
+     exception 0xc06d007e is not caught and both copies exit with it.
+     HKCU still names the boot user's hive while running as SYSTEM
+     (advapi32's `current_user_path` is fixed to the boot user's SID;
+     Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
+     Next, in the order the run reaches them: MSXML 6 (DOMDocument60 and
+     the XML it parses: the configuration and the CDN's cab manifests),
+     gdiplus (setup.exe's error and progress UI), HKCU from the caller's
+     token, the TLS handshake from 32-bit (schannel.dll has no i686 build:
+     secur32's x86 loads it on first use), winhttp's AUTOLOGON_POLICY and
+     DISABLE_FEATURE, then CryptQueryObject's embedded PKCS #7 and
+     wintrust's WinVerifyTrust (the signature check), wininet, urlmon,
+     xmllite, webservices, iphlpapi, setupapi, cabinet, credui; the
+     service control manager (advapi32's service calls are stubs); a few
+     shlwapi, user32, ole32 and shell32 functions; FormatMessage's system
+     text for ERROR_CANCELLED (1223, recorded on the declined path).
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,

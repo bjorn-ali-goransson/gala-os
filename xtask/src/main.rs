@@ -3053,6 +3053,21 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_ucrt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_ucrt_test", "x86/ucrtbase.dll", "Windows/SysWOW64"),
     ("wow64_ucrt_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // ShellExecute's "runas" (user/runas_test), x64 and x86: shell32 and
+    // the advapi32 it loads for the caller's token.
+    ("runas_test", "ntdll.dll", "Windows/System32"),
+    ("runas_test", "kernel32.dll", "Windows/System32"),
+    ("runas_test", "shell32.dll", "Windows/System32"),
+    ("runas_test", "advapi32.dll", "Windows/System32"),
+    ("runas_test", "secur32.dll", "Windows/System32"),
+    ("runas_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("runas_test", "bcrypt.dll", "Windows/System32"),
+    ("wow64_runas_test", "wow64.dll", "Windows/System32"),
+    ("wow64_runas_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/shell32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_runas_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     // The kernel32 and ntdll functions Office imports (user/office_api_test),
     // x64 and x86.
     ("office_api_test", "ntdll.dll", "Windows/System32"),
@@ -3228,6 +3243,7 @@ const USER_PROGRAMS: &[&str] = &[
     "office_api_test",
     "msi_test",
     "winhttp_cb_test",
+    "runas_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -3245,6 +3261,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_cert_test",
     "wow64_msi_test",
     "wow64_winhttp_cb_test",
+    "wow64_runas_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -6203,6 +6220,46 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["office_api_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // ShellExecute's "runas" by an elevated caller (SYSTEM): no
+        // prompt, the child starts with the caller's token, elevated
+        // (user/runas_test; docs/SECURITY.md "Elevation").
+        name: "runas_test",
+        cmdline: "qemu_exit as=system run=runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "runas_test: elevated (type 1): runas started an elevated child",
+            "personality nt, elevated token",
+            "runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same through WOW64 (user/runas_test built for x86): the x86
+        // SHELLEXECUTEINFOW and shell32.
+        name: "wow64_runas_test",
+        cmdline: "qemu_exit as=system run=wow64_runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_runas_test: elevated (type 1): runas started an elevated child",
+            "32-bit x86 (WOW64), elevated token",
+            "wow64_runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // "runas" by the boot user, a standard user: UAC would prompt;
+        // gala has no prompt and declines, recorded (user/runas_test).
+        name: "runas_declined",
+        cmdline: "qemu_exit run=runas_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "runas_test: not elevated (type 1): runas declined",
+            r#"ledger: {"service":"shell32.dll!ShellExecute(runas: elevation prompt)","what":"unsupported""#,
+            "runas_test: ok",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
         // The same through WOW64 (user/office_api_test built for x86).
         name: "wow64_office_api_test",
         cmdline: "qemu_exit run=wow64_office_api_test.exe",
@@ -8447,9 +8504,11 @@ const SCENARIOS: &[Scenario] = &[
         // PREBUILT odt) installs Word, Excel and PowerPoint as
         // user/office_install/config.xml asks, from Microsoft's CDN (a
         // net scenario: QEMU's NAT to the host's network). Its log goes to
-        // C:\gala\odtlog; the ledger ranks what it lacks (ROADMAP OF).
+        // C:\gala\odtlog; the ledger ranks what it lacks (ROADMAP OF). As
+        // SYSTEM: ODT needs an administrator (its "runas" is declined for
+        // the boot user, a standard user; docs/SECURITY.md "Elevation").
         name: "office_install",
-        cmdline: "qemu_exit run=setup.exe args=/configure%20C:\\gala\\config.xml",
+        cmdline: "qemu_exit as=system run=setup.exe args=/configure%20C:\\gala\\config.xml",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["setup.exe (pid 4) exited with status 0x00000000"],
     },
@@ -9278,6 +9337,7 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("gala_cli", "gala_cli_test"),
     ("net_reset", "go_http"),
     ("disk_reset", "disk_test"),
+    ("runas_declined", "runas_test"),
     ("handover_disk", "persist_test"),
     ("handover_k32", "handover_k32_test"),
     ("handover_k32_uefi", "handover_k32_test"),
@@ -9929,6 +9989,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_sock_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("pk_install_inno32", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_adv_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_runas_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("win32_misc_test", "a child process (its 32-bit wow64_test.exe, IsWow64Process2)"),
     ("conpty_test", "child processes: the console host and the child"),
     ("process_test", "child processes (one NT process per Linux process)"),
