@@ -148,17 +148,17 @@ pub extern "system" fn MsiSetInternalUI(level: u32, window: *mut usize) -> u32 {
     UI_LEVEL.swap(level, Ordering::Relaxed)
 }
 
-/// MsiQueryProductStateW (#113): INSTALLSTATE_UNKNOWN (last error 0) for
-/// a product code; INSTALLSTATE_INVALIDARG (last error untouched) for
-/// anything else.
+/// MsiQueryProductStateW (#113): INSTALLSTATE_UNKNOWN for a product code,
+/// INSTALLSTATE_INVALIDARG for anything else; the last error 0 either way
+/// (as Windows answers a NULL code).
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiQueryProductStateW(product: *const u16) -> i32 {
+    // SAFETY: plain call.
+    unsafe { SetLastError(ERROR_SUCCESS) };
     if !is_guid(product) {
         return INSTALLSTATE_INVALIDARG;
     }
     nothing_installed(b"MsiQueryProductStateW", 113);
-    // SAFETY: plain call.
-    unsafe { SetLastError(ERROR_SUCCESS) };
     INSTALLSTATE_UNKNOWN
 }
 
