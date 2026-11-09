@@ -1,7 +1,8 @@
 # Security model
 
-The design of NT security in gala: tokens, security descriptors, the
-access check, accounts and logons, sessions, integrity levels and UIPI.
+The design of NT security in gala: tokens, elevation, security
+descriptors, the access check, accounts and logons, sessions, integrity
+levels and UIPI.
 The implementation detail (layouts, the groups each token gets, every
 service's rules) is in ARCHITECTURE: "Access tokens", "Security
 descriptors", "Access checks", "Accounts and logon", "Windows across
@@ -21,7 +22,7 @@ are unrelated.)
 
 | Phase | Tests | State | Left |
 |---|---|---|---|
-| **S1** Tokens in the kernel | `token_test` | done | NtAccessCheck, NtImpersonateThread, NtAdjustGroupsToken |
+| **S1** Tokens in the kernel, elevation | `token_test`, `runas_test`, `runas_declined` | done | NtAccessCheck, NtImpersonateThread, NtAdjustGroupsToken; split administrator tokens and UAC's prompt ("Elevation") |
 | **S2** Descriptors kept on objects | `security_test` | done | SetSecurityInfo of an unprotected DACL does not re-apply inheritance; SACLs kept, no auditing |
 | **S3** Access checks at open, a second account | `access_test` | done for files, keys, named objects | processes and threads (NtOpenProcess/NtOpenThread grant what is asked), pipes and other devices, traversal |
 | **S4** Logons and per-user processes | `logon_test`, `system_test`, `lsa_test`, `profile_test`; `sshd_login`, `sshd_password` | sshd's key and password logins work | logon rights enforced for ordinary accounts; NetUserAdd; KERB_S4U_LOGON; untrusted callers' S4U tokens should be identification-level; the account key is readable by programs |
@@ -82,6 +83,45 @@ restricting SIDs (CreateRestrictedToken); source; elevation type.
   (0x7f23), NtAllocateLocallyUniqueId (0x7f22), and gala's GalaLogonUser
   (0x7f21) in the role of NtCreateToken. advapi32's token functions are
   wrappers over them (`user/advapi32/src/token.rs`).
+
+## Elevation
+
+User Account Control as Microsoft documents it ("How User Account
+Control works", TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, ShellExecuteEx),
+for the accounts gala has:
+
+- **No split tokens.** Windows gives an administrator who logs on with
+  UAC on two linked tokens, a filtered one (TokenElevationTypeLimited)
+  and the full one (TokenElevationTypeFull, TokenLinkedToken). gala's
+  accounts are standard users (the boot user `gala`, scenario accounts)
+  and SYSTEM (`as=system`), so every token is TokenElevationTypeDefault
+  (1) and there is no linked token. UAC counts as on (EnableLUA's
+  default; gala seeds no policy).
+- **TokenElevation** is 1 for a token holding BUILTIN\Administrators
+  enabled (not deny-only): SYSTEM's, a copy or duplicate of it; 0 for a
+  standard user's and for a restricted token whose Administrators group
+  was made deny-only (PostgreSQL's CreateRestrictedToken).
+- **ShellExecute(Ex)'s "runas"** (the elevation programs ask for):
+  - an elevated caller starts the program with its own token, with no
+    prompt, as Windows does for an elevated administrator (or with UAC
+    off): the child is elevated with the caller's elevation type;
+  - any other caller would get UAC's prompt (credentials, for a standard
+    user); gala has no prompt and no AppInfo service, so the request is
+    declined as a cancelled prompt answers: ERROR_CANCELLED, hInstApp
+    SE_ERR_ACCESSDENIED, recorded in the ledger
+    (`shell32.dll!ShellExecute(runas: elevation prompt)`).
+  - An installer that needs an administrator therefore runs as SYSTEM
+    (`as=system`), as Configuration Manager and Intune run them.
+- **Observability**: the `process ... starting at` line names an
+  elevated primary token (`, elevated token`), the `process start` event
+  carries `"elevated"`.
+- Not modelled: an administrator account with a filtered token and its
+  linked full token, the consent prompt (consent.exe) and AppInfo's
+  creation of the elevated process, the `requireAdministrator` manifest
+  level (CreateProcess's ERROR_ELEVATION_REQUIRED), UAC virtualization.
+
+Tests: `runas_test` (x64) and `wow64_runas_test` (x86) as SYSTEM,
+`runas_declined` as the boot user.
 
 ## Accounts and logon
 

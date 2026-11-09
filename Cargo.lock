@@ -1835,6 +1835,13 @@ name = "rtl_test"
 version = "0.1.0"
 
 [[package]]
+name = "runas_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2794,6 +2801,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_office_api_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_runas_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

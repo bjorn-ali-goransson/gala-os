@@ -2120,6 +2120,14 @@ SECURITY.md phase S1 holds the model; the kernel side is
     BUILTIN\Administrators, an owner group, Everyone, Authenticated
     Users, the System label; the system logon session 0x3e7, session 0;
     LocalSystem's privileges, enabled as in a service.
+  - **Elevation** (SECURITY.md "Elevation"): no token is split, so
+    TokenElevationType is 1 (default) for all; TokenElevation
+    (`TokenData::elevated`) is 1 when the token holds
+    BUILTIN\Administrators enabled and not deny-only (SYSTEM's), 0
+    otherwise (the boot user's, a restricted token whose Administrators
+    group was made deny-only). The `process ... starting at` line ends
+    in `, elevated token` and the `process start` event carries
+    `"elevated"` for a process whose primary token is elevated.
 - **Impersonation**: a thread may hold an impersonation token
   (`NtThread::impersonation`): NtSetInformationThread
   ThreadImpersonationToken (impersonation tokens only), and
@@ -6184,8 +6192,15 @@ windows can use them too.
   run programs (.exe/.com, as given or along the search path, `.exe`
   added) with CreateProcessW and the documented results (hInstApp 33,
   hProcess with SEE_MASK_NOCLOSEPROCESS; SE_ERR_FNF and
-  ERROR_FILE_NOT_FOUND); other verbs, documents and URLs have no
-  associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
+  ERROR_FILE_NOT_FOUND); the verb "runas" (case-insensitive) is
+  elevation as SECURITY.md "Elevation" designs it: a caller whose token
+  is elevated (TokenElevation, read through advapi32 loaded on first
+  use) gets the program started with that token, no prompt; any other
+  caller gets ERROR_CANCELLED with hInstApp (ShellExecuteW's result)
+  SE_ERR_ACCESSDENIED, as a cancelled UAC prompt answers, recorded as
+  `shell32.dll!ShellExecute(runas: elevation prompt)` (`runas_test`,
+  `wow64_runas_test`, `runas_declined`). Other verbs, documents and URLs
+  have no associations yet (SE_ERR_NOASSOC, recorded). DragQueryFileW/
   DragQueryPoint/DragFinish read a DROPFILES block (wide or ANSI names);
   DragAcceptFiles sets WS_EX_ACCEPTFILES (nothing generates
   WM_DROPFILES yet). SHFileOperationW does FO_COPY/FO_MOVE/FO_RENAME/

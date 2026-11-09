@@ -310,7 +310,8 @@ fn products(c: &mut Checks) -> Result<(), u32> {
     unsafe {
         SetLastError(0xdead_beef);
         c.state(MsiQueryProductStateW(null()), INSTALLSTATE_INVALIDARG)?;
-        c.eq(GetLastError().into(), 0xdead_beef)?;
+        // Windows clears the last error here too (the CI runner's answer).
+        c.eq(GetLastError().into(), ERROR_SUCCESS.into())?;
         c.state(MsiQueryProductStateW(empty.as_ptr()), INSTALLSTATE_INVALIDARG)?;
         c.state(MsiQueryProductStateW(garbage.as_ptr()), INSTALLSTATE_INVALIDARG)?;
         c.state(MsiQueryProductStateW(unbraced.as_ptr()), INSTALLSTATE_INVALIDARG)?;

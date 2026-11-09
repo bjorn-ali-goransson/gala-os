@@ -147,6 +147,16 @@ impl Process {
             _ => super::token::MEDIUM_LEVEL,
         }
     }
+
+    /// Its primary token is elevated (TokenElevation: an administrator's
+    /// full token, SYSTEM's).
+    pub fn elevated(&self) -> bool {
+        let token = self.token.lock().clone();
+        match &token.body {
+            ObjectBody::Token(t) => t.data.lock().elevated(),
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Debug for Process {
@@ -1015,16 +1025,20 @@ pub fn announce_start(process: &Process, rip: u64, command_line: &str) {
     crate::events::note_process(id, command_line);
     let (machine, wow64) =
         if process.wow64.is_some() { ("x86", ", 32-bit x86 (WOW64)") } else { ("x64", "") };
+    // An elevated primary token (an administrator's full token: SYSTEM's,
+    // or what ShellExecute's "runas" starts) is named on the line.
+    let elevated = process.elevated();
     info!(
         "process {} (pid {id}, session {session}): starting at {rip:#x}, personality \
-         {personality}{wow64}",
-        process.name
+         {personality}{wow64}{}",
+        process.name,
+        if elevated { ", elevated token" } else { "" }
     );
     crate::events::emit(
         crate::events::Category::Process,
         "process start",
         format_args!(
-            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"image_base":{},"entry":{rip},"cmdline":{}"#,
+            r#""pid":{id},"session":{session},"name":{},"personality":"{personality}","machine":"{machine}","ppid":{ppid},"ptid":{ptid},"elevated":{elevated},"image_base":{},"entry":{rip},"cmdline":{}"#,
             crate::events::Str(process.name),
             process.image.0,
             crate::events::Str(command_line)
