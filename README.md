@@ -361,7 +361,7 @@ only those DLLs, and the kernel under them, are gala's.
 flowchart TB
     subgraph user["User mode (per process, in a session)"]
         app["Windows program (.exe)<br/>Go · Rust · mingw-w64 · MSVC · JDK · .NET · official releases"]
-        crt["msvcrt.dll<br/>(or the program's own UCRT)"]
+        crt["msvcrt.dll · ucrtbase.dll<br/>(gala's C runtimes)"]
         dlls["kernel32 · kernelbase · advapi32 · user32 · gdi32 · ws2_32<br/>shell32 · ole32 · bcrypt · ncrypt · secur32 · winhttp · ... (~50)"]
         ntdll["ntdll.dll<br/>loader · heaps · exception and APC dispatch · system call stubs"]
         tools["gala's programs<br/>conhost.exe · cmd.exe · gala.exe"]

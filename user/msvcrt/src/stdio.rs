@@ -57,6 +57,8 @@ unsafe extern "system" {
         options: u32,
     ) -> i32;
     fn GetFileSizeEx(h: *mut c_void, size: *mut i64) -> i32;
+    #[cfg_attr(not(ucrt), allow(dead_code))]
+    fn SetEndOfFile(h: *mut c_void) -> i32;
     fn CreatePipe(
         read: *mut *mut c_void,
         write: *mut *mut c_void,
@@ -109,9 +111,9 @@ fn errno_of_last_error() -> i32 {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct File {
-    ptr: usize,
-    cnt: i32,
-    base: usize,
+    pub(crate) ptr: usize,
+    pub(crate) cnt: i32,
+    pub(crate) base: usize,
     flag: i32,
     file: i32,
     charbuf: i32,
@@ -241,10 +243,46 @@ fn stream<'a>(file: *mut u8) -> Option<&'a mut Stream> {
     (s.magic == MAGIC).then_some(s)
 }
 
+/// The handle a FILE reads and writes (the UCRT's printf to a stream).
+#[cfg_attr(not(ucrt), allow(dead_code))]
+pub(crate) fn stream_handle(file: *mut u8) -> Option<*mut c_void> {
+    stream(file).map(|s| s.handle)
+}
+
+/// Sets the length of descriptor `fd`'s file to `size` (`_chsize_s`),
+/// keeping its position; false with errno set on failure.
+#[cfg_attr(not(ucrt), allow(dead_code))]
+pub(crate) fn set_length(fd: i32, size: i64) -> bool {
+    let Some(h) = handle_of_fd(fd) else {
+        set_errno(EBADF);
+        return false;
+    };
+    let mut at = 0i64;
+    // SAFETY: our handle; the position is put back.
+    unsafe {
+        if SetFilePointerEx(h, 0, &mut at, 1) == 0
+            || SetFilePointerEx(h, size, null_mut(), 0) == 0
+            || SetEndOfFile(h) == 0
+        {
+            set_errno(errno_of_last_error());
+            return false;
+        }
+        SetFilePointerEx(h, at, null_mut(), 0);
+    }
+    true
+}
+
 fn write_handle(h: *mut c_void, data: &[u8]) -> bool {
     let mut written = 0;
     // SAFETY: a valid buffer.
     unsafe { WriteFile(h, data.as_ptr(), data.len() as u32, &mut written, null_mut()) != 0 }
+}
+
+/// Writes to the console (`_putch`): standard output's handle here.
+#[cfg_attr(not(ucrt), allow(dead_code))]
+pub(crate) fn write_console(data: &[u8]) {
+    // SAFETY: plain call.
+    write_handle(unsafe { GetStdHandle(-11i32 as u32) }, data);
 }
 
 pub(crate) fn write_stderr(data: &[u8]) {
@@ -584,8 +622,13 @@ pub extern "C" fn fflush(_file: *mut u8) -> i32 {
 /// fseek: drops what was read ahead; SEEK_SET/CUR/END (0, 1, 2).
 #[unsafe(no_mangle)]
 pub extern "C" fn fseek(file: *mut u8, offset: i32, whence: i32) -> i32 {
+    seek(file, i64::from(offset), whence)
+}
+
+/// fseek with a 64-bit offset (`_fseeki64`).
+pub(crate) fn seek(file: *mut u8, offset: i64, whence: i32) -> i32 {
     let Some(s) = stream(file) else { return -1 };
-    let mut offset = i64::from(offset);
+    let mut offset = offset;
     if whence == 1 {
         // Relative to the caller's position, not the read-ahead.
         offset -= (s.len - s.pos) as i64 + i64::from(s.unget.is_some());
@@ -601,13 +644,18 @@ pub extern "C" fn fseek(file: *mut u8, offset: i32, whence: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ftell(file: *mut u8) -> i32 {
+    tell(file) as i32
+}
+
+/// ftell's 64-bit position (`_ftelli64`).
+pub(crate) fn tell(file: *mut u8) -> i64 {
     let Some(s) = stream(file) else { return -1 };
     let mut at = 0i64;
     // SAFETY: our handle.
     if unsafe { SetFilePointerEx(s.handle, 0, &mut at, 1) } == 0 {
         return -1;
     }
-    (at - (s.len - s.pos) as i64 - i64::from(s.unget.is_some())) as i32
+    at - (s.len - s.pos) as i64 - i64::from(s.unget.is_some())
 }
 
 #[unsafe(no_mangle)]
@@ -990,9 +1038,9 @@ pub extern "C" fn clearerr(file: *mut u8) {
 /// _vscprintf(fmt, args): the length the formatted text would have.
 #[unsafe(no_mangle)]
 pub extern "C" fn _vscprintf(fmt: *const u8, args: VaList) -> i32 {
-    let mut out = Out { sink: Sink::Bytes { ptr: null_mut(), cap: 0 }, total: 0 };
+    let mut out = Out::bytes(null_mut(), 0);
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, Style::msvcrt(false));
     out.total as i32
 }
 
@@ -1170,23 +1218,71 @@ pub extern "C" fn _fstat64(fd: i32, buf: *mut u8) -> i32 {
 // ---- Formatting ---------------------------------------------------------------------
 
 /// Where formatted output goes.
-enum Sink {
+pub(crate) enum Sink {
     /// A handle, in 256-byte pieces.
     Handle { handle: *mut c_void, buf: [u8; 256], len: usize },
     /// A byte buffer of `cap` bytes (the rest is counted, not written).
     Bytes { ptr: *mut u8, cap: usize },
+    /// A UTF-16 buffer of `cap` characters: the formatter's UTF-8 decoded
+    /// as it comes (`pending` holds a character's first bytes); `total`
+    /// counts UTF-16 units.
+    Wide { ptr: *mut u16, cap: usize, pending: [u8; 4], have: usize },
 }
 
-struct Out {
-    sink: Sink,
-    total: usize,
+/// Formatted output: the sink and how much was produced (bytes, or
+/// UTF-16 units for `Sink::Wide`), whether it fitted or not.
+pub(crate) struct Out {
+    pub(crate) sink: Sink,
+    pub(crate) total: usize,
 }
 
 impl Out {
-    fn put(&mut self, mut data: &[u8]) {
+    pub(crate) fn bytes(ptr: *mut u8, cap: usize) -> Self {
+        Self { sink: Sink::Bytes { ptr, cap }, total: 0 }
+    }
+
+    pub(crate) fn wide(ptr: *mut u16, cap: usize) -> Self {
+        Self { sink: Sink::Wide { ptr, cap, pending: [0; 4], have: 0 }, total: 0 }
+    }
+
+    pub(crate) fn handle(handle: *mut c_void) -> Self {
+        Self { sink: Sink::Handle { handle, buf: [0; 256], len: 0 }, total: 0 }
+    }
+
+    pub(crate) fn put(&mut self, mut data: &[u8]) {
+        if let Sink::Wide { ptr, cap, pending, have } = &mut self.sink {
+            for &b in data {
+                pending[*have] = b;
+                *have += 1;
+                let need = match pending[0] {
+                    0xf0.. => 4,
+                    0xe0.. => 3,
+                    0xc0.. => 2,
+                    _ => 1,
+                };
+                if *have < need {
+                    continue;
+                }
+                let c = core::str::from_utf8(&pending[..need])
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                    .unwrap_or(char::REPLACEMENT_CHARACTER);
+                *have = 0;
+                let mut units = [0u16; 2];
+                for &u in c.encode_utf16(&mut units).iter() {
+                    if self.total < *cap {
+                        // SAFETY: inside the caller's buffer of `cap` units.
+                        unsafe { *ptr.add(self.total) = u };
+                    }
+                    self.total += 1;
+                }
+            }
+            return;
+        }
         let start = self.total;
         self.total += data.len();
         match &mut self.sink {
+            Sink::Wide { .. } => {}
             Sink::Handle { handle, buf, len } => {
                 while !data.is_empty() {
                     let n = data.len().min(buf.len() - *len);
@@ -1210,13 +1306,37 @@ impl Out {
         }
     }
 
-    fn flush(&mut self) {
+    pub(crate) fn flush(&mut self) {
         if let Sink::Handle { handle, buf, len } = &mut self.sink
             && *len > 0
         {
             write_handle(*handle, &buf[..*len]);
             *len = 0;
         }
+    }
+}
+
+/// How a format is read: msvcrt's ways or the UCRT's (its
+/// `_CRT_INTERNAL_PRINTF_*` options, ucrt/stdio.rs).
+#[derive(Clone, Copy)]
+pub(crate) struct Style {
+    /// The format is a wide function's: `%T` strings are UTF-16, and so
+    /// are `%s`/`%c` when `legacy_wide`.
+    pub(crate) wide: bool,
+    /// `%s` and `%c` in a wide function take UTF-16 (msvcrt's rule, and
+    /// the UCRT's with _CRT_INTERNAL_PRINTF_LEGACY_WIDE_SPECIFIERS); the
+    /// UCRT's standard rule makes them narrow as in a narrow function.
+    pub(crate) legacy_wide: bool,
+    /// Floating point (float.rs): msvcrt's or the UCRT's.
+    pub(crate) float: crate::float::Style,
+    /// The UCRT reads `%*2d` as width 2 (digits after `*` replace it);
+    /// msvcrt's engine appends them.
+    pub(crate) ucrt: bool,
+}
+
+impl Style {
+    pub(crate) const fn msvcrt(wide: bool) -> Self {
+        Self { wide, legacy_wide: true, float: crate::float::Style::MSVCRT, ucrt: false }
     }
 }
 
@@ -1232,11 +1352,13 @@ enum IntSize {
 }
 
 /// Formats `fmt` with the C printf rules (flags `-+ #0`, width and
-/// precision with `*`, lengths hh h l ll I I32 I64 z j t w, conversions
-/// d i u o x X c s p %, and f e g (float.rs)). With `wide`, `%s` and
-/// `%c` take UTF-16 (and `%hs` narrow), as in the wprintf functions; the
-/// output is UTF-8 either way.
-fn format(out: &mut Out, fmt: &[u8], mut args: VaList, wide: bool) {
+/// precision with `*`, lengths hh h l ll I I32 I64 z j t w T, conversions
+/// d i u o x X c s p %, and f F e E g G (float.rs)). In a wide function
+/// (`style`), `%s` and `%c` take UTF-16 (and `%hs` narrow) as the
+/// wprintf functions do; the output is UTF-8 either way (a `Sink::Wide`
+/// makes it UTF-16).
+pub(crate) fn format(out: &mut Out, fmt: &[u8], mut args: VaList, style: Style) {
+    let wide = style.wide && style.legacy_wide;
     let mut i = 0;
     while i < fmt.len() {
         if fmt[i] != b'%' {
@@ -1270,6 +1392,11 @@ fn format(out: &mut Out, fmt: &[u8], mut args: VaList, wide: bool) {
             width = w.unsigned_abs() as usize;
             i += 1;
         }
+        if style.ucrt && i < fmt.len() && fmt[i].is_ascii_digit() {
+            // `%*2d`: the digits are the width (the `*` argument was
+            // still taken).
+            width = 0;
+        }
         while i < fmt.len() && fmt[i].is_ascii_digit() {
             width = width * 10 + usize::from(fmt[i] - b'0');
             i += 1;
@@ -1292,6 +1419,7 @@ fn format(out: &mut Out, fmt: &[u8], mut args: VaList, wide: bool) {
         // Length: the integer's size (`l` is 32-bit on Windows, `I` the
         // pointer's); `h`/`l`/`w` choose narrow or wide strings.
         let (mut size, mut narrow, mut wide_str) = (IntSize::Int, false, false);
+        let mut natural = false;
         loop {
             let rest = &fmt[i..];
             if rest.starts_with(b"I64") {
@@ -1319,6 +1447,10 @@ fn format(out: &mut Out, fmt: &[u8], mut args: VaList, wide: bool) {
                 i += 1;
             } else if matches!(rest.first(), Some(b'L')) {
                 i += 1;
+            } else if matches!(rest.first(), Some(b'T')) {
+                // The function's own width (the UCRT's `%Ts`).
+                natural = true;
+                i += 1;
             } else {
                 break;
             }
@@ -1328,6 +1460,7 @@ fn format(out: &mut Out, fmt: &[u8], mut args: VaList, wide: bool) {
         // Strings and characters in UTF-16: %S (narrow printf), %s/%c
         // (wide printf), %ls/%ws.
         let utf16 = match conv {
+            _ if natural => style.wide,
             b's' | b'c' => wide_str || (wide && !narrow),
             b'S' | b'C' => !(wide && !narrow) || wide_str,
             _ => false,
@@ -1400,7 +1533,8 @@ fn format(out: &mut Out, fmt: &[u8], mut args: VaList, wide: bool) {
             }
             b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
                 let v = args.double();
-                let (n, negative) = crate::float::format(v, conv, precision, alt, &mut float_buf);
+                let (n, negative) =
+                    crate::float::format(v, conv, precision, alt, &mut float_buf, style.float);
                 let sign: &[u8] = if negative {
                     b"-"
                 } else if plus {
@@ -1510,9 +1644,9 @@ pub extern "C" fn vfprintf(file: *mut u8, fmt: *const u8, args: VaList) -> i32 {
         crate::missing(b"msvcrt.dll!vfprintf(file)", 0);
         return -1;
     };
-    let mut out = Out { sink: Sink::Handle { handle: s.handle, buf: [0; 256], len: 0 }, total: 0 };
+    let mut out = Out::handle(s.handle);
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, Style::msvcrt(false));
     out.flush();
     out.total as i32
 }
@@ -1526,9 +1660,9 @@ pub extern "C" fn vprintf(fmt: *const u8, args: VaList) -> i32 {
 /// vsprintf: no size limit (as documented; the caller's buffer must fit).
 #[unsafe(no_mangle)]
 pub extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, args: VaList) -> i32 {
-    let mut out = Out { sink: Sink::Bytes { ptr: buf, cap: usize::MAX }, total: 0 };
+    let mut out = Out::bytes(buf, usize::MAX);
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, Style::msvcrt(false));
     out.put(&[0]);
     out.total as i32 - 1
 }
@@ -1537,9 +1671,9 @@ pub extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, args: VaList) -> i32 {
 /// or -1 if it did not fit (then without a terminator), as documented.
 #[unsafe(no_mangle)]
 pub extern "C" fn _vsnprintf(buf: *mut u8, count: usize, fmt: *const u8, args: VaList) -> i32 {
-    let mut out = Out { sink: Sink::Bytes { ptr: buf, cap: count }, total: 0 };
+    let mut out = Out::bytes(buf, count);
     // SAFETY: the caller's NUL-terminated format.
-    format(&mut out, unsafe { crate::c_str(fmt) }, args, false);
+    format(&mut out, unsafe { crate::c_str(fmt) }, args, Style::msvcrt(false));
     let n = out.total;
     if buf.is_null() && count == 0 {
         // The documented way to measure: the length the output needs.
@@ -1559,38 +1693,57 @@ pub extern "C" fn _vsnprintf(buf: *mut u8, count: usize, fmt: *const u8, args: V
 /// characters).
 #[unsafe(no_mangle)]
 pub extern "C" fn _vsnwprintf(buf: *mut u16, count: usize, fmt: *const u16, args: VaList) -> i32 {
-    // The format as UTF-8 (formats are ASCII in practice).
-    let mut narrow_fmt = [0u8; 1024];
-    let mut n = 0;
+    with_utf8_format(fmt, |f| {
+        let mut out = Out::wide(buf, count);
+        format(&mut out, f, args, Style::msvcrt(true));
+        let w = out.total;
+        if w < count {
+            // SAFETY: room for the terminator.
+            unsafe { *buf.add(w) = 0 };
+            w as i32
+        } else if w == count {
+            w as i32
+        } else {
+            -1
+        }
+    })
+}
+
+/// Calls `f` with the wide format `fmt` as UTF-8 (on the stack, or the
+/// heap when long); -1 if it cannot be converted (no memory).
+pub(crate) fn with_utf8_format(fmt: *const u16, f: impl FnOnce(&[u8]) -> i32) -> i32 {
+    if fmt.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
     // SAFETY: the caller's NUL-terminated wide format.
-    unsafe {
-        while *fmt.add(n) != 0 && n < narrow_fmt.len() - 1 {
-            narrow_fmt[n] = (*fmt.add(n)).min(0x7f) as u8;
+    let units = unsafe { core::slice::from_raw_parts(fmt, crate::wide::wlen(fmt)) };
+    let need = 3 * units.len();
+    let mut stack = [0u8; 1024];
+    let (buf, heap) = if need <= stack.len() {
+        (stack.as_mut_ptr(), null_mut())
+    } else {
+        let p = malloc(need);
+        if p.is_null() {
+            return -1;
+        }
+        (p, p)
+    };
+    let mut n = 0;
+    for c in char::decode_utf16(units.iter().copied()) {
+        let mut b = [0u8; 4];
+        for &byte in c.unwrap_or(char::REPLACEMENT_CHARACTER).encode_utf8(&mut b).as_bytes() {
+            // SAFETY: at most 3 bytes per UTF-16 unit.
+            unsafe { *buf.add(n) = byte };
             n += 1;
         }
     }
-    let mut text = [0u8; 2048];
-    let mut out = Out { sink: Sink::Bytes { ptr: text.as_mut_ptr(), cap: text.len() }, total: 0 };
-    format(&mut out, &narrow_fmt[..n], args, true);
-    let produced = out.total.min(text.len());
-    let s = core::str::from_utf8(&text[..produced]).unwrap_or("");
-    let mut w = 0;
-    for c in s.encode_utf16() {
-        if w < count {
-            // SAFETY: inside the caller's buffer of `count` characters.
-            unsafe { *buf.add(w) = c };
-        }
-        w += 1;
+    // SAFETY: the `n` bytes just written.
+    let r = f(unsafe { core::slice::from_raw_parts(buf, n) });
+    if !heap.is_null() {
+        free(heap);
     }
-    if w < count {
-        // SAFETY: room for the terminator.
-        unsafe { *buf.add(w) = 0 };
-        w as i32
-    } else if w == count {
-        w as i32
-    } else {
-        -1
-    }
+    r
 }
 
 /// vfwprintf(file, fmt, args): the wide format's output written to a
@@ -1608,8 +1761,8 @@ pub extern "C" fn vfwprintf(file: *mut u8, fmt: *const u16, args: VaList) -> i32
         }
     }
     let mut text = [0u8; 2048];
-    let mut out = Out { sink: Sink::Bytes { ptr: text.as_mut_ptr(), cap: text.len() }, total: 0 };
-    format(&mut out, &narrow_fmt[..n], args, true);
+    let mut out = Out::bytes(text.as_mut_ptr(), text.len());
+    format(&mut out, &narrow_fmt[..n], args, Style::msvcrt(true));
     let produced = out.total.min(text.len());
     if fwrite(text.as_ptr(), 1, produced, file) != produced {
         return -1;

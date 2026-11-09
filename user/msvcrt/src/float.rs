@@ -5,6 +5,11 @@
 //! 0.1 is `0.10000000000000001000`), then rounded half away from zero at
 //! the last digit asked for; exponents with a sign and at least three
 //! digits (`1e+100`, `2.5e-005`). Precision is capped at `MAX_PRECISION`.
+//!
+//! The UCRT's way (`Style`, gala's ucrtbase): every digit exact (`%.30f`
+//! of 1/3 is `0.333333333333333314829616256247`), still rounded half away
+//! from zero, and exponents of at least two digits (`1e+15`; three with
+//! `_CRT_INTERNAL_PRINTF_LEGACY_THREE_DIGIT_EXPONENTS`).
 
 /// Bignum words: 1152 bits, enough for 2^1024 and for a fraction of up to
 /// 1074 bits times 10.
@@ -117,9 +122,13 @@ fn expand(v: f64, frac: usize, d: &mut [u8; MAX_DIGITS]) -> (usize, usize) {
 }
 
 /// `expand`, then rounded to SIGNIFICANT digits with the rest zero, as
-/// msvcrt converts. Returns (total, integer digits).
-fn expand_limited(v: f64, frac: usize, d: &mut [u8; MAX_DIGITS]) -> (usize, usize) {
+/// msvcrt converts (with `exact`, as the UCRT does: not rounded).
+/// Returns (total, integer digits).
+fn expand_limited(v: f64, frac: usize, d: &mut [u8; MAX_DIGITS], exact: bool) -> (usize, usize) {
     let (mut n, mut int_digits) = expand(v, frac, d);
+    if exact {
+        return (n, int_digits);
+    }
     let Some(first) = d[..n].iter().position(|&x| x != 0) else { return (n, int_digits) };
     let cut = first + SIGNIFICANT;
     if n <= cut {
@@ -161,7 +170,7 @@ fn round(d: &mut [u8], next: u8) -> bool {
 
 /// `count` significant digits of |v| rounded, and the decimal exponent of
 /// the first (0 for zero).
-fn significant(v: f64, count: usize, sig: &mut [u8; MAX_PRECISION + 1]) -> i32 {
+fn significant(v: f64, count: usize, sig: &mut [u8; MAX_PRECISION + 1], exact: bool) -> i32 {
     let mut d = [0u8; MAX_DIGITS];
     if v == 0.0 {
         sig[..count].fill(0);
@@ -169,7 +178,7 @@ fn significant(v: f64, count: usize, sig: &mut [u8; MAX_PRECISION + 1]) -> i32 {
     }
     // Enough fraction digits for the leading zeros of the smallest
     // doubles (323) and `count` + 1 more.
-    let (n, int_digits) = expand_limited(v, 324 + count + 1, &mut d);
+    let (n, int_digits) = expand_limited(v, 324 + count + 1, &mut d, exact);
     let first = d[..n].iter().position(|&x| x != 0).unwrap_or(0);
     let mut exp = int_digits as i32 - first as i32 - 1;
     for (i, s) in sig[..count].iter_mut().enumerate() {
@@ -186,6 +195,20 @@ fn significant(v: f64, count: usize, sig: &mut [u8; MAX_PRECISION + 1]) -> i32 {
 struct Writer<'a> {
     out: &'a mut [u8; MAX_OUT],
     n: usize,
+    style: Style,
+}
+
+/// msvcrt's conversion or the UCRT's (module comment).
+#[derive(Clone, Copy)]
+pub struct Style {
+    /// Exact digits (UCRT) instead of 17 significant ones (msvcrt).
+    pub exact: bool,
+    /// The fewest exponent digits: 3 (msvcrt) or 2 (UCRT).
+    pub exponent_digits: u8,
+}
+
+impl Style {
+    pub const MSVCRT: Self = Self { exact: false, exponent_digits: 3 };
 }
 
 impl Writer<'_> {
@@ -210,8 +233,9 @@ impl Writer<'_> {
         if e >= 1000 {
             self.push(b'0' + (e / 1000) as u8);
         }
-        for x in digits {
-            self.push(b'0' + x as u8);
+        let skip = usize::from(self.style.exponent_digits < 3 && e < 100);
+        for x in &digits[skip..] {
+            self.push(b'0' + *x as u8);
         }
     }
 
@@ -234,7 +258,8 @@ impl Writer<'_> {
 fn fixed(w: &mut Writer<'_>, v: f64, p: usize, alt: bool) {
     let mut d = [0u8; MAX_DIGITS];
     // Enough digits for the 17-digit rounding of the smallest values.
-    let (n, mut int_digits) = expand_limited(v, (p + 1).max(324 + SIGNIFICANT + 1), &mut d);
+    let exact = w.style.exact;
+    let (n, mut int_digits) = expand_limited(v, (p + 1).max(324 + SIGNIFICANT + 1), &mut d, exact);
     let (mut start, mut keep) = (0, int_digits + p);
     if int_digits == 0 {
         // A leading "0" for the integer part (room: expand starts at 0).
@@ -260,7 +285,7 @@ fn fixed(w: &mut Writer<'_>, v: f64, p: usize, alt: bool) {
 #[inline(never)]
 fn scientific(w: &mut Writer<'_>, v: f64, p: usize, alt: bool, upper: bool) {
     let mut sig = [0u8; MAX_PRECISION + 1];
-    let exp = significant(v, p + 1, &mut sig);
+    let exp = significant(v, p + 1, &mut sig, w.style.exact);
     w.digits(&sig[..1]);
     if p > 0 || alt {
         w.push(b'.');
@@ -275,7 +300,7 @@ fn scientific(w: &mut Writer<'_>, v: f64, p: usize, alt: bool, upper: bool) {
 fn general(w: &mut Writer<'_>, v: f64, p: usize, alt: bool, upper: bool) {
     let p = p.max(1);
     let mut sig = [0u8; MAX_PRECISION + 1];
-    let exp = significant(v, p, &mut sig);
+    let exp = significant(v, p, &mut sig, w.style.exact);
     let from = w.n;
     if exp < -4 || exp >= p as i32 {
         w.digits(&sig[..1]);
@@ -309,19 +334,20 @@ fn general(w: &mut Writer<'_>, v: f64, p: usize, alt: bool, upper: bool) {
     }
 }
 
-/// Formats `v` for conversion `conv` (f F e E g G) into `out`; returns
-/// the length and whether the value is negative (the caller adds the
-/// sign and padding).
+/// Formats `v` for conversion `conv` (f F e E g G) into `out` in `style`;
+/// returns the length and whether the value is negative (the caller adds
+/// the sign and padding).
 pub fn format(
     v: f64,
     conv: u8,
     precision: Option<usize>,
     alt: bool,
     out: &mut [u8; MAX_OUT],
+    style: Style,
 ) -> (usize, bool) {
     let negative = v.is_sign_negative() && !v.is_nan();
     let upper = conv.is_ascii_uppercase();
-    let mut w = Writer { out, n: 0 };
+    let mut w = Writer { out, n: 0, style };
     if !v.is_finite() {
         let s: &[u8] = match (v.is_nan(), upper) {
             (true, false) => b"nan",

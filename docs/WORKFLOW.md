@@ -1119,6 +1119,17 @@ numbers, 0x7f.., fail there).
   32-bit kernel32 takes `memcpy`, MSVC's 64-bit division helpers,
   `__chkstk` and `strlen` from it; its no_mangle ones become extra
   exports).
+- A cdecl (`extern "C"`) import on x86 with `import_name_type =
+  "undecorated"` loses one leading underscore (rustc takes it for the C
+  decoration: `__acrt_iob_func` is imported as `_acrt_iob_func`): give
+  such names one more with `link_name` (`ucrt_test`'s `ucrt_imports!`
+  macro adds `_` to every name; `malloc` stays `malloc`). stdcall
+  imports are not affected.
+- One source for an x64 and an x86 test program: the x86 package's
+  `[[bin]] path` points at the other's `main.rs` (`wow64_ucrt_test`
+  builds `user/ucrt_test/src/main.rs`); one source for two DLLs: the
+  second package's `[lib] path` and `build` point at the first's
+  (`user/ucrtbase` is msvcrt's source with `cfg(ucrt)`).
 - `raw-dylib` blocks of a crate built for both: `import_name_type` is
   an error on x64, so they carry `#[cfg_attr(target_arch = "x86",
   link(name = "...", kind = "raw-dylib", import_name_type =

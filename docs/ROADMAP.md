@@ -749,9 +749,8 @@ parity already exposes.
    endpoint over plain HTTP (a test program serving a scripted SSE
    stream, a tool call included), so streaming is tested without TLS.
    Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
-   Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
-   not with gala; scenarios copy the JDK's app-local copy today; gala's
-   own is decided, item OF).
+   Burn exe, PK stage 3); the UCRT is gala's own ucrtbase.dll
+   (ARCHITECTURE "The UCRT").
 2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
    system store (rustls-native-certs through crypt32), which gala opens
    empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
@@ -1117,8 +1116,7 @@ the kernel.
    redistributable). gdi32's GetGlyphOutline (Mesa's
    wglUseFontOutlines) is still GDI_ERROR. What DXVK 3.1.1
    (github.com/doitsujin/dxvk, `dxvk-3.1.1.tar.gz`, x64) needs, from its
-   import tables: the UCRT (`api-ms-win-crt-*`; the JDK's, as for
-   CPython) and gdi32's D3DKMT* functions (19 of them: failing with
+   import tables: the UCRT (`api-ms-win-crt-*`: gala's ucrtbase) and gdi32's D3DKMT* functions (19 of them: failing with
    STATUS_NOT_SUPPORTED, in the ledger: DXVK uses them only for shared
    resources); everything else it imports gala has. d3d11_test needs
    DXBC shaders, and the host has no HLSL compiler (Ubuntu's
@@ -1357,19 +1355,32 @@ need gala's.
    scenario that boots them (where the files come from: the native
    install below, or a directory a local run provides; never
    committed or published).
-   - The UCRT for the installer: gala's own `ucrtbase.dll` and
-     `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
-     msvcrt, test first against Windows (the owner's decision; also
-     the answer to PK's AIChat UCRT question and the JDK copies the
-     scenarios carry today).
+   - The UCRT: gala's own `ucrtbase.dll` (the `api-ms-win-crt-*` sets
+     resolve to it), x64 and x86, msvcrt's source with the UCRT's own
+     functions (ARCHITECTURE "The UCRT"; tests `ucrt_test`,
+     `wow64_ucrt_test`, expected results from Windows' ucrtbase). It
+     covers every UCRT import of ODT's setup.exe and of curl, CPython,
+     `cxx_eh_test` and `pk_install_inno`, whose scenarios use it and no
+     longer copy the JDK's. Next: what the JDK, PowerShell, .NET,
+     PostgreSQL and SQL Server LocalDB still import that gala's lacks
+     (139 functions across their files: the C++ runtime functions
+     Windows' ucrtbase also exports, `_CxxThrowException`,
+     `__CxxFrameHandler3`, `__std_exception_copy`, `__std_type_info_*`,
+     `__RTDynamicCast`; the `_o_` aliases of api-ms-win-crt-private; the
+     `_l` locale variants; `__stdio_common_vfscanf`/`vfwscanf`;
+     `_Strftime` and the `_Get*` time-name functions; float math
+     (`acosf`, `sinhf`, ...); a few `_s` string functions), then those
+     scenarios drop the copied `ucrtbase.dll` and `api-ms-win-crt-*`
+     files. `ucrt_test`/`wow64_ucrt_test` join
+     `user/windows/ci-passing.txt` once CI's windows job shows them
+     passing.
    - Alongside, natively: a pending scenario `office_install` runs the
      Office Deployment Tool's `setup.exe /configure` in gala (its
      ledger ranks the installer's blockers; the guest needs the CDN, so
      on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
      32-bit x86 program (WOW64), and by its import tables against
-     gala's i686 DLLs it does not load yet: it imports the UCRT
-     (`api-ms-win-crt-*`, which gala does not ship yet: gala's own,
-     above) and nine kernel32 functions
+     gala's i686 DLLs it does not load yet: its UCRT imports gala's
+     ucrtbase has (above), but it imports nine kernel32 functions
      gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
      K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
      WerRegisterMemoryBlock/WerUnregisterMemoryBlock,

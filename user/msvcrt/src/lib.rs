@@ -50,6 +50,11 @@ mod va;
 mod wide;
 mod wide_more;
 
+// gala's ucrtbase.dll: the same source with the UCRT's own functions
+// (user/ucrtbase; ARCHITECTURE "The UCRT").
+#[cfg(ucrt)]
+mod ucrt;
+
 // The 32-bit build: the memory routines, 64-bit division helpers and
 // stack probe the compiler calls on x86 (and memcmp/strlen, exported as
 // msvcrt's own) come from ntrt's x86 runtime.
@@ -493,11 +498,15 @@ fn run_exit_handlers() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _cexit() {
+    #[cfg(ucrt)]
+    ucrt::before_exit_handlers();
     run_exit_handlers();
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn exit(code: i32) -> ! {
+    #[cfg(ucrt)]
+    ucrt::before_exit_handlers();
     run_exit_handlers();
     // SAFETY: ends the process.
     unsafe { ExitProcess(code as u32) }

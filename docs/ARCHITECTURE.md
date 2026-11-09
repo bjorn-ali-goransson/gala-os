@@ -2452,7 +2452,7 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | Role | DLLs |
 |---|---|
 | core | ntdll, kernel32, kernelbase (the core API sets' host: Windows' kernelbase export list as forwarders, its own CompareObjectHandles, PathCch, WaitOnAddress and interrupt-time functions, which Windows' kernel32 lacks; "API sets"), psapi (forwarders to kernel32's K32*), normaliz (forwarders to kernel32's IDN functions), wow64 (the 64-bit side of 32-bit processes: "Plan: WOW64") |
-| C runtime | msvcrt (mingw-w64 programs' C runtime) |
+| C runtime | msvcrt (mingw-w64 programs' C runtime), ucrtbase (the Universal C Runtime, msvcrt's source with the UCRT's own functions: "The UCRT") |
 | security, registry, services | advapi32, secur32, security (forwarders to secur32), schannel ("Schannel (TLS)"), authz, userenv |
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
@@ -2902,7 +2902,17 @@ runtime of mingw-w64 programs.
   digits with zeros after them and then half away from zero at the
   requested digit, as msvcrt.dll's conversion does; exponents have a sign
   and at least three digits. inf and nan print as `inf`/`nan` (msvcrt.dll
-  prints `1.#INF00`: a known difference, TODO).
+  prints `1.#INF00`: a known difference, TODO). The UCRT's style
+  (`float::Style`): every digit exact, two exponent digits.
+- **The formatting engine** (`stdio.rs` `format`) takes a `Style`
+  (msvcrt's, or the UCRT's options: which `%s`/`%c` are UTF-16 in a wide
+  function, `%T`, the float style, `%*2d`) and writes to an `Out`: a
+  handle, a byte buffer, or a UTF-16 buffer (`Sink::Wide` decodes the
+  engine's UTF-8 as it comes; `total` counts UTF-16 units), so the wide
+  functions have no length limit. `scan` takes a `ScanStyle` (the secure
+  form's buffer sizes; strings stored as UTF-16).
+- **The heap's header** keeps the size a block was asked with
+  (`heap::requested`, the UCRT's `_msize`).
 - **Math**: sin, pow, floor, fmod, ... come from the `libm` crate; the
   transcendental ones may differ from msvcrt's in the last bit.
 - **Wide functions** (`wide.rs`, `wide_more.rs`): the wide path functions
@@ -2927,6 +2937,92 @@ runtime of mingw-w64 programs.
 - **Other**: `_chmod` maps the absence of `_S_IWRITE` to
   FILE_ATTRIBUTE_READONLY; `_aligned_malloc` keeps the block's start just
   below the aligned pointer.
+
+### The UCRT
+
+`user/ucrtbase` (`ucrt_test`, `wow64_ucrt_test`): gala's own
+`ucrtbase.dll`, the Universal C Runtime that programs built with Visual
+C++ 2015 and later import, directly or through the `api-ms-win-crt-*`
+API sets (which the loader maps to ucrtbase, "API sets"), for x64
+(System32) and x86 (SysWOW64). Written in Rust, not Microsoft's
+redistributable (the owner's decision).
+
+- **One source, two DLLs**: `user/ucrtbase` has no source of its own:
+  its Cargo.toml points its lib at `user/msvcrt/src/lib.rs` and its build
+  script at msvcrt's, which sets `cfg(ucrt)` for this package. That adds
+  `user/msvcrt/src/ucrt/` (and the UCRT's hooks in shared code, such as
+  the exit sequence). So ucrtbase exports msvcrt's functions plus the
+  UCRT's, and has its own state (heap, errno, stdio, atexit table, argv),
+  as the two runtimes do on Windows: a program that mixes them (a
+  mingw DLL in an MSVC program) has two separate runtimes. What both
+  need is written once, in msvcrt's modules; a UCRT-only helper in them
+  carries `#[cfg_attr(not(ucrt), allow(dead_code))]`.
+- **Start-up** (`ucrt/mod.rs`): what Visual C++'s static start-up code
+  calls: `_configure_narrow_argv`/`_configure_wide_argv` and
+  `_initialize_*_environment` (msvcrt's `__getmainargs`/`__wgetmainargs`
+  build the arrays; wildcard expansion, mode 2, is not done and is
+  recorded), `__p___argc`/`__p___argv`/`__p___wargv`/`__p__environ`/
+  `__p__wenviron`, `_get_narrow/wide_winmain_command_line` (after the
+  program name, quotes toggling, then blanks), `_initterm_e` (stops at
+  the first nonzero result), onexit tables (`_initialize_onexit_table`
+  keeps a table that already has an allocation; entries are plain
+  pointers, not encoded as on Windows; `_execute_onexit_table` takes the
+  table first, runs it last to first and frees it), `_crt_atexit` (the
+  runtime's atexit table), `quick_exit`, `_set_app_type`, `_set_fmode`,
+  `_set_new_mode`, `_seh_filter_exe` (msvcrt's `_XcptFilter`: no signal
+  handlers, so the search goes on). `exit` and `_cexit` first call the
+  `_register_thread_local_exe_atexit_callback` callback (thread_local
+  destructors, with DLL_PROCESS_DETACH), then the atexit functions.
+- **Invalid parameters**: the `_s` functions and the `__stdio_common_*`
+  checks call `invalid_parameter()`: the thread's handler
+  (`_set_thread_local_invalid_parameter_handler`, a TLS slot), else the
+  process's (`_set_invalid_parameter_handler`), with NULL expression,
+  function and file, line 0, then return the documented error; with no
+  handler the process ends with STATUS_STACK_BUFFER_OVERRUN (0xc0000409,
+  Windows' fast-fail status) after a line on stderr naming the cause.
+- **printf and scanf** (`ucrt/stdio.rs`): the `__stdio_common_v*`
+  functions with their option flags: legacy termination (1), standard
+  snprintf (2), neither (-2 when it does not fit); legacy wide specifiers
+  (4: `%s` in a wide function is UTF-16; without it, narrow as the C
+  standard says); three-digit exponents (16). The UCRT prints every digit
+  exactly (`%.30f`) and two exponent digits; ties round half away from
+  zero, as the UCRT does without `_CRT_INTERNAL_PRINTF_STANDARD_ROUNDING`
+  (32, recorded). The `_s` forms: `_TRUNCATE` keeps what fits and returns
+  -1; `sprintf_s` with too small a buffer is an invalid parameter
+  (ERANGE, emptied). scanf's secure flag (1) reads a buffer size after
+  each `%s`/`%c`/`%[` pointer; the count limits the input. Legacy msvcrt
+  compatibility (8: `1.#INF`, `%F`/`%N` sizes) and `%a` are recorded,
+  not done.
+- **Streams**: `__acrt_iob_func` gives msvcrt's `_iob` slots;
+  `_fseeki64`/`_ftelli64`, `_fsopen`/`_wfsopen` (share modes not
+  applied), `fopen_s` and friends, `_get_stream_buffer_pointers` (the
+  FILE's fields; `_cnt` stays 0), `_chsize_s`, `_sopen_s`,
+  `_findfirst64i32`. `_lock_file` does nothing: gala's streams are
+  unbuffered and write each call with one WriteFile. No text-mode CRLF
+  translation (as msvcrt here).
+- **Strings, locale, math, time** (`string.rs`, `locale.rs`, `math.rs`,
+  `time.rs`, `compat.rs`): the `_s` string and number functions, the
+  restartable multibyte functions (UTF-8; a character beyond the BMP
+  does not fit one wchar_t: U+FFFD, recorded); one locale, "C", with
+  UTF-8 as the multibyte code page (`_create_locale` returns it and
+  records any other name; `_configthreadlocale` is kept per process);
+  `_dclass` and the classification functions with the UCRT's FP_*
+  values; `_controlfp_s`, `_clearfp`/`_statusfp` (MXCSR, and on x86 the
+  x87 status word); on x86 the `_libm_sse2_*_precise` functions that
+  SSE2 code calls (the argument in xmm0, xmm1 for pow's second, the
+  result in xmm0: naked shims around cdecl Rust); local time is UTC.
+- **Limits**: errno is per process (msvcrt's), as are the rand state
+  and strtok's; `setlocale` answers "C" for any name; console I/O
+  (`_getwch`, `_putwch`) is the standard handles' bytes and `_kbhit`
+  reports no key (recorded); the C++ runtime functions that Windows'
+  ucrtbase also exports (`_CxxThrowException`, `__CxxFrameHandler3`,
+  `__std_exception_copy`, ...) and the `_o_` aliases are not there yet,
+  nor the `_l` locale variants (PostgreSQL's), so the JDK, PowerShell,
+  .NET, PostgreSQL and SQL Server LocalDB scenarios still ship
+  Microsoft's copy (ROADMAP OF).
+- **Who uses it**: setup.exe of the Office Deployment Tool (x86; all its
+  UCRT imports), curl (`curl`, `curl_schannel`), CPython (`python_*`),
+  `cxx_eh_test` (with Microsoft's vcruntime140), `pk_install_inno`.
 
 ### advapi32
 
@@ -7233,6 +7329,7 @@ Win32 Structured Exception Handling", MSJ 1997).
 | The 32-bit ntdll (SysWOW64): the loader, the stubs, x86 SEH, the APC dispatcher | `user/testntdll` built for i686 (`x86.rs`, `seh_x86.rs`; `x64.rs` the 64-bit one's parts); the kernel's `nt/ntdll.rs` (`get32`), `nt/wow64.rs` (`through_ntdll32`, `exception_stack`), `nt/process.rs` (`deliver_to_user`) |
 | The 32-bit kernel32 (SysWOW64) | `user/kernel32` built for i686 (`x86.rs`; `x64.rs` the 64-bit one's parts) |
 | The 32-bit msvcrt (SysWOW64) | `user/msvcrt` built for i686 (`x86.rs`, `va.rs`; `x64.rs` the 64-bit one's parts) |
+| The 32-bit UCRT (SysWOW64) | `user/ucrtbase` built for i686 ("The UCRT"; its `_libm_sse2_*` shims in `ucrt/math.rs`) |
 | The 32-bit advapi32 and bcryptprimitives (SysWOW64) | `user/advapi32` built for i686 (its typed structures in `layout.rs`), `user/bcryptprimitives` |
 | The 32-bit user32 and gdi32 (SysWOW64) | `user/user32`, `user/gdi32`, `user/gala_heap` built for i686; their services' rows in `user/wow64/src/generic.rs` |
 | The 32-bit comctl32, oleaut32, ole32, shell32, shlwapi, winhttp, ws2_32 and the rest of what an x86 Inno installer loads | those crates built for i686 (`USER_DLLS_X86`); typed structures in `user/comctl32/src/layout.rs`, `user/ws2_32/src/layout.rs` |
@@ -7243,7 +7340,7 @@ Win32 Structured Exception Handling", MSJ 1997).
 | 32-bit threads: NtCreateThread's WOW64 path, the 64-bit stack, freeing at exit, the 32-bit stack's guard page | `nt/syscalls.rs` (`create_wow64_thread`), `nt/wow64.rs` (`reserve_stack64`, `release_thread`), `nt/vm.rs` (`guard_hit`), `nt/thread.rs` (`current_stack32`, `Parked::compat`) |
 | The x86 IO_STATUS_BLOCK | `Process::write_iosb` |
 | The 32-bit runtime of test programs | `user/ntrt/src/x86.rs` (i686-pc-windows-msvc; `syscall`, `nr`) |
-| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
+| Tests | `user/wow64_test` (32-bit; scenarios `wow64_test`, `wow64_crash`), `user/wow64_thread_test`, `win32_misc_test`'s `wow64`, `user/wow64_import_test` (with `user/testdll32`), `user/wow64_seh_test` (`wow64_seh_test`, `wow64_seh_crash`), `user/wow64_fs_test`, `user/wow64_k32_test`, `user/wow64_c_test` (C, clang-built), `user/wow64_crt_test` (C on msvcrt, mingw-built), `user/wow64_adv_test` (advapi32, the registry's 32-bit view), `user/wow64_ucrt_test` (the UCRT: `user/ucrt_test` built for x86), `user/wow64_gui_test` (C on user32/gdi32, mingw-built: a window, its messages, extra bytes, GetClassInfoW, class longs, GetObjectW, painting), scenario `wow64_inno` (Inno Setup 6.5.4's x86 installer), `user/wow64_sock_test` (C on ws2_32: TCP, UDP, select, getaddrinfo) |
 
 ### Decisions
 

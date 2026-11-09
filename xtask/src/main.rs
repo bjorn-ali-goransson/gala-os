@@ -550,6 +550,9 @@ const USER_DLLS: &[Dll] = &[
     // gala's msvcrt.dll (the C runtime of mingw-w64 programs), advapi32.dll
     // and user32.dll (only what Nginx imports).
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt.dll" },
+    // gala's ucrtbase.dll (the Universal C Runtime; msvcrt's source with
+    // the UCRT's own functions: ARCHITECTURE "The UCRT").
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase.dll" },
     Dll { package: "advapi32", file: "advapi32.dll", exported_as: "testadvapi32.dll" },
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32.dll" },
     // gala's winmm.dll (timer resolution; Go and the JVM load it).
@@ -665,6 +668,8 @@ const USER_DLLS_X86: &[Dll] = &[
     Dll { package: "kernelbase", file: "kernelbase.dll", exported_as: "testkernelbase32.dll" },
     // The 32-bit msvcrt: gala's msvcrt built for i686.
     Dll { package: "msvcrt", file: "msvcrt.dll", exported_as: "testmsvcrt32.dll" },
+    // The 32-bit ucrtbase: gala's UCRT built for i686.
+    Dll { package: "ucrtbase", file: "ucrtbase.dll", exported_as: "testucrtbase32.dll" },
     // The 32-bit user32 and gdi32 (WOW64 stage 4; user32 loads gdi32).
     Dll { package: "user32", file: "user32.dll", exported_as: "testuser32_32.dll" },
     Dll { package: "gdi32", file: "gdi32.dll", exported_as: "testgdi32_32.dll" },
@@ -1437,9 +1442,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("pk_install_inno", "crypt32.dll", "Windows/System32"),
     ("pk_install_inno", "msimg32.dll", "Windows/System32"),
     ("pk_install_inno", "msctf.dll", "Windows/System32"),
-    // The UCRT (ucrtbase.dll ships with Windows; gala has none of its own:
-    // Microsoft's redistributable copy from the JDK, as other scenarios).
-    ("pk_install_inno", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    // The UCRT: gala's ucrtbase.dll, in System32 as on Windows.
+    ("pk_install_inno", "ucrtbase.dll", "Windows/System32"),
     // pk_install_https: `gala install` downloads over winhttp from
     // schannel_test's Nginx (MODULE_SETS), which serves the package; the
     // machine root store holds the public CA bundle beside the test CA.
@@ -1900,9 +1904,9 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "winmm.dll", "Windows/System32"),
     ("dotnet", "msvcrt.dll", "Windows/System32"),
     // P1 step 6: the embeddable CPython (PREBUILT `python`) in C:\python,
-    // gala's DLLs it imports, the JDK's UCRT beside it.
+    // gala's DLLs it imports (its UCRT gala's ucrtbase).
     ("python_hello", "target/prebuilt/python/", "python"),
-    ("python_hello", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_hello", "ucrtbase.dll", "Windows/System32"),
     ("python_hello", "ntdll.dll", "Windows/System32"),
     ("python_hello", "kernel32.dll", "Windows/System32"),
     ("python_hello", "advapi32.dll", "Windows/System32"),
@@ -1924,7 +1928,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     // P1 step 6: pip and venv on the full CPython layout (PREBUILT
     // `python-full`) in C:\python, as python_hello's.
     ("python_pip", "target/prebuilt/python-full/tools/", "python"),
-    ("python_pip", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "python"),
+    ("python_pip", "ucrtbase.dll", "Windows/System32"),
     ("python_pip", "ntdll.dll", "Windows/System32"),
     ("python_pip", "kernel32.dll", "Windows/System32"),
     ("python_pip", "advapi32.dll", "Windows/System32"),
@@ -2247,12 +2251,12 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/api-ms-win-crt-utility-l1-1-0.dll", "dotnet"),
     ("dotnet", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "dotnet"),
     // C++ exceptions with Microsoft's C++ runtime (the JDK's
-    // redistributable copies, app-local).
+    // redistributable vcruntime140, app-local) on gala's UCRT.
     ("cxx_eh_test", "ntdll.dll", "Windows/System32"),
     ("cxx_eh_test", "kernel32.dll", "Windows/System32"),
     ("cxx_eh_test", "user/bin/cxx_eh_test.exe", "gala"),
     ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/vcruntime140.dll", "gala"),
-    ("cxx_eh_test", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "gala"),
+    ("cxx_eh_test", "ucrtbase.dll", "Windows/System32"),
     ("java_hello", "ntdll.dll", "Windows/System32"),
     ("java_hello", "kernel32.dll", "Windows/System32"),
     ("java_hello", "advapi32.dll", "Windows/System32"),
@@ -2419,11 +2423,11 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("schannel_test", "user/nginx/temp/keep-temp.txt", "nginx/temp"),
     // curl for Windows, run by busybox sh (user/curl/curl.sh) against
     // schannel_test's Nginx (MODULE_SETS): curl.se's build (PREBUILT
-    // curl; the UCRT is the JDK's redistributable ucrtbase.dll, in
-    // System32 as on Windows) and Git for Windows' Schannel curl (PREBUILT
+    // curl, on gala's UCRT: ucrtbase.dll in System32, as on Windows) and
+    // Git for Windows' Schannel curl (PREBUILT
     // gitcurl), each as C:\curl.
     ("curl", "target/prebuilt/curl/curl-8.23.0_8-win64-mingw/bin/curl.exe", "curl"),
-    ("curl", "target/prebuilt/jdk/jdk-21.0.5+11/bin/ucrtbase.dll", "Windows/System32"),
+    ("curl", "ucrtbase.dll", "Windows/System32"),
     ("curl", "normaliz.dll", "Windows/System32"),
     ("curl_common", "iphlpapi.dll", "Windows/System32"),
     ("curl_schannel", "target/prebuilt/gitcurl/mingw64/bin/", "curl"),
@@ -2544,6 +2548,16 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_adv_test", "x86/kernel32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/advapi32.dll", "Windows/SysWOW64"),
     ("wow64_adv_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    // gala's UCRT, called directly (user/ucrt_test), x64 and x86.
+    ("ucrt_test", "ntdll.dll", "Windows/System32"),
+    ("ucrt_test", "kernel32.dll", "Windows/System32"),
+    ("ucrt_test", "ucrtbase.dll", "Windows/System32"),
+    ("ucrt_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "wow64.dll", "Windows/System32"),
+    ("wow64_ucrt_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/ucrtbase.dll", "Windows/SysWOW64"),
+    ("wow64_ucrt_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
 ];
 /// Go programs in `user/<name>/`, built for windows/amd64 with this Go
 /// toolchain (when `go` is installed; otherwise the checked-in binary in
@@ -2681,6 +2695,7 @@ const USER_PROGRAMS: &[&str] = &[
     "kernel32_file_test",
     "pipe_test",
     "lock_test",
+    "ucrt_test",
 ];
 
 /// 32-bit test programs (`user/<name>`, built for USER_TARGET_X86, ntrt's
@@ -2693,6 +2708,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_fs_test",
     "wow64_k32_test",
     "wow64_adv_test",
+    "wow64_ucrt_test",
 ];
 
 /// Where the build puts test program `program` (x64 or x86).
@@ -5461,6 +5477,31 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=kernel32_misc_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["kernel32_misc_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // gala's UCRT (ucrtbase.dll) called directly: start-up, printf and
+        // scanf with the UCRT's options, streams, strings, locale, math,
+        // the exit sequence (user/ucrt_test).
+        name: "ucrt_test",
+        cmdline: "qemu_exit run=ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "ucrt_test: ok",
+            "ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
+    },
+    Scenario {
+        // The same through WOW64: the 32-bit ucrtbase (user/ucrt_test
+        // built for x86), its `_libm_sse2_*` functions included.
+        name: "wow64_ucrt_test",
+        cmdline: "qemu_exit run=wow64_ucrt_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &[
+            "wow64_ucrt_test: ok",
+            "wow64_ucrt_test: atexit ran in order",
+            "exited with status 0x00000000",
+        ],
     },
     Scenario {
         name: "prng_test",
@@ -9001,6 +9042,7 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_seh_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_fs_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_k32_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_ucrt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_gui_test", "32-bit code (WOW64): its segments are the kernel's GDT"),

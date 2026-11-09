@@ -10,7 +10,15 @@
 //! there and exported as they are, the others are its assembly); the
 //! variadic functions are naked functions (`x86.rs`), exported as they
 //! are.
+//!
+//! The same source builds gala's ucrtbase.dll (user/ucrtbase points its
+//! lib and build script here): for that package this sets `cfg(ucrt)`,
+//! which adds the UCRT's own functions (`src/ucrt/`).
 fn main() {
+    println!("cargo::rustc-check-cfg=cfg(ucrt)");
+    if std::env::var("CARGO_PKG_NAME").as_deref() == Ok("ucrtbase") {
+        println!("cargo:rustc-cfg=ucrt");
+    }
     match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("x86") => {
             for name in ["memcpy", "memmove", "memset"] {
