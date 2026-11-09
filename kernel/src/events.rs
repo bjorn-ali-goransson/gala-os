@@ -38,7 +38,8 @@ pub enum Category {
     /// an HWND asked for from another session, and each key the desktop
     /// delivers (`key`: its window and owner).
     Window = 2048,
-    /// File opens: the name, the handle or the failing status.
+    /// File opens: the name, the handle or the failing status; registry
+    /// key opens (`key`): the name and the status.
     File = 4096,
     /// Interprocess I/O: pipes (create, connect, write and read with byte
     /// offsets, disconnect, close) and I/O completion ports (post and

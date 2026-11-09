@@ -94,6 +94,15 @@
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{00021401-0000-0000-C000-000000000046}\InprocServer32]
 @=expand:%SystemRoot%\System32\shell32.dll
 "ThreadingModel"=sz:Both
+; DOMDocument60 (MSXML 6, msxml6.h's CLSID_DOMDocument60; the Office
+; Deployment Tool's setup.exe reads its configuration with it).
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}]
+@=sz:XML DOM Document 6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.DOMDocument.6.0
+[\Registry\Machine\SOFTWARE\Classes\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
+"ThreadingModel"=sz:Both
 ; The 32-bit view (WOW64, nt::regview): what 32-bit programs read under
 ; HKLM\SOFTWARE. Windows keeps the version there too, and gives them the
 ; (x86) directories as ProgramFilesDir and CommonFilesDir.
@@ -136,6 +145,15 @@
 @=sz:Shortcut
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{00021401-0000-0000-C000-000000000046}\InprocServer32]
 @=expand:%SystemRoot%\System32\shell32.dll
+"ThreadingModel"=sz:Both
+; DOMDocument60 (MSXML 6, msxml6.h's CLSID_DOMDocument60; the Office
+; Deployment Tool's setup.exe reads its configuration with it).
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}]
+@=sz:XML DOM Document 6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\ProgID]
+@=sz:Msxml2.DOMDocument.6.0
+[\Registry\Machine\SOFTWARE\Classes\WOW6432Node\CLSID\{88D96A05-F192-11D4-A65F-0040963251E5}\InprocServer32]
+@=expand:%SystemRoot%\System32\msxml6.dll
 "ThreadingModel"=sz:Both
 [\Registry\Machine\SOFTWARE\Classes\WOW6432Node\Interface]
 

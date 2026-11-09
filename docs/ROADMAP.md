@@ -171,7 +171,7 @@ has a section under "Open items".
 | Threads, suspension, context, TEB/PEB/KUSER_SHARED_DATA, process startup | `thread_test`, `threadinfo_test`, `context_test`, `kuser_test`, `peb_test`, `startup_test` |
 | Sections, image sections, memory-mapped files | `section_test`, `image_test`, `filemap_test` |
 | Files, directories, async I/O, APCs, IOCP, file locks, change notification | `file_test`, `dir_test`, `async_test`, `apc_test`, `ioapc_test`, `iocp_test`, `lock_test`, `dirchange_test` |
-| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `fpu_test`, `safepoint_test` |
+| User-mode exceptions, SEH and unwinding, C++ exceptions, x87/SSE | `exception_test`, `seh_test`, `cxx_eh_test`, `cxx_throw`, `fpu_test`, `safepoint_test` |
 | Loader: imports, dynamic loading, static TLS, API sets | `import_test`, `loader_test`, `tls_test`, `missing_import_test` |
 | System and process information | `sysinfo_test` |
 | Pipes, child processes with redirected stdio | `pipe_test`, `process_test` |
@@ -193,6 +193,7 @@ has a section under "Open items".
 | WOW | 32-bit x86 programs (WOW64) | done (follow-ups listed) | stages 1-2 done: `wow64_test`, `wow64_thread_test`, `wow64_crash`, `win32_misc_test`'s WOW64 answers; stage 3's 32-bit ntdll, exceptions, APCs, redirection and environment: `wow64_import_test`, `wow64_seh_test`, `wow64_seh_crash`, `wow64_fs_test`; the 32-bit kernel32: `wow64_k32_test`, `wow64_c_test`; the 32-bit msvcrt: `wow64_crt_test`; the 32-bit advapi32 and the registry's 32-bit view: `wow64_adv_test`; the 32-bit crypt32 and ncrypt: `wow64_cert_test`; msi: `wow64_msi_test`; stage 4's 32-bit user32 and gdi32: `wow64_gui_test`; an x86 Inno Setup installer: `wow64_inno`, under `gala install`: `pk_install_inno32`; ARCHITECTURE "Plan: WOW64" |
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
+| UAC | User Account Control: the consent prompt | planned | an administrator account (the boot user or a second one) logs on with a filtered token linked to its full one (TokenLinkedToken, elevation types 2/3); `runas`, `requireAdministrator` manifests and COM elevation (`Elevation:Administrator!new:`) go to an AppInfo-like service that shows a consent prompt (or a credential prompt for a standard user) on a secure desktop the user's programs cannot reach (with SH step 3's trusted process) and creates the process with the full token; CreateProcess's ERROR_ELEVATION_REQUIRED; UAC virtualization of Program Files and HKLM for legacy programs; a scenario that drives the prompt through input and screen checks. Today an elevated caller's `runas` runs without a prompt and everyone else's is declined as a cancelled prompt (SECURITY "Elevation") |
 | D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
@@ -1442,30 +1443,64 @@ need gala's.
      error, so the scenario runs it as SYSTEM (`as=system`, an
      administrator, as Configuration Manager and Intune run ODT), elevated
      (the `, elevated token` start lines), which asks for no elevation.
-     Where the run ends now: urlmon is asked for and missing (`urlmon.dll`
-     missing dll, survived), two WinHttpSetOption options are recorded
-     unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
+     Its configuration it reads with MSXML 6 (done: gala's msxml6.dll,
+     x64 and x86, DOMDocument60 registered in both registry views;
+     `msxml_test`, `wow64_msxml_test`; ARCHITECTURE "msxml6"): it loads
+     `C:\gala\config.xml` (load, async left on: loaded before load
+     returns, recorded), then documentElement, selectSingleNode("Add"),
+     selectNodes("Product", "Language", "ExcludeApp", "Remove",
+     "RemoveMSI", "Display", "Logging", "Updates", "Property", "@ID"),
+     the node lists' length and item, getAttribute (SourcePath, Version,
+     Channel, OfficeClientEdition, Level, AcceptEULA, Path, Enabled, ...),
+     attributes, nodeType and nodeValue: no DOM method it calls is
+     missing. Before that, urlmon is asked for and missing
+     (`urlmon.dll` missing dll, survived), two WinHttpSetOption options
+     are recorded unsupported (77 WINHTTP_OPTION_AUTOLOGON_POLICY, 63
      WINHTTP_OPTION_DISABLE_FEATURE), no TCP connection is made yet
-     (`events=net` shows none), then setup.exe asks COM for
-     {88D96A05-F192-11D4-A65F-0040963251E5} (MSXML 6's DOMDocument60,
-     msxml6.dll: not registered, `ole32.dll!CoGetClassObject(class not
-     registered)`) and, reporting that failure, delay-loads gdiplus.dll,
-     which is missing (`gdiplus.dll` missing dll): the delay-load
-     exception 0xc06d007e is not caught and both copies exit with it.
+     (`events=net` shows none). After the configuration it asks kernel32
+     for GetUserDefaultGeoName (done: "US", GetUserGeoID's GEO_ISO2;
+     `office_api_test`, `wow64_office_api_test`) and loads wldp.dll to
+     check for S mode (done: gala's wldp.dll, x64 and x86, unlocked, no
+     policy in force; the same tests), looks for an Office 2013
+     Click-to-Run (`C:\Program Files\Microsoft Office 15\ClientX64\...`,
+     `HKLM\SOFTWARE\Microsoft\Office\15.0\ClickToRun\Configuration`:
+     absent, as on a clean Windows) and throws a C++ exception over the
+     absent key (the crash report decodes it: `shared::Exception`, a
+     std::exception, its message "Cannot open Registry Key"), which its
+     own catch takes. Done: that catch works (the 32-bit ntdll links a
+     registration of its own around each handler call, as Windows; before,
+     an earlier catch had linked an unwound frame back and the
+     registration list looped on itself, so this throw found no handler:
+     the crash report's SEH list showed it; ARCHITECTURE "WOW64",
+     `wow64_seh_test`). Where the run ends now: the elevated copy (pid 12)
+     delay-loads advapi32's OpenSCManagerW (the service control manager:
+     gala's advapi32 has only ledger stubs for the service functions,
+     which GetProcAddress does not return), the delay-load helper raises
+     0xc06d007f (crash report: `delay load of ADVAPI32.dll!OpenSCManagerW`;
+     ledger `advapi32.dll!OpenSCManagerW` missing export) and both copies
+     end with it. ODT has written no log yet (`dump=C:/gala/odtlog` finds
+     no directory: it creates its log later).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: MSXML 6 (DOMDocument60 and
-     the XML it parses: the configuration and the CDN's cab manifests),
-     gdiplus (setup.exe's error and progress UI), HKCU from the caller's
-     token, the TLS handshake from 32-bit (schannel.dll has no i686 build:
-     secur32's x86 loads it on first use), winhttp's AUTOLOGON_POLICY and
-     DISABLE_FEATURE, then CryptQueryObject's embedded PKCS #7 and
-     wintrust's WinVerifyTrust (the signature check), wininet, urlmon,
-     xmllite, webservices, iphlpapi, setupapi, cabinet, credui; the
-     service control manager (advapi32's service calls are stubs); a few
-     shlwapi, user32, ole32 and shell32 functions; FormatMessage's system
-     text for ERROR_CANCELLED (1223, recorded on the declined path).
+     Next, in the order the run reaches them: the service control manager
+     for both widths (OpenSCManagerW, then what setup.exe asks of it:
+     presumably OpenServiceW for Click-to-Run's ClickToRunSvc,
+     ERROR_SERVICE_DOES_NOT_EXIST on a machine without Office; test first
+     with Wine's dlls/advapi32/tests/service.c expectations), then what the
+     run reaches after it (its log in `target/failed/office_install.dump/`
+     once it writes one); gdiplus (setup.exe's error and progress UI),
+     HKCU from the caller's token, the TLS handshake from 32-bit
+     (schannel.dll has no i686 build: secur32's x86 loads it on first
+     use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
+     the XML it downloads (the CDN's cab manifests: more of the DOM as
+     the run reaches it; load of URLs is recorded unsupported), then
+     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
+     (the signature check), wininet, urlmon, xmllite, webservices,
+     iphlpapi, setupapi, cabinet, credui; a few shlwapi, user32, ole32
+     and shell32 functions; FormatMessage's system text for
+     ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
+     dispatcher's nested exceptions and collided unwinds.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
    sign-in through the Web Account Manager, notifications.
 3. The Microsoft 365 apps: Click-to-Run's service and virtualization,

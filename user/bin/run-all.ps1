@@ -101,6 +101,7 @@ $expected = @{
     "busybox"             = 3           # 0x3: its command line here ends `exit 3`
     "busybox_script"      = 4           # 0x4: script.sh ends `exit 4`
     "crash"               = 3221225477  # 0xc0000005: it crashes on purpose
+    "cxx_throw"           = 3765269347  # 0xe06d7363: a C++ throw nothing catches, on purpose
     "unimplemented_test"  = 3           # 0x3 is Windows' own answer (gala: 0xc0000002)
     "missing_import_test" = 3221225785  # 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND, the point of it
     # gala's own programs (user/cmd, user/conhost, user/gala), not tests:

@@ -2471,8 +2471,8 @@ runs on Windows, never shadows the system's DLLs). Exceptions: crate
 | crypto | bcrypt, bcryptprimitives, ncrypt, crypt32 |
 | networking | ws2_32 ("ws2_32.dll"), mswsock (forwarders to ws2_32), wsock32 (Winsock 1.1: forwarders to ws2_32 with the standard ordinals), iphlpapi, winhttp, wininet, urlmon, dhcpcsvc, netapi32, mpr, wldap32 |
 | UI | user32, gdi32, comctl32, comdlg32, uxtheme, msimg32, riched20, msftedit, oleacc, uiautomationcore ("Windows on the screen", "UI Automation"), msctf (input scopes, "Other DLLs") |
-| COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite |
-| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs") |
+| COM, shell | ole32, oleaut32, rpcrt4, shell32, shlwapi, xmllite, msxml6 |
+| other | winmm, powrprof, version, dbghelp, pdh, setupapi, odbc32, xolehlp, webservices, wintrust, clusapi, resutils, msi (Windows Installer's queries: nothing installed, "Other DLLs"), wldp (Windows Lockdown Policy: unlocked, no policy in force) |
 
 Programs in System32 beside the DLLs: `user/conhost` (conhost.exe,
 "Consoles") and `user/cmd` (cmd.exe, "Other DLLs and programs").
@@ -2777,7 +2777,9 @@ ntdll imports.
   date format lists (EnumTimeFormatsEx, EnumDateFormatsExEx),
   FindNLSStringEx (prefix, suffix, first and last occurrence, compared
   code unit by code unit with simple case folding; linguistic
-  equivalences are recorded).
+  equivalences are recorded). One geographic region, the United States
+  (GetUserGeoID 244, GetGeoInfoA/W's values, GetUserDefaultGeoName
+  "US": its GEO_ISO2).
 - **Time**: Sleep, tick counts, the performance counter, UTC local time.
   The time zone is UTC, named "UTC" (its time-zone key name) rather than
   "Coordinated Universal Time": a deliberate difference, because programs
@@ -3508,6 +3510,83 @@ What CoreCLR imports, and what UI Automation needs (`com_test`,
   recorded. Type libraries are not registered. Its exports have
   Windows' ordinals (build.rs, from Wine's spec); Get/Set/CreateErrorInfo
   forward to ole32.
+
+### msxml6 (MSXML 6's DOM)
+
+What the Office Deployment Tool's setup.exe reads its configuration with
+(`msxml_test`, `wow64_msxml_test`; ROADMAP OF). `user/msxml6`, built for
+x64 and x86.
+
+- **Registration**: DOMDocument60 ({88D96A05-F192-11D4-A65F-0040963251E5},
+  ProgID Msxml2.DOMDocument.6.0) under `HKLM\SOFTWARE\Classes\CLSID`
+  and `Classes\WOW6432Node\CLSID` (the registry seed), InprocServer32
+  `%SystemRoot%\System32\msxml6.dll` (SysWOW64's for 32-bit programs,
+  through the file system redirector); ole32's CoCreateInstance loads it
+  and calls DllGetClassObject. FreeThreadedDOMDocument60 and the older
+  MSXML classes are not registered (CoGetClassObject records the class).
+- **Objects** (`com.rs`): the document owns its tree, an arena of nodes
+  (`dom.rs`; index 0 the document node). A node object handed out is a
+  wrapper (vtable for its node type, references, document, index) that
+  holds a reference on the document, so the tree lives while anything in
+  it is held; asking for the document node gives the document object.
+  Two requests for one node give two objects (MSXML gives one). Node
+  lists are live for childNodes and fixed for selections
+  (IXMLDOMSelection too); attribute maps are live; a parse error object is
+  a copy of the document's last error. IDispatch's GetTypeInfoCount is
+  0; no type information, GetIDsOfNames or Invoke (E_NOTIMPL, recorded).
+  Documents are rental: one thread at a time, no locking.
+- **Loading**: loadXML parses the string; load takes a VT_BSTR path or
+  `file:` URL, reads the file whole (64 MiB at most) and parses it before
+  returning, whatever `async` says (async load of local files is
+  synchronous: recorded as "other"); URLs of other schemes and IStreams
+  are not supported (recorded; S_FALSE, E_NOTIMPL). The reader is
+  `gala_xml` (galapkg's MSIX reader): no DTDs (MSXML 6's ProhibitDTD;
+  setting it FALSE is recorded and changes nothing), the encoding
+  declaration is not read (UTF-8 or a BOM). White space only text is
+  dropped unless preserveWhiteSpace. A failed parse leaves an empty
+  document, S_FALSE and VARIANT_FALSE, and a parse error: the line,
+  column, the line's text, the reason (gala's words), and an errorCode
+  of XML_E_MISSINGROOT (no root), XML_E_ENDTAGMISMATCH (an end tag that
+  does not match) or XML_E_INVALIDATROOTLEVEL for every other error
+  (MSXML has a code per error); a file not found is
+  INET_E_OBJECT_NOT_FOUND. With no error, its numbers are S_FALSE and 0.
+- **Reading the tree**: names (nodeName, baseName, prefix, namespaceURI,
+  with S_FALSE and NULL where there is none), nodeType and its string,
+  nodeValue, parent, children, siblings, ownerDocument, attributes
+  (getNamedItem, getQualifiedItem, item, nextNode), text (an element's
+  text nodes and CDATA in order, trimmed at the ends unless
+  preserveWhiteSpace), xml (empty elements as `<a/>`, the document's
+  top-level nodes ending with CR LF), getAttribute (S_FALSE and VT_NULL
+  when absent), getAttributeNode, character data and processing
+  instruction getters; the properties async, validateOnParse,
+  resolveExternals (turning it on is recorded), preserveWhiteSpace,
+  readyState (4), url.
+- **Properties** (setProperty/getProperty): SelectionLanguage is XPath
+  (anything else E_FAIL, recorded), SelectionNamespaces is kept as text
+  and parsed into prefix bindings (a text that does not parse is kept,
+  E_FAIL, and binds nothing, as Wine's tests show Windows doing); the
+  other MSXML 6 properties (ProhibitDTD, ServerHTTPRequest,
+  AllowDocumentFunction, MaxElementDepth, ...) are kept with their
+  defaults; an unknown name is E_FAIL (recorded).
+- **XPath** (`xpath.rs`): XPath 1.0 whole but the namespace axis, id()
+  and lang() (E_FAIL, recorded): every other axis, node tests, predicates
+  (a number is a position), unions, filter expressions, the operators
+  with XPath's conversions and comparison rules, the core function
+  library. Prefixes resolve through SelectionNamespaces only (an
+  undeclared one is E_FAIL, as in MSXML 6); an unprefixed name is in no
+  namespace; namespace declarations are not attributes. Node-sets are in
+  document order (attributes after their element). selectNodes and
+  selectSingleNode fail with E_FAIL on an expression that is not a
+  node-set. Numbers print as Rust's shortest round-trip form (XPath
+  wants no exponent: values beyond 1e21 differ).
+- **Not implemented** (E_NOTIMPL, each recorded as
+  `msxml6.dll!<interface>::<method>`, "not implemented"): changing the
+  tree (create*, appendChild, insertBefore, removeChild, replaceChild,
+  setAttribute, put_text, put_nodeValue, cloneNode, importNode, the
+  character data editors), save, getElementsByTagName, transforms, schemas
+  and validation, typed values, the event handlers, abort, nodeFromID,
+  the selection's own methods and the enumerators (`get__newEnum`).
+  Implement them when a program's run reaches one.
 
 ### Other DLLs and programs
 
@@ -7233,11 +7312,18 @@ file's buffer is reserved fallibly (`try_reserve_exact`, an
 package's as `<package>/<file>`), the block, expected and actual
 values, and for XML the element and line.
 
-**XML** (`xml.rs`, gala's own): elements, attributes, text, CDATA,
-comments, PIs, the predefined entities and character references,
-namespaces, UTF-8 (with or without BOM) and UTF-16 with BOM. DTDs are
-refused (no entity expansion), as are undeclared prefixes, duplicate
-attributes and nesting beyond 256; iterative, so depth costs no stack.
+**XML** (`user/gala_xml`, gala's own, shared with msxml6.dll; host
+tests `cargo test -p gala_xml`): elements, attributes, text, CDATA,
+comments, PIs (the XML declaration among them), the predefined entities
+and character references, namespaces (declarations kept as attributes
+in the xmlns namespace, as the DOM has them), UTF-8 (with or without
+BOM) and UTF-16 with BOM, line ends normalized to LF; each element keeps
+its content in document order beside its child elements and
+concatenated text. DTDs are refused (no entity expansion), as are
+undeclared prefixes, duplicate attributes and nesting beyond 256;
+errors carry the line and column; iterative, so depth costs no stack.
+Its allocations are infallible (`alloc`'s String and Vec: the input's
+size bounds them).
 **ZIP64** (`zip.rs`): the zip64 end record, locator and extra field
 (MSIX packages are zip64 with data descriptors; the central directory is
 authoritative); entries of 4 GiB or more are refused (archives are in
@@ -7750,8 +7836,11 @@ come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
 ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 (`wow64_cert_test`, cert_test's source built for x86), msi
-(`wow64_msi_test`), normaliz and powrprof (`wow64_office_api_test`;
-powrprof reads CPUID through `core::arch::x86` there). crypt32's own
+(`wow64_msi_test`), normaliz, powrprof and wldp (`wow64_office_api_test`;
+powrprof reads CPUID through `core::arch::x86` there). wldp.dll answers
+as an unlocked Windows without App Control: WldpQueryWindowsLockdownMode
+UNLOCKED (no S mode), WldpGetLockdownPolicy WLDP_LOCKDOWN_DEFINED_FLAG
+alone for every host, WldpIsDynamicCodePolicyEnabled FALSE. crypt32's own
 structures (CERT_CONTEXT, CERT_INFO, CRL_*, the chain contexts) are
 `repr(C)` with pointers, and the caller's ones it reads or writes
 (CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_PARA's CERT_USAGE_MATCH, the
@@ -7868,7 +7957,18 @@ under their own names: `testdll32.dll`).
   fs:[0] chain (on the stack, aligned; otherwise
   EXCEPTION_STACK_INVALID), `handler(record, frame, context,
   dispatcher_context)` until one continues execution (a noncontinuable
-  one then raises STATUS_NONCONTINUABLE_EXCEPTION); the continue
+  one then raises STATUS_NONCONTINUABLE_EXCEPTION). Each handler runs
+  under a registration of the dispatcher's own, linked at the head of
+  the list for the call (Windows' nested-exception frame: its Next the
+  head at the call, then the frame being handled; ExceptionNestedException
+  for a dispatch that meets it, ExceptionCollidedUnwind for an unwind,
+  unlinked after the call while still the head). Invariant: Microsoft's
+  C++ catch (x86) saves fs:[0] in the handler, unwinds to the catching
+  frame and links the saved registration back above it; without the
+  dispatcher's own registration that saved head was the throwing
+  function's, an unwound frame, and a later call registering at the
+  same address made the list loop on itself (ODT's setup.exe:
+  `wow64_seh_test` checks the head a handler sees). Then the continue
   handlers; unhandled: GalaUnhandledException (wow64.dll converts the
   x86 record and context into the x64 ones with CS 0x23: the crash
   report's 32-bit registers), the top-level filter, the process ends.
@@ -7877,8 +7977,11 @@ under their own names: `testdll32.dll`).
   returns to its caller with ReturnValue; RtlRaiseException dispatches
   from its caller's context (ExceptionAddress: the return address); both
   and RtlCaptureContext are naked functions capturing the caller's
-  registers. Not yet: nested exceptions (EXCEPTION_NESTED_CALL),
-  collided unwinds, SafeSEH tables.
+  registers. Not yet: nested exceptions (the dispatcher's registration
+  answers ExceptionNestedException, but the search is not marked
+  EXCEPTION_NESTED_CALL nor skips to the handled frame), collided
+  unwinds (both dispositions are taken as ExceptionContinueSearch),
+  SafeSEH tables.
 - **APCs**: a 32-bit APC routine (NtQueueApcThread's, an I/O or timer
   APC's) is queued as wow64.dll's marker with the routine and its
   context packed in NormalContext. The kernel runs user APCs of a WOW64

@@ -46,7 +46,7 @@ pub mod shim;
 pub mod source;
 pub mod version;
 pub mod winget;
-pub mod xml;
+pub use gala_xml as xml;
 pub mod zip;
 
 use alloc::string::String;

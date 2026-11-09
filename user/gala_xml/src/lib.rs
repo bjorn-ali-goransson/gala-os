@@ -1,17 +1,32 @@
 //! A small XML 1.0 reader with namespaces (W3C XML 1.0 and Namespaces
-//! in XML 1.0), enough for MSIX's AppxManifest.xml, AppxBlockMap.xml,
-//! AppxBundleManifest.xml and OPC's [Content_Types].xml: elements,
-//! attributes, text, CDATA, comments, processing instructions, the five
-//! predefined entities and character references; UTF-8 (with or without
-//! a byte order mark) and UTF-16 with a byte order mark.
+//! in XML 1.0), shared by galapkg (MSIX's AppxManifest.xml,
+//! AppxBlockMap.xml, AppxBundleManifest.xml and OPC's
+//! [Content_Types].xml) and msxml6.dll's DOM: elements, attributes, text,
+//! CDATA, comments, processing instructions (the XML declaration among
+//! them), the five predefined entities and character references; UTF-8
+//! (with or without a byte order mark) and UTF-16 with a byte order mark.
+//! Line ends are normalized to `\n` (XML 1.0 section 2.11).
 //!
-//! Refused (an error names the line): document type declarations (no
-//! DTDs, so no entity expansion: MSIX packages carry none), undeclared
-//! prefixes, mismatched or unclosed tags, duplicate attributes, text or
-//! a second element outside the root, nesting deeper than [`MAX_DEPTH`].
+//! Refused (an error names the line and column): document type
+//! declarations (no DTDs, so no entity expansion: MSIX packages carry
+//! none, and MSXML 6 prohibits them by default), undeclared prefixes,
+//! mismatched or unclosed tags, duplicate attributes, text or a second
+//! element outside the root, nesting deeper than [`MAX_DEPTH`].
 //!
 //! The result is a tree of [`Element`]s, each with its namespace URI
-//! and local name resolved, and the line its start tag is on.
+//! and local name resolved, the line its start tag is on, its child
+//! elements and its content in document order ([`Content`]); namespace
+//! declarations are attributes in [`XMLNS_NS`], as the DOM has them.
+//! [`parse_document`] also gives what comes before and after the root.
+//!
+//! Allocation is infallible (`alloc`'s String and Vec): a document is
+//! read whole into memory, its size the caller's to bound.
+
+#![no_std]
+
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,10 +38,16 @@ pub const MAX_DEPTH: usize = 256;
 /// The namespace the `xml` prefix is bound to.
 pub const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// Why a document could not be read: the line (1-based) and what.
+/// The namespace of namespace declarations (`xmlns`, `xmlns:p`), as the
+/// DOM gives their attributes.
+pub const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
+
+/// Why a document could not be read: the line (1-based), the column
+/// (1-based, in characters) where reading stopped, and what.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub line: u32,
+    pub column: u32,
     pub msg: String,
 }
 
@@ -36,12 +57,44 @@ impl fmt::Display for Error {
     }
 }
 
-/// An attribute, its namespace resolved (empty for an unprefixed one).
+/// An attribute, its namespace resolved (empty for an unprefixed one;
+/// [`XMLNS_NS`] for a namespace declaration, whose local name is the
+/// prefix it declares, or `xmlns` for the default namespace).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attr {
     pub ns: String,
     pub name: String,
+    /// The name as written (with its prefix).
+    pub qname: String,
     pub value: String,
+}
+
+/// A piece of an element's content (or of the document outside the
+/// root), in document order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Content {
+    /// The child element at this index of `children`.
+    Element(usize),
+    /// Character data, references replaced (one run between markup).
+    Text(String),
+    /// A CDATA section's text.
+    CData(String),
+    Comment(String),
+    /// A processing instruction (the XML declaration is one, target
+    /// `xml`): its target and its data, leading white space dropped.
+    Pi {
+        target: String,
+        data: String,
+    },
+}
+
+/// A whole document: what precedes the root (the XML declaration,
+/// comments, processing instructions), the root, and what follows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Document {
+    pub prolog: Vec<Content>,
+    pub root: Element,
+    pub epilog: Vec<Content>,
 }
 
 /// An element.
@@ -57,11 +110,20 @@ pub struct Element {
     pub children: Vec<Element>,
     /// The element's own text (character data and CDATA, concatenated).
     pub text: String,
+    /// The content in document order: text, CDATA, comments, processing
+    /// instructions and the child elements (by index).
+    pub content: Vec<Content>,
     /// The line of the start tag.
     pub line: u32,
 }
 
 impl Element {
+    /// Appends a child element (to `children` and `content`).
+    fn add_child(&mut self, child: Element) {
+        self.content.push(Content::Element(self.children.len()));
+        self.children.push(child);
+    }
+
     /// An unprefixed attribute's value.
     pub fn attr(&self, name: &str) -> Option<&str> {
         self.attr_ns("", name)
@@ -93,9 +155,29 @@ impl Element {
 }
 
 /// Turns the document's bytes into text: UTF-8 (a BOM skipped) or
-/// UTF-16 LE/BE with a BOM.
-fn decode(bytes: &[u8]) -> Result<String, Error> {
-    let bad = |msg: &str| Error { line: 1, msg: msg.into() };
+/// UTF-16 LE/BE with a BOM; line ends become `\n`.
+pub fn decode(bytes: &[u8]) -> Result<String, Error> {
+    let text = decode_raw(bytes)?;
+    if !text.contains('\r') {
+        return Ok(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+fn decode_raw(bytes: &[u8]) -> Result<String, Error> {
+    let bad = |msg: &str| Error { line: 1, column: 1, msg: msg.into() };
     if let Some(rest) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         return core::str::from_utf8(rest).map(String::from).map_err(|_| bad("not valid UTF-8"));
     }
@@ -117,8 +199,22 @@ fn decode(bytes: &[u8]) -> Result<String, Error> {
 
 /// Parses a whole document; the root element is returned.
 pub fn parse(bytes: &[u8]) -> Result<Element, Error> {
+    parse_document(bytes).map(|d| d.root)
+}
+
+/// Parses a whole document given as bytes (see [`decode`]).
+pub fn parse_document(bytes: &[u8]) -> Result<Document, Error> {
     let text = decode(bytes)?;
-    Parser { s: text.as_bytes(), text: &text, pos: 0, line: 1 }.document()
+    parse_text(&text)
+}
+
+/// Parses a whole document already decoded (for UTF-16 text a program
+/// hands over, such as MSXML's loadXML). Line ends are normalized.
+pub fn parse_text(text: &str) -> Result<Document, Error> {
+    if text.contains('\r') {
+        return parse_document(text.as_bytes());
+    }
+    Parser { s: text.as_bytes(), text, pos: 0, line: 1, line_start: 0 }.document()
 }
 
 /// An element being read, with the namespace bindings its tag made.
@@ -133,6 +229,8 @@ struct Parser<'t> {
     text: &'t str,
     pos: usize,
     line: u32,
+    /// Where the current line starts (for the column).
+    line_start: usize,
 }
 
 fn is_name_start(c: char) -> bool {
@@ -145,7 +243,19 @@ fn is_name_char(c: char) -> bool {
 
 impl<'t> Parser<'t> {
     fn err<T>(&self, msg: impl Into<String>) -> Result<T, Error> {
-        Err(Error { line: self.line, msg: msg.into() })
+        Err(self.error_at(self.line, msg))
+    }
+
+    /// An error on `line` (the column is where reading stopped when that
+    /// is the current line, else 1).
+    fn error_at(&self, line: u32, msg: impl Into<String>) -> Error {
+        let column = if line == self.line {
+            let end = self.pos.min(self.text.len());
+            self.text.get(self.line_start..end).map_or(1, |s| s.chars().count() as u32 + 1)
+        } else {
+            1
+        };
+        Error { line, column, msg: msg.into() }
     }
 
     fn starts(&self, p: &str) -> bool {
@@ -155,7 +265,12 @@ impl<'t> Parser<'t> {
     /// Moves `n` bytes on, counting lines.
     fn advance(&mut self, n: usize) {
         let end = (self.pos + n).min(self.s.len());
-        self.line += self.s[self.pos..end].iter().filter(|&&b| b == b'\n').count() as u32;
+        for i in self.pos..end {
+            if self.s[i] == b'\n' {
+                self.line += 1;
+                self.line_start = i + 1;
+            }
+        }
         self.pos = end;
     }
 
@@ -242,13 +357,13 @@ impl<'t> Parser<'t> {
 
     /// Comments, processing instructions and white space between
     /// markup outside the root; a DOCTYPE is refused.
-    fn misc(&mut self) -> Result<(), Error> {
+    fn misc(&mut self, out: &mut Vec<Content>) -> Result<(), Error> {
         loop {
             self.skip_space();
             if self.starts("<!--") {
-                self.skip_past("-->", "a comment")?;
+                out.push(self.comment()?);
             } else if self.starts("<?") {
-                self.skip_past("?>", "a processing instruction")?;
+                out.push(self.pi()?);
             } else if self.starts("<!DOCTYPE") {
                 return self.err("a document type declaration (DTDs are not allowed)");
             } else {
@@ -257,17 +372,46 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn document(mut self) -> Result<Element, Error> {
-        self.misc()?;
+    /// A comment (at `<!--`).
+    fn comment(&mut self) -> Result<Content, Error> {
+        self.advance(4);
+        let text = self.skip_past("-->", "a comment")?;
+        Ok(Content::Comment(text.into()))
+    }
+
+    /// A processing instruction (at `<?`).
+    fn pi(&mut self) -> Result<Content, Error> {
+        self.advance(2);
+        let target = self.name()?;
+        let body = self.skip_past("?>", "a processing instruction")?;
+        if !body.is_empty() && !body.starts_with([' ', '\t', '\n']) {
+            return self.err(alloc::format!("white space expected after <?{target}"));
+        }
+        let data = body.trim_start_matches([' ', '\t', '\n']);
+        Ok(Content::Pi { target: target.into(), data: data.into() })
+    }
+
+    fn document(mut self) -> Result<Document, Error> {
+        let mut prolog = Vec::new();
+        // The XML declaration may only come first.
+        if self.starts("<?xml") && !self.starts("<?xml-") {
+            prolog.push(self.pi()?);
+        }
+        self.misc(&mut prolog)?;
         if !self.starts("<") || self.starts("</") {
             return self.err("no root element");
         }
         let root = self.element()?;
-        self.misc()?;
+        let mut epilog = Vec::new();
+        self.misc(&mut epilog)?;
         if self.pos != self.s.len() {
             return self.err("content after the root element");
         }
-        Ok(root)
+        let misplaced = |c: &Content| matches!(c, Content::Pi { target, .. } if target.eq_ignore_ascii_case("xml"));
+        if prolog.iter().skip(1).chain(epilog.iter()).any(misplaced) {
+            return Err(self.error_at(1, "an XML declaration not at the start"));
+        }
+        Ok(Document { prolog, root, epilog })
     }
 
     /// Resolves a prefix against the open elements' bindings (innermost
@@ -291,7 +435,7 @@ impl<'t> Parser<'t> {
             Some(uri) => Ok(uri),
             None if prefix.is_empty() => Ok(String::new()),
             None => {
-                Err(Error { line, msg: alloc::format!("undeclared namespace prefix '{prefix}'") })
+                Err(self.error_at(line, alloc::format!("undeclared namespace prefix '{prefix}'")))
             }
         }
     }
@@ -314,30 +458,42 @@ impl<'t> Parser<'t> {
                     return self.err("an end tag without a start tag");
                 };
                 if open.el.qname != name {
-                    return Err(Error {
+                    return Err(self.error_at(
                         line,
-                        msg: alloc::format!(
+                        alloc::format!(
                             "</{name}> closes <{}> (line {})",
                             open.el.qname,
                             open.el.line
                         ),
-                    });
+                    ));
                 }
                 match stack.last_mut() {
-                    Some(parent) => parent.el.children.push(open.el),
+                    Some(parent) => parent.el.add_child(open.el),
                     None => return Ok(open.el),
                 }
             } else if self.starts("<!--") {
-                self.skip_past("-->", "a comment")?;
+                let c = self.comment()?;
+                if let Some(o) = stack.last_mut() {
+                    o.el.content.push(c);
+                }
             } else if self.starts("<![CDATA[") {
                 self.advance(9);
                 let data = self.skip_past("]]>", "a CDATA section")?;
                 match stack.last_mut() {
-                    Some(o) => o.el.text.push_str(data),
+                    Some(o) => {
+                        o.el.text.push_str(data);
+                        o.el.content.push(Content::CData(data.into()));
+                    }
                     None => return self.err("CDATA outside the root"),
                 }
             } else if self.starts("<?") {
-                self.skip_past("?>", "a processing instruction")?;
+                let pi = self.pi()?;
+                if matches!(&pi, Content::Pi { target, .. } if target.eq_ignore_ascii_case("xml")) {
+                    return self.err("an XML declaration not at the start");
+                }
+                if let Some(o) = stack.last_mut() {
+                    o.el.content.push(pi);
+                }
             } else if self.starts("<!") {
                 return self.err("markup declarations are not allowed");
             } else if self.starts("<") {
@@ -347,7 +503,7 @@ impl<'t> Parser<'t> {
                 let (open, empty) = self.start_tag(&stack)?;
                 if empty {
                     match stack.last_mut() {
-                        Some(parent) => parent.el.children.push(open.el),
+                        Some(parent) => parent.el.add_child(open.el),
                         None => return Ok(open.el),
                     }
                 } else {
@@ -361,7 +517,10 @@ impl<'t> Parser<'t> {
                 let mut text = String::new();
                 self.chars_until(b"<", &mut text)?;
                 match stack.last_mut() {
-                    Some(o) => o.el.text.push_str(&text),
+                    Some(o) => {
+                        o.el.text.push_str(&text);
+                        o.el.content.push(Content::Text(text));
+                    }
                     None => return self.err("text outside the root"),
                 }
             }
@@ -415,10 +574,9 @@ impl<'t> Parser<'t> {
                 .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
                 .collect();
             if raw.iter().any(|(n, _, _)| *n == an) {
-                return Err(Error {
-                    line: aline,
-                    msg: alloc::format!("attribute {an} given twice in <{qname}>"),
-                });
+                return Err(
+                    self.error_at(aline, alloc::format!("attribute {an} given twice in <{qname}>"))
+                );
             }
             raw.push((an, value, aline));
         };
@@ -428,7 +586,7 @@ impl<'t> Parser<'t> {
                 bindings.push((String::new(), v.clone()));
             } else if let Some(p) = n.strip_prefix("xmlns:") {
                 if v.is_empty() {
-                    return Err(Error { line, msg: alloc::format!("prefix {p} bound to nothing") });
+                    return Err(self.error_at(line, alloc::format!("prefix {p} bound to nothing")));
                 }
                 bindings.push((p.into(), v.clone()));
             }
@@ -442,6 +600,13 @@ impl<'t> Parser<'t> {
         let mut attrs = Vec::new();
         for (n, value, aline) in raw {
             if n == "xmlns" || n.starts_with("xmlns:") {
+                let local = n.strip_prefix("xmlns:").unwrap_or(n);
+                attrs.push(Attr {
+                    ns: XMLNS_NS.into(),
+                    name: local.into(),
+                    qname: n.into(),
+                    value,
+                });
                 continue;
             }
             let (p, l) = split(n);
@@ -452,12 +617,12 @@ impl<'t> Parser<'t> {
                 self.resolve(stack, &bindings, p, aline)?
             };
             if attrs.iter().any(|a: &Attr| a.ns == ans && a.name == l) {
-                return Err(Error {
-                    line: aline,
-                    msg: alloc::format!("attribute {{{ans}}}{l} given twice in <{qname}>"),
-                });
+                return Err(self.error_at(
+                    aline,
+                    alloc::format!("attribute {{{ans}}}{l} given twice in <{qname}>"),
+                ));
             }
-            attrs.push(Attr { ns: ans, name: l.into(), value });
+            attrs.push(Attr { ns: ans, name: l.into(), qname: n.into(), value });
         }
         let el = Element {
             ns,
@@ -466,6 +631,7 @@ impl<'t> Parser<'t> {
             attrs,
             children: Vec::new(),
             text: String::new(),
+            content: Vec::new(),
             line,
         };
         Ok((Open { el, bindings }, empty))
@@ -533,5 +699,41 @@ mod tests {
         let deep = "<a>".repeat(MAX_DEPTH + 1);
         assert!(err(&deep).msg.contains("too deeply"));
         assert!(parse(b"").is_err());
+    }
+
+    #[test]
+    fn content_in_order() {
+        let doc = b"<?xml version=\"1.0\"?>\r\n<!--c--><r xmlns='urn:d' xmlns:p='urn:p' p:a='1'>x<p:e/>\r\ny<![CDATA[z]]><?t d ?><!--k--></r><?after?>";
+        let d = parse_document(doc).unwrap();
+        assert_eq!(
+            d.prolog,
+            vec![
+                Content::Pi { target: "xml".into(), data: "version=\"1.0\"".into() },
+                Content::Comment("c".into())
+            ]
+        );
+        assert_eq!(d.epilog, vec![Content::Pi { target: "after".into(), data: "".into() }]);
+        let r = &d.root;
+        assert_eq!(
+            r.content,
+            vec![
+                Content::Text("x".into()),
+                Content::Element(0),
+                Content::Text("\ny".into()),
+                Content::CData("z".into()),
+                Content::Pi { target: "t".into(), data: "d ".into() },
+                Content::Comment("k".into()),
+            ]
+        );
+        assert_eq!(r.children[0].ns, "urn:p");
+        let names: std::vec::Vec<_> =
+            r.attrs.iter().map(|a| (a.ns.as_str(), a.name.as_str(), a.qname.as_str())).collect();
+        assert_eq!(
+            names,
+            vec![(XMLNS_NS, "xmlns", "xmlns"), (XMLNS_NS, "p", "xmlns:p"), ("urn:p", "a", "p:a")]
+        );
+        assert!(err("<a/><?xml version='1.0'?>").msg.contains("XML declaration"));
+        let e = err("<a>\n  <b></c></a>");
+        assert_eq!((e.line, e.column), (2, 10));
     }
 }

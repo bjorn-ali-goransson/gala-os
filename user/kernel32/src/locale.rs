@@ -1242,6 +1242,26 @@ pub extern "system" fn GetGeoInfoW(
     }
 }
 
+/// GetUserDefaultGeoName(geoName, geoNameCount): the user's region as
+/// Microsoft documents it, its two-letter ISO 3166 code (GetUserGeoID's
+/// GEO_ISO2: "US"); the characters written with the NUL; with a count of
+/// 0, the count needed; too small a buffer: 0 and
+/// ERROR_INSUFFICIENT_BUFFER (office_api_test).
+#[unsafe(no_mangle)]
+pub extern "system" fn GetUserDefaultGeoName(buf: *mut u16, size: i32) -> i32 {
+    if size < 0 || (size > 0 && buf.is_null()) {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    }
+    let Some(name) = geo_value(GetUserGeoID(GEOCLASS_NATION), 4) else {
+        return fail_with(ERROR_INVALID_PARAMETER, 0);
+    };
+    let mut w = [0u16; 4];
+    for (d, c) in w.iter_mut().zip(name.encode_utf16()) {
+        *d = c;
+    }
+    put(&w[..name.len()], buf, size)
+}
+
 // ---- Locale names (the Vista API) ----
 
 /// LCIDToLocaleName: "en-US" for gala's locale and the defaults, "" for

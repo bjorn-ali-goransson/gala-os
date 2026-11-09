@@ -118,7 +118,8 @@ for the accounts gala has:
 - Not modelled: an administrator account with a filtered token and its
   linked full token, the consent prompt (consent.exe) and AppInfo's
   creation of the elevated process, the `requireAdministrator` manifest
-  level (CreateProcess's ERROR_ELEVATION_REQUIRED), UAC virtualization.
+  level (CreateProcess's ERROR_ELEVATION_REQUIRED), UAC virtualization:
+  ROADMAP "UAC" plans them.
 
 Tests: `runas_test` (x64) and `wow64_runas_test` (x86) as SYSTEM,
 `runas_declined` as the boot user.
