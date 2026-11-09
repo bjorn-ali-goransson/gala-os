@@ -127,6 +127,6 @@ pub extern "system" fn WinHttpQueryHeaders(
             Vec::new()
         };
         // SAFETY: the caller's length, buffer and index, as documented.
-        unsafe { r.query_info(level, &name, buffer, length, index) }
+        unsafe { r.query_info(level, &name, buffer, length, index, false) }
     })())
 }

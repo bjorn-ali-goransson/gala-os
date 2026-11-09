@@ -1070,10 +1070,11 @@ impl Request {
         }
     }
 
-    /// Answers a header query (WinHttpQueryHeaders, HttpQueryInfoW): the
-    /// value as UTF-16 with its NUL (`*length` then its bytes without the
-    /// NUL; ERROR_INSUFFICIENT_BUFFER with the bytes needed, the NUL
-    /// included), or with QUERY_FLAG_NUMBER / NUMBER64 as a number.
+    /// Answers a header query (WinHttpQueryHeaders, HttpQueryInfoW/A): the
+    /// value as UTF-16 (`ansi`: as its bytes, HttpQueryInfoA) with its NUL
+    /// (`*length` then its bytes without the NUL; ERROR_INSUFFICIENT_BUFFER
+    /// with the bytes needed, the NUL included), or with QUERY_FLAG_NUMBER
+    /// / NUMBER64 as a number.
     /// `name` is QUERY_CUSTOM's header name; `index` (in: which
     /// occurrence, out: the next) may be null.
     ///
@@ -1087,6 +1088,7 @@ impl Request {
         buffer: *mut u8,
         length: *mut u32,
         index: *mut u32,
+        ansi: bool,
     ) -> Result<(), u32> {
         if length.is_null() {
             return Err(INVALID_PARAMETER);
@@ -1127,6 +1129,15 @@ impl Request {
                     buffer.cast::<u32>().write_unaligned(n as u32);
                 }
                 *length = size;
+            } else if ansi {
+                let needed = value.len() as u32 + 1;
+                if buffer.is_null() || *length < needed {
+                    *length = needed;
+                    return Err(INSUFFICIENT_BUFFER);
+                }
+                core::ptr::copy_nonoverlapping(value.as_ptr(), buffer, value.len());
+                buffer.add(value.len()).write(0);
+                *length = value.len() as u32;
             } else {
                 let needed = (value.len() as u32 + 1) * 2;
                 if buffer.is_null() || *length < needed {

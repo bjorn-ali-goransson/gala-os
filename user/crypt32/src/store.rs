@@ -260,7 +260,9 @@ fn new_store() -> *mut c_void {
     p.cast()
 }
 
+const CERT_STORE_PROV_MSG: usize = 1;
 const CERT_STORE_PROV_MEMORY: usize = 2;
+const CERT_STORE_PROV_PKCS7: usize = 5;
 const CERT_STORE_PROV_SYSTEM_A: usize = 9;
 const CERT_STORE_PROV_SYSTEM_W: usize = 10;
 const CERT_STORE_PROV_COLLECTION: usize = 11;
@@ -348,7 +350,9 @@ fn wide_len(p: *const u16) -> usize {
 
 /// CertOpenStore: a memory store (CERT_STORE_PROV_MEMORY, "Memory"), a
 /// collection (CERT_STORE_PROV_COLLECTION, "Collection": a store whose
-/// members CertAddStoreToCollection adds), or a system store (empty).
+/// members CertAddStoreToCollection adds), a system store (empty), or a
+/// memory store of a message's certificates (CERT_STORE_PROV_MSG with a
+/// decoded message handle, CERT_STORE_PROV_PKCS7 with an encoded one).
 /// Other providers fail with ERROR_NOT_SUPPORTED (recorded).
 #[unsafe(no_mangle)]
 pub extern "system" fn CertOpenStore(
@@ -362,6 +366,17 @@ pub extern "system" fn CertOpenStore(
     if id < 0x10000 {
         return match id {
             CERT_STORE_PROV_MEMORY | CERT_STORE_PROV_COLLECTION => new_store(),
+            CERT_STORE_PROV_MSG => message_store(para as *mut c_void),
+            CERT_STORE_PROV_PKCS7 => {
+                let der = blob(para);
+                let h = crate::msg::decode(der);
+                if h.is_null() {
+                    return core::ptr::null_mut(); // its error is set
+                }
+                let s = message_store(h);
+                crate::msg::CryptMsgClose(h);
+                s
+            }
             CERT_STORE_PROV_SYSTEM_W | CERT_STORE_PROV_SYSTEM_REGISTRY_W => {
                 let mut name = [0u8; 32];
                 let n = wide_name(para.cast(), &mut name);
@@ -388,6 +403,43 @@ pub extern "system" fn CertOpenStore(
     }
     unsupported(b"crypt32.dll!CertOpenStore(provider)", 0);
     error(ERROR_NOT_SUPPORTED, core::ptr::null_mut())
+}
+
+/// A memory store holding a decoded message's certificates
+/// (CERT_STORE_PROV_MSG; CERT_STORE_PROV_PKCS7 decodes the blob first).
+/// The message's CRLs are not added (recorded when it has any).
+fn message_store(h: *mut c_void) -> *mut c_void {
+    let certs = match crate::msg::certificates(h) {
+        Ok(c) => c,
+        Err(e) => return error(e, core::ptr::null_mut()),
+    };
+    if crate::msg::signed_of(h).is_ok_and(|s| !s.crls.is_empty()) {
+        unsupported(b"crypt32.dll!CertOpenStore(message CRLs not added)", 0);
+    }
+    let store = new_store();
+    if store.is_null() {
+        return store;
+    }
+    let mut d = crate::cert::Der::new(certs);
+    while d.peek_tag().is_some() {
+        let Ok(t) = d.next() else { break };
+        if t.tag != crate::cert::SEQUENCE {
+            unsupported(
+                b"crypt32.dll!CertOpenStore(message: an attribute certificate, skipped)",
+                t.tag.into(),
+            );
+            continue;
+        }
+        CertAddEncodedCertificateToStore(
+            store,
+            1,
+            t.whole.as_ptr(),
+            t.whole.len() as u32,
+            CERT_STORE_ADD_ALWAYS,
+            core::ptr::null_mut(),
+        );
+    }
+    store
 }
 
 /// CertOpenSystemStoreW: the system store `name` (see `system_store`).
@@ -717,6 +769,7 @@ const CERT_FIND_SUBJECT_NAME: u32 = 0x2_0007;
 const CERT_FIND_ISSUER_STR_W: u32 = 0x8_0004;
 const CERT_FIND_SUBJECT_STR_W: u32 = 0x8_0007;
 const CERT_FIND_EXISTING: u32 = 0xd_0000;
+const CERT_FIND_SUBJECT_CERT: u32 = 0xb_0000;
 const CERT_NAME_SIMPLE_DISPLAY_TYPE: u32 = 4;
 const CERT_NAME_ISSUER_FLAG: u32 = 1;
 
@@ -773,7 +826,8 @@ fn name_contains(c: *const CertContext, issuer: bool, needle: &[u16]) -> bool {
 /// matches: CERT_FIND_ANY, CERT_FIND_SHA1_HASH (a hash blob),
 /// CERT_FIND_SUBJECT_NAME (the encoded name), CERT_FIND_SUBJECT_STR_W /
 /// CERT_FIND_ISSUER_STR_W (a substring of the name, case ignored),
-/// CERT_FIND_EXISTING (the same certificate). Others are recorded.
+/// CERT_FIND_EXISTING (the same certificate), CERT_FIND_SUBJECT_CERT (a
+/// CERT_INFO's issuer and serial number). Others are recorded.
 #[unsafe(no_mangle)]
 pub extern "system" fn CertFindCertificateInStore(
     h: *mut c_void,
@@ -812,6 +866,20 @@ pub extern "system" fn CertFindCertificateInStore(
             let issuer = kind == CERT_FIND_ISSUER_STR_W;
             next_after(h, prev, |c| name_contains(c, issuer, needle))
         }
+        CERT_FIND_SUBJECT_CERT => {
+            let want = para as *const crate::cert::CertInfo;
+            if want.is_null() {
+                return error(E_INVALIDARG, core::ptr::null());
+            }
+            // SAFETY: the caller's CERT_INFO: its issuer and serial number.
+            let (issuer, serial) = unsafe { ((*want).issuer, (*want).serial) };
+            let (issuer, serial) = (blob_of(&issuer), blob_of(&serial));
+            next_after(h, prev, |c| {
+                // SAFETY: a context of ours.
+                let info = unsafe { &*(*c).info };
+                blob_of(&info.issuer) == issuer && blob_of(&info.serial) == serial
+            })
+        }
         CERT_FIND_EXISTING => {
             let other = para as *const CertContext;
             if other.is_null() {
@@ -828,6 +896,35 @@ pub extern "system" fn CertFindCertificateInStore(
             error(CRYPT_E_NOT_FOUND, core::ptr::null())
         }
     }
+}
+
+fn blob_of<'a>(b: &crate::cert::Blob) -> &'a [u8] {
+    if b.data.is_null() {
+        return &[];
+    }
+    // SAFETY: a blob of a CERT_INFO (the caller's or ours).
+    unsafe { core::slice::from_raw_parts(b.data, b.size as usize) }
+}
+
+/// CertGetSubjectCertificateFromStore: the certificate with the CERT_INFO's
+/// issuer and serial number (CERT_FIND_SUBJECT_CERT), or CRYPT_E_NOT_FOUND.
+#[unsafe(no_mangle)]
+pub extern "system" fn CertGetSubjectCertificateFromStore(
+    h: *mut c_void,
+    encoding: u32,
+    info: *const crate::cert::CertInfo,
+) -> *const CertContext {
+    if info.is_null() {
+        return error(E_INVALIDARG, core::ptr::null());
+    }
+    CertFindCertificateInStore(
+        h,
+        encoding,
+        0,
+        CERT_FIND_SUBJECT_CERT,
+        info.cast(),
+        core::ptr::null(),
+    )
 }
 
 /// CertDeleteCertificateFromStore: the context's certificate removed from
@@ -1194,27 +1291,4 @@ pub extern "system" fn CertFindChainInStore(
         return error(E_INVALIDARG, core::ptr::null());
     }
     error(CRYPT_E_NOT_FOUND, core::ptr::null())
-}
-
-/// CryptMsgClose: gala hands out no message handles (CryptMsgOpenToDecode
-/// is not there yet), so only NULL can come back: TRUE.
-#[unsafe(no_mangle)]
-pub extern "system" fn CryptMsgClose(msg: *mut c_void) -> i32 {
-    if !msg.is_null() {
-        unsupported(b"crypt32.dll!CryptMsgClose(a message gala did not make)", 0);
-    }
-    1
-}
-
-/// CryptMsgGetParam: no message handles exist yet: E_INVALIDARG.
-#[unsafe(no_mangle)]
-pub extern "system" fn CryptMsgGetParam(
-    _msg: *mut c_void,
-    kind: u32,
-    _index: u32,
-    _data: *mut c_void,
-    _size: *mut u32,
-) -> i32 {
-    unsupported(b"crypt32.dll!CryptMsgGetParam", kind.into());
-    error(E_INVALIDARG, 0)
 }

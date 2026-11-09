@@ -1724,6 +1724,15 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
 - **NUL**: `\Device\Null` (with `\??\NUL` linking to it) opens as a file
   whose reads are at end of file and whose writes are discarded
   (FILE_DEVICE_NULL); kernel32 maps the DOS name `NUL` to `\??\NUL`.
+- **Win32 paths** (kernel32's `full_path`, under every file function and
+  GetFullPathNameW): relative paths join the current directory, a
+  leading separator takes the current drive, `.`/`..` are resolved. An
+  empty path names nothing: ERROR_PATH_NOT_FOUND, never the current
+  directory (`kernel32_file_test`; ledger `kernel32.dll!empty path`).
+  Invariant: no path function turns "" into a real path. A program that
+  builds a folder from an unset value asks whether "" exists before it
+  deletes "<folder>\*" recursively (ODT's setup.exe does); a "yes" from
+  the platform makes that `\*`, the drive's root, and wipes C:.
 - **Access checks** on opens and creates: "Access checks".
 
 #### Directory change notification
@@ -3354,7 +3363,10 @@ definition for both layouts, "Plan: WOW64").
   issuer, its authority key identifier its own key), else it is
   CERT_TRUST_IS_PARTIAL_CHAIN (chain level, as Windows reports it).
   Element errors: NOT_TIME_VALID, NOT_SIGNATURE_VALID (on the signed
-  element), UNTRUSTED_ROOT (a root not in the engine's roots),
+  element; the ledger says why: `crypt32.dll!chain element <i>: <step>`,
+  the step's status as detail: BCryptVerifySignature's 0xc000a000 for a
+  signature that does not match, anything else (GetProcAddress(BCryptHash)
+  126: bcrypt.dll did not load) a check that could not run), UNTRUSTED_ROOT (a root not in the engine's roots),
   INVALID_BASIC_CONSTRAINTS (an issuer that is no CA, a path length
   exceeded; v1/v2 issuers count as CAs only from the engine's own
   stores), NOT_VALID_FOR_USAGE (keyCertSign against the CA flag;
@@ -3385,7 +3397,15 @@ definition for both layouts, "Plan: WOW64").
   CERT_E_UNTRUSTEDROOT, then the end certificate's EKU for the side and
   the server name: DNS and IP alternative names, else the subject's
   CNs, one-label wildcards, CERT_E_CN_NO_MATCH at element 0),
-  BASIC_CONSTRAINTS; the others as BASE (recorded). The order and the
+  BASIC_CONSTRAINTS, AUTHENTICODE and AUTHENTICODE_TS (BASE's checks, a
+  revoked certificate CERT_E_REVOKED, an unknown revocation status
+  CERT_E_REVOCATION_FAILURE unless AUTHENTICODE_EXTRA_CERT_CHAIN_POLICY_PARA's
+  dwRegPolicySettings has WTPF_IGNOREREVOKATION or a WTPF_OFFLINEOK_* bit,
+  then accepted and recorded), MICROSOFT_ROOT (only whether the last
+  element's key is one of Microsoft's roots: the SHA-1 of the key bits
+  against Microsoft Root Authority, Root Certificate Authority (two keys)
+  and 2010, plus 2011 with CHECK_APPLICATION_ROOT_FLAG; test roots
+  recorded); the others as BASE (recorded). The order and the
   element indexes are those Wine's conformance tests record on Windows.
   A failed policy is recorded as `crypt32.dll!<policy>: <error>` with
   the chain's error bits, so a refused certificate says why.
@@ -3468,11 +3488,137 @@ definition for both layouts, "Plan: WOW64").
   the context's own (not the caller's to free) or the one the provider
   info names, opened (the caller's, or kept in the context with
   CRYPT_ACQUIRE_CACHE_FLAG); CSP keys are recorded and NTE_NOT_SUPPORTED.
+- **Messages** (`msg.rs`; `wintrust_test`): the decoding side of
+  PKCS #7 / CMS: CryptMsgOpenToDecode (type 0 from the ContentInfo,
+  CMSG_SIGNED, CMSG_DATA), CryptMsgUpdate (appends; the final update
+  checks the SignedData decodes), CryptMsgGetParam (type, content,
+  inner content type, signer count, CMSG_SIGNER_INFO, the signer's
+  CERT_INFO with issuer and serial, its hash algorithm, signed and
+  unsigned attributes, encoded signer, certificates, CRLs, the
+  encoding, the version), CryptMsgControl (CMSG_CTRL_VERIFY_SIGNATURE
+  by a CERT_INFO's issuer and serial, _EX by index with a public key or
+  a certificate: the messageDigest attribute against the content's
+  digest, CRYPT_E_HASH_VALUE; the signature over the attributes re-tagged
+  as a SET, NTE_BAD_SIGNATURE; RSA PKCS #1 and ECDSA through `cert`'s
+  `verify_hashed`), CryptMsgDuplicate/Close. A handle is a heap block
+  with the encoding; every parameter is parsed from it again when asked
+  (no decoded copy to keep in step). The digested content is the [0]'s
+  OCTET STRING value (CMS, timestamp tokens) or, for PKCS #7's other
+  content types, the inner TLV's contents octets (Authenticode's
+  SpcIndirectDataContent, as PKCS #7 9.3 says); CMSG_CONTENT_PARAM is the
+  octets or the whole inner TLV. The structures are built in the
+  caller's buffer by `msg::Out`, one pass measuring and one writing, so
+  pointers point into the same block (CryptDecodeObjectEx's
+  allocation too). CertOpenStore's CERT_STORE_PROV_MSG (a message
+  handle) and CERT_STORE_PROV_PKCS7 (an encoding) give a memory store of
+  its X.509 certificates (attribute certificates skipped, CRLs not
+  added; both recorded); CertFindCertificateInStore's
+  CERT_FIND_SUBJECT_CERT and CertGetSubjectCertificateFromStore find a
+  signer's certificate by issuer and serial. CryptQueryObject recognises
+  CERT_QUERY_CONTENT_PKCS7_SIGNED (DER) and _SIGNED_EMBED (a PE image's
+  first WIN_CERTIFICATE), giving the message and its store. Not here
+  (recorded): encoding, streaming, detached content (the flag is
+  recorded and ignored), enveloped and hashed messages, BER indefinite
+  lengths, CMS signers by key identifier in CMSG_SIGNER_INFO.
+- **Decoding** (`decode.rs`): CryptDecodeObject(Ex)'s
+  SPC_INDIRECT_DATA_CONTENT and SPC_SP_OPUS_INFO (the Authenticode
+  structures Windows' wintrust registers with crypt32; an SPC_LINK
+  moniker is recorded and left empty), PKCS7_SIGNER_INFO, PKCS_UTC_TIME,
+  X509_CHOICE_OF_TIME and szOID_RSA_signingTime (FILETIME, a
+  GeneralizedTime's fraction kept), X509_OCTET_STRING; others recorded,
+  CRYPT_E_ASN1_BADTAG. CryptVerifyTimeStampSignature checks an RFC 3161
+  token: its TSTInfo's message imprint against the data's hash
+  (CRYPT_E_HASH_VALUE), the TSA signer, found among the token's
+  certificates and the additional store, through `msg::verify_signer`;
+  it gives the CRYPT_TIMESTAMP_CONTEXT (one CryptMemAlloc block; TSTInfo
+  extensions recorded and left out), the signer and the token's store;
+  the TSA's chain is the caller's (wintrust's) to check.
   crypt32 loads bcrypt and advapi32 on first use (LoadLibrary), so it
   keeps no static imports of them (Caddy ships crypt32 alone). crypt32
   and ncrypt are built for x86 too ("The 32-bit system DLLs"): the
   caller's structures with pointers in crypt32's `layout.rs`, checked
   against wincrypt.h for both widths at compile time.
+
+### wintrust: Authenticode
+
+`user/wintrust` (`wintrust_test`, `wow64_wintrust_test`; x64 and x86):
+WinVerifyTrust(Ex) with WINTRUST_ACTION_GENERIC_VERIFY_V2 over a PE
+image, and WTHelperProvDataFromStateData, WTHelperGetProvSignerFromChain
+and WTHelperGetProvCertFromChain over its provider data (what ODT's
+setup.exe imports). The work is split as on Windows: wintrust has the PE
+subject and the image hash (`pe.rs`), crypt32 the message, the signer's
+signature, the timestamp token, the chain and the policies, reached
+through their public functions.
+
+- **Steps** (`verify.rs`), each setting its TRUSTERROR_STEP_FINAL_*
+  entry, the first failure being the result (and the last error):
+  object: the file (the caller's hFile, else opened by path) is a PE
+  image (empty, no "MZ", no "PE\0\0" inside the file:
+  TRUST_E_SUBJECT_FORM_UNKNOWN) whose certificate table exists, follows
+  its directory entry and ends the file (else TRUST_E_NOSIGNATURE, as
+  Windows answers 4 bytes appended), its WIN_CERTIFICATE (revision 1 or
+  2, PKCS_SIGNED_DATA) decodes, its content is SpcIndirectDataContent
+  with SpcPeImageData, and its digest is the image hash
+  (TRUST_E_BAD_DIGEST); signature: the signer (one; more recorded), its
+  certificate in the message's store (TRUST_E_NO_SIGNER_CERT), its
+  signature (CryptMsgControl's error), its RFC 3161 timestamp
+  (CryptVerifyTimeStampSignature over the signer's encrypted digest,
+  TRUST_E_TIME_STAMP if it fails), whose time becomes sftVerifyAsOf (the
+  current time without one, or with lifetime signing) and whose signer
+  the one counter signer; certificate: CertGetCertificateChain with the
+  default engine at sftVerifyAsOf, the message's store as the
+  additional store, the code signing usage, revocation per dwProvFlags'
+  WTD_REVOCATION_CHECK_* or WTD_REVOKE_WHOLECHAIN (CHAIN_EXCLUDE_ROOT),
+  none otherwise; the timestamp's chain at its time with the time
+  stamping usage and no revocation; policy: AUTHENTICODE (and
+  AUTHENTICODE_TS for the timestamp) with Windows' default Software
+  Publishing state 0x23c00 as dwRegPolicySettings. WTD_HASH_ONLY_FLAG
+  stops after the object step, every failure there being
+  TRUST_E_NOSIGNATURE (Windows' answers in Wine's test_wintrust_digest).
+- **The image hash** (Authenticode PE format): the file from 0 to the
+  certificate table, without the CheckSum and the table's directory
+  entry, read at offsets in 64 KiB pieces and hashed with bcrypt's
+  pseudo-handles (MD5, SHA-1, SHA-2). Page hashes are not checked, as
+  WinVerifyTrust does not.
+- **State**: one heap block per verification (`State`), the
+  CRYPT_PROVIDER_DATA first so its address is hWVTStateData: the step
+  errors (38), the provider functions (pfnAlloc/pfnFree on the process
+  heap, the rest NULL), PROVDATA_SIP (the PE subject GUID, the decoded
+  SpcIndirectDataContent), one signer and one counter signer with up to
+  8 CRYPT_PROVIDER_CERTs each (the chain's certificates, referenced;
+  fTrustedRoot on a self-signed trusted root, fSelfSigned,
+  dwConfidence and dwError from each element's status), and what it owns:
+  the message, its store, the chains, the timestamp context and store,
+  the opened file. WTD_STATEACTION_VERIFY keeps it until
+  WTD_STATEACTION_CLOSE; IGNORE frees it at once. The structures are
+  typed for both widths in `layout.rs`, checked against mingw-w64's
+  wintrust.h plus Windows 8's pSignatureSettings, pSigState and
+  pSigSettings (which mingw lacks).
+- **Roots**: Microsoft's code signing roots are not in Mozilla's bundle,
+  so a full image also ships `user/roots/microsoft-roots.pem`
+  (Microsoft Root Certificate Authority 2010 and 2011, Microsoft Identity
+  Verification Root Certificate Authority 2020; `microsoft.sh` fetches
+  them with pinned SHA-256s) in `gala\roots`, as Windows' root store has
+  them.
+- **Observability**: every failed step is recorded
+  (`wintrust.dll!WinVerifyTrust: <step>`, kind "other", the error as
+  detail: `subject or certificate table`, `image hash differs`,
+  `signer's signature`, `timestamp`, `Authenticode policy`, ...), and
+  crypt32's policy line says which chain error it was
+  (`crypt32.dll!AUTHENTICODE: CERT_E_CHAINING`).
+- **Not here** (each recorded): other actions (TRUST_E_PROVIDER_UNKNOWN),
+  other subjects (catalog members, blobs, WTD_CHOICE_CERT/SIGNER:
+  TRUST_E_SUBJECT_FORM_UNKNOWN), cabinets and catalogs (no SIP for them:
+  a cabinet's Authenticode digest is not documented in the sources gala
+  may use, and Wine does not check it, so a signed .cab is
+  TRUST_E_SUBJECT_FORM_UNKNOWN rather than trusted unchecked), more than
+  one signer or WIN_CERTIFICATE, secondary (nested) signatures and
+  WINTRUST_SIGNATURE_SETTINGS (the primary signature only), PKCS #9
+  countersignatures (legacy timestamps: the chain is checked at the
+  current time), the Disallowed store (empty in gala), the registry's
+  Software Publishing state (its default is used), revocation fetching
+  (crypt32 is offline; the default state accepts an offline check), the
+  catalog functions (CryptCATAdmin*: gala_stubs), any UI.
 
 ### secur32: SSPI
 
@@ -3784,7 +3930,13 @@ x64 and x86.
   _TRANSACTED are E_INVALIDARG), StrToIntW (decimal with an optional
   '-', wrapping), StrTrimW, PathIsFileSpecW, and
   SHCreateMemStream (#12, ole32's memory stream, loaded when first
-  needed).
+  needed); what ODT's setup.exe imports beside them (`shell.rs`):
+  PathIsUNCW, PathGetArgsW, PathGetCharTypeW (GCT_SHORTCHAR by Wine's
+  table of Windows' answers), PathGetDriveNumberW (after `\\?\`) and
+  StrRetToBufW (STRRET typed for both widths; a STRRET_WSTR's string is
+  freed with ole32's CoTaskMemFree, loaded when first needed; too long:
+  E_NOT_SUFFICIENT_BUFFER and an empty buffer). x64 and x86:
+  `wow64_shlwapi_test` is shlwapi_test's C source built for x86.
 - **rpcrt4**: UUID functions (`rpcrt4_test`). **netapi32**:
   NetWkstaGetInfo; NetUserGetInfo levels 0 and 1 for the accounts
   LookupAccountNameW finds as users (all USER_PRIV_USER, password age 0:
@@ -3853,7 +4005,8 @@ x64 and x86.
   comctl32, shell32, ole32 and others); a function is implemented by
   removing its name from the list.
 - **Stub-only DLLs**: pdh, xolehlp, odbc32, authz,
-  wintrust, webservices, dhcpcsvc and oleacc are nothing but such stubs.
+  webservices, dhcpcsvc and oleacc are nothing but such stubs (wintrust's
+  catalog functions are too: "wintrust: Authenticode").
   comdlg32 (`comdlg32_test`) draws no dialog yet: GetFileTitleW (the
   name without its directory, the size needed when the buffer is
   short; the extension kept), the parameter checks FindTextW,
@@ -4188,8 +4341,10 @@ WinHTTP and WinINet references document them, on one engine,
 `user/http_client` (an `rlib`, `no_std` with `alloc`): the connection
 (`net.rs`), the request and response (`request.rs`), URL cracking
 (`url.rs`) and the live-handle list (`handles.rs`). Each DLL is its
-API's functions, flags, options and error codes over it. Tests:
-`winhttp_test` and `wininet_test` (C, mingw-w64), `winhttp_cb_test`
+API's functions, flags, options and error codes over it. Both build
+for x64 and x86 (SysWOW64). Tests:
+`winhttp_test`, and `wininet_test` with its x86 twin
+`wow64_wininet_test` (C, mingw-w64, one source), `winhttp_cb_test`
 and its x86 twin `wow64_winhttp_cb_test` (the status callbacks; Rust
 on ntrt); all against schannel_test's Nginx, which also serves plain
 HTTP on 127.0.0.1:8080.
@@ -4239,11 +4394,31 @@ HTTP on 127.0.0.1:8080.
   of the path and extra info, the given headers added),
   InternetCrackUrlW, InternetSetOptionW (the time-outs, CONNECT_RETRIES,
   SECURITY_FLAGS, USER_AGENT, CONTEXT_VALUE; others and the process-wide
-  NULL handle are recorded and accepted), InternetCloseHandle and
-  InternetAttemptConnect (ERROR_SUCCESS: no dial-up). gala's default
-  time-outs: connect 60 s, send and receive 30 s (the response's headers
-  as a receive).
-- **WinHttpCrackUrl / InternetCrackUrlW** (`url.rs`): http and https
+  NULL handle are recorded and accepted), InternetQueryOptionW (the
+  time-outs, CONNECT_RETRIES, HANDLE_TYPE, SECURITY_FLAGS, CONTEXT_VALUE,
+  USER_AGENT of a session, URL of a request, and for the NULL handle
+  CONNECTED_STATE; a string option that does not fit is
+  ERROR_INSUFFICIENT_BUFFER with the bytes needed with the NUL, one that
+  fits gives its length in characters without it; another handle's
+  option is ERROR_INTERNET_INCORRECT_HANDLE_TYPE; others are recorded
+  and ERROR_INTERNET_INVALID_OPTION), InternetCloseHandle and
+  InternetAttemptConnect (ERROR_SUCCESS: no dial-up). The A functions
+  ODT's setup.exe imports (`ansi.rs`): InternetConnectA,
+  HttpOpenRequestA and HttpAddRequestHeadersA through the ANSI code page
+  into the W ones; InternetCrackUrlA on the caller's bytes (the
+  delimiters are ASCII, so a URL widened byte by byte has its
+  components at the same offsets whatever the code page); HttpQueryInfoA
+  answers the header's bytes (the length without the NUL, or the bytes
+  needed with it). InternetGetCookieExW: gala keeps no cookie store
+  (Set-Cookie is not kept), so a URL has none: FALSE,
+  ERROR_NO_MORE_ITEMS, `*size` 0, as for a fresh profile, recorded
+  (`wininet.dll!InternetGetCookieExW(no cookie store)`); a URL without a
+  scheme is ERROR_INTERNET_UNRECOGNIZED_SCHEME, any other that is not
+  a whole http(s) URL (about:blank) ERROR_INVALID_PARAMETER. gala's
+  default time-outs: connect 60 s, send and receive 30 s (the response's
+  headers as a receive).
+- **WinHttpCrackUrl / InternetCrackUrlW / A** (`url.rs`, generic over
+  the character: URL_COMPONENTSW or URL_COMPONENTSA): http and https
   (other schemes: ERROR_WINHTTP_UNRECOGNIZED_SCHEME; recorded by
   wininet, whose Windows counterpart also has ftp, file, ...), user and
   password, bracketed IPv6
@@ -4319,7 +4494,7 @@ HTTP on 127.0.0.1:8080.
   Location is no http(s) URL`, ...); a panic records its
   location (`<dll>!panic <file>`) and ends the process with 0xC0000409.
 - **Status callbacks** (`user/winhttp/src/callback.rs`; WinINet's
-  InternetSetStatusCallback is not there yet): WinHttpSetStatusCallback
+  below): WinHttpSetStatusCallback
   sets one handle's callback and notification flags and returns the
   previous callback (NULL at first, last error ERROR_SUCCESS;
   WINHTTP_INVALID_STATUS_CALLBACK with ERROR_INVALID_HANDLE for a bad
@@ -4347,6 +4522,22 @@ HTTP on 127.0.0.1:8080.
   `wow64_winhttp_cb_test` check it against Nginx. Not sent: the
   asynchronous completions, INTERMEDIATE_RESPONSE (1xx are skipped),
   CLOSING_CONNECTION / CONNECTION_CLOSED, DETECTING_PROXY.
+- **WinINet's status callbacks** (`user/wininet/src/callback.rs`,
+  InternetSetStatusCallbackW): the same observer, WinINet's rules (the
+  documentation and Wine's http.c tests on Windows): no notification
+  flags, but a handle whose context is 0 reports nothing; a connection
+  and a request get their parent's callback; HANDLE_CREATED (60) goes
+  to the parent's callback with the new handle's context, HANDLE_CLOSING
+  (70) to the closed handle's; the steps are RESOLVING_NAME (10, the
+  host in UTF-16), NAME_RESOLVED (11), CONNECTING_TO_SERVER (20) and
+  CONNECTED_TO_SERVER (21) (the address as ANSI text, strlen + 1, for
+  the W callback too), SENDING_REQUEST (30), REQUEST_SENT (31),
+  RECEIVING_RESPONSE (40), RESPONSE_RECEIVED (41), REDIRECT (110, the
+  URL in UTF-16); wide strings' lengths are their bytes with the NUL.
+  A failed handshake has no notification (the error code says it).
+  InternetOpenUrlW makes its handle (HANDLE_CREATED) before it sends,
+  and closes it if the send fails. `wininet_test` /
+  `wow64_wininet_test` check the order and the context rule.
 - **Time-outs**: the connect time-out (default 60 s) is a non-blocking
   connect waited for with WSAPoll, for each address tried (SO_ERROR
   says why one failed); every address timing out is
@@ -4361,8 +4552,8 @@ HTTP on 127.0.0.1:8080.
   WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW
   (`gala_stubs` stubs); named
   proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
-  WinINet's FTP and Gopher and its cache (InternetQueryOptionW and the
-  A functions are not exported yet);
+  WinINet's FTP and Gopher, its cache and cookie store, and the A
+  functions setup.exe does not import;
   WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
   as an option, not applied; the redirect policy is);
   connection reuse (every request has its own connection, closed with
@@ -4901,9 +5092,11 @@ endpoint's I/O completion port.
 
 The kernel reports its interfaces through a class of its own,
 NtQuerySystemInformation(0x67610001, GALA_NETWORK_INTERFACES; Windows'
-iphlpapi asks the NSI driver, whose interface is undocumented): 36-byte
+iphlpapi asks the NSI driver, whose interface is undocumented): 40-byte
 records of index, IFTYPE, MTU, MAC length, MAC (8 bytes), IPv4 address,
-prefix length and NetLuidIndex.
+prefix length, NetLuidIndex and the IPv4 default gateway (0.0.0.0: none;
+the card's is QEMU's 10.0.2.2). The DLL and the kernel ship together:
+a caller with room for fewer bytes gets STATUS_INFO_LENGTH_MISMATCH.
 
 | Index | Interface | Address | NetLuidIndex |
 |---|---|---|---|
@@ -4917,7 +5110,18 @@ GetUnicastIpAddressTable (IPv4 rows; none for AF_INET6),
 GetAnycastIpAddressTable (empty), FreeMibTable (tables from the process
 heap), ConvertInterfaceLuidToNameW/NameToLuidW (`loopback_0`,
 `ethernet_32768`), ConvertInterfaceLuidToIndex/IndexToLuid;
-ConvertLengthToIpv4Mask is computed. Java's NetworkInterface lists them
+ConvertLengthToIpv4Mask is computed; GetAdaptersInfo (`adapters.rs`,
+IP_ADAPTER_INFO in the caller's width, held to the SDK's offsets for
+both; on x86 with MSVC's 64-bit time_t, 648 bytes, where mingw's i686
+headers say 640: only the lease times differ, which callers reach
+through Next anyway): every adapter but loopback, named by its GUID in
+braces, its MAC, address and mask, the gateway (mask 255.255.255.255),
+DHCP off, no WINS (Wine's testGetAdaptersInfo, run on Windows: no size
+pointer ERROR_INVALID_PARAMETER, no adapter ERROR_NO_DATA, too small
+ERROR_BUFFER_OVERFLOW with the bytes needed; `office_api_test` and
+`wow64_office_api_test`, which boot with a card). The tables have no
+pointers, so the x86 build (SysWOW64) writes the same layouts. Java's
+NetworkInterface lists them
 (Elasticsearch's default network.host, `_local_`, needs that).
 GetAdaptersAddresses, ICMP echo and address-change notification return
 ERROR_NOT_SUPPORTED and are recorded.
@@ -6531,6 +6735,15 @@ windows can use them too.
     and 16 named parameters (more is recorded) and the BIND_OPTS bytes;
     CoImpersonateClient/CoRevertToSelf answer RPC_E_CALL_COMPLETE (gala
     serves no COM calls across processes).
+  - Call cancellation (`lib.rs`): CoEnableCallCancellation counts per
+    thread (in the thread's OLE state; CoUninitialize's last call resets
+    it), CoDisableCallCancellation undoes one (S_OK, measured on
+    Windows; CO_E_CANCEL_DISABLED when none is left to undo);
+    CoCancelCall is RPC_E_NO_CONTEXT (as Windows answers with no call
+    pending, measured with cancellation enabled and disabled): gala's COM never
+    has a pending cross-apartment call to cancel (recorded,
+    `ole32.dll!CoCancelCall(no pending call)`). `combase_test`,
+    `wow64_combase_test`.
 - **dbghelp** (`user/dbghelp/src/image.rs`, `symbols.rs`, `stack.rs`;
   `dbghelp_test`): ImageNtHeader checks "MZ" and "PE\0\0";
   SymSrvGetFileIndexInfoW reads an image file's headers (no mapping):
@@ -8020,7 +8233,11 @@ ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 there), schannel and the RustCrypto crates under it
 (`wow64_schannel_test`; getrandom's ProcessPrng imported undecorated), combase and
 appxdeploymentclient (`wow64_combase_test`; PackageManager is registered
-in the 32-bit registry view too). urlmon.dll has the default URL security manager
+in the 32-bit registry view too), wininet (`wow64_wininet_test`,
+wininet_test's C source built with mingw's i686 compiler; "WinHTTP and
+WinINet"), iphlpapi (`wow64_office_api_test`'s GetAdaptersInfo;
+"Network interfaces"), wintrust (`wow64_wintrust_test`: "wintrust:
+Authenticode"). urlmon.dll has the default URL security manager
 (CoInternetCreateSecurityManager, `secmgr.rs`): MapUrlToZone and
 GetSecurityId as Windows' default settings with no zone mappings answer
 them (a drive path, file: with a drive and res: the Local Machine zone;
@@ -8058,7 +8275,7 @@ compiled programs import from it (`_allmul`, `_alldiv`, `_allrem`,
 `_aulldiv`, `_aullrem`, `_alldvrm`, `_aulldvrm`, `_allshl`, `_allshr`,
 `_aullshr`: `x86.rs`). Inno Setup 6.5.4's x86 installer installs on
 these (`wow64_inno`). To come, as programs need them (ODT's setup.exe
-next: ROADMAP OF): wintrust, wininet and the rest (ROADMAP WOW).
+next: ROADMAP OF): the rest of what it imports (ROADMAP WOW).
 
 The 32-bit stubs pop the bytes their own declaration names (stdcall
 `ret N`), and wow64.dll's table converts one entry per 4-byte word:
@@ -8079,7 +8296,7 @@ being a 64-bit one's), and user/bin gets them as `test<name>32.dll`
 `testadvapi32_32.dll`, `testbcryptprimitives32.dll`,
 `testuser32_32.dll`, `testgdi32_32.dll`, `testcomctl3232.dll` and the
 rest of the Inno set as `test<name>32.dll`, `testcrypt3232.dll`,
-`testncrypt32.dll`, `testmsi32.dll`; test DLLs
+`testncrypt32.dll`, `testmsi32.dll`, `testwintrust32.dll`; test DLLs
 under their own names: `testdll32.dll`).
 
 ### Redirection, the 32-bit environment and the answers

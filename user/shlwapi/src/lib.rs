@@ -1,7 +1,9 @@
 //! gala's shlwapi.dll (shell path, string and URL helpers): the path
 //! functions SQL Server LocalDB and wxWidgets use (`paths`,
 //! `paths_more`), string comparisons and searches and SHDeleteKeyW
-//! (`strings`); the URL functions, AssocQueryStringW, SHAutoComplete and
+//! (`strings`); PathIsUNCW, PathGetArgsW, PathGetCharTypeW,
+//! PathGetDriveNumberW and StrRetToBufW, which ODT's setup.exe imports
+//! (`shell`); the URL functions, AssocQueryStringW, SHAutoComplete and
 //! SHCreateStreamOnFileEx are not implemented yet (`gala_stubs`: each
 //! reports itself to the missing-features ledger and ends the process
 //! when called).
@@ -12,6 +14,7 @@ mod assoc;
 mod misc;
 mod paths;
 mod paths_more;
+mod shell;
 mod strings;
 mod urls;
 

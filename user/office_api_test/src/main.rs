@@ -70,6 +70,15 @@
 //!   then the zone's DWORD); a relative URL E_INVALIDARG; "http:" without
 //!   "//" S_OK with URLZONE_INVALID and no ID; NULL arguments
 //!   E_INVALIDARG, ProcessUrlAction's too.
+//! - iphlpapi's GetAdaptersInfo (setup.exe delay-loads it; Wine's
+//!   iphlpapi.c testGetAdaptersInfo run on Windows): no size pointer
+//!   ERROR_INVALID_PARAMETER; no buffer ERROR_NO_DATA (no adapter) or
+//!   ERROR_BUFFER_OVERFLOW with the bytes needed, then with them
+//!   NO_ERROR; each adapter, linked by Next inside the buffer, is no
+//!   loopback, is named by its GUID in braces, has its MAC's length (at
+//!   most 8), an address and mask, and a gateway address and mask (as
+//!   text, "0.0.0.0" when there is none). One byte less is
+//!   ERROR_BUFFER_OVERFLOW again. The scenarios give gala a network card.
 //! - AttachConsole and AllocConsole in a process that has a console
 //!   (GetConsoleCP not 0; run-all.ps1's programs and gala's have one):
 //!   ERROR_ACCESS_DENIED; GetDiskFreeSpaceA of the system drive.
@@ -315,6 +324,41 @@ unsafe extern "system" {
 #[cfg_attr(not(target_arch = "x86"), link(name = "urlmon", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn CoInternetCreateSecurityManager(provider: usize, manager: *mut usize, reserved: u32) -> i32;
+}
+
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "iphlpapi", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "iphlpapi", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn GetAdaptersInfo(info: *mut IpAdapterInfo, size: *mut u32) -> u32;
+}
+
+/// IP_ADDR_STRING (iptypes.h).
+#[repr(C)]
+struct IpAddrString {
+    next: usize,
+    address: [u8; 16],
+    mask: [u8; 16],
+    context: u32,
+}
+
+/// IP_ADAPTER_INFO (iptypes.h), up to the fields the checks read.
+#[repr(C)]
+struct IpAdapterInfo {
+    next: *mut IpAdapterInfo,
+    combo_index: u32,
+    adapter_name: [u8; 260],
+    description: [u8; 132],
+    address_length: u32,
+    address: [u8; 8],
+    index: u32,
+    if_type: u32,
+    dhcp_enabled: u32,
+    current_ip_address: usize,
+    ip_address_list: IpAddrString,
+    gateway_list: IpAddrString,
 }
 
 #[cfg_attr(
@@ -1032,6 +1076,52 @@ fn run() -> Result<(), u32> {
     idn_and_power(&mut c)?;
     geo_and_lockdown(&mut c)?;
     url_zones(&mut c)?;
+    adapters(&mut c)?;
+    Ok(())
+}
+
+/// GetAdaptersInfo, as the module's comment says.
+fn adapters(c: &mut Checks) -> Result<(), u32> {
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    const ERROR_NO_DATA: u32 = 232;
+    const MIB_IF_TYPE_LOOPBACK: u32 = 24;
+    static mut BUF: [u64; 1024] = [0; 1024];
+    let buf = (&raw mut BUF).cast::<IpAdapterInfo>();
+    let end = buf as usize + size_of::<[u64; 1024]>();
+    // SAFETY: our buffer with its size; the adapters inside it.
+    unsafe {
+        c.eq(GetAdaptersInfo(null_mut(), null_mut()).into(), u64::from(ERROR_INVALID_PARAMETER))?;
+        let mut len = 0;
+        let r = GetAdaptersInfo(null_mut(), &mut len);
+        if r == ERROR_NO_DATA {
+            return Ok(());
+        }
+        c.eq(r.into(), u64::from(ERROR_BUFFER_OVERFLOW))?;
+        c.ok(
+            len as usize >= size_of::<IpAdapterInfo>() && len as usize <= end - buf as usize,
+            len.into(),
+        )?;
+        let mut short = len - 1;
+        c.eq(GetAdaptersInfo(buf, &mut short).into(), u64::from(ERROR_BUFFER_OVERFLOW))?;
+        c.eq(short.into(), len.into())?;
+        c.eq(GetAdaptersInfo(buf, &mut len).into(), 0)?;
+        let text = |s: &[u8]| s[0] != 0 && s.contains(&0);
+        let mut a = buf;
+        while !a.is_null() {
+            c.ok(
+                a as usize >= buf as usize && (a as usize) < buf as usize + len as usize,
+                a as u64,
+            )?;
+            let i = &*a;
+            c.ok(i.if_type != MIB_IF_TYPE_LOOPBACK, i.if_type.into())?;
+            let name = &i.adapter_name;
+            c.ok(name[0] == b'{' && name[37] == b'}' && name[38] == 0, u64::from(name[0]))?;
+            c.ok(i.address_length <= 8, i.address_length.into())?;
+            c.ok(text(&i.ip_address_list.address) && text(&i.ip_address_list.mask), 0)?;
+            c.ok(text(&i.gateway_list.address) && text(&i.gateway_list.mask), 0)?;
+            a = i.next;
+        }
+    }
     Ok(())
 }
 

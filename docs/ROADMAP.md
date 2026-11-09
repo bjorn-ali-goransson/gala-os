@@ -1457,9 +1457,8 @@ need gala's.
      both widths, ARCHITECTURE "The 32-bit system DLLs"). How far it
      gets: it starts, starts its copy (a second setup.exe), whose crypt32
      now loads and answers (its own embedded signature asked of
-     CryptQueryObject, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED, is
-     recorded unsupported: `crypt32.dll!CryptQueryObject(content)`
-     0x400); it reads its Office and Click-to-Run registry keys (absent)
+     CryptQueryObject, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED: the
+     message and its store, below); it reads its Office and Click-to-Run registry keys (absent)
      and ends with 0xc06d007e at its next delay-loaded DLL, msi.dll,
      imported by ordinal (MsiCloseHandle #8, MsiEnumComponentQualifiersW
      #39, MsiEnumProductsW #45, MsiLocateComponentW #90,
@@ -1548,14 +1547,11 @@ need gala's.
      Gateway SDS Issuing CA", `openssl s_client` on the host shows the
      same), which no root store trusts (`crypt32.dll!SSL:
      CERT_E_UNTRUSTEDROOT`, chain error 0x20, `schannel.dll!ISC:
-     UnknownIssuer`, SEC_E_UNTRUSTED_ROOT). Open bug: in about one run in
-     three the same chain (three RSA-2048 SHA-256 certificates, which
-     `openssl verify` accepts every time) fails with
-     `crypt32.dll!SSL: TRUST_E_CERT_SIGNATURE`, chain error 0x28
-     (CERT_TRUST_IS_NOT_SIGNATURE_VALID too) and SEC_E_CERT_UNKNOWN:
-     the 32-bit crypt32/bcrypt signature check is not deterministic under
-     setup.exe's threads (`wow64_cert_test` and `wow64_schannel_test`,
-     single-threaded, pass every time); not yet investigated. With direct egress the chain is Microsoft's,
+     UnknownIssuer`, SEC_E_UNTRUSTED_ROOT), every run (an empty path
+     is ERROR_PATH_NOT_FOUND, not the current directory, so setup.exe's
+     cleanup of its unset folder "" no longer deletes C:\, SysWOW64's
+     bcrypt.dll with it; `kernel32_file_test`, ARCHITECTURE "Files").
+     With direct egress the chain is Microsoft's,
      to a public root (not yet seen in a run). Its error path asks urlmon's
      security manager (done: urlmon.dll for x64 and x86,
      CoInternetCreateSecurityManager with MapUrlToZone and GetSecurityId
@@ -1565,21 +1561,85 @@ need gala's.
      https://officeclient.microsoft.com..., URLACTION_CREDENTIALS_USE
      0x1a00), answered E_NOTIMPL and recorded (Windows answers from the
      Internet zone's policy under Internet Settings\Zones), and MapUrlToZone(
-     https://ecs.office.com/config/v2/Office/...) = 3, Internet. Where
-     the run ends now: setup.exe delay-loads
-     `wininet.dll!InternetGetCookieExW`, and gala's wininet has no i686
-     build: both copies end with 0xc06d007e (crash report: "delay load of
-     WININET.dll!InternetGetCookieExW"). ODT has written no log yet
+     https://ecs.office.com/config/v2/Office/...) = 3, Internet. It then
+     asks wininet for its cookies (done: gala's wininet.dll for i686 too,
+     with every wininet function setup.exe imports: InternetGetCookieExW,
+     no cookies as on a fresh profile, recorded `wininet.dll!InternetGet
+     CookieExW(no cookie store)`, asked twice, with
+     INTERNET_COOKIE_HTTPONLY and without; InternetQueryOptionW,
+     InternetSetStatusCallbackW with WinINet's notifications, and the A
+     functions InternetConnectA, HttpOpenRequestA, HttpAddRequestHeadersA,
+     HttpQueryInfoA, InternetCrackUrlA; `wininet_test` and its x86 twin
+     `wow64_wininet_test`, expectations from Wine's wininet tests run on
+     Windows; ARCHITECTURE "WinHTTP and WinINet"), asks the 32-bit ntdll
+     for RtlConvertDeviceFamilyInfoToString through GetProcAddress
+     (missing export, survived), lists the network adapters (done:
+     gala's iphlpapi.dll for i686 too, with GetAdaptersInfo for both
+     widths from the kernel's interface records, which carry the
+     gateway; `office_api_test`, `wow64_office_api_test`, on a card;
+     ARCHITECTURE "Network interfaces"), asks WinRT for
+     Windows.Networking.Connectivity.NetworkInformation and
+     Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator
+     (not registered, recorded; REGDB_E_CLASSNOTREG, survived) and opens
+     an asynchronous wininet session (`wininet.dll!InternetOpenW(INTERNET_
+     FLAG_ASYNC)`, ERROR_NOT_SUPPORTED, recorded, survived). It then uses
+     shlwapi's path helpers (done: PathIsUNCW, PathGetArgsW,
+     PathGetCharTypeW, PathGetDriveNumberW, StrRetToBufW, every shlwapi
+     function it imports; `shlwapi_test` and its x86 twin
+     `wow64_shlwapi_test`) and ole32's call cancellation (done:
+     CoEnableCallCancellation, CoDisableCallCancellation, CoCancelCall;
+     `combase_test`, `wow64_combase_test`), asks COM for BITS's
+     BackgroundCopyManager ({4991D34B-80A1-4291-83B6-3328366B9097}, an
+     out-of-process server: `ole32.dll!CoGetClassObject(out-of-process
+     server)`, recorded, survived) and the zone policy of the CDN's URL
+     (`urlmon.dll!ProcessUrlAction(http://officecdn.microsoft.com/...)`).
+     It then checks signatures with WinVerifyTrust (done: gala's
+     wintrust.dll, x64 and x86, Authenticode over PE images: the image
+     hash, the PKCS #7 SignedData through crypt32's CryptMsg* decoding,
+     the signer's signature, the RFC 3161 timestamp, the chain with the
+     Authenticode policy, Microsoft's code signing roots in the root
+     store, and the three WTHelper functions; CryptQueryObject's
+     embedded PKCS #7, which setup.exe asks for its own signature, is
+     answered too; `wintrust_test`, `wow64_wintrust_test`, expected
+     results from Wine's softpub.c tests run on Windows; ARCHITECTURE
+     "wintrust: Authenticode"): its own setup.exe verifies (primary
+     signature; its WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
+     CryptMsgOpenToDecode asks for CMSG_DETACHED_FLAG (recorded, decoded
+     as attached), and it downloads the version descriptor cab from
+     officecdn.microsoft.com over http.
+     Where the run ends now: WinVerifyTrust of that cabinet, twice
+     (`wintrust.dll!WinVerifyTrust(subject: cabinet)`, then
+     TRUST_E_SUBJECT_FORM_UNKNOWN: gala has no cabinet SIP); setup.exe
+     then asks kernelbase for SetSystemFileCacheSize and ntdll for
+     NtSetSystemInformation (missing exports), LoadLibrary("slc.dll")
+     (missing dll), and the elevated copy and its parent exit with
+     0xffffffff after about 7 s. ODT has written no log yet
      (`dump=C:/gala/odtlog` finds no directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next: the nondeterministic signature failure above (first: which
-     element and which call fails, then why); in the order the run
-     reaches them: wininet.dll for i686
-     (InternetGetCookieExW: no cookies, as a fresh profile; then what
-     else of wininet it calls), urlmon's ProcessUrlAction from the zones'
-     default policies (the Internet Settings\Zones keys), a run with
+     Next, in the order the run reaches them: Authenticode for cabinets
+     (the cab SIP: the signature's place is in Wine's crypt.c, the
+     reserved header area's offset and size, but the digest a signed
+     cab's SpcIndirectDataContent carries, an SpcLink with a moniker over
+     SHA-256, covers a range the allowed sources do not document and
+     Wine does not check: a contiguous hash of the cab up to the
+     signature, with the size and reserve fields left out or zeroed, does
+     not match a CDN cab; establish it from Windows' behaviour on signed
+     and altered cabs, test first), then whether the cab's acceptance is
+     what ends the run (slc.dll's licensing calls are next on the path);
+     then
+     the other DLLs
+     the other DLLs
+     setup.exe imports that gala has no i686 build of (xmllite,
+     webservices, setupapi, cabinet, credui, gdiplus; osppc.dll is
+     Office's own) and the functions its imports lack (shell32's
+     SHGetSettings, user32's CheckRadioButton and SetCoalescableTimer,
+     iphlpapi's CreateSortedAddressPairs); BITS (the
+     BackgroundCopyManager it asks for: absent, survived); WinINet's
+     asynchronous sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),
+     RtlConvertDeviceFamilyInfoToString in ntdll, urlmon's
+     ProcessUrlAction from the zones' default policies (the Internet Settings\Zones keys), a run with
      direct egress (the TLS chain of Microsoft's servers to a public
      root), then what the run reaches after them (its log
      in `target/failed/office_install.dump/` once it writes one); starting
@@ -1588,11 +1648,9 @@ need gala's.
      (setup.exe's error and progress UI), HKCU from the caller's token,
      winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
      the XML it downloads (the CDN's cab manifests: more of the DOM as
-     the run reaches it; load of URLs is recorded unsupported), then
-     CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
-     (the signature check), wininet, xmllite, webservices,
-     iphlpapi, setupapi, cabinet, credui; a few shlwapi, user32, ole32
-     and shell32 functions; FormatMessage's system text for
+     the run reaches it; load of URLs is recorded unsupported);
+     wintrust's secondary signatures and legacy countersignatures,
+     crypt32's detached messages; FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
      dispatcher's nested exceptions and collided unwinds.
 2. The new Outlook after BR's WebView2: MSIX install (PK stage 4),
@@ -1635,8 +1693,8 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    "WinHTTP and WinINet"); the status callbacks of a synchronous
    session and the connect time-out (`winhttp_cb_test`,
    `wow64_winhttp_cb_test`). Still open there: connection reuse,
-   asynchronous sessions (and their completion notifications), WinINet's
-   InternetSetStatusCallback, proxies, authentication,
+   asynchronous sessions (and their completion notifications), proxies,
+   authentication,
    WINHTTP_DISABLE_REDIRECTS.
 2. Done: wininet's HTTP functions on the same engine as winhttp
    (`user/http_client`; `wininet_test` against the same Nginx:
@@ -1645,8 +1703,11 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    and InternetReadFile, InternetOpenUrlW, InternetCrackUrlW, an unknown
    issuer as ERROR_INTERNET_INVALID_CA, a closed port, a redirect
    followed and one not (INTERNET_FLAG_NO_AUTO_REDIRECT); ARCHITECTURE
-   "WinHTTP and WinINet"). Still open there, besides winhttp's list:
-   the A functions, InternetQueryOptionW, FTP, the cache,
+   "WinHTTP and WinINet"); x86 too (`wow64_wininet_test`), with
+   InternetQueryOptionW, InternetSetStatusCallbackW, InternetGetCookieExW
+   (no cookie store: none) and the A functions ODT's setup.exe imports.
+   Still open there, besides winhttp's list: the other A functions, the
+   cookie store (Set-Cookie kept, sent and answered), FTP, the cache,
    InternetTimeFrom/ToSystemTimeW.
 3. Done: curl and Git over Schannel. curl.se's own Windows build
    (8.23.0_8, PREBUILT `curl`) has LibreSSL as its only TLS backend (no

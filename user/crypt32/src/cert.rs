@@ -27,6 +27,7 @@ unsafe extern "system" {
     fn HeapAlloc(heap: usize, flags: u32, size: usize) -> *mut u8;
     fn HeapFree(heap: usize, flags: u32, p: *mut u8) -> i32;
     fn SetLastError(code: u32);
+    fn GetLastError() -> u32;
     fn LoadLibraryA(name: *const u8) -> usize;
     fn GetProcAddress(module: usize, name: *const u8) -> usize;
 }
@@ -706,11 +707,20 @@ pub(crate) fn bcrypt(name: &core::ffi::CStr) -> Option<usize> {
 /// BCryptHash with algorithm pseudo-handle `alg` (0x21 MD5, 0x31 SHA-1,
 /// 0x41 SHA-256).
 fn digest(alg: usize, data: &[u8], out: &mut [u8]) -> bool {
+    hash_with(alg, data, out).is_ok()
+}
+
+/// `digest`, with the step that failed: finding BCryptHash (the loader's
+/// error) or BCryptHash itself (its NTSTATUS).
+pub(crate) fn hash_with(alg: usize, data: &[u8], out: &mut [u8]) -> Result<(), SignatureFailure> {
     type HashFn =
         unsafe extern "system" fn(usize, *const u8, u32, *const u8, u32, *mut u8, u32) -> u32;
-    let Some(f) = bcrypt(c"BCryptHash") else { return false };
+    let Some(f) = bcrypt(c"BCryptHash") else {
+        // SAFETY: plain call.
+        return Err(SignatureFailure::at(b"GetProcAddress(BCryptHash)", unsafe { GetLastError() }));
+    };
     // SAFETY: BCryptHash's documented signature; our buffers.
-    unsafe {
+    let status = unsafe {
         let f = core::mem::transmute::<usize, HashFn>(f);
         f(
             alg,
@@ -720,8 +730,9 @@ fn digest(alg: usize, data: &[u8], out: &mut [u8]) -> bool {
             data.len() as u32,
             out.as_mut_ptr(),
             out.len() as u32,
-        ) == 0
-    }
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(SignatureFailure::at(b"BCryptHash", status)) }
 }
 
 /// Copies `data` out as documented: the size with a null buffer,
@@ -1704,6 +1715,43 @@ fn signature_algorithm(oid: &[u8]) -> Option<(Scheme, usize, usize, &'static [u1
     Some((scheme, alg, len, name))
 }
 
+/// A digest algorithm (OID contents): its bcrypt pseudo-handle, length
+/// and name: MD5, SHA-1, SHA-256/384/512.
+pub(crate) fn digest_algorithm(oid: &[u8]) -> Option<(usize, usize, &'static [u16])> {
+    const MD5: [u16; 4] = [0x4d, 0x44, 0x35, 0];
+    const SHA1: [u16; 5] = [0x53, 0x48, 0x41, 0x31, 0];
+    const SHA256: [u16; 7] = [0x53, 0x48, 0x41, 0x32, 0x35, 0x36, 0];
+    const SHA384: [u16; 7] = [0x53, 0x48, 0x41, 0x33, 0x38, 0x34, 0];
+    const SHA512: [u16; 7] = [0x53, 0x48, 0x41, 0x35, 0x31, 0x32, 0];
+    const NIST: [u8; 8] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02];
+    match oid {
+        [0x2b, 0x0e, 0x03, 0x02, 0x1a] => Some((0x31, 20, &SHA1)),
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x05] => Some((0x21, 16, &MD5)),
+        [n @ .., last] if n == NIST => match last {
+            1 => Some((0x41, 32, &SHA256)),
+            2 => Some((0x51, 48, &SHA384)),
+            3 => Some((0x61, 64, &SHA512)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a signer's signature algorithm (OID contents) is ECDSA
+/// (id-ecPublicKey or ecdsa-with-*), RSA (rsaEncryption or
+/// *WithRSAEncryption): Some(true) for ECDSA, Some(false) for RSA.
+pub(crate) fn signer_scheme(oid: &[u8]) -> Option<bool> {
+    const PKCS1: [u8; 8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+    const EC_KEY: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+    if oid.len() == 9 && oid[..8] == PKCS1 {
+        return Some(false);
+    }
+    if oid == EC_KEY {
+        return Some(true);
+    }
+    signature_algorithm(oid).map(|(scheme, ..)| scheme == Scheme::Ecdsa)
+}
+
 /// An ECDSA signature (Ecdsa-Sig-Value: SEQUENCE { r INTEGER, s INTEGER })
 /// as bcrypt takes it: r || s, each `size` bytes.
 fn ecdsa_signature(der: &[u8], size: usize, out: &mut [u8; 2 * 66]) -> Option<usize> {
@@ -1720,6 +1768,22 @@ fn ecdsa_signature(der: &[u8], size: usize, out: &mut [u8; 2 * 66]) -> Option<us
         out[at..at + v.len()].copy_from_slice(v);
     }
     Some(2 * size)
+}
+
+/// Why a signature check failed: the step (`b"BCryptVerifySignature"`,
+/// ...) and its status (an NTSTATUS from bcrypt, or the error the step
+/// set), which CertGetCertificateChain records for an element whose
+/// signature does not verify.
+#[derive(Clone, Copy)]
+pub(crate) struct SignatureFailure {
+    pub step: &'static [u8],
+    pub status: u32,
+}
+
+impl SignatureFailure {
+    const fn at(step: &'static [u8], status: u32) -> Self {
+        SignatureFailure { step, status }
+    }
 }
 
 /// CryptVerifyCertificateSignatureEx(prov, encoding, subjectType, subject,
@@ -1742,8 +1806,24 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
     _flags: u32,
     _extra: *const c_void,
 ) -> i32 {
+    match verify_signature(subject_type, subject, issuer_type, issuer) {
+        Ok(()) => 1,
+        Err(f) if f.step == b"BCryptVerifySignature" => error(NTE_BAD_SIGNATURE, 0),
+        Err(f) if f.step == b"BCryptHash" => error(NTE_BAD_ALGID, 0),
+        Err(f) => error(f.status, 0),
+    }
+}
+
+/// CryptVerifyCertificateSignatureEx's check, with the step that failed.
+pub(crate) fn verify_signature(
+    subject_type: u32,
+    subject: *const c_void,
+    issuer_type: u32,
+    issuer: *const c_void,
+) -> Result<(), SignatureFailure> {
+    let fail = SignatureFailure::at;
     if subject.is_null() || issuer.is_null() {
-        return error(E_INVALIDARG, 0);
+        return Err(fail(b"arguments", E_INVALIDARG));
     }
     // SAFETY: the caller's blob or context.
     let encoded: &[u8] = unsafe {
@@ -1760,7 +1840,7 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
                 let c = &*subject.cast::<crate::crl::CrlContext>();
                 core::slice::from_raw_parts(c.encoded, c.encoded_len as usize)
             }
-            _ => return error(E_INVALIDARG, 0),
+            _ => return Err(fail(b"arguments", E_INVALIDARG)),
         }
     };
     // SAFETY: the caller's CERT_PUBLIC_KEY_INFO or context.
@@ -1768,7 +1848,7 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
         match issuer_type {
             1 => issuer.cast(),
             2 => &(*(*issuer.cast::<CertContext>()).info).public_key,
-            _ => return error(E_INVALIDARG, 0),
+            _ => return Err(fail(b"arguments", E_INVALIDARG)),
         }
     };
     // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm,
@@ -1781,32 +1861,50 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
         let sig = d.expect(BIT_STRING)?;
         Ok::<_, u32>((tbs.whole, alg, sig.content.get(1..).unwrap_or(&[])))
     })();
-    let Ok((tbs, alg, signature)) = parts else { return error(CRYPT_E_ASN1_CORRUPT, 0) };
+    let Ok((tbs, alg, signature)) = parts else {
+        return Err(fail(b"decode", CRYPT_E_ASN1_CORRUPT));
+    };
     let Some((scheme, hash_alg, hash_len, hash_name)) = signature_algorithm(alg) else {
         crate::store::unsupported(b"crypt32.dll!CryptVerifyCertificateSignatureEx(algorithm)", 0);
-        return error(NTE_BAD_ALGID, 0);
+        return Err(fail(b"algorithm", NTE_BAD_ALGID));
     };
+    let mut hash = [0u8; 64];
+    hash_with(hash_alg, tbs, &mut hash[..hash_len])?;
+    verify_hashed(key_info, scheme == Scheme::Ecdsa, hash_name, &hash[..hash_len], signature)
+}
+
+/// Whether `signature` (RSA PKCS #1 v1.5, or ECDSA's DER
+/// Ecdsa-Sig-Value) over the digest `hash`, made with the hash named
+/// `hash_name` (bcrypt's name, NUL-terminated UTF-16), verifies with the
+/// public key `key_info`; the step that failed otherwise.
+pub(crate) fn verify_hashed(
+    key_info: *const PublicKeyInfo,
+    ecdsa: bool,
+    hash_name: &'static [u16],
+    hash: &[u8],
+    signature: &[u8],
+) -> Result<(), SignatureFailure> {
+    let fail = SignatureFailure::at;
+    let scheme = if ecdsa { Scheme::Ecdsa } else { Scheme::Rsa };
+    let hash_len = hash.len();
     let mut raw = [0u8; 2 * 66];
     let signature = if scheme == Scheme::Ecdsa {
         // SAFETY: the caller's CERT_PUBLIC_KEY_INFO.
         let Some((_, _, size, _)) = ec_key(unsafe { &*key_info }) else {
-            return error(NTE_BAD_ALGID, 0);
+            return Err(fail(b"ECDSA key", NTE_BAD_ALGID));
         };
         match ecdsa_signature(signature, size, &mut raw) {
             Some(n) => &raw[..n],
-            None => return error(NTE_BAD_SIGNATURE, 0),
+            None => return Err(fail(b"BCryptVerifySignature", NTE_BAD_SIGNATURE)),
         }
     } else {
         signature
     };
-    let mut hash = [0u8; 64];
-    if !digest(hash_alg, tbs, &mut hash[..hash_len]) {
-        return error(NTE_BAD_ALGID, 0);
-    }
     let mut key = 0usize;
     if CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING, key_info, 0, core::ptr::null(), &mut key) == 0
     {
-        return 0;
+        // SAFETY: plain call.
+        return Err(fail(b"CryptImportPublicKeyInfoEx2", unsafe { GetLastError() }));
     }
     type Verify =
         unsafe extern "system" fn(usize, *const c_void, *const u8, u32, *const u8, u32, u32) -> u32;
@@ -1814,7 +1912,7 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
     let (Some(verify), Some(destroy)) =
         (bcrypt(c"BCryptVerifySignature"), bcrypt(c"BCryptDestroyKey"))
     else {
-        return error(NTE_BAD_ALGID, 0);
+        return Err(fail(b"bcrypt.dll", NTE_BAD_ALGID));
     };
     let padding = hash_name.as_ptr();
     // SAFETY: bcrypt's documented signatures; BCRYPT_PKCS1_PADDING_INFO
@@ -1838,7 +1936,7 @@ pub extern "system" fn CryptVerifyCertificateSignatureEx(
         core::mem::transmute::<usize, Destroy>(destroy)(key);
         status
     };
-    if status == 0 { 1 } else { error(NTE_BAD_SIGNATURE, 0) }
+    if status == 0 { Ok(()) } else { Err(fail(b"BCryptVerifySignature", status)) }
 }
 
 const CRYPT_E_NO_KEY_PROPERTY: u32 = 0x8009_200b;

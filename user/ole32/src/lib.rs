@@ -478,6 +478,9 @@ pub(crate) struct ThreadState {
     sta_context: Context,
     /// CoGetCurrentProcess's number for this thread (0 until asked).
     number: u32,
+    /// CoEnableCallCancellation's calls not yet undone by
+    /// CoDisableCallCancellation (0: cancellation disabled).
+    cancel_enables: u32,
 }
 
 const APARTMENT_STA: u32 = 0x80;
@@ -545,6 +548,7 @@ pub(crate) fn thread_state() -> Option<&'static mut ThreadState> {
                     threading: CONTEXT_THREADING.0.as_ptr().cast(),
                 },
                 number: 0,
+                cancel_enables: 0,
             });
             *slot = p;
         }
@@ -644,11 +648,60 @@ pub extern "system" fn CoUninitialize() {
                 MTA_THREADS.fetch_sub(1, Ordering::Relaxed);
             }
             state.set_kind(0);
+            // Leaving COM disables call cancellation (CoDisableCall
+            // Cancellation's documentation).
+            state.cancel_enables = 0;
         }
     }
     for &spy in spies.iter().filter(|&&s| s != 0) {
         com_call!(spy, 6, fn(u32) -> HResult, state.refs);
     }
+}
+
+// ---- Call cancellation ----
+
+const CO_E_CANCEL_DISABLED: HResult = 0x8001_0140u32 as i32;
+const RPC_E_NO_CONTEXT: HResult = 0x8001_011Eu32 as i32;
+
+/// CoEnableCallCancellation(reserved): one more enable on this thread
+/// (nested: each needs its CoDisableCallCancellation); `reserved` must be
+/// NULL (E_INVALIDARG).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoEnableCallCancellation(reserved: *mut c_void) -> HResult {
+    if !reserved.is_null() {
+        return E_INVALIDARG;
+    }
+    let Some(state) = thread_state() else { return E_OUTOFMEMORY };
+    state.cancel_enables = state.cancel_enables.saturating_add(1);
+    S_OK
+}
+
+/// CoDisableCallCancellation(reserved): undoes one enable: S_OK while
+/// one remains to undo (measured on Windows: the first of two disables
+/// after two enables is S_OK), CO_E_CANCEL_DISABLED when there is none.
+#[unsafe(no_mangle)]
+pub extern "system" fn CoDisableCallCancellation(reserved: *mut c_void) -> HResult {
+    if !reserved.is_null() {
+        return E_INVALIDARG;
+    }
+    let Some(state) = thread_state() else { return E_OUTOFMEMORY };
+    if state.cancel_enables == 0 {
+        return CO_E_CANCEL_DISABLED;
+    }
+    state.cancel_enables -= 1;
+    S_OK
+}
+
+/// CoCancelCall(thread, timeout): cancels the thread's pending synchronous
+/// call to another apartment. gala's COM makes no cross-apartment or
+/// cross-process calls (every object is called directly), so there is
+/// never such a call: RPC_E_NO_CONTEXT ("no call to cancel"), whether
+/// or not cancellation is enabled (measured on Windows with it disabled;
+/// `combase_test`), recorded (`ole32.dll!CoCancelCall(no pending call)`).
+#[unsafe(no_mangle)]
+pub extern "system" fn CoCancelCall(thread: u32, _timeout: u32) -> HResult {
+    missing(b"ole32.dll!CoCancelCall(no pending call)", thread.into());
+    RPC_E_NO_CONTEXT
 }
 
 /// RoInitialize: RO_INIT_SINGLETHREADED (0) is an STA, MULTITHREADED (1)

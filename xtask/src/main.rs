@@ -1141,10 +1141,18 @@ const USER_DLLS_X86: &[Dll] = &[
     // urlmon (ODT's setup.exe delay-loads its security manager on its
     // download's error path; wow64_office_api_test).
     Dll { package: "urlmon", file: "urlmon.dll", exported_as: "testurlmon32.dll" },
+    // wininet (ODT's setup.exe delay-loads it for its cookies and its
+    // downloads; wow64_wininet_test).
+    Dll { package: "wininet", file: "wininet.dll", exported_as: "testwininet32.dll" },
+    // iphlpapi (ODT's setup.exe delay-loads GetAdaptersInfo;
+    // wow64_office_api_test).
+    Dll { package: "iphlpapi", file: "iphlpapi.dll", exported_as: "testiphlpapi32.dll" },
     // wldp (ODT's setup.exe loads it to check for S mode).
     Dll { package: "wldp", file: "wldp.dll", exported_as: "testwldp32.dll" },
     // msi (ODT's setup.exe delay-loads it by ordinal; wow64_msi_test).
     Dll { package: "msi", file: "msi.dll", exported_as: "testmsi32.dll" },
+    // wintrust (ODT's setup.exe delay-loads it; wow64_wintrust_test).
+    Dll { package: "wintrust", file: "wintrust.dll", exported_as: "testwintrust32.dll" },
     // msxml6 (ODT's setup.exe asks COM for DOMDocument60;
     // wow64_msxml_test).
     Dll { package: "msxml6", file: "msxml6.dll", exported_as: "testmsxml632.dll" },
@@ -1792,6 +1800,22 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wininet_test", "msvcrt.dll", "Windows/System32"),
     ("wininet_test", "wininet.dll", "Windows/System32"),
     ("wininet_test", "user/bin/wininet_test.exe", "gala"),
+    // wininet_test's source built for x86 (user/wininet_test/build.sh)
+    // through SysWOW64's wininet, against the same Nginx (MODULE_SETS).
+    ("wow64_wininet_test", "wow64.dll", "Windows/System32"),
+    ("wow64_wininet_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/wininet.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/ws2_32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/secur32.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "x86/schannel.dll", "Windows/SysWOW64"),
+    ("wow64_wininet_test", "user/bin/wow64_wininet_test.exe", "gala"),
     ("gdi32_test", "ntdll.dll", "Windows/System32"),
     ("gdi32_test", "kernel32.dll", "Windows/System32"),
     ("gdi32_test", "msvcrt.dll", "Windows/System32"),
@@ -1826,7 +1850,18 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("shlwapi_test", "shlwapi.dll", "Windows/System32"),
     ("shlwapi_test", "advapi32.dll", "Windows/System32"),
     ("shlwapi_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("shlwapi_test", "ole32.dll", "Windows/System32"),
     ("shlwapi_test", "user/bin/shlwapi_test.exe", "gala"),
+    // shlwapi_test's source built for x86 (user/shlwapi_test/build.sh).
+    ("wow64_shlwapi_test", "wow64.dll", "Windows/System32"),
+    ("wow64_shlwapi_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/msvcrt.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/shlwapi.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "x86/ole32.dll", "Windows/SysWOW64"),
+    ("wow64_shlwapi_test", "user/bin/wow64_shlwapi_test.exe", "gala"),
     ("ole32_test", "ntdll.dll", "Windows/System32"),
     ("ole32_test", "kernel32.dll", "Windows/System32"),
     ("ole32_test", "msvcrt.dll", "Windows/System32"),
@@ -3084,10 +3119,14 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_install", "x86/secur32.dll", "Windows/SysWOW64"),
     ("office_install", "x86/schannel.dll", "Windows/SysWOW64"),
     ("office_install", "x86/urlmon.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/wininet.dll", "Windows/SysWOW64"),
+    ("office_install", "x86/iphlpapi.dll", "Windows/SysWOW64"),
     // The machine's root store as a full image has it (system_modules:
     // the public CAs), which Schannel's validation of Microsoft's servers
     // reads.
     ("office_install", "user/roots/public-roots.pem", "Windows/System32/gala/roots"),
+    ("office_install", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
+    ("office_install", "x86/wintrust.dll", "Windows/SysWOW64"),
     ("office_install", "x86/shfolder.dll", "Windows/SysWOW64"),
     ("office_install", "x86/mpr.dll", "Windows/SysWOW64"),
     ("office_install", "x86/comdlg32.dll", "Windows/SysWOW64"),
@@ -3147,6 +3186,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("office_api_test", "powrprof.dll", "Windows/System32"),
     ("office_api_test", "wldp.dll", "Windows/System32"),
     ("office_api_test", "urlmon.dll", "Windows/System32"),
+    ("office_api_test", "iphlpapi.dll", "Windows/System32"),
     ("wow64_office_api_test", "wow64.dll", "Windows/System32"),
     ("wow64_office_api_test", "x86/ntdll.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/kernel32.dll", "Windows/SysWOW64"),
@@ -3155,6 +3195,7 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_office_api_test", "x86/powrprof.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/wldp.dll", "Windows/SysWOW64"),
     ("wow64_office_api_test", "x86/urlmon.dll", "Windows/SysWOW64"),
+    ("wow64_office_api_test", "x86/iphlpapi.dll", "Windows/SysWOW64"),
     // crypt32 through WOW64 (user/cert_test built for x86): the 32-bit
     // crypt32, ncrypt and bcrypt; the machine's roots in the real System32,
     // which the 32-bit crypt32 reads through Sysnative.
@@ -3167,6 +3208,33 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("wow64_cert_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
     ("wow64_cert_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
     ("wow64_cert_test", "user/schannel_test/certs/ca.cer", "Windows/System32/gala/roots"),
+    // WinVerifyTrust (user/wintrust_test), x64 and x86: wintrust, crypt32
+    // and bcrypt; Microsoft's code signing roots as a full image has them;
+    // the real signed images it verifies, from their downloads (PREBUILT
+    // odt and python; not committed).
+    ("wintrust_test", "ntdll.dll", "Windows/System32"),
+    ("wintrust_test", "kernel32.dll", "Windows/System32"),
+    ("wintrust_test", "advapi32.dll", "Windows/System32"),
+    ("wintrust_test", "wintrust.dll", "Windows/System32"),
+    ("wintrust_test", "crypt32.dll", "Windows/System32"),
+    ("wintrust_test", "bcrypt.dll", "Windows/System32"),
+    ("wintrust_test", "bcryptprimitives.dll", "Windows/System32"),
+    ("wintrust_test", "ncrypt.dll", "Windows/System32"),
+    ("wintrust_test", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
+    ("wintrust_test", "target/prebuilt/odt/setup.exe", "gala"),
+    ("wintrust_test", "target/prebuilt/python/python.exe", "gala"),
+    ("wow64_wintrust_test", "wow64.dll", "Windows/System32"),
+    ("wow64_wintrust_test", "x86/ntdll.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/kernel32.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/advapi32.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/wintrust.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/crypt32.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/ncrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/bcrypt.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "x86/bcryptprimitives.dll", "Windows/SysWOW64"),
+    ("wow64_wintrust_test", "user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"),
+    ("wow64_wintrust_test", "target/prebuilt/odt/setup.exe", "gala"),
+    ("wow64_wintrust_test", "target/prebuilt/python/python.exe", "gala"),
     // msi's queries (user/msi_test), x64 and x86.
     ("msi_test", "ntdll.dll", "Windows/System32"),
     ("msi_test", "kernel32.dll", "Windows/System32"),
@@ -3364,6 +3432,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ucrt_test",
     "office_api_test",
     "msi_test",
+    "wintrust_test",
     "svc_test",
     "msxml_test",
     "winhttp_cb_test",
@@ -3385,6 +3454,7 @@ const USER_PROGRAMS_X86: &[&str] = &[
     "wow64_office_api_test",
     "wow64_cert_test",
     "wow64_msi_test",
+    "wow64_wintrust_test",
     "wow64_svc_test",
     "wow64_msxml_test",
     "wow64_winhttp_cb_test",
@@ -4905,6 +4975,9 @@ const NET_SCENARIOS: &[(&str, &str, NetClient)] = &[
     ("chromium_driver", "ChromeDriver was started successfully", NetClient::WebDriver),
     ("chromium_wpt", "ChromeDriver was started successfully", NetClient::Wpt),
     ("office_install", "run: begin setup.exe", NetClient::Outbound),
+    // A card for GetAdaptersInfo to list (nothing connects).
+    ("office_api_test", "run: begin office_api_test.exe", NetClient::Outbound),
+    ("wow64_office_api_test", "run: begin wow64_office_api_test.exe", NetClient::Outbound),
     // Elasticsearch's root endpoint: the node's JSON description.
     (
         "elasticsearch",
@@ -6453,6 +6526,22 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wow64_cert_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // WinVerifyTrust's Authenticode (user/wintrust_test): Wine's
+        // self-signed images and their corrupted copies, an unsigned image,
+        // ODT's setup.exe and CPython's python.exe (Microsoft's roots).
+        name: "wintrust_test",
+        cmdline: "qemu_exit run=wintrust_test.exe args=require",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wintrust_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (user/wintrust_test built for x86).
+        name: "wow64_wintrust_test",
+        cmdline: "qemu_exit run=wow64_wintrust_test.exe args=require",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_wintrust_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // Windows Installer's queries with nothing installed, the
         // functions and ordinals ODT's setup.exe imports (user/msi_test).
         name: "msi_test",
@@ -6800,6 +6889,14 @@ const SCENARIOS: &[Scenario] = &[
         cmdline: "qemu_exit run=shlwapi_test.exe",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["shlwapi_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
+        // The same through WOW64 (shlwapi_test's source built for x86 by
+        // its build.sh), on SysWOW64's shlwapi: ODT's setup.exe's.
+        name: "wow64_shlwapi_test",
+        cmdline: "qemu_exit run=wow64_shlwapi_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_shlwapi_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // AG: ole32's PROPVARIANT and STGMEDIUM clean-up, the
@@ -8371,6 +8468,16 @@ const SCENARIOS: &[Scenario] = &[
         expect: &["wininet_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
+        // The same through WOW64: wininet_test's source built for x86
+        // (user/wininet_test/build.sh), on SysWOW64's wininet, against the
+        // same Nginx.
+        name: "wow64_wininet_test",
+        cmdline: "qemu_exit start=nginx.exe start_args=-p%20C:/nginx/%20-c%20conf/nginx.conf \
+                  run=wow64_wininet_test.exe",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["wow64_wininet_test: ok", "exited with status 0x00000000"],
+    },
+    Scenario {
         // TLS step 3: curl for Windows (curl.se's build, PREBUILT curl),
         // unmodified, against the same Nginx (user/curl/curl.sh: plain
         // HTTP, HTTPS, an untrusted and an expired certificate). That build
@@ -9666,6 +9773,8 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("wow64_schannel_test", "schannel_test"),
     ("wininet_test", "wininet_test"),
     ("wininet_test", "schannel_test"),
+    ("wow64_wininet_test", "wow64_wininet_test"),
+    ("wow64_wininet_test", "schannel_test"),
     ("curl", "curl"),
     ("curl", "curl_common"),
     ("curl", "schannel_test"),
@@ -10230,11 +10339,14 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ("wow64_office_api_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_cert_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_wintrust_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_combase_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_svc_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_msxml_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_winhttp_cb_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_schannel_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_wininet_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
+    ("wow64_shlwapi_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("office_install", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_c_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("wow64_crt_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
@@ -15473,6 +15585,7 @@ fn system_modules() -> Vec<(&'static str, &'static str)> {
         .map(|d| (d.file, "Windows/System32"))
         .collect();
     modules.push(("user/roots/public-roots.pem", "Windows/System32/gala/roots"));
+    modules.push(("user/roots/microsoft-roots.pem", "Windows/System32/gala/roots"));
     modules
 }
 

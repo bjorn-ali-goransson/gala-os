@@ -219,7 +219,8 @@ there: a local account `galatest` with password `Gala-Test-1` (access,
 disk, logon, lsa, profile, session and system tests log on as it) and
 an administrator prompt for `schannel_test` (its test CA goes into
 LocalMachine\Root; it is skipped otherwise, and so are `winhttp_test`
-and `wininet_test`, which fetch from the Nginx that setup starts).
+and `wininet_test` and their WOW64 twins, which fetch from the Nginx
+that setup starts).
 A program that crashes gets a `fault` field
 (`<code> <name> at module+offset`) from `user/windows/fault.py`, which
 the runner looks for at `..\windowsault.py`: it re-runs the program as
@@ -1192,6 +1193,13 @@ numbers, 0x7f.., fail there).
   (fninit: the x87 at 64-bit precision, `_controlfp(0, 0)` 0x8001f, not
   msvcrt's 0x9001f): a test of msvcrt's `_fpreset` calls it through
   GetProcAddress.
+- One C source for an x64 test and its x86 twin: `build.sh` compiles
+  main.c with both mingw compilers, the twin with
+  `-DNAME='"wow64_<name>"'` for its output lines (`user/wininet_test`:
+  `wininet_test.exe` and `wow64_wininet_test.exe`); both binaries are
+  checked in, and the twin's scenario ships the 32-bit DLLs it loads
+  (for one on the network, Schannel's chain: ws2_32, secur32, schannel,
+  crypt32, ncrypt, bcrypt, advapi32, bcryptprimitives).
 - A 32-bit DLL (USER_DLLS_X86, exported as `test<name>32.dll` or its
   own `<name>32.dll`): its exports keep their undecorated names
   (`#[unsafe(no_mangle)] extern "system"`, naked functions too); symbols
@@ -1620,7 +1628,8 @@ view of a check. On Windows, run-all.ps1 starts the same Nginx from a
 prefix in TEMP and, as an administrator, imports the test CA into
 LocalMachine\Root for the run (skipped otherwise). `nginx_tls` instead
 uses the host's `curl -k` as the client. `winhttp_test` and
-`wininet_test` (C, built with their `build.sh`) use the same Nginx, also
+`wininet_test` (C, built with their `build.sh`; `wow64_wininet_test` is
+wininet_test's source for x86) use the same Nginx, also
 on plain HTTP (8080); a failed request names its step in the ledger
 (`winhttp.dll!connect`, `wininet.dll!TLS handshake`, ...). Both DLLs run
 on `user/http_client`: a change to the engine boots both scenarios.
@@ -2826,6 +2835,16 @@ before blaming CI:
 - `XTASK_QEMU_ARGS="-accel tcg,thread=single"` boots any scenario
   without host-level parallelism (to tell a guest race from an emulator
   one); `-accel tcg,thread=multi` boots a JIT scenario multi-threaded.
+- A nondeterministic failure in one component can be another thread
+  damaging shared state, not a race in that component: rule out the
+  file system before the code. A "missing dll" ledger line for a DLL the
+  image has, or opens failing with STATUS_OBJECT_PATH_NOT_FOUND below
+  `C:\Windows`, means something deleted it (a program's cleanup given a
+  path gala answered wrongly: an empty path once named the current
+  directory, and ODT's setup.exe then deleted `\*`). `events=file,syscall`
+  shows NtSetInformationFile class 13 (delete) per handle; the event
+  stream slows opens enough to hide such a race, so the ledger (which
+  costs nothing) is the first look.
 
 ### Hunting a rare hang
 
@@ -3421,6 +3440,25 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
 
 ### gala's DLLs
 
+- **A message's digest is not its content parameter**: a PKCS #7
+  SignedData whose content is not `data` (Authenticode's
+  SpcIndirectDataContent) is digested over the inner TLV's contents
+  octets, without its tag and length, while CMSG_CONTENT_PARAM gives the
+  whole TLV; a CMS one (an RFC 3161 token's TSTInfo) wraps its content in
+  an OCTET STRING, digested and returned as the octets
+  (crypt32's `msg::Signed::digested` and `content_param`). Hashing the
+  whole TLV makes every Authenticode signer CRYPT_E_HASH_VALUE.
+- **A signed binary's signer may have expired**: Authenticode checks
+  the chain at the RFC 3161 timestamp's time (python.exe's signer was
+  valid for three days in 2024), so a verification that fails with
+  CERT_E_EXPIRED on a real binary means the timestamp was not found or
+  not used, not that the binary is bad. wintrust_test's real images
+  (ODT's setup.exe, CPython's python.exe) come from their PREBUILT
+  downloads, shipped to C:\gala by the scenario (`args=require` makes
+  their absence a failure; on Windows they are skipped when absent).
+- **Small integer LPCSTRs**: a store provider or structure type passed
+  as `1 as *const u8` trips clippy's `manual_dangling_ptr`; write
+  `core::ptr::without_provenance(1)`.
 - **A stub is invisible to GetProcAddress**: gala_stubs' exports live in
   `.gstub`, which ntdll's GetProcAddress skips (a probing program takes
   its fallback), while they are in the export directory. A test of which
@@ -3577,6 +3615,11 @@ programs", harness ones under "Scenarios", FlaUI's under "FlaUI".
   (user32 mirrors it): poll IsZoomed/IsIconic from another process
   rather than reading them once right after `gala windows` (which is
   shasha's own state) changed.
+- **WinINet's status callback is silent for a handle whose context is
+  0** (InternetConnect's, HttpOpenRequest's dwContext): a test that
+  expects notifications gives its handles a nonzero context; the
+  address notifications (NAME_RESOLVED, CONNECTING/CONNECTED_TO_SERVER)
+  are ANSI text even for InternetSetStatusCallbackW.
 
 ## Hygiene sweeps
 

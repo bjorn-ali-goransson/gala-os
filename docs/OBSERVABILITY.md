@@ -322,6 +322,11 @@ hit (scenario `ledger_test`).
   `appxdeploymentclient.dll!<method>(<name asked>)`, "other", for each
   PackageManager query answered with no packages (what a program looked
   for: `FindPackagesByNamePublisher(Microsoft.O...` in office_install).
+  WinVerifyTrust's failed verifications, "other", one per step that
+  failed, the error as detail: `wintrust.dll!WinVerifyTrust: <step>`
+  (`subject or certificate table`, `image hash differs`, `signer's
+  signature`, `timestamp`, `Authenticode policy`, ...), with crypt32's
+  `crypt32.dll!AUTHENTICODE: <error>` naming the chain's error bits.
 - `cargo xtask report` merges them over all scenarios and real programs
   into `target/report/ledger.md`, ranked by programs and hits.
 - The Linux personality records with the same call: `linux syscall
