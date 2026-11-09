@@ -5,8 +5,9 @@ Runs gala-os's test programs on Windows and writes a report for
 
 .DESCRIPTION
 Runs every *.exe next to this script (PowerShell 5 or later, no admin
-rights needed, except for schannel_test, which is skipped without them),
-captures each program's output, exit status and how long it took, and
+rights needed, except for schannel_test, which is skipped without them;
+four programs are skipped *with* them, see $standardUserOnly), captures
+each program's output, exit status and how long it took, and
 writes them as JSON in the schema of `cargo xtask report` (see
 xtask/src/report.rs). Programs report through their exit status: 0, the
 number of the failing check, or an NTSTATUS if they crash.
@@ -36,6 +37,28 @@ $outDir = Split-Path -Parent $Out
 # a time costs a round trip each. One file per run, replaced at the start.
 $outAll = Join-Path $outDir "windows-output.txt"
 Remove-Item $outAll -ErrorAction SilentlyContinue
+
+# Whether this run is elevated decides five programs' results, so it is
+# decided once here, recorded in both files a run leaves, and never
+# guessed from them afterwards: schannel_test (and so winhttp_test and
+# wininet_test) needs an administrator, and the four programs in
+# $standardUserOnly need the opposite.
+$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+$who = if ($admin) { "elevated" } else { "standard user" }
+# Programs whose checks are what a *standard* user gets, which an elevated
+# run contradicts. Their checks are right -- a program on gala has a
+# standard user's token -- so it is the elevated run that cannot answer for
+# them, and a skip saying so beats a failing check number that means
+# nothing but "this run was elevated". Measured both ways on 26200 and
+# against CI's elevated 26100, where the same three check numbers fail.
+$standardUserOnly = [ordered]@{
+    token_test         = "an administrator's token holds SeDebugPrivilege, which check 29 asserts is absent"
+    kernel32_file_test = "an administrator may open \\.\C: for reading, which check 144 asserts is ERROR_ACCESS_DENIED"
+    kernel32_pool_test = "an administrator holds SeCreateSymbolicLinkPrivilege, which check 61 asserts is not held"
+    disk_test          = "an administrator opens PhysicalDrive0, which is not xtask's 16 MiB scratch disk"
+}
+("# run-all.ps1 as $who" + [Environment]::NewLine) | Set-Content -Path $outAll -Encoding UTF8
 
 # A crashing program (crash.exe crashes on purpose) must not open a Windows
 # Error Reporting dialog; the error mode is inherited by child processes.
@@ -141,8 +164,6 @@ $results = @()
 $schannelSkip = $null
 $schannelNginx = $null
 $schannelCa = $null
-$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator)
 $schannelDir = Join-Path $here "..\schannel_test"
 if (-not (Test-Path (Join-Path $here "schannel_test.exe"))) {
     $schannelSkip = "no schannel_test.exe"
@@ -187,6 +208,16 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     if ($name -eq "schannel_test" -and $null -ne $schannelSkip) {
         $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $schannelSkip }
         Write-Host ("{0,-18} skipped: {1}" -f $name, $schannelSkip)
+        continue
+    }
+    # The other direction: what an elevated run cannot answer for
+    # ($standardUserOnly). Skipped rather than run, because the check
+    # number such a run reports says nothing about the program -- only
+    # that the run was elevated.
+    if ($admin -and $standardUserOnly.Contains($name)) {
+        $why = "needs a standard user: " + $standardUserOnly[$name]
+        $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $why }
+        Write-Host ("{0,-18} skipped: {1}" -f $name, $why)
         continue
     }
     # persist_test checks on its second run what its first run wrote, so
@@ -409,6 +440,6 @@ foreach ($s in $scripts) {
 }
 
 $os = Get-CimInstance Win32_OperatingSystem
-$report = [ordered]@{ platform = "windows " + $os.Version; results = $results }
+$report = [ordered]@{ platform = "windows " + $os.Version + " " + $who; results = $results }
 $report | ConvertTo-Json -Depth 4 | Set-Content -Path $Out -Encoding UTF8
 Write-Host "wrote $Out"
