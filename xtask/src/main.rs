@@ -10628,6 +10628,10 @@ const NOT_IN_UM: &[(&str, &str)] = &[
     ),
     ("wow64_svcrun_test", "32-bit code (WOW64): its segments are the kernel's GDT"),
     ("winevent_test", "a child process (one NT process per Linux process)"),
+    (
+        "rstrtmgr_test",
+        "a child process that holds a file open for RmGetList (one NT process per Linux process)",
+    ),
     ("uia_test", "a child process (one NT process per Linux process)"),
     ("logon_test", "child processes (one NT process per Linux process)"),
     ("system_test", "child processes; run as SYSTEM (a boot option)"),
