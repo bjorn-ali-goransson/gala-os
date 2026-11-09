@@ -184,8 +184,9 @@ kernel. No breakdown taken.
 
 `cargo xtask bench --release bench-windows.txt` on the Windows machine
 (12 host CPUs, WSL2, KVM, QEMU 11.1.3, host load 1.2 throughout)
-against `user/bin/run-all.ps1`'s `bench-windows.txt` from the same
-machine (Windows 11, build 26200, elevated run). Three runs; the first
+against `user/windows/bench-windows.txt` (as `user/bin/run-all.ps1`
+wrote it) from the same machine (Windows 11, build 26200, elevated
+run). Three runs; the first
 after a kernel build is cold and 1.5-2x slower than the two after it
 (`null_syscall` 1228 ns against 787 and 718), so it is discarded and
 the range below is the two quiet runs. A run taken while the host was
