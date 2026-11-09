@@ -2826,6 +2826,16 @@ before blaming CI:
 - `XTASK_QEMU_ARGS="-accel tcg,thread=single"` boots any scenario
   without host-level parallelism (to tell a guest race from an emulator
   one); `-accel tcg,thread=multi` boots a JIT scenario multi-threaded.
+- A nondeterministic failure in one component can be another thread
+  damaging shared state, not a race in that component: rule out the
+  file system before the code. A "missing dll" ledger line for a DLL the
+  image has, or opens failing with STATUS_OBJECT_PATH_NOT_FOUND below
+  `C:\Windows`, means something deleted it (a program's cleanup given a
+  path gala answered wrongly: an empty path once named the current
+  directory, and ODT's setup.exe then deleted `\*`). `events=file,syscall`
+  shows NtSetInformationFile class 13 (delete) per handle; the event
+  stream slows opens enough to hide such a race, so the ledger (which
+  costs nothing) is the first look.
 
 ### Hunting a rare hang
 

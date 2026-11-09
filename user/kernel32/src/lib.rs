@@ -839,6 +839,17 @@ fn is_sep(c: u16) -> bool {
 /// `/` becomes `\\`, and `.`/`..` components are resolved. `\\\\?\\` paths are
 /// returned unchanged.
 fn full_path(path: &[u16]) -> Result<PathBuf, u32> {
+    // An empty path names nothing (it is not the current directory): every
+    // file function fails with ERROR_PATH_NOT_FOUND, as on Windows. A
+    // program that builds a path from an unset folder gets no file
+    // (ODT's setup.exe deletes "\*" recursively once "" exists); the
+    // ledger keeps the caller's mistake visible.
+    if path.is_empty() {
+        let what = b"kernel32.dll!empty path";
+        // SAFETY: a valid buffer; 5 is the ledger's "other".
+        unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 5, 0) };
+        return Err(3); // ERROR_PATH_NOT_FOUND
+    }
     let mut out = PathBuf::new();
     let verbatim = [BACKSLASH, BACKSLASH, u16::from(b'?'), BACKSLASH];
     let device = [BACKSLASH, BACKSLASH, u16::from(b'.'), BACKSLASH];

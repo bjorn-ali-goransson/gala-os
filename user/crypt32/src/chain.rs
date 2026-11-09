@@ -23,7 +23,8 @@
 //!   element), as do cycles and more than `MAX_ELEMENTS`.
 //! - **Checks**: validity at pTime (or now) on every element; each
 //!   signature by the next element's key (CERT_TRUST_IS_NOT_SIGNATURE_VALID
-//!   on the signed one; RSA and ECDSA P-256/P-384 through bcrypt); the
+//!   on the signed one, with the failed step in the ledger:
+//!   `record_signature_failure`; RSA and ECDSA P-256/P-384 through bcrypt); the
 //!   root's presence in the trusted store (CERT_TRUST_IS_UNTRUSTED_ROOT);
 //!   basic constraints (CA, path length; v1/v2 certificates count as CAs
 //!   only from the engine's own stores) and keyCertSign; critical
@@ -68,9 +69,8 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use super::cert::{
     BIT_STRING, BOOLEAN, CertContext, CertDuplicateCertificateContext, CertFreeCertificateContext,
-    CertGetCertificateContextProperty, CertInfo, CertVerifyTimeValidity,
-    CryptVerifyCertificateSignatureEx, Der, INTEGER, OID, SEQUENCE, SET, c_text, extension_value,
-    oid_text,
+    CertGetCertificateContextProperty, CertInfo, CertVerifyTimeValidity, Der, INTEGER, OID,
+    SEQUENCE, SET, SignatureFailure, c_text, extension_value, oid_text, verify_signature,
 };
 use super::store::{
     CertAddStoreToCollection, CertCloseStore, CertDuplicateStore, CertFindCertificateInStore,
@@ -502,19 +502,14 @@ fn holds(store: *mut c_void, c: *const CertContext) -> bool {
     true
 }
 
-/// Whether `subject`'s signature verifies with `issuer`'s key.
-fn signed_by(subject: *const CertContext, issuer: *const CertContext) -> bool {
-    let ok = CryptVerifyCertificateSignatureEx(
-        0,
-        1,
-        2, // CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT
-        subject.cast(),
-        2, // CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT
-        issuer.cast(),
-        0,
-        core::ptr::null(),
-    );
-    ok != 0
+/// Whether `subject`'s signature verifies with `issuer`'s key, or the
+/// step that failed.
+fn signed_by(
+    subject: *const CertContext,
+    issuer: *const CertContext,
+) -> Result<(), SignatureFailure> {
+    // CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT, _ISSUER_CERT.
+    verify_signature(2, subject.cast(), 2, issuer.cast())
 }
 
 /// Basic constraints: Ok(None) without the extension, Ok(Some((cA,
@@ -604,8 +599,9 @@ fn usage_ok(c: *const CertContext, requested: &[&[u8]], and: bool) -> bool {
 struct Built {
     certs: [*const CertContext; MAX_ELEMENTS],
     status: [TrustStatus; MAX_ELEMENTS],
-    /// Element i's signature verifies with element i + 1's key.
-    signed: [bool; MAX_ELEMENTS],
+    /// Element i's signature verifies with element i + 1's key, or the
+    /// step that failed.
+    signed: [Result<(), SignatureFailure>; MAX_ELEMENTS],
     n: usize,
     /// The chain-level errors (CERT_TRUST_IS_PARTIAL_CHAIN).
     chain_error: u32,
@@ -619,11 +615,12 @@ fn find_issuer(
     subject: *const CertContext,
     time: u64,
     chain: &[*const CertContext],
-) -> Option<(*const CertContext, u32, bool)> {
+) -> Option<(*const CertContext, u32, Result<(), SignatureFailure>)> {
     const CERT_FIND_SUBJECT_NAME: u32 = 0x2_0007;
     let issuer_name = &info(subject).issuer as *const super::cert::Blob;
     let aki = authority_key_id(subject);
-    let mut best: Option<(*const CertContext, u32, bool, u32)> = None;
+    #[allow(clippy::type_complexity)]
+    let mut best: Option<(*const CertContext, u32, Result<(), SignatureFailure>, u32)> = None;
     let mut c = core::ptr::null();
     loop {
         // The enumeration frees the previous candidate.
@@ -640,7 +637,7 @@ fn find_issuer(
         let sig = signed_by(subject, c);
         let trusted = self_signed(c).is_some() && holds(e.root, c);
         let valid = CertVerifyTimeValidity(&time, info(c)) == 0;
-        let score = u32::from(sig) * 8
+        let score = u32::from(sig.is_ok()) * 8
             + u32::from(key_match || aki.is_none()) * 4
             + u32::from(trusted) * 2
             + u32::from(valid);
@@ -659,7 +656,7 @@ fn build(e: &Engine, cert: *const CertContext, time: u64, additional: *mut c_voi
     let mut b = Built {
         certs: [core::ptr::null(); MAX_ELEMENTS],
         status: [TrustStatus::default(); MAX_ELEMENTS],
-        signed: [false; MAX_ELEMENTS],
+        signed: [Ok(()); MAX_ELEMENTS],
         n: 1,
         chain_error: 0,
     };
@@ -718,8 +715,11 @@ fn check(e: &Engine, b: &mut Built, time: u64) {
         if CertVerifyTimeValidity(&time, info(c)) != 0 {
             status.error |= IS_NOT_TIME_VALID;
         }
-        if i + 1 < n && !b.signed[i] {
+        if i + 1 < n
+            && let Err(f) = b.signed[i]
+        {
             status.error |= IS_NOT_SIGNATURE_VALID;
+            record_signature_failure(i, f);
         }
         let is_root = i == n - 1 && !partial;
         let constraints = basic_constraints(c);
@@ -1221,6 +1221,24 @@ fn ssl_checks(b: &ChainBlock, extra: *const u8) -> Verdict {
 }
 
 /// The name of a policy error, for the ledger.
+/// Records why element `index`'s signature did not verify with its
+/// issuer's key (CertGetCertificateChain's CERT_TRUST_IS_NOT_SIGNATURE_VALID):
+/// `crypt32.dll!chain element <i>: <step>` in the ledger, the step's
+/// status as detail (BCryptVerifySignature's 0xc000a000 for a signature
+/// that does not match; anything else means the check itself failed).
+fn record_signature_failure(index: usize, f: SignatureFailure) {
+    let mut text = [0u8; 96];
+    let mut n = 0;
+    let digit = [b'0' + (index % 10) as u8];
+    for part in [&b"crypt32.dll!chain element "[..], &digit, b": ", f.step] {
+        let part = &part[..part.len().min(text.len() - n)];
+        text[n..n + part.len()].copy_from_slice(part);
+        n += part.len();
+    }
+    // SAFETY: a valid buffer; 5 is the ledger's "other".
+    unsafe { GalaRecordMissing(text.as_ptr(), n, 5, f.status.into()) };
+}
+
 fn error_name(code: u32) -> &'static [u8] {
     match code {
         CERT_E_EXPIRED => b"CERT_E_EXPIRED",

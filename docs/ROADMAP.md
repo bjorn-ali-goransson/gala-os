@@ -1548,14 +1548,11 @@ need gala's.
      Gateway SDS Issuing CA", `openssl s_client` on the host shows the
      same), which no root store trusts (`crypt32.dll!SSL:
      CERT_E_UNTRUSTEDROOT`, chain error 0x20, `schannel.dll!ISC:
-     UnknownIssuer`, SEC_E_UNTRUSTED_ROOT). Open bug: in about one run in
-     three the same chain (three RSA-2048 SHA-256 certificates, which
-     `openssl verify` accepts every time) fails with
-     `crypt32.dll!SSL: TRUST_E_CERT_SIGNATURE`, chain error 0x28
-     (CERT_TRUST_IS_NOT_SIGNATURE_VALID too) and SEC_E_CERT_UNKNOWN:
-     the 32-bit crypt32/bcrypt signature check is not deterministic under
-     setup.exe's threads (`wow64_cert_test` and `wow64_schannel_test`,
-     single-threaded, pass every time); not yet investigated. With direct egress the chain is Microsoft's,
+     UnknownIssuer`, SEC_E_UNTRUSTED_ROOT), every run (an empty path
+     is ERROR_PATH_NOT_FOUND, not the current directory, so setup.exe's
+     cleanup of its unset folder "" no longer deletes C:\, SysWOW64's
+     bcrypt.dll with it; `kernel32_file_test`, ARCHITECTURE "Files").
+     With direct egress the chain is Microsoft's,
      to a public root (not yet seen in a run). Its error path asks urlmon's
      security manager (done: urlmon.dll for x64 and x86,
      CoInternetCreateSecurityManager with MapUrlToZone and GetSecurityId
@@ -1574,9 +1571,7 @@ need gala's.
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next: the nondeterministic signature failure above (first: which
-     element and which call fails, then why); in the order the run
-     reaches them: wininet.dll for i686
+     Next, in the order the run reaches them: wininet.dll for i686
      (InternetGetCookieExW: no cookies, as a fresh profile; then what
      else of wininet it calls), urlmon's ProcessUrlAction from the zones'
      default policies (the Internet Settings\Zones keys), a run with

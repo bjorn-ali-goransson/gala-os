@@ -1724,6 +1724,15 @@ share it (LX seam 4; the Linux side is `lx::file`, "The lx module"):
 - **NUL**: `\Device\Null` (with `\??\NUL` linking to it) opens as a file
   whose reads are at end of file and whose writes are discarded
   (FILE_DEVICE_NULL); kernel32 maps the DOS name `NUL` to `\??\NUL`.
+- **Win32 paths** (kernel32's `full_path`, under every file function and
+  GetFullPathNameW): relative paths join the current directory, a
+  leading separator takes the current drive, `.`/`..` are resolved. An
+  empty path names nothing: ERROR_PATH_NOT_FOUND, never the current
+  directory (`kernel32_file_test`; ledger `kernel32.dll!empty path`).
+  Invariant: no path function turns "" into a real path. A program that
+  builds a folder from an unset value asks whether "" exists before it
+  deletes "<folder>\*" recursively (ODT's setup.exe does); a "yes" from
+  the platform makes that `\*`, the drive's root, and wipes C:.
 - **Access checks** on opens and creates: "Access checks".
 
 #### Directory change notification
@@ -3354,7 +3363,10 @@ definition for both layouts, "Plan: WOW64").
   issuer, its authority key identifier its own key), else it is
   CERT_TRUST_IS_PARTIAL_CHAIN (chain level, as Windows reports it).
   Element errors: NOT_TIME_VALID, NOT_SIGNATURE_VALID (on the signed
-  element), UNTRUSTED_ROOT (a root not in the engine's roots),
+  element; the ledger says why: `crypt32.dll!chain element <i>: <step>`,
+  the step's status as detail: BCryptVerifySignature's 0xc000a000 for a
+  signature that does not match, anything else (GetProcAddress(BCryptHash)
+  126: bcrypt.dll did not load) a check that could not run), UNTRUSTED_ROOT (a root not in the engine's roots),
   INVALID_BASIC_CONSTRAINTS (an issuer that is no CA, a path length
   exceeded; v1/v2 issuers count as CAs only from the engine's own
   stores), NOT_VALID_FOR_USAGE (keyCertSign against the CA flag;
