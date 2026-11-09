@@ -93,6 +93,7 @@ syscall_stubs! {
     NtDeleteKey = 0x7f07, fn(h: usize);
     NtDeleteValueKey = 0x7f08, fn(h: usize, name: *const UnicodeString);
     NtFlushKey = 0x7f09, fn(h: usize);
+    NtSetInformationKey = 0x7fd6, fn(h: usize, class: u32, buf: *const u8, len: u32);
     // Job objects (gala's numbers, unverified).
     NtCreateJobObject = 0x7f0a, fn(
         handle: *mut usize, access: u32, attributes: *const ObjectAttributes

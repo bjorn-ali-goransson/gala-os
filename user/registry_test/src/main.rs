@@ -29,6 +29,13 @@
 //!   STATUS_BUFFER_OVERFLOW / STATUS_BUFFER_TOO_SMALL with the needed
 //!   length, NtQueryKey basic and name information (the full name starts
 //!   \REGISTRY\MACHINE), STATUS_NO_MORE_ENTRIES.
+//! - NtSetInformationKey(KeyControlFlagsInformation) with a ULONG of
+//!   REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG (Office's Click-to-Run
+//!   client's call): STATUS_SUCCESS on a handle with KEY_SET_VALUE,
+//!   STATUS_ACCESS_DENIED on a KEY_READ one (ZwSetInformationKey's
+//!   documentation); a length of 3 STATUS_INFO_LENGTH_MISMATCH and class
+//!   99 STATUS_INVALID_INFO_CLASS (the general rules for information
+//!   classes; not confirmed on Windows yet).
 //!
 //! The test's own keys are volatile and deleted at the end, so a run
 //! leaves nothing behind on Windows.
@@ -192,6 +199,7 @@ unsafe extern "system" {
         ret: *mut u32,
     ) -> u32;
     fn NtQueryKey(key: usize, class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> u32;
+    fn NtSetInformationKey(key: usize, class: u32, data: *const u8, len: u32) -> u32;
     fn NtEnumerateKey(
         key: usize,
         index: u32,
@@ -269,6 +277,9 @@ const STATUS_BUFFER_OVERFLOW: u64 = 0x8000_0005;
 const STATUS_NO_MORE_ENTRIES: u64 = 0x8000_001a;
 const STATUS_BUFFER_TOO_SMALL: u64 = 0xc000_0023;
 const STATUS_OBJECT_NAME_NOT_FOUND: u64 = 0xc000_0034;
+const STATUS_ACCESS_DENIED: u64 = 0xc000_0022;
+const STATUS_INVALID_INFO_CLASS: u64 = 0xc000_0003;
+const STATUS_INFO_LENGTH_MISMATCH: u64 = 0xc000_0004;
 
 const CURRENT_VERSION: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
 
@@ -1055,6 +1066,10 @@ fn nt(c: &mut Checks, test: Hkey) -> Result<(), u32> {
         let full = "\\REGISTRY\\MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
         c.eq(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]).into(), 2 * full.len() as u64)?;
         c.ok(same(&units(&buf[4..4 + 2 * full.len()])[..full.len()], full), buf[4].into())?;
+        // NtSetInformationKey needs KEY_SET_VALUE: this handle is KEY_READ.
+        let flags = 0xau32.to_le_bytes(); // REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG
+        let r = NtSetInformationKey(key, 2, flags.as_ptr(), 4);
+        c.eq(r.into(), STATUS_ACCESS_DENIED)?;
         NtClose(key);
 
         // Enumeration past the end.
@@ -1066,6 +1081,14 @@ fn nt(c: &mut Checks, test: Hkey) -> Result<(), u32> {
         c.ok(same(&units(&buf[16..26])[..5], "alpha"), buf[16].into())?;
         let r = NtEnumerateValueKey(test, 99, 0, buf.as_mut_ptr(), 256, &mut ret);
         c.eq(r.into(), STATUS_NO_MORE_ENTRIES)?;
+
+        // KeyControlFlagsInformation, as Office's Click-to-Run client sets
+        // it: a ULONG; another length, or a class that is none, fails.
+        c.eq(NtSetInformationKey(test, 2, flags.as_ptr(), 4).into(), 0)?;
+        let r = NtSetInformationKey(test, 2, flags.as_ptr(), 3);
+        c.eq(r.into(), STATUS_INFO_LENGTH_MISMATCH)?;
+        let r = NtSetInformationKey(test, 99, flags.as_ptr(), 4);
+        c.eq(r.into(), STATUS_INVALID_INFO_CLASS)?;
     }
     Ok(())
 }

@@ -362,6 +362,48 @@ pub(super) fn nt_delete_value_key(call: &mut Call<'_>) -> NtStatus {
     NtStatus::SUCCESS
 }
 
+/// NtSetInformationKey(KeyHandle, KeySetInformationClass, KeySetInformation,
+/// KeySetInformationLength), with KEY_SET_VALUE on the handle (as
+/// ZwSetInformationKey's documentation asks). KeyWow64FlagsInformation (1)
+/// and KeyControlFlagsInformation (2) are a ULONG (another length is
+/// STATUS_INFO_LENGTH_MISMATCH) that steers registry virtualization, which
+/// gala has not (every process writes where it names): accepted, nothing
+/// to change, recorded with the flags (Office's Click-to-Run client sets
+/// REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG). KeyWriteTimeInformation
+/// and the classes 3 to 6 are STATUS_NOT_IMPLEMENTED (recorded); others
+/// STATUS_INVALID_INFO_CLASS.
+pub(super) fn nt_set_information_key(call: &mut Call<'_>) -> NtStatus {
+    let (_object, _id) = tri!(call.key(arg!(call, 0), KEY_SET_VALUE));
+    let (class, data, len) = (arg!(call, 1) as u32, arg!(call, 2), arg!(call, 3) as u32);
+    match class {
+        1 | 2 => {
+            if len != 4 {
+                return NtStatus::INFO_LENGTH_MISMATCH;
+            }
+            let mut flags = [0u8; 4];
+            if call.process.read(data, &mut flags).is_err() {
+                return NtStatus::ACCESS_VIOLATION;
+            }
+            let what = if class == 1 {
+                "wow64 flags: no registry virtualization"
+            } else {
+                "control flags: no registry virtualization"
+            };
+            super::super::ledger::record(
+                "NtSetInformationKey",
+                what,
+                u64::from(u32::from_le_bytes(flags)),
+            );
+            NtStatus::SUCCESS
+        }
+        0 | 3..=6 => {
+            super::super::ledger::record("NtSetInformationKey", "information class", class.into());
+            NtStatus::NOT_IMPLEMENTED
+        }
+        _ => NtStatus::INVALID_INFO_CLASS,
+    }
+}
+
 /// NtFlushKey(KeyHandle): the registry is in memory; nothing to write.
 pub(super) fn nt_flush_key(call: &mut Call<'_>) -> NtStatus {
     let (_object, id) = tri!(call.key(arg!(call, 0), 0));

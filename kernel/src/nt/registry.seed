@@ -73,6 +73,11 @@
 [\Registry\Machine\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies]
 [\Registry\Machine\SOFTWARE\Policies\Microsoft\Windows]
 [\Registry\Machine\SOFTWARE\Classes]
+; The class of files no other class claims (shlwapi's AssocQueryStringW
+; answers an unregistered extension's command from it: Windows 11 25H2's
+; is OpenWith's, issue #57).
+[\Registry\Machine\SOFTWARE\Classes\Unknown\shell\open\command]
+@=expand:%SystemRoot%\system32\OpenWith.exe "%1"
 ; In-process COM classes gala's DLLs serve (ole32's CoCreateInstance).
 ; CUIAutomation (UIAutomationClient.h's CLSID_CUIAutomation).
 [\Registry\Machine\SOFTWARE\Classes\CLSID\{ff48dba4-60ef-4201-aa87-54103eef594e}]

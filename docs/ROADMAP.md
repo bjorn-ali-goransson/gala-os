@@ -1602,39 +1602,72 @@ need gala's.
      embedded PKCS #7, which setup.exe asks for its own signature, is
      answered too; `wintrust_test`, `wow64_wintrust_test`, expected
      results from Wine's softpub.c tests run on Windows; ARCHITECTURE
-     "wintrust: Authenticode"): its own setup.exe verifies (primary
-     signature; its WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
+     "wintrust: Authenticode"; issue #57's measurements: a signer whose
+     signature fails is TRUST_E_NOSIGNATURE, a dual-signed image falls
+     back to its nested signature): its own setup.exe verifies (its
+     WINTRUST_SIGNATURE_SETTINGS recorded), an earlier
      CryptMsgOpenToDecode asks for CMSG_DETACHED_FLAG (recorded, decoded
      as attached), and it downloads the version descriptor cab from
-     officecdn.microsoft.com over http.
-     Where the run ends now: WinVerifyTrust of that cabinet, twice
-     (`wintrust.dll!WinVerifyTrust(subject: cabinet)`, then
-     TRUST_E_SUBJECT_FORM_UNKNOWN: gala has no cabinet SIP); setup.exe
-     then asks kernelbase for SetSystemFileCacheSize and ntdll for
-     NtSetSystemInformation (missing exports), LoadLibrary("slc.dll")
-     (missing dll), and the elevated copy and its parent exit with
-     0xffffffff after about 7 s. ODT has written no log yet
-     (`dump=C:/gala/odtlog` finds no directory).
+     officecdn.microsoft.com over http and verifies it (done: the
+     cabinet subject in gala's wintrust, its digest the range every
+     signed CDN cabinet's signature matches; `wintrust_test`'s cabinet
+     cases, `cab_probe` for Windows' answers; ARCHITECTURE "wintrust:
+     Authenticode"). Rejected, that cabinet ended the run: ODT's log
+     (`C:\Users\Public\GALA-<date>.log`, dumped) said
+     `MRO::LoadFromVCab ... InvalidSignature (HR:0x800B0003)`, "Cannot
+     download and extract version descriptor", and only then, on its
+     way out, came slc.dll and the SetSystemFileCacheSize and
+     NtSetSystemInformation lookups (telemetry at exit, not causes).
+     Accepted, setup.exe closes three all-zero WINTRUST_DATAs
+     (dwStateAction CLOSE, cbStruct 0: TRUST_E_SUBJECT_FORM_UNKNOWN,
+     recorded, survived; Windows' answer is `cab_probe`'s) and extracts
+     the cabinet with setupapi's SetupIterateCabinetW (done: x64 and
+     x86, over galapkg's cabinet reader, v64.cab being LZX:21;
+     `setupcab_test`, `wow64_setupcab_test`, expected results from
+     Wine's setupcab.c tests; ARCHITECTURE "Other DLLs").
+     It loads the descriptor's XML with MSXML 6 and clones from it
+     (done: IXMLDOMNode::cloneNode; `msxml_test`, `wow64_msxml_test`,
+     Wine's test_cloneNode), downloads the product's cabinets and
+     streams for about 70 s (DeliveryOptimization and BITS are asked
+     first: REGDB_E_CLASSNOTREG, it falls back to HTTP), installs their
+     catalog files (wintrust's CryptCATAdminAcquireContext is a stub:
+     `wintrust.dll!CryptCATAdminAcquireContext` missing export; ODT logs
+     `C2R::CatalogFiles::Install` UnexpectedError and goes on) and
+     starts the 64-bit Click-to-Run client, `C:\Program Files\Common
+     Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe platform=x64
+     culture=en-us productstoadd=O365ProPlusRetail.16_en-us_x-none ...`
+     (done: the scenario ships the whole 64-bit system,
+     `FULL_SYSTEM_SCENARIOS`; the client's missing exports, kernel32's
+     WerRegisterFile and ntdll's NtSetInformationKey, and its delay-loaded
+     user32 SetCoalescableTimer, x64 and x86: `office_api_test`,
+     `registry_test`, `user32_test`). The client registers its log for
+     error reports, sets its registry keys' control flags
+     (REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG, recorded: gala has
+     no registry virtualization) and installs a global hook
+     (`user32.dll!SetWindowsHookExW(global)`, recorded).
+     Where the run ends now: it delay-loads rpcrt4's RpcServerRegisterIf3
+     (and If2), missing: it means to be an RPC server, so the delay-load
+     fails (0xc06d007f) about 1.7 s in, and setup.exe and its parent exit
+     with that status after about 82 s ("C2RClient returned a failing
+     exit code"). slc.dll, kernelbase's SetSystemFileCacheSize and
+     ntdll's NtSetSystemInformation are still asked for only on the way
+     out (after "Bootstrapper Finished").
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: Authenticode for cabinets
-     (the cab SIP: the signature's place is in Wine's crypt.c, the
-     reserved header area's offset and size, but the digest a signed
-     cab's SpcIndirectDataContent carries, an SpcLink with a moniker over
-     SHA-256, covers a range the allowed sources do not document and
-     Wine does not check: a contiguous hash of the cab up to the
-     signature, with the size and reserve fields left out or zeroed, does
-     not match a CDN cab; establish it from Windows' behaviour on signed
-     and altered cabs, test first), then whether the cab's acceptance is
-     what ends the run (slc.dll's licensing calls are next on the path);
-     then
-     the other DLLs
-     the other DLLs
+     Next, in the order the run reaches them: an RPC server in rpcrt4
+     (RpcServerRegisterIf2/3 and what serving its interface needs: gala's
+     rpcrt4 has only the UUID functions, no RPC runtime); CryptCATAdmin*
+     (catalogs: a catalog SIP, member lookup
+     by hash); slc.dll and the two exports once a run needs them (their
+     Windows answers for a standard and an elevated caller first);
+     Windows' answers from `cab_probe` (the cabinet cases of
+     `wintrust_test` follow them);
+     then the other DLLs
      setup.exe imports that gala has no i686 build of (xmllite,
-     webservices, setupapi, cabinet, credui, gdiplus; osppc.dll is
+     webservices, cabinet, credui, gdiplus; osppc.dll is
      Office's own) and the functions its imports lack (shell32's
-     SHGetSettings, user32's CheckRadioButton and SetCoalescableTimer,
+     SHGetSettings, user32's CheckRadioButton,
      iphlpapi's CreateSortedAddressPairs); BITS (the
      BackgroundCopyManager it asks for: absent, survived); WinINet's
      asynchronous sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),
@@ -1649,7 +1682,8 @@ need gala's.
      winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, MSXML for
      the XML it downloads (the CDN's cab manifests: more of the DOM as
      the run reaches it; load of URLs is recorded unsupported);
-     wintrust's secondary signatures and legacy countersignatures,
+     wintrust's WINTRUST_SIGNATURE_SETTINGS (choosing among the
+     signatures) and legacy countersignatures,
      crypt32's detached messages; FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
      dispatcher's nested exceptions and collided unwinds.

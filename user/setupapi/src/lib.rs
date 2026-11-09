@@ -6,13 +6,32 @@
 //! interface by name finds none. Chromium's battery-level provider looks
 //! for batteries this way. Each query of the tree is recorded once per
 //! class in the ledger ("no device tree"). See user/setupapi_test.
+//!
+//! SetupIterateCabinetW (`cab`, user/setupcab_test): a cabinet's files
+//! through the caller's callback, read by galapkg's cabinet reader.
+//!
+//! Built for x64 and x86 (ODT's 32-bit setup.exe unpacks its cabinets
+//! with it).
 
 #![no_std]
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+extern crate alloc;
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use gala_heap as _;
+
+// The 32-bit build takes the memory routines, 64-bit division helpers
+// and unwind personality from ntrt's x86 runtime (ARCHITECTURE "Plan:
+// WOW64").
+#[cfg(target_arch = "x86")]
+use ntrt as _;
+
+mod cab;
+
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 #[link(name = "ntdll", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -20,22 +39,35 @@ unsafe extern "C" {
     fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8;
     fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8;
     fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32;
+    fn strlen(s: *const u8) -> usize;
     // MSVC-target unwind tables reference it (gala's ntdll provides it).
     fn __CxxFrameHandler3();
+    // The stack probe for frames over a page (ntdll exports it).
+    fn __chkstk();
 }
 
-#[link(name = "ntdll", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ntdll", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ntdll", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn GalaRecordMissing(name: *const u8, length: usize, what: u32, detail: u64) -> u32;
 }
 
-#[link(name = "kernel32", kind = "raw-dylib")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "kernel32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn SetLastError(e: u32);
+    fn ExitProcess(code: u32) -> !;
 }
 
-/// MSVC-target codegen references this marker symbol directly, so it cannot
-/// come from an import.
+/// MSVC-target codegen references this marker symbol directly (ntrt's
+/// x86 runtime defines it on x86).
+#[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 pub static _fltused: i32 = 0;
 
@@ -57,6 +89,12 @@ fn fail<T>(e: u32, v: T) -> T {
 fn record(what: &[u8], detail: u64) {
     // SAFETY: a valid buffer; the service only reads it.
     unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 2, detail) };
+}
+
+/// Records an observation (the ledger's "other").
+fn observed(what: &[u8], detail: u64) {
+    // SAFETY: a valid buffer; the service only reads it.
+    unsafe { GalaRecordMissing(what.as_ptr(), what.len(), 5, detail) };
 }
 
 /// The sets: a bit per slot (live or not) and each slot's generation.
@@ -257,9 +295,24 @@ pub extern "system" fn mainCRTStartup(_instance: usize, _reason: u32, _reserved:
     1
 }
 
+/// A panic is a bug (or the heap ran out inside the cabinet reader): its
+/// location goes to the ledger (`panic <file>`, the line as detail) and
+/// the process ends with STATUS_STACK_BUFFER_OVERRUN (fail-fast), as
+/// gala's other DLLs do.
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let mut text = [0u8; 80];
+    let mut n = 0;
+    let line = info.location().map_or(0, |l| {
+        for &b in b"panic ".iter().chain(l.file().as_bytes()) {
+            if n < text.len() {
+                text[n] = b;
+                n += 1;
+            }
+        }
+        l.line()
+    });
+    observed(&text[..n], line.into());
+    // SAFETY: ends the process.
+    unsafe { ExitProcess(0xc000_0409) }
 }

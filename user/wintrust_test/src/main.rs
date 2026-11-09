@@ -28,32 +28,40 @@
 //!   checksum, the certificate table's directory entry and the table, so
 //!   a changed CheckSum still verifies; a changed byte of a section does
 //!   not (TRUST_E_BAD_DIGEST, as Wine's offset-19 case).
-//! - Real signed images, when present (not committed: the files at their
-//!   download locations, which the boot scenario ships to C:\gala): the
-//!   Office Deployment Tool's setup.exe (Microsoft Corporation, by
-//!   Microsoft Windows Code Signing PCA 2024, from Microsoft Root
-//!   Certificate Authority 2010; an RFC 3161 timestamp) and CPython
-//!   3.13.1's python.exe (Python Software Foundation, a certificate valid
-//!   3-6 December 2024, from Microsoft Identity Verification Root
-//!   Certificate Authority 2020; trusted today through its RFC 3161
-//!   timestamp of 2024-12-03 20:13:09.973 UTC). Both verify (S_OK) on Windows,
-//!   whose root store holds those roots; with WTD_REVOKE_WHOLECHAIN too
-//!   (Windows fetches the CRLs; gala has no fetching and its Authenticode
-//!   policy accepts an offline revocation check as Windows' default
-//!   Software Publishing state, 0x23c00, WTPF_OFFLINEOK_*, does).
-//!   setup.exe's chain is 3 certificates, python.exe's 4, the last one a
-//!   trusted, self-signed root.
+//! - A changed byte in a signer's encrypted digest (inside the OCTET
+//!   STRING, so the message still decodes) is TRUST_E_NOSIGNATURE
+//!   (measured on `data/selfsigned64.exe`, issue #57).
+//! - ODT's setup.exe, when present (not committed: the file at its
+//!   download location, which the boot scenario ships to C:\gala):
+//!   Microsoft Corporation, by Microsoft Windows Code Signing PCA 2024,
+//!   from Microsoft Root Certificate Authority 2010, a chain of 3 whose
+//!   last is a trusted, self-signed root; SHA-256; an RFC 3161 timestamp,
+//!   which is one counter signer (csCounterSigners 1). S_OK with
+//!   WTD_REVOKE_NONE and WTD_REVOKE_WHOLECHAIN alike (Windows fetches the
+//!   CRLs; gala has no fetching and its Authenticode policy accepts an
+//!   offline revocation check as Windows' default Software Publishing
+//!   state, 0x23c00, WTPF_OFFLINEOK_*, does). It is dual-signed: the
+//!   primary signer's unauthenticated attributes hold a nested signature
+//!   (szOID_NESTED_SIGNATURE), and Windows falls back to it, so a changed
+//!   byte in either signer's encrypted digest still verifies and both
+//!   changed is TRUST_E_NOSIGNATURE; the provider data shows one signer.
+//! - A signed cabinet (`data/selfsigned.cab`, from `data/make_cab.py`),
+//!   whose digest is computed as the digests of Microsoft's signed CDN
+//!   cabinets are (ARCHITECTURE "wintrust: Authenticode"): as it is,
+//!   CERT_E_CHAINING (S_OK hash only); with the header's reserved1 changed
+//!   (outside the digest) the same; with cbCabinet or a byte of its file
+//!   changed TRUST_E_BAD_DIGEST (hash only: TRUST_E_NOSIGNATURE, as for
+//!   images); without the RESERVE_PRESENT flag TRUST_E_NOSIGNATURE.
 //!
 //! Not confirmed on Windows yet (CI's run of this program confirms them):
-//! a changed byte in the signer's encrypted digest is taken as
-//! NTE_BAD_SIGNATURE, CryptMsgControl's answer (Wine reports
-//! TRUST_E_CERT_SIGNATURE); an RFC 3161 timestamp is one counter signer
-//! (csCounterSigners 1) and sets the signer's sftVerifyAsOf to its time.
+//! every cabinet answer above (`cab_probe` measures Windows' answers for
+//! Microsoft's cabinets and this one, byte by byte of the header); the
+//! changed digest of `data/selfsigned32.exe` (measured on the 64-bit
+//! image); setup.exe's sftVerifyAsOf, taken as its timestamp's genTime.
 //!
-//! With the argument `require` (gala's scenario) the real images must be
-//! there; without it (Windows' run from user/bin) their checks are
-//! skipped when C:\gala\setup.exe or C:\gala\python.exe is missing, and
-//! say so.
+//! With the argument `require` (gala's scenario) setup.exe must be there;
+//! without it (Windows' run from user/bin) its checks are skipped when
+//! C:\gala\setup.exe is missing, and say so.
 //!
 //! The same source builds `wow64_wintrust_test`, the 32-bit (x86)
 //! program. Prints `wintrust_test: ok` (`wow64_wintrust_test: ok`), or
@@ -261,7 +269,9 @@ const TRUST_E_SUBJECT_FORM_UNKNOWN: u32 = 0x800b_0003;
 const TRUST_E_NOSIGNATURE: u32 = 0x800b_0100;
 const CERT_E_CHAINING: u32 = 0x800b_010a;
 const TRUST_E_BAD_DIGEST: u32 = 0x8009_6010;
-const NTE_BAD_SIGNATURE: u32 = 0x8009_0006;
+/// szOID_NESTED_SIGNATURE (1.3.6.1.4.1.311.2.4.1) as a DER OBJECT IDENTIFIER.
+const NESTED_OID: [u8; 12] =
+    [0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x04, 0x01];
 
 const WTD_UI_NONE: u32 = 2;
 const WTD_REVOKE_NONE: u32 = 0;
@@ -539,6 +549,39 @@ fn basics(c: &mut Checks) -> Result<(), u32> {
     Ok(())
 }
 
+/// A signed cabinet (`data/selfsigned.cab`, made by `data/make_cab.py`:
+/// signed as Microsoft's CDN cabinets are, by a certificate whose root is
+/// not in the signature, as Wine's self-signed images), as it is and
+/// altered: the full verification and WTD_HASH_ONLY_FLAG's.
+fn cab_cases(c: &mut Checks) -> Result<(), u32> {
+    let cab: &[u8] = include_bytes!("../data/selfsigned.cab");
+    // cbCabinet: where the signature starts.
+    let end = u32::from_le_bytes([cab[8], cab[9], cab[10], cab[11]]) as usize;
+    let path = temp_path(b"signed.cab");
+    let one = |at: usize| [cab[at] ^ 0x5a];
+    let (reserved1, cb_cabinet, data, flags) = (one(4), one(8), one(end - 3), [0u8]);
+    let cases: [(&[&[u8]], u32, u32); 5] = [
+        (&[cab], CERT_E_CHAINING, S_OK),
+        // The header's reserved1, outside the digest.
+        (&[&cab[..4], &reserved1, &cab[5..]], CERT_E_CHAINING, S_OK),
+        // cbCabinet and a byte of the file's data, inside it.
+        (&[&cab[..8], &cb_cabinet, &cab[9..]], TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        (&[&cab[..end - 3], &data, &cab[end - 2..]], TRUST_E_BAD_DIGEST, TRUST_E_NOSIGNATURE),
+        // Without RESERVE_PRESENT the cabinet has no signature.
+        (&[&cab[..30], &flags, &cab[31..]], TRUST_E_NOSIGNATURE, TRUST_E_NOSIGNATURE),
+    ];
+    for (parts, full, hash_only) in cases {
+        c.ok(write_file(&path, parts), 0)?;
+        let r = verify(c, &path, false)?;
+        c.eq(r, full)?;
+        let r = verify(c, &path, true)?;
+        c.eq(r, hash_only)?;
+    }
+    // SAFETY: a NUL-terminated path.
+    unsafe { DeleteFileW(path.as_ptr()) };
+    Ok(())
+}
+
 /// Wine's test_wintrust_digest over one of its two self-signed images.
 fn digest_cases(c: &mut Checks, image: &[u8], nt_headers: usize) -> Result<(), u32> {
     const DUMMY: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
@@ -559,6 +602,16 @@ fn digest_cases(c: &mut Checks, image: &[u8], nt_headers: usize) -> Result<(), u
         let r = verify(c, &path, true)?;
         c.eq(r, hash_only)?;
     }
+    // A changed byte in the signer's encrypted digest (RSA-2048: the
+    // table's 256-byte OCTET STRING): TRUST_E_NOSIGNATURE.
+    let (_, table, _) = pe_offsets(image);
+    let digest = image[table..].windows(4).position(|w| w == [0x04, 0x82, 0x01, 0x00]);
+    c.ok(digest.is_some(), 0)?;
+    let at = table + digest.unwrap_or(0) + 4 + 128;
+    let flipped = [image[at] ^ 0x01];
+    c.ok(write_file(&path, &[&image[..at], &flipped, &image[at + 1..]]), 0)?;
+    let r = verify(c, &path, false)?;
+    c.eq(r, TRUST_E_NOSIGNATURE)?;
     // SAFETY: a NUL-terminated path.
     unsafe { DeleteFileW(path.as_ptr()) };
     Ok(())
@@ -709,7 +762,8 @@ fn setup_exe(c: &mut Checks, path: &[u16]) -> Result<(), u32> {
         b"Microsoft Corporation",
         b"Microsoft Root Certificate Authority 2010",
         SHA256,
-        None,
+        // Its RFC 3161 timestamp's genTime, 2026-10-03 07:54:38.455 UTC.
+        Some(filetime(2026, 10, 3, 7, 54, 38) + 4_550_000),
         WTD_REVOKE_NONE,
     )?;
     real_image(
@@ -752,16 +806,38 @@ fn setup_exe(c: &mut Checks, path: &[u16]) -> Result<(), u32> {
     let r = verify(c, &copy, true)?;
     c.eq(r, TRUST_E_NOSIGNATURE)?;
     image[code + 0x10] ^= 0x01;
-    // A changed byte of the signer's encrypted digest (not confirmed on
-    // Windows: CryptMsgControl's NTE_BAD_SIGNATURE).
+    // setup.exe is dual-signed: the primary signer's unauthenticated
+    // attributes hold a nested signature (1.3.6.1.4.1.311.2.4.1, a second
+    // SHA-256 Microsoft signature), and Windows falls back to it when one
+    // signer's signature does not verify: a changed byte in either
+    // encrypted digest still verifies, both changed is
+    // TRUST_E_NOSIGNATURE.
     let at = image[table..].windows(16).position(|w| w == sample).map(|p| table + p);
     c.ok(at.is_some(), 0)?;
-    let at = at.unwrap_or(0) + 8;
-    image[at] ^= 0x01;
-    c.ok(write_file(&copy, &[image]), 0)?;
-    let r = verify(c, &copy, false)?;
-    c.eq(r, NTE_BAD_SIGNATURE)?;
-    image[at] ^= 0x01;
+    let primary = at.unwrap_or(0) + 8;
+    let nested = image[table..].windows(NESTED_OID.len()).position(|w| w == NESTED_OID);
+    c.ok(nested.is_some(), 0)?;
+    let from = table + nested.unwrap_or(0);
+    // The nested signer's encrypted digest: the first 512-byte OCTET
+    // STRING (RSA-4096) after the attribute's OID.
+    let digest = image[from..].windows(4).position(|w| w == [0x04, 0x82, 0x02, 0x00]);
+    c.ok(digest.is_some(), 0)?;
+    let second = from + digest.unwrap_or(0) + 4 + 256;
+    for (flip, expected) in [
+        (&[primary][..], S_OK),
+        (&[second][..], S_OK),
+        (&[primary, second][..], TRUST_E_NOSIGNATURE),
+    ] {
+        for &at in flip {
+            image[at] ^= 0x01;
+        }
+        c.ok(write_file(&copy, &[image]), 0)?;
+        let r = verify(c, &copy, false)?;
+        c.eq(r, expected)?;
+        for &at in flip {
+            image[at] ^= 0x01;
+        }
+    }
     // Data after the certificate table.
     c.ok(write_file(&copy, &[image, &[0x11, 0x22, 0x33, 0x44]]), 0)?;
     let r = verify(c, &copy, false)?;
@@ -777,10 +853,10 @@ fn run() -> Result<(), u32> {
     // IMAGE_NT_HEADERS32 is 248 bytes, IMAGE_NT_HEADERS64 264.
     digest_cases(&mut c, include_bytes!("../data/selfsigned32.exe"), 248)?;
     digest_cases(&mut c, include_bytes!("../data/selfsigned64.exe"), 264)?;
+    cab_cases(&mut c)?;
 
     let require = required();
     let setup = wide::<32>(b"C:\\gala\\setup.exe");
-    let python = wide::<32>(b"C:\\gala\\python.exe");
     let present = |p: &[u16]| {
         // SAFETY: a NUL-terminated path; our handle.
         unsafe {
@@ -795,24 +871,6 @@ fn run() -> Result<(), u32> {
         Line::new()
             .s(NAME.as_bytes())
             .s(b": no C:\\gala\\setup.exe, its checks skipped\r\n")
-            .print();
-    }
-    if present(&python) {
-        real_image(
-            &mut c,
-            &python,
-            4,
-            b"Python Software Foundation",
-            b"Microsoft Identity Verification Root Certificate Authority 2020",
-            b"2.16.840.1.101.3.4.2.1",
-            Some(filetime(2024, 12, 3, 20, 13, 9) + 9_730_000),
-            WTD_REVOKE_NONE,
-        )?;
-    } else {
-        c.ok(!require, 0)?;
-        Line::new()
-            .s(NAME.as_bytes())
-            .s(b": no C:\\gala\\python.exe, its checks skipped\r\n")
             .print();
     }
     Ok(())

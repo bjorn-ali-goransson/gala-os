@@ -104,6 +104,21 @@ pub extern "system" fn SetTimer(hwnd: Hwnd, id: usize, elapse: u32, proc_: usize
     .unwrap_or(0)
 }
 
+/// SetCoalescableTimer(hwnd, id, elapse, proc, tolerance): SetTimer; the
+/// tolerance (how late the system may fire it to batch timers) is not
+/// used: gala fires every timer when it is due, which any tolerance
+/// allows. Office's Click-to-Run client sets its timers this way.
+#[unsafe(no_mangle)]
+pub extern "system" fn SetCoalescableTimer(
+    hwnd: Hwnd,
+    id: usize,
+    elapse: u32,
+    proc_: usize,
+    _tolerance: u32,
+) -> usize {
+    SetTimer(hwnd, id, elapse, proc_)
+}
+
 /// KillTimer: TRUE if there was such a timer.
 #[unsafe(no_mangle)]
 pub extern "system" fn KillTimer(hwnd: Hwnd, id: usize) -> i32 {

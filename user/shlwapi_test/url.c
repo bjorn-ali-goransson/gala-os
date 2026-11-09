@@ -223,32 +223,38 @@ static void assoc_checks(void) {
 
     wchar_t out[MAX_PATH];
     DWORD len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len), S_OK);
     CHECK(wcscmp(out, command) == 0 && len == wcslen(command) + 1);
     len = MAX_PATH;
     /* The command's program does not exist: CO_E_APPNOTFOUND (Windows 11
        25H2); an existing one (this program, below) is S_OK. */
-    CHECK(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len)
-          == CO_E_APPNOTFOUND);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len), CO_E_APPNOTFOUND);
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_FRIENDLYDOCNAME, L".galatest", NULL, out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_FRIENDLYDOCNAME, L".galatest", NULL, out, &len), S_OK);
     CHECK(wcscmp(out, friendly) == 0);
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L"GalaTest.File", NULL, out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L"GalaTest.File", NULL, out, &len), S_OK);
     len = 0;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, NULL, &len) == S_FALSE);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, NULL, &len), S_FALSE);
     CHECK(len == wcslen(command) + 1);
     /* A short buffer: HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER), not
        the documented E_POINTER, the size needed, and the string truncated
        into the buffer (Windows 11 25H2). */
     len = 4;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len)
-          == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galatest", NULL, out, &len),
+             HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
     CHECK(len == wcslen(command) + 1);
     CHECK(wcsncmp(out, command, 3) == 0 && out[3] == 0);
+    /* An extension no class claims: the Unknown class's command, OpenWith
+       (Windows 11 25H2, issue #57: `C:\WINDOWS\system32\OpenWith.exe
+       "%1"`, the system directory as GetSystemDirectoryW spells it). */
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galanone", NULL, out, &len)
-          == HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION));
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_COMMAND, L".galanone", NULL, out, &len), S_OK);
+    wchar_t openwith[MAX_PATH + 32];
+    CHECK(GetSystemDirectoryW(openwith, MAX_PATH) > 0);
+    wcscat(openwith, L"\\OpenWith.exe \"%1\"");
+    CHECK(_wcsicmp(out, openwith) == 0);
+    CHECK_EQ(len, wcslen(openwith) + 1);
     wchar_t me[MAX_PATH], existing[MAX_PATH + 8];
     CHECK(GetModuleFileNameW(NULL, me, MAX_PATH) > 0);
     wcscpy(existing, L"\"");
@@ -260,7 +266,7 @@ static void assoc_checks(void) {
           == ERROR_SUCCESS);
     RegCloseKey(key);
     len = MAX_PATH;
-    CHECK(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len) == S_OK);
+    CHECK_EQ(AssocQueryStringW(0, ASSOCSTR_EXECUTABLE, L".galatest", L"open", out, &len), S_OK);
     CHECK(wcscmp(out, me) == 0);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\.galatest") == ERROR_SUCCESS);
     CHECK(SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\GalaTest.File") == ERROR_SUCCESS);

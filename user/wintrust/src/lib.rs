@@ -1,10 +1,10 @@
 //! gala's wintrust.dll: WinVerifyTrust with WINTRUST_ACTION_GENERIC_VERIFY_V2
-//! (Authenticode signatures of PE images, `verify`), the WTHelper
+//! (Authenticode signatures of PE images and cabinets, `verify`), the WTHelper
 //! functions over the provider data it keeps, and the catalog functions
 //! SQL Server LocalDB imports, not implemented (`unimplemented`).
 //!
 //! The design (ARCHITECTURE "wintrust: Authenticode"): the PE image hash
-//! is wintrust's (`pe`, through bcrypt); the PKCS #7 SignedData, its
+//! and the cabinet digest are wintrust's (`pe`, `cab`, through bcrypt); the PKCS #7 SignedData, its
 //! signer's signature, the RFC 3161 timestamp and the chain and its
 //! Authenticode policy are crypt32's (CryptMsg*, CryptDecodeObjectEx,
 //! CryptVerifyTimeStampSignature, CertGetCertificateChain,
@@ -15,6 +15,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod cab;
 mod layout;
 mod pe;
 mod unimplemented;

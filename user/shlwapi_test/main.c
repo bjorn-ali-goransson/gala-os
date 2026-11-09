@@ -67,6 +67,10 @@
 
 static int check;
 #define CHECK(cond) do { check++; if (!(cond)) { printf(NAME ": check %d (%s line %d) failed\n", check, __FILE_NAME__, __LINE__); fflush(stdout); ExitProcess(check); } } while (0)
+/* A check of a value: prints what it got and wanted when they differ. */
+#define CHECK_EQ(got, want) do { check++; long long got_ = (long long)(got), want_ = (long long)(want); \
+    if (got_ != want_) { printf(NAME ": check %d (%s line %d) got 0x%llx, want 0x%llx\n", check, __FILE_NAME__, \
+    __LINE__, got_, want_); fflush(stdout); ExitProcess(check); } } while (0)
 
 #ifndef INTERNET_MAX_URL_LENGTH
 #define INTERNET_MAX_URL_LENGTH 2084

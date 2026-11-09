@@ -1272,6 +1272,12 @@ fn dump_node(shown: &str, volume_path: &str, depth: u32) {
     // Windows programs often write their logs, is shown as text too.
     let utf16 = data.starts_with(&[0xff, 0xfe])
         || (data.len() >= 4 && data.len() % 2 == 0 && data[0] != 0 && data[1] == 0 && data[3] == 0);
+    // A binary file (a NUL in its first 4 KiB, not UTF-16 text: ODT's
+    // downloaded cabinets beside its log) is named, not printed.
+    if !utf16 && data.iter().take(4096).any(|&b| b == 0) {
+        info!("dump: {shown}: {} bytes, binary, not shown", data.len());
+        return;
+    }
     info!("dump: begin {shown} ({} bytes{})", data.len(), if utf16 { ", UTF-16LE" } else { "" });
     if utf16 {
         let body = data.strip_prefix(&[0xff, 0xfe]).unwrap_or(&data);
