@@ -98,8 +98,9 @@ struct Inner {
     /// How many Ctrl+C events there have been.
     ctrl_count: u32,
     /// The processes whose control-handler thread waits for Ctrl+C
-    /// (GalaConsoleCtrl), with the last one each has taken.
-    takers: Vec<(u64, u32)>,
+    /// (GalaConsoleCtrl): (pid, the last Ctrl+C it has taken, the last
+    /// whose handlers it has finished).
+    takers: Vec<(u64, u32, u32)>,
     /// The output mode (ENABLE_PROCESSED_OUTPUT, DISABLE_NEWLINE_AUTO_RETURN).
     output_mode: u32,
     /// The last byte written was CR (a following LF is not translated).
@@ -329,14 +330,24 @@ impl Session {
     }
 
     /// Process `pid`'s handler thread has taken the Ctrl+C events up to
-    /// `count` (its first call registers it with the count so far).
+    /// `count` (its first call registers it with the count so far, all of
+    /// them handled).
     pub fn took(&self, pid: u64, count: u32) -> Result<(), NtStatus> {
         let mut s = self.inner.lock();
         if let Some(t) = s.takers.iter_mut().find(|t| t.0 == pid) {
             t.1 = count;
             return Ok(());
         }
-        s.takers.try_push((pid, count)).map_err(|_| NtStatus::NO_MEMORY)
+        s.takers.try_push((pid, count, count)).map_err(|_| NtStatus::NO_MEMORY)
+    }
+
+    /// Process `pid` is done with the Ctrl+C events up to `count`: its
+    /// handler thread came back to wait for the next one (its handlers
+    /// returned), or it is ending.
+    pub fn handled(&self, pid: u64, count: u32) {
+        if let Some(t) = self.inner.lock().takers.iter_mut().find(|t| t.0 == pid) {
+            t.2 = count;
+        }
     }
 
     /// The last Ctrl+C process `pid`'s handler thread took, if it has one.
@@ -350,12 +361,12 @@ impl Session {
         self.inner.lock().takers.retain(|t| t.0 != pid);
     }
 
-    /// The processes other than `pid` whose handler threads have not yet
-    /// taken Ctrl+C `count`.
-    pub fn not_yet_taken(&self, pid: u64, count: u32, out: &mut [u64]) -> usize {
+    /// The processes other than `pid` that are not yet done with Ctrl+C
+    /// `count` (`handled`).
+    pub fn not_yet_handled(&self, pid: u64, count: u32, out: &mut [u64]) -> usize {
         let s = self.inner.lock();
         let mut n = 0;
-        for t in s.takers.iter().filter(|t| t.0 != pid && (t.1.wrapping_sub(count) as i32) < 0) {
+        for t in s.takers.iter().filter(|t| t.0 != pid && (t.2.wrapping_sub(count) as i32) < 0) {
             if n < out.len() {
                 out[n] = t.0;
             }
@@ -572,27 +583,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn who_has_not_yet_taken_a_ctrl_c() {
+    fn who_is_not_yet_done_with_a_ctrl_c() {
         let s = Session::new().unwrap();
         // The shell (pid 4) and its child (8) register at count 0.
         s.took(4, 0).unwrap();
         s.took(8, 0).unwrap();
         let mut late = [0u64; 4];
-        assert_eq!(s.not_yet_taken(8, 0, &mut late), 0);
+        assert_eq!(s.not_yet_handled(8, 0, &mut late), 0);
         // Ctrl+C 1: the child, ending with it, waits for the shell.
-        assert_eq!(s.not_yet_taken(8, 1, &mut late), 1);
+        assert_eq!(s.not_yet_handled(8, 1, &mut late), 1);
         assert_eq!(late[0], 4);
+        // The shell's thread woke (took it): its handler has not run yet.
         s.took(4, 1).unwrap();
-        assert_eq!(s.not_yet_taken(8, 1, &mut late), 0);
+        assert_eq!(s.not_yet_handled(8, 1, &mut late), 1);
+        // Back to wait: its handler returned.
+        s.handled(4, 1);
+        assert_eq!(s.not_yet_handled(8, 1, &mut late), 0);
         assert_eq!((s.taken_by(4), s.taken_by(99)), (Some(1), None));
         // A process that ended takes nothing more and is not waited for.
         s.took(12, 0).unwrap();
-        assert_eq!(s.not_yet_taken(8, 1, &mut late), 1);
+        assert_eq!(s.not_yet_handled(8, 1, &mut late), 1);
         s.forget_taker(12);
-        assert_eq!(s.not_yet_taken(8, 1, &mut late), 0);
+        assert_eq!(s.not_yet_handled(8, 1, &mut late), 0);
+        // Two processes ending with it do not wait for each other.
+        s.took(16, 1).unwrap();
+        s.handled(16, 1);
+        assert_eq!(s.not_yet_handled(8, 1, &mut late), 0);
         // Counts wrap.
         s.took(4, u32::MAX).unwrap();
-        assert_eq!(s.not_yet_taken(8, 0, &mut late), 1);
+        s.handled(4, u32::MAX);
+        assert_eq!(s.not_yet_handled(8, 0, &mut late), 1);
     }
 
     #[test]
