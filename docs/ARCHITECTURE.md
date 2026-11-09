@@ -4200,8 +4200,10 @@ WinHTTP and WinINet references document them, on one engine,
 `user/http_client` (an `rlib`, `no_std` with `alloc`): the connection
 (`net.rs`), the request and response (`request.rs`), URL cracking
 (`url.rs`) and the live-handle list (`handles.rs`). Each DLL is its
-API's functions, flags, options and error codes over it. Tests:
-`winhttp_test` and `wininet_test` (C, mingw-w64), `winhttp_cb_test`
+API's functions, flags, options and error codes over it. Both build
+for x64 and x86 (SysWOW64). Tests:
+`winhttp_test`, and `wininet_test` with its x86 twin
+`wow64_wininet_test` (C, mingw-w64, one source), `winhttp_cb_test`
 and its x86 twin `wow64_winhttp_cb_test` (the status callbacks; Rust
 on ntrt); all against schannel_test's Nginx, which also serves plain
 HTTP on 127.0.0.1:8080.
@@ -4251,11 +4253,31 @@ HTTP on 127.0.0.1:8080.
   of the path and extra info, the given headers added),
   InternetCrackUrlW, InternetSetOptionW (the time-outs, CONNECT_RETRIES,
   SECURITY_FLAGS, USER_AGENT, CONTEXT_VALUE; others and the process-wide
-  NULL handle are recorded and accepted), InternetCloseHandle and
-  InternetAttemptConnect (ERROR_SUCCESS: no dial-up). gala's default
-  time-outs: connect 60 s, send and receive 30 s (the response's headers
-  as a receive).
-- **WinHttpCrackUrl / InternetCrackUrlW** (`url.rs`): http and https
+  NULL handle are recorded and accepted), InternetQueryOptionW (the
+  time-outs, CONNECT_RETRIES, HANDLE_TYPE, SECURITY_FLAGS, CONTEXT_VALUE,
+  USER_AGENT of a session, URL of a request, and for the NULL handle
+  CONNECTED_STATE; a string option that does not fit is
+  ERROR_INSUFFICIENT_BUFFER with the bytes needed with the NUL, one that
+  fits gives its length in characters without it; another handle's
+  option is ERROR_INTERNET_INCORRECT_HANDLE_TYPE; others are recorded
+  and ERROR_INTERNET_INVALID_OPTION), InternetCloseHandle and
+  InternetAttemptConnect (ERROR_SUCCESS: no dial-up). The A functions
+  ODT's setup.exe imports (`ansi.rs`): InternetConnectA,
+  HttpOpenRequestA and HttpAddRequestHeadersA through the ANSI code page
+  into the W ones; InternetCrackUrlA on the caller's bytes (the
+  delimiters are ASCII, so a URL widened byte by byte has its
+  components at the same offsets whatever the code page); HttpQueryInfoA
+  answers the header's bytes (the length without the NUL, or the bytes
+  needed with it). InternetGetCookieExW: gala keeps no cookie store
+  (Set-Cookie is not kept), so a URL has none: FALSE,
+  ERROR_NO_MORE_ITEMS, `*size` 0, as for a fresh profile, recorded
+  (`wininet.dll!InternetGetCookieExW(no cookie store)`); a URL without a
+  scheme is ERROR_INTERNET_UNRECOGNIZED_SCHEME, any other that is not
+  a whole http(s) URL (about:blank) ERROR_INVALID_PARAMETER. gala's
+  default time-outs: connect 60 s, send and receive 30 s (the response's
+  headers as a receive).
+- **WinHttpCrackUrl / InternetCrackUrlW / A** (`url.rs`, generic over
+  the character: URL_COMPONENTSW or URL_COMPONENTSA): http and https
   (other schemes: ERROR_WINHTTP_UNRECOGNIZED_SCHEME; recorded by
   wininet, whose Windows counterpart also has ftp, file, ...), user and
   password, bracketed IPv6
@@ -4331,7 +4353,7 @@ HTTP on 127.0.0.1:8080.
   Location is no http(s) URL`, ...); a panic records its
   location (`<dll>!panic <file>`) and ends the process with 0xC0000409.
 - **Status callbacks** (`user/winhttp/src/callback.rs`; WinINet's
-  InternetSetStatusCallback is not there yet): WinHttpSetStatusCallback
+  below): WinHttpSetStatusCallback
   sets one handle's callback and notification flags and returns the
   previous callback (NULL at first, last error ERROR_SUCCESS;
   WINHTTP_INVALID_STATUS_CALLBACK with ERROR_INVALID_HANDLE for a bad
@@ -4359,6 +4381,22 @@ HTTP on 127.0.0.1:8080.
   `wow64_winhttp_cb_test` check it against Nginx. Not sent: the
   asynchronous completions, INTERMEDIATE_RESPONSE (1xx are skipped),
   CLOSING_CONNECTION / CONNECTION_CLOSED, DETECTING_PROXY.
+- **WinINet's status callbacks** (`user/wininet/src/callback.rs`,
+  InternetSetStatusCallbackW): the same observer, WinINet's rules (the
+  documentation and Wine's http.c tests on Windows): no notification
+  flags, but a handle whose context is 0 reports nothing; a connection
+  and a request get their parent's callback; HANDLE_CREATED (60) goes
+  to the parent's callback with the new handle's context, HANDLE_CLOSING
+  (70) to the closed handle's; the steps are RESOLVING_NAME (10, the
+  host in UTF-16), NAME_RESOLVED (11), CONNECTING_TO_SERVER (20) and
+  CONNECTED_TO_SERVER (21) (the address as ANSI text, strlen + 1, for
+  the W callback too), SENDING_REQUEST (30), REQUEST_SENT (31),
+  RECEIVING_RESPONSE (40), RESPONSE_RECEIVED (41), REDIRECT (110, the
+  URL in UTF-16); wide strings' lengths are their bytes with the NUL.
+  A failed handshake has no notification (the error code says it).
+  InternetOpenUrlW makes its handle (HANDLE_CREATED) before it sends,
+  and closes it if the send fails. `wininet_test` /
+  `wow64_wininet_test` check the order and the context rule.
 - **Time-outs**: the connect time-out (default 60 s) is a non-blocking
   connect waited for with WSAPoll, for each address tried (SO_ERROR
   says why one failed); every address timing out is
@@ -4373,8 +4411,8 @@ HTTP on 127.0.0.1:8080.
   WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW
   (`gala_stubs` stubs); named
   proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
-  WinINet's FTP and Gopher and its cache (InternetQueryOptionW and the
-  A functions are not exported yet);
+  WinINet's FTP and Gopher, its cache and cookie store, and the A
+  functions setup.exe does not import;
   WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
   as an option, not applied; the redirect policy is);
   connection reuse (every request has its own connection, closed with
@@ -8032,7 +8070,9 @@ ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 there), schannel and the RustCrypto crates under it
 (`wow64_schannel_test`; getrandom's ProcessPrng imported undecorated), combase and
 appxdeploymentclient (`wow64_combase_test`; PackageManager is registered
-in the 32-bit registry view too). urlmon.dll has the default URL security manager
+in the 32-bit registry view too), wininet (`wow64_wininet_test`,
+wininet_test's C source built with mingw's i686 compiler; "WinHTTP and
+WinINet"). urlmon.dll has the default URL security manager
 (CoInternetCreateSecurityManager, `secmgr.rs`): MapUrlToZone and
 GetSecurityId as Windows' default settings with no zone mappings answer
 them (a drive path, file: with a drive and res: the Local Machine zone;

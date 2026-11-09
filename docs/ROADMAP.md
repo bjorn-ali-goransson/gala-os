@@ -1562,19 +1562,33 @@ need gala's.
      https://officeclient.microsoft.com..., URLACTION_CREDENTIALS_USE
      0x1a00), answered E_NOTIMPL and recorded (Windows answers from the
      Internet zone's policy under Internet Settings\Zones), and MapUrlToZone(
-     https://ecs.office.com/config/v2/Office/...) = 3, Internet. Where
-     the run ends now: setup.exe delay-loads
-     `wininet.dll!InternetGetCookieExW`, and gala's wininet has no i686
-     build: both copies end with 0xc06d007e (crash report: "delay load of
-     WININET.dll!InternetGetCookieExW"). ODT has written no log yet
-     (`dump=C:/gala/odtlog` finds no directory).
+     https://ecs.office.com/config/v2/Office/...) = 3, Internet. It then
+     asks wininet for its cookies (done: gala's wininet.dll for i686 too,
+     with every wininet function setup.exe imports: InternetGetCookieExW,
+     no cookies as on a fresh profile, recorded `wininet.dll!InternetGet
+     CookieExW(no cookie store)`, asked twice, with
+     INTERNET_COOKIE_HTTPONLY and without; InternetQueryOptionW,
+     InternetSetStatusCallbackW with WinINet's notifications, and the A
+     functions InternetConnectA, HttpOpenRequestA, HttpAddRequestHeadersA,
+     HttpQueryInfoA, InternetCrackUrlA; `wininet_test` and its x86 twin
+     `wow64_wininet_test`, expectations from Wine's wininet tests run on
+     Windows; ARCHITECTURE "WinHTTP and WinINet"), asks the 32-bit ntdll
+     for RtlConvertDeviceFamilyInfoToString through GetProcAddress
+     (missing export, survived). Where the run ends now: setup.exe
+     delay-loads `IPHLPAPI.DLL!GetAdaptersInfo`, and gala's iphlpapi has
+     no i686 build: the elevated copy ends with 0xc06d007e (crash report:
+     "delay load of IPHLPAPI.DLL!GetAdaptersInfo"), and its parent with
+     it. ODT has written no log yet (`dump=C:/gala/odtlog` finds no
+     directory).
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: wininet.dll for i686
-     (InternetGetCookieExW: no cookies, as a fresh profile; then what
-     else of wininet it calls), urlmon's ProcessUrlAction from the zones'
-     default policies (the Internet Settings\Zones keys), a run with
+     Next, in the order the run reaches them: iphlpapi.dll for i686
+     (GetAdaptersInfo, a `gala_stubs` stub on x64 too, with
+     IP_ADAPTER_INFO typed for both widths; CreateSortedAddressPairs and
+     FreeMibTable, which setup.exe also imports),
+     RtlConvertDeviceFamilyInfoToString in ntdll, urlmon's
+     ProcessUrlAction from the zones' default policies (the Internet Settings\Zones keys), a run with
      direct egress (the TLS chain of Microsoft's servers to a public
      root), then what the run reaches after them (its log
      in `target/failed/office_install.dump/` once it writes one); starting
@@ -1585,7 +1599,7 @@ need gala's.
      the XML it downloads (the CDN's cab manifests: more of the DOM as
      the run reaches it; load of URLs is recorded unsupported), then
      CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
-     (the signature check), wininet, xmllite, webservices,
+     (the signature check), xmllite, webservices,
      iphlpapi, setupapi, cabinet, credui; a few shlwapi, user32, ole32
      and shell32 functions; FormatMessage's system text for
      ERROR_CANCELLED (1223, recorded on the declined path); the 32-bit
@@ -1630,8 +1644,8 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    "WinHTTP and WinINet"); the status callbacks of a synchronous
    session and the connect time-out (`winhttp_cb_test`,
    `wow64_winhttp_cb_test`). Still open there: connection reuse,
-   asynchronous sessions (and their completion notifications), WinINet's
-   InternetSetStatusCallback, proxies, authentication,
+   asynchronous sessions (and their completion notifications), proxies,
+   authentication,
    WINHTTP_DISABLE_REDIRECTS.
 2. Done: wininet's HTTP functions on the same engine as winhttp
    (`user/http_client`; `wininet_test` against the same Nginx:
@@ -1640,8 +1654,11 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    and InternetReadFile, InternetOpenUrlW, InternetCrackUrlW, an unknown
    issuer as ERROR_INTERNET_INVALID_CA, a closed port, a redirect
    followed and one not (INTERNET_FLAG_NO_AUTO_REDIRECT); ARCHITECTURE
-   "WinHTTP and WinINet"). Still open there, besides winhttp's list:
-   the A functions, InternetQueryOptionW, FTP, the cache,
+   "WinHTTP and WinINet"); x86 too (`wow64_wininet_test`), with
+   InternetQueryOptionW, InternetSetStatusCallbackW, InternetGetCookieExW
+   (no cookie store: none) and the A functions ODT's setup.exe imports.
+   Still open there, besides winhttp's list: the other A functions, the
+   cookie store (Set-Cookie kept, sent and answered), FTP, the cache,
    InternetTimeFrom/ToSystemTimeW.
 3. Done: curl and Git over Schannel. curl.se's own Windows build
    (8.23.0_8, PREBUILT `curl`) has LibreSSL as its only TLS backend (no

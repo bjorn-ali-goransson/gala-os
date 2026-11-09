@@ -2762,6 +2762,7 @@ dependencies = [
  "gala_heap",
  "gala_stubs",
  "http_client",
+ "ntrt",
 ]
 
 [[package]]
