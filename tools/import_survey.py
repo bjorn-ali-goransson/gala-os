@@ -113,8 +113,46 @@ def own_exports(d):
             out[n[:-len(".txt")]] = set(l.strip() for l in f if l.strip())
     return out
 
+def closure(imports_dir, roots):
+    """With `--roots a.exe,b.exe` (--dumps): the files those programs
+    load, following static imports through the program's own DLLs (a
+    DLL name maps to every dump of that file name); {rel: "static"} for
+    those, "delay" for own DLLs reached only through a delay import."""
+    by_name, deps = defaultdict(list), {}
+    for dirpath, _, names in os.walk(imports_dir):
+        for n in names:
+            rel = os.path.relpath(os.path.join(dirpath, n), imports_dir)[:-len(".txt")]
+            by_name[os.path.basename(rel).lower()].append(rel)
+            kind, dll, d = None, None, []
+            with open(os.path.join(dirpath, n), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("Import {"): kind = "static"
+                    elif line.startswith("DelayImport {"): kind = "delay"
+                    elif line.strip().startswith("Name:"): d.append((kind, line.strip()[5:].strip().lower()))
+            deps[rel] = d
+    seen = {}
+    todo = [(r, "static") for root in roots for r in by_name.get(root.lower(), [])]
+    while todo:
+        rel, how = todo.pop()
+        if seen.get(rel) == "static" or (seen.get(rel) == how):
+            continue
+        seen[rel] = how
+        for kind, dll in deps.get(rel, []):
+            for r in by_name.get(dll, []):
+                todo.append((r, "static" if how == "static" and kind == "static" else "delay"))
+    return seen
+
 if len(sys.argv) > 2 and sys.argv[2] == "--dumps":
     own = own_exports(sys.argv[4])
+    only = None
+    if len(sys.argv) > 6 and sys.argv[5] == "--roots":
+        only = closure(sys.argv[3], sys.argv[6].split(","))
+        # `--static`: only what loading needs (the start-up files' static
+        # imports), not what delay imports reach.
+        if "--static" in sys.argv[7:]:
+            only = {k: v for k, v in only.items() if v == "static"}
+        print(f"== closure of {sys.argv[6]}: {sum(1 for v in only.values() if v == 'static')} "
+              f"files loaded at start, {sum(1 for v in only.values() if v == 'delay')} more through delay imports")
     need = defaultdict(set)      # (dll, sym) -> files
     nodll = defaultdict(set)     # dll -> files
     ownmiss = defaultdict(set)   # (dll, sym) of the program's own DLLs not exported
@@ -123,11 +161,19 @@ if len(sys.argv) > 2 and sys.argv[2] == "--dumps":
         for n in names:
             files += 1
             rel = os.path.relpath(os.path.join(dirpath, n), sys.argv[3])[:-len(".txt")]
+            if only is not None and rel not in only:
+                files -= 1
+                continue
             dll = None
+            static_only = "--static" in sys.argv[7:]
+            kind = None
             with open(os.path.join(dirpath, n), encoding="utf-8", errors="replace") as f:
                 for line in f:
                     s = line.strip()
-                    if s.startswith("Name:"): dll = s[5:].strip()
+                    if line.startswith("Import {"): kind = "static"
+                    elif line.startswith("DelayImport {"): kind = "delay"
+                    elif s.startswith("Name:"): dll = s[5:].strip()
+                    elif s.startswith("Symbol:") and static_only and kind == "delay": continue
                     elif s.startswith("Symbol:"):
                         m = re.match(r"Symbol: (\S*) \((\d+)\)", s)
                         sym = m.group(1) if m.group(1) else f"#{m.group(2)}"

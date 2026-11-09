@@ -750,8 +750,8 @@ parity already exposes.
    stream, a tool call included), so streaming is tested without TLS.
    Open: the manifest's `Microsoft.VCRedist.2015+.x64` dependency (a
    Burn exe, PK stage 3) and the UCRT (ucrtbase.dll ships with Windows,
-   not with gala; scenarios copy the JDK's app-local copy today) need a
-   decided home in the image or the installer.
+   not with gala; scenarios copy the JDK's app-local copy today; gala's
+   own is decided, item OF).
 2. HTTPS: aichat verifies servers with rustls against Windows' ROOT
    system store (rustls-native-certs through crypt32), which gala opens
    empty today; TLS step 5's ROOT store makes it work (aichat's TLS is
@@ -1316,19 +1316,60 @@ package over WebView2). Classic Outlook is out of scope.
 list; its dependencies (GPU G2's DXVK, COM/OLE, Click-to-Run's
 install, WebView2, MSIX) are worked as the analysis ranks them.
 
+**Gap analysis** (step 1; the `office-survey` workflow, WORKFLOW "The
+Office survey"; Microsoft 365 Apps 16.0.20527.20150, Current channel,
+x64: 1486 PE files, 867 of them x64, 529 DLLs of Office's own). What
+Word, Excel and PowerPoint load (`import_survey.py --dumps ... --roots
+WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE`): 114 files at start, 85 more
+through delay imports. Office carries its own UCRT and VC runtime
+(app-local `ucrtbase.dll`, `vcruntime140.dll`), so the apps do not
+need gala's.
+- **To load** (static imports of the 114; no DLL is missing, only
+  functions): kernel32's CreateFile2 (15 files), the activation-context
+  queries FindActCtxSectionStringW and QueryActCtxW (11), CreateMutexExW,
+  FindFirstFileNameW/FindNextFileNameW, GetShortPathNameA,
+  GetThreadIOPendingFlag, GetVolumePathNamesForVolumeNameW,
+  IsSystemResumeAutomatic, OpenSemaphoreA, QueueUserWorkItem,
+  WerRegisterMemoryBlock/WerUnregisterMemoryBlock (5 each) and ten more
+  used once; ntdll's AVL generic tables (RtlInitializeGenericTableAvl
+  and its seven companions), NtNotifyChangeMultipleKeys, NtRenameKey,
+  RtlIntegerToUnicodeString, RtlIsNameInExpression (5 each). Some are
+  stubs today (CreateMutexExW, GetShortPathNameA, GetThreadIOPendingFlag,
+  GetVolumePathNamesForVolumeNameW): they must work, not only exist.
+- **Then, as the apps draw and work** (delay imports, files needing
+  each): gdiplus (13), Direct2D `d2d1` (7), `mscms` colour management
+  (5), Media Foundation `mfplat`/`mf` (4/2), `propsys` (4), `cryptui`
+  (4), `msi` (4), WIC `windowscodecs` (3), `rstrtmgr` (3), the
+  WinAppSDK/XAML pieces' app-model and ntuser API sets, `d3d10_1` and
+  `d3dcompiler_47` (2), `httpapi`, `srpapi`, `ninput`, `dnsapi`,
+  `activeds`, `credui`, `davclnt`; the full list with every function is
+  the survey's output. Direct2D and WIC lead the drawing path (Office
+  draws through Direct2D/DirectWrite, falling back to GDI+), with GPU
+  G2's Direct3D 11 under Direct2D.
+- **Install** (Click-to-Run): the `ClickToRunSvc` service (automatic,
+  LocalSystem, `OfficeClickToRun.exe /service`), its integrator, and
+  ten scheduled tasks; ODT's own `setup.exe` is 32-bit (below).
+
 **Next**:
-1. Gap analysis (black-box metadata only, CLEAN_ROOM): import tables,
-   delay loads, COM classes and services of the apps (installed with the
-   Office Deployment Tool) against gala's exports and stubs; a ranked
-   blocker list in this section, like AG's.
+1. The load list above, test first (a kernel32/ntdll test program for
+   the functions, expected results from Windows), until the three
+   apps' processes start in gala with Office's files in place; a
+   scenario that boots them (where the files come from: the native
+   install below, or a directory a local run provides; never
+   committed or published).
+   - The UCRT for the installer: gala's own `ucrtbase.dll` and
+     `api-ms-win-crt-*` sets, x86 and x64, written in Rust over gala's
+     msvcrt, test first against Windows (the owner's decision; also
+     the answer to PK's AIChat UCRT question and the JDK copies the
+     scenarios carry today).
    - Alongside, natively: a pending scenario `office_install` runs the
      Office Deployment Tool's `setup.exe /configure` in gala (its
      ledger ranks the installer's blockers; the guest needs the CDN, so
      on CI's boot runners). ODT 16.0.20430.20146's `setup.exe` is a
      32-bit x86 program (WOW64), and by its import tables against
      gala's i686 DLLs it does not load yet: it imports the UCRT
-     (`api-ms-win-crt-*`, which gala does not ship: the open question
-     of the UCRT's home, PK's AIChat item) and nine kernel32 functions
+     (`api-ms-win-crt-*`, which gala does not ship yet: gala's own,
+     above) and nine kernel32 functions
      gala lacks (CreateFile2, OpenSemaphoreA, K32EnumProcesses,
      K32GetProcessImageFileNameW, RtlCaptureStackBackTrace,
      WerRegisterMemoryBlock/WerUnregisterMemoryBlock,

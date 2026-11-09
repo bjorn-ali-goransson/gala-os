@@ -1247,7 +1247,9 @@ export lists of Office's DLLs, COM classes, services, scheduled tasks;
 never a binary). Download the `office-survey` artifact, then rank it
 against gala's DLLs: `python3 -I tools/import_survey.py
 target/x86_64-pc-windows-msvc/release --dumps <artifact>/imports
-<artifact>/exports`.
+<artifact>/exports`; `--roots WINWORD.EXE,EXCEL.EXE,POWERPNT.EXE` keeps only
+what those programs load (static imports through Office's own DLLs,
+then delay imports), `--static` after it only what loading needs.
 
 ### Linux test programs (user/lx, ROADMAP LX)
 
