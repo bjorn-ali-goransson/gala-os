@@ -601,7 +601,8 @@ numbers and the version reported to programs depend on it.
   gala's numbers for Windows services (until verified): 0x7f01
   NtCancelIoFileEx, 0x7f03 NtCreateNamedPipeFile, 0x7f04 NtFsControlFile,
   0x7f05 NtSetInformationObject, 0x7f06-0x7f09 NtOpenKeyEx, NtDeleteKey,
-  NtDeleteValueKey, NtFlushKey, 0x7f0a-0x7f0e the job services,
+  NtDeleteValueKey, NtFlushKey, 0x7fd6 NtSetInformationKey,
+  0x7f0a-0x7f0e the job services,
   0x7f0f-0x7f12 the keyed-event services, 0x7f13
   NtNotifyChangeDirectoryFile, 0x7f14/0x7f15 NtReadFileScatter/
   NtWriteFileGather, 0x7f16-0x7f1e the token services, 0x7f1f/0x7f20
@@ -2412,7 +2413,11 @@ shutdown.
   0x16, NtQueryValueKey 0x17, NtCreateKey 0x1d, NtEnumerateKey 0x32
   (long-stable on x64), NtSetValueKey 0x60 (to be verified), and gala's
   numbers for NtOpenKeyEx, NtDeleteKey, NtDeleteValueKey, NtFlushKey
-  (0x7f06-0x7f09).
+  (0x7f06-0x7f09) and NtSetInformationKey (0x7fd6: KEY_SET_VALUE on the
+  handle; KeyWow64FlagsInformation and KeyControlFlagsInformation, a
+  ULONG, accepted and recorded, there being no registry virtualization
+  to steer; KeyWriteTimeInformation and classes 3-6 recorded
+  STATUS_NOT_IMPLEMENTED; `registry_test`).
 - **Seeding**: the tree is built at boot from
   `kernel/src/nt/registry.seed` (a small text format, described at its
   top) plus `HARDWARE\DESCRIPTION\System\CentralProcessor\<n>` per
@@ -2914,8 +2919,9 @@ ntdll imports.
   QueueUserWorkItem (the pool's simple callbacks), GetShortPathNameA,
   GetVolumePathNamesForVolumeNameW (gala's one volume: `C:\`),
   GetPhysicallyInstalledSystemMemory (the physical memory gala manages),
-  IsSystemResumeAutomatic (FALSE), WerRegisterMemoryBlock (accepted and
-  recorded: gala's crash reports are the kernel's),
+  IsSystemResumeAutomatic (FALSE), WerRegisterMemoryBlock and
+  WerRegisterFile (accepted and recorded: gala's crash reports are the
+  kernel's; their Unregister twins S_OK),
   AttachConsole/AllocConsole (every gala process has a console:
   ERROR_ACCESS_DENIED, as Windows answers a process that has one;
   FreeConsole does not detach), GetDiskFreeSpaceA. GetThreadIOPendingFlag
@@ -6183,6 +6189,8 @@ SetCurrentProcessExplicitAppUserModelID) and `controls_test`.
   due timer (no pile-up); GetMessage waits until the next timer. A
   TIMERPROC rides in lParam and DispatchMessage calls it. Intervals
   clamp to 10 ms .. 0x7fffffff; a window's timers go with it.
+  SetCoalescableTimer is SetTimer (every timer fires when due, which any
+  tolerance allows; `user32_test`).
 - **SystemParametersInfoW** (`spi.rs`): the non-client metrics with the
   GUI font, the work area, the icon title font, high contrast off, three
   wheel lines, and Windows' defaults for the visual-effect switches;

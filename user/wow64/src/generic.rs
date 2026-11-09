@@ -362,6 +362,7 @@ pub static TABLE: &[(u32, &[K])] = &[
     (0x7f07, &[H]),                                          // NtDeleteKey
     (0x7f08, &[H, Us]),                                      // NtDeleteValueKey
     (0x7f09, &[H]),                                          // NtFlushKey
+    (0x7fd6, &[H, U, U, U]),                                 // NtSetInformationKey
     (0x7f0a, &[Oh, U, Oa]),                                  // NtCreateJobObject
     (0x7f0b, &[H, H]),                                       // NtAssignProcessToJobObject
     (0x7f0e, &[H, H]),                                       // NtIsProcessInJob

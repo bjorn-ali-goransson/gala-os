@@ -322,6 +322,10 @@ hit (scenario `ledger_test`).
   `appxdeploymentclient.dll!<method>(<name asked>)`, "other", for each
   PackageManager query answered with no packages (what a program looked
   for: `FindPackagesByNamePublisher(Microsoft.O...` in office_install).
+  NtSetInformationKey's flags classes, "NtSetInformationKey" with
+  `control flags: no registry virtualization` (or `wow64 flags`), the
+  flags as detail: what a program asked of the virtualization gala has
+  not.
   WinVerifyTrust's failed verifications, "other", one per step that
   failed, the error as detail: `wintrust.dll!WinVerifyTrust: <step>`
   (`subject or certificate table`, `image hash differs`, `cabinet not

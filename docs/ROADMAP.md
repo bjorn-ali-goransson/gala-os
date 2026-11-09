@@ -1633,20 +1633,30 @@ need gala's.
      `C2R::CatalogFiles::Install` UnexpectedError and goes on) and
      starts the 64-bit Click-to-Run client, `C:\Program Files\Common
      Files\Microsoft Shared\ClickToRun\OfficeClickToRun.exe platform=x64
-     culture=en-us productstoadd=O365ProPlusRetail.16_en-us_x-none ...`.
-     Where the run ends now: that client does not load (0xc0000135: the
-     scenario ships no 64-bit oleaut32.dll, and its other imports are
-     not known yet), ODT logs "C2RClient returned a failing exit code",
-     and setup.exe and its parent exit with 0xc0000135 after about 82 s.
-     slc.dll, kernelbase's SetSystemFileCacheSize and ntdll's
-     NtSetSystemInformation are still asked for only on the way out
-     (after "Bootstrapper Finished").
+     culture=en-us productstoadd=O365ProPlusRetail.16_en-us_x-none ...`
+     (done: the scenario ships the whole 64-bit system,
+     `FULL_SYSTEM_SCENARIOS`; the client's missing exports, kernel32's
+     WerRegisterFile and ntdll's NtSetInformationKey, and its delay-loaded
+     user32 SetCoalescableTimer, x64 and x86: `office_api_test`,
+     `registry_test`, `user32_test`). The client registers its log for
+     error reports, sets its registry keys' control flags
+     (REG_KEY_DONT_VIRTUALIZE | REG_KEY_RECURSE_FLAG, recorded: gala has
+     no registry virtualization) and installs a global hook
+     (`user32.dll!SetWindowsHookExW(global)`, recorded).
+     Where the run ends now: it delay-loads rpcrt4's RpcServerRegisterIf3
+     (and If2), missing: it means to be an RPC server, so the delay-load
+     fails (0xc06d007f) about 1.7 s in, and setup.exe and its parent exit
+     with that status after about 82 s ("C2RClient returned a failing
+     exit code"). slc.dll, kernelbase's SetSystemFileCacheSize and
+     ntdll's NtSetSystemInformation are still asked for only on the way
+     out (after "Bootstrapper Finished").
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: OfficeClickToRun.exe's
-     64-bit import closure in the scenario (gala's x64 DLLs, then what
-     they lack); CryptCATAdmin* (catalogs: a catalog SIP, member lookup
+     Next, in the order the run reaches them: an RPC server in rpcrt4
+     (RpcServerRegisterIf2/3 and what serving its interface needs: gala's
+     rpcrt4 has only the UUID functions, no RPC runtime); CryptCATAdmin*
+     (catalogs: a catalog SIP, member lookup
      by hash); slc.dll and the two exports once a run needs them (their
      Windows answers for a standard and an elevated caller first);
      Windows' answers from `cab_probe` (the cabinet cases of
@@ -1655,7 +1665,7 @@ need gala's.
      setup.exe imports that gala has no i686 build of (xmllite,
      webservices, cabinet, credui, gdiplus; osppc.dll is
      Office's own) and the functions its imports lack (shell32's
-     SHGetSettings, user32's CheckRadioButton and SetCoalescableTimer,
+     SHGetSettings, user32's CheckRadioButton,
      iphlpapi's CreateSortedAddressPairs); BITS (the
      BackgroundCopyManager it asks for: absent, survived); WinINet's
      asynchronous sessions (INTERNET_FLAG_ASYNC: setup.exe opens one),

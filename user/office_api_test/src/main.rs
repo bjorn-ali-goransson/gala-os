@@ -27,6 +27,8 @@
 //!   least the memory Windows reports (or ERROR_INVALID_DATA where the
 //!   firmware has no memory table: some virtual machines);
 //!   WerRegisterMemoryBlock/WerUnregisterMemoryBlock S_OK;
+//!   WerRegisterFile (WerRegFileTypeOther) and WerUnregisterFile of it
+//!   S_OK (their documentation: the Click-to-Run client imports them);
 //!   RtlCaptureStackBackTrace (kernel32's export) at most what was asked.
 //! - imm32's ImmDisableIME for the calling thread (0) and the process (-1):
 //!   TRUE.
@@ -231,6 +233,8 @@ unsafe extern "system" {
     fn IsSystemResumeAutomatic() -> i32;
     fn GetPhysicallyInstalledSystemMemory(kb: *mut u64) -> i32;
     fn WerRegisterMemoryBlock(p: *mut c_void, size: u32) -> u32;
+    fn WerRegisterFile(path: *const u16, kind: u32, flags: u32) -> u32;
+    fn WerUnregisterFile(path: *const u16) -> u32;
     fn WerUnregisterMemoryBlock(p: *mut c_void) -> u32;
     fn RtlCaptureStackBackTrace(skip: u32, count: u32, frames: *mut usize, hash: *mut u32) -> u16;
     fn GetShortPathNameA(long: *const u8, short: *mut u8, len: u32) -> u32;
@@ -805,6 +809,13 @@ fn sync_and_processes(c: &mut Checks) -> Result<(), u32> {
         let mut block = [0u8; 64];
         c.eq(WerRegisterMemoryBlock(block.as_mut_ptr().cast(), 64).into(), 0)?;
         c.eq(WerUnregisterMemoryBlock(block.as_mut_ptr().cast()).into(), 0)?;
+        // WerRegFileTypeOther (2), no flags.
+        let mut report = [0u16; 32];
+        for (slot, &b) in report.iter_mut().zip(b"C:\\gala_wer_file.log") {
+            *slot = b.into();
+        }
+        c.eq(WerRegisterFile(report.as_ptr(), 2, 0).into(), 0)?;
+        c.eq(WerUnregisterFile(report.as_ptr()).into(), 0)?;
         let mut frames = [0usize; 8];
         let mut hash = 0;
         let got = RtlCaptureStackBackTrace(0, 4, frames.as_mut_ptr(), &mut hash);

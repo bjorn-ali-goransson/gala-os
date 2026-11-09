@@ -152,7 +152,8 @@
  *   id) comes no sooner than the interval, after posted messages;
  *   KillTimer returns TRUE once. A window-less timer with a TIMERPROC
  *   gets a new id; its WM_TIMER carries the procedure in lParam and
- *   DispatchMessage calls it.
+ *   DispatchMessage calls it. SetCoalescableTimer (the Click-to-Run
+ *   client's) acts as SetTimer for a window: its id, then WM_TIMER.
  * - The display: EnumDisplayMonitors calls back once (one monitor) with
  *   the screen's rectangle and the data; MonitorFromPoint finds it for a
  *   point on the screen, and for one off it only by the default flags;
@@ -411,6 +412,11 @@ static void timers(void) {
     DispatchMessageW(&m);
     CHECK(timer_proc_calls == 1);
     CHECK(KillTimer(NULL, timer_proc_id));
+    // SetCoalescableTimer: SetTimer with a tolerance (here
+    // TIMERV_NO_COALESCING); a window's timer is its id and WM_TIMER.
+    CHECK(SetCoalescableTimer(w, 9, 20, NULL, TIMERV_NO_COALESCING) == 9);
+    CHECK(GetMessageW(&m, w, 0, 0) == 1 && m.message == WM_TIMER && m.wParam == 9);
+    CHECK(KillTimer(w, 9));
 
     // MsgWaitForMultipleObjects: WAIT_OBJECT_0 + count when a message of the
     // wake mask is queued, a handle's index when it is signalled.

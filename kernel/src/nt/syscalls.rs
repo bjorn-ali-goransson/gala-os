@@ -62,6 +62,8 @@ pub const NT_OPEN_KEY_EX: u32 = 0x7f06;
 pub const NT_DELETE_KEY: u32 = 0x7f07;
 pub const NT_DELETE_VALUE_KEY: u32 = 0x7f08;
 pub const NT_FLUSH_KEY: u32 = 0x7f09;
+/// gala's number for NtSetInformationKey until verified.
+pub const NT_SET_INFORMATION_KEY: u32 = 0x7fd6;
 // Job objects: gala's numbers until verified (reached through ntdll).
 pub const NT_CREATE_JOB_OBJECT: u32 = 0x7f0a;
 pub const NT_ASSIGN_PROCESS_TO_JOB_OBJECT: u32 = 0x7f0b;
@@ -496,6 +498,7 @@ const TABLE: &[(u32, &str, usize, Handler)] = &[
     (NT_DELETE_KEY, "NtDeleteKey", 1, registry_calls::nt_delete_key),
     (NT_DELETE_VALUE_KEY, "NtDeleteValueKey", 2, registry_calls::nt_delete_value_key),
     (NT_FLUSH_KEY, "NtFlushKey", 1, registry_calls::nt_flush_key),
+    (NT_SET_INFORMATION_KEY, "NtSetInformationKey", 4, registry_calls::nt_set_information_key),
     (NT_CREATE_JOB_OBJECT, "NtCreateJobObject", 3, job_calls::nt_create_job_object),
     (NT_OPEN_PROCESS_TOKEN, "NtOpenProcessToken", 3, token_calls::nt_open_process_token),
     (NT_OPEN_PROCESS_TOKEN_EX, "NtOpenProcessTokenEx", 4, token_calls::nt_open_process_token_ex),

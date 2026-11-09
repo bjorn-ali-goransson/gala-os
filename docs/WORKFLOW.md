@@ -380,6 +380,7 @@ xtask that change how a scenario boots:
 | `USER_PROGRAMS`, `USER_DLLS`, `GO_PROGRAMS` | what is built and exported |
 | `EXTRA_MODULES` | extra files for a scenario: `(scenario, file, directory on C:)`; repository paths and `target/prebuilt/...` paths work too |
 | `MODULE_SETS` | a named set of modules shared by scenarios (and so a VM); a scenario listed twice gets the union |
+| `FULL_SYSTEM_SCENARIOS` | scenarios that also ship the whole 64-bit system a full image has (`system_modules`): installers whose product's programs import what they will (`office_install`) |
 | `WRITABLE_TREES` | directory modules programs may write to (`sql/data`, `fzs`, `ftp`) |
 | `PENDING` | still being brought up: `boot-test <name>` runs it, `test` and CI do not |
 | `SLOW_SCENARIOS` | 300 s instead of `BOOT_TEST_TIMEOUT` (120 s) |
@@ -1910,6 +1911,11 @@ it on first use.
   (telemetry at exit), the cabinet's rejection before it. Read the
   program's own log, or the events up to the first error path, before
   filling the last gap.
+- **office_install's run time.** Under TCG (no KVM, the agent sandbox)
+  the run takes about 90 s of its 120 s limit before the Click-to-Run
+  client starts; with KVM (CI's boot runners) it is a fraction. Pass
+  `XTASK_TIMEOUT=600` to see further locally rather than raising the
+  scenario's limit.
 - **.NET**: the ledger first, then `XTASK_EVENTS=syscall,image,fault`.
   CoreCLR's own source (dotnet/runtime, MIT) says what it expects of the
   OS (read only, as any application's documentation).

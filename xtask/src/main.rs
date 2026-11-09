@@ -9859,6 +9859,12 @@ const MODULE_SETS: &[(&str, &str)] = &[
     ("lx_gtk_pie", "glibc"),
 ];
 
+/// Scenarios that also ship the whole 64-bit system a full image has
+/// (`system_modules`): installers whose product's own programs import
+/// what they will (office_install: ODT starts the 64-bit
+/// OfficeClickToRun.exe, whose imports are only seen in the run).
+const FULL_SYSTEM_SCENARIOS: &[&str] = &["office_install"];
+
 /// The boot modules (file, directory) scenario `name` ships besides the
 /// test programs.
 fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
@@ -9877,6 +9883,9 @@ fn extra_modules(name: &str) -> Vec<(&'static str, &'static str)> {
         if modules.contains(&(kernel32, dir)) {
             modules.push((kernelbase, dir));
         }
+    }
+    if FULL_SYSTEM_SCENARIOS.contains(&name) {
+        modules.extend(system_modules());
     }
     modules.sort_unstable();
     modules.dedup();
