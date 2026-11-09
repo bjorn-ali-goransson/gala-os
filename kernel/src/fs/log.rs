@@ -81,7 +81,30 @@ pub enum Op {
         from: Vec<u16>,
         to: Vec<u16>,
     },
+    /// A file on a volume with a data area (D4): its size, write time, and
+    /// pages that now live in clusters of the data area (`runs`: `count`
+    /// pages from `page` in clusters from `cluster`; other pages keep
+    /// theirs). The clusters hold the pages' data before the record is
+    /// written (version 4).
+    Clusters {
+        path: Vec<u16>,
+        size: u64,
+        written: u64,
+        runs: Vec<Run>,
+    },
 }
+
+/// Consecutive pages of a file in consecutive clusters (`Op::Clusters`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    pub page: u64,
+    pub cluster: u32,
+    pub count: u32,
+}
+
+/// The most runs one Clusters record carries (its payload stays well
+/// under MAX_PAYLOAD with the longest path).
+pub const MAX_RUNS: usize = 4096;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"GLOG");
 /// The record format's version (ARCHITECTURE invariant 3). A reader takes
@@ -91,7 +114,8 @@ const MAGIC: u32 = u32::from_le_bytes(*b"GLOG");
 /// 2: SetBasic carries the access time after the attributes.
 /// 3: Create carries the POSIX mode and case sensitivity after the times;
 /// the SetMode, Symlink and Link records (LX seam 4).
-pub const VERSION: u8 = 3;
+/// 4: the Clusters record (a disk-backed C:, D4).
+pub const VERSION: u8 = 4;
 /// Create's mode field when the node has no POSIX mode.
 const NO_MODE: u32 = u32::MAX;
 /// Create's flag bit: a case-sensitive directory.
@@ -159,6 +183,7 @@ impl Op {
             Op::SetMode { .. } => 8,
             Op::Symlink { .. } => 9,
             Op::Link { .. } => 10,
+            Op::Clusters { .. } => 11,
         }
     }
 
@@ -213,6 +238,18 @@ impl Op {
             Op::Link { from, to } => {
                 put_path(out, from)?;
                 put_path(out, to)
+            }
+            Op::Clusters { path, size, written, runs } => {
+                put_path(out, path)?;
+                put(out, &size.to_le_bytes())?;
+                put(out, &written.to_le_bytes())?;
+                put(out, &(runs.len() as u32).to_le_bytes())?;
+                for r in runs {
+                    put(out, &r.page.to_le_bytes())?;
+                    put(out, &r.cluster.to_le_bytes())?;
+                    put(out, &r.count.to_le_bytes())?;
+                }
+                Ok(())
             }
         }
     }
@@ -396,6 +433,24 @@ fn parse(kind: u8, version: u8, r: &mut Reader<'_>) -> Option<Result<Op, NoMemor
             let to = path!();
             Op::Link { from, to }
         }
+        11 if version >= 4 => {
+            let path = path!();
+            let (size, written, n) = (r.u64()?, r.u64()?, r.u32()? as usize);
+            if n > MAX_RUNS {
+                return None;
+            }
+            let mut runs = Vec::new();
+            if runs.try_reserve_exact(n).is_err() {
+                return Some(Err(NoMemory));
+            }
+            for _ in 0..n {
+                let run = Run { page: r.u64()?, cluster: r.u32()?, count: r.u32()? };
+                if runs.try_push(run).is_err() {
+                    return Some(Err(NoMemory));
+                }
+            }
+            Op::Clusters { path, size, written, runs }
+        }
         _ => return None,
     }))
 }
@@ -493,6 +548,9 @@ mod tests {
         assert!(matches!(decode(&old, 5), Decoded::Record(op, _) if op == want));
         let link = Op::Link { from: w("\\a"), to: w("\\b") };
         assert_eq!(decode(&as_version(&link, 2, 0), 5), Decoded::End);
+        // Nor is version 4's Clusters a record of version 3.
+        let clusters = Op::Clusters { path: w("\\a"), size: 1, written: 2, runs: vec![] };
+        assert_eq!(decode(&as_version(&clusters, 3, 0), 5), Decoded::End);
     }
 
     fn w(s: &str) -> Vec<u16> {
@@ -534,6 +592,15 @@ mod tests {
             Op::SetMode { path: w("\\d\\h"), mode: 0o4755 },
             Op::Symlink { path: w("\\d\\s"), target: b"../t".to_vec(), created: 11 },
             Op::Link { from: w("\\d\\h"), to: w("\\d\\h2") },
+            Op::Clusters {
+                path: w("\\d\\h"),
+                size: 9000,
+                written: 12,
+                runs: vec![
+                    Run { page: 0, cluster: 7, count: 2 },
+                    Run { page: 5, cluster: 1, count: 1 },
+                ],
+            },
         ]
     }
 

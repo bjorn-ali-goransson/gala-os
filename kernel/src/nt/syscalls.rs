@@ -4522,7 +4522,7 @@ fn file_section(
             return Err(NtStatus::SECTION_TOO_BIG);
         }
         let now = platform::system_time();
-        file::with_fs(|fs| fs.set_size(f.node, size, now)).map_err(file::fs_status)?;
+        file::set_size(f.node, size, now).map_err(file::fs_status)?;
     }
     section::Section::new_file(entry.object.clone(), f.node, size, protect)
 }
@@ -5732,7 +5732,13 @@ fn write_range(
     length: u32,
     offset: u64,
 ) -> Result<u64, NtStatus> {
-    let mut chunk = [0u8; 512];
+    // On a disk-backed C: a write that cannot have all its clusters
+    // fails as a whole (STATUS_DISK_FULL), as on Windows.
+    file::with_fs(|fs| fs.room_for(file.node, offset, u64::from(length)))
+        .map_err(file::fs_status)?;
+    let mut big = Vec::new();
+    let mut small = [0u8; 512];
+    let chunk = io_chunk(&mut big, &mut small, length);
     let mut done = 0u64;
     while done < u64::from(length) {
         let n = (u64::from(length) - done).min(chunk.len() as u64) as usize;
@@ -5740,11 +5746,23 @@ fn write_range(
             return Err(NtStatus::ACCESS_VIOLATION);
         }
         let now = platform::system_time();
-        file::with_fs(|fs| fs.write(file.node, offset + done, &chunk[..n], now))
-            .map_err(file::fs_status)?;
+        file::write(file.node, offset + done, &chunk[..n], now).map_err(file::fs_status)?;
         done += n as u64;
     }
     Ok(done)
+}
+
+/// A buffer for moving file data between the caller and the file system:
+/// up to 64 KiB from the heap (a disk-backed file's pages then change a
+/// cluster run at a time, one change record per call), else 512 bytes.
+fn io_chunk<'a>(big: &'a mut Vec<u8>, small: &'a mut [u8; 512], length: u32) -> &'a mut [u8] {
+    let want = (length as usize).clamp(512, 64 * 1024);
+    if want > 512 && big.try_reserve_exact(want).is_ok() {
+        big.resize(want, 0);
+        big
+    } else {
+        small
+    }
 }
 
 /// Reads up to `length` bytes at `offset` into the caller's `buffer`
@@ -5756,12 +5774,14 @@ fn read_range(
     length: u32,
     offset: u64,
 ) -> Result<u64, NtStatus> {
-    let mut chunk = [0u8; 512];
+    let mut big = Vec::new();
+    let mut small = [0u8; 512];
+    let chunk = io_chunk(&mut big, &mut small, length);
     let mut done = 0u64;
     while done < u64::from(length) {
         let want = (u64::from(length) - done).min(chunk.len() as u64) as usize;
-        let n = file::with_fs(|fs| fs.read(file.node, offset + done, &mut chunk[..want]))
-            .map_err(file::fs_status)?;
+        let n =
+            file::read(file.node, offset + done, &mut chunk[..want]).map_err(file::fs_status)?;
         if n == 0 {
             break;
         }
@@ -6568,7 +6588,7 @@ fn nt_set_information_file(call: &mut Call<'_>) -> NtStatus {
                 return NtStatus::ACCESS_DENIED;
             }
             let now = platform::system_time();
-            match file::with_fs(|fs| fs.set_size(file.node, value, now)) {
+            match file::set_size(file.node, value, now) {
                 Ok(()) => NtStatus::SUCCESS,
                 Err(e) => file::fs_status(e),
             }

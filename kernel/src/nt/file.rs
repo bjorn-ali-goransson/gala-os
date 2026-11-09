@@ -245,9 +245,77 @@ pub fn read_all(node: NodeId) -> Result<Vec<u8>, NtStatus> {
     let mut data = Vec::new();
     data.try_reserve_exact(len).map_err(|_| NtStatus::NO_MEMORY)?;
     data.resize(len, 0);
-    let n = with_fs(|fs| fs.read(node, 0, &mut data)).map_err(fs_status)?;
+    let n = read(node, 0, &mut data).map_err(fs_status)?;
     data.truncate(n);
     Ok(data)
+}
+
+/// Runs `f` on the file system like `with_fs`, first reading from the
+/// disk each page it finds on the disk only (a disk-backed C:, D4:
+/// `FsError::NotResident`), then running it again. The read happens with
+/// the file system released; a page that changed meanwhile is read again.
+pub fn with_pages<R>(mut f: impl FnMut(&mut RamFs) -> Result<R, FsError>) -> Result<R, FsError> {
+    loop {
+        let (r, wanted) = with_fs(|fs| {
+            let r = f(fs);
+            let wanted =
+                if matches!(r, Err(FsError::NotResident)) { fs.take_page_in() } else { None };
+            (r, wanted)
+        });
+        match (r, wanted) {
+            (Err(FsError::NotResident), Some(req)) => page_in(&req)?,
+            (r, _) => return r,
+        }
+    }
+}
+
+/// Reads page `req` from its cluster into memory (see `with_pages`).
+fn page_in(req: &ramfs::PageIn) -> Result<(), FsError> {
+    super::persist::relieve();
+    let mut page =
+        crate::mm::heap::try_box(ramfs::Page([0; ramfs::PAGE])).map_err(|_| FsError::NoMemory)?;
+    if super::persist::read_cluster(req.cluster, &mut page.0).is_err() {
+        warn!(
+            "file: cannot read cluster {} (page {} of node {})",
+            req.cluster, req.index, req.node
+        );
+        return Err(FsError::NotResident);
+    }
+    super::persist::note_page_in();
+    with_fs(|fs| fs.fill(req, page));
+    Ok(())
+}
+
+/// Reads file `node` from `offset` into `buf`: all of it, short only at
+/// the end of the file (pages on the disk only are read in).
+pub fn read(node: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, FsError> {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = offset + done as u64;
+        let n = with_pages(|fs| fs.read(node, at, &mut buf[done..]))?;
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    Ok(done)
+}
+
+/// Writes `data` to file `node` at `offset` (pages it changes in part are
+/// read in first).
+pub fn write(node: NodeId, offset: u64, data: &[u8], now: u64) -> Result<usize, FsError> {
+    with_pages(|fs| fs.write(node, offset, data, now))
+}
+
+/// Sets file `node`'s size (a partial last page is read in first).
+pub fn set_size(node: NodeId, size: u64, now: u64) -> Result<(), FsError> {
+    with_pages(|fs| fs.set_size(node, size, now))
+}
+
+/// The address of mapped file `node`'s page `index` (read in first if it
+/// is on the disk only).
+pub fn page_address(node: NodeId, index: usize) -> Option<usize> {
+    with_pages(|fs| fs.page_address(node, index)).ok()
 }
 
 pub fn fs_status(e: FsError) -> NtStatus {
@@ -271,6 +339,9 @@ pub fn fs_status(e: FsError) -> NtStatus {
         FsError::NotSealable => NtStatus::INVALID_PARAMETER,
         // NT never reaches a volume's tree (ramfs's doc).
         FsError::CrossVolume => NtStatus::NOT_SAME_DEVICE,
+        FsError::DiskFull => NtStatus::DISK_FULL,
+        // A page that could not be read from the disk (`with_pages`).
+        FsError::NotResident => NtStatus::IO_DEVICE_ERROR,
     }
 }
 
@@ -757,9 +828,13 @@ const PHYSICAL_BYTES_PER_SECTOR: u32 = 4096;
 const FS_NAME: &[u8] = b"NTFS";
 
 /// Volume information of `class` as (bytes, minimum buffer length). Sizes
-/// are in clusters of free and total RAM (the volume lives in memory).
+/// are in 4 KiB clusters: the data area's on a disk-backed C: (D4), else
+/// free and total RAM (the volume lives in memory).
 pub fn volume_information(class: u32) -> Result<(Vec<u8>, usize), NtStatus> {
-    let (free, total) = platform::frame_stats();
+    let (free, total) = match with_fs(|fs| fs.area_size()) {
+        Some((count, free)) => (u64::from(free), u64::from(count)),
+        None => platform::frame_stats(),
+    };
     let mut b = Vec::new();
     let grow = |b: &mut Vec<u8>, n: usize| -> Result<(), NtStatus> {
         b.try_reserve_exact(n).map_err(|_| NtStatus::NO_MEMORY)?;

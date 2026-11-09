@@ -35,7 +35,11 @@ system that keeps descriptors (boot option `persist`: changes to C:,
 descriptors included, are a log on the disk replayed at boot;
 `persist_test`), D3 the registry kept (its changes, key descriptors
 included, are a log in `C:\Windows\System32\config\gala.reglog`,
-replayed after the seed; not Windows' hive format).
+replayed after the seed; not Windows' hive format), D4 files' contents
+in the disk's data area (a disk-backed C:; `volume_test`): a cluster a
+file gives up is not handed to another file before the record giving
+it up is on the disk, so no crash replays one file's page with
+another's data (ARCHITECTURE "A disk-backed C:").
 
 ## Driving programs
 

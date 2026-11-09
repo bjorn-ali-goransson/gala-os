@@ -3,6 +3,43 @@
 //! Host requirements: `git`, `xorriso`, `qemu-system-x86_64` and an OVMF
 //! (UEFI) firmware image. Set `OVMF_CODE` / `OVMF_VARS` to override the search.
 
+// The kernel's file-system modules (`diskimage`) use `alloc::` paths.
+extern crate alloc;
+
+/// What the kernel's file-system modules take from its heap module
+/// (`crate::mm::heap`), for `diskimage`, which compiles them for the host.
+mod mm {
+    pub mod heap {
+        #[derive(Debug)]
+        pub struct AllocError;
+
+        pub trait TryVec<T> {
+            fn try_push(&mut self, value: T) -> Result<(), AllocError>;
+            fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), AllocError>
+            where
+                T: Clone;
+        }
+
+        impl<T> TryVec<T> for Vec<T> {
+            fn try_push(&mut self, value: T) -> Result<(), AllocError> {
+                self.push(value);
+                Ok(())
+            }
+            fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), AllocError>
+            where
+                T: Clone,
+            {
+                self.extend_from_slice(other);
+                Ok(())
+            }
+        }
+
+        pub fn try_box<T>(value: T) -> Result<Box<T>, AllocError> {
+            Ok(Box::new(value))
+        }
+    }
+}
+
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -13,6 +50,7 @@ use std::time::{Duration, Instant};
 
 mod alloc_audit;
 mod clockcheck;
+mod diskimage;
 mod feed;
 mod lint;
 mod lx_expect;
@@ -1359,6 +1397,8 @@ const EXTRA_MODULES: &[(&str, &str, &str)] = &[
     ("persist_test", "secur32.dll", "Windows/System32"),
     ("persist_test", "bcryptprimitives.dll", "Windows/System32"),
     ("persist_test", "bcrypt.dll", "Windows/System32"),
+    ("volume_test", "ntdll.dll", "Windows/System32"),
+    ("volume_test", "kernel32.dll", "Windows/System32"),
     ("kernel32_system_test", "ntdll.dll", "Windows/System32"),
     ("kernel32_clr_test", "ntdll.dll", "Windows/System32"),
     ("com_test", "ntdll.dll", "Windows/System32"),
@@ -3421,6 +3461,7 @@ const USER_PROGRAMS: &[&str] = &[
     "dwrite_test",
     "gpu_stub_test",
     "persist_test",
+    "volume_test",
     "kernel32_system_test",
     "kernel32_clr_test",
     "com_test",
@@ -3554,6 +3595,13 @@ const ELASTICSEARCH_TIMEOUT: Duration = Duration::from_secs(900);
 /// and a harness run under TCG (a report run, PENDING: not in the gate).
 const WPT_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const SLOW_TIMEOUT: Duration = Duration::from_secs(300);
+/// `office_install` (MANUAL): the Click-to-Run client downloads 4.44 GB
+/// (`required:=4437233664` in its log) for Word, Excel and PowerPoint. A
+/// gala guest under TCG fetched 512 MiB of the same CDN file with curl
+/// onto a disk-backed C: in 179 s (3.0 MB/s): about 1480 s for the
+/// download, after about 360 s of setup before it (run time, measured);
+/// twice that for a slower host.
+const OFFICE_INSTALL_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Scenarios run under an artificial host load (clockcheck::HostLoad:
 /// a busy thread on every host CPU) whose guest clock must agree with the
@@ -3572,6 +3620,8 @@ fn scenario_timeout(name: &str) -> Duration {
         DUMP_SCENARIO_TIMEOUT
     } else if name == "chromium_wpt" {
         WPT_TIMEOUT
+    } else if name == "office_install" {
+        OFFICE_INSTALL_TIMEOUT
     } else if name == "elasticsearch"
         || name == "java_stress"
         || name.starts_with("sqllocaldb")
@@ -3658,6 +3708,8 @@ commands:
   events       summarize an event stream (XTASK_EVENTS=...): system calls by time,
                failing statuses, each thread's last calls, faults, processes, images:
                events <events.jsonl>
+  disk-files   what a disk image (a kept <iso>.disk.img) holds on C:, read with the
+               kernel's own code: disk-files <image> [C:/path] [--out DIR]
   serve-page   answer one HTTP request on standard input/output with the
                host page (QEMU runs it per connection: HOST_PAGE_SCENARIOS)
   relay <port> one connection on standard input/output to 127.0.0.1:<port>
@@ -3779,6 +3831,7 @@ fn main() -> ExitCode {
                 None => Err("usage: cargo xtask events <events.jsonl>".into()),
             },
             Some("feed") => feed::cli(&args[1..]),
+            Some("disk-files") => diskimage::disk_files(&args[1..]),
             Some("release-tree") => match args.get(1).filter(|a| !a.starts_with("--")) {
                 Some(dir) => release_tree(release, Path::new(dir)),
                 None => Err("usage: cargo xtask release-tree <dir> [--release]".into()),
@@ -4901,9 +4954,22 @@ const PENDING: &[&str] = &[
     "sqllocaldb",
     "sqllocaldb_persist",
     "sshd",
-    // OF: Office's installer; it needs the CDN (CI's boot runners).
+];
+
+/// Scenarios that are never part of `cargo xtask test` or CI by design
+/// (not "being brought up": they are run by hand, by exact name, e.g.
+/// `cargo xtask boot-test office_install`): runs too long or too large
+/// for every change's gate.
+const MANUAL: &[&str] = &[
+    // OF: Office's installer: a ~5.4 GB download from Microsoft's CDN
+    // onto a disk-backed C: (OFFICE_INSTALL_TIMEOUT).
     "office_install",
 ];
+
+/// Whether scenario `name` runs only when named exactly (PENDING, MANUAL).
+fn named_only(name: &str) -> bool {
+    PENDING.contains(&name) || MANUAL.contains(&name)
+}
 
 /// Boot tests that boot through UEFI, so that path stays covered.
 const UEFI_SCENARIOS: &[&str] = &[
@@ -6430,6 +6496,16 @@ const SCENARIOS: &[Scenario] = &[
             "crash: flight: the last",
             "exited with status 0x00000000",
         ],
+    },
+    Scenario {
+        // D4: a disk-backed C: (`persist` on a fresh 1 GiB disk,
+        // DISK_SCENARIOS): free space is the disk's, a 640 MiB file (more
+        // than the VM's 512 MiB) is written and read back, writing past
+        // the free space fails with ERROR_DISK_FULL.
+        name: "volume_test",
+        cmdline: "qemu_exit persist run=volume_test.exe args=640",
+        exit_status: QEMU_EXIT_SUCCESS,
+        expect: &["volume_test: ok", "exited with status 0x00000000"],
     },
     Scenario {
         // D2: files kept across a reboot (`persist`: C: is kept on the
@@ -8967,8 +9043,8 @@ const SCENARIOS: &[Scenario] = &[
         // SYSTEM: ODT needs an administrator (its "runas" is declined for
         // the boot user, a standard user; docs/SECURITY.md "Elevation").
         name: "office_install",
-        cmdline: "qemu_exit as=system run=setup.exe args=/configure%20C:\\gala\\config.xml \
-                  dump=C:/gala/odtlog,C:/Users/Public",
+        cmdline: "qemu_exit persist as=system run=setup.exe \
+                  args=/configure%20C:\\gala\\config.xml dump=C:/gala/odtlog,C:/Users/Public",
         exit_status: QEMU_EXIT_SUCCESS,
         expect: &["setup.exe (pid 4) exited with status 0x00000000"],
     },
@@ -10041,8 +10117,8 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
     let selected: Vec<&Scenario> = SCENARIOS
         .iter()
         .filter(|s| match filter {
-            // Pending scenarios run only when named exactly.
-            None => !PENDING.contains(&s.name),
+            // Pending and manual scenarios run only when named exactly.
+            None => !named_only(s.name),
             Some(f) if exact => s.name == f.as_str(),
             // `name$`: that scenario only (`hello$`, not java_hello too).
             Some(f) if f.ends_with('$') => s.name == f.trim_end_matches('$'),
@@ -10050,9 +10126,7 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
             Some(f) if f.contains(',') => f.split(',').any(|n| n == s.name),
             // A pending scenario runs when named exactly; others match
             // by substring.
-            Some(f) => {
-                s.name == f.as_str() || (s.name.contains(f.as_str()) && !PENDING.contains(&s.name))
-            }
+            Some(f) => s.name == f.as_str() || (s.name.contains(f.as_str()) && !named_only(s.name)),
         })
         .collect();
     if selected.is_empty() {
@@ -10107,9 +10181,17 @@ fn boot_tests(release: bool, filter: Option<&String>) -> Result {
         }
         let result = boot_vm(vm, &iso);
         // A passing VM's image is not needed again (a failed one is kept
-        // to boot by hand).
+        // to boot by hand), nor its disk image (a failed one's is kept to
+        // look at: it says what it takes on the host).
+        let disk = iso.with_extension("disk.img");
         if result.1.iter().all(|(_, v)| v.is_ok()) {
             let _ = fs::remove_file(&iso);
+            let _ = fs::remove_file(&disk);
+        } else if let Some(used) = host_usage_mib(&disk) {
+            eprintln!(
+                "xtask: kept {} ({used} MiB on the host; delete it when done)",
+                disk.display()
+            );
         }
         Ok(result)
     });
@@ -13288,16 +13370,26 @@ fn add_gpu(cmd: &mut Command) {
 /// A virtio-blk disk backed by the raw image `path` (the legacy
 /// interface, as for the network card).
 fn add_disk(cmd: &mut Command, path: &Path) {
+    // A host error (the host's disk full under a sparse image) reaches the
+    // guest as a failed request, which it logs, rather than pausing the VM
+    // (QEMU's default for ENOSPC) until the scenario times out.
     cmd.arg("-drive")
-        .arg(format!("if=none,id=d0,format=raw,file={}", path.display()))
+        .arg(format!(
+            "if=none,id=d0,format=raw,werror=report,rerror=report,file={}",
+            path.display()
+        ))
         .args(["-device", "virtio-blk-pci,drive=d0,disable-legacy=off"]);
 }
 
 /// A scenario that gets a disk.
 struct DiskScenario {
     name: &'static str,
-    /// Bytes.
+    /// Bytes (a sparse file on the host: only what the guest writes takes
+    /// room).
     size: usize,
+    /// What the image may take on the host at most, in MiB, when that is
+    /// less than its size (checked free before it boots); None: its size.
+    host_mib: Option<u64>,
     /// What to put on the fresh (zeroed) image.
     setup: fn(&mut [u8]),
     /// What the image must hold after the last boot (its first MiB).
@@ -13314,6 +13406,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     DiskScenario {
         name: "disk_test",
         size: 16 << 20,
+        host_mib: None,
         setup: disk_test_setup,
         check: disk_test_check,
         earlier_boots: &[],
@@ -13323,6 +13416,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // R1 invariant 4: the device is reset under the driver mid-test.
         name: "disk_reset",
         size: 16 << 20,
+        host_mib: None,
         setup: disk_test_setup,
         check: disk_test_check,
         earlier_boots: &[],
@@ -13332,6 +13426,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // LocalDB's data files stay on the disk (twice: two log areas).
         name: "sqllocaldb_persist",
         size: 1 << 30,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["tds_test: created", "exited with status 0x00000000"]],
@@ -13340,6 +13435,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     DiskScenario {
         name: "failpoint_disk",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -13348,6 +13444,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
     DiskScenario {
         name: "failpoint_disk_delay",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -13357,6 +13454,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // R9 (a): the volume handed over between kernels.
         name: "handover_disk",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[],
@@ -13366,6 +13464,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // R8 step 6: the earlier boot is release 2 (trust::EARLIER_SIGNING).
         name: "rollback_refused",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&[
@@ -13376,8 +13475,32 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         earlier_fail: false,
     },
     DiskScenario {
+        // OF: C: on the disk (`persist`) with room for Office: the
+        // Click-to-Run client asks for 5432 MB free; 16 GiB leaves room
+        // for its updates and the system. On the host the image grows to
+        // what the install writes (the products, ~5.4 GB, and logs).
+        name: "office_install",
+        size: 16 << 30,
+        host_mib: Some(6 << 10),
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
+        // D4: C: on the disk; volume_test fills it (sparse until then).
+        name: "volume_test",
+        size: 1 << 30,
+        host_mib: None,
+        setup: |_| {},
+        check: |_| Ok(()),
+        earlier_boots: &[],
+        earlier_fail: false,
+    },
+    DiskScenario {
         name: "persist_test",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&["persist_test: first boot", "exited with status 0x00000000"]],
@@ -13388,6 +13511,7 @@ const DISK_SCENARIOS: &[DiskScenario] = &[
         // and leaves its crash record on the disk; this boot prints it.
         name: "crash_record",
         size: 32 << 20,
+        host_mib: None,
         setup: |_| {},
         check: |_| Ok(()),
         earlier_boots: &[&[
@@ -13422,9 +13546,24 @@ fn disk_test_check(image: &[u8]) -> Result {
     }
 }
 
+/// MiB a (sparse) file takes on the host.
+fn host_usage_mib(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| (m.blocks() * 512) >> 20)
+}
+
 /// Makes scenario `name`'s fresh disk image next to `iso`, if it has one.
+/// The host must have room for what the image may grow to
+/// (`DiskScenario::host_mib`), unless `XTASK_LOW_DISK=1` starts it anyway
+/// (the guest then logs failed disk writes once the host's disk is full).
 fn new_disk(name: &str, iso: &Path) -> Result<Option<PathBuf>> {
     let Some(d) = disk_scenario(name) else { return Ok(None) };
+    let need = d.host_mib.unwrap_or(d.size as u64 >> 20);
+    if env::var_os("XTASK_LOW_DISK").is_none() {
+        check_disk_space(name, need + MIN_FREE_MIB).map_err(|e| {
+            format!("{e}\nxtask: {name}'s disk image may take {need} MiB (XTASK_LOW_DISK=1 starts it anyway)")
+        })?;
+    }
     // What setup writes goes in the first MiB; the rest is a sparse file.
     let mut image = vec![0u8; d.size.min(1 << 20)];
     (d.setup)(&mut image);

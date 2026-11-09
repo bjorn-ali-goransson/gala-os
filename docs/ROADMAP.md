@@ -194,7 +194,7 @@ has a section under "Open items".
 | P1 | Unmodified prebuilt programs | in progress | Caddy, JDK, .NET, PowerShell, Elasticsearch, LocalDB, OpenSSH, PostgreSQL, MinGit, FileZilla Server, Python (pip, venv, asyncio, multiprocessing, numpy) done; Git Bash parked |
 | SEC | Security model: tokens, descriptors, access checks, logons, integrity, UIPI | done | SECURITY "Status": phases S1-S6 (leftovers listed there) |
 | UAC | User Account Control: the consent prompt | planned | an administrator account (the boot user or a second one) logs on with a filtered token linked to its full one (TokenLinkedToken, elevation types 2/3); `runas`, `requireAdministrator` manifests and COM elevation (`Elevation:Administrator!new:`) go to an AppInfo-like service that shows a consent prompt (or a credential prompt for a standard user) on a secure desktop the user's programs cannot reach (with SH step 3's trusted process) and creates the process with the full token; CreateProcess's ERROR_ELEVATION_REQUIRED; UAC virtualization of Program Files and HKLM for legacy programs; a scenario that drives the prompt through input and screen checks. Today an elevated caller's `runas` runs without a prompt and everyone else's is declined as a cancelled prompt (SECURITY "Elevation") |
-| D1-D3 | Disk: virtio-blk, C: kept (`persist`), the registry kept | done | `disk_test`, `persist_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk" |
+| D1-D4 | Disk: virtio-blk, C: kept (`persist`), the registry kept, files' contents in the disk's data area (a disk-backed C:: free space is the disk's, files larger than memory) | done | `disk_test`, `persist_test`, `volume_test`, `sqllocaldb_persist`; ARCHITECTURE "Disk", "A disk-backed C:" |
 | TLS | Schannel and the HTTP stacks on it | in progress | Schannel, winhttp and wininet (synchronous, one engine, redirects), curl and Git's https remotes (curl's `--cacert` too), `gala install`'s downloads with a public CA bundle, crypt32's chain engine (Schannel's trust decision), ECDSA server keys, session resumption, client certificates, revocation from CRLs (offline) done; fetching CRLs next |
 | AG | API gaps in the shell and runtime DLLs | in progress | 13 groups done; filler |
 | WD | Windows divergences: the test programs on real Windows | in progress | triage in `user/windows/` (build 26200); the first fixes done; probes to come back |
@@ -1675,23 +1675,34 @@ need gala's.
      CO_E_NOTINITIALIZED stopped the service with 17000), and it asks
      shell32 for CSIDL_SYSTEMX86 (done: SysWOW64 and the x86 program
      files; `win32_misc_test`).
-     Where the run ends now: the service runs the INSTALL scenario
+     It runs the INSTALL scenario
      (DeliveryOptimization is REGDB_E_CLASSNOTREG, it falls back to HTTP;
      catalogs as before), downloads and indexes the stream manifest, and
-     its streaming task fails with PipelineInsufficientDiskSpace
-     (`{"Required":"5432","FreeSpace":"1024"}`, MB): C: lives in the VM's
-     memory (`file::volume_information` reports free RAM) and the
-     scenario's VM is far smaller than the 5.4 GB the products need. The
-     client then exits with 17004 (0x426c) about 217 s in, setup.exe and
-     its parent with the same at about 297 s (without KVM, with
-     `XTASK_TIMEOUT=600`; a normal run reaches the scenario's run-time
-     limit during the service's download).
+     checks for room (done: a disk-backed C:, ARCHITECTURE "A disk-backed
+     C:", `volume_test`; the scenario is MANUAL, `persist` on a 16 GiB
+     sparse disk, 3600 s of run time; its log: `AvailableSpace 15741`,
+     `free:=16506359808 required:=4437233664`).
+     Where the run ends now: preparing the download's staging, its
+     repoman.dll delay-loads the Restart Manager and fails
+     (`Call failed delayloading RstrtMgr.DLL`, ledger `rstrtmgr.dll`
+     missing dll), so `SetCurrentState failed` and the stream task ends
+     with `Failed to stage working op, Error:0x8007007e`
+     (ERROR_MOD_NOT_FOUND) about 17 min in; the task is retried every few
+     minutes, each time the same, and two HTTP requests to the CDN go
+     90 s without an answer first (`winhttp.dll!timed out` 90000 in the
+     ledger; their `Transport2` activities report 0 bytes). Read from the
+     kept disk image with `cargo xtask disk-files ... C:/Users/Public`.
      HKCU still names the boot user's hive while running as SYSTEM
      (advapi32's `current_user_path` is fixed to the boot user's SID;
      Windows maps it from the caller's token: S-1-5-18's for SYSTEM).
-     Next, in the order the run reaches them: room for the products
-     (a C: with 5.4 GB free: a disk-backed volume for the scenario, or
-     a VM that large; the owner's decision); a service's environment
+     Next, in the order the run reaches them: gala's rstrtmgr.dll (x64:
+     repoman.dll imports RmStartSession, RmRegisterResources, RmGetList,
+     RmEndSession; OfficeClickToRun.exe also RmAddFilter, RmShutdown,
+     RmShutdownOnlyRegistered, RmRestart), test first with Windows'
+     answers for files nobody uses; why two of winhttp's requests to the
+     CDN get no answer for 90 s (`XTASK_EVENTS=net`); then the stream
+     download itself (4.44 GB) and what applying it needs (wofutil.dll,
+     asked for and missing: WOF compression); a service's environment
      (SYSTEM's profile variables, Windows' TEMP for services) and HKCU
      from the caller's token; the RPC calls the client's
      pieces then make of each other (the ledger's `rpcrt4.dll!NDR(...)`
@@ -3634,6 +3645,15 @@ xtask test` or CI.
 | `gitbash` | blocked (P1 Git Bash is parked) | P1 |
 | `filezilla`, `filezilla_flaui`, `filezilla_sftp` | slow (about 100 s, 45 s and 45 s in the kernel under TCG) | W3 |
 | `sshd` | `ssh-keygen -A` and `sshd -t` only; superseded by `sshd_login`, `sshd_server` | SSH (move into the suite or drop) |
+
+### Manual scenarios
+
+`MANUAL` in xtask: never in `cargo xtask test` or CI, by design; run by
+exact name (`cargo xtask boot-test office_install`).
+
+| Scenario | Why manual | Owner |
+|---|---|---|
+| `office_install` | the Office Deployment Tool installs Word, Excel and PowerPoint from Microsoft's CDN: a ~5.4 GB download onto a disk-backed C: (a 16 GiB sparse image, up to ~6 GiB on the host) | OF |
 
 ### Environment
 

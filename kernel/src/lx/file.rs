@@ -474,6 +474,29 @@ fn errno_of(e: FsError) -> u16 {
         FsError::WriteMapped => EBUSY,
         FsError::NotSealable => EINVAL,
         FsError::CrossVolume => EXDEV,
+        FsError::DiskFull => super::errno::ENOSPC,
+        // A page that could not be read from the disk (nt::file::with_pages).
+        FsError::NotResident => super::errno::EIO,
+    }
+}
+
+/// Runs `f` (which reports file-system errors as errnos, NotResident
+/// apart) with pages on the disk only read in first (nt::file::with_pages).
+fn with_pages_errno<R>(
+    mut f: impl FnMut(&mut ramfs::RamFs) -> core::result::Result<core::result::Result<R, u16>, FsError>,
+) -> core::result::Result<R, u16> {
+    crate::nt::file::with_pages(|fs| f(fs)).map_err(errno_of)?
+}
+
+/// A file-system result as `with_pages_errno` wants it: NotResident goes
+/// out to be read in, the other errors become errnos.
+fn paged<T>(
+    r: core::result::Result<T, FsError>,
+) -> core::result::Result<core::result::Result<T, u16>, FsError> {
+    match r {
+        Err(FsError::NotResident) => Err(FsError::NotResident),
+        Err(e) => Ok(Err(errno_of(e))),
+        Ok(v) => Ok(Ok(v)),
     }
 }
 
@@ -1257,7 +1280,7 @@ fn read_at(call: &Call<'_>, file: &OpenFile, at: u64, buf: u64, count: u64) -> R
         chunk.clear();
         chunk.try_reserve_exact(n).map_err(|_| ENOMEM)?;
         chunk.resize(n, 0);
-        let got = with_fs(|fs| fs.read(file.node, at + done, &mut chunk)).map_err(errno_of)?;
+        let got = crate::nt::file::read(file.node, at + done, &mut chunk).map_err(errno_of)?;
         if got == 0 {
             break;
         }
@@ -1295,12 +1318,12 @@ fn write_at(call: &Call<'_>, file: &OpenFile, at: u64, buf: u64, count: u64) -> 
 
 /// Reads file bytes at `at` into `out` (sendfile); returns how many.
 pub fn read_node(file: &OpenFile, at: u64, out: &mut [u8]) -> core::result::Result<usize, u16> {
-    with_fs(|fs| fs.read(file.node, at, out)).map_err(errno_of)
+    crate::nt::file::read(file.node, at, out).map_err(errno_of)
 }
 
 fn write_bytes_at(file: &OpenFile, at: u64, data: &[u8]) -> core::result::Result<(), u16> {
     let now = platform::system_time();
-    with_fs(|fs| fs.write(file.node, at, data, now)).map_err(errno_of)?;
+    crate::nt::file::write(file.node, at, data, now).map_err(errno_of)?;
     Ok(())
 }
 
@@ -1858,7 +1881,7 @@ pub fn ftruncate(call: &Call<'_>, fd: u64, length: u64) -> Result {
         return Err(EINVAL);
     }
     let now = platform::system_time();
-    with_fs(|fs| fs.set_size(file.node, length, now)).map_err(errno_of)?;
+    crate::nt::file::set_size(file.node, length, now).map_err(errno_of)?;
     Ok(0)
 }
 
@@ -1904,25 +1927,29 @@ pub fn fallocate(call: &Call<'_>, fd: u64, mode: u64, offset: u64, len: u64) -> 
     }
     let end = offset.checked_add(len).filter(|e| *e <= i64::MAX as u64).ok_or(EFBIG)?;
     let (node, now) = (file.node, platform::system_time());
-    with_fs(|fs| {
-        let n = fs.node(node).ok_or(EBADF)?;
+    // Zeros written again from the start after a page is read in: the
+    // same result.
+    with_pages_errno(|fs| {
+        let Some(n) = fs.node(node) else { return Ok(Err(EBADF)) };
         let size = n.size();
         if mode & FALLOC_PUNCH_HOLE != 0 {
             if n.seals().unwrap_or(0) & (ramfs::SEAL_WRITE | ramfs::SEAL_FUTURE_WRITE) != 0 {
-                return Err(EPERM);
+                return Ok(Err(EPERM));
             }
             let (mut at, to) = (offset, end.min(size));
             while at < to {
                 let k = (to - at).min(ZEROS.len() as u64) as usize;
-                fs.write(node, at, &ZEROS[..k], now).map_err(errno_of)?;
+                if let Err(e) = paged(fs.write(node, at, &ZEROS[..k], now))? {
+                    return Ok(Err(e));
+                }
                 at += k as u64;
             }
-            return Ok(());
+            return Ok(Ok(()));
         }
         if mode & FALLOC_KEEP_SIZE == 0 && end > size {
-            fs.set_size(node, end, now).map_err(errno_of)?;
+            return paged(fs.set_size(node, end, now));
         }
-        Ok(())
+        Ok(Ok(()))
     })?;
     Ok(0)
 }
@@ -1934,15 +1961,15 @@ pub fn truncate(call: &Call<'_>, path: u64, length: u64) -> Result {
     let (found, _) = lookup(call, AT_FDCWD, path, true)?;
     let n = found.existing()?;
     let now = platform::system_time();
-    with_fs(|fs| {
-        let node = fs.node(n).ok_or(ENOENT)?;
+    with_pages_errno(|fs| {
+        let Some(node) = fs.node(n) else { return Ok(Err(ENOENT)) };
         if node.is_dir() {
-            return Err(EISDIR);
+            return Ok(Err(EISDIR));
         }
         if perm(node) & 0o200 == 0 || node.attributes & ramfs::ATTRIBUTE_READONLY != 0 {
-            return Err(EACCES);
+            return Ok(Err(EACCES));
         }
-        fs.set_size(n, length, now).map_err(errno_of)
+        paged(fs.set_size(n, length, now))
     })?;
     Ok(0)
 }
