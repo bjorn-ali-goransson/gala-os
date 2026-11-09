@@ -119,6 +119,20 @@ jobs:
           cache: false
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
+      # The pinned downloads (PREBUILT, the Linux roots' packages), kept
+      # between runs: each is checked against its pinned checksum at each
+      # use (an unpacked tree carries a marker naming it), so an older cache
+      # is safe and only what is missing is fetched; a release host's
+      # outage (a 504 from GitHub's release downloads) then fails only the
+      # runs that need a new download.
+      - name: Cache the pinned prebuilt programs
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/prebuilt
+            !target/prebuilt/chromium-syms
+          key: gala-prebuilt-${{ matrix.shard }}-${{ hashFiles('xtask/src/main.rs') }}
+          restore-keys: gala-prebuilt-${{ matrix.shard }}-
       - name: Boot scenarios, shard ${{ matrix.shard }} of 6
         env:
           XTASK_SHARD: ${{ matrix.shard }}/6

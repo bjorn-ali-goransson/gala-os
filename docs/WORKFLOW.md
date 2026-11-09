@@ -82,6 +82,12 @@ cargo xtask export-tests    # refresh user/bin (CI compares)
     round-robin shares of the planned VMs; a batch stays in one share,
     and the shard prints what it took). A failed shard keeps
     `target/failed/` (each failed boot's log and triage) as an artifact.
+    Each shard keeps its pinned downloads (`target/prebuilt`, without
+    Chromium's symbols) in the Actions cache between runs, keyed by
+    `xtask/src/main.rs` with the shard's older caches restored: every
+    download is checked against its pinned checksum at each use, so only
+    what is missing is fetched (a release host's outage fails only a run
+    that needs a new download).
     The runners have hardware virtualization: a step opens /dev/kvm to
     the runner's user, so the boots run under KVM (the boot log's
     `xtask: vm time` line, and a QEMU standard error without "falling
