@@ -153,12 +153,14 @@ foreach ($exe in Get-ChildItem -Path $here -Filter *.exe | Sort-Object Name) {
     # Driven by flaui_test (a .NET program: docs/WORKFLOW.md, "FlaUI");
     # alone it waits for its window to be closed.
     if ($name -eq "flaui_target") { continue }
-    # winhttp_test and wininet_test fetch from the Nginx that the
-    # schannel_test setup above starts (plain HTTP on 127.0.0.1:8080, TLS on
-    # 8443 with the test CA's certificate for localhost), and that setup
+    # winhttp_test, winhttp_cb_test (and its WOW64 twin) and wininet_test
+    # fetch from the Nginx that the schannel_test setup above starts (plain
+    # HTTP on 127.0.0.1:8080, TLS on 8443 with the test CA's certificate
+    # for localhost), and that setup
     # needs an administrator. Without it they wait for a server that is not
     # there and are killed at the timeout, a minute each.
-    if (($name -eq "winhttp_test" -or $name -eq "wininet_test") -and $null -ne $schannelSkip) {
+    if (($name -eq "winhttp_test" -or $name -eq "winhttp_cb_test" -or $name -eq "wow64_winhttp_cb_test" -or
+         $name -eq "wininet_test") -and $null -ne $schannelSkip) {
         $why = "no Nginx: " + $schannelSkip
         $results += [ordered]@{ program = $name; exit = $null; line = ""; skipped = $why }
         Write-Host ("{0,-18} skipped: {1}" -f $name, $why)

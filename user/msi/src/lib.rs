@@ -59,6 +59,15 @@ unsafe extern "system" {
     fn SetLastError(code: u32);
 }
 
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "user32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "user32", kind = "raw-dylib"))]
+unsafe extern "system" {
+    fn IsWindow(window: usize) -> i32;
+}
+
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -128,7 +137,9 @@ pub extern "system" fn MsiCloseHandle(handle: u32) -> u32 {
 /// MsiSetInternalUI (#141): sets the process's UI level and returns the
 /// previous one; INSTALLUILEVEL_NOCHANGE keeps it; a level above
 /// INSTALLUILEVEL_FULL or an unknown flag changes nothing and returns
-/// INSTALLUILEVEL_NOCHANGE. A window passed is swapped with the previous.
+/// INSTALLUILEVEL_NOCHANGE. A window passed gets the previous owner back
+/// and becomes the owner if it is a window (as Windows: a value that is
+/// not one leaves the owner as it was, `msi_test`).
 #[unsafe(no_mangle)]
 pub extern "system" fn MsiSetInternalUI(level: u32, window: *mut usize) -> u32 {
     if level & 0xf > INSTALLUILEVEL_FULL || level & !(0xf | INSTALLUILEVEL_FLAGS) != 0 {
@@ -136,7 +147,13 @@ pub extern "system" fn MsiSetInternalUI(level: u32, window: *mut usize) -> u32 {
     }
     if !window.is_null() {
         // SAFETY: the caller's in/out window handle.
-        unsafe { *window = UI_WINDOW.swap(*window, Ordering::Relaxed) };
+        unsafe {
+            let previous = UI_WINDOW.load(Ordering::Relaxed);
+            if IsWindow(*window) != 0 {
+                UI_WINDOW.store(*window, Ordering::Relaxed);
+            }
+            *window = previous;
+        }
     }
     if level & 0xf == INSTALLUILEVEL_NOCHANGE && level & INSTALLUILEVEL_FLAGS == 0 {
         return UI_LEVEL.load(Ordering::Relaxed);

@@ -1335,6 +1335,9 @@ version = "0.1.0"
 [[package]]
 name = "normaliz"
 version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
 
 [[package]]
 name = "noto-sans-mono-bitmap"
@@ -1604,6 +1607,7 @@ name = "powrprof"
 version = "0.1.0"
 dependencies = [
  "gala_stubs",
+ "ntrt",
 ]
 
 [[package]]
@@ -2683,6 +2687,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "winhttp_cb_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
 name = "wininet"
 version = "0.1.0"
 dependencies = [
@@ -2811,6 +2822,13 @@ dependencies = [
 
 [[package]]
 name = "wow64_ucrt_test"
+version = "0.1.0"
+dependencies = [
+ "ntrt",
+]
+
+[[package]]
+name = "wow64_winhttp_cb_test"
 version = "0.1.0"
 dependencies = [
  "ntrt",

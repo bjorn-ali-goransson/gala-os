@@ -3946,9 +3946,10 @@ WinHTTP and WinINet references document them, on one engine,
 (`net.rs`), the request and response (`request.rs`), URL cracking
 (`url.rs`) and the live-handle list (`handles.rs`). Each DLL is its
 API's functions, flags, options and error codes over it. Tests:
-`winhttp_test` and `wininet_test` (C, mingw-w64; against
-schannel_test's Nginx, which also serves plain HTTP on
-127.0.0.1:8080).
+`winhttp_test` and `wininet_test` (C, mingw-w64), `winhttp_cb_test`
+and its x86 twin `wow64_winhttp_cb_test` (the status callbacks; Rust
+on ntrt); all against schannel_test's Nginx, which also serves plain
+HTTP on 127.0.0.1:8080.
 
 - **What the APIs share, and so the engine**: WinHTTP kept WinINet's
   numbers for the query levels and flags (WINHTTP_QUERY_* =
@@ -4074,17 +4075,55 @@ schannel_test's Nginx, which also serves plain HTTP on
   (REDIRECT_POLICY)`, `redirect: more than the maximum`, `redirect:
   Location is no http(s) URL`, ...); a panic records its
   location (`<dll>!panic <file>`) and ends the process with 0xC0000409.
+- **Status callbacks** (`user/winhttp/src/callback.rs`; WinINet's
+  InternetSetStatusCallback is not there yet): WinHttpSetStatusCallback
+  sets one handle's callback and notification flags and returns the
+  previous callback (NULL at first, last error ERROR_SUCCESS;
+  WINHTTP_INVALID_STATUS_CALLBACK with ERROR_INVALID_HANDLE for a bad
+  handle). A connection and a request get their parent's callback,
+  flags and CONTEXT_VALUE when made; WinHttpSendRequest's context, when
+  not 0, becomes the request's. A notification is delivered when its
+  status bit is in the flags, on the thread of the call that takes the
+  step, with the handle and its context: HANDLE_CREATED (connection,
+  request) and HANDLE_CLOSING (after the handle is gone), the handle as
+  information; then the engine's steps, which it tells an observer
+  (`http_client::Event`, `Observer`: the DLL hands the request a
+  snapshot of its callback before each call into the engine, so a
+  callback changed from a callback applies from the next call):
+  RESOLVING_NAME (the host), NAME_RESOLVED (the first address),
+  CONNECTING_TO_SERVER (each address tried), CONNECTED_TO_SERVER
+  (after the TLS handshake for https), SECURE_FAILURE (a failed
+  handshake: WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CA, _CERT_DATE_INVALID,
+  _CERT_CN_INVALID, _CERT_REVOKED, _CERT_REV_FAILED, _INVALID_CERT or
+  _SECURITY_CHANNEL_ERROR), SENDING_REQUEST, REQUEST_SENT (the bytes),
+  RECEIVING_RESPONSE, RESPONSE_RECEIVED (the header block's bytes, a
+  3xx's too), REDIRECT (the new URL, before its connection). Strings
+  are NUL-terminated, their length in characters with the NUL (Wine's
+  lengths). The order is that of Wine's notification tests on Windows
+  (cache_test, redirect_test); `winhttp_cb_test` and
+  `wow64_winhttp_cb_test` check it against Nginx. Not sent: the
+  asynchronous completions, INTERMEDIATE_RESPONSE (1xx are skipped),
+  CLOSING_CONNECTION / CONNECTION_CLOSED, DETECTING_PROXY.
+- **Time-outs**: the connect time-out (default 60 s) is a non-blocking
+  connect waited for with WSAPoll, for each address tried (SO_ERROR
+  says why one failed); every address timing out is
+  ERROR_WINHTTP_TIMEOUT (`winhttp.dll!connect timed out`, the time-out
+  as detail), refused ERROR_WINHTTP_CANNOT_CONNECT. -1 or 0 leaves the
+  stack's own wait. WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH is a
+  session's (exactly a DWORD) and changes nothing: Passport's sign-in is
+  retired and Windows returns its 401 to the caller (Wine's
+  test_passport_auth on Windows), as gala does.
 - **Limits** (recorded where met): asynchronous sessions
-  (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED) and
-  WinHttpSetStatusCallback (a `gala_stubs` stub, as are
-  WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW); named
+  (WINHTTP_FLAG_ASYNC, INTERNET_FLAG_ASYNC: ERROR_NOT_SUPPORTED);
+  WinHttpTimeFromSystemTime and InternetTimeFrom/ToSystemTimeW
+  (`gala_stubs` stubs); named
   proxies (WinHttpOpen, InternetOpenW fail) and WinHttpGetProxyForUrl;
   WinINet's FTP and Gopher and its cache (InternetQueryOptionW and the
   A functions are not exported yet);
   WINHTTP_OPTION_DISABLE_FEATURE's WINHTTP_DISABLE_REDIRECTS (recorded
   as an option, not applied; the redirect policy is);
   connection reuse (every request has its own connection, closed with
-  its body); the resolve and connect time-outs (the stack's apply);
+  its body); the resolve time-out (GetAddrInfoW's own wait applies);
   authentication, cookies, decompression, HTTP/2, client certificates,
   FLAG_SYSTEMTIME. A handle must not be closed while another thread
   uses it.
@@ -7278,7 +7317,8 @@ stations and desktops a program creates are refused until stage 3).
   MsiProvideQualifiedComponentExW and MsiEnumComponentQualifiersW
   ERROR_UNKNOWN_COMPONENT; a code that is not a braced GUID is
   INSTALLSTATE_INVALIDARG or ERROR_INVALID_PARAMETER; MsiSetInternalUI
-  keeps the process's level and window; MsiCloseHandle knows no handle
+  keeps the process's level and owner window (a value that is not a
+  window, user32's IsWindow, leaves the owner as it was, as on Windows); MsiCloseHandle knows no handle
   but 0. Each "nothing installed" answer is recorded (`msi.dll!<function>:
   nothing installed`, kind other, the ordinal as detail). The exports
   carry Windows' ordinals (build.rs; ODT's setup.exe imports them by
@@ -7694,7 +7734,8 @@ come in another order on x86, ADDRINFO and ADDRINFOEX typed in
 the kernel reads as such: `wow64_sock_test`). Built for i686 too, for
 ODT's setup.exe (ROADMAP OF): crypt32 and the ncrypt it loads for keys
 (`wow64_cert_test`, cert_test's source built for x86), msi
-(`wow64_msi_test`). crypt32's own
+(`wow64_msi_test`), normaliz and powrprof (`wow64_office_api_test`;
+powrprof reads CPUID through `core::arch::x86` there). crypt32's own
 structures (CERT_CONTEXT, CERT_INFO, CRL_*, the chain contexts) are
 `repr(C)` with pointers, and the caller's ones it reads or writes
 (CERT_CHAIN_ENGINE_CONFIG, CERT_CHAIN_PARA's CERT_USAGE_MATCH, the

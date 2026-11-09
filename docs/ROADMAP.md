@@ -1424,10 +1424,30 @@ need gala's.
      its input methods (imm32's ImmDisableIME: done, TRUE as Windows,
      `office_api_test`), queries its activation context (QueryActCtxW's
      module context and the manifest sections, recorded unsupported),
-     asks COM for a class not registered, and ends with 0xc06d007e at
-     normaliz.dll, which has no i686 build (powrprof.dll, also x64 only,
-     was missing before it without ending the run). Next, in the order
-     the run reaches them: i686 builds of normaliz and powrprof, then
+     asks COM for a class not registered, and loads normaliz and powrprof
+     (done: both built for i686 too; `office_api_test` and
+     `wow64_office_api_test` check IdnToAscii/IdnToUnicode and
+     CallNtPowerInformation's processor information). It then sets up
+     its download of its configuration from officeclient.microsoft.com
+     over a synchronous winhttp session with a status callback (done:
+     WinHttpSetStatusCallback and the synchronous notifications, per
+     handle and inherited, in Windows' order; the real connect time-out,
+     30 s here; WINHTTP_OPTION_CONFIGURE_PASSPORT_AUTH accepted as
+     Windows does; `winhttp_cb_test`, `wow64_winhttp_cb_test`;
+     ARCHITECTURE "WinHTTP and WinINet"). Where the run ends now: urlmon
+     is asked for and missing (`urlmon.dll` missing dll, survived), two
+     WinHttpSetOption options are recorded unsupported (77
+     WINHTTP_OPTION_AUTOLOGON_POLICY, 63 WINHTTP_OPTION_DISABLE_FEATURE),
+     a worker thread connects to officeclient.microsoft.com:443, and
+     meanwhile the main thread asks ShellExecute to relaunch itself
+     elevated ("runas": `shell32.dll!ShellExecute(verb)` 5, recorded
+     unsupported); the failure is a C++ exception nobody catches and the
+     copy ends with abort's status 3 (the first setup.exe with it).
+     Next, in the order the run reaches them: elevation (ShellExecuteEx
+     "runas": the boot user's token and what Windows answers when it is
+     already an administrator or UAC is off), the TLS handshake from
+     32-bit (schannel.dll has no i686 build: secur32's x86 loads it on
+     first use), winhttp's AUTOLOGON_POLICY and DISABLE_FEATURE, then
      CryptQueryObject's embedded PKCS #7 and wintrust's WinVerifyTrust
      (the signature check), wininet, urlmon, xmllite, webservices,
      iphlpapi, setupapi, cabinet, credui, gdiplus; the service control
@@ -1469,8 +1489,11 @@ public CA bundle in gala's machine root store (`pk_install_https`; step
    and chunked bodies, an untrusted issuer, a closed port,
    WinHttpCrackUrl; automatic redirects by WINHTTP_OPTION_REDIRECT_POLICY
    and MAX_HTTP_AUTOMATIC_REDIRECTS, WINHTTP_OPTION_URL; ARCHITECTURE
-   "WinHTTP and WinINet"). Still open there: connection reuse,
-   asynchronous sessions and status callbacks, proxies, authentication,
+   "WinHTTP and WinINet"); the status callbacks of a synchronous
+   session and the connect time-out (`winhttp_cb_test`,
+   `wow64_winhttp_cb_test`). Still open there: connection reuse,
+   asynchronous sessions (and their completion notifications), WinINet's
+   InternetSetStatusCallback, proxies, authentication,
    WINHTTP_DISABLE_REDIRECTS.
 2. Done: wininet's HTTP functions on the same engine as winhttp
    (`user/http_client`; `wininet_test` against the same Nginx:
@@ -3156,7 +3179,14 @@ and the converter names the slowest hand-offs. The sampling profiler's
 samples go to OTLP's profiles signal (v1development), each linked to
 its thread's span; kernel samples carry their frame-pointer stack, so
 the profile names a hot kernel function's callers (user-mode stacks
-need unwinding: next). The wire format (the owner): what is sent is
+need unwinding: next). Open weakness: scenario `events_sample`'s
+user-mode sample rests on bench's `cpu_loop` (about 0.25 s of user
+time) being sampled by the other CPU's ticks; on a loaded CI runner
+(2.4 s of the run waiting for a host CPU) it once got 405 samples, none
+in user mode. Next: a user-mode probe like `sampleprobe` (the program
+spins in user mode until the kernel has taken a user-mode sample of it,
+which it can ask for), so the check no longer depends on how long the
+host lets the sampling CPU run. The wire format (the owner): what is sent is
 OTLP/HTTP binary protobuf, gzipped, in batches of at most 512 items
 from bounded queues (drops counted), retried with backoff and
 `Retry-After` (`xtask/src/otel/send.rs`, its `Batcher` meant for OT5's
