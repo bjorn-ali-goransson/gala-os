@@ -1259,7 +1259,7 @@ current focus.
 
 **Today**: nothing. No audio driver; winmm has its timer functions
 only and reports no audio or MIDI devices (ARCHITECTURE "Other
-gaps"); no MMDevice API, WASAPI, DirectSound or XAudio2.
+DLLs"); no MMDevice API, WASAPI, DirectSound or XAudio2.
 
 **Next** (each step test first):
 1. The virtio-sound driver (virtio 1.2's sound device; QEMU's
